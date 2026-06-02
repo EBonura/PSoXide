@@ -51,11 +51,11 @@ use psxed_project::{
     OptionKind, ParticleEmitterSettings, PhysicsBodySettings, ProjectDocument, PsxBlendMode,
     Resource, ResourceData, ResourceId, RuntimeDepthSortMode, RuntimeRoomDrawOrderMode,
     RuntimeTextureSplitMode, Scene, SceneNode, SkyMode, SkySettings, UiAction, UiAnchor,
-    UiFontChoice, UiNodeId, UiNodeKind, UiNodeRow, UiRect, UiScene, UiSceneId, UiSfxBindings,
-    UiSfxCue, UiTextAlign, UiValueBinding, WorldCameraSettings, WorldCullingSettings, WorldGrid,
-    WorldPhysicsSettings, WorldStreamingSettings, DEFAULT_WALL_HEIGHT_SECTORS,
-    DEFAULT_WORLD_SECTOR_SIZE, HEIGHT_QUANTUM, MAX_PHYSICS_WEIGHT_Q8, MAX_UI_FONT_SCALE,
-    MAX_UI_LETTER_SPACING, MAX_WORLD_CAMERA_DISTANCE, MAX_WORLD_CAMERA_HEIGHT,
+    UiFontChoice, UiGradient, UiGradientDirection, UiNode, UiNodeId, UiNodeKind, UiNodeRow, UiRect,
+    UiScene, UiSceneId, UiSfxBindings, UiSfxCue, UiTextAlign, UiValueBinding, WorldCameraSettings,
+    WorldCullingSettings, WorldGrid, WorldPhysicsSettings, WorldStreamingSettings,
+    DEFAULT_WALL_HEIGHT_SECTORS, DEFAULT_WORLD_SECTOR_SIZE, HEIGHT_QUANTUM, MAX_PHYSICS_WEIGHT_Q8,
+    MAX_UI_FONT_SCALE, MAX_UI_LETTER_SPACING, MAX_WORLD_CAMERA_DISTANCE, MAX_WORLD_CAMERA_HEIGHT,
     MAX_WORLD_CAMERA_MIN_FLOOR_CLEARANCE, MAX_WORLD_CHUNK_ACTIVATION_RADIUS_SECTORS,
     MAX_WORLD_DRAW_DISTANCE, MAX_WORLD_GRAVITY_PER_TICK, MAX_WORLD_SECTOR_SIZE,
     MAX_WORLD_STREAMING_RESIDENT_CHUNKS, MAX_WORLD_STREAMING_VISIBLE_CHUNKS,
@@ -225,7 +225,10 @@ enum TreeAction {
 
 enum UiTreeAction {
     Select(UiNodeId),
+    Copy(UiNodeId),
+    PasteInto(UiNodeId),
     Delete(UiNodeId),
+    ToggleVisibility(UiNodeId),
     AddChild {
         parent: UiNodeId,
         kind: UiNodeKind,
@@ -373,6 +376,8 @@ pub struct EditorWorkspace {
     collapsed_scene_nodes: HashSet<NodeId>,
     collapsed_file_folders: HashSet<String>,
     hidden_scene_nodes: HashSet<NodeId>,
+    hidden_ui_nodes: HashSet<(UiSceneId, UiNodeId)>,
+    ui_node_clipboard: Option<UiNodeClipboard>,
     history: UndoStack,
     scene_filter: String,
     file_filter: String,
@@ -1660,6 +1665,13 @@ struct GeometryClipboard {
     cells: Vec<GeometryClipboardCell>,
 }
 
+#[derive(Debug, Clone)]
+struct UiNodeClipboard {
+    root: UiNodeId,
+    root_name: String,
+    nodes: Vec<UiNode>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GeometryClipboardMode {
     ReplaceCells,
@@ -2731,6 +2743,8 @@ impl EditorWorkspace {
             collapsed_scene_nodes: HashSet::new(),
             collapsed_file_folders: HashSet::new(),
             hidden_scene_nodes: HashSet::new(),
+            hidden_ui_nodes: HashSet::new(),
+            ui_node_clipboard: None,
             history: UndoStack::default(),
             scene_filter: String::new(),
             file_filter: String::new(),
@@ -2999,6 +3013,7 @@ impl EditorWorkspace {
                 self.selection.resource_selection_anchor = None;
                 self.place_resource = None;
                 self.clear_sector_selection();
+                self.ui_node_clipboard = None;
                 self.resource_renaming = None;
                 self.resource_delete_confirm = None;
                 self.dirty = dirty;
@@ -4745,6 +4760,7 @@ impl EditorWorkspace {
         let canvas_rect = centered_aspect_rect(container, aspect);
         let canvas_interact_rect = canvas_rect.expand(UI_RESIZE_HANDLE_HIT_SIZE);
         let canvas_size = [canvas_w, canvas_h];
+        let hidden_ui_nodes = self.hidden_ui_nodes.clone();
         let response = ui.interact(
             canvas_interact_rect,
             ui.id().with("ui_canvas_preview"),
@@ -4756,14 +4772,16 @@ impl EditorWorkspace {
         let hovered_resize_target = pointer.and_then(|pos| {
             ui_scene_resize_handle_target(
                 &scene,
+                &hidden_ui_nodes,
                 self.selection.selected_ui_node,
                 canvas_rect,
                 canvas_size,
                 pos,
             )
         });
-        let hovered_node =
-            pointer.and_then(|pos| ui_scene_hit_test(&scene, canvas_rect, canvas_size, pos));
+        let hovered_node = pointer.and_then(|pos| {
+            ui_scene_hit_test(&scene, &hidden_ui_nodes, canvas_rect, canvas_size, pos)
+        });
         if response.hovered() {
             if let Some((_, handle)) = hovered_resize_target {
                 ui.output_mut(|output| output.cursor_icon = handle.cursor());
@@ -4776,6 +4794,7 @@ impl EditorWorkspace {
             if let Some(pos) = response.interact_pointer_pos() {
                 let resize_target = ui_scene_resize_handle_target(
                     &scene,
+                    &hidden_ui_nodes,
                     self.selection.selected_ui_node,
                     canvas_rect,
                     canvas_size,
@@ -4789,7 +4808,9 @@ impl EditorWorkspace {
                         canvas_size,
                         pos,
                     );
-                } else if let Some(id) = ui_scene_hit_test(&scene, canvas_rect, canvas_size, pos) {
+                } else if let Some(id) =
+                    ui_scene_hit_test(&scene, &hidden_ui_nodes, canvas_rect, canvas_size, pos)
+                {
                     self.begin_ui_canvas_drag(
                         id,
                         UiCanvasDragMode::Move,
@@ -4809,7 +4830,9 @@ impl EditorWorkspace {
             let picked = response
                 .interact_pointer_pos()
                 .or(response.hover_pos())
-                .and_then(|pos| ui_scene_hit_test(&scene, canvas_rect, canvas_size, pos))
+                .and_then(|pos| {
+                    ui_scene_hit_test(&scene, &hidden_ui_nodes, canvas_rect, canvas_size, pos)
+                })
                 .unwrap_or(scene.root);
             self.select_ui_node(picked);
         }
@@ -4853,6 +4876,7 @@ impl EditorWorkspace {
             &preview_scene,
             display_canvas,
             canvas_size,
+            &hidden_ui_nodes,
             self.selection.selected_ui_node,
             hovered_resize_target.and_then(|(node, handle)| {
                 (node == self.selection.selected_ui_node).then_some(handle)
@@ -4879,6 +4903,9 @@ impl EditorWorkspace {
             let mut focus_ids: Vec<UiNodeId> = Vec::new();
             let mut rects: Vec<psx_level::NavRect> = Vec::new();
             for id in preview_scene.hierarchy_node_ids() {
+                if ui_node_hidden(&preview_scene, &hidden_ui_nodes, id) {
+                    continue;
+                }
                 let Some(node) = preview_scene.node(id) else {
                     continue;
                 };
@@ -5141,8 +5168,97 @@ impl EditorWorkspace {
         }
         self.selection.selected_ui_node = parent;
         self.interaction.take_ui_canvas_drag();
+        self.retain_hidden_ui_nodes_for_project();
         self.mark_dirty();
         self.status = format!("Deleted UI {name}");
+        true
+    }
+
+    fn copy_selected_ui_node(&mut self) -> bool {
+        self.copy_ui_node(self.selection.selected_ui_node)
+    }
+
+    fn copy_ui_node(&mut self, id: UiNodeId) -> bool {
+        let Some(scene) = self.current_ui_scene() else {
+            self.status = "No UI scene available".to_string();
+            return false;
+        };
+        if id == scene.root {
+            self.status = "Canvas cannot be copied".to_string();
+            return false;
+        }
+        let Some(node) = scene.node(id) else {
+            self.status = "UI node no longer exists".to_string();
+            return false;
+        };
+        let Some(nodes) = scene.subtree_nodes(id) else {
+            self.status = "UI node cannot be copied".to_string();
+            return false;
+        };
+        let root_name = node.name.clone();
+        let count = nodes.len();
+        self.ui_node_clipboard = Some(UiNodeClipboard {
+            root: id,
+            root_name: root_name.clone(),
+            nodes,
+        });
+        self.status = if count == 1 {
+            format!("Copied UI {root_name}")
+        } else {
+            format!("Copied UI {root_name} ({count} nodes)")
+        };
+        true
+    }
+
+    fn paste_ui_node(&mut self) -> bool {
+        let Some(scene) = self.current_ui_scene() else {
+            self.status = "No UI scene available".to_string();
+            return false;
+        };
+        let parent = if scene.node(self.selection.selected_ui_node).is_some() {
+            self.selection.selected_ui_node
+        } else {
+            scene.root
+        };
+        self.paste_ui_node_under(parent)
+    }
+
+    fn paste_ui_node_under(&mut self, parent: UiNodeId) -> bool {
+        let Some(clipboard) = self.ui_node_clipboard.clone() else {
+            self.status = "No copied UI node".to_string();
+            return false;
+        };
+        let Some(parent) = self
+            .current_ui_scene()
+            .map(|scene| if scene.node(parent).is_some() { parent } else { scene.root })
+        else {
+            self.status = "No UI scene available".to_string();
+            return false;
+        };
+
+        self.push_undo();
+        let Some(pasted) = self
+            .current_ui_scene_mut()
+            .and_then(|scene| scene.paste_subtree(parent, &clipboard.nodes, clipboard.root))
+        else {
+            self.status = "Paste UI node failed".to_string();
+            return false;
+        };
+        self.selection.selected_ui_node = pasted;
+        self.clear_resource_selection_state();
+        self.clear_primitive_selection_state();
+        self.clear_sector_selection();
+        self.interaction.take_ui_canvas_drag();
+        self.mark_dirty();
+        self.status = if clipboard.nodes.len() == 1 {
+            format!("Pasted UI {}", clipboard.root_name)
+        } else {
+            format!(
+                "Pasted UI {} ({} nodes)",
+                clipboard.root_name,
+                clipboard.nodes.len()
+            )
+        };
         true
     }
 
@@ -10425,6 +10541,12 @@ impl EditorWorkspace {
         let consume_redo = consume_command_shift_shortcut(ctx, egui::Key::Z);
         let consume_undo = consume_command_shortcut(ctx, egui::Key::Z);
         let focus_taken = ctx.memory(|m| m.focused().is_some());
+        let consume_ui_copy = !focus_taken
+            && self.active_workspace == WorkspaceView::Ui
+            && consume_command_shortcut(ctx, egui::Key::C);
+        let consume_ui_paste = !focus_taken
+            && self.active_workspace == WorkspaceView::Ui
+            && consume_command_shortcut(ctx, egui::Key::V);
         let consume_duplicate = if focus_taken || self.active_workspace == WorkspaceView::Ui {
             false
         } else {
@@ -10464,6 +10586,12 @@ impl EditorWorkspace {
         }
         if consume_duplicate {
             self.duplicate_current_selection();
+        }
+        if consume_ui_copy {
+            self.copy_selected_ui_node();
+        }
+        if consume_ui_paste {
+            self.paste_ui_node();
         }
         self.handle_toolbar_group_shortcuts(ctx);
 
@@ -11086,9 +11214,35 @@ impl EditorWorkspace {
             UiTreeAction::Select(id) => {
                 self.select_ui_node(id);
             }
+            UiTreeAction::Copy(id) => {
+                self.copy_ui_node(id);
+            }
+            UiTreeAction::PasteInto(id) => {
+                self.paste_ui_node_under(id);
+            }
             UiTreeAction::Delete(id) => {
                 self.selection.selected_ui_node = id;
                 self.delete_selected_ui_node();
+            }
+            UiTreeAction::ToggleVisibility(id) => {
+                let Some((scene_id, node_name)) = self
+                    .current_ui_scene()
+                    .map(|scene| (scene.id, scene.node(id).map(|node| node.name.clone())))
+                else {
+                    return;
+                };
+                let key = (scene_id, id);
+                if self.hidden_ui_nodes.remove(&key) {
+                    self.status = node_name
+                        .map(|name| format!("Showing UI {name}"))
+                        .unwrap_or_else(|| "Showing UI node".to_string());
+                } else {
+                    self.hidden_ui_nodes.insert(key);
+                    self.status = node_name
+                        .map(|name| format!("Hiding UI {name}"))
+                        .unwrap_or_else(|| "Hiding UI node".to_string());
+                }
+                self.interaction.take_ui_canvas_drag();
             }
             UiTreeAction::AddChild { parent, kind, name } => {
                 self.selection.selected_ui_node = parent;
@@ -12252,6 +12406,7 @@ impl EditorWorkspace {
         };
         let rows = scene.hierarchy_rows();
         let selected = self.selection.selected_ui_node;
+        let hidden_ui_nodes = self.hidden_ui_nodes.clone();
         let mut actions = Vec::new();
         let tree_scroll_height = (ui.available_height() - 30.0).max(24.0);
         egui::ScrollArea::vertical()
@@ -12260,7 +12415,16 @@ impl EditorWorkspace {
             .max_height(tree_scroll_height)
             .show(ui, |ui| {
                 for row in rows {
-                    draw_ui_node_row(ui, &row, selected == row.id, &mut actions);
+                    draw_ui_node_row(
+                        ui,
+                        &row,
+                        scene.id,
+                        selected == row.id,
+                        hidden_ui_nodes.contains(&(scene.id, row.id)),
+                        ui_node_hidden(scene, &hidden_ui_nodes, row.id),
+                        self.ui_node_clipboard.is_some(),
+                        &mut actions,
+                    );
                 }
                 autoscroll_tree_drag::<UiNodeId>(ui);
             });
@@ -12272,6 +12436,26 @@ impl EditorWorkspace {
                 if let Some(scene) = self.current_ui_scene() {
                     self.selection.selected_ui_node = scene.root;
                 }
+            }
+            let can_copy = self.current_ui_scene().is_some_and(|scene| {
+                self.selection.selected_ui_node != scene.root
+                    && scene.node(self.selection.selected_ui_node).is_some()
+            });
+            if ui
+                .add_enabled(
+                    can_copy,
+                    egui::Button::new(icons::label(icons::COPY, "Copy")),
+                )
+                .clicked()
+            {
+                self.copy_selected_ui_node();
+            }
+            let can_paste = self.ui_node_clipboard.is_some() && self.current_ui_scene().is_some();
+            if ui
+                .add_enabled(can_paste, egui::Button::new("Paste"))
+                .clicked()
+            {
+                self.paste_ui_node();
             }
             let can_delete = self
                 .current_ui_scene()
@@ -12539,6 +12723,7 @@ impl EditorWorkspace {
             self.active_ui_scene_index -= 1;
         }
         self.reset_ui_node_selection();
+        self.retain_hidden_ui_nodes_for_project();
         self.status = match removed_name {
             Some(name) => format!("Deleted UI scene {name}"),
             None => "Deleted UI scene".to_string(),
@@ -12781,9 +12966,14 @@ impl EditorWorkspace {
                 ui.weak("Organizes child UI nodes.");
                 changed |= draw_ui_rect_editor(ui, rect);
             }
-            UiNodeKind::Rect { rect, color } => {
+            UiNodeKind::Rect {
+                rect,
+                color,
+                gradient,
+            } => {
                 changed |= draw_ui_rect_editor(ui, rect);
                 changed |= color_editor(ui, "Color", color);
+                changed |= draw_ui_gradient_editor(ui, "Gradient", color, gradient);
             }
             UiNodeKind::Label {
                 rect,
@@ -12795,6 +12985,7 @@ impl EditorWorkspace {
                 font_scale,
                 letter_spacing,
                 color,
+                gradient,
             } => {
                 changed |= draw_ui_rect_editor(ui, rect);
                 ui.horizontal(|ui| {
@@ -12813,6 +13004,7 @@ impl EditorWorkspace {
                 changed |= draw_ui_letter_spacing_editor(ui, letter_spacing);
                 changed |= ui.checkbox(wrap, "Wrap").changed();
                 changed |= color_editor(ui, "Color", color);
+                changed |= draw_ui_gradient_editor(ui, "Gradient", color, gradient);
             }
             UiNodeKind::Image {
                 rect,
@@ -12822,19 +13014,43 @@ impl EditorWorkspace {
                 changed |= draw_ui_rect_editor(ui, rect);
                 changed |= ui_texture_resource_picker(ui, "Texture", texture, &texture_options);
                 changed |= color_editor(ui, "Tint", tint);
+                ui.horizontal(|ui| {
+                    if ui.small_button("Dim").clicked() {
+                        *tint = [96, 96, 96];
+                        changed = true;
+                    }
+                    if ui.small_button("Neutral").clicked() {
+                        *tint = [128, 128, 128];
+                        changed = true;
+                    }
+                    if ui.small_button("Bright").clicked() {
+                        *tint = [192, 192, 192];
+                        changed = true;
+                    }
+                    ui.label(RichText::new("128 neutral").color(STUDIO_TEXT_WEAK).small());
+                });
             }
             UiNodeKind::Bar {
                 rect,
                 value,
                 max,
                 fill,
+                fill_gradient,
                 background,
+                background_gradient,
             } => {
                 changed |= draw_ui_rect_editor(ui, rect);
                 changed |= draw_ui_value_binding_editor(ui, "Value", value, &option_choices);
                 changed |= draw_ui_value_binding_editor(ui, "Max", max, &option_choices);
                 changed |= color_editor(ui, "Fill", fill);
+                changed |= draw_ui_gradient_editor(ui, "Fill Gradient", fill, fill_gradient);
                 changed |= color_editor(ui, "Background", background);
+                changed |= draw_ui_gradient_editor(
+                    ui,
+                    "Background Gradient",
+                    background,
+                    background_gradient,
+                );
             }
             UiNodeKind::Button {
                 rect,
@@ -12844,7 +13060,9 @@ impl EditorWorkspace {
                 font_scale,
                 letter_spacing,
                 color,
+                background_gradient,
                 text_color,
+                text_gradient,
                 transparent,
                 action,
                 sfx,
@@ -12861,6 +13079,9 @@ impl EditorWorkspace {
                 changed |= color_editor(ui, "Text", text_color);
                 changed |= ui.checkbox(transparent, "Transparent background").changed();
                 changed |= color_editor(ui, "Background", color);
+                changed |=
+                    draw_ui_gradient_editor(ui, "Background Gradient", color, background_gradient);
+                changed |= draw_ui_gradient_editor(ui, "Text Gradient", text_color, text_gradient);
                 changed |= draw_ui_action_editor(ui, action, &scene_options, &option_choices);
                 changed |= draw_button_sfx_editor(
                     ui,
@@ -12874,15 +13095,21 @@ impl EditorWorkspace {
                 rect,
                 option,
                 track,
+                track_gradient,
                 fill,
+                fill_gradient,
                 knob,
+                knob_gradient,
                 sfx,
             } => {
                 changed |= draw_ui_rect_editor(ui, rect);
                 changed |= draw_ui_option_picker(ui, "Option", option, &option_choices);
                 changed |= color_editor(ui, "Track", track);
+                changed |= draw_ui_gradient_editor(ui, "Track Gradient", track, track_gradient);
                 changed |= color_editor(ui, "Fill", fill);
+                changed |= draw_ui_gradient_editor(ui, "Fill Gradient", fill, fill_gradient);
                 changed |= color_editor(ui, "Knob", knob);
+                changed |= draw_ui_gradient_editor(ui, "Knob Gradient", knob, knob_gradient);
                 changed |= draw_slider_sfx_editor(
                     ui,
                     sfx,
@@ -16916,6 +17143,20 @@ impl EditorWorkspace {
         }
     }
 
+    fn retain_hidden_ui_nodes_for_project(&mut self) {
+        let valid_ui_nodes: HashSet<(UiSceneId, UiNodeId)> = self
+            .project
+            .ui_scenes
+            .iter()
+            .flat_map(|scene| {
+                let scene_id = scene.id;
+                scene.nodes().iter().map(move |node| (scene_id, node.id))
+            })
+            .collect();
+        self.hidden_ui_nodes
+            .retain(|key| valid_ui_nodes.contains(key));
+    }
+
     fn reconcile_selection_after_document_change(&mut self) {
         let valid_nodes: HashSet<NodeId> = self
             .project
@@ -17005,6 +17246,7 @@ impl EditorWorkspace {
         {
             self.ui_scene_delete_confirm = None;
         }
+        self.retain_hidden_ui_nodes_for_project();
         // The selected UI node belongs to whatever scene is now active;
         // a stale id from a rolled-back scene snaps back to the canvas.
         let ui_root = self
@@ -21959,6 +22201,59 @@ fn color_editor(ui: &mut egui::Ui, label: &str, color: &mut [u8; 3]) -> bool {
         changed
     })
     .inner
+}
+
+fn draw_ui_gradient_editor(
+    ui: &mut egui::Ui,
+    label: &str,
+    from: &[u8; 3],
+    gradient: &mut Option<UiGradient>,
+) -> bool {
+    let mut changed = false;
+    let mut enabled = gradient.is_some();
+    ui.horizontal(|ui| {
+        changed |= ui.checkbox(&mut enabled, label).changed();
+        if enabled {
+            ui.label(
+                RichText::new("start = color")
+                    .color(STUDIO_TEXT_WEAK)
+                    .small(),
+            );
+        }
+    });
+
+    if enabled {
+        if gradient.is_none() {
+            *gradient = Some(UiGradient::new(
+                default_ui_gradient_end(*from),
+                UiGradientDirection::Vertical,
+            ));
+            changed = true;
+        }
+        if let Some(gradient) = gradient {
+            changed |= color_editor(ui, "To", &mut gradient.to);
+            egui::ComboBox::from_label("Direction")
+                .selected_text(gradient.direction.label())
+                .show_ui(ui, |ui| {
+                    for candidate in UiGradientDirection::ALL {
+                        changed |= ui
+                            .selectable_value(&mut gradient.direction, candidate, candidate.label())
+                            .changed();
+                    }
+                });
+        }
+    } else if gradient.take().is_some() {
+        changed = true;
+    }
+    changed
+}
+
+fn default_ui_gradient_end(from: [u8; 3]) -> [u8; 3] {
+    [
+        from[0].saturating_add(48),
+        from[1].saturating_add(48),
+        from[2].saturating_add(48),
+    ]
 }
 
 fn short_path(path: &Path) -> String {
@@ -28491,7 +28786,11 @@ fn move_scene_nodes_as_group(
 fn draw_ui_node_row(
     ui: &mut egui::Ui,
     row: &UiNodeRow,
+    scene_id: UiSceneId,
     selected: bool,
+    directly_hidden: bool,
+    effectively_hidden: bool,
+    can_paste: bool,
     actions: &mut Vec<UiTreeAction>,
 ) {
     let row_height = 24.0;
@@ -28535,30 +28834,35 @@ fn draw_ui_node_row(
         Align2::CENTER_CENTER,
         ui_node_kind_icon(row.kind).to_string(),
         icons::font(15.0),
-        if selected {
+        if effectively_hidden {
+            Color32::from_rgb(82, 94, 106)
+        } else if selected {
             STUDIO_ACCENT
         } else {
             Color32::from_rgb(160, 174, 188)
         },
     );
 
+    let text_color = if effectively_hidden {
+        Color32::from_rgb(96, 110, 124)
+    } else if selected {
+        Color32::WHITE
+    } else {
+        STUDIO_TEXT
+    };
     let text_left = icon_rect.right() + 7.0;
     let label = compact_middle(&row.name, dock_label_limit(row.depth));
     painter
         .with_clip_rect(Rect::from_min_max(
             Pos2::new(text_left, rect.top()),
-            Pos2::new((rect.right() - 118.0).max(text_left + 56.0), rect.bottom()),
+            Pos2::new((rect.right() - 142.0).max(text_left + 56.0), rect.bottom()),
         ))
         .text(
             Pos2::new(text_left, rect.center().y),
             Align2::LEFT_CENTER,
             label,
             FontId::proportional(13.0),
-            if selected {
-                Color32::WHITE
-            } else {
-                STUDIO_TEXT
-            },
+            text_color,
         );
 
     if row.id != UiNodeId::ROOT {
@@ -28569,13 +28873,15 @@ fn draw_ui_node_row(
             .unwrap_or_else(|| row.kind.to_string());
         painter.text(
             Pos2::new(
-                (rect.right() - 112.0).max(text_left + 72.0),
+                (rect.right() - 136.0).max(text_left + 72.0),
                 rect.center().y,
             ),
             Align2::LEFT_CENTER,
             detail,
             FontId::proportional(11.0),
-            if selected {
+            if effectively_hidden {
+                Color32::from_rgb(84, 96, 108)
+            } else if selected {
                 Color32::from_rgb(204, 229, 236)
             } else {
                 STUDIO_TEXT_WEAK
@@ -28585,7 +28891,7 @@ fn draw_ui_node_row(
 
     if row.child_count > 0 {
         let pill = Rect::from_min_size(
-            Pos2::new(rect.right() - 34.0, rect.center().y - 8.0),
+            Pos2::new(rect.right() - 50.0, rect.center().y - 8.0),
             Vec2::new(24.0, 16.0),
         );
         painter.rect_filled(pill, 8.0, Color32::from_rgba_unmultiplied(9, 14, 18, 138));
@@ -28597,6 +28903,42 @@ fn draw_ui_node_row(
             STUDIO_TEXT_WEAK,
         );
     }
+
+    let eye_rect = Rect::from_min_size(
+        Pos2::new(rect.right() - 22.0, rect.center().y - 6.0),
+        Vec2::new(14.0, 12.0),
+    );
+    let eye_response = ui
+        .interact(
+            eye_rect.expand2(Vec2::new(5.0, 4.0)),
+            ui.id().with(("ui_tree_visibility", scene_id, row.id)),
+            Sense::click(),
+        )
+        .on_hover_text(if directly_hidden {
+            "Show UI node"
+        } else {
+            "Hide UI node"
+        });
+    painter.text(
+        eye_rect.center(),
+        Align2::CENTER_CENTER,
+        if effectively_hidden {
+            icons::EYE_OFF
+        } else {
+            icons::EYE
+        }
+        .to_string(),
+        icons::font(12.0),
+        if eye_response.hovered() {
+            Color32::WHITE
+        } else if effectively_hidden {
+            Color32::from_rgb(82, 92, 102)
+        } else if selected || hovered {
+            Color32::from_rgb(184, 205, 218)
+        } else {
+            Color32::from_rgb(88, 102, 116)
+        },
+    );
 
     if row.id != UiNodeId::ROOT && response.dragged() {
         response.dnd_set_drag_payload::<UiNodeId>(row.id);
@@ -28656,11 +28998,29 @@ fn draw_ui_node_row(
         }
     }
 
-    if response.clicked() {
+    if eye_response.clicked() {
+        actions.push(UiTreeAction::ToggleVisibility(row.id));
+    }
+    let icon_clicked = eye_response.clicked();
+    if response.clicked() && !icon_clicked {
         actions.push(UiTreeAction::Select(row.id));
     }
 
     response.context_menu(|ui| {
+        if row.id != UiNodeId::ROOT
+            && ui.button(icons::label(icons::COPY, "Copy")).clicked()
+        {
+            actions.push(UiTreeAction::Copy(row.id));
+            ui.close_menu();
+        }
+        if ui
+            .add_enabled(can_paste, egui::Button::new("Paste Child"))
+            .clicked()
+        {
+            actions.push(UiTreeAction::PasteInto(row.id));
+            ui.close_menu();
+        }
+        ui.separator();
         ui.menu_button(icons::label(icons::PLUS, "Add Child"), |ui| {
             for (label, kind) in default_addable_ui_kinds() {
                 if ui.button(label).clicked() {
@@ -29172,6 +29532,21 @@ fn scene_node_hidden(
     false
 }
 
+fn ui_node_hidden(
+    scene: &psxed_project::UiScene,
+    hidden_ui_nodes: &HashSet<(UiSceneId, UiNodeId)>,
+    id: UiNodeId,
+) -> bool {
+    let mut current = Some(id);
+    while let Some(node_id) = current {
+        if hidden_ui_nodes.contains(&(scene.id, node_id)) {
+            return true;
+        }
+        current = scene.node(node_id).and_then(|node| node.parent);
+    }
+    false
+}
+
 fn scene_tree_row_matches_filter(row: &NodeRow, filter: &str) -> bool {
     let display_kind = scene_tree_kind_label(row.kind);
     filter.is_empty()
@@ -29334,6 +29709,7 @@ fn default_addable_ui_kinds() -> Vec<(&'static str, UiNodeKind)> {
             UiNodeKind::Rect {
                 rect: UiRect::new(24, 24, 80, 24),
                 color: [32, 36, 48],
+                gradient: None,
             },
         ),
         (
@@ -29348,6 +29724,7 @@ fn default_addable_ui_kinds() -> Vec<(&'static str, UiNodeKind)> {
                 font_scale: default_ui_font_scale(),
                 letter_spacing: default_ui_letter_spacing(),
                 color: [220, 226, 240],
+                gradient: None,
             },
         ),
         (
@@ -29365,7 +29742,9 @@ fn default_addable_ui_kinds() -> Vec<(&'static str, UiNodeKind)> {
                 value: UiValueBinding::ConstantQ12(4096),
                 max: UiValueBinding::ConstantQ12(4096),
                 fill: [72, 136, 96],
+                fill_gradient: None,
                 background: [30, 26, 28],
+                background_gradient: None,
             },
         ),
         (
@@ -29378,7 +29757,9 @@ fn default_addable_ui_kinds() -> Vec<(&'static str, UiNodeKind)> {
                 font_scale: default_ui_font_scale(),
                 letter_spacing: default_ui_letter_spacing(),
                 color: [52, 60, 80],
+                background_gradient: None,
                 text_color: [236, 240, 248],
+                text_gradient: None,
                 transparent: false,
                 action: UiAction::Back,
                 sfx: UiSfxBindings::default(),
@@ -29390,8 +29771,11 @@ fn default_addable_ui_kinds() -> Vec<(&'static str, UiNodeKind)> {
                 rect: UiRect::new(24, 48, 96, 8),
                 option: OptionId::default(),
                 track: [30, 34, 44],
+                track_gradient: None,
                 fill: [80, 132, 180],
+                fill_gradient: None,
                 knob: [210, 218, 232],
+                knob_gradient: None,
                 sfx: UiSfxBindings::default(),
             },
         ),
@@ -29440,10 +29824,14 @@ fn draw_ui_scene_preview(
     scene: &psxed_project::UiScene,
     canvas: Rect,
     canvas_size: [u16; 2],
+    hidden_ui_nodes: &HashSet<(UiSceneId, UiNodeId)>,
     selected: UiNodeId,
     hovered_handle: Option<UiResizeHandle>,
 ) {
     for id in scene.hierarchy_node_ids() {
+        if ui_node_hidden(scene, hidden_ui_nodes, id) {
+            continue;
+        }
         let Some(node) = scene.node(id) else {
             continue;
         };
@@ -29460,15 +29848,20 @@ fn draw_ui_scene_preview(
                     StrokeKind::Inside,
                 );
             }
-            UiNodeKind::Rect { rect, color } => {
+            UiNodeKind::Rect {
+                rect,
+                color,
+                gradient,
+            } => {
                 let rect = scene.absolute_rect(node.id).unwrap_or(*rect);
                 let screen = ui_rect_to_screen(rect, canvas, canvas_size);
-                painter.rect_filled(screen, 0.0, Color32::from_rgb(color[0], color[1], color[2]));
+                draw_ui_preview_rect(painter, screen, ui_preview_paint(*color, *gradient));
             }
             UiNodeKind::Label {
                 rect,
                 text,
                 color,
+                gradient,
                 align,
                 wrap,
                 font,
@@ -29493,7 +29886,7 @@ fn draw_ui_scene_preview(
                     scale,
                     *letter_spacing,
                     base_scale,
-                    Color32::from_rgb(color[0], color[1], color[2]),
+                    ui_preview_paint(*color, *gradient),
                 );
             }
             UiNodeKind::Image {
@@ -29507,9 +29900,6 @@ fn draw_ui_scene_preview(
                     .and_then(|id| project.resource(id).map(|resource| resource.id))
                     .and_then(|id| texture_thumbs.get(&id))
                 {
-                    if thumb.stats.index_zero_transparent {
-                        draw_checker_preview(painter, screen, Color32::from_rgb(20, 26, 32));
-                    }
                     painter.image(
                         thumb.handle.id(),
                         screen,
@@ -29517,7 +29907,7 @@ fn draw_ui_scene_preview(
                         ui_psx_tint_to_egui(*tint),
                     );
                 } else {
-                    painter.rect_filled(screen, 0.0, Color32::from_rgb(tint[0], tint[1], tint[2]));
+                    painter.rect_filled(screen, 0.0, ui_psx_tint_to_egui(*tint));
                 }
                 painter.rect_stroke(
                     screen,
@@ -29531,14 +29921,16 @@ fn draw_ui_scene_preview(
                 value,
                 max,
                 fill,
+                fill_gradient,
                 background,
+                background_gradient,
             } => {
                 let absolute = scene.absolute_rect(node.id).unwrap_or(*rect);
                 let screen = ui_rect_to_screen(absolute, canvas, canvas_size);
-                painter.rect_filled(
+                draw_ui_preview_rect(
+                    painter,
                     screen,
-                    0.0,
-                    Color32::from_rgb(background[0], background[1], background[2]),
+                    ui_preview_paint(*background, *background_gradient),
                 );
                 let max_q12 = ui_binding_preview_q12(*max).max(1);
                 let value_q12 = ui_binding_preview_q12(*value).clamp(0, max_q12);
@@ -29546,10 +29938,10 @@ fn draw_ui_scene_preview(
                 if fill_w > 0.0 {
                     let fill_rect =
                         Rect::from_min_size(screen.min, Vec2::new(fill_w, screen.height()));
-                    painter.rect_filled(
+                    draw_ui_preview_rect(
+                        painter,
                         fill_rect,
-                        0.0,
-                        Color32::from_rgb(fill[0], fill[1], fill[2]),
+                        ui_preview_paint(*fill, *fill_gradient),
                     );
                 }
             }
@@ -29561,20 +29953,21 @@ fn draw_ui_scene_preview(
                 font_scale,
                 letter_spacing,
                 color,
+                background_gradient,
                 text_color,
+                text_gradient,
                 transparent,
                 ..
             } => {
                 let absolute = scene.absolute_rect(node.id).unwrap_or(*rect);
                 let screen = ui_rect_to_screen(absolute, canvas, canvas_size);
                 if !*transparent {
-                    painter.rect_filled(
+                    draw_ui_preview_rect(
+                        painter,
                         screen,
-                        0.0,
-                        Color32::from_rgb(color[0], color[1], color[2]),
+                        ui_preview_paint(*color, *background_gradient),
                     );
                 }
-                let label_color = Color32::from_rgb(text_color[0], text_color[1], text_color[2]);
                 let base_scale = (screen.height() / rect.height.max(1) as f32).clamp(1.0, 8.0);
                 let scale = base_scale * ui_font_scale_q8_to_f32(*font_scale);
                 let texture = ui_preview_font_texture(font_textures, *font);
@@ -29590,29 +29983,32 @@ fn draw_ui_scene_preview(
                     scale,
                     *letter_spacing,
                     base_scale,
-                    label_color,
+                    ui_preview_paint(*text_color, *text_gradient),
                 );
             }
             UiNodeKind::Slider {
                 rect,
                 track,
+                track_gradient,
                 fill,
+                fill_gradient,
                 knob,
+                knob_gradient,
                 ..
             } => {
                 let absolute = scene.absolute_rect(node.id).unwrap_or(*rect);
                 let screen = ui_rect_to_screen(absolute, canvas, canvas_size);
-                painter.rect_filled(screen, 0.0, Color32::from_rgb(track[0], track[1], track[2]));
+                draw_ui_preview_rect(painter, screen, ui_preview_paint(*track, *track_gradient));
                 // Half-way preview fill until the runtime option store
                 // drives the value (matches the engine renderer).
                 let fill_w = screen.width() * 0.5;
                 if fill_w > 0.0 {
                     let fill_rect =
                         Rect::from_min_size(screen.min, Vec2::new(fill_w, screen.height()));
-                    painter.rect_filled(
+                    draw_ui_preview_rect(
+                        painter,
                         fill_rect,
-                        0.0,
-                        Color32::from_rgb(fill[0], fill[1], fill[2]),
+                        ui_preview_paint(*fill, *fill_gradient),
                     );
                 }
                 let knob_w = (screen.height() + 2.0).clamp(3.0, screen.width().max(3.0));
@@ -29623,29 +30019,141 @@ fn draw_ui_scene_preview(
                     Pos2::new(knob_x, screen.min.y - 1.0),
                     Vec2::new(knob_w, screen.height() + 2.0),
                 );
-                painter.rect_filled(knob_rect, 0.0, Color32::from_rgb(knob[0], knob[1], knob[2]));
+                draw_ui_preview_rect(painter, knob_rect, ui_preview_paint(*knob, *knob_gradient));
             }
         }
     }
 
-    if let Some(selected_node) = scene.node(selected) {
-        let selected_rect = match &selected_node.kind {
-            UiNodeKind::Canvas { .. } => Some(canvas),
-            _ => scene
-                .absolute_rect(selected_node.id)
-                .map(|rect| ui_rect_to_screen(rect, canvas, canvas_size)),
-        };
-        if let Some(rect) = selected_rect {
-            painter.rect_stroke(
-                rect.expand(2.0),
-                0.0,
-                Stroke::new(2.0, STUDIO_ACCENT),
-                StrokeKind::Outside,
-            );
-            if !matches!(selected_node.kind, UiNodeKind::Canvas { .. }) {
-                draw_ui_resize_handles(painter, rect, hovered_handle);
+    if !ui_node_hidden(scene, hidden_ui_nodes, selected) {
+        if let Some(selected_node) = scene.node(selected) {
+            let selected_rect = match &selected_node.kind {
+                UiNodeKind::Canvas { .. } => Some(canvas),
+                _ => scene
+                    .absolute_rect(selected_node.id)
+                    .map(|rect| ui_rect_to_screen(rect, canvas, canvas_size)),
+            };
+            if let Some(rect) = selected_rect {
+                painter.rect_stroke(
+                    rect.expand(2.0),
+                    0.0,
+                    Stroke::new(2.0, STUDIO_ACCENT),
+                    StrokeKind::Outside,
+                );
+                if !matches!(selected_node.kind, UiNodeKind::Canvas { .. }) {
+                    draw_ui_resize_handles(painter, rect, hovered_handle);
+                }
             }
         }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum UiPreviewPaint {
+    Solid(Color32),
+    Gradient {
+        from: Color32,
+        to: Color32,
+        direction: UiGradientDirection,
+    },
+}
+
+fn ui_preview_paint(color: [u8; 3], gradient: Option<UiGradient>) -> UiPreviewPaint {
+    let from = Color32::from_rgb(color[0], color[1], color[2]);
+    match gradient {
+        Some(gradient) if gradient.to != color => UiPreviewPaint::Gradient {
+            from,
+            to: Color32::from_rgb(gradient.to[0], gradient.to[1], gradient.to[2]),
+            direction: gradient.direction,
+        },
+        _ => UiPreviewPaint::Solid(from),
+    }
+}
+
+fn draw_ui_preview_rect(painter: &egui::Painter, rect: Rect, paint: UiPreviewPaint) {
+    match paint {
+        UiPreviewPaint::Solid(color) => {
+            painter.rect_filled(rect, 0.0, color);
+        }
+        UiPreviewPaint::Gradient {
+            from,
+            to,
+            direction,
+        } => draw_ui_preview_quad_mesh(
+            painter,
+            egui::TextureId::default(),
+            rect,
+            Rect::from_min_max(Pos2::ZERO, Pos2::ZERO),
+            preview_gradient_vertex_colors(from, to, direction),
+        ),
+    }
+}
+
+fn draw_ui_preview_textured_rect(
+    painter: &egui::Painter,
+    texture_id: egui::TextureId,
+    rect: Rect,
+    uv: Rect,
+    paint: UiPreviewPaint,
+) {
+    match paint {
+        UiPreviewPaint::Solid(color) => {
+            painter.image(texture_id, rect, uv, color);
+        }
+        UiPreviewPaint::Gradient {
+            from,
+            to,
+            direction,
+        } => draw_ui_preview_quad_mesh(
+            painter,
+            texture_id,
+            rect,
+            uv,
+            preview_gradient_vertex_colors(from, to, direction),
+        ),
+    }
+}
+
+fn draw_ui_preview_quad_mesh(
+    painter: &egui::Painter,
+    texture_id: egui::TextureId,
+    rect: Rect,
+    uv: Rect,
+    colors: [Color32; 4],
+) {
+    let mut mesh = egui::Mesh::with_texture(texture_id);
+    mesh.vertices.push(egui::epaint::Vertex {
+        pos: rect.left_top(),
+        uv: uv.left_top(),
+        color: colors[0],
+    });
+    mesh.vertices.push(egui::epaint::Vertex {
+        pos: rect.right_top(),
+        uv: uv.right_top(),
+        color: colors[1],
+    });
+    mesh.vertices.push(egui::epaint::Vertex {
+        pos: rect.left_bottom(),
+        uv: uv.left_bottom(),
+        color: colors[2],
+    });
+    mesh.vertices.push(egui::epaint::Vertex {
+        pos: rect.right_bottom(),
+        uv: uv.right_bottom(),
+        color: colors[3],
+    });
+    mesh.add_triangle(0, 1, 2);
+    mesh.add_triangle(1, 2, 3);
+    painter.add(egui::Shape::mesh(mesh));
+}
+
+fn preview_gradient_vertex_colors(
+    from: Color32,
+    to: Color32,
+    direction: UiGradientDirection,
+) -> [Color32; 4] {
+    match direction {
+        UiGradientDirection::Vertical => [from, from, to, to],
+        UiGradientDirection::Horizontal => [from, to, from, to],
     }
 }
 
@@ -29822,7 +30330,7 @@ fn draw_ui_preview_text(
     scale: f32,
     letter_spacing: i8,
     canvas_scale: f32,
-    color: Color32,
+    paint: UiPreviewPaint,
 ) {
     let spec = ui_preview_font_spec(font);
     let line_height = (spec.line_height as f32 * scale).max(1.0);
@@ -29864,7 +30372,7 @@ fn draw_ui_preview_text(
             scale,
             letter_spacing,
             canvas_scale,
-            color,
+            paint,
         );
         y += line_height;
     }
@@ -29883,7 +30391,7 @@ fn draw_ui_preview_text_line(
     scale: f32,
     letter_spacing: i8,
     canvas_scale: f32,
-    color: Color32,
+    paint: UiPreviewPaint,
 ) {
     let line_w = ui_preview_text_width(font, line, scale, letter_spacing, canvas_scale);
     let start_x = match align {
@@ -29901,11 +30409,12 @@ fn draw_ui_preview_text_line(
         // missing-glyph cell (index 0), matching the runtime's fallback.
         let code = if (ch as u32) < 128 { ch as u8 } else { 0 };
         let glyph_rect = Rect::from_min_size(Pos2::new(x, y), glyph_size);
-        painter.image(
+        draw_ui_preview_textured_rect(
+            painter,
             font_texture.id(),
             glyph_rect,
             ui_font_glyph_uv(font, code),
-            color,
+            paint,
         );
         let gap = if chars.peek().is_some() {
             f32::from(letter_spacing) * canvas_scale
@@ -30006,12 +30515,14 @@ fn draw_ui_resize_handles(painter: &egui::Painter, rect: Rect, hovered: Option<U
 
 fn ui_scene_resize_handle_target(
     scene: &psxed_project::UiScene,
+    hidden_ui_nodes: &HashSet<(UiSceneId, UiNodeId)>,
     selected: UiNodeId,
     canvas: Rect,
     canvas_size: [u16; 2],
     pos: Pos2,
 ) -> Option<(UiNodeId, UiResizeHandle)> {
-    if let Some(handle) = ui_scene_node_resize_handle_hit(scene, selected, canvas, canvas_size, pos)
+    if let Some(handle) =
+        ui_scene_node_resize_handle_hit(scene, hidden_ui_nodes, selected, canvas, canvas_size, pos)
     {
         return Some((selected, handle));
     }
@@ -30021,18 +30532,22 @@ fn ui_scene_resize_handle_target(
         .rev()
         .filter(|id| *id != selected)
         .find_map(|id| {
-            ui_scene_node_resize_handle_hit(scene, id, canvas, canvas_size, pos)
+            ui_scene_node_resize_handle_hit(scene, hidden_ui_nodes, id, canvas, canvas_size, pos)
                 .map(|handle| (id, handle))
         })
 }
 
 fn ui_scene_node_resize_handle_hit(
     scene: &psxed_project::UiScene,
+    hidden_ui_nodes: &HashSet<(UiSceneId, UiNodeId)>,
     id: UiNodeId,
     canvas: Rect,
     canvas_size: [u16; 2],
     pos: Pos2,
 ) -> Option<UiResizeHandle> {
+    if ui_node_hidden(scene, hidden_ui_nodes, id) {
+        return None;
+    }
     let node = scene.node(id)?;
     node.kind.rect()?;
     let rect = scene
@@ -30071,11 +30586,15 @@ fn ui_resize_handle_rects_with_size(rect: Rect, size: f32) -> Vec<(UiResizeHandl
 
 fn ui_scene_hit_test(
     scene: &psxed_project::UiScene,
+    hidden_ui_nodes: &HashSet<(UiSceneId, UiNodeId)>,
     canvas: Rect,
     canvas_size: [u16; 2],
     pos: Pos2,
 ) -> Option<UiNodeId> {
     scene.hierarchy_node_ids().into_iter().rev().find_map(|id| {
+        if ui_node_hidden(scene, hidden_ui_nodes, id) {
+            return None;
+        }
         let node = scene.node(id)?;
         node.kind.rect()?;
         let rect = scene.absolute_rect(id)?;
@@ -37720,9 +38239,17 @@ mod tests {
             },
         );
         let canvas = Rect::from_min_size(Pos2::ZERO, Vec2::new(320.0, 240.0));
+        let hidden_ui_nodes = HashSet::new();
 
         assert_eq!(
-            ui_scene_resize_handle_target(&scene, image, canvas, [320, 240], Pos2::new(-4.0, -4.0)),
+            ui_scene_resize_handle_target(
+                &scene,
+                &hidden_ui_nodes,
+                image,
+                canvas,
+                [320, 240],
+                Pos2::new(-4.0, -4.0)
+            ),
             Some((image, UiResizeHandle::TopLeft))
         );
     }
@@ -39593,6 +40120,130 @@ mod tests {
             .collect_entity_bounds(Some(room))
             .iter()
             .any(|bound| bound.node == actor));
+    }
+
+    #[test]
+    fn ui_tree_visibility_is_scene_local_and_hides_canvas_hits() {
+        let mut project = ProjectDocument::new("ui-tree-visibility");
+        project.ui_scenes = vec![UiScene::empty_canvas("Main", UiSceneId::FIRST)];
+        let first_scene_id = project.ui_scenes[0].id;
+        let group = project.ui_scenes[0].add_node(
+            UiNodeId::ROOT,
+            "Panel",
+            UiNodeKind::Group {
+                rect: UiRect::new(0, 0, 96, 64),
+            },
+        );
+        let label = project.ui_scenes[0].add_node(
+            group,
+            "Label",
+            UiNodeKind::Group {
+                rect: UiRect::new(4, 4, 48, 16),
+            },
+        );
+        let second_scene_id = project.add_ui_scene("Settings");
+        let second_group = project
+            .ui_scene_mut(second_scene_id)
+            .unwrap()
+            .add_node(
+                UiNodeId::ROOT,
+                "Panel",
+                UiNodeKind::Group {
+                    rect: UiRect::new(0, 0, 96, 64),
+                },
+            );
+        assert_eq!(group.raw(), second_group.raw());
+
+        let mut workspace =
+            EditorWorkspace::with_project(test_temp_dir("ui-tree-visibility"), project);
+        workspace.apply_ui_tree_action(UiTreeAction::ToggleVisibility(group));
+
+        let first_scene = workspace.current_ui_scene().unwrap();
+        assert!(workspace.hidden_ui_nodes.contains(&(first_scene_id, group)));
+        assert!(ui_node_hidden(first_scene, &workspace.hidden_ui_nodes, group));
+        assert!(ui_node_hidden(first_scene, &workspace.hidden_ui_nodes, label));
+        let canvas = Rect::from_min_size(Pos2::ZERO, Vec2::new(320.0, 240.0));
+        assert_eq!(
+            ui_scene_hit_test(
+                first_scene,
+                &workspace.hidden_ui_nodes,
+                canvas,
+                [320, 240],
+                Pos2::new(8.0, 8.0)
+            ),
+            None
+        );
+
+        let second_scene = workspace.project.ui_scene(second_scene_id).unwrap();
+        assert!(!ui_node_hidden(
+            second_scene,
+            &workspace.hidden_ui_nodes,
+            second_group
+        ));
+        assert_eq!(
+            ui_scene_hit_test(
+                second_scene,
+                &workspace.hidden_ui_nodes,
+                canvas,
+                [320, 240],
+                Pos2::new(8.0, 8.0)
+            ),
+            Some(second_group)
+        );
+    }
+
+    #[test]
+    fn ui_node_clipboard_pastes_subtree_into_another_ui_scene() {
+        let mut project = ProjectDocument::new("ui-node-clipboard");
+        project.ui_scenes = vec![UiScene::empty_canvas("Main", UiSceneId::FIRST)];
+        let source_root = project.ui_scenes[0].root;
+        let panel = project.ui_scenes[0].add_node(
+            source_root,
+            "Panel",
+            UiNodeKind::Group {
+                rect: UiRect::new(10, 12, 80, 40),
+            },
+        );
+        project.ui_scenes[0].add_node(
+            panel,
+            "Child",
+            UiNodeKind::Group {
+                rect: UiRect::new(3, 4, 16, 8),
+            },
+        );
+        let target_scene_id = project.add_ui_scene("Settings");
+        let target_root = project.ui_scene(target_scene_id).unwrap().root;
+        let target_parent = project
+            .ui_scene_mut(target_scene_id)
+            .unwrap()
+            .add_node(
+                target_root,
+                "Destination",
+                UiNodeKind::Group {
+                    rect: UiRect::new(20, 30, 100, 50),
+                },
+            );
+
+        let mut workspace =
+            EditorWorkspace::with_project(test_temp_dir("ui-node-clipboard"), project);
+        assert!(workspace.copy_ui_node(panel));
+        workspace.active_ui_scene_index = 1;
+        workspace.selection.selected_ui_node = target_parent;
+        assert!(workspace.paste_ui_node());
+
+        let pasted = workspace.selection.selected_ui_node;
+        let scene = workspace.current_ui_scene().unwrap();
+        let pasted_node = scene.node(pasted).unwrap();
+        assert_eq!(pasted_node.name, "Panel");
+        assert_eq!(pasted_node.parent, Some(target_parent));
+        assert_eq!(pasted_node.children.len(), 1);
+        let pasted_child = pasted_node.children[0];
+        assert_eq!(scene.node(pasted_child).unwrap().name, "Child");
+        assert_eq!(scene.node(pasted_child).unwrap().parent, Some(pasted));
+        assert_eq!(
+            scene.absolute_rect(pasted_child),
+            Some(UiRect::new(33, 46, 16, 8))
+        );
     }
 
     #[test]
@@ -43677,6 +44328,7 @@ mod tests {
             UiNodeKind::Rect {
                 rect: UiRect::new(8, 8, 32, 16),
                 color: [10, 20, 30],
+                gradient: None,
             },
             "Probe",
         );
@@ -43779,8 +44431,11 @@ mod tests {
                 rect: UiRect::new(8, 8, 96, 8),
                 option: second,
                 track: [11, 12, 13],
+                track_gradient: None,
                 fill: [21, 22, 23],
+                fill_gradient: None,
                 knob: [31, 32, 33],
+                knob_gradient: None,
                 sfx: UiSfxBindings::default(),
             },
             "Brightness",
