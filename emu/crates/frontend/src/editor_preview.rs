@@ -4110,6 +4110,7 @@ fn entity_marker_color(kind: &NodeKind) -> Option<(u8, u8, u8)> {
         | NodeKind::Collider { .. }
         | NodeKind::CharacterController { .. }
         | NodeKind::Equipment { .. }
+        | NodeKind::Interactable { .. }
         | NodeKind::PhysicsBody { .. }
         | NodeKind::Room { .. }
         | NodeKind::World { .. }

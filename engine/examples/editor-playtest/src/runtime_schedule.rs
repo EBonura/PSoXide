@@ -27,5 +27,8 @@ pub(crate) const RUNTIME_SCHEDULE: RuntimeScheduleConfig = RuntimeScheduleConfig
     stream_load_batch_count: 4,
     stream_pump_sectors_per_tick: 8,
     stream_bootstrap_pump_limit: 4096,
-    max_fixed_ticks_before_visual: 0,
+    // Prevent boot/menu-to-gameplay loads from building an unbounded fixed-update
+    // backlog before the first visual frame. Two ticks matches the 30Hz render
+    // cadence while still allowing one non-render tick for background work.
+    max_fixed_ticks_before_visual: 2,
 };
