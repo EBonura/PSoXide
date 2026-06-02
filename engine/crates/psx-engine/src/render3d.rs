@@ -1146,7 +1146,7 @@ pub struct WorldRenderPass<'a, 'ot, const OT_DEPTH: usize> {
     slot_heads: MaybeUninit<[u16; OT_DEPTH]>,
     slot_tails: MaybeUninit<[u16; OT_DEPTH]>,
     command_len: usize,
-    next_order: usize,
+    next_order: u16,
     ordering: WorldCommandOrdering,
 }
 
@@ -3887,6 +3887,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         stats
     }
 
+    #[inline(always)]
     fn push_command(
         &mut self,
         slot: DepthSlot,
@@ -3896,17 +3897,18 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         words: u8,
     ) {
         let command_index = self.command_len;
+        debug_assert!(command_index < WORLD_COMMAND_NONE as usize);
         self.commands[command_index] = WorldTriCommand {
             packet_ptr,
             depth,
             slot: slot.index().min(u16::MAX as usize) as u16,
-            order: self.next_order.min(u16::MAX as usize) as u16,
+            order: self.next_order,
             next: WORLD_COMMAND_NONE,
             render_layer: world_render_layer_code(render_layer),
             words,
         };
         self.command_len += 1;
-        self.next_order = self.next_order.saturating_add(1);
+        self.next_order = self.next_order.wrapping_add(1);
         match self.ordering {
             WorldCommandOrdering::LinkedSorted => self.insert_command_in_slot(command_index),
             WorldCommandOrdering::DeferredSorted => {}
