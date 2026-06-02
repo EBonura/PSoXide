@@ -39,6 +39,7 @@ const REG_REQUEST_IRQ: u32 = BASE + 3;
 const STATUS_PARAM_NOT_FULL: u8 = 1 << 4;
 const STATUS_RESPONSE_NOT_EMPTY: u8 = 1 << 5;
 const IRQ_ACK: u8 = 3;
+const IRQ_COMPLETE: u8 = 2;
 const IRQ_ERROR: u8 = 5;
 const IRQ_ACK_ALL: u8 = 0x1F;
 const IRQ_PARAM_FIFO_RESET: u8 = 0x40;
@@ -163,6 +164,14 @@ pub fn try_pause(spin_limit: u32) -> Option<Response> {
     try_command(CMD_PAUSE, &[], spin_limit)
 }
 
+/// Try to pause CD-DA/read playback and wait for the completion IRQ.
+///
+/// Unlike [`try_stop`], this leaves the drive spun up, which makes it the
+/// right handoff before gameplay code starts issuing data-read commands.
+pub fn try_pause_until_complete(spin_limit: u32) -> bool {
+    try_command_until_complete(CMD_PAUSE, &[], spin_limit)
+}
+
 /// Stop the CD-ROM motor/playback.
 pub fn stop() -> Response {
     command(CMD_STOP, &[])
@@ -230,6 +239,48 @@ fn wait_irq_bounded(expected: u8, mut spins: u32) -> Option<u8> {
         spins -= 1;
         core::hint::spin_loop();
     }
+}
+
+fn try_command_until_complete(command: u8, params: &[u8], spin_limit: u32) -> bool {
+    let irq_enable = begin_polled_command();
+    select_index(0);
+    for &param in params {
+        if !wait_param_room_bounded(spin_limit) {
+            finish_failed_polled_command(irq_enable);
+            return false;
+        }
+        write_byte(REG_PARAMETER, param);
+    }
+    write_byte(REG_COMMAND_RESPONSE, command);
+
+    let ok = wait_ack_then_complete(spin_limit);
+    drain_response_fifo();
+    ack_irq(IRQ_ACK_ALL);
+    restore_irq_enable(irq_enable);
+    select_index(0);
+    ok
+}
+
+fn wait_ack_then_complete(spin_limit: u32) -> bool {
+    if wait_irq_bounded(IRQ_ACK, spin_limit).is_none() {
+        return false;
+    }
+    drain_response_fifo();
+    ack_irq(IRQ_ACK);
+
+    if wait_irq_bounded(IRQ_COMPLETE, spin_limit).is_none() {
+        return false;
+    }
+    drain_response_fifo();
+    ack_irq(IRQ_COMPLETE);
+    true
+}
+
+fn finish_failed_polled_command(irq_enable: u8) {
+    drain_response_fifo();
+    ack_irq(IRQ_ACK_ALL);
+    restore_irq_enable(irq_enable);
+    select_index(0);
 }
 
 fn read_response_fifo() -> Response {

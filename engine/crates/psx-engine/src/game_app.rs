@@ -197,10 +197,7 @@ impl CddaPlayer {
         self.requested = cue;
 
         if cue.track == 0 {
-            self.current_track = 0;
-            self.step = CddaStartStep::SetMode;
-            self.next_retry_tick = tick;
-            cdda_try_stop();
+            self.release_for_data_reads(tick);
             return;
         }
 
@@ -215,6 +212,16 @@ impl CddaPlayer {
             self.next_retry_tick = tick;
             self.next_status_tick = tick.saturating_add(CDDA_STATUS_TICKS);
         }
+    }
+
+    fn release_for_data_reads(&mut self, tick: u32) {
+        self.requested = MusicCue::SILENT;
+        self.current_track = 0;
+        self.step = CddaStartStep::SetMode;
+        self.next_retry_tick = tick;
+        self.next_status_tick = 0;
+        self.routed = false;
+        cdda_release_for_data_reads();
     }
 
     fn update(&mut self, tick: u32) {
@@ -357,12 +364,13 @@ fn cdda_is_playing() -> bool {
 }
 
 #[cfg(target_arch = "mips")]
-fn cdda_try_stop() {
-    let _ = psx_io::cdrom::try_stop(CDDA_COMMAND_SPINS);
+fn cdda_release_for_data_reads() {
+    psx_spu::enable_cd_audio(false);
+    let _ = psx_io::cdrom::try_pause_until_complete(CDDA_COMMAND_SPINS);
 }
 
 #[cfg(not(target_arch = "mips"))]
-fn cdda_try_stop() {}
+fn cdda_release_for_data_reads() {}
 
 /// Cursor + small scratch tracking where in the [`GameFlow`] the
 /// runtime currently sits.
@@ -671,7 +679,7 @@ impl<'a, S: Scene> GameApp<'a, S> {
     /// off to gameplay later. Idempotent init keeps a flow that bounces
     /// between menu and gameplay from re-initialising the world.
     fn enter_gameplay(&mut self, index: u16, ctx: &mut Ctx) {
-        self.cdda.request(MusicCue::SILENT, ctx.sim_tick.as_u32());
+        self.cdda.release_for_data_reads(ctx.sim_tick.as_u32());
         self.cursor.current = index;
         if !self.cursor.gameplay_inited {
             self.gameplay.init(ctx);
