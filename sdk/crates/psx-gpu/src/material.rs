@@ -398,7 +398,7 @@ impl TextureMaterial {
     pub fn apply_draw_mode(self) {
         wait_cmd_ready();
         write_gp0(self.draw_mode_word());
-        self.texture_window.apply();
+        write_gp0(self.texture_window.word());
     }
 }
 

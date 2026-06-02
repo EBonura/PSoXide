@@ -361,7 +361,6 @@ pub fn draw_quad_textured_material(
 ) {
     wait_cmd_ready();
     write_gp0(material.texture_window_word());
-    wait_cmd_ready();
     write_gp0(material.flat_textured_polygon_header(true));
     write_gp0(pack_vertex(verts[0].0, verts[0].1));
     write_gp0(pack_texcoord(uvs[0].0, uvs[0].1, material.clut_word()));
@@ -413,7 +412,6 @@ pub fn draw_quad_textured_gouraud_material(
 ) {
     wait_cmd_ready();
     write_gp0(material.texture_window_word());
-    wait_cmd_ready();
     write_gp0(
         material.textured_polygon_command(true, true)
             | pack_color(colors[0].0, colors[0].1, colors[0].2),
