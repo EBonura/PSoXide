@@ -422,6 +422,18 @@ disc, `make run-<name>` where supported).
 └── Makefile                top-level quality and example commands
 ```
 
+Each area has its own README with a per-crate breakdown:
+
+| Area | What's inside |
+|------|---------------|
+| [`crates/`](crates/README.md) | Shared `no_std` PSX primitives (hardware model, disc parsing, traces). |
+| [`sdk/`](sdk/README.md) | Bare-metal PSX SDK crates + `hello-*` examples. |
+| [`engine/`](engine/README.md) | Scene/App runtime engine, level schema, and the example games. |
+| [`editor/`](editor/README.md) | Project model, asset cookers, and editor UI. |
+| [`emu/`](emu/README.md) | Emulator core, desktop frontend, renderer, parity oracle. |
+| [`tools/`](tools/README.md) | Disc-mastering and EXE utilities. |
+| [`docs/`](docs/README.md) | Architecture, hardware reference, and planning notes. |
+
 Generated contract:
 
 - `engine/examples/editor-playtest/generated/level_manifest.rs` is a
@@ -466,6 +478,19 @@ the same file.
 The GPL choice is deliberate: the emulator core builds on PCSX-Redux
 as a parity oracle and reference, and PCSX-Redux is GPL-2.0-or-later.
 Releasing PSoXide under the same license keeps the lineage clean.
+
+Commercial use is allowed. Free, paid, open-source, and commercial
+homebrew projects can be built with PSoXide, as long as the code they
+distribute complies with GPL-2.0-or-later. In practice, if a shipped
+game includes PSoXide SDK/runtime/engine code, or modifications to that
+code, the corresponding code should remain available under
+GPL-compatible terms to the people receiving the game.
+
+Original game content is separate from the engine/toolchain code.
+Models, textures, audio, writing, level data, branding, and other
+project-specific assets may use their own licenses, provided those
+asset licenses allow the intended distribution. PSoXide does not claim
+ownership of content created with the editor, cooker, SDK, or runtime.
 
 Asset provenance is tracked in
 [`docs/asset-provenance.md`](docs/asset-provenance.md). Third-party

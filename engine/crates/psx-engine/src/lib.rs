@@ -57,6 +57,7 @@ pub mod app;
 pub mod character_motor;
 pub mod fixed;
 pub mod frames;
+pub mod game_app;
 pub mod lighting;
 pub mod movement;
 pub mod render;
@@ -68,6 +69,7 @@ pub mod telemetry;
 pub mod third_person_camera;
 mod time;
 pub mod transform;
+pub mod ui;
 pub mod world;
 pub mod world_render;
 
@@ -80,6 +82,7 @@ pub use character_motor::{
 };
 pub use fixed::{Q12, Q8};
 pub use frames::{Frames, SimTick, Ticks, VideoHz, VisualFrame};
+pub use game_app::{FlowCursor, GameApp, GAMEPLAY_ONLY};
 pub use lighting::{
     accumulate_point_lights, accumulate_point_lights_rgb, modulate_material_tint, modulate_tint,
     shade_material_tint_with_lights, shade_tint_with_lights, LightingRgb, MaterialTint,
@@ -91,16 +94,17 @@ pub use movement::{
 };
 pub use render::{
     CameraDepth, DepthBand, DepthRange, DepthSlot, GpuPacket, OtDepth, OtFrame, PrimitiveArena,
-    PrimitivePacketArena, PrimitivePacketScratch, PrimitiveSink,
+    PrimitivePacketArena, PrimitivePacketScratch, PrimitiveSink, RoomSurfaceSink,
 };
 pub use render3d::{
     apply_model_pose_translation, compute_joint_view_transform, compute_joint_world_transform,
     project_model_vertex_with_joint_transforms, CullMode, DepthPolicy, GouraudMeshOptions,
     GouraudRenderPass, GouraudTriCommand, JointViewTransform, JointWorldTransform,
     LoadedWorldCameraGte, LocalToWorldScale, MeshRenderStats, ModelPoseTranslation,
-    ProjectedTexturedVertex, ProjectedVertex, TexturedModelGeometry, TexturedModelRenderFace,
-    TexturedModelRenderStats, TexturedViewVertex, ViewVertex, WorldCamera, WorldProjection,
-    WorldRenderLayer, WorldRenderPass, WorldRenderStats, WorldSurfaceOptions, WorldTriCommand,
+    ProjectedTexturedVertex, ProjectedVertex, SkyDirectionProjector, TexturedModelGeometry,
+    TexturedModelRenderFace, TexturedModelRenderStats, TexturedViewVertex, ViewVertex, WorldCamera,
+    WorldProjection, WorldRenderLayer, WorldRenderPass, WorldRenderStats, WorldSurfaceOptions,
+    WorldTriCommand,
 };
 pub use scheduler::{
     collect_due_tasks, FixedUpdateOutcome, FrameScheduler, OverloadPolicy, SchedulerAction,
@@ -117,11 +121,12 @@ pub use third_person_camera::{
     ThirdPersonCameraState, ThirdPersonCameraTarget,
 };
 pub use transform::{ActorTransform, RoomPoint, Vec3World, WorldVertex};
+pub use ui::{draw_scene, is_focusable, node_nav_rect, UiTextureSlot, UI_CANVAS_H, UI_CANVAS_W};
 pub use world::{
-    CompactCollisionParseError, CompactCollisionRoom, GridCoord, GridDirection, GridFloorSample,
-    GridHorizontalFace, GridRoom, GridSector, GridSplit, GridVerticalFace, GridWalls, GridWorld,
-    RoomCollision, RoomRender, RuntimeCollisionRoom, RuntimeRoom, SectorCollision, SectorRender,
-    WallCollision, WallRender, WorldMaterialId, GRID_SECTOR_SIZE,
+    CompactCollisionParseError, CompactCollisionRoom, GridDirection, GridHorizontalFace,
+    GridSector, GridSplit, GridVerticalFace, GridWalls, RoomCollision, RoomRender,
+    RuntimeCollisionRoom, RuntimeRoom, SectorCollision, SectorRender, WallCollision, WallRender,
+    WorldMaterialId,
 };
 pub use world_render::{
     cache_room_vertex_lit_surfaces, cached_room_cells_from_level_records,

@@ -95,6 +95,26 @@ impl Resolution {
     };
 }
 
+/// GPU clocks per displayed pixel at the standard PSX dot clock that
+/// [`init`] programs. The horizontal display window therefore spans
+/// `width * H_CLOCKS_PER_PIXEL` GPU clocks.
+const H_CLOCKS_PER_PIXEL: u32 = 8;
+
+/// Default left edge (GP1 06h X1) of the horizontal display window, in GPU
+/// clocks from start-of-line -- the standard centred NTSC picture.
+const H_DISPLAY_WINDOW_START: u32 = 0x260;
+/// Default top edge (GP1 07h Y1) of the NTSC vertical display window.
+const NTSC_V_DISPLAY_WINDOW_START: u32 = 0x10;
+/// Default top edge (GP1 07h Y1) of the PAL vertical display window.
+const PAL_V_DISPLAY_WINDOW_START: u32 = 0x23;
+
+const fn v_display_window_start(mode: VideoMode) -> u32 {
+    match mode {
+        VideoMode::Ntsc => NTSC_V_DISPLAY_WINDOW_START,
+        VideoMode::Pal => PAL_V_DISPLAY_WINDOW_START,
+    }
+}
+
 /// Initialise the GPU: reset, set display mode, set display ranges,
 /// configure DMA direction, enable display output.
 pub fn init(mode: VideoMode, res: Resolution) {
@@ -115,14 +135,12 @@ pub fn init(mode: VideoMode, res: Resolution) {
     // Horizontal & vertical display windows. Values below match the
     // standard PSX output (NTSC 260h..C60h, PAL similar) -- tweaking
     // them shifts the picture on the TV but not the VRAM layout.
-    let h_start = 0x260;
-    let h_end = h_start + (res.width as u32) * 8;
+    let h_start = H_DISPLAY_WINDOW_START;
+    let h_end = h_start + (res.width as u32) * H_CLOCKS_PER_PIXEL;
     write_gp1(gp1::h_display_range(h_start, h_end));
 
-    let (v_start, v_end) = match mode {
-        VideoMode::Ntsc => (0x10, 0x10 + res.height as u32),
-        VideoMode::Pal => (0x23, 0x23 + res.height as u32),
-    };
+    let v_start = v_display_window_start(mode);
+    let v_end = v_start + res.height as u32;
     write_gp1(gp1::v_display_range(v_start, v_end));
 
     write_gp1(gp1::dma_direction(2)); // CPU → GP0
@@ -180,6 +198,35 @@ pub fn set_draw_area(x0: u16, y0: u16, x1: u16, y1: u16) {
 pub fn set_draw_offset(x: i16, y: i16) {
     wait_cmd_ready();
     write_gp0(gp0::draw_offset(x as i32, y as i32));
+}
+
+/// Shift the displayed picture horizontally on the TV by `offset_px` pixels
+/// (positive = right) via the authentic GP1(06h) horizontal display range --
+/// the same mechanism period games used to recentre the image inside a CRT's
+/// overscan. Unlike [`set_draw_offset`], this never clips rendered content: it
+/// only slides where the active window lands in the video signal, so the whole
+/// picture is preserved. `res` must match the value handed to [`init`] so the
+/// window keeps its width.
+///
+/// Note: this project's emulator mirrors the offset in its presentation buffer
+/// so the front-end preview is visible; other emulators may crop to the active
+/// display region and hide the shift.
+pub fn set_screen_h_offset(offset_px: i16, res: Resolution) {
+    let start = (H_DISPLAY_WINDOW_START as i32 + offset_px as i32 * H_CLOCKS_PER_PIXEL as i32)
+        .max(0) as u32;
+    let end = start + res.width as u32 * H_CLOCKS_PER_PIXEL;
+    write_gp1(gp1::h_display_range(start, end));
+}
+
+/// Shift the displayed picture vertically on the TV by `offset_px` scanlines
+/// (positive = down) via the authentic GP1(07h) vertical display range. This
+/// is the vertical counterpart to [`set_screen_h_offset`]: it slides the video
+/// window inside overscan without changing VRAM layout or the GPU draw offset.
+/// `mode` and `res` must match the values handed to [`init`].
+pub fn set_screen_v_offset(offset_px: i16, mode: VideoMode, res: Resolution) {
+    let start = (v_display_window_start(mode) as i32 + offset_px as i32).max(0) as u32;
+    let end = start + res.height as u32;
+    write_gp1(gp1::v_display_range(start, end));
 }
 
 /// Fill a VRAM rectangle with a solid color. Ignores draw area / offset.
@@ -403,25 +450,6 @@ pub fn draw_sprite_material(
     write_gp0(pack_vertex(x, y));
     write_gp0(pack_texcoord(uv.0, uv.1, material.clut_word()));
     write_gp0(pack_xy(w, h));
-}
-
-/// Upload raw 16bpp pixels from CPU memory into a VRAM rectangle.
-/// Used for font glyphs, sprites, and CLUTs -- the standard
-/// "CPU→VRAM transfer" pipe (GP0 0xA0 + pixel words).
-///
-/// Length of `pixels` must equal `w * h / 2` words (two 16bpp
-/// pixels packed per word). Alignment of `pixels` doesn't matter
-/// here because we push one word at a time via the FIFO; games
-/// doing DMA uploads get an order-of-magnitude speedup but need
-/// extra care with addresses, which we skip for this simple path.
-pub fn upload_rect_raw(x: u16, y: u16, w: u16, h: u16, pixels: &[u32]) {
-    wait_cmd_ready();
-    write_gp0(gp0::COPY_CPU_TO_VRAM);
-    write_gp0(pack_xy(x, y));
-    write_gp0(pack_xy(w, h));
-    for word in pixels {
-        write_gp0(*word);
-    }
 }
 
 /// Set the texture page + CLUT + color depth used by subsequent
