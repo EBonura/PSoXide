@@ -625,6 +625,18 @@ impl Gpu {
         (self.h_range_x1 as i32 - H_DISPLAY_START_STANDARD) / divisor
     }
 
+    /// Vertical presentation offset, in displayed scanlines, requested by
+    /// GP1(07h) relative to the standard centred window. This mirrors the
+    /// screen-position preview logic in [`Self::horizontal_display_offset_px`].
+    pub fn vertical_display_offset_px(&self) -> i32 {
+        let standard = if self.effective_display_height() > 240 {
+            0x23
+        } else {
+            0x10
+        };
+        self.v_range_y1 as i32 - standard
+    }
+
     /// Produce a row-major `RGBA8` buffer of the current display area.
     /// In 16-bit mode the 5-bit channels are bit-replicated to 8-bit;
     /// in 24-bit mode the packed RGB888 triplets are used directly.
@@ -639,28 +651,33 @@ impl Gpu {
         let vram_h = crate::VRAM_HEIGHT as u16;
         let eff_h = da.height.min(vram_h.saturating_sub(da.y));
         let eff_w = da.width.min(vram_w.saturating_sub(da.x));
-        // GP1(06h) horizontal screen positioning: slide the picture within the
+        // GP1(06h)/(07h) screen positioning: slide the picture within the
         // output by the requested offset and black-fill the exposed edge, so a
         // screen-position setting is visible. Real hardware shifts the active
         // window inside the video signal; cropping to the active region would
-        // otherwise discard the shift. Standard-centred content -> off 0.
-        let off = self
+        // otherwise discard the shift. Standard-centred content -> offset 0.
+        let off_x = self
             .horizontal_display_offset_px()
             .clamp(-(eff_w as i32), eff_w as i32);
+        let off_y = self
+            .vertical_display_offset_px()
+            .clamp(-(eff_h as i32), eff_h as i32);
         let mut out = Vec::with_capacity((eff_w as usize) * (eff_h as usize) * 4);
         for dy in 0..eff_h {
+            let src_y = dy as i32 - off_y;
             for dx in 0..eff_w {
-                let src = dx as i32 - off;
-                if src < 0 || src >= eff_w as i32 {
+                let src_x = dx as i32 - off_x;
+                if src_x < 0 || src_x >= eff_w as i32 || src_y < 0 || src_y >= eff_h as i32 {
                     out.extend_from_slice(&[0, 0, 0, 0xFF]);
                     continue;
                 }
-                let sx = da.x + src as u16;
+                let sx = da.x + src_x as u16;
+                let sy = da.y + src_y as u16;
                 if da.bpp24 {
-                    let (r, g, b) = self.read_pixel_rgb24(sx, da.y + dy);
+                    let (r, g, b) = self.read_pixel_rgb24(sx, sy);
                     out.extend_from_slice(&[r, g, b, 0xFF]);
                 } else {
-                    let pixel = self.vram.get_pixel(sx, da.y + dy);
+                    let pixel = self.vram.get_pixel(sx, sy);
                     let r = ((pixel & 0x1F) as u8) << 3;
                     let g = (((pixel >> 5) & 0x1F) as u8) << 3;
                     let b = (((pixel >> 10) & 0x1F) as u8) << 3;
