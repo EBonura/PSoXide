@@ -15,6 +15,7 @@ the [root README](../README.md) and the per-area READMEs
 | [world-grid-architecture.md](world-grid-architecture.md) | Room/sector grid model. |
 | [level-residency.md](level-residency.md) | Streamed-room residency runtime. |
 | [architecture-cleanup-roadmap.md](architecture-cleanup-roadmap.md) | In-progress structural cleanup. |
+| [demo10-low-level-hot-paths-2026-06-02.md](demo10-low-level-hot-paths-2026-06-02.md) | Demo10 guest-cycle baseline for low-level optimization work. |
 
 ## Authoring & runtime
 
