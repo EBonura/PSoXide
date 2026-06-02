@@ -1652,6 +1652,115 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         )
     }
 
+    /// Submit a projected textured Gouraud quad as one GP0 quad packet when
+    /// both underlying triangles are hardware-safe. Falls back to the normal
+    /// two-triangle prescreened path for oversized quads.
+    pub fn submit_textured_gouraud_quad_prescreened_u8<P>(
+        &mut self,
+        primitives: &mut P,
+        verts: [ProjectedVertex; 4],
+        uvs: [(u8, u8); 4],
+        colors: [(u8, u8, u8); 4],
+        material: TextureMaterial,
+        options: WorldSurfaceOptions,
+    ) -> WorldRenderStats
+    where
+        P: PrimitiveSink<QuadTexturedGouraud> + PrimitiveSink<TriTexturedGouraud>,
+    {
+        let first = [verts[0], verts[1], verts[2]];
+        let second = [verts[0], verts[2], verts[3]];
+        if !projected_triangle_can_skip_split(first, options)
+            || !projected_triangle_can_skip_split(second, options)
+        {
+            let mut stats = self.submit_textured_gouraud_triangle_prescreened_u8(
+                primitives,
+                first,
+                [uvs[0], uvs[1], uvs[2]],
+                [colors[0], colors[1], colors[2]],
+                material,
+                options,
+            );
+            if stats.primitive_overflow || stats.command_overflow {
+                return stats;
+            }
+            let second_stats = self.submit_textured_gouraud_triangle_prescreened_u8(
+                primitives,
+                second,
+                [uvs[0], uvs[2], uvs[3]],
+                [colors[0], colors[2], colors[3]],
+                material,
+                options,
+            );
+            merge_world_stats(&mut stats, second_stats);
+            return stats;
+        }
+
+        let mut stats = WorldRenderStats::default();
+        if self.command_len >= self.commands.len() {
+            stats.command_overflow = true;
+            return stats;
+        }
+
+        let depth_value = match options.depth_policy {
+            DepthPolicy::Average => (verts[0].sz + verts[1].sz + verts[2].sz + verts[3].sz) / 4,
+            DepthPolicy::Nearest => verts[0]
+                .sz
+                .min(verts[1].sz)
+                .min(verts[2].sz)
+                .min(verts[3].sz),
+            DepthPolicy::Farthest => verts[0]
+                .sz
+                .max(verts[1].sz)
+                .max(verts[2].sz)
+                .max(verts[3].sz),
+            DepthPolicy::Fixed(depth) => depth,
+        };
+        let depth = CameraDepth::new(depth_value.saturating_add(options.depth_bias));
+        let slot = options
+            .depth_band
+            .slot_depth::<OT_DEPTH>(options.depth_range, depth);
+        let packet_material = TexturedGouraudPacketMaterial::from_texture(material);
+        let quad_verts = [verts[1], verts[0], verts[2], verts[3]];
+        let quad_uvs = [uvs[1], uvs[0], uvs[2], uvs[3]];
+        let quad_colors = [colors[1], colors[0], colors[2], colors[3]];
+        let uv_words = [
+            model_uv_word(quad_uvs[0]),
+            model_uv_word(quad_uvs[1]),
+            model_uv_word(quad_uvs[2]),
+            model_uv_word(quad_uvs[3]),
+        ];
+        let Some(quad) =
+            primitives.push(QuadTexturedGouraud::with_packet_material_packed_uv_words(
+                [
+                    (quad_verts[0].sx, quad_verts[0].sy),
+                    (quad_verts[1].sx, quad_verts[1].sy),
+                    (quad_verts[2].sx, quad_verts[2].sy),
+                    (quad_verts[3].sx, quad_verts[3].sy),
+                ],
+                uv_words,
+                quad_colors,
+                packet_material,
+            ))
+        else {
+            stats.primitive_overflow = true;
+            return stats;
+        };
+
+        self.push_command(
+            slot,
+            depth.raw(),
+            if packet_material.is_translucent() {
+                WorldRenderLayer::Transparent
+            } else {
+                options.render_layer
+            },
+            quad as *mut QuadTexturedGouraud as *mut u32,
+            QuadTexturedGouraud::WORDS,
+        );
+        stats.submitted_triangles = 2;
+        stats
+    }
+
     /// Submit a projected textured Gouraud triangle with fixed depth already
     /// prepared by the caller.
     ///
@@ -5773,13 +5882,9 @@ fn merge_world_stats(stats: &mut WorldRenderStats, next: WorldRenderStats) {
         .submitted_triangles
         .wrapping_add(next.submitted_triangles);
     stats.culled_triangles = stats.culled_triangles.wrapping_add(next.culled_triangles);
-    stats.clipped_triangles = stats
-        .clipped_triangles
-        .wrapping_add(next.clipped_triangles);
+    stats.clipped_triangles = stats.clipped_triangles.wrapping_add(next.clipped_triangles);
     stats.split_triangles = stats.split_triangles.wrapping_add(next.split_triangles);
-    stats.dropped_triangles = stats
-        .dropped_triangles
-        .wrapping_add(next.dropped_triangles);
+    stats.dropped_triangles = stats.dropped_triangles.wrapping_add(next.dropped_triangles);
     stats.primitive_overflow |= next.primitive_overflow;
     stats.command_overflow |= next.command_overflow;
 }
@@ -5806,9 +5911,7 @@ fn flush_packed_unclamped_model_batch_stats(
     stats.fast_submitted_triangles = stats
         .fast_submitted_triangles
         .wrapping_add(fast_submitted_triangles);
-    stats.hw_extent_fallbacks = stats
-        .hw_extent_fallbacks
-        .wrapping_add(hw_extent_fallbacks);
+    stats.hw_extent_fallbacks = stats.hw_extent_fallbacks.wrapping_add(hw_extent_fallbacks);
 }
 
 fn merge_textured_model_stats(stats: &mut TexturedModelRenderStats, next: WorldRenderStats) {
@@ -5817,9 +5920,7 @@ fn merge_textured_model_stats(stats: &mut TexturedModelRenderStats, next: WorldR
         .wrapping_add(next.submitted_triangles);
     stats.culled_triangles = stats.culled_triangles.wrapping_add(next.culled_triangles);
     stats.split_triangles = stats.split_triangles.wrapping_add(next.split_triangles);
-    stats.dropped_triangles = stats
-        .dropped_triangles
-        .wrapping_add(next.dropped_triangles);
+    stats.dropped_triangles = stats.dropped_triangles.wrapping_add(next.dropped_triangles);
     stats.primitive_overflow |= next.primitive_overflow;
     stats.command_overflow |= next.command_overflow;
 }

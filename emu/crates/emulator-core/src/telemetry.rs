@@ -99,10 +99,28 @@ pub mod stage {
     pub const WORLD_FLUSH: u16 = 10;
     /// Ordering-table DMA submission.
     pub const OT_SUBMIT: u16 = 11;
+    /// Player collision gather + motor solve (sim).
+    pub const SIM_COLLISION: u16 = 36;
+    /// Current-room tracking + active-window refresh (sim).
+    pub const SIM_ROOM_TRACK: u16 = 37;
+    /// Streamed-room residency reconcile (sim).
+    pub const SIM_RESIDENCY: u16 = 38;
+    /// Streamed-room sector pump (sim).
+    pub const SIM_PUMP: u16 = 39;
+    /// Character motor solve (floor snap + wall sweep), excludes the gather.
+    pub const SIM_SOLVE: u16 = 40;
+    /// Solid unbroken editor box props.
+    pub const BOX_PROPS: u16 = 41;
+    /// Persistent floor debris from broken editor box props.
+    pub const BOX_PROP_DEBRIS: u16 = 42;
+    /// Transient break shards from editor box props.
+    pub const BOX_PROP_SHARDS: u16 = 43;
+    /// Editor-authored image/card props, excluding box props.
+    pub const IMAGE_CARDS: u16 = 44;
 }
 
 /// Number of stage slots, including index zero for unknown/reserved ids.
-pub const STAGE_COUNT: usize = 41;
+pub const STAGE_COUNT: usize = 45;
 
 /// Runtime task id constants shared with `psx-engine::telemetry`.
 pub mod task {
@@ -976,11 +994,15 @@ pub fn stage_name(id: u16) -> &'static str {
         stage::EQUIPMENT => "equipment",
         stage::WORLD_FLUSH => "world flush/sort",
         stage::OT_SUBMIT => "ot submit",
-        36 => "sim collision",
-        37 => "sim room track",
-        38 => "sim residency",
-        39 => "sim pump",
-        40 => "sim solve",
+        stage::SIM_COLLISION => "sim collision",
+        stage::SIM_ROOM_TRACK => "sim room track",
+        stage::SIM_RESIDENCY => "sim residency",
+        stage::SIM_PUMP => "sim pump",
+        stage::SIM_SOLVE => "sim solve",
+        stage::BOX_PROPS => "box props",
+        stage::BOX_PROP_DEBRIS => "box debris",
+        stage::BOX_PROP_SHARDS => "box shards",
+        stage::IMAGE_CARDS => "image cards",
         _ => "unknown",
     }
 }

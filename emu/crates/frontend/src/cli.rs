@@ -191,6 +191,11 @@ pub struct LaunchArgs {
     /// pinned to an exact camera position over a recorded sweep.
     #[arg(long)]
     pub counter_log: Option<PathBuf>,
+    /// Write a per-completed-guest-frame CSV of guest telemetry stages and
+    /// counters. Use this with a recorded input tape to identify which systems
+    /// stack together on deadline-miss spikes.
+    #[arg(long)]
+    pub profile_log: Option<PathBuf>,
     /// Optional path to dump the final VRAM as a raw PPM image.
     /// Lets you eyeball the boot state without firing up the GUI.
     #[arg(long)]
@@ -659,6 +664,7 @@ fn run_headless_launch(
     if let Some(samples) = tape_samples.as_ref() {
         samples[tape_cursor].apply_to_bus(&mut bus);
     }
+    let collect_profile_events = args.dump_guest_profile || args.profile_log.is_some();
     let mut profile_summary = args
         .dump_guest_profile
         .then(telemetry::GuestTelemetrySummary::default);
@@ -679,6 +685,7 @@ fn run_headless_launch(
     let mut observed_guest_hash_frames = observed_guest_frames;
     let mut counter_log = CounterLog::new(args.counter_log.as_deref())?;
     let mut observed_counter_frames = observed_guest_frames;
+    let mut profile_log = GuestProfileLog::new(args.profile_log.as_deref())?;
 
     // Step the CPU. Report early on opcode errors -- they're usually
     // "we hit an unimplemented instruction" and worth surfacing.
@@ -721,9 +728,12 @@ fn run_headless_launch(
             bus.set_port1_sticks(rx, ry, lx, ly);
         }
         if current_guest_frames != observed_guest_frames {
-            if let Some(summary) = profile_summary.as_mut() {
+            if collect_profile_events {
                 let events = bus.telemetry.drain_events();
-                summary.add_events(&events);
+                if let Some(summary) = profile_summary.as_mut() {
+                    summary.add_events(&events);
+                }
+                profile_log.add_events(&events, cpu.tick(), bus.cycles())?;
             }
             observed_guest_frames = current_guest_frames;
         }
@@ -774,9 +784,18 @@ fn run_headless_launch(
             }
         }
     }
+    if collect_profile_events {
+        let events = bus.telemetry.drain_events();
+        if let Some(summary) = profile_summary.as_mut() {
+            summary.add_events(&events);
+        }
+        profile_log.add_events(&events, cpu.tick(), bus.cycles())?;
+    }
+    profile_log.finish(cpu.tick(), bus.cycles())?;
     visual_hash_log.flush()?;
     guest_hash_log.flush()?;
     counter_log.flush()?;
+    profile_log.flush()?;
 
     if emit_summary {
         println!(
@@ -804,8 +823,6 @@ fn run_headless_launch(
         let counter_max_values = bus.telemetry.counter_max_values();
         let counter_latest_values = bus.telemetry.counter_latest_values();
         let mut summary = profile_summary.unwrap_or_default();
-        let events = bus.telemetry.drain_events();
-        summary.add_events(&events);
         summary.counters = counter_totals;
         summary.counter_max_values = counter_max_values;
         summary.counter_latest_values = counter_latest_values;
@@ -1230,6 +1247,7 @@ fn validation_launch_args(
         guest_hash_log: None,
         guest_hash_interval: 60,
         counter_log: None,
+        profile_log: None,
         dump_vram: None,
         dump_hw: None,
         dump_audio: None,
@@ -1456,6 +1474,329 @@ impl CounterLog {
                 .map_err(|e| format!("flush counter log: {e}"))?;
         }
         Ok(())
+    }
+}
+
+const PROFILE_LOG_HEADER: &[&str] = &[
+    "guest_frame",
+    "end_cpu_tick",
+    "start_bus_cycles",
+    "end_bus_cycles",
+    "frame_cycles",
+    "frame_markers",
+    "fixed_update_task",
+    "visual_render_task",
+    "update",
+    "render",
+    "present",
+    "frame_clear",
+    "camera",
+    "portal_visibility",
+    "active_room_window",
+    "room_surface_cache",
+    "vram_upload",
+    "cd_room_chunk_load",
+    "room",
+    "room_visible_list",
+    "room_cell_select",
+    "room_project",
+    "room_depth_prep",
+    "room_surface_draw",
+    "sky",
+    "far_vista",
+    "image_props",
+    "box_props",
+    "box_prop_debris",
+    "box_prop_shards",
+    "image_cards",
+    "model_instances",
+    "model_bounds",
+    "model_draw",
+    "player",
+    "player_bounds",
+    "player_draw",
+    "equipment",
+    "textured_model_joints",
+    "textured_model_project",
+    "textured_model_faces",
+    "world_flush",
+    "ot_submit",
+    "sim_ticks",
+    "visual_frames",
+    "visual_skipped_vblanks",
+    "visual_deadline_misses",
+    "visual_lateness_vblanks",
+    "cd_room_chunk_loads",
+    "cd_room_chunk_bytes",
+    "cd_room_chunk_sectors",
+    "room_stream_requests",
+    "room_stream_misses",
+    "room_stream_prefetch_requests",
+    "room_stream_pending_loads",
+    "room_stream_evicts",
+    "room_stream_resident_slots",
+    "room_stream_loading_mask",
+    "room_active_chunks",
+    "room_visible_cells",
+    "room_cells_drawn",
+    "room_surfaces_considered",
+    "room_projected_vertices",
+    "tri_primitives",
+    "world_commands",
+    "model_instance_draws",
+    "player_projected_vertices",
+    "player_submitted_tris",
+    "textured_model_parts",
+    "textured_model_vertices",
+    "textured_model_faces_counter",
+    "textured_model_fast_submitted_tris",
+    "textured_model_split_tris",
+    "textured_model_packed_unclamped",
+    "textured_model_packed_clamped",
+    "textured_model_packed_general",
+    "textured_model_fallback_faces",
+    "resident_mask",
+    "active_mask",
+    "drawn_mask",
+    "visible_mask",
+    "missing_mask",
+    "camera_x_biased",
+    "camera_y_biased",
+    "camera_z_biased",
+    "current_room",
+    "player_room",
+];
+
+struct ProfileFrame {
+    guest_frame: u64,
+    start_bus_cycles: u64,
+    events: Vec<telemetry::GuestTelemetryEvent>,
+}
+
+/// Per-completed-guest-frame log of runtime telemetry, used to identify which
+/// hot systems overlap on deadline-miss spikes in a recorded run.
+struct GuestProfileLog {
+    writer: Option<BufWriter<std::fs::File>>,
+    current_frame: Option<ProfileFrame>,
+}
+
+impl GuestProfileLog {
+    fn new(path: Option<&Path>) -> Result<Self, String> {
+        let Some(path) = path else {
+            return Ok(Self {
+                writer: None,
+                current_frame: None,
+            });
+        };
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+        }
+        let file =
+            std::fs::File::create(path).map_err(|e| format!("create {}: {e}", path.display()))?;
+        let mut writer = BufWriter::new(file);
+        writeln!(writer, "{}", PROFILE_LOG_HEADER.join(","))
+            .map_err(|e| format!("write {}: {e}", path.display()))?;
+        Ok(Self {
+            writer: Some(writer),
+            current_frame: None,
+        })
+    }
+
+    fn add_events(
+        &mut self,
+        events: &[telemetry::GuestTelemetryEvent],
+        end_cpu_tick: u64,
+        end_bus_cycles: u64,
+    ) -> Result<(), String> {
+        if self.writer.is_none() {
+            return Ok(());
+        }
+        for &event in events {
+            if matches!(event.kind, telemetry::GuestTelemetryKind::FrameBegin) {
+                self.flush_current(end_cpu_tick, event.cycles)?;
+                self.current_frame = Some(ProfileFrame {
+                    guest_frame: event.value as u64,
+                    start_bus_cycles: event.cycles,
+                    events: vec![event],
+                });
+            } else if let Some(frame) = self.current_frame.as_mut() {
+                frame.events.push(event);
+            }
+        }
+        if events.is_empty() {
+            self.flush_current(end_cpu_tick, end_bus_cycles)?;
+        }
+        Ok(())
+    }
+
+    fn finish(&mut self, end_cpu_tick: u64, end_bus_cycles: u64) -> Result<(), String> {
+        self.flush_current(end_cpu_tick, end_bus_cycles)
+    }
+
+    fn flush(&mut self) -> Result<(), String> {
+        if let Some(writer) = self.writer.as_mut() {
+            writer
+                .flush()
+                .map_err(|e| format!("flush profile log: {e}"))?;
+        }
+        Ok(())
+    }
+
+    fn flush_current(&mut self, end_cpu_tick: u64, end_bus_cycles: u64) -> Result<(), String> {
+        let Some(frame) = self.current_frame.take() else {
+            return Ok(());
+        };
+        self.write_frame(frame, end_cpu_tick, end_bus_cycles)
+    }
+
+    fn write_frame(
+        &mut self,
+        frame: ProfileFrame,
+        end_cpu_tick: u64,
+        end_bus_cycles: u64,
+    ) -> Result<(), String> {
+        let Some(writer) = self.writer.as_mut() else {
+            return Ok(());
+        };
+        let summary = telemetry::GuestTelemetrySummary::from_events(&frame.events);
+        let stage = |id: u16| {
+            summary
+                .stage_cycles
+                .get(id as usize)
+                .copied()
+                .unwrap_or_default()
+        };
+        let task = |id: u16| {
+            summary
+                .task_cycles
+                .get(id as usize)
+                .copied()
+                .unwrap_or_default()
+        };
+        let counter_latest = |id: u16| {
+            summary
+                .counter_latest_values
+                .get(id as usize)
+                .copied()
+                .unwrap_or_default()
+        };
+        let mut row = Vec::with_capacity(PROFILE_LOG_HEADER.len());
+        macro_rules! push {
+            ($value:expr) => {
+                row.push(($value).to_string())
+            };
+        }
+
+        use telemetry::{counter as c, stage as s, task as t};
+        push!(frame.guest_frame);
+        push!(end_cpu_tick);
+        push!(frame.start_bus_cycles);
+        push!(end_bus_cycles);
+        push!(end_bus_cycles.saturating_sub(frame.start_bus_cycles));
+        push!(summary.frames);
+        push!(task(t::FIXED_UPDATE));
+        push!(task(t::VISUAL_RENDER));
+        push!(stage(s::UPDATE));
+        push!(stage(s::RENDER));
+        push!(stage(s::PRESENT));
+        push!(stage(s::FRAME_CLEAR));
+        push!(stage(s::CAMERA));
+        push!(stage(s::PORTAL_VISIBILITY));
+        push!(stage(s::ACTIVE_ROOM_WINDOW));
+        push!(stage(s::ROOM_SURFACE_CACHE));
+        push!(stage(s::VRAM_UPLOAD));
+        push!(stage(s::CD_ROOM_CHUNK_LOAD));
+        push!(stage(s::ROOM));
+        push!(stage(s::ROOM_VISIBLE_LIST));
+        push!(stage(s::ROOM_CELL_SELECT));
+        push!(stage(s::ROOM_PROJECT));
+        push!(stage(s::ROOM_DEPTH_PREP));
+        push!(stage(s::ROOM_SURFACE_DRAW));
+        push!(stage(s::SKY));
+        push!(stage(s::FAR_VISTA));
+        push!(stage(s::IMAGE_PROPS));
+        push!(stage(s::BOX_PROPS));
+        push!(stage(s::BOX_PROP_DEBRIS));
+        push!(stage(s::BOX_PROP_SHARDS));
+        push!(stage(s::IMAGE_CARDS));
+        push!(stage(s::MODEL_INSTANCES));
+        push!(stage(s::MODEL_BOUNDS));
+        push!(stage(s::MODEL_DRAW));
+        push!(stage(s::PLAYER));
+        push!(stage(s::PLAYER_BOUNDS));
+        push!(stage(s::PLAYER_DRAW));
+        push!(stage(s::EQUIPMENT));
+        push!(stage(s::TEXTURED_MODEL_JOINTS));
+        push!(stage(s::TEXTURED_MODEL_PROJECT));
+        push!(stage(s::TEXTURED_MODEL_FACES));
+        push!(stage(s::WORLD_FLUSH));
+        push!(stage(s::OT_SUBMIT));
+        push!(counter_total(&summary, c::SIM_TICKS));
+        push!(counter_total(&summary, c::VISUAL_FRAMES));
+        push!(counter_total(&summary, c::VISUAL_SKIPPED_VBLANKS));
+        push!(counter_total(&summary, c::VISUAL_DEADLINE_MISSES));
+        push!(counter_latest(c::VISUAL_MAX_LATENESS_VBLANKS));
+        push!(counter_total(&summary, c::CD_ROOM_CHUNK_LOADS));
+        push!(counter_total(&summary, c::CD_ROOM_CHUNK_BYTES));
+        push!(counter_total(&summary, c::CD_ROOM_CHUNK_SECTORS));
+        push!(counter_total(&summary, c::ROOM_STREAM_REQUESTS));
+        push!(counter_total(&summary, c::ROOM_STREAM_MISSES));
+        push!(counter_total(&summary, c::ROOM_STREAM_PREFETCH_REQUESTS));
+        push!(counter_total(&summary, c::ROOM_STREAM_PENDING_LOADS));
+        push!(counter_total(&summary, c::ROOM_STREAM_EVICTIONS));
+        push!(counter_latest(c::ROOM_STREAM_RESIDENT_SLOTS));
+        push!(counter_latest(c::ROOM_STREAM_LOADING_MASK_LO));
+        push!(counter_total(&summary, c::ROOM_ACTIVE_CHUNKS));
+        push!(counter_total(&summary, c::ROOM_VISIBLE_CELLS));
+        push!(counter_total(&summary, c::ROOM_CELLS_DRAWN));
+        push!(counter_total(&summary, c::ROOM_SURFACES_CONSIDERED));
+        push!(counter_total(&summary, c::ROOM_PROJECTED_VERTICES));
+        push!(counter_total(&summary, c::TRI_PRIMITIVES));
+        push!(counter_total(&summary, c::WORLD_COMMANDS));
+        push!(counter_total(&summary, c::MODEL_INSTANCE_DRAWS));
+        push!(counter_total(&summary, c::PLAYER_PROJECTED_VERTICES));
+        push!(counter_total(&summary, c::PLAYER_SUBMITTED_TRIS));
+        push!(counter_total(&summary, c::TEXTURED_MODEL_PARTS));
+        push!(counter_total(&summary, c::TEXTURED_MODEL_VERTICES));
+        push!(counter_total(&summary, c::TEXTURED_MODEL_FACES));
+        push!(counter_total(
+            &summary,
+            c::TEXTURED_MODEL_FAST_SUBMITTED_TRIS
+        ));
+        push!(counter_total(&summary, c::TEXTURED_MODEL_SPLIT_TRIS));
+        push!(counter_total(
+            &summary,
+            c::TEXTURED_MODEL_PACKED_UNCLAMPED_CALLS
+        ));
+        push!(counter_total(
+            &summary,
+            c::TEXTURED_MODEL_PACKED_CLAMPED_CALLS
+        ));
+        push!(counter_total(
+            &summary,
+            c::TEXTURED_MODEL_PACKED_GENERAL_CALLS
+        ));
+        push!(counter_total(
+            &summary,
+            c::TEXTURED_MODEL_FALLBACK_FACE_CALLS
+        ));
+        push!(counter_latest(c::ROOM_STREAM_RESIDENT_MASK_LO));
+        push!(counter_latest(c::ROOM_ACTIVE_CHUNK_MASK_LO));
+        push!(counter_latest(c::ROOM_DRAWN_CHUNK_MASK_LO));
+        push!(counter_latest(c::PORTAL_VIS_VISIBLE_MASK_LO));
+        push!(counter_latest(c::PORTAL_VIS_MISSING_MASK_LO));
+        push!(counter_latest(c::ROOM_CAMERA_GLOBAL_X_BIASED));
+        push!(counter_latest(c::ROOM_CAMERA_GLOBAL_Y_BIASED));
+        push!(counter_latest(c::ROOM_CAMERA_GLOBAL_Z_BIASED));
+        push!(counter_latest(c::PORTAL_VIS_CURRENT_ROOM));
+        push!(counter_latest(c::ROOM_PLAYER_ROOM_INDEX));
+
+        debug_assert_eq!(row.len(), PROFILE_LOG_HEADER.len());
+        writeln!(writer, "{}", row.join(",")).map_err(|e| format!("write profile log: {e}"))
     }
 }
 
