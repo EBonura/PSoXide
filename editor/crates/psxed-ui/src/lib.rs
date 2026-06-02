@@ -42,27 +42,29 @@ use psxed_project::room_connections::{
 use psxed_project::streaming::SceneResourceUse;
 use psxed_project::world_cook::{self, WorldGridCookError, WorldGridFaceKind};
 use psxed_project::{
-    default_model_collision_radius_for_height, snap_height, BootTarget,
+    default_model_collision_radius_for_height, default_ui_font_scale, default_ui_letter_spacing,
+    snap_height, ui_font_scale_f32_to_q8, ui_font_scale_q8_to_f32, BootTarget,
     CharacterControllerSettings, ColliderShape, EditorCameraMode, EditorCameraState,
     EditorVisibilityState, FarVistaSettings, GridCellBounds, GridDirection, GridHorizontalFace,
     GridSector, GridSplit, GridTriangleMaterialOverride, GridUvRotation, GridUvTransform,
     GridVerticalFace, MaterialFaceSidedness, MaterialResource, NodeId, NodeKind, NodeRow, OptionId,
     OptionKind, ParticleEmitterSettings, PhysicsBodySettings, ProjectDocument, PsxBlendMode,
     Resource, ResourceData, ResourceId, RuntimeDepthSortMode, RuntimeRoomDrawOrderMode,
-    RuntimeTextureSplitMode, Scene, SceneNode, SkyMode, SkySettings, UiAction, UiAnchor, UiNodeId,
-    UiNodeKind, UiNodeRow, UiRect, UiScene, UiSceneId, UiSfxBindings, UiSfxCue, UiTextAlign,
-    UiValueBinding, WorldCameraSettings, WorldCullingSettings, WorldGrid, WorldPhysicsSettings,
-    WorldStreamingSettings, DEFAULT_WALL_HEIGHT_SECTORS, DEFAULT_WORLD_SECTOR_SIZE, HEIGHT_QUANTUM,
-    MAX_PHYSICS_WEIGHT_Q8, MAX_WORLD_CAMERA_DISTANCE, MAX_WORLD_CAMERA_HEIGHT,
+    RuntimeTextureSplitMode, Scene, SceneNode, SkyMode, SkySettings, UiAction, UiAnchor,
+    UiFontChoice, UiNodeId, UiNodeKind, UiNodeRow, UiRect, UiScene, UiSceneId, UiSfxBindings,
+    UiSfxCue, UiTextAlign, UiValueBinding, WorldCameraSettings, WorldCullingSettings, WorldGrid,
+    WorldPhysicsSettings, WorldStreamingSettings, DEFAULT_WALL_HEIGHT_SECTORS,
+    DEFAULT_WORLD_SECTOR_SIZE, HEIGHT_QUANTUM, MAX_PHYSICS_WEIGHT_Q8, MAX_UI_FONT_SCALE,
+    MAX_UI_LETTER_SPACING, MAX_WORLD_CAMERA_DISTANCE, MAX_WORLD_CAMERA_HEIGHT,
     MAX_WORLD_CAMERA_MIN_FLOOR_CLEARANCE, MAX_WORLD_CHUNK_ACTIVATION_RADIUS_SECTORS,
     MAX_WORLD_DRAW_DISTANCE, MAX_WORLD_GRAVITY_PER_TICK, MAX_WORLD_SECTOR_SIZE,
     MAX_WORLD_STREAMING_RESIDENT_CHUNKS, MAX_WORLD_STREAMING_VISIBLE_CHUNKS,
-    MAX_WORLD_VISIBILITY_RADIUS, MIN_PHYSICS_WEIGHT_Q8, MIN_WORLD_CAMERA_DISTANCE,
-    MIN_WORLD_CHUNK_ACTIVATION_RADIUS_SECTORS, MIN_WORLD_DRAW_DISTANCE, MIN_WORLD_GRAVITY_PER_TICK,
-    MIN_WORLD_SECTOR_SIZE, MIN_WORLD_STREAMING_RESIDENT_CHUNKS, MIN_WORLD_STREAMING_VISIBLE_CHUNKS,
-    MIN_WORLD_VISIBILITY_RADIUS, MODEL_SCALE_ONE_Q8, PHYSICS_WEIGHT_ONE_Q8, SKYBOX_COLUMNS_MAX,
-    SKYBOX_COLUMNS_MIN, SKYBOX_ROWS_MAX, SKYBOX_ROWS_MIN, SKY_MOUNTAIN_HEIGHT_PERCENT_MAX,
-    WORLD_SECTOR_SIZE_QUANTUM,
+    MAX_WORLD_VISIBILITY_RADIUS, MIN_PHYSICS_WEIGHT_Q8, MIN_UI_FONT_SCALE, MIN_UI_LETTER_SPACING,
+    MIN_WORLD_CAMERA_DISTANCE, MIN_WORLD_CHUNK_ACTIVATION_RADIUS_SECTORS, MIN_WORLD_DRAW_DISTANCE,
+    MIN_WORLD_GRAVITY_PER_TICK, MIN_WORLD_SECTOR_SIZE, MIN_WORLD_STREAMING_RESIDENT_CHUNKS,
+    MIN_WORLD_STREAMING_VISIBLE_CHUNKS, MIN_WORLD_VISIBILITY_RADIUS, MODEL_SCALE_ONE_Q8,
+    PHYSICS_WEIGHT_ONE_Q8, SKYBOX_COLUMNS_MAX, SKYBOX_COLUMNS_MIN, SKYBOX_ROWS_MAX,
+    SKYBOX_ROWS_MIN, SKY_MOUNTAIN_HEIGHT_PERCENT_MAX, WORLD_SECTOR_SIZE_QUANTUM,
 };
 
 const RESIZABLE_DOCK_MIN_WIDTH: f32 = 48.0;
@@ -90,6 +92,8 @@ const GIZMO_PLANE_PICK_RADIUS: f32 = 8.0;
 const UI_RESIZE_HANDLE_SIZE: f32 = 8.0;
 const UI_RESIZE_HANDLE_HIT_SIZE: f32 = 14.0;
 const UI_NODE_HIT_MIN_SIZE: f32 = 10.0;
+const UI_CENTER_SNAP_TOLERANCE: i32 = 3;
+const UI_CENTER_GUIDE_COLOR: Color32 = Color32::from_rgb(80, 170, 255);
 const UI_NODE_MIN_SIZE: i32 = 1;
 const UI_NODE_COORD_MIN: i32 = -4096;
 const UI_NODE_COORD_MAX: i32 = 4096;
@@ -345,6 +349,9 @@ pub struct EditorWorkspace {
     /// activates a focused button's GotoScene, and the focused control is
     /// highlighted. Toggled in the UI workspace; off by default.
     ui_nav_preview: bool,
+    /// When on, moving a UI node snaps its centre to the authored canvas
+    /// centre within a small tolerance and shows blue centre guide lines.
+    ui_center_snap: bool,
     /// Device-pixel horizontal "screen offset" for the UI workspace's
     /// TV-centring simulation -- the in-editor mirror of the runtime's
     /// GP1(06h) screen offset. The preview slides the previewed picture this
@@ -436,10 +443,10 @@ pub struct EditorWorkspace {
     /// follow `material.texture` to the same key.
     texture_thumbs: HashMap<ResourceId, ThumbnailEntry>,
     psoxide_logo_texture: Option<egui::TextureHandle>,
-    /// Cached egui texture of the on-device bitmap UI font, rasterized once
-    /// from `psx_font::fonts::BASIC` so the UI-scene preview shows the real
-    /// glyphs the runtime draws instead of an egui host face.
-    ui_font_texture: Option<egui::TextureHandle>,
+    /// Cached egui textures of the on-device bitmap UI fonts, rasterized once
+    /// so the UI-scene preview shows the real glyphs the runtime draws instead
+    /// of an egui host face.
+    ui_font_textures: Vec<Option<egui::TextureHandle>>,
     /// Persistent texture used by the Model resource inspector's
     /// animated preview. Keeping the handle alive across frames
     /// avoids submitting a texture id that egui has already freed.
@@ -1806,7 +1813,10 @@ struct UiCanvasDrag {
     mode: UiCanvasDragMode,
     start_pointer_canvas: [f32; 2],
     start_rect: UiRect,
+    start_absolute_rect: UiRect,
     snapshot_pushed: bool,
+    snap_center_x: bool,
+    snap_center_y: bool,
 }
 
 /// The single pointer-driven interaction stroke in flight.
@@ -2712,6 +2722,7 @@ impl EditorWorkspace {
             active_ui_scene_index: 0,
             active_floor: 0,
             ui_nav_preview: false,
+            ui_center_snap: true,
             screen_offset_sim_px: 0,
             ui_nav_focus: None,
             ui_scene_renaming: None,
@@ -2773,7 +2784,7 @@ impl EditorWorkspace {
             },
             texture_thumbs: HashMap::new(),
             psoxide_logo_texture: None,
-            ui_font_texture: None,
+            ui_font_textures: Vec::new(),
             model_resource_preview_texture: None,
             animation_viewer: ModelAnimationViewerState::default(),
             animation_viewer_preview_texture: None,
@@ -3902,9 +3913,9 @@ impl EditorWorkspace {
     }
 
     fn drain_live_egui_textures(&mut self) -> Vec<egui::TextureHandle> {
-        // `ui_font_texture` is intentionally NOT drained here: the bitmap UI
-        // font is project-independent, so it persists across project switches
-        // and is rebuilt only if it was never loaded.
+        // `ui_font_textures` is intentionally NOT drained here: the bitmap UI
+        // fonts are project-independent, so they persist across project
+        // switches and are rebuilt only if they were never loaded.
         let mut handles = Vec::new();
         if let Some(handle) = self.psoxide_logo_texture.take() {
             handles.push(handle);
@@ -4728,25 +4739,6 @@ impl EditorWorkspace {
         };
         let (canvas_w, canvas_h) = ui_scene_canvas_size(&scene);
         let aspect = (canvas_w as f32 / canvas_h.max(1) as f32).max(0.01);
-        ui.horizontal(|ui| {
-            ui.checkbox(&mut self.ui_nav_preview, "Preview nav");
-            if self.ui_nav_preview {
-                ui.weak("arrows move focus  /  Enter activates");
-            }
-            ui.separator();
-            ui.label("Screen offset");
-            ui.add(
-                egui::DragValue::new(&mut self.screen_offset_sim_px)
-                    .range(-48..=48)
-                    .suffix(" px"),
-            );
-            if self.screen_offset_sim_px != 0 {
-                if ui.button("Centre").clicked() {
-                    self.screen_offset_sim_px = 0;
-                }
-                ui.weak("TV-position preview -- editing uses the centred screen");
-            }
-        });
         let avail = ui.available_size();
         let container_size = Vec2::new(avail.x.max(1.0), avail.y.max(1.0));
         let (container, _) = ui.allocate_exact_size(container_size, Sense::hover());
@@ -4839,7 +4831,7 @@ impl EditorWorkspace {
         let preview_scene = self.current_ui_scene().cloned().unwrap_or(scene);
         // Resolve the bitmap-font texture before the immutable project borrows
         // below, since rasterizing it needs `&mut self`.
-        let ui_font = self.ui_font_texture(ui.ctx());
+        let ui_fonts = self.ui_font_textures(ui.ctx());
         // Screen-offset (TV-centring) simulation: slide the previewed picture
         // horizontally within the fixed screen, clipped at the bezel, so the
         // authored GP1(06h) offset can be eyeballed here. Node hit-testing keeps
@@ -4857,7 +4849,7 @@ impl EditorWorkspace {
             &scene_painter,
             &self.project,
             &self.texture_thumbs,
-            &ui_font,
+            &ui_fonts,
             &preview_scene,
             display_canvas,
             canvas_size,
@@ -4865,6 +4857,11 @@ impl EditorWorkspace {
             hovered_resize_target.and_then(|(node, handle)| {
                 (node == self.selection.selected_ui_node).then_some(handle)
             }),
+        );
+        draw_ui_center_snap_guides(
+            &scene_painter,
+            canvas_rect,
+            self.interaction.ui_canvas_drag(),
         );
         if self.screen_offset_sim_px != 0 {
             painter.text(
@@ -5000,13 +4997,20 @@ impl EditorWorkspace {
             self.select_ui_node(node);
             return;
         };
+        let start_absolute_rect = self
+            .current_ui_scene()
+            .and_then(|scene| scene.absolute_rect(node))
+            .unwrap_or(start_rect);
         self.select_ui_node(node);
         self.interaction = Interaction::UiCanvas(UiCanvasDrag {
             node,
             mode,
             start_pointer_canvas,
             start_rect,
+            start_absolute_rect,
             snapshot_pushed: false,
+            snap_center_x: false,
+            snap_center_y: false,
         });
         self.status = match mode {
             UiCanvasDragMode::Move => "Move UI node".to_string(),
@@ -5025,10 +5029,28 @@ impl EditorWorkspace {
             (pointer_canvas[0] - drag.start_pointer_canvas[0]).round() as i32,
             (pointer_canvas[1] - drag.start_pointer_canvas[1]).round() as i32,
         ];
+        let mut snap_center_x = false;
+        let mut snap_center_y = false;
         let next_rect = match drag.mode {
-            UiCanvasDragMode::Move => move_ui_rect(drag.start_rect, delta),
+            UiCanvasDragMode::Move => {
+                let moved = move_ui_rect(drag.start_rect, delta);
+                if self.ui_center_snap {
+                    let moved_absolute = move_ui_rect(drag.start_absolute_rect, delta);
+                    let snapped =
+                        snap_moved_ui_rect_to_canvas_center(moved, moved_absolute, canvas_size);
+                    snap_center_x = snapped.snap_x;
+                    snap_center_y = snapped.snap_y;
+                    snapped.rect
+                } else {
+                    moved
+                }
+            }
             UiCanvasDragMode::Resize(handle) => resize_ui_rect(drag.start_rect, handle, delta),
         };
+        if let Some(active) = self.interaction.ui_canvas_drag_mut() {
+            active.snap_center_x = snap_center_x;
+            active.snap_center_y = snap_center_y;
+        }
 
         let current_rect = self
             .current_ui_scene()
@@ -10543,6 +10565,9 @@ impl EditorWorkspace {
         if let Some(reverse) = consume_command_cycle_shortcut(ctx, egui::Key::Num1) {
             self.cycle_workspace_group(reverse);
         }
+        if self.active_workspace == WorkspaceView::Ui {
+            return;
+        }
         if let Some(reverse) = consume_command_cycle_shortcut(ctx, egui::Key::Num2) {
             self.cycle_tool_group(reverse);
         }
@@ -11241,17 +11266,27 @@ impl EditorWorkspace {
         self.psoxide_logo_texture.as_ref().map(|handle| handle.id())
     }
 
-    /// Lazily rasterize the on-device UI bitmap font into an egui texture and
-    /// return its handle. The atlas is a `UI_FONT_COLS x UI_FONT_ROWS` grid of
-    /// 8x8 glyphs (white, alpha from the source bits) so the UI-scene preview
-    /// can blit the exact glyphs the runtime draws. Uses NEAREST sampling so
-    /// the crisp 1:1 pixels survive any preview scale.
-    fn ui_font_texture(&mut self, ctx: &egui::Context) -> egui::TextureHandle {
-        self.ui_font_texture
+    /// Lazily rasterize the on-device UI bitmap fonts into egui textures and
+    /// return their handles. Uses NEAREST sampling so the crisp source pixels
+    /// survive any preview scale.
+    fn ui_font_textures(&mut self, ctx: &egui::Context) -> Vec<egui::TextureHandle> {
+        UI_FONT_CHOICES
+            .iter()
+            .copied()
+            .map(|font| self.ui_font_texture(ctx, font))
+            .collect()
+    }
+
+    fn ui_font_texture(&mut self, ctx: &egui::Context, font: UiFontChoice) -> egui::TextureHandle {
+        let spec = ui_preview_font_spec(font);
+        if self.ui_font_textures.len() < UI_FONT_COUNT {
+            self.ui_font_textures.resize_with(UI_FONT_COUNT, || None);
+        }
+        self.ui_font_textures[spec.texture_index]
             .get_or_insert_with(|| {
                 ctx.load_texture(
-                    "psx-ui-font",
-                    rasterize_ui_font_atlas(),
+                    format!("psx-ui-font-{}", font.slug()),
+                    rasterize_ui_font_atlas(font),
                     egui::TextureOptions::NEAREST,
                 )
             })
@@ -12756,6 +12791,9 @@ impl EditorWorkspace {
                 tag,
                 align,
                 wrap,
+                font,
+                font_scale,
+                letter_spacing,
                 color,
             } => {
                 changed |= draw_ui_rect_editor(ui, rect);
@@ -12770,6 +12808,9 @@ impl EditorWorkspace {
                     changed |= ui.text_edit_singleline(tag).changed();
                 });
                 changed |= draw_ui_text_align_editor(ui, align);
+                changed |= draw_ui_font_choice_editor(ui, font);
+                changed |= draw_ui_font_scale_editor(ui, font_scale);
+                changed |= draw_ui_letter_spacing_editor(ui, letter_spacing);
                 changed |= ui.checkbox(wrap, "Wrap").changed();
                 changed |= color_editor(ui, "Color", color);
             }
@@ -12799,6 +12840,9 @@ impl EditorWorkspace {
                 rect,
                 label,
                 align,
+                font,
+                font_scale,
+                letter_spacing,
                 color,
                 text_color,
                 transparent,
@@ -12811,6 +12855,9 @@ impl EditorWorkspace {
                     changed |= ui.text_edit_singleline(label).changed();
                 });
                 changed |= draw_ui_text_align_editor(ui, align);
+                changed |= draw_ui_font_choice_editor(ui, font);
+                changed |= draw_ui_font_scale_editor(ui, font_scale);
+                changed |= draw_ui_letter_spacing_editor(ui, letter_spacing);
                 changed |= color_editor(ui, "Text", text_color);
                 changed |= ui.checkbox(transparent, "Transparent background").changed();
                 changed |= color_editor(ui, "Background", color);
@@ -15178,6 +15225,10 @@ impl EditorWorkspace {
             ui.ctx().request_repaint();
         }
         ui.spacing_mut().item_spacing.x = 4.0;
+        if self.active_workspace == WorkspaceView::Ui {
+            self.draw_ui_viewport_toolbar(ui);
+            return;
+        }
 
         toolbar_group_menu(
             ui,
@@ -15290,6 +15341,116 @@ impl EditorWorkspace {
                 }
             }
         }
+    }
+
+    fn draw_ui_viewport_toolbar(&mut self, ui: &mut egui::Ui) {
+        toolbar_group_menu(
+            ui,
+            1,
+            self.shortcut_group_glow(ShortcutGroup::Workspace),
+            self.active_workspace.icon(),
+            "Workspace",
+            self.active_workspace.label(),
+            |ui| self.draw_workspace_group_menu(ui),
+        );
+
+        ui.separator();
+        toolbar_option_menu(ui, icons::PLUS, "Add UI Node", "Add", false, |ui| {
+            ui.set_min_width(160.0);
+            for (label, kind) in default_addable_ui_kinds() {
+                if ui.button(label).clicked() {
+                    self.add_ui_child(kind, label);
+                    ui.close_menu();
+                }
+            }
+        });
+
+        let center_snap_label = if self.ui_center_snap { "On" } else { "Off" };
+        toolbar_option_menu(
+            ui,
+            icons::FOCUS,
+            "Center Snap",
+            center_snap_label,
+            self.ui_center_snap,
+            |ui| {
+                ui.set_min_width(240.0);
+                if ui
+                    .checkbox(
+                        &mut self.ui_center_snap,
+                        "Snap moved nodes to canvas centre",
+                    )
+                    .changed()
+                {
+                    self.status = if self.ui_center_snap {
+                        "UI centre snap enabled".to_string()
+                    } else {
+                        "UI centre snap disabled".to_string()
+                    };
+                }
+                ui.weak("Shows blue centre guides while dragging.");
+            },
+        );
+
+        let nav_preview_label = if self.ui_nav_preview { "On" } else { "Off" };
+        toolbar_option_menu(
+            ui,
+            icons::PLAY,
+            "Navigation Preview",
+            nav_preview_label,
+            self.ui_nav_preview,
+            |ui| {
+                ui.set_min_width(228.0);
+                if ui
+                    .checkbox(&mut self.ui_nav_preview, "Preview UI navigation")
+                    .changed()
+                {
+                    self.status = if self.ui_nav_preview {
+                        "UI navigation preview enabled".to_string()
+                    } else {
+                        "UI navigation preview disabled".to_string()
+                    };
+                }
+                if self.ui_nav_preview {
+                    ui.weak("Arrow keys move focus; Enter activates.");
+                }
+            },
+        );
+
+        let screen_offset_label = if self.screen_offset_sim_px == 0 {
+            "0 px".to_string()
+        } else {
+            format!("{:+} px", self.screen_offset_sim_px)
+        };
+        toolbar_option_menu(
+            ui,
+            icons::MOVE,
+            "Screen Offset",
+            screen_offset_label,
+            self.screen_offset_sim_px != 0,
+            |ui| {
+                ui.set_min_width(220.0);
+                ui.horizontal(|ui| {
+                    ui.label("Screen offset");
+                    let response = ui.add(
+                        egui::DragValue::new(&mut self.screen_offset_sim_px)
+                            .range(-48..=48)
+                            .suffix(" px"),
+                    );
+                    if response.changed() {
+                        self.status = format!(
+                            "UI screen offset preview {:+} px",
+                            self.screen_offset_sim_px
+                        );
+                    }
+                });
+                if self.screen_offset_sim_px != 0 && ui.button("Centre").clicked() {
+                    self.screen_offset_sim_px = 0;
+                    self.status = "UI screen offset preview centred".to_string();
+                    ui.close_menu();
+                }
+                ui.weak("TV-position preview; authored positions stay centred.");
+            },
+        );
     }
 
     fn draw_workspace_group_menu(&mut self, ui: &mut egui::Ui) {
@@ -21977,6 +22138,28 @@ fn toolbar_group_menu<R>(
     ));
 }
 
+fn toolbar_option_menu<R>(
+    ui: &mut egui::Ui,
+    icon: char,
+    label: &str,
+    current: impl Into<String>,
+    active: bool,
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) {
+    let mut button = egui::Button::new(icons::text(icon, 15.0)).min_size(Vec2::new(30.0, 23.0));
+    if active {
+        button = button
+            .fill(Color32::from_rgba_unmultiplied(45, 177, 207, 44))
+            .stroke(Stroke::new(
+                1.0,
+                Color32::from_rgba_unmultiplied(165, 238, 255, 180),
+            ));
+    }
+    let current = current.into();
+    let response = egui::menu::menu_custom_button(ui, button, add_contents).response;
+    response.on_hover_text(format!("{label}: {current}"));
+}
+
 fn toolbar_menu_choice(
     ui: &mut egui::Ui,
     label: impl Into<egui::WidgetText>,
@@ -25301,6 +25484,110 @@ fn draw_ui_text_align_editor(ui: &mut egui::Ui, align: &mut UiTextAlign) -> bool
                 }
             }
         });
+    changed
+}
+
+fn draw_ui_font_choice_editor(ui: &mut egui::Ui, font: &mut UiFontChoice) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.label("Font");
+        if ui
+            .add(egui::Button::new(icons::text(icons::CHEVRON_LEFT, 12.0)))
+            .on_hover_text("Previous font")
+            .clicked()
+        {
+            changed |= step_ui_font_choice(font, -1);
+        }
+        egui::ComboBox::from_id_salt(ui.id().with("font_choice"))
+            .selected_text(font.label())
+            .show_ui(ui, |ui| {
+                for candidate in UI_FONT_CHOICES {
+                    if ui
+                        .selectable_label(*font == candidate, candidate.label())
+                        .clicked()
+                        && *font != candidate
+                    {
+                        *font = candidate;
+                        changed = true;
+                    }
+                }
+            });
+        if ui
+            .add(egui::Button::new(icons::text(icons::CHEVRON_RIGHT, 12.0)))
+            .on_hover_text("Next font")
+            .clicked()
+        {
+            changed |= step_ui_font_choice(font, 1);
+        }
+    });
+    changed
+}
+
+fn step_ui_font_choice(font: &mut UiFontChoice, delta: isize) -> bool {
+    let Some(index) = UI_FONT_CHOICES
+        .iter()
+        .position(|candidate| *candidate == *font)
+    else {
+        *font = UiFontChoice::default();
+        return true;
+    };
+    let len = UI_FONT_CHOICES.len() as isize;
+    let next = (index as isize + delta).rem_euclid(len) as usize;
+    let next_font = UI_FONT_CHOICES[next];
+    if *font == next_font {
+        return false;
+    }
+    *font = next_font;
+    true
+}
+
+fn draw_ui_font_scale_editor(ui: &mut egui::Ui, font_scale: &mut u16) -> bool {
+    let mut changed = false;
+    let mut value = ui_font_scale_q8_to_f32(*font_scale);
+    ui.horizontal(|ui| {
+        ui.label("Size");
+        changed |= ui
+            .add(
+                egui::DragValue::new(&mut value)
+                    .range(
+                        ui_font_scale_q8_to_f32(MIN_UI_FONT_SCALE)
+                            ..=ui_font_scale_q8_to_f32(MAX_UI_FONT_SCALE),
+                    )
+                    .speed(0.05)
+                    .suffix("x"),
+            )
+            .changed();
+    });
+    let clamped = ui_font_scale_f32_to_q8(value);
+    if *font_scale != clamped {
+        *font_scale = clamped;
+        changed = true;
+    }
+    changed
+}
+
+fn draw_ui_letter_spacing_editor(ui: &mut egui::Ui, letter_spacing: &mut i8) -> bool {
+    let mut changed = false;
+    let mut value = (*letter_spacing).clamp(MIN_UI_LETTER_SPACING, MAX_UI_LETTER_SPACING) as i32;
+    ui.horizontal(|ui| {
+        ui.label("Letter spacing");
+        changed |= ui
+            .add(
+                egui::DragValue::new(&mut value)
+                    .range(i32::from(MIN_UI_LETTER_SPACING)..=i32::from(MAX_UI_LETTER_SPACING))
+                    .speed(1.0)
+                    .suffix(" px"),
+            )
+            .changed();
+    });
+    let clamped = value.clamp(
+        i32::from(MIN_UI_LETTER_SPACING),
+        i32::from(MAX_UI_LETTER_SPACING),
+    ) as i8;
+    if *letter_spacing != clamped {
+        *letter_spacing = clamped;
+        changed = true;
+    }
     changed
 }
 
@@ -29057,6 +29344,9 @@ fn default_addable_ui_kinds() -> Vec<(&'static str, UiNodeKind)> {
                 tag: String::new(),
                 align: UiTextAlign::Left,
                 wrap: false,
+                font: UiFontChoice::Basic,
+                font_scale: default_ui_font_scale(),
+                letter_spacing: default_ui_letter_spacing(),
                 color: [220, 226, 240],
             },
         ),
@@ -29084,6 +29374,9 @@ fn default_addable_ui_kinds() -> Vec<(&'static str, UiNodeKind)> {
                 rect: UiRect::new(24, 24, 96, 18),
                 label: "Button".to_string(),
                 align: UiTextAlign::Center,
+                font: UiFontChoice::Basic,
+                font_scale: default_ui_font_scale(),
+                letter_spacing: default_ui_letter_spacing(),
                 color: [52, 60, 80],
                 text_color: [236, 240, 248],
                 transparent: false,
@@ -29143,7 +29436,7 @@ fn draw_ui_scene_preview(
     painter: &egui::Painter,
     project: &ProjectDocument,
     texture_thumbs: &HashMap<ResourceId, ThumbnailEntry>,
-    font_texture: &egui::TextureHandle,
+    font_textures: &[egui::TextureHandle],
     scene: &psxed_project::UiScene,
     canvas: Rect,
     canvas_size: [u16; 2],
@@ -29178,20 +29471,28 @@ fn draw_ui_scene_preview(
                 color,
                 align,
                 wrap,
+                font,
+                font_scale,
+                letter_spacing,
                 ..
             } => {
                 let absolute = scene.absolute_rect(node.id).unwrap_or(*rect);
                 let screen = ui_rect_to_screen(absolute, canvas, canvas_size);
-                let scale = (screen.height() / rect.height.max(1) as f32).clamp(1.0, 8.0);
+                let base_scale = (screen.height() / rect.height.max(1) as f32).clamp(1.0, 8.0);
+                let scale = base_scale * ui_font_scale_q8_to_f32(*font_scale);
+                let texture = ui_preview_font_texture(font_textures, *font);
                 draw_ui_preview_text(
                     painter,
-                    font_texture,
+                    texture,
                     screen,
                     text,
+                    *font,
                     *align,
                     *wrap,
                     false,
                     scale,
+                    *letter_spacing,
+                    base_scale,
                     Color32::from_rgb(color[0], color[1], color[2]),
                 );
             }
@@ -29256,6 +29557,9 @@ fn draw_ui_scene_preview(
                 rect,
                 label,
                 align,
+                font,
+                font_scale,
+                letter_spacing,
                 color,
                 text_color,
                 transparent,
@@ -29271,16 +29575,21 @@ fn draw_ui_scene_preview(
                     );
                 }
                 let label_color = Color32::from_rgb(text_color[0], text_color[1], text_color[2]);
-                let scale = (screen.height() / rect.height.max(1) as f32).clamp(1.0, 8.0);
+                let base_scale = (screen.height() / rect.height.max(1) as f32).clamp(1.0, 8.0);
+                let scale = base_scale * ui_font_scale_q8_to_f32(*font_scale);
+                let texture = ui_preview_font_texture(font_textures, *font);
                 draw_ui_preview_text(
                     painter,
-                    font_texture,
+                    texture,
                     screen,
                     label,
+                    *font,
                     *align,
                     false,
                     true,
                     scale,
+                    *letter_spacing,
+                    base_scale,
                     label_color,
                 );
             }
@@ -29348,29 +29657,103 @@ fn ui_psx_tint_to_egui(tint: [u8; 3]) -> Color32 {
     )
 }
 
-/// Source glyph cell size of the UI bitmap font, in texels. The on-device
-/// font ([`psx_font::fonts::BASIC`]) is 8x8.
-const UI_FONT_GLYPH: usize = 8;
-/// Atlas grid: 16 columns x 8 rows = 128 glyphs (the font's `glyph_count`).
-const UI_FONT_COLS: usize = 16;
-const UI_FONT_ROWS: usize = 8;
+const UI_FONT_COUNT: usize = UiFontChoice::ALL.len();
+const UI_FONT_CHOICES: [UiFontChoice; UI_FONT_COUNT] = UiFontChoice::ALL;
 
-/// Rasterize the on-device UI bitmap font into an RGBA egui image: a
-/// `(UI_FONT_COLS*8) x (UI_FONT_ROWS*8)` atlas of white glyphs whose alpha is
-/// the source bit (1 -> opaque white, 0 -> transparent). Tinting happens at
-/// blit time, mirroring the PS1 "monochrome glyph * vertex colour" path.
-fn rasterize_ui_font_atlas() -> egui::ColorImage {
-    use psx_font::fonts::BASIC;
-    let aw = UI_FONT_COLS * UI_FONT_GLYPH;
-    let ah = UI_FONT_ROWS * UI_FONT_GLYPH;
+/// Preview atlas grid for the 128-glyph built-in ASCII fonts.
+const UI_FONT_COLS: usize = 16;
+
+#[derive(Clone, Copy)]
+struct UiPreviewFontSpec {
+    texture_index: usize,
+    glyph_w: usize,
+    glyph_h: usize,
+    line_height: usize,
+    cols: usize,
+    glyph_count: usize,
+}
+
+fn ui_preview_font_spec(font: UiFontChoice) -> UiPreviewFontSpec {
+    let source = ui_preview_font_source(font);
+    UiPreviewFontSpec {
+        texture_index: font.runtime_index() as usize,
+        glyph_w: source.glyph_w as usize,
+        glyph_h: source.glyph_h as usize,
+        line_height: source.line_height as usize,
+        cols: UI_FONT_COLS,
+        glyph_count: source.glyph_count as usize,
+    }
+}
+
+fn ui_preview_font_source(font: UiFontChoice) -> &'static psx_font::BitmapFont {
+    match font {
+        UiFontChoice::Basic => &psx_font::fonts::BASIC,
+        UiFontChoice::Basic8x16 => &psx_font::fonts::BASIC_8X16,
+        UiFontChoice::KenneyBlocks => &psx_font::fonts::KENNEY_BLOCKS,
+        UiFontChoice::KenneyFuture => &psx_font::fonts::KENNEY_FUTURE,
+        UiFontChoice::KenneyFutureNarrow => &psx_font::fonts::KENNEY_FUTURE_NARROW,
+        UiFontChoice::KenneyHigh => &psx_font::fonts::KENNEY_HIGH,
+        UiFontChoice::KenneyHighSquare => &psx_font::fonts::KENNEY_HIGH_SQUARE,
+        UiFontChoice::KenneyMini => &psx_font::fonts::KENNEY_MINI,
+        UiFontChoice::KenneyMiniSquare => &psx_font::fonts::KENNEY_MINI_SQUARE,
+        UiFontChoice::KenneyMiniSquareMono => &psx_font::fonts::KENNEY_MINI_SQUARE_MONO,
+        UiFontChoice::KenneyPixel => &psx_font::fonts::KENNEY_PIXEL,
+        UiFontChoice::KenneyPixelSquare => &psx_font::fonts::KENNEY_PIXEL_SQUARE,
+        UiFontChoice::KenneyRocket => &psx_font::fonts::KENNEY_ROCKET,
+        UiFontChoice::KenneyRocketSquare => &psx_font::fonts::KENNEY_ROCKET_SQUARE,
+        UiFontChoice::PressStart2P => &psx_font::fonts::PRESS_START_2P,
+        UiFontChoice::Silkscreen => &psx_font::fonts::SILKSCREEN,
+        UiFontChoice::PixelifySans => &psx_font::fonts::PIXELIFY_SANS,
+        UiFontChoice::Orbitron => &psx_font::fonts::ORBITRON,
+        UiFontChoice::Audiowide => &psx_font::fonts::AUDIOWIDE,
+        UiFontChoice::Michroma => &psx_font::fonts::MICHROMA,
+        UiFontChoice::Electrolize => &psx_font::fonts::ELECTROLIZE,
+        UiFontChoice::Oxanium => &psx_font::fonts::OXANIUM,
+        UiFontChoice::Rajdhani => &psx_font::fonts::RAJDHANI,
+        UiFontChoice::ChakraPetch => &psx_font::fonts::CHAKRA_PETCH,
+        UiFontChoice::Tektur => &psx_font::fonts::TEKTUR,
+        UiFontChoice::Tomorrow => &psx_font::fonts::TOMORROW,
+        UiFontChoice::ZenDots => &psx_font::fonts::ZEN_DOTS,
+        UiFontChoice::TurretRoad => &psx_font::fonts::TURRET_ROAD,
+        UiFontChoice::Tiny5 => &psx_font::fonts::TINY5,
+        UiFontChoice::Jersey10 => &psx_font::fonts::JERSEY_10,
+        UiFontChoice::SpaceMono => &psx_font::fonts::SPACE_MONO,
+        UiFontChoice::BrunoAce => &psx_font::fonts::BRUNO_ACE,
+        UiFontChoice::Aldrich => &psx_font::fonts::ALDRICH,
+        UiFontChoice::Syncopate => &psx_font::fonts::SYNCOPATE,
+        UiFontChoice::ShareTechMono => &psx_font::fonts::SHARE_TECH_MONO,
+        UiFontChoice::Jura => &psx_font::fonts::JURA,
+    }
+}
+
+fn ui_preview_font_texture<'a>(
+    font_textures: &'a [egui::TextureHandle],
+    font: UiFontChoice,
+) -> &'a egui::TextureHandle {
+    let spec = ui_preview_font_spec(font);
+    &font_textures[spec
+        .texture_index
+        .min(font_textures.len().saturating_sub(1))]
+}
+
+/// Rasterize an on-device UI bitmap font into an RGBA egui image: an atlas of
+/// white glyphs whose alpha is the source bit (1 -> opaque white, 0 ->
+/// transparent). Tinting happens at blit time, mirroring the PS1 "monochrome
+/// glyph * vertex colour" path.
+fn rasterize_ui_font_atlas(font: UiFontChoice) -> egui::ColorImage {
+    let source = ui_preview_font_source(font);
+    let spec = ui_preview_font_spec(font);
+    let rows = spec.glyph_count.div_ceil(spec.cols);
+    let aw = spec.cols * spec.glyph_w;
+    let ah = rows * spec.glyph_h;
     let mut pixels = vec![Color32::TRANSPARENT; aw * ah];
-    for glyph in 0..BASIC.glyph_count.min((UI_FONT_COLS * UI_FONT_ROWS) as u16) {
-        let gx = (glyph as usize % UI_FONT_COLS) * UI_FONT_GLYPH;
-        let gy = (glyph as usize / UI_FONT_COLS) * UI_FONT_GLYPH;
-        for row in 0..UI_FONT_GLYPH {
+    for glyph in 0..source.glyph_count {
+        let gx = (glyph as usize % spec.cols) * spec.glyph_w;
+        let gy = (glyph as usize / spec.cols) * spec.glyph_h;
+        for row in 0..spec.glyph_h {
             // `glyph_row_packed` normalises bit order: pixel 0 is bit 0.
-            let bits = BASIC.glyph_row_packed(glyph, row as u8);
-            for col in 0..UI_FONT_GLYPH {
+            let bits = source.glyph_row_packed(glyph, row as u8);
+            for col in 0..spec.glyph_w {
                 if bits & (1 << col) != 0 {
                     pixels[(gy + row) * aw + (gx + col)] = Color32::WHITE;
                 }
@@ -29385,38 +29768,81 @@ fn rasterize_ui_font_atlas() -> egui::ColorImage {
 
 /// UV rect of glyph `code` within the atlas, in 0..1 space. Codes outside the
 /// font's range map to glyph 0 (the missing-glyph cell).
-fn ui_font_glyph_uv(code: u8) -> Rect {
-    let index = (code as usize).min(UI_FONT_COLS * UI_FONT_ROWS - 1);
-    let gx = (index % UI_FONT_COLS) as f32 / UI_FONT_COLS as f32;
-    let gy = (index / UI_FONT_COLS) as f32 / UI_FONT_ROWS as f32;
-    let gw = 1.0 / UI_FONT_COLS as f32;
-    let gh = 1.0 / UI_FONT_ROWS as f32;
+fn ui_font_glyph_uv(font: UiFontChoice, code: u8) -> Rect {
+    let source = ui_preview_font_source(font);
+    let spec = ui_preview_font_spec(font);
+    let first = source.first_char;
+    let cp = code as u16;
+    let index = if cp >= first && cp < first.saturating_add(source.glyph_count) {
+        (cp - first) as usize
+    } else {
+        0
+    };
+    let rows = spec.glyph_count.div_ceil(spec.cols);
+    let index = index.min(spec.glyph_count.saturating_sub(1));
+    let gx = (index % spec.cols) as f32 / spec.cols as f32;
+    let gy = (index / spec.cols) as f32 / rows as f32;
+    let gw = 1.0 / spec.cols as f32;
+    let gh = 1.0 / rows as f32;
     Rect::from_min_size(Pos2::new(gx, gy), Vec2::new(gw, gh))
+}
+
+fn ui_preview_glyph_advance(font: UiFontChoice, ch: char) -> usize {
+    ui_preview_font_source(font).glyph_advance(ch) as usize
+}
+
+fn ui_preview_text_width(
+    font: UiFontChoice,
+    text: &str,
+    scale: f32,
+    letter_spacing: i8,
+    canvas_scale: f32,
+) -> f32 {
+    let base: f32 = text
+        .chars()
+        .map(|ch| ui_preview_glyph_advance(font, ch) as f32 * scale)
+        .sum();
+    let gaps = text.chars().count().saturating_sub(1) as f32;
+    (base + gaps * f32::from(letter_spacing) * canvas_scale).max(0.0)
 }
 
 /// Draw preview text using the on-device bitmap font, so the editor canvas
 /// matches what the runtime renderer ([`psx_engine::ui::draw_scene`]) draws:
-/// fixed 8px cells, 8px advance, 8px line height, all scaled by `scale`.
+/// source advance/line height, all scaled by `scale`.
 #[allow(clippy::too_many_arguments)]
 fn draw_ui_preview_text(
     painter: &egui::Painter,
     font_texture: &egui::TextureHandle,
     rect: Rect,
     text: &str,
+    font: UiFontChoice,
     align: UiTextAlign,
     wrap: bool,
     vcenter: bool,
     scale: f32,
+    letter_spacing: i8,
+    canvas_scale: f32,
     color: Color32,
 ) {
-    let cell = (UI_FONT_GLYPH as f32 * scale).max(1.0);
-    let max_chars = (rect.width() / cell).floor().max(1.0) as usize;
+    let spec = ui_preview_font_spec(font);
+    let line_height = (spec.line_height as f32 * scale).max(1.0);
+    let glyph_size = Vec2::new(
+        (spec.glyph_w as f32 * scale).max(1.0),
+        (spec.glyph_h as f32 * scale).max(1.0),
+    );
     let lines: Vec<&str> = if wrap {
-        wrap_preview_text_lines(text, max_chars)
+        wrap_preview_text_lines(
+            text,
+            font,
+            rect.width(),
+            scale,
+            letter_spacing,
+            canvas_scale,
+        )
     } else {
         text.lines().collect()
     };
-    let total_h = lines.len().max(1) as f32 * cell;
+    let total_h = lines.len().max(1) as f32 * line_height;
     let mut y = if vcenter {
         rect.top() + (rect.height() - total_h).max(0.0) / 2.0
     } else {
@@ -29426,8 +29852,21 @@ fn draw_ui_preview_text(
         if y > rect.bottom() {
             break;
         }
-        draw_ui_preview_text_line(painter, font_texture, rect, y, line, align, cell, color);
-        y += cell;
+        draw_ui_preview_text_line(
+            painter,
+            font_texture,
+            rect,
+            y,
+            line,
+            font,
+            align,
+            glyph_size,
+            scale,
+            letter_spacing,
+            canvas_scale,
+            color,
+        );
+        y += line_height;
     }
 }
 
@@ -29438,44 +29877,72 @@ fn draw_ui_preview_text_line(
     rect: Rect,
     y: f32,
     line: &str,
+    font: UiFontChoice,
     align: UiTextAlign,
-    cell: f32,
+    glyph_size: Vec2,
+    scale: f32,
+    letter_spacing: i8,
+    canvas_scale: f32,
     color: Color32,
 ) {
-    // Advance is the cell width (the font is fixed-pitch); ASCII-count gives
-    // the run width since each glyph occupies one cell.
-    let glyph_count = line.chars().count() as f32;
-    let line_w = glyph_count * cell;
+    let line_w = ui_preview_text_width(font, line, scale, letter_spacing, canvas_scale);
     let start_x = match align {
         UiTextAlign::Left => rect.left(),
         UiTextAlign::Center => rect.center().x - line_w / 2.0,
         UiTextAlign::Right => rect.right() - line_w,
     };
     let mut x = start_x;
-    for ch in line.chars() {
-        if x + cell > rect.right() + 0.5 {
+    let mut chars = line.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if x > rect.right() + 0.5 {
             break;
         }
         // Only the 128-glyph ASCII range is in the atlas; others draw the
         // missing-glyph cell (index 0), matching the runtime's fallback.
         let code = if (ch as u32) < 128 { ch as u8 } else { 0 };
-        let glyph_rect = Rect::from_min_size(Pos2::new(x, y), Vec2::splat(cell));
-        painter.image(font_texture.id(), glyph_rect, ui_font_glyph_uv(code), color);
-        x += cell;
+        let glyph_rect = Rect::from_min_size(Pos2::new(x, y), glyph_size);
+        painter.image(
+            font_texture.id(),
+            glyph_rect,
+            ui_font_glyph_uv(font, code),
+            color,
+        );
+        let gap = if chars.peek().is_some() {
+            f32::from(letter_spacing) * canvas_scale
+        } else {
+            0.0
+        };
+        x += ui_preview_glyph_advance(font, ch) as f32 * scale + gap;
     }
 }
 
-fn wrap_preview_text_lines(text: &str, max_chars: usize) -> Vec<&str> {
+fn wrap_preview_text_lines(
+    text: &str,
+    font: UiFontChoice,
+    max_width: f32,
+    scale: f32,
+    letter_spacing: i8,
+    canvas_scale: f32,
+) -> Vec<&str> {
     let mut out = Vec::new();
     for source_line in text.lines() {
         let mut start = 0usize;
         while start < source_line.len() {
             let remaining = &source_line[start..];
-            if remaining.chars().count() <= max_chars {
+            if ui_preview_text_width(font, remaining, scale, letter_spacing, canvas_scale)
+                <= max_width
+            {
                 out.push(remaining);
                 break;
             }
-            let hard_split = preview_wrap_hard_split(remaining, max_chars);
+            let hard_split = preview_wrap_hard_split(
+                remaining,
+                font,
+                max_width,
+                scale,
+                letter_spacing,
+                canvas_scale,
+            );
             let split = remaining[..hard_split]
                 .rfind(' ')
                 .filter(|idx| *idx > 0)
@@ -29493,11 +29960,31 @@ fn wrap_preview_text_lines(text: &str, max_chars: usize) -> Vec<&str> {
     out
 }
 
-fn preview_wrap_hard_split(text: &str, max_chars: usize) -> usize {
-    text.char_indices()
-        .nth(max_chars)
-        .map(|(idx, _)| idx)
-        .unwrap_or(text.len())
+fn preview_wrap_hard_split(
+    text: &str,
+    font: UiFontChoice,
+    max_width: f32,
+    scale: f32,
+    letter_spacing: i8,
+    canvas_scale: f32,
+) -> usize {
+    let max_width = max_width.max(1.0);
+    let mut width = 0.0;
+    let mut last = 0usize;
+    let mut chars = text.char_indices().peekable();
+    while let Some((idx, ch)) = chars.next() {
+        let next = idx + ch.len_utf8();
+        let next_width = width + ui_preview_glyph_advance(font, ch) as f32 * scale;
+        if next_width > max_width && last > 0 {
+            return last;
+        }
+        width = next_width;
+        last = next;
+        if chars.peek().is_some() {
+            width = (width + f32::from(letter_spacing) * canvas_scale).max(0.0);
+        }
+    }
+    text.len()
 }
 
 fn draw_ui_resize_handles(painter: &egui::Painter, rect: Rect, hovered: Option<UiResizeHandle>) {
@@ -29624,6 +30111,91 @@ fn ui_rect_to_screen(rect: UiRect, canvas: Rect, canvas_size: [u16; 2]) -> Rect 
         ),
         Vec2::new(rect.width as f32 * scale_x, rect.height as f32 * scale_y),
     )
+}
+
+fn draw_ui_center_snap_guides(painter: &egui::Painter, canvas: Rect, drag: Option<&UiCanvasDrag>) {
+    let Some(drag) = drag else {
+        return;
+    };
+    if !drag.snap_center_x && !drag.snap_center_y {
+        return;
+    }
+    let stroke = Stroke::new(1.5, UI_CENTER_GUIDE_COLOR);
+    let center = canvas.center();
+    if drag.snap_center_x {
+        painter.line_segment(
+            [
+                Pos2::new(center.x.round(), canvas.top()),
+                Pos2::new(center.x.round(), canvas.bottom()),
+            ],
+            stroke,
+        );
+    }
+    if drag.snap_center_y {
+        painter.line_segment(
+            [
+                Pos2::new(canvas.left(), center.y.round()),
+                Pos2::new(canvas.right(), center.y.round()),
+            ],
+            stroke,
+        );
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct UiCenterSnapResult {
+    rect: UiRect,
+    snap_x: bool,
+    snap_y: bool,
+}
+
+fn snap_ui_rect_to_canvas_center(rect: UiRect, canvas_size: [u16; 2]) -> UiCenterSnapResult {
+    let canvas_w = i32::from(canvas_size[0].max(1));
+    let canvas_h = i32::from(canvas_size[1].max(1));
+    let mut next = rect;
+    let tolerance_twice = UI_CENTER_SNAP_TOLERANCE * 2;
+
+    let node_center_x_twice = i32::from(rect.x) * 2 + i32::from(rect.width);
+    let canvas_center_x_twice = canvas_w;
+    let snap_x = (node_center_x_twice - canvas_center_x_twice).abs() <= tolerance_twice;
+    if snap_x {
+        next.x = clamp_ui_coord((canvas_w - i32::from(rect.width)) / 2) as i16;
+    }
+
+    let node_center_y_twice = i32::from(rect.y) * 2 + i32::from(rect.height);
+    let canvas_center_y_twice = canvas_h;
+    let snap_y = (node_center_y_twice - canvas_center_y_twice).abs() <= tolerance_twice;
+    if snap_y {
+        next.y = clamp_ui_coord((canvas_h - i32::from(rect.height)) / 2) as i16;
+    }
+
+    UiCenterSnapResult {
+        rect: next,
+        snap_x,
+        snap_y,
+    }
+}
+
+fn snap_moved_ui_rect_to_canvas_center(
+    local_rect: UiRect,
+    absolute_rect: UiRect,
+    canvas_size: [u16; 2],
+) -> UiCenterSnapResult {
+    let snapped_absolute = snap_ui_rect_to_canvas_center(absolute_rect, canvas_size);
+    let mut next = local_rect;
+    if snapped_absolute.snap_x {
+        let dx = i32::from(snapped_absolute.rect.x) - i32::from(absolute_rect.x);
+        next.x = clamp_ui_coord(i32::from(next.x) + dx) as i16;
+    }
+    if snapped_absolute.snap_y {
+        let dy = i32::from(snapped_absolute.rect.y) - i32::from(absolute_rect.y);
+        next.y = clamp_ui_coord(i32::from(next.y) + dy) as i16;
+    }
+    UiCenterSnapResult {
+        rect: next,
+        snap_x: snapped_absolute.snap_x,
+        snap_y: snapped_absolute.snap_y,
+    }
 }
 
 fn move_ui_rect(rect: UiRect, delta: [i32; 2]) -> UiRect {
@@ -36228,29 +36800,68 @@ mod tests {
 
     #[test]
     fn ui_font_atlas_has_expected_dimensions() {
-        let atlas = rasterize_ui_font_atlas();
-        assert_eq!(atlas.size, [UI_FONT_COLS * 8, UI_FONT_ROWS * 8]);
+        let atlas = rasterize_ui_font_atlas(UiFontChoice::Basic);
+        let basic = ui_preview_font_spec(UiFontChoice::Basic);
+        let basic_rows = basic.glyph_count.div_ceil(basic.cols);
+        assert_eq!(
+            atlas.size,
+            [basic.cols * basic.glyph_w, basic_rows * basic.glyph_h]
+        );
         // A real font has many lit pixels; an all-transparent atlas would mean
         // the rasterizer read the source wrong.
         let opaque = atlas.pixels.iter().filter(|p| p.a() == 255).count();
         assert!(opaque > 500, "atlas looks empty ({opaque} opaque px)");
+
+        let tall = rasterize_ui_font_atlas(UiFontChoice::Basic8x16);
+        let tall_spec = ui_preview_font_spec(UiFontChoice::Basic8x16);
+        let tall_rows = tall_spec.glyph_count.div_ceil(tall_spec.cols);
+        assert_eq!(
+            tall.size,
+            [
+                tall_spec.cols * tall_spec.glyph_w,
+                tall_rows * tall_spec.glyph_h
+            ]
+        );
+        let tall_opaque = tall.pixels.iter().filter(|p| p.a() == 255).count();
+        assert!(
+            tall_opaque > opaque,
+            "8x16 atlas should carry more lit rows than 8x8",
+        );
+
+        let orbitron = rasterize_ui_font_atlas(UiFontChoice::Orbitron);
+        let orbitron_spec = ui_preview_font_spec(UiFontChoice::Orbitron);
+        let orbitron_rows = orbitron_spec.glyph_count.div_ceil(orbitron_spec.cols);
+        assert_eq!(
+            orbitron.size,
+            [
+                orbitron_spec.cols * orbitron_spec.glyph_w,
+                orbitron_rows * orbitron_spec.glyph_h
+            ]
+        );
+        assert!(orbitron_spec.glyph_w > basic.glyph_w);
+        let orbitron_opaque = orbitron.pixels.iter().filter(|p| p.a() == 255).count();
+        assert!(
+            orbitron_opaque > 500,
+            "imported TTF atlas looks empty ({orbitron_opaque} opaque px)",
+        );
     }
 
     #[test]
     fn ui_font_atlas_pixels_match_the_source_font_bits() {
         use psx_font::fonts::BASIC;
-        let atlas = rasterize_ui_font_atlas();
-        let aw = UI_FONT_COLS * 8;
+        let atlas = rasterize_ui_font_atlas(UiFontChoice::Basic);
+        let spec = ui_preview_font_spec(UiFontChoice::Basic);
+        let aw = spec.cols * spec.glyph_w;
         // Check every glyph cell against the source bitmap: an atlas pixel is
         // opaque exactly when the corresponding source bit is set. This proves
         // the rasterizer (grid placement + bit-order via glyph_row_packed) is
         // faithful, not just non-empty.
-        for glyph in 0..BASIC.glyph_count.min((UI_FONT_COLS * UI_FONT_ROWS) as u16) {
-            let gx = (glyph as usize % UI_FONT_COLS) * 8;
-            let gy = (glyph as usize / UI_FONT_COLS) * 8;
-            for row in 0..8 {
+        for glyph in 0..BASIC.glyph_count {
+            let gx = (glyph as usize % spec.cols) * spec.glyph_w;
+            let gy = (glyph as usize / spec.cols) * spec.glyph_h;
+            for row in 0..spec.glyph_h {
                 let bits = BASIC.glyph_row_packed(glyph, row as u8);
-                for col in 0..8 {
+                for col in 0..spec.glyph_w {
                     let lit = bits & (1 << col) != 0;
                     let px = atlas.pixels[(gy + row) * aw + (gx + col)];
                     assert_eq!(
@@ -36265,15 +36876,39 @@ mod tests {
 
     #[test]
     fn ui_font_glyph_uv_is_in_unit_range_and_advances_by_one_cell() {
-        let a = ui_font_glyph_uv(b'A');
+        let a = ui_font_glyph_uv(UiFontChoice::Basic, b'A');
         assert!(a.min.x >= 0.0 && a.max.x <= 1.0 && a.min.y >= 0.0 && a.max.y <= 1.0);
         // Adjacent codes on the same row differ by exactly one column step.
-        let b = ui_font_glyph_uv(b'B');
+        let b = ui_font_glyph_uv(UiFontChoice::Basic, b'B');
         let step = 1.0 / UI_FONT_COLS as f32;
         assert!((b.min.x - a.min.x - step).abs() < 1e-6);
         // Out-of-range codes clamp into the atlas (no panic, stays in 0..1).
-        let oob = ui_font_glyph_uv(255);
+        let oob = ui_font_glyph_uv(UiFontChoice::Basic8x16, 255);
         assert!(oob.max.x <= 1.0 && oob.max.y <= 1.0);
+    }
+
+    #[test]
+    fn ui_preview_text_width_applies_letter_spacing_between_glyphs() {
+        assert_eq!(
+            ui_preview_text_width(UiFontChoice::Basic, "ABC", 1.0, 2, 1.0),
+            28.0
+        );
+        assert_eq!(
+            ui_preview_text_width(UiFontChoice::Basic, "ABC", 2.0, -1, 1.0),
+            46.0
+        );
+        assert_eq!(
+            ui_preview_text_width(UiFontChoice::Basic, "A", 1.0, 9, 1.0),
+            8.0
+        );
+    }
+
+    #[test]
+    fn preview_wrap_hard_split_counts_spacing_between_included_glyphs_only() {
+        assert_eq!(
+            preview_wrap_hard_split("ABC", UiFontChoice::Basic, 18.0, 1.0, 2, 1.0),
+            2
+        );
     }
 
     /// The shared multi-select math (`apply_range_modifiers`) backs both scene
@@ -37090,6 +37725,50 @@ mod tests {
             ui_scene_resize_handle_target(&scene, image, canvas, [320, 240], Pos2::new(-4.0, -4.0)),
             Some((image, UiResizeHandle::TopLeft))
         );
+    }
+
+    #[test]
+    fn ui_center_snap_aligns_node_to_canvas_midpoints() {
+        let result = snap_ui_rect_to_canvas_center(UiRect::new(121, 109, 80, 20), [320, 240]);
+
+        assert!(result.snap_x);
+        assert!(result.snap_y);
+        assert_eq!(result.rect, UiRect::new(120, 110, 80, 20));
+    }
+
+    #[test]
+    fn ui_center_snap_can_snap_one_axis_without_the_other() {
+        let result = snap_ui_rect_to_canvas_center(UiRect::new(117, 114, 80, 20), [320, 240]);
+
+        assert!(result.snap_x);
+        assert!(!result.snap_y);
+        assert_eq!(result.rect, UiRect::new(120, 114, 80, 20));
+    }
+
+    #[test]
+    fn ui_center_snap_applies_absolute_delta_to_anchored_local_rects() {
+        let local = UiRect::new(0, 0, 80, 20).with_anchor(UiAnchor::Center);
+        let absolute = UiRect::new(121, 109, 80, 20);
+
+        let result = snap_moved_ui_rect_to_canvas_center(local, absolute, [320, 240]);
+
+        assert!(result.snap_x);
+        assert!(result.snap_y);
+        assert_eq!(
+            result.rect,
+            UiRect::new(-1, 1, 80, 20).with_anchor(UiAnchor::Center)
+        );
+    }
+
+    #[test]
+    fn ui_center_snap_leaves_rects_outside_tolerance_unchanged() {
+        let rect = UiRect::new(112, 120, 80, 20);
+
+        let result = snap_ui_rect_to_canvas_center(rect, [320, 240]);
+
+        assert!(!result.snap_x);
+        assert!(!result.snap_y);
+        assert_eq!(result.rect, rect);
     }
 
     fn test_node_preview_origin(project: &ProjectDocument, room: NodeId, node: NodeId) -> [i32; 3] {

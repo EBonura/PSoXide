@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use ron::ser::PrettyConfig;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 pub mod floor_view;
 pub mod model_import;
@@ -610,6 +610,329 @@ pub struct OptionDef {
     pub kind: OptionKind,
 }
 
+/// Built-in bitmap font a text UI node draws with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UiFontChoice {
+    /// 8x8 basic ASCII font.
+    Basic,
+    /// 8x16 basic ASCII font.
+    Basic8x16,
+    /// Kenney Blocks display font.
+    KenneyBlocks,
+    /// Kenney Future display font.
+    KenneyFuture,
+    /// Kenney Future Narrow display font.
+    KenneyFutureNarrow,
+    /// Kenney High display font.
+    KenneyHigh,
+    /// Kenney High Square display font.
+    KenneyHighSquare,
+    /// Kenney Mini UI font.
+    KenneyMini,
+    /// Kenney Mini Square UI font.
+    KenneyMiniSquare,
+    /// Kenney Mini Square Mono UI font.
+    KenneyMiniSquareMono,
+    /// Kenney Pixel UI font.
+    KenneyPixel,
+    /// Kenney Pixel Square UI font.
+    KenneyPixelSquare,
+    /// Kenney Rocket display font.
+    KenneyRocket,
+    /// Kenney Rocket Square display font.
+    KenneyRocketSquare,
+    /// Press Start 2P display font.
+    PressStart2P,
+    /// Silkscreen UI font.
+    Silkscreen,
+    /// Pixelify Sans display font.
+    PixelifySans,
+    /// Orbitron display font.
+    Orbitron,
+    /// Audiowide display font.
+    Audiowide,
+    /// Michroma display font.
+    Michroma,
+    /// Electrolize UI font.
+    Electrolize,
+    /// Oxanium UI font.
+    Oxanium,
+    /// Rajdhani UI font.
+    Rajdhani,
+    /// Chakra Petch UI font.
+    ChakraPetch,
+    /// Tektur display font.
+    Tektur,
+    /// Tomorrow UI font.
+    Tomorrow,
+    /// Zen Dots display font.
+    ZenDots,
+    /// Turret Road display font.
+    TurretRoad,
+    /// Tiny5 display font.
+    Tiny5,
+    /// Jersey 10 display font.
+    Jersey10,
+    /// Space Mono display font.
+    SpaceMono,
+    /// Bruno Ace display font.
+    BrunoAce,
+    /// Aldrich display font.
+    Aldrich,
+    /// Syncopate display font.
+    Syncopate,
+    /// Share Tech Mono UI font.
+    ShareTechMono,
+    /// Jura UI font.
+    Jura,
+}
+
+impl Default for UiFontChoice {
+    fn default() -> Self {
+        Self::Basic
+    }
+}
+
+impl UiFontChoice {
+    /// All editor-selectable built-in UI fonts.
+    pub const ALL: [Self; 36] = [
+        Self::Basic,
+        Self::Basic8x16,
+        Self::KenneyBlocks,
+        Self::KenneyFuture,
+        Self::KenneyFutureNarrow,
+        Self::KenneyHigh,
+        Self::KenneyHighSquare,
+        Self::KenneyMini,
+        Self::KenneyMiniSquare,
+        Self::KenneyMiniSquareMono,
+        Self::KenneyPixel,
+        Self::KenneyPixelSquare,
+        Self::KenneyRocket,
+        Self::KenneyRocketSquare,
+        Self::PressStart2P,
+        Self::Silkscreen,
+        Self::PixelifySans,
+        Self::Orbitron,
+        Self::Audiowide,
+        Self::Michroma,
+        Self::Electrolize,
+        Self::Oxanium,
+        Self::Rajdhani,
+        Self::ChakraPetch,
+        Self::Tektur,
+        Self::Tomorrow,
+        Self::ZenDots,
+        Self::TurretRoad,
+        Self::Tiny5,
+        Self::Jersey10,
+        Self::SpaceMono,
+        Self::BrunoAce,
+        Self::Aldrich,
+        Self::Syncopate,
+        Self::ShareTechMono,
+        Self::Jura,
+    ];
+
+    /// Editor-facing label for this font.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Basic => "Basic 8x8",
+            Self::Basic8x16 => "Basic 8x16",
+            Self::KenneyBlocks => "Kenney Blocks",
+            Self::KenneyFuture => "Kenney Future",
+            Self::KenneyFutureNarrow => "Kenney Future Narrow",
+            Self::KenneyHigh => "Kenney High",
+            Self::KenneyHighSquare => "Kenney High Square",
+            Self::KenneyMini => "Kenney Mini",
+            Self::KenneyMiniSquare => "Kenney Mini Square",
+            Self::KenneyMiniSquareMono => "Kenney Mini Square Mono",
+            Self::KenneyPixel => "Kenney Pixel",
+            Self::KenneyPixelSquare => "Kenney Pixel Square",
+            Self::KenneyRocket => "Kenney Rocket",
+            Self::KenneyRocketSquare => "Kenney Rocket Square",
+            Self::PressStart2P => "Press Start 2P",
+            Self::Silkscreen => "Silkscreen",
+            Self::PixelifySans => "Pixelify Sans",
+            Self::Orbitron => "Orbitron",
+            Self::Audiowide => "Audiowide",
+            Self::Michroma => "Michroma",
+            Self::Electrolize => "Electrolize",
+            Self::Oxanium => "Oxanium",
+            Self::Rajdhani => "Rajdhani",
+            Self::ChakraPetch => "Chakra Petch",
+            Self::Tektur => "Tektur",
+            Self::Tomorrow => "Tomorrow",
+            Self::ZenDots => "Zen Dots",
+            Self::TurretRoad => "Turret Road",
+            Self::Tiny5 => "Tiny5",
+            Self::Jersey10 => "Jersey 10",
+            Self::SpaceMono => "Space Mono",
+            Self::BrunoAce => "Bruno Ace",
+            Self::Aldrich => "Aldrich",
+            Self::Syncopate => "Syncopate",
+            Self::ShareTechMono => "Share Tech Mono",
+            Self::Jura => "Jura",
+        }
+    }
+
+    /// Stable editor-preview texture slug.
+    pub const fn slug(self) -> &'static str {
+        match self {
+            Self::Basic => "basic-8x8",
+            Self::Basic8x16 => "basic-8x16",
+            Self::KenneyBlocks => "kenney-blocks",
+            Self::KenneyFuture => "kenney-future",
+            Self::KenneyFutureNarrow => "kenney-future-narrow",
+            Self::KenneyHigh => "kenney-high",
+            Self::KenneyHighSquare => "kenney-high-square",
+            Self::KenneyMini => "kenney-mini",
+            Self::KenneyMiniSquare => "kenney-mini-square",
+            Self::KenneyMiniSquareMono => "kenney-mini-square-mono",
+            Self::KenneyPixel => "kenney-pixel",
+            Self::KenneyPixelSquare => "kenney-pixel-square",
+            Self::KenneyRocket => "kenney-rocket",
+            Self::KenneyRocketSquare => "kenney-rocket-square",
+            Self::PressStart2P => "press-start-2p",
+            Self::Silkscreen => "silkscreen",
+            Self::PixelifySans => "pixelify-sans",
+            Self::Orbitron => "orbitron",
+            Self::Audiowide => "audiowide",
+            Self::Michroma => "michroma",
+            Self::Electrolize => "electrolize",
+            Self::Oxanium => "oxanium",
+            Self::Rajdhani => "rajdhani",
+            Self::ChakraPetch => "chakra-petch",
+            Self::Tektur => "tektur",
+            Self::Tomorrow => "tomorrow",
+            Self::ZenDots => "zen-dots",
+            Self::TurretRoad => "turret-road",
+            Self::Tiny5 => "tiny5",
+            Self::Jersey10 => "jersey-10",
+            Self::SpaceMono => "space-mono",
+            Self::BrunoAce => "bruno-ace",
+            Self::Aldrich => "aldrich",
+            Self::Syncopate => "syncopate",
+            Self::ShareTechMono => "share-tech-mono",
+            Self::Jura => "jura",
+        }
+    }
+
+    /// Runtime font-table selector written into cooked UI nodes.
+    pub const fn runtime_index(self) -> u8 {
+        match self {
+            Self::Basic => 0,
+            Self::Basic8x16 => 1,
+            Self::KenneyBlocks => 2,
+            Self::KenneyFuture => 3,
+            Self::KenneyFutureNarrow => 4,
+            Self::KenneyHigh => 5,
+            Self::KenneyHighSquare => 6,
+            Self::KenneyMini => 7,
+            Self::KenneyMiniSquare => 8,
+            Self::KenneyMiniSquareMono => 9,
+            Self::KenneyPixel => 10,
+            Self::KenneyPixelSquare => 11,
+            Self::KenneyRocket => 12,
+            Self::KenneyRocketSquare => 13,
+            Self::PressStart2P => 14,
+            Self::Silkscreen => 15,
+            Self::PixelifySans => 16,
+            Self::Orbitron => 17,
+            Self::Audiowide => 18,
+            Self::Michroma => 19,
+            Self::Electrolize => 20,
+            Self::Oxanium => 21,
+            Self::Rajdhani => 22,
+            Self::ChakraPetch => 23,
+            Self::Tektur => 24,
+            Self::Tomorrow => 25,
+            Self::ZenDots => 26,
+            Self::TurretRoad => 27,
+            Self::Tiny5 => 28,
+            Self::Jersey10 => 29,
+            Self::SpaceMono => 30,
+            Self::BrunoAce => 31,
+            Self::Aldrich => 32,
+            Self::Syncopate => 33,
+            Self::ShareTechMono => 34,
+            Self::Jura => 35,
+        }
+    }
+}
+
+/// Q8 fixed-point value for 1.0x authored UI font scale.
+pub const UI_FONT_SCALE_ONE_Q8: u16 = 256;
+/// Smallest authored UI font scale, Q8 fixed point (0.5x).
+pub const MIN_UI_FONT_SCALE: u16 = UI_FONT_SCALE_ONE_Q8 / 2;
+/// Largest authored UI font scale, Q8 fixed point (8.0x).
+pub const MAX_UI_FONT_SCALE: u16 = UI_FONT_SCALE_ONE_Q8 * 8;
+/// Tightest authored UI letter spacing, in PSX framebuffer pixels.
+pub const MIN_UI_LETTER_SPACING: i8 = -16;
+/// Widest authored UI letter spacing, in PSX framebuffer pixels.
+pub const MAX_UI_LETTER_SPACING: i8 = 64;
+
+/// Default authored UI font scale.
+pub const fn default_ui_font_scale() -> u16 {
+    UI_FONT_SCALE_ONE_Q8
+}
+
+/// Clamp an authored UI font scale in Q8 fixed-point units.
+pub const fn clamp_ui_font_scale(scale_q8: u16) -> u16 {
+    if scale_q8 < MIN_UI_FONT_SCALE {
+        MIN_UI_FONT_SCALE
+    } else if scale_q8 > MAX_UI_FONT_SCALE {
+        MAX_UI_FONT_SCALE
+    } else {
+        scale_q8
+    }
+}
+
+/// Convert an authored Q8 UI font scale to an editor-facing multiplier.
+pub fn ui_font_scale_q8_to_f32(scale_q8: u16) -> f32 {
+    f32::from(clamp_ui_font_scale(scale_q8)) / f32::from(UI_FONT_SCALE_ONE_Q8)
+}
+
+/// Convert an editor-facing multiplier into authored Q8 UI font scale.
+pub fn ui_font_scale_f32_to_q8(scale: f32) -> u16 {
+    if !scale.is_finite() {
+        return default_ui_font_scale();
+    }
+    let scaled = (scale * f32::from(UI_FONT_SCALE_ONE_Q8)).round();
+    clamp_ui_font_scale(scaled.clamp(0.0, f32::from(u16::MAX)) as u16)
+}
+
+/// Default authored UI letter spacing, in PSX framebuffer pixels.
+pub const fn default_ui_letter_spacing() -> i8 {
+    0
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum UiFontScaleWire {
+    Int(u16),
+    Float(f32),
+}
+
+fn deserialize_ui_font_scale<'de, D>(deserializer: D) -> Result<u16, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let scale = match UiFontScaleWire::deserialize(deserializer)? {
+        UiFontScaleWire::Float(value) => ui_font_scale_f32_to_q8(value),
+        UiFontScaleWire::Int(value) if value <= 4 => ui_font_scale_f32_to_q8(f32::from(value)),
+        UiFontScaleWire::Int(value) => clamp_ui_font_scale(value),
+    };
+    Ok(scale)
+}
+
+fn serialize_ui_font_scale<S>(scale_q8: &u16, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    serializer.serialize_f32(ui_font_scale_q8_to_f32(*scale_q8))
+}
+
 /// Authored 2D UI node type.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UiNodeKind {
@@ -647,6 +970,19 @@ pub enum UiNodeKind {
         /// Wrap words inside the label rectangle.
         #[serde(default)]
         wrap: bool,
+        /// Runtime bitmap font.
+        #[serde(default)]
+        font: UiFontChoice,
+        /// Q8 text scale written into the runtime UI node.
+        #[serde(
+            default = "default_ui_font_scale",
+            deserialize_with = "deserialize_ui_font_scale",
+            serialize_with = "serialize_ui_font_scale"
+        )]
+        font_scale: u16,
+        /// Extra signed screen pixels inserted between adjacent glyphs.
+        #[serde(default = "default_ui_letter_spacing")]
+        letter_spacing: i8,
         /// Text tint.
         color: [u8; 3],
     },
@@ -686,6 +1022,19 @@ pub enum UiNodeKind {
         /// Label alignment inside `rect`.
         #[serde(default)]
         align: UiTextAlign,
+        /// Runtime bitmap font.
+        #[serde(default)]
+        font: UiFontChoice,
+        /// Q8 text scale written into the runtime UI node.
+        #[serde(
+            default = "default_ui_font_scale",
+            deserialize_with = "deserialize_ui_font_scale",
+            serialize_with = "serialize_ui_font_scale"
+        )]
+        font_scale: u16,
+        /// Extra signed screen pixels inserted between adjacent glyphs.
+        #[serde(default = "default_ui_letter_spacing")]
+        letter_spacing: i8,
         /// Background fill colour (ignored when `transparent`).
         #[serde(default = "default_ui_button_color")]
         color: [u8; 3],
@@ -10872,6 +11221,43 @@ impl Default for ProjectDocument {
 mod tests {
     use super::*;
 
+    #[derive(Debug, Deserialize, Serialize)]
+    struct UiFontScaleFixture {
+        #[serde(
+            default = "default_ui_font_scale",
+            deserialize_with = "deserialize_ui_font_scale",
+            serialize_with = "serialize_ui_font_scale"
+        )]
+        font_scale: u16,
+    }
+
+    #[test]
+    fn ui_font_scale_deserializes_legacy_and_fractional_values() {
+        let legacy: UiFontScaleFixture = ron::from_str("(font_scale: 2)").unwrap();
+        assert_eq!(legacy.font_scale, UI_FONT_SCALE_ONE_Q8 * 2);
+
+        let fractional: UiFontScaleFixture = ron::from_str("(font_scale: 1.5)").unwrap();
+        assert_eq!(
+            fractional.font_scale,
+            UI_FONT_SCALE_ONE_Q8 + UI_FONT_SCALE_ONE_Q8 / 2
+        );
+
+        let q8: UiFontScaleFixture = ron::from_str("(font_scale: 384)").unwrap();
+        assert_eq!(
+            q8.font_scale,
+            UI_FONT_SCALE_ONE_Q8 + UI_FONT_SCALE_ONE_Q8 / 2
+        );
+    }
+
+    #[test]
+    fn ui_font_scale_serializes_as_decimal_multiplier() {
+        let value = UiFontScaleFixture {
+            font_scale: UI_FONT_SCALE_ONE_Q8 + UI_FONT_SCALE_ONE_Q8 / 2,
+        };
+        let ron = ron::to_string(&value).unwrap();
+        assert!(ron.contains("1.5"), "{ron}");
+    }
+
     #[test]
     fn horizontal_face_height_samples_editor_corner_convention() {
         let mut floor = GridHorizontalFace::flat(0, None);
@@ -12447,6 +12833,9 @@ mod tests {
                 tag: String::new(),
                 align: UiTextAlign::Left,
                 wrap: false,
+                font: UiFontChoice::Basic,
+                font_scale: default_ui_font_scale(),
+                letter_spacing: default_ui_letter_spacing(),
                 color: [220, 226, 240],
             },
         );
@@ -12481,6 +12870,9 @@ mod tests {
                 tag: String::new(),
                 align: UiTextAlign::Left,
                 wrap: false,
+                font: UiFontChoice::Basic,
+                font_scale: default_ui_font_scale(),
+                letter_spacing: default_ui_letter_spacing(),
                 color: [220, 226, 240],
             },
         );
@@ -12525,6 +12917,9 @@ mod tests {
                 tag: String::new(),
                 align: UiTextAlign::Left,
                 wrap: false,
+                font: UiFontChoice::Basic,
+                font_scale: default_ui_font_scale(),
+                letter_spacing: default_ui_letter_spacing(),
                 color: [255, 255, 255],
             },
         );

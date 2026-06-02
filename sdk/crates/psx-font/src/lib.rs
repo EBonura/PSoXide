@@ -23,6 +23,7 @@
 //! |---|---|---|---|
 //! | [`FontAtlas::draw_text`] | GP0 0x64 textured rect | 4 words | 1:1 axis-aligned, single tint |
 //! | [`FontAtlas::draw_text_scaled`] | GP0 0x2C textured quad | 9 words | Integer scale (2×, 3×, …), single tint |
+//! | [`FontAtlas::draw_text_scaled_q8`] | GP0 0x2C textured quad | 9 words | Q8 fractional scale (1.5× = 384), single tint |
 //! | [`FontAtlas::draw_text_rotated`] | GP0 0x2C textured quad | 9 words | Arbitrary angle rotation, single tint |
 //! | [`FontAtlas::draw_text_affine`] | GP0 0x2C textured quad | 9 words | Arbitrary 2×2 matrix, single tint |
 //! | [`FontAtlas::draw_text_gradient`] | GP0 0x3C gouraud-textured quad | 12 words | 1:1, top/bottom gradient |
@@ -49,9 +50,9 @@
 //! - **Atlas layout**: the uploader picks `glyphs_per_row` so the
 //!   atlas fits within its tpage.
 //! - **Upload buffer**: the stack-only scratch buffer inside
-//!   [`FontAtlas::upload`] is sized for ~128 glyphs of 8×8. Larger
-//!   fonts will want a const-generic buffer -- a planned follow-up;
-//!   panics today if the atlas overflows.
+//!   [`FontAtlas::upload`] is sized for a full 256×256 4bpp atlas,
+//!   enough for 128 glyphs up to 32×16. Larger fonts panic today;
+//!   add a bigger/const-generic buffer before importing them.
 //!
 //! ## Why 4bpp and not 15bpp direct
 //!
@@ -152,8 +153,12 @@ pub struct BitmapFont {
     /// Row-major bitmap bytes. `glyph_count * glyph_h *
     /// ceil(glyph_w / 8)` bytes total.
     pub bitmap: &'static [u8],
+    /// Optional per-glyph pixel advances. Proportional TTF imports fill this;
+    /// fixed-cell bitmap fonts leave it `None` and use `advance_x`.
+    pub glyph_advances: Option<&'static [u8]>,
     /// Pixel step between adjacent characters on a text line.
-    /// Usually `== glyph_w` for fixed-width fonts.
+    /// Usually `== glyph_w` for fixed-width fonts. Proportional fonts use this
+    /// as the fallback for missing/out-of-range glyphs.
     pub advance_x: u8,
     /// Pixel step between text lines. Usually `== glyph_h`.
     pub line_height: u8,
@@ -172,6 +177,54 @@ impl BitmapFont {
     /// Total bitmap bytes per glyph.
     pub const fn glyph_stride(&self) -> usize {
         self.row_bytes() * self.glyph_h as usize
+    }
+
+    /// Glyph index for `ch` if the font covers its codepoint.
+    pub fn glyph_index(&self, ch: char) -> Option<u16> {
+        let cp = ch as u32;
+        let first = self.first_char as u32;
+        let end = first.saturating_add(self.glyph_count as u32);
+        if cp >= first && cp < end {
+            Some((cp - first) as u16)
+        } else {
+            None
+        }
+    }
+
+    /// Pixel advance for `ch`, falling back to [`BitmapFont::advance_x`] when
+    /// the font has no per-glyph table or `ch` is outside the covered range.
+    pub fn glyph_advance(&self, ch: char) -> u8 {
+        self.glyph_index(ch)
+            .and_then(|index| {
+                self.glyph_advances
+                    .and_then(|advances| advances.get(index as usize).copied())
+            })
+            .unwrap_or(self.advance_x)
+    }
+
+    /// Pixel width of `text` with this font's advance metrics.
+    pub fn text_width(&self, text: &str) -> u16 {
+        text.chars()
+            .map(|ch| self.glyph_advance(ch) as u16)
+            .fold(0u16, u16::saturating_add)
+    }
+
+    /// Pixel width of `text` with an extra signed spacing value inserted
+    /// between adjacent characters. The spacing is in final screen pixels,
+    /// so callers that scale glyphs can decide whether or not to scale the
+    /// spacing separately.
+    pub fn text_width_with_spacing(&self, text: &str, letter_spacing: i8) -> u16 {
+        let mut chars = text.chars();
+        let Some(first) = chars.next() else {
+            return 0;
+        };
+        let mut width = i32::from(self.glyph_advance(first));
+        for ch in chars {
+            width = width
+                .saturating_add(i32::from(letter_spacing))
+                .saturating_add(i32::from(self.glyph_advance(ch)));
+        }
+        width.clamp(0, i32::from(u16::MAX)) as u16
     }
 
     /// Fetch row `r` of glyph `i` as 4 bytes LSB-packed little-
@@ -214,27 +267,45 @@ pub struct FontAtlas {
     glyphs_per_row: u16,
 }
 
+fn scale_q8_i16(value: i16, scale_q8: u16) -> i16 {
+    let scaled = i32::from(value)
+        .saturating_mul(i32::from(scale_q8))
+        .saturating_add(128)
+        >> 8;
+    scaled.clamp(1, i32::from(i16::MAX)) as i16
+}
+
+fn round_q8_to_i16(value_q8: i32) -> i16 {
+    let rounded = if value_q8 >= 0 {
+        value_q8.saturating_add(128) >> 8
+    } else {
+        -(value_q8.saturating_neg().saturating_add(128) >> 8)
+    };
+    rounded.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16
+}
+
 impl FontAtlas {
     /// Maximum texels a 4bpp tpage covers horizontally. 64 pixels
     /// is the PSX-SPX value (tpage is 256×256 in texel units, but
     /// in 4bpp mode the effective horizontal texel range per page
     /// maps onto 64 VRAM halfwords = 64 × 4 = 256 texels).
     const MAX_ATLAS_W_TEXELS: u16 = 256;
-    /// Stack buffer for the packed 4bpp atlas. 8192 halfwords =
-    /// 16 KiB covers the full 256×128 4bpp atlas footprint, which
+    /// Stack buffer for the packed 4bpp atlas. 16384 halfwords =
+    /// 32 KiB covers the full 256×256 4bpp atlas footprint, which
     /// fits:
     /// - 128 glyphs at 8×8   (2048 hw)
     /// - 128 glyphs at 8×16  (4096 hw)
     /// - 64 glyphs  at 16×16 (4096 hw)
     /// - 128 glyphs at 12×16 (5040 hw)
-    /// - 128 glyphs at 16×16 (8192 hw) -- the largest supported
+    /// - 128 glyphs at 16×16 (8192 hw)
+    /// - 128 glyphs at 32×16 (16384 hw) -- the largest supported
     ///
-    /// 16 KiB transient stack usage at boot is fine on a 2 MiB
+    /// 32 KiB transient stack usage at boot is fine on a 2 MiB
     /// PS1 (typical stack budget is 32-64 KiB, and `upload` is
-    /// called once before the main loop). Fonts larger than 16×16
+    /// called once before the main loop). Fonts larger than 32×16
     /// would need a bump -- open an issue, we'll add a
     /// const-generic variant.
-    const MAX_PACK_HALFWORDS: usize = 8192;
+    const MAX_PACK_HALFWORDS: usize = 16384;
 
     /// Upload `font` as a 4bpp CLUT texture at `tpage`, with a
     /// 2-entry CLUT (transparent, white) at `clut`.
@@ -322,10 +393,15 @@ impl FontAtlas {
         }
     }
 
-    /// Pixel width of `text` when rendered with this atlas. For a
-    /// fixed-width font that's `advance_x × text.len()`.
+    /// Pixel width of `text` when rendered with this atlas.
     pub fn text_width(&self, text: &str) -> u16 {
-        (text.len() as u16) * self.font.advance_x as u16
+        self.font.text_width(text)
+    }
+
+    /// Pixel width of `text` using this atlas's font metrics plus signed
+    /// spacing inserted between adjacent characters.
+    pub fn text_width_with_spacing(&self, text: &str, letter_spacing: i8) -> u16 {
+        self.font.text_width_with_spacing(text, letter_spacing)
     }
 
     /// Pixel height of a single text line. Usually `== glyph_h`.
@@ -382,17 +458,38 @@ impl FontAtlas {
     /// atlas.draw_text(8, 8, "SCORE 0042", (0x80, 0x80, 0x80));
     /// ```
     pub fn draw_text(&self, x: i16, y: i16, text: &str, tint: (u8, u8, u8)) {
+        self.draw_text_with_spacing(x, y, text, 0, tint);
+    }
+
+    /// Draw `text` with signed spacing inserted between adjacent characters.
+    /// `letter_spacing` is measured in final screen pixels and is not applied
+    /// after the last character.
+    pub fn draw_text_with_spacing(
+        &self,
+        x: i16,
+        y: i16,
+        text: &str,
+        letter_spacing: i8,
+        tint: (u8, u8, u8),
+    ) {
         // Our atlas tpage takes over the current draw-mode slot; the
         // per-glyph GP0 0x64 rectangles all sample from it.
         self.tpage.apply_as_draw_mode();
 
         let font = self.font;
-        let advance = font.advance_x as i16;
         let clut_word = self.clut.uv_clut_word();
         let mut cursor_x = x;
-        for ch in text.chars() {
+        let mut chars = text.chars().peekable();
+        while let Some(ch) = chars.next() {
+            let gap = if chars.peek().is_some() {
+                i16::from(letter_spacing)
+            } else {
+                0
+            };
             let Some((u, v)) = self.glyph_uv(ch) else {
-                cursor_x = cursor_x.wrapping_add(advance);
+                cursor_x = cursor_x
+                    .wrapping_add(font.glyph_advance(ch) as i16)
+                    .wrapping_add(gap);
                 continue;
             };
 
@@ -411,7 +508,9 @@ impl FontAtlas {
             // Third word: rectangle size.
             write_gp0(pack_xy(font.glyph_w as u16, font.glyph_h as u16));
 
-            cursor_x = cursor_x.wrapping_add(advance);
+            cursor_x = cursor_x
+                .wrapping_add(font.glyph_advance(ch) as i16)
+                .wrapping_add(gap);
         }
     }
 
@@ -423,8 +522,8 @@ impl FontAtlas {
     /// **Quad path** -- uses textured quads (GP0 0x2C, 9 words per
     /// glyph). PSX samples textures with nearest-neighbour, so
     /// integer scales (2×, 3×, 4×) produce crisp pixel-doubled
-    /// output. Non-integer scales are supported but smear the
-    /// texel grid.
+    /// output. Use [`Self::draw_text_scaled_q8`] for fractional
+    /// screen-space sizes.
     ///
     /// # Example
     ///
@@ -440,19 +539,86 @@ impl FontAtlas {
         scale_y: u8,
         tint: (u8, u8, u8),
     ) {
+        self.draw_text_scaled_with_spacing(x, y, text, scale_x, scale_y, 0, tint);
+    }
+
+    /// Draw `text` with Q8 fixed-point scale factors (`256` = 1.0x).
+    /// This keeps the font atlas monochrome while allowing fractional
+    /// screen-space glyph sizes such as 1.5x (`384`).
+    pub fn draw_text_scaled_q8(
+        &self,
+        x: i16,
+        y: i16,
+        text: &str,
+        scale_x_q8: u16,
+        scale_y_q8: u16,
+        tint: (u8, u8, u8),
+    ) {
+        self.draw_text_scaled_with_spacing_q8(x, y, text, scale_x_q8, scale_y_q8, 0, tint);
+    }
+
+    /// Draw scaled text with signed spacing inserted between adjacent
+    /// characters. `letter_spacing` is measured in final screen pixels, not
+    /// source-glyph pixels.
+    pub fn draw_text_scaled_with_spacing(
+        &self,
+        x: i16,
+        y: i16,
+        text: &str,
+        scale_x: u8,
+        scale_y: u8,
+        letter_spacing: i8,
+        tint: (u8, u8, u8),
+    ) {
         assert!(scale_x > 0 && scale_y > 0, "scale must be > 0 in both axes");
+        self.draw_text_scaled_with_spacing_q8(
+            x,
+            y,
+            text,
+            u16::from(scale_x) * 256,
+            u16::from(scale_y) * 256,
+            letter_spacing,
+            tint,
+        );
+    }
+
+    /// Draw scaled text with Q8 fixed-point scale and signed spacing inserted
+    /// between adjacent characters. `letter_spacing` is measured in final
+    /// screen pixels, not source-glyph pixels.
+    pub fn draw_text_scaled_with_spacing_q8(
+        &self,
+        x: i16,
+        y: i16,
+        text: &str,
+        scale_x_q8: u16,
+        scale_y_q8: u16,
+        letter_spacing: i8,
+        tint: (u8, u8, u8),
+    ) {
+        assert!(
+            scale_x_q8 > 0 && scale_y_q8 > 0,
+            "scale must be > 0 in both axes"
+        );
         let font = self.font;
         let gw = font.glyph_w as i16;
         let gh = font.glyph_h as i16;
-        let sw = gw * scale_x as i16;
-        let sh = gh * scale_y as i16;
-        let advance = font.advance_x as i16 * scale_x as i16;
+        let sw = scale_q8_i16(gw, scale_x_q8);
+        let sh = scale_q8_i16(gh, scale_y_q8);
         let clut = self.clut.uv_clut_word();
         let tpage = self.tpage.uv_tpage_word(0);
-        let mut cursor_x = x;
-        for ch in text.chars() {
+        let mut cursor_x_q8 = i32::from(x) << 8;
+        let mut chars = text.chars().peekable();
+        while let Some(ch) = chars.next() {
+            let gap = if chars.peek().is_some() {
+                i16::from(letter_spacing)
+            } else {
+                0
+            };
+            let cursor_x = round_q8_to_i16(cursor_x_q8);
             let Some((u, v)) = self.glyph_uv(ch) else {
-                cursor_x = cursor_x.wrapping_add(advance);
+                cursor_x_q8 = cursor_x_q8
+                    .saturating_add(i32::from(font.glyph_advance(ch)) * i32::from(scale_x_q8))
+                    .saturating_add(i32::from(gap) << 8);
                 continue;
             };
             let verts = [
@@ -468,7 +634,9 @@ impl FontAtlas {
                 (u + gw as u8, v + gh as u8),
             ];
             draw_quad_textured(verts, uvs, clut, tpage, tint);
-            cursor_x = cursor_x.wrapping_add(advance);
+            cursor_x_q8 = cursor_x_q8
+                .saturating_add(i32::from(font.glyph_advance(ch)) * i32::from(scale_x_q8))
+                .saturating_add(i32::from(gap) << 8);
         }
     }
 
@@ -502,8 +670,7 @@ impl FontAtlas {
         let font = self.font;
         let gw = font.glyph_w as i32;
         let gh = font.glyph_h as i32;
-        let advance = font.advance_x as i32;
-        let total_w = (text.chars().count() as i32) * advance;
+        let total_w = font.text_width(text) as i32;
         // Centre the string on the pivot -- baseline (top edge of
         // first glyph) is `gh/2` above the pivot so that the glyph
         // midline runs through `(cx, cy)`.
@@ -522,11 +689,13 @@ impl FontAtlas {
             ((cx as i32 + rx) as i16, (cy as i32 + ry) as i16)
         };
 
-        for (i, ch) in text.chars().enumerate() {
+        let mut cursor_x = 0i32;
+        for ch in text.chars() {
             let Some((u, v)) = self.glyph_uv(ch) else {
+                cursor_x += font.glyph_advance(ch) as i32;
                 continue;
             };
-            let lx0 = origin_x + (i as i32) * advance;
+            let lx0 = origin_x + cursor_x;
             let lx1 = lx0 + gw;
             let ly0 = origin_y;
             let ly1 = origin_y + gh;
@@ -538,6 +707,7 @@ impl FontAtlas {
                 (u + gw as u8, v + gh as u8),
             ];
             draw_quad_textured(verts, uvs, clut, tpage, tint);
+            cursor_x += font.glyph_advance(ch) as i32;
         }
     }
 
@@ -572,7 +742,6 @@ impl FontAtlas {
         let font = self.font;
         let gw = font.glyph_w as i32;
         let gh = font.glyph_h as i32;
-        let advance = font.advance_x as i32;
         let (m00, m01) = (m[0][0] as i32, m[0][1] as i32);
         let (m10, m11) = (m[1][0] as i32, m[1][1] as i32);
         let clut = self.clut.uv_clut_word();
@@ -584,11 +753,13 @@ impl FontAtlas {
             (sx as i16, sy as i16)
         };
 
-        for (i, ch) in text.chars().enumerate() {
+        let mut cursor_x = 0i32;
+        for ch in text.chars() {
             let Some((u, v)) = self.glyph_uv(ch) else {
+                cursor_x += font.glyph_advance(ch) as i32;
                 continue;
             };
-            let lx0 = (i as i32) * advance;
+            let lx0 = cursor_x;
             let lx1 = lx0 + gw;
             let ly0 = 0;
             let ly1 = gh;
@@ -600,6 +771,7 @@ impl FontAtlas {
                 (u + gw as u8, v + gh as u8),
             ];
             draw_quad_textured(verts, uvs, clut, tpage, tint);
+            cursor_x += font.glyph_advance(ch) as i32;
         }
     }
 
@@ -670,13 +842,12 @@ impl FontAtlas {
         let gh = font.glyph_h as i16;
         let sw = gw * scale_x as i16;
         let sh = gh * scale_y as i16;
-        let advance = font.advance_x as i16 * scale_x as i16;
         let clut = self.clut.uv_clut_word();
         let tpage = self.tpage.uv_tpage_word(0);
         let mut cursor_x = x;
         for ch in text.chars() {
             let Some((u, v)) = self.glyph_uv(ch) else {
-                cursor_x = cursor_x.wrapping_add(advance);
+                cursor_x = cursor_x.wrapping_add(font.glyph_advance(ch) as i16 * scale_x as i16);
                 continue;
             };
             let verts = [
@@ -693,7 +864,7 @@ impl FontAtlas {
             ];
             let colors = [top, top, bottom, bottom];
             draw_quad_textured_gouraud(verts, uvs, colors, clut, tpage);
-            cursor_x = cursor_x.wrapping_add(advance);
+            cursor_x = cursor_x.wrapping_add(font.glyph_advance(ch) as i16 * scale_x as i16);
         }
     }
 
@@ -731,9 +902,16 @@ mod tests {
             0xFF, 0x01, // 'B': row 0 = alternating, row 1 = rightmost
             0x55, 0x80,
         ],
+        glyph_advances: None,
         advance_x: 8,
         line_height: 2,
         bit_order: BitOrder::Lsb,
+    };
+
+    const TEST_PROPORTIONAL_ADVANCES: [u8; 2] = [3, 7];
+    const TEST_PROPORTIONAL_FONT: BitmapFont = BitmapFont {
+        glyph_advances: Some(&TEST_PROPORTIONAL_ADVANCES),
+        ..TEST_FONT
     };
 
     #[test]
@@ -772,5 +950,30 @@ mod tests {
         assert_eq!(msb_font.glyph_row_packed(0, 1), 0x80);
         // 0x55 (0b01010101) mirrors to 0xAA (0b10101010).
         assert_eq!(msb_font.glyph_row_packed(1, 0), 0xAA);
+    }
+
+    #[test]
+    fn glyph_advances_override_fixed_advance_when_present() {
+        assert_eq!(TEST_PROPORTIONAL_FONT.glyph_advance('A'), 3);
+        assert_eq!(TEST_PROPORTIONAL_FONT.glyph_advance('B'), 7);
+        assert_eq!(TEST_PROPORTIONAL_FONT.glyph_advance('Z'), 8);
+        assert_eq!(TEST_PROPORTIONAL_FONT.text_width("ABA"), 13);
+    }
+
+    #[test]
+    fn text_width_with_spacing_inserts_gaps_between_glyphs_only() {
+        assert_eq!(TEST_PROPORTIONAL_FONT.text_width_with_spacing("", 5), 0);
+        assert_eq!(TEST_PROPORTIONAL_FONT.text_width_with_spacing("A", 5), 3);
+        assert_eq!(TEST_PROPORTIONAL_FONT.text_width_with_spacing("ABA", 2), 17);
+        assert_eq!(TEST_PROPORTIONAL_FONT.text_width_with_spacing("ABA", -2), 9);
+    }
+
+    #[test]
+    fn q8_scale_helpers_round_to_screen_pixels() {
+        assert_eq!(scale_q8_i16(8, 256), 8);
+        assert_eq!(scale_q8_i16(8, 384), 12);
+        assert_eq!(scale_q8_i16(17, 384), 26);
+        assert_eq!(round_q8_to_i16(384), 2);
+        assert_eq!(round_q8_to_i16(-384), -2);
     }
 }

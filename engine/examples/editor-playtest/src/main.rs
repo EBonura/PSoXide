@@ -36,6 +36,7 @@ extern crate psx_rt;
 use psx_asset::{Animation, Model, ModelPart, ModelVertex, Texture};
 #[cfg(feature = "vis-full-active-chunks")]
 use psx_engine::draw_indexed_cached_room_vertex_lit_all_cells;
+use psx_engine::ui::UiTextureSlot;
 #[cfg(feature = "cd-stream-bench")]
 use psx_engine::CompactCollisionRoom;
 #[cfg(feature = "world-grid-visible")]
@@ -73,7 +74,7 @@ use psx_engine::{
     draw_indexed_cached_room_vertex_lit_visible_cells, draw_room_vertex_lit_visible_cells,
     GridVisibility,
 };
-use psx_font::{fonts::BASIC, FontAtlas};
+use psx_font::FontAtlas;
 use psx_gpu::{
     draw_line_mono, draw_tri_flat_blended,
     material::{BlendMode, TextureMaterial, TextureWindow},
@@ -131,7 +132,7 @@ use generated::{
     MODEL_FRAME_BOUNDS, MODEL_INSTANCES, MODEL_SOCKETS, PARTICLE_EMITTERS, PLAYER_CONTROLLER,
     PLAYER_SPAWN, ROOMS, ROOM_CACHE_CELLS, ROOM_CACHE_CELL_VERTICES, ROOM_CACHE_SURFACES,
     ROOM_CACHE_VERTICES, ROOM_CHUNKS, ROOM_PORTALS, ROOM_RESIDENCY, ROOM_SURFACE_CACHES,
-    ROOM_VISIBILITY, UI_NODES, UI_SFX_CUES, UI_SFX_SAMPLES, VISIBILITY_CELLS, WEAPONS,
+    ROOM_VISIBILITY, UI_FONTS, UI_NODES, UI_SFX_CUES, UI_SFX_SAMPLES, VISIBILITY_CELLS, WEAPONS,
     WEAPON_HITBOXES,
 };
 use generated::{GAME_FLOW, OPTIONS, UI_SCENES};
@@ -238,9 +239,21 @@ const MODEL_TPAGE_LIMIT_X: u16 = SKY_PANORAMA_LEFT_TPAGE.x();
 const SKY_CYCLORAMA_COLUMNS_MIN: u8 = 8;
 const SKY_CYCLORAMA_COLUMNS_MAX: u8 = 12;
 
-/// 4bpp 8x8 BIOS-style font atlas for the analog-mode gate prompt.
-const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
-const FONT_CLUT: Clut = Clut::new(320, 256);
+/// Runtime UI font slots. The cooked manifest compacts authored font choices
+/// into these slots, so only fonts actually used by cooked UI text are uploaded.
+const MAX_RUNTIME_UI_FONTS: usize = 4;
+const UI_FONT_TPAGES: [Tpage; MAX_RUNTIME_UI_FONTS] = [
+    Tpage::new(320, 0, TexDepth::Bit4),
+    Tpage::new(384, 0, TexDepth::Bit4),
+    Tpage::new(448, 0, TexDepth::Bit4),
+    Tpage::new(512, 0, TexDepth::Bit4),
+];
+const UI_FONT_CLUTS: [Clut; MAX_RUNTIME_UI_FONTS] = [
+    Clut::new(320, 256),
+    Clut::new(336, 256),
+    Clut::new(352, 256),
+    Clut::new(368, 256),
+];
 const TARGET_LOCK_OUTER: i32 = 25;
 const TARGET_LOCK_INNER: i32 = 13;
 const TARGET_LOCK_TRI_HALF_WIDTH: i32 = 8;
@@ -1603,6 +1616,8 @@ static mut MODEL_ATLAS_COUNT: usize = 0;
 
 const VRAM_UPLOAD_QUEUE_CAP: usize = 8;
 const VRAM_UPLOAD_ROWS_PER_BACKGROUND_TICK: u16 = 8;
+const UI_TEXTURE_UPLOAD_ROW_BUDGET: u16 = ROOM_TILE_TEXELS;
+const UI_TEXTURE_UPLOAD_MAX_STEPS: u8 = 4;
 const ROOM_WINDOW_BACKGROUND_TICK_MASK: u32 = 1;
 
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -3402,8 +3417,8 @@ struct Playtest {
     soft_lock_suppressed: bool,
     /// Spawn position retained for orbit-mode targeting.
     spawn: RoomPoint,
-    /// Font atlas used for the analog-mode required prompt.
-    font: Option<FontAtlas>,
+    /// Runtime UI font atlases, compacted from the cooked manifest's used fonts.
+    ui_fonts: [Option<FontAtlas>; MAX_RUNTIME_UI_FONTS],
     /// Parsed models/materials, built once at init.
     models: [Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
     /// Predecoded model face records, shared by `models`.
@@ -3513,7 +3528,7 @@ impl Playtest {
             soft_lock_target: None,
             soft_lock_suppressed: false,
             spawn: RoomPoint::ZERO,
-            font: None,
+            ui_fonts: [const { None }; MAX_RUNTIME_UI_FONTS],
             models: [const { None }; MAX_RUNTIME_MODELS],
             model_faces: [TexturedModelRenderFace::ZERO; MAX_RUNTIME_MODEL_FACES],
             model_face_count: 0,
@@ -3579,14 +3594,38 @@ impl Scene for Playtest {
     /// scenes (the cooked Main Menu) draw their labels and buttons with
     /// the same glyphs the in-game HUD uses.
     fn ui_font(&self) -> Option<&FontAtlas> {
-        self.font.as_ref()
+        self.ui_fonts[0].as_ref()
+    }
+
+    fn ui_font_at(&self, index: u8) -> Option<&FontAtlas> {
+        self.ui_fonts
+            .get(index as usize)
+            .and_then(|font| font.as_ref())
+    }
+
+    fn ui_texture(&self, asset_id: AssetId) -> Option<UiTextureSlot> {
+        let asset = find_asset_of_kind(ASSETS, asset_id, AssetKind::Texture)?;
+        let slot = ensure_ui_texture_uploaded(asset.id, asset.bytes)?;
+        Some(UiTextureSlot {
+            clut_word: slot.clut_word,
+            tpage_word: slot.tpage_word,
+            texture_window: slot.texture_window,
+            texture_width: slot.texture_width,
+            texture_height: slot.texture_height,
+        })
     }
 
     /// Upload the font at boot (before any state is entered) so a front-end
     /// menu scene -- which renders before gameplay `init` runs -- has glyphs
     /// to draw its labels and buttons with.
     fn load_shared_assets(&mut self, _ctx: &mut Ctx) {
-        self.font = Some(FontAtlas::upload(&BASIC, FONT_TPAGE, FONT_CLUT));
+        for slot in 0..UI_FONTS.len().min(MAX_RUNTIME_UI_FONTS) {
+            self.ui_fonts[slot] = Some(FontAtlas::upload(
+                UI_FONTS[slot],
+                UI_FONT_TPAGES[slot],
+                UI_FONT_CLUTS[slot],
+            ));
+        }
     }
 
     /// Apply front-end settings chosen before Play. Screen-position options
@@ -3884,7 +3923,7 @@ impl Scene for Playtest {
 
     fn render(&mut self, ctx: &mut Ctx) {
         if !ctx.pad.is_analog() {
-            if let Some(font) = self.font.as_ref() {
+            if let Some(font) = self.ui_fonts[0].as_ref() {
                 draw_analog_required_prompt(font);
             }
             return;
@@ -4713,11 +4752,17 @@ impl Scene for Playtest {
             // The shared UI_NODES pool now holds front-end menu scenes too, so
             // draw only the HUD scene's slice as the in-game overlay.
             let (hud_first, hud_count) = hud_scene_range();
+            let font_table = [
+                self.ui_fonts[0].as_ref(),
+                self.ui_fonts[1].as_ref(),
+                self.ui_fonts[2].as_ref(),
+                self.ui_fonts[3].as_ref(),
+            ];
             draw_player_hud(
                 UI_NODES,
                 hud_first,
                 hud_count,
-                self.font.as_ref(),
+                &font_table,
                 self.motor.stamina_q12(),
                 self.motor_config().stamina_max_q12,
             );
@@ -10238,6 +10283,29 @@ fn ensure_texture_uploaded(asset_id: AssetId, asset_bytes: &'static [u8]) -> Opt
         VramSlotClutMode::OpaqueZero
     };
     ensure_texture_uploaded_with_clut_mode(asset_id, asset_bytes, clut_mode)
+}
+
+fn ensure_ui_texture_uploaded(asset_id: AssetId, asset_bytes: &'static [u8]) -> Option<VramSlot> {
+    let texture = Texture::from_bytes(asset_bytes).ok()?;
+    let clut_mode = if texture.index_zero_transparent() {
+        VramSlotClutMode::TransparentZero
+    } else {
+        VramSlotClutMode::OpaqueZero
+    };
+    if let Some(slot) = find_vram_slot(asset_id, clut_mode) {
+        return Some(slot);
+    }
+
+    let _ = ensure_texture_uploaded_with_clut_mode(asset_id, asset_bytes, clut_mode);
+    let mut steps = 0u8;
+    while pending_vram_upload(asset_id, clut_mode) && steps < UI_TEXTURE_UPLOAD_MAX_STEPS {
+        unsafe {
+            VRAM_UPLOAD_QUEUE.step(UI_TEXTURE_UPLOAD_ROW_BUDGET);
+        }
+        steps = steps.saturating_add(1);
+    }
+
+    find_vram_slot(asset_id, clut_mode)
 }
 
 fn ensure_texture_uploaded_with_clut_mode(

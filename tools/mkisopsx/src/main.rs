@@ -16,8 +16,9 @@
 //! (points the BIOS at `PSX.EXE`) and the EXE itself, both in the
 //! root directory. Pass `--cdtest-sectors N` to insert deterministic
 //! `CDTEST.BIN` stream-benchmark data before `PSX.EXE`. Pass one or
-//! more `--cdda-track <raw-pcm>` paths to append sector-aligned raw
-//! CD-DA tracks into the same `.bin` and emit a sibling `.cue`.
+//! more `--cdda-track <raw-pcm>` paths, or a newline-delimited
+//! `--cdda-track-list <file>`, to append sector-aligned raw CD-DA
+//! tracks into the same `.bin` and emit a sibling `.cue`.
 //!
 //! The tool is deliberately a tiny CLI -- actual encoding lives in
 //! `psx-iso::iso9660` so it's reusable from build scripts, test
@@ -108,6 +109,13 @@ fn parse_args() -> Result<Args, String> {
                         .ok_or_else(|| "--cdda-track takes a path".to_string())?,
                 ));
             }
+            "--cdda-track-list" => {
+                let path = PathBuf::from(
+                    it.next()
+                        .ok_or_else(|| "--cdda-track-list takes a path".to_string())?,
+                );
+                cdda_tracks.extend(read_cdda_track_list(&path)?);
+            }
             "--system-area" => {
                 system_area = Some(PathBuf::from(
                     it.next()
@@ -158,6 +166,10 @@ fn print_usage() {
                          Append a sector-aligned raw CD-DA track to\n\
                          the output .bin and emit a sibling .cue. May\n\
                          be repeated.\n\
+         --cdda-track-list PATH\n\
+                         Append sector-aligned raw CD-DA tracks from a\n\
+                         newline-delimited list. Blank lines and lines\n\
+                         starting with # are ignored.\n\
          --system-area PATH\n\
                          Inject the first 16 sectors from a local PS1\n\
                          system-area file or disc image. May also be\n\
@@ -284,6 +296,32 @@ fn main() -> ExitCode {
         args.exe.display(),
     );
     ExitCode::SUCCESS
+}
+
+fn read_cdda_track_list(path: &Path) -> Result<Vec<PathBuf>, String> {
+    let text = fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    let base = path.parent().unwrap_or_else(|| Path::new(""));
+    let mut tracks = Vec::new();
+    for (line_index, line) in text.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let track = PathBuf::from(trimmed);
+        tracks.push(if track.is_absolute() {
+            track
+        } else {
+            base.join(track)
+        });
+        if tracks.len() > 98 {
+            return Err(format!(
+                "{}:{} exceeds the 98 CD-DA track limit",
+                path.display(),
+                line_index + 1
+            ));
+        }
+    }
+    Ok(tracks)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -626,6 +664,33 @@ mod tests {
         assert!(cue.contains("  TRACK 02 AUDIO\n"));
         assert!(cue.contains("    INDEX 00 00:00:10\n"));
         assert!(cue.contains("    INDEX 01 00:02:10\n"));
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn cdda_track_list_skips_comments_and_resolves_relative_paths() {
+        let dir = std::env::temp_dir().join(format!(
+            "mkisopsx-test-{}-{}",
+            std::process::id(),
+            "cdda-list"
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let list_path = dir.join("tracks.txt");
+        let absolute = dir.join("absolute track.cdda");
+        std::fs::write(
+            &list_path,
+            format!(
+                "# generated tracks\n\ntrack 02.cdda\n{}\n",
+                absolute.display()
+            ),
+        )
+        .unwrap();
+
+        let tracks = read_cdda_track_list(&list_path).unwrap();
+        assert_eq!(tracks, vec![dir.join("track 02.cdda"), absolute]);
 
         std::fs::remove_dir_all(dir).unwrap();
     }
