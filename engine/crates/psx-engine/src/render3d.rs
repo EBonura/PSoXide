@@ -3922,7 +3922,8 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             return;
         }
 
-        let slot = (self.commands[command_index].slot as usize).min(OT_DEPTH - 1);
+        let slot = self.commands[command_index].slot as usize;
+        debug_assert!(slot < OT_DEPTH);
         let command_link = command_index as u16;
         let tail = self.slot_tails()[slot];
         if tail == WORLD_COMMAND_NONE {
@@ -3938,7 +3939,8 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             return;
         }
 
-        let slot = (self.commands[command_index].slot as usize).min(OT_DEPTH - 1);
+        let slot = self.commands[command_index].slot as usize;
+        debug_assert!(slot < OT_DEPTH);
         let command_link = command_index as u16;
         let head = self.slot_heads()[slot];
         if head == WORLD_COMMAND_NONE
@@ -4065,8 +4067,8 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                     // arenas borrowed by submit methods. Those packets live
                     // until after this pass flushes and the frame submits.
                     unsafe {
-                        self.ot.add_raw_slot(
-                            DepthSlot::new(command.slot as usize),
+                        self.ot.add_raw_unchecked(
+                            command.slot as usize,
                             command.packet_ptr,
                             command.words,
                         )
@@ -4113,8 +4115,8 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                     // arenas borrowed by submit methods. Those packets live
                     // until after this pass flushes and the frame submits.
                     unsafe {
-                        self.ot.add_raw_slot(
-                            DepthSlot::new(command.slot as usize),
+                        self.ot.add_raw_unchecked(
+                            command.slot as usize,
                             command.packet_ptr,
                             command.words,
                         )
@@ -4430,7 +4432,8 @@ impl<'a, 'ot, 'arena, const OT_DEPTH: usize> GouraudRenderPass<'a, 'ot, 'arena, 
             return;
         }
 
-        let slot = self.commands[command_index].slot.index().min(OT_DEPTH - 1);
+        let slot = self.commands[command_index].slot.index();
+        debug_assert!(slot < OT_DEPTH);
         let command_link = command_index as u16;
         let head = self.slot_heads[slot];
         if head == GOURAUD_COMMAND_NONE
@@ -4469,7 +4472,16 @@ impl<'a, 'ot, 'arena, const OT_DEPTH: usize> GouraudRenderPass<'a, 'ot, 'arena, 
             while command_index != GOURAUD_COMMAND_NONE {
                 let command = self.commands[command_index as usize];
                 if let Some(tri) = self.triangles.get_mut(command.primitive_index) {
-                    self.ot.add_packet_slot(command.slot, tri);
+                    // SAFETY: Commands are created only after the primitive
+                    // arena push succeeds, and their slots come from
+                    // OT-depth-aware depth-band mapping.
+                    unsafe {
+                        self.ot.add_raw_unchecked(
+                            command.slot.index(),
+                            tri as *mut TriGouraud as *mut u32,
+                            TriGouraud::WORDS,
+                        )
+                    };
                 }
                 command_index = command.next;
             }
