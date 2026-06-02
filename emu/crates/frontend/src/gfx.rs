@@ -222,6 +222,7 @@ impl Graphics {
         show_lights: bool,
         hidden_scene_nodes: &std::collections::HashSet<psxed_project::NodeId>,
         active_room: Option<psxed_project::NodeId>,
+        active_floor: usize,
         selected: psxed_project::NodeId,
         hovered_primitive: Option<psxed_ui::Selection>,
         selected_primitive: Option<psxed_ui::Selection>,
@@ -247,6 +248,7 @@ impl Graphics {
             show_lights,
             hidden_scene_nodes,
             active_room,
+            active_floor,
             selected,
             hovered_primitive,
             selected_primitive,
@@ -341,16 +343,19 @@ impl Graphics {
         );
     }
 
-    /// Upload the CPU-decoded visible display area for 24bpp scanout.
-    /// Normal 15-bit gameplay presents the HW renderer target; this
-    /// fallback exists because PS1 24bpp pixels are RGB888 triplets
-    /// packed across 16-bit VRAM cells.
+    /// Upload the CPU-decoded visible display area for presentation cases the
+    /// HW texture path cannot express directly: 24bpp scanout, and GP1(06h/
+    /// 07h) screen-position preview. Normal 15-bit gameplay with the standard
+    /// centred display range presents the HW renderer target.
     pub fn prepare_display(&self, gpu: Option<&Gpu>) {
         let Some(gpu) = gpu else {
             self.clear_display_texture();
             return;
         };
-        if !gpu.display_area().bpp24 {
+        let needs_cpu_display = gpu.display_area().bpp24
+            || gpu.horizontal_display_offset_px() != 0
+            || gpu.vertical_display_offset_px() != 0;
+        if !needs_cpu_display {
             return;
         }
         let (rgba, width, height) = gpu.display_rgba8();

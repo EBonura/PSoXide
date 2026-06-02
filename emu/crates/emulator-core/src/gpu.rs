@@ -608,6 +608,35 @@ impl Gpu {
         }
     }
 
+    /// Horizontal presentation offset, in displayed pixels, requested by
+    /// GP1(06h) relative to the standard centred window. Real hardware slides
+    /// the active picture by this much within the video signal (the classic
+    /// CRT screen-position adjustment); [`Gpu::display_rgba8`] reproduces it so
+    /// the setting is visible even though we otherwise crop to the active
+    /// region. Content that leaves the H-range at the standard value -- the
+    /// vast majority -- gets `0`.
+    pub fn horizontal_display_offset_px(&self) -> i32 {
+        // Standard centred H-range start (GP1 06h X1) the SDK and most content
+        // use; the offset is measured relative to it. GPU clocks per pixel come
+        // from the active dot clock, so 320-wide content uses 8 (matching the
+        // SDK's `set_screen_h_offset`).
+        const H_DISPLAY_START_STANDARD: i32 = 0x260;
+        let divisor = self.dot_clock_divisor().max(1) as i32;
+        (self.h_range_x1 as i32 - H_DISPLAY_START_STANDARD) / divisor
+    }
+
+    /// Vertical presentation offset, in displayed scanlines, requested by
+    /// GP1(07h) relative to the standard centred window. This mirrors the
+    /// screen-position preview logic in [`Self::horizontal_display_offset_px`].
+    pub fn vertical_display_offset_px(&self) -> i32 {
+        let standard = if self.effective_display_height() > 240 {
+            0x23
+        } else {
+            0x10
+        };
+        self.v_range_y1 as i32 - standard
+    }
+
     /// Produce a row-major `RGBA8` buffer of the current display area.
     /// In 16-bit mode the 5-bit channels are bit-replicated to 8-bit;
     /// in 24-bit mode the packed RGB888 triplets are used directly.
@@ -622,14 +651,33 @@ impl Gpu {
         let vram_h = crate::VRAM_HEIGHT as u16;
         let eff_h = da.height.min(vram_h.saturating_sub(da.y));
         let eff_w = da.width.min(vram_w.saturating_sub(da.x));
+        // GP1(06h)/(07h) screen positioning: slide the picture within the
+        // output by the requested offset and black-fill the exposed edge, so a
+        // screen-position setting is visible. Real hardware shifts the active
+        // window inside the video signal; cropping to the active region would
+        // otherwise discard the shift. Standard-centred content -> offset 0.
+        let off_x = self
+            .horizontal_display_offset_px()
+            .clamp(-(eff_w as i32), eff_w as i32);
+        let off_y = self
+            .vertical_display_offset_px()
+            .clamp(-(eff_h as i32), eff_h as i32);
         let mut out = Vec::with_capacity((eff_w as usize) * (eff_h as usize) * 4);
         for dy in 0..eff_h {
+            let src_y = dy as i32 - off_y;
             for dx in 0..eff_w {
+                let src_x = dx as i32 - off_x;
+                if src_x < 0 || src_x >= eff_w as i32 || src_y < 0 || src_y >= eff_h as i32 {
+                    out.extend_from_slice(&[0, 0, 0, 0xFF]);
+                    continue;
+                }
+                let sx = da.x + src_x as u16;
+                let sy = da.y + src_y as u16;
                 if da.bpp24 {
-                    let (r, g, b) = self.read_pixel_rgb24(da.x + dx, da.y + dy);
+                    let (r, g, b) = self.read_pixel_rgb24(sx, sy);
                     out.extend_from_slice(&[r, g, b, 0xFF]);
                 } else {
-                    let pixel = self.vram.get_pixel(da.x + dx, da.y + dy);
+                    let pixel = self.vram.get_pixel(sx, sy);
                     let r = ((pixel & 0x1F) as u8) << 3;
                     let g = (((pixel >> 5) & 0x1F) as u8) << 3;
                     let b = (((pixel >> 10) & 0x1F) as u8) << 3;
@@ -3729,6 +3777,34 @@ mod tests {
     }
 
     #[test]
+    fn display_rgba8_pans_by_gp1_06_horizontal_offset() {
+        let mut gpu = Gpu::new();
+        gpu.write32(GP1_ADDR, 0x0500_0000); // display start (0, 0)
+        gpu.write32(GP1_ADDR, 0x0703_c000); // v-range 0..240
+        gpu.write32(GP1_ADDR, 0x0800_0001); // 320-wide, 240 lines
+        // Mark VRAM column 0 red so we can see where it lands on the output.
+        for y in 0..4 {
+            gpu.vram.set_pixel(0, y, 0x001F); // 15bpp red
+        }
+        let px = |buf: &[u8], x: usize| (buf[x * 4], buf[x * 4 + 1], buf[x * 4 + 2]);
+
+        // H-range at the standard centre (0x260): no pan, column 0 is red.
+        gpu.write32(GP1_ADDR, 0x0600_0000 | 0x260 | (0xC60 << 12));
+        assert_eq!(gpu.horizontal_display_offset_px(), 0);
+        let (rgba, w, _h) = gpu.display_rgba8();
+        assert_eq!(w, 320);
+        assert_eq!(px(&rgba, 0), (255, 0, 0), "centred: column 0 = VRAM x=0");
+
+        // H-range start 0x260 + 32*8 = 0x360 -> +32 px: the picture slides right,
+        // so VRAM x=0 lands at output column 32 and columns 0..31 are black-fill.
+        gpu.write32(GP1_ADDR, 0x0600_0000 | 0x360 | (0xD60 << 12));
+        assert_eq!(gpu.horizontal_display_offset_px(), 32);
+        let (rgba, _w, _h) = gpu.display_rgba8();
+        assert_eq!(px(&rgba, 0), (0, 0, 0), "offset: exposed left edge is black");
+        assert_eq!(px(&rgba, 32), (255, 0, 0), "offset: VRAM x=0 now at column 32");
+    }
+
+    #[test]
     fn gp0_writes_are_accepted_without_effect() {
         let mut gpu = Gpu::new();
         let stat_before = gpu.read32(GP1_ADDR).unwrap();
@@ -4389,6 +4465,223 @@ mod tests {
         }
         // FIFO must be empty -- the 9-word packet consumed cleanly.
         assert_eq!(gpu.gp0_expected, 0);
+    }
+
+    /// A room surface is a quad split into two triangles sharing the
+    /// `0`-`2` diagonal: `tri(v0,v1,v2) + tri(v0,v2,v3)`. The PS1 GPU quad
+    /// primitive (0x3C) splits on the `1`-`2` diagonal instead. Emitting
+    /// the quad with packet order `[v1,v0,v2,v3]` makes the hardware split
+    /// land on the original `0`-`2` edge, so a single quad rasterizes the
+    /// same two triangles the engine submits today. This proves it
+    /// bit-exactly across a battery of shapes -- crucially the
+    /// axis-aligned quads with horizontal edges (tie-Y), the case where
+    /// `setup_sections`' strict-`>` y-sort could resolve the swapped
+    /// vertex order differently and leak a 1-LSB seam.
+    #[test]
+    fn textured_gouraud_quad_matches_two_triangle_split_bitexact() {
+        fn vert_word(x: i32, y: i32) -> u32 {
+            ((x as u32) & 0x7FF) | (((y as u32) & 0x7FF) << 16)
+        }
+        fn uv_word(u: u8, v: u8, hi: u16) -> u32 {
+            (u as u32) | ((v as u32) << 8) | ((hi as u32) << 16)
+        }
+        // tex_page_x = 5*64 = 320, tex_page_y = 256 (bit 4), 15bpp (bits
+        // 7-8 = 2). Sampling from VRAM y >= 256 keeps the texture clear of
+        // the draw region (y < 256) so no draw feeds back into a texel.
+        const TEXPAGE: u16 = 0x0115;
+
+        fn make_gpu() -> Gpu {
+            let mut gpu = Gpu::new();
+            gpu.write32(GP0_ADDR, 0xE300_0000); // draw area TL (0,0)
+            gpu.write32(GP0_ADDR, 0xE400_0000 | 0x3FF | (0x1FF << 10)); // BR
+            // Deterministic non-uniform 15bpp texture over the sample area.
+            for y in 256..512u16 {
+                for x in 256..640u16 {
+                    let p = (((x as u32) * 3 + (y as u32) * 5) & 0x7FFF) as u16 | 1;
+                    gpu.vram.set_pixel(x, y, p);
+                }
+            }
+            gpu
+        }
+
+        struct Quad {
+            v: [(i32, i32); 4],
+            c: [u32; 4],
+            uv: [(u8, u8); 4],
+        }
+        let quads = [
+            // Axis-aligned rectangle: horizontal top (v0,v1) + bottom
+            // (v3,v2) edges -- two tie-Y pairs, the room wall/floor case.
+            Quad {
+                v: [(20, 20), (120, 20), (120, 90), (20, 90)],
+                c: [0xFF_FFFF, 0x00_00FF, 0x00_FF00, 0xFF_0000],
+                uv: [(0, 0), (60, 0), (60, 40), (0, 40)],
+            },
+            // Trapezoid floor: horizontal near + far edges (tie-Y both).
+            Quad {
+                v: [(40, 140), (160, 140), (130, 190), (70, 190)],
+                c: [0x80_8080, 0x40_C0FF, 0xFF_C040, 0x20_2020],
+                uv: [(2, 2), (58, 2), (50, 38), (10, 38)],
+            },
+            // General quad, no two vertices share a Y.
+            Quad {
+                v: [(220, 30), (300, 55), (280, 150), (210, 110)],
+                c: [0x12_3456, 0x65_4321, 0x00_FFFF, 0xFF_00FF],
+                uv: [(5, 5), (40, 10), (55, 45), (8, 50)],
+            },
+            // Near-vertical skewed wall.
+            Quad {
+                v: [(340, 40), (380, 35), (385, 160), (345, 150)],
+                c: [0xAA_BBCC, 0x11_2233, 0x44_5566, 0x77_8899],
+                uv: [(0, 0), (20, 0), (20, 60), (0, 60)],
+            },
+            // Thin slab with a near-horizontal top edge (1px slope).
+            Quad {
+                v: [(420, 60), (520, 61), (515, 120), (425, 119)],
+                c: [0xFF_FFFF, 0xFF_FFFF, 0x00_0000, 0x00_0000],
+                uv: [(0, 0), (63, 0), (63, 30), (0, 30)],
+            },
+        ];
+
+        for (qi, q) in quads.iter().enumerate() {
+            // Path A: two triangles, engine 0-2 split.
+            let mut a = make_gpu();
+            for w in [
+                0x3400_0000 | q.c[0],
+                vert_word(q.v[0].0, q.v[0].1),
+                uv_word(q.uv[0].0, q.uv[0].1, 0),
+                q.c[1],
+                vert_word(q.v[1].0, q.v[1].1),
+                uv_word(q.uv[1].0, q.uv[1].1, TEXPAGE),
+                q.c[2],
+                vert_word(q.v[2].0, q.v[2].1),
+                uv_word(q.uv[2].0, q.uv[2].1, 0),
+            ] {
+                a.write32(GP0_ADDR, w);
+            }
+            for w in [
+                0x3400_0000 | q.c[0],
+                vert_word(q.v[0].0, q.v[0].1),
+                uv_word(q.uv[0].0, q.uv[0].1, 0),
+                q.c[2],
+                vert_word(q.v[2].0, q.v[2].1),
+                uv_word(q.uv[2].0, q.uv[2].1, TEXPAGE),
+                q.c[3],
+                vert_word(q.v[3].0, q.v[3].1),
+                uv_word(q.uv[3].0, q.uv[3].1, 0),
+            ] {
+                a.write32(GP0_ADDR, w);
+            }
+
+            // Path B: one quad, packet order [v1,v0,v2,v3] so the hardware
+            // 1-2 split diagonal lands on the original 0-2 edge.
+            let mut b = make_gpu();
+            let order = [1usize, 0, 2, 3];
+            for w in [
+                0x3C00_0000 | q.c[order[0]],
+                vert_word(q.v[order[0]].0, q.v[order[0]].1),
+                uv_word(q.uv[order[0]].0, q.uv[order[0]].1, 0),
+                q.c[order[1]],
+                vert_word(q.v[order[1]].0, q.v[order[1]].1),
+                uv_word(q.uv[order[1]].0, q.uv[order[1]].1, TEXPAGE),
+                q.c[order[2]],
+                vert_word(q.v[order[2]].0, q.v[order[2]].1),
+                uv_word(q.uv[order[2]].0, q.uv[order[2]].1, 0),
+                q.c[order[3]],
+                vert_word(q.v[order[3]].0, q.v[order[3]].1),
+                uv_word(q.uv[order[3]].0, q.uv[order[3]].1, 0),
+            ] {
+                b.write32(GP0_ADDR, w);
+            }
+
+            let xs = q.v.iter().map(|p| p.0).min().unwrap().max(0) as u16;
+            let xe = (q.v.iter().map(|p| p.0).max().unwrap().min(1023)) as u16;
+            let ys = q.v.iter().map(|p| p.1).min().unwrap().max(0) as u16;
+            let ye = (q.v.iter().map(|p| p.1).max().unwrap().min(511)) as u16;
+            let mut diffs = 0usize;
+            for y in ys..=ye {
+                for x in xs..=xe {
+                    if a.vram.get_pixel(x, y) != b.vram.get_pixel(x, y) {
+                        diffs += 1;
+                    }
+                }
+            }
+            assert_eq!(
+                diffs, 0,
+                "quad {qi}: {diffs} pixels differ between two-triangle split and quad primitive",
+            );
+        }
+
+        // Randomized sweep: jittered convex quads (perimeter order kept by
+        // jittering each corner of a base rectangle within its own
+        // bounds), the shape family the engine actually projects. Many
+        // land near tie-Y / 1px-slope edges. Deterministic LCG, no host
+        // float, so the sweep is reproducible.
+        let mut seed: u32 = 0x1234_5678;
+        let mut next = || {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            seed
+        };
+        for it in 0..4000usize {
+            // Keep the draw box clear of the texture (y >= 256) so no
+            // sub-triangle ever samples a texel another just overwrote --
+            // that feedback is draw-order sensitive and would be a test
+            // artifact, not a rasterization difference.
+            let bx = 30 + (next() % 360) as i32;
+            let by = 30 + (next() % 140) as i32;
+            let bw = 8 + (next() % 120) as i32;
+            let bh = 8 + (next() % 70) as i32;
+            // Corners jittered within their own half so the quad stays
+            // convex and in clockwise perimeter order.
+            let v = [
+                (bx + (next() % 4) as i32, by + (next() % 4) as i32),
+                (bx + bw - (next() % 4) as i32, by + (next() % 4) as i32),
+                (bx + bw - (next() % 4) as i32, by + bh - (next() % 4) as i32),
+                (bx + (next() % 4) as i32, by + bh - (next() % 4) as i32),
+            ];
+            let c = [next() & 0xFF_FFFF, next() & 0xFF_FFFF, next() & 0xFF_FFFF, next() & 0xFF_FFFF];
+            let uv = [
+                ((next() % 64) as u8, (next() % 64) as u8),
+                ((next() % 64) as u8, (next() % 64) as u8),
+                ((next() % 64) as u8, (next() % 64) as u8),
+                ((next() % 64) as u8, (next() % 64) as u8),
+            ];
+
+            let mut a = make_gpu();
+            for w in [
+                0x3400_0000 | c[0], vert_word(v[0].0, v[0].1), uv_word(uv[0].0, uv[0].1, 0),
+                c[1], vert_word(v[1].0, v[1].1), uv_word(uv[1].0, uv[1].1, TEXPAGE),
+                c[2], vert_word(v[2].0, v[2].1), uv_word(uv[2].0, uv[2].1, 0),
+            ] { a.write32(GP0_ADDR, w); }
+            for w in [
+                0x3400_0000 | c[0], vert_word(v[0].0, v[0].1), uv_word(uv[0].0, uv[0].1, 0),
+                c[2], vert_word(v[2].0, v[2].1), uv_word(uv[2].0, uv[2].1, TEXPAGE),
+                c[3], vert_word(v[3].0, v[3].1), uv_word(uv[3].0, uv[3].1, 0),
+            ] { a.write32(GP0_ADDR, w); }
+
+            let mut b = make_gpu();
+            let o = [1usize, 0, 2, 3];
+            for w in [
+                0x3C00_0000 | c[o[0]], vert_word(v[o[0]].0, v[o[0]].1), uv_word(uv[o[0]].0, uv[o[0]].1, 0),
+                c[o[1]], vert_word(v[o[1]].0, v[o[1]].1), uv_word(uv[o[1]].0, uv[o[1]].1, TEXPAGE),
+                c[o[2]], vert_word(v[o[2]].0, v[o[2]].1), uv_word(uv[o[2]].0, uv[o[2]].1, 0),
+                c[o[3]], vert_word(v[o[3]].0, v[o[3]].1), uv_word(uv[o[3]].0, uv[o[3]].1, 0),
+            ] { b.write32(GP0_ADDR, w); }
+
+            let xs = v.iter().map(|p| p.0).min().unwrap().max(0) as u16;
+            let xe = (v.iter().map(|p| p.0).max().unwrap().min(1023)) as u16;
+            let ys = v.iter().map(|p| p.1).min().unwrap().max(0) as u16;
+            let ye = (v.iter().map(|p| p.1).max().unwrap().min(511)) as u16;
+            let mut diffs = 0usize;
+            for y in ys..=ye {
+                for x in xs..=xe {
+                    if a.vram.get_pixel(x, y) != b.vram.get_pixel(x, y) {
+                        diffs += 1;
+                    }
+                }
+            }
+            assert_eq!(diffs, 0, "random quad {it}: {diffs} pixels differ (verts {v:?})");
+        }
     }
 
     // --- sample_texture transparency rules ---
