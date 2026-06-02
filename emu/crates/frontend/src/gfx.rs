@@ -344,16 +344,17 @@ impl Graphics {
     }
 
     /// Upload the CPU-decoded visible display area for presentation cases the
-    /// HW texture path cannot express directly: 24bpp scanout, and GP1(06h)
-    /// horizontal screen-position preview. Normal 15-bit gameplay with the
-    /// standard centred H-range presents the HW renderer target.
+    /// HW texture path cannot express directly: 24bpp scanout, and GP1(06h/
+    /// 07h) screen-position preview. Normal 15-bit gameplay with the standard
+    /// centred display range presents the HW renderer target.
     pub fn prepare_display(&self, gpu: Option<&Gpu>) {
         let Some(gpu) = gpu else {
             self.clear_display_texture();
             return;
         };
-        let needs_cpu_display =
-            gpu.display_area().bpp24 || gpu.horizontal_display_offset_px() != 0;
+        let needs_cpu_display = gpu.display_area().bpp24
+            || gpu.horizontal_display_offset_px() != 0
+            || gpu.vertical_display_offset_px() != 0;
         if !needs_cpu_display {
             return;
         }
