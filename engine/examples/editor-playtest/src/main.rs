@@ -132,8 +132,8 @@ use generated::{
     MODEL_FRAME_BOUNDS, MODEL_INSTANCES, MODEL_SOCKETS, PARTICLE_EMITTERS, PLAYER_CONTROLLER,
     PLAYER_SPAWN, ROOMS, ROOM_CACHE_CELLS, ROOM_CACHE_CELL_VERTICES, ROOM_CACHE_SURFACES,
     ROOM_CACHE_VERTICES, ROOM_CHUNKS, ROOM_PORTALS, ROOM_RESIDENCY, ROOM_SURFACE_CACHES,
-    ROOM_VISIBILITY, UI_FONTS, UI_NODES, UI_SFX_CUES, UI_SFX_SAMPLES, VISIBILITY_CELLS, WEAPONS,
-    WEAPON_HITBOXES,
+    ROOM_VISIBILITY, UI_FONTS, UI_NODES, UI_PAINTS, UI_SFX_CUES, UI_SFX_SAMPLES,
+    VISIBILITY_CELLS, WEAPONS, WEAPON_HITBOXES,
 };
 use generated::{GAME_FLOW, OPTIONS, UI_SCENES};
 #[cfg(all(
@@ -4773,6 +4773,7 @@ impl Scene for Playtest {
                 hud_first,
                 hud_count,
                 &font_table,
+                (ctx.sim_tick.as_u32() & 0xffff) as u16,
                 self.motor.stamina_q12(),
                 self.motor_config().stamina_max_q12,
             );
@@ -13620,6 +13621,7 @@ fn main() -> ! {
         &GAME_FLOW,
         UI_SCENES,
         UI_NODES,
+        UI_PAINTS,
         OPTIONS,
         UI_SFX_SAMPLES,
         UI_SFX_CUES,

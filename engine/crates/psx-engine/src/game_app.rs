@@ -47,9 +47,10 @@
 //! tables are `&'static` slices that the linker pins.
 
 use psx_level::{
-    first_focus, next_focus, FlowState, GameFlow, LevelOptionDef, LevelUiAction, LevelUiNodeKind,
-    LevelUiNodeRecord, LevelUiScene, LevelUiSfxCueRecord, LevelUiSfxEvent, LevelUiSfxSampleRecord,
-    LevelUiValueBinding, NavDir, NavRect, UI_OPTION_NONE, UI_SFX_NONE,
+    first_focus, next_focus, scene_state_flags, FlowState, GameFlow, LevelOptionDef,
+    LevelSceneState, LevelUiAction, LevelUiNodeKind, LevelUiNodeRecord, LevelUiScene,
+    LevelUiSfxCueRecord, LevelUiSfxEvent, LevelUiSfxSampleRecord, LevelUiValueBinding,
+    LevelWorldLayer, NavDir, NavRect, UI_OPTION_NONE, UI_SCENE_NONE, UI_SFX_NONE,
 };
 use psx_pad::button;
 
@@ -99,21 +100,63 @@ const CDDA_COMMAND_SPINS: u32 = 131_072;
 /// the bare gameplay scene under the old runner.
 pub const GAMEPLAY_ONLY: GameFlow = GameFlow {
     states: &[FlowState::Gameplay],
+    scene_states: &[],
     entry: 0,
 };
 
-/// `Copy` reduction of the resolved [`FlowState`] for the current
-/// cursor position. Dispatch matches on this so it never has to hold
-/// a borrow into the flow table while also touching `self.gameplay`.
+/// `Copy` reduction of the resolved [`FlowState`] for the current cursor
+/// position. Dispatch reads this before borrowing `self.gameplay`, so a
+/// composed state can update/render a world layer and an optional UI overlay
+/// without holding a borrow into the flow tables.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-enum StateTag {
-    /// Hand the tick to the borrowed gameplay scene.
-    Gameplay,
-    /// Show the UI scene with this [`LevelUiScene::id`].
-    UiScene {
-        /// Target scene id.
-        scene: u16,
-    },
+struct StateTag {
+    world: LevelWorldLayer,
+    ui_scene: u16,
+    flags: u16,
+}
+
+impl StateTag {
+    const GAMEPLAY: Self = Self {
+        world: LevelWorldLayer::Gameplay,
+        ui_scene: UI_SCENE_NONE,
+        flags: 0,
+    };
+
+    const fn ui_only(scene: u16) -> Self {
+        Self {
+            world: LevelWorldLayer::None,
+            ui_scene: scene,
+            flags: scene_state_flags::UI_INPUT,
+        }
+    }
+
+    const fn from_scene_state(state: LevelSceneState) -> Self {
+        Self {
+            world: state.world,
+            ui_scene: state.ui_scene,
+            flags: state.flags,
+        }
+    }
+
+    const fn has_gameplay(self) -> bool {
+        matches!(self.world, LevelWorldLayer::Gameplay)
+    }
+
+    const fn ui_scene(self) -> Option<u16> {
+        if self.ui_scene == UI_SCENE_NONE {
+            None
+        } else {
+            Some(self.ui_scene)
+        }
+    }
+
+    const fn ui_accepts_input(self) -> bool {
+        self.flags & scene_state_flags::UI_INPUT != 0
+    }
+
+    const fn world_is_paused(self) -> bool {
+        self.flags & scene_state_flags::PAUSE_WORLD != 0
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -454,6 +497,8 @@ pub struct GameApp<'a, S: Scene> {
     pub scenes: &'static [LevelUiScene],
     /// Shared UI node pool the scenes slice into.
     pub nodes: &'static [LevelUiNodeRecord],
+    /// Cooked UI gradient paints referenced by node colour roles.
+    pub paints: &'static [psx_level::LevelUiPaintRecord],
     /// Cooked project options. Sliders and `SetOption` actions bind to
     /// these by id; the live value store ([`Self::option_values`]) is
     /// seeded from each option's `default`.
@@ -494,6 +539,7 @@ impl<'a, S: Scene> GameApp<'a, S> {
         flow: &'static GameFlow,
         scenes: &'static [LevelUiScene],
         nodes: &'static [LevelUiNodeRecord],
+        paints: &'static [psx_level::LevelUiPaintRecord],
         options: &'static [LevelOptionDef],
         ui_sfx_samples: &'static [LevelUiSfxSampleRecord],
         ui_sfx_cues: &'static [LevelUiSfxCueRecord],
@@ -508,6 +554,7 @@ impl<'a, S: Scene> GameApp<'a, S> {
             flow,
             scenes,
             nodes,
+            paints,
             options,
             ui_sfx_samples,
             ui_sfx_cues,
@@ -659,9 +706,22 @@ impl<'a, S: Scene> GameApp<'a, S> {
     #[inline]
     fn tag_at(&self, index: u16) -> StateTag {
         match self.flow.states.get(index as usize) {
-            Some(FlowState::Gameplay) | None => StateTag::Gameplay,
-            Some(FlowState::UiScene { scene }) => StateTag::UiScene { scene: *scene },
+            Some(FlowState::SceneState { state }) => self
+                .scene_state(*state)
+                .map(StateTag::from_scene_state)
+                .unwrap_or(StateTag::GAMEPLAY),
+            Some(FlowState::Gameplay) | None => StateTag::GAMEPLAY,
+            Some(FlowState::UiScene { scene }) => StateTag::ui_only(*scene),
         }
+    }
+
+    #[inline]
+    fn scene_state(&self, state_id: u16) -> Option<LevelSceneState> {
+        self.flow
+            .scene_states
+            .iter()
+            .find(|state| state.id == state_id)
+            .copied()
     }
 
     /// Tag of the state the cursor currently sits on.
@@ -676,28 +736,55 @@ impl<'a, S: Scene> GameApp<'a, S> {
         self.flow
             .states
             .iter()
-            .position(|state| matches!(state, FlowState::Gameplay))
+            .enumerate()
+            .find(|(index, _)| self.tag_at(*index as u16).has_gameplay())
+            .map(|(index, _)| index as u16)
+    }
+
+    /// Index into [`GameFlow::states`] of the first state targeting
+    /// `state_id`, if any. A `GotoState` action names a composed state id;
+    /// the cursor addresses the flow table, so this resolves one to the
+    /// other.
+    fn flow_index_for_scene_state(&self, state_id: u16) -> Option<u16> {
+        self.flow
+            .states
+            .iter()
+            .position(
+                |state| matches!(state, FlowState::SceneState { state } if *state == state_id),
+            )
             .map(|index| index as u16)
     }
 
-    /// Move the cursor onto a gameplay state, running `gameplay.init`
-    /// exactly once on the first such transition.
+    /// Move the cursor onto `state_index`, running gameplay init exactly
+    /// once if the target state carries a gameplay/world layer.
     ///
-    /// This is the single funnel for "start the game": it is how the
-    /// gameplay-only path reaches init at boot and how a UI state hands
-    /// off to gameplay later. Idempotent init keeps a flow that bounces
-    /// between menu and gameplay from re-initialising the world.
-    fn enter_gameplay(&mut self, index: u16, ctx: &mut Ctx) {
+    /// This is the transition funnel. Today it preserves the old "start
+    /// gameplay" semantics; future loading/unloading phases belong here
+    /// because every state handoff now resolves through one path.
+    fn enter_flow_state(&mut self, state_index: u16, return_to: Option<u16>, ctx: &mut Ctx) {
+        self.cursor.current = state_index;
+        self.cursor.return_to = return_to;
+        self.cursor.menu_focus = MENU_FOCUS_NONE;
+        if !self.current_tag().has_gameplay() {
+            return;
+        }
         self.cdda.release_for_data_reads(ctx.sim_tick.as_u32());
-        self.cursor.current = index;
         if !self.cursor.gameplay_inited {
             self.gameplay.init(ctx);
             self.cursor.gameplay_inited = true;
+            ctx.request_timing_realign();
         }
         // Hand the current option values to gameplay on every entry (not just
         // first init), so a setting changed in a front-end menu before Play
         // takes effect this session.
         self.apply_current_options();
+    }
+
+    /// Compatibility wrapper for actions/tests that mean "enter the first
+    /// gameplay-capable state".
+    fn enter_gameplay(&mut self, index: u16, ctx: &mut Ctx) {
+        let return_to = self.cursor.return_to;
+        self.enter_flow_state(index, return_to, ctx);
     }
 
     /// Resolve a UI scene id to its `[first, count)` block in the shared
@@ -739,8 +826,20 @@ impl<'a, S: Scene> GameApp<'a, S> {
         self.flow
             .states
             .iter()
-            .position(|state| matches!(state, FlowState::UiScene { scene } if *scene == scene_id))
-            .map(|index| index as u16)
+            .enumerate()
+            .find(|(index, _)| {
+                let tag = self.tag_at(*index as u16);
+                tag.ui_scene() == Some(scene_id) && !tag.has_gameplay()
+            })
+            .map(|(index, _)| index as u16)
+            .or_else(|| {
+                self.flow
+                    .states
+                    .iter()
+                    .enumerate()
+                    .find(|(index, _)| self.tag_at(*index as u16).ui_scene() == Some(scene_id))
+                    .map(|(index, _)| index as u16)
+            })
     }
 
     /// Switch the cursor onto UI-scene flow `state_index`, remembering
@@ -883,10 +982,16 @@ impl<'a, S: Scene> GameApp<'a, S> {
         };
         self.play_node_sfx_event(node, LevelUiSfxEvent::Activate);
         match node.action {
+            LevelUiAction::GotoState { state } => {
+                if let Some(state_index) = self.flow_index_for_scene_state(state) {
+                    let return_to = Some(self.cursor.current);
+                    self.enter_flow_state(state_index, return_to, ctx);
+                }
+            }
             LevelUiAction::GotoScene { scene } => {
                 if let Some(state_index) = self.ui_state_index_for_scene(scene) {
                     let return_to = Some(self.cursor.current);
-                    self.enter_ui_state(state_index, return_to);
+                    self.enter_flow_state(state_index, return_to, ctx);
                 }
             }
             LevelUiAction::StartGameplay => {
@@ -903,6 +1008,104 @@ impl<'a, S: Scene> GameApp<'a, S> {
             // TODO(menu-step3): dispatch game-specific actions by id.
             LevelUiAction::Game { .. } => {}
         }
+    }
+
+    fn update_ui_scene(&mut self, scene: u16, ctx: &mut Ctx) {
+        // Resolve the scene's block in the shared pool once. Focus geometry
+        // walks the whole pool (parents are pool-relative), so the helpers
+        // take the range, not a sub-slice.
+        let (first, count) = self.scene_node_range(scene);
+
+        // Seed (or repair) focus before reading input, so the first press
+        // acts on the default control even on the frame the scene is entered,
+        // and so a flow driven headless (update without render) still tracks
+        // focus.
+        let _ = self.resolved_focus(first, count);
+
+        // D-pad moves focus among the scene's focusable controls. Each press
+        // is a discrete step, so use just_pressed; the resolver no-ops when
+        // nothing lies that way.
+        if ctx.just_pressed(button::UP) {
+            self.move_focus(first, count, NavDir::Up);
+        }
+        if ctx.just_pressed(button::DOWN) {
+            self.move_focus(first, count, NavDir::Down);
+        }
+        // LEFT / RIGHT scrub a focused slider's bound option, or move focus
+        // horizontally for any other control.
+        if ctx.just_pressed(button::LEFT) {
+            self.horizontal_press(first, count, false);
+        }
+        if ctx.just_pressed(button::RIGHT) {
+            self.horizontal_press(first, count, true);
+        }
+
+        // CROSS activates the focused control. CIRCLE is a dedicated
+        // back/cancel even when the focused control is not a Back button.
+        if ctx.just_pressed(button::CROSS) {
+            self.activate_focus(first, count, ctx);
+        } else if ctx.just_pressed(button::CIRCLE) {
+            self.go_back();
+        } else if ctx.just_pressed(button::START) {
+            // START keeps its "confirm / jump to gameplay" shortcut so a
+            // title screen advances without the player hunting for the Start
+            // button first.
+            if let Some(gameplay_index) = self.first_gameplay_index() {
+                self.enter_gameplay(gameplay_index, ctx);
+            }
+        }
+    }
+
+    fn update_ui_music(&mut self, scene: u16, ctx: &mut Ctx) {
+        let music_cue = self.scene_music_cue(scene);
+        self.cdda.request(music_cue, ctx.sim_tick.as_u32());
+        self.cdda.update(ctx.sim_tick.as_u32());
+    }
+
+    fn render_ui_scene(&mut self, scene: u16, ctx: &mut Ctx) {
+        // Resolve the scene's pool block, then resolve focus, so the
+        // highlighted control matches the one input acts on.
+        let (first, count) = self.scene_node_range(scene);
+        let focused = self.resolved_focus(first, count);
+        // Copy the node pool + option store out of `self` first so the
+        // resolver closures borrow only these Copy locals, not `self`
+        // (draw_scene already borrows `self.nodes`).
+        let nodes = self.nodes;
+        let paints = self.paints;
+        let options = self.options;
+        let option_values = self.option_values;
+        let option_len = self.option_len;
+        let mut textures = |asset| self.gameplay.ui_texture(asset);
+        let value = |binding: LevelUiValueBinding| {
+            resolve_ui_value(binding, options, &option_values, option_len)
+        };
+        // Slider fill reads the live option value by id from the copied
+        // store, through the same resolver the input path uses so the knob
+        // position matches what scrubbing changed.
+        let option_value =
+            |option_id: u16| resolve_option_value(options, &option_values, option_len, option_id);
+        // The gameplay scene lends its uploaded font atlases so menu labels
+        // and buttons draw with the same glyphs the HUD uses. Empty slots
+        // skip text or fall back to slot 0 in the renderer.
+        let font_table = [
+            self.gameplay.ui_font_at(0),
+            self.gameplay.ui_font_at(1),
+            self.gameplay.ui_font_at(2),
+            self.gameplay.ui_font_at(3),
+        ];
+        ui::draw_scene(
+            nodes,
+            first,
+            count,
+            paints,
+            &font_table,
+            focused,
+            (ctx.sim_tick.as_u32() & 0xffff) as u16,
+            &mut textures,
+            &value,
+            options,
+            &option_value,
+        );
     }
 
     /// Pop to the remembered `return_to` state, if one is set. The
@@ -1005,126 +1208,44 @@ impl<'a, S: Scene> Scene for GameApp<'a, S> {
         // reproducing the boot-time init the old App::run did inline.
         // A UI entry only parks the cursor; gameplay.init is deferred
         // until the flow transitions into a Gameplay state.
-        match self.current_tag() {
-            StateTag::Gameplay => {
-                let index = self.cursor.current;
-                self.enter_gameplay(index, ctx);
-            }
-            StateTag::UiScene { .. } => {
-                // Cursor already at the UI entry from FlowCursor::new.
-                // Apply defaults once so global presentation options preview
-                // correctly even before the player starts gameplay.
-                self.apply_current_options();
-                // TODO(p5): run any per-scene enter hook here.
-            }
+        if self.current_tag().has_gameplay() {
+            let index = self.cursor.current;
+            self.enter_gameplay(index, ctx);
+            // Boot-time gameplay init is handled by App's post-init clock
+            // reset. Only deferred gameplay init from a later UI action should
+            // request a timing realign from the fixed-update loop.
+            let _ = ctx.take_timing_realign_request();
+        } else {
+            // Cursor already at the UI-only entry from FlowCursor::new.
+            // Apply defaults once so global presentation options preview
+            // correctly even before the player starts gameplay.
+            self.apply_current_options();
+            // TODO(p5): run any per-scene enter hook here.
         }
     }
 
     fn update(&mut self, ctx: &mut Ctx) {
-        match self.current_tag() {
-            StateTag::Gameplay => self.gameplay.update(ctx),
-            StateTag::UiScene { scene } => {
-                // Resolve the scene's block in the shared pool once.
-                // Focus geometry walks the whole pool (parents are
-                // pool-relative), so the helpers take the range, not a
-                // sub-slice.
-                let (first, count) = self.scene_node_range(scene);
-
-                // Seed (or repair) focus before reading input, so the
-                // first press acts on the default control even on the
-                // frame the scene is entered, and so a flow driven
-                // headless (update without render) still tracks focus.
-                let _ = self.resolved_focus(first, count);
-
-                // D-pad moves focus among the scene's focusable controls.
-                // Each press is a discrete step, so use just_pressed; the
-                // resolver no-ops when nothing lies that way.
-                if ctx.just_pressed(button::UP) {
-                    self.move_focus(first, count, NavDir::Up);
-                }
-                if ctx.just_pressed(button::DOWN) {
-                    self.move_focus(first, count, NavDir::Down);
-                }
-                // LEFT / RIGHT scrub a focused slider's bound option, or
-                // move focus horizontally for any other control.
-                if ctx.just_pressed(button::LEFT) {
-                    self.horizontal_press(first, count, false);
-                }
-                if ctx.just_pressed(button::RIGHT) {
-                    self.horizontal_press(first, count, true);
-                }
-
-                // CROSS activates the focused control. CIRCLE is a
-                // dedicated back/cancel even when the focused control is
-                // not a Back button.
-                if ctx.just_pressed(button::CROSS) {
-                    self.activate_focus(first, count, ctx);
-                } else if ctx.just_pressed(button::CIRCLE) {
-                    self.go_back();
-                } else if ctx.just_pressed(button::START) {
-                    // START keeps its "confirm / jump to gameplay"
-                    // shortcut so a title screen advances without the
-                    // player hunting for the Start button first.
-                    if let Some(gameplay_index) = self.first_gameplay_index() {
-                        self.enter_gameplay(gameplay_index, ctx);
-                    }
-                }
-
-                if let StateTag::UiScene { scene } = self.current_tag() {
-                    let music_cue = self.scene_music_cue(scene);
-                    self.cdda.request(music_cue, ctx.sim_tick.as_u32());
-                    self.cdda.update(ctx.sim_tick.as_u32());
-                }
+        let tag = self.current_tag();
+        if tag.has_gameplay() && !tag.world_is_paused() {
+            self.gameplay.update(ctx);
+        }
+        if let Some(scene) = tag.ui_scene() {
+            if tag.ui_accepts_input() {
+                self.update_ui_scene(scene, ctx);
+            }
+            if let Some(scene) = self.current_tag().ui_scene() {
+                self.update_ui_music(scene, ctx);
             }
         }
     }
 
     fn render(&mut self, ctx: &mut Ctx) {
-        match self.current_tag() {
-            StateTag::Gameplay => self.gameplay.render(ctx),
-            StateTag::UiScene { scene } => {
-                // Resolve the scene's pool block, then resolve focus, so
-                // the highlighted control matches the one input acts on.
-                let (first, count) = self.scene_node_range(scene);
-                let focused = self.resolved_focus(first, count);
-                // Copy the node pool + option store out of `self` first so
-                // the resolver closures borrow only these Copy locals, not
-                // `self` (draw_scene already borrows `self.nodes`).
-                let nodes = self.nodes;
-                let options = self.options;
-                let option_values = self.option_values;
-                let option_len = self.option_len;
-                let mut textures = |asset| self.gameplay.ui_texture(asset);
-                let value = |binding: LevelUiValueBinding| {
-                    resolve_ui_value(binding, options, &option_values, option_len)
-                };
-                // Slider fill reads the live option value by id from the
-                // copied store, through the same resolver the input path
-                // uses so the knob position matches what scrubbing changed.
-                let option_value = |option_id: u16| {
-                    resolve_option_value(options, &option_values, option_len, option_id)
-                };
-                // The gameplay scene lends its uploaded font atlases so menu
-                // labels and buttons draw with the same glyphs the HUD uses.
-                // Empty slots skip text or fall back to slot 0 in the renderer.
-                let font_table = [
-                    self.gameplay.ui_font_at(0),
-                    self.gameplay.ui_font_at(1),
-                    self.gameplay.ui_font_at(2),
-                    self.gameplay.ui_font_at(3),
-                ];
-                ui::draw_scene(
-                    nodes,
-                    first,
-                    count,
-                    &font_table,
-                    focused,
-                    &mut textures,
-                    &value,
-                    options,
-                    &option_value,
-                );
-            }
+        let tag = self.current_tag();
+        if tag.has_gameplay() {
+            self.gameplay.render(ctx);
+        }
+        if let Some(scene) = tag.ui_scene() {
+            self.render_ui_scene(scene, ctx);
         }
     }
 }
@@ -1169,20 +1290,20 @@ mod tests {
     }
 
     fn test_ctx() -> Ctx {
-        Ctx {
-            sim_tick: SimTick::ZERO,
-            visual_frame: VisualFrame::ZERO,
-            video_hz: VideoHz::NTSC,
-            pad: PadState::NONE,
-            pad_prev: PadState::NONE,
-            fb: FrameBuffer::new(320, 240),
-        }
+        Ctx::new(
+            SimTick::ZERO,
+            VisualFrame::ZERO,
+            VideoHz::NTSC,
+            PadState::NONE,
+            PadState::NONE,
+            FrameBuffer::new(320, 240),
+        )
     }
 
     #[test]
     fn gameplay_only_inits_once_then_forwards() {
         let mut scene = CountingScene::default();
-        let mut app = GameApp::new(&GAMEPLAY_ONLY, &[], &[], &[], &[], &[], &mut scene);
+        let mut app = GameApp::new(&GAMEPLAY_ONLY, &[], &[], &[], &[], &[], &[], &mut scene);
         let mut ctx = test_ctx();
 
         app.init(&mut ctx);
@@ -1201,12 +1322,16 @@ mod tests {
         // Mirrors the old App::run shape: init is paid before the first
         // update tick, not lazily on first update.
         let mut scene = CountingScene::default();
-        let mut app = GameApp::new(&GAMEPLAY_ONLY, &[], &[], &[], &[], &[], &mut scene);
+        let mut app = GameApp::new(&GAMEPLAY_ONLY, &[], &[], &[], &[], &[], &[], &mut scene);
         let mut ctx = test_ctx();
 
         app.init(&mut ctx);
         assert_eq!(app.gameplay.inits, 1);
         assert_eq!(app.gameplay.updates, 0);
+        assert!(
+            !ctx.take_timing_realign_request(),
+            "boot init is covered by App's post-init clock reset"
+        );
     }
 
     #[test]
@@ -1219,42 +1344,54 @@ mod tests {
         }];
         static FLOW: GameFlow = GameFlow {
             states: &[FlowState::UiScene { scene: 7 }, FlowState::Gameplay],
+            scene_states: &[],
             entry: 0,
         };
 
         let mut scene = CountingScene::default();
-        let mut app = GameApp::new(&FLOW, SCENES, &[], &[], &[], &[], &mut scene);
+        let mut app = GameApp::new(&FLOW, SCENES, &[], &[], &[], &[], &[], &mut scene);
         let mut ctx = test_ctx();
 
         app.init(&mut ctx);
         assert_eq!(app.gameplay.inits, 0, "UI entry does not init gameplay");
+        assert!(!ctx.take_timing_realign_request());
 
         // No START yet: still on the UI state, gameplay untouched.
         app.update(&mut ctx);
         assert_eq!(app.gameplay.inits, 0);
         assert_eq!(app.gameplay.updates, 0);
+        assert!(!ctx.take_timing_realign_request());
 
         // Press START: transition into gameplay, init runs once here.
         ctx.pad_prev = PadState::NONE;
         ctx.pad.buttons = ButtonState::from_bits(button::START);
         app.update(&mut ctx);
         assert_eq!(app.gameplay.inits, 1, "transition inits gameplay once");
+        assert!(
+            ctx.take_timing_realign_request(),
+            "deferred gameplay init requests one scheduler realign"
+        );
+        assert!(
+            !ctx.take_timing_realign_request(),
+            "the timing reset request is one-shot"
+        );
 
         // Now resolved to Gameplay: updates forward, no re-init.
         ctx.pad_prev = ctx.pad;
         app.update(&mut ctx);
         assert_eq!(app.gameplay.inits, 1);
         assert_eq!(app.gameplay.updates, 1);
+        assert!(!ctx.take_timing_realign_request());
     }
 
     #[test]
     fn unknown_scene_id_yields_empty_node_range() {
         let mut scene = CountingScene::default();
-        let app = GameApp::new(&GAMEPLAY_ONLY, &[], &[], &[], &[], &[], &mut scene);
+        let app = GameApp::new(&GAMEPLAY_ONLY, &[], &[], &[], &[], &[], &[], &mut scene);
         assert_eq!(app.scene_node_range(999), (0, 0));
     }
 
-    use psx_level::{AssetId, LevelUiNodeKind, UI_OPTION_NONE};
+    use psx_level::{AssetId, LevelUiImageEffect, LevelUiNodeKind, UI_OPTION_NONE, UI_PAINT_NONE};
 
     /// Release every button, then press exactly `button`, so the next
     /// `update` sees it as `just_pressed`. Mirrors the pad-edge idiom
@@ -1278,13 +1415,18 @@ mod tests {
             color: [40, 48, 64],
             background: [0, 0, 0],
             accent: [236, 240, 248],
+            color_paint: UI_PAINT_NONE,
+            background_paint: UI_PAINT_NONE,
+            accent_paint: UI_PAINT_NONE,
             value: LevelUiValueBinding::ConstantQ12(0),
             max: LevelUiValueBinding::ConstantQ12(1),
             texture_asset: AssetId(u16::MAX),
+            image_effect: LevelUiImageEffect::None,
             text: "",
             tag: "",
             action,
             option: UI_OPTION_NONE,
+            rotation_degrees: 0,
             flags: 0,
             sfx_first: UI_SFX_NONE,
             sfx_count: 0,
@@ -1304,13 +1446,18 @@ mod tests {
         color: [0, 0, 0],
         background: [0, 0, 0],
         accent: [0, 0, 0],
+        color_paint: UI_PAINT_NONE,
+        background_paint: UI_PAINT_NONE,
+        accent_paint: UI_PAINT_NONE,
         value: LevelUiValueBinding::ConstantQ12(0),
         max: LevelUiValueBinding::ConstantQ12(1),
         texture_asset: AssetId(u16::MAX),
+        image_effect: LevelUiImageEffect::None,
         text: "",
         tag: "",
         action: LevelUiAction::Back,
         option: UI_OPTION_NONE,
+        rotation_degrees: 0,
         flags: 0,
         sfx_first: UI_SFX_NONE,
         sfx_count: 0,
@@ -1350,8 +1497,45 @@ mod tests {
             FlowState::UiScene { scene: 2 },
             FlowState::Gameplay,
         ],
+        scene_states: &[],
         entry: 0,
     };
+
+    static COMPOSED_STATES: &[LevelSceneState] = &[LevelSceneState {
+        id: 42,
+        name: "gameplay-with-ui",
+        world: LevelWorldLayer::Gameplay,
+        ui_scene: 1,
+        flags: scene_state_flags::UI_INPUT,
+    }];
+    static COMPOSED_FLOW: GameFlow = GameFlow {
+        states: &[FlowState::SceneState { state: 42 }],
+        scene_states: COMPOSED_STATES,
+        entry: 0,
+    };
+
+    #[test]
+    fn scene_state_can_run_gameplay_with_ui_overlay_input() {
+        let mut scene = CountingScene::default();
+        let mut app = GameApp::new(
+            &COMPOSED_FLOW,
+            MENU_SCENES,
+            MENU_NODES,
+            &[],
+            &[],
+            &[],
+            &[],
+            &mut scene,
+        );
+        let mut ctx = test_ctx();
+
+        app.init(&mut ctx);
+        assert_eq!(app.gameplay.inits, 1);
+
+        app.update(&mut ctx);
+        assert_eq!(app.gameplay.updates, 1);
+        assert_eq!(app.cursor.focused_node(), Some(1));
+    }
 
     /// One UI update tick with no buttons held, so focus seeds without
     /// triggering any action. Render is the GPU draw path and cannot run
@@ -1370,6 +1554,7 @@ mod tests {
             &MENU_FLOW,
             MENU_SCENES,
             MENU_NODES,
+            &[],
             &[],
             &[],
             &[],
@@ -1403,7 +1588,7 @@ mod tests {
             },
         ];
         let mut scene = CountingScene::default();
-        let mut app = GameApp::new(&GAMEPLAY_ONLY, &[], &[], &[], &[], CUES, &mut scene);
+        let mut app = GameApp::new(&GAMEPLAY_ONLY, &[], &[], &[], &[], &[], CUES, &mut scene);
         let node = LevelUiNodeRecord {
             sfx_first: 0,
             sfx_count: 2,
@@ -1424,6 +1609,7 @@ mod tests {
             &MENU_FLOW,
             MENU_SCENES,
             MENU_NODES,
+            &[],
             &[],
             &[],
             &[],
@@ -1465,6 +1651,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
             &mut scene,
         );
         let mut ctx = test_ctx();
@@ -1502,6 +1689,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
             &mut scene,
         );
         let mut ctx = test_ctx();
@@ -1528,6 +1716,7 @@ mod tests {
             &MENU_FLOW,
             MENU_SCENES,
             MENU_NODES,
+            &[],
             &[],
             &[],
             &[],
@@ -1575,6 +1764,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
             &mut scene,
         );
         let mut ctx = test_ctx();
@@ -1602,7 +1792,7 @@ mod tests {
         // A gameplay-only flow never enters a UI arm, so d-pad presses do
         // not touch menu_focus and updates forward straight to gameplay.
         let mut scene = CountingScene::default();
-        let mut app = GameApp::new(&GAMEPLAY_ONLY, &[], &[], &[], &[], &[], &mut scene);
+        let mut app = GameApp::new(&GAMEPLAY_ONLY, &[], &[], &[], &[], &[], &[], &mut scene);
         let mut ctx = test_ctx();
         app.init(&mut ctx);
 
@@ -1633,13 +1823,18 @@ mod tests {
             color: [11, 12, 13],
             background: [21, 22, 23],
             accent: [31, 32, 33],
+            color_paint: UI_PAINT_NONE,
+            background_paint: UI_PAINT_NONE,
+            accent_paint: UI_PAINT_NONE,
             value: LevelUiValueBinding::ConstantQ12(0),
             max: LevelUiValueBinding::ConstantQ12(1),
             texture_asset: AssetId(u16::MAX),
+            image_effect: LevelUiImageEffect::None,
             text: "",
             tag: "",
             action: LevelUiAction::Back,
             option,
+            rotation_degrees: 0,
             flags: 0,
             sfx_first: UI_SFX_NONE,
             sfx_count: 0,
@@ -1690,10 +1885,12 @@ mod tests {
     ];
     static OPT_FLOW_SLIDER: GameFlow = GameFlow {
         states: &[FlowState::UiScene { scene: 1 }],
+        scene_states: &[],
         entry: 0,
     };
     static OPT_FLOW_BUTTON: GameFlow = GameFlow {
         states: &[FlowState::UiScene { scene: 2 }],
+        scene_states: &[],
         entry: 0,
     };
 
@@ -1717,13 +1914,18 @@ mod tests {
             color: [0, 0, 0],
             background: [0, 0, 0],
             accent: [0, 0, 0],
+            color_paint: UI_PAINT_NONE,
+            background_paint: UI_PAINT_NONE,
+            accent_paint: UI_PAINT_NONE,
             value: LevelUiValueBinding::Option(VOL_ID),
             max: LevelUiValueBinding::ConstantQ12(0),
             texture_asset: AssetId(u16::MAX),
+            image_effect: LevelUiImageEffect::None,
             text: "",
             tag: "",
             action: LevelUiAction::Back,
             option: 2,
+            rotation_degrees: 0,
             flags: psx_level::ui_node_flags::MUSIC_LOOP,
             sfx_first: UI_SFX_NONE,
             sfx_count: 0,
@@ -1741,6 +1943,7 @@ mod tests {
     }];
     static MUSIC_FLOW: GameFlow = GameFlow {
         states: &[FlowState::UiScene { scene: 9 }],
+        scene_states: &[],
         entry: 0,
     };
 
@@ -1761,6 +1964,7 @@ mod tests {
             &OPT_FLOW_SLIDER,
             OPT_SCENES,
             OPT_NODES,
+            &[],
             OPTIONS,
             &[],
             &[],
@@ -1779,6 +1983,7 @@ mod tests {
             &OPT_FLOW_SLIDER,
             OPT_SCENES,
             OPT_NODES,
+            &[],
             OPTIONS,
             &[],
             &[],
@@ -1826,6 +2031,7 @@ mod tests {
             &OPT_FLOW_SLIDER,
             OPT_SCENES,
             OPT_NODES,
+            &[],
             OPTIONS,
             &[],
             &[],
@@ -1871,6 +2077,7 @@ mod tests {
             &MUSIC_FLOW,
             MUSIC_SCENES,
             MUSIC_NODES,
+            &[],
             MUSIC_OPTIONS,
             &[],
             &[],
@@ -1902,6 +2109,7 @@ mod tests {
             &OPT_FLOW_BUTTON,
             OPT_SCENES,
             OPT_NODES,
+            &[],
             OPTIONS,
             &[],
             &[],
@@ -1931,6 +2139,7 @@ mod tests {
             &OPT_FLOW_SLIDER,
             OPT_SCENES,
             OPT_NODES,
+            &[],
             OPTIONS,
             &[],
             &[],

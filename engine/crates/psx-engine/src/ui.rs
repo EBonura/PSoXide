@@ -33,13 +33,16 @@
 
 use psx_font::FontAtlas;
 use psx_gpu::{
-    draw_quad_flat, draw_quad_textured_material,
+    draw_quad_flat, draw_quad_textured_gouraud_material, draw_quad_textured_material,
+    draw_tri_gouraud,
     material::{TextureMaterial, TextureWindow},
 };
 use psx_level::{
-    ui_node_flags, AssetId, LevelOptionDef, LevelUiNodeKind, LevelUiNodeRecord,
-    LevelUiValueBinding, NavRect, UI_OPTION_NONE,
+    ui_node_flags, AssetId, LevelOptionDef, LevelUiGradientDirection, LevelUiImageEffect,
+    LevelUiNodeKind, LevelUiNodeRecord, LevelUiPaintRecord, LevelUiValueBinding, NavRect,
+    UI_OPTION_NONE, UI_PAINT_NONE,
 };
+use psx_math::{cos_q12, sin_q12};
 
 /// Canvas width used as the fallback parent rectangle for a node
 /// whose parent chain does not resolve to a [`LevelUiNodeKind::Canvas`].
@@ -68,6 +71,261 @@ pub struct UiTextureSlot {
     /// Texture height in texels (far UV counterpart to
     /// [`Self::texture_width`]).
     pub texture_height: u16,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+struct UiAffine {
+    m00: i32,
+    m01: i32,
+    m10: i32,
+    m11: i32,
+    tx: i32,
+    ty: i32,
+}
+
+impl UiAffine {
+    const IDENTITY: Self = Self {
+        m00: 4096,
+        m01: 0,
+        m10: 0,
+        m11: 4096,
+        tx: 0,
+        ty: 0,
+    };
+
+    fn from_node_rect(x: i16, y: i16, width: u16, height: u16, node: &LevelUiNodeRecord) -> Self {
+        let angle = degrees_to_q12(node.rotation_degrees);
+        let sin = sin_q12(angle);
+        let cos = cos_q12(angle);
+        let fx = if node.flags & ui_node_flags::FLIP_X != 0 {
+            -1
+        } else {
+            1
+        };
+        let fy = if node.flags & ui_node_flags::FLIP_Y != 0 {
+            -1
+        } else {
+            1
+        };
+        let m00 = cos.saturating_mul(fx);
+        let m01 = -sin.saturating_mul(fy);
+        let m10 = sin.saturating_mul(fx);
+        let m11 = cos.saturating_mul(fy);
+        let half_w_q12 = i32::from(width) << 11;
+        let half_h_q12 = i32::from(height) << 11;
+        let center_x_q12 = (i32::from(x) << 12).saturating_add(half_w_q12);
+        let center_y_q12 = (i32::from(y) << 12).saturating_add(half_h_q12);
+        Self {
+            m00,
+            m01,
+            m10,
+            m11,
+            tx: center_x_q12
+                .saturating_sub(mul_q12(m00, half_w_q12))
+                .saturating_sub(mul_q12(m01, half_h_q12)),
+            ty: center_y_q12
+                .saturating_sub(mul_q12(m10, half_w_q12))
+                .saturating_sub(mul_q12(m11, half_h_q12)),
+        }
+    }
+
+    fn compose(self, child: Self) -> Self {
+        Self {
+            m00: mul_q12(self.m00, child.m00).saturating_add(mul_q12(self.m01, child.m10)),
+            m01: mul_q12(self.m00, child.m01).saturating_add(mul_q12(self.m01, child.m11)),
+            m10: mul_q12(self.m10, child.m00).saturating_add(mul_q12(self.m11, child.m10)),
+            m11: mul_q12(self.m10, child.m01).saturating_add(mul_q12(self.m11, child.m11)),
+            tx: mul_q12(self.m00, child.tx)
+                .saturating_add(mul_q12(self.m01, child.ty))
+                .saturating_add(self.tx),
+            ty: mul_q12(self.m10, child.tx)
+                .saturating_add(mul_q12(self.m11, child.ty))
+                .saturating_add(self.ty),
+        }
+    }
+
+    fn point(self, x: i32, y: i32) -> (i16, i16) {
+        let sx = self
+            .tx
+            .saturating_add(self.m00.saturating_mul(x))
+            .saturating_add(self.m01.saturating_mul(y));
+        let sy = self
+            .ty
+            .saturating_add(self.m10.saturating_mul(x))
+            .saturating_add(self.m11.saturating_mul(y));
+        (round_q12_to_i16(sx), round_q12_to_i16(sy))
+    }
+
+    fn subrect(self, x: i16, y: i16, width: i16, height: i16) -> [(i16, i16); 4] {
+        let x0 = i32::from(x);
+        let y0 = i32::from(y);
+        let x1 = x0.saturating_add(i32::from(width));
+        let y1 = y0.saturating_add(i32::from(height));
+        [
+            self.point(x0, y0),
+            self.point(x1, y0),
+            self.point(x0, y1),
+            self.point(x1, y1),
+        ]
+    }
+
+    fn font_matrix(self, scale_q8: u16) -> [[i16; 2]; 2] {
+        [
+            [
+                mul_scale_q8_to_i16(self.m00, scale_q8),
+                mul_scale_q8_to_i16(self.m01, scale_q8),
+            ],
+            [
+                mul_scale_q8_to_i16(self.m10, scale_q8),
+                mul_scale_q8_to_i16(self.m11, scale_q8),
+            ],
+        ]
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+struct UiResolvedNode {
+    width: u16,
+    height: u16,
+    transform: UiAffine,
+    verts: [(i16, i16); 4],
+}
+
+impl UiResolvedNode {
+    fn subrect(self, x: i16, y: i16, width: i16, height: i16) -> [(i16, i16); 4] {
+        self.transform.subrect(x, y, width, height)
+    }
+
+    fn bounds(self) -> (i16, i16, u16, u16) {
+        quad_bounds(self.verts)
+    }
+}
+
+fn mul_q12(a: i32, b_q12: i32) -> i32 {
+    ((i64::from(a) * i64::from(b_q12)) >> 12).clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
+}
+
+fn mul_scale_q8_to_i16(value_q12: i32, scale_q8: u16) -> i16 {
+    ((i64::from(value_q12) * i64::from(scale_q8)) >> 8)
+        .clamp(i64::from(i16::MIN), i64::from(i16::MAX)) as i16
+}
+
+fn round_q12_to_i16(value: i32) -> i16 {
+    let rounded = if value >= 0 {
+        value.saturating_add(2048) >> 12
+    } else {
+        -(value.saturating_neg().saturating_add(2048) >> 12)
+    };
+    rounded.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16
+}
+
+fn degrees_to_q12(degrees: i16) -> u16 {
+    let mut degrees = i32::from(degrees) % 360;
+    if degrees < 0 {
+        degrees += 360;
+    }
+    ((degrees * 4096 + 180) / 360) as u16 & 0x0fff
+}
+
+fn quad_bounds(verts: [(i16, i16); 4]) -> (i16, i16, u16, u16) {
+    let mut min_x = verts[0].0;
+    let mut max_x = verts[0].0;
+    let mut min_y = verts[0].1;
+    let mut max_y = verts[0].1;
+    let mut i = 1usize;
+    while i < verts.len() {
+        min_x = min_x.min(verts[i].0);
+        max_x = max_x.max(verts[i].0);
+        min_y = min_y.min(verts[i].1);
+        max_y = max_y.max(verts[i].1);
+        i += 1;
+    }
+    (
+        min_x,
+        min_y,
+        (i32::from(max_x) - i32::from(min_x))
+            .max(1)
+            .min(i32::from(u16::MAX)) as u16,
+        (i32::from(max_y) - i32::from(min_y))
+            .max(1)
+            .min(i32::from(u16::MAX)) as u16,
+    )
+}
+
+fn default_resolved_node() -> UiResolvedNode {
+    let transform = UiAffine::IDENTITY;
+    let verts = transform.subrect(0, 0, 1, 1);
+    UiResolvedNode {
+        width: 1,
+        height: 1,
+        transform,
+        verts,
+    }
+}
+
+fn node_resolved(nodes: &[LevelUiNodeRecord], index: usize) -> Option<UiResolvedNode> {
+    node_resolved_inner(nodes, index, 0)
+}
+
+fn node_resolved_inner(
+    nodes: &[LevelUiNodeRecord],
+    index: usize,
+    depth: usize,
+) -> Option<UiResolvedNode> {
+    if depth > nodes.len() {
+        return None;
+    }
+    let node = nodes.get(index)?;
+    if matches!(node.kind, LevelUiNodeKind::Canvas) {
+        return Some(resolved_from_parent(
+            UiAffine::IDENTITY,
+            0,
+            0,
+            node.width.max(1),
+            node.height.max(1),
+            node,
+        ));
+    }
+
+    let parent = node
+        .parent
+        .and_then(|parent| node_resolved_inner(nodes, parent.to_usize(), depth + 1))
+        .unwrap_or(UiResolvedNode {
+            width: UI_CANVAS_W,
+            height: UI_CANVAS_H,
+            transform: UiAffine::IDENTITY,
+            verts: UiAffine::IDENTITY.subrect(0, 0, UI_CANVAS_W as i16, UI_CANVAS_H as i16),
+        });
+    let (anchor_x, anchor_y) = anchor_factors(node.flags);
+    let local_x = (i32::from(parent.width) * anchor_x / 2).saturating_add(i32::from(node.x));
+    let local_y = (i32::from(parent.height) * anchor_y / 2).saturating_add(i32::from(node.y));
+    Some(resolved_from_parent(
+        parent.transform,
+        local_x.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16,
+        local_y.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16,
+        node.width.max(1),
+        node.height.max(1),
+        node,
+    ))
+}
+
+fn resolved_from_parent(
+    parent: UiAffine,
+    x: i16,
+    y: i16,
+    width: u16,
+    height: u16,
+    node: &LevelUiNodeRecord,
+) -> UiResolvedNode {
+    let local = UiAffine::from_node_rect(x, y, width, height, node);
+    let transform = parent.compose(local);
+    let verts = transform.subrect(0, 0, width as i16, height as i16);
+    UiResolvedNode {
+        width,
+        height,
+        transform,
+        verts,
+    }
 }
 
 /// Draw the cooked nodes `nodes[first..first + count]` of one UI scene
@@ -118,8 +376,10 @@ pub fn draw_scene(
     nodes: &[LevelUiNodeRecord],
     first: usize,
     count: usize,
+    paints: &[LevelUiPaintRecord],
     fonts: &[Option<&FontAtlas>],
     focused: Option<usize>,
+    frame: u16,
     textures: &mut impl FnMut(AssetId) -> Option<UiTextureSlot>,
     value: &impl Fn(LevelUiValueBinding) -> i32,
     options: &[LevelOptionDef],
@@ -128,39 +388,39 @@ pub fn draw_scene(
     let end = first.saturating_add(count).min(nodes.len());
     for index in first..end {
         let node = &nodes[index];
-        let (x, y, width, height) = node_absolute_rect(nodes, index);
+        let resolved = node_resolved(nodes, index).unwrap_or_else(default_resolved_node);
         let is_focused = focused == Some(index);
         match node.kind {
             LevelUiNodeKind::Canvas | LevelUiNodeKind::Group | LevelUiNodeKind::Music => {}
             LevelUiNodeKind::Rect => {
-                draw_rect(x, y, width as i16, height as i16, rgb(node.color));
+                draw_quad_paint(
+                    resolved.verts,
+                    shape_paint(node.color, node.color_paint, paints),
+                );
             }
             LevelUiNodeKind::Label => {
                 if let Some(font) = node_font(fonts, node.font) {
-                    draw_label(font, node, x, y, width);
+                    draw_label(font, node, resolved, paints);
                 }
             }
             LevelUiNodeKind::Image => {
-                draw_image(node, x, y, width, height, textures);
+                draw_image(node, resolved, frame, textures);
             }
             LevelUiNodeKind::Bar => {
                 let max_q12 = value(node.max).max(1);
                 let value_q12 = value(node.value).clamp(0, max_q12);
                 draw_status_bar(
-                    x,
-                    y,
-                    width as i16,
-                    height as i16,
+                    resolved,
                     value_q12,
                     max_q12,
-                    rgb(node.color),
-                    rgb(node.background),
+                    shape_paint(node.color, node.color_paint, paints),
+                    shape_paint(node.background, node.background_paint, paints),
                 );
             }
             LevelUiNodeKind::Button => {
-                draw_button(node_font(fonts, node.font), node, x, y, width, height);
+                draw_button(node_font(fonts, node.font), node, resolved, paints);
                 if is_focused {
-                    draw_focus_ring(x, y, width as i16, height as i16);
+                    draw_focus_ring(resolved);
                 }
             }
             LevelUiNodeKind::Slider => {
@@ -169,18 +429,15 @@ pub fn draw_scene(
                 // option yields 0/1 (empty track).
                 let (fill_num, fill_den) = slider_fill(node.option, options, option_value);
                 draw_slider(
-                    x,
-                    y,
-                    width as i16,
-                    height as i16,
+                    resolved,
                     fill_num,
                     fill_den,
-                    rgb(node.color),
-                    rgb(node.background),
-                    rgb(node.accent),
+                    shape_paint(node.color, node.color_paint, paints),
+                    shape_paint(node.background, node.background_paint, paints),
+                    shape_paint(node.accent, node.accent_paint, paints),
                 );
                 if is_focused {
-                    draw_focus_ring(x, y, width as i16, height as i16);
+                    draw_focus_ring(resolved);
                 }
             }
         }
@@ -190,21 +447,18 @@ pub fn draw_scene(
 /// Bright 1px outline drawn just outside a focused control's rect so
 /// the highlight reads regardless of the control's own colours. Four
 /// thin [`draw_rect`] edges, integer-only, no allocation.
-fn draw_focus_ring(x: i16, y: i16, width: i16, height: i16) {
+fn draw_focus_ring(node: UiResolvedNode) {
+    let width = node.width as i16;
+    let height = node.height as i16;
     if width <= 0 || height <= 0 {
         return;
     }
     const RING: (u8, u8, u8) = (248, 224, 96);
-    let left = x - 1;
-    let top = y - 1;
     let outer_w = width + 2;
-    let outer_h = height + 2;
-    // Top and bottom edges span the full outer width; the side edges
-    // fill the gap between them so the corners paint exactly once.
-    draw_rect(left, top, outer_w, 1, RING);
-    draw_rect(left, top + outer_h - 1, outer_w, 1, RING);
-    draw_rect(left, top + 1, 1, outer_h - 2, RING);
-    draw_rect(left + outer_w - 1, top + 1, 1, outer_h - 2, RING);
+    draw_quad_flat(node.subrect(-1, -1, outer_w, 1), RING.0, RING.1, RING.2);
+    draw_quad_flat(node.subrect(-1, height, outer_w, 1), RING.0, RING.1, RING.2);
+    draw_quad_flat(node.subrect(-1, 0, 1, height), RING.0, RING.1, RING.2);
+    draw_quad_flat(node.subrect(width, 0, 1, height), RING.0, RING.1, RING.2);
 }
 
 /// Fill proportion `(num, den)` for a slider bound to option `option_id`,
@@ -261,7 +515,52 @@ fn font_index(table_len: usize, selector: u8) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::{font_index, scale_u16_q8};
+    use super::{
+        font_index, font_tint, image_effect_vertex_colors, node_absolute_rect, scale_u16_q8,
+    };
+    use psx_level::{
+        AssetId, LevelUiAction, LevelUiImageEffect, LevelUiNodeKind, LevelUiNodeRecord,
+        LevelUiValueBinding, UI_OPTION_NONE, UI_PAINT_NONE, UI_SFX_NONE,
+    };
+
+    fn ui_node(
+        parent: Option<psx_level::UiNodeIndex>,
+        kind: LevelUiNodeKind,
+        x: i16,
+        y: i16,
+        width: u16,
+        height: u16,
+    ) -> LevelUiNodeRecord {
+        LevelUiNodeRecord {
+            parent,
+            kind,
+            x,
+            y,
+            width,
+            height,
+            color: [0, 0, 0],
+            background: [0, 0, 0],
+            accent: [0, 0, 0],
+            color_paint: UI_PAINT_NONE,
+            background_paint: UI_PAINT_NONE,
+            accent_paint: UI_PAINT_NONE,
+            value: LevelUiValueBinding::ConstantQ12(0),
+            max: LevelUiValueBinding::ConstantQ12(0),
+            texture_asset: AssetId(u16::MAX),
+            image_effect: LevelUiImageEffect::None,
+            text: "",
+            tag: "",
+            action: LevelUiAction::Back,
+            option: UI_OPTION_NONE,
+            rotation_degrees: 0,
+            flags: 0,
+            sfx_first: UI_SFX_NONE,
+            sfx_count: 0,
+            font: 0,
+            font_scale: 256,
+            letter_spacing: 0,
+        }
+    }
 
     #[test]
     fn font_index_picks_selector_when_in_range() {
@@ -284,10 +583,63 @@ mod tests {
     }
 
     #[test]
+    fn node_absolute_rect_bounds_rotated_node() {
+        let mut nodes = [
+            ui_node(None, LevelUiNodeKind::Canvas, 0, 0, 320, 240),
+            ui_node(
+                Some(psx_level::UiNodeIndex(0)),
+                LevelUiNodeKind::Rect,
+                10,
+                20,
+                30,
+                10,
+            ),
+        ];
+        nodes[1].rotation_degrees = 90;
+
+        assert_eq!(node_absolute_rect(&nodes, 1), (20, 10, 10, 30));
+    }
+
+    #[test]
     fn q8_font_scale_rounds_to_screen_pixels() {
         assert_eq!(scale_u16_q8(8, 256), 8);
         assert_eq!(scale_u16_q8(8, 384), 12);
         assert_eq!(scale_u16_q8(17, 384), 26);
+    }
+
+    #[test]
+    fn font_tint_converts_authored_rgb_to_psx_modulation() {
+        assert_eq!(font_tint([0, 1, 2]), (0, 1, 1));
+        assert_eq!(font_tint([148, 136, 255]), (74, 68, 128));
+    }
+
+    #[test]
+    fn image_effect_vertex_colors_animate_presets() {
+        let base = (128, 128, 128);
+        let verts = [(0, 0), (160, 0), (0, 100), (160, 100)];
+        assert_eq!(
+            image_effect_vertex_colors(base, LevelUiImageEffect::None, 0, verts),
+            [base; 4]
+        );
+        assert_ne!(
+            image_effect_vertex_colors(base, LevelUiImageEffect::Shimmer, 0, verts),
+            image_effect_vertex_colors(base, LevelUiImageEffect::Shimmer, 64, verts)
+        );
+        assert_eq!(
+            image_effect_vertex_colors(base, LevelUiImageEffect::SoftPulse, 0, verts)[0],
+            image_effect_vertex_colors(base, LevelUiImageEffect::SoftPulse, 0, verts)[3]
+        );
+    }
+
+    #[test]
+    fn image_effect_sweep_is_continuous_across_split_fragments() {
+        let base = (128, 128, 128);
+        let left = [(0, 0), (160, 0), (0, 100), (160, 100)];
+        let right = [(160, 0), (320, 0), (160, 100), (320, 100)];
+        let left_colors = image_effect_vertex_colors(base, LevelUiImageEffect::Shimmer, 48, left);
+        let right_colors = image_effect_vertex_colors(base, LevelUiImageEffect::Shimmer, 48, right);
+        assert_eq!(left_colors[1], right_colors[0]);
+        assert_eq!(left_colors[3], right_colors[2]);
     }
 }
 
@@ -295,7 +647,9 @@ mod tests {
 /// parent chain and 9-point anchor. Falls back to a 1x1 rect at the
 /// origin for an out-of-range index.
 fn node_absolute_rect(nodes: &[LevelUiNodeRecord], index: usize) -> (i16, i16, u16, u16) {
-    node_absolute_rect_inner(nodes, index, 0).unwrap_or((0, 0, 1, 1))
+    node_resolved(nodes, index)
+        .map(UiResolvedNode::bounds)
+        .unwrap_or((0, 0, 1, 1))
 }
 
 /// `true` when a node kind takes menu focus and so should be drawn
@@ -315,33 +669,6 @@ pub fn is_focusable(kind: LevelUiNodeKind) -> bool {
 pub fn node_nav_rect(nodes: &[LevelUiNodeRecord], index: usize) -> NavRect {
     let (x, y, w, h) = node_absolute_rect(nodes, index);
     NavRect { x, y, w, h }
-}
-
-fn node_absolute_rect_inner(
-    nodes: &[LevelUiNodeRecord],
-    index: usize,
-    depth: usize,
-) -> Option<(i16, i16, u16, u16)> {
-    if depth > nodes.len() {
-        return None;
-    }
-    let node = nodes.get(index)?;
-    if matches!(node.kind, LevelUiNodeKind::Canvas) {
-        return Some((0, 0, node.width.max(1), node.height.max(1)));
-    }
-    let (parent_x, parent_y, parent_w, parent_h) = node
-        .parent
-        .and_then(|parent| node_absolute_rect_inner(nodes, parent.to_usize(), depth + 1))
-        .unwrap_or((0, 0, UI_CANVAS_W, UI_CANVAS_H));
-    let (anchor_x, anchor_y) = anchor_factors(node.flags);
-    let x = parent_x as i32 + (parent_w as i32 * anchor_x) / 2 + node.x as i32;
-    let y = parent_y as i32 + (parent_h as i32 * anchor_y) / 2 + node.y as i32;
-    Some((
-        x.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
-        y.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
-        node.width.max(1),
-        node.height.max(1),
-    ))
 }
 
 /// Map the anchor nibble to half-step (x, y) factors. The factors are
@@ -415,19 +742,106 @@ fn draw_scaled_text(
     }
 }
 
-fn draw_label(font: &FontAtlas, node: &LevelUiNodeRecord, x: i16, y: i16, width: u16) {
-    let tint = rgb(node.color);
+fn draw_scaled_text_paint(
+    font: &FontAtlas,
+    x: i16,
+    y: i16,
+    text: &str,
+    scale_q8: u16,
+    letter_spacing: i8,
+    paint: UiPaint,
+) {
+    match paint {
+        UiPaint::Solid(tint) => draw_scaled_text(font, x, y, text, scale_q8, letter_spacing, tint),
+        UiPaint::Gradient {
+            from,
+            to,
+            direction,
+        } => font.draw_text_scaled_gouraud_with_spacing_q8(
+            x,
+            y,
+            text,
+            scale_q8,
+            scale_q8,
+            letter_spacing,
+            gradient_vertex_colors(from, to, direction),
+        ),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_transformed_text_paint(
+    font: &FontAtlas,
+    resolved: UiResolvedNode,
+    x: i16,
+    y: i16,
+    text: &str,
+    scale_q8: u16,
+    letter_spacing: i8,
+    paint: UiPaint,
+) {
+    if resolved.transform.m00 == 4096
+        && resolved.transform.m01 == 0
+        && resolved.transform.m10 == 0
+        && resolved.transform.m11 == 4096
+    {
+        let origin = resolved.transform.point(i32::from(x), i32::from(y));
+        draw_scaled_text_paint(
+            font,
+            origin.0,
+            origin.1,
+            text,
+            scale_q8,
+            letter_spacing,
+            paint,
+        );
+        return;
+    }
+
+    let origin = resolved.transform.point(i32::from(x), i32::from(y));
+    font.draw_text_affine(
+        origin,
+        text,
+        resolved.transform.font_matrix(scale_q8),
+        paint.from(),
+    );
+}
+
+fn draw_label(
+    font: &FontAtlas,
+    node: &LevelUiNodeRecord,
+    resolved: UiResolvedNode,
+    paints: &[LevelUiPaintRecord],
+) {
+    let paint = text_paint(node.color, node.color_paint, paints);
     let scale = node_font_scale_q8(node);
     let letter_spacing = node_letter_spacing(node);
     let align = (node.flags & ui_node_flags::TEXT_ALIGN_MASK) >> ui_node_flags::TEXT_ALIGN_SHIFT;
     if node.flags & ui_node_flags::TEXT_WRAP == 0 {
-        let text_x = aligned_text_x(font, node.text, x, width, align, scale, letter_spacing);
-        draw_scaled_text(font, text_x, y, node.text, scale, letter_spacing, tint);
+        let text_x = aligned_text_x(
+            font,
+            node.text,
+            0,
+            resolved.width,
+            align,
+            scale,
+            letter_spacing,
+        );
+        draw_transformed_text_paint(
+            font,
+            resolved,
+            text_x,
+            0,
+            node.text,
+            scale,
+            letter_spacing,
+            paint,
+        );
         return;
     }
 
     let mut start = 0usize;
-    let mut line_y = y;
+    let mut line_y = 0i16;
     while start < node.text.len() {
         while matches!(node.text.as_bytes().get(start), Some(b' ' | b'\n')) {
             start += 1;
@@ -435,10 +849,26 @@ fn draw_label(font: &FontAtlas, node: &LevelUiNodeRecord, x: i16, y: i16, width:
         if start >= node.text.len() {
             break;
         }
-        let end = wrapped_line_end(font, node.text, start, width, scale, letter_spacing);
+        let end = wrapped_line_end(
+            font,
+            node.text,
+            start,
+            resolved.width,
+            scale,
+            letter_spacing,
+        );
         let line = &node.text[start..end];
-        let text_x = aligned_text_x(font, line, x, width, align, scale, letter_spacing);
-        draw_scaled_text(font, text_x, line_y, line, scale, letter_spacing, tint);
+        let text_x = aligned_text_x(font, line, 0, resolved.width, align, scale, letter_spacing);
+        draw_transformed_text_paint(
+            font,
+            resolved,
+            text_x,
+            line_y,
+            line,
+            scale,
+            letter_spacing,
+            paint,
+        );
         line_y = line_y.saturating_add(scaled_line_height(font, scale));
         start = end;
     }
@@ -497,14 +927,12 @@ fn aligned_text_x(
 
 fn draw_image(
     node: &LevelUiNodeRecord,
-    x: i16,
-    y: i16,
-    width: u16,
-    height: u16,
+    resolved: UiResolvedNode,
+    frame: u16,
     textures: &mut impl FnMut(AssetId) -> Option<UiTextureSlot>,
 ) {
     if node.texture_asset.0 == u16::MAX {
-        draw_rect(x, y, width as i16, height as i16, rgb(node.color));
+        draw_quad_flat(resolved.verts, node.color[0], node.color[1], node.color[2]);
         return;
     }
     let Some(slot) = textures(node.texture_asset) else {
@@ -514,19 +942,17 @@ fn draw_image(
         .with_texture_window(slot.texture_window);
     let tex_w = texture_size_u8(slot.texture_width).saturating_sub(1);
     let tex_h = texture_size_u8(slot.texture_height).saturating_sub(1);
-    draw_quad_textured_material(
-        [
-            (x, y),
-            (x.saturating_add(width as i16), y),
-            (x, y.saturating_add(height as i16)),
-            (
-                x.saturating_add(width as i16),
-                y.saturating_add(height as i16),
-            ),
-        ],
-        [(0, 0), (tex_w, 0), (0, tex_h), (tex_w, tex_h)],
-        material,
-    );
+    let uvs = [(0, 0), (tex_w, 0), (0, tex_h), (tex_w, tex_h)];
+    if node.image_effect == LevelUiImageEffect::None {
+        draw_quad_textured_material(resolved.verts, uvs, material);
+    } else {
+        draw_quad_textured_gouraud_material(
+            resolved.verts,
+            uvs,
+            image_effect_vertex_colors(rgb(node.color), node.image_effect, frame, resolved.verts),
+            material,
+        );
+    }
 }
 
 /// Clamp a texel dimension into the GP0 8-bit UV range.
@@ -534,24 +960,109 @@ fn texture_size_u8(size: u16) -> u8 {
     size.min(u16::from(u8::MAX)) as u8
 }
 
+fn image_effect_vertex_colors(
+    base: (u8, u8, u8),
+    effect: LevelUiImageEffect,
+    frame: u16,
+    verts: [(i16, i16); 4],
+) -> [(u8, u8, u8); 4] {
+    match effect {
+        LevelUiImageEffect::None => [base; 4],
+        LevelUiImageEffect::Shimmer => sweep_colors(
+            base,
+            frame,
+            3,
+            88,
+            [verts[0].0, verts[1].0, verts[2].0, verts[3].0],
+        ),
+        LevelUiImageEffect::FastShimmer => sweep_colors(
+            base,
+            frame,
+            7,
+            112,
+            [verts[0].0, verts[1].0, verts[2].0, verts[3].0],
+        ),
+        LevelUiImageEffect::DiagonalSweep => sweep_colors(
+            base,
+            frame,
+            4,
+            96,
+            [
+                verts[0].0.saturating_add(verts[0].1 / 2),
+                verts[1].0.saturating_add(verts[1].1 / 2),
+                verts[2].0.saturating_add(verts[2].1 / 2),
+                verts[3].0.saturating_add(verts[3].1 / 2),
+            ],
+        ),
+        LevelUiImageEffect::SoftPulse => {
+            let lift = 10 + (u16::from(triangle_wave_u8(frame.wrapping_mul(3))) * 44 / 255) as u8;
+            [add_light(base, lift); 4]
+        }
+    }
+}
+
+fn sweep_colors(
+    base: (u8, u8, u8),
+    frame: u16,
+    speed: u16,
+    intensity: u8,
+    positions: [i16; 4],
+) -> [(u8, u8, u8); 4] {
+    let phase = ((frame.wrapping_mul(speed) & 0x01ff) as i16) - 128;
+    [
+        add_light(base, sweep_lift(positions[0], phase, intensity)),
+        add_light(base, sweep_lift(positions[1], phase, intensity)),
+        add_light(base, sweep_lift(positions[2], phase, intensity)),
+        add_light(base, sweep_lift(positions[3], phase, intensity)),
+    ]
+}
+
+fn sweep_lift(position: i16, phase: i16, intensity: u8) -> u8 {
+    let distance = (position - phase).unsigned_abs();
+    let falloff = (distance / 2).min(u16::from(u8::MAX)) as u8;
+    intensity.saturating_sub(falloff)
+}
+
+fn triangle_wave_u8(value: u16) -> u8 {
+    let phase = value & 0x01ff;
+    if phase < 256 {
+        phase as u8
+    } else {
+        (511 - phase) as u8
+    }
+}
+
+fn add_light(color: (u8, u8, u8), lift: u8) -> (u8, u8, u8) {
+    (
+        color.0.saturating_add(lift),
+        color.1.saturating_add(lift),
+        color.2.saturating_add(lift),
+    )
+}
+
 fn draw_status_bar(
-    x: i16,
-    y: i16,
-    width: i16,
-    height: i16,
+    resolved: UiResolvedNode,
     value: i32,
     max_value: i32,
-    fill: (u8, u8, u8),
-    background: (u8, u8, u8),
+    fill: UiPaint,
+    background: UiPaint,
 ) {
-    draw_rect(x - 1, y - 1, width + 2, height + 2, (12, 14, 18));
-    draw_rect(x, y, width, height, background);
+    let width = resolved.width as i16;
+    let height = resolved.height as i16;
+    draw_quad_flat(resolved.subrect(-1, -1, width + 2, height + 2), 12, 14, 18);
+    draw_quad_paint(resolved.verts, background);
 
     let fill_width = status_fill_width(width, value, max_value);
     if fill_width > 0 {
-        draw_rect(x, y, fill_width, height, fill);
-        if height > 3 {
-            draw_rect(x, y, fill_width, 1, brighten(fill));
+        draw_quad_paint(resolved.subrect(0, 0, fill_width, height), fill);
+        if height > 3 && fill.is_solid() {
+            let color = brighten(fill.from());
+            draw_quad_flat(
+                resolved.subrect(0, 0, fill_width, 1),
+                color.0,
+                color.1,
+                color.2,
+            );
         }
     }
 }
@@ -571,16 +1082,20 @@ fn status_fill_width(width: i16, value: i32, max_value: i32) -> i16 {
 fn draw_button(
     font: Option<&FontAtlas>,
     node: &LevelUiNodeRecord,
-    x: i16,
-    y: i16,
-    width: u16,
-    height: u16,
+    resolved: UiResolvedNode,
+    paints: &[LevelUiPaintRecord],
 ) {
     if node.flags & ui_node_flags::BUTTON_TRANSPARENT == 0 {
-        let fill = rgb(node.color);
-        draw_rect(x, y, width as i16, height as i16, fill);
-        if height > 3 {
-            draw_rect(x, y, width as i16, 1, brighten(fill));
+        let fill = shape_paint(node.color, node.color_paint, paints);
+        draw_quad_paint(resolved.verts, fill);
+        if resolved.height > 3 && fill.is_solid() {
+            let color = brighten(fill.from());
+            draw_quad_flat(
+                resolved.subrect(0, 0, resolved.width as i16, 1),
+                color.0,
+                color.1,
+                color.2,
+            );
         }
     }
     let Some(font) = font else {
@@ -592,18 +1107,27 @@ fn draw_button(
     let scale = node_font_scale_q8(node);
     let letter_spacing = node_letter_spacing(node);
     let line_h = scaled_line_height(font, scale) as i32;
-    let text_y = (y as i32 + (height as i32 - line_h).max(0) / 2)
+    let text_y = ((resolved.height as i32 - line_h).max(0) / 2)
         .clamp(i16::MIN as i32, i16::MAX as i32) as i16;
     let align = (node.flags & ui_node_flags::TEXT_ALIGN_MASK) >> ui_node_flags::TEXT_ALIGN_SHIFT;
-    let text_x = aligned_text_x(font, node.text, x, width, align, scale, letter_spacing);
-    draw_scaled_text(
+    let text_x = aligned_text_x(
         font,
+        node.text,
+        0,
+        resolved.width,
+        align,
+        scale,
+        letter_spacing,
+    );
+    draw_transformed_text_paint(
+        font,
+        resolved,
         text_x,
         text_y,
         node.text,
         scale,
         letter_spacing,
-        rgb(node.accent),
+        text_paint(node.accent, node.accent_paint, paints),
     );
 }
 
@@ -614,54 +1138,117 @@ fn draw_button(
 /// option's value feeds this through [`slider_fill`] in [`draw_scene`].
 #[allow(clippy::too_many_arguments)]
 fn draw_slider(
-    x: i16,
-    y: i16,
-    width: i16,
-    height: i16,
+    resolved: UiResolvedNode,
     fill_num: i32,
     fill_den: i32,
-    track: (u8, u8, u8),
-    fill: (u8, u8, u8),
-    knob: (u8, u8, u8),
+    track: UiPaint,
+    fill: UiPaint,
+    knob: UiPaint,
 ) {
+    let width = resolved.width as i16;
+    let height = resolved.height as i16;
     if width <= 0 || height <= 0 {
         return;
     }
-    draw_rect(x - 1, y - 1, width + 2, height + 2, (12, 14, 18));
-    draw_rect(x, y, width, height, track);
+    draw_quad_flat(resolved.subrect(-1, -1, width + 2, height + 2), 12, 14, 18);
+    draw_quad_paint(resolved.verts, track);
 
     let den = fill_den.max(1);
     let num = fill_num.clamp(0, den);
     let fill_width = ((width as i32).saturating_mul(num) / den) as i16;
     if fill_width > 0 {
-        draw_rect(x, y, fill_width, height, fill);
+        draw_quad_paint(resolved.subrect(0, 0, fill_width, height), fill);
     }
 
     // Knob: a fixed-width rect centred on the fill edge, clamped so it
     // stays inside the track.
     let knob_w = (height + 2).clamp(3, width.max(3));
-    let edge = x as i32 + fill_width as i32;
-    let knob_x =
-        (edge - knob_w as i32 / 2).clamp(x as i32, x as i32 + width as i32 - knob_w as i32);
+    let edge = fill_width as i32;
+    let knob_x = (edge - knob_w as i32 / 2).clamp(0, width as i32 - knob_w as i32);
     let knob_x = knob_x.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
-    draw_rect(knob_x, y - 1, knob_w, height + 2, knob);
+    draw_quad_paint(resolved.subrect(knob_x, -1, knob_w, height + 2), knob);
 }
 
-fn draw_rect(x: i16, y: i16, width: i16, height: i16, color: (u8, u8, u8)) {
-    if width <= 0 || height <= 0 {
-        return;
+fn draw_quad_paint(verts: [(i16, i16); 4], paint: UiPaint) {
+    match paint {
+        UiPaint::Solid(color) => draw_quad_flat(verts, color.0, color.1, color.2),
+        UiPaint::Gradient {
+            from,
+            to,
+            direction,
+        } => {
+            let colors = gradient_vertex_colors(from, to, direction);
+            draw_tri_gouraud(
+                [verts[0], verts[1], verts[2]],
+                [colors[0], colors[1], colors[2]],
+            );
+            draw_tri_gouraud(
+                [verts[1], verts[2], verts[3]],
+                [colors[1], colors[2], colors[3]],
+            );
+        }
     }
-    draw_quad_flat(
-        [
-            (x, y),
-            (x + width, y),
-            (x, y + height),
-            (x + width, y + height),
-        ],
-        color.0,
-        color.1,
-        color.2,
-    );
+}
+
+fn gradient_vertex_colors(
+    from: (u8, u8, u8),
+    to: (u8, u8, u8),
+    direction: LevelUiGradientDirection,
+) -> [(u8, u8, u8); 4] {
+    match direction {
+        LevelUiGradientDirection::Vertical => [from, from, to, to],
+        LevelUiGradientDirection::Horizontal => [from, to, from, to],
+    }
+}
+
+#[derive(Clone, Copy)]
+enum UiPaint {
+    Solid((u8, u8, u8)),
+    Gradient {
+        from: (u8, u8, u8),
+        to: (u8, u8, u8),
+        direction: LevelUiGradientDirection,
+    },
+}
+
+impl UiPaint {
+    const fn is_solid(self) -> bool {
+        matches!(self, Self::Solid(_))
+    }
+
+    const fn from(self) -> (u8, u8, u8) {
+        match self {
+            Self::Solid(color) | Self::Gradient { from: color, .. } => color,
+        }
+    }
+}
+
+fn shape_paint(color: [u8; 3], paint_index: u16, paints: &[LevelUiPaintRecord]) -> UiPaint {
+    resolve_paint(color, paint_index, paints, rgb)
+}
+
+fn text_paint(color: [u8; 3], paint_index: u16, paints: &[LevelUiPaintRecord]) -> UiPaint {
+    resolve_paint(color, paint_index, paints, font_tint)
+}
+
+fn resolve_paint(
+    color: [u8; 3],
+    paint_index: u16,
+    paints: &[LevelUiPaintRecord],
+    map_color: fn([u8; 3]) -> (u8, u8, u8),
+) -> UiPaint {
+    let solid = map_color(color);
+    if paint_index == UI_PAINT_NONE {
+        return UiPaint::Solid(solid);
+    }
+    let Some(paint) = paints.get(paint_index as usize) else {
+        return UiPaint::Solid(solid);
+    };
+    UiPaint::Gradient {
+        from: map_color(paint.from),
+        to: map_color(paint.to),
+        direction: paint.direction,
+    }
 }
 
 fn brighten(color: (u8, u8, u8)) -> (u8, u8, u8) {
@@ -674,4 +1261,16 @@ fn brighten(color: (u8, u8, u8)) -> (u8, u8, u8) {
 
 fn rgb(color: [u8; 3]) -> (u8, u8, u8) {
     (color[0], color[1], color[2])
+}
+
+fn font_tint(color: [u8; 3]) -> (u8, u8, u8) {
+    (
+        psx_texture_modulation_color(color[0]),
+        psx_texture_modulation_color(color[1]),
+        psx_texture_modulation_color(color[2]),
+    )
+}
+
+fn psx_texture_modulation_color(component: u8) -> u8 {
+    ((component as u16 + 1) / 2) as u8
 }
