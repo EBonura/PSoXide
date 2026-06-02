@@ -13,7 +13,6 @@ use psx_level::{
     COMPACT_COLLISION_VERSION, COMPACT_COLLISION_WALL_BYTES,
 };
 
-
 /// Runtime material slot used by cooked world geometry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WorldMaterialId(pub u16);
@@ -237,7 +236,6 @@ impl Default for GridSector<'_> {
         Self::EMPTY
     }
 }
-
 
 /// PSX-resident wrapper over a parsed `.psxw` blob.
 ///
@@ -1405,4 +1403,3 @@ const _: () = {
     _assert_copy::<WallRender>();
     _assert_copy::<WallCollision>();
 };
-
