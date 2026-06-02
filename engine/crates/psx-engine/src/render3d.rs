@@ -2965,7 +2965,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             while global_index < part_end {
                 let vertex = vertices[global_index];
                 if blend_vertices && model_vertex_uses_cpu_blend(vertex, joint_count) {
-                    stats.cpu_blended_vertices = stats.cpu_blended_vertices.saturating_add(1);
+                    stats.cpu_blended_vertices = stats.cpu_blended_vertices.wrapping_add(1);
                     let projected = project_blended_textured_model_vertex(
                         vertex,
                         primary,
@@ -3198,8 +3198,8 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 continue;
             }
 
-            packed_face_calls = packed_face_calls.saturating_add(1);
-            packed_unclamped_face_calls = packed_unclamped_face_calls.saturating_add(1);
+            packed_face_calls = packed_face_calls.wrapping_add(1);
+            packed_unclamped_face_calls = packed_unclamped_face_calls.wrapping_add(1);
             let projected = unsafe {
                 // SAFETY: each index was checked against `projected_vertices.len()`
                 // immediately above. The slice is pretrimmed to `project_count`.
@@ -3226,7 +3226,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 ) {
                     ModelTrianglePacketResult::Submitted => {
                         submitted_triangles = submitted_triangles.wrapping_add(1);
-                        fast_submitted_triangles = fast_submitted_triangles.saturating_add(1);
+                        fast_submitted_triangles = fast_submitted_triangles.wrapping_add(1);
                     }
                     ModelTrianglePacketResult::CommandOverflow => {
                         flush_packed_unclamped_model_batch_stats(
@@ -3261,7 +3261,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 continue;
             }
 
-            hw_extent_fallbacks = hw_extent_fallbacks.saturating_add(1);
+            hw_extent_fallbacks = hw_extent_fallbacks.wrapping_add(1);
             flush_packed_unclamped_model_batch_stats(
                 stats,
                 skipped_triangles,
@@ -3329,8 +3329,8 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             stats.skipped_triangles = stats.skipped_triangles.wrapping_add(1);
             return false;
         }
-        stats.packed_face_calls = stats.packed_face_calls.saturating_add(1);
-        stats.packed_clamped_face_calls = stats.packed_clamped_face_calls.saturating_add(1);
+        stats.packed_face_calls = stats.packed_face_calls.wrapping_add(1);
+        stats.packed_clamped_face_calls = stats.packed_clamped_face_calls.wrapping_add(1);
         let projected = [
             projected_vertices[ia],
             projected_vertices[ib],
@@ -3359,11 +3359,11 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             );
             stats.fast_submitted_triangles = stats
                 .fast_submitted_triangles
-                .saturating_add(stats.submitted_triangles.saturating_sub(before));
+                .wrapping_add(stats.submitted_triangles.wrapping_sub(before));
             return overflow;
         }
 
-        stats.hw_extent_fallbacks = stats.hw_extent_fallbacks.saturating_add(1);
+        stats.hw_extent_fallbacks = stats.hw_extent_fallbacks.wrapping_add(1);
         let uvs = face.uvs();
         let textured = [
             ProjectedTexturedVertex::new(projected[0], uvs[0].0 as i32, uvs[0].1 as i32),
@@ -3396,8 +3396,8 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             stats.skipped_triangles = stats.skipped_triangles.wrapping_add(1);
             return false;
         }
-        stats.packed_face_calls = stats.packed_face_calls.saturating_add(1);
-        stats.packed_clamped_face_calls = stats.packed_clamped_face_calls.saturating_add(1);
+        stats.packed_face_calls = stats.packed_face_calls.wrapping_add(1);
+        stats.packed_clamped_face_calls = stats.packed_clamped_face_calls.wrapping_add(1);
         let projected = [
             projected_vertices[ia],
             projected_vertices[ib],
@@ -3426,11 +3426,11 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             );
             stats.fast_submitted_triangles = stats
                 .fast_submitted_triangles
-                .saturating_add(stats.submitted_triangles.saturating_sub(before));
+                .wrapping_add(stats.submitted_triangles.wrapping_sub(before));
             return overflow;
         }
 
-        stats.hw_extent_fallbacks = stats.hw_extent_fallbacks.saturating_add(1);
+        stats.hw_extent_fallbacks = stats.hw_extent_fallbacks.wrapping_add(1);
         let uvs = face.uvs();
         let textured = [
             ProjectedTexturedVertex::new(projected[0], uvs[0].0 as i32, uvs[0].1 as i32),
@@ -3465,8 +3465,8 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             stats.skipped_triangles = stats.skipped_triangles.wrapping_add(1);
             return false;
         }
-        stats.packed_face_calls = stats.packed_face_calls.saturating_add(1);
-        stats.packed_general_face_calls = stats.packed_general_face_calls.saturating_add(1);
+        stats.packed_face_calls = stats.packed_face_calls.wrapping_add(1);
+        stats.packed_general_face_calls = stats.packed_general_face_calls.wrapping_add(1);
         let projected = [
             projected_vertices[ia],
             projected_vertices[ib],
@@ -3476,7 +3476,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         if !all_projected_vertices_in_front && projected_model_face_crosses_near(projected, near_z)
         {
             stats.dropped_triangles = stats.dropped_triangles.wrapping_add(1);
-            stats.near_plane_dropped_faces = stats.near_plane_dropped_faces.saturating_add(1);
+            stats.near_plane_dropped_faces = stats.near_plane_dropped_faces.wrapping_add(1);
             return false;
         }
 
@@ -3502,11 +3502,11 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             );
             stats.fast_submitted_triangles = stats
                 .fast_submitted_triangles
-                .saturating_add(stats.submitted_triangles.saturating_sub(before));
+                .wrapping_add(stats.submitted_triangles.wrapping_sub(before));
             return overflow;
         }
 
-        stats.hw_extent_fallbacks = stats.hw_extent_fallbacks.saturating_add(1);
+        stats.hw_extent_fallbacks = stats.hw_extent_fallbacks.wrapping_add(1);
         let uvs = face.uvs();
         let textured = [
             ProjectedTexturedVertex::new(projected[0], uvs[0].0 as i32, uvs[0].1 as i32),
@@ -3541,7 +3541,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             stats.skipped_triangles = stats.skipped_triangles.wrapping_add(1);
             return false;
         }
-        stats.fallback_face_calls = stats.fallback_face_calls.saturating_add(1);
+        stats.fallback_face_calls = stats.fallback_face_calls.wrapping_add(1);
         let projected = [
             projected_vertices[ia],
             projected_vertices[ib],
@@ -3551,7 +3551,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         if !all_projected_vertices_in_front && projected_model_face_crosses_near(projected, near_z)
         {
             stats.dropped_triangles = stats.dropped_triangles.wrapping_add(1);
-            stats.near_plane_dropped_faces = stats.near_plane_dropped_faces.saturating_add(1);
+            stats.near_plane_dropped_faces = stats.near_plane_dropped_faces.wrapping_add(1);
             return false;
         }
 
@@ -3581,7 +3581,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 );
                 stats.fast_submitted_triangles = stats
                     .fast_submitted_triangles
-                    .saturating_add(stats.submitted_triangles.saturating_sub(before));
+                    .wrapping_add(stats.submitted_triangles.wrapping_sub(before));
                 return overflow;
             }
             let uvs = face.uvs();
@@ -3753,7 +3753,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         ];
         if !projected_triangle_hw_safe(verts) {
             stats.dropped_triangles = stats.dropped_triangles.wrapping_add(1);
-            stats.hw_unsafe_dropped_faces = stats.hw_unsafe_dropped_faces.saturating_add(1);
+            stats.hw_unsafe_dropped_faces = stats.hw_unsafe_dropped_faces.wrapping_add(1);
             return false;
         }
         if self.command_len >= self.commands.len() {
@@ -4366,7 +4366,7 @@ impl<'a, 'ot, 'arena, const OT_DEPTH: usize> GouraudRenderPass<'a, 'ot, 'arena, 
                 || (ib as usize) >= project_count
                 || (ic as usize) >= project_count
             {
-                stats.skipped_triangles = stats.skipped_triangles.saturating_add(1);
+                stats.skipped_triangles = stats.skipped_triangles.wrapping_add(1);
                 face_idx += 1;
                 continue;
             }
@@ -4377,7 +4377,7 @@ impl<'a, 'ot, 'arena, const OT_DEPTH: usize> GouraudRenderPass<'a, 'ot, 'arena, 
                 projected_vertices[ic as usize],
             ];
             if options.cull_backfaces && back_facing(verts) {
-                stats.culled_triangles = stats.culled_triangles.saturating_add(1);
+                stats.culled_triangles = stats.culled_triangles.wrapping_add(1);
                 face_idx += 1;
                 continue;
             }
@@ -4416,7 +4416,7 @@ impl<'a, 'ot, 'arena, const OT_DEPTH: usize> GouraudRenderPass<'a, 'ot, 'arena, 
             };
             self.command_len += 1;
             self.insert_command_in_slot(command_index);
-            stats.submitted_triangles = stats.submitted_triangles.saturating_add(1);
+            stats.submitted_triangles = stats.submitted_triangles.wrapping_add(1);
             face_idx += 1;
         }
 
@@ -5567,15 +5567,15 @@ fn lerp_i32(a: i32, b: i32, numerator: i32, denominator: i32) -> i32 {
 fn merge_world_stats(stats: &mut WorldRenderStats, next: WorldRenderStats) {
     stats.submitted_triangles = stats
         .submitted_triangles
-        .saturating_add(next.submitted_triangles);
-    stats.culled_triangles = stats.culled_triangles.saturating_add(next.culled_triangles);
+        .wrapping_add(next.submitted_triangles);
+    stats.culled_triangles = stats.culled_triangles.wrapping_add(next.culled_triangles);
     stats.clipped_triangles = stats
         .clipped_triangles
-        .saturating_add(next.clipped_triangles);
-    stats.split_triangles = stats.split_triangles.saturating_add(next.split_triangles);
+        .wrapping_add(next.clipped_triangles);
+    stats.split_triangles = stats.split_triangles.wrapping_add(next.split_triangles);
     stats.dropped_triangles = stats
         .dropped_triangles
-        .saturating_add(next.dropped_triangles);
+        .wrapping_add(next.dropped_triangles);
     stats.primitive_overflow |= next.primitive_overflow;
     stats.command_overflow |= next.command_overflow;
 }
@@ -5593,29 +5593,29 @@ fn flush_packed_unclamped_model_batch_stats(
     hw_extent_fallbacks: u16,
 ) {
     stats.skipped_triangles = stats.skipped_triangles.wrapping_add(skipped_triangles);
-    stats.packed_face_calls = stats.packed_face_calls.saturating_add(packed_face_calls);
+    stats.packed_face_calls = stats.packed_face_calls.wrapping_add(packed_face_calls);
     stats.packed_unclamped_face_calls = stats
         .packed_unclamped_face_calls
-        .saturating_add(packed_unclamped_face_calls);
+        .wrapping_add(packed_unclamped_face_calls);
     stats.culled_triangles = stats.culled_triangles.wrapping_add(culled_triangles);
     stats.submitted_triangles = stats.submitted_triangles.wrapping_add(submitted_triangles);
     stats.fast_submitted_triangles = stats
         .fast_submitted_triangles
-        .saturating_add(fast_submitted_triangles);
+        .wrapping_add(fast_submitted_triangles);
     stats.hw_extent_fallbacks = stats
         .hw_extent_fallbacks
-        .saturating_add(hw_extent_fallbacks);
+        .wrapping_add(hw_extent_fallbacks);
 }
 
 fn merge_textured_model_stats(stats: &mut TexturedModelRenderStats, next: WorldRenderStats) {
     stats.submitted_triangles = stats
         .submitted_triangles
-        .saturating_add(next.submitted_triangles);
-    stats.culled_triangles = stats.culled_triangles.saturating_add(next.culled_triangles);
-    stats.split_triangles = stats.split_triangles.saturating_add(next.split_triangles);
+        .wrapping_add(next.submitted_triangles);
+    stats.culled_triangles = stats.culled_triangles.wrapping_add(next.culled_triangles);
+    stats.split_triangles = stats.split_triangles.wrapping_add(next.split_triangles);
     stats.dropped_triangles = stats
         .dropped_triangles
-        .saturating_add(next.dropped_triangles);
+        .wrapping_add(next.dropped_triangles);
     stats.primitive_overflow |= next.primitive_overflow;
     stats.command_overflow |= next.command_overflow;
 }
