@@ -12,13 +12,16 @@ pub fn write_package(package: &PlaytestPackage, generated_dir: &Path) -> std::io
     let stream_chunks_dir = generated_dir.join(STREAM_CHUNKS_DIRNAME);
     let textures_dir = generated_dir.join(TEXTURES_DIRNAME);
     let models_dir = generated_dir.join(MODELS_DIRNAME);
+    let ui_sfx_dir = generated_dir.join(UI_SFX_DIRNAME);
     std::fs::create_dir_all(&rooms_dir)?;
     std::fs::create_dir_all(&stream_chunks_dir)?;
     std::fs::create_dir_all(&textures_dir)?;
     std::fs::create_dir_all(&models_dir)?;
+    std::fs::create_dir_all(&ui_sfx_dir)?;
     purge_directory_files(&rooms_dir, "psxw")?;
     purge_directory_files(&stream_chunks_dir, "psxc")?;
     purge_directory_files(&textures_dir, "psxt")?;
+    purge_directory_files(&ui_sfx_dir, "psau")?;
     // Models live in per-model subfolders so the recursive
     // purge needs to traverse one level deeper than rooms /
     // textures.
@@ -44,6 +47,9 @@ pub fn write_package(package: &PlaytestPackage, generated_dir: &Path) -> std::io
         }
         std::fs::write(&target, &asset.bytes)?;
     }
+    for sample in &package.ui_sfx_samples {
+        std::fs::write(ui_sfx_dir.join(&sample.filename), &sample.bytes)?;
+    }
     for room_index in 0..package.rooms.len().min(u16::MAX as usize + 1) {
         let payload = streamed_room_chunk_payload(package, room_index as u16)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
@@ -59,6 +65,10 @@ pub fn write_package(package: &PlaytestPackage, generated_dir: &Path) -> std::io
         generated_dir.join(WORLD_PACK_ORDER_FILENAME),
         render_world_pack_order(package),
     )?;
+    std::fs::write(
+        generated_dir.join(CDDA_TRACKS_FILENAME),
+        render_cdda_tracks(package),
+    )?;
     Ok(())
 }
 
@@ -66,6 +76,23 @@ pub fn write_package(package: &PlaytestPackage, generated_dir: &Path) -> std::io
 /// can `include!`. Imports types from `psx_level` rather than
 /// re-defining them so the writer here and the reader there
 /// stay in lockstep.
+/// Emit a `pub static {name}: &[u8]` whose backing blob is forced to
+/// 4-byte (word) alignment via [`AlignedAssetBytes`]. Plain
+/// `include_bytes!` is byte-aligned, which makes the runtime stream the
+/// texture/sky payload to VRAM one word at a time through the GP0 FIFO;
+/// a word-aligned blob lets it DMA the payload in a single block-mode
+/// transfer instead (`pixel_bytes` sits at a 4-aligned offset).
+fn write_aligned_asset_bytes_static(out: &mut String, static_name: &str, include_path: &str) {
+    let _ = writeln!(out, "pub static {static_name}: &[u8] = {{");
+    let _ = writeln!(out, "    static ALIGNED: &AlignedAssetBytes<u32, [u8]> =");
+    let _ = writeln!(
+        out,
+        "        &AlignedAssetBytes {{ _align: [], bytes: *include_bytes!(\"{include_path}\") }};",
+    );
+    let _ = writeln!(out, "    &ALIGNED.bytes");
+    let _ = writeln!(out, "}};");
+}
+
 pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     let mut out = String::new();
     out.push_str(MANIFEST_HEADER);
@@ -114,6 +141,17 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         "pub const CACHED_ROOM_TEXTURE_SPLIT_MAX_EDGE: u16 = {runtime_texture_split_max_edge};\n",
     );
 
+    // Force 4-byte alignment on embedded asset blobs. A zero-size
+    // `[u32; 0]` marker bumps the wrapper's alignment to a word; the
+    // trailing unsized `bytes` field then starts word-aligned, which
+    // keeps each texture's `pixel_bytes` DMA-eligible at upload time.
+    out.push_str("#[allow(dead_code)]\n");
+    out.push_str("#[repr(C)]\n");
+    out.push_str("struct AlignedAssetBytes<Align, Bytes: ?Sized> {\n");
+    out.push_str("    _align: [Align; 0],\n");
+    out.push_str("    bytes: Bytes,\n");
+    out.push_str("}\n\n");
+
     // Emit one named static per asset so the include_bytes! call
     // sites are easy to grep for. Asset records reference these
     // statics so the slice is still constructible at compile time.
@@ -140,18 +178,19 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
                 asset_static_name(asset, i)
             );
             let _ = writeln!(out, "#[cfg(not(feature = \"cd-stream-bench\"))]");
-            let _ = writeln!(
-                out,
-                "pub static {}: &[u8] = include_bytes!(\"{include_path}\");",
-                asset_static_name(asset, i),
-            );
+            write_aligned_asset_bytes_static(&mut out, &asset_static_name(asset, i), &include_path);
         } else {
-            let _ = writeln!(
-                out,
-                "pub static {}: &[u8] = include_bytes!(\"{include_path}\");",
-                asset_static_name(asset, i),
-            );
+            write_aligned_asset_bytes_static(&mut out, &asset_static_name(asset, i), &include_path);
         }
+    }
+    for (i, sample) in package.ui_sfx_samples.iter().enumerate() {
+        let static_name = ui_sfx_sample_static_name(i);
+        let _ = writeln!(out, "/// {static_name} - {}", sample.source_path);
+        write_aligned_asset_bytes_static(
+            &mut out,
+            &static_name,
+            &format!("{UI_SFX_DIRNAME}/{}", sample.filename),
+        );
     }
     out.push('\n');
 
@@ -287,17 +326,19 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         let sky_cyclorama_quads = &sky_cyclorama_refs[room_index];
         let _ = writeln!(
             out,
-            "    LevelRoomRecord {{ name: {:?}, world_asset: AssetId({}), origin_x: {}, origin_z: {}, sector_size: {}, draw_distance: {}, chunk_activation_radius_sectors: {}, visibility_radius: {}, resident_chunk_limit: {}, visible_chunk_limit: {}, material_first: MaterialIndex({}), material_count: {}, portal_first: {}, portal_count: {}, near_room_first: {}, near_room_count: {}, overlapped_room_first: {}, overlapped_room_count: {}, fog_rgb: [{}, {}, {}], fog_near: {}, fog_far: {}, atmosphere_rgb: [{}, {}, {}], atmosphere_density: {}, atmosphere_fall_speed_q4: {}, atmosphere_wind_speed_q4: {}, sky: LevelSkyRecord {{ top_rgb: [{}, {}, {}], horizon_rgb: [{}, {}, {}], bottom_rgb: [{}, {}, {}], horizon_percent: {}, horizon_thickness_percent: {}, skybox_columns: {}, skybox_rows: {}, flags: {}, cyclorama_quads: {}, cloud_layer: LevelCloudLayerRecord {{ texture_asset: AssetId({}), color_rgb: [{}, {}, {}], density: {}, altitude: {}, extent: {}, tile_count: {}, scroll_speed: [{}, {}], noise_seed: 0x{:08x}, flags: {} }} }}, far_vista: LevelFarVistaRecord {{ texture_assets: {}, radius: {}, height: {}, vertical_offset: {}, segments: {}, rotation_degrees: {}, tint_rgb: [{}, {}, {}], flags: {} }}, camera: LevelCameraRecord {{ distance: {}, height: {}, target_height: {}, min_floor_clearance: {} }}, flags: {} }},",
+            "    LevelRoomRecord {{ name: {:?}, world_asset: AssetId({}), origin_x: {}, origin_z: {}, origin_y: {}, sector_size: {}, draw_distance: {}, chunk_activation_radius_sectors: {}, visibility_radius: {}, resident_chunk_limit: {}, visible_chunk_limit: {}, gravity_per_tick: {}, material_first: MaterialIndex({}), material_count: {}, portal_first: {}, portal_count: {}, near_room_first: {}, near_room_count: {}, overlapped_room_first: {}, overlapped_room_count: {}, fog_rgb: [{}, {}, {}], fog_near: {}, fog_far: {}, atmosphere_rgb: [{}, {}, {}], atmosphere_density: {}, atmosphere_fall_speed_q4: {}, atmosphere_wind_speed_q4: {}, sky: LevelSkyRecord {{ top_rgb: [{}, {}, {}], horizon_rgb: [{}, {}, {}], bottom_rgb: [{}, {}, {}], horizon_percent: {}, horizon_thickness_percent: {}, skybox_columns: {}, skybox_rows: {}, flags: {}, cyclorama_quads: {}, cloud_layer: LevelCloudLayerRecord {{ texture_asset: AssetId({}), color_rgb: [{}, {}, {}], density: {}, altitude: {}, extent: {}, tile_count: {}, scroll_speed: [{}, {}], noise_seed: 0x{:08x}, flags: {} }} }}, far_vista: LevelFarVistaRecord {{ texture_assets: {}, radius: {}, height: {}, vertical_offset: {}, segments: {}, rotation_degrees: {}, tint_rgb: [{}, {}, {}], flags: {} }}, camera: LevelCameraRecord {{ distance: {}, height: {}, target_height: {}, min_floor_clearance: {} }}, flags: {} }},",
             room.name,
             room.world_asset_index,
             room.origin_x,
             room.origin_z,
+            room.origin_y,
             room.sector_size,
             room.draw_distance,
             room.chunk_activation_radius_sectors,
             room.visibility_radius,
             room.resident_chunk_limit,
             room.visible_chunk_limit,
+            room.gravity_per_tick,
             room.material_first,
             room.material_count,
             room.portal_first,
@@ -901,13 +942,14 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         let kind = render_ui_node_kind(&node.kind);
         let value = render_ui_value_binding(node.value);
         let max = render_ui_value_binding(node.max);
+        let action = render_ui_action(node.action);
         let texture_asset = node
             .texture_asset
             .map(|index| format!("AssetId({index})"))
             .unwrap_or_else(|| "AssetId(u16::MAX)".to_string());
         let _ = writeln!(
             out,
-            "    LevelUiNodeRecord {{ parent: {parent}, kind: {kind}, x: {}, y: {}, width: {}, height: {}, color: [{}, {}, {}], background: [{}, {}, {}], value: {value}, max: {max}, texture_asset: {texture_asset}, text: {:?}, tag: {:?}, flags: {} }},",
+            "    LevelUiNodeRecord {{ parent: {parent}, kind: {kind}, x: {}, y: {}, width: {}, height: {}, color: [{}, {}, {}], background: [{}, {}, {}], accent: [{}, {}, {}], value: {value}, max: {max}, texture_asset: {texture_asset}, text: {:?}, tag: {:?}, action: {action}, option: {}, flags: {}, sfx_first: {}, sfx_count: {}, font: 0 }},",
             node.x,
             node.y,
             node.width,
@@ -918,9 +960,76 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             node.background[0],
             node.background[1],
             node.background[2],
+            node.accent[0],
+            node.accent[1],
+            node.accent[2],
             node.text,
             node.tag,
+            node.option,
             node.flags,
+            node.sfx_first,
+            node.sfx_count,
+        );
+    }
+    out.push_str("];\n\n");
+
+    out.push_str("/// Cooked UI SFX samples.\n");
+    out.push_str("pub static UI_SFX_SAMPLES: &[LevelUiSfxSampleRecord] = &[\n");
+    for i in 0..package.ui_sfx_samples.len() {
+        let static_name = ui_sfx_sample_static_name(i);
+        let _ = writeln!(
+            out,
+            "    LevelUiSfxSampleRecord {{ bytes: {static_name} }},"
+        );
+    }
+    out.push_str("];\n\n");
+
+    out.push_str("/// Cooked UI SFX cue bindings.\n");
+    out.push_str("pub static UI_SFX_CUES: &[LevelUiSfxCueRecord] = &[\n");
+    for cue in &package.ui_sfx_cues {
+        let event = render_ui_sfx_event(cue.event);
+        let _ = writeln!(
+            out,
+            "    LevelUiSfxCueRecord {{ sample: {}, event: {event}, volume_percent: {}, pitch_q12: {}, flags: {} }},",
+            cue.sample, cue.volume_percent, cue.pitch_q12, cue.flags,
+        );
+    }
+    out.push_str("];\n\n");
+
+    out.push_str("/// Addressable cooked UI scenes indexing `UI_NODES`.\n");
+    out.push_str("pub static UI_SCENES: &[LevelUiScene] = &[\n");
+    for scene in &package.ui_scenes {
+        let _ = writeln!(
+            out,
+            "    LevelUiScene {{ id: {}, name: {:?}, node_first: {}, node_count: {} }},",
+            scene.id, scene.name, scene.node_first, scene.node_count,
+        );
+    }
+    out.push_str("];\n\n");
+
+    out.push_str("/// Cooked game-state flow.\n");
+    out.push_str("pub static GAME_FLOW: GameFlow = GameFlow {\n");
+    out.push_str("    states: &[\n");
+    for state in &package.game_flow.states {
+        let rendered = match state {
+            PlaytestFlowState::UiScene { scene } => {
+                format!("FlowState::UiScene {{ scene: {scene} }}")
+            }
+            PlaytestFlowState::Gameplay => "FlowState::Gameplay".to_string(),
+        };
+        let _ = writeln!(out, "        {rendered},");
+    }
+    out.push_str("    ],\n");
+    let _ = writeln!(out, "    entry: {},", package.game_flow.entry);
+    out.push_str("};\n\n");
+
+    out.push_str("/// Cooked project options sliders and SetOption actions bind to.\n");
+    out.push_str("pub static OPTIONS: &[LevelOptionDef] = &[\n");
+    for option in &package.options {
+        let _ = writeln!(
+            out,
+            "    LevelOptionDef {{ id: {}, min: {}, max: {}, step: {}, default: {} }},",
+            option.id, option.min, option.max, option.step, option.default,
         );
     }
     out.push_str("];\n\n");
@@ -1061,7 +1170,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             .join(", ");
         let _ = writeln!(
             out,
-            "    LevelCharacterRecord {{ model: ModelIndex({}), action_clips: [{}], action_flags: [{}], visual_offset: [{}, {}, {}], visual_yaw: {}, visual_scale_q8: {}, radius: {}, height: {}, walk_speed: {}, run_speed: {}, turn_speed_degrees_per_second: {}, stamina_max_q12: {}, sprint_min_q12: {}, sprint_drain_q12: {}, stamina_recover_q12: {}, roll_cost_q12: {}, roll_speed: {}, roll_active_frames: {}, roll_recovery_frames: {}, roll_invulnerable_frames: {}, backstep_cost_q12: {}, backstep_speed: {}, backstep_active_frames: {}, backstep_recovery_frames: {}, backstep_invulnerable_frames: {}, camera_distance: {}, camera_height: {}, camera_target_height: {}, flags: 0 }},",
+            "    LevelCharacterRecord {{ model: ModelIndex({}), action_clips: [{}], action_flags: [{}], visual_offset: [{}, {}, {}], visual_yaw: {}, visual_scale_q8: {}, weight_q8: {}, radius: {}, height: {}, walk_speed: {}, run_speed: {}, turn_speed_degrees_per_second: {}, stamina_max_q12: {}, sprint_min_q12: {}, sprint_drain_q12: {}, stamina_recover_q12: {}, roll_cost_q12: {}, roll_speed: {}, roll_active_frames: {}, roll_recovery_frames: {}, roll_invulnerable_frames: {}, backstep_cost_q12: {}, backstep_speed: {}, backstep_active_frames: {}, backstep_recovery_frames: {}, backstep_invulnerable_frames: {}, camera_distance: {}, camera_height: {}, camera_target_height: {}, flags: 0 }},",
             character.model,
             action_clips,
             action_flags,
@@ -1070,6 +1179,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             character.visual_offset[2],
             character.visual_yaw,
             character.visual_scale_q8,
+            character.weight_q8,
             character.radius,
             character.height,
             character.walk_speed,
@@ -1137,6 +1247,17 @@ fn render_world_pack_order(package: &PlaytestPackage) -> String {
     );
     for room in world_pack_order(package) {
         let _ = writeln!(out, "{room}");
+    }
+    out
+}
+
+fn render_cdda_tracks(package: &PlaytestPackage) -> String {
+    let mut out = String::from(
+        "# PSoXide CD-DA WAV sources\n\
+         # One WAV path per line. Track 2 is the first line, track 3 the second, etc.\n",
+    );
+    for track in &package.cdda_tracks {
+        let _ = writeln!(out, "{}", track.wav_path);
     }
     out
 }
@@ -2111,6 +2232,32 @@ fn render_ui_node_kind(kind: &UiNodeKind) -> &'static str {
         UiNodeKind::Label { .. } => "LevelUiNodeKind::Label",
         UiNodeKind::Image { .. } => "LevelUiNodeKind::Image",
         UiNodeKind::Bar { .. } => "LevelUiNodeKind::Bar",
+        UiNodeKind::Button { .. } => "LevelUiNodeKind::Button",
+        UiNodeKind::Slider { .. } => "LevelUiNodeKind::Slider",
+        UiNodeKind::Music { .. } => "LevelUiNodeKind::Music",
+    }
+}
+
+fn render_ui_action(action: PlaytestUiAction) -> String {
+    match action {
+        PlaytestUiAction::GotoScene { scene } => {
+            format!("LevelUiAction::GotoScene {{ scene: {scene} }}")
+        }
+        PlaytestUiAction::StartGameplay => "LevelUiAction::StartGameplay".to_string(),
+        PlaytestUiAction::Back => "LevelUiAction::Back".to_string(),
+        PlaytestUiAction::SetOption { option, delta } => {
+            format!("LevelUiAction::SetOption {{ option: {option}, delta: {delta} }}")
+        }
+        PlaytestUiAction::Game { id } => format!("LevelUiAction::Game {{ id: {id} }}"),
+    }
+}
+
+fn render_ui_sfx_event(event: psx_level::LevelUiSfxEvent) -> &'static str {
+    match event {
+        psx_level::LevelUiSfxEvent::Focus => "LevelUiSfxEvent::Focus",
+        psx_level::LevelUiSfxEvent::Activate => "LevelUiSfxEvent::Activate",
+        psx_level::LevelUiSfxEvent::SliderNudge => "LevelUiSfxEvent::SliderNudge",
+        psx_level::LevelUiSfxEvent::SliderLimit => "LevelUiSfxEvent::SliderLimit",
     }
 }
 
@@ -2118,6 +2265,12 @@ fn render_ui_value_binding(binding: UiValueBinding) -> String {
     match binding {
         UiValueBinding::ConstantQ12(value) => {
             format!("LevelUiValueBinding::ConstantQ12({value})")
+        }
+        UiValueBinding::Option(option) => {
+            format!(
+                "LevelUiValueBinding::Option({})",
+                crate::playtest::cook_option_id(option)
+            )
         }
         UiValueBinding::PlayerHealth => "LevelUiValueBinding::PlayerHealth".to_string(),
         UiValueBinding::PlayerHealthMax => "LevelUiValueBinding::PlayerHealthMax".to_string(),
@@ -2418,6 +2571,10 @@ fn asset_static_name(asset: &PlaytestAsset, index: usize) -> String {
     format!("ASSET_{index:03}_{}_BYTES", stem.to_ascii_uppercase())
 }
 
+fn ui_sfx_sample_static_name(index: usize) -> String {
+    format!("UI_SFX_SAMPLE_{index:03}_BYTES")
+}
+
 fn purge_directory_files(dir: &Path, ext: &str) -> std::io::Result<()> {
     if !dir.exists() {
         return Ok(());
@@ -2589,6 +2746,138 @@ mod tests {
     }
 
     #[test]
+    fn empty_package_emits_gameplay_only_flow_and_no_scenes() {
+        let package = PlaytestPackage::default();
+        let src = render_manifest_source(&package);
+        assert!(src.contains("pub static UI_SCENES: &[LevelUiScene] = &[\n];"));
+        assert!(src.contains(
+            "pub static GAME_FLOW: GameFlow = GameFlow {\n    states: &[\n        FlowState::Gameplay,\n    ],\n    entry: 0,\n};"
+        ));
+    }
+
+    #[test]
+    fn ui_scene_table_and_flow_emit_addressable_scenes() {
+        let mut package = PlaytestPackage::default();
+        package.ui_nodes = vec![PlaytestUiNode {
+            parent: None,
+            kind: UiNodeKind::Canvas {
+                width: 320,
+                height: 240,
+            },
+            x: 0,
+            y: 0,
+            width: 320,
+            height: 240,
+            color: [0, 0, 0],
+            background: [0, 0, 0],
+            accent: [0, 0, 0],
+            value: UiValueBinding::ConstantQ12(0),
+            max: UiValueBinding::ConstantQ12(0),
+            texture_asset: None,
+            text: String::new(),
+            tag: String::new(),
+            action: PlaytestUiAction::default(),
+            option: psx_level::UI_OPTION_NONE,
+            flags: 0,
+            sfx_first: psx_level::UI_SFX_NONE,
+            sfx_count: 0,
+        }];
+        package.ui_scenes = vec![PlaytestUiScene {
+            id: 7,
+            name: "Pause".to_string(),
+            node_first: 0,
+            node_count: 1,
+        }];
+        package.game_flow = PlaytestGameFlow {
+            states: vec![
+                PlaytestFlowState::UiScene { scene: 7 },
+                PlaytestFlowState::Gameplay,
+            ],
+            entry: 0,
+        };
+
+        let src = render_manifest_source(&package);
+        assert!(
+            src.contains("LevelUiScene { id: 7, name: \"Pause\", node_first: 0, node_count: 1 },")
+        );
+        assert!(src.contains("FlowState::UiScene { scene: 7 },"));
+        assert!(src.contains("FlowState::Gameplay,"));
+        assert!(src.contains("entry: 0,"));
+    }
+
+    #[test]
+    fn button_and_slider_nodes_render_action_accent_and_option_fields() {
+        let mut package = PlaytestPackage::default();
+        package.ui_nodes = vec![
+            PlaytestUiNode {
+                parent: None,
+                kind: UiNodeKind::Button {
+                    rect: crate::UiRect::new(0, 0, 80, 18),
+                    label: "Play".to_string(),
+                    align: UiTextAlign::Center,
+                    color: [50, 60, 70],
+                    text_color: [236, 240, 248],
+                    transparent: false,
+                    action: UiAction::Back,
+                    sfx: crate::UiSfxBindings::default(),
+                },
+                x: 0,
+                y: 0,
+                width: 80,
+                height: 18,
+                color: [50, 60, 70],
+                background: [0, 0, 0],
+                accent: [0, 0, 0],
+                value: UiValueBinding::ConstantQ12(0),
+                max: UiValueBinding::ConstantQ12(0),
+                texture_asset: None,
+                text: "Play".to_string(),
+                tag: String::new(),
+                action: PlaytestUiAction::GotoScene { scene: 7 },
+                option: psx_level::UI_OPTION_NONE,
+                flags: 0,
+                sfx_first: psx_level::UI_SFX_NONE,
+                sfx_count: 0,
+            },
+            PlaytestUiNode {
+                parent: None,
+                kind: UiNodeKind::Slider {
+                    rect: crate::UiRect::new(0, 0, 96, 8),
+                    option: crate::OptionId(3),
+                    track: [11, 12, 13],
+                    fill: [21, 22, 23],
+                    knob: [31, 32, 33],
+                    sfx: crate::UiSfxBindings::default(),
+                },
+                x: 0,
+                y: 0,
+                width: 96,
+                height: 8,
+                color: [11, 12, 13],
+                background: [21, 22, 23],
+                accent: [31, 32, 33],
+                value: UiValueBinding::ConstantQ12(0),
+                max: UiValueBinding::ConstantQ12(0),
+                texture_asset: None,
+                text: String::new(),
+                tag: String::new(),
+                action: PlaytestUiAction::default(),
+                option: 3,
+                flags: 0,
+                sfx_first: psx_level::UI_SFX_NONE,
+                sfx_count: 0,
+            },
+        ];
+
+        let src = render_manifest_source(&package);
+        assert!(src.contains("kind: LevelUiNodeKind::Button"));
+        assert!(src.contains("action: LevelUiAction::GotoScene { scene: 7 }"));
+        assert!(src.contains("kind: LevelUiNodeKind::Slider"));
+        assert!(src.contains("accent: [31, 32, 33]"));
+        assert!(src.contains("option: 3"));
+    }
+
+    #[test]
     fn cd_stream_manifest_does_not_embed_room_bytes_or_global_cache_tables() {
         let mut package = PlaytestPackage::default();
         package.runtime_depth_sort_mode = crate::RuntimeDepthSortMode::PerTriangle;
@@ -2615,7 +2904,8 @@ mod tests {
         assert!(src.contains("pub const CACHED_ROOM_DRAW_ORDER_MODE: u8 = 1;"));
         assert!(src.contains("pub const CACHED_ROOM_TEXTURE_SPLIT_MAX_EDGE: u16 = 96;"));
         assert!(src.contains("#[cfg(feature = \"cd-stream-bench\")]\npub static ASSET_000_ROOM_000_BYTES: &[u8] = &[];"));
-        assert!(src.contains("#[cfg(not(feature = \"cd-stream-bench\"))]\npub static ASSET_000_ROOM_000_BYTES: &[u8] = include_bytes!(\"rooms/room_000.psxw\");"));
+        assert!(src.contains("#[cfg(not(feature = \"cd-stream-bench\"))]\npub static ASSET_000_ROOM_000_BYTES: &[u8] = {"));
+        assert!(src.contains("bytes: *include_bytes!(\"rooms/room_000.psxw\") };"));
         assert!(src.contains("#[cfg(feature = \"cd-stream-bench\")]\n/// Stream builds read room-surface cache slices from `.psxc` chunks.\npub static ROOM_SURFACE_CACHES: &[LevelRoomSurfaceCacheRecord] = &[];"));
         assert!(src.contains("#[cfg(feature = \"cd-stream-bench\")]\n/// Stream builds read cached room cells from `.psxc` chunks.\npub static ROOM_CACHE_CELLS: &[LevelCachedRoomCellRecord] = &[];"));
         assert!(src.contains("#[cfg(feature = \"cd-stream-bench\")]\n/// Stream builds read cached cell vertex indices from `.psxc` chunks.\npub static ROOM_CACHE_CELL_VERTICES: &[u16] = &[];"));
@@ -2877,12 +3167,14 @@ mod tests {
             world_asset_index,
             origin_x: 0,
             origin_z: 0,
+            origin_y: 0,
             sector_size: 1024,
             draw_distance: 25_000,
             chunk_activation_radius_sectors: 64,
             visibility_radius: 32,
             resident_chunk_limit: 10,
             visible_chunk_limit: 10,
+            gravity_per_tick: 96,
             material_first: 0,
             material_count: 0,
             portal_first: 0,
@@ -3031,6 +3323,8 @@ use psx_level::{
     EntityKind,
     EntityRecord,
     EquipmentRecord,
+    FlowState,
+    GameFlow,
     LevelCachedRoomCellRecord,
     LevelCachedRoomSurfaceRecord,
     LevelCachedRoomVertexRecord,
@@ -3051,13 +3345,19 @@ use psx_level::{
     LevelModelInstanceRecord,
     LevelModelRecord,
     LevelModelSocketRecord,
+    LevelOptionDef,
     LevelRoomPortalRecord,
     LevelRoomRecord,
     LevelRoomSurfaceCacheRecord,
     LevelRoomVisibilityRecord,
     LevelSkyRecord,
+    LevelUiAction,
     LevelUiNodeKind,
     LevelUiNodeRecord,
+    LevelUiScene,
+    LevelUiSfxCueRecord,
+    LevelUiSfxEvent,
+    LevelUiSfxSampleRecord,
     LevelUiValueBinding,
     LevelVisibilityCellRecord,
     LevelVisibilityPvsRecord,

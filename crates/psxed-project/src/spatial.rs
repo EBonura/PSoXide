@@ -16,6 +16,7 @@
 //! should choose the space they need rather than re-derive a formula.
 
 use crate::{GridCellBounds, GridDirection, Transform3, WorldGrid};
+use psx_engine::Angle;
 
 /// Integer room-space position `[x, y, z]`.
 pub type RoomPoint = [i32; 3];
@@ -182,9 +183,95 @@ pub fn editor_wall_outline_corners(
     ])
 }
 
+// --- Q12 fixed-point transforms -------------------------------------------
+//
+// Authored rotations must transform a vertex identically in the editor
+// preview, the playtest cooker, and the runtime. These primitives are the one
+// definition of that math; the preview and the cooker both call them rather
+// than re-deriving the formula. (Two divergent degrees->Q12 conversions, with
+// different integer casts, previously lived in `editor_preview` and
+// `playtest` -- the source of the authored-facing drift.)
+
+/// Q12 fixed-point multiply: `(value * q12) >> 12`, saturated to `i32`.
+pub fn mul_q12(value: i32, q12: i32) -> i32 {
+    (((value as i64) * (q12 as i64)) >> 12).clamp(i32::MIN as i64, i32::MAX as i64) as i32
+}
+
+/// Rotate `v` about the X axis by a Q12 turn angle (4096 units per turn).
+pub fn rotate_x_q12(v: RoomPoint, angle_q12: u16) -> RoomPoint {
+    let angle = Angle::from_q12(angle_q12);
+    let (s, c) = (angle.sin().raw(), angle.cos().raw());
+    [
+        v[0],
+        mul_q12(v[1], c) - mul_q12(v[2], s),
+        mul_q12(v[1], s) + mul_q12(v[2], c),
+    ]
+}
+
+/// Rotate `v` about the Y axis by a Q12 turn angle.
+pub fn rotate_y_q12(v: RoomPoint, angle_q12: u16) -> RoomPoint {
+    let angle = Angle::from_q12(angle_q12);
+    let (s, c) = (angle.sin().raw(), angle.cos().raw());
+    [
+        mul_q12(v[0], c) + mul_q12(v[2], s),
+        v[1],
+        -mul_q12(v[0], s) + mul_q12(v[2], c),
+    ]
+}
+
+/// Rotate `v` about the Z axis by a Q12 turn angle.
+pub fn rotate_z_q12(v: RoomPoint, angle_q12: u16) -> RoomPoint {
+    let angle = Angle::from_q12(angle_q12);
+    let (s, c) = (angle.sin().raw(), angle.cos().raw());
+    [
+        mul_q12(v[0], c) - mul_q12(v[1], s),
+        mul_q12(v[0], s) + mul_q12(v[1], c),
+        v[2],
+    ]
+}
+
+/// Apply an authored Euler rotation in the editor/runtime order: pitch about
+/// X, then yaw about Y, then roll about Z (all Q12 turn angles). The editor
+/// card, selection outline, cooked record, and runtime draw path agree
+/// because they share this one function.
+pub fn rotate_euler_local_q12(v: RoomPoint, pitch: u16, yaw: u16, roll: u16) -> RoomPoint {
+    rotate_z_q12(rotate_y_q12(rotate_x_q12(v, pitch), yaw), roll)
+}
+
+/// Convert an authored Euler angle in degrees to a PSX Q12 angle unit
+/// (`0..4096`). Single source of truth for the editor preview and the
+/// playtest cooker, so authored facing can't diverge between what the user
+/// sees and what ships.
+pub fn euler_degrees_to_q12(degrees: f32) -> u16 {
+    let normalised = degrees.rem_euclid(360.0);
+    (normalised * (4096.0 / 360.0)) as i32 as u16
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn euler_degrees_to_q12_quarters_and_wraps() {
+        assert_eq!(euler_degrees_to_q12(0.0), 0);
+        assert_eq!(euler_degrees_to_q12(90.0), 1024);
+        assert_eq!(euler_degrees_to_q12(180.0), 2048);
+        assert_eq!(euler_degrees_to_q12(270.0), 3072);
+        assert_eq!(euler_degrees_to_q12(360.0), 0);
+        assert_eq!(euler_degrees_to_q12(-90.0), 3072);
+    }
+
+    #[test]
+    fn q12_transforms_scale_and_identity() {
+        assert_eq!(mul_q12(4096, 4096), 4096); // 1.0 * 1.0
+        assert_eq!(mul_q12(2048, 2048), 1024); // 0.5 * 0.5 = 0.25
+        let v = [123, -456, 789];
+        // A zero rotation is the identity on every axis.
+        assert_eq!(rotate_euler_local_q12(v, 0, 0, 0), v);
+        assert_eq!(rotate_x_q12(v, 0), v);
+        assert_eq!(rotate_y_q12(v, 0), v);
+        assert_eq!(rotate_z_q12(v, 0), v);
+    }
 
     #[test]
     fn preview_origin_accounts_for_negative_room_origin() {

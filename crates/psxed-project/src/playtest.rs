@@ -48,9 +48,10 @@ use crate::world_cook::{
 };
 use crate::{
     spatial, AnimationRole, CharacterAnimationAction, CharacterControllerSettings, NodeId,
-    NodeKind, ParticleEmitterSettings, ProjectDocument, PsxBlendMode, ResourceData, ResourceId,
-    SceneNode, UiAnchor, UiNodeId, UiNodeKind, UiTextAlign, UiValueBinding, WorldGrid,
-    WorldStreamingSettings, FAR_VISTA_TEXTURE_PANEL_COUNT, MAX_ROOM_BYTES,
+    NodeKind, OptionId, OptionKind, ParticleEmitterSettings, PhysicsBodySettings, ProjectDocument,
+    PsxBlendMode, ResourceData, ResourceId, SceneNode, UiAction, UiAnchor, UiNodeId, UiNodeKind,
+    UiSfxCue, UiTextAlign, UiValueBinding, WorldGrid, WorldStreamingSettings,
+    FAR_VISTA_TEXTURE_PANEL_COUNT, MAX_ROOM_BYTES, PHYSICS_WEIGHT_ONE_Q8,
 };
 
 mod assets;
@@ -81,6 +82,7 @@ struct PlayerSpawnCandidate<'a> {
     position: [i32; 3],
     character: Option<ResourceId>,
     controller_settings: Option<CharacterControllerSettings>,
+    weight_q8: u16,
     renderer: Option<ModelRendererComponent>,
     animator: Option<AnimatorComponent<'a>>,
 }
@@ -111,6 +113,9 @@ struct AuthoredRoomChunk {
     psxw_bytes: usize,
     static_lit_bytes: usize,
     populated_cells: u16,
+    /// Which floor of the room this chunk belongs to (0 = base grid).
+    /// Drives auto-stacked vertical links between consecutive floors.
+    floor_idx: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -128,6 +133,10 @@ struct CookedRoomBakeInput {
     room_index: u16,
     world_asset_index: usize,
     world_origin: [i32; 2],
+    /// This chunk's floor elevation in engine units (the room's
+    /// `origin_y`). Used to keep light spill from crossing floors:
+    /// a light only bleeds onto a chunk on (roughly) its own level.
+    origin_y: i32,
     cooked: CookedWorldGrid,
 }
 
@@ -202,222 +211,263 @@ pub fn build_package(
     let room_overlapped_rooms: Vec<u16> = Vec::new();
 
     for room_node in &room_nodes {
-        let NodeKind::Room { grid } = &room_node.kind else {
+        let NodeKind::Room { grid: base_grid } = &room_node.kind else {
             continue;
         };
-        if grid.populated_sector_count() == 0 {
+        if base_grid.populated_sector_count() == 0 {
             report.warn(format!(
                 "Room '{}' has no geometry — skipped",
                 room_node.name
             ));
             continue;
         }
-        let streaming = scene
-            .world_streaming_for_node(room_node.id)
-            .unwrap_or_default()
-            .normalized();
-        let plan = plan_portal_rooms(scene, room_node.id, grid, PortalRoomConfig::default());
-        if plan.over_budget_count() > 0 {
-            report.warn(format!(
-                "Room '{}' produced {} manual portal room(s) still over budget",
-                room_node.name,
-                plan.over_budget_count()
-            ));
-        }
-        let portal_room_count = plan.room_count();
-        let room_index_base = rooms.len();
-        let room_portal_base = room_portals.len();
-        for portal in &plan.portals {
-            let source_room = room_index_base.saturating_add(portal.source_room);
-            let destination_room = room_index_base.saturating_add(portal.destination_room);
-            room_portals.push(PlaytestRoomPortal {
-                source_room: u16::try_from(source_room).unwrap_or(u16::MAX),
-                destination_room: u16::try_from(destination_room).unwrap_or(u16::MAX),
-                kind: if portal.vertical { 1 } else { 0 },
-                normal: portal.normal_world,
-                vertices: portal.vertices_world,
-            });
-        }
-        for portal_room in plan.rooms {
-            let chunk_grid = extract_portal_room_grid(grid, &portal_room);
-            if chunk_grid.populated_sector_count() == 0 {
+        // Vertical room placement. The room's base Y is the Room node's
+        // `Transform3::translation[1]` (in sectors, like X/Z). Each floor
+        // then adds its own `elevation` delta on top, so stacked floors
+        // cook as independent chunk sets at their own heights. The
+        // integer-only runtime never sees the host f32.
+        let room_origin_y_base = (f64::from(room_node.transform.translation[1])
+            * f64::from(base_grid.sector_size)) as i32;
+        let base_elevation = base_grid.elevation;
+        // Cook floor 0 (the base grid) plus every floor above it. Each
+        // floor runs the full per-floor chunk pipeline below.
+        for floor_idx in 0..base_grid.floor_count() {
+            let Some(grid) = base_grid.floor(floor_idx) else {
+                continue;
+            };
+            if grid.populated_sector_count() == 0 {
                 continue;
             }
-            let cooked = match cook_world_grid(project, &chunk_grid) {
-                Ok(c) => c,
-                Err(e) => {
-                    report.error(cook_error_for_node(&room_node.name, e));
-                    return (None, report);
-                }
-            };
-            let room_index = u16::try_from(rooms.len()).unwrap_or(u16::MAX);
-            room_chunks_by_node
-                .entry(room_node.id)
-                .or_default()
-                .push(AuthoredRoomChunk {
-                    room_index,
-                    authored_room: room_node.id.raw() as u32,
-                    chunk_index: u16::try_from(portal_room.index).unwrap_or(u16::MAX),
-                    array_origin: portal_room.array_origin,
-                    world_origin: portal_room.world_origin,
-                    size: portal_room.size,
-                    cells: portal_room.cells.clone(),
-                    neighbours: portal_room.neighbours.map(|neighbour| {
-                        neighbour.and_then(|index| {
-                            u16::try_from(room_index_base.saturating_add(index)).ok()
-                        })
-                    }),
-                    triangles: portal_room.budget.triangles,
-                    psxw_bytes: portal_room.budget.psxw_bytes,
-                    static_lit_bytes: portal_room.budget.psxw_static_lit_bytes,
-                    populated_cells: u16::try_from(chunk_grid.populated_sector_count())
-                        .unwrap_or(u16::MAX),
+            let room_origin_y = room_origin_y_base + (grid.elevation - base_elevation);
+            let streaming = scene
+                .world_streaming_for_node(room_node.id)
+                .unwrap_or_default()
+                .normalized();
+            let resolved_physics = scene
+                .world_physics_for_node(room_node.id)
+                .unwrap_or_default()
+                .normalized();
+            let plan = plan_portal_rooms(scene, room_node.id, grid, PortalRoomConfig::default());
+            if plan.over_budget_count() > 0 {
+                report.warn(format!(
+                    "Room '{}' produced {} manual portal room(s) still over budget",
+                    room_node.name,
+                    plan.over_budget_count()
+                ));
+            }
+            let portal_room_count = plan.room_count();
+            let room_index_base = rooms.len();
+            let room_portal_base = room_portals.len();
+            for portal in &plan.portals {
+                let source_room = room_index_base.saturating_add(portal.source_room);
+                let destination_room = room_index_base.saturating_add(portal.destination_room);
+                room_portals.push(PlaytestRoomPortal {
+                    source_room: u16::try_from(source_room).unwrap_or(u16::MAX),
+                    destination_room: u16::try_from(destination_room).unwrap_or(u16::MAX),
+                    kind: if portal.vertical { 1 } else { 0 },
+                    normal: portal.normal_world,
+                    vertices: portal.vertices_world,
                 });
-            collect_pending_floor_links(room_index, &chunk_grid, &mut pending_floor_links);
-
-            // Room asset goes into the master table first (ahead of
-            // any material textures discovered while walking it).
-            let world_asset_index = assets.len();
-            assets.push(PlaytestAsset {
-                kind: PlaytestAssetKind::RoomWorld,
-                bytes: Vec::new(),
-                filename: format!("room_{:03}.psxw", room_index),
-                source_label: runtime_room_name(
-                    &room_node.name,
-                    portal_room_count,
-                    portal_room.index,
-                ),
-            });
-
-            // Walk material slots in slot order. The cooker emits
-            // CookedWorldMaterial per resolved slot id; we build
-            // PlaytestMaterial mirrors keyed to (room, local_slot)
-            // and register each unique texture asset on first use.
-            let material_first = u16::try_from(materials.len()).unwrap_or(u16::MAX);
-            let mut sorted_materials: Vec<&CookedWorldMaterial> = cooked.materials.iter().collect();
-            sorted_materials.sort_by_key(|m| m.slot);
-
-            for cooked_material in sorted_materials {
-                let texture_id = match cooked_material.texture {
-                    Some(id) => id,
-                    None => {
-                        report.error(format!(
-                            "Room '{}' material slot {} has no texture (resource #{})",
-                            room_node.name,
-                            cooked_material.slot,
-                            cooked_material.source.raw(),
-                        ));
+            }
+            for portal_room in plan.rooms {
+                let chunk_grid = extract_portal_room_grid(grid, &portal_room);
+                if chunk_grid.populated_sector_count() == 0 {
+                    continue;
+                }
+                let cooked = match cook_world_grid(project, &chunk_grid) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        report.error(cook_error_for_node(&room_node.name, e));
                         return (None, report);
                     }
                 };
-                let texture_resource = match find_resource(project, texture_id) {
-                    Some(r) => r,
-                    None => {
-                        report.error(format!(
+                let room_index = u16::try_from(rooms.len()).unwrap_or(u16::MAX);
+                room_chunks_by_node
+                    .entry(room_node.id)
+                    .or_default()
+                    .push(AuthoredRoomChunk {
+                        room_index,
+                        authored_room: room_node.id.raw() as u32,
+                        chunk_index: u16::try_from(portal_room.index).unwrap_or(u16::MAX),
+                        array_origin: portal_room.array_origin,
+                        world_origin: portal_room.world_origin,
+                        size: portal_room.size,
+                        cells: portal_room.cells.clone(),
+                        neighbours: portal_room.neighbours.map(|neighbour| {
+                            neighbour.and_then(|index| {
+                                u16::try_from(room_index_base.saturating_add(index)).ok()
+                            })
+                        }),
+                        triangles: portal_room.budget.triangles,
+                        psxw_bytes: portal_room.budget.psxw_bytes,
+                        static_lit_bytes: portal_room.budget.psxw_static_lit_bytes,
+                        populated_cells: u16::try_from(chunk_grid.populated_sector_count())
+                            .unwrap_or(u16::MAX),
+                        floor_idx,
+                    });
+                collect_pending_floor_links(room_index, &chunk_grid, &mut pending_floor_links);
+
+                // Room asset goes into the master table first (ahead of
+                // any material textures discovered while walking it).
+                let world_asset_index = assets.len();
+                assets.push(PlaytestAsset {
+                    kind: PlaytestAssetKind::RoomWorld,
+                    bytes: Vec::new(),
+                    filename: format!("room_{:03}.psxw", room_index),
+                    source_label: runtime_room_name(
+                        &room_node.name,
+                        portal_room_count,
+                        portal_room.index,
+                    ),
+                });
+
+                // Walk material slots in slot order. The cooker emits
+                // CookedWorldMaterial per resolved slot id; we build
+                // PlaytestMaterial mirrors keyed to (room, local_slot)
+                // and register each unique texture asset on first use.
+                let material_first = u16::try_from(materials.len()).unwrap_or(u16::MAX);
+                let mut sorted_materials: Vec<&CookedWorldMaterial> =
+                    cooked.materials.iter().collect();
+                sorted_materials.sort_by_key(|m| m.slot);
+
+                for cooked_material in sorted_materials {
+                    let texture_id = match cooked_material.texture {
+                        Some(id) => id,
+                        None => {
+                            report.error(format!(
+                                "Room '{}' material slot {} has no texture (resource #{})",
+                                room_node.name,
+                                cooked_material.slot,
+                                cooked_material.source.raw(),
+                            ));
+                            return (None, report);
+                        }
+                    };
+                    let texture_resource = match find_resource(project, texture_id) {
+                        Some(r) => r,
+                        None => {
+                            report.error(format!(
                             "Room '{}' material slot {} references missing texture resource #{}",
                             room_node.name,
                             cooked_material.slot,
                             texture_id.raw(),
                         ));
-                        return (None, report);
-                    }
-                };
-                let texture_asset_index =
-                    if let Some(&existing) = texture_asset_for_resource.get(&texture_id) {
-                        existing
-                    } else {
-                        let bytes = match load_texture_bytes(texture_resource, project_root) {
-                            Ok(b) => b,
-                            Err(msg) => {
+                            return (None, report);
+                        }
+                    };
+                    let texture_asset_index =
+                        if let Some(&existing) = texture_asset_for_resource.get(&texture_id) {
+                            existing
+                        } else {
+                            let bytes = match load_texture_bytes(texture_resource, project_root) {
+                                Ok(b) => b,
+                                Err(msg) => {
+                                    report.error(format!(
+                                        "Room '{}' material slot {}: {}",
+                                        room_node.name, cooked_material.slot, msg,
+                                    ));
+                                    return (None, report);
+                                }
+                            };
+                            // Room materials must be 4bpp (16-entry CLUT) --
+                            // both the editor preview's material upload
+                            // path and the runtime room material slots
+                            // assume the 4bpp tpage layout. Loud failure
+                            // here beats wrong-colour rendering at runtime.
+                            if let Err(msg) = expect_room_material_depth(texture_resource, &bytes) {
                                 report.error(format!(
                                     "Room '{}' material slot {}: {}",
                                     room_node.name, cooked_material.slot, msg,
                                 ));
                                 return (None, report);
                             }
+                            let texture_index = texture_asset_for_resource.len();
+                            let new_index = assets.len();
+                            assets.push(PlaytestAsset {
+                                kind: PlaytestAssetKind::Texture,
+                                bytes,
+                                filename: format!("texture_{:03}.psxt", texture_index),
+                                source_label: texture_resource.name.clone(),
+                            });
+                            texture_asset_for_resource.insert(texture_id, new_index);
+                            new_index
                         };
-                        // Room materials must be 4bpp (16-entry CLUT) --
-                        // both the editor preview's material upload
-                        // path and the runtime room material slots
-                        // assume the 4bpp tpage layout. Loud failure
-                        // here beats wrong-colour rendering at runtime.
-                        if let Err(msg) = expect_room_material_depth(texture_resource, &bytes) {
-                            report.error(format!(
-                                "Room '{}' material slot {}: {}",
-                                room_node.name, cooked_material.slot, msg,
-                            ));
-                            return (None, report);
-                        }
-                        let texture_index = texture_asset_for_resource.len();
-                        let new_index = assets.len();
-                        assets.push(PlaytestAsset {
-                            kind: PlaytestAssetKind::Texture,
-                            bytes,
-                            filename: format!("texture_{:03}.psxt", texture_index),
-                            source_label: texture_resource.name.clone(),
-                        });
-                        texture_asset_for_resource.insert(texture_id, new_index);
-                        new_index
-                    };
 
-                materials.push(PlaytestMaterial {
-                    room: room_index,
-                    local_slot: cooked_material.slot,
-                    texture_asset_index,
-                    tint_rgb: cooked_material.tint,
-                    face_sidedness: cooked_material.face_sidedness,
-                });
-            }
-            let material_count =
-                u16::try_from(materials.len() - material_first as usize).unwrap_or(u16::MAX);
+                    materials.push(PlaytestMaterial {
+                        room: room_index,
+                        local_slot: cooked_material.slot,
+                        texture_asset_index,
+                        tint_rgb: cooked_material.tint,
+                        face_sidedness: cooked_material.face_sidedness,
+                    });
+                }
+                let material_count =
+                    u16::try_from(materials.len() - material_first as usize).unwrap_or(u16::MAX);
 
-            let resolved_culling = scene
-                .world_culling_for_node(room_node.id)
-                .unwrap_or_default()
-                .normalized();
-            append_room_visibility(
-                room_index,
-                &cooked,
-                resolved_culling.visibility_radius,
-                &mut room_visibility,
-                &mut visibility_cells,
-                &mut visibility_pvs,
-                &mut visibility_pvs_bits,
-            );
+                let resolved_culling = scene
+                    .world_culling_for_node(room_node.id)
+                    .unwrap_or_default()
+                    .normalized();
+                append_room_visibility(
+                    room_index,
+                    &cooked,
+                    resolved_culling.visibility_radius,
+                    &mut room_visibility,
+                    &mut visibility_cells,
+                    &mut visibility_pvs,
+                    &mut visibility_pvs_bits,
+                );
 
-            let resolved_sky = scene
-                .world_sky_for_node(room_node.id)
-                .unwrap_or_default()
-                .resolved_for_room(chunk_grid.fog_enabled, chunk_grid.fog_color);
-            let resolved_far_vista = scene
-                .world_far_vista_for_node(room_node.id)
-                .unwrap_or_default()
-                .resolved_for_room(chunk_grid.fog_enabled, chunk_grid.fog_color);
-            let resolved_camera = scene
-                .world_camera_for_node(room_node.id)
-                .unwrap_or_default()
-                .normalized();
-            let far_vista_texture_asset_indices = if resolved_far_vista.enabled {
-                let assigned_panels = resolved_far_vista
-                    .texture_panels
-                    .iter()
-                    .any(Option::is_some);
-                if assigned_panels {
-                    resolved_far_vista
+                let resolved_sky = scene
+                    .world_sky_for_node(room_node.id)
+                    .unwrap_or_default()
+                    .resolved_for_room(chunk_grid.fog_enabled, chunk_grid.fog_color);
+                let resolved_far_vista = scene
+                    .world_far_vista_for_node(room_node.id)
+                    .unwrap_or_default()
+                    .resolved_for_room(chunk_grid.fog_enabled, chunk_grid.fog_color);
+                let resolved_camera = scene
+                    .world_camera_for_node(room_node.id)
+                    .unwrap_or_default()
+                    .normalized();
+                let far_vista_texture_asset_indices = if resolved_far_vista.enabled {
+                    let assigned_panels = resolved_far_vista
                         .texture_panels
                         .iter()
-                        .take(active_far_vista_panel_count(
-                            &resolved_far_vista.texture_panels,
-                            resolved_far_vista.segments,
-                        ))
-                        .enumerate()
-                        .map(|(panel_index, texture_id)| {
-                            texture_id.and_then(|texture_id| {
-                                let context = format!(
-                                    "Room '{}' far vista panel {}",
-                                    room_node.name,
-                                    panel_index + 1
-                                );
+                        .any(Option::is_some);
+                    if assigned_panels {
+                        resolved_far_vista
+                            .texture_panels
+                            .iter()
+                            .take(active_far_vista_panel_count(
+                                &resolved_far_vista.texture_panels,
+                                resolved_far_vista.segments,
+                            ))
+                            .enumerate()
+                            .map(|(panel_index, texture_id)| {
+                                texture_id.and_then(|texture_id| {
+                                    let context = format!(
+                                        "Room '{}' far vista panel {}",
+                                        room_node.name,
+                                        panel_index + 1
+                                    );
+                                    cook_far_vista_texture_asset(
+                                        project,
+                                        project_root,
+                                        texture_id,
+                                        &context,
+                                        &mut texture_asset_for_resource,
+                                        &mut assets,
+                                        &mut report,
+                                    )
+                                })
+                            })
+                            .collect::<Vec<_>>()
+                    } else {
+                        resolved_far_vista
+                            .texture
+                            .and_then(|texture_id| {
+                                let context = format!("Room '{}' far vista", room_node.name);
                                 cook_far_vista_texture_asset(
                                     project,
                                     project_root,
@@ -428,142 +478,134 @@ pub fn build_package(
                                     &mut report,
                                 )
                             })
-                        })
-                        .collect::<Vec<_>>()
+                            .into_iter()
+                            .map(Some)
+                            .collect::<Vec<_>>()
+                    }
                 } else {
-                    resolved_far_vista
-                        .texture
-                        .and_then(|texture_id| {
-                            let context = format!("Room '{}' far vista", room_node.name);
-                            cook_far_vista_texture_asset(
-                                project,
-                                project_root,
-                                texture_id,
-                                &context,
-                                &mut texture_asset_for_resource,
-                                &mut assets,
-                                &mut report,
-                            )
-                        })
-                        .into_iter()
-                        .map(Some)
-                        .collect::<Vec<_>>()
-                }
-            } else {
-                Vec::new()
-            };
-            let far_vista_has_texture = far_vista_texture_asset_indices.iter().any(Option::is_some);
-            let sky_texture_asset_index =
-                cook_sky_panorama_texture_asset(resolved_sky, &mut sky_texture_assets, &mut assets);
-            let atmosphere_density = clamp_atmosphere_density(chunk_grid.atmosphere_density);
-            let atmosphere_fall_speed_q4 =
-                clamp_atmosphere_fall_speed_q4(chunk_grid.atmosphere_fall_speed_q4);
-            let atmosphere_wind_speed_q4 =
-                clamp_atmosphere_wind_speed_q4(chunk_grid.atmosphere_wind_speed_q4);
-            let atmosphere_enabled = chunk_grid.atmosphere_enabled && atmosphere_density > 0;
+                    Vec::new()
+                };
+                let far_vista_has_texture =
+                    far_vista_texture_asset_indices.iter().any(Option::is_some);
+                let sky_texture_asset_index = cook_sky_panorama_texture_asset(
+                    resolved_sky,
+                    &mut sky_texture_assets,
+                    &mut assets,
+                );
+                let atmosphere_density = clamp_atmosphere_density(chunk_grid.atmosphere_density);
+                let atmosphere_fall_speed_q4 =
+                    clamp_atmosphere_fall_speed_q4(chunk_grid.atmosphere_fall_speed_q4);
+                let atmosphere_wind_speed_q4 =
+                    clamp_atmosphere_wind_speed_q4(chunk_grid.atmosphere_wind_speed_q4);
+                let atmosphere_enabled = chunk_grid.atmosphere_enabled && atmosphere_density > 0;
 
-            rooms.push(PlaytestRoom {
-                name: runtime_room_name(&room_node.name, portal_room_count, portal_room.index),
-                world_asset_index,
-                origin_x: chunk_grid.origin[0],
-                origin_z: chunk_grid.origin[1],
-                sector_size: chunk_grid.sector_size,
-                draw_distance: resolved_culling.draw_distance,
-                chunk_activation_radius_sectors: resolved_culling.chunk_activation_radius_sectors,
-                visibility_radius: resolved_culling.visibility_radius,
-                resident_chunk_limit: playtest_streaming_resident_chunk_limit(streaming),
-                visible_chunk_limit: streaming.visible_chunk_limit,
-                material_first,
-                material_count,
-                portal_first: if portal_room.portal_count == 0 {
-                    0
-                } else {
-                    u16::try_from(room_portal_base.saturating_add(portal_room.portal_first))
-                        .unwrap_or(u16::MAX)
-                },
-                portal_count: u8::try_from(portal_room.portal_count).unwrap_or(u8::MAX),
-                near_room_first: 0,
-                near_room_count: 0,
-                overlapped_room_first: 0,
-                overlapped_room_count: 0,
-                fog_rgb: chunk_grid.fog_color,
-                fog_near: chunk_grid.fog_near,
-                fog_far: chunk_grid.fog_far,
-                atmosphere_rgb: chunk_grid.atmosphere_color,
-                atmosphere_density,
-                atmosphere_fall_speed_q4,
-                atmosphere_wind_speed_q4,
-                sky: PlaytestSky {
-                    top_rgb: resolved_sky.top_color,
-                    horizon_rgb: resolved_sky.horizon_color,
-                    bottom_rgb: resolved_sky.lower_color,
-                    horizon_percent: resolved_sky.horizon_percent,
-                    horizon_thickness_percent: resolved_sky.horizon_thickness_percent,
-                    skybox_columns: resolved_sky.skybox_columns,
-                    skybox_rows: resolved_sky.skybox_rows,
-                    flags: if resolved_sky.enabled {
-                        sky_flags::ENABLED
-                    } else {
+                rooms.push(PlaytestRoom {
+                    name: runtime_room_name(&room_node.name, portal_room_count, portal_room.index),
+                    world_asset_index,
+                    origin_x: chunk_grid.origin[0],
+                    origin_z: chunk_grid.origin[1],
+                    origin_y: room_origin_y,
+                    sector_size: chunk_grid.sector_size,
+                    draw_distance: resolved_culling.draw_distance,
+                    chunk_activation_radius_sectors: resolved_culling
+                        .chunk_activation_radius_sectors,
+                    visibility_radius: resolved_culling.visibility_radius,
+                    resident_chunk_limit: playtest_streaming_resident_chunk_limit(streaming),
+                    visible_chunk_limit: streaming.visible_chunk_limit,
+                    gravity_per_tick: resolved_physics.gravity_per_tick,
+                    material_first,
+                    material_count,
+                    portal_first: if portal_room.portal_count == 0 {
                         0
+                    } else {
+                        u16::try_from(room_portal_base.saturating_add(portal_room.portal_first))
+                            .unwrap_or(u16::MAX)
                     },
-                    cyclorama_quads: Vec::new(),
-                    cloud_layer: PlaytestCloudLayer {
-                        texture_asset_index: sky_texture_asset_index,
-                        color_rgb: resolved_sky.cloud_layer.color,
-                        density: resolved_sky.cloud_layer.density,
-                        altitude: resolved_sky.cloud_layer.altitude,
-                        extent: resolved_sky.cloud_layer.extent,
-                        tile_count: resolved_sky.cloud_layer.tile_count,
-                        scroll_speed: resolved_sky.cloud_layer.scroll_speed,
-                        noise_seed: resolved_sky.cloud_layer.noise_seed,
-                        flags: if resolved_sky.cloud_layer.enabled && resolved_sky.enabled {
-                            cloud_layer_flags::ENABLED
+                    portal_count: u8::try_from(portal_room.portal_count).unwrap_or(u8::MAX),
+                    near_room_first: 0,
+                    near_room_count: 0,
+                    overlapped_room_first: 0,
+                    overlapped_room_count: 0,
+                    fog_rgb: chunk_grid.fog_color,
+                    fog_near: chunk_grid.fog_near,
+                    fog_far: chunk_grid.fog_far,
+                    atmosphere_rgb: chunk_grid.atmosphere_color,
+                    atmosphere_density,
+                    atmosphere_fall_speed_q4,
+                    atmosphere_wind_speed_q4,
+                    sky: PlaytestSky {
+                        top_rgb: resolved_sky.top_color,
+                        horizon_rgb: resolved_sky.horizon_color,
+                        bottom_rgb: resolved_sky.lower_color,
+                        horizon_percent: resolved_sky.horizon_percent,
+                        horizon_thickness_percent: resolved_sky.horizon_thickness_percent,
+                        skybox_columns: resolved_sky.skybox_columns,
+                        skybox_rows: resolved_sky.skybox_rows,
+                        flags: if resolved_sky.enabled {
+                            sky_flags::ENABLED
+                        } else {
+                            0
+                        },
+                        cyclorama_quads: Vec::new(),
+                        cloud_layer: PlaytestCloudLayer {
+                            texture_asset_index: sky_texture_asset_index,
+                            color_rgb: resolved_sky.cloud_layer.color,
+                            density: resolved_sky.cloud_layer.density,
+                            altitude: resolved_sky.cloud_layer.altitude,
+                            extent: resolved_sky.cloud_layer.extent,
+                            tile_count: resolved_sky.cloud_layer.tile_count,
+                            scroll_speed: resolved_sky.cloud_layer.scroll_speed,
+                            noise_seed: resolved_sky.cloud_layer.noise_seed,
+                            flags: if resolved_sky.cloud_layer.enabled && resolved_sky.enabled {
+                                cloud_layer_flags::ENABLED
+                            } else {
+                                0
+                            },
+                        },
+                    },
+                    far_vista: PlaytestFarVista {
+                        texture_asset_indices: far_vista_texture_asset_indices,
+                        radius: resolved_far_vista.radius,
+                        height: resolved_far_vista.height,
+                        vertical_offset: resolved_far_vista.vertical_offset,
+                        segments: resolved_far_vista.segments,
+                        rotation_degrees: resolved_far_vista.rotation_degrees,
+                        tint_rgb: resolved_far_vista.tint,
+                        flags: if resolved_far_vista.enabled {
+                            far_vista_flags::ENABLED
+                                | if far_vista_has_texture {
+                                    far_vista_flags::TEXTURED
+                                } else {
+                                    0
+                                }
                         } else {
                             0
                         },
                     },
-                },
-                far_vista: PlaytestFarVista {
-                    texture_asset_indices: far_vista_texture_asset_indices,
-                    radius: resolved_far_vista.radius,
-                    height: resolved_far_vista.height,
-                    vertical_offset: resolved_far_vista.vertical_offset,
-                    segments: resolved_far_vista.segments,
-                    rotation_degrees: resolved_far_vista.rotation_degrees,
-                    tint_rgb: resolved_far_vista.tint,
-                    flags: if resolved_far_vista.enabled {
-                        far_vista_flags::ENABLED
-                            | if far_vista_has_texture {
-                                far_vista_flags::TEXTURED
-                            } else {
-                                0
-                            }
+                    camera: PlaytestCamera {
+                        distance: resolved_camera.distance,
+                        height: resolved_camera.height,
+                        target_height: resolved_camera.target_height,
+                        min_floor_clearance: resolved_camera.min_floor_clearance,
+                    },
+                    flags: if chunk_grid.fog_enabled {
+                        room_flags::FOG_ENABLED
+                    } else {
+                        0
+                    } | if atmosphere_enabled {
+                        room_flags::ATMOSPHERE_ENABLED
                     } else {
                         0
                     },
-                },
-                camera: PlaytestCamera {
-                    distance: resolved_camera.distance,
-                    height: resolved_camera.height,
-                    target_height: resolved_camera.target_height,
-                    min_floor_clearance: resolved_camera.min_floor_clearance,
-                },
-                flags: if chunk_grid.fog_enabled {
-                    room_flags::FOG_ENABLED
-                } else {
-                    0
-                } | if atmosphere_enabled {
-                    room_flags::ATMOSPHERE_ENABLED
-                } else {
-                    0
-                },
-            });
-            room_bake_inputs.push(CookedRoomBakeInput {
-                room_index,
-                world_asset_index,
-                world_origin: portal_room.world_origin,
-                cooked,
-            });
+                });
+                room_bake_inputs.push(CookedRoomBakeInput {
+                    room_index,
+                    world_asset_index,
+                    world_origin: portal_room.world_origin,
+                    origin_y: room_origin_y,
+                    cooked,
+                });
+            }
         }
     }
 
@@ -647,6 +689,7 @@ pub fn build_package(
             NodeKind::Entity => {
                 let pos = floor_pos;
                 let character_controller = component_character_controller(scene, node);
+                let weight_q8 = physics_body_weight_q8(scene, node);
                 let is_player_controlled =
                     character_controller.is_some_and(|controller| controller.player);
                 if !is_player_controlled {
@@ -701,6 +744,7 @@ pub fn build_package(
                             position: pos,
                             character: controller.character,
                             controller_settings: Some(controller.settings),
+                            weight_q8,
                             renderer: component_model_renderer(scene, node),
                             animator: component_animator(scene, node),
                         });
@@ -790,6 +834,7 @@ pub fn build_package(
                     position: pos,
                     character: *character,
                     controller_settings: None,
+                    weight_q8: PHYSICS_WEIGHT_ONE_Q8,
                     renderer: None,
                     animator: None,
                 });
@@ -945,16 +990,6 @@ pub fn build_package(
                     return (None, report);
                 }
             }
-            NodeKind::Trigger { .. } => {
-                if warned_unsupported.insert("Trigger") {
-                    report.warn("Trigger volumes are skipped in this pass");
-                }
-            }
-            NodeKind::AudioSource { .. } => {
-                if warned_unsupported.insert("AudioSource") {
-                    report.warn("AudioSource nodes are skipped in this pass");
-                }
-            }
             NodeKind::Portal { .. } => {
                 if warned_unsupported.insert("Portal") {
                     report
@@ -980,11 +1015,9 @@ pub fn build_package(
             | NodeKind::ModelRenderer { .. }
             | NodeKind::Animator { .. }
             | NodeKind::Collider { .. }
-            | NodeKind::Interactable { .. }
             | NodeKind::CharacterController { .. }
-            | NodeKind::AiController { .. }
-            | NodeKind::Combat { .. }
-            | NodeKind::Equipment { .. } => {}
+            | NodeKind::Equipment { .. }
+            | NodeKind::PhysicsBody { .. } => {}
         }
     }
 
@@ -1105,6 +1138,7 @@ pub fn build_package(
                     .map(|animator| animator.action_clips)
                     .unwrap_or(&[]),
                 candidate.controller_settings,
+                candidate.weight_q8,
                 &mut assets,
                 &mut models,
                 &mut model_clips,
@@ -1191,8 +1225,19 @@ pub fn build_package(
         }
     }
 
-    let room_floor_links = resolve_room_floor_links(&pending_floor_links, &room_chunks_by_node);
-    let ui_nodes = cook_ui_nodes(
+    let mut room_floor_links = resolve_room_floor_links(&pending_floor_links, &room_chunks_by_node);
+    room_floor_links.extend(auto_wire_floor_stack_links(&room_chunks_by_node));
+    room_portals.extend(auto_wire_floor_stack_portals(scene, &room_chunks_by_node));
+    // The runtime visibility BFS reads each room's portals as the
+    // contiguous slice [portal_first, portal_first+portal_count). The
+    // per-room ranges set during the cook loop only covered the
+    // horizontal portals from `plan_portal_rooms`; the vertical
+    // floor-stack portals were appended afterwards and would be
+    // unreferenced (room.portal_count wouldn't include them, so the BFS
+    // never scans them). Regroup the whole table by source_room and
+    // rebuild every room's range so both kinds are reachable.
+    regroup_room_portals(&mut rooms, &mut room_portals);
+    let (ui_nodes, ui_scenes, ui_sfx_samples, ui_sfx_cues, game_flow, cdda_tracks) = cook_ui_nodes(
         project,
         project_root,
         &mut texture_asset_for_resource,
@@ -1202,6 +1247,7 @@ pub fn build_package(
     if !report.is_ok() {
         return (None, report);
     }
+    let options = cook_options(project);
 
     (
         Some(PlaytestPackage {
@@ -1235,6 +1281,12 @@ pub fn build_package(
             image_props,
             box_props,
             ui_nodes,
+            ui_scenes,
+            ui_sfx_samples,
+            ui_sfx_cues,
+            game_flow,
+            options,
+            cdda_tracks,
             weapon_hitboxes,
             weapons,
             equipment,
@@ -1262,24 +1314,135 @@ fn active_far_vista_panel_count(
         .min(FAR_VISTA_TEXTURE_PANEL_COUNT)
 }
 
+/// Cook every authored UI scene into one shared node pool plus a
+/// parallel scene table, and derive the default game flow.
+///
+/// Each scene's nodes are flattened in hierarchy order and appended
+/// to the shared pool; the scene's `node_first` records the pool
+/// offset of its block. Parent indices stored on each cooked node
+/// are made relative to the shared pool (scene-local index plus the
+/// scene's offset), so the runtime can address any scene's nodes
+/// through a single table.
+///
+/// The default flow lists one [`PlaytestFlowState::UiScene`] per
+/// cooked scene followed by [`PlaytestFlowState::Gameplay`], and
+/// enters the first UI scene when one exists. With no UI scenes the
+/// flow is a single `Gameplay` state entered at index `0`.
 fn cook_ui_nodes(
     project: &ProjectDocument,
     project_root: &Path,
     texture_asset_for_resource: &mut HashMap<ResourceId, usize>,
     assets: &mut Vec<PlaytestAsset>,
     report: &mut PlaytestValidationReport,
-) -> Vec<PlaytestUiNode> {
-    let Some(scene) = project.active_ui_scene() else {
-        return Vec::new();
+) -> (
+    Vec<PlaytestUiNode>,
+    Vec<PlaytestUiScene>,
+    Vec<PlaytestUiSfxSample>,
+    Vec<PlaytestUiSfxCue>,
+    PlaytestGameFlow,
+    Vec<PlaytestCddaTrack>,
+) {
+    let mut ui_nodes: Vec<PlaytestUiNode> = Vec::new();
+    let mut ui_scenes: Vec<PlaytestUiScene> = Vec::new();
+    let mut ui_sfx_samples: Vec<PlaytestUiSfxSample> = Vec::new();
+    let mut ui_sfx_cues: Vec<PlaytestUiSfxCue> = Vec::new();
+    let mut ui_sfx_sample_for_wav: HashMap<String, u16> = HashMap::new();
+    let mut cdda_tracks: Vec<PlaytestCddaTrack> = Vec::new();
+    let mut cdda_track_for_wav: HashMap<String, u8> = HashMap::new();
+
+    for scene in &project.ui_scenes {
+        let node_first = ui_nodes.len().min(u16::MAX as usize) as u16;
+        cook_ui_scene_nodes(
+            scene,
+            node_first,
+            project,
+            project_root,
+            texture_asset_for_resource,
+            assets,
+            report,
+            &mut cdda_tracks,
+            &mut cdda_track_for_wav,
+            &mut ui_sfx_samples,
+            &mut ui_sfx_cues,
+            &mut ui_sfx_sample_for_wav,
+            &mut ui_nodes,
+        );
+        let node_count = (ui_nodes.len() - node_first as usize).min(u16::MAX as usize) as u16;
+        ui_scenes.push(PlaytestUiScene {
+            id: (scene.id.raw() & u16::MAX as u64) as u16,
+            name: scene.name.clone(),
+            node_first,
+            node_count,
+        });
+    }
+
+    let game_flow = if ui_scenes.is_empty() {
+        // No authored UI: start straight in gameplay.
+        PlaytestGameFlow::default()
+    } else {
+        // One state per scene, gameplay last. The entry state comes from the
+        // project's boot target: a UI scene by id (its position in the list),
+        // or gameplay (the final state). An unknown/removed boot scene falls
+        // back to the gameplay state so a stale selection cannot wedge boot.
+        let mut states: Vec<PlaytestFlowState> = ui_scenes
+            .iter()
+            .map(|scene| PlaytestFlowState::UiScene { scene: scene.id })
+            .collect();
+        let gameplay_index = states.len() as u16;
+        states.push(PlaytestFlowState::Gameplay);
+        let entry = match project.boot {
+            crate::BootTarget::Gameplay => gameplay_index,
+            crate::BootTarget::UiScene(scene_id) => ui_scenes
+                .iter()
+                .position(|scene| u64::from(scene.id) == scene_id.raw())
+                .map(|index| index as u16)
+                .unwrap_or(gameplay_index),
+        };
+        PlaytestGameFlow { states, entry }
     };
+
+    (
+        ui_nodes,
+        ui_scenes,
+        ui_sfx_samples,
+        ui_sfx_cues,
+        game_flow,
+        cdda_tracks,
+    )
+}
+
+/// Flatten one scene's nodes into the shared `out` pool. `node_first`
+/// is the pool offset of this scene's block; parent indices are
+/// rebased onto the shared pool.
+#[allow(clippy::too_many_arguments)]
+fn cook_ui_scene_nodes(
+    scene: &crate::UiScene,
+    node_first: u16,
+    project: &ProjectDocument,
+    project_root: &Path,
+    texture_asset_for_resource: &mut HashMap<ResourceId, usize>,
+    assets: &mut Vec<PlaytestAsset>,
+    report: &mut PlaytestValidationReport,
+    cdda_tracks: &mut Vec<PlaytestCddaTrack>,
+    cdda_track_for_wav: &mut HashMap<String, u8>,
+    ui_sfx_samples: &mut Vec<PlaytestUiSfxSample>,
+    ui_sfx_cues: &mut Vec<PlaytestUiSfxCue>,
+    ui_sfx_sample_for_wav: &mut HashMap<String, u16>,
+    out: &mut Vec<PlaytestUiNode>,
+) {
     let ordered_ids = scene.hierarchy_node_ids();
     let id_to_index: HashMap<UiNodeId, u16> = ordered_ids
         .iter()
         .enumerate()
-        .map(|(index, id)| (*id, index.min(u16::MAX as usize) as u16))
+        .map(|(index, id)| {
+            (
+                *id,
+                (index + node_first as usize).min(u16::MAX as usize) as u16,
+            )
+        })
         .collect();
 
-    ordered_ids
+    let cooked = ordered_ids
         .iter()
         .filter_map(|id| scene.node(*id))
         .map(|node| {
@@ -1291,11 +1454,14 @@ fn cook_ui_nodes(
                 height,
                 color,
                 background,
+                accent,
                 value,
                 max,
                 texture_asset,
                 text,
                 tag,
+                action,
+                option,
                 flags,
             ) = match &node.kind {
                 UiNodeKind::Canvas { width, height } => (
@@ -1305,11 +1471,14 @@ fn cook_ui_nodes(
                     (*height).max(1),
                     [0, 0, 0],
                     [0, 0, 0],
+                    [0, 0, 0],
                     UiValueBinding::ConstantQ12(0),
                     UiValueBinding::ConstantQ12(0),
                     None,
                     String::new(),
                     String::new(),
+                    PlaytestUiAction::default(),
+                    psx_level::UI_OPTION_NONE,
                     0,
                 ),
                 UiNodeKind::Group { rect } => (
@@ -1319,11 +1488,14 @@ fn cook_ui_nodes(
                     rect.height.max(1),
                     [0, 0, 0],
                     [0, 0, 0],
+                    [0, 0, 0],
                     UiValueBinding::ConstantQ12(0),
                     UiValueBinding::ConstantQ12(0),
                     None,
                     String::new(),
                     String::new(),
+                    PlaytestUiAction::default(),
+                    psx_level::UI_OPTION_NONE,
                     ui_node_flags(rect.anchor, UiTextAlign::Left, false),
                 ),
                 UiNodeKind::Rect { rect, color } => (
@@ -1333,11 +1505,14 @@ fn cook_ui_nodes(
                     rect.height.max(1),
                     *color,
                     [0, 0, 0],
+                    [0, 0, 0],
                     UiValueBinding::ConstantQ12(0),
                     UiValueBinding::ConstantQ12(0),
                     None,
                     String::new(),
                     String::new(),
+                    PlaytestUiAction::default(),
+                    psx_level::UI_OPTION_NONE,
                     ui_node_flags(rect.anchor, UiTextAlign::Left, false),
                 ),
                 UiNodeKind::Label {
@@ -1354,11 +1529,14 @@ fn cook_ui_nodes(
                     rect.height.max(1),
                     *color,
                     [0, 0, 0],
+                    [0, 0, 0],
                     UiValueBinding::ConstantQ12(0),
                     UiValueBinding::ConstantQ12(0),
                     None,
                     text.clone(),
                     tag.clone(),
+                    PlaytestUiAction::default(),
+                    psx_level::UI_OPTION_NONE,
                     ui_node_flags(rect.anchor, *align, *wrap),
                 ),
                 UiNodeKind::Image {
@@ -1371,6 +1549,7 @@ fn cook_ui_nodes(
                     rect.width.max(1),
                     rect.height.max(1),
                     *tint,
+                    [0, 0, 0],
                     [0, 0, 0],
                     UiValueBinding::ConstantQ12(0),
                     UiValueBinding::ConstantQ12(0),
@@ -1387,6 +1566,8 @@ fn cook_ui_nodes(
                     }),
                     String::new(),
                     String::new(),
+                    PlaytestUiAction::default(),
+                    psx_level::UI_OPTION_NONE,
                     ui_node_flags(rect.anchor, UiTextAlign::Left, false),
                 ),
                 UiNodeKind::Bar {
@@ -1402,14 +1583,116 @@ fn cook_ui_nodes(
                     rect.height.max(1),
                     *fill,
                     *background,
+                    [0, 0, 0],
                     *value,
                     *max,
                     None,
                     String::new(),
                     String::new(),
+                    PlaytestUiAction::default(),
+                    psx_level::UI_OPTION_NONE,
                     ui_node_flags(rect.anchor, UiTextAlign::Left, false),
                 ),
+                UiNodeKind::Button {
+                    rect,
+                    label,
+                    align,
+                    color,
+                    text_color,
+                    transparent,
+                    action,
+                    ..
+                } => (
+                    rect.x,
+                    rect.y,
+                    rect.width.max(1),
+                    rect.height.max(1),
+                    *color,
+                    [0, 0, 0],
+                    *text_color,
+                    UiValueBinding::ConstantQ12(0),
+                    UiValueBinding::ConstantQ12(0),
+                    None,
+                    label.clone(),
+                    String::new(),
+                    cook_ui_action(*action),
+                    psx_level::UI_OPTION_NONE,
+                    ui_node_flags(rect.anchor, *align, false)
+                        | if *transparent {
+                            psx_level::ui_node_flags::BUTTON_TRANSPARENT
+                        } else {
+                            0
+                        },
+                ),
+                UiNodeKind::Slider {
+                    rect,
+                    option,
+                    track,
+                    fill,
+                    knob,
+                    ..
+                } => (
+                    rect.x,
+                    rect.y,
+                    rect.width.max(1),
+                    rect.height.max(1),
+                    *track,
+                    *fill,
+                    *knob,
+                    UiValueBinding::ConstantQ12(0),
+                    UiValueBinding::ConstantQ12(0),
+                    None,
+                    String::new(),
+                    String::new(),
+                    PlaytestUiAction::default(),
+                    cook_option_id(*option),
+                    ui_node_flags(rect.anchor, UiTextAlign::Left, false),
+                ),
+                UiNodeKind::Music {
+                    wav_path,
+                    volume,
+                    volume_option,
+                    loop_track,
+                } => (
+                    0,
+                    0,
+                    1,
+                    1,
+                    [0, 0, 0],
+                    [0, 0, 0],
+                    [0, 0, 0],
+                    volume_option
+                        .map(UiValueBinding::Option)
+                        .unwrap_or_else(|| {
+                            UiValueBinding::ConstantQ12(i32::from((*volume).min(100)))
+                        }),
+                    UiValueBinding::ConstantQ12(0),
+                    None,
+                    String::new(),
+                    String::new(),
+                    PlaytestUiAction::default(),
+                    cook_cdda_track_number(
+                        wav_path,
+                        project_root,
+                        cdda_tracks,
+                        cdda_track_for_wav,
+                        report,
+                    ),
+                    if *loop_track {
+                        psx_level::ui_node_flags::MUSIC_LOOP
+                    } else {
+                        0
+                    },
+                ),
             };
+            let (sfx_first, sfx_count) = cook_ui_node_sfx(
+                &node.kind,
+                project_root,
+                ui_sfx_samples,
+                ui_sfx_cues,
+                ui_sfx_sample_for_wav,
+                report,
+            );
             PlaytestUiNode {
                 parent,
                 kind: node.kind.clone(),
@@ -1419,15 +1702,227 @@ fn cook_ui_nodes(
                 height,
                 color,
                 background,
+                accent,
                 value,
                 max,
                 texture_asset,
                 text,
                 tag,
+                action,
+                option,
                 flags,
+                sfx_first,
+                sfx_count,
             }
         })
-        .collect()
+        .collect::<Vec<_>>();
+    out.extend(cooked);
+}
+
+fn cook_cdda_track_number(
+    wav_path: &str,
+    project_root: &Path,
+    cdda_tracks: &mut Vec<PlaytestCddaTrack>,
+    cdda_track_for_wav: &mut HashMap<String, u8>,
+    report: &mut PlaytestValidationReport,
+) -> u16 {
+    let trimmed = wav_path.trim();
+    if trimmed.is_empty() {
+        return psx_level::UI_OPTION_NONE;
+    }
+    if !trimmed
+        .rsplit_once('.')
+        .map(|(_, ext)| ext.eq_ignore_ascii_case("wav"))
+        .unwrap_or(false)
+    {
+        report.warn(format!(
+            "CD-DA music source '{trimmed}' is not a .wav file and was skipped"
+        ));
+        return psx_level::UI_OPTION_NONE;
+    }
+    let abs = resolve_path(trimmed, project_root);
+    if !abs.is_file() {
+        report.warn(format!(
+            "CD-DA music source '{}' does not exist and was skipped",
+            abs.display()
+        ));
+        return psx_level::UI_OPTION_NONE;
+    }
+    let abs = std::fs::canonicalize(&abs).unwrap_or(abs);
+    let key = abs.to_string_lossy().into_owned();
+    if let Some(track) = cdda_track_for_wav.get(&key) {
+        return u16::from(*track);
+    }
+    if cdda_tracks.len() >= 98 {
+        report.warn("CD-DA music track limit reached; extra music sources were skipped");
+        return psx_level::UI_OPTION_NONE;
+    }
+    let track = (cdda_tracks.len() + 2) as u8;
+    cdda_tracks.push(PlaytestCddaTrack {
+        track,
+        wav_path: key.clone(),
+    });
+    cdda_track_for_wav.insert(key, track);
+    u16::from(track)
+}
+
+fn cook_ui_node_sfx(
+    kind: &UiNodeKind,
+    project_root: &Path,
+    samples: &mut Vec<PlaytestUiSfxSample>,
+    cues: &mut Vec<PlaytestUiSfxCue>,
+    sample_for_wav: &mut HashMap<String, u16>,
+    report: &mut PlaytestValidationReport,
+) -> (u16, u8) {
+    let first = cues.len().min(u16::MAX as usize) as u16;
+    match kind {
+        UiNodeKind::Button { sfx, .. } => {
+            cook_ui_sfx_event(
+                &sfx.focus,
+                psx_level::LevelUiSfxEvent::Focus,
+                project_root,
+                samples,
+                cues,
+                sample_for_wav,
+                report,
+            );
+            cook_ui_sfx_event(
+                &sfx.activate,
+                psx_level::LevelUiSfxEvent::Activate,
+                project_root,
+                samples,
+                cues,
+                sample_for_wav,
+                report,
+            );
+        }
+        UiNodeKind::Slider { sfx, .. } => {
+            cook_ui_sfx_event(
+                &sfx.focus,
+                psx_level::LevelUiSfxEvent::Focus,
+                project_root,
+                samples,
+                cues,
+                sample_for_wav,
+                report,
+            );
+            cook_ui_sfx_event(
+                &sfx.nudge,
+                psx_level::LevelUiSfxEvent::SliderNudge,
+                project_root,
+                samples,
+                cues,
+                sample_for_wav,
+                report,
+            );
+            cook_ui_sfx_event(
+                &sfx.limit,
+                psx_level::LevelUiSfxEvent::SliderLimit,
+                project_root,
+                samples,
+                cues,
+                sample_for_wav,
+                report,
+            );
+        }
+        _ => {}
+    }
+    let count = cues.len().saturating_sub(first as usize);
+    if count == 0 {
+        (psx_level::UI_SFX_NONE, 0)
+    } else {
+        (first, count.min(u8::MAX as usize) as u8)
+    }
+}
+
+fn cook_ui_sfx_event(
+    authored: &[UiSfxCue],
+    event: psx_level::LevelUiSfxEvent,
+    project_root: &Path,
+    samples: &mut Vec<PlaytestUiSfxSample>,
+    cues: &mut Vec<PlaytestUiSfxCue>,
+    sample_for_wav: &mut HashMap<String, u16>,
+    report: &mut PlaytestValidationReport,
+) {
+    for cue in authored {
+        let Some(sample) =
+            cook_ui_sfx_sample_index(&cue.wav_path, project_root, samples, sample_for_wav, report)
+        else {
+            continue;
+        };
+        cues.push(PlaytestUiSfxCue {
+            sample,
+            event,
+            volume_percent: cue.volume.min(100),
+            pitch_q12: cue.pitch_q12.clamp(1, 0x3FFF),
+            flags: 0,
+        });
+    }
+}
+
+fn cook_ui_sfx_sample_index(
+    wav_path: &str,
+    project_root: &Path,
+    samples: &mut Vec<PlaytestUiSfxSample>,
+    sample_for_wav: &mut HashMap<String, u16>,
+    report: &mut PlaytestValidationReport,
+) -> Option<u16> {
+    let trimmed = wav_path.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if !trimmed
+        .rsplit_once('.')
+        .map(|(_, ext)| ext.eq_ignore_ascii_case("wav"))
+        .unwrap_or(false)
+    {
+        report.warn(format!(
+            "UI SFX source '{trimmed}' is not a .wav file and was skipped"
+        ));
+        return None;
+    }
+    let abs = resolve_path(trimmed, project_root);
+    if !abs.is_file() {
+        report.warn(format!(
+            "UI SFX source '{}' does not exist and was skipped",
+            abs.display()
+        ));
+        return None;
+    }
+    let abs = std::fs::canonicalize(&abs).unwrap_or(abs);
+    let key = abs.to_string_lossy().into_owned();
+    if let Some(index) = sample_for_wav.get(&key) {
+        return Some(*index);
+    }
+    if samples.len() >= u16::MAX as usize {
+        report.warn("UI SFX sample limit reached; extra SFX sources were skipped");
+        return None;
+    }
+    let bytes = match std::fs::read(&abs) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            report.warn(format!("UI SFX source '{}': {error}", abs.display()));
+            return None;
+        }
+    };
+    let psau = match psxed_audio::cook_sfx_from_wav(&bytes) {
+        Ok(psau) => psau,
+        Err(error) => {
+            report.warn(format!(
+                "UI SFX source '{}' could not be cooked: {error}",
+                abs.display()
+            ));
+            return None;
+        }
+    };
+    let index = samples.len() as u16;
+    samples.push(PlaytestUiSfxSample {
+        bytes: psau,
+        filename: format!("ui_sfx_{index:03}.psau"),
+        source_path: key.clone(),
+    });
+    sample_for_wav.insert(key, index);
+    Some(index)
 }
 
 fn ui_node_flags(anchor: UiAnchor, align: UiTextAlign, wrap: bool) -> u16 {
@@ -1438,6 +1933,67 @@ fn ui_node_flags(anchor: UiAnchor, align: UiTextAlign, wrap: bool) -> u16 {
         flags |= psx_level::ui_node_flags::TEXT_WRAP;
     }
     flags
+}
+
+/// Lower an authored [`UiAction`] to a cooked [`PlaytestUiAction`].
+/// `GotoScene` resolves the target [`crate::UiSceneId`] to a cooked
+/// scene id by taking its low 16 bits, matching how `cook_ui_nodes`
+/// assigns each [`PlaytestUiScene::id`].
+fn cook_ui_action(action: UiAction) -> PlaytestUiAction {
+    match action {
+        UiAction::GotoScene(scene) => PlaytestUiAction::GotoScene {
+            scene: (scene.raw() & u16::MAX as u64) as u16,
+        },
+        UiAction::StartGameplay => PlaytestUiAction::StartGameplay,
+        UiAction::Back => PlaytestUiAction::Back,
+        UiAction::SetOption { option, delta } => PlaytestUiAction::SetOption {
+            option: cook_option_id(option),
+            delta,
+        },
+        UiAction::Game(id) => PlaytestUiAction::Game { id },
+    }
+}
+
+/// Pack an authored [`OptionId`] into the runtime's compact `u16`
+/// slot, clamping to the low 16 bits.
+fn cook_option_id(option: OptionId) -> u16 {
+    (option.raw() & u16::MAX as u32) as u16
+}
+
+/// Flatten every authored [`OptionDef`] into a cooked [`PlaytestOption`]
+/// the runtime store can seed from. Each [`OptionKind`] collapses to a
+/// bounded integer triple: an `IntRange` maps directly, an `Enum` becomes
+/// `[0, variants - 1]` step `1` (an empty variant list yields a degenerate
+/// `[0, 0]`), and a `Bool` becomes `[0, 1]` step `1`. The id is the same
+/// low-16-bit packing sliders and `SetOption` actions cook to, so a slider
+/// or button resolves its bound option by matching ids at runtime.
+fn cook_options(project: &ProjectDocument) -> Vec<PlaytestOption> {
+    project
+        .options
+        .iter()
+        .map(|option| {
+            let (min, max, step, default) = match &option.kind {
+                OptionKind::IntRange {
+                    min,
+                    max,
+                    step,
+                    default,
+                } => (*min, *max, *step, *default),
+                OptionKind::Enum { variants, default } => {
+                    let last = variants.len().saturating_sub(1) as i32;
+                    (0, last, 1, *default as i32)
+                }
+                OptionKind::Bool { default } => (0, 1, 1, *default as i32),
+            };
+            PlaytestOption {
+                id: cook_option_id(option.id),
+                min,
+                max,
+                step,
+                default,
+            }
+        })
+        .collect()
 }
 
 fn cook_sky_panorama_texture_asset(
@@ -1780,6 +2336,7 @@ fn cook_player_character(
     visual_scale_q8: u16,
     action_overrides: &[crate::CharacterActionClip],
     controller_settings: Option<CharacterControllerSettings>,
+    weight_q8: u16,
     assets: &mut Vec<PlaytestAsset>,
     models: &mut Vec<PlaytestModel>,
     model_clips: &mut Vec<PlaytestModelClip>,
@@ -2069,6 +2626,7 @@ fn cook_player_character(
         visual_offset,
         visual_yaw,
         visual_scale_q8,
+        weight_q8,
         radius: settings.radius,
         height: settings.height,
         walk_speed: settings.walk_speed,
@@ -3138,6 +3696,11 @@ struct CharacterControllerComponent {
     player: bool,
 }
 
+#[derive(Clone, Copy)]
+struct PhysicsBodyComponent {
+    settings: PhysicsBodySettings,
+}
+
 struct EquipmentComponent<'a> {
     weapon: Option<ResourceId>,
     character_socket: &'a str,
@@ -3195,6 +3758,21 @@ fn component_character_controller(
         }),
         _ => None,
     })
+}
+
+fn component_physics_body(scene: &crate::Scene, host: &SceneNode) -> Option<PhysicsBodyComponent> {
+    component_children(scene, host).find_map(|node| match &node.kind {
+        NodeKind::PhysicsBody { settings } => Some(PhysicsBodyComponent {
+            settings: settings.normalized(),
+        }),
+        _ => None,
+    })
+}
+
+fn physics_body_weight_q8(scene: &crate::Scene, host: &SceneNode) -> u16 {
+    component_physics_body(scene, host)
+        .map(|component| component.settings.weight_q8)
+        .unwrap_or(PHYSICS_WEIGHT_ONE_Q8)
 }
 
 fn component_equipment<'a>(
@@ -3550,9 +4128,24 @@ fn expand_lights_across_chunks(
         let source_origin = room_origin_units(source_room);
         let global_x = source_origin[0].saturating_add(light.x);
         let global_z = source_origin[1].saturating_add(light.z);
+        // Absolute Y of the light (source floor elevation + local Y).
+        // `light.y` already carries the entity's floor via its authored
+        // transform, so a floor-1 light sits in floor 1's band.
+        let global_y = source_room.origin_y.saturating_add(light.y);
         let mut emitted = false;
         for target_room in rooms {
             if !light_overlaps_room_chunk(global_x, global_z, light.radius, target_room) {
+                continue;
+            }
+            // Keep light on its own level: only spill to a target floor
+            // whose band contains the light's Y (within its radius). This
+            // stops a floor-1 light from lighting floor 0's overlapping
+            // chunk and vice versa. Same-floor chunks share `origin_y`, so
+            // intra-floor spill is unaffected.
+            let dy = global_y.saturating_sub(target_room.origin_y);
+            if i64::from(dy).saturating_mul(i64::from(dy))
+                > i64::from(light.radius).saturating_mul(i64::from(light.radius))
+            {
                 continue;
             }
             let target_origin = room_origin_units(target_room);
@@ -3785,8 +4378,12 @@ fn image_prop_static_vertices(prop: &PlaytestImageProp) -> [[i32; 3]; 4] {
     ];
     let mut out = [[0, 0, 0]; 4];
     for (idx, local) in locals.iter().enumerate() {
-        let rotated =
-            rotate_image_prop_local(*local, prop.pitch as u16, prop.yaw as u16, prop.roll as u16);
+        let rotated = crate::spatial::rotate_euler_local_q12(
+            *local,
+            prop.pitch as u16,
+            prop.yaw as u16,
+            prop.roll as u16,
+        );
         out[idx] = [
             prop.x.saturating_add(rotated[0]),
             prop.y.saturating_add(rotated[1]),
@@ -3801,7 +4398,7 @@ fn box_prop_static_face_vertices(
 ) -> [[[i32; 3]; 4]; psx_level::BOX_PROP_FACE_COUNT] {
     let mut vertices = [[0, 0, 0]; psx_level::BOX_PROP_VERTEX_COUNT];
     for (idx, local) in prop.vertices.iter().enumerate() {
-        let rotated = rotate_image_prop_local(
+        let rotated = crate::spatial::rotate_euler_local_q12(
             [local[0] as i32, local[1] as i32, local[2] as i32],
             prop.pitch as u16,
             prop.yaw as u16,
@@ -3821,47 +4418,6 @@ fn box_prop_static_face_vertices(
         }
     }
     faces
-}
-
-fn rotate_image_prop_local(v: [i32; 3], pitch: u16, yaw: u16, roll: u16) -> [i32; 3] {
-    rotate_z_q12(rotate_y_q12(rotate_x_q12(v, pitch), yaw), roll)
-}
-
-fn rotate_x_q12(v: [i32; 3], angle_q12: u16) -> [i32; 3] {
-    let angle = psx_engine::Angle::from_q12(angle_q12);
-    let s = angle.sin().raw();
-    let c = angle.cos().raw();
-    [
-        v[0],
-        mul_q12_i32(v[1], c) - mul_q12_i32(v[2], s),
-        mul_q12_i32(v[1], s) + mul_q12_i32(v[2], c),
-    ]
-}
-
-fn rotate_y_q12(v: [i32; 3], angle_q12: u16) -> [i32; 3] {
-    let angle = psx_engine::Angle::from_q12(angle_q12);
-    let s = angle.sin().raw();
-    let c = angle.cos().raw();
-    [
-        mul_q12_i32(v[0], c) + mul_q12_i32(v[2], s),
-        v[1],
-        -mul_q12_i32(v[0], s) + mul_q12_i32(v[2], c),
-    ]
-}
-
-fn rotate_z_q12(v: [i32; 3], angle_q12: u16) -> [i32; 3] {
-    let angle = psx_engine::Angle::from_q12(angle_q12);
-    let s = angle.sin().raw();
-    let c = angle.cos().raw();
-    [
-        mul_q12_i32(v[0], c) - mul_q12_i32(v[1], s),
-        mul_q12_i32(v[0], s) + mul_q12_i32(v[1], c),
-        v[2],
-    ]
-}
-
-fn mul_q12_i32(value: i32, q12: i32) -> i32 {
-    (((value as i64) * (q12 as i64)) >> 12).clamp(i32::MIN as i64, i32::MAX as i64) as i32
 }
 
 const fn rgb_tuple(rgb: [u8; 3]) -> (u8, u8, u8) {
@@ -4782,6 +5338,186 @@ fn resolve_room_floor_links(
     out
 }
 
+/// Auto-wire vertical links between consecutive floors of each room.
+/// Every floor of one room lives under a single node id at the same
+/// world cells, so the `(node id, cell)` resolver used for authored
+/// links can't tell two floors apart. Here we link directly by chunk
+/// `room_index`, using each chunk's `floor_idx`: floor N's sector links
+/// down to floor N-1's chunk and up to floor N+1's chunk at the same
+/// world cell. Single-floor rooms produce nothing.
+fn auto_wire_floor_stack_links(
+    chunks_by_node: &HashMap<NodeId, Vec<AuthoredRoomChunk>>,
+) -> Vec<PlaytestRoomFloorLink> {
+    let mut out = Vec::new();
+    for chunks in chunks_by_node.values() {
+        let max_floor = chunks
+            .iter()
+            .map(|chunk| chunk.floor_idx)
+            .max()
+            .unwrap_or(0);
+        if max_floor == 0 {
+            continue;
+        }
+        for chunk in chunks {
+            for &cell in &chunk.cells {
+                let world_cell = chunk_cell_world_cell(chunk, cell);
+                let find_on = |floor: usize| -> Option<u16> {
+                    chunks
+                        .iter()
+                        .find(|other| {
+                            other.floor_idx == floor && chunk_contains_world_cell(other, world_cell)
+                        })
+                        .map(|other| other.room_index)
+                };
+                let below_room = chunk.floor_idx.checked_sub(1).and_then(find_on);
+                let above_room = find_on(chunk.floor_idx + 1);
+                if above_room.is_none() && below_room.is_none() {
+                    continue;
+                }
+                out.push(PlaytestRoomFloorLink {
+                    room: chunk.room_index,
+                    x: cell[0].saturating_sub(chunk.array_origin[0]),
+                    z: cell[1].saturating_sub(chunk.array_origin[1]),
+                    above_room,
+                    below_room,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Emit vertical portal quads between consecutive floors, mirroring the
+/// floor links. For each cell shared by floor N (below) and floor N+1
+/// (above) the runtime gets a reciprocal pair: an up-portal owned by the
+/// lower room (normal +Y) and a down-portal owned by the upper room
+/// (normal -Y), both lying in the horizontal plane at the boundary
+/// elevation (floor N+1's elevation). Without these, `room_floor_links`
+/// connect the rooms for streaming/walking but the portal clipper and
+/// portal-view overlay have no quad to draw or cull against. Coords match
+/// the wall-portal convention: world units = `(grid.origin + cell) *
+/// sector_size`, vertices `[BL, BR, TR, TL]`.
+fn auto_wire_floor_stack_portals(
+    scene: &crate::Scene,
+    chunks_by_node: &HashMap<NodeId, Vec<AuthoredRoomChunk>>,
+) -> Vec<PlaytestRoomPortal> {
+    let mut out = Vec::new();
+    for (node_id, chunks) in chunks_by_node {
+        let max_floor = chunks
+            .iter()
+            .map(|chunk| chunk.floor_idx)
+            .max()
+            .unwrap_or(0);
+        if max_floor == 0 {
+            continue;
+        }
+        let Some(NodeKind::Room { grid }) = scene.node(*node_id).map(|n| &n.kind) else {
+            continue;
+        };
+        let s = grid.sector_size;
+        if s <= 0 {
+            continue;
+        }
+        for chunk in chunks {
+            // Only emit from the lower side of each boundary, so each
+            // shared cell yields exactly one reciprocal pair.
+            let upper_floor = chunk.floor_idx + 1;
+            let (Some(lower_grid), Some(upper_grid)) =
+                (grid.floor(chunk.floor_idx), grid.floor(upper_floor))
+            else {
+                continue;
+            };
+            let boundary_y = upper_grid.elevation;
+            for &cell in &chunk.cells {
+                let world_cell = chunk_cell_world_cell(chunk, cell);
+                let Some(above) = chunks.iter().find(|other| {
+                    other.floor_idx == upper_floor && chunk_contains_world_cell(other, world_cell)
+                }) else {
+                    continue;
+                };
+                // A vertical portal only exists where there is an actual
+                // GAP between the floors: the upper floor has no floor
+                // face AND the lower floor has no ceiling face at this
+                // cell. A sealed cell (floor above / ceiling below) is a
+                // solid slab you can neither see nor walk through, so it
+                // gets no portal. Cells are addressed in each floor grid's
+                // own array space via its origin.
+                let upper_sealed = upper_grid
+                    .world_cell_to_array(world_cell[0], world_cell[1])
+                    .and_then(|(sx, sz)| upper_grid.sector(sx, sz))
+                    .is_some_and(|sector| sector.floor.is_some());
+                let lower_sealed = lower_grid
+                    .world_cell_to_array(world_cell[0], world_cell[1])
+                    .and_then(|(sx, sz)| lower_grid.sector(sx, sz))
+                    .is_some_and(|sector| sector.ceiling.is_some());
+                if upper_sealed || lower_sealed {
+                    continue;
+                }
+                let below_room = u16::try_from(chunk.room_index as usize).unwrap_or(u16::MAX);
+                let above_room = above.room_index;
+                // Cell footprint in world units at the boundary plane.
+                let x0 = world_cell[0].saturating_mul(s);
+                let x1 = world_cell[0].saturating_add(1).saturating_mul(s);
+                let z0 = world_cell[1].saturating_mul(s);
+                let z1 = world_cell[1].saturating_add(1).saturating_mul(s);
+                let quad = [
+                    [x0, boundary_y, z0],
+                    [x1, boundary_y, z0],
+                    [x1, boundary_y, z1],
+                    [x0, boundary_y, z1],
+                ];
+                // Up-portal: owned by the lower room, looks up into the
+                // upper room (source-facing normal points back down).
+                out.push(PlaytestRoomPortal {
+                    source_room: below_room,
+                    destination_room: above_room,
+                    kind: 1,
+                    normal: [0, -1, 0],
+                    vertices: quad,
+                });
+                // Down-portal: owned by the upper room, looks down.
+                out.push(PlaytestRoomPortal {
+                    source_room: above_room,
+                    destination_room: below_room,
+                    kind: 1,
+                    normal: [0, 1, 0],
+                    vertices: quad,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Sort the portal table by `source_room` and rebuild every room's
+/// `[portal_first, portal_count)` range so the runtime BFS scans all of a
+/// room's portals (horizontal + vertical) as one contiguous slice.
+/// Stable sort preserves each room's internal portal order. Rooms with no
+/// portals get `portal_first=0, portal_count=0`.
+fn regroup_room_portals(rooms: &mut [PlaytestRoom], room_portals: &mut [PlaytestRoomPortal]) {
+    room_portals.sort_by_key(|portal| portal.source_room);
+    for (index, room) in rooms.iter_mut().enumerate() {
+        let room_index = u16::try_from(index).unwrap_or(u16::MAX);
+        let first = room_portals
+            .iter()
+            .position(|portal| portal.source_room == room_index);
+        match first {
+            Some(first) => {
+                let count = room_portals[first..]
+                    .iter()
+                    .take_while(|portal| portal.source_room == room_index)
+                    .count();
+                room.portal_first = u16::try_from(first).unwrap_or(u16::MAX);
+                room.portal_count = u8::try_from(count).unwrap_or(u8::MAX);
+            }
+            None => {
+                room.portal_first = 0;
+                room.portal_count = 0;
+            }
+        }
+    }
+}
+
 fn resolve_floor_link_target(
     target_room: Option<NodeId>,
     world_cell: [i32; 2],
@@ -4841,12 +5577,29 @@ fn chunk_for_node<'a>(
     let wcx = world_cells[0].floor() as i32;
     let wcz = world_cells[1].floor() as i32;
     let (sx, sz) = grid.world_cell_to_array(wcx, wcz)?;
-    chunks.iter().find(|chunk| {
-        chunk
+    // A node's XZ cell can exist on several stacked floors. Bind to the
+    // floor the node was AUTHORED on (`node.floor`, explicit), not by
+    // inferring from Y -- the authored Y is a placement default (e.g. the
+    // 2.89-sector standing height shared by every project) and can land
+    // above the wrong floor. Floor 0 is the ground; clamp so a stale
+    // index can't miss. Single-floor rooms have one candidate and the
+    // clamp collapses to it.
+    let target_floor = node.floor.min(grid.floor_count().saturating_sub(1));
+    let mut fallback = None;
+    for chunk in chunks {
+        let on_cell = chunk
             .cells
             .iter()
-            .any(|cell| cell[0] == sx && cell[1] == sz)
-    })
+            .any(|cell| cell[0] == sx && cell[1] == sz);
+        if !on_cell {
+            continue;
+        }
+        if chunk.floor_idx == target_floor {
+            return Some(chunk);
+        }
+        fallback.get_or_insert(chunk);
+    }
+    fallback
 }
 
 fn build_playtest_chunks(
@@ -4940,11 +5693,12 @@ fn yaw_from_degrees(degrees: f32) -> i16 {
     angle_from_degrees(degrees)
 }
 
-/// Convert editor Euler degrees to PSX angle units (`0..4096`).
+/// Convert editor Euler degrees to PSX angle units (`0..4096`), stored as the
+/// signed value the compact records use. The math is shared with the editor
+/// preview via [`crate::spatial::euler_degrees_to_q12`] so authored facing
+/// can't drift between preview and cooked output.
 fn angle_from_degrees(degrees: f32) -> i16 {
-    let normalised = degrees.rem_euclid(360.0);
-    let units = normalised * (4096.0 / 360.0);
-    units as i16
+    crate::spatial::euler_degrees_to_q12(degrees) as i16
 }
 
 fn cook_error_for_node(name: &str, err: WorldGridCookError) -> String {
@@ -4958,6 +5712,171 @@ mod tests {
 
     fn starter_project_root() -> PathBuf {
         crate::default_project_dir()
+    }
+
+    fn unique_temp_dir(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "psxed-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ))
+    }
+
+    fn test_wav_mono_44k() -> Vec<u8> {
+        let sample_rate = 44_100u32;
+        let samples = [0i16, 2048, -2048, 4096, -4096, 0, 1024, -1024];
+        let data_bytes = (samples.len() * 2) as u32;
+        let mut out = Vec::with_capacity(44 + data_bytes as usize);
+        out.extend_from_slice(b"RIFF");
+        out.extend_from_slice(&(36 + data_bytes).to_le_bytes());
+        out.extend_from_slice(b"WAVE");
+        out.extend_from_slice(b"fmt ");
+        out.extend_from_slice(&16u32.to_le_bytes());
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&sample_rate.to_le_bytes());
+        out.extend_from_slice(&(sample_rate * 2).to_le_bytes());
+        out.extend_from_slice(&2u16.to_le_bytes());
+        out.extend_from_slice(&16u16.to_le_bytes());
+        out.extend_from_slice(b"data");
+        out.extend_from_slice(&data_bytes.to_le_bytes());
+        for sample in samples {
+            out.extend_from_slice(&sample.to_le_bytes());
+        }
+        out
+    }
+
+    #[test]
+    #[ignore = "diagnostic: run with --ignored --nocapture to inspect demo11 cook"]
+    fn diag_demo11_cook() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../projects/demo11");
+        let mut project =
+            ProjectDocument::load_from_path(root.join("project.ron")).expect("load demo11");
+        project.normalize_loaded();
+
+        // Authored side: room node, its floors, the player entity Y.
+        let scene = project.active_scene();
+        for node in scene.nodes() {
+            if let NodeKind::Room { grid } = &node.kind {
+                println!(
+                    "ROOM node id={} name={:?} sector_size={} base_elev={} floors={}",
+                    node.id.raw(),
+                    node.name,
+                    grid.sector_size,
+                    grid.elevation,
+                    grid.floor_count()
+                );
+                for i in 0..grid.floor_count() {
+                    if let Some(f) = grid.floor(i) {
+                        println!(
+                            "   floor {i}: elevation={} populated_cells={} dims={}x{} origin={:?}",
+                            f.elevation,
+                            f.populated_sector_count(),
+                            f.width,
+                            f.depth,
+                            f.origin,
+                        );
+                    }
+                }
+            }
+        }
+        for node in scene.nodes() {
+            let is_player = matches!(&node.kind, NodeKind::SpawnPoint { player: true, .. })
+                || scene.nodes().iter().any(|c| {
+                    c.parent == Some(node.id)
+                        && matches!(&c.kind, NodeKind::CharacterController { player: true, .. })
+                });
+            if is_player {
+                println!(
+                    "PLAYER node id={} name={:?} translation={:?}",
+                    node.id.raw(),
+                    node.name,
+                    node.transform.translation
+                );
+                // Physics check: where is the player relative to each
+                // floor's surface at its cell?
+                if let Some(room) = enclosing_room(scene, node) {
+                    if let NodeKind::Room { grid } = &room.kind {
+                        let s = grid.sector_size;
+                        let node_y_eng = (node.transform.translation[1] * s as f32) as i32;
+                        let local = grid.editor_to_room_local([
+                            node.transform.translation[0],
+                            node.transform.translation[2],
+                        ]);
+                        println!(
+                            "  player_y_engine={} (room-local cell from xz={:?})",
+                            node_y_eng, local
+                        );
+                        for i in 0..grid.floor_count() {
+                            if let Some(f) = grid.floor(i) {
+                                let surf =
+                                    f.floor_height_at_room_local(local[0] as i32, local[2] as i32);
+                                println!(
+                                    "   floor {i}: base_elev={} surface_at_cell={:?} -> player is {} above base",
+                                    f.elevation,
+                                    surf,
+                                    node_y_eng - f.elevation
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let (package, report) = build_package(&project, &root);
+        println!("report.ok={} errors={:?}", report.is_ok(), report);
+        let package = package.expect("demo11 cooked");
+
+        println!("=== COOKED rooms ({}) ===", package.rooms.len());
+        for (i, r) in package.rooms.iter().enumerate() {
+            println!(
+                "  room[{i}] name={:?} origin=({},{}) origin_y={} size={}x{} portal_first={} portal_count={}",
+                r.name, r.origin_x, r.origin_z, r.origin_y, r.material_first, r.material_count,
+                r.portal_first, r.portal_count
+            );
+        }
+        println!("=== COOKED chunks ({}) ===", package.chunks.len());
+        for (i, c) in package.chunks.iter().enumerate() {
+            println!(
+                "  chunk[{i}] room={} authored_room={} origin=({},{}) {}x{} neighbours={:?}",
+                c.room, c.authored_room, c.origin_x, c.origin_z, c.width, c.depth, c.neighbours
+            );
+        }
+        println!("=== room_portals ({}) ===", package.room_portals.len());
+        for (i, p) in package.room_portals.iter().enumerate() {
+            println!(
+                "  portal[{i}] src={} dst={} kind={} normal={:?} verts={:?}",
+                p.source_room, p.destination_room, p.kind, p.normal, p.vertices
+            );
+        }
+        println!(
+            "=== room_floor_links ({}) ===",
+            package.room_floor_links.len()
+        );
+        for (i, l) in package.room_floor_links.iter().enumerate() {
+            println!(
+                "  link[{i}] room={} cell=({},{}) above={:?} below={:?}",
+                l.room, l.x, l.z, l.above_room, l.below_room
+            );
+        }
+        if let Some(spawn) = package.spawn {
+            println!(
+                "=== SPAWN room={} pos=({},{},{}) -> room origin_y={} ===",
+                spawn.room,
+                spawn.x,
+                spawn.y,
+                spawn.z,
+                package
+                    .rooms
+                    .get(spawn.room as usize)
+                    .map(|r| r.origin_y)
+                    .unwrap_or(-1)
+            );
+        }
     }
 
     const PORTAL_SWEEP_MAX_ROOMS: usize = 32;
@@ -5021,12 +5940,14 @@ mod tests {
                     world_asset: psx_level::AssetId(room.world_asset_index as u16),
                     origin_x: room.origin_x,
                     origin_z: room.origin_z,
+                    origin_y: room.origin_y,
                     sector_size: room.sector_size,
                     draw_distance: room.draw_distance,
                     chunk_activation_radius_sectors: room.chunk_activation_radius_sectors,
                     visibility_radius: room.visibility_radius,
                     resident_chunk_limit: room.resident_chunk_limit,
                     visible_chunk_limit: room.visible_chunk_limit,
+                    gravity_per_tick: room.gravity_per_tick,
                     material_first: psx_level::MaterialIndex(room.material_first),
                     material_count: room.material_count,
                     portal_first: room.portal_first,
@@ -7146,12 +8067,30 @@ mod tests {
         let mut texture_asset_for_resource = HashMap::new();
         let mut assets = Vec::new();
         let mut report = PlaytestValidationReport::default();
-        let nodes = cook_ui_nodes(
+        let (nodes, scenes, _sfx_samples, _sfx_cues, flow, _cdda_tracks) = cook_ui_nodes(
             &project,
             Path::new("."),
             &mut texture_asset_for_resource,
             &mut assets,
             &mut report,
+        );
+        assert_eq!(scenes.len(), 1);
+        assert_eq!(scenes[0].node_first, 0);
+        assert_eq!(scenes[0].node_count as usize, nodes.len());
+        assert_eq!(
+            flow.states.first(),
+            Some(&PlaytestFlowState::UiScene {
+                scene: scenes[0].id
+            })
+        );
+        assert_eq!(flow.states.last(), Some(&PlaytestFlowState::Gameplay));
+        // With the default boot target (Gameplay), entry points at the gameplay
+        // state (the last one), not the first UI scene. Authoring a UI boot
+        // target via `project.boot` is what moves entry onto a menu scene.
+        assert_eq!(flow.entry as usize, flow.states.len() - 1);
+        assert_eq!(
+            flow.states.get(flow.entry as usize),
+            Some(&PlaytestFlowState::Gameplay)
         );
         let group_index = nodes
             .iter()
@@ -7171,6 +8110,337 @@ mod tests {
         assert_eq!(nodes[label_index].parent, Some(group_index as u16));
         assert_eq!((nodes[label_index].x, nodes[label_index].y), (8, 6));
         assert_eq!(nodes[label_index].tag, "prompt");
+    }
+
+    #[test]
+    fn boot_target_sets_game_flow_entry_to_the_chosen_scene() {
+        // Two UI scenes; choose the SECOND as the boot target and confirm the
+        // cooked flow enters that scene's state (not index 0, not gameplay).
+        let mut project = ProjectDocument::new("boot");
+        project.ui_scenes.push(crate::UiScene::empty_canvas(
+            "Menu",
+            crate::UiSceneId::UNASSIGNED,
+        ));
+        project.normalize_loaded(); // hands out stable scene ids
+        let menu_id = project.ui_scenes[1].id;
+        project.boot = crate::BootTarget::UiScene(menu_id);
+
+        let mut texture_asset_for_resource = HashMap::new();
+        let mut assets = Vec::new();
+        let mut report = PlaytestValidationReport::default();
+        let (_nodes, scenes, _sfx_samples, _sfx_cues, flow, _cdda_tracks) = cook_ui_nodes(
+            &project,
+            Path::new("."),
+            &mut texture_asset_for_resource,
+            &mut assets,
+            &mut report,
+        );
+
+        let menu_pos = scenes
+            .iter()
+            .position(|scene| u64::from(scene.id) == menu_id.raw())
+            .expect("menu scene cooked");
+        assert_eq!(flow.entry as usize, menu_pos);
+        assert_eq!(
+            flow.states.get(flow.entry as usize),
+            Some(&PlaytestFlowState::UiScene {
+                scene: scenes[menu_pos].id
+            })
+        );
+    }
+
+    #[test]
+    fn boot_target_falls_back_to_gameplay_when_scene_missing() {
+        // A boot target pointing at a non-existent scene must not wedge boot:
+        // entry falls back to the gameplay state.
+        let mut project = ProjectDocument::new("boot-missing");
+        project.normalize_loaded();
+        project.boot = crate::BootTarget::UiScene(crate::UiSceneId(9999));
+
+        let mut texture_asset_for_resource = HashMap::new();
+        let mut assets = Vec::new();
+        let mut report = PlaytestValidationReport::default();
+        let (_nodes, _scenes, _sfx_samples, _sfx_cues, flow, _cdda_tracks) = cook_ui_nodes(
+            &project,
+            Path::new("."),
+            &mut texture_asset_for_resource,
+            &mut assets,
+            &mut report,
+        );
+        assert_eq!(
+            flow.states.get(flow.entry as usize),
+            Some(&PlaytestFlowState::Gameplay)
+        );
+    }
+
+    #[test]
+    fn button_and_slider_cook_action_colours_and_option_binding() {
+        let mut project = ProjectDocument::new("ui");
+        // A second scene so GotoScene has a non-trivial target id to
+        // resolve and we can assert the low-16-bit lowering.
+        let target_scene = project.add_ui_scene("Pause");
+        let option = project.add_option("Volume");
+
+        let scene = project.active_ui_scene_mut().expect("default ui scene");
+        scene.add_node(
+            scene.root,
+            "Play",
+            UiNodeKind::Button {
+                rect: UiRect::new(10, 12, 80, 18),
+                label: "Play".to_string(),
+                align: UiTextAlign::Center,
+                color: [50, 60, 70],
+                text_color: [236, 240, 248],
+                transparent: false,
+                action: UiAction::GotoScene(target_scene),
+                sfx: crate::UiSfxBindings::default(),
+            },
+        );
+        scene.add_node(
+            scene.root,
+            "Volume",
+            UiNodeKind::Slider {
+                rect: UiRect::new(10, 40, 96, 8),
+                option,
+                track: [11, 12, 13],
+                fill: [21, 22, 23],
+                knob: [31, 32, 33],
+                sfx: crate::UiSfxBindings::default(),
+            },
+        );
+
+        let mut texture_asset_for_resource = HashMap::new();
+        let mut assets = Vec::new();
+        let mut report = PlaytestValidationReport::default();
+        let (nodes, _scenes, _sfx_samples, _sfx_cues, _flow, _cdda_tracks) = cook_ui_nodes(
+            &project,
+            Path::new("."),
+            &mut texture_asset_for_resource,
+            &mut assets,
+            &mut report,
+        );
+
+        let button = nodes
+            .iter()
+            .find(|node| matches!(node.kind, UiNodeKind::Button { .. }))
+            .expect("button cooked");
+        assert_eq!(button.text, "Play");
+        assert_eq!(button.color, [50, 60, 70]);
+        assert_eq!(button.option, psx_level::UI_OPTION_NONE);
+        assert_eq!(
+            button.action,
+            PlaytestUiAction::GotoScene {
+                scene: (target_scene.raw() & u16::MAX as u64) as u16,
+            }
+        );
+
+        let slider = nodes
+            .iter()
+            .find(|node| matches!(node.kind, UiNodeKind::Slider { .. }))
+            .expect("slider cooked");
+        // Track -> color, fill -> background, knob -> accent.
+        assert_eq!(slider.color, [11, 12, 13]);
+        assert_eq!(slider.background, [21, 22, 23]);
+        assert_eq!(slider.accent, [31, 32, 33]);
+        assert_eq!(slider.option, (option.raw() & u16::MAX as u32) as u16);
+        assert_eq!(slider.action, PlaytestUiAction::default());
+    }
+
+    #[test]
+    fn button_sfx_cooks_wav_to_sample_and_cue_range() {
+        let root = unique_temp_dir("ui-sfx-cook");
+        let sfx_dir = root.join("assets/sfx");
+        std::fs::create_dir_all(&sfx_dir).expect("sfx dir");
+        std::fs::write(sfx_dir.join("click.wav"), test_wav_mono_44k()).expect("test wav");
+
+        let mut project = ProjectDocument::new("ui-sfx");
+        let scene = project.active_ui_scene_mut().expect("default ui scene");
+        scene.add_node(
+            scene.root,
+            "Play",
+            UiNodeKind::Button {
+                rect: UiRect::new(10, 12, 80, 18),
+                label: "Play".to_string(),
+                align: UiTextAlign::Center,
+                color: [50, 60, 70],
+                text_color: [236, 240, 248],
+                transparent: false,
+                action: UiAction::Back,
+                sfx: crate::UiSfxBindings {
+                    activate: vec![UiSfxCue {
+                        wav_path: "assets/sfx/click.wav".to_string(),
+                        volume: 73,
+                        pitch_q12: 5120,
+                    }],
+                    ..crate::UiSfxBindings::default()
+                },
+            },
+        );
+
+        let mut texture_asset_for_resource = HashMap::new();
+        let mut assets = Vec::new();
+        let mut report = PlaytestValidationReport::default();
+        let (nodes, _scenes, samples, cues, _flow, _cdda_tracks) = cook_ui_nodes(
+            &project,
+            &root,
+            &mut texture_asset_for_resource,
+            &mut assets,
+            &mut report,
+        );
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert!(report.is_ok(), "warnings/errors: {:?}", report);
+        assert_eq!(samples.len(), 1);
+        assert_eq!(&samples[0].bytes[0..4], b"PSAU");
+        assert_eq!(cues.len(), 1);
+        assert_eq!(cues[0].sample, 0);
+        assert_eq!(cues[0].event, psx_level::LevelUiSfxEvent::Activate);
+        assert_eq!(cues[0].volume_percent, 73);
+        assert_eq!(cues[0].pitch_q12, 5120);
+        let button = nodes
+            .iter()
+            .find(|node| matches!(node.kind, UiNodeKind::Button { .. }))
+            .expect("button cooked");
+        assert_eq!(button.sfx_first, 0);
+        assert_eq!(button.sfx_count, 1);
+    }
+
+    #[test]
+    fn button_set_option_and_back_actions_lower_to_runtime_ids() {
+        let mut project = ProjectDocument::new("ui");
+        let option = project.add_option("Difficulty");
+        let scene = project.active_ui_scene_mut().expect("default ui scene");
+        scene.add_node(
+            scene.root,
+            "Harder",
+            UiNodeKind::Button {
+                rect: UiRect::new(0, 0, 40, 16),
+                label: "+".to_string(),
+                align: UiTextAlign::Center,
+                color: [40, 40, 40],
+                text_color: [236, 240, 248],
+                transparent: false,
+                action: UiAction::SetOption { option, delta: 2 },
+                sfx: crate::UiSfxBindings::default(),
+            },
+        );
+        scene.add_node(
+            scene.root,
+            "Back",
+            UiNodeKind::Button {
+                rect: UiRect::new(0, 20, 40, 16),
+                label: "Back".to_string(),
+                align: UiTextAlign::Center,
+                color: [40, 40, 40],
+                text_color: [236, 240, 248],
+                transparent: false,
+                action: UiAction::Back,
+                sfx: crate::UiSfxBindings::default(),
+            },
+        );
+
+        let mut texture_asset_for_resource = HashMap::new();
+        let mut assets = Vec::new();
+        let mut report = PlaytestValidationReport::default();
+        let (nodes, _scenes, _sfx_samples, _sfx_cues, _flow, _cdda_tracks) = cook_ui_nodes(
+            &project,
+            Path::new("."),
+            &mut texture_asset_for_resource,
+            &mut assets,
+            &mut report,
+        );
+
+        let set_option = nodes
+            .iter()
+            .find(|node| node.text == "+")
+            .expect("set-option button cooked");
+        assert_eq!(
+            set_option.action,
+            PlaytestUiAction::SetOption {
+                option: (option.raw() & u16::MAX as u32) as u16,
+                delta: 2,
+            }
+        );
+
+        let back = nodes
+            .iter()
+            .find(|node| node.text == "Back")
+            .expect("back button cooked");
+        assert_eq!(back.action, PlaytestUiAction::Back);
+    }
+
+    #[test]
+    fn cook_options_flattens_every_kind() {
+        // One option of each kind; the cook collapses them to bounded
+        // integer triples keyed by the low-16-bit option id.
+        let mut project = ProjectDocument::new("ui");
+        let int_id = project.add_option("Volume");
+        if let Some(opt) = project.options.iter_mut().find(|o| o.id == int_id) {
+            opt.kind = crate::OptionKind::IntRange {
+                min: 2,
+                max: 9,
+                step: 3,
+                default: 5,
+            };
+        }
+        let enum_id = project.add_option("Quality");
+        if let Some(opt) = project.options.iter_mut().find(|o| o.id == enum_id) {
+            opt.kind = crate::OptionKind::Enum {
+                variants: vec!["Low".into(), "Medium".into(), "High".into()],
+                default: 2,
+            };
+        }
+        let bool_id = project.add_option("Subtitles");
+        if let Some(opt) = project.options.iter_mut().find(|o| o.id == bool_id) {
+            opt.kind = crate::OptionKind::Bool { default: true };
+        }
+
+        let options = cook_options(&project);
+        assert_eq!(options.len(), 3);
+
+        let int_opt = options
+            .iter()
+            .find(|o| o.id == (int_id.raw() & u16::MAX as u32) as u16)
+            .expect("int option cooked");
+        assert_eq!(
+            (int_opt.min, int_opt.max, int_opt.step, int_opt.default),
+            (2, 9, 3, 5)
+        );
+
+        // Enum -> [0, variants - 1] step 1, default = variant index.
+        let enum_opt = options
+            .iter()
+            .find(|o| o.id == (enum_id.raw() & u16::MAX as u32) as u16)
+            .expect("enum option cooked");
+        assert_eq!(
+            (enum_opt.min, enum_opt.max, enum_opt.step, enum_opt.default),
+            (0, 2, 1, 2)
+        );
+
+        // Bool -> [0, 1] step 1, default = 1 for true.
+        let bool_opt = options
+            .iter()
+            .find(|o| o.id == (bool_id.raw() & u16::MAX as u32) as u16)
+            .expect("bool option cooked");
+        assert_eq!(
+            (bool_opt.min, bool_opt.max, bool_opt.step, bool_opt.default),
+            (0, 1, 1, 1)
+        );
+    }
+
+    #[test]
+    fn manifest_emits_cooked_options_table() {
+        let mut package = PlaytestPackage::default();
+        package.options = vec![PlaytestOption {
+            id: 7,
+            min: 0,
+            max: 5,
+            step: 1,
+            default: 3,
+        }];
+        let src = render_manifest_source(&package);
+        assert!(src.contains("pub static OPTIONS: &[LevelOptionDef] = &[\n"));
+        assert!(src.contains("LevelOptionDef { id: 7, min: 0, max: 5, step: 1, default: 3 },"));
     }
 
     #[test]
@@ -7258,6 +8528,224 @@ mod tests {
         assert_eq!(package.room_floor_links[0].z, 0);
         assert_eq!(package.room_floor_links[0].above_room, None);
         assert_eq!(package.room_floor_links[0].below_room, Some(1));
+    }
+
+    #[test]
+    fn floors_cook_to_stacked_rooms_with_auto_links() {
+        let mut project = project_with_one_room();
+        let room_material = project
+            .resources
+            .iter()
+            .find(|resource| matches!(resource.data, ResourceData::Material(_)))
+            .map(|resource| resource.id);
+        let baseline = build_package(&project, &starter_project_root())
+            .0
+            .expect("baseline package")
+            .rooms
+            .len();
+
+        // Add a populated floor above the base, kept at its auto-stacked
+        // elevation, fully overlapping the base footprint.
+        {
+            let scene = project.active_scene_mut();
+            let room_id = scene
+                .nodes()
+                .iter()
+                .find(|node| matches!(node.kind, NodeKind::Room { .. }))
+                .map(|node| node.id)
+                .expect("room node");
+            let node = scene.node_mut(room_id).expect("room node");
+            let NodeKind::Room { grid } = &mut node.kind else {
+                panic!("expected a room");
+            };
+            let (w, d, s, origin) = (grid.width, grid.depth, grid.sector_size, grid.origin);
+            // Punch a hole at a cell shared by both floors so the
+            // hole-gated portal generator emits a vertical portal there:
+            // floor 0 must have no ceiling and floor 1 no floor at (0,0).
+            if let Some(sector) = grid.sector_mut(0, 0) {
+                sector.ceiling = None;
+            }
+            grid.push_floor();
+            let floor1 = grid.floor_mut(1).expect("floor 1");
+            let elevation = floor1.elevation;
+            *floor1 = WorldGrid::stone_room(w, d, s, room_material, room_material);
+            floor1.origin = origin;
+            floor1.elevation = elevation;
+            // Open the floor-1 floor at the hole cell.
+            if let Some(sector) = floor1.sector_mut(0, 0) {
+                sector.floor = None;
+            }
+        }
+
+        let (package, report) = build_package(&project, &starter_project_root());
+        assert!(report.is_ok(), "{report:?}");
+        let package = package.expect("package");
+        // Floor 1 cooks as its own room chunk(s) on top of the base.
+        assert!(
+            package.rooms.len() > baseline,
+            "the upper floor should add cooked rooms ({} vs {baseline})",
+            package.rooms.len()
+        );
+        // At least one cooked room sits above Y=0 (the stacked floor).
+        assert!(
+            package.rooms.iter().any(|room| room.origin_y > 0),
+            "an upper floor should cook at a stacked origin_y"
+        );
+        // The floors are auto-wired with vertical room links.
+        assert!(
+            package
+                .room_floor_links
+                .iter()
+                .any(|link| link.above_room.is_some() || link.below_room.is_some()),
+            "consecutive floors should be auto-linked"
+        );
+        // ...and with vertical portal quads (kind=1) so the portal
+        // clipper / portal view have geometry between the floors. Portals
+        // are emitted only at actual holes (floor-1 floor open AND floor-0
+        // ceiling open); we punched one at (0,0), so expect a reciprocal
+        // up/down pair there with ±Y normals.
+        let vertical: Vec<_> = package
+            .room_portals
+            .iter()
+            .filter(|p| p.kind == 1)
+            .collect();
+        assert!(
+            !vertical.is_empty(),
+            "stacked floors should emit vertical portal quads"
+        );
+        assert!(
+            vertical.iter().any(|p| p.normal == [0, 1, 0])
+                && vertical.iter().any(|p| p.normal == [0, -1, 0]),
+            "vertical portals should be reciprocal (both +Y and -Y normals): {vertical:?}"
+        );
+        // Each vertical portal is planar in Y (a horizontal quad at the
+        // boundary elevation).
+        for p in &vertical {
+            let y = p.vertices[0][1];
+            assert!(
+                p.vertices.iter().all(|v| v[1] == y),
+                "a vertical portal quad must be planar in Y: {:?}",
+                p.vertices
+            );
+        }
+    }
+
+    #[test]
+    fn entities_bind_to_their_explicit_floor() {
+        // Two-floor room; a spawn marker on each floor, distinguished by
+        // the explicit `SceneNode::floor` field (NOT by Y -- the authored
+        // standing height is a placement default and can't select a
+        // floor). The cook must bind each marker to the runtime room for
+        // its own floor (distinct origin_y).
+        let mut project = project_with_one_room();
+        let room_material = project
+            .resources
+            .iter()
+            .find(|resource| matches!(resource.data, ResourceData::Material(_)))
+            .map(|resource| resource.id);
+
+        let room_id = {
+            let scene = project.active_scene_mut();
+            let room_id = scene
+                .nodes()
+                .iter()
+                .find(|node| matches!(node.kind, NodeKind::Room { .. }))
+                .map(|node| node.id)
+                .expect("room node");
+            let node = scene.node_mut(room_id).expect("room node");
+            let NodeKind::Room { grid } = &mut node.kind else {
+                panic!("expected a room");
+            };
+            let (w, d, s, origin) = (grid.width, grid.depth, grid.sector_size, grid.origin);
+            grid.push_floor();
+            let floor1 = grid.floor_mut(1).expect("floor 1");
+            let elevation = floor1.elevation;
+            *floor1 = WorldGrid::stone_room(w, d, s, room_material, room_material);
+            floor1.origin = origin;
+            floor1.elevation = elevation;
+            room_id
+        };
+
+        // Two markers at the SAME transform; only the explicit floor
+        // differs. This proves binding is by `floor`, not Y.
+        let scene = project.active_scene_mut();
+        let ground = scene.add_node(
+            room_id,
+            "Ground Marker",
+            NodeKind::SpawnPoint {
+                player: false,
+                character: None,
+            },
+        );
+        let ground_node = scene.node_mut(ground).unwrap();
+        ground_node.transform.translation = [0.0, 0.0, 0.0];
+        ground_node.floor = 0;
+        let upper = scene.add_node(
+            room_id,
+            "Upper Marker",
+            NodeKind::SpawnPoint {
+                player: false,
+                character: None,
+            },
+        );
+        let upper_node = scene.node_mut(upper).unwrap();
+        upper_node.transform.translation = [0.0, 0.0, 0.0];
+        upper_node.floor = 1;
+
+        let (package, report) = build_package(&project, &starter_project_root());
+        assert!(report.is_ok(), "{report:?}");
+        let package = package.expect("package");
+
+        // Both markers cooked; each binds to a room whose origin_y matches
+        // its floor. The base marker -> origin_y 0; the upper -> origin_y > 0.
+        let origin_y_of = |room_index: u16| package.rooms[room_index as usize].origin_y;
+        let marker_origin_ys: Vec<i32> = package
+            .entities
+            .iter()
+            .filter(|e| matches!(e.kind, PlaytestEntityKind::Marker))
+            .map(|e| origin_y_of(e.room))
+            .collect();
+        assert!(
+            marker_origin_ys.contains(&0),
+            "the ground marker should bind to floor 0 (origin_y 0): {marker_origin_ys:?}"
+        );
+        assert!(
+            marker_origin_ys.iter().any(|y| *y > 0),
+            "the upper marker should bind to the stacked floor (origin_y > 0): {marker_origin_ys:?}"
+        );
+    }
+
+    #[test]
+    fn room_vertical_placement_flows_from_transform_into_origin_y() {
+        // Ground placement: a room left at the default transform Y
+        // cooks to origin_y == 0, preserving today's behaviour.
+        let project = project_with_one_room();
+        let (package, report) = build_package(&project, &starter_project_root());
+        assert!(report.is_ok(), "{report:?}");
+        let package = package.expect("package");
+        assert_eq!(package.rooms[0].origin_y, 0);
+
+        // Raised placement: authoring translation[1] = 2 sectors must
+        // cook to engine units (2 * sector_size). The cook reads the
+        // Room node transform, so the authored Y reaches the record
+        // even though the per-chunk grid does not carry elevation yet.
+        let mut project = project_with_one_room();
+        let scene = project.active_scene_mut();
+        let room_id = scene
+            .nodes()
+            .iter()
+            .find(|node| matches!(node.kind, NodeKind::Room { .. }))
+            .map(|node| node.id)
+            .expect("room node");
+        scene.node_mut(room_id).expect("room").transform.translation[1] = 2.0;
+        let (raised, report) = build_package(&project, &starter_project_root());
+        assert!(report.is_ok(), "{report:?}");
+        let raised = raised.expect("package");
+        // 2 authored sectors converted to engine units. Derived from
+        // the room's own sector_size so the test holds whatever the
+        // starter project uses.
+        assert_eq!(raised.rooms[0].origin_y, 2 * raised.rooms[0].sector_size);
+        assert!(raised.rooms[0].sector_size > 0);
     }
 
     #[test]
@@ -7666,6 +9154,42 @@ mod tests {
         assert_eq!(character.turn_speed_degrees_per_second, 270);
         assert_eq!(character.stamina_max_q12, 2048);
         assert_eq!(character.roll_speed, 144);
+    }
+
+    #[test]
+    fn world_physics_and_physics_body_drive_cooked_gravity() {
+        let mut project = project_with_one_room();
+        let world_id = project
+            .active_scene()
+            .nodes()
+            .iter()
+            .find(|node| matches!(node.kind, NodeKind::World { .. }))
+            .expect("starter has world")
+            .id;
+        if let Some(world) = project.active_scene_mut().node_mut(world_id) {
+            let NodeKind::World { physics, .. } = &mut world.kind else {
+                panic!("expected world");
+            };
+            physics.gravity_per_tick = 123;
+        }
+
+        let player = player_spawn_node_id(&project);
+        project.active_scene_mut().add_node(
+            player,
+            "Physics Body",
+            NodeKind::PhysicsBody {
+                settings: crate::PhysicsBodySettings { weight_q8: 384 },
+            },
+        );
+
+        let (package, report) = build_package(&project, &starter_project_root());
+        assert!(report.is_ok(), "errors: {:?}", report.errors);
+        let package = package.expect("package returned on ok report");
+        assert!(package
+            .rooms
+            .iter()
+            .all(|room| room.gravity_per_tick == 123));
+        assert_eq!(package.characters[0].weight_q8, 384);
     }
 
     #[test]
@@ -8761,6 +10285,7 @@ mod tests {
             room_index: 0,
             world_asset_index: 0,
             world_origin: [0, 0],
+            origin_y: 0,
             cooked: CookedWorldGrid {
                 width: 1,
                 depth: 1,
@@ -8840,6 +10365,7 @@ mod tests {
             room_index: 0,
             world_asset_index: 0,
             world_origin: [0, 0],
+            origin_y: 0,
             cooked: CookedWorldGrid {
                 width: 0,
                 depth: 0,
@@ -9755,6 +11281,7 @@ mod tests {
             .contains("pub static ROOM_CACHE_SURFACES: &[LevelCachedRoomSurfaceRecord] = &[\n];"));
         assert!(src.contains("pub static ROOM_RESIDENCY: &[RoomResidencyRecord] = &[\n];"));
         assert!(src.contains("pub static UI_NODES: &[LevelUiNodeRecord] = &[\n];"));
+        assert!(src.contains("pub static OPTIONS: &[LevelOptionDef] = &[\n];"));
         assert!(src.contains("pub static ENTITIES: &[EntityRecord] = &[\n];"));
         assert!(src.contains("pub static PLAYER_SPAWN"));
     }
