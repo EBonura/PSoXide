@@ -20,9 +20,8 @@ pub const MANIFEST_FILENAME: &str = "level_manifest.rs";
 /// Ignored cooked Rust-source manifest written by editor Play /
 /// `make cook-playtest`.
 pub const COOKED_MANIFEST_FILENAME: &str = "level_manifest.cooked.rs";
-/// Generated project-relative/absolute WAV list for CD-DA tracks. The
-/// editor-playtest disc builder converts these sources into mixed-mode audio
-/// tracks in list order (`track 2`, `track 3`, ...).
+/// Generated raw CD-DA payload list for mixed-mode playtest discs.
+/// Tracks are listed in disc order (`track 2`, `track 3`, ...).
 pub const CDDA_TRACKS_FILENAME: &str = "cdda_tracks.txt";
 
 /// Cooked WORLD.PAK room ordering hint consumed by disc builders.
@@ -50,6 +49,10 @@ pub const MODELS_DIRNAME: &str = "models";
 /// Subdirectory inside `generated/` that holds cooked UI SFX `.psau`
 /// blobs selected by button/slider cue pools.
 pub const UI_SFX_DIRNAME: &str = "ui_sfx";
+
+/// Subdirectory inside `generated/` that holds cooked raw CD-DA
+/// track payloads selected by menu music nodes.
+pub const CDDA_TRACKS_DIRNAME: &str = "cdda_tracks";
 
 /// Coarse asset class -- mirrors [`psx_level::AssetKind`] but
 /// stays host-side `String`/`Vec` friendly. Converted to the
@@ -738,6 +741,13 @@ pub struct PlaytestUiNode {
     pub sfx_first: u16,
     /// Number of SFX cues belonging to this node.
     pub sfx_count: u8,
+    /// Authored font choice index for text-bearing nodes. The manifest writer
+    /// compacts this into the runtime font-table selector.
+    pub font: u8,
+    /// Q8 font scale for text-bearing nodes (`256` = 1.0x).
+    pub font_scale: u16,
+    /// Extra signed screen pixels inserted between adjacent glyphs.
+    pub letter_spacing: i8,
 }
 
 /// One cooked UI SFX sample. Written to `generated/ui_sfx/` and
@@ -788,7 +798,7 @@ pub struct PlaytestCddaTrack {
     /// 1-based disc track number. Track 1 is the data track, so CD-DA starts
     /// at track 2.
     pub track: u8,
-    /// Source WAV path. Generated track-list files use this path verbatim.
+    /// Source WAV path used to cook the generated raw CD-DA payload.
     pub wav_path: String,
 }
 

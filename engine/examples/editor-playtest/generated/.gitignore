@@ -13,4 +13,5 @@ stream_chunks/*.psxc
 textures/*.psxt
 sky/*.psxt
 ui_sfx/*.psau
+cdda_tracks/*.cdda
 models/
