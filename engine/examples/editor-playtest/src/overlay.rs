@@ -137,6 +137,58 @@ pub(crate) fn draw_analog_required_prompt(font: &FontAtlas) {
     draw_centered_text(font, 134, "TO START PLAYTEST", (200, 220, 245));
 }
 
+pub(crate) fn draw_interaction_prompt(font: &FontAtlas, prompt: &str) {
+    const PAD_X: i16 = 10;
+    const BOX_Y: i16 = SCREEN_H - 34;
+    const BOX_H: i16 = 20;
+    let label_width = font.text_width(prompt) as i16;
+    let box_w = (label_width + PAD_X * 2).clamp(72, SCREEN_W - 32);
+    let box_x = (SCREEN_W - box_w) / 2;
+    draw_rect(box_x, BOX_Y, box_w, BOX_H, (18, 24, 34));
+    draw_rect(box_x, BOX_Y, box_w, 1, (96, 154, 134));
+    font.draw_text(
+        box_x + (box_w - label_width) / 2,
+        BOX_Y + 6,
+        prompt,
+        (205, 248, 226),
+    );
+}
+
+pub(crate) fn draw_interactable_message(font: &FontAtlas, title: &str, body: &str) {
+    const BOX_X: i16 = 26;
+    const BOX_Y: i16 = 150;
+    const BOX_W: i16 = SCREEN_W - BOX_X * 2;
+    const BOX_H: i16 = 72;
+    draw_quad_flat(
+        [
+            (BOX_X, BOX_Y),
+            (BOX_X + BOX_W, BOX_Y),
+            (BOX_X, BOX_Y + BOX_H),
+            (BOX_X + BOX_W, BOX_Y + BOX_H),
+        ],
+        8,
+        11,
+        18,
+    );
+    draw_rect(BOX_X, BOX_Y, BOX_W, 1, (120, 180, 156));
+    draw_rect(BOX_X, BOX_Y + BOX_H - 1, BOX_W, 1, (54, 84, 76));
+    font.draw_text(BOX_X + 10, BOX_Y + 10, title, (222, 255, 238));
+
+    let mut line_y = BOX_Y + 28;
+    let mut lines = 0u8;
+    for line in body.split('\n') {
+        if lines >= 4 {
+            break;
+        }
+        if !line.is_empty() {
+            font.draw_text(BOX_X + 10, line_y, line, (190, 218, 206));
+        }
+        line_y += 10;
+        lines += 1;
+    }
+    draw_centered_text(font, BOX_Y + BOX_H - 12, "CROSS / CIRCLE", (126, 154, 148));
+}
+
 pub(crate) fn draw_centered_text(font: &FontAtlas, y: i16, text: &str, tint: (u8, u8, u8)) {
     let width = font.text_width(text) as i16;
     let x = (SCREEN_W - width) / 2;

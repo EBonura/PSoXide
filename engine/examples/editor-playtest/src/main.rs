@@ -91,12 +91,12 @@ use psx_level::{
     box_prop_flags, character_action_flags, equipment_flags, far_vista_flags, find_asset_of_kind,
     image_prop_flags, model_clip_flags, particle_emitter_flags, room_flags, sky_flags,
     visibility_cell_flags, AssetId, AssetKind, CharacterAnimationAction, EntityRecord,
-    LevelBoxPropRecord, LevelCameraRecord, LevelCharacterRecord, LevelChunkRecord,
-    LevelFarVistaRecord, LevelImagePropRecord, LevelMaterialRecord, LevelMaterialSidedness,
-    LevelModelFrameBoundsRecord, LevelModelRecord, LevelModelSocketRecord, LevelRoomRecord,
-    LevelSkyRecord, ModelClipIndex, ModelClipTableIndex, ModelIndex, ModelSocketIndex,
-    OptionalModelClipIndex, ParticleEmitterRecord, ResidencyManager, RoomIndex, RuntimeDebugMask,
-    WeaponHitShapeRecord, CHARACTER_ANIMATION_ACTION_COUNT,
+    InteractableKind, InteractableRecord, LevelBoxPropRecord, LevelCameraRecord,
+    LevelCharacterRecord, LevelChunkRecord, LevelFarVistaRecord, LevelImagePropRecord,
+    LevelMaterialRecord, LevelMaterialSidedness, LevelModelFrameBoundsRecord, LevelModelRecord,
+    LevelModelSocketRecord, LevelRoomRecord, LevelSkyRecord, ModelClipIndex, ModelClipTableIndex,
+    ModelIndex, ModelSocketIndex, OptionalModelClipIndex, ParticleEmitterRecord, ResidencyManager,
+    RoomIndex, RuntimeDebugMask, WeaponHitShapeRecord, CHARACTER_ANIMATION_ACTION_COUNT,
 };
 #[cfg(feature = "cd-stream-bench")]
 use psx_level::{
@@ -128,12 +128,12 @@ mod generated {
 use generated::{
     ASSETS, BOX_PROPS, CACHED_ROOM_DEPTH_MODE, CACHED_ROOM_DRAW_ORDER_MODE,
     CACHED_ROOM_TEXTURE_SPLIT_MAX_EDGE, CACHED_ROOM_TEXTURE_SPLIT_MODE, CHARACTERS, ENTITIES,
-    EQUIPMENT, IMAGE_PROPS, LIGHTS, MATERIALS, MODELS, MODEL_CLIPS, MODEL_CLIP_BOUNDS,
-    MODEL_FRAME_BOUNDS, MODEL_INSTANCES, MODEL_SOCKETS, PARTICLE_EMITTERS, PLAYER_CONTROLLER,
-    PLAYER_SPAWN, ROOMS, ROOM_CACHE_CELLS, ROOM_CACHE_CELL_VERTICES, ROOM_CACHE_SURFACES,
-    ROOM_CACHE_VERTICES, ROOM_CHUNKS, ROOM_PORTALS, ROOM_RESIDENCY, ROOM_SURFACE_CACHES,
-    ROOM_VISIBILITY, UI_FONTS, UI_NODES, UI_PAINTS, UI_SFX_CUES, UI_SFX_SAMPLES,
-    VISIBILITY_CELLS, WEAPONS, WEAPON_HITBOXES,
+    EQUIPMENT, IMAGE_PROPS, INTERACTABLES, INTERACTABLE_MESSAGES, LIGHTS, MATERIALS, MODELS,
+    MODEL_CLIPS, MODEL_CLIP_BOUNDS, MODEL_FRAME_BOUNDS, MODEL_INSTANCES, MODEL_SOCKETS,
+    PARTICLE_EMITTERS, PLAYER_CONTROLLER, PLAYER_SPAWN, ROOMS, ROOM_CACHE_CELLS,
+    ROOM_CACHE_CELL_VERTICES, ROOM_CACHE_SURFACES, ROOM_CACHE_VERTICES, ROOM_CHUNKS, ROOM_PORTALS,
+    ROOM_RESIDENCY, ROOM_SURFACE_CACHES, ROOM_VISIBILITY, UI_FONTS, UI_NODES, UI_PAINTS,
+    UI_SFX_CUES, UI_SFX_SAMPLES, VISIBILITY_CELLS, WEAPONS, WEAPON_HITBOXES,
 };
 use generated::{GAME_FLOW, OPTIONS, UI_SCENES};
 #[cfg(all(
@@ -350,6 +350,7 @@ const PLAYER_SPEED_SCALE_NUM: i32 = 3;
 const PLAYER_SPEED_SCALE_DEN: i32 = 4;
 const EVADE_RUN_BUTTON: u16 = button::CIRCLE;
 const EVADE_RUN_HOLD_VBLANKS: u8 = 8;
+const INTERACT_BUTTON: u16 = button::CROSS;
 const LIGHT_ATTACK_BUTTON: u16 = button::R1;
 const HEAVY_ATTACK_BUTTON: u16 = button::R2;
 
@@ -1506,6 +1507,7 @@ const BOX_PROP_BROKEN_WORDS: usize = (MAX_BOX_PROP_STATE + 31) / 32;
 const MAX_BOX_PROP_BREAK_EVENTS: usize = 16;
 const BOX_PROP_BREAK_FRAMES: u8 = 24;
 const BOX_PROP_BREAK_MOTION_FRAMES: u8 = 20;
+const BOX_PROP_BREAK_SHARD_COUNT: usize = 8;
 const BOX_PROP_BREAK_ATTACK_REACH: i32 = 768;
 const BOX_PROP_BREAK_ATTACK_WIDTH: i32 = 320;
 const BOX_PROP_FACE_NORMAL_SHIFT: u32 = 10;
@@ -1619,7 +1621,7 @@ static mut MODEL_ATLAS_COUNT: usize = 0;
 const VRAM_UPLOAD_QUEUE_CAP: usize = 8;
 const VRAM_UPLOAD_ROWS_PER_BACKGROUND_TICK: u16 = 8;
 const UI_TEXTURE_UPLOAD_ROW_BUDGET: u16 = ROOM_TILE_TEXELS;
-const UI_TEXTURE_UPLOAD_MAX_STEPS: u8 = 4;
+const UI_TEXTURE_UPLOAD_MAX_STEPS: u8 = 8;
 const ROOM_WINDOW_BACKGROUND_TICK_MASK: u32 = 1;
 
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -1882,6 +1884,20 @@ const fn player_anim_is_attack(anim: PlayerAnim) -> bool {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+struct RuntimeCheckpoint {
+    room: RoomIndex,
+    position: RoomPoint,
+    yaw: Angle,
+    checkpoint_id: &'static str,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+struct RuntimeMessageOverlay {
+    title: &'static str,
+    body: &'static str,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 struct BoxPropBreakEvent {
     prop_index: u16,
     age: u8,
@@ -1914,6 +1930,29 @@ struct BoxPropBreakShard {
     impulse_per_frame: u8,
     twist_q8_per_frame: i8,
     delay: u8,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+struct BoxPropBreakShardRuntime {
+    face: u8,
+    base_quad: [WorldVertex; 4],
+    center: WorldVertex,
+    edge_u: [i32; 3],
+    edge_v: [i32; 3],
+    face_delta: [i32; 3],
+    colors: [(u8, u8, u8); 4],
+}
+
+impl BoxPropBreakShardRuntime {
+    const EMPTY: Self = Self {
+        face: 0,
+        base_quad: [WorldVertex::ZERO; 4],
+        center: WorldVertex::ZERO,
+        edge_u: [0; 3],
+        edge_v: [0; 3],
+        face_delta: [0; 3],
+        colors: [(0, 0, 0); 4],
+    };
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -1966,6 +2005,7 @@ impl BoxPropFaceRuntime {
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 struct BoxPropRuntime {
     faces: [BoxPropFaceRuntime; psx_level::BOX_PROP_FACE_COUNT],
+    break_shards: [BoxPropBreakShardRuntime; BOX_PROP_BREAK_SHARD_COUNT],
     cull_center: WorldVertex,
     cull_radius: i32,
     floor_y: i32,
@@ -1977,6 +2017,7 @@ struct BoxPropRuntime {
 impl BoxPropRuntime {
     const EMPTY: Self = Self {
         faces: [BoxPropFaceRuntime::EMPTY; psx_level::BOX_PROP_FACE_COUNT],
+        break_shards: [BoxPropBreakShardRuntime::EMPTY; BOX_PROP_BREAK_SHARD_COUNT],
         cull_center: WorldVertex::ZERO,
         cull_radius: 32,
         floor_y: 0,
@@ -3417,6 +3458,14 @@ struct Playtest {
     /// manual camera input until the player leaves target range.
     soft_lock_target: Option<usize>,
     soft_lock_suppressed: bool,
+    /// Nearest authored interactable currently in range.
+    active_interactable: Option<usize>,
+    /// Last synchronized in-memory checkpoint. Future death/respawn
+    /// code restores from this; it is intentionally not persisted to
+    /// memory card yet.
+    checkpoint: Option<RuntimeCheckpoint>,
+    /// Simple modal message overlay opened by an interactable.
+    message_overlay: Option<RuntimeMessageOverlay>,
     /// Spawn position retained for orbit-mode targeting.
     spawn: RoomPoint,
     /// Runtime UI font atlases, compacted from the cooked manifest's used fonts.
@@ -3529,6 +3578,9 @@ impl Playtest {
             lock_switch_stick_held: false,
             soft_lock_target: None,
             soft_lock_suppressed: false,
+            active_interactable: None,
+            checkpoint: None,
+            message_overlay: None,
             spawn: RoomPoint::ZERO,
             ui_fonts: [const { None }; MAX_RUNTIME_UI_FONTS],
             models: [const { None }; MAX_RUNTIME_MODELS],
@@ -3683,6 +3735,9 @@ impl Scene for Playtest {
         self.anim_state = PlayerAnim::Idle;
         self.anim_start_tick = SimTick::ZERO;
         self.anim_lock_until_tick = SimTick::ZERO;
+        self.active_interactable = None;
+        self.checkpoint = None;
+        self.message_overlay = None;
         self.box_prop_broken = [0; BOX_PROP_BROKEN_WORDS];
         self.box_prop_break_events = [BoxPropBreakEvent::EMPTY; MAX_BOX_PROP_BREAK_EVENTS];
         self.camera.snap_to_player_with_yaw(
@@ -3750,6 +3805,14 @@ impl Scene for Playtest {
             self.show_collision_debug = !self.show_collision_debug;
         }
 
+        if self.message_overlay.is_some() {
+            if ctx.just_pressed(INTERACT_BUTTON) || ctx.just_pressed(button::CIRCLE) {
+                self.message_overlay = None;
+            }
+            self.camera_turning_last_tick = false;
+            return;
+        }
+
         if !ctx.pad.is_analog() {
             self.camera_turning_last_tick = false;
             return;
@@ -3795,15 +3858,32 @@ impl Scene for Playtest {
                 self.orbit_radius = (self.orbit_radius + button_radius_step).min(CAMERA_RADIUS_MAX);
             }
             self.player_moved_last_tick = false;
+            self.active_interactable = None;
             telemetry::stage_begin(telemetry::stage::CAMERA);
             self.render_camera = self.free_orbit_camera();
             telemetry::stage_end(telemetry::stage::CAMERA);
             self.refresh_active_room_window_if_needed();
+            #[cfg(all(
+                feature = "world-grid-visible",
+                not(feature = "vis-full-active-chunks")
+            ))]
+            self.prewarm_visible_cell_caches();
             return;
         }
 
         let now = ctx.sim_tick;
         let action_locked = self.anim_lock_until_tick > now;
+        self.refresh_active_interactable();
+        if !action_locked {
+            if let Some(index) = self.active_interactable {
+                if ctx.just_pressed(INTERACT_BUTTON) && self.activate_interactable(index) {
+                    self.evade_run_hold_ticks = 0;
+                    self.evade_run_hold_consumed = false;
+                    self.camera_turning_last_tick = false;
+                    return;
+                }
+            }
+        }
         let circle = self.update_evade_run_button(ctx, delta_vblanks);
         let mut input = if action_locked {
             CharacterMotorInput::default()
@@ -3921,6 +4001,11 @@ impl Scene for Playtest {
         self.render_camera = self.update_follow_camera(ctx);
         telemetry::stage_end(telemetry::stage::CAMERA);
         self.refresh_active_room_window_if_needed();
+        #[cfg(all(
+            feature = "world-grid-visible",
+            not(feature = "vis-full-active-chunks")
+        ))]
+        self.prewarm_visible_cell_caches();
     }
 
     fn render(&mut self, ctx: &mut Ctx) {
@@ -4778,6 +4863,16 @@ impl Scene for Playtest {
                 self.motor_config().stamina_max_q12,
             );
         }
+
+        if let Some(font) = self.ui_fonts[0].as_ref() {
+            if let Some(message) = self.message_overlay {
+                draw_interactable_message(font, message.title, message.body);
+            } else if let Some(index) = self.active_interactable {
+                if let Some(interactable) = INTERACTABLES.get(index) {
+                    draw_interaction_prompt(font, interactable.prompt);
+                }
+            }
+        }
     }
 }
 
@@ -4795,6 +4890,20 @@ fn hud_scene_range() -> (usize, usize) {
         i += 1;
     }
     (0, UI_NODES.len())
+}
+
+fn interactable_is_active(interactable: &InteractableRecord) -> bool {
+    (interactable.flags & psx_level::interactable_flags::ENABLED) != 0
+}
+
+fn interactable_message_text(interactable: &InteractableRecord) -> (&'static str, &'static str) {
+    INTERACTABLE_MESSAGES
+        .get(interactable.message as usize)
+        .map(|message| (message.title, message.body))
+        .unwrap_or(match interactable.kind {
+            InteractableKind::Message => ("ECHO REMNANT", ""),
+            InteractableKind::Checkpoint => ("SYNC RELAY", "Relay synchronized."),
+        })
 }
 
 #[cfg(all(
@@ -5438,6 +5547,11 @@ impl Playtest {
         } else {
             self.refresh_active_room_window_if_needed();
         }
+        #[cfg(all(
+            feature = "world-grid-visible",
+            not(feature = "vis-full-active-chunks")
+        ))]
+        self.prewarm_visible_cell_caches();
     }
 
     fn update_follow_camera(&mut self, ctx: &Ctx) -> WorldCamera {
@@ -6539,6 +6653,7 @@ impl Playtest {
         self.lock_target = None;
         self.lock_switch_stick_held = false;
         self.soft_lock_target = None;
+        self.active_interactable = None;
         let camera_after = RoomPoint::new(
             self.render_camera.position.x,
             self.render_camera.position.y,
@@ -6643,6 +6758,59 @@ impl Playtest {
             return None;
         }
         Some(RoomPoint::new(target.x, target.y, target.z))
+    }
+
+    fn refresh_active_interactable(&mut self) {
+        self.active_interactable = self.find_best_interactable();
+    }
+
+    fn find_best_interactable(&self) -> Option<usize> {
+        let player = self.motor.position();
+        let mut best = None;
+        let mut best_distance = i32::MAX;
+        for (index, interactable) in INTERACTABLES.iter().enumerate() {
+            if !interactable_is_active(interactable) || interactable.room != self.room_index {
+                continue;
+            }
+            let target = RoomPoint::new(interactable.x, interactable.y, interactable.z);
+            let distance = distance_xz_sq(player, target);
+            let radius_sq = square_i32_saturating(interactable.radius as i32);
+            if distance <= radius_sq && distance < best_distance {
+                best = Some(index);
+                best_distance = distance;
+            }
+        }
+        best
+    }
+
+    fn activate_interactable(&mut self, index: usize) -> bool {
+        let Some(interactable) = INTERACTABLES.get(index) else {
+            return false;
+        };
+        if !interactable_is_active(interactable) {
+            return false;
+        }
+        match interactable.kind {
+            InteractableKind::Message => {
+                self.open_interactable_message(interactable);
+                true
+            }
+            InteractableKind::Checkpoint => {
+                self.checkpoint = Some(RuntimeCheckpoint {
+                    room: self.room_index,
+                    position: self.motor.position(),
+                    yaw: self.motor.yaw(),
+                    checkpoint_id: interactable.checkpoint_id,
+                });
+                self.open_interactable_message(interactable);
+                true
+            }
+        }
+    }
+
+    fn open_interactable_message(&mut self, interactable: &InteractableRecord) {
+        let (title, body) = interactable_message_text(interactable);
+        self.message_overlay = Some(RuntimeMessageOverlay { title, body });
     }
 
     fn lock_target_indicator_position(&self) -> Option<RoomPoint> {
@@ -7524,13 +7692,10 @@ fn draw_sky_panorama(
         let v1 = sky_uv_for_step(row + 1, rows, SKY_PANORAMA_HEIGHT);
         let clut_word = sky_panorama_clut_word(sky_panorama_clut_band_for_row(row, rows));
         for column in 0..columns {
-            let material = TextureMaterial::opaque(
-                clut_word,
-                column_tpage_word[column],
-                (0x80, 0x80, 0x80),
-            )
-            .with_raw_texture(true)
-            .with_dither(true);
+            let material =
+                TextureMaterial::opaque(clut_word, column_tpage_word[column], (0x80, 0x80, 0x80))
+                    .with_raw_texture(true)
+                    .with_dither(true);
             let Some(p0) = projected_grid[row_base + column] else {
                 continue;
             };
@@ -7568,10 +7733,26 @@ fn draw_sky_panorama(
 }
 
 fn sky_quad_outside_screen(points: [(i16, i16); 4]) -> bool {
-    let min_x = points[0].0.min(points[1].0).min(points[2].0).min(points[3].0);
-    let max_x = points[0].0.max(points[1].0).max(points[2].0).max(points[3].0);
-    let min_y = points[0].1.min(points[1].1).min(points[2].1).min(points[3].1);
-    let max_y = points[0].1.max(points[1].1).max(points[2].1).max(points[3].1);
+    let min_x = points[0]
+        .0
+        .min(points[1].0)
+        .min(points[2].0)
+        .min(points[3].0);
+    let max_x = points[0]
+        .0
+        .max(points[1].0)
+        .max(points[2].0)
+        .max(points[3].0);
+    let min_y = points[0]
+        .1
+        .min(points[1].1)
+        .min(points[2].1)
+        .min(points[3].1);
+    let max_y = points[0]
+        .1
+        .max(points[1].1)
+        .max(points[2].1)
+        .max(points[3].1);
     max_x < 0 || min_x >= SCREEN_W || max_y < 0 || min_y >= SCREEN_H
 }
 
@@ -8148,6 +8329,59 @@ impl Playtest {
         self.visible_cell_cache_cursor = 0;
     }
 
+    fn prewarm_visible_cell_caches(&mut self) {
+        if self.current_collision_room.is_none() {
+            return;
+        }
+        let camera = self.render_camera;
+        let active_draw_order = active_room_draw_order(
+            &self.active_rooms,
+            camera,
+            &self.portal_visibility,
+            self.room_index,
+            cached_room_draw_order_mode(),
+        );
+        let player = self.motor.position();
+        let global_visibility_anchor = player;
+
+        telemetry::stage_begin(telemetry::stage::ROOM_VISIBLE_LIST);
+        for &active_slot in &active_draw_order {
+            if active_slot == INVALID_ACTIVE_ROOM_SLOT {
+                continue;
+            }
+            let active_slot = active_slot as usize;
+            let Some(active) = self.active_rooms[active_slot] else {
+                continue;
+            };
+            if !self.portal_visibility_draws_room(active.index) {
+                continue;
+            }
+            let visibility_anchor = RoomPoint::new(
+                global_visibility_anchor.x.saturating_sub(active.offset_x),
+                player.y,
+                global_visibility_anchor.z.saturating_sub(active.offset_z),
+            );
+            let room_camera = camera_for_room(camera, active);
+            let _ = self.cached_precomputed_visible_cells(
+                active_slot,
+                active.index,
+                active.width,
+                active.depth,
+                active.sector_size,
+                visibility_anchor,
+                active.offset_x,
+                active.offset_z,
+                global_visibility_anchor,
+                room_camera,
+                ROOM_VISIBLE_CELL_STATIONARY_CANDIDATES
+                    && !self.player_moved_last_tick
+                    && self.camera_turning_last_tick
+                    && active.surface_cache.ready,
+            );
+        }
+        telemetry::stage_end(telemetry::stage::ROOM_VISIBLE_LIST);
+    }
+
     fn cached_precomputed_visible_cells(
         &mut self,
         active_slot: usize,
@@ -8184,8 +8418,9 @@ impl Playtest {
                 .map(|cells| (cells, cache.rejected_global));
         }
 
+        let required_cells = room_visibility_candidate_count(room_index)?;
         let mut first = self.visible_cell_cache_cursor;
-        if MAX_ACTIVE_VISIBLE_CELLS.saturating_sub(first) < MAX_PRECOMPUTED_VISIBLE_CELLS {
+        if MAX_ACTIVE_VISIBLE_CELLS.saturating_sub(first) < required_cells {
             self.clear_visible_cell_caches();
             first = 0;
         }
@@ -8249,6 +8484,17 @@ impl Playtest {
             .get(first..self.visible_cell_cache_cursor)
             .map(|cells| (cells, rejected_global))
     }
+}
+
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
+fn room_visibility_candidate_count(room_index: RoomIndex) -> Option<usize> {
+    ROOM_VISIBILITY
+        .iter()
+        .find(|visibility| visibility.room == room_index)
+        .map(|visibility| visibility.cell_count as usize)
 }
 
 #[cfg(all(
@@ -10317,7 +10563,15 @@ fn ensure_ui_texture_uploaded(asset_id: AssetId, asset_bytes: &'static [u8]) -> 
         return Some(slot);
     }
 
-    let _ = ensure_texture_uploaded_with_clut_mode(asset_id, asset_bytes, clut_mode);
+    let use_large_ui_upload = texture.width() > ROOM_TILE_TEXELS
+        || texture.height() > ROOM_TILE_TEXELS
+        || room_texture_window_size(texture.width()).is_none()
+        || room_texture_window_size(texture.height()).is_none();
+    let _ = if use_large_ui_upload {
+        ensure_large_ui_texture_uploaded_with_clut_mode(asset_id, asset_bytes, clut_mode)
+    } else {
+        ensure_texture_uploaded_with_clut_mode(asset_id, asset_bytes, clut_mode)
+    };
     let mut steps = 0u8;
     while pending_vram_upload(asset_id, clut_mode) && steps < UI_TEXTURE_UPLOAD_MAX_STEPS {
         unsafe {
@@ -10327,6 +10581,107 @@ fn ensure_ui_texture_uploaded(asset_id: AssetId, asset_bytes: &'static [u8]) -> 
     }
 
     find_vram_slot(asset_id, clut_mode)
+}
+
+fn ensure_large_ui_texture_uploaded_with_clut_mode(
+    asset_id: AssetId,
+    asset_bytes: &'static [u8],
+    clut_mode: VramSlotClutMode,
+) -> Option<VramSlot> {
+    if let Some(slot) = find_vram_slot(asset_id, clut_mode) {
+        return Some(slot);
+    }
+    if pending_vram_upload(asset_id, clut_mode) {
+        return None;
+    }
+    if pending_room_texture_upload(asset_id) {
+        return None;
+    }
+    unsafe {
+        if !VRAM_UPLOAD_QUEUE.has_free_slot() {
+            return None;
+        }
+    }
+
+    let texture = Texture::from_bytes(asset_bytes).ok()?;
+    if texture.clut_entries() != 16
+        || texture.width() == 0
+        || texture.width() > 256
+        || texture.height() == 0
+        || texture.height() > 256
+    {
+        return None;
+    }
+    let texture_width_halfwords = texture.halfwords_per_row();
+    if texture_width_halfwords > ROOM_TPAGE_STRIDE_HW {
+        return None;
+    }
+    let expected_pixel_bytes = usize::from(texture_width_halfwords)
+        .saturating_mul(usize::from(texture.height()))
+        .saturating_mul(2);
+    if texture.pixel_bytes().len() != expected_pixel_bytes {
+        return None;
+    }
+
+    let count = unsafe { VRAM_SLOT_COUNT };
+    let room_count = unsafe { ROOM_TEXTURE_COUNT };
+    if count >= MAX_RESIDENT_VRAM_ASSETS {
+        return None;
+    }
+    let room_index = u16::try_from(room_count).ok()?;
+    let clut_x = ROOM_CLUT_BASE_X.checked_add(room_index.checked_mul(ROOM_CLUT_STRIDE)?)?;
+    if clut_x.checked_add(texture.clut_entries())? > 1024 {
+        return None;
+    }
+    let page_index = unsafe { ROOM_TEXTURE_ALLOCATOR.reserve_empty_page()? };
+    let page_index = u16::try_from(page_index).ok()?;
+    let tpage_x = ROOM_TPAGE_BASE_X.checked_add(page_index.checked_mul(ROOM_TPAGE_STRIDE_HW)?)?;
+    let end_x = tpage_x.checked_add(ROOM_TPAGE_STRIDE_HW)?;
+    if tpage_x % 64 != 0 || end_x > ROOM_TPAGE_LIMIT_X {
+        return None;
+    }
+    let tpage = Tpage::new(tpage_x, SHARED_TPAGE.y(), TexDepth::Bit4);
+    let clut = Clut::new(clut_x, ROOM_CLUT_Y);
+    let slot = VramSlot {
+        asset: asset_id,
+        clut_mode,
+        ready: false,
+        clut_word: clut.uv_clut_word(),
+        tpage_word: tpage.uv_tpage_word(0),
+        texture_window: TextureWindow::NONE,
+        texture_width: texture.width(),
+        texture_height: texture.height(),
+    };
+
+    unsafe {
+        VRAM_SLOTS[count] = Some(slot);
+        VRAM_SLOT_COUNT = count + 1;
+        ROOM_TEXTURE_COUNT = room_count + 1;
+        if !VRAM_UPLOAD_QUEUE.push(VramUploadJob {
+            active: true,
+            slot_index: count as u16,
+            asset: asset_id,
+            clut_mode,
+            kind: VramUploadKind::TextureAndClut,
+            bytes: Some(asset_bytes),
+            texture_x: tpage_x,
+            texture_y: SHARED_TPAGE.y(),
+            texture_width_halfwords,
+            texture_height_rows: texture.height(),
+            next_texture_row: 0,
+            clut_x,
+            clut_y: ROOM_CLUT_Y,
+            clut_entries: texture.clut_entries(),
+            clut_uploaded: false,
+        }) {
+            VRAM_SLOTS[count] = None;
+            VRAM_SLOT_COUNT = count;
+            ROOM_TEXTURE_COUNT = room_count;
+            return None;
+        }
+    }
+
+    None
 }
 
 fn ensure_texture_uploaded_with_clut_mode(
@@ -11467,7 +11822,7 @@ const BOX_PROP_FACE_VERTEX_INDICES: [[usize; 4]; psx_level::BOX_PROP_FACE_COUNT]
     [0, 1, 2, 3],
 ];
 
-const BOX_PROP_BREAK_SHARDS: [BoxPropBreakShard; 20] = [
+const BOX_PROP_BREAK_SHARDS: [BoxPropBreakShard; BOX_PROP_BREAK_SHARD_COUNT] = [
     BoxPropBreakShard {
         face: 0,
         u0_q8: 0,
@@ -11479,18 +11834,6 @@ const BOX_PROP_BREAK_SHARDS: [BoxPropBreakShard; 20] = [
         impulse_per_frame: 34,
         twist_q8_per_frame: -4,
         delay: 0,
-    },
-    BoxPropBreakShard {
-        face: 0,
-        u0_q8: 84,
-        v0_q8: 0,
-        u1_q8: 172,
-        v1_q8: 256,
-        drift_q8_per_frame: 1,
-        lift_per_frame: 36,
-        impulse_per_frame: 40,
-        twist_q8_per_frame: 5,
-        delay: 1,
     },
     BoxPropBreakShard {
         face: 0,
@@ -11518,18 +11861,6 @@ const BOX_PROP_BREAK_SHARDS: [BoxPropBreakShard; 20] = [
     },
     BoxPropBreakShard {
         face: 1,
-        u0_q8: 86,
-        v0_q8: 0,
-        u1_q8: 170,
-        v1_q8: 256,
-        drift_q8_per_frame: 2,
-        lift_per_frame: 38,
-        impulse_per_frame: 42,
-        twist_q8_per_frame: -4,
-        delay: 1,
-    },
-    BoxPropBreakShard {
-        face: 1,
         u0_q8: 170,
         v0_q8: 0,
         u1_q8: 256,
@@ -11553,42 +11884,6 @@ const BOX_PROP_BREAK_SHARDS: [BoxPropBreakShard; 20] = [
         delay: 0,
     },
     BoxPropBreakShard {
-        face: 2,
-        u0_q8: 84,
-        v0_q8: 0,
-        u1_q8: 172,
-        v1_q8: 256,
-        drift_q8_per_frame: -1,
-        lift_per_frame: 34,
-        impulse_per_frame: 38,
-        twist_q8_per_frame: -5,
-        delay: 2,
-    },
-    BoxPropBreakShard {
-        face: 2,
-        u0_q8: 172,
-        v0_q8: 0,
-        u1_q8: 256,
-        v1_q8: 256,
-        drift_q8_per_frame: 3,
-        lift_per_frame: 28,
-        impulse_per_frame: 35,
-        twist_q8_per_frame: 7,
-        delay: 1,
-    },
-    BoxPropBreakShard {
-        face: 3,
-        u0_q8: 0,
-        v0_q8: 0,
-        u1_q8: 86,
-        v1_q8: 256,
-        drift_q8_per_frame: -4,
-        lift_per_frame: 32,
-        impulse_per_frame: 34,
-        twist_q8_per_frame: -6,
-        delay: 1,
-    },
-    BoxPropBreakShard {
         face: 3,
         u0_q8: 86,
         v0_q8: 0,
@@ -11599,18 +11894,6 @@ const BOX_PROP_BREAK_SHARDS: [BoxPropBreakShard; 20] = [
         impulse_per_frame: 41,
         twist_q8_per_frame: 4,
         delay: 0,
-    },
-    BoxPropBreakShard {
-        face: 3,
-        u0_q8: 170,
-        v0_q8: 0,
-        u1_q8: 256,
-        v1_q8: 256,
-        drift_q8_per_frame: 4,
-        lift_per_frame: 25,
-        impulse_per_frame: 33,
-        twist_q8_per_frame: -5,
-        delay: 2,
     },
     BoxPropBreakShard {
         face: 4,
@@ -11627,30 +11910,6 @@ const BOX_PROP_BREAK_SHARDS: [BoxPropBreakShard; 20] = [
     BoxPropBreakShard {
         face: 4,
         u0_q8: 128,
-        v0_q8: 0,
-        u1_q8: 256,
-        v1_q8: 128,
-        drift_q8_per_frame: 4,
-        lift_per_frame: 44,
-        impulse_per_frame: 28,
-        twist_q8_per_frame: -5,
-        delay: 1,
-    },
-    BoxPropBreakShard {
-        face: 4,
-        u0_q8: 0,
-        v0_q8: 128,
-        u1_q8: 128,
-        v1_q8: 256,
-        drift_q8_per_frame: -5,
-        lift_per_frame: 42,
-        impulse_per_frame: 24,
-        twist_q8_per_frame: -4,
-        delay: 2,
-    },
-    BoxPropBreakShard {
-        face: 4,
-        u0_q8: 128,
         v0_q8: 128,
         u1_q8: 256,
         v1_q8: 256,
@@ -11659,54 +11918,6 @@ const BOX_PROP_BREAK_SHARDS: [BoxPropBreakShard; 20] = [
         impulse_per_frame: 30,
         twist_q8_per_frame: 6,
         delay: 0,
-    },
-    BoxPropBreakShard {
-        face: 5,
-        u0_q8: 0,
-        v0_q8: 0,
-        u1_q8: 128,
-        v1_q8: 128,
-        drift_q8_per_frame: -2,
-        lift_per_frame: 16,
-        impulse_per_frame: 24,
-        twist_q8_per_frame: -4,
-        delay: 3,
-    },
-    BoxPropBreakShard {
-        face: 5,
-        u0_q8: 128,
-        v0_q8: 0,
-        u1_q8: 256,
-        v1_q8: 128,
-        drift_q8_per_frame: 3,
-        lift_per_frame: 14,
-        impulse_per_frame: 22,
-        twist_q8_per_frame: 4,
-        delay: 4,
-    },
-    BoxPropBreakShard {
-        face: 5,
-        u0_q8: 0,
-        v0_q8: 128,
-        u1_q8: 128,
-        v1_q8: 256,
-        drift_q8_per_frame: -4,
-        lift_per_frame: 12,
-        impulse_per_frame: 20,
-        twist_q8_per_frame: 3,
-        delay: 4,
-    },
-    BoxPropBreakShard {
-        face: 5,
-        u0_q8: 128,
-        v0_q8: 128,
-        u1_q8: 256,
-        v1_q8: 256,
-        drift_q8_per_frame: 4,
-        lift_per_frame: 18,
-        impulse_per_frame: 25,
-        twist_q8_per_frame: -3,
-        delay: 3,
     },
 ];
 
@@ -12205,10 +12416,8 @@ fn draw_box_prop_break_events<T>(
         };
         let face_textures = box_prop_face_textures(prop);
         draw_box_prop_break_shards(
-            prop,
             &face_textures,
-            &box_runtime.faces,
-            box_runtime.cull_center,
+            &box_runtime.break_shards,
             *event,
             loaded_projector,
             camera,
@@ -12221,10 +12430,8 @@ fn draw_box_prop_break_events<T>(
 }
 
 fn draw_box_prop_break_shards<T>(
-    prop: &LevelBoxPropRecord,
     face_textures: &[Option<BoxPropFaceTextureRuntime>; psx_level::BOX_PROP_FACE_COUNT],
-    faces: &[BoxPropFaceRuntime; psx_level::BOX_PROP_FACE_COUNT],
-    box_center: WorldVertex,
+    shard_runtimes: &[BoxPropBreakShardRuntime; BOX_PROP_BREAK_SHARD_COUNT],
     event: BoxPropBreakEvent,
     projector: LoadedWorldCameraGte,
     camera: &WorldCamera,
@@ -12241,16 +12448,14 @@ fn draw_box_prop_break_shards<T>(
         if event.age < shard.delay {
             continue;
         }
-        let face = shard.face as usize;
+        let shard_runtime = shard_runtimes[shard_index];
+        let face = shard_runtime.face as usize;
         if face >= psx_level::BOX_PROP_FACE_COUNT {
             continue;
         }
         draw_box_prop_break_shard(
-            prop,
-            face,
             face_textures[face],
-            faces[face].vertices,
-            box_center,
+            shard_runtime,
             event,
             shard,
             shard_index,
@@ -12266,11 +12471,8 @@ fn draw_box_prop_break_shards<T>(
 
 #[allow(clippy::too_many_arguments)]
 fn draw_box_prop_break_shard<T>(
-    prop: &LevelBoxPropRecord,
-    face: usize,
     face_texture: Option<BoxPropFaceTextureRuntime>,
-    face_vertices: [WorldVertex; 4],
-    box_center: WorldVertex,
+    shard_runtime: BoxPropBreakShardRuntime,
     event: BoxPropBreakEvent,
     shard: BoxPropBreakShard,
     shard_index: usize,
@@ -12291,7 +12493,7 @@ fn draw_box_prop_break_shard<T>(
 
     let material = face_texture.material;
     let uvs = box_prop_shard_uvs(face_texture.u_max, face_texture.v_max, shard);
-    let quad = box_prop_break_shard_quad(face_vertices, box_center, event, shard, shard_index);
+    let quad = box_prop_break_shard_quad(shard_runtime, event, shard, shard_index);
     let opts = options
         .with_depth_policy(DepthPolicy::Average)
         .with_cull_mode(CullMode::None)
@@ -12300,48 +12502,22 @@ fn draw_box_prop_break_shard<T>(
         .with_textured_triangle_max_edge(0);
     if BOX_PROP_GTE_PROJECT_ENABLED {
         if let Some(projected) = projector.project_world_quad(quad) {
-            let colors = [
-                lighting.apply_vertex_fog_weight(
-                    box_prop_face_color_at(prop, face, shard.u0_q8, shard.v0_q8),
-                    lighting.fog_weight_at_depth(projected[0].sz),
-                ),
-                lighting.apply_vertex_fog_weight(
-                    box_prop_face_color_at(prop, face, shard.u1_q8, shard.v0_q8),
-                    lighting.fog_weight_at_depth(projected[1].sz),
-                ),
-                lighting.apply_vertex_fog_weight(
-                    box_prop_face_color_at(prop, face, shard.u1_q8, shard.v1_q8),
-                    lighting.fog_weight_at_depth(projected[2].sz),
-                ),
-                lighting.apply_vertex_fog_weight(
-                    box_prop_face_color_at(prop, face, shard.u0_q8, shard.v1_q8),
-                    lighting.fog_weight_at_depth(projected[3].sz),
-                ),
-            ];
+            let fog_weight = lighting.fog_weight_at_depth(average4_i32(
+                projected[0].sz,
+                projected[1].sz,
+                projected[2].sz,
+                projected[3].sz,
+            ));
+            let colors = box_prop_apply_fog_weight(lighting, shard_runtime.colors, fog_weight);
             submit_projected_textured_gouraud_quad_u8(
                 world, triangles, projected, uvs, colors, material, opts,
             );
             return;
         }
     }
-    let colors = [
-        lighting.apply_vertex_fog(
-            box_prop_face_color_at(prop, face, shard.u0_q8, shard.v0_q8),
-            quad[0],
-        ),
-        lighting.apply_vertex_fog(
-            box_prop_face_color_at(prop, face, shard.u1_q8, shard.v0_q8),
-            quad[1],
-        ),
-        lighting.apply_vertex_fog(
-            box_prop_face_color_at(prop, face, shard.u1_q8, shard.v1_q8),
-            quad[2],
-        ),
-        lighting.apply_vertex_fog(
-            box_prop_face_color_at(prop, face, shard.u0_q8, shard.v1_q8),
-            quad[3],
-        ),
-    ];
+    let center = box_prop_quad_center(quad);
+    let fog_weight = lighting.fog_weight_at_depth(camera.view_vertex(center).z);
+    let colors = box_prop_apply_fog_weight(lighting, shard_runtime.colors, fog_weight);
     if let Some(projected) = camera.project_world_quad(quad) {
         submit_projected_textured_gouraud_quad_u8(
             world, triangles, projected, uvs, colors, material, opts,
@@ -12366,13 +12542,21 @@ fn submit_projected_textured_gouraud_quad_u8<T>(
     T: PrimitiveSink<QuadTexturedGouraud> + PrimitiveSink<TriTexturedGouraud>,
 {
     let _ = world.submit_textured_gouraud_quad_prescreened_u8(
-        triangles,
-        projected,
-        uvs,
-        colors,
-        material,
-        options,
+        triangles, projected, uvs, colors, material, options,
     );
+}
+
+fn box_prop_apply_fog_weight(
+    lighting: &RuntimeRoomLighting,
+    colors: [(u8, u8, u8); 4],
+    fog_weight: i32,
+) -> [(u8, u8, u8); 4] {
+    [
+        lighting.apply_vertex_fog_weight(colors[0], fog_weight),
+        lighting.apply_vertex_fog_weight(colors[1], fog_weight),
+        lighting.apply_vertex_fog_weight(colors[2], fog_weight),
+        lighting.apply_vertex_fog_weight(colors[3], fog_weight),
+    ]
 }
 
 fn draw_box_prop_faces<T>(
@@ -12462,8 +12646,7 @@ fn box_prop_face_front_facing(camera: &WorldCamera, face: BoxPropFaceRuntime) ->
 }
 
 fn box_prop_break_shard_quad(
-    face: [WorldVertex; 4],
-    box_center: WorldVertex,
+    shard_runtime: BoxPropBreakShardRuntime,
     event: BoxPropBreakEvent,
     shard: BoxPropBreakShard,
     shard_index: usize,
@@ -12472,16 +12655,10 @@ fn box_prop_break_shard_quad(
         .age
         .saturating_sub(shard.delay)
         .min(BOX_PROP_BREAK_MOTION_FRAMES) as i32;
-    let mut quad = [
-        box_prop_face_point_q8(face, shard.u0_q8, shard.v0_q8),
-        box_prop_face_point_q8(face, shard.u1_q8, shard.v0_q8),
-        box_prop_face_point_q8(face, shard.u1_q8, shard.v1_q8),
-        box_prop_face_point_q8(face, shard.u0_q8, shard.v1_q8),
-    ];
-    let shard_center = box_prop_quad_center(quad);
-    let face_center = box_prop_quad_center(face);
-    let edge_u = world_vertex_delta(face[0], face[1]);
-    let edge_v = world_vertex_delta(face[0], face[3]);
+    let mut quad = shard_runtime.base_quad;
+    let shard_center = shard_runtime.center;
+    let edge_u = shard_runtime.edge_u;
+    let edge_v = shard_runtime.edge_v;
     let spin_q12 = box_prop_break_shard_spin_q12(event.prop_index, shard_index, age);
     let outward_q8 = age.saturating_mul(age);
     let drift_q8 = (shard.drift_q8_per_frame as i32)
@@ -12493,17 +12670,16 @@ fn box_prop_break_shard_quad(
     let shrink_q8 = (252 - age.saturating_mul(3)).max(176);
     let impulse_units = age.saturating_mul(shard.impulse_per_frame as i32);
     let fall = age.saturating_mul(age).saturating_mul(4);
-    let face_delta = world_vertex_delta(box_center, face_center);
     let drift = scale_world_delta_q8(edge_u, drift_q8);
     let offset = [
-        scale_q8_i32_signed(face_delta[0], outward_q8)
+        scale_q8_i32_signed(shard_runtime.face_delta[0], outward_q8)
             .saturating_add((event.impulse_x_q8 as i32).saturating_mul(impulse_units) / 256)
             .saturating_add(drift[0]),
-        scale_q8_i32_signed(face_delta[1], outward_q8)
+        scale_q8_i32_signed(shard_runtime.face_delta[1], outward_q8)
             .saturating_add((shard.lift_per_frame as i32).saturating_mul(age))
             .saturating_sub(fall)
             .saturating_add(drift[1]),
-        scale_q8_i32_signed(face_delta[2], outward_q8)
+        scale_q8_i32_signed(shard_runtime.face_delta[2], outward_q8)
             .saturating_add((event.impulse_z_q8 as i32).saturating_mul(impulse_units) / 256)
             .saturating_add(drift[2]),
     ];
@@ -12901,9 +13077,11 @@ fn build_box_prop_runtime(prop: &LevelBoxPropRecord) -> BoxPropRuntime {
         face += 1;
     }
     let (cull_center, cull_radius) = box_prop_cull_bounds(vertices);
+    let break_shards = box_prop_break_shard_runtime(prop, raw_faces, cull_center);
     let (aabb_min, aabb_max) = box_prop_aabb_from_vertices(vertices);
     BoxPropRuntime {
         faces,
+        break_shards,
         cull_center,
         cull_radius,
         floor_y: box_prop_floor_y(vertices),
@@ -12911,6 +13089,45 @@ fn build_box_prop_runtime(prop: &LevelBoxPropRecord) -> BoxPropRuntime {
         aabb_min,
         aabb_max,
     }
+}
+
+fn box_prop_break_shard_runtime(
+    prop: &LevelBoxPropRecord,
+    faces: [[WorldVertex; 4]; psx_level::BOX_PROP_FACE_COUNT],
+    box_center: WorldVertex,
+) -> [BoxPropBreakShardRuntime; BOX_PROP_BREAK_SHARD_COUNT] {
+    let mut out = [BoxPropBreakShardRuntime::EMPTY; BOX_PROP_BREAK_SHARD_COUNT];
+    let mut shard_index = 0usize;
+    while shard_index < BOX_PROP_BREAK_SHARD_COUNT {
+        let shard = BOX_PROP_BREAK_SHARDS[shard_index];
+        let face = shard.face as usize;
+        if face < psx_level::BOX_PROP_FACE_COUNT {
+            let face_vertices = faces[face];
+            let base_quad = [
+                box_prop_face_point_q8(face_vertices, shard.u0_q8, shard.v0_q8),
+                box_prop_face_point_q8(face_vertices, shard.u1_q8, shard.v0_q8),
+                box_prop_face_point_q8(face_vertices, shard.u1_q8, shard.v1_q8),
+                box_prop_face_point_q8(face_vertices, shard.u0_q8, shard.v1_q8),
+            ];
+            let face_center = box_prop_quad_center(face_vertices);
+            out[shard_index] = BoxPropBreakShardRuntime {
+                face: shard.face,
+                base_quad,
+                center: box_prop_quad_center(base_quad),
+                edge_u: world_vertex_delta(face_vertices[0], face_vertices[1]),
+                edge_v: world_vertex_delta(face_vertices[0], face_vertices[3]),
+                face_delta: world_vertex_delta(box_center, face_center),
+                colors: [
+                    box_prop_face_color_at(prop, face, shard.u0_q8, shard.v0_q8),
+                    box_prop_face_color_at(prop, face, shard.u1_q8, shard.v0_q8),
+                    box_prop_face_color_at(prop, face, shard.u1_q8, shard.v1_q8),
+                    box_prop_face_color_at(prop, face, shard.u0_q8, shard.v1_q8),
+                ],
+            };
+        }
+        shard_index += 1;
+    }
+    out
 }
 
 fn box_prop_cull_bounds(
@@ -13095,8 +13312,7 @@ fn box_prop_intersects_attack_volume(
     let cos_yaw = yaw.cos();
     let forward = sin_yaw.mul_i32(dx).saturating_add(cos_yaw.mul_i32(dz));
     let lateral = cos_yaw.mul_i32(dx).saturating_sub(sin_yaw.mul_i32(dz));
-    let prop_extent =
-        abs_delta_i32(max.x, min.x).saturating_add(abs_delta_i32(max.z, min.z)) >> 1;
+    let prop_extent = abs_delta_i32(max.x, min.x).saturating_add(abs_delta_i32(max.z, min.z)) >> 1;
     let reach = BOX_PROP_BREAK_ATTACK_REACH
         .saturating_add(config.radius.max(0))
         .saturating_add(prop_extent);
