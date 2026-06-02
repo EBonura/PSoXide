@@ -1321,7 +1321,7 @@ pub fn draw_room_lit_grid_visible<const OT: usize, L: WorldSurfaceLighting>(
                 let dz = ((sz as i32) - anchor_z).abs();
                 if dx.max(dz) == ring {
                     if let Some(sector) = room.sector(sx, sz) {
-                        stats.cells_considered = stats.cells_considered.saturating_add(1);
+                        stats.cells_considered = stats.cells_considered.wrapping_add(1);
                         let (min_y, max_y) = sector_y_bounds(room, sector);
                         if !cell_visible_to_camera(
                             camera,
@@ -1334,9 +1334,9 @@ pub fn draw_room_lit_grid_visible<const OT: usize, L: WorldSurfaceLighting>(
                             visibility.screen_margin,
                         ) {
                             stats.cells_frustum_culled =
-                                stats.cells_frustum_culled.saturating_add(1);
+                                stats.cells_frustum_culled.wrapping_add(1);
                         } else {
-                            stats.cells_drawn = stats.cells_drawn.saturating_add(1);
+                            stats.cells_drawn = stats.cells_drawn.wrapping_add(1);
                             let cell_options = tile_depth_options(
                                 options,
                                 camera,
@@ -1344,7 +1344,7 @@ pub fn draw_room_lit_grid_visible<const OT: usize, L: WorldSurfaceLighting>(
                                 sector_size,
                             );
                             stats.surfaces_considered =
-                                stats.surfaces_considered.saturating_add(draw_sector_lit(
+                                stats.surfaces_considered.wrapping_add(draw_sector_lit(
                                     room,
                                     sx,
                                     sz,
@@ -1445,7 +1445,7 @@ pub fn draw_room_vertex_lit_grid_visible<const OT: usize, L: WorldSurfaceLightin
                 let dz = ((sz as i32) - anchor_z).abs();
                 if dx.max(dz) == ring {
                     if let Some(sector) = room.sector(sx, sz) {
-                        stats.cells_considered = stats.cells_considered.saturating_add(1);
+                        stats.cells_considered = stats.cells_considered.wrapping_add(1);
                         let (min_y, max_y) = sector_y_bounds(room, sector);
                         if !cell_visible_to_camera(
                             camera,
@@ -1458,9 +1458,9 @@ pub fn draw_room_vertex_lit_grid_visible<const OT: usize, L: WorldSurfaceLightin
                             visibility.screen_margin,
                         ) {
                             stats.cells_frustum_culled =
-                                stats.cells_frustum_culled.saturating_add(1);
+                                stats.cells_frustum_culled.wrapping_add(1);
                         } else {
-                            stats.cells_drawn = stats.cells_drawn.saturating_add(1);
+                            stats.cells_drawn = stats.cells_drawn.wrapping_add(1);
                             let cell_options = tile_depth_options(
                                 options,
                                 camera,
@@ -1470,7 +1470,7 @@ pub fn draw_room_vertex_lit_grid_visible<const OT: usize, L: WorldSurfaceLightin
                             stats.surfaces_considered =
                                 stats
                                     .surfaces_considered
-                                    .saturating_add(draw_sector_vertex_lit(
+                                    .wrapping_add(draw_sector_vertex_lit(
                                         room,
                                         sx,
                                         sz,
@@ -1526,7 +1526,7 @@ pub fn draw_room_vertex_lit_visible_cells<const OT: usize, L: WorldSurfaceLighti
         let Some(sector) = room.sector(cell.x, cell.z) else {
             continue;
         };
-        stats.cells_considered = stats.cells_considered.saturating_add(1);
+        stats.cells_considered = stats.cells_considered.wrapping_add(1);
         if !cell_visible_to_camera(
             camera,
             options,
@@ -1537,15 +1537,15 @@ pub fn draw_room_vertex_lit_visible_cells<const OT: usize, L: WorldSurfaceLighti
             cell.max_y,
             screen_margin,
         ) {
-            stats.cells_frustum_culled = stats.cells_frustum_culled.saturating_add(1);
+            stats.cells_frustum_culled = stats.cells_frustum_culled.wrapping_add(1);
             continue;
         }
-        stats.cells_drawn = stats.cells_drawn.saturating_add(1);
+        stats.cells_drawn = stats.cells_drawn.wrapping_add(1);
         let cell_options = tile_depth_options(options, camera, *cell, sector_size);
         stats.surfaces_considered =
             stats
                 .surfaces_considered
-                .saturating_add(draw_sector_vertex_lit(
+                .wrapping_add(draw_sector_vertex_lit(
                     room,
                     cell.x,
                     cell.z,
@@ -2002,7 +2002,7 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
             continue;
         };
 
-        stats.cells_considered = stats.cells_considered.saturating_add(1);
+        stats.cells_considered = stats.cells_considered.wrapping_add(1);
         let cell_depth = if visible.camera_depth == GridVisibleCell::CAMERA_DEPTH_PRECULLED {
             let visibility_center = WorldVertex::new(
                 cell.visibility_center[0],
@@ -2024,7 +2024,7 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
                 cell.visibility_radius,
                 screen_margin,
             ) {
-                stats.cells_frustum_culled = stats.cells_frustum_culled.saturating_add(1);
+                stats.cells_frustum_culled = stats.cells_frustum_culled.wrapping_add(1);
                 continue;
             }
             accepted_depths_need_sort = true;
@@ -2033,7 +2033,7 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
             visible.camera_depth as i32
         };
 
-        stats.cells_drawn = stats.cells_drawn.saturating_add(1);
+        stats.cells_drawn = stats.cells_drawn.wrapping_add(1);
         accepted_cell_indices[accepted_cell_count] = cell_index as u16;
         accepted_cell_depths[accepted_cell_count] = cell_depth;
         accepted_cell_count += 1;
@@ -2096,7 +2096,7 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
             stats.surfaces_considered =
                 stats
                     .surfaces_considered
-                    .saturating_add(draw_indexed_cached_room_surface(
+                    .wrapping_add(draw_indexed_cached_room_surface(
                         cached_surfaces[i],
                         cached_vertices,
                         projected_vertices,
@@ -2180,14 +2180,14 @@ pub fn draw_indexed_cached_room_vertex_lit_all_cells<const OT: usize, L: WorldSu
         if cell.surface_count == 0 || cell_index > u16::MAX as usize {
             continue;
         }
-        stats.cells_considered = stats.cells_considered.saturating_add(1);
+        stats.cells_considered = stats.cells_considered.wrapping_add(1);
         let visibility_center = WorldVertex::new(
             cell.visibility_center[0],
             cell.visibility_center[1],
             cell.visibility_center[2],
         );
         let cell_depth = camera.view_vertex(visibility_center).z;
-        stats.cells_drawn = stats.cells_drawn.saturating_add(1);
+        stats.cells_drawn = stats.cells_drawn.wrapping_add(1);
         accepted_cell_indices[accepted_cell_count] = cell_index as u16;
         accepted_cell_depths[accepted_cell_count] = cell_depth;
         accepted_cell_count += 1;
@@ -2253,7 +2253,7 @@ pub fn draw_indexed_cached_room_vertex_lit_all_cells<const OT: usize, L: WorldSu
             stats.surfaces_considered =
                 stats
                     .surfaces_considered
-                    .saturating_add(draw_indexed_cached_room_surface(
+                    .wrapping_add(draw_indexed_cached_room_surface(
                         cached_surfaces[i],
                         cached_vertices,
                         projected_vertices,
@@ -3203,7 +3203,7 @@ fn draw_sector_lit<const OT: usize, L: WorldSurfaceLighting>(
                     },
                     base_material,
                 );
-                surfaces = surfaces.saturating_add(1);
+                surfaces = surfaces.wrapping_add(1);
                 emit_floor(
                     sx,
                     sz,
@@ -3250,7 +3250,7 @@ fn draw_sector_lit<const OT: usize, L: WorldSurfaceLighting>(
                     },
                     base_material,
                 );
-                surfaces = surfaces.saturating_add(1);
+                surfaces = surfaces.wrapping_add(1);
                 emit_floor_triangle(
                     sx,
                     sz,
@@ -3285,7 +3285,7 @@ fn draw_sector_lit<const OT: usize, L: WorldSurfaceLighting>(
                     },
                     base_material,
                 );
-                surfaces = surfaces.saturating_add(1);
+                surfaces = surfaces.wrapping_add(1);
                 emit_ceiling(
                     sx,
                     sz,
@@ -3332,7 +3332,7 @@ fn draw_sector_lit<const OT: usize, L: WorldSurfaceLighting>(
                     },
                     base_material,
                 );
-                surfaces = surfaces.saturating_add(1);
+                surfaces = surfaces.wrapping_add(1);
                 emit_ceiling_triangle(
                     sx,
                     sz,
@@ -3379,7 +3379,7 @@ fn draw_sector_lit<const OT: usize, L: WorldSurfaceLighting>(
                     },
                     base_material,
                 );
-                surfaces = surfaces.saturating_add(1);
+                surfaces = surfaces.wrapping_add(1);
                 emit_wall(
                     sx,
                     sz,
@@ -3431,7 +3431,7 @@ fn draw_sector_vertex_lit<const OT: usize, L: WorldSurfaceLighting>(
                     baked_vertex_rgb: baked_vertex_rgb(room.floor_light(sx, sz)),
                     ordinal: 0,
                 };
-                surfaces = surfaces.saturating_add(1);
+                surfaces = surfaces.wrapping_add(1);
                 emit_floor_vertex_lit(
                     sx,
                     sz,
@@ -3477,7 +3477,7 @@ fn draw_sector_vertex_lit<const OT: usize, L: WorldSurfaceLighting>(
                     baked_vertex_rgb: baked_vertex_rgb(room.floor_light(sx, sz)),
                     ordinal: triangle_index as u16,
                 };
-                surfaces = surfaces.saturating_add(1);
+                surfaces = surfaces.wrapping_add(1);
                 emit_floor_triangle_vertex_lit(
                     sx,
                     sz,
@@ -3511,7 +3511,7 @@ fn draw_sector_vertex_lit<const OT: usize, L: WorldSurfaceLighting>(
                     baked_vertex_rgb: baked_vertex_rgb(room.ceiling_light(sx, sz)),
                     ordinal: 0,
                 };
-                surfaces = surfaces.saturating_add(1);
+                surfaces = surfaces.wrapping_add(1);
                 emit_ceiling_vertex_lit(
                     sx,
                     sz,
@@ -3557,7 +3557,7 @@ fn draw_sector_vertex_lit<const OT: usize, L: WorldSurfaceLighting>(
                     baked_vertex_rgb: baked_vertex_rgb(room.ceiling_light(sx, sz)),
                     ordinal: triangle_index as u16,
                 };
-                surfaces = surfaces.saturating_add(1);
+                surfaces = surfaces.wrapping_add(1);
                 emit_ceiling_triangle_vertex_lit(
                     sx,
                     sz,
@@ -3603,7 +3603,7 @@ fn draw_sector_vertex_lit<const OT: usize, L: WorldSurfaceLighting>(
                     baked_vertex_rgb: baked_vertex_rgb(room.wall_light(sector, i)),
                     ordinal: i,
                 };
-                surfaces = surfaces.saturating_add(1);
+                surfaces = surfaces.wrapping_add(1);
                 emit_wall_vertex_lit(
                     sx,
                     sz,
