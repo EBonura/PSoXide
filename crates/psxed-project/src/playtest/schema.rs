@@ -2,7 +2,7 @@
 
 use crate::{
     MaterialFaceSidedness, ResourceId, RuntimeDepthSortMode, RuntimeRoomDrawOrderMode,
-    RuntimeTextureSplitMode, SkyCycloramaQuad, UiNodeKind, UiValueBinding,
+    RuntimeTextureSplitMode, SkyCycloramaQuad, UiGradientDirection, UiNodeKind, UiValueBinding,
 };
 
 /// Number of cooked character animation action slots.
@@ -669,6 +669,11 @@ pub struct PlaytestBoxProp {
 /// the option/game ids are carried as compact integers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlaytestUiAction {
+    /// Switch to the cooked composed scene state with this id.
+    GotoState {
+        /// Target [`PlaytestSceneState::id`].
+        state: u16,
+    },
     /// Switch to the cooked UI scene with this id.
     GotoScene {
         /// Target [`PlaytestUiScene::id`].
@@ -698,6 +703,18 @@ impl Default for PlaytestUiAction {
     }
 }
 
+/// One cooked UI gradient paint. Nodes reference these by small indices
+/// when one of their color roles needs something richer than a solid fill.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestUiPaint {
+    /// Near/top/left colour.
+    pub from: [u8; 3],
+    /// Far/bottom/right colour.
+    pub to: [u8; 3],
+    /// Gradient direction.
+    pub direction: UiGradientDirection,
+}
+
 /// One cooked screen-space UI node.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlaytestUiNode {
@@ -720,12 +737,20 @@ pub struct PlaytestUiNode {
     pub background: [u8; 3],
     /// Tertiary colour, currently the `Slider` knob.
     pub accent: [u8; 3],
+    /// Optional paint override for [`Self::color`].
+    pub color_paint: Option<u16>,
+    /// Optional paint override for [`Self::background`].
+    pub background_paint: Option<u16>,
+    /// Optional paint override for [`Self::accent`].
+    pub accent_paint: Option<u16>,
     /// Current value binding for `Bar`.
     pub value: UiValueBinding,
     /// Maximum value binding for `Bar`.
     pub max: UiValueBinding,
     /// Texture asset index for `Image`, or `None`.
     pub texture_asset: Option<usize>,
+    /// Animated image vertex-colour effect preset.
+    pub image_effect: crate::UiImageEffect,
     /// Text for `Label`/`Button`.
     pub text: String,
     /// Runtime lookup tag for dynamic labels. Empty means untagged.
@@ -734,6 +759,8 @@ pub struct PlaytestUiNode {
     pub action: PlaytestUiAction,
     /// Project option a `Slider` binds to, or [`psx_level::UI_OPTION_NONE`].
     pub option: u16,
+    /// Clockwise visual rotation around this node's centre, in degrees.
+    pub rotation_degrees: i16,
     /// Runtime flags.
     pub flags: u16,
     /// First index into [`PlaytestPackage::ui_sfx_cues`], or
@@ -820,9 +847,52 @@ pub struct PlaytestOption {
     pub default: i32,
 }
 
+/// Runtime world layer attached to a composed scene state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaytestWorldLayer {
+    /// No 3D/gameplay world layer.
+    None,
+    /// Project gameplay world layer.
+    Gameplay,
+}
+
+/// One composed runtime scene state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlaytestSceneState {
+    /// Stable cooked state id.
+    pub id: u16,
+    /// Display/debug name.
+    pub name: String,
+    /// Optional world layer.
+    pub world: PlaytestWorldLayer,
+    /// Optional cooked UI scene id, or [`psx_level::UI_SCENE_NONE`].
+    pub ui_scene: u16,
+    /// Runtime flags from [`psx_level::scene_state_flags`].
+    pub flags: u16,
+}
+
+impl PlaytestSceneState {
+    /// Built-in gameplay-only state used by projects with no authored
+    /// frontend and as the final "Play" target for menu-driven projects.
+    pub fn gameplay() -> Self {
+        Self {
+            id: 0,
+            name: "Gameplay".to_string(),
+            world: PlaytestWorldLayer::Gameplay,
+            ui_scene: psx_level::UI_SCENE_NONE,
+            flags: 0,
+        }
+    }
+}
+
 /// One cooked game-flow state. Mirrors [`psx_level::FlowState`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlaytestFlowState {
+    /// Enter the cooked composed scene state with this id.
+    SceneState {
+        /// Target [`PlaytestSceneState::id`].
+        state: u16,
+    },
     /// Show a UI scene by its [`PlaytestUiScene::id`].
     UiScene {
         /// Target scene id.
@@ -838,6 +908,8 @@ pub enum PlaytestFlowState {
 pub struct PlaytestGameFlow {
     /// Flow state table.
     pub states: Vec<PlaytestFlowState>,
+    /// Composed scene states referenced by [`Self::states`].
+    pub scene_states: Vec<PlaytestSceneState>,
     /// Index into `states` of the starting state.
     pub entry: u16,
 }
@@ -847,7 +919,8 @@ impl Default for PlaytestGameFlow {
     /// gameplay.
     fn default() -> Self {
         Self {
-            states: vec![PlaytestFlowState::Gameplay],
+            states: vec![PlaytestFlowState::SceneState { state: 0 }],
+            scene_states: vec![PlaytestSceneState::gameplay()],
             entry: 0,
         }
     }
@@ -994,6 +1067,52 @@ pub struct PlaytestParticleEmitter {
     /// Random spawn offset radius, in engine units.
     pub spawn_radius: u16,
     /// Runtime flags. Bit 0 = enabled.
+    pub flags: u16,
+}
+
+/// Cooked interaction behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaytestInteractableKind {
+    /// Show a message overlay.
+    Message,
+    /// Update the in-memory checkpoint.
+    Checkpoint,
+}
+
+/// Text payload used by an interactable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlaytestInteractableMessage {
+    /// Header/title line.
+    pub title: String,
+    /// Body text.
+    pub body: String,
+}
+
+/// One placed gameplay interaction, room-local engine units.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlaytestInteractable {
+    /// Owning room.
+    pub room: u16,
+    /// Runtime behavior.
+    pub kind: PlaytestInteractableKind,
+    /// Room-local X.
+    pub x: i32,
+    /// Y.
+    pub y: i32,
+    /// Room-local Z.
+    pub z: i32,
+    /// Yaw, PSX angle units.
+    pub yaw: i16,
+    /// Interaction radius in XZ engine units.
+    pub radius: u16,
+    /// Prompt shown while in range.
+    pub prompt: String,
+    /// Index into [`PlaytestPackage::interactable_messages`], or
+    /// [`psx_level::INTERACTABLE_MESSAGE_NONE`].
+    pub message: u16,
+    /// Stable authored checkpoint id. Empty for message-only records.
+    pub checkpoint_id: String,
+    /// Runtime flags from [`psx_level::interactable_flags`].
     pub flags: u16,
 }
 
@@ -1200,6 +1319,8 @@ pub struct PlaytestPackage {
     /// Cooked screen-space UI nodes for every scene, concatenated
     /// into one shared pool. [`Self::ui_scenes`] slices this pool.
     pub ui_nodes: Vec<PlaytestUiNode>,
+    /// Cooked UI gradient paints referenced by [`Self::ui_nodes`].
+    pub ui_paints: Vec<PlaytestUiPaint>,
     /// Addressable cooked UI scene table indexing [`Self::ui_nodes`].
     pub ui_scenes: Vec<PlaytestUiScene>,
     /// Cooked UI SFX samples, deduplicated by source WAV path.
@@ -1224,6 +1345,10 @@ pub struct PlaytestPackage {
     pub lights: Vec<PlaytestLight>,
     /// Placed point-projected particle emitters.
     pub particle_emitters: Vec<PlaytestParticleEmitter>,
+    /// Text payloads referenced by placed interactables.
+    pub interactable_messages: Vec<PlaytestInteractableMessage>,
+    /// Placed gameplay interactables.
+    pub interactables: Vec<PlaytestInteractable>,
     /// Single player spawn -- required.
     pub spawn: Option<PlaytestSpawn>,
     /// Cooked Character resources used by player / future

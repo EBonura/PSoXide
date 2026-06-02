@@ -3,7 +3,7 @@
 use std::fmt::Write as _;
 
 use super::*;
-use crate::{UiFontChoice, UiNodeKind, UiValueBinding};
+use crate::{UiFontChoice, UiGradientDirection, UiImageEffect, UiNodeKind, UiValueBinding};
 
 const STREAMED_ROOM_SLOT_BYTES: usize = 32 * 1024;
 
@@ -945,6 +945,23 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     out.push_str("];\n");
     out.push_str("const _: () = assert!(UI_FONTS.len() <= 4);\n\n");
 
+    out.push_str("/// Cooked UI gradient paints referenced by UI node color roles.\n");
+    out.push_str("pub static UI_PAINTS: &[LevelUiPaintRecord] = &[\n");
+    for paint in &package.ui_paints {
+        let direction = render_ui_gradient_direction(paint.direction);
+        let _ = writeln!(
+            out,
+            "    LevelUiPaintRecord {{ from: [{}, {}, {}], to: [{}, {}, {}], direction: {direction} }},",
+            paint.from[0],
+            paint.from[1],
+            paint.from[2],
+            paint.to[0],
+            paint.to[1],
+            paint.to[2],
+        );
+    }
+    out.push_str("];\n\n");
+
     out.push_str("/// Cooked screen-space UI nodes.\n");
     out.push_str("pub static UI_NODES: &[LevelUiNodeRecord] = &[\n");
     for node in &package.ui_nodes {
@@ -961,9 +978,13 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             .map(|index| format!("AssetId({index})"))
             .unwrap_or_else(|| "AssetId(u16::MAX)".to_string());
         let font = compact_ui_font_index(&ui_fonts, node);
+        let color_paint = render_ui_paint_ref(node.color_paint);
+        let background_paint = render_ui_paint_ref(node.background_paint);
+        let accent_paint = render_ui_paint_ref(node.accent_paint);
+        let image_effect = render_ui_image_effect(node.image_effect);
         let _ = writeln!(
             out,
-            "    LevelUiNodeRecord {{ parent: {parent}, kind: {kind}, x: {}, y: {}, width: {}, height: {}, color: [{}, {}, {}], background: [{}, {}, {}], accent: [{}, {}, {}], value: {value}, max: {max}, texture_asset: {texture_asset}, text: {:?}, tag: {:?}, action: {action}, option: {}, flags: {}, sfx_first: {}, sfx_count: {}, font: {}, font_scale: {}, letter_spacing: {} }},",
+            "    LevelUiNodeRecord {{ parent: {parent}, kind: {kind}, x: {}, y: {}, width: {}, height: {}, color: [{}, {}, {}], background: [{}, {}, {}], accent: [{}, {}, {}], color_paint: {color_paint}, background_paint: {background_paint}, accent_paint: {accent_paint}, value: {value}, max: {max}, texture_asset: {texture_asset}, image_effect: {image_effect}, text: {:?}, tag: {:?}, action: {action}, option: {}, rotation_degrees: {}, flags: {}, sfx_first: {}, sfx_count: {}, font: {}, font_scale: {}, letter_spacing: {} }},",
             node.x,
             node.y,
             node.width,
@@ -980,6 +1001,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             node.text,
             node.tag,
             node.option,
+            node.rotation_degrees,
             node.flags,
             node.sfx_first,
             node.sfx_count,
@@ -1024,11 +1046,29 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     }
     out.push_str("];\n\n");
 
+    out.push_str("/// Composed runtime scene states.\n");
+    out.push_str("pub static SCENE_STATES: &[LevelSceneState] = &[\n");
+    for state in &package.game_flow.scene_states {
+        let world = match state.world {
+            PlaytestWorldLayer::None => "LevelWorldLayer::None",
+            PlaytestWorldLayer::Gameplay => "LevelWorldLayer::Gameplay",
+        };
+        let _ = writeln!(
+            out,
+            "    LevelSceneState {{ id: {}, name: {:?}, world: {}, ui_scene: {}, flags: {} }},",
+            state.id, state.name, world, state.ui_scene, state.flags,
+        );
+    }
+    out.push_str("];\n\n");
+
     out.push_str("/// Cooked game-state flow.\n");
     out.push_str("pub static GAME_FLOW: GameFlow = GameFlow {\n");
     out.push_str("    states: &[\n");
     for state in &package.game_flow.states {
         let rendered = match state {
+            PlaytestFlowState::SceneState { state } => {
+                format!("FlowState::SceneState {{ state: {state} }}")
+            }
             PlaytestFlowState::UiScene { scene } => {
                 format!("FlowState::UiScene {{ scene: {scene} }}")
             }
@@ -1037,6 +1077,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         let _ = writeln!(out, "        {rendered},");
     }
     out.push_str("    ],\n");
+    out.push_str("    scene_states: SCENE_STATES,\n");
     let _ = writeln!(out, "    entry: {},", package.game_flow.entry);
     out.push_str("};\n\n");
 
@@ -1159,6 +1200,45 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             emitter.acceleration_q4[2],
             emitter.spawn_radius,
             emitter.flags,
+        );
+    }
+    out.push_str("];\n\n");
+
+    out.push_str("/// Text payloads referenced by placed interactables.\n");
+    out.push_str("pub static INTERACTABLE_MESSAGES: &[InteractableMessageRecord] = &[\n");
+    for message in &package.interactable_messages {
+        let _ = writeln!(
+            out,
+            "    InteractableMessageRecord {{ title: {:?}, body: {:?} }},",
+            message.title, message.body,
+        );
+    }
+    out.push_str("];\n\n");
+
+    out.push_str("/// Placed gameplay interactables, room-local coordinates.\n");
+    out.push_str("pub static INTERACTABLES: &[InteractableRecord] = &[\n");
+    for interactable in &package.interactables {
+        let kind = match interactable.kind {
+            PlaytestInteractableKind::Message => "InteractableKind::Message",
+            PlaytestInteractableKind::Checkpoint => "InteractableKind::Checkpoint",
+        };
+        let message = if interactable.message == psx_level::INTERACTABLE_MESSAGE_NONE {
+            "psx_level::INTERACTABLE_MESSAGE_NONE".to_string()
+        } else {
+            interactable.message.to_string()
+        };
+        let _ = writeln!(
+            out,
+            "    InteractableRecord {{ room: RoomIndex({}), kind: {kind}, x: {}, y: {}, z: {}, yaw: {}, radius: {}, prompt: {:?}, message: {message}, checkpoint_id: {:?}, flags: {} }},",
+            interactable.room,
+            interactable.x,
+            interactable.y,
+            interactable.z,
+            interactable.yaw,
+            interactable.radius,
+            interactable.prompt,
+            interactable.checkpoint_id,
+            interactable.flags,
         );
     }
     out.push_str("];\n\n");
@@ -2338,8 +2418,34 @@ fn render_ui_node_kind(kind: &UiNodeKind) -> &'static str {
     }
 }
 
+fn render_ui_gradient_direction(direction: UiGradientDirection) -> &'static str {
+    match direction {
+        UiGradientDirection::Vertical => "LevelUiGradientDirection::Vertical",
+        UiGradientDirection::Horizontal => "LevelUiGradientDirection::Horizontal",
+    }
+}
+
+fn render_ui_image_effect(effect: UiImageEffect) -> &'static str {
+    match effect {
+        UiImageEffect::None => "LevelUiImageEffect::None",
+        UiImageEffect::Shimmer => "LevelUiImageEffect::Shimmer",
+        UiImageEffect::FastShimmer => "LevelUiImageEffect::FastShimmer",
+        UiImageEffect::DiagonalSweep => "LevelUiImageEffect::DiagonalSweep",
+        UiImageEffect::SoftPulse => "LevelUiImageEffect::SoftPulse",
+    }
+}
+
+fn render_ui_paint_ref(paint: Option<u16>) -> String {
+    paint
+        .map(|index| index.to_string())
+        .unwrap_or_else(|| "psx_level::UI_PAINT_NONE".to_string())
+}
+
 fn render_ui_action(action: PlaytestUiAction) -> String {
     match action {
+        PlaytestUiAction::GotoState { state } => {
+            format!("LevelUiAction::GotoState {{ state: {state} }}")
+        }
         PlaytestUiAction::GotoScene { scene } => {
             format!("LevelUiAction::GotoScene {{ scene: {scene} }}")
         }
@@ -2885,7 +2991,10 @@ mod tests {
         ));
         assert!(src.contains("pub static UI_SCENES: &[LevelUiScene] = &[\n];"));
         assert!(src.contains(
-            "pub static GAME_FLOW: GameFlow = GameFlow {\n    states: &[\n        FlowState::Gameplay,\n    ],\n    entry: 0,\n};"
+            "LevelSceneState { id: 0, name: \"Gameplay\", world: LevelWorldLayer::Gameplay, ui_scene: 65535, flags: 0 },"
+        ));
+        assert!(src.contains(
+            "pub static GAME_FLOW: GameFlow = GameFlow {\n    states: &[\n        FlowState::SceneState { state: 0 },\n    ],\n    scene_states: SCENE_STATES,\n    entry: 0,\n};"
         ));
     }
 
@@ -2905,13 +3014,18 @@ mod tests {
             color: [0, 0, 0],
             background: [0, 0, 0],
             accent: [0, 0, 0],
+            color_paint: None,
+            background_paint: None,
+            accent_paint: None,
             value: UiValueBinding::ConstantQ12(0),
             max: UiValueBinding::ConstantQ12(0),
             texture_asset: None,
+            image_effect: UiImageEffect::None,
             text: String::new(),
             tag: String::new(),
             action: PlaytestUiAction::default(),
             option: psx_level::UI_OPTION_NONE,
+            rotation_degrees: 0,
             flags: 0,
             sfx_first: psx_level::UI_SFX_NONE,
             sfx_count: 0,
@@ -2927,8 +3041,18 @@ mod tests {
         }];
         package.game_flow = PlaytestGameFlow {
             states: vec![
-                PlaytestFlowState::UiScene { scene: 7 },
-                PlaytestFlowState::Gameplay,
+                PlaytestFlowState::SceneState { state: 1 },
+                PlaytestFlowState::SceneState { state: 0 },
+            ],
+            scene_states: vec![
+                PlaytestSceneState::gameplay(),
+                PlaytestSceneState {
+                    id: 1,
+                    name: "Pause".to_string(),
+                    world: PlaytestWorldLayer::None,
+                    ui_scene: 7,
+                    flags: psx_level::scene_state_flags::UI_INPUT,
+                },
             ],
             entry: 0,
         };
@@ -2937,8 +3061,9 @@ mod tests {
         assert!(
             src.contains("LevelUiScene { id: 7, name: \"Pause\", node_first: 0, node_count: 1 },")
         );
-        assert!(src.contains("FlowState::UiScene { scene: 7 },"));
-        assert!(src.contains("FlowState::Gameplay,"));
+        assert!(src.contains("LevelSceneState { id: 1, name: \"Pause\", world: LevelWorldLayer::None, ui_scene: 7, flags: 1 },"));
+        assert!(src.contains("FlowState::SceneState { state: 1 },"));
+        assert!(src.contains("FlowState::SceneState { state: 0 },"));
         assert!(src.contains("entry: 0,"));
     }
 
@@ -2956,7 +3081,9 @@ mod tests {
                     font_scale: crate::default_ui_font_scale(),
                     letter_spacing: crate::default_ui_letter_spacing(),
                     color: [50, 60, 70],
+                    background_gradient: None,
                     text_color: [236, 240, 248],
+                    text_gradient: None,
                     transparent: false,
                     action: UiAction::Back,
                     sfx: crate::UiSfxBindings::default(),
@@ -2968,13 +3095,18 @@ mod tests {
                 color: [50, 60, 70],
                 background: [0, 0, 0],
                 accent: [0, 0, 0],
+                color_paint: None,
+                background_paint: None,
+                accent_paint: None,
                 value: UiValueBinding::ConstantQ12(0),
                 max: UiValueBinding::ConstantQ12(0),
                 texture_asset: None,
+                image_effect: UiImageEffect::None,
                 text: "Play".to_string(),
                 tag: String::new(),
                 action: PlaytestUiAction::GotoScene { scene: 7 },
                 option: psx_level::UI_OPTION_NONE,
+                rotation_degrees: 0,
                 flags: 0,
                 sfx_first: psx_level::UI_SFX_NONE,
                 sfx_count: 0,
@@ -2988,8 +3120,11 @@ mod tests {
                     rect: crate::UiRect::new(0, 0, 96, 8),
                     option: crate::OptionId(3),
                     track: [11, 12, 13],
+                    track_gradient: None,
                     fill: [21, 22, 23],
+                    fill_gradient: None,
                     knob: [31, 32, 33],
+                    knob_gradient: None,
                     sfx: crate::UiSfxBindings::default(),
                 },
                 x: 0,
@@ -2999,13 +3134,18 @@ mod tests {
                 color: [11, 12, 13],
                 background: [21, 22, 23],
                 accent: [31, 32, 33],
+                color_paint: None,
+                background_paint: None,
+                accent_paint: None,
                 value: UiValueBinding::ConstantQ12(0),
                 max: UiValueBinding::ConstantQ12(0),
                 texture_asset: None,
+                image_effect: UiImageEffect::None,
                 text: String::new(),
                 tag: String::new(),
                 action: PlaytestUiAction::default(),
                 option: 3,
+                rotation_degrees: 0,
                 flags: 0,
                 sfx_first: psx_level::UI_SFX_NONE,
                 sfx_count: 0,
@@ -3026,6 +3166,60 @@ mod tests {
         assert!(src.contains("kind: LevelUiNodeKind::Slider"));
         assert!(src.contains("accent: [31, 32, 33]"));
         assert!(src.contains("option: 3"));
+    }
+
+    #[test]
+    fn ui_gradient_paints_emit_table_and_node_refs() {
+        let mut package = PlaytestPackage::default();
+        package.ui_paints = vec![PlaytestUiPaint {
+            from: [20, 30, 40],
+            to: [80, 90, 100],
+            direction: UiGradientDirection::Horizontal,
+        }];
+        package.ui_nodes = vec![PlaytestUiNode {
+            parent: None,
+            kind: UiNodeKind::Rect {
+                rect: crate::UiRect::new(0, 0, 80, 18),
+                color: [20, 30, 40],
+                gradient: Some(crate::UiGradient::new(
+                    [80, 90, 100],
+                    UiGradientDirection::Horizontal,
+                )),
+            },
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 18,
+            color: [20, 30, 40],
+            background: [0, 0, 0],
+            accent: [0, 0, 0],
+            color_paint: Some(0),
+            background_paint: None,
+            accent_paint: None,
+            value: UiValueBinding::ConstantQ12(0),
+            max: UiValueBinding::ConstantQ12(0),
+            texture_asset: None,
+            image_effect: UiImageEffect::None,
+            text: String::new(),
+            tag: String::new(),
+            action: PlaytestUiAction::default(),
+            option: psx_level::UI_OPTION_NONE,
+            rotation_degrees: 0,
+            flags: 0,
+            sfx_first: psx_level::UI_SFX_NONE,
+            sfx_count: 0,
+            font: 0,
+            font_scale: crate::default_ui_font_scale(),
+            letter_spacing: crate::default_ui_letter_spacing(),
+        }];
+
+        let src = render_manifest_source(&package);
+        assert!(src.contains("pub static UI_PAINTS: &[LevelUiPaintRecord]"));
+        assert!(src.contains(
+            "LevelUiPaintRecord { from: [20, 30, 40], to: [80, 90, 100], direction: LevelUiGradientDirection::Horizontal }"
+        ));
+        assert!(src.contains("color_paint: 0"));
+        assert!(src.contains("background_paint: psx_level::UI_PAINT_NONE"));
     }
 
     #[test]
@@ -3499,6 +3693,9 @@ use psx_level::{
     EquipmentRecord,
     FlowState,
     GameFlow,
+    InteractableKind,
+    InteractableMessageRecord,
+    InteractableRecord,
     LevelCachedRoomCellRecord,
     LevelCachedRoomSurfaceRecord,
     LevelCachedRoomVertexRecord,
@@ -3524,15 +3721,20 @@ use psx_level::{
     LevelRoomRecord,
     LevelRoomSurfaceCacheRecord,
     LevelRoomVisibilityRecord,
+    LevelSceneState,
     LevelSkyRecord,
     LevelUiAction,
+    LevelUiGradientDirection,
+    LevelUiImageEffect,
     LevelUiNodeKind,
     LevelUiNodeRecord,
+    LevelUiPaintRecord,
     LevelUiScene,
     LevelUiSfxCueRecord,
     LevelUiSfxEvent,
     LevelUiSfxSampleRecord,
     LevelUiValueBinding,
+    LevelWorldLayer,
     LevelVisibilityCellRecord,
     LevelVisibilityPvsRecord,
     LevelWeaponRecord,
