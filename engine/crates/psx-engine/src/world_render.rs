@@ -1148,7 +1148,7 @@ fn triangle_depth_options(options: WorldSurfaceOptions) -> WorldSurfaceOptions {
 
 fn tile_camera_depth(camera: &WorldCamera, cell: GridVisibleCell, sector_size: i32) -> i32 {
     let sector_size = sector_size.max(1);
-    let half = sector_size / 2;
+    let half = sector_size >> 1;
     let center = WorldVertex::new(
         (cell.x as i32)
             .saturating_mul(sector_size)
@@ -3697,7 +3697,7 @@ fn cell_visibility_bounds(
 ) -> (WorldVertex, i32) {
     let (x0, x1, z0, z1) = cell_bounds(sx, sz, sector_size);
     let center = WorldVertex::new((x0 + x1) / 2, (min_y + max_y) / 2, (z0 + z1) / 2);
-    let half_height = ((max_y - min_y).abs() / 2).max(sector_size / 2);
+    let half_height = ((max_y - min_y).abs() >> 1).max(sector_size >> 1);
     let radius = sector_size.saturating_add(half_height);
     (center, radius)
 }
