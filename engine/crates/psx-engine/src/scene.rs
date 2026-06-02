@@ -20,6 +20,11 @@ use psx_pad::{button, PadState};
 use crate::frames::{SimTick, VideoHz, VisualFrame};
 use crate::ui::UiTextureSlot;
 
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct RuntimeRequests {
+    timing_realign: bool,
+}
+
 /// Per-frame context passed to [`Scene::update`] and
 /// [`Scene::render`]. The engine owns and updates this between
 /// frames; the scene reads from it and draws through it.
@@ -43,9 +48,29 @@ pub struct Ctx {
     /// Frame buffer the scene draws into. The engine clears it
     /// before [`Scene::render`] runs, and swaps it after.
     pub fb: FrameBuffer,
+    runtime_requests: RuntimeRequests,
 }
 
 impl Ctx {
+    pub(crate) fn new(
+        sim_tick: SimTick,
+        visual_frame: VisualFrame,
+        video_hz: VideoHz,
+        pad: PadState,
+        pad_prev: PadState,
+        fb: FrameBuffer,
+    ) -> Self {
+        Self {
+            sim_tick,
+            visual_frame,
+            video_hz,
+            pad,
+            pad_prev,
+            fb,
+            runtime_requests: RuntimeRequests::default(),
+        }
+    }
+
     /// Fixed simulation delta as Q12 seconds.
     #[inline]
     pub fn fixed_delta_seconds_q12(&self) -> u32 {
@@ -87,6 +112,21 @@ impl Ctx {
             || self.is_held(button::DOWN)
             || self.is_held(button::LEFT)
             || self.is_held(button::RIGHT)
+    }
+
+    /// Ask the app runner to discard display-clock debt accumulated by an
+    /// intentional blocking load or scene transition. The request is consumed
+    /// after the current fixed update; simulation tick order is unchanged.
+    #[inline]
+    pub fn request_timing_realign(&mut self) {
+        self.runtime_requests.timing_realign = true;
+    }
+
+    #[inline]
+    pub(crate) fn take_timing_realign_request(&mut self) -> bool {
+        let requested = self.runtime_requests.timing_realign;
+        self.runtime_requests.timing_realign = false;
+        requested
     }
 }
 

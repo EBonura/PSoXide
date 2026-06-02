@@ -41,6 +41,12 @@ use psx_level::{
     visibility_edge_flags,
 };
 use psxed_format::world as psxw;
+use psxed_format::{
+    texture::{
+        Depth as TextureDepth, TextureHeader, MAGIC as TEXTURE_MAGIC, VERSION as TEXTURE_VERSION,
+    },
+    AssetHeader,
+};
 
 use crate::portal_rooms::{extract_portal_room_grid, plan_portal_rooms, PortalRoomConfig};
 use crate::world_cook::{
@@ -50,9 +56,10 @@ use crate::{
     clamp_ui_font_scale, default_ui_font_scale, default_ui_letter_spacing, spatial, AnimationRole,
     CharacterAnimationAction, CharacterControllerSettings, NodeId, NodeKind, OptionId, OptionKind,
     ParticleEmitterSettings, PhysicsBodySettings, ProjectDocument, PsxBlendMode, ResourceData,
-    ResourceId, SceneNode, UiAction, UiAnchor, UiNodeId, UiNodeKind, UiSfxCue, UiTextAlign,
-    UiValueBinding, WorldGrid, WorldStreamingSettings, FAR_VISTA_TEXTURE_PANEL_COUNT,
-    MAX_ROOM_BYTES, MAX_UI_LETTER_SPACING, MIN_UI_LETTER_SPACING, PHYSICS_WEIGHT_ONE_Q8,
+    ResourceId, SceneNode, UiAction, UiAnchor, UiGradient, UiImageEffect, UiNodeId, UiNodeKind,
+    UiRect, UiSfxCue, UiTextAlign, UiValueBinding, WorldGrid, WorldStreamingSettings,
+    FAR_VISTA_TEXTURE_PANEL_COUNT, MAX_ROOM_BYTES, MAX_UI_LETTER_SPACING, MIN_UI_LETTER_SPACING,
+    PHYSICS_WEIGHT_ONE_Q8,
 };
 
 mod assets;
@@ -76,6 +83,20 @@ const ATMOSPHERE_DENSITY_MAX: i32 = 96;
 const ATMOSPHERE_FALL_SPEED_MAX_Q4: i32 = 64;
 const ATMOSPHERE_WIND_SPEED_MIN_Q4: i32 = -64;
 const ATMOSPHERE_WIND_SPEED_MAX_Q4: i32 = 64;
+const UI_LARGE_IMAGE_STRIP_WIDTH: u16 = 160;
+const UI_LARGE_IMAGE_MAX_DIMENSION: u16 = 256;
+
+#[derive(Clone)]
+struct CookedUiImageTexture {
+    width: u16,
+    fragments: Vec<CookedUiImageFragment>,
+}
+
+#[derive(Clone)]
+struct CookedUiImageFragment {
+    asset_index: usize,
+    width: u16,
+}
 
 struct PlayerSpawnCandidate<'a> {
     node: &'a SceneNode,
@@ -632,6 +653,8 @@ pub fn build_package(
     let mut equipment: Vec<PlaytestEquipment> = Vec::new();
     let mut lights: Vec<PlaytestLight> = Vec::new();
     let mut particle_emitters: Vec<PlaytestParticleEmitter> = Vec::new();
+    let mut interactable_messages: Vec<PlaytestInteractableMessage> = Vec::new();
+    let mut interactables: Vec<PlaytestInteractable> = Vec::new();
     // ResourceId → index into `models` for instance dedup.
     let runtime_model_clips = collect_runtime_model_clip_requirements(project, scene);
     let mut model_for_resource: HashMap<ResourceId, u16> = HashMap::new();
@@ -821,6 +844,21 @@ pub fn build_package(
                         });
                     } else if warned_unsupported.insert("UnboundEquipment") {
                         report.warn("Equipment components with no Weapon are skipped");
+                    }
+                }
+
+                if let Some(interactable) = component_interactable(scene, node) {
+                    if !push_interactable(
+                        node.name.as_str(),
+                        room_index,
+                        pos,
+                        yaw,
+                        interactable,
+                        &mut interactable_messages,
+                        &mut interactables,
+                        &mut report,
+                    ) {
+                        return (None, report);
                     }
                 }
             }
@@ -1018,7 +1056,8 @@ pub fn build_package(
             | NodeKind::Collider { .. }
             | NodeKind::CharacterController { .. }
             | NodeKind::Equipment { .. }
-            | NodeKind::PhysicsBody { .. } => {}
+            | NodeKind::PhysicsBody { .. }
+            | NodeKind::Interactable { .. } => {}
         }
     }
 
@@ -1238,13 +1277,14 @@ pub fn build_package(
     // never scans them). Regroup the whole table by source_room and
     // rebuild every room's range so both kinds are reachable.
     regroup_room_portals(&mut rooms, &mut room_portals);
-    let (ui_nodes, ui_scenes, ui_sfx_samples, ui_sfx_cues, game_flow, cdda_tracks) = cook_ui_nodes(
-        project,
-        project_root,
-        &mut texture_asset_for_resource,
-        &mut assets,
-        &mut report,
-    );
+    let (ui_nodes, ui_paints, ui_scenes, ui_sfx_samples, ui_sfx_cues, game_flow, cdda_tracks) =
+        cook_ui_nodes(
+            project,
+            project_root,
+            &mut texture_asset_for_resource,
+            &mut assets,
+            &mut report,
+        );
     if !report.is_ok() {
         return (None, report);
     }
@@ -1282,6 +1322,7 @@ pub fn build_package(
             image_props,
             box_props,
             ui_nodes,
+            ui_paints,
             ui_scenes,
             ui_sfx_samples,
             ui_sfx_cues,
@@ -1293,6 +1334,8 @@ pub fn build_package(
             equipment,
             lights,
             particle_emitters,
+            interactable_messages,
+            interactables,
             spawn,
             characters,
             player_controller,
@@ -1325,8 +1368,8 @@ fn active_far_vista_panel_count(
 /// scene's offset), so the runtime can address any scene's nodes
 /// through a single table.
 ///
-/// The default flow lists one [`PlaytestFlowState::UiScene`] per
-/// cooked scene followed by [`PlaytestFlowState::Gameplay`], and
+/// The default flow lists one composed UI-only scene state per cooked UI scene
+/// followed by the built-in gameplay state, and
 /// enters the first UI scene when one exists. With no UI scenes the
 /// flow is a single `Gameplay` state entered at index `0`.
 fn cook_ui_nodes(
@@ -1337,6 +1380,7 @@ fn cook_ui_nodes(
     report: &mut PlaytestValidationReport,
 ) -> (
     Vec<PlaytestUiNode>,
+    Vec<PlaytestUiPaint>,
     Vec<PlaytestUiScene>,
     Vec<PlaytestUiSfxSample>,
     Vec<PlaytestUiSfxCue>,
@@ -1344,12 +1388,15 @@ fn cook_ui_nodes(
     Vec<PlaytestCddaTrack>,
 ) {
     let mut ui_nodes: Vec<PlaytestUiNode> = Vec::new();
+    let mut ui_paints: Vec<PlaytestUiPaint> = Vec::new();
     let mut ui_scenes: Vec<PlaytestUiScene> = Vec::new();
     let mut ui_sfx_samples: Vec<PlaytestUiSfxSample> = Vec::new();
     let mut ui_sfx_cues: Vec<PlaytestUiSfxCue> = Vec::new();
     let mut ui_sfx_sample_for_wav: HashMap<String, u16> = HashMap::new();
     let mut cdda_tracks: Vec<PlaytestCddaTrack> = Vec::new();
     let mut cdda_track_for_wav: HashMap<String, u8> = HashMap::new();
+    let mut ui_image_texture_for_resource: HashMap<ResourceId, CookedUiImageTexture> =
+        HashMap::new();
 
     for scene in &project.ui_scenes {
         let node_first = ui_nodes.len().min(u16::MAX as usize) as u16;
@@ -1361,11 +1408,13 @@ fn cook_ui_nodes(
             texture_asset_for_resource,
             assets,
             report,
+            &mut ui_image_texture_for_resource,
             &mut cdda_tracks,
             &mut cdda_track_for_wav,
             &mut ui_sfx_samples,
             &mut ui_sfx_cues,
             &mut ui_sfx_sample_for_wav,
+            &mut ui_paints,
             &mut ui_nodes,
         );
         let node_count = (ui_nodes.len() - node_first as usize).min(u16::MAX as usize) as u16;
@@ -1377,33 +1426,11 @@ fn cook_ui_nodes(
         });
     }
 
-    let game_flow = if ui_scenes.is_empty() {
-        // No authored UI: start straight in gameplay.
-        PlaytestGameFlow::default()
-    } else {
-        // One state per scene, gameplay last. The entry state comes from the
-        // project's boot target: a UI scene by id (its position in the list),
-        // or gameplay (the final state). An unknown/removed boot scene falls
-        // back to the gameplay state so a stale selection cannot wedge boot.
-        let mut states: Vec<PlaytestFlowState> = ui_scenes
-            .iter()
-            .map(|scene| PlaytestFlowState::UiScene { scene: scene.id })
-            .collect();
-        let gameplay_index = states.len() as u16;
-        states.push(PlaytestFlowState::Gameplay);
-        let entry = match project.boot {
-            crate::BootTarget::Gameplay => gameplay_index,
-            crate::BootTarget::UiScene(scene_id) => ui_scenes
-                .iter()
-                .position(|scene| u64::from(scene.id) == scene_id.raw())
-                .map(|index| index as u16)
-                .unwrap_or(gameplay_index),
-        };
-        PlaytestGameFlow { states, entry }
-    };
+    let game_flow = cook_game_flow(project, &ui_scenes);
 
     (
         ui_nodes,
+        ui_paints,
         ui_scenes,
         ui_sfx_samples,
         ui_sfx_cues,
@@ -1412,351 +1439,815 @@ fn cook_ui_nodes(
     )
 }
 
+fn cook_game_flow(project: &ProjectDocument, ui_scenes: &[PlaytestUiScene]) -> PlaytestGameFlow {
+    if project.scene_states.is_empty() {
+        return PlaytestGameFlow::default();
+    }
+
+    let mut scene_states = Vec::with_capacity(project.scene_states.len());
+    let mut states = Vec::with_capacity(project.scene_states.len());
+    for authored in &project.scene_states {
+        let state_id = cook_scene_state_id(authored.id);
+        let ui_scene = authored
+            .ui_scene
+            .and_then(|id| {
+                ui_scenes
+                    .iter()
+                    .find(|scene| u64::from(scene.id) == id.raw())
+                    .map(|scene| scene.id)
+            })
+            .unwrap_or(psx_level::UI_SCENE_NONE);
+        let world = match authored.world {
+            crate::SceneWorldLayer::None => PlaytestWorldLayer::None,
+            crate::SceneWorldLayer::Gameplay => PlaytestWorldLayer::Gameplay,
+        };
+        let mut flags = 0;
+        if authored.ui_input {
+            flags |= psx_level::scene_state_flags::UI_INPUT;
+        }
+        if authored.pause_world {
+            flags |= psx_level::scene_state_flags::PAUSE_WORLD;
+        }
+        scene_states.push(PlaytestSceneState {
+            id: state_id,
+            name: authored.name.clone(),
+            world,
+            ui_scene,
+            flags,
+        });
+        states.push(PlaytestFlowState::SceneState { state: state_id });
+    }
+
+    let gameplay_index = scene_states
+        .iter()
+        .position(|state| state.world == PlaytestWorldLayer::Gameplay)
+        .unwrap_or(0) as u16;
+    let entry = match project.boot {
+        crate::BootTarget::SceneState(id) => scene_states
+            .iter()
+            .position(|state| state.id == cook_scene_state_id(id))
+            .map(|index| index as u16)
+            .unwrap_or(gameplay_index),
+        crate::BootTarget::Gameplay => gameplay_index,
+        crate::BootTarget::UiScene(scene_id) => {
+            let cooked_ui_scene = (scene_id.raw() & u16::MAX as u64) as u16;
+            scene_states
+                .iter()
+                .position(|state| state.ui_scene == cooked_ui_scene)
+                .map(|index| index as u16)
+                .unwrap_or(gameplay_index)
+        }
+    };
+
+    PlaytestGameFlow {
+        states,
+        scene_states,
+        entry,
+    }
+}
+
+fn cook_scene_state_id(id: crate::SceneStateId) -> u16 {
+    (id.raw() & u16::MAX as u64) as u16
+}
+
 /// Flatten one scene's nodes into the shared `out` pool. `node_first`
 /// is the pool offset of this scene's block; parent indices are
 /// rebased onto the shared pool.
 #[allow(clippy::too_many_arguments)]
 fn cook_ui_scene_nodes(
     scene: &crate::UiScene,
-    node_first: u16,
+    _node_first: u16,
     project: &ProjectDocument,
     project_root: &Path,
-    texture_asset_for_resource: &mut HashMap<ResourceId, usize>,
+    _texture_asset_for_resource: &mut HashMap<ResourceId, usize>,
     assets: &mut Vec<PlaytestAsset>,
     report: &mut PlaytestValidationReport,
+    ui_image_texture_for_resource: &mut HashMap<ResourceId, CookedUiImageTexture>,
     cdda_tracks: &mut Vec<PlaytestCddaTrack>,
     cdda_track_for_wav: &mut HashMap<String, u8>,
     ui_sfx_samples: &mut Vec<PlaytestUiSfxSample>,
     ui_sfx_cues: &mut Vec<PlaytestUiSfxCue>,
     ui_sfx_sample_for_wav: &mut HashMap<String, u16>,
+    ui_paints: &mut Vec<PlaytestUiPaint>,
     out: &mut Vec<PlaytestUiNode>,
 ) {
     let ordered_ids = scene.hierarchy_node_ids();
-    let id_to_index: HashMap<UiNodeId, u16> = ordered_ids
-        .iter()
-        .enumerate()
-        .map(|(index, id)| {
-            (
-                *id,
-                (index + node_first as usize).min(u16::MAX as usize) as u16,
-            )
-        })
-        .collect();
+    let mut runtime_index_for_id: HashMap<UiNodeId, u16> = HashMap::new();
 
-    let cooked = ordered_ids
-        .iter()
-        .filter_map(|id| scene.node(*id))
-        .map(|node| {
-            let parent = node.parent.and_then(|id| id_to_index.get(&id).copied());
-            let (
-                x,
-                y,
-                width,
-                height,
+    for id in ordered_ids {
+        let Some(node) = scene.node(id) else {
+            continue;
+        };
+        let parent = node
+            .parent
+            .and_then(|id| runtime_index_for_id.get(&id).copied());
+        let runtime_index = out.len().min(u16::MAX as usize) as u16;
+        runtime_index_for_id.insert(id, runtime_index);
+
+        if let UiNodeKind::Image {
+            rect,
+            texture,
+            tint,
+            effect,
+        } = &node.kind
+        {
+            cook_ui_image_node(
+                &node.name,
+                parent,
+                rect,
+                *texture,
+                *tint,
+                *effect,
+                project,
+                project_root,
+                ui_image_texture_for_resource,
+                assets,
+                report,
+                out,
+            );
+            continue;
+        }
+
+        let (
+            x,
+            y,
+            width,
+            height,
+            color,
+            background,
+            accent,
+            color_paint,
+            background_paint,
+            accent_paint,
+            value,
+            max,
+            texture_asset,
+            text,
+            tag,
+            action,
+            option,
+            flags,
+            font,
+            font_scale,
+            letter_spacing,
+        ) = match &node.kind {
+            UiNodeKind::Canvas { width, height } => (
+                0,
+                0,
+                (*width).max(1),
+                (*height).max(1),
+                [0, 0, 0],
+                [0, 0, 0],
+                [0, 0, 0],
+                None,
+                None,
+                None,
+                UiValueBinding::ConstantQ12(0),
+                UiValueBinding::ConstantQ12(0),
+                None,
+                String::new(),
+                String::new(),
+                PlaytestUiAction::default(),
+                psx_level::UI_OPTION_NONE,
+                0,
+                0,
+                default_ui_font_scale(),
+                default_ui_letter_spacing(),
+            ),
+            UiNodeKind::Group { rect } => (
+                rect.x,
+                rect.y,
+                rect.width.max(1),
+                rect.height.max(1),
+                [0, 0, 0],
+                [0, 0, 0],
+                [0, 0, 0],
+                None,
+                None,
+                None,
+                UiValueBinding::ConstantQ12(0),
+                UiValueBinding::ConstantQ12(0),
+                None,
+                String::new(),
+                String::new(),
+                PlaytestUiAction::default(),
+                psx_level::UI_OPTION_NONE,
+                ui_node_flags(rect.anchor, UiTextAlign::Left, false),
+                0,
+                default_ui_font_scale(),
+                default_ui_letter_spacing(),
+            ),
+            UiNodeKind::Rect {
+                rect,
                 color,
-                background,
-                accent,
-                value,
-                max,
-                texture_asset,
+                gradient,
+            } => (
+                rect.x,
+                rect.y,
+                rect.width.max(1),
+                rect.height.max(1),
+                *color,
+                [0, 0, 0],
+                [0, 0, 0],
+                cook_ui_paint(*color, *gradient, ui_paints),
+                None,
+                None,
+                UiValueBinding::ConstantQ12(0),
+                UiValueBinding::ConstantQ12(0),
+                None,
+                String::new(),
+                String::new(),
+                PlaytestUiAction::default(),
+                psx_level::UI_OPTION_NONE,
+                ui_node_flags(rect.anchor, UiTextAlign::Left, false),
+                0,
+                default_ui_font_scale(),
+                default_ui_letter_spacing(),
+            ),
+            UiNodeKind::Label {
+                rect,
                 text,
                 tag,
-                action,
-                option,
-                flags,
+                align,
+                wrap,
                 font,
                 font_scale,
                 letter_spacing,
-            ) = match &node.kind {
-                UiNodeKind::Canvas { width, height } => (
-                    0,
-                    0,
-                    (*width).max(1),
-                    (*height).max(1),
-                    [0, 0, 0],
-                    [0, 0, 0],
-                    [0, 0, 0],
-                    UiValueBinding::ConstantQ12(0),
-                    UiValueBinding::ConstantQ12(0),
-                    None,
-                    String::new(),
-                    String::new(),
-                    PlaytestUiAction::default(),
-                    psx_level::UI_OPTION_NONE,
-                    0,
-                    0,
-                    default_ui_font_scale(),
-                    default_ui_letter_spacing(),
-                ),
-                UiNodeKind::Group { rect } => (
-                    rect.x,
-                    rect.y,
-                    rect.width.max(1),
-                    rect.height.max(1),
-                    [0, 0, 0],
-                    [0, 0, 0],
-                    [0, 0, 0],
-                    UiValueBinding::ConstantQ12(0),
-                    UiValueBinding::ConstantQ12(0),
-                    None,
-                    String::new(),
-                    String::new(),
-                    PlaytestUiAction::default(),
-                    psx_level::UI_OPTION_NONE,
-                    ui_node_flags(rect.anchor, UiTextAlign::Left, false),
-                    0,
-                    default_ui_font_scale(),
-                    default_ui_letter_spacing(),
-                ),
-                UiNodeKind::Rect { rect, color } => (
-                    rect.x,
-                    rect.y,
-                    rect.width.max(1),
-                    rect.height.max(1),
-                    *color,
-                    [0, 0, 0],
-                    [0, 0, 0],
-                    UiValueBinding::ConstantQ12(0),
-                    UiValueBinding::ConstantQ12(0),
-                    None,
-                    String::new(),
-                    String::new(),
-                    PlaytestUiAction::default(),
-                    psx_level::UI_OPTION_NONE,
-                    ui_node_flags(rect.anchor, UiTextAlign::Left, false),
-                    0,
-                    default_ui_font_scale(),
-                    default_ui_letter_spacing(),
-                ),
-                UiNodeKind::Label {
-                    rect,
-                    text,
-                    tag,
-                    align,
-                    wrap,
-                    font,
-                    font_scale,
-                    letter_spacing,
-                    color,
-                } => (
-                    rect.x,
-                    rect.y,
-                    rect.width.max(1),
-                    rect.height.max(1),
-                    *color,
-                    [0, 0, 0],
-                    [0, 0, 0],
-                    UiValueBinding::ConstantQ12(0),
-                    UiValueBinding::ConstantQ12(0),
-                    None,
-                    text.clone(),
-                    tag.clone(),
-                    PlaytestUiAction::default(),
-                    psx_level::UI_OPTION_NONE,
-                    ui_node_flags(rect.anchor, *align, *wrap),
-                    font.runtime_index(),
-                    clamp_ui_font_scale(*font_scale),
-                    (*letter_spacing).clamp(MIN_UI_LETTER_SPACING, MAX_UI_LETTER_SPACING),
-                ),
-                UiNodeKind::Image {
-                    rect,
-                    texture,
-                    tint,
-                } => (
-                    rect.x,
-                    rect.y,
-                    rect.width.max(1),
-                    rect.height.max(1),
-                    *tint,
-                    [0, 0, 0],
-                    [0, 0, 0],
-                    UiValueBinding::ConstantQ12(0),
-                    UiValueBinding::ConstantQ12(0),
-                    texture.and_then(|texture_id| {
-                        cook_far_vista_texture_asset(
-                            project,
-                            project_root,
-                            texture_id,
-                            &format!("UI image '{}'", node.name),
-                            texture_asset_for_resource,
-                            assets,
-                            report,
-                        )
-                    }),
-                    String::new(),
-                    String::new(),
-                    PlaytestUiAction::default(),
-                    psx_level::UI_OPTION_NONE,
-                    ui_node_flags(rect.anchor, UiTextAlign::Left, false),
-                    0,
-                    default_ui_font_scale(),
-                    default_ui_letter_spacing(),
-                ),
-                UiNodeKind::Bar {
-                    rect,
-                    value,
-                    max,
-                    fill,
-                    background,
-                } => (
-                    rect.x,
-                    rect.y,
-                    rect.width.max(1),
-                    rect.height.max(1),
-                    *fill,
-                    *background,
-                    [0, 0, 0],
-                    *value,
-                    *max,
-                    None,
-                    String::new(),
-                    String::new(),
-                    PlaytestUiAction::default(),
-                    psx_level::UI_OPTION_NONE,
-                    ui_node_flags(rect.anchor, UiTextAlign::Left, false),
-                    0,
-                    default_ui_font_scale(),
-                    default_ui_letter_spacing(),
-                ),
-                UiNodeKind::Button {
-                    rect,
-                    label,
-                    align,
-                    font,
-                    font_scale,
-                    letter_spacing,
-                    color,
-                    text_color,
-                    transparent,
-                    action,
-                    ..
-                } => (
-                    rect.x,
-                    rect.y,
-                    rect.width.max(1),
-                    rect.height.max(1),
-                    *color,
-                    [0, 0, 0],
-                    *text_color,
-                    UiValueBinding::ConstantQ12(0),
-                    UiValueBinding::ConstantQ12(0),
-                    None,
-                    label.clone(),
-                    String::new(),
-                    cook_ui_action(*action),
-                    psx_level::UI_OPTION_NONE,
-                    ui_node_flags(rect.anchor, *align, false)
-                        | if *transparent {
-                            psx_level::ui_node_flags::BUTTON_TRANSPARENT
-                        } else {
-                            0
-                        },
-                    font.runtime_index(),
-                    clamp_ui_font_scale(*font_scale),
-                    (*letter_spacing).clamp(MIN_UI_LETTER_SPACING, MAX_UI_LETTER_SPACING),
-                ),
-                UiNodeKind::Slider {
-                    rect,
-                    option,
-                    track,
-                    fill,
-                    knob,
-                    ..
-                } => (
-                    rect.x,
-                    rect.y,
-                    rect.width.max(1),
-                    rect.height.max(1),
-                    *track,
-                    *fill,
-                    *knob,
-                    UiValueBinding::ConstantQ12(0),
-                    UiValueBinding::ConstantQ12(0),
-                    None,
-                    String::new(),
-                    String::new(),
-                    PlaytestUiAction::default(),
-                    cook_option_id(*option),
-                    ui_node_flags(rect.anchor, UiTextAlign::Left, false),
-                    0,
-                    default_ui_font_scale(),
-                    default_ui_letter_spacing(),
-                ),
-                UiNodeKind::Music {
-                    wav_path,
-                    volume,
-                    volume_option,
-                    loop_track,
-                } => (
-                    0,
-                    0,
-                    1,
-                    1,
-                    [0, 0, 0],
-                    [0, 0, 0],
-                    [0, 0, 0],
-                    volume_option
-                        .map(UiValueBinding::Option)
-                        .unwrap_or_else(|| {
-                            UiValueBinding::ConstantQ12(i32::from((*volume).min(100)))
-                        }),
-                    UiValueBinding::ConstantQ12(0),
-                    None,
-                    String::new(),
-                    String::new(),
-                    PlaytestUiAction::default(),
-                    cook_cdda_track_number(
-                        wav_path,
-                        project_root,
-                        cdda_tracks,
-                        cdda_track_for_wav,
-                        report,
-                    ),
-                    if *loop_track {
-                        psx_level::ui_node_flags::MUSIC_LOOP
+                color,
+                gradient,
+            } => (
+                rect.x,
+                rect.y,
+                rect.width.max(1),
+                rect.height.max(1),
+                *color,
+                [0, 0, 0],
+                [0, 0, 0],
+                cook_ui_paint(*color, *gradient, ui_paints),
+                None,
+                None,
+                UiValueBinding::ConstantQ12(0),
+                UiValueBinding::ConstantQ12(0),
+                None,
+                text.clone(),
+                tag.clone(),
+                PlaytestUiAction::default(),
+                psx_level::UI_OPTION_NONE,
+                ui_node_flags(rect.anchor, *align, *wrap),
+                font.runtime_index(),
+                clamp_ui_font_scale(*font_scale),
+                (*letter_spacing).clamp(MIN_UI_LETTER_SPACING, MAX_UI_LETTER_SPACING),
+            ),
+            UiNodeKind::Image { .. } => unreachable!("image nodes are handled above"),
+            UiNodeKind::Bar {
+                rect,
+                value,
+                max,
+                fill,
+                fill_gradient,
+                background,
+                background_gradient,
+            } => (
+                rect.x,
+                rect.y,
+                rect.width.max(1),
+                rect.height.max(1),
+                *fill,
+                *background,
+                [0, 0, 0],
+                cook_ui_paint(*fill, *fill_gradient, ui_paints),
+                cook_ui_paint(*background, *background_gradient, ui_paints),
+                None,
+                *value,
+                *max,
+                None,
+                String::new(),
+                String::new(),
+                PlaytestUiAction::default(),
+                psx_level::UI_OPTION_NONE,
+                ui_node_flags(rect.anchor, UiTextAlign::Left, false),
+                0,
+                default_ui_font_scale(),
+                default_ui_letter_spacing(),
+            ),
+            UiNodeKind::Button {
+                rect,
+                label,
+                align,
+                font,
+                font_scale,
+                letter_spacing,
+                color,
+                background_gradient,
+                text_color,
+                text_gradient,
+                transparent,
+                action,
+                ..
+            } => (
+                rect.x,
+                rect.y,
+                rect.width.max(1),
+                rect.height.max(1),
+                *color,
+                [0, 0, 0],
+                *text_color,
+                cook_ui_paint(*color, *background_gradient, ui_paints),
+                None,
+                cook_ui_paint(*text_color, *text_gradient, ui_paints),
+                UiValueBinding::ConstantQ12(0),
+                UiValueBinding::ConstantQ12(0),
+                None,
+                label.clone(),
+                String::new(),
+                cook_ui_action(*action),
+                psx_level::UI_OPTION_NONE,
+                ui_node_flags(rect.anchor, *align, false)
+                    | if *transparent {
+                        psx_level::ui_node_flags::BUTTON_TRANSPARENT
                     } else {
                         0
                     },
-                    0,
-                    default_ui_font_scale(),
-                    default_ui_letter_spacing(),
-                ),
-            };
-            let (sfx_first, sfx_count) = cook_ui_node_sfx(
-                &node.kind,
-                project_root,
-                ui_sfx_samples,
-                ui_sfx_cues,
-                ui_sfx_sample_for_wav,
-                report,
-            );
-            PlaytestUiNode {
-                parent,
-                kind: node.kind.clone(),
-                x,
-                y,
-                width,
-                height,
-                color,
-                background,
-                accent,
-                value,
-                max,
-                texture_asset,
-                text,
-                tag,
-                action,
+                font.runtime_index(),
+                clamp_ui_font_scale(*font_scale),
+                (*letter_spacing).clamp(MIN_UI_LETTER_SPACING, MAX_UI_LETTER_SPACING),
+            ),
+            UiNodeKind::Slider {
+                rect,
                 option,
-                flags,
-                sfx_first,
-                sfx_count,
-                font,
-                font_scale,
-                letter_spacing,
-            }
-        })
-        .collect::<Vec<_>>();
-    out.extend(cooked);
+                track,
+                track_gradient,
+                fill,
+                fill_gradient,
+                knob,
+                knob_gradient,
+                ..
+            } => (
+                rect.x,
+                rect.y,
+                rect.width.max(1),
+                rect.height.max(1),
+                *track,
+                *fill,
+                *knob,
+                cook_ui_paint(*track, *track_gradient, ui_paints),
+                cook_ui_paint(*fill, *fill_gradient, ui_paints),
+                cook_ui_paint(*knob, *knob_gradient, ui_paints),
+                UiValueBinding::ConstantQ12(0),
+                UiValueBinding::ConstantQ12(0),
+                None,
+                String::new(),
+                String::new(),
+                PlaytestUiAction::default(),
+                cook_option_id(*option),
+                ui_node_flags(rect.anchor, UiTextAlign::Left, false),
+                0,
+                default_ui_font_scale(),
+                default_ui_letter_spacing(),
+            ),
+            UiNodeKind::Music {
+                wav_path,
+                volume,
+                volume_option,
+                loop_track,
+            } => (
+                0,
+                0,
+                1,
+                1,
+                [0, 0, 0],
+                [0, 0, 0],
+                [0, 0, 0],
+                None,
+                None,
+                None,
+                volume_option
+                    .map(UiValueBinding::Option)
+                    .unwrap_or_else(|| UiValueBinding::ConstantQ12(i32::from((*volume).min(100)))),
+                UiValueBinding::ConstantQ12(0),
+                None,
+                String::new(),
+                String::new(),
+                PlaytestUiAction::default(),
+                cook_cdda_track_number(
+                    wav_path,
+                    project_root,
+                    cdda_tracks,
+                    cdda_track_for_wav,
+                    report,
+                ),
+                if *loop_track {
+                    psx_level::ui_node_flags::MUSIC_LOOP
+                } else {
+                    0
+                },
+                0,
+                default_ui_font_scale(),
+                default_ui_letter_spacing(),
+            ),
+        };
+        let (sfx_first, sfx_count) = cook_ui_node_sfx(
+            &node.kind,
+            project_root,
+            ui_sfx_samples,
+            ui_sfx_cues,
+            ui_sfx_sample_for_wav,
+            report,
+        );
+        let visual_rect = node.kind.rect();
+        let rotation_degrees = visual_rect.map(|rect| rect.rotation_degrees).unwrap_or(0);
+        let flags = visual_rect
+            .map(|rect| flags | ui_rect_transform_flags(rect))
+            .unwrap_or(flags);
+        out.push(PlaytestUiNode {
+            parent,
+            kind: node.kind.clone(),
+            x,
+            y,
+            width,
+            height,
+            color,
+            background,
+            accent,
+            color_paint,
+            background_paint,
+            accent_paint,
+            value,
+            max,
+            texture_asset,
+            image_effect: UiImageEffect::None,
+            text,
+            tag,
+            action,
+            option,
+            rotation_degrees,
+            flags,
+            sfx_first,
+            sfx_count,
+            font,
+            font_scale,
+            letter_spacing,
+        });
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cook_ui_image_node(
+    name: &str,
+    parent: Option<u16>,
+    rect: &UiRect,
+    texture: Option<ResourceId>,
+    tint: [u8; 3],
+    effect: UiImageEffect,
+    project: &ProjectDocument,
+    project_root: &Path,
+    ui_image_texture_for_resource: &mut HashMap<ResourceId, CookedUiImageTexture>,
+    assets: &mut Vec<PlaytestAsset>,
+    report: &mut PlaytestValidationReport,
+    out: &mut Vec<PlaytestUiNode>,
+) {
+    let Some(texture_id) = texture else {
+        out.push(cooked_ui_image_node(parent, *rect, tint, effect, None));
+        return;
+    };
+    let Some(cooked) = cook_ui_image_texture_asset(
+        project,
+        project_root,
+        texture_id,
+        &format!("UI image '{name}'"),
+        ui_image_texture_for_resource,
+        assets,
+        report,
+    ) else {
+        out.push(cooked_ui_image_node(parent, *rect, tint, effect, None));
+        return;
+    };
+    if cooked.fragments.len() <= 1 {
+        out.push(cooked_ui_image_node(
+            parent,
+            *rect,
+            tint,
+            effect,
+            cooked
+                .fragments
+                .first()
+                .map(|fragment| fragment.asset_index),
+        ));
+        return;
+    }
+
+    let group_index = out.len().min(u16::MAX as usize) as u16;
+    out.push(cooked_ui_group_node(parent, *rect));
+
+    let mut screen_x = 0u16;
+    for (index, fragment) in cooked.fragments.iter().enumerate() {
+        let remaining = rect.width.max(1).saturating_sub(screen_x);
+        let screen_w = if index + 1 == cooked.fragments.len() {
+            remaining.max(1)
+        } else {
+            scale_ui_fragment_width(rect.width.max(1), fragment.width, cooked.width)
+                .min(remaining)
+                .max(1)
+        };
+        let child_rect = UiRect::new(
+            screen_x.min(i16::MAX as u16) as i16,
+            0,
+            screen_w,
+            rect.height.max(1),
+        );
+        out.push(cooked_ui_image_node(
+            Some(group_index),
+            child_rect,
+            tint,
+            effect,
+            Some(fragment.asset_index),
+        ));
+        screen_x = screen_x.saturating_add(screen_w);
+    }
+}
+
+fn scale_ui_fragment_width(screen_width: u16, fragment_width: u16, texture_width: u16) -> u16 {
+    if texture_width == 0 {
+        return screen_width.max(1);
+    }
+    ((u32::from(screen_width) * u32::from(fragment_width)) / u32::from(texture_width))
+        .min(u32::from(u16::MAX)) as u16
+}
+
+fn cook_ui_paint(
+    from: [u8; 3],
+    gradient: Option<UiGradient>,
+    ui_paints: &mut Vec<PlaytestUiPaint>,
+) -> Option<u16> {
+    let gradient = gradient?;
+    if gradient.to == from {
+        return None;
+    }
+    let paint = PlaytestUiPaint {
+        from,
+        to: gradient.to,
+        direction: gradient.direction,
+    };
+    if let Some(index) = ui_paints.iter().position(|candidate| *candidate == paint) {
+        return Some(index.min(u16::MAX as usize) as u16);
+    }
+    let index = ui_paints.len().min(u16::MAX as usize) as u16;
+    ui_paints.push(paint);
+    Some(index)
+}
+
+fn cooked_ui_group_node(parent: Option<u16>, rect: UiRect) -> PlaytestUiNode {
+    PlaytestUiNode {
+        parent,
+        kind: UiNodeKind::Group { rect },
+        x: rect.x,
+        y: rect.y,
+        width: rect.width.max(1),
+        height: rect.height.max(1),
+        color: [0, 0, 0],
+        background: [0, 0, 0],
+        accent: [0, 0, 0],
+        color_paint: None,
+        background_paint: None,
+        accent_paint: None,
+        value: UiValueBinding::ConstantQ12(0),
+        max: UiValueBinding::ConstantQ12(0),
+        texture_asset: None,
+        image_effect: UiImageEffect::None,
+        text: String::new(),
+        tag: String::new(),
+        action: PlaytestUiAction::default(),
+        option: psx_level::UI_OPTION_NONE,
+        rotation_degrees: rect.rotation_degrees,
+        flags: ui_node_flags(rect.anchor, UiTextAlign::Left, false) | ui_rect_transform_flags(rect),
+        sfx_first: psx_level::UI_SFX_NONE,
+        sfx_count: 0,
+        font: 0,
+        font_scale: default_ui_font_scale(),
+        letter_spacing: default_ui_letter_spacing(),
+    }
+}
+
+fn cooked_ui_image_node(
+    parent: Option<u16>,
+    rect: UiRect,
+    tint: [u8; 3],
+    effect: UiImageEffect,
+    texture_asset: Option<usize>,
+) -> PlaytestUiNode {
+    PlaytestUiNode {
+        parent,
+        kind: UiNodeKind::Image {
+            rect,
+            texture: None,
+            tint,
+            effect,
+        },
+        x: rect.x,
+        y: rect.y,
+        width: rect.width.max(1),
+        height: rect.height.max(1),
+        color: tint,
+        background: [0, 0, 0],
+        accent: [0, 0, 0],
+        color_paint: None,
+        background_paint: None,
+        accent_paint: None,
+        value: UiValueBinding::ConstantQ12(0),
+        max: UiValueBinding::ConstantQ12(0),
+        texture_asset,
+        image_effect: effect,
+        text: String::new(),
+        tag: String::new(),
+        action: PlaytestUiAction::default(),
+        option: psx_level::UI_OPTION_NONE,
+        rotation_degrees: rect.rotation_degrees,
+        flags: ui_node_flags(rect.anchor, UiTextAlign::Left, false) | ui_rect_transform_flags(rect),
+        sfx_first: psx_level::UI_SFX_NONE,
+        sfx_count: 0,
+        font: 0,
+        font_scale: default_ui_font_scale(),
+        letter_spacing: default_ui_letter_spacing(),
+    }
+}
+
+fn cook_ui_image_texture_asset(
+    project: &ProjectDocument,
+    project_root: &Path,
+    texture_id: ResourceId,
+    context: &str,
+    ui_image_texture_for_resource: &mut HashMap<ResourceId, CookedUiImageTexture>,
+    assets: &mut Vec<PlaytestAsset>,
+    report: &mut PlaytestValidationReport,
+) -> Option<CookedUiImageTexture> {
+    if let Some(existing) = ui_image_texture_for_resource.get(&texture_id).cloned() {
+        return Some(existing);
+    }
+    let Some(texture_resource) = find_resource(project, texture_id) else {
+        report.warn(format!(
+            "{context}: texture resource #{} is missing; using placeholder",
+            texture_id.raw()
+        ));
+        return None;
+    };
+    let bytes = match load_texture_bytes(texture_resource, project_root) {
+        Ok(bytes) => bytes,
+        Err(msg) => {
+            report.warn(format!("{context}: {msg}; using placeholder"));
+            return None;
+        }
+    };
+    let texture = match psx_asset::Texture::from_bytes(&bytes) {
+        Ok(texture) => texture,
+        Err(error) => {
+            report.warn(format!(
+                "{context}: texture '{}' parse failed: {error:?}; using placeholder",
+                texture_resource.name
+            ));
+            return None;
+        }
+    };
+    if texture.depth() != TextureDepth::Bit4 || texture.clut_entries() != 16 {
+        report.warn(format!(
+            "{context}: texture '{}' must be 4bpp with one 16-colour CLUT for UI images; using placeholder",
+            texture_resource.name
+        ));
+        return None;
+    }
+    if texture.width() == 0
+        || texture.height() == 0
+        || texture.height() > UI_LARGE_IMAGE_MAX_DIMENSION
+    {
+        report.warn(format!(
+            "{context}: texture '{}' has unsupported UI dimensions {}x{}; using placeholder",
+            texture_resource.name,
+            texture.width(),
+            texture.height()
+        ));
+        return None;
+    }
+
+    let fragment_count = ui_image_fragment_count(texture.width());
+    let nominal_width = texture.width().div_ceil(fragment_count);
+    let mut fragments = Vec::with_capacity(fragment_count as usize);
+    let mut source_x = 0u16;
+    let mut fragment_index = 0u16;
+    while source_x < texture.width() {
+        let width = nominal_width.min(texture.width() - source_x).max(1);
+        let fragment_bytes = if source_x == 0 && width == texture.width() {
+            bytes.clone()
+        } else {
+            encode_ui_image_fragment_psxt(&texture, source_x, width)?
+        };
+        let asset_index = assets.len();
+        assets.push(PlaytestAsset {
+            kind: PlaytestAssetKind::Texture,
+            bytes: fragment_bytes,
+            filename: format!("ui_image_{:04}_{fragment_index:02}.psxt", texture_id.raw()),
+            source_label: if fragment_count == 1 {
+                texture_resource.name.clone()
+            } else {
+                format!(
+                    "{} strip {} of {}",
+                    texture_resource.name,
+                    fragment_index + 1,
+                    fragment_count
+                )
+            },
+        });
+        fragments.push(CookedUiImageFragment { asset_index, width });
+        source_x = source_x.saturating_add(width);
+        fragment_index = fragment_index.saturating_add(1);
+    }
+
+    let cooked = CookedUiImageTexture {
+        width: texture.width(),
+        fragments,
+    };
+    ui_image_texture_for_resource.insert(texture_id, cooked.clone());
+    Some(cooked)
+}
+
+fn ui_image_fragment_count(width: u16) -> u16 {
+    if width <= UI_LARGE_IMAGE_MAX_DIMENSION {
+        1
+    } else {
+        width.div_ceil(UI_LARGE_IMAGE_STRIP_WIDTH).max(1)
+    }
+}
+
+fn encode_ui_image_fragment_psxt(
+    texture: &psx_asset::Texture<'_>,
+    source_x: u16,
+    width: u16,
+) -> Option<Vec<u8>> {
+    let height = texture.height();
+    let src_width = texture.width();
+    let src_hw_per_row = TextureHeader::halfwords_per_row(TextureDepth::Bit4, src_width);
+    let dst_hw_per_row = TextureHeader::halfwords_per_row(TextureDepth::Bit4, width);
+    let mut dst_halfwords = vec![0u16; usize::from(dst_hw_per_row) * usize::from(height)];
+
+    let src_pixels = texture.pixel_bytes();
+    let mut y = 0u16;
+    while y < height {
+        let mut x = 0u16;
+        while x < width {
+            let source_pixel_x = source_x.checked_add(x)?;
+            let src_hw_index = usize::from(y)
+                .checked_mul(usize::from(src_hw_per_row))?
+                .checked_add(usize::from(source_pixel_x / 4))?;
+            let src_byte = src_hw_index.checked_mul(2)?;
+            let source_hw = u16::from_le_bytes([
+                *src_pixels.get(src_byte)?,
+                *src_pixels.get(src_byte.checked_add(1)?)?,
+            ]);
+            let palette_index = (source_hw >> ((source_pixel_x & 3) * 4)) & 0x000f;
+
+            let dst_hw_index = usize::from(y)
+                .checked_mul(usize::from(dst_hw_per_row))?
+                .checked_add(usize::from(x / 4))?;
+            dst_halfwords[dst_hw_index] |= palette_index << ((x & 3) * 4);
+            x = x.saturating_add(1);
+        }
+        y = y.saturating_add(1);
+    }
+
+    Some(assemble_ui_image_psxt(
+        width,
+        height,
+        texture.flags(),
+        &dst_halfwords,
+        texture.clut_bytes(),
+    ))
+}
+
+fn assemble_ui_image_psxt(
+    width: u16,
+    height: u16,
+    flags: u16,
+    pixel_hw: &[u16],
+    clut_bytes: &[u8],
+) -> Vec<u8> {
+    let pixel_bytes = (pixel_hw.len() * 2) as u32;
+    let clut_len = clut_bytes.len() as u32;
+    let payload_len = TextureHeader::SIZE as u32 + pixel_bytes + clut_len;
+    let mut out = Vec::with_capacity(AssetHeader::SIZE + payload_len as usize);
+    out.extend_from_slice(&TEXTURE_MAGIC);
+    out.extend_from_slice(&TEXTURE_VERSION.to_le_bytes());
+    out.extend_from_slice(&flags.to_le_bytes());
+    out.extend_from_slice(&payload_len.to_le_bytes());
+    out.push(TextureDepth::Bit4 as u8);
+    out.push(0);
+    out.extend_from_slice(&width.to_le_bytes());
+    out.extend_from_slice(&height.to_le_bytes());
+    out.extend_from_slice(&16u16.to_le_bytes());
+    out.extend_from_slice(&pixel_bytes.to_le_bytes());
+    out.extend_from_slice(&clut_len.to_le_bytes());
+    for hw in pixel_hw {
+        out.extend_from_slice(&hw.to_le_bytes());
+    }
+    out.extend_from_slice(clut_bytes);
+    out
 }
 
 fn cook_cdda_track_number(
@@ -1975,12 +2466,26 @@ fn ui_node_flags(anchor: UiAnchor, align: UiTextAlign, wrap: bool) -> u16 {
     flags
 }
 
+fn ui_rect_transform_flags(rect: UiRect) -> u16 {
+    let mut flags = 0;
+    if rect.flip_x {
+        flags |= psx_level::ui_node_flags::FLIP_X;
+    }
+    if rect.flip_y {
+        flags |= psx_level::ui_node_flags::FLIP_Y;
+    }
+    flags
+}
+
 /// Lower an authored [`UiAction`] to a cooked [`PlaytestUiAction`].
 /// `GotoScene` resolves the target [`crate::UiSceneId`] to a cooked
 /// scene id by taking its low 16 bits, matching how `cook_ui_nodes`
 /// assigns each [`PlaytestUiScene::id`].
 fn cook_ui_action(action: UiAction) -> PlaytestUiAction {
     match action {
+        UiAction::GotoState(state) => PlaytestUiAction::GotoState {
+            state: cook_scene_state_id(state),
+        },
         UiAction::GotoScene(scene) => PlaytestUiAction::GotoScene {
             scene: (scene.raw() & u16::MAX as u64) as u16,
         },
@@ -3747,6 +4252,14 @@ struct EquipmentComponent<'a> {
     weapon_grip: &'a str,
 }
 
+#[derive(Clone, Copy)]
+struct InteractableComponent<'a> {
+    kind: &'a crate::InteractableKind,
+    prompt: &'a str,
+    radius: u16,
+    enabled: bool,
+}
+
 fn component_model_renderer(
     scene: &crate::Scene,
     host: &SceneNode,
@@ -3828,6 +4341,26 @@ fn component_equipment<'a>(
             weapon: *weapon,
             character_socket,
             weapon_grip,
+        }),
+        _ => None,
+    })
+}
+
+fn component_interactable<'a>(
+    scene: &'a crate::Scene,
+    host: &'a SceneNode,
+) -> Option<InteractableComponent<'a>> {
+    component_children(scene, host).find_map(|node| match &node.kind {
+        NodeKind::Interactable {
+            kind,
+            prompt,
+            radius,
+            enabled,
+        } => Some(InteractableComponent {
+            kind,
+            prompt,
+            radius: *radius,
+            enabled: *enabled,
         }),
         _ => None,
     })
@@ -4144,6 +4677,82 @@ fn push_particle_emitter(
         flags: particle_emitter_flags::ENABLED,
     });
     true
+}
+
+fn push_interactable(
+    node_name: &str,
+    room_index: u16,
+    pos: [i32; 3],
+    yaw: i16,
+    component: InteractableComponent<'_>,
+    messages: &mut Vec<PlaytestInteractableMessage>,
+    interactables: &mut Vec<PlaytestInteractable>,
+    report: &mut PlaytestValidationReport,
+) -> bool {
+    if component.radius == 0 {
+        report.error(format!(
+            "Interactable on '{node_name}' has radius 0 (must be > 0)"
+        ));
+        return false;
+    }
+
+    let prompt = non_empty_or(
+        component.prompt,
+        default_prompt_for_interactable(component.kind),
+    );
+    let (kind, title, body, checkpoint_id) = match component.kind {
+        crate::InteractableKind::Message { title, body } => (
+            PlaytestInteractableKind::Message,
+            non_empty_or(title, "ECHO REMNANT").to_string(),
+            body.clone(),
+            String::new(),
+        ),
+        crate::InteractableKind::Checkpoint {
+            checkpoint_id,
+            title,
+            body,
+        } => (
+            PlaytestInteractableKind::Checkpoint,
+            non_empty_or(title, "SYNC RELAY").to_string(),
+            non_empty_or(body, "Relay synchronized.").to_string(),
+            non_empty_or(checkpoint_id, node_name).to_string(),
+        ),
+    };
+    let message = messages.len().min(u16::MAX as usize) as u16;
+    messages.push(PlaytestInteractableMessage { title, body });
+    interactables.push(PlaytestInteractable {
+        room: room_index,
+        kind,
+        x: pos[0],
+        y: pos[1],
+        z: pos[2],
+        yaw,
+        radius: component.radius,
+        prompt: prompt.to_string(),
+        message,
+        checkpoint_id,
+        flags: if component.enabled {
+            psx_level::interactable_flags::ENABLED
+        } else {
+            0
+        },
+    });
+    true
+}
+
+fn non_empty_or<'a>(value: &'a str, fallback: &'a str) -> &'a str {
+    if value.trim().is_empty() {
+        fallback
+    } else {
+        value
+    }
+}
+
+fn default_prompt_for_interactable(kind: &crate::InteractableKind) -> &'static str {
+    match kind {
+        crate::InteractableKind::Message { .. } => "READ ECHO",
+        crate::InteractableKind::Checkpoint { .. } => "SYNCHRONIZE",
+    }
 }
 
 const fn particle_blend_mode_code(mode: PsxBlendMode) -> u8 {
@@ -8104,13 +8713,14 @@ mod tests {
                 font_scale: crate::default_ui_font_scale(),
                 letter_spacing: -2,
                 color: [220, 226, 240],
+                gradient: None,
             },
         );
 
         let mut texture_asset_for_resource = HashMap::new();
         let mut assets = Vec::new();
         let mut report = PlaytestValidationReport::default();
-        let (nodes, scenes, _sfx_samples, _sfx_cues, flow, _cdda_tracks) = cook_ui_nodes(
+        let (nodes, _paints, scenes, _sfx_samples, _sfx_cues, flow, _cdda_tracks) = cook_ui_nodes(
             &project,
             Path::new("."),
             &mut texture_asset_for_resource,
@@ -8120,20 +8730,37 @@ mod tests {
         assert_eq!(scenes.len(), 1);
         assert_eq!(scenes[0].node_first, 0);
         assert_eq!(scenes[0].node_count as usize, nodes.len());
+        let first_ui_state = flow
+            .scene_states
+            .iter()
+            .find(|state| state.ui_scene == scenes[0].id)
+            .expect("ui scene state cooked");
         assert_eq!(
             flow.states.first(),
-            Some(&PlaytestFlowState::UiScene {
-                scene: scenes[0].id
+            Some(&PlaytestFlowState::SceneState {
+                state: first_ui_state.id
             })
         );
-        assert_eq!(flow.states.last(), Some(&PlaytestFlowState::Gameplay));
+        let gameplay_state = flow
+            .scene_states
+            .iter()
+            .find(|state| state.world == PlaytestWorldLayer::Gameplay)
+            .expect("gameplay scene state cooked");
+        assert_eq!(
+            flow.states.last(),
+            Some(&PlaytestFlowState::SceneState {
+                state: gameplay_state.id
+            })
+        );
         // With the default boot target (Gameplay), entry points at the gameplay
         // state (the last one), not the first UI scene. Authoring a UI boot
         // target via `project.boot` is what moves entry onto a menu scene.
         assert_eq!(flow.entry as usize, flow.states.len() - 1);
         assert_eq!(
             flow.states.get(flow.entry as usize),
-            Some(&PlaytestFlowState::Gameplay)
+            Some(&PlaytestFlowState::SceneState {
+                state: gameplay_state.id
+            })
         );
         let group_index = nodes
             .iter()
@@ -8157,6 +8784,82 @@ mod tests {
     }
 
     #[test]
+    fn ui_gradient_roles_cook_to_paint_table_refs() {
+        let mut project = ProjectDocument::new("ui-gradient");
+        let scene = project.active_ui_scene_mut().expect("default ui scene");
+        scene.add_node(
+            scene.root,
+            "Panel",
+            UiNodeKind::Rect {
+                rect: UiRect::new(4, 5, 80, 20),
+                color: [20, 30, 40],
+                gradient: Some(crate::UiGradient::new(
+                    [80, 90, 100],
+                    crate::UiGradientDirection::Horizontal,
+                )),
+            },
+        );
+
+        let mut texture_asset_for_resource = HashMap::new();
+        let mut assets = Vec::new();
+        let mut report = PlaytestValidationReport::default();
+        let (nodes, paints, _scenes, _sfx_samples, _sfx_cues, _flow, _cdda_tracks) = cook_ui_nodes(
+            &project,
+            Path::new("."),
+            &mut texture_asset_for_resource,
+            &mut assets,
+            &mut report,
+        );
+
+        assert!(report.is_ok(), "warnings/errors: {:?}", report);
+        assert_eq!(paints.len(), 1);
+        assert_eq!(paints[0].from, [20, 30, 40]);
+        assert_eq!(paints[0].to, [80, 90, 100]);
+        assert_eq!(paints[0].direction, crate::UiGradientDirection::Horizontal);
+        let rect = nodes
+            .iter()
+            .find(|node| matches!(node.kind, UiNodeKind::Rect { .. }))
+            .expect("rect cooked");
+        assert_eq!(rect.color_paint, Some(0));
+        assert_eq!(rect.background_paint, None);
+        assert_eq!(rect.accent_paint, None);
+    }
+
+    #[test]
+    fn ui_image_effect_cooks_to_image_node() {
+        let mut project = ProjectDocument::new("ui-image-effect");
+        let scene = project.active_ui_scene_mut().expect("default ui scene");
+        scene.add_node(
+            scene.root,
+            "Glow",
+            UiNodeKind::Image {
+                rect: UiRect::new(4, 5, 80, 20),
+                texture: None,
+                tint: [128, 128, 128],
+                effect: UiImageEffect::DiagonalSweep,
+            },
+        );
+
+        let mut texture_asset_for_resource = HashMap::new();
+        let mut assets = Vec::new();
+        let mut report = PlaytestValidationReport::default();
+        let (nodes, _paints, _scenes, _sfx_samples, _sfx_cues, _flow, _cdda_tracks) = cook_ui_nodes(
+            &project,
+            Path::new("."),
+            &mut texture_asset_for_resource,
+            &mut assets,
+            &mut report,
+        );
+
+        assert!(report.is_ok(), "warnings/errors: {:?}", report);
+        let image = nodes
+            .iter()
+            .find(|node| matches!(node.kind, UiNodeKind::Image { .. }))
+            .expect("image cooked");
+        assert_eq!(image.image_effect, UiImageEffect::DiagonalSweep);
+    }
+
+    #[test]
     fn boot_target_sets_game_flow_entry_to_the_chosen_scene() {
         // Two UI scenes; choose the SECOND as the boot target and confirm the
         // cooked flow enters that scene's state (not index 0, not gameplay).
@@ -8172,7 +8875,7 @@ mod tests {
         let mut texture_asset_for_resource = HashMap::new();
         let mut assets = Vec::new();
         let mut report = PlaytestValidationReport::default();
-        let (_nodes, scenes, _sfx_samples, _sfx_cues, flow, _cdda_tracks) = cook_ui_nodes(
+        let (_nodes, _paints, scenes, _sfx_samples, _sfx_cues, flow, _cdda_tracks) = cook_ui_nodes(
             &project,
             Path::new("."),
             &mut texture_asset_for_resource,
@@ -8184,11 +8887,15 @@ mod tests {
             .iter()
             .position(|scene| u64::from(scene.id) == menu_id.raw())
             .expect("menu scene cooked");
-        assert_eq!(flow.entry as usize, menu_pos);
+        let menu_state = flow
+            .scene_states
+            .iter()
+            .find(|state| state.ui_scene == scenes[menu_pos].id)
+            .expect("menu scene state cooked");
         assert_eq!(
             flow.states.get(flow.entry as usize),
-            Some(&PlaytestFlowState::UiScene {
-                scene: scenes[menu_pos].id
+            Some(&PlaytestFlowState::SceneState {
+                state: menu_state.id
             })
         );
     }
@@ -8204,16 +8911,23 @@ mod tests {
         let mut texture_asset_for_resource = HashMap::new();
         let mut assets = Vec::new();
         let mut report = PlaytestValidationReport::default();
-        let (_nodes, _scenes, _sfx_samples, _sfx_cues, flow, _cdda_tracks) = cook_ui_nodes(
+        let (_nodes, _paints, _scenes, _sfx_samples, _sfx_cues, flow, _cdda_tracks) = cook_ui_nodes(
             &project,
             Path::new("."),
             &mut texture_asset_for_resource,
             &mut assets,
             &mut report,
         );
+        let gameplay_state = flow
+            .scene_states
+            .iter()
+            .find(|state| state.world == PlaytestWorldLayer::Gameplay)
+            .expect("gameplay scene state cooked");
         assert_eq!(
             flow.states.get(flow.entry as usize),
-            Some(&PlaytestFlowState::Gameplay)
+            Some(&PlaytestFlowState::SceneState {
+                state: gameplay_state.id
+            })
         );
     }
 
@@ -8237,7 +8951,9 @@ mod tests {
                 font_scale: crate::default_ui_font_scale(),
                 letter_spacing: 4,
                 color: [50, 60, 70],
+                background_gradient: None,
                 text_color: [236, 240, 248],
+                text_gradient: None,
                 transparent: false,
                 action: UiAction::GotoScene(target_scene),
                 sfx: crate::UiSfxBindings::default(),
@@ -8250,8 +8966,11 @@ mod tests {
                 rect: UiRect::new(10, 40, 96, 8),
                 option,
                 track: [11, 12, 13],
+                track_gradient: None,
                 fill: [21, 22, 23],
+                fill_gradient: None,
                 knob: [31, 32, 33],
+                knob_gradient: None,
                 sfx: crate::UiSfxBindings::default(),
             },
         );
@@ -8259,7 +8978,7 @@ mod tests {
         let mut texture_asset_for_resource = HashMap::new();
         let mut assets = Vec::new();
         let mut report = PlaytestValidationReport::default();
-        let (nodes, _scenes, _sfx_samples, _sfx_cues, _flow, _cdda_tracks) = cook_ui_nodes(
+        let (nodes, _paints, _scenes, _sfx_samples, _sfx_cues, _flow, _cdda_tracks) = cook_ui_nodes(
             &project,
             Path::new("."),
             &mut texture_asset_for_resource,
@@ -8315,7 +9034,9 @@ mod tests {
                 font_scale: crate::default_ui_font_scale(),
                 letter_spacing: crate::default_ui_letter_spacing(),
                 color: [50, 60, 70],
+                background_gradient: None,
                 text_color: [236, 240, 248],
+                text_gradient: None,
                 transparent: false,
                 action: UiAction::Back,
                 sfx: crate::UiSfxBindings {
@@ -8332,7 +9053,7 @@ mod tests {
         let mut texture_asset_for_resource = HashMap::new();
         let mut assets = Vec::new();
         let mut report = PlaytestValidationReport::default();
-        let (nodes, _scenes, samples, cues, _flow, _cdda_tracks) = cook_ui_nodes(
+        let (nodes, _paints, _scenes, samples, cues, _flow, _cdda_tracks) = cook_ui_nodes(
             &project,
             &root,
             &mut texture_asset_for_resource,
@@ -8373,7 +9094,9 @@ mod tests {
                 font_scale: crate::default_ui_font_scale(),
                 letter_spacing: crate::default_ui_letter_spacing(),
                 color: [40, 40, 40],
+                background_gradient: None,
                 text_color: [236, 240, 248],
+                text_gradient: None,
                 transparent: false,
                 action: UiAction::SetOption { option, delta: 2 },
                 sfx: crate::UiSfxBindings::default(),
@@ -8390,7 +9113,9 @@ mod tests {
                 font_scale: crate::default_ui_font_scale(),
                 letter_spacing: crate::default_ui_letter_spacing(),
                 color: [40, 40, 40],
+                background_gradient: None,
                 text_color: [236, 240, 248],
+                text_gradient: None,
                 transparent: false,
                 action: UiAction::Back,
                 sfx: crate::UiSfxBindings::default(),
@@ -8400,7 +9125,7 @@ mod tests {
         let mut texture_asset_for_resource = HashMap::new();
         let mut assets = Vec::new();
         let mut report = PlaytestValidationReport::default();
-        let (nodes, _scenes, _sfx_samples, _sfx_cues, _flow, _cdda_tracks) = cook_ui_nodes(
+        let (nodes, _paints, _scenes, _sfx_samples, _sfx_cues, _flow, _cdda_tracks) = cook_ui_nodes(
             &project,
             Path::new("."),
             &mut texture_asset_for_resource,
@@ -10546,6 +11271,48 @@ mod tests {
             "color: [{}, {}, {}]",
             color[0], color[1], color[2]
         )));
+    }
+
+    #[test]
+    fn interactable_component_emits_prompt_and_message_records() {
+        let mut project = ProjectDocument::starter();
+        let scene = project.active_scene_mut();
+        let room = scene
+            .nodes()
+            .iter()
+            .find(|n| matches!(n.kind, NodeKind::Room { .. }))
+            .map(|n| n.id)
+            .expect("starter has room");
+        let entity = scene.add_node(room, "Echo Body", NodeKind::Entity);
+        scene.add_node(
+            entity,
+            "Interactable",
+            NodeKind::Interactable {
+                kind: crate::InteractableKind::Message {
+                    title: "ECHO REMNANT".to_string(),
+                    body: "The signal breaks here.".to_string(),
+                },
+                prompt: "READ ECHO".to_string(),
+                radius: 128,
+                enabled: true,
+            },
+        );
+
+        let (package, report) = build_package(&project, &starter_project_root());
+        assert!(report.is_ok(), "errors: {:?}", report.errors);
+        let package = package.expect("cooks");
+        assert_eq!(package.interactables.len(), 1);
+        assert_eq!(package.interactable_messages.len(), 1);
+        assert_eq!(package.interactables[0].prompt, "READ ECHO");
+        assert_eq!(package.interactables[0].radius, 128);
+        assert_eq!(package.interactable_messages[0].title, "ECHO REMNANT");
+
+        let src = render_manifest_source(&package);
+        assert!(src.contains("pub static INTERACTABLE_MESSAGES"));
+        assert!(src.contains("pub static INTERACTABLES"));
+        assert!(src.contains("InteractableKind::Message"));
+        assert!(src.contains("READ ECHO"));
+        assert!(src.contains("The signal breaks here."));
     }
 
     #[test]
