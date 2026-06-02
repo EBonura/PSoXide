@@ -87,6 +87,14 @@ pub mod stage {
     pub const SIM_PUMP: u16 = 39;
     /// Character motor solve (floor snap + wall sweep), excludes the gather.
     pub const SIM_SOLVE: u16 = 40;
+    /// Solid unbroken editor box props.
+    pub const BOX_PROPS: u16 = 41;
+    /// Persistent floor debris from broken editor box props.
+    pub const BOX_PROP_DEBRIS: u16 = 42;
+    /// Transient break shards from editor box props.
+    pub const BOX_PROP_SHARDS: u16 = 43;
+    /// Editor-authored image/card props, excluding box props.
+    pub const IMAGE_CARDS: u16 = 44;
 }
 
 /// Runtime task ids. Keep in sync with `emulator_core::telemetry::task`.
