@@ -1922,6 +1922,53 @@ struct BoxPropDebrisBounds {
     span_z: i32,
 }
 
+impl BoxPropDebrisBounds {
+    const EMPTY: Self = Self {
+        center_x: 0,
+        center_z: 0,
+        span_x: 64,
+        span_z: 64,
+    };
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+struct BoxPropFaceRuntime {
+    vertices: [WorldVertex; 4],
+    center: WorldVertex,
+    normal: [i32; 3],
+}
+
+impl BoxPropFaceRuntime {
+    const EMPTY: Self = Self {
+        vertices: [WorldVertex::ZERO; 4],
+        center: WorldVertex::ZERO,
+        normal: [0, 0, 0],
+    };
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+struct BoxPropRuntime {
+    faces: [BoxPropFaceRuntime; psx_level::BOX_PROP_FACE_COUNT],
+    cull_center: WorldVertex,
+    cull_radius: i32,
+    floor_y: i32,
+    debris_bounds: BoxPropDebrisBounds,
+    aabb_min: RoomPoint,
+    aabb_max: RoomPoint,
+}
+
+impl BoxPropRuntime {
+    const EMPTY: Self = Self {
+        faces: [BoxPropFaceRuntime::EMPTY; psx_level::BOX_PROP_FACE_COUNT],
+        cull_center: WorldVertex::ZERO,
+        cull_radius: 32,
+        floor_y: 0,
+        debris_bounds: BoxPropDebrisBounds::EMPTY,
+        aabb_min: RoomPoint::ZERO,
+        aabb_max: RoomPoint::ZERO,
+    };
+}
+
 #[derive(Copy, Clone, Debug, Default)]
 struct EvadeRunIntent {
     sprint: bool,
@@ -3319,6 +3366,8 @@ struct Playtest {
     anim_lock_until_tick: SimTick,
     /// Persistent runtime state for authored breakable box props.
     box_prop_broken: [u32; BOX_PROP_BROKEN_WORDS],
+    /// Static derived box-prop data used by render, break tests, and collision.
+    box_prop_runtime: [BoxPropRuntime; MAX_BOX_PROP_STATE],
     /// Short-lived baked face-burst events for newly broken box props.
     box_prop_break_events: [BoxPropBreakEvent; MAX_BOX_PROP_BREAK_EVENTS],
     /// Circle is shared by tap-evade and hold-sprint. We delay
@@ -3441,6 +3490,7 @@ impl Playtest {
             anim_start_tick: SimTick::ZERO,
             anim_lock_until_tick: SimTick::ZERO,
             box_prop_broken: [0; BOX_PROP_BROKEN_WORDS],
+            box_prop_runtime: [BoxPropRuntime::EMPTY; MAX_BOX_PROP_STATE],
             box_prop_break_events: [BoxPropBreakEvent::EMPTY; MAX_BOX_PROP_BREAK_EVENTS],
             evade_run_hold_ticks: 0,
             evade_run_hold_consumed: false,
@@ -3478,6 +3528,16 @@ impl Playtest {
             streaming_jobs: RuntimeStreamingJobs::new(),
             post_cross_debug_frames: 0,
             portal_debug_log_cooldown: 0,
+        }
+    }
+
+    fn rebuild_box_prop_runtime(&mut self) {
+        self.box_prop_runtime = [BoxPropRuntime::EMPTY; MAX_BOX_PROP_STATE];
+        for (index, prop) in BOX_PROPS.iter().enumerate() {
+            if index >= self.box_prop_runtime.len() {
+                break;
+            }
+            self.box_prop_runtime[index] = build_box_prop_runtime(prop);
         }
     }
 
@@ -3573,6 +3633,7 @@ impl Scene for Playtest {
             return;
         };
         self.load_runtime_models();
+        self.rebuild_box_prop_runtime();
         self.spawn = RoomPoint::new(spawn.x, spawn.y, spawn.z);
         self.character = character;
         self.motor
@@ -4230,6 +4291,7 @@ impl Scene for Playtest {
                 draw_box_props(
                     BOX_PROPS,
                     &self.box_prop_broken,
+                    &self.box_prop_runtime,
                     active.index,
                     &room_camera,
                     actor_options,
@@ -4240,6 +4302,7 @@ impl Scene for Playtest {
                 draw_box_prop_floor_debris(
                     BOX_PROPS,
                     &self.box_prop_broken,
+                    &self.box_prop_runtime,
                     active.index,
                     &room_camera,
                     actor_options,
@@ -4250,6 +4313,7 @@ impl Scene for Playtest {
                 draw_box_prop_break_events(
                     &self.box_prop_break_events,
                     BOX_PROPS,
+                    &self.box_prop_runtime,
                     active.index,
                     &room_camera,
                     actor_options,
@@ -4921,7 +4985,10 @@ impl Playtest {
             {
                 continue;
             }
-            let (min, max) = box_prop_aabb(prop);
+            let Some(box_runtime) = self.box_prop_runtime.get(index) else {
+                continue;
+            };
+            let (min, max) = (box_runtime.aabb_min, box_runtime.aabb_max);
             if character_body_overlaps_aabb(current, config.radius, config.height, min, max)
                 || character_body_overlaps_aabb(target, config.radius, config.height, min, max)
             {
@@ -4944,7 +5011,10 @@ impl Playtest {
             {
                 continue;
             }
-            let (min, max) = box_prop_aabb(prop);
+            let Some(box_runtime) = self.box_prop_runtime.get(index) else {
+                continue;
+            };
+            let (min, max) = (box_runtime.aabb_min, box_runtime.aabb_max);
             if box_prop_intersects_attack_volume(origin, yaw, config, min, max) {
                 let center_x = min.x.saturating_add(max.x) / 2;
                 let center_z = min.z.saturating_add(max.z) / 2;
@@ -5000,7 +5070,10 @@ impl Playtest {
             {
                 continue;
             }
-            let (min, max) = box_prop_aabb(prop);
+            let Some(box_runtime) = self.box_prop_runtime.get(index) else {
+                continue;
+            };
+            let (min, max) = (box_runtime.aabb_min, box_runtime.aabb_max);
             out[count] = CharacterCollisionAabb::new(min, max);
             count += 1;
         }
@@ -11722,6 +11795,7 @@ fn box_prop_broken_in_words(broken: &[u32; BOX_PROP_BROKEN_WORDS], index: usize)
 fn draw_box_props<T>(
     props: &[LevelBoxPropRecord],
     broken: &[u32; BOX_PROP_BROKEN_WORDS],
+    runtime: &[BoxPropRuntime; MAX_BOX_PROP_STATE],
     current_room: RoomIndex,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
@@ -11735,14 +11809,21 @@ fn draw_box_props<T>(
         if prop.room != current_room || box_prop_broken_in_words(broken, index) {
             continue;
         }
-        let vertices = box_prop_vertices(prop);
-        let (center, radius) = box_prop_cull_bounds(vertices);
-        if !sphere_visible_to_camera(camera, options, center, radius, 96) {
+        let Some(box_runtime) = runtime.get(index) else {
+            continue;
+        };
+        if !sphere_visible_to_camera(
+            camera,
+            options,
+            box_runtime.cull_center,
+            box_runtime.cull_radius,
+            96,
+        ) {
             continue;
         }
         draw_box_prop_faces(
             prop,
-            box_prop_faces(vertices),
+            &box_runtime.faces,
             camera,
             options,
             lighting,
@@ -11755,6 +11836,7 @@ fn draw_box_props<T>(
 fn draw_box_prop_floor_debris<T>(
     props: &[LevelBoxPropRecord],
     broken: &[u32; BOX_PROP_BROKEN_WORDS],
+    runtime: &[BoxPropRuntime; MAX_BOX_PROP_STATE],
     current_room: RoomIndex,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
@@ -11768,28 +11850,39 @@ fn draw_box_prop_floor_debris<T>(
         if prop.room != current_room || !box_prop_broken_in_words(broken, index) {
             continue;
         }
-        let vertices = box_prop_vertices(prop);
-        let (center, radius) = box_prop_cull_bounds(vertices);
-        let floor_y = box_prop_floor_y(vertices);
-        let debris_center = WorldVertex::new(center.x, floor_y.saturating_add(16), center.z);
+        let Some(box_runtime) = runtime.get(index) else {
+            continue;
+        };
+        let debris_center = WorldVertex::new(
+            box_runtime.cull_center.x,
+            box_runtime.floor_y.saturating_add(16),
+            box_runtime.cull_center.z,
+        );
         if !sphere_visible_to_camera(
             camera,
             options,
             debris_center,
-            radius.saturating_mul(2),
+            box_runtime.cull_radius.saturating_mul(2),
             128,
         ) {
             continue;
         }
         draw_box_prop_floor_debris_chips(
-            prop, vertices, floor_y, camera, options, lighting, triangles, world,
+            prop,
+            box_runtime.debris_bounds,
+            box_runtime.floor_y,
+            camera,
+            options,
+            lighting,
+            triangles,
+            world,
         );
     }
 }
 
 fn draw_box_prop_floor_debris_chips<T>(
     prop: &LevelBoxPropRecord,
-    vertices: [WorldVertex; psx_level::BOX_PROP_VERTEX_COUNT],
+    bounds: BoxPropDebrisBounds,
     floor_y: i32,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
@@ -11799,7 +11892,6 @@ fn draw_box_prop_floor_debris_chips<T>(
 ) where
     T: PrimitiveSink<TriTextured> + PrimitiveSink<TriTexturedGouraud>,
 {
-    let bounds = box_prop_debris_bounds(vertices);
     for chip in BOX_PROP_FLOOR_DEBRIS_CHIPS {
         let face = chip.face as usize;
         if face >= psx_level::BOX_PROP_FACE_COUNT {
@@ -11899,6 +11991,7 @@ fn draw_box_prop_floor_debris_chip<T>(
 fn draw_box_prop_break_events<T>(
     events: &[BoxPropBreakEvent; MAX_BOX_PROP_BREAK_EVENTS],
     props: &[LevelBoxPropRecord],
+    runtime: &[BoxPropRuntime; MAX_BOX_PROP_STATE],
     current_room: RoomIndex,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
@@ -11918,15 +12011,22 @@ fn draw_box_prop_break_events<T>(
         if prop.room != current_room {
             continue;
         }
-        let vertices = box_prop_vertices(prop);
-        let (center, radius) = box_prop_cull_bounds(vertices);
-        if !sphere_visible_to_camera(camera, options, center, radius.saturating_mul(3), 128) {
+        let Some(box_runtime) = runtime.get(event.prop_index as usize) else {
+            continue;
+        };
+        if !sphere_visible_to_camera(
+            camera,
+            options,
+            box_runtime.cull_center,
+            box_runtime.cull_radius.saturating_mul(3),
+            128,
+        ) {
             continue;
         }
         draw_box_prop_break_shards(
             prop,
-            box_prop_faces(vertices),
-            center,
+            &box_runtime.faces,
+            box_runtime.cull_center,
             *event,
             camera,
             options,
@@ -11939,7 +12039,7 @@ fn draw_box_prop_break_events<T>(
 
 fn draw_box_prop_break_shards<T>(
     prop: &LevelBoxPropRecord,
-    faces: [[WorldVertex; 4]; psx_level::BOX_PROP_FACE_COUNT],
+    faces: &[BoxPropFaceRuntime; psx_level::BOX_PROP_FACE_COUNT],
     box_center: WorldVertex,
     event: BoxPropBreakEvent,
     camera: &WorldCamera,
@@ -11961,7 +12061,7 @@ fn draw_box_prop_break_shards<T>(
         draw_box_prop_break_shard(
             prop,
             face,
-            faces[face],
+            faces[face].vertices,
             box_center,
             event,
             shard,
@@ -12064,7 +12164,7 @@ fn draw_box_prop_break_shard<T>(
 
 fn draw_box_prop_faces<T>(
     prop: &LevelBoxPropRecord,
-    faces: [[WorldVertex; 4]; psx_level::BOX_PROP_FACE_COUNT],
+    faces: &[BoxPropFaceRuntime; psx_level::BOX_PROP_FACE_COUNT],
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
     lighting: &RuntimeRoomLighting,
@@ -12074,10 +12174,11 @@ fn draw_box_prop_faces<T>(
     T: PrimitiveSink<TriTextured> + PrimitiveSink<TriTexturedGouraud>,
 {
     for face in 0..psx_level::BOX_PROP_FACE_COUNT {
-        let face_vertices = faces[face];
-        if !box_prop_face_front_facing(camera, face_vertices) {
+        let face_runtime = faces[face];
+        if !box_prop_face_front_facing(camera, face_runtime) {
             continue;
         }
+        let face_vertices = face_runtime.vertices;
         let Some(texture_asset) = prop.texture_assets[face] else {
             continue;
         };
@@ -12155,30 +12256,9 @@ fn draw_box_prop_faces<T>(
     }
 }
 
-fn box_prop_face_front_facing(camera: &WorldCamera, face: [WorldVertex; 4]) -> bool {
-    let abx = face[1].x.saturating_sub(face[0].x);
-    let aby = face[1].y.saturating_sub(face[0].y);
-    let abz = face[1].z.saturating_sub(face[0].z);
-    let acx = face[2].x.saturating_sub(face[0].x);
-    let acy = face[2].y.saturating_sub(face[0].y);
-    let acz = face[2].z.saturating_sub(face[0].z);
-    let nx = aby
-        .saturating_mul(acz)
-        .saturating_sub(abz.saturating_mul(acy))
-        >> BOX_PROP_FACE_NORMAL_SHIFT;
-    let ny = abz
-        .saturating_mul(acx)
-        .saturating_sub(abx.saturating_mul(acz))
-        >> BOX_PROP_FACE_NORMAL_SHIFT;
-    let nz = abx
-        .saturating_mul(acy)
-        .saturating_sub(aby.saturating_mul(acx))
-        >> BOX_PROP_FACE_NORMAL_SHIFT;
-    let center = WorldVertex::new(
-        average4_i32(face[0].x, face[1].x, face[2].x, face[3].x),
-        average4_i32(face[0].y, face[1].y, face[2].y, face[3].y),
-        average4_i32(face[0].z, face[1].z, face[2].z, face[3].z),
-    );
+fn box_prop_face_front_facing(camera: &WorldCamera, face: BoxPropFaceRuntime) -> bool {
+    let [nx, ny, nz] = face.normal;
+    let center = face.center;
     let vx = camera.position.x.saturating_sub(center.x);
     let vy = camera.position.y.saturating_sub(center.y);
     let vz = camera.position.z.saturating_sub(center.z);
@@ -12588,6 +12668,58 @@ fn box_prop_faces(
     out
 }
 
+fn box_prop_face_runtime(face: [WorldVertex; 4]) -> BoxPropFaceRuntime {
+    let abx = face[1].x.saturating_sub(face[0].x);
+    let aby = face[1].y.saturating_sub(face[0].y);
+    let abz = face[1].z.saturating_sub(face[0].z);
+    let acx = face[2].x.saturating_sub(face[0].x);
+    let acy = face[2].y.saturating_sub(face[0].y);
+    let acz = face[2].z.saturating_sub(face[0].z);
+    let nx = aby
+        .saturating_mul(acz)
+        .saturating_sub(abz.saturating_mul(acy))
+        >> BOX_PROP_FACE_NORMAL_SHIFT;
+    let ny = abz
+        .saturating_mul(acx)
+        .saturating_sub(abx.saturating_mul(acz))
+        >> BOX_PROP_FACE_NORMAL_SHIFT;
+    let nz = abx
+        .saturating_mul(acy)
+        .saturating_sub(aby.saturating_mul(acx))
+        >> BOX_PROP_FACE_NORMAL_SHIFT;
+    BoxPropFaceRuntime {
+        vertices: face,
+        center: WorldVertex::new(
+            average4_i32(face[0].x, face[1].x, face[2].x, face[3].x),
+            average4_i32(face[0].y, face[1].y, face[2].y, face[3].y),
+            average4_i32(face[0].z, face[1].z, face[2].z, face[3].z),
+        ),
+        normal: [nx, ny, nz],
+    }
+}
+
+fn build_box_prop_runtime(prop: &LevelBoxPropRecord) -> BoxPropRuntime {
+    let vertices = box_prop_vertices(prop);
+    let raw_faces = box_prop_faces(vertices);
+    let mut faces = [BoxPropFaceRuntime::EMPTY; psx_level::BOX_PROP_FACE_COUNT];
+    let mut face = 0usize;
+    while face < psx_level::BOX_PROP_FACE_COUNT {
+        faces[face] = box_prop_face_runtime(raw_faces[face]);
+        face += 1;
+    }
+    let (cull_center, cull_radius) = box_prop_cull_bounds(vertices);
+    let (aabb_min, aabb_max) = box_prop_aabb_from_vertices(vertices);
+    BoxPropRuntime {
+        faces,
+        cull_center,
+        cull_radius,
+        floor_y: box_prop_floor_y(vertices),
+        debris_bounds: box_prop_debris_bounds(vertices),
+        aabb_min,
+        aabb_max,
+    }
+}
+
 fn box_prop_cull_bounds(
     vertices: [WorldVertex; psx_level::BOX_PROP_VERTEX_COUNT],
 ) -> (WorldVertex, i32) {
@@ -12646,8 +12778,9 @@ fn box_prop_debris_bounds(
     }
 }
 
-fn box_prop_aabb(prop: &LevelBoxPropRecord) -> (RoomPoint, RoomPoint) {
-    let vertices = box_prop_vertices(prop);
+fn box_prop_aabb_from_vertices(
+    vertices: [WorldVertex; psx_level::BOX_PROP_VERTEX_COUNT],
+) -> (RoomPoint, RoomPoint) {
     let mut min_x = vertices[0].x;
     let mut max_x = vertices[0].x;
     let mut min_y = vertices[0].y;
