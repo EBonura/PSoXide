@@ -38,6 +38,8 @@ fn main() {
     bus.enable_hle_bios();
     bus.attach_digital_pad_port1();
     bus.cdrom.insert_disc(Some(disc));
+    bus.cdrom.enable_command_log(128);
+    bus.cdrom.enable_response_log(128);
 
     let mut cpu = Cpu::new();
     cpu.seed_from_exe(exe.initial_pc, exe.initial_gp, exe.initial_sp());
@@ -95,6 +97,7 @@ fn main() {
     );
     println!("CD LBA:   {}", bus.cdrom.debug_read_lba());
     println!("Steps:    {steps}");
+    print_cdrom_commands(&bus);
 
     if stats.peak_l.max(stats.peak_r) < min_peak {
         eprintln!(
@@ -103,6 +106,38 @@ fn main() {
         );
         std::process::exit(1);
     }
+}
+
+fn print_cdrom_commands(bus: &Bus) {
+    let hist = bus.cdrom.command_histogram();
+    println!(
+        "CD CMDS:  GetStat={} Play={} Pause={} Demute={} SetMode={}",
+        hist[0x01], hist[0x03], hist[0x09], hist[0x0C], hist[0x0E],
+    );
+    for entry in bus.cdrom.command_log().iter().take(16) {
+        println!(
+            "  cmd cyc={:>10} op=0x{:02x} params=[{}]",
+            entry.cycle,
+            entry.command,
+            fmt_params(&entry.params[..entry.param_len as usize]),
+        );
+    }
+    for entry in bus.cdrom.response_log().iter().take(16) {
+        println!(
+            "  resp cyc={:>9} irq={:?} bytes=[{}]",
+            entry.cycle,
+            entry.irq,
+            fmt_params(&entry.bytes[..entry.len as usize]),
+        );
+    }
+}
+
+fn fmt_params(params: &[u8]) -> String {
+    params
+        .iter()
+        .map(|p| format!("{p:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[derive(Default)]

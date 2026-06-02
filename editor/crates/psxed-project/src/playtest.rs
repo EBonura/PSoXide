@@ -47,11 +47,12 @@ use crate::world_cook::{
     cook_world_grid, CookedWorldGrid, CookedWorldMaterial, WorldGridCookError,
 };
 use crate::{
-    spatial, AnimationRole, CharacterAnimationAction, CharacterControllerSettings, NodeId,
-    NodeKind, OptionId, OptionKind, ParticleEmitterSettings, PhysicsBodySettings, ProjectDocument,
-    PsxBlendMode, ResourceData, ResourceId, SceneNode, UiAction, UiAnchor, UiNodeId, UiNodeKind,
-    UiSfxCue, UiTextAlign, UiValueBinding, WorldGrid, WorldStreamingSettings,
-    FAR_VISTA_TEXTURE_PANEL_COUNT, MAX_ROOM_BYTES, PHYSICS_WEIGHT_ONE_Q8,
+    clamp_ui_font_scale, default_ui_font_scale, default_ui_letter_spacing, spatial, AnimationRole,
+    CharacterAnimationAction, CharacterControllerSettings, NodeId, NodeKind, OptionId, OptionKind,
+    ParticleEmitterSettings, PhysicsBodySettings, ProjectDocument, PsxBlendMode, ResourceData,
+    ResourceId, SceneNode, UiAction, UiAnchor, UiNodeId, UiNodeKind, UiSfxCue, UiTextAlign,
+    UiValueBinding, WorldGrid, WorldStreamingSettings, FAR_VISTA_TEXTURE_PANEL_COUNT,
+    MAX_ROOM_BYTES, MAX_UI_LETTER_SPACING, MIN_UI_LETTER_SPACING, PHYSICS_WEIGHT_ONE_Q8,
 };
 
 mod assets;
@@ -1463,6 +1464,9 @@ fn cook_ui_scene_nodes(
                 action,
                 option,
                 flags,
+                font,
+                font_scale,
+                letter_spacing,
             ) = match &node.kind {
                 UiNodeKind::Canvas { width, height } => (
                     0,
@@ -1480,6 +1484,9 @@ fn cook_ui_scene_nodes(
                     PlaytestUiAction::default(),
                     psx_level::UI_OPTION_NONE,
                     0,
+                    0,
+                    default_ui_font_scale(),
+                    default_ui_letter_spacing(),
                 ),
                 UiNodeKind::Group { rect } => (
                     rect.x,
@@ -1497,6 +1504,9 @@ fn cook_ui_scene_nodes(
                     PlaytestUiAction::default(),
                     psx_level::UI_OPTION_NONE,
                     ui_node_flags(rect.anchor, UiTextAlign::Left, false),
+                    0,
+                    default_ui_font_scale(),
+                    default_ui_letter_spacing(),
                 ),
                 UiNodeKind::Rect { rect, color } => (
                     rect.x,
@@ -1514,6 +1524,9 @@ fn cook_ui_scene_nodes(
                     PlaytestUiAction::default(),
                     psx_level::UI_OPTION_NONE,
                     ui_node_flags(rect.anchor, UiTextAlign::Left, false),
+                    0,
+                    default_ui_font_scale(),
+                    default_ui_letter_spacing(),
                 ),
                 UiNodeKind::Label {
                     rect,
@@ -1521,6 +1534,9 @@ fn cook_ui_scene_nodes(
                     tag,
                     align,
                     wrap,
+                    font,
+                    font_scale,
+                    letter_spacing,
                     color,
                 } => (
                     rect.x,
@@ -1538,6 +1554,9 @@ fn cook_ui_scene_nodes(
                     PlaytestUiAction::default(),
                     psx_level::UI_OPTION_NONE,
                     ui_node_flags(rect.anchor, *align, *wrap),
+                    font.runtime_index(),
+                    clamp_ui_font_scale(*font_scale),
+                    (*letter_spacing).clamp(MIN_UI_LETTER_SPACING, MAX_UI_LETTER_SPACING),
                 ),
                 UiNodeKind::Image {
                     rect,
@@ -1569,6 +1588,9 @@ fn cook_ui_scene_nodes(
                     PlaytestUiAction::default(),
                     psx_level::UI_OPTION_NONE,
                     ui_node_flags(rect.anchor, UiTextAlign::Left, false),
+                    0,
+                    default_ui_font_scale(),
+                    default_ui_letter_spacing(),
                 ),
                 UiNodeKind::Bar {
                     rect,
@@ -1592,11 +1614,17 @@ fn cook_ui_scene_nodes(
                     PlaytestUiAction::default(),
                     psx_level::UI_OPTION_NONE,
                     ui_node_flags(rect.anchor, UiTextAlign::Left, false),
+                    0,
+                    default_ui_font_scale(),
+                    default_ui_letter_spacing(),
                 ),
                 UiNodeKind::Button {
                     rect,
                     label,
                     align,
+                    font,
+                    font_scale,
+                    letter_spacing,
                     color,
                     text_color,
                     transparent,
@@ -1623,6 +1651,9 @@ fn cook_ui_scene_nodes(
                         } else {
                             0
                         },
+                    font.runtime_index(),
+                    clamp_ui_font_scale(*font_scale),
+                    (*letter_spacing).clamp(MIN_UI_LETTER_SPACING, MAX_UI_LETTER_SPACING),
                 ),
                 UiNodeKind::Slider {
                     rect,
@@ -1647,6 +1678,9 @@ fn cook_ui_scene_nodes(
                     PlaytestUiAction::default(),
                     cook_option_id(*option),
                     ui_node_flags(rect.anchor, UiTextAlign::Left, false),
+                    0,
+                    default_ui_font_scale(),
+                    default_ui_letter_spacing(),
                 ),
                 UiNodeKind::Music {
                     wav_path,
@@ -1683,6 +1717,9 @@ fn cook_ui_scene_nodes(
                     } else {
                         0
                     },
+                    0,
+                    default_ui_font_scale(),
+                    default_ui_letter_spacing(),
                 ),
             };
             let (sfx_first, sfx_count) = cook_ui_node_sfx(
@@ -1713,6 +1750,9 @@ fn cook_ui_scene_nodes(
                 flags,
                 sfx_first,
                 sfx_count,
+                font,
+                font_scale,
+                letter_spacing,
             }
         })
         .collect::<Vec<_>>();
@@ -8060,6 +8100,9 @@ mod tests {
                 tag: "prompt".to_string(),
                 align: crate::UiTextAlign::Left,
                 wrap: false,
+                font: crate::UiFontChoice::Basic,
+                font_scale: crate::default_ui_font_scale(),
+                letter_spacing: -2,
                 color: [220, 226, 240],
             },
         );
@@ -8110,6 +8153,7 @@ mod tests {
         assert_eq!(nodes[label_index].parent, Some(group_index as u16));
         assert_eq!((nodes[label_index].x, nodes[label_index].y), (8, 6));
         assert_eq!(nodes[label_index].tag, "prompt");
+        assert_eq!(nodes[label_index].letter_spacing, -2);
     }
 
     #[test]
@@ -8189,6 +8233,9 @@ mod tests {
                 rect: UiRect::new(10, 12, 80, 18),
                 label: "Play".to_string(),
                 align: UiTextAlign::Center,
+                font: crate::UiFontChoice::Basic8x16,
+                font_scale: crate::default_ui_font_scale(),
+                letter_spacing: 4,
                 color: [50, 60, 70],
                 text_color: [236, 240, 248],
                 transparent: false,
@@ -8225,6 +8272,8 @@ mod tests {
             .find(|node| matches!(node.kind, UiNodeKind::Button { .. }))
             .expect("button cooked");
         assert_eq!(button.text, "Play");
+        assert_eq!(button.font, 1);
+        assert_eq!(button.letter_spacing, 4);
         assert_eq!(button.color, [50, 60, 70]);
         assert_eq!(button.option, psx_level::UI_OPTION_NONE);
         assert_eq!(
@@ -8262,6 +8311,9 @@ mod tests {
                 rect: UiRect::new(10, 12, 80, 18),
                 label: "Play".to_string(),
                 align: UiTextAlign::Center,
+                font: crate::UiFontChoice::Basic,
+                font_scale: crate::default_ui_font_scale(),
+                letter_spacing: crate::default_ui_letter_spacing(),
                 color: [50, 60, 70],
                 text_color: [236, 240, 248],
                 transparent: false,
@@ -8317,6 +8369,9 @@ mod tests {
                 rect: UiRect::new(0, 0, 40, 16),
                 label: "+".to_string(),
                 align: UiTextAlign::Center,
+                font: crate::UiFontChoice::Basic,
+                font_scale: crate::default_ui_font_scale(),
+                letter_spacing: crate::default_ui_letter_spacing(),
                 color: [40, 40, 40],
                 text_color: [236, 240, 248],
                 transparent: false,
@@ -8331,6 +8386,9 @@ mod tests {
                 rect: UiRect::new(0, 20, 40, 16),
                 label: "Back".to_string(),
                 align: UiTextAlign::Center,
+                font: crate::UiFontChoice::Basic,
+                font_scale: crate::default_ui_font_scale(),
+                letter_spacing: crate::default_ui_letter_spacing(),
                 color: [40, 40, 40],
                 text_color: [236, 240, 248],
                 transparent: false,

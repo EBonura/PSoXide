@@ -85,10 +85,12 @@ const UI_SFX_VOICE_COUNT: u8 = 4;
 const CDDA_RETRY_TICKS: u32 = 60;
 const CDDA_STATUS_TICKS: u32 = 30;
 const CDDA_DEFAULT_VOLUME_PERCENT: u8 = 25;
+#[cfg(any(target_arch = "mips", test))]
+const CDDA_PLAYBACK_MODE: u8 = psx_io::cdrom::MODE_DOUBLE_SPEED | psx_io::cdrom::MODE_CDDA;
 #[cfg(target_arch = "mips")]
 const CDDA_STATUS_PLAYING: u8 = 1 << 7;
 #[cfg(target_arch = "mips")]
-const CDDA_COMMAND_SPINS: u32 = 16_384;
+const CDDA_COMMAND_SPINS: u32 = 131_072;
 
 /// The implicit single-state flow every plain [`App::run`] call uses.
 ///
@@ -339,10 +341,17 @@ fn cdda_set_volume(_volume_percent: u8) {}
 fn cdda_issue_step(step: CddaStartStep, track: u8) -> bool {
     match step {
         CddaStartStep::SetMode => {
-            psx_io::cdrom::try_set_mode(psx_io::cdrom::MODE_CDDA, CDDA_COMMAND_SPINS).is_some()
+            let _ = psx_io::cdrom::set_mode(CDDA_PLAYBACK_MODE);
+            true
         }
-        CddaStartStep::Demute => psx_io::cdrom::try_demute(CDDA_COMMAND_SPINS).is_some(),
-        CddaStartStep::Play => psx_io::cdrom::try_play_track(track, CDDA_COMMAND_SPINS).is_some(),
+        CddaStartStep::Demute => {
+            let _ = psx_io::cdrom::demute();
+            true
+        }
+        CddaStartStep::Play => {
+            let _ = psx_io::cdrom::play_track(track);
+            true
+        }
     }
 }
 
@@ -1085,11 +1094,7 @@ impl<'a, S: Scene> Scene for GameApp<'a, S> {
                 let options = self.options;
                 let option_values = self.option_values;
                 let option_len = self.option_len;
-                // TODO(p5): thread real texture / value resolvers through
-                // run_with_flow so image nodes and data-bound bars draw.
-                // Stub resolvers skip images (None) and report zero for
-                // every binding, so rects and labels still paint.
-                let mut textures = |_asset| None;
+                let mut textures = |asset| self.gameplay.ui_texture(asset);
                 let value = |binding: LevelUiValueBinding| {
                     resolve_ui_value(binding, options, &option_values, option_len)
                 };
@@ -1099,20 +1104,20 @@ impl<'a, S: Scene> Scene for GameApp<'a, S> {
                 let option_value = |option_id: u16| {
                     resolve_option_value(options, &option_values, option_len, option_id)
                 };
-                // The gameplay scene lends its uploaded font atlas (via
-                // `Scene::ui_font`) so menu labels and buttons draw with the
-                // same glyphs the HUD uses. A gameplay-only scene returns
-                // `None`, leaving the font table empty (text skipped).
-                let font = self.gameplay.ui_font();
-                let font_table: &[&psx_font::FontAtlas] = match &font {
-                    Some(font) => core::slice::from_ref(font),
-                    None => &[],
-                };
+                // The gameplay scene lends its uploaded font atlases so menu
+                // labels and buttons draw with the same glyphs the HUD uses.
+                // Empty slots skip text or fall back to slot 0 in the renderer.
+                let font_table = [
+                    self.gameplay.ui_font_at(0),
+                    self.gameplay.ui_font_at(1),
+                    self.gameplay.ui_font_at(2),
+                    self.gameplay.ui_font_at(3),
+                ];
                 ui::draw_scene(
                     nodes,
                     first,
                     count,
-                    font_table,
+                    &font_table,
                     focused,
                     &mut textures,
                     &value,
@@ -1284,6 +1289,8 @@ mod tests {
             sfx_first: UI_SFX_NONE,
             sfx_count: 0,
             font: 0,
+            font_scale: 256,
+            letter_spacing: 0,
         }
     }
 
@@ -1308,6 +1315,8 @@ mod tests {
         sfx_first: UI_SFX_NONE,
         sfx_count: 0,
         font: 0,
+        font_scale: 256,
+        letter_spacing: 0,
     };
 
     // A title scene (id 1) with two stacked buttons: "Play" (StartGameplay)
@@ -1635,6 +1644,8 @@ mod tests {
             sfx_first: UI_SFX_NONE,
             sfx_count: 0,
             font: 0,
+            font_scale: 256,
+            letter_spacing: 0,
         }
     }
 
@@ -1717,6 +1728,8 @@ mod tests {
             sfx_first: UI_SFX_NONE,
             sfx_count: 0,
             font: 0,
+            font_scale: 256,
+            letter_spacing: 0,
         },
         slider(100, 100, VOL_ID),
     ];
@@ -1730,6 +1743,14 @@ mod tests {
         states: &[FlowState::UiScene { scene: 9 }],
         entry: 0,
     };
+
+    #[test]
+    fn menu_cdda_playback_mode_matches_working_cdda_demo() {
+        assert_eq!(
+            CDDA_PLAYBACK_MODE,
+            psx_io::cdrom::MODE_DOUBLE_SPEED | psx_io::cdrom::MODE_CDDA
+        );
+    }
 
     #[test]
     fn option_store_seeds_from_default() {

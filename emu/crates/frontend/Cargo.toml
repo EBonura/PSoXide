@@ -19,7 +19,6 @@ psx-gte          = { workspace = true }
 psx-vram         = { workspace = true }
 psx-iso          = { workspace = true }
 psx-trace        = { workspace = true }
-psxed-audio      = { workspace = true }
 psxed-project    = { workspace = true }
 psxed-ui         = { workspace = true }
 

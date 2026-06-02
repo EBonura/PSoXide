@@ -24,7 +24,7 @@ pub(crate) fn draw_player_hud(
     nodes: &[LevelUiNodeRecord],
     hud_first: usize,
     hud_count: usize,
-    font: Option<&FontAtlas>,
+    fonts: &[Option<&FontAtlas>],
     stamina_q12: i32,
     stamina_max_q12: i32,
 ) {
@@ -65,17 +65,12 @@ pub(crate) fn draw_player_hud(
     // HUD overlay: draw only the HUD scene's node slice (the shared pool
     // also holds front-end menu scenes now), no menu focus so no control is
     // highlighted. The HUD carries no sliders, so the option table is empty
-    // and the value resolver always reports zero. The HUD uses one font, so
-    // the font table is that atlas as a single-element slice (or empty).
-    let font_table: &[&FontAtlas] = match font {
-        Some(font) => &[font],
-        None => &[],
-    };
+    // and the value resolver always reports zero.
     ui::draw_scene(
         nodes,
         hud_first,
         hud_count,
-        font_table,
+        fonts,
         None,
         &mut resolve_texture,
         &resolve_value,
