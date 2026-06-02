@@ -368,6 +368,52 @@ impl UiTextAlign {
     }
 }
 
+/// Direction for authored UI gradients.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UiGradientDirection {
+    /// Interpolate from top to bottom.
+    #[default]
+    Vertical,
+    /// Interpolate from left to right.
+    Horizontal,
+}
+
+impl UiGradientDirection {
+    /// Stable list used by editor controls.
+    pub const ALL: [Self; 2] = [Self::Vertical, Self::Horizontal];
+
+    /// Compact display label.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Vertical => "Vertical",
+            Self::Horizontal => "Horizontal",
+        }
+    }
+}
+
+/// Optional second colour for a UI paint, paired with a direction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UiGradient {
+    /// Target colour at the far edge of the gradient.
+    #[serde(default = "default_ui_gradient_to")]
+    pub to: [u8; 3],
+    /// Interpolation direction.
+    #[serde(default)]
+    pub direction: UiGradientDirection,
+}
+
+impl UiGradient {
+    /// Construct a gradient paint from an existing solid colour to `to`.
+    pub const fn new(to: [u8; 3], direction: UiGradientDirection) -> Self {
+        Self { to, direction }
+    }
+}
+
+/// Default far colour used when an authored gradient omits it.
+pub const fn default_ui_gradient_to() -> [u8; 3] {
+    [255, 255, 255]
+}
+
 /// Screen-space rectangle in authored PSX framebuffer pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UiRect {
@@ -954,6 +1000,9 @@ pub enum UiNodeKind {
         rect: UiRect,
         /// Fill colour.
         color: [u8; 3],
+        /// Optional fill gradient ending colour/direction.
+        #[serde(default)]
+        gradient: Option<UiGradient>,
     },
     /// Text label drawn with the runtime font atlas.
     Label {
@@ -985,6 +1034,9 @@ pub enum UiNodeKind {
         letter_spacing: i8,
         /// Text tint.
         color: [u8; 3],
+        /// Optional text gradient ending colour/direction.
+        #[serde(default)]
+        gradient: Option<UiGradient>,
     },
     /// Screen-space textured image.
     Image {
@@ -1007,8 +1059,14 @@ pub enum UiNodeKind {
         max: UiValueBinding,
         /// Filled portion colour.
         fill: [u8; 3],
+        /// Optional fill gradient ending colour/direction.
+        #[serde(default)]
+        fill_gradient: Option<UiGradient>,
         /// Empty/background colour.
         background: [u8; 3],
+        /// Optional background gradient ending colour/direction.
+        #[serde(default)]
+        background_gradient: Option<UiGradient>,
     },
     /// Interactive button: a filled rectangle with a centered label
     /// that fires `action` when activated. Runtime activation is a
@@ -1038,9 +1096,15 @@ pub enum UiNodeKind {
         /// Background fill colour (ignored when `transparent`).
         #[serde(default = "default_ui_button_color")]
         color: [u8; 3],
+        /// Optional background gradient ending colour/direction.
+        #[serde(default)]
+        background_gradient: Option<UiGradient>,
         /// Label text colour.
         #[serde(default = "default_ui_button_text_color")]
         text_color: [u8; 3],
+        /// Optional label gradient ending colour/direction.
+        #[serde(default)]
+        text_gradient: Option<UiGradient>,
         /// Transparent background: skip the fill and draw only the label.
         #[serde(default)]
         transparent: bool,
@@ -1063,12 +1127,21 @@ pub enum UiNodeKind {
         /// Track (background) colour.
         #[serde(default = "default_ui_slider_track")]
         track: [u8; 3],
+        /// Optional track gradient ending colour/direction.
+        #[serde(default)]
+        track_gradient: Option<UiGradient>,
         /// Fill colour up to the current value.
         #[serde(default = "default_ui_slider_fill")]
         fill: [u8; 3],
+        /// Optional fill gradient ending colour/direction.
+        #[serde(default)]
+        fill_gradient: Option<UiGradient>,
         /// Knob colour.
         #[serde(default = "default_ui_slider_knob")]
         knob: [u8; 3],
+        /// Optional knob gradient ending colour/direction.
+        #[serde(default)]
+        knob_gradient: Option<UiGradient>,
         /// Per-event SFX cue pools.
         #[serde(default)]
         sfx: UiSfxBindings,
@@ -1263,7 +1336,9 @@ impl UiScene {
                 value: UiValueBinding::PlayerHealth,
                 max: UiValueBinding::PlayerHealthMax,
                 fill: [94, 16, 24],
+                fill_gradient: None,
                 background: [30, 26, 28],
+                background_gradient: None,
             },
         );
         let stamina = UiNode::new(
@@ -1275,7 +1350,9 @@ impl UiScene {
                 value: UiValueBinding::PlayerStamina,
                 max: UiValueBinding::PlayerStaminaMax,
                 fill: [44, 98, 48],
+                fill_gradient: None,
                 background: [30, 26, 28],
+                background_gradient: None,
             },
         );
         root.children = vec![health.id, stamina.id];
@@ -1424,6 +1501,89 @@ impl UiScene {
             node.parent = Some(new_parent);
         }
         true
+    }
+
+    /// Return a deep copy of `root` and all of its descendants in
+    /// hierarchy order. The copied nodes keep their source ids so a
+    /// destination scene can remap parent/child links consistently.
+    pub fn subtree_nodes(&self, root: UiNodeId) -> Option<Vec<UiNode>> {
+        self.node(root)?;
+        let mut nodes = Vec::new();
+        let mut visited = HashSet::new();
+        self.push_subtree_node(root, &mut nodes, &mut visited);
+        Some(nodes)
+    }
+
+    fn push_subtree_node(
+        &self,
+        id: UiNodeId,
+        nodes: &mut Vec<UiNode>,
+        visited: &mut HashSet<UiNodeId>,
+    ) {
+        if !visited.insert(id) {
+            return;
+        }
+        if let Some(node) = self.node(id) {
+            nodes.push(node.clone());
+            for &child in &node.children {
+                self.push_subtree_node(child, nodes, visited);
+            }
+        }
+    }
+
+    /// Paste a copied UI subtree under `parent`, remapping every node id
+    /// to fresh ids in this scene while preserving the copied hierarchy.
+    /// Returns the new root node id.
+    pub fn paste_subtree(
+        &mut self,
+        parent: UiNodeId,
+        subtree: &[UiNode],
+        subtree_root: UiNodeId,
+    ) -> Option<UiNodeId> {
+        if subtree.is_empty() || !subtree.iter().any(|node| node.id == subtree_root) {
+            return None;
+        }
+        let parent = if self.node(parent).is_some() {
+            parent
+        } else {
+            self.root
+        };
+
+        let mut remap = BTreeMap::new();
+        for source in subtree {
+            let id = UiNodeId(self.next_node_id);
+            self.next_node_id = self.next_node_id.saturating_add(1);
+            remap.insert(source.id, id);
+        }
+        let new_root = *remap.get(&subtree_root)?;
+
+        let mut pasted = Vec::with_capacity(subtree.len());
+        for source in subtree {
+            let id = *remap.get(&source.id)?;
+            let parent_id = if source.id == subtree_root {
+                Some(parent)
+            } else {
+                source
+                    .parent
+                    .and_then(|source_parent| remap.get(&source_parent).copied())
+                    .or(Some(new_root))
+            };
+            let mut node = source.clone();
+            node.id = id;
+            node.parent = parent_id;
+            node.children = source
+                .children
+                .iter()
+                .filter_map(|child| remap.get(child).copied())
+                .collect();
+            pasted.push(node);
+        }
+
+        self.nodes.extend(pasted);
+        if let Some(parent_node) = self.node_mut(parent) {
+            parent_node.children.push(new_root);
+        }
+        Some(new_root)
     }
 
     /// Node ids in tree draw order.
@@ -12774,6 +12934,7 @@ mod tests {
             UiNodeKind::Rect {
                 rect: UiRect::new(1, 2, 3, 4),
                 color: [9, 9, 9],
+                gradient: None,
             },
         );
         let source_id = project.ui_scenes[source_index].id;
@@ -12837,6 +12998,7 @@ mod tests {
                 font_scale: default_ui_font_scale(),
                 letter_spacing: default_ui_letter_spacing(),
                 color: [220, 226, 240],
+                gradient: None,
             },
         );
 
@@ -12874,6 +13036,7 @@ mod tests {
                 font_scale: default_ui_font_scale(),
                 letter_spacing: default_ui_letter_spacing(),
                 color: [220, 226, 240],
+                gradient: None,
             },
         );
 
@@ -12921,6 +13084,7 @@ mod tests {
                 font_scale: default_ui_font_scale(),
                 letter_spacing: default_ui_letter_spacing(),
                 color: [255, 255, 255],
+                gradient: None,
             },
         );
 
@@ -12929,6 +13093,51 @@ mod tests {
         assert_eq!(scene.absolute_rect(label), Some(UiRect::new(22, 33, 8, 8)));
         assert!(!scene.move_node(b, label, 0));
         assert!(!scene.move_node(scene.root, b, 0));
+    }
+
+    #[test]
+    fn ui_scene_paste_subtree_remaps_ids_and_preserves_children() {
+        let mut source = UiScene::empty_canvas("Source", UiSceneId::FIRST);
+        let group = source.add_node(
+            source.root,
+            "Panel",
+            UiNodeKind::Group {
+                rect: UiRect::new(10, 12, 80, 40),
+            },
+        );
+        let child = source.add_node(
+            group,
+            "Child",
+            UiNodeKind::Group {
+                rect: UiRect::new(3, 4, 16, 8),
+            },
+        );
+        let subtree = source.subtree_nodes(group).unwrap();
+
+        let mut target = UiScene::empty_canvas("Target", UiSceneId(2));
+        let parent = target.add_node(
+            target.root,
+            "Destination",
+            UiNodeKind::Group {
+                rect: UiRect::new(20, 30, 100, 50),
+            },
+        );
+        let pasted = target.paste_subtree(parent, &subtree, group).unwrap();
+
+        assert_ne!(pasted, group);
+        let pasted_node = target.node(pasted).unwrap();
+        assert_eq!(pasted_node.name, "Panel");
+        assert_eq!(pasted_node.parent, Some(parent));
+        assert_eq!(pasted_node.children.len(), 1);
+
+        let pasted_child = pasted_node.children[0];
+        assert_ne!(pasted_child, child);
+        assert_eq!(target.node(pasted_child).unwrap().name, "Child");
+        assert_eq!(target.node(pasted_child).unwrap().parent, Some(pasted));
+        assert_eq!(
+            target.absolute_rect(pasted_child),
+            Some(UiRect::new(33, 46, 16, 8))
+        );
     }
 
     #[test]
