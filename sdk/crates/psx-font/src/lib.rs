@@ -89,8 +89,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
 
-use psx_gpu::{draw_quad_textured, draw_quad_textured_gouraud};
-use psx_hw::gpu::{pack_color, pack_texcoord, pack_vertex, pack_xy};
+use psx_hw::gpu::{gp0, pack_color, pack_texcoord, pack_vertex, pack_xy};
 use psx_io::gpu::{wait_cmd_ready, write_gp0};
 use psx_math::sincos;
 use psx_vram::{upload_16bpp, upload_clut, Clut, Color555, TexDepth, Tpage, VramRect};
@@ -282,6 +281,61 @@ fn round_q8_to_i16(value_q8: i32) -> i16 {
         -(value_q8.saturating_neg().saturating_add(128) >> 8)
     };
     rounded.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16
+}
+
+#[inline]
+fn reset_texture_window() {
+    wait_cmd_ready();
+    write_gp0(gp0::tex_window(0, 0, 0, 0));
+}
+
+#[inline]
+fn pack_uv_word(u: u8, v: u8, high_word: u16) -> u32 {
+    u as u32 | ((v as u32) << 8) | ((high_word as u32) << 16)
+}
+
+#[inline]
+fn write_textured_quad_packet(
+    verts: [(i16, i16); 4],
+    uvs: [(u8, u8); 4],
+    color_cmd: u32,
+    clut_word: u16,
+    tpage_word: u16,
+) {
+    wait_cmd_ready();
+    write_gp0(color_cmd);
+    write_gp0(pack_vertex(verts[0].0, verts[0].1));
+    write_gp0(pack_uv_word(uvs[0].0, uvs[0].1, clut_word));
+    write_gp0(pack_vertex(verts[1].0, verts[1].1));
+    write_gp0(pack_uv_word(uvs[1].0, uvs[1].1, tpage_word));
+    write_gp0(pack_vertex(verts[2].0, verts[2].1));
+    write_gp0(pack_uv_word(uvs[2].0, uvs[2].1, 0));
+    write_gp0(pack_vertex(verts[3].0, verts[3].1));
+    write_gp0(pack_uv_word(uvs[3].0, uvs[3].1, 0));
+}
+
+#[inline]
+fn write_textured_gouraud_quad_packet(
+    verts: [(i16, i16); 4],
+    uvs: [(u8, u8); 4],
+    colors: [(u8, u8, u8); 4],
+    color0_cmd: u32,
+    clut_word: u16,
+    tpage_word: u16,
+) {
+    wait_cmd_ready();
+    write_gp0(color0_cmd);
+    write_gp0(pack_vertex(verts[0].0, verts[0].1));
+    write_gp0(pack_uv_word(uvs[0].0, uvs[0].1, clut_word));
+    write_gp0(pack_color(colors[1].0, colors[1].1, colors[1].2));
+    write_gp0(pack_vertex(verts[1].0, verts[1].1));
+    write_gp0(pack_uv_word(uvs[1].0, uvs[1].1, tpage_word));
+    write_gp0(pack_color(colors[2].0, colors[2].1, colors[2].2));
+    write_gp0(pack_vertex(verts[2].0, verts[2].1));
+    write_gp0(pack_uv_word(uvs[2].0, uvs[2].1, 0));
+    write_gp0(pack_color(colors[3].0, colors[3].1, colors[3].2));
+    write_gp0(pack_vertex(verts[3].0, verts[3].1));
+    write_gp0(pack_uv_word(uvs[3].0, uvs[3].1, 0));
 }
 
 impl FontAtlas {
@@ -478,14 +532,11 @@ impl FontAtlas {
 
         let font = self.font;
         let clut_word = self.clut.uv_clut_word();
+        let color_cmd = 0x6400_0000 | pack_color(tint.0, tint.1, tint.2);
+        let glyph_size = pack_xy(font.glyph_w as u16, font.glyph_h as u16);
+        let gap = i16::from(letter_spacing);
         let mut cursor_x = x;
-        let mut chars = text.chars().peekable();
-        while let Some(ch) = chars.next() {
-            let gap = if chars.peek().is_some() {
-                i16::from(letter_spacing)
-            } else {
-                0
-            };
+        for ch in text.chars() {
             let Some((u, v)) = self.glyph_uv(ch) else {
                 cursor_x = cursor_x
                     .wrapping_add(font.glyph_advance(ch) as i16)
@@ -498,7 +549,7 @@ impl FontAtlas {
             // opaque. First word: 0x64_BB_GG_RR (color is the tint
             // multiplier -- NOT a fill colour: CLUT index 1's white
             // texel gets modulated by this).
-            write_gp0(0x6400_0000 | pack_color(tint.0, tint.1, tint.2));
+            write_gp0(color_cmd);
             write_gp0(pack_vertex(cursor_x, y));
             // Second word packs (U, V, CLUT) -- our `pack_texcoord`
             // takes (u, v, extra) where `extra` is the CLUT field
@@ -506,7 +557,7 @@ impl FontAtlas {
             // draw mode.
             write_gp0(pack_texcoord(u, v, clut_word));
             // Third word: rectangle size.
-            write_gp0(pack_xy(font.glyph_w as u16, font.glyph_h as u16));
+            write_gp0(glyph_size);
 
             cursor_x = cursor_x
                 .wrapping_add(font.glyph_advance(ch) as i16)
@@ -599,6 +650,9 @@ impl FontAtlas {
             scale_x_q8 > 0 && scale_y_q8 > 0,
             "scale must be > 0 in both axes"
         );
+        if text.is_empty() {
+            return;
+        }
         let font = self.font;
         let gw = font.glyph_w as i16;
         let gh = font.glyph_h as i16;
@@ -606,19 +660,17 @@ impl FontAtlas {
         let sh = scale_q8_i16(gh, scale_y_q8);
         let clut = self.clut.uv_clut_word();
         let tpage = self.tpage.uv_tpage_word(0);
+        let color_cmd = gp0::polygon_opcode(false, true, true, false, false)
+            | pack_color(tint.0, tint.1, tint.2);
+        let gap_q8 = i32::from(letter_spacing) << 8;
         let mut cursor_x_q8 = i32::from(x) << 8;
-        let mut chars = text.chars().peekable();
-        while let Some(ch) = chars.next() {
-            let gap = if chars.peek().is_some() {
-                i16::from(letter_spacing)
-            } else {
-                0
-            };
+        reset_texture_window();
+        for ch in text.chars() {
             let cursor_x = round_q8_to_i16(cursor_x_q8);
             let Some((u, v)) = self.glyph_uv(ch) else {
                 cursor_x_q8 = cursor_x_q8
                     .saturating_add(i32::from(font.glyph_advance(ch)) * i32::from(scale_x_q8))
-                    .saturating_add(i32::from(gap) << 8);
+                    .saturating_add(gap_q8);
                 continue;
             };
             let verts = [
@@ -633,10 +685,10 @@ impl FontAtlas {
                 (u, v + gh as u8),
                 (u + gw as u8, v + gh as u8),
             ];
-            draw_quad_textured(verts, uvs, clut, tpage, tint);
+            write_textured_quad_packet(verts, uvs, color_cmd, clut, tpage);
             cursor_x_q8 = cursor_x_q8
                 .saturating_add(i32::from(font.glyph_advance(ch)) * i32::from(scale_x_q8))
-                .saturating_add(i32::from(gap) << 8);
+                .saturating_add(gap_q8);
         }
     }
 
@@ -667,6 +719,9 @@ impl FontAtlas {
         angle_q12: u16,
         tint: (u8, u8, u8),
     ) {
+        if text.is_empty() {
+            return;
+        }
         let font = self.font;
         let gw = font.glyph_w as i32;
         let gh = font.glyph_h as i32;
@@ -680,6 +735,8 @@ impl FontAtlas {
         let c = sincos::cos_q12(angle_q12);
         let clut = self.clut.uv_clut_word();
         let tpage = self.tpage.uv_tpage_word(0);
+        let color_cmd = gp0::polygon_opcode(false, true, true, false, false)
+            | pack_color(tint.0, tint.1, tint.2);
 
         // Transform helper: local (lx, ly) → screen (sx, sy), with
         // Q1.12 rotation matrix and integer translate to (cx, cy).
@@ -690,6 +747,7 @@ impl FontAtlas {
         };
 
         let mut cursor_x = 0i32;
+        reset_texture_window();
         for ch in text.chars() {
             let Some((u, v)) = self.glyph_uv(ch) else {
                 cursor_x += font.glyph_advance(ch) as i32;
@@ -706,7 +764,7 @@ impl FontAtlas {
                 (u, v + gh as u8),
                 (u + gw as u8, v + gh as u8),
             ];
-            draw_quad_textured(verts, uvs, clut, tpage, tint);
+            write_textured_quad_packet(verts, uvs, color_cmd, clut, tpage);
             cursor_x += font.glyph_advance(ch) as i32;
         }
     }
@@ -739,6 +797,9 @@ impl FontAtlas {
         m: [[i16; 2]; 2],
         tint: (u8, u8, u8),
     ) {
+        if text.is_empty() {
+            return;
+        }
         let font = self.font;
         let gw = font.glyph_w as i32;
         let gh = font.glyph_h as i32;
@@ -746,6 +807,8 @@ impl FontAtlas {
         let (m10, m11) = (m[1][0] as i32, m[1][1] as i32);
         let clut = self.clut.uv_clut_word();
         let tpage = self.tpage.uv_tpage_word(0);
+        let color_cmd = gp0::polygon_opcode(false, true, true, false, false)
+            | pack_color(tint.0, tint.1, tint.2);
 
         let tx = |lx: i32, ly: i32| -> (i16, i16) {
             let sx = origin.0 as i32 + ((m00 * lx + m01 * ly) >> 12);
@@ -754,6 +817,7 @@ impl FontAtlas {
         };
 
         let mut cursor_x = 0i32;
+        reset_texture_window();
         for ch in text.chars() {
             let Some((u, v)) = self.glyph_uv(ch) else {
                 cursor_x += font.glyph_advance(ch) as i32;
@@ -770,7 +834,7 @@ impl FontAtlas {
                 (u, v + gh as u8),
                 (u + gw as u8, v + gh as u8),
             ];
-            draw_quad_textured(verts, uvs, clut, tpage, tint);
+            write_textured_quad_packet(verts, uvs, color_cmd, clut, tpage);
             cursor_x += font.glyph_advance(ch) as i32;
         }
     }
@@ -837,6 +901,9 @@ impl FontAtlas {
         bottom: (u8, u8, u8),
     ) {
         assert!(scale_x > 0 && scale_y > 0, "scale must be > 0 in both axes");
+        if text.is_empty() {
+            return;
+        }
         let font = self.font;
         let gw = font.glyph_w as i16;
         let gh = font.glyph_h as i16;
@@ -844,7 +911,10 @@ impl FontAtlas {
         let sh = gh * scale_y as i16;
         let clut = self.clut.uv_clut_word();
         let tpage = self.tpage.uv_tpage_word(0);
+        let color0_cmd =
+            gp0::polygon_opcode(true, true, true, false, false) | pack_color(top.0, top.1, top.2);
         let mut cursor_x = x;
+        reset_texture_window();
         for ch in text.chars() {
             let Some((u, v)) = self.glyph_uv(ch) else {
                 cursor_x = cursor_x.wrapping_add(font.glyph_advance(ch) as i16 * scale_x as i16);
@@ -863,7 +933,7 @@ impl FontAtlas {
                 (u + gw as u8, v + gh as u8),
             ];
             let colors = [top, top, bottom, bottom];
-            draw_quad_textured_gouraud(verts, uvs, colors, clut, tpage);
+            write_textured_gouraud_quad_packet(verts, uvs, colors, color0_cmd, clut, tpage);
             cursor_x = cursor_x.wrapping_add(font.glyph_advance(ch) as i16 * scale_x as i16);
         }
     }
