@@ -54,6 +54,7 @@ pub(crate) fn draw_player_hud(
     let resolve_value = |binding: LevelUiValueBinding| -> i32 {
         match binding {
             LevelUiValueBinding::ConstantQ12(value) => value,
+            LevelUiValueBinding::Option(_) => 0,
             LevelUiValueBinding::PlayerHealth => PLAYER_HEALTH_MAX_Q12,
             LevelUiValueBinding::PlayerHealthMax => PLAYER_HEALTH_MAX_Q12,
             LevelUiValueBinding::PlayerStamina => stamina_q12,
