@@ -342,4 +342,36 @@ Observed gain:
 - Full render: about 9.2k cycles saved per visual frame on this route
   (~1.4% of render).
 
-Next candidates remain image props and the character motor/collision gather.
+## Second Optimization Result
+
+The next useful slice was the `IMAGE_PROPS` bucket, which also includes box
+props. A single-quad packet experiment for flat image props was visually safe
+on the menu-to-gameplay route, but it was slower in the measured stage
+(`IMAGE_PROPS` rose from 164,720 to 165,976 cycles / hit), so it was discarded.
+
+The real win was caching static box-prop derived data at gameplay init:
+
+- Precompute box-prop world vertices, face vertices, face centers, face normals,
+  cull sphere, floor height, debris bounds, and AABB once.
+- Render uses cached faces/bounds instead of rotating local vertices and
+  recomputing face normals every visual frame.
+- Break checks and collision AABB gathering use cached AABBs instead of
+  rebuilding them every simulation tick.
+
+Validation:
+
+| Metric | Before | After |
+| --- | ---: | ---: |
+| Render cycles / visual frame | 653,261 | 606,929 |
+| Update cycles / sim tick | 254,950 | 186,984 |
+| `IMAGE_PROPS` cycles / hit | 164,720 | 114,761 |
+| `SIM_COLLISION` cycles / hit | 52,962 | 16,722 |
+| Deadline misses | 104 | 0 |
+| Cadence | missed/late | steady |
+
+The display hash changed under the fixed CPU-step capture because the optimized
+run reached steady cadence and produced more visual frames before the same step
+cap. The displayed screenshots were visually equivalent; the pixel diff between
+the old and optimized step-cap captures changed only 47 pixels out of 76,800.
+
+Next candidates remain the character motor solve and sky setup.
