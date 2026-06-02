@@ -938,6 +938,71 @@ impl FontAtlas {
         }
     }
 
+    /// Draw `text` with per-vertex glyph colours, Q8 scaling, and
+    /// authored letter spacing.
+    ///
+    /// `colors` are ordered top-left, top-right, bottom-left,
+    /// bottom-right, matching [`psx_gpu::draw_quad_textured_gouraud`].
+    /// This is the general-purpose path behind gradient UI text:
+    /// vertical gradients use `[top, top, bottom, bottom]`, horizontal
+    /// gradients use `[left, right, left, right]`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_text_scaled_gouraud_with_spacing_q8(
+        &self,
+        x: i16,
+        y: i16,
+        text: &str,
+        scale_x_q8: u16,
+        scale_y_q8: u16,
+        letter_spacing: i8,
+        colors: [(u8, u8, u8); 4],
+    ) {
+        assert!(
+            scale_x_q8 > 0 && scale_y_q8 > 0,
+            "scale must be > 0 in both axes"
+        );
+        if text.is_empty() {
+            return;
+        }
+        let font = self.font;
+        let gw = font.glyph_w as i16;
+        let gh = font.glyph_h as i16;
+        let sw = scale_q8_i16(gw, scale_x_q8);
+        let sh = scale_q8_i16(gh, scale_y_q8);
+        let clut = self.clut.uv_clut_word();
+        let tpage = self.tpage.uv_tpage_word(0);
+        let color0_cmd = gp0::polygon_opcode(true, true, true, false, false)
+            | pack_color(colors[0].0, colors[0].1, colors[0].2);
+        let gap_q8 = i32::from(letter_spacing) << 8;
+        let mut cursor_x_q8 = i32::from(x) << 8;
+        reset_texture_window();
+        for ch in text.chars() {
+            let cursor_x = round_q8_to_i16(cursor_x_q8);
+            let Some((u, v)) = self.glyph_uv(ch) else {
+                cursor_x_q8 = cursor_x_q8
+                    .saturating_add(i32::from(font.glyph_advance(ch)) * i32::from(scale_x_q8))
+                    .saturating_add(gap_q8);
+                continue;
+            };
+            let verts = [
+                (cursor_x, y),
+                (cursor_x + sw, y),
+                (cursor_x, y + sh),
+                (cursor_x + sw, y + sh),
+            ];
+            let uvs = [
+                (u, v),
+                (u + gw as u8, v),
+                (u, v + gh as u8),
+                (u + gw as u8, v + gh as u8),
+            ];
+            write_textured_gouraud_quad_packet(verts, uvs, colors, color0_cmd, clut, tpage);
+            cursor_x_q8 = cursor_x_q8
+                .saturating_add(i32::from(font.glyph_advance(ch)) * i32::from(scale_x_q8))
+                .saturating_add(gap_q8);
+        }
+    }
+
     /// Access the underlying [`BitmapFont`]. Useful for UI code
     /// that needs glyph dimensions for its own layout math.
     pub fn font(&self) -> &'static BitmapFont {

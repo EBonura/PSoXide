@@ -349,6 +349,10 @@ pub mod ui_node_flags {
     pub const BUTTON_TRANSPARENT: u16 = 1 << 7;
     /// Music node restarts its CD-DA track when playback ends.
     pub const MUSIC_LOOP: u16 = 1 << 8;
+    /// Mirror the node's local X axis before rotation.
+    pub const FLIP_X: u16 = 1 << 9;
+    /// Mirror the node's local Y axis before rotation.
+    pub const FLIP_Y: u16 = 1 << 10;
 }
 
 typed_index! {
@@ -1249,6 +1253,65 @@ pub struct EntityRecord {
     pub flags: u16,
 }
 
+/// Runtime interaction kind. The record stays compact and table-driven;
+/// content lives in [`InteractableMessageRecord`] and static strings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InteractableKind {
+    /// Show a message overlay.
+    Message,
+    /// Update the in-memory checkpoint/sync point.
+    Checkpoint,
+}
+
+/// Runtime flags for [`InteractableRecord`].
+pub mod interactable_flags {
+    /// Record is active in gameplay.
+    pub const ENABLED: u16 = 1 << 0;
+}
+
+/// Sentinel for [`InteractableRecord::message`] when no message is
+/// associated with the interaction.
+pub const INTERACTABLE_MESSAGE_NONE: u16 = u16::MAX;
+
+/// Text shown by an interactable. Kept separate so future records can
+/// share/localize messages without changing the spatial table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InteractableMessageRecord {
+    /// Header/title line.
+    pub title: &'static str,
+    /// Body text. Newlines are preserved by the simple runtime overlay.
+    pub body: &'static str,
+}
+
+/// One placed gameplay interaction. Coordinates are room-local engine
+/// units and use the same floor-anchor convention as placed entities.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InteractableRecord {
+    /// Owning room index.
+    pub room: RoomIndex,
+    /// Runtime behavior.
+    pub kind: InteractableKind,
+    /// Room-local X.
+    pub x: i32,
+    /// Y.
+    pub y: i32,
+    /// Room-local Z.
+    pub z: i32,
+    /// Yaw, PSX angle units.
+    pub yaw: i16,
+    /// Activation radius in XZ engine units.
+    pub radius: u16,
+    /// Short prompt shown near the object.
+    pub prompt: &'static str,
+    /// Index into the generated interactable message table, or
+    /// [`INTERACTABLE_MESSAGE_NONE`].
+    pub message: u16,
+    /// Stable checkpoint id for [`InteractableKind::Checkpoint`].
+    pub checkpoint_id: &'static str,
+    /// Runtime flags from [`interactable_flags`].
+    pub flags: u16,
+}
+
 /// One animation clip bound to a [`LevelModelRecord`]. The clip
 /// asset's joint count is checked against the owning model's
 /// joint count at cook time; runtime trusts the contract.
@@ -1476,10 +1539,54 @@ pub struct LevelUiScene {
     pub node_count: u16,
 }
 
-/// One state in the game flow graph. A `UiScene` state shows the
-/// named scene; `Gameplay` hands control to the level runtime.
+/// Runtime world layer attached to a composed scene state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LevelWorldLayer {
+    /// No 3D/gameplay world is rendered or updated.
+    None,
+    /// Run the project gameplay/level scene.
+    Gameplay,
+}
+
+/// Sentinel meaning "this scene state has no UI overlay".
+pub const UI_SCENE_NONE: u16 = u16::MAX;
+
+/// Runtime flags for [`LevelSceneState`].
+pub mod scene_state_flags {
+    /// Route menu/navigation input to the state's UI scene.
+    pub const UI_INPUT: u16 = 1 << 0;
+    /// Keep the gameplay/world layer frozen while this state is active.
+    pub const PAUSE_WORLD: u16 = 1 << 1;
+}
+
+/// One composed runtime scene. A state may be 2D-only, 3D-only, or a
+/// 3D world with a 2D overlay. Flow entries point at these records so
+/// loading/unloading policy can become state-driven instead of being
+/// implicit in "menu versus gameplay".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelSceneState {
+    /// Stable cooked state id.
+    pub id: u16,
+    /// Display/debug name.
+    pub name: &'static str,
+    /// World layer to update/render.
+    pub world: LevelWorldLayer,
+    /// Optional [`LevelUiScene::id`] drawn over the world.
+    pub ui_scene: u16,
+    /// Runtime flags from [`scene_state_flags`].
+    pub flags: u16,
+}
+
+/// One state in the game flow graph. `SceneState` is the modern
+/// composable form. `UiScene` and `Gameplay` remain compatibility
+/// aliases for older generated manifests and gameplay-only examples.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FlowState {
+    /// Enter the composed [`LevelSceneState`] with this id.
+    SceneState {
+        /// Target [`LevelSceneState::id`].
+        state: u16,
+    },
     /// Show a UI scene by its [`LevelUiScene::id`].
     UiScene {
         /// Target scene id.
@@ -1496,6 +1603,8 @@ pub enum FlowState {
 pub struct GameFlow {
     /// Flow state table.
     pub states: &'static [FlowState],
+    /// Addressable composed scene-state table.
+    pub scene_states: &'static [LevelSceneState],
     /// Index into `states` of the starting state.
     pub entry: u16,
 }
@@ -1589,6 +1698,11 @@ pub struct LevelUiSfxCueRecord {
 /// `static`. Activation/navigation is wired in a later step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LevelUiAction {
+    /// Switch the game flow to the composed scene state by id.
+    GotoState {
+        /// Target [`LevelSceneState::id`].
+        state: u16,
+    },
     /// Switch the game flow to the named [`LevelUiScene`] by id.
     GotoScene {
         /// Target [`LevelUiScene::id`].
@@ -1618,6 +1732,46 @@ pub const UI_OPTION_NONE: u16 = u16::MAX;
 
 /// Sentinel meaning "this UI node has no cooked SFX cue range".
 pub const UI_SFX_NONE: u16 = u16::MAX;
+
+/// Sentinel meaning "this UI colour role uses its solid colour field,
+/// not an entry in the cooked paint table".
+pub const UI_PAINT_NONE: u16 = u16::MAX;
+
+/// Direction for a cooked UI gradient paint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LevelUiGradientDirection {
+    /// Interpolate from top to bottom.
+    Vertical,
+    /// Interpolate from left to right.
+    Horizontal,
+}
+
+/// One cooked UI gradient paint. Nodes reference these by index for
+/// their primary/secondary/accent colour roles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelUiPaintRecord {
+    /// Near/top/left colour.
+    pub from: [u8; 3],
+    /// Far/bottom/right colour.
+    pub to: [u8; 3],
+    /// Gradient direction.
+    pub direction: LevelUiGradientDirection,
+}
+
+/// Animated vertex-colour effect for textured UI image nodes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LevelUiImageEffect {
+    /// Static image tint.
+    None,
+    /// Broad highlight moving left-to-right.
+    Shimmer,
+    /// Faster, stronger left-to-right shimmer.
+    FastShimmer,
+    /// Highlight moving diagonally across the image.
+    DiagonalSweep,
+    /// Whole-image brightness pulse.
+    SoftPulse,
+}
 
 /// One cooked project option: a runtime-tunable integer with a bounded
 /// range, step, and default. Sliders ([`LevelUiNodeRecord::option`]) and
@@ -1666,12 +1820,20 @@ pub struct LevelUiNodeRecord {
     pub background: [u8; 3],
     /// Tertiary colour, currently the `Slider` knob.
     pub accent: [u8; 3],
+    /// Optional paint index overriding [`Self::color`], or [`UI_PAINT_NONE`].
+    pub color_paint: u16,
+    /// Optional paint index overriding [`Self::background`], or [`UI_PAINT_NONE`].
+    pub background_paint: u16,
+    /// Optional paint index overriding [`Self::accent`], or [`UI_PAINT_NONE`].
+    pub accent_paint: u16,
     /// Current value binding for `Bar`.
     pub value: LevelUiValueBinding,
     /// Maximum value binding for `Bar`.
     pub max: LevelUiValueBinding,
     /// Texture asset for `Image`, or `AssetId(u16::MAX)`.
     pub texture_asset: AssetId,
+    /// Animated vertex-colour preset for `Image`.
+    pub image_effect: LevelUiImageEffect,
     /// Text for `Label`/`Button`.
     pub text: &'static str,
     /// Runtime lookup tag for dynamic labels. Empty means untagged.
@@ -1680,6 +1842,8 @@ pub struct LevelUiNodeRecord {
     pub action: LevelUiAction,
     /// Project option a `Slider` binds to, or [`UI_OPTION_NONE`].
     pub option: u16,
+    /// Clockwise visual rotation around this node's centre, in degrees.
+    pub rotation_degrees: i16,
     /// Runtime flags.
     pub flags: u16,
     /// First index into the generated `UI_SFX_CUES` table, or

@@ -23,6 +23,16 @@ impl EngineClock {
         platform::vblank_count().wrapping_sub(self.origin_vblank)
     }
 
+    pub(crate) fn reset_origin(&mut self) {
+        self.align_origin_to_sim_tick(0);
+    }
+
+    pub(crate) fn align_origin_to_sim_tick(&mut self, sim_tick: u32) {
+        let now = platform::vblank_count();
+        self.origin_vblank = now.wrapping_sub(sim_tick);
+        self.last_present_vblank = now;
+    }
+
     pub(crate) fn wait_next_vblank(&mut self) {
         self.last_present_vblank = platform::wait_present_vblank(self.last_present_vblank);
     }
