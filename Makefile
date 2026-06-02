@@ -255,6 +255,7 @@ PSX_BUILD_FLAGS := --target $(PSX_TARGET) -Zbuild-std=core -Zbuild-std-features=
 SDK_EXAMPLE_CARGO_ENV := CARGO_TARGET_DIR=$(EXAMPLE_TARGET_DIR) RUSTFLAGS="-Clink-arg=-T../../psoxide.ld -Clink-arg=--oformat=binary"
 ENGINE_EXAMPLE_CARGO_ENV := CARGO_TARGET_DIR=$(EXAMPLE_TARGET_DIR) RUSTFLAGS="-Clink-arg=-T../../../sdk/psoxide.ld -Clink-arg=--oformat=binary"
 EDITOR_PLAYTEST_CARGO_ENV := CARGO_TARGET_DIR=$(EXAMPLE_TARGET_DIR) RUSTFLAGS="-Zunstable-options -Cpanic=immediate-abort -Clink-arg=-T../../../sdk/psoxide.ld -Clink-arg=--oformat=binary"
+EDITOR_PLAYTEST_GENERATED_FROM_MKISOPSX := ../../engine/examples/editor-playtest/generated
 CDDA_DEMO_TRACK ?= assets/audio/cdda/GONCHAROV.track02.cdda
 GONCHAROV_WAV ?= assets/audio/cdda/GONCHAROV.wav
 MAGIKAAAAARP_PONG_TRACK ?= assets/audio/cdda/GONCHAROV.track02.cdda
@@ -427,7 +428,8 @@ profile-demo3-disc-stream:
 		--volume PSOXIDE \
 		--cdtest-sectors 32 \
 		--world-pack-rooms-dir ../../engine/examples/editor-playtest/generated/stream_chunks \
-		--world-pack-order-file ../../engine/examples/editor-playtest/generated/world_pack_order.txt
+		--world-pack-order-file ../../engine/examples/editor-playtest/generated/world_pack_order.txt \
+		--cdda-track-list $(EDITOR_PLAYTEST_GENERATED_FROM_MKISOPSX)/cdda_tracks.txt
 	cd emu && cargo run -p frontend --release -- launch \
 		--path ../$(EXAMPLE_OUT)/editor-playtest.cue \
 		--embedded-playtest \
@@ -447,7 +449,8 @@ profile-demo3-disc-stream-forward:
 		--volume PSOXIDE \
 		--cdtest-sectors 32 \
 		--world-pack-rooms-dir ../../engine/examples/editor-playtest/generated/stream_chunks \
-		--world-pack-order-file ../../engine/examples/editor-playtest/generated/world_pack_order.txt
+		--world-pack-order-file ../../engine/examples/editor-playtest/generated/world_pack_order.txt \
+		--cdda-track-list $(EDITOR_PLAYTEST_GENERATED_FROM_MKISOPSX)/cdda_tracks.txt
 	cd emu && cargo run -p frontend --release -- launch \
 		--path ../$(EXAMPLE_OUT)/editor-playtest.cue \
 		--embedded-playtest \
@@ -468,7 +471,8 @@ profile-demo7-camera-sweep:
 		--volume PSOXIDE \
 		--cdtest-sectors 32 \
 		--world-pack-rooms-dir ../../engine/examples/editor-playtest/generated/stream_chunks \
-		--world-pack-order-file ../../engine/examples/editor-playtest/generated/world_pack_order.txt
+		--world-pack-order-file ../../engine/examples/editor-playtest/generated/world_pack_order.txt \
+		--cdda-track-list $(EDITOR_PLAYTEST_GENERATED_FROM_MKISOPSX)/cdda_tracks.txt
 	cd emu && cargo run -p frontend --release -- launch \
 		--path ../$(EXAMPLE_OUT)/editor-playtest.cue \
 		--embedded-playtest \
