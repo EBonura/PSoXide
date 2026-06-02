@@ -3,7 +3,7 @@
 use std::fmt::Write as _;
 
 use super::*;
-use crate::{UiNodeKind, UiValueBinding};
+use crate::{UiFontChoice, UiNodeKind, UiValueBinding};
 
 const STREAMED_ROOM_SLOT_BYTES: usize = 32 * 1024;
 
@@ -13,15 +13,18 @@ pub fn write_package(package: &PlaytestPackage, generated_dir: &Path) -> std::io
     let textures_dir = generated_dir.join(TEXTURES_DIRNAME);
     let models_dir = generated_dir.join(MODELS_DIRNAME);
     let ui_sfx_dir = generated_dir.join(UI_SFX_DIRNAME);
+    let cdda_tracks_dir = generated_dir.join(CDDA_TRACKS_DIRNAME);
     std::fs::create_dir_all(&rooms_dir)?;
     std::fs::create_dir_all(&stream_chunks_dir)?;
     std::fs::create_dir_all(&textures_dir)?;
     std::fs::create_dir_all(&models_dir)?;
     std::fs::create_dir_all(&ui_sfx_dir)?;
+    std::fs::create_dir_all(&cdda_tracks_dir)?;
     purge_directory_files(&rooms_dir, "psxw")?;
     purge_directory_files(&stream_chunks_dir, "psxc")?;
     purge_directory_files(&textures_dir, "psxt")?;
     purge_directory_files(&ui_sfx_dir, "psau")?;
+    purge_directory_files(&cdda_tracks_dir, "cdda")?;
     // Models live in per-model subfolders so the recursive
     // purge needs to traverse one level deeper than rooms /
     // textures.
@@ -67,7 +70,7 @@ pub fn write_package(package: &PlaytestPackage, generated_dir: &Path) -> std::io
     )?;
     std::fs::write(
         generated_dir.join(CDDA_TRACKS_FILENAME),
-        render_cdda_tracks(package),
+        write_cdda_tracks(package, &cdda_tracks_dir)?,
     )?;
     Ok(())
 }
@@ -932,6 +935,16 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     }
     out.push_str("];\n\n");
 
+    let ui_fonts = collect_ui_fonts(&package.ui_nodes);
+    out.push_str("/// Cooked UI font sources, compacted to fonts used by cooked UI text.\n");
+    out.push_str("pub static UI_FONTS: &[&psx_font::BitmapFont] = &[\n");
+    for font in &ui_fonts {
+        let source = render_ui_font_source(*font);
+        let _ = writeln!(out, "    &{source},");
+    }
+    out.push_str("];\n");
+    out.push_str("const _: () = assert!(UI_FONTS.len() <= 4);\n\n");
+
     out.push_str("/// Cooked screen-space UI nodes.\n");
     out.push_str("pub static UI_NODES: &[LevelUiNodeRecord] = &[\n");
     for node in &package.ui_nodes {
@@ -947,9 +960,10 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             .texture_asset
             .map(|index| format!("AssetId({index})"))
             .unwrap_or_else(|| "AssetId(u16::MAX)".to_string());
+        let font = compact_ui_font_index(&ui_fonts, node);
         let _ = writeln!(
             out,
-            "    LevelUiNodeRecord {{ parent: {parent}, kind: {kind}, x: {}, y: {}, width: {}, height: {}, color: [{}, {}, {}], background: [{}, {}, {}], accent: [{}, {}, {}], value: {value}, max: {max}, texture_asset: {texture_asset}, text: {:?}, tag: {:?}, action: {action}, option: {}, flags: {}, sfx_first: {}, sfx_count: {}, font: 0 }},",
+            "    LevelUiNodeRecord {{ parent: {parent}, kind: {kind}, x: {}, y: {}, width: {}, height: {}, color: [{}, {}, {}], background: [{}, {}, {}], accent: [{}, {}, {}], value: {value}, max: {max}, texture_asset: {texture_asset}, text: {:?}, tag: {:?}, action: {action}, option: {}, flags: {}, sfx_first: {}, sfx_count: {}, font: {}, font_scale: {}, letter_spacing: {} }},",
             node.x,
             node.y,
             node.width,
@@ -969,6 +983,9 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             node.flags,
             node.sfx_first,
             node.sfx_count,
+            font,
+            node.font_scale,
+            node.letter_spacing,
         );
     }
     out.push_str("];\n\n");
@@ -1251,15 +1268,27 @@ fn render_world_pack_order(package: &PlaytestPackage) -> String {
     out
 }
 
-fn render_cdda_tracks(package: &PlaytestPackage) -> String {
+fn write_cdda_tracks(package: &PlaytestPackage, cdda_tracks_dir: &Path) -> std::io::Result<String> {
     let mut out = String::from(
-        "# PSoXide CD-DA WAV sources\n\
-         # One WAV path per line. Track 2 is the first line, track 3 the second, etc.\n",
+        "# PSoXide cooked CD-DA raw track payloads\n\
+         # One path per line. Track 2 is the first line, track 3 the second, etc.\n",
     );
     for track in &package.cdda_tracks {
-        let _ = writeln!(out, "{}", track.wav_path);
+        let source = Path::new(&track.wav_path);
+        let bytes = std::fs::read(source)?;
+        let cooked = psxed_audio::cook_cdda_track_from_wav(&bytes).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("cook CD-DA track {}: {e}", source.display()),
+            )
+        })?;
+        let filename = format!("track{:02}.cdda", track.track);
+        let target = cdda_tracks_dir.join(filename);
+        std::fs::write(&target, cooked)?;
+        let listed = target.canonicalize().unwrap_or(target);
+        let _ = writeln!(out, "{}", listed.display());
     }
-    out
+    Ok(out)
 }
 
 fn world_pack_toc(package: &PlaytestPackage) -> Vec<psx_iso::WorldPackBuildEntry> {
@@ -2224,6 +2253,77 @@ fn render_weapon_hit_shape(shape: PlaytestWeaponHitShape) -> String {
     }
 }
 
+fn collect_ui_fonts(nodes: &[PlaytestUiNode]) -> Vec<UiFontChoice> {
+    let mut fonts = Vec::new();
+    for node in nodes {
+        let Some(font) = authored_ui_font(&node.kind) else {
+            continue;
+        };
+        if !fonts.contains(&font) {
+            fonts.push(font);
+        }
+    }
+    if fonts.is_empty() {
+        fonts.push(UiFontChoice::Basic);
+    }
+    fonts
+}
+
+fn authored_ui_font(kind: &UiNodeKind) -> Option<UiFontChoice> {
+    match kind {
+        UiNodeKind::Label { font, .. } | UiNodeKind::Button { font, .. } => Some(*font),
+        _ => None,
+    }
+}
+
+fn compact_ui_font_index(fonts: &[UiFontChoice], node: &PlaytestUiNode) -> u8 {
+    authored_ui_font(&node.kind)
+        .and_then(|font| fonts.iter().position(|candidate| *candidate == font))
+        .unwrap_or(0)
+        .min(u8::MAX as usize) as u8
+}
+
+fn render_ui_font_source(font: UiFontChoice) -> &'static str {
+    match font {
+        UiFontChoice::Basic => "psx_font::fonts::BASIC",
+        UiFontChoice::Basic8x16 => "psx_font::fonts::BASIC_8X16",
+        UiFontChoice::KenneyBlocks => "psx_font::fonts::KENNEY_BLOCKS",
+        UiFontChoice::KenneyFuture => "psx_font::fonts::KENNEY_FUTURE",
+        UiFontChoice::KenneyFutureNarrow => "psx_font::fonts::KENNEY_FUTURE_NARROW",
+        UiFontChoice::KenneyHigh => "psx_font::fonts::KENNEY_HIGH",
+        UiFontChoice::KenneyHighSquare => "psx_font::fonts::KENNEY_HIGH_SQUARE",
+        UiFontChoice::KenneyMini => "psx_font::fonts::KENNEY_MINI",
+        UiFontChoice::KenneyMiniSquare => "psx_font::fonts::KENNEY_MINI_SQUARE",
+        UiFontChoice::KenneyMiniSquareMono => "psx_font::fonts::KENNEY_MINI_SQUARE_MONO",
+        UiFontChoice::KenneyPixel => "psx_font::fonts::KENNEY_PIXEL",
+        UiFontChoice::KenneyPixelSquare => "psx_font::fonts::KENNEY_PIXEL_SQUARE",
+        UiFontChoice::KenneyRocket => "psx_font::fonts::KENNEY_ROCKET",
+        UiFontChoice::KenneyRocketSquare => "psx_font::fonts::KENNEY_ROCKET_SQUARE",
+        UiFontChoice::PressStart2P => "psx_font::fonts::PRESS_START_2P",
+        UiFontChoice::Silkscreen => "psx_font::fonts::SILKSCREEN",
+        UiFontChoice::PixelifySans => "psx_font::fonts::PIXELIFY_SANS",
+        UiFontChoice::Orbitron => "psx_font::fonts::ORBITRON",
+        UiFontChoice::Audiowide => "psx_font::fonts::AUDIOWIDE",
+        UiFontChoice::Michroma => "psx_font::fonts::MICHROMA",
+        UiFontChoice::Electrolize => "psx_font::fonts::ELECTROLIZE",
+        UiFontChoice::Oxanium => "psx_font::fonts::OXANIUM",
+        UiFontChoice::Rajdhani => "psx_font::fonts::RAJDHANI",
+        UiFontChoice::ChakraPetch => "psx_font::fonts::CHAKRA_PETCH",
+        UiFontChoice::Tektur => "psx_font::fonts::TEKTUR",
+        UiFontChoice::Tomorrow => "psx_font::fonts::TOMORROW",
+        UiFontChoice::ZenDots => "psx_font::fonts::ZEN_DOTS",
+        UiFontChoice::TurretRoad => "psx_font::fonts::TURRET_ROAD",
+        UiFontChoice::Tiny5 => "psx_font::fonts::TINY5",
+        UiFontChoice::Jersey10 => "psx_font::fonts::JERSEY_10",
+        UiFontChoice::SpaceMono => "psx_font::fonts::SPACE_MONO",
+        UiFontChoice::BrunoAce => "psx_font::fonts::BRUNO_ACE",
+        UiFontChoice::Aldrich => "psx_font::fonts::ALDRICH",
+        UiFontChoice::Syncopate => "psx_font::fonts::SYNCOPATE",
+        UiFontChoice::ShareTechMono => "psx_font::fonts::SHARE_TECH_MONO",
+        UiFontChoice::Jura => "psx_font::fonts::JURA",
+    }
+}
+
 fn render_ui_node_kind(kind: &UiNodeKind) -> &'static str {
     match kind {
         UiNodeKind::Canvas { .. } => "LevelUiNodeKind::Canvas",
@@ -2667,6 +2767,37 @@ mod tests {
     }
 
     #[test]
+    fn write_cdda_tracks_cooks_sector_aligned_payloads_and_lists_paths() {
+        let dir = std::env::temp_dir().join(format!(
+            "psxed-project-test-{}-{}",
+            std::process::id(),
+            "cdda-tracks"
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let source = dir.join("menu music.wav");
+        std::fs::write(&source, test_wav_mono_44k(&[0, 1200, -1200, 0])).unwrap();
+        let cdda_dir = dir.join(CDDA_TRACKS_DIRNAME);
+        std::fs::create_dir_all(&cdda_dir).unwrap();
+
+        let mut package = PlaytestPackage::default();
+        package.cdda_tracks.push(PlaytestCddaTrack {
+            track: 2,
+            wav_path: source.to_string_lossy().into_owned(),
+        });
+
+        let list = write_cdda_tracks(&package, &cdda_dir).unwrap();
+        let target = cdda_dir.join("track02.cdda");
+        let cooked_len = std::fs::metadata(&target).unwrap().len();
+        assert!(list.contains(&target.canonicalize().unwrap().display().to_string()));
+        assert_eq!(cooked_len % psx_iso::SECTOR_BYTES as u64, 0);
+        assert!(cooked_len > 0);
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn world_pack_order_starts_at_spawn_and_walks_chunk_neighbours() {
         let chunks = [
             test_chunk(0, 0, 0, 0, [None, Some(1), Some(2), None]),
@@ -2749,6 +2880,9 @@ mod tests {
     fn empty_package_emits_gameplay_only_flow_and_no_scenes() {
         let package = PlaytestPackage::default();
         let src = render_manifest_source(&package);
+        assert!(src.contains(
+            "pub static UI_FONTS: &[&psx_font::BitmapFont] = &[\n    &psx_font::fonts::BASIC,\n];"
+        ));
         assert!(src.contains("pub static UI_SCENES: &[LevelUiScene] = &[\n];"));
         assert!(src.contains(
             "pub static GAME_FLOW: GameFlow = GameFlow {\n    states: &[\n        FlowState::Gameplay,\n    ],\n    entry: 0,\n};"
@@ -2781,6 +2915,9 @@ mod tests {
             flags: 0,
             sfx_first: psx_level::UI_SFX_NONE,
             sfx_count: 0,
+            font: 0,
+            font_scale: crate::default_ui_font_scale(),
+            letter_spacing: crate::default_ui_letter_spacing(),
         }];
         package.ui_scenes = vec![PlaytestUiScene {
             id: 7,
@@ -2815,6 +2952,9 @@ mod tests {
                     rect: crate::UiRect::new(0, 0, 80, 18),
                     label: "Play".to_string(),
                     align: UiTextAlign::Center,
+                    font: crate::UiFontChoice::Basic8x16,
+                    font_scale: crate::default_ui_font_scale(),
+                    letter_spacing: crate::default_ui_letter_spacing(),
                     color: [50, 60, 70],
                     text_color: [236, 240, 248],
                     transparent: false,
@@ -2838,6 +2978,9 @@ mod tests {
                 flags: 0,
                 sfx_first: psx_level::UI_SFX_NONE,
                 sfx_count: 0,
+                font: 1,
+                font_scale: crate::UI_FONT_SCALE_ONE_Q8 * 2,
+                letter_spacing: 3,
             },
             PlaytestUiNode {
                 parent: None,
@@ -2866,12 +3009,20 @@ mod tests {
                 flags: 0,
                 sfx_first: psx_level::UI_SFX_NONE,
                 sfx_count: 0,
+                font: 0,
+                font_scale: crate::default_ui_font_scale(),
+                letter_spacing: crate::default_ui_letter_spacing(),
             },
         ];
 
         let src = render_manifest_source(&package);
+        assert!(src.contains("    &psx_font::fonts::BASIC_8X16,\n"));
+        assert!(!src.contains("    &psx_font::fonts::BASIC,\n"));
         assert!(src.contains("kind: LevelUiNodeKind::Button"));
         assert!(src.contains("action: LevelUiAction::GotoScene { scene: 7 }"));
+        assert!(src.contains("font: 0"));
+        assert!(src.contains("font_scale: 512"));
+        assert!(src.contains("letter_spacing: 3"));
         assert!(src.contains("kind: LevelUiNodeKind::Slider"));
         assert!(src.contains("accent: [31, 32, 33]"));
         assert!(src.contains("option: 3"));
@@ -3303,6 +3454,29 @@ mod tests {
             bytes[offset + 3],
         ])
     }
+}
+
+#[cfg(test)]
+fn test_wav_mono_44k(samples: &[i16]) -> Vec<u8> {
+    let data_len = samples.len() as u32 * 2;
+    let mut out = Vec::with_capacity(44 + data_len as usize);
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&(36 + data_len).to_le_bytes());
+    out.extend_from_slice(b"WAVE");
+    out.extend_from_slice(b"fmt ");
+    out.extend_from_slice(&16u32.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&44_100u32.to_le_bytes());
+    out.extend_from_slice(&(44_100u32 * 2).to_le_bytes());
+    out.extend_from_slice(&2u16.to_le_bytes());
+    out.extend_from_slice(&16u16.to_le_bytes());
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&data_len.to_le_bytes());
+    for sample in samples {
+        out.extend_from_slice(&sample.to_le_bytes());
+    }
+    out
 }
 
 /// Header emitted at the top of every generated manifest. The
