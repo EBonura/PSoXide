@@ -60,6 +60,7 @@ pub static MODELS: &[LevelModelRecord] = &[];
 pub static MODEL_INSTANCES: &[LevelModelInstanceRecord] = &[];
 pub static IMAGE_PROPS: &[LevelImagePropRecord] = &[];
 pub static BOX_PROPS: &[LevelBoxPropRecord] = &[];
+pub static UI_FONTS: &[&psx_font::BitmapFont] = &[&psx_font::fonts::BASIC];
 pub static UI_NODES: &[LevelUiNodeRecord] = &[];
 pub static UI_SFX_SAMPLES: &[LevelUiSfxSampleRecord] = &[];
 pub static UI_SFX_CUES: &[LevelUiSfxCueRecord] = &[];

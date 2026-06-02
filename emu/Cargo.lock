@@ -1329,7 +1329,6 @@ dependencies = [
  "psx-iso",
  "psx-trace",
  "psx-vram",
- "psxed-audio",
  "psxed-project",
  "psxed-ui",
  "rfd",

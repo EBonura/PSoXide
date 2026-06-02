@@ -1693,6 +1693,13 @@ pub struct LevelUiNodeRecord {
     /// scene mix, e.g., a large title font and a small body font. Ignored by
     /// non-text node kinds.
     pub font: u8,
+    /// Q8 scale for `Label` / `Button` text (`256` = 1.0x). Runtime renderers
+    /// clamp this to their supported range and ignore it for non-text node
+    /// kinds.
+    pub font_scale: u16,
+    /// Extra signed screen pixels inserted between adjacent glyphs. Runtime
+    /// renderers ignore it for non-text node kinds.
+    pub letter_spacing: i8,
 }
 
 /// Direction a focus move travels across a menu's focusable rects.

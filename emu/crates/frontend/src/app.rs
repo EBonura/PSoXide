@@ -2154,8 +2154,8 @@ pub(crate) fn build_embedded_playtest_disc() -> Result<PathBuf, String> {
     let exe_bytes = std::fs::read(&exe_path).map_err(|e| format!("{}: {e}", exe_path.display()))?;
     let world_pack = embedded_world_pack_payload()?;
     let mut image = embedded_playtest_disc_image(exe_bytes, world_pack)?;
-    let cdda_sources = embedded_cdda_track_sources()?;
-    let cdda_tracks = append_cdda_tracks_to_image(&mut image, &cdda_sources)?;
+    let cdda_payloads = embedded_cdda_track_payloads()?;
+    let cdda_tracks = append_cdda_tracks_to_image(&mut image, &cdda_payloads)?;
 
     let cue_path = editor_playtest_disc_path();
     let bin_path = cue_path.with_extension("bin");
@@ -2209,21 +2209,20 @@ fn cue_msf(frames: u32) -> String {
 
 fn append_cdda_tracks_to_image(
     image: &mut Vec<u8>,
-    sources: &[PathBuf],
+    payloads: &[PathBuf],
 ) -> Result<Vec<CddaCueTrack>, String> {
     const CDDA_PREGAP_SECTORS: usize = 150;
-    let mut cue_tracks = Vec::with_capacity(sources.len());
-    for (index, source) in sources.iter().enumerate() {
+    let mut cue_tracks = Vec::with_capacity(payloads.len());
+    for (index, payload) in payloads.iter().enumerate() {
         if index >= 98 {
             return Err("CUE sheets can only address tracks 01 through 99".to_string());
         }
-        let wav = std::fs::read(source).map_err(|e| format!("read {}: {e}", source.display()))?;
-        let cdda = psxed_audio::cook_cdda_track_from_wav(&wav)
-            .map_err(|e| format!("cook CD-DA {}: {e}", source.display()))?;
+        let cdda =
+            std::fs::read(payload).map_err(|e| format!("read {}: {e}", payload.display()))?;
         if cdda.is_empty() || cdda.len() % SECTOR_BYTES != 0 {
             return Err(format!(
-                "{} did not cook to a non-empty whole number of 2352-byte CD-DA sectors",
-                source.display()
+                "{} is not a non-empty whole number of 2352-byte CD-DA sectors",
+                payload.display()
             ));
         }
         let index0_sector = (image.len() / SECTOR_BYTES) as u32;
@@ -2265,7 +2264,7 @@ fn editor_playtest_generated_dir() -> PathBuf {
         .join("generated")
 }
 
-fn embedded_cdda_track_sources() -> Result<Vec<PathBuf>, String> {
+fn embedded_cdda_track_payloads() -> Result<Vec<PathBuf>, String> {
     let tracks_file =
         editor_playtest_generated_dir().join(psxed_project::playtest::CDDA_TRACKS_FILENAME);
     if !tracks_file.is_file() {
