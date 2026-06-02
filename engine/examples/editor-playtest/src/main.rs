@@ -7453,6 +7453,7 @@ fn draw_sky_panorama(
     let bottom_pitch = (horizon_pitch - 46).max(-72);
     let mut projected_grid: [Option<(i16, i16)>; SKY_CYCLORAMA_GRID_POINTS_MAX] =
         [None; SKY_CYCLORAMA_GRID_POINTS_MAX];
+    let grid_stride = columns + 1;
 
     // Project the whole grid on the GTE: load the camera rotation once, then
     // RTPS each direction (hardware rotate + perspective divide) instead of the
@@ -7476,49 +7477,59 @@ fn draw_sky_panorama(
         pitch_cos[row] = pitch.cos().raw();
     }
     for row in 0..=rows {
+        let row_base = row * grid_stride;
         for column in 0..=columns {
             let dir = [
                 clamp_i16(-mul_q12_i32(yaw_sin[column], pitch_cos[row])),
                 clamp_i16(pitch_sin[row]),
                 clamp_i16(-mul_q12_i32(yaw_cos[column], pitch_cos[row])),
             ];
-            projected_grid[sky_grid_index(row, column, columns)] = sky_projector
+            projected_grid[row_base + column] = sky_projector
                 .project(dir)
                 .map(|(sx, sy)| (sx.clamp(-512, 831), sy.clamp(-256, 495)));
         }
     }
 
+    let mut column_tpage_word = [0u16; SKY_CYCLORAMA_COLUMNS_MAX as usize];
+    let mut column_u0 = [0u8; SKY_CYCLORAMA_COLUMNS_MAX as usize];
+    let mut column_u1 = [0u8; SKY_CYCLORAMA_COLUMNS_MAX as usize];
+    for column in 0..columns {
+        let page = sky_panorama_page_for_column(column, columns);
+        column_tpage_word[column] = sky_panorama_tpage_word(page);
+        column_u0[column] = sky_panorama_local_u(
+            sky_coord_for_step(column, columns, SKY_PANORAMA_WIDTH),
+            page,
+        );
+        column_u1[column] = sky_panorama_local_u(
+            sky_coord_for_step(column + 1, columns, SKY_PANORAMA_WIDTH),
+            page,
+        );
+    }
+
     for row in 0..rows {
+        let row_base = row * grid_stride;
+        let next_row_base = row_base + grid_stride;
         let v0 = sky_uv_for_step(row, rows, SKY_PANORAMA_HEIGHT);
         let v1 = sky_uv_for_step(row + 1, rows, SKY_PANORAMA_HEIGHT);
         let clut_word = sky_panorama_clut_word(sky_panorama_clut_band_for_row(row, rows));
         for column in 0..columns {
-            let page = sky_panorama_page_for_column(column, columns);
             let material = TextureMaterial::opaque(
                 clut_word,
-                sky_panorama_tpage_word(page),
+                column_tpage_word[column],
                 (0x80, 0x80, 0x80),
             )
             .with_raw_texture(true)
             .with_dither(true);
-            let u0 = sky_panorama_local_u(
-                sky_coord_for_step(column, columns, SKY_PANORAMA_WIDTH),
-                page,
-            );
-            let u1 = sky_panorama_local_u(
-                sky_coord_for_step(column + 1, columns, SKY_PANORAMA_WIDTH),
-                page,
-            );
-            let Some(p0) = projected_grid[sky_grid_index(row, column, columns)] else {
+            let Some(p0) = projected_grid[row_base + column] else {
                 continue;
             };
-            let Some(p1) = projected_grid[sky_grid_index(row, column + 1, columns)] else {
+            let Some(p1) = projected_grid[row_base + column + 1] else {
                 continue;
             };
-            let Some(p2) = projected_grid[sky_grid_index(row + 1, column, columns)] else {
+            let Some(p2) = projected_grid[next_row_base + column] else {
                 continue;
             };
-            let Some(p3) = projected_grid[sky_grid_index(row + 1, column + 1, columns)] else {
+            let Some(p3) = projected_grid[next_row_base + column + 1] else {
                 continue;
             };
             let projected = [p0, p1, p2, p3];
@@ -7530,7 +7541,12 @@ fn draw_sky_panorama(
             // one chain instead of per-quad FIFO writes + wait_cmd_ready spins.
             let quad = QuadTexturedMaterial::with_material(
                 projected,
-                [(u0, v0), (u1, v0), (u0, v1), (u1, v1)],
+                [
+                    (column_u0[column], v0),
+                    (column_u1[column], v0),
+                    (column_u0[column], v1),
+                    (column_u1[column], v1),
+                ],
                 material,
             );
             if let Some(packet) = primitive_packets.push(quad) {
@@ -7540,17 +7556,11 @@ fn draw_sky_panorama(
     }
 }
 
-fn sky_grid_index(row: usize, column: usize, columns: usize) -> usize {
-    row.saturating_mul(columns.saturating_add(1))
-        .saturating_add(column)
-        .min(SKY_CYCLORAMA_GRID_POINTS_MAX - 1)
-}
-
 fn sky_quad_outside_screen(points: [(i16, i16); 4]) -> bool {
-    let min_x = points.iter().map(|p| p.0).min().unwrap_or(0);
-    let max_x = points.iter().map(|p| p.0).max().unwrap_or(0);
-    let min_y = points.iter().map(|p| p.1).min().unwrap_or(0);
-    let max_y = points.iter().map(|p| p.1).max().unwrap_or(0);
+    let min_x = points[0].0.min(points[1].0).min(points[2].0).min(points[3].0);
+    let max_x = points[0].0.max(points[1].0).max(points[2].0).max(points[3].0);
+    let min_y = points[0].1.min(points[1].1).min(points[2].1).min(points[3].1);
+    let max_y = points[0].1.max(points[1].1).max(points[2].1).max(points[3].1);
     max_x < 0 || min_x >= SCREEN_W || max_y < 0 || min_y >= SCREEN_H
 }
 
@@ -11361,7 +11371,7 @@ fn draw_image_props<T>(
                     .with_material_layer(material)
                     .with_textured_triangle_splitting(true)
                     .with_textured_triangle_max_edge(0);
-                let _ = world.submit_textured_gouraud_triangle(
+                let _ = world.submit_textured_gouraud_triangle_prescreened_u8(
                     triangles,
                     [projected[0], projected[1], projected[2]],
                     [uvs[0], uvs[1], uvs[2]],
@@ -11369,7 +11379,7 @@ fn draw_image_props<T>(
                     material,
                     opts,
                 );
-                let _ = world.submit_textured_gouraud_triangle(
+                let _ = world.submit_textured_gouraud_triangle_prescreened_u8(
                     triangles,
                     [projected[0], projected[2], projected[3]],
                     [uvs[0], uvs[2], uvs[3]],
@@ -11398,7 +11408,7 @@ fn draw_image_props<T>(
                 .with_material_layer(material)
                 .with_textured_triangle_splitting(true)
                 .with_textured_triangle_max_edge(0);
-            let _ = world.submit_textured_gouraud_triangle(
+            let _ = world.submit_textured_gouraud_triangle_prescreened_u8(
                 triangles,
                 [projected[0], projected[1], projected[2]],
                 [uvs[0], uvs[1], uvs[2]],
@@ -11406,7 +11416,7 @@ fn draw_image_props<T>(
                 material,
                 opts,
             );
-            let _ = world.submit_textured_gouraud_triangle(
+            let _ = world.submit_textured_gouraud_triangle_prescreened_u8(
                 triangles,
                 [projected[0], projected[2], projected[3]],
                 [uvs[0], uvs[2], uvs[3]],
