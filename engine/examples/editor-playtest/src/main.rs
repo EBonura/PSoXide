@@ -6604,7 +6604,7 @@ impl Playtest {
             .unwrap_or(1024);
         Some(RoomPoint::new(
             target.x,
-            target.y.saturating_add(height / 2),
+            target.y.saturating_add(height >> 1),
             target.z,
         ))
     }
@@ -8332,7 +8332,7 @@ fn visible_cell_camera_depth_if_sphere_visible(
     far_z: i32,
 ) -> Option<i32> {
     let sector_size = sector_size.max(1);
-    let half = sector_size / 2;
+    let half = sector_size >> 1;
     let center = WorldVertex::new(
         (cell.x as i32)
             .saturating_mul(sector_size)
@@ -8342,7 +8342,7 @@ fn visible_cell_camera_depth_if_sphere_visible(
             .saturating_mul(sector_size)
             .saturating_add(half),
     );
-    let half_height = ((cell.max_y - cell.min_y).abs() / 2).max(half);
+    let half_height = ((cell.max_y - cell.min_y).abs() >> 1).max(half);
     let radius = sector_size.saturating_add(half_height);
     let view = camera.view_vertex(center);
     let near = camera.projection.near_z.max(1);
@@ -8377,7 +8377,7 @@ fn visible_cell_camera_depth(
     sector_size: i32,
 ) -> i32 {
     let sector_size = sector_size.max(1);
-    let half = sector_size / 2;
+    let half = sector_size >> 1;
     let center = WorldVertex::new(
         (cell.x as i32)
             .saturating_mul(sector_size)
@@ -8560,7 +8560,7 @@ fn visibility_cell_in_view_wedge(
     }
 
     let sector_size = filter.sector_size.max(1);
-    let half = sector_size / 2;
+    let half = sector_size >> 1;
     let center_x = (cell.x as i32)
         .saturating_mul(sector_size)
         .saturating_add(half);
@@ -8609,7 +8609,7 @@ fn visibility_cell_aabb_intersects_camera(
     far_z: i32,
 ) -> bool {
     let sector_size = sector_size.max(1);
-    let margin = ROOM_VISIBLE_CELL_CAMERA_MARGIN.max(sector_size / 4);
+    let margin = ROOM_VISIBLE_CELL_CAMERA_MARGIN.max(sector_size >> 2);
     let x0 = (cell.x as i32)
         .saturating_mul(sector_size)
         .saturating_sub(margin);
@@ -8938,10 +8938,10 @@ fn active_room_sort_depth(active: ActiveRuntimeRoom, camera: WorldCamera) -> i32
     let sector_size = active.sector_size.max(1);
     let center_x = active
         .offset_x
-        .saturating_add((active.width as i32).saturating_mul(sector_size) / 2);
+        .saturating_add((active.width as i32).saturating_mul(sector_size) >> 1);
     let center_z = active
         .offset_z
-        .saturating_add((active.depth as i32).saturating_mul(sector_size) / 2);
+        .saturating_add((active.depth as i32).saturating_mul(sector_size) >> 1);
     camera
         .view_vertex(WorldVertex::new(center_x, 0, center_z))
         .z
@@ -10749,7 +10749,7 @@ fn draw_collision_cylinder_debug(
 }
 
 fn collision_debug_ring_offset(radius: i32, index: usize) -> (i32, i32) {
-    let diagonal = radius.saturating_mul(181) / 256;
+    let diagonal = radius.saturating_mul(181) >> 8;
     match index & 7 {
         0 => (radius, 0),
         1 => (diagonal, diagonal),
@@ -11078,7 +11078,7 @@ fn floor_anchored_model_origin(x: i32, y: i32, z: i32, world_height: u16) -> Wor
 }
 
 fn model_origin_floor_lift(world_height: u16) -> i32 {
-    (world_height as i32) / 2
+    (world_height as i32) >> 1
 }
 
 const MODEL_BOUNDS_SCREEN_MARGIN: i32 = 192;
@@ -12368,8 +12368,8 @@ fn box_prop_floor_debris_quad(
     chip: BoxPropFloorDebrisChip,
 ) -> [WorldVertex; 4] {
     let base = bounds.span_x.max(bounds.span_z).max(128);
-    let half_length = (base.saturating_mul(chip.half_length_q8 as i32) / 256).clamp(32, base);
-    let half_width = (base.saturating_mul(chip.half_width_q8 as i32) / 256).clamp(16, base);
+    let half_length = (base.saturating_mul(chip.half_length_q8 as i32) >> 8).clamp(32, base);
+    let half_width = (base.saturating_mul(chip.half_width_q8 as i32) >> 8).clamp(16, base);
     let center_x = bounds
         .center_x
         .saturating_add(bounds.span_x.saturating_mul(chip.offset_x_q8 as i32) / 256);
@@ -12467,7 +12467,7 @@ fn lerp_i32_q8(a: i32, b: i32, t_q8: u16) -> i32 {
 }
 
 fn uv_from_q8(max: u8, t_q8: u16) -> u8 {
-    ((max as u16).saturating_mul(t_q8.min(256)) / 256) as u8
+    ((max as u16).saturating_mul(t_q8.min(256)) >> 8) as u8
 }
 
 fn shrink_world_vertex_around(
@@ -12532,7 +12532,7 @@ fn average_vertex_rgb(colors: [(u8, u8, u8); 4]) -> (u8, u8, u8) {
 }
 
 fn image_prop_depth_bias(width: u16, height: u16) -> i32 {
-    IMAGE_PROP_DEPTH_BIAS.saturating_add((width.max(height) as i32) / 2)
+    IMAGE_PROP_DEPTH_BIAS.saturating_add((width.max(height) as i32) >> 1)
 }
 
 fn image_prop_cull_bounds(verts: [WorldVertex; 4]) -> (WorldVertex, i32) {
@@ -12590,7 +12590,7 @@ fn image_prop_vertices(
     camera: WorldCamera,
 ) -> [WorldVertex; 4] {
     if flags & image_prop_flags::CYLINDRICAL_BILLBOARD != 0 {
-        let half_width = (width as i32) / 2;
+        let half_width = (width as i32) >> 1;
         let right_x = mul_q12_i32(half_width, camera.cos_yaw.raw());
         let right_z = -mul_q12_i32(half_width, camera.sin_yaw.raw());
         let top_y = origin.y.saturating_add(height as i32);
@@ -12602,7 +12602,7 @@ fn image_prop_vertices(
         ];
     }
 
-    let half_width = (width as i32) / 2;
+    let half_width = (width as i32) >> 1;
     let h = height as i32;
     let locals = [
         [-half_width, h, 0],
@@ -12745,7 +12745,7 @@ fn box_prop_cull_bounds(
     let radius = abs_delta_i32(max_x, min_x)
         .saturating_add(abs_delta_i32(max_y, min_y))
         .saturating_add(abs_delta_i32(max_z, min_z))
-        / 2;
+        >> 1;
     (center, radius.max(32))
 }
 
@@ -12902,7 +12902,8 @@ fn box_prop_intersects_attack_volume(
     let cos_yaw = yaw.cos();
     let forward = sin_yaw.mul_i32(dx).saturating_add(cos_yaw.mul_i32(dz));
     let lateral = cos_yaw.mul_i32(dx).saturating_sub(sin_yaw.mul_i32(dz));
-    let prop_extent = abs_delta_i32(max.x, min.x).saturating_add(abs_delta_i32(max.z, min.z)) / 2;
+    let prop_extent =
+        abs_delta_i32(max.x, min.x).saturating_add(abs_delta_i32(max.z, min.z)) >> 1;
     let reach = BOX_PROP_BREAK_ATTACK_REACH
         .saturating_add(config.radius.max(0))
         .saturating_add(prop_extent);
@@ -13159,7 +13160,7 @@ fn draw_particle_sample(
         .saturating_add(particle_signed_spread(seed, spawn_radius));
     let origin_y = emitter.y.saturating_add(particle_signed_spread(
         seed.rotate_left(9),
-        spawn_radius / 2,
+        spawn_radius >> 1,
     ));
     let origin_z = emitter
         .z
@@ -13351,7 +13352,7 @@ fn draw_room_atmosphere_overlay(room: &LevelRoomRecord, elapsed_tick: SimTick) {
             base_y + (elapsed.wrapping_mul(fall_q4) >> 4),
             ATMOSPHERE_WRAP_H,
         );
-        let size = 1 + (layer as i16 / 2);
+        let size = 1 + ((layer as i16) >> 1);
         draw_atmosphere_particle(
             x,
             y,
