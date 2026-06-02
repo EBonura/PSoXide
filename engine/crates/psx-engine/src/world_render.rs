@@ -3107,8 +3107,7 @@ fn indexed_vertex_lighting_colors<L: WorldSurfaceLighting>(
     }
     if has_baked_rgb {
         let sample = surface.sample_without_center();
-        if let Some(colors) =
-            lighting.shade_cached_baked_vertices(sample, vertex_depths, material)
+        if let Some(colors) = lighting.shade_cached_baked_vertices(sample, vertex_depths, material)
         {
             return Some(colors);
         }

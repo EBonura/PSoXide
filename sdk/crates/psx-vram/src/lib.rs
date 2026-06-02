@@ -301,6 +301,22 @@ impl<const PAGE_COUNT: usize> TextureWindowAtlas<PAGE_COUNT> {
         }
         None
     }
+
+    /// Reserve one completely empty texture page and return its page index.
+    ///
+    /// This is for assets that use a whole page without GP0(E2) texture
+    /// windows, such as large UI/background strips. It shares the atlas
+    /// bookkeeping so later windowed material allocations cannot overlap the
+    /// reserved page.
+    pub fn reserve_empty_page(&mut self) -> Option<usize> {
+        for page_index in 0..PAGE_COUNT {
+            if self.rows[page_index].iter().all(|row| *row == 0) {
+                self.rows[page_index].fill(u32::MAX);
+                return Some(page_index);
+            }
+        }
+        None
+    }
 }
 
 impl<const PAGE_COUNT: usize> Default for TextureWindowAtlas<PAGE_COUNT> {
@@ -750,6 +766,18 @@ mod tests {
                 .expect("64x64 slot fits in first page");
         }
         let next = atlas.allocate(64, 64).expect("second page has space");
+
+        assert_eq!(next.page_index(), 1);
+        assert_eq!((next.origin_u(), next.origin_v()), (0, 0));
+    }
+
+    #[test]
+    fn texture_window_atlas_reserves_empty_page_for_unwindowed_texture() {
+        let mut atlas = TextureWindowAtlas::<2>::new();
+
+        let page = atlas.reserve_empty_page().expect("page reserved");
+        assert_eq!(page, 0);
+        let next = atlas.allocate(64, 64).expect("second page still free");
 
         assert_eq!(next.page_index(), 1);
         assert_eq!((next.origin_u(), next.origin_v()), (0, 0));
