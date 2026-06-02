@@ -22,7 +22,7 @@ default = [
     "world-order-bucketed",
     "world-grid-visible",
     "ot-2048",
-    "vis-coarse-yaw",
+    "vis-anchor-pvs-candidates",
     "vis-static-active-turn",
 ]
 cd-stream-bench = ["dep:psx-io"]

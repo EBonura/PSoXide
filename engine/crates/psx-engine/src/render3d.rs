@@ -20,7 +20,7 @@ use core::mem::MaybeUninit;
 use psx_asset::{Animation, GteJointPose, JointPose, Mesh, Model, ModelPart, ModelVertex};
 use psx_gpu::{
     material::{TextureMaterial, TexturedGouraudPacketMaterial, TexturedPacketMaterial},
-    prim::{TriGouraud, TriTextured, TriTexturedGouraud},
+    prim::{QuadTexturedGouraud, TriGouraud, TriTextured, TriTexturedGouraud},
 };
 use psx_gte::{
     lighting::{project_lit, project_lit_triangle, ProjectedLit},
@@ -776,6 +776,21 @@ impl LoadedWorldCameraGte {
             scene::project_vertex_scheduled(input),
             self.camera.projection.near_z,
         )
+    }
+
+    /// Transform one world-space vertex into *view* space through the loaded
+    /// GTE (MVMVA, no perspective divide), mirroring [`WorldCamera::view_vertex`]
+    /// but on the otherwise-idle GTE. Used for depth/cull queries (cell select,
+    /// bounds tests) so they share the same transform as `project_world` instead
+    /// of redoing the camera rotation in CPU fixed-point. Out-of-range vertices
+    /// fall back to the CPU path, matching `project_world`.
+    #[inline]
+    pub fn view_vertex(self, vertex: WorldVertex) -> ViewVertex {
+        let Some(input) = world_vertex_gte_input(vertex) else {
+            return self.camera.view_vertex(vertex);
+        };
+        let t = scene::transform_vertex_scheduled(input);
+        ViewVertex::new(t.x, t.y, t.z)
     }
 
     /// Transform and project a world-space quad through the loaded GTE.
@@ -2242,6 +2257,63 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             },
             tri as *mut TriTexturedGouraud as *mut u32,
             TriTexturedGouraud::WORDS,
+        );
+        stats.submitted_triangles = 1;
+        stats
+    }
+
+    /// Submit a cached room quad as a single GP0(3Ch) textured-Gouraud
+    /// quad with a caller-prepared fixed depth, instead of two
+    /// [`TriTexturedGouraud`] leaves.
+    ///
+    /// `verts`/`uv_words`/`colors` are in **GP0 packet order** -- the
+    /// hardware rasterizes the quad as `tri(v0,v1,v2)+tri(v1,v2,v3)`
+    /// (the `1`-`2` diagonal). The caller is responsible for ordering
+    /// the four corners so this hardware split lands on the engine's
+    /// chosen diagonal, which makes the output pixel-identical to the
+    /// two-triangle submission (proved by
+    /// `textured_gouraud_quad_matches_two_triangle_split_bitexact`).
+    pub(crate) fn submit_textured_gouraud_quad_leaf_uv_words_prepared_depth(
+        &mut self,
+        quads: &mut impl PrimitiveSink<QuadTexturedGouraud>,
+        verts: [ProjectedVertex; 4],
+        uv_words: [u16; 4],
+        colors: [(u8, u8, u8); 4],
+        material: TexturedGouraudPacketMaterial,
+        options: WorldSurfaceOptions,
+        prepared_depth: PreparedTriangleDepth,
+    ) -> WorldRenderStats {
+        let mut stats = WorldRenderStats::default();
+        if self.command_len >= self.commands.len() {
+            stats.command_overflow = true;
+            return stats;
+        }
+
+        let Some(quad) = quads.push(QuadTexturedGouraud::with_packet_material_packed_uv_words(
+            [
+                (verts[0].sx, verts[0].sy),
+                (verts[1].sx, verts[1].sy),
+                (verts[2].sx, verts[2].sy),
+                (verts[3].sx, verts[3].sy),
+            ],
+            uv_words,
+            colors,
+            material,
+        )) else {
+            stats.primitive_overflow = true;
+            return stats;
+        };
+
+        self.push_command(
+            prepared_depth.slot,
+            prepared_depth.depth,
+            if material.is_translucent() {
+                WorldRenderLayer::Transparent
+            } else {
+                options.render_layer
+            },
+            quad as *mut QuadTexturedGouraud as *mut u32,
+            QuadTexturedGouraud::WORDS,
         );
         stats.submitted_triangles = 1;
         stats
@@ -4795,6 +4867,41 @@ fn camera_gte_view_matrix(camera: WorldCamera) -> Mat3I16 {
     }
 }
 
+/// Projects sky directions (points at infinity) through the GTE. It installs
+/// the camera rotation with zero translation and the projection plane, so RTPS
+/// performs the yaw/pitch rotate and perspective divide in hardware, replacing
+/// the per-direction CPU rotate (eight Q12 muls) and perspective divide (two
+/// divides). Load once, project the whole sky grid, then load the world camera
+/// before world geometry -- this leaves the GTE holding the sky rotation/TR.
+pub struct SkyDirectionProjector {
+    near_z: i32,
+}
+
+impl SkyDirectionProjector {
+    /// Install the camera rotation, zero translation, and projection plane.
+    pub fn load(camera: WorldCamera) -> Self {
+        load_world_projection_gte(camera.projection);
+        scene::load_rotation(&camera_gte_view_matrix(camera));
+        scene::load_translation(Vec3I32::ZERO);
+        Self {
+            near_z: camera.projection.near_z,
+        }
+    }
+
+    /// Project a Q12 direction to screen space, or `None` when it is at or
+    /// behind the near plane (the GTE's clamped SZ reproduces the CPU
+    /// `z2 <= near_z` cull). Matches `camera_gte_view_matrix` so the result
+    /// equals the former CPU sky projection.
+    pub fn project(&self, dir: [i16; 3]) -> Option<(i16, i16)> {
+        let p = scene::project_vertex(Vec3I16::new(dir[0], dir[1], dir[2]));
+        if (p.sz as i32) > self.near_z {
+            Some((p.sx, p.sy))
+        } else {
+            None
+        }
+    }
+}
+
 fn scaled_pose_matrix(pose: JointPose, local_to_world: LocalToWorldScale) -> Mat3I16 {
     let scale = local_to_world.scale();
     let mut out = [[0i16; 3]; 3];
@@ -4845,21 +4952,6 @@ fn dot_world_q12(row: [i16; 3], v: WorldVertex) -> i32 {
 /// view-space position twice on the CPU, lerp, and project on the CPU
 /// using `WorldProjection::project_view`.
 #[inline]
-fn cpu_view_transform(transform: &JointViewTransform, position: Vec3I16) -> ViewVertex {
-    let vx = position.x as i32;
-    let vy = position.y as i32;
-    let vz = position.z as i32;
-    let m = &transform.rotation.m;
-    let x = ((m[0][0] as i32) * vx + (m[0][1] as i32) * vy + (m[0][2] as i32) * vz) >> 12;
-    let y = ((m[1][0] as i32) * vx + (m[1][1] as i32) * vy + (m[1][2] as i32) * vz) >> 12;
-    let z = ((m[2][0] as i32) * vx + (m[2][1] as i32) * vy + (m[2][2] as i32) * vz) >> 12;
-    ViewVertex::new(
-        x + transform.translation.x,
-        y + transform.translation.y,
-        z + transform.translation.z,
-    )
-}
-
 fn project_textured_model_vertex(
     vertex: ModelVertex,
     primary: JointViewTransform,
@@ -4882,18 +4974,36 @@ fn project_blended_textured_model_vertex(
     projection: WorldProjection,
 ) -> ProjectedVertex {
     let secondary = joint_view_transforms[vertex.joint1 as usize];
-    let view_a = cpu_view_transform(&primary, vertex.position);
-    let view_b = cpu_view_transform(&secondary, vertex.position);
+    // The part's primary joint is already loaded in the GTE by the caller's
+    // project loop, so transform view_a there instead of by hand on the CPU.
+    let a = scene::transform_vertex_scheduled(vertex.position);
+    let view_a = ViewVertex::new(a.x, a.y, a.z);
+    // view_b needs the secondary joint: load it and transform.
+    scene::load_rotation(&secondary.rotation);
+    scene::load_translation(secondary.translation);
+    let b = scene::transform_vertex_scheduled(vertex.position);
+    let view_b = ViewVertex::new(b.x, b.y, b.z);
     let view_blend = lerp_view_vertex(view_a, view_b, vertex.blend);
-    match cpu_project_gte_view(view_blend, projection) {
-        Some(proj) => proj,
-        None => ProjectedVertex::new(0, 0, projection.near_z - 1),
-    }
+    // Project the blended view-space vertex on the GTE (perspective divide in
+    // hardware) instead of two CPU divides, then restore the primary joint so
+    // the caller's GTE batch state is preserved on return.
+    let projected = project_gte_view_vertex(view_blend, projection);
+    scene::load_rotation(&primary.rotation);
+    scene::load_translation(primary.translation);
+    projected
 }
+
+/// Minimum `joint1` weight (out of 255) for a vertex to take the two-bone
+/// blend path. Below it the secondary influence is under ~6%, which reads as
+/// single-bone: the vertex rides the primary-joint GTE batch instead of the
+/// per-vertex blend, dropping it off the expensive path with no visible change.
+const MODEL_BLEND_MIN_WEIGHT: u8 = 16;
 
 #[inline]
 fn model_vertex_uses_cpu_blend(vertex: ModelVertex, joint_count: usize) -> bool {
-    vertex.is_blend() && (vertex.joint1 as usize) < joint_count
+    vertex.is_blend()
+        && vertex.blend >= MODEL_BLEND_MIN_WEIGHT
+        && (vertex.joint1 as usize) < joint_count
 }
 
 #[inline]
@@ -4960,6 +5070,32 @@ fn cpu_project_gte_view(view: ViewVertex, projection: WorldProjection) -> Option
     let sx = (projection.screen_x as i32) + (view.x * projection.focal_length) / view.z;
     let sy = (projection.screen_y as i32) + (view.y * projection.focal_length) / view.z;
     Some(ProjectedVertex::new(clamp_i16(sx), clamp_i16(sy), view.z))
+}
+
+/// Project an already-view-space vertex through the GTE. Loading the identity
+/// rotation with zero translation makes RTPS perform only the perspective
+/// divide and screen mapping -- in hardware -- replacing the two CPU divides
+/// in [`cpu_project_gte_view`]. The screen offset and projection plane are
+/// already loaded frame-wide for the model batch. The GTE vertex input is
+/// i16, so a rare oversized view vertex (far off-screen) falls back to the CPU
+/// path. Leaves the GTE rotation clobbered; the caller restores its own state.
+fn project_gte_view_vertex(view: ViewVertex, projection: WorldProjection) -> ProjectedVertex {
+    let (Ok(x), Ok(y), Ok(z)) = (
+        i16::try_from(view.x),
+        i16::try_from(view.y),
+        i16::try_from(view.z),
+    ) else {
+        return cpu_project_gte_view(view, projection)
+            .unwrap_or_else(|| ProjectedVertex::new(0, 0, projection.near_z - 1));
+    };
+    scene::load_rotation(&Mat3I16::IDENTITY);
+    scene::load_translation(Vec3I32::ZERO);
+    let p = scene::project_vertex(Vec3I16::new(x, y, z));
+    if (p.sz as i32) >= projection.near_z {
+        ProjectedVertex::new(p.sx, p.sy, p.sz as i32)
+    } else {
+        ProjectedVertex::new(0, 0, projection.near_z - 1)
+    }
 }
 
 /// 256-step linear blend between two view-space positions.
@@ -5585,7 +5721,6 @@ fn should_insert_world_before(a: WorldTriCommand, b: WorldTriCommand) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::RoomPoint;
     use psx_gpu::material::BlendMode;
     use psx_gpu::ot::OrderingTable;
 
@@ -6317,19 +6452,6 @@ mod tests {
                 .with_material_layer(transparent)
                 .render_layer,
             WorldRenderLayer::Transparent
-        );
-    }
-
-    #[test]
-    fn room_point_converts_to_raw_world_vertex_only_at_boundary() {
-        let point = RoomPoint::new(12, -34, 56);
-        let vertex = point.to_world_vertex();
-
-        assert_eq!(vertex, WorldVertex::new(12, -34, 56));
-        assert_eq!(RoomPoint::from_world_vertex(vertex), point);
-        assert_eq!(
-            core::mem::size_of::<RoomPoint>(),
-            core::mem::size_of::<WorldVertex>()
         );
     }
 

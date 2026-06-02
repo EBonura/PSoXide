@@ -12,6 +12,29 @@ use crate::{
 
 const DEFAULT_STAMINA_MAX_Q12: i32 = 4096;
 const DEFAULT_BODY_HEIGHT: i32 = 768;
+/// Max height (engine units) of a wall the character steps over instead
+/// of being blocked by. A riser whose top is within this of the feet is
+/// treated as a step (the floor probe already found walkable floor on the
+/// far side, so the body simply rises onto it); taller walls still block.
+/// Sits in the gap between demo-scale steps (<=~576) and real walls
+/// (>=~1152).
+const STEP_UP_HEIGHT: i32 = 640;
+/// Largest drop the feet snap straight down to (the descent counterpart of
+/// [`STEP_UP_HEIGHT`]): walking down demo-scale steps stays glued to the
+/// floor. A larger drop -- a ledge, or a hole over a lower floor -- leaves
+/// the body airborne instead, and [`CharacterMotorState::apply_vertical`]
+/// lets it fall.
+const STEP_DOWN_HEIGHT: i32 = 640;
+/// Downward acceleration applied to an airborne body each fixed tick, in
+/// engine units per tick^2. Integer fixed-point (the PS1 has no FPU).
+const GRAVITY_PER_TICK: i32 = 96;
+/// Q8 gravity multiplier representing 1.0x body weight.
+const DEFAULT_WEIGHT_Q8: u16 = 256;
+const MIN_WEIGHT_Q8: u16 = 1;
+const MAX_WEIGHT_Q8: u16 = 4096;
+/// Terminal downward speed in engine units per tick, so a long fall stays
+/// bounded and deterministic.
+const MAX_FALL_SPEED: i32 = 768;
 const MAX_MOTOR_CATCHUP_VBLANKS: u16 = 4;
 const SPLIT_NE_SW: u8 = 1;
 const DIR_NORTH: u8 = 0;
@@ -91,6 +114,12 @@ pub struct CharacterCollisionRoom<'room> {
     /// Offset from the motor's current room origin to this room's
     /// origin, in engine units.
     pub offset_z: i32,
+    /// Vertical offset from the motor's current room elevation to this
+    /// room's, in engine units. Stacked floors are separate collision
+    /// rooms at distinct `origin_y`; this lets the motor see an upper
+    /// floor's surface at its true height (so you can step up onto it)
+    /// instead of collapsed to the current room's elevation.
+    pub offset_y: i32,
 }
 
 impl<'room> CharacterCollisionRoom<'room> {
@@ -99,6 +128,7 @@ impl<'room> CharacterCollisionRoom<'room> {
         room: None,
         offset_x: 0,
         offset_z: 0,
+        offset_y: 0,
     };
 
     /// Build a collision room with a current-space origin offset.
@@ -107,6 +137,7 @@ impl<'room> CharacterCollisionRoom<'room> {
             room: Some(RuntimeCollisionRoom::Runtime(room)),
             offset_x,
             offset_z,
+            offset_y: 0,
         }
     }
 
@@ -120,7 +151,15 @@ impl<'room> CharacterCollisionRoom<'room> {
             room: Some(room),
             offset_x,
             offset_z,
+            offset_y: 0,
         }
+    }
+
+    /// Set the vertical (elevation) offset, for stacked-floor collision
+    /// rooms. Builder form keeps the common offset_y=0 constructors terse.
+    pub const fn with_offset_y(mut self, offset_y: i32) -> Self {
+        self.offset_y = offset_y;
+        self
     }
 }
 
@@ -219,6 +258,10 @@ pub struct CharacterMotorConfig {
     pub run_speed: i32,
     /// Turn speed per display frame.
     pub yaw_step: Angle,
+    /// Downward acceleration in engine units per fixed 60 Hz tick squared.
+    pub gravity_per_tick: i32,
+    /// Gravity multiplier in Q8 fixed point (`256 = 1.0x`).
+    pub weight_q8: u16,
     /// Maximum stamina, in Q12-style arbitrary units.
     pub stamina_max_q12: i32,
     /// Minimum stamina required to start sprinting.
@@ -269,6 +312,8 @@ impl CharacterMotorConfig {
             walk_speed,
             run_speed,
             yaw_step,
+            gravity_per_tick: GRAVITY_PER_TICK,
+            weight_q8: DEFAULT_WEIGHT_Q8,
             stamina_max_q12: DEFAULT_STAMINA_MAX_Q12,
             sprint_min_q12: 384,
             sprint_drain_q12: 40,
@@ -383,6 +428,23 @@ pub struct CharacterMotorState {
     /// Prevents held-sprint from pulsing Run/Walk every recovery
     /// frame after stamina reaches zero.
     sprint_exhausted: bool,
+    /// Vertical velocity in engine units per tick (negative = falling).
+    /// Non-zero only while the body is airborne over a ledge or hole;
+    /// reset to zero on landing.
+    velocity_y: i32,
+    /// `true` while the feet rest on a floor. Gates the per-tick vertical
+    /// work: a grounded body that has not moved in XZ reuses its cached
+    /// floor and skips the multi-room ground query entirely. Cleared on
+    /// teleport and whenever the body goes airborne.
+    grounded: bool,
+    /// Cached supporting floor height (current space) for the grounded
+    /// fast path; only meaningful while `grounded` is set.
+    ground_floor: i32,
+    /// XZ at which `ground_floor` was last resolved. While the body stays
+    /// on this exact cell the floor cannot change (static world), so the
+    /// ground query is skipped. Any XZ movement re-resolves.
+    ground_anchor_x: i32,
+    ground_anchor_z: i32,
 }
 
 impl CharacterMotorState {
@@ -397,6 +459,11 @@ impl CharacterMotorState {
             action_yaw: yaw,
             sprint_latched: false,
             sprint_exhausted: false,
+            velocity_y: 0,
+            grounded: false,
+            ground_floor: 0,
+            ground_anchor_x: 0,
+            ground_anchor_z: 0,
         }
     }
 
@@ -410,6 +477,8 @@ impl CharacterMotorState {
         self.action_yaw = yaw;
         self.sprint_latched = false;
         self.sprint_exhausted = false;
+        self.velocity_y = 0;
+        self.grounded = false;
     }
 
     /// Move the motor to another coordinate space while preserving
@@ -418,6 +487,10 @@ impl CharacterMotorState {
     /// re-expressed relative to a newly-current chunk.
     pub fn relocate(&mut self, position: RoomPoint) {
         self.position = position;
+        // Force the ground cache to re-resolve after a teleport / room switch:
+        // the XZ cell and the active rooms may differ. Vertical velocity is
+        // intentionally preserved so a fall continues across a room change.
+        self.grounded = false;
     }
 
     /// Advance the motor by one frame.
@@ -508,7 +581,7 @@ impl CharacterMotorState {
         config: CharacterMotorConfig,
     ) -> CharacterMotorFrame {
         self.stamina_q12 = self.stamina_q12.clamp(0, config.stamina_max_q12);
-        self.snap_floor(collision.room, config.radius);
+        self.apply_vertical(&collision, config);
 
         if self.action.is_idle() && input.evade {
             self.try_start_evade(input, config);
@@ -844,13 +917,80 @@ impl CharacterMotorState {
         }
     }
 
-    fn snap_floor(&mut self, collision: Option<RoomCollision<'_, '_>>, radius: i32) {
-        let Some(room) = collision else {
+    /// Vertical update run once per fixed tick. Keeps the feet glued to the
+    /// supporting floor when grounded, and integrates gravity when the body
+    /// is airborne over a ledge or hole so it falls rather than teleporting
+    /// down. Replaces the old unconditional floor snap.
+    ///
+    /// Probing only the centre column is intentional: a prior move already
+    /// validated the cylinder footprint, so for the per-tick settle just the
+    /// centre floor height is needed to stay grounded on slopes and steps.
+    fn apply_vertical(
+        &mut self,
+        collision: &CharacterCollision<'_, '_, '_>,
+        config: CharacterMotorConfig,
+    ) {
+        // Grounded fast path: a body that is grounded and has not moved in XZ
+        // sits on the same (static) floor as last tick, so reuse the cached
+        // height and skip the multi-room ground query (no divide, no room
+        // iteration, no interpolation). This is the common case for the many
+        // idle entities that will each run this every tick.
+        if self.grounded
+            && self.position.x == self.ground_anchor_x
+            && self.position.z == self.ground_anchor_z
+        {
+            self.position.y = self.ground_floor;
+            self.velocity_y = 0;
+            return;
+        }
+
+        // Cold path: resolve the supporting floor (highest floor at/below the
+        // feet plus a step, across the active rooms).
+        let Some(floor) =
+            supporting_floor_height(collision, self.position.x, self.position.z, self.position.y)
+        else {
+            // No floor anywhere below (open void): hold rather than fall
+            // forever. Matches the legacy no-room behaviour.
+            self.grounded = false;
+            self.velocity_y = 0;
             return;
         };
-        if let Some(height) = stand_height(room, self.position.x, self.position.z, radius) {
-            self.position.y = height;
+
+        if self.position.y.saturating_sub(floor) <= STEP_DOWN_HEIGHT {
+            // On the floor, or within a step of it: snap down and ground.
+            // Caching the cell lets the next idle tick take the fast path.
+            self.position.y = floor;
+            self.velocity_y = 0;
+            self.set_grounded(floor);
+            return;
         }
+
+        // Airborne: the floor is more than a step below (a ledge or hole).
+        // Accelerate downward (clamped to terminal) and move, landing exactly
+        // on the floor without overshooting through it.
+        self.grounded = false;
+        let gravity = config
+            .gravity_per_tick
+            .saturating_mul(config.weight_q8 as i32)
+            / DEFAULT_WEIGHT_Q8 as i32;
+        self.velocity_y = self.velocity_y.saturating_sub(gravity).max(-MAX_FALL_SPEED);
+        let next = self.position.y.saturating_add(self.velocity_y);
+        if next <= floor {
+            self.position.y = floor;
+            self.velocity_y = 0;
+            self.set_grounded(floor);
+        } else {
+            self.position.y = next;
+        }
+    }
+
+    /// Mark the body grounded on `floor` and anchor the ground cache to the
+    /// current XZ so the next stationary tick takes the fast path.
+    fn set_grounded(&mut self, floor: i32) {
+        self.grounded = true;
+        self.ground_floor = floor;
+        self.ground_anchor_x = self.position.x;
+        self.ground_anchor_z = self.position.z;
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -930,6 +1070,8 @@ fn normalize_config(mut config: CharacterMotorConfig) -> CharacterMotorConfig {
     if config.yaw_step == Angle::ZERO {
         config.yaw_step = Angle::from_q12(1);
     }
+    config.gravity_per_tick = config.gravity_per_tick.max(0);
+    config.weight_q8 = config.weight_q8.clamp(MIN_WEIGHT_Q8, MAX_WEIGHT_Q8);
     config.stamina_max_q12 = config.stamina_max_q12.max(1);
     config.sprint_min_q12 = config.sprint_min_q12.clamp(0, config.stamina_max_q12);
     config.sprint_drain_q12 = config.sprint_drain_q12.max(0);
@@ -953,6 +1095,38 @@ fn normalize_config(mut config: CharacterMotorConfig) -> CharacterMotorConfig {
     config
 }
 
+/// Resolve the supporting floor height under `(x, z)` in the motor's
+/// current space, preferring the multi-room (streaming) collision and
+/// falling back to a single room. `None` means no floor anywhere below
+/// (an open void), in which case the caller holds position.
+fn supporting_floor_height(
+    collision: &CharacterCollision<'_, '_, '_>,
+    x: i32,
+    z: i32,
+    feet_y: i32,
+) -> Option<i32> {
+    if !collision.rooms.is_empty() {
+        supporting_floor_in_rooms(collision.rooms, x, z, feet_y)
+    } else if let Some(room) = collision.room {
+        floor_height_at(room, x, z)
+    } else {
+        None
+    }
+}
+
+/// Feet height when moving onto a cell whose floor is `floor`. Snap to the
+/// floor for steps up and small steps down, but for a drop deeper than
+/// [`STEP_DOWN_HEIGHT`] keep the feet at their current height so the body
+/// walks out over the ledge; [`CharacterMotorState::apply_vertical`] then
+/// makes it fall instead of teleporting down.
+fn resolve_step_down(feet_y: i32, floor: i32) -> i32 {
+    if floor < feet_y.saturating_sub(STEP_DOWN_HEIGHT) {
+        feet_y
+    } else {
+        floor
+    }
+}
+
 fn body_stand_position(
     collision: CharacterCollision<'_, '_, '_>,
     target: RoomPoint,
@@ -962,8 +1136,8 @@ fn body_stand_position(
     let radius = radius.max(0);
     let height = height.max(1);
     let position = if !collision.rooms.is_empty() {
-        let floor = stand_height_in_rooms(collision.rooms, target.x, target.z, radius)?;
-        let position = target.with_y(floor);
+        let floor = stand_height_in_rooms(collision.rooms, target.x, target.z, radius, target.y)?;
+        let position = target.with_y(resolve_step_down(target.y, floor));
         if body_hits_solid_wall_in_rooms(collision.rooms, position, radius, height) {
             return None;
         }
@@ -972,7 +1146,7 @@ fn body_stand_position(
         match collision.room {
             Some(room) => {
                 let floor = stand_height(room, target.x, target.z, radius)?;
-                let position = target.with_y(floor);
+                let position = target.with_y(resolve_step_down(target.y, floor));
                 if body_hits_solid_wall(room, position, radius, height) {
                     return None;
                 }
@@ -994,36 +1168,100 @@ fn stand_height_in_rooms(
     x: i32,
     z: i32,
     radius: i32,
+    feet_y: i32,
 ) -> Option<i32> {
-    let height = floor_height_at_rooms(rooms, x, z)?;
+    let height = supporting_floor_in_rooms(rooms, x, z, feet_y)?;
     if radius <= 0 {
         return Some(height);
     }
     let r = radius.max(0);
-    floor_height_at_rooms(rooms, x.saturating_sub(r), z)?;
-    floor_height_at_rooms(rooms, x.saturating_add(r), z)?;
-    floor_height_at_rooms(rooms, x, z.saturating_sub(r))?;
-    floor_height_at_rooms(rooms, x, z.saturating_add(r))?;
-    Some(height)
+    let footprint_clear = floor_walkable_at_rooms(rooms, x.saturating_sub(r), z)
+        && floor_walkable_at_rooms(rooms, x.saturating_add(r), z)
+        && floor_walkable_at_rooms(rooms, x, z.saturating_sub(r))
+        && floor_walkable_at_rooms(rooms, x, z.saturating_add(r));
+    footprint_clear.then_some(height)
 }
 
+#[cfg(test)]
 fn floor_height_at_rooms(rooms: &[CharacterCollisionRoom<'_>], x: i32, z: i32) -> Option<i32> {
     for collision_room in rooms {
         let Some(room) = collision_room.room else {
             continue;
         };
-        if !collision_room_contains_point(*collision_room, room, x, z) {
-            continue;
-        }
-        if let Some(height) = floor_height_at(
-            room.collision(),
-            x.saturating_sub(collision_room.offset_x),
-            z.saturating_sub(collision_room.offset_z),
-        ) {
+        if let Some(height) = floor_height_at_collision_room(*collision_room, room, x, z) {
             return Some(height);
         }
     }
     None
+}
+
+/// Highest floor at `(x, z)` the feet can rest on: the tallest floor across
+/// ALL collision rooms that sits at or below `feet_y + STEP_UP_HEIGHT`
+/// (a step up is reachable; anything higher is a wall or ceiling). This
+/// picks the floor by elevation, not by room order -- essential for stacked
+/// floors, where the player standing on an upper floor must rest on it
+/// rather than be pulled down to the lower floor occupying the same X/Z.
+/// Returns `None` when the only floors lie above reach (open space above
+/// the feet).
+fn supporting_floor_in_rooms(
+    rooms: &[CharacterCollisionRoom<'_>],
+    x: i32,
+    z: i32,
+    feet_y: i32,
+) -> Option<i32> {
+    let reach = feet_y.saturating_add(STEP_UP_HEIGHT);
+    let mut best: Option<i32> = None;
+    for collision_room in rooms {
+        let Some(room) = collision_room.room else {
+            continue;
+        };
+        if let Some(height) = floor_height_at_collision_room(*collision_room, room, x, z) {
+            if height <= reach {
+                best = Some(best.map_or(height, |b| b.max(height)));
+            }
+        }
+    }
+    best
+}
+
+/// Multi-room walkability check used by the cylinder-footprint samples.
+fn floor_walkable_at_rooms(rooms: &[CharacterCollisionRoom<'_>], x: i32, z: i32) -> bool {
+    for collision_room in rooms {
+        let Some(room) = collision_room.room else {
+            continue;
+        };
+        if floor_walkable_at_collision_room(*collision_room, room, x, z) {
+            return true;
+        }
+    }
+    false
+}
+
+fn floor_height_at_collision_room(
+    collision_room: CharacterCollisionRoom<'_>,
+    room: RuntimeCollisionRoom<'_>,
+    x: i32,
+    z: i32,
+) -> Option<i32> {
+    floor_height_at(
+        room.collision(),
+        x.saturating_sub(collision_room.offset_x),
+        z.saturating_sub(collision_room.offset_z),
+    )
+    .map(|height| height.saturating_add(collision_room.offset_y))
+}
+
+fn floor_walkable_at_collision_room(
+    collision_room: CharacterCollisionRoom<'_>,
+    room: RuntimeCollisionRoom<'_>,
+    x: i32,
+    z: i32,
+) -> bool {
+    floor_walkable_at(
+        room.collision(),
+        x.saturating_sub(collision_room.offset_x),
+        z.saturating_sub(collision_room.offset_z),
+    )
 }
 
 fn body_hits_solid_wall_in_rooms(
@@ -1041,10 +1279,12 @@ fn body_hits_solid_wall_in_rooms(
         }
         let local_position = RoomPoint::new(
             position.x.saturating_sub(collision_room.offset_x),
-            position.y,
+            position.y.saturating_sub(collision_room.offset_y),
             position.z.saturating_sub(collision_room.offset_z),
         );
-        return body_hits_solid_wall(room.collision(), local_position, radius, height);
+        if body_hits_solid_wall(room.collision(), local_position, radius, height) {
+            return true;
+        }
     }
     false
 }
@@ -1178,14 +1418,14 @@ fn stand_height(room: RoomCollision<'_, '_>, x: i32, z: i32, radius: i32) -> Opt
         return Some(height);
     }
     let r = radius.max(0);
-    floor_height_at(room, x.saturating_sub(r), z)?;
-    floor_height_at(room, x.saturating_add(r), z)?;
-    floor_height_at(room, x, z.saturating_sub(r))?;
-    floor_height_at(room, x, z.saturating_add(r))?;
-    Some(height)
+    let footprint_clear = floor_walkable_at(room, x.saturating_sub(r), z)
+        && floor_walkable_at(room, x.saturating_add(r), z)
+        && floor_walkable_at(room, x, z.saturating_sub(r))
+        && floor_walkable_at(room, x, z.saturating_add(r));
+    footprint_clear.then_some(height)
 }
 
-fn floor_height_at(room: RoomCollision<'_, '_>, x: i32, z: i32) -> Option<i32> {
+fn floor_probe(room: RoomCollision<'_, '_>, x: i32, z: i32, need_height: bool) -> Option<i32> {
     let s = room.sector_size();
     if s <= 0 || x < 0 || z < 0 {
         return None;
@@ -1205,6 +1445,9 @@ fn floor_height_at(room: RoomCollision<'_, '_>, x: i32, z: i32) -> Option<i32> {
     if !sector.floor_triangle_walkable(triangle) {
         return None;
     }
+    if !need_height {
+        return Some(0);
+    }
     let heights = triangle_heights_to_quad(
         sector.floor_heights(),
         sector.floor_split(),
@@ -1218,6 +1461,19 @@ fn floor_height_at(room: RoomCollision<'_, '_>, x: i32, z: i32) -> Option<i32> {
         local_z,
         s,
     ))
+}
+
+/// Interpolated floor height at a point, or `None` if it is off walkable floor.
+fn floor_height_at(room: RoomCollision<'_, '_>, x: i32, z: i32) -> Option<i32> {
+    floor_probe(room, x, z, true)
+}
+
+/// Whether a point sits on walkable floor, without interpolating its height.
+/// The four cylinder-footprint samples in `stand_height` only need this; skipping
+/// the interpolation drops `triangle_heights_to_quad` + `height_at_local` (and its
+/// per-axis divides) for four of every five floor queries.
+fn floor_walkable_at(room: RoomCollision<'_, '_>, x: i32, z: i32) -> bool {
+    floor_probe(room, x, z, false).is_some()
 }
 
 fn triangle_index_at_local(split: u8, local_x: i32, local_z: i32, sector: i32) -> usize {
@@ -1267,7 +1523,7 @@ fn body_hits_solid_wall(
                 while i < sector.wall_count() {
                     if let Some(wall) = room.sector_wall(sector, i) {
                         if wall.solid()
-                            && vertical_ranges_overlap(position.y, height, wall.heights())
+                            && wall_blocks_body(position.y, height, wall.heights())
                             && circle_overlaps_wall_segment(
                                 position.x,
                                 position.z,
@@ -1289,6 +1545,22 @@ fn body_hits_solid_wall(
         sx += 1;
     }
     false
+}
+
+/// Whether a solid wall blocks the body, accounting for stair-stepping.
+/// A wall blocks when it overlaps the body's vertical span AND its top
+/// rises more than [`STEP_UP_HEIGHT`] above the body's feet. A lower
+/// riser is a step the character climbs: the floor probe has already
+/// confirmed walkable floor at the target X/Z, so the body rises onto it
+/// rather than being stopped. `apply_vertical` then settles the feet on the
+/// step surface the next tick.
+fn wall_blocks_body(feet_y: i32, body_height: i32, wall_heights: [i32; 4]) -> bool {
+    if !vertical_ranges_overlap(feet_y, body_height, wall_heights) {
+        return false;
+    }
+    let wall_top = wall_heights.iter().copied().max().unwrap_or(feet_y);
+    // Steppable riser: top within a step of the feet -> not a blocker.
+    wall_top > feet_y.saturating_add(STEP_UP_HEIGHT)
 }
 
 fn vertical_ranges_overlap(body_y: i32, body_height: i32, wall_heights: [i32; 4]) -> bool {
@@ -1493,6 +1765,51 @@ mod tests {
 
     fn config() -> CharacterMotorConfig {
         CharacterMotorConfig::character(64, 32, 64, Angle::from_q12(16))
+    }
+
+    #[test]
+    fn low_riser_is_steppable_not_blocking() {
+        // Feet on the lower floor at y=0, body 768 tall. A short riser
+        // (top 320, a demo-scale step) overlaps the body but is within a
+        // step of the feet, so it must NOT block: the character steps up.
+        let step = [0, 0, 320, 320];
+        assert!(vertical_ranges_overlap(0, 768, step), "step overlaps body");
+        assert!(
+            !wall_blocks_body(0, 768, step),
+            "a low riser within STEP_UP_HEIGHT must be steppable"
+        );
+    }
+
+    #[test]
+    fn full_wall_still_blocks() {
+        // A real wall (top 1792, a full sector) rises far above the feet
+        // and must block.
+        let wall = [0, 0, 1792, 1792];
+        assert!(
+            wall_blocks_body(0, 768, wall),
+            "a full-height wall must block"
+        );
+    }
+
+    #[test]
+    fn step_at_threshold_boundary() {
+        // Exactly STEP_UP_HEIGHT above the feet is still steppable; one
+        // unit higher blocks. Guards the off-by-one at the boundary.
+        let at = [0, 0, STEP_UP_HEIGHT, STEP_UP_HEIGHT];
+        let over = [0, 0, STEP_UP_HEIGHT + 1, STEP_UP_HEIGHT + 1];
+        assert!(
+            !wall_blocks_body(0, 768, at),
+            "top == feet+STEP_UP steppable"
+        );
+        assert!(wall_blocks_body(0, 768, over), "one unit higher blocks");
+    }
+
+    #[test]
+    fn wall_below_feet_does_not_block() {
+        // A wall entirely below the feet (e.g. seen from an upper floor)
+        // doesn't overlap the body and never blocks.
+        let below = [-1024, -1024, -512, -512];
+        assert!(!wall_blocks_body(0, 768, below));
     }
 
     fn world_with_internal_south_wall() -> [u8; 184] {
@@ -1731,6 +2048,244 @@ mod tests {
         assert_eq!(frame.position, RoomPoint::new(512, 0, 800));
         assert!(!frame.moved);
         assert!(frame.blocked);
+    }
+
+    #[test]
+    fn stacked_floor_reports_elevation_in_current_space() {
+        // A collision room offset up by 3584 engine units (an upper floor)
+        // must report its floor at the current-space height 3584, not its
+        // room-local 0. Without the offset_y handling the motor would see
+        // the upper floor at Y=0 and never let the player step up onto it.
+        let bytes = flat_floor_world();
+        let upper = RuntimeRoom::from_bytes(&bytes).expect("upper room parses");
+        let rooms = [CharacterCollisionRoom::new(upper, 0, 0).with_offset_y(3584)];
+        // Query a cell inside the room footprint.
+        let h = floor_height_at_rooms(&rooms, 512, 512);
+        assert_eq!(h, Some(3584), "upper floor must report its true elevation");
+    }
+
+    #[test]
+    fn ground_floor_unaffected_by_zero_offset() {
+        // offset_y defaults to 0, so a ground room is byte-identical to
+        // before: floor at room-local 0.
+        let bytes = flat_floor_world();
+        let ground = RuntimeRoom::from_bytes(&bytes).expect("ground room parses");
+        let rooms = [CharacterCollisionRoom::new(ground, 0, 0)];
+        assert_eq!(floor_height_at_rooms(&rooms, 512, 512), Some(0));
+    }
+
+    #[test]
+    fn resolve_step_down_snaps_small_drops_but_drops_into_falls() {
+        // Steps up always snap to the floor (gravity never lifts the feet).
+        assert_eq!(resolve_step_down(0, 640), 640);
+        // A drop within STEP_DOWN_HEIGHT snaps straight down (descending a step).
+        assert_eq!(resolve_step_down(0, -STEP_DOWN_HEIGHT), -STEP_DOWN_HEIGHT);
+        assert_eq!(
+            resolve_step_down(0, -STEP_DOWN_HEIGHT + 1),
+            -STEP_DOWN_HEIGHT + 1
+        );
+        // One unit deeper than a step keeps the feet put: the body walks out
+        // over the ledge at its current height and gravity takes over.
+        assert_eq!(resolve_step_down(0, -STEP_DOWN_HEIGHT - 1), 0);
+        assert_eq!(resolve_step_down(0, -3584), 0);
+    }
+
+    #[test]
+    fn airborne_body_falls_gradually_and_lands_on_floor() {
+        // A flat floor at y=0; spawn the body high above it and apply no
+        // input. Gravity must pull it down over several frames (not teleport)
+        // and settle it exactly on the floor without passing through.
+        let bytes = flat_floor_world();
+        let room = RuntimeRoom::from_bytes(&bytes).expect("room parses");
+        let rooms = [CharacterCollisionRoom::new(room, 0, 0)];
+        let mut motor = CharacterMotorState::new(RoomPoint::new(512, 2048, 512), Angle::ZERO);
+        let cfg = config();
+
+        let f1 = motor.update_vblanks_with_collision(
+            CharacterCollision::rooms(&rooms, &[]),
+            CharacterMotorInput::default(),
+            cfg,
+            1,
+        );
+        assert!(f1.position.y < 2048, "gravity pulls the body down");
+        assert!(
+            f1.position.y > 0,
+            "it falls gradually, not teleporting to the floor (y={})",
+            f1.position.y
+        );
+
+        let mut min_y = f1.position.y;
+        let mut rest_y = f1.position.y;
+        for _ in 0..60 {
+            let f = motor.update_vblanks_with_collision(
+                CharacterCollision::rooms(&rooms, &[]),
+                CharacterMotorInput::default(),
+                cfg,
+                1,
+            );
+            rest_y = f.position.y;
+            min_y = min_y.min(f.position.y);
+        }
+        assert_eq!(rest_y, 0, "lands exactly on the floor");
+        assert!(min_y >= 0, "never falls through the floor (min={min_y})");
+    }
+
+    #[test]
+    fn weight_scales_airborne_gravity() {
+        let bytes = flat_floor_world();
+        let room = RuntimeRoom::from_bytes(&bytes).expect("room parses");
+        let rooms = [CharacterCollisionRoom::new(room, 0, 0)];
+
+        let mut normal = CharacterMotorState::new(RoomPoint::new(512, 2048, 512), Angle::ZERO);
+        let normal_frame = normal.update_vblanks_with_collision(
+            CharacterCollision::rooms(&rooms, &[]),
+            CharacterMotorInput::default(),
+            config(),
+            1,
+        );
+
+        let mut heavy_config = config();
+        heavy_config.weight_q8 = DEFAULT_WEIGHT_Q8 * 2;
+        let mut heavy = CharacterMotorState::new(RoomPoint::new(512, 2048, 512), Angle::ZERO);
+        let heavy_frame = heavy.update_vblanks_with_collision(
+            CharacterCollision::rooms(&rooms, &[]),
+            CharacterMotorInput::default(),
+            heavy_config,
+            1,
+        );
+
+        assert_eq!(normal_frame.position.y, 2048 - GRAVITY_PER_TICK);
+        assert_eq!(heavy_frame.position.y, 2048 - GRAVITY_PER_TICK * 2);
+    }
+
+    #[test]
+    fn airborne_body_falls_to_lower_stacked_floor() {
+        // Upper room: cell 0 has floor at y=0, cell 1 is a hole. A lower room
+        // sits under the hole, dropped 3584 units. A body standing over the
+        // hole must fall through and land on the lower floor at -3584.
+        let upper_bytes = sparse_two_sector_world();
+        let upper = RuntimeRoom::from_bytes(&upper_bytes).expect("upper parses");
+        let lower_bytes = flat_floor_world();
+        let lower = RuntimeRoom::from_bytes(&lower_bytes).expect("lower parses");
+        let rooms = [
+            CharacterCollisionRoom::new(upper, 0, 0),
+            CharacterCollisionRoom::new(lower, 1024, 0).with_offset_y(-3584),
+        ];
+        // x in [1024, 2048) is the hole cell.
+        let mut motor = CharacterMotorState::new(RoomPoint::new(1536, 0, 512), Angle::ZERO);
+        let cfg = config();
+        let mut rest_y = 0;
+        let mut min_y = 0;
+        for _ in 0..60 {
+            let f = motor.update_vblanks_with_collision(
+                CharacterCollision::rooms(&rooms, &[]),
+                CharacterMotorInput::default(),
+                cfg,
+                1,
+            );
+            rest_y = f.position.y;
+            min_y = min_y.min(f.position.y);
+        }
+        assert_eq!(rest_y, -3584, "falls through the hole onto the lower floor");
+        assert!(min_y >= -3584, "never falls through the lower floor");
+    }
+
+    #[test]
+    fn standing_on_upper_stacked_floor_does_not_fall_to_lower() {
+        // Regression: the collision lists the LOWER room first, then the upper
+        // floor at +3584. A body standing on the upper floor (feet 3584) must
+        // rest there, not be pulled down by gravity to the lower floor at 0
+        // that occupies the same X/Z. (First-match floor lookup would return
+        // the lower floor and drop the player through the upper one.)
+        let lower_bytes = flat_floor_world();
+        let upper_bytes = flat_floor_world();
+        let lower = RuntimeRoom::from_bytes(&lower_bytes).expect("lower parses");
+        let upper = RuntimeRoom::from_bytes(&upper_bytes).expect("upper parses");
+        let rooms = [
+            CharacterCollisionRoom::new(lower, 0, 0),
+            CharacterCollisionRoom::new(upper, 0, 0).with_offset_y(3584),
+        ];
+        let mut motor = CharacterMotorState::new(RoomPoint::new(512, 3584, 512), Angle::ZERO);
+        let cfg = config();
+        for _ in 0..30 {
+            let f = motor.update_vblanks_with_collision(
+                CharacterCollision::rooms(&rooms, &[]),
+                CharacterMotorInput::default(),
+                cfg,
+                1,
+            );
+            assert_eq!(
+                f.position.y, 3584,
+                "stays on the upper floor, not pulled down to the lower"
+            );
+        }
+    }
+
+    #[test]
+    fn solid_wall_in_later_stacked_room_still_blocks() {
+        // The lower room overlaps X/Z and is listed first, but the body is on
+        // the upper floor. Multi-room wall checks must keep scanning after a
+        // lower-room non-hit, otherwise upper-room walls are ignored.
+        let lower_bytes = flat_floor_world();
+        let upper_bytes = world_with_internal_south_wall();
+        let lower = RuntimeRoom::from_bytes(&lower_bytes).expect("lower parses");
+        let upper = RuntimeRoom::from_bytes(&upper_bytes).expect("upper parses");
+        let rooms = [
+            CharacterCollisionRoom::new(lower, 0, 0),
+            CharacterCollisionRoom::new(upper, 0, 0).with_offset_y(3584),
+        ];
+
+        assert!(body_hits_solid_wall_in_rooms(
+            &rooms,
+            RoomPoint::new(512, 3584, 1000),
+            96,
+            768
+        ));
+    }
+
+    #[test]
+    fn idle_body_snaps_within_a_step_then_stays_grounded() {
+        // Spawned within STEP_DOWN above a flat floor with no input: the body
+        // snaps down onto the floor (not a fall) and then stays grounded tick
+        // after tick via the cached fast path.
+        let bytes = flat_floor_world();
+        let room = RuntimeRoom::from_bytes(&bytes).expect("room parses");
+        let rooms = [CharacterCollisionRoom::new(room, 0, 0)];
+        let mut motor = CharacterMotorState::new(RoomPoint::new(512, 320, 512), Angle::ZERO);
+        let cfg = config();
+        for i in 0..20 {
+            let f = motor.update_vblanks_with_collision(
+                CharacterCollision::rooms(&rooms, &[]),
+                CharacterMotorInput::default(),
+                cfg,
+                1,
+            );
+            assert_eq!(f.position.y, 0, "tick {i}: snapped onto floor and stays");
+        }
+    }
+
+    #[test]
+    fn grounded_walk_keeps_feet_on_flat_floor() {
+        // Regression: with gravity in place, ordinary walking on a flat floor
+        // still keeps the feet glued at y=0 (no drift, no float).
+        let bytes = flat_floor_world();
+        let room = RuntimeRoom::from_bytes(&bytes).expect("room parses");
+        let rooms = [CharacterCollisionRoom::new(room, 0, 0)];
+        let mut motor = CharacterMotorState::new(RoomPoint::new(128, 0, 128), Angle::ZERO);
+        let mut cfg = config();
+        cfg.walk_speed = 64;
+        for _ in 0..8 {
+            let f = motor.update_vblanks_with_collision(
+                CharacterCollision::rooms(&rooms, &[]),
+                CharacterMotorInput {
+                    walk: 1,
+                    ..CharacterMotorInput::default()
+                },
+                cfg,
+                1,
+            );
+            assert_eq!(f.position.y, 0, "feet stay on the flat floor while walking");
+        }
     }
 
     #[test]

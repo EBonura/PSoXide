@@ -37,8 +37,13 @@
 
 use psx_gpu::framebuf::FrameBuffer;
 use psx_gpu::{self as gpu, Resolution, VideoMode};
+use psx_level::{
+    GameFlow, LevelOptionDef, LevelUiNodeRecord, LevelUiScene, LevelUiSfxCueRecord,
+    LevelUiSfxSampleRecord,
+};
 use psx_pad::{poll_port1, PadState};
 
+use crate::game_app::{GameApp, GAMEPLAY_ONLY};
 use crate::scene::{Ctx, Scene};
 use crate::scheduler::{FrameScheduler, SchedulerAction, SchedulerConfig};
 use crate::telemetry;
@@ -163,6 +168,13 @@ impl App {
     /// poll-pad → update → clear → render → display-clock wait →
     /// draw-sync → swap.
     ///
+    /// Internally this wraps `scene` in a [`GameApp`] over the implicit
+    /// gameplay-only flow ([`GAMEPLAY_ONLY`]) and drives that wrapper
+    /// through the same scheduled loop, so behaviour is identical to
+    /// running the bare scene: one init at boot, then the unchanged
+    /// per-tick cadence. Projects that want front-end UI states call
+    /// [`run_with_flow`](Self::run_with_flow) with their own flow.
+    ///
     /// Typical call site in `main`:
     ///
     /// ```ignore
@@ -173,6 +185,37 @@ impl App {
     /// }
     /// ```
     pub fn run<S: Scene>(config: Config, scene: &mut S) -> ! {
+        // Auto-wrap the bare gameplay scene in the unified runtime
+        // spine over GAMEPLAY_ONLY. That flow has a single Gameplay
+        // state entered at boot, so `GameApp::init` forwards straight
+        // to `scene.init` and `update`/`render` forward straight to
+        // the scene every tick -- the old one-init-then-loop shape,
+        // plus one already-taken `match` branch. No UI scenes, no
+        // nodes, no options: the front-end arms are dead code on this path.
+        Self::run_with_flow(config, &GAMEPLAY_ONLY, &[], &[], &[], &[], &[], scene)
+    }
+
+    /// Run `scene` as the gameplay state of a cooked [`GameFlow`].
+    /// Never returns.
+    ///
+    /// Same boot + scheduled loop as [`run`](Self::run); the scene is
+    /// driven through a [`GameApp`] so the flow can also surface cooked
+    /// UI-scene states (title / pause / game-over) under the identical
+    /// pacing and telemetry. `scenes` and `nodes` supply the
+    /// addressable UI scenes and the shared node pool they slice into;
+    /// `options` supplies the cooked project options sliders and
+    /// `SetOption` actions bind to. Pass empty slices for a gameplay-only
+    /// flow.
+    pub fn run_with_flow<S: Scene>(
+        config: Config,
+        flow: &'static GameFlow,
+        scenes: &'static [LevelUiScene],
+        nodes: &'static [LevelUiNodeRecord],
+        options: &'static [LevelOptionDef],
+        ui_sfx_samples: &'static [LevelUiSfxSampleRecord],
+        ui_sfx_cues: &'static [LevelUiSfxCueRecord],
+        scene: &mut S,
+    ) -> ! {
         boot_trace("psx-engine: run");
         gpu::init(config.video_mode, config.resolution);
         boot_trace("psx-engine: gpu ok");
@@ -188,22 +231,43 @@ impl App {
         gpu::set_draw_offset(0, 0);
         boot_trace("psx-engine: framebuffer ok");
 
+        // Seed pad + pad_prev from a real poll so a button already held at
+        // boot does NOT register as `just_pressed` on the first frame. This
+        // matters when booting into a UI scene with captured input (editor
+        // embedded Play): the CROSS/START that may be down as Play starts must
+        // not instantly activate a menu button and skip into gameplay. With
+        // both seeded to the current state, an input must actually transition
+        // (release then press) to count as a press.
+        let initial_pad = poll_port1();
         let mut ctx = Ctx {
             sim_tick: SimTick::ZERO,
             visual_frame: VisualFrame::ZERO,
             video_hz: config.video_hz(),
-            pad: PadState::NONE,
-            pad_prev: PadState::NONE,
+            pad: initial_pad,
+            pad_prev: initial_pad,
             fb,
         };
 
+        // The wrapper is the Scene the scheduled loop drives: its
+        // init/update/render dispatch to the borrowed gameplay scene
+        // (or the UI renderer) per flow state.
+        let mut app = GameApp::new(
+            flow,
+            scenes,
+            nodes,
+            options,
+            ui_sfx_samples,
+            ui_sfx_cues,
+            scene,
+        );
+
         boot_trace("psx-engine: scene init");
-        scene.init(&mut ctx);
+        app.init(&mut ctx);
         boot_trace("psx-engine: scene init ok");
 
         let visual_interval = config.visual_pacing.interval_vblanks();
         boot_trace("psx-engine: loop");
-        Self::run_scheduled(config, scene, clock, ctx, visual_interval);
+        Self::run_scheduled(config, &mut app, clock, ctx, visual_interval);
     }
 
     fn run_scheduled<S: Scene>(

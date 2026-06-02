@@ -76,6 +76,8 @@ pub struct Timers {
     /// `cycleStart` and the live count is `(cycle - cycleStart) /
     /// rate` evaluated lazily.
     last_advance_cycle: u64,
+    /// Diagnostic: count of Timer 2 IRQ fires since reset.
+    pub dbg_timer2_fires: u64,
 }
 
 impl Timers {
@@ -248,10 +250,16 @@ impl Timers {
 
         // Convert `cycles` system clocks into source clocks.
         let ticks = match (idx, source) {
-            // Timer 0 source 1/3 = dot clock.
+            // Timer 0 source 1/3 = dot clock. `dot_clock_divisor` is the
+            // GPU *pixel* divisor (GPU clock / pixel_div = dot clock). The
+            // GPU clock runs at CPU_clock * 11/7, so one dot tick is
+            // `7 * pixel_div / 11` system cycles, not `pixel_div` -- using
+            // the pixel divisor alone made the dot clock tick 11/7 too slow
+            // (hardware reads a sys:dot ratio of ~5.09 at 320-wide, we read
+            // 8). Accumulate in 1/11-cycle units to keep the ratio exact.
             (0, 1) | (0, 3) => {
-                t.accum += cycles;
-                let divisor = dot_clock_divisor.max(1);
+                t.accum += cycles * 11;
+                let divisor = 7 * dot_clock_divisor.max(1);
                 let n = t.accum / divisor;
                 t.accum %= divisor;
                 n
@@ -338,6 +346,9 @@ impl Timers {
         }
 
         t.counter = new_val as u32;
+        if idx == 2 && fired {
+            self.dbg_timer2_fires += 1;
+        }
         fired
     }
 }
@@ -406,14 +417,15 @@ mod tests {
         let mut t = Timers::new();
         // Set Timer 0 mode with clock source = 1 (dot clock).
         t.write32(0x1F80_1104, 1 << 8, 0);
-        // At 320-pixel resolution, divisor = 8 (system clocks per dot).
-        // Advance by 80 cycles → 10 dot-clock ticks.
+        // At 320-wide the GPU pixel divisor is 8, and the GPU clock is
+        // CPU * 11/7, so a dot tick is 7*8/11 ≈ 5.09 system cycles.
+        // 80 cycles → 80*11/56 = 15 ticks (with remainder carried).
         let fired = t.tick(80, 2146, 8);
         assert_eq!(fired, 0);
-        assert_eq!(t.read32(0x1F80_1100) & 0xFFFF, 10);
-        // Another 40 cycles → 5 more dot-clock ticks.
-        t.tick(40, 2146, 8);
         assert_eq!(t.read32(0x1F80_1100) & 0xFFFF, 15);
+        // Another 40 cycles → accum carries the remainder → 8 more ticks.
+        t.tick(40, 2146, 8);
+        assert_eq!(t.read32(0x1F80_1100) & 0xFFFF, 23);
     }
 
     #[test]

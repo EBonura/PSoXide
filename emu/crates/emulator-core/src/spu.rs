@@ -141,7 +141,8 @@ mod voice_offset {
     pub const VOLUME_L: u32 = 0x0;
     /// +2..3 volume right.
     pub const VOLUME_R: u32 = 0x2;
-    /// +4..5 ADPCM pitch. `0x1000` = base rate (44.1 kHz). Max 0x3FFF.
+    /// +4..5 ADPCM pitch. `0x1000` = base rate (44.1 kHz). 16-bit R/W
+    /// register (full readback); the effective rate clamps to 0x3FFF.
     pub const PITCH: u32 = 0x4;
     /// +6..7 ADPCM start address (in 8-byte units; <<3 = byte addr).
     pub const START_ADDR: u32 = 0x6;
@@ -361,15 +362,23 @@ struct Voice {
     vol_l: VolumeEnvelope,
     /// Right volume envelope.
     vol_r: VolumeEnvelope,
-    /// Raw pitch register (0..=0x3FFF). `0x1000` plays at the sample's
-    /// source rate (typically 44.1 kHz).
+    /// Raw pitch register, full 16-bit R/W -- reads echo the written value
+    /// like hardware. `0x1000` plays at the sample's source rate (typically
+    /// 44.1 kHz); the rate counter clamps to 0x3FFF at use.
     raw_pitch: u16,
     /// Byte address into SPU RAM where playback begins on KON. `<<3`
-    /// of the register value.
+    /// of the register value, 16-byte aligned for the decoder.
     start_addr: u32,
+    /// The raw 16-bit START_ADDR register value, kept verbatim so reads
+    /// echo it back like hardware (the decoder uses `start_addr`, the
+    /// `<<3`/aligned form derived from it).
+    start_addr_raw: u16,
     /// Loop address (byte address). Set by software via REPEAT_ADDR
     /// register and by the ADPCM flag-4 bit (loop-start).
     loop_addr: u32,
+    /// Raw REPEAT_ADDR register value for readback: the software-written
+    /// 16-bit word, or `loop_addr >> 3` when the decoder sets the loop.
+    loop_addr_raw: u16,
     /// True if software wrote REPEAT_ADDR directly since voice start;
     /// suppresses the ADPCM flag-4 loop-start auto-update (matches
     /// Redux's `IgnoreLoop`).
@@ -435,7 +444,9 @@ impl Default for Voice {
             vol_r: VolumeEnvelope::new(),
             raw_pitch: 0,
             start_addr: 0,
+            start_addr_raw: 0,
             loop_addr: 0,
+            loop_addr_raw: 0,
             loop_addr_locked: false,
             adsr_lo: 0,
             adsr_hi: 0,
@@ -766,6 +777,41 @@ pub struct Spu {
     koff_raw: u32,
     /// KOFF pending bitmap.
     koff_pending: u32,
+    /// Diagnostic per-voice activity: key-on count and number of samples
+    /// that produced nonzero output. A voice keyed but never voiced is the
+    /// signature of a missing-instrument bug (ADSR/decode failure). Not on
+    /// any hot register path.
+    dbg_kon_count: [u32; NUM_VOICES],
+    dbg_voiced_samples: [u32; NUM_VOICES],
+    /// Per-voice note-end reason tally: key-off (game gate) vs sample-stop
+    /// (one-shot/loop end). Distinguishes a gate/release cutoff from samples
+    /// ending early.
+    dbg_koff_count: [u32; NUM_VOICES],
+    dbg_sampstop_count: [u32; NUM_VOICES],
+    /// Voice config captured at the last key-on: (start_addr, adsr_lo,
+    /// adsr_hi, raw_pitch, vol_l, vol_r). Reveals why a keyed voice stays
+    /// silent (bad start address, dead ADSR, zero volume).
+    dbg_keyon_cfg: [(u32, u16, u16, u16, i16, i16); NUM_VOICES],
+    /// Per-voice envelope/decode trace, snapshotted every 1024 output
+    /// samples: (decoded_sample_pre_adsr, envelope_level, phase). Bisects
+    /// premature note cutoff -- decoded->0 with envelope held = decode/loop
+    /// bug; envelope->0 = ADSR/key-off. Capped, diagnostic-only.
+    dbg_trace: [Vec<(i16, i32, u8)>; NUM_VOICES],
+    /// Output-sample clock that gates dbg_trace snapshots.
+    dbg_sample_idx: u32,
+    /// Per-voice running max of |decoded sample| and envelope within the
+    /// current trace window; pushed + reset at each snapshot boundary.
+    dbg_acc_smax: [i32; NUM_VOICES],
+    dbg_acc_emax: [i32; NUM_VOICES],
+    /// Accumulated |dry| and |wet (reverb)| output magnitude over the run.
+    /// A near-zero wet/dry ratio means the reverb bus is not contributing --
+    /// missing reverb tails read as dry, "cut-off" notes vs the oracle.
+    dbg_dry_energy: u64,
+    dbg_wet_energy: u64,
+    /// OR-accumulated pmon / noise bitmaps over the whole run -- captures
+    /// any voice ever pitch-modulated or noise-mode, not just the end state.
+    dbg_pmon_ever: u32,
+    dbg_noise_ever: u32,
     /// Voice pitch-modulation enable bitmap. Bit N means voice N takes
     /// its pitch from voice N-1's output sample.
     pmon: u32,
@@ -867,6 +913,19 @@ impl Spu {
             kon_pending: 0,
             koff_raw: 0,
             koff_pending: 0,
+            dbg_kon_count: [0; NUM_VOICES],
+            dbg_voiced_samples: [0; NUM_VOICES],
+            dbg_koff_count: [0; NUM_VOICES],
+            dbg_sampstop_count: [0; NUM_VOICES],
+            dbg_keyon_cfg: [(0, 0, 0, 0, 0, 0); NUM_VOICES],
+            dbg_trace: core::array::from_fn(|_| Vec::new()),
+            dbg_sample_idx: 0,
+            dbg_acc_smax: [0; NUM_VOICES],
+            dbg_acc_emax: [0; NUM_VOICES],
+            dbg_dry_energy: 0,
+            dbg_wet_energy: 0,
+            dbg_pmon_ever: 0,
+            dbg_noise_ever: 0,
             pmon: 0,
             noise_on: 0,
             reverb_on: 0,
@@ -984,6 +1043,18 @@ impl Spu {
         self.samples_produced
     }
 
+    /// Diagnostic SPU IRQ state: (irq_addr, spucnt, spustat, decode cursor,
+    /// cd-audio queue len). For tracing games that sync on the SPU IRQ.
+    pub fn debug_irq_state(&self) -> (u32, u16, u16, u32, usize) {
+        (
+            self.irq_addr,
+            self.spucnt,
+            self.spustat,
+            self.decode_irq_cursor,
+            self.cd_audio_in.len(),
+        )
+    }
+
     /// Drain pending host-facing stereo samples. Frontend calls this
     /// every frame to feed its audio output. Returns `(left, right)`
     /// pairs in playback order, oldest first.
@@ -994,6 +1065,43 @@ impl Spu {
     /// How many stereo samples are queued but not yet drained.
     pub fn audio_queue_len(&self) -> usize {
         self.audio_out.len()
+    }
+
+    /// Diagnostic: per-voice (key-on count, samples that produced nonzero
+    /// output). A voice with key-ons but ~no voiced samples is keyed but
+    /// silent -- the signature of a missing-instrument bug.
+    pub fn voice_debug_counts(&self) -> ([u32; NUM_VOICES], [u32; NUM_VOICES]) {
+        (self.dbg_kon_count, self.dbg_voiced_samples)
+    }
+
+    /// Diagnostic: per-voice note-end tally (key-off count, sample-stop count).
+    pub fn voice_end_counts(&self) -> ([u32; NUM_VOICES], [u32; NUM_VOICES]) {
+        (self.dbg_koff_count, self.dbg_sampstop_count)
+    }
+
+    /// Diagnostic: per-voice (start_addr, adsr_lo, adsr_hi, raw_pitch,
+    /// vol_l, vol_r) captured at the last key-on.
+    pub fn voice_trace(&self) -> &[Vec<(i16, i32, u8)>; NUM_VOICES] {
+        &self.dbg_trace
+    }
+
+    /// Diagnostic: (dry_energy, wet_energy, spucnt, reverb_on, pmon, noise_on)
+    /// to gauge reverb activity + which voices are pitch-modulated / noise.
+    pub fn reverb_debug(&self) -> (u64, u64, u16, u32, u32, u32) {
+        (
+            self.dbg_dry_energy,
+            self.dbg_wet_energy,
+            self.spucnt,
+            self.reverb_on,
+            self.dbg_pmon_ever,
+            self.dbg_noise_ever,
+        )
+    }
+
+    /// Diagnostic: per-voice (start_addr, adsr_lo, adsr_hi, raw_pitch,
+    /// vol_l, vol_r) captured at the last key-on.
+    pub fn voice_keyon_cfg(&self) -> [(u32, u16, u16, u16, i16, i16); NUM_VOICES] {
+        self.dbg_keyon_cfg
     }
 
     /// True when the SPU has an IRQ to report. Bus drains this flag
@@ -1008,6 +1116,11 @@ impl Spu {
         // SPUCNT bits 5..4 = 2 (DMA write) or 3 (DMA read) means RAM
         // transfer is DMA-driven.
         matches!((self.spucnt >> 4) & 3, 2 | 3)
+    }
+
+    /// Diagnostic: current SPU-RAM transfer (write/read) cursor.
+    pub fn transfer_addr(&self) -> u32 {
+        self.transfer_addr
     }
 
     // ============================================================
@@ -1203,28 +1316,23 @@ impl Spu {
             voice_offset::VOLUME_L => voice.vol_l.reg_read(),
             voice_offset::VOLUME_R => voice.vol_r.reg_read(),
             voice_offset::PITCH => voice.raw_pitch,
-            voice_offset::START_ADDR => (voice.start_addr >> 3) as u16,
+            voice_offset::START_ADDR => voice.start_addr_raw,
             voice_offset::ADSR_LO => voice.adsr_lo,
             voice_offset::ADSR_HI => voice.adsr_hi,
             voice_offset::ADSR_CURRENT => {
-                // Pinned at 0x0001 for Redux parity. Redux's SPU runs
-                // in a background thread (`MainThread`); during a
-                // parity-oracle trace that thread does not get
-                // scheduled, so `Chan::New` stays true for every
-                // keyed voice and `readRegister` case 12 returns 1
-                // unconditionally. The BIOS's SPU-init probe polls
-                // ADSR_CURRENT at ~step 19M expecting 1; anything
-                // else diverges the trace.
+                // Current ADSR volume (ENVX), 15-bit. Hardware exposes the
+                // live envelope level, and games poll it: a commercial title
+                // spins until every voice's ENVX reaches 0 before advancing
+                // past its intro, so a pinned non-zero value hangs it forever.
                 //
-                // Real hardware advances this register over time,
-                // and our full ADSR machine does produce correct
-                // envelope values internally -- but exposing them
-                // here would break the Redux parity contract.
-                // Revisit once the Redux oracle is taught to pump
-                // its SPU thread synchronously.
-                0x0001
+                // This deliberately diverges from the Redux parity trace --
+                // Redux's SPU runs on an unpumped background thread during an
+                // oracle trace, so its `readRegister` case 12 returns a stale
+                // 1 -- but per the hardware > Redux oracle priority the live
+                // envelope is the correct, hardware-accurate value.
+                self.voices[v].envelope.clamp(0, 0x7FFF) as u16
             }
-            voice_offset::REPEAT_ADDR => (voice.loop_addr >> 3) as u16,
+            voice_offset::REPEAT_ADDR => voice.loop_addr_raw,
             _ => 0,
         }
     }
@@ -1234,9 +1342,11 @@ impl Spu {
         match off {
             voice_offset::VOLUME_L => voice.vol_l.write(value),
             voice_offset::VOLUME_R => voice.vol_r.write(value),
-            voice_offset::PITCH => voice.raw_pitch = value.min(0x3FFF),
+            voice_offset::PITCH => voice.raw_pitch = value,
             voice_offset::START_ADDR => {
-                // 16-byte aligned byte address.
+                // Echo the full 16-bit register on read; the decoder uses
+                // the <<3, 16-byte-aligned byte address.
+                voice.start_addr_raw = value;
                 voice.start_addr = ((value as u32) << 3) & (SPU_RAM_BYTES as u32 - 1) & !0xF;
             }
             voice_offset::ADSR_LO => {
@@ -1253,6 +1363,7 @@ impl Spu {
                 voice.envelope = (value as i16) as i32 & 0x7FFF;
             }
             voice_offset::REPEAT_ADDR => {
+                voice.loop_addr_raw = value;
                 voice.loop_addr = ((value as u32) << 3) & (SPU_RAM_BYTES as u32 - 1) & !0xF;
                 voice.loop_addr_locked = true;
             }
@@ -1603,6 +1714,9 @@ impl Spu {
         let mut reverb_in_r: i32 = 0;
         for v in 0..NUM_VOICES {
             let (l, r) = self.tick_voice(v);
+            if l != 0 || r != 0 {
+                self.dbg_voiced_samples[v] = self.dbg_voiced_samples[v].saturating_add(1);
+            }
             let is_modulator = v + 1 < NUM_VOICES && (self.pmon & (1 << (v + 1))) != 0;
             if !is_modulator {
                 sum_l = sum_l.saturating_add(l as i32);
@@ -1613,6 +1727,9 @@ impl Spu {
                 }
             }
         }
+        self.dbg_sample_idx = self.dbg_sample_idx.wrapping_add(1);
+        self.dbg_pmon_ever |= self.pmon;
+        self.dbg_noise_ever |= self.noise_on;
 
         // 3. Mix CD audio input at CD_VOL_L/R. Source is the CDROM's
         //    CD-DA sample stream or the decoded XA-ADPCM payload,
@@ -1650,6 +1767,12 @@ impl Spu {
         let dry_r = sum_r;
         let out_l = saturate_i16(dry_l.saturating_add(wet_l));
         let out_r = saturate_i16(dry_r.saturating_add(wet_r));
+        self.dbg_dry_energy = self
+            .dbg_dry_energy
+            .saturating_add(dry_l.unsigned_abs() as u64 + dry_r.unsigned_abs() as u64);
+        self.dbg_wet_energy = self
+            .dbg_wet_energy
+            .saturating_add(wet_l.unsigned_abs() as u64 + wet_r.unsigned_abs() as u64);
 
         // 5. Push to output ring, discarding oldest if full.
         if self.audio_out.len() >= OUTPUT_BUFFER_CAP {
@@ -1663,7 +1786,7 @@ impl Spu {
     }
 
     fn tick_decode_buffer_irq(&mut self) {
-        if self.spucnt & (1 << 6) != 0 && self.irq_addr != 0 && self.irq_addr < 0x1000 {
+        if self.spucnt & (1 << 6) != 0 && self.irq_addr < 0x1000 {
             for bank in 0..4 {
                 let cursor = self.decode_irq_cursor + bank * 0x400;
                 if self.irq_addr >= cursor && self.irq_addr < cursor + 2 {
@@ -1688,9 +1811,21 @@ impl Spu {
             let key_on = kon & bit != 0;
             if key_on {
                 self.voices[v].key_on();
+                self.dbg_kon_count[v] = self.dbg_kon_count[v].saturating_add(1);
+                let vc = &self.voices[v];
+                let cfg = (
+                    vc.start_addr,
+                    vc.adsr_lo,
+                    vc.adsr_hi,
+                    vc.raw_pitch,
+                    vc.vol_l.current,
+                    vc.vol_r.current,
+                );
+                self.dbg_keyon_cfg[v] = cfg;
             }
             if !key_on && koff & bit != 0 {
                 self.voices[v].key_off();
+                self.dbg_koff_count[v] = self.dbg_koff_count[v].saturating_add(1);
             }
         }
     }
@@ -1704,6 +1839,23 @@ impl Spu {
         // Advance ADSR envelope.
         let env = self.voices[v].step_envelope();
         let mixed_i16 = apply_adsr_volume(sample_i16, env);
+
+        // Diagnostic trace: track per-window max decode amplitude + envelope,
+        // snapshot every 1024 samples to bisect premature cutoffs
+        // (decode-silence with envelope held vs envelope-drop).
+        let s_abs = (sample_i16 as i32).abs();
+        if s_abs > self.dbg_acc_smax[v] {
+            self.dbg_acc_smax[v] = s_abs;
+        }
+        if env > self.dbg_acc_emax[v] {
+            self.dbg_acc_emax[v] = env;
+        }
+        if self.dbg_sample_idx & 0x3FF == 0 && self.dbg_trace[v].len() < 2600 {
+            let ph = self.voices[v].phase as u8;
+            self.dbg_trace[v].push((self.dbg_acc_smax[v] as i16, self.dbg_acc_emax[v], ph));
+            self.dbg_acc_smax[v] = 0;
+            self.dbg_acc_emax[v] = 0;
+        }
 
         let voice = &mut self.voices[v];
         voice.last_sample = mixed_i16;
@@ -1739,7 +1891,10 @@ impl Spu {
         // Voice 0 cannot be modulated (no preceding voice). The
         // modulator voice's own L/R output is suppressed from the
         // audible mix in `tick_sample`.
-        let mut pitch = self.voices[v].raw_pitch as u32;
+        // The sample-rate register stores the full 16-bit written value so
+        // reads echo it back like hardware; the rate counter clamps to
+        // 0x3FFF here (values above that don't speed playback further).
+        let mut pitch = (self.voices[v].raw_pitch as u32).min(0x3FFF);
         if v > 0 && self.pmon & (1 << v) != 0 {
             let prev = self.voices[v - 1].last_sample as i32;
             let np = ((0x8000 + prev) * pitch as i32) / 0x8000;
@@ -1756,6 +1911,7 @@ impl Spu {
         while self.voices[v].sample_pos >= 0x10000 {
             if self.voices[v].sample_index >= ADPCM_SAMPLES_PER_BLOCK {
                 if self.voices[v].stop_after_block {
+                    self.dbg_sampstop_count[v] = self.dbg_sampstop_count[v].saturating_add(1);
                     let voice = &mut self.voices[v];
                     voice.phase = AdsrPhase::Off;
                     voice.envelope = 0;
@@ -1859,6 +2015,7 @@ impl Spu {
         //     REPEAT_ADDR write).
         if flags & 0x4 != 0 && !voice.loop_addr_locked {
             voice.loop_addr = current;
+            voice.loop_addr_raw = (current >> 3) as u16;
         }
         if flags & 0x1 != 0 {
             // End of sample -- latch ENDX.
@@ -2118,16 +2275,17 @@ mod tests {
     }
 
     #[test]
-    fn voice_adsr_current_pinned_at_one_for_redux_parity() {
-        // Until the parity oracle pumps Redux's SPU thread, this
-        // register must read 0x0001 regardless of the real internal
-        // envelope state. See comment in `read_voice_reg`.
+    fn voice_adsr_current_reads_live_envelope() {
+        // ENVX exposes the live envelope level (hardware behavior). Games
+        // poll it -- e.g. a commercial title spins until every voice reaches 0
+        // before advancing past its intro -- so it must reflect the real
+        // envelope, not a pinned constant. See `read_voice_reg`.
         let mut s = Spu::new();
         s.voices[0].phase = AdsrPhase::Attack;
         s.voices[0].envelope = 0x4000;
-        assert_eq!(s.read16(VOICE_BASE + voice_offset::ADSR_CURRENT), 1);
-        s.voices[0].phase = AdsrPhase::Off;
-        assert_eq!(s.read16(VOICE_BASE + voice_offset::ADSR_CURRENT), 1);
+        assert_eq!(s.read16(VOICE_BASE + voice_offset::ADSR_CURRENT), 0x4000);
+        s.voices[0].envelope = 0;
+        assert_eq!(s.read16(VOICE_BASE + voice_offset::ADSR_CURRENT), 0);
     }
 
     #[test]
@@ -2287,15 +2445,19 @@ mod tests {
     }
 
     #[test]
-    fn decoded_buffer_irq_ignores_zero_irq_address() {
+    fn decoded_buffer_irq_fires_at_zero_irq_address() {
+        // Address 0 (CD-left capture buffer start) is a valid SPU IRQ
+        // target. CTR arms its SCEA advance-timer SPU IRQ there; gating
+        // it off (the old behavior) froze the game on the SCEA screen.
+        // SPUCNT bit 6 already guards against firing before a game arms.
         let mut s = Spu::new();
         s.write16(SPUCNT, 1 << 6); // IRQ enable
         s.write16(IRQ_ADDR, 0x0000);
 
         s.tick_sample(0);
 
-        assert!(!s.take_irq_pending());
-        assert_eq!(s.spustat() & (1 << 6), 0);
+        assert!(s.take_irq_pending());
+        assert_ne!(s.spustat() & (1 << 6), 0);
     }
 
     #[test]

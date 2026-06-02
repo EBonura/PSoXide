@@ -893,6 +893,7 @@ impl ApplicationHandler for Shell {
                     let editor_selected_sector_faces = state.editor.selected_sector_faces();
                     let editor_paint_preview = state.editor.paint_target_preview();
                     let editor_active_room = state.editor.active_room_id();
+                    let editor_active_floor = state.editor.active_floor();
                     let editor_entity_bounds =
                         state.editor.collect_entity_bounds(editor_active_room);
                     let editor_hovered_entity = state.editor.hovered_entity_node();
@@ -908,6 +909,7 @@ impl ApplicationHandler for Shell {
                         editor_show_lights,
                         editor_hidden_scene_nodes,
                         editor_active_room,
+                        editor_active_floor,
                         editor_selected,
                         editor_hover,
                         editor_selection,
@@ -1026,7 +1028,9 @@ fn frontend_display(
     gfx: &gfx::Graphics,
 ) -> (egui::TextureId, egui::Rect) {
     let area = display_area_or_default(bus);
-    if area.bpp24 {
+    let screen_offset_active = bus
+        .is_some_and(|bus| bus.gpu.horizontal_display_offset_px() != 0);
+    if area.bpp24 || screen_offset_active {
         return (gfx.display_texture_id(), cpu_display_uv(area));
     }
     (gfx.hw_texture_id(), hw_display_uv(area))
@@ -1324,6 +1328,7 @@ fn editor_play_metrics(state: &app::AppState) -> Option<psxed_ui::EditorPlaytest
         stream_slot_limit: recent_counter(counter::ROOM_STREAM_SLOT_LIMIT),
         stream_pending: recent_counter(counter::ROOM_STREAM_PENDING_LOADS),
         stream_failed: recent_counter(counter::ROOM_STREAM_FAILED_LOADS),
+        stream_protected_full: recent_counter(counter::ROOM_STREAM_PROTECTED_FULL),
         chunk_loaded_mask: chunk_mask(
             counter::ROOM_STREAM_RESIDENT_MASK_LO,
             counter::ROOM_STREAM_RESIDENT_MASK_HI,

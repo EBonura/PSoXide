@@ -226,6 +226,14 @@ fn gte_command_cycles(opcode: u8) -> Option<u8> {
 }
 
 impl Gte {
+    /// Real-hardware cycle latency of the GTE command encoded in `instr`
+    /// (the bottom six bits select the function), or 0 for encodings that
+    /// decode as nops. Lets a CPU model charge the latency it stalls on
+    /// when a GTE result register is read before the op completes.
+    pub fn command_cycles(instr: u32) -> u32 {
+        gte_command_cycles((instr & 0x3F) as u8).map_or(0, u32::from)
+    }
+
     /// Construct a freshly-reset GTE -- all registers cleared. Real
     /// hardware powers on with garbage, but the BIOS zeroes the lot
     /// before first use, so we save a redundant write by starting

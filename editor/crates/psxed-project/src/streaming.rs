@@ -14,15 +14,12 @@ pub struct SceneResourceUse {
     pub models: Vec<ResourceId>,
     pub meshes: Vec<ResourceId>,
     pub characters: Vec<ResourceId>,
-    pub audio: Vec<ResourceId>,
     pub model_instances: usize,
     pub character_controllers: usize,
     pub colliders: usize,
-    pub interactables: usize,
     pub image_props: usize,
     pub lights: usize,
     pub particle_emitters: usize,
-    pub triggers: usize,
     pub portals: usize,
 }
 
@@ -47,7 +44,6 @@ fn collect_resource_use(
     let mut models = HashSet::new();
     let mut meshes = HashSet::new();
     let mut characters = HashSet::new();
-    let mut audio = HashSet::new();
 
     for node in scene.nodes() {
         if let Some(room_id) = room_filter {
@@ -107,13 +103,7 @@ fn collect_resource_use(
                     &mut models,
                 );
             }
-            NodeKind::AudioSource { sound, .. } => {
-                if let Some(audio_id) = sound {
-                    push_unique(*audio_id, &mut use_set.audio, &mut audio);
-                }
-            }
             NodeKind::Collider { .. } => use_set.colliders += 1,
-            NodeKind::Interactable { .. } => use_set.interactables += 1,
             NodeKind::PointLight { .. } => use_set.lights += 1,
             NodeKind::ParticleEmitter { settings } => {
                 use_set.particle_emitters += 1;
@@ -121,7 +111,6 @@ fn collect_resource_use(
                     push_unique(texture_id, &mut use_set.textures, &mut textures);
                 }
             }
-            NodeKind::Trigger { .. } => use_set.triggers += 1,
             NodeKind::Portal { .. } => use_set.portals += 1,
             _ => {}
         }

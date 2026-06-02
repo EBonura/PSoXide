@@ -20,6 +20,10 @@ pub const MANIFEST_FILENAME: &str = "level_manifest.rs";
 /// Ignored cooked Rust-source manifest written by editor Play /
 /// `make cook-playtest`.
 pub const COOKED_MANIFEST_FILENAME: &str = "level_manifest.cooked.rs";
+/// Generated project-relative/absolute WAV list for CD-DA tracks. The
+/// editor-playtest disc builder converts these sources into mixed-mode audio
+/// tracks in list order (`track 2`, `track 3`, ...).
+pub const CDDA_TRACKS_FILENAME: &str = "cdda_tracks.txt";
 
 /// Cooked WORLD.PAK room ordering hint consumed by disc builders.
 pub const WORLD_PACK_ORDER_FILENAME: &str = "world_pack_order.txt";
@@ -42,6 +46,10 @@ pub const TEXTURES_DIRNAME: &str = "textures";
 /// blobs. One subfolder per unique [`ResourceData::Model`]
 /// referenced by any placed [`NodeKind::MeshInstance`].
 pub const MODELS_DIRNAME: &str = "models";
+
+/// Subdirectory inside `generated/` that holds cooked UI SFX `.psau`
+/// blobs selected by button/slider cue pools.
+pub const UI_SFX_DIRNAME: &str = "ui_sfx";
 
 /// Coarse asset class -- mirrors [`psx_level::AssetKind`] but
 /// stays host-side `String`/`Vec` friendly. Converted to the
@@ -91,6 +99,11 @@ pub struct PlaytestRoom {
     pub origin_x: i32,
     /// Editor-side `WorldGrid::origin[1]`.
     pub origin_z: i32,
+    /// Room vertical placement in engine units, from the Room node's
+    /// authored `Transform3::translation[1]`. Diagnostic only for now,
+    /// mirroring `origin_x` / `origin_z`: the cooker still normalizes
+    /// geometry to array-rooted at ground level.
+    pub origin_y: i32,
     /// Engine units per sector.
     pub sector_size: i32,
     /// Camera-space far plane used for room/actor rendering.
@@ -103,6 +116,9 @@ pub struct PlaytestRoom {
     pub resident_chunk_limit: u8,
     /// Runtime room visible/drawable budget inherited from the World node.
     pub visible_chunk_limit: u8,
+    /// Downward acceleration inherited from the World node, in engine units
+    /// per fixed 60 Hz tick squared.
+    pub gravity_per_tick: i32,
     /// First index into [`PlaytestPackage::materials`] for this
     /// room's slice.
     pub material_first: u16,
@@ -644,6 +660,41 @@ pub struct PlaytestBoxProp {
     pub flags: u16,
 }
 
+/// Cooked button action, ready for manifest emission. Mirrors
+/// [`psx_level::LevelUiAction`]: the authored `GotoScene(UiSceneId)`
+/// is resolved to a cooked [`PlaytestUiScene::id`] at cook time, and
+/// the option/game ids are carried as compact integers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaytestUiAction {
+    /// Switch to the cooked UI scene with this id.
+    GotoScene {
+        /// Target [`PlaytestUiScene::id`].
+        scene: u16,
+    },
+    /// Enter the gameplay/level simulation.
+    StartGameplay,
+    /// Return to the previous menu/scene.
+    Back,
+    /// Adjust a project option by a signed delta.
+    SetOption {
+        /// Target option id.
+        option: u16,
+        /// Signed step.
+        delta: i32,
+    },
+    /// Game-specific action dispatched by opaque id.
+    Game {
+        /// Caller-defined id.
+        id: u16,
+    },
+}
+
+impl Default for PlaytestUiAction {
+    fn default() -> Self {
+        Self::Back
+    }
+}
+
 /// One cooked screen-space UI node.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlaytestUiNode {
@@ -659,22 +710,137 @@ pub struct PlaytestUiNode {
     pub width: u16,
     /// Height in canvas pixels.
     pub height: u16,
-    /// Primary colour: fill for `Rect`/`Bar`, text tint for `Label`.
+    /// Primary colour: fill for `Rect`/`Bar`/`Button`, text tint for
+    /// `Label`, track colour for `Slider`.
     pub color: [u8; 3],
-    /// Secondary colour, currently the `Bar` background.
+    /// Secondary colour: `Bar` background or `Slider` fill.
     pub background: [u8; 3],
+    /// Tertiary colour, currently the `Slider` knob.
+    pub accent: [u8; 3],
     /// Current value binding for `Bar`.
     pub value: UiValueBinding,
     /// Maximum value binding for `Bar`.
     pub max: UiValueBinding,
     /// Texture asset index for `Image`, or `None`.
     pub texture_asset: Option<usize>,
-    /// Text for `Label`.
+    /// Text for `Label`/`Button`.
     pub text: String,
     /// Runtime lookup tag for dynamic labels. Empty means untagged.
     pub tag: String,
+    /// Action fired by a `Button`. Ignored by other kinds.
+    pub action: PlaytestUiAction,
+    /// Project option a `Slider` binds to, or [`psx_level::UI_OPTION_NONE`].
+    pub option: u16,
     /// Runtime flags.
     pub flags: u16,
+    /// First index into [`PlaytestPackage::ui_sfx_cues`], or
+    /// [`psx_level::UI_SFX_NONE`] when the node has no SFX.
+    pub sfx_first: u16,
+    /// Number of SFX cues belonging to this node.
+    pub sfx_count: u8,
+}
+
+/// One cooked UI SFX sample. Written to `generated/ui_sfx/` and
+/// referenced by [`PlaytestUiSfxCue::sample`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlaytestUiSfxSample {
+    /// Cooked `.psau` bytes.
+    pub bytes: Vec<u8>,
+    /// Filename inside the generated UI SFX directory.
+    pub filename: String,
+    /// Source WAV path for diagnostics.
+    pub source_path: String,
+}
+
+/// One cooked SFX cue owned by a UI node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestUiSfxCue {
+    /// Index into [`PlaytestPackage::ui_sfx_samples`].
+    pub sample: u16,
+    /// Runtime event that triggers this cue.
+    pub event: psx_level::LevelUiSfxEvent,
+    /// Per-play volume as a percentage of full voice volume.
+    pub volume_percent: u8,
+    /// Pitch multiplier in Q12 (`4096` = source pitch).
+    pub pitch_q12: u16,
+    /// Reserved runtime flags.
+    pub flags: u16,
+}
+
+/// One cooked UI scene addressing a contiguous block of
+/// [`PlaytestPackage::ui_nodes`]. Mirrors
+/// [`psx_level::LevelUiScene`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlaytestUiScene {
+    /// Stable authored scene id.
+    pub id: u16,
+    /// Display name.
+    pub name: String,
+    /// First node index into [`PlaytestPackage::ui_nodes`].
+    pub node_first: u16,
+    /// Number of nodes belonging to this scene.
+    pub node_count: u16,
+}
+
+/// One WAV source assigned to a cooked CD-DA track number.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlaytestCddaTrack {
+    /// 1-based disc track number. Track 1 is the data track, so CD-DA starts
+    /// at track 2.
+    pub track: u8,
+    /// Source WAV path. Generated track-list files use this path verbatim.
+    pub wav_path: String,
+}
+
+/// One cooked project option, ready for manifest emission. Mirrors
+/// [`psx_level::LevelOptionDef`]: the authored [`crate::OptionKind`] is
+/// flattened to a bounded integer triple at cook time (an enum becomes
+/// `[0, variants - 1]` step `1`, a bool becomes `[0, 1]` step `1`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestOption {
+    /// Stable option id, low 16 bits of the authored [`crate::OptionId`].
+    pub id: u16,
+    /// Inclusive minimum value.
+    pub min: i32,
+    /// Inclusive maximum value.
+    pub max: i32,
+    /// Step applied per slider nudge.
+    pub step: i32,
+    /// Initial runtime value.
+    pub default: i32,
+}
+
+/// One cooked game-flow state. Mirrors [`psx_level::FlowState`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaytestFlowState {
+    /// Show a UI scene by its [`PlaytestUiScene::id`].
+    UiScene {
+        /// Target scene id.
+        scene: u16,
+    },
+    /// Run the gameplay/level simulation.
+    Gameplay,
+}
+
+/// Cooked game-state flow. Mirrors [`psx_level::GameFlow`]: an
+/// addressable state table plus the entry index into it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlaytestGameFlow {
+    /// Flow state table.
+    pub states: Vec<PlaytestFlowState>,
+    /// Index into `states` of the starting state.
+    pub entry: u16,
+}
+
+impl Default for PlaytestGameFlow {
+    /// A project with no authored UI scenes starts straight in
+    /// gameplay.
+    fn default() -> Self {
+        Self {
+            states: vec![PlaytestFlowState::Gameplay],
+            entry: 0,
+        }
+    }
 }
 
 /// Weapon-local hit shape, ready for manifest emission.
@@ -870,6 +1036,8 @@ pub struct PlaytestCharacter {
     pub visual_yaw: i16,
     /// Render-only uniform scale in Q8 fixed point (`256 = 1.0`).
     pub visual_scale_q8: u16,
+    /// Gravity multiplier in Q8 fixed point (`256 = 1.0x`).
+    pub weight_q8: u16,
     /// Capsule radius in engine units.
     pub radius: u16,
     /// Capsule height in engine units.
@@ -1019,8 +1187,23 @@ pub struct PlaytestPackage {
     pub image_props: Vec<PlaytestImageProp>,
     /// Placed editable box props, room-local coordinates.
     pub box_props: Vec<PlaytestBoxProp>,
-    /// Cooked screen-space UI nodes.
+    /// Cooked screen-space UI nodes for every scene, concatenated
+    /// into one shared pool. [`Self::ui_scenes`] slices this pool.
     pub ui_nodes: Vec<PlaytestUiNode>,
+    /// Addressable cooked UI scene table indexing [`Self::ui_nodes`].
+    pub ui_scenes: Vec<PlaytestUiScene>,
+    /// Cooked UI SFX samples, deduplicated by source WAV path.
+    pub ui_sfx_samples: Vec<PlaytestUiSfxSample>,
+    /// Cooked UI SFX cues, sliced by [`PlaytestUiNode::sfx_first`] /
+    /// [`PlaytestUiNode::sfx_count`].
+    pub ui_sfx_cues: Vec<PlaytestUiSfxCue>,
+    /// Cooked game-state flow definition.
+    pub game_flow: PlaytestGameFlow,
+    /// Cooked project options, flattened to bounded integer ranges.
+    /// Sliders and `SetOption` actions reference these by id.
+    pub options: Vec<PlaytestOption>,
+    /// WAV sources baked as CD-DA tracks in the playtest/export disc image.
+    pub cdda_tracks: Vec<PlaytestCddaTrack>,
     /// Weapon hitboxes, shared by [`Self::weapons`].
     pub weapon_hitboxes: Vec<PlaytestWeaponHitbox>,
     /// Cooked Weapon resources, deduplicated by source resource id.
