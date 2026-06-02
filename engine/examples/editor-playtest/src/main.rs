@@ -79,7 +79,7 @@ use psx_gpu::{
     draw_line_mono, draw_tri_flat_blended,
     material::{BlendMode, TextureMaterial, TextureWindow},
     ot::OrderingTable,
-    prim::{QuadTexturedMaterial, TriTextured, TriTexturedGouraud},
+    prim::{QuadTexturedGouraud, QuadTexturedMaterial, TriTextured, TriTexturedGouraud},
     VideoMode,
 };
 use psx_level::portal_visibility::{
@@ -1524,6 +1524,8 @@ const MODEL_BOUNDS_CULLING_ENABLED: bool =
     option_env!("PSXO_BENCH_DISABLE_MODEL_BOUNDS_CULL").is_none();
 const PROP_PARTICLE_GTE_PROJECT_ENABLED: bool =
     option_env!("PSXO_GTE_PROP_PARTICLE_PROJECT").is_some();
+const BOX_PROP_GTE_PROJECT_ENABLED: bool = true;
+const BOX_PROP_PROFILE_ENABLED: bool = option_env!("PSXO_PROFILE_BOX_PROPS").is_some();
 
 /// Marker visualization tuning. Markers are debug stubs -- keep
 /// them visible at orbit-camera scales without dominating the
@@ -4327,6 +4329,7 @@ impl Scene for Playtest {
                 );
                 telemetry::stage_end(telemetry::stage::ENTITY_MARKERS);
                 telemetry::stage_begin(telemetry::stage::IMAGE_PROPS);
+                box_prop_profile_begin(telemetry::stage::BOX_PROPS);
                 draw_box_props(
                     BOX_PROPS,
                     &self.box_prop_broken,
@@ -4338,6 +4341,8 @@ impl Scene for Playtest {
                     &mut primitive_packets,
                     &mut world,
                 );
+                box_prop_profile_end(telemetry::stage::BOX_PROPS);
+                box_prop_profile_begin(telemetry::stage::BOX_PROP_DEBRIS);
                 draw_box_prop_floor_debris(
                     BOX_PROPS,
                     &self.box_prop_broken,
@@ -4349,6 +4354,8 @@ impl Scene for Playtest {
                     &mut primitive_packets,
                     &mut world,
                 );
+                box_prop_profile_end(telemetry::stage::BOX_PROP_DEBRIS);
+                box_prop_profile_begin(telemetry::stage::BOX_PROP_SHARDS);
                 draw_box_prop_break_events(
                     &self.box_prop_break_events,
                     BOX_PROPS,
@@ -4360,6 +4367,8 @@ impl Scene for Playtest {
                     &mut primitive_packets,
                     &mut world,
                 );
+                box_prop_profile_end(telemetry::stage::BOX_PROP_SHARDS);
+                box_prop_profile_begin(telemetry::stage::IMAGE_CARDS);
                 draw_image_props(
                     IMAGE_PROPS,
                     active.index,
@@ -4369,6 +4378,7 @@ impl Scene for Playtest {
                     &mut primitive_packets,
                     &mut world,
                 );
+                box_prop_profile_end(telemetry::stage::IMAGE_CARDS);
                 telemetry::stage_end(telemetry::stage::IMAGE_PROPS);
                 telemetry::stage_begin(telemetry::stage::MODEL_INSTANCES);
                 let player = self.motor.position();
@@ -10489,6 +10499,15 @@ fn ensure_texture_uploaded_with_clut_mode(
     None
 }
 
+fn prop_texture_slot(texture_asset: AssetId) -> Option<VramSlot> {
+    let clut_mode = VramSlotClutMode::TransparentZero;
+    if let Some(slot) = find_vram_slot(texture_asset, clut_mode) {
+        return Some(slot);
+    }
+    let asset = find_asset_of_kind(ASSETS, texture_asset, AssetKind::Texture)?;
+    ensure_texture_uploaded_with_clut_mode(asset.id, asset.bytes, clut_mode)
+}
+
 fn room_texture_window_size(size: u16) -> Option<u8> {
     if size < 8 || size > ROOM_TILE_TEXELS || !size.is_power_of_two() || size % 8 != 0 {
         return None;
@@ -11316,14 +11335,7 @@ fn draw_image_props<T>(
         if !sphere_visible_to_camera(camera, options, center, radius, 96) {
             continue;
         }
-        let Some(asset) = find_asset_of_kind(ASSETS, prop.texture_asset, AssetKind::Texture) else {
-            continue;
-        };
-        let Some(slot) = ensure_texture_uploaded_with_clut_mode(
-            asset.id,
-            asset.bytes,
-            VramSlotClutMode::TransparentZero,
-        ) else {
+        let Some(slot) = prop_texture_slot(prop.texture_asset) else {
             continue;
         };
         let material = TextureMaterial::opaque(slot.clut_word, slot.tpage_word, (0x80, 0x80, 0x80))
@@ -11870,6 +11882,52 @@ fn box_prop_broken_in_words(broken: &[u32; BOX_PROP_BROKEN_WORDS], index: usize)
     broken[word] & mask != 0
 }
 
+#[inline(always)]
+fn box_prop_profile_begin(stage_id: u16) {
+    if BOX_PROP_PROFILE_ENABLED {
+        telemetry::stage_begin(stage_id);
+    }
+}
+
+#[inline(always)]
+fn box_prop_profile_end(stage_id: u16) {
+    if BOX_PROP_PROFILE_ENABLED {
+        telemetry::stage_end(stage_id);
+    }
+}
+
+#[derive(Copy, Clone)]
+struct BoxPropFaceTextureRuntime {
+    material: TextureMaterial,
+    u_max: u8,
+    v_max: u8,
+}
+
+fn box_prop_face_textures(
+    prop: &LevelBoxPropRecord,
+) -> [Option<BoxPropFaceTextureRuntime>; psx_level::BOX_PROP_FACE_COUNT] {
+    let mut textures = [None; psx_level::BOX_PROP_FACE_COUNT];
+    let mut face = 0usize;
+    while face < psx_level::BOX_PROP_FACE_COUNT {
+        if let Some(texture_asset) = prop.texture_assets[face] {
+            if let Some(slot) = prop_texture_slot(texture_asset) {
+                textures[face] = Some(BoxPropFaceTextureRuntime {
+                    material: TextureMaterial::opaque(
+                        slot.clut_word,
+                        slot.tpage_word,
+                        (0x80, 0x80, 0x80),
+                    )
+                    .with_texture_window(slot.texture_window),
+                    u_max: model_render_uv_max(slot.texture_width),
+                    v_max: model_render_uv_max(slot.texture_height),
+                });
+            }
+        }
+        face += 1;
+    }
+    textures
+}
+
 fn draw_box_props<T>(
     props: &[LevelBoxPropRecord],
     broken: &[u32; BOX_PROP_BROKEN_WORDS],
@@ -11922,8 +11980,11 @@ fn draw_box_prop_floor_debris<T>(
     triangles: &mut T,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) where
-    T: PrimitiveSink<TriTextured> + PrimitiveSink<TriTexturedGouraud>,
+    T: PrimitiveSink<QuadTexturedGouraud>
+        + PrimitiveSink<TriTextured>
+        + PrimitiveSink<TriTexturedGouraud>,
 {
+    let mut projector = None;
     for (index, prop) in props.iter().enumerate() {
         if prop.room != current_room || !box_prop_broken_in_words(broken, index) {
             continue;
@@ -11945,10 +12006,21 @@ fn draw_box_prop_floor_debris<T>(
         ) {
             continue;
         }
+        let loaded_projector = match projector {
+            Some(projector) => projector,
+            None => {
+                let loaded = LoadedWorldCameraGte::load(*camera);
+                projector = Some(loaded);
+                loaded
+            }
+        };
+        let face_textures = box_prop_face_textures(prop);
         draw_box_prop_floor_debris_chips(
             prop,
+            &face_textures,
             box_runtime.debris_bounds,
             box_runtime.floor_y,
+            loaded_projector,
             camera,
             options,
             lighting,
@@ -11960,15 +12032,19 @@ fn draw_box_prop_floor_debris<T>(
 
 fn draw_box_prop_floor_debris_chips<T>(
     prop: &LevelBoxPropRecord,
+    face_textures: &[Option<BoxPropFaceTextureRuntime>; psx_level::BOX_PROP_FACE_COUNT],
     bounds: BoxPropDebrisBounds,
     floor_y: i32,
+    projector: LoadedWorldCameraGte,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
     lighting: &RuntimeRoomLighting,
     triangles: &mut T,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) where
-    T: PrimitiveSink<TriTextured> + PrimitiveSink<TriTexturedGouraud>,
+    T: PrimitiveSink<QuadTexturedGouraud>
+        + PrimitiveSink<TriTextured>
+        + PrimitiveSink<TriTexturedGouraud>,
 {
     for chip in BOX_PROP_FLOOR_DEBRIS_CHIPS {
         let face = chip.face as usize;
@@ -11976,7 +12052,18 @@ fn draw_box_prop_floor_debris_chips<T>(
             continue;
         }
         draw_box_prop_floor_debris_chip(
-            prop, face, bounds, floor_y, chip, camera, options, lighting, triangles, world,
+            prop,
+            face,
+            face_textures[face],
+            bounds,
+            floor_y,
+            chip,
+            projector,
+            camera,
+            options,
+            lighting,
+            triangles,
+            world,
         );
     }
 }
@@ -11985,37 +12072,60 @@ fn draw_box_prop_floor_debris_chips<T>(
 fn draw_box_prop_floor_debris_chip<T>(
     prop: &LevelBoxPropRecord,
     face: usize,
+    face_texture: Option<BoxPropFaceTextureRuntime>,
     bounds: BoxPropDebrisBounds,
     floor_y: i32,
     chip: BoxPropFloorDebrisChip,
+    projector: LoadedWorldCameraGte,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
     lighting: &RuntimeRoomLighting,
     triangles: &mut T,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) where
-    T: PrimitiveSink<TriTextured> + PrimitiveSink<TriTexturedGouraud>,
+    T: PrimitiveSink<QuadTexturedGouraud>
+        + PrimitiveSink<TriTextured>
+        + PrimitiveSink<TriTexturedGouraud>,
 {
-    let Some(texture_asset) = prop.texture_assets[face] else {
-        return;
-    };
-    let Some(asset) = find_asset_of_kind(ASSETS, texture_asset, AssetKind::Texture) else {
-        return;
-    };
-    let Some(slot) = ensure_texture_uploaded_with_clut_mode(
-        asset.id,
-        asset.bytes,
-        VramSlotClutMode::TransparentZero,
-    ) else {
+    let Some(face_texture) = face_texture else {
         return;
     };
 
-    let material = TextureMaterial::opaque(slot.clut_word, slot.tpage_word, (0x80, 0x80, 0x80))
-        .with_texture_window(slot.texture_window);
-    let u_max = model_render_uv_max(slot.texture_width);
-    let v_max = model_render_uv_max(slot.texture_height);
-    let uvs = box_prop_floor_debris_uvs(u_max, v_max, chip);
+    let material = face_texture.material;
+    let uvs = box_prop_floor_debris_uvs(face_texture.u_max, face_texture.v_max, chip);
     let quad = box_prop_floor_debris_quad(bounds, floor_y, chip);
+    let opts = options
+        .with_depth_policy(DepthPolicy::Average)
+        .with_cull_mode(CullMode::None)
+        .with_material_layer(material)
+        .with_textured_triangle_splitting(true)
+        .with_textured_triangle_max_edge(0);
+    if BOX_PROP_GTE_PROJECT_ENABLED {
+        if let Some(projected) = projector.project_world_quad(quad) {
+            let colors = [
+                lighting.apply_vertex_fog_weight(
+                    box_prop_face_color_at(prop, face, chip.u0_q8, chip.v0_q8),
+                    lighting.fog_weight_at_depth(projected[0].sz),
+                ),
+                lighting.apply_vertex_fog_weight(
+                    box_prop_face_color_at(prop, face, chip.u1_q8, chip.v0_q8),
+                    lighting.fog_weight_at_depth(projected[1].sz),
+                ),
+                lighting.apply_vertex_fog_weight(
+                    box_prop_face_color_at(prop, face, chip.u1_q8, chip.v1_q8),
+                    lighting.fog_weight_at_depth(projected[2].sz),
+                ),
+                lighting.apply_vertex_fog_weight(
+                    box_prop_face_color_at(prop, face, chip.u0_q8, chip.v1_q8),
+                    lighting.fog_weight_at_depth(projected[3].sz),
+                ),
+            ];
+            submit_projected_textured_gouraud_quad_u8(
+                world, triangles, projected, uvs, colors, material, opts,
+            );
+            return;
+        }
+    }
     let colors = [
         lighting.apply_vertex_fog(
             box_prop_face_color_at(prop, face, chip.u0_q8, chip.v0_q8),
@@ -12034,33 +12144,13 @@ fn draw_box_prop_floor_debris_chip<T>(
             quad[3],
         ),
     ];
-    let opts = options
-        .with_depth_policy(DepthPolicy::Average)
-        .with_cull_mode(CullMode::None)
-        .with_material_layer(material)
-        .with_textured_triangle_splitting(true)
-        .with_textured_triangle_max_edge(0);
     if let Some(projected) = camera.project_world_quad(quad) {
-        let _ = world.submit_textured_gouraud_triangle(
-            triangles,
-            [projected[0], projected[1], projected[2]],
-            [uvs[0], uvs[1], uvs[2]],
-            [colors[0], colors[1], colors[2]],
-            material,
-            opts,
-        );
-        let _ = world.submit_textured_gouraud_triangle(
-            triangles,
-            [projected[0], projected[2], projected[3]],
-            [uvs[0], uvs[2], uvs[3]],
-            [colors[0], colors[2], colors[3]],
-            material,
-            opts,
+        submit_projected_textured_gouraud_quad_u8(
+            world, triangles, projected, uvs, colors, material, opts,
         );
     } else {
         let tint = average_vertex_rgb(colors);
-        let material = TextureMaterial::opaque(slot.clut_word, slot.tpage_word, tint)
-            .with_texture_window(slot.texture_window);
+        let material = material.with_tint(tint);
         let opts = opts.with_material_layer(material);
         let _ = world.submit_textured_world_quad(triangles, *camera, quad, uvs, material, opts);
     }
@@ -12077,8 +12167,11 @@ fn draw_box_prop_break_events<T>(
     triangles: &mut T,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) where
-    T: PrimitiveSink<TriTextured> + PrimitiveSink<TriTexturedGouraud>,
+    T: PrimitiveSink<QuadTexturedGouraud>
+        + PrimitiveSink<TriTextured>
+        + PrimitiveSink<TriTexturedGouraud>,
 {
+    let mut projector = None;
     for event in events {
         if !event.is_active() || event.age >= BOX_PROP_BREAK_FRAMES {
             continue;
@@ -12101,11 +12194,22 @@ fn draw_box_prop_break_events<T>(
         ) {
             continue;
         }
+        let loaded_projector = match projector {
+            Some(projector) => projector,
+            None => {
+                let loaded = LoadedWorldCameraGte::load(*camera);
+                projector = Some(loaded);
+                loaded
+            }
+        };
+        let face_textures = box_prop_face_textures(prop);
         draw_box_prop_break_shards(
             prop,
+            &face_textures,
             &box_runtime.faces,
             box_runtime.cull_center,
             *event,
+            loaded_projector,
             camera,
             options,
             lighting,
@@ -12117,16 +12221,20 @@ fn draw_box_prop_break_events<T>(
 
 fn draw_box_prop_break_shards<T>(
     prop: &LevelBoxPropRecord,
+    face_textures: &[Option<BoxPropFaceTextureRuntime>; psx_level::BOX_PROP_FACE_COUNT],
     faces: &[BoxPropFaceRuntime; psx_level::BOX_PROP_FACE_COUNT],
     box_center: WorldVertex,
     event: BoxPropBreakEvent,
+    projector: LoadedWorldCameraGte,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
     lighting: &RuntimeRoomLighting,
     triangles: &mut T,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) where
-    T: PrimitiveSink<TriTextured> + PrimitiveSink<TriTexturedGouraud>,
+    T: PrimitiveSink<QuadTexturedGouraud>
+        + PrimitiveSink<TriTextured>
+        + PrimitiveSink<TriTexturedGouraud>,
 {
     for (shard_index, shard) in BOX_PROP_BREAK_SHARDS.iter().copied().enumerate() {
         if event.age < shard.delay {
@@ -12139,11 +12247,13 @@ fn draw_box_prop_break_shards<T>(
         draw_box_prop_break_shard(
             prop,
             face,
+            face_textures[face],
             faces[face].vertices,
             box_center,
             event,
             shard,
             shard_index,
+            projector,
             camera,
             options,
             lighting,
@@ -12157,39 +12267,62 @@ fn draw_box_prop_break_shards<T>(
 fn draw_box_prop_break_shard<T>(
     prop: &LevelBoxPropRecord,
     face: usize,
+    face_texture: Option<BoxPropFaceTextureRuntime>,
     face_vertices: [WorldVertex; 4],
     box_center: WorldVertex,
     event: BoxPropBreakEvent,
     shard: BoxPropBreakShard,
     shard_index: usize,
+    projector: LoadedWorldCameraGte,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
     lighting: &RuntimeRoomLighting,
     triangles: &mut T,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) where
-    T: PrimitiveSink<TriTextured> + PrimitiveSink<TriTexturedGouraud>,
+    T: PrimitiveSink<QuadTexturedGouraud>
+        + PrimitiveSink<TriTextured>
+        + PrimitiveSink<TriTexturedGouraud>,
 {
-    let Some(texture_asset) = prop.texture_assets[face] else {
-        return;
-    };
-    let Some(asset) = find_asset_of_kind(ASSETS, texture_asset, AssetKind::Texture) else {
-        return;
-    };
-    let Some(slot) = ensure_texture_uploaded_with_clut_mode(
-        asset.id,
-        asset.bytes,
-        VramSlotClutMode::TransparentZero,
-    ) else {
+    let Some(face_texture) = face_texture else {
         return;
     };
 
-    let material = TextureMaterial::opaque(slot.clut_word, slot.tpage_word, (0x80, 0x80, 0x80))
-        .with_texture_window(slot.texture_window);
-    let u_max = model_render_uv_max(slot.texture_width);
-    let v_max = model_render_uv_max(slot.texture_height);
-    let uvs = box_prop_shard_uvs(u_max, v_max, shard);
+    let material = face_texture.material;
+    let uvs = box_prop_shard_uvs(face_texture.u_max, face_texture.v_max, shard);
     let quad = box_prop_break_shard_quad(face_vertices, box_center, event, shard, shard_index);
+    let opts = options
+        .with_depth_policy(DepthPolicy::Average)
+        .with_cull_mode(CullMode::None)
+        .with_material_layer(material)
+        .with_textured_triangle_splitting(true)
+        .with_textured_triangle_max_edge(0);
+    if BOX_PROP_GTE_PROJECT_ENABLED {
+        if let Some(projected) = projector.project_world_quad(quad) {
+            let colors = [
+                lighting.apply_vertex_fog_weight(
+                    box_prop_face_color_at(prop, face, shard.u0_q8, shard.v0_q8),
+                    lighting.fog_weight_at_depth(projected[0].sz),
+                ),
+                lighting.apply_vertex_fog_weight(
+                    box_prop_face_color_at(prop, face, shard.u1_q8, shard.v0_q8),
+                    lighting.fog_weight_at_depth(projected[1].sz),
+                ),
+                lighting.apply_vertex_fog_weight(
+                    box_prop_face_color_at(prop, face, shard.u1_q8, shard.v1_q8),
+                    lighting.fog_weight_at_depth(projected[2].sz),
+                ),
+                lighting.apply_vertex_fog_weight(
+                    box_prop_face_color_at(prop, face, shard.u0_q8, shard.v1_q8),
+                    lighting.fog_weight_at_depth(projected[3].sz),
+                ),
+            ];
+            submit_projected_textured_gouraud_quad_u8(
+                world, triangles, projected, uvs, colors, material, opts,
+            );
+            return;
+        }
+    }
     let colors = [
         lighting.apply_vertex_fog(
             box_prop_face_color_at(prop, face, shard.u0_q8, shard.v0_q8),
@@ -12208,36 +12341,37 @@ fn draw_box_prop_break_shard<T>(
             quad[3],
         ),
     ];
-    let opts = options
-        .with_depth_policy(DepthPolicy::Average)
-        .with_cull_mode(CullMode::None)
-        .with_material_layer(material)
-        .with_textured_triangle_splitting(true)
-        .with_textured_triangle_max_edge(0);
     if let Some(projected) = camera.project_world_quad(quad) {
-        let _ = world.submit_textured_gouraud_triangle(
-            triangles,
-            [projected[0], projected[1], projected[2]],
-            [uvs[0], uvs[1], uvs[2]],
-            [colors[0], colors[1], colors[2]],
-            material,
-            opts,
-        );
-        let _ = world.submit_textured_gouraud_triangle(
-            triangles,
-            [projected[0], projected[2], projected[3]],
-            [uvs[0], uvs[2], uvs[3]],
-            [colors[0], colors[2], colors[3]],
-            material,
-            opts,
+        submit_projected_textured_gouraud_quad_u8(
+            world, triangles, projected, uvs, colors, material, opts,
         );
     } else {
         let tint = average_vertex_rgb(colors);
-        let material = TextureMaterial::opaque(slot.clut_word, slot.tpage_word, tint)
-            .with_texture_window(slot.texture_window);
+        let material = material.with_tint(tint);
         let opts = opts.with_material_layer(material);
         let _ = world.submit_textured_world_quad(triangles, *camera, quad, uvs, material, opts);
     }
+}
+
+fn submit_projected_textured_gouraud_quad_u8<T>(
+    world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
+    triangles: &mut T,
+    projected: [ProjectedVertex; 4],
+    uvs: [(u8, u8); 4],
+    colors: [(u8, u8, u8); 4],
+    material: TextureMaterial,
+    options: WorldSurfaceOptions,
+) where
+    T: PrimitiveSink<QuadTexturedGouraud> + PrimitiveSink<TriTexturedGouraud>,
+{
+    let _ = world.submit_textured_gouraud_quad_prescreened_u8(
+        triangles,
+        projected,
+        uvs,
+        colors,
+        material,
+        options,
+    );
 }
 
 fn draw_box_prop_faces<T>(
@@ -12260,28 +12394,8 @@ fn draw_box_prop_faces<T>(
         let Some(texture_asset) = prop.texture_assets[face] else {
             continue;
         };
-        // Box props share the texture pool with room surfaces, so the texture
-        // is already resident: look the slot up directly and skip the per-face
-        // linear ASSETS scan + upload check. Fall back to the full
-        // resolve-and-upload path only on a (rare) cold miss. `find_vram_slot`
-        // returns exactly the slot `ensure_texture_uploaded` would for a
-        // resident asset, so this is bit-identical.
-        let slot = match find_vram_slot(texture_asset, VramSlotClutMode::TransparentZero) {
-            Some(slot) => slot,
-            None => {
-                let Some(asset) = find_asset_of_kind(ASSETS, texture_asset, AssetKind::Texture)
-                else {
-                    continue;
-                };
-                match ensure_texture_uploaded_with_clut_mode(
-                    asset.id,
-                    asset.bytes,
-                    VramSlotClutMode::TransparentZero,
-                ) {
-                    Some(slot) => slot,
-                    None => continue,
-                }
-            }
+        let Some(slot) = prop_texture_slot(texture_asset) else {
+            continue;
         };
         let material = TextureMaterial::opaque(slot.clut_word, slot.tpage_word, (0x80, 0x80, 0x80))
             .with_texture_window(slot.texture_window);
