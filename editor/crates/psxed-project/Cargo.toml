@@ -8,6 +8,7 @@ description = "PSoXide editor project model: scenes, nodes, resources, and PS1-f
 
 [dependencies]
 psxed-format = { path = "../psxed-format" }
+psxed-audio  = { path = "../psxed-audio" }
 psxed-gltf   = { path = "../psxed-gltf" }
 psxed-tex    = { path = "../psxed-tex" }
 psx-asset    = { path = "../../../sdk/crates/psx-asset" }

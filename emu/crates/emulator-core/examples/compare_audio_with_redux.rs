@@ -74,13 +74,17 @@ fn main() {
     let ours_wav = out_dir.join(format!("ours_audio_{tag}_{steps}.wav"));
     let report_path = out_dir.join(format!("audio_compare_{tag}_{steps}.txt"));
 
-    let redux_audio = capture_redux_audio(
-        steps,
-        chunk_steps,
-        &bios_path,
-        disc_path.as_deref(),
-        &redux_raw,
-    );
+    let redux_audio = if env::var("PSOXIDE_SKIP_REDUX").is_ok() {
+        eprintln!("[redux] skipped (PSOXIDE_SKIP_REDUX set)");
+        CapturedAudio {
+            tick: 0,
+            samples: Vec::new(),
+            first_kon_cycle: None,
+            first_unmute_cycle: None,
+        }
+    } else {
+        capture_redux_audio(steps, chunk_steps, &bios_path, disc_path.as_deref(), &redux_raw)
+    };
     write_wav(&redux_wav, &redux_audio.samples).expect("write redux wav");
 
     let our_audio = capture_our_audio(steps, &bios_path, disc_path.as_deref());
@@ -154,6 +158,9 @@ fn capture_our_audio(steps: u64, bios_path: &Path, disc_path: Option<&Path>) -> 
         let disc_bytes = fs::read(disc_path).expect("disc");
         bus.cdrom.insert_disc(Some(Disc::from_bin(disc_bytes)));
     }
+    if std::env::var("PSOXIDE_DUMP_VRAM").is_ok() {
+        bus.cdrom.enable_command_log(256);
+    }
 
     let mut cpu = Cpu::new();
     let mut audio_cycle_accum = 0u64;
@@ -164,7 +171,10 @@ fn capture_our_audio(steps: u64, bios_path: &Path, disc_path: Option<&Path>) -> 
         ..OurTimeline::default()
     };
 
-    for _ in 0..steps {
+    use std::collections::HashMap;
+    let mut pc_hist: HashMap<u32, u32> = HashMap::new();
+    let pc_window_start = steps.saturating_sub(256_000);
+    for step_idx in 0..steps {
         // Match Redux's debugger-facing step semantics: one oracle
         // "step" stops at the next user instruction, letting IRQ
         // handlers run through inside the same user-side step.
@@ -187,6 +197,289 @@ fn capture_our_audio(steps: u64, bios_path: &Path, disc_path: Option<&Path>) -> 
                 );
             }
         }
+        if step_idx >= pc_window_start {
+            *pc_hist.entry(cpu.pc()).or_insert(0) += 1;
+        }
+    }
+
+    // Optional VRAM dump (PSOXIDE_DUMP_VRAM=path) -- boot a disc, step N,
+    // and write the full 1024x512 framebuffer as a PPM. Lets us inspect a
+    // game's on-screen state through emulator-core without the frontend.
+    if let Ok(path) = std::env::var("PSOXIDE_DUMP_VRAM") {
+        let vram = bus.gpu.vram.words();
+        let (w, h) = (1024usize, 512usize);
+        let mut out = format!("P6\n{w} {h}\n255\n").into_bytes();
+        for &px in vram.iter().take(w * h) {
+            out.push(((px & 0x1F) << 3) as u8);
+            out.push((((px >> 5) & 0x1F) << 3) as u8);
+            out.push((((px >> 10) & 0x1F) << 3) as u8);
+        }
+        std::fs::write(&path, &out).expect("write vram ppm");
+        eprintln!("[ours] VRAM -> {path} ({w}x{h}) after {steps} steps");
+
+        // Also dump the on-screen display sub-rect (15bpp) for a clean view.
+        let da = bus.gpu.display_area();
+        let (dx, dy) = (da.x as usize, da.y as usize);
+        let (dw, dh) = ((da.width as usize).max(1), (da.height as usize).max(1));
+        let dpath = format!("{path}.display.ppm");
+        let mut dout = format!("P6\n{dw} {dh}\n255\n").into_bytes();
+        let byte = |off: usize| -> u8 {
+            let hw = vram.get(off / 2).copied().unwrap_or(0);
+            if off & 1 == 0 { (hw & 0xFF) as u8 } else { (hw >> 8) as u8 }
+        };
+        for row in 0..dh {
+            let vy = dy + row;
+            for col in 0..dw {
+                if da.bpp24 {
+                    // 24bpp FMV: 3 bytes/pixel packed across VRAM halfwords.
+                    let base = (vy * w + dx) * 2 + col * 3;
+                    dout.push(byte(base));
+                    dout.push(byte(base + 1));
+                    dout.push(byte(base + 2));
+                } else {
+                    let vx = dx + col;
+                    let px = if vx < w && vy < h { vram[vy * w + vx] } else { 0 };
+                    dout.push(((px & 0x1F) << 3) as u8);
+                    dout.push((((px >> 5) & 0x1F) << 3) as u8);
+                    dout.push((((px >> 10) & 0x1F) << 3) as u8);
+                }
+            }
+        }
+        std::fs::write(&dpath, &dout).expect("write display ppm");
+        eprintln!("[ours] display {dw}x{dh} @({dx},{dy}) bpp24={} -> {dpath}", da.bpp24);
+
+        // Hang diagnostic: where is the CPU spinning, and what is the CD doing?
+        let mut pcs: Vec<(u32, u32)> = pc_hist.iter().map(|(&p, &c)| (p, c)).collect();
+        pcs.sort_by(|a, b| b.1.cmp(&a.1));
+        eprintln!("[ours] top spin PCs (last {} steps):", steps.min(256_000));
+        for (pc, count) in pcs.iter().take(8) {
+            eprintln!("    0x{pc:08x} : {count}");
+        }
+        let hist = bus.cdrom.command_histogram();
+        let cmds: Vec<String> = hist
+            .iter()
+            .enumerate()
+            .filter(|(_, &c)| c > 0)
+            .map(|(i, c)| format!("{i:02x}:{c}"))
+            .collect();
+        eprintln!(
+            "[ours] cdrom: cmds={} irq_flag={:02x} irq_mask={:02x} pending={} last_lba={} cmd_hist=[{}]",
+            bus.cdrom.commands_dispatched(),
+            bus.cdrom.irq_flag(),
+            bus.cdrom.irq_mask_value(),
+            bus.cdrom.pending_queue_len(),
+            bus.cdrom.debug_read_lba(),
+            cmds.join(" "),
+        );
+        eprintln!("[ours] cd-state: {}", bus.cdrom.debug_state(bus.cycles()));
+        let (spu_ia, spu_cnt, spu_stat, spu_cur, spu_cdq) = bus.spu.debug_irq_state();
+        eprintln!(
+            "[ours] spu-irq: irq_addr=0x{spu_ia:05x} spucnt=0x{spu_cnt:04x} (irq_en={}) spustat=0x{spu_stat:04x} decode_cursor=0x{spu_cur:x} cd_audio_q={spu_cdq}",
+            (spu_cnt >> 6) & 1
+        );
+        let istat = bus.irq_mut().stat();
+        let imask = bus.irq_mut().mask();
+        eprintln!("[ours] global IRQ: I_STAT={istat:08x} I_MASK={imask:08x} (active={:08x})", istat & imask);
+        let t2 = &bus.timers().timers[2];
+        eprintln!(
+            "[ours] timer2: counter={} mode={:04x} target={} fires={} (irq_on_tgt={} repeat={} reset_at_tgt={} src={})",
+            t2.counter, t2.mode, t2.target, bus.timers().dbg_timer2_fires,
+            (t2.mode >> 4) & 1, (t2.mode >> 6) & 1, (t2.mode >> 3) & 1, (t2.mode >> 8) & 3,
+        );
+        if let Ok(addr_s) = std::env::var("PSOXIDE_PEEK") {
+            if let Ok(addr) = u32::from_str_radix(addr_s.trim_start_matches("0x"), 16) {
+                eprintln!("[ours] peek 0x{addr:08x} = {:08x}", bus.peek_instruction(addr).unwrap_or(0));
+            }
+        }
+        eprintln!(
+            "[ours] regs: v0={:08x} v1={:08x} a0={:08x} a1={:08x} a2={:08x} a3={:08x} gp={:08x} sp={:08x} ra={:08x}",
+            cpu.gpr(2), cpu.gpr(3), cpu.gpr(4), cpu.gpr(5), cpu.gpr(6), cpu.gpr(7), cpu.gpr(28), cpu.gpr(29), cpu.gpr(31),
+        );
+        // Find what writes [$gp+OFFSET] (the flag a spin loop polls): scan
+        // RAM for `sw rt, OFFSET($gp)`. PSOXIDE_FIND_GP_STORE=0x74c
+        if let Ok(off_s) = std::env::var("PSOXIDE_FIND_GP_STORE") {
+            if let Ok(off) = u32::from_str_radix(off_s.trim_start_matches("0x"), 16) {
+                let want = 0xAF80_0000u32 | (off & 0xFFFF); // sw rt, off($gp), rt bits masked
+                let gp = cpu.gpr(28);
+                eprintln!(
+                    "[ours] scan `sw rt,0x{off:x}($gp)` gp=0x{gp:08x} flag@0x{:08x}:",
+                    gp.wrapping_add(off)
+                );
+                let mut found = 0;
+                let mut addr = 0x8000_0000u32;
+                while addr < 0x8020_0000 {
+                    if let Some(w) = bus.peek_instruction(addr) {
+                        if (w & 0xFFE0_FFFF) == want {
+                            let rt = (w >> 16) & 0x1F;
+                            eprintln!("  writer @0x{addr:08x}: {w:08x} (sw r{rt},0x{off:x}($gp))");
+                            found += 1;
+                        }
+                    }
+                    addr = addr.wrapping_add(4);
+                }
+                eprintln!("[ours]   {found} writer(s)");
+            }
+        }
+        // Find callers of a function at PSOXIDE_FIND_CALLERS=0xADDR: scan RAM
+        // for `jal ADDR` and for ADDR stored as a literal (callback pointer).
+        if let Ok(t_s) = std::env::var("PSOXIDE_FIND_CALLERS") {
+            if let Ok(target) = u32::from_str_radix(t_s.trim_start_matches("0x"), 16) {
+                let jal = 0x0C00_0000u32 | ((target >> 2) & 0x03FF_FFFF);
+                eprintln!("[ours] callers of 0x{target:08x} (jal={jal:08x} or literal ptr):");
+                let mut found = 0;
+                let mut addr = 0x8000_0000u32;
+                while addr < 0x8020_0000 {
+                    if let Some(w) = bus.peek_instruction(addr) {
+                        if w == jal {
+                            eprintln!("  jal  @0x{addr:08x}");
+                            found += 1;
+                        } else if w == target {
+                            eprintln!("  ptr  @0x{addr:08x}");
+                            found += 1;
+                        }
+                    }
+                    addr = addr.wrapping_add(4);
+                }
+                eprintln!("[ours]   {found} site(s)");
+            }
+        }
+        // Find `lw rt, IMM(rs)` sites (PSOXIDE_FIND_LW_IMM=0xc3f0): locates
+        // code that loads a specific global (e.g. a dispatched callback slot).
+        if let Ok(imm_s) = std::env::var("PSOXIDE_FIND_LW_IMM") {
+            if let Ok(imm) = u32::from_str_radix(imm_s.trim_start_matches("0x"), 16) {
+                let want = 0x8C00_0000u32 | (imm & 0xFFFF);
+                eprintln!("[ours] scan `lw rt,0x{imm:x}(rs)`:");
+                let mut addr = 0x8000_0000u32;
+                let mut found = 0;
+                while addr < 0x8020_0000 {
+                    if let Some(w) = bus.peek_instruction(addr) {
+                        if (w & 0xFC00_FFFF) == want {
+                            eprintln!("  lw @0x{addr:08x}: {w:08x}");
+                            found += 1;
+                        }
+                    }
+                    addr = addr.wrapping_add(4);
+                }
+                eprintln!("[ours]   {found} site(s)");
+            }
+        }
+        // Dump raw words at PSOXIDE_DIS=0xADDR (96 words) for hand-disasm.
+        if let Ok(addr_s) = std::env::var("PSOXIDE_DIS") {
+            if let Ok(start) = u32::from_str_radix(addr_s.trim_start_matches("0x"), 16) {
+                eprintln!("[ours] words @0x{start:08x}:");
+                for off in 0..96u32 {
+                    let addr = start + off * 4;
+                    if let Some(w) = bus.peek_instruction(addr) {
+                        eprintln!("    0x{addr:08x}: {w:08x}");
+                    }
+                }
+            }
+        }
+        if let Some(&(top_pc, _)) = pcs.first() {
+            let base = top_pc & !0x1F;
+            eprintln!("[ours] spin-loop words @0x{base:08x}:");
+            for off in 0..32u32 {
+                let addr = base + off * 4;
+                if let Some(word) = bus.peek_instruction(addr) {
+                    eprintln!("    0x{addr:08x}: {word:08x}");
+                }
+            }
+        }
+        // Dump the polled table: 24 entries, halfword at +0xC of each, using
+        // the entry pointer in $v1 as the current scan position.
+        let tbl = cpu.gpr(7); // $a3 = table base
+        eprintln!("[ours] table @0x{tbl:08x} (+0xC halfwords, guessed strides):");
+        for stride in [0x10u32, 0x14, 0x18, 0x1C, 0x20] {
+            let vals: Vec<String> = (0..8u32)
+                .map(|i| {
+                    let a = tbl.wrapping_add(i * stride + 0xC);
+                    bus.peek_instruction(a & !3)
+                        .map(|w| format!("{:04x}", (w >> ((a & 2) * 8)) & 0xFFFF))
+                        .unwrap_or_else(|| "----".into())
+                })
+                .collect();
+            eprintln!("    stride 0x{stride:02x}: {}", vals.join(" "));
+        }
+    }
+
+    let (kon, voiced) = bus.spu.voice_debug_counts();
+    let (koff, sampstop) = bus.spu.voice_end_counts();
+    let cfg = bus.spu.voice_keyon_cfg();
+    eprintln!("[ours] per-voice (kon/koff/sampstop, voiced, mean note len, cfg):");
+    for v in 0..kon.len() {
+        if kon[v] > 0 || voiced[v] > 0 {
+            let (sa, alo, ahi, pit, vl, vr) = cfg[v];
+            let flag = if kon[v] > 0 && voiced[v] == 0 {
+                "  <-- SILENT"
+            } else {
+                ""
+            };
+            let note_ms = if kon[v] > 0 {
+                (voiced[v] as f64 / kon[v] as f64) * 1000.0 / 44_100.0
+            } else {
+                0.0
+            };
+            eprintln!(
+                "  v{v:02}: kon={:<3} koff={:<3} sampstop={:<3} voiced={:<8} note~{note_ms:.0}ms start=0x{sa:05x} adsr={alo:04x}/{ahi:04x} pitch={pit:04x} vol={vl}/{vr}{flag}",
+                kon[v], koff[v], sampstop[v], voiced[v]
+            );
+        }
+    }
+
+    let (dry, wet, spucnt, reverb_on, pmon, noise_on) = bus.spu.reverb_debug();
+    eprintln!(
+        "[ours] spu globals: wet/dry={:.3} spucnt={spucnt:04x} reverb_en={} eon={reverb_on:06x} pmon={pmon:06x} noise={noise_on:06x}  (v10 bit set? pmon={} noise={})",
+        wet as f64 / dry.max(1) as f64,
+        (spucnt >> 7) & 1,
+        (pmon >> 10) & 1,
+        (noise_on >> 10) & 1
+    );
+    eprintln!(
+        "[ours] dma ch4 (SPU) CHCR start-triggers (kicks): {}",
+        bus.dma_start_triggers()[4]
+    );
+
+    let trace = bus.spu.voice_trace();
+    let tlen = trace.iter().map(|t| t.len()).max().unwrap_or(0);
+    let gstep = (tlen / 90).max(1);
+    let ms_per_col = gstep * 1024 * 1000 / 44100;
+    eprintln!(
+        "[ours] per-voice timeline (each col ~{ms_per_col}ms, {tlen} snaps; env/dec scaled 0-9, .=silent; phase /=Atk \\\\=Dec ==Sus v=Rel _=Off):"
+    );
+    for v in 0..16 {
+        let t = &trace[v];
+        if t.is_empty() {
+            continue;
+        }
+        let step = gstep;
+        let scale = |x: i32| -> char {
+            let d = (x.max(0) * 10 / 0x8000).min(9);
+            if d == 0 {
+                '.'
+            } else {
+                (b'0' + d as u8) as char
+            }
+        };
+        let env: String = t.iter().step_by(step).map(|&(_, e, _)| scale(e)).collect();
+        let dec: String = t
+            .iter()
+            .step_by(step)
+            .map(|&(s, _, _)| scale((s as i32).abs()))
+            .collect();
+        let pha: String = t
+            .iter()
+            .step_by(step)
+            .map(|&(_, _, p)| match p {
+                1 => '/',
+                2 => '\\',
+                3 => '=',
+                4 => 'v',
+                _ => '_',
+            })
+            .collect();
+        eprintln!("  v{v:02} env:{env}");
+        eprintln!("      dec:{dec}");
+        eprintln!("      pha:{pha}");
     }
 
     CapturedAudio {

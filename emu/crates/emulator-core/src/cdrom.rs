@@ -307,6 +307,10 @@ pub struct CdRom {
     /// DataReady sector events that advanced the read stream without
     /// raising a CPU-visible CDROM IRQ. Diagnostic for XA streams.
     data_ready_suppressed: u64,
+    /// OR of submode bytes across every suppressed sector. Diagnostic:
+    /// reveals whether an EOF (0x80) sector was suppressed rather than
+    /// raising INT1.
+    dbg_suppressed_submode_or: u8,
     /// Loaded disc image, if any. When `Some`, `disc_present` is also
     /// true and GetID / ReadN follow the disc-present paths; when
     /// `None`, they fall back to the "please insert disc" path.
@@ -454,6 +458,7 @@ impl CdRom {
             cdrom_irq_log_cap: 0,
             sector_events_scheduled: 0,
             data_ready_suppressed: 0,
+            dbg_suppressed_submode_or: 0,
             disc: None,
             data_fifo: VecDeque::new(),
             data_fifo_ready: false,
@@ -1437,6 +1442,9 @@ impl CdRom {
                 self.last_sector_header_valid = true;
                 let submode = raw[18];
                 let suppress_data_ready = self.mode & 0x40 != 0 && submode & 0x04 != 0;
+                if suppress_data_ready {
+                    self.dbg_suppressed_submode_or |= submode;
+                }
 
                 // If XA mode is on, only decode sectors that match the
                 // Redux gate: unmuted, audio submode set, matching
@@ -1987,6 +1995,46 @@ impl CdRom {
     /// nothing scheduled to fire.
     pub fn pending_queue_len(&self) -> usize {
         self.pending.len()
+    }
+
+    /// Diagnostic snapshot of the read/IRQ state machine relative to `now`
+    /// (the bus cycle), used to debug stuck CD completions.
+    pub fn debug_state(&self, now: u64) -> String {
+        let pend: Vec<String> = self
+            .pending
+            .iter()
+            .map(|e| {
+                let due = e.deadline as i64 - now as i64;
+                format!(
+                    "{:?}(cmd{:02x},dl={},due{:+})",
+                    e.irq, e.command, e.deadline, due
+                )
+            })
+            .collect();
+        format!(
+            "reading={} mode={:02x} muted={} xa_first={} read_resched={} loc_changed={} \
+cmd_busy={} dr_suppressed={} submode_or={:02x} last_subhdr=[{:02x} {:02x} {:02x} {:02x}] \
+xa_filter=({},{}) sched_cycle={} read_lba={} now={} pending=[{}]",
+            self.reading,
+            self.mode,
+            self.muted,
+            self.xa_first_sector,
+            self.read_rescheduled,
+            self.location_changed,
+            self.command_busy,
+            self.data_ready_suppressed,
+            self.dbg_suppressed_submode_or,
+            self.last_sector_subheader[0],
+            self.last_sector_subheader[1],
+            self.last_sector_subheader[2],
+            self.last_sector_subheader[3],
+            self.xa_filter_file,
+            self.xa_filter_channel,
+            self.scheduling_cycle,
+            self.read_lba,
+            now,
+            pend.join(", ")
+        )
     }
 
     /// Absolute cycle used as the base for the most recent command's
