@@ -53,6 +53,13 @@ enum WorldCommandOrdering {
     Bucketed,
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum ModelTrianglePacketResult {
+    Submitted,
+    CommandOverflow,
+    PrimitiveOverflow,
+}
+
 impl WorldCommandOrdering {
     #[inline(always)]
     const fn uses_slot_heads(self) -> bool {
@@ -3035,70 +3042,18 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         let packed_back_average_unclamped_faces =
             packed_back_average_in_front_faces && all_projected_vertices_inside_hw_bounds;
         crate::telemetry::stage_begin(crate::telemetry::stage::TEXTURED_MODEL_FACES);
-        let mut face_index = 0usize;
-        while face_index < faces.len() {
-            faces_considered = faces_considered.wrapping_add(1);
-            let overflow = if packed_back_average_unclamped_faces {
-                self.submit_predecoded_model_face_packed_back_average_unclamped_fast(
-                    triangles,
-                    projected_vertices,
-                    project_count,
-                    faces[face_index],
-                    packet_material,
-                    material,
-                    options,
-                    &mut stats,
-                )
-            } else if packed_back_average_in_front_faces {
-                self.submit_predecoded_model_face_packed_back_average_in_front_fast(
-                    triangles,
-                    projected_vertices,
-                    project_count,
-                    faces[face_index],
-                    packet_material,
-                    material,
-                    options,
-                    &mut stats,
-                )
-            } else if packed_back_in_front_faces {
-                self.submit_predecoded_model_face_packed_back_in_front_fast(
-                    triangles,
-                    projected_vertices,
-                    project_count,
-                    faces[face_index],
-                    packet_material,
-                    material,
-                    options,
-                    &mut stats,
-                )
-            } else if packed_fast_faces {
-                self.submit_predecoded_model_face_packed_fast(
-                    triangles,
-                    projected_vertices,
-                    project_count,
-                    faces[face_index],
-                    all_projected_vertices_in_front,
-                    near_z,
-                    packet_material,
-                    material,
-                    options,
-                    &mut stats,
-                )
-            } else {
-                self.submit_predecoded_model_face(
-                    triangles,
-                    projected_vertices,
-                    project_count,
-                    faces[face_index],
-                    all_projected_vertices_in_front,
-                    near_z,
-                    packet_material,
-                    material,
-                    options,
-                    &mut stats,
-                )
-            };
-            if overflow {
+        if packed_back_average_unclamped_faces {
+            let projected_vertices = &projected_vertices[..project_count];
+            if self.submit_predecoded_model_faces_packed_back_average_unclamped_batch(
+                triangles,
+                projected_vertices,
+                faces,
+                packet_material,
+                material,
+                options,
+                &mut stats,
+                &mut faces_considered,
+            ) {
                 crate::telemetry::stage_end(crate::telemetry::stage::TEXTURED_MODEL_FACES);
                 emit_textured_model_detail_counters(
                     joint_count,
@@ -3115,7 +3070,78 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 );
                 return stats;
             }
-            face_index += 1;
+        } else {
+            let mut face_index = 0usize;
+            while face_index < faces.len() {
+                faces_considered = faces_considered.wrapping_add(1);
+                let overflow = if packed_back_average_in_front_faces {
+                    self.submit_predecoded_model_face_packed_back_average_in_front_fast(
+                        triangles,
+                        projected_vertices,
+                        project_count,
+                        faces[face_index],
+                        packet_material,
+                        material,
+                        options,
+                        &mut stats,
+                    )
+                } else if packed_back_in_front_faces {
+                    self.submit_predecoded_model_face_packed_back_in_front_fast(
+                        triangles,
+                        projected_vertices,
+                        project_count,
+                        faces[face_index],
+                        packet_material,
+                        material,
+                        options,
+                        &mut stats,
+                    )
+                } else if packed_fast_faces {
+                    self.submit_predecoded_model_face_packed_fast(
+                        triangles,
+                        projected_vertices,
+                        project_count,
+                        faces[face_index],
+                        all_projected_vertices_in_front,
+                        near_z,
+                        packet_material,
+                        material,
+                        options,
+                        &mut stats,
+                    )
+                } else {
+                    self.submit_predecoded_model_face(
+                        triangles,
+                        projected_vertices,
+                        project_count,
+                        faces[face_index],
+                        all_projected_vertices_in_front,
+                        near_z,
+                        packet_material,
+                        material,
+                        options,
+                        &mut stats,
+                    )
+                };
+                if overflow {
+                    crate::telemetry::stage_end(crate::telemetry::stage::TEXTURED_MODEL_FACES);
+                    emit_textured_model_detail_counters(
+                        joint_count,
+                        model.part_count(),
+                        project_count,
+                        faces_considered,
+                        blend_vertices,
+                        all_projected_vertices_in_front,
+                        all_projected_vertices_inside_hw_bounds,
+                        packed_back_average_unclamped_faces,
+                        packed_back_in_front_faces,
+                        packed_fast_faces,
+                        &stats,
+                    );
+                    return stats;
+                }
+                face_index += 1;
+            }
         }
         crate::telemetry::stage_end(crate::telemetry::stage::TEXTURED_MODEL_FACES);
         emit_textured_model_detail_counters(
@@ -3137,64 +3163,150 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
 
     #[allow(clippy::too_many_arguments)]
     #[inline(always)]
-    fn submit_predecoded_model_face_packed_back_average_unclamped_fast(
+    fn submit_predecoded_model_faces_packed_back_average_unclamped_batch(
         &mut self,
         triangles: &mut impl PrimitiveSink<TriTextured>,
         projected_vertices: &[ProjectedVertex],
-        project_count: usize,
-        face: TexturedModelRenderFace,
+        faces: &[TexturedModelRenderFace],
         packet_material: TexturedPacketMaterial,
         material: TextureMaterial,
         options: WorldSurfaceOptions,
         stats: &mut TexturedModelRenderStats,
+        faces_considered: &mut u32,
     ) -> bool {
-        let ia = face.vertex_indices[0] as usize;
-        let ib = face.vertex_indices[1] as usize;
-        let ic = face.vertex_indices[2] as usize;
-        if ia >= project_count || ib >= project_count || ic >= project_count {
-            stats.skipped_triangles = stats.skipped_triangles.wrapping_add(1);
-            return false;
-        }
-        stats.packed_face_calls = stats.packed_face_calls.saturating_add(1);
-        stats.packed_unclamped_face_calls = stats.packed_unclamped_face_calls.saturating_add(1);
-        let projected = [
-            projected_vertices[ia],
-            projected_vertices[ib],
-            projected_vertices[ic],
-        ];
+        let mut skipped_triangles = 0u16;
+        let mut packed_face_calls = 0u16;
+        let mut packed_unclamped_face_calls = 0u16;
+        let mut culled_triangles = 0u16;
+        let mut submitted_triangles = 0u16;
+        let mut fast_submitted_triangles = 0u16;
+        let mut hw_extent_fallbacks = 0u16;
 
-        if projected_back_facing(projected) {
-            stats.culled_triangles = stats.culled_triangles.wrapping_add(1);
-            return false;
-        }
+        let mut face_index = 0usize;
+        while face_index < faces.len() {
+            *faces_considered = faces_considered.wrapping_add(1);
+            let face = faces[face_index];
+            let ia = face.vertex_indices[0] as usize;
+            let ib = face.vertex_indices[1] as usize;
+            let ic = face.vertex_indices[2] as usize;
+            if ia >= projected_vertices.len()
+                || ib >= projected_vertices.len()
+                || ic >= projected_vertices.len()
+            {
+                skipped_triangles = skipped_triangles.wrapping_add(1);
+                face_index += 1;
+                continue;
+            }
 
-        if projected_triangle_preclamped_hw_extent_safe(projected) {
-            let before = stats.submitted_triangles;
-            let overflow = self.submit_projected_model_triangle_preclamped_packed_average_fast(
-                triangles,
-                projected,
-                face.uv_words,
-                packet_material,
-                options,
+            packed_face_calls = packed_face_calls.saturating_add(1);
+            packed_unclamped_face_calls = packed_unclamped_face_calls.saturating_add(1);
+            let projected = unsafe {
+                // SAFETY: each index was checked against `projected_vertices.len()`
+                // immediately above. The slice is pretrimmed to `project_count`.
+                [
+                    *projected_vertices.get_unchecked(ia),
+                    *projected_vertices.get_unchecked(ib),
+                    *projected_vertices.get_unchecked(ic),
+                ]
+            };
+
+            if projected_back_facing(projected) {
+                culled_triangles = culled_triangles.wrapping_add(1);
+                face_index += 1;
+                continue;
+            }
+
+            if projected_triangle_preclamped_hw_extent_safe(projected) {
+                match self.submit_projected_model_triangle_preclamped_packed_average_untracked(
+                    triangles,
+                    projected,
+                    face.uv_words,
+                    packet_material,
+                    options,
+                ) {
+                    ModelTrianglePacketResult::Submitted => {
+                        submitted_triangles = submitted_triangles.wrapping_add(1);
+                        fast_submitted_triangles = fast_submitted_triangles.saturating_add(1);
+                    }
+                    ModelTrianglePacketResult::CommandOverflow => {
+                        flush_packed_unclamped_model_batch_stats(
+                            stats,
+                            skipped_triangles,
+                            packed_face_calls,
+                            packed_unclamped_face_calls,
+                            culled_triangles,
+                            submitted_triangles,
+                            fast_submitted_triangles,
+                            hw_extent_fallbacks,
+                        );
+                        stats.command_overflow = true;
+                        return true;
+                    }
+                    ModelTrianglePacketResult::PrimitiveOverflow => {
+                        flush_packed_unclamped_model_batch_stats(
+                            stats,
+                            skipped_triangles,
+                            packed_face_calls,
+                            packed_unclamped_face_calls,
+                            culled_triangles,
+                            submitted_triangles,
+                            fast_submitted_triangles,
+                            hw_extent_fallbacks,
+                        );
+                        stats.primitive_overflow = true;
+                        return true;
+                    }
+                }
+                face_index += 1;
+                continue;
+            }
+
+            hw_extent_fallbacks = hw_extent_fallbacks.saturating_add(1);
+            flush_packed_unclamped_model_batch_stats(
                 stats,
+                skipped_triangles,
+                packed_face_calls,
+                packed_unclamped_face_calls,
+                culled_triangles,
+                submitted_triangles,
+                fast_submitted_triangles,
+                hw_extent_fallbacks,
             );
-            stats.fast_submitted_triangles = stats
-                .fast_submitted_triangles
-                .saturating_add(stats.submitted_triangles.saturating_sub(before));
-            return overflow;
+            skipped_triangles = 0;
+            packed_face_calls = 0;
+            packed_unclamped_face_calls = 0;
+            culled_triangles = 0;
+            submitted_triangles = 0;
+            fast_submitted_triangles = 0;
+            hw_extent_fallbacks = 0;
+
+            let uvs = face.uvs();
+            let textured = [
+                ProjectedTexturedVertex::new(projected[0], uvs[0].0 as i32, uvs[0].1 as i32),
+                ProjectedTexturedVertex::new(projected[1], uvs[1].0 as i32, uvs[1].1 as i32),
+                ProjectedTexturedVertex::new(projected[2], uvs[2].0 as i32, uvs[2].1 as i32),
+            ];
+            let tri_stats =
+                self.submit_textured_triangle_split(triangles, textured, material, options, 0);
+            merge_textured_model_stats(stats, tri_stats);
+            if stats.primitive_overflow || stats.command_overflow {
+                return true;
+            }
+
+            face_index += 1;
         }
 
-        stats.hw_extent_fallbacks = stats.hw_extent_fallbacks.saturating_add(1);
-        let uvs = face.uvs();
-        let textured = [
-            ProjectedTexturedVertex::new(projected[0], uvs[0].0 as i32, uvs[0].1 as i32),
-            ProjectedTexturedVertex::new(projected[1], uvs[1].0 as i32, uvs[1].1 as i32),
-            ProjectedTexturedVertex::new(projected[2], uvs[2].0 as i32, uvs[2].1 as i32),
-        ];
-        let tri_stats =
-            self.submit_textured_triangle_split(triangles, textured, material, options, 0);
-        merge_textured_model_stats(stats, tri_stats);
-        stats.primitive_overflow || stats.command_overflow
+        flush_packed_unclamped_model_batch_stats(
+            stats,
+            skipped_triangles,
+            packed_face_calls,
+            packed_unclamped_face_calls,
+            culled_triangles,
+            submitted_triangles,
+            fast_submitted_triangles,
+            hw_extent_fallbacks,
+        );
+        false
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3492,6 +3604,46 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 stats,
             )
         }
+    }
+
+    #[inline(always)]
+    fn submit_projected_model_triangle_preclamped_packed_average_untracked(
+        &mut self,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
+        verts: [ProjectedVertex; 3],
+        uv_words: [u16; 3],
+        material: TexturedPacketMaterial,
+        options: WorldSurfaceOptions,
+    ) -> ModelTrianglePacketResult {
+        if self.command_len >= self.commands.len() {
+            return ModelTrianglePacketResult::CommandOverflow;
+        }
+
+        let Some(tri) = triangles.push(TriTextured::with_packet_material_packed_uv_words(
+            [
+                (verts[0].sx, verts[0].sy),
+                (verts[1].sx, verts[1].sy),
+                (verts[2].sx, verts[2].sy),
+            ],
+            uv_words,
+            material,
+        )) else {
+            return ModelTrianglePacketResult::PrimitiveOverflow;
+        };
+
+        let depth = CameraDepth::new(
+            ((verts[0].sz + verts[1].sz + verts[2].sz) / 3).saturating_add(options.depth_bias),
+        );
+        self.push_command(
+            options
+                .depth_band
+                .slot_depth::<OT_DEPTH>(options.depth_range, depth),
+            depth.raw(),
+            options.render_layer,
+            tri as *mut TriTextured as *mut u32,
+            TriTextured::WORDS,
+        );
+        ModelTrianglePacketResult::Submitted
     }
 
     #[inline(always)]
@@ -5426,6 +5578,33 @@ fn merge_world_stats(stats: &mut WorldRenderStats, next: WorldRenderStats) {
         .saturating_add(next.dropped_triangles);
     stats.primitive_overflow |= next.primitive_overflow;
     stats.command_overflow |= next.command_overflow;
+}
+
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn flush_packed_unclamped_model_batch_stats(
+    stats: &mut TexturedModelRenderStats,
+    skipped_triangles: u16,
+    packed_face_calls: u16,
+    packed_unclamped_face_calls: u16,
+    culled_triangles: u16,
+    submitted_triangles: u16,
+    fast_submitted_triangles: u16,
+    hw_extent_fallbacks: u16,
+) {
+    stats.skipped_triangles = stats.skipped_triangles.wrapping_add(skipped_triangles);
+    stats.packed_face_calls = stats.packed_face_calls.saturating_add(packed_face_calls);
+    stats.packed_unclamped_face_calls = stats
+        .packed_unclamped_face_calls
+        .saturating_add(packed_unclamped_face_calls);
+    stats.culled_triangles = stats.culled_triangles.wrapping_add(culled_triangles);
+    stats.submitted_triangles = stats.submitted_triangles.wrapping_add(submitted_triangles);
+    stats.fast_submitted_triangles = stats
+        .fast_submitted_triangles
+        .saturating_add(fast_submitted_triangles);
+    stats.hw_extent_fallbacks = stats
+        .hw_extent_fallbacks
+        .saturating_add(hw_extent_fallbacks);
 }
 
 fn merge_textured_model_stats(stats: &mut TexturedModelRenderStats, next: WorldRenderStats) {
