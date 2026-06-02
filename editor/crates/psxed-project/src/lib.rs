@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use ron::ser::PrettyConfig;
 use serde::{Deserialize, Serialize};
 
+pub mod floor_view;
 pub mod model_import;
 pub mod playtest;
 pub mod portal_rooms;
@@ -175,6 +176,21 @@ impl ResourceId {
     }
 }
 
+/// Stable identifier for a project [`OptionDef`]. Sliders bind to an
+/// option by id; the cook carries the low 16 bits into the runtime
+/// record so an option survives renames and reorders.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
+)]
+pub struct OptionId(pub u32);
+
+impl OptionId {
+    /// Return the raw integer value for compact UI/debug display.
+    pub const fn raw(self) -> u32 {
+        self.0
+    }
+}
+
 /// Stable identifier for a node inside one authored UI scene.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct UiNodeId(u64);
@@ -186,6 +202,35 @@ impl UiNodeId {
     /// Return the raw integer value for compact UI/debug display.
     pub const fn raw(self) -> u64 {
         self.0
+    }
+}
+
+/// Stable identifier for an authored UI scene. Assigned once when
+/// the scene is created and preserved across renames so the cook
+/// and the runtime game-state flow can address a scene by id rather
+/// than by list position. `UNASSIGNED` is the load-time sentinel
+/// for legacy `project.ron` files that predate the field; such
+/// scenes are given a fresh id during normalization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct UiSceneId(pub u64);
+
+impl UiSceneId {
+    /// Sentinel meaning "no id assigned yet". Normalization replaces
+    /// it with the next free id.
+    pub const UNASSIGNED: Self = Self(0);
+
+    /// First id handed out to a freshly authored scene.
+    pub const FIRST: Self = Self(1);
+
+    /// Return the raw integer value for compact UI/debug display.
+    pub const fn raw(self) -> u64 {
+        self.0
+    }
+}
+
+impl Default for UiSceneId {
+    fn default() -> Self {
+        Self::UNASSIGNED
     }
 }
 
@@ -369,6 +414,8 @@ impl Default for UiRect {
 pub enum UiValueBinding {
     /// Literal fixed-point Q12 value.
     ConstantQ12(i32),
+    /// Live project option value.
+    Option(OptionId),
     /// Player health value.
     PlayerHealth,
     /// Player health maximum.
@@ -384,12 +431,183 @@ impl UiValueBinding {
     pub const fn label(self) -> &'static str {
         match self {
             Self::ConstantQ12(_) => "Constant",
+            Self::Option(_) => "Option",
             Self::PlayerHealth => "Player Health",
             Self::PlayerHealthMax => "Player Health Max",
             Self::PlayerStamina => "Player Stamina",
             Self::PlayerStaminaMax => "Player Stamina Max",
         }
     }
+}
+
+/// Action a [`UiNodeKind::Button`] fires when activated. Runtime
+/// dispatch is a later step; this carries the authored intent so the
+/// cook can lower it to a [`psx_level::LevelUiAction`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UiAction {
+    /// Switch to another authored UI scene by stable id.
+    GotoScene(UiSceneId),
+    /// Enter the gameplay/level simulation.
+    StartGameplay,
+    /// Return to the previous menu/scene.
+    Back,
+    /// Adjust a project option by a signed delta.
+    SetOption {
+        /// Target option id.
+        option: OptionId,
+        /// Signed step applied to the option value.
+        delta: i32,
+    },
+    /// Game-specific action dispatched by opaque id.
+    Game(u16),
+}
+
+impl Default for UiAction {
+    fn default() -> Self {
+        Self::Back
+    }
+}
+
+impl UiAction {
+    /// Editor-facing label for the action variant.
+    pub const fn label(&self) -> &'static str {
+        match self {
+            Self::GotoScene(_) => "Go To Scene",
+            Self::StartGameplay => "Start Gameplay",
+            Self::Back => "Back",
+            Self::SetOption { .. } => "Set Option",
+            Self::Game(_) => "Game Action",
+        }
+    }
+}
+
+/// Pitch multiplier that plays a UI SFX cue at its source pitch.
+pub const UI_SFX_PITCH_UNITY_Q12: u16 = 4096;
+
+fn default_ui_sfx_volume() -> u8 {
+    80
+}
+
+fn default_ui_sfx_pitch_q12() -> u16 {
+    UI_SFX_PITCH_UNITY_Q12
+}
+
+/// One editor-authored SFX choice for a UI event.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UiSfxCue {
+    /// Project-relative source WAV. The playtest/export cook converts it to
+    /// PS1 SPU ADPCM automatically.
+    #[serde(default)]
+    pub wav_path: String,
+    /// Voice volume as a percentage of full scale.
+    #[serde(default = "default_ui_sfx_volume")]
+    pub volume: u8,
+    /// Q12 pitch multiplier (`4096` = source pitch).
+    #[serde(default = "default_ui_sfx_pitch_q12")]
+    pub pitch_q12: u16,
+}
+
+impl Default for UiSfxCue {
+    fn default() -> Self {
+        Self {
+            wav_path: String::new(),
+            volume: default_ui_sfx_volume(),
+            pitch_q12: default_ui_sfx_pitch_q12(),
+        }
+    }
+}
+
+/// Per-event SFX pools shared by interactive UI nodes. Button nodes use
+/// `focus` + `activate`; sliders use `focus` + `nudge` + `limit`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UiSfxBindings {
+    /// Played when focus moves onto the control.
+    #[serde(default)]
+    pub focus: Vec<UiSfxCue>,
+    /// Played when a button is activated.
+    #[serde(default)]
+    pub activate: Vec<UiSfxCue>,
+    /// Played when a slider changes value.
+    #[serde(default)]
+    pub nudge: Vec<UiSfxCue>,
+    /// Played when a slider is nudged against its clamped limit.
+    #[serde(default)]
+    pub limit: Vec<UiSfxCue>,
+}
+
+fn normalize_ui_sfx_bindings(sfx: &mut UiSfxBindings) {
+    for cue in sfx
+        .focus
+        .iter_mut()
+        .chain(sfx.activate.iter_mut())
+        .chain(sfx.nudge.iter_mut())
+        .chain(sfx.limit.iter_mut())
+    {
+        cue.volume = cue.volume.min(100);
+        cue.pitch_q12 = cue.pitch_q12.clamp(1, 0x3FFF);
+    }
+}
+
+/// How a project [`OptionDef`] is interpreted and edited.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OptionKind {
+    /// Bounded integer with a fixed step.
+    IntRange {
+        /// Minimum value.
+        min: i32,
+        /// Maximum value.
+        max: i32,
+        /// Increment applied per step.
+        step: i32,
+        /// Default value.
+        default: i32,
+    },
+    /// Choice from a fixed list of named variants.
+    Enum {
+        /// Ordered variant labels.
+        variants: Vec<String>,
+        /// Default variant index.
+        default: usize,
+    },
+    /// On/off toggle.
+    Bool {
+        /// Default value.
+        default: bool,
+    },
+}
+
+impl Default for OptionKind {
+    fn default() -> Self {
+        Self::IntRange {
+            min: 0,
+            max: 10,
+            step: 1,
+            default: 5,
+        }
+    }
+}
+
+impl OptionKind {
+    /// Editor-facing label for the option kind.
+    pub const fn label(&self) -> &'static str {
+        match self {
+            Self::IntRange { .. } => "Int Range",
+            Self::Enum { .. } => "Enum",
+            Self::Bool { .. } => "Bool",
+        }
+    }
+}
+
+/// One project-level tunable option. Sliders and `SetOption` button
+/// actions reference an option by its stable [`OptionId`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OptionDef {
+    /// Stable id, preserved across renames and reorders.
+    pub id: OptionId,
+    /// Display name.
+    pub name: String,
+    /// Value domain and default.
+    pub kind: OptionKind,
 }
 
 /// Authored 2D UI node type.
@@ -456,6 +674,74 @@ pub enum UiNodeKind {
         /// Empty/background colour.
         background: [u8; 3],
     },
+    /// Interactive button: a filled rectangle with a centered label
+    /// that fires `action` when activated. Runtime activation is a
+    /// later step.
+    Button {
+        /// Button bounds in canvas pixels.
+        rect: UiRect,
+        /// Centered label text.
+        #[serde(default)]
+        label: String,
+        /// Label alignment inside `rect`.
+        #[serde(default)]
+        align: UiTextAlign,
+        /// Background fill colour (ignored when `transparent`).
+        #[serde(default = "default_ui_button_color")]
+        color: [u8; 3],
+        /// Label text colour.
+        #[serde(default = "default_ui_button_text_color")]
+        text_color: [u8; 3],
+        /// Transparent background: skip the fill and draw only the label.
+        #[serde(default)]
+        transparent: bool,
+        /// Action fired on activation.
+        #[serde(default)]
+        action: UiAction,
+        /// Per-event SFX cue pools.
+        #[serde(default)]
+        sfx: UiSfxBindings,
+    },
+    /// Interactive slider bound to a project option, drawn as a track,
+    /// a proportional fill, and a knob. Runtime value editing is a
+    /// later step.
+    Slider {
+        /// Slider bounds in canvas pixels.
+        rect: UiRect,
+        /// Bound project option id.
+        #[serde(default)]
+        option: OptionId,
+        /// Track (background) colour.
+        #[serde(default = "default_ui_slider_track")]
+        track: [u8; 3],
+        /// Fill colour up to the current value.
+        #[serde(default = "default_ui_slider_fill")]
+        fill: [u8; 3],
+        /// Knob colour.
+        #[serde(default = "default_ui_slider_knob")]
+        knob: [u8; 3],
+        /// Per-event SFX cue pools.
+        #[serde(default)]
+        sfx: UiSfxBindings,
+    },
+    /// Non-visual CD-DA music cue for the containing UI scene.
+    Music {
+        /// Project-relative source WAV. The playtest/export disc builder
+        /// converts it to a sector-aligned CD-DA track automatically.
+        #[serde(default)]
+        wav_path: String,
+        /// CD-DA playback volume as a percentage of the hardware maximum.
+        #[serde(default = "default_ui_music_volume")]
+        volume: u8,
+        /// Optional project option whose live value overrides [`Self::Music`]'s
+        /// fixed `volume`, so a menu slider can change CD-DA loudness while the
+        /// scene is open.
+        #[serde(default)]
+        volume_option: Option<OptionId>,
+        /// Restart the track when the CD-ROM reports playback has ended.
+        #[serde(default)]
+        loop_track: bool,
+    },
 }
 
 impl UiNodeKind {
@@ -468,6 +754,9 @@ impl UiNodeKind {
             Self::Label { .. } => "Label",
             Self::Image { .. } => "Image",
             Self::Bar { .. } => "Bar",
+            Self::Button { .. } => "Button",
+            Self::Slider { .. } => "Slider",
+            Self::Music { .. } => "Music",
         }
     }
 
@@ -479,7 +768,10 @@ impl UiNodeKind {
             | Self::Rect { rect, .. }
             | Self::Label { rect, .. }
             | Self::Image { rect, .. }
-            | Self::Bar { rect, .. } => Some(rect),
+            | Self::Bar { rect, .. }
+            | Self::Button { rect, .. }
+            | Self::Slider { rect, .. } => Some(rect),
+            Self::Music { .. } => None,
         }
     }
 
@@ -491,13 +783,40 @@ impl UiNodeKind {
             | Self::Rect { rect, .. }
             | Self::Label { rect, .. }
             | Self::Image { rect, .. }
-            | Self::Bar { rect, .. } => Some(*rect),
+            | Self::Bar { rect, .. }
+            | Self::Button { rect, .. }
+            | Self::Slider { rect, .. } => Some(*rect),
+            Self::Music { .. } => None,
         }
     }
 }
 
 fn default_ui_image_tint() -> [u8; 3] {
     [128, 128, 128]
+}
+
+fn default_ui_button_color() -> [u8; 3] {
+    [52, 60, 80]
+}
+
+fn default_ui_button_text_color() -> [u8; 3] {
+    [236, 240, 248]
+}
+
+fn default_ui_slider_track() -> [u8; 3] {
+    [30, 34, 44]
+}
+
+fn default_ui_slider_fill() -> [u8; 3] {
+    [80, 132, 180]
+}
+
+fn default_ui_slider_knob() -> [u8; 3] {
+    [210, 218, 232]
+}
+
+fn default_ui_music_volume() -> u8 {
+    25
 }
 
 /// One node in an authored UI scene tree.
@@ -557,10 +876,19 @@ pub struct UiNodeRow {
 /// One authored 2D UI scene.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UiScene {
+    /// Stable scene id. Defaults to [`UiSceneId::UNASSIGNED`] for
+    /// legacy projects and is filled in by
+    /// [`ProjectDocument::normalize_loaded`].
+    #[serde(default)]
+    pub id: UiSceneId,
     /// Display name.
     pub name: String,
     /// Root node id.
     pub root: UiNodeId,
+    /// Optional node that receives focus when this scene becomes the
+    /// active game state. `None` falls back to the root canvas.
+    #[serde(default)]
+    pub default_focus: Option<UiNodeId>,
     next_node_id: u64,
     nodes: Vec<UiNode>,
 }
@@ -603,10 +931,36 @@ impl UiScene {
         );
         root.children = vec![health.id, stamina.id];
         Self {
+            id: UiSceneId::FIRST,
             name: "HUD".to_string(),
             root: UiNodeId::ROOT,
+            default_focus: None,
             next_node_id: 4,
             nodes: vec![root, health, stamina],
+        }
+    }
+
+    /// Build a fresh scene with `name`, `id`, and a single empty root
+    /// Canvas at the PSX 320x240 authoring resolution. Used by the
+    /// editor's "new scene" path; pass [`UiSceneId::UNASSIGNED`] to let
+    /// [`ProjectDocument::assign_ui_scene_ids`] hand out the stable id.
+    pub fn empty_canvas(name: impl Into<String>, id: UiSceneId) -> Self {
+        let root = UiNode::new(
+            UiNodeId::ROOT,
+            None,
+            "Canvas",
+            UiNodeKind::Canvas {
+                width: 320,
+                height: 240,
+            },
+        );
+        Self {
+            id,
+            name: name.into(),
+            root: UiNodeId::ROOT,
+            default_focus: None,
+            next_node_id: UiNodeId::ROOT.raw().saturating_add(1),
+            nodes: vec![root],
         }
     }
 
@@ -816,6 +1170,15 @@ impl UiScene {
         let valid_ids: HashSet<UiNodeId> = self.nodes.iter().map(|node| node.id).collect();
         for node in &mut self.nodes {
             max_id = max_id.max(node.id.raw());
+            if let UiNodeKind::Music { volume, .. } = &mut node.kind {
+                *volume = (*volume).min(100);
+            }
+            match &mut node.kind {
+                UiNodeKind::Button { sfx, .. } | UiNodeKind::Slider { sfx, .. } => {
+                    normalize_ui_sfx_bindings(sfx);
+                }
+                _ => {}
+            }
             node.children
                 .retain(|child| *child != node.id && valid_ids.contains(child));
             if node.id != self.root
@@ -851,6 +1214,12 @@ impl UiScene {
         }
         self.rebuild_child_links();
         self.next_node_id = self.next_node_id.max(max_id.saturating_add(1));
+        if self
+            .default_focus
+            .is_some_and(|focus| self.node(focus).is_none())
+        {
+            self.default_focus = None;
+        }
     }
 
     fn rebuild_child_links(&mut self) {
@@ -4980,6 +5349,16 @@ pub const MIN_WORLD_STREAMING_VISIBLE_CHUNKS: u8 = 2;
 pub const DEFAULT_WORLD_STREAMING_VISIBLE_CHUNKS: u8 = DEFAULT_WORLD_STREAMING_RESIDENT_CHUNKS;
 /// Largest portal-room visible-window budget supported by the current runtime.
 pub const MAX_WORLD_STREAMING_VISIBLE_CHUNKS: u8 = 32;
+/// Minimum authored gravity, in engine units per 60 Hz tick squared.
+pub const MIN_WORLD_GRAVITY_PER_TICK: i32 = 0;
+/// Maximum authored gravity, in engine units per 60 Hz tick squared.
+pub const MAX_WORLD_GRAVITY_PER_TICK: i32 = 2_048;
+/// Q8 identity weight (`256 = 1.0x`) for entity physics bodies.
+pub const PHYSICS_WEIGHT_ONE_Q8: u16 = 256;
+/// Smallest authored entity weight multiplier.
+pub const MIN_PHYSICS_WEIGHT_Q8: u16 = 1;
+/// Largest authored entity weight multiplier.
+pub const MAX_PHYSICS_WEIGHT_Q8: u16 = 4_096;
 
 const fn default_world_draw_distance() -> i32 {
     25_000
@@ -4999,6 +5378,14 @@ const fn default_world_streaming_resident_chunks() -> u8 {
 
 const fn default_world_streaming_visible_chunks() -> u8 {
     DEFAULT_WORLD_STREAMING_VISIBLE_CHUNKS
+}
+
+const fn default_world_gravity_per_tick() -> i32 {
+    96
+}
+
+const fn default_physics_weight_q8() -> u16 {
+    PHYSICS_WEIGHT_ONE_Q8
 }
 
 /// Runtime culling knobs inherited by descendant Rooms from their
@@ -5095,6 +5482,61 @@ impl Default for WorldStreamingSettings {
     }
 }
 
+/// World-level physics settings inherited by descendant rooms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorldPhysicsSettings {
+    /// Downward acceleration applied by character/controller physics,
+    /// in engine units per fixed 60 Hz tick squared.
+    #[serde(default = "default_world_gravity_per_tick")]
+    pub gravity_per_tick: i32,
+}
+
+impl WorldPhysicsSettings {
+    /// Clamp authored values to runtime-safe integer ranges.
+    pub fn normalized(self) -> Self {
+        Self {
+            gravity_per_tick: self
+                .gravity_per_tick
+                .clamp(MIN_WORLD_GRAVITY_PER_TICK, MAX_WORLD_GRAVITY_PER_TICK),
+        }
+    }
+}
+
+impl Default for WorldPhysicsSettings {
+    fn default() -> Self {
+        Self {
+            gravity_per_tick: default_world_gravity_per_tick(),
+        }
+    }
+}
+
+/// Per-entity physics body settings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PhysicsBodySettings {
+    /// Gravity multiplier in Q8 fixed point (`256 = 1.0x`).
+    #[serde(default = "default_physics_weight_q8")]
+    pub weight_q8: u16,
+}
+
+impl PhysicsBodySettings {
+    /// Clamp authored values to runtime-safe integer ranges.
+    pub fn normalized(self) -> Self {
+        Self {
+            weight_q8: self
+                .weight_q8
+                .clamp(MIN_PHYSICS_WEIGHT_Q8, MAX_PHYSICS_WEIGHT_Q8),
+        }
+    }
+}
+
+impl Default for PhysicsBodySettings {
+    fn default() -> Self {
+        Self {
+            weight_q8: default_physics_weight_q8(),
+        }
+    }
+}
+
 fn face_triangle_count(face: &GridHorizontalFace) -> usize {
     if face.is_triangle() {
         1
@@ -5126,6 +5568,17 @@ pub struct WorldGrid {
     /// `[0, 0]` for backward compat with already-saved projects.
     #[serde(default)]
     pub origin: [i32; 2],
+    /// Vertical placement of the room, in engine units, used for
+    /// Tomb-Raider-style stacked rooms. This is the room's `Y`
+    /// companion to the cell-unit `X` / `Z` [`Self::origin`]; unlike
+    /// `origin` (sectors) it is already in engine units so the
+    /// integer-only runtime cook can emit it without a per-cell
+    /// conversion. Authored from the Room node's
+    /// `Transform3::translation[1]` (sectors) at cook time. Default
+    /// `0` keeps every existing room pinned to the ground plane, so
+    /// projects saved before vertical placement load unchanged.
+    #[serde(default)]
+    pub elevation: i32,
     /// Room ambient color used as editor/cooker metadata.
     #[serde(default = "default_ambient_color")]
     pub ambient_color: [u8; 3],
@@ -5155,6 +5608,14 @@ pub struct WorldGrid {
     /// Base horizontal particle speed, in 1/16 pixel-per-vblank units.
     #[serde(default = "default_atmosphere_wind_speed_q4")]
     pub atmosphere_wind_speed_q4: i32,
+    /// Additional floors stacked above this one. Floor 0 is this grid;
+    /// floor `i` is `floors_above[i - 1]`. Each floor is its own free
+    /// grid (footprint + heights), auto-stacked just above the floor
+    /// below. Empty for single-floor rooms, so projects saved before
+    /// floors load unchanged. Only the base (floor 0) grid uses this;
+    /// upper-floor grids keep it empty.
+    #[serde(default)]
+    pub floors_above: Vec<WorldGrid>,
 }
 
 impl WorldGrid {
@@ -5167,6 +5628,7 @@ impl WorldGrid {
             sector_size,
             sectors: vec![None; len],
             origin: [0, 0],
+            elevation: 0,
             ambient_color: default_ambient_color(),
             fog_enabled: true,
             fog_color: default_fog_color(),
@@ -5177,7 +5639,59 @@ impl WorldGrid {
             atmosphere_density: default_atmosphere_density(),
             atmosphere_fall_speed_q4: default_atmosphere_fall_speed_q4(),
             atmosphere_wind_speed_q4: default_atmosphere_wind_speed_q4(),
+            floors_above: Vec::new(),
         }
+    }
+
+    /// Number of floors in this room (1 for a single-floor room). Floor 0
+    /// is this base grid; floor `i` is `floors_above[i - 1]`.
+    pub fn floor_count(&self) -> usize {
+        1 + self.floors_above.len()
+    }
+
+    /// Floor `i` (0 = this base grid).
+    pub fn floor(&self, i: usize) -> Option<&WorldGrid> {
+        if i == 0 {
+            Some(self)
+        } else {
+            self.floors_above.get(i - 1)
+        }
+    }
+
+    /// Mutable floor `i`.
+    pub fn floor_mut(&mut self, i: usize) -> Option<&mut WorldGrid> {
+        if i == 0 {
+            Some(self)
+        } else {
+            self.floors_above.get_mut(i - 1)
+        }
+    }
+
+    /// Add an empty floor stacked just above the current top floor's
+    /// ceiling and return its index. The new floor copies the base
+    /// footprint dimensions but starts with no sectors, so it can be
+    /// painted and extended freely.
+    pub fn push_floor(&mut self) -> usize {
+        let top = self.floors_above.last().unwrap_or(self);
+        let elevation = top.elevation + default_wall_height_for_sector_size(top.sector_size);
+        let mut floor = WorldGrid::empty(self.width, self.depth, self.sector_size);
+        floor.origin = self.origin;
+        floor.elevation = elevation;
+        // Inherit the room-level look so stacked floors render
+        // consistently (and the sky/fog seed grid is unaffected by which
+        // floor is active).
+        floor.ambient_color = self.ambient_color;
+        floor.fog_enabled = self.fog_enabled;
+        floor.fog_color = self.fog_color;
+        floor.fog_near = self.fog_near;
+        floor.fog_far = self.fog_far;
+        floor.atmosphere_enabled = self.atmosphere_enabled;
+        floor.atmosphere_color = self.atmosphere_color;
+        floor.atmosphere_density = self.atmosphere_density;
+        floor.atmosphere_fall_speed_q4 = self.atmosphere_fall_speed_q4;
+        floor.atmosphere_wind_speed_q4 = self.atmosphere_wind_speed_q4;
+        self.floors_above.push(floor);
+        self.floors_above.len()
     }
 
     /// Create a rectangular room with floors and perimeter walls.
@@ -7979,6 +8493,9 @@ pub enum NodeKind {
         /// Cook-time streaming controls inherited by descendant rooms.
         #[serde(default)]
         streaming: WorldStreamingSettings,
+        /// Runtime physics controls inherited by descendant rooms.
+        #[serde(default)]
+        physics: WorldPhysicsSettings,
     },
     /// One authored Tomb Raider-style room: a sector grid plus its
     /// child entities and portal links.
@@ -8104,17 +8621,6 @@ pub enum NodeKind {
         #[serde(default = "default_true")]
         solid: bool,
     },
-    /// Interactable component for props such as chests, doors, and
-    /// levers. Runtime behaviour is not cooked yet; this is authoring
-    /// structure for the upcoming object pass.
-    Interactable {
-        /// UI prompt or editor-facing affordance.
-        #[serde(default)]
-        prompt: String,
-        /// Logical action id.
-        #[serde(default)]
-        action: String,
-    },
     /// Character/controller component. It binds an entity to a reusable
     /// [`ResourceData::Character`] profile. When `player` is true this is
     /// the component-tree replacement for a legacy player
@@ -8131,21 +8637,6 @@ pub enum NodeKind {
         #[serde(default)]
         player: bool,
     },
-    /// AI marker component for future NPC/enemy runtime records.
-    AiController {
-        /// Logical AI profile id.
-        #[serde(default)]
-        behavior: String,
-    },
-    /// Combat stat component for entity nodes.
-    Combat {
-        /// Team/faction label.
-        #[serde(default)]
-        faction: String,
-        /// Hit points.
-        #[serde(default = "default_combat_health")]
-        health: u16,
-    },
     /// Equipment component. The parent Entity supplies the animated
     /// character model; this component names the Weapon and which
     /// socket/grip pair should be composed.
@@ -8159,6 +8650,12 @@ pub enum NodeKind {
         /// Weapon-local grip/pivot to align to the character socket.
         #[serde(default = "default_weapon_grip")]
         weapon_grip: String,
+    },
+    /// Physics body component for movable entities.
+    PhysicsBody {
+        /// Per-entity physics tuning.
+        #[serde(default)]
+        settings: PhysicsBodySettings,
     },
     /// Static point light.
     PointLight {
@@ -8189,18 +8686,6 @@ pub enum NodeKind {
         #[serde(default)]
         character: Option<ResourceId>,
     },
-    /// Trigger volume marker.
-    Trigger {
-        /// Logical trigger id.
-        trigger_id: String,
-    },
-    /// Positional audio source.
-    AudioSource {
-        /// Audio resource.
-        sound: Option<ResourceId>,
-        /// Playback radius.
-        radius: f32,
-    },
     /// Manual streaming/visibility graph edge: the cooker snaps the marker
     /// to a grid edge and treats that edge as a room-to-room portal.
     Portal {
@@ -8227,6 +8712,7 @@ impl NodeKind {
             camera: WorldCameraSettings::default(),
             culling: WorldCullingSettings::default(),
             streaming: WorldStreamingSettings::default(),
+            physics: WorldPhysicsSettings::default(),
         }
     }
 
@@ -8244,16 +8730,12 @@ impl NodeKind {
             Self::ModelRenderer { .. } => "Model Renderer",
             Self::Animator { .. } => "Animator",
             Self::Collider { .. } => "Collider",
-            Self::Interactable { .. } => "Interactable",
             Self::CharacterController { .. } => "Character Controller",
-            Self::AiController { .. } => "AI Controller",
-            Self::Combat { .. } => "Combat",
             Self::Equipment { .. } => "Equipment",
+            Self::PhysicsBody { .. } => "Physics Body",
             Self::PointLight { .. } => "Point Light",
             Self::ParticleEmitter { .. } => "Particle Emitter",
             Self::SpawnPoint { .. } => "Spawn Point",
-            Self::Trigger { .. } => "Trigger",
-            Self::AudioSource { .. } => "Audio Source",
             Self::Portal { .. } => "Portal",
         }
     }
@@ -8267,11 +8749,9 @@ impl NodeKind {
             Self::ModelRenderer { .. }
                 | Self::Animator { .. }
                 | Self::Collider { .. }
-                | Self::Interactable { .. }
                 | Self::CharacterController { .. }
-                | Self::AiController { .. }
-                | Self::Combat { .. }
                 | Self::Equipment { .. }
+                | Self::PhysicsBody { .. }
         )
     }
 }
@@ -8310,10 +8790,6 @@ const fn default_true() -> bool {
     true
 }
 
-const fn default_combat_health() -> u16 {
-    1
-}
-
 /// Explicit Tomb Raider-style portal rectangle.
 ///
 /// Authored seam portals still use the marker transform and snap to
@@ -8339,6 +8815,15 @@ pub struct SceneNode {
     pub kind: NodeKind,
     /// Local transform.
     pub transform: Transform3,
+    /// Which floor of the enclosing Room this node belongs to (0 =
+    /// ground). Stacked floors share the same XZ cells, so a node's
+    /// floor cannot be inferred from its Y (the authored standing height
+    /// is a placement default identical across projects). Recorded
+    /// explicitly at placement and consumed by the cook to bind the node
+    /// to the right runtime room. Default `0` keeps every existing
+    /// project (and all non-Room-child nodes) on the ground.
+    #[serde(default)]
+    pub floor: usize,
     /// Parent id, absent only for the scene root.
     pub parent: Option<NodeId>,
     /// Ordered child ids.
@@ -8352,6 +8837,7 @@ impl SceneNode {
             name: name.into(),
             kind,
             transform: Transform3::default(),
+            floor: 0,
             parent,
             children: Vec::new(),
         }
@@ -8661,6 +9147,19 @@ impl Scene {
             let node = self.node(node_id)?;
             if let NodeKind::World { streaming, .. } = &node.kind {
                 return Some(streaming.normalized());
+            }
+            current = node.parent;
+        }
+        None
+    }
+
+    /// Physics settings inherited by `id` from the nearest World ancestor.
+    pub fn world_physics_for_node(&self, id: NodeId) -> Option<WorldPhysicsSettings> {
+        let mut current = Some(id);
+        while let Some(node_id) = current {
+            let node = self.node(node_id)?;
+            if let NodeKind::World { physics, .. } = &node.kind {
+                return Some(physics.normalized());
             }
             current = node.parent;
         }
@@ -9017,9 +9516,29 @@ pub struct ProjectDocument {
     /// Authored screen-space UI scenes. The first scene is the HUD for now.
     #[serde(default = "default_ui_scenes")]
     pub ui_scenes: Vec<UiScene>,
+    /// Project-level tunable options sliders and `SetOption` button
+    /// actions bind to. Defaults to empty for legacy projects.
+    #[serde(default)]
+    pub options: Vec<OptionDef>,
+    /// Where the cooked game boots: straight into gameplay, or into one of
+    /// the authored UI scenes (a title/menu screen). Drives the cooked
+    /// `GameFlow.entry`. Defaults to [`BootTarget::Gameplay`] so existing
+    /// projects boot exactly as before.
+    #[serde(default)]
+    pub boot: BootTarget,
     /// Project resources.
     pub resources: Vec<Resource>,
     next_resource_id: u64,
+}
+
+/// Where a cooked project starts running.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum BootTarget {
+    /// Boot straight into the gameplay/level simulation (skip any menus).
+    #[default]
+    Gameplay,
+    /// Boot into the authored UI scene with this stable id (a title/menu).
+    UiScene(UiSceneId),
 }
 
 impl ProjectDocument {
@@ -9035,6 +9554,8 @@ impl ProjectDocument {
             runtime_texture_split_max_edge: DEFAULT_RUNTIME_TEXTURE_SPLIT_MAX_EDGE,
             scenes: vec![Scene::new("Main")],
             ui_scenes: default_ui_scenes(),
+            options: Vec::new(),
+            boot: BootTarget::default(),
             resources: Vec::new(),
             next_resource_id: 1,
         }
@@ -9072,6 +9593,129 @@ impl ProjectDocument {
     /// Active UI scene, mutable.
     pub fn active_ui_scene_mut(&mut self) -> Option<&mut UiScene> {
         self.ui_scenes.first_mut()
+    }
+
+    /// UI scene by stable id.
+    pub fn ui_scene(&self, id: UiSceneId) -> Option<&UiScene> {
+        self.ui_scenes.iter().find(|scene| scene.id == id)
+    }
+
+    /// UI scene by stable id, mutable.
+    pub fn ui_scene_mut(&mut self, id: UiSceneId) -> Option<&mut UiScene> {
+        self.ui_scenes.iter_mut().find(|scene| scene.id == id)
+    }
+
+    /// UI scene by list position.
+    pub fn ui_scene_at(&self, index: usize) -> Option<&UiScene> {
+        self.ui_scenes.get(index)
+    }
+
+    /// UI scene by list position, mutable.
+    pub fn ui_scene_at_mut(&mut self, index: usize) -> Option<&mut UiScene> {
+        self.ui_scenes.get_mut(index)
+    }
+
+    /// Assign a stable id to every UI scene that still carries
+    /// [`UiSceneId::UNASSIGNED`], and de-duplicate any colliding ids
+    /// from hand-authored data. Ids already in use are preserved so
+    /// they stay stable across renames and reorders.
+    fn assign_ui_scene_ids(&mut self) {
+        let mut next = UiSceneId::FIRST.raw();
+        for scene in &self.ui_scenes {
+            if scene.id != UiSceneId::UNASSIGNED {
+                next = next.max(scene.id.raw().saturating_add(1));
+            }
+        }
+        let mut seen: HashSet<UiSceneId> = HashSet::new();
+        for scene in &mut self.ui_scenes {
+            if scene.id == UiSceneId::UNASSIGNED || !seen.insert(scene.id) {
+                scene.id = UiSceneId(next);
+                seen.insert(scene.id);
+                next = next.saturating_add(1);
+            }
+        }
+    }
+
+    /// Append a fresh UI scene named `name`, seeded with an empty root
+    /// Canvas at the PSX 320x240 authoring resolution, and return its
+    /// freshly assigned stable id. The id is handed out by the shared
+    /// [`Self::assign_ui_scene_ids`] path so it never collides with an
+    /// existing scene and stays stable across renames and reorders.
+    pub fn add_ui_scene(&mut self, name: impl Into<String>) -> UiSceneId {
+        self.ui_scenes
+            .push(UiScene::empty_canvas(name, UiSceneId::UNASSIGNED));
+        self.assign_ui_scene_ids();
+        self.ui_scenes
+            .last()
+            .map(|scene| scene.id)
+            .unwrap_or(UiSceneId::UNASSIGNED)
+    }
+
+    /// Deep-copy the UI scene at `index`, insert the copy directly after
+    /// the source, give it a fresh stable id, and name it "{source} Copy".
+    /// Returns the new scene's id, or `None` when `index` is out of range.
+    pub fn duplicate_ui_scene(&mut self, index: usize) -> Option<UiSceneId> {
+        let source = self.ui_scenes.get(index)?;
+        let mut copy = source.clone();
+        copy.id = UiSceneId::UNASSIGNED;
+        copy.name = format!("{} Copy", source.name);
+        self.ui_scenes.insert(index + 1, copy);
+        self.assign_ui_scene_ids();
+        self.ui_scenes.get(index + 1).map(|scene| scene.id)
+    }
+
+    /// Remove the UI scene at `index`. `ui_scenes` is never left empty:
+    /// removing the final scene re-seeds the default HUD in its place.
+    /// Returns `true` when a scene at `index` existed and was removed.
+    pub fn remove_ui_scene(&mut self, index: usize) -> bool {
+        if index >= self.ui_scenes.len() {
+            return false;
+        }
+        self.ui_scenes.remove(index);
+        if self.ui_scenes.is_empty() {
+            self.ui_scenes = default_ui_scenes();
+            self.assign_ui_scene_ids();
+        }
+        true
+    }
+
+    /// Look up a project option by stable id.
+    pub fn option(&self, id: OptionId) -> Option<&OptionDef> {
+        self.options.iter().find(|option| option.id == id)
+    }
+
+    /// Append a fresh [`OptionDef`] named `name` with a default
+    /// [`OptionKind`], assign it a stable id that does not collide with
+    /// any existing option, and return that id.
+    pub fn add_option(&mut self, name: impl Into<String>) -> OptionId {
+        let id = self.next_option_id();
+        self.options.push(OptionDef {
+            id,
+            name: name.into(),
+            kind: OptionKind::default(),
+        });
+        id
+    }
+
+    /// Remove the option at `index`. Returns `true` when an option
+    /// existed there. Sliders bound to the removed id keep the id and
+    /// simply resolve to nothing until rebound.
+    pub fn remove_option(&mut self, index: usize) -> bool {
+        if index >= self.options.len() {
+            return false;
+        }
+        self.options.remove(index);
+        true
+    }
+
+    /// First option id not already in use. Stable across reorders so a
+    /// freshly added option never shadows an existing slider binding.
+    fn next_option_id(&self) -> OptionId {
+        let mut next = 1u32;
+        for option in &self.options {
+            next = next.max(option.id.raw().saturating_add(1));
+        }
+        OptionId(next)
     }
 
     /// Add a resource and return its id.
@@ -9424,6 +10068,7 @@ impl ProjectDocument {
         for scene in &mut self.ui_scenes {
             scene.normalize();
         }
+        self.assign_ui_scene_ids();
         for scene in &mut self.scenes {
             scene.normalize_world_root();
             for node in &mut scene.nodes {
@@ -9435,6 +10080,7 @@ impl ProjectDocument {
                         camera,
                         culling,
                         streaming,
+                        physics,
                     } => {
                         *sector_size = snap_world_sector_size(*sector_size);
                         sky.horizon_percent = sky.horizon_percent.clamp(5, 95);
@@ -9465,6 +10111,10 @@ impl ProjectDocument {
                         *camera = camera.normalized();
                         *culling = culling.normalized();
                         *streaming = streaming.normalized();
+                        *physics = physics.normalized();
+                    }
+                    NodeKind::PhysicsBody { settings } => {
+                        *settings = settings.normalized();
                     }
                     _ => {}
                 }
@@ -9657,18 +10307,14 @@ fn node_kind_reference_count(kind: &NodeKind, id: ResourceId) -> usize {
             option_resource_reference_count(settings.texture, id)
         }
         NodeKind::SpawnPoint { character, .. } => option_resource_reference_count(*character, id),
-        NodeKind::AudioSource { sound, .. } => option_resource_reference_count(*sound, id),
         NodeKind::World { far_vista, .. } => far_vista_resource_reference_count(far_vista, id),
         NodeKind::Node
         | NodeKind::Node3D
         | NodeKind::Entity
         | NodeKind::Animator { .. }
         | NodeKind::Collider { .. }
-        | NodeKind::Interactable { .. }
-        | NodeKind::AiController { .. }
-        | NodeKind::Combat { .. }
+        | NodeKind::PhysicsBody { .. }
         | NodeKind::PointLight { .. }
-        | NodeKind::Trigger { .. }
         | NodeKind::Portal { .. } => 0,
     }
 }
@@ -9711,18 +10357,14 @@ fn clear_node_kind_references(kind: &mut NodeKind, id: ResourceId) -> usize {
         NodeKind::Equipment { weapon, .. } => clear_option_resource(weapon, id),
         NodeKind::ParticleEmitter { settings } => clear_option_resource(&mut settings.texture, id),
         NodeKind::SpawnPoint { character, .. } => clear_option_resource(character, id),
-        NodeKind::AudioSource { sound, .. } => clear_option_resource(sound, id),
         NodeKind::World { far_vista, .. } => clear_far_vista_resource_references(far_vista, id),
         NodeKind::Node
         | NodeKind::Node3D
         | NodeKind::Entity
         | NodeKind::Animator { .. }
         | NodeKind::Collider { .. }
-        | NodeKind::Interactable { .. }
-        | NodeKind::AiController { .. }
-        | NodeKind::Combat { .. }
+        | NodeKind::PhysicsBody { .. }
         | NodeKind::PointLight { .. }
-        | NodeKind::Trigger { .. }
         | NodeKind::Portal { .. } => 0,
     }
 }
@@ -10608,6 +11250,7 @@ mod tests {
                 camera: WorldCameraSettings::default(),
                 culling: WorldCullingSettings::default(),
                 streaming: WorldStreamingSettings::default(),
+                physics: WorldPhysicsSettings::default(),
             },
         );
         let mut grid = WorldGrid::empty(1, 1, 1024);
@@ -11664,6 +12307,128 @@ mod tests {
     }
 
     #[test]
+    fn normalize_loaded_assigns_stable_unique_ui_scene_ids() {
+        let mut project = ProjectDocument::new("ids");
+        // Simulate a legacy project: scenes with the unassigned sentinel.
+        let mut second = UiScene::default_hud();
+        second.name = "Pause".to_string();
+        second.id = UiSceneId::UNASSIGNED;
+        project.ui_scenes.push(second);
+        for scene in &mut project.ui_scenes {
+            scene.id = UiSceneId::UNASSIGNED;
+        }
+
+        project.normalize_loaded();
+
+        let ids: Vec<UiSceneId> = project.ui_scenes.iter().map(|scene| scene.id).collect();
+        assert!(ids.iter().all(|id| *id != UiSceneId::UNASSIGNED));
+        let unique: HashSet<UiSceneId> = ids.iter().copied().collect();
+        assert_eq!(unique.len(), ids.len(), "scene ids must be unique");
+
+        // Ids are stable across a second normalize and addressable.
+        let first_id = project.ui_scenes[0].id;
+        project.normalize_loaded();
+        assert_eq!(project.ui_scenes[0].id, first_id);
+        assert_eq!(
+            project.ui_scene(first_id).map(|scene| scene.name.as_str()),
+            Some(project.ui_scenes[0].name.as_str())
+        );
+        assert_eq!(
+            project.ui_scene_at(1).map(|scene| scene.id),
+            Some(project.ui_scenes[1].id)
+        );
+    }
+
+    #[test]
+    fn ui_scene_id_survives_ron_roundtrip() {
+        let mut project = ProjectDocument::new("ids");
+        project.normalize_loaded();
+        let assigned = project.ui_scenes[0].id;
+        let ron = project.to_ron_string().unwrap();
+        let mut reloaded = ProjectDocument::from_ron_str(&ron).unwrap();
+        reloaded.normalize_loaded();
+        assert_eq!(reloaded.ui_scenes[0].id, assigned);
+    }
+
+    #[test]
+    fn add_ui_scene_seeds_empty_canvas_with_fresh_id() {
+        let mut project = ProjectDocument::new("crud");
+        project.normalize_loaded();
+        let existing: HashSet<UiSceneId> = project.ui_scenes.iter().map(|scene| scene.id).collect();
+
+        let id = project.add_ui_scene("Pause");
+        assert!(id != UiSceneId::UNASSIGNED);
+        assert!(!existing.contains(&id), "new scene id is unique");
+
+        let scene = project.ui_scene(id).unwrap();
+        assert_eq!(scene.name, "Pause");
+        // Empty root canvas at PSX resolution: exactly one node, a Canvas.
+        assert_eq!(scene.nodes().len(), 1);
+        assert_eq!(scene.root, UiNodeId::ROOT);
+        let root = scene.node(scene.root).unwrap();
+        assert!(matches!(
+            root.kind,
+            UiNodeKind::Canvas {
+                width: 320,
+                height: 240
+            }
+        ));
+    }
+
+    #[test]
+    fn duplicate_ui_scene_deep_copies_after_source_with_fresh_id() {
+        let mut project = ProjectDocument::new("crud");
+        project.normalize_loaded();
+        // Give the source an extra node so the deep copy is observable.
+        let source_index = 0;
+        let source_root = project.ui_scenes[source_index].root;
+        let extra = project.ui_scenes[source_index].add_node(
+            source_root,
+            "Extra",
+            UiNodeKind::Rect {
+                rect: UiRect::new(1, 2, 3, 4),
+                color: [9, 9, 9],
+            },
+        );
+        let source_id = project.ui_scenes[source_index].id;
+        let source_name = project.ui_scenes[source_index].name.clone();
+        let source_node_count = project.ui_scenes[source_index].nodes().len();
+
+        let copy_id = project.duplicate_ui_scene(source_index).unwrap();
+        // Inserted directly after the source.
+        assert_eq!(project.ui_scenes[source_index + 1].id, copy_id);
+        assert_ne!(copy_id, source_id, "copy gets a fresh id");
+        let copy = project.ui_scene(copy_id).unwrap();
+        assert_eq!(copy.name, format!("{source_name} Copy"));
+        assert_eq!(copy.nodes().len(), source_node_count);
+        assert!(copy.node(extra).is_some(), "deep copy carries child nodes");
+
+        // Editing the copy does not touch the source.
+        let copy_index = source_index + 1;
+        project.ui_scenes[copy_index].remove_node(extra);
+        assert!(project.ui_scene(source_id).unwrap().node(extra).is_some());
+    }
+
+    #[test]
+    fn remove_ui_scene_never_leaves_list_empty() {
+        let mut project = ProjectDocument::new("crud");
+        project.normalize_loaded();
+        project.add_ui_scene("Second");
+        assert_eq!(project.ui_scenes.len(), 2);
+
+        assert!(project.remove_ui_scene(0));
+        assert_eq!(project.ui_scenes.len(), 1);
+
+        // Removing the final scene re-seeds a default so the list is
+        // never empty, and out-of-range indices are a no-op.
+        assert!(project.remove_ui_scene(0));
+        assert_eq!(project.ui_scenes.len(), 1, "list re-seeds a default HUD");
+        assert!(project.ui_scenes[0].id != UiSceneId::UNASSIGNED);
+        assert!(!project.remove_ui_scene(9));
+        assert_eq!(project.ui_scenes.len(), 1);
+    }
+
+    #[test]
     fn ui_scene_remove_node_removes_descendants_and_root_is_stable() {
         let mut scene = UiScene::default_hud();
         let group = scene.add_node(
@@ -12463,21 +13228,12 @@ mod tests {
                 character: Some(target),
             },
         );
-        scene.add_node(
-            room,
-            "Audio",
-            NodeKind::AudioSource {
-                sound: Some(target),
-                radius: 1.0,
-            },
-        );
-
-        assert_eq!(project.resource_reference_count(target), 13);
+        assert_eq!(project.resource_reference_count(target), 12);
         let report = project
             .delete_resource_with_files(target, &root)
             .expect("resource exists");
         assert_eq!(report.removed.name, "Target");
-        assert_eq!(report.cleared_references, 13);
+        assert_eq!(report.cleared_references, 12);
         assert_eq!(
             report.deleted_files,
             vec![ResourceFileDelete {
@@ -12537,9 +13293,6 @@ mod tests {
                 }
                 NodeKind::Equipment { weapon, .. } => {
                     assert_eq!(*weapon, None);
-                }
-                NodeKind::AudioSource { sound, .. } => {
-                    assert_eq!(*sound, None);
                 }
                 _ => {}
             }

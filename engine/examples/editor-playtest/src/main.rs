@@ -45,6 +45,7 @@ use psx_engine::GridVisibilityStats;
     not(feature = "vis-full-active-chunks")
 ))]
 use psx_engine::GridVisibleCell;
+use psx_engine::SkyDirectionProjector;
 use psx_engine::{
     apply_model_pose_translation, button, compute_joint_world_transform, telemetry, Angle, App,
     CachedRoomCell, CachedRoomDepthMode, CachedRoomSubdivisionMode, CachedRoomSurface,
@@ -74,7 +75,7 @@ use psx_engine::{
 };
 use psx_font::{fonts::BASIC, FontAtlas};
 use psx_gpu::{
-    draw_line_mono, draw_quad_textured_material, draw_tri_flat_blended,
+    draw_line_mono, draw_tri_flat_blended,
     material::{BlendMode, TextureMaterial, TextureWindow},
     ot::OrderingTable,
     prim::{QuadTexturedMaterial, TriTextured, TriTexturedGouraud},
@@ -130,8 +131,10 @@ use generated::{
     MODEL_FRAME_BOUNDS, MODEL_INSTANCES, MODEL_SOCKETS, PARTICLE_EMITTERS, PLAYER_CONTROLLER,
     PLAYER_SPAWN, ROOMS, ROOM_CACHE_CELLS, ROOM_CACHE_CELL_VERTICES, ROOM_CACHE_SURFACES,
     ROOM_CACHE_VERTICES, ROOM_CHUNKS, ROOM_PORTALS, ROOM_RESIDENCY, ROOM_SURFACE_CACHES,
-    ROOM_VISIBILITY, UI_NODES, VISIBILITY_CELLS, WEAPONS, WEAPON_HITBOXES,
+    ROOM_VISIBILITY, UI_NODES, UI_SFX_CUES, UI_SFX_SAMPLES, VISIBILITY_CELLS, WEAPONS,
+    WEAPON_HITBOXES,
 };
+use generated::{GAME_FLOW, OPTIONS, UI_SCENES};
 #[cfg(all(
     feature = "world-grid-visible",
     not(feature = "vis-full-active-chunks")
@@ -284,6 +287,13 @@ const COLLISION_DEBUG_BUTTON: u16 = button::L3;
 const COLLISION_DEBUG_SEGMENTS: usize = 8;
 const COLLISION_DEBUG_FLOOR_LIFT: i32 = 8;
 const FLOOR_LINK_CROSS_EPSILON: i32 = 32;
+/// Dead-band (engine units) below a floor boundary before a downward room
+/// switch fires. Climbing up lands the player AT the boundary; without a
+/// margin the down-switch would immediately fire and the player would
+/// thrash between floors. Must exceed `FLOOR_LINK_CROSS_EPSILON` (the
+/// up-switch slack) so the up and down conditions can't both hold at the
+/// seam; well under a floor's height so a real fall still registers.
+const FLOOR_LINK_SWITCH_HYSTERESIS: i32 = 256;
 const DEBUG_MAP_POSITION_BIAS: i32 = 1_000_000;
 
 const CAMERA_Y_OFFSET: i32 = 1100;
@@ -339,7 +349,10 @@ const OT_DEPTH: usize = 512;
 /// Room geometry, actors, and shadows share one depth band so walls can
 /// correctly overpaint the hidden parts of characters in the PS1
 /// painter's algorithm.
-const WORLD_BAND: DepthBand = DepthBand::new(0, OT_DEPTH - 1);
+// Farthest slot (OT_DEPTH - 1) is reserved for the sky cyclorama (see
+// SKY_OT_SLOT), so world geometry spans 0..=OT_DEPTH-2 and always draws in
+// front of the sky.
+const WORLD_BAND: DepthBand = DepthBand::new(0, OT_DEPTH - 2);
 const WORLD_DEPTH_RANGE: DepthRange = DepthRange::new(NEAR_Z, FAR_Z);
 #[cfg(feature = "world-grid-visible")]
 const ROOM_VISIBLE_CELL_SCREEN_MARGIN: i32 = 0;
@@ -399,6 +412,14 @@ fn room_depth_range(record: &LevelRoomRecord) -> DepthRange {
     DepthRange::new(NEAR_Z, room_draw_distance(record))
 }
 
+/// Project-option ids cooked from demo10's screen-position settings. Applied
+/// through [`Scene::apply_options`] when front-end menus publish new values and
+/// again on gameplay entry, using the authentic GP1 display-window registers:
+/// the classic CRT screen-position setting that slides the active window within
+/// overscan without clipping.
+const SCREEN_OFFSET_X_OPTION_ID: u16 = 1;
+const SCREEN_OFFSET_Y_OPTION_ID: u16 = 2;
+
 fn room_surface_options(record: &LevelRoomRecord) -> WorldSurfaceOptions {
     WorldSurfaceOptions::new(WORLD_BAND, room_depth_range(record))
         .with_textured_triangle_max_edge(CACHED_ROOM_TEXTURE_SPLIT_MAX_EDGE)
@@ -431,10 +452,6 @@ fn room_resident_chunk_limit(record: &LevelRoomRecord) -> usize {
 }
 
 #[cfg(feature = "cd-stream-bench")]
-fn room_stream_request_chunk_limit(record: &LevelRoomRecord) -> usize {
-    room_resident_chunk_limit(record).clamp(1, STREAMED_ROOM_SLOT_COUNT)
-}
-
 fn room_visible_chunk_limit(record: &LevelRoomRecord) -> usize {
     usize::from(record.visible_chunk_limit.max(1)).min(MAX_ACTIVE_ROOMS)
 }
@@ -460,6 +477,15 @@ fn emit_room_chunk_mask(counter_lo: u16, counter_hi: u16, mask: RuntimeDebugMask
 }
 
 const DEBUG_LOG_LINE_CAP: usize = 256;
+/// Master gate for the verbose portal-visibility snapshot log. Default off: the
+/// snapshot emits many lines one byte at a time via `write_volatile` to the
+/// trapped emulator log port, and every trapped byte costs the emulator
+/// thousands of cycles, so a single snapshot smears ~1M guest cycles onto its
+/// tick and reads as a frametime spike. Its `should_debug_log_*` predicate is
+/// almost always true (some portal is always rejected), so it fired on a fixed
+/// cooldown in normal runs. Keep false for play/perf; flip to true only when
+/// debugging portal traversal.
+const PORTAL_VIS_DEBUG_LOGS: bool = false;
 const PORTAL_VIS_DEBUG_LOG_COOLDOWN_TICKS: u8 = 120;
 const PORTAL_VIS_DEBUG_VERBOSE_CLIPS: bool = false;
 const PORTAL_VIS_DEBUG_LOG_MAX_FRUSTUMS: usize = 4;
@@ -581,6 +607,9 @@ fn debug_log_room_transition(
     camera_before: RoomPoint,
     camera_after: RoomPoint,
 ) {
+    if !POST_CROSS_RENDER_DEBUG_LOGS {
+        return;
+    }
     let mut line = DebugLogLine::new("room cross prev=");
     line.push_room(previous_room);
     line.push_str(" next=");
@@ -613,6 +642,9 @@ fn debug_log_room_window_after_cross(
     portals_tested: u16,
     portals_accepted: u16,
 ) {
+    if !POST_CROSS_RENDER_DEBUG_LOGS {
+        return;
+    }
     let mut line = DebugLogLine::new("room window room=");
     line.push_room(room);
     line.push_str(" visible=");
@@ -1330,14 +1362,24 @@ const MAX_TEXTURED_TRIS: usize = 3328;
 /// over-reserving VRAM or RAM. If a future room exceeds this,
 /// the runtime fails graceful (skips the over-cap material) and
 /// the cook report should also flag.
-const MAX_ROOM_MATERIALS: usize = 32;
+const MAX_ROOM_MATERIALS: usize = 8;
 /// Current manual portal room plus the best cache-budgeted nearby rooms.
 ///
 /// Upper bound for rooms that can be active, drawable, and collidable in one
 /// runtime window. The world-level resident room limit picks the effective
 /// count per cooked build; this cap only prevents the fixed arrays from
 /// growing past the editor-exposed maximum.
-const MAX_ACTIVE_ROOMS: usize = 32;
+const MAX_ACTIVE_ROOMS: usize = 16;
+/// Graph-distance (BFS) radius for the streaming residency ring. Rooms within
+/// this many portal hops of the current room are kept resident in memory
+/// (the load-ahead prefetch buffer). `WORLD_STREAM_RADIUS >= WORLD_VISIBILITY_RADIUS`.
+/// 16 covers demo10's 8-room graph, so the streaming ring is every room and the
+/// runtime stays equivalent to today's all-resident baseline.
+const WORLD_STREAM_RADIUS: u16 = 16;
+/// Graph-distance (BFS) radius for the surface-cache build ring. Rooms within
+/// this many portal hops of the current room get their surface caches built;
+/// the portal-visibility/frustum pass still decides which built rooms draw.
+const WORLD_VISIBILITY_RADIUS: u16 = 16;
 const MAX_PORTAL_FRUSTUMS: usize = 64;
 const MAX_PORTAL_FRONTIER_ROOMS: usize = 32;
 const MAX_PORTAL_ROOM_BOUNDS: usize = 256;
@@ -1899,6 +1941,7 @@ struct RuntimeCharacter {
     visual_offset: [i16; 3],
     visual_yaw: i16,
     visual_scale_q8: u16,
+    weight_q8: u16,
     /// Coarse collision cylinder radius. Engine units.
     radius: i32,
     /// Coarse collision cylinder height. Engine units.
@@ -1943,6 +1986,7 @@ impl RuntimeCharacter {
             visual_offset: c.visual_offset,
             visual_yaw: c.visual_yaw,
             visual_scale_q8: c.visual_scale_q8,
+            weight_q8: c.weight_q8,
             radius: c.radius as i32,
             height: c.height as i32,
             walk_speed: scaled_player_speed(c.walk_speed),
@@ -2061,6 +2105,7 @@ impl RuntimeCharacter {
             self.run_speed,
             self.yaw_step,
         );
+        config.weight_q8 = self.weight_q8;
         config.stamina_max_q12 = self.stamina_max_q12;
         config.sprint_min_q12 = self.sprint_min_q12;
         config.sprint_drain_q12 = self.sprint_drain_q12;
@@ -2326,7 +2371,7 @@ fn world_camera_from_position_focus(
             .max(1);
     WorldCamera::from_basis(
         projection,
-        position.to_world_vertex(),
+        position,
         Q12::from_ratio(dx, radius),
         Q12::from_ratio(dz, radius),
         Q12::from_ratio(target_dy, pitch_len),
@@ -2508,6 +2553,12 @@ impl<const N: usize> RoomStreamLoadPlan<N> {
 struct RoomStreamScheduler<const N: usize> {
     slots: [StreamedRoomSlot; N],
     room_slots: [u16; MAX_STREAMED_ROOM_INDEX_COUNT],
+    /// Rooms declared part of the resident window via `set_resident_window`.
+    /// Pinned rooms are never chosen for eviction regardless of LRU age, so the
+    /// residency owner can keep them resident without re-requesting them. This
+    /// is the primitive both policies build on: full-residency pins every room,
+    /// a sliding window pins the current room plus its near neighbours.
+    pinned_rooms: [bool; MAX_STREAMED_ROOM_INDEX_COUNT],
     job: cd_stream::WorldRoomSlotsReadJob<N>,
     job_plan: RoomStreamLoadPlan<N>,
     slot_limit: usize,
@@ -2527,6 +2578,7 @@ impl<const N: usize> RoomStreamScheduler<N> {
         Self {
             slots: [StreamedRoomSlot::EMPTY; N],
             room_slots: [STREAMED_ROOM_SLOT_NONE; MAX_STREAMED_ROOM_INDEX_COUNT],
+            pinned_rooms: [false; MAX_STREAMED_ROOM_INDEX_COUNT],
             job: cd_stream::WorldRoomSlotsReadJob::new(),
             job_plan: RoomStreamLoadPlan::EMPTY,
             slot_limit: N,
@@ -2541,12 +2593,43 @@ impl<const N: usize> RoomStreamScheduler<N> {
         }
     }
 
-    fn set_slot_limit(&mut self, limit: usize) {
-        self.slot_limit = limit.clamp(1, N);
-    }
-
     fn effective_slot_limit(&self) -> usize {
         self.slot_limit.clamp(1, N)
+    }
+
+    fn is_room_pinned(&self, room: RoomIndex) -> bool {
+        let index = room.to_usize();
+        index < MAX_STREAMED_ROOM_INDEX_COUNT && self.pinned_rooms[index]
+    }
+
+    /// Declare the rooms that must stay resident. They are pinned (never
+    /// evicted) so they survive without being re-requested; rooms no longer in
+    /// the set are unpinned and become evictable again.
+    fn set_resident_window(&mut self, rooms: &[RoomIndex], count: usize) {
+        self.pinned_rooms = [false; MAX_STREAMED_ROOM_INDEX_COUNT];
+        let mut i = 0usize;
+        while i < count {
+            let index = rooms[i].to_usize();
+            if index < MAX_STREAMED_ROOM_INDEX_COUNT {
+                self.pinned_rooms[index] = true;
+            }
+            i += 1;
+        }
+    }
+
+    /// Single residency entry point: pin the desired set and load whatever is
+    /// missing. Called once per frame by the residency owner so residency is
+    /// no longer requested ad-hoc from the build paths.
+    fn reconcile_residency(
+        &mut self,
+        desired: &[RoomIndex; STREAMED_ROOM_SLOT_COUNT],
+        count: usize,
+    ) {
+        self.begin_window();
+        self.set_resident_window(desired, count);
+        let plan = self.plan_window_loads(desired, count, count);
+        self.start_load_plan(plan);
+        self.emit_counters();
     }
 
     fn begin_window(&mut self) {
@@ -2990,6 +3073,7 @@ impl<const N: usize> RoomStreamScheduler<N> {
             if meta.state != RoomStreamSlotState::Resident
                 || streamed_slot_reserved(candidate, reserved_slots, reserved_count)
                 || room_requested(meta.room, requested_rooms, requested_count)
+                || self.is_room_pinned(meta.room)
             {
                 candidate += 1;
                 continue;
@@ -3014,18 +3098,46 @@ struct ActiveRuntimeRoom {
     depth: u16,
     sector_size: i32,
     ambient_rgb: [u8; 3],
+    /// Non-streamed builds keep materials inline; streamed builds pool them by
+    /// `stream_slot` (see [`ROOM_MATERIAL_POOL`]) to keep this struct small.
+    #[cfg(not(feature = "cd-stream-bench"))]
     materials: [WorldRenderMaterial; MAX_ROOM_MATERIALS],
+    #[cfg(not(feature = "cd-stream-bench"))]
     material_count: usize,
     /// Offset from the current chunk's origin to this chunk's
     /// origin, in engine units.
     offset_x: i32,
     offset_z: i32,
+    /// Vertical offset from the current room's elevation to this room's,
+    /// in engine units. Stacked floors cook to distinct `origin_y`; this
+    /// places the room's geometry at its real height relative to the
+    /// camera so an upper floor renders a storey up, not on top of the
+    /// current one at Y=0.
+    offset_y: i32,
     surface_cache: ActiveRoomSurfaceCache,
 }
 
 impl ActiveRuntimeRoom {
     fn render(&self) -> Option<RoomRender<'static, '_>> {
         self.render_room.as_ref().map(|room| room.render())
+    }
+
+    /// In-use room-surface materials. Streamed builds read the `stream_slot`
+    /// pool; non-streamed builds read the inline array.
+    fn materials(&self) -> &[WorldRenderMaterial] {
+        #[cfg(feature = "cd-stream-bench")]
+        {
+            let slot = self.stream_slot as usize;
+            if slot < STREAMED_ROOM_SLOT_COUNT {
+                let pool = unsafe { &*core::ptr::addr_of!(ROOM_MATERIAL_POOL) };
+                return &pool[slot].materials[..pool[slot].count];
+            }
+            &[]
+        }
+        #[cfg(not(feature = "cd-stream-bench"))]
+        {
+            &self.materials[..self.material_count]
+        }
     }
 
     fn with_current_room_offsets(
@@ -3035,6 +3147,9 @@ impl ActiveRuntimeRoom {
     ) -> Self {
         self.offset_x = room_origin_x(record).saturating_sub(room_origin_x(current_record));
         self.offset_z = room_origin_z(record).saturating_sub(room_origin_z(current_record));
+        // `origin_y` is absolute engine units (not sector-scaled like
+        // x/z), so the vertical offset is a plain record difference.
+        self.offset_y = record.origin_y.saturating_sub(current_record.origin_y);
         self
     }
 }
@@ -3127,6 +3242,11 @@ struct Playtest {
     portal_visibility_camera_global: RoomPoint,
     /// Global chunk bounds retained for portal diagnostics and streaming.
     portal_room_bounds: [PortalRoomBounds; MAX_PORTAL_ROOM_BOUNDS],
+    /// Cached `portal_room_bounds` length. The bounds are a pure function of the
+    /// static cooked geometry (ROOM_VISIBILITY / VISIBILITY_CELLS / ROOMS), so
+    /// they are computed once and reused; recomputing them per portal-visibility
+    /// refresh was ~74% of the portal-visibility cost.
+    portal_room_bounds_count: Option<usize>,
     portal_visible_missing_resident: u16,
     portal_visible_missing_mask: RuntimeDebugMask,
     portal_visible_build_failed: u16,
@@ -3160,6 +3280,19 @@ struct Playtest {
     /// Index in ROOMS the player is currently in. Used to scope
     /// model-instance + light queries.
     room_index: RoomIndex,
+    /// Room the cached BFS rings below were computed from. The resident and
+    /// visible sets are a pure function of `(current_room, radius, static
+    /// graph)`, so they are recomputed only when `room_index` changes and
+    /// cached between crossings.
+    room_rings_root: RoomIndex,
+    /// Streaming ring: rooms within `WORLD_STREAM_RADIUS` portal hops, kept
+    /// resident in memory. Drives the residency desired-set.
+    stream_ring: [RoomIndex; STREAMED_ROOM_SLOT_COUNT],
+    stream_ring_count: usize,
+    /// Visibility ring: rooms within `WORLD_VISIBILITY_RADIUS` portal hops whose
+    /// surface caches are built. Drives the active-window build job's request.
+    visibility_ring: [RoomIndex; MAX_ACTIVE_ROOMS],
+    visibility_ring_count: usize,
     /// Active room's material table, ordered by `local_slot`.
     /// Indexed directly by the slot value the cooked `.psxw`
     /// stores per face.
@@ -3263,6 +3396,7 @@ impl Playtest {
             portal_visibility_root: RoomIndex::ZERO,
             portal_visibility_camera_global: RoomPoint::ZERO,
             portal_room_bounds: [PortalRoomBounds::EMPTY; MAX_PORTAL_ROOM_BOUNDS],
+            portal_room_bounds_count: None,
             portal_visible_missing_resident: 0,
             portal_visible_missing_mask: RuntimeDebugMask::EMPTY,
             portal_visible_build_failed: 0,
@@ -3294,6 +3428,11 @@ impl Playtest {
             active_room_view_pitch_sin_key: 0,
             active_room_view_pitch_cos_key: 0,
             room_index: RoomIndex::ZERO,
+            room_rings_root: INVALID_ROOM_INDEX,
+            stream_ring: [INVALID_ROOM_INDEX; STREAMED_ROOM_SLOT_COUNT],
+            stream_ring_count: 0,
+            visibility_ring: [INVALID_ROOM_INDEX; MAX_ACTIVE_ROOMS],
+            visibility_ring_count: 0,
             materials: [room_material_fallback(); MAX_ROOM_MATERIALS],
             material_count: 0,
             motor: CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO),
@@ -3376,8 +3515,39 @@ impl Playtest {
 }
 
 impl Scene for Playtest {
-    fn init(&mut self, _ctx: &mut Ctx) {
+    /// Lend the uploaded HUD font to the flow driver so front-end UI
+    /// scenes (the cooked Main Menu) draw their labels and buttons with
+    /// the same glyphs the in-game HUD uses.
+    fn ui_font(&self) -> Option<&FontAtlas> {
+        self.font.as_ref()
+    }
+
+    /// Upload the font at boot (before any state is entered) so a front-end
+    /// menu scene -- which renders before gameplay `init` runs -- has glyphs
+    /// to draw its labels and buttons with.
+    fn load_shared_assets(&mut self, _ctx: &mut Ctx) {
         self.font = Some(FontAtlas::upload(&BASIC, FONT_TPAGE, FONT_CLUT));
+    }
+
+    /// Apply front-end settings chosen before Play. Screen-position options
+    /// shift the whole rendered scene through the display window.
+    fn apply_options(&mut self, options: &[psx_level::LevelOptionDef], values: &[i32]) {
+        for (option, value) in options.iter().zip(values) {
+            if option.id == SCREEN_OFFSET_X_OPTION_ID {
+                let offset_px = (*value).clamp(-128, 127) as i16;
+                psx_gpu::set_screen_h_offset(offset_px, psx_gpu::Resolution::R320X240);
+            } else if option.id == SCREEN_OFFSET_Y_OPTION_ID {
+                let offset_px = (*value).clamp(-128, 127) as i16;
+                psx_gpu::set_screen_v_offset(
+                    offset_px,
+                    psx_gpu::VideoMode::Ntsc,
+                    psx_gpu::Resolution::R320X240,
+                );
+            }
+        }
+    }
+
+    fn init(&mut self, _ctx: &mut Ctx) {
         self.shadow_material = upload_shadow_texture();
         self.particle_material = Some(upload_particle_texture());
 
@@ -3434,8 +3604,20 @@ impl Scene for Playtest {
         self.portal_debug_log_cooldown = self.portal_debug_log_cooldown.saturating_sub(1);
         let background_tick = self.streaming_jobs.background_tick(ctx);
         #[cfg(feature = "cd-stream-bench")]
+        if background_tick {
+            // Residency owner: the single per-frame declaration of which rooms
+            // must be resident (pin + load), so the build paths no longer have
+            // to request residency themselves.
+            telemetry::stage_begin(telemetry::stage::SIM_RESIDENCY);
+            self.update_room_residency();
+            telemetry::stage_end(telemetry::stage::SIM_RESIDENCY);
+        }
+        #[cfg(feature = "cd-stream-bench")]
         let stream_progress = if background_tick {
-            self.pump_room_stream(RUNTIME_SCHEDULE.stream_pump_sectors_per_tick)
+            telemetry::stage_begin(telemetry::stage::SIM_PUMP);
+            let progress = self.pump_room_stream(RUNTIME_SCHEDULE.stream_pump_sectors_per_tick);
+            telemetry::stage_end(telemetry::stage::SIM_PUMP);
+            progress
         } else {
             false
         };
@@ -3546,6 +3728,7 @@ impl Scene for Playtest {
         {
             self.break_box_props_for_movement(trigger, input, config, delta_vblanks);
         }
+        telemetry::stage_begin(telemetry::stage::SIM_COLLISION);
         let mut collision_rooms = [const { CharacterCollisionRoom::EMPTY }; MAX_COLLISION_ROOMS];
         let collision_room_count = if self.chunked_level() {
             let catchup = delta_vblanks.min(4) as i32;
@@ -3586,13 +3769,18 @@ impl Scene for Playtest {
                 &aabb_blockers[..aabb_blocker_count],
             )
         };
+        telemetry::stage_end(telemetry::stage::SIM_COLLISION);
+        telemetry::stage_begin(telemetry::stage::SIM_SOLVE);
         let motor_frame =
             self.motor
                 .update_vblanks_with_collision(collision, input, config, delta_vblanks);
+        telemetry::stage_end(telemetry::stage::SIM_SOLVE);
         self.player_moved_last_tick = motor_frame.moved;
+        telemetry::stage_begin(telemetry::stage::SIM_ROOM_TRACK);
         if !self.update_current_room_from_player() {
             self.refresh_active_room_window_if_needed();
         }
+        telemetry::stage_end(telemetry::stage::SIM_ROOM_TRACK);
 
         let new_state = if self.anim_lock_until_tick > now {
             self.anim_state
@@ -3658,12 +3846,19 @@ impl Scene for Playtest {
 
         let mut ot = unsafe { OtFrame::begin(&mut OT) };
         let mut primitive_packets = unsafe { PrimitivePacketArena::new(&mut PRIMITIVE_PACKETS) };
+
+        let room_record = ROOMS.get(self.room_index.to_usize());
+        // Sky inserts into the OT background slot before the world pass borrows
+        // the OT; world geometry (slots 0..=OT_DEPTH-2) then draws in front.
+        if let Some(room_record) = room_record {
+            telemetry::stage_begin(telemetry::stage::SKY);
+            draw_sky_panorama(room_record.sky, camera, &mut primitive_packets, &mut ot);
+            telemetry::stage_end(telemetry::stage::SKY);
+        }
+
         let mut world = unsafe { begin_world_render_pass(&mut ot, &mut WORLD_COMMANDS) };
 
-        if let Some(room_record) = ROOMS.get(self.room_index.to_usize()) {
-            telemetry::stage_begin(telemetry::stage::SKY);
-            draw_sky_panorama(room_record.sky, camera);
-            telemetry::stage_end(telemetry::stage::SKY);
+        if let Some(room_record) = room_record {
             telemetry::stage_begin(telemetry::stage::FAR_VISTA);
             draw_far_vista_ring(
                 camera,
@@ -3741,7 +3936,7 @@ impl Scene for Playtest {
                     room_cache_surfaces = room_cache_surfaces
                         .saturating_add(active.surface_cache.surface_count as u32);
                 }
-                let materials = &active.materials[..active.material_count];
+                let materials = active.materials();
                 let Some(room_record) = ROOMS.get(active.index.to_usize()) else {
                     continue;
                 };
@@ -4451,14 +4646,35 @@ impl Scene for Playtest {
         }
 
         if self.character.is_some() {
+            // The shared UI_NODES pool now holds front-end menu scenes too, so
+            // draw only the HUD scene's slice as the in-game overlay.
+            let (hud_first, hud_count) = hud_scene_range();
             draw_player_hud(
                 UI_NODES,
+                hud_first,
+                hud_count,
                 self.font.as_ref(),
                 self.motor.stamina_q12(),
                 self.motor_config().stamina_max_q12,
             );
         }
     }
+}
+
+/// Node-pool range `(first, count)` of the cooked "HUD" UI scene, so the
+/// in-game overlay draws only the HUD and not the front-end menu scenes that
+/// now share the same `UI_NODES` pool. Falls back to the whole pool when no
+/// scene is named "HUD".
+fn hud_scene_range() -> (usize, usize) {
+    let mut i = 0usize;
+    while i < UI_SCENES.len() {
+        let scene = &UI_SCENES[i];
+        if scene.name == "HUD" {
+            return (scene.node_first as usize, scene.node_count as usize);
+        }
+        i += 1;
+    }
+    (0, UI_NODES.len())
 }
 
 #[cfg(all(
@@ -4612,7 +4828,7 @@ impl Playtest {
     }
 
     fn motor_config(&self) -> CharacterMotorConfig {
-        match self.character {
+        let mut config = match self.character {
             Some(c) => c.motor_config(),
             None => CharacterMotorConfig::character(
                 0,
@@ -4620,7 +4836,11 @@ impl Playtest {
                 scaled_player_speed(FALLBACK_PLAYER_SPEED),
                 FALLBACK_PLAYER_YAW_STEP,
             ),
+        };
+        if let Some(room) = ROOMS.get(self.room_index.to_usize()) {
+            config.gravity_per_tick = room.gravity_per_tick;
         }
+        config
     }
 
     fn is_box_prop_broken(&self, index: usize) -> bool {
@@ -4812,7 +5032,8 @@ impl Playtest {
                 active.collision_room,
                 active.offset_x,
                 active.offset_z,
-            );
+            )
+            .with_offset_y(active.offset_y);
             collected_rooms[count] = active.index;
             count += 1;
         }
@@ -4882,7 +5103,8 @@ impl Playtest {
                 room,
                 room_origin_x(record).saturating_sub(room_origin_x(current_record)),
                 room_origin_z(record).saturating_sub(room_origin_z(current_record)),
-            );
+            )
+            .with_offset_y(record.origin_y.saturating_sub(current_record.origin_y));
             collected_rooms[count] = index;
             count += 1;
         }
@@ -4928,7 +5150,8 @@ impl Playtest {
                 RuntimeCollisionRoom::Compact(room),
                 room_origin_x(record).saturating_sub(room_origin_x(current_record)),
                 room_origin_z(record).saturating_sub(room_origin_z(current_record)),
-            );
+            )
+            .with_offset_y(record.origin_y.saturating_sub(current_record.origin_y));
             collected_rooms[count] = chunk.room;
             count += 1;
         }
@@ -5063,7 +5286,7 @@ impl Playtest {
     fn free_orbit_camera(&self) -> WorldCamera {
         WorldCamera::orbit_yaw(
             PROJECTION,
-            self.spawn.to_world_vertex(),
+            self.spawn,
             CAMERA_Y_OFFSET,
             self.orbit_radius,
             self.orbit_yaw,
@@ -5171,7 +5394,16 @@ impl Playtest {
             half_fov_y_tan_q12,
             RUNTIME_SCHEDULE.portal_min_width_q12,
         );
-        let bounds_count = collect_portal_room_bounds(&mut self.portal_room_bounds);
+        // The room bounds are a pure function of the static cooked geometry, so
+        // collect them once and reuse the cached length on every later refresh.
+        let bounds_count = match self.portal_room_bounds_count {
+            Some(count) => count,
+            None => {
+                let count = collect_portal_room_bounds(&mut self.portal_room_bounds);
+                self.portal_room_bounds_count = Some(count);
+                count
+            }
+        };
         build_portal_visibility_with_room_bounds(
             ROOMS,
             ROOM_PORTALS,
@@ -5182,7 +5414,8 @@ impl Playtest {
             &mut self.portal_visibility,
         );
         telemetry::stage_end(telemetry::stage::PORTAL_VISIBILITY);
-        if self.portal_debug_log_cooldown == 0
+        if PORTAL_VIS_DEBUG_LOGS
+            && self.portal_debug_log_cooldown == 0
             && should_debug_log_portal_visibility(current_record, &self.portal_visibility)
         {
             let player_local = self.motor.position();
@@ -5527,6 +5760,35 @@ impl Playtest {
         }
     }
 
+    /// Recompute the cached streaming + visibility BFS rings if the current
+    /// room changed since they were last built. The rings are a pure function
+    /// of `(current_room, radius, static graph)`, so they are cached between
+    /// crossings and only rebuilt when `room_index` moves.
+    fn ensure_room_rings(&mut self) {
+        if self.room_rings_root == self.room_index {
+            return;
+        }
+        let mut s = [INVALID_ROOM_INDEX; STREAMED_ROOM_SLOT_COUNT];
+        let sc = room_graph_ring(
+            self.room_index,
+            WORLD_STREAM_RADIUS,
+            &mut s,
+            STREAMED_ROOM_SLOT_COUNT,
+        );
+        let mut v = [INVALID_ROOM_INDEX; MAX_ACTIVE_ROOMS];
+        let vc = room_graph_ring(
+            self.room_index,
+            WORLD_VISIBILITY_RADIUS,
+            &mut v,
+            MAX_ACTIVE_ROOMS,
+        );
+        self.stream_ring = s;
+        self.stream_ring_count = sc;
+        self.visibility_ring = v;
+        self.visibility_ring_count = vc;
+        self.room_rings_root = self.room_index;
+    }
+
     fn begin_active_room_window_job(&mut self, update_streaming: bool) {
         if !self.chunked_level() {
             return;
@@ -5581,16 +5843,8 @@ impl Playtest {
             return;
         };
 
-        #[cfg(feature = "cd-stream-bench")]
-        if self.active_room_job.update_streaming {
-            let requested_rooms = self.active_room_job.requested_rooms;
-            let requested_count = self.active_room_job.requested_count;
-            self.request_streamed_active_room_job(
-                &requested_rooms,
-                requested_count,
-                current_record,
-            );
-        }
+        // Residency is owned by update_room_residency now; the build job no
+        // longer requests streaming itself, it only builds from resident rooms.
 
         telemetry::stage_begin(telemetry::stage::ACTIVE_ROOM_WINDOW);
         let mut built_this_tick = 0usize;
@@ -5707,19 +5961,32 @@ impl Playtest {
         self.room = active.render_room;
         self.current_collision_room = Some(active.collision_room);
         self.current_ambient_rgb = active.ambient_rgb;
-        self.materials = active.materials;
-        self.material_count = active.material_count;
+        self.set_current_materials(&active);
+    }
+
+    /// Copy a room's in-use materials into the current-room slot the renderer
+    /// reads. Source is the `stream_slot` pool (streamed) or inline (non-stream).
+    fn set_current_materials(&mut self, active: &ActiveRuntimeRoom) {
+        let mats = active.materials();
+        self.material_count = mats.len();
+        self.materials[..mats.len()].copy_from_slice(mats);
     }
 
     fn refresh_active_room_materials(&mut self) {
         let mut slot = 0usize;
         while slot < MAX_ACTIVE_ROOMS {
-            if let Some(mut active) = self.active_rooms[slot] {
+            if let Some(active) = self.active_rooms[slot] {
                 if let Some(record) = ROOMS.get(active.index.to_usize()) {
                     let (materials, material_count) = build_runtime_room_material_table(record);
-                    active.materials = materials;
-                    active.material_count = material_count;
-                    self.active_rooms[slot] = Some(active);
+                    #[cfg(feature = "cd-stream-bench")]
+                    store_room_materials(active.stream_slot, materials, material_count);
+                    #[cfg(not(feature = "cd-stream-bench"))]
+                    {
+                        let mut active = active;
+                        active.materials = materials;
+                        active.material_count = material_count;
+                        self.active_rooms[slot] = Some(active);
+                    }
                 }
             }
             slot += 1;
@@ -5807,8 +6074,7 @@ impl Playtest {
                         self.room = active.render_room;
                         self.current_collision_room = Some(active.collision_room);
                         self.current_ambient_rgb = active.ambient_rgb;
-                        self.materials = active.materials;
-                        self.material_count = active.material_count;
+                        self.set_current_materials(&active);
                     }
                     self.active_rooms[next_slot] = Some(active);
                     next_slot += 1;
@@ -5837,8 +6103,7 @@ impl Playtest {
                 self.room = active.render_room;
                 self.current_collision_room = Some(active.collision_room);
                 self.current_ambient_rgb = active.ambient_rgb;
-                self.materials = active.materials;
-                self.material_count = active.material_count;
+                self.set_current_materials(&active);
                 self.active_rooms[next_slot] = Some(active);
                 next_slot += 1;
             }
@@ -5857,8 +6122,7 @@ impl Playtest {
                     self.room = active.render_room;
                     self.current_collision_room = Some(active.collision_room);
                     self.current_ambient_rgb = active.ambient_rgb;
-                    self.materials = active.materials;
-                    self.material_count = active.material_count;
+                    self.set_current_materials(&active);
                     self.active_rooms[0] = Some(active);
                     next_slot = 1;
                 }
@@ -5907,8 +6171,11 @@ impl Playtest {
         desired_visible_count: usize,
         current_record: &LevelRoomRecord,
     ) {
-        let visible_limit =
-            self.request_streamed_active_room_window(desired_visible_count, current_record);
+        // Residency is owned by update_room_residency now; this path only
+        // builds the active window from whatever the owner made resident.
+        let visible_limit = desired_visible_count
+            .min(self.portal_visibility.room_count)
+            .min(room_active_chunk_limit(current_record));
 
         let previous_active_rooms = self.active_rooms;
         let mut rebuilt = [const { None }; MAX_ACTIVE_ROOMS];
@@ -5981,364 +6248,38 @@ impl Playtest {
     }
 
     #[cfg(feature = "cd-stream-bench")]
-    fn request_streamed_active_room_window(
-        &mut self,
-        desired_visible_count: usize,
-        current_record: &LevelRoomRecord,
-    ) -> usize {
-        let resident_capacity = room_resident_chunk_limit(current_record);
-        let request_limit = room_stream_request_chunk_limit(current_record);
-        let mut requested_rooms = [INVALID_ROOM_INDEX; STREAMED_ROOM_SLOT_COUNT];
-        let mut requested_count = 0usize;
-        self.portal_stream_priority_current = 0;
-        self.portal_stream_priority_visible = 0;
-        self.portal_stream_priority_frontier = 0;
-
-        if push_stream_room_request(
-            &mut requested_rooms,
-            &mut requested_count,
-            request_limit,
-            self.room_index,
-        ) {
-            self.portal_stream_priority_current = 1;
-        }
-        self.portal_stream_priority_frontier = self.portal_stream_priority_frontier.saturating_add(
-            self.push_current_floor_link_stream_requests(
-                &mut requested_rooms,
-                &mut requested_count,
-                request_limit,
-            ) as u16,
-        );
-
-        let visible_limit = desired_visible_count
-            .min(self.portal_visibility.room_count)
-            .min(room_active_chunk_limit(current_record));
-        let mut i = 0usize;
-        while i < visible_limit {
-            let room = self.portal_visibility.rooms[i].room;
-            if push_stream_room_request(
-                &mut requested_rooms,
-                &mut requested_count,
-                request_limit,
-                room,
-            ) {
-                self.portal_stream_priority_visible =
-                    self.portal_stream_priority_visible.saturating_add(1);
-            }
-            i += 1;
-        }
-
-        let portal_first = current_record.portal_first as usize;
-        let portal_end = portal_first.saturating_add(current_record.portal_count as usize);
-        let mut portal_index = portal_first;
-        while portal_index < portal_end.min(ROOM_PORTALS.len())
-            && requested_count < request_limit
-            && requested_count < STREAMED_ROOM_SLOT_COUNT
-        {
-            let portal = ROOM_PORTALS[portal_index];
-            if portal.source_room == self.room_index
-                && push_stream_room_request(
-                    &mut requested_rooms,
-                    &mut requested_count,
-                    request_limit,
-                    portal.destination_room,
-                )
-            {
-                self.portal_stream_priority_frontier =
-                    self.portal_stream_priority_frontier.saturating_add(1);
-            }
-            portal_index += 1;
-        }
-        let protected_count = requested_count;
-
-        let mut frontier = 0usize;
-        while frontier < self.portal_visibility.frontier_count
-            && requested_count < request_limit
-            && requested_count < STREAMED_ROOM_SLOT_COUNT
-        {
-            let room = self.portal_visibility.frontier_rooms[frontier].room;
-            if push_stream_room_request(
-                &mut requested_rooms,
-                &mut requested_count,
-                request_limit,
-                room,
-            ) {
-                self.portal_stream_priority_frontier =
-                    self.portal_stream_priority_frontier.saturating_add(1);
-            }
-            frontier += 1;
-        }
-
-        let requested_count = self.append_pack_aware_streamed_prefetches(
-            &mut requested_rooms,
-            requested_count,
-            request_limit,
-        );
-        self.ensure_streamed_room_residency(
-            &requested_rooms,
-            requested_count,
-            protected_count,
-            resident_capacity,
-        );
-
-        visible_limit
-    }
-
-    #[cfg(feature = "cd-stream-bench")]
-    fn request_streamed_active_room_job(
-        &mut self,
-        job_rooms: &[RoomIndex; MAX_ACTIVE_ROOMS],
-        job_room_count: usize,
-        current_record: &LevelRoomRecord,
-    ) {
-        let resident_capacity = room_resident_chunk_limit(current_record);
-        let request_limit = room_stream_request_chunk_limit(current_record);
-        let mut requested_rooms = [INVALID_ROOM_INDEX; STREAMED_ROOM_SLOT_COUNT];
-        let mut requested_count = 0usize;
-        self.portal_stream_priority_current = 0;
-        self.portal_stream_priority_visible = 0;
-        self.portal_stream_priority_frontier = 0;
-
-        if push_stream_room_request(
-            &mut requested_rooms,
-            &mut requested_count,
-            request_limit,
-            self.room_index,
-        ) {
-            self.portal_stream_priority_current = 1;
-        }
-        self.portal_stream_priority_frontier = self.portal_stream_priority_frontier.saturating_add(
-            self.push_current_floor_link_stream_requests(
-                &mut requested_rooms,
-                &mut requested_count,
-                request_limit,
-            ) as u16,
-        );
-
-        let mut i = 0usize;
-        while i < job_room_count
-            && requested_count < request_limit
-            && requested_count < STREAMED_ROOM_SLOT_COUNT
-        {
-            if push_stream_room_request(
-                &mut requested_rooms,
-                &mut requested_count,
-                request_limit,
-                job_rooms[i],
-            ) {
-                self.portal_stream_priority_visible =
-                    self.portal_stream_priority_visible.saturating_add(1);
-            }
-            i += 1;
-        }
-
-        let portal_first = current_record.portal_first as usize;
-        let portal_end = portal_first.saturating_add(current_record.portal_count as usize);
-        let mut portal_index = portal_first;
-        while portal_index < portal_end.min(ROOM_PORTALS.len())
-            && requested_count < request_limit
-            && requested_count < STREAMED_ROOM_SLOT_COUNT
-        {
-            let portal = ROOM_PORTALS[portal_index];
-            if portal.source_room == self.room_index
-                && push_stream_room_request(
-                    &mut requested_rooms,
-                    &mut requested_count,
-                    request_limit,
-                    portal.destination_room,
-                )
-            {
-                self.portal_stream_priority_frontier =
-                    self.portal_stream_priority_frontier.saturating_add(1);
-            }
-            portal_index += 1;
-        }
-
-        let mut frontier = 0usize;
-        while frontier < self.portal_visibility.frontier_count
-            && requested_count < request_limit
-            && requested_count < STREAMED_ROOM_SLOT_COUNT
-        {
-            let room = self.portal_visibility.frontier_rooms[frontier].room;
-            if push_stream_room_request(
-                &mut requested_rooms,
-                &mut requested_count,
-                request_limit,
-                room,
-            ) {
-                self.portal_stream_priority_frontier =
-                    self.portal_stream_priority_frontier.saturating_add(1);
-            }
-            frontier += 1;
-        }
-
-        let protected_count = requested_count;
-        let requested_count = self.append_pack_aware_streamed_prefetches(
-            &mut requested_rooms,
-            requested_count,
-            request_limit,
-        );
-        self.ensure_streamed_room_residency(
-            &requested_rooms,
-            requested_count,
-            protected_count,
-            resident_capacity,
-        );
-    }
-
-    #[cfg(feature = "cd-stream-bench")]
-    fn push_current_floor_link_stream_requests(
-        &self,
-        requested_rooms: &mut [RoomIndex; STREAMED_ROOM_SLOT_COUNT],
-        requested_count: &mut usize,
-        request_limit: usize,
-    ) -> usize {
-        let (rooms, count) = self.current_floor_link_rooms();
-        let mut added = 0usize;
-        let mut i = 0usize;
-        while i < count
-            && *requested_count < request_limit
-            && *requested_count < STREAMED_ROOM_SLOT_COUNT
-        {
-            if push_stream_room_request(requested_rooms, requested_count, request_limit, rooms[i]) {
-                added += 1;
-            }
-            i += 1;
-        }
-        added
-    }
-
-    #[cfg(feature = "cd-stream-bench")]
-    fn append_pack_aware_streamed_prefetches(
-        &self,
-        requested_rooms: &mut [RoomIndex; STREAMED_ROOM_SLOT_COUNT],
-        active_count: usize,
-        request_limit: usize,
-    ) -> usize {
-        let mut requested_count = active_count
-            .min(request_limit)
-            .min(STREAMED_ROOM_SLOT_COUNT);
-        if requested_count == 0
-            || requested_count >= request_limit
-            || requested_count >= STREAMED_ROOM_SLOT_COUNT
-            || RUNTIME_SCHEDULE.stream_prefetch_count == 0
-            || ROOM_CHUNKS.is_empty()
-        {
-            return requested_count;
-        }
-
-        let Some(current_record) = ROOMS.get(self.room_index.to_usize()) else {
-            return requested_count;
-        };
-        let player = self.motor.position();
-
-        let mut added = 0usize;
-        while added < RUNTIME_SCHEDULE.stream_prefetch_count
-            && requested_count < request_limit
-            && requested_count < STREAMED_ROOM_SLOT_COUNT
-        {
-            let Some((span_start, span_end)) =
-                streamed_request_sector_span(requested_rooms, requested_count)
-            else {
-                break;
-            };
-            let base_span = span_end.saturating_sub(span_start);
-            let mut best_room = INVALID_ROOM_INDEX;
-            let mut best_score = ChunkResidencyScore::WORST;
-            let mut best_extra_sectors = u32::MAX;
-            let mut best_total_sectors = u32::MAX;
-
-            for chunk in ROOM_CHUNKS {
-                if chunk.room == self.room_index
-                    || room_requested(chunk.room, requested_rooms, requested_count)
-                    || streamed_room_is_resident(chunk.room)
-                {
-                    continue;
-                }
-                let Some(score) =
-                    chunk_residency_score(*chunk, self.room_index, current_record, player)
-                else {
-                    continue;
-                };
-                let Some(info) = cd_stream::world_room_chunk_info(chunk.room.raw(), WORLD_PACK_TOC)
-                else {
-                    continue;
-                };
-                if info.sector_count == 0
-                    || info.byte_size == 0
-                    || info.byte_size > STREAMED_ROOM_SLOT_BYTES
-                {
-                    continue;
-                }
-                let candidate_end = info.sector_offset.saturating_add(info.sector_count);
-                let total_sectors = span_end
-                    .max(candidate_end)
-                    .saturating_sub(span_start.min(info.sector_offset));
-                let extra_sectors = total_sectors.saturating_sub(base_span);
-                if extra_sectors > RUNTIME_SCHEDULE.stream_prefetch_max_extra_sectors
-                    || (extra_sectors > 0
-                        && total_sectors > RUNTIME_SCHEDULE.stream_prefetch_max_total_sectors)
-                {
-                    continue;
-                }
-                let better = best_room == INVALID_ROOM_INDEX
-                    || extra_sectors < best_extra_sectors
-                    || (extra_sectors == best_extra_sectors
-                        && (score.better_than(best_score)
-                            || (best_total_sectors > total_sectors
-                                && !best_score.better_than(score))));
-                if better {
-                    best_room = chunk.room;
-                    best_score = score;
-                    best_extra_sectors = extra_sectors;
-                    best_total_sectors = total_sectors;
-                }
-            }
-
-            if best_room == INVALID_ROOM_INDEX {
-                break;
-            }
-            requested_rooms[requested_count] = best_room;
-            requested_count += 1;
-            added += 1;
-        }
-
-        requested_count
-    }
-
-    #[cfg(feature = "cd-stream-bench")]
-    fn ensure_streamed_room_residency(
-        &mut self,
-        requested_rooms: &[RoomIndex; STREAMED_ROOM_SLOT_COUNT],
-        requested_count: usize,
-        active_count: usize,
-        resident_limit: usize,
-    ) {
-        let plan = unsafe {
-            ROOM_STREAM_SCHEDULER.set_slot_limit(resident_limit);
-            ROOM_STREAM_SCHEDULER.begin_window();
-            ROOM_STREAM_SCHEDULER.plan_window_loads(
-                requested_rooms,
-                requested_count,
-                active_count.min(requested_count),
-            )
-        };
-        if plan.count == 0 {
-            unsafe {
-                ROOM_STREAM_SCHEDULER.emit_counters();
-            }
-            return;
-        }
-
-        unsafe {
-            ROOM_STREAM_SCHEDULER.start_load_plan(plan);
-            ROOM_STREAM_SCHEDULER.emit_counters();
-        }
-    }
-
-    #[cfg(feature = "cd-stream-bench")]
     fn pump_room_stream(&mut self, max_sectors: usize) -> bool {
         unsafe { ROOM_STREAM_SCHEDULER.pump(&mut STREAMED_ROOM_WORDS, max_sectors) }
+    }
+
+    /// The residency owner: computes the single desired resident set -- the
+    /// whole level when it fits the budget, otherwise the current room plus its
+    /// visible neighbourhood -- and hands it to the scheduler to pin + load.
+    /// This is the one place residency is declared; the build paths read
+    /// residency from what this makes resident.
+    #[cfg(feature = "cd-stream-bench")]
+    fn update_room_residency(&mut self) {
+        // Residency desired-set is the streaming BFS ring: every room within
+        // WORLD_STREAM_RADIUS portal hops of the current room. Computed once per
+        // crossing and cached; recompute here is a no-op unless the room moved.
+        self.ensure_room_rings();
+        let mut desired = [INVALID_ROOM_INDEX; STREAMED_ROOM_SLOT_COUNT];
+        let mut count = self.stream_ring_count.min(STREAMED_ROOM_SLOT_COUNT);
+        desired[..count].copy_from_slice(&self.stream_ring[..count]);
+        // The BFS ring is prefetch; portal visibility is correctness. Whatever
+        // the renderer can currently see MUST be resident even when the graph
+        // ring and the geometric visibility disagree, or it draws nothing.
+        let visible = self.portal_visibility.room_count.min(MAX_ACTIVE_ROOMS);
+        let mut i = 0usize;
+        while i < visible && count < STREAMED_ROOM_SLOT_COUNT {
+            let room = self.portal_visibility.rooms[i].room;
+            if room != INVALID_ROOM_INDEX && !room_requested(room, &desired, count) {
+                desired[count] = room;
+                count += 1;
+            }
+            i += 1;
+        }
+        unsafe { ROOM_STREAM_SCHEDULER.reconcile_residency(&desired, count) };
     }
 
     #[cfg(feature = "cd-stream-bench")]
@@ -6374,63 +6315,45 @@ impl Playtest {
         room.sector(sx as u16, sz as u16)
     }
 
-    fn current_floor_link_rooms(&self) -> ([RoomIndex; 2], usize) {
-        let Some(sector) = self.current_floor_link_sector() else {
-            return ([INVALID_ROOM_INDEX; 2], 0);
-        };
-        let mut rooms = [INVALID_ROOM_INDEX; 2];
-        let mut count = 0usize;
-        if let Some(room) = sector.floor_above_room() {
-            self.push_valid_floor_link_room(&mut rooms, &mut count, room);
-        }
-        if let Some(room) = sector.floor_below_room() {
-            self.push_valid_floor_link_room(&mut rooms, &mut count, room);
-        }
-        (rooms, count)
-    }
-
-    fn push_valid_floor_link_room(
-        &self,
-        rooms: &mut [RoomIndex; 2],
-        count: &mut usize,
-        room: RoomIndex,
-    ) {
-        if *count >= rooms.len()
-            || room == self.room_index
-            || room == INVALID_ROOM_INDEX
-            || room.to_usize() >= ROOMS.len()
-        {
-            return;
-        }
-        let mut i = 0usize;
-        while i < *count {
-            if rooms[i] == room {
-                return;
-            }
-            i += 1;
-        }
-        rooms[*count] = room;
-        *count += 1;
-    }
-
     fn current_floor_link_switch_target(&self) -> Option<RoomIndex> {
         let sector = self.current_floor_link_sector()?;
         let player_y = self.motor.position().y;
+        let current_origin_y = ROOMS
+            .get(self.room_index.to_usize())
+            .map(room_origin_y)
+            .unwrap_or(0);
+        // The motor's Y is current-room-local; lift to global so it can be
+        // compared against another room's absolute elevation.
+        let global_y = player_y.saturating_add(current_origin_y);
 
-        if let Some(room) = sector.floor_below_room() {
-            let crosses = !sector.has_floor()
-                || player_y
-                    < min_i32x4(sector.floor_heights()).saturating_sub(FLOOR_LINK_CROSS_EPSILON);
-            if crosses && self.can_switch_to_floor_link_room(room) {
+        // Switch floors using a hysteresis band around the boundary
+        // between the two rooms (the higher of the two origins). Without
+        // it the player thrashes between rooms at the seam: climbing up to
+        // the boundary satisfies "below me is a hole" (down) and "I've
+        // reached the upper floor" (up) on the same frame. Requiring the
+        // player to clear the boundary by FLOOR_LINK_SWITCH_HYSTERESIS in
+        // the travel direction makes the transition one-way and stable.
+        if let Some(room) = sector.floor_above_room() {
+            let boundary = ROOMS.get(room.to_usize()).map(room_origin_y).unwrap_or(0);
+            // Climbed clearly up to / past the upper floor's elevation.
+            if global_y >= boundary.saturating_sub(FLOOR_LINK_CROSS_EPSILON)
+                && self.can_switch_to_floor_link_room(room)
+            {
                 return Some(room);
             }
         }
 
-        if let Some(room) = sector.floor_above_room() {
-            let crosses = sector.has_ceiling()
-                && player_y
-                    > max_i32x4(sector.ceiling_heights()).saturating_add(FLOOR_LINK_CROSS_EPSILON);
-            if crosses && self.can_switch_to_floor_link_room(room) {
+        if let Some(room) = sector.floor_below_room() {
+            // Boundary is THIS room's own floor elevation; the lower room
+            // sits below it. Only drop down when the player has descended
+            // CLEARLY below the boundary (by the hysteresis margin). This
+            // is what stops climb-thrash: arriving at the boundary from
+            // below (global_y ~= boundary) does NOT re-trigger a drop, even
+            // on the floorless hole cell you climbed through -- you must
+            // actually fall to leave.
+            let boundary = current_origin_y;
+            let descended = global_y <= boundary.saturating_sub(FLOOR_LINK_SWITCH_HYSTERESIS);
+            if descended && self.can_switch_to_floor_link_room(room) {
                 return Some(room);
             }
         }
@@ -7379,7 +7302,16 @@ fn accumulate_grid_visibility_stats(total: &mut GridVisibilityStats, stats: Grid
 /// rasterized into a panorama texture by the editor cooker; runtime
 /// wraps that texture over a small camera-centred dome so translation
 /// is ignored but yaw/pitch still feel like surrounding scenery.
-fn draw_sky_panorama(sky: LevelSkyRecord, camera: WorldCamera) {
+/// OT slot reserved for the sky cyclorama. It is the farthest slot, drawn
+/// behind all world geometry (which `WORLD_BAND` caps at `OT_DEPTH - 2`).
+const SKY_OT_SLOT: psx_engine::DepthSlot = psx_engine::DepthSlot::new(OT_DEPTH - 1);
+
+fn draw_sky_panorama(
+    sky: LevelSkyRecord,
+    camera: WorldCamera,
+    primitive_packets: &mut PrimitivePacketArena<'_>,
+    ot: &mut OtFrame<'_, OT_DEPTH>,
+) {
     if sky.flags & sky_flags::ENABLED == 0 {
         return;
     }
@@ -7404,12 +7336,37 @@ fn draw_sky_panorama(sky: LevelSkyRecord, camera: WorldCamera) {
     let mut projected_grid: [Option<(i16, i16)>; SKY_CYCLORAMA_GRID_POINTS_MAX] =
         [None; SKY_CYCLORAMA_GRID_POINTS_MAX];
 
+    // Project the whole grid on the GTE: load the camera rotation once, then
+    // RTPS each direction (hardware rotate + perspective divide) instead of the
+    // per-direction CPU rotate (eight muls) and two divides.
+    let sky_projector = SkyDirectionProjector::load(camera);
+    // Yaw depends only on column and pitch only on row, so precompute the
+    // sin/cos of each once instead of four trig lookups per grid point.
+    let mut yaw_sin = [0i32; SKY_CYCLORAMA_COLUMNS_MAX as usize + 1];
+    let mut yaw_cos = [0i32; SKY_CYCLORAMA_COLUMNS_MAX as usize + 1];
+    for column in 0..=columns {
+        let yaw = angle_from_degrees_i32(sky_yaw_degrees_for_column(column, columns));
+        yaw_sin[column] = yaw.sin().raw();
+        yaw_cos[column] = yaw.cos().raw();
+    }
+    let mut pitch_sin = [0i32; SKY_PANORAMA_PALETTE_BANDS + 1];
+    let mut pitch_cos = [0i32; SKY_PANORAMA_PALETTE_BANDS + 1];
     for row in 0..=rows {
-        let pitch = sky_lerp_i32(top_pitch, bottom_pitch, row, rows);
+        let pitch =
+            angle_from_degrees_i32(sky_lerp_i32(top_pitch, bottom_pitch, row, rows).clamp(-82, 82));
+        pitch_sin[row] = pitch.sin().raw();
+        pitch_cos[row] = pitch.cos().raw();
+    }
+    for row in 0..=rows {
         for column in 0..=columns {
-            let yaw = sky_yaw_degrees_for_column(column, columns);
-            projected_grid[sky_grid_index(row, column, columns)] =
-                project_sky_direction(sky_direction_q12(yaw, pitch), camera);
+            let dir = [
+                clamp_i16(-mul_q12_i32(yaw_sin[column], pitch_cos[row])),
+                clamp_i16(pitch_sin[row]),
+                clamp_i16(-mul_q12_i32(yaw_cos[column], pitch_cos[row])),
+            ];
+            projected_grid[sky_grid_index(row, column, columns)] = sky_projector
+                .project(dir)
+                .map(|(sx, sy)| (sx.clamp(-512, 831), sy.clamp(-256, 495)));
         }
     }
 
@@ -7450,11 +7407,17 @@ fn draw_sky_panorama(sky: LevelSkyRecord, camera: WorldCamera) {
             if sky_quad_outside_screen(projected) {
                 continue;
             }
-            draw_quad_textured_material(
+            // Same GP0 words as the old immediate `draw_quad_textured_material`,
+            // but pushed into the OT background slot so the whole sky DMAs as
+            // one chain instead of per-quad FIFO writes + wait_cmd_ready spins.
+            let quad = QuadTexturedMaterial::with_material(
                 projected,
                 [(u0, v0), (u1, v0), (u0, v1), (u1, v1)],
                 material,
             );
+            if let Some(packet) = primitive_packets.push(quad) {
+                ot.add_packet_slot(SKY_OT_SLOT, packet);
+            }
         }
     }
 }
@@ -7465,49 +7428,12 @@ fn sky_grid_index(row: usize, column: usize, columns: usize) -> usize {
         .min(SKY_CYCLORAMA_GRID_POINTS_MAX - 1)
 }
 
-fn project_sky_direction(dir: [i16; 3], camera: WorldCamera) -> Option<(i16, i16)> {
-    let x = i32::from(dir[0]);
-    let y = i32::from(dir[1]);
-    let z = i32::from(dir[2]);
-    let sin_yaw = camera.sin_yaw.raw();
-    let cos_yaw = camera.cos_yaw.raw();
-    let sin_pitch = camera.sin_pitch.raw();
-    let cos_pitch = camera.cos_pitch.raw();
-    let x1 = mul_q12_i32(x, cos_yaw) - mul_q12_i32(z, sin_yaw);
-    let z1 = -mul_q12_i32(x, sin_yaw) - mul_q12_i32(z, cos_yaw);
-    let y2 = mul_q12_i32(y, cos_pitch) - mul_q12_i32(z1, sin_pitch);
-    let z2 = mul_q12_i32(y, sin_pitch) + mul_q12_i32(z1, cos_pitch);
-    if z2 <= NEAR_Z {
-        return None;
-    }
-    let sx = SCREEN_CX as i32 + (x1 * FOCAL) / z2;
-    let sy = SCREEN_CY as i32 - (y2 * FOCAL) / z2;
-    Some((
-        clamp_i16(sx.clamp(-512, 831)),
-        clamp_i16(sy.clamp(-256, 495)),
-    ))
-}
-
 fn sky_quad_outside_screen(points: [(i16, i16); 4]) -> bool {
     let min_x = points.iter().map(|p| p.0).min().unwrap_or(0);
     let max_x = points.iter().map(|p| p.0).max().unwrap_or(0);
     let min_y = points.iter().map(|p| p.1).min().unwrap_or(0);
     let max_y = points.iter().map(|p| p.1).max().unwrap_or(0);
     max_x < 0 || min_x >= SCREEN_W || max_y < 0 || min_y >= SCREEN_H
-}
-
-fn sky_direction_q12(yaw_degrees: i32, pitch_degrees: i32) -> [i16; 3] {
-    let yaw = angle_from_degrees_i32(yaw_degrees);
-    let pitch = angle_from_degrees_i32(pitch_degrees.clamp(-82, 82));
-    let yaw_sin = yaw.sin().raw();
-    let yaw_cos = yaw.cos().raw();
-    let pitch_sin = pitch.sin().raw();
-    let pitch_cos = pitch.cos().raw();
-    [
-        clamp_i16(-mul_q12_i32(yaw_sin, pitch_cos)),
-        clamp_i16(pitch_sin),
-        clamp_i16(-mul_q12_i32(yaw_cos, pitch_cos)),
-    ]
 }
 
 fn angle_from_degrees_i32(degrees: i32) -> Angle {
@@ -7934,6 +7860,91 @@ fn streamed_slot_reserved(slot: usize, reserved_slots: &[usize], reserved_count:
     false
 }
 
+/// Breadth-first room-graph ring around `start`.
+///
+/// Walks the portal connectivity graph (portals are edges, rooms are nodes) in
+/// distance order and writes the rooms reachable within `max_depth` portal hops
+/// into `out`, stopping once `out_cap` rooms are written. Because expansion is
+/// distance-ordered, capping keeps the NEAREST rooms. Returns the number of
+/// rooms written.
+///
+/// Neighbours of room `r` are the `destination_room`s of the portals in
+/// `ROOM_PORTALS[r.portal_first .. r.portal_first + r.portal_count]`. Invalid
+/// indices and indices outside `ROOMS` are skipped.
+fn room_graph_ring(
+    start: RoomIndex,
+    max_depth: u16,
+    out: &mut [RoomIndex],
+    out_cap: usize,
+) -> usize {
+    let mut count = 0usize;
+    if start == INVALID_ROOM_INDEX
+        || start.to_usize() >= ROOMS.len()
+        || start.to_usize() >= MAX_STREAMED_ROOM_INDEX_COUNT
+        || out_cap == 0
+    {
+        return count;
+    }
+
+    let mut visited = [false; MAX_STREAMED_ROOM_INDEX_COUNT];
+    let mut queue = [(INVALID_ROOM_INDEX, 0u16); MAX_STREAMED_ROOM_INDEX_COUNT];
+    let mut head = 0usize;
+    let mut tail = 0usize;
+
+    visited[start.to_usize()] = true;
+    queue[tail] = (start, 0u16);
+    tail += 1;
+
+    while head < tail {
+        let (room, depth) = queue[head];
+        head += 1;
+
+        if count < out_cap {
+            out[count] = room;
+            count += 1;
+        } else {
+            break;
+        }
+
+        if depth >= max_depth {
+            continue;
+        }
+
+        let Some(record) = ROOMS.get(room.to_usize()) else {
+            continue;
+        };
+        let portal_first = record.portal_first as usize;
+        let portal_end = portal_first.saturating_add(record.portal_count as usize);
+        let mut portal_index = portal_first;
+        while portal_index < portal_end.min(ROOM_PORTALS.len()) {
+            let portal = ROOM_PORTALS[portal_index];
+            portal_index += 1;
+            if portal.source_room != room {
+                continue;
+            }
+            let neighbour = portal.destination_room;
+            if neighbour == INVALID_ROOM_INDEX {
+                continue;
+            }
+            let neighbour_idx = neighbour.to_usize();
+            if neighbour_idx >= ROOMS.len() || neighbour_idx >= MAX_STREAMED_ROOM_INDEX_COUNT {
+                continue;
+            }
+            if visited[neighbour_idx] {
+                continue;
+            }
+            if tail >= MAX_STREAMED_ROOM_INDEX_COUNT {
+                continue;
+            }
+            visited[neighbour_idx] = true;
+            queue[tail] = (neighbour, depth + 1);
+            tail += 1;
+        }
+    }
+
+    count
+}
+
 #[cfg(feature = "cd-stream-bench")]
 fn room_requested(
     room: RoomIndex,
@@ -7950,61 +7961,42 @@ fn room_requested(
     false
 }
 
-#[cfg(feature = "cd-stream-bench")]
-fn push_stream_room_request(
-    requested_rooms: &mut [RoomIndex; STREAMED_ROOM_SLOT_COUNT],
-    requested_count: &mut usize,
-    request_limit: usize,
-    room: RoomIndex,
-) -> bool {
-    if room == INVALID_ROOM_INDEX
-        || *requested_count >= request_limit
-        || *requested_count >= STREAMED_ROOM_SLOT_COUNT
-        || room_requested(room, requested_rooms, *requested_count)
-    {
-        return false;
-    }
-    requested_rooms[*requested_count] = room;
-    *requested_count += 1;
-    true
-}
-
-#[cfg(feature = "cd-stream-bench")]
-fn streamed_request_sector_span(
-    requested_rooms: &[RoomIndex; STREAMED_ROOM_SLOT_COUNT],
-    requested_count: usize,
-) -> Option<(u32, u32)> {
-    let mut span_start = u32::MAX;
-    let mut span_end = 0u32;
-    let mut found = false;
-    let mut i = 0usize;
-    while i < requested_count.min(STREAMED_ROOM_SLOT_COUNT) {
-        let room = requested_rooms[i];
-        if room == INVALID_ROOM_INDEX {
-            i += 1;
-            continue;
-        }
-        let info = cd_stream::world_room_chunk_info(room.raw(), WORLD_PACK_TOC)?;
-        if info.sector_count == 0
-            || info.byte_size == 0
-            || info.byte_size > STREAMED_ROOM_SLOT_BYTES
-        {
-            return None;
-        }
-        span_start = span_start.min(info.sector_offset);
-        span_end = span_end.max(info.sector_offset.saturating_add(info.sector_count));
-        found = true;
-        i += 1;
-    }
-    if found {
-        Some((span_start, span_end))
-    } else {
-        None
-    }
-}
-
+// Retained after the BFS-ring residency rewrite (the desired-set is now copied
+// from the cached stream ring); kept for other build paths / future reuse.
 const fn room_material_fallback() -> WorldRenderMaterial {
     WorldRenderMaterial::both(TextureMaterial::opaque(0, TPAGE_WORD, (0x80, 0x80, 0x80)))
+}
+
+/// Refactor B: room-surface materials live in a pool keyed by the resident
+/// `stream_slot` rather than inline in `ActiveRuntimeRoom`, so the per-crossing
+/// copy of the `[ActiveRuntimeRoom; MAX_ACTIVE_ROOMS]` window stays small. An
+/// entry is (re)built whenever a room becomes active in its slot and read at
+/// render through `ActiveRuntimeRoom::materials()`.
+#[cfg(feature = "cd-stream-bench")]
+#[derive(Copy, Clone)]
+struct ResidentRoomMaterials {
+    materials: [WorldRenderMaterial; MAX_ROOM_MATERIALS],
+    count: usize,
+}
+
+#[cfg(feature = "cd-stream-bench")]
+static mut ROOM_MATERIAL_POOL: [ResidentRoomMaterials; STREAMED_ROOM_SLOT_COUNT] =
+    [ResidentRoomMaterials {
+        materials: [room_material_fallback(); MAX_ROOM_MATERIALS],
+        count: 0,
+    }; STREAMED_ROOM_SLOT_COUNT];
+
+#[cfg(feature = "cd-stream-bench")]
+fn store_room_materials(
+    stream_slot: u16,
+    materials: [WorldRenderMaterial; MAX_ROOM_MATERIALS],
+    count: usize,
+) {
+    let slot = stream_slot as usize;
+    if slot < STREAMED_ROOM_SLOT_COUNT {
+        let pool = unsafe { &mut *core::ptr::addr_of_mut!(ROOM_MATERIAL_POOL) };
+        pool[slot] = ResidentRoomMaterials { materials, count };
+    }
 }
 
 #[cfg(all(
@@ -8860,7 +8852,9 @@ fn portal_visibility_result_draws_room(
     let mut i = 0usize;
     while i < visibility.room_count.min(MAX_ACTIVE_ROOMS) {
         if visibility.rooms[i].room == index {
-            return true;
+            // Visible (and resident for prefetch) but only drawn when within
+            // the draw distance -- a beyond-far room renders nothing.
+            return visibility.rooms[i].within_far;
         }
         i += 1;
     }
@@ -8926,20 +8920,26 @@ fn build_active_room(
     }
     let payload = parse_active_room_payload(slot, index, record)?;
     let (materials, material_count) = build_runtime_room_material_table(record);
+    let stream_slot = active_room_stream_slot(index);
+    #[cfg(feature = "cd-stream-bench")]
+    store_room_materials(stream_slot, materials, material_count);
     let surface_cache = active_room_surface_cache_for(index);
     Some(ActiveRuntimeRoom {
         index,
-        stream_slot: active_room_stream_slot(index),
+        stream_slot,
         render_room: payload.render_room,
         collision_room: payload.collision_room,
         width: payload.width,
         depth: payload.depth,
         sector_size: payload.sector_size,
         ambient_rgb: payload.ambient_rgb,
+        #[cfg(not(feature = "cd-stream-bench"))]
         materials,
+        #[cfg(not(feature = "cd-stream-bench"))]
         material_count,
         offset_x: room_origin_x(record).saturating_sub(room_origin_x(current_record)),
         offset_z: room_origin_z(record).saturating_sub(room_origin_z(current_record)),
+        offset_y: record.origin_y.saturating_sub(current_record.origin_y),
         surface_cache,
     })
 }
@@ -9209,6 +9209,13 @@ fn room_origin_z(record: &LevelRoomRecord) -> i32 {
     record.origin_z.saturating_mul(record.sector_size)
 }
 
+/// Vertical origin of a room in engine units. Unlike X/Z (`origin_*` in
+/// sectors), `origin_y` is already stored in engine units, so it is used
+/// directly. Drives Y rebasing across room transitions for stacked floors.
+fn room_origin_y(record: &LevelRoomRecord) -> i32 {
+    record.origin_y
+}
+
 #[derive(Copy, Clone)]
 struct ActiveRoomView {
     position: RoomPoint,
@@ -9258,46 +9265,6 @@ fn portal_visibility_view_keys(view: ActiveRoomView) -> (i16, i16, i16, i16) {
     )
 }
 
-#[derive(Copy, Clone)]
-struct ChunkResidencyScore {
-    tier: u8,
-    distance: u32,
-}
-
-impl ChunkResidencyScore {
-    const WORST: Self = Self {
-        tier: u8::MAX,
-        distance: u32::MAX,
-    };
-
-    fn better_than(self, other: Self) -> bool {
-        self.tier < other.tier || (self.tier == other.tier && self.distance < other.distance)
-    }
-}
-
-fn chunk_residency_score(
-    chunk: LevelChunkRecord,
-    current_index: RoomIndex,
-    current_record: &LevelRoomRecord,
-    player: RoomPoint,
-) -> Option<ChunkResidencyScore> {
-    let current_authored_room = authored_room_for_chunk(current_index)?;
-    let same_authored = chunk.authored_room == current_authored_room;
-    if !same_authored
-        && authored_room_for_chunk(current_index)
-            .and_then(|authored| authored_bounds_current_space(authored, current_record))
-            .is_some_and(|bounds| {
-                rects_overlap(chunk_bounds_current_space(chunk, current_record), bounds)
-            })
-    {
-        return None;
-    }
-    Some(ChunkResidencyScore {
-        tier: if same_authored { 0 } else { 1 },
-        distance: chunk_distance_sq_current_space(chunk, current_record, player),
-    })
-}
-
 fn authored_room_for_chunk(index: RoomIndex) -> Option<u32> {
     chunk_record_for_room(index).map(|chunk| chunk.authored_room)
 }
@@ -9309,59 +9276,6 @@ fn chunk_record_for_room(index: RoomIndex) -> Option<&'static LevelChunkRecord> 
         }
     }
     ROOM_CHUNKS.iter().find(|chunk| chunk.room == index)
-}
-
-fn authored_bounds_current_space(
-    authored_room: u32,
-    current_record: &LevelRoomRecord,
-) -> Option<(i32, i32, i32, i32)> {
-    let mut bounds: Option<(i32, i32, i32, i32)> = None;
-    for chunk in ROOM_CHUNKS {
-        if chunk.authored_room != authored_room {
-            continue;
-        }
-        bounds = Some(match bounds {
-            Some((ax0, ax1, az0, az1)) => {
-                let (bx0, bx1, bz0, bz1) = chunk_bounds_current_space(*chunk, current_record);
-                (ax0.min(bx0), ax1.max(bx1), az0.min(bz0), az1.max(bz1))
-            }
-            None => chunk_bounds_current_space(*chunk, current_record),
-        });
-    }
-    bounds
-}
-
-fn rects_overlap(a: (i32, i32, i32, i32), b: (i32, i32, i32, i32)) -> bool {
-    let (ax0, ax1, az0, az1) = a;
-    let (bx0, bx1, bz0, bz1) = b;
-    ax0 < bx1 && ax1 > bx0 && az0 < bz1 && az1 > bz0
-}
-
-fn chunk_distance_sq_current_space(
-    chunk: LevelChunkRecord,
-    current_record: &LevelRoomRecord,
-    player: RoomPoint,
-) -> u32 {
-    let (x0, x1, z0, z1) = chunk_bounds_current_space(chunk, current_record);
-    rect_distance_sq(player.x, player.z, x0, x1, z0, z1)
-}
-
-fn chunk_bounds_current_space(
-    chunk: LevelChunkRecord,
-    current_record: &LevelRoomRecord,
-) -> (i32, i32, i32, i32) {
-    let sector_size = current_record.sector_size.max(1);
-    let x0 = chunk
-        .origin_x
-        .saturating_sub(current_record.origin_x)
-        .saturating_mul(sector_size);
-    let z0 = chunk
-        .origin_z
-        .saturating_sub(current_record.origin_z)
-        .saturating_mul(sector_size);
-    let x1 = x0.saturating_add((chunk.width as i32).saturating_mul(sector_size));
-    let z1 = z0.saturating_add((chunk.depth as i32).saturating_mul(sector_size));
-    (x0, x1, z0, z1)
 }
 
 fn chunk_overlaps_collision_window(
@@ -9752,7 +9666,7 @@ fn local_to_global_room_point(room: RoomIndex, point: RoomPoint) -> RoomPoint {
     };
     RoomPoint::new(
         point.x.saturating_add(room_origin_x(record)),
-        point.y,
+        point.y.saturating_add(room_origin_y(record)),
         point.z.saturating_add(room_origin_z(record)),
     )
 }
@@ -9763,7 +9677,7 @@ fn global_to_local_room_point(room: RoomIndex, point: RoomPoint) -> RoomPoint {
     };
     RoomPoint::new(
         point.x.saturating_sub(room_origin_x(record)),
-        point.y,
+        point.y.saturating_sub(room_origin_y(record)),
         point.z.saturating_sub(room_origin_z(record)),
     )
 }
@@ -9773,7 +9687,7 @@ fn camera_for_room(camera: WorldCamera, active: ActiveRuntimeRoom) -> WorldCamer
         camera.projection,
         WorldVertex::new(
             camera.position.x.saturating_sub(active.offset_x),
-            camera.position.y,
+            camera.position.y.saturating_sub(active.offset_y),
             camera.position.z.saturating_sub(active.offset_z),
         ),
         camera.sin_yaw,
@@ -9888,7 +9802,7 @@ impl RuntimeRoomLighting {
         point: WorldVertex,
         material: TextureMaterial,
     ) -> TextureMaterial {
-        material.with_tint(self.shade_tint_at(RoomPoint::from_world_vertex(point), material.tint()))
+        material.with_tint(self.shade_tint_at(point, material.tint()))
     }
 
     fn shade_tint_at(&self, point: RoomPoint, base: (u8, u8, u8)) -> (u8, u8, u8) {
@@ -9902,7 +9816,7 @@ impl RuntimeRoomLighting {
         if !self.fog_enabled || self.fog_far <= self.fog_near {
             return tint;
         }
-        let depth = self.camera.view_vertex(point.to_world_vertex()).z;
+        let depth = self.camera.view_vertex(point).z;
         self.apply_fog_at_depth(tint, depth)
     }
 
@@ -9997,10 +9911,10 @@ impl WorldSurfaceLighting for RuntimeRoomLighting {
             ];
         }
         [
-            self.shade_vertex(sample, RoomPoint::from_world_vertex(vertices[0]), material),
-            self.shade_vertex(sample, RoomPoint::from_world_vertex(vertices[1]), material),
-            self.shade_vertex(sample, RoomPoint::from_world_vertex(vertices[2]), material),
-            self.shade_vertex(sample, RoomPoint::from_world_vertex(vertices[3]), material),
+            self.shade_vertex(sample, vertices[0], material),
+            self.shade_vertex(sample, vertices[1], material),
+            self.shade_vertex(sample, vertices[2], material),
+            self.shade_vertex(sample, vertices[3], material),
         ]
     }
 
@@ -10023,26 +9937,10 @@ impl WorldSurfaceLighting for RuntimeRoomLighting {
             ];
         }
         [
-            self.shade_tint_at_depth(
-                RoomPoint::from_world_vertex(vertices[0]),
-                material.texture.tint(),
-                depths[0],
-            ),
-            self.shade_tint_at_depth(
-                RoomPoint::from_world_vertex(vertices[1]),
-                material.texture.tint(),
-                depths[1],
-            ),
-            self.shade_tint_at_depth(
-                RoomPoint::from_world_vertex(vertices[2]),
-                material.texture.tint(),
-                depths[2],
-            ),
-            self.shade_tint_at_depth(
-                RoomPoint::from_world_vertex(vertices[3]),
-                material.texture.tint(),
-                depths[3],
-            ),
+            self.shade_tint_at_depth(vertices[0], material.texture.tint(), depths[0]),
+            self.shade_tint_at_depth(vertices[1], material.texture.tint(), depths[1]),
+            self.shade_tint_at_depth(vertices[2], material.texture.tint(), depths[2]),
+            self.shade_tint_at_depth(vertices[3], material.texture.tint(), depths[3]),
         ]
     }
 
@@ -12183,15 +12081,28 @@ fn draw_box_prop_faces<T>(
         let Some(texture_asset) = prop.texture_assets[face] else {
             continue;
         };
-        let Some(asset) = find_asset_of_kind(ASSETS, texture_asset, AssetKind::Texture) else {
-            continue;
-        };
-        let Some(slot) = ensure_texture_uploaded_with_clut_mode(
-            asset.id,
-            asset.bytes,
-            VramSlotClutMode::TransparentZero,
-        ) else {
-            continue;
+        // Box props share the texture pool with room surfaces, so the texture
+        // is already resident: look the slot up directly and skip the per-face
+        // linear ASSETS scan + upload check. Fall back to the full
+        // resolve-and-upload path only on a (rare) cold miss. `find_vram_slot`
+        // returns exactly the slot `ensure_texture_uploaded` would for a
+        // resident asset, so this is bit-identical.
+        let slot = match find_vram_slot(texture_asset, VramSlotClutMode::TransparentZero) {
+            Some(slot) => slot,
+            None => {
+                let Some(asset) = find_asset_of_kind(ASSETS, texture_asset, AssetKind::Texture)
+                else {
+                    continue;
+                };
+                match ensure_texture_uploaded_with_clut_mode(
+                    asset.id,
+                    asset.bytes,
+                    VramSlotClutMode::TransparentZero,
+                ) {
+                    Some(slot) => slot,
+                    None => continue,
+                }
+            }
         };
         let material = TextureMaterial::opaque(slot.clut_word, slot.tpage_word, (0x80, 0x80, 0x80))
             .with_texture_window(slot.texture_window);
@@ -12987,7 +12898,7 @@ fn draw_entity_markers(
 }
 
 fn draw_lock_target_indicator(target: RoomPoint, camera: WorldCamera, elapsed_tick: SimTick) {
-    let Some(center) = camera.project_world(target.to_world_vertex()) else {
+    let Some(center) = camera.project_world(target) else {
         return;
     };
 
@@ -13374,5 +13285,18 @@ fn main() -> ! {
             .with_max_fixed_ticks_before_visual(RUNTIME_SCHEDULE.max_fixed_ticks_before_visual),
         ..Config::default()
     };
-    App::run(config, &mut scene);
+    // Drive the cooked game flow (front-end UI scenes + gameplay) rather than
+    // booting straight into gameplay, so an authored menu shows first and
+    // `GAME_FLOW.entry` (set from the project's boot target) decides where
+    // play begins.
+    App::run_with_flow(
+        config,
+        &GAME_FLOW,
+        UI_SCENES,
+        UI_NODES,
+        OPTIONS,
+        UI_SFX_SAMPLES,
+        UI_SFX_CUES,
+        &mut scene,
+    );
 }

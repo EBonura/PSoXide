@@ -345,6 +345,10 @@ pub mod ui_node_flags {
     pub const TEXT_ALIGN_MASK: u16 = 0x0030;
     /// Label text wraps inside its rectangle.
     pub const TEXT_WRAP: u16 = 1 << 6;
+    /// Button background is transparent: skip the fill and draw only the label.
+    pub const BUTTON_TRANSPARENT: u16 = 1 << 7;
+    /// Music node restarts its CD-DA track when playback ends.
+    pub const MUSIC_LOOP: u16 = 1 << 8;
 }
 
 typed_index! {
@@ -625,6 +629,11 @@ pub struct LevelRoomRecord {
     pub origin_x: i32,
     /// Editor-side origin Z.
     pub origin_z: i32,
+    /// Room vertical placement in engine units, authored from the
+    /// Room node's transform. Diagnostic only for now (the cooker
+    /// still array-roots geometry at ground level); it is the
+    /// preserved foundation for Tomb-Raider-style stacked rooms.
+    pub origin_y: i32,
     /// Engine units per sector.
     pub sector_size: i32,
     /// Camera-space far plane used for room/actor rendering.
@@ -637,6 +646,8 @@ pub struct LevelRoomRecord {
     pub resident_chunk_limit: u8,
     /// Maximum cooked rooms selected for drawing/collision for this world.
     pub visible_chunk_limit: u8,
+    /// Downward acceleration in engine units per fixed 60 Hz tick squared.
+    pub gravity_per_tick: i32,
     /// First index into the global `MATERIALS` table for this
     /// room's material slice.
     pub material_first: MaterialIndex,
@@ -1447,6 +1458,48 @@ pub struct LevelBoxPropRecord {
     pub flags: u16,
 }
 
+/// One addressable cooked UI scene. Each scene names a contiguous
+/// block inside the shared [`UI_NODES`](LevelUiNodeRecord) pool, so
+/// the runtime can activate any authored scene as a game state by
+/// id without re-cooking. `node_first`/`node_count` index the
+/// shared pool; parent indices stored in the pooled nodes are
+/// already pool-relative.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelUiScene {
+    /// Stable scene id, assigned at author time and preserved across renames.
+    pub id: u16,
+    /// Display name.
+    pub name: &'static str,
+    /// First node index into the shared UI node pool.
+    pub node_first: u16,
+    /// Number of nodes belonging to this scene.
+    pub node_count: u16,
+}
+
+/// One state in the game flow graph. A `UiScene` state shows the
+/// named scene; `Gameplay` hands control to the level runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlowState {
+    /// Show a UI scene by its [`LevelUiScene::id`].
+    UiScene {
+        /// Target scene id.
+        scene: u16,
+    },
+    /// Run the gameplay/level simulation.
+    Gameplay,
+}
+
+/// Cooked game-state flow definition. `states` is the addressable
+/// state table and `entry` is the index into `states` the runtime
+/// begins in. Plain `Copy` data so it lives in a generated `static`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GameFlow {
+    /// Flow state table.
+    pub states: &'static [FlowState],
+    /// Index into `states` of the starting state.
+    pub entry: u16,
+}
+
 /// Screen-space UI node kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LevelUiNodeKind {
@@ -1462,6 +1515,20 @@ pub enum LevelUiNodeKind {
     Image,
     /// Horizontal value bar.
     Bar,
+    /// Interactive button: a filled rect with a centered label that
+    /// fires a [`LevelUiAction`] when activated. Activation handling
+    /// is a later step; cooking and rendering land now.
+    Button,
+    /// Interactive slider bound to a project option: a track, a
+    /// proportional fill, and a draggable knob. The bound option id
+    /// lives in [`LevelUiNodeRecord::option`]. Value changes are a
+    /// later step.
+    Slider,
+    /// Non-visual CD-DA music cue for the containing UI scene. The
+    /// cooked track number lives in [`LevelUiNodeRecord::option`],
+    /// volume percentage in [`LevelUiNodeRecord::value`], and loop state
+    /// in [`ui_node_flags::MUSIC_LOOP`].
+    Music,
 }
 
 /// Runtime value source for data-bound UI elements.
@@ -1469,6 +1536,8 @@ pub enum LevelUiNodeKind {
 pub enum LevelUiValueBinding {
     /// Literal Q12 fixed-point value.
     ConstantQ12(i32),
+    /// Live project option value.
+    Option(u16),
     /// Player health value.
     PlayerHealth,
     /// Player health maximum.
@@ -1477,6 +1546,102 @@ pub enum LevelUiValueBinding {
     PlayerStamina,
     /// Player stamina maximum.
     PlayerStaminaMax,
+}
+
+/// UI event that can fire one of a node's cooked SFX cues.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LevelUiSfxEvent {
+    /// Focus moved onto this control.
+    Focus,
+    /// Button activation / confirm.
+    Activate,
+    /// Slider value changed by one authored step.
+    SliderNudge,
+    /// Slider was nudged while already clamped at its min/max.
+    SliderLimit,
+}
+
+/// One cooked UI SFX sample blob. Samples are global to a cooked level and
+/// nodes reference them indirectly through [`LevelUiSfxCueRecord::sample`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelUiSfxSampleRecord {
+    /// Cooked `.psau` bytes, usually from `include_bytes!`.
+    pub bytes: &'static [u8],
+}
+
+/// One authored SFX cue for a UI node event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelUiSfxCueRecord {
+    /// Index into the generated `UI_SFX_SAMPLES` table.
+    pub sample: u16,
+    /// Event that triggers this cue.
+    pub event: LevelUiSfxEvent,
+    /// Per-play volume as a percentage of full voice volume.
+    pub volume_percent: u8,
+    /// Pitch multiplier in Q12 (`4096` = source pitch).
+    pub pitch_q12: u16,
+    /// Reserved runtime flags.
+    pub flags: u16,
+}
+
+/// Action a [`LevelUiNodeKind::Button`] fires when activated. Plain
+/// `Copy` data carrying compact ids so it lives in a generated
+/// `static`. Activation/navigation is wired in a later step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LevelUiAction {
+    /// Switch the game flow to the named [`LevelUiScene`] by id.
+    GotoScene {
+        /// Target [`LevelUiScene::id`].
+        scene: u16,
+    },
+    /// Enter the gameplay/level simulation.
+    StartGameplay,
+    /// Return to the previous menu/scene.
+    Back,
+    /// Adjust a project option by a signed delta.
+    SetOption {
+        /// Target option id (mirrors the authored `OptionId`).
+        option: u16,
+        /// Signed step applied to the option value.
+        delta: i32,
+    },
+    /// Game-specific action dispatched by opaque id.
+    Game {
+        /// Caller-defined action id.
+        id: u16,
+    },
+}
+
+/// Sentinel meaning "this node binds to no project option". Stored in
+/// [`LevelUiNodeRecord::option`] for every non-`Slider` node.
+pub const UI_OPTION_NONE: u16 = u16::MAX;
+
+/// Sentinel meaning "this UI node has no cooked SFX cue range".
+pub const UI_SFX_NONE: u16 = u16::MAX;
+
+/// One cooked project option: a runtime-tunable integer with a bounded
+/// range, step, and default. Sliders ([`LevelUiNodeRecord::option`]) and
+/// `SetOption` button actions ([`LevelUiAction::SetOption`]) reference an
+/// option by [`Self::id`]. The authoring side's richer kinds (int range,
+/// enum, bool) all flatten to this integer triple at cook time: an enum is
+/// `[0, variants - 1]` step `1`, a bool is `[0, 1]` step `1`.
+///
+/// Plain `Copy` POD so a generated `OPTIONS` static lives in the linker's
+/// rodata next to the rest of the manifest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelOptionDef {
+    /// Stable option id (mirrors the authored `OptionId`, low 16 bits).
+    /// Matched against [`LevelUiNodeRecord::option`] and
+    /// [`LevelUiAction::SetOption::option`].
+    pub id: u16,
+    /// Inclusive minimum value.
+    pub min: i32,
+    /// Inclusive maximum value.
+    pub max: i32,
+    /// Step applied per slider nudge (the `SetOption` delta is used as-is).
+    pub step: i32,
+    /// Initial value the runtime store seeds with.
+    pub default: i32,
 }
 
 /// One cooked screen-space UI node.
@@ -1494,22 +1659,168 @@ pub struct LevelUiNodeRecord {
     pub width: u16,
     /// Height in canvas pixels.
     pub height: u16,
-    /// Primary colour: fill for `Rect`/`Bar`, text tint for `Label`.
+    /// Primary colour: fill for `Rect`/`Bar`/`Button`, text tint for
+    /// `Label`, track colour for `Slider`.
     pub color: [u8; 3],
-    /// Secondary colour, currently the `Bar` background.
+    /// Secondary colour: `Bar` background or `Slider` fill.
     pub background: [u8; 3],
+    /// Tertiary colour, currently the `Slider` knob.
+    pub accent: [u8; 3],
     /// Current value binding for `Bar`.
     pub value: LevelUiValueBinding,
     /// Maximum value binding for `Bar`.
     pub max: LevelUiValueBinding,
     /// Texture asset for `Image`, or `AssetId(u16::MAX)`.
     pub texture_asset: AssetId,
-    /// Text for `Label`.
+    /// Text for `Label`/`Button`.
     pub text: &'static str,
     /// Runtime lookup tag for dynamic labels. Empty means untagged.
     pub tag: &'static str,
+    /// Action fired by a `Button`. Ignored by other kinds.
+    pub action: LevelUiAction,
+    /// Project option a `Slider` binds to, or [`UI_OPTION_NONE`].
+    pub option: u16,
     /// Runtime flags.
     pub flags: u16,
+    /// First index into the generated `UI_SFX_CUES` table, or
+    /// [`UI_SFX_NONE`] when this node has no SFX.
+    pub sfx_first: u16,
+    /// Number of SFX cues belonging to this node.
+    pub sfx_count: u8,
+    /// Font selector for `Label` / `Button` text: an index into the font
+    /// table the caller passes to the UI renderer. `0` is the default font;
+    /// an index past the end of the table falls back to font `0`. Lets a
+    /// scene mix, e.g., a large title font and a small body font. Ignored by
+    /// non-text node kinds.
+    pub font: u8,
+}
+
+/// Direction a focus move travels across a menu's focusable rects.
+///
+/// Maps one-to-one to the four d-pad directions at the runtime call
+/// site and to the arrow keys in the editor's nav preview. Both
+/// callers drive the same [`next_focus`] resolver through this enum so
+/// editor and runtime agree on which control a press lands on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NavDir {
+    /// Toward smaller screen Y.
+    Up,
+    /// Toward larger screen Y.
+    Down,
+    /// Toward smaller screen X.
+    Left,
+    /// Toward larger screen X.
+    Right,
+}
+
+/// One focusable control's absolute on-screen rectangle, in canvas
+/// pixels. The caller builds these from its own node model (cooked
+/// [`LevelUiNodeRecord`]s at runtime, authored `UiNode`s in the
+/// editor), so the resolver stays input- and model-agnostic: it is
+/// pure geometry plus integer math.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NavRect {
+    /// Left edge in canvas pixels.
+    pub x: i16,
+    /// Top edge in canvas pixels.
+    pub y: i16,
+    /// Width in canvas pixels.
+    pub w: u16,
+    /// Height in canvas pixels.
+    pub h: u16,
+}
+
+impl NavRect {
+    /// Center X doubled, so the half-pixel center stays exact in
+    /// integer math (a 3-wide rect centers at x + 1.5). Comparisons
+    /// and gaps below all work in this doubled space.
+    #[inline]
+    const fn center_x2(self) -> i32 {
+        self.x as i32 * 2 + self.w as i32
+    }
+
+    /// Center Y doubled. See [`NavRect::center_x2`].
+    #[inline]
+    const fn center_y2(self) -> i32 {
+        self.y as i32 * 2 + self.h as i32
+    }
+}
+
+/// Pick the focusable rect to move to from `current` in direction
+/// `dir`, or `None` if nothing lies that way.
+///
+/// # Rule
+///
+/// Working in doubled-center space (so centers are exact integers):
+/// a candidate is eligible only if its center is strictly past the
+/// current center along the primary axis of `dir` (above for `Up`,
+/// right for `Right`, and so on). Among eligible candidates the score
+/// is `primary_gap + secondary_penalty`, where `primary_gap` is the
+/// forward distance along the move axis and `secondary_penalty` is the
+/// perpendicular offset. The penalty is weighted heavier than the gap
+/// so the move prefers the control most in line with the press before
+/// reaching for one far off to the side; ties break toward the lower
+/// index for determinism. All integer, no allocation, `no_std`.
+///
+/// `current` out of range, or a candidate list where nothing is
+/// eligible, both yield `None`.
+pub fn next_focus(rects: &[NavRect], current: usize, dir: NavDir) -> Option<usize> {
+    let from = rects.get(current).copied()?;
+    let from_cx = from.center_x2();
+    let from_cy = from.center_y2();
+
+    // Perpendicular offset is weighted so a control directly in line
+    // with the press always wins over one the same forward distance
+    // away but off to the side. 2x keeps it integer and is enough to
+    // dominate the typical primary gap without overflowing i32 for any
+    // sane canvas size.
+    const SECONDARY_WEIGHT: i32 = 2;
+
+    let mut best: Option<(usize, i32)> = None;
+    for (index, candidate) in rects.iter().enumerate() {
+        if index == current {
+            continue;
+        }
+        let cx = candidate.center_x2();
+        let cy = candidate.center_y2();
+        let (primary_gap, secondary) = match dir {
+            NavDir::Up => (from_cy - cy, (cx - from_cx).abs()),
+            NavDir::Down => (cy - from_cy, (cx - from_cx).abs()),
+            NavDir::Left => (from_cx - cx, (cy - from_cy).abs()),
+            NavDir::Right => (cx - from_cx, (cy - from_cy).abs()),
+        };
+        // Must make real forward progress along the move axis.
+        if primary_gap <= 0 {
+            continue;
+        }
+        let score = primary_gap + secondary * SECONDARY_WEIGHT;
+        match best {
+            Some((_, best_score)) if best_score <= score => {}
+            _ => best = Some((index, score)),
+        }
+    }
+    best.map(|(index, _)| index)
+}
+
+/// Pick the initial focus: the top-left-most focusable rect.
+///
+/// Smaller screen Y wins first (top), then smaller screen X (left),
+/// then the lower index. `None` for an empty list. Deterministic
+/// integer compares so editor and runtime agree on the default focus.
+pub fn first_focus(rects: &[NavRect]) -> Option<usize> {
+    let mut best: Option<(usize, i32, i32)> = None;
+    for (index, rect) in rects.iter().enumerate() {
+        let cy = rect.center_y2();
+        let cx = rect.center_x2();
+        let better = match best {
+            None => true,
+            Some((_, best_cy, best_cx)) => cy < best_cy || (cy == best_cy && cx < best_cx),
+        };
+        if better {
+            best = Some((index, cy, cx));
+        }
+    }
+    best.map(|(index, _, _)| index)
 }
 
 /// Cooked weapon-local hit shape.
@@ -1768,6 +2079,8 @@ pub struct LevelCharacterRecord {
     pub visual_yaw: i16,
     /// Render-only uniform scale in Q8 fixed point (`256 = 1.0`).
     pub visual_scale_q8: u16,
+    /// Gravity multiplier in Q8 fixed point (`256 = 1.0x`).
+    pub weight_q8: u16,
     /// Capsule radius in engine units. Used by collision +
     /// any future debug draw.
     pub radius: u16,
@@ -2140,5 +2453,140 @@ mod tests {
         assert_eq!(core::mem::align_of::<LevelCachedRoomCellRecord>(), 4);
         assert_eq!(core::mem::align_of::<LevelCachedRoomVertexRecord>(), 4);
         assert_eq!(core::mem::align_of::<LevelCachedRoomSurfaceRecord>(), 2);
+    }
+
+    // A vertical column of three same-width buttons, evenly spaced.
+    const COLUMN: [NavRect; 3] = [
+        NavRect {
+            x: 100,
+            y: 10,
+            w: 80,
+            h: 20,
+        },
+        NavRect {
+            x: 100,
+            y: 40,
+            w: 80,
+            h: 20,
+        },
+        NavRect {
+            x: 100,
+            y: 70,
+            w: 80,
+            h: 20,
+        },
+    ];
+
+    #[test]
+    fn first_focus_picks_top_left_most() {
+        // Out of order on purpose: bottom row authored first, then the
+        // top-right, then the top-left. first_focus must still pick the
+        // geometric top-left (index 2), not authoring order.
+        let rects = [
+            NavRect {
+                x: 10,
+                y: 90,
+                w: 20,
+                h: 20,
+            },
+            NavRect {
+                x: 90,
+                y: 10,
+                w: 20,
+                h: 20,
+            },
+            NavRect {
+                x: 10,
+                y: 10,
+                w: 20,
+                h: 20,
+            },
+        ];
+        assert_eq!(first_focus(&rects), Some(2));
+        assert_eq!(first_focus(&[]), None);
+    }
+
+    #[test]
+    fn next_focus_walks_a_vertical_column() {
+        assert_eq!(next_focus(&COLUMN, 0, NavDir::Down), Some(1));
+        assert_eq!(next_focus(&COLUMN, 1, NavDir::Down), Some(2));
+        // Past the last row there is nothing further down.
+        assert_eq!(next_focus(&COLUMN, 2, NavDir::Down), None);
+        assert_eq!(next_focus(&COLUMN, 2, NavDir::Up), Some(1));
+        assert_eq!(next_focus(&COLUMN, 0, NavDir::Up), None);
+        // No horizontal neighbours in a single column.
+        assert_eq!(next_focus(&COLUMN, 1, NavDir::Left), None);
+        assert_eq!(next_focus(&COLUMN, 1, NavDir::Right), None);
+    }
+
+    #[test]
+    fn next_focus_down_skips_to_nearest_row() {
+        // From the top row, Down lands on the adjacent row, not the
+        // far one, even though both are eligible.
+        assert_eq!(next_focus(&COLUMN, 0, NavDir::Down), Some(1));
+    }
+
+    #[test]
+    fn next_focus_prefers_the_aligned_candidate_over_a_closer_offset_one() {
+        // current at index 0. Below it sit two candidates the same
+        // forward distance away: index 1 directly underneath, index 2
+        // shoved far to the right. The secondary penalty must steer the
+        // move to the aligned one.
+        let rects = [
+            NavRect {
+                x: 100,
+                y: 10,
+                w: 20,
+                h: 20,
+            },
+            NavRect {
+                x: 100,
+                y: 50,
+                w: 20,
+                h: 20,
+            },
+            NavRect {
+                x: 260,
+                y: 50,
+                w: 20,
+                h: 20,
+            },
+        ];
+        assert_eq!(next_focus(&rects, 0, NavDir::Down), Some(1));
+    }
+
+    #[test]
+    fn next_focus_moves_horizontally_in_a_row() {
+        let row = [
+            NavRect {
+                x: 10,
+                y: 50,
+                w: 40,
+                h: 20,
+            },
+            NavRect {
+                x: 70,
+                y: 50,
+                w: 40,
+                h: 20,
+            },
+            NavRect {
+                x: 130,
+                y: 50,
+                w: 40,
+                h: 20,
+            },
+        ];
+        assert_eq!(next_focus(&row, 0, NavDir::Right), Some(1));
+        assert_eq!(next_focus(&row, 1, NavDir::Right), Some(2));
+        assert_eq!(next_focus(&row, 2, NavDir::Right), None);
+        assert_eq!(next_focus(&row, 2, NavDir::Left), Some(1));
+        assert_eq!(next_focus(&row, 0, NavDir::Left), None);
+    }
+
+    #[test]
+    fn next_focus_out_of_range_current_is_none() {
+        assert_eq!(next_focus(&COLUMN, 99, NavDir::Down), None);
+        assert_eq!(next_focus(&[], 0, NavDir::Up), None);
     }
 }

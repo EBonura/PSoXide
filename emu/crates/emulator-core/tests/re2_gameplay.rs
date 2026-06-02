@@ -13,8 +13,9 @@
 use std::path::PathBuf;
 
 use emulator_core::{
-    button, fast_boot_disc_with_hle, warm_bios_for_disc_fast_boot, Bus, ButtonState, Cpu,
-    DISC_FAST_BOOT_WARMUP_STEPS,
+    button, fast_boot_disc_with_hle,
+    input_tape::{read_tape, write_tape, PadSample},
+    warm_bios_for_disc_fast_boot, Bus, Cpu, DISC_FAST_BOOT_WARMUP_STEPS,
 };
 
 const DEFAULT_BIOS: &str = "bios/SCPH1001.BIN";
@@ -41,13 +42,24 @@ fn re2_dualshock_disc1_selects_original_game_and_reaches_first_playable_room() {
     bus.attach_digital_pad_port1();
     bus.attach_memcard_port1(Vec::new());
 
+    // Record the scripted route to the shared PXITAPE1 tape and read it
+    // back, so this real-game regression drives input through the same
+    // format the editor records and `launch --input-tape` replays.
+    let route: Vec<PadSample> = (0..1_000u64)
+        .map(|vblank| PadSample::from_buttons(re2_original_game_route_mask(vblank)))
+        .collect();
+    let tape_path = std::env::temp_dir().join("psoxide-re2-route.pxtape");
+    write_tape(&tape_path, &route).expect("write RE2 route tape");
+    let route = read_tape(&tape_path).expect("read RE2 route tape");
+    let _ = std::fs::remove_file(&tape_path);
+
     let mut current_pad_mask = u16::MAX;
     let mut cycles_at_last_pump = bus.cycles();
     for _ in 0..GAMEPLAY_STEPS {
         let vblank = bus.irq().raise_counts()[0];
-        let pad_mask = re2_original_game_route_mask(vblank);
+        let pad_mask = route.get(vblank as usize).map(|s| s.buttons).unwrap_or(0);
         if pad_mask != current_pad_mask {
-            bus.set_port1_buttons(ButtonState::from_bits(pad_mask));
+            PadSample::from_buttons(pad_mask).apply_to_bus(&mut bus);
             current_pad_mask = pad_mask;
         }
         cpu.step(&mut bus).expect("CPU step");

@@ -517,13 +517,6 @@ pub fn run_benchmark() {
     telemetry::stage_end(telemetry::stage::CD_STREAM_BENCH);
 }
 
-pub fn world_room_chunk_info(
-    room_id: u16,
-    toc: &[LevelWorldPackEntryRecord],
-) -> Option<WorldChunkInfo> {
-    world_pack_entry_from_toc(toc, room_id as u32)
-}
-
 #[cfg(all(feature = "cd-stream-benchmark", not(target_arch = "mips")))]
 fn run_benchmark_inner() -> BenchResult {
     BenchResult::unsupported()

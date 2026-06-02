@@ -185,6 +185,12 @@ pub struct LaunchArgs {
     /// Capture every Nth guest frame when `--guest-hash-log` is enabled.
     #[arg(long, default_value_t = 60)]
     pub guest_hash_interval: u64,
+    /// Write a per-guest-frame CSV of frametime (bus-cycle delta) alongside the
+    /// portal/streaming masks and camera position. Lets a streaming/visibility
+    /// change be measured frame-by-frame and a drawn-but-not-visible room be
+    /// pinned to an exact camera position over a recorded sweep.
+    #[arg(long)]
+    pub counter_log: Option<PathBuf>,
     /// Optional path to dump the final VRAM as a raw PPM image.
     /// Lets you eyeball the boot state without firing up the GUI.
     #[arg(long)]
@@ -196,6 +202,10 @@ pub struct LaunchArgs {
     /// a window or screen-capture permission.
     #[arg(long)]
     pub dump_hw: Option<PathBuf>,
+    /// Optional path to dump the SPU's mixed stereo output as a 16-bit
+    /// 44.1 kHz WAV, for A/B comparison against a reference emulator.
+    #[arg(long)]
+    pub dump_audio: Option<PathBuf>,
     /// Print a guest-runtime telemetry summary captured out-of-band.
     #[arg(long)]
     pub dump_guest_profile: bool,
@@ -205,6 +215,13 @@ pub struct LaunchArgs {
     /// Hold the game run button during the headless run.
     #[arg(long)]
     pub hold_run: bool,
+    /// Scripted camera sweep: alternate rotating the camera in place (right
+    /// stick) with walking forward (left stick), so a recorded window visits
+    /// several positions and full rotations. Use with `--counter-log` to
+    /// reproduce portal-visibility false-positives/flicker that a straight
+    /// `--hold-forward` walk never triggers.
+    #[arg(long)]
+    pub sweep: bool,
 }
 
 /// Arguments for `build-project-disc`.
@@ -245,6 +262,9 @@ pub struct DumpEditorPreviewArgs {
     /// Hide the streaming grid overlay.
     #[arg(long)]
     pub no_grid: bool,
+    /// Active floor to render (0 = ground). Diagnostic for stacked-floor rooms.
+    #[arg(long, default_value_t = 0)]
+    pub active_floor: usize,
 }
 
 /// Arguments for `validate`.
@@ -448,6 +468,12 @@ fn run_headless_launch(
     emit_summary: bool,
 ) -> Result<HeadlessLaunchResult, String> {
     let settings = Settings::load(&paths.settings_file()).unwrap_or_default();
+    if args.sweep && (args.input_tape.is_some() || args.hold_forward || args.hold_run) {
+        return Err(
+            "--sweep cannot be combined with --input-tape, --hold-forward, or --hold-run"
+                .to_string(),
+        );
+    }
     if args.input_tape.is_some() && (args.hold_forward || args.hold_run) {
         return Err(
             "--input-tape cannot be combined with --hold-forward or --hold-run".to_string(),
@@ -621,6 +647,14 @@ fn run_headless_launch(
             bus.set_port1_sticks(0x80, 0x80, 0x80, 0x00);
         }
     }
+    if args.sweep {
+        let mut buttons = ButtonState::NONE;
+        buttons.press(button::CIRCLE);
+        bus.set_port1_buttons(buttons);
+        let (rx, ry, lx, ly) = sweep_pad(1);
+        bus.set_port1_sticks(rx, ry, lx, ly);
+    }
+    let mut sweep_frame = 0u64;
     let mut tape_cursor = 0usize;
     if let Some(samples) = tape_samples.as_ref() {
         samples[tape_cursor].apply_to_bus(&mut bus);
@@ -643,11 +677,14 @@ fn run_headless_launch(
         "guest",
     )?;
     let mut observed_guest_hash_frames = observed_guest_frames;
+    let mut counter_log = CounterLog::new(args.counter_log.as_deref())?;
+    let mut observed_counter_frames = observed_guest_frames;
 
     // Step the CPU. Report early on opcode errors -- they're usually
     // "we hit an unimplemented instruction" and worth surfacing.
     let mut stopped_at: Option<u64> = None;
     let mut audio_cycle_accum = 0u64;
+    let mut audio_capture: Vec<(i16, i16)> = Vec::new();
     let gte_profile_before = cpu.cop2().profile_snapshot();
     for i in 0..args.steps {
         let cycles_before = bus.cycles();
@@ -662,7 +699,10 @@ fn run_headless_launch(
         audio_cycle_accum %= SAMPLE_CYCLES;
         if sample_count > 0 {
             bus.run_spu_samples(sample_count);
-            let _ = bus.spu.drain_audio();
+            let drained = bus.spu.drain_audio();
+            if args.dump_audio.is_some() {
+                audio_capture.extend(drained);
+            }
         }
         let current_guest_frames = bus.telemetry.frames_seen();
         if let Some(samples) = tape_samples.as_ref() {
@@ -674,6 +714,11 @@ fn run_headless_launch(
                     samples[tape_cursor].apply_to_bus(&mut bus);
                 }
             }
+        }
+        if args.sweep && current_guest_frames != sweep_frame {
+            sweep_frame = current_guest_frames;
+            let (rx, ry, lx, ly) = sweep_pad(current_guest_frames);
+            bus.set_port1_sticks(rx, ry, lx, ly);
         }
         if current_guest_frames != observed_guest_frames {
             if let Some(summary) = profile_summary.as_mut() {
@@ -707,6 +752,10 @@ fn run_headless_launch(
                 &bus,
             )?;
         }
+        while observed_counter_frames < current_guest_frames {
+            observed_counter_frames += 1;
+            counter_log.record(observed_counter_frames, cpu.tick(), bus.cycles(), &bus)?;
+        }
         if let Some(target) = args.guest_visual_frames {
             if target > 0
                 && bus
@@ -727,6 +776,7 @@ fn run_headless_launch(
     }
     visual_hash_log.flush()?;
     guest_hash_log.flush()?;
+    counter_log.flush()?;
 
     if emit_summary {
         println!(
@@ -760,17 +810,25 @@ fn run_headless_launch(
         summary.counter_max_values = counter_max_values;
         summary.counter_latest_values = counter_latest_values;
         print_guest_profile(&summary);
-        print_gte_profile(
-            &gte_profile_before,
-            &gte_profile_after,
-            summary.frames.max(1),
-        );
+        print_gte_profile(&gte_profile_before, &gte_profile_after, &summary);
     }
 
     if let Some(path) = args.dump_vram {
         dump_vram_ppm(&bus, &path)?;
         if emit_summary {
             eprintln!("[cli] VRAM → {}", path.display());
+        }
+    }
+
+    if let Some(path) = args.dump_audio.as_ref() {
+        write_wav_s16_stereo(path, 44_100, &audio_capture)?;
+        if emit_summary {
+            eprintln!(
+                "[cli] audio → {} ({} stereo samples, {:.2}s @ 44.1kHz)",
+                path.display(),
+                audio_capture.len(),
+                audio_capture.len() as f64 / 44_100.0
+            );
         }
     }
 
@@ -813,6 +871,35 @@ fn run_headless_launch(
         display_rgba_height,
         vram_words: bus.gpu.vram.words().to_vec(),
     })
+}
+
+/// Write 16-bit stereo PCM as a canonical 44-byte-header WAV. No crate
+/// dependency -- the SPU output is already interleaved `(left, right)`.
+fn write_wav_s16_stereo(
+    path: &std::path::Path,
+    sample_rate: u32,
+    samples: &[(i16, i16)],
+) -> Result<(), String> {
+    let data_len = (samples.len() as u32).saturating_mul(4); // 2 ch * 2 bytes
+    let mut out: Vec<u8> = Vec::with_capacity(44 + data_len as usize);
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&(36 + data_len).to_le_bytes());
+    out.extend_from_slice(b"WAVE");
+    out.extend_from_slice(b"fmt ");
+    out.extend_from_slice(&16u32.to_le_bytes()); // PCM fmt chunk size
+    out.extend_from_slice(&1u16.to_le_bytes()); // format = PCM
+    out.extend_from_slice(&2u16.to_le_bytes()); // channels
+    out.extend_from_slice(&sample_rate.to_le_bytes());
+    out.extend_from_slice(&(sample_rate * 4).to_le_bytes()); // byte rate
+    out.extend_from_slice(&4u16.to_le_bytes()); // block align
+    out.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&data_len.to_le_bytes());
+    for (l, r) in samples {
+        out.extend_from_slice(&l.to_le_bytes());
+        out.extend_from_slice(&r.to_le_bytes());
+    }
+    std::fs::write(path, out).map_err(|e| format!("write wav {}: {e}", path.display()))
 }
 
 fn cmd_build_editor_playtest_disc() -> Result<(), String> {
@@ -1142,11 +1229,14 @@ fn validation_launch_args(
         visual_hash_interval: 1,
         guest_hash_log: None,
         guest_hash_interval: 60,
+        counter_log: None,
         dump_vram: None,
         dump_hw: None,
+        dump_audio: None,
         dump_guest_profile: false,
         hold_forward: checkpoint.hold_forward,
         hold_run: checkpoint.hold_run,
+        sweep: false,
     }
 }
 
@@ -1198,6 +1288,20 @@ fn cli_repo_root() -> PathBuf {
 fn attach_headless_playtest_pad(bus: &mut Bus) {
     bus.attach_digital_pad_port1();
     let _ = bus.force_port1_analog_mode();
+}
+
+/// Scripted DualShock state for `--sweep`, keyed on guest frame. Alternates
+/// ~180 frames rotating the camera in place (right stick) with ~180 frames
+/// walking forward (left stick), so a recorded window visits several positions
+/// and full rotations -- exercising multi-portal viewpoints a straight walk
+/// never reaches. Returns `(right_x, right_y, left_x, left_y)` in the DualShock
+/// 0x00..=0xFF byte convention (0x80 centered; left_y 0x00 = forward).
+fn sweep_pad(frame: u64) -> (u8, u8, u8, u8) {
+    if frame % 360 < 180 {
+        (0xFF, 0x80, 0x80, 0x80)
+    } else {
+        (0x80, 0x80, 0x80, 0x00)
+    }
 }
 
 fn hash_vram(bus: &Bus) -> u64 {
@@ -1286,6 +1390,75 @@ impl DisplayHashLog {
     }
 }
 
+/// Per-guest-frame log of frametime + the portal/streaming masks and camera
+/// position, so a streaming/visibility change can be measured frame-by-frame
+/// and a drawn-but-not-visible room pinned to an exact camera position.
+struct CounterLog {
+    writer: Option<BufWriter<std::fs::File>>,
+}
+
+impl CounterLog {
+    fn new(path: Option<&Path>) -> Result<Self, String> {
+        let Some(path) = path else {
+            return Ok(Self { writer: None });
+        };
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+        }
+        let file =
+            std::fs::File::create(path).map_err(|e| format!("create {}: {e}", path.display()))?;
+        let mut writer = BufWriter::new(file);
+        writeln!(
+            writer,
+            "guest_frame,cpu_tick,bus_cycles,resident_mask,active_mask,drawn_mask,visible_mask,cam_x_biased,cam_y_biased,cam_z_biased,current_room"
+        )
+        .map_err(|e| format!("write {}: {e}", path.display()))?;
+        Ok(Self {
+            writer: Some(writer),
+        })
+    }
+
+    fn record(
+        &mut self,
+        guest_frame: u64,
+        cpu_tick: u64,
+        bus_cycles: u64,
+        bus: &Bus,
+    ) -> Result<(), String> {
+        let Some(writer) = self.writer.as_mut() else {
+            return Ok(());
+        };
+        use telemetry::counter as c;
+        let g = |id| bus.telemetry.counter_latest_value(id);
+        writeln!(
+            writer,
+            "{guest_frame},{cpu_tick},{bus_cycles},{},{},{},{},{},{},{},{}",
+            g(c::ROOM_STREAM_RESIDENT_MASK_LO),
+            g(c::ROOM_ACTIVE_CHUNK_MASK_LO),
+            g(c::ROOM_DRAWN_CHUNK_MASK_LO),
+            g(c::PORTAL_VIS_VISIBLE_MASK_LO),
+            g(c::ROOM_CAMERA_GLOBAL_X_BIASED),
+            g(c::ROOM_CAMERA_GLOBAL_Y_BIASED),
+            g(c::ROOM_CAMERA_GLOBAL_Z_BIASED),
+            g(c::PORTAL_VIS_CURRENT_ROOM),
+        )
+        .map_err(|e| format!("write counter log: {e}"))
+    }
+
+    fn flush(&mut self) -> Result<(), String> {
+        if let Some(writer) = self.writer.as_mut() {
+            writer
+                .flush()
+                .map_err(|e| format!("flush counter log: {e}"))?;
+        }
+        Ok(())
+    }
+}
+
 fn cmd_dump_editor_preview(args: DumpEditorPreviewArgs) -> Result<(), String> {
     let (project_root, project_file) = resolve_project_arg(&args.project);
     let project = ProjectDocument::load_from_path(&project_file)
@@ -1317,7 +1490,15 @@ fn cmd_dump_editor_preview(args: DumpEditorPreviewArgs) -> Result<(), String> {
         true,
         true,
         &empty_hidden,
-        None,
+        // Active room defaults to the first room; pass the requested
+        // active floor so stacked-floor rooms can be inspected per floor.
+        project
+            .active_scene()
+            .nodes()
+            .iter()
+            .find(|n| matches!(n.kind, psxed_project::NodeKind::Room { .. }))
+            .map(|n| n.id),
+        args.active_floor,
         NodeId::ROOT,
         None,
         None,
@@ -1366,19 +1547,51 @@ fn resolve_project_arg(path: &Path) -> (PathBuf, PathBuf) {
     }
 }
 
-fn print_gte_profile(before: &GteProfileSnapshot, after: &GteProfileSnapshot, frames: u64) {
+fn print_gte_profile(
+    before: &GteProfileSnapshot,
+    after: &GteProfileSnapshot,
+    summary: &telemetry::GuestTelemetrySummary,
+) {
     let ops = after.ops.saturating_sub(before.ops);
     let cycles = after
         .estimated_cycles
         .saturating_sub(before.estimated_cycles);
-    let frames = frames.max(1);
+    let guest_frames = summary.frames.max(1);
     println!("gte_profile:");
-    println!("  ops={}  per_frame={:.0}", ops, ops as f64 / frames as f64);
     println!(
-        "  estimated_cycles={}  per_frame={:.0}",
-        cycles,
-        cycles as f64 / frames as f64
+        "  ops={}  per_guest_frame={:.0}",
+        ops,
+        ops as f64 / guest_frames as f64
     );
+    println!(
+        "  estimated_cycles={}  per_guest_frame={:.0}",
+        cycles,
+        cycles as f64 / guest_frames as f64
+    );
+    // GTE load against the render budget. NOTE: this emulator does not charge
+    // GTE op latency to the CPU frametime, so `estimated_cycles` is the real
+    // hardware GTE load; the rest of the per-frame budget is headroom available
+    // for offloading CPU geometry math (matrix-vector, perspective divide,
+    // cross-product backface) onto the otherwise-idle GTE.
+    let visual_frames = counter_total(summary, telemetry::counter::VISUAL_FRAMES).max(1);
+    let interval_total = counter_total(summary, telemetry::counter::VISUAL_INTERVAL_VBLANKS);
+    let per_render = cycles / visual_frames;
+    if interval_total > 0 && summary.frames > 0 {
+        let vblanks = interval_total as f64 / summary.frames as f64;
+        let budget = vblanks * NTSC_CPU_CYCLES_PER_VBLANK as f64;
+        let pct = if budget > 0.0 {
+            100.0 * per_render as f64 / budget
+        } else {
+            0.0
+        };
+        println!(
+            "  estimated_cycles_per_visual_frame={}  ({:.1}% of the {:.0}-cycle render budget, ~{:.1}% GTE headroom)",
+            per_render,
+            pct,
+            budget,
+            (100.0 - pct).max(0.0)
+        );
+    }
     println!("  opcodes:");
     for opcode in 0..after.opcode_counts.len() {
         let count = after.opcode_counts[opcode].saturating_sub(before.opcode_counts[opcode]);
@@ -1386,10 +1599,10 @@ fn print_gte_profile(before: &GteProfileSnapshot, after: &GteProfileSnapshot, fr
             continue;
         }
         println!(
-            "    0x{opcode:02x} {:<6} count={:<10} per_frame={:.0}",
+            "    0x{opcode:02x} {:<6} count={:<10} per_guest_frame={:.0}",
             gte_opcode_name(opcode as u8),
             count,
-            count as f64 / frames as f64
+            count as f64 / guest_frames as f64
         );
     }
 }
@@ -1715,7 +1928,7 @@ fn region_label(e: &LibraryEntry) -> &'static str {
 
 fn dump_hw_ppm(bus: &Bus, path: &std::path::Path) -> Result<bool, String> {
     let display = bus.gpu.display_area();
-    if display.bpp24 {
+    if display.bpp24 || bus.gpu.horizontal_display_offset_px() != 0 {
         let (rgba, w, h) = bus.gpu.display_rgba8();
         write_rgb_ppm_from_rgba(path, w, h, &rgba)?;
         return Ok(true);
