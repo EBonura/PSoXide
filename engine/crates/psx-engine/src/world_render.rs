@@ -1333,8 +1333,7 @@ pub fn draw_room_lit_grid_visible<const OT: usize, L: WorldSurfaceLighting>(
                             max_y,
                             visibility.screen_margin,
                         ) {
-                            stats.cells_frustum_culled =
-                                stats.cells_frustum_culled.wrapping_add(1);
+                            stats.cells_frustum_culled = stats.cells_frustum_culled.wrapping_add(1);
                         } else {
                             stats.cells_drawn = stats.cells_drawn.wrapping_add(1);
                             let cell_options = tile_depth_options(
@@ -1457,8 +1456,7 @@ pub fn draw_room_vertex_lit_grid_visible<const OT: usize, L: WorldSurfaceLightin
                             max_y,
                             visibility.screen_margin,
                         ) {
-                            stats.cells_frustum_culled =
-                                stats.cells_frustum_culled.wrapping_add(1);
+                            stats.cells_frustum_culled = stats.cells_frustum_culled.wrapping_add(1);
                         } else {
                             stats.cells_drawn = stats.cells_drawn.wrapping_add(1);
                             let cell_options = tile_depth_options(
@@ -1542,21 +1540,20 @@ pub fn draw_room_vertex_lit_visible_cells<const OT: usize, L: WorldSurfaceLighti
         }
         stats.cells_drawn = stats.cells_drawn.wrapping_add(1);
         let cell_options = tile_depth_options(options, camera, *cell, sector_size);
-        stats.surfaces_considered =
-            stats
-                .surfaces_considered
-                .wrapping_add(draw_sector_vertex_lit(
-                    room,
-                    cell.x,
-                    cell.z,
-                    sector,
-                    materials,
-                    lighting,
-                    camera,
-                    cell_options,
-                    triangles,
-                    world,
-                ));
+        stats.surfaces_considered = stats
+            .surfaces_considered
+            .wrapping_add(draw_sector_vertex_lit(
+                room,
+                cell.x,
+                cell.z,
+                sector,
+                materials,
+                lighting,
+                camera,
+                cell_options,
+                triangles,
+                world,
+            ));
     }
     stats
 }
@@ -2718,7 +2715,7 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                     surface_options,
                     prepared_depth,
                     CullMode::Back,
-                    split_triangles_runtime(surface.split),
+                    surface.split,
                     profile,
                 );
                 profile.add_submit(RoomSurfaceMicroProfile::elapsed(submit_start));
@@ -2829,7 +2826,7 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                     surface_options,
                     prepared_depth,
                     CullMode::Back,
-                    SPLIT_NW_SE_TRIANGLES,
+                    SPLIT_NW_SE,
                     profile,
                 );
                 profile.add_submit(RoomSurfaceMicroProfile::elapsed(submit_start));
@@ -4445,7 +4442,7 @@ fn submit_sided_projected_gouraud_quad_cached_uv_words<const OT: usize>(
     options: WorldSurfaceOptions,
     prepared_depth: Option<PreparedTriangleDepth>,
     _base_cull: CullMode,
-    split_triangles: [(usize, usize, usize); 2],
+    split: u8,
     profile: &mut RoomSurfaceMicroProfile,
 ) {
     let (verts, uv_words, colors) = match material.sidedness {
@@ -4457,79 +4454,31 @@ fn submit_sided_projected_gouraud_quad_cached_uv_words<const OT: usize>(
         SurfaceSidedness::Front | SurfaceSidedness::Both => (verts, uv_words, colors),
     };
     let opts = options.with_material_layer(material.texture);
-    let [(a, b, c), (d, e, f)] = split_triangles;
     // The hardware quad (GP0 3Ch) rasterizes as tri(q0,q1,q2)+tri(q1,q2,q3),
     // i.e. the 1-2 diagonal. Reorder the four corners so that diagonal
     // lands on the engine's split diagonal, then one quad packet is
     // pixel-identical to the two leaves (proved bit-exact in the emulator
-    // GPU tests). Only the two authored diagonals are recognised; any
-    // other split falls back to the two-triangle path.
-    let quad_order = match split_triangles {
-        [(0, 1, 2), (0, 2, 3)] => Some([1usize, 0, 2, 3]),
-        [(0, 1, 3), (1, 2, 3)] => Some([0usize, 1, 3, 2]),
-        _ => None,
-    };
+    // GPU tests). Unknown split ids use the standard NW-SE fallback, matching
+    // `split_triangles_runtime`.
     if let Some(prepared_depth) = prepared_depth {
-        if let Some(o) = quad_order {
-            let _ = world.submit_textured_gouraud_quad_leaf_uv_words_prepared_depth(
-                triangles,
-                [verts[o[0]], verts[o[1]], verts[o[2]], verts[o[3]]],
-                [
-                    uv_words[o[0]],
-                    uv_words[o[1]],
-                    uv_words[o[2]],
-                    uv_words[o[3]],
-                ],
-                [colors[o[0]], colors[o[1]], colors[o[2]], colors[o[3]]],
-                material.gouraud_packet,
-                opts,
-                prepared_depth,
-            );
-            #[cfg(not(feature = "room-surface-profile"))]
-            let _ = profile;
-            return;
-        }
-        #[cfg(feature = "room-surface-profile")]
-        let stats = world.submit_textured_gouraud_triangle_leaf_uv_words_prepared_depth_profiled(
+        let (quad_verts, quad_uv_words, quad_colors) = if split == SPLIT_NE_SW {
+            (
+                [verts[0], verts[1], verts[3], verts[2]],
+                [uv_words[0], uv_words[1], uv_words[3], uv_words[2]],
+                [colors[0], colors[1], colors[3], colors[2]],
+            )
+        } else {
+            (
+                [verts[1], verts[0], verts[2], verts[3]],
+                [uv_words[1], uv_words[0], uv_words[2], uv_words[3]],
+                [colors[1], colors[0], colors[2], colors[3]],
+            )
+        };
+        let _ = world.submit_textured_gouraud_quad_leaf_uv_words_prepared_depth(
             triangles,
-            [verts[a], verts[b], verts[c]],
-            [uv_words[a], uv_words[b], uv_words[c]],
-            [colors[a], colors[b], colors[c]],
-            material.gouraud_packet,
-            opts,
-            prepared_depth,
-            profile.submit_profile(),
-        );
-        #[cfg(not(feature = "room-surface-profile"))]
-        let stats = world.submit_textured_gouraud_triangle_leaf_uv_words_prepared_depth(
-            triangles,
-            [verts[a], verts[b], verts[c]],
-            [uv_words[a], uv_words[b], uv_words[c]],
-            [colors[a], colors[b], colors[c]],
-            material.gouraud_packet,
-            opts,
-            prepared_depth,
-        );
-        if stats.primitive_overflow || stats.command_overflow {
-            return;
-        }
-        #[cfg(feature = "room-surface-profile")]
-        let _ = world.submit_textured_gouraud_triangle_leaf_uv_words_prepared_depth_profiled(
-            triangles,
-            [verts[d], verts[e], verts[f]],
-            [uv_words[d], uv_words[e], uv_words[f]],
-            [colors[d], colors[e], colors[f]],
-            material.gouraud_packet,
-            opts,
-            prepared_depth,
-            profile.submit_profile(),
-        );
-        #[cfg(not(feature = "room-surface-profile"))]
-        let _ = world.submit_textured_gouraud_triangle_leaf_uv_words_prepared_depth(
-            triangles,
-            [verts[d], verts[e], verts[f]],
-            [uv_words[d], uv_words[e], uv_words[f]],
-            [colors[d], colors[e], colors[f]],
+            quad_verts,
+            quad_uv_words,
+            quad_colors,
             material.gouraud_packet,
             opts,
             prepared_depth,
@@ -4538,6 +4487,8 @@ fn submit_sided_projected_gouraud_quad_cached_uv_words<const OT: usize>(
         let _ = profile;
         return;
     }
+    let split_triangles = split_triangles_runtime(split);
+    let [(a, b, c), (d, e, f)] = split_triangles;
     #[cfg(feature = "room-surface-profile")]
     let stats = world.submit_textured_gouraud_triangle_prescreened_uv_words_profiled(
         triangles,
