@@ -2570,10 +2570,22 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
     profile.count_shape(surface.triangle_index);
     let projected_start = RoomSurfaceMicroProfile::cycle();
     let ids = surface.vertex_indices;
-    let Some(projected) = indexed_projected_quad(projected_vertices, ids) else {
-        profile.add_projected(RoomSurfaceMicroProfile::elapsed(projected_start));
-        profile.count_projected_reject();
-        return 0;
+    let (projected, vertex_depths) = if use_vertex_depths {
+        let Some((projected, depths)) =
+            indexed_projected_quad_with_depths(projected_vertices, projected_depths, ids)
+        else {
+            profile.add_projected(RoomSurfaceMicroProfile::elapsed(projected_start));
+            profile.count_projected_reject();
+            return 0;
+        };
+        (projected, Some(depths))
+    } else {
+        let Some(projected) = indexed_projected_quad(projected_vertices, ids) else {
+            profile.add_projected(RoomSurfaceMicroProfile::elapsed(projected_start));
+            profile.count_projected_reject();
+            return 0;
+        };
+        (projected, None)
     };
     profile.add_projected(RoomSurfaceMicroProfile::elapsed(projected_start));
     let screen_start = RoomSurfaceMicroProfile::cycle();
@@ -2634,9 +2646,8 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                     surface,
                     material,
                     cached_vertices,
-                    projected_depths,
                     ids,
-                    use_vertex_depths,
+                    vertex_depths,
                     use_direct_baked_rgb,
                 ) else {
                     profile.add_lighting(RoomSurfaceMicroProfile::elapsed(lighting_start));
@@ -2685,9 +2696,8 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                     surface,
                     material,
                     cached_vertices,
-                    projected_depths,
                     ids,
-                    use_vertex_depths,
+                    vertex_depths,
                     use_direct_baked_rgb,
                 ) else {
                     profile.add_lighting(RoomSurfaceMicroProfile::elapsed(lighting_start));
@@ -2759,9 +2769,8 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                     surface,
                     material,
                     cached_vertices,
-                    projected_depths,
                     ids,
-                    use_vertex_depths,
+                    vertex_depths,
                     use_direct_baked_rgb,
                 ) else {
                     profile.add_lighting(RoomSurfaceMicroProfile::elapsed(lighting_start));
@@ -2805,9 +2814,8 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                     surface,
                     material,
                     cached_vertices,
-                    projected_depths,
                     ids,
-                    use_vertex_depths,
+                    vertex_depths,
                     use_direct_baked_rgb,
                 ) else {
                     profile.add_lighting(RoomSurfaceMicroProfile::elapsed(lighting_start));
@@ -3043,24 +3051,44 @@ fn indexed_projected_quad(
 }
 
 #[inline(always)]
-fn indexed_quad_depths(depths: &[i32], ids: [u16; 4]) -> Option<[i32; 4]> {
+fn indexed_projected_quad_with_depths(
+    projected_vertices: &[ProjectedVertex],
+    depths: &[i32],
+    ids: [u16; 4],
+) -> Option<([ProjectedVertex; 4], [i32; 4])> {
     let a = ids[0] as usize;
     let b = ids[1] as usize;
     let c = ids[2] as usize;
     let d = ids[3] as usize;
     let max_index = a.max(b).max(c).max(d);
-    if max_index >= depths.len() {
+    if max_index >= projected_vertices.len() || max_index >= depths.len() {
         return None;
     }
-    // SAFETY: `max_index < depths.len()` proves every id is in range.
-    unsafe {
-        Some([
-            *depths.get_unchecked(a),
-            *depths.get_unchecked(b),
-            *depths.get_unchecked(c),
-            *depths.get_unchecked(d),
-        ])
+    // SAFETY: the max-index checks prove every id is in range for both slices.
+    let (projected, depths) = unsafe {
+        (
+            [
+                *projected_vertices.get_unchecked(a),
+                *projected_vertices.get_unchecked(b),
+                *projected_vertices.get_unchecked(c),
+                *projected_vertices.get_unchecked(d),
+            ],
+            [
+                *depths.get_unchecked(a),
+                *depths.get_unchecked(b),
+                *depths.get_unchecked(c),
+                *depths.get_unchecked(d),
+            ],
+        )
+    };
+    if !projected[0].is_valid()
+        || !projected[1].is_valid()
+        || !projected[2].is_valid()
+        || !projected[3].is_valid()
+    {
+        return None;
     }
+    Some((projected, depths))
 }
 
 #[inline(always)]
@@ -3069,23 +3097,18 @@ fn indexed_vertex_lighting_colors<L: WorldSurfaceLighting>(
     surface: CachedRoomSurface,
     material: WorldRenderMaterial,
     cached_vertices: &[WorldVertex],
-    depths: &[i32],
     ids: [u16; 4],
-    use_vertex_depths: bool,
+    vertex_depths: Option<[i32; 4]>,
     use_direct_baked_rgb: bool,
 ) -> Option<[(u8, u8, u8); 4]> {
-    if use_direct_baked_rgb && surface.has_baked_rgb() {
+    let has_baked_rgb = surface.has_baked_rgb();
+    if use_direct_baked_rgb && has_baked_rgb {
         return Some(surface.baked_vertex_rgb);
     }
-    if surface.has_baked_rgb() {
-        let prepared_depths = if use_vertex_depths {
-            Some(indexed_quad_depths(depths, ids)?)
-        } else {
-            None
-        };
+    if has_baked_rgb {
         let sample = surface.sample_without_center();
         if let Some(colors) =
-            lighting.shade_cached_baked_vertices(sample, prepared_depths, material)
+            lighting.shade_cached_baked_vertices(sample, vertex_depths, material)
         {
             return Some(colors);
         }
@@ -3094,10 +3117,9 @@ fn indexed_vertex_lighting_colors<L: WorldSurfaceLighting>(
     let vertices = indexed_world_quad(cached_vertices, ids)?;
     let sample = surface.sample_with_center(
         vertices,
-        lighting.needs_surface_sample_center(surface.has_baked_rgb()),
+        lighting.needs_surface_sample_center(has_baked_rgb),
     );
-    if use_vertex_depths {
-        let depths = indexed_quad_depths(depths, ids)?;
+    if let Some(depths) = vertex_depths {
         return Some(vertex_lighting_colors_with_depths(
             lighting, sample, material, vertices, depths,
         ));
