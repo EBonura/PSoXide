@@ -14,10 +14,11 @@
 
 use psx_font::FontAtlas;
 use psx_gpu::framebuf::FrameBuffer;
-use psx_level::LevelOptionDef;
+use psx_level::{AssetId, LevelOptionDef};
 use psx_pad::{button, PadState};
 
 use crate::frames::{SimTick, VideoHz, VisualFrame};
+use crate::ui::UiTextureSlot;
 
 /// Per-frame context passed to [`Scene::update`] and
 /// [`Scene::render`]. The engine owns and updates this between
@@ -137,6 +138,28 @@ pub trait Scene {
     /// scene with no menus. Override to return your uploaded atlas.
     #[inline]
     fn ui_font(&self) -> Option<&FontAtlas> {
+        None
+    }
+
+    /// Font selector lookup for cooked UI nodes. Slot `0` is the first cooked
+    /// UI font; scenes that upload additional atlases override this to expose
+    /// slots `1..`.
+    #[inline]
+    fn ui_font_at(&self, index: u8) -> Option<&FontAtlas> {
+        if index == 0 {
+            self.ui_font()
+        } else {
+            None
+        }
+    }
+
+    /// Texture resolver for front-end UI image nodes. The flow driver owns only
+    /// cooked asset ids; scenes know how their texture assets are packed and
+    /// uploaded, so they translate an [`AssetId`] into GPU texture state here.
+    /// Default skips image nodes, which is correct for projects with text/rect
+    /// menus only.
+    #[inline]
+    fn ui_texture(&self, _asset: AssetId) -> Option<UiTextureSlot> {
         None
     }
 

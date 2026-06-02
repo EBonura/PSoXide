@@ -84,9 +84,9 @@ pub struct UiTextureSlot {
 /// `fonts` is the font table indexed by each node's
 /// [`LevelUiNodeRecord::font`] selector: a `Label` / `Button` draws with
 /// `fonts[node.font]`, falling back to `fonts[0]` when its selector is out of
-/// range. An empty table skips all text (the slice is the multi-font
-/// replacement for the old single `Option<&FontAtlas>`; pass one atlas as a
-/// one-element slice for the common single-font case).
+/// range or the selected slot is empty. An empty table skips all text (the
+/// slice is the multi-font replacement for the old single `Option<&FontAtlas>`;
+/// pass `[Some(font)]` for the common single-font case).
 ///
 /// `focused` is the *pool* index of the currently focused node, if any,
 /// so a focused [`LevelUiNodeKind::Button`] / [`LevelUiNodeKind::Slider`]
@@ -118,7 +118,7 @@ pub fn draw_scene(
     nodes: &[LevelUiNodeRecord],
     first: usize,
     count: usize,
-    fonts: &[&FontAtlas],
+    fonts: &[Option<&FontAtlas>],
     focused: Option<usize>,
     textures: &mut impl FnMut(AssetId) -> Option<UiTextureSlot>,
     value: &impl Fn(LevelUiValueBinding) -> i32,
@@ -239,8 +239,9 @@ fn slider_fill(
 /// table. Returns `fonts[selector]`, falling back to `fonts[0]` when the
 /// selector is out of range, or `None` when the table is empty (text is then
 /// skipped). One indirection, no allocation.
-fn node_font<'f>(fonts: &[&'f FontAtlas], selector: u8) -> Option<&'f FontAtlas> {
-    font_index(fonts.len(), selector).map(|index| fonts[index])
+fn node_font<'f>(fonts: &[Option<&'f FontAtlas>], selector: u8) -> Option<&'f FontAtlas> {
+    let index = font_index(fonts.len(), selector)?;
+    fonts[index].or_else(|| if index == 0 { None } else { fonts[0] })
 }
 
 /// Pure index-selection rule behind [`node_font`], split out so it is testable
@@ -260,7 +261,7 @@ fn font_index(table_len: usize, selector: u8) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::font_index;
+    use super::{font_index, scale_u16_q8};
 
     #[test]
     fn font_index_picks_selector_when_in_range() {
@@ -280,6 +281,13 @@ mod tests {
         // No fonts uploaded: text is skipped entirely.
         assert_eq!(font_index(0, 0), None);
         assert_eq!(font_index(0, 7), None);
+    }
+
+    #[test]
+    fn q8_font_scale_rounds_to_screen_pixels() {
+        assert_eq!(scale_u16_q8(8, 256), 8);
+        assert_eq!(scale_u16_q8(8, 384), 12);
+        assert_eq!(scale_u16_q8(17, 384), 26);
     }
 }
 
@@ -353,12 +361,68 @@ fn anchor_factors(flags: u16) -> (i32, i32) {
     }
 }
 
+const UI_FONT_SCALE_ONE_Q8: u16 = 256;
+const UI_FONT_SCALE_MIN_Q8: u16 = UI_FONT_SCALE_ONE_Q8 / 2;
+const UI_FONT_SCALE_MAX_Q8: u16 = UI_FONT_SCALE_ONE_Q8 * 8;
+
+fn node_font_scale_q8(node: &LevelUiNodeRecord) -> u16 {
+    node.font_scale
+        .clamp(UI_FONT_SCALE_MIN_Q8, UI_FONT_SCALE_MAX_Q8)
+}
+
+fn node_letter_spacing(node: &LevelUiNodeRecord) -> i8 {
+    node.letter_spacing
+}
+
+fn scale_u16_q8(value: u16, scale_q8: u16) -> u16 {
+    let scaled = u32::from(value)
+        .saturating_mul(u32::from(scale_q8))
+        .saturating_add(128)
+        >> 8;
+    scaled.min(u32::from(u16::MAX)) as u16
+}
+
+fn scaled_text_width(font: &FontAtlas, text: &str, scale_q8: u16, letter_spacing: i8) -> u16 {
+    let base = i32::from(scale_u16_q8(font.text_width(text), scale_q8));
+    let gaps = text
+        .chars()
+        .count()
+        .saturating_sub(1)
+        .min(i32::MAX as usize) as i32;
+    let spacing = gaps.saturating_mul(i32::from(letter_spacing));
+    base.saturating_add(spacing).clamp(0, i32::from(u16::MAX)) as u16
+}
+
+fn scaled_line_height(font: &FontAtlas, scale_q8: u16) -> i16 {
+    scale_u16_q8(font.line_height(), scale_q8)
+        .max(1)
+        .min(i16::MAX as u16) as i16
+}
+
+fn draw_scaled_text(
+    font: &FontAtlas,
+    x: i16,
+    y: i16,
+    text: &str,
+    scale_q8: u16,
+    letter_spacing: i8,
+    tint: (u8, u8, u8),
+) {
+    if scale_q8 == UI_FONT_SCALE_ONE_Q8 {
+        font.draw_text_with_spacing(x, y, text, letter_spacing, tint);
+    } else {
+        font.draw_text_scaled_with_spacing_q8(x, y, text, scale_q8, scale_q8, letter_spacing, tint);
+    }
+}
+
 fn draw_label(font: &FontAtlas, node: &LevelUiNodeRecord, x: i16, y: i16, width: u16) {
     let tint = rgb(node.color);
+    let scale = node_font_scale_q8(node);
+    let letter_spacing = node_letter_spacing(node);
     let align = (node.flags & ui_node_flags::TEXT_ALIGN_MASK) >> ui_node_flags::TEXT_ALIGN_SHIFT;
     if node.flags & ui_node_flags::TEXT_WRAP == 0 {
-        let text_x = aligned_text_x(font, node.text, x, width, align);
-        font.draw_text(text_x, y, node.text, tint);
+        let text_x = aligned_text_x(font, node.text, x, width, align, scale, letter_spacing);
+        draw_scaled_text(font, text_x, y, node.text, scale, letter_spacing, tint);
         return;
     }
 
@@ -371,16 +435,23 @@ fn draw_label(font: &FontAtlas, node: &LevelUiNodeRecord, x: i16, y: i16, width:
         if start >= node.text.len() {
             break;
         }
-        let end = wrapped_line_end(font, node.text, start, width);
+        let end = wrapped_line_end(font, node.text, start, width, scale, letter_spacing);
         let line = &node.text[start..end];
-        let text_x = aligned_text_x(font, line, x, width, align);
-        font.draw_text(text_x, line_y, line, tint);
-        line_y = line_y.saturating_add(font.line_height() as i16);
+        let text_x = aligned_text_x(font, line, x, width, align, scale, letter_spacing);
+        draw_scaled_text(font, text_x, line_y, line, scale, letter_spacing, tint);
+        line_y = line_y.saturating_add(scaled_line_height(font, scale));
         start = end;
     }
 }
 
-fn wrapped_line_end(font: &FontAtlas, text: &str, start: usize, width: u16) -> usize {
+fn wrapped_line_end(
+    font: &FontAtlas,
+    text: &str,
+    start: usize,
+    width: u16,
+    scale: u16,
+    letter_spacing: i8,
+) -> usize {
     let bytes = text.as_bytes();
     let mut end = start;
     let mut last_space = None;
@@ -392,7 +463,9 @@ fn wrapped_line_end(font: &FontAtlas, text: &str, start: usize, width: u16) -> u
         if bytes[end] == b' ' {
             last_space = Some(end);
         }
-        if next > start && font.text_width(&text[start..next]) > width {
+        if next > start
+            && scaled_text_width(font, &text[start..next], scale, letter_spacing) > width
+        {
             return last_space
                 .filter(|space| *space > start)
                 .unwrap_or(end.max(start + 1));
@@ -402,8 +475,16 @@ fn wrapped_line_end(font: &FontAtlas, text: &str, start: usize, width: u16) -> u
     end
 }
 
-fn aligned_text_x(font: &FontAtlas, text: &str, x: i16, width: u16, align: u16) -> i16 {
-    let text_w = font.text_width(text) as i32;
+fn aligned_text_x(
+    font: &FontAtlas,
+    text: &str,
+    x: i16,
+    width: u16,
+    align: u16,
+    scale: u16,
+    letter_spacing: i8,
+) -> i16 {
+    let text_w = scaled_text_width(font, text, scale, letter_spacing) as i32;
     let base = x as i32;
     let available = width as i32;
     let offset = match align {
@@ -508,12 +589,22 @@ fn draw_button(
     if node.text.is_empty() {
         return;
     }
-    let line_h = font.line_height() as i32;
+    let scale = node_font_scale_q8(node);
+    let letter_spacing = node_letter_spacing(node);
+    let line_h = scaled_line_height(font, scale) as i32;
     let text_y = (y as i32 + (height as i32 - line_h).max(0) / 2)
         .clamp(i16::MIN as i32, i16::MAX as i32) as i16;
     let align = (node.flags & ui_node_flags::TEXT_ALIGN_MASK) >> ui_node_flags::TEXT_ALIGN_SHIFT;
-    let text_x = aligned_text_x(font, node.text, x, width, align);
-    font.draw_text(text_x, text_y, node.text, rgb(node.accent));
+    let text_x = aligned_text_x(font, node.text, x, width, align, scale, letter_spacing);
+    draw_scaled_text(
+        font,
+        text_x,
+        text_y,
+        node.text,
+        scale,
+        letter_spacing,
+        rgb(node.accent),
+    );
 }
 
 /// Draw a slider: a recessed track, a proportional fill, and a knob
