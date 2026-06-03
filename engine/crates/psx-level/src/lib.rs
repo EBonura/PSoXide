@@ -2429,6 +2429,13 @@ impl<const RAM_CAP: usize, const VRAM_CAP: usize> ResidencyManager<RAM_CAP, VRAM
         insert(&mut self.vram, id)
     }
 
+    /// Mark `id` no longer VRAM-resident. Returns `true` if it was
+    /// present (now removed), `false` if it was not resident. The
+    /// freed slot is immediately reusable by a later `mark_*`.
+    pub fn mark_vram_evicted(&mut self, id: AssetId) -> bool {
+        remove(&mut self.vram, id)
+    }
+
     /// Number of RAM slots in use.
     pub fn ram_len(&self) -> usize {
         self.ram.iter().filter(|s| s.is_some()).count()
@@ -2501,6 +2508,20 @@ fn insert<const N: usize>(slots: &mut [Option<AssetId>; N], id: AssetId) -> bool
         if slots[i].is_none() {
             slots[i] = Some(id);
             return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+fn remove<const N: usize>(slots: &mut [Option<AssetId>; N], id: AssetId) -> bool {
+    let mut i = 0;
+    while i < N {
+        if let Some(existing) = slots[i] {
+            if existing == id {
+                slots[i] = None;
+                return true;
+            }
         }
         i += 1;
     }
@@ -2583,6 +2604,23 @@ mod tests {
         assert!(r.mark_ram_resident(AssetId(7)));
         assert!(!r.mark_ram_resident(AssetId(7)));
         assert_eq!(r.ram_len(), 1);
+    }
+
+    #[test]
+    fn vram_evict_removes_then_allows_reinsert() {
+        let mut r = ResidencyManager::<4, 4>::new();
+        assert!(r.mark_vram_resident(AssetId(7)));
+        assert!(r.contains_vram(AssetId(7)));
+        assert_eq!(r.vram_len(), 1);
+        // Eviction reports it was present and clears the slot.
+        assert!(r.mark_vram_evicted(AssetId(7)));
+        assert!(!r.contains_vram(AssetId(7)));
+        assert_eq!(r.vram_len(), 0);
+        // Evicting a non-resident id reports false.
+        assert!(!r.mark_vram_evicted(AssetId(7)));
+        // The freed slot is reusable.
+        assert!(r.mark_vram_resident(AssetId(7)));
+        assert_eq!(r.vram_len(), 1);
     }
 
     #[test]

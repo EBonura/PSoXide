@@ -55,7 +55,8 @@ use psx_engine::{
     Ctx, CullMode, DepthBand, DepthPolicy, DepthRange, JointViewTransform, JointWorldTransform,
     LoadedWorldCameraGte, LocalToWorldScale, Mat3I16, MaterialTint, ModelPoseTranslation, OtFrame,
     PointLightSample, PrimitivePacketArena, PrimitivePacketScratch, PrimitiveSink, ProjectedVertex,
-    Rgb8, RoomPoint, RoomRender, RuntimeCollisionRoom, RuntimeRoom, Scene, SchedulerConfig,
+    Rgb8, RoomPoint, RoomRender, RuntimeCollisionRoom, RuntimeRoom, Scene, SceneStateRef,
+    SchedulerConfig,
     SimTick, TexturedModelGeometry, TexturedModelRenderFace, TexturedModelRenderStats,
     ThirdPersonCameraConfig, ThirdPersonCameraInput, ThirdPersonCameraState,
     ThirdPersonCameraTarget, VideoHz, VisualPacing, WorldCamera, WorldProjection,
@@ -74,7 +75,7 @@ use psx_engine::{
     draw_indexed_cached_room_vertex_lit_visible_cells, draw_room_vertex_lit_visible_cells,
     GridVisibility,
 };
-use psx_font::FontAtlas;
+use psx_font::{upload_fonts, FontAtlas, FontSetVram};
 use psx_gpu::{
     draw_line_mono, draw_tri_flat_blended,
     material::{BlendMode, TextureMaterial, TextureWindow},
@@ -104,7 +105,9 @@ use psx_level::{
     LevelCachedRoomVertexRecord, STREAMED_ROOM_CHUNK_FLAG_COLLISION_COMPACT,
     STREAMED_ROOM_CHUNK_HEADER_BYTES, STREAMED_ROOM_CHUNK_MAGIC, STREAMED_ROOM_CHUNK_VERSION,
 };
-use psx_vram::{upload_bytes, Clut, TexDepth, TextureWindowAtlas, Tpage, VramRect};
+use psx_vram::{
+    upload_bytes, Clut, TexDepth, Tpage, VramAllocator, VramHandle, VramRect, VramRegionSource,
+};
 
 #[cfg(feature = "cd-stream-bench")]
 mod cd_stream;
@@ -200,33 +203,15 @@ const ROOM_TPAGE_LIMIT_X: u16 = 1024;
 const ROOM_TPAGE_COUNT: usize =
     ((ROOM_TPAGE_LIMIT_X - ROOM_TPAGE_BASE_X) / ROOM_TPAGE_STRIDE_HW) as usize;
 const ROOM_TILE_TEXELS: u16 = 64;
-/// CLUT strip used by room material textures. Keep it outside the
-/// 320-pixel-wide double-buffered framebuffer (`x=0..319`,
-/// `y=0..479`) so frame clears cannot overwrite palettes.
-const ROOM_CLUT_BASE_X: u16 = 320;
-const ROOM_CLUT_STRIDE: u16 = 16;
-const ROOM_CLUT_Y: u16 = 480;
 
 const MODEL_TPAGE: Tpage = Tpage::new(384, 256, TexDepth::Bit8);
-/// Minimum allocation quantum for an 8bpp model atlas. The GPU
-/// texture-page X field is 64-halfword aligned; keeping every atlas
-/// on that boundary lets meshes use local UVs unchanged.
-const MODEL_TPAGE_SLOT_HALFWORDS: u16 = 64;
 /// Maximum halfword width addressable by one 8bpp texture page.
 const MODEL_TPAGE_MAX_HALFWORDS: u16 = 128;
-/// First CLUT row used by model atlases. 256-entry CLUTs span
-/// a single row; we step one row down per uploaded atlas, so
-/// `MODEL_CLUT_BASE_Y + n` is the row for the n-th atlas.
-const MODEL_CLUT_BASE_Y: u16 = 484;
 
 /// Cooked sky panoramas occupy two side-by-side 4bpp pages. The
 /// texture pixels are outside the double-buffered framebuffer and
 /// model-atlas upload regions; each horizontal band gets a dedicated
 /// CLUT row so the sky can spend 16 colours per altitude range.
-const SKY_PANORAMA_LEFT_TPAGE: Tpage = Tpage::new(896, 256, TexDepth::Bit4);
-const SKY_PANORAMA_RIGHT_TPAGE: Tpage = Tpage::new(960, 256, TexDepth::Bit4);
-const SKY_PANORAMA_CLUT_X: u16 = 320;
-const SKY_PANORAMA_CLUT_Y: u16 = 481;
 const SKY_PANORAMA_CLUT_ENTRIES: u16 = 16;
 const SKY_PANORAMA_PALETTE_BANDS: usize = 8;
 const SKY_PANORAMA_WIDTH: u16 = 512;
@@ -234,45 +219,36 @@ const SKY_PANORAMA_HEIGHT: u16 = 256;
 const SKY_PANORAMA_PAGE_WIDTH: u16 = 256;
 const SKY_CYCLORAMA_GRID_POINTS_MAX: usize =
     (SKY_CYCLORAMA_COLUMNS_MAX as usize + 1) * (SKY_PANORAMA_PALETTE_BANDS + 1);
-/// Model atlases pack left-to-right until the reserved sky page.
-const MODEL_TPAGE_LIMIT_X: u16 = SKY_PANORAMA_LEFT_TPAGE.x();
 const SKY_CYCLORAMA_COLUMNS_MIN: u8 = 8;
 const SKY_CYCLORAMA_COLUMNS_MAX: u8 = 12;
 
 /// Runtime UI font slots. The cooked manifest compacts authored font choices
 /// into these slots, so only fonts actually used by cooked UI text are uploaded.
 const MAX_RUNTIME_UI_FONTS: usize = 4;
-const UI_FONT_TPAGES: [Tpage; MAX_RUNTIME_UI_FONTS] = [
-    Tpage::new(320, 0, TexDepth::Bit4),
-    Tpage::new(384, 0, TexDepth::Bit4),
-    Tpage::new(448, 0, TexDepth::Bit4),
-    Tpage::new(512, 0, TexDepth::Bit4),
-];
-const UI_FONT_CLUTS: [Clut; MAX_RUNTIME_UI_FONTS] = [
-    Clut::new(320, 256),
-    Clut::new(336, 256),
-    Clut::new(352, 256),
-    Clut::new(368, 256),
-];
+/// Resource-set key shared by every flow state: the UI font atlas is used by
+/// the menus and the gameplay HUD, so it is acquired once and never torn down.
+const UI_FONT_RESOURCE_KEY: u32 = 1;
+/// Scratch for packing every UI font into one combined atlas before a single
+/// `GP0(A0h)` upload. Sized for `MAX_RUNTIME_UI_FONTS` pages × 256-row atlases;
+/// lives in BSS, not on the stack.
+const FONT_PACK_SCRATCH_LEN: usize = MAX_RUNTIME_UI_FONTS * 64 * 256;
+static mut FONT_PACK_SCRATCH: [u16; FONT_PACK_SCRATCH_LEN] = [0; FONT_PACK_SCRATCH_LEN];
 const TARGET_LOCK_OUTER: i32 = 25;
 const TARGET_LOCK_INNER: i32 = 13;
 const TARGET_LOCK_TRI_HALF_WIDTH: i32 = 8;
 const TARGET_LOCK_RED: (u8, u8, u8) = (225, 18, 24);
 const TARGET_LOCK_ROTATION_FRAMES: u32 = 360;
 static SHADOW_CIRCLE_BLOB: &[u8] = include_bytes!("../assets/shadow_circle_64.psxt");
-const SHADOW_TPAGE: Tpage = Tpage::new(576, 0, TexDepth::Bit4);
+/// Shadow (U=64) and particle (U=0) decals share one 4bpp page, allocated from
+/// the unified allocator on first upload. UVs are page-relative, so only the
+/// page base moves; the render quads are unchanged.
 const SHADOW_TEXEL_U: u8 = 64;
-const SHADOW_TEXTURE_X: u16 = SHADOW_TPAGE.x() + ((SHADOW_TEXEL_U as u16) / 4);
-const SHADOW_CLUT: Clut = Clut::new(336, 481);
 const SHADOW_UV_MAX: u8 = SHADOW_TEXEL_U + 63;
-const PARTICLE_TPAGE: Tpage = SHADOW_TPAGE;
 const PARTICLE_TEXEL_U: u8 = 0;
 const PARTICLE_TEXEL_V: u8 = 0;
 const PARTICLE_TEXTURE_SIZE: u16 = 16;
 const PARTICLE_UV_MAX: u8 = PARTICLE_TEXEL_U + PARTICLE_TEXTURE_SIZE as u8 - 1;
-const PARTICLE_TEXTURE_X: u16 = PARTICLE_TPAGE.x() + ((PARTICLE_TEXEL_U as u16) / 4);
 const PARTICLE_TEXTURE_HALFWORDS_PER_ROW: u16 = PARTICLE_TEXTURE_SIZE / 4;
-const PARTICLE_CLUT: Clut = Clut::new(352, 481);
 
 const SCREEN_W: i16 = 320;
 const SCREEN_H: i16 = 240;
@@ -1585,6 +1561,12 @@ struct VramSlot {
     texture_window: TextureWindow,
     texture_width: u16,
     texture_height: u16,
+    /// Allocator handle for the texture window/page this slot owns. `Empty` when
+    /// the slot shares another slot's pixels (a clut-only variant) or is a
+    /// session-persistent resource (model/sky) freed elsewhere.
+    region: VramHandle,
+    /// Allocator handle for this slot's CLUT. `Empty` if not separately owned.
+    clut_region: VramHandle,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -1600,23 +1582,103 @@ static mut VRAM_SLOTS: [Option<VramSlot>; MAX_RESIDENT_VRAM_ASSETS] =
     [VRAM_SLOT_EMPTY; MAX_RESIDENT_VRAM_ASSETS];
 /// Number of VRAM slots used so far across room textures and model atlases.
 static mut VRAM_SLOT_COUNT: usize = 0;
-/// Number of room texture CLUT slots uploaded. A texture may consume
-/// two CLUT slots when used both as opaque room geometry and as a
-/// zero-transparent image prop, while sharing one pixel upload.
-/// Pixel placement is tracked by `ROOM_TEXTURE_ALLOCATOR`.
-/// Kept separate from `VRAM_SLOT_COUNT` so model atlas uploads cannot
-/// shift room texture addressing.
-static mut ROOM_TEXTURE_COUNT: usize = 0;
-static mut ROOM_TEXTURE_ALLOCATOR: TextureWindowAtlas<ROOM_TPAGE_COUNT> = TextureWindowAtlas::new();
+/// Find a free VRAM slot index, reusing holes left by eviction before growing
+/// into fresh entries. Returns `None` when the slot table is full.
+fn next_vram_slot() -> Option<usize> {
+    unsafe { (0..MAX_RESIDENT_VRAM_ASSETS).find(|&i| VRAM_SLOTS[i].is_none()) }
+}
 
-/// Tpage X cursor (in halfwords) for the model-atlas 8bpp
-/// region. Distinct cursor so room-material uploads don't shift
-/// model atlas positions and vice versa.
-static mut MODEL_TPAGE_X_CURSOR: u16 = 0;
-/// Number of model atlases uploaded so far. Doubles as the
-/// CLUT row offset: each 8bpp atlas needs a fresh 256-entry
-/// CLUT row.
-static mut MODEL_ATLAS_COUNT: usize = 0;
+/// Release slot `i`'s VRAM (texture window/page + CLUT) to the allocator, drop
+/// its residency mark, and clear the slot for reuse. Caller must ensure the slot
+/// is `ready`: a slot with a pending upload job must not be freed, or the async
+/// writeback would land in a slot that has since been reused.
+fn free_vram_slot(i: usize) {
+    unsafe {
+        if let Some(slot) = VRAM_SLOTS[i].take() {
+            VRAM_ALLOCATOR.free(slot.region);
+            VRAM_ALLOCATOR.free(slot.clut_region);
+            let _ = RESIDENCY.mark_vram_evicted(slot.asset);
+            VRAM_SLOT_COUNT = VRAM_SLOT_COUNT.saturating_sub(1);
+            telemetry::counter(telemetry::counter::VRAM_SLOTS_FREED, 1);
+        }
+    }
+}
+
+/// Current room at the last eviction pass. Eviction only runs when the streamed
+/// residency set shifts (the player crosses into a new room), keeping it off the
+/// per-frame path.
+static mut LAST_EVICT_ROOM: RoomIndex = INVALID_ROOM_INDEX;
+
+/// True if any of the `count` desired rooms lists `asset` in its required VRAM set.
+fn vram_asset_required(
+    asset: AssetId,
+    desired: &[RoomIndex; STREAMED_ROOM_SLOT_COUNT],
+    count: usize,
+) -> bool {
+    for &room in desired.iter().take(count) {
+        if room == INVALID_ROOM_INDEX {
+            continue;
+        }
+        if let Some(res) = ROOM_RESIDENCY.iter().find(|r| r.room == room) {
+            if res.required_vram.iter().any(|&a| a == asset) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Free room-texture VRAM slots that no desired room still requires, returning
+/// their window/CLUT to the allocator. Model atlases and the sky persist for the
+/// session; only `ready` slots are freed so a pending upload's async writeback
+/// cannot land in a slot that has since been reused.
+fn evict_unreferenced_vram(desired: &[RoomIndex; STREAMED_ROOM_SLOT_COUNT], count: usize) {
+    for i in 0..MAX_RESIDENT_VRAM_ASSETS {
+        let slot = match unsafe { VRAM_SLOTS[i] } {
+            Some(s) if s.ready => s,
+            _ => continue,
+        };
+        if !matches!(
+            slot.clut_mode,
+            VramSlotClutMode::OpaqueZero | VramSlotClutMode::TransparentZero
+        ) {
+            continue;
+        }
+        if !vram_asset_required(slot.asset, desired, count) {
+            free_vram_slot(i);
+        }
+    }
+}
+
+/// CLUT-band rows the unified VRAM allocator manages, just past the back
+/// buffer (Stage 1: only the shared font CLUT lands here).
+const VRAM_CLUT_ROWS: usize = 16;
+/// First VRAM row of the managed CLUT band.
+const VRAM_CLUT_BASE_Y: u16 = 480;
+/// The single owner of VRAM. Stage 1 routes fonts through it; later stages
+/// fold in room textures, models, sky, shadow and particle.
+static mut VRAM_ALLOCATOR: VramAllocator<ROOM_TPAGE_COUNT, VRAM_CLUT_ROWS> =
+    VramAllocator::new(VRAM_CLUT_BASE_Y);
+/// Set once the still-hardcoded VRAM regions are reserved in `VRAM_ALLOCATOR`.
+static mut VRAM_REGIONS_RESERVED: bool = false;
+/// Handles for the combined UI-font upload, kept for teardown.
+static mut VRAM_FONT_SET: Option<FontSetVram> = None;
+
+/// Reserve the framebuffer and every region still owned by legacy hardcoded
+/// uploads, so the allocator places fonts in the remaining free VRAM without
+/// collision. Each reserved region migrates into managed allocation in a later
+/// stage.
+fn reserve_static_vram_regions(alloc: &mut VramAllocator<ROOM_TPAGE_COUNT, VRAM_CLUT_ROWS>) {
+    // Double-buffered framebuffer.
+    alloc.reserve_rect(VramRect::new(0, 0, 320, 480));
+    // Room-material window band (allocated via the unified allocator).
+    alloc.reserve_room_band(ROOM_TPAGE_BASE_X, 0);
+    // Column between the framebuffer and the model-atlas region. Model atlases,
+    // the sky panorama, and shadow/particle decals are all allocated dynamically
+    // (rows 256 and 0); reserving this gap keeps model atlases at their historical
+    // x=384 base.
+    alloc.reserve_rect(VramRect::new(320, MODEL_TPAGE.y(), MODEL_TPAGE.x() - 320, 256));
+}
 
 const VRAM_UPLOAD_QUEUE_CAP: usize = 8;
 const VRAM_UPLOAD_ROWS_PER_BACKGROUND_TICK: u16 = 8;
@@ -1709,6 +1771,17 @@ impl VramUploadQueue {
             i += 1;
         }
         false
+    }
+
+    fn is_idle(&self) -> bool {
+        let mut i = 0usize;
+        while i < self.jobs.len() {
+            if self.jobs[i].active {
+                return false;
+            }
+            i += 1;
+        }
+        true
     }
 
     fn push(&mut self, job: VramUploadJob) -> bool {
@@ -1845,6 +1918,10 @@ impl RuntimeStreamingJobs {
 
     fn step_vram_uploads(self) -> bool {
         unsafe { VRAM_UPLOAD_QUEUE.step(self.vram_rows_per_tick) }
+    }
+
+    fn vram_uploads_idle(self) -> bool {
+        unsafe { VRAM_UPLOAD_QUEUE.is_idle() }
     }
 }
 
@@ -3610,6 +3687,133 @@ impl Playtest {
         }
     }
 
+    fn step_streaming_jobs(&mut self, ctx: &mut Ctx) {
+        let background_tick = self.streaming_jobs.background_tick(ctx);
+        #[cfg(feature = "cd-stream-bench")]
+        if background_tick {
+            // Residency owner: the single per-frame declaration of which rooms
+            // must be resident (pin + load), so the build paths no longer have
+            // to request residency themselves.
+            telemetry::stage_begin(telemetry::stage::SIM_RESIDENCY);
+            self.update_room_residency();
+            telemetry::stage_end(telemetry::stage::SIM_RESIDENCY);
+        }
+        #[cfg(feature = "cd-stream-bench")]
+        let stream_progress = if background_tick {
+            telemetry::stage_begin(telemetry::stage::SIM_PUMP);
+            let progress = self.pump_room_stream(RUNTIME_SCHEDULE.stream_pump_sectors_per_tick);
+            telemetry::stage_end(telemetry::stage::SIM_PUMP);
+            progress
+        } else {
+            false
+        };
+        if background_tick {
+            #[cfg(feature = "cd-stream-bench")]
+            if stream_progress {
+                if self.active_room_job.active {
+                    self.active_room_job.update_streaming = true;
+                } else {
+                    self.begin_active_room_window_job(true);
+                }
+            }
+            if self.streaming_jobs.step_vram_uploads() {
+                self.refresh_active_room_materials();
+            }
+            self.step_active_room_window_job();
+        }
+    }
+
+    fn initial_world_ready(&mut self) -> bool {
+        #[cfg(not(feature = "cd-stream-bench"))]
+        {
+            true
+        }
+        #[cfg(feature = "cd-stream-bench")]
+        {
+            if !self.chunked_level() {
+                return true;
+            }
+            let Some(record) = ROOMS.get(self.room_index.to_usize()) else {
+                return true;
+            };
+            let textures_ready = self.initial_stream_ring_textures_ready();
+            self.current_collision_room.is_some()
+                && !self.active_room_job.active
+                && self.portal_visible_rooms_are_active(record)
+                && self.initial_stream_ring_resident()
+                && textures_ready
+                && self.streaming_jobs.vram_uploads_idle()
+                && !streamed_room_stream_active()
+        }
+    }
+
+    #[cfg(feature = "cd-stream-bench")]
+    fn initial_stream_ring_resident(&self) -> bool {
+        let count = self.stream_ring_count.min(STREAMED_ROOM_SLOT_COUNT);
+        if count == 0 {
+            return false;
+        }
+        let mut i = 0usize;
+        while i < count {
+            let room = self.stream_ring[i];
+            if room == INVALID_ROOM_INDEX || !streamed_room_is_resident(room) {
+                return false;
+            }
+            i += 1;
+        }
+
+        let Some(record) = ROOMS.get(self.room_index.to_usize()) else {
+            return true;
+        };
+        let visible_limit = self.portal_visible_room_limit(record);
+        let mut visible = 0usize;
+        while visible < visible_limit {
+            let room = self.portal_visibility.rooms[visible].room;
+            if room != INVALID_ROOM_INDEX && !streamed_room_is_resident(room) {
+                return false;
+            }
+            visible += 1;
+        }
+        true
+    }
+
+    #[cfg(feature = "cd-stream-bench")]
+    fn initial_stream_ring_textures_ready(&mut self) -> bool {
+        let mut ready = true;
+        let count = self.stream_ring_count.min(STREAMED_ROOM_SLOT_COUNT);
+        let mut i = 0usize;
+        while i < count {
+            let room = self.stream_ring[i];
+            if room != INVALID_ROOM_INDEX {
+                if let Some(record) = ROOMS.get(room.to_usize()) {
+                    ready &= room_material_textures_ready(record);
+                    ready &= room_backdrop_textures_ready(record);
+                }
+                ready &= room_prop_textures_ready(room);
+            }
+            i += 1;
+        }
+
+        let Some(record) = ROOMS.get(self.room_index.to_usize()) else {
+            return ready;
+        };
+        let visible_limit = self.portal_visible_room_limit(record);
+        let mut visible = 0usize;
+        while visible < visible_limit {
+            let room = self.portal_visibility.rooms[visible].room;
+            if room != INVALID_ROOM_INDEX && !room_requested(room, &self.stream_ring, count) {
+                if let Some(record) = ROOMS.get(room.to_usize()) {
+                    ready &= room_material_textures_ready(record);
+                    ready &= room_backdrop_textures_ready(record);
+                }
+                ready &= room_prop_textures_ready(room);
+            }
+            visible += 1;
+        }
+
+        ready
+    }
+
     fn update_evade_run_button(&mut self, ctx: &Ctx, delta_vblanks: u16) -> EvadeRunIntent {
         if ctx.just_pressed(EVADE_RUN_BUTTON) {
             self.evade_run_hold_ticks = 0;
@@ -3669,16 +3873,46 @@ impl Scene for Playtest {
         })
     }
 
-    /// Upload the font at boot (before any state is entered) so a front-end
-    /// menu scene -- which renders before gameplay `init` runs -- has glyphs
-    /// to draw its labels and buttons with.
-    fn load_shared_assets(&mut self, _ctx: &mut Ctx) {
-        for slot in 0..UI_FONTS.len().min(MAX_RUNTIME_UI_FONTS) {
-            self.ui_fonts[slot] = Some(FontAtlas::upload(
-                UI_FONTS[slot],
-                UI_FONT_TPAGES[slot],
-                UI_FONT_CLUTS[slot],
-            ));
+    /// Every flow state shares one resource set: the UI font atlas is used by
+    /// the menus and the gameplay HUD, so it is acquired once on the first
+    /// state entered and never torn down (no per-transition re-upload).
+    fn state_resource_key(&self, _state: SceneStateRef) -> u32 {
+        UI_FONT_RESOURCE_KEY
+    }
+
+    /// Acquire the shared resource set. On first entry: reserve the static VRAM
+    /// regions, then pack every UI font into one combined atlas and upload it
+    /// in a single `GP0(A0h)` transfer. Uploading the fonts one-at-a-time
+    /// desyncs the GPU command stream and freezes the world render, so the
+    /// consolidated upload is the fix; routing it through the allocator keeps
+    /// the font VRAM tracked.
+    fn on_enter_state(&mut self, _state: SceneStateRef, _ctx: &mut Ctx) {
+        unsafe {
+            if !VRAM_REGIONS_RESERVED {
+                reserve_static_vram_regions(&mut VRAM_ALLOCATOR);
+                VRAM_REGIONS_RESERVED = true;
+            }
+            if self.ui_fonts[0].is_none() && !UI_FONTS.is_empty() {
+                VRAM_FONT_SET = upload_fonts(
+                    UI_FONTS,
+                    &mut VRAM_ALLOCATOR,
+                    &mut FONT_PACK_SCRATCH,
+                    &mut self.ui_fonts,
+                );
+            }
+        }
+    }
+
+    /// Release the shared resource set. Dormant in this project's flow (the
+    /// font set never leaves the active set) but correct: free the VRAM and
+    /// clear the atlases so a re-entry re-acquires cleanly.
+    fn on_exit_state(&mut self, _state: SceneStateRef, _ctx: &mut Ctx) {
+        unsafe {
+            if let Some(set) = VRAM_FONT_SET.take() {
+                VRAM_ALLOCATOR.free(set.pages);
+                VRAM_ALLOCATOR.free(set.clut);
+                self.ui_fonts = [const { None }; MAX_RUNTIME_UI_FONTS];
+            }
         }
     }
 
@@ -3702,7 +3936,7 @@ impl Scene for Playtest {
 
     fn init(&mut self, _ctx: &mut Ctx) {
         self.shadow_material = upload_shadow_texture();
-        self.particle_material = Some(upload_particle_texture());
+        self.particle_material = upload_particle_texture();
 
         // Empty manifest? Boot to a clear-coloured screen.
         if ROOMS.is_empty() {
@@ -3750,48 +3984,22 @@ impl Scene for Playtest {
             self.camera.position(),
             self.camera.focus(),
         );
-        self.load_active_room_window();
         #[cfg(feature = "cd-stream-bench")]
         self.bootstrap_streamed_room_window();
+        #[cfg(not(feature = "cd-stream-bench"))]
+        self.load_active_room_window();
         #[cfg(feature = "cd-stream-benchmark")]
         cd_stream::run_benchmark();
     }
 
+    fn loading_update(&mut self, ctx: &mut Ctx) -> bool {
+        self.step_streaming_jobs(ctx);
+        self.initial_world_ready()
+    }
+
     fn update(&mut self, ctx: &mut Ctx) {
         self.portal_debug_log_cooldown = self.portal_debug_log_cooldown.saturating_sub(1);
-        let background_tick = self.streaming_jobs.background_tick(ctx);
-        #[cfg(feature = "cd-stream-bench")]
-        if background_tick {
-            // Residency owner: the single per-frame declaration of which rooms
-            // must be resident (pin + load), so the build paths no longer have
-            // to request residency themselves.
-            telemetry::stage_begin(telemetry::stage::SIM_RESIDENCY);
-            self.update_room_residency();
-            telemetry::stage_end(telemetry::stage::SIM_RESIDENCY);
-        }
-        #[cfg(feature = "cd-stream-bench")]
-        let stream_progress = if background_tick {
-            telemetry::stage_begin(telemetry::stage::SIM_PUMP);
-            let progress = self.pump_room_stream(RUNTIME_SCHEDULE.stream_pump_sectors_per_tick);
-            telemetry::stage_end(telemetry::stage::SIM_PUMP);
-            progress
-        } else {
-            false
-        };
-        if background_tick {
-            #[cfg(feature = "cd-stream-bench")]
-            if stream_progress {
-                if self.active_room_job.active {
-                    self.active_room_job.update_streaming = true;
-                } else {
-                    self.begin_active_room_window_job(true);
-                }
-            }
-            if self.streaming_jobs.step_vram_uploads() {
-                self.refresh_active_room_materials();
-            }
-            self.step_active_room_window_job();
-        }
+        self.step_streaming_jobs(ctx);
 
         if ctx.just_pressed(button::R3) {
             self.lock_target = match self.lock_target {
@@ -5716,6 +5924,9 @@ impl Playtest {
     }
 
     fn portal_visible_rooms_are_active(&self, current_record: &LevelRoomRecord) -> bool {
+        if !self.active_room_contains_drawable(self.room_index) {
+            return false;
+        }
         let visible_limit = self.portal_visible_room_limit(current_record);
         let mut i = 0usize;
         while i < visible_limit {
@@ -6044,16 +6255,18 @@ impl Playtest {
         self.refresh_portal_visibility_for_view(current_index, current_record, view);
 
         let mut requested_rooms = [INVALID_ROOM_INDEX; MAX_ACTIVE_ROOMS];
-        let mut requested_count = self.portal_visible_room_limit(current_record);
-        if requested_count == 0 {
-            requested_rooms[0] = current_index;
-            requested_count = 1;
-        } else {
-            let mut i = 0usize;
-            while i < requested_count {
-                requested_rooms[i] = self.portal_visibility.rooms[i].room;
-                i += 1;
+        let mut requested_count = 0usize;
+        requested_rooms[requested_count] = current_index;
+        requested_count += 1;
+        let visible_limit = self.portal_visible_room_limit(current_record);
+        let mut i = 0usize;
+        while i < visible_limit && requested_count < MAX_ACTIVE_ROOMS {
+            let room = self.portal_visibility.rooms[i].room;
+            if room != current_index && room != INVALID_ROOM_INDEX {
+                requested_rooms[requested_count] = room;
+                requested_count += 1;
             }
+            i += 1;
         }
 
         self.active_room_anchor = self.motor.position();
@@ -6523,18 +6736,48 @@ impl Playtest {
             i += 1;
         }
         unsafe { ROOM_STREAM_SCHEDULER.reconcile_residency(&desired, count) };
+        // Reclaim VRAM from rooms that just left the streamed residency set.
+        let current = self.room_index;
+        if unsafe { LAST_EVICT_ROOM } != current {
+            evict_unreferenced_vram(&desired, count);
+            unsafe { LAST_EVICT_ROOM = current };
+        }
     }
 
     #[cfg(feature = "cd-stream-bench")]
     fn bootstrap_streamed_room_window(&mut self) {
-        let mut pumps = 0usize;
-        while pumps < RUNTIME_SCHEDULE.stream_bootstrap_pump_limit && streamed_room_stream_active()
-        {
-            if self.pump_room_stream(RUNTIME_SCHEDULE.stream_pump_sectors_per_tick) {
-                self.load_active_room_window();
+        self.update_room_residency();
+        self.load_active_room_window();
+
+        let mut steps = 0usize;
+        while steps < RUNTIME_SCHEDULE.stream_bootstrap_pump_limit {
+            let stream_progress = if streamed_room_stream_active() {
+                self.pump_room_stream(RUNTIME_SCHEDULE.stream_pump_sectors_per_tick)
+            } else {
+                false
+            };
+
+            if stream_progress {
+                if self.active_room_job.active {
+                    self.active_room_job.update_streaming = true;
+                } else {
+                    self.begin_active_room_window_job(true);
+                }
             }
-            pumps += 1;
+
+            self.step_active_room_window_job();
+
+            if self.current_collision_room.is_some() && !self.active_room_job.active {
+                break;
+            }
+
+            if !streamed_room_stream_active() {
+                self.update_room_residency();
+            }
+
+            steps += 1;
         }
+
         if self.current_collision_room.is_none() {
             self.load_active_room_window();
         }
@@ -7814,20 +8057,17 @@ fn sky_panorama_local_u(global_u: u16, page: usize) -> u8 {
     page_u as u8
 }
 
+/// Sky panorama placement, filled by `ensure_sky_panorama_uploaded` from the
+/// unified allocator: two contiguous 4bpp page words + one CLUT word per band.
+static mut SKY_PAGE_TPAGE_WORDS: [u16; 2] = [0; 2];
+static mut SKY_CLUT_WORDS: [u16; SKY_PANORAMA_PALETTE_BANDS] = [0; SKY_PANORAMA_PALETTE_BANDS];
+
 fn sky_panorama_tpage_word(page: usize) -> u16 {
-    if page == 0 {
-        SKY_PANORAMA_LEFT_TPAGE.uv_tpage_word(0)
-    } else {
-        SKY_PANORAMA_RIGHT_TPAGE.uv_tpage_word(0)
-    }
+    unsafe { SKY_PAGE_TPAGE_WORDS[page.min(1)] }
 }
 
 fn sky_panorama_clut_word(band: usize) -> u16 {
-    Clut::new(
-        SKY_PANORAMA_CLUT_X,
-        SKY_PANORAMA_CLUT_Y + band.min(SKY_PANORAMA_PALETTE_BANDS - 1) as u16,
-    )
-    .uv_clut_word()
+    unsafe { SKY_CLUT_WORDS[band.min(SKY_PANORAMA_PALETTE_BANDS - 1)] }
 }
 
 fn draw_far_vista_ring(
@@ -7924,6 +8164,50 @@ fn far_vista_texture_material(
         vram_slot_texture_size_u8(slot.texture_width),
         vram_slot_texture_size_u8(slot.texture_height),
     ))
+}
+
+#[cfg(feature = "cd-stream-bench")]
+fn room_backdrop_textures_ready(record: &LevelRoomRecord) -> bool {
+    sky_panorama_texture_ready(record.sky) & far_vista_textures_ready(record.far_vista)
+}
+
+#[cfg(feature = "cd-stream-bench")]
+fn sky_panorama_texture_ready(sky: LevelSkyRecord) -> bool {
+    if sky.flags & sky_flags::ENABLED == 0 {
+        return true;
+    }
+    let Some(asset) = find_asset_of_kind(ASSETS, sky.cloud_layer.texture_asset, AssetKind::Texture)
+    else {
+        return true;
+    };
+    ensure_sky_panorama_uploaded(asset.id, asset.bytes).is_some()
+}
+
+#[cfg(feature = "cd-stream-bench")]
+fn far_vista_textures_ready(vista: LevelFarVistaRecord) -> bool {
+    if vista.flags & far_vista_flags::ENABLED == 0 || vista.flags & far_vista_flags::TEXTURED == 0 {
+        return true;
+    }
+    let segments = vista.segments.clamp(3, 16);
+    let mut ready = true;
+    let mut segment = 0u8;
+    while segment < segments {
+        if let Some(asset_id) = far_vista_panel_asset(vista, segment, segments) {
+            if let Some(asset) = find_asset_of_kind(ASSETS, asset_id, AssetKind::Texture) {
+                if ensure_texture_uploaded_with_clut_mode(
+                    asset.id,
+                    asset.bytes,
+                    VramSlotClutMode::TransparentZero,
+                )
+                .is_none()
+                {
+                    ready = false;
+                }
+            }
+        }
+        segment += 1;
+    }
+    ready
 }
 
 fn vram_slot_texture_size_u8(size: u16) -> u8 {
@@ -9375,6 +9659,30 @@ fn build_runtime_room_material_table(
     (materials, material_count)
 }
 
+#[cfg(feature = "cd-stream-bench")]
+fn room_material_textures_ready(record: &LevelRoomRecord) -> bool {
+    let mut resolved_materials = [const { None }; MAX_ROOM_MATERIALS];
+    let _ = build_room_materials(record, &mut resolved_materials);
+    let first = record.material_first.to_usize();
+    let count = record.material_count as usize;
+    let slice: &[LevelMaterialRecord] = &MATERIALS[first..first + count];
+    let mut ready = true;
+
+    for material in slice {
+        let slot = material.local_slot.to_usize();
+        if slot >= MAX_ROOM_MATERIALS {
+            continue;
+        }
+        if find_asset_of_kind(ASSETS, material.texture_asset, AssetKind::Texture).is_some()
+            && resolved_materials[slot].is_none()
+        {
+            ready = false;
+        }
+    }
+
+    ready
+}
+
 fn active_room_surface_cache_for(index: RoomIndex) -> ActiveRoomSurfaceCache {
     #[cfg(feature = "cd-stream-bench")]
     if let Some(cache) = streamed_active_room_surface_cache_for(index) {
@@ -9634,9 +9942,19 @@ fn portal_visibility_space_for_view(
     view: ActiveRoomView,
 ) -> PortalVisibilitySpace {
     let camera_global = local_to_global_room_point(current_index, view.position);
+    let visibility_index =
+        room_index_containing_global_from(current_index, camera_global).unwrap_or(current_index);
+    let visibility_view = if visibility_index == current_index {
+        view
+    } else {
+        ActiveRoomView {
+            position: global_to_local_room_point(visibility_index, camera_global),
+            ..view
+        }
+    };
     PortalVisibilitySpace {
-        room: current_index,
-        view,
+        room: visibility_index,
+        view: visibility_view,
         camera_global,
     }
 }
@@ -10398,30 +10716,46 @@ const fn rgb_tuple(rgb: [u8; 3]) -> (u8, u8, u8) {
     (rgb[0], rgb[1], rgb[2])
 }
 
+/// Shadow and particle decals share one 4bpp page (shadow at U=64, particle at
+/// U=0). Allocated once from the unified allocator on first decal upload.
+static mut SHADOW_PARTICLE_PAGE: Option<Tpage> = None;
+
+fn shadow_particle_page() -> Option<Tpage> {
+    unsafe {
+        if SHADOW_PARTICLE_PAGE.is_none() {
+            let (tpage, _region) = VRAM_ALLOCATOR.alloc_page_run(1, TexDepth::Bit4, 0)?;
+            SHADOW_PARTICLE_PAGE = Some(tpage);
+        }
+        SHADOW_PARTICLE_PAGE
+    }
+}
+
 fn upload_shadow_texture() -> Option<TextureMaterial> {
     let texture = Texture::from_bytes(SHADOW_CIRCLE_BLOB).ok()?;
     if texture.width() != 64 || texture.height() != 64 || texture.clut_entries() != 16 {
         return None;
     }
 
+    let page = shadow_particle_page()?;
+    let (clut, _clut_region) = unsafe { VRAM_ALLOCATOR.alloc_clut(texture.clut_entries())? };
     upload_bytes(
         VramRect::new(
-            SHADOW_TEXTURE_X,
-            SHADOW_TPAGE.y(),
+            page.x() + u16::from(SHADOW_TEXEL_U) / 4,
+            page.y(),
             texture.halfwords_per_row(),
             texture.height(),
         ),
         texture.pixel_bytes(),
     );
     upload_clut(
-        VramRect::new(SHADOW_CLUT.x(), SHADOW_CLUT.y(), texture.clut_entries(), 1),
+        VramRect::new(clut.x(), clut.y(), texture.clut_entries(), 1),
         texture.clut_bytes(),
     );
 
     Some(
         TextureMaterial::blended(
-            SHADOW_CLUT.uv_clut_word(),
-            SHADOW_TPAGE.uv_tpage_word(0),
+            clut.uv_clut_word(),
+            page.uv_tpage_word(0),
             (0x80, 0x80, 0x80),
             BlendMode::Average,
         )
@@ -10429,7 +10763,7 @@ fn upload_shadow_texture() -> Option<TextureMaterial> {
     )
 }
 
-fn upload_particle_texture() -> TextureMaterial {
+fn upload_particle_texture() -> Option<TextureMaterial> {
     let mut pixels =
         [0u8; (PARTICLE_TEXTURE_HALFWORDS_PER_ROW as usize) * (PARTICLE_TEXTURE_SIZE as usize) * 2];
     let mut row = 0usize;
@@ -10458,26 +10792,28 @@ fn upload_particle_texture() -> TextureMaterial {
     clut[2] = white[0];
     clut[3] = white[1];
 
+    let page = shadow_particle_page()?;
+    let (clut_pos, _clut_region) = unsafe { VRAM_ALLOCATOR.alloc_clut(16)? };
     upload_bytes(
         VramRect::new(
-            PARTICLE_TEXTURE_X,
-            PARTICLE_TPAGE.y(),
+            page.x() + u16::from(PARTICLE_TEXEL_U) / 4,
+            page.y(),
             PARTICLE_TEXTURE_HALFWORDS_PER_ROW,
             PARTICLE_TEXTURE_SIZE,
         ),
         &pixels,
     );
     upload_clut(
-        VramRect::new(PARTICLE_CLUT.x(), PARTICLE_CLUT.y(), 16, 1),
+        VramRect::new(clut_pos.x(), clut_pos.y(), 16, 1),
         &clut,
     );
 
-    TextureMaterial::blended(
-        PARTICLE_CLUT.uv_clut_word(),
-        PARTICLE_TPAGE.uv_tpage_word(0),
+    Some(TextureMaterial::blended(
+        clut_pos.uv_clut_word(),
+        page.uv_tpage_word(0),
         (0x80, 0x80, 0x80),
         BlendMode::Average,
-    )
+    ))
 }
 
 /// Upload `asset_bytes` to VRAM if not already resident; return
@@ -10623,25 +10959,10 @@ fn ensure_large_ui_texture_uploaded_with_clut_mode(
         return None;
     }
 
-    let count = unsafe { VRAM_SLOT_COUNT };
-    let room_count = unsafe { ROOM_TEXTURE_COUNT };
-    if count >= MAX_RESIDENT_VRAM_ASSETS {
-        return None;
-    }
-    let room_index = u16::try_from(room_count).ok()?;
-    let clut_x = ROOM_CLUT_BASE_X.checked_add(room_index.checked_mul(ROOM_CLUT_STRIDE)?)?;
-    if clut_x.checked_add(texture.clut_entries())? > 1024 {
-        return None;
-    }
-    let page_index = unsafe { ROOM_TEXTURE_ALLOCATOR.reserve_empty_page()? };
-    let page_index = u16::try_from(page_index).ok()?;
-    let tpage_x = ROOM_TPAGE_BASE_X.checked_add(page_index.checked_mul(ROOM_TPAGE_STRIDE_HW)?)?;
-    let end_x = tpage_x.checked_add(ROOM_TPAGE_STRIDE_HW)?;
-    if tpage_x % 64 != 0 || end_x > ROOM_TPAGE_LIMIT_X {
-        return None;
-    }
-    let tpage = Tpage::new(tpage_x, SHARED_TPAGE.y(), TexDepth::Bit4);
-    let clut = Clut::new(clut_x, ROOM_CLUT_Y);
+    let idx = next_vram_slot()?;
+    let (tpage, region) = unsafe { VRAM_ALLOCATOR.alloc_room_page()? };
+    let tpage_x = tpage.x();
+    let (clut, clut_region) = unsafe { VRAM_ALLOCATOR.alloc_clut(texture.clut_entries())? };
     let slot = VramSlot {
         asset: asset_id,
         clut_mode,
@@ -10651,15 +10972,16 @@ fn ensure_large_ui_texture_uploaded_with_clut_mode(
         texture_window: TextureWindow::NONE,
         texture_width: texture.width(),
         texture_height: texture.height(),
+        region,
+        clut_region,
     };
 
     unsafe {
-        VRAM_SLOTS[count] = Some(slot);
-        VRAM_SLOT_COUNT = count + 1;
-        ROOM_TEXTURE_COUNT = room_count + 1;
+        VRAM_SLOTS[idx] = Some(slot);
+        VRAM_SLOT_COUNT += 1;
         if !VRAM_UPLOAD_QUEUE.push(VramUploadJob {
             active: true,
-            slot_index: count as u16,
+            slot_index: idx as u16,
             asset: asset_id,
             clut_mode,
             kind: VramUploadKind::TextureAndClut,
@@ -10669,14 +10991,13 @@ fn ensure_large_ui_texture_uploaded_with_clut_mode(
             texture_width_halfwords,
             texture_height_rows: texture.height(),
             next_texture_row: 0,
-            clut_x,
-            clut_y: ROOM_CLUT_Y,
+            clut_x: clut.x(),
+            clut_y: clut.y(),
             clut_entries: texture.clut_entries(),
             clut_uploaded: false,
         }) {
-            VRAM_SLOTS[count] = None;
-            VRAM_SLOT_COUNT = count;
-            ROOM_TEXTURE_COUNT = room_count;
+            VRAM_SLOTS[idx] = None;
+            VRAM_SLOT_COUNT -= 1;
             return None;
         }
     }
@@ -10715,11 +11036,7 @@ fn ensure_texture_uploaded_with_clut_mode(
     }
 
     // Capacity check before we touch any VRAM state.
-    let count = unsafe { VRAM_SLOT_COUNT };
-    let room_count = unsafe { ROOM_TEXTURE_COUNT };
-    if count >= MAX_RESIDENT_VRAM_ASSETS {
-        return None;
-    }
+    let idx = next_vram_slot()?;
 
     if texture.width() > ROOM_TILE_TEXELS || texture.height() > ROOM_TILE_TEXELS {
         return None;
@@ -10742,30 +11059,28 @@ fn ensure_texture_uploaded_with_clut_mode(
         return None;
     }
 
-    let room_index = u16::try_from(room_count).ok()?;
-    let clut_x = ROOM_CLUT_BASE_X.checked_add(room_index.checked_mul(ROOM_CLUT_STRIDE)?)?;
-    if clut_x.checked_add(texture.clut_entries())? > 1024 {
-        return None;
-    }
-
     if let Some(shared_texture) = find_room_texture_vram_slot(asset_id) {
+        let (clut, clut_region) = unsafe { VRAM_ALLOCATOR.alloc_clut(texture.clut_entries())? };
         let slot = VramSlot {
             asset: asset_id,
             clut_mode,
             ready: false,
-            clut_word: Clut::new(clut_x, ROOM_CLUT_Y).uv_clut_word(),
+            clut_word: clut.uv_clut_word(),
             tpage_word: shared_texture.tpage_word,
             texture_window: shared_texture.texture_window,
             texture_width: shared_texture.texture_width,
             texture_height: shared_texture.texture_height,
+            // Shared pixels are owned by the original slot; this variant only
+            // owns its own CLUT.
+            region: VramHandle::Empty,
+            clut_region,
         };
         unsafe {
-            VRAM_SLOTS[count] = Some(slot);
-            VRAM_SLOT_COUNT = count + 1;
-            ROOM_TEXTURE_COUNT = room_count + 1;
+            VRAM_SLOTS[idx] = Some(slot);
+            VRAM_SLOT_COUNT += 1;
             if !VRAM_UPLOAD_QUEUE.push(VramUploadJob {
                 active: true,
-                slot_index: count as u16,
+                slot_index: idx as u16,
                 asset: asset_id,
                 clut_mode,
                 kind: VramUploadKind::ClutOnly,
@@ -10775,14 +11090,13 @@ fn ensure_texture_uploaded_with_clut_mode(
                 texture_width_halfwords: 0,
                 texture_height_rows: 0,
                 next_texture_row: 0,
-                clut_x,
-                clut_y: ROOM_CLUT_Y,
+                clut_x: clut.x(),
+                clut_y: clut.y(),
                 clut_entries: texture.clut_entries(),
                 clut_uploaded: false,
             }) {
-                VRAM_SLOTS[count] = None;
-                VRAM_SLOT_COUNT = count;
-                ROOM_TEXTURE_COUNT = room_count;
+                VRAM_SLOTS[idx] = None;
+                VRAM_SLOT_COUNT -= 1;
                 return None;
             }
         }
@@ -10792,22 +11106,16 @@ fn ensure_texture_uploaded_with_clut_mode(
     // Pack room materials on the GP0(E2) 8-texel grid inside 4bpp
     // tpages. A 32x32 texture now consumes a 32x32 window instead of
     // burning a whole old 64x64 cell.
-    let placement = unsafe {
-        ROOM_TEXTURE_ALLOCATOR.allocate(u16::from(texture_width), u16::from(texture_height))?
+    let (tpage, placement, region) = unsafe {
+        VRAM_ALLOCATOR.alloc_window(u16::from(texture_width), u16::from(texture_height))?
     };
-    let page_index = placement.page_index();
-    let tpage_x = ROOM_TPAGE_BASE_X.checked_add(page_index.checked_mul(ROOM_TPAGE_STRIDE_HW)?)?;
-    let end_x = tpage_x.checked_add(ROOM_TPAGE_STRIDE_HW)?;
-    if tpage_x % 64 != 0 || end_x > ROOM_TPAGE_LIMIT_X {
-        return None;
-    }
-    let tpage = Tpage::new(tpage_x, SHARED_TPAGE.y(), TexDepth::Bit4);
+    let tpage_x = tpage.x();
     let texture_x = tpage_x.checked_add(u16::from(placement.origin_u()) / 4)?;
     let texture_y = SHARED_TPAGE
         .y()
         .checked_add(u16::from(placement.origin_v()))?;
 
-    let clut = Clut::new(clut_x, ROOM_CLUT_Y);
+    let (clut, clut_region) = unsafe { VRAM_ALLOCATOR.alloc_clut(texture.clut_entries())? };
     let slot = VramSlot {
         asset: asset_id,
         clut_mode,
@@ -10822,15 +11130,16 @@ fn ensure_texture_uploaded_with_clut_mode(
         ),
         texture_width: u16::from(texture_width),
         texture_height: u16::from(texture_height),
+        region,
+        clut_region,
     };
 
     unsafe {
-        VRAM_SLOTS[count] = Some(slot);
-        VRAM_SLOT_COUNT = count + 1;
-        ROOM_TEXTURE_COUNT = room_count + 1;
+        VRAM_SLOTS[idx] = Some(slot);
+        VRAM_SLOT_COUNT += 1;
         if !VRAM_UPLOAD_QUEUE.push(VramUploadJob {
             active: true,
-            slot_index: count as u16,
+            slot_index: idx as u16,
             asset: asset_id,
             clut_mode,
             kind: VramUploadKind::TextureAndClut,
@@ -10840,14 +11149,13 @@ fn ensure_texture_uploaded_with_clut_mode(
             texture_width_halfwords,
             texture_height_rows,
             next_texture_row: 0,
-            clut_x,
-            clut_y: ROOM_CLUT_Y,
+            clut_x: clut.x(),
+            clut_y: clut.y(),
             clut_entries: texture.clut_entries(),
             clut_uploaded: false,
         }) {
-            VRAM_SLOTS[count] = None;
-            VRAM_SLOT_COUNT = count;
-            ROOM_TEXTURE_COUNT = room_count;
+            VRAM_SLOTS[idx] = None;
+            VRAM_SLOT_COUNT -= 1;
             return None;
         }
     }
@@ -10862,6 +11170,34 @@ fn prop_texture_slot(texture_asset: AssetId) -> Option<VramSlot> {
     }
     let asset = find_asset_of_kind(ASSETS, texture_asset, AssetKind::Texture)?;
     ensure_texture_uploaded_with_clut_mode(asset.id, asset.bytes, clut_mode)
+}
+
+#[cfg(feature = "cd-stream-bench")]
+fn room_prop_textures_ready(room: RoomIndex) -> bool {
+    let mut ready = true;
+
+    for prop in IMAGE_PROPS {
+        if prop.room == room && prop_texture_slot(prop.texture_asset).is_none() {
+            ready = false;
+        }
+    }
+
+    for prop in BOX_PROPS {
+        if prop.room != room {
+            continue;
+        }
+        let mut face = 0usize;
+        while face < psx_level::BOX_PROP_FACE_COUNT {
+            if let Some(texture_asset) = prop.texture_assets[face] {
+                if prop_texture_slot(texture_asset).is_none() {
+                    ready = false;
+                }
+            }
+            face += 1;
+        }
+    }
+
+    ready
 }
 
 fn room_texture_window_size(size: u16) -> Option<u8> {
@@ -10883,10 +11219,7 @@ fn ensure_sky_panorama_uploaded(asset_id: AssetId, asset_bytes: &[u8]) -> Option
     {
         return None;
     }
-    let count = unsafe { VRAM_SLOT_COUNT };
-    if count >= MAX_RESIDENT_VRAM_ASSETS {
-        return None;
-    }
+    let idx = next_vram_slot()?;
     let expected_pixel_bytes = (texture.halfwords_per_row() as usize)
         .saturating_mul(texture.height() as usize)
         .saturating_mul(2);
@@ -10894,31 +11227,43 @@ fn ensure_sky_panorama_uploaded(asset_id: AssetId, asset_bytes: &[u8]) -> Option
         return None;
     }
 
+    let clut_row_bytes = usize::from(SKY_PANORAMA_CLUT_ENTRIES) * 2;
+    if texture.clut_bytes().len() != clut_row_bytes * SKY_PANORAMA_PALETTE_BANDS {
+        return None;
+    }
+    // Two contiguous 4bpp pages (the 512-texel panorama) + one CLUT per band,
+    // all from the unified allocator.
+    let (left_tpage, _page_region) =
+        unsafe { VRAM_ALLOCATOR.alloc_page_run(2, TexDepth::Bit4, 256)? };
+    let right_tpage = Tpage::new(left_tpage.x() + 64, left_tpage.y(), TexDepth::Bit4);
+    let mut sky_cluts = [Clut::new(0, 0); SKY_PANORAMA_PALETTE_BANDS];
+    for dst in sky_cluts.iter_mut() {
+        let (clut, _clut_region) =
+            unsafe { VRAM_ALLOCATOR.alloc_clut(SKY_PANORAMA_CLUT_ENTRIES)? };
+        *dst = clut;
+    }
+    unsafe {
+        SKY_PAGE_TPAGE_WORDS = [left_tpage.uv_tpage_word(0), right_tpage.uv_tpage_word(0)];
+        for (band, clut) in sky_cluts.iter().enumerate() {
+            SKY_CLUT_WORDS[band] = clut.uv_clut_word();
+        }
+    }
+
     telemetry::stage_begin(telemetry::stage::VRAM_UPLOAD);
     telemetry::counter(telemetry::counter::ROOM_TEXTURE_UPLOADS, 1);
     upload_bytes(
         VramRect::new(
-            SKY_PANORAMA_LEFT_TPAGE.x(),
-            SKY_PANORAMA_LEFT_TPAGE.y(),
+            left_tpage.x(),
+            left_tpage.y(),
             texture.halfwords_per_row(),
             texture.height(),
         ),
         texture.pixel_bytes(),
     );
-    let clut_row_bytes = usize::from(SKY_PANORAMA_CLUT_ENTRIES) * 2;
-    if texture.clut_bytes().len() != clut_row_bytes * SKY_PANORAMA_PALETTE_BANDS {
-        telemetry::stage_end(telemetry::stage::VRAM_UPLOAD);
-        return None;
-    }
-    for band in 0..SKY_PANORAMA_PALETTE_BANDS {
+    for (band, clut) in sky_cluts.iter().enumerate() {
         let offset = band * clut_row_bytes;
         upload_model_clut(
-            VramRect::new(
-                SKY_PANORAMA_CLUT_X,
-                SKY_PANORAMA_CLUT_Y + band as u16,
-                SKY_PANORAMA_CLUT_ENTRIES,
-                1,
-            ),
+            VramRect::new(clut.x(), clut.y(), SKY_PANORAMA_CLUT_ENTRIES, 1),
             &texture.clut_bytes()[offset..offset + clut_row_bytes],
             texture.index_zero_transparent(),
         );
@@ -10930,14 +11275,17 @@ fn ensure_sky_panorama_uploaded(asset_id: AssetId, asset_bytes: &[u8]) -> Option
         clut_mode: VramSlotClutMode::SkyPanorama,
         ready: true,
         clut_word: sky_panorama_clut_word(0),
-        tpage_word: SKY_PANORAMA_LEFT_TPAGE.uv_tpage_word(0),
+        tpage_word: sky_panorama_tpage_word(0),
         texture_window: TextureWindow::NONE,
         texture_width: texture.width(),
         texture_height: texture.height(),
+        // Sky is session-persistent (2 pages + 8 CLUTs); not freed via slot eviction.
+        region: VramHandle::Empty,
+        clut_region: VramHandle::Empty,
     };
     unsafe {
-        VRAM_SLOTS[count] = Some(slot);
-        VRAM_SLOT_COUNT = count + 1;
+        VRAM_SLOTS[idx] = Some(slot);
+        VRAM_SLOT_COUNT += 1;
         let _ = RESIDENCY.mark_vram_resident(asset_id);
     }
     Some(slot)
@@ -10964,11 +11312,7 @@ fn ensure_model_atlas_uploaded(asset_id: AssetId, asset_bytes: &[u8]) -> Option<
         return None;
     }
 
-    let count = unsafe { VRAM_SLOT_COUNT };
-    let atlas_count = unsafe { MODEL_ATLAS_COUNT };
-    if count >= MAX_RESIDENT_VRAM_ASSETS {
-        return None;
-    }
+    let idx = next_vram_slot()?;
     let texture_width = texture.width();
     let texture_height = texture.height();
     let texture_halfwords_per_row = texture.halfwords_per_row();
@@ -10987,29 +11331,22 @@ fn ensure_model_atlas_uploaded(asset_id: AssetId, asset_bytes: &[u8]) -> Option<
         return None;
     }
 
-    let tpage_x = MODEL_TPAGE.x() + unsafe { MODEL_TPAGE_X_CURSOR };
-    let slot_halfwords = if texture_halfwords_per_row <= MODEL_TPAGE_SLOT_HALFWORDS {
-        MODEL_TPAGE_SLOT_HALFWORDS
-    } else {
-        MODEL_TPAGE_MAX_HALFWORDS
-    };
-    if tpage_x % 64 != 0 || tpage_x.checked_add(slot_halfwords)? > MODEL_TPAGE_LIMIT_X {
-        return None;
-    }
+    // Placement comes only from the unified allocator: an 8bpp page run at row 256
+    // plus a 256-entry CLUT (16 contiguous 16-px slots in the managed band).
+    let (tpage, region) =
+        unsafe { VRAM_ALLOCATOR.alloc_model_slot(texture_halfwords_per_row)? };
+    let (clut, clut_region) = unsafe { VRAM_ALLOCATOR.alloc_clut(texture.clut_entries())? };
     telemetry::stage_begin(telemetry::stage::VRAM_UPLOAD);
     telemetry::counter(telemetry::counter::MODEL_ATLAS_UPLOADS, 1);
     let pix_rect = VramRect::new(
-        tpage_x,
-        MODEL_TPAGE.y(),
+        tpage.x(),
+        tpage.y(),
         texture_halfwords_per_row,
         texture_height,
     );
     upload_bytes(pix_rect, texture.pixel_bytes());
-    let tpage = Tpage::new(tpage_x, MODEL_TPAGE.y(), TexDepth::Bit8);
 
-    // 256-entry CLUT: 256 halfwords on a single row.
-    let clut_y = MODEL_CLUT_BASE_Y + atlas_count as u16;
-    let clut_rect = VramRect::new(0, clut_y, texture.clut_entries(), 1);
+    let clut_rect = VramRect::new(clut.x(), clut.y(), texture.clut_entries(), 1);
     upload_model_clut(
         clut_rect,
         texture.clut_bytes(),
@@ -11021,18 +11358,19 @@ fn ensure_model_atlas_uploaded(asset_id: AssetId, asset_bytes: &[u8]) -> Option<
         asset: asset_id,
         clut_mode: VramSlotClutMode::ModelAtlas,
         ready: true,
-        clut_word: Clut::new(0, clut_y).uv_clut_word(),
+        clut_word: clut.uv_clut_word(),
         tpage_word: tpage.uv_tpage_word(0),
         texture_window: TextureWindow::NONE,
         texture_width,
         texture_height,
+        // Model atlases are session-persistent; handles stored but not evicted.
+        region,
+        clut_region,
     };
 
     unsafe {
-        VRAM_SLOTS[count] = Some(slot);
-        VRAM_SLOT_COUNT = count + 1;
-        MODEL_TPAGE_X_CURSOR += slot_halfwords;
-        MODEL_ATLAS_COUNT = atlas_count + 1;
+        VRAM_SLOTS[idx] = Some(slot);
+        VRAM_SLOT_COUNT += 1;
         let _ = RESIDENCY.mark_vram_resident(asset_id);
     }
     Some(slot)
