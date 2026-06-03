@@ -3,6 +3,15 @@
 //! Current coverage: RAM, BIOS, scratchpad. Everything else panics on
 //! access -- deliberately, because we want unmapped reads to be loud
 //! until each region's owning module (GPU, SPU, CD-ROM, …) is wired up.
+//!
+//! ## Provenance
+//!
+//! Portions of this module are parity-matched against, and in places
+//! derived from, PCSX-Redux (<https://github.com/grumpycoders/pcsx-redux>),
+//! Copyright (C) the PCSX-Redux authors, GPL-2.0-or-later. Points of
+//! correspondence are flagged inline with `Redux` references. PSoXide is
+//! released under GPL-2.0-or-later in part to honor this lineage; see
+//! `LICENSE` and `docs/license-audit.md`.
 
 use psx_hw::memory::{self, to_physical};
 use thiserror::Error;
@@ -955,6 +964,12 @@ impl Bus {
     /// Cumulative cycles since reset.
     pub fn cycles(&self) -> u64 {
         self.cycles
+    }
+
+    /// Raw view of the 2 MiB main RAM. For headless `--dump-ram`
+    /// snapshots and offline diffing.
+    pub fn ram(&self) -> &[u8] {
+        &self.ram[..]
     }
 
     /// Record `addr` as seen on an unmapped *read*, returning

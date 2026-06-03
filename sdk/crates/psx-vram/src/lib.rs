@@ -317,6 +317,37 @@ impl<const PAGE_COUNT: usize> TextureWindowAtlas<PAGE_COUNT> {
         }
         None
     }
+
+    /// Release a placement previously returned by [`allocate`](Self::allocate),
+    /// clearing its occupancy bits so the space can be reused. The
+    /// `width`/`height` are the texel dimensions the placement was allocated
+    /// with (the placement records them).
+    pub fn release(&mut self, placement: TextureWindowPlacement) {
+        let page = placement.page_index() as usize;
+        let (Some(width_units), Some(height_units)) = (
+            texture_window_units(placement.width() as u16),
+            texture_window_units(placement.height() as u16),
+        ) else {
+            return;
+        };
+        let x = (placement.origin_u() / TEXTURE_WINDOW_UNIT_TEXELS as u8) as usize;
+        let y = (placement.origin_v() / TEXTURE_WINDOW_UNIT_TEXELS as u8) as usize;
+        if page >= PAGE_COUNT {
+            return;
+        }
+        let mask = texture_region_mask(x, width_units);
+        for row in &mut self.rows[page][y..y + height_units] {
+            *row &= !mask;
+        }
+    }
+
+    /// Release a whole page previously taken by
+    /// [`reserve_empty_page`](Self::reserve_empty_page).
+    pub fn release_page(&mut self, page_index: usize) {
+        if page_index < PAGE_COUNT {
+            self.rows[page_index].fill(0);
+        }
+    }
 }
 
 impl<const PAGE_COUNT: usize> Default for TextureWindowAtlas<PAGE_COUNT> {
@@ -544,6 +575,305 @@ impl Clut {
         let cx = (self.x / 16) & 0x3F;
         let cy = self.y & 0x1FF;
         cx | (cy << 6)
+    }
+}
+
+// ======================================================================
+// Unified VRAM allocator
+// ======================================================================
+
+/// Coarse VRAM occupancy cell width in pixels (one texture-page column).
+const ALLOC_COL_W: u16 = 64;
+/// Coarse VRAM occupancy cell height in pixels.
+const ALLOC_ROW_H: u16 = 16;
+/// Number of 64-pixel columns across VRAM (16).
+pub const VRAM_ALLOC_COLS: usize = (VRAM_WIDTH / ALLOC_COL_W) as usize;
+/// Number of 16-pixel rows down VRAM (32).
+pub const VRAM_ALLOC_ROWS: usize = (VRAM_HEIGHT / ALLOC_ROW_H) as usize;
+/// Page height in coarse rows (a texture page is 256 px tall).
+const ALLOC_PAGE_ROWS: usize = (TEXTURE_PAGE_TEXELS / ALLOC_ROW_H) as usize;
+/// CLUT slots per VRAM row (1024 px / 16 px).
+const CLUT_SLOTS_PER_ROW: u16 = VRAM_WIDTH / 16;
+
+/// A freeable handle to a VRAM reservation handed out by [`VramAllocator`].
+///
+/// Returned alongside the hardware [`Tpage`] / [`Clut`] so a caller can both
+/// use the reservation immediately and release it later via
+/// [`VramAllocator::free`]. `Copy` so it can sit in fixed slot tables.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum VramHandle {
+    /// No reservation (allocation failed, or a default slot).
+    Empty,
+    /// A coarse-grid rectangle: texture pages, model strips, the framebuffer.
+    Rect(VramRect),
+    /// A room-material window inside the composed [`TextureWindowAtlas`].
+    Window(TextureWindowPlacement),
+    /// A whole reserved room-material page (its page index).
+    RoomPage(u16),
+    /// A CLUT-row sub-allocation: `entries` palette slots at `(x, y)`.
+    Clut {
+        /// VRAM X (multiple of 16).
+        x: u16,
+        /// VRAM Y.
+        y: u16,
+        /// Palette entry count (16 or 256).
+        entries: u16,
+    },
+}
+
+/// Source of VRAM regions for crates that should not depend on the whole
+/// [`VramAllocator`] type (e.g. `psx-font`). [`VramAllocator`] implements it.
+pub trait VramRegionSource {
+    /// Reserve `count` contiguous texture pages at page row `page_y`
+    /// (0 or 256), returning the base [`Tpage`] and a free handle.
+    fn alloc_page_run(
+        &mut self,
+        count: u16,
+        depth: TexDepth,
+        page_y: u16,
+    ) -> Option<(Tpage, VramHandle)>;
+
+    /// Reserve a CLUT of `entries` palette slots (16 for 4bpp, 256 for 8bpp).
+    fn alloc_clut(&mut self, entries: u16) -> Option<(Clut, VramHandle)>;
+}
+
+/// CLUT-row sub-allocator over a reserved band of `ROWS` VRAM rows.
+///
+/// Each row holds [`CLUT_SLOTS_PER_ROW`] 16-pixel slots tracked as a `u64`
+/// bitmap, so a 4bpp (16-entry) CLUT takes 1 slot and an 8bpp (256-entry)
+/// CLUT takes 16 contiguous slots.
+#[derive(Copy, Clone, Debug)]
+pub struct ClutRowAllocator<const ROWS: usize> {
+    base_y: u16,
+    rows: [u64; ROWS],
+}
+
+impl<const ROWS: usize> ClutRowAllocator<ROWS> {
+    /// Build an allocator over rows `[base_y, base_y + ROWS)`.
+    pub const fn new(base_y: u16) -> Self {
+        Self {
+            base_y,
+            rows: [0; ROWS],
+        }
+    }
+
+    fn slot_count(entries: u16) -> usize {
+        (entries.max(1) as usize).div_ceil(16)
+    }
+
+    /// Allocate a CLUT of `entries` (16 or 256) palette slots.
+    pub fn alloc(&mut self, entries: u16) -> Option<Clut> {
+        let slots = Self::slot_count(entries);
+        let cap = CLUT_SLOTS_PER_ROW as usize;
+        if slots == 0 || slots > cap.min(64) {
+            return None;
+        }
+        let want: u64 = if slots == 64 {
+            u64::MAX
+        } else {
+            (1u64 << slots) - 1
+        };
+        for (r, row) in self.rows.iter_mut().enumerate() {
+            let mut s = 0usize;
+            while s + slots <= cap.min(64) {
+                let mask = want << s;
+                if *row & mask == 0 {
+                    *row |= mask;
+                    return Some(Clut::new((s as u16) * 16, self.base_y + r as u16));
+                }
+                s += 1;
+            }
+        }
+        None
+    }
+
+    /// Release a CLUT previously returned by [`alloc`](Self::alloc).
+    pub fn free(&mut self, clut: Clut, entries: u16) {
+        let slots = Self::slot_count(entries);
+        let r = clut.y().saturating_sub(self.base_y) as usize;
+        let s = (clut.x() / 16) as usize;
+        if r >= ROWS || s + slots > 64 {
+            return;
+        }
+        let mask: u64 = if slots == 64 {
+            u64::MAX
+        } else {
+            (1u64 << slots) - 1
+        } << s;
+        self.rows[r] &= !mask;
+    }
+}
+
+/// One owner for all of VRAM: texture pages, room-material windows, model
+/// strips and CLUT rows, with `free`. A coarse 64×16-pixel occupancy grid
+/// keeps page/strip/framebuffer reservations from overlapping; a composed
+/// [`TextureWindowAtlas`] sub-allocates room-material windows inside a
+/// reserved band; a [`ClutRowAllocator`] hands out CLUT rows.
+#[derive(Copy, Clone, Debug)]
+pub struct VramAllocator<const ROOM_PAGES: usize, const CLUT_ROWS: usize> {
+    grid: [u16; VRAM_ALLOC_ROWS],
+    clut: ClutRowAllocator<CLUT_ROWS>,
+    room: TextureWindowAtlas<ROOM_PAGES>,
+    room_base_x: u16,
+    room_base_y: u16,
+}
+
+impl<const ROOM_PAGES: usize, const CLUT_ROWS: usize> VramAllocator<ROOM_PAGES, CLUT_ROWS> {
+    /// Build an empty allocator. `clut_base_y` is the first CLUT-band row.
+    pub const fn new(clut_base_y: u16) -> Self {
+        Self {
+            grid: [0; VRAM_ALLOC_ROWS],
+            clut: ClutRowAllocator::new(clut_base_y),
+            room: TextureWindowAtlas::new(),
+            room_base_x: 0,
+            room_base_y: 0,
+        }
+    }
+
+    fn span(x: u16, y: u16, w: u16, h: u16) -> (usize, usize, usize, usize) {
+        let c0 = (x / ALLOC_COL_W) as usize;
+        let c1 = ((x as usize + w as usize).div_ceil(ALLOC_COL_W as usize)).min(VRAM_ALLOC_COLS);
+        let r0 = (y / ALLOC_ROW_H) as usize;
+        let r1 = ((y as usize + h as usize).div_ceil(ALLOC_ROW_H as usize)).min(VRAM_ALLOC_ROWS);
+        (c0, c1, r0, r1)
+    }
+
+    #[allow(dead_code)] // used by later stages for overlap assertions
+    fn rect_free(&self, x: u16, y: u16, w: u16, h: u16) -> bool {
+        let (c0, c1, r0, r1) = Self::span(x, y, w, h);
+        for r in r0..r1 {
+            for c in c0..c1 {
+                if self.grid[r] & (1 << c) != 0 {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    fn set_rect(&mut self, x: u16, y: u16, w: u16, h: u16, occupied: bool) {
+        let (c0, c1, r0, r1) = Self::span(x, y, w, h);
+        for r in r0..r1 {
+            for c in c0..c1 {
+                if occupied {
+                    self.grid[r] |= 1 << c;
+                } else {
+                    self.grid[r] &= !(1 << c);
+                }
+            }
+        }
+    }
+
+    /// Reserve a fixed rectangle (e.g. the double-buffered framebuffer, or a
+    /// region still owned by legacy hardcoded uploads). Returns a handle that
+    /// can be `free`d but is normally permanent.
+    pub fn reserve_rect(&mut self, rect: VramRect) -> VramHandle {
+        self.set_rect(rect.x, rect.y, rect.w, rect.h, true);
+        VramHandle::Rect(rect)
+    }
+
+    /// Reserve the room-material window band at `(base_x, base_y)` spanning
+    /// `ROOM_PAGES` pages. [`alloc_window`](Self::alloc_window) lands inside it.
+    pub fn reserve_room_band(&mut self, base_x: u16, base_y: u16) {
+        self.room_base_x = base_x;
+        self.room_base_y = base_y;
+        self.set_rect(base_x, base_y, ROOM_PAGES as u16 * ALLOC_COL_W, TEXTURE_PAGE_TEXELS, true);
+    }
+
+    fn find_page_run(&self, count: u16, page_y: u16) -> Option<u16> {
+        let r0 = (page_y / ALLOC_ROW_H) as usize;
+        let r1 = r0 + ALLOC_PAGE_ROWS;
+        if r1 > VRAM_ALLOC_ROWS || count == 0 {
+            return None;
+        }
+        let n = count as usize;
+        let mut c = 0usize;
+        while c + n <= VRAM_ALLOC_COLS {
+            let cols_free = (c..c + n).all(|col| (r0..r1).all(|r| self.grid[r] & (1 << col) == 0));
+            if cols_free {
+                return Some((c as u16) * ALLOC_COL_W);
+            }
+            c += 1;
+        }
+        None
+    }
+
+    /// Allocate a room-material window (delegates to the composed
+    /// [`TextureWindowAtlas`]; the band must be reserved first).
+    pub fn alloc_window(
+        &mut self,
+        width_texels: u16,
+        height_texels: u16,
+    ) -> Option<(Tpage, TextureWindowPlacement, VramHandle)> {
+        let placement = self.room.allocate(width_texels, height_texels)?;
+        let page_x = self.room_base_x + placement.page_index() * ALLOC_COL_W;
+        let tpage = Tpage::new(page_x, self.room_base_y, TexDepth::Bit4);
+        Some((tpage, placement, VramHandle::Window(placement)))
+    }
+
+    /// Reserve a whole room-material page (large UI / background textures use a
+    /// full page without a GP0(E2) window). The room band must be reserved
+    /// first via [`reserve_room_band`](Self::reserve_room_band).
+    pub fn alloc_room_page(&mut self) -> Option<(Tpage, VramHandle)> {
+        let page_index = self.room.reserve_empty_page()?;
+        let page_x = self.room_base_x + (page_index as u16) * ALLOC_COL_W;
+        Some((
+            Tpage::new(page_x, self.room_base_y, TexDepth::Bit4),
+            VramHandle::RoomPage(page_index as u16),
+        ))
+    }
+
+    /// Allocate an 8bpp model-atlas strip `halfwords_per_row` wide (rounded up
+    /// to whole 64-px pages) at page row 256.
+    pub fn alloc_model_slot(&mut self, halfwords_per_row: u16) -> Option<(Tpage, VramHandle)> {
+        let pages = halfwords_per_row.div_ceil(ALLOC_COL_W).max(1);
+        let x = self.find_page_run(pages, 256)?;
+        self.set_rect(x, 256, pages * ALLOC_COL_W, TEXTURE_PAGE_TEXELS, true);
+        Some((
+            Tpage::new(x, 256, TexDepth::Bit8),
+            VramHandle::Rect(VramRect::new(x, 256, pages * ALLOC_COL_W, TEXTURE_PAGE_TEXELS)),
+        ))
+    }
+
+    /// Release a reservation.
+    pub fn free(&mut self, handle: VramHandle) {
+        match handle {
+            VramHandle::Empty => {}
+            VramHandle::Rect(rect) => self.set_rect(rect.x, rect.y, rect.w, rect.h, false),
+            VramHandle::Window(placement) => self.room.release(placement),
+            VramHandle::RoomPage(page) => self.room.release_page(page as usize),
+            VramHandle::Clut { x, y, entries } => self.clut.free(Clut::new(x, y), entries),
+        }
+    }
+}
+
+impl<const ROOM_PAGES: usize, const CLUT_ROWS: usize> VramRegionSource
+    for VramAllocator<ROOM_PAGES, CLUT_ROWS>
+{
+    fn alloc_page_run(
+        &mut self,
+        count: u16,
+        depth: TexDepth,
+        page_y: u16,
+    ) -> Option<(Tpage, VramHandle)> {
+        let x = self.find_page_run(count, page_y)?;
+        self.set_rect(x, page_y, count * ALLOC_COL_W, TEXTURE_PAGE_TEXELS, true);
+        Some((
+            Tpage::new(x, page_y, depth),
+            VramHandle::Rect(VramRect::new(x, page_y, count * ALLOC_COL_W, TEXTURE_PAGE_TEXELS)),
+        ))
+    }
+
+    fn alloc_clut(&mut self, entries: u16) -> Option<(Clut, VramHandle)> {
+        let clut = self.clut.alloc(entries)?;
+        Some((
+            clut,
+            VramHandle::Clut {
+                x: clut.x(),
+                y: clut.y(),
+                entries,
+            },
+        ))
     }
 }
 
@@ -845,5 +1175,65 @@ mod tests {
         assert_eq!(TexDepth::Bit4.texels_per_halfword(), 4);
         assert_eq!(TexDepth::Bit8.texels_per_halfword(), 2);
         assert_eq!(TexDepth::Bit15.texels_per_halfword(), 1);
+    }
+
+    #[test]
+    fn vram_alloc_reserves_framebuffer_then_packs_pages_past_it() {
+        let mut a = VramAllocator::<6, 16>::new(480);
+        a.reserve_rect(VramRect::new(0, 0, 320, 480));
+        let (tp, _h) = a
+            .alloc_page_run(3, TexDepth::Bit4, 0)
+            .expect("3 contiguous pages");
+        assert_eq!(tp.x() % 64, 0, "page X is 64-aligned");
+        assert!(tp.x() >= 320, "page must not overlap the framebuffer");
+        assert_eq!(tp.y(), 0);
+    }
+
+    #[test]
+    fn vram_alloc_free_round_trips_a_page() {
+        let mut a = VramAllocator::<6, 16>::new(480);
+        let (tp1, h1) = a.alloc_page_run(1, TexDepth::Bit4, 0).unwrap();
+        let (tp2, _h2) = a.alloc_page_run(1, TexDepth::Bit4, 0).unwrap();
+        assert_ne!(tp1.x(), tp2.x());
+        a.free(h1);
+        let (tp3, _h3) = a.alloc_page_run(1, TexDepth::Bit4, 0).unwrap();
+        assert_eq!(tp3.x(), tp1.x(), "freed page is reused");
+    }
+
+    #[test]
+    fn vram_alloc_window_lands_in_reserved_room_band() {
+        let mut a = VramAllocator::<2, 16>::new(480);
+        a.reserve_room_band(640, 0);
+        let (tp, pl, _h) = a.alloc_window(32, 32).expect("window fits");
+        assert_eq!(tp.x(), 640, "first window is at room band base");
+        assert_eq!((pl.origin_u(), pl.origin_v()), (0, 0));
+    }
+
+    #[test]
+    fn clut_row_allocator_packs_and_reuses_slots() {
+        let mut c = ClutRowAllocator::<4>::new(480);
+        let a = c.alloc(16).unwrap();
+        let b = c.alloc(16).unwrap();
+        assert_eq!((a.x(), a.y()), (0, 480));
+        assert_eq!((b.x(), b.y()), (16, 480));
+        let big = c.alloc(256).unwrap(); // 16 contiguous slots
+        assert_eq!((big.x(), big.y()), (32, 480));
+        c.free(a, 16);
+        let reused = c.alloc(16).unwrap();
+        assert_eq!((reused.x(), reused.y()), (0, 480), "freed slot reused");
+    }
+
+    #[test]
+    fn texture_window_atlas_release_frees_for_reuse() {
+        let mut atlas = TextureWindowAtlas::<1>::new();
+        let first = atlas.allocate(32, 32).unwrap();
+        let _second = atlas.allocate(32, 32).unwrap();
+        atlas.release(first);
+        let reused = atlas.allocate(32, 32).unwrap();
+        assert_eq!(
+            (reused.origin_u(), reused.origin_v()),
+            (first.origin_u(), first.origin_v()),
+            "released slot is reused"
+        );
     }
 }

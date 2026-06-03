@@ -13,22 +13,22 @@
 //! dispatches each engine tick to either the borrowed gameplay scene
 //! or the screen-space UI renderer, and never touches the loop.
 //!
-//! # Gameplay-only is the default, and it is identical to before
+//! # Gameplay-only is the default
 //!
 //! [`App::run`][crate::app::App::run] keeps its old signature and
 //! wraps the supplied gameplay scene in a [`GameApp`] over
 //! [`GAMEPLAY_ONLY`] -- a one-state flow whose only state is
 //! [`FlowState::Gameplay`]. In that configuration:
 //!
-//! - `init` resolves the entry state to `Gameplay` and forwards
-//!   straight to `gameplay.init`, reproducing the boot-time init the
-//!   old runner did inline.
+//! - `init` parks on the loading screen, then resolves the entry state to
+//!   `Gameplay` after the loading screen has rendered once. This gives
+//!   streaming scenes a place to finish boot residency work before the first
+//!   world frame is shown.
 //! - `update` / `render` only ever match the `Gameplay` arm and
 //!   forward to `gameplay.update` / `gameplay.render`.
 //!
-//! So the gameplay-only path is the old behaviour plus one already-
-//! taken `match` branch. The UI arms are dead code for the 13 existing
-//! examples.
+//! So the gameplay-only path is still the same runtime arm as before once
+//! loading clears. The UI arms remain dead code for gameplay-only examples.
 //!
 //! # Borrowing
 //!
@@ -46,6 +46,7 @@
 //! Plain `Copy` data, no allocator, integer-only. Flow / scene / node
 //! tables are `&'static` slices that the linker pins.
 
+use psx_gpu::draw_quad_flat;
 use psx_level::{
     first_focus, next_focus, scene_state_flags, FlowState, GameFlow, LevelOptionDef,
     LevelSceneState, LevelUiAction, LevelUiNodeKind, LevelUiNodeRecord, LevelUiScene,
@@ -54,7 +55,7 @@ use psx_level::{
 };
 use psx_pad::button;
 
-use crate::scene::{Ctx, Scene};
+use crate::scene::{Ctx, Scene, SceneStateRef};
 use crate::ui;
 
 /// Upper bound on focusable controls a single UI scene can navigate.
@@ -69,6 +70,18 @@ const MAX_FOCUSABLE_NODES: usize = 64;
 /// this, so the entry path can tell an uninitialised cursor from a
 /// genuine focus on node 0.
 const MENU_FOCUS_NONE: u16 = u16::MAX;
+const MENU_FOCUS_LOADING_UNRENDERED: u16 = u16::MAX - 1;
+const MENU_FOCUS_LOADING_RENDERED: u16 = u16::MAX - 2;
+const MENU_FOCUS_LOADING_INITED: u16 = u16::MAX - 3;
+const MENU_FOCUS_LOADING_READY: u16 = u16::MAX - 4;
+
+/// [`FlowCursor::active_resource_key`] sentinel meaning "no resource set held
+/// yet". `u32::MAX` so it never collides with a [`Scene::state_resource_key`]
+/// value (those default to a `u16` state id, always `<= 0xFFFF`).
+const RESOURCE_KEY_NONE: u32 = u32::MAX;
+/// Synthesised [`SceneStateRef::id`] for a bare [`FlowState::Gameplay`] (one
+/// with no cooked [`LevelSceneState`]).
+const SYNTH_GAMEPLAY_ID: u16 = u16::MAX;
 
 /// Upper bound on project options the runtime value store tracks. The
 /// store is a fixed `[i32; MAX_OPTIONS]` so the driver stays `no_std` /
@@ -449,9 +462,14 @@ pub struct FlowCursor {
     /// `focused` parameter directly. Reset to the sentinel on every
     /// scene change so the new scene re-seeds via [`first_focus`].
     menu_focus: u16,
-    /// Frame countdown for timed UI states (intro/splash). Skeletal:
-    /// not yet decremented.
+    /// Small flow scratch. Timed UI states will use it as a countdown; while
+    /// a loading screen is pending it stores the target flow-state index.
     intro_timer: u16,
+    /// Resource-set key ([`Scene::state_resource_key`]) of the state whose
+    /// resources are currently held, or [`RESOURCE_KEY_NONE`]. Drives
+    /// exit/enter deduplication so a resource set shared across states is
+    /// acquired once and not torn down on an intra-set transition.
+    active_resource_key: u32,
 }
 
 impl FlowCursor {
@@ -464,6 +482,7 @@ impl FlowCursor {
             gameplay_inited: false,
             menu_focus: MENU_FOCUS_NONE,
             intro_timer: 0,
+            active_resource_key: RESOURCE_KEY_NONE,
         }
     }
 
@@ -474,10 +493,66 @@ impl FlowCursor {
     /// the driver's internals.
     #[inline]
     pub fn focused_node(&self) -> Option<usize> {
-        if self.menu_focus == MENU_FOCUS_NONE {
-            None
-        } else {
-            Some(self.menu_focus as usize)
+        match self.menu_focus {
+            MENU_FOCUS_NONE
+            | MENU_FOCUS_LOADING_UNRENDERED
+            | MENU_FOCUS_LOADING_RENDERED
+            | MENU_FOCUS_LOADING_INITED
+            | MENU_FOCUS_LOADING_READY => None,
+            focus => Some(focus as usize),
+        }
+    }
+
+    #[inline]
+    fn loading_target(self) -> Option<u16> {
+        match self.menu_focus {
+            MENU_FOCUS_LOADING_UNRENDERED
+            | MENU_FOCUS_LOADING_RENDERED
+            | MENU_FOCUS_LOADING_INITED
+            | MENU_FOCUS_LOADING_READY => Some(self.intro_timer),
+            _ => None,
+        }
+    }
+
+    #[inline]
+    fn loading_has_rendered(self) -> bool {
+        self.menu_focus == MENU_FOCUS_LOADING_RENDERED
+    }
+
+    #[inline]
+    fn loading_is_inited(self) -> bool {
+        self.menu_focus == MENU_FOCUS_LOADING_INITED
+    }
+
+    #[inline]
+    fn begin_loading(&mut self, target: u16, return_to: Option<u16>) {
+        self.return_to = return_to;
+        self.menu_focus = MENU_FOCUS_LOADING_UNRENDERED;
+        self.intro_timer = target;
+    }
+
+    #[inline]
+    fn mark_loading_rendered(&mut self) {
+        match self.menu_focus {
+            MENU_FOCUS_LOADING_UNRENDERED => self.menu_focus = MENU_FOCUS_LOADING_RENDERED,
+            MENU_FOCUS_LOADING_READY => {
+                self.menu_focus = MENU_FOCUS_NONE;
+                self.intro_timer = 0;
+            }
+            _ => {}
+        }
+    }
+
+    #[inline]
+    fn mark_loading_inited(&mut self, target: u16) {
+        self.menu_focus = MENU_FOCUS_LOADING_INITED;
+        self.intro_timer = target;
+    }
+
+    #[inline]
+    fn mark_loading_ready(&mut self) {
+        if self.menu_focus == MENU_FOCUS_LOADING_INITED {
+            self.menu_focus = MENU_FOCUS_LOADING_READY;
         }
     }
 }
@@ -599,8 +674,14 @@ impl<'a, S: Scene> GameApp<'a, S> {
     /// position, gamma, etc.) can preview immediately, and gameplay entry calls
     /// it so the same values are active for play.
     fn apply_current_options(&mut self) {
+        let values = self.option_values;
+        let len = self.option_len;
+        self.apply_option_values(&values, len);
+    }
+
+    fn apply_option_values(&mut self, values: &[i32; MAX_OPTIONS], len: usize) {
         self.gameplay
-            .apply_options(self.options, &self.option_values[..self.option_len]);
+            .apply_options(self.options, &values[..len.min(MAX_OPTIONS)]);
     }
 
     fn init_menu_audio(&mut self) {
@@ -724,6 +805,55 @@ impl<'a, S: Scene> GameApp<'a, S> {
             .copied()
     }
 
+    /// Resolve a flow-state index to a `Copy` [`SceneStateRef`] for the scene
+    /// resource-lifecycle hooks. Mirrors [`tag_at`](Self::tag_at) but carries a
+    /// stable id (synthesised for bare `Gameplay` / `UiScene` flow states).
+    fn state_ref_at(&self, index: u16) -> SceneStateRef {
+        let gameplay = SceneStateRef {
+            id: SYNTH_GAMEPLAY_ID,
+            world: LevelWorldLayer::Gameplay,
+            ui_scene: UI_SCENE_NONE,
+            flags: 0,
+        };
+        match self.flow.states.get(index as usize) {
+            Some(FlowState::SceneState { state }) => match self.scene_state(*state) {
+                Some(ss) => SceneStateRef {
+                    id: ss.id,
+                    world: ss.world,
+                    ui_scene: ss.ui_scene,
+                    flags: ss.flags,
+                },
+                None => gameplay,
+            },
+            Some(FlowState::Gameplay) | None => gameplay,
+            Some(FlowState::UiScene { scene }) => SceneStateRef {
+                id: SYNTH_GAMEPLAY_ID.wrapping_sub(1).wrapping_sub(*scene),
+                world: LevelWorldLayer::None,
+                ui_scene: *scene,
+                flags: scene_state_flags::UI_INPUT,
+            },
+        }
+    }
+
+    /// Run the scene resource lifecycle for a transition onto `next_index`,
+    /// *before* the cursor moves there. Calls `on_exit_state` on the outgoing
+    /// state then `on_enter_state` on the incoming one, but skips both when the
+    /// two states share a resource key (so a resource shared across states is
+    /// acquired once and never thrashed). Idempotent for same-set transitions.
+    fn switch_resources(&mut self, next_index: u16, ctx: &mut Ctx) {
+        let next = self.state_ref_at(next_index);
+        let next_key = self.gameplay.state_resource_key(next);
+        if next_key == self.cursor.active_resource_key {
+            return;
+        }
+        if self.cursor.active_resource_key != RESOURCE_KEY_NONE {
+            let prev = self.state_ref_at(self.cursor.current);
+            self.gameplay.on_exit_state(prev, ctx);
+        }
+        self.gameplay.on_enter_state(next, ctx);
+        self.cursor.active_resource_key = next_key;
+    }
+
     /// Tag of the state the cursor currently sits on.
     #[inline]
     fn current_tag(&self) -> StateTag {
@@ -762,29 +892,71 @@ impl<'a, S: Scene> GameApp<'a, S> {
     /// gameplay" semantics; future loading/unloading phases belong here
     /// because every state handoff now resolves through one path.
     fn enter_flow_state(&mut self, state_index: u16, return_to: Option<u16>, ctx: &mut Ctx) {
+        // Acquire/release scene resources before the cursor moves and before
+        // any gameplay init below reads them.
+        self.switch_resources(state_index, ctx);
         self.cursor.current = state_index;
         self.cursor.return_to = return_to;
         self.cursor.menu_focus = MENU_FOCUS_NONE;
+        self.cursor.intro_timer = 0;
         if !self.current_tag().has_gameplay() {
             return;
         }
+        let option_values = self.option_values;
+        let option_len = self.option_len;
         self.cdda.release_for_data_reads(ctx.sim_tick.as_u32());
         if !self.cursor.gameplay_inited {
             self.gameplay.init(ctx);
             self.cursor.gameplay_inited = true;
+            // Deferred gameplay init runs after front-end option previews have
+            // already programmed global presentation state. The publish after
+            // init should use the menu store that triggered this transition,
+            // not any state touched while bootstrapping gameplay.
+            self.option_values = option_values;
+            self.option_len = option_len;
             ctx.request_timing_realign();
         }
         // Hand the current option values to gameplay on every entry (not just
         // first init), so a setting changed in a front-end menu before Play
         // takes effect this session.
-        self.apply_current_options();
+        self.apply_option_values(&option_values, option_len);
     }
 
-    /// Compatibility wrapper for actions/tests that mean "enter the first
-    /// gameplay-capable state".
-    fn enter_gameplay(&mut self, index: u16, ctx: &mut Ctx) {
+    fn request_flow_state(&mut self, state_index: u16, return_to: Option<u16>, ctx: &mut Ctx) {
+        if self.tag_at(state_index).has_gameplay() && !self.cursor.gameplay_inited {
+            self.cdda.release_for_data_reads(ctx.sim_tick.as_u32());
+            self.cursor.begin_loading(state_index, return_to);
+            return;
+        }
+        self.enter_flow_state(state_index, return_to, ctx);
+    }
+
+    fn request_gameplay(&mut self, index: u16, ctx: &mut Ctx) {
         let return_to = self.cursor.return_to;
-        self.enter_flow_state(index, return_to, ctx);
+        self.request_flow_state(index, return_to, ctx);
+    }
+
+    fn finish_loading_transition(&mut self, ctx: &mut Ctx) {
+        if self.cursor.loading_is_inited() {
+            if self.gameplay.loading_update(ctx) {
+                self.cursor.mark_loading_ready();
+            }
+            return;
+        }
+        let Some(state_index) = self.cursor.loading_target() else {
+            return;
+        };
+        if !self.cursor.loading_has_rendered() {
+            return;
+        }
+        let return_to = self.cursor.return_to;
+        self.enter_flow_state(state_index, return_to, ctx);
+        self.cursor.mark_loading_inited(state_index);
+    }
+
+    #[inline]
+    fn loading_pending(&self) -> bool {
+        self.cursor.loading_target().is_some()
     }
 
     /// Resolve a UI scene id to its `[first, count)` block in the shared
@@ -845,10 +1017,12 @@ impl<'a, S: Scene> GameApp<'a, S> {
     /// Switch the cursor onto UI-scene flow `state_index`, remembering
     /// `return_to` for a later `Back`, and clear the resolved focus so
     /// the new scene re-seeds from [`first_focus`] on its first update.
-    fn enter_ui_state(&mut self, state_index: u16, return_to: Option<u16>) {
+    fn enter_ui_state(&mut self, state_index: u16, return_to: Option<u16>, ctx: &mut Ctx) {
+        self.switch_resources(state_index, ctx);
         self.cursor.current = state_index;
         self.cursor.return_to = return_to;
         self.cursor.menu_focus = MENU_FOCUS_NONE;
+        self.cursor.intro_timer = 0;
     }
 
     /// Resolve, and lazily seed, the focused *pool* index for the scene
@@ -985,21 +1159,21 @@ impl<'a, S: Scene> GameApp<'a, S> {
             LevelUiAction::GotoState { state } => {
                 if let Some(state_index) = self.flow_index_for_scene_state(state) {
                     let return_to = Some(self.cursor.current);
-                    self.enter_flow_state(state_index, return_to, ctx);
+                    self.request_flow_state(state_index, return_to, ctx);
                 }
             }
             LevelUiAction::GotoScene { scene } => {
                 if let Some(state_index) = self.ui_state_index_for_scene(scene) {
                     let return_to = Some(self.cursor.current);
-                    self.enter_flow_state(state_index, return_to, ctx);
+                    self.request_flow_state(state_index, return_to, ctx);
                 }
             }
             LevelUiAction::StartGameplay => {
                 if let Some(gameplay_index) = self.first_gameplay_index() {
-                    self.enter_gameplay(gameplay_index, ctx);
+                    self.request_gameplay(gameplay_index, ctx);
                 }
             }
-            LevelUiAction::Back => self.go_back(),
+            LevelUiAction::Back => self.go_back(ctx),
             // Nudge the bound option by the authored delta (clamped). A
             // dynamic-label refresh from the new value is a later step.
             LevelUiAction::SetOption { option, delta } => {
@@ -1045,13 +1219,13 @@ impl<'a, S: Scene> GameApp<'a, S> {
         if ctx.just_pressed(button::CROSS) {
             self.activate_focus(first, count, ctx);
         } else if ctx.just_pressed(button::CIRCLE) {
-            self.go_back();
+            self.go_back(ctx);
         } else if ctx.just_pressed(button::START) {
             // START keeps its "confirm / jump to gameplay" shortcut so a
             // title screen advances without the player hunting for the Start
             // button first.
             if let Some(gameplay_index) = self.first_gameplay_index() {
-                self.enter_gameplay(gameplay_index, ctx);
+                self.request_gameplay(gameplay_index, ctx);
             }
         }
     }
@@ -1112,9 +1286,22 @@ impl<'a, S: Scene> GameApp<'a, S> {
     /// return target is itself a UI-scene state in this step (gameplay
     /// is reached through `StartGameplay`, never popped into), so this
     /// re-enters it as a UI scene and clears the one-deep return slot.
-    fn go_back(&mut self) {
+    fn go_back(&mut self, ctx: &mut Ctx) {
         if let Some(return_to) = self.cursor.return_to {
-            self.enter_ui_state(return_to, None);
+            self.enter_ui_state(return_to, None, ctx);
+        }
+    }
+
+    fn render_loading_screen(&mut self) {
+        draw_quad_flat([(0, 0), (320, 0), (0, 240), (320, 240)], 4, 6, 10);
+        draw_quad_flat([(96, 136), (224, 136), (96, 138), (224, 138)], 34, 48, 64);
+        if let Some(font) = self.gameplay.ui_font_at(0) {
+            let text = "loading";
+            let x = ((i32::from(ui::UI_CANVAS_W) - i32::from(font.text_width(text))) / 2)
+                .clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
+            let y = ((i32::from(ui::UI_CANVAS_H) - i32::from(font.line_height())) / 2)
+                .clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
+            font.draw_text(x, y, text, (210, 220, 232));
         }
     }
 }
@@ -1198,33 +1385,37 @@ impl<'a, S: Scene> Scene for GameApp<'a, S> {
         // CD-DA audio.
         self.init_menu_audio();
 
-        // Shared assets (the UI font menus draw with) upload first, before any
-        // state is entered -- a UI entry defers gameplay init, so without this
-        // the menu would have no font and its text would be invisible.
+        // Legacy boot-time shared-asset hook. Scenes that have migrated to the
+        // per-state resource lifecycle leave this a no-op and acquire their
+        // resources in `on_enter_state` instead.
         self.gameplay.load_shared_assets(ctx);
 
-        // Enter the configured entry state. For GAMEPLAY_ONLY this
-        // resolves to Gameplay and forwards straight to gameplay.init,
-        // reproducing the boot-time init the old App::run did inline.
-        // A UI entry only parks the cursor; gameplay.init is deferred
-        // until the flow transitions into a Gameplay state.
+        // Acquire the entry state's resource set (e.g. the UI font atlas) up
+        // front, so both the loading screen and the first menu frame have it.
+        // This is the per-scene enter hook the flow previously left as a TODO.
+        let entry = self.cursor.current;
+        self.switch_resources(entry, ctx);
+
+        // Enter the configured entry state. Any Gameplay entry, including the
+        // gameplay-only default, first parks on loading so streaming scenes can
+        // finish boot residency work before the first world frame is shown.
+        // A UI entry only parks the cursor; gameplay.init is deferred until the
+        // flow transitions into a Gameplay state.
         if self.current_tag().has_gameplay() {
-            let index = self.cursor.current;
-            self.enter_gameplay(index, ctx);
-            // Boot-time gameplay init is handled by App's post-init clock
-            // reset. Only deferred gameplay init from a later UI action should
-            // request a timing realign from the fixed-update loop.
-            let _ = ctx.take_timing_realign_request();
+            self.cursor.begin_loading(entry, None);
         } else {
             // Cursor already at the UI-only entry from FlowCursor::new.
             // Apply defaults once so global presentation options preview
             // correctly even before the player starts gameplay.
             self.apply_current_options();
-            // TODO(p5): run any per-scene enter hook here.
         }
     }
 
     fn update(&mut self, ctx: &mut Ctx) {
+        if self.loading_pending() {
+            self.finish_loading_transition(ctx);
+            return;
+        }
         let tag = self.current_tag();
         if tag.has_gameplay() && !tag.world_is_paused() {
             self.gameplay.update(ctx);
@@ -1232,6 +1423,9 @@ impl<'a, S: Scene> Scene for GameApp<'a, S> {
         if let Some(scene) = tag.ui_scene() {
             if tag.ui_accepts_input() {
                 self.update_ui_scene(scene, ctx);
+                if self.loading_pending() {
+                    return;
+                }
             }
             if let Some(scene) = self.current_tag().ui_scene() {
                 self.update_ui_music(scene, ctx);
@@ -1240,6 +1434,11 @@ impl<'a, S: Scene> Scene for GameApp<'a, S> {
     }
 
     fn render(&mut self, ctx: &mut Ctx) {
+        if self.loading_pending() {
+            self.render_loading_screen();
+            self.cursor.mark_loading_rendered();
+            return;
+        }
         let tag = self.current_tag();
         if tag.has_gameplay() {
             self.gameplay.render(ctx);
@@ -1267,10 +1466,19 @@ mod tests {
         renders: u32,
         option_applications: u32,
         last_option_value: i32,
+        enters: u32,
+        exits: u32,
+        enter_ran_before_init: bool,
+        /// When `Some`, returned as the resource key for every state (a shared
+        /// set); when `None`, the trait default (`state.id`) applies.
+        shared_resource_key: Option<u32>,
     }
 
     impl Scene for CountingScene {
         fn init(&mut self, _ctx: &mut Ctx) {
+            if self.enters > 0 {
+                self.enter_ran_before_init = true;
+            }
             self.inits += 1;
         }
         fn update(&mut self, _ctx: &mut Ctx) {
@@ -1286,6 +1494,15 @@ mod tests {
                 .position(|option| option.id == OPT_ID)
                 .and_then(|index| values.get(index).copied())
                 .unwrap_or(0);
+        }
+        fn on_enter_state(&mut self, _state: SceneStateRef, _ctx: &mut Ctx) {
+            self.enters += 1;
+        }
+        fn on_exit_state(&mut self, _state: SceneStateRef, _ctx: &mut Ctx) {
+            self.exits += 1;
+        }
+        fn state_resource_key(&self, state: SceneStateRef) -> u32 {
+            self.shared_resource_key.unwrap_or(state.id as u32)
         }
     }
 
@@ -1307,6 +1524,13 @@ mod tests {
         let mut ctx = test_ctx();
 
         app.init(&mut ctx);
+        assert!(
+            app.loading_pending(),
+            "gameplay-only boot starts on loading"
+        );
+        assert_eq!(app.gameplay.inits, 0, "loading defers gameplay init");
+        complete_loading(&mut app, &mut ctx);
+
         app.update(&mut ctx);
         app.render(&mut ctx);
         app.update(&mut ctx);
@@ -1318,19 +1542,108 @@ mod tests {
     }
 
     #[test]
-    fn gameplay_entry_initialises_at_boot() {
-        // Mirrors the old App::run shape: init is paid before the first
-        // update tick, not lazily on first update.
+    fn gameplay_only_enters_resource_set_once_before_init() {
         let mut scene = CountingScene::default();
         let mut app = GameApp::new(&GAMEPLAY_ONLY, &[], &[], &[], &[], &[], &[], &mut scene);
         let mut ctx = test_ctx();
 
         app.init(&mut ctx);
-        assert_eq!(app.gameplay.inits, 1);
+        complete_loading(&mut app, &mut ctx);
+
+        assert_eq!(app.gameplay.enters, 1, "resource set entered exactly once");
+        assert_eq!(app.gameplay.exits, 0, "single-state flow never exits a set");
+        assert!(
+            app.gameplay.enter_ran_before_init,
+            "on_enter_state runs before gameplay init"
+        );
+    }
+
+    #[test]
+    fn shared_resource_key_acquires_once_across_ui_to_gameplay() {
+        static SCENES: &[LevelUiScene] = &[LevelUiScene {
+            id: 7,
+            name: "title",
+            node_first: 0,
+            node_count: 0,
+        }];
+        static FLOW: GameFlow = GameFlow {
+            states: &[FlowState::UiScene { scene: 7 }, FlowState::Gameplay],
+            scene_states: &[],
+            entry: 0,
+        };
+        let mut scene = CountingScene {
+            shared_resource_key: Some(42),
+            ..Default::default()
+        };
+        let mut app = GameApp::new(&FLOW, SCENES, &[], &[], &[], &[], &[], &mut scene);
+        let mut ctx = test_ctx();
+
+        app.init(&mut ctx);
+        assert_eq!(app.gameplay.enters, 1, "UI entry acquires the shared set once");
+
+        let gameplay = app.first_gameplay_index().expect("gameplay state exists");
+        app.request_gameplay(gameplay, &mut ctx);
+        complete_loading(&mut app, &mut ctx);
+
+        assert_eq!(
+            app.gameplay.enters, 1,
+            "shared set is not re-acquired on UI->gameplay"
+        );
+        assert_eq!(app.gameplay.exits, 0, "shared set is not torn down");
+        assert_eq!(app.gameplay.inits, 1, "gameplay still inits exactly once");
+    }
+
+    #[test]
+    fn default_resource_key_churns_on_state_change() {
+        static SCENES: &[LevelUiScene] = &[LevelUiScene {
+            id: 7,
+            name: "title",
+            node_first: 0,
+            node_count: 0,
+        }];
+        static FLOW: GameFlow = GameFlow {
+            states: &[FlowState::UiScene { scene: 7 }, FlowState::Gameplay],
+            scene_states: &[],
+            entry: 0,
+        };
+        // No shared key: each state is its own set, so UI->gameplay exits the
+        // UI set and enters the gameplay set.
+        let mut scene = CountingScene::default();
+        let mut app = GameApp::new(&FLOW, SCENES, &[], &[], &[], &[], &[], &mut scene);
+        let mut ctx = test_ctx();
+
+        app.init(&mut ctx);
+        assert_eq!(app.gameplay.enters, 1);
+        assert_eq!(app.gameplay.exits, 0);
+
+        let gameplay = app.first_gameplay_index().expect("gameplay state exists");
+        app.request_gameplay(gameplay, &mut ctx);
+        complete_loading(&mut app, &mut ctx);
+
+        assert_eq!(app.gameplay.exits, 1, "default key exits the old set");
+        assert_eq!(app.gameplay.enters, 2, "default key enters the new set");
+    }
+
+    #[test]
+    fn gameplay_entry_loads_before_initialising() {
+        let mut scene = CountingScene::default();
+        let mut app = GameApp::new(&GAMEPLAY_ONLY, &[], &[], &[], &[], &[], &[], &mut scene);
+        let mut ctx = test_ctx();
+
+        app.init(&mut ctx);
+        assert!(app.loading_pending(), "gameplay entry parks on loading");
+        assert_eq!(app.gameplay.inits, 0);
         assert_eq!(app.gameplay.updates, 0);
         assert!(
             !ctx.take_timing_realign_request(),
-            "boot init is covered by App's post-init clock reset"
+            "no timing reset before gameplay init actually runs"
+        );
+
+        complete_loading(&mut app, &mut ctx);
+        assert_eq!(app.gameplay.inits, 1);
+        assert!(
+            ctx.take_timing_realign_request(),
+            "deferred boot gameplay init requests one scheduler realign"
         );
     }
 
@@ -1362,10 +1675,20 @@ mod tests {
         assert_eq!(app.gameplay.updates, 0);
         assert!(!ctx.take_timing_realign_request());
 
-        // Press START: transition into gameplay, init runs once here.
+        // Press START: the UI leaves input behind and shows loading; the
+        // blocking gameplay init is not paid until that loading screen has
+        // rendered once.
         ctx.pad_prev = PadState::NONE;
         ctx.pad.buttons = ButtonState::from_bits(button::START);
         app.update(&mut ctx);
+        assert!(app.loading_pending(), "transition parks on loading");
+        assert_eq!(app.gameplay.inits, 0, "loading defers gameplay init");
+        assert!(
+            !ctx.take_timing_realign_request(),
+            "no timing reset before gameplay init actually runs"
+        );
+
+        complete_loading(&mut app, &mut ctx);
         assert_eq!(app.gameplay.inits, 1, "transition inits gameplay once");
         assert!(
             ctx.take_timing_realign_request(),
@@ -1530,6 +1853,9 @@ mod tests {
         let mut ctx = test_ctx();
 
         app.init(&mut ctx);
+        assert!(app.loading_pending());
+        assert_eq!(app.gameplay.inits, 0);
+        complete_loading(&mut app, &mut ctx);
         assert_eq!(app.gameplay.inits, 1);
 
         app.update(&mut ctx);
@@ -1545,6 +1871,34 @@ mod tests {
         ctx.pad_prev = PadState::NONE;
         ctx.pad = PadState::NONE;
         app.update(ctx);
+    }
+
+    fn complete_loading(app: &mut GameApp<'_, CountingScene>, ctx: &mut Ctx) {
+        assert!(
+            app.loading_pending(),
+            "loading transition should be pending"
+        );
+        app.cursor.mark_loading_rendered();
+        app.update(ctx);
+        assert!(
+            app.loading_pending(),
+            "gameplay init keeps loading visible until one post-init render"
+        );
+        app.cursor.mark_loading_rendered();
+        assert!(
+            app.loading_pending(),
+            "loading remains visible while the scene finishes load-only work"
+        );
+        app.update(ctx);
+        assert!(
+            app.loading_pending(),
+            "ready loading transition clears after one final loading render"
+        );
+        app.cursor.mark_loading_rendered();
+        assert!(
+            !app.loading_pending(),
+            "rendered loading transition should enter the target state"
+        );
     }
 
     #[test]
@@ -1673,6 +2027,12 @@ mod tests {
         assert_eq!(app.gameplay.inits, 0, "release alone does nothing");
         press(&mut ctx, button::CROSS); // fresh press
         app.update(&mut ctx);
+        assert!(app.loading_pending());
+        assert_eq!(
+            app.gameplay.inits, 0,
+            "activation shows loading before gameplay init"
+        );
+        complete_loading(&mut app, &mut ctx);
         assert_eq!(
             app.gameplay.inits, 1,
             "a genuine CROSS press after release activates Play"
@@ -1700,6 +2060,10 @@ mod tests {
         // (StartGameplay) button and activates it in the same tick.
         press(&mut ctx, button::CROSS);
         app.update(&mut ctx);
+        assert!(app.loading_pending(), "CROSS on Play enters loading");
+        assert_eq!(app.gameplay.inits, 0, "loading defers gameplay init");
+
+        complete_loading(&mut app, &mut ctx);
         assert_eq!(app.gameplay.inits, 1, "CROSS on Play starts gameplay once");
 
         // Now in gameplay: updates forward to the scene, no re-init.
@@ -1707,6 +2071,39 @@ mod tests {
         app.update(&mut ctx);
         assert_eq!(app.gameplay.inits, 1);
         assert_eq!(app.gameplay.updates, 1);
+    }
+
+    #[test]
+    fn start_gameplay_republishes_current_front_end_options() {
+        let mut scene = CountingScene::default();
+        let mut app = GameApp::new(
+            &MENU_FLOW,
+            MENU_SCENES,
+            MENU_NODES,
+            &[],
+            OPTIONS,
+            &[],
+            &[],
+            &mut scene,
+        );
+        let mut ctx = test_ctx();
+        app.init(&mut ctx);
+        assert_eq!(app.gameplay.last_option_value, 4);
+
+        app.option_values[0] = 6;
+        press(&mut ctx, button::CROSS);
+        app.update(&mut ctx);
+        assert!(app.loading_pending(), "Play shows loading before init");
+        assert_eq!(app.gameplay.inits, 0);
+
+        complete_loading(&mut app, &mut ctx);
+
+        assert_eq!(app.gameplay.inits, 1);
+        assert_eq!(app.gameplay.option_applications, 2);
+        assert_eq!(
+            app.gameplay.last_option_value, 6,
+            "gameplay entry publishes the front-end option value active at Play"
+        );
     }
 
     #[test]
@@ -1795,6 +2192,7 @@ mod tests {
         let mut app = GameApp::new(&GAMEPLAY_ONLY, &[], &[], &[], &[], &[], &[], &mut scene);
         let mut ctx = test_ctx();
         app.init(&mut ctx);
+        complete_loading(&mut app, &mut ctx);
 
         press(&mut ctx, button::DOWN);
         app.update(&mut ctx);
