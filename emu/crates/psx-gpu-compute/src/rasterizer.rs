@@ -5,6 +5,15 @@
 //! primitive's parameters into a uniform buffer, picks the matching
 //! pipeline, and dispatches a workgroup grid sized to the bounding
 //! box.
+//!
+//! ## Provenance
+//!
+//! Portions of this module are parity-matched against, and in places
+//! derived from, PCSX-Redux (<https://github.com/grumpycoders/pcsx-redux>),
+//! Copyright (C) the PCSX-Redux authors, GPL-2.0-or-later. Points of
+//! correspondence are flagged inline with `Redux` references. PSoXide is
+//! released under GPL-2.0-or-later in part to honor this lineage; see
+//! `LICENSE` and `docs/license-audit.md`.
 
 use std::sync::Arc;
 

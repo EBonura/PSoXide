@@ -1,4 +1,13 @@
 //! Video timing constants and scanline estimation helpers.
+//!
+//! ## Provenance
+//!
+//! The video-timing constants here are parity-matched against, and
+//! derived from, PCSX-Redux's `psxcounters.cc`
+//! (<https://github.com/grumpycoders/pcsx-redux>), Copyright (C) the
+//! PCSX-Redux authors, GPL-2.0-or-later, so VBlank fires on the same
+//! cycle on both sides. PSoXide is released under GPL-2.0-or-later in
+//! part to honor this lineage; see `LICENSE` and `docs/license-audit.md`.
 
 // --- Video-timing constants ---
 //

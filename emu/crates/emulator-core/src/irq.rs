@@ -10,6 +10,15 @@
 //!   that is 0 in `v` and preserves any bit that is 1. So software
 //!   acknowledges interrupt `s` by writing `!(1 << s)`.
 //! - **`I_MASK` is a straight write.**
+//!
+//! ## Provenance
+//!
+//! Implemented from public hardware documentation (nocash PSX-SPX) and
+//! parity-verified against PCSX-Redux
+//! (<https://github.com/grumpycoders/pcsx-redux>), GPL-2.0-or-later;
+//! correspondences are flagged inline with `Redux` references. PSoXide is
+//! released under GPL-2.0-or-later for compatibility with that reference.
+//! See `LICENSE` and `docs/license-audit.md`.
 
 /// Source-bit positions inside `I_STAT` / `I_MASK`. Kept as a typed enum
 /// so calling sites read as intent (`irq.raise(IrqSource::VBlank)`)

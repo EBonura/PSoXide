@@ -107,6 +107,38 @@ What is not done:
   real PS1 constraints.
 - No stable release binaries are published yet. Build from source.
 
+## How This Was Built
+
+PSoXide is developed with heavy use of AI coding assistants, with a
+human in the loop directing architecture, debugging, and verification.
+That accounts for the commit volume and cadence. The work is real and
+tested, but it is built differently from a hand-typed codebase, and the
+commit history reflects that.
+
+PSoXide is written in Rust by deliberate choice. Its ownership model
+gives memory safety and tight, deterministic control over allocation
+without a garbage collector, which suits both an emulator and a console
+runtime, and its toolchain makes cross-compiling to the PS1's bare-metal
+`mipsel-sony-psx` target a breeze rather than a build-system ordeal.
+
+The emulator core is not an independent clean-room implementation. It
+uses PCSX-Redux (GPL-2.0-or-later) in two ways: as a differential test
+oracle (a patched Redux build that the parity harness runs in lockstep
+against), and as a reference implementation for several subsystems. Some
+of those subsystems are parity-matched against, and in places derived
+from, Redux. The CD-ROM command-timing constants, for example, are
+transcribed directly from Redux's `core/cdrom.cc`. Every such file
+carries a `## Provenance` header naming PCSX-Redux, its copyright
+holders, and its license. Subsystems that are implemented from hardware
+documentation and only parity-verified against Redux (the GTE, the
+interrupt controller, the pad, XA-ADPCM) carry a header that says that
+instead, and are not claimed as derived.
+
+PSoXide is licensed GPL-2.0-or-later for this reason: it is the license
+Redux uses, and it is what the GPL requires of work derived from it.
+Full provenance, including the asset inventory, is in [`LICENSE`](LICENSE) and
+[`docs/license-audit.md`](docs/license-audit.md).
+
 ## Quick Start
 
 ### 1. Install dependencies
@@ -475,9 +507,13 @@ or (at your option) any later version**. The full license text is in
 [LICENSE](LICENSE); third-party references and provenance notes are in
 the same file.
 
-The GPL choice is deliberate: the emulator core builds on PCSX-Redux
-as a parity oracle and reference, and PCSX-Redux is GPL-2.0-or-later.
-Releasing PSoXide under the same license keeps the lineage clean.
+The GPL choice is deliberate: parts of the emulator core are
+parity-matched against, and in places derived from, PCSX-Redux
+(GPL-2.0-or-later), used both as a differential test oracle and as a
+reference implementation. Releasing PSoXide under the same license is
+what the GPL asks for work derived from Redux, and keeps the lineage
+explicit. See [`docs/license-audit.md`](docs/license-audit.md) and the
+per-file `Provenance` headers for specifics.
 
 Commercial use is allowed. Free, paid, open-source, and commercial
 homebrew projects can be built with PSoXide, as long as the code they

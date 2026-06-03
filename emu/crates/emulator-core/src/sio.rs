@@ -11,6 +11,15 @@
 //! plus a memory card on port 2. Frontend launches replace the card
 //! backing with the per-game save file, while parity probes use the
 //! same fresh-card default as Redux's portable profile.
+//!
+//! ## Provenance
+//!
+//! Portions of this module are parity-matched against, and in places
+//! derived from, PCSX-Redux (<https://github.com/grumpycoders/pcsx-redux>),
+//! Copyright (C) the PCSX-Redux authors, GPL-2.0-or-later. Points of
+//! correspondence are flagged inline with `Redux` references. PSoXide is
+//! released under GPL-2.0-or-later in part to honor this lineage; see
+//! `LICENSE` and `docs/license-audit.md`.
 
 mod stat_bit {
     pub const TX_READY_1: u32 = 1 << 0;
