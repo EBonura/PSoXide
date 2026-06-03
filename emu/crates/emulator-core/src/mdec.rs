@@ -31,6 +31,15 @@
 //! all its time shipping data otherwise). We expose `dma_write_in` +
 //! `dma_read_out` entry points for the bus to call on DMA channel 0 /
 //! channel 1 triggers.
+//!
+//! ## Provenance
+//!
+//! Portions of this module are parity-matched against, and in places
+//! derived from, PCSX-Redux (<https://github.com/grumpycoders/pcsx-redux>),
+//! Copyright (C) the PCSX-Redux authors, GPL-2.0-or-later. Points of
+//! correspondence are flagged inline with `Redux` references. PSoXide is
+//! released under GPL-2.0-or-later in part to honor this lineage; see
+//! `LICENSE` and `docs/license-audit.md`.
 
 // ===============================================================
 //  Register addresses + command constants.

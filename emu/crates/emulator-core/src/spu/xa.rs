@@ -1,3 +1,14 @@
+//! XA-ADPCM block decoder.
+//!
+//! ## Provenance
+//!
+//! Implemented from public hardware documentation (nocash PSX-SPX) and
+//! parity-verified against PCSX-Redux
+//! (<https://github.com/grumpycoders/pcsx-redux>), GPL-2.0-or-later; the
+//! ADPCM filter coefficients are hardware constants. PSoXide is released
+//! under GPL-2.0-or-later for compatibility with that reference. See
+//! `LICENSE` and `docs/license-audit.md`.
+
 /// Per-channel decoder history for XA ADPCM blocks. The filter
 /// uses the last two decoded samples (`y0` = most recent,
 /// `y1` = second-most-recent) as feedback. Callers hold one of

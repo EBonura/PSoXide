@@ -10,6 +10,15 @@
 //! Register map (single-cycle MMIO, 32-bit):
 //! - `0x1F80_1810` GP0 write  / `GPUREAD` read
 //! - `0x1F80_1814` GP1 write / `GPUSTAT` read
+//!
+//! ## Provenance
+//!
+//! Portions of this module are parity-matched against, and in places
+//! derived from, PCSX-Redux (<https://github.com/grumpycoders/pcsx-redux>),
+//! Copyright (C) the PCSX-Redux authors, GPL-2.0-or-later. Points of
+//! correspondence are flagged inline with `Redux` references. PSoXide is
+//! released under GPL-2.0-or-later in part to honor this lineage; see
+//! `LICENSE` and `docs/license-audit.md`.
 
 mod commands;
 

@@ -4,6 +4,16 @@
 //! alongside a parity assertion against PCSX-Redux. The decoder itself
 //! is intentionally a flat match on the primary opcode field -- we'll
 //! refactor to a jump table only if a profiler says to.
+//!
+//! ## Provenance
+//!
+//! Portions of this module are parity-matched against, and in places
+//! derived from, PCSX-Redux (<https://github.com/grumpycoders/pcsx-redux>),
+//! Copyright (C) the PCSX-Redux authors, GPL-2.0-or-later. The MIPS
+//! R3000A instruction set is standard; the inline `Redux` references mark
+//! where edge-case and timing behaviour is matched to Redux. PSoXide is
+//! released under GPL-2.0-or-later in part to honor this lineage; see
+//! `LICENSE` and `docs/license-audit.md`.
 
 use psx_hw::memory;
 use psx_trace::InstructionRecord;
