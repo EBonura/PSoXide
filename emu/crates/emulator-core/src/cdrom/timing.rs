@@ -1,3 +1,14 @@
+//! CD-ROM command-response cycle delays.
+//!
+//! ## Provenance
+//!
+//! The delay constants in this module are transcribed from PCSX-Redux's
+//! `core/cdrom.cc` (<https://github.com/grumpycoders/pcsx-redux>),
+//! Copyright (C) the PCSX-Redux authors, GPL-2.0-or-later, with the
+//! upstream line numbers preserved inline. PSoXide is released under
+//! GPL-2.0-or-later in part to honor this derivation; see `LICENSE` and
+//! `docs/license-audit.md`.
+
 /// Canonical cycle delays for command responses, transcribed from
 /// Redux's `core/cdrom.cc`. Exact match is the difference between
 /// our CDROM events landing on the same instructions as Redux's

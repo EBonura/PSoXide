@@ -1,6 +1,6 @@
 # PSoXide License And Provenance Audit
 
-Audit date: 2026-04-29 (last revised 2026-04-30).
+Audit date: 2026-04-29 (last revised 2026-06-03).
 
 Scope: repository source, checked-in binary assets, generated artifacts,
 third-party references, and public README media.
@@ -21,10 +21,13 @@ PSoXide is licensed under **GPL-2.0-or-later**. The full license text
 is at [`LICENSE`](../LICENSE) at the repo root, alongside the project
 notice, third-party references, and credit.
 
-The choice is deliberate: the emulator core uses PCSX-Redux
-(GPL-2.0-or-later) as a parity oracle and reference for several
-subsystems, and matching its license keeps the lineage clean and removes
-the derivative-work question entirely.
+The choice is deliberate. Several emulator-core subsystems are
+parity-matched against, and in places derived from, PCSX-Redux
+(GPL-2.0-or-later). Some of that code is best described as a derivative
+work under copyright law. Licensing PSoXide under the same
+GPL-2.0-or-later is exactly what the GPL asks of a derivative work: it
+keeps the lineage explicit and the distribution compliant, rather than
+trying to argue the derivation away.
 
 ## Resolved Blockers
 
@@ -34,15 +37,34 @@ the derivative-work question entirely.
 notice and third-party reference notes. All `Cargo.toml` `license`
 fields declare `GPL-2.0-or-later`.
 
-### PCSX-Redux derivation risk (resolved 2026-04-30)
+### PCSX-Redux derivation (addressed 2026-06-03)
 
-By relicensing under GPL-2.0-or-later, the parts of the emulator core
-that mirror Redux's algorithm shapes (scheduler, DMA DICR, SPU ADSR
-tables, MDEC AAN IDCT, scanline triangle rasterizer) are GPL-compatible
-and require no further action. Comments in those files have been
-softened from "port of" / "Direct port of" to behaviour-parity language
-("matches Redux's behaviour", "parity-matched against Redux's …") --
-the code is unchanged, but the language no longer overstates derivation.
+Several emulator-core subsystems are parity-matched against, and in
+places derived from, PCSX-Redux: the event scheduler, DMA DICR
+semantics, SPU ADSR tables and voice model, MDEC AAN IDCT + YUV->RGB
+pipeline, CD-ROM command timing (transcribed from `core/cdrom.cc` with
+upstream line numbers), SIO baud timing, CPU cycle bias, bus/video
+timing, timers, and the scanline-delta triangle rasterizer (both the CPU
+and compute-shader paths). These should be treated as derivative works
+of Redux.
+
+GPL-2.0-or-later is the response the GPL prescribes for a derivative
+work, so distributing this code under it is compliant. To make the
+lineage explicit rather than implicit, every derived source file now
+carries a `## Provenance` header that names PCSX-Redux, its copyright
+holders (Copyright (C) the PCSX-Redux authors), and its license, and
+points back to this audit; inline `Redux` references mark the specific
+points of correspondence. Files that are implemented from hardware
+documentation and only parity-verified against Redux (the GTE, the
+interrupt controller, the pad, and XA-ADPCM decode) carry a header that
+says exactly that and are not claimed as derived.
+
+A correction worth recording: an earlier pass (2026-04-30) rewrote
+"port of" / "Direct port of" comments into softer "behaviour-parity"
+wording without changing the code. That was the wrong direction. For a
+derivative work, both GPL compliance and plain honesty call for louder
+attribution, not quieter. The per-file provenance headers described
+above supersede that change and restore explicit derivation language.
 
 ## Resolved (continued)
 

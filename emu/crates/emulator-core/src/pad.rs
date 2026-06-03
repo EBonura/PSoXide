@@ -25,6 +25,15 @@
 //! (for example, a stale TX after a failed poll) resets the device
 //! back to idle and returns `0xFF` / no-ack, matching the DSR-timeout
 //! behaviour real hardware exhibits.
+//!
+//! ## Provenance
+//!
+//! Implemented from public hardware documentation (nocash PSX-SPX) and
+//! parity-verified against PCSX-Redux
+//! (<https://github.com/grumpycoders/pcsx-redux>), GPL-2.0-or-later;
+//! correspondences are flagged inline with `Redux` references. PSoXide is
+//! released under GPL-2.0-or-later for compatibility with that reference.
+//! See `LICENSE` and `docs/license-audit.md`.
 
 /// Logical button bit positions. `ButtonState::bits()` returns a
 /// `u16` where bit N = 1 means button N is currently held. The
