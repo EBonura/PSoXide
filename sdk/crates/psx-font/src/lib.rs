@@ -92,7 +92,10 @@
 use psx_hw::gpu::{gp0, pack_color, pack_texcoord, pack_vertex, pack_xy};
 use psx_io::gpu::{wait_cmd_ready, write_gp0};
 use psx_math::sincos;
-use psx_vram::{upload_16bpp, upload_clut, Clut, Color555, TexDepth, Tpage, VramRect};
+use psx_vram::{
+    upload_16bpp, upload_clut, Clut, Color555, TexDepth, Tpage, VramHandle, VramRect,
+    VramRegionSource,
+};
 
 pub mod fonts;
 
@@ -336,6 +339,125 @@ fn write_textured_gouraud_quad_packet(
     write_gp0(pack_color(colors[3].0, colors[3].1, colors[3].2));
     write_gp0(pack_vertex(verts[3].0, verts[3].1));
     write_gp0(pack_uv_word(uvs[3].0, uvs[3].1, 0));
+}
+
+/// VRAM reservations backing a set of fonts uploaded together by
+/// [`upload_fonts`]. Free both handles through the allocator to reclaim the
+/// VRAM when the owning scene is torn down.
+#[derive(Copy, Clone, Debug)]
+pub struct FontSetVram {
+    /// The contiguous page-run reservation that holds every atlas.
+    pub pages: VramHandle,
+    /// The shared 2-entry CLUT reservation.
+    pub clut: VramHandle,
+}
+
+/// Atlas layout for `font`: `(glyphs_per_row, atlas_w_texels, atlas_h_texels,
+/// halfwords_per_row)`. Mirrors the layout [`FontAtlas::upload`] computes.
+fn font_atlas_dims(font: &BitmapFont) -> (u16, u16, u16, u16) {
+    let glyph_w = (font.glyph_w as u16).max(1);
+    let glyph_h = font.glyph_h as u16;
+    let max_cols = (FontAtlas::MAX_ATLAS_W_TEXELS / glyph_w).max(1);
+    let glyphs_per_row = font.glyph_count.min(max_cols).max(1);
+    let glyph_rows = font.glyph_count.div_ceil(glyphs_per_row);
+    let atlas_w = glyphs_per_row * glyph_w;
+    let atlas_h = glyph_rows * glyph_h;
+    let halfwords_per_row = atlas_w.div_ceil(4);
+    (glyphs_per_row, atlas_w, atlas_h, halfwords_per_row)
+}
+
+/// Halfwords spanned by one 4bpp texture page (64 halfwords = 256 texels).
+const FONT_PAGE_HALFWORDS: usize = 64;
+
+/// Upload several fonts in a **single** `GP0(A0h)` image transfer.
+///
+/// Repeated per-font VRAM uploads desync the GPU command stream on some
+/// targets and corrupt subsequent (world) rendering; packing every glyph
+/// atlas side-by-side into one reserved page run and emitting one transfer
+/// avoids that entirely. Each font keeps its own 4bpp tpage (one 64-halfword
+/// page column) so glyph UVs stay local; all fonts share one 2-entry CLUT
+/// (transparent, white) which `tint` recolours per draw.
+///
+/// `scratch` is a caller-owned buffer (put it in `static mut` BSS, **not** on
+/// the stack); it must hold at least `fonts.len() * 64 * max_atlas_height`
+/// halfwords. `out` receives one `Some(FontAtlas)` per font; trailing slots
+/// are set to `None`. Returns the handles to free the set later, or `None`
+/// (uploading nothing) if a font is too wide, `scratch`/`out` is too small,
+/// or the allocator is out of space.
+pub fn upload_fonts<R: VramRegionSource>(
+    fonts: &[&'static BitmapFont],
+    alloc: &mut R,
+    scratch: &mut [u16],
+    out: &mut [Option<FontAtlas>],
+) -> Option<FontSetVram> {
+    let n = fonts.len();
+    if n == 0 || n > out.len() {
+        return None;
+    }
+    let mut max_h = 0u16;
+    for &font in fonts {
+        let (_, _, atlas_h, halfwords_per_row) = font_atlas_dims(font);
+        if halfwords_per_row as usize > FONT_PAGE_HALFWORDS {
+            return None; // a glyph atlas wider than one page can't be paged
+        }
+        max_h = max_h.max(atlas_h);
+    }
+    let stride = n * FONT_PAGE_HALFWORDS; // halfwords per combined row
+    let total = stride * max_h as usize;
+    if max_h == 0 || total > scratch.len() {
+        return None;
+    }
+
+    let (base, pages) = alloc.alloc_page_run(n as u16, TexDepth::Bit4, 0)?;
+    // CLUT allocation can't fail at boot (the band is empty); if it ever does
+    // the page run is left reserved, which is harmless at boot.
+    let (clut, clut_handle) = alloc.alloc_clut(2)?;
+
+    scratch[..total].fill(0);
+    for (slot, &font) in fonts.iter().enumerate() {
+        let (glyphs_per_row, _, _, _) = font_atlas_dims(font);
+        let col0 = slot * FONT_PAGE_HALFWORDS;
+        for gi in 0..font.glyph_count {
+            let atlas_col = gi % glyphs_per_row;
+            let atlas_row = gi / glyphs_per_row;
+            let base_x = atlas_col * font.glyph_w as u16;
+            let base_y = atlas_row * font.glyph_h as u16;
+            for row in 0..font.glyph_h {
+                let row_bits = font.glyph_row_packed(gi, row);
+                for col in 0..font.glyph_w as u16 {
+                    if (row_bits >> col) & 1 == 0 {
+                        continue;
+                    }
+                    let x = base_x + col;
+                    let y = base_y + row as u16;
+                    let hw_idx = y as usize * stride + col0 + (x as usize / 4);
+                    let nibble_shift = (x & 3) * 4;
+                    scratch[hw_idx] |= 1u16 << nibble_shift; // CLUT index 1 = white
+                }
+            }
+        }
+        out[slot] = Some(FontAtlas {
+            font,
+            tpage: Tpage::new(base.x() + (slot as u16) * 64, base.y(), TexDepth::Bit4),
+            clut,
+            glyphs_per_row,
+        });
+    }
+    for slot in out.iter_mut().skip(n) {
+        *slot = None;
+    }
+
+    // One image transfer for the whole combined atlas, then the shared CLUT.
+    upload_16bpp(
+        VramRect::new(base.x(), base.y(), stride as u16, max_h),
+        &scratch[..total],
+    );
+    upload_clut(clut, &[Color555::TRANSPARENT, Color555::rgb5(31, 31, 31)]);
+
+    Some(FontSetVram {
+        pages,
+        clut: clut_handle,
+    })
 }
 
 impl FontAtlas {
