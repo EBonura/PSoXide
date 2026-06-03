@@ -474,13 +474,16 @@ impl ApplicationHandler for Shell {
                 if state == ElementState::Pressed {
                     self.pending_input = merge_key(self.pending_input, &logical_key);
                 }
-                // F12 -- toggle the display source between the CPU
+                // `g` -- toggle the display source between the CPU
                 // rasterizer's VRAM and the compute backend's. Only
                 // meaningful when the compute backend is active
                 // (i.e. `--gpu-compute` was passed). No-op otherwise.
+                // (Was F12; rebound to `g` so it needs no Fn on macOS.
+                // `g` is not a pad binding, so it never collides with play
+                // input.)
                 if state == ElementState::Pressed
                     && !repeat
-                    && matches!(&logical_key, Key::Named(NamedKey::F12))
+                    && matches!(&logical_key, Key::Character(c) if c.eq_ignore_ascii_case("g"))
                 {
                     self.display_gpu_compute = !self.display_gpu_compute;
                     eprintln!(
@@ -1028,7 +1031,9 @@ fn frontend_display(
     gfx: &gfx::Graphics,
 ) -> (egui::TextureId, egui::Rect) {
     let area = display_area_or_default(bus);
-    let screen_offset_active = bus.is_some_and(|bus| bus.gpu.horizontal_display_offset_px() != 0);
+    let screen_offset_active = bus.is_some_and(|bus| {
+        bus.gpu.horizontal_display_offset_px() != 0 || bus.gpu.vertical_display_offset_px() != 0
+    });
     if area.bpp24 || screen_offset_active {
         return (gfx.display_texture_id(), cpu_display_uv(area));
     }
