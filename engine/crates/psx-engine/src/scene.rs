@@ -14,7 +14,7 @@
 
 use psx_font::FontAtlas;
 use psx_gpu::framebuf::FrameBuffer;
-use psx_level::{AssetId, LevelOptionDef};
+use psx_level::{AssetId, LevelOptionDef, LevelWorldLayer};
 use psx_pad::{button, PadState};
 
 use crate::frames::{SimTick, VideoHz, VisualFrame};
@@ -130,6 +130,30 @@ impl Ctx {
     }
 }
 
+/// A copyable view of a flow state, handed to the scene resource-lifecycle
+/// hooks. Carries the cooked state identity by value so the hooks never borrow
+/// the flow tables the driver owns.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct SceneStateRef {
+    /// Cooked `LevelSceneState` id (or a synthesised id for bare
+    /// `Gameplay` / `UiScene` flow states).
+    pub id: u16,
+    /// Whether this state runs the gameplay world.
+    pub world: LevelWorldLayer,
+    /// UI scene overlaid on this state, or the project's "no UI scene" sentinel.
+    pub ui_scene: u16,
+    /// State flags (UI input / pause-world).
+    pub flags: u16,
+}
+
+impl SceneStateRef {
+    /// `true` if this state runs the gameplay world layer.
+    #[inline]
+    pub fn has_gameplay(self) -> bool {
+        matches!(self.world, LevelWorldLayer::Gameplay)
+    }
+}
+
 /// Implement this trait on your game type and hand an instance to
 /// [`App::run`][crate::app::App::run].
 ///
@@ -155,6 +179,15 @@ pub trait Scene {
     /// initialisation. Default is a no-op.
     #[allow(unused_variables)]
     fn init(&mut self, ctx: &mut Ctx) {}
+
+    /// Advance load-only work while a flow transition is holding the loading
+    /// screen after [`init`](Scene::init). Return `true` once the scene is ready
+    /// for its first gameplay render. The default is ready immediately for
+    /// simple scenes with no asynchronous world streaming.
+    #[allow(unused_variables)]
+    fn loading_update(&mut self, ctx: &mut Ctx) -> bool {
+        true
+    }
 
     /// Advance game state for the current fixed simulation tick.
     /// Called before [`render`]. Read pad input from `ctx` and use
@@ -216,4 +249,34 @@ pub trait Scene {
     /// Default is a no-op.
     #[allow(unused_variables)]
     fn apply_options(&mut self, options: &[LevelOptionDef], values: &[i32]) {}
+
+    /// Acquire the VRAM/asset resources a flow state needs, through the
+    /// project's VRAM allocator. The flow driver calls this once, immediately
+    /// before the state becomes active, and only when the incoming state's
+    /// resource *set* differs from the outgoing one (see
+    /// [`state_resource_key`](Scene::state_resource_key)). For a gameplay
+    /// state it runs before [`init`](Scene::init), so uploads land before init
+    /// reads them. Default is a no-op.
+    #[allow(unused_variables)]
+    fn on_enter_state(&mut self, state: SceneStateRef, ctx: &mut Ctx) {}
+
+    /// Release the resources acquired in
+    /// [`on_enter_state`](Scene::on_enter_state), returning their reservations
+    /// to the allocator. The driver calls this once after the state stops
+    /// being active, and only when the destination state's resource set
+    /// differs. Must be idempotent (tolerate already-released resources).
+    /// Default is a no-op.
+    #[allow(unused_variables)]
+    fn on_exit_state(&mut self, state: SceneStateRef, ctx: &mut Ctx) {}
+
+    /// Stable identity of the resource *set* a state owns. The driver skips the
+    /// exit+enter pair when the outgoing and incoming keys match, so a resource
+    /// shared across states -- e.g. a UI font atlas used by both menus and the
+    /// gameplay HUD -- is acquired once and not torn down on intra-set hops.
+    /// Default: every state is its own set (`state.id`), i.e. fully symmetric
+    /// create/destroy on every transition.
+    #[allow(unused_variables)]
+    fn state_resource_key(&self, state: SceneStateRef) -> u32 {
+        state.id as u32
+    }
 }

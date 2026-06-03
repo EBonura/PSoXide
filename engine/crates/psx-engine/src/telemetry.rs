@@ -539,6 +539,8 @@ pub mod counter {
     pub const TEXTURED_MODEL_PRIMITIVE_OVERFLOW_SUBMITS: u16 = 215;
     /// Model submits that exceeded world-command storage.
     pub const TEXTURED_MODEL_COMMAND_OVERFLOW_SUBMITS: u16 = 216;
+    /// Room-texture VRAM slots freed by residency eviction (Stage 4 teardown).
+    pub const VRAM_SLOTS_FREED: u16 = 217;
 }
 
 const EVENT_KIND_FRAME_BEGIN: u8 = 1;
