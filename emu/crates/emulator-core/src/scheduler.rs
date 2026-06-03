@@ -35,6 +35,15 @@
 //!   pointers; we keep the data pure and dispatch in [`Bus`] via a
 //!   `match` on the returned `EventSlot`. Avoids box-dyn / lifetime
 //!   noise and makes the firing order deterministic.
+//!
+//! ## Provenance
+//!
+//! Portions of this module are parity-matched against, and in places
+//! derived from, PCSX-Redux (<https://github.com/grumpycoders/pcsx-redux>),
+//! Copyright (C) the PCSX-Redux authors, GPL-2.0-or-later. Points of
+//! correspondence are flagged inline with `Redux` references. PSoXide is
+//! released under GPL-2.0-or-later in part to honor this lineage; see
+//! `LICENSE` and `docs/license-audit.md`.
 
 /// A scheduled-event slot. Names mirror Redux's `PSXINT_*` constants
 /// 1:1 so cross-referencing the Redux source stays trivial. The
