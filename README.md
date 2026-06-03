@@ -140,8 +140,7 @@ Full provenance, including the asset inventory, is in [`LICENSE`](LICENSE) and
 [`docs/license-audit.md`](docs/license-audit.md).
 
 PSoXide also builds on prior open-source work that it neither forks nor
-embeds and shares no code with. The SDK started from PSn00bSDK as a
-reference point; the engine's room and portal model is architecturally
+embeds and shares no code with. The SDK was motivated by earlier work with PSn00bSDK; the engine's room and portal model is architecturally
 inspired by OpenLara and the classic adaptive room system; and the
 editor's authoring model is inspired by Godot. Those are influences, not
 code derivations. PCSX-Redux is the one genuine code derivation, credited
