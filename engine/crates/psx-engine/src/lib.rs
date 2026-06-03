@@ -115,7 +115,7 @@ pub use scheduler::{
 // arguments (instance rotation, joint transforms) without pulling in
 // `psx-gte` directly.
 pub use psx_gte::math::Mat3I16;
-pub use scene::{Ctx, Scene};
+pub use scene::{Ctx, Scene, SceneStateRef};
 pub use third_person_camera::{
     ThirdPersonCameraConfig, ThirdPersonCameraFrame, ThirdPersonCameraInput,
     ThirdPersonCameraState, ThirdPersonCameraTarget,

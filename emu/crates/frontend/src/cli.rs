@@ -200,6 +200,10 @@ pub struct LaunchArgs {
     /// Lets you eyeball the boot state without firing up the GUI.
     #[arg(long)]
     pub dump_vram: Option<PathBuf>,
+    /// Optional path to dump the final 2 MiB main RAM as a raw binary
+    /// blob, for offline diffing of guest state across two runs.
+    #[arg(long)]
+    pub dump_ram: Option<PathBuf>,
     /// Optional path to dump the HW renderer's output as a PPM. Spins
     /// up a headless wgpu device, replays the cumulative `cmd_log`
     /// through the same pipeline the live GUI uses, and writes the
@@ -850,13 +854,10 @@ fn run_headless_launch(
     }
 
     if let Some(path) = args.dump_hw {
-        let used_24bpp_fallback = dump_hw_ppm(&bus, &path)?;
+        let fallback = dump_hw_ppm(&bus, &path)?;
         if emit_summary {
-            if used_24bpp_fallback {
-                eprintln!(
-                    "[cli] HW renderer → {} (24bpp display fallback)",
-                    path.display()
-                );
+            if let Some(reason) = fallback {
+                eprintln!("[cli] HW renderer → {} ({reason})", path.display());
             } else {
                 eprintln!(
                     "[cli] HW renderer → {} ({} cmd_log entries replayed)",
@@ -864,6 +865,13 @@ fn run_headless_launch(
                     bus.gpu.cmd_log.len()
                 );
             }
+        }
+    }
+
+    if let Some(path) = args.dump_ram {
+        std::fs::write(&path, bus.ram()).map_err(|e| format!("write ram dump: {e}"))?;
+        if emit_summary {
+            eprintln!("[cli] main RAM → {} ({} bytes)", path.display(), bus.ram().len());
         }
     }
 
@@ -1249,6 +1257,7 @@ fn validation_launch_args(
         counter_log: None,
         profile_log: None,
         dump_vram: None,
+        dump_ram: None,
         dump_hw: None,
         dump_audio: None,
         dump_guest_profile: false,
@@ -2267,12 +2276,18 @@ fn region_label(e: &LibraryEntry) -> &'static str {
     }
 }
 
-fn dump_hw_ppm(bus: &Bus, path: &std::path::Path) -> Result<bool, String> {
+fn dump_hw_ppm(bus: &Bus, path: &std::path::Path) -> Result<Option<&'static str>, String> {
     let display = bus.gpu.display_area();
-    if display.bpp24 || bus.gpu.horizontal_display_offset_px() != 0 {
+    let has_screen_offset =
+        bus.gpu.horizontal_display_offset_px() != 0 || bus.gpu.vertical_display_offset_px() != 0;
+    if display.bpp24 || has_screen_offset {
         let (rgba, w, h) = bus.gpu.display_rgba8();
         write_rgb_ppm_from_rgba(path, w, h, &rgba)?;
-        return Ok(true);
+        return Ok(Some(if display.bpp24 {
+            "24bpp display fallback"
+        } else {
+            "screen-offset display fallback"
+        }));
     }
 
     let (device, queue) = headless_wgpu_device()?;
@@ -2290,7 +2305,7 @@ fn dump_hw_ppm(bus: &Bus, path: &std::path::Path) -> Result<bool, String> {
         display.height as u32 * s,
     );
     write_rgb_ppm_from_rgba(path, w, h, &rgba)?;
-    Ok(false)
+    Ok(None)
 }
 
 fn headless_wgpu_device() -> Result<(wgpu::Device, wgpu::Queue), String> {
