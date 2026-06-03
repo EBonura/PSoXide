@@ -29,6 +29,15 @@
 //! | 4  | SPU          |
 //! | 5  | PIO          |
 //! | 6  | OTC          |
+//!
+//! ## Provenance
+//!
+//! Portions of this module are parity-matched against, and in places
+//! derived from, PCSX-Redux (<https://github.com/grumpycoders/pcsx-redux>),
+//! Copyright (C) the PCSX-Redux authors, GPL-2.0-or-later. Points of
+//! correspondence are flagged inline with `Redux` references. PSoXide is
+//! released under GPL-2.0-or-later in part to honor this lineage; see
+//! `LICENSE` and `docs/license-audit.md`.
 
 /// Number of DMA channels.
 pub const NUM_CHANNELS: usize = 7;

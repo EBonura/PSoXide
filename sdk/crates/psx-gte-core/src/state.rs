@@ -18,6 +18,15 @@
 //!
 //! Reference: nocash PSX-SPX, section "GTE Coprocessor". Cross-checked
 //! against PCSX-Redux's `gte.cc` interpreter.
+//!
+//! ## Provenance
+//!
+//! Implemented from public hardware documentation (nocash PSX-SPX, "GTE
+//! Coprocessor") and parity-verified against PCSX-Redux's `gte.cc`
+//! (<https://github.com/grumpycoders/pcsx-redux>), GPL-2.0-or-later. The
+//! division seed table and saturation rules are hardware behaviour.
+//! PSoXide is released under GPL-2.0-or-later for compatibility with that
+//! reference; see `LICENSE` and `docs/license-audit.md`.
 
 #![allow(clippy::needless_range_loop)]
 
