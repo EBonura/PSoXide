@@ -388,6 +388,21 @@ The emulator core was developed alongside the following references:
   SPU envelope decode behaviour, embedded as quoted commentary in
   PCSX-Redux's `src/spu/adsr.cc`. Referenced via that quotation.
 
+The SDK, engine, and editor build on the following as influences. No
+source code from them is included or derived in this repository:
+
+- PSn00bSDK (https://github.com/Lameguy64/PSn00bSDK) -- the open-source
+  PS1 SDK that introduced the author to PSX development. The PSoXide SDK
+  is an independent Rust reimplementation, not a port.
+
+- OpenLara (https://github.com/XProger/OpenLara) -- architectural
+  inspiration for the engine's room/portal world model (the classic
+  adaptive room system).
+
+- Godot (https://godotengine.org/) -- inspiration for the editor's
+  scene-tree and resource authoring model. PSoXide does not embed or
+  fork Godot.
+
 PlayStation BIOS images, commercial game disc images, and PCSX-Redux
 binaries or source trees are not included in this repository and are
 not redistributed by this project. Users must supply their own legally
