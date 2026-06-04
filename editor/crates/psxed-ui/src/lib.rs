@@ -12285,7 +12285,7 @@ impl EditorWorkspace {
             .show(ui, |ui| {
                 ui.set_min_width((strip_width - 18.0).max(80.0));
                 ui.set_min_height((strip_height - 10.0).max(26.0));
-                ui.horizontal(|ui| {
+                ui.horizontal_top(|ui| {
                     ui.label(icons::text(status.icon, 14.0).color(status.accent));
                     ui.label(
                         RichText::new(status.badge)
@@ -12294,11 +12294,7 @@ impl EditorWorkspace {
                             .color(status.accent),
                     );
                     ui.separator();
-                    ui.add_sized(
-                        Vec2::new(
-                            ui.available_width().max(80.0),
-                            ui.available_height().max(18.0),
-                        ),
+                    ui.add(
                         egui::Label::new(
                             RichText::new(status.message)
                                 .small()
