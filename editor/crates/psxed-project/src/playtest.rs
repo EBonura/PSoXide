@@ -730,13 +730,19 @@ pub fn build_package(
                                 .map(|id| (id, renderer))
                         })
                     {
-                        let clip = component_animator(scene, node).and_then(|anim| anim.clip);
+                        let animator = component_animator(scene, node);
+                        let clip = animator.as_ref().and_then(|anim| anim.clip);
+                        let pose_frame = match &animator {
+                            Some(anim) if !anim.autoplay => anim.pose_frame,
+                            _ => MODEL_INSTANCE_POSE_ANIMATE,
+                        };
                         if !push_model_instance_for_resource(
                             project,
                             project_root,
                             node.name.as_str(),
                             model_resource_id,
                             clip,
+                            pose_frame,
                             room_index,
                             pos,
                             yaw,
@@ -919,6 +925,7 @@ pub fn build_package(
                         node.name.as_str(),
                         model_resource_id,
                         *animation_clip,
+                        MODEL_INSTANCE_POSE_ANIMATE,
                         room_index,
                         pos,
                         yaw,
@@ -1019,6 +1026,9 @@ pub fn build_package(
                     node.name.as_str(),
                     room_index,
                     raw_pos,
+                    // Ground beneath the box (floor-anchored Y): where its
+                    // fragments settle and where it falls to if unsupported.
+                    floor_pos[1],
                     pitch,
                     yaw,
                     roll,
@@ -3897,6 +3907,7 @@ fn push_model_instance_for_resource(
     node_name: &str,
     model_resource_id: ResourceId,
     clip_override: Option<u16>,
+    pose_frame: u16,
     room_index: u16,
     pos: [i32; 3],
     yaw: i16,
@@ -3958,6 +3969,7 @@ fn push_model_instance_for_resource(
         room: room_index,
         model: model_index,
         clip,
+        pose_frame,
         x: pos[0],
         y: pos[1],
         z: pos[2],
@@ -4044,6 +4056,7 @@ fn push_character_controller_idle_instance(
         room: room_index,
         model: model_index,
         clip,
+        pose_frame: MODEL_INSTANCE_POSE_ANIMATE,
         x: pos[0],
         y: pos[1],
         z: pos[2],
@@ -4237,6 +4250,8 @@ struct ModelRendererComponent {
 struct AnimatorComponent<'a> {
     clip: Option<u16>,
     action_clips: &'a [crate::CharacterActionClip],
+    autoplay: bool,
+    pose_frame: u16,
 }
 
 #[derive(Clone, Copy)]
@@ -4291,10 +4306,15 @@ fn component_animator<'a>(
 ) -> Option<AnimatorComponent<'a>> {
     component_children(scene, host).find_map(|node| match &node.kind {
         NodeKind::Animator {
-            clip, action_clips, ..
+            clip,
+            action_clips,
+            autoplay,
+            pose_frame,
         } => Some(AnimatorComponent {
             clip: *clip,
             action_clips,
+            autoplay: *autoplay,
+            pose_frame: *pose_frame,
         }),
         _ => None,
     })
@@ -4523,6 +4543,7 @@ fn push_box_prop(
     node_name: &str,
     room_index: u16,
     pos: [i32; 3],
+    ground_y: i32,
     pitch: i16,
     yaw: i16,
     roll: i16,
@@ -4585,6 +4606,7 @@ fn push_box_prop(
         x: pos[0],
         y: pos[1],
         z: pos[2],
+        ground_y,
         pitch,
         yaw,
         roll,
@@ -11407,6 +11429,7 @@ mod tests {
                 clip: Some(0),
                 action_clips: Vec::new(),
                 autoplay: true,
+                pose_frame: 0,
             },
         );
         scene.add_node(
@@ -11885,6 +11908,12 @@ mod tests {
         assert_eq!(
             prop.y, expected_y,
             "box prop must cook its authored Y (preview-consistent), not snap to the floor"
+        );
+        // The floor under the box is baked as ground_y so fragments and an
+        // unsupported fall settle on the ground, not the elevated bottom.
+        assert_eq!(
+            prop.ground_y, 512,
+            "box prop must bake the room-floor height beneath it as ground_y"
         );
     }
 
