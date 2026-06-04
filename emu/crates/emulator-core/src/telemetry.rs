@@ -570,7 +570,9 @@ pub mod counter {
 }
 
 /// Number of counter slots, including index zero for unknown/reserved ids.
-pub const COUNTER_COUNT: usize = 217;
+/// Must stay larger than the highest counter id emitted by the guest
+/// (`psx_engine::telemetry::counter`); a counter id >= this is silently dropped.
+pub const COUNTER_COUNT: usize = 218;
 
 /// Telemetry event kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
