@@ -1432,6 +1432,11 @@ pub struct LevelModelInstanceRecord {
     /// Per-instance clip override, or `0xFFFF` to inherit the
     /// model's `default_clip`.
     pub clip: OptionalModelClipIndex,
+    /// Static pose frame within [`Self::clip`], or
+    /// [`MODEL_INSTANCE_POSE_ANIMATE`] to advance the clip from the
+    /// elapsed-tick phase. Lets a model be placed frozen on a chosen
+    /// frame (e.g. a corpse held on the last frame of a death clip).
+    pub pose_frame: u16,
     /// Room-local X.
     pub x: i32,
     /// Y.
@@ -1454,6 +1459,10 @@ pub struct LevelModelInstanceRecord {
 /// Sentinel for [`LevelModelInstanceRecord::clip`] meaning
 /// "inherit model default".
 pub const MODEL_CLIP_INHERIT: OptionalModelClipIndex = OptionalModelClipIndex::INHERIT;
+
+/// Sentinel for [`LevelModelInstanceRecord::pose_frame`] meaning
+/// "advance the clip normally" (no static freeze).
+pub const MODEL_INSTANCE_POSE_ANIMATE: u16 = 0xFFFF;
 
 /// One placed flat image prop. Coordinates are room-local engine
 /// units and `x/y/z` names the bottom-center anchor of the quad.
@@ -1505,6 +1514,13 @@ pub struct LevelBoxPropRecord {
     pub y: i32,
     /// Bottom-center room-local Z.
     pub z: i32,
+    /// Room-floor Y directly beneath the prop, baked at cook time.
+    /// Break shards and settled floor debris fall to this Y instead of
+    /// the prop's own bottom, so an elevated or stacked box's fragments
+    /// land on the ground rather than floating at the box's height. It
+    /// is also the surface an unsupported box falls to. Equals `y` for a
+    /// box authored on the floor, or where no floor sample exists.
+    pub ground_y: i32,
     /// Static pitch in PSX angle units.
     pub pitch: i16,
     /// Static yaw in PSX angle units.

@@ -860,9 +860,10 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         };
         let _ = writeln!(
             out,
-            "    LevelModelInstanceRecord {{ room: RoomIndex({}), model: ModelIndex({}), clip: {clip}, x: {}, y: {}, z: {}, yaw: {}, visual_yaw: {}, visual_offset: [{}, {}, {}], visual_scale_q8: {}, flags: {} }},",
+            "    LevelModelInstanceRecord {{ room: RoomIndex({}), model: ModelIndex({}), clip: {clip}, pose_frame: {}, x: {}, y: {}, z: {}, yaw: {}, visual_yaw: {}, visual_offset: [{}, {}, {}], visual_scale_q8: {}, flags: {} }},",
             inst.room,
             inst.model,
+            inst.pose_frame,
             inst.x,
             inst.y,
             inst.z,
@@ -922,11 +923,12 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         let baked_vertex_rgb = render_box_prop_baked_vertex_rgb(&prop.baked_vertex_rgb);
         let _ = writeln!(
             out,
-            "    LevelBoxPropRecord {{ room: RoomIndex({}), texture_assets: {texture_assets}, x: {}, y: {}, z: {}, pitch: {}, yaw: {}, roll: {}, vertices: {vertices}, tint_rgb: {tint_rgb}, baked_vertex_rgb: {baked_vertex_rgb}, flags: {} }},",
+            "    LevelBoxPropRecord {{ room: RoomIndex({}), texture_assets: {texture_assets}, x: {}, y: {}, z: {}, ground_y: {}, pitch: {}, yaw: {}, roll: {}, vertices: {vertices}, tint_rgb: {tint_rgb}, baked_vertex_rgb: {baked_vertex_rgb}, flags: {} }},",
             prop.room,
             prop.x,
             prop.y,
             prop.z,
+            prop.ground_y,
             prop.pitch,
             prop.yaw,
             prop.roll,

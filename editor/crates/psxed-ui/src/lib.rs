@@ -8785,6 +8785,7 @@ impl EditorWorkspace {
                 clip: None,
                 action_clips: Vec::new(),
                 autoplay: true,
+                pose_frame: 0,
             },
         );
         entity
@@ -8874,6 +8875,7 @@ impl EditorWorkspace {
                     clip: idle_clip,
                     action_clips: Vec::new(),
                     autoplay: true,
+                    pose_frame: 0,
                 },
             );
         }
@@ -22199,6 +22201,7 @@ fn draw_node_kind_editor(
             clip,
             action_clips,
             autoplay,
+            pose_frame,
         } => {
             ui.weak("Component: maps gameplay actions to model animation clips.");
             let autoplay_response = ui.checkbox(autoplay, icons::label(icons::PLAY, "Autoplay"));
@@ -22206,8 +22209,25 @@ fn draw_node_kind_editor(
                 changed = true;
             }
             autoplay_response.on_hover_text(
-                "Advance the editor preview clip in the room viewport. Off holds frame zero.",
+                "Advance the editor preview clip in the room viewport. Off freezes the model on the Pose Frame below.",
             );
+            if !*autoplay {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Pose Frame").color(STUDIO_TEXT_WEAK));
+                    let mut frame = i32::from(*pose_frame);
+                    if ui
+                        .add(egui::DragValue::new(&mut frame).speed(1.0).range(0..=4095))
+                        .changed()
+                    {
+                        *pose_frame = frame.clamp(0, u16::MAX as i32 - 1) as u16;
+                        changed = true;
+                    }
+                })
+                .response
+                .on_hover_text(
+                    "Frame of the selected clip to hold while autoplay is off. Place a model frozen on a chosen pose, e.g. a corpse on its death frame.",
+                );
+            }
             if let Some(context) = animator_clip_context {
                 ui.label(
                     RichText::new(format!("Model: {}", context.model_name))
@@ -31818,6 +31838,7 @@ fn component_templates_for_host(host_kind: &NodeKind) -> Vec<(&'static str, Node
                 clip: None,
                 action_clips: Vec::new(),
                 autoplay: true,
+                pose_frame: 0,
             },
         ),
         (
