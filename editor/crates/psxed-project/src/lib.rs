@@ -9305,6 +9305,11 @@ pub enum NodeKind {
         /// editor/playtest runtime.
         #[serde(default = "default_true")]
         autoplay: bool,
+        /// Frame to hold when `autoplay` is off, so a model can be
+        /// placed frozen on a chosen pose (e.g. a corpse on a death
+        /// frame). Ignored while `autoplay` is on.
+        #[serde(default)]
+        pose_frame: u16,
     },
     /// Collision component. The first runtime pass only cooks room
     /// grid collision, but keeping authored collider data as a node
