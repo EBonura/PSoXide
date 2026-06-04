@@ -12489,7 +12489,9 @@ fn draw_box_props<T>(
     triangles: &mut T,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) where
-    T: PrimitiveSink<TriTextured> + PrimitiveSink<TriTexturedGouraud>,
+    T: PrimitiveSink<TriTextured>
+        + PrimitiveSink<TriTexturedGouraud>
+        + PrimitiveSink<QuadTexturedGouraud>,
 {
     for (index, prop) in props.iter().enumerate() {
         if prop.room != current_room || box_prop_broken_in_words(broken, index) {
@@ -12906,7 +12908,9 @@ fn draw_box_prop_faces<T>(
     triangles: &mut T,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) where
-    T: PrimitiveSink<TriTextured> + PrimitiveSink<TriTexturedGouraud>,
+    T: PrimitiveSink<TriTextured>
+        + PrimitiveSink<TriTexturedGouraud>
+        + PrimitiveSink<QuadTexturedGouraud>,
 {
     for face in 0..psx_level::BOX_PROP_FACE_COUNT {
         let face_runtime = faces[face];
@@ -12938,21 +12942,8 @@ fn draw_box_prop_faces<T>(
             .with_textured_triangle_splitting(true)
             .with_textured_triangle_max_edge(0);
         if let Some(projected) = camera.project_world_quad(face_vertices) {
-            let _ = world.submit_textured_gouraud_triangle(
-                triangles,
-                [projected[0], projected[1], projected[2]],
-                [uvs[0], uvs[1], uvs[2]],
-                [colors[0], colors[1], colors[2]],
-                material,
-                opts,
-            );
-            let _ = world.submit_textured_gouraud_triangle(
-                triangles,
-                [projected[0], projected[2], projected[3]],
-                [uvs[0], uvs[2], uvs[3]],
-                [colors[0], colors[2], colors[3]],
-                material,
-                opts,
+            submit_projected_textured_gouraud_quad_u8(
+                world, triangles, projected, uvs, colors, material, opts,
             );
         } else {
             let tint = average_vertex_rgb(colors);
