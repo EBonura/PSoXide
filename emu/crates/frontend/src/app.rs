@@ -1143,10 +1143,7 @@ impl AppState {
         self.editor
             .set_status(format!("{cook_status}; compiling runtime..."));
 
-        if let Err(error) = self.spawn_editor_playtest_build(
-            EditorBuildCompletion::RunEmbedded,
-            "Building embedded playtest",
-        ) {
+        if let Err(error) = self.spawn_editor_playtest_build(EditorBuildCompletion::RunEmbedded) {
             let message = format!("Embedded Play build failed: {error}");
             self.editor.set_status(message.clone());
             self.embedded_playtest.fail();
@@ -1182,10 +1179,9 @@ impl AppState {
             dest_path.display()
         ));
 
-        if let Err(error) = self.spawn_editor_playtest_build(
-            EditorBuildCompletion::ExportProject { dest_path },
-            "Building project disc",
-        ) {
+        if let Err(error) =
+            self.spawn_editor_playtest_build(EditorBuildCompletion::ExportProject { dest_path })
+        {
             let message = format!("Project build failed: {error}");
             self.editor.set_status(message.clone());
             self.embedded_playtest.fail();
@@ -1195,7 +1191,6 @@ impl AppState {
     fn spawn_editor_playtest_build(
         &mut self,
         completion: EditorBuildCompletion,
-        toast: &'static str,
     ) -> Result<(), String> {
         let workspace_root = repo_root_dir();
         // Capture the build's stdout+stderr to a log file rather than
@@ -1222,7 +1217,6 @@ impl AppState {
             .map_err(|error| format!("spawn make: {error}"))?;
         self.editor_build_completion = Some(completion);
         self.embedded_playtest.start_building(child);
-        self.status_message_set(toast);
         Ok(())
     }
 
