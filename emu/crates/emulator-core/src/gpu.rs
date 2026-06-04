@@ -4693,6 +4693,148 @@ mod tests {
         }
     }
 
+    /// The real `TriTexturedGouraud` packet (GP0 0x34) rasterizes, and the
+    /// engine's two-triangle split of a quad face is pixel-identical to the
+    /// `QuadTexturedGouraud` packet (0x3C) built from the same corners.
+    ///
+    /// Unlike `textured_gouraud_quad_matches_two_triangle_split_bitexact`,
+    /// which hand-assembles GP0 words, this drives the *exact struct bytes
+    /// the engine emits* -- the same SDK constructors the `WorldRenderPass`
+    /// leaf paths call (`TriTexturedGouraud::with_material_packet_texcoords`
+    /// and `QuadTexturedGouraud::with_packet_material_packed_uv_words`),
+    /// including the leading GP0(E2) texture-window word that the
+    /// hand-assembled sweep omits. A regression here is exactly the
+    /// invisible-box symptom: `submit_textured_gouraud_triangle` reaches the
+    /// ordering table but paints nothing. Keeping it green is what lets the
+    /// per-triangle `TriTexturedGouraud` primitive (world geometry, image
+    /// props, subdivided cached-room surfaces) stay trusted instead of
+    /// being mistaken for a dead, broken type.
+    #[test]
+    fn tri_textured_gouraud_struct_rasterizes_and_matches_quad() {
+        use psx_gpu::material::{TextureMaterial, TexturedGouraudPacketMaterial};
+        use psx_gpu::prim::{QuadTexturedGouraud, TriTexturedGouraud};
+
+        // Same texture-page layout as the GP0-word bit-exact sweep: 15bpp,
+        // tex_page_x = 5*64 = 320, tex_page_y = 256, so sampling stays clear
+        // of the y < 256 draw region (no draw feeds back into a texel).
+        const TPAGE: u16 = 0x0115;
+
+        // Feed a packet struct to the GPU as a GP0 word stream, skipping the
+        // OT tag (word 0) and sending exactly `words` data words -- i.e. what
+        // the DMA linked-list walker delivers for a tag of `(words << 24)`.
+        fn submit_packet<T>(gpu: &mut Gpu, packet: &T, words: u8) {
+            // SAFETY: every primitive struct is #[repr(C, align(4))] holding
+            // (1 + WORDS) u32 fields with no padding; we read only those.
+            let raw = unsafe {
+                core::slice::from_raw_parts(
+                    (packet as *const T).cast::<u32>(),
+                    1 + words as usize,
+                )
+            };
+            for &w in &raw[1..] {
+                gpu.write32(GP0_ADDR, w);
+            }
+        }
+
+        fn make_gpu() -> Gpu {
+            let mut gpu = Gpu::new();
+            gpu.write32(GP0_ADDR, 0xE300_0000); // draw area TL (0,0)
+            gpu.write32(GP0_ADDR, 0xE400_0000 | 0x3FF | (0x1FF << 10)); // BR
+            // Deterministic non-zero 15bpp texture (low bit forced set, so no
+            // texel resolves to transparent 0x0000) over the sample area.
+            for y in 256..512u16 {
+                for x in 256..640u16 {
+                    let p = (((x as u32) * 3 + (y as u32) * 5) & 0x7FFF) as u16 | 1;
+                    gpu.vram.set_pixel(x, y, p);
+                }
+            }
+            gpu
+        }
+
+        // Opaque, non-raw textured-Gouraud material on the sample page. CLUT
+        // is irrelevant at 15bpp; tint 0x80 is neutral (1.0) modulation.
+        let material = TextureMaterial::opaque(0, TPAGE, (0x80, 0x80, 0x80));
+        let packet_material = TexturedGouraudPacketMaterial::from_texture(material);
+
+        // A clockwise-perimeter quad face, the shape box props project to.
+        let verts: [(i16, i16); 4] = [(40, 40), (180, 48), (172, 150), (52, 140)];
+        let uvs: [(u8, u8); 4] = [(0, 0), (60, 0), (60, 40), (0, 40)];
+        let colors: [(u8, u8, u8); 4] = [
+            (0xFF, 0xFF, 0xFF),
+            (0x40, 0xC0, 0xFF),
+            (0x20, 0xFF, 0x40),
+            (0xFF, 0x40, 0x80),
+        ];
+
+        // Path A: the two leaf packets `submit_textured_gouraud_triangle`
+        // emits when it splits the quad on the 0-2 diagonal.
+        let mut a = make_gpu();
+        let tri0 = TriTexturedGouraud::with_material_packet_texcoords(
+            [verts[0], verts[1], verts[2]],
+            [uvs[0], uvs[1], uvs[2]],
+            [colors[0], colors[1], colors[2]],
+            material,
+        );
+        let tri1 = TriTexturedGouraud::with_material_packet_texcoords(
+            [verts[0], verts[2], verts[3]],
+            [uvs[0], uvs[2], uvs[3]],
+            [colors[0], colors[2], colors[3]],
+            material,
+        );
+        submit_packet(&mut a, &tri0, TriTexturedGouraud::WORDS);
+        submit_packet(&mut a, &tri1, TriTexturedGouraud::WORDS);
+
+        // Path B: the single `QuadTexturedGouraud` packet
+        // `submit_textured_gouraud_quad_prescreened_u8` emits, with the
+        // [1,0,2,3] reorder that lands the hardware 1-2 diagonal on the
+        // original 0-2 edge.
+        let mut b = make_gpu();
+        let uv_word = |uv: (u8, u8)| (uv.0 as u16) | ((uv.1 as u16) << 8);
+        let quad = QuadTexturedGouraud::with_packet_material_packed_uv_words(
+            [verts[1], verts[0], verts[2], verts[3]],
+            [
+                uv_word(uvs[1]),
+                uv_word(uvs[0]),
+                uv_word(uvs[2]),
+                uv_word(uvs[3]),
+            ],
+            [colors[1], colors[0], colors[2], colors[3]],
+            packet_material,
+        );
+        submit_packet(&mut b, &quad, QuadTexturedGouraud::WORDS);
+
+        let xs = verts.iter().map(|p| p.0).min().unwrap().max(0) as u16;
+        let xe = (verts.iter().map(|p| p.0).max().unwrap().min(1023)) as u16;
+        let ys = verts.iter().map(|p| p.1).min().unwrap().max(0) as u16;
+        let ye = (verts.iter().map(|p| p.1).max().unwrap().min(511)) as u16;
+
+        // The triangle path must actually paint pixels -- the exact
+        // assertion the invisible-box symptom would have failed -- and must
+        // match the quad packet pixel-for-pixel.
+        let mut tri_painted = 0usize;
+        let mut diffs = 0usize;
+        for y in ys..=ye {
+            for x in xs..=xe {
+                let pa = a.vram.get_pixel(x, y);
+                if pa != 0 {
+                    tri_painted += 1;
+                }
+                if pa != b.vram.get_pixel(x, y) {
+                    diffs += 1;
+                }
+            }
+        }
+        assert!(
+            tri_painted > 0,
+            "TriTexturedGouraud (GP0 0x34) reached the GPU but rasterized no pixels",
+        );
+        assert_eq!(
+            diffs, 0,
+            "{diffs} pixels differ between the TriTexturedGouraud 0-2 split and \
+             the QuadTexturedGouraud packet built from identical corners",
+        );
+    }
+
     // --- sample_texture transparency rules ---
     //
     // PSX convention: a texel is transparent when the **resolved
