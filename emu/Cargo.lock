@@ -1102,6 +1102,7 @@ version = "0.1.0"
 dependencies = [
  "parity-oracle",
  "psoxide-settings",
+ "psx-gpu",
  "psx-gte-core",
  "psx-hw",
  "psx-iso",
