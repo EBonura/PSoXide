@@ -579,6 +579,9 @@ pub struct PlaytestModelInstance {
     /// Per-instance clip override, or [`MODEL_CLIP_INHERIT`]
     /// to use the model's `default_clip`.
     pub clip: u16,
+    /// Static pose frame within `clip`, or [`MODEL_INSTANCE_POSE_ANIMATE`]
+    /// to advance the clip normally.
+    pub pose_frame: u16,
     /// Room-local X.
     pub x: i32,
     /// Y.
@@ -602,6 +605,10 @@ pub struct PlaytestModelInstance {
 /// "inherit model default" -- same value as
 /// [`psx_level::MODEL_CLIP_INHERIT`].
 pub const MODEL_CLIP_INHERIT: u16 = 0xFFFF;
+
+/// Sentinel for [`PlaytestModelInstance::pose_frame`] meaning "play the
+/// clip" -- same value as [`psx_level::MODEL_INSTANCE_POSE_ANIMATE`].
+pub const MODEL_INSTANCE_POSE_ANIMATE: u16 = 0xFFFF;
 
 /// One material-backed flat image prop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -647,6 +654,10 @@ pub struct PlaytestBoxProp {
     pub y: i32,
     /// Bottom-center room-local Z.
     pub z: i32,
+    /// Room-floor Y directly beneath the prop (the floor-anchored
+    /// height), baked so fragments and falling boxes settle on the
+    /// ground rather than the prop's own elevated bottom.
+    pub ground_y: i32,
     /// Static pitch, PSX angle units.
     pub pitch: i16,
     /// Static yaw, PSX angle units.

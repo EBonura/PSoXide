@@ -6416,6 +6416,7 @@ mod tests {
                 clip: Some(3),
                 action_clips: Vec::new(),
                 autoplay: true,
+                pose_frame: 0,
             },
         );
 
@@ -6466,6 +6467,7 @@ mod tests {
                 clip: Some(2),
                 action_clips: Vec::new(),
                 autoplay: false,
+                pose_frame: 0,
             },
         );
 

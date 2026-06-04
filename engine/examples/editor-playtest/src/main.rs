@@ -1484,6 +1484,16 @@ const MAX_BOX_PROP_BREAK_EVENTS: usize = 16;
 const BOX_PROP_BREAK_FRAMES: u8 = 24;
 const BOX_PROP_BREAK_MOTION_FRAMES: u8 = 20;
 const BOX_PROP_BREAK_SHARD_COUNT: usize = 8;
+/// Gravity applied to an unsupported, falling box (room units per vblank,
+/// per vblank). Tuned so a stacked box drops over a handful of frames.
+const BOX_PROP_FALL_GRAVITY: i32 = 28;
+/// Per-vblank fall-speed cap so a tall drop cannot tunnel past its
+/// landing in one step (the landing check snaps any overshoot anyway).
+const BOX_PROP_FALL_MAX_VEL: i32 = 384;
+/// Slack for "rests on the floor / on the box below" support tests, in
+/// room units. Boxes are ~900+ units tall, so this only absorbs rounding
+/// and small authored gaps.
+const BOX_PROP_SUPPORT_TOLERANCE: i32 = 64;
 const BOX_PROP_BREAK_ATTACK_REACH: i32 = 768;
 const BOX_PROP_BREAK_ATTACK_WIDTH: i32 = 320;
 const BOX_PROP_FACE_NORMAL_SHIFT: u32 = 10;
@@ -1980,6 +1990,13 @@ struct BoxPropBreakEvent {
     age: u8,
     impulse_x_q8: i16,
     impulse_z_q8: i16,
+    /// Room-floor Y beneath the broken box (from its runtime). Shard
+    /// vertices clamp to this, so fragments settle on the ground instead
+    /// of floating at an elevated box's bottom.
+    ground_y: i32,
+    /// Y offset the box had when it broke (its fall offset on impact; 0
+    /// for an in-place break). Shards spawn from this landed position.
+    y_offset: i32,
 }
 
 impl BoxPropBreakEvent {
@@ -1988,11 +2005,33 @@ impl BoxPropBreakEvent {
         age: 0,
         impulse_x_q8: 0,
         impulse_z_q8: 0,
+        ground_y: i32::MIN,
+        y_offset: 0,
     };
 
     const fn is_active(self) -> bool {
         self.prop_index != u16::MAX
     }
+}
+
+/// Per-box dynamic fall state. A box becomes `falling` once whatever held
+/// it up (the floor or a box beneath) is gone; it then accelerates down by
+/// `vel` until its bottom reaches the room floor, where it breaks.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+struct BoxPropFallState {
+    falling: bool,
+    /// Downward offset applied to the box's geometry while falling (<= 0).
+    fall_y: i32,
+    /// Current downward speed in room units per vblank.
+    vel: i32,
+}
+
+impl BoxPropFallState {
+    const EMPTY: Self = Self {
+        falling: false,
+        fall_y: 0,
+        vel: 0,
+    };
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -2085,7 +2124,12 @@ struct BoxPropRuntime {
     break_shards: [BoxPropBreakShardRuntime; BOX_PROP_BREAK_SHARD_COUNT],
     cull_center: WorldVertex,
     cull_radius: i32,
+    /// The box's own lowest vertex Y (its authored bottom).
     floor_y: i32,
+    /// Room-floor Y beneath the box (baked). Fragments settle here and
+    /// an unsupported box falls to here; equals `floor_y` for a box that
+    /// already rests on the floor.
+    ground_y: i32,
     debris_bounds: BoxPropDebrisBounds,
     aabb_min: RoomPoint,
     aabb_max: RoomPoint,
@@ -2098,6 +2142,7 @@ impl BoxPropRuntime {
         cull_center: WorldVertex::ZERO,
         cull_radius: 32,
         floor_y: 0,
+        ground_y: 0,
         debris_bounds: BoxPropDebrisBounds::EMPTY,
         aabb_min: RoomPoint::ZERO,
         aabb_max: RoomPoint::ZERO,
@@ -3503,6 +3548,9 @@ struct Playtest {
     box_prop_broken: [u32; BOX_PROP_BROKEN_WORDS],
     /// Static derived box-prop data used by render, break tests, and collision.
     box_prop_runtime: [BoxPropRuntime; MAX_BOX_PROP_STATE],
+    /// Dynamic fall state per box, parallel to `box_prop_broken`. A box
+    /// starts falling when its support is removed and breaks on landing.
+    box_prop_fall: [BoxPropFallState; MAX_BOX_PROP_STATE],
     /// Short-lived baked face-burst events for newly broken box props.
     box_prop_break_events: [BoxPropBreakEvent; MAX_BOX_PROP_BREAK_EVENTS],
     /// Circle is shared by tap-evade and hold-sprint. We delay
@@ -3634,6 +3682,7 @@ impl Playtest {
             anim_lock_until_tick: SimTick::ZERO,
             box_prop_broken: [0; BOX_PROP_BROKEN_WORDS],
             box_prop_runtime: [BoxPropRuntime::EMPTY; MAX_BOX_PROP_STATE],
+            box_prop_fall: [BoxPropFallState::EMPTY; MAX_BOX_PROP_STATE],
             box_prop_break_events: [BoxPropBreakEvent::EMPTY; MAX_BOX_PROP_BREAK_EVENTS],
             evade_run_hold_ticks: 0,
             evade_run_hold_consumed: false,
@@ -3679,6 +3728,7 @@ impl Playtest {
 
     fn rebuild_box_prop_runtime(&mut self) {
         self.box_prop_runtime = [BoxPropRuntime::EMPTY; MAX_BOX_PROP_STATE];
+        self.box_prop_fall = [BoxPropFallState::EMPTY; MAX_BOX_PROP_STATE];
         for (index, prop) in BOX_PROPS.iter().enumerate() {
             if index >= self.box_prop_runtime.len() {
                 break;
@@ -3973,6 +4023,7 @@ impl Scene for Playtest {
         self.checkpoint = None;
         self.message_overlay = None;
         self.box_prop_broken = [0; BOX_PROP_BROKEN_WORDS];
+        self.box_prop_fall = [BoxPropFallState::EMPTY; MAX_BOX_PROP_STATE];
         self.box_prop_break_events = [BoxPropBreakEvent::EMPTY; MAX_BOX_PROP_BREAK_EVENTS];
         self.camera.snap_to_player_with_yaw(
             self.camera_target(None, false),
@@ -4031,6 +4082,7 @@ impl Scene for Playtest {
         }
         let delta_vblanks = 1u16;
         self.advance_box_prop_break_events(delta_vblanks);
+        self.advance_box_prop_falls(delta_vblanks);
         if CAMERA_SWEEP_ENABLED {
             self.update_camera_sweep(delta_vblanks);
             return;
@@ -4627,6 +4679,7 @@ impl Scene for Playtest {
                     BOX_PROPS,
                     &self.box_prop_broken,
                     &self.box_prop_runtime,
+                    &self.box_prop_fall,
                     active.index,
                     &room_camera,
                     actor_options,
@@ -5296,16 +5349,28 @@ impl Playtest {
         }
         self.box_prop_broken[word] |= mask;
         self.spawn_box_prop_break_event(index, impulse_x_q8, impulse_z_q8);
+        // Anything that was resting on this box (or on a box this one was
+        // holding up) has lost its support: let it fall and break in turn.
+        self.start_unsupported_box_falls();
         true
     }
 
     fn spawn_box_prop_break_event(&mut self, index: usize, impulse_x_q8: i16, impulse_z_q8: i16) {
         let prop_index = index.min(u16::MAX as usize) as u16;
+        let ground_y = self
+            .box_prop_runtime
+            .get(index)
+            .map_or(i32::MIN, |runtime| runtime.ground_y);
+        // Spawn shards from wherever the box actually is: a box that fell
+        // and broke on impact carries its landed downward offset.
+        let y_offset = self.box_prop_fall.get(index).map_or(0, |fall| fall.fall_y);
         let replacement = BoxPropBreakEvent {
             prop_index,
             age: 0,
             impulse_x_q8,
             impulse_z_q8,
+            ground_y,
+            y_offset,
         };
         let mut target = 0usize;
         let mut oldest_age = 0u8;
@@ -5331,6 +5396,103 @@ impl Playtest {
             event.age = event.age.saturating_add(step);
             if event.age >= BOX_PROP_BREAK_FRAMES {
                 *event = BoxPropBreakEvent::EMPTY;
+            }
+        }
+    }
+
+    /// Mark every box that has lost its support as falling, to a fixpoint
+    /// so a toppling stack cascades: the box whose base is gone falls,
+    /// which in turn unsupports the box above it. Cheap and event-driven
+    /// (only runs when a box breaks), so it adds no steady-state cost.
+    fn start_unsupported_box_falls(&mut self) {
+        let count = BOX_PROPS.len().min(self.box_prop_runtime.len());
+        loop {
+            let mut changed = false;
+            for index in 0..count {
+                // Only the active room's boxes are live; never start a fall
+                // in an unloaded room from a break over here.
+                if BOX_PROPS[index].room != self.room_index {
+                    continue;
+                }
+                if self.is_box_prop_broken(index) || self.box_prop_fall[index].falling {
+                    continue;
+                }
+                if self.box_prop_supported(index, count) {
+                    continue;
+                }
+                self.box_prop_fall[index].falling = true;
+                self.box_prop_fall[index].vel = 0;
+                changed = true;
+            }
+            if !changed {
+                break;
+            }
+        }
+    }
+
+    /// True if box `index` rests on the room floor or on a still-standing
+    /// (unbroken, not-falling) box directly beneath it.
+    fn box_prop_supported(&self, index: usize, count: usize) -> bool {
+        let runtime = self.box_prop_runtime[index];
+        // Grounded: its bottom sits at (or below) the baked room floor.
+        if runtime.aabb_min.y <= runtime.ground_y.saturating_add(BOX_PROP_SUPPORT_TOLERANCE) {
+            return true;
+        }
+        let room = BOX_PROPS[index].room;
+        for other in 0..count {
+            if other == index
+                || BOX_PROPS[other].room != room
+                || self.is_box_prop_broken(other)
+                || self.box_prop_fall[other].falling
+            {
+                continue;
+            }
+            let support = self.box_prop_runtime[other];
+            // `other` holds up `index` when its top meets `index`'s bottom
+            // and their footprints overlap in X/Z.
+            let gap = runtime.aabb_min.y.saturating_sub(support.aabb_max.y).abs();
+            if gap <= BOX_PROP_SUPPORT_TOLERANCE
+                && box_prop_aabb_overlaps_xz(
+                    runtime.aabb_min,
+                    runtime.aabb_max,
+                    support.aabb_min,
+                    support.aabb_max,
+                )
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Advance every falling box under gravity and break it on impact with
+    /// the room floor. Only touches boxes flagged `falling`, so it is
+    /// transient work (no steady-state cost while boxes sit still).
+    fn advance_box_prop_falls(&mut self, delta_vblanks: u16) {
+        let step = delta_vblanks.max(1) as i32;
+        let count = BOX_PROPS.len().min(self.box_prop_runtime.len());
+        for index in 0..count {
+            if !self.box_prop_fall[index].falling || self.is_box_prop_broken(index) {
+                continue;
+            }
+            let runtime = self.box_prop_runtime[index];
+            let mut fall = self.box_prop_fall[index];
+            fall.vel = fall
+                .vel
+                .saturating_add(BOX_PROP_FALL_GRAVITY.saturating_mul(step))
+                .min(BOX_PROP_FALL_MAX_VEL);
+            fall.fall_y = fall.fall_y.saturating_sub(fall.vel.saturating_mul(step));
+            if runtime.aabb_min.y.saturating_add(fall.fall_y) <= runtime.ground_y {
+                // Snap so the box's bottom rests exactly on the floor, then
+                // break on impact. `mark_box_prop_broken` reads this final
+                // fall_y for the shard spawn offset and cascades to whatever
+                // was stacked on top of this box.
+                fall.fall_y = runtime.ground_y.saturating_sub(runtime.aabb_min.y);
+                fall.falling = false;
+                self.box_prop_fall[index] = fall;
+                self.mark_box_prop_broken(index, 0, 0);
+            } else {
+                self.box_prop_fall[index] = fall;
             }
         }
     }
@@ -11597,7 +11759,15 @@ fn draw_model_instances(
         let Some(anim) = runtime_model.clip(clips, clip_local) else {
             continue;
         };
-        let phase = anim.phase_at_tick_q12(elapsed_tick.as_u32(), video_hz.as_u16());
+        // A frozen instance (pose_frame != ANIMATE) holds one sampled
+        // frame: phase = frame << 12 lands exactly on it, with no
+        // fractional interpolation. Lets posed props (e.g. corpses) sit
+        // on a chosen frame instead of advancing the clip.
+        let phase = if inst.pose_frame == psx_level::MODEL_INSTANCE_POSE_ANIMATE {
+            anim.phase_at_tick_q12(elapsed_tick.as_u32(), video_hz.as_u16())
+        } else {
+            (inst.pose_frame.min(anim.frame_count().saturating_sub(1)) as u32) << 12
+        };
         let bounds = model_frame_bounds(runtime_model, clip_local, phase);
         let clip_anchor = model_clip_anchor(runtime_model, clip_local);
         let reference_anchor = model_clip_anchor(runtime_model, runtime_model.default_clip);
@@ -12482,6 +12652,7 @@ fn draw_box_props<T>(
     props: &[LevelBoxPropRecord],
     broken: &[u32; BOX_PROP_BROKEN_WORDS],
     runtime: &[BoxPropRuntime; MAX_BOX_PROP_STATE],
+    fall: &[BoxPropFallState; MAX_BOX_PROP_STATE],
     current_room: RoomIndex,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
@@ -12500,10 +12671,17 @@ fn draw_box_props<T>(
         let Some(box_runtime) = runtime.get(index) else {
             continue;
         };
+        // A box mid-fall is drawn shifted down by its current fall offset.
+        let fall_y = fall[index].fall_y;
+        let cull_center = WorldVertex::new(
+            box_runtime.cull_center.x,
+            box_runtime.cull_center.y.saturating_add(fall_y),
+            box_runtime.cull_center.z,
+        );
         if !sphere_visible_to_camera(
             camera,
             options,
-            box_runtime.cull_center,
+            cull_center,
             box_runtime.cull_radius,
             96,
         ) {
@@ -12512,6 +12690,7 @@ fn draw_box_props<T>(
         draw_box_prop_faces(
             prop,
             &box_runtime.faces,
+            fall_y,
             camera,
             options,
             lighting,
@@ -12546,7 +12725,7 @@ fn draw_box_prop_floor_debris<T>(
         };
         let debris_center = WorldVertex::new(
             box_runtime.cull_center.x,
-            box_runtime.floor_y.saturating_add(16),
+            box_runtime.ground_y.saturating_add(16),
             box_runtime.cull_center.z,
         );
         if !sphere_visible_to_camera(
@@ -12571,7 +12750,7 @@ fn draw_box_prop_floor_debris<T>(
             prop,
             &face_textures,
             box_runtime.debris_bounds,
-            box_runtime.floor_y,
+            box_runtime.ground_y,
             loaded_projector,
             camera,
             options,
@@ -12902,6 +13081,7 @@ fn box_prop_apply_fog_weight(
 fn draw_box_prop_faces<T>(
     prop: &LevelBoxPropRecord,
     faces: &[BoxPropFaceRuntime; psx_level::BOX_PROP_FACE_COUNT],
+    fall_y: i32,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
     lighting: &RuntimeRoomLighting,
@@ -12917,7 +13097,9 @@ fn draw_box_prop_faces<T>(
         if !box_prop_face_front_facing(camera, face_runtime) {
             continue;
         }
-        let face_vertices = face_runtime.vertices;
+        // A uniform Y shift while the box falls; facing is unchanged so the
+        // front-facing test above still uses the resting normal/center.
+        let face_vertices = box_prop_offset_quad_y(face_runtime.vertices, fall_y);
         let Some(texture_asset) = prop.texture_assets[face] else {
             continue;
         };
@@ -13022,7 +13204,16 @@ fn box_prop_break_shard_quad(
         p = add_world_vertex_offset(p, tumble_u);
         p = add_world_vertex_offset(p, tumble_v);
         p = rotate_world_vertex_y_around_q12(p, shard_center, spin_q12);
-        *vertex = add_world_vertex_offset(p, offset);
+        let landed = add_world_vertex_offset(p, offset);
+        // Shift by the box's landed fall offset (0 for an in-place break),
+        // then keep the fragment from sinking below the room floor: for an
+        // elevated or fallen box this settles it on the ground rather than
+        // the box's own (elevated) bottom.
+        let y = landed
+            .y
+            .saturating_add(event.y_offset)
+            .max(event.ground_y);
+        *vertex = WorldVertex::new(landed.x, y, landed.z);
     }
     quad
 }
@@ -13408,12 +13599,16 @@ fn build_box_prop_runtime(prop: &LevelBoxPropRecord) -> BoxPropRuntime {
     let (cull_center, cull_radius) = box_prop_cull_bounds(vertices);
     let break_shards = box_prop_break_shard_runtime(prop, raw_faces, cull_center);
     let (aabb_min, aabb_max) = box_prop_aabb_from_vertices(vertices);
+    let floor_y = box_prop_floor_y(vertices);
     BoxPropRuntime {
         faces,
         break_shards,
         cull_center,
         cull_radius,
-        floor_y: box_prop_floor_y(vertices),
+        floor_y,
+        // Never let the baked ground sit above the box's own bottom (a box
+        // rests on or above its floor); guards against a stale cook value.
+        ground_y: prop.ground_y.min(floor_y),
         debris_bounds: box_prop_debris_bounds(vertices),
         aabb_min,
         aabb_max,
@@ -13538,6 +13733,30 @@ fn box_prop_aabb_from_vertices(
         RoomPoint::new(min_x, min_y, min_z),
         RoomPoint::new(max_x, max_y, max_z),
     )
+}
+
+/// Whether two box AABBs overlap in the X/Z (floor) plane. Used to decide
+/// if one box sits over another for stacked-support detection.
+fn box_prop_aabb_overlaps_xz(
+    a_min: RoomPoint,
+    a_max: RoomPoint,
+    b_min: RoomPoint,
+    b_max: RoomPoint,
+) -> bool {
+    a_min.x <= b_max.x && a_max.x >= b_min.x && a_min.z <= b_max.z && a_max.z >= b_min.z
+}
+
+/// Shift a box-face quad down (or up) by `dy` room units. Used to draw a
+/// falling box at its current offset without rebuilding its runtime.
+fn box_prop_offset_quad_y(quad: [WorldVertex; 4], dy: i32) -> [WorldVertex; 4] {
+    if dy == 0 {
+        return quad;
+    }
+    let mut out = quad;
+    for vertex in out.iter_mut() {
+        *vertex = WorldVertex::new(vertex.x, vertex.y.saturating_add(dy), vertex.z);
+    }
+    out
 }
 
 fn box_prop_movement_break_trigger(
