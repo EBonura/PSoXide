@@ -1671,10 +1671,8 @@ impl Bus {
         if CdRom::contains(phys) {
             return self.cdrom.read8(phys);
         }
-        if (memory::scratchpad::BASE..memory::scratchpad::BASE + memory::scratchpad::SIZE as u32)
-            .contains(&phys)
-        {
-            return self.scratchpad[(phys - memory::scratchpad::BASE) as usize];
+        if let Some(offset) = scratchpad_offset(virt, phys) {
+            return self.scratchpad[offset];
         }
         if (memory::bios::BASE..memory::bios::BASE + memory::bios::SIZE as u32).contains(&phys) {
             return self.bios[(phys - memory::bios::BASE) as usize];
@@ -1732,10 +1730,7 @@ impl Bus {
         if CdRom::contains(phys) {
             return self.cdrom.read8(phys) as u16;
         }
-        if (memory::scratchpad::BASE..memory::scratchpad::BASE + memory::scratchpad::SIZE as u32)
-            .contains(&phys)
-        {
-            let off = (phys - memory::scratchpad::BASE) as usize;
+        if let Some(off) = scratchpad_offset(virt, phys) {
             return u16::from_le_bytes([self.scratchpad[off], self.scratchpad[off + 1]]);
         }
         if (memory::bios::BASE..memory::bios::BASE + memory::bios::SIZE as u32).contains(&phys) {
@@ -1832,10 +1827,7 @@ impl Bus {
             return read_u32_le(&self.ram[offset..]);
         }
 
-        if (memory::scratchpad::BASE..memory::scratchpad::BASE + memory::scratchpad::SIZE as u32)
-            .contains(&phys)
-        {
-            let offset = (phys - memory::scratchpad::BASE) as usize;
+        if let Some(offset) = scratchpad_offset(virt, phys) {
             return read_u32_le(&self.scratchpad[offset..]);
         }
 
@@ -2002,10 +1994,7 @@ impl Bus {
             return;
         }
 
-        if (memory::scratchpad::BASE..memory::scratchpad::BASE + memory::scratchpad::SIZE as u32)
-            .contains(&phys)
-        {
-            let offset = (phys - memory::scratchpad::BASE) as usize;
+        if let Some(offset) = scratchpad_offset(virt, phys) {
             self.scratchpad[offset..offset + 4].copy_from_slice(&bytes);
             return;
         }
@@ -2047,10 +2036,8 @@ impl Bus {
             self.ram[(phys as usize) % memory::ram::SIZE] = value;
             return;
         }
-        if (memory::scratchpad::BASE..memory::scratchpad::BASE + memory::scratchpad::SIZE as u32)
-            .contains(&phys)
-        {
-            self.scratchpad[(phys - memory::scratchpad::BASE) as usize] = value;
+        if let Some(offset) = scratchpad_offset(virt, phys) {
+            self.scratchpad[offset] = value;
             return;
         }
         // CDROM is byte-addressed (4 registers, each switching meaning by
@@ -2114,10 +2101,7 @@ impl Bus {
             self.ram[off..off + 2].copy_from_slice(&bytes);
             return;
         }
-        if (memory::scratchpad::BASE..memory::scratchpad::BASE + memory::scratchpad::SIZE as u32)
-            .contains(&phys)
-        {
-            let off = (phys - memory::scratchpad::BASE) as usize;
+        if let Some(off) = scratchpad_offset(virt, phys) {
             self.scratchpad[off..off + 2].copy_from_slice(&bytes);
             return;
         }
@@ -2175,6 +2159,26 @@ impl Bus {
                 "[bus] unmapped write16 @ virt={virt:#010x} phys={phys:#010x} value={value:#06x}"
             );
         }
+    }
+}
+
+/// Resolve a scratchpad access to its in-scratchpad byte offset, honoring
+/// the segment rule. The scratchpad is the CPU D-cache repurposed as fast
+/// RAM, so it answers only through cached segments (KUSEG, KSEG0). A KSEG1
+/// access is uncached and bypasses the cache, so on hardware it never
+/// reaches the scratchpad; model that as unmapped. Returns `None` for a
+/// non-scratchpad physical address or any KSEG1 virtual address.
+#[inline]
+fn scratchpad_offset(virt: u32, phys: u32) -> Option<usize> {
+    // KSEG1 spans 0xA000_0000..0xC000_0000 (uncached).
+    if (0xA000_0000..0xC000_0000).contains(&virt) {
+        return None;
+    }
+    let base = memory::scratchpad::BASE;
+    if (base..base + memory::scratchpad::SIZE as u32).contains(&phys) {
+        Some((phys - base) as usize)
+    } else {
+        None
     }
 }
 
@@ -2413,6 +2417,33 @@ mod tests {
         assert_eq!(bus.read32(0x0020_0000), 0x1122_3344);
         assert_eq!(bus.read32(0x0040_0000), 0x1122_3344);
         assert_eq!(bus.read32(0x0060_0000), 0x1122_3344);
+    }
+
+    #[test]
+    fn segment_aliases_resolve_to_same_ram_word() {
+        // a commercial title stashed a flag in a pointer's segment bits: the
+        // C4-plant struct lived once in RAM, and the pointer was OR-ed with
+        // 0x8000_0000 (KSEG0) or 0xA000_0000 (KSEG1) to encode wall vs
+        // ground. All three segment views must resolve to the same word.
+        let mut bus = Bus::new(synthetic_bios()).unwrap();
+        bus.write32(0x8012_0000, 0xCAFE_F00D); // write through KSEG0
+        assert_eq!(bus.read32(0x0012_0000), 0xCAFE_F00D); // KUSEG
+        assert_eq!(bus.read32(0x8012_0000), 0xCAFE_F00D); // KSEG0
+        assert_eq!(bus.read32(0xA012_0000), 0xCAFE_F00D); // KSEG1
+    }
+
+    #[test]
+    fn scratchpad_is_unreachable_through_kseg1() {
+        // Scratchpad is the D-cache used as fast RAM: cached segments only.
+        // A KSEG1 (uncached) view bypasses the cache, so it must not reach
+        // the scratchpad -- reads see open bus, writes are dropped.
+        let mut bus = Bus::new(synthetic_bios()).unwrap();
+        bus.write32(0x1F80_0010, 0x1234_5678); // KUSEG scratchpad
+        assert_eq!(bus.read32(0x1F80_0010), 0x1234_5678); // KUSEG sees it
+        assert_eq!(bus.read32(0x9F80_0010), 0x1234_5678); // KSEG0 sees it
+        assert_eq!(bus.read32(0xBF80_0010), 0xFFFF_FFFF); // KSEG1: unmapped
+        bus.write32(0xBF80_0010, 0xDEAD_BEEF); // KSEG1 write dropped
+        assert_eq!(bus.read32(0x1F80_0010), 0x1234_5678); // scratchpad intact
     }
 
     #[test]
