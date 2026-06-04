@@ -1008,12 +1008,17 @@ pub fn build_package(
                 collision_enabled,
                 break_flags,
             } => {
+                // Box props are scenery that can sit at any height (e.g.
+                // stacked on another box), so they honor the authored Y
+                // like the editor preview's raw origin. They are NOT
+                // floor-anchored: snapping to the floor grid ignores a box
+                // stacked beneath and would collapse the stack to the floor.
                 if !push_box_prop(
                     project,
                     project_root,
                     node.name.as_str(),
                     room_index,
-                    floor_pos,
+                    raw_pos,
                     pitch,
                     yaw,
                     roll,
@@ -11814,6 +11819,73 @@ mod tests {
         assert_eq!(prop.flags & psx_level::box_prop_flags::COLLISION_ENABLED, 1);
         assert_ne!(prop.flags & psx_level::box_prop_flags::BREAK_ON_WALK, 0);
         assert_ne!(prop.flags & psx_level::box_prop_flags::BREAK_ON_ATTACK, 0);
+    }
+
+    #[test]
+    fn box_prop_cooks_authored_y_instead_of_snapping_to_floor() {
+        // A box prop authored above the floor (e.g. stacked on top of
+        // another box) must cook to its authored Y, matching the editor
+        // preview (which uses the raw, un-anchored origin). Floor-anchoring
+        // would collapse it onto the room floor underneath, which samples
+        // the floor grid and ignores any box stacked there.
+        let mut project = ProjectDocument::starter();
+        let material_id = project
+            .resources
+            .iter()
+            .find(|resource| matches!(resource.data, ResourceData::Material(_)))
+            .expect("starter has a material")
+            .id;
+        let scene = project.active_scene_mut();
+        let room_id = scene
+            .nodes()
+            .iter()
+            .find(|n| matches!(n.kind, NodeKind::Room { .. }))
+            .map(|n| n.id)
+            .unwrap();
+        // Raise the floor under (0,0) so a floor-snap would be observable.
+        let sector_size = {
+            let room = scene.node_mut(room_id).expect("room node");
+            let NodeKind::Room { grid } = &mut room.kind else {
+                panic!("starter room is a room");
+            };
+            let (sx, sz) = grid.editor_cells_to_array([0.0, 0.0]).unwrap();
+            grid.set_floor(sx, sz, 512, Some(material_id));
+            grid.sector_size as f32
+        };
+        let elevation = 9.0f32; // well above the raised floor
+        let vertices = crate::box_prop_vertices_for_size(512);
+        let prop_id = scene.add_node(
+            room_id,
+            "Elevated Box Prop",
+            NodeKind::BoxProp {
+                materials: [Some(material_id); crate::BOX_PROP_FACE_COUNT],
+                vertices,
+                collision_enabled: false,
+                break_flags: 0,
+            },
+        );
+        if let Some(node) = scene.node_mut(prop_id) {
+            node.transform.translation = [0.0, elevation, 0.0];
+        }
+
+        let (package, report) = build_package(&project, &starter_project_root());
+        assert!(report.is_ok(), "errors: {:?}", report.errors);
+        let package = package.expect("cooks");
+        let prop = package
+            .box_props
+            .iter()
+            .find(|prop| prop.vertices == vertices)
+            .expect("box prop cooks");
+
+        let expected_y = (elevation * sector_size) as i32;
+        assert_ne!(
+            expected_y, 512,
+            "test setup: authored elevation must differ from the floor height"
+        );
+        assert_eq!(
+            prop.y, expected_y,
+            "box prop must cook its authored Y (preview-consistent), not snap to the floor"
+        );
     }
 
     #[test]
