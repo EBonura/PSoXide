@@ -17,6 +17,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "psx-cache"
+version = "0.1.0"
+
+[[package]]
 name = "psx-font"
 version = "0.1.0"
 dependencies = [
