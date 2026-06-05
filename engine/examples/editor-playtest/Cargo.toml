@@ -22,8 +22,11 @@ default = [
     "world-order-bucketed",
     "world-grid-visible",
     "ot-2048",
-    "vis-anchor-pvs-candidates",
     "vis-static-active-turn",
+    # Draw every cell of each node-traversal room and rely on per-polygon
+    # backface + screen culling, instead of the cooked per-cell PVS. Closes the
+    # far-room cull where distant cells were dropped by the PVS path.
+    "vis-full-active-chunks",
 ]
 cd-stream-bench = ["dep:psx-io"]
 cd-stream-benchmark = ["cd-stream-bench"]
