@@ -1,0 +1,2855 @@
+    use super::*;
+
+    #[derive(Debug, Deserialize, Serialize)]
+    struct UiFontScaleFixture {
+        #[serde(
+            default = "default_ui_font_scale",
+            deserialize_with = "deserialize_ui_font_scale",
+            serialize_with = "serialize_ui_font_scale"
+        )]
+        font_scale: u16,
+    }
+
+    #[test]
+    fn ui_font_scale_deserializes_legacy_and_fractional_values() {
+        let legacy: UiFontScaleFixture = ron::from_str("(font_scale: 2)").unwrap();
+        assert_eq!(legacy.font_scale, UI_FONT_SCALE_ONE_Q8 * 2);
+
+        let fractional: UiFontScaleFixture = ron::from_str("(font_scale: 1.5)").unwrap();
+        assert_eq!(
+            fractional.font_scale,
+            UI_FONT_SCALE_ONE_Q8 + UI_FONT_SCALE_ONE_Q8 / 2
+        );
+
+        let q8: UiFontScaleFixture = ron::from_str("(font_scale: 384)").unwrap();
+        assert_eq!(
+            q8.font_scale,
+            UI_FONT_SCALE_ONE_Q8 + UI_FONT_SCALE_ONE_Q8 / 2
+        );
+    }
+
+    #[test]
+    fn ui_font_scale_serializes_as_decimal_multiplier() {
+        let value = UiFontScaleFixture {
+            font_scale: UI_FONT_SCALE_ONE_Q8 + UI_FONT_SCALE_ONE_Q8 / 2,
+        };
+        let ron = ron::to_string(&value).unwrap();
+        assert!(ron.contains("1.5"), "{ron}");
+    }
+
+    #[test]
+    fn horizontal_face_height_samples_editor_corner_convention() {
+        let mut floor = GridHorizontalFace::flat(0, None);
+        floor.heights = [100, 200, 300, 400];
+
+        assert_eq!(floor.height_at_local(0, 1024, 1024), 100);
+        assert_eq!(floor.height_at_local(1024, 1024, 1024), 200);
+        assert_eq!(floor.height_at_local(1024, 0, 1024), 300);
+        assert_eq!(floor.height_at_local(0, 0, 1024), 400);
+    }
+
+    #[test]
+    fn grid_floor_height_handles_negative_origin_cells() {
+        let mut grid = WorldGrid::empty(1, 1, 1024);
+        grid.origin = [-1, -1];
+        grid.set_floor(0, 0, 256, None);
+
+        assert_eq!(grid.floor_height_at_room_local(-512, -512), Some(256));
+        assert_eq!(grid.floor_height_at_room_local(0, 0), None);
+    }
+
+    #[test]
+    fn snap_height_rounds_to_nearest_quantum() {
+        assert_eq!(HEIGHT_QUANTUM, 64);
+        // Exact multiples are unchanged (positive + negative).
+        assert_eq!(snap_height(0), 0);
+        assert_eq!(snap_height(64), 64);
+        assert_eq!(snap_height(1024), 1024);
+        assert_eq!(snap_height(-64), -64);
+        assert_eq!(snap_height(-1024), -1024);
+        // Below half-quantum rounds down toward zero.
+        assert_eq!(snap_height(31), 0);
+        assert_eq!(snap_height(-31), 0);
+        // At half-quantum (32), away-from-zero on both sides.
+        assert_eq!(snap_height(32), 64);
+        assert_eq!(snap_height(-32), -64);
+        // Above half-quantum rounds up away from zero.
+        assert_eq!(snap_height(33), 64);
+        assert_eq!(snap_height(-33), -64);
+        // Past one quantum the same rule applies -- round to the
+        // nearest multiple.
+        assert_eq!(snap_height(95), 64);
+        assert_eq!(snap_height(96), 128);
+        assert_eq!(snap_height(-95), -64);
+        assert_eq!(snap_height(-96), -128);
+    }
+
+    #[test]
+    fn character_resource_deserializes_without_new_motor_tuning_fields() {
+        let ron = r#"(
+            model: None,
+            animation_set: None,
+            idle_clip: None,
+            walk_clip: None,
+            run_clip: None,
+            turn_clip: None,
+            radius: 192,
+            height: 1024,
+            walk_speed: 48,
+            run_speed: 96,
+            turn_speed_degrees_per_second: 180,
+            camera_distance: 6144,
+            camera_height: 1280,
+            camera_target_height: 640,
+        )"#;
+        let character: CharacterResource =
+            ron::from_str(ron).expect("legacy character resource deserializes");
+
+        assert_eq!(
+            character.stamina_max_q12,
+            default_character_stamina_max_q12()
+        );
+        assert_eq!(character.roll_speed, default_character_roll_speed());
+        assert_eq!(
+            character.backstep_invulnerable_frames,
+            default_character_backstep_invulnerable_frames()
+        );
+    }
+
+    #[test]
+    fn sky_settings_resolve_clamps_subdivision_defaults() {
+        let default_sky = SkySettings::default().resolved_for_room(false, [0, 0, 0]);
+        assert_eq!(default_sky.skybox_columns, SKYBOX_COLUMNS_DEFAULT);
+        assert_eq!(default_sky.skybox_rows, SKYBOX_ROWS_DEFAULT);
+        assert_eq!(
+            default_sky.horizon_glow_percent,
+            default_sky_horizon_glow_percent()
+        );
+        assert_eq!(
+            default_sky.horizon_glow_yaw_degrees,
+            default_sky_horizon_glow_yaw_degrees()
+        );
+        assert_eq!(default_sky.sun_enabled, default_sky_sun_enabled());
+        assert_eq!(default_sky.sun_color, default_sky_sun_color());
+        assert_eq!(default_sky.sun_border_color, default_sky_sun_border_color());
+        assert_eq!(default_sky.sun_yaw_degrees, default_sky_sun_yaw_degrees());
+        assert_eq!(
+            default_sky.sun_pitch_degrees,
+            default_sky_sun_pitch_degrees()
+        );
+        assert_eq!(default_sky.sun_size_percent, default_sky_sun_size_percent());
+        assert_eq!(default_sky.sun_glow_percent, default_sky_sun_glow_percent());
+        assert_eq!(
+            default_sky.sun_glow_size_percent,
+            default_sky_sun_glow_size_percent()
+        );
+        assert_eq!(
+            default_sky.mountain_height_percent,
+            default_sky_mountain_height_percent()
+        );
+        assert_eq!(
+            default_sky.mountain_top_color,
+            default_sky_mountain_top_color()
+        );
+        assert_eq!(
+            default_sky.mountain_base_color,
+            default_sky_mountain_base_color()
+        );
+        assert_eq!(
+            default_sky.mountain_gap_percent,
+            default_sky_mountain_gap_percent()
+        );
+        assert_eq!(
+            default_sky.mountain_roughness_percent,
+            default_sky_mountain_roughness_percent()
+        );
+        assert_eq!(
+            default_sky.mountain_layer_count,
+            default_sky_mountain_layer_count()
+        );
+
+        let mut sky = SkySettings::default();
+        sky.horizon_glow_percent = 240;
+        sky.horizon_glow_yaw_degrees = 720;
+        sky.sun_yaw_degrees = -720;
+        sky.sun_pitch_degrees = 120;
+        sky.sun_size_percent = 0;
+        sky.sun_glow_percent = 240;
+        sky.sun_glow_size_percent = 240;
+        sky.mountain_height_percent = 240;
+        sky.mountain_gap_percent = 240;
+        sky.mountain_roughness_percent = 240;
+        sky.mountain_layer_count = 9;
+        sky.skybox_columns = 1;
+        sky.skybox_rows = 99;
+        let resolved = sky.resolved_for_room(false, [0, 0, 0]);
+        assert_eq!(resolved.horizon_glow_percent, 100);
+        assert_eq!(resolved.horizon_glow_yaw_degrees, 180);
+        assert_eq!(resolved.sun_yaw_degrees, -180);
+        assert_eq!(resolved.sun_pitch_degrees, 75);
+        assert_eq!(resolved.sun_size_percent, 1);
+        assert_eq!(resolved.sun_glow_percent, 100);
+        assert_eq!(resolved.sun_glow_size_percent, 100);
+        assert_eq!(
+            resolved.mountain_height_percent,
+            SKY_MOUNTAIN_HEIGHT_PERCENT_MAX
+        );
+        assert_eq!(resolved.mountain_gap_percent, 100);
+        assert_eq!(resolved.mountain_roughness_percent, 100);
+        assert_eq!(resolved.mountain_layer_count, 3);
+        assert_eq!(resolved.skybox_columns, SKYBOX_COLUMNS_MIN);
+        assert_eq!(resolved.skybox_rows, SKYBOX_ROWS_MAX);
+    }
+
+    #[test]
+    fn sky_cyclorama_generation_is_cook_time_geometry() {
+        let mut sky = SkySettings::default();
+        sky.cloud_layer.enabled = true;
+        sky.cloud_layer.density = 192;
+        let resolved = sky.resolved_for_room(false, [0, 0, 0]);
+        let quads = generate_sky_cyclorama(resolved);
+        assert!(!quads.is_empty());
+        assert!(quads.len() <= SKY_CYCLORAMA_QUAD_MAX);
+        assert!(quads
+            .iter()
+            .any(|quad| quad.direction_q12[0] != quad.direction_q12[1]));
+
+        let mut disabled = sky;
+        disabled.mode = SkyMode::Off;
+        assert!(generate_sky_cyclorama(disabled.resolved_for_room(false, [0, 0, 0])).is_empty());
+    }
+
+    #[test]
+    fn dense_cyclorama_sky_stays_under_playtest_budget() {
+        let mut sky = SkySettings::default();
+        sky.top_color = [36, 36, 36];
+        sky.horizon_color = [87, 34, 34];
+        sky.lower_color = [0, 0, 0];
+        sky.horizon_percent = 40;
+        sky.horizon_thickness_percent = 0;
+        sky.sun_enabled = true;
+        sky.mountain_layer_count = 3;
+        sky.skybox_columns = 12;
+        sky.skybox_rows = 5;
+        sky.cloud_layer.enabled = true;
+        sky.cloud_layer.color = [155, 142, 140];
+        sky.cloud_layer.density = 255;
+        sky.cloud_layer.altitude = 5800;
+        sky.cloud_layer.extent = 49_800;
+        sky.cloud_layer.tile_count = 9;
+        sky.cloud_layer.noise_seed = 0x5a7b_c91d;
+
+        let quads = generate_sky_cyclorama(sky.resolved_for_room(false, [0, 0, 0]));
+
+        // The runtime consumes a baked panorama; this guard keeps
+        // cook/editor-preview source geometry from growing without
+        // bound as the procedural sky gains detail.
+        assert!(
+            quads.len() <= 1050,
+            "dense sky generated {} quads",
+            quads.len()
+        );
+    }
+
+    #[test]
+    fn sky_cyclorama_sun_uses_faceted_polar_geometry() {
+        let mut sky = SkySettings::default();
+        sky.sun_enabled = true;
+        sky.mountain_height_percent = 0;
+        sky.top_color = [178, 178, 198];
+        sky.horizon_color = [142, 108, 100];
+        sky.lower_color = [80, 58, 70];
+        sky.cloud_layer.enabled = false;
+
+        let resolved = sky.resolved_for_room(false, [0, 0, 0]);
+        let base_quads = resolved.skybox_columns as usize * resolved.skybox_rows as usize;
+        let quads = generate_sky_cyclorama(resolved);
+        let sun_quads = &quads[base_quads..];
+
+        assert_eq!(sun_quads.len(), SKY_CYCLORAMA_SUN_QUAD_MAX);
+        assert!(sun_quads.iter().any(|quad| {
+            quad.direction_q12[2] == quad.direction_q12[3]
+                && quad.direction_q12[0] != quad.direction_q12[2]
+        }));
+        assert!(sun_quads.iter().any(|quad| quad.rgb[0] != quad.rgb[1]));
+    }
+
+    #[test]
+    fn normalize_loaded_snaps_room_heights_to_quantum() {
+        let mut project = ProjectDocument::starter();
+        let room_id = project
+            .active_scene()
+            .nodes()
+            .iter()
+            .find(|node| matches!(node.kind, NodeKind::Room { .. }))
+            .map(|node| node.id)
+            .unwrap();
+        {
+            let room = project.active_scene_mut().node_mut(room_id).unwrap();
+            let NodeKind::Room { grid } = &mut room.kind else {
+                panic!("expected room");
+            };
+            let sector = grid.ensure_sector(0, 0).unwrap();
+            sector.floor = Some(GridHorizontalFace::flat(33, None));
+            let walls = sector.walls.get_mut(GridDirection::West);
+            walls.clear();
+            walls.push(GridVerticalFace::with_heights([0, 0, 965, 802], None));
+        }
+
+        project.normalize_loaded();
+
+        let room = project.active_scene().node(room_id).unwrap();
+        let NodeKind::Room { grid } = &room.kind else {
+            panic!("expected room");
+        };
+        let sector = grid.sector(0, 0).unwrap();
+        assert_eq!(sector.floor.as_ref().unwrap().heights, [64, 64, 64, 64]);
+        assert_eq!(
+            sector.walls.get(GridDirection::West)[0].heights,
+            [0, 0, 960, 832]
+        );
+    }
+
+    #[test]
+    fn snap_world_sector_size_quantizes_to_128_units() {
+        assert_eq!(WORLD_SECTOR_SIZE_QUANTUM, 128);
+        assert_eq!(snap_world_sector_size(1), 128);
+        assert_eq!(snap_world_sector_size(127), 128);
+        assert_eq!(snap_world_sector_size(191), 128);
+        assert_eq!(snap_world_sector_size(192), 256);
+        assert_eq!(snap_world_sector_size(1500), 1536);
+        assert_eq!(
+            snap_world_sector_size(MAX_WORLD_SECTOR_SIZE + 1),
+            MAX_WORLD_SECTOR_SIZE
+        );
+    }
+
+    #[test]
+    fn world_camera_settings_default_normalize_and_inherit() {
+        let mut project = ProjectDocument::starter();
+        let scene = project.active_scene();
+        let world_id = scene
+            .nodes()
+            .iter()
+            .find(|node| matches!(node.kind, NodeKind::World { .. }))
+            .map(|node| node.id)
+            .expect("starter has world");
+        let room_id = scene
+            .nodes()
+            .iter()
+            .find(|node| matches!(node.kind, NodeKind::Room { .. }))
+            .map(|node| node.id)
+            .expect("starter has room");
+
+        let inherited_camera = scene
+            .nodes()
+            .iter()
+            .find_map(|node| match &node.kind {
+                NodeKind::World { camera, .. } => Some(*camera),
+                _ => None,
+            })
+            .expect("starter world has camera settings");
+        assert_eq!(scene.world_camera_for_node(room_id), Some(inherited_camera));
+
+        {
+            let world = project.active_scene_mut().node_mut(world_id).unwrap();
+            let NodeKind::World { camera, .. } = &mut world.kind else {
+                panic!("expected world");
+            };
+            *camera = WorldCameraSettings {
+                distance: 1,
+                height: MAX_WORLD_CAMERA_HEIGHT + 1,
+                target_height: -1,
+                min_floor_clearance: MAX_WORLD_CAMERA_MIN_FLOOR_CLEARANCE + 1,
+            };
+        }
+
+        project.normalize_loaded();
+
+        assert_eq!(
+            project.active_scene().world_camera_for_node(room_id),
+            Some(WorldCameraSettings {
+                distance: MIN_WORLD_CAMERA_DISTANCE,
+                height: MAX_WORLD_CAMERA_HEIGHT,
+                target_height: 0,
+                min_floor_clearance: MAX_WORLD_CAMERA_MIN_FLOOR_CLEARANCE,
+            })
+        );
+    }
+
+    #[test]
+    fn world_streaming_settings_separate_resident_and_visible_limits() {
+        let settings = WorldStreamingSettings {
+            resident_chunk_limit: 24,
+            visible_chunk_limit: 8,
+        }
+        .normalized();
+
+        assert_eq!(settings.resident_chunk_limit, 24);
+        assert_eq!(settings.visible_chunk_limit, 8);
+    }
+
+    #[test]
+    fn world_streaming_legacy_visible_limit_inherits_resident_limit() {
+        let settings = WorldStreamingSettings {
+            resident_chunk_limit: 18,
+            visible_chunk_limit: 0,
+        }
+        .normalized();
+
+        assert_eq!(settings.resident_chunk_limit, 18);
+        assert_eq!(settings.visible_chunk_limit, 18);
+    }
+
+    #[test]
+    fn changing_world_sector_size_rescales_descendant_room_and_colliders() {
+        let mut project = ProjectDocument::new("test");
+        let scene = project.active_scene_mut();
+        let world = scene.add_node(
+            scene.root,
+            "World",
+            NodeKind::World {
+                sector_size: 1024,
+                sky: SkySettings::default(),
+                far_vista: FarVistaSettings::default(),
+                camera: WorldCameraSettings::default(),
+                culling: WorldCullingSettings::default(),
+                streaming: WorldStreamingSettings::default(),
+                physics: WorldPhysicsSettings::default(),
+            },
+        );
+        let mut grid = WorldGrid::empty(1, 1, 1024);
+        grid.set_floor(0, 0, 160, None);
+        grid.add_wall(0, 0, GridDirection::North, 0, 1024, None);
+        let room = scene.add_node(world, "Room", NodeKind::Room { grid });
+        let entity = scene.add_node(room, "Entity", NodeKind::Entity);
+        let collider = scene.add_node(
+            entity,
+            "Collider",
+            NodeKind::Collider {
+                shape: ColliderShape::Capsule {
+                    radius: 128,
+                    height: 1024,
+                },
+                solid: true,
+            },
+        );
+
+        assert_eq!(project.set_world_sector_size(world, 1500), Some(1536));
+        assert_eq!(project.world_sector_size_for_node(entity), 1536);
+
+        let scene = project.active_scene();
+        let NodeKind::Room { grid } = &scene.node(room).unwrap().kind else {
+            panic!("expected Room");
+        };
+        assert_eq!(grid.sector_size, 1536);
+        let sector = grid.sector(0, 0).unwrap();
+        assert_eq!(sector.floor.as_ref().unwrap().heights, [256; 4]);
+        assert_eq!(
+            sector
+                .walls
+                .get(GridDirection::North)
+                .first()
+                .unwrap()
+                .heights,
+            [0, 0, 1536, 1536]
+        );
+
+        let NodeKind::Collider {
+            shape: ColliderShape::Capsule { radius, height },
+            ..
+        } = &scene.node(collider).unwrap().kind
+        else {
+            panic!("expected capsule collider");
+        };
+        assert_eq!((*radius, *height), (192, 1536));
+    }
+
+    #[test]
+    fn saving_normalizes_room_sector_size_to_world() {
+        let mut project = ProjectDocument::starter();
+        let scene = project.active_scene_mut();
+        let room_id = scene
+            .nodes()
+            .iter()
+            .find(|node| matches!(node.kind, NodeKind::Room { .. }))
+            .map(|node| node.id)
+            .unwrap();
+        let NodeKind::Room { grid } = &mut scene.node_mut(room_id).unwrap().kind else {
+            panic!("expected Room");
+        };
+        grid.sector_size = 2030;
+
+        let dir = unique_temp_dir("normalize-room-sector-size");
+        let path = dir.join("project.ron");
+        project.save_to_path(&path).unwrap();
+
+        let saved = std::fs::read_to_string(&path).unwrap();
+        let expected_sector_size = project.world_sector_size_for_node(room_id);
+        assert!(saved.contains(&format!("kind: World(sector_size: {expected_sector_size},")));
+        assert!(saved.contains(&format!("sector_size: {expected_sector_size}")));
+        assert!(!saved.contains("sector_size: 2030"));
+
+        let loaded = ProjectDocument::load_from_path(&path).unwrap();
+        let scene = loaded.active_scene();
+        let NodeKind::Room { grid } = &scene.node(room_id).unwrap().kind else {
+            panic!("expected Room");
+        };
+        assert_eq!(grid.sector_size, expected_sector_size);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn grid_direction_physical_edges_use_editor_z_convention() {
+        assert_eq!(
+            GridDirection::North.physical_edge(2, 3),
+            Some(GridPhysicalEdge {
+                x: 2,
+                z: 4,
+                axis: GridEdgeAxis::EastWest,
+            })
+        );
+        assert_eq!(
+            GridDirection::South.physical_edge(2, 3),
+            Some(GridPhysicalEdge {
+                x: 2,
+                z: 3,
+                axis: GridEdgeAxis::EastWest,
+            })
+        );
+        assert_eq!(
+            GridDirection::East.physical_edge(2, 3),
+            Some(GridPhysicalEdge {
+                x: 3,
+                z: 3,
+                axis: GridEdgeAxis::NorthSouth,
+            })
+        );
+        assert_eq!(
+            GridDirection::West.physical_edge(2, 3),
+            Some(GridPhysicalEdge {
+                x: 2,
+                z: 3,
+                axis: GridEdgeAxis::NorthSouth,
+            })
+        );
+        assert_eq!(GridDirection::NorthWestSouthEast.physical_edge(2, 3), None);
+    }
+
+    #[test]
+    fn cell_bounds_match_editor_corner_and_wall_convention() {
+        let grid = WorldGrid::empty(2, 2, 1024);
+        let bounds = grid.cell_bounds_world(1, 1);
+
+        assert_eq!(bounds.horizontal_corner_xz(Corner::NW), [1024, 2048]);
+        assert_eq!(bounds.horizontal_corner_xz(Corner::NE), [2048, 2048]);
+        assert_eq!(bounds.horizontal_corner_xz(Corner::SE), [2048, 1024]);
+        assert_eq!(bounds.horizontal_corner_xz(Corner::SW), [1024, 1024]);
+
+        assert_eq!(
+            bounds.wall_endpoints_xz(GridDirection::North),
+            Some(([1024, 2048], [2048, 2048]))
+        );
+        assert_eq!(
+            bounds.wall_endpoints_xz(GridDirection::South),
+            Some(([2048, 1024], [1024, 1024]))
+        );
+        assert_eq!(
+            bounds.wall_endpoints_xz(GridDirection::NorthWestSouthEast),
+            Some(([1024, 2048], [2048, 1024]))
+        );
+        assert_eq!(
+            bounds.wall_endpoints_xz(GridDirection::NorthEastSouthWest),
+            Some(([2048, 2048], [1024, 1024]))
+        );
+    }
+
+    #[test]
+    fn wall_placement_aligns_bottom_edge_to_floor_vertices() {
+        let mut grid = WorldGrid::empty(1, 1, 1024);
+        let mut floor = GridHorizontalFace::flat(0, None);
+        floor.heights = [128, 256, 384, 512];
+        grid.ensure_sector(0, 0).unwrap().floor = Some(floor);
+
+        grid.add_wall_aligned_to_surfaces(0, 0, GridDirection::North, None);
+
+        let wall = grid
+            .sector(0, 0)
+            .unwrap()
+            .walls
+            .get(GridDirection::North)
+            .first()
+            .unwrap();
+        assert_eq!(wall.heights, [128, 256, 2304, 2176]);
+    }
+
+    #[test]
+    fn wall_placement_aligns_top_edge_to_ceiling_vertices() {
+        let mut grid = WorldGrid::empty(1, 1, 1024);
+        let mut floor = GridHorizontalFace::flat(0, None);
+        floor.heights = [128, 256, 384, 512];
+        let mut ceiling = GridHorizontalFace::flat(1024, None);
+        ceiling.heights = [900, 1000, 1100, 1200];
+        let sector = grid.ensure_sector(0, 0).unwrap();
+        sector.floor = Some(floor);
+        sector.ceiling = Some(ceiling);
+
+        grid.add_wall_aligned_to_surfaces(0, 0, GridDirection::East, None);
+
+        let wall = grid
+            .sector(0, 0)
+            .unwrap()
+            .walls
+            .get(GridDirection::East)
+            .first()
+            .unwrap();
+        assert_eq!(wall.heights, [256, 384, 1100, 1000]);
+    }
+
+    #[test]
+    fn diagonal_wall_placement_aligns_to_horizontal_diagonal_vertices() {
+        let mut grid = WorldGrid::empty(1, 1, 1024);
+        let mut floor = GridHorizontalFace::flat(0, None);
+        floor.heights = [128, 256, 384, 512];
+        let mut ceiling = GridHorizontalFace::flat(1024, None);
+        ceiling.heights = [900, 1000, 1100, 1200];
+        let sector = grid.ensure_sector(0, 0).unwrap();
+        sector.floor = Some(floor);
+        sector.ceiling = Some(ceiling);
+
+        grid.add_wall_aligned_to_surfaces(0, 0, GridDirection::NorthWestSouthEast, None);
+        grid.add_wall_aligned_to_surfaces(0, 0, GridDirection::NorthEastSouthWest, None);
+
+        let sector = grid.sector(0, 0).unwrap();
+        let nw_se = sector
+            .walls
+            .get(GridDirection::NorthWestSouthEast)
+            .first()
+            .unwrap();
+        let ne_sw = sector
+            .walls
+            .get(GridDirection::NorthEastSouthWest)
+            .first()
+            .unwrap();
+        assert_eq!(nw_se.heights, [128, 384, 1100, 900]);
+        assert_eq!(ne_sw.heights, [256, 512, 1200, 1000]);
+    }
+
+    #[test]
+    fn ceiling_placement_aligns_edge_to_touching_wall_top() {
+        let mut grid = WorldGrid::empty(1, 1, 1024);
+        grid.ensure_sector(0, 0)
+            .unwrap()
+            .walls
+            .get_mut(GridDirection::North)
+            .push(GridVerticalFace::with_heights([0, 0, 1472, 1344], None));
+
+        grid.set_ceiling_aligned_to_neighbors(0, 0, None);
+
+        let ceiling = grid.sector(0, 0).unwrap().ceiling.as_ref().unwrap();
+        assert_eq!(ceiling.heights, [1344, 1472, 2048, 2048]);
+    }
+
+    #[test]
+    fn floor_placement_with_one_flat_neighbor_uses_that_height_for_whole_face() {
+        let mut grid = WorldGrid::empty(2, 1, 1024);
+        grid.set_floor(0, 0, 384, None);
+
+        grid.set_floor_aligned_to_neighbors(1, 0, 0, None);
+
+        let floor = grid.sector(1, 0).unwrap().floor.as_ref().unwrap();
+        assert_eq!(floor.heights, [384; 4]);
+    }
+
+    #[test]
+    fn floor_preview_for_off_grid_cell_matches_flat_neighbor_height() {
+        let mut grid = WorldGrid::empty(1, 1, 1024);
+        grid.set_floor(0, 0, 384, None);
+
+        let heights = grid.floor_heights_aligned_to_neighbors_for_world_cell(1, 0, 0);
+
+        assert_eq!(heights, [384; 4]);
+    }
+
+    #[test]
+    fn floor_placement_with_one_sloped_neighbor_keeps_only_the_shared_edge() {
+        let mut grid = WorldGrid::empty(2, 1, 1024);
+        let mut floor = GridHorizontalFace::flat(0, None);
+        floor.heights = [128, 256, 384, 512];
+        grid.ensure_sector(0, 0).unwrap().floor = Some(floor);
+
+        grid.set_floor_aligned_to_neighbors(1, 0, 0, None);
+
+        let floor = grid.sector(1, 0).unwrap().floor.as_ref().unwrap();
+        assert_eq!(floor.heights, [256, 0, 0, 384]);
+    }
+
+    #[test]
+    fn ceiling_placement_with_one_flat_neighbor_uses_that_height_for_whole_face() {
+        let mut grid = WorldGrid::empty(2, 1, 1024);
+        grid.ensure_sector(0, 0).unwrap().ceiling = Some(GridHorizontalFace::flat(1536, None));
+
+        grid.set_ceiling_aligned_to_neighbors(1, 0, None);
+
+        let ceiling = grid.sector(1, 0).unwrap().ceiling.as_ref().unwrap();
+        assert_eq!(ceiling.heights, [1536; 4]);
+    }
+
+    #[test]
+    fn ceiling_preview_for_off_grid_cell_matches_flat_neighbor_height() {
+        let mut grid = WorldGrid::empty(1, 1, 1024);
+        grid.ensure_sector(0, 0).unwrap().ceiling = Some(GridHorizontalFace::flat(1536, None));
+
+        let heights = grid.ceiling_heights_aligned_to_neighbors_for_world_cell(1, 0);
+
+        assert_eq!(heights, [1536; 4]);
+    }
+
+    #[test]
+    fn ceiling_placement_aligns_edge_to_touching_neighbor_wall_top() {
+        let mut grid = WorldGrid::empty(2, 1, 1024);
+        grid.ensure_sector(0, 0)
+            .unwrap()
+            .walls
+            .get_mut(GridDirection::East)
+            .push(GridVerticalFace::with_heights([0, 0, 1600, 1536], None));
+
+        grid.set_ceiling_aligned_to_neighbors(1, 0, None);
+
+        let ceiling = grid.sector(1, 0).unwrap().ceiling.as_ref().unwrap();
+        assert_eq!(ceiling.heights, [1536, 2048, 2048, 1600]);
+    }
+
+    #[test]
+    fn ceiling_placement_aligns_edge_to_touching_neighbor_ceiling() {
+        let mut grid = WorldGrid::empty(2, 1, 1024);
+        let mut ceiling = GridHorizontalFace::flat(2048, None);
+        ceiling.heights = [1024, 1152, 1280, 1408];
+        grid.ensure_sector(0, 0).unwrap().ceiling = Some(ceiling);
+
+        grid.set_ceiling_aligned_to_neighbors(1, 0, None);
+
+        let ceiling = grid.sector(1, 0).unwrap().ceiling.as_ref().unwrap();
+        assert_eq!(ceiling.heights, [1152, 2048, 2048, 1280]);
+    }
+
+    #[test]
+    fn off_grid_wall_preview_samples_adjacent_floor_edge() {
+        let mut grid = WorldGrid::empty(1, 1, 1024);
+        let mut floor = GridHorizontalFace::flat(0, None);
+        floor.heights = [128, 256, 384, 512];
+        grid.ensure_sector(0, 0).unwrap().floor = Some(floor);
+
+        let heights =
+            grid.wall_heights_aligned_to_surfaces_for_world_cell(1, 0, GridDirection::West);
+
+        assert_eq!(heights, [384, 256, 2304, 2432]);
+    }
+
+    #[test]
+    fn wall_stack_placement_starts_above_highest_wall_top() {
+        let mut grid = WorldGrid::empty(1, 1, 1024);
+        grid.add_wall(0, 0, GridDirection::North, 0, 1024, None);
+
+        let heights = grid.wall_heights_above_stack_or_surfaces(0, 0, GridDirection::North);
+
+        assert_eq!(heights, [1024, 1024, 3072, 3072]);
+    }
+
+    #[test]
+    fn wall_stack_placement_preserves_sloped_top_edge() {
+        let mut grid = WorldGrid::empty(1, 1, 1024);
+        grid.ensure_sector(0, 0)
+            .unwrap()
+            .walls
+            .get_mut(GridDirection::North)
+            .push(GridVerticalFace::with_heights([0, 0, 1408, 1152], None));
+
+        let heights = grid.wall_heights_above_stack_or_surfaces(0, 0, GridDirection::North);
+
+        assert_eq!(heights, [1152, 1408, 3456, 3200]);
+    }
+
+    #[test]
+    fn stone_room_perimeter_uses_editor_direction_convention() {
+        let grid = WorldGrid::stone_room(2, 3, 1024, None, None);
+        let default_wall_height = default_wall_height_for_sector_size(1024);
+
+        for x in 0..grid.width {
+            assert!(!grid
+                .sector(x, 0)
+                .unwrap()
+                .walls
+                .get(GridDirection::South)
+                .is_empty());
+            assert!(grid
+                .sector(x, 0)
+                .unwrap()
+                .walls
+                .get(GridDirection::North)
+                .is_empty());
+            assert!(!grid
+                .sector(x, grid.depth - 1)
+                .unwrap()
+                .walls
+                .get(GridDirection::North)
+                .is_empty());
+            assert!(grid
+                .sector(x, grid.depth - 1)
+                .unwrap()
+                .walls
+                .get(GridDirection::South)
+                .is_empty());
+        }
+        let south_wall = grid
+            .sector(0, 0)
+            .unwrap()
+            .walls
+            .get(GridDirection::South)
+            .first()
+            .unwrap();
+        assert_eq!(
+            south_wall.heights,
+            [0, 0, default_wall_height, default_wall_height]
+        );
+    }
+
+    #[test]
+    fn editor_to_room_local_round_trip_origin_zero() {
+        let grid = WorldGrid::stone_room(3, 3, 1024, None, None);
+        for editor in [[0.0_f32, 0.0], [1.5, -0.25], [-1.4, 1.49]] {
+            let world = grid.editor_to_room_local(editor);
+            let back = grid.room_local_to_editor(world);
+            assert!(
+                (back[0] - editor[0]).abs() < 1e-3,
+                "x: {editor:?} → {back:?}"
+            );
+            assert!(
+                (back[1] - editor[1]).abs() < 1e-3,
+                "z: {editor:?} → {back:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn editor_to_room_local_round_trip_negative_origin() {
+        let mut grid = WorldGrid::stone_room(3, 3, 1024, None, None);
+        // Force a -2/-3 origin via the public grow path so the
+        // test shape matches what auto-grow actually produces.
+        grid.extend_to_include(-2, -3);
+        assert_eq!(grid.origin, [-2, -3]);
+
+        for editor in [[0.0_f32, 0.0], [2.0, -1.25], [-3.5, 1.0]] {
+            let world = grid.editor_to_room_local(editor);
+            let back = grid.room_local_to_editor(world);
+            assert!(
+                (back[0] - editor[0]).abs() < 1e-3,
+                "x: {editor:?} → {back:?}"
+            );
+            assert!(
+                (back[1] - editor[1]).abs() < 1e-3,
+                "z: {editor:?} → {back:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn editor_cells_to_array_resolves_to_correct_cell() {
+        // Plain 3×3, origin [0, 0]: editor (0, 0) is room centre,
+        // which falls inside cell (1, 1).
+        let grid = WorldGrid::stone_room(3, 3, 1024, None, None);
+        assert_eq!(grid.editor_cells_to_array([0.0, 0.0]), Some((1, 1)));
+        assert_eq!(grid.editor_cells_to_array([-1.4, -1.4]), Some((0, 0)));
+        assert_eq!(grid.editor_cells_to_array([1.4, 1.4]), Some((2, 2)));
+        // Past the room edge: out of range.
+        assert_eq!(grid.editor_cells_to_array([-2.0, 0.0]), None);
+    }
+
+    #[test]
+    fn editor_cells_to_array_after_negative_grow_is_origin_aware() {
+        // Negative-side grow: origin shifts but the previously-
+        // existing cells must remain reachable from the same
+        // editor coordinates. After `extend_to_include(-1, 0)` on a
+        // 3×3 starter the room becomes width=4, depth=3, origin=[-1,0].
+        // Old cell at world-cell (0, 0) is now at array (1, 0).
+        let mut grid = WorldGrid::stone_room(3, 3, 1024, None, None);
+        grid.extend_to_include(-1, 0);
+        assert_eq!(grid.origin, [-1, 0]);
+        assert_eq!(grid.width, 4);
+        // grid_center_cells = [-1 + 2, 0 + 1.5] = [1.0, 1.5]; cell
+        // (1, 0) has world-cell centre [0.5, 0.5], so editor centre
+        // is [0.5 - 1.0, 0.5 - 1.5] = [-0.5, -1.0].
+        assert_eq!(grid.editor_cells_to_array([-0.5, -1.0]), Some((1, 0)));
+        // Newly-included cell at array (0, 0) -- world-cell (-1, 0),
+        // editor centre [-0.5 - 1.0, -1.0] = [-1.5, -1.0].
+        assert_eq!(grid.editor_cells_to_array([-1.5, -1.0]), Some((0, 0)));
+    }
+
+    #[test]
+    fn cell_center_world_in_editor_units_matches_helper() {
+        let mut grid = WorldGrid::stone_room(4, 5, 1024, None, None);
+        grid.extend_to_include(-2, -1);
+        let s = grid.sector_size as f32;
+        for (sx, sz) in [(0u16, 0u16), (1, 2), (3, 4)] {
+            let world_centre = grid.cell_center_world(sx, sz);
+            let editor = grid.world_cells_to_editor([world_centre[0] / s, world_centre[1] / s]);
+            // Same cell via editor_cells_to_array should round-trip.
+            assert_eq!(grid.editor_cells_to_array(editor), Some((sx, sz)));
+        }
+    }
+
+    #[test]
+    fn authored_footprint_ignores_empty_allocation() {
+        let mut grid = WorldGrid::empty(8, 6, 1024);
+        let _ = grid.ensure_sector(0, 0);
+        grid.set_floor(2, 1, 0, None);
+        grid.add_wall(5, 4, GridDirection::North, 0, 1024, None);
+
+        let footprint = grid.authored_footprint().expect("authored geometry");
+        assert_eq!(
+            footprint,
+            WorldGridFootprint {
+                x: 2,
+                z: 1,
+                width: 4,
+                depth: 4,
+            }
+        );
+        assert_eq!(grid.populated_sector_count(), 2);
+
+        let budget = grid.authored_budget();
+        assert_eq!(budget.width, 4);
+        assert_eq!(budget.depth, 4);
+        assert_eq!(budget.total_cells, 16);
+        assert_eq!(budget.populated_cells, 2);
+    }
+
+    #[test]
+    fn budget_empty_grid_reports_no_geometry() {
+        let grid = WorldGrid::empty(3, 3, 1024);
+        let b = grid.budget();
+        assert_eq!(b.width, 3);
+        assert_eq!(b.depth, 3);
+        assert_eq!(b.total_cells, 9);
+        assert_eq!(b.populated_cells, 0);
+        assert_eq!(b.floors, 0);
+        assert_eq!(b.ceilings, 0);
+        assert_eq!(b.walls, 0);
+        assert_eq!(b.triangles, 0);
+        // AssetHeader + active WorldHeader + 9 sector records.
+        // `.psxw` stores a record per cell whether populated or not.
+        assert_eq!(
+            b.psxw_bytes,
+            12 + psxed_format::world::WorldHeader::SIZE
+                + 9 * psxed_format::world::SectorRecord::SIZE
+        );
+        assert_eq!(b.static_light_table_bytes, 0);
+        assert_eq!(b.psxw_static_lit_bytes, b.psxw_bytes);
+        assert_eq!(
+            b.future_compact_estimated_bytes,
+            12 + psxed_format::world::WorldHeader::SIZE + 9 * 28
+        );
+        assert!(!b.over_budget());
+        assert!(!b.static_lit_over_budget());
+    }
+
+    #[test]
+    fn budget_starter_room_matches_authored_geometry() {
+        let grid = WorldGrid::stone_room(3, 3, 1024, None, None);
+        let b = grid.budget();
+        assert_eq!(b.populated_cells, 9);
+        assert_eq!(b.floors, 9);
+        assert_eq!(b.ceilings, 0);
+        // Perimeter only: 4 sides * 3 cells = 12 walls.
+        assert_eq!(b.walls, 12);
+        // 2 tris per face: 9 floors + 12 walls = 21 faces.
+        assert_eq!(b.triangles, 42);
+        // The future compact estimate should be strictly smaller
+        // than the active format once any geometry exists.
+        assert!(b.future_compact_estimated_bytes < b.psxw_bytes);
+        assert_eq!(
+            b.static_light_table_bytes,
+            (9 * 2 + 12) * psxed_format::world::SurfaceLightRecord::SIZE
+        );
+        assert_eq!(
+            b.psxw_static_lit_bytes,
+            b.psxw_bytes + b.static_light_table_bytes
+        );
+        assert!(!b.over_budget());
+        assert!(!b.static_lit_over_budget());
+    }
+
+    #[test]
+    fn budget_counts_generated_floor_transition_walls() {
+        let mut grid = WorldGrid::empty(2, 1, 1024);
+        grid.set_floor(0, 0, 0, None);
+        grid.set_floor(1, 0, 512, None);
+
+        let b = grid.budget();
+
+        assert_eq!(b.floors, 2);
+        assert_eq!(b.walls, 1);
+        assert_eq!(b.triangles, 6);
+    }
+
+    #[test]
+    fn budget_max_dimension_grid_within_caps() {
+        // Floors-only at MAX_ROOM_WIDTH × MAX_ROOM_DEPTH = 32 × 32.
+        // Stresses the byte-cap path without going over MAX_ROOM_TRIANGLES.
+        let mut grid = WorldGrid::empty(MAX_ROOM_WIDTH, MAX_ROOM_DEPTH, 1024);
+        for x in 0..MAX_ROOM_WIDTH {
+            for z in 0..MAX_ROOM_DEPTH {
+                grid.set_floor(x, z, 0, None);
+            }
+        }
+        let b = grid.budget();
+        assert_eq!(b.populated_cells, 1024);
+        assert_eq!(b.floors, 1024);
+        assert_eq!(b.triangles, 2048);
+        assert!(b.triangles <= MAX_ROOM_TRIANGLES);
+        // Active format remains under the byte cap for floors-only;
+        // the wall-stack-heavy worst case is what pushes rooms over.
+        assert!(b.psxw_bytes <= MAX_ROOM_BYTES);
+        assert!(b.psxw_static_lit_bytes > MAX_ROOM_BYTES);
+        assert!(b.future_compact_estimated_bytes <= MAX_ROOM_BYTES);
+        assert!(!b.over_budget());
+        assert!(b.static_lit_over_budget());
+    }
+
+    #[test]
+    fn budget_flags_oversized_room_dimensions() {
+        // 64×16 fits the byte cap but blows past MAX_ROOM_WIDTH.
+        // The old `over_budget` check only watched triangles +
+        // bytes; this test pins the new width/depth check that
+        // catches asymmetric over-sized rooms.
+        let grid = WorldGrid::empty(MAX_ROOM_WIDTH * 2, MAX_ROOM_DEPTH / 2, 1024);
+        let b = grid.budget();
+        assert!(b.over_budget(), "{b:?}");
+    }
+
+    #[test]
+    fn extend_to_include_grows_positively_without_shift() {
+        let mut grid = WorldGrid::stone_room(3, 3, 1024, None, None);
+        let baseline_floor_world = grid.cell_world_x(0); // 0
+        let cell = grid.extend_to_include(5, 1);
+        assert_eq!(cell, (5, 1));
+        assert_eq!(grid.width, 6);
+        assert_eq!(grid.depth, 3);
+        assert_eq!(grid.origin, [0, 0]);
+        // Old (0, 0) data still at array (0, 0), still at world 0.
+        assert_eq!(grid.cell_world_x(0), baseline_floor_world);
+        assert!(grid.sector(0, 0).is_some());
+    }
+
+    #[test]
+    fn extend_to_include_grows_negatively_preserving_world_position() {
+        let mut grid = WorldGrid::stone_room(3, 3, 1024, None, None);
+        let cell = grid.extend_to_include(-2, 0);
+        assert_eq!(cell, (0, 0));
+        // Two new columns prepended in -X.
+        assert_eq!(grid.width, 5);
+        assert_eq!(grid.origin[0], -2);
+        // Old (0, 0) data is now at array (2, 0), still at world 0.
+        assert_eq!(grid.cell_world_x(2), 0);
+        assert!(grid.sector(2, 0).is_some());
+        // The newly-included cell at array (0, 0) is empty.
+        assert!(grid.sector(0, 0).is_none());
+    }
+
+    #[test]
+    fn embedded_default_project_ron_deserializes() {
+        let project = ProjectDocument::from_ron_str(DEFAULT_PROJECT_RON).unwrap();
+        assert!(project.resources.iter().any(|r| matches!(
+            &r.data,
+            ResourceData::Texture { psxt_path } if psxt_path.ends_with("block_1a.psxt")
+        )));
+        assert!(project.resources.iter().any(|r| matches!(
+            &r.data,
+            ResourceData::Texture { psxt_path } if psxt_path.ends_with("fence_1a.psxt")
+        )));
+        assert!(!project.resources.iter().any(|r| matches!(
+            &r.data,
+            ResourceData::Texture { psxt_path }
+                if psxt_path.ends_with("floor.psxt")
+                    || psxt_path.ends_with("brick-wall.psxt")
+        )));
+        // Starter now mirrors demo7: the active player is the
+        // Crimson Cross Knight profile with its Meshy Gold animation
+        // library and material atlas.
+        let (character_id, character) = project
+            .resources
+            .iter()
+            .find_map(|r| match &r.data {
+                ResourceData::Character(c) if r.name == "Crimson Cross Knight Player" => {
+                    Some((r.id, c))
+                }
+                _ => None,
+            })
+            .expect("starter player character resource missing");
+        let model_id = character.model.expect("starter character has a model");
+        let model = project
+            .resource(model_id)
+            .and_then(|resource| match &resource.data {
+                ResourceData::Model(model) => Some(model),
+                _ => None,
+            })
+            .expect("starter player model resource missing");
+        assert!(model
+            .model_path
+            .ends_with("crimson_cross_knight/crimson_cross_knight.psxmdl"));
+        assert!(model
+            .texture_path
+            .as_deref()
+            .is_some_and(|path| path.ends_with("crimson_cross_knight.psxt")));
+        assert!(model.skeleton.is_some());
+        assert!(model.clips.len() >= 50);
+        assert_eq!(model.default_clip, Some(22));
+        assert_eq!(
+            model.collision_radius,
+            default_model_collision_radius_for_height(model.world_height)
+        );
+        let resolved_clips = project.resolved_model_animation_clips(model_id);
+        assert!(resolved_clips.len() >= 50);
+        assert!(resolved_clips
+            .iter()
+            .any(|clip| clip.name == "Meshy Gold / idle 03"));
+        assert_eq!(model.scale_q8, [MODEL_SCALE_ONE_Q8; 3]);
+        assert!(project.active_scene().nodes().iter().any(|node| matches!(
+            &node.kind,
+            NodeKind::CharacterController {
+                player: true,
+                character: Some(id),
+                ..
+            } if *id == character_id
+        )));
+    }
+
+    #[test]
+    fn legacy_world_and_actor_project_ron_migrates_to_world_sector_and_entity() {
+        fn replace_first_world_payload(source: &str) -> String {
+            let start = source
+                .find("kind: World(")
+                .expect("default fixture has a parameterised World kind");
+            let payload_start = start + "kind: World".len();
+            let mut depth = 0i32;
+            for (offset, ch) in source[payload_start..].char_indices() {
+                match ch {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            let end = payload_start + offset + ch.len_utf8();
+                            return format!("{}kind: World{}", &source[..start], &source[end..]);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            panic!("unterminated World payload");
+        }
+
+        let starter = ProjectDocument::from_ron_str(DEFAULT_PROJECT_RON).unwrap();
+        assert!(starter
+            .active_scene()
+            .nodes()
+            .iter()
+            .any(|node| matches!(node.kind, NodeKind::World { .. })));
+        let legacy = replace_first_world_payload(DEFAULT_PROJECT_RON).replacen(
+            "kind: Entity,",
+            "kind: Actor,",
+            1,
+        );
+
+        let project = ProjectDocument::from_ron_str(&legacy).unwrap();
+        let scene = project.active_scene();
+        let root = scene.node(scene.root).expect("world root exists");
+        assert!(matches!(root.kind, NodeKind::World { .. }));
+        assert_eq!(root.name, "World");
+        assert!(scene.nodes().iter().all(|node| node.name != "Root"));
+        let world = scene
+            .nodes()
+            .iter()
+            .find(|node| node.name == "World")
+            .expect("starter world exists");
+        assert!(matches!(
+            &world.kind,
+            NodeKind::World { sector_size, .. } if *sector_size == DEFAULT_WORLD_SECTOR_SIZE
+        ));
+        let migrated = scene
+            .nodes()
+            .iter()
+            .find(|node| node.name == "Player")
+            .expect("starter player entity exists");
+        assert!(matches!(&migrated.kind, NodeKind::Entity));
+    }
+
+    #[test]
+    fn starter_model_files_present_on_disk() {
+        let root = default_project_dir();
+        assert!(root
+            .join("assets/models/crimson_cross_knight/crimson_cross_knight.psxmdl")
+            .is_file());
+        assert!(root
+            .join("assets/models/crimson_cross_knight/crimson_cross_knight.psxt")
+            .is_file());
+        assert!(root
+            .join("assets/models/crimson_cross_knight/crimson_cross_knight_armature_idle_03_baselayer.psxanim")
+            .is_file());
+    }
+
+    #[test]
+    fn projects_dir_resolves_to_real_directory() {
+        assert!(projects_dir().is_dir(), "{}", projects_dir().display());
+        assert!(default_project_dir().join("project.ron").is_file());
+        assert!(default_project_dir()
+            .join("assets/textures/block_1a.psxt")
+            .is_file());
+        assert!(default_project_dir()
+            .join("assets/textures/fence_1a.psxt")
+            .is_file());
+        assert!(default_project_dir()
+            .join("assets/models/crimson_cross_knight/crimson_cross_knight.psxmdl")
+            .is_file());
+        assert!(!default_project_dir()
+            .join("assets/textures/floor.psxt")
+            .exists());
+        assert!(!default_project_dir()
+            .join("assets/textures/brick-wall.psxt")
+            .exists());
+    }
+
+    #[test]
+    fn project_file_stem_is_filesystem_safe() {
+        assert_eq!(
+            project_file_stem("Stone Room: Vertical Slice!"),
+            "stone_room_vertical_slice"
+        );
+        assert_eq!(project_file_stem("PSoXide 2"), "psoxide_2");
+        assert_eq!(project_file_stem("..."), "project");
+    }
+
+    #[test]
+    fn starter_project_has_scene_tree_and_resources() {
+        let project = ProjectDocument::starter();
+
+        assert_eq!(project.scenes.len(), 1);
+        // Starter includes the demo7 room texture/material set plus gameplay
+        // resources for the animated character and weapon path.
+        assert!(project.resources.len() >= 10);
+        assert!(project
+            .active_scene()
+            .hierarchy_rows()
+            .iter()
+            .any(|row| row.kind == "Room" && row.name == "Demo7 Map"));
+        let grid = project
+            .active_scene()
+            .nodes()
+            .iter()
+            .find_map(|node| match &node.kind {
+                NodeKind::Room { grid } => Some(grid),
+                _ => None,
+            })
+            .expect("starter should contain a room node");
+        assert!(grid.width > 0);
+        assert!(grid.depth > 0);
+        assert_eq!(
+            grid.sectors.len(),
+            grid.width as usize * grid.depth as usize
+        );
+        assert!(grid.populated_sector_count() > 0);
+    }
+
+    #[test]
+    fn project_missing_point_light_color_and_room_ambient_uses_defaults() {
+        let starter = ProjectDocument::from_ron_str(DEFAULT_PROJECT_RON).unwrap();
+        let light = starter
+            .active_scene()
+            .nodes()
+            .iter()
+            .find_map(|node| match &node.kind {
+                NodeKind::PointLight {
+                    color,
+                    intensity,
+                    radius,
+                } => Some((*color, *intensity, *radius)),
+                _ => None,
+            })
+            .expect("starter has a light");
+        let room = starter
+            .active_scene()
+            .nodes()
+            .iter()
+            .find_map(|node| match &node.kind {
+                NodeKind::Room { grid } => Some(grid),
+                _ => None,
+            })
+            .expect("starter has a room");
+        let source = DEFAULT_PROJECT_RON
+            .replace(
+                &format!(
+                    "kind: PointLight(color: ({}, {}, {}), intensity: {}, radius: {})",
+                    light.0[0], light.0[1], light.0[2], light.1, light.2
+                ),
+                &format!(
+                    "kind: PointLight(intensity: {}, radius: {})",
+                    light.1, light.2
+                ),
+            )
+            .replace(
+                &format!(
+                    ", ambient_color: ({}, {}, {})",
+                    room.ambient_color[0], room.ambient_color[1], room.ambient_color[2]
+                ),
+                "",
+            )
+            .replace(
+                &format!(", fog_near: {}, fog_far: {}", room.fog_near, room.fog_far),
+                "",
+            );
+
+        let project = ProjectDocument::from_ron_str(&source).unwrap();
+        let light_color = project
+            .active_scene()
+            .nodes()
+            .iter()
+            .find_map(|node| match &node.kind {
+                NodeKind::PointLight { color, .. } => Some(*color),
+                _ => None,
+            })
+            .expect("starter has a light");
+        assert_eq!(light_color, default_light_color());
+
+        let ambient = project
+            .active_scene()
+            .nodes()
+            .iter()
+            .find_map(|node| match &node.kind {
+                NodeKind::Room { grid } => Some(grid.ambient_color),
+                _ => None,
+            })
+            .expect("starter has a room");
+        assert_eq!(ambient, default_ambient_color());
+
+        let fog = project
+            .active_scene()
+            .nodes()
+            .iter()
+            .find_map(|node| match &node.kind {
+                NodeKind::Room { grid } => Some((grid.fog_color, grid.fog_near, grid.fog_far)),
+                _ => None,
+            })
+            .expect("starter has a room");
+        assert_eq!(
+            fog,
+            (default_fog_color(), default_fog_near(), default_fog_far())
+        );
+    }
+
+    #[test]
+    fn adding_node_preserves_parent_child_relationship() {
+        let mut scene = Scene::new("Test");
+
+        let room = scene.add_node(
+            scene.root,
+            "Room",
+            NodeKind::Room {
+                grid: WorldGrid::empty(2, 2, 1024),
+            },
+        );
+        let child = scene.add_node(
+            room,
+            "Spawn",
+            NodeKind::SpawnPoint {
+                player: true,
+                character: None,
+            },
+        );
+
+        assert_eq!(scene.node(child).and_then(|node| node.parent), Some(room));
+        assert!(scene
+            .node(room)
+            .is_some_and(|node| node.children.contains(&child)));
+    }
+
+    #[test]
+    fn removing_node_removes_descendants() {
+        let mut scene = Scene::new("Test");
+        let parent = scene.add_node(scene.root, "A", NodeKind::Node3D);
+        let child = scene.add_node(parent, "B", NodeKind::Node3D);
+
+        assert!(scene.remove_node(parent));
+        assert!(scene.node(parent).is_none());
+        assert!(scene.node(child).is_none());
+        assert!(scene
+            .node(scene.root)
+            .is_some_and(|root| root.children.is_empty()));
+    }
+
+    #[test]
+    fn move_node_reparents_and_reorders() {
+        let mut scene = Scene::new("Test");
+        let a = scene.add_node(scene.root, "A", NodeKind::Node3D);
+        let b = scene.add_node(scene.root, "B", NodeKind::Node3D);
+        let c = scene.add_node(a, "C", NodeKind::Node3D);
+
+        // Reparent c from a to b at position 0.
+        assert!(scene.move_node(c, b, 0));
+        assert_eq!(scene.node(c).unwrap().parent, Some(b));
+        assert!(scene.node(a).unwrap().children.is_empty());
+        assert_eq!(scene.node(b).unwrap().children, vec![c]);
+
+        // Reorder b before a at the root.
+        assert!(scene.move_node(b, scene.root, 0));
+        assert_eq!(scene.node(scene.root).unwrap().children, vec![b, a]);
+    }
+
+    #[test]
+    fn move_node_rejects_cycles_and_root() {
+        let mut scene = Scene::new("Test");
+        let a = scene.add_node(scene.root, "A", NodeKind::Node3D);
+        let b = scene.add_node(a, "B", NodeKind::Node3D);
+
+        // Cannot reparent a node under itself.
+        assert!(!scene.move_node(a, a, 0));
+        // Cannot reparent an ancestor under its descendant.
+        assert!(!scene.move_node(a, b, 0));
+        // Cannot move the root.
+        assert!(!scene.move_node(scene.root, a, 0));
+    }
+
+    #[test]
+    fn project_roundtrips_through_ron_string() {
+        let project = ProjectDocument::starter();
+        let ron = project.to_ron_string().unwrap();
+
+        assert!(ron.contains("Demo7 Map"));
+        assert_eq!(ProjectDocument::from_ron_str(&ron).unwrap(), project);
+    }
+
+    #[test]
+    fn new_project_seeds_hud_ui_scene() {
+        let project = ProjectDocument::new("ui");
+        let ui_scene = project.active_ui_scene().expect("default UI scene");
+        assert_eq!(ui_scene.name, "HUD");
+        assert!(matches!(
+            ui_scene.node(ui_scene.root).map(|node| &node.kind),
+            Some(UiNodeKind::Canvas {
+                width: 320,
+                height: 240
+            })
+        ));
+        assert!(ui_scene.nodes().iter().any(|node| {
+            node.name == "Health Bar"
+                && matches!(
+                    node.kind,
+                    UiNodeKind::Bar {
+                        value: UiValueBinding::PlayerHealth,
+                        max: UiValueBinding::PlayerHealthMax,
+                        ..
+                    }
+                )
+        }));
+        assert!(ui_scene.nodes().iter().any(|node| {
+            node.name == "Stamina Bar"
+                && matches!(
+                    node.kind,
+                    UiNodeKind::Bar {
+                        value: UiValueBinding::PlayerStamina,
+                        max: UiValueBinding::PlayerStaminaMax,
+                        ..
+                    }
+                )
+        }));
+    }
+
+    #[test]
+    fn normalize_loaded_restores_missing_ui_scenes() {
+        let mut project = ProjectDocument::new("legacy");
+        project.ui_scenes.clear();
+        project.scene_states.clear();
+        project.normalize_loaded();
+        assert_eq!(project.active_ui_scene().unwrap().name, "HUD");
+        assert!(project
+            .scene_states
+            .iter()
+            .any(|state| state.world == SceneWorldLayer::Gameplay));
+    }
+
+    #[test]
+    fn normalize_loaded_creates_screen_states_for_ui_scenes() {
+        let mut project = ProjectDocument::new("states");
+        project.add_ui_scene("Menu");
+        for state in &mut project.scene_states {
+            state.id = SceneStateId::UNASSIGNED;
+        }
+        project.normalize_loaded();
+
+        for scene in &project.ui_scenes {
+            assert!(
+                project
+                    .scene_states
+                    .iter()
+                    .any(|state| state.ui_scene == Some(scene.id)),
+                "missing state for UI scene {}",
+                scene.name
+            );
+        }
+        assert!(project
+            .scene_states
+            .iter()
+            .any(|state| state.world == SceneWorldLayer::Gameplay));
+        let ids: HashSet<SceneStateId> =
+            project.scene_states.iter().map(|state| state.id).collect();
+        assert_eq!(ids.len(), project.scene_states.len());
+        assert!(ids.iter().all(|id| *id != SceneStateId::UNASSIGNED));
+    }
+
+    #[test]
+    fn normalize_loaded_assigns_stable_unique_ui_scene_ids() {
+        let mut project = ProjectDocument::new("ids");
+        // Simulate a legacy project: scenes with the unassigned sentinel.
+        let mut second = UiScene::default_hud();
+        second.name = "Pause".to_string();
+        second.id = UiSceneId::UNASSIGNED;
+        project.ui_scenes.push(second);
+        for scene in &mut project.ui_scenes {
+            scene.id = UiSceneId::UNASSIGNED;
+        }
+
+        project.normalize_loaded();
+
+        let ids: Vec<UiSceneId> = project.ui_scenes.iter().map(|scene| scene.id).collect();
+        assert!(ids.iter().all(|id| *id != UiSceneId::UNASSIGNED));
+        let unique: HashSet<UiSceneId> = ids.iter().copied().collect();
+        assert_eq!(unique.len(), ids.len(), "scene ids must be unique");
+
+        // Ids are stable across a second normalize and addressable.
+        let first_id = project.ui_scenes[0].id;
+        project.normalize_loaded();
+        assert_eq!(project.ui_scenes[0].id, first_id);
+        assert_eq!(
+            project.ui_scene(first_id).map(|scene| scene.name.as_str()),
+            Some(project.ui_scenes[0].name.as_str())
+        );
+        assert_eq!(
+            project.ui_scene_at(1).map(|scene| scene.id),
+            Some(project.ui_scenes[1].id)
+        );
+    }
+
+    #[test]
+    fn ui_scene_id_survives_ron_roundtrip() {
+        let mut project = ProjectDocument::new("ids");
+        project.normalize_loaded();
+        let assigned = project.ui_scenes[0].id;
+        let ron = project.to_ron_string().unwrap();
+        let mut reloaded = ProjectDocument::from_ron_str(&ron).unwrap();
+        reloaded.normalize_loaded();
+        assert_eq!(reloaded.ui_scenes[0].id, assigned);
+    }
+
+    #[test]
+    fn add_ui_scene_seeds_empty_canvas_with_fresh_id() {
+        let mut project = ProjectDocument::new("crud");
+        project.normalize_loaded();
+        let existing: HashSet<UiSceneId> = project.ui_scenes.iter().map(|scene| scene.id).collect();
+
+        let id = project.add_ui_scene("Pause");
+        assert!(id != UiSceneId::UNASSIGNED);
+        assert!(!existing.contains(&id), "new scene id is unique");
+
+        let scene = project.ui_scene(id).unwrap();
+        assert_eq!(scene.name, "Pause");
+        assert!(project
+            .scene_states
+            .iter()
+            .any(|state| state.ui_scene == Some(id)));
+        // Empty root canvas at PSX resolution: exactly one node, a Canvas.
+        assert_eq!(scene.nodes().len(), 1);
+        assert_eq!(scene.root, UiNodeId::ROOT);
+        let root = scene.node(scene.root).unwrap();
+        assert!(matches!(
+            root.kind,
+            UiNodeKind::Canvas {
+                width: 320,
+                height: 240
+            }
+        ));
+    }
+
+    #[test]
+    fn duplicate_ui_scene_deep_copies_after_source_with_fresh_id() {
+        let mut project = ProjectDocument::new("crud");
+        project.normalize_loaded();
+        // Give the source an extra node so the deep copy is observable.
+        let source_index = 0;
+        let source_root = project.ui_scenes[source_index].root;
+        let extra = project.ui_scenes[source_index].add_node(
+            source_root,
+            "Extra",
+            UiNodeKind::Rect {
+                rect: UiRect::new(1, 2, 3, 4),
+                color: [9, 9, 9],
+                gradient: None,
+            },
+        );
+        let source_id = project.ui_scenes[source_index].id;
+        let source_name = project.ui_scenes[source_index].name.clone();
+        let source_node_count = project.ui_scenes[source_index].nodes().len();
+
+        let copy_id = project.duplicate_ui_scene(source_index).unwrap();
+        // Inserted directly after the source.
+        assert_eq!(project.ui_scenes[source_index + 1].id, copy_id);
+        assert_ne!(copy_id, source_id, "copy gets a fresh id");
+        let copy = project.ui_scene(copy_id).unwrap();
+        assert_eq!(copy.name, format!("{source_name} Copy"));
+        assert_eq!(copy.nodes().len(), source_node_count);
+        assert!(copy.node(extra).is_some(), "deep copy carries child nodes");
+
+        // Editing the copy does not touch the source.
+        let copy_index = source_index + 1;
+        project.ui_scenes[copy_index].remove_node(extra);
+        assert!(project.ui_scene(source_id).unwrap().node(extra).is_some());
+    }
+
+    #[test]
+    fn remove_ui_scene_never_leaves_list_empty() {
+        let mut project = ProjectDocument::new("crud");
+        project.normalize_loaded();
+        project.add_ui_scene("Second");
+        assert_eq!(project.ui_scenes.len(), 2);
+
+        assert!(project.remove_ui_scene(0));
+        assert_eq!(project.ui_scenes.len(), 1);
+
+        // Removing the final scene re-seeds a default so the list is
+        // never empty, and out-of-range indices are a no-op.
+        assert!(project.remove_ui_scene(0));
+        assert_eq!(project.ui_scenes.len(), 1, "list re-seeds a default HUD");
+        assert!(project.ui_scenes[0].id != UiSceneId::UNASSIGNED);
+        assert!(!project.remove_ui_scene(9));
+        assert_eq!(project.ui_scenes.len(), 1);
+    }
+
+    #[test]
+    fn ui_scene_remove_node_removes_descendants_and_root_is_stable() {
+        let mut scene = UiScene::default_hud();
+        let group = scene.add_node(
+            scene.root,
+            "Prompt",
+            UiNodeKind::Group {
+                rect: UiRect::new(48, 180, 120, 24),
+            },
+        );
+        let label = scene.add_node(
+            group,
+            "Prompt Text",
+            UiNodeKind::Label {
+                rect: UiRect::new(52, 184, 96, 12),
+                text: "Open".to_string(),
+                tag: String::new(),
+                align: UiTextAlign::Left,
+                wrap: false,
+                font: UiFontChoice::Basic,
+                font_scale: default_ui_font_scale(),
+                letter_spacing: default_ui_letter_spacing(),
+                color: [220, 226, 240],
+                gradient: None,
+            },
+        );
+
+        assert!(!scene.remove_node(scene.root));
+        assert!(scene.remove_node(group));
+        assert!(scene.node(group).is_none());
+        assert!(scene.node(label).is_none());
+        assert!(!scene
+            .node(scene.root)
+            .expect("root")
+            .children
+            .contains(&group));
+    }
+
+    #[test]
+    fn ui_scene_parent_rect_offsets_children() {
+        let mut scene = UiScene::default_hud();
+        let group = scene.add_node(
+            scene.root,
+            "Panel",
+            UiNodeKind::Group {
+                rect: UiRect::new(40, 30, 100, 50),
+            },
+        );
+        let label = scene.add_node(
+            group,
+            "Prompt",
+            UiNodeKind::Label {
+                rect: UiRect::new(8, 6, 48, 12),
+                text: "Open".to_string(),
+                tag: String::new(),
+                align: UiTextAlign::Left,
+                wrap: false,
+                font: UiFontChoice::Basic,
+                font_scale: default_ui_font_scale(),
+                letter_spacing: default_ui_letter_spacing(),
+                color: [220, 226, 240],
+                gradient: None,
+            },
+        );
+
+        assert_eq!(
+            scene.absolute_rect(label),
+            Some(UiRect::new(48, 36, 48, 12))
+        );
+        assert_eq!(
+            scene
+                .hierarchy_node_ids()
+                .into_iter()
+                .filter(|id| *id == group || *id == label)
+                .collect::<Vec<_>>(),
+            vec![group, label]
+        );
+    }
+
+    #[test]
+    fn ui_scene_absolute_rect_preserves_visual_transform() {
+        let mut scene = UiScene::default_hud();
+        let rect = UiRect::new(8, 6, 48, 12)
+            .with_rotation(30)
+            .with_flips(true, false);
+        let label = scene.add_node(
+            scene.root,
+            "Prompt",
+            UiNodeKind::Label {
+                rect,
+                text: "Open".to_string(),
+                tag: String::new(),
+                align: UiTextAlign::Left,
+                wrap: false,
+                font: UiFontChoice::Basic,
+                font_scale: default_ui_font_scale(),
+                letter_spacing: default_ui_letter_spacing(),
+                color: [220, 226, 240],
+                gradient: None,
+            },
+        );
+
+        let absolute = scene.absolute_rect(label).expect("absolute rect");
+        assert_eq!(absolute.x, 8);
+        assert_eq!(absolute.y, 6);
+        assert_eq!(absolute.rotation_degrees, 30);
+        assert!(absolute.flip_x);
+        assert!(!absolute.flip_y);
+    }
+
+    #[test]
+    fn ui_scene_move_node_reparents_and_rejects_cycles() {
+        let mut scene = UiScene::default_hud();
+        let a = scene.add_node(
+            scene.root,
+            "A",
+            UiNodeKind::Group {
+                rect: UiRect::new(4, 5, 16, 16),
+            },
+        );
+        let b = scene.add_node(
+            scene.root,
+            "B",
+            UiNodeKind::Group {
+                rect: UiRect::new(20, 30, 16, 16),
+            },
+        );
+        let label = scene.add_node(
+            a,
+            "Label",
+            UiNodeKind::Label {
+                rect: UiRect::new(2, 3, 8, 8),
+                text: "x".to_string(),
+                tag: String::new(),
+                align: UiTextAlign::Left,
+                wrap: false,
+                font: UiFontChoice::Basic,
+                font_scale: default_ui_font_scale(),
+                letter_spacing: default_ui_letter_spacing(),
+                color: [255, 255, 255],
+                gradient: None,
+            },
+        );
+
+        assert!(scene.move_node(label, b, 0));
+        assert_eq!(scene.node(label).unwrap().parent, Some(b));
+        assert_eq!(scene.absolute_rect(label), Some(UiRect::new(22, 33, 8, 8)));
+        assert!(!scene.move_node(b, label, 0));
+        assert!(!scene.move_node(scene.root, b, 0));
+    }
+
+    #[test]
+    fn ui_scene_paste_subtree_remaps_ids_and_preserves_children() {
+        let mut source = UiScene::empty_canvas("Source", UiSceneId::FIRST);
+        let group = source.add_node(
+            source.root,
+            "Panel",
+            UiNodeKind::Group {
+                rect: UiRect::new(10, 12, 80, 40),
+            },
+        );
+        let child = source.add_node(
+            group,
+            "Child",
+            UiNodeKind::Group {
+                rect: UiRect::new(3, 4, 16, 8),
+            },
+        );
+        let subtree = source.subtree_nodes(group).unwrap();
+
+        let mut target = UiScene::empty_canvas("Target", UiSceneId(2));
+        let parent = target.add_node(
+            target.root,
+            "Destination",
+            UiNodeKind::Group {
+                rect: UiRect::new(20, 30, 100, 50),
+            },
+        );
+        let pasted = target.paste_subtree(parent, &subtree, group).unwrap();
+
+        assert_ne!(pasted, group);
+        let pasted_node = target.node(pasted).unwrap();
+        assert_eq!(pasted_node.name, "Panel");
+        assert_eq!(pasted_node.parent, Some(parent));
+        assert_eq!(pasted_node.children.len(), 1);
+
+        let pasted_child = pasted_node.children[0];
+        assert_ne!(pasted_child, child);
+        assert_eq!(target.node(pasted_child).unwrap().name, "Child");
+        assert_eq!(target.node(pasted_child).unwrap().parent, Some(pasted));
+        assert_eq!(
+            target.absolute_rect(pasted_child),
+            Some(UiRect::new(33, 46, 16, 8))
+        );
+    }
+
+    #[test]
+    fn editor_camera_roundtrips_through_ron_string() {
+        let mut project = ProjectDocument::new("camera");
+        project.editor_camera = EditorCameraState {
+            mode: EditorCameraMode::Free,
+            orbit_yaw_q12: 384,
+            orbit_pitch_q12: 4096 - 128,
+            orbit_radius: 8192,
+            orbit_target: [1024, 512, -2048],
+            free_yaw_q12: 1536,
+            free_pitch_q12: 128,
+            free_position: [-300, 700, 900],
+            free_initialized: true,
+        };
+        let ron = project.to_ron_string().unwrap();
+
+        assert!(ron.contains("editor_camera"));
+        assert_eq!(ProjectDocument::from_ron_str(&ron).unwrap(), project);
+    }
+
+    #[test]
+    fn editor_visibility_roundtrips_through_ron_string() {
+        let mut project = ProjectDocument::new("visibility");
+        project.editor_visibility = EditorVisibilityState {
+            show_grid: false,
+            show_portals: true,
+            show_lights: false,
+            preview_fog: false,
+            preview_backface_wireframe: true,
+            preview_bounds: false,
+            show_play_debug_overlays: false,
+            show_play_debug_map: true,
+        };
+        let ron = project.to_ron_string().unwrap();
+
+        assert!(ron.contains("editor_visibility"));
+        assert_eq!(ProjectDocument::from_ron_str(&ron).unwrap(), project);
+    }
+
+    #[test]
+    fn editor_workspace_roundtrips_through_ron_string() {
+        let mut project = ProjectDocument::new("workspace");
+        project.editor_workspace = EditorWorkspaceState {
+            active: EditorWorkspaceView::Ui,
+        };
+        let ron = project.to_ron_string().unwrap();
+
+        assert!(ron.contains("editor_workspace"));
+        assert_eq!(ProjectDocument::from_ron_str(&ron).unwrap(), project);
+    }
+
+    #[test]
+    fn runtime_depth_sort_mode_roundtrips_through_ron_string() {
+        let mut project = ProjectDocument::new("depth-sort");
+        project.runtime_depth_sort_mode = RuntimeDepthSortMode::HybridWalls;
+        project.runtime_texture_split_mode = RuntimeTextureSplitMode::DepthSorted;
+        project.runtime_room_draw_order_mode = RuntimeRoomDrawOrderMode::Portal;
+        project.runtime_texture_split_max_edge = 96;
+        let ron = project.to_ron_string().unwrap();
+
+        assert!(ron.contains("runtime_depth_sort_mode"));
+        assert!(ron.contains("runtime_texture_split_mode"));
+        assert!(ron.contains("runtime_room_draw_order_mode"));
+        assert!(ron.contains("runtime_texture_split_max_edge"));
+        assert_eq!(ProjectDocument::from_ron_str(&ron).unwrap(), project);
+    }
+
+    #[test]
+    fn model_resource_roundtrips_through_ron_string() {
+        let mut project = ProjectDocument::starter();
+        let id = project.add_resource(
+            "TestModel",
+            ResourceData::Model(ModelResource {
+                model_path: "assets/models/x/x.psxmdl".to_string(),
+                source_path: None,
+                texture_path: Some("assets/models/x/x.psxt".to_string()),
+                skeleton: None,
+                clips: vec![
+                    ModelAnimationClip {
+                        name: "idle".to_string(),
+                        psxanim_path: "assets/models/x/x_idle.psxanim".to_string(),
+                        calibration: Default::default(),
+                    },
+                    ModelAnimationClip {
+                        name: "walk".to_string(),
+                        psxanim_path: "assets/models/x/x_walk.psxanim".to_string(),
+                        calibration: AnimationClipCalibration {
+                            in_place: false,
+                            offset: [12, -8, 24],
+                        },
+                    },
+                ],
+                default_clip: Some(0),
+                preview_clip: Some(1),
+                world_height: 1280,
+                collision_radius: 240,
+                scale_q8: [
+                    MODEL_SCALE_ONE_Q8,
+                    MODEL_SCALE_ONE_Q8 * 2,
+                    MODEL_SCALE_ONE_Q8,
+                ],
+                attachments: vec![AttachmentSocket {
+                    name: "right_hand_grip".to_string(),
+                    joint: 3,
+                    translation: [16, 32, -8],
+                    rotation_q12: [0, 1024, 0],
+                }],
+            }),
+        );
+        let ron = project.to_ron_string().unwrap();
+        let restored = ProjectDocument::from_ron_str(&ron).unwrap();
+        assert_eq!(restored, project);
+        let resource = restored.resource(id).unwrap();
+        match &resource.data {
+            ResourceData::Model(m) => {
+                assert_eq!(m.clips.len(), 2);
+                assert_eq!(m.default_clip, Some(0));
+                assert_eq!(m.preview_clip, Some(1));
+                assert_eq!(m.clips[1].calibration.offset, [12, -8, 24]);
+                assert!(!m.clips[1].calibration.in_place);
+                assert_eq!(m.world_height, 1280);
+                assert_eq!(m.collision_radius, 240);
+                assert_eq!(
+                    m.scale_q8,
+                    [
+                        MODEL_SCALE_ONE_Q8,
+                        MODEL_SCALE_ONE_Q8 * 2,
+                        MODEL_SCALE_ONE_Q8
+                    ]
+                );
+                assert_eq!(m.effective_preview_clip(), Some(1));
+                assert_eq!(m.effective_runtime_clip(), Some(0));
+                assert_eq!(m.attachments.len(), 1);
+                assert_eq!(m.attachments[0].joint, 3);
+                assert_eq!(m.attachments[0].translation, [16, 32, -8]);
+            }
+            _ => panic!("expected Model"),
+        }
+    }
+
+    #[test]
+    fn animation_library_resources_roundtrip_and_resolve_by_path() {
+        let mut project = ProjectDocument::new("Animation Test");
+        let skeleton = project.add_resource(
+            "Humanoid Skeleton",
+            ResourceData::Skeleton(SkeletonResource {
+                joint_count: 2,
+                parents: vec![None, Some(0)],
+                signature: "psx-parent-v1:2:root,0".to_string(),
+                note: "test skeleton".to_string(),
+            }),
+        );
+        let idle_animation = project.add_resource(
+            "Idle",
+            ResourceData::AnimationClip(AnimationClipResource {
+                psxanim_path: "assets/animations/idle.psxanim".to_string(),
+                skeleton: Some(skeleton),
+                source: None,
+                target_model: None,
+                bake: AnimationClipBakeKind::LegacyShared,
+                role: AnimationRole::Idle,
+                looping: true,
+                tags: vec!["idle".to_string()],
+                calibration: Default::default(),
+            }),
+        );
+        let set = project.add_resource(
+            "Humanoid Set",
+            ResourceData::AnimationSet(AnimationSetResource {
+                skeleton: Some(skeleton),
+                idle_clip: Some(idle_animation),
+                walk_clip: None,
+                run_clip: None,
+                turn_clip: None,
+                roll_clip: None,
+                backstep_clip: None,
+                action_clips: Vec::new(),
+                clips: Vec::new(),
+            }),
+        );
+        let model = project.add_resource(
+            "Humanoid Model",
+            ResourceData::Model(ModelResource {
+                model_path: "assets/models/humanoid.psxmdl".to_string(),
+                source_path: None,
+                texture_path: Some("assets/models/humanoid.psxt".to_string()),
+                skeleton: Some(skeleton),
+                clips: vec![ModelAnimationClip {
+                    name: "legacy idle".to_string(),
+                    psxanim_path: "assets/animations/idle.psxanim".to_string(),
+                    calibration: Default::default(),
+                }],
+                default_clip: Some(0),
+                preview_clip: Some(0),
+                world_height: 1024,
+                collision_radius: default_model_collision_radius_for_height(1024),
+                scale_q8: [MODEL_SCALE_ONE_Q8; 3],
+                attachments: Vec::new(),
+            }),
+        );
+        project.add_resource(
+            "Character",
+            ResourceData::Character(CharacterResource {
+                model: Some(model),
+                animation_set: Some(set),
+                idle_clip: None,
+                walk_clip: None,
+                run_clip: None,
+                turn_clip: None,
+                ..CharacterResource::default()
+            }),
+        );
+
+        let restored = ProjectDocument::from_ron_str(&project.to_ron_string().unwrap()).unwrap();
+        assert_eq!(restored, project);
+        assert_eq!(
+            restored.resolved_model_animation_index(model, idle_animation),
+            Some(0),
+            "standalone clips matching legacy model-local paths resolve to the stable legacy index",
+        );
+    }
+
+    #[test]
+    fn animation_sources_and_target_specific_clips_roundtrip() {
+        let mut project = ProjectDocument::new("Animation Source Test");
+        let skeleton = project.add_resource(
+            "Meshy Biped Skeleton",
+            ResourceData::Skeleton(SkeletonResource {
+                joint_count: 24,
+                parents: vec![None],
+                signature: "psx-parent-v1:24:root".to_string(),
+                note: "test skeleton".to_string(),
+            }),
+        );
+        let model_a = project.add_resource(
+            "Knight",
+            ResourceData::Model(ModelResource {
+                model_path: "assets/models/knight/knight.psxmdl".to_string(),
+                source_path: None,
+                texture_path: None,
+                skeleton: Some(skeleton),
+                clips: Vec::new(),
+                default_clip: None,
+                preview_clip: None,
+                world_height: 1024,
+                collision_radius: default_model_collision_radius_for_height(1024),
+                scale_q8: [MODEL_SCALE_ONE_Q8; 3],
+                attachments: Vec::new(),
+            }),
+        );
+        let model_b = project.add_resource(
+            "Wraith",
+            ResourceData::Model(ModelResource {
+                model_path: "assets/models/wraith/wraith.psxmdl".to_string(),
+                source_path: None,
+                texture_path: None,
+                skeleton: Some(skeleton),
+                clips: Vec::new(),
+                default_clip: None,
+                preview_clip: None,
+                world_height: 1024,
+                collision_radius: default_model_collision_radius_for_height(1024),
+                scale_q8: [MODEL_SCALE_ONE_Q8; 3],
+                attachments: Vec::new(),
+            }),
+        );
+        let source = project.add_resource(
+            "Mixamo Roll",
+            ResourceData::AnimationSource(AnimationSourceResource {
+                source_path: "assets/animations/source/stand_to_roll.fbx".to_string(),
+                clip_name: "Stand To Roll".to_string(),
+                provider: AnimationSourceProvider::Mixamo,
+                skeleton: Some(skeleton),
+                target_model: None,
+                role: AnimationRole::Generic,
+                looping: false,
+                tags: vec!["roll".to_string()],
+            }),
+        );
+        let shared_walk = project.add_resource(
+            "Shared Walk",
+            ResourceData::AnimationClip(AnimationClipResource {
+                psxanim_path: "assets/animations/shared_walk.psxanim".to_string(),
+                skeleton: Some(skeleton),
+                source: None,
+                target_model: None,
+                bake: AnimationClipBakeKind::LegacyShared,
+                role: AnimationRole::Walk,
+                looping: true,
+                tags: vec!["walk".to_string()],
+                calibration: Default::default(),
+            }),
+        );
+        let baked_for_a = project.add_resource(
+            "Knight Roll",
+            ResourceData::AnimationClip(AnimationClipResource {
+                psxanim_path: "assets/models/knight/knight_roll.psxanim".to_string(),
+                skeleton: Some(skeleton),
+                source: Some(source),
+                target_model: Some(model_a),
+                bake: AnimationClipBakeKind::Retargeted,
+                role: AnimationRole::Generic,
+                looping: false,
+                tags: vec!["roll".to_string()],
+                calibration: Default::default(),
+            }),
+        );
+        project.add_resource(
+            "Wraith Roll",
+            ResourceData::AnimationClip(AnimationClipResource {
+                psxanim_path: "assets/models/wraith/wraith_roll.psxanim".to_string(),
+                skeleton: Some(skeleton),
+                source: Some(source),
+                target_model: Some(model_b),
+                bake: AnimationClipBakeKind::Retargeted,
+                role: AnimationRole::Generic,
+                looping: false,
+                tags: vec!["roll".to_string()],
+                calibration: Default::default(),
+            }),
+        );
+
+        let restored = ProjectDocument::from_ron_str(&project.to_ron_string().unwrap()).unwrap();
+        assert_eq!(restored, project);
+        let model_a_clips = restored.resolved_model_animation_clips(model_a);
+        let baked_for_a_index = model_a_clips
+            .iter()
+            .position(|clip| clip.animation_resource == Some(baked_for_a))
+            .expect("target-specific clip should resolve for its model");
+        let shared_walk_index = model_a_clips
+            .iter()
+            .position(|clip| clip.animation_resource == Some(shared_walk))
+            .expect("generic clip should still resolve for matching skeleton");
+        assert!(
+            baked_for_a_index < shared_walk_index,
+            "target-specific clips should be offered before generic skeleton-shared clips",
+        );
+        assert!(!restored
+            .resolved_model_animation_clips(model_b)
+            .iter()
+            .any(|clip| clip.animation_resource == Some(baked_for_a)));
+        assert_eq!(restored.resource_reference_count(source), 2);
+    }
+
+    #[test]
+    fn mesh_instance_with_animation_clip_roundtrips() {
+        let mut project = ProjectDocument::starter();
+        let scene = project.active_scene_mut();
+        let room_id = scene
+            .nodes()
+            .iter()
+            .find(|n| matches!(n.kind, NodeKind::Room { .. }))
+            .map(|n| n.id)
+            .unwrap();
+        let model_resource_id = ResourceId(99);
+        scene.add_node(
+            room_id,
+            "TestWraith",
+            NodeKind::MeshInstance {
+                mesh: Some(model_resource_id),
+                material: None,
+                animation_clip: Some(2),
+            },
+        );
+        let ron = project.to_ron_string().unwrap();
+        let restored = ProjectDocument::from_ron_str(&ron).unwrap();
+        assert_eq!(restored, project);
+        // Confirm the new field survives.
+        let surviving = restored
+            .active_scene()
+            .nodes()
+            .iter()
+            .find(|n| n.name == "TestWraith")
+            .unwrap();
+        assert!(matches!(
+            surviving.kind,
+            NodeKind::MeshInstance {
+                mesh: Some(_),
+                animation_clip: Some(2),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn legacy_mesh_instance_without_animation_clip_loads() {
+        // Synthesize the pre-extension MeshInstance shape -- `animation_clip`
+        // missing -- and confirm `#[serde(default)]` lands `None`.
+        let ron = r#"
+            (
+                name: "Legacy",
+                next_resource_id: 1,
+                resources: [],
+                scenes: [
+                    Scene(
+                        name: "Demo",
+                        next_node_id: 3,
+                        root: NodeId(1),
+                        nodes: [
+                            (
+                                id: NodeId(1),
+                                name: "Root",
+                                parent: None,
+                                children: [NodeId(2)],
+                                kind: Node3D,
+                                transform: (translation: (0.0, 0.0, 0.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)),
+                            ),
+                            (
+                                id: NodeId(2),
+                                name: "OldMesh",
+                                parent: Some(NodeId(1)),
+                                children: [],
+                                kind: MeshInstance(mesh: None, material: None),
+                                transform: (translation: (0.0, 0.0, 0.0), rotation_degrees: (0.0, 0.0, 0.0), scale: (1.0, 1.0, 1.0)),
+                            ),
+                        ],
+                    ),
+                ],
+            )
+        "#;
+        let project = ProjectDocument::from_ron_str(ron).unwrap();
+        let mesh = project
+            .active_scene()
+            .nodes()
+            .iter()
+            .find(|n| n.name == "OldMesh")
+            .unwrap();
+        assert!(matches!(
+            mesh.kind,
+            NodeKind::MeshInstance {
+                mesh: None,
+                material: None,
+                animation_clip: None,
+            }
+        ));
+    }
+
+    #[test]
+    fn project_saves_and_loads_from_disk() {
+        let mut project = ProjectDocument::starter();
+        project.name = "Disk Test".to_string();
+
+        let dir = std::env::temp_dir().join(format!(
+            "psxed-project-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let path = dir.join("project.ron");
+
+        project.save_to_path(&path).unwrap();
+        assert_eq!(ProjectDocument::load_from_path(&path).unwrap(), project);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn unique_temp_dir(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "psxed-project-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    #[test]
+    fn resource_rename_moves_project_owned_texture_file() {
+        let root = unique_temp_dir("resource-rename-texture");
+        let texture_dir = root.join("assets").join("textures");
+        std::fs::create_dir_all(&texture_dir).unwrap();
+        std::fs::write(texture_dir.join("floor.psxt"), b"texture").unwrap();
+
+        let mut project = ProjectDocument::new("test");
+        let id = project.add_resource(
+            "Floor",
+            ResourceData::Texture {
+                psxt_path: "assets/textures/floor.psxt".to_string(),
+            },
+        );
+
+        let report = project
+            .rename_resource_with_files(id, "Stone Floor", &root)
+            .unwrap();
+
+        assert_eq!(project.resource_name(id), Some("Stone Floor"));
+        let ResourceData::Texture { psxt_path } = &project.resource(id).unwrap().data else {
+            panic!("expected texture");
+        };
+        assert_eq!(psxt_path, "assets/textures/stone_floor.psxt");
+        assert!(!texture_dir.join("floor.psxt").exists());
+        assert_eq!(
+            std::fs::read(texture_dir.join("stone_floor.psxt")).unwrap(),
+            b"texture"
+        );
+        assert_eq!(report.renamed_files.len(), 1);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn resource_rename_moves_imported_model_bundle_files() {
+        let root = unique_temp_dir("resource-rename-model");
+        let bundle_dir = root.join("assets").join("models").join("obsidian_wraith");
+        std::fs::create_dir_all(&bundle_dir).unwrap();
+        std::fs::write(bundle_dir.join("obsidian_wraith.psxmdl"), b"model").unwrap();
+        std::fs::write(bundle_dir.join("obsidian_wraith.psxt"), b"atlas").unwrap();
+        std::fs::write(bundle_dir.join("obsidian_wraith_idle.psxanim"), b"idle").unwrap();
+        std::fs::write(bundle_dir.join("obsidian_wraith_walk.psxanim"), b"walk").unwrap();
+
+        let mut project = ProjectDocument::new("test");
+        let id = project.add_resource(
+            "Obsidian Wraith",
+            ResourceData::Model(ModelResource {
+                model_path: "assets/models/obsidian_wraith/obsidian_wraith.psxmdl".to_string(),
+                source_path: None,
+                texture_path: Some(
+                    "assets/models/obsidian_wraith/obsidian_wraith.psxt".to_string(),
+                ),
+                skeleton: None,
+                clips: vec![
+                    ModelAnimationClip {
+                        name: "idle".to_string(),
+                        psxanim_path: "assets/models/obsidian_wraith/obsidian_wraith_idle.psxanim"
+                            .to_string(),
+                        calibration: Default::default(),
+                    },
+                    ModelAnimationClip {
+                        name: "walk".to_string(),
+                        psxanim_path: "assets/models/obsidian_wraith/obsidian_wraith_walk.psxanim"
+                            .to_string(),
+                        calibration: Default::default(),
+                    },
+                ],
+                default_clip: Some(0),
+                preview_clip: Some(0),
+                world_height: 1024,
+                collision_radius: default_model_collision_radius_for_height(1024),
+                scale_q8: [MODEL_SCALE_ONE_Q8; 3],
+                attachments: Vec::new(),
+            }),
+        );
+
+        let report = project
+            .rename_resource_with_files(id, "Hooded Wretch", &root)
+            .unwrap();
+
+        let ResourceData::Model(model) = &project.resource(id).unwrap().data else {
+            panic!("expected model");
+        };
+        assert_eq!(
+            model.model_path,
+            "assets/models/hooded_wretch/hooded_wretch.psxmdl"
+        );
+        assert_eq!(
+            model.texture_path.as_deref(),
+            Some("assets/models/hooded_wretch/hooded_wretch.psxt")
+        );
+        assert_eq!(
+            model.clips[0].psxanim_path,
+            "assets/models/hooded_wretch/hooded_wretch_idle.psxanim"
+        );
+        assert_eq!(
+            model.clips[1].psxanim_path,
+            "assets/models/hooded_wretch/hooded_wretch_walk.psxanim"
+        );
+        assert_eq!(report.renamed_files.len(), 4);
+        assert!(!bundle_dir.exists());
+        assert!(root
+            .join("assets/models/hooded_wretch/hooded_wretch.psxmdl")
+            .exists());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn resource_rename_refuses_existing_target_without_mutating_project() {
+        let root = unique_temp_dir("resource-rename-target-exists");
+        let texture_dir = root.join("assets").join("textures");
+        std::fs::create_dir_all(&texture_dir).unwrap();
+        std::fs::write(texture_dir.join("floor.psxt"), b"old").unwrap();
+        std::fs::write(texture_dir.join("stone_floor.psxt"), b"target").unwrap();
+
+        let mut project = ProjectDocument::new("test");
+        let id = project.add_resource(
+            "Floor",
+            ResourceData::Texture {
+                psxt_path: "assets/textures/floor.psxt".to_string(),
+            },
+        );
+
+        let error = project
+            .rename_resource_with_files(id, "Stone Floor", &root)
+            .unwrap_err();
+
+        assert!(matches!(error, ResourceRenameError::TargetExists(_)));
+        assert_eq!(project.resource_name(id), Some("Floor"));
+        let ResourceData::Texture { psxt_path } = &project.resource(id).unwrap().data else {
+            panic!("expected texture");
+        };
+        assert_eq!(psxt_path, "assets/textures/floor.psxt");
+        assert_eq!(
+            std::fs::read(texture_dir.join("floor.psxt")).unwrap(),
+            b"old"
+        );
+        assert_eq!(
+            std::fs::read(texture_dir.join("stone_floor.psxt")).unwrap(),
+            b"target"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn delete_resource_removes_entry_and_clears_references() {
+        let root = unique_temp_dir("resource-delete");
+        let texture_dir = root.join("assets").join("textures");
+        std::fs::create_dir_all(&texture_dir).unwrap();
+        std::fs::write(texture_dir.join("target.psxt"), b"texture").unwrap();
+
+        let mut project = ProjectDocument::new("delete-resource");
+        let target = project.add_resource(
+            "Target",
+            ResourceData::Texture {
+                psxt_path: "assets/textures/target.psxt".to_string(),
+            },
+        );
+        let material = project.add_resource(
+            "Material",
+            ResourceData::Material(MaterialResource::opaque(Some(target))),
+        );
+        let character = project.add_resource(
+            "Character",
+            ResourceData::Character(CharacterResource {
+                model: Some(target),
+                idle_clip: Some(0),
+                walk_clip: Some(1),
+                run_clip: Some(2),
+                turn_clip: Some(3),
+                ..CharacterResource::defaults()
+            }),
+        );
+        let weapon = project.add_resource(
+            "Weapon",
+            ResourceData::Weapon(WeaponResource {
+                model: Some(target),
+                ..WeaponResource::default()
+            }),
+        );
+
+        let scene = project.active_scene_mut();
+        let mut grid = WorldGrid::empty(1, 1, 1024);
+        grid.set_floor(0, 0, 0, Some(target));
+        grid.add_wall(0, 0, GridDirection::North, 0, 1024, Some(target));
+        let room = scene.add_node(scene.root, "Room", NodeKind::Room { grid });
+        scene.add_node(
+            room,
+            "Mesh",
+            NodeKind::MeshInstance {
+                mesh: Some(target),
+                material: Some(target),
+                animation_clip: None,
+            },
+        );
+        let entity = scene.add_node(room, "Entity", NodeKind::Entity);
+        scene.add_node(
+            entity,
+            "Renderer",
+            NodeKind::ModelRenderer {
+                model: Some(target),
+                material: Some(target),
+                visual_offset: [0; 3],
+                visual_scale_q8: MODEL_SCALE_ONE_Q8,
+            },
+        );
+        scene.add_node(
+            entity,
+            "Controller",
+            NodeKind::CharacterController {
+                character: Some(target),
+                settings: CharacterControllerSettings::default(),
+                player: true,
+            },
+        );
+        scene.add_node(
+            entity,
+            "Equipment",
+            NodeKind::Equipment {
+                weapon: Some(target),
+                character_socket: "right_hand_grip".to_string(),
+                weapon_grip: "grip".to_string(),
+            },
+        );
+        scene.add_node(
+            room,
+            "Spawn",
+            NodeKind::SpawnPoint {
+                player: false,
+                character: Some(target),
+            },
+        );
+        assert_eq!(project.resource_reference_count(target), 12);
+        let report = project
+            .delete_resource_with_files(target, &root)
+            .expect("resource exists");
+        assert_eq!(report.removed.name, "Target");
+        assert_eq!(report.cleared_references, 12);
+        assert_eq!(
+            report.deleted_files,
+            vec![ResourceFileDelete {
+                path: "assets/textures/target.psxt".to_string(),
+            }]
+        );
+        assert!(report.skipped_files.is_empty());
+        assert!(!texture_dir.join("target.psxt").exists());
+        assert!(project.resource(target).is_none());
+        assert_eq!(project.resource_name(material), Some("Material"));
+
+        let ResourceData::Material(material_data) = &project.resource(material).unwrap().data
+        else {
+            panic!("expected material");
+        };
+        assert_eq!(material_data.texture, None);
+        let ResourceData::Character(character_data) = &project.resource(character).unwrap().data
+        else {
+            panic!("expected character");
+        };
+        assert_eq!(character_data.model, None);
+        assert_eq!(character_data.idle_clip, None);
+        assert_eq!(character_data.walk_clip, None);
+        assert_eq!(character_data.run_clip, None);
+        assert_eq!(character_data.turn_clip, None);
+        let ResourceData::Weapon(weapon_data) = &project.resource(weapon).unwrap().data else {
+            panic!("expected weapon");
+        };
+        assert_eq!(weapon_data.model, None);
+
+        for node in project.active_scene().nodes() {
+            match &node.kind {
+                NodeKind::Room { grid } => {
+                    let sector = grid.sector(0, 0).unwrap();
+                    assert_eq!(sector.floor.as_ref().unwrap().material, None);
+                    assert_eq!(
+                        sector
+                            .walls
+                            .get(GridDirection::North)
+                            .first()
+                            .unwrap()
+                            .material,
+                        None
+                    );
+                }
+                NodeKind::MeshInstance { mesh, material, .. } => {
+                    assert_eq!((*mesh, *material), (None, None));
+                }
+                NodeKind::ModelRenderer {
+                    model, material, ..
+                } => {
+                    assert_eq!((*model, *material), (None, None));
+                }
+                NodeKind::CharacterController { character, .. }
+                | NodeKind::SpawnPoint { character, .. } => {
+                    assert_eq!(*character, None);
+                }
+                NodeKind::Equipment { weapon, .. } => {
+                    assert_eq!(*weapon, None);
+                }
+                _ => {}
+            }
+        }
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn corner_surviving_split_picks_diagonal_that_keeps_a_triangle() {
+        // Drop NE → only the NW-SE diagonal keeps a triangle.
+        // Drop NW → only the NE-SW diagonal keeps a triangle.
+        assert_eq!(Corner::NE.surviving_split(), GridSplit::NorthWestSouthEast);
+        assert_eq!(Corner::SW.surviving_split(), GridSplit::NorthWestSouthEast);
+        assert_eq!(Corner::NW.surviving_split(), GridSplit::NorthEastSouthWest);
+        assert_eq!(Corner::SE.surviving_split(), GridSplit::NorthEastSouthWest);
+    }
+
+    #[test]
+    fn drop_corner_marks_face_as_triangle_and_flips_split() {
+        let mut face = GridHorizontalFace::flat(0, None);
+        face.split = GridSplit::NorthWestSouthEast; // would die if NW dropped
+        face.drop_corner(Corner::NW);
+        assert!(face.is_triangle());
+        assert_eq!(face.dropped_corner, Some(Corner::NW));
+        assert_eq!(face.split, GridSplit::NorthEastSouthWest);
+
+        face.restore_corner();
+        assert!(!face.is_triangle());
+        assert_eq!(face.dropped_corner, None);
+    }
+
+    #[test]
+    fn horizontal_triangle_overrides_inherit_until_set() {
+        let parent = ResourceId(11);
+        let triangle = ResourceId(12);
+        let mut face = GridHorizontalFace::flat(0, Some(parent));
+        face.uv.offset = [3, 4];
+        face.walkable = true;
+
+        assert_eq!(face.triangle_material(0), Some(parent));
+        assert_eq!(face.triangle_uv(0), face.uv);
+        assert!(face.triangle_walkable(0));
+
+        let override_a = face.triangle_override_mut(0);
+        override_a.material = Some(GridTriangleMaterialOverride::Resource(triangle));
+        override_a.uv = Some(GridUvTransform {
+            offset: [9, 10],
+            span: [64, 32],
+            rotation: GridUvRotation::Deg90,
+            flip_u: true,
+            flip_v: false,
+        });
+        override_a.walkable = Some(false);
+
+        assert_eq!(face.triangle_material(0), Some(triangle));
+        assert_eq!(face.triangle_material(1), Some(parent));
+        assert_eq!(face.triangle_uv(0).offset, [9, 10]);
+        assert!(!face.triangle_walkable(0));
+        assert!(face.triangle_walkable(1));
+    }
+
+    #[test]
+    fn drop_corner_on_wall_marks_triangle() {
+        let mut wall = GridVerticalFace::flat(0, 64, None);
+        wall.drop_corner(WallCorner::TL);
+        assert!(wall.is_triangle());
+        assert_eq!(wall.dropped_corner, Some(WallCorner::TL));
+    }
+
+    #[test]
+    fn grid_uv_transform_rotates_quad_without_rebaking_texture() {
+        let transform = GridUvTransform {
+            offset: [0, 0],
+            span: [0, 0],
+            rotation: GridUvRotation::Deg90,
+            flip_u: false,
+            flip_v: false,
+        };
+
+        assert_eq!(
+            transform.apply_to_quad([(0, 0), (64, 0), (64, 64), (0, 64)]),
+            [(64, 0), (64, 64), (0, 64), (0, 0)]
+        );
+    }
+
+    #[test]
+    fn grid_uv_transform_rotates_quad_45_degrees_without_rebaking_texture() {
+        let transform = GridUvTransform {
+            offset: [0, 0],
+            span: [0, 0],
+            rotation: GridUvRotation::Deg45,
+            flip_u: false,
+            flip_v: false,
+        };
+
+        assert_eq!(
+            transform.apply_to_quad([(0, 0), (64, 0), (64, 64), (0, 64)]),
+            [(32, 0), (64, 32), (32, 64), (0, 32)]
+        );
+    }
+
+    #[test]
+    fn grid_uv_transform_rotates_quad_315_degrees_without_rebaking_texture() {
+        let transform = GridUvTransform {
+            offset: [0, 0],
+            span: [0, 0],
+            rotation: GridUvRotation::Deg315,
+            flip_u: false,
+            flip_v: false,
+        };
+
+        assert_eq!(
+            transform.apply_to_quad([(0, 0), (64, 0), (64, 64), (0, 64)]),
+            [(0, 32), (32, 0), (64, 32), (32, 64)]
+        );
+    }
+
+    #[test]
+    fn grid_uv_transform_flips_and_wraps_ps1_uv_offsets() {
+        let transform = GridUvTransform {
+            offset: [-8, 12],
+            span: [0, 0],
+            rotation: GridUvRotation::Deg0,
+            flip_u: true,
+            flip_v: false,
+        };
+
+        assert_eq!(
+            transform.apply_to_quad([(0, 0), (64, 0), (64, 64), (0, 64)]),
+            [(56, 12), (248, 12), (248, 76), (56, 76)]
+        );
+    }
+
+    #[test]
+    fn grid_uv_transform_scales_quad_span_without_rebaking_texture() {
+        let transform = GridUvTransform {
+            offset: [0, 0],
+            span: [0, 32],
+            rotation: GridUvRotation::Deg0,
+            flip_u: false,
+            flip_v: false,
+        };
+
+        assert_eq!(
+            transform.apply_to_quad([(0, 64), (64, 64), (64, 0), (0, 0)]),
+            [(0, 32), (64, 32), (64, 0), (0, 0)]
+        );
+    }
+
+    #[test]
+    fn wall_autotile_sets_double_height_v_span_without_changing_geometry() {
+        let mut wall = GridVerticalFace::flat(0, 1536, None);
+        let heights = wall.heights;
+
+        let clamped = wall.autotile_uv(768);
+
+        assert!(!clamped);
+        assert_eq!(wall.heights, heights);
+        assert_eq!(wall.uv.span, [0, 128]);
+    }
+
+    #[test]
+    fn wall_autotile_uses_partial_v_span_for_short_wall() {
+        let mut wall = GridVerticalFace::flat(0, 384, None);
+
+        let clamped = wall.autotile_uv(768);
+
+        assert!(!clamped);
+        assert_eq!(wall.heights, [0, 0, 384, 384]);
+        assert_eq!(wall.uv.span, [0, 32]);
+    }
+
+    #[test]
+    fn wall_autotile_clamps_one_quad_to_ps1_uv_range() {
+        let mut wall = GridVerticalFace::flat(0, 768 * 5, None);
+
+        let clamped = wall.autotile_uv(768);
+
+        assert!(clamped);
+        assert_eq!(wall.heights, [0, 0, 3840, 3840]);
+        assert_eq!(wall.uv.span, [0, 255]);
+    }
+
+    #[test]
+    fn default_tall_wall_keeps_single_authored_uv_primitive() {
+        let wall = GridVerticalFace::flat(0, 768 * 5, None);
+
+        let segments = wall.split_into_autotile_segments(768);
+
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].heights, [0, 0, 3840, 3840]);
+        assert_eq!(segments[0].uv.span, [0, 0]);
+    }
+
+    #[test]
+    fn wall_autotile_keeps_one_primitive_when_repeated_uvs_fit_packet() {
+        let mut wall = GridVerticalFace::flat(0, 1536, None);
+        wall.uv.offset[1] = -5;
+        wall.autotile_uv(768);
+
+        let segments = wall.split_into_autotile_segments(768);
+
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].heights, [0, 0, 1536, 1536]);
+        assert_eq!(segments[0].uv.span, [0, 128]);
+        assert_eq!(segments[0].uv.offset[1], -5);
+    }
+
+    #[test]
+    fn wall_autotile_segments_restore_clamped_tall_wall_density() {
+        let mut wall = GridVerticalFace::flat(0, 768 * 5, None);
+        wall.autotile_uv(768);
+
+        let segments = wall.split_into_autotile_segments(768);
+
+        assert_eq!(segments.len(), 5);
+        assert!(segments.iter().all(|segment| segment.uv.span == [0, 0]));
+        assert_eq!(segments[4].heights, [3072, 3072, 3840, 3840]);
+    }
+
+    #[test]
+    fn wall_split_height_segments_keeps_uvs_and_sloped_edges_connected() {
+        let mut wall = GridVerticalFace::flat(0, 1536, None);
+        wall.heights = [0, 384, 1536, 1920];
+        wall.uv.span = [12, 96];
+
+        let segments = wall.split_into_height_segments(768);
+
+        assert_eq!(segments.len(), 3);
+        assert_eq!(
+            [
+                segments[0].heights[WallCorner::BL.idx()],
+                segments[0].heights[WallCorner::BR.idx()],
+            ],
+            [0, 384]
+        );
+        assert_eq!(
+            [
+                segments[2].heights[WallCorner::TL.idx()],
+                segments[2].heights[WallCorner::TR.idx()],
+            ],
+            [1920, 1536]
+        );
+        for pair in segments.windows(2) {
+            assert_eq!(
+                pair[0].heights[WallCorner::TL.idx()],
+                pair[1].heights[WallCorner::BL.idx()]
+            );
+            assert_eq!(
+                pair[0].heights[WallCorner::TR.idx()],
+                pair[1].heights[WallCorner::BR.idx()]
+            );
+        }
+        assert!(segments.iter().all(|segment| segment.uv.span == [12, 96]));
+    }
