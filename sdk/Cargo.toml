@@ -9,6 +9,7 @@ members = [
     "crates/psx-pad",
     "crates/psx-sdk",
     "crates/psx-vram",
+    "crates/psx-cache",
     "crates/psx-font",
     "crates/psx-math",
     "crates/psx-spu",
@@ -48,6 +49,7 @@ psx-gte-core = { path = "crates/psx-gte-core" }
 psx-pad = { path = "crates/psx-pad" }
 psx-sdk = { path = "crates/psx-sdk" }
 psx-vram = { path = "crates/psx-vram" }
+psx-cache = { path = "crates/psx-cache" }
 psx-font = { path = "crates/psx-font" }
 psx-math = { path = "crates/psx-math" }
 psx-spu  = { path = "crates/psx-spu" }
