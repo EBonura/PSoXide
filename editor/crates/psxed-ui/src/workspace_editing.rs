@@ -1,0 +1,2091 @@
+use super::*;
+
+impl EditorWorkspace {
+    /// Press on a primitive: select it AND arm a drag. The
+    /// drag itself doesn't apply any height change yet -- that
+    /// happens in `update_primitive_drag` once the pointer
+    /// actually moves. A pure click (no movement) flows through
+    /// `commit_face_selection` and never touches `primitive_drag`.
+    pub(crate) fn begin_primitive_drag(&mut self, modifiers: egui::Modifiers) {
+        let Some((_, targets)) = self.prepare_primitive_drag_targets(modifiers) else {
+            return;
+        };
+        if targets.is_empty() {
+            return;
+        }
+        // Resolve the vertices the drag will translate and snapshot
+        // their pre-drag Ys. Welded mode fans each seed out to all
+        // coincident face-corners; detached mode keeps just the
+        // selected face's corner records.
+        let vertices = self.drag_vertices_for_targets(&targets);
+        if vertices.is_empty() {
+            return;
+        }
+        self.interaction = Interaction::PrimitiveHeight(PrimitiveDrag {
+            targets,
+            vertices,
+            accumulated_pixel_dy: 0.0,
+            snapshot_pushed: false,
+        });
+    }
+
+    pub(crate) fn prepare_primitive_drag_targets(
+        &mut self,
+        modifiers: egui::Modifiers,
+    ) -> Option<(Selection, Vec<Selection>)> {
+        let Some(target) = self.selection.hovered_primitive else {
+            return None;
+        };
+        let already_selected = self.primitive_is_selected(target)
+            || self.floor_face_sector_is_selected(target).is_some();
+        if !already_selected {
+            if modifiers.shift || modifiers.command || modifiers.ctrl {
+                self.apply_primitive_selection_modifiers(target, modifiers);
+            } else {
+                self.replace_primitive_selection(target);
+                self.clear_node_selection_state();
+                self.clear_sector_selection();
+                self.update_primitive_resource_selection();
+            }
+        } else {
+            self.selection.selected_primitive = Some(target);
+        }
+
+        let targets = self.primitive_drag_targets(target);
+        Some((target, targets))
+    }
+
+    pub(crate) fn begin_primitive_pointer_drag(
+        &mut self,
+        rect: egui::Rect,
+        pointer: egui::Pos2,
+        modifiers: egui::Modifiers,
+    ) {
+        if modifiers.alt || !self.begin_primitive_grid_drag(rect, pointer, modifiers) {
+            self.begin_primitive_drag(modifiers);
+        }
+    }
+
+    pub(crate) fn begin_primitive_grid_drag(
+        &mut self,
+        rect: egui::Rect,
+        pointer: egui::Pos2,
+        modifiers: egui::Modifiers,
+    ) -> bool {
+        let Some((target, targets)) = self.prepare_primitive_drag_targets(modifiers) else {
+            return false;
+        };
+        if targets.is_empty() {
+            return false;
+        }
+        let room = target.room();
+        let Some(grid) = self.room_grid_view(room) else {
+            return false;
+        };
+        let (_, sx, sz) = selection_sector(target);
+        let target_cell = [grid.origin[0] + sx as i32, grid.origin[1] + sz as i32];
+        let start_cell = self
+            .pointer_world_cell_for_room(rect, pointer, room)
+            .unwrap_or(target_cell);
+        let Ok((clipboard, _)) = self.primitive_geometry_clipboard_for_targets(&targets) else {
+            return false;
+        };
+        self.interaction = Interaction::PrimitiveGrid(PrimitiveGridDrag {
+            base_project: self.project.clone(),
+            base_dirty: self.dirty,
+            room,
+            targets,
+            source_origin: clipboard.source_origin,
+            start_cell,
+            current_delta: [0, 0],
+            cells: clipboard.cells,
+        });
+        true
+    }
+
+    /// One drag-frame: accumulate mouse-Y travel, convert to a
+    /// world-Y delta (snap-aware), and apply to every captured
+    /// physical vertex.
+    pub(crate) fn update_primitive_drag(&mut self, dy_pixels: f32) {
+        if dy_pixels.abs() < f32::EPSILON {
+            return;
+        }
+        // Pixels per HEIGHT_QUANTUM step -- drag 8 px to advance
+        // one quantum. With HEIGHT_QUANTUM = 64 and a 1024-unit
+        // sector, one full sector of height takes 128 pixels of
+        // mouse travel -- comfortable for the orbit-cam panel.
+        const PIXELS_PER_QUANTUM: f32 = 8.0;
+        let Some(drag) = self.interaction.primitive_drag_mut() else {
+            return;
+        };
+        // Screen +Y is down; world +Y is up -- invert.
+        drag.accumulated_pixel_dy -= dy_pixels;
+        let total_quanta = (drag.accumulated_pixel_dy / PIXELS_PER_QUANTUM).round() as i32;
+        let world_delta = total_quanta * HEIGHT_QUANTUM;
+        // No-op until the drag has crossed a quantum.
+        if world_delta == 0 && !drag.snapshot_pushed {
+            return;
+        }
+        // Lazy undo snapshot -- captures pre-drag state once,
+        // never on a press-without-movement.
+        if !drag.snapshot_pushed {
+            drag.snapshot_pushed = true;
+            self.push_undo();
+        }
+        // Re-borrow after the push_undo(&mut self) call.
+        let Some(drag) = self.interaction.primitive_drag() else {
+            return;
+        };
+        // Compute every (vertex, new_y) BEFORE entering the
+        // mutable scene borrow so the apply step is one tight
+        // loop without re-borrowing.
+        let updates: Vec<(NodeId, PhysicalVertex, i32)> = drag
+            .vertices
+            .iter()
+            .map(|entry| {
+                let new_y = snap_height(entry.pre_drag_y + world_delta);
+                (entry.room, entry.vertex.clone(), new_y)
+            })
+            .collect();
+        for (room, vertex, new_y) in updates {
+            let Some(grid) = self.room_floor_grid_mut(room) else {
+                continue;
+            };
+            apply_vertex_height(grid, &vertex, new_y);
+        }
+        self.mark_dirty();
+    }
+
+    /// Drag released. Just clears the stroke; the heights are
+    /// already committed.
+    pub(crate) fn end_primitive_drag(&mut self) {
+        if let Some(drag) = self.interaction.take_primitive_drag() {
+            if drag.snapshot_pushed {
+                let label = if drag.targets.len() == 1 {
+                    describe_selection(drag.targets[0])
+                } else {
+                    format!("{} primitives", drag.targets.len())
+                };
+                self.status = format!(
+                    "Translated {} ({} face-corners followed)",
+                    label,
+                    drag.vertices
+                        .iter()
+                        .map(|v| v.vertex.members.len())
+                        .sum::<usize>(),
+                );
+            }
+        }
+    }
+
+    pub(crate) fn portal_place_active(&self) -> bool {
+        matches!(self.active_tool, ViewTool::Place) && matches!(self.place_kind, PlaceKind::Portal)
+    }
+
+    pub(crate) fn rotate_portal_place_direction(&mut self) {
+        if !self.portal_place_active() {
+            return;
+        }
+        self.portal_place_direction = next_cardinal_direction(self.portal_place_direction);
+        self.status = format!(
+            "Portal edge: {}",
+            direction_label(self.portal_place_direction)
+        );
+    }
+
+    pub(crate) fn draw_portal_place_preview_2d(
+        &self,
+        painter: &egui::Painter,
+        transform: ViewportTransform,
+        world: [f32; 2],
+    ) {
+        if !self.portal_place_active() {
+            return;
+        }
+        let Some(room_id) = self.active_room_id() else {
+            return;
+        };
+        let scene = self.project.active_scene();
+        let Some(room) = scene.node(room_id) else {
+            return;
+        };
+        let NodeKind::Room { grid } = &room.kind else {
+            return;
+        };
+        let room_center = node_world(room);
+        let editor = [world[0] - room_center[0], world[1] - room_center[1]];
+        let world_cells = grid.editor_to_world_cells(editor);
+        let wcx = world_cells[0].floor() as i32;
+        let wcz = world_cells[1].floor() as i32;
+        let Some((sx, sz)) = grid.world_cell_to_array(wcx, wcz) else {
+            return;
+        };
+        let dir = self.portal_place_direction;
+        let valid = portal_edge_valid_for_array_cell(grid, sx, sz, dir);
+        let color = if valid {
+            PORTAL_PINK
+        } else {
+            Color32::from_rgb(255, 64, 96)
+        };
+        let halo = Stroke::new(
+            8.0,
+            Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 48),
+        );
+        let stroke = Stroke::new(3.0, color);
+        if valid {
+            if let Some(edge) = canonical_portal_edge_for_array_cell(sx, sz, dir) {
+                let seam = portal_seam_edges_for_edge(grid, edge);
+                if !seam.is_empty() {
+                    for edge in seam {
+                        draw_portal_edge_segment_2d(
+                            painter,
+                            transform,
+                            grid,
+                            room_center,
+                            edge,
+                            halo,
+                            stroke,
+                        );
+                    }
+                    return;
+                }
+            }
+        }
+        if let Some((local_a, local_b)) = portal_edge_editor_segment_for_array(grid, sx, sz, dir) {
+            let a = transform
+                .world_to_screen([room_center[0] + local_a[0], room_center[1] + local_a[1]]);
+            let b = transform
+                .world_to_screen([room_center[0] + local_b[0], room_center[1] + local_b[1]]);
+            painter.line_segment([a, b], halo);
+            painter.line_segment([a, b], stroke);
+        }
+    }
+
+    pub(crate) fn paint_preview_world_cell(
+        &self,
+        room_id: NodeId,
+        grid: &WorldGrid,
+        face_hit: Option<(FaceRef, [f32; 3])>,
+        fallback_hit: Option<[f32; 2]>,
+    ) -> Option<(i32, i32)> {
+        if let Some((face, _)) = self.face_hit_for_paint_tool(face_hit) {
+            return Some((
+                grid.origin[0] + face.sx as i32,
+                grid.origin[1] + face.sz as i32,
+            ));
+        }
+        let editor = fallback_hit?;
+        let hit = self.editor_world_to_world3(room_id, editor);
+        Some((grid.world_x_to_cell(hit[0]), grid.world_z_to_cell(hit[2])))
+    }
+
+    pub(crate) fn update_primitive_grid_drag(&mut self, rect: egui::Rect, pointer: egui::Pos2) {
+        let Some(drag) = self.interaction.primitive_grid_drag() else {
+            return;
+        };
+        let Some(current_cell) = self.pointer_world_cell_for_room(rect, pointer, drag.room) else {
+            return;
+        };
+        let delta = [
+            current_cell[0] - drag.start_cell[0],
+            current_cell[1] - drag.start_cell[1],
+        ];
+        if delta == drag.current_delta {
+            return;
+        }
+        if let Some(drag) = self.interaction.primitive_grid_drag_mut() {
+            drag.current_delta = delta;
+        }
+        self.apply_primitive_grid_drag_preview();
+    }
+
+    pub(crate) fn apply_primitive_grid_drag_preview(&mut self) {
+        let Some(drag) = self.interaction.primitive_grid_drag().cloned() else {
+            return;
+        };
+
+        self.project = drag.base_project.clone();
+        self.dirty = drag.base_dirty;
+        if drag.current_delta == [0, 0] {
+            self.select_geometry_primitives(drag.room, drag.targets);
+            return;
+        }
+
+        remove_primitive_faces_from_project(&mut self.project, &drag.targets, self.active_floor);
+        let mut selected_primitives = Vec::new();
+        let active_floor = self.active_floor;
+        {
+            let scene = self.project.active_scene_mut();
+            let Some(node) = scene.node(drag.room) else {
+                self.interaction = Interaction::Idle;
+                self.status = "Move target room no longer exists".to_string();
+                return;
+            };
+            let NodeKind::Room { .. } = &node.kind else {
+                self.interaction = Interaction::Idle;
+                self.status = "Move target is not a Room".to_string();
+                return;
+            };
+            for cell in &drag.cells {
+                let _ = extend_room_grid_to_include_preserving_child_positions(
+                    scene,
+                    drag.room,
+                    drag.source_origin[0] + drag.current_delta[0] + cell.offset[0],
+                    drag.source_origin[1] + drag.current_delta[1] + cell.offset[1],
+                    active_floor,
+                );
+            }
+            let Some(node) = scene.node_mut(drag.room) else {
+                self.interaction = Interaction::Idle;
+                self.status = "Move target room no longer exists".to_string();
+                return;
+            };
+            let NodeKind::Room { grid } = &mut node.kind else {
+                self.interaction = Interaction::Idle;
+                self.status = "Move target is not a Room".to_string();
+                return;
+            };
+            let floor_idx = active_floor.min(grid.floor_count().saturating_sub(1));
+            let grid = grid
+                .floor_mut(floor_idx)
+                .expect("floor index clamped to range");
+            for cell in drag.cells {
+                let wcx = drag.source_origin[0] + drag.current_delta[0] + cell.offset[0];
+                let wcz = drag.source_origin[1] + drag.current_delta[1] + cell.offset[1];
+                let Some((sx, sz)) = grid.world_cell_to_array(wcx, wcz) else {
+                    continue;
+                };
+                let Some(index) = grid.sector_index(sx, sz) else {
+                    continue;
+                };
+                let Some(fragment) = cell.sector else {
+                    continue;
+                };
+                let target = grid.sectors[index].get_or_insert_with(GridSector::empty);
+                merge_primitive_fragment(
+                    target,
+                    fragment,
+                    drag.room,
+                    sx,
+                    sz,
+                    &mut selected_primitives,
+                );
+            }
+        }
+        self.select_geometry_primitives(drag.room, selected_primitives);
+    }
+
+    pub(crate) fn pointer_world_cell_for_room(
+        &self,
+        rect: egui::Rect,
+        pointer: egui::Pos2,
+        room: NodeId,
+    ) -> Option<[i32; 2]> {
+        let grid = self
+            .interaction
+            .primitive_grid_drag()
+            .filter(|drag| drag.room == room)
+            .and_then(|drag| drag.base_project.active_scene().node(room))
+            .and_then(|node| match &node.kind {
+                NodeKind::Room { grid } => Some(grid),
+                _ => None,
+            })
+            .or_else(|| self.room_grid_view(room))?;
+        let (origin, dir) = self.camera_ray_for_pointer(rect, pointer)?;
+        let hit = ray_intersects_horizontal_plane(origin, dir, 0.0)?;
+        Some([grid.world_x_to_cell(hit[0]), grid.world_z_to_cell(hit[2])])
+    }
+
+    pub(crate) fn end_primitive_grid_drag(&mut self) {
+        let Some(drag) = self.interaction.take_primitive_grid_drag() else {
+            return;
+        };
+        if drag.current_delta == [0, 0] {
+            self.project = drag.base_project;
+            self.dirty = drag.base_dirty;
+            self.select_geometry_primitives(drag.room, drag.targets);
+            return;
+        }
+
+        let moved = drag.targets.len();
+        let delta = drag.current_delta;
+        self.history.record(drag.base_project);
+        self.status = if moved == 1 {
+            format!("Moved 1 primitive by {},{} cells", delta[0], delta[1])
+        } else {
+            format!(
+                "Moved {moved} primitives by {},{} cells",
+                delta[0], delta[1]
+            )
+        };
+        self.mark_dirty();
+    }
+
+    pub(crate) fn primitive_selection_room(&self, targets: &[Selection]) -> Option<NodeId> {
+        let room = targets.first()?.room();
+        targets
+            .iter()
+            .all(|selection| selection.room() == room)
+            .then_some(room)
+    }
+
+    pub(crate) fn primitive_selection_pivot(&self, targets: &[Selection]) -> Option<[f32; 3]> {
+        let mut min = [f32::INFINITY; 3];
+        let mut max = [f32::NEG_INFINITY; 3];
+        let mut any = false;
+        for &selection in targets {
+            for point in self.selection_world_points(selection)? {
+                for axis in 0..3 {
+                    min[axis] = min[axis].min(point[axis]);
+                    max[axis] = max[axis].max(point[axis]);
+                }
+                any = true;
+            }
+        }
+        any.then_some([
+            (min[0] + max[0]) * 0.5,
+            (min[1] + max[1]) * 0.5,
+            (min[2] + max[2]) * 0.5,
+        ])
+    }
+
+    pub(crate) fn primitive_gizmo_screen_axes(&self, rect: Rect) -> Vec<PrimitiveGizmoScreenAxis> {
+        let targets = self.selected_primitive_targets();
+        let Some(room) = self.primitive_selection_room(&targets) else {
+            return Vec::new();
+        };
+        let Some(grid) = self.room_grid_view(room) else {
+            return Vec::new();
+        };
+        let Some(pivot) = self.primitive_selection_pivot(&targets) else {
+            return Vec::new();
+        };
+        let camera = self.viewport_3d_camera();
+        let Some(start) = project_world_to_viewport_screen(camera, rect, pivot) else {
+            return Vec::new();
+        };
+        let sector_size = grid.sector_size.max(1);
+        [
+            PrimitiveGizmoAxis::X,
+            PrimitiveGizmoAxis::Y,
+            PrimitiveGizmoAxis::Z,
+        ]
+        .into_iter()
+        .filter_map(|axis| {
+            let delta = axis.world_delta(sector_size);
+            let end_world = [
+                pivot[0] + delta[0],
+                pivot[1] + delta[1],
+                pivot[2] + delta[2],
+            ];
+            let end = project_world_to_viewport_screen(camera, rect, end_world)?;
+            ((end - start).length_sq() >= 64.0).then_some(PrimitiveGizmoScreenAxis {
+                axis,
+                start,
+                end,
+            })
+        })
+        .collect()
+    }
+
+    pub(crate) fn pick_primitive_gizmo_axis(
+        &self,
+        rect: Rect,
+        pointer: Pos2,
+    ) -> Option<PrimitiveGizmoAxis> {
+        self.primitive_gizmo_screen_axes(rect)
+            .into_iter()
+            .filter_map(|screen_axis| {
+                let distance = distance_to_segment_2d(pointer, screen_axis.start, screen_axis.end)
+                    .min((pointer - screen_axis.end).length());
+                (distance <= GIZMO_AXIS_PICK_RADIUS).then_some((distance, screen_axis.axis))
+            })
+            .min_by(|(a, _), (b, _)| a.total_cmp(b))
+            .map(|(_, axis)| axis)
+    }
+
+    pub(crate) fn draw_primitive_gizmo(
+        &self,
+        painter: &egui::Painter,
+        rect: Rect,
+        hovered_axis: Option<PrimitiveGizmoAxis>,
+    ) {
+        if self.transform_gizmo_mode != TransformGizmoMode::Move {
+            return;
+        }
+        let axes = self.primitive_gizmo_screen_axes(rect);
+        if axes.is_empty() {
+            return;
+        }
+        let active_axis = self
+            .interaction
+            .primitive_gizmo_drag()
+            .map(|drag| drag.axis);
+        painter.circle_filled(axes[0].start, 4.0, Color32::from_rgb(235, 242, 248));
+        for screen_axis in axes {
+            let highlighted =
+                active_axis == Some(screen_axis.axis) || hovered_axis == Some(screen_axis.axis);
+            let color = gizmo_axis_color(screen_axis.axis, highlighted);
+            let stroke_width = gizmo_axis_stroke_width(highlighted);
+            painter.line_segment(
+                [screen_axis.start, screen_axis.end],
+                Stroke::new(stroke_width, color),
+            );
+            painter.circle_filled(
+                screen_axis.end,
+                gizmo_axis_handle_radius(highlighted),
+                color,
+            );
+            let label_offset = (screen_axis.end - screen_axis.start).normalized() * 12.0;
+            painter.text(
+                screen_axis.end + label_offset,
+                Align2::CENTER_CENTER,
+                screen_axis.axis.label(),
+                FontId::monospace(12.0),
+                color,
+            );
+        }
+    }
+
+    pub(crate) fn node_gizmo_screen_axes(&self, rect: Rect) -> Vec<PrimitiveGizmoScreenAxis> {
+        let targets = self.selected_node_gizmo_targets();
+        if targets.is_empty() {
+            return Vec::new();
+        }
+        let Some((pivot, _)) = self.node_gizmo_bounds_3d(&targets) else {
+            return Vec::new();
+        };
+        let camera = self.viewport_3d_camera();
+        let Some(start) = project_world_to_viewport_screen(camera, rect, pivot) else {
+            return Vec::new();
+        };
+        let axis_len = self.node_gizmo_axis_world_length(&targets);
+        let axes: &[PrimitiveGizmoAxis] = match self.transform_gizmo_mode {
+            TransformGizmoMode::Move => &[
+                PrimitiveGizmoAxis::X,
+                PrimitiveGizmoAxis::Y,
+                PrimitiveGizmoAxis::Z,
+            ],
+            TransformGizmoMode::Rotate => &[
+                PrimitiveGizmoAxis::X,
+                PrimitiveGizmoAxis::Y,
+                PrimitiveGizmoAxis::Z,
+            ],
+            TransformGizmoMode::Scale => &[
+                PrimitiveGizmoAxis::X,
+                PrimitiveGizmoAxis::Y,
+                PrimitiveGizmoAxis::Z,
+            ],
+        };
+        axes.iter()
+            .copied()
+            .filter_map(|axis| {
+                let delta = axis.world_delta(axis_len);
+                let end_world = [
+                    pivot[0] + delta[0],
+                    pivot[1] + delta[1],
+                    pivot[2] + delta[2],
+                ];
+                let end = project_world_to_viewport_screen(camera, rect, end_world)?;
+                ((end - start).length_sq() >= 64.0).then_some(PrimitiveGizmoScreenAxis {
+                    axis,
+                    start,
+                    end,
+                })
+            })
+            .collect()
+    }
+
+    pub(crate) fn node_gizmo_screen_planes(&self, rect: Rect) -> Vec<NodeGizmoScreenPlane> {
+        if self.transform_gizmo_mode != TransformGizmoMode::Move {
+            return Vec::new();
+        }
+        let targets = self.selected_node_gizmo_targets();
+        if targets.is_empty() {
+            return Vec::new();
+        }
+        let Some((pivot, _)) = self.node_gizmo_bounds_3d(&targets) else {
+            return Vec::new();
+        };
+        let camera = self.viewport_3d_camera();
+        let axis_len = self.node_gizmo_axis_world_length(&targets) as f32;
+        let near = axis_len * 0.18;
+        let far = axis_len * 0.44;
+
+        NodeGizmoPlane::ALL
+            .into_iter()
+            .filter_map(|plane| {
+                let [a, b] = plane.axes();
+                let a_delta = a.world_delta(1);
+                let b_delta = b.world_delta(1);
+                let corner_world = |a_scale: f32, b_scale: f32| {
+                    [
+                        pivot[0] + a_delta[0] * a_scale + b_delta[0] * b_scale,
+                        pivot[1] + a_delta[1] * a_scale + b_delta[1] * b_scale,
+                        pivot[2] + a_delta[2] * a_scale + b_delta[2] * b_scale,
+                    ]
+                };
+                let corners = [
+                    project_world_to_viewport_screen(camera, rect, corner_world(near, near))?,
+                    project_world_to_viewport_screen(camera, rect, corner_world(far, near))?,
+                    project_world_to_viewport_screen(camera, rect, corner_world(far, far))?,
+                    project_world_to_viewport_screen(camera, rect, corner_world(near, far))?,
+                ];
+                (polygon_area_2d(&corners).abs() >= 24.0)
+                    .then_some(NodeGizmoScreenPlane { plane, corners })
+            })
+            .collect()
+    }
+
+    pub(crate) fn selected_node_gizmo_targets(&self) -> Vec<NodeId> {
+        self.selected_node_ids_in_hierarchy()
+            .into_iter()
+            .filter(|id| self.node_supports_transform_gizmo(*id, self.transform_gizmo_mode))
+            .collect()
+    }
+
+    pub(crate) fn node_supports_transform_gizmo(
+        &self,
+        id: NodeId,
+        mode: TransformGizmoMode,
+    ) -> bool {
+        if self.scene_node_effectively_hidden(id) {
+            return false;
+        }
+        self.project
+            .active_scene()
+            .node(id)
+            .is_some_and(|node| node_kind_supports_transform_gizmo(&node.kind, mode))
+    }
+
+    pub(crate) fn node_gizmo_bounds_3d(&self, targets: &[NodeId]) -> Option<([f32; 3], [f32; 3])> {
+        let mut bounds = None;
+        for id in targets {
+            if let Some((center, half)) = self.node_frame_bounds_3d(*id) {
+                merge_bounds_3d(&mut bounds, center, half);
+            }
+        }
+        bounds.map(bounds_3d_to_center_half)
+    }
+
+    pub(crate) fn node_gizmo_axis_world_length(&self, targets: &[NodeId]) -> i32 {
+        let scene = self.project.active_scene();
+        for id in targets {
+            let Some(room_id) = enclosing_room_id(scene, *id) else {
+                continue;
+            };
+            let Some(room) = scene.node(room_id) else {
+                continue;
+            };
+            let NodeKind::Room { grid } = &room.kind else {
+                continue;
+            };
+            return grid.sector_size.max(1);
+        }
+        DEFAULT_WORLD_SECTOR_SIZE
+    }
+
+    pub(crate) fn node_rotation_gizmo_screen_ring_for_axis(
+        &self,
+        rect: Rect,
+        axis: PrimitiveGizmoAxis,
+    ) -> Option<NodeRotationGizmoScreenRing> {
+        let targets = self.selected_node_gizmo_targets();
+        if targets.is_empty() {
+            return None;
+        }
+        let (pivot, half) = self.node_gizmo_bounds_3d(&targets)?;
+        let camera = self.viewport_3d_camera();
+        let center = project_world_to_viewport_screen(camera, rect, pivot)?;
+        let base_radius = self.node_gizmo_axis_world_length(&targets) as f32 * 0.65;
+        let bound_radius = half[0].max(half[1]).max(half[2]) * 1.35;
+        let radius = base_radius.max(bound_radius).max(128.0);
+        let mut points = Vec::with_capacity(49);
+        for step in 0..=48 {
+            let angle = step as f32 / 48.0 * std::f32::consts::TAU;
+            // Ring lies in the plane perpendicular to `axis`. The
+            // ring's two basis vectors are the world axes that the
+            // chosen rotation keeps fixed.
+            let world = match axis {
+                PrimitiveGizmoAxis::X => [
+                    pivot[0],
+                    pivot[1] + angle.cos() * radius,
+                    pivot[2] + angle.sin() * radius,
+                ],
+                PrimitiveGizmoAxis::Y => [
+                    pivot[0] + angle.cos() * radius,
+                    pivot[1],
+                    pivot[2] + angle.sin() * radius,
+                ],
+                PrimitiveGizmoAxis::Z => [
+                    pivot[0] + angle.cos() * radius,
+                    pivot[1] + angle.sin() * radius,
+                    pivot[2],
+                ],
+            };
+            if let Some(screen) = project_world_to_viewport_screen(camera, rect, world) {
+                points.push(screen);
+            }
+        }
+        (points.len() >= 8).then_some(NodeRotationGizmoScreenRing {
+            axis,
+            center,
+            points,
+        })
+    }
+
+    pub(crate) fn node_rotation_gizmo_screen_rings(
+        &self,
+        rect: Rect,
+    ) -> Vec<NodeRotationGizmoScreenRing> {
+        self.selected_node_rotation_axes()
+            .into_iter()
+            .filter_map(|axis| self.node_rotation_gizmo_screen_ring_for_axis(rect, axis))
+            .collect()
+    }
+
+    pub(crate) fn selected_node_rotation_axes(&self) -> Vec<PrimitiveGizmoAxis> {
+        let scene = self.project.active_scene();
+        let targets = self.selected_node_gizmo_targets();
+        if targets.is_empty() {
+            return Vec::new();
+        }
+        let all_axes = [
+            PrimitiveGizmoAxis::X,
+            PrimitiveGizmoAxis::Y,
+            PrimitiveGizmoAxis::Z,
+        ];
+        let mut axes: Vec<PrimitiveGizmoAxis> = all_axes.to_vec();
+        for id in &targets {
+            let Some(node) = scene.node(*id) else {
+                continue;
+            };
+            let supported = node_rotation_axes(&node.kind);
+            axes.retain(|axis| supported.contains(axis));
+        }
+        axes
+    }
+
+    pub(crate) fn pick_node_gizmo_handle(
+        &self,
+        rect: Rect,
+        pointer: Pos2,
+    ) -> Option<NodeGizmoHandle> {
+        if self.transform_gizmo_mode == TransformGizmoMode::Rotate {
+            return self
+                .node_rotation_gizmo_screen_rings(rect)
+                .into_iter()
+                .filter_map(|ring| {
+                    ring.points
+                        .windows(2)
+                        .map(|pair| distance_to_segment_2d(pointer, pair[0], pair[1]))
+                        .min_by(|a, b| a.total_cmp(b))
+                        .map(|distance| (distance, ring.axis))
+                })
+                .filter(|(distance, _)| *distance <= GIZMO_ROTATION_PICK_RADIUS)
+                .min_by(|(a, _), (b, _)| a.total_cmp(b))
+                .map(|(_, axis)| NodeGizmoHandle::Axis(axis));
+        }
+        // Axes and move planes overlap on screen: each plane handle is an
+        // inner quad spanning two axes, so a cursor inside a plane is also
+        // within the axis pick radius of both of that plane's axes.
+        // Gather every in-tolerance handle and choose the globally closest
+        // instead of returning the first kind checked. The old code
+        // early-returned on axes, so a click inside the plane grabbed an
+        // axis -- and when the plane was foreshortened while zoomed out,
+        // that miss read as "grabbed the tile behind it". Ties go to the
+        // plane: a plane hit reports distance 0 by polygon containment, so
+        // an equal distance means the cursor is inside the quad, where the
+        // user is aiming at the plane rather than its bounding axes.
+        let mut best: Option<(f32, u8, NodeGizmoHandle)> = None;
+        let mut consider = |distance: f32, plane_tiebreak: u8, handle: NodeGizmoHandle| {
+            let better = match best {
+                Some((best_distance, best_tiebreak, _)) => {
+                    distance < best_distance
+                        || (distance == best_distance && plane_tiebreak > best_tiebreak)
+                }
+                None => true,
+            };
+            if better {
+                best = Some((distance, plane_tiebreak, handle));
+            }
+        };
+        for screen_axis in self.node_gizmo_screen_axes(rect) {
+            let distance = distance_to_segment_2d(pointer, screen_axis.start, screen_axis.end)
+                .min((pointer - screen_axis.end).length());
+            if distance <= GIZMO_AXIS_PICK_RADIUS {
+                consider(distance, 0, NodeGizmoHandle::Axis(screen_axis.axis));
+            }
+        }
+        if self.transform_gizmo_mode == TransformGizmoMode::Move {
+            let axes = self.node_gizmo_screen_axes(rect);
+            let pivot = axes.first().map(|axis| axis.start);
+            for screen_plane in self.node_gizmo_screen_planes(rect) {
+                // The plane is drawn as a small square inset into the
+                // corner between its two axes, but the user reads the whole
+                // corner as the handle. So the plane is grabbable in two
+                // tiers, both reported at distance-to-quad so a genuinely
+                // nearby axis (added above within its 10px radius) still
+                // wins and the plane only claims interior the axes leave:
+                //   1. inside the quad (distance 0) or within the usual
+                //      few-px tolerance of it -- the tight, primary target;
+                //   2. anywhere inside the footprint triangle (pivot + the
+                //      two axis endpoints) -- fills the wedge of bare tile
+                //      that used to sit between the inset quad and the axes
+                //      and caused zoomed-out clicks to fall through to the
+                //      floor.
+                let quad_distance = if point_in_polygon_2d(pointer, &screen_plane.corners) {
+                    0.0
+                } else {
+                    distance_to_polygon_edges_2d(pointer, &screen_plane.corners)
+                };
+                if quad_distance <= GIZMO_PLANE_PICK_RADIUS {
+                    consider(quad_distance, 1, NodeGizmoHandle::Plane(screen_plane.plane));
+                    continue;
+                }
+                if let Some(pivot) = pivot {
+                    let [axis_a, axis_b] = screen_plane.plane.axes();
+                    let end_a = axes.iter().find(|axis| axis.axis == axis_a).map(|a| a.end);
+                    let end_b = axes.iter().find(|axis| axis.axis == axis_b).map(|a| a.end);
+                    if let (Some(end_a), Some(end_b)) = (end_a, end_b) {
+                        if point_in_polygon_2d(pointer, &[pivot, end_a, end_b]) {
+                            consider(quad_distance, 1, NodeGizmoHandle::Plane(screen_plane.plane));
+                        }
+                    }
+                }
+            }
+        }
+        best.map(|(_, _, handle)| handle)
+    }
+
+    pub(crate) fn resolve_viewport_3d_pointer_target(
+        &self,
+        rect: Rect,
+        pointer: Pos2,
+        room_filter: Option<NodeId>,
+        select_pick_enabled: bool,
+    ) -> Option<Viewport3dPointerTarget> {
+        if select_pick_enabled {
+            if self.transform_gizmo_mode == TransformGizmoMode::Move {
+                if let Some(axis) = self.pick_primitive_gizmo_axis(rect, pointer) {
+                    return Some(Viewport3dPointerTarget::PrimitiveGizmo(axis));
+                }
+            }
+            if let Some(handle) = self.pick_node_gizmo_handle(rect, pointer) {
+                return Some(Viewport3dPointerTarget::NodeGizmo(handle));
+            }
+        }
+
+        let surface = self
+            .pick_face_with_hit(rect, pointer)
+            .and_then(|(face, hit)| {
+                let (origin, _) = self.camera_ray_for_pointer(rect, pointer)?;
+                Some((
+                    Viewport3dPointerTarget::Surface {
+                        face,
+                        hit,
+                        selection: self.pick_primitive_from_hit(face, hit),
+                    },
+                    distance3_f32(origin, hit),
+                ))
+            });
+        if !select_pick_enabled {
+            return surface.map(|(target, _)| target);
+        }
+
+        match (self.pick_entity_bound(rect, pointer, room_filter), surface) {
+            (Some(entity), Some((_surface, surface_distance)))
+                if entity.distance <= surface_distance =>
+            {
+                Some(Viewport3dPointerTarget::Entity(entity))
+            }
+            (Some(_), Some((surface, _))) => Some(surface),
+            (Some(entity), None) => Some(Viewport3dPointerTarget::Entity(entity)),
+            (None, Some((surface, _))) => Some(surface),
+            (None, None) => None,
+        }
+    }
+
+    pub(crate) fn draw_node_gizmo(
+        &self,
+        painter: &egui::Painter,
+        rect: Rect,
+        hovered_handle: Option<NodeGizmoHandle>,
+    ) {
+        if self.transform_gizmo_mode == TransformGizmoMode::Rotate {
+            let rings = self.node_rotation_gizmo_screen_rings(rect);
+            if rings.is_empty() {
+                return;
+            }
+            let active_axis = self
+                .interaction
+                .node_gizmo_drag()
+                .and_then(|drag| drag.handle.axis());
+            painter.circle_filled(rings[0].center, 4.0, Color32::from_rgb(235, 242, 248));
+            for ring in &rings {
+                let highlighted = active_axis == Some(ring.axis)
+                    || hovered_handle == Some(NodeGizmoHandle::Axis(ring.axis));
+                let color = gizmo_axis_color(ring.axis, highlighted);
+                let stroke_width = gizmo_axis_stroke_width(highlighted);
+                for pair in ring.points.windows(2) {
+                    painter.line_segment([pair[0], pair[1]], Stroke::new(stroke_width, color));
+                }
+                if let Some(label_pos) = ring.points.first().copied() {
+                    painter.circle_filled(label_pos, gizmo_axis_handle_radius(highlighted), color);
+                    painter.text(
+                        label_pos + Vec2::new(14.0, 0.0),
+                        Align2::CENTER_CENTER,
+                        ring.axis.label(),
+                        FontId::monospace(12.0),
+                        color,
+                    );
+                }
+            }
+            return;
+        }
+        let axes = self.node_gizmo_screen_axes(rect);
+        if axes.is_empty() {
+            return;
+        }
+        let active_handle = self.interaction.node_gizmo_drag().map(|drag| drag.handle);
+        painter.circle_filled(axes[0].start, 4.0, Color32::from_rgb(235, 242, 248));
+        if self.transform_gizmo_mode == TransformGizmoMode::Move {
+            for screen_plane in self.node_gizmo_screen_planes(rect) {
+                let highlighted = active_handle == Some(NodeGizmoHandle::Plane(screen_plane.plane))
+                    || hovered_handle == Some(NodeGizmoHandle::Plane(screen_plane.plane));
+                let color = gizmo_highlight_color(screen_plane.plane.color(), highlighted);
+                let fill_alpha = if highlighted { 128 } else { 58 };
+                let stroke_width = if highlighted { 3.0 } else { 1.5 };
+                painter.add(egui::Shape::convex_polygon(
+                    screen_plane.corners.to_vec(),
+                    Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), fill_alpha),
+                    Stroke::new(stroke_width, color),
+                ));
+            }
+        }
+        for screen_axis in axes {
+            let highlighted = active_handle == Some(NodeGizmoHandle::Axis(screen_axis.axis))
+                || hovered_handle == Some(NodeGizmoHandle::Axis(screen_axis.axis));
+            let color = gizmo_axis_color(screen_axis.axis, highlighted);
+            let stroke_width = gizmo_axis_stroke_width(highlighted);
+            painter.line_segment(
+                [screen_axis.start, screen_axis.end],
+                Stroke::new(stroke_width, color),
+            );
+            painter.circle_filled(
+                screen_axis.end,
+                gizmo_axis_handle_radius(highlighted),
+                color,
+            );
+            let label_offset = (screen_axis.end - screen_axis.start).normalized() * 12.0;
+            painter.text(
+                screen_axis.end + label_offset,
+                Align2::CENTER_CENTER,
+                screen_axis.axis.label(),
+                FontId::monospace(12.0),
+                color,
+            );
+        }
+    }
+
+    pub(crate) fn begin_primitive_gizmo_drag(
+        &mut self,
+        axis: PrimitiveGizmoAxis,
+        rect: Rect,
+        pointer: Pos2,
+    ) -> bool {
+        let targets = self.selected_primitive_targets();
+        if targets.is_empty() {
+            return false;
+        }
+        let Some(room) = self.primitive_selection_room(&targets) else {
+            self.status = "Move one room's geometry at a time".to_string();
+            return false;
+        };
+        let Some(screen_axis) = self
+            .primitive_gizmo_screen_axes(rect)
+            .into_iter()
+            .find(|candidate| candidate.axis == axis)
+        else {
+            return false;
+        };
+        let screen_axis_delta = screen_axis.end - screen_axis.start;
+        if screen_axis_delta.length_sq() < 64.0 {
+            return false;
+        }
+
+        let mut y_vertices = Vec::new();
+        let mut grid_drag = None;
+        match axis {
+            PrimitiveGizmoAxis::Y => {
+                y_vertices = self.drag_vertices_for_targets(&targets);
+                if y_vertices.is_empty() {
+                    return false;
+                }
+            }
+            PrimitiveGizmoAxis::X | PrimitiveGizmoAxis::Z => {
+                let Ok((clipboard, _)) = self.primitive_geometry_clipboard_for_targets(&targets)
+                else {
+                    self.status = "Selected primitives are empty".to_string();
+                    return false;
+                };
+                grid_drag = Some(PrimitiveGizmoGridDrag {
+                    base_project: self.project.clone(),
+                    base_dirty: self.dirty,
+                    room,
+                    targets: targets.clone(),
+                    source_origin: clipboard.source_origin,
+                    current_delta: [0, 0],
+                    cells: clipboard.cells,
+                });
+            }
+        }
+
+        self.interaction = Interaction::PrimitiveGizmo(PrimitiveGizmoDrag {
+            axis,
+            start_pointer: pointer,
+            screen_axis: screen_axis_delta,
+            targets,
+            y_vertices,
+            grid: grid_drag,
+            current_steps: 0,
+            snapshot_pushed: false,
+        });
+        true
+    }
+
+    pub(crate) fn update_primitive_gizmo_drag(&mut self, pointer: Pos2) {
+        let Some(drag) = self.interaction.primitive_gizmo_drag() else {
+            return;
+        };
+        let axis_len_sq = drag.screen_axis.length_sq();
+        if axis_len_sq < f32::EPSILON {
+            return;
+        }
+        let pointer_delta = pointer - drag.start_pointer;
+        let steps = match drag.axis {
+            PrimitiveGizmoAxis::Y => {
+                const PIXELS_PER_QUANTUM: f32 = 4.0;
+                let unit = drag.screen_axis / axis_len_sq.sqrt();
+                (pointer_delta.dot(unit) / PIXELS_PER_QUANTUM).round() as i32
+            }
+            PrimitiveGizmoAxis::X | PrimitiveGizmoAxis::Z => {
+                (pointer_delta.dot(drag.screen_axis) * 2.0 / axis_len_sq).round() as i32
+            }
+        };
+        if steps == drag.current_steps {
+            return;
+        }
+        let axis = drag.axis;
+        if let Some(drag) = self.interaction.primitive_gizmo_drag_mut() {
+            drag.current_steps = steps;
+            if let Some(grid) = drag.grid.as_mut() {
+                grid.current_delta = axis.cell_delta(steps);
+            }
+        }
+        match axis {
+            PrimitiveGizmoAxis::Y => self.apply_primitive_gizmo_y_drag(),
+            PrimitiveGizmoAxis::X | PrimitiveGizmoAxis::Z => {
+                self.apply_primitive_gizmo_grid_preview();
+            }
+        }
+    }
+
+    pub(crate) fn apply_primitive_gizmo_y_drag(&mut self) {
+        let Some(drag) = self.interaction.primitive_gizmo_drag() else {
+            return;
+        };
+        let world_delta = drag.current_steps * HEIGHT_QUANTUM;
+        if world_delta == 0 && !drag.snapshot_pushed {
+            return;
+        }
+        if !drag.snapshot_pushed {
+            if let Some(drag) = self.interaction.primitive_gizmo_drag_mut() {
+                drag.snapshot_pushed = true;
+            }
+            self.push_undo();
+        }
+        let Some(drag) = self.interaction.primitive_gizmo_drag() else {
+            return;
+        };
+        let updates: Vec<(NodeId, PhysicalVertex, i32)> = drag
+            .y_vertices
+            .iter()
+            .map(|entry| {
+                (
+                    entry.room,
+                    entry.vertex.clone(),
+                    snap_height(entry.pre_drag_y + world_delta),
+                )
+            })
+            .collect();
+        for (room, vertex, new_y) in updates {
+            let Some(grid) = self.room_floor_grid_mut(room) else {
+                continue;
+            };
+            apply_vertex_height(grid, &vertex, new_y);
+        }
+        self.mark_dirty();
+    }
+
+    pub(crate) fn apply_primitive_gizmo_grid_preview(&mut self) {
+        let Some(grid_drag) = self
+            .interaction
+            .primitive_gizmo_drag()
+            .and_then(|drag| drag.grid.clone())
+        else {
+            return;
+        };
+
+        self.project = grid_drag.base_project.clone();
+        self.dirty = grid_drag.base_dirty;
+        if grid_drag.current_delta == [0, 0] {
+            self.select_geometry_primitives(grid_drag.room, grid_drag.targets);
+            return;
+        }
+
+        remove_primitive_faces_from_project(
+            &mut self.project,
+            &grid_drag.targets,
+            self.active_floor,
+        );
+        let mut selected_primitives = Vec::new();
+        let active_floor = self.active_floor;
+        {
+            let scene = self.project.active_scene_mut();
+            let Some(node) = scene.node(grid_drag.room) else {
+                self.interaction = Interaction::Idle;
+                self.status = "Move target room no longer exists".to_string();
+                return;
+            };
+            let NodeKind::Room { .. } = &node.kind else {
+                self.interaction = Interaction::Idle;
+                self.status = "Move target is not a Room".to_string();
+                return;
+            };
+            for cell in &grid_drag.cells {
+                let _ = extend_room_grid_to_include_preserving_child_positions(
+                    scene,
+                    grid_drag.room,
+                    grid_drag.source_origin[0] + grid_drag.current_delta[0] + cell.offset[0],
+                    grid_drag.source_origin[1] + grid_drag.current_delta[1] + cell.offset[1],
+                    active_floor,
+                );
+            }
+            let Some(node) = scene.node_mut(grid_drag.room) else {
+                self.interaction = Interaction::Idle;
+                self.status = "Move target room no longer exists".to_string();
+                return;
+            };
+            let NodeKind::Room { grid } = &mut node.kind else {
+                self.interaction = Interaction::Idle;
+                self.status = "Move target is not a Room".to_string();
+                return;
+            };
+            let floor_idx = active_floor.min(grid.floor_count().saturating_sub(1));
+            let grid = grid
+                .floor_mut(floor_idx)
+                .expect("floor index clamped to range");
+            for cell in grid_drag.cells {
+                let wcx = grid_drag.source_origin[0] + grid_drag.current_delta[0] + cell.offset[0];
+                let wcz = grid_drag.source_origin[1] + grid_drag.current_delta[1] + cell.offset[1];
+                let Some((sx, sz)) = grid.world_cell_to_array(wcx, wcz) else {
+                    continue;
+                };
+                let Some(index) = grid.sector_index(sx, sz) else {
+                    continue;
+                };
+                let Some(fragment) = cell.sector else {
+                    continue;
+                };
+                let target = grid.sectors[index].get_or_insert_with(GridSector::empty);
+                merge_primitive_fragment(
+                    target,
+                    fragment,
+                    grid_drag.room,
+                    sx,
+                    sz,
+                    &mut selected_primitives,
+                );
+            }
+        }
+        self.select_geometry_primitives(grid_drag.room, selected_primitives);
+    }
+
+    pub(crate) fn end_primitive_gizmo_drag(&mut self) {
+        let Some(drag) = self.interaction.take_primitive_gizmo_drag() else {
+            return;
+        };
+        if let Some(grid_drag) = drag.grid {
+            if grid_drag.current_delta == [0, 0] {
+                self.project = grid_drag.base_project;
+                self.dirty = grid_drag.base_dirty;
+                self.select_geometry_primitives(grid_drag.room, grid_drag.targets);
+                return;
+            }
+            let moved = grid_drag.targets.len();
+            let delta = grid_drag.current_delta;
+            self.history.record(grid_drag.base_project);
+            self.status = if moved == 1 {
+                format!("Moved 1 primitive by {},{} cells", delta[0], delta[1])
+            } else {
+                format!(
+                    "Moved {moved} primitives by {},{} cells",
+                    delta[0], delta[1]
+                )
+            };
+            self.mark_dirty();
+        } else if drag.snapshot_pushed {
+            let moved = drag.targets.len();
+            let delta = drag.current_steps * HEIGHT_QUANTUM;
+            self.status = if moved == 1 {
+                format!("Moved 1 primitive by {delta} height units")
+            } else {
+                format!("Moved {moved} primitives by {delta} height units")
+            };
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn begin_node_gizmo_drag(
+        &mut self,
+        axis: PrimitiveGizmoAxis,
+        rect: Rect,
+        pointer: Pos2,
+    ) -> bool {
+        self.begin_node_gizmo_handle_drag(NodeGizmoHandle::Axis(axis), rect, pointer)
+    }
+
+    pub(crate) fn begin_node_gizmo_handle_drag(
+        &mut self,
+        handle: NodeGizmoHandle,
+        rect: Rect,
+        pointer: Pos2,
+    ) -> bool {
+        let mode = self.transform_gizmo_mode;
+        let ids = self.selected_node_gizmo_targets();
+        if ids.is_empty() {
+            return false;
+        }
+        if mode != TransformGizmoMode::Move && !matches!(handle, NodeGizmoHandle::Axis(_)) {
+            return false;
+        }
+
+        let start_plane_hit =
+            if let (TransformGizmoMode::Move, NodeGizmoHandle::Plane(plane)) = (mode, handle) {
+                let Some((pivot, _)) = self.node_gizmo_bounds_3d(&ids) else {
+                    return false;
+                };
+                let Some((origin, dir)) = self.camera_ray_for_pointer(rect, pointer) else {
+                    return false;
+                };
+                let normal = plane.normal_axis();
+                ray_intersects_axis_aligned_plane(origin, dir, normal, pivot[normal.index()])
+            } else {
+                None
+            };
+        if matches!(
+            (mode, handle),
+            (TransformGizmoMode::Move, NodeGizmoHandle::Plane(_))
+        ) && start_plane_hit.is_none()
+        {
+            return false;
+        }
+
+        let screen_axis_delta = match (mode, handle) {
+            (TransformGizmoMode::Rotate, NodeGizmoHandle::Axis(axis)) => {
+                let Some(ring) = self.node_rotation_gizmo_screen_ring_for_axis(rect, axis) else {
+                    return false;
+                };
+                ring.points
+                    .first()
+                    .map(|point| *point - ring.center)
+                    .filter(|delta| delta.length_sq() >= 64.0)
+                    .unwrap_or(Vec2::new(64.0, 0.0))
+            }
+            (_, NodeGizmoHandle::Axis(axis)) => {
+                let Some(screen_axis) = self
+                    .node_gizmo_screen_axes(rect)
+                    .into_iter()
+                    .find(|candidate| candidate.axis == axis)
+                else {
+                    return false;
+                };
+                screen_axis.end - screen_axis.start
+            }
+            (TransformGizmoMode::Move, NodeGizmoHandle::Plane(plane)) => {
+                let Some(screen_plane) = self
+                    .node_gizmo_screen_planes(rect)
+                    .into_iter()
+                    .find(|candidate| candidate.plane == plane)
+                else {
+                    return false;
+                };
+                screen_plane.corners[2] - screen_plane.corners[0]
+            }
+            (_, NodeGizmoHandle::Plane(_)) => return false,
+        };
+        if screen_axis_delta.length_sq() < 64.0 {
+            return false;
+        }
+
+        let scene = self.project.active_scene();
+        let targets: Vec<NodeGizmoTarget> = ids
+            .into_iter()
+            .filter_map(|id| {
+                scene.node(id).map(|node| NodeGizmoTarget {
+                    node: id,
+                    start_translation: node.transform.translation,
+                    start_rotation_degrees: node.transform.rotation_degrees,
+                    start_image_prop_size: match &node.kind {
+                        NodeKind::ImageProp { width, height, .. } => Some([*width, *height]),
+                        _ => None,
+                    },
+                    start_box_prop_vertices: match &node.kind {
+                        NodeKind::BoxProp { vertices, .. } => Some(*vertices),
+                        _ => None,
+                    },
+                    sector_size: node_enclosing_sector_size(scene, id),
+                })
+            })
+            .collect();
+        if targets.is_empty() {
+            return false;
+        }
+
+        self.interaction = Interaction::NodeGizmo(NodeGizmoDrag {
+            mode,
+            handle,
+            start_pointer: pointer,
+            screen_axis: screen_axis_delta,
+            start_plane_hit,
+            current_plane_delta_world: [0.0, 0.0, 0.0],
+            targets,
+            current_steps: 0,
+            snapshot_pushed: false,
+        });
+        true
+    }
+
+    pub(crate) fn update_node_gizmo_drag(&mut self, rect: Rect, pointer: Pos2) {
+        let Some(drag) = self.interaction.node_gizmo_drag() else {
+            return;
+        };
+        if let (TransformGizmoMode::Move, NodeGizmoHandle::Plane(plane)) = (drag.mode, drag.handle)
+        {
+            let Some(start_hit) = drag.start_plane_hit else {
+                return;
+            };
+            let Some((origin, dir)) = self.camera_ray_for_pointer(rect, pointer) else {
+                return;
+            };
+            let normal = plane.normal_axis();
+            let Some(hit) =
+                ray_intersects_axis_aligned_plane(origin, dir, normal, start_hit[normal.index()])
+            else {
+                return;
+            };
+            let [a, b] = plane.axes();
+            let mut delta = [0.0, 0.0, 0.0];
+            delta[a.index()] = hit[a.index()] - start_hit[a.index()];
+            delta[b.index()] = hit[b.index()] - start_hit[b.index()];
+            if vec3_nearly_equal(delta, drag.current_plane_delta_world) {
+                return;
+            }
+            if let Some(drag) = self.interaction.node_gizmo_drag_mut() {
+                drag.current_plane_delta_world = delta;
+            }
+            self.apply_node_gizmo_drag();
+            return;
+        }
+
+        let axis_len_sq = drag.screen_axis.length_sq();
+        if axis_len_sq < f32::EPSILON {
+            return;
+        }
+        let pixels_per_step = match drag.mode {
+            TransformGizmoMode::Move => 4.0,
+            TransformGizmoMode::Scale => 8.0,
+            // Rotation steps are 1° each, so a low pixels-per-step
+            // makes the ring feel hair-trigger. 12 px / ° (a full
+            // 360° revolution costs roughly screen-width of drag)
+            // matches the editor's expectation that fine prop
+            // alignment is doable without modifier keys.
+            TransformGizmoMode::Rotate => 12.0,
+        };
+        let pointer_delta = pointer - drag.start_pointer;
+        let unit = drag.screen_axis / axis_len_sq.sqrt();
+        let steps = (pointer_delta.dot(unit) / pixels_per_step).round() as i32;
+        if steps == drag.current_steps {
+            return;
+        }
+        if let Some(drag) = self.interaction.node_gizmo_drag_mut() {
+            drag.current_steps = steps;
+        }
+        self.apply_node_gizmo_drag();
+    }
+
+    pub(crate) fn apply_node_gizmo_drag(&mut self) {
+        let Some(drag) = self.interaction.node_gizmo_drag() else {
+            return;
+        };
+        if !node_gizmo_drag_has_motion(drag) && !drag.snapshot_pushed {
+            return;
+        }
+        if !drag.snapshot_pushed {
+            if let Some(drag) = self.interaction.node_gizmo_drag_mut() {
+                drag.snapshot_pushed = true;
+            }
+            self.push_undo();
+        }
+
+        let Some(drag) = self.interaction.node_gizmo_drag() else {
+            return;
+        };
+        let handle = drag.handle;
+        let steps = drag.current_steps;
+        let plane_delta_world = drag.current_plane_delta_world;
+        let mode = drag.mode;
+        let targets = drag.targets.clone();
+        let scene = self.project.active_scene_mut();
+        for target in targets {
+            let Some(node) = scene.node_mut(target.node) else {
+                continue;
+            };
+            match mode {
+                TransformGizmoMode::Move => match handle {
+                    NodeGizmoHandle::Axis(axis) => {
+                        node.transform.translation = node_gizmo_translation(
+                            node,
+                            target.start_translation,
+                            axis,
+                            steps,
+                            target.sector_size,
+                        );
+                    }
+                    NodeGizmoHandle::Plane(plane) => {
+                        node.transform.translation = node_gizmo_plane_translation(
+                            node,
+                            target.start_translation,
+                            plane,
+                            plane_delta_world,
+                            target.sector_size,
+                        );
+                    }
+                },
+                TransformGizmoMode::Rotate => {
+                    if let NodeGizmoHandle::Axis(axis) = handle {
+                        node.transform.rotation_degrees =
+                            node_gizmo_rotation(node, target.start_rotation_degrees, axis, steps);
+                    }
+                }
+                TransformGizmoMode::Scale => {
+                    if let NodeGizmoHandle::Axis(axis) = handle {
+                        apply_node_gizmo_scale(
+                            node,
+                            target.start_image_prop_size,
+                            target.start_box_prop_vertices,
+                            axis,
+                            steps,
+                        );
+                    }
+                }
+            }
+        }
+        self.mark_dirty();
+    }
+
+    pub(crate) fn end_node_gizmo_drag(&mut self) {
+        let Some(drag) = self.interaction.take_node_gizmo_drag() else {
+            return;
+        };
+        if !drag.snapshot_pushed {
+            return;
+        }
+        let handle = drag.handle.label();
+        let moved = drag.targets.len();
+        let action = match drag.mode {
+            TransformGizmoMode::Move => "Moved",
+            TransformGizmoMode::Rotate => "Rotated",
+            TransformGizmoMode::Scale => "Scaled",
+        };
+        self.status = if moved == 1 {
+            format!("{action} 1 node on {handle}")
+        } else {
+            format!("{action} {moved} nodes on {handle}")
+        };
+    }
+
+    pub(crate) fn primitive_drag_targets(&self, target: Selection) -> Vec<Selection> {
+        if self.floor_face_sector_is_selected(target).is_some() {
+            return self
+                .selected_sector_faces()
+                .into_iter()
+                .map(Selection::Face)
+                .collect();
+        }
+        if self.primitive_is_selected(target) {
+            self.selected_primitive_targets()
+        } else {
+            vec![target]
+        }
+    }
+
+    pub(crate) fn drag_vertices_for_targets(&self, targets: &[Selection]) -> Vec<DragVertex> {
+        let mut vertices = Vec::new();
+        for target in targets {
+            let Some(grid) = self.room_grid_view(target.room()) else {
+                continue;
+            };
+            let Some(seeds) = drag_corner_seeds(*target) else {
+                continue;
+            };
+            for seed in seeds {
+                let Some(vertex) = vertex_for_seed(grid, seed, self.vertex_connectivity) else {
+                    continue;
+                };
+                if vertices
+                    .iter()
+                    .any(|entry: &DragVertex| entry.room == target.room() && entry.vertex == vertex)
+                {
+                    continue;
+                }
+                vertices.push(DragVertex {
+                    room: target.room(),
+                    pre_drag_y: vertex.world[1],
+                    vertex,
+                });
+            }
+        }
+        vertices
+    }
+
+    /// Promote the hovered primitive to a selection. When the
+    /// hover is a face, also pre-load `selected_resource` with
+    /// its material so the resource panel surfaces it without a
+    /// second click. Edge / vertex modes don't pre-load -- the
+    /// inspector renders directly from the selection.
+    /// Promote `node` to the active selected node, clearing
+    /// any grid primitive selection. Mirrors `commit_face_selection`
+    /// for entity bounds -- keeps the inspector and scene tree
+    /// in sync with the viewport click.
+    pub(crate) fn commit_node_selection(&mut self, node: NodeId) {
+        self.replace_node_selection(node);
+        self.clear_primitive_selection_state();
+        self.clear_resource_selection_state();
+        self.clear_sector_selection();
+        let scene = self.project.active_scene();
+        if let Some(n) = scene.node(node) {
+            self.status = format!("Selected {} '{}'", n.kind.label(), n.name);
+        } else {
+            self.status = format!("Selected node #{}", node.raw());
+        }
+    }
+
+    /// Start a node-drag stroke. The pointer landed on
+    /// `hit.bounds`; lock the drag plane to the node's current
+    /// world Y, snapshot the start translation, and select the
+    /// node so subsequent UI updates show the right inspector.
+    /// Undo is lazy -- only pushed once the user actually moves.
+    pub(crate) fn begin_node_drag(&mut self, hit: EntityBoundHit, _rect: egui::Rect) {
+        // Promote selection so the inspector lands on the
+        // dragged node. If it is already part of a multi-selection,
+        // preserve that set while the drag uses this node as the handle.
+        if !self.node_is_selected(hit.node) {
+            self.commit_node_selection(hit.node);
+        }
+        let scene = self.project.active_scene();
+        let Some(node) = scene.node(hit.node) else {
+            return;
+        };
+        // Lock the drag plane to the node's *current* world Y
+        // -- that way the cursor stays attached to the bound
+        // even if the camera angle changes mid-drag.
+        let drag_plane_y = hit.bounds.center[1];
+        self.interaction = Interaction::Node(NodeDrag {
+            node: hit.node,
+            start_translation: node.transform.translation,
+            start_world_hit: hit.point,
+            drag_plane_y,
+            snapshot_pushed: false,
+            room: hit.bounds.room,
+        });
+    }
+
+    /// Per-frame node-drag update. Re-cast the current pointer
+    /// onto the locked drag plane, compute the world delta from
+    /// the start hit, project that delta back into editor-space
+    /// (sectors), and write `start + delta` to the node's
+    /// translation. Pushes undo lazily on the first
+    /// non-zero-delta frame.
+    pub(crate) fn update_node_drag(&mut self, rect: egui::Rect, pointer: egui::Pos2) {
+        let Some(drag) = self.interaction.node_drag() else {
+            return;
+        };
+        let plane_y = drag.drag_plane_y;
+        let node_id = drag.node;
+        let start_translation = drag.start_translation;
+        let start_world_hit = drag.start_world_hit;
+        let room_id = drag.room;
+        let already_snapshotted = drag.snapshot_pushed;
+
+        let Some((origin, dir)) = self.camera_ray_for_pointer(rect, pointer) else {
+            return;
+        };
+        let Some(world_hit) = ray_intersects_horizontal_plane(origin, dir, plane_y) else {
+            return;
+        };
+        // Convert the world-space delta into editor-space
+        // (sectors) using the room's `sector_size`. Without an
+        // enclosing Room, fall back to a 1:1 conversion so
+        // global nodes still drag.
+        let scene = self.project.active_scene();
+        let sector_size = room_id
+            .and_then(|id| scene.node(id))
+            .and_then(|n| match &n.kind {
+                NodeKind::Room { grid } => Some(grid.sector_size as f32),
+                _ => None,
+            })
+            .unwrap_or(1.0);
+        let delta_world = [
+            world_hit[0] - start_world_hit[0],
+            world_hit[2] - start_world_hit[2],
+        ];
+        let new_translation = [
+            start_translation[0] + delta_world[0] / sector_size,
+            start_translation[1],
+            start_translation[2] + delta_world[1] / sector_size,
+        ];
+
+        // Lazy undo: first non-zero delta pushes one snapshot.
+        if !already_snapshotted
+            && (delta_world[0].abs() > f32::EPSILON || delta_world[1].abs() > f32::EPSILON)
+        {
+            self.push_undo();
+            if let Some(d) = self.interaction.node_drag_mut() {
+                d.snapshot_pushed = true;
+            }
+        }
+
+        if let Some(node) = self.project.active_scene_mut().node_mut(node_id) {
+            node.transform.translation = new_translation;
+            self.dirty = true;
+        }
+        self.status = format!(
+            "Drag node — ({:.2}, {:.2})",
+            new_translation[0], new_translation[2]
+        );
+    }
+
+    /// End the active node-drag stroke. Idempotent if no drag
+    /// is in flight.
+    pub(crate) fn end_node_drag(&mut self) {
+        self.interaction.take_node_drag();
+    }
+
+    pub(crate) fn commit_face_selection(&mut self, modifiers: egui::Modifiers) {
+        match self.selection.hovered_primitive {
+            Some(selection) => {
+                self.apply_primitive_selection_modifiers(selection, modifiers);
+            }
+            None => {
+                self.clear_primitive_selection_state();
+                self.clear_resource_selection_state();
+                self.clear_sector_selection();
+                self.status = "Cleared selection".to_string();
+            }
+        }
+    }
+
+    pub(crate) fn floor_face_sector_is_selected(
+        &self,
+        selection: Selection,
+    ) -> Option<SectorSelection> {
+        let Selection::Face(face) = selection else {
+            return None;
+        };
+        if !matches!(face.kind, FaceKind::Floor) {
+            return None;
+        }
+        let sector = (face.room, face.sx, face.sz);
+        self.selection
+            .selected_sectors
+            .contains(&sector)
+            .then_some(sector)
+    }
+
+    pub(crate) fn select_wall_face_span(
+        &mut self,
+        selection: Selection,
+        modifiers: egui::Modifiers,
+    ) -> bool {
+        let Selection::Face(current) = selection else {
+            return false;
+        };
+        let FaceKind::Wall { dir, stack } = current.kind else {
+            return false;
+        };
+        let Some(anchor) = self.wall_face_selection_anchor() else {
+            return false;
+        };
+        let FaceKind::Wall {
+            dir: anchor_dir,
+            stack: anchor_stack,
+        } = anchor.kind
+        else {
+            return false;
+        };
+        if anchor.room != current.room || anchor_dir != dir || anchor_stack != stack {
+            return false;
+        }
+
+        let Some((min_x, max_x, min_z, max_z)) = wall_span_bounds(anchor, current, dir) else {
+            return false;
+        };
+        let selections =
+            self.existing_wall_span_faces(current.room, dir, stack, min_x, max_x, min_z, max_z);
+        if selections.is_empty() {
+            return false;
+        }
+
+        let additive = modifiers.command || modifiers.ctrl;
+        self.clear_sector_selection();
+        self.clear_node_selection_state();
+        if !additive {
+            self.selection.selected_primitives.clear();
+        }
+        for span_selection in selections {
+            self.push_selected_primitive_unique(span_selection);
+        }
+        self.selection.selected_primitive = Some(selection);
+        self.update_primitive_resource_selection();
+        self.status = match self.selection.selected_primitives.len() {
+            0 => "Cleared primitive selection".to_string(),
+            1 => format!("Selected {}", describe_selection(selection)),
+            count => format!("Selected {count} walls"),
+        };
+        true
+    }
+
+    pub(crate) fn select_horizontal_face_rect(
+        &mut self,
+        selection: Selection,
+        modifiers: egui::Modifiers,
+    ) -> bool {
+        let Selection::Face(current) = selection else {
+            return false;
+        };
+        if !matches!(current.kind, FaceKind::Floor | FaceKind::Ceiling) {
+            return false;
+        }
+        let Some(anchor) = self.horizontal_face_selection_anchor(current.kind) else {
+            return false;
+        };
+        if anchor.room != current.room {
+            return false;
+        }
+
+        let min_x = anchor.sx.min(current.sx);
+        let max_x = anchor.sx.max(current.sx);
+        let min_z = anchor.sz.min(current.sz);
+        let max_z = anchor.sz.max(current.sz);
+        let selections = self.existing_horizontal_rect_faces(
+            current.room,
+            current.kind,
+            min_x,
+            max_x,
+            min_z,
+            max_z,
+        );
+        if selections.is_empty() {
+            return false;
+        }
+
+        let additive = modifiers.command || modifiers.ctrl;
+        self.clear_sector_selection();
+        self.clear_node_selection_state();
+        if !additive {
+            self.selection.selected_primitives.clear();
+        }
+        for rect_selection in selections {
+            self.push_selected_primitive_unique(rect_selection);
+        }
+        self.selection.selected_primitive = Some(selection);
+        self.update_primitive_resource_selection();
+        self.status = match self.selection.selected_primitives.len() {
+            0 => "Cleared primitive selection".to_string(),
+            1 => format!("Selected {}", describe_selection(selection)),
+            count => format!("Selected {count} {}", horizontal_face_plural(current.kind)),
+        };
+        true
+    }
+
+    pub(crate) fn horizontal_face_selection_anchor(&self, kind: FaceKind) -> Option<FaceRef> {
+        self.selection
+            .selected_primitives
+            .iter()
+            .copied()
+            .find_map(|selection| selection_horizontal_face(selection, kind))
+            .or_else(|| {
+                self.selection
+                    .selected_primitive
+                    .and_then(|selection| selection_horizontal_face(selection, kind))
+            })
+    }
+
+    pub(crate) fn existing_horizontal_rect_faces(
+        &self,
+        room: NodeId,
+        kind: FaceKind,
+        min_x: u16,
+        max_x: u16,
+        min_z: u16,
+        max_z: u16,
+    ) -> Vec<Selection> {
+        let Some(grid) = self.room_grid_view(room) else {
+            return Vec::new();
+        };
+        let mut selections = Vec::new();
+        for sx in min_x..=max_x {
+            for sz in min_z..=max_z {
+                let has_face = grid.sector(sx, sz).is_some_and(|sector| match kind {
+                    FaceKind::Floor => sector.floor.is_some(),
+                    FaceKind::Ceiling => sector.ceiling.is_some(),
+                    FaceKind::Wall { .. } => false,
+                });
+                if has_face {
+                    selections.push(Selection::Face(FaceRef { room, sx, sz, kind }));
+                }
+            }
+        }
+        selections
+    }
+
+    pub(crate) fn wall_face_selection_anchor(&self) -> Option<FaceRef> {
+        self.selection
+            .selected_primitives
+            .iter()
+            .copied()
+            .find_map(selection_wall_face)
+            .or_else(|| {
+                self.selection
+                    .selected_primitive
+                    .and_then(selection_wall_face)
+            })
+    }
+
+    pub(crate) fn existing_wall_span_faces(
+        &self,
+        room: NodeId,
+        dir: GridDirection,
+        stack: u8,
+        min_x: u16,
+        max_x: u16,
+        min_z: u16,
+        max_z: u16,
+    ) -> Vec<Selection> {
+        let Some(grid) = self.room_grid_view(room) else {
+            return Vec::new();
+        };
+        let mut selections = Vec::new();
+        for sx in min_x..=max_x {
+            for sz in min_z..=max_z {
+                let has_wall = grid
+                    .sector(sx, sz)
+                    .is_some_and(|sector| sector.walls.get(dir).get(stack as usize).is_some());
+                if has_wall {
+                    selections.push(Selection::Face(FaceRef {
+                        room,
+                        sx,
+                        sz,
+                        kind: FaceKind::Wall { dir, stack },
+                    }));
+                }
+            }
+        }
+        selections
+    }
+
+    pub(crate) fn select_edge_path(
+        &mut self,
+        selection: Selection,
+        modifiers: egui::Modifiers,
+    ) -> bool {
+        let Selection::Edge(current) = selection else {
+            return false;
+        };
+        let Some(anchor) = self.edge_selection_anchor() else {
+            return false;
+        };
+        let Some(path) = self.edge_path_between(anchor, current) else {
+            return false;
+        };
+        if path.is_empty() {
+            return false;
+        }
+
+        let additive = modifiers.command || modifiers.ctrl;
+        self.clear_sector_selection();
+        self.clear_node_selection_state();
+        if !additive {
+            self.selection.selected_primitives.clear();
+        }
+        for edge in path {
+            self.push_selected_primitive_unique(Selection::Edge(edge));
+        }
+        self.selection.selected_primitive = Some(selection);
+        self.update_primitive_resource_selection();
+        self.status = match self.selection.selected_primitives.len() {
+            0 => "Cleared primitive selection".to_string(),
+            1 => format!("Selected {}", describe_selection(selection)),
+            count => format!("Selected {count} edges"),
+        };
+        true
+    }
+
+    pub(crate) fn edge_selection_anchor(&self) -> Option<EdgeRef> {
+        self.selection
+            .selected_primitives
+            .iter()
+            .copied()
+            .find_map(selection_edge)
+            .or_else(|| self.selection.selected_primitive.and_then(selection_edge))
+    }
+
+    pub(crate) fn edge_path_between(
+        &self,
+        anchor: EdgeRef,
+        current: EdgeRef,
+    ) -> Option<Vec<EdgeRef>> {
+        if anchor.room != current.room {
+            return None;
+        }
+        let kind = edge_path_kind(anchor);
+        if edge_path_kind(current) != kind {
+            return None;
+        }
+        let grid = self.room_grid_view(anchor.room)?;
+        let mut candidates = Vec::new();
+        for selection in self.all_primitive_selections_in_room(anchor.room, SelectionMode::Edge) {
+            let Some(edge) = selection_edge(selection) else {
+                continue;
+            };
+            if edge_path_kind(edge) != kind {
+                continue;
+            }
+            let Some(segment) = edge_world_segment(grid, edge) else {
+                continue;
+            };
+            candidates.push((edge, segment));
+        }
+
+        let start = candidates.iter().position(|(edge, _)| *edge == anchor)?;
+        let end = candidates.iter().position(|(edge, _)| *edge == current)?;
+        if start == end {
+            return Some(vec![current]);
+        }
+
+        let mut visited = vec![false; candidates.len()];
+        let mut previous: Vec<Option<usize>> = vec![None; candidates.len()];
+        let mut queue = VecDeque::new();
+        visited[start] = true;
+        queue.push_back(start);
+
+        while let Some(index) = queue.pop_front() {
+            if index == end {
+                break;
+            }
+            for next in 0..candidates.len() {
+                if visited[next] {
+                    continue;
+                }
+                if !edge_segments_touch(candidates[index].1, candidates[next].1) {
+                    continue;
+                }
+                visited[next] = true;
+                previous[next] = Some(index);
+                queue.push_back(next);
+            }
+        }
+
+        if !visited[end] {
+            return None;
+        }
+        let mut path = Vec::new();
+        let mut index = end;
+        loop {
+            path.push(candidates[index].0);
+            if index == start {
+                break;
+            }
+            index = previous[index]?;
+        }
+        path.reverse();
+        Some(path)
+    }
+
+    pub(crate) fn apply_primitive_selection_modifiers(
+        &mut self,
+        selection: Selection,
+        modifiers: egui::Modifiers,
+    ) {
+        let toggle = modifiers.command || modifiers.ctrl;
+        if modifiers.shift && self.select_horizontal_face_rect(selection, modifiers) {
+            return;
+        }
+        if modifiers.shift && self.select_wall_face_span(selection, modifiers) {
+            return;
+        }
+        if modifiers.shift && self.select_edge_path(selection, modifiers) {
+            return;
+        }
+
+        self.clear_sector_selection();
+        self.clear_node_selection_state();
+        if modifiers.shift {
+            if self.selection.selected_primitives.is_empty() {
+                if let Some(current) = self.selection.selected_primitive {
+                    self.selection.selected_primitives.push(current);
+                }
+            }
+            self.push_selected_primitive_unique(selection);
+        } else if toggle {
+            if self.selection.selected_primitives.is_empty() {
+                if let Some(current) = self.selection.selected_primitive {
+                    self.selection.selected_primitives.push(current);
+                }
+            }
+            if let Some(index) = self
+                .selection
+                .selected_primitives
+                .iter()
+                .position(|candidate| *candidate == selection)
+            {
+                self.selection.selected_primitives.remove(index);
+                self.selection.selected_primitive =
+                    self.selection.selected_primitives.last().copied();
+            } else {
+                self.push_selected_primitive_unique(selection);
+            }
+        } else {
+            self.replace_primitive_selection(selection);
+        }
+
+        if self.selection.selected_primitives.is_empty() {
+            self.clear_primitive_selection_state();
+            self.clear_resource_selection_state();
+            self.status = "Cleared primitive selection".to_string();
+            return;
+        }
+
+        self.update_primitive_resource_selection();
+        self.status = match self.selection.selected_primitives.len() {
+            0 => "Cleared primitive selection".to_string(),
+            1 => format!(
+                "Selected {}",
+                describe_selection(self.selection.selected_primitives[0])
+            ),
+            count => format!("Selected {count} primitives"),
+        };
+    }
+}
