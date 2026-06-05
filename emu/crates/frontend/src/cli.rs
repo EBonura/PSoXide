@@ -664,6 +664,19 @@ fn run_headless_launch(
         bus.set_port1_sticks(rx, ry, lx, ly);
     }
     let mut sweep_frame = 0u64;
+    // Input-tape replay clock. The editor records/replays exactly one tape
+    // sample per `app::step_one_frame` tick -- a `vblank_period` cycle budget
+    // (capped at `run_steps_per_frame` instructions). It does NOT key the tape
+    // to `frames_seen` (guest FrameBegin events), which stall during loading
+    // while the editor keeps ticking. Mirror that tick here so a headless
+    // replay reproduces the editor frame-for-frame; keying off `frames_seen`
+    // (as this loop used to) desyncs the whole run after the load and, at
+    // camera-collision-sensitive spots, collapses the camera onto the player.
+    const TAPE_RUN_STEPS_PER_FRAME: u64 = 1_000_000; // matches AppState default
+    let tape_vblank_period = bus.vblank_period().max(1);
+    let mut tape_tick_deadline = bus.cycles().saturating_add(tape_vblank_period);
+    let mut tape_tick_steps = 0u64;
+    let mut tape_ticks = 0u64;
     let mut tape_cursor = 0usize;
     if let Some(samples) = tape_samples.as_ref() {
         samples[tape_cursor].apply_to_bus(&mut bus);
@@ -717,11 +730,17 @@ fn run_headless_launch(
         }
         let current_guest_frames = bus.telemetry.frames_seen();
         if let Some(samples) = tape_samples.as_ref() {
-            if current_guest_frames > 0 {
-                let desired_cursor = (current_guest_frames - 1) as usize;
-                let desired_cursor = desired_cursor.min(samples.len().saturating_sub(1));
-                if desired_cursor != tape_cursor {
-                    tape_cursor = desired_cursor;
+            // Advance on the editor's tick clock (see setup above), not on
+            // `frames_seen`: one sample per vblank-period cycle budget, capped
+            // at the same instruction budget `step_one_frame` uses.
+            tape_tick_steps += 1;
+            if bus.cycles() >= tape_tick_deadline || tape_tick_steps >= TAPE_RUN_STEPS_PER_FRAME {
+                tape_tick_deadline = bus.cycles().saturating_add(tape_vblank_period);
+                tape_tick_steps = 0;
+                tape_ticks += 1;
+                let cursor = (tape_ticks as usize).min(samples.len().saturating_sub(1));
+                if cursor != tape_cursor {
+                    tape_cursor = cursor;
                     samples[tape_cursor].apply_to_bus(&mut bus);
                 }
             }
@@ -782,7 +801,15 @@ fn run_headless_launch(
             }
         }
         if let Some(target) = guest_frame_limit {
-            if target > 0 && bus.telemetry.frames_seen() >= target {
+            // When replaying a tape the natural clock is tape ticks, not
+            // `frames_seen`; otherwise `--guest-frames N` stops at the wrong
+            // moment now that the tape advances on the vblank tick.
+            let reached = if tape_samples.is_some() {
+                tape_ticks >= target
+            } else {
+                bus.telemetry.frames_seen() >= target
+            };
+            if target > 0 && reached {
                 stopped_at = Some(i + 1);
                 break;
             }
