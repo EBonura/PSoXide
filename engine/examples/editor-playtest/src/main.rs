@@ -1360,16 +1360,14 @@ const MAX_ROOM_MATERIALS: usize = 8;
 /// count per cooked build; this cap only prevents the fixed arrays from
 /// growing past the editor-exposed maximum.
 const MAX_ACTIVE_ROOMS: usize = 16;
-/// Graph-distance (BFS) radius for the streaming residency ring. Rooms within
-/// this many portal hops of the current room are kept resident in memory
-/// (the load-ahead prefetch buffer). `WORLD_STREAM_RADIUS >= WORLD_VISIBILITY_RADIUS`.
-/// 16 covers demo10's 8-room graph, so the streaming ring is every room and the
-/// runtime stays equivalent to today's all-resident baseline.
-const WORLD_STREAM_RADIUS: u16 = 16;
-/// Graph-distance (BFS) radius for the surface-cache build ring. Rooms within
-/// this many portal hops of the current room get their surface caches built;
-/// the portal-visibility/frustum pass still decides which built rooms draw.
-const WORLD_VISIBILITY_RADIUS: u16 = 16;
+/// Reachability draw model: the camera's room plus this many portal hops are the
+/// ACTIVE/DRAWN set, with no frustum or far-plane room cull (per-polygon
+/// backface + screen culling still applies). Side and behind rooms stay drawn.
+const RESIDENT_DRAW_DEPTH: u16 = 3;
+/// Extra portal hops kept RESIDENT beyond the draw set (the load-ahead margin).
+/// Resident radius = RESIDENT_DRAW_DEPTH + RESIDENT_PREFETCH_HOPS; since it
+/// covers the draw depth, resident is a superset of drawn by construction.
+const RESIDENT_PREFETCH_HOPS: u16 = 2;
 const MAX_PORTAL_FRUSTUMS: usize = 64;
 const MAX_PORTAL_FRONTIER_ROOMS: usize = 32;
 const MAX_PORTAL_ROOM_BOUNDS: usize = 256;
@@ -3507,19 +3505,12 @@ struct Playtest {
     /// Index in ROOMS the player is currently in. Used to scope
     /// model-instance + light queries.
     room_index: RoomIndex,
-    /// Room the cached BFS rings below were computed from. The resident and
-    /// visible sets are a pure function of `(current_room, radius, static
-    /// graph)`, so they are recomputed only when `room_index` changes and
-    /// cached between crossings.
-    room_rings_root: RoomIndex,
-    /// Streaming ring: rooms within `WORLD_STREAM_RADIUS` portal hops, kept
-    /// resident in memory. Drives the residency desired-set.
-    stream_ring: [RoomIndex; STREAMED_ROOM_SLOT_COUNT],
-    stream_ring_count: usize,
-    /// Visibility ring: rooms within `WORLD_VISIBILITY_RADIUS` portal hops whose
-    /// surface caches are built. Drives the active-window build job's request.
-    visibility_ring: [RoomIndex; MAX_ACTIVE_ROOMS],
-    visibility_ring_count: usize,
+    /// The resident desired-set the last residency pass actually requested (the
+    /// camera ring + visible). The boot gate waits for THIS to be resident, not
+    /// the legacy player `stream_ring`, so loading completes against the set
+    /// streaming actually loads.
+    resident_desired: [RoomIndex; STREAMED_ROOM_SLOT_COUNT],
+    resident_desired_count: usize,
     /// Active room's material table, ordered by `local_slot`.
     /// Indexed directly by the slot value the cooked `.psxw`
     /// stores per face.
@@ -3668,11 +3659,8 @@ impl Playtest {
             active_room_view_pitch_sin_key: 0,
             active_room_view_pitch_cos_key: 0,
             room_index: RoomIndex::ZERO,
-            room_rings_root: INVALID_ROOM_INDEX,
-            stream_ring: [INVALID_ROOM_INDEX; STREAMED_ROOM_SLOT_COUNT],
-            stream_ring_count: 0,
-            visibility_ring: [INVALID_ROOM_INDEX; MAX_ACTIVE_ROOMS],
-            visibility_ring_count: 0,
+            resident_desired: [INVALID_ROOM_INDEX; STREAMED_ROOM_SLOT_COUNT],
+            resident_desired_count: 0,
             materials: [room_material_fallback(); MAX_ROOM_MATERIALS],
             material_count: 0,
             motor: CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO),
@@ -3799,13 +3787,13 @@ impl Playtest {
 
     #[cfg(feature = "cd-stream-bench")]
     fn initial_stream_ring_resident(&self) -> bool {
-        let count = self.stream_ring_count.min(STREAMED_ROOM_SLOT_COUNT);
+        let count = self.resident_desired_count.min(STREAMED_ROOM_SLOT_COUNT);
         if count == 0 {
             return false;
         }
         let mut i = 0usize;
         while i < count {
-            let room = self.stream_ring[i];
+            let room = self.resident_desired[i];
             if room == INVALID_ROOM_INDEX || !streamed_room_is_resident(room) {
                 return false;
             }
@@ -3830,10 +3818,10 @@ impl Playtest {
     #[cfg(feature = "cd-stream-bench")]
     fn initial_stream_ring_textures_ready(&mut self) -> bool {
         let mut ready = true;
-        let count = self.stream_ring_count.min(STREAMED_ROOM_SLOT_COUNT);
+        let count = self.resident_desired_count.min(STREAMED_ROOM_SLOT_COUNT);
         let mut i = 0usize;
         while i < count {
-            let room = self.stream_ring[i];
+            let room = self.resident_desired[i];
             if room != INVALID_ROOM_INDEX {
                 if let Some(record) = ROOMS.get(room.to_usize()) {
                     ready &= room_material_textures_ready(record);
@@ -3851,7 +3839,7 @@ impl Playtest {
         let mut visible = 0usize;
         while visible < visible_limit {
             let room = self.portal_visibility.rooms[visible].room;
-            if room != INVALID_ROOM_INDEX && !room_requested(room, &self.stream_ring, count) {
+            if room != INVALID_ROOM_INDEX && !room_requested(room, &self.resident_desired, count) {
                 if let Some(record) = ROOMS.get(room.to_usize()) {
                     ready &= room_material_textures_ready(record);
                     ready &= room_backdrop_textures_ready(record);
@@ -6189,8 +6177,12 @@ impl Playtest {
         mask
     }
 
-    fn portal_visibility_draws_room(&self, index: RoomIndex) -> bool {
-        portal_visibility_result_draws_room(&self.portal_visibility, self.room_index, index)
+    fn portal_visibility_draws_room(&self, _index: RoomIndex) -> bool {
+        // Reachability draw: every room in the active set (the camera ring) is
+        // drawn; the frustum walk no longer gates room drawing. Per-polygon
+        // backface + screen culling removes off-screen geometry. This is the
+        // single per-room draw gate -- a behind-camera prune can live here later.
+        true
     }
 
     fn emit_portal_visibility_counters(&self) {
@@ -6376,35 +6368,6 @@ impl Playtest {
         }
     }
 
-    /// Recompute the cached streaming + visibility BFS rings if the current
-    /// room changed since they were last built. The rings are a pure function
-    /// of `(current_room, radius, static graph)`, so they are cached between
-    /// crossings and only rebuilt when `room_index` moves.
-    fn ensure_room_rings(&mut self) {
-        if self.room_rings_root == self.room_index {
-            return;
-        }
-        let mut s = [INVALID_ROOM_INDEX; STREAMED_ROOM_SLOT_COUNT];
-        let sc = room_graph_ring(
-            self.room_index,
-            WORLD_STREAM_RADIUS,
-            &mut s,
-            STREAMED_ROOM_SLOT_COUNT,
-        );
-        let mut v = [INVALID_ROOM_INDEX; MAX_ACTIVE_ROOMS];
-        let vc = room_graph_ring(
-            self.room_index,
-            WORLD_VISIBILITY_RADIUS,
-            &mut v,
-            MAX_ACTIVE_ROOMS,
-        );
-        self.stream_ring = s;
-        self.stream_ring_count = sc;
-        self.visibility_ring = v;
-        self.visibility_ring_count = vc;
-        self.room_rings_root = self.room_index;
-    }
-
     fn begin_active_room_window_job(&mut self, update_streaming: bool) {
         if !self.chunked_level() {
             return;
@@ -6416,14 +6379,24 @@ impl Playtest {
         let view = self.active_room_selection_view();
         self.refresh_portal_visibility_for_view(current_index, current_record, view);
 
+        // Reachability draw: the active/drawn set is the unpruned portal-graph
+        // ring around the camera's room (the visibility root), not the
+        // frustum-clipped visible set. Side and behind-the-player rooms stay
+        // drawn (no pop-in when a portal goes edge-on); per-polygon backface +
+        // screen culling still removes the off-screen geometry cheaply.
         let mut requested_rooms = [INVALID_ROOM_INDEX; MAX_ACTIVE_ROOMS];
-        let mut requested_count = 0usize;
-        requested_rooms[requested_count] = current_index;
-        requested_count += 1;
-        let visible_limit = self.portal_visible_room_limit(current_record);
+        requested_rooms[0] = current_index;
+        let mut requested_count = 1usize;
+        let mut ring = [INVALID_ROOM_INDEX; MAX_ACTIVE_ROOMS];
+        let ring_count = room_graph_ring(
+            self.portal_visibility_root,
+            RESIDENT_DRAW_DEPTH,
+            &mut ring,
+            MAX_ACTIVE_ROOMS,
+        );
         let mut i = 0usize;
-        while i < visible_limit && requested_count < MAX_ACTIVE_ROOMS {
-            let room = self.portal_visibility.rooms[i].room;
+        while i < ring_count && requested_count < MAX_ACTIVE_ROOMS {
+            let room = ring[i];
             if room != current_index && room != INVALID_ROOM_INDEX {
                 requested_rooms[requested_count] = room;
                 requested_count += 1;
@@ -6877,16 +6850,15 @@ impl Playtest {
     /// residency from what this makes resident.
     #[cfg(feature = "cd-stream-bench")]
     fn update_room_residency(&mut self) {
-        // Residency desired-set is the streaming BFS ring: every room within
-        // WORLD_STREAM_RADIUS portal hops of the current room. Computed once per
-        // crossing and cached; recompute here is a no-op unless the room moved.
-        self.ensure_room_rings();
+        // One source of truth: the camera-rooted portal traversal. The resident
+        // desired-set is its frustum-visible rooms first (correctness -- anything
+        // drawn must be resident), then an unpruned BFS ring from the SAME root
+        // (prefetch). The ring radius covers the traversal depth, so
+        // resident is a superset of visible by construction; visible-first keeps
+        // that true even when the budget cannot hold the whole prefetch ring.
+        //
         let mut desired = [INVALID_ROOM_INDEX; STREAMED_ROOM_SLOT_COUNT];
-        let mut count = self.stream_ring_count.min(STREAMED_ROOM_SLOT_COUNT);
-        desired[..count].copy_from_slice(&self.stream_ring[..count]);
-        // The BFS ring is prefetch; portal visibility is correctness. Whatever
-        // the renderer can currently see MUST be resident even when the graph
-        // ring and the geometric visibility disagree, or it draws nothing.
+        let mut count = 0usize;
         let visible = self.portal_visibility.room_count.min(MAX_ACTIVE_ROOMS);
         let mut i = 0usize;
         while i < visible && count < STREAMED_ROOM_SLOT_COUNT {
@@ -6897,9 +6869,34 @@ impl Playtest {
             }
             i += 1;
         }
+        // Prefetch ring rooted at the camera's room (the visibility root), not
+        // the player's. Breadth-first, so the closest hops fill the rest of the
+        // budget. Radius = traversal depth + a small margin that also absorbs the
+        // one-frame residency lag.
+        let resident_radius = RESIDENT_DRAW_DEPTH.saturating_add(RESIDENT_PREFETCH_HOPS);
+        let mut ring = [INVALID_ROOM_INDEX; STREAMED_ROOM_SLOT_COUNT];
+        let ring_count = room_graph_ring(
+            self.portal_visibility_root,
+            resident_radius,
+            &mut ring,
+            STREAMED_ROOM_SLOT_COUNT,
+        );
+        let mut j = 0usize;
+        while j < ring_count && count < STREAMED_ROOM_SLOT_COUNT {
+            let room = ring[j];
+            if room != INVALID_ROOM_INDEX && !room_requested(room, &desired, count) {
+                desired[count] = room;
+                count += 1;
+            }
+            j += 1;
+        }
+        self.resident_desired = desired;
+        self.resident_desired_count = count;
         unsafe { ROOM_STREAM_SCHEDULER.reconcile_residency(&desired, count) };
-        // Reclaim VRAM from rooms that just left the streamed residency set.
-        let current = self.room_index;
+        // The ring only moves when the camera changes room, so the desired set is
+        // stable between crossings; debounce eviction on the camera room (not the
+        // player) and let the scheduler LRU absorb visible-set jitter.
+        let current = self.portal_visibility_root;
         if unsafe { LAST_EVICT_ROOM } != current {
             evict_unreferenced_vram(&desired, count);
             unsafe { LAST_EVICT_ROOM = current };
@@ -9673,23 +9670,18 @@ fn active_draw_order_contains(order: &[u8; MAX_ACTIVE_ROOMS], count: usize, slot
 }
 
 fn portal_visibility_result_draws_room(
-    visibility: &RuntimePortalVisibility,
-    current_room: RoomIndex,
-    index: RoomIndex,
+    _visibility: &RuntimePortalVisibility,
+    _current_room: RoomIndex,
+    _index: RoomIndex,
 ) -> bool {
-    if index == current_room {
-        return true;
-    }
-    let mut i = 0usize;
-    while i < visibility.room_count.min(MAX_ACTIVE_ROOMS) {
-        if visibility.rooms[i].room == index {
-            // Visible (and resident for prefetch) but only drawn when within
-            // the draw distance -- a beyond-far room renders nothing.
-            return visibility.rooms[i].within_far;
-        }
-        i += 1;
-    }
-    false
+    // Reachability draw: the draw-order builders only pass rooms from the active
+    // window (the camera ring), so every one is drawn -- no frustum/far-distance
+    // cull gates room drawing here. Per-cell frustum + per-polygon backface and
+    // screen culling still trim the off-screen geometry. This is the draw-order
+    // twin of `portal_visibility_draws_room`; the reachability-draw rework
+    // flipped that one but missed this, so a reachable-but-not-frustum-visible
+    // room (e.g. the room behind the player) was dropped from the draw order.
+    true
 }
 
 fn active_room_sort_depth(active: ActiveRuntimeRoom, camera: WorldCamera) -> i32 {
