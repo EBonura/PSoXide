@@ -850,6 +850,11 @@ fn playtest_visual_pacing(video_mode: VideoMode) -> VisualPacing {
 #[no_mangle]
 fn main() -> ! {
     let mut scene = Playtest::new();
+    // `scene` is the deepest stack-resident object; fail loudly here if it
+    // (or the call frames it will spawn) has overrun the stack into static
+    // data instead of silently corrupting `static` buffers at runtime.
+    #[cfg(target_arch = "mips")]
+    psx_rt::assert_stack_headroom();
     let video_mode = VideoMode::Ntsc;
     let config = Config {
         clear_color: (5, 7, 12),
