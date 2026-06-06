@@ -178,6 +178,7 @@ def main():
     bars = []
     render_cyc, sim_cyc = [], []
     misses = 0
+    frame_idx = -1  # 30fps-frame group index; bumps on each render vblank
     for r in rows:
         fc = num(r, idx_fc)
         render = num(r, idx_render)
@@ -189,6 +190,8 @@ def main():
         stacks = [vals[b[0]] for b in BANDS] + [render_other, present_v, frame_other]
 
         is_render = render > 0
+        if is_render:
+            frame_idx += 1
         detail = {}
         for (group, cols) in detail_idx:
             for (name, i) in cols:
@@ -196,7 +199,7 @@ def main():
                 if v > 0:
                     detail[name] = v
         bars.append({
-            "s": stacks, "fc": fc, "r": 1 if is_render else 0,
+            "s": stacks, "fc": fc, "r": 1 if is_render else 0, "g": frame_idx,
             "m": num(r, idx_miss), "room": num(r, idx_room), "t": detail,
         })
         (render_cyc if is_render else sim_cyc).append(fc)
@@ -272,7 +275,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html><html><head><meta charset="utf-8"><title>per-
 <div id="hdr"><h1 id="t"></h1><div id="s"></div></div>
 <div id="lg"></div>
 <div id="wrap"><canvas id="c"></canvas><div id="tip"></div></div>
-<div id="ft">scroll = zoom &middot; drag = pan &middot; double-click = reset &nbsp;&middot;&nbsp; <span style="color:#f85149">red baseline tick</span> = 30fps slot missed (render vb + sim vb &gt; 2 vblanks) &nbsp;&middot;&nbsp; <span style="color:#f85149">red top tick</span> = off-scale stall</div>
+<div id="ft"><span style="color:#a8b1bb">&middot; &middot; &middot;</span> dotted line = 1 vblank (16.67ms, the 60fps budget). Each bar is one sim tick; a render bar + the next sim bar = one 30fps frame, so the <b>pair</b> must fit 2&times; the line. &nbsp;&middot;&nbsp; <span style="color:#f85149">red baseline tick</span> = 30fps slot missed (render vb + sim vb &gt; 2 vblanks) &nbsp;&middot;&nbsp; <span style="color:#f85149">red top tick</span> = off-scale stall<br><span style="color:#f0c674">&#9650;</span> = frame drawn here (render vblank) &nbsp;&middot;&nbsp; shaded bands group each render+sim pair into one 30fps frame &nbsp;&middot;&nbsp; scroll = zoom &middot; drag = pan &middot; double-click = reset</div>
 <div id="legend"><h2>phases (bottom &rarr; top of each bar)</h2><div id="legbody"></div></div>
 <script>
 const D=__DATA__;
@@ -289,7 +292,7 @@ document.getElementById('s').innerHTML=
  `<span class=stat>sim-only <b>${st.sim_vblanks}</b> avg <b>${ms(st.sim_avg)}ms</b> (${pctb(st.sim_avg)}%)</span>`+
  `<span class=stat>deadline misses <b>${st.misses}</b></span>`+
  `<span class=stat>spread target <b>${ms(st.spread_target)}ms</b>/vb (${pctb(st.spread_target)}%)</span>`+
- `<span class=stat style="color:#6e7681">1 vblank = ${ms(budget)}ms</span>`;
+ `<span class=stat style="color:#6e7681">1 vblank = ${ms(budget)}ms &middot; 60 Hz sim / 30 Hz render</span>`;
 // compact top legend (color key) + detailed legend below the chart
 let lg='';for(let i=0;i<labels.length;i++)lg+='<span class="sw" style="background:'+colors[i]+'"></span>'+labels[i];
 document.getElementById('lg').innerHTML=lg;
@@ -308,15 +311,15 @@ function draw(){
  const n=view1-view0,bw=w/n;
  const yMax=cap;
  const y=v=>PADT+plot-(v/yMax)*plot;
- ctx.strokeStyle='#30363d';ctx.fillStyle='#8b949e';ctx.font='11px sans-serif';ctx.textAlign='left';
- // Per-vblank reference is the 1-vblank budget. A presented 30fps frame owns
- // TWO vblanks (a render vblank + its sim vblank), so the deadline is a property
- // of that PAIR, not a single bar: the pair must fit 2x this line. The red
- // baseline ticks flag pairs that did not (a slipped 30fps slot).
- ctx.setLineDash([]);
- if(budget<=yMax){ctx.beginPath();ctx.moveTo(0,y(budget));ctx.lineTo(w,y(budget));ctx.stroke();
-   ctx.fillText('1-vblank budget '+fmt(budget)+' cyc / '+ms(budget)+'ms  (30fps frame = render vb + sim vb, the pair must fit 2x)',4,y(budget)-3);}
- // bars
+ // 30fps-frame grouping: tint alternate frames (a render vblank + the sim
+ // vblank(s) until the next render) so the 60 Hz-sim / 30 Hz-render cadence and
+ // the render+sim pairing read at a glance.
+ for(let i=Math.floor(view0);i<Math.ceil(view1);i++){
+   if(i<0||i>=bars.length)continue;
+   if(bars[i].g%2===0){ctx.fillStyle='rgba(120,160,255,0.05)';ctx.fillRect((i-view0)*bw,PADT,bw,plot);}
+ }
+ // bars first, then the budget line ON TOP so the line and its label are never
+ // hidden behind a tall bar.
  for(let i=Math.floor(view0);i<Math.ceil(view1);i++){
    if(i<0||i>=bars.length)continue;
    const b=bars[i],x=(i-view0)*bw;
@@ -331,6 +334,22 @@ function draw(){
    if(b.fc>yMax){ctx.fillStyle='#f85149';ctx.fillRect(x+0.5,PADT,Math.max(1,bw-1),3);}
    if(b.m>0){ctx.fillStyle='#f85149';const mw=Math.min(Math.max(1,bw-1),7);ctx.fillRect(x+(bw-mw)/2,PADT+plot+1,mw,4);}
  }
+ // 1-vblank budget reference: a dotted line drawn over the bars. The wordy
+ // explanation lives in the footer, not on the plot.
+ if(budget<=yMax){
+   ctx.strokeStyle='#a8b1bb';ctx.lineWidth=1;ctx.setLineDash([4,4]);
+   ctx.beginPath();ctx.moveTo(0,y(budget));ctx.lineTo(w,y(budget));ctx.stroke();
+   ctx.setLineDash([]);
+ }
+ // "frame drawn" caret under each render vblank (where the 30 Hz render fires).
+ // Sim-only vblanks get none, so it is clear exactly when a frame is drawn.
+ // Skipped when bars are too thin to read.
+ if(bw>=5){for(let i=Math.floor(view0);i<Math.ceil(view1);i++){
+   if(i<0||i>=bars.length||!bars[i].r)continue;
+   const cx=(i-view0)*bw+bw/2,by=PADT+plot+6;
+   ctx.fillStyle='#f0c674';
+   ctx.beginPath();ctx.moveTo(cx-4,by+5);ctx.lineTo(cx+4,by+5);ctx.lineTo(cx,by);ctx.closePath();ctx.fill();
+ }}
  ctx.fillStyle='#6e7681';ctx.textAlign='center';
  const step=Math.max(1,Math.round(n/12));
  for(let i=Math.ceil(view0);i<view1;i++){if(i%step)continue;ctx.fillText(i,(i-view0)*bw+bw/2,h-8);}
