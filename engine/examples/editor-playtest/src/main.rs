@@ -131,6 +131,7 @@ mod visibility_runtime;
 mod visible_cell_runtime;
 mod vram_runtime;
 mod vram_upload;
+mod vram_upload_queue;
 
 use active_room_cache::*;
 use active_room_streaming::*;
