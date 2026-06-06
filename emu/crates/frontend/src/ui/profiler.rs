@@ -36,6 +36,7 @@ const GUEST_RENDER_BREAKDOWN_STAGES: &[(u16, &str)] = &[
     (stage::EQUIPMENT, "equipment"),
     (stage::WORLD_FLUSH, "flush/sort"),
     (stage::OT_SUBMIT, "ot submit"),
+    (stage::OT_WAIT, "ot wait"),
 ];
 const PROFILE_LOG_STAGE_PER_VISUAL_FIELDS: &[(u16, &str)] = &[
     (stage::FRAME_CLEAR, "guest_clear_v"),
@@ -55,6 +56,7 @@ const PROFILE_LOG_STAGE_PER_VISUAL_FIELDS: &[(u16, &str)] = &[
     (stage::EQUIPMENT, "guest_equipment_v"),
     (stage::WORLD_FLUSH, "guest_flush_v"),
     (stage::OT_SUBMIT, "guest_ot_v"),
+    (stage::OT_WAIT, "guest_ot_wait_v"),
     (stage::PRESENT, "guest_present_v"),
 ];
 const PROFILE_LOG_STAGE_PER_HIT_FIELDS: &[(u16, &str)] = &[

@@ -3,19 +3,38 @@
 
 The profile log writes one row per guest vblank (a `frame_begin` marker fires
 each sim tick, which advances once per display vblank). Column `frame_cycles`
-is the total guest CPU cycles spent in that vblank; the per-stage columns
-(`update`, `render`, `present`, `player`, `room`, ...) break it down.
+is the total guest CPU cycles spent in that vblank; per-stage columns break it
+down.
 
-This tool stacks those stages into per-vblank bars so the 60 Hz-sim / 30 Hz-render
-cadence is visible at a glance: render vblanks carry the whole frame build and
-overflow the one-vblank budget, while the alternate sim-only vblanks run light.
+# How the bars are partitioned (why there is no vague "other")
+
+Every cycle in a bar is attributed to a named band. The partition is anchored
+on three totals that the profiler guarantees are non-overlapping and together
+cover the whole vblank:
+
+    frame_cycles  =  update  +  render  +  present  +  (frame remainder)
+
+`update` is the gameplay sim, `render` is the whole `Scene::render`, `present`
+is the vblank-wait + page-flip. `render` is then split into its leaf
+sub-stages (room, sky, player, props, world_flush, ot_submit, ot_wait, ...);
+whatever those leaves do not cover is the **render remainder** (render-side
+camera/view setup, mid-frame VRAM uploads, glue). The two remainders are
+*derived* from the totals, never a sum of guessed columns, so the bars always
+total `frame_cycles` exactly and a stage reused across passes (e.g. `camera`,
+which runs in both the render pass and the sim pass) is never double-counted:
+its render part stays inside `render`, its sim part inside `update`.
+
+`ot_submit` is the DMA *kick* (CPU); `ot_wait` is the CPU blocked on the OT
+DMA/GPU walk = GPU draw cost. `ot_wait` is ~0 under the emulator, which does
+not model GPU time; it is meaningful only on hardware.
 
 Usage:
-    python3 tools/vblank_chart.py --in /tmp/demo10-vblank.csv --out /tmp/demo10-vblank.html
-    python3 tools/vblank_chart.py --in run.csv --out run.html --title "demo10 gameplay"
+    python3 tools/vblank_chart.py --in /tmp/demo10-vblank.csv --out /tmp/x.html
+    python3 tools/vblank_chart.py --in run.csv --out run.html --title "demo10"
 
 The output is a single self-contained HTML file (scroll = zoom, drag = pan,
-double-click = reset). Summary stats are also printed to stdout.
+double-click = reset) with a full legend below the chart. Summary stats are
+also printed to stdout.
 """
 from __future__ import annotations
 
@@ -26,29 +45,72 @@ import sys
 
 # NTSC: 33.8688 MHz CPU / 60 Hz = one display field.
 ONE_VBLANK_CYCLES = 564480
+CPU_HZ = 33_868_800  # NTSC R3000A clock, for cycles -> ms.
 
-# Stacked series, bottom -> top. Each maps a label/color to the profile columns
-# it sums. `render`/`update` parents are intentionally excluded; we stack their
-# leaf sub-stages so the build cost is legible. Anything left over (frame_cycles
-# minus the sum) lands in the gray "untracked" band so bars always total the
-# real per-vblank cost.
-SERIES = [
-    ("sim / update", "#1f6feb", ["update"]),
-    ("room / sky / world", "#1a7f37",
-     ["frame_clear", "room", "sky", "far_vista", "model_instances",
-      "world_flush", "ot_submit"]),
-    ("props (image / box)", "#2ea043",
-     ["image_props", "box_props", "box_prop_debris", "box_prop_shards",
-      "image_cards", "equipment"]),
-    ("player model", "#3fb950", ["player"]),
-    ("present (vsync / swap)", "#db61a2", ["present"]),
+# Stacked leaf bands, bottom -> top: (key, label, color, [columns to sum],
+# description). `update` is the sim half; the rest are leaf children of the
+# `render` stage. Parents (room/player/models/props) carry only their own
+# column here -- their sub-stages show in the tooltip, and anything a parent
+# does not cover falls into the derived render remainder, never double-counted.
+BANDS = [
+    ("update", "sim: update", "#1f6feb", ["update"],
+     "Gameplay sim for this tick: input, collision, character motor, stream "
+     "residency, and the sim-side camera. Runs every vblank (the 60 Hz sim clock)."),
+    ("frame_clear", "frame clear", "#6e7681", ["frame_clear"],
+     "Clear the back-buffer before drawing the scene."),
+    ("room", "room", "#2f81f7", ["room"],
+     "Cooked room geometry: visible-cell select, GTE vertex projection, surface "
+     "cull/light, packet build. Per-phase room_* detail is in the tooltip."),
+    ("sky", "sky", "#58a6ff", ["sky"],
+     "Cooked sky / cyclorama backdrop."),
+    ("far_vista", "far vista", "#79c0ff", ["far_vista"],
+     "Distant far-vista ring rendered behind the room."),
+    ("props", "props (image/box)", "#2ea043", ["image_props"],
+     "Editor-authored image/card and box props. Box/card detail is in the tooltip."),
+    ("models", "models", "#3fb950", ["model_instances"],
+     "Placed model-instance rendering (whole-model bounds cull + draw)."),
+    ("player", "player", "#56d364", ["player"],
+     "Player model: joint/skinning, GTE projection, face cull + packet build. "
+     "joints/project/faces detail is in the tooltip."),
+    ("equipment", "equipment", "#2dd4bf", ["equipment"],
+     "Player-attached equipment / weapon render + hit-volume evaluation."),
+    ("world_flush", "world flush/sort", "#db61a2", ["world_flush"],
+     "Deferred world-command depth sort + ordering-table insertion (painter sort)."),
+    ("ot_submit", "ot submit (kick)", "#e3a008", ["ot_submit"],
+     "Ordering-table DMA kick: set registers and start the linked-list DMA. "
+     "CPU-side, tiny."),
+    ("ot_wait", "gpu draw (ot wait)", "#e3633a", ["ot_wait"],
+     "Block on the OT DMA/GPU walk = GPU draw cost. ~0 under the emulator (GPU "
+     "time is not modeled); meaningful only on real hardware."),
 ]
-OTHER_COLOR = "#6e7681"
+# Derived remainder after the render leaves (= render - sum(render leaves)).
+RENDER_OTHER = ("render: camera/view + glue", "#768390",
+                "Render time not inside a named sub-stage: render-side camera / "
+                "view-matrix setup, mid-frame VRAM uploads, portal visibility, glue.")
+# Real `present` column, placed after the render block.
+PRESENT_BAND = ("present (wait/swap)", "#8957e5",
+                "Wait for the next vblank + draw_sync + framebuffer page-flip "
+                "(makes the drawn buffer visible). Mostly idle spin when the "
+                "render finished inside its budget.")
+# Derived frame remainder (= frame_cycles - update - render - present).
+FRAME_OTHER = ("idle / loop (vblank wait)", "#373e47",
+               "Whatever is left of the vblank. On sim-only vblanks this is the "
+               "CPU idling until the next vblank after the sim finished -- the "
+               "slack a render-spread could fill. On render vblanks it is just "
+               "main-loop glue (pad poll, scheduler, telemetry markers).")
 
-# Extra columns surfaced only in the hover tooltip (deeper render breakdown).
-TOOLTIP_COLS = ["player", "image_props", "room", "sky", "world_flush",
-                "ot_submit", "present", "update", "current_room",
-                "visual_deadline_misses"]
+# Sub-stage breakdowns surfaced in the tooltip only (NOT stacked), grouped under
+# the parent band they belong to. Shown when non-zero.
+DETAIL = [
+    ("room sub", ["room_visible_list", "room_cell_select", "room_project",
+                  "room_depth_prep", "room_surface_draw"]),
+    ("player sub", ["player_bounds", "player_draw", "textured_model_joints",
+                    "textured_model_project", "textured_model_faces"]),
+    ("props sub", ["box_props", "box_prop_debris", "box_prop_shards", "image_cards"]),
+    ("models sub", ["model_bounds", "model_draw"]),
+    ("cross-pass", ["camera", "portal_visibility", "active_room_window",
+                    "room_surface_cache", "vram_upload", "cd_room_chunk_load"]),
+]
 
 
 def col(header, name):
@@ -94,31 +156,49 @@ def main():
 
     idx_fc = col(header, "frame_cycles")
     idx_render = col(header, "render")
+    idx_present = col(header, "present")
+    idx_miss = col(header, "visual_deadline_misses")
+    idx_room = col(header, "current_room")
     if idx_fc is None:
         sys.exit("error: CSV has no 'frame_cycles' column -- is this a profile-log?")
 
-    series_idx = [(label, color, [col(header, c) for c in cols])
-                  for (label, color, cols) in SERIES]
-    tip_idx = [(c, col(header, c)) for c in TOOLTIP_COLS]
+    # Resolve band columns once.
+    band_idx = [(key, [col(header, c) for c in cols]) for (key, _l, _c, cols, _d) in BANDS]
+    render_leaf_keys = [b[0] for b in BANDS[1:]]  # everything except `update`
+    detail_idx = [(group, [(c, col(header, c)) for c in cols]) for (group, cols) in DETAIL]
+
+    # Stack order = BANDS (12) + render_other + present + frame_other. Reduce
+    # every band to a uniform (label, color, desc) so the three arrays come from
+    # one pass instead of indexing two different tuple shapes by hand.
+    band_meta = [(b[1], b[2], b[4]) for b in BANDS] + [RENDER_OTHER, PRESENT_BAND, FRAME_OTHER]
+    labels = [m[0] for m in band_meta]
+    colors = [m[1] for m in band_meta]
+    descs = [m[2] for m in band_meta]
 
     bars = []
     render_cyc, sim_cyc = [], []
     misses = 0
-    idx_miss = col(header, "visual_deadline_misses")
     for r in rows:
         fc = num(r, idx_fc)
-        stacks = []
-        used = 0
-        for (_label, _color, idxs) in series_idx:
-            v = sum(num(r, i) for i in idxs)
-            stacks.append(v)
-            used += v
-        other = max(0, fc - used)
-        stacks.append(other)
-        is_render = num(r, idx_render) > 0
-        tip = {name: num(r, i) for (name, i) in tip_idx if i is not None}
-        bars.append({"s": stacks, "fc": fc, "r": 1 if is_render else 0,
-                     "m": num(r, idx_miss), "t": tip})
+        render = num(r, idx_render)
+        present_v = num(r, idx_present)
+        vals = {key: sum(num(r, i) for i in idxs) for (key, idxs) in band_idx}
+        render_leaf_sum = sum(vals[k] for k in render_leaf_keys)
+        render_other = max(0, render - render_leaf_sum)
+        frame_other = max(0, fc - vals["update"] - render - present_v)
+        stacks = [vals[b[0]] for b in BANDS] + [render_other, present_v, frame_other]
+
+        is_render = render > 0
+        detail = {}
+        for (group, cols) in detail_idx:
+            for (name, i) in cols:
+                v = num(r, i)
+                if v > 0:
+                    detail[name] = v
+        bars.append({
+            "s": stacks, "fc": fc, "r": 1 if is_render else 0,
+            "m": num(r, idx_miss), "room": num(r, idx_room), "t": detail,
+        })
         (render_cyc if is_render else sim_cyc).append(fc)
         misses += num(r, idx_miss)
 
@@ -128,14 +208,8 @@ def main():
     r_avg = sum(render_cyc) // max(1, len(render_cyc))
     s_avg = sum(sim_cyc) // max(1, len(sim_cyc))
     overall_avg = (sum(render_cyc) + sum(sim_cyc)) // max(1, len(bars))
-    r_over = sum(1 for c in render_cyc if c > budget)
-    # Perfectly-spread target: total work / number of vblanks.
-    spread = overall_avg
 
-    title = args.title or f"per-vblank work — {args.inp.split('/')[-1]}"
-    labels = [s[0] for s in SERIES] + ["untracked"]
-    colors = [s[1] for s in SERIES] + [OTHER_COLOR]
-
+    title = args.title or f"per-vblank work - {args.inp.split('/')[-1]}"
     stats = {
         "vblanks": len(bars),
         "render_vblanks": len(render_cyc),
@@ -143,11 +217,11 @@ def main():
         "render_avg": r_avg,
         "render_p50": percentile(render_cyc, 50),
         "render_max": render_cyc[-1] if render_cyc else 0,
-        "render_over_budget": r_over,
+        "render_over_budget": sum(1 for c in render_cyc if c > budget),
         "sim_avg": s_avg,
         "sim_p50": percentile(sim_cyc, 50),
         "overall_avg": overall_avg,
-        "spread_target": spread,
+        "spread_target": overall_avg,
         "misses": misses,
         "budget": budget,
         "budget2": budget * 2,
@@ -156,8 +230,8 @@ def main():
     # y-axis cap: keep the steady state readable; clip rare streaming stalls.
     cap = max(budget * 2, int(percentile(sorted(b["fc"] for b in bars), 99) * 1.1))
 
-    payload = {"title": title, "labels": labels, "colors": colors,
-               "bars": bars, "stats": stats, "cap": cap}
+    payload = {"title": title, "labels": labels, "colors": colors, "descs": descs,
+               "bars": bars, "stats": stats, "cap": cap, "hz": CPU_HZ}
     html = HTML_TEMPLATE.replace("__DATA__", json.dumps(payload, separators=(",", ":")))
     with open(args.out, "w") as f:
         f.write(html)
@@ -167,7 +241,7 @@ def main():
         return f"{v:>10,} ({v / budget * 100:5.1f}% of 1 vblank)"
     print(f"wrote {args.out}  ({len(bars)} vblanks)")
     print(f"  render vblanks : {len(render_cyc):>4}  avg {pc(r_avg)}  "
-          f"p50 {pc(stats['render_p50'])}  over-budget {r_over}/{len(render_cyc)}")
+          f"p50 {pc(stats['render_p50'])}  over-budget {stats['render_over_budget']}/{len(render_cyc)}")
     print(f"  sim-only       : {len(sim_cyc):>4}  avg {pc(s_avg)}  "
           f"p50 {pc(stats['sim_p50'])}")
     print(f"  overall avg    : {pc(overall_avg)}   <- perfectly-spread target")
@@ -186,26 +260,43 @@ HTML_TEMPLATE = r"""<!DOCTYPE html><html><head><meta charset="utf-8"><title>per-
  #tip{position:absolute;pointer-events:none;background:#161b22;border:1px solid #30363d;border-radius:6px;
    padding:7px 10px;font-size:12px;display:none;box-shadow:0 4px 16px #000a;z-index:5;white-space:nowrap}
  #tip table{border-collapse:collapse}#tip td{padding:0 6px 0 0}#tip td.n{text-align:right;color:#c9d1d9}
+ #tip .hd{color:#8b949e;font-size:11px;text-transform:uppercase;letter-spacing:.04em;padding-top:4px}
  #ft{padding:6px 16px;color:#6e7681;font-size:12px}
+ #legend{padding:10px 16px 24px;border-top:1px solid #21262d}
+ #legend h2{font-size:12px;font-weight:600;color:#8b949e;text-transform:uppercase;letter-spacing:.04em;margin:0 0 8px}
+ .lrow{display:flex;align-items:flex-start;gap:8px;margin:0 0 6px;max-width:1000px}
+ .lsw{flex:0 0 auto;width:12px;height:12px;border-radius:2px;margin-top:2px}
+ .lname{flex:0 0 180px;font-weight:600;color:#c9d1d9}
+ .ldesc{flex:1 1 auto;color:#8b949e}
 </style></head><body>
 <div id="hdr"><h1 id="t"></h1><div id="s"></div></div>
 <div id="lg"></div>
 <div id="wrap"><canvas id="c"></canvas><div id="tip"></div></div>
-<div id="ft">scroll = zoom · drag = pan · double-click = reset &nbsp;·&nbsp; <span style="color:#f85149">red baseline tick</span> = 30fps slot missed (render vb + sim vb &gt; 2 vblanks) &nbsp;·&nbsp; <span style="color:#f85149">red top tick</span> = off-scale stall</div>
+<div id="ft">scroll = zoom &middot; drag = pan &middot; double-click = reset &nbsp;&middot;&nbsp; <span style="color:#f85149">red baseline tick</span> = 30fps slot missed (render vb + sim vb &gt; 2 vblanks) &nbsp;&middot;&nbsp; <span style="color:#f85149">red top tick</span> = off-scale stall</div>
+<div id="legend"><h2>phases (bottom &rarr; top of each bar)</h2><div id="legbody"></div></div>
 <script>
 const D=__DATA__;
 const c=document.getElementById('c'),ctx=c.getContext('2d'),tip=document.getElementById('tip');
-const bars=D.bars,labels=D.labels,colors=D.colors,st=D.stats,cap=D.cap,budget=st.budget;
+const bars=D.bars,labels=D.labels,colors=D.colors,descs=D.descs,st=D.stats,cap=D.cap,budget=st.budget;
 document.getElementById('t').textContent=D.title;
 const fmt=n=>n.toLocaleString();
+const ms=cyc=>(cyc/D.hz*1000).toFixed(2);
+const vbl=cyc=>(cyc/budget).toFixed(2);
+const pctb=cyc=>(cyc/budget*100).toFixed(0);
 document.getElementById('s').innerHTML=
  `<span class=stat>vblanks <b>${st.vblanks}</b></span>`+
- `<span class=stat>render <b>${st.render_vblanks}</b> avg <b>${fmt(st.render_avg)}</b> (${(st.render_avg/budget*100).toFixed(0)}% of 1vb), ${st.render_over_budget} over budget</span>`+
- `<span class=stat>sim-only <b>${st.sim_vblanks}</b> avg <b>${fmt(st.sim_avg)}</b> (${(st.sim_avg/budget*100).toFixed(0)}%)</span>`+
+ `<span class=stat>render <b>${st.render_vblanks}</b> avg <b>${ms(st.render_avg)}ms</b> (${pctb(st.render_avg)}% of 1vb), ${st.render_over_budget} over 1vb</span>`+
+ `<span class=stat>sim-only <b>${st.sim_vblanks}</b> avg <b>${ms(st.sim_avg)}ms</b> (${pctb(st.sim_avg)}%)</span>`+
  `<span class=stat>deadline misses <b>${st.misses}</b></span>`+
- `<span class=stat>spread target <b>${fmt(st.spread_target)}</b>/vb (${(st.spread_target/budget*100).toFixed(0)}%)</span>`;
+ `<span class=stat>spread target <b>${ms(st.spread_target)}ms</b>/vb (${pctb(st.spread_target)}%)</span>`+
+ `<span class=stat style="color:#6e7681">1 vblank = ${ms(budget)}ms</span>`;
+// compact top legend (color key) + detailed legend below the chart
 let lg='';for(let i=0;i<labels.length;i++)lg+='<span class="sw" style="background:'+colors[i]+'"></span>'+labels[i];
 document.getElementById('lg').innerHTML=lg;
+let lb='';for(let i=0;i<labels.length;i++)lb+=
+  `<div class=lrow><span class=lsw style="background:${colors[i]}"></span>`+
+  `<span class=lname>${labels[i]}</span><span class=ldesc>${descs[i]}</span></div>`;
+document.getElementById('legbody').innerHTML=lb;
 
 let view0=0,view1=bars.length,drag=false,dragX=0,dragV0=0,dragV1=0;
 function resize(){c.width=c.clientWidth*devicePixelRatio;c.height=420*devicePixelRatio;c.style.height='420px';ctx.setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0);draw();}
@@ -217,17 +308,14 @@ function draw(){
  const n=view1-view0,bw=w/n;
  const yMax=cap;
  const y=v=>PADT+plot-(v/yMax)*plot;
- // budget gridlines: 1 vblank (solid) and 2 vblanks/30fps (dashed)
  ctx.strokeStyle='#30363d';ctx.fillStyle='#8b949e';ctx.font='11px sans-serif';ctx.textAlign='left';
  // Per-vblank reference is the 1-vblank budget. A presented 30fps frame owns
  // TWO vblanks (a render vblank + its sim vblank), so the deadline is a property
  // of that PAIR, not a single bar: the pair must fit 2x this line. The red
- // baseline ticks flag pairs that did not (a slipped 30fps slot). Do not draw a
- // flat 2-vblank line over single bars; it reads as "bars under here are fine",
- // which is false (one render bar is only half a frame).
+ // baseline ticks flag pairs that did not (a slipped 30fps slot).
  ctx.setLineDash([]);
  if(budget<=yMax){ctx.beginPath();ctx.moveTo(0,y(budget));ctx.lineTo(w,y(budget));ctx.stroke();
-   ctx.fillText('1-vblank budget '+fmt(budget)+'  (30fps frame = render vb + sim vb, the pair must fit 2x)',4,y(budget)-3);}
+   ctx.fillText('1-vblank budget '+fmt(budget)+' cyc / '+ms(budget)+'ms  (30fps frame = render vb + sim vb, the pair must fit 2x)',4,y(budget)-3);}
  // bars
  for(let i=Math.floor(view0);i<Math.ceil(view1);i++){
    if(i<0||i>=bars.length)continue;
@@ -240,12 +328,9 @@ function draw(){
      ctx.fillRect(x+0.5,y1,Math.max(1,bw-1),Math.max(0,y0-y1));
      acc+=v;
    }
-   // off-scale marker for streaming stalls (red tick at top)
    if(b.fc>yMax){ctx.fillStyle='#f85149';ctx.fillRect(x+0.5,PADT,Math.max(1,bw-1),3);}
-   // deadline-miss marker (red tick at baseline)
    if(b.m>0){ctx.fillStyle='#f85149';const mw=Math.min(Math.max(1,bw-1),7);ctx.fillRect(x+(bw-mw)/2,PADT+plot+1,mw,4);}
  }
- // x labels (sparse)
  ctx.fillStyle='#6e7681';ctx.textAlign='center';
  const step=Math.max(1,Math.round(n/12));
  for(let i=Math.ceil(view0);i<view1;i++){if(i%step)continue;ctx.fillText(i,(i-view0)*bw+bw/2,h-8);}
@@ -256,12 +341,17 @@ c.addEventListener('mousemove',ev=>{
  if(drag){const d=at(ev)-(dragV0+((dragX-c.getBoundingClientRect().left)/W())*(dragV1-dragV0));
    view0=dragV0-d;view1=dragV1-d;clampView();draw();tip.style.display='none';return;}
  const i=Math.floor(at(ev));const b=bars[i];if(!b){tip.style.display='none';return;}
- let rows=`<tr><td>vblank</td><td class=n>${i}</td></tr>`+
-   `<tr><td>${b.r?'RENDER':'sim-only'}</td><td class=n>${fmt(b.fc)} cyc</td></tr>`+
-   `<tr><td>% of 1 vblank</td><td class=n>${(b.fc/budget*100).toFixed(0)}%</td></tr>`;
+ let rows=`<tr><td>vblank</td><td class=n>${i} ${b.r?'<span style="color:#56d364">RENDER</span>':'<span style="color:#8b949e">sim-only</span>'} &middot; room ${b.room}</td></tr>`+
+   `<tr><td>total</td><td class=n>${ms(b.fc)} ms &middot; ${vbl(b.fc)} vbl &middot; ${fmt(b.fc)} cyc</td></tr>`;
  if(b.r){const p=bars[i+1];const pair=b.fc+(p&&!p.r?p.fc:0);const miss=pair>st.budget2;
-   rows+=`<tr><td>30fps frame (this+sim vb)</td><td class=n style="color:${miss?'#f85149':'#c9d1d9'}">${fmt(pair)} = ${(pair/st.budget2*100).toFixed(0)}% of 2vb${miss?' (MISS)':''}</td></tr>`;}
- for(const k in b.t)rows+=`<tr><td>${k}</td><td class=n>${fmt(b.t[k])}</td></tr>`;
+   rows+=`<tr><td>30fps frame (this+sim vb)</td><td class=n style="color:${miss?'#f85149':'#c9d1d9'}">${ms(pair)}ms = ${(pair/st.budget2*100).toFixed(0)}% of 2vb${miss?' (MISS)':''}</td></tr>`;}
+ rows+=`<tr><td colspan=2 class=hd>phases (bottom &rarr; top)</td></tr>`;
+ for(let s=0;s<b.s.length;s++){const v=b.s[s];if(v<=0)continue;
+   rows+=`<tr><td><span class=sw style="background:${colors[s]};margin:0 4px 0 0"></span>${labels[s]}</td>`+
+         `<td class=n>${ms(v)}ms (${pctb(v)}%)</td></tr>`;}
+ const dk=Object.keys(b.t);
+ if(dk.length){rows+=`<tr><td colspan=2 class=hd>detail (sub-stages)</td></tr>`;
+   for(const k of dk)rows+=`<tr><td>${k}</td><td class=n>${ms(b.t[k])}ms</td></tr>`;}
  tip.innerHTML=`<table>${rows}</table>`;tip.style.display='block';
  const r=c.getBoundingClientRect();let tx=ev.clientX-r.left+14,ty=ev.clientY-r.top+12;
  if(tx+tip.offsetWidth>W())tx-=tip.offsetWidth+28;tip.style.left=tx+'px';tip.style.top=ty+'px';

@@ -59,6 +59,7 @@ const GUEST_RENDER_BREAKDOWN_STAGES: &[(u16, &str)] = &[
     (telemetry::stage::EQUIPMENT, "equipment"),
     (telemetry::stage::WORLD_FLUSH, "flush/sort"),
     (telemetry::stage::OT_SUBMIT, "ot submit"),
+    (telemetry::stage::OT_WAIT, "ot wait"),
 ];
 
 /// Top-level argument parser. Passed to `clap::Parser::parse()`
@@ -1557,6 +1558,7 @@ const PROFILE_LOG_HEADER: &[&str] = &[
     "textured_model_faces",
     "world_flush",
     "ot_submit",
+    "ot_wait",
     "sim_ticks",
     "visual_frames",
     "visual_skipped_vblanks",
@@ -1771,6 +1773,7 @@ impl GuestProfileLog {
         push!(stage(s::TEXTURED_MODEL_FACES));
         push!(stage(s::WORLD_FLUSH));
         push!(stage(s::OT_SUBMIT));
+        push!(stage(s::OT_WAIT));
         push!(counter_total(&summary, c::SIM_TICKS));
         push!(counter_total(&summary, c::VISUAL_FRAMES));
         push!(counter_total(&summary, c::VISUAL_SKIPPED_VBLANKS));

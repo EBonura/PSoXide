@@ -75,8 +75,11 @@ pub mod stage {
     pub const EQUIPMENT: u16 = 12;
     /// Deferred world-command sort and OT insertion.
     pub const WORLD_FLUSH: u16 = 10;
-    /// Ordering-table DMA submission.
+    /// Ordering-table DMA kick (CPU-side setup; excludes the GPU-draw wait).
     pub const OT_SUBMIT: u16 = 11;
+    /// Blocking wait for the ordering-table DMA walk to finish: the
+    /// CPU-blocked-on-GPU portion of a submit, i.e. GPU draw + DMA cost.
+    pub const OT_WAIT: u16 = 45;
     /// Player collision gather + motor solve (sim).
     pub const SIM_COLLISION: u16 = 36;
     /// Current-room tracking + active-window refresh (sim).
