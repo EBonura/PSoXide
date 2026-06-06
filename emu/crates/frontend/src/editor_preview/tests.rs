@@ -1,13 +1,13 @@
 use super::{
-    face_side_visible, floor_anchored_model_origin, horizontal_triangle_world_points,
-    light_face, material_sized_uvs, material_texture_tint, node_room_local_origin,
-    preview_lights, preview_model_reference, preview_player_reference,
-    preview_projected_triangle_hw_safe, preview_scratch, preview_shadow_radius,
-    preview_static_model_reference, preview_vertices_in_front, push_clear, push_tri,
-    push_wall_face, room_depth_slot, rotate_image_prop_local, setup_gte_for_camera,
-    shadow_depth_slot, should_draw_culled_face_outline, wall_material_sidedness_for_edge,
-    wall_side_visible, yaw_rotation_q12, FaceShade, MaterialSlot, PreviewFog, WallEdge,
-    GRID_TILE_UV, PREVIEW_FLOOR_UVS, PREVIEW_GEOMETRY_SLOT_MAX, PREVIEW_GEOMETRY_SLOT_MIN,
+    face_side_visible, floor_anchored_model_origin, horizontal_triangle_world_points, light_face,
+    material_sized_uvs, material_texture_tint, node_room_local_origin, preview_lights,
+    preview_model_reference, preview_player_reference, preview_projected_triangle_hw_safe,
+    preview_scratch, preview_shadow_radius, preview_static_model_reference,
+    preview_vertices_in_front, push_clear, push_tri, push_wall_face, room_depth_slot,
+    rotate_image_prop_local, setup_gte_for_camera, shadow_depth_slot,
+    should_draw_culled_face_outline, wall_material_sidedness_for_edge, wall_side_visible,
+    yaw_rotation_q12, FaceShade, MaterialSlot, PreviewFog, WallEdge, GRID_TILE_UV,
+    PREVIEW_FLOOR_UVS, PREVIEW_GEOMETRY_SLOT_MAX, PREVIEW_GEOMETRY_SLOT_MIN,
     PREVIEW_SHADOW_DEPTH_BIAS, PREVIEW_SHADOW_RADIUS_MAX, PREVIEW_SHADOW_RADIUS_MIN,
     PREVIEW_WALL_UVS,
 };
@@ -366,9 +366,8 @@ fn portal_edge_height_span_uses_real_adjacent_geometry() {
         .east
         .push(GridVerticalFace::flat(0, 3328, None));
 
-    let corners =
-        super::portal_edge_wall_corners_for_world_cell(&grid, 0, 0, GridDirection::East)
-            .expect("portal wall corners");
+    let corners = super::portal_edge_wall_corners_for_world_cell(&grid, 0, 0, GridDirection::East)
+        .expect("portal wall corners");
 
     assert_eq!(corners[0][1], -104);
     assert_eq!(corners[1][1], -104);
@@ -775,21 +774,11 @@ fn editor_cardinal_wall_front_material_renders_from_owning_cell() {
 
     for (edge, inside_pos, inside_yaw, outside_pos, outside_yaw) in cases {
         assert!(
-            wall_face_emits_from_camera(
-                edge,
-                inside_pos,
-                inside_yaw,
-                MaterialFaceSidedness::Front
-            ),
+            wall_face_emits_from_camera(edge, inside_pos, inside_yaw, MaterialFaceSidedness::Front),
             "{edge:?} wall front material should render from inside the owning cell"
         );
         assert!(
-            !wall_face_emits_from_camera(
-                edge,
-                inside_pos,
-                inside_yaw,
-                MaterialFaceSidedness::Back
-            ),
+            !wall_face_emits_from_camera(edge, inside_pos, inside_yaw, MaterialFaceSidedness::Back),
             "{edge:?} wall back material should not render from inside the owning cell"
         );
         assert!(

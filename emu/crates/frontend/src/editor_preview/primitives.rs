@@ -134,7 +134,10 @@ pub(crate) fn largest_preview_projected_edge(p: [psx_gte::scene::Projected; 3]) 
     edge
 }
 
-pub(crate) fn preview_edge_split_score(a: psx_gte::scene::Projected, b: psx_gte::scene::Projected) -> i32 {
+pub(crate) fn preview_edge_split_score(
+    a: psx_gte::scene::Projected,
+    b: psx_gte::scene::Projected,
+) -> i32 {
     let dx = ((a.sx as i32) - (b.sx as i32)).abs();
     let dy = ((a.sy as i32) - (b.sy as i32)).abs();
     dx.max(dy.saturating_mul(2))
