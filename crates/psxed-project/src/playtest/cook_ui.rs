@@ -816,6 +816,9 @@ pub(crate) fn cook_ui_image_texture_asset(
                     fragment_count
                 )
             },
+            // UI image textures are CD-streamed: empty baked bytes plus
+            // a UI.PAK payload loaded on demand on menu entry.
+            streamed: true,
         });
         fragments.push(CookedUiImageFragment { asset_index, width });
         source_x = source_x.saturating_add(width);
