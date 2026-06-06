@@ -113,6 +113,7 @@ mod cd_stream;
 mod debug_runtime;
 mod image_props_runtime;
 mod input;
+mod marker_runtime;
 mod model_rendering;
 mod overlay;
 mod particle_runtime;
@@ -127,6 +128,7 @@ use box_props::*;
 use debug_runtime::*;
 use image_props_runtime::*;
 use input::*;
+use marker_runtime::*;
 use model_rendering::*;
 use overlay::*;
 use particle_runtime::*;
@@ -228,11 +230,6 @@ const MAX_RUNTIME_UI_FONTS: usize = 4;
 /// Resource-set key shared by every flow state: the UI font atlas is used by
 /// the menus and the gameplay HUD, so it is acquired once and never torn down.
 const UI_FONT_RESOURCE_KEY: u32 = 1;
-const TARGET_LOCK_OUTER: i32 = 25;
-const TARGET_LOCK_INNER: i32 = 13;
-const TARGET_LOCK_TRI_HALF_WIDTH: i32 = 8;
-const TARGET_LOCK_RED: (u8, u8, u8) = (225, 18, 24);
-const TARGET_LOCK_ROTATION_FRAMES: u32 = 360;
 static SHADOW_CIRCLE_BLOB: &[u8] = include_bytes!("../assets/shadow_circle_64.psxt");
 /// Shadow decals share the shadow/particle 4bpp page allocated by the unified
 /// VRAM allocator. UVs are page-relative, so only the page base moves.
@@ -609,12 +606,6 @@ const PROP_PARTICLE_GTE_PROJECT_ENABLED: bool =
 const BOX_PROP_GTE_PROJECT_ENABLED: bool = true;
 const BOX_PROP_PROFILE_ENABLED: bool = option_env!("PSXO_PROFILE_BOX_PROPS").is_some();
 
-/// Marker visualization tuning. Markers are debug stubs -- keep
-/// them visible at orbit-camera scales without dominating the
-/// scene.
-const MARKER_HALF: i32 = 96;
-const MARKER_LIFT: i32 = MARKER_HALF;
-const MARKER_TINT: (u8, u8, u8) = (0xff, 0xa8, 0x40);
 static mut OT: OrderingTable<OT_DEPTH> = OrderingTable::new();
 static mut PRIMITIVE_PACKETS: PrimitivePacketScratch<MAX_TEXTURED_TRIS> =
     PrimitivePacketScratch::ZERO;
@@ -3693,137 +3684,6 @@ fn mul_q12_i32(value: i32, q12: i32) -> i32 {
     whole
         .saturating_mul(q12)
         .saturating_add(fraction.saturating_mul(q12) >> Q12::FRACTIONAL_BITS)
-}
-
-/// Draw one tinted cube per generated entity record. Cubes
-/// reuse the room's first material with an override tint so
-/// markers stand out from the surrounding geometry without
-/// needing a dedicated texture upload.
-fn draw_entity_markers(
-    entities: &[EntityRecord],
-    current_room: RoomIndex,
-    materials: &[WorldRenderMaterial],
-    camera: &WorldCamera,
-    options: WorldSurfaceOptions,
-    triangles: &mut impl PrimitiveSink<TriTextured>,
-    world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
-) {
-    if entities.is_empty() || materials.is_empty() {
-        return;
-    }
-    // Reuse the room's first material so we don't need a
-    // dedicated marker texture. Tint override picks up the
-    // existing CLUT + tpage but recolours.
-    let material = materials[0].texture.with_tint(MARKER_TINT);
-    let opts = options.with_material_layer(material);
-    const UVS: [(u8, u8); 4] = [(0, 0), (64, 0), (64, 64), (0, 64)];
-
-    for entity in entities {
-        if entity.room != current_room {
-            continue;
-        }
-        let cx = entity.x;
-        let cy = entity.y - MARKER_LIFT - MARKER_HALF;
-        let cz = entity.z;
-        let h = MARKER_HALF;
-
-        let top = [
-            WorldVertex::new(cx - h, cy - h, cz - h),
-            WorldVertex::new(cx + h, cy - h, cz - h),
-            WorldVertex::new(cx + h, cy - h, cz + h),
-            WorldVertex::new(cx - h, cy - h, cz + h),
-        ];
-        let bottom = [
-            WorldVertex::new(cx - h, cy + h, cz + h),
-            WorldVertex::new(cx + h, cy + h, cz + h),
-            WorldVertex::new(cx + h, cy + h, cz - h),
-            WorldVertex::new(cx - h, cy + h, cz - h),
-        ];
-        let north = [
-            WorldVertex::new(cx - h, cy - h, cz - h),
-            WorldVertex::new(cx + h, cy - h, cz - h),
-            WorldVertex::new(cx + h, cy + h, cz - h),
-            WorldVertex::new(cx - h, cy + h, cz - h),
-        ];
-        let south = [
-            WorldVertex::new(cx + h, cy - h, cz + h),
-            WorldVertex::new(cx - h, cy - h, cz + h),
-            WorldVertex::new(cx - h, cy + h, cz + h),
-            WorldVertex::new(cx + h, cy + h, cz + h),
-        ];
-        let east = [
-            WorldVertex::new(cx + h, cy - h, cz - h),
-            WorldVertex::new(cx + h, cy - h, cz + h),
-            WorldVertex::new(cx + h, cy + h, cz + h),
-            WorldVertex::new(cx + h, cy + h, cz - h),
-        ];
-        let west = [
-            WorldVertex::new(cx - h, cy - h, cz + h),
-            WorldVertex::new(cx - h, cy - h, cz - h),
-            WorldVertex::new(cx - h, cy + h, cz - h),
-            WorldVertex::new(cx - h, cy + h, cz + h),
-        ];
-
-        for face in [top, bottom, north, south, east, west] {
-            if let Some(projected) = camera.project_world_quad(face) {
-                let _ = world.submit_textured_quad(triangles, projected, UVS, material, opts);
-            }
-        }
-    }
-}
-
-fn draw_lock_target_indicator(target: RoomPoint, camera: WorldCamera, elapsed_tick: SimTick) {
-    let Some(center) = camera.project_world(target) else {
-        return;
-    };
-
-    let outer = TARGET_LOCK_OUTER;
-    let inner = TARGET_LOCK_INNER;
-    let half_width = TARGET_LOCK_TRI_HALF_WIDTH;
-    let angle = Angle::per_frames(TARGET_LOCK_ROTATION_FRAMES).mul_tick(elapsed_tick);
-    let triangles = [
-        [
-            target_screen_vertex(center, 0, -inner, angle),
-            target_screen_vertex(center, -half_width, -outer, angle),
-            target_screen_vertex(center, half_width, -outer, angle),
-        ],
-        [
-            target_screen_vertex(center, 0, inner, angle),
-            target_screen_vertex(center, half_width, outer, angle),
-            target_screen_vertex(center, -half_width, outer, angle),
-        ],
-        [
-            target_screen_vertex(center, -inner, 0, angle),
-            target_screen_vertex(center, -outer, half_width, angle),
-            target_screen_vertex(center, -outer, -half_width, angle),
-        ],
-        [
-            target_screen_vertex(center, inner, 0, angle),
-            target_screen_vertex(center, outer, -half_width, angle),
-            target_screen_vertex(center, outer, half_width, angle),
-        ],
-    ];
-
-    for triangle in triangles {
-        draw_tri_flat_blended(
-            triangle,
-            TARGET_LOCK_RED.0,
-            TARGET_LOCK_RED.1,
-            TARGET_LOCK_RED.2,
-            BlendMode::Average,
-        );
-    }
-}
-
-fn target_screen_vertex(center: ProjectedVertex, ox: i32, oy: i32, angle: Angle) -> (i16, i16) {
-    let sin = angle.sin_q12();
-    let cos = angle.cos_q12();
-    let rx = ((ox.saturating_mul(cos)).saturating_sub(oy.saturating_mul(sin))) >> 12;
-    let ry = ((ox.saturating_mul(sin)).saturating_add(oy.saturating_mul(cos))) >> 12;
-    (
-        clamp_i16((center.sx as i32).saturating_add(rx)),
-        clamp_i16((center.sy as i32).saturating_add(ry)),
-    )
 }
 
 fn playtest_visual_pacing(video_mode: VideoMode) -> VisualPacing {
