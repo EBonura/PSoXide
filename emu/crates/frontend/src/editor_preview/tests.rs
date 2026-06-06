@@ -1,0 +1,1106 @@
+use super::{
+    face_side_visible, floor_anchored_model_origin, horizontal_triangle_world_points,
+    light_face, material_sized_uvs, material_texture_tint, node_room_local_origin,
+    preview_lights, preview_model_reference, preview_player_reference,
+    preview_projected_triangle_hw_safe, preview_scratch, preview_shadow_radius,
+    preview_static_model_reference, preview_vertices_in_front, push_clear, push_tri,
+    push_wall_face, room_depth_slot, rotate_image_prop_local, setup_gte_for_camera,
+    shadow_depth_slot, should_draw_culled_face_outline, wall_material_sidedness_for_edge,
+    wall_side_visible, yaw_rotation_q12, FaceShade, MaterialSlot, PreviewFog, WallEdge,
+    GRID_TILE_UV, PREVIEW_FLOOR_UVS, PREVIEW_GEOMETRY_SLOT_MAX, PREVIEW_GEOMETRY_SLOT_MIN,
+    PREVIEW_SHADOW_DEPTH_BIAS, PREVIEW_SHADOW_RADIUS_MAX, PREVIEW_SHADOW_RADIUS_MIN,
+    PREVIEW_WALL_UVS,
+};
+use psx_engine::{PointLightSample, WorldVertex};
+use psx_gpu::material::BlendMode;
+use psx_gte::scene::Projected;
+use psxed_project::portal_rooms::PortalEdge;
+use psxed_project::{
+    Corner, GridDirection, GridSplit, GridUvTransform, GridVerticalFace, MaterialFaceSidedness,
+    MaterialResource, NodeId, NodeKind, ProjectDocument, ResourceData, WorldGrid,
+};
+use psxed_ui::{ViewportCameraMode, ViewportCameraState};
+
+fn flat(r: u8, g: u8, b: u8) -> FaceShade {
+    FaceShade::Flat {
+        rgb: (r, g, b),
+        sidedness: psxed_project::MaterialFaceSidedness::Front,
+    }
+}
+
+fn flat_sided(r: u8, g: u8, b: u8, sidedness: MaterialFaceSidedness) -> FaceShade {
+    FaceShade::Flat {
+        rgb: (r, g, b),
+        sidedness,
+    }
+}
+
+fn unpack(shade: FaceShade) -> (u8, u8, u8) {
+    match shade {
+        FaceShade::Flat { rgb, .. } => rgb,
+        FaceShade::Textured { tint, .. } => tint,
+    }
+}
+
+fn address_window(addr: usize) -> usize {
+    addr & !(super::OT_ADDRESS_WINDOW_BYTES - 1)
+}
+
+fn assert_same_ot_window<T>(label: &str, ot_window: usize, value: &T) {
+    let start = value as *const T as usize;
+    let end = start + core::mem::size_of::<T>().saturating_sub(1);
+    assert_eq!(address_window(start), ot_window, "{label} start");
+    assert_eq!(address_window(end), ot_window, "{label} end");
+}
+
+fn headless_preview_renderer() -> Option<psx_gpu_render::HwRenderer> {
+    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::PRIMARY,
+        ..Default::default()
+    });
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        compatible_surface: None,
+        force_fallback_adapter: false,
+    }))?;
+    let (device, queue) = pollster::block_on(adapter.request_device(
+        &wgpu::DeviceDescriptor {
+            label: Some("editor-preview-test-device"),
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::default(),
+            memory_hints: wgpu::MemoryHints::Performance,
+        },
+        None,
+    ))
+    .ok()?;
+    Some(psx_gpu_render::HwRenderer::new_headless(device, queue))
+}
+
+fn count_nonblack_rgba(rgba: &[u8]) -> usize {
+    rgba.chunks_exact(4)
+        .filter(|px| px[0] != 0 || px[1] != 0 || px[2] != 0)
+        .count()
+}
+
+#[test]
+fn preview_scratch_packet_arenas_share_one_ot_address_window() {
+    let scratch = preview_scratch()
+        .lock()
+        .expect("editor preview scratch mutex");
+    let ot_window = address_window(scratch.ot.submit_head() as usize);
+
+    assert_same_ot_window("ordering table", ot_window, &scratch.ot);
+    assert_same_ot_window("clear packet", ot_window, &scratch.clear_packet);
+    assert_same_ot_window("sky quads", ot_window, &scratch.sky_quads);
+    assert_same_ot_window("far vista quads", ot_window, &scratch.far_vista_quads);
+    assert_same_ot_window("flat tris", ot_window, &scratch.tris);
+    assert_same_ot_window("textured tris", ot_window, &scratch.tex_tris);
+}
+
+#[test]
+fn preview_scratch_command_log_walk_terminates() {
+    let mut scratch = preview_scratch()
+        .lock()
+        .expect("editor preview scratch mutex");
+    scratch.used = 0;
+    scratch.tex_used = 0;
+    scratch.overlay_lines.clear();
+    scratch.ot.clear();
+
+    push_clear(&mut scratch, [0, 0, 0]);
+    assert!(push_tri(
+        &mut scratch,
+        [
+            Projected {
+                sx: 0,
+                sy: 0,
+                sz: 256,
+            },
+            Projected {
+                sx: 32,
+                sy: 0,
+                sz: 256,
+            },
+            Projected {
+                sx: 0,
+                sy: 32,
+                sz: 256,
+            },
+        ],
+        (255, 0, 0),
+    ));
+
+    let log = unsafe { psx_gpu_render::build_cmd_log(&scratch.ot) };
+    assert_eq!(log.len(), 2);
+    assert_eq!(log[0].opcode, 0x02);
+    assert_eq!(log[1].opcode, 0x20);
+}
+
+#[test]
+fn demo10_preview_frame_contains_draw_commands() {
+    let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .canonicalize()
+        .expect("repo root");
+    let project_root = repo_root.join("editor/projects/demo10");
+    let project =
+        ProjectDocument::load_from_path(project_root.join("project.ron")).expect("demo10");
+    let mut textures = crate::editor_textures::EditorTextures::new();
+    textures.refresh(&project, &project_root);
+    textures.refresh_models(&project, &project_root);
+    let mut assets = crate::editor_assets::EditorAssets::new();
+    assets.refresh(&project, &project_root);
+
+    let camera = ViewportCameraState {
+        mode: ViewportCameraMode::Orbit,
+        yaw_q12: 320,
+        pitch_q12: 300,
+        radius: 8192,
+        target: [2048, 512, 2048],
+        position: [0, 0, 0],
+    };
+    let empty_hidden = std::collections::HashSet::new();
+    let frame = super::build_phase1_frame(
+        &project,
+        camera,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        &empty_hidden,
+        None,
+        0,
+        NodeId::ROOT,
+        None,
+        None,
+        &[],
+        &[],
+        None,
+        &[],
+        None,
+        &[],
+        None,
+        &textures,
+        &assets,
+    );
+
+    let draw_count = frame
+        .cmd_log
+        .iter()
+        .filter(|entry| matches!(entry.opcode, 0x20..=0x7F))
+        .count();
+    let mut translator = psx_gpu_render::Translator::new();
+    let translated = translator.translate(&frame.cmd_log);
+    let nonblack_vertices = translated
+        .vertices
+        .iter()
+        .filter(|v| v.color[0] != 0 || v.color[1] != 0 || v.color[2] != 0)
+        .count();
+    assert!(
+        draw_count > 0,
+        "demo10 preview should emit draw commands; opcodes={:?}",
+        frame
+            .cmd_log
+            .iter()
+            .map(|entry| entry.opcode)
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        translated.total() > 0,
+        "demo10 preview should translate to vertices"
+    );
+    assert!(
+        nonblack_vertices > 0,
+        "demo10 preview should contain visible non-black vertices"
+    );
+
+    if let Some(mut renderer) = headless_preview_renderer() {
+        assert!(renderer.set_internal_scale(2, None));
+        let vram = textures.vram_words();
+        renderer.render_frame(&emulator_core::Gpu::new(), &frame.cmd_log, vram);
+        let scale = renderer.internal_scale();
+        let (_, _, rgba) = renderer.read_subrect_rgba8(0, 0, 320 * scale, 240 * scale);
+        assert!(
+            count_nonblack_rgba(&rgba) > 0,
+            "demo10 preview should render non-black pixels"
+        );
+    }
+}
+
+fn fog(rgb: (u8, u8, u8), near: i32, far: i32) -> PreviewFog {
+    PreviewFog {
+        enabled: true,
+        rgb,
+        near,
+        far,
+    }
+}
+
+#[test]
+fn image_prop_overlay_rotation_applies_roll() {
+    let rotated = rotate_image_prop_local([0, 512, 0], [0, 0, 1024]);
+    assert_eq!(rotated, [-512, 0, 0]);
+}
+
+#[test]
+fn image_prop_overlay_rotation_applies_yaw_q12_quarter_turn() {
+    let rotated = rotate_image_prop_local([512, 0, 0], [0, 1024, 0]);
+    assert_eq!(rotated, [0, 0, -512]);
+}
+
+#[test]
+fn model_preview_yaw_matrix_uses_q12_quarter_turn() {
+    let rotation = yaw_rotation_q12(1024);
+    assert_eq!(rotation.m, [[0, 0, 4096], [0, 4096, 0], [-4096, 0, 0]]);
+}
+
+fn projected(sx: i16, sy: i16) -> Projected {
+    Projected { sx, sy, sz: 100 }
+}
+
+#[test]
+fn textured_preview_uses_authored_material_tint() {
+    let mut project = ProjectDocument::new("test");
+    let texture = project.add_resource(
+        "Brick Texture",
+        ResourceData::Texture {
+            psxt_path: "brick.psxt".to_string(),
+        },
+    );
+    let mut material = MaterialResource::opaque(Some(texture));
+    material.tint = [0x60, 0x70, 0x90];
+    let material = project.add_resource("Brick Wall", ResourceData::Material(material));
+
+    assert_eq!(
+        material_texture_tint(&project, material),
+        (0x60, 0x70, 0x90)
+    );
+}
+
+#[test]
+fn wall_preview_uvs_use_runtime_grid_tile_span() {
+    let transform = GridUvTransform {
+        span: [0, 128],
+        ..GridUvTransform::IDENTITY
+    };
+
+    assert_eq!(
+        transform.apply_to_quad(PREVIEW_WALL_UVS),
+        [(0, 128), (64, 128), (64, 0), (0, 0)]
+    );
+}
+
+#[test]
+fn horizontal_preview_points_use_triangle_local_heights() {
+    let corners = psxed_project::horizontal_triangle_corners(GridSplit::NorthWestSouthEast, 0);
+    assert_eq!(corners, [Corner::NW, Corner::NE, Corner::SE]);
+    assert_eq!(
+        horizontal_triangle_world_points([0, 1024, 0, 1024], corners, [64, 128, 192]),
+        [[0, 64, 1024], [1024, 128, 1024], [1024, 192, 0]]
+    );
+}
+
+#[test]
+fn portal_seam_runs_coalesce_connected_edges() {
+    let runs = super::portal_seam_runs(vec![
+        PortalEdge {
+            x: 2,
+            z: 0,
+            direction: GridDirection::North,
+        },
+        PortalEdge {
+            x: 0,
+            z: 0,
+            direction: GridDirection::North,
+        },
+        PortalEdge {
+            x: 1,
+            z: 0,
+            direction: GridDirection::North,
+        },
+        PortalEdge {
+            x: 4,
+            z: 2,
+            direction: GridDirection::East,
+        },
+        PortalEdge {
+            x: 4,
+            z: 3,
+            direction: GridDirection::East,
+        },
+    ]);
+
+    assert_eq!(
+        runs,
+        vec![
+            super::PortalSeamRun {
+                start: PortalEdge {
+                    x: 0,
+                    z: 0,
+                    direction: GridDirection::North,
+                },
+                len: 3,
+            },
+            super::PortalSeamRun {
+                start: PortalEdge {
+                    x: 4,
+                    z: 2,
+                    direction: GridDirection::East,
+                },
+                len: 2,
+            },
+        ]
+    );
+}
+
+#[test]
+fn portal_edge_height_span_uses_real_adjacent_geometry() {
+    let mut grid = WorldGrid::empty(2, 1, 2048);
+    grid.set_floor(0, 0, -128, None);
+    grid.set_floor(1, 0, 64, None);
+    grid.ensure_sector(1, 0)
+        .unwrap()
+        .walls
+        .east
+        .push(GridVerticalFace::flat(0, 3328, None));
+
+    let corners =
+        super::portal_edge_wall_corners_for_world_cell(&grid, 0, 0, GridDirection::East)
+            .expect("portal wall corners");
+
+    assert_eq!(corners[0][1], -104);
+    assert_eq!(corners[1][1], -104);
+    assert_eq!(corners[2][1], 3328);
+    assert_eq!(corners[3][1], 3328);
+}
+
+#[test]
+fn visible_room_grids_keeps_all_non_hidden_rooms() {
+    let mut project = ProjectDocument::new("test");
+    let scene = project.active_scene_mut();
+    let room_a = scene.add_node(
+        scene.root,
+        "Room A",
+        NodeKind::Room {
+            grid: WorldGrid::empty(1, 1, 1024),
+        },
+    );
+    let room_b = scene.add_node(
+        scene.root,
+        "Room B",
+        NodeKind::Room {
+            grid: WorldGrid::empty(1, 1, 1024),
+        },
+    );
+
+    let mut hidden = std::collections::HashSet::new();
+    let visible = super::visible_room_grids(&project, &hidden)
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect::<Vec<_>>();
+    assert_eq!(visible, vec![room_a, room_b]);
+
+    hidden.insert(room_a);
+    let visible = super::visible_room_grids(&project, &hidden)
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect::<Vec<_>>();
+    assert_eq!(visible, vec![room_b]);
+}
+
+#[test]
+fn preview_room_grids_walks_bounded_portal_neighborhood() {
+    let mut project = ProjectDocument::new("test");
+    let scene = project.active_scene_mut();
+    let room_a = scene.add_node(
+        scene.root,
+        "Room A",
+        NodeKind::Room {
+            grid: WorldGrid::empty(1, 1, 1024),
+        },
+    );
+    let room_b = scene.add_node(
+        scene.root,
+        "Room B",
+        NodeKind::Room {
+            grid: WorldGrid::empty(1, 1, 1024),
+        },
+    );
+    let room_c = scene.add_node(
+        scene.root,
+        "Room C",
+        NodeKind::Room {
+            grid: WorldGrid::empty(1, 1, 1024),
+        },
+    );
+    let room_d = scene.add_node(
+        scene.root,
+        "Room D",
+        NodeKind::Room {
+            grid: WorldGrid::empty(1, 1, 1024),
+        },
+    );
+    let room_e = scene.add_node(
+        scene.root,
+        "Room E",
+        NodeKind::Room {
+            grid: WorldGrid::empty(1, 1, 1024),
+        },
+    );
+    let room_far = scene.add_node(
+        scene.root,
+        "Room Far",
+        NodeKind::Room {
+            grid: WorldGrid::empty(1, 1, 1024),
+        },
+    );
+    for (source, target) in [
+        (room_a, room_b),
+        (room_b, room_c),
+        (room_c, room_d),
+        (room_d, room_e),
+    ] {
+        scene.add_node(
+            source,
+            "Portal",
+            NodeKind::Portal {
+                target_room: Some(target),
+                target_entry: String::new(),
+                entry_name: String::new(),
+                geometry: None,
+            },
+        );
+    }
+
+    let hidden = std::collections::HashSet::new();
+    let visible = super::preview_room_grids(
+        &project,
+        &hidden,
+        Some(room_a),
+        0,
+        NodeId::ROOT,
+        None,
+        &[],
+        &[],
+    )
+    .into_iter()
+    .map(|entry| entry.room)
+    .collect::<Vec<_>>();
+
+    assert_eq!(visible, vec![room_a, room_b, room_c, room_d]);
+    assert!(!visible.contains(&room_e));
+    assert!(!visible.contains(&room_far));
+}
+
+/// Sims-style floor view: the active floor is the working plane at
+/// y_offset 0 (so the ray pick, which tests the active floor's
+/// floor-local faces, aligns with what's drawn), floors BELOW render
+/// descending (negative offset), and floors ABOVE are hidden. This is
+/// what keeps selection on the floor you're editing.
+#[test]
+fn preview_room_grids_shows_active_floor_and_below_only() {
+    let mut project = ProjectDocument::new("test");
+    let scene = project.active_scene_mut();
+    let mut grid = WorldGrid::empty(1, 1, 1024);
+    grid.push_floor(); // floor 1
+    grid.push_floor(); // floor 2
+    let room = scene.add_node(scene.root, "Stacked", NodeKind::Room { grid });
+
+    let hidden = std::collections::HashSet::new();
+    // Active floor = 1 (middle of three).
+    let floors = super::preview_room_grids(
+        &project,
+        &hidden,
+        Some(room),
+        1,
+        NodeId::ROOT,
+        None,
+        &[],
+        &[],
+    );
+    let entries: Vec<(usize, i32, bool)> = floors
+        .iter()
+        .filter(|f| f.room == room)
+        .map(|f| (f.floor_index, f.y_offset, f.active))
+        .collect();
+
+    // Floors 0 and 1 only (the active floor and the one below); floor
+    // 2 (above) is hidden.
+    assert_eq!(entries.len(), 2, "active + below only: {entries:?}");
+    assert!(
+        entries
+            .iter()
+            .any(|&(i, off, act)| i == 1 && off == 0 && act),
+        "active floor 1 at y_offset 0: {entries:?}"
+    );
+    let below = entries
+        .iter()
+        .find(|&&(i, _, _)| i == 0)
+        .expect("floor 0 below");
+    assert!(
+        below.1 < 0,
+        "floor below descends (negative y_offset): {below:?}"
+    );
+    assert!(
+        !entries.iter().any(|&(i, _, _)| i == 2),
+        "floor above hidden"
+    );
+}
+
+#[test]
+fn component_model_reference_reads_renderer_and_animator_children() {
+    let mut project = ProjectDocument::new("test");
+    let model_id = project.add_resource(
+        "Dummy",
+        ResourceData::Texture {
+            psxt_path: "dummy.psxt".to_string(),
+        },
+    );
+    let scene = project.active_scene_mut();
+    let actor = scene.add_node(scene.root, "Enemy", NodeKind::Entity);
+    let renderer = scene.add_node(
+        actor,
+        "Model Renderer",
+        NodeKind::ModelRenderer {
+            model: Some(model_id),
+            material: None,
+            visual_offset: [0; 3],
+            visual_scale_q8: psxed_project::MODEL_SCALE_ONE_Q8,
+        },
+    );
+    let animator = scene.add_node(
+        actor,
+        "Animator",
+        NodeKind::Animator {
+            clip: Some(3),
+            action_clips: Vec::new(),
+            autoplay: true,
+            pose_frame: 0,
+        },
+    );
+
+    let scene = project.active_scene();
+    let reference = preview_model_reference(scene, scene.node(actor).unwrap()).unwrap();
+
+    assert_eq!(reference.model_id, model_id);
+    assert_eq!(reference.clip_override, Some(3));
+    assert!(reference.autoplay);
+    assert_eq!(reference.renderer_node, Some(renderer));
+    assert_eq!(reference.animator_node, Some(animator));
+}
+
+#[test]
+fn component_player_reference_reads_controller_renderer_and_animator_children() {
+    let mut project = ProjectDocument::new("test");
+    let character_id = project.add_resource(
+        "Dummy",
+        ResourceData::Texture {
+            psxt_path: "dummy.psxt".to_string(),
+        },
+    );
+    let scene = project.active_scene_mut();
+    let actor = scene.add_node(scene.root, "Player", NodeKind::Entity);
+    let controller = scene.add_node(
+        actor,
+        "Character Controller",
+        NodeKind::CharacterController {
+            character: Some(character_id),
+            player: true,
+            settings: Default::default(),
+        },
+    );
+    let renderer = scene.add_node(
+        actor,
+        "Model Renderer",
+        NodeKind::ModelRenderer {
+            model: None,
+            material: None,
+            visual_offset: [0; 3],
+            visual_scale_q8: psxed_project::MODEL_SCALE_ONE_Q8,
+        },
+    );
+    let animator = scene.add_node(
+        actor,
+        "Animator",
+        NodeKind::Animator {
+            clip: Some(2),
+            action_clips: Vec::new(),
+            autoplay: false,
+            pose_frame: 0,
+        },
+    );
+
+    let scene = project.active_scene();
+    let reference = preview_player_reference(scene, scene.node(actor).unwrap()).unwrap();
+
+    assert_eq!(reference.character, Some(character_id));
+    assert_eq!(reference.controller_node, Some(controller));
+    assert_eq!(reference.renderer_node, Some(renderer));
+    assert_eq!(reference.animator_node, Some(animator));
+    assert_eq!(reference.clip_override, Some(2));
+    assert!(!reference.autoplay);
+}
+
+#[test]
+fn player_controlled_entity_does_not_static_preview_model_renderer() {
+    let mut project = ProjectDocument::new("test");
+    let model_id = project.add_resource(
+        "Dummy Model",
+        ResourceData::Texture {
+            psxt_path: "dummy.psxt".to_string(),
+        },
+    );
+    let character_id = project.add_resource(
+        "Dummy Character",
+        ResourceData::Texture {
+            psxt_path: "dummy-character.psxt".to_string(),
+        },
+    );
+    let scene = project.active_scene_mut();
+    let actor = scene.add_node(scene.root, "Player", NodeKind::Entity);
+    scene.add_node(
+        actor,
+        "Model Renderer",
+        NodeKind::ModelRenderer {
+            model: Some(model_id),
+            material: None,
+            visual_offset: [0; 3],
+            visual_scale_q8: psxed_project::MODEL_SCALE_ONE_Q8,
+        },
+    );
+    scene.add_node(
+        actor,
+        "Character Controller",
+        NodeKind::CharacterController {
+            character: Some(character_id),
+            player: true,
+            settings: Default::default(),
+        },
+    );
+
+    let scene = project.active_scene();
+    let actor_node = scene.node(actor).unwrap();
+    assert!(
+        preview_model_reference(scene, actor_node).is_some(),
+        "the raw renderer reference is still present"
+    );
+    assert!(
+        preview_static_model_reference(scene, actor_node).is_none(),
+        "player-controlled renderers are drawn by the player preview path"
+    );
+}
+
+#[test]
+fn point_light_uses_own_transform() {
+    let mut project = ProjectDocument::new("test");
+    let scene = project.active_scene_mut();
+    let host = scene.add_node(scene.root, "Lamp", NodeKind::Entity);
+    scene.node_mut(host).unwrap().transform.translation = [2.0, 0.5, 3.0];
+    let light = scene.add_node(
+        scene.root,
+        "Point Light",
+        NodeKind::PointLight {
+            color: [1, 2, 3],
+            intensity: 0.75,
+            radius: 4.0,
+        },
+    );
+    scene.node_mut(light).unwrap().transform.translation = [99.0, 99.0, 99.0];
+
+    let hidden = std::collections::HashSet::new();
+    let lights = preview_lights(project.active_scene(), &hidden);
+
+    assert_eq!(lights.len(), 1);
+    assert_eq!(lights[0].host_id, light);
+    assert_eq!(lights[0].transform.translation, [99.0, 99.0, 99.0]);
+    assert_eq!(lights[0].color, [1, 2, 3]);
+    assert_eq!(lights[0].intensity, 0.75);
+    assert_eq!(lights[0].radius, 4.0);
+}
+
+#[test]
+fn face_sidedness_matches_runtime_winding_convention() {
+    let front = [projected(0, 0), projected(10, 0), projected(0, 10)];
+    let back = [front[0], front[2], front[1]];
+
+    assert!(face_side_visible(MaterialFaceSidedness::Front, front));
+    assert!(!face_side_visible(MaterialFaceSidedness::Front, back));
+    assert!(!face_side_visible(MaterialFaceSidedness::Back, front));
+    assert!(face_side_visible(MaterialFaceSidedness::Back, back));
+    assert!(face_side_visible(MaterialFaceSidedness::Both, front));
+    assert!(face_side_visible(MaterialFaceSidedness::Both, back));
+}
+
+#[test]
+fn preview_rejects_triangles_outside_psx_packet_extent() {
+    assert!(preview_projected_triangle_hw_safe([
+        projected(0, 0),
+        projected(64, 0),
+        projected(0, 64),
+    ]));
+    assert!(!preview_projected_triangle_hw_safe([
+        projected(-1024, 0),
+        projected(1023, 0),
+        projected(0, 16),
+    ]));
+    assert!(!preview_projected_triangle_hw_safe([
+        projected(0, -512),
+        projected(16, 512),
+        projected(0, 0),
+    ]));
+}
+
+#[test]
+fn editor_cardinal_wall_front_material_renders_from_owning_cell() {
+    let cases = [
+        (WallEdge::North, [512, 512, 512], 2048, [512, 512, 1536], 0),
+        (
+            WallEdge::East,
+            [512, 512, 512],
+            3072,
+            [1536, 512, 512],
+            1024,
+        ),
+        (WallEdge::South, [512, 512, 512], 0, [512, 512, -512], 2048),
+        (
+            WallEdge::West,
+            [512, 512, 512],
+            1024,
+            [-512, 512, 512],
+            3072,
+        ),
+    ];
+
+    for (edge, inside_pos, inside_yaw, outside_pos, outside_yaw) in cases {
+        assert!(
+            wall_face_emits_from_camera(
+                edge,
+                inside_pos,
+                inside_yaw,
+                MaterialFaceSidedness::Front
+            ),
+            "{edge:?} wall front material should render from inside the owning cell"
+        );
+        assert!(
+            !wall_face_emits_from_camera(
+                edge,
+                inside_pos,
+                inside_yaw,
+                MaterialFaceSidedness::Back
+            ),
+            "{edge:?} wall back material should not render from inside the owning cell"
+        );
+        assert!(
+            !wall_face_emits_from_camera(
+                edge,
+                outside_pos,
+                outside_yaw,
+                MaterialFaceSidedness::Front
+            ),
+            "{edge:?} wall front material should not render from outside the owning cell"
+        );
+        assert!(
+            wall_face_emits_from_camera(
+                edge,
+                outside_pos,
+                outside_yaw,
+                MaterialFaceSidedness::Back
+            ),
+            "{edge:?} wall back material should render from outside the owning cell"
+        );
+    }
+}
+
+#[test]
+fn editor_diagonal_wall_materials_are_forced_double_sided() {
+    for edge in [WallEdge::NorthWestSouthEast, WallEdge::NorthEastSouthWest] {
+        assert_eq!(
+            wall_material_sidedness_for_edge(MaterialFaceSidedness::Front, edge),
+            MaterialFaceSidedness::Both
+        );
+        assert_eq!(
+            wall_material_sidedness_for_edge(MaterialFaceSidedness::Back, edge),
+            MaterialFaceSidedness::Both
+        );
+        assert!(wall_side_visible(
+            MaterialFaceSidedness::Front,
+            [0, 1024, 0, 1024],
+            edge,
+            [256, 512, 256]
+        ));
+        assert!(wall_side_visible(
+            MaterialFaceSidedness::Back,
+            [0, 1024, 0, 1024],
+            edge,
+            [768, 512, 768]
+        ));
+    }
+}
+
+fn wall_face_emits_from_camera(
+    edge: WallEdge,
+    position: [i32; 3],
+    yaw_q12: u16,
+    sidedness: MaterialFaceSidedness,
+) -> bool {
+    let camera = setup_gte_for_camera(ViewportCameraState {
+        mode: ViewportCameraMode::Free,
+        yaw_q12,
+        pitch_q12: 0,
+        radius: 1024,
+        target: [512, 512, 512],
+        position,
+    });
+    let mut scratch = preview_scratch()
+        .lock()
+        .expect("editor preview scratch mutex");
+    scratch.used = 0;
+    scratch.tex_used = 0;
+    scratch.overlay_lines.clear();
+    scratch.ot.clear();
+
+    push_wall_face(
+        &mut scratch,
+        camera,
+        [0, 1024, 0, 1024],
+        edge,
+        [384, 384, 640, 640],
+        None,
+        GridUvTransform::default(),
+        flat_sided(128, 128, 128, sidedness),
+        position,
+    );
+
+    scratch.used > 0 || scratch.tex_used > 0
+}
+
+#[test]
+fn preview_near_guard_rejects_vertices_behind_camera() {
+    let camera = setup_gte_for_camera(ViewportCameraState {
+        mode: ViewportCameraMode::Free,
+        yaw_q12: 0,
+        pitch_q12: 0,
+        radius: 1024,
+        target: [0, 0, 0],
+        position: [0, 0, 0],
+    });
+
+    assert!(preview_vertices_in_front(
+        camera,
+        &[[0, 0, -64], [16, 0, -64]]
+    ));
+    assert!(!preview_vertices_in_front(
+        camera,
+        &[[0, 0, -64], [0, 0, 16]]
+    ));
+}
+
+#[test]
+fn culled_room_face_outline_respects_preview_toggle() {
+    assert!(should_draw_culled_face_outline(
+        true,
+        flat_sided(128, 128, 128, MaterialFaceSidedness::Front)
+    ));
+    assert!(should_draw_culled_face_outline(
+        true,
+        flat_sided(128, 128, 128, MaterialFaceSidedness::Back)
+    ));
+    assert!(!should_draw_culled_face_outline(
+        false,
+        flat_sided(128, 128, 128, MaterialFaceSidedness::Back)
+    ));
+    assert!(!should_draw_culled_face_outline(
+        true,
+        flat_sided(128, 128, 128, MaterialFaceSidedness::Both)
+    ));
+}
+
+#[test]
+fn preview_depth_slots_share_world_geometry_band() {
+    assert_eq!(room_depth_slot(0), PREVIEW_GEOMETRY_SLOT_MIN);
+    assert_eq!(room_depth_slot(u32::MAX), PREVIEW_GEOMETRY_SLOT_MAX);
+    assert!(shadow_depth_slot(2048) < room_depth_slot(2048));
+    assert_eq!(shadow_depth_slot(0), PREVIEW_GEOMETRY_SLOT_MIN);
+    assert_eq!(PREVIEW_SHADOW_DEPTH_BIAS, 128);
+}
+
+#[test]
+fn preview_shadow_radius_matches_runtime_scale() {
+    assert_eq!(preview_shadow_radius(1), PREVIEW_SHADOW_RADIUS_MIN);
+    assert_eq!(preview_shadow_radius(2048), PREVIEW_SHADOW_RADIUS_MAX);
+    assert_eq!(preview_shadow_radius(200), 250);
+}
+
+#[test]
+fn node_room_local_origin_matches_origin_aware_grid_conversion() {
+    let mut grid = WorldGrid::stone_room(4, 7, 1024, None, None);
+    grid.origin = [-1, -3];
+    let translation = [1.0, 0.25, 0.85];
+    let transform = psxed_project::Transform3 {
+        translation,
+        ..psxed_project::Transform3::default()
+    };
+
+    let origin = node_room_local_origin(&grid, &transform);
+    let expected = grid.editor_to_room_local([translation[0], translation[2]]);
+
+    assert_eq!(origin.x, expected[0] as i32);
+    assert_eq!(origin.y, 256);
+    assert_eq!(origin.z, expected[2] as i32);
+    assert_ne!(
+        (origin.x, origin.z),
+        (
+            ((translation[0] + grid.width as f32 * 0.5) * grid.sector_size as f32) as i32,
+            ((translation[2] + grid.depth as f32 * 0.5) * grid.sector_size as f32) as i32,
+        ),
+        "regression guard: old half-grid-only conversion ignores grid.origin"
+    );
+}
+
+#[test]
+fn floor_anchored_model_origin_offsets_by_half_world_height() {
+    let origin = floor_anchored_model_origin(WorldVertex::new(10, 0, 20), 1024);
+    assert_eq!(origin, WorldVertex::new(10, 512, 20));
+}
+
+#[test]
+fn floor_anchored_model_origin_ignores_negative_height() {
+    let origin = floor_anchored_model_origin(WorldVertex::new(10, 32, 20), -128);
+    assert_eq!(origin, WorldVertex::new(10, 32, 20));
+}
+
+#[test]
+fn preview_fog_blends_after_near_plane() {
+    let fog = fog((10, 20, 30), 100, 300);
+
+    assert_eq!(fog.apply_rgb((110, 120, 130), 100), (110, 120, 130));
+    assert_eq!(fog.apply_rgb((110, 120, 130), 200), (60, 70, 80));
+    assert_eq!(fog.apply_rgb((110, 120, 130), 300), (10, 20, 30));
+    assert_eq!(fog.apply_rgb((110, 120, 130), 900), (10, 20, 30));
+}
+
+#[test]
+fn preview_fog_applies_to_flat_and_textured_tints() {
+    let fog = fog((0, 0, 0), 0, 256);
+    let flat = fog.apply_shade(flat(128, 64, 32), 128);
+    let textured = fog.apply_shade(
+        FaceShade::Textured {
+            slot: MaterialSlot {
+                tpage_word: 0,
+                clut_word: 0,
+                texture_window: psx_gpu::material::TextureWindow::NONE,
+                texture_width: 64,
+                texture_height: 64,
+            },
+            tint: (128, 64, 32),
+            blend_mode: BlendMode::Opaque,
+            sidedness: psxed_project::MaterialFaceSidedness::Front,
+        },
+        128,
+    );
+
+    assert_eq!(unpack(flat), (64, 32, 16));
+    assert_eq!(unpack(textured), (64, 32, 16));
+}
+
+#[test]
+fn material_sized_uvs_stretch_32px_texture_once_by_default() {
+    let shade = FaceShade::Textured {
+        slot: MaterialSlot {
+            tpage_word: 0,
+            clut_word: 0,
+            texture_window: psx_gpu::material::TextureWindow::NONE,
+            texture_width: 32,
+            texture_height: 32,
+        },
+        tint: (128, 128, 128),
+        blend_mode: BlendMode::Opaque,
+        sidedness: psxed_project::MaterialFaceSidedness::Both,
+    };
+    assert_eq!(
+        material_sized_uvs(shade, PREVIEW_FLOOR_UVS),
+        [(0, 0), (32, 0), (32, 32), (0, 32)]
+    );
+}
+
+#[test]
+fn material_sized_uvs_preserve_authored_repeat_count() {
+    let shade = FaceShade::Textured {
+        slot: MaterialSlot {
+            tpage_word: 0,
+            clut_word: 0,
+            texture_window: psx_gpu::material::TextureWindow::NONE,
+            texture_width: 32,
+            texture_height: 64,
+        },
+        tint: (128, 128, 128),
+        blend_mode: BlendMode::Opaque,
+        sidedness: psxed_project::MaterialFaceSidedness::Both,
+    };
+    assert_eq!(
+        material_sized_uvs(
+            shade,
+            [(0, 0), (128, 0), (128, GRID_TILE_UV), (0, GRID_TILE_UV)]
+        ),
+        [(0, 0), (64, 0), (64, GRID_TILE_UV), (0, GRID_TILE_UV)]
+    );
+}
+
+#[test]
+fn light_face_no_lights_ambient_32_is_not_white() {
+    // Regression: pre-fix the `ambient * 256` bug saturated
+    // every face to 255. With the new convention an unlit
+    // face at ambient 32 should render at ~32, not white.
+    let base = flat(128, 128, 128);
+    let lit = light_face(base, [0, 0, 0], &[], [32, 32, 32]);
+    let (r, g, b) = unpack(lit);
+    assert!(r < 64 && g < 64 && b < 64, "got ({r}, {g}, {b})");
+}
+
+#[test]
+fn light_face_ambient_128_is_neutral() {
+    // 128 ambient is the neutral PSX-tint value; an unlit
+    // 128-base material should land back at exactly 128.
+    let lit = light_face(flat(128, 128, 128), [0, 0, 0], &[], [128, 128, 128]);
+    assert_eq!(unpack(lit), (128, 128, 128));
+}
+
+#[test]
+fn light_face_zero_ambient_zero_lights_black() {
+    let lit = light_face(flat(255, 255, 255), [0, 0, 0], &[], [0, 0, 0]);
+    assert_eq!(unpack(lit), (0, 0, 0));
+}
+
+#[test]
+fn light_face_point_light_inside_radius_brightens() {
+    // White light at the face centre with neutral base
+    // should land at saturating-bright since contribution
+    // (255 × 256 × 256) / 65536 = 255 dominates ambient.
+    let light = PointLightSample::from_color_intensity_q8([0, 0, 0], 100, [255, 255, 255], 256);
+    let lit = light_face(flat(128, 128, 128), [0, 0, 0], &[light], [32, 32, 32]);
+    let (r, g, b) = unpack(lit);
+    assert!(r > 200 && g > 200 && b > 200, "got ({r}, {g}, {b})");
+}
+
+#[test]
+fn light_face_point_light_outside_radius_zero() {
+    // Place the face well outside the light's radius; the
+    // contribution must be exactly zero. Output should
+    // match the no-lights case.
+    let light = PointLightSample::from_color_intensity_q8([0, 0, 0], 100, [255, 255, 255], 256);
+    let lit = light_face(flat(128, 128, 128), [10000, 0, 0], &[light], [32, 32, 32]);
+    let baseline = light_face(flat(128, 128, 128), [10000, 0, 0], &[], [32, 32, 32]);
+    assert_eq!(unpack(lit), unpack(baseline));
+}
+
+#[test]
+fn light_face_two_lights_accumulate_and_clamp() {
+    let l = PointLightSample::from_color_intensity_q8([0, 0, 0], 100, [255, 255, 255], 256);
+    let lit = light_face(flat(255, 255, 255), [0, 0, 0], &[l, l], [128, 128, 128]);
+    let (r, g, b) = unpack(lit);
+    // Even with two saturating lights, output never
+    // exceeds 255 per channel.
+    assert_eq!((r, g, b), (255, 255, 255));
+}
