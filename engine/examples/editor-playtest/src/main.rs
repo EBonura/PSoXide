@@ -123,6 +123,7 @@ mod overlay;
 mod particle_runtime;
 mod playtest_runtime;
 mod playtest_scene;
+mod playtest_update;
 mod room_lighting_runtime;
 mod runtime_config;
 mod runtime_schedule;
