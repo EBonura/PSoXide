@@ -250,7 +250,11 @@ pub(crate) fn push_far_vista_textured_quad(
     );
 }
 
-pub(crate) fn push_far_vista_quad(scratch: &mut PreviewScratch, verts: [(i16, i16); 4], color: [u8; 3]) {
+pub(crate) fn push_far_vista_quad(
+    scratch: &mut PreviewScratch,
+    verts: [(i16, i16); 4],
+    color: [u8; 3],
+) {
     if scratch.far_vista_used >= scratch.far_vista_quads.len() {
         return;
     }
