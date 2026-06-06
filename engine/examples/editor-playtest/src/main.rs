@@ -127,6 +127,7 @@ mod runtime_config;
 mod runtime_schedule;
 mod sky_runtime;
 mod visibility_runtime;
+mod visible_cell_runtime;
 mod vram_runtime;
 mod vram_upload;
 
@@ -146,6 +147,7 @@ use runtime_config::*;
 use runtime_schedule::RUNTIME_SCHEDULE;
 use sky_runtime::*;
 use visibility_runtime::*;
+use visible_cell_runtime::*;
 use vram_runtime::*;
 
 // Placeholder manifests reference unused statics; populated
