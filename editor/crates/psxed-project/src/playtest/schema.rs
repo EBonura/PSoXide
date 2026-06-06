@@ -78,6 +78,33 @@ pub enum PlaytestAssetKind {
     ModelAnimation,
 }
 
+/// Streaming class of a [`PlaytestAsset`]. A streamed asset's baked
+/// manifest static is empty bytes (under `cd-stream-bench`) and its
+/// payload is packed into the parallel UI.PAK that the runtime loads
+/// on demand, keeping it out of the guest's baked `.data`. The class
+/// distinguishes which transient staging buffer the runtime loads
+/// through so each buffer stays right-sized: small for menu UI images,
+/// larger for gameplay-scoped textures like the sky panorama.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamedClass {
+    /// Baked into the guest `.data` via `include_bytes!`; never streamed.
+    None,
+    /// Menu UI image. Streamed off UI.PAK and staged through the small
+    /// per-image UI staging buffer, loaded on menu entry.
+    UiImage,
+    /// Gameplay-scoped texture (e.g. the sky panorama). Streamed off
+    /// UI.PAK and staged through a larger transient buffer, loaded on
+    /// gameplay entry and freed on gameplay exit.
+    Gameplay,
+}
+
+impl StreamedClass {
+    /// `true` when the asset is CD-streamed (any non-`None` class).
+    pub fn is_streamed(self) -> bool {
+        !matches!(self, StreamedClass::None)
+    }
+}
+
 /// One asset destined for the master table. Owns its bytes so
 /// callers can write them out to the generated tree without
 /// reaching back into the project.
@@ -95,12 +122,19 @@ pub struct PlaytestAsset {
     /// or room. Surfaces in cook reports and stays out of the
     /// runtime contract.
     pub source_label: String,
-    /// When `true`, the asset's payload is CD-streamed: the baked
-    /// manifest static is empty bytes (under `cd-stream-bench`) and
-    /// the payload is packed into a parallel pack the runtime loads
-    /// on demand. Currently only set for UI image textures so they
-    /// stay out of the guest's baked `.data`.
-    pub streamed: bool,
+    /// CD-streaming class. [`StreamedClass::None`] bakes the payload
+    /// into the guest `.data`; the other variants route the payload to
+    /// UI.PAK keyed by asset index, with the variant selecting the
+    /// runtime staging buffer (small for UI images, larger for
+    /// gameplay-scoped textures like the sky panorama).
+    pub streamed_class: StreamedClass,
+}
+
+impl PlaytestAsset {
+    /// `true` when this asset's payload is CD-streamed off UI.PAK.
+    pub fn is_streamed(&self) -> bool {
+        self.streamed_class.is_streamed()
+    }
 }
 
 /// One room's residency-aware record. Carries indices into
