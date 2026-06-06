@@ -93,6 +93,51 @@ pub unsafe extern "C" fn _start() -> ! {
     halt();
 }
 
+/// Current MIPS stack pointer (`$sp`). No memory or stack side effects.
+#[cfg(target_arch = "mips")]
+#[inline(always)]
+fn stack_pointer() -> usize {
+    let sp: usize;
+    // SAFETY: a single register move out of `$sp`.
+    unsafe {
+        core::arch::asm!("move {}, $sp", out(reg) sp, options(nomem, nostack, preserves_flags));
+    }
+    sp
+}
+
+/// Trap (loudly, via TTY) if the live stack pointer has descended into
+/// the static data region.
+///
+/// The linker lays out `.text/.data/.bss` from the load address upward
+/// and runs the stack downward from the top of RAM. The two are only
+/// safe while `$sp` stays above the top of `.bss`. A large
+/// stack-resident object (e.g. a multi-hundred-KB struct held in a
+/// `main` local) or very deep call frames push `$sp` *below* `__bss_end`;
+/// from there a stack write and a write to some `static` alias the same
+/// RAM and silently corrupt each other -- the corruption surfaces far
+/// from the cause and is brutal to debug. Call this once the deepest
+/// expected stack frame is live (e.g. right after constructing the main
+/// scene object) to turn that into an immediate, located halt instead.
+///
+/// Note: this checks against the *actual* top of static data, not the
+/// linker's `__heap_end` stack floor, which currently reserves only a
+/// nominal slice and would false-positive on any real stack.
+#[cfg(target_arch = "mips")]
+pub fn assert_stack_headroom() {
+    /// Bytes of slack required between `$sp` and the top of `.bss`.
+    const GUARD: usize = 0x800;
+    let data_top = &raw const __bss_end as *const u8 as usize;
+    let sp = stack_pointer();
+    if sp <= data_top.saturating_add(GUARD) {
+        tty::print("\nSTACK/DATA COLLISION: $sp=0x");
+        tty::print_hex_u32(sp as u32);
+        tty::print(" is inside static data (top=0x");
+        tty::print_hex_u32(data_top as u32);
+        tty::print(").\n  A large stack object or deep call frames overran the stack and\n  now alias `static` memory -- this silently corrupts both. Move big\n  objects into .bss, shrink static buffers, or enlarge the stack.\n");
+        halt();
+    }
+}
+
 /// Infinite loop with no useful side effects. Used after `main()`
 /// returns or from panic / reset paths.
 #[inline(never)]
