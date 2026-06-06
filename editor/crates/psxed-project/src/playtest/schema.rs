@@ -27,6 +27,10 @@ pub const CDDA_TRACKS_FILENAME: &str = "cdda_tracks.txt";
 /// Cooked WORLD.PAK room ordering hint consumed by disc builders.
 pub const WORLD_PACK_ORDER_FILENAME: &str = "world_pack_order.txt";
 
+/// Cooked UI.PAK chunk ordering hint consumed by disc builders.
+/// One streamed UI asset index per line, in pack order.
+pub const UI_PACK_ORDER_FILENAME: &str = "ui_pack_order.txt";
+
 /// Subdirectory inside `generated/` that holds cooked `.psxw`
 /// blobs.
 pub const ROOMS_DIRNAME: &str = "rooms";
@@ -35,6 +39,11 @@ pub const ROOMS_DIRNAME: &str = "rooms";
 /// chunks. Each `.psxc` stores a collision payload plus the cooked
 /// render cache for that room.
 pub const STREAM_CHUNKS_DIRNAME: &str = "stream_chunks";
+
+/// Subdirectory inside `generated/` that holds CD-streamable UI
+/// image chunks. Each `ui_NNN.psxt` is the raw texture payload for
+/// one streamed UI image asset, with no chunk header.
+pub const UI_STREAM_CHUNKS_DIRNAME: &str = "ui_stream_chunks";
 
 /// Subdirectory inside `generated/` that holds copied `.psxt`
 /// texture blobs.
@@ -86,6 +95,12 @@ pub struct PlaytestAsset {
     /// or room. Surfaces in cook reports and stays out of the
     /// runtime contract.
     pub source_label: String,
+    /// When `true`, the asset's payload is CD-streamed: the baked
+    /// manifest static is empty bytes (under `cd-stream-bench`) and
+    /// the payload is packed into a parallel pack the runtime loads
+    /// on demand. Currently only set for UI image textures so they
+    /// stay out of the guest's baked `.data`.
+    pub streamed: bool,
 }
 
 /// One room's residency-aware record. Carries indices into

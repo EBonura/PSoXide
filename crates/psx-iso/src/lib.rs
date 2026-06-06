@@ -57,6 +57,10 @@ pub const CD_STREAM_BENCH_DEFAULT_SECTORS: usize = 32;
 pub const CD_STREAM_BENCH_MAGIC: [u8; 8] = *b"PSOXSTRM";
 /// Root-directory file used for the first real streamed world package.
 pub const WORLD_PACK_FILE_NAME: &str = "WORLD.PAK";
+/// Root-directory file used for streamed UI image assets. Packed
+/// immediately after [`WORLD_PACK_FILE_NAME`] in the playtest ISO
+/// layout, sharing the same on-disc pack format and build helpers.
+pub const UI_PACK_FILE_NAME: &str = "UI.PAK";
 /// Header signature at the start of [`WORLD_PACK_FILE_NAME`].
 pub const WORLD_PACK_MAGIC: [u8; 8] = *b"PSOXWPAK";
 /// Current on-disc world-pack format version.

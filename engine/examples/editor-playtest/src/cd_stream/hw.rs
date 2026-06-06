@@ -169,6 +169,28 @@ pub(super) unsafe fn read_stream_sector(buffer: *mut u32, polls: &mut u32) -> Re
     Ok(())
 }
 
+/// Blocking single-sector read. Waits for the next DataReady IRQ,
+/// DMAs the sector into `buffer`, and acks. Mirrors the benchmark's
+/// `read_stream_sector` but is available outside the benchmark
+/// feature so the UI image loader can read whole UI.PAK chunks one
+/// sector at a time.
+#[cfg(target_arch = "mips")]
+pub(super) unsafe fn read_one_sector_blocking(buffer: *mut u32, polls: &mut u32) -> Result<(), u32> {
+    match wait_irq(IRQ_DATA_READY, DATA_READY_BLOCKING_POLL_LIMIT, polls) {
+        WaitOutcome::Matched => {}
+        WaitOutcome::CdError => {
+            drain_responses();
+            cd_ack_all();
+            return Err(STATUS_CD_ERROR);
+        }
+        WaitOutcome::Timeout => return Err(STATUS_DATA_TIMEOUT),
+    }
+    dma_read_sector(buffer, polls);
+    drain_responses();
+    cd_ack(IRQ_DATA_READY);
+    Ok(())
+}
+
 #[cfg(target_arch = "mips")]
 pub(super) unsafe fn try_read_stream_sector(
     buffer: *mut u32,

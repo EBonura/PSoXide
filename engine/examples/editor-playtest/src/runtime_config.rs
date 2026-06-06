@@ -64,7 +64,17 @@ pub(super) const MODEL_TPAGE_MAX_HALFWORDS: u16 = 128;
 pub(super) const MAX_RUNTIME_UI_FONTS: usize = 4;
 /// Resource-set key shared by every flow state: the UI font atlas is used by
 /// the menus and the gameplay HUD, so it is acquired once and never torn down.
+/// Retained for reference now that menu and gameplay states use distinct keys
+/// (see `MENU_RESOURCE_KEY` / `GAMEPLAY_RESOURCE_KEY`).
+#[allow(dead_code)]
 pub(super) const UI_FONT_RESOURCE_KEY: u32 = 1;
+/// Resource-set key for menu (non-gameplay) states. Distinct from the gameplay
+/// key so the flow driver fires `on_exit_state`/`on_enter_state` when crossing
+/// the menu->gameplay boundary, letting the runtime load streamed UI images on
+/// menu entry and free them on gameplay entry.
+pub(super) const MENU_RESOURCE_KEY: u32 = 2;
+/// Resource-set key for gameplay states (see `MENU_RESOURCE_KEY`).
+pub(super) const GAMEPLAY_RESOURCE_KEY: u32 = 3;
 pub(super) static SHADOW_CIRCLE_BLOB: &[u8] = include_bytes!("../assets/shadow_circle_64.psxt");
 /// Shadow decals share the shadow/particle 4bpp page allocated by the unified
 /// VRAM allocator. UVs are page-relative, so only the page base moves.
@@ -387,8 +397,11 @@ pub(super) const INVALID_ROOM_INDEX: RoomIndex = RoomIndex(u16::MAX);
 /// Sized to the largest part vertex count we expect; instances
 /// over this cap drop their over-budget triangles graceful.
 pub(super) const MODEL_VERTEX_CAP: usize = 1024;
-/// Predecoded face records shared by runtime model assets.
-pub(super) const MAX_RUNTIME_MODEL_FACES: usize = 4096;
+/// Predecoded face records shared by runtime model assets. Right-sized from
+/// 4096: a single PS1 character mesh is on the order of ~100-200 faces, so the
+/// shared decode pool only needs to hold the loaded models' faces (the decode
+/// returns `None` and skips a model that would overflow it -- no corruption).
+pub(super) const MAX_RUNTIME_MODEL_FACES: usize = 1024;
 /// Predecoded part records shared by runtime model assets.
 pub(super) const MAX_RUNTIME_MODEL_PARTS: usize = 128;
 /// Predecoded vertex records shared by runtime model assets.
