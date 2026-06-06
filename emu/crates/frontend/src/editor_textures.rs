@@ -1445,6 +1445,7 @@ mod tests {
                 camera: Default::default(),
                 culling: Default::default(),
                 streaming: Default::default(),
+                physics: Default::default(),
             },
         );
 
@@ -1490,6 +1491,7 @@ mod tests {
                 camera: Default::default(),
                 culling: Default::default(),
                 streaming: Default::default(),
+                physics: Default::default(),
             },
         );
 
