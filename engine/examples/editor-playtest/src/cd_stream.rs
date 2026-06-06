@@ -69,6 +69,9 @@ const COMMAND_ACK_POLL_LIMIT: u32 = 16_384;
 const DATA_READY_POLL_LIMIT: u32 = 1_000_000;
 #[cfg(target_arch = "mips")]
 const DATA_READY_STALL_POLL_LIMIT: u32 = 4096;
+/// Spin budget for one blocking UI image sector read.
+#[cfg(target_arch = "mips")]
+const DATA_READY_BLOCKING_POLL_LIMIT: u32 = 1_000_000;
 const DMA_POLL_LIMIT: u32 = 65_536;
 const CLEANUP_POLL_LIMIT: u32 = 16_384;
 
@@ -643,6 +646,96 @@ fn first_status_error(current: u32, next: u32) -> u32 {
         next
     } else {
         current
+    }
+}
+
+/// Synchronously read one UI.PAK chunk into `dst`. Looks the chunk
+/// up in `toc` by `chunk_id` (the streamed asset index), reads its
+/// sector run from `ui_pack_lba + entry.sector_offset`, copies the
+/// unpadded bytes into `dst`, and verifies the FNV checksum. Used by
+/// the menu UI-image loader, which loads one image at a time into a
+/// shared staging buffer, so a blocking read is the simplest correct
+/// shape. Non-mips builds return `STATUS_UNSUPPORTED`.
+pub(super) fn read_ui_chunk_blocking(
+    ui_pack_lba: u32,
+    toc: &[LevelWorldPackEntryRecord],
+    chunk_id: u32,
+    dst: &mut [u32],
+) -> RoomChunkLoadResult {
+    let mut result = RoomChunkLoadResult {
+        status: STATUS_OK,
+        bytes: 0,
+        sectors: 0,
+    };
+
+    let Some(entry) = world_pack_entry_from_toc(toc, chunk_id) else {
+        result.status = STATUS_CHUNK_NOT_FOUND;
+        return result;
+    };
+
+    let dst_bytes = dst.len().saturating_mul(4);
+    if entry.byte_size > dst_bytes {
+        result.status = STATUS_DEST_TOO_SMALL;
+        return result;
+    }
+
+    #[cfg(not(target_arch = "mips"))]
+    {
+        let _ = ui_pack_lba;
+        result.status = STATUS_UNSUPPORTED;
+        result
+    }
+
+    #[cfg(target_arch = "mips")]
+    unsafe {
+        let mut polls = 0u32;
+        if let Err(status) = prepare_cd_read(&mut polls) {
+            result.status = status;
+            return result;
+        }
+        if let Err(status) = start_cd_read_at_lba(
+            ui_pack_lba.saturating_add(entry.sector_offset),
+            &mut polls,
+        ) {
+            result.status = status;
+            cleanup_read_stream(&mut polls);
+            return result;
+        }
+
+        let buffer = core::ptr::addr_of_mut!(CD_STREAM_SECTOR_BUFFER) as *mut u32;
+        let dst_ptr = dst.as_mut_ptr().cast::<u8>();
+        let mut checksum = FNV_OFFSET;
+        let mut sector = 0u32;
+        while sector < entry.sector_count {
+            if let Err(status) = read_one_sector_blocking(buffer, &mut polls) {
+                result.status = status;
+                break;
+            }
+            let chunk_byte_offset = (sector as usize).saturating_mul(SECTOR_BYTES);
+            let remaining = entry.byte_size.saturating_sub(chunk_byte_offset);
+            let copy_len = remaining.min(SECTOR_BYTES);
+            if copy_len > 0 {
+                core::ptr::copy_nonoverlapping(
+                    buffer as *const u8,
+                    dst_ptr.add(chunk_byte_offset),
+                    copy_len,
+                );
+                checksum = checksum_bytes(buffer as *const u8, copy_len, checksum);
+                result.bytes = result.bytes.saturating_add(copy_len);
+            }
+            result.sectors = result.sectors.saturating_add(1);
+            sector += 1;
+        }
+        cleanup_read_stream(&mut polls);
+
+        if result.status == STATUS_OK {
+            if result.bytes != entry.byte_size {
+                result.status = STATUS_DATA_TIMEOUT;
+            } else if checksum != entry.checksum {
+                result.status = STATUS_CHECKSUM_MISMATCH;
+            }
+        }
+        result
     }
 }
 

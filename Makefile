@@ -429,6 +429,8 @@ profile-demo3-disc-stream:
 		--cdtest-sectors 32 \
 		--world-pack-rooms-dir ../../engine/examples/editor-playtest/generated/stream_chunks \
 		--world-pack-order-file ../../engine/examples/editor-playtest/generated/world_pack_order.txt \
+		--ui-pack-dir ../../engine/examples/editor-playtest/generated/ui_stream_chunks \
+		--ui-pack-order-file ../../engine/examples/editor-playtest/generated/ui_pack_order.txt \
 		--cdda-track-list $(EDITOR_PLAYTEST_GENERATED_FROM_MKISOPSX)/cdda_tracks.txt
 	cd emu && cargo run -p frontend --release -- launch \
 		--path ../$(EXAMPLE_OUT)/editor-playtest.cue \
@@ -450,6 +452,8 @@ profile-demo3-disc-stream-forward:
 		--cdtest-sectors 32 \
 		--world-pack-rooms-dir ../../engine/examples/editor-playtest/generated/stream_chunks \
 		--world-pack-order-file ../../engine/examples/editor-playtest/generated/world_pack_order.txt \
+		--ui-pack-dir ../../engine/examples/editor-playtest/generated/ui_stream_chunks \
+		--ui-pack-order-file ../../engine/examples/editor-playtest/generated/ui_pack_order.txt \
 		--cdda-track-list $(EDITOR_PLAYTEST_GENERATED_FROM_MKISOPSX)/cdda_tracks.txt
 	cd emu && cargo run -p frontend --release -- launch \
 		--path ../$(EXAMPLE_OUT)/editor-playtest.cue \
@@ -472,6 +476,8 @@ profile-demo7-camera-sweep:
 		--cdtest-sectors 32 \
 		--world-pack-rooms-dir ../../engine/examples/editor-playtest/generated/stream_chunks \
 		--world-pack-order-file ../../engine/examples/editor-playtest/generated/world_pack_order.txt \
+		--ui-pack-dir ../../engine/examples/editor-playtest/generated/ui_stream_chunks \
+		--ui-pack-order-file ../../engine/examples/editor-playtest/generated/ui_pack_order.txt \
 		--cdda-track-list $(EDITOR_PLAYTEST_GENERATED_FROM_MKISOPSX)/cdda_tracks.txt
 	cd emu && cargo run -p frontend --release -- launch \
 		--path ../$(EXAMPLE_OUT)/editor-playtest.cue \
