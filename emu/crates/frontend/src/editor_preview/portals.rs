@@ -156,7 +156,10 @@ pub(crate) fn push_portal_edge_wall_outline(
     push_portal_segment(scratch, corners[3], corners[0], style);
 }
 
-pub(crate) fn portal_edge_wall_corners(grid: &WorldGrid, edge: PortalEdge) -> Option<[spatial::RoomPoint; 4]> {
+pub(crate) fn portal_edge_wall_corners(
+    grid: &WorldGrid,
+    edge: PortalEdge,
+) -> Option<[spatial::RoomPoint; 4]> {
     portal_edge_wall_corners_for_world_cell(
         grid,
         grid.origin[0] + edge.x as i32,
@@ -304,7 +307,10 @@ pub(crate) fn sample_sector_vertical_bounds(
     }
 }
 
-pub(crate) fn horizontal_edge_heights_for_portal(heights: [i32; 4], dir: GridDirection) -> Option<[i32; 2]> {
+pub(crate) fn horizontal_edge_heights_for_portal(
+    heights: [i32; 4],
+    dir: GridDirection,
+) -> Option<[i32; 2]> {
     match dir {
         GridDirection::North => Some([heights[Corner::NW.idx()], heights[Corner::NE.idx()]]),
         GridDirection::East => Some([heights[Corner::NE.idx()], heights[Corner::SE.idx()]]),
