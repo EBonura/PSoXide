@@ -2554,14 +2554,6 @@ fn square_i32_saturating(value: i32) -> i32 {
     }
 }
 
-fn min_i32x4(values: [i32; 4]) -> i32 {
-    values[0].min(values[1]).min(values[2]).min(values[3])
-}
-
-fn max_i32x4(values: [i32; 4]) -> i32 {
-    values[0].max(values[1]).max(values[2]).max(values[3])
-}
-
 fn model_render_uv_limits(texture_width: u16, texture_height: u16) -> (u8, u8) {
     (
         model_render_uv_max(texture_width),
@@ -10156,6 +10148,10 @@ fn chunk_overlaps_collision_window(
         && anchor.z.saturating_sub(margin) < z1
 }
 
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 fn rect_distance_sq(x: i32, z: i32, x0: i32, x1: i32, z0: i32, z1: i32) -> u32 {
     let dx = if x < x0 {
         x0.saturating_sub(x)
@@ -10174,6 +10170,10 @@ fn rect_distance_sq(x: i32, z: i32, x0: i32, x1: i32, z0: i32, z1: i32) -> u32 {
     square_i32_to_u32_saturating(dx).saturating_add(square_i32_to_u32_saturating(dz))
 }
 
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
 fn square_i32_to_u32_saturating(value: i32) -> u32 {
     let value = value.unsigned_abs();
     if value > 65_535 {
