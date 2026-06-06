@@ -19,9 +19,18 @@ HEADER_SIZE = 2K;           /* PSX-EXE header */
 LOAD_ADDR   = RAM_BASE + BIOS_SIZE;
 STACK_INIT  = RAM_BASE + 0x001FFF00;
 
+/* Build-time RAM budget for the stack. The stack runs downward from
+   STACK_INIT while .text/.data/.bss grow upward from LOAD_ADDR. We carve
+   this reserve out of the RAM region the static sections may occupy, so a
+   program that no longer leaves room for the stack overruns the region at
+   LINK time (a clean rust-lld "section will not fit in region" error)
+   instead of silently colliding $sp with .bss at runtime. 32 KiB is a
+   generous floor for the call stack; the heap is unused while alloc is off. */
+STACK_RESERVE = 0x8000;     /* 32 KiB reserved for the runtime stack */
+
 MEMORY {
     HEADER    : ORIGIN = LOAD_ADDR - HEADER_SIZE, LENGTH = HEADER_SIZE
-    RAM (rwx) : ORIGIN = LOAD_ADDR,               LENGTH = RAM_SIZE - BIOS_SIZE
+    RAM (rwx) : ORIGIN = LOAD_ADDR,               LENGTH = RAM_SIZE - BIOS_SIZE - STACK_RESERVE
 }
 
 ENTRY(_start)
@@ -102,7 +111,7 @@ SECTIONS {
     /* Heap starts right after BSS and runs up to just below the stack. */
     . = ALIGN(4);
     __heap_start = .;
-    __heap_end   = STACK_INIT - 0x100;   /* 256-byte guard before SP */
+    __heap_end   = STACK_INIT - STACK_RESERVE;   /* keep heap below the reserved stack */
 
     /* Discard MIPS ABI glue not needed on bare metal. */
     /DISCARD/ : {

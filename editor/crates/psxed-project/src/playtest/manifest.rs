@@ -10,18 +10,21 @@ const STREAMED_ROOM_SLOT_BYTES: usize = 32 * 1024;
 pub fn write_package(package: &PlaytestPackage, generated_dir: &Path) -> std::io::Result<()> {
     let rooms_dir = generated_dir.join(ROOMS_DIRNAME);
     let stream_chunks_dir = generated_dir.join(STREAM_CHUNKS_DIRNAME);
+    let ui_stream_chunks_dir = generated_dir.join(UI_STREAM_CHUNKS_DIRNAME);
     let textures_dir = generated_dir.join(TEXTURES_DIRNAME);
     let models_dir = generated_dir.join(MODELS_DIRNAME);
     let ui_sfx_dir = generated_dir.join(UI_SFX_DIRNAME);
     let cdda_tracks_dir = generated_dir.join(CDDA_TRACKS_DIRNAME);
     std::fs::create_dir_all(&rooms_dir)?;
     std::fs::create_dir_all(&stream_chunks_dir)?;
+    std::fs::create_dir_all(&ui_stream_chunks_dir)?;
     std::fs::create_dir_all(&textures_dir)?;
     std::fs::create_dir_all(&models_dir)?;
     std::fs::create_dir_all(&ui_sfx_dir)?;
     std::fs::create_dir_all(&cdda_tracks_dir)?;
     purge_directory_files(&rooms_dir, "psxw")?;
     purge_directory_files(&stream_chunks_dir, "psxc")?;
+    purge_directory_files(&ui_stream_chunks_dir, "psxt")?;
     purge_directory_files(&textures_dir, "psxt")?;
     purge_directory_files(&ui_sfx_dir, "psau")?;
     purge_directory_files(&cdda_tracks_dir, "cdda")?;
@@ -53,6 +56,19 @@ pub fn write_package(package: &PlaytestPackage, generated_dir: &Path) -> std::io
     for sample in &package.ui_sfx_samples {
         std::fs::write(ui_sfx_dir.join(&sample.filename), &sample.bytes)?;
     }
+    // Streamed Texture payloads (UI images) are written into the UI
+    // stream-chunks dir as raw texture bytes (no chunk header), keyed
+    // by asset index, for the ISO packer to assemble into UI.PAK. The
+    // same bytes also land in `textures/` above so the non-streaming
+    // (`include_bytes!`) build still resolves them.
+    for (index, asset) in package.assets.iter().enumerate() {
+        if asset.streamed {
+            std::fs::write(
+                ui_stream_chunks_dir.join(format!("ui_{index:03}.psxt")),
+                &asset.bytes,
+            )?;
+        }
+    }
     for room_index in 0..package.rooms.len().min(u16::MAX as usize + 1) {
         let payload = streamed_room_chunk_payload(package, room_index as u16)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
@@ -67,6 +83,10 @@ pub fn write_package(package: &PlaytestPackage, generated_dir: &Path) -> std::io
     std::fs::write(
         generated_dir.join(WORLD_PACK_ORDER_FILENAME),
         render_world_pack_order(package),
+    )?;
+    std::fs::write(
+        generated_dir.join(UI_PACK_ORDER_FILENAME),
+        render_ui_pack_order(package),
     )?;
     std::fs::write(
         generated_dir.join(CDDA_TRACKS_FILENAME),
@@ -101,6 +121,16 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     out.push_str(MANIFEST_HEADER);
     let world_pack_toc = world_pack_toc(package);
     let world_pack_max_chunk_bytes = world_pack_toc
+        .iter()
+        .map(|entry| entry.byte_size as usize)
+        .max()
+        .unwrap_or(0);
+    // UI.PAK immediately follows WORLD.PAK in the ISO file order, so its
+    // start LBA is the WORLD.PAK start LBA plus the WORLD.PAK total sectors.
+    let world_pack_total_sectors = world_pack_layout(package).total_sectors;
+    let ui_pack_start_lba = psx_iso::WORLD_PACK_DEFAULT_START_LBA + world_pack_total_sectors;
+    let ui_pack_toc = ui_pack_toc(package);
+    let ui_pack_max_chunk_bytes = ui_pack_toc
         .iter()
         .map(|entry| entry.byte_size as usize)
         .max()
@@ -173,7 +203,11 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             asset_static_name(asset, i),
             asset.source_label,
         );
-        if asset.kind == PlaytestAssetKind::RoomWorld {
+        // Room worlds always stream off WORLD.PAK; streamed Texture
+        // assets (UI images) stream off UI.PAK. Both emit empty baked
+        // bytes under `cd-stream-bench` and the normal word-aligned
+        // `include_bytes!` static when the feature is off.
+        if asset.kind == PlaytestAssetKind::RoomWorld || asset.streamed {
             let _ = writeln!(out, "#[cfg(feature = \"cd-stream-bench\")]");
             let _ = writeln!(
                 out,
@@ -489,6 +523,38 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     );
     out.push_str("pub static WORLD_PACK_TOC: &[LevelWorldPackEntryRecord] = &[\n");
     for entry in &world_pack_toc {
+        let _ = writeln!(
+            out,
+            "    LevelWorldPackEntryRecord {{ room: RoomIndex({}), sector_offset: {}, sector_count: {}, byte_size: {}, checksum: {} }},",
+            entry.chunk_id,
+            entry.sector_offset,
+            entry.sector_count,
+            entry.byte_size,
+            entry.checksum,
+        );
+    }
+    out.push_str("];\n\n");
+
+    out.push_str(
+        "/// Absolute disc LBA where UI.PAK starts in the playtest ISO layout.\n\
+         /// UI.PAK is packed immediately after WORLD.PAK by the ISO builder.\n",
+    );
+    let _ = writeln!(out, "pub const UI_PACK_START_LBA: u32 = {ui_pack_start_lba};");
+    out.push('\n');
+
+    out.push_str("/// Largest streamed UI image chunk in bytes (staging buffer size).\n");
+    let _ = writeln!(
+        out,
+        "pub const UI_PACK_MAX_CHUNK_BYTES: usize = {ui_pack_max_chunk_bytes};",
+    );
+    out.push('\n');
+
+    out.push_str(
+        "/// Cooked UI.PAK image table generated from the same layout as the ISO packer.\n\
+         /// Each entry's `room` field carries the streamed asset index as its chunk id.\n",
+    );
+    out.push_str("pub static UI_PACK_TOC: &[LevelWorldPackEntryRecord] = &[\n");
+    for entry in &ui_pack_toc {
         let _ = writeln!(
             out,
             "    LevelWorldPackEntryRecord {{ room: RoomIndex({}), sector_offset: {}, sector_count: {}, byte_size: {}, checksum: {} }},",
@@ -1373,18 +1439,63 @@ fn write_cdda_tracks(package: &PlaytestPackage, cdda_tracks_dir: &Path) -> std::
     Ok(out)
 }
 
-fn world_pack_toc(package: &PlaytestPackage) -> Vec<psx_iso::WorldPackBuildEntry> {
+fn world_pack_chunks(package: &PlaytestPackage) -> Vec<(u32, Vec<u8>)> {
     let mut chunks: Vec<(u32, Vec<u8>)> = Vec::new();
     for room in world_pack_order(package) {
         let payload =
             streamed_room_chunk_payload(package, room).expect("valid streamed room chunk payload");
         chunks.push((room as u32, payload));
     }
+    chunks
+}
+
+fn world_pack_toc(package: &PlaytestPackage) -> Vec<psx_iso::WorldPackBuildEntry> {
+    world_pack_layout(package).entries
+}
+
+fn world_pack_layout(package: &PlaytestPackage) -> psx_iso::WorldPackLayout {
+    let chunks = world_pack_chunks(package);
     let refs = chunks
         .iter()
         .map(|(room, bytes)| (*room, bytes.as_slice()))
         .collect::<Vec<_>>();
+    psx_iso::build_world_pack_layout(&refs)
+}
+
+/// Streamed UI image assets in pack order, paired with their asset
+/// index (used as the UI.PAK chunk id). Mirrors `world_pack_order`'s
+/// pairing but for `streamed` Texture assets.
+fn ui_pack_chunks(package: &PlaytestPackage) -> Vec<(u32, &[u8])> {
+    package
+        .assets
+        .iter()
+        .enumerate()
+        .filter(|(_, asset)| asset.streamed)
+        .map(|(index, asset)| (index as u32, asset.bytes.as_slice()))
+        .collect()
+}
+
+fn ui_pack_toc(package: &PlaytestPackage) -> Vec<psx_iso::WorldPackBuildEntry> {
+    let refs = ui_pack_chunks(package);
     psx_iso::build_world_pack_layout(&refs).entries
+}
+
+fn ui_pack_order(package: &PlaytestPackage) -> Vec<u32> {
+    ui_pack_chunks(package)
+        .iter()
+        .map(|(index, _)| *index)
+        .collect()
+}
+
+fn render_ui_pack_order(package: &PlaytestPackage) -> String {
+    let mut out = String::from(
+        "# PSoXide UI.PAK image order\n\
+         # One streamed UI asset index per line. Generated by cook-playtest.\n",
+    );
+    for index in ui_pack_order(package) {
+        let _ = writeln!(out, "{index}");
+    }
+    out
 }
 
 fn streamed_room_chunk_filename(room: u16) -> String {
