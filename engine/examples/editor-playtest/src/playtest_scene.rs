@@ -55,9 +55,13 @@ impl Scene for Playtest {
     fn on_enter_state(&mut self, state: SceneStateRef, _ctx: &mut Ctx) {
         acquire_shared_ui_fonts(&mut self.ui_fonts);
         // Streamed UI images live only in menu states. Load them off UI.PAK on
-        // menu entry; gameplay entry frees them (see `on_exit_state`).
+        // menu entry; gameplay entry frees them (see `on_exit_state`). The sky
+        // panorama is gameplay-scoped, so it is the mirror image: loaded on
+        // gameplay entry and freed on gameplay exit.
         #[cfg(feature = "cd-stream-bench")]
-        if !state.has_gameplay() {
+        if state.has_gameplay() {
+            load_streamed_sky_from_cd();
+        } else {
             load_ui_images_from_cd();
         }
         let _ = state;
@@ -68,7 +72,9 @@ impl Scene for Playtest {
     /// released here (it serves the gameplay HUD too).
     fn on_exit_state(&mut self, state: SceneStateRef, _ctx: &mut Ctx) {
         #[cfg(feature = "cd-stream-bench")]
-        if !state.has_gameplay() {
+        if state.has_gameplay() {
+            release_streamed_sky();
+        } else {
             release_ui_images();
         }
         let _ = state;

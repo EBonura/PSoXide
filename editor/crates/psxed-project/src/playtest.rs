@@ -351,7 +351,7 @@ pub fn build_package(
                         portal_room_count,
                         portal_room.index,
                     ),
-                    streamed: false,
+                    streamed_class: StreamedClass::None,
                 });
 
                 // Walk material slots in slot order. The cooker emits
@@ -421,7 +421,7 @@ pub fn build_package(
                                 bytes,
                                 filename: format!("texture_{:03}.psxt", texture_index),
                                 source_label: texture_resource.name.clone(),
-                                streamed: false,
+                                streamed_class: StreamedClass::None,
                             });
                             texture_asset_for_resource.insert(texture_id, new_index);
                             new_index

@@ -60,7 +60,7 @@ pub(crate) fn resolve_material_texture_asset(
             bytes,
             filename: format!("texture_{texture_index:03}.psxt"),
             source_label: texture_resource.name.clone(),
-            streamed: false,
+            streamed_class: StreamedClass::None,
         });
         texture_asset_for_resource.insert(texture_id, new_index);
         new_index

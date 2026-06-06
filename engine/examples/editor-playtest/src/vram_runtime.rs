@@ -140,6 +140,12 @@ pub(super) fn load_ui_images_from_cd() {
             if asset.kind != AssetKind::Texture || !asset.bytes.is_empty() {
                 continue;
             }
+            // The sky panorama is also a streamed (empty-bytes) Texture but is
+            // gameplay-scoped: it is loaded by `load_streamed_sky_from_cd` into
+            // a larger staging buffer, never through this small per-image one.
+            if is_sky_panorama_asset(asset.id) {
+                continue;
+            }
             if slot_count >= MAX_UI_IMAGE_SLOTS {
                 break;
             }
@@ -148,7 +154,7 @@ pub(super) fn load_ui_images_from_cd() {
                 continue;
             }
 
-            let res = cd_stream::read_ui_chunk_blocking(
+            let res = cd_stream::read_chunk_blocking(
                 UI_PACK_START_LBA,
                 UI_PACK_TOC,
                 asset.id.0 as u32,
@@ -358,6 +364,12 @@ impl RuntimeStreamingJobs {
 /// unified allocator: two contiguous 4bpp page words + one CLUT word per band.
 static mut SKY_PAGE_TPAGE_WORDS: [u16; 2] = [0; 2];
 static mut SKY_CLUT_WORDS: [u16; SKY_PANORAMA_PALETTE_BANDS] = [0; SKY_PANORAMA_PALETTE_BANDS];
+/// Allocator handles for the sky panorama's two-page run and per-band CLUTs.
+/// Captured at upload so `release_streamed_sky` can return them to the unified
+/// allocator on gameplay exit. `Empty` while the sky is not resident.
+static mut SKY_PAGE_REGION: VramHandle = VramHandle::Empty;
+static mut SKY_CLUT_REGIONS: [VramHandle; SKY_PANORAMA_PALETTE_BANDS] =
+    [VramHandle::Empty; SKY_PANORAMA_PALETTE_BANDS];
 
 pub(super) fn sky_panorama_tpage_word(page: usize) -> u16 {
     unsafe { SKY_PAGE_TPAGE_WORDS[page.min(1)] }
@@ -483,6 +495,13 @@ fn find_vram_slot(asset_id: AssetId, clut_mode: VramSlotClutMode) -> Option<Vram
             .filter_map(|s| *s)
             .find(|s| s.ready && s.asset == asset_id && s.clut_mode == clut_mode)
     }
+}
+
+/// Look up the sky panorama's VRAM slot, if the sky is uploaded. Used by the
+/// render path so a streamed (empty-bytes) sky resolves its already-uploaded
+/// slot instead of re-parsing empty asset bytes.
+pub(super) fn find_sky_panorama_vram_slot(asset_id: AssetId) -> Option<VramSlot> {
+    find_vram_slot(asset_id, VramSlotClutMode::SkyPanorama)
 }
 
 pub(super) fn find_room_texture_vram_slot(asset_id: AssetId) -> Option<VramSlot> {
@@ -895,20 +914,25 @@ pub(super) fn ensure_sky_panorama_uploaded(
         return None;
     }
     // Two contiguous 4bpp pages (the 512-texel panorama) + one CLUT per band,
-    // all from the unified allocator.
-    let (left_tpage, _page_region) =
+    // all from the unified allocator. The page-run and per-band CLUT handles are
+    // retained so `release_streamed_sky` can free them on gameplay exit.
+    let (left_tpage, page_region) =
         unsafe { VRAM_ALLOCATOR.alloc_page_run(2, TexDepth::Bit4, 256)? };
     let right_tpage = Tpage::new(left_tpage.x() + 64, left_tpage.y(), TexDepth::Bit4);
     let mut sky_cluts = [Clut::new(0, 0); SKY_PANORAMA_PALETTE_BANDS];
-    for dst in sky_cluts.iter_mut() {
-        let (clut, _clut_region) = unsafe { VRAM_ALLOCATOR.alloc_clut(SKY_PANORAMA_CLUT_ENTRIES)? };
+    let mut sky_clut_regions = [VramHandle::Empty; SKY_PANORAMA_PALETTE_BANDS];
+    for (dst, region_dst) in sky_cluts.iter_mut().zip(sky_clut_regions.iter_mut()) {
+        let (clut, clut_region) = unsafe { VRAM_ALLOCATOR.alloc_clut(SKY_PANORAMA_CLUT_ENTRIES)? };
         *dst = clut;
+        *region_dst = clut_region;
     }
     unsafe {
         SKY_PAGE_TPAGE_WORDS = [left_tpage.uv_tpage_word(0), right_tpage.uv_tpage_word(0)];
         for (band, clut) in sky_cluts.iter().enumerate() {
             SKY_CLUT_WORDS[band] = clut.uv_clut_word();
         }
+        SKY_PAGE_REGION = page_region;
+        SKY_CLUT_REGIONS = sky_clut_regions;
     }
 
     telemetry::stage_begin(telemetry::stage::VRAM_UPLOAD);
@@ -941,7 +965,9 @@ pub(super) fn ensure_sky_panorama_uploaded(
         texture_window: TextureWindow::NONE,
         texture_width: texture.width(),
         texture_height: texture.height(),
-        // Sky is session-persistent (2 pages + 8 CLUTs); not freed via slot eviction.
+        // The sky's allocator handles (2 pages + 8 CLUTs) live in the dedicated
+        // SKY_PAGE_REGION / SKY_CLUT_REGIONS statics and are freed by
+        // `release_streamed_sky` on gameplay exit, not via slot eviction.
         region: VramHandle::Empty,
         clut_region: VramHandle::Empty,
     };
@@ -951,6 +977,112 @@ pub(super) fn ensure_sky_panorama_uploaded(
         let _ = RESIDENCY.mark_vram_resident(asset_id);
     }
     Some(slot)
+}
+
+/// `true` when `asset_id` is referenced as a room's sky cyclorama panorama.
+/// The runtime manifest does not carry the host-side streamed class, so the
+/// menu UI-image loader and the gameplay sky loader tell their streamed
+/// (empty-bytes) Texture assets apart by this room-table lookup.
+pub(super) fn is_sky_panorama_asset(asset_id: AssetId) -> bool {
+    ROOMS.iter().any(|room| {
+        room.sky.flags & sky_flags::ENABLED != 0
+            && room.sky.cloud_layer.texture_asset == asset_id
+    })
+}
+
+/// Load the CD-streamed sky panorama into VRAM on gameplay entry.
+///
+/// The sky is a gameplay-scoped streamed Texture (empty baked bytes under
+/// `cd-stream-bench`): its UI.PAK chunk is read into a transient staging
+/// buffer and handed to the normal sky upload path. The staging buffer is
+/// `FONT_PACK_SCRATCH`, which is free during gameplay -- the UI fonts are
+/// packed once on first scene entry (`acquire_shared_ui_fonts`, guarded by
+/// `ui_fonts[0].is_none()`) and are already in VRAM, never re-packed and
+/// never released, so the scratch is unused after boot. Casting it as a u32
+/// staging slice is sound because the read fully consumes it before the next
+/// caller, and the sky (~64 KB) fits inside its 128 KB.
+///
+/// A no-op for non-streamed (baked) builds: a non-empty sky asset is uploaded
+/// lazily by the render path's `ensure_sky_panorama_uploaded`.
+#[cfg(feature = "cd-stream-bench")]
+pub(super) fn load_streamed_sky_from_cd() {
+    unsafe {
+        for asset in ASSETS {
+            if asset.kind != AssetKind::Texture || !asset.bytes.is_empty() {
+                continue;
+            }
+            if !is_sky_panorama_asset(asset.id) {
+                continue;
+            }
+            // Already resident (idempotent re-entry).
+            if find_vram_slot(asset.id, VramSlotClutMode::SkyPanorama).is_some() {
+                continue;
+            }
+
+            // FONT_PACK_SCRATCH is a `[u16; N]`; the CD read writes whole
+            // sectors as bytes through a u32-aligned slice. Both views alias
+            // the same dead-after-boot buffer; the read consumes it before the
+            // upload, and nothing else touches it during gameplay.
+            const SKY_STAGE_WORDS: usize = (GAMEPLAY_PACK_MAX_CHUNK_BYTES + 3) / 4;
+            const _: () = assert!(
+                SKY_STAGE_WORDS * 4 <= FONT_PACK_SCRATCH_LEN * 2,
+                "streamed sky chunk does not fit FONT_PACK_SCRATCH staging buffer"
+            );
+            let stage: &mut [u32] = core::slice::from_raw_parts_mut(
+                core::ptr::addr_of_mut!(FONT_PACK_SCRATCH) as *mut u32,
+                SKY_STAGE_WORDS,
+            );
+
+            let res = cd_stream::read_chunk_blocking(
+                UI_PACK_START_LBA,
+                UI_PACK_TOC,
+                asset.id.0 as u32,
+                stage,
+            );
+            if res.status != cd_stream::ROOM_CHUNK_STATUS_OK || res.bytes == 0 {
+                continue;
+            }
+
+            // The staged bytes are valid until the next read overwrites the
+            // buffer; the sky upload below consumes them synchronously.
+            let bytes: &[u8] = core::slice::from_raw_parts(
+                core::ptr::addr_of!(FONT_PACK_SCRATCH) as *const u8,
+                res.bytes,
+            );
+            let _ = ensure_sky_panorama_uploaded(asset.id, bytes);
+        }
+    }
+}
+
+/// Free the streamed sky panorama's VRAM on gameplay exit: return its two-page
+/// run and per-band CLUTs to the unified allocator, drop its VRAM slot, and
+/// clear the cached placement words so the next gameplay entry re-streams it.
+/// A no-op when the sky is not resident.
+#[cfg(feature = "cd-stream-bench")]
+pub(super) fn release_streamed_sky() {
+    unsafe {
+        let mut freed = false;
+        for i in 0..MAX_RESIDENT_VRAM_ASSETS {
+            if let Some(slot) = VRAM_SLOTS[i] {
+                if slot.clut_mode == VramSlotClutMode::SkyPanorama {
+                    let _ = RESIDENCY.mark_vram_evicted(slot.asset);
+                    VRAM_SLOTS[i] = None;
+                    VRAM_SLOT_COUNT = VRAM_SLOT_COUNT.saturating_sub(1);
+                    freed = true;
+                }
+            }
+        }
+        if !freed {
+            return;
+        }
+        VRAM_ALLOCATOR.free(core::mem::replace(&mut SKY_PAGE_REGION, VramHandle::Empty));
+        for region in SKY_CLUT_REGIONS.iter_mut() {
+            VRAM_ALLOCATOR.free(core::mem::replace(region, VramHandle::Empty));
+        }
+        SKY_PAGE_TPAGE_WORDS = [0; 2];
+        SKY_CLUT_WORDS = [0; SKY_PANORAMA_PALETTE_BANDS];
+        telemetry::counter(telemetry::counter::VRAM_SLOTS_FREED, 1);
+    }
 }
 
 /// Upload an 8bpp model atlas to the dedicated model VRAM
