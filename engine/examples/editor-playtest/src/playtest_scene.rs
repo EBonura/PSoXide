@@ -901,9 +901,16 @@ impl Scene for Playtest {
             primitive_packets.remaining() as u32,
         );
         telemetry::counter(telemetry::counter::WORLD_COMMANDS, world_command_len as u32);
+        // Split the submit so profiling can separate CPU build cost from
+        // GPU draw cost: OT_SUBMIT times the DMA kick (CPU), OT_WAIT times
+        // the blocking wait for the GPU/DMA walk. Waiting immediately after
+        // the kick keeps behaviour identical to the old blocking submit().
         telemetry::stage_begin(telemetry::stage::OT_SUBMIT);
-        ot.submit();
+        let ot_in_flight = ot.submit_async();
         telemetry::stage_end(telemetry::stage::OT_SUBMIT);
+        telemetry::stage_begin(telemetry::stage::OT_WAIT);
+        ot_in_flight.wait();
+        telemetry::stage_end(telemetry::stage::OT_WAIT);
 
         if let Some(room_record) = ROOMS.get(self.room_index.to_usize()) {
             draw_room_atmosphere_overlay(room_record, ctx.sim_tick);

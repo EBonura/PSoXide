@@ -479,14 +479,19 @@ pub enum TextureDepth {
     Bit15 = 2,
 }
 
-/// Submit a linked-list chain starting at `head` to GPU GP0 via
-/// DMA channel 2 in linked-list mode. Blocks until the walker hits
-/// the `0x00FFFFFF` terminator.
+/// Kick a linked-list chain to GPU GP0 via DMA channel 2 in
+/// linked-list mode **without** waiting for the walk to finish.
+///
+/// Returns as soon as the DMA transfer is started, so the CPU can do
+/// other work (build the next frame, run a sim tick) while the GPU
+/// rasterises this one. The caller MUST call [`submit_linked_list_wait`]
+/// before reusing the chain's backing storage or the ordering table,
+/// and the chain memory must stay live until that wait returns.
 ///
 /// `head` must point at a 4-byte-aligned RAM address; the DMA
 /// controller clocks bits 23..=0 of the 32-bit tag as the next-
 /// node address and bits 31..=24 as that packet's data-word count.
-pub fn submit_linked_list(head: *const u32) {
+pub fn submit_linked_list_async(head: *const u32) {
     draw_sync();
     // Make sure the GPU's DMA direction is CPU→GP0 before we kick
     // off the walker. `gpu::init` sets this, but games occasionally
@@ -501,5 +506,30 @@ pub fn submit_linked_list(head: *const u32) {
         Channel::Gpu,
         dma::CHCR_TO_DEVICE | dma::CHCR_SYNC_LINKED | dma::CHCR_START,
     );
+}
+
+/// Block until the GPU-DMA linked-list walk kicked by
+/// [`submit_linked_list_async`] has drained the whole chain. This is
+/// the CPU-blocked-on-GPU portion of an ordering-table submission;
+/// profiling code times it separately from the kick to split GPU-draw
+/// cost from CPU build cost.
+#[inline]
+pub fn submit_linked_list_wait() {
     while dma::is_busy(Channel::Gpu) {}
+}
+
+/// Submit a linked-list chain starting at `head` to GPU GP0 via
+/// DMA channel 2 in linked-list mode. Blocks until the walker hits
+/// the `0x00FFFFFF` terminator.
+///
+/// This is [`submit_linked_list_async`] immediately followed by
+/// [`submit_linked_list_wait`]; callers that want to overlap the GPU
+/// draw with CPU work should use the two halves directly.
+///
+/// `head` must point at a 4-byte-aligned RAM address; the DMA
+/// controller clocks bits 23..=0 of the 32-bit tag as the next-
+/// node address and bits 31..=24 as that packet's data-word count.
+pub fn submit_linked_list(head: *const u32) {
+    submit_linked_list_async(head);
+    submit_linked_list_wait();
 }
