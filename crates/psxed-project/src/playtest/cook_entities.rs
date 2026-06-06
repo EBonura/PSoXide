@@ -22,7 +22,10 @@ pub(crate) fn cook_sky_panorama_texture_asset(
         bytes,
         filename: format!("sky/sky_{sky_index:03}.psxt"),
         source_label: format!("Cooked Sky Panorama {sky_index}"),
-        streamed: false,
+        // The sky panorama is gameplay-scoped: CD-streamed off UI.PAK and
+        // staged through the larger gameplay buffer, loaded on gameplay
+        // entry and freed on gameplay exit so it stays out of `.data`.
+        streamed_class: StreamedClass::Gameplay,
     });
     sky_texture_assets.push((sky, asset_index));
     Some(asset_index)
@@ -66,7 +69,7 @@ pub(crate) fn cook_far_vista_texture_asset(
         bytes,
         filename: format!("texture_{texture_index:03}.psxt"),
         source_label: texture_resource.name.clone(),
-        streamed: false,
+        streamed_class: StreamedClass::None,
     });
     texture_asset_for_resource.insert(texture_id, new_index);
     Some(new_index)
@@ -757,7 +760,7 @@ pub(crate) fn register_model_for_instance(
         bytes: mesh_bytes.clone(),
         filename: format!("{folder}/mesh.psxmdl"),
         source_label: resource.name.clone(),
-        streamed: false,
+        streamed_class: StreamedClass::None,
     });
 
     // Atlas asset (optional).
@@ -802,7 +805,7 @@ pub(crate) fn register_model_for_instance(
             bytes,
             filename: format!("{folder}/atlas.psxt"),
             source_label: format!("{} atlas", resource.name),
-            streamed: false,
+            streamed_class: StreamedClass::None,
         });
         Some(idx)
     } else {
@@ -927,7 +930,7 @@ pub(crate) fn register_model_for_instance(
             bytes: animation_bytes,
             filename: format!("{folder}/clip_{:02}_{safe_clip}.psxanim", local_i),
             source_label: format!("{} / {}", resource.name, clip.name),
-            streamed: false,
+            streamed_class: StreamedClass::None,
         });
         clip_remap[resolved_i as usize] = u16::try_from(local_i).ok();
         model_clips.push(PlaytestModelClip {
