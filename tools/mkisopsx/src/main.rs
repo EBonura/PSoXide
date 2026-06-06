@@ -26,7 +26,7 @@
 
 use psx_iso::{
     build_world_pack, cd_stream_bench_payload, default_system_cnf, Exe, IsoBuilder,
-    CD_STREAM_BENCH_FILE_NAME, WORLD_PACK_FILE_NAME,
+    CD_STREAM_BENCH_FILE_NAME, UI_PACK_FILE_NAME, WORLD_PACK_FILE_NAME,
 };
 use std::collections::HashSet;
 use std::env;
@@ -44,6 +44,8 @@ struct Args {
     cdtest_sectors: Option<usize>,
     world_pack_rooms_dir: Option<PathBuf>,
     world_pack_order_file: Option<PathBuf>,
+    ui_pack_dir: Option<PathBuf>,
+    ui_pack_order_file: Option<PathBuf>,
     cdda_tracks: Vec<PathBuf>,
     system_area: Option<PathBuf>,
 }
@@ -56,6 +58,8 @@ fn parse_args() -> Result<Args, String> {
     let mut cdtest_sectors = None;
     let mut world_pack_rooms_dir = None;
     let mut world_pack_order_file = None;
+    let mut ui_pack_dir = None;
+    let mut ui_pack_order_file = None;
     let mut cdda_tracks = Vec::new();
     let mut system_area = env::var_os("PSOXIDE_SYSTEM_AREA").map(PathBuf::from);
     let mut it = env::args().skip(1);
@@ -103,6 +107,18 @@ fn parse_args() -> Result<Args, String> {
                         "--world-pack-order-file takes a path".to_string()
                     })?));
             }
+            "--ui-pack-dir" => {
+                ui_pack_dir = Some(PathBuf::from(
+                    it.next()
+                        .ok_or_else(|| "--ui-pack-dir takes a path".to_string())?,
+                ));
+            }
+            "--ui-pack-order-file" => {
+                ui_pack_order_file = Some(PathBuf::from(
+                    it.next()
+                        .ok_or_else(|| "--ui-pack-order-file takes a path".to_string())?,
+                ));
+            }
             "--cdda-track" => {
                 cdda_tracks.push(PathBuf::from(
                     it.next()
@@ -138,6 +154,8 @@ fn parse_args() -> Result<Args, String> {
         cdtest_sectors,
         world_pack_rooms_dir,
         world_pack_order_file,
+        ui_pack_dir,
+        ui_pack_order_file,
         cdda_tracks,
         system_area,
     })
@@ -162,6 +180,12 @@ fn print_usage() {
          --world-pack-order-file PATH\n\
                          Optional newline-delimited room id order for\n\
                          WORLD.PAK payload placement.\n\
+         --ui-pack-dir PATH\n\
+                         Pack ui_*.psxt streamed UI images into UI.PAK\n\
+                         after WORLD.PAK and before PSX.EXE.\n\
+         --ui-pack-order-file PATH\n\
+                         Optional newline-delimited UI asset index order\n\
+                         for UI.PAK payload placement.\n\
          --cdda-track PATH\n\
                          Append a sector-aligned raw CD-DA track to\n\
                          the output .bin and emit a sibling .cue. May\n\
@@ -251,6 +275,19 @@ fn main() -> ExitCode {
             }
         };
         builder.add_file(WORLD_PACK_FILE_NAME, pack);
+    }
+    // UI.PAK must follow WORLD.PAK and precede PSX.EXE so its on-disc
+    // start LBA matches the manifest's `UI_PACK_START_LBA`
+    // (WORLD_PACK_START_LBA + WORLD.PAK total sectors).
+    if let Some(dir) = args.ui_pack_dir.as_deref() {
+        let pack = match build_ui_pack_from_dir(dir, args.ui_pack_order_file.as_deref()) {
+            Ok(pack) => pack,
+            Err(e) => {
+                eprintln!("{e}");
+                return ExitCode::from(1);
+            }
+        };
+        builder.add_file(UI_PACK_FILE_NAME, pack);
     }
     builder.add_file("PSX.EXE", exe_bytes);
 
@@ -475,6 +512,45 @@ fn build_world_pack_from_rooms_dir(
         apply_world_pack_order(&mut rooms, &order, order_file)?;
     }
     let refs: Vec<(u32, &[u8])> = rooms
+        .iter()
+        .map(|(chunk_id, bytes)| (*chunk_id, bytes.as_slice()))
+        .collect();
+    Ok(build_world_pack(&refs))
+}
+
+fn build_ui_pack_from_dir(
+    dir: &std::path::Path,
+    order_file: Option<&std::path::Path>,
+) -> Result<Vec<u8>, String> {
+    let mut chunks = Vec::new();
+    let entries = fs::read_dir(dir).map_err(|e| format!("read {}: {e}", dir.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("read {}: {e}", dir.display()))?;
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("psxt") {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        let Some(raw_index) = stem.strip_prefix("ui_") else {
+            continue;
+        };
+        let chunk_id = raw_index
+            .parse::<u32>()
+            .map_err(|_| format!("invalid UI chunk filename: {}", path.display()))?;
+        let bytes = fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        chunks.push((chunk_id, bytes));
+    }
+    chunks.sort_by_key(|(chunk_id, _)| *chunk_id);
+    if chunks.is_empty() {
+        return Err(format!("no ui_*.psxt files found in {}", dir.display()));
+    }
+    if let Some(order_file) = order_file {
+        let order = read_world_pack_order_file(order_file)?;
+        apply_world_pack_order(&mut chunks, &order, order_file)?;
+    }
+    let refs: Vec<(u32, &[u8])> = chunks
         .iter()
         .map(|(chunk_id, bytes)| (*chunk_id, bytes.as_slice()))
         .collect();

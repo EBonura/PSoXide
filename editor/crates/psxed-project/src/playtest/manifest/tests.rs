@@ -11,6 +11,7 @@ fn room_texture_vram_bytes_match_runtime_compact_tile_upload() {
         bytes,
         filename: "texture_000.psxt".to_string(),
         source_label: "Delven slateflr1a q2".to_string(),
+        streamed: false,
     };
 
     assert_eq!(asset_vram_bytes(&asset), 8 * 32 * 2 + 16 * 2);
@@ -28,6 +29,7 @@ fn model_atlas_vram_bytes_match_runtime_atlas_upload() {
         bytes,
         filename: "models/model_000_obsidian_wraith/atlas.psxt".to_string(),
         source_label: "Obsidian Wraith atlas".to_string(),
+        streamed: false,
     };
 
     assert_eq!(asset_vram_bytes(&asset), 64 * 128 * 2 + 256 * 2);
@@ -664,6 +666,7 @@ fn test_room_asset(bytes: Vec<u8>, index: usize) -> PlaytestAsset {
         bytes,
         filename: format!("room_{index:03}.psxw"),
         source_label: format!("Room {index}"),
+        streamed: false,
     }
 }
 

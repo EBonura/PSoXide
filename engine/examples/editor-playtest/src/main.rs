@@ -178,7 +178,8 @@ use generated::{GAME_FLOW, OPTIONS, UI_SCENES};
 use generated::{VISIBILITY_PVS, VISIBILITY_PVS_BITS};
 #[cfg(feature = "cd-stream-bench")]
 use generated::{
-    WORLD_PACK_MAX_CHUNK_BYTES, WORLD_PACK_START_LBA, WORLD_PACK_TOC, WORLD_RESIDENT_CHUNK_LIMIT,
+    UI_PACK_MAX_CHUNK_BYTES, UI_PACK_START_LBA, UI_PACK_TOC, WORLD_PACK_MAX_CHUNK_BYTES,
+    WORLD_PACK_START_LBA, WORLD_PACK_TOC, WORLD_RESIDENT_CHUNK_LIMIT,
 };
 
 static mut OT: OrderingTable<OT_DEPTH> = OrderingTable::new();
@@ -847,12 +848,19 @@ fn playtest_visual_pacing(video_mode: VideoMode) -> VisualPacing {
     }
 }
 
+/// The `Playtest` scene is ~225 KB; keeping it as a `main` stack local
+/// pushed `$sp` down into `.bss`. Place it in static storage (`.bss`) so it
+/// no longer competes with the stack for the same region. `Playtest::new()`
+/// is `const fn`, so this is zero-initialized at link time.
+static mut SCENE: Playtest = Playtest::new();
+
 #[no_mangle]
 fn main() -> ! {
-    let mut scene = Playtest::new();
-    // `scene` is the deepest stack-resident object; fail loudly here if it
-    // (or the call frames it will spawn) has overrun the stack into static
-    // data instead of silently corrupting `static` buffers at runtime.
+    let scene: &mut Playtest = unsafe { &mut *core::ptr::addr_of_mut!(SCENE) };
+    // The scene now lives in `.bss`, not on the stack; this guard still
+    // checks that the live stack frames (and the rest of static data) leave
+    // headroom between `$sp` and the top of `.bss` instead of silently
+    // corrupting `static` buffers at runtime.
     #[cfg(target_arch = "mips")]
     psx_rt::assert_stack_headroom();
     let video_mode = VideoMode::Ntsc;
@@ -877,6 +885,6 @@ fn main() -> ! {
         OPTIONS,
         UI_SFX_SAMPLES,
         UI_SFX_CUES,
-        &mut scene,
+        scene,
     );
 }

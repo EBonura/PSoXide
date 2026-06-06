@@ -16,7 +16,14 @@ impl Scene for Playtest {
 
     fn ui_texture(&self, asset_id: AssetId) -> Option<UiTextureSlot> {
         let asset = find_asset_of_kind(ASSETS, asset_id, AssetKind::Texture)?;
-        let slot = ensure_ui_texture_uploaded(asset.id, asset.bytes)?;
+        // Streamed UI images carry empty baked bytes; they are already in
+        // VRAM (loaded on menu entry), so look up the existing slot rather
+        // than re-parsing empty bytes through `ensure_ui_texture_uploaded`.
+        let slot = if asset.bytes.is_empty() {
+            find_room_texture_vram_slot(asset.id)?
+        } else {
+            ensure_ui_texture_uploaded(asset.id, asset.bytes)?
+        };
         Some(UiTextureSlot {
             clut_word: slot.clut_word,
             tpage_word: slot.tpage_word,
@@ -26,11 +33,17 @@ impl Scene for Playtest {
         })
     }
 
-    /// Every flow state shares one resource set: the UI font atlas is used by
-    /// the menus and the gameplay HUD, so it is acquired once on the first
-    /// state entered and never torn down (no per-transition re-upload).
-    fn state_resource_key(&self, _state: SceneStateRef) -> u32 {
-        UI_FONT_RESOURCE_KEY
+    /// Menu and gameplay states use distinct resource-set keys so the flow
+    /// driver fires `on_exit_state`/`on_enter_state` across the menu->gameplay
+    /// boundary. The UI font atlas is shared by both (acquired once, never torn
+    /// down); the keys differ only so the streamed UI image set can be loaded on
+    /// menu entry and freed on gameplay entry.
+    fn state_resource_key(&self, state: SceneStateRef) -> u32 {
+        if state.has_gameplay() {
+            GAMEPLAY_RESOURCE_KEY
+        } else {
+            MENU_RESOURCE_KEY
+        }
     }
 
     /// Acquire the shared resource set. On first entry: reserve the static VRAM
@@ -39,15 +52,26 @@ impl Scene for Playtest {
     /// desyncs the GPU command stream and freezes the world render, so the
     /// consolidated upload is the fix; routing it through the allocator keeps
     /// the font VRAM tracked.
-    fn on_enter_state(&mut self, _state: SceneStateRef, _ctx: &mut Ctx) {
+    fn on_enter_state(&mut self, state: SceneStateRef, _ctx: &mut Ctx) {
         acquire_shared_ui_fonts(&mut self.ui_fonts);
+        // Streamed UI images live only in menu states. Load them off UI.PAK on
+        // menu entry; gameplay entry frees them (see `on_exit_state`).
+        #[cfg(feature = "cd-stream-bench")]
+        if !state.has_gameplay() {
+            load_ui_images_from_cd();
+        }
+        let _ = state;
     }
 
-    /// Release the shared resource set. Dormant in this project's flow (the
-    /// font set never leaves the active set) but correct: free the VRAM and
-    /// clear the atlases so a re-entry re-acquires cleanly.
-    fn on_exit_state(&mut self, _state: SceneStateRef, _ctx: &mut Ctx) {
-        release_shared_ui_fonts(&mut self.ui_fonts);
+    /// Release the menu's streamed UI images when leaving a menu state so the
+    /// gameplay room textures reclaim that VRAM. The shared UI font atlas is NOT
+    /// released here (it serves the gameplay HUD too).
+    fn on_exit_state(&mut self, state: SceneStateRef, _ctx: &mut Ctx) {
+        #[cfg(feature = "cd-stream-bench")]
+        if !state.has_gameplay() {
+            release_ui_images();
+        }
+        let _ = state;
     }
 
     /// Apply front-end settings chosen before Play. Screen-position options
