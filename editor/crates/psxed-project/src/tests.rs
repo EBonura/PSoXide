@@ -1072,9 +1072,8 @@ fn embedded_default_project_ron_deserializes() {
             if psxt_path.ends_with("floor.psxt")
                 || psxt_path.ends_with("brick-wall.psxt")
     )));
-    // Starter now mirrors demo7: the active player is the
-    // Crimson Cross Knight profile with its Meshy Gold animation
-    // library and material atlas.
+    // Starter seeds the active player with the Crimson Cross Knight profile,
+    // its Meshy Gold animation library, and material atlas.
     let (character_id, character) = project
         .resources
         .iter()
@@ -1232,14 +1231,14 @@ fn starter_project_has_scene_tree_and_resources() {
     let project = ProjectDocument::starter();
 
     assert_eq!(project.scenes.len(), 1);
-    // Starter includes the demo7 room texture/material set plus gameplay
-    // resources for the animated character and weapon path.
+    // Starter includes a room texture/material set plus gameplay resources for
+    // the animated character and weapon path.
     assert!(project.resources.len() >= 10);
     assert!(project
         .active_scene()
         .hierarchy_rows()
         .iter()
-        .any(|row| row.kind == "Room" && row.name == "Demo7 Map"));
+        .any(|row| row.kind == "Room"));
     let grid = project
         .active_scene()
         .nodes()
@@ -1421,7 +1420,7 @@ fn project_roundtrips_through_ron_string() {
     let project = ProjectDocument::starter();
     let ron = project.to_ron_string().unwrap();
 
-    assert!(ron.contains("Demo7 Map"));
+    assert!(ron.contains("Crimson Cross Knight Player"));
     assert_eq!(ProjectDocument::from_ron_str(&ron).unwrap(), project);
 }
 
