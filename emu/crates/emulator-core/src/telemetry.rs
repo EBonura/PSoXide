@@ -97,8 +97,11 @@ pub mod stage {
     pub const EQUIPMENT: u16 = 12;
     /// Deferred world-command sort and OT insertion.
     pub const WORLD_FLUSH: u16 = 10;
-    /// Ordering-table DMA submission.
+    /// Ordering-table DMA kick (CPU-side setup; excludes the GPU-draw wait).
     pub const OT_SUBMIT: u16 = 11;
+    /// Blocking wait for the ordering-table DMA walk to finish: the
+    /// CPU-blocked-on-GPU portion of a submit, i.e. GPU draw + DMA cost.
+    pub const OT_WAIT: u16 = 45;
     /// Player collision gather + motor solve (sim).
     pub const SIM_COLLISION: u16 = 36;
     /// Current-room tracking + active-window refresh (sim).
@@ -120,7 +123,15 @@ pub mod stage {
 }
 
 /// Number of stage slots, including index zero for unknown/reserved ids.
-pub const STAGE_COUNT: usize = 45;
+/// Sized to the highest stage id (`OT_WAIT = 45`) plus one.
+pub const STAGE_COUNT: usize = 46;
+
+// Enforce `STAGE_COUNT = highest stage id + 1` at compile time. The stage
+// arrays are indexed by id, and `add_events` drops out-of-range ids silently
+// (via `get_mut`), so a new higher id without a matching STAGE_COUNT bump would
+// quietly vanish from every summary. Adding an id above OT_WAIT trips this and
+// must update both the count and this guard.
+const _: () = assert!(stage::OT_WAIT as usize == STAGE_COUNT - 1);
 
 /// Runtime task id constants shared with `psx-engine::telemetry`.
 pub mod task {
@@ -995,7 +1006,8 @@ pub fn stage_name(id: u16) -> &'static str {
         stage::PORTAL_VISIBILITY => "portal visibility",
         stage::EQUIPMENT => "equipment",
         stage::WORLD_FLUSH => "world flush/sort",
-        stage::OT_SUBMIT => "ot submit",
+        stage::OT_SUBMIT => "ot submit (kick)",
+        stage::OT_WAIT => "ot wait (gpu/dma)",
         stage::SIM_COLLISION => "sim collision",
         stage::SIM_ROOM_TRACK => "sim room track",
         stage::SIM_RESIDENCY => "sim residency",
