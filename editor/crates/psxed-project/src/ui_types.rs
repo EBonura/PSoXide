@@ -1651,4 +1651,3 @@ pub(crate) fn clamp_ui_rect_coord(value: i32) -> i16 {
 pub(crate) fn default_ui_scenes() -> Vec<UiScene> {
     vec![UiScene::default_hud()]
 }
-
