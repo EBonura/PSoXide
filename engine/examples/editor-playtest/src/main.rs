@@ -108,6 +108,7 @@ use psx_vram::{TexDepth, Tpage};
 
 mod active_room_cache;
 mod active_room_streaming;
+mod active_room_visibility;
 mod active_rooms;
 mod box_props;
 #[cfg(feature = "cd-stream-bench")]
