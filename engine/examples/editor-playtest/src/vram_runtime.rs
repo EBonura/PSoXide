@@ -12,6 +12,25 @@ use psx_vram::{
 const FONT_PACK_SCRATCH_LEN: usize = MAX_RUNTIME_UI_FONTS * 64 * 256;
 static mut FONT_PACK_SCRATCH: [u16; FONT_PACK_SCRATCH_LEN] = [0; FONT_PACK_SCRATCH_LEN];
 
+/// Staging buffer for one CD-streamed UI image. Reused image-by-image
+/// on menu entry: a UI image is read off UI.PAK into this buffer, then
+/// uploaded to VRAM (a synchronous DMA), then the buffer is overwritten
+/// by the next image. Lives in BSS, not on the stack. Sized to the
+/// largest streamed UI chunk so any one image fits.
+#[cfg(feature = "cd-stream-bench")]
+const UI_STAGE_WORDS: usize = (UI_PACK_MAX_CHUNK_BYTES + 3) / 4;
+#[cfg(feature = "cd-stream-bench")]
+static mut UI_IMAGE_STAGE: [u32; UI_STAGE_WORDS] = [0; UI_STAGE_WORDS];
+
+/// Streamed UI image VRAM slots created on menu entry, tracked so they
+/// can be released on gameplay entry. One entry per streamed Texture
+/// asset.
+#[cfg(feature = "cd-stream-bench")]
+const MAX_UI_IMAGE_SLOTS: usize = 16;
+#[cfg(feature = "cd-stream-bench")]
+static mut UI_IMAGE_SLOTS: [Option<AssetId>; MAX_UI_IMAGE_SLOTS] =
+    [None; MAX_UI_IMAGE_SLOTS];
+
 /// Capacity of the residency manager's RAM table. Holds room
 /// world + model meshes + animation clips.
 const MAX_RESIDENT_RAM_ASSETS: usize = 128;
@@ -80,6 +99,112 @@ fn free_vram_slot(i: usize) {
             let _ = RESIDENCY.mark_vram_evicted(slot.asset);
             VRAM_SLOT_COUNT = VRAM_SLOT_COUNT.saturating_sub(1);
             telemetry::counter(telemetry::counter::VRAM_SLOTS_FREED, 1);
+        }
+    }
+}
+
+/// Free the room-texture VRAM slot a streamed UI image occupies, if any.
+/// Tries both 4bpp clut modes since a UI image's transparency flag decides
+/// which mode `ensure_ui_texture_uploaded` picked.
+fn free_room_texture_vram_slot(asset_id: AssetId) {
+    unsafe {
+        for i in 0..MAX_RESIDENT_VRAM_ASSETS {
+            if let Some(slot) = VRAM_SLOTS[i] {
+                if slot.asset == asset_id
+                    && matches!(
+                        slot.clut_mode,
+                        VramSlotClutMode::OpaqueZero | VramSlotClutMode::TransparentZero
+                    )
+                {
+                    free_vram_slot(i);
+                }
+            }
+        }
+    }
+}
+
+/// Load every CD-streamed UI image into VRAM, one image at a time.
+///
+/// Each streamed image (a `Texture` asset with empty baked bytes) is read
+/// off UI.PAK into the shared `UI_IMAGE_STAGE` buffer, uploaded to VRAM,
+/// and the upload drained to completion BEFORE the next image overwrites
+/// the buffer. The `&'static` slice handed to the uploader is sound only
+/// because the buffer is `static mut` and fully consumed before the next
+/// read mutates it. Tracks each created slot so `release_ui_images` can
+/// free it on gameplay entry.
+#[cfg(feature = "cd-stream-bench")]
+pub(super) fn load_ui_images_from_cd() {
+    unsafe {
+        let mut slot_count = 0usize;
+        for asset in ASSETS {
+            if asset.kind != AssetKind::Texture || !asset.bytes.is_empty() {
+                continue;
+            }
+            if slot_count >= MAX_UI_IMAGE_SLOTS {
+                break;
+            }
+            // Skip if already uploaded (idempotent re-entry).
+            if find_room_texture_vram_slot(asset.id).is_some() {
+                continue;
+            }
+
+            let res = cd_stream::read_ui_chunk_blocking(
+                UI_PACK_START_LBA,
+                UI_PACK_TOC,
+                asset.id.0 as u32,
+                &mut *core::ptr::addr_of_mut!(UI_IMAGE_STAGE),
+            );
+            if res.status != cd_stream::ROOM_CHUNK_STATUS_OK || res.bytes == 0 {
+                continue;
+            }
+
+            // The staged bytes are valid until the next read overwrites the
+            // buffer; the upload below consumes them synchronously first.
+            let bytes: &'static [u8] = core::slice::from_raw_parts(
+                core::ptr::addr_of!(UI_IMAGE_STAGE) as *const u8,
+                res.bytes,
+            );
+            if ensure_ui_texture_uploaded(asset.id, bytes).is_none() {
+                // Drain in case a job was queued but not yet completed, then
+                // retry the lookup before giving up on this image.
+                drain_ui_upload_queue();
+            }
+
+            // Make sure this asset's upload has fully drained before the next
+            // iteration reuses the staging buffer.
+            drain_ui_upload_queue();
+
+            if find_room_texture_vram_slot(asset.id).is_some() {
+                UI_IMAGE_SLOTS[slot_count] = Some(asset.id);
+                slot_count += 1;
+            }
+        }
+    }
+}
+
+/// Run the VRAM upload queue to idle so the shared UI staging buffer can be
+/// safely overwritten. Bounded so a stuck job can't hang the loader.
+#[cfg(feature = "cd-stream-bench")]
+fn drain_ui_upload_queue() {
+    unsafe {
+        let mut steps = 0u32;
+        while !VRAM_UPLOAD_QUEUE.is_idle() && steps < 4096 {
+            VRAM_UPLOAD_QUEUE.step(ROOM_TILE_TEXELS, mark_vram_slot_ready);
+            steps += 1;
+        }
+    }
+}
+
+/// Free every streamed UI image VRAM slot created by `load_ui_images_from_cd`.
+/// Called on gameplay entry so the room textures reclaim that VRAM. Fonts are
+/// shared and are NOT released here.
+#[cfg(feature = "cd-stream-bench")]
+pub(super) fn release_ui_images() {
+    unsafe {
+        for entry in UI_IMAGE_SLOTS.iter_mut() {
+            if let Some(asset_id) = entry.take() {
+                free_room_texture_vram_slot(asset_id);
+            }
         }
     }
 }
@@ -185,6 +310,10 @@ pub(super) fn acquire_shared_ui_fonts(ui_fonts: &mut [Option<FontAtlas>; MAX_RUN
     }
 }
 
+/// Kept for completeness even though the current flow never releases the shared
+/// UI fonts (they serve both menu and gameplay HUD): a future teardown path can
+/// call this to free the font VRAM and clear the atlases for a clean re-acquire.
+#[allow(dead_code)]
 pub(super) fn release_shared_ui_fonts(ui_fonts: &mut [Option<FontAtlas>; MAX_RUNTIME_UI_FONTS]) {
     unsafe {
         if let Some(set) = VRAM_FONT_SET.take() {
@@ -356,7 +485,7 @@ fn find_vram_slot(asset_id: AssetId, clut_mode: VramSlotClutMode) -> Option<Vram
     }
 }
 
-fn find_room_texture_vram_slot(asset_id: AssetId) -> Option<VramSlot> {
+pub(super) fn find_room_texture_vram_slot(asset_id: AssetId) -> Option<VramSlot> {
     unsafe {
         VRAM_SLOTS.iter().filter_map(|s| *s).find(|s| {
             s.ready
