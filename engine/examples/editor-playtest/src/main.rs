@@ -106,6 +106,7 @@ use psx_level::{
 };
 use psx_vram::{TexDepth, Tpage};
 
+mod active_room_cache;
 mod active_room_streaming;
 mod active_rooms;
 mod box_props;
@@ -128,8 +129,8 @@ mod visibility_runtime;
 mod vram_runtime;
 mod vram_upload;
 
+use active_room_cache::*;
 use active_room_streaming::*;
-use active_rooms::*;
 use box_props::*;
 use character_runtime::*;
 use debug_runtime::*;
