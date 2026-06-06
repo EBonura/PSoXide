@@ -62,7 +62,7 @@ pub fn write_package(package: &PlaytestPackage, generated_dir: &Path) -> std::io
     // same bytes also land in `textures/` above so the non-streaming
     // (`include_bytes!`) build still resolves them.
     for (index, asset) in package.assets.iter().enumerate() {
-        if asset.streamed {
+        if asset.is_streamed() {
             std::fs::write(
                 ui_stream_chunks_dir.join(format!("ui_{index:03}.psxt")),
                 &asset.bytes,
@@ -130,11 +130,13 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     let world_pack_total_sectors = world_pack_layout(package).total_sectors;
     let ui_pack_start_lba = psx_iso::WORLD_PACK_DEFAULT_START_LBA + world_pack_total_sectors;
     let ui_pack_toc = ui_pack_toc(package);
-    let ui_pack_max_chunk_bytes = ui_pack_toc
-        .iter()
-        .map(|entry| entry.byte_size as usize)
-        .max()
-        .unwrap_or(0);
+    // Staging-buffer sizing is per streamed class so each runtime buffer
+    // stays right-sized: UI images load through a small per-image buffer,
+    // gameplay-scoped textures (the sky) through a larger transient one.
+    // Both classes share UI.PAK / UI_PACK_TOC; only the staging differs.
+    let ui_pack_max_chunk_bytes = streamed_class_max_chunk_bytes(package, StreamedClass::UiImage);
+    let gameplay_pack_max_chunk_bytes =
+        streamed_class_max_chunk_bytes(package, StreamedClass::Gameplay);
     let resident_chunk_limit = package
         .rooms
         .iter()
@@ -207,7 +209,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         // assets (UI images) stream off UI.PAK. Both emit empty baked
         // bytes under `cd-stream-bench` and the normal word-aligned
         // `include_bytes!` static when the feature is off.
-        if asset.kind == PlaytestAssetKind::RoomWorld || asset.streamed {
+        if asset.kind == PlaytestAssetKind::RoomWorld || asset.is_streamed() {
             let _ = writeln!(out, "#[cfg(feature = \"cd-stream-bench\")]");
             let _ = writeln!(
                 out,
@@ -542,10 +544,21 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     let _ = writeln!(out, "pub const UI_PACK_START_LBA: u32 = {ui_pack_start_lba};");
     out.push('\n');
 
-    out.push_str("/// Largest streamed UI image chunk in bytes (staging buffer size).\n");
+    out.push_str("/// Largest streamed UI image chunk in bytes (UI image staging buffer size).\n");
     let _ = writeln!(
         out,
         "pub const UI_PACK_MAX_CHUNK_BYTES: usize = {ui_pack_max_chunk_bytes};",
+    );
+    out.push('\n');
+
+    out.push_str(
+        "/// Largest streamed gameplay-scoped chunk in bytes (e.g. the sky panorama).\n\
+         /// Sizes the transient gameplay staging buffer, kept separate from the UI\n\
+         /// image buffer so the small per-image buffer stays small.\n",
+    );
+    let _ = writeln!(
+        out,
+        "pub const GAMEPLAY_PACK_MAX_CHUNK_BYTES: usize = {gameplay_pack_max_chunk_bytes};",
     );
     out.push('\n');
 
@@ -1462,17 +1475,33 @@ fn world_pack_layout(package: &PlaytestPackage) -> psx_iso::WorldPackLayout {
     psx_iso::build_world_pack_layout(&refs)
 }
 
-/// Streamed UI image assets in pack order, paired with their asset
-/// index (used as the UI.PAK chunk id). Mirrors `world_pack_order`'s
-/// pairing but for `streamed` Texture assets.
+/// Streamed assets in pack order, paired with their asset index (used
+/// as the UI.PAK chunk id). Mirrors `world_pack_order`'s pairing but for
+/// every CD-streamed Texture asset. Both streamed classes (UI images and
+/// gameplay-scoped textures like the sky) share UI.PAK, keyed by asset
+/// index, so the disc packer stays unchanged; only the runtime staging
+/// buffer differs per class.
 fn ui_pack_chunks(package: &PlaytestPackage) -> Vec<(u32, &[u8])> {
     package
         .assets
         .iter()
         .enumerate()
-        .filter(|(_, asset)| asset.streamed)
+        .filter(|(_, asset)| asset.is_streamed())
         .map(|(index, asset)| (index as u32, asset.bytes.as_slice()))
         .collect()
+}
+
+/// Largest payload in bytes across the streamed assets of one class.
+/// Drives the runtime staging-buffer size for that class. Returns `0`
+/// when no asset of the class is streamed.
+fn streamed_class_max_chunk_bytes(package: &PlaytestPackage, class: StreamedClass) -> usize {
+    package
+        .assets
+        .iter()
+        .filter(|asset| asset.streamed_class == class)
+        .map(|asset| asset.bytes.len())
+        .max()
+        .unwrap_or(0)
 }
 
 fn ui_pack_toc(package: &PlaytestPackage) -> Vec<psx_iso::WorldPackBuildEntry> {

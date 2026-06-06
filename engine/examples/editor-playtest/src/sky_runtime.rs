@@ -35,7 +35,10 @@ pub(super) fn draw_sky_panorama(
     else {
         return;
     };
-    if ensure_sky_panorama_uploaded(asset.id, asset.bytes).is_none() {
+    // Streamed sky assets carry empty baked bytes; they are uploaded on gameplay
+    // entry (`load_streamed_sky_from_cd`), so resolve the existing VRAM slot
+    // rather than re-parsing empty bytes. Baked builds upload lazily here.
+    if !sky_panorama_resident(asset) {
         return;
     }
 
@@ -343,7 +346,18 @@ fn sky_panorama_texture_ready(sky: LevelSkyRecord) -> bool {
     else {
         return true;
     };
-    ensure_sky_panorama_uploaded(asset.id, asset.bytes).is_some()
+    sky_panorama_resident(asset)
+}
+
+/// Resolve whether the room sky's panorama is uploaded to VRAM. Streamed sky
+/// assets (empty baked bytes) are uploaded on gameplay entry, so this only
+/// queries the existing slot; baked sky assets upload lazily on first call.
+fn sky_panorama_resident(asset: &psx_level::LevelAssetRecord) -> bool {
+    if asset.bytes.is_empty() {
+        find_sky_panorama_vram_slot(asset.id).is_some()
+    } else {
+        ensure_sky_panorama_uploaded(asset.id, asset.bytes).is_some()
+    }
 }
 
 #[cfg(feature = "cd-stream-bench")]
