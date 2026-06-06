@@ -651,13 +651,14 @@ fn first_status_error(current: u32, next: u32) -> u32 {
 
 /// Synchronously read one UI.PAK chunk into `dst`. Looks the chunk
 /// up in `toc` by `chunk_id` (the streamed asset index), reads its
-/// sector run from `ui_pack_lba + entry.sector_offset`, copies the
+/// sector run from `pack_lba + entry.sector_offset`, copies the
 /// unpadded bytes into `dst`, and verifies the FNV checksum. Used by
-/// the menu UI-image loader, which loads one image at a time into a
-/// shared staging buffer, so a blocking read is the simplest correct
-/// shape. Non-mips builds return `STATUS_UNSUPPORTED`.
-pub(super) fn read_ui_chunk_blocking(
-    ui_pack_lba: u32,
+/// the streamed-asset loaders (menu UI images and the gameplay sky),
+/// which load one chunk at a time into a shared staging buffer, so a
+/// blocking read is the simplest correct shape. Non-mips builds return
+/// `STATUS_UNSUPPORTED`.
+pub(super) fn read_chunk_blocking(
+    pack_lba: u32,
     toc: &[LevelWorldPackEntryRecord],
     chunk_id: u32,
     dst: &mut [u32],
@@ -681,7 +682,7 @@ pub(super) fn read_ui_chunk_blocking(
 
     #[cfg(not(target_arch = "mips"))]
     {
-        let _ = ui_pack_lba;
+        let _ = pack_lba;
         result.status = STATUS_UNSUPPORTED;
         result
     }
@@ -694,7 +695,7 @@ pub(super) fn read_ui_chunk_blocking(
             return result;
         }
         if let Err(status) = start_cd_read_at_lba(
-            ui_pack_lba.saturating_add(entry.sector_offset),
+            pack_lba.saturating_add(entry.sector_offset),
             &mut polls,
         ) {
             result.status = status;
