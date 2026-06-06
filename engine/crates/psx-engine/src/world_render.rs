@@ -2172,6 +2172,12 @@ pub fn draw_indexed_cached_room_vertex_lit_all_cells<const OT: usize, L: WorldSu
     crate::telemetry::stage_begin(crate::telemetry::stage::ROOM_CELL_SELECT);
     let mut projected_index_count = 0usize;
     let mut accepted_cell_count = 0usize;
+    // Lateral + behind-camera cull only (no far plane). Off-screen side/behind
+    // cells are skipped so room_project + room_surface_draw stop paying for
+    // them, while far cells down a sightline are kept (centered in the frustum
+    // cone). The full visible-to-camera test would re-cull the far room via its
+    // draw_distance far plane, which is the regression we are avoiding.
+    let loaded_camera = LoadedWorldCameraGte::load(*camera);
 
     for (cell_index, cell) in cached_cells.iter().copied().enumerate() {
         if cell.surface_count == 0 || cell_index > u16::MAX as usize {
@@ -2183,10 +2189,19 @@ pub fn draw_indexed_cached_room_vertex_lit_all_cells<const OT: usize, L: WorldSu
             cell.visibility_center[1],
             cell.visibility_center[2],
         );
-        let cell_depth = camera.view_vertex(visibility_center).z;
+        let visibility_view = loaded_camera.view_vertex(visibility_center);
+        if !cell_visibility_view_in_lateral_frustum(
+            camera,
+            visibility_view,
+            cell.visibility_radius,
+            screen_margin,
+        ) {
+            stats.cells_frustum_culled = stats.cells_frustum_culled.wrapping_add(1);
+            continue;
+        }
         stats.cells_drawn = stats.cells_drawn.wrapping_add(1);
         accepted_cell_indices[accepted_cell_count] = cell_index as u16;
-        accepted_cell_depths[accepted_cell_count] = cell_depth;
+        accepted_cell_depths[accepted_cell_count] = visibility_view.z;
         accepted_cell_count += 1;
     }
     sort_cached_room_cell_indices_by_depth(
@@ -3746,6 +3761,35 @@ fn cell_visibility_view_visible_to_camera(
         return false;
     }
 
+    let z = view.z.max(near);
+    let focal = camera.projection.focal_length.max(1);
+    let half_w = (camera.projection.screen_x as i32)
+        .saturating_add(screen_margin)
+        .max(1);
+    let half_h = (camera.projection.screen_y as i32)
+        .saturating_add(screen_margin)
+        .max(1);
+    let projected_x = view.x.abs().saturating_sub(radius).saturating_mul(focal);
+    let projected_y = view.y.abs().saturating_sub(radius).saturating_mul(focal);
+    projected_x <= half_w.saturating_mul(z) && projected_y <= half_h.saturating_mul(z)
+}
+
+/// Lateral + near frustum test for a cell visibility sphere, with NO far plane.
+/// The all-cells path (`vis-full-active-chunks`) uses this so off-screen side or
+/// behind-camera cells are skipped while far cells down a sightline are kept
+/// (they sit centered in the frustum cone). Using
+/// `cell_visibility_view_visible_to_camera` here would re-cull the far room via
+/// its `draw_distance` far plane.
+fn cell_visibility_view_in_lateral_frustum(
+    camera: &WorldCamera,
+    view: ViewVertex,
+    radius: i32,
+    screen_margin: i32,
+) -> bool {
+    let near = camera.projection.near_z.max(1);
+    if view.z < near.saturating_sub(radius) {
+        return false;
+    }
     let z = view.z.max(near);
     let focal = camera.projection.focal_length.max(1);
     let half_w = (camera.projection.screen_x as i32)
