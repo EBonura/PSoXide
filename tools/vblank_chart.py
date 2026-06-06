@@ -191,7 +191,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html><html><head><meta charset="utf-8"><title>per-
 <div id="hdr"><h1 id="t"></h1><div id="s"></div></div>
 <div id="lg"></div>
 <div id="wrap"><canvas id="c"></canvas><div id="tip"></div></div>
-<div id="ft">scroll = zoom · drag = pan · double-click = reset &nbsp;·&nbsp; <span style="color:#f85149">red baseline tick</span> = deadline miss &nbsp;·&nbsp; <span style="color:#f85149">red top tick</span> = off-scale stall</div>
+<div id="ft">scroll = zoom · drag = pan · double-click = reset &nbsp;·&nbsp; <span style="color:#f85149">red baseline tick</span> = 30fps slot missed (render vb + sim vb &gt; 2 vblanks) &nbsp;·&nbsp; <span style="color:#f85149">red top tick</span> = off-scale stall</div>
 <script>
 const D=__DATA__;
 const c=document.getElementById('c'),ctx=c.getContext('2d'),tip=document.getElementById('tip');
@@ -219,11 +219,15 @@ function draw(){
  const y=v=>PADT+plot-(v/yMax)*plot;
  // budget gridlines: 1 vblank (solid) and 2 vblanks/30fps (dashed)
  ctx.strokeStyle='#30363d';ctx.fillStyle='#8b949e';ctx.font='11px sans-serif';ctx.textAlign='left';
- for(const [v,lab,dash] of [[budget,'1 vblank (564k)',[]],[st.budget2,'2 vblanks / 30fps',[4,4]]]){
-   if(v>yMax)continue;ctx.setLineDash(dash);ctx.beginPath();ctx.moveTo(0,y(v));ctx.lineTo(w,y(v));ctx.stroke();
-   ctx.fillText(lab,4,y(v)-3);
- }
+ // Per-vblank reference is the 1-vblank budget. A presented 30fps frame owns
+ // TWO vblanks (a render vblank + its sim vblank), so the deadline is a property
+ // of that PAIR, not a single bar: the pair must fit 2x this line. The red
+ // baseline ticks flag pairs that did not (a slipped 30fps slot). Do not draw a
+ // flat 2-vblank line over single bars; it reads as "bars under here are fine",
+ // which is false (one render bar is only half a frame).
  ctx.setLineDash([]);
+ if(budget<=yMax){ctx.beginPath();ctx.moveTo(0,y(budget));ctx.lineTo(w,y(budget));ctx.stroke();
+   ctx.fillText('1-vblank budget '+fmt(budget)+'  (30fps frame = render vb + sim vb, the pair must fit 2x)',4,y(budget)-3);}
  // bars
  for(let i=Math.floor(view0);i<Math.ceil(view1);i++){
    if(i<0||i>=bars.length)continue;
@@ -255,6 +259,8 @@ c.addEventListener('mousemove',ev=>{
  let rows=`<tr><td>vblank</td><td class=n>${i}</td></tr>`+
    `<tr><td>${b.r?'RENDER':'sim-only'}</td><td class=n>${fmt(b.fc)} cyc</td></tr>`+
    `<tr><td>% of 1 vblank</td><td class=n>${(b.fc/budget*100).toFixed(0)}%</td></tr>`;
+ if(b.r){const p=bars[i+1];const pair=b.fc+(p&&!p.r?p.fc:0);const miss=pair>st.budget2;
+   rows+=`<tr><td>30fps frame (this+sim vb)</td><td class=n style="color:${miss?'#f85149':'#c9d1d9'}">${fmt(pair)} = ${(pair/st.budget2*100).toFixed(0)}% of 2vb${miss?' (MISS)':''}</td></tr>`;}
  for(const k in b.t)rows+=`<tr><td>${k}</td><td class=n>${fmt(b.t[k])}</td></tr>`;
  tip.innerHTML=`<table>${rows}</table>`;tip.style.display='block';
  const r=c.getBoundingClientRect();let tx=ev.clientX-r.left+14,ty=ev.clientY-r.top+12;
