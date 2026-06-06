@@ -1,0 +1,825 @@
+use super::*;
+
+/// Node type used by the editor scene tree.
+///
+/// Hierarchy convention for level authoring:
+/// `World (scene root) -> Room (sector grid) -> portal/entity nodes`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum NodeKind {
+    /// Plain organisational node.
+    Node,
+    /// Spatial transform node.
+    Node3D,
+    /// Composed world object. The node owns transform/identity;
+    /// behaviour is expressed by component-node children such as
+    /// [`ModelRenderer`](Self::ModelRenderer),
+    /// [`Animator`](Self::Animator), and
+    /// [`Collider`](Self::Collider).
+    Entity,
+    /// World-root node for one authored world. Owns global settings
+    /// inherited by descendant room grids.
+    World {
+        /// Shared sector size in engine units, snapped to
+        /// [`WORLD_SECTOR_SIZE_QUANTUM`].
+        #[serde(default = "default_world_sector_size")]
+        sector_size: i32,
+        /// Background sky drawn before room geometry.
+        #[serde(default)]
+        sky: SkySettings,
+        /// Distant scenery ring drawn between sky and room geometry.
+        #[serde(default)]
+        far_vista: FarVistaSettings,
+        /// Third-person camera defaults inherited by descendant rooms.
+        #[serde(default)]
+        camera: WorldCameraSettings,
+        /// Runtime culling controls inherited by descendant rooms.
+        #[serde(default)]
+        culling: WorldCullingSettings,
+        /// Cook-time streaming controls inherited by descendant rooms.
+        #[serde(default)]
+        streaming: WorldStreamingSettings,
+        /// Runtime physics controls inherited by descendant rooms.
+        #[serde(default)]
+        physics: WorldPhysicsSettings,
+    },
+    /// One authored Tomb Raider-style room: a sector grid plus its
+    /// child entities and portal links.
+    #[serde(rename = "Room", alias = "Map")]
+    Room {
+        /// Authored grid-world payload.
+        grid: WorldGrid,
+    },
+    /// Static or dynamic mesh / model instance.
+    ///
+    /// `mesh` references either a legacy [`ResourceData::Mesh`] or a
+    /// cooked [`ResourceData::Model`]. When it points at a Model,
+    /// `animation_clip` selects which clip plays -- an explicit
+    /// `Some(idx)` overrides the model's `default_clip`; `None`
+    /// inherits the model default. Instances of legacy meshes
+    /// ignore this field.
+    MeshInstance {
+        /// Mesh / model resource.
+        mesh: Option<ResourceId>,
+        /// Material override (legacy mesh path; ignored for Model
+        /// resources, which embed material data in the `.psxmdl`).
+        material: Option<ResourceId>,
+        /// Per-instance animation clip override.
+        #[serde(default)]
+        animation_clip: Option<u16>,
+    },
+    /// Flat material-backed image plane. The node transform marks
+    /// the bottom-center anchor; yaw controls the static facing
+    /// direction unless cylindrical billboarding is enabled.
+    ImageProp {
+        /// Material used by the quad.
+        #[serde(default)]
+        material: Option<ResourceId>,
+        /// Authored width in engine/editor units.
+        #[serde(default = "default_image_prop_size")]
+        width: u16,
+        /// Authored height in engine/editor units.
+        #[serde(default = "default_image_prop_size")]
+        height: u16,
+        /// Rotate around Y every frame so the card faces the camera
+        /// while staying upright.
+        #[serde(default)]
+        cylindrical_billboard: bool,
+        /// Toggle the authored AABB collision box around the prop.
+        /// Disabled by default so legacy props (and freshly placed
+        /// ones) keep the "decorative-only" semantics they had
+        /// before collision was opt-in.
+        #[serde(default)]
+        collision_enabled: bool,
+        /// Full size (width / height / depth) of the AABB collision
+        /// box in engine units, centered on the visible plane.
+        /// Ignored when [`collision_enabled`](Self::ImageProp) is
+        /// `false`, but kept around so toggling it back on restores
+        /// the user's last size instead of snapping to a default.
+        #[serde(default = "default_image_prop_collision_size")]
+        collision_size: [u16; 3],
+    },
+    /// Material-backed editable hexahedron. The transform is a
+    /// bottom-center anchor, `vertices` are local engine units from
+    /// that anchor, and each face can bind its own material.
+    BoxProp {
+        /// Per-face material slots in [`BOX_PROP_FACE_NAMES`] order.
+        #[serde(default = "default_box_prop_materials")]
+        materials: [Option<ResourceId>; BOX_PROP_FACE_COUNT],
+        /// Editable local vertices, bottom ring then top ring.
+        #[serde(default = "default_box_prop_vertices")]
+        vertices: [[i16; 3]; BOX_PROP_VERTEX_COUNT],
+        /// Whether this prop blocks the character motor.
+        #[serde(default = "default_true")]
+        collision_enabled: bool,
+        /// Authored break trigger bits from [`psx_level::box_prop_flags`].
+        #[serde(default)]
+        break_flags: u16,
+    },
+    /// Render a cooked [`ResourceData::Model`] from the transform
+    /// on the nearest entity ancestor. This is the component form of
+    /// the legacy [`MeshInstance`](Self::MeshInstance) node.
+    ModelRenderer {
+        /// Model resource.
+        model: Option<ResourceId>,
+        /// Optional material override for legacy/static paths.
+        /// Cooked PSX models currently carry their own atlas and
+        /// ignore this field.
+        #[serde(default)]
+        material: Option<ResourceId>,
+        /// Render-only offset from the owning Entity root to the
+        /// model origin, in entity-local engine units. This does
+        /// not affect collision, camera, or movement.
+        #[serde(default)]
+        visual_offset: [i16; 3],
+        /// Render-only uniform scale in Q8 fixed point (`256 =
+        /// 1.0`). Use this for per-instance calibration; use the
+        /// Model resource import scale for global asset fixes.
+        #[serde(default = "default_model_renderer_visual_scale_q8")]
+        visual_scale_q8: u16,
+    },
+    /// Animation component for a model-rendering entity. `clip`
+    /// overrides the model default when set; `None` inherits the
+    /// model's runtime default.
+    Animator {
+        /// Per-instance clip override.
+        #[serde(default)]
+        clip: Option<u16>,
+        /// Gameplay action to model-local animation clip mapping.
+        /// This is the authoritative authoring location for
+        /// player/NPC action animation.
+        #[serde(default)]
+        action_clips: Vec<CharacterActionClip>,
+        /// Whether this animation should run automatically in the
+        /// editor/playtest runtime.
+        #[serde(default = "default_true")]
+        autoplay: bool,
+        /// Frame to hold when `autoplay` is off, so a model can be
+        /// placed frozen on a chosen pose (e.g. a corpse on a death
+        /// frame). Ignored while `autoplay` is on.
+        #[serde(default)]
+        pose_frame: u16,
+    },
+    /// Collision component. The first runtime pass only cooks room
+    /// grid collision, but keeping authored collider data as a node
+    /// makes entity/interactable/NPC architecture explicit now.
+    Collider {
+        /// Collision shape in engine/editor units.
+        #[serde(default)]
+        shape: ColliderShape,
+        /// Solid colliders block movement; non-solid colliders are
+        /// trigger volumes.
+        #[serde(default = "default_true")]
+        solid: bool,
+    },
+    /// Character/controller component. It binds an entity to a reusable
+    /// [`ResourceData::Character`] profile. When `player` is true this is
+    /// the component-tree replacement for a legacy player
+    /// [`SpawnPoint`](Self::SpawnPoint); non-player controllers cook as
+    /// idle model instances until dedicated NPC runtime records exist.
+    CharacterController {
+        /// Character profile resource.
+        #[serde(default)]
+        character: Option<ResourceId>,
+        /// Movement, stamina, evade, and coarse capsule tuning for this controller.
+        #[serde(default)]
+        settings: CharacterControllerSettings,
+        /// Whether this controller drives the player.
+        #[serde(default)]
+        player: bool,
+    },
+    /// Equipment component. The parent Entity supplies the animated
+    /// character model; this component names the Weapon and which
+    /// socket/grip pair should be composed.
+    Equipment {
+        /// Weapon resource.
+        #[serde(default)]
+        weapon: Option<ResourceId>,
+        /// Character/model socket to follow.
+        #[serde(default = "default_character_socket")]
+        character_socket: String,
+        /// Weapon-local grip/pivot to align to the character socket.
+        #[serde(default = "default_weapon_grip")]
+        weapon_grip: String,
+    },
+    /// Physics body component for movable entities.
+    PhysicsBody {
+        /// Per-entity physics tuning.
+        #[serde(default)]
+        settings: PhysicsBodySettings,
+    },
+    /// Gameplay interaction component. Attach this to an Entity
+    /// alongside render/collision components to make the placed object
+    /// readable, synchronizable, or otherwise activatable at runtime.
+    Interactable {
+        /// What happens when the player presses the interaction button.
+        #[serde(default)]
+        kind: InteractableKind,
+        /// Short prompt shown while the player is inside the radius.
+        #[serde(default = "default_interactable_prompt")]
+        prompt: String,
+        /// Interaction radius in engine/editor units, measured in XZ
+        /// from the parent Entity origin.
+        #[serde(default = "default_interactable_radius")]
+        radius: u16,
+        /// Disabled interactables remain authored but are not emitted as
+        /// active runtime records.
+        #[serde(default = "default_true")]
+        enabled: bool,
+    },
+    /// Static point light.
+    PointLight {
+        /// RGB light colour.
+        #[serde(default = "default_light_color")]
+        color: [u8; 3],
+        /// Light intensity multiplier.
+        intensity: f32,
+        /// Approximate editor/runtime radius in sectors.
+        radius: f32,
+    },
+    /// Cheap point-projected world particle emitter.
+    ParticleEmitter {
+        /// Fixed-budget emitter tuning.
+        #[serde(default)]
+        settings: ParticleEmitterSettings,
+    },
+    /// Spawn marker.
+    SpawnPoint {
+        /// Whether this is the player spawn.
+        player: bool,
+        /// Character profile resource that drives this spawn. For the
+        /// player spawn this picks the player's model + role
+        /// clips + controller params. `None` lets the cook step
+        /// auto-pick a Character when exactly one exists, or
+        /// fail with a clear error otherwise. Non-player spawns
+        /// currently ignore this field.
+        #[serde(default)]
+        character: Option<ResourceId>,
+    },
+    /// Manual streaming/visibility graph edge: the cooker snaps the marker
+    /// to a grid edge and treats that edge as a room-to-room portal.
+    Portal {
+        /// Target room node by id, or `None` when not wired.
+        target_room: Option<NodeId>,
+        /// Entry-portal label on the target room.
+        target_entry: String,
+        /// Identifier this portal marker is known by in its source room.
+        entry_name: String,
+        /// Optional exact 3D portal plane imported from a Tomb
+        /// Raider-style level file.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        geometry: Option<PortalGeometry>,
+    },
+}
+
+impl NodeKind {
+    /// Default scene-root World node.
+    pub fn default_world() -> Self {
+        Self::World {
+            sector_size: DEFAULT_WORLD_SECTOR_SIZE,
+            sky: SkySettings::default(),
+            far_vista: FarVistaSettings::default(),
+            camera: WorldCameraSettings::default(),
+            culling: WorldCullingSettings::default(),
+            streaming: WorldStreamingSettings::default(),
+            physics: WorldPhysicsSettings::default(),
+        }
+    }
+
+    /// User-facing label.
+    pub const fn label(&self) -> &'static str {
+        match self {
+            Self::Node => "Node",
+            Self::Node3D => "Node3D",
+            Self::Entity => "Entity",
+            Self::World { .. } => "World",
+            Self::Room { .. } => "Room",
+            Self::MeshInstance { .. } => "Mesh Instance",
+            Self::ImageProp { .. } => "Image Prop",
+            Self::BoxProp { .. } => "Box Prop",
+            Self::ModelRenderer { .. } => "Model Renderer",
+            Self::Animator { .. } => "Animator",
+            Self::Collider { .. } => "Collider",
+            Self::CharacterController { .. } => "Character Controller",
+            Self::Equipment { .. } => "Equipment",
+            Self::PhysicsBody { .. } => "Physics Body",
+            Self::Interactable { .. } => "Interactable",
+            Self::PointLight { .. } => "Point Light",
+            Self::ParticleEmitter { .. } => "Particle Emitter",
+            Self::SpawnPoint { .. } => "Spawn Point",
+            Self::Portal { .. } => "Portal",
+        }
+    }
+
+    /// True for behaviour/component nodes that are intended to be
+    /// children of an [`Entity`](Self::Entity) host rather than
+    /// independent placed objects.
+    pub const fn is_component(self: &Self) -> bool {
+        matches!(
+            self,
+            Self::ModelRenderer { .. }
+                | Self::Animator { .. }
+                | Self::Collider { .. }
+                | Self::CharacterController { .. }
+                | Self::Equipment { .. }
+                | Self::PhysicsBody { .. }
+                | Self::Interactable { .. }
+        )
+    }
+}
+
+/// Authored interaction payload for an [`NodeKind::Interactable`]
+/// component.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum InteractableKind {
+    /// Show a diegetic text message.
+    Message {
+        /// Message title/header.
+        #[serde(default = "default_interactable_message_title")]
+        title: String,
+        /// Message body.
+        #[serde(default)]
+        body: String,
+    },
+    /// Update the in-memory checkpoint/sync point and optionally show
+    /// a confirmation message.
+    Checkpoint {
+        /// Stable authored id for future save/flag systems.
+        #[serde(default)]
+        checkpoint_id: String,
+        /// Confirmation title/header.
+        #[serde(default = "default_interactable_checkpoint_title")]
+        title: String,
+        /// Confirmation body.
+        #[serde(default = "default_interactable_checkpoint_body")]
+        body: String,
+    },
+}
+
+impl Default for InteractableKind {
+    fn default() -> Self {
+        Self::Message {
+            title: default_interactable_message_title(),
+            body: String::new(),
+        }
+    }
+}
+
+pub(crate) fn default_interactable_prompt() -> String {
+    "READ ECHO".to_string()
+}
+
+pub(crate) const fn default_interactable_radius() -> u16 {
+    96
+}
+
+pub(crate) fn default_interactable_message_title() -> String {
+    "ECHO REMNANT".to_string()
+}
+
+pub(crate) fn default_interactable_checkpoint_title() -> String {
+    "SYNC RELAY".to_string()
+}
+
+pub(crate) fn default_interactable_checkpoint_body() -> String {
+    "Relay synchronized.".to_string()
+}
+
+/// Authored collision shape for component-node entities.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum ColliderShape {
+    /// Axis-aligned box, stored as half-extents.
+    Box {
+        /// Half extents in engine/editor units.
+        half_extents: [u16; 3],
+    },
+    /// Sphere collider.
+    Sphere {
+        /// Radius in engine/editor units.
+        radius: u16,
+    },
+    /// Upright capsule.
+    Capsule {
+        /// Radius in engine/editor units.
+        radius: u16,
+        /// Height in engine/editor units.
+        height: u16,
+    },
+}
+
+impl Default for ColliderShape {
+    fn default() -> Self {
+        Self::Box {
+            half_extents: [256, 256, 256],
+        }
+    }
+}
+
+pub(crate) const fn default_true() -> bool {
+    true
+}
+
+/// Explicit Tomb Raider-style portal rectangle.
+///
+/// Authored seam portals still use the marker transform and snap to
+/// sector edges. Imported TR levels already carry the exact 3D
+/// rectangle that connects two rooms, so keep that information on
+/// the portal node instead of trying to rediscover it from a 2D grid.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PortalGeometry {
+    /// Portal normal in editor/world coordinates.
+    pub normal: [i32; 3],
+    /// Portal corners in editor/world coordinates.
+    pub vertices: [[i32; 3]; 4],
+}
+
+/// A scene-tree node.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SceneNode {
+    /// Stable node id.
+    pub id: NodeId,
+    /// Display name.
+    pub name: String,
+    /// Node type.
+    pub kind: NodeKind,
+    /// Local transform.
+    pub transform: Transform3,
+    /// Which floor of the enclosing Room this node belongs to (0 =
+    /// ground). Stacked floors share the same XZ cells, so a node's
+    /// floor cannot be inferred from its Y (the authored standing height
+    /// is a placement default identical across projects). Recorded
+    /// explicitly at placement and consumed by the cook to bind the node
+    /// to the right runtime room. Default `0` keeps every existing
+    /// project (and all non-Room-child nodes) on the ground.
+    #[serde(default)]
+    pub floor: usize,
+    /// Parent id, absent only for the scene root.
+    pub parent: Option<NodeId>,
+    /// Ordered child ids.
+    pub children: Vec<NodeId>,
+}
+
+impl SceneNode {
+    fn new(id: NodeId, parent: Option<NodeId>, name: impl Into<String>, kind: NodeKind) -> Self {
+        Self {
+            id,
+            name: name.into(),
+            kind,
+            transform: Transform3::default(),
+            floor: 0,
+            parent,
+            children: Vec::new(),
+        }
+    }
+}
+
+/// Owned row used by hierarchy UI without borrowing the scene.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodeRow {
+    /// Node id.
+    pub id: NodeId,
+    /// Parent node id, or `None` for the scene root.
+    pub parent: Option<NodeId>,
+    /// Tree depth from root.
+    pub depth: usize,
+    /// Index of this node inside its parent's `children` list. Used
+    /// by the editor's drag-drop machinery so a "drop above this row"
+    /// gesture maps cleanly to `move_node(.., parent, sibling_index)`.
+    pub sibling_index: usize,
+    /// Display name.
+    pub name: String,
+    /// Node kind label.
+    pub kind: &'static str,
+    /// Number of direct children.
+    pub child_count: usize,
+}
+
+/// One editor scene.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Scene {
+    /// Display name.
+    pub name: String,
+    /// World root node id.
+    pub root: NodeId,
+    next_node_id: u64,
+    pub(crate) nodes: Vec<SceneNode>,
+}
+
+impl Scene {
+    /// Create a scene with one root `World`.
+    pub fn new(name: impl Into<String>) -> Self {
+        let root = SceneNode::new(NodeId::ROOT, None, "World", NodeKind::default_world());
+        Self {
+            name: name.into(),
+            root: NodeId::ROOT,
+            next_node_id: NodeId::ROOT.raw() + 1,
+            nodes: vec![root],
+        }
+    }
+
+    /// Normalize legacy `Root -> World -> Room` scenes into the
+    /// Tomb Raider-style `World(root) -> Room` hierarchy.
+    pub fn normalize_world_root(&mut self) {
+        let root_id = self.root;
+        if self.node(root_id).is_none() {
+            self.nodes.insert(
+                0,
+                SceneNode::new(root_id, None, "World", NodeKind::default_world()),
+            );
+        }
+
+        let child_world = self.node(root_id).and_then(|root| {
+            root.children.iter().copied().find(|id| {
+                self.node(*id)
+                    .is_some_and(|node| matches!(&node.kind, NodeKind::World { .. }))
+            })
+        });
+
+        if self
+            .node(root_id)
+            .is_some_and(|root| matches!(&root.kind, NodeKind::World { .. }))
+        {
+            if let Some(root) = self.node_mut(root_id) {
+                root.parent = None;
+                if root.name == "Root" || root.name.is_empty() {
+                    root.name = "World".to_string();
+                }
+            }
+            return;
+        }
+
+        if let Some(world_id) = child_world {
+            let Some(world_node) = self.node(world_id).cloned() else {
+                return;
+            };
+            let mut merged_children = self
+                .node(root_id)
+                .map(|root| root.children.clone())
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|id| *id != world_id)
+                .collect::<Vec<_>>();
+            for child in world_node.children {
+                if child != root_id && !merged_children.contains(&child) {
+                    merged_children.push(child);
+                }
+            }
+            for node in &mut self.nodes {
+                if node.parent == Some(world_id) {
+                    node.parent = Some(root_id);
+                }
+                node.children.retain(|child| *child != world_id);
+            }
+            if let Some(root) = self.node_mut(root_id) {
+                root.name = if world_node.name.is_empty() || world_node.name == "Root" {
+                    "World".to_string()
+                } else {
+                    world_node.name
+                };
+                root.kind = world_node.kind;
+                root.parent = None;
+                root.children = merged_children;
+            }
+            self.nodes.retain(|node| node.id != world_id);
+        } else if let Some(root) = self.node_mut(root_id) {
+            root.name = "World".to_string();
+            root.kind = NodeKind::default_world();
+            root.parent = None;
+        }
+    }
+
+    /// All nodes in storage order.
+    pub fn nodes(&self) -> &[SceneNode] {
+        &self.nodes
+    }
+
+    /// Get a node.
+    pub fn node(&self, id: NodeId) -> Option<&SceneNode> {
+        self.nodes.iter().find(|node| node.id == id)
+    }
+
+    /// Get a mutable node.
+    pub fn node_mut(&mut self, id: NodeId) -> Option<&mut SceneNode> {
+        self.nodes.iter_mut().find(|node| node.id == id)
+    }
+
+    /// Add a node under `parent`. Invalid parents fall back to the root.
+    pub fn add_node(&mut self, parent: NodeId, name: impl Into<String>, kind: NodeKind) -> NodeId {
+        let parent = if self.node(parent).is_some() {
+            parent
+        } else {
+            self.root
+        };
+        let id = NodeId(self.next_node_id);
+        self.next_node_id = self.next_node_id.saturating_add(1);
+        self.nodes
+            .push(SceneNode::new(id, Some(parent), name, kind));
+        if let Some(parent_node) = self.node_mut(parent) {
+            parent_node.children.push(id);
+        }
+        id
+    }
+
+    /// Remove a non-root node and its descendants.
+    pub fn remove_node(&mut self, id: NodeId) -> bool {
+        if id == self.root || self.node(id).is_none() {
+            return false;
+        }
+
+        let mut doomed = Vec::new();
+        self.collect_descendants(id, &mut doomed);
+        doomed.push(id);
+
+        for node in &mut self.nodes {
+            node.children.retain(|child| !doomed.contains(child));
+        }
+        self.nodes.retain(|node| !doomed.contains(&node.id));
+        true
+    }
+
+    /// `true` when `ancestor` appears anywhere on the parent chain of
+    /// `id`. Includes `id` itself in the check, so callers using this
+    /// for cycle detection don't need a separate equality test.
+    pub fn is_descendant_of(&self, id: NodeId, ancestor: NodeId) -> bool {
+        if id == ancestor {
+            return true;
+        }
+        let mut current = self.node(id).and_then(|n| n.parent);
+        let mut guard = 0usize;
+        while let Some(p) = current {
+            if guard >= self.nodes.len() {
+                break;
+            }
+            if p == ancestor {
+                return true;
+            }
+            current = self.node(p).and_then(|n| n.parent);
+            guard += 1;
+        }
+        false
+    }
+
+    /// Move `id` under `new_parent` at `position` in its child list.
+    ///
+    /// Refuses (returns `false`) when:
+    /// * `id` is the world root,
+    /// * `id` or `new_parent` is missing,
+    /// * `new_parent` is `id` or any of its descendants -- that would
+    ///   form a cycle.
+    ///
+    /// `position` clamps to the destination's current child count.
+    /// Reordering inside the same parent works because `id` is removed
+    /// from the child list before `position` is clamped, so dropping
+    /// at "the same slot" is a no-op without UI corner cases.
+    pub fn move_node(&mut self, id: NodeId, new_parent: NodeId, position: usize) -> bool {
+        if id == self.root {
+            return false;
+        }
+        if self.node(id).is_none() || self.node(new_parent).is_none() {
+            return false;
+        }
+        if self.is_descendant_of(new_parent, id) {
+            return false;
+        }
+
+        for node in &mut self.nodes {
+            node.children.retain(|c| *c != id);
+        }
+        if let Some(parent) = self.node_mut(new_parent) {
+            let pos = position.min(parent.children.len());
+            parent.children.insert(pos, id);
+        }
+        if let Some(node) = self.node_mut(id) {
+            node.parent = Some(new_parent);
+        }
+        true
+    }
+
+    fn collect_descendants(&self, id: NodeId, out: &mut Vec<NodeId>) {
+        if let Some(node) = self.node(id) {
+            for child in &node.children {
+                self.collect_descendants(*child, out);
+                out.push(*child);
+            }
+        }
+    }
+
+    /// Sector size inherited by `id` from the nearest World ancestor.
+    pub fn world_sector_size_for_node(&self, id: NodeId) -> Option<i32> {
+        let mut current = Some(id);
+        while let Some(node_id) = current {
+            let node = self.node(node_id)?;
+            if let NodeKind::World { sector_size, .. } = &node.kind {
+                return Some(snap_world_sector_size(*sector_size));
+            }
+            current = node.parent;
+        }
+        None
+    }
+
+    /// Sky settings inherited by `id` from the nearest World ancestor.
+    pub fn world_sky_for_node(&self, id: NodeId) -> Option<SkySettings> {
+        let mut current = Some(id);
+        while let Some(node_id) = current {
+            let node = self.node(node_id)?;
+            if let NodeKind::World { sky, .. } = &node.kind {
+                return Some(*sky);
+            }
+            current = node.parent;
+        }
+        None
+    }
+
+    /// Far-vista settings inherited by `id` from the nearest World ancestor.
+    pub fn world_far_vista_for_node(&self, id: NodeId) -> Option<FarVistaSettings> {
+        let mut current = Some(id);
+        while let Some(node_id) = current {
+            let node = self.node(node_id)?;
+            if let NodeKind::World { far_vista, .. } = &node.kind {
+                return Some(*far_vista);
+            }
+            current = node.parent;
+        }
+        None
+    }
+
+    /// Third-person camera settings inherited by `id` from the nearest World ancestor.
+    pub fn world_camera_for_node(&self, id: NodeId) -> Option<WorldCameraSettings> {
+        let mut current = Some(id);
+        while let Some(node_id) = current {
+            let node = self.node(node_id)?;
+            if let NodeKind::World { camera, .. } = &node.kind {
+                return Some(camera.normalized());
+            }
+            current = node.parent;
+        }
+        None
+    }
+
+    /// Runtime culling settings inherited by `id` from the nearest World ancestor.
+    pub fn world_culling_for_node(&self, id: NodeId) -> Option<WorldCullingSettings> {
+        let mut current = Some(id);
+        while let Some(node_id) = current {
+            let node = self.node(node_id)?;
+            if let NodeKind::World { culling, .. } = &node.kind {
+                return Some(culling.normalized());
+            }
+            current = node.parent;
+        }
+        None
+    }
+
+    /// Streaming chunk settings inherited by `id` from the nearest World ancestor.
+    pub fn world_streaming_for_node(&self, id: NodeId) -> Option<WorldStreamingSettings> {
+        let mut current = Some(id);
+        while let Some(node_id) = current {
+            let node = self.node(node_id)?;
+            if let NodeKind::World { streaming, .. } = &node.kind {
+                return Some(streaming.normalized());
+            }
+            current = node.parent;
+        }
+        None
+    }
+
+    /// Physics settings inherited by `id` from the nearest World ancestor.
+    pub fn world_physics_for_node(&self, id: NodeId) -> Option<WorldPhysicsSettings> {
+        let mut current = Some(id);
+        while let Some(node_id) = current {
+            let node = self.node(node_id)?;
+            if let NodeKind::World { physics, .. } = &node.kind {
+                return Some(physics.normalized());
+            }
+            current = node.parent;
+        }
+        None
+    }
+
+    /// Rows in root-first depth-first order.
+    pub fn hierarchy_rows(&self) -> Vec<NodeRow> {
+        let mut rows = Vec::new();
+        self.push_hierarchy_row(self.root, 0, &mut rows);
+        rows
+    }
+
+    fn push_hierarchy_row(&self, id: NodeId, depth: usize, rows: &mut Vec<NodeRow>) {
+        let Some(node) = self.node(id) else {
+            return;
+        };
+        rows.push(NodeRow {
+            id,
+            parent: node.parent,
+            depth,
+            sibling_index: node
+                .parent
+                .and_then(|parent_id| self.node(parent_id))
+                .and_then(|parent| parent.children.iter().position(|child| *child == id))
+                .unwrap_or(0),
+            name: node.name.clone(),
+            kind: node.kind.label(),
+            child_count: node.children.len(),
+        });
+        for child in &node.children {
+            self.push_hierarchy_row(*child, depth + 1, rows);
+        }
+    }
+}
