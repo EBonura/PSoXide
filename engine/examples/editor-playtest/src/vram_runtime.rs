@@ -1,15 +1,30 @@
 use super::vram_upload::{upload_clut, upload_model_clut};
 use super::vram_upload_queue::*;
 use super::*;
-use psx_font::{upload_fonts, FontAtlas, FontSetVram};
+use psx_font::{upload_fonts, FontAtlas};
 use psx_vram::{
     upload_bytes, Clut, TexDepth, Tpage, VramAllocator, VramHandle, VramRect, VramRegionSource,
 };
 
-/// Scratch for packing every UI font into one combined atlas before a single
-/// `GP0(A0h)` upload. Sized for `MAX_RUNTIME_UI_FONTS` pages × 256-row atlases;
-/// lives in BSS, not on the stack.
-const FONT_PACK_SCRATCH_LEN: usize = MAX_RUNTIME_UI_FONTS * 64 * 256;
+/// Shared transient load scratch (BSS, not on the stack). At boot it packs
+/// every UI font into one combined atlas for a single `GP0(A0h)` upload; during
+/// gameplay the fonts are already resident, so the same buffer is reused to
+/// stage the CD-streamed sky chunk. Sized to the larger of the two uses. Pixel
+/// fonts are short (glyph_h <= 16), so a 128-row atlas cap is generous; the
+/// streamed sky chunk is the dominant consumer.
+const FONT_ATLAS_MAX_ROWS: usize = 128;
+const FONT_PACK_U16: usize = MAX_RUNTIME_UI_FONTS * 64 * FONT_ATLAS_MAX_ROWS;
+#[cfg(feature = "cd-stream-bench")]
+const FONT_PACK_SCRATCH_LEN: usize = {
+    let sky_u16 = (GAMEPLAY_PACK_MAX_CHUNK_BYTES + 1) / 2;
+    if FONT_PACK_U16 > sky_u16 {
+        FONT_PACK_U16
+    } else {
+        sky_u16
+    }
+};
+#[cfg(not(feature = "cd-stream-bench"))]
+const FONT_PACK_SCRATCH_LEN: usize = FONT_PACK_U16;
 static mut FONT_PACK_SCRATCH: [u16; FONT_PACK_SCRATCH_LEN] = [0; FONT_PACK_SCRATCH_LEN];
 
 /// Staging buffer for one CD-streamed UI image. Reused image-by-image
@@ -275,8 +290,6 @@ static mut VRAM_ALLOCATOR: VramAllocator<ROOM_TPAGE_COUNT, VRAM_CLUT_ROWS> =
     VramAllocator::new(VRAM_CLUT_BASE_Y);
 /// Set once the still-hardcoded VRAM regions are reserved in `VRAM_ALLOCATOR`.
 static mut VRAM_REGIONS_RESERVED: bool = false;
-/// Handles for the combined UI-font upload, kept for teardown.
-static mut VRAM_FONT_SET: Option<FontSetVram> = None;
 
 /// Reserve the framebuffer and every region still owned by legacy hardcoded
 /// uploads, so the allocator places fonts in the remaining free VRAM without
@@ -306,26 +319,14 @@ pub(super) fn acquire_shared_ui_fonts(ui_fonts: &mut [Option<FontAtlas>; MAX_RUN
             VRAM_REGIONS_RESERVED = true;
         }
         if ui_fonts[0].is_none() && !UI_FONTS.is_empty() {
-            VRAM_FONT_SET = upload_fonts(
+            // Fonts are uploaded once and never torn down (menu and gameplay HUD
+            // share them), so the returned VRAM handle is not retained.
+            let _ = upload_fonts(
                 UI_FONTS,
                 &mut VRAM_ALLOCATOR,
                 &mut FONT_PACK_SCRATCH,
                 ui_fonts,
             );
-        }
-    }
-}
-
-/// Kept for completeness even though the current flow never releases the shared
-/// UI fonts (they serve both menu and gameplay HUD): a future teardown path can
-/// call this to free the font VRAM and clear the atlases for a clean re-acquire.
-#[allow(dead_code)]
-pub(super) fn release_shared_ui_fonts(ui_fonts: &mut [Option<FontAtlas>; MAX_RUNTIME_UI_FONTS]) {
-    unsafe {
-        if let Some(set) = VRAM_FONT_SET.take() {
-            VRAM_ALLOCATOR.free(set.pages);
-            VRAM_ALLOCATOR.free(set.clut);
-            *ui_fonts = [const { None }; MAX_RUNTIME_UI_FONTS];
         }
     }
 }
