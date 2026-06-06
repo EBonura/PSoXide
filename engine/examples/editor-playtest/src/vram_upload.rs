@@ -1,6 +1,6 @@
 //! Small VRAM upload helpers for editor-playtest.
 
-use super::*;
+use psx_vram::{upload_bytes, VramRect};
 
 /// Stamp the 0x8000 (semi-transparency-disable) bit on every
 /// non-zero CLUT entry so opaque textures don't accidentally
