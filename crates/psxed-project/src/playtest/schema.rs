@@ -358,6 +358,12 @@ pub struct PlaytestCamera {
     pub target_height: i32,
     /// Minimum camera origin height above the sampled floor.
     pub min_floor_clearance: i32,
+    /// Camera origin follow lag shift. Lower values move faster.
+    pub position_lag_shift: u8,
+    /// Camera focus follow lag shift. Lower values move faster.
+    pub focus_lag_shift: u8,
+    /// Collision boom recovery lag shift. Lower values move faster.
+    pub distance_lag_shift: u8,
 }
 
 /// Per-room slice into generated visibility cells.

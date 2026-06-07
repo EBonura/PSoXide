@@ -117,6 +117,25 @@ fn character_resource_deserializes_without_new_motor_tuning_fields() {
 }
 
 #[test]
+fn camera_node_kind_serializes_roundtrip() {
+    let kind = NodeKind::Camera {
+        settings: WorldCameraSettings {
+            distance: 2048,
+            height: 900,
+            target_height: 700,
+            min_floor_clearance: 96,
+            position_lag_shift: 1,
+            focus_lag_shift: 2,
+            distance_lag_shift: 3,
+        },
+    };
+
+    let ron = ron::to_string(&kind).expect("camera node serializes");
+    let decoded: NodeKind = ron::from_str(&ron).expect("camera node deserializes");
+    assert_eq!(decoded, kind);
+}
+
+#[test]
 fn sky_settings_resolve_clamps_subdivision_defaults() {
     let default_sky = SkySettings::default().resolved_for_room(false, [0, 0, 0]);
     assert_eq!(default_sky.skybox_columns, SKYBOX_COLUMNS_DEFAULT);
@@ -361,6 +380,9 @@ fn world_camera_settings_default_normalize_and_inherit() {
             height: MAX_WORLD_CAMERA_HEIGHT + 1,
             target_height: -1,
             min_floor_clearance: MAX_WORLD_CAMERA_MIN_FLOOR_CLEARANCE + 1,
+            position_lag_shift: MAX_WORLD_CAMERA_LAG_SHIFT + 1,
+            focus_lag_shift: MAX_WORLD_CAMERA_LAG_SHIFT + 2,
+            distance_lag_shift: MAX_WORLD_CAMERA_LAG_SHIFT + 3,
         };
     }
 
@@ -373,6 +395,9 @@ fn world_camera_settings_default_normalize_and_inherit() {
             height: MAX_WORLD_CAMERA_HEIGHT,
             target_height: 0,
             min_floor_clearance: MAX_WORLD_CAMERA_MIN_FLOOR_CLEARANCE,
+            position_lag_shift: MAX_WORLD_CAMERA_LAG_SHIFT,
+            focus_lag_shift: MAX_WORLD_CAMERA_LAG_SHIFT,
+            distance_lag_shift: MAX_WORLD_CAMERA_LAG_SHIFT,
         })
     );
 }

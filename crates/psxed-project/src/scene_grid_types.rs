@@ -1740,6 +1740,12 @@ pub const DEFAULT_WORLD_CAMERA_HEIGHT: i32 = 1280;
 pub const DEFAULT_WORLD_CAMERA_TARGET_HEIGHT: i32 = 640;
 /// Default minimum camera origin height above the sampled floor.
 pub const DEFAULT_WORLD_CAMERA_MIN_FLOOR_CLEARANCE: i32 = HEIGHT_QUANTUM;
+/// Default camera position follow lag shift. Lower values move faster.
+pub const DEFAULT_WORLD_CAMERA_POSITION_LAG_SHIFT: u8 = 2;
+/// Default camera focus follow lag shift. Lower values move faster.
+pub const DEFAULT_WORLD_CAMERA_FOCUS_LAG_SHIFT: u8 = 2;
+/// Default camera boom-distance recovery lag shift. Lower values move faster.
+pub const DEFAULT_WORLD_CAMERA_DISTANCE_LAG_SHIFT: u8 = 3;
 /// Minimum authored third-person camera distance.
 pub const MIN_WORLD_CAMERA_DISTANCE: i32 = 384;
 /// Maximum authored third-person camera distance.
@@ -1748,6 +1754,8 @@ pub const MAX_WORLD_CAMERA_DISTANCE: i32 = 16_384;
 pub const MAX_WORLD_CAMERA_HEIGHT: i32 = 16_384;
 /// Maximum authored minimum floor clearance for the third-person camera.
 pub const MAX_WORLD_CAMERA_MIN_FLOOR_CLEARANCE: i32 = 4_096;
+/// Maximum authored camera follow lag shift.
+pub const MAX_WORLD_CAMERA_LAG_SHIFT: u8 = 6;
 /// Default wall span when no ceiling is authored above the edge.
 pub const DEFAULT_WALL_HEIGHT_SECTORS: i32 = 2;
 /// Minimum authored sector size.
@@ -1803,6 +1811,18 @@ pub(crate) fn default_world_camera_target_height() -> i32 {
 
 pub(crate) fn default_world_camera_min_floor_clearance() -> i32 {
     DEFAULT_WORLD_CAMERA_MIN_FLOOR_CLEARANCE
+}
+
+pub(crate) fn default_world_camera_position_lag_shift() -> u8 {
+    DEFAULT_WORLD_CAMERA_POSITION_LAG_SHIFT
+}
+
+pub(crate) fn default_world_camera_focus_lag_shift() -> u8 {
+    DEFAULT_WORLD_CAMERA_FOCUS_LAG_SHIFT
+}
+
+pub(crate) fn default_world_camera_distance_lag_shift() -> u8 {
+    DEFAULT_WORLD_CAMERA_DISTANCE_LAG_SHIFT
 }
 
 pub(crate) fn default_wall_height_for_sector_size(sector_size: i32) -> i32 {
