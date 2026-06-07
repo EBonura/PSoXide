@@ -1734,4 +1734,369 @@ mod tests {
             cooked_wall_count(first_populated_cooked_sector(&cooked)) as u16
         );
     }
+
+    // -----------------------------------------------------------------
+    // Dropped-corner horizontal triangle: the cooked runtime triangle
+    // must draw the same physical world-space triangle the editor 3D
+    // preview draws. Anything else means a stair-relief / wall-frieze
+    // face renders in the editor but vanishes in the streamed runtime.
+    // -----------------------------------------------------------------
+
+    /// Editor-preview corner -> world XZ for a unit cell `[0, S] x [0, S]`.
+    /// Mirrors `editor_preview/room_geometry.rs::horizontal_corner_world_point`
+    /// (`NW=(x0,z1), NE=(x1,z1), SE=(x1,z0), SW=(x0,z0)`).
+    fn editor_corner_xz(corner: Corner, s: i32) -> (i32, i32) {
+        match corner {
+            Corner::NW => (0, s),
+            Corner::NE => (s, s),
+            Corner::SE => (s, 0),
+            Corner::SW => (0, 0),
+        }
+    }
+
+    /// Runtime quad-index -> world XZ for a unit cell. Mirrors
+    /// `engine/.../world_render.rs::horizontal_vertices`
+    /// (`0=(x0,z0), 1=(x1,z0), 2=(x1,z1), 3=(x0,z1)`).
+    fn runtime_index_xz(index: usize, s: i32) -> (i32, i32) {
+        match index {
+            0 => (0, 0),
+            1 => (s, 0),
+            2 => (s, s),
+            _ => (0, s),
+        }
+    }
+
+    /// Signed area of the triangle projected onto the XZ plane, in the
+    /// vertex order given. A top-down camera's screen-space signed area
+    /// (the value the Front/Back backface test keys on, both in the
+    /// editor preview `face_side_visible` and the runtime
+    /// `screen_triangle_back_facing`) has the same sign as this, so two
+    /// emit orders with opposite signs cull on opposite sides.
+    fn signed_area_xz(pts: &[(i32, i32, i32); 3]) -> i64 {
+        let (ax, _, az) = pts[0];
+        let (bx, _, bz) = pts[1];
+        let (cx, _, cz) = pts[2];
+        let abx = (bx - ax) as i64;
+        let abz = (bz - az) as i64;
+        let acx = (cx - ax) as i64;
+        let acz = (cz - az) as i64;
+        abx * acz - abz * acx
+    }
+
+    /// Editor-preview survivor in the EXACT vertex order the preview
+    /// emits it (`push_horizontal_face`): the editor triangle not
+    /// containing `dropped_corner`, in `horizontal_triangle_corners`
+    /// order, with the floor/ceiling winding flip applied
+    /// (`flip_winding=true` for ceilings keeps `[0,1,2]`; floors use
+    /// `[0,2,1]`).
+    fn editor_survivor_emit_order(
+        face: &GridHorizontalFace,
+        dropped: Corner,
+        is_ceiling: bool,
+        s: i32,
+    ) -> Option<[(i32, i32, i32); 3]> {
+        for editor_index in 0..2 {
+            let corners = crate::horizontal_triangle_corners(face.split, editor_index);
+            if corners.contains(&dropped) {
+                continue;
+            }
+            let heights = face.triangle_heights(editor_index);
+            let v: Vec<(i32, i32, i32)> = corners
+                .iter()
+                .zip(heights)
+                .map(|(corner, y)| {
+                    let (x, z) = editor_corner_xz(*corner, s);
+                    (x, y, z)
+                })
+                .collect();
+            // floors reverse to `[0, 2, 1]`, ceilings keep `[0, 1, 2]`.
+            return Some(if is_ceiling {
+                [v[0], v[1], v[2]]
+            } else {
+                [v[0], v[2], v[1]]
+            });
+        }
+        None
+    }
+
+    /// Editor-preview survivor: the editor triangle that does NOT
+    /// contain `dropped_corner`, projected to sorted world `(x, y, z)`.
+    /// Mirrors `push_horizontal_face`'s skip-the-dropped-half logic.
+    fn editor_survivor_world(
+        face: &GridHorizontalFace,
+        dropped: Corner,
+        s: i32,
+    ) -> Option<Vec<(i32, i32, i32)>> {
+        for editor_index in 0..2 {
+            let corners = crate::horizontal_triangle_corners(face.split, editor_index);
+            if corners.contains(&dropped) {
+                continue;
+            }
+            let heights = face.triangle_heights(editor_index);
+            let mut pts: Vec<(i32, i32, i32)> = corners
+                .iter()
+                .zip(heights)
+                .map(|(corner, y)| {
+                    let (x, z) = editor_corner_xz(*corner, s);
+                    (x, y, z)
+                })
+                .collect();
+            pts.sort();
+            return Some(pts);
+        }
+        None
+    }
+
+    /// Runtime survivor: decode the cooked `.psxw`, find the present
+    /// floor/ceiling triangle, and reconstruct its world `(x, y, z)`
+    /// corners exactly as the runtime renderer does
+    /// (`triangle_heights_to_quad` + `horizontal_vertices`).
+    fn runtime_survivor_world(
+        bytes: &[u8],
+        is_ceiling: bool,
+        s: i32,
+    ) -> Vec<(i32, i32, i32)> {
+        let parsed = psx_asset::World::from_bytes(bytes).expect("psxw parses");
+        let sector = parsed.sector(0, 0).expect("sector 0,0 present");
+        let (split, quad_heights) = if is_ceiling {
+            (sector.ceiling_split(), sector.ceiling_heights())
+        } else {
+            (sector.floor_split(), sector.floor_heights())
+        };
+        let mut found: Vec<Vec<(i32, i32, i32)>> = Vec::new();
+        for index in 0..2 {
+            let present = if is_ceiling {
+                sector.ceiling_triangle_present(index)
+            } else {
+                sector.floor_triangle_present(index)
+            };
+            if !present {
+                continue;
+            }
+            let tri_heights = if is_ceiling {
+                sector.ceiling_triangle_heights(index)
+            } else {
+                sector.floor_triangle_heights(index)
+            };
+            // Runtime split -> the three quad-corner indices for this
+            // triangle, matching `split_triangles_runtime`.
+            let runtime_split = if split == psxed_format::world::split::NORTH_EAST_SOUTH_WEST {
+                GridSplit::NorthEastSouthWest
+            } else {
+                GridSplit::NorthWestSouthEast
+            };
+            let runtime_corners = crate::horizontal_triangle_corners(runtime_split, index);
+            // `triangle_heights_to_quad`: stamp the triangle heights
+            // into the quad slots, then read each corner's world point.
+            let mut quad = quad_heights;
+            quad[runtime_corners[0].idx()] = tri_heights[0];
+            quad[runtime_corners[1].idx()] = tri_heights[1];
+            quad[runtime_corners[2].idx()] = tri_heights[2];
+            let mut pts: Vec<(i32, i32, i32)> = runtime_corners
+                .iter()
+                .map(|corner| {
+                    let i = corner.idx();
+                    let (x, z) = runtime_index_xz(i, s);
+                    (x, quad[i], z)
+                })
+                .collect();
+            pts.sort();
+            found.push(pts);
+        }
+        assert_eq!(
+            found.len(),
+            1,
+            "exactly one runtime triangle must be present for a dropped-corner face"
+        );
+        found.into_iter().next().unwrap()
+    }
+
+    /// Runtime survivor in the EXACT vertex order the runtime renderer
+    /// emits it. Mirrors `world_render.rs::submit_split_triangle`:
+    /// `tri = split_triangles_runtime(split)[index]`, then for a
+    /// single-sided (`Front`) material the ceiling pass reverses to
+    /// `(a, c, b)` (`reverse_front ^ (sidedness == Back)`). The
+    /// quad-corner -> world point is `horizontal_vertices`.
+    fn runtime_survivor_emit_order(
+        bytes: &[u8],
+        is_ceiling: bool,
+        s: i32,
+    ) -> [(i32, i32, i32); 3] {
+        let parsed = psx_asset::World::from_bytes(bytes).expect("psxw parses");
+        let sector = parsed.sector(0, 0).expect("sector 0,0 present");
+        let (split, quad_heights) = if is_ceiling {
+            (sector.ceiling_split(), sector.ceiling_heights())
+        } else {
+            (sector.floor_split(), sector.floor_heights())
+        };
+        let runtime_split = if split == psxed_format::world::split::NORTH_EAST_SOUTH_WEST {
+            GridSplit::NorthEastSouthWest
+        } else {
+            GridSplit::NorthWestSouthEast
+        };
+        for index in 0..2 {
+            let present = if is_ceiling {
+                sector.ceiling_triangle_present(index)
+            } else {
+                sector.floor_triangle_present(index)
+            };
+            if !present {
+                continue;
+            }
+            let tri_heights = if is_ceiling {
+                sector.ceiling_triangle_heights(index)
+            } else {
+                sector.floor_triangle_heights(index)
+            };
+            let runtime_corners = crate::horizontal_triangle_corners(runtime_split, index);
+            let mut quad = quad_heights;
+            quad[runtime_corners[0].idx()] = tri_heights[0];
+            quad[runtime_corners[1].idx()] = tri_heights[1];
+            quad[runtime_corners[2].idx()] = tri_heights[2];
+            // The three quad-corner indices for this triangle, in the
+            // same order `split_triangles_runtime` produces.
+            let mut order = [
+                runtime_corners[0].idx(),
+                runtime_corners[1].idx(),
+                runtime_corners[2].idx(),
+            ];
+            // `reverse_front` (ceiling) with a non-Back material swaps
+            // the last two vertices.
+            if is_ceiling {
+                order.swap(1, 2);
+            }
+            return [
+                {
+                    let (x, z) = runtime_index_xz(order[0], s);
+                    (x, quad[order[0]], z)
+                },
+                {
+                    let (x, z) = runtime_index_xz(order[1], s);
+                    (x, quad[order[1]], z)
+                },
+                {
+                    let (x, z) = runtime_index_xz(order[2], s);
+                    (x, quad[order[2]], z)
+                },
+            ];
+        }
+        panic!("no present runtime triangle for dropped-corner face");
+    }
+
+    fn build_dropped_corner_face(
+        material: ResourceId,
+        split: GridSplit,
+        dropped: Corner,
+        heights: [i32; 4],
+    ) -> GridHorizontalFace {
+        let mut face = GridHorizontalFace::flat(0, Some(material));
+        face.heights = heights;
+        face.split = split;
+        face.dropped_corner = Some(dropped);
+        face
+    }
+
+    #[test]
+    fn dropped_corner_horizontal_runtime_matches_editor_preview() {
+        let (project, material) = minimal_material_project();
+        let s = world::SECTOR_SIZE;
+        // Distinct per-corner heights so a wrong corner/height mapping
+        // cannot accidentally pass. Order is `[NW, NE, SE, SW]`.
+        let heights = [7616, 8896, 4096, 1024];
+
+        let mut failures: Vec<String> = Vec::new();
+        let mut tested = 0;
+
+        for split in [GridSplit::NorthWestSouthEast, GridSplit::NorthEastSouthWest] {
+            for dropped in [Corner::NW, Corner::NE, Corner::SE, Corner::SW] {
+                for is_ceiling in [false, true] {
+                    let face = build_dropped_corner_face(material, split, dropped, heights);
+
+                    let editor = editor_survivor_world(&face, dropped, s);
+
+                    let mut grid = WorldGrid::empty(1, 1, s);
+                    grid.set_floor(0, 0, 0, Some(material));
+                    if is_ceiling {
+                        if let Some(sector) = grid.sector_mut(0, 0) {
+                            sector.ceiling = Some(face.clone());
+                        }
+                    } else if let Some(sector) = grid.sector_mut(0, 0) {
+                        sector.floor = Some(face.clone());
+                    }
+
+                    let bytes = encode_world_grid_psxw(&project, &grid).unwrap();
+
+                    let label = format!("{split:?} + drop {dropped:?} + ceiling={is_ceiling}");
+
+                    match editor {
+                        None => {
+                            // Dropped corner lies on this split's diagonal:
+                            // the editor draws nothing, so must the runtime.
+                            let parsed = psx_asset::World::from_bytes(&bytes).unwrap();
+                            let present = match parsed.sector(0, 0) {
+                                None => false,
+                                Some(sector) if is_ceiling => {
+                                    sector.ceiling_triangle_present(0)
+                                        || sector.ceiling_triangle_present(1)
+                                }
+                                Some(sector) => {
+                                    sector.floor_triangle_present(0)
+                                        || sector.floor_triangle_present(1)
+                                }
+                            };
+                            if present {
+                                failures.push(format!(
+                                    "{label}: editor draws nothing (dropped corner on diagonal) \
+                                     but runtime emits a triangle"
+                                ));
+                            }
+                        }
+                        Some(editor_pts) => {
+                            tested += 1;
+                            // 1) Same physical triangle (corner set).
+                            let runtime_pts = runtime_survivor_world(&bytes, is_ceiling, s);
+                            if runtime_pts != editor_pts {
+                                failures.push(format!(
+                                    "{label}: editor survivor {editor_pts:?} != runtime survivor \
+                                     {runtime_pts:?}"
+                                ));
+                            }
+                            // 2) Same emit winding. A single-sided
+                            // (Front) face is backface-culled by both the
+                            // editor preview and the runtime via the
+                            // SIGN of the projected (XZ) signed area; if
+                            // the two pipelines emit opposite winding the
+                            // surface shows in the editor but vanishes in
+                            // the streamed runtime.
+                            let editor_emit =
+                                editor_survivor_emit_order(&face, dropped, is_ceiling, s)
+                                    .expect("editor survivor exists");
+                            let runtime_emit =
+                                runtime_survivor_emit_order(&bytes, is_ceiling, s);
+                            let editor_sign = signed_area_xz(&editor_emit).signum();
+                            let runtime_sign = signed_area_xz(&runtime_emit).signum();
+                            if editor_sign != runtime_sign {
+                                failures.push(format!(
+                                    "{label}: winding mismatch (single-sided face culls on \
+                                     opposite sides) -- editor emit {editor_emit:?} (area sign \
+                                     {editor_sign}) vs runtime emit {runtime_emit:?} (area sign \
+                                     {runtime_sign})"
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        assert!(
+            tested >= 8,
+            "expected at least 8 non-degenerate combos, tested {tested}"
+        );
+        assert!(
+            failures.is_empty(),
+            "dropped-corner runtime/editor mismatches:\n{}",
+            failures.join("\n")
+        );
+    }
 }
