@@ -541,7 +541,10 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         "/// Absolute disc LBA where UI.PAK starts in the playtest ISO layout.\n\
          /// UI.PAK is packed immediately after WORLD.PAK by the ISO builder.\n",
     );
-    let _ = writeln!(out, "pub const UI_PACK_START_LBA: u32 = {ui_pack_start_lba};");
+    let _ = writeln!(
+        out,
+        "pub const UI_PACK_START_LBA: u32 = {ui_pack_start_lba};"
+    );
     out.push('\n');
 
     out.push_str("/// Largest streamed UI image chunk in bytes (UI image staging buffer size).\n");
@@ -1346,12 +1349,19 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             .map(u8::to_string)
             .collect::<Vec<_>>()
             .join(", ");
+        let action_speeds = character
+            .action_speeds
+            .iter()
+            .map(u16::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
         let _ = writeln!(
             out,
-            "    LevelCharacterRecord {{ model: ModelIndex({}), action_clips: [{}], action_flags: [{}], visual_offset: [{}, {}, {}], visual_yaw: {}, visual_scale_q8: {}, weight_q8: {}, radius: {}, height: {}, walk_speed: {}, run_speed: {}, turn_speed_degrees_per_second: {}, stamina_max_q12: {}, sprint_min_q12: {}, sprint_drain_q12: {}, stamina_recover_q12: {}, roll_cost_q12: {}, roll_speed: {}, roll_active_frames: {}, roll_recovery_frames: {}, roll_invulnerable_frames: {}, backstep_cost_q12: {}, backstep_speed: {}, backstep_active_frames: {}, backstep_recovery_frames: {}, backstep_invulnerable_frames: {}, camera_distance: {}, camera_height: {}, camera_target_height: {}, flags: 0 }},",
+            "    LevelCharacterRecord {{ model: ModelIndex({}), action_clips: [{}], action_flags: [{}], action_speeds: [{}], visual_offset: [{}, {}, {}], visual_yaw: {}, visual_scale_q8: {}, weight_q8: {}, radius: {}, height: {}, walk_speed: {}, run_speed: {}, turn_speed_degrees_per_second: {}, stamina_max_q12: {}, sprint_min_q12: {}, sprint_drain_q12: {}, stamina_recover_q12: {}, roll_cost_q12: {}, roll_speed: {}, roll_active_frames: {}, roll_recovery_frames: {}, roll_invulnerable_frames: {}, backstep_cost_q12: {}, backstep_speed: {}, backstep_active_frames: {}, backstep_recovery_frames: {}, backstep_invulnerable_frames: {}, camera_distance: {}, camera_height: {}, camera_target_height: {}, flags: 0 }},",
             character.model,
             action_clips,
             action_flags,
+            action_speeds,
             character.visual_offset[0],
             character.visual_offset[1],
             character.visual_offset[2],

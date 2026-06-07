@@ -482,6 +482,7 @@ fn component_player_without_profile_uses_model_renderer_and_animator() {
             options: Some(crate::CharacterActionOptions {
                 looping: true,
                 in_place: false,
+                speed_q8: crate::ACTION_SPEED_UNSCALED_Q8,
             }),
         });
     }

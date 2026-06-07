@@ -65,6 +65,7 @@ pub(super) struct RuntimeCharacter {
     pub(super) model: ModelIndex,
     pub(super) action_clips: [OptionalModelClipIndex; CHARACTER_ANIMATION_ACTION_COUNT],
     pub(super) action_flags: [u8; CHARACTER_ANIMATION_ACTION_COUNT],
+    pub(super) action_speeds: [u16; CHARACTER_ANIMATION_ACTION_COUNT],
     pub(super) visual_offset: [i16; 3],
     pub(super) visual_yaw: i16,
     pub(super) visual_scale_q8: u16,
@@ -110,6 +111,7 @@ impl RuntimeCharacter {
             model: c.model,
             action_clips: c.action_clips,
             action_flags: c.action_flags,
+            action_speeds: c.action_speeds,
             visual_offset: c.visual_offset,
             visual_yaw: c.visual_yaw,
             visual_scale_q8: c.visual_scale_q8,
@@ -148,6 +150,15 @@ impl RuntimeCharacter {
             .get(action.to_index())
             .copied()
             .unwrap_or(0)
+    }
+
+    /// Q8 playback speed (`256 = 1.0x`) for an action, defaulting to
+    /// unscaled when the action slot is out of range.
+    pub(super) fn action_speed(&self, action: CharacterAnimationAction) -> u16 {
+        self.action_speeds
+            .get(action.to_index())
+            .copied()
+            .unwrap_or(psx_level::CHARACTER_ACTION_SPEED_UNSCALED_Q8)
     }
 
     pub(super) fn action_loops(&self, action: CharacterAnimationAction) -> bool {
