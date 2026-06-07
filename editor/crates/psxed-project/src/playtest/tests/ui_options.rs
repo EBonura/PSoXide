@@ -12,7 +12,7 @@ fn tracked_editor_playtest_manifest_is_placeholder() {
     assert!(manifest.contains("pub static ROOMS: &[LevelRoomRecord] = &[];"));
     assert!(manifest.contains("pub static ROOM_CHUNKS: &[LevelChunkRecord] = &[];"));
     assert!(manifest.contains("pub static ROOM_PORTALS: &[LevelRoomPortalRecord] = &[];"));
-    assert!(manifest.contains("pub const CACHED_ROOM_DEPTH_MODE: u8 = 0;"));
+    assert!(manifest.contains("pub const CACHED_ROOM_DEPTH_MODE: u8 = 2;"));
     assert!(manifest.contains("pub const CACHED_ROOM_TEXTURE_SPLIT_MODE: u8 = 0;"));
     assert!(manifest.contains("pub const CACHED_ROOM_DRAW_ORDER_MODE: u8 = 0;"));
     assert!(manifest.contains("pub const CACHED_ROOM_TEXTURE_SPLIT_MAX_EDGE: u16 = 0;"));
