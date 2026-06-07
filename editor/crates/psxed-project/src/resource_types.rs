@@ -392,6 +392,16 @@ pub struct CharacterActionOptions {
     /// means the selected clip's final frame.
     #[serde(default = "default_action_frame_end")]
     pub frame_end: u16,
+    /// Total forward distance, in engine units, applied while this
+    /// action plays. Zero disables authored action push.
+    #[serde(default)]
+    pub push_distance: i32,
+    /// First sampled frame that receives authored forward push.
+    #[serde(default)]
+    pub push_frame_start: u16,
+    /// Last sampled frame that receives authored forward push, inclusive.
+    #[serde(default = "default_action_frame_end")]
+    pub push_frame_end: u16,
 }
 
 impl CharacterActionOptions {
@@ -402,6 +412,9 @@ impl CharacterActionOptions {
             speed_q8: ACTION_SPEED_UNSCALED_Q8,
             frame_start: 0,
             frame_end: ACTION_FRAME_END_FULL,
+            push_distance: 0,
+            push_frame_start: 0,
+            push_frame_end: ACTION_FRAME_END_FULL,
         }
     }
 }

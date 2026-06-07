@@ -406,172 +406,181 @@ pub(crate) fn draw_animator_action_clip_table(
 ) -> bool {
     let mut changed = false;
 
-    // Fixed column widths so the table layout stays stable regardless of
-    // panel width or clip-name length.
-    let action_width = 76.0;
-    let clip_width = 148.0;
-    let flag_width = 52.0;
-    let speed_width = 56.0;
-
-    let header = |ui: &mut egui::Ui, text: &str, width: f32| {
-        ui.add_sized(
-            [width, 18.0],
-            egui::Label::new(RichText::new(text).color(STUDIO_TEXT_WEAK).small()),
+    let selected_action_id = ui.make_persistent_id("animator-selected-action");
+    let mut selected_index = ui
+        .memory_mut(|memory| memory.data.get_persisted::<usize>(selected_action_id))
+        .unwrap_or(psxed_project::CharacterAnimationAction::Idle.to_index())
+        .min(
+            psxed_project::CharacterAnimationAction::ALL
+                .len()
+                .saturating_sub(1),
         );
-    };
+    let before_selected_index = selected_index;
+    let selected_action = psxed_project::CharacterAnimationAction::ALL[selected_index];
+
     ui.horizontal(|ui| {
-        ui.add_space(4.0);
-        animator_action_table_cell(ui, action_width, 18.0, |ui| {
-            header(ui, "Action", action_width);
-        });
-        animator_action_table_cell(ui, clip_width, 18.0, |ui| {
-            header(ui, "Clip", clip_width);
-        });
-        animator_action_table_cell(ui, flag_width, 18.0, |ui| {
-            header(ui, "Loop", flag_width);
-        });
-        animator_action_table_cell(ui, flag_width, 18.0, |ui| {
-            header(ui, "In-place", flag_width);
-        });
-        animator_action_table_cell(ui, speed_width, 18.0, |ui| {
-            header(ui, "Speed", speed_width);
-        });
+        ui.label(RichText::new("Action").color(STUDIO_TEXT_WEAK));
+        egui::ComboBox::from_id_salt("animator-selected-action-picker")
+            .selected_text(selected_action.label())
+            .width(180.0)
+            .show_ui(ui, |ui| {
+                for (index, action) in psxed_project::CharacterAnimationAction::ALL
+                    .iter()
+                    .copied()
+                    .enumerate()
+                {
+                    if ui
+                        .selectable_label(selected_index == index, action.label())
+                        .clicked()
+                    {
+                        selected_index = index;
+                    }
+                }
+            });
     });
+    if selected_index != before_selected_index {
+        ui.memory_mut(|memory| {
+            memory
+                .data
+                .insert_persisted(selected_action_id, selected_index)
+        });
+    }
+    let action = psxed_project::CharacterAnimationAction::ALL[selected_index];
+    let binding_index = action_clips
+        .iter()
+        .position(|binding| binding.action == action);
+    let inherited_clip = context.profile_action_clips[action.to_index()];
+    let mut current = binding_index.map(|index| action_clips[index].clip);
+    let mut options = binding_index
+        .and_then(|index| action_clips[index].options)
+        .unwrap_or_else(|| {
+            animator_action_option_defaults(action, current, inherited_clip, context)
+        });
+    let before_options = options;
 
     ui.add_space(2.0);
-    for (row, action) in psxed_project::CharacterAnimationAction::ALL
-        .iter()
-        .copied()
-        .enumerate()
-    {
-        let binding_index = action_clips
-            .iter()
-            .position(|binding| binding.action == action);
-        let inherited_clip = context.profile_action_clips[action.to_index()];
-        let mut current = binding_index.map(|index| action_clips[index].clip);
-        let mut options = binding_index
-            .and_then(|index| action_clips[index].options)
-            .unwrap_or_else(|| {
-                animator_action_option_defaults(action, current, inherited_clip, context)
+    egui::Frame::new()
+        .fill(STUDIO_PANEL_HEADER)
+        .stroke(Stroke::new(1.0, STUDIO_BORDER))
+        .corner_radius(egui::CornerRadius::same(4))
+        .inner_margin(egui::Margin::symmetric(8, 7))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width().max(220.0));
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(action.label()).strong());
+                if inherited_clip.is_some() && current.is_none() {
+                    ui.label(
+                        RichText::new("using profile default")
+                            .small()
+                            .color(STUDIO_TEXT_WEAK),
+                    );
+                }
             });
 
-        let row_fill = if row % 2 == 0 {
-            STUDIO_PANEL_HEADER
-        } else {
-            Color32::TRANSPARENT
-        };
-        egui::Frame::new()
-            .fill(row_fill)
-            .inner_margin(egui::Margin::symmetric(4, 2))
-            .show(ui, |ui| {
-                let mut effective_clip = current.or(inherited_clip);
-                let mut enabled = effective_clip.is_some();
-                let before_options = options;
-                ui.horizontal(|ui| {
-                    animator_action_table_cell(ui, action_width, 24.0, |ui| {
-                        ui.add_sized([action_width, 24.0], egui::Label::new(action.label()));
-                    });
-                    animator_action_table_cell(ui, clip_width, 24.0, |ui| {
-                        if animator_action_clip_combo(
-                            ui,
-                            &format!("animator-action-{}", action.to_index()),
-                            clip_width,
-                            &mut current,
-                            inherited_clip,
-                            context.profile_name.as_deref(),
-                            &context.clips,
-                        ) {
-                            set_node_action_clip(action_clips, action, current);
-                            changed = true;
-                        }
-                    });
-
-                    effective_clip = current.or(inherited_clip);
-                    enabled = effective_clip.is_some();
-                    animator_action_table_cell(ui, flag_width, 24.0, |ui| {
-                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                            ui.centered_and_justified(|ui| {
-                                ui.add_enabled_ui(enabled, |ui| {
-                                    changed |= ui
-                                        .checkbox(&mut options.looping, "")
-                                        .on_hover_text(
-                                            "Loop this clip while the action remains active",
-                                        )
-                                        .changed();
-                                });
-                            });
-                        });
-                    });
-                    animator_action_table_cell(ui, flag_width, 24.0, |ui| {
-                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                            ui.centered_and_justified(|ui| {
-                                ui.add_enabled_ui(enabled, |ui| {
-                                    changed |= ui
-                                        .checkbox(&mut options.in_place, "")
-                                        .on_hover_text("Cancel root translation for this action")
-                                        .changed();
-                                });
-                            });
-                        });
-                    });
-                    animator_action_table_cell(ui, speed_width, 24.0, |ui| {
-                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                            ui.add_enabled_ui(enabled, |ui| {
-                                let mut speed_mult = options.speed_q8 as f32 / 256.0;
-                                if ui
-                                    .add(
-                                        egui::DragValue::new(&mut speed_mult)
-                                            .speed(0.01)
-                                            .range(0.25..=4.0)
-                                            .fixed_decimals(2)
-                                            .suffix("x"),
-                                    )
-                                    .on_hover_text(
-                                        "Playback speed for this action (1.00x = authored rate)",
-                                    )
-                                    .changed()
-                                {
-                                    options.speed_q8 = (speed_mult * 256.0).round().clamp(
-                                        psxed_project::ACTION_SPEED_MIN_Q8 as f32,
-                                        psxed_project::ACTION_SPEED_MAX_Q8 as f32,
-                                    ) as u16;
-                                }
-                            });
-                        });
-                    });
-                });
-
-                ui.horizontal(|ui| {
-                    ui.add_space(action_width + 4.0);
-                    let frame_count = effective_clip
-                        .and_then(|clip| context.clip_frame_counts.get(clip as usize))
-                        .copied()
-                        .flatten();
-                    ui.add_enabled_ui(enabled, |ui| {
-                        changed |= animator_action_frame_range_controls(
-                            ui,
-                            &format!("animator-action-range-{}", action.to_index()),
-                            clip_width,
-                            &mut options,
-                            frame_count,
-                        );
-                    });
-                });
-
-                if enabled && options != before_options {
-                    let clip = effective_clip.expect("enabled rows have a clip");
-                    if current.is_none() {
-                        current = Some(clip);
-                        set_node_action_clip(action_clips, action, current);
-                    }
-                    let defaults =
-                        animator_action_option_defaults(action, current, inherited_clip, context);
-                    let stored = (options != defaults).then_some(options);
-                    set_node_action_options(action_clips, action, stored);
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Clip").color(STUDIO_TEXT_WEAK));
+                let combo_width = (ui.available_width() - 4.0).max(180.0);
+                if animator_action_clip_combo(
+                    ui,
+                    &format!("animator-action-{}", action.to_index()),
+                    combo_width,
+                    &mut current,
+                    inherited_clip,
+                    context.profile_name.as_deref(),
+                    &context.clips,
+                ) {
+                    set_node_action_clip(action_clips, action, current);
                     changed = true;
                 }
             });
+
+            let effective_clip = current.or(inherited_clip);
+            let enabled = effective_clip.is_some();
+            let frame_count = effective_clip
+                .and_then(|clip| context.clip_frame_counts.get(clip as usize))
+                .copied()
+                .flatten();
+
+            ui.add_space(8.0);
+            ui.add_enabled_ui(enabled, |ui| {
+                let slider_width = ui.available_width().max(220.0);
+                changed |= animator_action_frame_range_controls(
+                    ui,
+                    &format!("animator-action-range-{}", action.to_index()),
+                    slider_width,
+                    &mut options,
+                    frame_count,
+                );
+            });
+
+            ui.add_space(8.0);
+            ui.add_enabled_ui(enabled, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Playback speed").color(STUDIO_TEXT_WEAK));
+                    let mut speed_mult = options.speed_q8 as f32 / 256.0;
+                    if ui
+                        .add(
+                            egui::DragValue::new(&mut speed_mult)
+                                .speed(0.01)
+                                .range(0.25..=4.0)
+                                .fixed_decimals(2)
+                                .suffix("x"),
+                        )
+                        .on_hover_text("Playback speed for this action (1.00x = authored rate)")
+                        .changed()
+                    {
+                        options.speed_q8 = (speed_mult * 256.0).round().clamp(
+                            psxed_project::ACTION_SPEED_MIN_Q8 as f32,
+                            psxed_project::ACTION_SPEED_MAX_Q8 as f32,
+                        ) as u16;
+                    }
+                });
+                ui.horizontal(|ui| {
+                    changed |= ui
+                        .checkbox(&mut options.looping, "Loop")
+                        .on_hover_text("Loop this clip while the action remains active")
+                        .changed();
+                    changed |= ui
+                        .checkbox(&mut options.in_place, "In-place")
+                        .on_hover_text("Cancel root translation for this action")
+                        .changed();
+                });
+
+                ui.add_space(8.0);
+                ui.separator();
+                ui.label(RichText::new("Movement").color(STUDIO_TEXT_WEAK).small());
+                changed |= drag_i32(ui, "Forward push", &mut options.push_distance, 0, 8192);
+                ui.add_enabled_ui(options.push_distance > 0, |ui| {
+                    changed |= animator_action_push_frame_range_controls(
+                        ui,
+                        &format!("animator-action-push-range-{}", action.to_index()),
+                        ui.available_width().max(220.0),
+                        &mut options,
+                        frame_count,
+                    );
+                });
+            });
+
+            if !enabled {
+                ui.add_space(6.0);
+                ui.weak("Choose a clip to edit playback details.");
+            }
+        });
+
+    if current.or(inherited_clip).is_some() && options != before_options {
+        if current.is_none() {
+            if let Some(clip) = inherited_clip {
+                current = Some(clip);
+                set_node_action_clip(action_clips, action, current);
+            }
+        }
+        let defaults = animator_action_option_defaults(action, current, inherited_clip, context);
+        let stored = (options != defaults).then_some(options);
+        set_node_action_options(action_clips, action, stored);
+        changed = true;
     }
+
     changed
 }
 
@@ -617,6 +626,56 @@ fn animator_action_frame_range_controls(
     if changed {
         options.frame_start = start;
         options.frame_end = if end == max_frame {
+            psxed_project::ACTION_FRAME_END_FULL
+        } else {
+            end
+        };
+    }
+    changed
+}
+
+fn animator_action_push_frame_range_controls(
+    ui: &mut egui::Ui,
+    id_salt: &str,
+    width: f32,
+    options: &mut psxed_project::CharacterActionOptions,
+    frame_count: Option<u16>,
+) -> bool {
+    let Some(frame_count) = frame_count else {
+        ui.add_sized(
+            [width, 18.0],
+            egui::Label::new(
+                RichText::new("Push frames unavailable")
+                    .small()
+                    .color(STUDIO_TEXT_WEAK),
+            ),
+        );
+        return false;
+    };
+    let max_frame = frame_count.saturating_sub(2);
+    let mut start = options.push_frame_start.min(max_frame);
+    let mut end = if options.push_frame_end == psxed_project::ACTION_FRAME_END_FULL {
+        max_frame
+    } else {
+        options.push_frame_end.min(max_frame)
+    };
+    if end < start {
+        end = start;
+    }
+
+    let mut changed = false;
+    ui.vertical(|ui| {
+        ui.set_width(width);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Push frames").small().color(STUDIO_TEXT_WEAK));
+            ui.label(RichText::new(format!("{start}-{end}")).small());
+        });
+        changed |= double_frame_range_slider(ui, id_salt, width, &mut start, &mut end, max_frame);
+    });
+
+    if changed {
+        options.push_frame_start = start;
+        options.push_frame_end = if end == max_frame {
             psxed_project::ACTION_FRAME_END_FULL
         } else {
             end
@@ -698,24 +757,6 @@ fn double_frame_range_slider(
     changed
 }
 
-fn animator_action_table_cell<R>(
-    ui: &mut egui::Ui,
-    width: f32,
-    height: f32,
-    add_contents: impl FnOnce(&mut egui::Ui) -> R,
-) -> R {
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, height), egui::Sense::hover());
-    let mut child = ui.new_child(
-        egui::UiBuilder::new()
-            .max_rect(rect)
-            .layout(egui::Layout::left_to_right(egui::Align::Center)),
-    );
-    child.set_clip_rect(rect);
-    child.set_width(width);
-    child.set_height(height);
-    add_contents(&mut child)
-}
-
 pub(crate) fn animator_action_option_defaults(
     action: psxed_project::CharacterAnimationAction,
     current: Option<u16>,
@@ -731,6 +772,9 @@ pub(crate) fn animator_action_option_defaults(
         speed_q8: psxed_project::ACTION_SPEED_UNSCALED_Q8,
         frame_start: 0,
         frame_end: psxed_project::ACTION_FRAME_END_FULL,
+        push_distance: 0,
+        push_frame_start: 0,
+        push_frame_end: psxed_project::ACTION_FRAME_END_FULL,
     }
 }
 
