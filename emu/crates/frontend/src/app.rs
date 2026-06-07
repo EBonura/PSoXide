@@ -1538,9 +1538,12 @@ impl AppState {
         let build_bytes = copy_project_disc(&source_path, &dest_path)?;
 
         let rescan_error = self.rescan_library().err();
+        let display_path = dest_path
+            .canonicalize()
+            .unwrap_or_else(|_| dest_path.clone());
         let mut message = format!(
             "Project disc exported -> {} ({} KiB)",
-            dest_path.display(),
+            display_path.display(),
             build_bytes / 1024
         );
         if let Some(error) = rescan_error {
