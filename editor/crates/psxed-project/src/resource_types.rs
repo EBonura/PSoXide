@@ -354,6 +354,18 @@ pub struct CharacterActionClip {
     pub options: Option<CharacterActionOptions>,
 }
 
+/// Q8 fixed-point unit (`1.0x`) for per-action playback speed.
+pub const ACTION_SPEED_UNSCALED_Q8: u16 = 256;
+/// Authoring lower clamp for per-action playback speed (`0.25x`).
+pub const ACTION_SPEED_MIN_Q8: u16 = 64;
+/// Authoring upper clamp for per-action playback speed (`4.0x`).
+pub const ACTION_SPEED_MAX_Q8: u16 = 1024;
+
+/// Default per-action playback speed: `1.0x` (unscaled).
+pub(crate) const fn default_action_speed_q8() -> u16 {
+    ACTION_SPEED_UNSCALED_Q8
+}
+
 /// Per-action playback controls.
 ///
 /// This deliberately belongs to the action binding, not the clip
@@ -365,6 +377,12 @@ pub struct CharacterActionOptions {
     pub looping: bool,
     #[serde(default = "default_true")]
     pub in_place: bool,
+    /// Playback speed multiplier in Q8 fixed point (`256 = 1.0x`).
+    /// Scales how fast this action's cooked clip advances at runtime:
+    /// `< 256` plays slower, `> 256` plays faster. Authoring clamps to
+    /// [`ACTION_SPEED_MIN_Q8`]..=[`ACTION_SPEED_MAX_Q8`].
+    #[serde(default = "default_action_speed_q8")]
+    pub speed_q8: u16,
 }
 
 impl CharacterActionOptions {
@@ -372,6 +390,7 @@ impl CharacterActionOptions {
         Self {
             looping: action.loops_by_default(),
             in_place: true,
+            speed_q8: ACTION_SPEED_UNSCALED_Q8,
         }
     }
 }
