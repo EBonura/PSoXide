@@ -1,4 +1,5 @@
 use super::*;
+use psxed_project::UiVisibilityCondition;
 
 #[derive(Clone, Debug)]
 pub(crate) struct AnimationSetOption {
@@ -1191,6 +1192,28 @@ pub(crate) fn draw_ui_text_align_editor(ui: &mut egui::Ui, align: &mut UiTextAli
                     && *align != candidate
                 {
                     *align = candidate;
+                    changed = true;
+                }
+            }
+        });
+    changed
+}
+
+pub(crate) fn draw_ui_visibility_editor(
+    ui: &mut egui::Ui,
+    visible_when: &mut UiVisibilityCondition,
+) -> bool {
+    let mut changed = false;
+    egui::ComboBox::from_label("Visible when")
+        .selected_text(visible_when.label())
+        .show_ui(ui, |ui| {
+            for candidate in UiVisibilityCondition::ALL {
+                if ui
+                    .selectable_label(*visible_when == candidate, candidate.label())
+                    .clicked()
+                    && *visible_when != candidate
+                {
+                    *visible_when = candidate;
                     changed = true;
                 }
             }

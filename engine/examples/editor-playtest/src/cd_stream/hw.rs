@@ -10,23 +10,22 @@ pub(super) enum WaitOutcome {
 
 #[cfg(target_arch = "mips")]
 pub(super) unsafe fn prepare_cd_read(polls: &mut u32) -> Result<(), u32> {
+    // The engine installs a VBlank-only exception handler. After a real BIOS
+    // disc boot, keep CD-ROM at the controller level and poll its IRQ flags
+    // manually so DataReady cannot enter an unhandled CPU IRQ storm.
+    psx_io::irq::set_mask(1 << psx_io::irq::source::VBLANK);
+    psx_io::irq::ack(1 << psx_io::irq::source::CDROM);
     cd_enable_irqs();
     cd_ack_all();
     psx_io::dma::enable_channel(psx_io::dma::Channel::Cdrom);
     if !CD_READ_PREPARED {
-        // The BIOS/fast-boot EXE loader can leave an old CD read
-        // stream or data-ready state behind. Stop it once before
-        // our first direct sector read so random WORLD.PAK loads do
-        // not consume stale sector data.
-        cleanup_read_stream(polls);
+        // BIOS disc boot has already finished its file load. Do not send Pause
+        // before our first stream; on real BIOS boot paths some emulators have
+        // no active read command to pause and never acknowledge it. Drain any
+        // already-latched data/ack instead.
+        drain_pending_irqs(polls);
         cd_ack_all();
         CD_READ_PREPARED = true;
-    }
-    let Some(stat) = get_stat(polls) else {
-        return Err(STATUS_CD_ERROR);
-    };
-    if stat & DRIVE_STATUS_MOTOR_ON == 0 || stat & DRIVE_STATUS_SHELL_OPEN != 0 {
-        return Err(STATUS_CD_ERROR);
     }
     if !send_command(
         CMD_SETMODE,
@@ -38,6 +37,19 @@ pub(super) unsafe fn prepare_cd_read(polls: &mut u32) -> Result<(), u32> {
         return Err(classify_command_failure(STATUS_SETMODE_TIMEOUT));
     }
     Ok(())
+}
+
+#[cfg(target_arch = "mips")]
+pub(super) unsafe fn drain_pending_irqs(polls: &mut u32) {
+    let mut i = 0;
+    while i < 16 {
+        let flag = cd_irq_flag();
+        if flag == 0 {
+            break;
+        }
+        ack_unexpected_irq(flag, polls);
+        i += 1;
+    }
 }
 
 #[cfg(target_arch = "mips")]
@@ -55,32 +67,8 @@ pub(super) unsafe fn start_cd_read_at_lba(lba: u32, polls: &mut u32) -> Result<(
     if !send_command(CMD_READN, &[], IRQ_ACK, COMMAND_ACK_POLL_LIMIT, polls) {
         return Err(classify_command_failure(STATUS_READ_ACK_TIMEOUT));
     }
+    cd_enable_irqs();
     Ok(())
-}
-
-#[cfg(target_arch = "mips")]
-pub(super) unsafe fn get_stat(polls: &mut u32) -> Option<u8> {
-    cd_write_index(0);
-    psx_io::write8(CD_IRQ, 0x40);
-    psx_io::write8(CD_RESPONSE, CMD_GETSTAT);
-    match wait_irq(IRQ_ACK, COMMAND_ACK_POLL_LIMIT, polls) {
-        WaitOutcome::Matched => {
-            cd_write_index(0);
-            let stat = if psx_io::read8(CD_STATUS) & STATUS_RESPONSE_FIFO_NOT_EMPTY != 0 {
-                Some(psx_io::read8(CD_RESPONSE))
-            } else {
-                None
-            };
-            drain_responses();
-            cd_ack(IRQ_ACK);
-            stat
-        }
-        WaitOutcome::CdError | WaitOutcome::Timeout => {
-            drain_responses();
-            cd_ack_all();
-            None
-        }
-    }
 }
 
 #[cfg(target_arch = "mips")]
@@ -91,13 +79,24 @@ pub(super) unsafe fn send_command(
     poll_limit: u32,
     polls: &mut u32,
 ) -> bool {
+    let irq_enable = cd_irq_enable();
+    cd_set_irq_enable(0);
+    cd_ack_all();
     cd_write_index(0);
+    drain_responses();
+    cd_write_index(1);
     psx_io::write8(CD_IRQ, 0x40);
+    cd_write_index(0);
     for &param in params {
+        if !wait_parameter_room(polls) {
+            cd_set_irq_enable(irq_enable);
+            cd_write_index(0);
+            return false;
+        }
         psx_io::write8(CD_PARAM, param);
     }
     psx_io::write8(CD_RESPONSE, command);
-    match wait_irq(expected_irq, poll_limit, polls) {
+    let ok = match wait_irq(expected_irq, poll_limit, polls) {
         WaitOutcome::Matched => {
             drain_responses();
             cd_ack(expected_irq);
@@ -109,7 +108,23 @@ pub(super) unsafe fn send_command(
             false
         }
         WaitOutcome::Timeout => false,
+    };
+    cd_set_irq_enable(irq_enable);
+    cd_write_index(0);
+    ok
+}
+
+#[cfg(target_arch = "mips")]
+pub(super) unsafe fn wait_parameter_room(polls: &mut u32) -> bool {
+    let mut i = 0;
+    while i < PARAMETER_ROOM_POLL_LIMIT {
+        if psx_io::read8(CD_STATUS) & STATUS_PARAMETER_FIFO_NOT_FULL != 0 {
+            return true;
+        }
+        *polls = (*polls).saturating_add(1);
+        i += 1;
     }
+    false
 }
 
 #[cfg(target_arch = "mips")]
@@ -118,6 +133,9 @@ pub(super) unsafe fn wait_irq(expected: u8, poll_limit: u32, polls: &mut u32) ->
     while i < poll_limit {
         let flag = cd_irq_flag();
         if flag == expected {
+            return WaitOutcome::Matched;
+        }
+        if expected == IRQ_DATA_READY && cd_data_fifo_ready() {
             return WaitOutcome::Matched;
         }
         if flag == IRQ_ERROR {
@@ -196,7 +214,8 @@ pub(super) unsafe fn try_read_stream_sector(
     buffer: *mut u32,
     polls: &mut u32,
 ) -> Result<bool, u32> {
-    match cd_irq_flag() {
+    let flag = cd_irq_flag();
+    match flag {
         IRQ_DATA_READY => {
             dma_read_sector(buffer, polls);
             drain_responses();
@@ -215,6 +234,12 @@ pub(super) unsafe fn try_read_stream_sector(
             drain_responses();
             cd_ack(stale_irq);
             Ok(false)
+        }
+        _ if cd_data_fifo_ready() => {
+            dma_read_sector(buffer, polls);
+            drain_responses();
+            cd_ack(IRQ_DATA_READY);
+            Ok(true)
         }
         _ => {
             *polls = (*polls).saturating_add(1);
@@ -283,6 +308,7 @@ pub(super) unsafe fn stream_world_pack(buffer: *mut u32, result: &mut BenchResul
 
 #[cfg(target_arch = "mips")]
 pub(super) unsafe fn dma_read_sector(buffer: *mut u32, polls: &mut u32) {
+    cd_arm_data_transfer();
     psx_io::dma::set_madr(psx_io::dma::Channel::Cdrom, buffer as u32);
     psx_io::dma::set_bcr_manual(psx_io::dma::Channel::Cdrom, SECTOR_WORDS as u16);
     // Matches the BIOS-style burst control word that the emulator
@@ -294,6 +320,13 @@ pub(super) unsafe fn dma_read_sector(buffer: *mut u32, polls: &mut u32) {
         i += 1;
     }
     psx_io::irq::ack(1 << psx_io::irq::source::DMA);
+}
+
+#[cfg(target_arch = "mips")]
+pub(super) unsafe fn cd_arm_data_transfer() {
+    cd_write_index(0);
+    psx_io::write8(CD_IRQ, 0x80);
+    cd_write_index(0);
 }
 
 #[cfg(target_arch = "mips")]
@@ -319,6 +352,22 @@ pub(super) unsafe fn classify_command_failure(timeout_status: u32) -> u32 {
 pub(super) unsafe fn cd_enable_irqs() {
     cd_write_index(1);
     psx_io::write8(CD_PARAM, 0x1F);
+    cd_write_index(0);
+}
+
+#[cfg(target_arch = "mips")]
+pub(super) unsafe fn cd_irq_enable() -> u8 {
+    cd_write_index(0);
+    let enable = psx_io::read8(CD_IRQ) & 0x1F;
+    cd_write_index(0);
+    enable
+}
+
+#[cfg(target_arch = "mips")]
+pub(super) unsafe fn cd_set_irq_enable(mask: u8) {
+    cd_write_index(1);
+    psx_io::write8(CD_PARAM, mask & 0x1F);
+    cd_write_index(0);
 }
 
 #[cfg(target_arch = "mips")]
@@ -326,6 +375,7 @@ pub(super) unsafe fn cd_ack_all() {
     cd_write_index(1);
     psx_io::write8(CD_IRQ, 0x5F);
     psx_io::irq::ack(1 << psx_io::irq::source::CDROM);
+    cd_write_index(0);
 }
 
 #[cfg(target_arch = "mips")]
@@ -333,12 +383,15 @@ pub(super) unsafe fn cd_ack(irq: u8) {
     cd_write_index(1);
     psx_io::write8(CD_IRQ, irq & 0x1F);
     psx_io::irq::ack(1 << psx_io::irq::source::CDROM);
+    cd_write_index(0);
 }
 
 #[cfg(target_arch = "mips")]
 pub(super) unsafe fn cd_irq_flag() -> u8 {
     cd_write_index(1);
-    psx_io::read8(CD_IRQ) & 0x1F
+    let flag = psx_io::read8(CD_IRQ) & 0x1F;
+    cd_write_index(0);
+    flag
 }
 
 #[cfg(target_arch = "mips")]
@@ -347,6 +400,14 @@ pub(super) unsafe fn drain_responses() {
     while psx_io::read8(CD_STATUS) & STATUS_RESPONSE_FIFO_NOT_EMPTY != 0 {
         let _ = psx_io::read8(CD_RESPONSE);
     }
+}
+
+#[cfg(target_arch = "mips")]
+pub(super) unsafe fn cd_data_fifo_ready() -> bool {
+    cd_write_index(0);
+    let ready = psx_io::read8(CD_STATUS) & STATUS_DATA_FIFO_NOT_EMPTY != 0;
+    cd_write_index(0);
+    ready
 }
 
 #[cfg(target_arch = "mips")]

@@ -235,7 +235,10 @@ pub(crate) fn fbx_node_indices(scene: &ufbx::Scene) -> HashMap<usize, usize> {
     out
 }
 
-pub(crate) fn fbx_node_index(node_indices: &HashMap<usize, usize>, node: &ufbx::Node) -> Result<usize, Error> {
+pub(crate) fn fbx_node_index(
+    node_indices: &HashMap<usize, usize>,
+    node: &ufbx::Node,
+) -> Result<usize, Error> {
     node_indices
         .get(&(node as *const ufbx::Node as usize))
         .copied()
@@ -491,7 +494,11 @@ pub(crate) fn fbx_stack_time_range(stack: &ufbx::AnimStack) -> Option<(f64, f64)
     }
 }
 
-pub(crate) fn evaluate_fbx_frame_trs(scene: &ufbx::Scene, anim: &ufbx::Anim, time: f64) -> Vec<Trs> {
+pub(crate) fn evaluate_fbx_frame_trs(
+    scene: &ufbx::Scene,
+    anim: &ufbx::Anim,
+    time: f64,
+) -> Vec<Trs> {
     scene
         .nodes
         .iter()
@@ -936,7 +943,10 @@ pub(crate) fn cook_all_fbx_animations(
     Ok(clips)
 }
 
-pub(crate) fn fbx_stack_source_name(stack: &ufbx::AnimStack, fallback_name: Option<&str>) -> Option<String> {
+pub(crate) fn fbx_stack_source_name(
+    stack: &ufbx::AnimStack,
+    fallback_name: Option<&str>,
+) -> Option<String> {
     let stack_name = stack.element.name.trim();
     if !stack_name.is_empty() && stack_name != "Take 001" && stack_name != "mixamo.com" {
         Some(stack_name.to_string())
@@ -1084,7 +1094,10 @@ pub(crate) fn cook_fbx_base_color_texture(
         .map_err(Error::TextureCook)
 }
 
-pub(crate) fn resolve_fbx_texture_path(texture_path: &Path, source_path: Option<&Path>) -> Option<PathBuf> {
+pub(crate) fn resolve_fbx_texture_path(
+    texture_path: &Path,
+    source_path: Option<&Path>,
+) -> Option<PathBuf> {
     if texture_path.exists() {
         return Some(texture_path.to_path_buf());
     }
