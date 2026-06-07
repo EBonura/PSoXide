@@ -53,6 +53,13 @@ impl Playtest {
         config
     }
 
+    pub(super) fn camera_orbit_speed_level(&self) -> u8 {
+        ROOMS
+            .get(self.room_index.to_usize())
+            .map(|room| room.camera.orbit_speed_level)
+            .unwrap_or(LevelCameraRecord::DEFAULT.orbit_speed_level)
+    }
+
     pub(super) fn collect_collision_blockers(
         &self,
         out: &mut [CharacterCollisionCylinder; MAX_MODEL_INSTANCES],
@@ -400,7 +407,7 @@ impl Playtest {
                 recenter: ctx.is_held(button::L1),
             }
         } else {
-            camera_input(ctx)
+            camera_input(ctx, self.camera_orbit_speed_level())
         };
         let lock_target = self
             .lock_target_position()
