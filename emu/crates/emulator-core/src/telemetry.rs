@@ -578,12 +578,24 @@ pub mod counter {
     pub const TEXTURED_MODEL_PRIMITIVE_OVERFLOW_SUBMITS: u16 = 215;
     /// Model submits that exceeded world-command storage.
     pub const TEXTURED_MODEL_COMMAND_OVERFLOW_SUBMITS: u16 = 216;
+    /// Room-texture VRAM slots freed by residency eviction (Stage 4 teardown).
+    pub const VRAM_SLOTS_FREED: u16 = 217;
+    /// Texture uploads that found no free VRAM slot-table entry (64-slot cap).
+    pub const VRAM_SLOT_TABLE_FULL: u16 = 218;
+    /// Room-texture uploads where the room-material page band was full.
+    pub const VRAM_WINDOW_FULL: u16 = 219;
+    /// Texture uploads where the CLUT band was full.
+    pub const VRAM_CLUT_FULL: u16 = 220;
+    /// Room-texture uploads skipped because the VRAM upload queue was full.
+    pub const VRAM_UPLOAD_QUEUE_FULL: u16 = 221;
+    /// Room materials left untextured because their texture was not VRAM-resident.
+    pub const ROOM_MATERIAL_TEXTURE_DROPS: u16 = 222;
 }
 
 /// Number of counter slots, including index zero for unknown/reserved ids.
 /// Must stay larger than the highest counter id emitted by the guest
 /// (`psx_engine::telemetry::counter`); a counter id >= this is silently dropped.
-pub const COUNTER_COUNT: usize = 218;
+pub const COUNTER_COUNT: usize = 223;
 
 /// Telemetry event kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1255,6 +1267,12 @@ pub fn counter_name(id: u16) -> &'static str {
         counter::TEXTURED_MODEL_VERTEX_OVERFLOW_SUBMITS => "mdl vertex overflow submits",
         counter::TEXTURED_MODEL_PRIMITIVE_OVERFLOW_SUBMITS => "mdl primitive overflow submits",
         counter::TEXTURED_MODEL_COMMAND_OVERFLOW_SUBMITS => "mdl command overflow submits",
+        counter::VRAM_SLOTS_FREED => "vram slots freed",
+        counter::VRAM_SLOT_TABLE_FULL => "vram slot table full",
+        counter::VRAM_WINDOW_FULL => "vram window full",
+        counter::VRAM_CLUT_FULL => "vram clut full",
+        counter::VRAM_UPLOAD_QUEUE_FULL => "vram upload queue full",
+        counter::ROOM_MATERIAL_TEXTURE_DROPS => "room material texture drops",
         _ => "unknown",
     }
 }

@@ -231,6 +231,13 @@ pub struct EditorPlaytestMetrics {
     /// Requested rooms denied a slot because every candidate was protected
     /// (the resident-budget-exceeded signal: more high-priority rooms than slots).
     pub stream_protected_full: u32,
+    /// Room materials dropped to the untextured fallback because their texture
+    /// could not become VRAM-resident: the silent missing-texture symptom.
+    pub vram_texture_drops: u32,
+    /// VRAM overflow attribution behind the drops, in order: [slot-table full
+    /// (the binding 64-slot cap), room-window band full, CLUT band full,
+    /// upload-queue full].
+    pub vram_caps_full: [u32; 4],
     /// Resident streamed chunks, keyed by runtime room/chunk index.
     pub chunk_loaded_mask: u64,
     /// Streamed chunks with in-flight loads, keyed by runtime room/chunk index.
