@@ -287,6 +287,7 @@ impl Scene for Playtest {
                                     cached_room_depth_mode(),
                                     cached_room_subdivision_mode(),
                                     ROOM_VISIBLE_CELL_SCREEN_MARGIN,
+                                    active.index == self.portal_visibility_root,
                                     &mut primitive_packets,
                                     &mut world,
                                 )
