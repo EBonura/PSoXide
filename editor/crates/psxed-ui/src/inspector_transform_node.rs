@@ -13,7 +13,7 @@ pub(crate) fn draw_transform_policy_editor(
             sector_size,
             sky,
             far_vista,
-            camera,
+            camera: _,
             culling,
             streaming,
             physics,
@@ -22,7 +22,6 @@ pub(crate) fn draw_transform_policy_editor(
             *sector_size,
             sky,
             far_vista,
-            camera,
             culling,
             streaming,
             physics,
@@ -77,6 +76,7 @@ pub(crate) fn node_transform_inspector(kind: &NodeKind) -> NodeTransformInspecto
         | NodeKind::Animator { .. }
         | NodeKind::Collider { .. }
         | NodeKind::CharacterController { .. }
+        | NodeKind::Camera { .. }
         | NodeKind::Equipment { .. }
         | NodeKind::PhysicsBody { .. }
         | NodeKind::Interactable { .. } => NodeTransformInspector::Hidden,
@@ -174,7 +174,6 @@ pub(crate) fn draw_world_grid_settings(
     sector_size: i32,
     sky: &mut SkySettings,
     far_vista: &mut FarVistaSettings,
-    camera: &mut WorldCameraSettings,
     culling: &mut WorldCullingSettings,
     streaming: &mut WorldStreamingSettings,
     physics: &mut WorldPhysicsSettings,
@@ -548,51 +547,6 @@ pub(crate) fn draw_world_grid_settings(
                 });
             }
         });
-    egui::CollapsingHeader::new(icons::label(icons::FOCUS, "Camera"))
-        .default_open(true)
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Distance").color(STUDIO_TEXT_WEAK));
-                changed |= ui
-                    .add(
-                        egui::DragValue::new(&mut camera.distance)
-                            .speed(128.0)
-                            .range(MIN_WORLD_CAMERA_DISTANCE..=MAX_WORLD_CAMERA_DISTANCE),
-                    )
-                    .changed();
-            });
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Height").color(STUDIO_TEXT_WEAK));
-                changed |= ui
-                    .add(
-                        egui::DragValue::new(&mut camera.height)
-                            .speed(64.0)
-                            .range(0..=MAX_WORLD_CAMERA_HEIGHT),
-                    )
-                    .changed();
-            });
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Target Height").color(STUDIO_TEXT_WEAK));
-                changed |= ui
-                    .add(
-                        egui::DragValue::new(&mut camera.target_height)
-                            .speed(64.0)
-                            .range(0..=MAX_WORLD_CAMERA_HEIGHT),
-                    )
-                    .changed();
-            });
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Floor Clearance").color(STUDIO_TEXT_WEAK));
-                changed |= ui
-                    .add(
-                        egui::DragValue::new(&mut camera.min_floor_clearance)
-                            .speed(16.0)
-                            .range(0..=MAX_WORLD_CAMERA_MIN_FLOOR_CLEARANCE),
-                    )
-                    .on_hover_text("Minimum camera origin height above the sampled floor.")
-                    .changed();
-            });
-        });
     egui::CollapsingHeader::new(icons::label(icons::FOCUS, "Culling"))
         .default_open(false)
         .show(ui, |ui| {
@@ -719,6 +673,247 @@ pub(crate) fn draw_world_grid_settings(
                 .changed();
         });
     changed
+}
+
+pub(crate) fn draw_gameplay_camera_settings(
+    ui: &mut egui::Ui,
+    camera: &mut WorldCameraSettings,
+) -> bool {
+    let mut changed = false;
+    egui::CollapsingHeader::new(icons::label(icons::FOCUS, "Follow Rig"))
+        .default_open(true)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Distance").color(STUDIO_TEXT_WEAK));
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut camera.distance)
+                            .speed(128.0)
+                            .range(MIN_WORLD_CAMERA_DISTANCE..=MAX_WORLD_CAMERA_DISTANCE),
+                    )
+                    .on_hover_text("Preferred trailing distance from the player focus point.")
+                    .changed();
+            });
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Height").color(STUDIO_TEXT_WEAK));
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut camera.height)
+                            .speed(64.0)
+                            .range(0..=MAX_WORLD_CAMERA_HEIGHT),
+                    )
+                    .on_hover_text("Camera origin height above the player root.")
+                    .changed();
+            });
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Target Height").color(STUDIO_TEXT_WEAK));
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut camera.target_height)
+                            .speed(64.0)
+                            .range(0..=MAX_WORLD_CAMERA_HEIGHT),
+                    )
+                    .on_hover_text("Look-at focus height above the player root.")
+                    .changed();
+            });
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Floor Clearance").color(STUDIO_TEXT_WEAK));
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut camera.min_floor_clearance)
+                            .speed(16.0)
+                            .range(0..=MAX_WORLD_CAMERA_MIN_FLOOR_CLEARANCE),
+                    )
+                    .on_hover_text("Minimum camera origin height above the sampled floor.")
+                    .changed();
+            });
+            ui.separator();
+            ui.weak("Movement speed");
+            changed |= draw_camera_speed_control(
+                ui,
+                "Camera",
+                &mut camera.position_lag_shift,
+                "How quickly the camera origin follows its desired position.",
+            );
+            changed |= draw_camera_speed_control(
+                ui,
+                "Focus",
+                &mut camera.focus_lag_shift,
+                "How quickly the look-at point follows the player.",
+            );
+            changed |= draw_camera_speed_control(
+                ui,
+                "Boom Return",
+                &mut camera.distance_lag_shift,
+                "How quickly the camera returns to full distance after collision pulls it in.",
+            );
+            if ui.button("Reset").clicked() {
+                *camera = WorldCameraSettings::default();
+                changed = true;
+            }
+            if changed {
+                *camera = camera.normalized();
+            }
+        });
+    changed
+}
+
+fn draw_camera_speed_control(
+    ui: &mut egui::Ui,
+    label: &'static str,
+    lag_shift: &mut u8,
+    hover: &'static str,
+) -> bool {
+    const MAX_SPEED_LEVEL: u8 = psxed_project::MAX_WORLD_CAMERA_LAG_SHIFT + 1;
+    let mut speed = camera_speed_level_for_lag_shift(*lag_shift);
+    let response = ui.horizontal(|ui| {
+        ui.label(RichText::new(label).color(STUDIO_TEXT_WEAK));
+        ui.add(
+            egui::DragValue::new(&mut speed)
+                .speed(0.1)
+                .range(1..=MAX_SPEED_LEVEL),
+        )
+        .on_hover_text(hover)
+        .changed()
+    });
+    if response.inner {
+        *lag_shift = camera_lag_shift_for_speed_level(speed);
+    }
+    response.inner
+}
+
+fn camera_speed_level_for_lag_shift(lag_shift: u8) -> u8 {
+    const MAX_SPEED_LEVEL: u8 = psxed_project::MAX_WORLD_CAMERA_LAG_SHIFT + 1;
+    MAX_SPEED_LEVEL - lag_shift.min(psxed_project::MAX_WORLD_CAMERA_LAG_SHIFT)
+}
+
+fn camera_lag_shift_for_speed_level(speed: u8) -> u8 {
+    const MAX_SPEED_LEVEL: u8 = psxed_project::MAX_WORLD_CAMERA_LAG_SHIFT + 1;
+    MAX_SPEED_LEVEL - speed.clamp(1, MAX_SPEED_LEVEL)
+}
+
+pub(crate) fn draw_gameplay_camera_start_preview(ui: &mut egui::Ui, camera: WorldCameraSettings) {
+    let width = ui.available_width().min(360.0).max(1.0);
+    let height = 150.0;
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, height), egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 6.0, STUDIO_PANEL_HEADER);
+    painter.rect_stroke(
+        rect,
+        6.0,
+        egui::Stroke::new(1.0, Color32::from_rgb(44, 55, 70)),
+        egui::StrokeKind::Inside,
+    );
+
+    let left = rect.left() + 24.0;
+    let right = rect.right() - 28.0;
+    let top = rect.top() + 22.0;
+    let floor_y = rect.bottom() - 26.0;
+    let player_x = right;
+    let effective_camera_height = camera.height.max(camera.min_floor_clearance);
+    let max_vertical = camera
+        .height
+        .max(effective_camera_height)
+        .max(camera.target_height)
+        .max(camera.min_floor_clearance)
+        .max(512) as f32;
+    let x_scale = (player_x - left) / camera.distance.max(1) as f32;
+    let y_scale = (floor_y - top) / max_vertical;
+    let camera_x = player_x - camera.distance as f32 * x_scale;
+    let desired_camera_y = floor_y - camera.height as f32 * y_scale;
+    let camera_y = floor_y - effective_camera_height as f32 * y_scale;
+    let target_y = floor_y - camera.target_height as f32 * y_scale;
+    let clearance_y = floor_y - camera.min_floor_clearance as f32 * y_scale;
+
+    let floor_a = egui::pos2(rect.left() + 12.0, floor_y);
+    let floor_b = egui::pos2(rect.right() - 12.0, floor_y);
+    let player_root = egui::pos2(player_x, floor_y);
+    let target = egui::pos2(player_x, target_y);
+    let camera_eye = egui::pos2(camera_x, camera_y);
+    let desired_camera_eye = egui::pos2(camera_x, desired_camera_y);
+    let clearance_a = egui::pos2(rect.left() + 12.0, clearance_y);
+    let clearance_b = egui::pos2(rect.right() - 12.0, clearance_y);
+    if camera.min_floor_clearance > 0 {
+        painter.rect_filled(
+            egui::Rect::from_min_max(clearance_a, floor_b),
+            0.0,
+            Color32::from_rgba_unmultiplied(230, 160, 90, 18),
+        );
+        painter.line_segment(
+            [clearance_a, clearance_b],
+            egui::Stroke::new(1.0, Color32::from_rgb(190, 130, 80)),
+        );
+        painter.text(
+            clearance_b + Vec2::new(-4.0, -3.0),
+            egui::Align2::RIGHT_BOTTOM,
+            "floor clearance",
+            egui::TextStyle::Small.resolve(ui.style()),
+            Color32::from_rgb(210, 160, 100),
+        );
+    }
+    painter.line_segment(
+        [floor_a, floor_b],
+        egui::Stroke::new(1.0, Color32::from_rgb(64, 75, 88)),
+    );
+    painter.line_segment(
+        [player_root, target],
+        egui::Stroke::new(2.0, Color32::from_rgb(94, 126, 160)),
+    );
+    painter.line_segment(
+        [camera_eye, target],
+        egui::Stroke::new(1.5, Color32::from_rgb(164, 190, 226)),
+    );
+    if effective_camera_height != camera.height {
+        painter.circle_stroke(
+            desired_camera_eye,
+            4.0,
+            egui::Stroke::new(1.0, Color32::from_rgb(155, 120, 80)),
+        );
+        painter.line_segment(
+            [desired_camera_eye, camera_eye],
+            egui::Stroke::new(1.0, Color32::from_rgb(190, 130, 80)),
+        );
+    }
+    painter.circle_filled(target, 4.0, Color32::from_rgb(120, 170, 230));
+    painter.circle_filled(camera_eye, 5.0, Color32::from_rgb(230, 190, 120));
+    painter.circle_filled(player_root, 5.0, Color32::from_rgb(180, 220, 170));
+    painter.text(
+        camera_eye + Vec2::new(0.0, -12.0),
+        egui::Align2::CENTER_BOTTOM,
+        "Camera",
+        egui::TextStyle::Small.resolve(ui.style()),
+        STUDIO_TEXT,
+    );
+    painter.text(
+        target + Vec2::new(7.0, 0.0),
+        egui::Align2::LEFT_CENTER,
+        "Look target",
+        egui::TextStyle::Small.resolve(ui.style()),
+        STUDIO_TEXT_WEAK,
+    );
+    painter.text(
+        player_root + Vec2::new(0.0, 12.0),
+        egui::Align2::CENTER_TOP,
+        "Player root",
+        egui::TextStyle::Small.resolve(ui.style()),
+        STUDIO_TEXT_WEAK,
+    );
+    painter.text(
+        rect.left_top() + Vec2::new(10.0, 8.0),
+        egui::Align2::LEFT_TOP,
+        format!(
+            "side view: {}u back, {}u high{}",
+            camera.distance,
+            effective_camera_height,
+            if effective_camera_height != camera.height {
+                " (clearance clamped)"
+            } else {
+                ""
+            }
+        ),
+        egui::TextStyle::Small.resolve(ui.style()),
+        STUDIO_TEXT_WEAK,
+    );
 }
 
 pub(crate) fn room_grid_transform_editor(
@@ -2089,6 +2284,15 @@ pub(crate) fn draw_node_kind_editor(
                 .small(),
             );
             changed |= draw_character_controller_settings(ui, settings);
+        }
+        NodeKind::Camera { settings } => {
+            ui.weak("Component: third-person gameplay camera for the player Entity. The Entity transform supplies the start position and yaw.");
+            changed |= draw_gameplay_camera_settings(ui, settings);
+            egui::CollapsingHeader::new(icons::label(icons::EYE, "Starting Position Preview"))
+                .default_open(true)
+                .show(ui, |ui| {
+                    draw_gameplay_camera_start_preview(ui, settings.normalized());
+                });
         }
         NodeKind::Equipment {
             weapon,
