@@ -22,6 +22,11 @@ pub(super) fn build_room_materials(
     for material in slice {
         let slot = material.local_slot.to_usize();
         if slot >= MAX_ROOM_MATERIALS {
+            // The room references more distinct materials than the per-room table
+            // holds: this slot, and every surface that uses it, is dropped. Count
+            // it so the drop is visible instead of silent. This was the root cause
+            // of the demo10 invisible frieze/stairs (slots >= the old cap of 8).
+            telemetry::counter(telemetry::counter::ROOM_MATERIAL_SLOT_OVERFLOW, 1);
             continue;
         }
         if slot + 1 > max_slot {

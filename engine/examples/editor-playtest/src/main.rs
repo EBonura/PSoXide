@@ -33,6 +33,14 @@
 
 extern crate psx_rt;
 
+#[cfg(all(target_arch = "mips", feature = "boot-trace"))]
+fn game_trace(message: &str) {
+    psx_rt::tty::println(message);
+}
+
+#[cfg(not(all(target_arch = "mips", feature = "boot-trace")))]
+fn game_trace(_message: &str) {}
+
 use psx_asset::{Animation, Model, ModelPart, ModelVertex, Texture};
 #[cfg(feature = "vis-full-active-chunks")]
 use psx_engine::draw_indexed_cached_room_vertex_lit_all_cells;
@@ -872,6 +880,7 @@ fn main() -> ! {
     // corrupting `static` buffers at runtime.
     #[cfg(target_arch = "mips")]
     psx_rt::assert_stack_headroom();
+    game_trace("editor-playtest: init ok");
     let video_mode = VideoMode::Ntsc;
     let config = Config {
         clear_color: (5, 7, 12),

@@ -1851,11 +1851,7 @@ mod tests {
     /// floor/ceiling triangle, and reconstruct its world `(x, y, z)`
     /// corners exactly as the runtime renderer does
     /// (`triangle_heights_to_quad` + `horizontal_vertices`).
-    fn runtime_survivor_world(
-        bytes: &[u8],
-        is_ceiling: bool,
-        s: i32,
-    ) -> Vec<(i32, i32, i32)> {
+    fn runtime_survivor_world(bytes: &[u8], is_ceiling: bool, s: i32) -> Vec<(i32, i32, i32)> {
         let parsed = psx_asset::World::from_bytes(bytes).expect("psxw parses");
         let sector = parsed.sector(0, 0).expect("sector 0,0 present");
         let (split, quad_heights) = if is_ceiling {
@@ -1917,11 +1913,7 @@ mod tests {
     /// single-sided (`Front`) material the ceiling pass reverses to
     /// `(a, c, b)` (`reverse_front ^ (sidedness == Back)`). The
     /// quad-corner -> world point is `horizontal_vertices`.
-    fn runtime_survivor_emit_order(
-        bytes: &[u8],
-        is_ceiling: bool,
-        s: i32,
-    ) -> [(i32, i32, i32); 3] {
+    fn runtime_survivor_emit_order(bytes: &[u8], is_ceiling: bool, s: i32) -> [(i32, i32, i32); 3] {
         let parsed = psx_asset::World::from_bytes(bytes).expect("psxw parses");
         let sector = parsed.sector(0, 0).expect("sector 0,0 present");
         let (split, quad_heights) = if is_ceiling {
@@ -2071,8 +2063,7 @@ mod tests {
                             let editor_emit =
                                 editor_survivor_emit_order(&face, dropped, is_ceiling, s)
                                     .expect("editor survivor exists");
-                            let runtime_emit =
-                                runtime_survivor_emit_order(&bytes, is_ceiling, s);
+                            let runtime_emit = runtime_survivor_emit_order(&bytes, is_ceiling, s);
                             let editor_sign = signed_area_xz(&editor_emit).signum();
                             let runtime_sign = signed_area_xz(&runtime_emit).signum();
                             if editor_sign != runtime_sign {
