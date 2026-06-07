@@ -358,6 +358,8 @@ pub struct PlaytestCamera {
     pub target_height: i32,
     /// Minimum camera origin height above the sampled floor.
     pub min_floor_clearance: i32,
+    /// Manual orbit input speed level. Higher values turn faster.
+    pub orbit_speed_level: u8,
     /// Camera origin follow lag shift. Lower values move faster.
     pub position_lag_shift: u8,
     /// Camera focus follow lag shift. Lower values move faster.
