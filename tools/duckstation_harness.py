@@ -123,10 +123,10 @@ def build_command(args: argparse.Namespace, duckstation: Path, cue: Path) -> lis
     command = [
         str(duckstation),
         "-batch",
-        "-fastboot",
         "-nofullscreen",
         "-earlyconsole",
     ]
+    command.append("-slowboot" if args.bios_boot else "-fastboot")
     if not args.gui:
         command.append("-nogui")
     command.extend(["--", str(cue)])
@@ -274,6 +274,11 @@ def parse_args() -> argparse.Namespace:
         "--gui",
         action="store_true",
         help="Show DuckStation's main window instead of using -nogui.",
+    )
+    parser.add_argument(
+        "--bios-boot",
+        action="store_true",
+        help="Use DuckStation -slowboot instead of -fastboot so the BIOS/logo path is tested.",
     )
     return parser.parse_args()
 
