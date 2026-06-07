@@ -313,6 +313,8 @@ pub mod character_action_flags {
 /// Per-action playback speed Q8 unit (`256 = 1.0x`), matching
 /// [`LevelCharacterRecord::action_speeds`].
 pub const CHARACTER_ACTION_SPEED_UNSCALED_Q8: u16 = 256;
+/// Sentinel meaning an action plays through the selected clip's last frame.
+pub const CHARACTER_ACTION_FRAME_END_FULL: u16 = u16::MAX;
 
 typed_index! {
     /// Clip index local to one model's clip slice.
@@ -2258,6 +2260,24 @@ impl CharacterAnimationAction {
     }
 }
 
+/// Inclusive playback window for one action clip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CharacterActionFrameRange {
+    /// First sampled frame to play.
+    pub start: u16,
+    /// Last sampled frame to play, inclusive. [`CHARACTER_ACTION_FRAME_END_FULL`]
+    /// means "the selected clip's final frame".
+    pub end: u16,
+}
+
+impl CharacterActionFrameRange {
+    /// Full-clip default.
+    pub const FULL: Self = Self {
+        start: 0,
+        end: CHARACTER_ACTION_FRAME_END_FULL,
+    };
+}
+
 /// Gameplay character -- backing model + role-clip mapping +
 /// capsule / camera / controller defaults. Layered on top of
 /// a [`LevelModelRecord`]; the player spawn references one of
@@ -2279,6 +2299,9 @@ pub struct LevelCharacterRecord {
     /// matching [`Self::action_clips`]. Scales how fast the action's
     /// clip advances; [`CHARACTER_ACTION_SPEED_UNSCALED_Q8`] is 1.0x.
     pub action_speeds: [u16; CHARACTER_ANIMATION_ACTION_COUNT],
+    /// Inclusive playback frame window per action. [`CharacterActionFrameRange::FULL`]
+    /// means the selected clip's full sampled frame range.
+    pub action_frame_ranges: [CharacterActionFrameRange; CHARACTER_ANIMATION_ACTION_COUNT],
     /// Render-only model offset from the controller root, in
     /// entity-local engine units.
     pub visual_offset: [i16; 3],

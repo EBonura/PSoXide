@@ -523,6 +523,8 @@ fn component_player_without_profile_uses_model_renderer_and_animator() {
                 looping: true,
                 in_place: false,
                 speed_q8: crate::ACTION_SPEED_UNSCALED_Q8,
+                frame_start: 3,
+                frame_end: 9,
             }),
         });
     }
@@ -548,6 +550,10 @@ fn component_player_without_profile_uses_model_renderer_and_animator() {
     assert_eq!(
         character.action_flags[CharacterAnimationAction::Backstep.to_index()],
         character_action_flags::LOOPING | character_action_flags::IN_PLACE_OVERRIDE
+    );
+    assert_eq!(
+        character.action_frame_ranges[CharacterAnimationAction::Backstep.to_index()],
+        psx_level::CharacterActionFrameRange { start: 3, end: 9 }
     );
 }
 
