@@ -933,7 +933,6 @@ impl ApplicationHandler for Shell {
                 if let Some(request) = editor_camera_preview {
                     let editor_preview_fog = state.editor.preview_fog_enabled();
                     let editor_hidden_scene_nodes = state.editor.hidden_scene_nodes();
-                    let editor_active_floor = state.editor.active_floor();
                     let editor_root = state.editor.project_root();
                     gfx.render_editor_camera_preview(
                         state.editor.project(),
@@ -941,7 +940,6 @@ impl ApplicationHandler for Shell {
                         request,
                         editor_preview_fog,
                         editor_hidden_scene_nodes,
-                        editor_active_floor,
                     );
                 }
 

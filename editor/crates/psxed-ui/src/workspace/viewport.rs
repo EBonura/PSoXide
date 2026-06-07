@@ -16,8 +16,24 @@ impl EditorWorkspace {
             return None;
         }
 
+        let room = self.active_room_id();
+        let floor = psxed_project::floor_view::node_floor(scene, host_id);
         let settings = settings.normalized();
-        let player = host.transform.translation.map(round_to_i32);
+        let player = room
+            .and_then(|room_id| {
+                let NodeKind::Room { grid } = &scene.node(room_id)?.kind else {
+                    return None;
+                };
+                let floor_grid = grid.floor(floor)?;
+                let mut origin = psxed_project::spatial::floor_anchored_node_preview_origin(
+                    floor_grid,
+                    &host.transform,
+                );
+                origin[1] = origin[1]
+                    .saturating_add(psxed_project::floor_view::floor_offset(grid, floor, floor));
+                Some(origin)
+            })
+            .unwrap_or_else(|| host.transform.translation.map(round_to_i32));
         let target = [
             player[0],
             player[1].saturating_add(settings.target_height),
@@ -36,7 +52,8 @@ impl EditorWorkspace {
                 target,
                 position: target,
             },
-            active_room: self.active_room_id(),
+            active_room: room,
+            active_floor: floor,
         })
     }
 
