@@ -1035,6 +1035,11 @@ impl EditorWorkspace {
                 _ => None,
             })
             .collect();
+        let texture_sizes: HashMap<ResourceId, (u16, u16)> = self
+            .texture_thumbs
+            .iter()
+            .map(|(id, entry)| (*id, (entry.stats.width, entry.stats.height)))
+            .collect();
         // Scene + option pick-lists are gathered before the mutable
         // node borrow below so the Button/Slider editors can offer
         // dropdowns without re-borrowing `self.project`.
@@ -1164,6 +1169,38 @@ impl EditorWorkspace {
             } => {
                 changed |= draw_ui_rect_editor(ui, rect);
                 changed |= ui_texture_resource_picker(ui, "Texture", texture, &texture_options);
+                let native_size = texture.and_then(|id| texture_sizes.get(&id).copied());
+                ui.horizontal(|ui| {
+                    let response = ui.add_enabled(
+                        native_size.is_some(),
+                        egui::Button::new("1:1 texels").small(),
+                    );
+                    let response = response.on_hover_text(
+                        "Resize this Image node to the selected texture's native PS1 texel size.",
+                    );
+                    if response.clicked() {
+                        if let Some((width, height)) = native_size {
+                            if rect.width != width || rect.height != height {
+                                rect.width = width;
+                                rect.height = height;
+                                changed = true;
+                            }
+                        }
+                    }
+                    if let Some((width, height)) = native_size {
+                        ui.label(
+                            RichText::new(format!("{width}x{height} texture"))
+                                .color(STUDIO_TEXT_WEAK)
+                                .small(),
+                        );
+                    } else {
+                        ui.label(
+                            RichText::new("No decoded texture size")
+                                .color(STUDIO_TEXT_WEAK)
+                                .small(),
+                        );
+                    }
+                });
                 changed |= color_editor(ui, "Tint", tint);
                 changed |= draw_ui_image_effect_picker(ui, effect);
                 ui.horizontal(|ui| {
