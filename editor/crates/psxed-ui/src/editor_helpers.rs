@@ -802,6 +802,7 @@ pub(crate) fn entity_bound_kind_and_size(
         | NodeKind::Animator { .. }
         | NodeKind::Collider { .. }
         | NodeKind::CharacterController { .. }
+        | NodeKind::Camera { .. }
         | NodeKind::Equipment { .. }
         | NodeKind::PhysicsBody { .. }
         | NodeKind::Interactable { .. } => None,

@@ -377,6 +377,15 @@ impl EditorWorkspace {
                 player,
             },
         );
+        if player {
+            scene.add_node(
+                entity,
+                "Camera",
+                NodeKind::Camera {
+                    settings: WorldCameraSettings::default(),
+                },
+            );
+        }
         entity
     }
 

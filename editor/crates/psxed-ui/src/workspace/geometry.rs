@@ -721,8 +721,19 @@ impl EditorWorkspace {
     }
 
     pub(crate) fn add_child(&mut self, mut kind: NodeKind, name: &str) {
-        self.push_undo();
         let parent = self.selection.selected_node;
+        if kind.is_component() {
+            let scene = self.project.active_scene();
+            let Some(host) = scene.node(parent) else {
+                self.status = format!("Cannot add {name}: no selected host node");
+                return;
+            };
+            if !component_can_be_added_to_host(&host.kind, &kind, scene, parent) {
+                self.status = format!("Cannot add {name} to {}", host.name);
+                return;
+            }
+        }
+        self.push_undo();
         let first_material = self.first_material();
         if let NodeKind::Room { grid } = &mut kind {
             *grid = starter_room_grid(
