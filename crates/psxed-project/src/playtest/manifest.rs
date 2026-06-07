@@ -10,18 +10,21 @@ const STREAMED_ROOM_SLOT_BYTES: usize = 32 * 1024;
 pub fn write_package(package: &PlaytestPackage, generated_dir: &Path) -> std::io::Result<()> {
     let rooms_dir = generated_dir.join(ROOMS_DIRNAME);
     let stream_chunks_dir = generated_dir.join(STREAM_CHUNKS_DIRNAME);
+    let ui_stream_chunks_dir = generated_dir.join(UI_STREAM_CHUNKS_DIRNAME);
     let textures_dir = generated_dir.join(TEXTURES_DIRNAME);
     let models_dir = generated_dir.join(MODELS_DIRNAME);
     let ui_sfx_dir = generated_dir.join(UI_SFX_DIRNAME);
     let cdda_tracks_dir = generated_dir.join(CDDA_TRACKS_DIRNAME);
     std::fs::create_dir_all(&rooms_dir)?;
     std::fs::create_dir_all(&stream_chunks_dir)?;
+    std::fs::create_dir_all(&ui_stream_chunks_dir)?;
     std::fs::create_dir_all(&textures_dir)?;
     std::fs::create_dir_all(&models_dir)?;
     std::fs::create_dir_all(&ui_sfx_dir)?;
     std::fs::create_dir_all(&cdda_tracks_dir)?;
     purge_directory_files(&rooms_dir, "psxw")?;
     purge_directory_files(&stream_chunks_dir, "psxc")?;
+    purge_directory_files(&ui_stream_chunks_dir, "psxt")?;
     purge_directory_files(&textures_dir, "psxt")?;
     purge_directory_files(&ui_sfx_dir, "psau")?;
     purge_directory_files(&cdda_tracks_dir, "cdda")?;
@@ -53,6 +56,19 @@ pub fn write_package(package: &PlaytestPackage, generated_dir: &Path) -> std::io
     for sample in &package.ui_sfx_samples {
         std::fs::write(ui_sfx_dir.join(&sample.filename), &sample.bytes)?;
     }
+    // Streamed Texture payloads (UI images) are written into the UI
+    // stream-chunks dir as raw texture bytes (no chunk header), keyed
+    // by asset index, for the ISO packer to assemble into UI.PAK. The
+    // same bytes also land in `textures/` above so the non-streaming
+    // (`include_bytes!`) build still resolves them.
+    for (index, asset) in package.assets.iter().enumerate() {
+        if asset.is_streamed() {
+            std::fs::write(
+                ui_stream_chunks_dir.join(format!("ui_{index:03}.psxt")),
+                &asset.bytes,
+            )?;
+        }
+    }
     for room_index in 0..package.rooms.len().min(u16::MAX as usize + 1) {
         let payload = streamed_room_chunk_payload(package, room_index as u16)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
@@ -67,6 +83,10 @@ pub fn write_package(package: &PlaytestPackage, generated_dir: &Path) -> std::io
     std::fs::write(
         generated_dir.join(WORLD_PACK_ORDER_FILENAME),
         render_world_pack_order(package),
+    )?;
+    std::fs::write(
+        generated_dir.join(UI_PACK_ORDER_FILENAME),
+        render_ui_pack_order(package),
     )?;
     std::fs::write(
         generated_dir.join(CDDA_TRACKS_FILENAME),
@@ -105,6 +125,18 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         .map(|entry| entry.byte_size as usize)
         .max()
         .unwrap_or(0);
+    // UI.PAK immediately follows WORLD.PAK in the ISO file order, so its
+    // start LBA is the WORLD.PAK start LBA plus the WORLD.PAK total sectors.
+    let world_pack_total_sectors = world_pack_layout(package).total_sectors;
+    let ui_pack_start_lba = psx_iso::WORLD_PACK_DEFAULT_START_LBA + world_pack_total_sectors;
+    let ui_pack_toc = ui_pack_toc(package);
+    // Staging-buffer sizing is per streamed class so each runtime buffer
+    // stays right-sized: UI images load through a small per-image buffer,
+    // gameplay-scoped textures (the sky) through a larger transient one.
+    // Both classes share UI.PAK / UI_PACK_TOC; only the staging differs.
+    let ui_pack_max_chunk_bytes = streamed_class_max_chunk_bytes(package, StreamedClass::UiImage);
+    let gameplay_pack_max_chunk_bytes =
+        streamed_class_max_chunk_bytes(package, StreamedClass::Gameplay);
     let resident_chunk_limit = package
         .rooms
         .iter()
@@ -173,7 +205,11 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             asset_static_name(asset, i),
             asset.source_label,
         );
-        if asset.kind == PlaytestAssetKind::RoomWorld {
+        // Room worlds always stream off WORLD.PAK; streamed Texture
+        // assets (UI images) stream off UI.PAK. Both emit empty baked
+        // bytes under `cd-stream-bench` and the normal word-aligned
+        // `include_bytes!` static when the feature is off.
+        if asset.kind == PlaytestAssetKind::RoomWorld || asset.is_streamed() {
             let _ = writeln!(out, "#[cfg(feature = \"cd-stream-bench\")]");
             let _ = writeln!(
                 out,
@@ -329,7 +365,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         let sky_cyclorama_quads = &sky_cyclorama_refs[room_index];
         let _ = writeln!(
             out,
-            "    LevelRoomRecord {{ name: {:?}, world_asset: AssetId({}), origin_x: {}, origin_z: {}, origin_y: {}, sector_size: {}, draw_distance: {}, chunk_activation_radius_sectors: {}, visibility_radius: {}, resident_chunk_limit: {}, visible_chunk_limit: {}, gravity_per_tick: {}, material_first: MaterialIndex({}), material_count: {}, portal_first: {}, portal_count: {}, near_room_first: {}, near_room_count: {}, overlapped_room_first: {}, overlapped_room_count: {}, fog_rgb: [{}, {}, {}], fog_near: {}, fog_far: {}, atmosphere_rgb: [{}, {}, {}], atmosphere_density: {}, atmosphere_fall_speed_q4: {}, atmosphere_wind_speed_q4: {}, sky: LevelSkyRecord {{ top_rgb: [{}, {}, {}], horizon_rgb: [{}, {}, {}], bottom_rgb: [{}, {}, {}], horizon_percent: {}, horizon_thickness_percent: {}, skybox_columns: {}, skybox_rows: {}, flags: {}, cyclorama_quads: {}, cloud_layer: LevelCloudLayerRecord {{ texture_asset: AssetId({}), color_rgb: [{}, {}, {}], density: {}, altitude: {}, extent: {}, tile_count: {}, scroll_speed: [{}, {}], noise_seed: 0x{:08x}, flags: {} }} }}, far_vista: LevelFarVistaRecord {{ texture_assets: {}, radius: {}, height: {}, vertical_offset: {}, segments: {}, rotation_degrees: {}, tint_rgb: [{}, {}, {}], flags: {} }}, camera: LevelCameraRecord {{ distance: {}, height: {}, target_height: {}, min_floor_clearance: {} }}, flags: {} }},",
+            "    LevelRoomRecord {{ name: {:?}, world_asset: AssetId({}), origin_x: {}, origin_z: {}, origin_y: {}, sector_size: {}, draw_distance: {}, chunk_activation_radius_sectors: {}, visibility_radius: {}, resident_chunk_limit: {}, visible_chunk_limit: {}, gravity_per_tick: {}, material_first: MaterialIndex({}), material_count: {}, portal_first: {}, portal_count: {}, near_room_first: {}, near_room_count: {}, overlapped_room_first: {}, overlapped_room_count: {}, fog_rgb: [{}, {}, {}], fog_near: {}, fog_far: {}, atmosphere_rgb: [{}, {}, {}], atmosphere_density: {}, atmosphere_fall_speed_q4: {}, atmosphere_wind_speed_q4: {}, sky: LevelSkyRecord {{ top_rgb: [{}, {}, {}], horizon_rgb: [{}, {}, {}], bottom_rgb: [{}, {}, {}], horizon_percent: {}, horizon_thickness_percent: {}, skybox_columns: {}, skybox_rows: {}, flags: {}, cyclorama_quads: {}, cloud_layer: LevelCloudLayerRecord {{ texture_asset: AssetId({}), color_rgb: [{}, {}, {}], density: {}, altitude: {}, extent: {}, tile_count: {}, scroll_speed: [{}, {}], noise_seed: 0x{:08x}, flags: {} }} }}, far_vista: LevelFarVistaRecord {{ texture_assets: {}, radius: {}, height: {}, vertical_offset: {}, segments: {}, rotation_degrees: {}, tint_rgb: [{}, {}, {}], flags: {} }}, camera: LevelCameraRecord {{ distance: {}, height: {}, target_height: {}, min_floor_clearance: {}, orbit_speed_level: {}, position_lag_shift: {}, focus_lag_shift: {}, distance_lag_shift: {} }}, flags: {} }},",
             room.name,
             room.world_asset_index,
             room.origin_x,
@@ -406,6 +442,10 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             room.camera.height,
             room.camera.target_height,
             room.camera.min_floor_clearance,
+            room.camera.orbit_speed_level,
+            room.camera.position_lag_shift,
+            room.camera.focus_lag_shift,
+            room.camera.distance_lag_shift,
             room.flags,
         );
     }
@@ -489,6 +529,52 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     );
     out.push_str("pub static WORLD_PACK_TOC: &[LevelWorldPackEntryRecord] = &[\n");
     for entry in &world_pack_toc {
+        let _ = writeln!(
+            out,
+            "    LevelWorldPackEntryRecord {{ room: RoomIndex({}), sector_offset: {}, sector_count: {}, byte_size: {}, checksum: {} }},",
+            entry.chunk_id,
+            entry.sector_offset,
+            entry.sector_count,
+            entry.byte_size,
+            entry.checksum,
+        );
+    }
+    out.push_str("];\n\n");
+
+    out.push_str(
+        "/// Absolute disc LBA where UI.PAK starts in the playtest ISO layout.\n\
+         /// UI.PAK is packed immediately after WORLD.PAK by the ISO builder.\n",
+    );
+    let _ = writeln!(
+        out,
+        "pub const UI_PACK_START_LBA: u32 = {ui_pack_start_lba};"
+    );
+    out.push('\n');
+
+    out.push_str("/// Largest streamed UI image chunk in bytes (UI image staging buffer size).\n");
+    let _ = writeln!(
+        out,
+        "pub const UI_PACK_MAX_CHUNK_BYTES: usize = {ui_pack_max_chunk_bytes};",
+    );
+    out.push('\n');
+
+    out.push_str(
+        "/// Largest streamed gameplay-scoped chunk in bytes (e.g. the sky panorama).\n\
+         /// Sizes the transient gameplay staging buffer, kept separate from the UI\n\
+         /// image buffer so the small per-image buffer stays small.\n",
+    );
+    let _ = writeln!(
+        out,
+        "pub const GAMEPLAY_PACK_MAX_CHUNK_BYTES: usize = {gameplay_pack_max_chunk_bytes};",
+    );
+    out.push('\n');
+
+    out.push_str(
+        "/// Cooked UI.PAK image table generated from the same layout as the ISO packer.\n\
+         /// Each entry's `room` field carries the streamed asset index as its chunk id.\n",
+    );
+    out.push_str("pub static UI_PACK_TOC: &[LevelWorldPackEntryRecord] = &[\n");
+    for entry in &ui_pack_toc {
         let _ = writeln!(
             out,
             "    LevelWorldPackEntryRecord {{ room: RoomIndex({}), sector_offset: {}, sector_count: {}, byte_size: {}, checksum: {} }},",
@@ -860,9 +946,10 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         };
         let _ = writeln!(
             out,
-            "    LevelModelInstanceRecord {{ room: RoomIndex({}), model: ModelIndex({}), clip: {clip}, x: {}, y: {}, z: {}, yaw: {}, visual_yaw: {}, visual_offset: [{}, {}, {}], visual_scale_q8: {}, flags: {} }},",
+            "    LevelModelInstanceRecord {{ room: RoomIndex({}), model: ModelIndex({}), clip: {clip}, pose_frame: {}, x: {}, y: {}, z: {}, yaw: {}, visual_yaw: {}, visual_offset: [{}, {}, {}], visual_scale_q8: {}, flags: {} }},",
             inst.room,
             inst.model,
+            inst.pose_frame,
             inst.x,
             inst.y,
             inst.z,
@@ -922,11 +1009,12 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         let baked_vertex_rgb = render_box_prop_baked_vertex_rgb(&prop.baked_vertex_rgb);
         let _ = writeln!(
             out,
-            "    LevelBoxPropRecord {{ room: RoomIndex({}), texture_assets: {texture_assets}, x: {}, y: {}, z: {}, pitch: {}, yaw: {}, roll: {}, vertices: {vertices}, tint_rgb: {tint_rgb}, baked_vertex_rgb: {baked_vertex_rgb}, flags: {} }},",
+            "    LevelBoxPropRecord {{ room: RoomIndex({}), texture_assets: {texture_assets}, x: {}, y: {}, z: {}, ground_y: {}, pitch: {}, yaw: {}, roll: {}, vertices: {vertices}, tint_rgb: {tint_rgb}, baked_vertex_rgb: {baked_vertex_rgb}, flags: {} }},",
             prop.room,
             prop.x,
             prop.y,
             prop.z,
+            prop.ground_y,
             prop.pitch,
             prop.yaw,
             prop.roll,
@@ -1265,12 +1353,43 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             .map(u8::to_string)
             .collect::<Vec<_>>()
             .join(", ");
+        let action_speeds = character
+            .action_speeds
+            .iter()
+            .map(u16::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let action_frame_ranges = character
+            .action_frame_ranges
+            .iter()
+            .map(|range| {
+                format!(
+                    "CharacterActionFrameRange {{ start: {}, end: {} }}",
+                    range.start, range.end
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let action_pushes = character
+            .action_pushes
+            .iter()
+            .map(|push| {
+                format!(
+                    "CharacterActionPush {{ distance: {}, frame_range: CharacterActionFrameRange {{ start: {}, end: {} }} }}",
+                    push.distance, push.frame_range.start, push.frame_range.end
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
         let _ = writeln!(
             out,
-            "    LevelCharacterRecord {{ model: ModelIndex({}), action_clips: [{}], action_flags: [{}], visual_offset: [{}, {}, {}], visual_yaw: {}, visual_scale_q8: {}, weight_q8: {}, radius: {}, height: {}, walk_speed: {}, run_speed: {}, turn_speed_degrees_per_second: {}, stamina_max_q12: {}, sprint_min_q12: {}, sprint_drain_q12: {}, stamina_recover_q12: {}, roll_cost_q12: {}, roll_speed: {}, roll_active_frames: {}, roll_recovery_frames: {}, roll_invulnerable_frames: {}, backstep_cost_q12: {}, backstep_speed: {}, backstep_active_frames: {}, backstep_recovery_frames: {}, backstep_invulnerable_frames: {}, camera_distance: {}, camera_height: {}, camera_target_height: {}, flags: 0 }},",
+            "    LevelCharacterRecord {{ model: ModelIndex({}), action_clips: [{}], action_flags: [{}], action_speeds: [{}], action_frame_ranges: [{}], action_pushes: [{}], visual_offset: [{}, {}, {}], visual_yaw: {}, visual_scale_q8: {}, weight_q8: {}, radius: {}, height: {}, walk_speed: {}, run_speed: {}, turn_speed_degrees_per_second: {}, stamina_max_q12: {}, sprint_min_q12: {}, sprint_drain_q12: {}, stamina_recover_q12: {}, roll_cost_q12: {}, roll_speed: {}, roll_active_frames: {}, roll_recovery_frames: {}, roll_invulnerable_frames: {}, backstep_cost_q12: {}, backstep_speed: {}, backstep_active_frames: {}, backstep_recovery_frames: {}, backstep_invulnerable_frames: {}, camera_distance: {}, camera_height: {}, camera_target_height: {}, flags: 0 }},",
             character.model,
             action_clips,
             action_flags,
+            action_speeds,
+            action_frame_ranges,
+            action_pushes,
             character.visual_offset[0],
             character.visual_offset[1],
             character.visual_offset[2],
@@ -1356,12 +1475,14 @@ fn write_cdda_tracks(package: &PlaytestPackage, cdda_tracks_dir: &Path) -> std::
     for track in &package.cdda_tracks {
         let source = Path::new(&track.wav_path);
         let bytes = std::fs::read(source)?;
-        let cooked = psxed_audio::cook_cdda_track_from_wav(&bytes).map_err(|e| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("cook CD-DA track {}: {e}", source.display()),
-            )
-        })?;
+        let cooked =
+            psxed_audio::cook_cdda_track_from_wav_at_speed(&bytes, track.playback_speed_q12)
+                .map_err(|e| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("cook CD-DA track {}: {e}", source.display()),
+                    )
+                })?;
         let filename = format!("track{:02}.cdda", track.track);
         let target = cdda_tracks_dir.join(filename);
         std::fs::write(&target, cooked)?;
@@ -1371,18 +1492,79 @@ fn write_cdda_tracks(package: &PlaytestPackage, cdda_tracks_dir: &Path) -> std::
     Ok(out)
 }
 
-fn world_pack_toc(package: &PlaytestPackage) -> Vec<psx_iso::WorldPackBuildEntry> {
+fn world_pack_chunks(package: &PlaytestPackage) -> Vec<(u32, Vec<u8>)> {
     let mut chunks: Vec<(u32, Vec<u8>)> = Vec::new();
     for room in world_pack_order(package) {
         let payload =
             streamed_room_chunk_payload(package, room).expect("valid streamed room chunk payload");
         chunks.push((room as u32, payload));
     }
+    chunks
+}
+
+fn world_pack_toc(package: &PlaytestPackage) -> Vec<psx_iso::WorldPackBuildEntry> {
+    world_pack_layout(package).entries
+}
+
+fn world_pack_layout(package: &PlaytestPackage) -> psx_iso::WorldPackLayout {
+    let chunks = world_pack_chunks(package);
     let refs = chunks
         .iter()
         .map(|(room, bytes)| (*room, bytes.as_slice()))
         .collect::<Vec<_>>();
+    psx_iso::build_world_pack_layout(&refs)
+}
+
+/// Streamed assets in pack order, paired with their asset index (used
+/// as the UI.PAK chunk id). Mirrors `world_pack_order`'s pairing but for
+/// every CD-streamed Texture asset. Both streamed classes (UI images and
+/// gameplay-scoped textures like the sky) share UI.PAK, keyed by asset
+/// index, so the disc packer stays unchanged; only the runtime staging
+/// buffer differs per class.
+fn ui_pack_chunks(package: &PlaytestPackage) -> Vec<(u32, &[u8])> {
+    package
+        .assets
+        .iter()
+        .enumerate()
+        .filter(|(_, asset)| asset.is_streamed())
+        .map(|(index, asset)| (index as u32, asset.bytes.as_slice()))
+        .collect()
+}
+
+/// Largest payload in bytes across the streamed assets of one class.
+/// Drives the runtime staging-buffer size for that class. Returns `0`
+/// when no asset of the class is streamed.
+fn streamed_class_max_chunk_bytes(package: &PlaytestPackage, class: StreamedClass) -> usize {
+    package
+        .assets
+        .iter()
+        .filter(|asset| asset.streamed_class == class)
+        .map(|asset| asset.bytes.len())
+        .max()
+        .unwrap_or(0)
+}
+
+fn ui_pack_toc(package: &PlaytestPackage) -> Vec<psx_iso::WorldPackBuildEntry> {
+    let refs = ui_pack_chunks(package);
     psx_iso::build_world_pack_layout(&refs).entries
+}
+
+fn ui_pack_order(package: &PlaytestPackage) -> Vec<u32> {
+    ui_pack_chunks(package)
+        .iter()
+        .map(|(index, _)| *index)
+        .collect()
+}
+
+fn render_ui_pack_order(package: &PlaytestPackage) -> String {
+    let mut out = String::from(
+        "# PSoXide UI.PAK image order\n\
+         # One streamed UI asset index per line. Generated by cook-playtest.\n",
+    );
+    for index in ui_pack_order(package) {
+        let _ = writeln!(out, "{index}");
+    }
+    out
 }
 
 fn streamed_room_chunk_filename(room: u16) -> String {
@@ -2836,819 +3018,8 @@ fn purge_generated_tree(path: &Path) -> std::io::Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn room_texture_vram_bytes_match_runtime_compact_tile_upload() {
-        let bytes = std::fs::read(
-            crate::default_project_dir().join("assets/textures/delven_01_slateflr1a_q2.psxt"),
-        )
-        .expect("starter Delven texture exists");
-        let asset = PlaytestAsset {
-            kind: PlaytestAssetKind::Texture,
-            bytes,
-            filename: "texture_000.psxt".to_string(),
-            source_label: "Delven slateflr1a q2".to_string(),
-        };
-
-        assert_eq!(asset_vram_bytes(&asset), 8 * 32 * 2 + 16 * 2);
-    }
-
-    #[test]
-    fn model_atlas_vram_bytes_match_runtime_atlas_upload() {
-        let bytes = std::fs::read(
-            crate::default_project_dir()
-                .join("assets/models/obsidian_wraith/obsidian_wraith_128x128_8bpp.psxt"),
-        )
-        .expect("starter wraith atlas exists");
-        let asset = PlaytestAsset {
-            kind: PlaytestAssetKind::Texture,
-            bytes,
-            filename: "models/model_000_obsidian_wraith/atlas.psxt".to_string(),
-            source_label: "Obsidian Wraith atlas".to_string(),
-        };
-
-        assert_eq!(asset_vram_bytes(&asset), 64 * 128 * 2 + 256 * 2);
-    }
-
-    #[test]
-    fn write_cdda_tracks_cooks_sector_aligned_payloads_and_lists_paths() {
-        let dir = std::env::temp_dir().join(format!(
-            "psxed-project-test-{}-{}",
-            std::process::id(),
-            "cdda-tracks"
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-
-        let source = dir.join("menu music.wav");
-        std::fs::write(&source, test_wav_mono_44k(&[0, 1200, -1200, 0])).unwrap();
-        let cdda_dir = dir.join(CDDA_TRACKS_DIRNAME);
-        std::fs::create_dir_all(&cdda_dir).unwrap();
-
-        let mut package = PlaytestPackage::default();
-        package.cdda_tracks.push(PlaytestCddaTrack {
-            track: 2,
-            wav_path: source.to_string_lossy().into_owned(),
-        });
-
-        let list = write_cdda_tracks(&package, &cdda_dir).unwrap();
-        let target = cdda_dir.join("track02.cdda");
-        let cooked_len = std::fs::metadata(&target).unwrap().len();
-        assert!(list.contains(&target.canonicalize().unwrap().display().to_string()));
-        assert_eq!(cooked_len % psx_iso::SECTOR_BYTES as u64, 0);
-        assert!(cooked_len > 0);
-
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn world_pack_order_starts_at_spawn_and_walks_chunk_neighbours() {
-        let chunks = [
-            test_chunk(0, 0, 0, 0, [None, Some(1), Some(2), None]),
-            test_chunk(1, 0, 1, 0, [None, None, Some(3), Some(0)]),
-            test_chunk(2, 0, 0, 1, [Some(0), Some(3), None, None]),
-            test_chunk(3, 0, 1, 1, [Some(1), None, None, Some(2)]),
-        ];
-
-        assert_eq!(
-            world_pack_order_from_chunks(4, Some(2), &chunks),
-            vec![2, 0, 3, 1]
-        );
-    }
-
-    #[test]
-    fn world_pack_order_appends_disconnected_chunks_by_proximity() {
-        let chunks = [
-            test_chunk(0, 10, 0, 0, [None; 4]),
-            test_chunk(1, 11, 50, 0, [None; 4]),
-            test_chunk(2, 12, 5, 0, [None; 4]),
-        ];
-
-        assert_eq!(
-            world_pack_order_from_chunks(3, Some(0), &chunks),
-            vec![0, 2, 1]
-        );
-    }
-
-    #[test]
-    fn world_pack_toc_uses_same_layout_as_pack_builder() {
-        let mut package = PlaytestPackage::default();
-        package.assets = vec![
-            test_room_asset(static_lit_test_room_bytes(), 0),
-            test_room_asset(static_lit_test_room_bytes(), 1),
-            test_room_asset(static_lit_test_room_bytes(), 2),
-        ];
-        package.rooms = vec![test_room(0), test_room(1), test_room(2)];
-        package.chunks = vec![
-            test_chunk(0, 0, 0, 0, [None, Some(1), Some(2), None]),
-            test_chunk(1, 0, 1, 0, [None, None, None, Some(0)]),
-            test_chunk(2, 0, 0, 1, [Some(0), None, None, None]),
-        ];
-        package.spawn = Some(PlaytestSpawn {
-            room: 2,
-            x: 0,
-            y: 0,
-            z: 0,
-            yaw: 0,
-            flags: 1,
-        });
-
-        let order = world_pack_order(&package);
-        assert_eq!(order, vec![2, 0, 1]);
-        let refs = order
-            .iter()
-            .map(|room| {
-                (
-                    *room as u32,
-                    streamed_room_chunk_payload(&package, *room).unwrap(),
-                )
-            })
-            .collect::<Vec<_>>();
-        let refs = refs
-            .iter()
-            .map(|(room, bytes)| (*room, bytes.as_slice()))
-            .collect::<Vec<_>>();
-        assert_eq!(
-            world_pack_toc(&package),
-            psx_iso::build_world_pack_layout(&refs).entries
-        );
-
-        let manifest = render_manifest_source(&package);
-        assert!(manifest.contains("pub const WORLD_RESIDENT_CHUNK_LIMIT: usize = 10;"));
-        assert!(manifest.contains("pub const WORLD_PACK_START_LBA: u32 = 54;"));
-        assert!(manifest.contains("pub static WORLD_PACK_TOC: &[LevelWorldPackEntryRecord]"));
-        assert!(manifest.contains("LevelWorldPackEntryRecord { room: RoomIndex(2), sector_offset: 1, sector_count: 1, byte_size: 148"));
-    }
-
-    #[test]
-    fn empty_package_emits_gameplay_only_flow_and_no_scenes() {
-        let package = PlaytestPackage::default();
-        let src = render_manifest_source(&package);
-        assert!(src.contains(
-            "pub static UI_FONTS: &[&psx_font::BitmapFont] = &[\n    &psx_font::fonts::BASIC,\n];"
-        ));
-        assert!(src.contains("pub static UI_SCENES: &[LevelUiScene] = &[\n];"));
-        assert!(src.contains(
-            "LevelSceneState { id: 0, name: \"Gameplay\", world: LevelWorldLayer::Gameplay, ui_scene: 65535, flags: 0 },"
-        ));
-        assert!(src.contains(
-            "pub static GAME_FLOW: GameFlow = GameFlow {\n    states: &[\n        FlowState::SceneState { state: 0 },\n    ],\n    scene_states: SCENE_STATES,\n    entry: 0,\n};"
-        ));
-    }
-
-    #[test]
-    fn ui_scene_table_and_flow_emit_addressable_scenes() {
-        let mut package = PlaytestPackage::default();
-        package.ui_nodes = vec![PlaytestUiNode {
-            parent: None,
-            kind: UiNodeKind::Canvas {
-                width: 320,
-                height: 240,
-            },
-            x: 0,
-            y: 0,
-            width: 320,
-            height: 240,
-            color: [0, 0, 0],
-            background: [0, 0, 0],
-            accent: [0, 0, 0],
-            color_paint: None,
-            background_paint: None,
-            accent_paint: None,
-            value: UiValueBinding::ConstantQ12(0),
-            max: UiValueBinding::ConstantQ12(0),
-            texture_asset: None,
-            image_effect: UiImageEffect::None,
-            text: String::new(),
-            tag: String::new(),
-            action: PlaytestUiAction::default(),
-            option: psx_level::UI_OPTION_NONE,
-            rotation_degrees: 0,
-            flags: 0,
-            sfx_first: psx_level::UI_SFX_NONE,
-            sfx_count: 0,
-            font: 0,
-            font_scale: crate::default_ui_font_scale(),
-            letter_spacing: crate::default_ui_letter_spacing(),
-        }];
-        package.ui_scenes = vec![PlaytestUiScene {
-            id: 7,
-            name: "Pause".to_string(),
-            node_first: 0,
-            node_count: 1,
-        }];
-        package.game_flow = PlaytestGameFlow {
-            states: vec![
-                PlaytestFlowState::SceneState { state: 1 },
-                PlaytestFlowState::SceneState { state: 0 },
-            ],
-            scene_states: vec![
-                PlaytestSceneState::gameplay(),
-                PlaytestSceneState {
-                    id: 1,
-                    name: "Pause".to_string(),
-                    world: PlaytestWorldLayer::None,
-                    ui_scene: 7,
-                    flags: psx_level::scene_state_flags::UI_INPUT,
-                },
-            ],
-            entry: 0,
-        };
-
-        let src = render_manifest_source(&package);
-        assert!(
-            src.contains("LevelUiScene { id: 7, name: \"Pause\", node_first: 0, node_count: 1 },")
-        );
-        assert!(src.contains("LevelSceneState { id: 1, name: \"Pause\", world: LevelWorldLayer::None, ui_scene: 7, flags: 1 },"));
-        assert!(src.contains("FlowState::SceneState { state: 1 },"));
-        assert!(src.contains("FlowState::SceneState { state: 0 },"));
-        assert!(src.contains("entry: 0,"));
-    }
-
-    #[test]
-    fn button_and_slider_nodes_render_action_accent_and_option_fields() {
-        let mut package = PlaytestPackage::default();
-        package.ui_nodes = vec![
-            PlaytestUiNode {
-                parent: None,
-                kind: UiNodeKind::Button {
-                    rect: crate::UiRect::new(0, 0, 80, 18),
-                    label: "Play".to_string(),
-                    align: UiTextAlign::Center,
-                    font: crate::UiFontChoice::Basic8x16,
-                    font_scale: crate::default_ui_font_scale(),
-                    letter_spacing: crate::default_ui_letter_spacing(),
-                    color: [50, 60, 70],
-                    background_gradient: None,
-                    text_color: [236, 240, 248],
-                    text_gradient: None,
-                    transparent: false,
-                    action: UiAction::Back,
-                    sfx: crate::UiSfxBindings::default(),
-                },
-                x: 0,
-                y: 0,
-                width: 80,
-                height: 18,
-                color: [50, 60, 70],
-                background: [0, 0, 0],
-                accent: [0, 0, 0],
-                color_paint: None,
-                background_paint: None,
-                accent_paint: None,
-                value: UiValueBinding::ConstantQ12(0),
-                max: UiValueBinding::ConstantQ12(0),
-                texture_asset: None,
-                image_effect: UiImageEffect::None,
-                text: "Play".to_string(),
-                tag: String::new(),
-                action: PlaytestUiAction::GotoScene { scene: 7 },
-                option: psx_level::UI_OPTION_NONE,
-                rotation_degrees: 0,
-                flags: 0,
-                sfx_first: psx_level::UI_SFX_NONE,
-                sfx_count: 0,
-                font: 1,
-                font_scale: crate::UI_FONT_SCALE_ONE_Q8 * 2,
-                letter_spacing: 3,
-            },
-            PlaytestUiNode {
-                parent: None,
-                kind: UiNodeKind::Slider {
-                    rect: crate::UiRect::new(0, 0, 96, 8),
-                    option: crate::OptionId(3),
-                    track: [11, 12, 13],
-                    track_gradient: None,
-                    fill: [21, 22, 23],
-                    fill_gradient: None,
-                    knob: [31, 32, 33],
-                    knob_gradient: None,
-                    sfx: crate::UiSfxBindings::default(),
-                },
-                x: 0,
-                y: 0,
-                width: 96,
-                height: 8,
-                color: [11, 12, 13],
-                background: [21, 22, 23],
-                accent: [31, 32, 33],
-                color_paint: None,
-                background_paint: None,
-                accent_paint: None,
-                value: UiValueBinding::ConstantQ12(0),
-                max: UiValueBinding::ConstantQ12(0),
-                texture_asset: None,
-                image_effect: UiImageEffect::None,
-                text: String::new(),
-                tag: String::new(),
-                action: PlaytestUiAction::default(),
-                option: 3,
-                rotation_degrees: 0,
-                flags: 0,
-                sfx_first: psx_level::UI_SFX_NONE,
-                sfx_count: 0,
-                font: 0,
-                font_scale: crate::default_ui_font_scale(),
-                letter_spacing: crate::default_ui_letter_spacing(),
-            },
-        ];
-
-        let src = render_manifest_source(&package);
-        assert!(src.contains("    &psx_font::fonts::BASIC_8X16,\n"));
-        assert!(!src.contains("    &psx_font::fonts::BASIC,\n"));
-        assert!(src.contains("kind: LevelUiNodeKind::Button"));
-        assert!(src.contains("action: LevelUiAction::GotoScene { scene: 7 }"));
-        assert!(src.contains("font: 0"));
-        assert!(src.contains("font_scale: 512"));
-        assert!(src.contains("letter_spacing: 3"));
-        assert!(src.contains("kind: LevelUiNodeKind::Slider"));
-        assert!(src.contains("accent: [31, 32, 33]"));
-        assert!(src.contains("option: 3"));
-    }
-
-    #[test]
-    fn ui_gradient_paints_emit_table_and_node_refs() {
-        let mut package = PlaytestPackage::default();
-        package.ui_paints = vec![PlaytestUiPaint {
-            from: [20, 30, 40],
-            to: [80, 90, 100],
-            direction: UiGradientDirection::Horizontal,
-        }];
-        package.ui_nodes = vec![PlaytestUiNode {
-            parent: None,
-            kind: UiNodeKind::Rect {
-                rect: crate::UiRect::new(0, 0, 80, 18),
-                color: [20, 30, 40],
-                gradient: Some(crate::UiGradient::new(
-                    [80, 90, 100],
-                    UiGradientDirection::Horizontal,
-                )),
-            },
-            x: 0,
-            y: 0,
-            width: 80,
-            height: 18,
-            color: [20, 30, 40],
-            background: [0, 0, 0],
-            accent: [0, 0, 0],
-            color_paint: Some(0),
-            background_paint: None,
-            accent_paint: None,
-            value: UiValueBinding::ConstantQ12(0),
-            max: UiValueBinding::ConstantQ12(0),
-            texture_asset: None,
-            image_effect: UiImageEffect::None,
-            text: String::new(),
-            tag: String::new(),
-            action: PlaytestUiAction::default(),
-            option: psx_level::UI_OPTION_NONE,
-            rotation_degrees: 0,
-            flags: 0,
-            sfx_first: psx_level::UI_SFX_NONE,
-            sfx_count: 0,
-            font: 0,
-            font_scale: crate::default_ui_font_scale(),
-            letter_spacing: crate::default_ui_letter_spacing(),
-        }];
-
-        let src = render_manifest_source(&package);
-        assert!(src.contains("pub static UI_PAINTS: &[LevelUiPaintRecord]"));
-        assert!(src.contains(
-            "LevelUiPaintRecord { from: [20, 30, 40], to: [80, 90, 100], direction: LevelUiGradientDirection::Horizontal }"
-        ));
-        assert!(src.contains("color_paint: 0"));
-        assert!(src.contains("background_paint: psx_level::UI_PAINT_NONE"));
-    }
-
-    #[test]
-    fn cd_stream_manifest_does_not_embed_room_bytes_or_global_cache_tables() {
-        let mut package = PlaytestPackage::default();
-        package.runtime_depth_sort_mode = crate::RuntimeDepthSortMode::PerTriangle;
-        package.runtime_texture_split_mode = crate::RuntimeTextureSplitMode::DepthSorted;
-        package.runtime_room_draw_order_mode = crate::RuntimeRoomDrawOrderMode::Portal;
-        package.runtime_texture_split_max_edge = 96;
-        package.assets = vec![test_room_asset(static_lit_test_room_bytes(), 0)];
-        package.rooms = vec![test_room(0)];
-        package.room_surface_caches = vec![PlaytestRoomSurfaceCache {
-            room: 0,
-            cell_first: 0,
-            cell_count: 0,
-            cell_vertex_first: 0,
-            cell_vertex_count: 0,
-            vertex_first: 0,
-            vertex_count: 0,
-            surface_first: 0,
-            surface_count: 0,
-        }];
-
-        let src = render_manifest_source(&package);
-        assert!(src.contains("pub const CACHED_ROOM_DEPTH_MODE: u8 = 3;"));
-        assert!(src.contains("pub const CACHED_ROOM_TEXTURE_SPLIT_MODE: u8 = 1;"));
-        assert!(src.contains("pub const CACHED_ROOM_DRAW_ORDER_MODE: u8 = 1;"));
-        assert!(src.contains("pub const CACHED_ROOM_TEXTURE_SPLIT_MAX_EDGE: u16 = 96;"));
-        assert!(src.contains("#[cfg(feature = \"cd-stream-bench\")]\npub static ASSET_000_ROOM_000_BYTES: &[u8] = &[];"));
-        assert!(src.contains("#[cfg(not(feature = \"cd-stream-bench\"))]\npub static ASSET_000_ROOM_000_BYTES: &[u8] = {"));
-        assert!(src.contains("bytes: *include_bytes!(\"rooms/room_000.psxw\") };"));
-        assert!(src.contains("#[cfg(feature = \"cd-stream-bench\")]\n/// Stream builds read room-surface cache slices from `.psxc` chunks.\npub static ROOM_SURFACE_CACHES: &[LevelRoomSurfaceCacheRecord] = &[];"));
-        assert!(src.contains("#[cfg(feature = \"cd-stream-bench\")]\n/// Stream builds read cached room cells from `.psxc` chunks.\npub static ROOM_CACHE_CELLS: &[LevelCachedRoomCellRecord] = &[];"));
-        assert!(src.contains("#[cfg(feature = \"cd-stream-bench\")]\n/// Stream builds read cached cell vertex indices from `.psxc` chunks.\npub static ROOM_CACHE_CELL_VERTICES: &[u16] = &[];"));
-        assert!(src.contains("#[cfg(feature = \"cd-stream-bench\")]\n/// Stream builds read cached room vertices from `.psxc` chunks.\npub static ROOM_CACHE_VERTICES: &[LevelCachedRoomVertexRecord] = &[];"));
-        assert!(src.contains("#[cfg(feature = \"cd-stream-bench\")]\n/// Stream builds read cached room surfaces from `.psxc` chunks.\npub static ROOM_CACHE_SURFACES: &[LevelCachedRoomSurfaceRecord] = &[];"));
-    }
-
-    #[test]
-    fn streamed_room_chunk_payload_splits_collision_and_render_cache_records() {
-        let mut package = PlaytestPackage::default();
-        package.assets = vec![test_room_asset(static_lit_test_room_bytes(), 0)];
-        package.rooms = vec![test_room(0)];
-        package.room_surface_caches = vec![PlaytestRoomSurfaceCache {
-            room: 0,
-            cell_first: 0,
-            cell_count: 1,
-            cell_vertex_first: 0,
-            cell_vertex_count: 4,
-            vertex_first: 0,
-            vertex_count: 1,
-            surface_first: 0,
-            surface_count: 1,
-        }];
-        package.room_cache_cells = vec![PlaytestCachedRoomCell {
-            x: 2,
-            z: 3,
-            min_y: -4,
-            max_y: 5,
-            visibility_center: [6, 7, 8],
-            visibility_radius: 9,
-            surface_first: 10,
-            surface_count: 11,
-            vertex_first: 0,
-            vertex_count: 4,
-        }];
-        package.room_cache_cell_vertices = vec![0, 1, 2, 3];
-        package.room_cache_vertices = vec![PlaytestCachedRoomVertex {
-            x: 12,
-            y: 13,
-            z: 14,
-        }];
-        package.room_cache_surfaces = vec![PlaytestCachedRoomSurface {
-            material_slot: 15,
-            vertex_indices: [0, 1, 2, 3],
-            sample_sx: 16,
-            sample_sz: 17,
-            sample_ordinal: 18,
-            uv_words: [0x1413, 0x1615, 0x1817, 0x1a19],
-            baked_vertex_rgb: [(27, 28, 29), (30, 31, 32), (33, 34, 35), (36, 37, 38)],
-            kind_flags: 39,
-            wall_direction: 40,
-            split: 41,
-            triangle_index: 42,
-        }];
-
-        let payload = streamed_room_chunk_payload(&package, 0).unwrap();
-        assert_eq!(
-            &payload[..8],
-            psx_level::STREAMED_ROOM_CHUNK_MAGIC.as_slice()
-        );
-        assert_eq!(u32_at(&payload, 8), psx_level::STREAMED_ROOM_CHUNK_VERSION);
-        assert_eq!(u32_at(&payload, 12), 0);
-        assert_eq!(u32_at(&payload, 16), payload.len() as u32);
-        assert_eq!(u32_at(&payload, 20), 64);
-        assert_eq!(u32_at(&payload, 24), 84);
-        assert_eq!(u32_at(&payload, 28), 148);
-        assert_eq!(u32_at(&payload, 32), 1);
-        assert_eq!(u32_at(&payload, 36), 192);
-        assert_eq!(u32_at(&payload, 40), 1);
-        assert_eq!(u32_at(&payload, 44), 204);
-        assert_eq!(u32_at(&payload, 48), 1);
-        assert_eq!(u32_at(&payload, 52), 184);
-        assert_eq!(u32_at(&payload, 56), 4);
-        assert_eq!(
-            u32_at(&payload, 60),
-            psx_level::STREAMED_ROOM_CHUNK_FLAG_COLLISION_COMPACT
-        );
-        assert_eq!(
-            &payload[64..72],
-            psx_level::COMPACT_COLLISION_MAGIC.as_slice()
-        );
-        assert_eq!(u16_at(&payload, 148), 2);
-        assert_eq!(i32_at(&payload, 152), -4);
-        assert_eq!(u16_at(&payload, 180), 0);
-        assert_eq!(u16_at(&payload, 184), 0);
-        assert_eq!(u16_at(&payload, 190), 3);
-        assert_eq!(i32_at(&payload, 192), 12);
-        assert_eq!(u16_at(&payload, 204), 15);
-        assert_eq!(payload[243], 42);
-    }
-
-    #[test]
-    fn streamed_room_chunk_memory_report_accounts_for_collision_render_and_padding() {
-        let mut package = PlaytestPackage::default();
-        package.assets = vec![test_room_asset(static_lit_test_room_bytes(), 0)];
-        package.rooms = vec![test_room(0)];
-        package.room_surface_caches = vec![PlaytestRoomSurfaceCache {
-            room: 0,
-            cell_first: 0,
-            cell_count: 1,
-            cell_vertex_first: 0,
-            cell_vertex_count: 4,
-            vertex_first: 0,
-            vertex_count: 1,
-            surface_first: 0,
-            surface_count: 1,
-        }];
-        package.room_cache_cells = vec![PlaytestCachedRoomCell {
-            x: 2,
-            z: 3,
-            min_y: -4,
-            max_y: 5,
-            visibility_center: [6, 7, 8],
-            visibility_radius: 9,
-            surface_first: 10,
-            surface_count: 11,
-            vertex_first: 0,
-            vertex_count: 4,
-        }];
-        package.room_cache_cell_vertices = vec![0, 1, 2, 3];
-        package.room_cache_vertices = vec![PlaytestCachedRoomVertex {
-            x: 12,
-            y: 13,
-            z: 14,
-        }];
-        package.room_cache_surfaces = vec![PlaytestCachedRoomSurface {
-            material_slot: 15,
-            vertex_indices: [0, 1, 2, 3],
-            sample_sx: 16,
-            sample_sz: 17,
-            sample_ordinal: 18,
-            uv_words: [0x1413, 0x1615, 0x1817, 0x1a19],
-            baked_vertex_rgb: [(27, 28, 29), (30, 31, 32), (33, 34, 35), (36, 37, 38)],
-            kind_flags: 39,
-            wall_direction: 40,
-            split: 41,
-            triangle_index: 42,
-        }];
-
-        let report = streamed_room_chunk_memory_report(&package).unwrap();
-        assert_eq!(report.chunks.len(), 1);
-        let chunk = report.chunks[0];
-        assert_eq!(chunk.room, 0);
-        assert_eq!(
-            chunk.payload_bytes,
-            streamed_room_chunk_payload(&package, 0).unwrap().len()
-        );
-        assert_eq!(chunk.collision_bytes, 84);
-        assert_eq!(chunk.render_cell_bytes, 36);
-        assert_eq!(chunk.render_cell_vertex_bytes, 8);
-        assert_eq!(chunk.render_vertex_bytes, 12);
-        assert_eq!(chunk.render_surface_bytes, 40);
-        assert_eq!(chunk.render_cache_bytes, 96);
-        assert_eq!(chunk.alignment_padding_bytes, 0);
-        assert_eq!(chunk.sector_count, 1);
-        assert_eq!(chunk.stream_bytes, psx_iso::SECTOR_USER_DATA_BYTES);
-        assert_eq!(
-            chunk.sector_padding_bytes,
-            psx_iso::SECTOR_USER_DATA_BYTES - chunk.payload_bytes
-        );
-        assert_eq!(
-            report.totals,
-            PlaytestStreamMemoryTotals {
-                sector_count: chunk.sector_count,
-                payload_bytes: chunk.payload_bytes,
-                stream_bytes: chunk.stream_bytes,
-                header_bytes: chunk.header_bytes,
-                collision_bytes: chunk.collision_bytes,
-                render_cell_bytes: chunk.render_cell_bytes,
-                render_cell_vertex_bytes: chunk.render_cell_vertex_bytes,
-                render_vertex_bytes: chunk.render_vertex_bytes,
-                render_surface_bytes: chunk.render_surface_bytes,
-                render_cache_bytes: chunk.render_cache_bytes,
-                alignment_padding_bytes: chunk.alignment_padding_bytes,
-                sector_padding_bytes: chunk.sector_padding_bytes,
-            }
-        );
-    }
-
-    #[test]
-    fn compact_collision_payload_matches_runtime_room_collision() {
-        let bytes = static_lit_test_room_bytes();
-        let payload = compact_collision_payload(&bytes, 0, &[]).unwrap();
-        assert_eq!(
-            payload.len(),
-            psx_level::COMPACT_COLLISION_HEADER_BYTES + psx_level::COMPACT_COLLISION_SECTOR_BYTES
-        );
-        assert_eq!(&payload[..8], psx_level::COMPACT_COLLISION_MAGIC.as_slice());
-        assert_eq!(
-            u32_at(&payload, psx_level::compact_collision_header::VERSION),
-            psx_level::COMPACT_COLLISION_VERSION
-        );
-        assert_eq!(
-            u16_at(&payload, psx_level::compact_collision_header::WIDTH),
-            1
-        );
-        assert_eq!(
-            u16_at(&payload, psx_level::compact_collision_header::DEPTH),
-            1
-        );
-        assert_eq!(
-            i32_at(&payload, psx_level::compact_collision_header::SECTOR_SIZE),
-            1024
-        );
-        assert_eq!(
-            u16_at(&payload, psx_level::compact_collision_header::SECTOR_COUNT),
-            1
-        );
-        assert_eq!(
-            &payload[psx_level::compact_collision_header::AMBIENT_RGB
-                ..psx_level::compact_collision_header::AMBIENT_RGB + 3],
-            &[7, 8, 9]
-        );
-        let room = psx_engine::CompactCollisionRoom::from_bytes(&payload).unwrap();
-        assert_eq!(room.width(), 1);
-        assert_eq!(room.depth(), 1);
-        assert_eq!(room.ambient_color(), [7, 8, 9]);
-        let sector = room.collision().sector(0, 0).unwrap();
-        assert!(sector.has_floor());
-        assert!(sector.floor_walkable());
-        assert_eq!(sector.floor_heights(), [0; 4]);
-    }
-
-    #[test]
-    fn compact_collision_payload_preserves_floor_links() {
-        let bytes = static_lit_test_room_bytes();
-        let floor_links = [PlaytestRoomFloorLink {
-            room: 0,
-            x: 0,
-            z: 0,
-            above_room: Some(2),
-            below_room: Some(3),
-        }];
-        let payload = compact_collision_payload(&bytes, 0, &floor_links).unwrap();
-        let room = psx_engine::CompactCollisionRoom::from_bytes(&payload).unwrap();
-        let sector = room.collision().sector(0, 0).unwrap();
-        assert_eq!(
-            sector.floor_above_room(),
-            Some(psx_level::RoomIndex::new(2))
-        );
-        assert_eq!(
-            sector.floor_below_room(),
-            Some(psx_level::RoomIndex::new(3))
-        );
-    }
-
-    fn test_room_asset(bytes: Vec<u8>, index: usize) -> PlaytestAsset {
-        PlaytestAsset {
-            kind: PlaytestAssetKind::RoomWorld,
-            bytes,
-            filename: format!("room_{index:03}.psxw"),
-            source_label: format!("Room {index}"),
-        }
-    }
-
-    fn test_room(world_asset_index: usize) -> PlaytestRoom {
-        PlaytestRoom {
-            name: format!("Room {world_asset_index}"),
-            world_asset_index,
-            origin_x: 0,
-            origin_z: 0,
-            origin_y: 0,
-            sector_size: 1024,
-            draw_distance: 25_000,
-            chunk_activation_radius_sectors: 64,
-            visibility_radius: 32,
-            resident_chunk_limit: 10,
-            visible_chunk_limit: 10,
-            gravity_per_tick: 96,
-            material_first: 0,
-            material_count: 0,
-            portal_first: 0,
-            portal_count: 0,
-            near_room_first: 0,
-            near_room_count: 0,
-            overlapped_room_first: 0,
-            overlapped_room_count: 0,
-            fog_rgb: [0, 0, 0],
-            fog_near: 0,
-            fog_far: 0,
-            atmosphere_rgb: [0, 0, 0],
-            atmosphere_density: 0,
-            atmosphere_fall_speed_q4: 0,
-            atmosphere_wind_speed_q4: 0,
-            sky: PlaytestSky {
-                top_rgb: [0, 0, 0],
-                horizon_rgb: [0, 0, 0],
-                bottom_rgb: [0, 0, 0],
-                horizon_percent: 50,
-                horizon_thickness_percent: 8,
-                skybox_columns: 16,
-                skybox_rows: 10,
-                flags: 0,
-                cyclorama_quads: Vec::new(),
-                cloud_layer: PlaytestCloudLayer {
-                    texture_asset_index: None,
-                    color_rgb: [0, 0, 0],
-                    density: 0,
-                    altitude: 0,
-                    extent: 0,
-                    tile_count: 0,
-                    scroll_speed: [0, 0],
-                    noise_seed: 0,
-                    flags: 0,
-                },
-            },
-            far_vista: PlaytestFarVista {
-                texture_asset_indices: Vec::new(),
-                radius: 0,
-                height: 0,
-                vertical_offset: 0,
-                segments: 0,
-                rotation_degrees: 0,
-                tint_rgb: [0, 0, 0],
-                flags: 0,
-            },
-            camera: PlaytestCamera {
-                distance: 0,
-                height: 0,
-                target_height: 0,
-                min_floor_clearance: 0,
-            },
-            flags: 0,
-        }
-    }
-
-    fn static_lit_test_room_bytes() -> Vec<u8> {
-        let asset_header = psxed_format::AssetHeader::SIZE;
-        let world_header = psxed_format::world::WorldHeader::SIZE;
-        let sector_bytes = psxed_format::world::SectorRecord::SIZE;
-        let light_bytes = 2 * psxed_format::world::SurfaceLightRecord::SIZE;
-        let payload_len = world_header + sector_bytes + light_bytes;
-        let mut out = vec![0u8; asset_header + payload_len];
-        out[0..4].copy_from_slice(&psxed_format::world::MAGIC);
-        out[4..6].copy_from_slice(&psxed_format::world::VERSION.to_le_bytes());
-        out[8..12].copy_from_slice(&(payload_len as u32).to_le_bytes());
-
-        let wh = asset_header;
-        out[wh..wh + 2].copy_from_slice(&1u16.to_le_bytes());
-        out[wh + 2..wh + 4].copy_from_slice(&1u16.to_le_bytes());
-        out[wh + 4..wh + 8].copy_from_slice(&1024i32.to_le_bytes());
-        out[wh + 8..wh + 10].copy_from_slice(&1u16.to_le_bytes());
-        out[wh + 14..wh + 17].copy_from_slice(&[7, 8, 9]);
-        out[wh + 17] = psxed_format::world::world_flags::STATIC_VERTEX_LIGHTING;
-        out[wh + 18..wh + 20].copy_from_slice(&2u16.to_le_bytes());
-
-        let sector = wh + world_header;
-        out[sector] = psxed_format::world::sector_flags::HAS_FLOOR
-            | psxed_format::world::sector_flags::FLOOR_WALKABLE;
-        out
-    }
-
-    fn test_chunk(
-        room: u16,
-        authored_room: u32,
-        origin_x: i32,
-        origin_z: i32,
-        neighbours: [Option<u16>; 4],
-    ) -> PlaytestChunk {
-        PlaytestChunk {
-            room,
-            authored_room,
-            chunk_index: room,
-            origin_x,
-            origin_z,
-            width: 1,
-            depth: 1,
-            neighbours,
-            triangles: 0,
-            psxw_bytes: 0,
-            static_lit_bytes: 0,
-            populated_cells: 0,
-            flags: 0,
-        }
-    }
-
-    fn u16_at(bytes: &[u8], offset: usize) -> u16 {
-        u16::from_le_bytes([bytes[offset], bytes[offset + 1]])
-    }
-
-    fn u32_at(bytes: &[u8], offset: usize) -> u32 {
-        u32::from_le_bytes([
-            bytes[offset],
-            bytes[offset + 1],
-            bytes[offset + 2],
-            bytes[offset + 3],
-        ])
-    }
-
-    fn i32_at(bytes: &[u8], offset: usize) -> i32 {
-        i32::from_le_bytes([
-            bytes[offset],
-            bytes[offset + 1],
-            bytes[offset + 2],
-            bytes[offset + 3],
-        ])
-    }
-}
+#[cfg(test)]
+mod tests;
 
 #[cfg(test)]
 fn test_wav_mono_44k(samples: &[i16]) -> Vec<u8> {
@@ -3687,6 +3058,8 @@ use psx_level::{
     AssetId,
     AssetKind,
     CHARACTER_CLIP_NONE,
+    CharacterActionFrameRange,
+    CharacterActionPush,
     CharacterIndex,
     EntityKind,
     EntityRecord,
