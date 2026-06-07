@@ -35,9 +35,10 @@ impl Scene for Playtest {
 
     /// Gameplay and each UI scene use distinct resource-set keys so the flow
     /// driver fires `on_exit_state`/`on_enter_state` across menu-to-menu and
-    /// menu-to-gameplay boundaries. The UI font atlas is shared by all states;
-    /// streamed UI images are scoped to the active UI scene so a splash/logo
-    /// screen does not keep its texture resident beside every main-menu strip.
+    /// menu-to-gameplay boundaries. The UI font atlas and menu image RAM cache
+    /// are shared by all menu states; streamed UI image VRAM is scoped to the
+    /// active UI scene so a splash/logo screen does not keep its texture resident
+    /// beside every main-menu strip.
     fn state_resource_key(&self, state: SceneStateRef) -> u32 {
         if state.has_gameplay() {
             GAMEPLAY_RESOURCE_KEY
@@ -56,16 +57,17 @@ impl Scene for Playtest {
     /// the font VRAM tracked.
     fn on_enter_state(&mut self, state: SceneStateRef, _ctx: &mut Ctx) {
         acquire_shared_ui_fonts(&mut self.ui_fonts);
-        // Streamed UI images live only in menu states. Load the active UI
-        // scene's images off UI.PAK on menu entry; gameplay entry frees any
-        // previous menu images (see `on_exit_state`). The sky panorama is
+        // Streamed UI images live only in menu states. The first menu entry
+        // preloads all menu image bytes from UI.PAK into RAM, then this call
+        // uploads only the active UI scene's images to VRAM. Gameplay entry
+        // frees previous menu VRAM (see `on_exit_state`). The sky panorama is
         // gameplay-scoped, so it is the mirror image: loaded on gameplay entry
         // and freed on gameplay exit.
         #[cfg(feature = "cd-stream-bench")]
         if state.has_gameplay() {
             load_streamed_sky_from_cd();
         } else {
-            load_ui_images_for_scene_from_cd(state.ui_scene);
+            load_ui_images_for_scene(state.ui_scene);
         }
         let _ = state;
     }
