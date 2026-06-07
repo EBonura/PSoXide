@@ -353,6 +353,7 @@ pub(crate) fn cook_player_character(
     visual_scale_q8: u16,
     action_overrides: &[crate::CharacterActionClip],
     controller_settings: Option<CharacterControllerSettings>,
+    camera_settings: Option<WorldCameraSettings>,
     weight_q8: u16,
     assets: &mut Vec<PlaytestAsset>,
     models: &mut Vec<PlaytestModel>,
@@ -395,6 +396,16 @@ pub(crate) fn cook_player_character(
     };
     let settings = controller_settings
         .unwrap_or_else(|| CharacterControllerSettings::from_character(character));
+    let camera = camera_settings.unwrap_or(WorldCameraSettings {
+        distance: character.camera_distance,
+        height: character.camera_height,
+        target_height: character.camera_target_height,
+        min_floor_clearance: crate::default_world_camera_min_floor_clearance(),
+        position_lag_shift: crate::default_world_camera_position_lag_shift(),
+        focus_lag_shift: crate::default_world_camera_focus_lag_shift(),
+        distance_lag_shift: crate::default_world_camera_distance_lag_shift(),
+    });
+    let camera = camera.normalized();
 
     let model_resource_id = match model_override.or(character.model) {
         Some(id) => id,
@@ -616,17 +627,15 @@ pub(crate) fn cook_player_character(
         ));
         return None;
     }
-    if character.camera_distance <= 0 {
+    if camera.distance <= 0 {
         report.error(format!(
-            "Character '{}' camera_distance must be > 0",
-            character_name
+            "Camera for '{character_name}' distance must be > 0"
         ));
         return None;
     }
-    if character.camera_height < 0 || character.camera_target_height < 0 {
+    if camera.height < 0 || camera.target_height < 0 {
         report.error(format!(
-            "Character '{}' camera offsets must be >= 0",
-            character_name
+            "Camera for '{character_name}' offsets must be >= 0"
         ));
         return None;
     }
@@ -680,9 +689,9 @@ pub(crate) fn cook_player_character(
         backstep_active_frames: settings.backstep_active_frames,
         backstep_recovery_frames: settings.backstep_recovery_frames,
         backstep_invulnerable_frames: settings.backstep_invulnerable_frames,
-        camera_distance: character.camera_distance,
-        camera_height: character.camera_height,
-        camera_target_height: character.camera_target_height,
+        camera_distance: camera.distance,
+        camera_height: camera.height,
+        camera_target_height: camera.target_height,
     });
     Some(character_index)
 }
@@ -1739,6 +1748,11 @@ pub(crate) struct CharacterControllerComponent {
 }
 
 #[derive(Clone, Copy)]
+pub(crate) struct CameraComponent {
+    pub(crate) settings: WorldCameraSettings,
+}
+
+#[derive(Clone, Copy)]
 pub(crate) struct PhysicsBodyComponent {
     pub(crate) settings: PhysicsBodySettings,
 }
@@ -1810,6 +1824,15 @@ pub(crate) fn component_character_controller(
             character: *character,
             settings: *settings,
             player: *player,
+        }),
+        _ => None,
+    })
+}
+
+pub(crate) fn component_camera(scene: &crate::Scene, host: &SceneNode) -> Option<CameraComponent> {
+    component_children(scene, host).find_map(|node| match &node.kind {
+        NodeKind::Camera { settings } => Some(CameraComponent {
+            settings: settings.normalized(),
         }),
         _ => None,
     })

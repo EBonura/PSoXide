@@ -57,9 +57,9 @@ use crate::{
     CharacterAnimationAction, CharacterControllerSettings, NodeId, NodeKind, OptionId, OptionKind,
     ParticleEmitterSettings, PhysicsBodySettings, ProjectDocument, PsxBlendMode, ResourceData,
     ResourceId, SceneNode, UiAction, UiAnchor, UiGradient, UiImageEffect, UiNodeId, UiNodeKind,
-    UiRect, UiSfxCue, UiTextAlign, UiValueBinding, WorldGrid, WorldStreamingSettings,
-    FAR_VISTA_TEXTURE_PANEL_COUNT, MAX_ROOM_BYTES, MAX_UI_LETTER_SPACING, MIN_UI_LETTER_SPACING,
-    PHYSICS_WEIGHT_ONE_Q8,
+    UiRect, UiSfxCue, UiTextAlign, UiValueBinding, WorldCameraSettings, WorldGrid,
+    WorldStreamingSettings, FAR_VISTA_TEXTURE_PANEL_COUNT, MAX_ROOM_BYTES, MAX_UI_LETTER_SPACING,
+    MIN_UI_LETTER_SPACING, PHYSICS_WEIGHT_ONE_Q8,
 };
 
 mod assets;
@@ -114,6 +114,7 @@ pub(crate) struct PlayerSpawnCandidate<'a> {
     position: [i32; 3],
     character: Option<ResourceId>,
     controller_settings: Option<CharacterControllerSettings>,
+    camera: Option<WorldCameraSettings>,
     weight_q8: u16,
     renderer: Option<ModelRendererComponent>,
     animator: Option<AnimatorComponent<'a>>,
@@ -621,6 +622,9 @@ pub fn build_package(
                         height: resolved_camera.height,
                         target_height: resolved_camera.target_height,
                         min_floor_clearance: resolved_camera.min_floor_clearance,
+                        position_lag_shift: resolved_camera.position_lag_shift,
+                        focus_lag_shift: resolved_camera.focus_lag_shift,
+                        distance_lag_shift: resolved_camera.distance_lag_shift,
                     },
                     flags: if chunk_grid.fog_enabled {
                         room_flags::FOG_ENABLED
@@ -786,6 +790,7 @@ pub fn build_package(
                             position: pos,
                             character: controller.character,
                             controller_settings: Some(controller.settings),
+                            camera: component_camera(scene, node).map(|camera| camera.settings),
                             weight_q8,
                             renderer: component_model_renderer(scene, node),
                             animator: component_animator(scene, node),
@@ -891,6 +896,7 @@ pub fn build_package(
                     position: pos,
                     character: *character,
                     controller_settings: None,
+                    camera: None,
                     weight_q8: PHYSICS_WEIGHT_ONE_Q8,
                     renderer: None,
                     animator: None,
@@ -1082,6 +1088,7 @@ pub fn build_package(
             | NodeKind::Animator { .. }
             | NodeKind::Collider { .. }
             | NodeKind::CharacterController { .. }
+            | NodeKind::Camera { .. }
             | NodeKind::Equipment { .. }
             | NodeKind::PhysicsBody { .. }
             | NodeKind::Interactable { .. } => {}
@@ -1116,6 +1123,22 @@ pub fn build_package(
             None
         }
     };
+    if let [candidate] = &player_spawns[..] {
+        if let Some(camera) = candidate.camera {
+            let camera = camera.normalized();
+            for room in &mut rooms {
+                room.camera = PlaytestCamera {
+                    distance: camera.distance,
+                    height: camera.height,
+                    target_height: camera.target_height,
+                    min_floor_clearance: camera.min_floor_clearance,
+                    position_lag_shift: camera.position_lag_shift,
+                    focus_lag_shift: camera.focus_lag_shift,
+                    distance_lag_shift: camera.distance_lag_shift,
+                };
+            }
+        }
+    }
 
     // Pass 4: resolve the player's Character, register its
     // model (deduped against MeshInstance-bound models above),
@@ -1205,6 +1228,7 @@ pub fn build_package(
                     .map(|animator| animator.action_clips)
                     .unwrap_or(&[]),
                 candidate.controller_settings,
+                candidate.camera,
                 candidate.weight_q8,
                 &mut assets,
                 &mut models,
