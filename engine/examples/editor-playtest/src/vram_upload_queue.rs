@@ -3,7 +3,11 @@ use super::vram_upload::{upload_clut, upload_opaque_clut};
 use super::*;
 use psx_vram::{upload_bytes, VramRect};
 
-const VRAM_UPLOAD_QUEUE_CAP: usize = 8;
+// Concurrent in-flight texture uploads. A room activation can request a burst
+// of texture uploads at once; anything that does not fit here is dropped to the
+// untextured fallback until the material pump re-queues it, so a slightly deeper
+// queue reduces those transient drops during heavy streaming.
+const VRAM_UPLOAD_QUEUE_CAP: usize = 12;
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub(crate) enum VramUploadKind {
     TextureAndClut,

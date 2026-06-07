@@ -282,7 +282,7 @@ pub(super) fn build_active_room(
         let _ = unsafe { RESIDENCY.ensure_room_resident(residency) };
     }
     let payload = parse_active_room_payload(slot, index, record)?;
-    let (materials, material_count) = build_runtime_room_material_table(record);
+    let (materials, material_count, _all_resolved) = build_runtime_room_material_table(record);
     let stream_slot = active_room_stream_slot(index);
     #[cfg(feature = "cd-stream-bench")]
     store_room_materials(stream_slot, materials, material_count);
@@ -341,40 +341,25 @@ pub(super) fn active_room_stream_slot(index: RoomIndex) -> u16 {
 
 pub(super) fn build_runtime_room_material_table(
     record: &LevelRoomRecord,
-) -> ([WorldRenderMaterial; MAX_ROOM_MATERIALS], usize) {
+) -> ([WorldRenderMaterial; MAX_ROOM_MATERIALS], usize, bool) {
     let mut resolved_materials = [const { None }; MAX_ROOM_MATERIALS];
-    let material_count = build_room_materials(record, &mut resolved_materials);
+    let (material_count, all_resolved) = build_room_materials(record, &mut resolved_materials);
     let mut materials = [room_material_fallback(); MAX_ROOM_MATERIALS];
     for i in 0..material_count {
         if let Some(material) = resolved_materials[i] {
             materials[i] = material;
         }
     }
-    (materials, material_count)
+    (materials, material_count, all_resolved)
 }
 
 #[cfg(feature = "cd-stream-bench")]
 pub(super) fn room_material_textures_ready(record: &LevelRoomRecord) -> bool {
     let mut resolved_materials = [const { None }; MAX_ROOM_MATERIALS];
-    let _ = build_room_materials(record, &mut resolved_materials);
-    let first = record.material_first.to_usize();
-    let count = record.material_count as usize;
-    let slice: &[LevelMaterialRecord] = &MATERIALS[first..first + count];
-    let mut ready = true;
-
-    for material in slice {
-        let slot = material.local_slot.to_usize();
-        if slot >= MAX_ROOM_MATERIALS {
-            continue;
-        }
-        if find_asset_of_kind(ASSETS, material.texture_asset, AssetKind::Texture).is_some()
-            && resolved_materials[slot].is_none()
-        {
-            ready = false;
-        }
-    }
-
-    ready
+    // `build_room_materials` reports whether every textured material resolved to a
+    // ready VRAM slot; that is exactly the readiness condition.
+    let (_, all_resolved) = build_room_materials(record, &mut resolved_materials);
+    all_resolved
 }
 
 pub(super) fn active_room_surface_cache_for(index: RoomIndex) -> ActiveRoomSurfaceCache {

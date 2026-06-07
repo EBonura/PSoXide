@@ -99,7 +99,14 @@ static mut VRAM_SLOT_COUNT: usize = 0;
 /// Find a free VRAM slot index, reusing holes left by eviction before growing
 /// into fresh entries. Returns `None` when the slot table is full.
 fn next_vram_slot() -> Option<usize> {
-    unsafe { (0..MAX_RESIDENT_VRAM_ASSETS).find(|&i| VRAM_SLOTS[i].is_none()) }
+    let slot = unsafe { (0..MAX_RESIDENT_VRAM_ASSETS).find(|&i| VRAM_SLOTS[i].is_none()) };
+    if slot.is_none() {
+        // The 64-slot residency table is the binding VRAM budget for distinct
+        // resident textures; record the overflow so the otherwise-silent drop is
+        // observable (counter-log / overlay) instead of a flat untextured surface.
+        telemetry::counter(telemetry::counter::VRAM_SLOT_TABLE_FULL, 1);
+    }
+    slot
 }
 
 /// Release slot `i`'s VRAM (texture window/page + CLUT) to the allocator, drop
@@ -331,7 +338,7 @@ pub(super) fn acquire_shared_ui_fonts(ui_fonts: &mut [Option<FontAtlas>; MAX_RUN
     }
 }
 
-const VRAM_UPLOAD_ROWS_PER_BACKGROUND_TICK: u16 = 8;
+const VRAM_UPLOAD_ROWS_PER_BACKGROUND_TICK: u16 = 512;
 const UI_TEXTURE_UPLOAD_ROW_BUDGET: u16 = ROOM_TILE_TEXELS;
 const UI_TEXTURE_UPLOAD_MAX_STEPS: u8 = 8;
 const ROOM_WINDOW_BACKGROUND_TICK_MASK: u32 = 1;
@@ -528,7 +535,7 @@ fn pending_vram_upload(asset_id: AssetId, clut_mode: VramSlotClutMode) -> bool {
     }
 }
 
-fn pending_room_texture_upload(asset_id: AssetId) -> bool {
+pub(super) fn pending_room_texture_upload(asset_id: AssetId) -> bool {
     unsafe {
         VRAM_SLOTS.iter().filter_map(|s| *s).any(|s| {
             !s.ready
@@ -615,6 +622,7 @@ fn ensure_large_ui_texture_uploaded_with_clut_mode(
     }
     unsafe {
         if !VRAM_UPLOAD_QUEUE.has_free_slot() {
+            telemetry::counter(telemetry::counter::VRAM_UPLOAD_QUEUE_FULL, 1);
             return None;
         }
     }
@@ -706,6 +714,7 @@ pub(super) fn ensure_texture_uploaded_with_clut_mode(
     }
     unsafe {
         if !VRAM_UPLOAD_QUEUE.has_free_slot() {
+            telemetry::counter(telemetry::counter::VRAM_UPLOAD_QUEUE_FULL, 1);
             return None;
         }
     }
@@ -740,7 +749,14 @@ pub(super) fn ensure_texture_uploaded_with_clut_mode(
     }
 
     if let Some(shared_texture) = find_room_texture_vram_slot(asset_id) {
-        let (clut, clut_region) = unsafe { VRAM_ALLOCATOR.alloc_clut(texture.clut_entries())? };
+        let (clut, clut_region) = match unsafe { VRAM_ALLOCATOR.alloc_clut(texture.clut_entries()) }
+        {
+            Some(pair) => pair,
+            None => {
+                telemetry::counter(telemetry::counter::VRAM_CLUT_FULL, 1);
+                return None;
+            }
+        };
         let slot = VramSlot {
             asset: asset_id,
             clut_mode,
@@ -786,8 +802,14 @@ pub(super) fn ensure_texture_uploaded_with_clut_mode(
     // Pack room materials on the GP0(E2) 8-texel grid inside 4bpp
     // tpages. A 32x32 texture now consumes a 32x32 window instead of
     // burning a whole old 64x64 cell.
-    let (tpage, placement, region) = unsafe {
-        VRAM_ALLOCATOR.alloc_window(u16::from(texture_width), u16::from(texture_height))?
+    let (tpage, placement, region) = match unsafe {
+        VRAM_ALLOCATOR.alloc_window(u16::from(texture_width), u16::from(texture_height))
+    } {
+        Some(window) => window,
+        None => {
+            telemetry::counter(telemetry::counter::VRAM_WINDOW_FULL, 1);
+            return None;
+        }
     };
     let tpage_x = tpage.x();
     let texture_x = tpage_x.checked_add(u16::from(placement.origin_u()) / 4)?;
@@ -795,7 +817,13 @@ pub(super) fn ensure_texture_uploaded_with_clut_mode(
         .y()
         .checked_add(u16::from(placement.origin_v()))?;
 
-    let (clut, clut_region) = unsafe { VRAM_ALLOCATOR.alloc_clut(texture.clut_entries())? };
+    let (clut, clut_region) = match unsafe { VRAM_ALLOCATOR.alloc_clut(texture.clut_entries()) } {
+        Some(pair) => pair,
+        None => {
+            telemetry::counter(telemetry::counter::VRAM_CLUT_FULL, 1);
+            return None;
+        }
+    };
     let slot = VramSlot {
         asset: asset_id,
         clut_mode,
