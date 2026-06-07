@@ -270,6 +270,11 @@ pub struct EditorPlaytestMetrics {
     /// (the binding 64-slot cap), room-window band full, CLUT band full,
     /// upload-queue full].
     pub vram_caps_full: [u32; 4],
+    /// Room materials dropped because their local slot is >= MAX_ROOM_MATERIALS:
+    /// the room uses more distinct materials than the per-room table holds, so
+    /// every surface on an overflow slot renders untextured or not at all. This
+    /// is a per-room-cap problem, distinct from the VRAM drops above.
+    pub room_material_slot_overflow: u32,
     /// Resident streamed chunks, keyed by runtime room/chunk index.
     pub chunk_loaded_mask: u64,
     /// Streamed chunks with in-flight loads, keyed by runtime room/chunk index.

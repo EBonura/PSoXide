@@ -79,6 +79,7 @@ pub(crate) fn draw_player_hud(
         &resolve_value,
         &[],
         &|_option_id| 0,
+        &|_| true,
     );
 }
 
