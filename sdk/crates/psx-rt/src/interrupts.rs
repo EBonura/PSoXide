@@ -90,8 +90,12 @@ pub fn vblank_count() -> u32 {
 
 #[cfg(target_arch = "mips")]
 unsafe fn enable_cpu_interrupts() {
+    const STATUS_IE: u32 = 1 << 0;
+    const STATUS_IM2: u32 = 1 << 10;
+    const STATUS_CU2: u32 = 1 << 30;
+
     let mut sr: u32;
     unsafe { core::arch::asm!("mfc0 $8, $12", lateout("$8") sr) };
-    sr |= 0x0401;
+    sr |= STATUS_IE | STATUS_IM2 | STATUS_CU2;
     unsafe { core::arch::asm!("mtc0 $8, $12", in("$8") sr) };
 }

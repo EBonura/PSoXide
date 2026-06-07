@@ -925,10 +925,27 @@ impl ApplicationHandler for Shell {
                         editor_hovered_entity,
                     );
                 }
+                let editor_camera_preview = if !state.embedded_playtest_running() {
+                    state.editor.selected_camera_preview_request()
+                } else {
+                    None
+                };
+                if let Some(request) = editor_camera_preview {
+                    let editor_preview_fog = state.editor.preview_fog_enabled();
+                    let editor_hidden_scene_nodes = state.editor.hidden_scene_nodes();
+                    let editor_root = state.editor.project_root();
+                    gfx.render_editor_camera_preview(
+                        state.editor.project(),
+                        editor_root,
+                        request,
+                        editor_preview_fog,
+                        editor_hidden_scene_nodes,
+                    );
+                }
 
                 let vram_tex = gfx.vram_texture_id();
                 let (display_tex, display_uv) = frontend_display(state.bus.as_ref(), gfx);
-                let editor_viewport = if state.embedded_playtest_running() {
+                let mut editor_viewport = if state.embedded_playtest_running() {
                     psxed_ui::EditorViewport3dPresentation::play(
                         display_tex,
                         display_uv,
@@ -941,6 +958,10 @@ impl ApplicationHandler for Shell {
                         gfx.editor_overlay_lines().to_vec(),
                     )
                 };
+                if editor_camera_preview.is_some() {
+                    editor_viewport =
+                        editor_viewport.with_camera_preview(gfx.camera_preview_texture_id());
+                }
                 profile.egui = gfx.render(|ctx| {
                     app::build_ui(
                         ctx,
@@ -1333,6 +1354,14 @@ fn editor_play_metrics(state: &app::AppState) -> Option<psxed_ui::EditorPlaytest
         stream_pending: recent_counter(counter::ROOM_STREAM_PENDING_LOADS),
         stream_failed: recent_counter(counter::ROOM_STREAM_FAILED_LOADS),
         stream_protected_full: recent_counter(counter::ROOM_STREAM_PROTECTED_FULL),
+        vram_texture_drops: recent_counter(counter::ROOM_MATERIAL_TEXTURE_DROPS),
+        vram_caps_full: [
+            recent_counter(counter::VRAM_SLOT_TABLE_FULL),
+            recent_counter(counter::VRAM_WINDOW_FULL),
+            recent_counter(counter::VRAM_CLUT_FULL),
+            recent_counter(counter::VRAM_UPLOAD_QUEUE_FULL),
+        ],
+        room_material_slot_overflow: recent_counter(counter::ROOM_MATERIAL_SLOT_OVERFLOW),
         chunk_loaded_mask: chunk_mask(
             counter::ROOM_STREAM_RESIDENT_MASK_LO,
             counter::ROOM_STREAM_RESIDENT_MASK_HI,

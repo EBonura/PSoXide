@@ -97,8 +97,11 @@ pub mod stage {
     pub const EQUIPMENT: u16 = 12;
     /// Deferred world-command sort and OT insertion.
     pub const WORLD_FLUSH: u16 = 10;
-    /// Ordering-table DMA submission.
+    /// Ordering-table DMA kick (CPU-side setup; excludes the GPU-draw wait).
     pub const OT_SUBMIT: u16 = 11;
+    /// Blocking wait for the ordering-table DMA walk to finish: the
+    /// CPU-blocked-on-GPU portion of a submit, i.e. GPU draw + DMA cost.
+    pub const OT_WAIT: u16 = 45;
     /// Player collision gather + motor solve (sim).
     pub const SIM_COLLISION: u16 = 36;
     /// Current-room tracking + active-window refresh (sim).
@@ -120,7 +123,15 @@ pub mod stage {
 }
 
 /// Number of stage slots, including index zero for unknown/reserved ids.
-pub const STAGE_COUNT: usize = 45;
+/// Sized to the highest stage id (`OT_WAIT = 45`) plus one.
+pub const STAGE_COUNT: usize = 46;
+
+// Enforce `STAGE_COUNT = highest stage id + 1` at compile time. The stage
+// arrays are indexed by id, and `add_events` drops out-of-range ids silently
+// (via `get_mut`), so a new higher id without a matching STAGE_COUNT bump would
+// quietly vanish from every summary. Adding an id above OT_WAIT trips this and
+// must update both the count and this guard.
+const _: () = assert!(stage::OT_WAIT as usize == STAGE_COUNT - 1);
 
 /// Runtime task id constants shared with `psx-engine::telemetry`.
 pub mod task {
@@ -567,10 +578,28 @@ pub mod counter {
     pub const TEXTURED_MODEL_PRIMITIVE_OVERFLOW_SUBMITS: u16 = 215;
     /// Model submits that exceeded world-command storage.
     pub const TEXTURED_MODEL_COMMAND_OVERFLOW_SUBMITS: u16 = 216;
+    /// Room-texture VRAM slots freed by residency eviction (Stage 4 teardown).
+    pub const VRAM_SLOTS_FREED: u16 = 217;
+    /// Texture uploads that found no free VRAM slot-table entry (64-slot cap).
+    pub const VRAM_SLOT_TABLE_FULL: u16 = 218;
+    /// Room-texture uploads where the room-material page band was full.
+    pub const VRAM_WINDOW_FULL: u16 = 219;
+    /// Texture uploads where the CLUT band was full.
+    pub const VRAM_CLUT_FULL: u16 = 220;
+    /// Room-texture uploads skipped because the VRAM upload queue was full.
+    pub const VRAM_UPLOAD_QUEUE_FULL: u16 = 221;
+    /// Room materials left untextured because their texture was not VRAM-resident.
+    pub const ROOM_MATERIAL_TEXTURE_DROPS: u16 = 222;
+    /// Room materials dropped because their `local_slot` >= MAX_ROOM_MATERIALS:
+    /// the room references more distinct materials than the per-room table holds,
+    /// so surfaces using the overflow slots render untextured or not at all.
+    pub const ROOM_MATERIAL_SLOT_OVERFLOW: u16 = 223;
 }
 
 /// Number of counter slots, including index zero for unknown/reserved ids.
-pub const COUNTER_COUNT: usize = 217;
+/// Must stay larger than the highest counter id emitted by the guest
+/// (`psx_engine::telemetry::counter`); a counter id >= this is silently dropped.
+pub const COUNTER_COUNT: usize = 224;
 
 /// Telemetry event kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -993,7 +1022,8 @@ pub fn stage_name(id: u16) -> &'static str {
         stage::PORTAL_VISIBILITY => "portal visibility",
         stage::EQUIPMENT => "equipment",
         stage::WORLD_FLUSH => "world flush/sort",
-        stage::OT_SUBMIT => "ot submit",
+        stage::OT_SUBMIT => "ot submit (kick)",
+        stage::OT_WAIT => "ot wait (gpu/dma)",
         stage::SIM_COLLISION => "sim collision",
         stage::SIM_ROOM_TRACK => "sim room track",
         stage::SIM_RESIDENCY => "sim residency",
@@ -1241,6 +1271,13 @@ pub fn counter_name(id: u16) -> &'static str {
         counter::TEXTURED_MODEL_VERTEX_OVERFLOW_SUBMITS => "mdl vertex overflow submits",
         counter::TEXTURED_MODEL_PRIMITIVE_OVERFLOW_SUBMITS => "mdl primitive overflow submits",
         counter::TEXTURED_MODEL_COMMAND_OVERFLOW_SUBMITS => "mdl command overflow submits",
+        counter::VRAM_SLOTS_FREED => "vram slots freed",
+        counter::VRAM_SLOT_TABLE_FULL => "vram slot table full",
+        counter::VRAM_WINDOW_FULL => "vram window full",
+        counter::VRAM_CLUT_FULL => "vram clut full",
+        counter::VRAM_UPLOAD_QUEUE_FULL => "vram upload queue full",
+        counter::ROOM_MATERIAL_TEXTURE_DROPS => "room material texture drops",
+        counter::ROOM_MATERIAL_SLOT_OVERFLOW => "room material slot overflow",
         _ => "unknown",
     }
 }

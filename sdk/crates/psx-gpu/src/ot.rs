@@ -122,6 +122,15 @@ impl<const N: usize> OrderingTable<N> {
         crate::submit_linked_list(self.submit_head());
     }
 
+    /// Kick the table's DMA walk without waiting for it to finish.
+    /// Forwards to [`crate::submit_linked_list_async`]; pair it with
+    /// [`crate::submit_linked_list_wait`]. The table (and every
+    /// primitive it chains) must stay live and unmodified until that
+    /// wait returns.
+    pub fn submit_async(&self) {
+        crate::submit_linked_list_async(self.submit_head());
+    }
+
     /// Walk the linked chain in DMA submission order, producing one
     /// `(packet_ptr, words)` pair per primitive packet.
     ///

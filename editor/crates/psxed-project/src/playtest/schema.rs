@@ -27,6 +27,10 @@ pub const CDDA_TRACKS_FILENAME: &str = "cdda_tracks.txt";
 /// Cooked WORLD.PAK room ordering hint consumed by disc builders.
 pub const WORLD_PACK_ORDER_FILENAME: &str = "world_pack_order.txt";
 
+/// Cooked UI.PAK chunk ordering hint consumed by disc builders.
+/// One streamed UI asset index per line, in pack order.
+pub const UI_PACK_ORDER_FILENAME: &str = "ui_pack_order.txt";
+
 /// Subdirectory inside `generated/` that holds cooked `.psxw`
 /// blobs.
 pub const ROOMS_DIRNAME: &str = "rooms";
@@ -35,6 +39,11 @@ pub const ROOMS_DIRNAME: &str = "rooms";
 /// chunks. Each `.psxc` stores a collision payload plus the cooked
 /// render cache for that room.
 pub const STREAM_CHUNKS_DIRNAME: &str = "stream_chunks";
+
+/// Subdirectory inside `generated/` that holds CD-streamable UI
+/// image chunks. Each `ui_NNN.psxt` is the raw texture payload for
+/// one streamed UI image asset, with no chunk header.
+pub const UI_STREAM_CHUNKS_DIRNAME: &str = "ui_stream_chunks";
 
 /// Subdirectory inside `generated/` that holds copied `.psxt`
 /// texture blobs.
@@ -69,6 +78,33 @@ pub enum PlaytestAssetKind {
     ModelAnimation,
 }
 
+/// Streaming class of a [`PlaytestAsset`]. A streamed asset's baked
+/// manifest static is empty bytes (under `cd-stream-bench`) and its
+/// payload is packed into the parallel UI.PAK that the runtime loads
+/// on demand, keeping it out of the guest's baked `.data`. The class
+/// distinguishes which transient staging buffer the runtime loads
+/// through so each buffer stays right-sized: small for menu UI images,
+/// larger for gameplay-scoped textures like the sky panorama.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamedClass {
+    /// Baked into the guest `.data` via `include_bytes!`; never streamed.
+    None,
+    /// Menu UI image. Streamed off UI.PAK and staged through the small
+    /// per-image UI staging buffer, loaded on menu entry.
+    UiImage,
+    /// Gameplay-scoped texture (e.g. the sky panorama). Streamed off
+    /// UI.PAK and staged through a larger transient buffer, loaded on
+    /// gameplay entry and freed on gameplay exit.
+    Gameplay,
+}
+
+impl StreamedClass {
+    /// `true` when the asset is CD-streamed (any non-`None` class).
+    pub fn is_streamed(self) -> bool {
+        !matches!(self, StreamedClass::None)
+    }
+}
+
 /// One asset destined for the master table. Owns its bytes so
 /// callers can write them out to the generated tree without
 /// reaching back into the project.
@@ -86,6 +122,19 @@ pub struct PlaytestAsset {
     /// or room. Surfaces in cook reports and stays out of the
     /// runtime contract.
     pub source_label: String,
+    /// CD-streaming class. [`StreamedClass::None`] bakes the payload
+    /// into the guest `.data`; the other variants route the payload to
+    /// UI.PAK keyed by asset index, with the variant selecting the
+    /// runtime staging buffer (small for UI images, larger for
+    /// gameplay-scoped textures like the sky panorama).
+    pub streamed_class: StreamedClass,
+}
+
+impl PlaytestAsset {
+    /// `true` when this asset's payload is CD-streamed off UI.PAK.
+    pub fn is_streamed(&self) -> bool {
+        self.streamed_class.is_streamed()
+    }
 }
 
 /// One room's residency-aware record. Carries indices into
@@ -309,6 +358,14 @@ pub struct PlaytestCamera {
     pub target_height: i32,
     /// Minimum camera origin height above the sampled floor.
     pub min_floor_clearance: i32,
+    /// Manual orbit input speed level. Higher values turn faster.
+    pub orbit_speed_level: u8,
+    /// Camera origin follow lag shift. Lower values move faster.
+    pub position_lag_shift: u8,
+    /// Camera focus follow lag shift. Lower values move faster.
+    pub focus_lag_shift: u8,
+    /// Collision boom recovery lag shift. Lower values move faster.
+    pub distance_lag_shift: u8,
 }
 
 /// Per-room slice into generated visibility cells.
@@ -579,6 +636,9 @@ pub struct PlaytestModelInstance {
     /// Per-instance clip override, or [`MODEL_CLIP_INHERIT`]
     /// to use the model's `default_clip`.
     pub clip: u16,
+    /// Static pose frame within `clip`, or [`MODEL_INSTANCE_POSE_ANIMATE`]
+    /// to advance the clip normally.
+    pub pose_frame: u16,
     /// Room-local X.
     pub x: i32,
     /// Y.
@@ -602,6 +662,10 @@ pub struct PlaytestModelInstance {
 /// "inherit model default" -- same value as
 /// [`psx_level::MODEL_CLIP_INHERIT`].
 pub const MODEL_CLIP_INHERIT: u16 = 0xFFFF;
+
+/// Sentinel for [`PlaytestModelInstance::pose_frame`] meaning "play the
+/// clip" -- same value as [`psx_level::MODEL_INSTANCE_POSE_ANIMATE`].
+pub const MODEL_INSTANCE_POSE_ANIMATE: u16 = 0xFFFF;
 
 /// One material-backed flat image prop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -647,6 +711,10 @@ pub struct PlaytestBoxProp {
     pub y: i32,
     /// Bottom-center room-local Z.
     pub z: i32,
+    /// Room-floor Y directly beneath the prop (the floor-anchored
+    /// height), baked so fragments and falling boxes settle on the
+    /// ground rather than the prop's own elevated bottom.
+    pub ground_y: i32,
     /// Static pitch, PSX angle units.
     pub pitch: i16,
     /// Static yaw, PSX angle units.
@@ -827,6 +895,8 @@ pub struct PlaytestCddaTrack {
     pub track: u8,
     /// Source WAV path used to cook the generated raw CD-DA payload.
     pub wav_path: String,
+    /// Baked playback-speed multiplier in Q12 (`4096` = 1.0x).
+    pub playback_speed_q12: u16,
 }
 
 /// One cooked project option, ready for manifest emission. Mirrors
@@ -1158,6 +1228,14 @@ pub struct PlaytestCharacter {
     pub action_clips: [u16; PLAYTEST_CHARACTER_ACTION_COUNT],
     /// Per-action playback flags matching [`Self::action_clips`].
     pub action_flags: [u8; PLAYTEST_CHARACTER_ACTION_COUNT],
+    /// Per-action playback speed in Q8 fixed point (`256 = 1.0x`),
+    /// matching [`Self::action_clips`].
+    pub action_speeds: [u16; PLAYTEST_CHARACTER_ACTION_COUNT],
+    /// Inclusive playback frame window per action.
+    pub action_frame_ranges:
+        [psx_level::CharacterActionFrameRange; PLAYTEST_CHARACTER_ACTION_COUNT],
+    /// Forward push per action.
+    pub action_pushes: [psx_level::CharacterActionPush; PLAYTEST_CHARACTER_ACTION_COUNT],
     /// Render-only model offset from the player/controller root,
     /// in entity-local engine units.
     pub visual_offset: [i16; 3],

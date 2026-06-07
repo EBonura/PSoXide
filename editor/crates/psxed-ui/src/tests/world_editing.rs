@@ -1,0 +1,1265 @@
+use super::*;
+
+#[test]
+fn rotate_sector_preserves_authored_uv_rotation() {
+    let mut sector = GridSector::empty();
+    let mut floor = GridHorizontalFace::flat(0, None);
+    floor.uv.rotation = GridUvRotation::Deg45;
+    let mut floor_tri_a = GridUvTransform::IDENTITY;
+    floor_tri_a.rotation = GridUvRotation::Deg135;
+    floor.triangle_override_mut(0).uv = Some(floor_tri_a);
+    let mut floor_tri_b = GridUvTransform::IDENTITY;
+    floor_tri_b.rotation = GridUvRotation::Deg225;
+    floor.triangle_override_mut(1).uv = Some(floor_tri_b);
+    sector.floor = Some(floor);
+
+    let mut ceiling = GridHorizontalFace::flat(1024, None);
+    ceiling.uv.rotation = GridUvRotation::Deg315;
+    sector.ceiling = Some(ceiling);
+
+    let mut wall = GridVerticalFace::with_heights([0, 10, 110, 100], None);
+    wall.uv.rotation = GridUvRotation::Deg90;
+    sector.walls.get_mut(GridDirection::North).push(wall);
+
+    let rotated = rotate_sector_cw(&sector);
+    let floor = rotated.floor.as_ref().unwrap();
+    let floor_override_rotations = [
+        floor.triangle_override(0).uv.unwrap().rotation,
+        floor.triangle_override(1).uv.unwrap().rotation,
+    ];
+
+    assert_eq!(floor.uv.rotation, GridUvRotation::Deg45);
+    assert!(floor_override_rotations.contains(&GridUvRotation::Deg135));
+    assert!(floor_override_rotations.contains(&GridUvRotation::Deg225));
+    assert_eq!(
+        rotated.ceiling.as_ref().unwrap().uv.rotation,
+        GridUvRotation::Deg315
+    );
+    assert_eq!(
+        rotated.walls.get(GridDirection::East)[0].uv.rotation,
+        GridUvRotation::Deg90
+    );
+}
+
+#[test]
+fn rotate_sector_reverses_diagonal_wall_endpoint_order_when_needed() {
+    let mut sector = GridSector::empty();
+    sector
+        .walls
+        .get_mut(GridDirection::NorthEastSouthWest)
+        .push(GridVerticalFace::with_heights([1, 2, 3, 4], None));
+
+    let rotated = rotate_sector_cw(&sector);
+
+    assert!(rotated
+        .walls
+        .get(GridDirection::NorthEastSouthWest)
+        .is_empty());
+    assert_eq!(
+        rotated.walls.get(GridDirection::NorthWestSouthEast)[0].heights,
+        [2, 1, 4, 3]
+    );
+}
+
+#[test]
+fn shift_selects_wall_span_from_anchor() {
+    let mut project = ProjectDocument::new("wall-span");
+    let mut grid = WorldGrid::empty(4, 1, 1024);
+    for sx in 0..4 {
+        grid.add_wall(sx, 0, GridDirection::North, 0, 1024, None);
+    }
+    let room = project
+        .active_scene_mut()
+        .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+    let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
+    let wall_at = |sx| {
+        Selection::Face(FaceRef {
+            room,
+            sx,
+            sz: 0,
+            kind: FaceKind::Wall {
+                dir: GridDirection::North,
+                stack: 0,
+            },
+        })
+    };
+
+    let mut shift = egui::Modifiers::NONE;
+    shift.shift = true;
+    workspace.apply_primitive_selection_modifiers(wall_at(0), egui::Modifiers::NONE);
+    workspace.apply_primitive_selection_modifiers(wall_at(3), shift);
+
+    assert_eq!(workspace.selection.selected_primitives.len(), 4);
+    for sx in 0..4 {
+        assert!(workspace
+            .selection
+            .selected_primitives
+            .contains(&wall_at(sx)));
+    }
+    assert_eq!(workspace.selection.selected_primitive, Some(wall_at(3)));
+}
+
+#[test]
+fn shift_selects_wall_top_edge_path_from_anchor() {
+    let mut project = ProjectDocument::new("wall-edge-path");
+    let mut grid = WorldGrid::empty(4, 1, 1024);
+    for sx in 0..4 {
+        grid.add_wall(sx, 0, GridDirection::North, 0, 1024, None);
+    }
+    let room = project
+        .active_scene_mut()
+        .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+    let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
+    let edge_at = |sx| {
+        Selection::Edge(EdgeRef {
+            room,
+            anchor: EdgeAnchor::Wall {
+                sx,
+                sz: 0,
+                dir: GridDirection::North,
+                stack: 0,
+                edge: WallEdge::Top,
+            },
+        })
+    };
+
+    let mut shift = egui::Modifiers::NONE;
+    shift.shift = true;
+    workspace.apply_primitive_selection_modifiers(edge_at(0), egui::Modifiers::NONE);
+    workspace.apply_primitive_selection_modifiers(edge_at(3), shift);
+
+    assert_eq!(workspace.selection.selected_primitives.len(), 4);
+    for sx in 0..4 {
+        assert!(workspace
+            .selection
+            .selected_primitives
+            .contains(&edge_at(sx)));
+    }
+    assert_eq!(workspace.selection.selected_primitive, Some(edge_at(3)));
+}
+
+#[test]
+fn shift_selects_floor_edge_path_from_anchor() {
+    let mut project = ProjectDocument::new("floor-edge-path");
+    let mut grid = WorldGrid::empty(4, 1, 1024);
+    for sx in 0..4 {
+        grid.set_floor(sx, 0, 0, None);
+    }
+    let room = project
+        .active_scene_mut()
+        .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+    let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
+    let edge_at = |sx| {
+        Selection::Edge(EdgeRef {
+            room,
+            anchor: EdgeAnchor::Floor {
+                sx,
+                sz: 0,
+                dir: GridDirection::North,
+            },
+        })
+    };
+
+    let mut shift = egui::Modifiers::NONE;
+    shift.shift = true;
+    workspace.apply_primitive_selection_modifiers(edge_at(0), egui::Modifiers::NONE);
+    workspace.apply_primitive_selection_modifiers(edge_at(3), shift);
+
+    assert_eq!(workspace.selection.selected_primitives.len(), 4);
+    for sx in 0..4 {
+        assert!(workspace
+            .selection
+            .selected_primitives
+            .contains(&edge_at(sx)));
+    }
+    assert_eq!(workspace.selection.selected_primitive, Some(edge_at(3)));
+}
+
+#[test]
+fn modified_primitive_selection_can_mix_floor_ceiling_and_wall_faces() {
+    let mut project = ProjectDocument::new("mixed-face-selection");
+    let mut grid = WorldGrid::empty(1, 1, 1024);
+    grid.set_floor(0, 0, 0, None);
+    grid.ensure_sector(0, 0).unwrap().ceiling = Some(GridHorizontalFace::flat(1024, None));
+    grid.add_wall(0, 0, GridDirection::North, 0, 1024, None);
+    let room = project
+        .active_scene_mut()
+        .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+    let mut workspace =
+        EditorWorkspace::with_project(test_temp_dir("mixed-face-selection"), project);
+    let floor = Selection::Face(FaceRef {
+        room,
+        sx: 0,
+        sz: 0,
+        kind: FaceKind::Floor,
+    });
+    let ceiling = Selection::Face(FaceRef {
+        room,
+        sx: 0,
+        sz: 0,
+        kind: FaceKind::Ceiling,
+    });
+    let wall = Selection::Face(FaceRef {
+        room,
+        sx: 0,
+        sz: 0,
+        kind: FaceKind::Wall {
+            dir: GridDirection::North,
+            stack: 0,
+        },
+    });
+    let mut ctrl = egui::Modifiers::NONE;
+    ctrl.ctrl = true;
+    let mut shift = egui::Modifiers::NONE;
+    shift.shift = true;
+
+    workspace.apply_primitive_selection_modifiers(floor, egui::Modifiers::NONE);
+    workspace.apply_primitive_selection_modifiers(ceiling, ctrl);
+    workspace.apply_primitive_selection_modifiers(wall, shift);
+
+    assert!(workspace.selection.selected_primitives.contains(&floor));
+    assert!(workspace.selection.selected_primitives.contains(&ceiling));
+    assert!(workspace.selection.selected_primitives.contains(&wall));
+    assert_eq!(workspace.selection.selected_primitives.len(), 3);
+    assert!(workspace.selection.selected_sectors.is_empty());
+    assert_eq!(workspace.selection.selected_primitive, Some(wall));
+}
+
+#[test]
+fn primitive_grid_drag_moves_selected_faces_without_whole_sector() {
+    let mut project = ProjectDocument::new("primitive-grid-drag");
+    let mut grid = WorldGrid::empty(1, 1, 1024);
+    grid.set_floor(0, 0, 0, None);
+    grid.sector_mut(0, 0)
+        .unwrap()
+        .floor
+        .as_mut()
+        .unwrap()
+        .heights = [0, 32, 64, 96];
+    grid.ensure_sector(0, 0).unwrap().ceiling = Some(GridHorizontalFace::flat(1024, None));
+    grid.add_wall(0, 0, GridDirection::North, 0, 1024, None);
+    let room = project
+        .active_scene_mut()
+        .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+    let mut workspace =
+        EditorWorkspace::with_project(test_temp_dir("primitive-grid-drag"), project);
+    let floor = Selection::Face(FaceRef {
+        room,
+        sx: 0,
+        sz: 0,
+        kind: FaceKind::Floor,
+    });
+
+    workspace.selection.hovered_primitive = Some(floor);
+    workspace.replace_primitive_selection(floor);
+    let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(320.0, 240.0));
+    assert!(workspace.begin_primitive_grid_drag(rect, rect.center(), egui::Modifiers::NONE));
+    workspace
+        .interaction
+        .primitive_grid_drag_mut()
+        .unwrap()
+        .current_delta = [1, 0];
+    workspace.apply_primitive_grid_drag_preview();
+
+    let grid = workspace.room_grid_view(room).unwrap();
+    let source = grid.sector(0, 0).unwrap();
+    assert!(source.floor.is_none());
+    assert!(source.ceiling.is_some());
+    assert_eq!(source.walls.get(GridDirection::North).len(), 1);
+    let moved = grid.sector(1, 0).unwrap();
+    assert_eq!(moved.floor.as_ref().unwrap().heights, [0, 32, 64, 96]);
+    assert!(moved.ceiling.is_none());
+    assert!(moved.walls.get(GridDirection::North).is_empty());
+    assert!(workspace
+        .selection
+        .selected_primitives
+        .contains(&Selection::Face(FaceRef {
+            room,
+            sx: 1,
+            sz: 0,
+            kind: FaceKind::Floor,
+        })));
+    assert!(workspace.selection.selected_sectors.is_empty());
+
+    workspace.end_primitive_grid_drag();
+    assert!(workspace.is_dirty());
+    workspace.do_undo();
+    let grid = workspace.room_grid_view(room).unwrap();
+    assert!(grid.sector(1, 0).is_none());
+    assert!(grid.sector(0, 0).unwrap().floor.is_some());
+}
+
+#[test]
+fn primitive_gizmo_y_moves_selected_face_by_height_quantum() {
+    let mut project = ProjectDocument::new("primitive-gizmo-y");
+    let mut grid = WorldGrid::empty(1, 1, 1024);
+    grid.set_floor(0, 0, 0, None);
+    let room = project
+        .active_scene_mut()
+        .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+    let mut workspace = EditorWorkspace::with_project(test_temp_dir("primitive-gizmo-y"), project);
+    set_gizmo_test_camera(&mut workspace);
+    let floor = Selection::Face(FaceRef {
+        room,
+        sx: 0,
+        sz: 0,
+        kind: FaceKind::Floor,
+    });
+    workspace.replace_primitive_selection(floor);
+
+    let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+    let y_axis = projected_gizmo_axis(&workspace, viewport, PrimitiveGizmoAxis::Y);
+    let unit = (y_axis.end - y_axis.start).normalized();
+    assert!(workspace.begin_primitive_gizmo_drag(PrimitiveGizmoAxis::Y, viewport, y_axis.start));
+    workspace.update_primitive_gizmo_drag(y_axis.start + unit * 4.0);
+    workspace.end_primitive_gizmo_drag();
+
+    let grid = workspace.room_grid_view(room).unwrap();
+    assert_eq!(
+        grid.sector(0, 0).unwrap().floor.as_ref().unwrap().heights,
+        [HEIGHT_QUANTUM; 4]
+    );
+    assert!(workspace.is_dirty());
+
+    workspace.do_undo();
+    let grid = workspace.room_grid_view(room).unwrap();
+    assert_eq!(
+        grid.sector(0, 0).unwrap().floor.as_ref().unwrap().heights,
+        [0; 4]
+    );
+}
+
+#[test]
+fn viewport_3d_pointer_target_prefers_primitive_gizmo_over_surface() {
+    let mut project = ProjectDocument::new("primitive-gizmo-target-priority");
+    let mut grid = WorldGrid::empty(1, 1, 1024);
+    grid.set_floor(0, 0, 0, None);
+    let room = project
+        .active_scene_mut()
+        .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+    let mut workspace =
+        EditorWorkspace::with_project(test_temp_dir("primitive-gizmo-target"), project);
+    set_gizmo_test_camera(&mut workspace);
+    workspace.replace_primitive_selection(Selection::Face(FaceRef {
+        room,
+        sx: 0,
+        sz: 0,
+        kind: FaceKind::Floor,
+    }));
+
+    let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+    let z_axis = projected_gizmo_axis(&workspace, viewport, PrimitiveGizmoAxis::Z);
+    let target =
+        workspace.resolve_viewport_3d_pointer_target(viewport, z_axis.end, Some(room), true);
+
+    assert!(
+        matches!(target, Some(Viewport3dPointerTarget::PrimitiveGizmo(_))),
+        "target was {target:?}"
+    );
+    assert!(target
+        .and_then(Viewport3dPointerTarget::primitive_selection)
+        .is_none());
+}
+
+#[test]
+fn primitive_gizmo_y_moves_selected_triangle_by_height_quantum() {
+    let mut project = ProjectDocument::new("primitive-gizmo-triangle-y");
+    let mut grid = WorldGrid::empty(1, 1, 1024);
+    grid.set_floor(0, 0, 0, None);
+    let room = project
+        .active_scene_mut()
+        .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+    let mut workspace =
+        EditorWorkspace::with_project(test_temp_dir("primitive-gizmo-triangle-y"), project);
+    set_gizmo_test_camera(&mut workspace);
+    let triangle = Selection::Triangle(HorizontalTriangleRef {
+        room,
+        sx: 0,
+        sz: 0,
+        surface: HorizontalSurfaceKind::Floor,
+        index: HorizontalTriangleIndex::A,
+        corners: [Corner::NW, Corner::NE, Corner::SE],
+    });
+    workspace.replace_primitive_selection(triangle);
+
+    let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+    let y_axis = projected_gizmo_axis(&workspace, viewport, PrimitiveGizmoAxis::Y);
+    let unit = (y_axis.end - y_axis.start).normalized();
+    assert!(workspace.begin_primitive_gizmo_drag(PrimitiveGizmoAxis::Y, viewport, y_axis.start));
+    workspace.update_primitive_gizmo_drag(y_axis.start + unit * 4.0);
+    workspace.end_primitive_gizmo_drag();
+
+    let grid = workspace.room_grid_view(room).unwrap();
+    let floor = grid.sector(0, 0).unwrap().floor.as_ref().unwrap();
+    assert_eq!(floor.heights, [0; 4]);
+    assert_eq!(
+        floor.triangle_heights(HorizontalTriangleIndex::A.idx()),
+        [HEIGHT_QUANTUM; 3]
+    );
+    assert_eq!(
+        floor.triangle_heights(HorizontalTriangleIndex::B.idx()),
+        [0; 3]
+    );
+    assert!(workspace.is_dirty());
+}
+
+#[test]
+fn primitive_gizmo_x_moves_selected_face_one_cell() {
+    let mut project = ProjectDocument::new("primitive-gizmo-x");
+    let mut grid = WorldGrid::empty(1, 1, 1024);
+    grid.set_floor(0, 0, 0, None);
+    grid.sector_mut(0, 0)
+        .unwrap()
+        .floor
+        .as_mut()
+        .unwrap()
+        .heights = [0, 32, 64, 96];
+    let room = project
+        .active_scene_mut()
+        .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+    let mut workspace = EditorWorkspace::with_project(test_temp_dir("primitive-gizmo-x"), project);
+    set_gizmo_test_camera(&mut workspace);
+    let floor = Selection::Face(FaceRef {
+        room,
+        sx: 0,
+        sz: 0,
+        kind: FaceKind::Floor,
+    });
+    workspace.replace_primitive_selection(floor);
+
+    let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+    let x_axis = projected_gizmo_axis(&workspace, viewport, PrimitiveGizmoAxis::X);
+    assert!(workspace.begin_primitive_gizmo_drag(PrimitiveGizmoAxis::X, viewport, x_axis.start));
+    workspace.update_primitive_gizmo_drag(x_axis.start + (x_axis.end - x_axis.start) * 0.5);
+
+    let grid = workspace.room_grid_view(room).unwrap();
+    assert!(grid.sector(0, 0).unwrap().floor.is_none());
+    assert_eq!(
+        grid.sector(1, 0).unwrap().floor.as_ref().unwrap().heights,
+        [0, 32, 64, 96]
+    );
+    assert!(workspace
+        .selection
+        .selected_primitives
+        .contains(&Selection::Face(FaceRef {
+            room,
+            sx: 1,
+            sz: 0,
+            kind: FaceKind::Floor,
+        })));
+
+    workspace.end_primitive_gizmo_drag();
+    assert!(workspace.is_dirty());
+    workspace.do_undo();
+    let grid = workspace.room_grid_view(room).unwrap();
+    assert!(grid.sector(1, 0).is_none());
+    assert!(grid.sector(0, 0).unwrap().floor.is_some());
+}
+
+#[test]
+fn node_gizmo_axes_appear_for_selected_entity_and_light() {
+    let mut project = ProjectDocument::new("node-gizmo-axes");
+    let room = project.active_scene_mut().add_node(
+        NodeId::ROOT,
+        "Room",
+        NodeKind::Room {
+            grid: WorldGrid::empty(1, 1, 1024),
+        },
+    );
+    let entity = project
+        .active_scene_mut()
+        .add_node(room, "Entity", NodeKind::Entity);
+    let light = project.active_scene_mut().add_node(
+        room,
+        "Light",
+        NodeKind::PointLight {
+            color: [255, 240, 200],
+            intensity: 1.0,
+            radius: 4.0,
+        },
+    );
+    let mut workspace = EditorWorkspace::with_project(test_temp_dir("node-gizmo-axes"), project);
+    set_gizmo_test_camera(&mut workspace);
+    let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+
+    workspace.replace_node_selection(entity);
+    let entity_axes: HashSet<_> = workspace
+        .node_gizmo_screen_axes(viewport)
+        .into_iter()
+        .map(|axis| axis.axis)
+        .collect();
+    assert!(entity_axes.contains(&PrimitiveGizmoAxis::X));
+    assert!(entity_axes.contains(&PrimitiveGizmoAxis::Y));
+    assert!(entity_axes.contains(&PrimitiveGizmoAxis::Z));
+
+    workspace.replace_node_selection(light);
+    let light_axes: HashSet<_> = workspace
+        .node_gizmo_screen_axes(viewport)
+        .into_iter()
+        .map(|axis| axis.axis)
+        .collect();
+    assert!(light_axes.contains(&PrimitiveGizmoAxis::X));
+    assert!(light_axes.contains(&PrimitiveGizmoAxis::Y));
+    assert!(light_axes.contains(&PrimitiveGizmoAxis::Z));
+}
+
+#[test]
+fn node_gizmo_move_planes_appear_for_selected_entity() {
+    let mut project = ProjectDocument::new("node-gizmo-planes");
+    let room = project.active_scene_mut().add_node(
+        NodeId::ROOT,
+        "Room",
+        NodeKind::Room {
+            grid: WorldGrid::empty(1, 1, 1024),
+        },
+    );
+    let entity = project
+        .active_scene_mut()
+        .add_node(room, "Entity", NodeKind::Entity);
+    let mut workspace = EditorWorkspace::with_project(test_temp_dir("node-gizmo-planes"), project);
+    set_gizmo_test_camera(&mut workspace);
+    workspace.camera_rig.free_position = [2048, 1024, -2048];
+    let (yaw, pitch) = camera_angles_to_look_at(
+        workspace.camera_rig.free_position,
+        [
+            DEFAULT_WORLD_SECTOR_SIZE / 2,
+            DEFAULT_WORLD_SECTOR_SIZE / 4,
+            DEFAULT_WORLD_SECTOR_SIZE / 2,
+        ],
+    )
+    .expect("oblique gizmo test camera can face the entity");
+    workspace.camera_rig.free_yaw = yaw;
+    workspace.camera_rig.free_pitch = pitch;
+    workspace.replace_node_selection(entity);
+
+    let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+    let planes: HashSet<_> = workspace
+        .node_gizmo_screen_planes(viewport)
+        .into_iter()
+        .map(|plane| plane.plane)
+        .collect();
+
+    assert!(planes.contains(&NodeGizmoPlane::XY));
+    assert!(planes.contains(&NodeGizmoPlane::XZ));
+    assert!(planes.contains(&NodeGizmoPlane::YZ));
+}
+
+#[test]
+fn node_gizmo_xy_plane_moves_entity_on_two_axes() {
+    let mut project = ProjectDocument::new("entity-gizmo-xy");
+    let room = project.active_scene_mut().add_node(
+        NodeId::ROOT,
+        "Room",
+        NodeKind::Room {
+            grid: WorldGrid::empty(1, 1, 1024),
+        },
+    );
+    let entity = project
+        .active_scene_mut()
+        .add_node(room, "Entity", NodeKind::Entity);
+    let mut workspace = EditorWorkspace::with_project(test_temp_dir("entity-gizmo-xy"), project);
+    set_gizmo_test_camera(&mut workspace);
+    workspace.replace_node_selection(entity);
+
+    let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+    let screen_plane = projected_node_gizmo_plane(&workspace, viewport, NodeGizmoPlane::XY);
+    let start = screen_plane_center(screen_plane);
+    assert_eq!(
+        workspace.pick_node_gizmo_handle(viewport, start),
+        Some(NodeGizmoHandle::Plane(NodeGizmoPlane::XY))
+    );
+    assert!(workspace.begin_node_gizmo_handle_drag(
+        NodeGizmoHandle::Plane(NodeGizmoPlane::XY),
+        viewport,
+        start
+    ));
+    let start_hit = workspace
+        .interaction
+        .node_gizmo_drag()
+        .and_then(|drag| drag.start_plane_hit)
+        .expect("plane drag stores start hit");
+    let target_hit = [
+        start_hit[0] + HEIGHT_QUANTUM as f32,
+        start_hit[1] + HEIGHT_QUANTUM as f32,
+        start_hit[2],
+    ];
+    let target_pointer =
+        project_world_to_viewport_screen(workspace.viewport_3d_camera(), viewport, target_hit)
+            .expect("target hit projects");
+
+    workspace.update_node_gizmo_drag(viewport, target_pointer);
+    workspace.end_node_gizmo_drag();
+
+    let node = workspace.project.active_scene().node(entity).unwrap();
+    assert_vec3_approx(
+        node.transform.translation,
+        [
+            HEIGHT_QUANTUM as f32 / 1024.0,
+            HEIGHT_QUANTUM as f32 / 1024.0,
+            0.0,
+        ],
+    );
+    assert_eq!(workspace.status, "Moved 1 node on XY");
+    assert!(workspace.is_dirty());
+
+    workspace.do_undo();
+    let node = workspace.project.active_scene().node(entity).unwrap();
+    assert_eq!(node.transform.translation, [0.0, 0.0, 0.0]);
+}
+
+#[test]
+fn node_gizmo_moves_entity_on_selected_axis() {
+    let mut project = ProjectDocument::new("entity-gizmo-x");
+    let room = project.active_scene_mut().add_node(
+        NodeId::ROOT,
+        "Room",
+        NodeKind::Room {
+            grid: WorldGrid::empty(1, 1, 1024),
+        },
+    );
+    let entity = project
+        .active_scene_mut()
+        .add_node(room, "Entity", NodeKind::Entity);
+    let mut workspace = EditorWorkspace::with_project(test_temp_dir("entity-gizmo-x"), project);
+    set_gizmo_test_camera(&mut workspace);
+    workspace.replace_node_selection(entity);
+
+    let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+    let x_axis = projected_node_gizmo_axis(&workspace, viewport, PrimitiveGizmoAxis::X);
+    let unit = (x_axis.end - x_axis.start).normalized();
+    assert!(workspace.begin_node_gizmo_drag(PrimitiveGizmoAxis::X, viewport, x_axis.start));
+    workspace.update_node_gizmo_drag(viewport, x_axis.start + unit * 4.0);
+    workspace.end_node_gizmo_drag();
+
+    let node = workspace.project.active_scene().node(entity).unwrap();
+    assert!((node.transform.translation[0] - HEIGHT_QUANTUM as f32 / 1024.0).abs() < 0.001);
+    assert_eq!(node.transform.translation[1], 0.0);
+    assert_eq!(node.transform.translation[2], 0.0);
+    let scene = workspace.project.active_scene();
+    let room_node = scene.node(room).unwrap();
+    let NodeKind::Room { grid } = &room_node.kind else {
+        unreachable!("test room is a room");
+    };
+    let world = psxed_project::spatial::node_preview_origin(grid, &node.transform);
+    assert_eq!(world[0], DEFAULT_WORLD_SECTOR_SIZE / 2 + HEIGHT_QUANTUM);
+    assert!(workspace.is_dirty());
+
+    workspace.do_undo();
+    let node = workspace.project.active_scene().node(entity).unwrap();
+    assert_eq!(node.transform.translation, [0.0, 0.0, 0.0]);
+}
+
+#[test]
+fn node_gizmo_moves_point_light_on_y_axis() {
+    let mut project = ProjectDocument::new("light-gizmo-y");
+    let room = project.active_scene_mut().add_node(
+        NodeId::ROOT,
+        "Room",
+        NodeKind::Room {
+            grid: WorldGrid::empty(1, 1, 1024),
+        },
+    );
+    let light = project.active_scene_mut().add_node(
+        room,
+        "Light",
+        NodeKind::PointLight {
+            color: [255, 240, 200],
+            intensity: 1.0,
+            radius: 4.0,
+        },
+    );
+    let mut workspace = EditorWorkspace::with_project(test_temp_dir("light-gizmo-y"), project);
+    set_gizmo_test_camera(&mut workspace);
+    workspace.replace_node_selection(light);
+
+    let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+    let y_axis = projected_node_gizmo_axis(&workspace, viewport, PrimitiveGizmoAxis::Y);
+    let unit = (y_axis.end - y_axis.start).normalized();
+    assert!(workspace.begin_node_gizmo_drag(PrimitiveGizmoAxis::Y, viewport, y_axis.start));
+    workspace.update_node_gizmo_drag(viewport, y_axis.start + unit * 4.0);
+    workspace.end_node_gizmo_drag();
+
+    let node = workspace.project.active_scene().node(light).unwrap();
+    assert_vec3_approx(
+        node.transform.translation,
+        [0.0, HEIGHT_QUANTUM as f32 / 1024.0, 0.0],
+    );
+    let scene = workspace.project.active_scene();
+    let room_node = scene.node(room).unwrap();
+    let NodeKind::Room { grid } = &room_node.kind else {
+        unreachable!("test room is a room");
+    };
+    let world = psxed_project::spatial::node_preview_origin(grid, &node.transform);
+    assert_eq!(world[1], HEIGHT_QUANTUM);
+    assert!(workspace.is_dirty());
+
+    workspace.do_undo();
+    let node = workspace.project.active_scene().node(light).unwrap();
+    assert_eq!(node.transform.translation, [0.0, 0.0, 0.0]);
+}
+
+#[test]
+fn node_gizmo_rotates_image_prop_around_y() {
+    let mut project = ProjectDocument::new("image-prop-gizmo-rotate");
+    let room = project.active_scene_mut().add_node(
+        NodeId::ROOT,
+        "Room",
+        NodeKind::Room {
+            grid: WorldGrid::empty(1, 1, 1024),
+        },
+    );
+    let prop = project.active_scene_mut().add_node(
+        room,
+        "Banner",
+        NodeKind::ImageProp {
+            material: None,
+            width: 1024,
+            height: 1024,
+            cylindrical_billboard: false,
+            collision_enabled: false,
+            collision_size: [1024, 1024, 1024],
+        },
+    );
+    let mut workspace =
+        EditorWorkspace::with_project(test_temp_dir("image-prop-gizmo-rotate"), project);
+    set_gizmo_test_camera(&mut workspace);
+    workspace.replace_node_selection(prop);
+    workspace.transform_gizmo_mode = TransformGizmoMode::Rotate;
+
+    let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+    let ring = workspace
+        .node_rotation_gizmo_screen_ring_for_axis(viewport, PrimitiveGizmoAxis::Y)
+        .expect("rotation ring projects");
+    let start = ring.points[0];
+    let unit = (start - ring.center).normalized();
+    assert!(workspace.begin_node_gizmo_drag(PrimitiveGizmoAxis::Y, viewport, start));
+    workspace.update_node_gizmo_drag(viewport, start + unit * 24.0);
+    workspace.end_node_gizmo_drag();
+
+    let node = workspace.project.active_scene().node(prop).unwrap();
+    assert_eq!(node.transform.rotation_degrees, [0.0, 2.0, 0.0]);
+    assert!(workspace.is_dirty());
+
+    workspace.do_undo();
+    let node = workspace.project.active_scene().node(prop).unwrap();
+    assert_eq!(node.transform.rotation_degrees, [0.0, 0.0, 0.0]);
+}
+
+#[test]
+fn node_gizmo_scales_image_prop_width() {
+    let mut project = ProjectDocument::new("image-prop-gizmo-scale");
+    let room = project.active_scene_mut().add_node(
+        NodeId::ROOT,
+        "Room",
+        NodeKind::Room {
+            grid: WorldGrid::empty(1, 1, 1024),
+        },
+    );
+    let prop = project.active_scene_mut().add_node(
+        room,
+        "Banner",
+        NodeKind::ImageProp {
+            material: None,
+            width: 1024,
+            height: 1024,
+            cylindrical_billboard: false,
+            collision_enabled: false,
+            collision_size: [1024, 1024, 1024],
+        },
+    );
+    let mut workspace =
+        EditorWorkspace::with_project(test_temp_dir("image-prop-gizmo-scale"), project);
+    set_gizmo_test_camera(&mut workspace);
+    workspace.replace_node_selection(prop);
+    workspace.transform_gizmo_mode = TransformGizmoMode::Scale;
+
+    let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+    let x_axis = projected_node_gizmo_axis(&workspace, viewport, PrimitiveGizmoAxis::X);
+    let unit = (x_axis.end - x_axis.start).normalized();
+    assert!(workspace.begin_node_gizmo_drag(PrimitiveGizmoAxis::X, viewport, x_axis.start));
+    workspace.update_node_gizmo_drag(viewport, x_axis.start + unit * 8.0);
+    workspace.end_node_gizmo_drag();
+
+    let node = workspace.project.active_scene().node(prop).unwrap();
+    let NodeKind::ImageProp { width, height, .. } = &node.kind else {
+        panic!("expected image prop");
+    };
+    assert_eq!(*width, 1024 + HEIGHT_QUANTUM as u16);
+    assert_eq!(*height, 1024);
+    assert!(workspace.is_dirty());
+
+    workspace.do_undo();
+    let node = workspace.project.active_scene().node(prop).unwrap();
+    let NodeKind::ImageProp { width, height, .. } = &node.kind else {
+        panic!("expected image prop");
+    };
+    assert_eq!(*width, 1024);
+    assert_eq!(*height, 1024);
+}
+
+#[test]
+fn node_gizmo_scales_box_prop_width() {
+    let mut project = ProjectDocument::new("box-prop-gizmo-scale");
+    let room = project.active_scene_mut().add_node(
+        NodeId::ROOT,
+        "Room",
+        NodeKind::Room {
+            grid: WorldGrid::empty(1, 1, 1024),
+        },
+    );
+    let prop = project.active_scene_mut().add_node(
+        room,
+        "Crate",
+        NodeKind::BoxProp {
+            materials: [None; psxed_project::BOX_PROP_FACE_COUNT],
+            vertices: psxed_project::box_prop_vertices_for_size(1024),
+            collision_enabled: true,
+            break_flags: 0,
+        },
+    );
+    let mut workspace =
+        EditorWorkspace::with_project(test_temp_dir("box-prop-gizmo-scale"), project);
+    set_gizmo_test_camera(&mut workspace);
+    workspace.replace_node_selection(prop);
+    workspace.transform_gizmo_mode = TransformGizmoMode::Scale;
+
+    let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+    let x_axis = projected_node_gizmo_axis(&workspace, viewport, PrimitiveGizmoAxis::X);
+    let unit = (x_axis.end - x_axis.start).normalized();
+    assert!(workspace.begin_node_gizmo_drag(PrimitiveGizmoAxis::X, viewport, x_axis.start));
+    workspace.update_node_gizmo_drag(viewport, x_axis.start + unit * 8.0);
+    workspace.end_node_gizmo_drag();
+
+    let node = workspace.project.active_scene().node(prop).unwrap();
+    let NodeKind::BoxProp { vertices, .. } = &node.kind else {
+        panic!("expected box prop");
+    };
+    let min_x = vertices.iter().map(|v| v[0]).min().unwrap();
+    let max_x = vertices.iter().map(|v| v[0]).max().unwrap();
+    let min_y = vertices.iter().map(|v| v[1]).min().unwrap();
+    let max_y = vertices.iter().map(|v| v[1]).max().unwrap();
+    assert_eq!(min_x, -544);
+    assert_eq!(max_x, 544);
+    assert_eq!(min_y, 0);
+    assert_eq!(max_y, 1024);
+    assert!(workspace.is_dirty());
+
+    workspace.do_undo();
+    let node = workspace.project.active_scene().node(prop).unwrap();
+    let NodeKind::BoxProp { vertices, .. } = &node.kind else {
+        panic!("expected box prop");
+    };
+    assert_eq!(*vertices, psxed_project::box_prop_vertices_for_size(1024));
+}
+
+#[test]
+fn duplicate_wall_cook_error_marks_both_authored_faces() {
+    let mut project = ProjectDocument::new("duplicate-wall");
+    let mut grid = WorldGrid::empty(4, 2, 1024);
+    grid.add_wall(3, 1, GridDirection::South, 0, 1024, None);
+    grid.add_wall(3, 0, GridDirection::North, 0, 1024, None);
+    let room = project
+        .active_scene_mut()
+        .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+    let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
+    workspace.view_2d = false;
+    workspace.camera_rig.target = [99_000, 99_000, 99_000];
+
+    workspace.record_world_cook_error(
+        room,
+        &WorldGridCookError::DuplicatePhysicalWall {
+            x: 3,
+            z: 1,
+            direction: GridDirection::South,
+            other_x: 3,
+            other_z: 0,
+            other_direction: GridDirection::North,
+        },
+        [0, 0],
+    );
+
+    let south = Selection::Face(FaceRef {
+        room,
+        sx: 3,
+        sz: 1,
+        kind: FaceKind::Wall {
+            dir: GridDirection::South,
+            stack: 0,
+        },
+    });
+    let north = Selection::Face(FaceRef {
+        room,
+        sx: 3,
+        sz: 0,
+        kind: FaceKind::Wall {
+            dir: GridDirection::North,
+            stack: 0,
+        },
+    });
+    assert!(workspace.validation_issue_primitives.contains(&south));
+    assert!(workspace.validation_issue_primitives.contains(&north));
+    assert!(workspace.validation_issue_rooms.is_empty());
+    assert_eq!(workspace.selection.selected_primitive, Some(south));
+    assert_eq!(workspace.selection.selected_primitives, vec![south, north]);
+    let (center, _) = workspace
+        .selected_frame_bounds_3d()
+        .expect("duplicate wall faces frame in 3D");
+    assert_eq!(
+        workspace.camera_rig.target,
+        [
+            round_to_i32(center[0]),
+            round_to_i32(center[1]),
+            round_to_i32(center[2])
+        ]
+    );
+}
+
+#[test]
+fn runtime_vram_budget_counts_compact_room_texture_and_model_atlas() {
+    let mut project = ProjectDocument::new("vram-budget");
+    let floor = project.add_resource(
+        "Floor Texture",
+        ResourceData::Texture {
+            psxt_path: "assets/textures/delven_01_slateflr1a_q2.psxt".to_string(),
+        },
+    );
+    let model = project.add_resource(
+        "Obsidian Wraith",
+        ResourceData::Model(psxed_project::ModelResource {
+            model_path: "assets/models/obsidian_wraith/obsidian_wraith.psxmdl".to_string(),
+            source_path: None,
+            texture_path: Some(
+                "assets/models/obsidian_wraith/obsidian_wraith_128x128_8bpp.psxt".to_string(),
+            ),
+            skeleton: None,
+            clips: Vec::new(),
+            default_clip: None,
+            preview_clip: None,
+            world_height: 1024,
+            collision_radius: default_model_collision_radius_for_height(1024),
+            scale_q8: [MODEL_SCALE_ONE_Q8; 3],
+            attachments: Vec::new(),
+        }),
+    );
+    let resource_use = SceneResourceUse {
+        textures: vec![floor],
+        models: vec![model],
+        ..SceneResourceUse::default()
+    };
+
+    let budget = runtime_vram_budget(
+        &project,
+        &psxed_project::default_project_dir(),
+        &resource_use,
+    );
+
+    assert_eq!(budget.textures, 2);
+    assert_eq!(budget.room_textures, 1);
+    assert_eq!(budget.model_textures, 1);
+    assert_eq!(budget.missing, 0);
+    assert_eq!(budget.room_bytes, 8 * 32 * 2 + 16 * 2);
+    assert_eq!(budget.model_bytes, 64 * 128 * 2 + 256 * 2);
+    assert_eq!(budget.bytes, 8 * 32 * 2 + 16 * 2 + 64 * 128 * 2 + 256 * 2);
+}
+
+#[test]
+fn material_click_assignment_updates_all_faces_in_selected_sectors() {
+    let mut project = ProjectDocument::new("materials");
+    let original = project.add_resource(
+        "Original",
+        ResourceData::Material(MaterialResource::opaque(None)),
+    );
+    let target = project.add_resource(
+        "Target",
+        ResourceData::Material(MaterialResource::opaque(None)),
+    );
+    let mut grid = WorldGrid::empty(2, 1, 1024);
+    for sx in 0..=1 {
+        grid.set_floor(sx, 0, 0, Some(original));
+        grid.ensure_sector(sx, 0).unwrap().ceiling =
+            Some(GridHorizontalFace::flat(1024, Some(original)));
+        grid.add_wall(sx, 0, GridDirection::North, 0, 1024, Some(original));
+    }
+    let room = project
+        .active_scene_mut()
+        .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+    let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
+    let mut ctrl = egui::Modifiers::NONE;
+    ctrl.ctrl = true;
+
+    workspace.select_sector((room, 0, 0), egui::Modifiers::NONE);
+    workspace.select_sector((room, 1, 0), ctrl);
+
+    let selected = workspace.selected_face_targets();
+    assert_eq!(selected.len(), 6);
+    assert_eq!(workspace.assign_selected_faces_material(Some(target)), 6);
+
+    for sx in 0..=1 {
+        assert_eq!(
+            workspace.face_material(FaceRef {
+                room,
+                sx,
+                sz: 0,
+                kind: FaceKind::Floor,
+            }),
+            Some(target)
+        );
+        assert_eq!(
+            workspace.face_material(FaceRef {
+                room,
+                sx,
+                sz: 0,
+                kind: FaceKind::Ceiling,
+            }),
+            Some(target)
+        );
+        assert_eq!(
+            workspace.face_material(FaceRef {
+                room,
+                sx,
+                sz: 0,
+                kind: FaceKind::Wall {
+                    dir: GridDirection::North,
+                    stack: 0,
+                },
+            }),
+            Some(target)
+        );
+    }
+    assert!(workspace.is_dirty());
+}
+
+#[test]
+fn material_click_assignment_updates_selected_box_prop_faces() {
+    let mut project = ProjectDocument::new("box-prop-materials");
+    let target = project.add_resource(
+        "Target",
+        ResourceData::Material(MaterialResource::opaque(None)),
+    );
+    let room = project.active_scene_mut().add_node(
+        NodeId::ROOT,
+        "Room",
+        NodeKind::Room {
+            grid: WorldGrid::empty(1, 1, 1024),
+        },
+    );
+    let prop = project.active_scene_mut().add_node(
+        room,
+        "Crate",
+        NodeKind::BoxProp {
+            materials: [None; psxed_project::BOX_PROP_FACE_COUNT],
+            vertices: psxed_project::box_prop_vertices_for_size(1024),
+            collision_enabled: true,
+            break_flags: 0,
+        },
+    );
+    let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
+    workspace.replace_node_selection(prop);
+
+    let assignment = workspace
+        .assign_selected_box_props_resource(target)
+        .expect("material applies to selected box prop");
+    assert_eq!(assignment.updated, 1);
+    assert_eq!(assignment.targets, 1);
+
+    let node = workspace.project.active_scene().node(prop).unwrap();
+    let NodeKind::BoxProp { materials, .. } = &node.kind else {
+        panic!("expected box prop");
+    };
+    assert!(materials.iter().all(|material| *material == Some(target)));
+    assert!(workspace.is_dirty());
+}
+
+#[test]
+fn texture_click_assignment_creates_material_for_selected_box_prop() {
+    let mut project = ProjectDocument::new("box-prop-texture");
+    let texture = project.add_resource(
+        "Brick",
+        ResourceData::Texture {
+            psxt_path: "assets/textures/brick.psxt".to_string(),
+        },
+    );
+    let room = project.active_scene_mut().add_node(
+        NodeId::ROOT,
+        "Room",
+        NodeKind::Room {
+            grid: WorldGrid::empty(1, 1, 1024),
+        },
+    );
+    let prop = project.active_scene_mut().add_node(
+        room,
+        "Crate",
+        NodeKind::BoxProp {
+            materials: [None; psxed_project::BOX_PROP_FACE_COUNT],
+            vertices: psxed_project::box_prop_vertices_for_size(1024),
+            collision_enabled: true,
+            break_flags: 0,
+        },
+    );
+    let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
+    workspace.replace_node_selection(prop);
+
+    let assignment = workspace
+        .assign_selected_box_props_resource(texture)
+        .expect("texture wraps into a material for selected box prop");
+    assert_eq!(assignment.updated, 1);
+    assert_ne!(assignment.material, texture);
+    let material = workspace.project.resource(assignment.material).unwrap();
+    assert!(matches!(
+        &material.data,
+        ResourceData::Material(material) if material.texture == Some(texture)
+    ));
+
+    let node = workspace.project.active_scene().node(prop).unwrap();
+    let NodeKind::BoxProp { materials, .. } = &node.kind else {
+        panic!("expected box prop");
+    };
+    assert!(materials
+        .iter()
+        .all(|material| *material == Some(assignment.material)));
+    assert!(workspace.is_dirty());
+}
+
+#[test]
+fn box_prop_resource_click_keeps_node_selection_active() {
+    let mut project = ProjectDocument::new("box-prop-click-selection");
+    let target = project.add_resource(
+        "Target",
+        ResourceData::Material(MaterialResource::opaque(None)),
+    );
+    let room = project.active_scene_mut().add_node(
+        NodeId::ROOT,
+        "Room",
+        NodeKind::Room {
+            grid: WorldGrid::empty(1, 1, 1024),
+        },
+    );
+    let prop = project.active_scene_mut().add_node(
+        room,
+        "Crate",
+        NodeKind::BoxProp {
+            materials: [None; psxed_project::BOX_PROP_FACE_COUNT],
+            vertices: psxed_project::box_prop_vertices_for_size(1024),
+            collision_enabled: true,
+            break_flags: 0,
+        },
+    );
+    let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
+    workspace.replace_node_selection(prop);
+    workspace.replace_resource_selection(target);
+
+    assert!(
+        workspace.apply_selected_box_prop_resource_click(ResourceClick {
+            id: target,
+            modifiers: egui::Modifiers::NONE,
+        })
+    );
+
+    assert_eq!(workspace.selection.selected_node, prop);
+    assert!(workspace.selection.selected_nodes.contains(&prop));
+    assert_eq!(workspace.selection.selected_resource, None);
+    assert!(workspace.selection.selected_resources.is_empty());
+}
+
+#[test]
+fn selected_material_resource_paints_new_floor_ceiling_and_wall() {
+    let mut project = ProjectDocument::new("paint-selected-material");
+    project.add_resource(
+        "Other",
+        ResourceData::Material(MaterialResource::opaque(None)),
+    );
+    let selected = project.add_resource(
+        "Selected",
+        ResourceData::Material(MaterialResource::opaque(None)),
+    );
+    let room = project.active_scene_mut().add_node(
+        NodeId::ROOT,
+        "Room",
+        NodeKind::Room {
+            grid: WorldGrid::empty(1, 1, 1024),
+        },
+    );
+    let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
+    workspace.replace_resource_selection(selected);
+
+    workspace.run_paint_action(ViewTool::PaintFloor, room, 0, 0, None, [512.0, 0.0, 512.0]);
+    workspace.run_paint_action(
+        ViewTool::PaintCeiling,
+        room,
+        0,
+        0,
+        None,
+        [512.0, 1024.0, 512.0],
+    );
+    workspace.run_paint_action(
+        ViewTool::PaintWall,
+        room,
+        0,
+        0,
+        Some(FaceRef {
+            room,
+            sx: 0,
+            sz: 0,
+            kind: FaceKind::Wall {
+                dir: GridDirection::North,
+                stack: 0,
+            },
+        }),
+        [512.0, 0.0, 1024.0],
+    );
+
+    let grid = workspace.room_grid_view(room).unwrap();
+    let sector = grid.sector(0, 0).unwrap();
+    assert_eq!(sector.floor.as_ref().unwrap().material, Some(selected));
+    assert_eq!(sector.ceiling.as_ref().unwrap().material, Some(selected));
+    assert_eq!(
+        sector.walls.get(GridDirection::North)[0].material,
+        Some(selected)
+    );
+}
+
+#[test]
+fn place_image_prop_with_selected_material_creates_node() {
+    let mut project = ProjectDocument::new("image-prop-material-place");
+    let material = project.add_resource(
+        "Banner",
+        ResourceData::Material(MaterialResource::opaque(None)),
+    );
+    let room = project.active_scene_mut().add_node(
+        NodeId::ROOT,
+        "Room",
+        NodeKind::Room {
+            grid: WorldGrid::empty(1, 1, 1024),
+        },
+    );
+    let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
+    workspace.place_kind = PlaceKind::ImageProp;
+    workspace.replace_resource_selection(material);
+
+    workspace.run_paint_action(ViewTool::Place, room, 0, 0, None, [512.0, 384.0, 512.0]);
+
+    let node = workspace
+        .project
+        .active_scene()
+        .node(workspace.selected_node_id())
+        .expect("placed image prop is selected");
+    assert_eq!(node.name, "Banner Image");
+    assert_eq!(workspace.active_tool, ViewTool::Select);
+    assert_eq!(node.transform.translation[1], 384.0 / 1024.0);
+    let NodeKind::ImageProp {
+        material: Some(actual),
+        width,
+        height,
+        cylindrical_billboard,
+        ..
+    } = &node.kind
+    else {
+        panic!("expected image prop node");
+    };
+    assert_eq!(*actual, material);
+    assert_eq!(*width, psxed_project::DEFAULT_IMAGE_PROP_SIZE);
+    assert_eq!(*height, psxed_project::DEFAULT_IMAGE_PROP_SIZE);
+    assert!(!*cylindrical_billboard);
+    assert_eq!(workspace.status, "Placed Image Prop at 0,0");
+    assert!(workspace.is_dirty());
+}
