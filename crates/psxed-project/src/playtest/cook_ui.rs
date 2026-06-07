@@ -1,5 +1,5 @@
 use super::*;
-use crate::UiVisibilityCondition;
+use crate::{UiTransition, UiTransitionKind, UiVisibilityCondition};
 
 pub(crate) fn active_far_vista_panel_count(
     texture_panels: &[Option<ResourceId>; FAR_VISTA_TEXTURE_PANEL_COUNT],
@@ -1165,16 +1165,44 @@ pub(crate) fn cook_ui_action(action: UiAction) -> PlaytestUiAction {
         UiAction::GotoState(state) => PlaytestUiAction::GotoState {
             state: cook_scene_state_id(state),
         },
+        UiAction::TransitionToState { state, transition } => PlaytestUiAction::TransitionToState {
+            state: cook_scene_state_id(state),
+            transition: cook_ui_transition(transition),
+        },
         UiAction::GotoScene(scene) => PlaytestUiAction::GotoScene {
             scene: (scene.raw() & u16::MAX as u64) as u16,
         },
+        UiAction::TransitionToScene { scene, transition } => PlaytestUiAction::TransitionToScene {
+            scene: (scene.raw() & u16::MAX as u64) as u16,
+            transition: cook_ui_transition(transition),
+        },
         UiAction::StartGameplay => PlaytestUiAction::StartGameplay,
+        UiAction::StartGameplayTransition { transition } => {
+            PlaytestUiAction::StartGameplayTransition {
+                transition: cook_ui_transition(transition),
+            }
+        }
         UiAction::Back => PlaytestUiAction::Back,
         UiAction::SetOption { option, delta } => PlaytestUiAction::SetOption {
             option: cook_option_id(option),
             delta,
         },
         UiAction::Game(id) => PlaytestUiAction::Game { id },
+    }
+}
+
+pub(crate) fn cook_ui_transition(transition: UiTransition) -> PlaytestTransition {
+    let kind = match transition.kind {
+        UiTransitionKind::None => PlaytestTransitionKind::None,
+        UiTransitionKind::Fade => PlaytestTransitionKind::Fade,
+        UiTransitionKind::BlockDissolve => PlaytestTransitionKind::BlockDissolve,
+        UiTransitionKind::GlitchBreak => PlaytestTransitionKind::GlitchBreak,
+    };
+    PlaytestTransition {
+        kind,
+        frames: transition.frames,
+        color: transition.color,
+        seed: transition.seed,
     }
 }
 

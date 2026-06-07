@@ -2628,16 +2628,51 @@ fn render_ui_action(action: PlaytestUiAction) -> String {
         PlaytestUiAction::GotoState { state } => {
             format!("LevelUiAction::GotoState {{ state: {state} }}")
         }
+        PlaytestUiAction::TransitionToState { state, transition } => {
+            format!(
+                "LevelUiAction::TransitionToState {{ state: {state}, transition: {} }}",
+                render_transition(transition)
+            )
+        }
         PlaytestUiAction::GotoScene { scene } => {
             format!("LevelUiAction::GotoScene {{ scene: {scene} }}")
         }
+        PlaytestUiAction::TransitionToScene { scene, transition } => {
+            format!(
+                "LevelUiAction::TransitionToScene {{ scene: {scene}, transition: {} }}",
+                render_transition(transition)
+            )
+        }
         PlaytestUiAction::StartGameplay => "LevelUiAction::StartGameplay".to_string(),
+        PlaytestUiAction::StartGameplayTransition { transition } => {
+            format!(
+                "LevelUiAction::StartGameplayTransition {{ transition: {} }}",
+                render_transition(transition)
+            )
+        }
         PlaytestUiAction::Back => "LevelUiAction::Back".to_string(),
         PlaytestUiAction::SetOption { option, delta } => {
             format!("LevelUiAction::SetOption {{ option: {option}, delta: {delta} }}")
         }
         PlaytestUiAction::Game { id } => format!("LevelUiAction::Game {{ id: {id} }}"),
     }
+}
+
+fn render_transition(transition: PlaytestTransition) -> String {
+    let kind = match transition.kind {
+        PlaytestTransitionKind::None => "LevelTransitionKind::None",
+        PlaytestTransitionKind::Fade => "LevelTransitionKind::Fade",
+        PlaytestTransitionKind::BlockDissolve => "LevelTransitionKind::BlockDissolve",
+        PlaytestTransitionKind::GlitchBreak => "LevelTransitionKind::GlitchBreak",
+    };
+    format!(
+        "LevelTransition {{ kind: {kind}, frames: {}, color: [{}, {}, {}], seed: {} }}",
+        transition.frames,
+        transition.color[0],
+        transition.color[1],
+        transition.color[2],
+        transition.seed
+    )
 }
 
 fn render_ui_sfx_event(event: psx_level::LevelUiSfxEvent) -> &'static str {
@@ -3096,6 +3131,8 @@ use psx_level::{
     LevelRoomVisibilityRecord,
     LevelSceneState,
     LevelSkyRecord,
+    LevelTransition,
+    LevelTransitionKind,
     LevelUiAction,
     LevelUiGradientDirection,
     LevelUiImageEffect,
