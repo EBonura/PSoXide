@@ -286,12 +286,22 @@ impl Playtest {
         self.materials[..mats.len()].copy_from_slice(mats);
     }
 
-    pub(super) fn refresh_active_room_materials(&mut self) {
+    /// Rebuild every active room's material table, re-queuing any texture that
+    /// was previously dropped (upload queue full) now that the queue may have
+    /// drained. Returns `true` while any active room still has an unresolved
+    /// (pending or dropped) texture, so the caller keeps pumping until all
+    /// resolve instead of stalling once in-flight uploads finish.
+    pub(super) fn refresh_active_room_materials(&mut self) -> bool {
+        let mut unresolved = false;
         let mut slot = 0usize;
         while slot < MAX_ACTIVE_ROOMS {
             if let Some(active) = self.active_rooms[slot] {
                 if let Some(record) = ROOMS.get(active.index.to_usize()) {
-                    let (materials, material_count) = build_runtime_room_material_table(record);
+                    let (materials, material_count, all_resolved) =
+                        build_runtime_room_material_table(record);
+                    if !all_resolved {
+                        unresolved = true;
+                    }
                     #[cfg(feature = "cd-stream-bench")]
                     store_room_materials(active.stream_slot, materials, material_count);
                     #[cfg(not(feature = "cd-stream-bench"))]
@@ -306,6 +316,7 @@ impl Playtest {
             slot += 1;
         }
         self.apply_current_active_room_fields();
+        unresolved
     }
 
     pub(super) fn mark_visible_room_unbuilt(&mut self, index: RoomIndex) {

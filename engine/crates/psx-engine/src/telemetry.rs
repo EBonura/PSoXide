@@ -544,6 +544,23 @@ pub mod counter {
     pub const TEXTURED_MODEL_COMMAND_OVERFLOW_SUBMITS: u16 = 216;
     /// Room-texture VRAM slots freed by residency eviction (Stage 4 teardown).
     pub const VRAM_SLOTS_FREED: u16 = 217;
+    /// Texture uploads that found no free `VRAM_SLOTS` entry: the 64-slot
+    /// residency table cap, the binding VRAM budget for distinct resident
+    /// textures. A non-zero value during traversal is the silent missing-texture
+    /// root cause.
+    pub const VRAM_SLOT_TABLE_FULL: u16 = 218;
+    /// Room-texture uploads where `alloc_window` found no free space in the
+    /// room-material page band (the secondary 4bpp window cap).
+    pub const VRAM_WINDOW_FULL: u16 = 219;
+    /// Texture uploads where `alloc_clut` found no free CLUT slot (the CLUT band cap).
+    pub const VRAM_CLUT_FULL: u16 = 220;
+    /// Room-texture uploads skipped because the in-flight VRAM upload queue had
+    /// no free slot (the upload-queue depth throttle, another silent skip).
+    pub const VRAM_UPLOAD_QUEUE_FULL: u16 = 221;
+    /// Room materials left untextured because their texture failed to become
+    /// VRAM-resident (a real drop, not merely a pending upload): the silent
+    /// missing-texture fallback at material-build time.
+    pub const ROOM_MATERIAL_TEXTURE_DROPS: u16 = 222;
 }
 
 const EVENT_KIND_FRAME_BEGIN: u8 = 1;

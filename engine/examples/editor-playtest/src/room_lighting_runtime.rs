@@ -12,12 +12,13 @@ use super::*;
 pub(super) fn build_room_materials(
     room: &LevelRoomRecord,
     out: &mut [Option<WorldRenderMaterial>; MAX_ROOM_MATERIALS],
-) -> usize {
+) -> (usize, bool) {
     let first = room.material_first.to_usize();
     let count = room.material_count as usize;
     let slice: &[LevelMaterialRecord] = &MATERIALS[first..first + count];
 
     let mut max_slot: usize = 0;
+    let mut all_resolved = true;
     for material in slice {
         let slot = material.local_slot.to_usize();
         if slot >= MAX_ROOM_MATERIALS {
@@ -31,6 +32,13 @@ pub(super) fn build_room_materials(
             continue;
         };
         let Some(slot_record) = ensure_texture_uploaded(asset.id, asset.bytes) else {
+            all_resolved = false;
+            // Distinguish a real drop (the silent untextured fallback, queue full
+            // or VRAM full) from a still-in-flight upload that resolves on a later
+            // refresh: only the former should count as a missing-texture drop.
+            if !pending_room_texture_upload(asset.id) {
+                telemetry::counter(telemetry::counter::ROOM_MATERIAL_TEXTURE_DROPS, 1);
+            }
             continue;
         };
         let texture = TextureMaterial::opaque(
@@ -50,7 +58,7 @@ pub(super) fn build_room_materials(
         );
         out[slot] = Some(render_material);
     }
-    max_slot
+    (max_slot, all_resolved)
 }
 
 #[derive(Copy, Clone)]
