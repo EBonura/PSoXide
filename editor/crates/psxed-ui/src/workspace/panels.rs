@@ -1103,6 +1103,7 @@ impl EditorWorkspace {
                 ));
             });
         }
+        changed |= draw_ui_visibility_editor(ui, &mut node.visible_when);
         ui.separator();
 
         match &mut node.kind {

@@ -438,6 +438,25 @@ pub fn build_package(
                 }
                 let material_count =
                     u16::try_from(materials.len() - material_first as usize).unwrap_or(u16::MAX);
+                // The runtime keeps a fixed per-room material table of
+                // psx_level::MAX_ROOM_MATERIALS slots and silently drops any
+                // material whose local_slot is >= that cap, which makes every
+                // surface on the dropped slot invisible at runtime. Fail the cook
+                // loudly here instead (this was the demo10 invisible frieze/stairs
+                // root cause, which had no signal until the runtime telemetry and
+                // this guard were added).
+                if material_count as usize > psx_level::MAX_ROOM_MATERIALS {
+                    report.error(format!(
+                        "Room '{}' uses {} distinct materials but the per-room cap \
+                         is {} (psx_level::MAX_ROOM_MATERIALS). Reduce the room's \
+                         materials or raise the cap; over-cap materials render \
+                         invisible at runtime.",
+                        room_node.name,
+                        material_count,
+                        psx_level::MAX_ROOM_MATERIALS,
+                    ));
+                    return (None, report);
+                }
 
                 let resolved_culling = scene
                     .world_culling_for_node(room_node.id)

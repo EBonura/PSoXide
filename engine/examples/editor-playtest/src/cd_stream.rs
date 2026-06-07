@@ -14,6 +14,8 @@ const CD_PARAM: u32 = CD_BASE + 2;
 const CD_IRQ: u32 = CD_BASE + 3;
 
 const STATUS_RESPONSE_FIFO_NOT_EMPTY: u8 = 1 << 5;
+const STATUS_PARAMETER_FIFO_NOT_FULL: u8 = 1 << 4;
+const STATUS_DATA_FIFO_NOT_EMPTY: u8 = 1 << 6;
 
 const IRQ_DATA_READY: u8 = 1;
 const IRQ_COMPLETE: u8 = 2;
@@ -21,14 +23,10 @@ const IRQ_ACK: u8 = 3;
 const IRQ_DATA_END: u8 = 4;
 const IRQ_ERROR: u8 = 5;
 
-const CMD_GETSTAT: u8 = 0x01;
 const CMD_SETLOC: u8 = 0x02;
 const CMD_READN: u8 = 0x06;
 const CMD_PAUSE: u8 = 0x09;
 const CMD_SETMODE: u8 = 0x0E;
-
-const DRIVE_STATUS_MOTOR_ON: u8 = 1 << 1;
-const DRIVE_STATUS_SHELL_OPEN: u8 = 1 << 4;
 
 const CD_MODE_DOUBLE_SPEED_2048: u8 = 0x80;
 #[cfg(feature = "cd-stream-benchmark")]
@@ -65,6 +63,7 @@ const STATUS_DEST_TOO_SMALL: u32 = 11;
 pub const ROOM_CHUNK_STATUS_OK: u32 = STATUS_OK;
 
 const COMMAND_ACK_POLL_LIMIT: u32 = 16_384;
+const PARAMETER_ROOM_POLL_LIMIT: u32 = 16_384;
 #[cfg(feature = "cd-stream-benchmark")]
 const DATA_READY_POLL_LIMIT: u32 = 1_000_000;
 #[cfg(target_arch = "mips")]
@@ -548,53 +547,17 @@ fn run_benchmark_inner() -> BenchResult {
     };
 
     unsafe {
-        cd_enable_irqs();
-        cd_ack_all();
-        let Some(stat) = get_stat(&mut result.polls) else {
-            result.status = STATUS_CD_ERROR;
-            return result;
-        };
-        if stat & DRIVE_STATUS_MOTOR_ON == 0 || stat & DRIVE_STATUS_SHELL_OPEN != 0 {
-            result.status = STATUS_CD_ERROR;
+        if let Err(status) = prepare_cd_read(&mut result.polls) {
+            result.status = status;
             return result;
         }
-        if !send_command(
-            CMD_SETMODE,
-            &[CD_MODE_DOUBLE_SPEED_2048],
-            IRQ_ACK,
-            COMMAND_ACK_POLL_LIMIT,
-            &mut result.polls,
-        ) {
-            result.status = classify_command_failure(STATUS_SETMODE_TIMEOUT);
-            return result;
-        }
-
-        let (minute, second, frame) = lba_to_bcd_msf(CD_STREAM_BENCH_LBA);
-        if !send_command(
-            CMD_SETLOC,
-            &[minute, second, frame],
-            IRQ_ACK,
-            COMMAND_ACK_POLL_LIMIT,
-            &mut result.polls,
-        ) {
-            result.status = classify_command_failure(STATUS_SETLOC_TIMEOUT);
-            return result;
-        }
-
-        if !send_command(
-            CMD_READN,
-            &[],
-            IRQ_ACK,
-            COMMAND_ACK_POLL_LIMIT,
-            &mut result.polls,
-        ) {
-            result.status = classify_command_failure(STATUS_READ_ACK_TIMEOUT);
+        if let Err(status) = start_cd_read_at_lba(CD_STREAM_BENCH_LBA, &mut result.polls) {
+            result.status = status;
+            cleanup_read_stream(&mut result.polls);
             return result;
         }
 
         let buffer = core::ptr::addr_of_mut!(CD_STREAM_SECTOR_BUFFER) as *mut u32;
-        psx_io::dma::enable_channel(psx_io::dma::Channel::Cdrom);
-
         let mut sector = 0usize;
         let mut steady_stage_open = false;
         while sector < CD_STREAM_BENCH_SECTORS {

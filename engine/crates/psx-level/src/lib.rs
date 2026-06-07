@@ -278,6 +278,15 @@ pub const BOX_PROP_FACE_COUNT: usize = 6;
 /// Editable vertex count on an authored boxed prop.
 pub const BOX_PROP_VERTEX_COUNT: usize = 8;
 
+/// Maximum distinct materials a single room may reference.
+///
+/// This is the cook<->runtime contract for the per-room material table: the
+/// runtime allocates a fixed `[_; MAX_ROOM_MATERIALS]` per active room and drops
+/// any material whose `local_slot` is >= this. The cook MUST reject a room that
+/// exceeds it (otherwise surfaces on the overflow slots silently vanish at
+/// runtime). Both sides reference this single constant so they can never drift.
+pub const MAX_ROOM_MATERIALS: usize = 16;
+
 /// Box prop record flags.
 pub mod box_prop_flags {
     /// Prop emits a static collision blocker for the character motor.
@@ -359,6 +368,8 @@ pub mod ui_node_flags {
     pub const FLIP_X: u16 = 1 << 9;
     /// Mirror the node's local Y axis before rotation.
     pub const FLIP_Y: u16 = 1 << 10;
+    /// Node is only visible while the active controller is not in analog mode.
+    pub const ANALOG_INACTIVE_ONLY: u16 = 1 << 11;
 }
 
 typed_index! {

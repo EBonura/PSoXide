@@ -291,12 +291,13 @@ pub(super) const MAX_CACHED_ROOM_VERTICES: usize = 4096;
 
 pub(super) const MAX_TEXTURED_TRIS: usize = 3328;
 
-/// Cap on the per-room material slot count. Picked to comfortably
-/// exceed the cooker's currently-emitted material count without
-/// over-reserving VRAM or RAM. If a future room exceeds this,
-/// the runtime fails graceful (skips the over-cap material) and
-/// the cook report should also flag.
-pub(super) const MAX_ROOM_MATERIALS: usize = 16;
+/// Cap on the per-room material slot count. Single source of truth is
+/// `psx_level::MAX_ROOM_MATERIALS` (the cook<->runtime contract): the cook now
+/// rejects any room that exceeds it, so an over-cap room fails loudly at cook
+/// time instead of silently dropping the over-cap material at runtime. Sized to
+/// comfortably exceed the cooker's emitted material count (observed max 12 in
+/// demo10) without over-reserving VRAM or RAM.
+pub(super) const MAX_ROOM_MATERIALS: usize = psx_level::MAX_ROOM_MATERIALS;
 /// Current manual portal room plus the best cache-budgeted nearby rooms.
 ///
 /// Upper bound for rooms that can be active, drawable, and collidable in one
@@ -337,7 +338,6 @@ pub(super) const STREAMED_ROOM_SLOT_BYTES: usize =
 pub(super) const STREAMED_ROOM_SLOT_WORDS: usize = STREAMED_ROOM_SLOT_BYTES / 4;
 #[cfg(feature = "cd-stream-bench")]
 pub(super) const MAX_STREAMED_ROOM_SLOT_COUNT: usize = 256;
-#[cfg(feature = "cd-stream-bench")]
 pub(super) const STREAMED_ROOM_SLOT_NONE: u16 = u16::MAX;
 #[cfg(feature = "cd-stream-bench")]
 pub(super) const MAX_STREAMED_ROOM_INDEX_COUNT: usize = 256;

@@ -144,6 +144,29 @@ pub enum UiGradientDirection {
     Horizontal,
 }
 
+/// Runtime condition controlling whether an authored UI node is drawn.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UiVisibilityCondition {
+    /// Always draw the node.
+    #[default]
+    Always,
+    /// Draw only while the current pad is not reporting DualShock analog mode.
+    AnalogInactive,
+}
+
+impl UiVisibilityCondition {
+    /// Stable list used by editor controls.
+    pub const ALL: [Self; 2] = [Self::Always, Self::AnalogInactive];
+
+    /// Compact display label.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Always => "Always",
+            Self::AnalogInactive => "Analog inactive",
+        }
+    }
+}
+
 impl UiGradientDirection {
     /// Stable list used by editor controls.
     pub const ALL: [Self; 2] = [Self::Vertical, Self::Horizontal];
@@ -1089,6 +1112,9 @@ pub struct UiNode {
     pub name: String,
     /// Node payload.
     pub kind: UiNodeKind,
+    /// Runtime visibility condition.
+    #[serde(default)]
+    pub visible_when: UiVisibilityCondition,
 }
 
 impl UiNode {
@@ -1105,6 +1131,7 @@ impl UiNode {
             children: Vec::new(),
             name: name.into(),
             kind,
+            visible_when: UiVisibilityCondition::Always,
         }
     }
 }

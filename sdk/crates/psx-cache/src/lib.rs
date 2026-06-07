@@ -426,7 +426,10 @@ mod tests {
         c.bump_epoch();
         put(&mut c, 4, 40);
         assert!(c.contains_ready(1), "pinned key must survive");
-        assert!(!c.contains_ready(2), "an unpinned key is the victim instead");
+        assert!(
+            !c.contains_ready(2),
+            "an unpinned key is the victim instead"
+        );
     }
 
     #[test]
