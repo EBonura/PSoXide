@@ -43,6 +43,7 @@ pub(super) fn draw_player_equipment(
         local_tick,
         video_hz,
         character.action_loops(anim_action),
+        character.action_speed(anim_action),
     );
     let character_anchor = model_clip_anchor(character_model, clip_local);
     let reference_anchor = model_clip_anchor(character_model, character.clip_for(PlayerAnim::Idle));
