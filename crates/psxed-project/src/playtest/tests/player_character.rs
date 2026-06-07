@@ -525,6 +525,9 @@ fn component_player_without_profile_uses_model_renderer_and_animator() {
                 speed_q8: crate::ACTION_SPEED_UNSCALED_Q8,
                 frame_start: 3,
                 frame_end: 9,
+                push_distance: 256,
+                push_frame_start: 4,
+                push_frame_end: 8,
             }),
         });
     }
@@ -554,6 +557,13 @@ fn component_player_without_profile_uses_model_renderer_and_animator() {
     assert_eq!(
         character.action_frame_ranges[CharacterAnimationAction::Backstep.to_index()],
         psx_level::CharacterActionFrameRange { start: 3, end: 9 }
+    );
+    assert_eq!(
+        character.action_pushes[CharacterAnimationAction::Backstep.to_index()],
+        psx_level::CharacterActionPush {
+            distance: 256,
+            frame_range: psx_level::CharacterActionFrameRange { start: 4, end: 8 },
+        }
     );
 }
 
