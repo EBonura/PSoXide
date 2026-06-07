@@ -603,6 +603,15 @@ impl Playtest {
                     self.begin_active_room_window_job(true);
                 }
             }
+            // Pump the material refresh while any room texture is unresolved, not
+            // only when an upload completes. A dropped texture (queue was full) is
+            // never queued, so it produces no completion to wake a refresh; without
+            // this it stays the untextured fallback forever. Re-running refresh as
+            // the queue drains re-queues the drops until every room resolves.
+            // When an upload finishes, rebuild the active-room materials so they
+            // pick up the now-resident texture. With the deeper upload queue and
+            // faster drain, drops are queued and complete quickly, so this
+            // completion-gated refresh resolves them.
             if self.streaming_jobs.step_vram_uploads() {
                 self.refresh_active_room_materials();
             }

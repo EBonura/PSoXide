@@ -1333,6 +1333,13 @@ fn editor_play_metrics(state: &app::AppState) -> Option<psxed_ui::EditorPlaytest
         stream_pending: recent_counter(counter::ROOM_STREAM_PENDING_LOADS),
         stream_failed: recent_counter(counter::ROOM_STREAM_FAILED_LOADS),
         stream_protected_full: recent_counter(counter::ROOM_STREAM_PROTECTED_FULL),
+        vram_texture_drops: recent_counter(counter::ROOM_MATERIAL_TEXTURE_DROPS),
+        vram_caps_full: [
+            recent_counter(counter::VRAM_SLOT_TABLE_FULL),
+            recent_counter(counter::VRAM_WINDOW_FULL),
+            recent_counter(counter::VRAM_CLUT_FULL),
+            recent_counter(counter::VRAM_UPLOAD_QUEUE_FULL),
+        ],
         chunk_loaded_mask: chunk_mask(
             counter::ROOM_STREAM_RESIDENT_MASK_LO,
             counter::ROOM_STREAM_RESIDENT_MASK_HI,
