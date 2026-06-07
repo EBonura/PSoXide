@@ -42,9 +42,9 @@ use ui_preview::*;
 use viewport2d::*;
 
 pub use play_mode::{
-    EditorPlaytestMetrics, EditorPlaytestRequest, EditorPlaytestStatus, EditorPlaytestTapeMode,
-    EditorPlaytestTapeStatus, EditorViewport3dMode, EditorViewport3dPresentation,
-    EditorViewportOverlayLine,
+    EditorCameraPreviewPresentation, EditorPlaytestMetrics, EditorPlaytestRequest,
+    EditorPlaytestStatus, EditorPlaytestTapeMode, EditorPlaytestTapeStatus, EditorViewport3dMode,
+    EditorViewport3dPresentation, EditorViewportOverlayLine,
 };
 
 use crate::gizmo::*;
@@ -1514,6 +1514,15 @@ pub struct ViewportCameraState {
     pub target: [i32; 3],
     /// Free-camera position in editor preview world units.
     pub position: [i32; 3],
+}
+
+/// Extra editor-preview render requested by the selected Camera inspector.
+#[derive(Debug, Clone, Copy)]
+pub struct EditorCameraPreviewRequest {
+    /// Camera state to render from.
+    pub camera: ViewportCameraState,
+    /// Room window to render for the preview.
+    pub active_room: Option<NodeId>,
 }
 
 /// 3D viewport camera rig: orbit and free-fly parameters plus the active mode.
