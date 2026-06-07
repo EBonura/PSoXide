@@ -1280,6 +1280,7 @@ impl EditorWorkspace {
                 wav_path,
                 volume,
                 volume_option,
+                playback_speed_q12,
                 loop_track,
             } => {
                 ui.weak("Non-visual CD-DA music cue for this UI scene.");
@@ -1293,6 +1294,18 @@ impl EditorWorkspace {
                         .changed()
                     {
                         *volume = value as u8;
+                        changed = true;
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Playback speed").color(STUDIO_TEXT_WEAK));
+                    let mut speed = ((*playback_speed_q12).max(1) as f32) / 4096.0;
+                    if ui
+                        .add(egui::Slider::new(&mut speed, 0.25..=2.0).suffix("x"))
+                        .changed()
+                    {
+                        *playback_speed_q12 =
+                            ((speed * 4096.0).round() as i32).clamp(1, 0x3FFF) as u16;
                         changed = true;
                     }
                 });
