@@ -646,6 +646,7 @@ impl EditorWorkspace {
     }
 
     pub(crate) fn draw_debug_terminal_tab(&mut self, ui: &mut egui::Ui) {
+        let terminal_width = ui.available_width().max(1.0);
         let terminal_height = ui.available_height().max(1.0);
         egui::Frame::new()
             .fill(Color32::from_black_alpha(170))
@@ -653,6 +654,7 @@ impl EditorWorkspace {
             .corner_radius(egui::CornerRadius::same(4))
             .inner_margin(egui::Margin::symmetric(8, 7))
             .show(ui, |ui| {
+                ui.set_min_width((terminal_width - 16.0).max(1.0));
                 ui.set_min_height((terminal_height - 14.0).max(1.0));
                 if self.play_debug_terminal_lines.is_empty() {
                     ui.weak("Guest debug terminal is waiting for PSX log output.");
