@@ -249,6 +249,7 @@ impl Playtest {
         character: RuntimeCharacter,
         clip: ModelClipIndex,
         video_hz: VideoHz,
+        speed_q8: u16,
     ) -> Option<u32> {
         let runtime_model = self
             .models
@@ -258,11 +259,10 @@ impl Playtest {
         let animation = runtime_model.clip(&self.clips, clip)?;
         let sample_rate = animation.sample_rate_hz().max(1) as u32;
         let frames = animation.frame_count().max(1) as u32;
-        Some(
-            frames
-                .saturating_mul(video_hz.as_nonzero_u32())
-                .div_ceil(sample_rate),
-        )
+        let unscaled = frames
+            .saturating_mul(video_hz.as_nonzero_u32())
+            .div_ceil(sample_rate);
+        Some(scale_duration_for_action_speed(unscaled, speed_q8))
     }
 
     pub(super) fn load_runtime_models(&mut self) {
@@ -271,6 +271,7 @@ impl Playtest {
             self.models[i] = None;
             i += 1;
         }
+
         i = 0;
         while i < MAX_RUNTIME_MODEL_CLIPS {
             self.clips[i] = None;
@@ -308,6 +309,13 @@ impl Playtest {
             );
         }
     }
+}
+
+fn scale_duration_for_action_speed(duration_vblanks: u32, speed_q8: u16) -> u32 {
+    duration_vblanks
+        .saturating_mul(psx_level::CHARACTER_ACTION_SPEED_UNSCALED_Q8 as u32)
+        .div_ceil(speed_q8.max(1) as u32)
+        .max(1)
 }
 
 #[derive(Copy, Clone, Debug, Default)]
