@@ -30,7 +30,12 @@ impl Playtest {
         }
         let clip = character.clip_for(anim);
         let duration = self
-            .player_clip_duration_vblanks(character, clip, video_hz)
+            .player_clip_duration_vblanks(
+                character,
+                clip,
+                video_hz,
+                character.action_speed(anim.action()),
+            )
             .unwrap_or(24)
             .max(1);
         self.anim_lock_until_tick = now.saturating_add(duration);
