@@ -1654,6 +1654,55 @@ pub struct GameFlow {
     pub entry: u16,
 }
 
+/// Full-screen transition effect kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LevelTransitionKind {
+    /// No transition; switch states immediately.
+    None,
+    /// Darken the current frame toward `color`.
+    Fade,
+    /// Cover the frame with deterministic random blocks.
+    BlockDissolve,
+    /// Horizon-Glide-style digital break: tears, static blocks, then blackout.
+    GlitchBreak,
+}
+
+/// Cooked full-screen transition settings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelTransition {
+    /// Effect variant.
+    pub kind: LevelTransitionKind,
+    /// Duration in visual frames. `0` behaves like [`LevelTransitionKind::None`].
+    pub frames: u16,
+    /// Overlay colour. Usually black.
+    pub color: [u8; 3],
+    /// Deterministic noise seed for block/glitch effects.
+    pub seed: u16,
+}
+
+impl LevelTransition {
+    /// No transition.
+    pub const NONE: Self = Self {
+        kind: LevelTransitionKind::None,
+        frames: 0,
+        color: [0, 0, 0],
+        seed: 0,
+    };
+
+    /// Default glitch transition tuned for menu/title handoffs.
+    pub const GLITCH_BREAK: Self = Self {
+        kind: LevelTransitionKind::GlitchBreak,
+        frames: 45,
+        color: [0, 0, 0],
+        seed: 0x4b1d,
+    };
+
+    /// Whether this transition should delay a state switch.
+    pub const fn is_active(self) -> bool {
+        !matches!(self.kind, LevelTransitionKind::None) && self.frames != 0
+    }
+}
+
 /// Screen-space UI node kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LevelUiNodeKind {
@@ -1748,13 +1797,32 @@ pub enum LevelUiAction {
         /// Target [`LevelSceneState::id`].
         state: u16,
     },
+    /// Switch to a composed scene state with a full-screen transition.
+    TransitionToState {
+        /// Target [`LevelSceneState::id`].
+        state: u16,
+        /// Transition to play before revealing the target.
+        transition: LevelTransition,
+    },
     /// Switch the game flow to the named [`LevelUiScene`] by id.
     GotoScene {
         /// Target [`LevelUiScene::id`].
         scene: u16,
     },
+    /// Switch to a UI scene with a full-screen transition.
+    TransitionToScene {
+        /// Target [`LevelUiScene::id`].
+        scene: u16,
+        /// Transition to play before revealing the target.
+        transition: LevelTransition,
+    },
     /// Enter the gameplay/level simulation.
     StartGameplay,
+    /// Enter gameplay with a full-screen transition.
+    StartGameplayTransition {
+        /// Transition to play before revealing gameplay/loading.
+        transition: LevelTransition,
+    },
     /// Return to the previous menu/scene.
     Back,
     /// Adjust a project option by a signed delta.

@@ -300,6 +300,80 @@ impl UiValueBinding {
     }
 }
 
+/// Authored full-screen transition effect kind.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UiTransitionKind {
+    /// No transition; switch immediately.
+    #[default]
+    None,
+    /// Darken the frame toward the transition colour.
+    Fade,
+    /// Deterministic random block cover.
+    BlockDissolve,
+    /// Horizon-Glide-style digital break.
+    GlitchBreak,
+}
+
+impl UiTransitionKind {
+    /// Human-readable editor label.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::Fade => "Fade",
+            Self::BlockDissolve => "Block Dissolve",
+            Self::GlitchBreak => "Glitch Break",
+        }
+    }
+}
+
+/// Authored full-screen transition settings for button-driven flow changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UiTransition {
+    /// Effect variant.
+    #[serde(default)]
+    pub kind: UiTransitionKind,
+    /// Duration in visual frames.
+    #[serde(default = "default_ui_transition_frames")]
+    pub frames: u16,
+    /// Overlay colour. Usually black.
+    #[serde(default)]
+    pub color: [u8; 3],
+    /// Deterministic noise seed.
+    #[serde(default = "default_ui_transition_seed")]
+    pub seed: u16,
+}
+
+impl Default for UiTransition {
+    fn default() -> Self {
+        Self {
+            kind: UiTransitionKind::None,
+            frames: default_ui_transition_frames(),
+            color: [0, 0, 0],
+            seed: default_ui_transition_seed(),
+        }
+    }
+}
+
+impl UiTransition {
+    /// Default glitch transition for title/menu handoffs.
+    pub const fn glitch_break() -> Self {
+        Self {
+            kind: UiTransitionKind::GlitchBreak,
+            frames: 45,
+            color: [0, 0, 0],
+            seed: 0x4b1d,
+        }
+    }
+}
+
+pub(crate) fn default_ui_transition_frames() -> u16 {
+    45
+}
+
+pub(crate) fn default_ui_transition_seed() -> u16 {
+    0x4b1d
+}
+
 /// Action a [`UiNodeKind::Button`] fires when activated. Runtime
 /// dispatch is a later step; this carries the authored intent so the
 /// cook can lower it to a [`psx_level::LevelUiAction`].
@@ -307,10 +381,29 @@ impl UiValueBinding {
 pub enum UiAction {
     /// Switch to a composed screen state by stable id.
     GotoState(SceneStateId),
+    /// Switch to a composed screen state through a full-screen transition.
+    TransitionToState {
+        /// Target screen state.
+        state: SceneStateId,
+        /// Transition effect.
+        transition: UiTransition,
+    },
     /// Switch to another authored UI scene by stable id.
     GotoScene(UiSceneId),
+    /// Switch to another authored UI scene through a full-screen transition.
+    TransitionToScene {
+        /// Target UI scene.
+        scene: UiSceneId,
+        /// Transition effect.
+        transition: UiTransition,
+    },
     /// Enter the gameplay/level simulation.
     StartGameplay,
+    /// Enter gameplay through a full-screen transition.
+    StartGameplayTransition {
+        /// Transition effect.
+        transition: UiTransition,
+    },
     /// Return to the previous menu/scene.
     Back,
     /// Adjust a project option by a signed delta.
@@ -335,8 +428,11 @@ impl UiAction {
     pub const fn label(&self) -> &'static str {
         match self {
             Self::GotoState(_) => "Go To State",
+            Self::TransitionToState { .. } => "Transition To State",
             Self::GotoScene(_) => "Go To Scene",
+            Self::TransitionToScene { .. } => "Transition To Scene",
             Self::StartGameplay => "Start Gameplay",
+            Self::StartGameplayTransition { .. } => "Transition To Gameplay",
             Self::Back => "Back",
             Self::SetOption { .. } => "Set Option",
             Self::Game(_) => "Game Action",

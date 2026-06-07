@@ -742,13 +742,32 @@ pub enum PlaytestUiAction {
         /// Target [`PlaytestSceneState::id`].
         state: u16,
     },
+    /// Switch to a cooked composed scene state with a full-screen transition.
+    TransitionToState {
+        /// Target [`PlaytestSceneState::id`].
+        state: u16,
+        /// Transition effect.
+        transition: PlaytestTransition,
+    },
     /// Switch to the cooked UI scene with this id.
     GotoScene {
         /// Target [`PlaytestUiScene::id`].
         scene: u16,
     },
+    /// Switch to a cooked UI scene with a full-screen transition.
+    TransitionToScene {
+        /// Target [`PlaytestUiScene::id`].
+        scene: u16,
+        /// Transition effect.
+        transition: PlaytestTransition,
+    },
     /// Enter the gameplay/level simulation.
     StartGameplay,
+    /// Enter gameplay with a full-screen transition.
+    StartGameplayTransition {
+        /// Transition effect.
+        transition: PlaytestTransition,
+    },
     /// Return to the previous menu/scene.
     Back,
     /// Adjust a project option by a signed delta.
@@ -763,6 +782,42 @@ pub enum PlaytestUiAction {
         /// Caller-defined id.
         id: u16,
     },
+}
+
+/// Cooked full-screen transition settings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestTransition {
+    /// Effect variant.
+    pub kind: PlaytestTransitionKind,
+    /// Duration in visual frames.
+    pub frames: u16,
+    /// Overlay colour.
+    pub color: [u8; 3],
+    /// Deterministic noise seed.
+    pub seed: u16,
+}
+
+impl PlaytestTransition {
+    /// No transition.
+    pub const NONE: Self = Self {
+        kind: PlaytestTransitionKind::None,
+        frames: 0,
+        color: [0, 0, 0],
+        seed: 0,
+    };
+}
+
+/// Cooked transition effect kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaytestTransitionKind {
+    /// No transition.
+    None,
+    /// Darken toward the transition colour.
+    Fade,
+    /// Random block cover.
+    BlockDissolve,
+    /// Digital glitch break.
+    GlitchBreak,
 }
 
 impl Default for PlaytestUiAction {

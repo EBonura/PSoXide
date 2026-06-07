@@ -46,12 +46,13 @@
 //! Plain `Copy` data, no allocator, integer-only. Flow / scene / node
 //! tables are `&'static` slices that the linker pins.
 
-use psx_gpu::draw_quad_flat;
+use psx_gpu::{draw_quad_flat, draw_tri_flat_blended, material::BlendMode};
 use psx_level::{
     first_focus, next_focus, scene_state_flags, ui_node_flags, FlowState, GameFlow, LevelOptionDef,
-    LevelSceneState, LevelUiAction, LevelUiNodeKind, LevelUiNodeRecord, LevelUiScene,
-    LevelUiSfxCueRecord, LevelUiSfxEvent, LevelUiSfxSampleRecord, LevelUiValueBinding,
-    LevelWorldLayer, NavDir, NavRect, UI_OPTION_NONE, UI_SCENE_NONE, UI_SFX_NONE,
+    LevelSceneState, LevelTransition, LevelTransitionKind, LevelUiAction, LevelUiNodeKind,
+    LevelUiNodeRecord, LevelUiScene, LevelUiSfxCueRecord, LevelUiSfxEvent, LevelUiSfxSampleRecord,
+    LevelUiValueBinding, LevelWorldLayer, NavDir, NavRect, UI_OPTION_NONE, UI_SCENE_NONE,
+    UI_SFX_NONE,
 };
 use psx_pad::button;
 
@@ -90,6 +91,7 @@ const SYNTH_GAMEPLAY_ID: u16 = u16::MAX;
 /// handful of options in practice, so the cap is generous.
 const MAX_OPTIONS: usize = 32;
 const MAX_UI_SFX_SAMPLES: usize = 64;
+const TRANSITION_SWITCH_MIN_FRAME: u16 = 1;
 #[cfg(target_arch = "mips")]
 const UI_SFX_SAMPLE_BASE_BYTES: u32 = 0x30000;
 #[cfg(target_arch = "mips")]
@@ -230,6 +232,44 @@ impl UiSfxRuntimeSample {
         base_pitch_q12: 0x1000,
         loaded: false,
     };
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+struct FlowTransition {
+    target: u16,
+    return_to: Option<u16>,
+    spec: LevelTransition,
+    elapsed: u16,
+    switched: bool,
+}
+
+impl FlowTransition {
+    const fn new(target: u16, return_to: Option<u16>, spec: LevelTransition) -> Self {
+        Self {
+            target,
+            return_to,
+            spec,
+            elapsed: 0,
+            switched: false,
+        }
+    }
+
+    const fn frames(self) -> u16 {
+        if self.spec.frames == 0 {
+            1
+        } else {
+            self.spec.frames
+        }
+    }
+
+    const fn switch_frame(self) -> u16 {
+        let half = self.frames() / 2;
+        if half < TRANSITION_SWITCH_MIN_FRAME {
+            TRANSITION_SWITCH_MIN_FRAME
+        } else {
+            half
+        }
+    }
 }
 
 impl CddaPlayer {
@@ -601,6 +641,9 @@ pub struct GameApp<'a, S: Scene> {
     ui_sfx_runtime_len: usize,
     /// Round-robin cursor for choosing cue variants and voices.
     ui_sfx_cursor: u16,
+    /// Active full-screen transition, if a button-triggered flow change is
+    /// delaying the cursor switch.
+    transition: Option<FlowTransition>,
 }
 
 impl<'a, S: Scene> GameApp<'a, S> {
@@ -641,6 +684,7 @@ impl<'a, S: Scene> GameApp<'a, S> {
             ui_sfx_runtime_samples: [UiSfxRuntimeSample::EMPTY; MAX_UI_SFX_SAMPLES],
             ui_sfx_runtime_len: 0,
             ui_sfx_cursor: 0,
+            transition: None,
         }
     }
 
@@ -922,7 +966,12 @@ impl<'a, S: Scene> GameApp<'a, S> {
         self.apply_option_values(&option_values, option_len);
     }
 
-    fn request_flow_state(&mut self, state_index: u16, return_to: Option<u16>, ctx: &mut Ctx) {
+    fn enter_or_load_flow_state(
+        &mut self,
+        state_index: u16,
+        return_to: Option<u16>,
+        ctx: &mut Ctx,
+    ) {
         if self.tag_at(state_index).has_gameplay() && !self.cursor.gameplay_inited {
             self.cdda.release_for_data_reads(ctx.sim_tick.as_u32());
             self.cursor.begin_loading(state_index, return_to);
@@ -931,9 +980,54 @@ impl<'a, S: Scene> GameApp<'a, S> {
         self.enter_flow_state(state_index, return_to, ctx);
     }
 
+    fn request_flow_state(&mut self, state_index: u16, return_to: Option<u16>, ctx: &mut Ctx) {
+        self.enter_or_load_flow_state(state_index, return_to, ctx);
+    }
+
+    fn request_flow_state_transition(
+        &mut self,
+        state_index: u16,
+        return_to: Option<u16>,
+        transition: LevelTransition,
+        ctx: &mut Ctx,
+    ) {
+        if !transition.is_active() {
+            self.enter_or_load_flow_state(state_index, return_to, ctx);
+            return;
+        }
+        self.transition = Some(FlowTransition::new(state_index, return_to, transition));
+    }
+
     fn request_gameplay(&mut self, index: u16, ctx: &mut Ctx) {
         let return_to = self.cursor.return_to;
         self.request_flow_state(index, return_to, ctx);
+    }
+
+    fn request_gameplay_transition(
+        &mut self,
+        index: u16,
+        transition: LevelTransition,
+        ctx: &mut Ctx,
+    ) {
+        let return_to = self.cursor.return_to;
+        self.request_flow_state_transition(index, return_to, transition, ctx);
+    }
+
+    fn update_transition(&mut self, ctx: &mut Ctx) -> bool {
+        let Some(mut transition) = self.transition else {
+            return false;
+        };
+        transition.elapsed = transition.elapsed.saturating_add(1);
+        if !transition.switched && transition.elapsed >= transition.switch_frame() {
+            transition.switched = true;
+            self.enter_or_load_flow_state(transition.target, transition.return_to, ctx);
+        }
+        if transition.elapsed >= transition.frames() {
+            self.transition = None;
+        } else {
+            self.transition = Some(transition);
+        }
+        true
     }
 
     fn finish_loading_transition(&mut self, ctx: &mut Ctx) {
@@ -1162,15 +1256,32 @@ impl<'a, S: Scene> GameApp<'a, S> {
                     self.request_flow_state(state_index, return_to, ctx);
                 }
             }
+            LevelUiAction::TransitionToState { state, transition } => {
+                if let Some(state_index) = self.flow_index_for_scene_state(state) {
+                    let return_to = Some(self.cursor.current);
+                    self.request_flow_state_transition(state_index, return_to, transition, ctx);
+                }
+            }
             LevelUiAction::GotoScene { scene } => {
                 if let Some(state_index) = self.ui_state_index_for_scene(scene) {
                     let return_to = Some(self.cursor.current);
                     self.request_flow_state(state_index, return_to, ctx);
                 }
             }
+            LevelUiAction::TransitionToScene { scene, transition } => {
+                if let Some(state_index) = self.ui_state_index_for_scene(scene) {
+                    let return_to = Some(self.cursor.current);
+                    self.request_flow_state_transition(state_index, return_to, transition, ctx);
+                }
+            }
             LevelUiAction::StartGameplay => {
                 if let Some(gameplay_index) = self.first_gameplay_index() {
                     self.request_gameplay(gameplay_index, ctx);
+                }
+            }
+            LevelUiAction::StartGameplayTransition { transition } => {
+                if let Some(gameplay_index) = self.first_gameplay_index() {
+                    self.request_gameplay_transition(gameplay_index, transition, ctx);
                 }
             }
             LevelUiAction::Back => self.go_back(ctx),
@@ -1383,6 +1494,193 @@ fn resolve_ui_value(
     }
 }
 
+fn render_transition_overlay(transition: FlowTransition) {
+    match transition.spec.kind {
+        LevelTransitionKind::None => {}
+        LevelTransitionKind::Fade => render_transition_fade(transition),
+        LevelTransitionKind::BlockDissolve => render_transition_blocks(transition),
+        LevelTransitionKind::GlitchBreak => render_transition_glitch(transition),
+    }
+}
+
+fn transition_progress_q8(transition: FlowTransition) -> u16 {
+    let frames = transition.frames().max(1);
+    ((u32::from(transition.elapsed.min(frames)) * 256) / u32::from(frames)) as u16
+}
+
+fn transition_coverage_q8(transition: FlowTransition) -> u16 {
+    let frames = transition.frames().max(1);
+    let switch_frame = transition.switch_frame().min(frames);
+    let elapsed = transition.elapsed.min(frames);
+    if elapsed <= switch_frame {
+        if switch_frame == 0 {
+            256
+        } else {
+            ((u32::from(elapsed) * 256) / u32::from(switch_frame)) as u16
+        }
+    } else {
+        let reveal_frames = frames.saturating_sub(switch_frame).max(1);
+        let remaining = frames.saturating_sub(elapsed);
+        ((u32::from(remaining) * 256) / u32::from(reveal_frames)) as u16
+    }
+}
+
+fn transition_color(transition: FlowTransition) -> (u8, u8, u8) {
+    (
+        transition.spec.color[0],
+        transition.spec.color[1],
+        transition.spec.color[2],
+    )
+}
+
+fn draw_fullscreen(color: (u8, u8, u8)) {
+    draw_quad_flat(
+        [(0, 0), (320, 0), (0, 240), (320, 240)],
+        color.0,
+        color.1,
+        color.2,
+    );
+}
+
+fn draw_fullscreen_average(color: (u8, u8, u8)) {
+    draw_tri_flat_blended(
+        [(0, 0), (320, 0), (0, 240)],
+        color.0,
+        color.1,
+        color.2,
+        BlendMode::Average,
+    );
+    draw_tri_flat_blended(
+        [(320, 0), (0, 240), (320, 240)],
+        color.0,
+        color.1,
+        color.2,
+        BlendMode::Average,
+    );
+}
+
+fn draw_rect(x: i16, y: i16, w: u16, h: u16, color: (u8, u8, u8)) {
+    if w == 0 || h == 0 {
+        return;
+    }
+    let x1 = x.saturating_add(w.min(i16::MAX as u16) as i16);
+    let y1 = y.saturating_add(h.min(i16::MAX as u16) as i16);
+    draw_quad_flat(
+        [(x, y), (x1, y), (x, y1), (x1, y1)],
+        color.0,
+        color.1,
+        color.2,
+    );
+}
+
+fn render_transition_fade(transition: FlowTransition) {
+    let progress = transition_coverage_q8(transition);
+    let color = transition_color(transition);
+    if progress >= 244 {
+        draw_fullscreen(color);
+        return;
+    }
+    let passes = match progress {
+        0..=63 => 0,
+        64..=127 => 1,
+        128..=191 => 2,
+        _ => 3,
+    };
+    let mut i = 0;
+    while i < passes {
+        draw_fullscreen_average(color);
+        i += 1;
+    }
+}
+
+fn render_transition_blocks(transition: FlowTransition) {
+    let progress = transition_coverage_q8(transition);
+    let color = transition_color(transition);
+    if progress >= 252 {
+        draw_fullscreen(color);
+        return;
+    }
+    let mut cell = 0u16;
+    while cell < 300 {
+        let noise = transition_noise(transition.spec.seed, cell, 0) & 0xff;
+        if noise < progress {
+            let x = ((cell % 20) * 16) as i16;
+            let y = ((cell / 20) * 16) as i16;
+            draw_rect(x, y, 16, 16, color);
+        }
+        cell += 1;
+    }
+}
+
+fn render_transition_glitch(transition: FlowTransition) {
+    let progress = transition_progress_q8(transition);
+    let base = transition_color(transition);
+    if progress >= 252 {
+        draw_fullscreen(base);
+        return;
+    }
+
+    let frame_seed = transition.elapsed;
+    let tear_count = 2u16.saturating_add(progress / 14);
+    let mut i = 0u16;
+    while i < tear_count {
+        let n = transition_noise(transition.spec.seed, i, frame_seed);
+        let y = (n % 240) as i16;
+        let h = 1 + ((n >> 8) % 5);
+        let color = glitch_color(n, base, progress);
+        draw_rect(0, y, 320, h as u16, color);
+        i += 1;
+    }
+
+    let block_count = (u32::from(progress) * 42 / 256) as u16;
+    let mut block = 0u16;
+    while block < block_count {
+        let n = transition_noise(transition.spec.seed ^ 0x3519, block, frame_seed);
+        let x = ((n % 40) * 8) as i16;
+        let y = ((((n >> 6) % 30) * 8) as i16).min(232);
+        let size = if n & 0x1000 != 0 { 16 } else { 8 };
+        let color = glitch_color(n.rotate_left(3), base, progress);
+        draw_rect(x, y, size, size, color);
+        block += 1;
+    }
+
+    if progress > 120 {
+        let takeover = (progress - 120).min(136);
+        let mut cell = 0u16;
+        while cell < 300 {
+            let n = transition_noise(transition.spec.seed ^ 0x6a27, cell, frame_seed / 2) & 0xff;
+            if n < takeover {
+                let x = ((cell % 20) * 16) as i16;
+                let y = ((cell / 20) * 16) as i16;
+                draw_rect(x, y, 16, 16, base);
+            }
+            cell += 1;
+        }
+    }
+}
+
+fn glitch_color(noise: u16, base: (u8, u8, u8), progress: u16) -> (u8, u8, u8) {
+    if progress > 170 || noise & 0x3 == 0 {
+        return base;
+    }
+    match (noise >> 3) & 0x7 {
+        0 => (255, 255, 255),
+        1 => (160, 220, 255),
+        2 => (255, 80, 160),
+        3 => (80, 255, 160),
+        4 => (255, 220, 80),
+        _ => base,
+    }
+}
+
+fn transition_noise(seed: u16, index: u16, frame: u16) -> u16 {
+    let mut x = seed ^ index.wrapping_mul(7477) ^ frame.wrapping_mul(101) ^ index.rotate_left(5);
+    x ^= x << 7;
+    x ^= x >> 9;
+    x = x.wrapping_mul(1093).wrapping_add(0x9e37);
+    x ^ (x >> 8)
+}
+
 impl<'a, S: Scene> Scene for GameApp<'a, S> {
     fn init(&mut self, ctx: &mut Ctx) {
         // Menu music and UI SFX share SPU state. Initialise once here and
@@ -1421,6 +1719,9 @@ impl<'a, S: Scene> Scene for GameApp<'a, S> {
             self.finish_loading_transition(ctx);
             return;
         }
+        if self.update_transition(ctx) {
+            return;
+        }
         let tag = self.current_tag();
         if tag.has_gameplay() && !tag.world_is_paused() {
             self.gameplay.update(ctx);
@@ -1451,6 +1752,9 @@ impl<'a, S: Scene> Scene for GameApp<'a, S> {
         if let Some(scene) = tag.ui_scene() {
             self.render_ui_scene(scene, ctx);
         }
+        if let Some(transition) = self.transition {
+            render_transition_overlay(transition);
+        }
     }
 }
 
@@ -1460,6 +1764,23 @@ mod tests {
     use crate::frames::{SimTick, VideoHz, VisualFrame};
     use psx_gpu::framebuf::FrameBuffer;
     use psx_pad::{ButtonState, PadState};
+
+    #[test]
+    fn transition_coverage_covers_then_reveals() {
+        let spec = LevelTransition {
+            kind: LevelTransitionKind::Fade,
+            frames: 10,
+            color: [0, 0, 0],
+            seed: 0,
+        };
+        let mut transition = FlowTransition::new(1, None, spec);
+        transition.elapsed = 0;
+        assert_eq!(transition_coverage_q8(transition), 0);
+        transition.elapsed = 5;
+        assert_eq!(transition_coverage_q8(transition), 256);
+        transition.elapsed = 10;
+        assert_eq!(transition_coverage_q8(transition), 0);
+    }
 
     /// Gameplay scene that records how many times each hook ran and in
     /// what order, so tests can assert the gameplay-only path matches
