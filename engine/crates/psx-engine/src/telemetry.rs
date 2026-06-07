@@ -561,6 +561,14 @@ pub mod counter {
     /// VRAM-resident (a real drop, not merely a pending upload): the silent
     /// missing-texture fallback at material-build time.
     pub const ROOM_MATERIAL_TEXTURE_DROPS: u16 = 222;
+    /// Room materials dropped because their `local_slot` is >= MAX_ROOM_MATERIALS,
+    /// i.e. the room references more distinct materials than the per-room material
+    /// table can hold. Every surface using a dropped slot renders untextured or
+    /// not at all. A non-zero value means the per-room material cap is too small
+    /// for the cooked room (raise MAX_ROOM_MATERIALS or reduce the room's
+    /// material count). This was the silent root cause of the demo10 invisible
+    /// frieze/stairs.
+    pub const ROOM_MATERIAL_SLOT_OVERFLOW: u16 = 223;
 }
 
 const EVENT_KIND_FRAME_BEGIN: u8 = 1;
