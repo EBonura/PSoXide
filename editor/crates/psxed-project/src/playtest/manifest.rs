@@ -135,6 +135,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     // gameplay-scoped textures (the sky) through a larger transient one.
     // Both classes share UI.PAK / UI_PACK_TOC; only the staging differs.
     let ui_pack_max_chunk_bytes = streamed_class_max_chunk_bytes(package, StreamedClass::UiImage);
+    let ui_pack_image_cache_slots = streamed_class_chunk_count(package, StreamedClass::UiImage);
     let gameplay_pack_max_chunk_bytes =
         streamed_class_max_chunk_bytes(package, StreamedClass::Gameplay);
     let resident_chunk_limit = package
@@ -555,6 +556,13 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     let _ = writeln!(
         out,
         "pub const UI_PACK_MAX_CHUNK_BYTES: usize = {ui_pack_max_chunk_bytes};",
+    );
+    out.push('\n');
+
+    out.push_str("/// Number of streamed menu UI image chunks cached at menu startup.\n");
+    let _ = writeln!(
+        out,
+        "pub const UI_PACK_IMAGE_CACHE_SLOTS: usize = {ui_pack_image_cache_slots};",
     );
     out.push('\n');
 
@@ -1542,6 +1550,16 @@ fn streamed_class_max_chunk_bytes(package: &PlaytestPackage, class: StreamedClas
         .map(|asset| asset.bytes.len())
         .max()
         .unwrap_or(0)
+}
+
+/// Number of streamed assets in one class. Used by the runtime to size fixed
+/// cache metadata without reserving a pessimistic slot count.
+fn streamed_class_chunk_count(package: &PlaytestPackage, class: StreamedClass) -> usize {
+    package
+        .assets
+        .iter()
+        .filter(|asset| asset.streamed_class == class)
+        .count()
 }
 
 fn ui_pack_toc(package: &PlaytestPackage) -> Vec<psx_iso::WorldPackBuildEntry> {
