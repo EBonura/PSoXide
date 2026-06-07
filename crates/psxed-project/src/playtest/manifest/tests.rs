@@ -54,6 +54,7 @@ fn write_cdda_tracks_cooks_sector_aligned_payloads_and_lists_paths() {
     package.cdda_tracks.push(PlaytestCddaTrack {
         track: 2,
         wav_path: source.to_string_lossy().into_owned(),
+        playback_speed_q12: crate::UI_MUSIC_PLAYBACK_SPEED_UNITY_Q12,
     });
 
     let list = write_cdda_tracks(&package, &cdda_dir).unwrap();

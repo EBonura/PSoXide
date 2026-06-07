@@ -468,6 +468,7 @@ pub(crate) fn cook_ui_scene_nodes(
                 wav_path,
                 volume,
                 volume_option,
+                playback_speed_q12,
                 loop_track,
             } => (
                 0,
@@ -490,6 +491,7 @@ pub(crate) fn cook_ui_scene_nodes(
                 PlaytestUiAction::default(),
                 cook_cdda_track_number(
                     wav_path,
+                    *playback_speed_q12,
                     project_root,
                     cdda_tracks,
                     cdda_track_for_wav,
@@ -919,6 +921,7 @@ pub(crate) fn assemble_ui_image_psxt(
 
 pub(crate) fn cook_cdda_track_number(
     wav_path: &str,
+    playback_speed_q12: u16,
     project_root: &Path,
     cdda_tracks: &mut Vec<PlaytestCddaTrack>,
     cdda_track_for_wav: &mut HashMap<String, u8>,
@@ -947,7 +950,8 @@ pub(crate) fn cook_cdda_track_number(
         return psx_level::UI_OPTION_NONE;
     }
     let abs = std::fs::canonicalize(&abs).unwrap_or(abs);
-    let key = abs.to_string_lossy().into_owned();
+    let speed = playback_speed_q12.max(1);
+    let key = format!("{}#{speed}", abs.display());
     if let Some(track) = cdda_track_for_wav.get(&key) {
         return u16::from(*track);
     }
@@ -958,7 +962,8 @@ pub(crate) fn cook_cdda_track_number(
     let track = (cdda_tracks.len() + 2) as u8;
     cdda_tracks.push(PlaytestCddaTrack {
         track,
-        wav_path: key.clone(),
+        wav_path: abs.to_string_lossy().into_owned(),
+        playback_speed_q12: speed,
     });
     cdda_track_for_wav.insert(key, track);
     u16::from(track)
