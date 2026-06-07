@@ -454,9 +454,36 @@ pub(crate) fn draw_play_chunk_debug_map(
         FontId::monospace(9.0),
         fault_color,
     );
+    // VRAM room-texture residency overflow: the silent missing-texture signal.
+    // `vdrop` is the symptom (materials left untextured); the rest attribute it to
+    // the binding cap (slot table / room window / CLUT / upload queue).
+    let vram_total = metrics.vram_texture_drops
+        + metrics.vram_caps_full[0]
+        + metrics.vram_caps_full[1]
+        + metrics.vram_caps_full[2]
+        + metrics.vram_caps_full[3];
+    let vram_color = if vram_total > 0 {
+        Color32::from_rgb(255, 120, 120)
+    } else {
+        STUDIO_TEXT_WEAK
+    };
+    painter.text(
+        map_rect.left_top() + Vec2::new(8.0, 45.0),
+        Align2::LEFT_TOP,
+        format!(
+            "vdrop {}  slot {}  win {}  clut {}  q {}",
+            metrics.vram_texture_drops,
+            metrics.vram_caps_full[0],
+            metrics.vram_caps_full[1],
+            metrics.vram_caps_full[2],
+            metrics.vram_caps_full[3],
+        ),
+        FontId::monospace(9.0),
+        vram_color,
+    );
 
     let plot = Rect::from_min_max(
-        map_rect.left_top() + Vec2::new(8.0, 48.0),
+        map_rect.left_top() + Vec2::new(8.0, 60.0),
         map_rect.right_bottom() - Vec2::new(8.0, 78.0),
     );
     let world_w = (max_x - min_x).max(1.0);
