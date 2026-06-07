@@ -507,6 +507,7 @@ pub fn draw_indexed_cached_room_vertex_lit_all_cells<const OT: usize, L: WorldSu
     depth_mode: CachedRoomDepthMode,
     subdivision_mode: CachedRoomSubdivisionMode,
     screen_margin: i32,
+    cull_cells_laterally: bool,
     triangles: &mut impl RoomSurfaceSink,
     world: &mut WorldRenderPass<'_, '_, OT>,
 ) -> GridVisibilityStats {
@@ -530,11 +531,6 @@ pub fn draw_indexed_cached_room_vertex_lit_all_cells<const OT: usize, L: WorldSu
     crate::telemetry::stage_begin(crate::telemetry::stage::ROOM_CELL_SELECT);
     let mut projected_index_count = 0usize;
     let mut accepted_cell_count = 0usize;
-    // Lateral + behind-camera cull only (no far plane). Off-screen side/behind
-    // cells are skipped so room_project + room_surface_draw stop paying for
-    // them, while far cells down a sightline are kept (centered in the frustum
-    // cone). The full visible-to-camera test would re-cull the far room via its
-    // draw_distance far plane, which is the regression we are avoiding.
     let loaded_camera = LoadedWorldCameraGte::load(*camera);
 
     for (cell_index, cell) in cached_cells.iter().copied().enumerate() {
@@ -548,12 +544,14 @@ pub fn draw_indexed_cached_room_vertex_lit_all_cells<const OT: usize, L: WorldSu
             cell.visibility_center[2],
         );
         let visibility_view = loaded_camera.view_vertex(visibility_center);
-        if !cell_visibility_view_in_lateral_frustum(
-            camera,
-            visibility_view,
-            cell.visibility_radius,
-            screen_margin,
-        ) {
+        if cull_cells_laterally
+            && !cell_visibility_view_in_lateral_frustum(
+                camera,
+                visibility_view,
+                cell.visibility_radius,
+                screen_margin,
+            )
+        {
             stats.cells_frustum_culled = stats.cells_frustum_culled.wrapping_add(1);
             continue;
         }

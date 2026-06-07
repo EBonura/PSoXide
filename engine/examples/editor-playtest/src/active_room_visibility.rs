@@ -175,14 +175,11 @@ impl Playtest {
         mask
     }
 
-    pub(super) fn portal_visibility_draws_room(&self, index: RoomIndex) -> bool {
-        // Node-traversal draw gate: draw a room only if the portal walk reached
-        // it through a frustum-facing portal. This prunes rooms whose connecting
-        // portal is behind the camera (resident in the ring but never visible).
-        // Visible rooms then rasterize ALL their cells -- per-polygon backface +
-        // screen culling does the rest, there is no per-cell PVS. The camera's
-        // own room always draws even if the walk has not repopulated this frame.
-        index == self.portal_visibility_root || self.portal_visibility.contains_room(index)
+    pub(super) fn portal_visibility_draws_room(&self, _index: RoomIndex) -> bool {
+        // Reachability draw: callers pass rooms from the active camera-ring
+        // window, so every active room is drawable. The room renderer still
+        // runs projection, screen, near-plane, and backface checks per surface.
+        true
     }
 
     pub(super) fn emit_portal_visibility_counters(&self) {

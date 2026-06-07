@@ -1632,11 +1632,8 @@ fn cell_visibility_view_visible_to_camera(
 }
 
 /// Lateral + near frustum test for a cell visibility sphere, with NO far plane.
-/// The all-cells path (`vis-full-active-chunks`) uses this so off-screen side or
-/// behind-camera cells are skipped while far cells down a sightline are kept
-/// (they sit centered in the frustum cone). Using
-/// `cell_visibility_view_visible_to_camera` here would re-cull the far room via
-/// its `draw_distance` far plane.
+/// The all-cells path uses this only for the camera/root room; neighbouring
+/// active rooms skip coarse cell culling so portal-edge geometry is not dropped.
 fn cell_visibility_view_in_lateral_frustum(
     camera: &WorldCamera,
     view: ViewVertex,
