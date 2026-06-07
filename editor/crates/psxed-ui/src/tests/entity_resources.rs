@@ -392,6 +392,64 @@ fn add_camera_component_to_entity_selects_new_child() {
 }
 
 #[test]
+fn camera_preview_request_targets_floor_anchored_player_origin() {
+    let mut project = ProjectDocument::new("camera-preview");
+    let scene = project.active_scene_mut();
+    let mut grid = WorldGrid::empty(3, 3, 1024);
+    grid.origin = [-1, -2];
+    grid.set_floor(1, 2, 256, None);
+    let room = scene.add_node(scene.root, "Room", NodeKind::Room { grid });
+    let player = scene.add_node(room, "Player", NodeKind::Entity);
+    scene
+        .node_mut(player)
+        .expect("player exists")
+        .transform
+        .translation = [0.0, 7.0, 0.0];
+    let camera = scene.add_node(
+        player,
+        "Camera",
+        NodeKind::Camera {
+            settings: WorldCameraSettings {
+                distance: 2048,
+                height: 768,
+                target_height: 512,
+                min_floor_clearance: 64,
+                position_lag_shift: 2,
+                focus_lag_shift: 2,
+                distance_lag_shift: 3,
+            },
+        },
+    );
+
+    let mut workspace =
+        EditorWorkspace::with_project(test_temp_dir("camera-preview-request"), project);
+    workspace.selection.selected_node = camera;
+    let request = workspace
+        .selected_camera_preview_request()
+        .expect("camera preview request");
+    let scene = workspace.project.active_scene();
+    let NodeKind::Room { grid } = &scene.node(room).expect("room exists").kind else {
+        panic!("expected room");
+    };
+    let expected_player = psxed_project::spatial::floor_anchored_node_preview_origin(
+        grid,
+        &scene.node(player).unwrap().transform,
+    );
+
+    assert_eq!(request.active_room, Some(room));
+    assert_eq!(request.active_floor, 0);
+    assert_eq!(
+        request.camera.target,
+        [
+            expected_player[0],
+            expected_player[1] + 512,
+            expected_player[2]
+        ]
+    );
+    assert_ne!(request.camera.target, [0, 7 + 512, 0]);
+}
+
+#[test]
 fn add_room_child_creates_three_by_three_floor_with_first_material() {
     let mut project = ProjectDocument::new("new-room");
     let material = project.add_resource(
