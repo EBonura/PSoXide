@@ -19,7 +19,7 @@ lto           = true
 default = [
     "cd-stream-bench",
     "emulator-telemetry",
-    "world-order-bucketed",
+    "world-order-slot",
     "world-grid-visible",
     "ot-2048",
     "vis-static-active-turn",
