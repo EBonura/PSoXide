@@ -33,14 +33,16 @@ impl Scene for Playtest {
         })
     }
 
-    /// Menu and gameplay states use distinct resource-set keys so the flow
-    /// driver fires `on_exit_state`/`on_enter_state` across the menu->gameplay
-    /// boundary. The UI font atlas is shared by both (acquired once, never torn
-    /// down); the keys differ only so the streamed UI image set can be loaded on
-    /// menu entry and freed on gameplay entry.
+    /// Gameplay and each UI scene use distinct resource-set keys so the flow
+    /// driver fires `on_exit_state`/`on_enter_state` across menu-to-menu and
+    /// menu-to-gameplay boundaries. The UI font atlas is shared by all states;
+    /// streamed UI images are scoped to the active UI scene so a splash/logo
+    /// screen does not keep its texture resident beside every main-menu strip.
     fn state_resource_key(&self, state: SceneStateRef) -> u32 {
         if state.has_gameplay() {
             GAMEPLAY_RESOURCE_KEY
+        } else if state.ui_scene != psx_level::UI_SCENE_NONE {
+            MENU_RESOURCE_KEY.saturating_add(u32::from(state.ui_scene).saturating_add(1))
         } else {
             MENU_RESOURCE_KEY
         }
@@ -54,15 +56,16 @@ impl Scene for Playtest {
     /// the font VRAM tracked.
     fn on_enter_state(&mut self, state: SceneStateRef, _ctx: &mut Ctx) {
         acquire_shared_ui_fonts(&mut self.ui_fonts);
-        // Streamed UI images live only in menu states. Load them off UI.PAK on
-        // menu entry; gameplay entry frees them (see `on_exit_state`). The sky
-        // panorama is gameplay-scoped, so it is the mirror image: loaded on
-        // gameplay entry and freed on gameplay exit.
+        // Streamed UI images live only in menu states. Load the active UI
+        // scene's images off UI.PAK on menu entry; gameplay entry frees any
+        // previous menu images (see `on_exit_state`). The sky panorama is
+        // gameplay-scoped, so it is the mirror image: loaded on gameplay entry
+        // and freed on gameplay exit.
         #[cfg(feature = "cd-stream-bench")]
         if state.has_gameplay() {
             load_streamed_sky_from_cd();
         } else {
-            load_ui_images_from_cd();
+            load_ui_images_for_scene_from_cd(state.ui_scene);
         }
         let _ = state;
     }
