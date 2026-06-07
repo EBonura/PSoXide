@@ -24,10 +24,7 @@
 //! `psx-iso::iso9660` so it's reusable from build scripts, test
 //! harnesses, or a future GUI bundler.
 
-use psx_iso::{
-    build_world_pack, cd_stream_bench_payload, default_system_cnf, Exe, IsoBuilder,
-    CD_STREAM_BENCH_FILE_NAME, UI_PACK_FILE_NAME, WORLD_PACK_FILE_NAME,
-};
+use psx_iso::{add_playtest_files, build_world_pack, Exe, IsoBuilder};
 use std::collections::HashSet;
 use std::env;
 use std::fs;
@@ -261,35 +258,32 @@ fn main() -> ExitCode {
             "warning: no PS1 system area supplied; emulators may boot this, real hardware may not"
         );
     }
-    builder.add_file("SYSTEM.CNF", default_system_cnf());
-    if let Some(sectors) = args.cdtest_sectors {
-        builder.add_file(CD_STREAM_BENCH_FILE_NAME, cd_stream_bench_payload(sectors));
-    }
-    if let Some(dir) = args.world_pack_rooms_dir.as_deref() {
-        let pack = match build_world_pack_from_rooms_dir(dir, args.world_pack_order_file.as_deref())
-        {
-            Ok(pack) => pack,
+    let world_pack = match args.world_pack_rooms_dir.as_deref() {
+        Some(dir) => {
+            match build_world_pack_from_rooms_dir(dir, args.world_pack_order_file.as_deref()) {
+                Ok(pack) => Some(pack),
+                Err(e) => {
+                    eprintln!("{e}");
+                    return ExitCode::from(1);
+                }
+            }
+        }
+        None => None,
+    };
+    let ui_pack = match args.ui_pack_dir.as_deref() {
+        Some(dir) => match build_ui_pack_from_dir(dir, args.ui_pack_order_file.as_deref()) {
+            Ok(pack) => Some(pack),
             Err(e) => {
                 eprintln!("{e}");
                 return ExitCode::from(1);
             }
-        };
-        builder.add_file(WORLD_PACK_FILE_NAME, pack);
-    }
-    // UI.PAK must follow WORLD.PAK and precede PSX.EXE so its on-disc
-    // start LBA matches the manifest's `UI_PACK_START_LBA`
-    // (WORLD_PACK_START_LBA + WORLD.PAK total sectors).
-    if let Some(dir) = args.ui_pack_dir.as_deref() {
-        let pack = match build_ui_pack_from_dir(dir, args.ui_pack_order_file.as_deref()) {
-            Ok(pack) => pack,
-            Err(e) => {
-                eprintln!("{e}");
-                return ExitCode::from(1);
-            }
-        };
-        builder.add_file(UI_PACK_FILE_NAME, pack);
-    }
-    builder.add_file("PSX.EXE", exe_bytes);
+        },
+        None => None,
+    };
+    // Canonical playtest-disc layout (SYSTEM.CNF, CDTEST.BIN, WORLD.PAK, UI.PAK,
+    // PSX.EXE), shared with the editor's embedded Play via add_playtest_files so
+    // the on-disc order cannot drift from the cooked *_PACK_START_LBA values.
+    add_playtest_files(&mut builder, exe_bytes, world_pack, ui_pack, args.cdtest_sectors);
 
     let (mut image, sector_size, format_label) = if args.cooked_iso {
         let iso = builder.build();
