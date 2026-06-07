@@ -310,6 +310,10 @@ pub mod character_action_flags {
     pub const IN_PLACE: u8 = 1 << 2;
 }
 
+/// Per-action playback speed Q8 unit (`256 = 1.0x`), matching
+/// [`LevelCharacterRecord::action_speeds`].
+pub const CHARACTER_ACTION_SPEED_UNSCALED_Q8: u16 = 256;
+
 typed_index! {
     /// Clip index local to one model's clip slice.
     pub struct ModelClipIndex;
@@ -2259,6 +2263,10 @@ pub struct LevelCharacterRecord {
     pub action_clips: [OptionalModelClipIndex; CHARACTER_ANIMATION_ACTION_COUNT],
     /// Per-action playback flags matching [`Self::action_clips`].
     pub action_flags: [u8; CHARACTER_ANIMATION_ACTION_COUNT],
+    /// Per-action playback speed in Q8 fixed point (`256 = 1.0x`),
+    /// matching [`Self::action_clips`]. Scales how fast the action's
+    /// clip advances; [`CHARACTER_ACTION_SPEED_UNSCALED_Q8`] is 1.0x.
+    pub action_speeds: [u16; CHARACTER_ANIMATION_ACTION_COUNT],
     /// Render-only model offset from the controller root, in
     /// entity-local engine units.
     pub visual_offset: [i16; 3],

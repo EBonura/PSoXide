@@ -877,6 +877,22 @@ impl<'a> Animation<'a> {
         playback_tick.wrapping_mul(self.phase_step_q12(playback_hz))
     }
 
+    /// Like [`Animation::phase_at_tick_q12`] but scales the advance by a
+    /// Q8 speed multiplier (`256 = 1.0x`): `< 256` plays slower, `> 256`
+    /// faster. Scaling the per-tick step rather than the accumulated
+    /// phase keeps looping wrap-around identical to unscaled playback.
+    #[inline]
+    pub fn phase_at_tick_scaled_q12(
+        &self,
+        playback_tick: u32,
+        playback_hz: u16,
+        speed_q8: u16,
+    ) -> u32 {
+        let scaled_step =
+            ((self.phase_step_q12(playback_hz) as u64 * speed_q8 as u64) / 256) as u32;
+        playback_tick.wrapping_mul(scaled_step)
+    }
+
     /// Joint pose at `frame_index`, `joint_index`.
     pub fn pose(&self, frame_index: u16, joint_index: u16) -> Option<JointPose> {
         if frame_index >= self.frame_count || joint_index >= self.joint_count {
