@@ -1,6 +1,45 @@
 use super::*;
 
 impl EditorWorkspace {
+    /// Optional clean scene render from the selected gameplay Camera.
+    pub fn selected_camera_preview_request(&self) -> Option<EditorCameraPreviewRequest> {
+        const EDITOR_PLAYTEST_CAMERA_START_YAW_Q12: u16 = 220;
+
+        let scene = self.project.active_scene();
+        let selected = scene.node(self.selection.selected_node)?;
+        let NodeKind::Camera { settings } = selected.kind else {
+            return None;
+        };
+        let host_id = selected.parent?;
+        let host = scene.node(host_id)?;
+        if !matches!(host.kind, NodeKind::Entity) {
+            return None;
+        }
+
+        let settings = settings.normalized();
+        let player = host.transform.translation.map(round_to_i32);
+        let target = [
+            player[0],
+            player[1].saturating_add(settings.target_height),
+            player[2],
+        ];
+        let vertical = settings.height.saturating_sub(settings.target_height);
+        let runtime_pitch = camera_pitch_q12_from_vertical_distance(vertical, settings.distance);
+        let orbit_pitch = ((-(runtime_pitch as i32)) & 0x0FFF) as u16;
+
+        Some(EditorCameraPreviewRequest {
+            camera: ViewportCameraState {
+                mode: ViewportCameraMode::Orbit,
+                yaw_q12: EDITOR_PLAYTEST_CAMERA_START_YAW_Q12,
+                pitch_q12: orbit_pitch,
+                radius: settings.distance.max(1),
+                target,
+                position: target,
+            },
+            active_room: self.active_room_id(),
+        })
+    }
+
     /// 3D viewport body -- paints the HwRenderer texture into the
     /// central area's working space and turns pointer input into
     /// camera updates. Called from `draw_viewport` when the

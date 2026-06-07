@@ -31,9 +31,10 @@ impl EditorWorkspace {
             self.handle_global_shortcuts(ctx, playtest_status);
         }
         let play_metrics = viewport_3d.play_metrics;
+        let camera_preview = viewport_3d.camera_preview;
         self.draw_action_bar(ctx, playtest_status, play_metrics);
         self.draw_left_dock(ctx);
-        self.draw_inspector(ctx);
+        self.draw_inspector(ctx, camera_preview);
         self.draw_content_browser(ctx);
         self.draw_viewport(ctx, viewport_3d, playtest_status);
         self.draw_new_project_dialog(ctx);
