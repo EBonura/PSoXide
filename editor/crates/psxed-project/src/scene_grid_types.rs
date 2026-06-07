@@ -1740,6 +1740,8 @@ pub const DEFAULT_WORLD_CAMERA_HEIGHT: i32 = 1280;
 pub const DEFAULT_WORLD_CAMERA_TARGET_HEIGHT: i32 = 640;
 /// Default minimum camera origin height above the sampled floor.
 pub const DEFAULT_WORLD_CAMERA_MIN_FLOOR_CLEARANCE: i32 = HEIGHT_QUANTUM;
+/// Default manual camera orbit speed level. Higher values turn faster.
+pub const DEFAULT_WORLD_CAMERA_ORBIT_SPEED_LEVEL: u8 = 5;
 /// Default camera position follow lag shift. Lower values move faster.
 pub const DEFAULT_WORLD_CAMERA_POSITION_LAG_SHIFT: u8 = 2;
 /// Default camera focus follow lag shift. Lower values move faster.
@@ -1754,6 +1756,10 @@ pub const MAX_WORLD_CAMERA_DISTANCE: i32 = 16_384;
 pub const MAX_WORLD_CAMERA_HEIGHT: i32 = 16_384;
 /// Maximum authored minimum floor clearance for the third-person camera.
 pub const MAX_WORLD_CAMERA_MIN_FLOOR_CLEARANCE: i32 = 4_096;
+/// Minimum authored manual camera orbit speed level.
+pub const MIN_WORLD_CAMERA_ORBIT_SPEED_LEVEL: u8 = 1;
+/// Maximum authored manual camera orbit speed level.
+pub const MAX_WORLD_CAMERA_ORBIT_SPEED_LEVEL: u8 = 7;
 /// Maximum authored camera follow lag shift.
 pub const MAX_WORLD_CAMERA_LAG_SHIFT: u8 = 6;
 /// Default wall span when no ceiling is authored above the edge.
@@ -1811,6 +1817,10 @@ pub(crate) fn default_world_camera_target_height() -> i32 {
 
 pub(crate) fn default_world_camera_min_floor_clearance() -> i32 {
     DEFAULT_WORLD_CAMERA_MIN_FLOOR_CLEARANCE
+}
+
+pub(crate) fn default_world_camera_orbit_speed_level() -> u8 {
+    DEFAULT_WORLD_CAMERA_ORBIT_SPEED_LEVEL
 }
 
 pub(crate) fn default_world_camera_position_lag_shift() -> u8 {
