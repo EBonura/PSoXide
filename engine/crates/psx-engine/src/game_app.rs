@@ -48,7 +48,7 @@
 
 use psx_gpu::draw_quad_flat;
 use psx_level::{
-    first_focus, next_focus, scene_state_flags, FlowState, GameFlow, LevelOptionDef,
+    first_focus, next_focus, scene_state_flags, ui_node_flags, FlowState, GameFlow, LevelOptionDef,
     LevelSceneState, LevelUiAction, LevelUiNodeKind, LevelUiNodeRecord, LevelUiScene,
     LevelUiSfxCueRecord, LevelUiSfxEvent, LevelUiSfxSampleRecord, LevelUiValueBinding,
     LevelWorldLayer, NavDir, NavRect, UI_OPTION_NONE, UI_SCENE_NONE, UI_SFX_NONE,
@@ -100,7 +100,7 @@ const CDDA_RETRY_TICKS: u32 = 60;
 const CDDA_STATUS_TICKS: u32 = 30;
 const CDDA_DEFAULT_VOLUME_PERCENT: u8 = 25;
 #[cfg(any(target_arch = "mips", test))]
-const CDDA_PLAYBACK_MODE: u8 = psx_io::cdrom::MODE_DOUBLE_SPEED | psx_io::cdrom::MODE_CDDA;
+const CDDA_PLAYBACK_MODE: u8 = psx_io::cdrom::MODE_CDDA;
 #[cfg(target_arch = "mips")]
 const CDDA_STATUS_PLAYING: u8 = 1 << 7;
 #[cfg(target_arch = "mips")]
@@ -1258,6 +1258,10 @@ impl<'a, S: Scene> GameApp<'a, S> {
         // position matches what scrubbing changed.
         let option_value =
             |option_id: u16| resolve_option_value(options, &option_values, option_len, option_id);
+        let analog_active = ctx.pad.is_analog();
+        let visible = |node: &LevelUiNodeRecord| {
+            node.flags & ui_node_flags::ANALOG_INACTIVE_ONLY == 0 || !analog_active
+        };
         // The gameplay scene lends its uploaded font atlases so menu labels
         // and buttons draw with the same glyphs the HUD uses. Empty slots
         // skip text or fall back to slot 0 in the renderer.
@@ -1279,6 +1283,7 @@ impl<'a, S: Scene> GameApp<'a, S> {
             &value,
             options,
             &option_value,
+            &visible,
         );
     }
 
@@ -1579,7 +1584,10 @@ mod tests {
         let mut ctx = test_ctx();
 
         app.init(&mut ctx);
-        assert_eq!(app.gameplay.enters, 1, "UI entry acquires the shared set once");
+        assert_eq!(
+            app.gameplay.enters, 1,
+            "UI entry acquires the shared set once"
+        );
 
         let gameplay = app.first_gameplay_index().expect("gameplay state exists");
         app.request_gameplay(gameplay, &mut ctx);
@@ -2347,10 +2355,7 @@ mod tests {
 
     #[test]
     fn menu_cdda_playback_mode_matches_working_cdda_demo() {
-        assert_eq!(
-            CDDA_PLAYBACK_MODE,
-            psx_io::cdrom::MODE_DOUBLE_SPEED | psx_io::cdrom::MODE_CDDA
-        );
+        assert_eq!(CDDA_PLAYBACK_MODE, psx_io::cdrom::MODE_CDDA);
     }
 
     #[test]

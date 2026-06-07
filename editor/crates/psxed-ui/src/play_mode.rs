@@ -80,6 +80,30 @@ pub struct EditorViewport3dPresentation {
     pub play_metrics: Option<EditorPlaytestMetrics>,
     /// Current embedded-play input tape state.
     pub play_tape: EditorPlaytestTapeStatus,
+    /// Optional rendered gameplay Camera view for the inspector.
+    pub camera_preview: Option<EditorCameraPreviewPresentation>,
+}
+
+/// Rendered gameplay Camera view shown inside the Camera inspector.
+#[derive(Clone, Copy)]
+pub struct EditorCameraPreviewPresentation {
+    /// Egui texture containing the rendered camera preview.
+    pub texture: egui::TextureId,
+    /// UV region inside `texture`.
+    pub uv: Rect,
+}
+
+impl EditorCameraPreviewPresentation {
+    /// Build a preview presentation using the editor renderer's 2x PSX target.
+    pub fn new(texture: egui::TextureId) -> Self {
+        Self {
+            texture,
+            uv: Rect::from_min_max(
+                egui::pos2(0.0, 0.0),
+                egui::pos2(640.0 / 2048.0, 480.0 / 1024.0),
+            ),
+        }
+    }
 }
 
 impl EditorViewport3dPresentation {
@@ -96,6 +120,7 @@ impl EditorViewport3dPresentation {
             overlay_source_size: egui::vec2(320.0, 240.0),
             play_metrics: None,
             play_tape: EditorPlaytestTapeStatus::default(),
+            camera_preview: None,
         }
     }
 
@@ -114,7 +139,14 @@ impl EditorViewport3dPresentation {
             overlay_source_size: Vec2::ZERO,
             play_metrics,
             play_tape,
+            camera_preview: None,
         }
+    }
+
+    /// Attach an inspector Camera preview texture.
+    pub fn with_camera_preview(mut self, texture: egui::TextureId) -> Self {
+        self.camera_preview = Some(EditorCameraPreviewPresentation::new(texture));
+        self
     }
 }
 
@@ -231,6 +263,18 @@ pub struct EditorPlaytestMetrics {
     /// Requested rooms denied a slot because every candidate was protected
     /// (the resident-budget-exceeded signal: more high-priority rooms than slots).
     pub stream_protected_full: u32,
+    /// Room materials dropped to the untextured fallback because their texture
+    /// could not become VRAM-resident: the silent missing-texture symptom.
+    pub vram_texture_drops: u32,
+    /// VRAM overflow attribution behind the drops, in order: [slot-table full
+    /// (the binding 64-slot cap), room-window band full, CLUT band full,
+    /// upload-queue full].
+    pub vram_caps_full: [u32; 4],
+    /// Room materials dropped because their local slot is >= MAX_ROOM_MATERIALS:
+    /// the room uses more distinct materials than the per-room table holds, so
+    /// every surface on an overflow slot renders untextured or not at all. This
+    /// is a per-room-cap problem, distinct from the VRAM drops above.
+    pub room_material_slot_overflow: u32,
     /// Resident streamed chunks, keyed by runtime room/chunk index.
     pub chunk_loaded_mask: u64,
     /// Streamed chunks with in-flight loads, keyed by runtime room/chunk index.

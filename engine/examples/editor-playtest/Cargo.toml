@@ -18,15 +18,20 @@ lto           = true
 [features]
 default = [
     "cd-stream-bench",
+    "boot-trace",
     "emulator-telemetry",
-    "world-order-bucketed",
+    "world-order-slot",
     "world-grid-visible",
     "ot-2048",
-    "vis-anchor-pvs-candidates",
     "vis-static-active-turn",
+    # Draw every cell of each node-traversal room and rely on per-polygon
+    # backface + screen culling, instead of the cooked per-cell PVS. Closes the
+    # far-room cull where distant cells were dropped by the PVS path.
+    "vis-full-active-chunks",
 ]
 cd-stream-bench = ["dep:psx-io"]
 cd-stream-benchmark = ["cd-stream-bench"]
+boot-trace = ["psx-engine/boot-trace", "psx-rt/boot-trace"]
 emulator-telemetry = ["psx-engine/emulator-telemetry"]
 world-order-global = []
 world-order-slot = []

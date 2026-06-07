@@ -396,6 +396,38 @@ impl<'a, const DEPTH: usize> OtFrame<'a, DEPTH> {
     pub fn submit(self) {
         self.ot.submit();
     }
+
+    /// Kick this frame's ordering-table DMA without blocking on the GPU
+    /// draw, returning an [`OtSubmitInFlight`] guard that must be waited
+    /// on before the table is reused.
+    ///
+    /// The ordering table and every primitive it chains must stay live
+    /// and unmodified until [`OtSubmitInFlight::wait`] returns. This is
+    /// the seam profiling code uses to time the GPU-draw wait separately
+    /// from the CPU-side build + kick, and the seam a future render
+    /// pipeline uses to overlap the GPU draw with CPU work.
+    pub fn submit_async(self) -> OtSubmitInFlight {
+        self.ot.submit_async();
+        OtSubmitInFlight(())
+    }
+}
+
+/// In-flight ordering-table DMA kicked by [`OtFrame::submit_async`].
+///
+/// It carries no borrow yet: the caller must keep the ordering table and
+/// primitive storage alive until [`wait`](Self::wait). The private unit field
+/// keeps it constructible only here. `#[must_use]` flags a *dropped* guard (a
+/// kicked DMA whose handle is discarded); it does not by itself enforce that
+/// `wait()` runs before the table is reused -- today the sole caller waits
+/// immediately, and a future overlap pipeline will tie the borrow in.
+#[must_use = "call wait() for the GPU DMA before reusing the ordering table"]
+pub struct OtSubmitInFlight(());
+
+impl OtSubmitInFlight {
+    /// Block until the kicked ordering-table DMA walk has finished.
+    pub fn wait(self) {
+        psx_gpu::submit_linked_list_wait();
+    }
 }
 
 /// Fixed backing storage for primitive packets.

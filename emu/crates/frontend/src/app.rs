@@ -12,7 +12,7 @@ use emulator_core::{
 };
 use psoxide_settings::library::{GameKind, Region};
 use psoxide_settings::{ConfigPaths, Library, LibraryEntry, Settings};
-use psx_iso::{build_world_pack, default_system_cnf, Disc, Exe, IsoBuilder, SECTOR_BYTES};
+use psx_iso::{build_world_pack, Disc, Exe, IsoBuilder, SECTOR_BYTES};
 use psx_trace::InstructionRecord;
 use psxed_ui::{EditorPlaytestStatus, EditorWorkspace};
 
@@ -1143,10 +1143,7 @@ impl AppState {
         self.editor
             .set_status(format!("{cook_status}; compiling runtime..."));
 
-        if let Err(error) = self.spawn_editor_playtest_build(
-            EditorBuildCompletion::RunEmbedded,
-            "Building embedded playtest",
-        ) {
+        if let Err(error) = self.spawn_editor_playtest_build(EditorBuildCompletion::RunEmbedded) {
             let message = format!("Embedded Play build failed: {error}");
             self.editor.set_status(message.clone());
             self.embedded_playtest.fail();
@@ -1182,10 +1179,9 @@ impl AppState {
             dest_path.display()
         ));
 
-        if let Err(error) = self.spawn_editor_playtest_build(
-            EditorBuildCompletion::ExportProject { dest_path },
-            "Building project disc",
-        ) {
+        if let Err(error) =
+            self.spawn_editor_playtest_build(EditorBuildCompletion::ExportProject { dest_path })
+        {
             let message = format!("Project build failed: {error}");
             self.editor.set_status(message.clone());
             self.embedded_playtest.fail();
@@ -1195,7 +1191,6 @@ impl AppState {
     fn spawn_editor_playtest_build(
         &mut self,
         completion: EditorBuildCompletion,
-        toast: &'static str,
     ) -> Result<(), String> {
         let workspace_root = repo_root_dir();
         // Capture the build's stdout+stderr to a log file rather than
@@ -1222,7 +1217,6 @@ impl AppState {
             .map_err(|error| format!("spawn make: {error}"))?;
         self.editor_build_completion = Some(completion);
         self.embedded_playtest.start_building(child);
-        self.status_message_set(toast);
         Ok(())
     }
 
@@ -1544,9 +1538,12 @@ impl AppState {
         let build_bytes = copy_project_disc(&source_path, &dest_path)?;
 
         let rescan_error = self.rescan_library().err();
+        let display_path = dest_path
+            .canonicalize()
+            .unwrap_or_else(|_| dest_path.clone());
         let mut message = format!(
             "Project disc exported -> {} ({} KiB)",
-            dest_path.display(),
+            display_path.display(),
             build_bytes / 1024
         );
         if let Some(error) = rescan_error {
@@ -2153,7 +2150,8 @@ pub(crate) fn build_embedded_playtest_disc() -> Result<PathBuf, String> {
     let exe_path = editor_playtest_exe_path();
     let exe_bytes = std::fs::read(&exe_path).map_err(|e| format!("{}: {e}", exe_path.display()))?;
     let world_pack = embedded_world_pack_payload()?;
-    let mut image = embedded_playtest_disc_image(exe_bytes, world_pack)?;
+    let ui_pack = embedded_ui_pack_payload()?;
+    let mut image = embedded_playtest_disc_image(exe_bytes, world_pack, ui_pack)?;
     let cdda_payloads = embedded_cdda_track_payloads()?;
     let cdda_tracks = append_cdda_tracks_to_image(&mut image, &cdda_payloads)?;
 
@@ -2241,18 +2239,22 @@ fn append_cdda_tracks_to_image(
 fn embedded_playtest_disc_image(
     exe_bytes: Vec<u8>,
     world_pack: Option<Vec<u8>>,
+    ui_pack: Option<Vec<u8>>,
 ) -> Result<Vec<u8>, String> {
     Exe::parse(&exe_bytes).map_err(|e| format!("parse EXE: {e:?}"))?;
     let mut builder = IsoBuilder::new().volume_id("PSOXIDE");
-    builder.add_file("SYSTEM.CNF", default_system_cnf());
-    builder.add_file(
-        psx_iso::CD_STREAM_BENCH_FILE_NAME,
-        psx_iso::cd_stream_bench_payload(psx_iso::CD_STREAM_BENCH_DEFAULT_SECTORS),
+    // Canonical playtest-disc layout, shared with the mkisopsx CLI via
+    // psx_iso::add_playtest_files so the on-disc file order (and therefore the
+    // cooked WORLD_PACK_START_LBA / UI_PACK_START_LBA) cannot drift between the
+    // two builders. The editor always carries CDTEST.BIN at the default sector
+    // count, matching the cooked layout assumption.
+    psx_iso::add_playtest_files(
+        &mut builder,
+        exe_bytes,
+        world_pack,
+        ui_pack,
+        Some(psx_iso::CD_STREAM_BENCH_DEFAULT_SECTORS),
     );
-    if let Some(world_pack) = world_pack {
-        builder.add_file(psx_iso::WORLD_PACK_FILE_NAME, world_pack);
-    }
-    builder.add_file("PSX.EXE", exe_bytes);
     Ok(builder.build_bin())
 }
 
@@ -2320,6 +2322,54 @@ fn embedded_world_pack_payload() -> Result<Option<Vec<u8>>, String> {
         apply_embedded_world_pack_order(&mut rooms, &order, &order_file)?;
     }
     let refs: Vec<(u32, &[u8])> = rooms
+        .iter()
+        .map(|(chunk_id, bytes)| (*chunk_id, bytes.as_slice()))
+        .collect();
+    Ok(Some(build_world_pack(&refs)))
+}
+
+/// Build the embedded `UI.PAK` from the generated `ui_stream_chunks/` directory,
+/// the same way [`embedded_world_pack_payload`] builds `WORLD.PAK`. Each
+/// `ui_{index}.psxt` chunk is keyed by its cooked asset index; `ui_pack_order.txt`
+/// fixes the on-disc order so the offsets match the cooked `UI_PACK_TOC`. Returns
+/// `None` when the project cooked no streamed UI assets.
+fn embedded_ui_pack_payload() -> Result<Option<Vec<u8>>, String> {
+    let generated_dir = editor_playtest_generated_dir();
+    let chunks_dir = generated_dir.join(psxed_project::playtest::UI_STREAM_CHUNKS_DIRNAME);
+    if !chunks_dir.is_dir() {
+        return Ok(None);
+    }
+    let mut chunks = Vec::new();
+    for entry in
+        std::fs::read_dir(&chunks_dir).map_err(|e| format!("read {}: {e}", chunks_dir.display()))?
+    {
+        let entry = entry.map_err(|e| format!("read {}: {e}", chunks_dir.display()))?;
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("psxt") {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        let Some(raw_index) = stem.strip_prefix("ui_") else {
+            continue;
+        };
+        let chunk_id = raw_index
+            .parse::<u32>()
+            .map_err(|_| format!("invalid ui chunk filename: {}", path.display()))?;
+        let bytes = std::fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        chunks.push((chunk_id, bytes));
+    }
+    if chunks.is_empty() {
+        return Ok(None);
+    }
+    chunks.sort_by_key(|(chunk_id, _)| *chunk_id);
+    let order_file = generated_dir.join(psxed_project::playtest::UI_PACK_ORDER_FILENAME);
+    if order_file.is_file() {
+        let order = read_embedded_world_pack_order(&order_file)?;
+        apply_embedded_world_pack_order(&mut chunks, &order, &order_file)?;
+    }
+    let refs: Vec<(u32, &[u8])> = chunks
         .iter()
         .map(|(chunk_id, bytes)| (*chunk_id, bytes.as_slice()))
         .collect();
@@ -2685,7 +2735,8 @@ mod tests {
         exe.extend_from_slice(&[1, 2, 3, 4]);
 
         let world_pack = psx_iso::build_world_pack(&[(0, b"room-zero".as_slice())]);
-        let image = embedded_playtest_disc_image(exe, Some(world_pack)).expect("disc image builds");
+        let image =
+            embedded_playtest_disc_image(exe, Some(world_pack), None).expect("disc image builds");
         let disc = Disc::from_bin(image);
         let boot = psx_iso::load_boot_exe_from_disc(&disc).expect("disc boots");
         let stream_sector = disc

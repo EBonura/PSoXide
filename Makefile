@@ -22,6 +22,7 @@
 	showcase-text showcase-text-disc run-showcase-text \
 	game-pong game-pong-disc run-game-pong \
 	game-magikaaaaaarp-pong game-magikaaaaaarp-pong-disc magikaaaaaarp-pong-spectrum run-game-magikaaaaaarp-pong probe-magikaaaaaarp-pong-audio duckstation-magikaaaaaarp-pong \
+	demo10-project-disc duckstation-demo10 \
 	game-breakout game-breakout-disc run-game-breakout \
         game-invaders game-invaders-disc run-game-invaders \
         showcase-3d showcase-3d-disc run-showcase-3d \
@@ -113,6 +114,8 @@ help:
 	@echo "                      - render magikAAAAArp Pong CD-DA to a WAV + silence check"
 	@echo "    make duckstation-magikaaaaaarp-pong"
 	@echo "                      - boot magikAAAAArp Pong in DuckStation and assert TTY markers"
+	@echo "    make duckstation-demo10"
+	@echo "                      - build demo10's project disc and assert DuckStation TTY markers"
 	@echo "    make run-showcase-text"
 	@echo "                      - build + boot the text capabilities showcase disc"
 	@echo "    make run-game-pong     - build + boot the Pong mini-game disc"
@@ -262,6 +265,8 @@ MAGIKAAAAARP_PONG_TRACK ?= assets/audio/cdda/GONCHAROV.track02.cdda
 MAGIKAAAAARP_PONG_SPECTRUM := engine/examples/game-magikaaaaaarp-pong/assets/goncharov_spectrum_16x30hz.bin
 DUCKSTATION_TIMEOUT ?= 45
 DUCKSTATION_MAGIKARP_LOG ?= build/duckstation-harness/game-magikaaaaaarp-pong.log
+DUCKSTATION_DEMO10_LOG ?= build/duckstation-harness/demo10.log
+DEMO10_PROJECT ?= editor/projects/demo10
 PYTHON ?= python3
 PROFILE_DEMO3_FRAMES ?= 60
 PROFILE_DEMO3_STEPS ?= 120000000
@@ -429,6 +434,8 @@ profile-demo3-disc-stream:
 		--cdtest-sectors 32 \
 		--world-pack-rooms-dir ../../engine/examples/editor-playtest/generated/stream_chunks \
 		--world-pack-order-file ../../engine/examples/editor-playtest/generated/world_pack_order.txt \
+		--ui-pack-dir ../../engine/examples/editor-playtest/generated/ui_stream_chunks \
+		--ui-pack-order-file ../../engine/examples/editor-playtest/generated/ui_pack_order.txt \
 		--cdda-track-list $(EDITOR_PLAYTEST_GENERATED_FROM_MKISOPSX)/cdda_tracks.txt
 	cd emu && cargo run -p frontend --release -- launch \
 		--path ../$(EXAMPLE_OUT)/editor-playtest.cue \
@@ -450,6 +457,8 @@ profile-demo3-disc-stream-forward:
 		--cdtest-sectors 32 \
 		--world-pack-rooms-dir ../../engine/examples/editor-playtest/generated/stream_chunks \
 		--world-pack-order-file ../../engine/examples/editor-playtest/generated/world_pack_order.txt \
+		--ui-pack-dir ../../engine/examples/editor-playtest/generated/ui_stream_chunks \
+		--ui-pack-order-file ../../engine/examples/editor-playtest/generated/ui_pack_order.txt \
 		--cdda-track-list $(EDITOR_PLAYTEST_GENERATED_FROM_MKISOPSX)/cdda_tracks.txt
 	cd emu && cargo run -p frontend --release -- launch \
 		--path ../$(EXAMPLE_OUT)/editor-playtest.cue \
@@ -472,6 +481,8 @@ profile-demo7-camera-sweep:
 		--cdtest-sectors 32 \
 		--world-pack-rooms-dir ../../engine/examples/editor-playtest/generated/stream_chunks \
 		--world-pack-order-file ../../engine/examples/editor-playtest/generated/world_pack_order.txt \
+		--ui-pack-dir ../../engine/examples/editor-playtest/generated/ui_stream_chunks \
+		--ui-pack-order-file ../../engine/examples/editor-playtest/generated/ui_pack_order.txt \
 		--cdda-track-list $(EDITOR_PLAYTEST_GENERATED_FROM_MKISOPSX)/cdda_tracks.txt
 	cd emu && cargo run -p frontend --release -- launch \
 		--path ../$(EXAMPLE_OUT)/editor-playtest.cue \
@@ -584,6 +595,19 @@ duckstation-magikaaaaaarp-pong: game-magikaaaaaarp-pong-disc
 		--cue $(CURDIR)/$(EXAMPLE_OUT)/game-magikaaaaaarp-pong.cue \
 		--timeout $(DUCKSTATION_TIMEOUT) \
 		--log $(CURDIR)/$(DUCKSTATION_MAGIKARP_LOG)
+
+demo10-project-disc:
+	cd emu && cargo run -p frontend --release -- build-project-disc --project ../$(DEMO10_PROJECT)
+
+duckstation-demo10: demo10-project-disc
+	$(PYTHON) tools/duckstation_harness.py \
+		--cue $(CURDIR)/$(DEMO10_PROJECT)/baked/demo10.cue \
+		--timeout $(DUCKSTATION_TIMEOUT) \
+		--log $(CURDIR)/$(DUCKSTATION_DEMO10_LOG) \
+		--no-default-expect \
+		--expect "psx-rt: main" \
+		--expect "editor-playtest: init ok" \
+		--expect "psx-engine: scene init ok"
 
 run-game-breakout: game-breakout-disc
 	cd emu && PSOXIDE_DISC=$(CURDIR)/$(EXAMPLE_OUT)/game-breakout.cue cargo run -p frontend --release

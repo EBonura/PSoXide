@@ -777,7 +777,13 @@ impl<const ROOM_PAGES: usize, const CLUT_ROWS: usize> VramAllocator<ROOM_PAGES, 
     pub fn reserve_room_band(&mut self, base_x: u16, base_y: u16) {
         self.room_base_x = base_x;
         self.room_base_y = base_y;
-        self.set_rect(base_x, base_y, ROOM_PAGES as u16 * ALLOC_COL_W, TEXTURE_PAGE_TEXELS, true);
+        self.set_rect(
+            base_x,
+            base_y,
+            ROOM_PAGES as u16 * ALLOC_COL_W,
+            TEXTURE_PAGE_TEXELS,
+            true,
+        );
     }
 
     fn find_page_run(&self, count: u16, page_y: u16) -> Option<u16> {
@@ -831,7 +837,12 @@ impl<const ROOM_PAGES: usize, const CLUT_ROWS: usize> VramAllocator<ROOM_PAGES, 
         self.set_rect(x, 256, pages * ALLOC_COL_W, TEXTURE_PAGE_TEXELS, true);
         Some((
             Tpage::new(x, 256, TexDepth::Bit8),
-            VramHandle::Rect(VramRect::new(x, 256, pages * ALLOC_COL_W, TEXTURE_PAGE_TEXELS)),
+            VramHandle::Rect(VramRect::new(
+                x,
+                256,
+                pages * ALLOC_COL_W,
+                TEXTURE_PAGE_TEXELS,
+            )),
         ))
     }
 
@@ -860,7 +871,12 @@ impl<const ROOM_PAGES: usize, const CLUT_ROWS: usize> VramRegionSource
         self.set_rect(x, page_y, count * ALLOC_COL_W, TEXTURE_PAGE_TEXELS, true);
         Some((
             Tpage::new(x, page_y, depth),
-            VramHandle::Rect(VramRect::new(x, page_y, count * ALLOC_COL_W, TEXTURE_PAGE_TEXELS)),
+            VramHandle::Rect(VramRect::new(
+                x,
+                page_y,
+                count * ALLOC_COL_W,
+                TEXTURE_PAGE_TEXELS,
+            )),
         ))
     }
 

@@ -278,6 +278,15 @@ pub const BOX_PROP_FACE_COUNT: usize = 6;
 /// Editable vertex count on an authored boxed prop.
 pub const BOX_PROP_VERTEX_COUNT: usize = 8;
 
+/// Maximum distinct materials a single room may reference.
+///
+/// This is the cook<->runtime contract for the per-room material table: the
+/// runtime allocates a fixed `[_; MAX_ROOM_MATERIALS]` per active room and drops
+/// any material whose `local_slot` is >= this. The cook MUST reject a room that
+/// exceeds it (otherwise surfaces on the overflow slots silently vanish at
+/// runtime). Both sides reference this single constant so they can never drift.
+pub const MAX_ROOM_MATERIALS: usize = 16;
+
 /// Box prop record flags.
 pub mod box_prop_flags {
     /// Prop emits a static collision blocker for the character motor.
@@ -309,6 +318,12 @@ pub mod character_action_flags {
     /// for this action.
     pub const IN_PLACE: u8 = 1 << 2;
 }
+
+/// Per-action playback speed Q8 unit (`256 = 1.0x`), matching
+/// [`LevelCharacterRecord::action_speeds`].
+pub const CHARACTER_ACTION_SPEED_UNSCALED_Q8: u16 = 256;
+/// Sentinel meaning an action plays through the selected clip's last frame.
+pub const CHARACTER_ACTION_FRAME_END_FULL: u16 = u16::MAX;
 
 typed_index! {
     /// Clip index local to one model's clip slice.
@@ -353,6 +368,8 @@ pub mod ui_node_flags {
     pub const FLIP_X: u16 = 1 << 9;
     /// Mirror the node's local Y axis before rotation.
     pub const FLIP_Y: u16 = 1 << 10;
+    /// Node is only visible while the active controller is not in analog mode.
+    pub const ANALOG_INACTIVE_ONLY: u16 = 1 << 11;
 }
 
 typed_index! {
@@ -607,6 +624,14 @@ pub struct LevelCameraRecord {
     pub target_height: i32,
     /// Minimum camera origin height above the sampled floor.
     pub min_floor_clearance: i32,
+    /// Manual orbit input speed level. Higher values turn faster.
+    pub orbit_speed_level: u8,
+    /// Camera origin follow lag shift. Lower values move faster.
+    pub position_lag_shift: u8,
+    /// Camera focus follow lag shift. Lower values move faster.
+    pub focus_lag_shift: u8,
+    /// Collision boom recovery lag shift. Lower values move faster.
+    pub distance_lag_shift: u8,
 }
 
 impl LevelCameraRecord {
@@ -616,6 +641,10 @@ impl LevelCameraRecord {
         height: 1_280,
         target_height: 640,
         min_floor_clearance: 64,
+        orbit_speed_level: 5,
+        position_lag_shift: 2,
+        focus_lag_shift: 2,
+        distance_lag_shift: 3,
     };
 }
 
@@ -1432,6 +1461,11 @@ pub struct LevelModelInstanceRecord {
     /// Per-instance clip override, or `0xFFFF` to inherit the
     /// model's `default_clip`.
     pub clip: OptionalModelClipIndex,
+    /// Static pose frame within [`Self::clip`], or
+    /// [`MODEL_INSTANCE_POSE_ANIMATE`] to advance the clip from the
+    /// elapsed-tick phase. Lets a model be placed frozen on a chosen
+    /// frame (e.g. a corpse held on the last frame of a death clip).
+    pub pose_frame: u16,
     /// Room-local X.
     pub x: i32,
     /// Y.
@@ -1454,6 +1488,10 @@ pub struct LevelModelInstanceRecord {
 /// Sentinel for [`LevelModelInstanceRecord::clip`] meaning
 /// "inherit model default".
 pub const MODEL_CLIP_INHERIT: OptionalModelClipIndex = OptionalModelClipIndex::INHERIT;
+
+/// Sentinel for [`LevelModelInstanceRecord::pose_frame`] meaning
+/// "advance the clip normally" (no static freeze).
+pub const MODEL_INSTANCE_POSE_ANIMATE: u16 = 0xFFFF;
 
 /// One placed flat image prop. Coordinates are room-local engine
 /// units and `x/y/z` names the bottom-center anchor of the quad.
@@ -1505,6 +1543,13 @@ pub struct LevelBoxPropRecord {
     pub y: i32,
     /// Bottom-center room-local Z.
     pub z: i32,
+    /// Room-floor Y directly beneath the prop, baked at cook time.
+    /// Break shards and settled floor debris fall to this Y instead of
+    /// the prop's own bottom, so an elevated or stacked box's fragments
+    /// land on the ground rather than floating at the box's height. It
+    /// is also the surface an unsupported box falls to. Equals `y` for a
+    /// box authored on the floor, or where no floor sample exists.
+    pub ground_y: i32,
     /// Static pitch in PSX angle units.
     pub pitch: i16,
     /// Static yaw in PSX angle units.
@@ -2226,6 +2271,41 @@ impl CharacterAnimationAction {
     }
 }
 
+/// Inclusive playback window for one action clip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CharacterActionFrameRange {
+    /// First sampled frame to play.
+    pub start: u16,
+    /// Last sampled frame to play, inclusive. [`CHARACTER_ACTION_FRAME_END_FULL`]
+    /// means "the selected clip's final frame".
+    pub end: u16,
+}
+
+impl CharacterActionFrameRange {
+    /// Full-clip default.
+    pub const FULL: Self = Self {
+        start: 0,
+        end: CHARACTER_ACTION_FRAME_END_FULL,
+    };
+}
+
+/// Authored forward movement applied while an action plays.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CharacterActionPush {
+    /// Total forward distance in engine units. Zero disables action push.
+    pub distance: i32,
+    /// Inclusive sampled-frame window over which the distance is distributed.
+    pub frame_range: CharacterActionFrameRange,
+}
+
+impl CharacterActionPush {
+    /// No authored push.
+    pub const NONE: Self = Self {
+        distance: 0,
+        frame_range: CharacterActionFrameRange::FULL,
+    };
+}
+
 /// Gameplay character -- backing model + role-clip mapping +
 /// capsule / camera / controller defaults. Layered on top of
 /// a [`LevelModelRecord`]; the player spawn references one of
@@ -2243,6 +2323,15 @@ pub struct LevelCharacterRecord {
     pub action_clips: [OptionalModelClipIndex; CHARACTER_ANIMATION_ACTION_COUNT],
     /// Per-action playback flags matching [`Self::action_clips`].
     pub action_flags: [u8; CHARACTER_ANIMATION_ACTION_COUNT],
+    /// Per-action playback speed in Q8 fixed point (`256 = 1.0x`),
+    /// matching [`Self::action_clips`]. Scales how fast the action's
+    /// clip advances; [`CHARACTER_ACTION_SPEED_UNSCALED_Q8`] is 1.0x.
+    pub action_speeds: [u16; CHARACTER_ANIMATION_ACTION_COUNT],
+    /// Inclusive playback frame window per action. [`CharacterActionFrameRange::FULL`]
+    /// means the selected clip's full sampled frame range.
+    pub action_frame_ranges: [CharacterActionFrameRange; CHARACTER_ANIMATION_ACTION_COUNT],
+    /// Per-action forward push applied by locked one-shot actions.
+    pub action_pushes: [CharacterActionPush; CHARACTER_ANIMATION_ACTION_COUNT],
     /// Render-only model offset from the controller root, in
     /// entity-local engine units.
     pub visual_offset: [i16; 3],
