@@ -27,15 +27,39 @@ const FONT_PACK_SCRATCH_LEN: usize = {
 const FONT_PACK_SCRATCH_LEN: usize = FONT_PACK_U16;
 static mut FONT_PACK_SCRATCH: [u16; FONT_PACK_SCRATCH_LEN] = [0; FONT_PACK_SCRATCH_LEN];
 
-/// Staging buffer for one CD-streamed UI image. Reused image-by-image
-/// on menu entry: a UI image is read off UI.PAK into this buffer, then
-/// uploaded to VRAM (a synchronous DMA), then the buffer is overwritten
-/// by the next image. Lives in BSS, not on the stack. Sized to the
-/// largest streamed UI chunk so any one image fits.
+/// One cached CD-streamed menu UI image. The bytes are loaded once from UI.PAK
+/// at first menu entry, then scene transitions upload their active images from
+/// this RAM cache instead of seeking the disc again.
+#[cfg(feature = "cd-stream-bench")]
+#[derive(Copy, Clone)]
+struct UiImageCacheEntry {
+    asset: AssetId,
+    bytes: usize,
+    loaded: bool,
+}
+
+#[cfg(feature = "cd-stream-bench")]
+const UI_IMAGE_CACHE_ENTRY_EMPTY: UiImageCacheEntry = UiImageCacheEntry {
+    asset: AssetId(u16::MAX),
+    bytes: 0,
+    loaded: false,
+};
+
+/// RAM cache for every streamed menu UI image. Each slot is fixed-width so the
+/// CD reader can write directly into it as a u32-aligned destination.
 #[cfg(feature = "cd-stream-bench")]
 const UI_STAGE_WORDS: usize = (UI_PACK_MAX_CHUNK_BYTES + 3) / 4;
 #[cfg(feature = "cd-stream-bench")]
-static mut UI_IMAGE_STAGE: [u32; UI_STAGE_WORDS] = [0; UI_STAGE_WORDS];
+const UI_IMAGE_CACHE_WORDS: usize = UI_STAGE_WORDS * UI_PACK_IMAGE_CACHE_SLOTS;
+#[cfg(feature = "cd-stream-bench")]
+static mut UI_IMAGE_CACHE: [u32; UI_IMAGE_CACHE_WORDS] = [0; UI_IMAGE_CACHE_WORDS];
+#[cfg(feature = "cd-stream-bench")]
+static mut UI_IMAGE_CACHE_ENTRIES: [UiImageCacheEntry; UI_PACK_IMAGE_CACHE_SLOTS] =
+    [UI_IMAGE_CACHE_ENTRY_EMPTY; UI_PACK_IMAGE_CACHE_SLOTS];
+#[cfg(feature = "cd-stream-bench")]
+static mut UI_IMAGE_CACHE_COUNT: usize = 0;
+#[cfg(feature = "cd-stream-bench")]
+static mut UI_IMAGE_CACHE_READY: bool = false;
 
 /// Streamed UI image VRAM slots created on menu entry, tracked so they
 /// can be released on gameplay entry. One entry per streamed Texture
@@ -145,20 +169,122 @@ fn free_room_texture_vram_slot(asset_id: AssetId) {
     }
 }
 
-/// Load the active UI scene's CD-streamed images into VRAM, one image at a time.
+/// Load every menu UI image from UI.PAK into RAM once. VRAM remains scoped to
+/// the active UI scene so the Bonnie splash texture does not stay resident beside
+/// all main-menu strips.
 ///
-/// Each streamed image (a `Texture` asset with empty baked bytes) is read
-/// off UI.PAK into the shared `UI_IMAGE_STAGE` buffer, uploaded to VRAM,
-/// and the upload drained to completion BEFORE the next image overwrites
-/// the buffer. The `&'static` slice handed to the uploader is sound only
-/// because the buffer is `static mut` and fully consumed before the next
-/// read mutates it. Tracks each created slot so `release_ui_images` can
-/// free it on gameplay entry.
+/// The first menu state pays the CD-read cost for all menu scenes; later
+/// menu-to-menu transitions only upload already-cached bytes to VRAM.
 #[cfg(feature = "cd-stream-bench")]
-pub(super) fn load_ui_images_for_scene_from_cd(scene_id: u16) {
+fn preload_menu_ui_images_from_cd() {
+    unsafe {
+        if UI_IMAGE_CACHE_READY {
+            return;
+        }
+
+        for scene in UI_SCENES {
+            let first = scene.node_first as usize;
+            let end = first
+                .saturating_add(scene.node_count as usize)
+                .min(UI_NODES.len());
+            for node in &UI_NODES[first..end] {
+                if node.kind != psx_level::LevelUiNodeKind::Image {
+                    continue;
+                }
+                let Some(asset) = find_asset_of_kind(ASSETS, node.texture_asset, AssetKind::Texture)
+                else {
+                    continue;
+                };
+                if !asset.bytes.is_empty() || is_sky_panorama_asset(asset.id) {
+                    continue;
+                }
+                if find_ui_image_cache_entry(asset.id).is_some() {
+                    continue;
+                }
+                if UI_IMAGE_CACHE_COUNT >= UI_PACK_IMAGE_CACHE_SLOTS {
+                    continue;
+                }
+
+                let slot = UI_IMAGE_CACHE_COUNT;
+                let start = slot.saturating_mul(UI_STAGE_WORDS);
+                let end = start.saturating_add(UI_STAGE_WORDS).min(UI_IMAGE_CACHE.len());
+                let res = cd_stream::read_chunk_blocking(
+                    UI_PACK_START_LBA,
+                    UI_PACK_TOC,
+                    asset.id.0 as u32,
+                    &mut UI_IMAGE_CACHE[start..end],
+                );
+                if res.status != cd_stream::ROOM_CHUNK_STATUS_OK || res.bytes == 0 {
+                    continue;
+                }
+
+                UI_IMAGE_CACHE_ENTRIES[slot] = UiImageCacheEntry {
+                    asset: asset.id,
+                    bytes: res.bytes,
+                    loaded: true,
+                };
+                UI_IMAGE_CACHE_COUNT += 1;
+            }
+        }
+
+        UI_IMAGE_CACHE_READY = UI_IMAGE_CACHE_COUNT >= UI_PACK_IMAGE_CACHE_SLOTS;
+    }
+}
+
+#[cfg(feature = "cd-stream-bench")]
+fn find_ui_image_cache_entry(asset_id: AssetId) -> Option<(usize, UiImageCacheEntry)> {
+    unsafe {
+        let mut i = 0usize;
+        while i < UI_IMAGE_CACHE_COUNT {
+            let entry = UI_IMAGE_CACHE_ENTRIES[i];
+            if entry.loaded && entry.asset == asset_id {
+                return Some((i, entry));
+            }
+            i += 1;
+        }
+    }
+    None
+}
+
+#[cfg(feature = "cd-stream-bench")]
+fn cached_ui_image_bytes(slot: usize, bytes: usize) -> &'static [u8] {
+    unsafe {
+        let offset_words = slot.saturating_mul(UI_STAGE_WORDS);
+        let offset_bytes = offset_words.saturating_mul(core::mem::size_of::<u32>());
+        core::slice::from_raw_parts(
+            (core::ptr::addr_of!(UI_IMAGE_CACHE) as *const u8).add(offset_bytes),
+            bytes,
+        )
+    }
+}
+
+#[cfg(feature = "cd-stream-bench")]
+fn track_ui_image_slot(asset_id: AssetId) {
+    unsafe {
+        for entry in UI_IMAGE_SLOTS.iter() {
+            if *entry == Some(asset_id) {
+                return;
+            }
+        }
+        for entry in UI_IMAGE_SLOTS.iter_mut() {
+            if entry.is_none() {
+                *entry = Some(asset_id);
+                return;
+            }
+        }
+    }
+}
+
+/// Upload the active UI scene's streamed images into VRAM from the preloaded RAM
+/// cache. Tracks each created slot so `release_ui_images` can free it when the
+/// scene changes or gameplay starts.
+#[cfg(feature = "cd-stream-bench")]
+pub(super) fn load_ui_images_for_scene(scene_id: u16) {
     if scene_id == psx_level::UI_SCENE_NONE {
         return;
     }
+    preload_menu_ui_images_from_cd();
+
     let Some(scene) = UI_SCENES.iter().find(|scene| scene.id == scene_id) else {
         return;
     };
@@ -166,64 +292,44 @@ pub(super) fn load_ui_images_for_scene_from_cd(scene_id: u16) {
     let end = first
         .saturating_add(scene.node_count as usize)
         .min(UI_NODES.len());
+    for node in &UI_NODES[first..end] {
+        if node.kind != psx_level::LevelUiNodeKind::Image {
+            continue;
+        }
+        let Some(asset) = find_asset_of_kind(ASSETS, node.texture_asset, AssetKind::Texture) else {
+            continue;
+        };
+        if !asset.bytes.is_empty() {
+            continue;
+        }
+        // The sky panorama is also a streamed (empty-bytes) Texture but is
+        // gameplay-scoped: it is loaded by `load_streamed_sky_from_cd` into
+        // a larger staging buffer, never through this small per-image one.
+        if is_sky_panorama_asset(asset.id) {
+            continue;
+        }
+        // Skip if already uploaded (idempotent re-entry).
+        if find_room_texture_vram_slot(asset.id).is_some() {
+            track_ui_image_slot(asset.id);
+            continue;
+        }
 
-    unsafe {
-        let mut slot_count = 0usize;
-        for node in &UI_NODES[first..end] {
-            if node.kind != psx_level::LevelUiNodeKind::Image {
-                continue;
-            }
-            let Some(asset) = find_asset_of_kind(ASSETS, node.texture_asset, AssetKind::Texture)
-            else {
-                continue;
-            };
-            if !asset.bytes.is_empty() {
-                continue;
-            }
-            // The sky panorama is also a streamed (empty-bytes) Texture but is
-            // gameplay-scoped: it is loaded by `load_streamed_sky_from_cd` into
-            // a larger staging buffer, never through this small per-image one.
-            if is_sky_panorama_asset(asset.id) {
-                continue;
-            }
-            if slot_count >= MAX_UI_IMAGE_SLOTS {
-                break;
-            }
-            // Skip if already uploaded (idempotent re-entry).
-            if find_room_texture_vram_slot(asset.id).is_some() {
-                continue;
-            }
-
-            let res = cd_stream::read_chunk_blocking(
-                UI_PACK_START_LBA,
-                UI_PACK_TOC,
-                asset.id.0 as u32,
-                &mut *core::ptr::addr_of_mut!(UI_IMAGE_STAGE),
-            );
-            if res.status != cd_stream::ROOM_CHUNK_STATUS_OK || res.bytes == 0 {
-                continue;
-            }
-
-            // The staged bytes are valid until the next read overwrites the
-            // buffer; the upload below consumes them synchronously first.
-            let bytes: &'static [u8] = core::slice::from_raw_parts(
-                core::ptr::addr_of!(UI_IMAGE_STAGE) as *const u8,
-                res.bytes,
-            );
-            if ensure_ui_texture_uploaded(asset.id, bytes).is_none() {
-                // Drain in case a job was queued but not yet completed, then
-                // retry the lookup before giving up on this image.
-                drain_ui_upload_queue();
-            }
-
-            // Make sure this asset's upload has fully drained before the next
-            // iteration reuses the staging buffer.
+        let Some((cache_slot, cache_entry)) = find_ui_image_cache_entry(asset.id) else {
+            continue;
+        };
+        let bytes = cached_ui_image_bytes(cache_slot, cache_entry.bytes);
+        if ensure_ui_texture_uploaded(asset.id, bytes).is_none() {
+            // Drain in case a job was queued but not yet completed, then
+            // retry the lookup before giving up on this image.
             drain_ui_upload_queue();
+        }
 
-            if find_room_texture_vram_slot(asset.id).is_some() {
-                UI_IMAGE_SLOTS[slot_count] = Some(asset.id);
-                slot_count += 1;
-            }
+        // Make sure this asset's upload has fully drained before render
+        // asks the UI texture resolver for its slot.
+        drain_ui_upload_queue();
+
+        if find_room_texture_vram_slot(asset.id).is_some() {
+            track_ui_image_slot(asset.id);
         }
     }
 }
