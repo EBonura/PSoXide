@@ -208,7 +208,7 @@ impl RuntimeDepthSortMode {
 
 impl Default for RuntimeDepthSortMode {
     fn default() -> Self {
-        Self::FixedCell
+        Self::HybridWalls
     }
 }
 

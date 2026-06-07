@@ -31,7 +31,7 @@ pub(super) fn build_room_materials(
         else {
             continue;
         };
-        let Some(slot_record) = ensure_texture_uploaded(asset.id, asset.bytes) else {
+        let Some(slot_record) = ensure_room_texture_uploaded(asset.id, asset.bytes) else {
             all_resolved = false;
             // Distinguish a real drop (the silent untextured fallback, queue full
             // or VRAM full) from a still-in-flight upload that resolves on a later

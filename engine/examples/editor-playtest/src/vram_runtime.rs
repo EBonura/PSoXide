@@ -572,6 +572,13 @@ pub(super) fn ensure_texture_uploaded(
     ensure_texture_uploaded_with_clut_mode(asset_id, asset_bytes, clut_mode)
 }
 
+pub(super) fn ensure_room_texture_uploaded(
+    asset_id: AssetId,
+    asset_bytes: &'static [u8],
+) -> Option<VramSlot> {
+    ensure_texture_uploaded_with_clut_mode(asset_id, asset_bytes, VramSlotClutMode::OpaqueZero)
+}
+
 pub(super) fn ensure_ui_texture_uploaded(
     asset_id: AssetId,
     asset_bytes: &'static [u8],
