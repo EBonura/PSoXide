@@ -1,0 +1,3150 @@
+use super::*;
+
+pub(crate) fn draw_transform_policy_editor(
+    ui: &mut egui::Ui,
+    node: &mut psxed_project::SceneNode,
+    inherited_sector_size: i32,
+    texture_options: &[(ResourceId, String)],
+    nav_target: &mut Option<ResourceId>,
+    world_sector_size_change: &mut Option<i32>,
+) -> bool {
+    match &mut node.kind {
+        NodeKind::World {
+            sector_size,
+            sky,
+            far_vista,
+            camera: _,
+            culling,
+            streaming,
+            physics,
+        } => draw_world_grid_settings(
+            ui,
+            *sector_size,
+            sky,
+            far_vista,
+            culling,
+            streaming,
+            physics,
+            texture_options,
+            nav_target,
+            world_sector_size_change,
+        ),
+        _ => match node_transform_inspector(&node.kind) {
+            NodeTransformInspector::Hidden => false,
+            NodeTransformInspector::RoomGrid => {
+                room_grid_transform_editor(ui, &mut node.transform, inherited_sector_size)
+            }
+            NodeTransformInspector::PositionOnly => {
+                light_transform_editor(ui, &mut node.transform, inherited_sector_size)
+            }
+            NodeTransformInspector::PositionYaw => {
+                entity_transform_editor(ui, &mut node.transform, inherited_sector_size, false)
+            }
+            NodeTransformInspector::PositionFullRotation => {
+                entity_transform_editor(ui, &mut node.transform, inherited_sector_size, true)
+            }
+            NodeTransformInspector::FullTransform => {
+                let mut changed = false;
+                changed |= transform_editor(ui, "Position", &mut node.transform.translation, 1.0);
+                changed |=
+                    transform_editor(ui, "Rotation", &mut node.transform.rotation_degrees, 1.0);
+                changed |= transform_editor(ui, "Scale", &mut node.transform.scale, 0.05);
+                changed
+            }
+        },
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NodeTransformInspector {
+    Hidden,
+    RoomGrid,
+    PositionOnly,
+    PositionYaw,
+    PositionFullRotation,
+    FullTransform,
+}
+
+pub(crate) fn node_transform_inspector(kind: &NodeKind) -> NodeTransformInspector {
+    match kind {
+        NodeKind::World { .. } | NodeKind::Node => NodeTransformInspector::Hidden,
+        NodeKind::Room { .. } => NodeTransformInspector::RoomGrid,
+        NodeKind::PointLight { .. } | NodeKind::ParticleEmitter { .. } => {
+            NodeTransformInspector::PositionOnly
+        }
+        NodeKind::ModelRenderer { .. }
+        | NodeKind::Animator { .. }
+        | NodeKind::Collider { .. }
+        | NodeKind::CharacterController { .. }
+        | NodeKind::Camera { .. }
+        | NodeKind::Equipment { .. }
+        | NodeKind::PhysicsBody { .. }
+        | NodeKind::Interactable { .. } => NodeTransformInspector::Hidden,
+        NodeKind::Entity
+        | NodeKind::MeshInstance { .. }
+        | NodeKind::SpawnPoint { .. }
+        | NodeKind::Portal { .. } => NodeTransformInspector::PositionYaw,
+        NodeKind::ImageProp { .. } | NodeKind::BoxProp { .. } => {
+            NodeTransformInspector::PositionFullRotation
+        }
+        NodeKind::Node3D => NodeTransformInspector::FullTransform,
+    }
+}
+
+pub(crate) fn draw_playtest_render_settings(
+    ui: &mut egui::Ui,
+    mode: &mut RuntimeDepthSortMode,
+    split_mode: &mut RuntimeTextureSplitMode,
+    room_order_mode: &mut RuntimeRoomDrawOrderMode,
+    texture_split_max_edge: &mut u16,
+) -> bool {
+    let mut changed = false;
+    egui::CollapsingHeader::new(icons::label(icons::BOX, "Playtest Render"))
+        .default_open(true)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Depth Sorting").color(STUDIO_TEXT_WEAK));
+                egui::ComboBox::from_id_salt("playtest-runtime-depth-sort-mode")
+                    .selected_text(mode.label())
+                    .show_ui(ui, |ui| {
+                        for candidate in RuntimeDepthSortMode::ALL {
+                            changed |= ui
+                                .selectable_value(mode, candidate, candidate.label())
+                                .on_hover_text(candidate.description())
+                                .changed();
+                        }
+                    });
+            });
+            ui.weak(mode.description());
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Subdivision Scope").color(STUDIO_TEXT_WEAK));
+                egui::ComboBox::from_id_salt("playtest-runtime-texture-split-mode")
+                    .selected_text(split_mode.label())
+                    .show_ui(ui, |ui| {
+                        for candidate in RuntimeTextureSplitMode::ALL {
+                            changed |= ui
+                                .selectable_value(split_mode, candidate, candidate.label())
+                                .on_hover_text(candidate.description())
+                                .changed();
+                        }
+                    });
+            });
+            ui.weak(split_mode.description());
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Room Order").color(STUDIO_TEXT_WEAK));
+                egui::ComboBox::from_id_salt("playtest-runtime-room-draw-order-mode")
+                    .selected_text(room_order_mode.label())
+                    .show_ui(ui, |ui| {
+                        for candidate in RuntimeRoomDrawOrderMode::ALL {
+                            changed |= ui
+                                .selectable_value(room_order_mode, candidate, candidate.label())
+                                .on_hover_text(candidate.description())
+                                .changed();
+                        }
+                    });
+            });
+            ui.weak(room_order_mode.description());
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Subdivision Edge").color(STUDIO_TEXT_WEAK));
+                let mut next = i32::from(*texture_split_max_edge);
+                if ui
+                    .add(
+                        egui::DragValue::new(&mut next)
+                            .speed(8.0)
+                            .range(0..=512)
+                            .update_while_editing(false),
+                    )
+                    .on_hover_text(
+                        "Maximum projected edge length before cached room triangles are split. \
+                         Lower values reduce PS1 ordering artifacts at higher CPU cost; 0 disables visual subdivision.",
+                    )
+                    .changed()
+                {
+                    *texture_split_max_edge = next.clamp(0, 512) as u16;
+                    changed = true;
+                }
+            });
+            ui.weak("0 disables visual subdivision. Lower values split room triangles more aggressively.");
+        });
+    changed
+}
+
+pub(crate) fn draw_world_grid_settings(
+    ui: &mut egui::Ui,
+    sector_size: i32,
+    sky: &mut SkySettings,
+    far_vista: &mut FarVistaSettings,
+    culling: &mut WorldCullingSettings,
+    streaming: &mut WorldStreamingSettings,
+    physics: &mut WorldPhysicsSettings,
+    texture_options: &[(ResourceId, String)],
+    nav_target: &mut Option<ResourceId>,
+    world_sector_size_change: &mut Option<i32>,
+) -> bool {
+    let mut changed = false;
+    egui::CollapsingHeader::new(icons::label(icons::GRID, "World Grid"))
+        .default_open(true)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Sector Size").color(STUDIO_TEXT_WEAK));
+                let mut next = sector_size;
+                let response = ui.add(
+                    egui::DragValue::new(&mut next)
+                        .speed(WORLD_SECTOR_SIZE_QUANTUM as f64)
+                        .range(MIN_WORLD_SECTOR_SIZE..=MAX_WORLD_SECTOR_SIZE)
+                        .update_while_editing(false),
+                );
+                if next != sector_size {
+                    *world_sector_size_change = Some(psxed_project::snap_world_sector_size(next));
+                    changed = true;
+                }
+                response
+                    .on_hover_text(format!("Snaps to {}-unit steps", WORLD_SECTOR_SIZE_QUANTUM));
+                ui.label(RichText::new("units").color(STUDIO_TEXT_WEAK));
+            });
+        });
+    egui::CollapsingHeader::new(icons::label(icons::WAYPOINT, "Physics"))
+        .default_open(true)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Gravity").color(STUDIO_TEXT_WEAK));
+                if ui
+                    .add(
+                        egui::DragValue::new(&mut physics.gravity_per_tick)
+                            .speed(8.0)
+                            .range(MIN_WORLD_GRAVITY_PER_TICK..=MAX_WORLD_GRAVITY_PER_TICK),
+                    )
+                    .on_hover_text("Downward acceleration in engine units per 60 Hz tick squared.")
+                    .changed()
+                {
+                    *physics = physics.normalized();
+                    changed = true;
+                }
+                ui.label(RichText::new("units/tick^2").color(STUDIO_TEXT_WEAK));
+            });
+        });
+    egui::CollapsingHeader::new(icons::label(icons::SCAN, "Streaming"))
+        .default_open(false)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Resident Rooms").color(STUDIO_TEXT_WEAK));
+                let mut limit = streaming.resident_chunk_limit as i32;
+                if ui
+                    .add(egui::DragValue::new(&mut limit).speed(1.0).range(
+                        MIN_WORLD_STREAMING_RESIDENT_CHUNKS as i32
+                            ..=MAX_WORLD_STREAMING_RESIDENT_CHUNKS as i32,
+                    ))
+                    .changed()
+                {
+                    streaming.resident_chunk_limit = limit as u8;
+                    *streaming = streaming.normalized();
+                    changed = true;
+                }
+                ui.label(RichText::new("rooms").color(STUDIO_TEXT_WEAK));
+            });
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Visible Rooms").color(STUDIO_TEXT_WEAK));
+                let mut limit = streaming.visible_chunk_limit as i32;
+                let max_visible = streaming.resident_chunk_limit.clamp(
+                    MIN_WORLD_STREAMING_VISIBLE_CHUNKS,
+                    MAX_WORLD_STREAMING_VISIBLE_CHUNKS,
+                );
+                if ui
+                    .add(
+                        egui::DragValue::new(&mut limit)
+                            .speed(1.0)
+                            .range(MIN_WORLD_STREAMING_VISIBLE_CHUNKS as i32..=max_visible as i32),
+                    )
+                    .changed()
+                {
+                    streaming.visible_chunk_limit = limit as u8;
+                    *streaming = streaming.normalized();
+                    changed = true;
+                }
+                ui.label(RichText::new("rooms").color(STUDIO_TEXT_WEAK));
+            });
+        });
+    egui::CollapsingHeader::new(icons::label(icons::SUN, "Sky"))
+        .default_open(true)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Mode").color(STUDIO_TEXT_WEAK));
+                changed |= ui
+                    .selectable_value(&mut sky.mode, SkyMode::Gradient, "Gradient")
+                    .changed();
+                changed |= ui
+                    .selectable_value(&mut sky.mode, SkyMode::Off, "Off")
+                    .changed();
+            });
+            if sky.mode == SkyMode::Gradient {
+                changed |= color_editor(ui, "Top", &mut sky.top_color);
+                changed |= color_editor(ui, "Horizon", &mut sky.horizon_color);
+                changed |= color_editor(ui, "Lower", &mut sky.lower_color);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Horizon").color(STUDIO_TEXT_WEAK));
+                    let mut horizon = sky.horizon_percent.clamp(5, 95);
+                    if ui
+                        .add(egui::Slider::new(&mut horizon, 5..=95).suffix("%"))
+                        .changed()
+                    {
+                        sky.horizon_percent = horizon;
+                        changed = true;
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Horizon Thickness").color(STUDIO_TEXT_WEAK));
+                    let mut thickness = sky.horizon_thickness_percent.clamp(0, 80);
+                    if ui
+                        .add(egui::Slider::new(&mut thickness, 0..=80).suffix("%"))
+                        .changed()
+                    {
+                        sky.horizon_thickness_percent = thickness;
+                        changed = true;
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Horizon Glow").color(STUDIO_TEXT_WEAK));
+                    let mut glow = sky.horizon_glow_percent.clamp(0, 100);
+                    if ui
+                        .add(egui::Slider::new(&mut glow, 0..=100).suffix("%"))
+                        .changed()
+                    {
+                        sky.horizon_glow_percent = glow;
+                        changed = true;
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Glow Direction").color(STUDIO_TEXT_WEAK));
+                    let mut yaw = sky.horizon_glow_yaw_degrees.clamp(-180, 180);
+                    if ui
+                        .add(egui::Slider::new(&mut yaw, -180..=180).suffix("deg"))
+                        .changed()
+                    {
+                        sky.horizon_glow_yaw_degrees = yaw;
+                        changed = true;
+                    }
+                });
+                ui.separator();
+                changed |= ui.checkbox(&mut sky.sun_enabled, "Sun").changed();
+                ui.add_enabled_ui(sky.sun_enabled, |ui| {
+                    changed |= color_editor(ui, "Sun Inner", &mut sky.sun_color);
+                    changed |= color_editor(ui, "Sun Border", &mut sky.sun_border_color);
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Sun Direction").color(STUDIO_TEXT_WEAK));
+                        let mut yaw = sky.sun_yaw_degrees.clamp(-180, 180);
+                        if ui
+                            .add(egui::Slider::new(&mut yaw, -180..=180).suffix("deg"))
+                            .changed()
+                        {
+                            sky.sun_yaw_degrees = yaw;
+                            changed = true;
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Sun Height").color(STUDIO_TEXT_WEAK));
+                        let mut pitch = sky.sun_pitch_degrees.clamp(-30, 75);
+                        if ui
+                            .add(egui::Slider::new(&mut pitch, -30..=75).suffix("deg"))
+                            .changed()
+                        {
+                            sky.sun_pitch_degrees = pitch;
+                            changed = true;
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Sun Size").color(STUDIO_TEXT_WEAK));
+                        let mut size = sky.sun_size_percent.clamp(1, 100);
+                        if ui
+                            .add(egui::Slider::new(&mut size, 1..=100).suffix("%"))
+                            .changed()
+                        {
+                            sky.sun_size_percent = size;
+                            changed = true;
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Sun Glow").color(STUDIO_TEXT_WEAK));
+                        let mut glow = sky.sun_glow_percent.clamp(0, 100);
+                        if ui
+                            .add(egui::Slider::new(&mut glow, 0..=100).suffix("%"))
+                            .changed()
+                        {
+                            sky.sun_glow_percent = glow;
+                            changed = true;
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Glow Size").color(STUDIO_TEXT_WEAK));
+                        let mut spread = sky.sun_glow_size_percent.clamp(0, 100);
+                        if ui
+                            .add(egui::Slider::new(&mut spread, 0..=100).suffix("%"))
+                            .changed()
+                        {
+                            sky.sun_glow_size_percent = spread;
+                            changed = true;
+                        }
+                    });
+                });
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Mountains").color(STUDIO_TEXT_WEAK));
+                    let mut mountains = sky
+                        .mountain_height_percent
+                        .clamp(0, SKY_MOUNTAIN_HEIGHT_PERCENT_MAX);
+                    if ui
+                        .add(
+                            egui::Slider::new(&mut mountains, 0..=SKY_MOUNTAIN_HEIGHT_PERCENT_MAX)
+                                .suffix("%"),
+                        )
+                        .changed()
+                    {
+                        sky.mountain_height_percent = mountains;
+                        changed = true;
+                    }
+                });
+                changed |= color_editor(ui, "Mountain Peak", &mut sky.mountain_top_color);
+                changed |= color_editor(ui, "Mountain Base", &mut sky.mountain_base_color);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Mountain Gap").color(STUDIO_TEXT_WEAK));
+                    let mut gap = sky.mountain_gap_percent.clamp(0, 100);
+                    if ui
+                        .add(egui::Slider::new(&mut gap, 0..=100).suffix("%"))
+                        .changed()
+                    {
+                        sky.mountain_gap_percent = gap;
+                        changed = true;
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Mountain Shape").color(STUDIO_TEXT_WEAK));
+                    let mut roughness = sky.mountain_roughness_percent.clamp(0, 100);
+                    if ui
+                        .add(egui::Slider::new(&mut roughness, 0..=100).suffix("%"))
+                        .changed()
+                    {
+                        sky.mountain_roughness_percent = roughness;
+                        changed = true;
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Mountain Layers").color(STUDIO_TEXT_WEAK));
+                    let mut layers = sky.mountain_layer_count.clamp(1, 3);
+                    if ui.add(egui::Slider::new(&mut layers, 1..=3)).changed() {
+                        sky.mountain_layer_count = layers;
+                        changed = true;
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Cyclorama Columns").color(STUDIO_TEXT_WEAK));
+                    let mut columns = sky
+                        .skybox_columns
+                        .clamp(SKYBOX_COLUMNS_MIN, SKYBOX_COLUMNS_MAX);
+                    if ui
+                        .add(egui::Slider::new(
+                            &mut columns,
+                            SKYBOX_COLUMNS_MIN..=SKYBOX_COLUMNS_MAX,
+                        ))
+                        .changed()
+                    {
+                        sky.skybox_columns = columns;
+                        changed = true;
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Cyclorama Rows").color(STUDIO_TEXT_WEAK));
+                    let mut rows = sky.skybox_rows.clamp(SKYBOX_ROWS_MIN, SKYBOX_ROWS_MAX);
+                    if ui
+                        .add(egui::Slider::new(
+                            &mut rows,
+                            SKYBOX_ROWS_MIN..=SKYBOX_ROWS_MAX,
+                        ))
+                        .changed()
+                    {
+                        sky.skybox_rows = rows;
+                        changed = true;
+                    }
+                });
+                changed |= ui
+                    .checkbox(&mut sky.match_room_fog, "Match room fog")
+                    .changed();
+                ui.separator();
+                let cloud = &mut sky.cloud_layer;
+                changed |= ui.checkbox(&mut cloud.enabled, "Cloud Layer").changed();
+                ui.add_enabled_ui(cloud.enabled, |ui| {
+                    changed |= color_editor(ui, "Cloud Color", &mut cloud.color);
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Density").color(STUDIO_TEXT_WEAK));
+                        changed |= ui
+                            .add(egui::Slider::new(&mut cloud.density, 0..=255))
+                            .changed();
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Altitude").color(STUDIO_TEXT_WEAK));
+                        changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut cloud.altitude)
+                                    .speed(64.0)
+                                    .range(64..=u16::MAX as i32),
+                            )
+                            .changed();
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Extent").color(STUDIO_TEXT_WEAK));
+                        changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut cloud.extent)
+                                    .speed(256.0)
+                                    .range(1024..=u16::MAX as i32),
+                            )
+                            .changed();
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Detail").color(STUDIO_TEXT_WEAK));
+                        changed |= ui
+                            .add(egui::Slider::new(&mut cloud.tile_count, 1..=16))
+                            .changed();
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Scroll").color(STUDIO_TEXT_WEAK));
+                        let mut sx = cloud.scroll_speed[0];
+                        let mut sz = cloud.scroll_speed[1];
+                        let sx_changed = ui
+                            .add(
+                                egui::DragValue::new(&mut sx)
+                                    .speed(1.0)
+                                    .range(-256..=256)
+                                    .prefix("X "),
+                            )
+                            .changed();
+                        let sz_changed = ui
+                            .add(
+                                egui::DragValue::new(&mut sz)
+                                    .speed(1.0)
+                                    .range(-256..=256)
+                                    .prefix("Z "),
+                            )
+                            .changed();
+                        if sx_changed || sz_changed {
+                            cloud.scroll_speed = [sx, sz];
+                            changed = true;
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Noise Seed").color(STUDIO_TEXT_WEAK));
+                        let mut seed = cloud.noise_seed;
+                        if ui
+                            .add(
+                                egui::DragValue::new(&mut seed)
+                                    .speed(1.0)
+                                    .hexadecimal(8, false, true),
+                            )
+                            .changed()
+                        {
+                            cloud.noise_seed = seed;
+                            changed = true;
+                        }
+                    });
+                });
+            }
+        });
+    egui::CollapsingHeader::new(icons::label(icons::FOCUS, "Culling"))
+        .default_open(false)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Draw Distance").color(STUDIO_TEXT_WEAK));
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut culling.draw_distance)
+                            .speed(512.0)
+                            .range(MIN_WORLD_DRAW_DISTANCE..=MAX_WORLD_DRAW_DISTANCE),
+                    )
+                    .changed();
+                ui.label(RichText::new("units").color(STUDIO_TEXT_WEAK));
+            });
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Chunk Radius").color(STUDIO_TEXT_WEAK));
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut culling.chunk_activation_radius_sectors)
+                            .speed(1.0)
+                            .range(
+                                MIN_WORLD_CHUNK_ACTIVATION_RADIUS_SECTORS
+                                    ..=MAX_WORLD_CHUNK_ACTIVATION_RADIUS_SECTORS,
+                            ),
+                    )
+                    .changed();
+                ui.label(RichText::new("sectors").color(STUDIO_TEXT_WEAK));
+            });
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Visibility Radius").color(STUDIO_TEXT_WEAK));
+                let mut radius = culling.visibility_radius as i32;
+                if ui
+                    .add(egui::DragValue::new(&mut radius).speed(1.0).range(
+                        MIN_WORLD_VISIBILITY_RADIUS as i32..=MAX_WORLD_VISIBILITY_RADIUS as i32,
+                    ))
+                    .changed()
+                {
+                    culling.visibility_radius = radius as u16;
+                    changed = true;
+                }
+                ui.label(RichText::new("cells").color(STUDIO_TEXT_WEAK));
+            });
+        });
+    egui::CollapsingHeader::new(icons::label(icons::WAYPOINT, "Far Vista"))
+        .default_open(true)
+        .show(ui, |ui| {
+            changed |= ui.checkbox(&mut far_vista.enabled, "Enabled").changed();
+            changed |= texture_resource_picker(
+                ui,
+                "Texture",
+                &mut far_vista.texture,
+                texture_options,
+                nav_target,
+            );
+            egui::CollapsingHeader::new("Panel Textures")
+                .default_open(false)
+                .show(ui, |ui| {
+                    ui.label(
+                        RichText::new("Filled panels override the repeated texture.")
+                            .color(STUDIO_TEXT_WEAK),
+                    );
+                    for index in 0..psxed_project::FAR_VISTA_TEXTURE_PANEL_COUNT {
+                        let label = format!("Panel {:02}", index + 1);
+                        changed |= texture_resource_picker(
+                            ui,
+                            &label,
+                            &mut far_vista.texture_panels[index],
+                            texture_options,
+                            nav_target,
+                        );
+                    }
+                });
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Radius").color(STUDIO_TEXT_WEAK));
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut far_vista.radius)
+                            .speed(128.0)
+                            .range(1_024..=65_535),
+                    )
+                    .changed();
+            });
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Height").color(STUDIO_TEXT_WEAK));
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut far_vista.height)
+                            .speed(64.0)
+                            .range(128..=32_768),
+                    )
+                    .changed();
+            });
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Y Offset").color(STUDIO_TEXT_WEAK));
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut far_vista.vertical_offset)
+                            .speed(64.0)
+                            .range(-32_768..=32_768),
+                    )
+                    .changed();
+            });
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Segments").color(STUDIO_TEXT_WEAK));
+                let mut segments = far_vista.segments.clamp(3, 16);
+                if ui.add(egui::Slider::new(&mut segments, 3..=16)).changed() {
+                    far_vista.segments = segments;
+                    changed = true;
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Rotation").color(STUDIO_TEXT_WEAK));
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut far_vista.rotation_degrees)
+                            .speed(1.0)
+                            .suffix(" deg"),
+                    )
+                    .changed();
+            });
+            changed |= color_editor(ui, "Tint", &mut far_vista.tint);
+            changed |= ui
+                .checkbox(&mut far_vista.match_room_fog, "Match room fog")
+                .changed();
+        });
+    changed
+}
+
+pub(crate) fn draw_gameplay_camera_settings(
+    ui: &mut egui::Ui,
+    camera: &mut WorldCameraSettings,
+) -> bool {
+    let mut changed = false;
+    egui::CollapsingHeader::new(icons::label(icons::FOCUS, "Follow Rig"))
+        .default_open(true)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Distance").color(STUDIO_TEXT_WEAK));
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut camera.distance)
+                            .speed(128.0)
+                            .range(MIN_WORLD_CAMERA_DISTANCE..=MAX_WORLD_CAMERA_DISTANCE),
+                    )
+                    .on_hover_text("Preferred trailing distance from the player focus point.")
+                    .changed();
+            });
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Height").color(STUDIO_TEXT_WEAK));
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut camera.height)
+                            .speed(64.0)
+                            .range(0..=MAX_WORLD_CAMERA_HEIGHT),
+                    )
+                    .on_hover_text("Camera origin height above the player root.")
+                    .changed();
+            });
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Target Height").color(STUDIO_TEXT_WEAK));
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut camera.target_height)
+                            .speed(64.0)
+                            .range(0..=MAX_WORLD_CAMERA_HEIGHT),
+                    )
+                    .on_hover_text("Look-at focus height above the player root.")
+                    .changed();
+            });
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Floor Clearance").color(STUDIO_TEXT_WEAK));
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut camera.min_floor_clearance)
+                            .speed(16.0)
+                            .range(0..=MAX_WORLD_CAMERA_MIN_FLOOR_CLEARANCE),
+                    )
+                    .on_hover_text("Minimum camera origin height above the sampled floor.")
+                    .changed();
+            });
+            ui.separator();
+            ui.weak("Input speed");
+            changed |= draw_camera_orbit_speed_control(
+                ui,
+                &mut camera.orbit_speed_level,
+                "Right-stick/manual camera orbit turn speed. Higher values orbit faster.",
+            );
+            ui.separator();
+            ui.weak("Follow smoothing");
+            changed |= draw_camera_speed_control(
+                ui,
+                "Position",
+                &mut camera.position_lag_shift,
+                "How quickly the camera origin catches up to its desired position.",
+            );
+            changed |= draw_camera_speed_control(
+                ui,
+                "Focus",
+                &mut camera.focus_lag_shift,
+                "How quickly the look-at point follows the player.",
+            );
+            changed |= draw_camera_speed_control(
+                ui,
+                "Boom Return",
+                &mut camera.distance_lag_shift,
+                "How quickly the camera returns to full distance after collision pulls it in.",
+            );
+            if ui.button("Reset").clicked() {
+                *camera = WorldCameraSettings::default();
+                changed = true;
+            }
+            if changed {
+                *camera = camera.normalized();
+            }
+        });
+    changed
+}
+
+fn draw_camera_orbit_speed_control(
+    ui: &mut egui::Ui,
+    orbit_speed_level: &mut u8,
+    hover: &'static str,
+) -> bool {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Orbit").color(STUDIO_TEXT_WEAK));
+        ui.add(egui::DragValue::new(orbit_speed_level).speed(0.1).range(
+            psxed_project::MIN_WORLD_CAMERA_ORBIT_SPEED_LEVEL
+                ..=psxed_project::MAX_WORLD_CAMERA_ORBIT_SPEED_LEVEL,
+        ))
+        .on_hover_text(hover)
+        .changed()
+    })
+    .inner
+}
+
+fn draw_camera_speed_control(
+    ui: &mut egui::Ui,
+    label: &'static str,
+    lag_shift: &mut u8,
+    hover: &'static str,
+) -> bool {
+    const MAX_SPEED_LEVEL: u8 = psxed_project::MAX_WORLD_CAMERA_LAG_SHIFT + 1;
+    let mut speed = camera_speed_level_for_lag_shift(*lag_shift);
+    let response = ui.horizontal(|ui| {
+        ui.label(RichText::new(label).color(STUDIO_TEXT_WEAK));
+        ui.add(
+            egui::DragValue::new(&mut speed)
+                .speed(0.1)
+                .range(1..=MAX_SPEED_LEVEL),
+        )
+        .on_hover_text(hover)
+        .changed()
+    });
+    if response.inner {
+        *lag_shift = camera_lag_shift_for_speed_level(speed);
+    }
+    response.inner
+}
+
+fn camera_speed_level_for_lag_shift(lag_shift: u8) -> u8 {
+    const MAX_SPEED_LEVEL: u8 = psxed_project::MAX_WORLD_CAMERA_LAG_SHIFT + 1;
+    MAX_SPEED_LEVEL - lag_shift.min(psxed_project::MAX_WORLD_CAMERA_LAG_SHIFT)
+}
+
+fn camera_lag_shift_for_speed_level(speed: u8) -> u8 {
+    const MAX_SPEED_LEVEL: u8 = psxed_project::MAX_WORLD_CAMERA_LAG_SHIFT + 1;
+    MAX_SPEED_LEVEL - speed.clamp(1, MAX_SPEED_LEVEL)
+}
+
+pub(crate) fn draw_gameplay_camera_render_preview(
+    ui: &mut egui::Ui,
+    preview: Option<EditorCameraPreviewPresentation>,
+) {
+    let width = ui.available_width().min(360.0).max(1.0);
+    let height = width * 0.75;
+    let size = Vec2::new(width, height);
+    if let Some(preview) = preview {
+        egui::Frame::new()
+            .fill(STUDIO_PANEL_HEADER)
+            .stroke(egui::Stroke::new(1.0, Color32::from_rgb(44, 55, 70)))
+            .corner_radius(6.0)
+            .show(ui, |ui| {
+                ui.add(egui::Image::new((preview.texture, size)).uv(preview.uv));
+            });
+        ui.weak("Rendered from this Camera component's starting gameplay rig.");
+    } else {
+        let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, 6.0, STUDIO_PANEL_HEADER);
+        painter.rect_stroke(
+            rect,
+            6.0,
+            egui::Stroke::new(1.0, Color32::from_rgb(44, 55, 70)),
+            egui::StrokeKind::Inside,
+        );
+        painter.text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "Select a Camera component to render preview",
+            egui::TextStyle::Small.resolve(ui.style()),
+            STUDIO_TEXT_WEAK,
+        );
+    }
+}
+
+pub(crate) fn draw_gameplay_camera_start_preview(ui: &mut egui::Ui, camera: WorldCameraSettings) {
+    let width = ui.available_width().min(360.0).max(1.0);
+    let height = 150.0;
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, height), egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 6.0, STUDIO_PANEL_HEADER);
+    painter.rect_stroke(
+        rect,
+        6.0,
+        egui::Stroke::new(1.0, Color32::from_rgb(44, 55, 70)),
+        egui::StrokeKind::Inside,
+    );
+
+    let left = rect.left() + 24.0;
+    let right = rect.right() - 28.0;
+    let top = rect.top() + 22.0;
+    let floor_y = rect.bottom() - 26.0;
+    let player_x = right;
+    let effective_camera_height = camera.height.max(camera.min_floor_clearance);
+    let max_vertical = camera
+        .height
+        .max(effective_camera_height)
+        .max(camera.target_height)
+        .max(camera.min_floor_clearance)
+        .max(512) as f32;
+    let x_scale = (player_x - left) / camera.distance.max(1) as f32;
+    let y_scale = (floor_y - top) / max_vertical;
+    let camera_x = player_x - camera.distance as f32 * x_scale;
+    let desired_camera_y = floor_y - camera.height as f32 * y_scale;
+    let camera_y = floor_y - effective_camera_height as f32 * y_scale;
+    let target_y = floor_y - camera.target_height as f32 * y_scale;
+    let clearance_y = floor_y - camera.min_floor_clearance as f32 * y_scale;
+
+    let floor_a = egui::pos2(rect.left() + 12.0, floor_y);
+    let floor_b = egui::pos2(rect.right() - 12.0, floor_y);
+    let player_root = egui::pos2(player_x, floor_y);
+    let target = egui::pos2(player_x, target_y);
+    let camera_eye = egui::pos2(camera_x, camera_y);
+    let desired_camera_eye = egui::pos2(camera_x, desired_camera_y);
+    let clearance_a = egui::pos2(rect.left() + 12.0, clearance_y);
+    let clearance_b = egui::pos2(rect.right() - 12.0, clearance_y);
+    if camera.min_floor_clearance > 0 {
+        painter.rect_filled(
+            egui::Rect::from_min_max(clearance_a, floor_b),
+            0.0,
+            Color32::from_rgba_unmultiplied(230, 160, 90, 18),
+        );
+        painter.line_segment(
+            [clearance_a, clearance_b],
+            egui::Stroke::new(1.0, Color32::from_rgb(190, 130, 80)),
+        );
+        painter.text(
+            clearance_b + Vec2::new(-4.0, -3.0),
+            egui::Align2::RIGHT_BOTTOM,
+            "floor clearance",
+            egui::TextStyle::Small.resolve(ui.style()),
+            Color32::from_rgb(210, 160, 100),
+        );
+    }
+    painter.line_segment(
+        [floor_a, floor_b],
+        egui::Stroke::new(1.0, Color32::from_rgb(64, 75, 88)),
+    );
+    painter.line_segment(
+        [player_root, target],
+        egui::Stroke::new(2.0, Color32::from_rgb(94, 126, 160)),
+    );
+    painter.line_segment(
+        [camera_eye, target],
+        egui::Stroke::new(1.5, Color32::from_rgb(164, 190, 226)),
+    );
+    if effective_camera_height != camera.height {
+        painter.circle_stroke(
+            desired_camera_eye,
+            4.0,
+            egui::Stroke::new(1.0, Color32::from_rgb(155, 120, 80)),
+        );
+        painter.line_segment(
+            [desired_camera_eye, camera_eye],
+            egui::Stroke::new(1.0, Color32::from_rgb(190, 130, 80)),
+        );
+    }
+    painter.circle_filled(target, 4.0, Color32::from_rgb(120, 170, 230));
+    painter.circle_filled(camera_eye, 5.0, Color32::from_rgb(230, 190, 120));
+    painter.circle_filled(player_root, 5.0, Color32::from_rgb(180, 220, 170));
+    painter.text(
+        camera_eye + Vec2::new(0.0, -12.0),
+        egui::Align2::CENTER_BOTTOM,
+        "Camera",
+        egui::TextStyle::Small.resolve(ui.style()),
+        STUDIO_TEXT,
+    );
+    painter.text(
+        target + Vec2::new(7.0, 0.0),
+        egui::Align2::LEFT_CENTER,
+        "Look target",
+        egui::TextStyle::Small.resolve(ui.style()),
+        STUDIO_TEXT_WEAK,
+    );
+    painter.text(
+        player_root + Vec2::new(0.0, 12.0),
+        egui::Align2::CENTER_TOP,
+        "Player root",
+        egui::TextStyle::Small.resolve(ui.style()),
+        STUDIO_TEXT_WEAK,
+    );
+    painter.text(
+        rect.left_top() + Vec2::new(10.0, 8.0),
+        egui::Align2::LEFT_TOP,
+        format!(
+            "side view: {}u back, {}u high{}",
+            camera.distance,
+            effective_camera_height,
+            if effective_camera_height != camera.height {
+                " (clearance clamped)"
+            } else {
+                ""
+            }
+        ),
+        egui::TextStyle::Small.resolve(ui.style()),
+        STUDIO_TEXT_WEAK,
+    );
+}
+
+pub(crate) fn room_grid_transform_editor(
+    ui: &mut egui::Ui,
+    transform: &mut psxed_project::Transform3,
+    sector_size: i32,
+) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.label(icons::text(icons::MOVE, 12.0).color(STUDIO_TEXT_WEAK));
+        ui.label("Grid Position");
+        let mut x = transform.translation[0].round() as i32;
+        let mut z = transform.translation[2].round() as i32;
+        let mut moved = false;
+        moved |= ui
+            .add(egui::DragValue::new(&mut x).prefix("X ").speed(1.0))
+            .changed();
+        moved |= ui
+            .add(egui::DragValue::new(&mut z).prefix("Z ").speed(1.0))
+            .changed();
+        if moved {
+            // Edit X/Z only; preserve the room's elevation (Y), which is the
+            // vertical stacking axis edited on the Elevation row below.
+            transform.translation[0] = x as f32;
+            transform.translation[2] = z as f32;
+            changed = true;
+        }
+        ui.label(RichText::new(format!("× {sector_size}")).color(STUDIO_TEXT_WEAK));
+    });
+
+    ui.horizontal(|ui| {
+        ui.label(icons::text(icons::MOVE, 12.0).color(STUDIO_TEXT_WEAK));
+        ui.label("Elevation");
+        let mut y = transform.translation[1].round() as i32;
+        let response = ui.add(egui::DragValue::new(&mut y).speed(1.0)).on_hover_text(
+            "Vertical level of this room, in sectors. Stack rooms by giving them different elevations; cooked to the room's origin_y.",
+        );
+        if response.changed() {
+            transform.translation[1] = y as f32;
+            changed = true;
+        }
+        ui.label(RichText::new(format!("× {sector_size}")).color(STUDIO_TEXT_WEAK));
+    });
+
+    ui.horizontal(|ui| {
+        ui.label(icons::text(icons::ROTATE_3D, 12.0).color(STUDIO_TEXT_WEAK));
+        ui.label("Rotation");
+        let mut yaw = cardinal_yaw(transform.rotation_degrees[1]);
+        for candidate in [0, 90, 180, 270] {
+            if ui
+                .selectable_value(&mut yaw, candidate, format!("{candidate}°"))
+                .changed()
+            {
+                transform.rotation_degrees = [0.0, yaw as f32, 0.0];
+                transform.scale = [1.0, 1.0, 1.0];
+                changed = true;
+            }
+        }
+    });
+    changed
+}
+
+pub(crate) fn entity_transform_editor(
+    ui: &mut egui::Ui,
+    transform: &mut psxed_project::Transform3,
+    sector_size: i32,
+    allow_full_rotation: bool,
+) -> bool {
+    let mut changed = false;
+    let sector_size = sector_size.max(1);
+    ui.horizontal(|ui| {
+        ui.label(icons::text(icons::MOVE, 12.0).color(STUDIO_TEXT_WEAK));
+        ui.label("Position");
+        let mut x = node_transform_component_to_world_units(transform.translation[0], sector_size);
+        let mut y = node_transform_component_to_world_units(transform.translation[1], sector_size);
+        let mut z = node_transform_component_to_world_units(transform.translation[2], sector_size);
+        let pos_changed = ui
+            .add(
+                egui::DragValue::new(&mut x)
+                    .prefix("X ")
+                    .speed(HEIGHT_QUANTUM as f64),
+            )
+            .changed()
+            | ui.add(
+                egui::DragValue::new(&mut y)
+                    .prefix("Y ")
+                    .speed(HEIGHT_QUANTUM as f64),
+            )
+            .changed()
+            | ui.add(
+                egui::DragValue::new(&mut z)
+                    .prefix("Z ")
+                    .speed(HEIGHT_QUANTUM as f64),
+            )
+            .changed();
+        if pos_changed {
+            transform.translation = [
+                node_transform_component_from_world_units(snap_height(x), sector_size),
+                node_transform_component_from_world_units(snap_height(y), sector_size),
+                node_transform_component_from_world_units(snap_height(z), sector_size),
+            ];
+            changed = true;
+        }
+    });
+
+    ui.horizontal(|ui| {
+        ui.label(icons::text(icons::ROTATE_3D, 12.0).color(STUDIO_TEXT_WEAK));
+        ui.label("Rotation");
+        let mut x_rot = transform.rotation_degrees[0].rem_euclid(360.0);
+        let mut y_rot = transform.rotation_degrees[1].rem_euclid(360.0);
+        let mut z_rot = transform.rotation_degrees[2].rem_euclid(360.0);
+        let mut rot_changed = false;
+        if allow_full_rotation {
+            rot_changed |= ui
+                .add(
+                    egui::DragValue::new(&mut x_rot)
+                        .prefix("X ")
+                        .speed(1.0)
+                        .range(0.0..=359.0),
+                )
+                .changed();
+        }
+        rot_changed |= ui
+            .add(
+                egui::DragValue::new(&mut y_rot)
+                    .prefix("Y ")
+                    .speed(1.0)
+                    .range(0.0..=359.0),
+            )
+            .changed();
+        if allow_full_rotation {
+            rot_changed |= ui
+                .add(
+                    egui::DragValue::new(&mut z_rot)
+                        .prefix("Z ")
+                        .speed(1.0)
+                        .range(0.0..=359.0),
+                )
+                .changed();
+        }
+        if rot_changed {
+            transform.rotation_degrees = [
+                if allow_full_rotation {
+                    x_rot.round().rem_euclid(360.0)
+                } else {
+                    0.0
+                },
+                y_rot.round().rem_euclid(360.0),
+                if allow_full_rotation {
+                    z_rot.round().rem_euclid(360.0)
+                } else {
+                    0.0
+                },
+            ];
+            changed = true;
+        }
+    });
+
+    if !allow_full_rotation
+        && (transform.rotation_degrees[0] != 0.0 || transform.rotation_degrees[2] != 0.0)
+    {
+        transform.rotation_degrees[0] = 0.0;
+        transform.rotation_degrees[2] = 0.0;
+        changed = true;
+    }
+    if transform.scale != [1.0, 1.0, 1.0] {
+        transform.scale = [1.0, 1.0, 1.0];
+        changed = true;
+    }
+    changed
+}
+
+pub(crate) fn light_transform_editor(
+    ui: &mut egui::Ui,
+    transform: &mut psxed_project::Transform3,
+    sector_size: i32,
+) -> bool {
+    let mut changed = normalise_light_transform(transform, sector_size);
+    let sector_size = sector_size.max(1);
+    ui.horizontal(|ui| {
+        ui.label(icons::text(icons::MOVE, 12.0).color(STUDIO_TEXT_WEAK));
+        ui.label("Position");
+        let mut x = node_transform_component_to_world_units(transform.translation[0], sector_size);
+        let mut y = node_transform_component_to_world_units(transform.translation[1], sector_size);
+        let mut z = node_transform_component_to_world_units(transform.translation[2], sector_size);
+        let pos_changed = ui
+            .add(
+                egui::DragValue::new(&mut x)
+                    .prefix("X ")
+                    .speed(HEIGHT_QUANTUM as f64),
+            )
+            .changed()
+            | ui.add(
+                egui::DragValue::new(&mut y)
+                    .prefix("Y ")
+                    .speed(HEIGHT_QUANTUM as f64),
+            )
+            .changed()
+            | ui.add(
+                egui::DragValue::new(&mut z)
+                    .prefix("Z ")
+                    .speed(HEIGHT_QUANTUM as f64),
+            )
+            .changed();
+        if pos_changed {
+            transform.translation = [
+                node_transform_component_from_world_units(snap_height(x), sector_size),
+                node_transform_component_from_world_units(snap_height(y), sector_size),
+                node_transform_component_from_world_units(snap_height(z), sector_size),
+            ];
+            changed = true;
+        }
+    });
+    changed
+}
+
+pub(crate) fn node_gizmo_translation(
+    node: &psxed_project::SceneNode,
+    start: [f32; 3],
+    axis: PrimitiveGizmoAxis,
+    steps: i32,
+    sector_size: i32,
+) -> [f32; 3] {
+    let mut translation = start;
+    let sector_size = sector_size.max(1);
+    let index = match axis {
+        PrimitiveGizmoAxis::X => 0,
+        PrimitiveGizmoAxis::Y => 1,
+        PrimitiveGizmoAxis::Z => 2,
+    };
+    let step = match (&node.kind, axis) {
+        (
+            NodeKind::Entity
+            | NodeKind::PointLight { .. }
+            | NodeKind::ParticleEmitter { .. }
+            | NodeKind::ImageProp { .. }
+            | NodeKind::BoxProp { .. },
+            _,
+        ) => node_transform_component_from_world_units(HEIGHT_QUANTUM, sector_size),
+        _ => 1.0,
+    };
+    translation[index] = start[index] + steps as f32 * step;
+
+    match &node.kind {
+        NodeKind::Entity
+        | NodeKind::PointLight { .. }
+        | NodeKind::ParticleEmitter { .. }
+        | NodeKind::ImageProp { .. }
+        | NodeKind::BoxProp { .. } => {
+            if steps != 0 {
+                translation[index] =
+                    snap_node_transform_component_to_world_step(translation[index], sector_size);
+            }
+            translation
+        }
+        _ => translation,
+    }
+}
+
+pub(crate) fn node_gizmo_plane_translation(
+    node: &psxed_project::SceneNode,
+    start: [f32; 3],
+    plane: NodeGizmoPlane,
+    delta_world: [f32; 3],
+    sector_size: i32,
+) -> [f32; 3] {
+    let mut translation = start;
+    let sector_size = sector_size.max(1);
+    for axis in plane.axes() {
+        let index = axis.index();
+        translation[index] = start[index] + delta_world[index] / sector_size as f32;
+    }
+
+    match &node.kind {
+        NodeKind::Entity
+        | NodeKind::PointLight { .. }
+        | NodeKind::ParticleEmitter { .. }
+        | NodeKind::ImageProp { .. }
+        | NodeKind::BoxProp { .. } => {
+            for axis in plane.axes() {
+                let index = axis.index();
+                if delta_world[index].abs() > f32::EPSILON {
+                    translation[index] = snap_node_transform_component_to_world_step(
+                        translation[index],
+                        sector_size,
+                    );
+                }
+            }
+            translation
+        }
+        _ => translation,
+    }
+}
+
+pub(crate) fn node_gizmo_drag_has_motion(drag: &NodeGizmoDrag) -> bool {
+    match drag.handle {
+        NodeGizmoHandle::Axis(_) => drag.current_steps != 0,
+        NodeGizmoHandle::Plane(plane) => {
+            let [a, b] = plane.axes();
+            drag.current_plane_delta_world[a.index()].abs() > f32::EPSILON
+                || drag.current_plane_delta_world[b.index()].abs() > f32::EPSILON
+        }
+    }
+}
+
+pub(crate) fn node_gizmo_rotation(
+    node: &psxed_project::SceneNode,
+    start: [f32; 3],
+    axis: PrimitiveGizmoAxis,
+    steps: i32,
+) -> [f32; 3] {
+    if !node_kind_supports_transform_gizmo(&node.kind, TransformGizmoMode::Rotate) {
+        return start;
+    }
+    let supported = node_rotation_axes(&node.kind);
+    if !supported.contains(&axis) {
+        return start;
+    }
+    let idx = match axis {
+        PrimitiveGizmoAxis::X => 0,
+        PrimitiveGizmoAxis::Y => 1,
+        PrimitiveGizmoAxis::Z => 2,
+    };
+    let mut result = start;
+    result[idx] = (start[idx] + steps as f32).rem_euclid(360.0);
+    // Force any unsupported axes back to zero so node kinds with
+    // legacy yaw-only semantics don't accumulate stale roll/pitch.
+    for (i, _) in [
+        PrimitiveGizmoAxis::X,
+        PrimitiveGizmoAxis::Y,
+        PrimitiveGizmoAxis::Z,
+    ]
+    .iter()
+    .enumerate()
+    .filter(|(_, a)| !supported.contains(a))
+    {
+        result[i] = 0.0;
+    }
+    result
+}
+
+/// Rotation axes supported by `kind`'s transform gizmo. ImageProps
+/// rotate freely around all three world axes; every other gizmo
+/// target keeps the legacy yaw-only behavior so entity / spawn /
+/// trigger transforms stay flat without stray pitch / roll.
+pub(crate) fn node_rotation_axes(kind: &NodeKind) -> &'static [PrimitiveGizmoAxis] {
+    match kind {
+        NodeKind::ImageProp { .. } | NodeKind::BoxProp { .. } => &[
+            PrimitiveGizmoAxis::X,
+            PrimitiveGizmoAxis::Y,
+            PrimitiveGizmoAxis::Z,
+        ],
+        _ => &[PrimitiveGizmoAxis::Y],
+    }
+}
+
+pub(crate) fn apply_node_gizmo_scale(
+    node: &mut psxed_project::SceneNode,
+    start_image_prop_size: Option<[u16; 2]>,
+    start_box_prop_vertices: Option<[[i16; 3]; psxed_project::BOX_PROP_VERTEX_COUNT]>,
+    axis: PrimitiveGizmoAxis,
+    steps: i32,
+) {
+    match &mut node.kind {
+        NodeKind::ImageProp { width, height, .. } => {
+            let Some([start_width, start_height]) = start_image_prop_size else {
+                return;
+            };
+            let delta = steps.saturating_mul(HEIGHT_QUANTUM);
+            let resize_axis = |start: u16| -> u16 {
+                (i32::from(start) + delta).clamp(1, i32::from(MAX_IMAGE_PROP_SIZE)) as u16
+            };
+            match axis {
+                PrimitiveGizmoAxis::X => *width = resize_axis(start_width),
+                PrimitiveGizmoAxis::Y => *height = resize_axis(start_height),
+                PrimitiveGizmoAxis::Z => {
+                    *width = resize_axis(start_width);
+                    *height = resize_axis(start_height);
+                }
+            }
+        }
+        NodeKind::BoxProp { vertices, .. } => {
+            let Some(start_vertices) = start_box_prop_vertices else {
+                return;
+            };
+            apply_box_prop_gizmo_scale(vertices, start_vertices, axis, steps);
+        }
+        _ => {}
+    }
+}
+
+pub(crate) fn apply_box_prop_gizmo_scale(
+    vertices: &mut [[i16; 3]; psxed_project::BOX_PROP_VERTEX_COUNT],
+    start_vertices: [[i16; 3]; psxed_project::BOX_PROP_VERTEX_COUNT],
+    axis: PrimitiveGizmoAxis,
+    steps: i32,
+) {
+    let idx = axis.index();
+    let mut min = i32::MAX;
+    let mut max = i32::MIN;
+    for vertex in start_vertices {
+        let value = i32::from(vertex[idx]);
+        min = min.min(value);
+        max = max.max(value);
+    }
+    if min >= max {
+        *vertices = start_vertices;
+        return;
+    }
+
+    let delta = steps.saturating_mul(HEIGHT_QUANTUM);
+    let old_size = max - min;
+    let new_size = (old_size + delta).clamp(1, i32::from(MAX_IMAGE_PROP_SIZE));
+    let pivot = if axis == PrimitiveGizmoAxis::Y {
+        min as f32
+    } else {
+        (min + max) as f32 * 0.5
+    };
+    let scale = new_size as f32 / old_size as f32;
+    *vertices = start_vertices;
+    for vertex in vertices.iter_mut() {
+        let value = pivot + (f32::from(vertex[idx]) - pivot) * scale;
+        vertex[idx] = value.round().clamp(
+            -f32::from(MAX_IMAGE_PROP_SIZE),
+            f32::from(MAX_IMAGE_PROP_SIZE),
+        ) as i16;
+    }
+}
+
+pub(crate) fn node_kind_supports_transform_gizmo(
+    kind: &NodeKind,
+    mode: TransformGizmoMode,
+) -> bool {
+    match mode {
+        TransformGizmoMode::Move => matches!(
+            kind,
+            NodeKind::Entity
+                | NodeKind::PointLight { .. }
+                | NodeKind::ParticleEmitter { .. }
+                | NodeKind::ImageProp { .. }
+                | NodeKind::BoxProp { .. }
+                | NodeKind::MeshInstance { .. }
+                | NodeKind::SpawnPoint { .. }
+                | NodeKind::Portal { .. }
+        ),
+        TransformGizmoMode::Rotate => matches!(
+            kind,
+            NodeKind::Entity
+                | NodeKind::ImageProp { .. }
+                | NodeKind::BoxProp { .. }
+                | NodeKind::MeshInstance { .. }
+                | NodeKind::SpawnPoint { .. }
+                | NodeKind::Portal { .. }
+        ),
+        TransformGizmoMode::Scale => {
+            matches!(kind, NodeKind::ImageProp { .. } | NodeKind::BoxProp { .. })
+        }
+    }
+}
+
+pub(crate) fn normalise_light_transform(
+    transform: &mut psxed_project::Transform3,
+    sector_size: i32,
+) -> bool {
+    let mut changed = false;
+    let snapped_y = snap_light_transform_y(transform.translation[1], sector_size);
+    if transform.translation[1] != snapped_y {
+        transform.translation[1] = snapped_y;
+        changed = true;
+    }
+    if transform.rotation_degrees != [0.0, 0.0, 0.0] {
+        transform.rotation_degrees = [0.0, 0.0, 0.0];
+        changed = true;
+    }
+    if transform.scale != [1.0, 1.0, 1.0] {
+        transform.scale = [1.0, 1.0, 1.0];
+        changed = true;
+    }
+    changed
+}
+
+pub(crate) fn node_transform_component_to_world_units(value: f32, sector_size: i32) -> i32 {
+    (value * sector_size.max(1) as f32).round() as i32
+}
+
+pub(crate) fn node_transform_component_from_world_units(value: i32, sector_size: i32) -> f32 {
+    value as f32 / sector_size.max(1) as f32
+}
+
+pub(crate) fn snap_node_transform_component_to_world_step(value: f32, sector_size: i32) -> f32 {
+    let world = node_transform_component_to_world_units(value, sector_size);
+    node_transform_component_from_world_units(snap_height(world), sector_size)
+}
+
+pub(crate) fn snap_light_transform_y(value: f32, sector_size: i32) -> f32 {
+    snap_node_transform_component_to_world_step(value, sector_size)
+}
+
+pub(crate) fn image_prop_default_size_for_sector(sector_size: i32) -> u16 {
+    sector_size.clamp(1, MAX_IMAGE_PROP_SIZE as i32) as u16
+}
+
+pub(crate) fn cardinal_yaw(degrees: f32) -> i32 {
+    let normalized = degrees.rem_euclid(360.0);
+    ((normalized / 90.0).round() as i32 * 90).rem_euclid(360)
+}
+
+pub(crate) fn transform_editor(
+    ui: &mut egui::Ui,
+    label: &str,
+    values: &mut [f32; 3],
+    speed: f64,
+) -> bool {
+    ui.horizontal(|ui| {
+        let mut changed = false;
+        ui.label(icons::text(transform_icon(label), 12.0).color(STUDIO_TEXT_WEAK));
+        ui.label(label);
+        changed |= ui
+            .add(
+                egui::DragValue::new(&mut values[0])
+                    .prefix("X ")
+                    .speed(speed),
+            )
+            .changed();
+        changed |= ui
+            .add(
+                egui::DragValue::new(&mut values[1])
+                    .prefix("Y ")
+                    .speed(speed),
+            )
+            .changed();
+        changed |= ui
+            .add(
+                egui::DragValue::new(&mut values[2])
+                    .prefix("Z ")
+                    .speed(speed),
+            )
+            .changed();
+        changed
+    })
+    .inner
+}
+
+pub(crate) fn transform_icon(label: &str) -> char {
+    match label {
+        "Position" => icons::MOVE,
+        "Rotation" => icons::ROTATE_3D,
+        "Scale" => icons::SCALE_3D,
+        _ => icons::WAYPOINT,
+    }
+}
+
+pub(crate) struct AnimatorClipContext {
+    pub(crate) model_name: String,
+    pub(crate) clips: Vec<String>,
+    pub(crate) clip_frame_counts: Vec<Option<u16>>,
+    pub(crate) clip_in_place_defaults: Vec<bool>,
+    pub(crate) profile_name: Option<String>,
+    pub(crate) profile_action_clips: [Option<u16>; psxed_project::CHARACTER_ANIMATION_ACTION_COUNT],
+}
+
+pub(crate) fn draw_box_prop_nudge_buttons(
+    ui: &mut egui::Ui,
+    vertices: &mut [[i16; 3]; psxed_project::BOX_PROP_VERTEX_COUNT],
+    indices: &[usize],
+) -> bool {
+    let mut changed = false;
+    let step = HEIGHT_QUANTUM as i16;
+    for (axis, label) in [(0usize, "X"), (1, "Y"), (2, "Z")] {
+        if ui.small_button(format!("{label}-")).clicked() {
+            nudge_box_prop_vertices(vertices, indices, axis, -step);
+            changed = true;
+        }
+        if ui.small_button(format!("{label}+")).clicked() {
+            nudge_box_prop_vertices(vertices, indices, axis, step);
+            changed = true;
+        }
+    }
+    changed
+}
+
+pub(crate) fn draw_box_prop_break_flag_checkbox(
+    ui: &mut egui::Ui,
+    flags: &mut u16,
+    flag: u16,
+    label: &str,
+) -> bool {
+    let mut checked = *flags & flag != 0;
+    if !ui.checkbox(&mut checked, label).changed() {
+        return false;
+    }
+    if checked {
+        *flags |= flag;
+    } else {
+        *flags &= !flag;
+    }
+    true
+}
+
+pub(crate) fn nudge_box_prop_vertices(
+    vertices: &mut [[i16; 3]; psxed_project::BOX_PROP_VERTEX_COUNT],
+    indices: &[usize],
+    axis: usize,
+    delta: i16,
+) {
+    for index in indices {
+        let value = i32::from(vertices[*index][axis]) + i32::from(delta);
+        vertices[*index][axis] = value.clamp(
+            -i32::from(MAX_IMAGE_PROP_SIZE),
+            i32::from(MAX_IMAGE_PROP_SIZE),
+        ) as i16;
+    }
+}
+
+pub(crate) fn selected_animator_clip_context(
+    project: &ProjectDocument,
+    selected: NodeId,
+    project_root: &std::path::Path,
+) -> Option<AnimatorClipContext> {
+    let scene = project.active_scene();
+    let node = scene.node(selected)?;
+    if !matches!(node.kind, NodeKind::Animator { .. }) {
+        return None;
+    }
+    let host = scene.node(node.parent?)?;
+    let model_id = host.children.iter().find_map(|child_id| {
+        scene.node(*child_id).and_then(|child| match child.kind {
+            NodeKind::ModelRenderer {
+                model: Some(model), ..
+            } => Some(model),
+            _ => None,
+        })
+    })?;
+    let profile = host.children.iter().find_map(|child_id| {
+        scene.node(*child_id).and_then(|child| match child.kind {
+            NodeKind::CharacterController {
+                character: Some(character),
+                ..
+            } => project
+                .resource(character)
+                .and_then(|resource| match &resource.data {
+                    ResourceData::Character(character) => Some((resource.name.clone(), character)),
+                    _ => None,
+                }),
+            _ => None,
+        })
+    });
+    let mut profile_action_clips = [None; psxed_project::CHARACTER_ANIMATION_ACTION_COUNT];
+    let profile_name = profile.as_ref().map(|(name, _)| name.clone());
+    if let Some((_, character)) = profile {
+        for action in psxed_project::CharacterAnimationAction::ALL {
+            profile_action_clips[action.to_index()] =
+                character_profile_action_clip(project, model_id, character, action);
+        }
+    }
+    project
+        .resources
+        .iter()
+        .find(|resource| resource.id == model_id)
+        .and_then(|resource| match &resource.data {
+            ResourceData::Model(_) => {
+                let clips = project.resolved_model_animation_clips(model_id);
+                Some(AnimatorClipContext {
+                    model_name: resource.name.clone(),
+                    clip_frame_counts: clips
+                        .iter()
+                        .map(|clip| animation_clip_frame_count(&clip.psxanim_path, project_root))
+                        .collect(),
+                    clip_in_place_defaults: clips
+                        .iter()
+                        .map(|clip| clip.calibration.in_place)
+                        .collect(),
+                    clips: clips.iter().map(|clip| clip.name.clone()).collect(),
+                    profile_name,
+                    profile_action_clips,
+                })
+            }
+            _ => None,
+        })
+}
+
+fn animation_clip_frame_count(psxanim_path: &str, project_root: &std::path::Path) -> Option<u16> {
+    let path = psxed_project::model_import::resolve_path(psxanim_path, Some(project_root));
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut header = [0u8; 20];
+    std::io::Read::read_exact(&mut file, &mut header).ok()?;
+    if &header[0..4] != b"PSXA" {
+        return None;
+    }
+    let version = u16::from_le_bytes([header[4], header[5]]);
+    if version != 1 && version != 2 {
+        return None;
+    }
+    let payload_len = u32::from_le_bytes([header[8], header[9], header[10], header[11]]);
+    if payload_len < 8 {
+        return None;
+    }
+    let frame_count = u16::from_le_bytes([header[14], header[15]]);
+    (frame_count > 0).then_some(frame_count)
+}
+
+pub(crate) fn character_profile_action_clip(
+    project: &ProjectDocument,
+    model_id: ResourceId,
+    character: &psxed_project::CharacterResource,
+    action: psxed_project::CharacterAnimationAction,
+) -> Option<u16> {
+    character.action_clip(action).or_else(|| {
+        let set = character.animation_set.and_then(|id| {
+            project
+                .resource(id)
+                .and_then(|resource| match &resource.data {
+                    ResourceData::AnimationSet(set) => Some(set),
+                    _ => None,
+                })
+        })?;
+        let clip = set.action_clip(action)?;
+        project.resolved_model_animation_index(model_id, clip)
+    })
+}
+
+pub(crate) fn draw_node_kind_editor(
+    ui: &mut egui::Ui,
+    kind: &mut NodeKind,
+    material_options: &[(ResourceId, String)],
+    texture_options: &[(ResourceId, String)],
+    room_options: &[(NodeId, String)],
+    model_options: &[(ResourceId, String, Vec<String>)],
+    character_options: &[(ResourceId, String)],
+    weapon_options: &[(ResourceId, String)],
+    animator_clip_context: Option<&AnimatorClipContext>,
+    inherited_sector_size: i32,
+    room_grid_resize: &mut Option<(u16, u16)>,
+    nav_target: &mut Option<ResourceId>,
+    camera_preview: Option<EditorCameraPreviewPresentation>,
+) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.label(icons::text(icons::CIRCLE_DOT, 13.0).color(STUDIO_TEXT_WEAK));
+        ui.strong("Node");
+    });
+    match kind {
+        NodeKind::Node | NodeKind::Node3D => {
+            ui.weak("Organisational transform node");
+        }
+        NodeKind::Entity => {
+            ui.weak("Entity host. Add component children for rendering, collision, interaction, lighting, or logic.");
+        }
+        NodeKind::World { .. } => {
+            ui.weak(
+                "Streamed-region group; holds Room children, camera, sky, and far vista settings.",
+            );
+        }
+        NodeKind::Room { grid } => {
+            ui.horizontal(|ui| {
+                ui.label(icons::text(icons::GRID, 12.0).color(STUDIO_TEXT_WEAK));
+                ui.label("Grid");
+                let mut new_w = grid.width;
+                let mut new_d = grid.depth;
+                let w_changed = ui
+                    .add(
+                        egui::DragValue::new(&mut new_w)
+                            .speed(0.1)
+                            .range(1..=64)
+                            .prefix("W "),
+                    )
+                    .changed();
+                let d_changed = ui
+                    .add(
+                        egui::DragValue::new(&mut new_d)
+                            .speed(0.1)
+                            .range(1..=64)
+                            .prefix("D "),
+                    )
+                    .changed();
+                if w_changed || d_changed {
+                    *room_grid_resize = Some((new_w, new_d));
+                    changed = true;
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label(icons::text(icons::WAYPOINT, 12.0).color(STUDIO_TEXT_WEAK));
+                ui.label("World Grid");
+                ui.label(
+                    RichText::new(format!("{inherited_sector_size} units")).color(STUDIO_TEXT_WEAK),
+                );
+            });
+            ui.horizontal(|ui| {
+                ui.label(icons::text(icons::BOX, 12.0).color(STUDIO_TEXT_WEAK));
+                ui.label(format!(
+                    "{} populated sectors",
+                    grid.populated_sector_count()
+                ));
+            });
+            changed |= color_editor(ui, "Ambient Light", &mut grid.ambient_color);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Preset").color(STUDIO_TEXT_WEAK));
+                if ui.small_button("Low").clicked() {
+                    grid.ambient_color = [32, 32, 32];
+                    changed = true;
+                }
+                if ui.small_button("Neutral").clicked() {
+                    grid.ambient_color = [128, 128, 128];
+                    changed = true;
+                }
+                if ui.small_button("Warm").clicked() {
+                    grid.ambient_color = [96, 80, 64];
+                    changed = true;
+                }
+            });
+            changed |= ui
+                .checkbox(&mut grid.fog_enabled, icons::label(icons::SCAN, "Fog"))
+                .changed();
+            if grid.fog_enabled {
+                changed |= color_editor(ui, "Fog Color", &mut grid.fog_color);
+                ui.horizontal(|ui| {
+                    ui.label(icons::text(icons::SCAN, 12.0).color(STUDIO_TEXT_WEAK));
+                    ui.label("Fog Range");
+                    let near_changed = ui
+                        .add(
+                            egui::DragValue::new(&mut grid.fog_near)
+                                .prefix("Near ")
+                                .speed(128.0)
+                                .range(0..=262_144),
+                        )
+                        .changed();
+                    let far_changed = ui
+                        .add(
+                            egui::DragValue::new(&mut grid.fog_far)
+                                .prefix("Far ")
+                                .speed(128.0)
+                                .range(128..=262_144),
+                        )
+                        .changed();
+                    if near_changed || far_changed {
+                        grid.fog_near = grid.fog_near.max(0);
+                        grid.fog_far = grid.fog_far.max(grid.fog_near + 128);
+                        changed = true;
+                    }
+                });
+            }
+            ui.separator();
+            changed |= ui
+                .checkbox(
+                    &mut grid.atmosphere_enabled,
+                    icons::label(icons::SCAN, "Atmosphere"),
+                )
+                .changed();
+            if grid.atmosphere_enabled {
+                changed |= color_editor(ui, "Particle Color", &mut grid.atmosphere_color);
+                changed |= drag_i32(ui, "Density", &mut grid.atmosphere_density, 0, 96);
+                changed |= drag_i32(ui, "Fall Speed", &mut grid.atmosphere_fall_speed_q4, 0, 64);
+                changed |= drag_i32(
+                    ui,
+                    "Wind Speed",
+                    &mut grid.atmosphere_wind_speed_q4,
+                    -64,
+                    64,
+                );
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Preset").color(STUDIO_TEXT_WEAK));
+                    if ui.small_button("Ash").clicked() {
+                        grid.atmosphere_color = [58, 52, 44];
+                        grid.atmosphere_density = 44;
+                        grid.atmosphere_fall_speed_q4 = 7;
+                        grid.atmosphere_wind_speed_q4 = 2;
+                        changed = true;
+                    }
+                    if ui.small_button("Snow").clicked() {
+                        grid.atmosphere_color = [198, 205, 214];
+                        grid.atmosphere_density = 36;
+                        grid.atmosphere_fall_speed_q4 = 10;
+                        grid.atmosphere_wind_speed_q4 = 1;
+                        changed = true;
+                    }
+                    if ui.small_button("Sparse").clicked() {
+                        grid.atmosphere_color = [74, 66, 56];
+                        grid.atmosphere_density = 18;
+                        grid.atmosphere_fall_speed_q4 = 5;
+                        grid.atmosphere_wind_speed_q4 = 1;
+                        changed = true;
+                    }
+                });
+            }
+        }
+        NodeKind::MeshInstance {
+            mesh,
+            material,
+            animation_clip,
+        } => {
+            // Look up the bound model (if any) so we can show
+            // a real clip-name combo for animation_clip.
+            let bound_model: Option<&(ResourceId, String, Vec<String>)> =
+                mesh.and_then(|id| model_options.iter().find(|(rid, _, _)| *rid == id));
+
+            ui.horizontal(|ui| {
+                ui.label(icons::text(icons::BOX, 12.0).color(STUDIO_TEXT_WEAK));
+                ui.label(match (mesh, bound_model) {
+                    (Some(_), Some((_, name, _))) => format!("Model: {name}"),
+                    (Some(id), None) => format!("Mesh resource #{}", id.raw()),
+                    (None, _) => "No mesh resource assigned".to_string(),
+                });
+            });
+            ui.separator();
+            // Same `material_picker` the face inspector uses, so
+            // the `→` jump button is available here too. (Models
+            // ignore this field -- material is baked into .psxmdl.)
+            changed |= material_picker(ui, "Material", material, material_options, nav_target);
+
+            // Animation clip override. When the bound mesh is a
+            // Model, render a clip-name combo so the user picks
+            // by name; otherwise fall back to a numeric override
+            // for legacy mesh instances.
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Animation clip").color(STUDIO_TEXT_WEAK));
+                if let Some((_, _, clips)) = bound_model {
+                    let preview = match *animation_clip {
+                        Some(idx) => clips
+                            .get(idx as usize)
+                            .map(|n| n.as_str())
+                            .unwrap_or("(invalid)")
+                            .to_string(),
+                        None => "(inherit default)".to_string(),
+                    };
+                    egui::ComboBox::from_id_salt("mesh_instance_clip")
+                        .selected_text(preview)
+                        .show_ui(ui, |ui| {
+                            if ui
+                                .selectable_label(animation_clip.is_none(), "(inherit default)")
+                                .clicked()
+                            {
+                                *animation_clip = None;
+                                changed = true;
+                            }
+                            for (i, name) in clips.iter().enumerate() {
+                                let label = format!("{i}: {name}");
+                                if ui
+                                    .selectable_label(*animation_clip == Some(i as u16), label)
+                                    .clicked()
+                                {
+                                    *animation_clip = Some(i as u16);
+                                    changed = true;
+                                }
+                            }
+                        });
+                    if let Some(idx) = *animation_clip {
+                        if (idx as usize) >= clips.len() {
+                            ui.colored_label(
+                                Color32::from_rgb(220, 160, 80),
+                                format!("clip {idx} out of range ({} clips)", clips.len()),
+                            );
+                        }
+                    }
+                } else {
+                    let mut current = animation_clip.map(|i| i as i32).unwrap_or(-1);
+                    let response = ui.add(
+                        egui::DragValue::new(&mut current)
+                            .speed(0.1)
+                            .range(-1..=255)
+                            .custom_formatter(|n, _| {
+                                if n < 0.0 {
+                                    "default".to_string()
+                                } else {
+                                    format!("{}", n as i32)
+                                }
+                            }),
+                    );
+                    if response.changed() {
+                        *animation_clip = if current < 0 {
+                            None
+                        } else {
+                            Some(current as u16)
+                        };
+                        changed = true;
+                    }
+                }
+            });
+        }
+        NodeKind::ImageProp {
+            material,
+            width,
+            height,
+            cylindrical_billboard,
+            collision_enabled,
+            collision_size,
+        } => {
+            ui.weak(
+                "Flat material-backed image plane. Transform position is the bottom-center anchor.",
+            );
+            changed |= material_picker(ui, "Material", material, material_options, nav_target);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Size").color(STUDIO_TEXT_WEAK));
+                let mut w = i32::from(*width);
+                let mut h = i32::from(*height);
+                let w_changed = ui
+                    .add(
+                        egui::DragValue::new(&mut w)
+                            .speed(1.0)
+                            .range(1..=i32::from(MAX_IMAGE_PROP_SIZE))
+                            .prefix("W "),
+                    )
+                    .changed();
+                let h_changed = ui
+                    .add(
+                        egui::DragValue::new(&mut h)
+                            .speed(1.0)
+                            .range(1..=i32::from(MAX_IMAGE_PROP_SIZE))
+                            .prefix("H "),
+                    )
+                    .changed();
+                if w_changed || h_changed {
+                    *width = w.clamp(1, i32::from(MAX_IMAGE_PROP_SIZE)) as u16;
+                    *height = h.clamp(1, i32::from(MAX_IMAGE_PROP_SIZE)) as u16;
+                    changed = true;
+                }
+            });
+            changed |= ui
+                .checkbox(cylindrical_billboard, "Face camera cylindrically")
+                .changed();
+            ui.separator();
+            changed |= ui.checkbox(collision_enabled, "Collision").changed();
+            ui.add_enabled_ui(*collision_enabled, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Box Size").color(STUDIO_TEXT_WEAK));
+                    let mut box_x = i32::from(collision_size[0]);
+                    let mut box_y = i32::from(collision_size[1]);
+                    let mut box_z = i32::from(collision_size[2]);
+                    let box_changed = ui
+                        .add(
+                            egui::DragValue::new(&mut box_x)
+                                .speed(1.0)
+                                .range(1..=i32::from(MAX_IMAGE_PROP_SIZE))
+                                .prefix("X "),
+                        )
+                        .changed()
+                        | ui.add(
+                            egui::DragValue::new(&mut box_y)
+                                .speed(1.0)
+                                .range(1..=i32::from(MAX_IMAGE_PROP_SIZE))
+                                .prefix("Y "),
+                        )
+                        .changed()
+                        | ui.add(
+                            egui::DragValue::new(&mut box_z)
+                                .speed(1.0)
+                                .range(1..=i32::from(MAX_IMAGE_PROP_SIZE))
+                                .prefix("Z "),
+                        )
+                        .changed();
+                    if box_changed {
+                        *collision_size = [
+                            box_x.clamp(1, i32::from(MAX_IMAGE_PROP_SIZE)) as u16,
+                            box_y.clamp(1, i32::from(MAX_IMAGE_PROP_SIZE)) as u16,
+                            box_z.clamp(1, i32::from(MAX_IMAGE_PROP_SIZE)) as u16,
+                        ];
+                        changed = true;
+                    }
+                });
+            });
+        }
+        NodeKind::BoxProp {
+            materials,
+            vertices,
+            collision_enabled,
+            break_flags,
+        } => {
+            ui.weak(
+                "Editable material-backed box. Transform position is the bottom-center anchor.",
+            );
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Faces").color(STUDIO_TEXT_WEAK));
+                if ui.small_button("Fill from Front").clicked() {
+                    if let Some(material) = materials[0] {
+                        for slot in materials.iter_mut() {
+                            *slot = Some(material);
+                        }
+                        changed = true;
+                    }
+                }
+            });
+            for face in 0..psxed_project::BOX_PROP_FACE_COUNT {
+                changed |= material_picker(
+                    ui,
+                    psxed_project::BOX_PROP_FACE_NAMES[face],
+                    &mut materials[face],
+                    material_options,
+                    nav_target,
+                );
+            }
+            ui.separator();
+            changed |= ui.checkbox(collision_enabled, "Collision").changed();
+            ui.separator();
+            ui.label(RichText::new("Break On").color(STUDIO_TEXT_WEAK));
+            ui.horizontal(|ui| {
+                changed |= draw_box_prop_break_flag_checkbox(
+                    ui,
+                    break_flags,
+                    psx_level::box_prop_flags::BREAK_ON_WALK,
+                    "Walk",
+                );
+                changed |= draw_box_prop_break_flag_checkbox(
+                    ui,
+                    break_flags,
+                    psx_level::box_prop_flags::BREAK_ON_RUN,
+                    "Run",
+                );
+                changed |= draw_box_prop_break_flag_checkbox(
+                    ui,
+                    break_flags,
+                    psx_level::box_prop_flags::BREAK_ON_ATTACK,
+                    "Attack",
+                );
+            });
+            ui.separator();
+            egui::CollapsingHeader::new("Move Faces")
+                .default_open(false)
+                .show(ui, |ui| {
+                    for face in 0..psxed_project::BOX_PROP_FACE_COUNT {
+                        ui.horizontal(|ui| {
+                            ui.label(psxed_project::BOX_PROP_FACE_NAMES[face]);
+                            changed |= draw_box_prop_nudge_buttons(
+                                ui,
+                                vertices,
+                                &BOX_PROP_FACE_VERTEX_INDICES[face],
+                            );
+                        });
+                    }
+                });
+            egui::CollapsingHeader::new("Move Edges")
+                .default_open(false)
+                .show(ui, |ui| {
+                    for (edge, indices) in BOX_PROP_EDGE_VERTEX_INDICES.iter().enumerate() {
+                        ui.horizontal(|ui| {
+                            ui.label(format!("E{edge}"));
+                            changed |= draw_box_prop_nudge_buttons(ui, vertices, indices);
+                        });
+                    }
+                });
+            ui.separator();
+            egui::CollapsingHeader::new("Vertices")
+                .default_open(true)
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Preset").color(STUDIO_TEXT_WEAK));
+                        if ui.small_button("Reset Cube").clicked() {
+                            *vertices = psxed_project::box_prop_vertices_for_size(
+                                psxed_project::DEFAULT_BOX_PROP_SIZE,
+                            );
+                            changed = true;
+                        }
+                    });
+                    for (index, vertex) in vertices.iter_mut().enumerate() {
+                        ui.horizontal(|ui| {
+                            ui.label(format!("V{index}"));
+                            let mut x = i32::from(vertex[0]);
+                            let mut y = i32::from(vertex[1]);
+                            let mut z = i32::from(vertex[2]);
+                            let vertex_changed = ui
+                                .add(
+                                    egui::DragValue::new(&mut x)
+                                        .speed(1.0)
+                                        .range(
+                                            -i32::from(MAX_IMAGE_PROP_SIZE)
+                                                ..=i32::from(MAX_IMAGE_PROP_SIZE),
+                                        )
+                                        .prefix("X "),
+                                )
+                                .changed()
+                                | ui.add(
+                                    egui::DragValue::new(&mut y)
+                                        .speed(1.0)
+                                        .range(
+                                            -i32::from(MAX_IMAGE_PROP_SIZE)
+                                                ..=i32::from(MAX_IMAGE_PROP_SIZE),
+                                        )
+                                        .prefix("Y "),
+                                )
+                                .changed()
+                                | ui.add(
+                                    egui::DragValue::new(&mut z)
+                                        .speed(1.0)
+                                        .range(
+                                            -i32::from(MAX_IMAGE_PROP_SIZE)
+                                                ..=i32::from(MAX_IMAGE_PROP_SIZE),
+                                        )
+                                        .prefix("Z "),
+                                )
+                                .changed();
+                            if vertex_changed {
+                                *vertex = [
+                                    x.clamp(
+                                        -i32::from(MAX_IMAGE_PROP_SIZE),
+                                        i32::from(MAX_IMAGE_PROP_SIZE),
+                                    ) as i16,
+                                    y.clamp(
+                                        -i32::from(MAX_IMAGE_PROP_SIZE),
+                                        i32::from(MAX_IMAGE_PROP_SIZE),
+                                    ) as i16,
+                                    z.clamp(
+                                        -i32::from(MAX_IMAGE_PROP_SIZE),
+                                        i32::from(MAX_IMAGE_PROP_SIZE),
+                                    ) as i16,
+                                ];
+                                changed = true;
+                            }
+                        });
+                    }
+                });
+        }
+        NodeKind::ModelRenderer {
+            model,
+            material: _,
+            visual_offset,
+            visual_scale_q8,
+        } => {
+            ui.weak("Component: renders a Model from the parent Entity transform.");
+            let bound_model =
+                model.and_then(|id| model_options.iter().find(|(rid, _, _)| *rid == id));
+            ui.horizontal(|ui| {
+                ui.label("Model");
+                let preview = bound_model
+                    .map(|(_, name, _)| name.as_str())
+                    .unwrap_or("(none)");
+                egui::ComboBox::from_id_salt("model-renderer-model-picker")
+                    .selected_text(preview)
+                    .show_ui(ui, |ui| {
+                        if ui.selectable_label(model.is_none(), "(none)").clicked() {
+                            *model = None;
+                            changed = true;
+                        }
+                        for (id, name, _) in model_options {
+                            if ui.selectable_label(*model == Some(*id), name).clicked() {
+                                *model = Some(*id);
+                                changed = true;
+                            }
+                        }
+                    });
+            });
+            if model.is_some() && bound_model.is_none() {
+                ui.colored_label(
+                    Color32::from_rgb(220, 120, 100),
+                    "Model resource is missing.",
+                );
+            }
+            ui.separator();
+            ui.weak("Visual calibration only. Collision, camera, and movement still use Entity and Character Controller data.");
+            ui.label("Visual Offset");
+            for (axis, label) in [(0usize, "X"), (1, "Y"), (2, "Z")] {
+                ui.horizontal(|ui| {
+                    ui.label(label);
+                    let mut v = visual_offset[axis] as i32;
+                    if ui
+                        .add(egui::DragValue::new(&mut v).range(-8192..=8192).speed(8.0))
+                        .changed()
+                    {
+                        visual_offset[axis] = v.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+                        changed = true;
+                    }
+                });
+            }
+            ui.horizontal(|ui| {
+                ui.label("Visual Scale");
+                let mut q8 = (*visual_scale_q8).max(1) as i32;
+                if ui
+                    .add(egui::DragValue::new(&mut q8).range(1..=4096).speed(16.0))
+                    .changed()
+                {
+                    *visual_scale_q8 = q8.clamp(1, u16::MAX as i32) as u16;
+                    changed = true;
+                }
+                ui.label(
+                    RichText::new(format!(
+                        "{:.3}x",
+                        *visual_scale_q8 as f32 / MODEL_SCALE_ONE_Q8 as f32
+                    ))
+                    .color(STUDIO_TEXT_WEAK)
+                    .monospace(),
+                );
+                if ui.button("Reset").clicked() {
+                    *visual_offset = [0; 3];
+                    *visual_scale_q8 = MODEL_SCALE_ONE_Q8;
+                    changed = true;
+                }
+            });
+        }
+        NodeKind::Animator {
+            clip,
+            action_clips,
+            autoplay,
+            pose_frame,
+        } => {
+            ui.weak("Component: maps gameplay actions to model animation clips.");
+            let autoplay_response = ui.checkbox(autoplay, icons::label(icons::PLAY, "Autoplay"));
+            if autoplay_response.changed() {
+                changed = true;
+            }
+            autoplay_response.on_hover_text(
+                "Advance the editor preview clip in the room viewport. Off freezes the model on the Pose Frame below.",
+            );
+            if !*autoplay {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Pose Frame").color(STUDIO_TEXT_WEAK));
+                    let mut frame = i32::from(*pose_frame);
+                    if ui
+                        .add(egui::DragValue::new(&mut frame).speed(1.0).range(0..=4095))
+                        .changed()
+                    {
+                        *pose_frame = frame.clamp(0, u16::MAX as i32 - 1) as u16;
+                        changed = true;
+                    }
+                })
+                .response
+                .on_hover_text(
+                    "Frame of the selected clip to hold while autoplay is off. Place a model frozen on a chosen pose, e.g. a corpse on its death frame.",
+                );
+            }
+            if let Some(context) = animator_clip_context {
+                ui.label(
+                    RichText::new(format!("Model: {}", context.model_name))
+                        .color(STUDIO_TEXT_WEAK)
+                        .small(),
+                );
+                changed |= clip_role_picker(
+                    ui,
+                    "Editor Clip",
+                    "animator-preview-clip",
+                    clip,
+                    &context.clips,
+                );
+                egui::CollapsingHeader::new(icons::label(icons::PLAY, "Gameplay Actions"))
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        if let Some(profile_name) = &context.profile_name {
+                            ui.label(
+                                RichText::new(format!(
+                                    "Empty slots inherit from profile: {profile_name}"
+                                ))
+                                .color(STUDIO_TEXT_WEAK)
+                                .small(),
+                            );
+                        }
+                        changed |= draw_animator_action_clip_table(ui, action_clips, context);
+                    });
+            } else {
+                ui.colored_label(
+                    STUDIO_TEXT_WEAK,
+                    "Add a Model Renderer sibling to select animation clips.",
+                );
+                let mut current = clip.map(|i| i as i32).unwrap_or(-1);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Editor Clip").color(STUDIO_TEXT_WEAK));
+                    let response = ui.add(
+                        egui::DragValue::new(&mut current)
+                            .speed(0.1)
+                            .range(-1..=255)
+                            .custom_formatter(|n, _| {
+                                if n < 0.0 {
+                                    "inherit".to_string()
+                                } else {
+                                    format!("{}", n as i32)
+                                }
+                            }),
+                    );
+                    if response.changed() {
+                        *clip = if current < 0 {
+                            None
+                        } else {
+                            Some(current as u16)
+                        };
+                        changed = true;
+                    }
+                });
+            }
+        }
+        NodeKind::Collider { shape, solid } => {
+            ui.weak("Component: collision authored on an Entity. Runtime entity collision is not cooked yet.");
+            changed |= ui.checkbox(solid, "Solid").changed();
+            changed |= collider_shape_editor(ui, shape);
+        }
+        NodeKind::CharacterController {
+            character,
+            settings,
+            player,
+        } => {
+            ui.weak("Component: movement, stamina, and player-control logic. Model Renderer owns the model; Animator owns action clips.");
+            changed |= ui
+                .checkbox(player, icons::label(icons::MAP_PIN, "Player controlled"))
+                .changed();
+            changed |= draw_character_selector(ui, character_options, character, nav_target);
+            ui.label(
+                RichText::new(
+                    "Optional preset. Component values are used where they are authored.",
+                )
+                .color(STUDIO_TEXT_WEAK)
+                .small(),
+            );
+            changed |= draw_character_controller_settings(ui, settings);
+        }
+        NodeKind::Camera { settings } => {
+            ui.weak("Component: third-person gameplay camera for the player Entity. The Entity transform supplies the start position and yaw.");
+            changed |= draw_gameplay_camera_settings(ui, settings);
+            egui::CollapsingHeader::new(icons::label(icons::EYE, "Camera Preview"))
+                .default_open(true)
+                .show(ui, |ui| {
+                    draw_gameplay_camera_render_preview(ui, camera_preview);
+                });
+            egui::CollapsingHeader::new(icons::label(icons::EYE, "Starting Position Preview"))
+                .default_open(true)
+                .show(ui, |ui| {
+                    draw_gameplay_camera_start_preview(ui, settings.normalized());
+                });
+        }
+        NodeKind::Equipment {
+            weapon,
+            character_socket,
+            weapon_grip,
+        } => {
+            ui.weak("Component: attaches a Weapon resource to a named model socket.");
+            changed |= draw_weapon_selector(ui, weapon_options, weapon);
+            ui.horizontal(|ui| {
+                ui.label("Character Socket");
+                changed |= ui.text_edit_singleline(character_socket).changed();
+            });
+            ui.horizontal(|ui| {
+                ui.label("Weapon Grip");
+                changed |= ui.text_edit_singleline(weapon_grip).changed();
+            });
+        }
+        NodeKind::PhysicsBody { settings } => {
+            ui.weak("Component: per-entity physics tuning. Weight is a Q8 gravity multiplier.");
+            ui.horizontal(|ui| {
+                ui.label("Weight");
+                let mut q8 = settings.weight_q8 as i32;
+                if ui
+                    .add(
+                        egui::DragValue::new(&mut q8)
+                            .speed(16.0)
+                            .range(MIN_PHYSICS_WEIGHT_Q8 as i32..=MAX_PHYSICS_WEIGHT_Q8 as i32),
+                    )
+                    .on_hover_text("Q8 multiplier applied to world gravity: 256 = 1.0x.")
+                    .changed()
+                {
+                    settings.weight_q8 =
+                        q8.clamp(MIN_PHYSICS_WEIGHT_Q8 as i32, MAX_PHYSICS_WEIGHT_Q8 as i32) as u16;
+                    *settings = settings.normalized();
+                    changed = true;
+                }
+                ui.label(
+                    RichText::new(format!("{:.3}x", settings.weight_q8 as f32 / 256.0))
+                        .color(STUDIO_TEXT_WEAK)
+                        .monospace(),
+                );
+                if ui.button("Reset").clicked() {
+                    settings.weight_q8 = PHYSICS_WEIGHT_ONE_Q8;
+                    changed = true;
+                }
+            });
+        }
+        NodeKind::Interactable {
+            kind: interactable_kind,
+            prompt,
+            radius,
+            enabled,
+        } => {
+            ui.weak("Component: lets the player press CROSS near this Entity to read a message or synchronize a checkpoint.");
+            changed |= ui.checkbox(enabled, "Enabled").changed();
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Kind").color(STUDIO_TEXT_WEAK));
+                let current = match interactable_kind {
+                    InteractableKind::Message { .. } => "Message",
+                    InteractableKind::Checkpoint { .. } => "Checkpoint",
+                };
+                egui::ComboBox::from_id_salt("interactable-kind")
+                    .selected_text(current)
+                    .show_ui(ui, |ui| {
+                        let is_message =
+                            matches!(interactable_kind, InteractableKind::Message { .. });
+                        if ui.selectable_label(is_message, "Message").clicked() {
+                            if !is_message {
+                                *interactable_kind = InteractableKind::Message {
+                                    title: "ECHO REMNANT".to_string(),
+                                    body: String::new(),
+                                };
+                                if prompt.trim().is_empty() || prompt == "SYNCHRONIZE" {
+                                    *prompt = "READ ECHO".to_string();
+                                }
+                                changed = true;
+                            }
+                        }
+                        let is_checkpoint =
+                            matches!(interactable_kind, InteractableKind::Checkpoint { .. });
+                        if ui.selectable_label(is_checkpoint, "Checkpoint").clicked() {
+                            if !is_checkpoint {
+                                *interactable_kind = InteractableKind::Checkpoint {
+                                    checkpoint_id: String::new(),
+                                    title: "SYNC RELAY".to_string(),
+                                    body: "Relay synchronized.".to_string(),
+                                };
+                                if prompt.trim().is_empty() || prompt == "READ ECHO" {
+                                    *prompt = "SYNCHRONIZE".to_string();
+                                }
+                                changed = true;
+                            }
+                        }
+                    });
+            });
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Prompt").color(STUDIO_TEXT_WEAK));
+                changed |= ui.text_edit_singleline(prompt).changed();
+            });
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Radius").color(STUDIO_TEXT_WEAK));
+                let mut r = i32::from(*radius);
+                if ui
+                    .add(egui::DragValue::new(&mut r).speed(4.0).range(1..=4096))
+                    .changed()
+                {
+                    *radius = r.clamp(1, u16::MAX as i32) as u16;
+                    changed = true;
+                }
+            });
+            ui.separator();
+            match interactable_kind {
+                InteractableKind::Message { title, body } => {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Title").color(STUDIO_TEXT_WEAK));
+                        changed |= ui.text_edit_singleline(title).changed();
+                    });
+                    ui.label(RichText::new("Body").color(STUDIO_TEXT_WEAK));
+                    changed |= ui
+                        .add(
+                            egui::TextEdit::multiline(body)
+                                .desired_rows(4)
+                                .desired_width(f32::INFINITY),
+                        )
+                        .changed();
+                }
+                InteractableKind::Checkpoint {
+                    checkpoint_id,
+                    title,
+                    body,
+                } => {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Checkpoint ID").color(STUDIO_TEXT_WEAK));
+                        changed |= ui.text_edit_singleline(checkpoint_id).changed();
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Title").color(STUDIO_TEXT_WEAK));
+                        changed |= ui.text_edit_singleline(title).changed();
+                    });
+                    ui.label(RichText::new("Body").color(STUDIO_TEXT_WEAK));
+                    changed |= ui
+                        .add(
+                            egui::TextEdit::multiline(body)
+                                .desired_rows(3)
+                                .desired_width(f32::INFINITY),
+                        )
+                        .changed();
+                }
+            }
+        }
+        NodeKind::PointLight {
+            color,
+            intensity,
+            radius,
+        } => {
+            ui.weak("Static point light emitted from this node transform.");
+            changed |= color_editor(ui, "Color", color);
+            changed |= ui
+                .add(
+                    egui::Slider::new(intensity, 0.0..=4.0)
+                        .text(icons::label(icons::SUN, "Intensity (× 1.0)")),
+                )
+                .changed();
+            changed |= ui
+                .add(
+                    egui::Slider::new(radius, 0.0..=8.0)
+                        .text(icons::label(icons::WAYPOINT, "Radius (sectors)")),
+                )
+                .changed();
+            // Validation warnings -- match what the playtest cooker
+            // refuses, so authors see the issue before they cook.
+            if *radius <= 0.0 {
+                ui.colored_label(
+                    Color32::from_rgb(220, 120, 100),
+                    "Radius must be > 0 (cook will fail)",
+                );
+            }
+            if !intensity.is_finite() || *intensity < 0.0 {
+                ui.colored_label(
+                    Color32::from_rgb(220, 120, 100),
+                    "Intensity must be finite and ≥ 0 (cook will fail)",
+                );
+            }
+            if *intensity > 4.0 {
+                ui.colored_label(
+                    Color32::from_rgb(220, 160, 80),
+                    "Intensity above 4.0 saturates almost every surface",
+                );
+            }
+        }
+        NodeKind::ParticleEmitter { settings } => {
+            ui.weak(
+                "Fixed-budget world particle emitter. Runtime projects each particle center and draws one tinted sprite.",
+            );
+            changed |= draw_particle_emitter_settings(ui, settings, texture_options, nav_target);
+        }
+        NodeKind::SpawnPoint { player, character } => {
+            changed |= ui
+                .checkbox(player, icons::label(icons::MAP_PIN, "Player spawn"))
+                .changed();
+            if *player {
+                changed |= draw_character_selector(ui, character_options, character, nav_target);
+            }
+        }
+        NodeKind::Portal {
+            target_room,
+            target_entry,
+            entry_name,
+            geometry,
+        } => {
+            ui.horizontal(|ui| {
+                ui.label(icons::text(icons::WAYPOINT, 12.0).color(STUDIO_TEXT_WEAK));
+                ui.label("Entry name");
+                changed |= ui.text_edit_singleline(entry_name).changed();
+            });
+            ui.horizontal(|ui| {
+                ui.label(icons::text(icons::HOUSE, 12.0).color(STUDIO_TEXT_WEAK));
+                ui.label("Target room");
+                let preview = target_room
+                    .and_then(|id| {
+                        room_options
+                            .iter()
+                            .find(|(rid, _)| *rid == id)
+                            .map(|(_, name)| name.as_str())
+                    })
+                    .unwrap_or("(none)");
+                egui::ComboBox::from_id_salt("portal_target_room")
+                    .selected_text(preview)
+                    .show_ui(ui, |ui| {
+                        if ui
+                            .selectable_label(target_room.is_none(), "(none)")
+                            .clicked()
+                        {
+                            *target_room = None;
+                            changed = true;
+                        }
+                        for (id, name) in room_options {
+                            if ui
+                                .selectable_label(*target_room == Some(*id), name)
+                                .clicked()
+                            {
+                                *target_room = Some(*id);
+                                changed = true;
+                            }
+                        }
+                    });
+            });
+            ui.horizontal(|ui| {
+                ui.label(icons::text(icons::MAP_PIN, 12.0).color(STUDIO_TEXT_WEAK));
+                ui.label("Target entry");
+                changed |= ui.text_edit_singleline(target_entry).changed();
+            });
+            if let Some(geometry) = geometry {
+                ui.horizontal(|ui| {
+                    ui.label(icons::text(icons::BOX, 12.0).color(STUDIO_TEXT_WEAK));
+                    ui.label(format!(
+                        "Imported plane n=({}, {}, {})",
+                        geometry.normal[0], geometry.normal[1], geometry.normal[2]
+                    ));
+                });
+            }
+        }
+    }
+    changed
+}
+
+pub(crate) fn blend_mode_editor(ui: &mut egui::Ui, mode: &mut PsxBlendMode) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.label(icons::text(icons::BLEND, 12.0).color(STUDIO_TEXT_WEAK));
+        ui.label("Blend mode");
+    });
+    for candidate in [
+        PsxBlendMode::Opaque,
+        PsxBlendMode::Average,
+        PsxBlendMode::Add,
+        PsxBlendMode::Subtract,
+        PsxBlendMode::AddQuarter,
+    ] {
+        if ui
+            .selectable_label(*mode == candidate, candidate.label())
+            .clicked()
+            && *mode != candidate
+        {
+            *mode = candidate;
+            changed = true;
+        }
+    }
+    changed
+}
+
+pub(crate) fn draw_particle_emitter_settings(
+    ui: &mut egui::Ui,
+    settings: &mut ParticleEmitterSettings,
+    texture_options: &[(ResourceId, String)],
+    nav_target: &mut Option<ResourceId>,
+) -> bool {
+    let mut changed = false;
+    changed |= ui.checkbox(&mut settings.enabled, "Enabled").changed();
+    changed |= texture_resource_picker(
+        ui,
+        "Mask Texture",
+        &mut settings.texture,
+        texture_options,
+        nav_target,
+    );
+    ui.label(
+        RichText::new("Use 16x16 greyscale/white masks; particle tint comes from the curve below.")
+            .color(STUDIO_TEXT_WEAK)
+            .small(),
+    );
+    changed |= blend_mode_editor(ui, &mut settings.blend_mode);
+    ui.separator();
+    ui.label(RichText::new("Budget").color(STUDIO_TEXT_WEAK));
+    changed |= drag_u16(ui, "Max Particles", &mut settings.max_particles, 1, 256);
+    ui.horizontal(|ui| {
+        ui.label("Spawn Rate");
+        let mut per_second = settings.spawn_rate_q8 as f32 / 256.0;
+        if ui
+            .add(
+                egui::DragValue::new(&mut per_second)
+                    .speed(0.25)
+                    .range(0.0..=120.0)
+                    .suffix(" /s"),
+            )
+            .changed()
+        {
+            settings.spawn_rate_q8 = (per_second.clamp(0.0, 120.0) * 256.0).round() as u16;
+            changed = true;
+        }
+    });
+    ui.horizontal(|ui| {
+        ui.label("Lifetime");
+        let mut lifetime = i32::from(settings.lifetime_frames);
+        if ui
+            .add(
+                egui::DragValue::new(&mut lifetime)
+                    .speed(1.0)
+                    .range(1..=255)
+                    .suffix(" frames"),
+            )
+            .changed()
+        {
+            settings.lifetime_frames = lifetime.clamp(1, 255) as u8;
+            changed = true;
+        }
+    });
+    changed |= drag_u16(ui, "Spawn Radius", &mut settings.spawn_radius, 0, 8192);
+    ui.separator();
+    ui.label(RichText::new("Size Curve").color(STUDIO_TEXT_WEAK));
+    changed |= drag_u16(ui, "Start Size", &mut settings.start_size, 1, 8192);
+    changed |= drag_u16(ui, "End Size", &mut settings.end_size, 1, 8192);
+    ui.separator();
+    ui.label(RichText::new("Tint Curve").color(STUDIO_TEXT_WEAK));
+    changed |= color_editor(ui, "Start", &mut settings.start_color);
+    changed |= color_editor(ui, "End", &mut settings.end_color);
+    ui.separator();
+    ui.label(RichText::new("Velocity Q4.4").color(STUDIO_TEXT_WEAK));
+    changed |= draw_particle_i16_vec3(ui, "Base", &mut settings.base_velocity_q4, -4096, 4096);
+    changed |= draw_particle_u16_vec3(ui, "Random", &mut settings.random_velocity_q4, 0, 4096);
+    changed |= draw_particle_i16_vec3(
+        ui,
+        "Acceleration",
+        &mut settings.acceleration_q4,
+        -4096,
+        4096,
+    );
+    changed
+}
+
+pub(crate) fn draw_particle_i16_vec3(
+    ui: &mut egui::Ui,
+    label: &str,
+    values: &mut [i16; 3],
+    min: i16,
+    max: i16,
+) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.label(label);
+        for (axis, value) in ["X", "Y", "Z"].into_iter().zip(values.iter_mut()) {
+            let mut next = i32::from(*value);
+            if ui
+                .add(
+                    egui::DragValue::new(&mut next)
+                        .speed(1.0)
+                        .range(i32::from(min)..=i32::from(max))
+                        .prefix(format!("{axis} ")),
+                )
+                .changed()
+            {
+                *value = next.clamp(i32::from(min), i32::from(max)) as i16;
+                changed = true;
+            }
+        }
+    });
+    changed
+}
+
+pub(crate) fn draw_particle_u16_vec3(
+    ui: &mut egui::Ui,
+    label: &str,
+    values: &mut [u16; 3],
+    min: u16,
+    max: u16,
+) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.label(label);
+        for (axis, value) in ["X", "Y", "Z"].into_iter().zip(values.iter_mut()) {
+            let mut next = i32::from(*value);
+            if ui
+                .add(
+                    egui::DragValue::new(&mut next)
+                        .speed(1.0)
+                        .range(i32::from(min)..=i32::from(max))
+                        .prefix(format!("{axis} ")),
+                )
+                .changed()
+            {
+                *value = next.clamp(i32::from(min), i32::from(max)) as u16;
+                changed = true;
+            }
+        }
+    });
+    changed
+}
+
+pub(crate) fn color_editor(ui: &mut egui::Ui, label: &str, color: &mut [u8; 3]) -> bool {
+    ui.horizontal(|ui| {
+        let mut changed = false;
+        ui.label(icons::text(icons::PALETTE, 12.0).color(STUDIO_TEXT_WEAK));
+        ui.label(label);
+        changed |= ui.color_edit_button_srgb(color).changed();
+        changed |= ui
+            .add(
+                egui::DragValue::new(&mut color[0])
+                    .prefix("R ")
+                    .range(0..=255),
+            )
+            .changed();
+        changed |= ui
+            .add(
+                egui::DragValue::new(&mut color[1])
+                    .prefix("G ")
+                    .range(0..=255),
+            )
+            .changed();
+        changed |= ui
+            .add(
+                egui::DragValue::new(&mut color[2])
+                    .prefix("B ")
+                    .range(0..=255),
+            )
+            .changed();
+        changed
+    })
+    .inner
+}
+
+pub(crate) fn draw_ui_gradient_editor(
+    ui: &mut egui::Ui,
+    label: &str,
+    from: &[u8; 3],
+    gradient: &mut Option<UiGradient>,
+) -> bool {
+    let mut changed = false;
+    let mut enabled = gradient.is_some();
+    ui.horizontal(|ui| {
+        changed |= ui.checkbox(&mut enabled, label).changed();
+        if enabled {
+            ui.label(
+                RichText::new("start = color")
+                    .color(STUDIO_TEXT_WEAK)
+                    .small(),
+            );
+        }
+    });
+
+    if enabled {
+        if gradient.is_none() {
+            *gradient = Some(UiGradient::new(
+                default_ui_gradient_end(*from),
+                UiGradientDirection::Vertical,
+            ));
+            changed = true;
+        }
+        if let Some(gradient) = gradient {
+            changed |= color_editor(ui, "To", &mut gradient.to);
+            egui::ComboBox::from_label("Direction")
+                .selected_text(gradient.direction.label())
+                .show_ui(ui, |ui| {
+                    for candidate in UiGradientDirection::ALL {
+                        changed |= ui
+                            .selectable_value(&mut gradient.direction, candidate, candidate.label())
+                            .changed();
+                    }
+                });
+        }
+    } else if gradient.take().is_some() {
+        changed = true;
+    }
+    changed
+}
+
+pub(crate) fn default_ui_gradient_end(from: [u8; 3]) -> [u8; 3] {
+    [
+        from[0].saturating_add(48),
+        from[1].saturating_add(48),
+        from[2].saturating_add(48),
+    ]
+}
+
+pub(crate) fn short_path(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+pub(crate) fn project_menu_label(path: &Path) -> String {
+    let folder = short_path(path);
+    let project_file = path.join("project.ron");
+    let Ok(project) = ProjectDocument::load_from_path(&project_file) else {
+        return folder;
+    };
+    let name = project.name.trim();
+    if name.is_empty() {
+        folder
+    } else if psxed_project::project_file_stem(name) == folder {
+        name.to_string()
+    } else {
+        format!("{name} ({folder})")
+    }
+}
+
+pub(crate) fn paths_equivalent(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
+}
+
+pub(crate) fn node_kind_is_player_source(kind: &NodeKind) -> bool {
+    matches!(
+        kind,
+        NodeKind::SpawnPoint { player: true, .. }
+            | NodeKind::CharacterController { player: true, .. }
+    )
+}
+
+pub(crate) fn translations_match(a: [f32; 3], b: [f32; 3]) -> bool {
+    a.iter()
+        .zip(b)
+        .all(|(lhs, rhs)| (*lhs - rhs).abs() <= PLACEMENT_DUPLICATE_EPSILON)
+}
+
+pub(crate) fn entity_model_resource_id(scene: &Scene, entity: &SceneNode) -> Option<ResourceId> {
+    entity.children.iter().find_map(|id| {
+        scene.node(*id).and_then(|child| match child.kind {
+            NodeKind::ModelRenderer {
+                model: Some(model), ..
+            } => Some(model),
+            _ => None,
+        })
+    })
+}
+
+pub(crate) fn entity_character_component_resource_id(
+    scene: &Scene,
+    entity: &SceneNode,
+) -> Option<ResourceId> {
+    entity.children.iter().find_map(|id| {
+        scene.node(*id).and_then(|child| match child.kind {
+            NodeKind::CharacterController {
+                character: Some(character),
+                ..
+            } => Some(character),
+            _ => None,
+        })
+    })
+}
+
+pub(crate) fn entity_weapon_resource_id(scene: &Scene, entity: &SceneNode) -> Option<ResourceId> {
+    entity.children.iter().find_map(|id| {
+        scene.node(*id).and_then(|child| match child.kind {
+            NodeKind::Equipment {
+                weapon: Some(weapon),
+                ..
+            } => Some(weapon),
+            _ => None,
+        })
+    })
+}
+
+pub(crate) fn node_lucide_icon(kind: &str, root: bool) -> char {
+    if root {
+        return icons::HOUSE;
+    }
+
+    match kind {
+        "Node3D" => icons::CIRCLE_DOT,
+        "Entity" => icons::BOX,
+        "World" => icons::HOUSE,
+        "Room" | "Map" => icons::GRID,
+        "Mesh Instance" | "MeshInstance" => icons::BOX,
+        "Image Prop" | "ImageProp" => icons::PALETTE,
+        "Box Prop" | "BoxProp" => icons::BOX,
+        "Model Renderer" | "ModelRenderer" => icons::BOX,
+        "Animator" => icons::PLAY,
+        "Collider" => icons::SCALE_3D,
+        "Character Controller" | "CharacterController" => icons::MAP_PIN,
+        "Equipment" => icons::WAYPOINT,
+        "Light" => icons::SUN,
+        "Point Light" | "PointLight" => icons::SUN,
+        "Particle Emitter" | "ParticleEmitter" => icons::FOCUS,
+        "Spawn Point" | "SpawnPoint" => icons::MAP_PIN,
+        "Portal" => icons::WAYPOINT,
+        _ => icons::CIRCLE_DOT,
+    }
+}
+
+pub(crate) fn node_lucide_color(kind: &str, root: bool, selected: bool) -> Color32 {
+    if selected {
+        return Color32::WHITE;
+    }
+    if root {
+        return STUDIO_ACCENT;
+    }
+
+    match kind {
+        "Entity" => Color32::from_rgb(156, 174, 190),
+        "World" => Color32::from_rgb(232, 152, 96),
+        "Room" | "Map" => Color32::from_rgb(209, 118, 71),
+        "Mesh Instance" | "MeshInstance" => Color32::from_rgb(156, 174, 190),
+        "Image Prop" | "ImageProp" => Color32::from_rgb(210, 170, 120),
+        "Box Prop" | "BoxProp" => Color32::from_rgb(135, 180, 220),
+        "Model Renderer" | "ModelRenderer" => Color32::from_rgb(134, 168, 196),
+        "Animator" => Color32::from_rgb(126, 164, 220),
+        "Collider" => Color32::from_rgb(180, 170, 112),
+        "Character Controller" | "CharacterController" => Color32::from_rgb(104, 194, 142),
+        "Equipment" => Color32::from_rgb(210, 190, 104),
+        "Light" => Color32::from_rgb(238, 203, 116),
+        "Point Light" | "PointLight" => Color32::from_rgb(238, 203, 116),
+        "Particle Emitter" | "ParticleEmitter" => Color32::from_rgb(152, 214, 230),
+        "Spawn Point" | "SpawnPoint" => Color32::from_rgb(236, 188, 104),
+        "Portal" => PORTAL_PINK,
+        _ => Color32::from_rgb(141, 160, 180),
+    }
+}
+
+pub(crate) fn draw_inline_icon(ui: &mut egui::Ui, icon: char, color: Color32) {
+    ui.label(icons::text(icon, 16.0).color(color));
+}
+
+pub(crate) fn toolbar_group_menu<R>(
+    ui: &mut egui::Ui,
+    number: u8,
+    glow: f32,
+    icon: char,
+    label: &str,
+    current: &str,
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) {
+    let number_text = number.to_string();
+    let shortcut = command_shortcut_text(&number_text);
+    let reverse_shortcut = command_shift_shortcut_text(&number_text);
+    let shortcut_summary = format!("Shortcut: {shortcut} / Reverse: {reverse_shortcut}");
+    let glow = glow.clamp(0.0, 1.0);
+    let mut button = egui::Button::new(icons::text(icon, 15.0)).min_size(Vec2::new(30.0, 23.0));
+    if glow > 0.0 {
+        let fill_alpha = (34.0 + 58.0 * glow).round() as u8;
+        let stroke_alpha = (120.0 + 120.0 * glow).round() as u8;
+        button = button
+            .fill(Color32::from_rgba_unmultiplied(45, 177, 207, fill_alpha))
+            .stroke(Stroke::new(
+                1.0 + glow * 0.75,
+                Color32::from_rgba_unmultiplied(165, 238, 255, stroke_alpha),
+            ));
+    }
+    let footer = shortcut_summary.clone();
+    let response = egui::menu::menu_custom_button(ui, button, |ui| {
+        let result = add_contents(ui);
+        ui.separator();
+        ui.label(RichText::new(footer).small().color(STUDIO_TEXT_WEAK));
+        result
+    })
+    .response;
+    response.on_hover_text(format!(
+        "{label}: {current}\n{shortcut} cycles forward\n{reverse_shortcut} cycles backward"
+    ));
+}
+
+pub(crate) fn toolbar_option_menu<R>(
+    ui: &mut egui::Ui,
+    icon: char,
+    label: &str,
+    current: impl Into<String>,
+    active: bool,
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) {
+    let mut button = egui::Button::new(icons::text(icon, 15.0)).min_size(Vec2::new(30.0, 23.0));
+    if active {
+        button = button
+            .fill(Color32::from_rgba_unmultiplied(45, 177, 207, 44))
+            .stroke(Stroke::new(
+                1.0,
+                Color32::from_rgba_unmultiplied(165, 238, 255, 180),
+            ));
+    }
+    let current = current.into();
+    let response = egui::menu::menu_custom_button(ui, button, add_contents).response;
+    response.on_hover_text(format!("{label}: {current}"));
+}
+
+pub(crate) fn toolbar_menu_choice(
+    ui: &mut egui::Ui,
+    label: impl Into<egui::WidgetText>,
+    selected: bool,
+) -> bool {
+    let clicked = ui.selectable_label(selected, label).clicked();
+    if clicked {
+        ui.close_menu();
+    }
+    clicked
+}
+
+pub(crate) fn visibility_menu_row(
+    ui: &mut egui::Ui,
+    id_salt: &'static str,
+    label: &str,
+    visible: &mut bool,
+) -> bool {
+    ui.label(label);
+    let icon = if *visible { icons::EYE } else { icons::EYE_OFF };
+    let icon_color = if *visible {
+        STUDIO_TEXT
+    } else {
+        Color32::from_rgb(82, 92, 102)
+    };
+    let response = ui
+        .push_id(id_salt, |ui| {
+            ui.add_sized(
+                [32.0, 22.0],
+                egui::Button::new(icons::text(icon, 14.0).color(icon_color)),
+            )
+            .on_hover_text(if *visible { "Hide" } else { "Show" })
+        })
+        .inner;
+    let changed = response.clicked();
+    if changed {
+        *visible = !*visible;
+    }
+    ui.end_row();
+    changed
+}
+
+pub(crate) fn viewport_camera_mode_label(mode: ViewportCameraMode) -> &'static str {
+    match mode {
+        ViewportCameraMode::Orbit => "Orbit",
+        ViewportCameraMode::Free => "Free",
+    }
+}

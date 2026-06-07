@@ -19,7 +19,7 @@ use psx_level::{
 
 pub const WORLD_RESIDENT_CHUNK_LIMIT: usize = 1;
 pub const WORLD_PACK_MAX_CHUNK_BYTES: usize = 0;
-pub const CACHED_ROOM_DEPTH_MODE: u8 = 0;
+pub const CACHED_ROOM_DEPTH_MODE: u8 = 2;
 pub const CACHED_ROOM_TEXTURE_SPLIT_MODE: u8 = 0;
 pub const CACHED_ROOM_DRAW_ORDER_MODE: u8 = 0;
 pub const CACHED_ROOM_TEXTURE_SPLIT_MAX_EDGE: u16 = 0;

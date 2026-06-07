@@ -75,8 +75,11 @@ pub mod stage {
     pub const EQUIPMENT: u16 = 12;
     /// Deferred world-command sort and OT insertion.
     pub const WORLD_FLUSH: u16 = 10;
-    /// Ordering-table DMA submission.
+    /// Ordering-table DMA kick (CPU-side setup; excludes the GPU-draw wait).
     pub const OT_SUBMIT: u16 = 11;
+    /// Blocking wait for the ordering-table DMA walk to finish: the
+    /// CPU-blocked-on-GPU portion of a submit, i.e. GPU draw + DMA cost.
+    pub const OT_WAIT: u16 = 45;
     /// Player collision gather + motor solve (sim).
     pub const SIM_COLLISION: u16 = 36;
     /// Current-room tracking + active-window refresh (sim).
@@ -541,6 +544,31 @@ pub mod counter {
     pub const TEXTURED_MODEL_COMMAND_OVERFLOW_SUBMITS: u16 = 216;
     /// Room-texture VRAM slots freed by residency eviction (Stage 4 teardown).
     pub const VRAM_SLOTS_FREED: u16 = 217;
+    /// Texture uploads that found no free `VRAM_SLOTS` entry: the 64-slot
+    /// residency table cap, the binding VRAM budget for distinct resident
+    /// textures. A non-zero value during traversal is the silent missing-texture
+    /// root cause.
+    pub const VRAM_SLOT_TABLE_FULL: u16 = 218;
+    /// Room-texture uploads where `alloc_window` found no free space in the
+    /// room-material page band (the secondary 4bpp window cap).
+    pub const VRAM_WINDOW_FULL: u16 = 219;
+    /// Texture uploads where `alloc_clut` found no free CLUT slot (the CLUT band cap).
+    pub const VRAM_CLUT_FULL: u16 = 220;
+    /// Room-texture uploads skipped because the in-flight VRAM upload queue had
+    /// no free slot (the upload-queue depth throttle, another silent skip).
+    pub const VRAM_UPLOAD_QUEUE_FULL: u16 = 221;
+    /// Room materials left untextured because their texture failed to become
+    /// VRAM-resident (a real drop, not merely a pending upload): the silent
+    /// missing-texture fallback at material-build time.
+    pub const ROOM_MATERIAL_TEXTURE_DROPS: u16 = 222;
+    /// Room materials dropped because their `local_slot` is >= MAX_ROOM_MATERIALS,
+    /// i.e. the room references more distinct materials than the per-room material
+    /// table can hold. Every surface using a dropped slot renders untextured or
+    /// not at all. A non-zero value means the per-room material cap is too small
+    /// for the cooked room (raise MAX_ROOM_MATERIALS or reduce the room's
+    /// material count). This was the silent root cause of the demo10 invisible
+    /// frieze/stairs.
+    pub const ROOM_MATERIAL_SLOT_OVERFLOW: u16 = 223;
 }
 
 const EVENT_KIND_FRAME_BEGIN: u8 = 1;
