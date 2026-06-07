@@ -173,6 +173,7 @@ fn player_camera_component_drives_cooked_camera() {
                 height: 900,
                 target_height: 700,
                 min_floor_clearance: 96,
+                orbit_speed_level: 6,
                 position_lag_shift: 1,
                 focus_lag_shift: 3,
                 distance_lag_shift: 5,
@@ -188,6 +189,7 @@ fn player_camera_component_drives_cooked_camera() {
             && room.camera.height == 900
             && room.camera.target_height == 700
             && room.camera.min_floor_clearance == 96
+            && room.camera.orbit_speed_level == 6
             && room.camera.position_lag_shift == 1
             && room.camera.focus_lag_shift == 3
             && room.camera.distance_lag_shift == 5

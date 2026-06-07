@@ -414,6 +414,7 @@ fn camera_preview_request_targets_floor_anchored_player_origin() {
                 height: 768,
                 target_height: 512,
                 min_floor_clearance: 64,
+                orbit_speed_level: 5,
                 position_lag_shift: 2,
                 focus_lag_shift: 2,
                 distance_lag_shift: 3,

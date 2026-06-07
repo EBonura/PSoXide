@@ -728,12 +728,19 @@ pub(crate) fn draw_gameplay_camera_settings(
                     .changed();
             });
             ui.separator();
-            ui.weak("Movement speed");
+            ui.weak("Input speed");
+            changed |= draw_camera_orbit_speed_control(
+                ui,
+                &mut camera.orbit_speed_level,
+                "Right-stick/manual camera orbit turn speed. Higher values orbit faster.",
+            );
+            ui.separator();
+            ui.weak("Follow smoothing");
             changed |= draw_camera_speed_control(
                 ui,
-                "Camera",
+                "Position",
                 &mut camera.position_lag_shift,
-                "How quickly the camera origin follows its desired position.",
+                "How quickly the camera origin catches up to its desired position.",
             );
             changed |= draw_camera_speed_control(
                 ui,
@@ -756,6 +763,23 @@ pub(crate) fn draw_gameplay_camera_settings(
             }
         });
     changed
+}
+
+fn draw_camera_orbit_speed_control(
+    ui: &mut egui::Ui,
+    orbit_speed_level: &mut u8,
+    hover: &'static str,
+) -> bool {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Orbit").color(STUDIO_TEXT_WEAK));
+        ui.add(egui::DragValue::new(orbit_speed_level).speed(0.1).range(
+            psxed_project::MIN_WORLD_CAMERA_ORBIT_SPEED_LEVEL
+                ..=psxed_project::MAX_WORLD_CAMERA_ORBIT_SPEED_LEVEL,
+        ))
+        .on_hover_text(hover)
+        .changed()
+    })
+    .inner
 }
 
 fn draw_camera_speed_control(

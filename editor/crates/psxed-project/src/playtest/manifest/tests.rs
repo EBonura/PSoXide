@@ -736,6 +736,7 @@ fn test_room(world_asset_index: usize) -> PlaytestRoom {
             height: 0,
             target_height: 0,
             min_floor_clearance: 0,
+            orbit_speed_level: 0,
             position_lag_shift: 0,
             focus_lag_shift: 0,
             distance_lag_shift: 0,
