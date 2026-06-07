@@ -187,6 +187,14 @@ pub enum NodeKind {
         #[serde(default)]
         player: bool,
     },
+    /// Gameplay camera component for a player-controlled entity.
+    /// The parent Entity supplies the start position/yaw; these settings
+    /// define the third-person follow rig used by Play.
+    Camera {
+        /// Third-person follow camera settings.
+        #[serde(default)]
+        settings: WorldCameraSettings,
+    },
     /// Equipment component. The parent Entity supplies the animated
     /// character model; this component names the Weapon and which
     /// socket/grip pair should be composed.
@@ -300,6 +308,7 @@ impl NodeKind {
             Self::Animator { .. } => "Animator",
             Self::Collider { .. } => "Collider",
             Self::CharacterController { .. } => "Character Controller",
+            Self::Camera { .. } => "Camera",
             Self::Equipment { .. } => "Equipment",
             Self::PhysicsBody { .. } => "Physics Body",
             Self::Interactable { .. } => "Interactable",
@@ -320,6 +329,7 @@ impl NodeKind {
                 | Self::Animator { .. }
                 | Self::Collider { .. }
                 | Self::CharacterController { .. }
+                | Self::Camera { .. }
                 | Self::Equipment { .. }
                 | Self::PhysicsBody { .. }
                 | Self::Interactable { .. }

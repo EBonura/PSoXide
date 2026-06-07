@@ -326,6 +326,9 @@ impl Playtest {
         );
         config.height = config.height.max(256);
         config.min_floor_clearance = camera.min_floor_clearance;
+        config.position_lag_shift = camera.position_lag_shift;
+        config.focus_lag_shift = camera.focus_lag_shift;
+        config.distance_lag_shift = camera.distance_lag_shift;
         config
     }
 

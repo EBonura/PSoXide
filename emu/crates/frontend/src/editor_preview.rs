@@ -2263,6 +2263,7 @@ fn entity_marker_color(kind: &NodeKind) -> Option<(u8, u8, u8)> {
         | NodeKind::Animator { .. }
         | NodeKind::Collider { .. }
         | NodeKind::CharacterController { .. }
+        | NodeKind::Camera { .. }
         | NodeKind::Equipment { .. }
         | NodeKind::Interactable { .. }
         | NodeKind::PhysicsBody { .. }
