@@ -314,6 +314,22 @@ fn scene_graph_add_menu_is_structure_only() {
 }
 
 #[test]
+fn entity_add_child_menu_includes_camera_component() {
+    let addable = scene_graph_addable_kinds_for_host_label(NodeKind::Entity.label());
+    assert!(addable
+        .iter()
+        .any(|(label, kind)| *label == "Camera" && matches!(kind, NodeKind::Camera { .. })));
+    assert!(addable
+        .iter()
+        .any(|(label, kind)| *label == "Entity" && matches!(kind, NodeKind::Entity)));
+
+    let folder_addable = scene_graph_addable_kinds_for_host_label(NodeKind::Node.label());
+    assert!(!folder_addable
+        .iter()
+        .any(|(_, kind)| matches!(kind, NodeKind::Camera { .. })));
+}
+
+#[test]
 fn add_component_to_host_creates_child_and_selects_it() {
     let mut workspace =
         EditorWorkspace::open_directory(psxed_project::default_project_dir()).unwrap();
@@ -341,6 +357,36 @@ fn add_component_to_host_creates_child_and_selects_it() {
     assert!(matches!(
         scene.node(controller).unwrap().kind,
         NodeKind::CharacterController { .. }
+    ));
+    assert!(workspace.is_dirty());
+}
+
+#[test]
+fn add_camera_component_to_entity_selects_new_child() {
+    let mut workspace =
+        EditorWorkspace::open_directory(psxed_project::default_project_dir()).unwrap();
+    let room = workspace.active_room_id().expect("starter has room");
+    let entity = workspace
+        .project
+        .active_scene_mut()
+        .add_node(room, "Player", NodeKind::Entity);
+
+    let camera = workspace
+        .add_component_to_host(
+            entity,
+            "Camera",
+            NodeKind::Camera {
+                settings: WorldCameraSettings::default(),
+            },
+        )
+        .expect("component is added");
+
+    let scene = workspace.project.active_scene();
+    assert_eq!(workspace.selection.selected_node, camera);
+    assert!(scene.node(entity).unwrap().children.contains(&camera));
+    assert!(matches!(
+        scene.node(camera).unwrap().kind,
+        NodeKind::Camera { .. }
     ));
     assert!(workspace.is_dirty());
 }

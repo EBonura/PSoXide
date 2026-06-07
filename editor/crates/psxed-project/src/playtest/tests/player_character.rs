@@ -161,6 +161,44 @@ fn player_character_controller_settings_drive_cooked_character() {
 }
 
 #[test]
+fn player_camera_component_drives_cooked_camera() {
+    let mut project = project_with_one_room();
+    let player = player_spawn_node_id(&project);
+    project.active_scene_mut().add_node(
+        player,
+        "Camera",
+        NodeKind::Camera {
+            settings: WorldCameraSettings {
+                distance: 2048,
+                height: 900,
+                target_height: 700,
+                min_floor_clearance: 96,
+                position_lag_shift: 1,
+                focus_lag_shift: 3,
+                distance_lag_shift: 5,
+            },
+        },
+    );
+
+    let (package, report) = build_package(&project, &starter_project_root());
+    assert!(report.is_ok(), "errors: {:?}", report.errors);
+    let package = package.expect("package returned on ok report");
+    assert!(package.rooms.iter().all(|room| {
+        room.camera.distance == 2048
+            && room.camera.height == 900
+            && room.camera.target_height == 700
+            && room.camera.min_floor_clearance == 96
+            && room.camera.position_lag_shift == 1
+            && room.camera.focus_lag_shift == 3
+            && room.camera.distance_lag_shift == 5
+    }));
+    let character = &package.characters[0];
+    assert_eq!(character.camera_distance, 2048);
+    assert_eq!(character.camera_height, 900);
+    assert_eq!(character.camera_target_height, 700);
+}
+
+#[test]
 fn world_physics_and_physics_body_drive_cooked_gravity() {
     let mut project = project_with_one_room();
     let world_id = project
