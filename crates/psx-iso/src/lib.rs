@@ -197,6 +197,38 @@ pub fn build_world_pack(chunks: &[(u32, &[u8])]) -> Vec<u8> {
     out
 }
 
+/// Add the canonical PSoXide playtest-disc file set to `builder`, in the LBA
+/// order the cooked manifest assumes: `SYSTEM.CNF`, then `CDTEST.BIN` (when
+/// `cdtest_sectors` is set), then the optional `WORLD.PAK` and `UI.PAK` stream
+/// packs, then `PSX.EXE`. The cooked `WORLD_PACK_START_LBA` / `UI_PACK_START_LBA`
+/// are derived from exactly this order, so every disc builder -- the `mkisopsx`
+/// CLI and the editor's in-process embedded Play -- routes through this one
+/// function. Defining the layout in a single place keeps the two from drifting
+/// (a `UI.PAK` added to one builder but not the other silently breaks streaming).
+///
+/// The caller sets up `builder` first (volume id, optional system area) and
+/// serializes the packs from its own input source (CLI dirs vs the editor's
+/// `generated/` tree); only the file set and order are shared here.
+pub fn add_playtest_files(
+    builder: &mut IsoBuilder,
+    exe_bytes: Vec<u8>,
+    world_pack: Option<Vec<u8>>,
+    ui_pack: Option<Vec<u8>>,
+    cdtest_sectors: Option<usize>,
+) {
+    builder.add_file("SYSTEM.CNF", default_system_cnf());
+    if let Some(sectors) = cdtest_sectors {
+        builder.add_file(CD_STREAM_BENCH_FILE_NAME, cd_stream_bench_payload(sectors));
+    }
+    if let Some(world_pack) = world_pack {
+        builder.add_file(WORLD_PACK_FILE_NAME, world_pack);
+    }
+    if let Some(ui_pack) = ui_pack {
+        builder.add_file(UI_PACK_FILE_NAME, ui_pack);
+    }
+    builder.add_file("PSX.EXE", exe_bytes);
+}
+
 /// Cooked placement metadata for one [`WORLD_PACK_FILE_NAME`] chunk.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WorldPackBuildEntry {
