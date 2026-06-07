@@ -100,7 +100,7 @@ const CDDA_RETRY_TICKS: u32 = 60;
 const CDDA_STATUS_TICKS: u32 = 30;
 const CDDA_DEFAULT_VOLUME_PERCENT: u8 = 25;
 #[cfg(any(target_arch = "mips", test))]
-const CDDA_PLAYBACK_MODE: u8 = psx_io::cdrom::MODE_DOUBLE_SPEED | psx_io::cdrom::MODE_CDDA;
+const CDDA_PLAYBACK_MODE: u8 = psx_io::cdrom::MODE_CDDA;
 #[cfg(target_arch = "mips")]
 const CDDA_STATUS_PLAYING: u8 = 1 << 7;
 #[cfg(target_arch = "mips")]
@@ -2355,10 +2355,7 @@ mod tests {
 
     #[test]
     fn menu_cdda_playback_mode_matches_working_cdda_demo() {
-        assert_eq!(
-            CDDA_PLAYBACK_MODE,
-            psx_io::cdrom::MODE_DOUBLE_SPEED | psx_io::cdrom::MODE_CDDA
-        );
+        assert_eq!(CDDA_PLAYBACK_MODE, psx_io::cdrom::MODE_CDDA);
     }
 
     #[test]
