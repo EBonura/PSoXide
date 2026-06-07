@@ -895,6 +895,8 @@ pub struct PlaytestCddaTrack {
     pub track: u8,
     /// Source WAV path used to cook the generated raw CD-DA payload.
     pub wav_path: String,
+    /// Baked playback-speed multiplier in Q12 (`4096` = 1.0x).
+    pub playback_speed_q12: u16,
 }
 
 /// One cooked project option, ready for manifest emission. Mirrors
