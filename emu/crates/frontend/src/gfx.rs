@@ -290,7 +290,6 @@ impl Graphics {
         request: psxed_ui::EditorCameraPreviewRequest,
         preview_fog: bool,
         hidden_scene_nodes: &std::collections::HashSet<psxed_project::NodeId>,
-        active_floor: usize,
     ) {
         self.editor_textures.refresh(project, project_root);
         self.editor_textures.refresh_models(project, project_root);
@@ -306,7 +305,7 @@ impl Graphics {
             false,
             hidden_scene_nodes,
             request.active_room,
-            active_floor,
+            request.active_floor,
             psxed_project::NodeId::ROOT,
             None,
             None,
