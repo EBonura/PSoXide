@@ -171,7 +171,21 @@ sudo apt install build-essential make pkg-config libasound2-dev libudev-dev \
   libxkbcommon-dev libwayland-dev mesa-vulkan-drivers
 ```
 
-Windows is not documented as a first-class path yet.
+Windows native setup is verified with the MSVC Rust host. Install
+Rust with rustup and make sure the Visual Studio C++ build tools are
+available for native crates:
+
+```powershell
+winget install Rustlang.Rustup
+winget install Microsoft.VisualStudio.2022.BuildTools --override "--add Microsoft.VisualStudio.Workload.VCTools --passive --wait"
+```
+
+Then open a new PowerShell in the repo. The pinned nightly toolchain
+will install the requested components automatically. `make` is optional
+on Windows; the commands below include native PowerShell equivalents.
+Do not expect `rustup target add mipsel-sony-psx` to install a prebuilt
+standard library on Windows. The PSX target is a low-tier target here;
+the example builds use nightly `-Zbuild-std` plus `rust-src` instead.
 
 ### 2. Clone and check the repo
 
@@ -180,6 +194,18 @@ git clone https://github.com/EBonura/PSoXide.git psoxide
 cd psoxide
 make check
 make test
+```
+
+Windows PowerShell equivalent without `make`:
+
+```powershell
+cargo check --workspace --all-features
+Push-Location editor; cargo check --workspace --all-features; Pop-Location
+Push-Location emu; cargo check --workspace --all-features; Pop-Location
+Push-Location engine; cargo check --workspace --all-features; Pop-Location
+Push-Location sdk; cargo check --workspace --all-features; Pop-Location
+cargo check --manifest-path tools\mkisopsx\Cargo.toml
+cargo check --manifest-path tools\psx-exe-pack\Cargo.toml
 ```
 
 The fast defaults do not require commercial games or PCSX-Redux.
@@ -194,6 +220,34 @@ PSoXide's HLE BIOS path:
 ```bash
 make hello-tri-disc
 make run-tri
+```
+
+Windows PowerShell equivalent without `make`:
+
+```powershell
+# Build the hello-tri PSX executable.
+$env:CARGO_TARGET_DIR = "$PWD\build\examples"
+$env:RUSTFLAGS = "-Clink-arg=-T../../psoxide.ld -Clink-arg=--oformat=binary"
+Push-Location sdk\examples\hello-tri
+cargo build --release --target mipsel-sony-psx -Zbuild-std=core -Zbuild-std-features=compiler-builtins-mem
+Pop-Location
+
+# Package a CUE/BIN disc.
+Push-Location tools\mkisopsx
+cargo run --release -- `
+  --exe ..\..\build\examples\mipsel-sony-psx\release\hello-tri.exe `
+  --out ..\..\build\examples\mipsel-sony-psx\release\hello-tri.bin `
+  --volume PSOXIDE
+Pop-Location
+
+# Headless no-BIOS smoke run through the frontend CLI.
+Push-Location emu
+cargo run -p frontend --release -- launch `
+  --path ..\build\examples\mipsel-sony-psx\release\hello-tri.cue `
+  --embedded-playtest `
+  --steps 5000000 `
+  --dump-hash
+Pop-Location
 ```
 
 To build the public example set:
@@ -311,8 +365,10 @@ cargo run --manifest-path emu/Cargo.toml -p frontend --release -- \
 
 ## Build Targets
 
-The Makefile is the source of truth; run `make help` for the exhaustive
-list. The main public targets are:
+The Makefile is the source of truth for Unix-like hosts. On Windows,
+the same operations can be run through direct `cargo` commands; the
+native `hello-tri` build/run path is shown above. The main public
+targets are:
 
 ```bash
 make check      # cargo check across root/editor/emu/engine/sdk/tools
