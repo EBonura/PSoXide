@@ -1,4 +1,5 @@
 use super::*;
+use crate::UiVisibilityCondition;
 
 pub(crate) fn active_far_vista_panel_count(
     texture_panels: &[Option<ResourceId>; FAR_VISTA_TEXTURE_PANEL_COUNT],
@@ -516,7 +517,8 @@ pub(crate) fn cook_ui_scene_nodes(
         let rotation_degrees = visual_rect.map(|rect| rect.rotation_degrees).unwrap_or(0);
         let flags = visual_rect
             .map(|rect| flags | ui_rect_transform_flags(rect))
-            .unwrap_or(flags);
+            .unwrap_or(flags)
+            | ui_visibility_flags(node.visible_when);
         out.push(PlaytestUiNode {
             parent,
             kind: node.kind.clone(),
@@ -1140,6 +1142,13 @@ pub(crate) fn ui_rect_transform_flags(rect: UiRect) -> u16 {
         flags |= psx_level::ui_node_flags::FLIP_Y;
     }
     flags
+}
+
+pub(crate) fn ui_visibility_flags(condition: UiVisibilityCondition) -> u16 {
+    match condition {
+        UiVisibilityCondition::Always => 0,
+        UiVisibilityCondition::AnalogInactive => psx_level::ui_node_flags::ANALOG_INACTIVE_ONLY,
+    }
 }
 
 /// Lower an authored [`UiAction`] to a cooked [`PlaytestUiAction`].

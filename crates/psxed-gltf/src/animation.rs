@@ -311,7 +311,11 @@ impl AnimationChannel {
     }
 }
 
-pub(crate) fn restore_root_translations(frame_trs: &mut [Trs], base_trs: &[Trs], root_joint_nodes: &[usize]) {
+pub(crate) fn restore_root_translations(
+    frame_trs: &mut [Trs],
+    base_trs: &[Trs],
+    root_joint_nodes: &[usize],
+) {
     for node_index in root_joint_nodes.iter().copied() {
         let Some(frame) = frame_trs.get_mut(node_index) else {
             continue;
@@ -413,7 +417,11 @@ pub(crate) fn sample_segment(times: &[f32], time: f32) -> (usize, usize, f32) {
     (last, last, 0.0)
 }
 
-pub(crate) fn compose_trs(translation: [f32; 3], rotation: [f32; 4], scale: [f32; 3]) -> [[f32; 4]; 4] {
+pub(crate) fn compose_trs(
+    translation: [f32; 3],
+    rotation: [f32; 4],
+    scale: [f32; 3],
+) -> [[f32; 4]; 4] {
     let [x, y, z, w] = normalize4(rotation);
     let xx = x * x;
     let yy = y * y;
