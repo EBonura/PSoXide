@@ -1523,6 +1523,8 @@ pub struct EditorCameraPreviewRequest {
     pub camera: ViewportCameraState,
     /// Room window to render for the preview.
     pub active_room: Option<NodeId>,
+    /// Floor to render as the preview's active floor.
+    pub active_floor: usize,
 }
 
 /// 3D viewport camera rig: orbit and free-fly parameters plus the active mode.
