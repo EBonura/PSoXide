@@ -1,5 +1,5 @@
 use super::*;
-use psxed_project::UiVisibilityCondition;
+use psxed_project::{UiTransition, UiTransitionKind, UiVisibilityCondition};
 
 #[derive(Clone, Debug)]
 pub(crate) struct AnimationSetOption {
@@ -1454,8 +1454,20 @@ pub(crate) fn ui_action_same_variant(a: &UiAction, b: &UiAction) -> bool {
     matches!(
         (a, b),
         (UiAction::GotoState(_), UiAction::GotoState(_))
+            | (
+                UiAction::TransitionToState { .. },
+                UiAction::TransitionToState { .. }
+            )
             | (UiAction::GotoScene(_), UiAction::GotoScene(_))
+            | (
+                UiAction::TransitionToScene { .. },
+                UiAction::TransitionToScene { .. }
+            )
             | (UiAction::StartGameplay, UiAction::StartGameplay)
+            | (
+                UiAction::StartGameplayTransition { .. },
+                UiAction::StartGameplayTransition { .. }
+            )
             | (UiAction::Back, UiAction::Back)
             | (UiAction::SetOption { .. }, UiAction::SetOption { .. })
             | (UiAction::Game(_), UiAction::Game(_))
@@ -1475,8 +1487,19 @@ pub(crate) fn draw_ui_action_editor(
     let mut changed = false;
     let variants = [
         UiAction::GotoState(state_options.first().map(|(id, _)| *id).unwrap_or_default()),
+        UiAction::TransitionToState {
+            state: state_options.first().map(|(id, _)| *id).unwrap_or_default(),
+            transition: UiTransition::glitch_break(),
+        },
         UiAction::GotoScene(scene_options.first().map(|(id, _)| *id).unwrap_or_default()),
+        UiAction::TransitionToScene {
+            scene: scene_options.first().map(|(id, _)| *id).unwrap_or_default(),
+            transition: UiTransition::glitch_break(),
+        },
         UiAction::StartGameplay,
+        UiAction::StartGameplayTransition {
+            transition: UiTransition::glitch_break(),
+        },
         UiAction::Back,
         UiAction::SetOption {
             option: option_choices
@@ -1505,8 +1528,19 @@ pub(crate) fn draw_ui_action_editor(
         UiAction::GotoState(state) => {
             changed |= draw_scene_state_picker(ui, "Target", state, state_options);
         }
+        UiAction::TransitionToState { state, transition } => {
+            changed |= draw_scene_state_picker(ui, "Target", state, state_options);
+            changed |= draw_ui_transition_editor(ui, transition);
+        }
         UiAction::GotoScene(scene) => {
             changed |= draw_ui_scene_picker(ui, "Target", scene, scene_options);
+        }
+        UiAction::TransitionToScene { scene, transition } => {
+            changed |= draw_ui_scene_picker(ui, "Target", scene, scene_options);
+            changed |= draw_ui_transition_editor(ui, transition);
+        }
+        UiAction::StartGameplayTransition { transition } => {
+            changed |= draw_ui_transition_editor(ui, transition);
         }
         UiAction::SetOption { option, delta } => {
             changed |= draw_ui_option_picker(ui, "Option", option, option_choices);
@@ -1520,6 +1554,41 @@ pub(crate) fn draw_ui_action_editor(
             }
         }
         UiAction::StartGameplay | UiAction::Back => {}
+    }
+    changed
+}
+
+fn draw_ui_transition_editor(ui: &mut egui::Ui, transition: &mut UiTransition) -> bool {
+    let mut changed = false;
+    let kinds = [
+        UiTransitionKind::None,
+        UiTransitionKind::Fade,
+        UiTransitionKind::BlockDissolve,
+        UiTransitionKind::GlitchBreak,
+    ];
+    egui::ComboBox::from_label("Transition")
+        .selected_text(transition.kind.label())
+        .show_ui(ui, |ui| {
+            for kind in kinds {
+                if ui
+                    .selectable_label(transition.kind == kind, kind.label())
+                    .clicked()
+                    && transition.kind != kind
+                {
+                    transition.kind = kind;
+                    changed = true;
+                }
+            }
+        });
+    changed |= drag_u16(ui, "Frames", &mut transition.frames, 0, 600);
+    changed |= drag_u16(ui, "Seed", &mut transition.seed, 0, u16::MAX);
+    let labels = ["R", "G", "B"];
+    for (index, label) in labels.iter().enumerate() {
+        let mut value = i32::from(transition.color[index]);
+        if drag_i32(ui, label, &mut value, 0, 255) {
+            transition.color[index] = value.clamp(0, 255) as u8;
+            changed = true;
+        }
     }
     changed
 }

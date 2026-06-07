@@ -145,7 +145,7 @@ fn free_room_texture_vram_slot(asset_id: AssetId) {
     }
 }
 
-/// Load every CD-streamed UI image into VRAM, one image at a time.
+/// Load the active UI scene's CD-streamed images into VRAM, one image at a time.
 ///
 /// Each streamed image (a `Texture` asset with empty baked bytes) is read
 /// off UI.PAK into the shared `UI_IMAGE_STAGE` buffer, uploaded to VRAM,
@@ -155,11 +155,29 @@ fn free_room_texture_vram_slot(asset_id: AssetId) {
 /// read mutates it. Tracks each created slot so `release_ui_images` can
 /// free it on gameplay entry.
 #[cfg(feature = "cd-stream-bench")]
-pub(super) fn load_ui_images_from_cd() {
+pub(super) fn load_ui_images_for_scene_from_cd(scene_id: u16) {
+    if scene_id == psx_level::UI_SCENE_NONE {
+        return;
+    }
+    let Some(scene) = UI_SCENES.iter().find(|scene| scene.id == scene_id) else {
+        return;
+    };
+    let first = scene.node_first as usize;
+    let end = first
+        .saturating_add(scene.node_count as usize)
+        .min(UI_NODES.len());
+
     unsafe {
         let mut slot_count = 0usize;
-        for asset in ASSETS {
-            if asset.kind != AssetKind::Texture || !asset.bytes.is_empty() {
+        for node in &UI_NODES[first..end] {
+            if node.kind != psx_level::LevelUiNodeKind::Image {
+                continue;
+            }
+            let Some(asset) = find_asset_of_kind(ASSETS, node.texture_asset, AssetKind::Texture)
+            else {
+                continue;
+            };
+            if !asset.bytes.is_empty() {
                 continue;
             }
             // The sky panorama is also a streamed (empty-bytes) Texture but is
