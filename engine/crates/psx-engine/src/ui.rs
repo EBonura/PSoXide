@@ -328,6 +328,29 @@ fn resolved_from_parent(
     }
 }
 
+fn node_visible_in_tree(
+    nodes: &[LevelUiNodeRecord],
+    index: usize,
+    visible: &impl Fn(&LevelUiNodeRecord) -> bool,
+) -> bool {
+    let mut cursor = Some(index);
+    let mut depth = 0;
+    while let Some(current) = cursor {
+        let Some(node) = nodes.get(current) else {
+            return false;
+        };
+        if !visible(node) {
+            return false;
+        }
+        depth += 1;
+        if depth > nodes.len() {
+            return false;
+        }
+        cursor = node.parent.map(|parent| usize::from(parent.raw()));
+    }
+    true
+}
+
 /// Draw the cooked nodes `nodes[first..first + count]` of one UI scene
 /// to the framebuffer.
 ///
@@ -371,6 +394,9 @@ fn resolved_from_parent(
 ///
 /// Drawing order follows pool order, so authoring order is the
 /// back-to-front paint order.
+///
+/// `visible` lets higher-level runtime code apply game/input state to
+/// authored nodes without baking those states into this renderer.
 #[allow(clippy::too_many_arguments)]
 pub fn draw_scene(
     nodes: &[LevelUiNodeRecord],
@@ -384,10 +410,14 @@ pub fn draw_scene(
     value: &impl Fn(LevelUiValueBinding) -> i32,
     options: &[LevelOptionDef],
     option_value: &impl Fn(u16) -> i32,
+    visible: &impl Fn(&LevelUiNodeRecord) -> bool,
 ) {
     let end = first.saturating_add(count).min(nodes.len());
     for index in first..end {
         let node = &nodes[index];
+        if !node_visible_in_tree(nodes, index, visible) {
+            continue;
+        }
         let resolved = node_resolved(nodes, index).unwrap_or_else(default_resolved_node);
         let is_focused = focused == Some(index);
         match node.kind {
