@@ -22,7 +22,7 @@
 	showcase-text showcase-text-disc run-showcase-text \
 	game-pong game-pong-disc run-game-pong \
 	game-magikaaaaaarp-pong game-magikaaaaaarp-pong-disc magikaaaaaarp-pong-spectrum run-game-magikaaaaaarp-pong probe-magikaaaaaarp-pong-audio duckstation-magikaaaaaarp-pong \
-	demo10-project-disc duckstation-demo10 \
+	demo10-project-disc duckstation-demo10 duckstation-demo10-bios redux-demo10-bios \
 	game-breakout game-breakout-disc run-game-breakout \
         game-invaders game-invaders-disc run-game-invaders \
         showcase-3d showcase-3d-disc run-showcase-3d \
@@ -116,6 +116,10 @@ help:
 	@echo "                      - boot magikAAAAArp Pong in DuckStation and assert TTY markers"
 	@echo "    make duckstation-demo10"
 	@echo "                      - build demo10's project disc and assert DuckStation TTY markers"
+	@echo "    make duckstation-demo10-bios"
+	@echo "                      - assert demo10 through DuckStation's full BIOS/logo path"
+	@echo "    make redux-demo10-bios"
+	@echo "                      - assert demo10 through PCSX-Redux's BIOS disc boot"
 	@echo "    make run-showcase-text"
 	@echo "                      - build + boot the text capabilities showcase disc"
 	@echo "    make run-game-pong     - build + boot the Pong mini-game disc"
@@ -266,6 +270,9 @@ MAGIKAAAAARP_PONG_SPECTRUM := engine/examples/game-magikaaaaaarp-pong/assets/gon
 DUCKSTATION_TIMEOUT ?= 45
 DUCKSTATION_MAGIKARP_LOG ?= build/duckstation-harness/game-magikaaaaaarp-pong.log
 DUCKSTATION_DEMO10_LOG ?= build/duckstation-harness/demo10.log
+DUCKSTATION_DEMO10_BIOS_LOG ?= build/duckstation-harness/demo10-bios.log
+REDUX_DEMO10_BIOS ?= $(HOME)/Downloads/ps1 bios/SCPH1001.BIN
+REDUX_DEMO10_STEPS ?= 70000000
 DEMO10_PROJECT ?= editor/projects/demo10
 PYTHON ?= python3
 PROFILE_DEMO3_FRAMES ?= 60
@@ -608,6 +615,23 @@ duckstation-demo10: demo10-project-disc
 		--expect "psx-rt: main" \
 		--expect "editor-playtest: init ok" \
 		--expect "psx-engine: scene init ok"
+
+duckstation-demo10-bios: demo10-project-disc
+	$(PYTHON) tools/duckstation_harness.py \
+		--cue $(CURDIR)/$(DEMO10_PROJECT)/baked/demo10.cue \
+		--timeout $(DUCKSTATION_TIMEOUT) \
+		--log $(CURDIR)/$(DUCKSTATION_DEMO10_BIOS_LOG) \
+		--bios-boot \
+		--no-default-expect \
+		--expect "psx-rt: main" \
+		--expect "editor-playtest: init ok" \
+		--expect "psx-engine: scene init ok"
+
+redux-demo10-bios: demo10-project-disc
+	cd emu && PSOXIDE_DISC="$(CURDIR)/$(DEMO10_PROJECT)/baked/demo10.cue" \
+		PSOXIDE_BIOS="$(REDUX_DEMO10_BIOS)" \
+		PSOXIDE_ORACLE_DISC_STEPS="$(REDUX_DEMO10_STEPS)" \
+		cargo test -p parity-oracle --test commercial_disc_smoke --release -- --ignored --nocapture
 
 run-game-breakout: game-breakout-disc
 	cd emu && PSOXIDE_DISC=$(CURDIR)/$(EXAMPLE_OUT)/game-breakout.cue cargo run -p frontend --release

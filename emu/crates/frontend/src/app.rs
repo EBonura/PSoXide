@@ -2243,6 +2243,15 @@ fn embedded_playtest_disc_image(
 ) -> Result<Vec<u8>, String> {
     Exe::parse(&exe_bytes).map_err(|e| format!("parse EXE: {e:?}"))?;
     let mut builder = IsoBuilder::new().volume_id("PSOXIDE");
+    if let Some(system_area) = embedded_playtest_system_area()? {
+        builder = builder
+            .system_area(system_area)
+            .map_err(|_| "PSOXIDE_SYSTEM_AREA did not decode to exactly 16 cooked sectors")?;
+    } else {
+        eprintln!(
+            "warning: no PS1 system area supplied; emulators may boot this, real hardware may not"
+        );
+    }
     // Canonical playtest-disc layout, shared with the mkisopsx CLI via
     // psx_iso::add_playtest_files so the on-disc file order (and therefore the
     // cooked WORLD_PACK_START_LBA / UI_PACK_START_LBA) cannot drift between the
@@ -2256,6 +2265,48 @@ fn embedded_playtest_disc_image(
         Some(psx_iso::CD_STREAM_BENCH_DEFAULT_SECTORS),
     );
     Ok(builder.build_bin())
+}
+
+fn embedded_playtest_system_area() -> Result<Option<Vec<u8>>, String> {
+    let Some(path) = std::env::var_os("PSOXIDE_SYSTEM_AREA") else {
+        return Ok(None);
+    };
+    let path = PathBuf::from(path);
+    let bytes = std::fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    extract_playstation_system_area(&bytes).map(Some).map_err(|e| {
+        format!(
+            "{}: {e}. Supply either the first 16 cooked 2048-byte sectors or a raw BIN/CUE-style image.",
+            path.display()
+        )
+    })
+}
+
+fn extract_playstation_system_area(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    const COOKED_BYTES: usize = 16 * psx_iso::iso9660::SECTOR_SIZE;
+    const RAW_BYTES: usize = 16 * psx_iso::iso9660::RAW_SECTOR_SIZE;
+
+    if bytes.len() >= RAW_BYTES && looks_like_raw_sector(&bytes[..SECTOR_BYTES]) {
+        let mut out = Vec::with_capacity(COOKED_BYTES);
+        for sector in bytes[..RAW_BYTES].chunks_exact(SECTOR_BYTES) {
+            out.extend_from_slice(&sector[24..24 + psx_iso::iso9660::SECTOR_SIZE]);
+        }
+        return Ok(out);
+    }
+
+    if bytes.len() >= COOKED_BYTES {
+        return Ok(bytes[..COOKED_BYTES].to_vec());
+    }
+
+    Err(format!(
+        "system area needs at least {COOKED_BYTES} cooked bytes or {RAW_BYTES} raw bytes"
+    ))
+}
+
+fn looks_like_raw_sector(sector: &[u8]) -> bool {
+    sector.len() >= SECTOR_BYTES
+        && sector[0] == 0x00
+        && sector[11] == 0x00
+        && sector[1..11] == [0xFF; 10]
 }
 
 fn editor_playtest_generated_dir() -> PathBuf {
