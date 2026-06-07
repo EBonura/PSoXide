@@ -406,12 +406,12 @@ pub(crate) fn draw_animator_action_clip_table(
 ) -> bool {
     let mut changed = false;
 
-    let available_width = ui.available_width().max(280.0);
-    let spacing = ui.spacing().item_spacing.x;
-    let action_width = 92.0;
-    let flag_width = 58.0;
-    let clip_width =
-        (available_width - action_width - flag_width * 2.0 - spacing * 3.0).clamp(150.0, 360.0);
+    // Fixed column widths so the table layout stays stable regardless of
+    // panel width or clip-name length.
+    let action_width = 76.0;
+    let clip_width = 148.0;
+    let flag_width = 52.0;
+    let speed_width = 56.0;
 
     let header = |ui: &mut egui::Ui, text: &str, width: f32| {
         ui.add_sized(
@@ -420,10 +420,12 @@ pub(crate) fn draw_animator_action_clip_table(
         );
     };
     ui.horizontal(|ui| {
+        ui.add_space(4.0);
         header(ui, "Action", action_width);
         header(ui, "Clip", clip_width);
         header(ui, "Loop", flag_width);
         header(ui, "In-place", flag_width);
+        header(ui, "Speed", speed_width);
     });
 
     ui.add_space(2.0);
@@ -500,6 +502,33 @@ pub(crate) fn draw_animator_action_clip_table(
                             });
                         },
                     );
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(speed_width, 24.0),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| {
+                            ui.add_enabled_ui(enabled, |ui| {
+                                let mut speed_mult = options.speed_q8 as f32 / 256.0;
+                                if ui
+                                    .add(
+                                        egui::DragValue::new(&mut speed_mult)
+                                            .speed(0.01)
+                                            .range(0.25..=4.0)
+                                            .fixed_decimals(2)
+                                            .suffix("x"),
+                                    )
+                                    .on_hover_text(
+                                        "Playback speed for this action (1.00x = authored rate)",
+                                    )
+                                    .changed()
+                                {
+                                    options.speed_q8 = (speed_mult * 256.0).round().clamp(
+                                        psxed_project::ACTION_SPEED_MIN_Q8 as f32,
+                                        psxed_project::ACTION_SPEED_MAX_Q8 as f32,
+                                    ) as u16;
+                                }
+                            });
+                        },
+                    );
                     if enabled && options != before_options {
                         let clip = effective_clip.expect("enabled rows have a clip");
                         if current.is_none() {
@@ -534,6 +563,7 @@ pub(crate) fn animator_action_option_defaults(
         in_place: clip
             .and_then(|idx| context.clip_in_place_defaults.get(idx as usize).copied())
             .unwrap_or(true),
+        speed_q8: psxed_project::ACTION_SPEED_UNSCALED_Q8,
     }
 }
 
