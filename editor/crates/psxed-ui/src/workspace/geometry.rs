@@ -1,0 +1,1806 @@
+use super::*;
+
+impl EditorWorkspace {
+    /// Single dispatch point for primary-button clicks on the viewport.
+    pub(crate) fn handle_viewport_click(
+        &mut self,
+        world: [f32; 2],
+        hits: &[ViewportHit],
+        modifiers: egui::Modifiers,
+    ) {
+        match self.active_tool {
+            ViewTool::Select => {
+                if let Some(hit) = hits.iter().rev().find(|hit| hit.contains(world)) {
+                    if let Some(sector) = self
+                        .world_to_sector(hit.id, world)
+                        .map(|(sx, sz)| (hit.id, sx, sz))
+                    {
+                        self.select_sector(sector, modifiers);
+                    } else {
+                        let visible_order = self.scene_node_order();
+                        self.apply_node_selection_modifiers(hit.id, modifiers, &visible_order);
+                        self.clear_primitive_selection_state();
+                        self.clear_sector_selection();
+                    }
+                } else {
+                    self.clear_resource_selection_state();
+                    self.clear_sector_selection();
+                }
+            }
+            tool => {
+                let Some(room_id) = self.active_room_id() else {
+                    return;
+                };
+                let Some((x, z)) = self.world_to_sector(room_id, world) else {
+                    self.clear_sector_selection();
+                    return;
+                };
+                if self.portal_place_active() {
+                    self.clear_sector_selection();
+                } else {
+                    self.selection.selected_sector = Some((x, z));
+                    self.selection.selected_sectors.clear();
+                    self.selection.selected_sectors.insert((room_id, x, z));
+                }
+                self.apply_paint(tool, room_id, x, z, world);
+            }
+        }
+    }
+
+    /// Apply a 2D-viewport click through the same logic as a 3D
+    /// click. Old behaviour kept a separate `apply_paint` body
+    /// here that diverged from the 3D `run_paint_action` (no
+    /// origin awareness, no wall replacement, no `PlaceKind`
+    /// dispatch). Now: lift the click into editor coords, pre-
+    /// compute a `picked_face` for PaintWall when the inferred
+    /// edge already has a wall stack, and hand off. PaintWall uses
+    /// that face's direction to add the next stack entry.
+    pub(crate) fn apply_paint(
+        &mut self,
+        tool: ViewTool,
+        room_id: NodeId,
+        sx: u16,
+        sz: u16,
+        world: [f32; 2],
+    ) {
+        // 2D `world` is already in editor sector-units (the 2D
+        // viewport's native space, room-centre-relative around
+        // `node_world(room)`). Convert through the canonical
+        // helper to get a room-local 3D position the rest of the
+        // paint flow can chew on. `editor_to_room_local` is
+        // origin-aware, so this stays correct after a -X / -Z grow.
+        let (hit_world, picked_face) = {
+            let Some(room) = self.project.active_scene().node(room_id) else {
+                return;
+            };
+            let room_center = node_world(room);
+            let Some(grid) = self.room_grid_view(room_id) else {
+                return;
+            };
+            let editor = [world[0] - room_center[0], world[1] - room_center[1]];
+            let hit = grid.editor_to_room_local(editor);
+
+            // For PaintWall: if the inferred edge already has at
+            // least one wall, hand `run_paint_action` a `FaceRef`
+            // pointing at the top of the stack so the new wall uses
+            // that edge instead of re-inferring from the cell center.
+            // Empty edge -> None -> normal append path.
+            let face = if matches!(tool, ViewTool::PaintWall) {
+                let centre = grid.cell_center_world(sx, sz);
+                let dir = self
+                    .wall_paint_shape
+                    .direction(hit[0] - centre[0], hit[2] - centre[1]);
+                grid.sector(sx, sz).and_then(|sector| {
+                    let walls = sector.walls.get(dir);
+                    let stack = walls.len().checked_sub(1)?;
+                    Some(FaceRef {
+                        room: room_id,
+                        sx,
+                        sz,
+                        kind: FaceKind::Wall {
+                            dir,
+                            stack: stack as u8,
+                        },
+                    })
+                })
+            } else {
+                None
+            };
+            (hit, face)
+        };
+
+        self.run_paint_action(tool, room_id, sx, sz, picked_face, hit_world);
+    }
+
+    pub(crate) fn has_geometry_selection(&self) -> bool {
+        !self.selection.selected_sectors.is_empty()
+            || !self.selected_primitive_targets().is_empty()
+            || (self.active_room_id().is_some() && self.selection.selected_sector.is_some())
+    }
+
+    pub(crate) fn duplicate_current_selection(&mut self) {
+        if self.floating_geometry.is_some() {
+            self.status = "Place or cancel the duplicate preview first".to_string();
+            return;
+        }
+        if self.has_geometry_selection() {
+            self.begin_floating_geometry_duplicate();
+        } else {
+            self.duplicate_selected();
+        }
+    }
+
+    pub(crate) fn selected_geometry_cell_targets(
+        &self,
+    ) -> Result<(NodeId, Vec<(u16, u16)>), &'static str> {
+        let mut targets = Vec::new();
+        if !self.selection.selected_sectors.is_empty() {
+            targets.extend(
+                self.selection
+                    .selected_sectors
+                    .iter()
+                    .map(|(room, sx, sz)| (*room, *sx, *sz)),
+            );
+        } else {
+            targets.extend(
+                self.selected_primitive_targets()
+                    .into_iter()
+                    .map(|selection| {
+                        let (room, sx, sz) = selection_sector(selection);
+                        (room, sx, sz)
+                    }),
+            );
+            if targets.is_empty() {
+                if let (Some(room), Some((sx, sz))) =
+                    (self.active_room_id(), self.selection.selected_sector)
+                {
+                    targets.push((room, sx, sz));
+                }
+            }
+        }
+
+        if targets.is_empty() {
+            return Err("Select world geometry first");
+        }
+        targets.sort_by_key(|(room, sx, sz)| (room.raw(), *sx, *sz));
+        targets.dedup();
+
+        let room = targets[0].0;
+        if targets.iter().any(|(candidate, _, _)| *candidate != room) {
+            return Err("Select geometry from one room at a time");
+        }
+
+        Ok((
+            room,
+            targets.into_iter().map(|(_, sx, sz)| (sx, sz)).collect(),
+        ))
+    }
+
+    pub(crate) fn copy_selected_geometry(&mut self) -> Option<GeometryClipboard> {
+        if self.selection.selected_sectors.is_empty()
+            && !self.selected_primitive_targets().is_empty()
+        {
+            return self.copy_selected_primitive_geometry();
+        }
+
+        self.copy_selected_geometry_cells()
+    }
+
+    pub(crate) fn copy_selected_primitive_geometry(&mut self) -> Option<GeometryClipboard> {
+        let targets = self.selected_primitive_targets();
+        let (clipboard, populated) = match self.primitive_geometry_clipboard_for_targets(&targets) {
+            Ok(result) => result,
+            Err(message) => {
+                self.status = message.to_string();
+                return None;
+            }
+        };
+        self.status = if populated == 1 {
+            "Copied 1 primitive".to_string()
+        } else {
+            format!("Copied {populated} primitives")
+        };
+        Some(clipboard)
+    }
+
+    pub(crate) fn primitive_geometry_clipboard_for_targets(
+        &self,
+        targets: &[Selection],
+    ) -> Result<(GeometryClipboard, usize), &'static str> {
+        let Some(first) = targets.first().copied() else {
+            return Err("Select world geometry first");
+        };
+        let room = first.room();
+        if targets.iter().any(|selection| selection.room() != room) {
+            return Err("Select geometry from one room at a time");
+        }
+
+        let Some(grid) = self.room_grid_view(room) else {
+            return Err("Selected room no longer exists");
+        };
+
+        let mut min_x = i32::MAX;
+        let mut min_z = i32::MAX;
+        let mut max_x = i32::MIN;
+        let mut max_z = i32::MIN;
+        let mut staged: Vec<([i32; 2], GridSector)> = Vec::new();
+        let mut populated = 0usize;
+        for &selection in targets {
+            let Some(fragment) = sector_fragment_for_selection(grid, selection) else {
+                continue;
+            };
+            let (_, sx, sz) = selection_sector(selection);
+            let world = [grid.origin[0] + sx as i32, grid.origin[1] + sz as i32];
+            min_x = min_x.min(world[0]);
+            min_z = min_z.min(world[1]);
+            max_x = max_x.max(world[0]);
+            max_z = max_z.max(world[1]);
+            if let Some((_, cell)) = staged
+                .iter_mut()
+                .find(|(candidate_world, _)| *candidate_world == world)
+            {
+                merge_clipboard_fragment(cell, fragment);
+            } else {
+                staged.push((world, fragment));
+            }
+            populated += 1;
+        }
+
+        if populated == 0 {
+            return Err("Selected primitives are empty");
+        }
+
+        let width = max_x - min_x + 1;
+        let height = max_z - min_z + 1;
+        let clipboard = GeometryClipboard {
+            mode: GeometryClipboardMode::MergePrimitives,
+            source_room: room,
+            source_origin: [min_x, min_z],
+            next_paste_origin: [max_x + 1, min_z],
+            width,
+            height,
+            cells: staged
+                .into_iter()
+                .map(|(world, sector)| GeometryClipboardCell {
+                    offset: [world[0] - min_x, world[1] - min_z],
+                    sector: Some(sector),
+                })
+                .collect(),
+        };
+        Ok((clipboard, populated))
+    }
+
+    pub(crate) fn copy_selected_geometry_cells(&mut self) -> Option<GeometryClipboard> {
+        let (room, cells) = match self.selected_geometry_cell_targets() {
+            Ok(targets) => targets,
+            Err(message) => {
+                self.status = message.to_string();
+                return None;
+            }
+        };
+        let Some(grid) = self.room_grid_view(room) else {
+            self.status = "Selected room no longer exists".to_string();
+            return None;
+        };
+
+        let mut min_x = i32::MAX;
+        let mut min_z = i32::MAX;
+        let mut max_x = i32::MIN;
+        let mut max_z = i32::MIN;
+        let mut staged = Vec::new();
+        for (sx, sz) in cells {
+            let world = [grid.origin[0] + sx as i32, grid.origin[1] + sz as i32];
+            min_x = min_x.min(world[0]);
+            min_z = min_z.min(world[1]);
+            max_x = max_x.max(world[0]);
+            max_z = max_z.max(world[1]);
+            staged.push((world, grid.sector(sx, sz).cloned()));
+        }
+
+        let populated = staged
+            .iter()
+            .filter(|(_, sector)| sector.as_ref().is_some_and(GridSector::has_geometry))
+            .count();
+        if populated == 0 {
+            self.status = "Selected cells are empty".to_string();
+            return None;
+        }
+
+        let width = max_x - min_x + 1;
+        let height = max_z - min_z + 1;
+        let clipboard = GeometryClipboard {
+            mode: GeometryClipboardMode::ReplaceCells,
+            source_room: room,
+            source_origin: [min_x, min_z],
+            next_paste_origin: [max_x + 1, min_z],
+            width,
+            height,
+            cells: staged
+                .into_iter()
+                .map(|(world, sector)| GeometryClipboardCell {
+                    offset: [world[0] - min_x, world[1] - min_z],
+                    sector,
+                })
+                .collect(),
+        };
+        self.status = if populated == 1 {
+            "Copied 1 world cell".to_string()
+        } else {
+            format!("Copied {populated} world cells")
+        };
+        Some(clipboard)
+    }
+
+    pub(crate) fn begin_floating_geometry_duplicate(&mut self) {
+        let Some(clipboard) = self.copy_selected_geometry() else {
+            return;
+        };
+        let Some(room) = self.paste_target_room(&clipboard) else {
+            self.status = "No room to duplicate into".to_string();
+            return;
+        };
+        self.floating_geometry = Some(FloatingGeometryPlacement {
+            base_project: self.project.clone(),
+            base_dirty: self.dirty,
+            mode: clipboard.mode,
+            room,
+            origin: clipboard.next_paste_origin,
+            width: clipboard.width,
+            height: clipboard.height,
+            rotation_quarters: 0,
+            flip_x: false,
+            flip_z: false,
+            cells: clipboard.cells,
+        });
+        self.apply_floating_geometry_preview();
+        self.status = "Duplicating world geometry - move cursor, R rotates, F flips, Shift+F flips vertically, click places, Esc cancels"
+            .to_string();
+    }
+
+    pub(crate) fn paste_target_room(&self, clipboard: &GeometryClipboard) -> Option<NodeId> {
+        self.active_room_id().or_else(|| {
+            self.project
+                .active_scene()
+                .node(clipboard.source_room)
+                .and_then(|node| matches!(node.kind, NodeKind::Room { .. }).then_some(node.id))
+        })
+    }
+
+    pub(crate) fn rotate_current_selection_90(&mut self) {
+        if self.floating_geometry.is_some() {
+            self.rotate_floating_geometry_cw();
+        } else if self.has_geometry_selection() {
+            self.rotate_selected_geometry_cw();
+        } else {
+            self.rotate_selected_yaw_90();
+        }
+    }
+
+    pub(crate) fn update_floating_geometry_origin(&mut self, origin: [i32; 2]) -> bool {
+        let Some(preview) = self.floating_geometry.as_mut() else {
+            return false;
+        };
+        if preview.origin == origin {
+            return true;
+        }
+        preview.origin = origin;
+        self.apply_floating_geometry_preview();
+        true
+    }
+
+    pub(crate) fn rotate_floating_geometry_cw(&mut self) {
+        let Some(preview) = self.floating_geometry.as_mut() else {
+            return;
+        };
+        preview.rotation_quarters = (preview.rotation_quarters + 1) % 4;
+        self.apply_floating_geometry_preview();
+        self.status = "Rotated duplicate preview 90°".to_string();
+    }
+
+    pub(crate) fn flip_floating_geometry_x(&mut self) {
+        let Some(preview) = self.floating_geometry.as_mut() else {
+            return;
+        };
+        preview.flip_x = !preview.flip_x;
+        self.apply_floating_geometry_preview();
+        self.status = "Flipped duplicate preview horizontally".to_string();
+    }
+
+    pub(crate) fn flip_floating_geometry_z(&mut self) {
+        let Some(preview) = self.floating_geometry.as_mut() else {
+            return;
+        };
+        preview.flip_z = !preview.flip_z;
+        self.apply_floating_geometry_preview();
+        self.status = "Flipped duplicate preview vertically".to_string();
+    }
+
+    pub(crate) fn commit_floating_geometry(&mut self) -> bool {
+        let Some(preview) = self.floating_geometry.take() else {
+            return false;
+        };
+        self.history.record(preview.base_project);
+        self.status = "Placed duplicated world geometry".to_string();
+        self.mark_dirty();
+        true
+    }
+
+    pub(crate) fn cancel_floating_geometry(&mut self) -> bool {
+        let Some(preview) = self.floating_geometry.take() else {
+            return false;
+        };
+        self.project = preview.base_project;
+        self.dirty = preview.base_dirty;
+        self.clear_sector_selection();
+        self.clear_primitive_selection_state();
+        self.status = "Cancelled duplicate".to_string();
+        true
+    }
+
+    pub(crate) fn apply_floating_geometry_preview(&mut self) {
+        let Some(preview) = self.floating_geometry.clone() else {
+            return;
+        };
+        self.project = preview.base_project.clone();
+        self.dirty = preview.base_dirty;
+
+        let cells = transformed_geometry_cells(
+            &preview.cells,
+            preview.width,
+            preview.height,
+            preview.rotation_quarters,
+            preview.flip_x,
+            preview.flip_z,
+        );
+        let mut selected_cells = Vec::new();
+        let mut selected_primitives = Vec::new();
+        let active_floor = self.active_floor;
+        {
+            let scene = self.project.active_scene_mut();
+            let Some(node) = scene.node(preview.room) else {
+                self.floating_geometry = None;
+                self.status = "Duplicate target room no longer exists".to_string();
+                return;
+            };
+            let NodeKind::Room { .. } = &node.kind else {
+                self.floating_geometry = None;
+                self.status = "Duplicate target is not a Room".to_string();
+                return;
+            };
+            for (offset, _) in &cells {
+                let _ = extend_room_grid_to_include_preserving_child_positions(
+                    scene,
+                    preview.room,
+                    preview.origin[0] + offset[0],
+                    preview.origin[1] + offset[1],
+                    active_floor,
+                );
+            }
+            let Some(node) = scene.node_mut(preview.room) else {
+                self.floating_geometry = None;
+                self.status = "Duplicate target room no longer exists".to_string();
+                return;
+            };
+            let NodeKind::Room { grid } = &mut node.kind else {
+                self.floating_geometry = None;
+                self.status = "Duplicate target is not a Room".to_string();
+                return;
+            };
+            let floor_idx = active_floor.min(grid.floor_count().saturating_sub(1));
+            let grid = grid
+                .floor_mut(floor_idx)
+                .expect("floor index clamped to range");
+            for (offset, sector) in cells {
+                let wcx = preview.origin[0] + offset[0];
+                let wcz = preview.origin[1] + offset[1];
+                let Some((sx, sz)) = grid.world_cell_to_array(wcx, wcz) else {
+                    continue;
+                };
+                let Some(index) = grid.sector_index(sx, sz) else {
+                    continue;
+                };
+                match preview.mode {
+                    GeometryClipboardMode::ReplaceCells => {
+                        grid.sectors[index] = sector;
+                        selected_cells.push((sx, sz));
+                    }
+                    GeometryClipboardMode::MergePrimitives => {
+                        let Some(fragment) = sector else {
+                            continue;
+                        };
+                        let target = grid.sectors[index].get_or_insert_with(GridSector::empty);
+                        merge_primitive_fragment(
+                            target,
+                            fragment,
+                            preview.room,
+                            sx,
+                            sz,
+                            &mut selected_primitives,
+                        );
+                    }
+                }
+            }
+        }
+        match preview.mode {
+            GeometryClipboardMode::ReplaceCells => {
+                self.select_geometry_cells(preview.room, selected_cells);
+            }
+            GeometryClipboardMode::MergePrimitives => {
+                self.select_geometry_primitives(preview.room, selected_primitives);
+            }
+        }
+    }
+
+    pub(crate) fn floating_origin_from_2d_world(
+        &self,
+        room: NodeId,
+        world: [f32; 2],
+    ) -> Option<[i32; 2]> {
+        let scene = self
+            .floating_geometry
+            .as_ref()
+            .map(|preview| preview.base_project.active_scene())
+            .unwrap_or_else(|| self.project.active_scene());
+        let node = scene.node(room)?;
+        let NodeKind::Room { grid } = &node.kind else {
+            return None;
+        };
+        let center = node_world(node);
+        let editor = [world[0] - center[0], world[1] - center[1]];
+        let world_cells = grid.editor_to_world_cells(editor);
+        Some([world_cells[0].floor() as i32, world_cells[1].floor() as i32])
+    }
+
+    pub(crate) fn floating_origin_from_3d_hover(
+        &self,
+        room: NodeId,
+        face_hit: Option<(FaceRef, [f32; 3])>,
+        ground_hit: Option<[f32; 2]>,
+    ) -> Option<[i32; 2]> {
+        // Anchor on the ground-plane projection only, never on
+        // `face_hit`. `face_hit` comes from `pick_face_with_hit`, which
+        // ray-tests the baked preview in `self.project`; feeding the
+        // preview's own faces back as the anchor makes the origin flip
+        // to whatever cell the cursor's nearest preview surface is in.
+        // `ground_hit` is a pure camera-ray/plane intersection
+        // (`pick_3d_world`), independent of scene geometry.
+        let _ = face_hit;
+        let editor = ground_hit?;
+        // Convert with the SAME grid the pick used. `ground_hit` was
+        // produced by `pick_3d_world_on_room_plane` via
+        // `WorldGrid::room_local_to_editor`, which subtracts
+        // `grid_center_cells()` of the *current* (`self.project`) grid.
+        // `editor_to_world_cells` re-adds the center, so it must read the
+        // same grid or the two centers cancel incorrectly. During a
+        // floating placement `self.project` may have been auto-grown,
+        // shifting its center: reading the clean base grid here would
+        // leave a constant offset between the two centers, the origin
+        // lands a cell over, the preview re-grows, the center shifts
+        // again, and the wireframe oscillates between two cells frame to
+        // frame. Using `self.project`'s grid makes the center cancel so
+        // `world_cells` is the true absolute cell under the cursor,
+        // regardless of how the preview grew.
+        let grid = self.room_grid_view(room)?;
+        let world_cells = grid.editor_to_world_cells(editor);
+        Some([world_cells[0].floor() as i32, world_cells[1].floor() as i32])
+    }
+
+    pub(crate) fn rotate_selected_geometry_cw(&mut self) {
+        let (room, cells) = match self.selected_geometry_cell_targets() {
+            Ok(targets) => targets,
+            Err(message) => {
+                self.status = message.to_string();
+                return;
+            }
+        };
+        let Some(grid) = self.room_grid_view(room) else {
+            self.status = "Selected room no longer exists".to_string();
+            return;
+        };
+
+        let mut min_x = i32::MAX;
+        let mut min_z = i32::MAX;
+        let mut max_x = i32::MIN;
+        let mut staged = Vec::new();
+        for (sx, sz) in cells {
+            let world = [grid.origin[0] + sx as i32, grid.origin[1] + sz as i32];
+            min_x = min_x.min(world[0]);
+            min_z = min_z.min(world[1]);
+            max_x = max_x.max(world[0]);
+            staged.push((world, grid.sector(sx, sz).cloned()));
+        }
+
+        let populated = staged
+            .iter()
+            .filter(|(_, sector)| sector.as_ref().is_some_and(GridSector::has_geometry))
+            .count();
+        if populated == 0 {
+            self.status = "Selected cells are empty".to_string();
+            return;
+        }
+
+        let width = max_x - min_x + 1;
+        let rotated: Vec<([i32; 2], Option<GridSector>)> = staged
+            .iter()
+            .map(|(world, sector)| {
+                let local_x = world[0] - min_x;
+                let local_z = world[1] - min_z;
+                (
+                    [min_x + local_z, min_z + width - 1 - local_x],
+                    sector.as_ref().map(rotate_sector_cw),
+                )
+            })
+            .collect();
+
+        self.push_undo();
+        let active_floor = self.active_floor;
+        let mut selected = Vec::new();
+        {
+            let scene = self.project.active_scene_mut();
+            let Some(node) = scene.node(room) else {
+                self.status = "Selected room no longer exists".to_string();
+                return;
+            };
+            let NodeKind::Room { .. } = &node.kind else {
+                self.status = "Selected target is not a Room".to_string();
+                return;
+            };
+
+            for (world, _) in &rotated {
+                let _ = extend_room_grid_to_include_preserving_child_positions(
+                    scene,
+                    room,
+                    world[0],
+                    world[1],
+                    active_floor,
+                );
+            }
+            let Some(node) = scene.node_mut(room) else {
+                self.status = "Selected room no longer exists".to_string();
+                return;
+            };
+            let NodeKind::Room { grid } = &mut node.kind else {
+                self.status = "Selected target is not a Room".to_string();
+                return;
+            };
+            let floor_idx = active_floor.min(grid.floor_count().saturating_sub(1));
+            let grid = grid
+                .floor_mut(floor_idx)
+                .expect("floor index clamped to range");
+            for (world, _) in &staged {
+                if let Some((sx, sz)) = grid.world_cell_to_array(world[0], world[1]) {
+                    if let Some(index) = grid.sector_index(sx, sz) {
+                        grid.sectors[index] = None;
+                    }
+                }
+            }
+            for (world, sector) in rotated {
+                let Some((sx, sz)) = grid.world_cell_to_array(world[0], world[1]) else {
+                    continue;
+                };
+                let Some(index) = grid.sector_index(sx, sz) else {
+                    continue;
+                };
+                grid.sectors[index] = sector;
+                selected.push((sx, sz));
+            }
+        }
+
+        self.select_geometry_cells(room, selected.clone());
+        self.status = if populated == 1 {
+            "Rotated 1 world cell 90°".to_string()
+        } else {
+            format!("Rotated {populated} world cells 90°")
+        };
+        self.mark_dirty();
+    }
+
+    pub(crate) fn select_geometry_cells(&mut self, room: NodeId, cells: Vec<(u16, u16)>) {
+        self.replace_node_selection(room);
+        self.clear_resource_selection_state();
+        self.clear_primitive_selection_state();
+        self.selection.selected_sectors = cells
+            .iter()
+            .map(|(sx, sz)| (room, *sx, *sz))
+            .collect::<HashSet<_>>();
+        self.selection.selected_sector = cells.first().copied();
+        self.selection.sector_selection_anchor = cells.first().map(|(sx, sz)| (room, *sx, *sz));
+        self.interaction.take_box_select_2d();
+    }
+
+    pub(crate) fn select_geometry_primitives(&mut self, room: NodeId, selections: Vec<Selection>) {
+        self.replace_node_selection(room);
+        self.clear_resource_selection_state();
+        self.clear_primitive_selection_state();
+        self.clear_sector_selection();
+        for selection in selections {
+            self.push_selected_primitive_unique(selection);
+        }
+        self.interaction.take_box_select_2d();
+        self.update_primitive_resource_selection();
+    }
+
+    pub(crate) fn add_child(&mut self, mut kind: NodeKind, name: &str) {
+        let parent = self.selection.selected_node;
+        if kind.is_component() {
+            let scene = self.project.active_scene();
+            let Some(host) = scene.node(parent) else {
+                self.status = format!("Cannot add {name}: no selected host node");
+                return;
+            };
+            if !component_can_be_added_to_host(&host.kind, &kind, scene, parent) {
+                self.status = format!("Cannot add {name} to {}", host.name);
+                return;
+            }
+        }
+        self.push_undo();
+        let first_material = self.first_material();
+        if let NodeKind::Room { grid } = &mut kind {
+            *grid = starter_room_grid(
+                self.project.world_sector_size_for_node(parent),
+                first_material,
+            );
+        }
+        let id = self
+            .project
+            .active_scene_mut()
+            .add_node(parent, name.to_string(), kind);
+        self.replace_node_selection(id);
+        self.clear_resource_selection_state();
+        self.clear_primitive_selection_state();
+        self.clear_sector_selection();
+        self.status = format!("Added {name}");
+        self.mark_dirty();
+    }
+
+    pub(crate) fn add_ui_child(&mut self, kind: UiNodeKind, name: &str) {
+        self.push_undo();
+        let parent = self.selection.selected_ui_node;
+        let Some(scene) = self.current_ui_scene_mut() else {
+            self.status = "No UI scene available".to_string();
+            return;
+        };
+        let id = scene.add_node(parent, name.to_string(), kind);
+        self.selection.selected_ui_node = id;
+        self.clear_resource_selection_state();
+        self.clear_primitive_selection_state();
+        self.clear_sector_selection();
+        self.status = format!("Added UI {name}");
+        self.mark_dirty();
+    }
+
+    pub(crate) fn create_reciprocal_portal(&mut self, source_portal: NodeId) {
+        let Some(connection) = connection_for_portal(self.project.active_scene(), source_portal)
+        else {
+            self.status = "Could not find portal connection".to_string();
+            return;
+        };
+        let source = if connection.a.portal == source_portal {
+            connection.a
+        } else if let Some(pair) = connection.b {
+            pair
+        } else {
+            connection.a
+        };
+        if source.target_room.is_none() {
+            self.status = "Assign a target room before creating a reciprocal portal".to_string();
+            return;
+        }
+        if connection.status != RoomConnectionStatus::Unpaired {
+            self.status = format!("Connection is {}", connection.status.label());
+            return;
+        }
+
+        let target_room = source.target_room.expect("checked target room");
+        let scene = self.project.active_scene();
+        let Some(source_node) = scene.node(source.portal) else {
+            self.status = "Source portal node is missing".to_string();
+            return;
+        };
+        let Some(target_room_node) = scene.node(target_room) else {
+            self.status = "Target room is missing".to_string();
+            return;
+        };
+        if !matches!(target_room_node.kind, NodeKind::Room { .. }) {
+            self.status = "Target node is not a room".to_string();
+            return;
+        }
+
+        let source_world = portal_marker_world_2d(scene, source_node);
+        let target_center = node_world(target_room_node);
+        let reciprocal_translation = [
+            source_world[0] - target_center[0],
+            source_node.transform.translation[1],
+            source_world[1] - target_center[1],
+        ];
+        let source_name = source_node.name.clone();
+        let source_entry = match &source_node.kind {
+            NodeKind::Portal { entry_name, .. } => entry_name.clone(),
+            _ => String::new(),
+        };
+        let source_room_name = room_display_name(scene, source.room);
+        let target_room_name = room_display_name(scene, target_room);
+        let geometry = source.geometry.as_ref().map(inverted_portal_geometry);
+
+        self.push_undo();
+        let scene = self.project.active_scene_mut();
+        let reciprocal = scene.add_node(
+            target_room,
+            format!("Portal {target_room_name} -> {source_room_name}"),
+            NodeKind::Portal {
+                target_room: Some(source.room),
+                target_entry: source_entry,
+                entry_name: format!("{}_reciprocal", source_name.trim().replace(' ', "_")),
+                geometry,
+            },
+        );
+        if let Some(node) = scene.node_mut(reciprocal) {
+            node.transform.translation = reciprocal_translation;
+        }
+        self.replace_node_selection(reciprocal);
+        self.clear_resource_selection_state();
+        self.clear_primitive_selection_state();
+        self.clear_sector_selection();
+        self.status = "Created reciprocal portal".to_string();
+        self.mark_dirty();
+    }
+
+    pub(crate) fn duplicate_selected(&mut self) {
+        let selected = self.selected_node_ids_in_hierarchy();
+        if selected.is_empty() {
+            return;
+        }
+        self.push_undo();
+        let mut duplicated = Vec::new();
+        for selected in selected {
+            let Some(source) = self.project.active_scene().node(selected).cloned() else {
+                continue;
+            };
+            let parent = source.parent.unwrap_or(NodeId::ROOT);
+            let id = self.project.active_scene_mut().add_node(
+                parent,
+                format!("{} Copy", source.name),
+                source.kind,
+            );
+            if let Some(node) = self.project.active_scene_mut().node_mut(id) {
+                node.transform = source.transform;
+            }
+            duplicated.push(id);
+        }
+        if duplicated.is_empty() {
+            return;
+        }
+        self.selection.selected_nodes = duplicated.iter().copied().collect();
+        self.selection.selected_node = duplicated[0];
+        self.selection.node_selection_anchor = duplicated.last().copied();
+        self.clear_resource_selection_state();
+        self.clear_primitive_selection_state();
+        self.clear_sector_selection();
+        self.status = if duplicated.len() == 1 {
+            "Duplicated node".to_string()
+        } else {
+            format!("Duplicated {} nodes", duplicated.len())
+        };
+        self.mark_dirty();
+    }
+
+    pub(crate) fn delete_selected(&mut self) {
+        let selected = self.selected_node_ids_in_hierarchy();
+        if selected.is_empty() {
+            return;
+        }
+        self.push_undo();
+        let mut removed = 0usize;
+        for id in selected.iter().rev() {
+            if self.project.active_scene_mut().remove_node(*id) {
+                removed += 1;
+            }
+        }
+        if removed > 0 {
+            self.clear_node_selection_state();
+            self.clear_resource_selection_state();
+            self.clear_primitive_selection_state();
+            self.clear_sector_selection();
+            self.status = if removed == 1 {
+                "Deleted node".to_string()
+            } else {
+                format!("Deleted {removed} nodes")
+            };
+            self.mark_dirty();
+        }
+    }
+
+    pub(crate) fn draw_component_authoring_panel(&mut self, ui: &mut egui::Ui, selected: NodeId) {
+        let scene = self.project.active_scene();
+        let Some(node) = scene.node(selected) else {
+            return;
+        };
+
+        let is_host = matches!(node.kind, NodeKind::Entity);
+        let is_component = node.kind.is_component();
+        if !is_host && !is_component {
+            return;
+        }
+
+        if is_component {
+            let parent = node
+                .parent
+                .and_then(|parent| scene.node(parent).map(|node| (node.id, node.name.clone())));
+            egui::CollapsingHeader::new(icons::label(icons::LAYERS, "Component"))
+                .default_open(true)
+                .show(ui, |ui| {
+                    if let Some((parent_id, parent_name)) = &parent {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Host").color(STUDIO_TEXT_WEAK));
+                            if ui.button(parent_name).clicked() {
+                                self.replace_node_selection(*parent_id);
+                                self.clear_resource_selection_state();
+                                self.clear_primitive_selection_state();
+                                self.clear_sector_selection();
+                            }
+                        });
+                    } else {
+                        ui.weak("Component has no host parent.");
+                    }
+                });
+            return;
+        }
+
+        let host_kind = node.kind.clone();
+        let components: Vec<(NodeId, String, &'static str, Option<bool>)> = node
+            .children
+            .iter()
+            .filter_map(|id| scene.node(*id))
+            .filter(|child| child.kind.is_component())
+            .map(|child| {
+                let player_controlled = match &child.kind {
+                    NodeKind::CharacterController { player, .. } => Some(*player),
+                    _ => None,
+                };
+                (
+                    child.id,
+                    child.name.clone(),
+                    child.kind.label(),
+                    player_controlled,
+                )
+            })
+            .collect();
+        let existing: Vec<&NodeKind> = node
+            .children
+            .iter()
+            .filter_map(|id| scene.node(*id))
+            .filter(|child| child.kind.is_component())
+            .map(|child| &child.kind)
+            .collect();
+        let addable = addable_component_templates(&host_kind, &existing);
+
+        let mut add_component = None;
+        let mut select_component = None;
+        let mut set_player_controlled = None;
+        egui::CollapsingHeader::new(icons::label(icons::LAYERS, "Components"))
+            .default_open(true)
+            .show(ui, |ui| {
+                if components.is_empty() {
+                    ui.weak("No components attached.");
+                } else {
+                    for (id, name, kind, player_controlled) in &components {
+                        ui.horizontal(|ui| {
+                            draw_inline_icon(ui, node_lucide_icon(kind, false), STUDIO_TEXT_WEAK);
+                            ui.label(name);
+                            ui.label(RichText::new(*kind).color(STUDIO_TEXT_WEAK).small());
+                            if ui
+                                .small_button(icons::text(icons::POINTER, 14.0))
+                                .on_hover_text("Select this component")
+                                .clicked()
+                            {
+                                select_component = Some(*id);
+                            }
+                        });
+                        // Component-specific toggles go on their own line so they
+                        // don't overflow the name/kind/select row.
+                        if let Some(player_controlled) = player_controlled {
+                            let mut player = *player_controlled;
+                            ui.horizontal(|ui| {
+                                ui.add_space(24.0);
+                                if ui
+                                    .checkbox(
+                                        &mut player,
+                                        icons::label(icons::MAP_PIN, "Player controlled"),
+                                    )
+                                    .changed()
+                                {
+                                    set_player_controlled = Some((*id, player));
+                                }
+                            });
+                        }
+                    }
+                }
+
+                ui.separator();
+                ui.menu_button(icons::label(icons::PLUS, "Add Component"), |ui| {
+                    if addable.is_empty() {
+                        ui.weak("All singleton components are already present.");
+                    }
+                    for (label, kind) in &addable {
+                        if ui.button(*label).clicked() {
+                            add_component = Some((*label, kind.clone()));
+                            ui.close_menu();
+                        }
+                    }
+                });
+            });
+
+        if let Some(id) = select_component {
+            self.replace_node_selection(id);
+            self.clear_resource_selection_state();
+            self.clear_primitive_selection_state();
+            self.clear_sector_selection();
+        }
+        if let Some((label, kind)) = add_component {
+            self.add_component_to_host(selected, label, kind);
+        }
+        if let Some((controller, player)) = set_player_controlled {
+            self.set_character_controller_player_controlled(controller, player);
+        }
+    }
+
+    pub(crate) fn set_character_controller_player_controlled(
+        &mut self,
+        controller: NodeId,
+        player: bool,
+    ) {
+        let Some(current) =
+            self.project
+                .active_scene()
+                .node(controller)
+                .and_then(|node| match &node.kind {
+                    NodeKind::CharacterController { player, .. } => Some(*player),
+                    _ => None,
+                })
+        else {
+            self.status = "Selected component is not a Character Controller".to_string();
+            return;
+        };
+        if current == player {
+            return;
+        }
+
+        self.push_undo();
+        if player {
+            self.demote_player_sources_except(Some(controller));
+        }
+        let Some(node) = self.project.active_scene_mut().node_mut(controller) else {
+            self.status = "Character Controller no longer exists".to_string();
+            return;
+        };
+        let NodeKind::CharacterController {
+            player: current, ..
+        } = &mut node.kind
+        else {
+            self.status = "Selected component is not a Character Controller".to_string();
+            return;
+        };
+        *current = player;
+        self.status = if player {
+            "Marked Character Controller as player controlled".to_string()
+        } else {
+            "Cleared player control from Character Controller".to_string()
+        };
+        self.mark_dirty();
+    }
+
+    pub(crate) fn add_component_to_host(
+        &mut self,
+        host: NodeId,
+        label: &'static str,
+        kind: NodeKind,
+    ) -> Option<NodeId> {
+        if !kind.is_component() {
+            self.status = "Only component nodes can be added as components".to_string();
+            return None;
+        }
+        let scene = self.project.active_scene();
+        let Some(host_node) = scene.node(host) else {
+            self.status = "Component host no longer exists".to_string();
+            return None;
+        };
+        if !matches!(host_node.kind, NodeKind::Entity) {
+            self.status = "Components can only be added to Entity nodes".to_string();
+            return None;
+        }
+        if !component_can_be_added_to_host(&host_node.kind, &kind, scene, host) {
+            self.status = format!("{label} is already present or invalid for this host");
+            return None;
+        }
+
+        self.push_undo();
+        let id = self
+            .project
+            .active_scene_mut()
+            .add_node(host, label.to_string(), kind);
+        self.replace_node_selection(id);
+        self.clear_resource_selection_state();
+        self.clear_primitive_selection_state();
+        self.clear_sector_selection();
+        self.status = format!("Added {label} component");
+        self.mark_dirty();
+        Some(id)
+    }
+
+    pub(crate) fn delete_selected_sectors(&mut self) {
+        let targets: Vec<SectorSelection> =
+            self.selection.selected_sectors.iter().copied().collect();
+        if targets.is_empty() {
+            return;
+        }
+
+        self.push_undo();
+        let mut removed = 0usize;
+        for (room, sx, sz) in targets {
+            let Some(grid) = self.room_floor_grid_mut(room) else {
+                continue;
+            };
+            let Some(index) = grid.sector_index(sx, sz) else {
+                continue;
+            };
+            if grid.sectors[index].take().is_some() {
+                removed += 1;
+            }
+        }
+
+        self.clear_sector_selection();
+        self.clear_primitive_selection_state();
+        if removed > 0 {
+            self.status = if removed == 1 {
+                "Deleted tile".to_string()
+            } else {
+                format!("Deleted {removed} tiles")
+            };
+            self.mark_dirty();
+        } else {
+            self.status = "No selected tiles had geometry".to_string();
+        }
+    }
+
+    /// Delete dispatch for the active selection:
+    /// - Face   → remove the face from its sector.
+    /// - Edge   → remove the face that owns the edge.
+    /// - Vertex → drop the corner on the seed face, turning it
+    ///   into a triangle (split is auto-flipped to the surviving
+    ///   diagonal). The other coincident face-corners are left
+    ///   untouched.
+    pub(crate) fn delete_selected_primitives(&mut self) {
+        let targets = self.selected_primitive_targets();
+        if targets.is_empty() {
+            return;
+        }
+        self.push_undo();
+
+        let mut removed = 0usize;
+        let mut triangulated = 0usize;
+        let mut first_label = None;
+        for selection in targets {
+            match self.delete_primitive_no_undo(selection) {
+                DeleteOutcome::Removed(label) => {
+                    removed += 1;
+                    first_label.get_or_insert(label);
+                }
+                DeleteOutcome::Triangulated(label) => {
+                    triangulated += 1;
+                    first_label.get_or_insert(label);
+                }
+                DeleteOutcome::Missing => {}
+            }
+        }
+
+        let changed = removed + triangulated;
+        if changed == 0 {
+            self.status = "Nothing to delete".to_string();
+            return;
+        }
+
+        self.clear_primitive_selection_state();
+        self.selection.hovered_primitive = None;
+        self.status = if changed == 1 {
+            if removed == 1 {
+                format!("Deleted {}", first_label.unwrap_or("primitive"))
+            } else {
+                format!("Dropped {}", first_label.unwrap_or("primitive"))
+            }
+        } else {
+            format!("Deleted {changed} primitives")
+        };
+        self.mark_dirty();
+    }
+
+    pub(crate) fn delete_primitive_no_undo(&mut self, selection: Selection) -> DeleteOutcome {
+        match selection {
+            Selection::Face(face) => self.remove_face_no_undo(face),
+            Selection::Triangle(triangle) => self.remove_triangle_no_undo(triangle),
+            Selection::Edge(edge) => edge_owning_face_ref(edge)
+                .map(|face| self.remove_face_no_undo(face))
+                .unwrap_or(DeleteOutcome::Missing),
+            Selection::Vertex(vertex) => self.drop_vertex_no_undo(vertex),
+        }
+    }
+
+    pub(crate) fn remove_triangle_no_undo(
+        &mut self,
+        triangle: HorizontalTriangleRef,
+    ) -> DeleteOutcome {
+        let Some(grid) = self.room_floor_grid_mut(triangle.room) else {
+            return DeleteOutcome::Missing;
+        };
+        let Some(sector) = grid.sector_mut(triangle.sx, triangle.sz) else {
+            return DeleteOutcome::Missing;
+        };
+        match triangle.surface {
+            HorizontalSurfaceKind::Floor => {
+                let Some(face) = sector.floor.as_mut() else {
+                    return DeleteOutcome::Missing;
+                };
+                if face.dropped_corner.is_some() {
+                    sector.floor = None;
+                    DeleteOutcome::Removed("floor")
+                } else {
+                    let corner = horizontal_triangle_delete_corner(face.split, triangle.index);
+                    face.drop_corner(corner);
+                    DeleteOutcome::Triangulated("floor triangle")
+                }
+            }
+            HorizontalSurfaceKind::Ceiling => {
+                let Some(face) = sector.ceiling.as_mut() else {
+                    return DeleteOutcome::Missing;
+                };
+                if face.dropped_corner.is_some() {
+                    sector.ceiling = None;
+                    DeleteOutcome::Removed("ceiling")
+                } else {
+                    let corner = horizontal_triangle_delete_corner(face.split, triangle.index);
+                    face.drop_corner(corner);
+                    DeleteOutcome::Triangulated("ceiling triangle")
+                }
+            }
+        }
+    }
+
+    /// Detach a face from its sector. Floors / ceilings clear the
+    /// `Option<>`; walls splice the entry out of the per-direction
+    /// `Vec`. Returns `Removed` on success so the caller can update
+    /// status / clear the selection.
+    pub(crate) fn remove_face_no_undo(&mut self, face: FaceRef) -> DeleteOutcome {
+        let Some(grid) = self.room_floor_grid_mut(face.room) else {
+            return DeleteOutcome::Missing;
+        };
+        let Some(sector) = grid.sector_mut(face.sx, face.sz) else {
+            return DeleteOutcome::Missing;
+        };
+        let removed = match face.kind {
+            FaceKind::Floor => sector.floor.take().is_some(),
+            FaceKind::Ceiling => sector.ceiling.take().is_some(),
+            FaceKind::Wall { dir, stack } => {
+                let walls = sector.walls.get_mut(dir);
+                if (stack as usize) < walls.len() {
+                    walls.remove(stack as usize);
+                    true
+                } else {
+                    false
+                }
+            }
+        };
+        if removed {
+            DeleteOutcome::Removed(describe_face_kind(face.kind))
+        } else {
+            DeleteOutcome::Missing
+        }
+    }
+
+    /// Drop a corner from the vertex's seed face. Floors / ceilings
+    /// gain a `dropped_corner` and have their split forced to the
+    /// surviving diagonal. Walls do the same with `WallCorner`.
+    pub(crate) fn drop_vertex_no_undo(&mut self, vertex: VertexRef) -> DeleteOutcome {
+        let Some(grid) = self.room_floor_grid_mut(vertex.room) else {
+            return DeleteOutcome::Missing;
+        };
+        let (sx, sz) = match vertex.anchor {
+            VertexAnchor::Floor { sx, sz, .. }
+            | VertexAnchor::Ceiling { sx, sz, .. }
+            | VertexAnchor::Wall { sx, sz, .. } => (sx, sz),
+        };
+        let Some(sector) = grid.sector_mut(sx, sz) else {
+            return DeleteOutcome::Missing;
+        };
+        match vertex.anchor {
+            VertexAnchor::Floor { corner, .. } => {
+                let Some(floor) = sector.floor.as_mut() else {
+                    return DeleteOutcome::Missing;
+                };
+                floor.drop_corner(corner);
+                DeleteOutcome::Triangulated("floor corner")
+            }
+            VertexAnchor::Ceiling { corner, .. } => {
+                let Some(ceiling) = sector.ceiling.as_mut() else {
+                    return DeleteOutcome::Missing;
+                };
+                ceiling.drop_corner(corner);
+                DeleteOutcome::Triangulated("ceiling corner")
+            }
+            VertexAnchor::Wall {
+                dir, stack, corner, ..
+            } => {
+                let walls = sector.walls.get_mut(dir);
+                let Some(wall) = walls.get_mut(stack as usize) else {
+                    return DeleteOutcome::Missing;
+                };
+                wall.drop_corner(corner);
+                DeleteOutcome::Triangulated("wall corner")
+            }
+        }
+    }
+
+    pub(crate) fn open_new_project_dialog(&mut self) {
+        self.modal = Modal::NewProject {
+            name: String::new(),
+            error: None,
+        };
+    }
+
+    pub(crate) fn open_texture_import_dialog(&mut self) {
+        self.texture_import_dialog.open = true;
+        self.texture_import_dialog.status = None;
+        self.retire_texture_import_preview();
+    }
+
+    pub(crate) fn open_model_import_dialog(&mut self) {
+        self.model_import_dialog.open = true;
+        self.model_import_dialog.status = None;
+        self.retire_model_import_preview();
+        self.model_import_dialog.selected_clip = 0;
+    }
+
+    pub(crate) fn catalogue_animation_source_folder(&mut self) {
+        let mut dialog = rfd::FileDialog::new().set_title("Choose animation source folder");
+        if self.project_dir.is_dir() {
+            dialog = dialog.set_directory(&self.project_dir);
+        }
+        let Some(path) = dialog.pick_folder() else {
+            return;
+        };
+        self.catalogue_animation_source_path(&path);
+    }
+
+    pub(crate) fn catalogue_animation_source_zip(&mut self) {
+        let mut dialog = rfd::FileDialog::new()
+            .set_title("Choose animation source zip")
+            .add_filter("Animation source zip", &["zip"]);
+        if self.project_dir.is_dir() {
+            dialog = dialog.set_directory(&self.project_dir);
+        }
+        let Some(path) = dialog.pick_file() else {
+            return;
+        };
+        self.catalogue_animation_source_path(&path);
+    }
+
+    pub(crate) fn catalogue_animation_source_path(&mut self, path: &Path) {
+        match catalogue_animation_sources_from_path(&mut self.project, &self.project_dir, path) {
+            Ok(report) => {
+                self.status = format!(
+                    "Catalogued animation sources: {} found, {} added, {} updated",
+                    report.source_candidates, report.sources_added, report.sources_updated
+                );
+                if report.changed() {
+                    self.mark_dirty();
+                }
+            }
+            Err(error) => {
+                self.status = format!("Animation source catalogue failed: {error}");
+            }
+        }
+    }
+
+    pub(crate) fn handle_animation_viewer_action(
+        &mut self,
+        action: model_animation_viewer::AnimationViewerAction,
+    ) {
+        match action {
+            model_animation_viewer::AnimationViewerAction::BakeSourceForModel {
+                model_id,
+                source_id,
+            } => {
+                let Some((model_source, world_height)) =
+                    self.project.resource(model_id).and_then(|resource| {
+                        let ResourceData::Model(model) = &resource.data else {
+                            return None;
+                        };
+                        Some((model.source_path.clone(), model.world_height))
+                    })
+                else {
+                    self.status = format!("Model #{} is not available", model_id.raw());
+                    return;
+                };
+                let Some(model_source) = model_source.filter(|path| !path.trim().is_empty()) else {
+                    self.status = format!(
+                        "Model #{} has no source path. Set it in the Model inspector or reimport the model.",
+                        model_id.raw()
+                    );
+                    return;
+                };
+                let Some(animation_source) =
+                    self.project.resource(source_id).and_then(|resource| {
+                        let ResourceData::AnimationSource(source) = &resource.data else {
+                            return None;
+                        };
+                        Some(source.source_path.clone())
+                    })
+                else {
+                    self.status = format!("Animation source #{} is not available", source_id.raw());
+                    return;
+                };
+
+                let temp_dir = match make_animation_bake_temp_dir() {
+                    Ok(path) => path,
+                    Err(error) => {
+                        self.status = format!("Animation bake failed: {error}");
+                        return;
+                    }
+                };
+                let result = (|| {
+                    let model_source_path = materialize_authoring_source_path(
+                        &model_source,
+                        &self.project_dir,
+                        &temp_dir,
+                    )?;
+                    let animation_source_path = materialize_authoring_source_path(
+                        &animation_source,
+                        &self.project_dir,
+                        &temp_dir,
+                    )?;
+                    let mut config = psxed_project::model_import::RigidModelConfig::default();
+                    config.world_height = world_height;
+                    config.extra_animations_affect_bounds = false;
+                    psxed_project::model_import::bake_animation_source_for_model(
+                        &mut self.project,
+                        model_id,
+                        source_id,
+                        &model_source_path,
+                        &animation_source_path,
+                        &self.project_dir,
+                        config,
+                    )
+                    .map_err(|error| error.to_string())
+                })();
+                let _ = std::fs::remove_dir_all(&temp_dir);
+                match result {
+                    Ok(clip_id) => {
+                        self.animation_viewer.focus_resource(&self.project, clip_id);
+                        self.animation_viewer_preview_texture = None;
+                        self.mark_dirty();
+                        self.status = format!("Baked animation clip #{}", clip_id.raw());
+                    }
+                    Err(error) => {
+                        self.status = format!("Animation bake failed: {error}");
+                    }
+                }
+            }
+            model_animation_viewer::AnimationViewerAction::ProjectChanged => {
+                self.mark_dirty();
+            }
+        }
+    }
+
+    pub(crate) fn mark_dirty(&mut self) {
+        self.dirty = true;
+        self.clear_validation_issues();
+    }
+
+    pub(crate) fn commit_resource_rename(&mut self, id: ResourceId, name: String) {
+        let Some(current_name) = self.project.resource_name(id).map(str::to_string) else {
+            self.resource_renaming = None;
+            self.status = format!("Resource #{} no longer exists", id.raw());
+            return;
+        };
+
+        let final_name = name.trim();
+        if final_name.is_empty() {
+            self.resource_renaming = Some((id, current_name));
+            self.status = "Resource name cannot be empty".to_string();
+            return;
+        }
+        if final_name == current_name {
+            self.resource_renaming = Some((id, current_name));
+            return;
+        }
+
+        let before = self.project.clone();
+        match self
+            .project
+            .rename_resource_with_files(id, final_name, &self.project_dir)
+        {
+            Ok(report) => {
+                if report.renamed_files.is_empty() {
+                    self.history.record(before);
+                } else {
+                    self.history.clear();
+                }
+                self.resource_renaming = Some((id, final_name.to_string()));
+                self.mark_dirty();
+
+                let moved = report.renamed_files.len();
+                let skipped = report.skipped_files.len();
+                self.status = match (moved, skipped) {
+                    (0, 0) => format!("Renamed {final_name}"),
+                    (m, 0) => format!("Renamed {final_name}; moved {m} file(s)"),
+                    (0, s) => format!("Renamed {final_name}; skipped {s} file path(s)"),
+                    (m, s) => {
+                        format!("Renamed {final_name}; moved {m} file(s), skipped {s} path(s)")
+                    }
+                };
+            }
+            Err(error) => {
+                self.resource_renaming = Some((id, current_name));
+                self.status = format!("Rename failed: {error}");
+            }
+        }
+    }
+
+    /// Snapshot the current project before a discrete mutation.
+    /// Call once per user action -- paint click, place, add/delete
+    /// node, etc -- so each undo step matches one author intent.
+    pub(crate) fn push_undo(&mut self) {
+        self.history.record(self.project.clone());
+    }
+
+    /// Pop the most recent snapshot back into `project`.
+    pub(crate) fn do_undo(&mut self) {
+        if let Some(prev) = self.history.undo(self.project.clone()) {
+            self.project = prev;
+            self.clear_resource_selection_state();
+            self.resource_renaming = None;
+            self.clear_sector_selection();
+            self.reconcile_selection_after_document_change();
+            self.status = "Undo".to_string();
+            self.mark_dirty();
+        } else {
+            self.status = "Nothing to undo".to_string();
+        }
+    }
+
+    pub(crate) fn do_redo(&mut self) {
+        if let Some(next) = self.history.redo(self.project.clone()) {
+            self.project = next;
+            self.clear_resource_selection_state();
+            self.resource_renaming = None;
+            self.clear_sector_selection();
+            self.reconcile_selection_after_document_change();
+            self.status = "Redo".to_string();
+            self.mark_dirty();
+        } else {
+            self.status = "Nothing to redo".to_string();
+        }
+    }
+
+    pub(crate) fn frame_viewport(&mut self) {
+        if !self.view_2d {
+            if let Some((center, _half)) = self.current_frame_bounds_3d() {
+                self.focus_3d_on_point_preserving_distance(center);
+                self.persist_editor_camera_state();
+                self.status = "Framed selection".to_string();
+            } else {
+                self.status = "Nothing to frame".to_string();
+            }
+            return;
+        }
+
+        let Some((center, half)) = self.current_frame_bounds_2d() else {
+            self.viewport_pan = Vec2::ZERO;
+            self.viewport_zoom = DEFAULT_VIEWPORT_ZOOM;
+            self.status = "Reset viewport frame".to_string();
+            return;
+        };
+        let content = [(half[0] * 2.0).max(1.0), (half[1] * 2.0).max(1.0)];
+        let viewport = [
+            self.last_viewport_size.x.max(320.0),
+            self.last_viewport_size.y.max(240.0),
+        ];
+        let zoom_x = viewport[0] * 0.72 / content[0];
+        let zoom_y = viewport[1] * 0.72 / content[1];
+        self.viewport_zoom = zoom_x
+            .min(zoom_y)
+            .clamp(MIN_VIEWPORT_ZOOM, MAX_VIEWPORT_ZOOM);
+        self.viewport_pan = Vec2::new(
+            -center[0] * self.viewport_zoom,
+            center[1] * self.viewport_zoom,
+        );
+        self.status = "Framed selection".to_string();
+    }
+
+    pub(crate) fn current_frame_bounds_3d(&self) -> Option<([f32; 3], [f32; 3])> {
+        self.selected_frame_bounds_3d().or_else(|| {
+            self.active_room_id()
+                .and_then(|room_id| self.room_bounds_3d(room_id))
+        })
+    }
+
+    pub(crate) fn selected_frame_bounds_3d(&self) -> Option<([f32; 3], [f32; 3])> {
+        let mut bounds: Option<(f32, f32, f32, f32, f32, f32)> = None;
+        for &(room, sx, sz) in &self.selection.selected_sectors {
+            if let Some((center, half)) = self.sector_bounds_3d(room, sx, sz) {
+                merge_bounds_3d(&mut bounds, center, half);
+            }
+        }
+        if let Some(bounds) = bounds {
+            return Some(bounds_3d_to_center_half(bounds));
+        }
+
+        let primitive_targets = self.selected_primitive_targets();
+        if primitive_targets.len() > 1 {
+            let mut bounds = None;
+            for selection in primitive_targets {
+                if let Some((center, half)) = self.selection_bounds_3d(selection) {
+                    merge_bounds_3d(&mut bounds, center, half);
+                }
+            }
+            if let Some(bounds) = bounds {
+                return Some(bounds_3d_to_center_half(bounds));
+            }
+        } else if let Some(selection) = self.selection.selected_primitive {
+            return self.selection_bounds_3d(selection);
+        }
+
+        if let Some((sx, sz)) = self.selection.selected_sector {
+            if let Some(room) = self.active_room_id() {
+                return self.sector_bounds_3d(room, sx, sz);
+            }
+        }
+
+        let selected_nodes = self.selected_node_ids_in_hierarchy();
+        if selected_nodes.len() > 1 {
+            let mut bounds = None;
+            for id in selected_nodes {
+                if let Some((center, half)) = self.node_frame_bounds_3d(id) {
+                    merge_bounds_3d(&mut bounds, center, half);
+                }
+            }
+            if let Some(bounds) = bounds {
+                return Some(bounds_3d_to_center_half(bounds));
+            }
+        }
+
+        if let Some(bounds) = self.node_frame_bounds_3d(self.selection.selected_node) {
+            return Some(bounds);
+        }
+        None
+    }
+
+    pub(crate) fn selection_bounds_3d(&self, selection: Selection) -> Option<([f32; 3], [f32; 3])> {
+        let grid = self.room_grid_view(selection.room())?;
+        let mut bounds: Option<(f32, f32, f32, f32, f32, f32)> = None;
+        for seed in drag_corner_seeds(selection)? {
+            let world = face_corner_world(grid, seed)?;
+            merge_bounds_3d(
+                &mut bounds,
+                [world[0] as f32, world[1] as f32, world[2] as f32],
+                [0.0, 0.0, 0.0],
+            );
+        }
+        bounds.map(bounds_3d_to_center_half)
+    }
+
+    pub(crate) fn current_frame_bounds_2d(&self) -> Option<([f32; 2], [f32; 2])> {
+        let mut bounds: Option<(f32, f32, f32, f32)> = None;
+        for &(room, sx, sz) in &self.selection.selected_sectors {
+            if let Some((center, half)) = self.sector_bounds_2d(room, sx, sz) {
+                merge_bounds(&mut bounds, center, half);
+            }
+        }
+        if let Some(bounds) = bounds {
+            return Some(bounds_to_center_half(bounds));
+        }
+
+        let primitive_targets = self.selected_primitive_targets();
+        if !primitive_targets.is_empty() {
+            for selection in primitive_targets {
+                let (room, sx, sz) = selection_sector(selection);
+                if let Some((center, half)) = self.sector_bounds_2d(room, sx, sz) {
+                    merge_bounds(&mut bounds, center, half);
+                }
+            }
+            if let Some(bounds) = bounds {
+                return Some(bounds_to_center_half(bounds));
+            }
+        }
+
+        if let Some((sx, sz)) = self.selection.selected_sector {
+            if let Some(room) = self.active_room_id() {
+                return self.sector_bounds_2d(room, sx, sz);
+            }
+        }
+
+        let selected_nodes = self.selected_node_ids_in_hierarchy();
+        if selected_nodes.len() > 1 {
+            let mut bounds = None;
+            for id in selected_nodes {
+                if let Some((center, half)) = self.node_frame_bounds_2d(id) {
+                    merge_bounds(&mut bounds, center, half);
+                }
+            }
+            if let Some(bounds) = bounds {
+                return Some(bounds_to_center_half(bounds));
+            }
+        }
+
+        self.node_frame_bounds_2d(self.selection.selected_node)
+    }
+
+    pub(crate) fn sector_bounds_2d(
+        &self,
+        room: NodeId,
+        sx: u16,
+        sz: u16,
+    ) -> Option<([f32; 2], [f32; 2])> {
+        let node = self.project.active_scene().node(room)?;
+        let center = node_world(node);
+        let grid = self.room_grid_view(room)?;
+        if sx >= grid.width || sz >= grid.depth {
+            return None;
+        }
+        let local = grid_cell_editor_center(grid, sx, sz);
+        Some(([center[0] + local[0], center[1] + local[1]], [0.5, 0.5]))
+    }
+
+    pub(crate) fn drag_selected_node(&mut self, screen_delta: Vec2) {
+        let selected = self.selected_node_ids_in_hierarchy();
+        if selected.is_empty() || screen_delta == Vec2::ZERO {
+            return;
+        }
+
+        let world_delta = [
+            screen_delta.x / self.viewport_zoom,
+            -screen_delta.y / self.viewport_zoom,
+        ];
+        let targets = {
+            let scene = self.project.active_scene();
+            selected
+                .into_iter()
+                .map(|id| (id, node_enclosing_sector_size(scene, id)))
+                .collect::<Vec<_>>()
+        };
+        let mut moved = Vec::new();
+        for (id, sector_size) in targets {
+            if let Some(node) = self.project.active_scene_mut().node_mut(id) {
+                node.transform.translation[0] += world_delta[0];
+                node.transform.translation[2] += world_delta[1];
+                if matches!(
+                    node.kind,
+                    NodeKind::Entity
+                        | NodeKind::PointLight { .. }
+                        | NodeKind::ImageProp { .. }
+                        | NodeKind::BoxProp { .. }
+                ) {
+                    node.transform.translation[0] = snap_node_transform_component_to_world_step(
+                        node.transform.translation[0],
+                        sector_size,
+                    );
+                    node.transform.translation[2] = snap_node_transform_component_to_world_step(
+                        node.transform.translation[2],
+                        sector_size,
+                    );
+                }
+                moved.push(node.name.clone());
+            }
+        }
+
+        match moved.as_slice() {
+            [] => {}
+            [name] => {
+                self.status = format!("Moved {name}");
+                self.mark_dirty();
+            }
+            _ => {
+                self.status = format!("Moved {} nodes", moved.len());
+                self.mark_dirty();
+            }
+        }
+    }
+}

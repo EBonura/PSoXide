@@ -313,12 +313,26 @@ pub fn import_pack(
 /// Output is 44.1 kHz stereo signed 16-bit little-endian PCM with no
 /// container header, padded to a whole number of 2352-byte CD-DA sectors.
 pub fn cook_cdda_track_from_wav(src: &[u8]) -> Result<Vec<u8>, Error> {
+    cook_cdda_track_from_wav_at_speed(src, 4096)
+}
+
+/// Convert a source WAV into a raw CD-DA track payload, baking a Q12 playback
+/// speed multiplier into the sample data (`4096` = 1.0x).
+pub fn cook_cdda_track_from_wav_at_speed(
+    src: &[u8],
+    playback_speed_q12: u16,
+) -> Result<Vec<u8>, Error> {
     let wav = parse_wav_pcm16(src)?;
     let mut stereo = wav_to_stereo_interleaved(&wav);
     if stereo.is_empty() {
         return Err(Error::EmptyAudio);
     }
-    stereo = resample_stereo_linear(&stereo, wav.sample_rate_hz, CDDA_SAMPLE_RATE_HZ);
+    stereo = resample_stereo_linear_at_speed(
+        &stereo,
+        wav.sample_rate_hz,
+        CDDA_SAMPLE_RATE_HZ,
+        playback_speed_q12.max(1),
+    );
 
     let mut out = Vec::with_capacity(stereo.len() * 2);
     for sample in stereo {
@@ -511,18 +525,26 @@ fn resample_linear(samples: &[i16], source_rate: u32, target_rate: u32) -> Vec<i
     out
 }
 
-fn resample_stereo_linear(samples: &[i16], source_rate: u32, target_rate: u32) -> Vec<i16> {
+fn resample_stereo_linear_at_speed(
+    samples: &[i16],
+    source_rate: u32,
+    target_rate: u32,
+    playback_speed_q12: u16,
+) -> Vec<i16> {
     let frames = samples.len() / CDDA_CHANNELS;
-    if source_rate == target_rate || frames < 2 {
+    let speed = playback_speed_q12.max(1) as u64;
+    if (source_rate == target_rate && speed == 4096) || frames < 2 {
         return samples.to_vec();
     }
-    let out_frames =
-        ((frames as u64 * target_rate as u64) + (source_rate as u64 / 2)) / source_rate as u64;
+    let source_rate_scaled = source_rate as u64 * speed;
+    let out_num = frames as u64 * target_rate as u64 * 4096;
+    let out_frames = (out_num + source_rate_scaled / 2) / source_rate_scaled;
     let out_frames = out_frames.max(1) as usize;
     let mut out = Vec::with_capacity(out_frames * CDDA_CHANNELS);
 
     for i in 0..out_frames {
-        let pos = (i as f64) * (source_rate as f64) / (target_rate as f64);
+        let pos =
+            (i as f64) * (source_rate as f64) * (speed as f64) / (target_rate as f64 * 4096.0);
         let lo = pos.floor() as usize;
         let hi = (lo + 1).min(frames - 1);
         let t = pos - lo as f64;
@@ -899,6 +921,19 @@ mod tests {
             );
         }
         assert!(cooked[samples.len() * 4..].iter().all(|&byte| byte == 0));
+    }
+
+    #[test]
+    fn cook_cdda_speed_multiplier_shortens_baked_track() {
+        let samples: Vec<i16> = (0..44_100).map(|i| (i % 1024) as i16).collect();
+        let wav = write_wav_mono_i16(44_100, &samples);
+        let normal = cook_cdda_track_from_wav_at_speed(&wav, 4096).unwrap();
+        let double = cook_cdda_track_from_wav_at_speed(&wav, 8192).unwrap();
+
+        assert_eq!(normal.len() % CDDA_SECTOR_BYTES, 0);
+        assert_eq!(double.len() % CDDA_SECTOR_BYTES, 0);
+        assert!(double.len() < normal.len());
+        assert!(double.len() >= normal.len() / 2);
     }
 
     #[test]

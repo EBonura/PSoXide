@@ -1,0 +1,1340 @@
+use super::*;
+
+impl EditorWorkspace {
+    pub(crate) fn draw_viewport(
+        &mut self,
+        ctx: &egui::Context,
+        viewport_3d: EditorViewport3dPresentation,
+        playtest_status: EditorPlaytestStatus,
+    ) {
+        egui::CentralPanel::default()
+            .frame(viewport_frame())
+            .show(ctx, |ui| {
+                tool_panel_frame().show(ui, |ui| {
+                    ui.expand_to_include_rect(ui.max_rect());
+                    self.draw_viewport_header_toolbar(ui);
+                    tool_panel_body(ui, |ui| {
+                        if viewport_3d.mode == EditorViewport3dMode::Play {
+                            self.draw_viewport_3d_play_body(ui, viewport_3d, playtest_status);
+                            return;
+                        }
+
+                        if self.active_workspace == WorkspaceView::Animation {
+                            let action = model_animation_viewer::draw_model_animation_viewer(
+                                ui,
+                                &mut self.project,
+                                &self.project_dir,
+                                &mut self.animation_viewer,
+                                &mut self.animation_viewer_preview_texture,
+                            );
+                            if let Some(action) = action {
+                                self.handle_animation_viewer_action(action);
+                            }
+                            return;
+                        }
+
+                        if self.active_workspace == WorkspaceView::Ui {
+                            self.draw_ui_workspace_body(ui);
+                            return;
+                        }
+
+                        if !self.view_2d {
+                            self.draw_viewport_3d_body(ui, viewport_3d);
+                            return;
+                        }
+
+                        let size = ui.available_size();
+                        let size = Vec2::new(size.x.max(320.0), size.y.max(240.0));
+                        let (rect, response) =
+                            ui.allocate_exact_size(size, Sense::click_and_drag());
+                        self.last_viewport_size = rect.size();
+                        let dnd_active = egui::DragAndDrop::has_any_payload(ui.ctx());
+                        let resource_drop_hovered =
+                            response.dnd_hover_payload::<ResourceId>().is_some();
+
+                        if !dnd_active
+                            && (response.dragged_by(egui::PointerButton::Middle)
+                                || response.dragged_by(egui::PointerButton::Secondary))
+                        {
+                            self.viewport_pan += ui.input(|input| input.pointer.delta());
+                        }
+
+                        if !dnd_active && response.hovered() {
+                            let scroll = ui.input(|input| input.raw_scroll_delta.y);
+                            if scroll.abs() > f32::EPSILON {
+                                let pointer = ui
+                                    .input(|input| input.pointer.hover_pos())
+                                    .unwrap_or_else(|| rect.center());
+                                let before = ViewportTransform::new(
+                                    rect,
+                                    self.viewport_pan,
+                                    self.viewport_zoom,
+                                )
+                                .screen_to_world(pointer);
+                                let zoom_factor = (1.0 + scroll * 0.0015).clamp(0.75, 1.25);
+                                self.viewport_zoom = (self.viewport_zoom * zoom_factor)
+                                    .clamp(MIN_VIEWPORT_ZOOM, MAX_VIEWPORT_ZOOM);
+                                let after = ViewportTransform::new(
+                                    rect,
+                                    self.viewport_pan,
+                                    self.viewport_zoom,
+                                )
+                                .world_to_screen(before);
+                                self.viewport_pan += pointer - after;
+                            }
+                        }
+
+                        let transform =
+                            ViewportTransform::new(rect, self.viewport_pan, self.viewport_zoom);
+                        if self.floating_geometry.is_none() {
+                            if let Some(resource_id) = response
+                                .dnd_release_payload::<ResourceId>()
+                                .map(|payload| *payload)
+                            {
+                                if let Some(pointer) =
+                                    response.interact_pointer_pos().or(response.hover_pos())
+                                {
+                                    let world = transform.screen_to_world(pointer);
+                                    self.drop_resource_2d(resource_id, world);
+                                }
+                            }
+                        }
+                        let painter = ui.painter_at(rect);
+                        painter.rect_filled(rect, 0.0, STUDIO_VIEWPORT);
+                        if self.show_grid {
+                            draw_world_grid(&painter, transform);
+                        }
+
+                        let hits = draw_scene_viewport(
+                            &painter,
+                            transform,
+                            &self.project,
+                            &self.hidden_scene_nodes,
+                            self.selection.selected_node,
+                            &self.selection.selected_nodes,
+                            &self.selection.selected_sectors,
+                            &self.validation_issue_primitives,
+                            &self.validation_issue_rooms,
+                            self.show_portals,
+                            self.show_lights,
+                        );
+
+                        let pointer_world = response
+                            .hover_pos()
+                            .or_else(|| response.interact_pointer_pos())
+                            .map(|pos| transform.screen_to_world(pos));
+                        if let Some(world) = pointer_world {
+                            self.draw_portal_place_preview_2d(&painter, transform, world);
+                        }
+                        if let (Some(room), Some(world)) = (
+                            self.floating_geometry.as_ref().map(|preview| preview.room),
+                            pointer_world,
+                        ) {
+                            if let Some(origin) = self.floating_origin_from_2d_world(room, world) {
+                                self.update_floating_geometry_origin(origin);
+                            }
+                        }
+                        let top_hit = pointer_world
+                            .and_then(|world| hits.iter().rev().find(|hit| hit.contains(world)))
+                            .map(|hit| hit.id);
+                        let top_hit_is_room = top_hit
+                            .and_then(|id| self.project.active_scene().node(id))
+                            .is_some_and(|node| matches!(node.kind, NodeKind::Room { .. }));
+                        let primary_down = ui
+                            .input(|input| input.pointer.button_down(egui::PointerButton::Primary));
+                        if !primary_down {
+                            self.interaction.take_box_select_2d();
+                        }
+                        if !dnd_active && self.floating_geometry.is_some() {
+                            if response.clicked_by(egui::PointerButton::Primary) {
+                                self.commit_floating_geometry();
+                            }
+                            if response.clicked_by(egui::PointerButton::Secondary) {
+                                self.cancel_floating_geometry();
+                            }
+                            draw_viewport_overlay(
+                                &painter,
+                                rect,
+                                &self.project,
+                                self.viewport_zoom,
+                                self.snap_units,
+                            );
+                            draw_axes_gizmo(&painter, rect);
+                            return;
+                        }
+                        if !dnd_active
+                            && matches!(self.active_tool, ViewTool::Select)
+                            && response.drag_started_by(egui::PointerButton::Primary)
+                        {
+                            let can_box_select = top_hit.is_none() || top_hit_is_room;
+                            if can_box_select {
+                                if let Some(start) = response.interact_pointer_pos() {
+                                    let modifiers = ui.input(|input| input.modifiers);
+                                    self.begin_viewport_box_select(
+                                        start,
+                                        top_hit.or_else(|| self.active_room_id()),
+                                        modifiers,
+                                    );
+                                }
+                            }
+                        }
+                        if !dnd_active
+                            && matches!(self.active_tool, ViewTool::Select)
+                            && response.dragged_by(egui::PointerButton::Primary)
+                        {
+                            if let Some(current) =
+                                response.interact_pointer_pos().or(response.hover_pos())
+                            {
+                                self.update_viewport_box_select(current, transform);
+                            }
+                        }
+                        if !dnd_active
+                            && self.interaction.box_select_2d().is_none()
+                            && response.dragged_by(egui::PointerButton::Primary)
+                        {
+                            self.drag_selected_node(ui.input(|input| input.pointer.delta()));
+                        }
+
+                        if !dnd_active && response.clicked_by(egui::PointerButton::Primary) {
+                            if let Some(pos) = response.interact_pointer_pos() {
+                                let world = transform.screen_to_world(pos);
+                                let modifiers = ui.input(|input| input.modifiers);
+                                self.handle_viewport_click(world, &hits, modifiers);
+                            }
+                        }
+
+                        draw_viewport_overlay(
+                            &painter,
+                            rect,
+                            &self.project,
+                            self.viewport_zoom,
+                            self.snap_units,
+                        );
+                        draw_viewport_box_select_marquee(&painter, self.viewport_box_select_rect());
+                        draw_axes_gizmo(&painter, rect);
+                        if resource_drop_hovered {
+                            painter.rect_stroke(
+                                rect.shrink(2.0),
+                                2.0,
+                                Stroke::new(EDITOR_OUTLINE_STROKE_WIDTH, EDITOR_OUTLINE_ACCENT),
+                                StrokeKind::Inside,
+                            );
+                            painter.text(
+                                rect.center_top() + Vec2::new(0.0, 16.0),
+                                Align2::CENTER_TOP,
+                                "Drop resource into scene",
+                                FontId::proportional(13.0),
+                                STUDIO_ACCENT,
+                            );
+                        }
+                    });
+                });
+            });
+    }
+
+    pub(crate) fn draw_viewport_header_toolbar(&mut self, ui: &mut egui::Ui) {
+        egui::Frame::new()
+            .fill(STUDIO_PANEL_HEADER)
+            .inner_margin(egui::Margin::symmetric(8, 5))
+            .show(ui, |ui| {
+                ui.set_min_height(32.0);
+                ui.spacing_mut().item_spacing = Vec2::new(5.0, 4.0);
+                ui.horizontal_wrapped(|ui| {
+                    self.draw_viewport_toolbar(ui);
+                });
+            });
+    }
+
+    pub(crate) fn mark_shortcut_group_changed(&mut self, group: ShortcutGroup) {
+        self.shortcut_group_flash = Some((group, Instant::now()));
+    }
+
+    pub(crate) fn retain_shortcut_group_flash(&mut self) {
+        if self.shortcut_group_flash.is_some_and(|(_, started)| {
+            started.elapsed().as_secs_f32() >= SHORTCUT_GROUP_FLASH_SECONDS
+        }) {
+            self.shortcut_group_flash = None;
+        }
+    }
+
+    pub(crate) fn shortcut_group_glow(&self, group: ShortcutGroup) -> f32 {
+        let Some((active, started)) = self.shortcut_group_flash else {
+            return 0.0;
+        };
+        if active != group {
+            return 0.0;
+        }
+        let elapsed = started.elapsed().as_secs_f32();
+        (1.0 - elapsed / SHORTCUT_GROUP_FLASH_SECONDS).clamp(0.0, 1.0)
+    }
+
+    pub(crate) fn draw_viewport_toolbar(&mut self, ui: &mut egui::Ui) {
+        if self.active_room_id().is_none() && self.active_tool.requires_room_context() {
+            self.active_tool = ViewTool::Select;
+        }
+        self.retain_shortcut_group_flash();
+        if self.shortcut_group_flash.is_some() {
+            ui.ctx().request_repaint();
+        }
+        ui.spacing_mut().item_spacing.x = 4.0;
+        if self.active_workspace == WorkspaceView::Ui {
+            self.draw_ui_viewport_toolbar(ui);
+            return;
+        }
+
+        toolbar_group_menu(
+            ui,
+            1,
+            self.shortcut_group_glow(ShortcutGroup::Workspace),
+            self.active_workspace.icon(),
+            "Workspace",
+            self.active_workspace.label(),
+            |ui| self.draw_workspace_group_menu(ui),
+        );
+        toolbar_group_menu(
+            ui,
+            2,
+            self.shortcut_group_glow(ShortcutGroup::Tool),
+            self.active_tool_group_icon(),
+            "Tool",
+            self.active_tool_group_label(),
+            |ui| self.draw_tool_group_menu(ui),
+        );
+        toolbar_group_menu(
+            ui,
+            3,
+            self.shortcut_group_glow(ShortcutGroup::Transform),
+            self.transform_gizmo_mode.icon(),
+            "Transform",
+            self.transform_gizmo_mode.label(),
+            |ui| self.draw_transform_group_menu(ui),
+        );
+        toolbar_group_menu(
+            ui,
+            4,
+            self.shortcut_group_glow(ShortcutGroup::Selection),
+            self.selection_mode.icon(),
+            "Selection",
+            self.selection_mode.label(),
+            |ui| self.draw_selection_group_menu(ui),
+        );
+        toolbar_group_menu(
+            ui,
+            5,
+            self.shortcut_group_glow(ShortcutGroup::Surface),
+            self.horizontal_edit_mode.icon(),
+            "Surface",
+            self.horizontal_edit_mode.label(),
+            |ui| self.draw_horizontal_edit_group_menu(ui),
+        );
+        toolbar_group_menu(
+            ui,
+            6,
+            self.shortcut_group_glow(ShortcutGroup::Vertex),
+            self.vertex_connectivity.icon(),
+            "Vertex Edits",
+            self.vertex_connectivity.label(),
+            |ui| self.draw_vertex_connectivity_group_menu(ui),
+        );
+        toolbar_group_menu(
+            ui,
+            7,
+            self.shortcut_group_glow(ShortcutGroup::Visibility),
+            self.visibility_group_icon(),
+            "Visibility",
+            self.visibility_group_label(),
+            |ui| self.draw_visibility_menu_contents(ui),
+        );
+        toolbar_group_menu(
+            ui,
+            8,
+            self.shortcut_group_glow(ShortcutGroup::Camera),
+            self.camera_rig.mode.icon(),
+            "Camera",
+            self.viewport_camera_mode_label(),
+            |ui| self.draw_camera_group_menu(ui),
+        );
+        toolbar_group_menu(
+            ui,
+            9,
+            self.shortcut_group_glow(ShortcutGroup::Viewport),
+            self.view_dimension_group_icon(),
+            "Viewport",
+            self.view_dimension_group_label(),
+            |ui| self.draw_view_dimension_group_menu(ui),
+        );
+
+        // Floor stepper: author multiple stacked floors per room. Shown
+        // only in the Room workspace with a room in context. Floor 0 is
+        // the base grid; "Up" past the top floor adds a new one.
+        if matches!(self.active_workspace, WorkspaceView::Room) {
+            if let Some(room_id) = self.floors_target_room() {
+                let floor_count = self
+                    .room_base_grid(room_id)
+                    .map(|grid| grid.floor_count())
+                    .unwrap_or(1);
+                let active = self.active_floor.min(floor_count.saturating_sub(1));
+                ui.separator();
+                ui.label("Floor");
+                if ui
+                    .add_enabled(active > 0, egui::Button::new("Down"))
+                    .on_hover_text("Edit the floor below")
+                    .clicked()
+                {
+                    self.floor_down();
+                }
+                ui.label(format!("{} / {}", active + 1, floor_count));
+                if ui
+                    .button("Up")
+                    .on_hover_text("Edit the floor above (adds one above the top floor)")
+                    .clicked()
+                {
+                    self.floor_up();
+                }
+            }
+        }
+    }
+
+    pub(crate) fn draw_ui_viewport_toolbar(&mut self, ui: &mut egui::Ui) {
+        toolbar_group_menu(
+            ui,
+            1,
+            self.shortcut_group_glow(ShortcutGroup::Workspace),
+            self.active_workspace.icon(),
+            "Workspace",
+            self.active_workspace.label(),
+            |ui| self.draw_workspace_group_menu(ui),
+        );
+
+        ui.separator();
+        toolbar_group_menu(
+            ui,
+            2,
+            self.shortcut_group_glow(ShortcutGroup::Transform),
+            self.ui_transform_mode.icon(),
+            "Transform",
+            self.ui_transform_mode.label(),
+            |ui| {
+                ui.set_min_width(160.0);
+                for mode in [UiTransformMode::Move, UiTransformMode::Rotate] {
+                    if toolbar_menu_choice(
+                        ui,
+                        icons::label(mode.icon(), mode.label()),
+                        self.ui_transform_mode == mode,
+                    ) {
+                        self.ui_transform_mode = mode;
+                        self.status = format!("UI transform: {}", mode.label());
+                        self.mark_shortcut_group_changed(ShortcutGroup::Transform);
+                    }
+                }
+            },
+        );
+
+        toolbar_option_menu(ui, icons::PLUS, "Add UI Node", "Add", false, |ui| {
+            ui.set_min_width(160.0);
+            for (label, kind) in default_addable_ui_kinds() {
+                if ui.button(label).clicked() {
+                    self.add_ui_child(kind, label);
+                    ui.close_menu();
+                }
+            }
+        });
+
+        let center_snap_label = if self.ui_center_snap { "On" } else { "Off" };
+        toolbar_option_menu(
+            ui,
+            icons::FOCUS,
+            "Center Snap",
+            center_snap_label,
+            self.ui_center_snap,
+            |ui| {
+                ui.set_min_width(240.0);
+                if ui
+                    .checkbox(
+                        &mut self.ui_center_snap,
+                        "Snap moved nodes to canvas centre",
+                    )
+                    .changed()
+                {
+                    self.status = if self.ui_center_snap {
+                        "UI centre snap enabled".to_string()
+                    } else {
+                        "UI centre snap disabled".to_string()
+                    };
+                }
+                ui.weak("Shows blue centre guides while dragging.");
+            },
+        );
+
+        let nav_preview_label = if self.ui_nav_preview { "On" } else { "Off" };
+        toolbar_option_menu(
+            ui,
+            icons::PLAY,
+            "Navigation Preview",
+            nav_preview_label,
+            self.ui_nav_preview,
+            |ui| {
+                ui.set_min_width(228.0);
+                if ui
+                    .checkbox(&mut self.ui_nav_preview, "Preview UI navigation")
+                    .changed()
+                {
+                    self.status = if self.ui_nav_preview {
+                        "UI navigation preview enabled".to_string()
+                    } else {
+                        "UI navigation preview disabled".to_string()
+                    };
+                }
+                if self.ui_nav_preview {
+                    ui.weak("Arrow keys move focus; Enter activates.");
+                }
+            },
+        );
+
+        let screen_offset_label = if self.screen_offset_sim_px == 0 {
+            "0 px".to_string()
+        } else {
+            format!("{:+} px", self.screen_offset_sim_px)
+        };
+        toolbar_option_menu(
+            ui,
+            icons::MOVE,
+            "Screen Offset",
+            screen_offset_label,
+            self.screen_offset_sim_px != 0,
+            |ui| {
+                ui.set_min_width(220.0);
+                ui.horizontal(|ui| {
+                    ui.label("Screen offset");
+                    let response = ui.add(
+                        egui::DragValue::new(&mut self.screen_offset_sim_px)
+                            .range(-48..=48)
+                            .suffix(" px"),
+                    );
+                    if response.changed() {
+                        self.status = format!(
+                            "UI screen offset preview {:+} px",
+                            self.screen_offset_sim_px
+                        );
+                    }
+                });
+                if self.screen_offset_sim_px != 0 && ui.button("Centre").clicked() {
+                    self.screen_offset_sim_px = 0;
+                    self.status = "UI screen offset preview centred".to_string();
+                    ui.close_menu();
+                }
+                ui.weak("TV-position preview; authored positions stay centred.");
+            },
+        );
+    }
+
+    pub(crate) fn draw_workspace_group_menu(&mut self, ui: &mut egui::Ui) {
+        ui.set_min_width(180.0);
+        for view in [
+            WorkspaceView::Room,
+            WorkspaceView::Ui,
+            WorkspaceView::Animation,
+        ] {
+            if toolbar_menu_choice(
+                ui,
+                icons::label(view.icon(), view.label()),
+                self.active_workspace == view,
+            ) {
+                if self.active_workspace != view {
+                    self.active_workspace = view;
+                    self.status = format!("Workspace: {}", view.label());
+                    self.mark_shortcut_group_changed(ShortcutGroup::Workspace);
+                }
+            }
+        }
+    }
+
+    pub(crate) fn draw_tool_group_menu(&mut self, ui: &mut egui::Ui) {
+        ui.set_min_width(236.0);
+        let room_active = self.active_room_id().is_some();
+        for (tool, icon, label) in [
+            (ViewTool::Select, ViewTool::Select.icon(), "Select"),
+            (ViewTool::PaintFloor, ViewTool::PaintFloor.icon(), "Floor"),
+            (ViewTool::PaintWall, ViewTool::PaintWall.icon(), "Wall"),
+            (
+                ViewTool::PaintCeiling,
+                ViewTool::PaintCeiling.icon(),
+                "Ceiling",
+            ),
+            (ViewTool::Erase, ViewTool::Erase.icon(), "Erase"),
+        ] {
+            let enabled = room_active || !tool.requires_room_context();
+            let selected = self.active_tool_cycle_value() == (tool, None);
+            ui.add_enabled_ui(enabled, |ui| {
+                if toolbar_menu_choice(ui, icons::label(icon, label), selected) {
+                    self.set_active_tool_cycle_value((tool, None));
+                }
+            });
+        }
+
+        ui.separator();
+        ui.label("Add");
+        for kind in PlaceKind::ALL {
+            let selected = self.active_tool_cycle_value() == (ViewTool::Place, Some(kind));
+            ui.add_enabled_ui(room_active, |ui| {
+                if toolbar_menu_choice(ui, icons::label(kind.icon(), kind.label()), selected) {
+                    self.set_active_tool_cycle_value((ViewTool::Place, Some(kind)));
+                }
+            });
+        }
+
+        ui.separator();
+        ui.horizontal(|ui| {
+            if ui.checkbox(&mut self.snap_to_grid, "Snap").changed() {
+                self.mark_shortcut_group_changed(ShortcutGroup::Tool);
+            }
+            let snap_response = ui.add_sized(
+                [64.0, 22.0],
+                egui::DragValue::new(&mut self.snap_units)
+                    .speed(1.0)
+                    .range(1..=256),
+            );
+            if snap_response.changed() {
+                self.mark_shortcut_group_changed(ShortcutGroup::Tool);
+            }
+            snap_response.on_hover_text("Snap interval.");
+        });
+
+        match self.active_tool {
+            ViewTool::Place if self.place_kind != PlaceKind::Portal => {
+                ui.separator();
+                self.draw_active_place_options(ui);
+            }
+            ViewTool::PaintWall => {
+                ui.separator();
+                ui.label("Wall shape");
+                ui.horizontal(|ui| self.draw_wall_paint_shape_picker(ui));
+                ui.separator();
+                ui.horizontal(|ui| self.draw_brush_material_picker(ui));
+            }
+            ViewTool::PaintFloor | ViewTool::PaintCeiling => {
+                ui.separator();
+                ui.horizontal(|ui| self.draw_brush_material_picker(ui));
+            }
+            ViewTool::Select | ViewTool::Erase | ViewTool::Place => {}
+        }
+    }
+
+    pub(crate) fn draw_transform_group_menu(&mut self, ui: &mut egui::Ui) {
+        ui.set_min_width(176.0);
+        for mode in [
+            TransformGizmoMode::Move,
+            TransformGizmoMode::Rotate,
+            TransformGizmoMode::Scale,
+        ] {
+            if toolbar_menu_choice(
+                ui,
+                icons::label(mode.icon(), mode.label()),
+                self.transform_gizmo_mode == mode,
+            ) {
+                self.set_transform_gizmo_mode(mode);
+            }
+        }
+    }
+
+    pub(crate) fn draw_selection_group_menu(&mut self, ui: &mut egui::Ui) {
+        ui.set_min_width(156.0);
+        for mode in [
+            SelectionMode::Face,
+            SelectionMode::Edge,
+            SelectionMode::Vertex,
+        ] {
+            if toolbar_menu_choice(
+                ui,
+                icons::label(mode.icon(), mode.label()),
+                self.selection_mode == mode,
+            ) {
+                self.set_selection_mode(mode);
+            }
+        }
+    }
+
+    pub(crate) fn draw_horizontal_edit_group_menu(&mut self, ui: &mut egui::Ui) {
+        ui.set_min_width(156.0);
+        for mode in [HorizontalEditMode::Quad, HorizontalEditMode::Triangle] {
+            if toolbar_menu_choice(
+                ui,
+                icons::label(mode.icon(), mode.label()),
+                self.horizontal_edit_mode == mode,
+            ) {
+                self.set_horizontal_edit_mode(mode);
+            }
+        }
+    }
+
+    pub(crate) fn draw_vertex_connectivity_group_menu(&mut self, ui: &mut egui::Ui) {
+        ui.set_min_width(168.0);
+        for mode in [VertexConnectivity::Welded, VertexConnectivity::Detached] {
+            if toolbar_menu_choice(
+                ui,
+                icons::label(mode.icon(), mode.label()),
+                self.vertex_connectivity == mode,
+            ) {
+                self.set_vertex_connectivity(mode);
+            }
+        }
+    }
+
+    pub(crate) fn draw_visibility_menu_contents(&mut self, ui: &mut egui::Ui) {
+        ui.set_min_width(224.0);
+        let mut changed = false;
+        egui::Grid::new("viewport-visibility-menu-grid")
+            .num_columns(2)
+            .spacing(Vec2::new(14.0, 5.0))
+            .show(ui, |ui| {
+                changed |= visibility_menu_row(ui, "grid", "Grid", &mut self.show_grid);
+                changed |= visibility_menu_row(ui, "portals", "Portals", &mut self.show_portals);
+                changed |= visibility_menu_row(ui, "lights", "Lights", &mut self.show_lights);
+                changed |= visibility_menu_row(ui, "fog", "Fog", &mut self.preview_fog);
+                changed |= visibility_menu_row(
+                    ui,
+                    "backfaces",
+                    "Backfaces",
+                    &mut self.preview_backface_wireframe,
+                );
+                changed |= visibility_menu_row(ui, "bounds", "Bounds", &mut self.preview_bounds);
+            });
+        if changed {
+            self.persist_editor_visibility_state();
+            self.mark_shortcut_group_changed(ShortcutGroup::Visibility);
+        }
+    }
+
+    pub(crate) fn draw_camera_group_menu(&mut self, ui: &mut egui::Ui) {
+        ui.set_min_width(148.0);
+        for mode in [ViewportCameraMode::Orbit, ViewportCameraMode::Free] {
+            if toolbar_menu_choice(
+                ui,
+                icons::label(mode.icon(), viewport_camera_mode_label(mode)),
+                self.camera_rig.mode == mode,
+            ) {
+                self.set_viewport_3d_camera_mode(mode);
+                self.status = format!("Camera: {}", viewport_camera_mode_label(mode));
+            }
+        }
+    }
+
+    pub(crate) fn draw_view_dimension_group_menu(&mut self, ui: &mut egui::Ui) {
+        ui.set_min_width(120.0);
+        if toolbar_menu_choice(ui, icons::label(icons::SQUARE, "2D"), self.view_2d) {
+            if !self.view_2d {
+                self.view_2d = true;
+                self.status = "Viewport: 2D".to_string();
+                self.mark_shortcut_group_changed(ShortcutGroup::Viewport);
+            }
+        }
+        if toolbar_menu_choice(ui, icons::label(icons::BOX, "3D"), !self.view_2d) {
+            if self.view_2d {
+                self.view_2d = false;
+                self.status = "Viewport: 3D".to_string();
+                self.mark_shortcut_group_changed(ShortcutGroup::Viewport);
+            }
+        }
+    }
+
+    pub(crate) fn active_tool_group_icon(&self) -> char {
+        match self.active_tool {
+            ViewTool::Place => self.place_kind.icon(),
+            tool => tool.icon(),
+        }
+    }
+
+    pub(crate) fn active_tool_group_label(&self) -> &'static str {
+        if self.active_tool == ViewTool::Place {
+            self.place_kind.label()
+        } else {
+            self.active_tool.label()
+        }
+    }
+
+    pub(crate) fn visibility_group_icon(&self) -> char {
+        if self.editor_visibility_has_hidden_items() {
+            icons::EYE_OFF
+        } else {
+            icons::EYE
+        }
+    }
+
+    pub(crate) fn visibility_group_label(&self) -> &'static str {
+        if self.editor_visibility_has_hidden_items() {
+            "Some Hidden"
+        } else {
+            "All Shown"
+        }
+    }
+
+    pub(crate) fn viewport_camera_mode_label(&self) -> &'static str {
+        viewport_camera_mode_label(self.camera_rig.mode)
+    }
+
+    pub(crate) fn view_dimension_group_icon(&self) -> char {
+        if self.view_2d {
+            icons::SQUARE
+        } else {
+            icons::BOX
+        }
+    }
+
+    pub(crate) fn view_dimension_group_label(&self) -> &'static str {
+        if self.view_2d {
+            "2D"
+        } else {
+            "3D"
+        }
+    }
+
+    pub(crate) fn editor_visibility_has_hidden_items(&self) -> bool {
+        !self.show_grid
+            || !self.show_portals
+            || !self.show_lights
+            || !self.preview_fog
+            || !self.preview_backface_wireframe
+            || !self.preview_bounds
+    }
+
+    /// Toolbar combobox for the active brush material. Selecting
+    /// "Auto" leaves `brush_material = None` so paint can use the
+    /// selected Material resource first, then a per-tool name hint;
+    /// picking a specific entry pins every Floor / Wall / Ceiling
+    /// stroke to that material.
+    /// Toolbar selector for the Place tool's node kind. Shown
+    /// only while `active_tool == Place` -- otherwise the brush
+    /// material picker takes the same slot.
+    /// Toolbar selector for the Select tool's primitive mode.
+    /// Visible only while `active_tool == Select`. Clicking goes
+    /// through `set_selection_mode` so the existing selection adapts.
+    pub(crate) fn draw_wall_paint_shape_picker(&mut self, ui: &mut egui::Ui) {
+        for shape in [
+            WallPaintShape::Cardinal,
+            WallPaintShape::NorthWestSouthEast,
+            WallPaintShape::NorthEastSouthWest,
+        ] {
+            if toolbar_menu_choice(ui, shape.label(), self.wall_paint_shape == shape) {
+                if self.wall_paint_shape != shape {
+                    self.wall_paint_shape = shape;
+                    self.mark_shortcut_group_changed(ShortcutGroup::Tool);
+                }
+            }
+        }
+    }
+
+    pub(crate) fn draw_active_place_options(&mut self, ui: &mut egui::Ui) {
+        match self.place_kind {
+            PlaceKind::ModelInstance => {
+                self.draw_place_resource_picker(ui, ResourceFilter::Model, "Model")
+            }
+            PlaceKind::Character => {
+                self.draw_place_resource_picker(ui, ResourceFilter::Character, "Profile")
+            }
+            PlaceKind::ImageProp => {
+                self.draw_place_resource_picker(ui, ResourceFilter::ImagePropSource, "Image")
+            }
+            PlaceKind::BoxProp => {
+                self.draw_place_resource_picker(ui, ResourceFilter::ImagePropSource, "Material")
+            }
+            PlaceKind::ParticleEmitter => {
+                ui.weak(
+                    "Point-projected sprite emitter. Configure texture and budget after placement.",
+                );
+            }
+            _ => {}
+        }
+    }
+
+    pub(crate) fn draw_place_resource_picker(
+        &mut self,
+        ui: &mut egui::Ui,
+        filter: ResourceFilter,
+        label: &str,
+    ) {
+        let options: Vec<(ResourceId, String)> = self
+            .project
+            .resources
+            .iter()
+            .filter(|resource| filter.matches(&resource.data))
+            .map(|resource| (resource.id, resource.name.clone()))
+            .collect();
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.label(icons::text(filter.icon(), 14.0).color(STUDIO_TEXT_WEAK))
+                .on_hover_text(label);
+            ui.label(label);
+        });
+
+        let before = self.place_resource;
+        let auto_label = if options.len() == 1 {
+            format!("Auto ({})", options[0].1)
+        } else {
+            format!("Auto {label}")
+        };
+        if ui
+            .selectable_label(self.place_resource.is_none(), auto_label)
+            .clicked()
+        {
+            self.place_resource = None;
+        }
+        if options.is_empty() {
+            ui.weak(format!("No {} resources", label.to_ascii_lowercase()));
+        }
+        for (id, name) in options {
+            if ui
+                .selectable_label(self.place_resource == Some(id), name)
+                .clicked()
+            {
+                self.place_resource = Some(id);
+                self.replace_resource_selection(id);
+            }
+        }
+        if self.place_resource != before {
+            let name = self
+                .place_resource
+                .and_then(|id| {
+                    self.project
+                        .resource(id)
+                        .map(|resource| resource.name.clone())
+                })
+                .unwrap_or_else(|| "Auto".to_string());
+            self.status = format!("Place {label}: {name}");
+            self.mark_shortcut_group_changed(ShortcutGroup::Tool);
+        }
+    }
+
+    pub(crate) fn place_resource_candidates(&self) -> impl Iterator<Item = ResourceId> {
+        [self.place_resource, self.selection.selected_resource]
+            .into_iter()
+            .flatten()
+    }
+
+    /// Pick the Model resource a `PlaceKind::ModelInstance` prop click
+    /// should bind to. Returns `(id, default_node_name)` on
+    /// success or an actionable status message on failure. The
+    /// caller renders the failure into `self.status` and skips
+    /// the place altogether -- never silently substitutes a
+    /// generic marker.
+    pub(crate) fn resolve_place_model_resource(&self) -> Result<(ResourceId, String), String> {
+        // (a) Chosen Place toolbar resource, or selected resource,
+        // is a Model? Use it.
+        for id in self.place_resource_candidates() {
+            if let Some(resource) = self.project.resource(id) {
+                if matches!(resource.data, ResourceData::Model(_)) {
+                    return Ok((id, resource.name.clone()));
+                }
+            }
+        }
+        // (b) Exactly one Model resource? Auto-pick.
+        let models: Vec<&Resource> = self
+            .project
+            .resources
+            .iter()
+            .filter(|r| matches!(r.data, ResourceData::Model(_)))
+            .collect();
+        match models.len() {
+            0 => Err("No Model resources exist. Register or import a model first.".to_string()),
+            1 => Ok((models[0].id, models[0].name.clone())),
+            n => Err(format!(
+                "Select a Model resource before placing a prop ({n} available)"
+            )),
+        }
+    }
+
+    pub(crate) fn resolve_place_image_prop_material(
+        &mut self,
+    ) -> Result<(ResourceId, String), String> {
+        for id in self.place_resource_candidates().collect::<Vec<_>>() {
+            let Some(resource) = self.project.resource(id) else {
+                continue;
+            };
+            match &resource.data {
+                ResourceData::Material(_) => return Ok((id, resource.name.clone())),
+                ResourceData::Texture { .. } => {
+                    let name = resource.name.clone();
+                    let material = self.material_for_image_texture(id, &name);
+                    return Ok((material, name));
+                }
+                _ => {}
+            }
+        }
+
+        let image_sources: Vec<(ResourceId, String, bool)> = self
+            .project
+            .resources
+            .iter()
+            .filter_map(|resource| match &resource.data {
+                ResourceData::Material(_) => Some((resource.id, resource.name.clone(), false)),
+                ResourceData::Texture { .. } => Some((resource.id, resource.name.clone(), true)),
+                _ => None,
+            })
+            .collect();
+        match image_sources.len() {
+            0 => Err("No Texture or Material resources exist. Import a texture first.".to_string()),
+            1 => {
+                let (id, name, is_texture) = &image_sources[0];
+                let material = if *is_texture {
+                    self.material_for_image_texture(*id, name)
+                } else {
+                    *id
+                };
+                Ok((material, name.clone()))
+            }
+            n => Err(format!(
+                "Select a Texture or Material before placing an image prop ({n} available)"
+            )),
+        }
+    }
+
+    pub(crate) fn material_for_image_texture(
+        &mut self,
+        texture_id: ResourceId,
+        texture_name: &str,
+    ) -> ResourceId {
+        if let Some(existing) = self.project.resources.iter().find(|resource| {
+            matches!(
+                &resource.data,
+                ResourceData::Material(material) if material.texture == Some(texture_id)
+            )
+        }) {
+            return existing.id;
+        }
+        let material_id = self.project.add_resource(
+            texture_name.to_string(),
+            ResourceData::Material(MaterialResource::opaque(Some(texture_id))),
+        );
+        self.place_resource = Some(material_id);
+        material_id
+    }
+
+    pub(crate) fn resolve_place_character_resource(
+        &self,
+    ) -> Result<(ResourceId, String, psxed_project::CharacterResource), String> {
+        for id in self.place_resource_candidates() {
+            if let Some(resource) = self.project.resource(id) {
+                if let ResourceData::Character(character) = &resource.data {
+                    return Ok((id, resource.name.clone(), character.clone()));
+                }
+            }
+        }
+
+        let characters: Vec<&Resource> = self
+            .project
+            .resources
+            .iter()
+            .filter(|r| matches!(r.data, ResourceData::Character(_)))
+            .collect();
+        match characters.len() {
+            0 => Err("No Character Profile resources exist. Sync starter characters or add a profile first.".to_string()),
+            1 => {
+                let ResourceData::Character(character) = &characters[0].data else {
+                    unreachable!("filtered to character resources");
+                };
+                Ok((characters[0].id, characters[0].name.clone(), character.clone()))
+            }
+            n => Err(format!(
+                "Select a Character Profile resource before placing a character ({n} available)"
+            )),
+        }
+    }
+
+    pub(crate) fn draw_brush_material_picker(&mut self, ui: &mut egui::Ui) {
+        let materials = self.project.material_options();
+        let label = match self.brush_material {
+            Some(id) => materials
+                .iter()
+                .find(|(mid, _)| *mid == id)
+                .map(|(_, name)| name.clone())
+                .unwrap_or_else(|| "(missing)".to_string()),
+            None => "Auto".to_string(),
+        };
+        ui.label(icons::text(icons::PALETTE, 14.0).color(STUDIO_TEXT_WEAK))
+            .on_hover_text("Brush material");
+        let before = self.brush_material;
+        egui::ComboBox::from_id_salt("brush-material-picker")
+            .selected_text(label)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut self.brush_material, None, "Auto")
+                    .on_hover_text("Use the selected material, then fall back by tool.");
+                for (id, name) in &materials {
+                    ui.selectable_value(&mut self.brush_material, Some(*id), name);
+                }
+            });
+        if self.brush_material != before {
+            self.mark_shortcut_group_changed(ShortcutGroup::Tool);
+        }
+    }
+
+    /// Resolve the Room node that owns the current selection, if any.
+    ///
+    /// Order: selected face's room → climb the selected node's
+    /// Walk the active scene and collect a selectable AABB for
+    /// every entity-kind node -- every node that's neither the
+    /// world root, nor a structural Node/World, nor a Room.
+    ///
+    /// `room_filter` confines the walk to descendants of one
+    /// Room (Some(id)) or includes everything (None). The 3D
+    /// click handler uses Some(active_room) so a click in the
+    /// active room can't pick lights from another room.
+    pub fn collect_entity_bounds(&self, room_filter: Option<NodeId>) -> Vec<EntityBounds> {
+        let scene = self.project.active_scene();
+        let mut out = Vec::new();
+        for node in scene.nodes() {
+            if node.id == scene.root {
+                continue;
+            }
+            if self.scene_node_effectively_hidden(node.id) {
+                continue;
+            }
+            if matches!(node.kind, NodeKind::PointLight { .. }) && !self.show_lights {
+                continue;
+            }
+            if matches!(node.kind, NodeKind::Portal { .. }) && !self.show_portals {
+                continue;
+            }
+            // Find this node's enclosing Room.
+            let enclosing_room = enclosing_room_id(scene, node.id);
+            if let (Some(want), Some(actual)) = (room_filter, enclosing_room) {
+                if want != actual {
+                    continue;
+                }
+            }
+            // Floor-aware selection: in the active room, a node is only
+            // interactable when its floor is visible in the Sims view
+            // (active floor or below), and its bounds must sit at the same
+            // Y the renderer drew it. `node_draw_offset` is the shared
+            // source of truth that the render pass also uses, so selection
+            // and render can't disagree. Nodes in other rooms (or rooms
+            // with a single floor) get offset 0.
+            let floor_y_offset = match enclosing_room {
+                Some(room) => {
+                    match psxed_project::floor_view::node_draw_offset(
+                        scene,
+                        room,
+                        self.active_floor,
+                        node.id,
+                    ) {
+                        Some(offset) => offset,
+                        // Floor hidden (above the active floor): not
+                        // selectable this frame.
+                        None => continue,
+                    }
+                }
+                None => 0,
+            };
+            let Some((kind, mut half_extents)) = entity_bound_kind_and_size(self, node) else {
+                continue;
+            };
+            // World position. Entities under a Room use the
+            // canonical room-local convention so bounds line up
+            // with the rendered marker / model exactly.
+            let center_world = match enclosing_room.and_then(|id| scene.node(id)) {
+                Some(room_node) => match &room_node.kind {
+                    NodeKind::Room { grid } => {
+                        if kind == EntityBoundKind::Portal {
+                            let Some((center, half)) = portal_seam_bounds_3d(grid, node) else {
+                                continue;
+                            };
+                            half_extents = half;
+                            center
+                        } else if node_is_floor_anchored(&node.kind) {
+                            psxed_project::spatial::floor_anchored_node_preview_bounds_center(
+                                grid,
+                                &node.transform,
+                                half_extents,
+                            )
+                        } else {
+                            psxed_project::spatial::node_preview_bounds_center(
+                                grid,
+                                &node.transform,
+                                half_extents,
+                            )
+                        }
+                    }
+                    _ => continue,
+                },
+                None => {
+                    // No enclosing Room -- node lives in raw
+                    // world space. Use translation directly so
+                    // the bound at least lands somewhere
+                    // pickable.
+                    let p = node.transform.translation;
+                    [p[0], p[1] + half_extents[1], p[2]]
+                }
+            };
+            // Lift the bound to the floor's drawn elevation so the pick
+            // box / gizmo coincides with the rendered node on a stacked
+            // floor.
+            let center_world = [
+                center_world[0],
+                center_world[1] + floor_y_offset as f32,
+                center_world[2],
+            ];
+            out.push(EntityBounds {
+                node: node.id,
+                room: enclosing_room,
+                kind,
+                center: center_world,
+                half_extents,
+                yaw_degrees: node.transform.rotation_degrees[1],
+            });
+        }
+        out
+    }
+
+    /// Pick the nearest entity bound under the camera ray.
+    /// Returns the `EntityBoundHit` plus its world distance --
+    /// the 3D click handler compares this against grid hits to
+    /// pick whichever is closer.
+    pub fn pick_entity_bound(
+        &self,
+        rect: egui::Rect,
+        pointer: egui::Pos2,
+        room_filter: Option<NodeId>,
+    ) -> Option<EntityBoundHit> {
+        let (origin, dir) = self.camera_ray_for_pointer(rect, pointer)?;
+        let bounds = self.collect_entity_bounds(room_filter);
+        let mut best: Option<EntityBoundHit> = None;
+        for b in &bounds {
+            let Some(t) = ray_intersects_aabb(origin, dir, b.center, b.half_extents) else {
+                continue;
+            };
+            if best.as_ref().is_some_and(|h| h.distance <= t) {
+                continue;
+            }
+            best = Some(EntityBoundHit {
+                node: b.node,
+                distance: t,
+                point: [
+                    origin[0] + dir[0] * t,
+                    origin[1] + dir[1] * t,
+                    origin[2] + dir[2] * t,
+                ],
+                bounds: *b,
+            });
+        }
+        best
+    }
+
+    /// parent chain → fall back to the active scene's first Room.
+    /// The fallback keeps paint tools enabled even when the
+    /// selection sits outside the scene tree (e.g. a face the user
+    /// just picked, which clears `selected_node` to ROOT).
+    pub fn active_room_id(&self) -> Option<NodeId> {
+        if let Some(selection) = self.selection.selected_primitive {
+            let room = selection.room();
+            if !self.scene_node_effectively_hidden(room) {
+                return Some(room);
+            }
+        }
+        let scene = self.project.active_scene();
+        let mut current = self.selection.selected_node;
+        while let Some(node) = scene.node(current) {
+            if matches!(node.kind, NodeKind::Room { .. })
+                && !self.scene_node_effectively_hidden(current)
+            {
+                return Some(current);
+            }
+            let Some(parent) = node.parent else { break };
+            current = parent;
+        }
+        scene
+            .nodes()
+            .iter()
+            .find(|node| {
+                matches!(node.kind, NodeKind::Room { .. })
+                    && !self.scene_node_effectively_hidden(node.id)
+            })
+            .map(|node| node.id)
+    }
+
+    /// Translate a 2D-viewport-space click into a sector cell on
+    /// `room`. The viewport draws cells around `node_world(room)`
+    /// with 1 unit = 1 sector, so the click is first re-expressed
+    /// as editor coords (room-centre-relative) and then routed
+    /// through `WorldGrid::editor_cells_to_array`. `origin` enters
+    /// the conversion via the canonical helper, keeping 2D and 3D
+    /// picks consistent after a negative-side grow.
+    pub(crate) fn world_to_sector(&self, room_id: NodeId, world: [f32; 2]) -> Option<(u16, u16)> {
+        let room = self.project.active_scene().node(room_id)?;
+        let center = node_world(room);
+        let grid = self.room_grid_view(room_id)?;
+        let editor = [world[0] - center[0], world[1] - center[1]];
+        grid.editor_cells_to_array(editor)
+    }
+
+    /// Default material id for a brushed surface, picked by name from
+    /// the project's material list. The cooker rejects unassigned
+    /// surfaces, so authors are expected to wire real materials in
+    /// resources before serious painting -- this fallback at least
+    /// keeps the brush usable while iterating.
+    pub(crate) fn default_brush_material(&self, needle: &str) -> Option<ResourceId> {
+        let lower = needle.to_ascii_lowercase();
+        let materials = self.project.material_options();
+        materials
+            .iter()
+            .find(|(_, name)| name.to_ascii_lowercase().contains(&lower))
+            .or_else(|| materials.first())
+            .map(|(id, _)| *id)
+    }
+
+    pub(crate) fn selected_material_resource(&self) -> Option<ResourceId> {
+        let id = self.selection.selected_resource?;
+        matches!(
+            self.project.resource(id).map(|resource| &resource.data),
+            Some(ResourceData::Material(_))
+        )
+        .then_some(id)
+    }
+
+    pub(crate) fn paint_material_for(&self, default_name_hint: &str) -> Option<ResourceId> {
+        self.brush_material
+            .or_else(|| self.selected_material_resource())
+            .or_else(|| self.default_brush_material(default_name_hint))
+    }
+
+    pub(crate) fn first_material(&self) -> Option<ResourceId> {
+        self.project.material_options().first().map(|(id, _)| *id)
+    }
+
+    pub(crate) fn has_player_source(&self) -> bool {
+        self.project
+            .active_scene()
+            .nodes()
+            .iter()
+            .any(|node| node_kind_is_player_source(&node.kind))
+    }
+
+    pub(crate) fn selected_node_is_player_source(&self) -> bool {
+        self.project
+            .active_scene()
+            .node(self.selection.selected_node)
+            .is_some_and(|node| node_kind_is_player_source(&node.kind))
+    }
+
+    pub(crate) fn demote_player_sources_except(&mut self, keep: Option<NodeId>) {
+        let scene = self.project.active_scene_mut();
+        let ids: Vec<NodeId> = scene
+            .nodes()
+            .iter()
+            .filter(|node| Some(node.id) != keep && node_kind_is_player_source(&node.kind))
+            .map(|node| node.id)
+            .collect();
+        for id in ids {
+            let Some(node) = scene.node_mut(id) else {
+                continue;
+            };
+            match &mut node.kind {
+                NodeKind::SpawnPoint { player, character } => {
+                    *player = false;
+                    *character = None;
+                }
+                NodeKind::CharacterController { player, .. } => {
+                    *player = false;
+                }
+                _ => {}
+            }
+        }
+    }
+}
