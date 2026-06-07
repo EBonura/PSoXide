@@ -1232,6 +1232,8 @@ pub struct PlaytestCharacter {
     /// Inclusive playback frame window per action.
     pub action_frame_ranges:
         [psx_level::CharacterActionFrameRange; PLAYTEST_CHARACTER_ACTION_COUNT],
+    /// Forward push per action.
+    pub action_pushes: [psx_level::CharacterActionPush; PLAYTEST_CHARACTER_ACTION_COUNT],
     /// Render-only model offset from the player/controller root,
     /// in entity-local engine units.
     pub visual_offset: [i16; 3],
