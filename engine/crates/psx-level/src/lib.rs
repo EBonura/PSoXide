@@ -2278,6 +2278,23 @@ impl CharacterActionFrameRange {
     };
 }
 
+/// Authored forward movement applied while an action plays.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CharacterActionPush {
+    /// Total forward distance in engine units. Zero disables action push.
+    pub distance: i32,
+    /// Inclusive sampled-frame window over which the distance is distributed.
+    pub frame_range: CharacterActionFrameRange,
+}
+
+impl CharacterActionPush {
+    /// No authored push.
+    pub const NONE: Self = Self {
+        distance: 0,
+        frame_range: CharacterActionFrameRange::FULL,
+    };
+}
+
 /// Gameplay character -- backing model + role-clip mapping +
 /// capsule / camera / controller defaults. Layered on top of
 /// a [`LevelModelRecord`]; the player spawn references one of
@@ -2302,6 +2319,8 @@ pub struct LevelCharacterRecord {
     /// Inclusive playback frame window per action. [`CharacterActionFrameRange::FULL`]
     /// means the selected clip's full sampled frame range.
     pub action_frame_ranges: [CharacterActionFrameRange; CHARACTER_ANIMATION_ACTION_COUNT],
+    /// Per-action forward push applied by locked one-shot actions.
+    pub action_pushes: [CharacterActionPush; CHARACTER_ANIMATION_ACTION_COUNT],
     /// Render-only model offset from the controller root, in
     /// entity-local engine units.
     pub visual_offset: [i16; 3],

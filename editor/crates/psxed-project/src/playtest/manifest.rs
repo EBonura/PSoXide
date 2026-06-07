@@ -1370,14 +1370,26 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             })
             .collect::<Vec<_>>()
             .join(", ");
+        let action_pushes = character
+            .action_pushes
+            .iter()
+            .map(|push| {
+                format!(
+                    "CharacterActionPush {{ distance: {}, frame_range: CharacterActionFrameRange {{ start: {}, end: {} }} }}",
+                    push.distance, push.frame_range.start, push.frame_range.end
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
         let _ = writeln!(
             out,
-            "    LevelCharacterRecord {{ model: ModelIndex({}), action_clips: [{}], action_flags: [{}], action_speeds: [{}], action_frame_ranges: [{}], visual_offset: [{}, {}, {}], visual_yaw: {}, visual_scale_q8: {}, weight_q8: {}, radius: {}, height: {}, walk_speed: {}, run_speed: {}, turn_speed_degrees_per_second: {}, stamina_max_q12: {}, sprint_min_q12: {}, sprint_drain_q12: {}, stamina_recover_q12: {}, roll_cost_q12: {}, roll_speed: {}, roll_active_frames: {}, roll_recovery_frames: {}, roll_invulnerable_frames: {}, backstep_cost_q12: {}, backstep_speed: {}, backstep_active_frames: {}, backstep_recovery_frames: {}, backstep_invulnerable_frames: {}, camera_distance: {}, camera_height: {}, camera_target_height: {}, flags: 0 }},",
+            "    LevelCharacterRecord {{ model: ModelIndex({}), action_clips: [{}], action_flags: [{}], action_speeds: [{}], action_frame_ranges: [{}], action_pushes: [{}], visual_offset: [{}, {}, {}], visual_yaw: {}, visual_scale_q8: {}, weight_q8: {}, radius: {}, height: {}, walk_speed: {}, run_speed: {}, turn_speed_degrees_per_second: {}, stamina_max_q12: {}, sprint_min_q12: {}, sprint_drain_q12: {}, stamina_recover_q12: {}, roll_cost_q12: {}, roll_speed: {}, roll_active_frames: {}, roll_recovery_frames: {}, roll_invulnerable_frames: {}, backstep_cost_q12: {}, backstep_speed: {}, backstep_active_frames: {}, backstep_recovery_frames: {}, backstep_invulnerable_frames: {}, camera_distance: {}, camera_height: {}, camera_target_height: {}, flags: 0 }},",
             character.model,
             action_clips,
             action_flags,
             action_speeds,
             action_frame_ranges,
+            action_pushes,
             character.visual_offset[0],
             character.visual_offset[1],
             character.visual_offset[2],
@@ -3045,6 +3057,7 @@ use psx_level::{
     AssetKind,
     CHARACTER_CLIP_NONE,
     CharacterActionFrameRange,
+    CharacterActionPush,
     CharacterIndex,
     EntityKind,
     EntityRecord,
