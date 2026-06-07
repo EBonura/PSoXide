@@ -8,8 +8,10 @@
 level_manifest.cooked.rs
 cdda_tracks.txt
 world_pack_order.txt
+ui_pack_order.txt
 rooms/*.psxw
 stream_chunks/*.psxc
+ui_stream_chunks/*.psxt
 textures/*.psxt
 sky/*.psxt
 ui_sfx/*.psau
