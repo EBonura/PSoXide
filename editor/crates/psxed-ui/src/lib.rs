@@ -1952,9 +1952,9 @@ enum WorkspaceView {
 impl WorkspaceView {
     const fn label(self) -> &'static str {
         match self {
-            Self::Room => "Room",
-            Self::Ui => "UI",
-            Self::Animation => "Animation Viewer",
+            Self::Room => "3D",
+            Self::Ui => "2D",
+            Self::Animation => "Animation",
         }
     }
 
