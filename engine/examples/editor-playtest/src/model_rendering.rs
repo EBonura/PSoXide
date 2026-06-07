@@ -250,6 +250,7 @@ impl Playtest {
         clip: ModelClipIndex,
         video_hz: VideoHz,
         speed_q8: u16,
+        frame_range: psx_level::CharacterActionFrameRange,
     ) -> Option<u32> {
         let runtime_model = self
             .models
@@ -258,7 +259,7 @@ impl Playtest {
             .flatten()?;
         let animation = runtime_model.clip(&self.clips, clip)?;
         let sample_rate = animation.sample_rate_hz().max(1) as u32;
-        let frames = animation.frame_count().max(1) as u32;
+        let frames = action_frame_range_frame_count(animation, frame_range);
         let unscaled = frames
             .saturating_mul(video_hz.as_nonzero_u32())
             .div_ceil(sample_rate);
@@ -318,6 +319,28 @@ fn scale_duration_for_action_speed(duration_vblanks: u32, speed_q8: u16) -> u32 
         .max(1)
 }
 
+fn normalized_action_frame_range(
+    animation: Animation<'static>,
+    frame_range: psx_level::CharacterActionFrameRange,
+) -> (u32, u32) {
+    let final_unique_frame = animation.frame_count().saturating_sub(2) as u32;
+    let start = (frame_range.start as u32).min(final_unique_frame);
+    let end = if frame_range.end == psx_level::CHARACTER_ACTION_FRAME_END_FULL {
+        final_unique_frame
+    } else {
+        (frame_range.end as u32).min(final_unique_frame)
+    };
+    (start, end.max(start))
+}
+
+fn action_frame_range_frame_count(
+    animation: Animation<'static>,
+    frame_range: psx_level::CharacterActionFrameRange,
+) -> u32 {
+    let (start, end) = normalized_action_frame_range(animation, frame_range);
+    end.saturating_sub(start).saturating_add(1)
+}
+
 #[derive(Copy, Clone, Debug, Default)]
 pub(super) struct PlayerModelDrawStats {
     pub(super) stats: TexturedModelRenderStats,
@@ -363,6 +386,7 @@ pub(super) fn draw_player(
         video_hz,
         character.action_loops(anim_action),
         character.action_speed(anim_action),
+        character.action_frame_range(anim_action),
     );
     let bounds = model_frame_bounds(runtime_model, clip_local, phase);
     let clip_anchor = model_clip_anchor(runtime_model, clip_local);
@@ -756,13 +780,18 @@ fn animation_phase_at_tick_q12(
     video_hz: VideoHz,
     looping: bool,
     speed_q8: u16,
+    frame_range: psx_level::CharacterActionFrameRange,
 ) -> u32 {
-    let phase = animation.phase_at_tick_scaled_q12(local_tick, video_hz.as_u16(), speed_q8);
+    let (start_frame, end_frame) = normalized_action_frame_range(animation, frame_range);
+    let range_phase = animation.phase_at_tick_scaled_q12(local_tick, video_hz.as_u16(), speed_q8);
+    let start_phase = start_frame << 12;
+    let end_phase = end_frame << 12;
     if looping {
-        return phase;
+        let frame_count = end_frame.saturating_sub(start_frame).saturating_add(1);
+        let cycle_phase = frame_count << 12;
+        return start_phase + range_phase % cycle_phase.max(1);
     }
-    let final_unique_frame = animation.frame_count().saturating_sub(2) as u32;
-    phase.min(final_unique_frame << 12)
+    start_phase + range_phase.min(end_phase.saturating_sub(start_phase))
 }
 
 fn model_pose_anchor_translation(
