@@ -418,6 +418,22 @@ pub(crate) fn camera_forward_from_angles(yaw_q12: u16, pitch_q12: u16) -> [f32; 
     normalize3([-cos_p * sin_y, sin_p, -cos_p * cos_y])
 }
 
+pub(crate) fn camera_pitch_q12_from_vertical_distance(vertical: i32, distance: i32) -> i16 {
+    if vertical == 0 {
+        return 0;
+    }
+    let ay = vertical.saturating_abs();
+    let ax = distance.saturating_abs().max(1);
+    let base = if ay <= ax {
+        ay.saturating_mul(512) / ax
+    } else {
+        1024 - (ax.saturating_mul(512) / ay.max(1))
+    }
+    .min(1024);
+    let signed = if vertical < 0 { -base } else { base };
+    signed.clamp(i16::MIN as i32, i16::MAX as i32) as i16
+}
+
 pub(crate) fn sin_q12_turn_f32(angle_q12: u16) -> f32 {
     psx_engine::Angle::from_q12(angle_q12).sin().raw() as f32 / 4096.0
 }

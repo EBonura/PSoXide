@@ -58,6 +58,8 @@ pub struct Graphics {
     /// an Image so the preview is bit-faithful to what the PS1 would
     /// draw given the same input data.
     editor_hw_renderer: HwRenderer,
+    /// Dedicated editor renderer for the selected Camera inspector preview.
+    camera_preview_hw_renderer: HwRenderer,
     /// Stub `Gpu` consumed by [`HwRenderer::render_frame`]. The
     /// renderer only reads `wireframe_enabled` from it; the editor
     /// preview always renders solid, so we hand it a freshly-zeroed
@@ -144,10 +146,13 @@ impl Graphics {
         let hw_renderer = HwRenderer::new(device.clone(), queue.clone(), &mut egui_renderer);
         let mut editor_hw_renderer =
             HwRenderer::new(device.clone(), queue.clone(), &mut egui_renderer);
+        let mut camera_preview_hw_renderer =
+            HwRenderer::new(device.clone(), queue.clone(), &mut egui_renderer);
         // Higher internal scale for the editor preview -- the game's
         // renderer follows user/scale-mode preference, but the editor
         // viewport is always overlay-friendly host resolution.
         editor_hw_renderer.set_internal_scale(2, Some(&mut egui_renderer));
+        camera_preview_hw_renderer.set_internal_scale(2, Some(&mut egui_renderer));
 
         Self {
             window,
@@ -164,6 +169,7 @@ impl Graphics {
             display_texture_id,
             hw_renderer,
             editor_hw_renderer,
+            camera_preview_hw_renderer,
             editor_gpu_stub: Gpu::new(),
             editor_textures: crate::editor_textures::EditorTextures::new(),
             editor_assets: crate::editor_assets::EditorAssets::new(),
@@ -191,6 +197,11 @@ impl Graphics {
     /// frames; the editor's 3D viewport panel paints it as an Image.
     pub fn editor_hw_texture_id(&self) -> egui::TextureId {
         self.editor_hw_renderer.texture_id()
+    }
+
+    /// Egui handle for the selected Camera inspector preview target.
+    pub fn camera_preview_texture_id(&self) -> egui::TextureId {
+        self.camera_preview_hw_renderer.texture_id()
     }
 
     /// Host-drawn overlay lines from the latest editor preview pass.
@@ -264,6 +275,52 @@ impl Graphics {
         );
         self.editor_overlay_lines = frame.overlay_lines;
         self.editor_hw_renderer.render_frame(
+            &self.editor_gpu_stub,
+            &frame.cmd_log,
+            self.editor_textures.vram_words(),
+        );
+    }
+
+    /// Render a clean scene view from the selected gameplay Camera into the
+    /// inspector preview target.
+    pub fn render_editor_camera_preview(
+        &mut self,
+        project: &psxed_project::ProjectDocument,
+        project_root: &std::path::Path,
+        request: psxed_ui::EditorCameraPreviewRequest,
+        preview_fog: bool,
+        hidden_scene_nodes: &std::collections::HashSet<psxed_project::NodeId>,
+        active_floor: usize,
+    ) {
+        self.editor_textures.refresh(project, project_root);
+        self.editor_textures.refresh_models(project, project_root);
+        self.editor_assets.refresh(project, project_root);
+        let frame = crate::editor_preview::build_phase1_frame(
+            project,
+            request.camera,
+            preview_fog,
+            false,
+            false,
+            false,
+            false,
+            false,
+            hidden_scene_nodes,
+            request.active_room,
+            active_floor,
+            psxed_project::NodeId::ROOT,
+            None,
+            None,
+            &[],
+            &[],
+            None,
+            &[],
+            None,
+            &[],
+            None,
+            &self.editor_textures,
+            &self.editor_assets,
+        );
+        self.camera_preview_hw_renderer.render_frame(
             &self.editor_gpu_stub,
             &frame.cmd_log,
             self.editor_textures.vram_words(),

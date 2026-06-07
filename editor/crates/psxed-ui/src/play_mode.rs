@@ -80,6 +80,30 @@ pub struct EditorViewport3dPresentation {
     pub play_metrics: Option<EditorPlaytestMetrics>,
     /// Current embedded-play input tape state.
     pub play_tape: EditorPlaytestTapeStatus,
+    /// Optional rendered gameplay Camera view for the inspector.
+    pub camera_preview: Option<EditorCameraPreviewPresentation>,
+}
+
+/// Rendered gameplay Camera view shown inside the Camera inspector.
+#[derive(Clone, Copy)]
+pub struct EditorCameraPreviewPresentation {
+    /// Egui texture containing the rendered camera preview.
+    pub texture: egui::TextureId,
+    /// UV region inside `texture`.
+    pub uv: Rect,
+}
+
+impl EditorCameraPreviewPresentation {
+    /// Build a preview presentation using the editor renderer's 2x PSX target.
+    pub fn new(texture: egui::TextureId) -> Self {
+        Self {
+            texture,
+            uv: Rect::from_min_max(
+                egui::pos2(0.0, 0.0),
+                egui::pos2(640.0 / 2048.0, 480.0 / 1024.0),
+            ),
+        }
+    }
 }
 
 impl EditorViewport3dPresentation {
@@ -96,6 +120,7 @@ impl EditorViewport3dPresentation {
             overlay_source_size: egui::vec2(320.0, 240.0),
             play_metrics: None,
             play_tape: EditorPlaytestTapeStatus::default(),
+            camera_preview: None,
         }
     }
 
@@ -114,7 +139,14 @@ impl EditorViewport3dPresentation {
             overlay_source_size: Vec2::ZERO,
             play_metrics,
             play_tape,
+            camera_preview: None,
         }
+    }
+
+    /// Attach an inspector Camera preview texture.
+    pub fn with_camera_preview(mut self, texture: egui::TextureId) -> Self {
+        self.camera_preview = Some(EditorCameraPreviewPresentation::new(texture));
+        self
     }
 }
 

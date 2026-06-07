@@ -925,10 +925,29 @@ impl ApplicationHandler for Shell {
                         editor_hovered_entity,
                     );
                 }
+                let editor_camera_preview = if !state.embedded_playtest_running() {
+                    state.editor.selected_camera_preview_request()
+                } else {
+                    None
+                };
+                if let Some(request) = editor_camera_preview {
+                    let editor_preview_fog = state.editor.preview_fog_enabled();
+                    let editor_hidden_scene_nodes = state.editor.hidden_scene_nodes();
+                    let editor_active_floor = state.editor.active_floor();
+                    let editor_root = state.editor.project_root();
+                    gfx.render_editor_camera_preview(
+                        state.editor.project(),
+                        editor_root,
+                        request,
+                        editor_preview_fog,
+                        editor_hidden_scene_nodes,
+                        editor_active_floor,
+                    );
+                }
 
                 let vram_tex = gfx.vram_texture_id();
                 let (display_tex, display_uv) = frontend_display(state.bus.as_ref(), gfx);
-                let editor_viewport = if state.embedded_playtest_running() {
+                let mut editor_viewport = if state.embedded_playtest_running() {
                     psxed_ui::EditorViewport3dPresentation::play(
                         display_tex,
                         display_uv,
@@ -941,6 +960,10 @@ impl ApplicationHandler for Shell {
                         gfx.editor_overlay_lines().to_vec(),
                     )
                 };
+                if editor_camera_preview.is_some() {
+                    editor_viewport =
+                        editor_viewport.with_camera_preview(gfx.camera_preview_texture_id());
+                }
                 profile.egui = gfx.render(|ctx| {
                     app::build_ui(
                         ctx,

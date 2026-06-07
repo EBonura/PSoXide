@@ -1312,7 +1312,11 @@ impl EditorWorkspace {
         }
     }
 
-    pub(crate) fn draw_inspector(&mut self, ctx: &egui::Context) {
+    pub(crate) fn draw_inspector(
+        &mut self,
+        ctx: &egui::Context,
+        camera_preview: Option<EditorCameraPreviewPresentation>,
+    ) {
         if !self.inspector_open {
             return;
         }
@@ -1465,6 +1469,7 @@ impl EditorWorkspace {
                                             inherited_sector_size,
                                             &mut room_grid_resize,
                                             &mut nav_target,
+                                            camera_preview,
                                         );
                                     });
                                 }
