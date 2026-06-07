@@ -269,6 +269,14 @@ pub(crate) fn character_action_flags_for(
     flags
 }
 
+/// Q8 playback speed (`256 = 1.0x`) cooked for one action binding,
+/// defaulting to unscaled when the binding leaves options unset.
+pub(crate) fn character_action_speed_for(options: Option<crate::CharacterActionOptions>) -> u16 {
+    options
+        .map(|options| options.speed_q8)
+        .unwrap_or(crate::ACTION_SPEED_UNSCALED_Q8)
+}
+
 pub(crate) fn add_model_clip_requirement(
     project: &ProjectDocument,
     out: &mut HashMap<ResourceId, BTreeSet<u16>>,
@@ -443,7 +451,7 @@ pub(crate) fn cook_player_character(
                           required: bool,
                           project: &ProjectDocument,
                           report: &mut PlaytestValidationReport|
-     -> Option<(u16, u8)> {
+     -> Option<(u16, u8, u16)> {
         let action_label = action.label().to_ascii_lowercase();
         if let Some(binding) = action_overrides
             .iter()
@@ -451,7 +459,11 @@ pub(crate) fn cook_player_character(
         {
             let idx = binding.clip;
             return match remap_runtime_model_clip(model_clip_remaps, model_resource_id, idx) {
-                Some(local) => Some((local, character_action_flags_for(action, binding.options))),
+                Some(local) => Some((
+                    local,
+                    character_action_flags_for(action, binding.options),
+                    character_action_speed_for(binding.options),
+                )),
                 None => {
                     report.error(format!(
                         "Animator on '{}' maps {action_label} to clip {idx}, but that clip was not packaged for runtime",
@@ -473,7 +485,11 @@ pub(crate) fn cook_player_character(
                         if let Some(local) =
                             remap_runtime_model_clip(model_clip_remaps, model_resource_id, index)
                         {
-                            return Some((local, character_action_flags_for(action, options)));
+                            return Some((
+                                local,
+                                character_action_flags_for(action, options),
+                                character_action_speed_for(options),
+                            ));
                         }
                         report.error(format!(
                             "Character '{}' {action_label} clip resolves to {index}, but that clip was not packaged for runtime",
@@ -505,6 +521,9 @@ pub(crate) fn cook_player_character(
                             action,
                             character_binding.and_then(|binding| binding.options),
                         ),
+                        character_action_speed_for(
+                            character_binding.and_then(|binding| binding.options),
+                        ),
                     )),
                     None => {
                         report.error(format!(
@@ -525,16 +544,21 @@ pub(crate) fn cook_player_character(
             None => Some((
                 CHARACTER_CLIP_NONE,
                 character_action_flags_for(action, None),
+                character_action_speed_for(None),
             )),
         }
     };
 
     let mut action_clips = [CHARACTER_CLIP_NONE; PLAYTEST_CHARACTER_ACTION_COUNT];
     let mut action_flags = [0u8; PLAYTEST_CHARACTER_ACTION_COUNT];
+    let mut action_speeds =
+        [psx_level::CHARACTER_ACTION_SPEED_UNSCALED_Q8; PLAYTEST_CHARACTER_ACTION_COUNT];
     for action in CharacterAnimationAction::ALL {
-        let (clip, flags) = resolve_action(action, action.required_for_player(), project, report)?;
+        let (clip, flags, speed) =
+            resolve_action(action, action.required_for_player(), project, report)?;
         action_clips[action.to_index()] = clip;
         action_flags[action.to_index()] = flags;
+        action_speeds[action.to_index()] = speed;
     }
 
     if settings.radius == 0 {
@@ -632,6 +656,7 @@ pub(crate) fn cook_player_character(
         model: model_index,
         action_clips,
         action_flags,
+        action_speeds,
         visual_offset,
         visual_yaw,
         visual_scale_q8,
