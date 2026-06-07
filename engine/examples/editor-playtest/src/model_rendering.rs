@@ -354,6 +354,7 @@ pub(super) fn draw_player(
         local_tick,
         video_hz,
         character.action_loops(anim_action),
+        character.action_speed(anim_action),
     );
     let bounds = model_frame_bounds(runtime_model, clip_local, phase);
     let clip_anchor = model_clip_anchor(runtime_model, clip_local);
@@ -746,8 +747,9 @@ fn animation_phase_at_tick_q12(
     local_tick: u32,
     video_hz: VideoHz,
     looping: bool,
+    speed_q8: u16,
 ) -> u32 {
-    let phase = animation.phase_at_tick_q12(local_tick, video_hz.as_u16());
+    let phase = animation.phase_at_tick_scaled_q12(local_tick, video_hz.as_u16(), speed_q8);
     if looping {
         return phase;
     }
