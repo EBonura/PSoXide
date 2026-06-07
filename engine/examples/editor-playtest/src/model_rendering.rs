@@ -266,6 +266,48 @@ impl Playtest {
         Some(scale_duration_for_action_speed(unscaled, speed_q8))
     }
 
+    pub(super) fn player_action_push_speed(
+        &self,
+        character: RuntimeCharacter,
+        anim: PlayerAnim,
+        local_tick: u32,
+        video_hz: VideoHz,
+    ) -> Option<i32> {
+        let action = anim.action();
+        let push = character.action_push(action);
+        if push.distance <= 0 {
+            return None;
+        }
+        let runtime_model = self
+            .models
+            .get(character.model.to_usize())
+            .copied()
+            .flatten()?;
+        let animation = runtime_model.clip(&self.clips, character.clip_for(anim))?;
+        let action_range = character.action_frame_range(action);
+        let (push_start, push_end) =
+            normalized_action_push_frame_range(animation, action_range, push.frame_range);
+        let phase = animation_phase_at_tick_q12(
+            animation,
+            local_tick,
+            video_hz,
+            character.action_loops(action),
+            character.action_speed(action),
+            action_range,
+        );
+        let current_frame = phase >> 12;
+        if current_frame < push_start || current_frame > push_end {
+            return None;
+        }
+        let sample_rate = animation.sample_rate_hz().max(1) as u32;
+        let push_frames = push_end.saturating_sub(push_start).saturating_add(1);
+        let unscaled = push_frames
+            .saturating_mul(video_hz.as_nonzero_u32())
+            .div_ceil(sample_rate);
+        let duration = scale_duration_for_action_speed(unscaled, character.action_speed(action));
+        Some((push.distance as u32).div_ceil(duration).max(1) as i32)
+    }
+
     pub(super) fn load_runtime_models(&mut self) {
         let mut i = 0;
         while i < MAX_RUNTIME_MODELS {
@@ -331,6 +373,21 @@ fn normalized_action_frame_range(
         (frame_range.end as u32).min(final_unique_frame)
     };
     (start, end.max(start))
+}
+
+fn normalized_action_push_frame_range(
+    animation: Animation<'static>,
+    action_range: psx_level::CharacterActionFrameRange,
+    push_range: psx_level::CharacterActionFrameRange,
+) -> (u32, u32) {
+    let (action_start, action_end) = normalized_action_frame_range(animation, action_range);
+    if push_range == psx_level::CharacterActionFrameRange::FULL {
+        return (action_start, action_end);
+    }
+    let (push_start, push_end) = normalized_action_frame_range(animation, push_range);
+    let start = push_start.max(action_start);
+    let end = push_end.min(action_end).max(start);
+    (start, end)
 }
 
 fn action_frame_range_frame_count(
@@ -774,7 +831,7 @@ fn visual_model_origin(
     )
 }
 
-fn animation_phase_at_tick_q12(
+pub(super) fn animation_phase_at_tick_q12(
     animation: Animation<'static>,
     local_tick: u32,
     video_hz: VideoHz,

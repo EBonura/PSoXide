@@ -177,7 +177,22 @@ impl Playtest {
                 input = CharacterMotorInput::default();
             }
         }
-        let config = self.motor_config();
+        let mut config = self.motor_config();
+        if action_locked && player_anim_is_attack(self.anim_state) {
+            if let Some(character) = self.character {
+                let local_tick = now.saturating_sub(self.anim_start_tick);
+                if let Some(push_speed) = self.player_action_push_speed(
+                    character,
+                    self.anim_state,
+                    local_tick,
+                    ctx.video_hz,
+                ) {
+                    input.walk = 1;
+                    config.walk_speed = push_speed;
+                    config.run_speed = config.run_speed.max(push_speed);
+                }
+            }
+        }
         if self.anim_lock_until_tick > now && player_anim_is_attack(self.anim_state) {
             self.break_box_props_for_attack(config);
         } else if let Some(trigger) =

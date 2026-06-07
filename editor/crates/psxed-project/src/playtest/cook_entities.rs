@@ -296,6 +296,28 @@ pub(crate) fn character_action_frame_range_for(
     }
 }
 
+pub(crate) fn character_action_push_for(
+    options: Option<crate::CharacterActionOptions>,
+) -> psx_level::CharacterActionPush {
+    let Some(options) = options else {
+        return psx_level::CharacterActionPush::NONE;
+    };
+    let end = if options.push_frame_end != crate::ACTION_FRAME_END_FULL
+        && options.push_frame_end < options.push_frame_start
+    {
+        options.push_frame_start
+    } else {
+        options.push_frame_end
+    };
+    psx_level::CharacterActionPush {
+        distance: options.push_distance.max(0),
+        frame_range: psx_level::CharacterActionFrameRange {
+            start: options.push_frame_start,
+            end,
+        },
+    }
+}
+
 pub(crate) fn add_model_clip_requirement(
     project: &ProjectDocument,
     out: &mut HashMap<ResourceId, BTreeSet<u16>>,
@@ -482,7 +504,13 @@ pub(crate) fn cook_player_character(
                           required: bool,
                           project: &ProjectDocument,
                           report: &mut PlaytestValidationReport|
-     -> Option<(u16, u8, u16, psx_level::CharacterActionFrameRange)> {
+     -> Option<(
+        u16,
+        u8,
+        u16,
+        psx_level::CharacterActionFrameRange,
+        psx_level::CharacterActionPush,
+    )> {
         let action_label = action.label().to_ascii_lowercase();
         if let Some(binding) = action_overrides
             .iter()
@@ -495,6 +523,7 @@ pub(crate) fn cook_player_character(
                     character_action_flags_for(action, binding.options),
                     character_action_speed_for(binding.options),
                     character_action_frame_range_for(binding.options),
+                    character_action_push_for(binding.options),
                 )),
                 None => {
                     report.error(format!(
@@ -522,6 +551,7 @@ pub(crate) fn cook_player_character(
                                 character_action_flags_for(action, options),
                                 character_action_speed_for(options),
                                 character_action_frame_range_for(options),
+                                character_action_push_for(options),
                             ));
                         }
                         report.error(format!(
@@ -560,6 +590,9 @@ pub(crate) fn cook_player_character(
                         character_action_frame_range_for(
                             character_binding.and_then(|binding| binding.options),
                         ),
+                        character_action_push_for(
+                            character_binding.and_then(|binding| binding.options),
+                        ),
                     )),
                     None => {
                         report.error(format!(
@@ -582,6 +615,7 @@ pub(crate) fn cook_player_character(
                 character_action_flags_for(action, None),
                 character_action_speed_for(None),
                 character_action_frame_range_for(None),
+                character_action_push_for(None),
             )),
         }
     };
@@ -592,13 +626,15 @@ pub(crate) fn cook_player_character(
         [psx_level::CHARACTER_ACTION_SPEED_UNSCALED_Q8; PLAYTEST_CHARACTER_ACTION_COUNT];
     let mut action_frame_ranges =
         [psx_level::CharacterActionFrameRange::FULL; PLAYTEST_CHARACTER_ACTION_COUNT];
+    let mut action_pushes = [psx_level::CharacterActionPush::NONE; PLAYTEST_CHARACTER_ACTION_COUNT];
     for action in CharacterAnimationAction::ALL {
-        let (clip, flags, speed, frame_range) =
+        let (clip, flags, speed, frame_range, push) =
             resolve_action(action, action.required_for_player(), project, report)?;
         action_clips[action.to_index()] = clip;
         action_flags[action.to_index()] = flags;
         action_speeds[action.to_index()] = speed;
         action_frame_ranges[action.to_index()] = frame_range;
+        action_pushes[action.to_index()] = push;
     }
 
     if settings.radius == 0 {
@@ -696,6 +732,7 @@ pub(crate) fn cook_player_character(
         action_flags,
         action_speeds,
         action_frame_ranges,
+        action_pushes,
         visual_offset,
         visual_yaw,
         visual_scale_q8,
