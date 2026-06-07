@@ -421,11 +421,21 @@ pub(crate) fn draw_animator_action_clip_table(
     };
     ui.horizontal(|ui| {
         ui.add_space(4.0);
-        header(ui, "Action", action_width);
-        header(ui, "Clip", clip_width);
-        header(ui, "Loop", flag_width);
-        header(ui, "In-place", flag_width);
-        header(ui, "Speed", speed_width);
+        animator_action_table_cell(ui, action_width, 18.0, |ui| {
+            header(ui, "Action", action_width);
+        });
+        animator_action_table_cell(ui, clip_width, 18.0, |ui| {
+            header(ui, "Clip", clip_width);
+        });
+        animator_action_table_cell(ui, flag_width, 18.0, |ui| {
+            header(ui, "Loop", flag_width);
+        });
+        animator_action_table_cell(ui, flag_width, 18.0, |ui| {
+            header(ui, "In-place", flag_width);
+        });
+        animator_action_table_cell(ui, speed_width, 18.0, |ui| {
+            header(ui, "Speed", speed_width);
+        });
     });
 
     ui.add_space(2.0);
@@ -455,27 +465,29 @@ pub(crate) fn draw_animator_action_clip_table(
             .inner_margin(egui::Margin::symmetric(4, 2))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.add_sized([action_width, 24.0], egui::Label::new(action.label()));
-                    if animator_action_clip_combo(
-                        ui,
-                        &format!("animator-action-{}", action.to_index()),
-                        clip_width,
-                        &mut current,
-                        inherited_clip,
-                        context.profile_name.as_deref(),
-                        &context.clips,
-                    ) {
-                        set_node_action_clip(action_clips, action, current);
-                        changed = true;
-                    }
+                    animator_action_table_cell(ui, action_width, 24.0, |ui| {
+                        ui.add_sized([action_width, 24.0], egui::Label::new(action.label()));
+                    });
+                    animator_action_table_cell(ui, clip_width, 24.0, |ui| {
+                        if animator_action_clip_combo(
+                            ui,
+                            &format!("animator-action-{}", action.to_index()),
+                            clip_width,
+                            &mut current,
+                            inherited_clip,
+                            context.profile_name.as_deref(),
+                            &context.clips,
+                        ) {
+                            set_node_action_clip(action_clips, action, current);
+                            changed = true;
+                        }
+                    });
 
                     let effective_clip = current.or(inherited_clip);
                     let enabled = effective_clip.is_some();
                     let before_options = options;
-                    ui.allocate_ui_with_layout(
-                        Vec2::new(flag_width, 24.0),
-                        egui::Layout::left_to_right(egui::Align::Center),
-                        |ui| {
+                    animator_action_table_cell(ui, flag_width, 24.0, |ui| {
+                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                             ui.centered_and_justified(|ui| {
                                 ui.add_enabled_ui(enabled, |ui| {
                                     changed |= ui
@@ -486,12 +498,10 @@ pub(crate) fn draw_animator_action_clip_table(
                                         .changed();
                                 });
                             });
-                        },
-                    );
-                    ui.allocate_ui_with_layout(
-                        Vec2::new(flag_width, 24.0),
-                        egui::Layout::left_to_right(egui::Align::Center),
-                        |ui| {
+                        });
+                    });
+                    animator_action_table_cell(ui, flag_width, 24.0, |ui| {
+                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                             ui.centered_and_justified(|ui| {
                                 ui.add_enabled_ui(enabled, |ui| {
                                     changed |= ui
@@ -500,12 +510,10 @@ pub(crate) fn draw_animator_action_clip_table(
                                         .changed();
                                 });
                             });
-                        },
-                    );
-                    ui.allocate_ui_with_layout(
-                        Vec2::new(speed_width, 24.0),
-                        egui::Layout::left_to_right(egui::Align::Center),
-                        |ui| {
+                        });
+                    });
+                    animator_action_table_cell(ui, speed_width, 24.0, |ui| {
+                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                             ui.add_enabled_ui(enabled, |ui| {
                                 let mut speed_mult = options.speed_q8 as f32 / 256.0;
                                 if ui
@@ -527,8 +535,8 @@ pub(crate) fn draw_animator_action_clip_table(
                                     ) as u16;
                                 }
                             });
-                        },
-                    );
+                        });
+                    });
                     if enabled && options != before_options {
                         let clip = effective_clip.expect("enabled rows have a clip");
                         if current.is_none() {
@@ -549,6 +557,24 @@ pub(crate) fn draw_animator_action_clip_table(
             });
     }
     changed
+}
+
+fn animator_action_table_cell<R>(
+    ui: &mut egui::Ui,
+    width: f32,
+    height: f32,
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, height), egui::Sense::hover());
+    let mut child = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(rect)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    child.set_clip_rect(rect);
+    child.set_width(width);
+    child.set_height(height);
+    add_contents(&mut child)
 }
 
 pub(crate) fn animator_action_option_defaults(
@@ -598,6 +624,7 @@ pub(crate) fn animator_action_clip_combo(
     let short_preview = compact_animator_clip_label(&preview, 36);
     egui::ComboBox::from_id_salt(id_salt)
         .width(width)
+        .truncate()
         .selected_text(short_preview)
         .show_ui(ui, |ui| {
             let inherit_label = inherited_clip
