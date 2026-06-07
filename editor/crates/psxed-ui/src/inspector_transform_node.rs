@@ -792,6 +792,42 @@ fn camera_lag_shift_for_speed_level(speed: u8) -> u8 {
     MAX_SPEED_LEVEL - speed.clamp(1, MAX_SPEED_LEVEL)
 }
 
+pub(crate) fn draw_gameplay_camera_render_preview(
+    ui: &mut egui::Ui,
+    preview: Option<EditorCameraPreviewPresentation>,
+) {
+    let width = ui.available_width().min(360.0).max(1.0);
+    let height = width * 0.75;
+    let size = Vec2::new(width, height);
+    if let Some(preview) = preview {
+        egui::Frame::new()
+            .fill(STUDIO_PANEL_HEADER)
+            .stroke(egui::Stroke::new(1.0, Color32::from_rgb(44, 55, 70)))
+            .corner_radius(6.0)
+            .show(ui, |ui| {
+                ui.add(egui::Image::new((preview.texture, size)).uv(preview.uv));
+            });
+        ui.weak("Rendered from this Camera component's starting gameplay rig.");
+    } else {
+        let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, 6.0, STUDIO_PANEL_HEADER);
+        painter.rect_stroke(
+            rect,
+            6.0,
+            egui::Stroke::new(1.0, Color32::from_rgb(44, 55, 70)),
+            egui::StrokeKind::Inside,
+        );
+        painter.text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "Select a Camera component to render preview",
+            egui::TextStyle::Small.resolve(ui.style()),
+            STUDIO_TEXT_WEAK,
+        );
+    }
+}
+
 pub(crate) fn draw_gameplay_camera_start_preview(ui: &mut egui::Ui, camera: WorldCameraSettings) {
     let width = ui.available_width().min(360.0).max(1.0);
     let height = 150.0;
@@ -1622,6 +1658,7 @@ pub(crate) fn draw_node_kind_editor(
     inherited_sector_size: i32,
     room_grid_resize: &mut Option<(u16, u16)>,
     nav_target: &mut Option<ResourceId>,
+    camera_preview: Option<EditorCameraPreviewPresentation>,
 ) -> bool {
     let mut changed = false;
     ui.horizontal(|ui| {
@@ -2288,6 +2325,11 @@ pub(crate) fn draw_node_kind_editor(
         NodeKind::Camera { settings } => {
             ui.weak("Component: third-person gameplay camera for the player Entity. The Entity transform supplies the start position and yaw.");
             changed |= draw_gameplay_camera_settings(ui, settings);
+            egui::CollapsingHeader::new(icons::label(icons::EYE, "Camera Preview"))
+                .default_open(true)
+                .show(ui, |ui| {
+                    draw_gameplay_camera_render_preview(ui, camera_preview);
+                });
             egui::CollapsingHeader::new(icons::label(icons::EYE, "Starting Position Preview"))
                 .default_open(true)
                 .show(ui, |ui| {
