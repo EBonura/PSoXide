@@ -1475,12 +1475,14 @@ fn write_cdda_tracks(package: &PlaytestPackage, cdda_tracks_dir: &Path) -> std::
     for track in &package.cdda_tracks {
         let source = Path::new(&track.wav_path);
         let bytes = std::fs::read(source)?;
-        let cooked = psxed_audio::cook_cdda_track_from_wav(&bytes).map_err(|e| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("cook CD-DA track {}: {e}", source.display()),
-            )
-        })?;
+        let cooked =
+            psxed_audio::cook_cdda_track_from_wav_at_speed(&bytes, track.playback_speed_q12)
+                .map_err(|e| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("cook CD-DA track {}: {e}", source.display()),
+                    )
+                })?;
         let filename = format!("track{:02}.cdda", track.track);
         let target = cdda_tracks_dir.join(filename);
         std::fs::write(&target, cooked)?;
