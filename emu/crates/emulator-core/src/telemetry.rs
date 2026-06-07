@@ -590,12 +590,16 @@ pub mod counter {
     pub const VRAM_UPLOAD_QUEUE_FULL: u16 = 221;
     /// Room materials left untextured because their texture was not VRAM-resident.
     pub const ROOM_MATERIAL_TEXTURE_DROPS: u16 = 222;
+    /// Room materials dropped because their `local_slot` >= MAX_ROOM_MATERIALS:
+    /// the room references more distinct materials than the per-room table holds,
+    /// so surfaces using the overflow slots render untextured or not at all.
+    pub const ROOM_MATERIAL_SLOT_OVERFLOW: u16 = 223;
 }
 
 /// Number of counter slots, including index zero for unknown/reserved ids.
 /// Must stay larger than the highest counter id emitted by the guest
 /// (`psx_engine::telemetry::counter`); a counter id >= this is silently dropped.
-pub const COUNTER_COUNT: usize = 223;
+pub const COUNTER_COUNT: usize = 224;
 
 /// Telemetry event kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1273,6 +1277,7 @@ pub fn counter_name(id: u16) -> &'static str {
         counter::VRAM_CLUT_FULL => "vram clut full",
         counter::VRAM_UPLOAD_QUEUE_FULL => "vram upload queue full",
         counter::ROOM_MATERIAL_TEXTURE_DROPS => "room material texture drops",
+        counter::ROOM_MATERIAL_SLOT_OVERFLOW => "room material slot overflow",
         _ => "unknown",
     }
 }

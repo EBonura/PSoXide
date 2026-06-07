@@ -461,7 +461,8 @@ pub(crate) fn draw_play_chunk_debug_map(
         + metrics.vram_caps_full[0]
         + metrics.vram_caps_full[1]
         + metrics.vram_caps_full[2]
-        + metrics.vram_caps_full[3];
+        + metrics.vram_caps_full[3]
+        + metrics.room_material_slot_overflow;
     let vram_color = if vram_total > 0 {
         Color32::from_rgb(255, 120, 120)
     } else {
@@ -471,12 +472,15 @@ pub(crate) fn draw_play_chunk_debug_map(
         map_rect.left_top() + Vec2::new(8.0, 45.0),
         Align2::LEFT_TOP,
         format!(
-            "vdrop {}  slot {}  win {}  clut {}  q {}",
+            // `mat` is the per-room material-slot overflow: room uses more
+            // materials than MAX_ROOM_MATERIALS, so surfaces go invisible.
+            "vdrop {}  slot {}  win {}  clut {}  q {}  mat {}",
             metrics.vram_texture_drops,
             metrics.vram_caps_full[0],
             metrics.vram_caps_full[1],
             metrics.vram_caps_full[2],
             metrics.vram_caps_full[3],
+            metrics.room_material_slot_overflow,
         ),
         FontId::monospace(9.0),
         vram_color,

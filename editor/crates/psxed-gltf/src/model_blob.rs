@@ -211,7 +211,9 @@ pub(crate) fn cook_model_blob(
     Ok((out, cooked_vertices.len(), part_records.len()))
 }
 
-pub(crate) fn model_vertex_position_key(record: &[u8; psxed_format::model::VERTEX_RECORD_SIZE]) -> [i16; 3] {
+pub(crate) fn model_vertex_position_key(
+    record: &[u8; psxed_format::model::VERTEX_RECORD_SIZE],
+) -> [i16; 3] {
     [
         i16::from_le_bytes([record[0], record[1]]),
         i16::from_le_bytes([record[2], record[3]]),
@@ -219,7 +221,10 @@ pub(crate) fn model_vertex_position_key(record: &[u8; psxed_format::model::VERTE
     ]
 }
 
-pub(crate) fn model_vertex_position_key_for_source(vertex: SourceVertex, bounds: &ModelBounds) -> [i16; 3] {
+pub(crate) fn model_vertex_position_key_for_source(
+    vertex: SourceVertex,
+    bounds: &ModelBounds,
+) -> [i16; 3] {
     let position = bounds.normalize_point(vertex.position);
     [
         q12_i16(position[0]),

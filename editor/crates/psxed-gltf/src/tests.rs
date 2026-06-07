@@ -397,8 +397,7 @@ fn cooked_animation_pose_scale_is_stripped_when_enabled() {
     }];
     let joints = [0usize];
     let inverse_bind_matrices = [identity_matrix()];
-    let bounds =
-        ModelBounds::from_min_max([-1.0, -1.0, -1.0], [1.0, 1.0, 1.0], 30_000.0).unwrap();
+    let bounds = ModelBounds::from_min_max([-1.0, -1.0, -1.0], [1.0, 1.0, 1.0], 30_000.0).unwrap();
 
     let stripped = cook_animation_bytes(
         &channels,
@@ -511,8 +510,7 @@ fn mapped_gltf_same_bind_preserves_local_translation_keys() {
 
 #[test]
 fn pose_record_round_trips_encoded_model_space() {
-    let bounds =
-        ModelBounds::from_min_max([-2.0, -3.0, -4.0], [4.0, 5.0, 6.0], 30_000.0).unwrap();
+    let bounds = ModelBounds::from_min_max([-2.0, -3.0, -4.0], [4.0, 5.0, 6.0], 30_000.0).unwrap();
     let skin = compose_trs([3.0, -2.0, 1.0], quat_z_degrees(90.0), [1.0, 1.0, 1.0]);
     let bytes = finish_animation_bytes(1, 1, 15, &[pose_record(&skin, &bounds)]).unwrap();
 
