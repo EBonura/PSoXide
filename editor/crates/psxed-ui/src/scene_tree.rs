@@ -1207,7 +1207,7 @@ pub(crate) fn draw_scene_node_row(
     if row.id != NodeId::ROOT {
         response.context_menu(|ui| {
             ui.menu_button(icons::label(icons::PLUS, "Add Child"), |ui| {
-                for (label, kind) in scene_graph_addable_kinds() {
+                for (label, kind) in scene_graph_addable_kinds_for_host_label(row.kind) {
                     if ui.button(label).clicked() {
                         actions.push(TreeAction::AddChild {
                             parent: row.id,
@@ -1450,11 +1450,10 @@ pub(crate) fn scene_tree_kind_label(kind: &'static str) -> &'static str {
     }
 }
 
-/// Structural scene-graph entries for "Add Child" menus.
+/// Structural scene-graph entries for global "Add Child" menus.
 ///
 /// Runtime objects are placed through the toolbar Add/Place menu so a click
 /// can resolve room context, resources, floor anchoring, and dedupe rules.
-/// Entity components are added from the selected Entity's Components panel.
 pub(crate) fn scene_graph_addable_kinds() -> [(&'static str, NodeKind); 3] {
     [
         (
@@ -1466,6 +1465,20 @@ pub(crate) fn scene_graph_addable_kinds() -> [(&'static str, NodeKind); 3] {
         ("Entity", NodeKind::Entity),
         ("Folder", NodeKind::Node),
     ]
+}
+
+/// Scene-graph entries for a specific row's "Add Child" menu.
+///
+/// Entity components are real child nodes, so expose them beside the
+/// structural nodes when adding directly under an Entity.
+pub(crate) fn scene_graph_addable_kinds_for_host_label(
+    host_kind: &str,
+) -> Vec<(&'static str, NodeKind)> {
+    let mut addable = scene_graph_addable_kinds().into_iter().collect::<Vec<_>>();
+    if host_kind == NodeKind::Entity.label() {
+        addable.extend(component_templates_for_host(&NodeKind::Entity));
+    }
+    addable
 }
 
 /// Default UI node templates for the UI tree "Add" menu.
@@ -1663,6 +1676,12 @@ pub(crate) fn component_templates_for_host(host_kind: &NodeKind) -> Vec<(&'stati
             },
         ),
         (
+            "Camera",
+            NodeKind::Camera {
+                settings: WorldCameraSettings::default(),
+            },
+        ),
+        (
             "Equipment",
             NodeKind::Equipment {
                 weapon: None,
@@ -1741,6 +1760,7 @@ pub(crate) const fn component_slot(kind: &NodeKind) -> Option<&'static str> {
         NodeKind::Animator { .. } => Some("Animator"),
         NodeKind::Collider { .. } => Some("Collider"),
         NodeKind::CharacterController { .. } => Some("CharacterController"),
+        NodeKind::Camera { .. } => Some("Camera"),
         NodeKind::Equipment { .. } => Some("Equipment"),
         NodeKind::PhysicsBody { .. } => Some("PhysicsBody"),
         NodeKind::Interactable { .. } => Some("Interactable"),

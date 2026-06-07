@@ -1271,6 +1271,7 @@ pub(crate) fn node_kind_reference_count(kind: &NodeKind, id: ResourceId) -> usiz
         | NodeKind::Entity
         | NodeKind::Animator { .. }
         | NodeKind::Collider { .. }
+        | NodeKind::Camera { .. }
         | NodeKind::PhysicsBody { .. }
         | NodeKind::Interactable { .. }
         | NodeKind::PointLight { .. }
@@ -1328,6 +1329,7 @@ pub(crate) fn clear_node_kind_references(kind: &mut NodeKind, id: ResourceId) ->
         | NodeKind::Entity
         | NodeKind::Animator { .. }
         | NodeKind::Collider { .. }
+        | NodeKind::Camera { .. }
         | NodeKind::PhysicsBody { .. }
         | NodeKind::Interactable { .. }
         | NodeKind::PointLight { .. }

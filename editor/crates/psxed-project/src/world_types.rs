@@ -377,6 +377,15 @@ pub struct WorldCameraSettings {
     /// Minimum camera origin height above the sampled floor.
     #[serde(default = "default_world_camera_min_floor_clearance")]
     pub min_floor_clearance: i32,
+    /// Camera origin follow lag shift. Lower values move faster.
+    #[serde(default = "default_world_camera_position_lag_shift")]
+    pub position_lag_shift: u8,
+    /// Camera focus follow lag shift. Lower values move faster.
+    #[serde(default = "default_world_camera_focus_lag_shift")]
+    pub focus_lag_shift: u8,
+    /// Collision boom recovery lag shift. Lower values move faster.
+    #[serde(default = "default_world_camera_distance_lag_shift")]
+    pub distance_lag_shift: u8,
 }
 
 impl WorldCameraSettings {
@@ -391,6 +400,9 @@ impl WorldCameraSettings {
             min_floor_clearance: self
                 .min_floor_clearance
                 .clamp(0, MAX_WORLD_CAMERA_MIN_FLOOR_CLEARANCE),
+            position_lag_shift: self.position_lag_shift.min(MAX_WORLD_CAMERA_LAG_SHIFT),
+            focus_lag_shift: self.focus_lag_shift.min(MAX_WORLD_CAMERA_LAG_SHIFT),
+            distance_lag_shift: self.distance_lag_shift.min(MAX_WORLD_CAMERA_LAG_SHIFT),
         }
     }
 }
@@ -402,6 +414,9 @@ impl Default for WorldCameraSettings {
             height: default_world_camera_height(),
             target_height: default_world_camera_target_height(),
             min_floor_clearance: default_world_camera_min_floor_clearance(),
+            position_lag_shift: default_world_camera_position_lag_shift(),
+            focus_lag_shift: default_world_camera_focus_lag_shift(),
+            distance_lag_shift: default_world_camera_distance_lag_shift(),
         }
     }
 }
