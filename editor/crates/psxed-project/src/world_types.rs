@@ -377,6 +377,9 @@ pub struct WorldCameraSettings {
     /// Minimum camera origin height above the sampled floor.
     #[serde(default = "default_world_camera_min_floor_clearance")]
     pub min_floor_clearance: i32,
+    /// Manual orbit input speed level. Higher values turn faster.
+    #[serde(default = "default_world_camera_orbit_speed_level")]
+    pub orbit_speed_level: u8,
     /// Camera origin follow lag shift. Lower values move faster.
     #[serde(default = "default_world_camera_position_lag_shift")]
     pub position_lag_shift: u8,
@@ -400,6 +403,10 @@ impl WorldCameraSettings {
             min_floor_clearance: self
                 .min_floor_clearance
                 .clamp(0, MAX_WORLD_CAMERA_MIN_FLOOR_CLEARANCE),
+            orbit_speed_level: self.orbit_speed_level.clamp(
+                MIN_WORLD_CAMERA_ORBIT_SPEED_LEVEL,
+                MAX_WORLD_CAMERA_ORBIT_SPEED_LEVEL,
+            ),
             position_lag_shift: self.position_lag_shift.min(MAX_WORLD_CAMERA_LAG_SHIFT),
             focus_lag_shift: self.focus_lag_shift.min(MAX_WORLD_CAMERA_LAG_SHIFT),
             distance_lag_shift: self.distance_lag_shift.min(MAX_WORLD_CAMERA_LAG_SHIFT),
@@ -414,6 +421,7 @@ impl Default for WorldCameraSettings {
             height: default_world_camera_height(),
             target_height: default_world_camera_target_height(),
             min_floor_clearance: default_world_camera_min_floor_clearance(),
+            orbit_speed_level: default_world_camera_orbit_speed_level(),
             position_lag_shift: default_world_camera_position_lag_shift(),
             focus_lag_shift: default_world_camera_focus_lag_shift(),
             distance_lag_shift: default_world_camera_distance_lag_shift(),

@@ -103,7 +103,10 @@ impl Playtest {
             let (right_x, right_y) = ctx.pad.sticks.right_centered();
             self.camera_turning_last_tick = abs_i16(right_x) >= CAMERA_STICK_DEADZONE;
             self.orbit_yaw = self.orbit_yaw.add_signed_q12(scale_i16_by_vblanks(
-                stick_to_yaw_delta(psx_engine::InputAxis::new(right_x.saturating_neg())),
+                stick_to_yaw_delta(
+                    psx_engine::InputAxis::new(right_x.saturating_neg()),
+                    self.camera_orbit_speed_level(),
+                ),
                 delta_vblanks,
             ));
             self.orbit_radius = (self.orbit_radius
