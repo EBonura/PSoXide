@@ -346,6 +346,8 @@ impl UiAction {
 
 /// Pitch multiplier that plays a UI SFX cue at its source pitch.
 pub const UI_SFX_PITCH_UNITY_Q12: u16 = 4096;
+/// Playback-speed multiplier that bakes a music cue at its source tempo.
+pub const UI_MUSIC_PLAYBACK_SPEED_UNITY_Q12: u16 = 4096;
 
 pub(crate) fn default_ui_sfx_volume() -> u8 {
     80
@@ -353,6 +355,10 @@ pub(crate) fn default_ui_sfx_volume() -> u8 {
 
 pub(crate) fn default_ui_sfx_pitch_q12() -> u16 {
     UI_SFX_PITCH_UNITY_Q12
+}
+
+pub(crate) fn default_ui_music_playback_speed_q12() -> u16 {
+    UI_MUSIC_PLAYBACK_SPEED_UNITY_Q12
 }
 
 /// One editor-authored SFX choice for a UI event.
@@ -1018,6 +1024,11 @@ pub enum UiNodeKind {
         /// scene is open.
         #[serde(default)]
         volume_option: Option<OptionId>,
+        /// Baked playback-speed multiplier in Q12 (`4096` = 1.0x). This is a
+        /// preprocessing knob: the generated CD-DA track is resampled, while
+        /// runtime CD playback remains standard speed.
+        #[serde(default = "default_ui_music_playback_speed_q12")]
+        playback_speed_q12: u16,
         /// Restart the track when the CD-ROM reports playback has ended.
         #[serde(default)]
         loop_track: bool,
