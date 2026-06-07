@@ -334,10 +334,10 @@ pub(super) fn psx_blend_mode(mode: psxed_project::PsxBlendMode) -> BlendMode {
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(super) struct PreviewFog {
-    enabled: bool,
-    rgb: (u8, u8, u8),
-    near: i32,
-    far: i32,
+    pub(super) enabled: bool,
+    pub(super) rgb: (u8, u8, u8),
+    pub(super) near: i32,
+    pub(super) far: i32,
 }
 
 impl PreviewFog {

@@ -40,8 +40,8 @@ pub(crate) fn push_portal_seam_edges(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PortalSeamRun {
-    start: PortalEdge,
-    len: u16,
+    pub(super) start: PortalEdge,
+    pub(super) len: u16,
 }
 
 pub(crate) fn portal_seam_runs(mut edges: Vec<PortalEdge>) -> Vec<PortalSeamRun> {
