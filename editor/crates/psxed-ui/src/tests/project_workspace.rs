@@ -615,6 +615,7 @@ fn debug_snapshot_writes_portal_runtime_log() {
         stream_protected_full: 0,
         vram_texture_drops: 0,
         vram_caps_full: [0, 0, 0, 0],
+        room_material_slot_overflow: 0,
         chunk_loaded_mask: 1,
         chunk_loading_mask: 0,
         chunk_active_mask: 1,
