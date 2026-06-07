@@ -68,6 +68,7 @@ pub(super) struct RuntimeCharacter {
     pub(super) action_speeds: [u16; CHARACTER_ANIMATION_ACTION_COUNT],
     pub(super) action_frame_ranges:
         [psx_level::CharacterActionFrameRange; CHARACTER_ANIMATION_ACTION_COUNT],
+    pub(super) action_pushes: [psx_level::CharacterActionPush; CHARACTER_ANIMATION_ACTION_COUNT],
     pub(super) visual_offset: [i16; 3],
     pub(super) visual_yaw: i16,
     pub(super) visual_scale_q8: u16,
@@ -115,6 +116,7 @@ impl RuntimeCharacter {
             action_flags: c.action_flags,
             action_speeds: c.action_speeds,
             action_frame_ranges: c.action_frame_ranges,
+            action_pushes: c.action_pushes,
             visual_offset: c.visual_offset,
             visual_yaw: c.visual_yaw,
             visual_scale_q8: c.visual_scale_q8,
@@ -172,6 +174,16 @@ impl RuntimeCharacter {
             .get(action.to_index())
             .copied()
             .unwrap_or(psx_level::CharacterActionFrameRange::FULL)
+    }
+
+    pub(super) fn action_push(
+        &self,
+        action: CharacterAnimationAction,
+    ) -> psx_level::CharacterActionPush {
+        self.action_pushes
+            .get(action.to_index())
+            .copied()
+            .unwrap_or(psx_level::CharacterActionPush::NONE)
     }
 
     pub(super) fn action_loops(&self, action: CharacterAnimationAction) -> bool {
