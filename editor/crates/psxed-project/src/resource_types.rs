@@ -360,6 +360,8 @@ pub const ACTION_SPEED_UNSCALED_Q8: u16 = 256;
 pub const ACTION_SPEED_MIN_Q8: u16 = 64;
 /// Authoring upper clamp for per-action playback speed (`4.0x`).
 pub const ACTION_SPEED_MAX_Q8: u16 = 1024;
+/// Sentinel meaning the action plays through the selected clip's last frame.
+pub const ACTION_FRAME_END_FULL: u16 = psx_level::CHARACTER_ACTION_FRAME_END_FULL;
 
 /// Default per-action playback speed: `1.0x` (unscaled).
 pub(crate) const fn default_action_speed_q8() -> u16 {
@@ -383,6 +385,13 @@ pub struct CharacterActionOptions {
     /// [`ACTION_SPEED_MIN_Q8`]..=[`ACTION_SPEED_MAX_Q8`].
     #[serde(default = "default_action_speed_q8")]
     pub speed_q8: u16,
+    /// First sampled frame to play for this action.
+    #[serde(default)]
+    pub frame_start: u16,
+    /// Last sampled frame to play, inclusive. [`ACTION_FRAME_END_FULL`]
+    /// means the selected clip's final frame.
+    #[serde(default = "default_action_frame_end")]
+    pub frame_end: u16,
 }
 
 impl CharacterActionOptions {
@@ -391,8 +400,14 @@ impl CharacterActionOptions {
             looping: action.loops_by_default(),
             in_place: true,
             speed_q8: ACTION_SPEED_UNSCALED_Q8,
+            frame_start: 0,
+            frame_end: ACTION_FRAME_END_FULL,
         }
     }
+}
+
+pub(crate) const fn default_action_frame_end() -> u16 {
+    ACTION_FRAME_END_FULL
 }
 
 /// Where an authoring-time animation candidate came from. The source

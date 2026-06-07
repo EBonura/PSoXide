@@ -464,6 +464,9 @@ pub(crate) fn draw_animator_action_clip_table(
             .fill(row_fill)
             .inner_margin(egui::Margin::symmetric(4, 2))
             .show(ui, |ui| {
+                let mut effective_clip = current.or(inherited_clip);
+                let mut enabled = effective_clip.is_some();
+                let before_options = options;
                 ui.horizontal(|ui| {
                     animator_action_table_cell(ui, action_width, 24.0, |ui| {
                         ui.add_sized([action_width, 24.0], egui::Label::new(action.label()));
@@ -483,9 +486,8 @@ pub(crate) fn draw_animator_action_clip_table(
                         }
                     });
 
-                    let effective_clip = current.or(inherited_clip);
-                    let enabled = effective_clip.is_some();
-                    let before_options = options;
+                    effective_clip = current.or(inherited_clip);
+                    enabled = effective_clip.is_some();
                     animator_action_table_cell(ui, flag_width, 24.0, |ui| {
                         ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                             ui.centered_and_justified(|ui| {
@@ -537,24 +539,161 @@ pub(crate) fn draw_animator_action_clip_table(
                             });
                         });
                     });
-                    if enabled && options != before_options {
-                        let clip = effective_clip.expect("enabled rows have a clip");
-                        if current.is_none() {
-                            current = Some(clip);
-                            set_node_action_clip(action_clips, action, current);
-                        }
-                        let defaults = animator_action_option_defaults(
-                            action,
-                            current,
-                            inherited_clip,
-                            context,
-                        );
-                        let stored = (options != defaults).then_some(options);
-                        set_node_action_options(action_clips, action, stored);
-                        changed = true;
-                    }
                 });
+
+                ui.horizontal(|ui| {
+                    ui.add_space(action_width + 4.0);
+                    let frame_count = effective_clip
+                        .and_then(|clip| context.clip_frame_counts.get(clip as usize))
+                        .copied()
+                        .flatten();
+                    ui.add_enabled_ui(enabled, |ui| {
+                        changed |= animator_action_frame_range_controls(
+                            ui,
+                            &format!("animator-action-range-{}", action.to_index()),
+                            clip_width,
+                            &mut options,
+                            frame_count,
+                        );
+                    });
+                });
+
+                if enabled && options != before_options {
+                    let clip = effective_clip.expect("enabled rows have a clip");
+                    if current.is_none() {
+                        current = Some(clip);
+                        set_node_action_clip(action_clips, action, current);
+                    }
+                    let defaults =
+                        animator_action_option_defaults(action, current, inherited_clip, context);
+                    let stored = (options != defaults).then_some(options);
+                    set_node_action_options(action_clips, action, stored);
+                    changed = true;
+                }
             });
+    }
+    changed
+}
+
+fn animator_action_frame_range_controls(
+    ui: &mut egui::Ui,
+    id_salt: &str,
+    width: f32,
+    options: &mut psxed_project::CharacterActionOptions,
+    frame_count: Option<u16>,
+) -> bool {
+    let Some(frame_count) = frame_count else {
+        ui.add_sized(
+            [width, 18.0],
+            egui::Label::new(
+                RichText::new("Frames unavailable")
+                    .small()
+                    .color(STUDIO_TEXT_WEAK),
+            ),
+        );
+        return false;
+    };
+    let max_frame = frame_count.saturating_sub(2);
+    let mut start = options.frame_start.min(max_frame);
+    let mut end = if options.frame_end == psxed_project::ACTION_FRAME_END_FULL {
+        max_frame
+    } else {
+        options.frame_end.min(max_frame)
+    };
+    if end < start {
+        end = start;
+    }
+
+    let mut changed = false;
+    ui.vertical(|ui| {
+        ui.set_width(width);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Frames").small().color(STUDIO_TEXT_WEAK));
+            ui.label(RichText::new(format!("{start}-{end}")).small());
+        });
+        changed |= double_frame_range_slider(ui, id_salt, width, &mut start, &mut end, max_frame);
+    });
+
+    if changed {
+        options.frame_start = start;
+        options.frame_end = if end == max_frame {
+            psxed_project::ACTION_FRAME_END_FULL
+        } else {
+            end
+        };
+    }
+    changed
+}
+
+fn double_frame_range_slider(
+    ui: &mut egui::Ui,
+    id_salt: &str,
+    width: f32,
+    start: &mut u16,
+    end: &mut u16,
+    max_frame: u16,
+) -> bool {
+    let id = ui.make_persistent_id(id_salt);
+    let desired = Vec2::new(width, 18.0);
+    let (rect, response) = ui.allocate_exact_size(desired, egui::Sense::click_and_drag());
+    let rail = egui::Rect::from_min_max(
+        egui::pos2(rect.left() + 6.0, rect.center().y - 1.0),
+        egui::pos2(rect.right() - 6.0, rect.center().y + 1.0),
+    );
+    let to_x = |frame: u16| {
+        if max_frame == 0 {
+            rail.left()
+        } else {
+            rail.left() + rail.width() * (frame as f32 / max_frame as f32)
+        }
+    };
+    let start_x = to_x(*start);
+    let end_x = to_x(*end);
+    let painter = ui.painter();
+    painter.rect_filled(rail, 1.0, Color32::from_rgb(52, 58, 70));
+    let active = egui::Rect::from_min_max(
+        egui::pos2(start_x.min(end_x), rail.top()),
+        egui::pos2(start_x.max(end_x), rail.bottom()),
+    );
+    painter.rect_filled(active, 1.0, STUDIO_ACCENT);
+    for x in [start_x, end_x] {
+        painter.circle_filled(egui::pos2(x, rect.center().y), 5.0, STUDIO_TEXT);
+        painter.circle_stroke(
+            egui::pos2(x, rect.center().y),
+            5.0,
+            Stroke::new(1.0, STUDIO_PANEL_DARK),
+        );
+    }
+
+    let mut changed = false;
+    if response.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+    }
+    if max_frame > 0 && (response.clicked() || response.dragged()) {
+        if let Some(pointer) = response.interact_pointer_pos() {
+            let t = ((pointer.x - rail.left()) / rail.width()).clamp(0.0, 1.0);
+            let frame = (t * max_frame as f32).round() as u16;
+            let use_start = ui
+                .memory_mut(|memory| memory.data.get_temp::<bool>(id))
+                .unwrap_or_else(|| {
+                    let start_distance = frame.abs_diff(*start);
+                    let end_distance = frame.abs_diff(*end);
+                    start_distance <= end_distance
+                });
+            ui.memory_mut(|memory| memory.data.insert_temp(id, use_start));
+            if use_start {
+                let next = frame.min(*end);
+                changed = next != *start;
+                *start = next;
+            } else {
+                let next = frame.max(*start);
+                changed = next != *end;
+                *end = next;
+            }
+        }
+    }
+    if response.drag_stopped() || (response.clicked() && !response.dragged()) {
+        ui.memory_mut(|memory| memory.data.remove::<bool>(id));
     }
     changed
 }
@@ -590,6 +729,8 @@ pub(crate) fn animator_action_option_defaults(
             .and_then(|idx| context.clip_in_place_defaults.get(idx as usize).copied())
             .unwrap_or(true),
         speed_q8: psxed_project::ACTION_SPEED_UNSCALED_Q8,
+        frame_start: 0,
+        frame_end: psxed_project::ACTION_FRAME_END_FULL,
     }
 }
 

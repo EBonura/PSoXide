@@ -35,6 +35,7 @@ impl Playtest {
                 clip,
                 video_hz,
                 character.action_speed(anim.action()),
+                character.action_frame_range(anim.action()),
             )
             .unwrap_or(24)
             .max(1);

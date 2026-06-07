@@ -1229,6 +1229,9 @@ pub struct PlaytestCharacter {
     /// Per-action playback speed in Q8 fixed point (`256 = 1.0x`),
     /// matching [`Self::action_clips`].
     pub action_speeds: [u16; PLAYTEST_CHARACTER_ACTION_COUNT],
+    /// Inclusive playback frame window per action.
+    pub action_frame_ranges:
+        [psx_level::CharacterActionFrameRange; PLAYTEST_CHARACTER_ACTION_COUNT],
     /// Render-only model offset from the player/controller root,
     /// in entity-local engine units.
     pub visual_offset: [i16; 3],

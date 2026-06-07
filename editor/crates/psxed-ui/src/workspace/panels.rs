@@ -1394,8 +1394,11 @@ impl EditorWorkspace {
                                 let character_options = collect_character_options(&self.project);
                                 let weapon_options = collect_weapon_options(&self.project);
                                 let selected = self.selection.selected_node;
-                                let animator_clip_context =
-                                    selected_animator_clip_context(&self.project, selected);
+                                let animator_clip_context = selected_animator_clip_context(
+                                    &self.project,
+                                    selected,
+                                    &self.project_dir,
+                                );
                                 let selected_sector = self.selection.selected_sector;
                                 let selected_sector_count = self.selection.selected_sectors.len();
 

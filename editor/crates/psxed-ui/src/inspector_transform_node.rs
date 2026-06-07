@@ -1529,6 +1529,7 @@ pub(crate) fn transform_icon(label: &str) -> char {
 pub(crate) struct AnimatorClipContext {
     pub(crate) model_name: String,
     pub(crate) clips: Vec<String>,
+    pub(crate) clip_frame_counts: Vec<Option<u16>>,
     pub(crate) clip_in_place_defaults: Vec<bool>,
     pub(crate) profile_name: Option<String>,
     pub(crate) profile_action_clips: [Option<u16>; psxed_project::CHARACTER_ANIMATION_ACTION_COUNT],
@@ -1590,6 +1591,7 @@ pub(crate) fn nudge_box_prop_vertices(
 pub(crate) fn selected_animator_clip_context(
     project: &ProjectDocument,
     selected: NodeId,
+    project_root: &std::path::Path,
 ) -> Option<AnimatorClipContext> {
     let scene = project.active_scene();
     let node = scene.node(selected)?;
@@ -1636,6 +1638,10 @@ pub(crate) fn selected_animator_clip_context(
                 let clips = project.resolved_model_animation_clips(model_id);
                 Some(AnimatorClipContext {
                     model_name: resource.name.clone(),
+                    clip_frame_counts: clips
+                        .iter()
+                        .map(|clip| animation_clip_frame_count(&clip.psxanim_path, project_root))
+                        .collect(),
                     clip_in_place_defaults: clips
                         .iter()
                         .map(|clip| clip.calibration.in_place)
@@ -1647,6 +1653,26 @@ pub(crate) fn selected_animator_clip_context(
             }
             _ => None,
         })
+}
+
+fn animation_clip_frame_count(psxanim_path: &str, project_root: &std::path::Path) -> Option<u16> {
+    let path = psxed_project::model_import::resolve_path(psxanim_path, Some(project_root));
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut header = [0u8; 20];
+    std::io::Read::read_exact(&mut file, &mut header).ok()?;
+    if &header[0..4] != b"PSXA" {
+        return None;
+    }
+    let version = u16::from_le_bytes([header[4], header[5]]);
+    if version != 1 && version != 2 {
+        return None;
+    }
+    let payload_len = u32::from_le_bytes([header[8], header[9], header[10], header[11]]);
+    if payload_len < 8 {
+        return None;
+    }
+    let frame_count = u16::from_le_bytes([header[14], header[15]]);
+    (frame_count > 0).then_some(frame_count)
 }
 
 pub(crate) fn character_profile_action_clip(
