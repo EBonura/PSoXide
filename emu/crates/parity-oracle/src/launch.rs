@@ -269,6 +269,14 @@ impl ReduxProcess {
         }
     }
 
+    /// Snapshot Redux's non-protocol stdout tail.
+    ///
+    /// This includes emulator log lines and guest TTY output, but excludes
+    /// `#PSX3:` protocol responses consumed by the oracle harness.
+    pub fn stdout_snapshot(&self) -> String {
+        self.stdout_log.lock().unwrap().snapshot()
+    }
+
     /// Advance Redux's CPU by exactly `n` instructions, returning one
     /// [`InstructionRecord`] per step.
     ///
