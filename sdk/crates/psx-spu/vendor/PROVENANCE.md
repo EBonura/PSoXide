@@ -14,9 +14,8 @@ later regeneration pass.
 
 ## Action when SPU work resumes
 
-1. Regenerate each tone from a documented generator (Python `numpy` +
-   PS1 ADPCM encoder, an online PSX-ADPCM tool, or a script in
-   `tools/`).
+1. Regenerate each tone from `psoxide-dev gen-tones` or another documented
+   Rust generator.
 2. Record the exact generator invocation in this file.
 3. Capture each blob's SHA-256 here so future regenerations can be
    verified.

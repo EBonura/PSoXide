@@ -74,7 +74,8 @@ Gotchas:
 ## 3. Render the per-vblank chart
 
 ```sh
-python3 tools/vblank_chart.py --in /tmp/cortex-override-v1-vblank.csv \
+cargo run --manifest-path tools/psoxide-dev/Cargo.toml --release -- \
+  vblank-chart --in /tmp/cortex-override-v1-vblank.csv \
   --out /tmp/cortex-override-v1-vblank.html --title "cortex_override_v1 per-vblank work"
 ```
 
