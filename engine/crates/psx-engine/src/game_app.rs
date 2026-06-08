@@ -433,21 +433,49 @@ fn cdda_set_volume(volume_percent: u8) {
 #[cfg(not(target_arch = "mips"))]
 fn cdda_set_volume(_volume_percent: u8) {}
 
+#[cfg(all(target_arch = "mips", feature = "boot-trace"))]
+#[inline(always)]
+fn cdda_trace(message: &str) {
+    psx_rt::tty::println(message);
+}
+
+#[cfg(all(target_arch = "mips", not(feature = "boot-trace")))]
+#[inline(always)]
+fn cdda_trace(_message: &str) {}
+
 #[cfg(target_arch = "mips")]
 fn cdda_issue_step(step: CddaStartStep, track: u8) -> bool {
-    match step {
+    let ok = match step {
         CddaStartStep::SetMode => {
             psx_io::cdrom::try_set_mode(CDDA_PLAYBACK_MODE, CDDA_COMMAND_SPINS).is_some()
         }
         CddaStartStep::Demute => psx_io::cdrom::try_demute(CDDA_COMMAND_SPINS).is_some(),
         CddaStartStep::Play => psx_io::cdrom::try_play_track(track, CDDA_COMMAND_SPINS).is_some(),
+    };
+    if ok {
+        match step {
+            CddaStartStep::SetMode => cdda_trace("psx-engine: cdda setmode ok"),
+            CddaStartStep::Demute => cdda_trace("psx-engine: cdda demute ok"),
+            CddaStartStep::Play => cdda_trace("psx-engine: cdda play ok"),
+        }
     }
+    ok
 }
 
 #[cfg(not(target_arch = "mips"))]
 fn cdda_issue_step(_step: CddaStartStep, _track: u8) -> bool {
     true
 }
+
+#[cfg(all(target_arch = "mips", feature = "boot-trace"))]
+#[inline(always)]
+fn flow_trace(message: &str) {
+    psx_rt::tty::println(message);
+}
+
+#[cfg(not(all(target_arch = "mips", feature = "boot-trace")))]
+#[inline(always)]
+fn flow_trace(_message: &str) {}
 
 #[cfg(target_arch = "mips")]
 fn cdda_is_playing() -> bool {
@@ -967,6 +995,7 @@ impl<'a, S: Scene> GameApp<'a, S> {
     ) {
         if self.tag_at(state_index).has_gameplay() && !self.cursor.gameplay_inited {
             self.cdda.release_for_data_reads(ctx.sim_tick.as_u32());
+            flow_trace("psx-engine: loading begin");
             self.cursor.begin_loading(state_index, return_to);
             return;
         }
@@ -1321,6 +1350,7 @@ impl<'a, S: Scene> GameApp<'a, S> {
         // CROSS activates the focused control. CIRCLE is a dedicated
         // back/cancel even when the focused control is not a Back button.
         if ctx.just_pressed(button::CROSS) {
+            flow_trace("psx-engine: ui cross");
             self.activate_focus(first, count, ctx);
         } else if ctx.just_pressed(button::CIRCLE) {
             self.go_back(ctx);
