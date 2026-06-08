@@ -288,7 +288,7 @@ MEDNAFEN_CORTEX_OVERRIDE_V1_LOG ?= build/external-emulator-smoke/cortex_override
 RETROARCH_CORTEX_OVERRIDE_V1_LOG ?= build/external-emulator-smoke/cortex_override_v1-retroarch.log
 EXTERNAL_EMULATOR_SMOKE_TIMEOUT ?= 12
 REDUX_CORTEX_OVERRIDE_V1_BIOS ?= $(HOME)/Downloads/ps1 bios/SCPH1001.BIN
-REDUX_CORTEX_OVERRIDE_V1_STEPS ?= 70000000
+REDUX_CORTEX_OVERRIDE_V1_STEPS ?= 240000000
 CORTEX_OVERRIDE_V1_PROJECT ?= editor/projects/cortex_override_v1
 CORTEX_OVERRIDE_V1_CUE ?= $(CORTEX_OVERRIDE_V1_PROJECT)/baked/cortex_override_v1.cue
 CORTEX_OVERRIDE_V1_BIN ?= $(CORTEX_OVERRIDE_V1_PROJECT)/baked/cortex_override_v1.bin
@@ -758,10 +758,12 @@ duckstation-cortex-override-v1-bios: cortex-override-v1-project-disc-boot-trace
 		--expect "psx-engine: cdda demute ok" \
 		--expect "psx-engine: cdda play ok"
 
-redux-cortex-override-v1-bios: cortex-override-v1-project-disc
+redux-cortex-override-v1-bios: cortex-override-v1-project-disc-boot-trace
 	cd emu && PSOXIDE_DISC="$(CURDIR)/$(CORTEX_OVERRIDE_V1_CUE)" \
 		PSOXIDE_BIOS="$(REDUX_CORTEX_OVERRIDE_V1_BIOS)" \
 		PSOXIDE_ORACLE_DISC_STEPS="$(REDUX_CORTEX_OVERRIDE_V1_STEPS)" \
+		PSOXIDE_REDUX_SKIP_DISPLAY_HASH=1 \
+		PSOXIDE_REDUX_EXPECT_STDOUT="psx-rt: main;;editor-playtest: init ok;;psx-engine: scene init ok;;psx-engine: cdda setmode ok;;psx-engine: cdda demute ok;;psx-engine: cdda play ok" \
 		cargo test -p parity-oracle --test commercial_disc_smoke --release -- --ignored --nocapture
 
 mednafen-cortex-override-v1-bios: cortex-override-v1-project-disc
