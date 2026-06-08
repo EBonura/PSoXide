@@ -13,6 +13,10 @@
 //!   or more masks for a fixed number of VBlanks starting at the given
 //!   VBlank count. Format per entry: `<mask>@<start_vblank>+<frames>`.
 //! - `PSOXIDE_VISIBLE_DUMP=/tmp/frame.ppm` dumps the final display frame.
+//! - `PSOXIDE_REQUIRE_CDDA=1` fails unless the run issued Play and mixed
+//!   audible CD-DA samples above `PSOXIDE_MIN_PEAK` (default 256).
+//! - `PSOXIDE_REQUIRE_CDROM_READS=1` fails unless the game read sectors
+//!   through the BIOS-facing CD-ROM FIFO/DMA path.
 //!
 //! Best used with MMIO tracing enabled:
 //!
@@ -26,7 +30,8 @@
 mod disc_support;
 
 use emulator_core::{
-    fast_boot_disc_with_hle, warm_bios_for_disc_fast_boot, Bus, Cpu, DISC_FAST_BOOT_WARMUP_STEPS,
+    fast_boot_disc_with_hle, spu, warm_bios_for_disc_fast_boot, Bus, Cpu,
+    DISC_FAST_BOOT_WARMUP_STEPS,
 };
 use std::path::PathBuf;
 
@@ -42,6 +47,166 @@ struct PadPulse {
     mask: u16,
     start_vblank: u64,
     frames: u64,
+}
+
+#[derive(Default)]
+struct AudioStats {
+    samples: usize,
+    nonzero: usize,
+    peak_l: u16,
+    peak_r: u16,
+}
+
+#[derive(Copy, Clone)]
+struct DisplayHashChange {
+    vblank: u64,
+    cycle: u64,
+    hash: u64,
+    width: u32,
+    height: u32,
+}
+
+impl AudioStats {
+    fn add_samples(&mut self, samples: &[(i16, i16)]) {
+        self.samples += samples.len();
+        for &(l, r) in samples {
+            self.peak_l = self.peak_l.max(l.unsigned_abs());
+            self.peak_r = self.peak_r.max(r.unsigned_abs());
+            if l != 0 || r != 0 {
+                self.nonzero += 1;
+            }
+        }
+    }
+}
+
+fn dump_cdrom_state(bus: &Bus, audio: &AudioStats) {
+    println!("\n=== CD-ROM / CD-DA state ===");
+    println!("mode:       0x{:02x}", bus.cdrom.debug_mode());
+    let (xa_file, xa_channel) = bus.cdrom.debug_xa_filter();
+    println!("xa filter:  file={xa_file} channel={xa_channel}");
+    println!("read_lba:   {}", bus.cdrom.debug_read_lba());
+    println!("fifo len:   {}", bus.cdrom.data_fifo_len());
+    println!("fifo pops:  {}", bus.cdrom.data_fifo_pops());
+    println!("cd queue:   {}", bus.cdrom.cd_audio_queue_len());
+    println!(
+        "audio:      samples={} nonzero={} peak_l={} peak_r={}",
+        audio.samples, audio.nonzero, audio.peak_l, audio.peak_r
+    );
+    if let Some((header, subheader)) = bus.cdrom.debug_last_sector() {
+        println!(
+            "last hdr:   {:02x}:{:02x}:{:02x} mode={} sub=[{:02x} {:02x} {:02x} {:02x}]",
+            header[0],
+            header[1],
+            header[2],
+            header[3],
+            subheader[0],
+            subheader[1],
+            subheader[2],
+            subheader[3]
+        );
+    } else {
+        println!("last hdr:   (none)");
+    }
+    println!("debug:      {}", bus.cdrom.debug_state(bus.cycles()));
+    println!("\n=== CD-ROM command histogram ===");
+    for (cmd, &count) in bus.cdrom.command_histogram().iter().enumerate() {
+        if count != 0 {
+            println!("  0x{cmd:02x} {:<8} {count}", cdrom_cmd_name(cmd as u8));
+        }
+    }
+    println!("\n=== Recent CD-ROM commands ===");
+    for entry in bus.cdrom.command_log() {
+        println!(
+            "  cyc={:>12} op=0x{:02x} {:<8} params=[{}]",
+            entry.cycle,
+            entry.command,
+            cdrom_cmd_name(entry.command),
+            fmt_bytes(&entry.params[..entry.param_len as usize])
+        );
+    }
+    println!("\n=== Recent CD-ROM responses ===");
+    for entry in bus.cdrom.response_log() {
+        println!(
+            "  cyc={:>12} irq={:?} bytes=[{}]",
+            entry.cycle,
+            entry.irq,
+            fmt_bytes(&entry.bytes[..entry.len as usize])
+        );
+    }
+}
+
+fn push_display_hash_change(changes: &mut Vec<DisplayHashChange>, change: DisplayHashChange) {
+    const MAX_DISPLAY_HASH_CHANGES: usize = 32;
+    changes.push(change);
+    if changes.len() > MAX_DISPLAY_HASH_CHANGES {
+        changes.remove(0);
+    }
+}
+
+fn dump_display_hash_changes(changes: &[DisplayHashChange]) {
+    println!("\n=== Recent display hash changes ===");
+    if changes.is_empty() {
+        println!("  (none)");
+        return;
+    }
+    for change in changes {
+        println!(
+            "  vblank={:>5} cyc={:>12} display={}x{} hash=0x{:016x}",
+            change.vblank, change.cycle, change.width, change.height, change.hash
+        );
+    }
+}
+
+fn fmt_bytes(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn cdrom_cmd_name(op: u8) -> &'static str {
+    match op {
+        0x00 => "Sync",
+        0x01 => "GetStat",
+        0x02 => "SetLoc",
+        0x03 => "Play",
+        0x04 => "Forward",
+        0x05 => "Backward",
+        0x06 => "ReadN",
+        0x07 => "MotorOn",
+        0x08 => "Stop",
+        0x09 => "Pause",
+        0x0A => "Init",
+        0x0B => "Mute",
+        0x0C => "Demute",
+        0x0D => "SetFilter",
+        0x0E => "SetMode",
+        0x0F => "GetParam",
+        0x10 => "GetLocL",
+        0x11 => "GetLocP",
+        0x12 => "SetSession",
+        0x13 => "GetTN",
+        0x14 => "GetTD",
+        0x15 => "SeekL",
+        0x16 => "SeekP",
+        0x17 => "SetClock",
+        0x18 => "GetClock",
+        0x19 => "Test",
+        0x1A => "GetID",
+        0x1B => "ReadS",
+        0x1C => "Reset",
+        0x1D => "GetQ",
+        0x1E => "ReadTOC",
+        0x1F => "VideoCD",
+        _ => "?",
+    }
+}
+
+fn env_bool(name: &str) -> bool {
+    std::env::var(name)
+        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(false)
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -70,9 +235,7 @@ fn main() {
     let bios_path = std::env::var("PSOXIDE_BIOS")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("bios/SCPH1001.BIN"));
-    let disc_path = std::env::var("PSOXIDE_DISC").unwrap_or_else(|_| {
-        "<rom-path>".into()
-    });
+    let disc_path = std::env::var("PSOXIDE_DISC").unwrap_or_else(|_| "<rom-path>".into());
     let held_buttons = std::env::var("PSOXIDE_PAD1")
         .ok()
         .and_then(|s| parse_u16_mask(&s))
@@ -89,6 +252,12 @@ fn main() {
             })
         })
         .unwrap_or_default();
+    let require_cdda = env_bool("PSOXIDE_REQUIRE_CDDA");
+    let require_cdrom_reads = env_bool("PSOXIDE_REQUIRE_CDROM_READS");
+    let min_peak = std::env::var("PSOXIDE_MIN_PEAK")
+        .ok()
+        .and_then(|s| s.parse::<u16>().ok())
+        .unwrap_or(256);
 
     let bios = std::fs::read(&bios_path).expect("BIOS readable");
     let mut bus = Bus::new(bios).expect("bus");
@@ -105,11 +274,29 @@ fn main() {
         );
     }
     bus.cdrom.insert_disc(Some(disc));
+    bus.cdrom.enable_command_log(128);
+    bus.cdrom.enable_response_log(128);
     bus.attach_digital_pad_port1();
 
-    let mut cycles_at_last_pump = 0u64;
+    let mut audio_cycle_accum = 0u64;
+    let mut audio_stats = AudioStats::default();
     let mut current_pad_mask = None;
     let mut pad_mask_changes = Vec::new();
+    let (initial_display_hash, initial_display_width, initial_display_height, _) =
+        bus.gpu.display_hash();
+    let mut last_display_hash = initial_display_hash;
+    let mut display_hash_changes = Vec::new();
+    push_display_hash_change(
+        &mut display_hash_changes,
+        DisplayHashChange {
+            vblank: bus.irq().raise_counts()[0],
+            cycle: bus.cycles(),
+            hash: initial_display_hash,
+            width: initial_display_width,
+            height: initial_display_height,
+        },
+    );
+    let mut last_sampled_vblank = bus.irq().raise_counts()[0];
     sync_pad_mask(
         &mut bus,
         held_buttons,
@@ -118,9 +305,12 @@ fn main() {
         &mut pad_mask_changes,
     );
     for _ in 0..steps {
+        let cycles_before = bus.cycles();
         if cpu.step(&mut bus).is_err() {
             break;
         }
+        audio_cycle_accum =
+            audio_cycle_accum.saturating_add(bus.cycles().saturating_sub(cycles_before));
         sync_pad_mask(
             &mut bus,
             held_buttons,
@@ -128,10 +318,29 @@ fn main() {
             &mut current_pad_mask,
             &mut pad_mask_changes,
         );
-        if bus.cycles() - cycles_at_last_pump > 560_000 {
-            cycles_at_last_pump = bus.cycles();
-            bus.run_spu_samples(735);
-            let _ = bus.spu.drain_audio();
+        let sample_count = (audio_cycle_accum / spu::SAMPLE_CYCLES) as usize;
+        audio_cycle_accum %= spu::SAMPLE_CYCLES;
+        if sample_count != 0 {
+            bus.run_spu_samples(sample_count);
+            audio_stats.add_samples(&bus.spu.drain_audio());
+        }
+        let vblank = bus.irq().raise_counts()[0];
+        if vblank != last_sampled_vblank {
+            last_sampled_vblank = vblank;
+            let (hash, width, height, _) = bus.gpu.display_hash();
+            if hash != last_display_hash {
+                last_display_hash = hash;
+                push_display_hash_change(
+                    &mut display_hash_changes,
+                    DisplayHashChange {
+                        vblank,
+                        cycle: bus.cycles(),
+                        hash,
+                        width,
+                        height,
+                    },
+                );
+            }
         }
     }
 
@@ -145,6 +354,8 @@ fn main() {
     println!("final pc:   0x{:08x}", cpu.pc());
     println!("vblank:     {}", bus.irq().raise_counts()[0]);
     println!("display:    {w}x{h}  hash=0x{display_hash:016x}");
+    dump_display_hash_changes(&display_hash_changes);
+    dump_cdrom_state(&bus, &audio_stats);
     dump_pad_mask_changes(&pad_mask_changes);
     dump_pad_histogram(&bus);
     if let Ok(path) = std::env::var("PSOXIDE_VISIBLE_DUMP") {
@@ -156,6 +367,34 @@ fn main() {
     dump_trace(&bus);
     #[cfg(not(feature = "trace-mmio"))]
     println!("\nMMIO tracing is disabled. Re-run with --features emulator-core/trace-mmio.");
+
+    let hist = bus.cdrom.command_histogram();
+    let peak = audio_stats.peak_l.max(audio_stats.peak_r);
+    let mut failed = false;
+    if require_cdda {
+        if hist[0x03] == 0 {
+            eprintln!("[probe-disc-pad] required CD-DA Play command was not observed");
+            failed = true;
+        }
+        if peak < min_peak {
+            eprintln!("[probe-disc-pad] required CD-DA peak {peak} < {min_peak}");
+            failed = true;
+        }
+    }
+    if require_cdrom_reads {
+        let read_commands = hist[0x06].saturating_add(hist[0x1B]);
+        if read_commands == 0 {
+            eprintln!("[probe-disc-pad] required ReadN/ReadS command was not observed");
+            failed = true;
+        }
+        if bus.cdrom.data_fifo_pops() == 0 {
+            eprintln!("[probe-disc-pad] required CD-ROM data FIFO consumption was not observed");
+            failed = true;
+        }
+    }
+    if failed {
+        std::process::exit(1);
+    }
 }
 
 fn parse_u16_mask(text: &str) -> Option<u16> {
@@ -326,6 +565,7 @@ fn dump_pad_histogram(bus: &Bus) {
     if polls.is_empty() {
         println!("  (none)");
     } else {
+        let vblank_period = bus.vblank_period().max(1);
         for poll in polls {
             let tx = poll
                 .tx
@@ -342,7 +582,9 @@ fn dump_pad_histogram(bus: &Bus) {
                 .collect::<Vec<_>>()
                 .join(" ");
             println!(
-                "  {}  tx=[{tx}]  rx=[{rx}]",
+                "  cyc={:>12} approx_vblank={:>5}  {}  tx=[{tx}]  rx=[{rx}]",
+                poll.cycle,
+                poll.cycle / vblank_period,
                 if poll.complete {
                     "complete"
                 } else {

@@ -457,7 +457,7 @@ impl Sio0 {
         let (rx, ack, _device_present, ack_delay_ticks) = if self.ctrl & ctrl_bit::JOYN_OUTPUT != 0
         {
             let port = self.active_port();
-            let result = port.exchange_detailed(value);
+            let result = port.exchange_detailed_at(value, now);
             let ack_delay_ticks = if port.selected_is_memcard() {
                 MEMCARD_ACK_DELAY_TICKS
             } else {

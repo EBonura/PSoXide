@@ -22,7 +22,7 @@
 	showcase-text showcase-text-disc run-showcase-text \
 	game-pong game-pong-disc run-game-pong \
 	game-magikaaaaaarp-pong game-magikaaaaaarp-pong-disc magikaaaaaarp-pong-spectrum run-game-magikaaaaaarp-pong probe-magikaaaaaarp-pong-audio duckstation-magikaaaaaarp-pong \
-	cortex-override-v1-project-disc cortex-override-v1-hardware-diagnostic-disc cortex-override-v1-preburn-local cortex-override-v1-preburn-struct cortex-override-v1-preburn-disc-reads cortex-override-v1-preburn-internal cortex-override-v1-preburn-cdda-audio cortex-override-v1-preburn-bios-cdrom duckstation-cortex-override-v1 duckstation-cortex-override-v1-bios redux-cortex-override-v1-bios \
+	cortex-override-v1-project-disc cortex-override-v1-hardware-diagnostic-disc cortex-override-v1-preburn-local cortex-override-v1-preburn-struct cortex-override-v1-preburn-disc-reads cortex-override-v1-preburn-internal cortex-override-v1-preburn-cdda-audio cortex-override-v1-preburn-bios-cdrom cortex-override-v1-preburn-boot-flow duckstation-cortex-override-v1 duckstation-cortex-override-v1-bios redux-cortex-override-v1-bios \
 	game-breakout game-breakout-disc run-game-breakout \
         game-invaders game-invaders-disc run-game-invaders \
         showcase-3d showcase-3d-disc run-showcase-3d \
@@ -290,6 +290,9 @@ CORTEX_OVERRIDE_V1_PREBURN_VISUAL_FRAMES ?= 90
 CORTEX_OVERRIDE_V1_PREBURN_GUEST_FRAMES ?= 360
 CORTEX_OVERRIDE_V1_PREBURN_STEPS ?= 240000000
 CORTEX_OVERRIDE_V1_PREBURN_BIOS_STEPS ?= 120000000
+CORTEX_OVERRIDE_V1_PREBURN_BOOT_FLOW_STEPS ?= 240000000
+CORTEX_OVERRIDE_V1_PREBURN_BOOT_FLOW_PAD1 ?= 0
+CORTEX_OVERRIDE_V1_PREBURN_BOOT_FLOW_PULSES ?= 0x4000@974+25
 CORTEX_OVERRIDE_V1_PREBURN_AUDIO_SECONDS ?= 6
 CORTEX_OVERRIDE_V1_PREBURN_AUDIO_MIN_PEAK ?= 256
 PSOXIDE_DEV ?= cargo run --manifest-path tools/psoxide-dev/Cargo.toml --release --
@@ -629,7 +632,7 @@ cortex-override-v1-project-disc:
 cortex-override-v1-hardware-diagnostic-disc:
 	cd emu && EDITOR_PLAYTEST_CARGO_FEATURE_FLAGS='--no-default-features --features "$(EDITOR_PLAYTEST_HARDWARE_FEATURES) hardware-boot-visual"' cargo run -p frontend --release -- build-project-disc --project ../$(CORTEX_OVERRIDE_V1_PROJECT)
 
-cortex-override-v1-preburn-local: cortex-override-v1-preburn-struct cortex-override-v1-preburn-disc-reads cortex-override-v1-preburn-internal cortex-override-v1-preburn-cdda-audio cortex-override-v1-preburn-bios-cdrom
+cortex-override-v1-preburn-local: cortex-override-v1-preburn-struct cortex-override-v1-preburn-disc-reads cortex-override-v1-preburn-internal cortex-override-v1-preburn-cdda-audio cortex-override-v1-preburn-bios-cdrom cortex-override-v1-preburn-boot-flow
 	@echo "cortex_override_v1 pre-burn local checks complete -> $(CORTEX_OVERRIDE_V1_PREBURN_OUT)"
 
 cortex-override-v1-preburn-struct: cortex-override-v1-project-disc
@@ -652,12 +655,13 @@ cortex-override-v1-preburn-struct: cortex-override-v1-project-disc
 
 cortex-override-v1-preburn-disc-reads: cortex-override-v1-project-disc
 	@mkdir -p $(CORTEX_OVERRIDE_V1_PREBURN_OUT)
-	cd emu && PSOXIDE_DISC="../$(CORTEX_OVERRIDE_V1_BIN)" \
-		cargo run -p emulator-core --example verify_disc_reads --release | tee "../$(CORTEX_OVERRIDE_V1_PREBURN_OUT)/disc-reads.log"
+	@(cd emu && PSOXIDE_DISC="../$(CORTEX_OVERRIDE_V1_BIN)" \
+		cargo run -p emulator-core --example verify_disc_reads --release) > "$(CORTEX_OVERRIDE_V1_PREBURN_OUT)/disc-reads.log" 2>&1; \
+	status=$$?; cat "$(CORTEX_OVERRIDE_V1_PREBURN_OUT)/disc-reads.log"; exit $$status
 
 cortex-override-v1-preburn-internal: cortex-override-v1-project-disc
 	@mkdir -p $(CORTEX_OVERRIDE_V1_PREBURN_OUT)
-	cd emu && cargo run -p frontend --release -- launch \
+	@(cd emu && cargo run -p frontend --release -- launch \
 		--path ../$(CORTEX_OVERRIDE_V1_CUE) \
 		--embedded-playtest \
 		--guest-visual-frames $(CORTEX_OVERRIDE_V1_PREBURN_VISUAL_FRAMES) \
@@ -670,25 +674,45 @@ cortex-override-v1-preburn-internal: cortex-override-v1-project-disc
 		--counter-log ../$(CORTEX_OVERRIDE_V1_PREBURN_OUT)/counters.csv \
 		--profile-log ../$(CORTEX_OVERRIDE_V1_PREBURN_OUT)/profile.csv \
 		--dump-hash \
-		--dump-guest-profile | tee "../$(CORTEX_OVERRIDE_V1_PREBURN_OUT)/internal-hle.log"
+		--dump-guest-profile) > "$(CORTEX_OVERRIDE_V1_PREBURN_OUT)/internal-hle.log" 2>&1; \
+	status=$$?; cat "$(CORTEX_OVERRIDE_V1_PREBURN_OUT)/internal-hle.log"; exit $$status
 
 cortex-override-v1-preburn-cdda-audio: cortex-override-v1-project-disc
 	@mkdir -p $(CORTEX_OVERRIDE_V1_PREBURN_OUT)
-	cd emu && PSOXIDE_EXE="../$(EXAMPLE_OUT)/editor-playtest.exe" \
+	@(cd emu && PSOXIDE_EXE="../$(EXAMPLE_OUT)/editor-playtest.exe" \
 		PSOXIDE_DISC="../$(CORTEX_OVERRIDE_V1_CUE)" \
 		PSOXIDE_WAV="../$(CORTEX_OVERRIDE_V1_PREBURN_OUT)/cdda-probe.wav" \
 		PSOXIDE_AUDIO_SECONDS="$(CORTEX_OVERRIDE_V1_PREBURN_AUDIO_SECONDS)" \
 		PSOXIDE_MIN_PEAK="$(CORTEX_OVERRIDE_V1_PREBURN_AUDIO_MIN_PEAK)" \
-		cargo run -p emulator-core --example probe_cdda_wav --release | tee "../$(CORTEX_OVERRIDE_V1_PREBURN_OUT)/cdda-probe.log"
+		cargo run -p emulator-core --example probe_cdda_wav --release) > "$(CORTEX_OVERRIDE_V1_PREBURN_OUT)/cdda-probe.log" 2>&1; \
+	status=$$?; cat "$(CORTEX_OVERRIDE_V1_PREBURN_OUT)/cdda-probe.log"; exit $$status
 
 cortex-override-v1-preburn-bios-cdrom: cortex-override-v1-project-disc
 	@mkdir -p $(CORTEX_OVERRIDE_V1_PREBURN_OUT)
 	@if [ -f "$(REDUX_CORTEX_OVERRIDE_V1_BIOS)" ]; then \
-		cd emu && PSOXIDE_BIOS="$(REDUX_CORTEX_OVERRIDE_V1_BIOS)" \
+		(cd emu && PSOXIDE_BIOS="$(REDUX_CORTEX_OVERRIDE_V1_BIOS)" \
 			PSOXIDE_DISC="../$(CORTEX_OVERRIDE_V1_BIN)" \
-			cargo run -p emulator-core --example cdrom_probe --release -- $(CORTEX_OVERRIDE_V1_PREBURN_BIOS_STEPS) | tee "../$(CORTEX_OVERRIDE_V1_PREBURN_OUT)/bios-cdrom-probe.log"; \
+			cargo run -p emulator-core --example cdrom_probe --release -- $(CORTEX_OVERRIDE_V1_PREBURN_BIOS_STEPS)) > "$(CORTEX_OVERRIDE_V1_PREBURN_OUT)/bios-cdrom-probe.log" 2>&1; \
+		status=$$?; cat "$(CORTEX_OVERRIDE_V1_PREBURN_OUT)/bios-cdrom-probe.log"; exit $$status; \
 	else \
 		echo "skip BIOS CD-ROM probe: REDUX_CORTEX_OVERRIDE_V1_BIOS not found ($(REDUX_CORTEX_OVERRIDE_V1_BIOS))"; \
+	fi
+
+cortex-override-v1-preburn-boot-flow: cortex-override-v1-project-disc
+	@mkdir -p $(CORTEX_OVERRIDE_V1_PREBURN_OUT)
+	@if [ -f "$(REDUX_CORTEX_OVERRIDE_V1_BIOS)" ]; then \
+		(cd emu && PSOXIDE_BIOS="$(REDUX_CORTEX_OVERRIDE_V1_BIOS)" \
+			PSOXIDE_DISC="../$(CORTEX_OVERRIDE_V1_CUE)" \
+			PSOXIDE_PAD1="$(CORTEX_OVERRIDE_V1_PREBURN_BOOT_FLOW_PAD1)" \
+			PSOXIDE_PAD1_PULSES="$(CORTEX_OVERRIDE_V1_PREBURN_BOOT_FLOW_PULSES)" \
+			PSOXIDE_VISIBLE_DUMP="../$(CORTEX_OVERRIDE_V1_PREBURN_OUT)/boot-flow.ppm" \
+			PSOXIDE_REQUIRE_CDDA=1 \
+			PSOXIDE_REQUIRE_CDROM_READS=1 \
+			PSOXIDE_MIN_PEAK="$(CORTEX_OVERRIDE_V1_PREBURN_AUDIO_MIN_PEAK)" \
+			cargo run -p emulator-core --example probe_disc_pad_trace --release -- $(CORTEX_OVERRIDE_V1_PREBURN_BOOT_FLOW_STEPS)) > "$(CORTEX_OVERRIDE_V1_PREBURN_OUT)/boot-flow.log" 2>&1; \
+		status=$$?; cat "$(CORTEX_OVERRIDE_V1_PREBURN_OUT)/boot-flow.log"; exit $$status; \
+	else \
+		echo "skip BIOS boot-flow probe: REDUX_CORTEX_OVERRIDE_V1_BIOS not found ($(REDUX_CORTEX_OVERRIDE_V1_BIOS))"; \
 	fi
 
 duckstation-cortex-override-v1: cortex-override-v1-project-disc
