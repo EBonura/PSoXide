@@ -2255,15 +2255,16 @@ fn embedded_playtest_disc_image(
     // Canonical playtest-disc layout, shared with the mkisopsx CLI via
     // psx_iso::add_playtest_files so the on-disc file order (and therefore the
     // cooked WORLD_PACK_START_LBA / UI_PACK_START_LBA) cannot drift between the
-    // two builders. The editor always carries CDTEST.BIN at the default sector
-    // count, matching the cooked layout assumption.
+    // two builders. Normal project discs omit CDTEST.BIN so the root directory
+    // stays close to a retail/homebrew boot layout.
     psx_iso::add_playtest_files(
         &mut builder,
         exe_bytes,
         world_pack,
         ui_pack,
-        Some(psx_iso::CD_STREAM_BENCH_DEFAULT_SECTORS),
-    );
+        None,
+    )
+    .map_err(|error| format!("playtest disc layout: {error:?}"))?;
     Ok(builder.build_bin())
 }
 
@@ -2790,9 +2791,9 @@ mod tests {
             embedded_playtest_disc_image(exe, Some(world_pack), None).expect("disc image builds");
         let disc = Disc::from_bin(image);
         let boot = psx_iso::load_boot_exe_from_disc(&disc).expect("disc boots");
-        let stream_sector = disc
-            .read_sector_user(psx_iso::CD_STREAM_BENCH_START_LBA)
-            .expect("stream bench sector exists");
+        let boot_sector = disc
+            .read_sector_user(psx_iso::PLAYTEST_BOOT_EXE_START_LBA)
+            .expect("boot exe sector exists");
         let world_pack_sector = disc
             .read_sector_user(psx_iso::WORLD_PACK_DEFAULT_START_LBA)
             .expect("world pack sector exists");
@@ -2800,10 +2801,7 @@ mod tests {
         assert_eq!(boot.boot_path, "PSX.EXE;1");
         assert_eq!(boot.exe.initial_pc, 0x8001_2340);
         assert_eq!(boot.exe.payload, vec![1, 2, 3, 4]);
-        assert_eq!(
-            &stream_sector[..psx_iso::CD_STREAM_BENCH_MAGIC.len()],
-            &psx_iso::CD_STREAM_BENCH_MAGIC
-        );
+        assert_eq!(&boot_sector[..8], b"PS-X EXE");
         assert_eq!(
             &world_pack_sector[..psx_iso::WORLD_PACK_MAGIC.len()],
             &psx_iso::WORLD_PACK_MAGIC

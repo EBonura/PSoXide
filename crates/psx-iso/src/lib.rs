@@ -47,12 +47,19 @@ pub const SECTOR_USER_DATA_BYTES: usize = 2048;
 
 /// Root-directory file used by the editor-playtest CD streaming probe.
 pub const CD_STREAM_BENCH_FILE_NAME: &str = "CDTEST.BIN";
-/// The editor-playtest disc layout writes SYSTEM.CNF first, then this
-/// file, then PSX.EXE. SYSTEM.CNF fits in one sector, so the probe
-/// payload starts at LBA 22.
-pub const CD_STREAM_BENCH_START_LBA: u32 = 22;
 /// Default payload size for the editor-playtest CD streaming probe.
 pub const CD_STREAM_BENCH_DEFAULT_SECTORS: usize = 32;
+/// The first root file starts at LBA 21 in PSoXide's compact ISO layout.
+pub const PLAYTEST_FIRST_FILE_LBA: u32 = 21;
+/// The boot executable follows `SYSTEM.CNF` immediately, matching the common
+/// PS1/homebrew layout and keeping the BIOS boot read close to the start of
+/// the data track.
+pub const PLAYTEST_BOOT_EXE_START_LBA: u32 = PLAYTEST_FIRST_FILE_LBA + 1;
+/// Fixed start LBA for the optional CD streaming probe when it uses the default
+/// 32-sector size. The probe sits at the end of the reserved boot area, just
+/// before [`WORLD_PACK_FILE_NAME`].
+pub const CD_STREAM_BENCH_START_LBA: u32 =
+    WORLD_PACK_DEFAULT_START_LBA - CD_STREAM_BENCH_DEFAULT_SECTORS as u32;
 /// Header signature at the start of the streaming probe payload.
 pub const CD_STREAM_BENCH_MAGIC: [u8; 8] = *b"PSOXSTRM";
 /// Root-directory file used for the first real streamed world package.
@@ -69,10 +76,24 @@ pub const WORLD_PACK_VERSION: u32 = 1;
 pub const WORLD_PACK_HEADER_BYTES: usize = 28;
 /// Bytes per world-pack chunk-table entry.
 pub const WORLD_PACK_ENTRY_BYTES: usize = 24;
-/// Default start LBA when SYSTEM.CNF and the default CD stream-test
-/// file precede WORLD.PAK in the root directory.
-pub const WORLD_PACK_DEFAULT_START_LBA: u32 =
-    CD_STREAM_BENCH_START_LBA + CD_STREAM_BENCH_DEFAULT_SECTORS as u32;
+/// Default start LBA for streamed playtest packs. `SYSTEM.CNF` and `PSX.EXE`
+/// live at the front of the disc, then invisible zero padding reserves a fixed
+/// boot area until this LBA. The reservation avoids a circular build dependency:
+/// runtime pack LBAs no longer depend on the final boot EXE size.
+pub const WORLD_PACK_DEFAULT_START_LBA: u32 = 1024;
+
+/// Errors returned when the canonical playtest layout cannot fit the requested
+/// boot/debug payloads into the fixed boot area.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlaytestLayoutError {
+    /// The boot executable would overlap the fixed pack region.
+    BootExeTooLarge { exe_sectors: u32, max_sectors: u32 },
+    /// The optional CD stream-test payload would overlap the boot executable.
+    CdtestTooLarge {
+        cdtest_sectors: u32,
+        max_sectors: u32,
+    },
+}
 
 /// PS1 track type from a CUE sheet / disc TOC.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -159,6 +180,15 @@ pub fn cd_stream_bench_expected_checksum(sectors: usize) -> u32 {
     hash
 }
 
+const fn sectors_for_bytes(bytes: usize) -> u32 {
+    let sectors = bytes.div_ceil(SECTOR_USER_DATA_BYTES);
+    if sectors == 0 {
+        1
+    } else {
+        sectors as u32
+    }
+}
+
 /// Build a sector-aligned world package from already-cooked chunks.
 ///
 /// Format:
@@ -197,14 +227,14 @@ pub fn build_world_pack(chunks: &[(u32, &[u8])]) -> Vec<u8> {
     out
 }
 
-/// Add the canonical PSoXide playtest-disc file set to `builder`, in the LBA
-/// order the cooked manifest assumes: `SYSTEM.CNF`, then `CDTEST.BIN` (when
-/// `cdtest_sectors` is set), then the optional `WORLD.PAK` and `UI.PAK` stream
-/// packs, then `PSX.EXE`. The cooked `WORLD_PACK_START_LBA` / `UI_PACK_START_LBA`
-/// are derived from exactly this order, so every disc builder -- the `mkisopsx`
-/// CLI and the editor's in-process embedded Play -- routes through this one
-/// function. Defining the layout in a single place keeps the two from drifting
-/// (a `UI.PAK` added to one builder but not the other silently breaks streaming).
+/// Add the canonical PSoXide playtest-disc file set to `builder`. The hardware
+/// conservative order is: `SYSTEM.CNF`, `PSX.EXE`, invisible boot-area padding,
+/// optional `CDTEST.BIN`, then `WORLD.PAK` and `UI.PAK`. The cooked
+/// `WORLD_PACK_START_LBA` / `UI_PACK_START_LBA` are derived from exactly this
+/// order, so every disc builder -- the `mkisopsx` CLI and the editor's
+/// in-process embedded Play -- routes through this one function. Defining the
+/// layout in a single place keeps the two from drifting (a `UI.PAK` added to one
+/// builder but not the other silently breaks streaming).
 ///
 /// The caller sets up `builder` first (volume id, optional system area) and
 /// serializes the packs from its own input source (CLI dirs vs the editor's
@@ -215,18 +245,43 @@ pub fn add_playtest_files(
     world_pack: Option<Vec<u8>>,
     ui_pack: Option<Vec<u8>>,
     cdtest_sectors: Option<usize>,
-) {
+) -> Result<(), PlaytestLayoutError> {
     builder.add_file("SYSTEM.CNF", default_system_cnf());
+    let exe_sectors = sectors_for_bytes(exe_bytes.len());
+    let next_after_exe = PLAYTEST_BOOT_EXE_START_LBA.saturating_add(exe_sectors);
+    let cdtest_sectors_u32 = cdtest_sectors.unwrap_or(0) as u32;
+    let pack_start = WORLD_PACK_DEFAULT_START_LBA;
+    let cdtest_start = pack_start.saturating_sub(cdtest_sectors_u32);
+    let max_exe_sectors = cdtest_start.saturating_sub(PLAYTEST_BOOT_EXE_START_LBA);
+    if exe_sectors > max_exe_sectors {
+        return Err(PlaytestLayoutError::BootExeTooLarge {
+            exe_sectors,
+            max_sectors: max_exe_sectors,
+        });
+    }
+    if cdtest_sectors_u32 > pack_start.saturating_sub(next_after_exe) {
+        return Err(PlaytestLayoutError::CdtestTooLarge {
+            cdtest_sectors: cdtest_sectors_u32,
+            max_sectors: pack_start.saturating_sub(next_after_exe),
+        });
+    }
+
+    builder.add_file("PSX.EXE", exe_bytes);
+    builder.add_padding_sectors(cdtest_start - next_after_exe);
     if let Some(sectors) = cdtest_sectors {
         builder.add_file(CD_STREAM_BENCH_FILE_NAME, cd_stream_bench_payload(sectors));
     }
+    debug_assert_eq!(
+        cdtest_start + cdtest_sectors_u32,
+        WORLD_PACK_DEFAULT_START_LBA
+    );
     if let Some(world_pack) = world_pack {
         builder.add_file(WORLD_PACK_FILE_NAME, world_pack);
     }
     if let Some(ui_pack) = ui_pack {
         builder.add_file(UI_PACK_FILE_NAME, ui_pack);
     }
-    builder.add_file("PSX.EXE", exe_bytes);
+    Ok(())
 }
 
 /// Cooked placement metadata for one [`WORLD_PACK_FILE_NAME`] chunk.
@@ -579,6 +634,63 @@ mod tests {
         assert_eq!(s[SECTOR_USER_DATA_OFFSET], 0xAB);
         let u = d.read_sector_user(0).unwrap();
         assert_eq!(u[0], 0xAB);
+    }
+
+    fn minimal_exe() -> Vec<u8> {
+        let mut exe = vec![0u8; EXE_HEADER_BYTES];
+        exe[..8].copy_from_slice(b"PS-X EXE");
+        exe[0x10..0x14].copy_from_slice(&0x8001_0000u32.to_le_bytes());
+        exe[0x18..0x1C].copy_from_slice(&0x8001_0000u32.to_le_bytes());
+        exe
+    }
+
+    #[test]
+    fn playtest_layout_puts_boot_exe_first_and_packs_at_fixed_lba() {
+        let world_pack = build_world_pack(&[(0, b"room".as_slice())]);
+        let mut builder = IsoBuilder::new();
+        add_playtest_files(&mut builder, minimal_exe(), Some(world_pack), None, None)
+            .expect("layout fits");
+
+        let disc = Disc::from_bin(builder.build_bin());
+        assert_eq!(
+            &disc
+                .read_sector_user(PLAYTEST_BOOT_EXE_START_LBA)
+                .expect("boot exe sector")[..8],
+            b"PS-X EXE"
+        );
+        assert_eq!(
+            &disc
+                .read_sector_user(WORLD_PACK_DEFAULT_START_LBA)
+                .expect("world pack sector")[..WORLD_PACK_MAGIC.len()],
+            &WORLD_PACK_MAGIC
+        );
+    }
+
+    #[test]
+    fn playtest_layout_places_default_cdtest_before_world_pack() {
+        let mut builder = IsoBuilder::new();
+        add_playtest_files(
+            &mut builder,
+            minimal_exe(),
+            Some(build_world_pack(&[(0, b"room".as_slice())])),
+            None,
+            Some(CD_STREAM_BENCH_DEFAULT_SECTORS),
+        )
+        .expect("layout fits");
+
+        let disc = Disc::from_bin(builder.build_bin());
+        assert_eq!(
+            &disc
+                .read_sector_user(CD_STREAM_BENCH_START_LBA)
+                .expect("cdtest sector")[..CD_STREAM_BENCH_MAGIC.len()],
+            &CD_STREAM_BENCH_MAGIC
+        );
+        assert_eq!(
+            &disc
+                .read_sector_user(WORLD_PACK_DEFAULT_START_LBA)
+                .expect("world pack sector")[..WORLD_PACK_MAGIC.len()],
+            &WORLD_PACK_MAGIC
+        );
     }
 
     #[test]
