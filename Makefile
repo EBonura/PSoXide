@@ -158,6 +158,7 @@ check:
 	cd sdk && cargo check --workspace --all-features
 	cd tools/mkisopsx && cargo check
 	cd tools/psx-exe-pack && cargo check
+	cargo check --manifest-path tools/psoxide-dev/Cargo.toml
 
 test:
 	cargo test --workspace
@@ -167,6 +168,7 @@ test:
 	cd sdk && cargo test --workspace
 	cd tools/mkisopsx && cargo test
 	cd tools/psx-exe-pack && cargo test
+	cargo test --manifest-path tools/psoxide-dev/Cargo.toml
 
 canaries:
 	cargo test --workspace -- --ignored
@@ -180,10 +182,11 @@ fmt:
 	cd sdk && cargo fmt --all
 	cd tools/mkisopsx && cargo fmt --all
 	cd tools/psx-exe-pack && cargo fmt --all
+	cargo fmt --manifest-path tools/psoxide-dev/Cargo.toml --all
 
 lint:
-	python3 tools/lint_policy_guard.py
-	python3 tools/runtime_numeric_guard.py
+	$(PSOXIDE_DEV) lint-policy-guard
+	$(PSOXIDE_DEV) runtime-numeric-guard
 	cargo clippy --workspace --all-targets --all-features -- -D warnings
 	cd editor && cargo clippy --workspace --all-targets --all-features -- -D warnings
 	cd emu && cargo clippy --workspace --all-targets --all-features -- -D warnings
@@ -191,12 +194,13 @@ lint:
 	cd sdk && cargo clippy --workspace --all-targets --all-features -- -D warnings
 	cd tools/mkisopsx && cargo clippy --all-targets --all-features -- -D warnings
 	cd tools/psx-exe-pack && cargo clippy --all-targets --all-features -- -D warnings
+	cargo clippy --manifest-path tools/psoxide-dev/Cargo.toml --all-targets --all-features -- -D warnings
 
 lint-policy-guard:
-	python3 tools/lint_policy_guard.py
+	$(PSOXIDE_DEV) lint-policy-guard
 
 runtime-numeric-guard:
-	python3 tools/runtime_numeric_guard.py
+	$(PSOXIDE_DEV) runtime-numeric-guard
 
 clean:
 	cargo clean
@@ -206,6 +210,7 @@ clean:
 	cd sdk && cargo clean
 	cd tools/mkisopsx && cargo clean
 	cd tools/psx-exe-pack && cargo clean
+	cargo clean --manifest-path tools/psoxide-dev/Cargo.toml
 	rm -rf build
 
 fetch-opcode:
@@ -287,7 +292,7 @@ CORTEX_OVERRIDE_V1_PREBURN_STEPS ?= 240000000
 CORTEX_OVERRIDE_V1_PREBURN_BIOS_STEPS ?= 120000000
 CORTEX_OVERRIDE_V1_PREBURN_AUDIO_SECONDS ?= 6
 CORTEX_OVERRIDE_V1_PREBURN_AUDIO_MIN_PEAK ?= 256
-PYTHON ?= python3
+PSOXIDE_DEV ?= cargo run --manifest-path tools/psoxide-dev/Cargo.toml --release --
 PROFILE_DEMO3_FRAMES ?= 60
 PROFILE_DEMO3_STEPS ?= 120000000
 PROFILE_DEMO3_HW ?= /tmp/psoxide-demo3-hw-$(PROFILE_DEMO3_FRAMES).ppm
@@ -373,7 +378,7 @@ game-magikaaaaaarp-pong:
 	cd engine/examples/game-magikaaaaaarp-pong && $(ENGINE_EXAMPLE_CARGO_ENV) cargo build --release $(PSX_BUILD_FLAGS)
 
 magikaaaaaarp-pong-spectrum:
-	$(PYTHON) tools/bake_spectrum.py $(GONCHAROV_WAV) \
+	$(PSOXIDE_DEV) bake-spectrum $(GONCHAROV_WAV) \
 		-o $(MAGIKAAAAARP_PONG_SPECTRUM) \
 		--fps 30 --bands 16 --seconds 233
 
@@ -613,7 +618,7 @@ probe-magikaaaaaarp-pong-audio: game-magikaaaaaarp-pong-disc
 	cd emu && PSOXIDE_EXE=$(CURDIR)/$(EXAMPLE_OUT)/game-magikaaaaaarp-pong.exe PSOXIDE_DISC=$(CURDIR)/$(EXAMPLE_OUT)/game-magikaaaaaarp-pong.cue PSOXIDE_WAV=/tmp/psoxide_magikaaaaaarp_pong.wav PSOXIDE_AUDIO_SECONDS=6 cargo run -p emulator-core --example probe_cdda_wav --release
 
 duckstation-magikaaaaaarp-pong: game-magikaaaaaarp-pong-disc
-	$(PYTHON) tools/duckstation_harness.py \
+	$(PSOXIDE_DEV) duckstation-harness \
 		--cue $(CURDIR)/$(EXAMPLE_OUT)/game-magikaaaaaarp-pong.cue \
 		--timeout $(DUCKSTATION_TIMEOUT) \
 		--log $(CURDIR)/$(DUCKSTATION_MAGIKARP_LOG)
@@ -687,7 +692,7 @@ cortex-override-v1-preburn-bios-cdrom: cortex-override-v1-project-disc
 	fi
 
 duckstation-cortex-override-v1: cortex-override-v1-project-disc
-	$(PYTHON) tools/duckstation_harness.py \
+	$(PSOXIDE_DEV) duckstation-harness \
 		--cue $(CURDIR)/$(CORTEX_OVERRIDE_V1_CUE) \
 		--timeout $(DUCKSTATION_TIMEOUT) \
 		--log $(CURDIR)/$(DUCKSTATION_CORTEX_OVERRIDE_V1_LOG) \
@@ -697,7 +702,7 @@ duckstation-cortex-override-v1: cortex-override-v1-project-disc
 		--expect "psx-engine: scene init ok"
 
 duckstation-cortex-override-v1-bios: cortex-override-v1-project-disc
-	$(PYTHON) tools/duckstation_harness.py \
+	$(PSOXIDE_DEV) duckstation-harness \
 		--cue $(CURDIR)/$(CORTEX_OVERRIDE_V1_CUE) \
 		--timeout $(DUCKSTATION_TIMEOUT) \
 		--log $(CURDIR)/$(DUCKSTATION_CORTEX_OVERRIDE_V1_BIOS_LOG) \
