@@ -22,7 +22,7 @@
 	showcase-text showcase-text-disc run-showcase-text \
 	game-pong game-pong-disc run-game-pong \
 	game-magikaaaaaarp-pong game-magikaaaaaarp-pong-disc magikaaaaaarp-pong-spectrum run-game-magikaaaaaarp-pong probe-magikaaaaaarp-pong-audio duckstation-magikaaaaaarp-pong \
-	cortex-override-v1-project-disc cortex-override-v1-hardware-diagnostic-disc cortex-override-v1-preburn-local cortex-override-v1-preburn-struct cortex-override-v1-preburn-disc-reads cortex-override-v1-preburn-internal cortex-override-v1-preburn-cdda-audio cortex-override-v1-preburn-bios-cdrom cortex-override-v1-preburn-boot-flow cortex-override-v1-emulator-inventory cortex-override-v1-external-emulators duckstation-cortex-override-v1 duckstation-cortex-override-v1-bios redux-cortex-override-v1-bios mednafen-cortex-override-v1-bios retroarch-cortex-override-v1-bios \
+	cortex-override-v1-project-disc cortex-override-v1-project-disc-boot-trace cortex-override-v1-hardware-diagnostic-disc cortex-override-v1-preburn-local cortex-override-v1-preburn-struct cortex-override-v1-preburn-disc-reads cortex-override-v1-preburn-internal cortex-override-v1-preburn-cdda-audio cortex-override-v1-preburn-bios-cdrom cortex-override-v1-preburn-boot-flow cortex-override-v1-emulator-inventory cortex-override-v1-external-emulators duckstation-cortex-override-v1 duckstation-cortex-override-v1-bios redux-cortex-override-v1-bios mednafen-cortex-override-v1-bios retroarch-cortex-override-v1-bios \
 	game-breakout game-breakout-disc run-game-breakout \
         game-invaders game-invaders-disc run-game-invaders \
         showcase-3d showcase-3d-disc run-showcase-3d \
@@ -636,6 +636,9 @@ duckstation-magikaaaaaarp-pong: game-magikaaaaaarp-pong-disc
 cortex-override-v1-project-disc:
 	cd emu && cargo run -p frontend --release -- build-project-disc --project ../$(CORTEX_OVERRIDE_V1_PROJECT)
 
+cortex-override-v1-project-disc-boot-trace:
+	cd emu && EDITOR_PLAYTEST_FEATURES='cd-stream-bench boot-trace' cargo run -p frontend --release -- build-project-disc --project ../$(CORTEX_OVERRIDE_V1_PROJECT)
+
 cortex-override-v1-hardware-diagnostic-disc:
 	cd emu && EDITOR_PLAYTEST_CARGO_FEATURE_FLAGS='--no-default-features --features "$(EDITOR_PLAYTEST_HARDWARE_FEATURES) hardware-boot-visual"' cargo run -p frontend --release -- build-project-disc --project ../$(CORTEX_OVERRIDE_V1_PROJECT)
 
@@ -728,7 +731,7 @@ cortex-override-v1-emulator-inventory:
 cortex-override-v1-external-emulators: duckstation-cortex-override-v1-bios redux-cortex-override-v1-bios mednafen-cortex-override-v1-bios retroarch-cortex-override-v1-bios
 	@echo "cortex_override_v1 external emulator matrix complete"
 
-duckstation-cortex-override-v1: cortex-override-v1-project-disc
+duckstation-cortex-override-v1: cortex-override-v1-project-disc-boot-trace
 	$(PSOXIDE_DEV) duckstation-harness \
 		--cue $(CURDIR)/$(CORTEX_OVERRIDE_V1_CUE) \
 		--timeout $(DUCKSTATION_TIMEOUT) \
@@ -736,9 +739,12 @@ duckstation-cortex-override-v1: cortex-override-v1-project-disc
 		--no-default-expect \
 		--expect "psx-rt: main" \
 		--expect "editor-playtest: init ok" \
-		--expect "psx-engine: scene init ok"
+		--expect "psx-engine: scene init ok" \
+		--expect "psx-engine: cdda setmode ok" \
+		--expect "psx-engine: cdda demute ok" \
+		--expect "psx-engine: cdda play ok"
 
-duckstation-cortex-override-v1-bios: cortex-override-v1-project-disc
+duckstation-cortex-override-v1-bios: cortex-override-v1-project-disc-boot-trace
 	$(PSOXIDE_DEV) duckstation-harness \
 		--cue $(CURDIR)/$(CORTEX_OVERRIDE_V1_CUE) \
 		--timeout $(DUCKSTATION_TIMEOUT) \
@@ -747,7 +753,10 @@ duckstation-cortex-override-v1-bios: cortex-override-v1-project-disc
 		--no-default-expect \
 		--expect "psx-rt: main" \
 		--expect "editor-playtest: init ok" \
-		--expect "psx-engine: scene init ok"
+		--expect "psx-engine: scene init ok" \
+		--expect "psx-engine: cdda setmode ok" \
+		--expect "psx-engine: cdda demute ok" \
+		--expect "psx-engine: cdda play ok"
 
 redux-cortex-override-v1-bios: cortex-override-v1-project-disc
 	cd emu && PSOXIDE_DISC="$(CURDIR)/$(CORTEX_OVERRIDE_V1_CUE)" \
