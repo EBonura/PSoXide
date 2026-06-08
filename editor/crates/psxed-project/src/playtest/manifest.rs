@@ -127,6 +127,9 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         .unwrap_or(0);
     // UI.PAK immediately follows WORLD.PAK in the ISO file order, so its
     // start LBA is the WORLD.PAK start LBA plus the WORLD.PAK total sectors.
+    // WORLD.PAK itself starts after a fixed boot area: SYSTEM.CNF and PSX.EXE
+    // are first on disc, then invisible padding keeps streamed pack LBAs stable
+    // across executable size changes.
     let world_pack_total_sectors = world_pack_layout(package).total_sectors;
     let ui_pack_start_lba = psx_iso::WORLD_PACK_DEFAULT_START_LBA + world_pack_total_sectors;
     let ui_pack_toc = ui_pack_toc(package);

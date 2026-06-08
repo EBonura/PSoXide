@@ -69,12 +69,17 @@ pub struct IsoFile {
     pub content: Vec<u8>,
 }
 
+enum IsoEntry {
+    File(IsoFile),
+    Padding { sectors: u32 },
+}
+
 /// Build a cooked ISO 9660 image from a set of root-directory files.
 pub struct IsoBuilder {
     volume_id: String,
     system_id: String,
     system_area: Option<Vec<u8>>,
-    files: Vec<IsoFile>,
+    entries: Vec<IsoEntry>,
 }
 
 impl Default for IsoBuilder {
@@ -91,7 +96,7 @@ impl IsoBuilder {
             volume_id: String::from("UNTITLED"),
             system_id: String::from("PLAYSTATION"),
             system_area: None,
-            files: Vec::new(),
+            entries: Vec::new(),
         }
     }
 
@@ -121,10 +126,20 @@ impl IsoBuilder {
 
     /// Add a file to the root directory. Name is normalised later.
     pub fn add_file(&mut self, name: &str, content: Vec<u8>) -> &mut Self {
-        self.files.push(IsoFile {
+        self.entries.push(IsoEntry::File(IsoFile {
             name: name.to_ascii_uppercase(),
             content,
-        });
+        }));
+        self
+    }
+
+    /// Reserve invisible file-area sectors. These sectors are not listed in the
+    /// root directory, but they do consume LBAs, allowing later files to land at
+    /// fixed positions without cluttering the ISO file tree.
+    pub fn add_padding_sectors(&mut self, sectors: u32) -> &mut Self {
+        if sectors != 0 {
+            self.entries.push(IsoEntry::Padding { sectors });
+        }
         self
     }
 
@@ -147,17 +162,24 @@ impl IsoBuilder {
             lba: u32,
             size: u32,
         }
-        let mut placements: Vec<FilePlacement> = Vec::with_capacity(self.files.len());
-        for file in &self.files {
-            let entry_name = iso_file_identifier(&file.name);
-            let size = file.content.len() as u32;
-            let sectors = size.div_ceil(SECTOR_SIZE as u32).max(1);
-            placements.push(FilePlacement {
-                entry_name,
-                lba: next_file_lba,
-                size,
-            });
-            next_file_lba += sectors;
+        let mut placements: Vec<FilePlacement> = Vec::new();
+        for entry in &self.entries {
+            match entry {
+                IsoEntry::File(file) => {
+                    let entry_name = iso_file_identifier(&file.name);
+                    let size = file.content.len() as u32;
+                    let sectors = size.div_ceil(SECTOR_SIZE as u32).max(1);
+                    placements.push(FilePlacement {
+                        entry_name,
+                        lba: next_file_lba,
+                        size,
+                    });
+                    next_file_lba += sectors;
+                }
+                IsoEntry::Padding { sectors } => {
+                    next_file_lba += *sectors;
+                }
+            }
         }
         let total_sectors = next_file_lba;
 
@@ -217,7 +239,7 @@ impl IsoBuilder {
         fill_ascii(&mut pvd[190..318], ""); // volume set id (128 bytes)
         fill_ascii(&mut pvd[318..446], ""); // publisher id
         fill_ascii(&mut pvd[446..574], ""); // data preparer id
-        fill_ascii(&mut pvd[574..702], ""); // application id
+        fill_ascii(&mut pvd[574..702], "PLAYSTATION"); // application id
         fill_ascii(&mut pvd[702..740], ""); // copyright file id
         fill_ascii(&mut pvd[740..776], ""); // abstract file id
         fill_ascii(&mut pvd[776..813], ""); // bibliographic file id
@@ -245,7 +267,13 @@ impl IsoBuilder {
         out[19 * SECTOR_SIZE..20 * SECTOR_SIZE].copy_from_slice(&m_path);
         out[20 * SECTOR_SIZE..21 * SECTOR_SIZE].copy_from_slice(&root_extent);
 
-        for (file, placement) in self.files.iter().zip(placements.iter()) {
+        let mut placement_index = 0usize;
+        for entry in &self.entries {
+            let IsoEntry::File(file) = entry else {
+                continue;
+            };
+            let placement = &placements[placement_index];
+            placement_index += 1;
             let start = placement.lba as usize * SECTOR_SIZE;
             let end = start + file.content.len();
             out[start..end].copy_from_slice(&file.content);
@@ -590,6 +618,14 @@ mod tests {
     }
 
     #[test]
+    fn playstation_identifiers_land_in_pvd() {
+        let img = IsoBuilder::new().build();
+        let pvd = &img[16 * SECTOR_SIZE..17 * SECTOR_SIZE];
+        assert_eq!(&pvd[8..19], b"PLAYSTATION");
+        assert_eq!(&pvd[574..585], b"PLAYSTATION");
+    }
+
+    #[test]
     fn system_area_overrides_initial_sectors() {
         let mut area = vec![0u8; 16 * SECTOR_SIZE];
         area[4 * SECTOR_SIZE] = 0xAB;
@@ -611,6 +647,25 @@ mod tests {
         assert_eq!(img[23 * SECTOR_SIZE], b'B');
         // Total sector count = 21 (fixed) + 1 (SMALL.TXT) + 2 (BIG.BIN).
         assert_eq!(img.len() / SECTOR_SIZE, 24);
+    }
+
+    #[test]
+    fn padding_reserves_invisible_file_area_sectors() {
+        let mut b = IsoBuilder::new();
+        b.add_file("FIRST.BIN", vec![b'A'; 1]);
+        b.add_padding_sectors(3);
+        b.add_file("SECOND.BIN", vec![b'B'; 1]);
+        let img = b.build();
+
+        assert_eq!(img[21 * SECTOR_SIZE], b'A');
+        assert_eq!(img[25 * SECTOR_SIZE], b'B');
+        assert_eq!(img.len() / SECTOR_SIZE, 26);
+
+        let root = &img[20 * SECTOR_SIZE..21 * SECTOR_SIZE];
+        let root_text = core::str::from_utf8(root).unwrap_or("");
+        assert!(root_text.contains("FIRST.BIN;1"));
+        assert!(root_text.contains("SECOND.BIN;1"));
+        assert!(!root_text.contains("PADDING"));
     }
 
     #[test]

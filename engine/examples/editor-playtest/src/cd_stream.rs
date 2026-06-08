@@ -30,7 +30,7 @@ const CMD_SETMODE: u8 = 0x0E;
 
 const CD_MODE_DOUBLE_SPEED_2048: u8 = 0x80;
 #[cfg(feature = "cd-stream-benchmark")]
-const CD_STREAM_BENCH_LBA: u32 = 22;
+const CD_STREAM_BENCH_LBA: u32 = 992;
 #[cfg(feature = "cd-stream-benchmark")]
 const CD_STREAM_BENCH_SECTORS: usize = 32;
 #[cfg(feature = "cd-stream-benchmark")]

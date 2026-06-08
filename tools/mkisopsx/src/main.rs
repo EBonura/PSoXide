@@ -15,7 +15,7 @@
 //! Both flavours contain the same ISO 9660 filesystem: `SYSTEM.CNF`
 //! (points the BIOS at `PSX.EXE`) and the EXE itself, both in the
 //! root directory. Pass `--cdtest-sectors N` to insert deterministic
-//! `CDTEST.BIN` stream-benchmark data before `PSX.EXE`. Pass one or
+//! `CDTEST.BIN` stream-benchmark data in the fixed boot-area padding. Pass one or
 //! more `--cdda-track <raw-pcm>` paths, or a newline-delimited
 //! `--cdda-track-list <file>`, to append sector-aligned raw CD-DA
 //! tracks into the same `.bin` and emit a sibling `.cue`.
@@ -170,16 +170,16 @@ fn print_usage() {
          --volume, -v    Volume identifier (default: PSOXIDE).\n\
          --cdtest-sectors N\n\
                          Add deterministic CDTEST.BIN benchmark data\n\
-                         before PSX.EXE.\n\
+                         before WORLD.PAK in the fixed boot-area padding.\n\
          --world-pack-rooms-dir PATH\n\
-                         Pack room_*.psxc stream chunks into WORLD.PAK before\n\
-                         PSX.EXE.\n\
+                         Pack room_*.psxc stream chunks into WORLD.PAK after\n\
+                         the fixed boot area.\n\
          --world-pack-order-file PATH\n\
                          Optional newline-delimited room id order for\n\
                          WORLD.PAK payload placement.\n\
          --ui-pack-dir PATH\n\
                          Pack ui_*.psxt streamed UI images into UI.PAK\n\
-                         after WORLD.PAK and before PSX.EXE.\n\
+                         immediately after WORLD.PAK.\n\
          --ui-pack-order-file PATH\n\
                          Optional newline-delimited UI asset index order\n\
                          for UI.PAK payload placement.\n\
@@ -280,10 +280,16 @@ fn main() -> ExitCode {
         },
         None => None,
     };
-    // Canonical playtest-disc layout (SYSTEM.CNF, CDTEST.BIN, WORLD.PAK, UI.PAK,
-    // PSX.EXE), shared with the editor's embedded Play via add_playtest_files so
-    // the on-disc order cannot drift from the cooked *_PACK_START_LBA values.
-    add_playtest_files(&mut builder, exe_bytes, world_pack, ui_pack, args.cdtest_sectors);
+    // Canonical playtest-disc layout (SYSTEM.CNF, PSX.EXE, fixed boot-area
+    // padding, optional CDTEST.BIN, WORLD.PAK, UI.PAK), shared with the editor's
+    // embedded Play via add_playtest_files so the on-disc order cannot drift
+    // from the cooked *_PACK_START_LBA values.
+    if let Err(error) =
+        add_playtest_files(&mut builder, exe_bytes, world_pack, ui_pack, args.cdtest_sectors)
+    {
+        eprintln!("playtest disc layout error: {error:?}");
+        return ExitCode::from(1);
+    }
 
     let (mut image, sector_size, format_label) = if args.cooked_iso {
         let iso = builder.build();
