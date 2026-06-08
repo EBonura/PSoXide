@@ -57,9 +57,10 @@ impl Scene for Playtest {
     /// the font VRAM tracked.
     fn on_enter_state(&mut self, state: SceneStateRef, _ctx: &mut Ctx) {
         acquire_shared_ui_fonts(&mut self.ui_fonts);
-        // Streamed UI images live only in menu states. The first menu entry
-        // preloads all menu image bytes from UI.PAK into RAM, then this call
-        // uploads only the active UI scene's images to VRAM. Gameplay entry
+        // Streamed UI images live only in menu states. Menu entry uploads any
+        // already-cached active-scene images but does not read the disc; those
+        // reads are stepped after boot by `update_ui_resources` so real hardware
+        // can render a first frame before menu preloading starts. Gameplay entry
         // frees previous menu VRAM (see `on_exit_state`). The sky panorama is
         // gameplay-scoped, so it is the mirror image: loaded on gameplay entry
         // and freed on gameplay exit.
@@ -67,6 +68,7 @@ impl Scene for Playtest {
         if state.has_gameplay() {
             load_streamed_sky_from_cd();
         } else {
+            note_menu_ui_scene_entered();
             load_ui_images_for_scene(state.ui_scene);
         }
         let _ = state;
@@ -110,6 +112,14 @@ impl Scene for Playtest {
     fn loading_update(&mut self, ctx: &mut Ctx) -> bool {
         self.step_streaming_jobs(ctx);
         self.initial_world_ready()
+    }
+
+    fn update_ui_resources(&mut self, state: SceneStateRef, _ctx: &mut Ctx) {
+        #[cfg(feature = "cd-stream-bench")]
+        if !state.has_gameplay() {
+            service_menu_ui_images(state.ui_scene);
+        }
+        let _ = state;
     }
 
     fn update(&mut self, ctx: &mut Ctx) {
