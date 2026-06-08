@@ -899,7 +899,11 @@ fn run_headless_launch(
     if let Some(path) = args.dump_ram {
         std::fs::write(&path, bus.ram()).map_err(|e| format!("write ram dump: {e}"))?;
         if emit_summary {
-            eprintln!("[cli] main RAM → {} ({} bytes)", path.display(), bus.ram().len());
+            eprintln!(
+                "[cli] main RAM → {} ({} bytes)",
+                path.display(),
+                bus.ram().len()
+            );
         }
     }
 
@@ -956,7 +960,7 @@ fn write_wav_s16_stereo(
 }
 
 fn cmd_build_editor_playtest_disc() -> Result<(), String> {
-    let disc_path = build_embedded_playtest_disc()?;
+    let disc_path = build_embedded_playtest_disc(crate::app::DEFAULT_EMBEDDED_PLAYTEST_VOLUME_ID)?;
     println!("{}", disc_path.display());
     Ok(())
 }
@@ -984,7 +988,8 @@ fn build_project_disc_path(project_path: &Path) -> Result<PathBuf, String> {
     )?;
     run_make(&repo_root, "build-editor-playtest", &[])?;
 
-    let source_cue = build_embedded_playtest_disc()?;
+    let volume_id = crate::app::project_disc_volume_id(&project.name);
+    let source_cue = build_embedded_playtest_disc(&volume_id)?;
     let dest_cue = project_root.join("baked").join(format!(
         "{}.cue",
         psxed_project::project_file_stem(&project.name)

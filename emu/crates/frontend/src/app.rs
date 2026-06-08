@@ -99,9 +99,12 @@ impl Workspace {
 enum EditorBuildCompletion {
     /// Wrap the built runtime into a CUE/BIN disc and load it into the
     /// embedded editor viewport.
-    RunEmbedded,
+    RunEmbedded { volume_id: String },
     /// Copy the built CUE/BIN disc into the active project's baked output folder.
-    ExportProject { dest_path: PathBuf },
+    ExportProject {
+        dest_path: PathBuf,
+        volume_id: String,
+    },
 }
 
 /// Top-level app state. Owns the emulator state directly -- no Arc/Mutex,
@@ -482,8 +485,8 @@ impl AppState {
 
     /// Convenience: look up an entry by menu launch token and launch
     /// it. Most tokens are stable library IDs; project builds use
-    /// path-qualified tokens because all authored PSoXide discs share
-    /// the same PSX volume ID.
+    /// path-qualified tokens because authored PSoXide discs can still
+    /// share a PSX volume ID.
     pub fn launch_by_id(&mut self, id: &str) -> Result<(), String> {
         let Some(entry) = library_entry_for_launch_id(&self.library.entries, id).cloned() else {
             return Err(format!("no library entry with id={id}"));
@@ -1143,7 +1146,10 @@ impl AppState {
         self.editor
             .set_status(format!("{cook_status}; compiling runtime..."));
 
-        if let Err(error) = self.spawn_editor_playtest_build(EditorBuildCompletion::RunEmbedded) {
+        let volume_id = project_disc_volume_id(&self.editor.project().name);
+        if let Err(error) =
+            self.spawn_editor_playtest_build(EditorBuildCompletion::RunEmbedded { volume_id })
+        {
             let message = format!("Embedded Play build failed: {error}");
             self.editor.set_status(message.clone());
             self.embedded_playtest.fail();
@@ -1165,6 +1171,7 @@ impl AppState {
         }
         let dest_path =
             project_baked_disc_path(self.editor.project_dir(), &self.editor.project().name);
+        let volume_id = project_disc_volume_id(&self.editor.project().name);
         let cook_status = match self.editor.cook_playtest_to_disk() {
             Ok(status) => status,
             Err(error) => {
@@ -1179,9 +1186,10 @@ impl AppState {
             dest_path.display()
         ));
 
-        if let Err(error) =
-            self.spawn_editor_playtest_build(EditorBuildCompletion::ExportProject { dest_path })
-        {
+        if let Err(error) = self.spawn_editor_playtest_build(EditorBuildCompletion::ExportProject {
+            dest_path,
+            volume_id,
+        }) {
             let message = format!("Project build failed: {error}");
             self.editor.set_status(message.clone());
             self.embedded_playtest.fail();
@@ -1251,15 +1259,16 @@ impl AppState {
             return;
         }
 
-        let completion = self
-            .editor_build_completion
-            .take()
-            .unwrap_or(EditorBuildCompletion::RunEmbedded);
+        let completion = self.editor_build_completion.take().unwrap_or_else(|| {
+            EditorBuildCompletion::RunEmbedded {
+                volume_id: DEFAULT_EMBEDDED_PLAYTEST_VOLUME_ID.to_string(),
+            }
+        });
         match completion {
-            EditorBuildCompletion::RunEmbedded => {
+            EditorBuildCompletion::RunEmbedded { volume_id } => {
                 self.editor
                     .set_status("Embedded Play build complete; creating disc image...");
-                match self.load_embedded_playtest_disc() {
+                match self.load_embedded_playtest_disc(&volume_id) {
                     Ok(()) => {
                         self.embedded_playtest.start_running(true);
                         self.running = true;
@@ -1276,20 +1285,21 @@ impl AppState {
                     }
                 }
             }
-            EditorBuildCompletion::ExportProject { dest_path } => {
-                match self.export_project_build(dest_path) {
-                    Ok(message) => {
-                        self.embedded_playtest.stop();
-                        self.editor.set_status(message.clone());
-                        self.status_message_set(message);
-                    }
-                    Err(error) => {
-                        let message = format!("Project build export failed: {error}");
-                        self.editor.set_status(message.clone());
-                        self.embedded_playtest.fail();
-                    }
+            EditorBuildCompletion::ExportProject {
+                dest_path,
+                volume_id,
+            } => match self.export_project_build(dest_path, &volume_id) {
+                Ok(message) => {
+                    self.embedded_playtest.stop();
+                    self.editor.set_status(message.clone());
+                    self.status_message_set(message);
                 }
-            }
+                Err(error) => {
+                    let message = format!("Project build export failed: {error}");
+                    self.editor.set_status(message.clone());
+                    self.embedded_playtest.fail();
+                }
+            },
         }
     }
 
@@ -1509,11 +1519,11 @@ impl AppState {
         }
     }
 
-    fn load_embedded_playtest_disc(&mut self) -> Result<(), String> {
+    fn load_embedded_playtest_disc(&mut self, volume_id: &str) -> Result<(), String> {
         let mut bus = Bus::new_without_bios();
         let mut cpu = Cpu::new();
 
-        let disc_path = build_embedded_playtest_disc()?;
+        let disc_path = build_embedded_playtest_disc(volume_id)?;
         let disc = load_authored_disc(&disc_path)?;
         // Embedded Play is PSoXide-authored homebrew: no user BIOS is
         // required. The runtime fast-boots with HLE BIOS dispatch, while
@@ -1533,8 +1543,12 @@ impl AppState {
         Ok(())
     }
 
-    fn export_project_build(&mut self, dest_path: PathBuf) -> Result<String, String> {
-        let source_path = build_embedded_playtest_disc()?;
+    fn export_project_build(
+        &mut self,
+        dest_path: PathBuf,
+        volume_id: &str,
+    ) -> Result<String, String> {
+        let source_path = build_embedded_playtest_disc(volume_id)?;
         let build_bytes = copy_project_disc(&source_path, &dest_path)?;
 
         let rescan_error = self.rescan_library().err();
@@ -2146,12 +2160,15 @@ fn editor_playtest_disc_path() -> PathBuf {
 
 /// Wrap the current editor-playtest executable and generated world pack into
 /// the local embedded playtest disc image.
-pub(crate) fn build_embedded_playtest_disc() -> Result<PathBuf, String> {
+pub(crate) const DEFAULT_EMBEDDED_PLAYTEST_VOLUME_ID: &str = "PSOXIDE";
+const ISO_VOLUME_ID_BYTES: usize = 32;
+
+pub(crate) fn build_embedded_playtest_disc(volume_id: &str) -> Result<PathBuf, String> {
     let exe_path = editor_playtest_exe_path();
     let exe_bytes = std::fs::read(&exe_path).map_err(|e| format!("{}: {e}", exe_path.display()))?;
     let world_pack = embedded_world_pack_payload()?;
     let ui_pack = embedded_ui_pack_payload()?;
-    let mut image = embedded_playtest_disc_image(exe_bytes, world_pack, ui_pack)?;
+    let mut image = embedded_playtest_disc_image(volume_id, exe_bytes, world_pack, ui_pack)?;
     let cdda_payloads = embedded_cdda_track_payloads()?;
     let cdda_tracks = append_cdda_tracks_to_image(&mut image, &cdda_payloads)?;
 
@@ -2237,12 +2254,13 @@ fn append_cdda_tracks_to_image(
 }
 
 fn embedded_playtest_disc_image(
+    volume_id: &str,
     exe_bytes: Vec<u8>,
     world_pack: Option<Vec<u8>>,
     ui_pack: Option<Vec<u8>>,
 ) -> Result<Vec<u8>, String> {
     Exe::parse(&exe_bytes).map_err(|e| format!("parse EXE: {e:?}"))?;
-    let mut builder = IsoBuilder::new().volume_id("PSOXIDE");
+    let mut builder = IsoBuilder::new().volume_id(volume_id);
     if let Some(system_area) = embedded_playtest_system_area()? {
         builder = builder
             .system_area(system_area)
@@ -2257,14 +2275,8 @@ fn embedded_playtest_disc_image(
     // cooked WORLD_PACK_START_LBA / UI_PACK_START_LBA) cannot drift between the
     // two builders. Normal project discs omit CDTEST.BIN so the root directory
     // stays close to a retail/homebrew boot layout.
-    psx_iso::add_playtest_files(
-        &mut builder,
-        exe_bytes,
-        world_pack,
-        ui_pack,
-        None,
-    )
-    .map_err(|error| format!("playtest disc layout: {error:?}"))?;
+    psx_iso::add_playtest_files(&mut builder, exe_bytes, world_pack, ui_pack, None)
+        .map_err(|error| format!("playtest disc layout: {error:?}"))?;
     Ok(builder.build_bin())
 }
 
@@ -2497,6 +2509,14 @@ fn project_baked_disc_path(project_dir: &Path, project_name: &str) -> PathBuf {
 
 fn safe_project_build_stem(name: &str) -> String {
     psxed_project::project_file_stem(name)
+}
+
+pub(crate) fn project_disc_volume_id(project_name: &str) -> String {
+    let mut volume_id = safe_project_build_stem(project_name).to_ascii_uppercase();
+    if volume_id.len() > ISO_VOLUME_ID_BYTES {
+        volume_id.truncate(ISO_VOLUME_ID_BYTES);
+    }
+    volume_id
 }
 
 fn remove_stale_project_builds(dest_path: &Path) -> Result<usize, String> {
@@ -2752,7 +2772,7 @@ mod tests {
             "build/examples/mipsel-sony-psx/release/editor-playtest.iso"
         )));
         assert!(is_internal_example_artifact(Path::new(
-            "build/examples/mipsel-sony-psx/release/editor-playtest-demo10-profile.bin"
+            "build/examples/mipsel-sony-psx/release/editor-playtest-cortex-override-v1-profile.bin"
         )));
         assert!(!is_internal_example_artifact(Path::new(
             "build/examples/mipsel-sony-psx/release/hello-cdda.exe"
@@ -2778,6 +2798,16 @@ mod tests {
     }
 
     #[test]
+    fn project_disc_volume_id_uses_project_name() {
+        assert_eq!(project_disc_volume_id("Demo 10"), "DEMO_10");
+        assert_eq!(project_disc_volume_id("..."), "PROJECT");
+        assert_eq!(
+            project_disc_volume_id("A very very very very very long project name"),
+            "A_VERY_VERY_VERY_VERY_VERY_LONG_"
+        );
+    }
+
+    #[test]
     fn embedded_playtest_disc_image_boots_psx_exe() {
         let mut exe = vec![0u8; psx_iso::EXE_HEADER_BYTES];
         exe[..8].copy_from_slice(b"PS-X EXE");
@@ -2787,10 +2817,11 @@ mod tests {
         exe.extend_from_slice(&[1, 2, 3, 4]);
 
         let world_pack = psx_iso::build_world_pack(&[(0, b"room-zero".as_slice())]);
-        let image =
-            embedded_playtest_disc_image(exe, Some(world_pack), None).expect("disc image builds");
+        let image = embedded_playtest_disc_image("DEMO_10", exe, Some(world_pack), None)
+            .expect("disc image builds");
         let disc = Disc::from_bin(image);
         let boot = psx_iso::load_boot_exe_from_disc(&disc).expect("disc boots");
+        let pvd_sector = disc.read_sector_user(16).expect("PVD sector exists");
         let boot_sector = disc
             .read_sector_user(psx_iso::PLAYTEST_BOOT_EXE_START_LBA)
             .expect("boot exe sector exists");
@@ -2801,6 +2832,7 @@ mod tests {
         assert_eq!(boot.boot_path, "PSX.EXE;1");
         assert_eq!(boot.exe.initial_pc, 0x8001_2340);
         assert_eq!(boot.exe.payload, vec![1, 2, 3, 4]);
+        assert_eq!(&pvd_sector[40..47], b"DEMO_10");
         assert_eq!(&boot_sector[..8], b"PS-X EXE");
         assert_eq!(
             &world_pack_sector[..psx_iso::WORLD_PACK_MAGIC.len()],
@@ -2860,14 +2892,17 @@ mod tests {
         std::fs::write(&source_bin, b"disc image bytes").unwrap();
         write_single_data_track_cue(&source_cue, &source_bin).unwrap();
 
-        let dest_cue = root.join("demo10").join("baked").join("demo10.cue");
+        let dest_cue = root
+            .join("cortex_override_v1")
+            .join("baked")
+            .join("cortex_override_v1.cue");
         let copied_bytes = copy_project_disc(&source_cue, &dest_cue).unwrap();
         let dest_bin = dest_cue.with_extension("bin");
         let cue = std::fs::read_to_string(&dest_cue).unwrap();
 
         assert!(copied_bytes > 0);
         assert_eq!(std::fs::read(&dest_bin).unwrap(), b"disc image bytes");
-        assert!(cue.contains("FILE \"demo10.bin\" BINARY"));
+        assert!(cue.contains("FILE \"cortex_override_v1.bin\" BINARY"));
         assert!(!cue.contains("editor-playtest.bin"));
 
         let _ = std::fs::remove_dir_all(root);
@@ -2904,7 +2939,10 @@ mod tests {
     fn project_build_launch_ids_resolve_by_path_when_disc_ids_collide() {
         let root = frontend_test_temp_dir("project-build-launch-ids");
         let a_path = root.join("demo4").join("baked").join("demo4.cue");
-        let b_path = root.join("demo10").join("baked").join("demo10.cue");
+        let b_path = root
+            .join("cortex_override_v1")
+            .join("baked")
+            .join("cortex_override_v1.cue");
         std::fs::create_dir_all(a_path.parent().unwrap()).unwrap();
         std::fs::create_dir_all(b_path.parent().unwrap()).unwrap();
         std::fs::write(&a_path, b"disc a").unwrap();

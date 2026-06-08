@@ -1001,6 +1001,13 @@ fn try_dma_copy_to_vram(rect: VramRect, src: *const u32) -> bool {
         return false;
     }
     let words_per_row = rect.w / 2;
+    // GPU block-mode DMA's BCR block size must fit the GPU's 16-word
+    // FIFO. Wider rows, such as the combined UI font atlas, can appear to
+    // work in emulators but wedge real hardware; use the GP0 FIFO path
+    // instead of starting an invalid DMA.
+    if words_per_row > 16 {
+        return false;
+    }
 
     copy_to_vram_header(rect);
     // GP1(04h) = 2: route DMA words CPU→GP0. `psx-gpu::init` sets this,

@@ -1,10 +1,10 @@
 (
     targets: [
         (
-            name: "demo10",
+            name: "cortex_override_v1",
             category: Project,
             artifact: Project(
-                project: "editor/projects/demo10",
+                project: "editor/projects/cortex_override_v1",
             ),
             checkpoints: [
                 (
