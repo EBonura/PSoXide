@@ -437,17 +437,10 @@ fn cdda_set_volume(_volume_percent: u8) {}
 fn cdda_issue_step(step: CddaStartStep, track: u8) -> bool {
     match step {
         CddaStartStep::SetMode => {
-            let _ = psx_io::cdrom::set_mode(CDDA_PLAYBACK_MODE);
-            true
+            psx_io::cdrom::try_set_mode(CDDA_PLAYBACK_MODE, CDDA_COMMAND_SPINS).is_some()
         }
-        CddaStartStep::Demute => {
-            let _ = psx_io::cdrom::demute();
-            true
-        }
-        CddaStartStep::Play => {
-            let _ = psx_io::cdrom::play_track(track);
-            true
-        }
+        CddaStartStep::Demute => psx_io::cdrom::try_demute(CDDA_COMMAND_SPINS).is_some(),
+        CddaStartStep::Play => psx_io::cdrom::try_play_track(track, CDDA_COMMAND_SPINS).is_some(),
     }
 }
 
@@ -1350,8 +1343,11 @@ impl<'a, S: Scene> GameApp<'a, S> {
     fn render_ui_scene(&mut self, scene: u16, ctx: &mut Ctx) {
         // Resolve the scene's pool block, then resolve focus, so the
         // highlighted control matches the one input acts on.
+        crate::app::boot_visual_checkpoint(&mut ctx.fb, (40, 80, 220), "37 UI RANGE BEGIN");
         let (first, count) = self.scene_node_range(scene);
+        crate::app::boot_visual_checkpoint(&mut ctx.fb, (40, 120, 220), "37 UI RANGE OK");
         let focused = self.resolved_focus(first, count);
+        crate::app::boot_visual_checkpoint(&mut ctx.fb, (40, 160, 220), "37 UI FOCUS OK");
         // Copy the node pool + option store out of `self` first so the
         // resolver closures borrow only these Copy locals, not `self`
         // (draw_scene already borrows `self.nodes`).
@@ -1382,6 +1378,7 @@ impl<'a, S: Scene> GameApp<'a, S> {
             self.gameplay.ui_font_at(2),
             self.gameplay.ui_font_at(3),
         ];
+        crate::app::boot_visual_checkpoint(&mut ctx.fb, (40, 200, 220), "37 UI DRAW BEGIN");
         ui::draw_scene(
             nodes,
             first,
@@ -1396,6 +1393,7 @@ impl<'a, S: Scene> GameApp<'a, S> {
             &option_value,
             &visible,
         );
+        crate::app::boot_visual_checkpoint(&mut ctx.fb, (80, 220, 220), "37 UI DRAW OK");
     }
 
     /// Pop to the remembered `return_to` state, if one is set. The
@@ -1686,18 +1684,24 @@ impl<'a, S: Scene> Scene for GameApp<'a, S> {
         // Menu music and UI SFX share SPU state. Initialise once here and
         // upload the generated UI SFX bank before any UI scene starts routing
         // CD-DA audio.
+        crate::app::boot_visual_checkpoint(&mut ctx.fb, (255, 80, 0), "04 MENU AUDIO BEGIN");
         self.init_menu_audio();
+        crate::app::boot_visual_checkpoint(&mut ctx.fb, (255, 0, 80), "05 MENU AUDIO OK");
 
         // Legacy boot-time shared-asset hook. Scenes that have migrated to the
         // per-state resource lifecycle leave this a no-op and acquire their
         // resources in `on_enter_state` instead.
+        crate::app::boot_visual_checkpoint(&mut ctx.fb, (255, 160, 0), "06 SHARED ASSETS BEGIN");
         self.gameplay.load_shared_assets(ctx);
+        crate::app::boot_visual_checkpoint(&mut ctx.fb, (0, 200, 80), "07 SHARED ASSETS OK");
 
         // Acquire the entry state's resource set (e.g. the UI font atlas) up
         // front, so both the loading screen and the first menu frame have it.
         // This is the per-scene enter hook the flow previously left as a TODO.
         let entry = self.cursor.current;
+        crate::app::boot_visual_checkpoint(&mut ctx.fb, (255, 0, 255), "08 RESOURCES BEGIN");
         self.switch_resources(entry, ctx);
+        crate::app::boot_visual_checkpoint(&mut ctx.fb, (80, 255, 80), "09 RESOURCES OK");
 
         // Enter the configured entry state. Any Gameplay entry, including the
         // gameplay-only default, first parks on loading so streaming scenes can
@@ -1710,7 +1714,9 @@ impl<'a, S: Scene> Scene for GameApp<'a, S> {
             // Cursor already at the UI-only entry from FlowCursor::new.
             // Apply defaults once so global presentation options preview
             // correctly even before the player starts gameplay.
+            crate::app::boot_visual_checkpoint(&mut ctx.fb, (255, 255, 255), "11 OPTIONS BEGIN");
             self.apply_current_options();
+            crate::app::boot_visual_checkpoint(&mut ctx.fb, (0, 255, 160), "12 OPTIONS OK");
         }
     }
 
@@ -1742,20 +1748,55 @@ impl<'a, S: Scene> Scene for GameApp<'a, S> {
     }
 
     fn render(&mut self, ctx: &mut Ctx) {
+        crate::app::boot_visual_checkpoint(&mut ctx.fb, (120, 40, 200), "34 GAMEAPP RENDER BEGIN");
         if self.loading_pending() {
+            crate::app::boot_visual_checkpoint(
+                &mut ctx.fb,
+                (140, 40, 220),
+                "35 LOADING RENDER BEGIN",
+            );
             self.render_loading_screen();
             self.cursor.mark_loading_rendered();
             return;
         }
+        crate::app::boot_visual_checkpoint(&mut ctx.fb, (140, 80, 220), "35 TAG RESOLVE BEGIN");
         let tag = self.current_tag();
+        crate::app::boot_visual_checkpoint(&mut ctx.fb, (160, 80, 220), "36 TAG RESOLVE OK");
         if tag.has_gameplay() {
+            crate::app::boot_visual_checkpoint(
+                &mut ctx.fb,
+                (180, 80, 220),
+                "37 GAMEPLAY RENDER BEGIN",
+            );
             self.gameplay.render(ctx);
+            crate::app::boot_visual_checkpoint(
+                &mut ctx.fb,
+                (200, 80, 220),
+                "38 GAMEPLAY RENDER OK",
+            );
         }
         if let Some(scene) = tag.ui_scene() {
+            crate::app::boot_visual_checkpoint(&mut ctx.fb, (200, 120, 220), "37 UI RENDER BEGIN");
             self.render_ui_scene(scene, ctx);
+            crate::app::boot_visual_checkpoint_hold(
+                &mut ctx.fb,
+                (220, 120, 220),
+                "38 UI RENDER OK",
+                60,
+            );
         }
         if let Some(transition) = self.transition {
+            crate::app::boot_visual_checkpoint(
+                &mut ctx.fb,
+                (220, 160, 220),
+                "38 TRANSITION RENDER BEGIN",
+            );
             render_transition_overlay(transition);
+            crate::app::boot_visual_checkpoint(
+                &mut ctx.fb,
+                (220, 200, 220),
+                "38 TRANSITION RENDER OK",
+            );
         }
     }
 }

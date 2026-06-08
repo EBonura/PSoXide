@@ -18,8 +18,6 @@ lto           = true
 [features]
 default = [
     "cd-stream-bench",
-    "boot-trace",
-    "emulator-telemetry",
     "world-order-slot",
     "world-grid-visible",
     "ot-2048",
@@ -33,6 +31,7 @@ cd-stream-bench = ["dep:psx-io"]
 cd-stream-benchmark = ["cd-stream-bench"]
 boot-trace = ["psx-engine/boot-trace", "psx-rt/boot-trace"]
 emulator-telemetry = ["psx-engine/emulator-telemetry"]
+hardware-boot-visual = ["psx-engine/hardware-boot-visual"]
 world-order-global = []
 world-order-slot = []
 world-order-linked = []

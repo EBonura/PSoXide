@@ -60,6 +60,239 @@ fn boot_trace(message: &str) {
 #[inline(always)]
 fn boot_trace(_message: &str) {}
 
+#[cfg(all(target_arch = "mips", feature = "hardware-boot-visual"))]
+pub(crate) fn boot_visual_checkpoint(fb: &mut FrameBuffer, color: (u8, u8, u8), message: &str) {
+    boot_visual_checkpoint_hold(fb, color, message, 1);
+}
+
+#[cfg(all(target_arch = "mips", feature = "hardware-boot-visual"))]
+pub(crate) fn boot_visual_checkpoint_hold(
+    fb: &mut FrameBuffer,
+    color: (u8, u8, u8),
+    message: &str,
+    frames: u8,
+) {
+    for _ in 0..frames.max(1) {
+        fb.clear(color.0, color.1, color.2);
+        draw_boot_text(fb, message);
+        gpu::draw_sync();
+        gpu::vsync();
+        fb.swap();
+    }
+}
+
+#[cfg(all(target_arch = "mips", feature = "hardware-boot-visual"))]
+fn draw_boot_text(fb: &FrameBuffer, message: &str) {
+    let scale = 2i16;
+    let advance = 6 * scale;
+    let line_height = 9 * scale;
+    let start_x = 12i16;
+    let mut x = start_x;
+    let mut y = 16i16;
+    draw_boot_text_line(start_x, y, "CORTEX_OVERRIDE_V1", scale);
+    y += line_height;
+    for ch in message.chars() {
+        if ch == '\n' || x + advance >= fb.width as i16 - 8 {
+            x = start_x;
+            y += line_height;
+            if ch == '\n' {
+                continue;
+            }
+        }
+        draw_boot_glyph(x, y, ch, scale);
+        x += advance;
+    }
+}
+
+#[cfg(all(target_arch = "mips", feature = "hardware-boot-visual"))]
+fn draw_boot_text_line(mut x: i16, y: i16, text: &str, scale: i16) {
+    let advance = 6 * scale;
+    for ch in text.chars() {
+        draw_boot_glyph(x, y, ch, scale);
+        x += advance;
+    }
+}
+
+#[cfg(all(target_arch = "mips", feature = "hardware-boot-visual"))]
+fn draw_boot_glyph(x: i16, y: i16, ch: char, scale: i16) {
+    let rows = boot_glyph(ch);
+    for (row, bits) in rows.iter().enumerate() {
+        for col in 0..5 {
+            if bits & (1 << (4 - col)) == 0 {
+                continue;
+            }
+            let px = x + col as i16 * scale;
+            let py = y + row as i16 * scale;
+            gpu::draw_quad_flat(
+                [
+                    (px, py),
+                    (px + scale - 1, py),
+                    (px, py + scale - 1),
+                    (px + scale - 1, py + scale - 1),
+                ],
+                255,
+                255,
+                255,
+            );
+        }
+    }
+}
+
+#[cfg(all(target_arch = "mips", feature = "hardware-boot-visual"))]
+fn boot_glyph(ch: char) -> [u8; 7] {
+    let ch = if ch >= 'a' && ch <= 'z' {
+        (ch as u8 - b'a' + b'A') as char
+    } else {
+        ch
+    };
+    match ch {
+        'A' => [
+            0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001,
+        ],
+        'B' => [
+            0b11110, 0b10001, 0b10001, 0b11110, 0b10001, 0b10001, 0b11110,
+        ],
+        'C' => [
+            0b01111, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b01111,
+        ],
+        'D' => [
+            0b11110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11110,
+        ],
+        'E' => [
+            0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b11111,
+        ],
+        'F' => [
+            0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b10000,
+        ],
+        'G' => [
+            0b01111, 0b10000, 0b10000, 0b10111, 0b10001, 0b10001, 0b01111,
+        ],
+        'H' => [
+            0b10001, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001,
+        ],
+        'I' => [
+            0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b11111,
+        ],
+        'J' => [
+            0b00111, 0b00010, 0b00010, 0b00010, 0b10010, 0b10010, 0b01100,
+        ],
+        'K' => [
+            0b10001, 0b10010, 0b10100, 0b11000, 0b10100, 0b10010, 0b10001,
+        ],
+        'L' => [
+            0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b11111,
+        ],
+        'M' => [
+            0b10001, 0b11011, 0b10101, 0b10101, 0b10001, 0b10001, 0b10001,
+        ],
+        'N' => [
+            0b10001, 0b11001, 0b10101, 0b10011, 0b10001, 0b10001, 0b10001,
+        ],
+        'O' => [
+            0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110,
+        ],
+        'P' => [
+            0b11110, 0b10001, 0b10001, 0b11110, 0b10000, 0b10000, 0b10000,
+        ],
+        'Q' => [
+            0b01110, 0b10001, 0b10001, 0b10001, 0b10101, 0b10010, 0b01101,
+        ],
+        'R' => [
+            0b11110, 0b10001, 0b10001, 0b11110, 0b10100, 0b10010, 0b10001,
+        ],
+        'S' => [
+            0b01111, 0b10000, 0b10000, 0b01110, 0b00001, 0b00001, 0b11110,
+        ],
+        'T' => [
+            0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100,
+        ],
+        'U' => [
+            0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110,
+        ],
+        'V' => [
+            0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01010, 0b00100,
+        ],
+        'W' => [
+            0b10001, 0b10001, 0b10001, 0b10101, 0b10101, 0b10101, 0b01010,
+        ],
+        'X' => [
+            0b10001, 0b10001, 0b01010, 0b00100, 0b01010, 0b10001, 0b10001,
+        ],
+        'Y' => [
+            0b10001, 0b10001, 0b01010, 0b00100, 0b00100, 0b00100, 0b00100,
+        ],
+        'Z' => [
+            0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b10000, 0b11111,
+        ],
+        '0' => [
+            0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110,
+        ],
+        '1' => [
+            0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110,
+        ],
+        '2' => [
+            0b01110, 0b10001, 0b00001, 0b00010, 0b00100, 0b01000, 0b11111,
+        ],
+        '3' => [
+            0b11110, 0b00001, 0b00001, 0b01110, 0b00001, 0b00001, 0b11110,
+        ],
+        '4' => [
+            0b00010, 0b00110, 0b01010, 0b10010, 0b11111, 0b00010, 0b00010,
+        ],
+        '5' => [
+            0b11111, 0b10000, 0b10000, 0b11110, 0b00001, 0b00001, 0b11110,
+        ],
+        '6' => [
+            0b01110, 0b10000, 0b10000, 0b11110, 0b10001, 0b10001, 0b01110,
+        ],
+        '7' => [
+            0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b01000, 0b01000,
+        ],
+        '8' => [
+            0b01110, 0b10001, 0b10001, 0b01110, 0b10001, 0b10001, 0b01110,
+        ],
+        '9' => [
+            0b01110, 0b10001, 0b10001, 0b01111, 0b00001, 0b00001, 0b01110,
+        ],
+        ':' => [
+            0b00000, 0b00100, 0b00100, 0b00000, 0b00100, 0b00100, 0b00000,
+        ],
+        '-' => [
+            0b00000, 0b00000, 0b00000, 0b11111, 0b00000, 0b00000, 0b00000,
+        ],
+        '_' => [
+            0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b11111,
+        ],
+        '/' => [
+            0b00001, 0b00001, 0b00010, 0b00100, 0b01000, 0b10000, 0b10000,
+        ],
+        '.' => [
+            0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b01100, 0b01100,
+        ],
+        '>' => [
+            0b10000, 0b01000, 0b00100, 0b00010, 0b00100, 0b01000, 0b10000,
+        ],
+        ' ' => [0; 7],
+        _ => [
+            0b11111, 0b00001, 0b00010, 0b00100, 0b00100, 0b00000, 0b00100,
+        ],
+    }
+}
+
+#[cfg(not(all(target_arch = "mips", feature = "hardware-boot-visual")))]
+#[inline(always)]
+pub(crate) fn boot_visual_checkpoint(_fb: &mut FrameBuffer, _color: (u8, u8, u8), _message: &str) {}
+
+#[cfg(not(all(target_arch = "mips", feature = "hardware-boot-visual")))]
+#[inline(always)]
+pub(crate) fn boot_visual_checkpoint_hold(
+    _fb: &mut FrameBuffer,
+    _color: (u8, u8, u8),
+    _message: &str,
+    _frames: u8,
+) {
+}
+
 /// Configuration passed to [`App::run`]. Sensible defaults via
 /// [`Config::default`] so simple games can just write
 /// `App::run(Config::default(), &mut game)`.
@@ -230,6 +463,8 @@ impl App {
             config.screen_h.saturating_sub(1),
         );
         gpu::set_draw_offset(0, 0);
+        let mut fb = fb;
+        boot_visual_checkpoint(&mut fb, (160, 0, 0), "01 FRAMEBUFFER READY");
         boot_trace("psx-engine: framebuffer ok");
 
         // Seed pad + pad_prev from a real poll so a button already held at
@@ -248,6 +483,7 @@ impl App {
             initial_pad,
             fb,
         );
+        boot_visual_checkpoint(&mut ctx.fb, (200, 96, 0), "02 CTX READY");
 
         // The wrapper is the Scene the scheduled loop drives: its
         // init/update/render dispatch to the borrowed gameplay scene
@@ -264,7 +500,9 @@ impl App {
         );
 
         boot_trace("psx-engine: scene init");
+        boot_visual_checkpoint(&mut ctx.fb, (180, 180, 0), "03 APP INIT BEGIN");
         app.init(&mut ctx);
+        boot_visual_checkpoint(&mut ctx.fb, (0, 120, 0), "13 APP INIT OK");
         boot_trace("psx-engine: scene init ok");
         clock.reset_origin();
 
@@ -302,24 +540,31 @@ impl App {
                 SchedulerAction::RunFixedUpdate { tick } => {
                     if !traced_update {
                         boot_trace("psx-engine: update begin");
+                        boot_visual_checkpoint(&mut ctx.fb, (0, 0, 180), "20 UPDATE BEGIN");
                     }
                     telemetry::task_begin(telemetry::task::FIXED_UPDATE);
                     telemetry::frame_begin(tick.as_u32());
                     ctx.sim_tick = tick;
+                    if !traced_update {
+                        boot_visual_checkpoint(&mut ctx.fb, (220, 0, 0), "21 FRAME BEGIN");
+                    }
                     emit_sim_tick_counters(visual_interval);
                     ctx.pad_prev = ctx.pad;
                     if !traced_update {
                         boot_trace("psx-engine: pad poll begin");
+                        boot_visual_checkpoint(&mut ctx.fb, (220, 100, 0), "22 PAD POLL BEGIN");
                     }
                     ctx.pad = poll_port1();
                     if !traced_update {
                         boot_trace("psx-engine: pad poll ok");
+                        boot_visual_checkpoint(&mut ctx.fb, (220, 220, 0), "23 PAD POLL OK");
                     }
 
                     telemetry::stage_begin(telemetry::stage::UPDATE);
                     scene.update(&mut ctx);
                     telemetry::stage_end(telemetry::stage::UPDATE);
                     if !traced_update {
+                        boot_visual_checkpoint(&mut ctx.fb, (0, 140, 180), "29 UPDATE OK");
                         boot_trace("psx-engine: update ok");
                         traced_update = true;
                     }
@@ -339,20 +584,48 @@ impl App {
                 } => {
                     if !traced_render {
                         boot_trace("psx-engine: render begin");
+                        boot_visual_checkpoint(&mut ctx.fb, (120, 0, 180), "30 RENDER BEGIN");
                     }
                     telemetry::task_begin(telemetry::task::VISUAL_RENDER);
                     telemetry::stage_begin(telemetry::stage::FRAME_CLEAR);
+                    if !traced_render {
+                        boot_visual_checkpoint(&mut ctx.fb, (80, 0, 120), "31 CLEAR BEGIN");
+                    }
                     ctx.fb.clear(
                         config.clear_color.0,
                         config.clear_color.1,
                         config.clear_color.2,
                     );
+                    if !traced_render {
+                        boot_visual_checkpoint(&mut ctx.fb, (80, 40, 160), "32 CLEAR OK");
+                    }
                     telemetry::stage_end(telemetry::stage::FRAME_CLEAR);
 
                     telemetry::stage_begin(telemetry::stage::RENDER);
+                    if !traced_render {
+                        boot_visual_checkpoint(
+                            &mut ctx.fb,
+                            (100, 40, 180),
+                            "33 SCENE RENDER BEGIN",
+                        );
+                    }
                     scene.render(&mut ctx);
+                    if !traced_render {
+                        boot_visual_checkpoint_hold(
+                            &mut ctx.fb,
+                            (180, 180, 255),
+                            "38 SCENE RENDER RETURNED",
+                            60,
+                        );
+                    }
                     telemetry::stage_end(telemetry::stage::RENDER);
                     if !traced_render {
+                        boot_visual_checkpoint_hold(
+                            &mut ctx.fb,
+                            (220, 220, 220),
+                            "39 RENDER OK",
+                            60,
+                        );
                         boot_trace("psx-engine: render ok");
                         traced_render = true;
                     }
@@ -360,6 +633,12 @@ impl App {
 
                     if !traced_present {
                         boot_trace("psx-engine: present begin");
+                        boot_visual_checkpoint_hold(
+                            &mut ctx.fb,
+                            (80, 80, 80),
+                            "40 PRESENT BEGIN",
+                            60,
+                        );
                     }
                     telemetry::stage_begin(telemetry::stage::PRESENT);
                     clock.wait_next_vblank();
@@ -367,6 +646,7 @@ impl App {
                     ctx.fb.swap();
                     telemetry::stage_end(telemetry::stage::PRESENT);
                     if !traced_present {
+                        boot_visual_checkpoint_hold(&mut ctx.fb, (0, 220, 0), "49 PRESENT OK", 60);
                         boot_trace("psx-engine: present ok");
                         traced_present = true;
                     }
