@@ -22,7 +22,7 @@
 	showcase-text showcase-text-disc run-showcase-text \
 	game-pong game-pong-disc run-game-pong \
 	game-magikaaaaaarp-pong game-magikaaaaaarp-pong-disc magikaaaaaarp-pong-spectrum run-game-magikaaaaaarp-pong probe-magikaaaaaarp-pong-audio duckstation-magikaaaaaarp-pong \
-	cortex-override-v1-project-disc cortex-override-v1-hardware-diagnostic-disc duckstation-cortex-override-v1 duckstation-cortex-override-v1-bios redux-cortex-override-v1-bios \
+	cortex-override-v1-project-disc cortex-override-v1-hardware-diagnostic-disc cortex-override-v1-preburn-local cortex-override-v1-preburn-struct cortex-override-v1-preburn-disc-reads cortex-override-v1-preburn-internal cortex-override-v1-preburn-cdda-audio cortex-override-v1-preburn-bios-cdrom duckstation-cortex-override-v1 duckstation-cortex-override-v1-bios redux-cortex-override-v1-bios \
 	game-breakout game-breakout-disc run-game-breakout \
         game-invaders game-invaders-disc run-game-invaders \
         showcase-3d showcase-3d-disc run-showcase-3d \
@@ -118,6 +118,8 @@ help:
 	@echo "                      - build cortex_override_v1's project disc and assert DuckStation TTY markers"
 	@echo "    make cortex-override-v1-hardware-diagnostic-disc"
 	@echo "                      - build cortex_override_v1 with TV-visible boot color checkpoints"
+	@echo "    make cortex-override-v1-preburn-local"
+	@echo "                      - run local structural/headless/audio/CD probes before burning"
 	@echo "    make duckstation-cortex-override-v1-bios"
 	@echo "                      - assert cortex_override_v1 through DuckStation's full BIOS/logo path"
 	@echo "    make redux-cortex-override-v1-bios"
@@ -277,6 +279,14 @@ REDUX_CORTEX_OVERRIDE_V1_BIOS ?= $(HOME)/Downloads/ps1 bios/SCPH1001.BIN
 REDUX_CORTEX_OVERRIDE_V1_STEPS ?= 70000000
 CORTEX_OVERRIDE_V1_PROJECT ?= editor/projects/cortex_override_v1
 CORTEX_OVERRIDE_V1_CUE ?= $(CORTEX_OVERRIDE_V1_PROJECT)/baked/cortex_override_v1.cue
+CORTEX_OVERRIDE_V1_BIN ?= $(CORTEX_OVERRIDE_V1_PROJECT)/baked/cortex_override_v1.bin
+CORTEX_OVERRIDE_V1_PREBURN_OUT ?= build/preburn/cortex_override_v1
+CORTEX_OVERRIDE_V1_PREBURN_VISUAL_FRAMES ?= 90
+CORTEX_OVERRIDE_V1_PREBURN_GUEST_FRAMES ?= 360
+CORTEX_OVERRIDE_V1_PREBURN_STEPS ?= 240000000
+CORTEX_OVERRIDE_V1_PREBURN_BIOS_STEPS ?= 120000000
+CORTEX_OVERRIDE_V1_PREBURN_AUDIO_SECONDS ?= 6
+CORTEX_OVERRIDE_V1_PREBURN_AUDIO_MIN_PEAK ?= 256
 PYTHON ?= python3
 PROFILE_DEMO3_FRAMES ?= 60
 PROFILE_DEMO3_STEPS ?= 120000000
@@ -613,6 +623,68 @@ cortex-override-v1-project-disc:
 
 cortex-override-v1-hardware-diagnostic-disc:
 	cd emu && EDITOR_PLAYTEST_CARGO_FEATURE_FLAGS='--no-default-features --features "$(EDITOR_PLAYTEST_HARDWARE_FEATURES) hardware-boot-visual"' cargo run -p frontend --release -- build-project-disc --project ../$(CORTEX_OVERRIDE_V1_PROJECT)
+
+cortex-override-v1-preburn-local: cortex-override-v1-preburn-struct cortex-override-v1-preburn-disc-reads cortex-override-v1-preburn-internal cortex-override-v1-preburn-cdda-audio cortex-override-v1-preburn-bios-cdrom
+	@echo "cortex_override_v1 pre-burn local checks complete -> $(CORTEX_OVERRIDE_V1_PREBURN_OUT)"
+
+cortex-override-v1-preburn-struct: cortex-override-v1-project-disc
+	@mkdir -p $(CORTEX_OVERRIDE_V1_PREBURN_OUT)
+	cd emu && cargo run -p frontend --release -- preburn-check \
+		--cue "$(CORTEX_OVERRIDE_V1_CUE)" \
+		--exe "$(EXAMPLE_OUT)/editor-playtest.exe" \
+		--volume CORTEX_OVERRIDE_V1 \
+		--require-file "SYSTEM.CNF;1" \
+		--require-file "PSX.EXE;1" \
+		--require-file "WORLD.PAK;1" \
+		--require-file "UI.PAK;1" \
+		--require-audio-track \
+		--forbid-exe-string "UI DRAW OK" \
+		--forbid-exe-string "PRESENT OK" \
+		--forbid-exe-string "RENDER BEGIN" \
+		--forbid-exe-string "psx-engine:" \
+		--forbid-exe-string "psx-rt:" \
+		--forbid-exe-string "editor-playtest:"
+
+cortex-override-v1-preburn-disc-reads: cortex-override-v1-project-disc
+	@mkdir -p $(CORTEX_OVERRIDE_V1_PREBURN_OUT)
+	cd emu && PSOXIDE_DISC="../$(CORTEX_OVERRIDE_V1_BIN)" \
+		cargo run -p emulator-core --example verify_disc_reads --release | tee "../$(CORTEX_OVERRIDE_V1_PREBURN_OUT)/disc-reads.log"
+
+cortex-override-v1-preburn-internal: cortex-override-v1-project-disc
+	@mkdir -p $(CORTEX_OVERRIDE_V1_PREBURN_OUT)
+	cd emu && cargo run -p frontend --release -- launch \
+		--path ../$(CORTEX_OVERRIDE_V1_CUE) \
+		--embedded-playtest \
+		--guest-visual-frames $(CORTEX_OVERRIDE_V1_PREBURN_VISUAL_FRAMES) \
+		--guest-frames $(CORTEX_OVERRIDE_V1_PREBURN_GUEST_FRAMES) \
+		--steps $(CORTEX_OVERRIDE_V1_PREBURN_STEPS) \
+		--dump-hw ../$(CORTEX_OVERRIDE_V1_PREBURN_OUT)/internal-hle.ppm \
+		--dump-audio ../$(CORTEX_OVERRIDE_V1_PREBURN_OUT)/internal-hle.wav \
+		--visual-hash-log ../$(CORTEX_OVERRIDE_V1_PREBURN_OUT)/visual-hashes.csv \
+		--guest-hash-log ../$(CORTEX_OVERRIDE_V1_PREBURN_OUT)/guest-hashes.csv \
+		--counter-log ../$(CORTEX_OVERRIDE_V1_PREBURN_OUT)/counters.csv \
+		--profile-log ../$(CORTEX_OVERRIDE_V1_PREBURN_OUT)/profile.csv \
+		--dump-hash \
+		--dump-guest-profile | tee "../$(CORTEX_OVERRIDE_V1_PREBURN_OUT)/internal-hle.log"
+
+cortex-override-v1-preburn-cdda-audio: cortex-override-v1-project-disc
+	@mkdir -p $(CORTEX_OVERRIDE_V1_PREBURN_OUT)
+	cd emu && PSOXIDE_EXE="../$(EXAMPLE_OUT)/editor-playtest.exe" \
+		PSOXIDE_DISC="../$(CORTEX_OVERRIDE_V1_CUE)" \
+		PSOXIDE_WAV="../$(CORTEX_OVERRIDE_V1_PREBURN_OUT)/cdda-probe.wav" \
+		PSOXIDE_AUDIO_SECONDS="$(CORTEX_OVERRIDE_V1_PREBURN_AUDIO_SECONDS)" \
+		PSOXIDE_MIN_PEAK="$(CORTEX_OVERRIDE_V1_PREBURN_AUDIO_MIN_PEAK)" \
+		cargo run -p emulator-core --example probe_cdda_wav --release | tee "../$(CORTEX_OVERRIDE_V1_PREBURN_OUT)/cdda-probe.log"
+
+cortex-override-v1-preburn-bios-cdrom: cortex-override-v1-project-disc
+	@mkdir -p $(CORTEX_OVERRIDE_V1_PREBURN_OUT)
+	@if [ -f "$(REDUX_CORTEX_OVERRIDE_V1_BIOS)" ]; then \
+		cd emu && PSOXIDE_BIOS="$(REDUX_CORTEX_OVERRIDE_V1_BIOS)" \
+			PSOXIDE_DISC="../$(CORTEX_OVERRIDE_V1_BIN)" \
+			cargo run -p emulator-core --example cdrom_probe --release -- $(CORTEX_OVERRIDE_V1_PREBURN_BIOS_STEPS) | tee "../$(CORTEX_OVERRIDE_V1_PREBURN_OUT)/bios-cdrom-probe.log"; \
+	else \
+		echo "skip BIOS CD-ROM probe: REDUX_CORTEX_OVERRIDE_V1_BIOS not found ($(REDUX_CORTEX_OVERRIDE_V1_BIOS))"; \
+	fi
 
 duckstation-cortex-override-v1: cortex-override-v1-project-disc
 	$(PYTHON) tools/duckstation_harness.py \

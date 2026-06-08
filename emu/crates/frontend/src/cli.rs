@@ -37,7 +37,7 @@ use psoxide_settings::{
 use psoxide_validation::{
     format_hash, ActualHashes, PixelHash, ValidationArtifact, ValidationRunner, ValidationSuite,
 };
-use psx_iso::{Disc, Exe};
+use psx_iso::{Disc, Exe, TrackType};
 use psxed_project::{NodeId, ProjectDocument};
 use psxed_ui::{ViewportCameraMode, ViewportCameraState};
 
@@ -114,6 +114,8 @@ pub enum Command {
     BuildEditorPlaytestDisc,
     /// Cook, build, and export a project CUE/BIN disc without opening the GUI.
     BuildProjectDisc(BuildProjectDiscArgs),
+    /// Validate an authored CUE/BIN image before burning it to CD-R.
+    PreburnCheck(PreburnCheckArgs),
     /// Render an editor 3D preview screenshot without opening the GUI.
     DumpEditorPreview(DumpEditorPreviewArgs),
     /// Run exact-hash validation checkpoints from a manifest.
@@ -242,6 +244,29 @@ pub struct BuildProjectDiscArgs {
     pub project: PathBuf,
 }
 
+/// Arguments for `preburn-check`.
+#[derive(Debug, Args)]
+pub struct PreburnCheckArgs {
+    /// Project CUE path to validate.
+    #[arg(long)]
+    pub cue: PathBuf,
+    /// Built PSX EXE to scan for forbidden diagnostic strings.
+    #[arg(long)]
+    pub exe: Option<PathBuf>,
+    /// Expected ISO9660 volume ID.
+    #[arg(long)]
+    pub volume: Option<String>,
+    /// Root ISO file that must exist, e.g. `SYSTEM.CNF;1`.
+    #[arg(long)]
+    pub require_file: Vec<String>,
+    /// Require at least one CD-DA audio track in the CUE.
+    #[arg(long)]
+    pub require_audio_track: bool,
+    /// Fail if this string appears in the built EXE.
+    #[arg(long)]
+    pub forbid_exe_string: Vec<String>,
+}
+
 /// Arguments for `dump-editor-preview`.
 #[derive(Debug, Args)]
 pub struct DumpEditorPreviewArgs {
@@ -319,6 +344,7 @@ pub fn run(cli: Cli) -> Result<(), String> {
         Command::Launch(args) => cmd_launch(&paths, args),
         Command::BuildEditorPlaytestDisc => cmd_build_editor_playtest_disc(),
         Command::BuildProjectDisc(args) => cmd_build_project_disc(args),
+        Command::PreburnCheck(args) => cmd_preburn_check(args),
         Command::DumpEditorPreview(args) => cmd_dump_editor_preview(args),
         Command::Validate(args) => cmd_validate(&paths, args),
     }
@@ -969,6 +995,196 @@ fn cmd_build_project_disc(args: BuildProjectDiscArgs) -> Result<(), String> {
     let dest_cue = build_project_disc_path(&args.project)?;
     println!("{}", dest_cue.display());
     Ok(())
+}
+
+#[derive(Clone, Debug)]
+struct IsoRootEntry {
+    identifier: String,
+    extent_lba: u32,
+    size: u32,
+    flags: u8,
+}
+
+impl IsoRootEntry {
+    fn is_dir(&self) -> bool {
+        self.flags & 0x02 != 0
+    }
+}
+
+fn cmd_preburn_check(args: PreburnCheckArgs) -> Result<(), String> {
+    let repo_root = cli_repo_root();
+    let cue_path = resolve_cli_path(&repo_root, &args.cue);
+    let disc = psoxide_settings::library::load_disc_from_cue(&cue_path)
+        .map_err(|error| format!("load {}: {error}", cue_path.display()))?;
+
+    let volume_id = iso_volume_id(&disc)?;
+    if let Some(expected) = args.volume.as_deref() {
+        if volume_id != expected {
+            return Err(format!(
+                "volume ID mismatch: expected {expected}, got {volume_id}"
+            ));
+        }
+    }
+
+    let track1 = disc
+        .track(1)
+        .ok_or_else(|| "disc has no track 1".to_string())?;
+    if track1.track_type != TrackType::Data {
+        return Err("track 1 is not a data track".to_string());
+    }
+    if args.require_audio_track {
+        let has_audio_track = (1..=disc.last_track_number().unwrap_or(0))
+            .filter_map(|number| disc.track(number))
+            .any(|track| track.track_type == TrackType::Audio);
+        if !has_audio_track {
+            return Err("disc has no CD-DA audio track".to_string());
+        }
+    }
+
+    let root_entries = iso_root_entries(&disc)?;
+    let root_names: Vec<&str> = root_entries
+        .iter()
+        .filter(|entry| !entry.is_dir())
+        .map(|entry| entry.identifier.as_str())
+        .collect();
+    for required in &args.require_file {
+        let required = required.to_ascii_uppercase();
+        if !root_names.iter().any(|name| *name == required) {
+            return Err(format!("missing root file: {required}"));
+        }
+    }
+
+    let boot = psx_iso::load_boot_exe_from_disc(&disc)
+        .map_err(|error| format!("boot EXE lookup failed: {error:?}"))?;
+    if boot.boot_path != "PSX.EXE;1" {
+        return Err(format!(
+            "SYSTEM.CNF boots {}, expected PSX.EXE;1",
+            boot.boot_path
+        ));
+    }
+
+    if let Some(exe_path) = args.exe.as_deref() {
+        let exe_path = resolve_cli_path(&repo_root, exe_path);
+        let exe = std::fs::read(&exe_path).map_err(|e| format!("{}: {e}", exe_path.display()))?;
+        for forbidden in &args.forbid_exe_string {
+            if contains_bytes(&exe, forbidden.as_bytes()) {
+                return Err(format!(
+                    "forbidden diagnostic string present in EXE: {forbidden:?}"
+                ));
+            }
+        }
+    }
+
+    println!("preburn structural check ok");
+    println!("  cue:       {}", cue_path.display());
+    println!("  sectors:   {}", disc.sector_count());
+    println!("  volume:    {volume_id}");
+    println!(
+        "  tracks:    {}",
+        (1..=disc.last_track_number().unwrap_or(0))
+            .filter_map(|number| disc.track(number))
+            .map(|track| format!(
+                "{:02}:{}",
+                track.number,
+                match track.track_type {
+                    TrackType::Data => "DATA",
+                    TrackType::Audio => "AUDIO",
+                }
+            ))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    println!("  boot:      {}", boot.boot_path);
+    println!("  root:      {}", root_names.join(", "));
+    Ok(())
+}
+
+fn iso_volume_id(disc: &Disc) -> Result<String, String> {
+    let pvd = disc
+        .read_sector_user(16)
+        .ok_or_else(|| "missing ISO9660 primary volume descriptor at LBA 16".to_string())?;
+    if pvd.len() < 72 || pvd[0] != 1 || &pvd[1..6] != b"CD001" || pvd[6] != 1 {
+        return Err("LBA 16 is not an ISO9660 primary volume descriptor".to_string());
+    }
+    Ok(String::from_utf8_lossy(&pvd[40..72]).trim().to_string())
+}
+
+fn iso_root_entries(disc: &Disc) -> Result<Vec<IsoRootEntry>, String> {
+    let pvd = disc
+        .read_sector_user(16)
+        .ok_or_else(|| "missing ISO9660 primary volume descriptor at LBA 16".to_string())?;
+    if pvd.len() < 190 || pvd[0] != 1 || &pvd[1..6] != b"CD001" || pvd[6] != 1 {
+        return Err("LBA 16 is not an ISO9660 primary volume descriptor".to_string());
+    }
+    let root =
+        parse_iso_dir_record(&pvd[156..]).ok_or_else(|| "bad root directory record".to_string())?;
+    if !root.is_dir() {
+        return Err("ISO9660 root record is not a directory".to_string());
+    }
+    let bytes = read_iso_extent(disc, root.extent_lba, root.size)?;
+    let mut entries = Vec::new();
+    let mut offset = 0usize;
+    while offset < bytes.len() {
+        let len = bytes[offset] as usize;
+        if len == 0 {
+            offset =
+                ((offset / psx_iso::SECTOR_USER_DATA_BYTES) + 1) * psx_iso::SECTOR_USER_DATA_BYTES;
+            continue;
+        }
+        let end = offset
+            .checked_add(len)
+            .filter(|end| *end <= bytes.len())
+            .ok_or_else(|| "bad ISO9660 directory record length".to_string())?;
+        let entry = parse_iso_dir_record(&bytes[offset..end])
+            .ok_or_else(|| "bad ISO9660 directory record".to_string())?;
+        if entry.identifier != "\u{0}" && entry.identifier != "\u{1}" {
+            entries.push(entry);
+        }
+        offset = end;
+    }
+    Ok(entries)
+}
+
+fn parse_iso_dir_record(record: &[u8]) -> Option<IsoRootEntry> {
+    let len = *record.first()? as usize;
+    if len < 34 || record.len() < len {
+        return None;
+    }
+    let ident_len = *record.get(32)? as usize;
+    let ident_start = 33usize;
+    let ident_end = ident_start.checked_add(ident_len)?;
+    if ident_end > len {
+        return None;
+    }
+    Some(IsoRootEntry {
+        extent_lba: u32::from_le_bytes(record.get(2..6)?.try_into().ok()?),
+        size: u32::from_le_bytes(record.get(10..14)?.try_into().ok()?),
+        flags: *record.get(25)?,
+        identifier: String::from_utf8(record[ident_start..ident_end].to_vec()).ok()?,
+    })
+}
+
+fn read_iso_extent(disc: &Disc, extent_lba: u32, size: u32) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::with_capacity(size as usize);
+    let mut remaining = size as usize;
+    let mut lba = extent_lba;
+    while remaining > 0 {
+        let sector = disc
+            .read_sector_user(lba)
+            .ok_or_else(|| format!("unreadable ISO9660 extent sector LBA {lba}"))?;
+        let take = remaining.min(sector.len());
+        bytes.extend_from_slice(&sector[..take]);
+        remaining -= take;
+        lba = lba.saturating_add(1);
+    }
+    Ok(bytes)
+}
+
+fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    !needle.is_empty()
+        && haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
 }
 
 fn build_project_disc_path(project_path: &Path) -> Result<PathBuf, String> {
