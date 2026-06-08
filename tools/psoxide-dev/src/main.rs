@@ -29,6 +29,8 @@ fn run() -> Result<(), String> {
         "runtime-numeric-guard" => runtime_numeric_guard(),
         "bake-spectrum" => bake_spectrum(&args),
         "duckstation-harness" => duckstation_harness(&args),
+        "emulator-inventory" => emulator_inventory(&args),
+        "external-emulator-smoke" => external_emulator_smoke(&args),
         "vblank-chart" => vblank_chart(&args),
         "gen-tones" => gen_tones(),
         "gen-fonts" => gen_fonts(),
@@ -47,6 +49,8 @@ fn help() -> String {
        runtime-numeric-guard\n\
        bake-spectrum <input.wav> -o <output.bin> [--fps N] [--bands N] [--seconds S]\n\
        duckstation-harness --cue <disc.cue> [--expect TEXT] [--bios-boot]\n\
+       emulator-inventory [--require NAME]\n\
+       external-emulator-smoke --emulator mednafen|retroarch --cue <disc.cue> [--bios BIOS]\n\
        vblank-chart --in <profile.csv> --out <chart.html> [--title TITLE]\n\
        gen-tones\n\
        gen-fonts"
@@ -637,6 +641,285 @@ fn parse_arg<T: std::str::FromStr>(value: Option<&String>, name: &str) -> Result
         .map_err(|_| format!("invalid value for {name}"))
 }
 
+#[derive(Clone)]
+struct EmulatorInventoryRow {
+    key: &'static str,
+    label: &'static str,
+    binary: Option<PathBuf>,
+    core: Option<PathBuf>,
+    coverage: &'static str,
+    install_hint: &'static str,
+}
+
+fn emulator_inventory(args: &[String]) -> Result<(), String> {
+    let mut requires = Vec::new();
+    let mut i = 0usize;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--require" => {
+                i += 1;
+                requires.push(
+                    args.get(i)
+                        .cloned()
+                        .ok_or("--require needs an emulator key")?,
+                );
+            }
+            other => return Err(format!("unknown emulator-inventory arg `{other}`")),
+        }
+        i += 1;
+    }
+
+    let rows = emulator_inventory_rows();
+    println!(
+        "{:<13} {:<14} {:<10} {:<38} Coverage",
+        "Key", "Emulator", "Available", "Binary/core"
+    );
+    for row in &rows {
+        let available = row.binary.is_some() && (row.key != "retroarch" || row.core.is_some());
+        let location = match (&row.binary, &row.core) {
+            (Some(binary), Some(core)) => {
+                format!("{} + {}", binary.display(), core.display())
+            }
+            (Some(binary), None) => binary.display().to_string(),
+            _ => row.install_hint.to_string(),
+        };
+        println!(
+            "{:<13} {:<14} {:<10} {:<38} {}",
+            row.key,
+            row.label,
+            if available { "yes" } else { "no" },
+            truncate_middle(&location, 38),
+            row.coverage
+        );
+    }
+
+    let missing: Vec<_> = requires
+        .iter()
+        .filter(|required| {
+            !rows.iter().any(|row| {
+                row.key == required.as_str()
+                    && row.binary.is_some()
+                    && (row.key != "retroarch" || row.core.is_some())
+            })
+        })
+        .cloned()
+        .collect();
+    if !missing.is_empty() {
+        return Err(format!(
+            "required emulator(s) unavailable: {}",
+            missing.join(", ")
+        ));
+    }
+    Ok(())
+}
+
+fn emulator_inventory_rows() -> Vec<EmulatorInventoryRow> {
+    let retroarch = discover_retroarch(None).ok();
+    let retroarch_core = find_retroarch_psx_core();
+    vec![
+        EmulatorInventoryRow {
+            key: "duckstation",
+            label: "DuckStation",
+            binary: discover_duckstation(None).ok(),
+            core: None,
+            coverage: "TTY marker harness",
+            install_hint: "install DuckStation.app or set DUCKSTATION_BIN",
+        },
+        EmulatorInventoryRow {
+            key: "redux",
+            label: "PCSX-Redux",
+            binary: discover_pcsx_redux(None).ok(),
+            core: None,
+            coverage: "parity-oracle BIOS smoke",
+            install_hint: "install PCSX-Redux.app or set PSOXIDE_REDUX_BIN",
+        },
+        EmulatorInventoryRow {
+            key: "mednafen",
+            label: "Mednafen",
+            binary: discover_mednafen(None).ok(),
+            core: None,
+            coverage: "optional launch smoke",
+            install_hint: "brew install mednafen or set MEDNAFEN_BIN",
+        },
+        EmulatorInventoryRow {
+            key: "retroarch",
+            label: "RetroArch",
+            binary: retroarch,
+            core: retroarch_core,
+            coverage: "optional launch smoke",
+            install_hint: "brew install --cask retroarch-metal plus a PSX core",
+        },
+        EmulatorInventoryRow {
+            key: "ares",
+            label: "ares",
+            binary: discover_ares(None).ok(),
+            core: None,
+            coverage: "inventory only",
+            install_hint: "install ares.app or set ARES_BIN",
+        },
+    ]
+}
+
+fn external_emulator_smoke(args: &[String]) -> Result<(), String> {
+    let mut emulator = None;
+    let mut cue = None;
+    let mut bios = env::var("PSOXIDE_BIOS").ok();
+    let mut timeout = 12.0f64;
+    let mut log = Some("build/external-emulator-smoke/emulator.log".to_string());
+    let mut i = 0usize;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--emulator" => {
+                i += 1;
+                emulator = args.get(i).cloned();
+            }
+            "--cue" => {
+                i += 1;
+                cue = args.get(i).cloned();
+            }
+            "--bios" => {
+                i += 1;
+                bios = args.get(i).cloned();
+            }
+            "--timeout" => {
+                i += 1;
+                timeout = parse_arg(args.get(i), "--timeout")?;
+            }
+            "--log" => {
+                i += 1;
+                log = args.get(i).cloned();
+            }
+            other => return Err(format!("unknown external-emulator-smoke arg `{other}`")),
+        }
+        i += 1;
+    }
+
+    let emulator = emulator.ok_or("external-emulator-smoke needs --emulator")?;
+    let cue = resolve_from_cwd(
+        cue.as_deref()
+            .ok_or("external-emulator-smoke needs --cue")?,
+    );
+    if !cue.is_file() {
+        return Err(format!("disc cue not found: {}", cue.display()));
+    }
+    let log_path = resolve_from_cwd(
+        log.as_deref()
+            .unwrap_or("build/external-emulator-smoke/emulator.log"),
+    );
+    if let Some(parent) = log_path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    }
+
+    let mut command = match emulator.as_str() {
+        "mednafen" => mednafen_command(&cue, bios.as_deref())?,
+        "retroarch" => retroarch_command(&cue)?,
+        other => {
+            return Err(format!(
+                "external-emulator-smoke does not know how to launch `{other}`"
+            ));
+        }
+    };
+    command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env("SDL_AUDIODRIVER", "dummy");
+
+    println!("Emulator: {emulator}");
+    println!("Disc:     {}", cue.display());
+    println!("Log:      {}", log_path.display());
+    println!("Command:  {:?}", command);
+
+    let mut child = command
+        .current_dir(repo_root())
+        .spawn()
+        .map_err(|e| format!("launch {emulator}: {e}"))?;
+    let stdout = child.stdout.take().expect("stdout piped");
+    let stderr = child.stderr.take().expect("stderr piped");
+    let (tx, rx) = mpsc::channel();
+    spawn_line_reader(stdout, tx.clone());
+    spawn_line_reader(stderr, tx);
+    let mut log_file =
+        fs::File::create(&log_path).map_err(|e| format!("{}: {e}", log_path.display()))?;
+    let deadline = Instant::now() + Duration::from_secs_f64(timeout);
+    let mut lines = Vec::new();
+    while Instant::now() < deadline {
+        if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
+            while let Ok(line) = rx.try_recv() {
+                writeln!(log_file, "{line}").map_err(|e| e.to_string())?;
+                lines.push(line);
+            }
+            if !status.success() {
+                eprintln!("\n{emulator} exited early with {status}");
+                for line in important_tail(&lines) {
+                    eprintln!("{line}");
+                }
+                return Err(format!("{emulator} launch smoke failed"));
+            }
+            println!("{emulator} exited successfully during launch smoke");
+            return Ok(());
+        }
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(line) => {
+                writeln!(log_file, "{line}").map_err(|e| e.to_string())?;
+                lines.push(line);
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {}
+        }
+    }
+    if child.try_wait().map_err(|e| e.to_string())?.is_none() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    println!("{emulator} stayed alive for {timeout:.1}s; launch smoke passed");
+    Ok(())
+}
+
+fn mednafen_command(cue: &Path, bios: Option<&str>) -> Result<Command, String> {
+    let binary = discover_mednafen(None)?;
+    let mut command = Command::new(binary);
+    if let Some(bios) = bios.filter(|s| !s.is_empty()) {
+        let bios = resolve_from_cwd(bios);
+        if bios.is_file() {
+            let bios = bios.to_string_lossy().to_string();
+            command
+                .arg("-psx.bios_na")
+                .arg(&bios)
+                .arg("-psx.bios_jp")
+                .arg(&bios)
+                .arg("-psx.bios_eu")
+                .arg(&bios);
+        }
+    }
+    command.arg("-force_module").arg("psx").arg(cue);
+    Ok(command)
+}
+
+fn retroarch_command(cue: &Path) -> Result<Command, String> {
+    let binary = discover_retroarch(None)?;
+    let core = find_retroarch_psx_core().ok_or(
+        "RetroArch found, but no PSX libretro core found. Set RETROARCH_PSX_CORE=/path/to/core.",
+    )?;
+    let mut command = Command::new(binary);
+    command.arg("--verbose").arg("-L").arg(core).arg(cue);
+    Ok(command)
+}
+
+fn truncate_middle(text: &str, max_len: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= max_len {
+        return text.to_string();
+    }
+    if max_len <= 3 {
+        return ".".repeat(max_len);
+    }
+    let keep = (max_len - 3) / 2;
+    let tail = max_len - 3 - keep;
+    let head: String = chars.iter().take(keep).collect();
+    let tail: String = chars.iter().skip(chars.len() - tail).collect();
+    format!("{head}...{tail}")
+}
+
 struct WavPcm {
     samples: Vec<i16>,
     channels: usize,
@@ -987,8 +1270,181 @@ fn discover_duckstation(explicit: Option<&str>) -> Result<PathBuf, String> {
 }
 
 fn duckstation_binary_from_app(app: &Path) -> Option<PathBuf> {
+    mac_app_binary_from_app(app, &["DuckStation", "duckstation-qt", "duckstation"])
+}
+
+fn discover_pcsx_redux(explicit: Option<&str>) -> Result<PathBuf, String> {
+    let explicit = explicit
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| env::var("PSOXIDE_REDUX_BIN").ok().filter(|s| !s.is_empty()));
+    if let Some(explicit) = explicit {
+        let candidate = PathBuf::from(explicit);
+        if candidate.extension().and_then(|s| s.to_str()) == Some("app") {
+            if let Some(binary) = mac_app_binary_from_app(&candidate, &["PCSX-Redux", "pcsx-redux"])
+            {
+                return Ok(binary);
+            }
+        }
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+        return Err(format!(
+            "PCSX-Redux binary not found: {}",
+            candidate.display()
+        ));
+    }
+    for name in ["pcsx-redux", "PCSX-Redux"] {
+        if let Some(path) = find_on_path(name) {
+            return Ok(path);
+        }
+    }
+    for app in [
+        PathBuf::from("/Applications/PCSX-Redux.app"),
+        dirs_home().join("Applications/PCSX-Redux.app"),
+        dirs_home().join("Downloads/PCSX-Redux.app"),
+    ] {
+        if let Some(binary) = mac_app_binary_from_app(&app, &["PCSX-Redux", "pcsx-redux"]) {
+            return Ok(binary);
+        }
+    }
+    Err("PCSX-Redux not found. Set PSOXIDE_REDUX_BIN=/path/to/pcsx-redux.".into())
+}
+
+fn discover_mednafen(explicit: Option<&str>) -> Result<PathBuf, String> {
+    let explicit = explicit
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| env::var("MEDNAFEN_BIN").ok().filter(|s| !s.is_empty()));
+    if let Some(explicit) = explicit {
+        let candidate = PathBuf::from(explicit);
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+        return Err(format!(
+            "Mednafen binary not found: {}",
+            candidate.display()
+        ));
+    }
+    find_on_path("mednafen").ok_or_else(|| {
+        "Mednafen not found. Install with `brew install mednafen` or set MEDNAFEN_BIN.".into()
+    })
+}
+
+fn discover_retroarch(explicit: Option<&str>) -> Result<PathBuf, String> {
+    let explicit = explicit
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| env::var("RETROARCH_BIN").ok().filter(|s| !s.is_empty()));
+    if let Some(explicit) = explicit {
+        let candidate = PathBuf::from(explicit);
+        if candidate.extension().and_then(|s| s.to_str()) == Some("app") {
+            if let Some(binary) = retroarch_binary_from_app(&candidate) {
+                return Ok(binary);
+            }
+        }
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+        return Err(format!(
+            "RetroArch binary not found: {}",
+            candidate.display()
+        ));
+    }
+    for name in ["retroarch", "RetroArch", "RetroArch-Metal"] {
+        if let Some(path) = find_on_path(name) {
+            return Ok(path);
+        }
+    }
+    for app in [
+        PathBuf::from("/Applications/RetroArch.app"),
+        PathBuf::from("/Applications/RetroArch Metal.app"),
+        dirs_home().join("Applications/RetroArch.app"),
+        dirs_home().join("Downloads/RetroArch.app"),
+    ] {
+        if let Some(binary) = retroarch_binary_from_app(&app) {
+            return Ok(binary);
+        }
+    }
+    Err("RetroArch not found. Install with `brew install --cask retroarch-metal` or set RETROARCH_BIN.".into())
+}
+
+fn retroarch_binary_from_app(app: &Path) -> Option<PathBuf> {
+    mac_app_binary_from_app(app, &["RetroArch", "RetroArch-Metal", "retroarch"])
+}
+
+fn find_retroarch_psx_core() -> Option<PathBuf> {
+    if let Ok(core) = env::var("RETROARCH_PSX_CORE") {
+        let path = PathBuf::from(core);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    let names = [
+        "mednafen_psx_hw_libretro.dylib",
+        "mednafen_psx_libretro.dylib",
+        "beetle_psx_hw_libretro.dylib",
+        "beetle_psx_libretro.dylib",
+        "swanstation_libretro.dylib",
+        "pcsx_rearmed_libretro.dylib",
+    ];
+    let dirs = [
+        PathBuf::from("/Applications/RetroArch.app/Contents/Resources/cores"),
+        PathBuf::from("/Applications/RetroArch Metal.app/Contents/Resources/cores"),
+        dirs_home().join("Library/Application Support/RetroArch/cores"),
+        dirs_home().join(".config/retroarch/cores"),
+        PathBuf::from("/opt/homebrew/lib/libretro"),
+        PathBuf::from("/usr/local/lib/libretro"),
+    ];
+    for dir in dirs {
+        for name in names {
+            let candidate = dir.join(name);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+fn discover_ares(explicit: Option<&str>) -> Result<PathBuf, String> {
+    let explicit = explicit
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| env::var("ARES_BIN").ok().filter(|s| !s.is_empty()));
+    if let Some(explicit) = explicit {
+        let candidate = PathBuf::from(explicit);
+        if candidate.extension().and_then(|s| s.to_str()) == Some("app") {
+            if let Some(binary) = mac_app_binary_from_app(&candidate, &["ares", "Ares"]) {
+                return Ok(binary);
+            }
+        }
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+        return Err(format!("ares binary not found: {}", candidate.display()));
+    }
+    for name in ["ares", "Ares"] {
+        if let Some(path) = find_on_path(name) {
+            return Ok(path);
+        }
+    }
+    for app in [
+        PathBuf::from("/Applications/ares.app"),
+        PathBuf::from("/Applications/Ares.app"),
+        dirs_home().join("Applications/ares.app"),
+        dirs_home().join("Downloads/ares.app"),
+    ] {
+        if let Some(binary) = mac_app_binary_from_app(&app, &["ares", "Ares"]) {
+            return Ok(binary);
+        }
+    }
+    Err("ares not found. Install ares.app or set ARES_BIN.".into())
+}
+
+fn mac_app_binary_from_app(app: &Path, names: &[&str]) -> Option<PathBuf> {
     let macos = app.join("Contents/MacOS");
-    for name in ["DuckStation", "duckstation-qt", "duckstation"] {
+    for name in names {
         let candidate = macos.join(name);
         if candidate.is_file() {
             return Some(candidate);
