@@ -2772,7 +2772,7 @@ mod tests {
             "build/examples/mipsel-sony-psx/release/editor-playtest.iso"
         )));
         assert!(is_internal_example_artifact(Path::new(
-            "build/examples/mipsel-sony-psx/release/editor-playtest-cortex-override-v1-profile.bin"
+            "build/examples/mipsel-sony-psx/release/editor-playtest-cortex-ignition-v1-profile.bin"
         )));
         assert!(!is_internal_example_artifact(Path::new(
             "build/examples/mipsel-sony-psx/release/hello-cdda.exe"
@@ -2893,16 +2893,16 @@ mod tests {
         write_single_data_track_cue(&source_cue, &source_bin).unwrap();
 
         let dest_cue = root
-            .join("cortex_override_v1")
+            .join("cortex_ignition_v1")
             .join("baked")
-            .join("cortex_override_v1.cue");
+            .join("cortex_ignition_v1.cue");
         let copied_bytes = copy_project_disc(&source_cue, &dest_cue).unwrap();
         let dest_bin = dest_cue.with_extension("bin");
         let cue = std::fs::read_to_string(&dest_cue).unwrap();
 
         assert!(copied_bytes > 0);
         assert_eq!(std::fs::read(&dest_bin).unwrap(), b"disc image bytes");
-        assert!(cue.contains("FILE \"cortex_override_v1.bin\" BINARY"));
+        assert!(cue.contains("FILE \"cortex_ignition_v1.bin\" BINARY"));
         assert!(!cue.contains("editor-playtest.bin"));
 
         let _ = std::fs::remove_dir_all(root);
@@ -2940,9 +2940,9 @@ mod tests {
         let root = frontend_test_temp_dir("project-build-launch-ids");
         let a_path = root.join("demo4").join("baked").join("demo4.cue");
         let b_path = root
-            .join("cortex_override_v1")
+            .join("cortex_ignition_v1")
             .join("baked")
-            .join("cortex_override_v1.cue");
+            .join("cortex_ignition_v1.cue");
         std::fs::create_dir_all(a_path.parent().unwrap()).unwrap();
         std::fs::create_dir_all(b_path.parent().unwrap()).unwrap();
         std::fs::write(&a_path, b"disc a").unwrap();

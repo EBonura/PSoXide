@@ -14,8 +14,7 @@ fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(usize::MAX);
 
-    let bios_path = env::var("PSOXIDE_BIOS")
-        .unwrap_or_else(|_| "bios/SCPH1001.BIN".into());
+    let bios_path = env::var("PSOXIDE_BIOS").unwrap_or_else(|_| "bios/SCPH1001.BIN".into());
     let bios = fs::read(&bios_path).expect("BIOS readable");
     let dir = cache::default_dir();
     let want = if max == usize::MAX { 50_000_000 } else { max };

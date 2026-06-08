@@ -122,6 +122,12 @@ impl Scene for Playtest {
         let _ = state;
     }
 
+    /// Hold the menu CD-DA until every front-end UI image is resident, so the
+    /// front-end (intro/menu/settings) never reads the CD while music plays.
+    fn front_end_assets_ready(&self) -> bool {
+        menu_ui_cache_ready()
+    }
+
     fn update(&mut self, ctx: &mut Ctx) {
         self.update_gameplay(ctx);
     }

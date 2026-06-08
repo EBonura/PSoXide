@@ -203,6 +203,21 @@ pub trait Scene {
     #[allow(unused_variables)]
     fn update_ui_resources(&mut self, state: SceneStateRef, ctx: &mut Ctx) {}
 
+    /// Whether every front-end (menu/intro/settings) asset is resident in
+    /// memory. The flow driver holds the menu CD-DA music until this returns
+    /// `true`, so the front-end never reads the CD while a music track is
+    /// playing -- on real hardware the single laser cannot stream a UI image
+    /// from the disc and play a CD-DA track at the same time (the read hangs
+    /// and the music dies; emulators have no laser/seek model so they hide it).
+    /// Scenes progressively stream all front-end UI in
+    /// [`update_ui_resources`](Scene::update_ui_resources) and flip this true
+    /// once the whole group is cached. Default is always ready (a scene with no
+    /// streamed front-end assets).
+    #[inline]
+    fn front_end_assets_ready(&self) -> bool {
+        true
+    }
+
     /// Draw the current frame. Called after [`update`] and after
     /// `ctx.fb` has been cleared. The engine submits the final
     /// swap after this returns.

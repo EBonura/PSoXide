@@ -291,6 +291,12 @@ pub struct CdRom {
     /// deadlines without threading `now` through every command
     /// handler.
     scheduling_cycle: u64,
+    /// Whether the command currently dispatching was issued while CD-DA audio
+    /// was already playing. Latched in `queue_command` before any handler
+    /// mutates the play state, and consumed by the `schedule_*_response`
+    /// helpers to add [`CDDA_BUSY_RESPONSE_CYCLES`] to the acknowledge delay --
+    /// modelling the busy single CD controller. See that constant.
+    cmd_issued_during_cdda: bool,
     /// Per-IrqType raise histogram -- indexed by `IrqType`
     /// discriminant (0..=5). Probes read this to tell
     /// Acknowledge/DataReady/Complete/Error counts apart when the
@@ -462,6 +468,7 @@ impl CdRom {
             response_log_cap: 0,
             data_fifo_pops: 0,
             scheduling_cycle: 0,
+            cmd_issued_during_cdda: false,
             irq_type_counts: [0; 6],
             cdrom_irq_log: Vec::new(),
             cdrom_irq_log_cap: 0,
@@ -852,6 +859,10 @@ impl CdRom {
         // right anchor, without threading `now` through every
         // command handler's signature.
         self.scheduling_cycle = now;
+        // Latch whether CD-DA was already playing *before* this command runs,
+        // so the ack-delay helpers can charge the busy-controller penalty even
+        // for commands (Play restart, Pause) that change the play state.
+        self.cmd_issued_during_cdda = self.drive_status & drive_status_bit::PLAYING != 0;
 
         // Drain parameters into a local vec -- handlers need them and
         // pop-order matches push-order.
@@ -937,14 +948,24 @@ impl CdRom {
 
     // --- Command handlers ---
 
-    /// Schedule a first-response IRQ at
-    /// `scheduling_cycle + FIRST_RESPONSE_CYCLES` (absolute). Matches
-    /// Redux's `AddIrqQueue` which anchors on `m_regs.cycle` at the
-    /// moment of the cmd-port write.
+    /// Absolute deadline for a command's first (acknowledge) response.
+    /// `scheduling_cycle + FIRST_RESPONSE_CYCLES`, anchored like Redux's
+    /// `AddIrqQueue` on the cmd-port write, PLUS [`CDDA_BUSY_RESPONSE_CYCLES`]
+    /// when the command was issued while CD-DA was playing (the busy single
+    /// controller is slow to acknowledge mid-playback).
+    fn first_response_deadline(&self) -> u64 {
+        let mut delay = FIRST_RESPONSE_CYCLES;
+        if self.cmd_issued_during_cdda {
+            delay = delay.saturating_add(CDDA_BUSY_RESPONSE_CYCLES);
+        }
+        self.scheduling_cycle.saturating_add(delay)
+    }
+
+    /// Schedule a first-response IRQ at [`Self::first_response_deadline`].
     fn schedule_first_response(&mut self, bytes: Vec<u8>) {
         self.insert_pending_event(PendingEvent {
             command: self.last_command,
-            deadline: self.scheduling_cycle.saturating_add(FIRST_RESPONSE_CYCLES),
+            deadline: self.first_response_deadline(),
             irq: IrqType::Acknowledge,
             bytes,
             followup: None,
@@ -954,7 +975,7 @@ impl CdRom {
     fn schedule_first_complete_response(&mut self, bytes: Vec<u8>) {
         self.insert_pending_event(PendingEvent {
             command: self.last_command,
-            deadline: self.scheduling_cycle.saturating_add(FIRST_RESPONSE_CYCLES),
+            deadline: self.first_response_deadline(),
             irq: IrqType::Complete,
             bytes,
             followup: None,
@@ -979,7 +1000,7 @@ impl CdRom {
     fn schedule_error_response(&mut self, bytes: Vec<u8>) {
         self.insert_pending_event(PendingEvent {
             command: self.last_command,
-            deadline: self.scheduling_cycle.saturating_add(FIRST_RESPONSE_CYCLES),
+            deadline: self.first_response_deadline(),
             irq: IrqType::Error,
             bytes,
             followup: None,
@@ -1446,6 +1467,22 @@ impl CdRom {
         self.read_lba = self.read_lba.wrapping_add(1);
         if let Some(disc) = self.disc.as_ref() {
             if let Some(raw) = disc.read_sector_raw(lba) {
+                // Match DuckStation: a data read (ReadN/ReadS) that advances
+                // into a Red Book audio track delivers no data and raises no
+                // DataReady. DuckStation logs "Skipping sector N as it is an
+                // audio sector and we're not playing"; the stream still
+                // advances so the caller schedules the next sector. Games keep
+                // their data in track 1, so this only bites a read that runs
+                // off the end of the data track -- matching it keeps PSoXide
+                // faithful to the higher-priority proxy.
+                if disc.track_for_lba(lba).map(|track| track.track_type)
+                    == Some(psx_iso::TrackType::Audio)
+                {
+                    self.data_fifo.clear();
+                    self.data_fifo_ready = false;
+                    self.data_transfer_active = false;
+                    return false;
+                }
                 self.last_sector_header.copy_from_slice(&raw[12..16]);
                 self.last_sector_subheader.copy_from_slice(&raw[16..20]);
                 self.last_sector_header_valid = true;

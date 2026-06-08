@@ -18,10 +18,7 @@ mod frame_probe;
 
 fn main() {
     let bios = frame_probe::read_bios();
-    let disc = fs::read(
-        "<rom-path>",
-    )
-    .expect("disc");
+    let disc = fs::read("<rom-path>").expect("disc");
     let mut bus = Bus::new(bios).expect("bus");
     bus.cdrom.insert_disc(Some(Disc::from_bin(disc)));
     let mut cpu = Cpu::new();
