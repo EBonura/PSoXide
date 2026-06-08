@@ -22,7 +22,7 @@
 	showcase-text showcase-text-disc run-showcase-text \
 	game-pong game-pong-disc run-game-pong \
 	game-magikaaaaaarp-pong game-magikaaaaaarp-pong-disc magikaaaaaarp-pong-spectrum run-game-magikaaaaaarp-pong probe-magikaaaaaarp-pong-audio duckstation-magikaaaaaarp-pong \
-	demo10-project-disc duckstation-demo10 duckstation-demo10-bios redux-demo10-bios \
+	cortex-override-v1-project-disc cortex-override-v1-hardware-diagnostic-disc duckstation-cortex-override-v1 duckstation-cortex-override-v1-bios redux-cortex-override-v1-bios \
 	game-breakout game-breakout-disc run-game-breakout \
         game-invaders game-invaders-disc run-game-invaders \
         showcase-3d showcase-3d-disc run-showcase-3d \
@@ -114,12 +114,14 @@ help:
 	@echo "                      - render magikAAAAArp Pong CD-DA to a WAV + silence check"
 	@echo "    make duckstation-magikaaaaaarp-pong"
 	@echo "                      - boot magikAAAAArp Pong in DuckStation and assert TTY markers"
-	@echo "    make duckstation-demo10"
-	@echo "                      - build demo10's project disc and assert DuckStation TTY markers"
-	@echo "    make duckstation-demo10-bios"
-	@echo "                      - assert demo10 through DuckStation's full BIOS/logo path"
-	@echo "    make redux-demo10-bios"
-	@echo "                      - assert demo10 through PCSX-Redux's BIOS disc boot"
+	@echo "    make duckstation-cortex-override-v1"
+	@echo "                      - build cortex_override_v1's project disc and assert DuckStation TTY markers"
+	@echo "    make cortex-override-v1-hardware-diagnostic-disc"
+	@echo "                      - build cortex_override_v1 with TV-visible boot color checkpoints"
+	@echo "    make duckstation-cortex-override-v1-bios"
+	@echo "                      - assert cortex_override_v1 through DuckStation's full BIOS/logo path"
+	@echo "    make redux-cortex-override-v1-bios"
+	@echo "                      - assert cortex_override_v1 through PCSX-Redux's BIOS disc boot"
 	@echo "    make run-showcase-text"
 	@echo "                      - build + boot the text capabilities showcase disc"
 	@echo "    make run-game-pong     - build + boot the Pong mini-game disc"
@@ -269,11 +271,12 @@ MAGIKAAAAARP_PONG_TRACK ?= assets/audio/cdda/GONCHAROV.track02.cdda
 MAGIKAAAAARP_PONG_SPECTRUM := engine/examples/game-magikaaaaaarp-pong/assets/goncharov_spectrum_16x30hz.bin
 DUCKSTATION_TIMEOUT ?= 45
 DUCKSTATION_MAGIKARP_LOG ?= build/duckstation-harness/game-magikaaaaaarp-pong.log
-DUCKSTATION_DEMO10_LOG ?= build/duckstation-harness/demo10.log
-DUCKSTATION_DEMO10_BIOS_LOG ?= build/duckstation-harness/demo10-bios.log
-REDUX_DEMO10_BIOS ?= $(HOME)/Downloads/ps1 bios/SCPH1001.BIN
-REDUX_DEMO10_STEPS ?= 70000000
-DEMO10_PROJECT ?= editor/projects/demo10
+DUCKSTATION_CORTEX_OVERRIDE_V1_LOG ?= build/duckstation-harness/cortex_override_v1.log
+DUCKSTATION_CORTEX_OVERRIDE_V1_BIOS_LOG ?= build/duckstation-harness/cortex_override_v1-bios.log
+REDUX_CORTEX_OVERRIDE_V1_BIOS ?= $(HOME)/Downloads/ps1 bios/SCPH1001.BIN
+REDUX_CORTEX_OVERRIDE_V1_STEPS ?= 70000000
+CORTEX_OVERRIDE_V1_PROJECT ?= editor/projects/cortex_override_v1
+CORTEX_OVERRIDE_V1_CUE ?= $(CORTEX_OVERRIDE_V1_PROJECT)/baked/cortex_override_v1.cue
 PYTHON ?= python3
 PROFILE_DEMO3_FRAMES ?= 60
 PROFILE_DEMO3_STEPS ?= 120000000
@@ -415,9 +418,11 @@ cook-playtest:
 # job (or `make cook-playtest` if you want the starter). The playtest runtime is
 # streaming-only, so the default build includes the CD streaming reader.
 EDITOR_PLAYTEST_FEATURES ?= cd-stream-bench
+EDITOR_PLAYTEST_CARGO_FEATURE_FLAGS ?= --features "$(EDITOR_PLAYTEST_FEATURES)"
+EDITOR_PLAYTEST_HARDWARE_FEATURES ?= cd-stream-bench world-order-slot world-grid-visible ot-2048 vis-static-active-turn vis-full-active-chunks
 
 build-editor-playtest:
-	cd engine/examples/editor-playtest && $(EDITOR_PLAYTEST_CARGO_ENV) cargo build --release $(PSX_BUILD_FLAGS) --features "$(EDITOR_PLAYTEST_FEATURES)"
+	cd engine/examples/editor-playtest && $(EDITOR_PLAYTEST_CARGO_ENV) cargo build --release $(PSX_BUILD_FLAGS) $(EDITOR_PLAYTEST_CARGO_FEATURE_FLAGS)
 
 profile-demo3:
 	$(MAKE) profile-demo3-disc-stream PROFILE_DEMO3_DISC_STREAM_HW=$(PROFILE_DEMO3_HW)
@@ -603,34 +608,37 @@ duckstation-magikaaaaaarp-pong: game-magikaaaaaarp-pong-disc
 		--timeout $(DUCKSTATION_TIMEOUT) \
 		--log $(CURDIR)/$(DUCKSTATION_MAGIKARP_LOG)
 
-demo10-project-disc:
-	cd emu && cargo run -p frontend --release -- build-project-disc --project ../$(DEMO10_PROJECT)
+cortex-override-v1-project-disc:
+	cd emu && cargo run -p frontend --release -- build-project-disc --project ../$(CORTEX_OVERRIDE_V1_PROJECT)
 
-duckstation-demo10: demo10-project-disc
+cortex-override-v1-hardware-diagnostic-disc:
+	cd emu && EDITOR_PLAYTEST_CARGO_FEATURE_FLAGS='--no-default-features --features "$(EDITOR_PLAYTEST_HARDWARE_FEATURES) hardware-boot-visual"' cargo run -p frontend --release -- build-project-disc --project ../$(CORTEX_OVERRIDE_V1_PROJECT)
+
+duckstation-cortex-override-v1: cortex-override-v1-project-disc
 	$(PYTHON) tools/duckstation_harness.py \
-		--cue $(CURDIR)/$(DEMO10_PROJECT)/baked/demo10.cue \
+		--cue $(CURDIR)/$(CORTEX_OVERRIDE_V1_CUE) \
 		--timeout $(DUCKSTATION_TIMEOUT) \
-		--log $(CURDIR)/$(DUCKSTATION_DEMO10_LOG) \
+		--log $(CURDIR)/$(DUCKSTATION_CORTEX_OVERRIDE_V1_LOG) \
 		--no-default-expect \
 		--expect "psx-rt: main" \
 		--expect "editor-playtest: init ok" \
 		--expect "psx-engine: scene init ok"
 
-duckstation-demo10-bios: demo10-project-disc
+duckstation-cortex-override-v1-bios: cortex-override-v1-project-disc
 	$(PYTHON) tools/duckstation_harness.py \
-		--cue $(CURDIR)/$(DEMO10_PROJECT)/baked/demo10.cue \
+		--cue $(CURDIR)/$(CORTEX_OVERRIDE_V1_CUE) \
 		--timeout $(DUCKSTATION_TIMEOUT) \
-		--log $(CURDIR)/$(DUCKSTATION_DEMO10_BIOS_LOG) \
+		--log $(CURDIR)/$(DUCKSTATION_CORTEX_OVERRIDE_V1_BIOS_LOG) \
 		--bios-boot \
 		--no-default-expect \
 		--expect "psx-rt: main" \
 		--expect "editor-playtest: init ok" \
 		--expect "psx-engine: scene init ok"
 
-redux-demo10-bios: demo10-project-disc
-	cd emu && PSOXIDE_DISC="$(CURDIR)/$(DEMO10_PROJECT)/baked/demo10.cue" \
-		PSOXIDE_BIOS="$(REDUX_DEMO10_BIOS)" \
-		PSOXIDE_ORACLE_DISC_STEPS="$(REDUX_DEMO10_STEPS)" \
+redux-cortex-override-v1-bios: cortex-override-v1-project-disc
+	cd emu && PSOXIDE_DISC="$(CURDIR)/$(CORTEX_OVERRIDE_V1_CUE)" \
+		PSOXIDE_BIOS="$(REDUX_CORTEX_OVERRIDE_V1_BIOS)" \
+		PSOXIDE_ORACLE_DISC_STEPS="$(REDUX_CORTEX_OVERRIDE_V1_STEPS)" \
 		cargo test -p parity-oracle --test commercial_disc_smoke --release -- --ignored --nocapture
 
 run-game-breakout: game-breakout-disc
