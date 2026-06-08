@@ -32,9 +32,8 @@ use psx_iso::Disc;
 
 fn parse_args() -> (PathBuf, PathBuf, u64, u64, bool) {
     let mut bios = PathBuf::from("bios/SCPH1001.BIN");
-    let mut disc = PathBuf::from(std::env::var("PSOXIDE_DISC").unwrap_or_else(|_| {
-        "<rom-path>".into()
-    }));
+    let mut disc =
+        PathBuf::from(std::env::var("PSOXIDE_DISC").unwrap_or_else(|_| "<rom-path>".into()));
     // ~558_000 cycles per frame matches the frontend's emulator
     // tick rate (PSX master / 60Hz). We expose it because games
     // run at 30 fps for some scenes.

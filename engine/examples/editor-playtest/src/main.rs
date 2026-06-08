@@ -178,18 +178,18 @@ use generated::{
     ROOM_RESIDENCY, ROOM_SURFACE_CACHES, ROOM_VISIBILITY, UI_FONTS, UI_NODES, UI_PAINTS,
     UI_SFX_CUES, UI_SFX_SAMPLES, VISIBILITY_CELLS, WEAPONS, WEAPON_HITBOXES,
 };
-use generated::{GAME_FLOW, OPTIONS, UI_SCENES};
-#[cfg(all(
-    feature = "world-grid-visible",
-    not(feature = "vis-full-active-chunks")
-))]
-use generated::{VISIBILITY_PVS, VISIBILITY_PVS_BITS};
 #[cfg(feature = "cd-stream-bench")]
 use generated::{
     GAMEPLAY_PACK_MAX_CHUNK_BYTES, UI_PACK_IMAGE_CACHE_SLOTS, UI_PACK_MAX_CHUNK_BYTES,
     UI_PACK_START_LBA, UI_PACK_TOC, WORLD_PACK_MAX_CHUNK_BYTES, WORLD_PACK_START_LBA,
     WORLD_PACK_TOC, WORLD_RESIDENT_CHUNK_LIMIT,
 };
+use generated::{GAME_FLOW, OPTIONS, UI_SCENES};
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
+use generated::{VISIBILITY_PVS, VISIBILITY_PVS_BITS};
 
 static mut OT: OrderingTable<OT_DEPTH> = OrderingTable::new();
 static mut PRIMITIVE_PACKETS: PrimitivePacketScratch<MAX_TEXTURED_TRIS> =

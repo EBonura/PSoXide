@@ -2329,11 +2329,17 @@ mod tests {
 
         bus.write32(crate::gpu::GP0_ADDR, 0x1F00_0000);
         assert_ne!(bus.read32(crate::gpu::GP1_ADDR) & (1 << 24), 0);
-        assert_ne!(bus.read32(IRQ_STAT_ADDR) & (1 << (IrqSource::Gpu as u32)), 0);
+        assert_ne!(
+            bus.read32(IRQ_STAT_ADDR) & (1 << (IrqSource::Gpu as u32)),
+            0
+        );
 
         bus.write32(crate::gpu::GP1_ADDR, 0x0200_0000);
         assert_eq!(bus.read32(crate::gpu::GP1_ADDR) & (1 << 24), 0);
-        assert_eq!(bus.read32(IRQ_STAT_ADDR) & (1 << (IrqSource::Gpu as u32)), 0);
+        assert_eq!(
+            bus.read32(IRQ_STAT_ADDR) & (1 << (IrqSource::Gpu as u32)),
+            0
+        );
     }
 
     #[test]

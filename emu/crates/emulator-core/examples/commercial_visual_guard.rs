@@ -29,8 +29,7 @@ use std::path::{Path, PathBuf};
 
 const DEFAULT_BIOS: &str = "bios/SCPH1001.BIN";
 const DEFAULT_OUT_ROOT: &str = "/tmp/psoxide-commercial-guards";
-const DEFAULT_TEKKEN3_DISC: &str =
-    "<rom-path>";
+const DEFAULT_TEKKEN3_DISC: &str = "<rom-path>";
 const DEFAULT_GUARD: &str = "tekken3-vs-portrait";
 
 const TEKKEN_MENU_PULSES: &str = "0x0008@100+30,0x0008@500+30,0x0008@850+30,\
