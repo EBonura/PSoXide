@@ -1727,6 +1727,8 @@ impl<'a, S: Scene> Scene for GameApp<'a, S> {
             self.gameplay.update(ctx);
         }
         if let Some(scene) = tag.ui_scene() {
+            let state = self.state_ref_at(self.cursor.current);
+            self.gameplay.update_ui_resources(state, ctx);
             if tag.ui_accepts_input() {
                 self.update_ui_scene(scene, ctx);
                 if self.loading_pending() {

@@ -196,6 +196,13 @@ pub trait Scene {
     /// [`render`]: Scene::render
     fn update(&mut self, ctx: &mut Ctx);
 
+    /// Advance resource work for a front-end UI state. The flow driver calls
+    /// this once per UI tick before handling input/rendering. Scenes can use it
+    /// to progressively stream optional menu assets without blocking the
+    /// boot-time [`on_enter_state`](Scene::on_enter_state) path.
+    #[allow(unused_variables)]
+    fn update_ui_resources(&mut self, state: SceneStateRef, ctx: &mut Ctx) {}
+
     /// Draw the current frame. Called after [`update`] and after
     /// `ctx.fb` has been cleared. The engine submits the final
     /// swap after this returns.
