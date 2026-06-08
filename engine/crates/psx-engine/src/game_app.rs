@@ -102,11 +102,23 @@ const CDDA_RETRY_TICKS: u32 = 60;
 const CDDA_STATUS_TICKS: u32 = 30;
 const CDDA_DEFAULT_VOLUME_PERCENT: u8 = 25;
 #[cfg(any(target_arch = "mips", test))]
-const CDDA_PLAYBACK_MODE: u8 = psx_io::cdrom::MODE_CDDA;
+const CDDA_PLAYBACK_MODE: u8 = psx_io::cdrom::MODE_CDDA | psx_io::cdrom::MODE_AUTO_PAUSE;
 #[cfg(target_arch = "mips")]
 const CDDA_STATUS_PLAYING: u8 = 1 << 7;
 #[cfg(target_arch = "mips")]
 const CDDA_COMMAND_SPINS: u32 = 131_072;
+/// Spin budget for the in-playback loop-status poll. Tiny on purpose: a CD
+/// controller busy streaming CD-DA is slow to answer, so a generous budget here
+/// would spin the whole menu loop for milliseconds every poll. With a small
+/// budget the poll simply returns "couldn't tell" mid-playback (we keep playing)
+/// and only reads a definite answer once the drive has auto-paused at track end.
+#[cfg(target_arch = "mips")]
+const CDDA_STATUS_SPINS: u32 = 1_024;
+/// Consecutive definite "stopped" reads required before we treat the track as
+/// finished and loop it. Guards against one stray/garbled status read triggering
+/// a mid-playback reseek (which kills the audio on real hardware). Used by
+/// `maybe_loop`, which is compiled on host too, so it is not target-gated.
+const CDDA_STOPPED_CONFIRMATIONS: u8 = 2;
 
 /// The implicit single-state flow every plain [`App::run`] call uses.
 ///
@@ -217,6 +229,10 @@ struct CddaPlayer {
     next_retry_tick: u32,
     next_status_tick: u32,
     routed: bool,
+    /// Consecutive definite "stopped" status reads seen by the loop poll. Reset
+    /// on any "playing"/inconclusive read; a track is only re-played once this
+    /// reaches [`CDDA_STOPPED_CONFIRMATIONS`].
+    stopped_polls: u8,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -282,6 +298,7 @@ impl CddaPlayer {
             next_retry_tick: 0,
             next_status_tick: 0,
             routed: false,
+            stopped_polls: 0,
         }
     }
 
@@ -364,10 +381,26 @@ impl CddaPlayer {
             return;
         }
         self.next_status_tick = tick.saturating_add(CDDA_STATUS_TICKS);
-        if !cdda_is_playing() {
-            self.current_track = 0;
-            self.step = CddaStartStep::SetMode;
-            self.next_retry_tick = tick;
+        // Non-blocking, restart-averse loop check. `cdda_drive_stopped` polls
+        // GetStat with a tiny spin budget, so mid-playback -- when the busy
+        // controller is slow to answer -- it returns `None` and we just keep
+        // playing, never stalling the menu loop. Only a run of definite
+        // "stopped" reads loops the track; the drive gives those cleanly once
+        // MODE_AUTO_PAUSE halts it at the track boundary. Restarting on a single
+        // missed/late read would reseek the laser mid-song and kill the audio on
+        // real hardware (the exact failure this whole path is fixing).
+        match cdda_drive_stopped() {
+            Some(true) => {
+                self.stopped_polls = self.stopped_polls.saturating_add(1);
+                if self.stopped_polls >= CDDA_STOPPED_CONFIRMATIONS {
+                    self.stopped_polls = 0;
+                    self.current_track = 0;
+                    self.step = CddaStartStep::SetMode;
+                    self.next_retry_tick = tick;
+                }
+            }
+            // Playing, or could not tell within the tiny budget: keep playing.
+            _ => self.stopped_polls = 0,
         }
     }
 }
@@ -477,16 +510,23 @@ fn flow_trace(message: &str) {
 #[inline(always)]
 fn flow_trace(_message: &str) {}
 
+/// Poll the drive's play state WITHOUT blocking the menu loop. Returns
+/// `Some(true)` if it definitely reports stopped (PLAYING bit clear),
+/// `Some(false)` if it reports playing, and `None` if it could not answer
+/// within the tiny [`CDDA_STATUS_SPINS`] budget (the controller busy streaming
+/// audio). The caller must read `None` as "assume still playing", never as
+/// "stopped", or a busy answer would falsely loop-restart the track.
 #[cfg(target_arch = "mips")]
-fn cdda_is_playing() -> bool {
-    psx_io::cdrom::try_get_stat(CDDA_COMMAND_SPINS)
+fn cdda_drive_stopped() -> Option<bool> {
+    psx_io::cdrom::try_get_stat(CDDA_STATUS_SPINS)
         .and_then(|response| response.bytes().first().copied())
-        .is_some_and(|status| status & CDDA_STATUS_PLAYING != 0)
+        .map(|status| status & CDDA_STATUS_PLAYING == 0)
 }
 
 #[cfg(not(target_arch = "mips"))]
-fn cdda_is_playing() -> bool {
-    true
+fn cdda_drive_stopped() -> Option<bool> {
+    // No real drive off-target: report "playing" so the loop never restarts.
+    Some(false)
 }
 
 #[cfg(target_arch = "mips")]
@@ -1365,8 +1405,16 @@ impl<'a, S: Scene> GameApp<'a, S> {
     }
 
     fn update_ui_music(&mut self, scene: u16, ctx: &mut Ctx) {
-        let music_cue = self.scene_music_cue(scene);
-        self.cdda.request(music_cue, ctx.sim_tick.as_u32());
+        // Hold the menu CD-DA until the whole front-end asset group is resident.
+        // Starting music while menu UI is still streaming from the CD makes the
+        // read hang and the music die on real hardware (one laser cannot read a
+        // UI image and play a CD-DA track at once). Once every front-end scene's
+        // assets are cached, the menu issues no more CD reads, so CD-DA plays
+        // uninterrupted while the player navigates intro/menu/settings.
+        if self.gameplay.front_end_assets_ready() {
+            let music_cue = self.scene_music_cue(scene);
+            self.cdda.request(music_cue, ctx.sim_tick.as_u32());
+        }
         self.cdda.update(ctx.sim_tick.as_u32());
     }
 
@@ -2748,8 +2796,14 @@ mod tests {
     };
 
     #[test]
-    fn menu_cdda_playback_mode_matches_working_cdda_demo() {
-        assert_eq!(CDDA_PLAYBACK_MODE, psx_io::cdrom::MODE_CDDA);
+    fn menu_cdda_playback_mode_enables_cdda_and_auto_pause() {
+        // CD-DA enable is required to play Red Book audio at all; auto-pause
+        // makes the drive halt itself at the track boundary so the loop poll can
+        // detect end-of-track and re-play without seeking the laser mid-song.
+        assert_eq!(
+            CDDA_PLAYBACK_MODE,
+            psx_io::cdrom::MODE_CDDA | psx_io::cdrom::MODE_AUTO_PAUSE
+        );
     }
 
     #[test]

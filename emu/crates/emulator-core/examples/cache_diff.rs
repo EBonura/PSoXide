@@ -37,9 +37,7 @@ fn main() {
         .nth(2)
         .and_then(|s| s.parse().ok())
         .expect("need step B");
-    let path = PathBuf::from(
-        "target/parity-cache/redux-32b1a0fa4db70c8f-50000000.bin",
-    );
+    let path = PathBuf::from("target/parity-cache/redux-32b1a0fa4db70c8f-50000000.bin");
     let mut r = BufReader::new(File::open(&path).expect("open cache"));
     let (ta, pca, ia, ga) = read_record(&mut r, a);
     let (tb, pcb, ib, gb) = read_record(&mut r, b);

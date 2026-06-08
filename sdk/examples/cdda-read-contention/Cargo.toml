@@ -1,0 +1,20 @@
+[package]
+name    = "cdda-read-contention"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-or-later"
+
+[workspace]
+
+[[bin]]
+name = "cdda-read-contention"
+path = "src/main.rs"
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+
+[dependencies]
+psx-io = { path = "../../crates/psx-io" }
+psx-rt = { path = "../../crates/psx-rt" }

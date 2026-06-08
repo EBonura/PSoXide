@@ -368,7 +368,12 @@ local function run()
     end
 
     PCSX.pauseEmulator()
-    PCSX.setQuietPauseResume(true)
+    -- `setQuietPauseResume` only suppresses Run/Pause log spam and was
+    -- removed from newer Redux Lua APIs. Guard it so the handshake still
+    -- works on stock builds that lack it.
+    if PCSX.setQuietPauseResume then
+        PCSX.setQuietPauseResume(true)
+    end
     ram_ptr = PCSX.getMemPtr()
     rom_ptr = PCSX.getRomPtr()
     regs = PCSX.getRegisters()
