@@ -28,8 +28,8 @@ const FONT_PACK_SCRATCH_LEN: usize = FONT_PACK_U16;
 static mut FONT_PACK_SCRATCH: [u16; FONT_PACK_SCRATCH_LEN] = [0; FONT_PACK_SCRATCH_LEN];
 
 /// One cached CD-streamed menu UI image. The bytes are loaded once from UI.PAK
-/// at first menu entry, then scene transitions upload their active images from
-/// this RAM cache instead of seeking the disc again.
+/// after menu boot, then scene transitions upload their active images from this
+/// RAM cache instead of seeking the disc again.
 #[cfg(feature = "cd-stream-bench")]
 #[derive(Copy, Clone)]
 struct UiImageCacheEntry {
@@ -60,6 +60,8 @@ static mut UI_IMAGE_CACHE_ENTRIES: [UiImageCacheEntry; UI_PACK_IMAGE_CACHE_SLOTS
 static mut UI_IMAGE_CACHE_COUNT: usize = 0;
 #[cfg(feature = "cd-stream-bench")]
 static mut UI_IMAGE_CACHE_READY: bool = false;
+#[cfg(feature = "cd-stream-bench")]
+static mut MENU_UI_CD_DEFER_FRAMES: u8 = 0;
 
 /// Streamed UI image VRAM slots created on menu entry, tracked so they
 /// can be released on gameplay entry. One entry per streamed Texture
@@ -169,66 +171,94 @@ fn free_room_texture_vram_slot(asset_id: AssetId) {
     }
 }
 
-/// Load every menu UI image from UI.PAK into RAM once. VRAM remains scoped to
-/// the active UI scene so the Bonnie splash texture does not stay resident beside
-/// all main-menu strips.
-///
-/// The first menu state pays the CD-read cost for all menu scenes; later
-/// menu-to-menu transitions only upload already-cached bytes to VRAM.
 #[cfg(feature = "cd-stream-bench")]
-fn preload_menu_ui_images_from_cd() {
+fn menu_ui_asset_for_node(
+    node: &psx_level::LevelUiNodeRecord,
+) -> Option<&'static psx_level::LevelAssetRecord> {
+    if node.kind != psx_level::LevelUiNodeKind::Image {
+        return None;
+    }
+    let asset = find_asset_of_kind(ASSETS, node.texture_asset, AssetKind::Texture)?;
+    if !asset.bytes.is_empty() || is_sky_panorama_asset(asset.id) {
+        return None;
+    }
+    Some(asset)
+}
+
+#[cfg(feature = "cd-stream-bench")]
+fn cache_menu_ui_image_from_cd(asset: &psx_level::LevelAssetRecord) -> bool {
     unsafe {
         if UI_IMAGE_CACHE_READY {
-            return;
+            return false;
+        }
+        if find_ui_image_cache_entry(asset.id).is_some() {
+            return false;
+        }
+        if UI_IMAGE_CACHE_COUNT >= UI_PACK_IMAGE_CACHE_SLOTS {
+            UI_IMAGE_CACHE_READY = true;
+            return false;
         }
 
-        for scene in UI_SCENES {
-            let first = scene.node_first as usize;
-            let end = first
-                .saturating_add(scene.node_count as usize)
-                .min(UI_NODES.len());
-            for node in &UI_NODES[first..end] {
-                if node.kind != psx_level::LevelUiNodeKind::Image {
-                    continue;
-                }
-                let Some(asset) = find_asset_of_kind(ASSETS, node.texture_asset, AssetKind::Texture)
-                else {
-                    continue;
-                };
-                if !asset.bytes.is_empty() || is_sky_panorama_asset(asset.id) {
-                    continue;
-                }
-                if find_ui_image_cache_entry(asset.id).is_some() {
-                    continue;
-                }
-                if UI_IMAGE_CACHE_COUNT >= UI_PACK_IMAGE_CACHE_SLOTS {
-                    continue;
-                }
-
-                let slot = UI_IMAGE_CACHE_COUNT;
-                let start = slot.saturating_mul(UI_STAGE_WORDS);
-                let end = start.saturating_add(UI_STAGE_WORDS).min(UI_IMAGE_CACHE.len());
-                let res = cd_stream::read_chunk_blocking(
-                    UI_PACK_START_LBA,
-                    UI_PACK_TOC,
-                    asset.id.0 as u32,
-                    &mut UI_IMAGE_CACHE[start..end],
-                );
-                if res.status != cd_stream::ROOM_CHUNK_STATUS_OK || res.bytes == 0 {
-                    continue;
-                }
-
-                UI_IMAGE_CACHE_ENTRIES[slot] = UiImageCacheEntry {
-                    asset: asset.id,
-                    bytes: res.bytes,
-                    loaded: true,
-                };
-                UI_IMAGE_CACHE_COUNT += 1;
-            }
+        let slot = UI_IMAGE_CACHE_COUNT;
+        let start = slot.saturating_mul(UI_STAGE_WORDS);
+        let end = start.saturating_add(UI_STAGE_WORDS).min(UI_IMAGE_CACHE.len());
+        let res = cd_stream::read_chunk_blocking(
+            UI_PACK_START_LBA,
+            UI_PACK_TOC,
+            asset.id.0 as u32,
+            &mut UI_IMAGE_CACHE[start..end],
+        );
+        if res.status != cd_stream::ROOM_CHUNK_STATUS_OK || res.bytes == 0 {
+            return false;
         }
 
+        UI_IMAGE_CACHE_ENTRIES[slot] = UiImageCacheEntry {
+            asset: asset.id,
+            bytes: res.bytes,
+            loaded: true,
+        };
+        UI_IMAGE_CACHE_COUNT += 1;
+        UI_IMAGE_CACHE_READY = UI_IMAGE_CACHE_COUNT >= UI_PACK_IMAGE_CACHE_SLOTS;
+        true
+    }
+}
+
+#[cfg(feature = "cd-stream-bench")]
+fn cache_one_missing_ui_image_for_scene(scene_id: u16) -> bool {
+    let Some(scene) = UI_SCENES.iter().find(|scene| scene.id == scene_id) else {
+        return false;
+    };
+    let first = scene.node_first as usize;
+    let end = first
+        .saturating_add(scene.node_count as usize)
+        .min(UI_NODES.len());
+    for node in &UI_NODES[first..end] {
+        let Some(asset) = menu_ui_asset_for_node(node) else {
+            continue;
+        };
+        if find_ui_image_cache_entry(asset.id).is_some() {
+            continue;
+        }
+        let _ = cache_menu_ui_image_from_cd(asset);
+        return true;
+    }
+    false
+}
+
+#[cfg(feature = "cd-stream-bench")]
+fn cache_one_missing_menu_ui_image() -> bool {
+    if unsafe { UI_IMAGE_CACHE_READY } {
+        return false;
+    }
+    for scene in UI_SCENES {
+        if cache_one_missing_ui_image_for_scene(scene.id) {
+            return true;
+        }
+    }
+    unsafe {
         UI_IMAGE_CACHE_READY = UI_IMAGE_CACHE_COUNT >= UI_PACK_IMAGE_CACHE_SLOTS;
     }
+    false
 }
 
 #[cfg(feature = "cd-stream-bench")]
@@ -275,15 +305,49 @@ fn track_ui_image_slot(asset_id: AssetId) {
     }
 }
 
-/// Upload the active UI scene's streamed images into VRAM from the preloaded RAM
-/// cache. Tracks each created slot so `release_ui_images` can free it when the
-/// scene changes or gameplay starts.
+/// Start a short grace period after entering a menu scene. This lets the boot
+/// frame (or transition cover) present before the next UI.PAK read starts.
+#[cfg(feature = "cd-stream-bench")]
+pub(super) fn note_menu_ui_scene_entered() {
+    unsafe {
+        if !UI_IMAGE_CACHE_READY {
+            MENU_UI_CD_DEFER_FRAMES = 2;
+        }
+    }
+}
+
+/// Advance menu UI streaming by at most one CD chunk, then upload any active
+/// scene image whose bytes are already cached. Prioritising the active scene
+/// keeps the visible menu complete, while the fallback preloads the other menu
+/// states so later transitions avoid CD reads.
+#[cfg(feature = "cd-stream-bench")]
+pub(super) fn service_menu_ui_images(scene_id: u16) {
+    if scene_id == psx_level::UI_SCENE_NONE {
+        return;
+    }
+
+    unsafe {
+        if MENU_UI_CD_DEFER_FRAMES != 0 {
+            MENU_UI_CD_DEFER_FRAMES -= 1;
+            load_ui_images_for_scene(scene_id);
+            return;
+        }
+    }
+
+    if !cache_one_missing_ui_image_for_scene(scene_id) {
+        let _ = cache_one_missing_menu_ui_image();
+    }
+    load_ui_images_for_scene(scene_id);
+}
+
+/// Upload the active UI scene's streamed images into VRAM from the RAM cache.
+/// Tracks each created slot so `release_ui_images` can free it when the scene
+/// changes or gameplay starts.
 #[cfg(feature = "cd-stream-bench")]
 pub(super) fn load_ui_images_for_scene(scene_id: u16) {
     if scene_id == psx_level::UI_SCENE_NONE {
         return;
     }
-    preload_menu_ui_images_from_cd();
 
     let Some(scene) = UI_SCENES.iter().find(|scene| scene.id == scene_id) else {
         return;
