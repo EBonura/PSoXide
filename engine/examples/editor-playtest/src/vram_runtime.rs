@@ -69,8 +69,7 @@ static mut MENU_UI_CD_DEFER_FRAMES: u8 = 0;
 #[cfg(feature = "cd-stream-bench")]
 const MAX_UI_IMAGE_SLOTS: usize = 16;
 #[cfg(feature = "cd-stream-bench")]
-static mut UI_IMAGE_SLOTS: [Option<AssetId>; MAX_UI_IMAGE_SLOTS] =
-    [None; MAX_UI_IMAGE_SLOTS];
+static mut UI_IMAGE_SLOTS: [Option<AssetId>; MAX_UI_IMAGE_SLOTS] = [None; MAX_UI_IMAGE_SLOTS];
 
 /// Capacity of the residency manager's RAM table. Holds room
 /// world + model meshes + animation clips.
@@ -201,7 +200,9 @@ fn cache_menu_ui_image_from_cd(asset: &psx_level::LevelAssetRecord) -> bool {
 
         let slot = UI_IMAGE_CACHE_COUNT;
         let start = slot.saturating_mul(UI_STAGE_WORDS);
-        let end = start.saturating_add(UI_STAGE_WORDS).min(UI_IMAGE_CACHE.len());
+        let end = start
+            .saturating_add(UI_STAGE_WORDS)
+            .min(UI_IMAGE_CACHE.len());
         let res = cd_stream::read_chunk_blocking(
             UI_PACK_START_LBA,
             UI_PACK_TOC,
@@ -1209,8 +1210,7 @@ pub(super) fn ensure_sky_panorama_uploaded(
 /// (empty-bytes) Texture assets apart by this room-table lookup.
 pub(super) fn is_sky_panorama_asset(asset_id: AssetId) -> bool {
     ROOMS.iter().any(|room| {
-        room.sky.flags & sky_flags::ENABLED != 0
-            && room.sky.cloud_layer.texture_asset == asset_id
+        room.sky.flags & sky_flags::ENABLED != 0 && room.sky.cloud_layer.texture_asset == asset_id
     })
 }
 

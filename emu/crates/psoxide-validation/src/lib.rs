@@ -484,7 +484,7 @@ mod tests {
                 name: "demo".to_string(),
                 category: ValidationCategory::Project,
                 artifact: ValidationArtifact::Project {
-                    project: PathBuf::from("editor/projects/demo10"),
+                    project: PathBuf::from("editor/projects/cortex_override_v1"),
                 },
                 checkpoints: vec![ValidationCheckpoint {
                     name: "boot".to_string(),
