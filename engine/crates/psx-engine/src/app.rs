@@ -89,7 +89,7 @@ fn draw_boot_text(fb: &FrameBuffer, message: &str) {
     let start_x = 12i16;
     let mut x = start_x;
     let mut y = 16i16;
-    draw_boot_text_line(start_x, y, "CORTEX_OVERRIDE_V1", scale);
+    draw_boot_text_line(start_x, y, "CORTEX_IGNITION_V1", scale);
     y += line_height;
     for ch in message.chars() {
         if ch == '\n' || x + advance >= fb.width as i16 - 8 {

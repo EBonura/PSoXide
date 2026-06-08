@@ -170,96 +170,84 @@ fn free_room_texture_vram_slot(asset_id: AssetId) {
     }
 }
 
+/// Stream the ENTIRE front-end UI image group from UI.PAK into the RAM cache in
+/// a SINGLE contiguous CD read, then mark the cache ready. The whole intro ->
+/// menu -> settings group is resident before the menu CD-DA starts (the engine
+/// holds music on `Scene::front_end_assets_ready` -> `menu_ui_cache_ready`), so
+/// the front-end issues ZERO CD reads while music plays and navigation between
+/// those scenes needs no CD.
+///
+/// The chunks are read back-to-back in one `SetLoc + ReadN .. Pause` session
+/// rather than one cycle per image. On a real CD-R, each separate cycle stops
+/// and re-seeks the drive (the menu's HUGE boot stall); the emulator has no
+/// seek model, so the win shows there only as the relocated-read penalty
+/// collapsing from N reads to 1.
 #[cfg(feature = "cd-stream-bench")]
-fn menu_ui_asset_for_node(
-    node: &psx_level::LevelUiNodeRecord,
-) -> Option<&'static psx_level::LevelAssetRecord> {
-    if node.kind != psx_level::LevelUiNodeKind::Image {
-        return None;
-    }
-    let asset = find_asset_of_kind(ASSETS, node.texture_asset, AssetKind::Texture)?;
-    if !asset.bytes.is_empty() || is_sky_panorama_asset(asset.id) {
-        return None;
-    }
-    Some(asset)
-}
-
-#[cfg(feature = "cd-stream-bench")]
-fn cache_menu_ui_image_from_cd(asset: &psx_level::LevelAssetRecord) -> bool {
+fn preload_all_menu_ui_contiguous() {
     unsafe {
         if UI_IMAGE_CACHE_READY {
-            return false;
+            return;
         }
-        if find_ui_image_cache_entry(asset.id).is_some() {
-            return false;
+
+        // Build the read plan from UI.PAK's TOC: every streamed (empty baked
+        // bytes) non-sky texture is a front-end UI image. The TOC is in disc
+        // (ascending sector) order, exactly what the contiguous read requires.
+        // Slot k holds chunk k, so its bytes land at the cache word
+        // `k * UI_STAGE_WORDS` that `cached_ui_image_bytes(k, ..)` reads back.
+        let mut plans = [cd_stream::UiChunkPlan::EMPTY; UI_PACK_IMAGE_CACHE_SLOTS];
+        let mut plan_assets = [AssetId(u16::MAX); UI_PACK_IMAGE_CACHE_SLOTS];
+        let mut n = 0usize;
+        let mut i = 0usize;
+        while i < UI_PACK_TOC.len() && n < UI_PACK_IMAGE_CACHE_SLOTS {
+            let entry = UI_PACK_TOC[i];
+            i += 1;
+            let asset_id = AssetId(entry.room.raw() as u16);
+            let Some(asset) = find_asset_of_kind(ASSETS, asset_id, AssetKind::Texture) else {
+                continue;
+            };
+            if !asset.bytes.is_empty() || is_sky_panorama_asset(asset_id) {
+                continue;
+            }
+            plans[n] = cd_stream::UiChunkPlan {
+                sector_offset: entry.sector_offset,
+                sector_count: entry.sector_count,
+                byte_size: entry.byte_size as usize,
+                checksum: entry.checksum,
+                cache_word_start: n.saturating_mul(UI_STAGE_WORDS),
+            };
+            plan_assets[n] = asset_id;
+            n += 1;
         }
-        if UI_IMAGE_CACHE_COUNT >= UI_PACK_IMAGE_CACHE_SLOTS {
+
+        if n == 0 {
             UI_IMAGE_CACHE_READY = true;
-            return false;
+            return;
         }
 
-        let slot = UI_IMAGE_CACHE_COUNT;
-        let start = slot.saturating_mul(UI_STAGE_WORDS);
-        let end = start
-            .saturating_add(UI_STAGE_WORDS)
-            .min(UI_IMAGE_CACHE.len());
-        let res = cd_stream::read_chunk_blocking(
+        let mut statuses = [cd_stream::ROOM_CHUNK_STATUS_OK; UI_PACK_IMAGE_CACHE_SLOTS];
+        cd_stream::read_chunks_contiguous(
             UI_PACK_START_LBA,
-            UI_PACK_TOC,
-            asset.id.0 as u32,
-            &mut UI_IMAGE_CACHE[start..end],
+            &plans[..n],
+            &mut UI_IMAGE_CACHE[..],
+            &mut statuses[..n],
         );
-        if res.status != cd_stream::ROOM_CHUNK_STATUS_OK || res.bytes == 0 {
-            return false;
-        }
 
-        UI_IMAGE_CACHE_ENTRIES[slot] = UiImageCacheEntry {
-            asset: asset.id,
-            bytes: res.bytes,
-            loaded: true,
-        };
-        UI_IMAGE_CACHE_COUNT += 1;
-        UI_IMAGE_CACHE_READY = UI_IMAGE_CACHE_COUNT >= UI_PACK_IMAGE_CACHE_SLOTS;
-        true
-    }
-}
-
-#[cfg(feature = "cd-stream-bench")]
-fn cache_one_missing_ui_image_for_scene(scene_id: u16) -> bool {
-    let Some(scene) = UI_SCENES.iter().find(|scene| scene.id == scene_id) else {
-        return false;
-    };
-    let first = scene.node_first as usize;
-    let end = first
-        .saturating_add(scene.node_count as usize)
-        .min(UI_NODES.len());
-    for node in &UI_NODES[first..end] {
-        let Some(asset) = menu_ui_asset_for_node(node) else {
-            continue;
-        };
-        if find_ui_image_cache_entry(asset.id).is_some() {
-            continue;
+        // Record one cache entry per planned chunk at its slot. A chunk that
+        // failed its read/checksum is left `loaded = false` so the uploader
+        // (which checks `loaded`) skips it exactly like a cache miss; COUNT is
+        // the plan count so the lookup scans every slot.
+        let mut k = 0usize;
+        while k < n {
+            UI_IMAGE_CACHE_ENTRIES[k] = UiImageCacheEntry {
+                asset: plan_assets[k],
+                bytes: plans[k].byte_size,
+                loaded: statuses[k] == cd_stream::ROOM_CHUNK_STATUS_OK,
+            };
+            k += 1;
         }
-        let _ = cache_menu_ui_image_from_cd(asset);
-        return true;
+        UI_IMAGE_CACHE_COUNT = n;
+        UI_IMAGE_CACHE_READY = true;
     }
-    false
-}
-
-#[cfg(feature = "cd-stream-bench")]
-fn cache_one_missing_menu_ui_image() -> bool {
-    if unsafe { UI_IMAGE_CACHE_READY } {
-        return false;
-    }
-    for scene in UI_SCENES {
-        if cache_one_missing_ui_image_for_scene(scene.id) {
-            return true;
-        }
-    }
-    unsafe {
-        UI_IMAGE_CACHE_READY = UI_IMAGE_CACHE_COUNT >= UI_PACK_IMAGE_CACHE_SLOTS;
-    }
-    false
 }
 
 #[cfg(feature = "cd-stream-bench")]
@@ -306,25 +294,6 @@ fn track_ui_image_slot(asset_id: AssetId) {
     }
 }
 
-#[cfg(feature = "cd-stream-bench")]
-fn scene_requests_music(scene_id: u16) -> bool {
-    let Some(scene) = UI_SCENES.iter().find(|scene| scene.id == scene_id) else {
-        return false;
-    };
-    let first = scene.node_first as usize;
-    let end = first
-        .saturating_add(scene.node_count as usize)
-        .min(UI_NODES.len());
-    UI_NODES[first..end]
-        .iter()
-        .any(|node| {
-            node.kind == psx_level::LevelUiNodeKind::Music
-                && node.option != psx_level::UI_OPTION_NONE
-                && node.option <= 99
-                && node.option != 0
-        })
-}
-
 /// Start a short grace period after entering a menu scene. This lets the boot
 /// frame (or transition cover) present before the next UI.PAK read starts.
 #[cfg(feature = "cd-stream-bench")]
@@ -354,14 +323,34 @@ pub(super) fn service_menu_ui_images(scene_id: u16) {
         }
     }
 
-    if cache_one_missing_ui_image_for_scene(scene_id) {
-        load_ui_images_for_scene(scene_id);
-        return;
-    }
-    if !scene_requests_music(scene_id) {
-        let _ = cache_one_missing_menu_ui_image();
+    // Stream the WHOLE front-end UI image run from UI.PAK in ONE contiguous CD
+    // read (one seek, sequential sectors, one pause) instead of N separate
+    // SetLoc+ReadN+Pause cycles. Each per-image cycle forces a real CD-R drive
+    // to stop/seek/re-acquire -- a HUGE boot stall on hardware, cheap only in
+    // the emulator. The front-end CD-DA is held until this completes
+    // (Scene::front_end_assets_ready), so no music contends with the read.
+    unsafe {
+        if !UI_IMAGE_CACHE_READY {
+            preload_all_menu_ui_contiguous();
+        }
     }
     load_ui_images_for_scene(scene_id);
+}
+
+/// True once every streamed front-end UI image is resident in the RAM cache.
+/// The engine holds the menu CD-DA until this is true (see
+/// `Scene::front_end_assets_ready`) so the front-end never reads the CD while
+/// music plays.
+#[cfg(feature = "cd-stream-bench")]
+pub(super) fn menu_ui_cache_ready() -> bool {
+    unsafe { UI_IMAGE_CACHE_READY }
+}
+
+/// Without the streaming feature there are no streamed UI images, so the
+/// front-end is always resident.
+#[cfg(not(feature = "cd-stream-bench"))]
+pub(super) fn menu_ui_cache_ready() -> bool {
+    true
 }
 
 /// Upload the active UI scene's streamed images into VRAM from the RAM cache.

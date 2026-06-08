@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::env;
+use std::fmt::Write as FmtWrite;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -31,6 +32,8 @@ fn run() -> Result<(), String> {
         "duckstation-harness" => duckstation_harness(&args),
         "emulator-inventory" => emulator_inventory(&args),
         "external-emulator-smoke" => external_emulator_smoke(&args),
+        "cortex-bringup-report" => cortex_bringup_report(&args),
+        "cortex-stream-guard" => cortex_stream_guard(&args),
         "vblank-chart" => vblank_chart(&args),
         "gen-tones" => gen_tones(),
         "gen-fonts" => gen_fonts(),
@@ -50,7 +53,9 @@ fn help() -> String {
        bake-spectrum <input.wav> -o <output.bin> [--fps N] [--bands N] [--seconds S]\n\
        duckstation-harness --cue <disc.cue> [--expect TEXT] [--bios-boot]\n\
        emulator-inventory [--require NAME]\n\
-       external-emulator-smoke --emulator mednafen|retroarch --cue <disc.cue> [--bios BIOS]\n\
+       external-emulator-smoke --emulator mednafen|retroarch|ares --cue <disc.cue> [--bios BIOS] [--fail-on TEXT] [--screenshot PNG]\n\
+       cortex-bringup-report [--out REPORT.md] [--fail-on-warn]\n\
+       cortex-stream-guard [--profile profile.csv] [--cdda-log cdda.log] [--boot-flow-log boot.log]\n\
        vblank-chart --in <profile.csv> --out <chart.html> [--title TITLE]\n\
        gen-tones\n\
        gen-fonts"
@@ -738,7 +743,7 @@ fn emulator_inventory_rows() -> Vec<EmulatorInventoryRow> {
             label: "Mednafen",
             binary: discover_mednafen(None).ok(),
             core: None,
-            coverage: "optional launch smoke",
+            coverage: "optional BIOS/TOC launch smoke",
             install_hint: "brew install mednafen or set MEDNAFEN_BIN",
         },
         EmulatorInventoryRow {
@@ -746,7 +751,7 @@ fn emulator_inventory_rows() -> Vec<EmulatorInventoryRow> {
             label: "RetroArch",
             binary: retroarch,
             core: retroarch_core,
-            coverage: "optional launch smoke",
+            coverage: "optional launch smoke + screenshot",
             install_hint: "brew install --cask retroarch-metal plus a PSX core",
         },
         EmulatorInventoryRow {
@@ -754,7 +759,7 @@ fn emulator_inventory_rows() -> Vec<EmulatorInventoryRow> {
             label: "ares",
             binary: discover_ares(None).ok(),
             core: None,
-            coverage: "inventory only",
+            coverage: "optional TOC launch smoke",
             install_hint: "install ares.app or set ARES_BIN",
         },
     ]
@@ -766,6 +771,9 @@ fn external_emulator_smoke(args: &[String]) -> Result<(), String> {
     let mut bios = env::var("PSOXIDE_BIOS").ok();
     let mut timeout = 12.0f64;
     let mut log = Some("build/external-emulator-smoke/emulator.log".to_string());
+    let mut fail_on = Vec::new();
+    let mut screenshot = None;
+    let mut screenshot_frames = 360u64;
     let mut i = 0usize;
     while i < args.len() {
         match args[i].as_str() {
@@ -789,6 +797,18 @@ fn external_emulator_smoke(args: &[String]) -> Result<(), String> {
                 i += 1;
                 log = args.get(i).cloned();
             }
+            "--fail-on" => {
+                i += 1;
+                fail_on.push(args.get(i).cloned().ok_or("--fail-on requires value")?);
+            }
+            "--screenshot" => {
+                i += 1;
+                screenshot = args.get(i).cloned();
+            }
+            "--screenshot-frames" => {
+                i += 1;
+                screenshot_frames = parse_arg(args.get(i), "--screenshot-frames")?;
+            }
             other => return Err(format!("unknown external-emulator-smoke arg `{other}`")),
         }
         i += 1;
@@ -809,16 +829,30 @@ fn external_emulator_smoke(args: &[String]) -> Result<(), String> {
     if let Some(parent) = log_path.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
     }
+    let screenshot_path = screenshot.as_deref().map(resolve_from_cwd);
+    if screenshot_path.is_some() && emulator != "retroarch" {
+        return Err("--screenshot is currently supported only for RetroArch".to_string());
+    }
+    if let Some(parent) = screenshot_path.as_deref().and_then(Path::parent) {
+        fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    }
 
     let mut command = match emulator.as_str() {
         "mednafen" => mednafen_command(&cue, bios.as_deref())?,
-        "retroarch" => retroarch_command(&cue)?,
+        "retroarch" => retroarch_command(
+            &cue,
+            bios.as_deref(),
+            screenshot_path.as_deref(),
+            screenshot_frames,
+        )?,
+        "ares" => ares_command(&cue, bios.as_deref())?,
         other => {
             return Err(format!(
                 "external-emulator-smoke does not know how to launch `{other}`"
             ));
         }
     };
+    let fatal_patterns = external_emulator_fatal_patterns(&emulator, &fail_on);
     command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -827,6 +861,9 @@ fn external_emulator_smoke(args: &[String]) -> Result<(), String> {
     println!("Emulator: {emulator}");
     println!("Disc:     {}", cue.display());
     println!("Log:      {}", log_path.display());
+    if let Some(path) = screenshot_path.as_deref() {
+        println!("Shot:     {}", path.display());
+    }
     println!("Command:  {:?}", command);
 
     let mut child = command
@@ -846,6 +883,13 @@ fn external_emulator_smoke(args: &[String]) -> Result<(), String> {
         if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
             while let Ok(line) = rx.try_recv() {
                 writeln!(log_file, "{line}").map_err(|e| e.to_string())?;
+                if let Some(pattern) = matching_pattern(&line, &fatal_patterns) {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    eprintln!("\n{emulator} emitted fatal launch pattern `{pattern}`");
+                    eprintln!("{line}");
+                    return Err(format!("{emulator} launch smoke failed"));
+                }
                 lines.push(line);
             }
             if !status.success() {
@@ -856,11 +900,19 @@ fn external_emulator_smoke(args: &[String]) -> Result<(), String> {
                 return Err(format!("{emulator} launch smoke failed"));
             }
             println!("{emulator} exited successfully during launch smoke");
+            verify_optional_screenshot(screenshot_path.as_deref())?;
             return Ok(());
         }
         match rx.recv_timeout(Duration::from_millis(100)) {
             Ok(line) => {
                 writeln!(log_file, "{line}").map_err(|e| e.to_string())?;
+                if let Some(pattern) = matching_pattern(&line, &fatal_patterns) {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    eprintln!("\n{emulator} emitted fatal launch pattern `{pattern}`");
+                    eprintln!("{line}");
+                    return Err(format!("{emulator} launch smoke failed"));
+                }
                 lines.push(line);
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -872,7 +924,714 @@ fn external_emulator_smoke(args: &[String]) -> Result<(), String> {
         let _ = child.wait();
     }
     println!("{emulator} stayed alive for {timeout:.1}s; launch smoke passed");
+    verify_optional_screenshot(screenshot_path.as_deref())?;
     Ok(())
+}
+
+fn verify_optional_screenshot(path: Option<&Path>) -> Result<(), String> {
+    let Some(path) = path else {
+        return Ok(());
+    };
+    if png_file_status(path) == "PASS" {
+        println!("Screenshot: {}", path.display());
+        Ok(())
+    } else {
+        Err(format!(
+            "observable screenshot was not created as a valid PNG: {}",
+            path.display()
+        ))
+    }
+}
+
+fn external_emulator_fatal_patterns(emulator: &str, extra: &[String]) -> Vec<String> {
+    let mut patterns = match emulator {
+        "retroarch" => vec![
+            "Firmware is missing".to_string(),
+            "Failed to load content".to_string(),
+        ],
+        _ => Vec::new(),
+    };
+    patterns.extend(extra.iter().cloned());
+    patterns
+}
+
+fn matching_pattern<'a>(line: &str, patterns: &'a [String]) -> Option<&'a str> {
+    patterns
+        .iter()
+        .find(|pattern| !pattern.is_empty() && line.contains(pattern.as_str()))
+        .map(String::as_str)
+}
+
+fn cortex_stream_guard(args: &[String]) -> Result<(), String> {
+    let mut profile = Some("build/preburn/cortex_ignition_v1/profile.csv".to_string());
+    let mut cdda_log = Some("build/preburn/cortex_ignition_v1/cdda-probe.log".to_string());
+    let mut boot_flow_log = Some("build/preburn/cortex_ignition_v1/boot-flow.log".to_string());
+    let mut i = 0usize;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--profile" => {
+                i += 1;
+                profile = args.get(i).cloned();
+            }
+            "--cdda-log" => {
+                i += 1;
+                cdda_log = args.get(i).cloned();
+            }
+            "--boot-flow-log" => {
+                i += 1;
+                boot_flow_log = args.get(i).cloned();
+            }
+            other => return Err(format!("unknown cortex-stream-guard arg `{other}`")),
+        }
+        i += 1;
+    }
+
+    let profile = resolve_from_cwd(
+        profile
+            .as_deref()
+            .unwrap_or("build/preburn/cortex_ignition_v1/profile.csv"),
+    );
+    let cdda_log = resolve_from_cwd(
+        cdda_log
+            .as_deref()
+            .unwrap_or("build/preburn/cortex_ignition_v1/cdda-probe.log"),
+    );
+    let boot_flow_log = resolve_from_cwd(
+        boot_flow_log
+            .as_deref()
+            .unwrap_or("build/preburn/cortex_ignition_v1/boot-flow.log"),
+    );
+
+    let mut failures = Vec::new();
+    let mut signals = Vec::new();
+
+    match read_optional_log(&cdda_log)? {
+        Some(text) if log_status(Some(&text), &["Nonzero:", "Peak:", "Play="]) == "PASS" => {
+            signals.push(format!(
+                "cdda log: {}",
+                summarize_matching_lines(&text, &["Nonzero:", "Peak:", "CD CMDS:"], 4)
+            ));
+        }
+        Some(text) => {
+            failures.push(format!(
+                "failure: CD-DA probe lacks required audio/play signal ({})",
+                summarize_matching_lines(&text, &["Nonzero:", "Peak:", "CD CMDS:"], 4)
+            ));
+        }
+        None => failures.push(format!(
+            "failure: CD-DA probe log missing: {}",
+            cdda_log.display()
+        )),
+    }
+
+    match read_optional_log(&boot_flow_log)? {
+        Some(text) if log_status(Some(&text), &["fifo pops:", "audio:", "Play"]) == "PASS" => {
+            signals.push(format!(
+                "boot-flow log: {}",
+                summarize_matching_lines(&text, &["display:", "fifo pops:", "audio:", "Play"], 5)
+            ));
+        }
+        Some(text) if text.contains("skip BIOS boot-flow probe:") => {
+            signals.push(format!(
+                "boot-flow log: {}",
+                summarize_matching_lines(&text, &["skip BIOS boot-flow probe:"], 1)
+            ));
+        }
+        Some(text) => {
+            failures.push(format!(
+                "failure: BIOS boot-flow log lacks CD data plus CD-DA signal ({})",
+                summarize_matching_lines(&text, &["display:", "fifo pops:", "audio:", "Play"], 5)
+            ));
+        }
+        None => failures.push(format!(
+            "failure: BIOS boot-flow log missing: {}",
+            boot_flow_log.display()
+        )),
+    }
+
+    match streaming_profile_summary(&profile) {
+        Ok(summary) => {
+            signals.push(format!(
+                "profile rows={} loads={} bytes={} sectors={} status={} requests={} misses={} failed_loads={} pending_last={} missing_mask_max=0x{:x}",
+                summary.rows,
+                summary.max_cd_room_chunk_loads,
+                summary.max_cd_room_chunk_bytes,
+                summary.max_cd_room_chunk_sectors,
+                summary.max_cd_room_chunk_status,
+                summary.max_room_stream_requests,
+                summary.max_room_stream_misses,
+                summary.max_room_stream_failed_loads,
+                summary.last_room_stream_pending_loads,
+                summary.max_missing_mask
+            ));
+            if !summary.missing_columns.is_empty() {
+                failures.push(format!(
+                    "failure: profile is missing guard column(s): {}",
+                    summary.missing_columns.join(", ")
+                ));
+            }
+            if summary.rows == 0 {
+                failures.push("failure: profile has no guest-frame rows".to_string());
+            }
+            if summary.rows > 0 && summary.missing_columns.is_empty() {
+                if summary.max_cd_room_chunk_loads == 0 {
+                    failures
+                        .push("failure: no CD room chunk loads observed in profile".to_string());
+                }
+                if summary.max_cd_room_chunk_bytes == 0 || summary.max_cd_room_chunk_sectors == 0 {
+                    failures.push(
+                        "failure: room streaming did not report CD bytes/sectors".to_string(),
+                    );
+                }
+                if summary.max_cd_room_chunk_status != 0 {
+                    let status = summary.max_cd_room_chunk_status;
+                    let label = if status == 5 {
+                        "STATUS_CD_ERROR"
+                    } else {
+                        "nonzero status"
+                    };
+                    failures.push(format!(
+                        "failure: CD room chunk status reached {status} ({label})"
+                    ));
+                }
+                if summary.max_room_stream_failed_loads != 0 {
+                    failures.push(format!(
+                        "failure: room stream failed-load counter reached {}",
+                        summary.max_room_stream_failed_loads
+                    ));
+                }
+                if summary.max_room_stream_requests == 0 {
+                    failures.push("failure: no room stream requests observed".to_string());
+                }
+                if summary.max_missing_mask != 0 {
+                    failures.push(format!(
+                        "failure: portal/room missing mask became nonzero: 0x{:x}",
+                        summary.max_missing_mask
+                    ));
+                }
+            }
+        }
+        Err(error) => failures.push(format!("failure: {error}")),
+    }
+
+    for signal in &signals {
+        println!("{signal}");
+    }
+    if failures.is_empty() {
+        println!("streaming guard: PASS");
+        return Ok(());
+    }
+    for failure in &failures {
+        eprintln!("{failure}");
+    }
+    eprintln!("streaming guard: FAIL");
+    Err("cortex stream guard failed".to_string())
+}
+
+#[derive(Default)]
+struct StreamingProfileSummary {
+    rows: usize,
+    missing_columns: Vec<String>,
+    max_cd_room_chunk_loads: u64,
+    max_cd_room_chunk_bytes: u64,
+    max_cd_room_chunk_sectors: u64,
+    max_cd_room_chunk_status: u64,
+    max_room_stream_requests: u64,
+    max_room_stream_misses: u64,
+    max_room_stream_failed_loads: u64,
+    last_room_stream_pending_loads: u64,
+    max_missing_mask: u64,
+}
+
+fn streaming_profile_summary(path: &Path) -> Result<StreamingProfileSummary, String> {
+    let text = fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut lines = text.lines().filter(|line| !line.trim().is_empty());
+    let header = lines
+        .next()
+        .ok_or_else(|| format!("profile is empty: {}", path.display()))?;
+    let headers: Vec<&str> = header.split(',').map(str::trim).collect();
+    let required = [
+        "cd_room_chunk_loads",
+        "cd_room_chunk_bytes",
+        "cd_room_chunk_sectors",
+        "cd_room_chunk_status",
+        "room_stream_requests",
+        "room_stream_misses",
+        "room_stream_pending_loads",
+        "room_stream_failed_loads",
+        "missing_mask",
+    ];
+    let mut columns = HashMap::new();
+    let mut missing = Vec::new();
+    for name in required {
+        if let Some(index) = headers.iter().position(|header| *header == name) {
+            columns.insert(name, index);
+        } else {
+            missing.push(name.to_string());
+        }
+    }
+
+    let mut summary = StreamingProfileSummary {
+        missing_columns: missing,
+        ..StreamingProfileSummary::default()
+    };
+    for line in lines {
+        let fields: Vec<&str> = line.split(',').map(str::trim).collect();
+        summary.rows += 1;
+        summary.max_cd_room_chunk_loads = summary.max_cd_room_chunk_loads.max(csv_field_u64(
+            &fields,
+            columns.get("cd_room_chunk_loads").copied(),
+        ));
+        summary.max_cd_room_chunk_bytes = summary.max_cd_room_chunk_bytes.max(csv_field_u64(
+            &fields,
+            columns.get("cd_room_chunk_bytes").copied(),
+        ));
+        summary.max_cd_room_chunk_sectors = summary.max_cd_room_chunk_sectors.max(csv_field_u64(
+            &fields,
+            columns.get("cd_room_chunk_sectors").copied(),
+        ));
+        summary.max_cd_room_chunk_status = summary.max_cd_room_chunk_status.max(csv_field_u64(
+            &fields,
+            columns.get("cd_room_chunk_status").copied(),
+        ));
+        summary.max_room_stream_requests = summary.max_room_stream_requests.max(csv_field_u64(
+            &fields,
+            columns.get("room_stream_requests").copied(),
+        ));
+        summary.max_room_stream_misses = summary.max_room_stream_misses.max(csv_field_u64(
+            &fields,
+            columns.get("room_stream_misses").copied(),
+        ));
+        summary.max_room_stream_failed_loads = summary.max_room_stream_failed_loads.max(
+            csv_field_u64(&fields, columns.get("room_stream_failed_loads").copied()),
+        );
+        summary.last_room_stream_pending_loads =
+            csv_field_u64(&fields, columns.get("room_stream_pending_loads").copied());
+        summary.max_missing_mask = summary
+            .max_missing_mask
+            .max(csv_field_u64(&fields, columns.get("missing_mask").copied()));
+    }
+    Ok(summary)
+}
+
+fn csv_field_u64(fields: &[&str], index: Option<usize>) -> u64 {
+    index
+        .and_then(|index| fields.get(index))
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
+fn cortex_bringup_report(args: &[String]) -> Result<(), String> {
+    let mut out = Some("build/preburn/cortex_ignition_v1/BRINGUP_REPORT.md".to_string());
+    let mut preburn_dir = Some("build/preburn/cortex_ignition_v1".to_string());
+    let mut duckstation_log =
+        Some("build/duckstation-harness/cortex_ignition_v1-bios.log".to_string());
+    let mut external_dir = Some("build/external-emulator-smoke".to_string());
+    let mut fail_on_warn = false;
+    let mut i = 0usize;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--out" => {
+                i += 1;
+                out = args.get(i).cloned();
+            }
+            "--preburn-dir" => {
+                i += 1;
+                preburn_dir = args.get(i).cloned();
+            }
+            "--duckstation-log" => {
+                i += 1;
+                duckstation_log = args.get(i).cloned();
+            }
+            "--external-dir" => {
+                i += 1;
+                external_dir = args.get(i).cloned();
+            }
+            "--fail-on-warn" => {
+                fail_on_warn = true;
+            }
+            other => return Err(format!("unknown cortex-bringup-report arg `{other}`")),
+        }
+        i += 1;
+    }
+
+    let out_path = resolve_from_cwd(
+        out.as_deref()
+            .unwrap_or("build/preburn/cortex_ignition_v1/BRINGUP_REPORT.md"),
+    );
+    let preburn_dir = resolve_from_cwd(
+        preburn_dir
+            .as_deref()
+            .unwrap_or("build/preburn/cortex_ignition_v1"),
+    );
+    let duckstation_log = resolve_from_cwd(
+        duckstation_log
+            .as_deref()
+            .unwrap_or("build/duckstation-harness/cortex_ignition_v1-bios.log"),
+    );
+    let external_dir = resolve_from_cwd(
+        external_dir
+            .as_deref()
+            .unwrap_or("build/external-emulator-smoke"),
+    );
+
+    let mut report = String::new();
+    writeln!(
+        report,
+        "# Cortex Ignition V1 Bringup Report\n\n\
+         Generated from local logs. This is a data ledger, not a proof of real-hardware success: \
+         emulator rows are only as strong as the signal listed in the table.\n"
+    )
+    .map_err(|e| e.to_string())?;
+    writeln!(
+        report,
+        "## Evidence Matrix\n\n\
+         | Surface | Source | Status | Signal | Follow-up |\n\
+         | --- | --- | --- | --- | --- |"
+    )
+    .map_err(|e| e.to_string())?;
+
+    let disc_reads = read_optional_log(&preburn_dir.join("disc-reads.log"))?;
+    report_row(
+        &mut report,
+        "Disc image structure",
+        &preburn_dir.join("disc-reads.log"),
+        log_status(disc_reads.as_deref(), &["CD001", "PS-X EXE"]),
+        disc_reads
+            .as_deref()
+            .map(|text| summarize_matching_lines(text, &["CD001", "PS-X EXE"], 3))
+            .unwrap_or_else(|| "log missing".to_string()),
+        "Keep this as the first burn gate: bad SYSTEM.CNF/EXE/ISO layout must fail before CD-R.",
+    )?;
+
+    let internal_hle = read_optional_log(&preburn_dir.join("internal-hle.log"))?;
+    report_row(
+        &mut report,
+        "PSoXide internal boot/render",
+        &preburn_dir.join("internal-hle.log"),
+        log_status(
+            internal_hle.as_deref(),
+            &["display_fnv1a_64", "vram_fnv1a_64"],
+        ),
+        internal_hle
+            .as_deref()
+            .map(|text| {
+                summarize_matching_lines(text, &["display_fnv1a_64", "vram_fnv1a_64", "pc="], 4)
+            })
+            .unwrap_or_else(|| "log missing".to_string()),
+        "Pin these hashes when a hardware-visible checkpoint changes unexpectedly.",
+    )?;
+
+    let bios_cdrom = read_optional_log(&preburn_dir.join("bios-cdrom-probe.log"))?;
+    report_row(
+        &mut report,
+        "BIOS CD-ROM command flow",
+        &preburn_dir.join("bios-cdrom-probe.log"),
+        log_status(bios_cdrom.as_deref(), &["ReadTOC", "ReadN", "Pause"]),
+        bios_cdrom
+            .as_deref()
+            .map(|text| {
+                if text.contains("skip BIOS CD-ROM probe:") {
+                    summarize_matching_lines(text, &["skip BIOS CD-ROM probe:"], 1)
+                } else {
+                    summarize_command_names(
+                        text,
+                        &[
+                            "Test", "GetID", "ReadTOC", "SetLoc", "SeekL", "SetMode", "ReadN",
+                            "Pause",
+                        ],
+                    )
+                }
+            })
+            .unwrap_or_else(|| "log missing".to_string()),
+        "Use command-order deltas here to improve emulator CD-ROM timing and BIOS boot behavior.",
+    )?;
+
+    let boot_flow = read_optional_log(&preburn_dir.join("boot-flow.log"))?;
+    report_row(
+        &mut report,
+        "BIOS boot flow, CD data, CD-DA",
+        &preburn_dir.join("boot-flow.log"),
+        log_status(boot_flow.as_deref(), &["fifo pops:", "audio:", "Play"]),
+        boot_flow
+            .as_deref()
+            .map(|text| {
+                if text.contains("skip BIOS boot-flow probe:") {
+                    summarize_matching_lines(text, &["skip BIOS boot-flow probe:"], 1)
+                } else {
+                    summarize_matching_lines(text, &["display:", "fifo pops:", "audio:", "Play"], 5)
+                }
+            })
+            .unwrap_or_else(|| "log missing".to_string()),
+        "This is the closest local proxy for the real CD path; failures should become emulator or engine fixes.",
+    )?;
+
+    let cdda = read_optional_log(&preburn_dir.join("cdda-probe.log"))?;
+    report_row(
+        &mut report,
+        "CD-DA audio probe",
+        &preburn_dir.join("cdda-probe.log"),
+        log_status(cdda.as_deref(), &["Nonzero:", "Peak:", "Play="]),
+        cdda.as_deref()
+            .map(|text| summarize_matching_lines(text, &["Nonzero:", "Peak:", "CD CMDS:"], 4))
+            .unwrap_or_else(|| "log missing".to_string()),
+        "Keep CD-DA and streamed data ownership regressions visible; they are central to the hardware issue.",
+    )?;
+
+    let streaming_guard = read_optional_log(&preburn_dir.join("streaming-guard.log"))?;
+    report_row(
+        &mut report,
+        "CD-DA + room streaming guard",
+        &preburn_dir.join("streaming-guard.log"),
+        log_status(streaming_guard.as_deref(), &["streaming guard: PASS"]),
+        streaming_guard
+            .as_deref()
+            .map(|text| {
+                summarize_matching_lines(
+                    text,
+                    &["streaming guard:", "profile rows=", "failure:"],
+                    6,
+                )
+            })
+            .unwrap_or_else(|| "log missing".to_string()),
+        "This red gate must cover menu CD-DA and gameplay room streaming before a burn candidate is trusted.",
+    )?;
+
+    let duck = read_optional_log(&duckstation_log)?;
+    let duck_markers = [
+        "psx-rt: main",
+        "editor-playtest: init ok",
+        "psx-engine: scene init ok",
+        "psx-engine: cdda setmode ok",
+        "psx-engine: cdda demute ok",
+        "psx-engine: cdda play ok",
+    ];
+    report_row(
+        &mut report,
+        "DuckStation BIOS TTY markers",
+        &duckstation_log,
+        log_status(duck.as_deref(), &duck_markers),
+        duck.as_deref()
+            .map(|text| {
+                format!(
+                    "{}/{} markers observed",
+                    count_matching_needles(text, &duck_markers),
+                    duck_markers.len()
+                )
+            })
+            .unwrap_or_else(|| "log missing".to_string()),
+        "TTY markers are semantic assertions; keep adding markers for real-CD stop points.",
+    )?;
+
+    external_report_row(
+        &mut report,
+        "Mednafen BIOS/TOC smoke",
+        &external_dir.join("cortex_ignition_v1-mednafen.log"),
+        &["Using module: psx", "Region:"],
+        &[],
+        "OBSERVED",
+        "BIOS core selection and disc TOC are visible, but there is still no semantic boot-progress assertion.",
+    )?;
+    external_report_row(
+        &mut report,
+        "RetroArch launch smoke",
+        &external_dir.join("cortex_ignition_v1-retroarch.log"),
+        &["[INFO]", "Audio"],
+        &["Firmware is missing", "Failed to load content"],
+        "OBSERVED",
+        "A missing firmware warning invalidates the signal; configure BIOS before using this row as coverage.",
+    )?;
+    let retroarch_screenshot = external_dir.join("cortex_ignition_v1-retroarch.png");
+    report_row(
+        &mut report,
+        "RetroArch frame screenshot",
+        &retroarch_screenshot,
+        png_file_status(&retroarch_screenshot),
+        png_file_signal(&retroarch_screenshot),
+        "Frame capture proves the core advanced far enough to render a host-side image; pin hashes later if this becomes stable.",
+    )?;
+    external_report_row(
+        &mut report,
+        "ares TOC smoke",
+        &external_dir.join("cortex_ignition_v1-ares.log"),
+        &["session", "track01", "track02"],
+        &[],
+        "OBSERVED",
+        "ares currently gives TOC/process-liveness coverage, not boot-progress assertions.",
+    )?;
+
+    writeln!(
+        report,
+        "\n## Hardware Finding Rule\n\n\
+         Every real-CD observation should land in one of three places:\n\n\
+         - a `hardware-boot-visual` checkpoint or text label when the finding is visible on a TV;\n\
+         - a preburn/emulator assertion when the finding is reproducible without hardware;\n\
+         - a tracked emulator, engine, or SDK fix when the finding explains a behavioral gap.\n\n\
+         Record real CD-R observations in `docs/hardware-burn-ledger.md` and decode \
+         color/text stops with `docs/hardware-visual-checkpoints.md`. \
+         The current visible checkpoint sources are `engine/crates/psx-engine/src/app.rs` and \
+         `engine/crates/psx-engine/src/game_app.rs`. If the next CD stops on a color/text code, \
+         preserve that code here and convert it into a named gate before burning again.\n"
+    )
+    .map_err(|e| e.to_string())?;
+    writeln!(
+        report,
+        "## Focused Probe Routing\n\n\
+         Use `docs/cortex-ignition-v1-focused-probes.md` when hardware and emulators disagree. \
+         Active red rows should route to one narrow owner at a time: CD-ROM IRQ/data timing, \
+         CD-DA/data arbitration, SIO/pad timing, GPU display area, or engine/SDK disc layout.\n"
+    )
+    .map_err(|e| e.to_string())?;
+
+    if let Some(parent) = out_path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    }
+    fs::write(&out_path, report).map_err(|e| format!("{}: {e}", out_path.display()))?;
+    println!("wrote {}", relative_to_root(&out_path));
+    if fail_on_warn {
+        let text =
+            fs::read_to_string(&out_path).map_err(|e| format!("{}: {e}", out_path.display()))?;
+        if text.contains("| WARN |") || text.contains("| MISSING |") {
+            return Err(format!(
+                "bringup report contains WARN/MISSING rows: {}",
+                relative_to_root(&out_path)
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn read_optional_log(path: &Path) -> Result<Option<String>, String> {
+    match fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("{}: {error}", path.display())),
+    }
+}
+
+fn png_file_status(path: &Path) -> &'static str {
+    match fs::read(path) {
+        Ok(bytes) if bytes.starts_with(b"\x89PNG\r\n\x1a\n") && bytes.len() > 8 => "PASS",
+        Ok(_) => "WARN",
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => "MISSING",
+        Err(_) => "WARN",
+    }
+}
+
+fn png_file_signal(path: &Path) -> String {
+    match fs::read(path) {
+        Ok(bytes) if bytes.starts_with(b"\x89PNG\r\n\x1a\n") && bytes.len() > 8 => {
+            format!("valid PNG, {} bytes", bytes.len())
+        }
+        Ok(bytes) => format!("not a valid PNG, {} bytes", bytes.len()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => "file missing".to_string(),
+        Err(error) => format!("read error: {error}"),
+    }
+}
+
+fn log_status(text: Option<&str>, required: &[&str]) -> &'static str {
+    match text {
+        None => "MISSING",
+        Some(text) if required.iter().all(|needle| text.contains(needle)) => "PASS",
+        Some(_) => "WARN",
+    }
+}
+
+fn external_report_row(
+    report: &mut String,
+    surface: &str,
+    path: &Path,
+    positive: &[&str],
+    negative: &[&str],
+    success_status: &'static str,
+    follow_up: &str,
+) -> Result<(), String> {
+    let text = read_optional_log(path)?;
+    let status = match text.as_deref() {
+        None => "MISSING",
+        Some(text) if negative.iter().any(|needle| text.contains(needle)) => "WARN",
+        Some(text) if positive.iter().all(|needle| text.contains(needle)) => success_status,
+        Some(_) => "WARN",
+    };
+    let signal = text
+        .as_deref()
+        .map(|text| {
+            if negative.iter().any(|needle| text.contains(needle)) {
+                summarize_matching_lines(text, negative, 5)
+            } else {
+                summarize_matching_lines(text, positive, 5)
+            }
+        })
+        .unwrap_or_else(|| "log missing".to_string());
+    report_row(report, surface, path, status, signal, follow_up)
+}
+
+fn report_row(
+    report: &mut String,
+    surface: &str,
+    path: &Path,
+    status: &str,
+    signal: String,
+    follow_up: &str,
+) -> Result<(), String> {
+    writeln!(
+        report,
+        "| {} | `{}` | {} | {} | {} |",
+        markdown_cell(surface),
+        markdown_cell(&relative_to_root(path)),
+        markdown_cell(status),
+        markdown_cell(&signal),
+        markdown_cell(follow_up)
+    )
+    .map_err(|e| e.to_string())
+}
+
+fn markdown_cell(value: &str) -> String {
+    value
+        .replace('|', "\\|")
+        .replace('\n', " ")
+        .trim()
+        .to_string()
+}
+
+fn summarize_matching_lines(text: &str, needles: &[&str], max_lines: usize) -> String {
+    let mut lines = Vec::new();
+    for line in text.lines() {
+        if needles
+            .iter()
+            .any(|needle| !needle.is_empty() && line.contains(needle))
+        {
+            lines.push(truncate_middle(line.trim(), 120));
+            if lines.len() == max_lines {
+                break;
+            }
+        }
+    }
+    if lines.is_empty() {
+        "no matching signal lines".to_string()
+    } else {
+        lines.join("; ")
+    }
+}
+
+fn summarize_command_names(text: &str, names: &[&str]) -> String {
+    let found: Vec<_> = names
+        .iter()
+        .filter(|name| text.contains(**name))
+        .copied()
+        .collect();
+    if found.is_empty() {
+        "no command names found".to_string()
+    } else {
+        found.join(", ")
+    }
+}
+
+fn count_matching_needles(text: &str, needles: &[&str]) -> usize {
+    needles
+        .iter()
+        .filter(|needle| text.contains(**needle))
+        .count()
 }
 
 fn mednafen_command(cue: &Path, bios: Option<&str>) -> Result<Command, String> {
@@ -895,13 +1654,79 @@ fn mednafen_command(cue: &Path, bios: Option<&str>) -> Result<Command, String> {
     Ok(command)
 }
 
-fn retroarch_command(cue: &Path) -> Result<Command, String> {
+fn retroarch_command(
+    cue: &Path,
+    bios: Option<&str>,
+    screenshot: Option<&Path>,
+    screenshot_frames: u64,
+) -> Result<Command, String> {
     let binary = discover_retroarch(None)?;
     let core = find_retroarch_psx_core().ok_or(
         "RetroArch found, but no PSX libretro core found. Set RETROARCH_PSX_CORE=/path/to/core.",
     )?;
     let mut command = Command::new(binary);
-    command.arg("--verbose").arg("-L").arg(core).arg(cue);
+    command.arg("--verbose");
+    if let Some(config) = retroarch_bios_append_config(bios)? {
+        command.arg(format!("--appendconfig={}", config.display()));
+    }
+    if let Some(screenshot) = screenshot {
+        command
+            .arg(format!("--max-frames={screenshot_frames}"))
+            .arg("--max-frames-ss")
+            .arg(format!("--max-frames-ss-path={}", screenshot.display()));
+    }
+    command.arg("-L").arg(core).arg(cue);
+    Ok(command)
+}
+
+fn retroarch_bios_append_config(bios: Option<&str>) -> Result<Option<PathBuf>, String> {
+    let Some(bios) = bios.filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    let bios = resolve_from_cwd(bios);
+    let system_dir = if bios.is_dir() {
+        bios
+    } else if bios.is_file() {
+        bios.parent()
+            .ok_or_else(|| format!("BIOS has no parent directory: {}", bios.display()))?
+            .to_path_buf()
+    } else {
+        return Ok(None);
+    };
+    let config = repo_root().join("build/external-emulator-smoke/retroarch-system.cfg");
+    if let Some(parent) = config.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    }
+    let system_dir = retroarch_config_string(&system_dir.to_string_lossy());
+    fs::write(&config, format!("system_directory = {system_dir}\n"))
+        .map_err(|e| format!("{}: {e}", config.display()))?;
+    Ok(Some(config))
+}
+
+fn retroarch_config_string(value: &str) -> String {
+    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{escaped}\"")
+}
+
+fn ares_command(cue: &Path, bios: Option<&str>) -> Result<Command, String> {
+    let binary = discover_ares(None)?;
+    let mut command = Command::new(binary);
+    command
+        .arg("--system")
+        .arg("PlayStation")
+        .arg("--no-file-prompt");
+    if let Some(bios) = bios.filter(|s| !s.is_empty()) {
+        let bios = resolve_from_cwd(bios);
+        if bios.is_file() {
+            let bios = bios.to_string_lossy().to_string();
+            for region in ["BIOS.US", "BIOS.Japan", "BIOS.Europe"] {
+                command
+                    .arg("--setting")
+                    .arg(format!("PlayStation/Firmware/{region}={bios}"));
+            }
+        }
+    }
+    command.arg(cue);
     Ok(command)
 }
 
