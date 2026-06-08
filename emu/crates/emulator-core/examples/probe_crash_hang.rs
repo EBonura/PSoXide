@@ -29,11 +29,8 @@ fn main() {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(50_000_000);
-    let bios_path = std::env::var("PSOXIDE_BIOS")
-        .unwrap_or_else(|_| "bios/SCPH1001.BIN".into());
-    let disc_path = std::env::var("PSOXIDE_DISC").unwrap_or_else(|_| {
-        "<rom-path>".into()
-    });
+    let bios_path = std::env::var("PSOXIDE_BIOS").unwrap_or_else(|_| "bios/SCPH1001.BIN".into());
+    let disc_path = std::env::var("PSOXIDE_DISC").unwrap_or_else(|_| "<rom-path>".into());
     let held_buttons = std::env::var("PSOXIDE_PAD1")
         .ok()
         .and_then(|s| parse_u16_mask(&s))

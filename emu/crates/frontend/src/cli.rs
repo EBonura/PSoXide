@@ -158,6 +158,11 @@ pub struct LaunchArgs {
     /// emitted guest frame-begin marker.
     #[arg(long)]
     pub input_tape: Option<PathBuf>,
+    /// Press pad-1 button masks on the headless route clock. Format:
+    /// `<mask>@<tick>+<frames>`, comma-separated, e.g.
+    /// `0x4000@45+12,0x4000@80+16`.
+    #[arg(long)]
+    pub pad_pulses: Option<String>,
     /// Treat an authored disc as an embedded editor Play disc and boot it
     /// through the same no-BIOS HLE path used by the editor viewport.
     #[arg(long)]
@@ -504,16 +509,30 @@ fn run_headless_launch(
     emit_summary: bool,
 ) -> Result<HeadlessLaunchResult, String> {
     let settings = Settings::load(&paths.settings_file()).unwrap_or_default();
+    let pad_pulses = args
+        .pad_pulses
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .map(parse_pad_pulses)
+        .transpose()?
+        .unwrap_or_default();
+    let has_pad_pulses = !pad_pulses.is_empty();
     if args.sweep && (args.input_tape.is_some() || args.hold_forward || args.hold_run) {
         return Err(
             "--sweep cannot be combined with --input-tape, --hold-forward, or --hold-run"
                 .to_string(),
         );
     }
+    if args.sweep && has_pad_pulses {
+        return Err("--sweep cannot be combined with --pad-pulses".to_string());
+    }
     if args.input_tape.is_some() && (args.hold_forward || args.hold_run) {
         return Err(
             "--input-tape cannot be combined with --hold-forward or --hold-run".to_string(),
         );
+    }
+    if args.input_tape.is_some() && has_pad_pulses {
+        return Err("--input-tape cannot be combined with --pad-pulses".to_string());
     }
 
     // Resolve `path`: direct flag or lookup by game-id.
@@ -673,12 +692,12 @@ fn run_headless_launch(
         }
     };
 
+    let mut held_button_mask = 0u16;
     if args.hold_forward || args.hold_run {
-        let mut buttons = ButtonState::NONE;
         if args.hold_run {
-            buttons.press(button::CIRCLE);
+            held_button_mask |= button::CIRCLE;
         }
-        bus.set_port1_buttons(buttons);
+        bus.set_port1_buttons(ButtonState::from_bits(held_button_mask));
         if args.hold_forward {
             bus.set_port1_sticks(0x80, 0x80, 0x80, 0x00);
         }
@@ -691,22 +710,31 @@ fn run_headless_launch(
         bus.set_port1_sticks(rx, ry, lx, ly);
     }
     let mut sweep_frame = 0u64;
-    // Input-tape replay clock. The editor records/replays exactly one tape
-    // sample per `app::step_one_frame` tick -- a `vblank_period` cycle budget
-    // (capped at `run_steps_per_frame` instructions). It does NOT key the tape
-    // to `frames_seen` (guest FrameBegin events), which stall during loading
-    // while the editor keeps ticking. Mirror that tick here so a headless
-    // replay reproduces the editor frame-for-frame; keying off `frames_seen`
-    // (as this loop used to) desyncs the whole run after the load and, at
-    // camera-collision-sensitive spots, collapses the camera onto the player.
-    const TAPE_RUN_STEPS_PER_FRAME: u64 = 1_000_000; // matches AppState default
-    let tape_vblank_period = bus.vblank_period().max(1);
-    let mut tape_tick_deadline = bus.cycles().saturating_add(tape_vblank_period);
-    let mut tape_tick_steps = 0u64;
-    let mut tape_ticks = 0u64;
+    // Headless route clock. The editor records/replays exactly one tape sample
+    // per `app::step_one_frame` tick -- a `vblank_period` cycle budget (capped
+    // at `run_steps_per_frame` instructions). It does NOT key scripted input to
+    // `frames_seen` (guest FrameBegin events), which stall during loading while
+    // the editor keeps ticking. Mirror that tick here so a headless replay or
+    // `--pad-pulses` route reproduces the editor frame-for-frame; keying off
+    // `frames_seen` desyncs the whole run after the load.
+    const ROUTE_RUN_STEPS_PER_FRAME: u64 = 1_000_000; // matches AppState default
+    let route_vblank_period = bus.vblank_period().max(1);
+    let mut route_tick_deadline = bus.cycles().saturating_add(route_vblank_period);
+    let mut route_tick_steps = 0u64;
+    let mut route_ticks = 0u64;
     let mut tape_cursor = 0usize;
     if let Some(samples) = tape_samples.as_ref() {
         samples[tape_cursor].apply_to_bus(&mut bus);
+    }
+    let mut current_pulsed_button_mask = None;
+    if has_pad_pulses {
+        sync_pad_pulses(
+            &mut bus,
+            held_button_mask,
+            &pad_pulses,
+            route_ticks,
+            &mut current_pulsed_button_mask,
+        );
     }
     let collect_profile_events = args.dump_guest_profile || args.profile_log.is_some();
     let mut profile_summary = args
@@ -756,20 +784,29 @@ fn run_headless_launch(
             }
         }
         let current_guest_frames = bus.telemetry.frames_seen();
-        if let Some(samples) = tape_samples.as_ref() {
-            // Advance on the editor's tick clock (see setup above), not on
-            // `frames_seen`: one sample per vblank-period cycle budget, capped
-            // at the same instruction budget `step_one_frame` uses.
-            tape_tick_steps += 1;
-            if bus.cycles() >= tape_tick_deadline || tape_tick_steps >= TAPE_RUN_STEPS_PER_FRAME {
-                tape_tick_deadline = bus.cycles().saturating_add(tape_vblank_period);
-                tape_tick_steps = 0;
-                tape_ticks += 1;
-                let cursor = (tape_ticks as usize).min(samples.len().saturating_sub(1));
+        // Advance on the editor's tick clock (see setup above), not on
+        // `frames_seen`: one sample/pulse window per vblank-period cycle
+        // budget, capped at the same instruction budget `step_one_frame` uses.
+        route_tick_steps += 1;
+        if bus.cycles() >= route_tick_deadline || route_tick_steps >= ROUTE_RUN_STEPS_PER_FRAME {
+            route_tick_deadline = bus.cycles().saturating_add(route_vblank_period);
+            route_tick_steps = 0;
+            route_ticks += 1;
+            if let Some(samples) = tape_samples.as_ref() {
+                let cursor = (route_ticks as usize).min(samples.len().saturating_sub(1));
                 if cursor != tape_cursor {
                     tape_cursor = cursor;
                     samples[tape_cursor].apply_to_bus(&mut bus);
                 }
+            }
+            if has_pad_pulses {
+                sync_pad_pulses(
+                    &mut bus,
+                    held_button_mask,
+                    &pad_pulses,
+                    route_ticks,
+                    &mut current_pulsed_button_mask,
+                );
             }
         }
         if args.sweep && current_guest_frames != sweep_frame {
@@ -832,7 +869,7 @@ fn run_headless_launch(
             // `frames_seen`; otherwise `--guest-frames N` stops at the wrong
             // moment now that the tape advances on the vblank tick.
             let reached = if tape_samples.is_some() {
-                tape_ticks >= target
+                route_ticks >= target
             } else {
                 bus.telemetry.frames_seen() >= target
             };
@@ -1496,6 +1533,7 @@ fn validation_launch_args(
         guest_frames: checkpoint.stop.guest_frames,
         guest_visual_frames: checkpoint.stop.guest_visual_frames,
         input_tape,
+        pad_pulses: None,
         embedded_playtest: artifact.embedded_playtest,
         bios_boot: artifact.bios_boot,
         dump_hash: false,
@@ -1564,6 +1602,88 @@ fn cli_repo_root() -> PathBuf {
 fn attach_headless_playtest_pad(bus: &mut Bus) {
     bus.attach_digital_pad_port1();
     let _ = bus.force_port1_analog_mode();
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+struct PadPulse {
+    mask: u16,
+    start_tick: u64,
+    frames: u64,
+}
+
+fn parse_pad_pulses(text: &str) -> Result<Vec<PadPulse>, String> {
+    let mut pulses = Vec::new();
+    for entry in text.split(',') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        pulses.push(parse_pad_pulse(entry)?);
+    }
+    Ok(pulses)
+}
+
+fn parse_pad_pulse(text: &str) -> Result<PadPulse, String> {
+    let (mask_text, rest) = text
+        .split_once('@')
+        .ok_or_else(|| format!("invalid pad pulse `{text}`: expected <mask>@<tick>+<frames>"))?;
+    let mask =
+        parse_u16_mask(mask_text).ok_or_else(|| format!("invalid pad pulse mask `{mask_text}`"))?;
+    let (start_text, frames_text) = match rest.split_once('+') {
+        Some((start, frames)) => (start.trim(), frames.trim()),
+        None => (rest.trim(), "1"),
+    };
+    let start_tick = start_text
+        .parse::<u64>()
+        .map_err(|_| format!("invalid pad pulse tick `{start_text}`"))?;
+    let frames = frames_text
+        .parse::<u64>()
+        .map_err(|_| format!("invalid pad pulse frame count `{frames_text}`"))?;
+    if frames == 0 {
+        return Err(format!(
+            "invalid pad pulse `{text}`: frame count must be > 0"
+        ));
+    }
+    Ok(PadPulse {
+        mask,
+        start_tick,
+        frames,
+    })
+}
+
+fn parse_u16_mask(text: &str) -> Option<u16> {
+    let s = text.trim();
+    if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        u16::from_str_radix(hex, 16).ok()
+    } else {
+        s.parse::<u16>().ok()
+    }
+}
+
+fn active_pad_pulse_mask(pulses: &[PadPulse], route_tick: u64) -> u16 {
+    let mut mask = 0;
+    for pulse in pulses {
+        let end_tick = pulse.start_tick.saturating_add(pulse.frames);
+        if route_tick >= pulse.start_tick && route_tick < end_tick {
+            mask |= pulse.mask;
+        }
+    }
+    mask
+}
+
+fn sync_pad_pulses(
+    bus: &mut Bus,
+    held_button_mask: u16,
+    pulses: &[PadPulse],
+    route_tick: u64,
+    current_mask: &mut Option<u16>,
+) {
+    let next_mask = held_button_mask | active_pad_pulse_mask(pulses, route_tick);
+    if current_mask.is_some_and(|mask| mask == next_mask) {
+        return;
+    }
+    bus.set_port1_buttons(ButtonState::from_bits(next_mask));
+    *current_mask = Some(next_mask);
 }
 
 /// Scripted DualShock state for `--sweep`, keyed on guest frame. Alternates
@@ -1788,11 +1908,13 @@ const PROFILE_LOG_HEADER: &[&str] = &[
     "cd_room_chunk_loads",
     "cd_room_chunk_bytes",
     "cd_room_chunk_sectors",
+    "cd_room_chunk_status",
     "room_stream_requests",
     "room_stream_misses",
     "room_stream_prefetch_requests",
     "room_stream_pending_loads",
     "room_stream_evicts",
+    "room_stream_failed_loads",
     "room_stream_resident_slots",
     "room_stream_loading_mask",
     "room_active_chunks",
@@ -2003,11 +2125,13 @@ impl GuestProfileLog {
         push!(counter_total(&summary, c::CD_ROOM_CHUNK_LOADS));
         push!(counter_total(&summary, c::CD_ROOM_CHUNK_BYTES));
         push!(counter_total(&summary, c::CD_ROOM_CHUNK_SECTORS));
+        push!(counter_latest(c::CD_ROOM_CHUNK_STATUS));
         push!(counter_total(&summary, c::ROOM_STREAM_REQUESTS));
         push!(counter_total(&summary, c::ROOM_STREAM_MISSES));
         push!(counter_total(&summary, c::ROOM_STREAM_PREFETCH_REQUESTS));
         push!(counter_total(&summary, c::ROOM_STREAM_PENDING_LOADS));
         push!(counter_total(&summary, c::ROOM_STREAM_EVICTIONS));
+        push!(counter_total(&summary, c::ROOM_STREAM_FAILED_LOADS));
         push!(counter_latest(c::ROOM_STREAM_RESIDENT_SLOTS));
         push!(counter_latest(c::ROOM_STREAM_LOADING_MASK_LO));
         push!(counter_total(&summary, c::ROOM_ACTIVE_CHUNKS));

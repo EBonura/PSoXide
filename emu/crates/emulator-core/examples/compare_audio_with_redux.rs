@@ -23,8 +23,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 const DEFAULT_BIOS: &str = "bios/SCPH1001.BIN";
-const DEFAULT_DISC: &str =
-    "<rom-path>";
+const DEFAULT_DISC: &str = "<rom-path>";
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const SAMPLE_RATE: u32 = 44_100;
 const SPUCNT_UNMUTE: u16 = 1 << 14;
@@ -83,7 +82,13 @@ fn main() {
             first_unmute_cycle: None,
         }
     } else {
-        capture_redux_audio(steps, chunk_steps, &bios_path, disc_path.as_deref(), &redux_raw)
+        capture_redux_audio(
+            steps,
+            chunk_steps,
+            &bios_path,
+            disc_path.as_deref(),
+            &redux_raw,
+        )
     };
     write_wav(&redux_wav, &redux_audio.samples).expect("write redux wav");
 
@@ -225,7 +230,11 @@ fn capture_our_audio(steps: u64, bios_path: &Path, disc_path: Option<&Path>) -> 
         let mut dout = format!("P6\n{dw} {dh}\n255\n").into_bytes();
         let byte = |off: usize| -> u8 {
             let hw = vram.get(off / 2).copied().unwrap_or(0);
-            if off & 1 == 0 { (hw & 0xFF) as u8 } else { (hw >> 8) as u8 }
+            if off & 1 == 0 {
+                (hw & 0xFF) as u8
+            } else {
+                (hw >> 8) as u8
+            }
         };
         for row in 0..dh {
             let vy = dy + row;
@@ -238,7 +247,11 @@ fn capture_our_audio(steps: u64, bios_path: &Path, disc_path: Option<&Path>) -> 
                     dout.push(byte(base + 2));
                 } else {
                     let vx = dx + col;
-                    let px = if vx < w && vy < h { vram[vy * w + vx] } else { 0 };
+                    let px = if vx < w && vy < h {
+                        vram[vy * w + vx]
+                    } else {
+                        0
+                    };
                     dout.push(((px & 0x1F) << 3) as u8);
                     dout.push((((px >> 5) & 0x1F) << 3) as u8);
                     dout.push((((px >> 10) & 0x1F) << 3) as u8);
@@ -246,7 +259,10 @@ fn capture_our_audio(steps: u64, bios_path: &Path, disc_path: Option<&Path>) -> 
             }
         }
         std::fs::write(&dpath, &dout).expect("write display ppm");
-        eprintln!("[ours] display {dw}x{dh} @({dx},{dy}) bpp24={} -> {dpath}", da.bpp24);
+        eprintln!(
+            "[ours] display {dw}x{dh} @({dx},{dy}) bpp24={} -> {dpath}",
+            da.bpp24
+        );
 
         // Hang diagnostic: where is the CPU spinning, and what is the CD doing?
         let mut pcs: Vec<(u32, u32)> = pc_hist.iter().map(|(&p, &c)| (p, c)).collect();
@@ -279,7 +295,10 @@ fn capture_our_audio(steps: u64, bios_path: &Path, disc_path: Option<&Path>) -> 
         );
         let istat = bus.irq_mut().stat();
         let imask = bus.irq_mut().mask();
-        eprintln!("[ours] global IRQ: I_STAT={istat:08x} I_MASK={imask:08x} (active={:08x})", istat & imask);
+        eprintln!(
+            "[ours] global IRQ: I_STAT={istat:08x} I_MASK={imask:08x} (active={:08x})",
+            istat & imask
+        );
         let t2 = &bus.timers().timers[2];
         eprintln!(
             "[ours] timer2: counter={} mode={:04x} target={} fires={} (irq_on_tgt={} repeat={} reset_at_tgt={} src={})",
@@ -288,7 +307,10 @@ fn capture_our_audio(steps: u64, bios_path: &Path, disc_path: Option<&Path>) -> 
         );
         if let Ok(addr_s) = std::env::var("PSOXIDE_PEEK") {
             if let Ok(addr) = u32::from_str_radix(addr_s.trim_start_matches("0x"), 16) {
-                eprintln!("[ours] peek 0x{addr:08x} = {:08x}", bus.peek_instruction(addr).unwrap_or(0));
+                eprintln!(
+                    "[ours] peek 0x{addr:08x} = {:08x}",
+                    bus.peek_instruction(addr).unwrap_or(0)
+                );
             }
         }
         eprintln!(

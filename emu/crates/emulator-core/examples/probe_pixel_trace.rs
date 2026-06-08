@@ -48,8 +48,7 @@ fn main() {
         let disc = disc_support::load_disc_path(&path).expect("disc");
         bus.cdrom.insert_disc(Some(disc));
     } else {
-        let fallback =
-            "<rom-path>";
+        let fallback = "<rom-path>";
         let disc = disc_support::load_disc_path(std::path::Path::new(fallback)).expect("disc");
         bus.cdrom.insert_disc(Some(disc));
     }

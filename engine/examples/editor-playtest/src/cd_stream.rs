@@ -657,10 +657,9 @@ pub(super) fn read_chunk_blocking(
             result.status = status;
             return result;
         }
-        if let Err(status) = start_cd_read_at_lba(
-            pack_lba.saturating_add(entry.sector_offset),
-            &mut polls,
-        ) {
+        if let Err(status) =
+            start_cd_read_at_lba(pack_lba.saturating_add(entry.sector_offset), &mut polls)
+        {
             result.status = status;
             cleanup_read_stream(&mut polls);
             return result;
@@ -700,6 +699,148 @@ pub(super) fn read_chunk_blocking(
             }
         }
         result
+    }
+}
+
+/// One UI.PAK chunk to read in a contiguous batch: where it sits on disc
+/// (`sector_offset` / `sector_count` within UI.PAK) and where its unpadded
+/// bytes go in the caller's flat cache (`cache_word_start`, in u32 words).
+#[derive(Copy, Clone)]
+pub(super) struct UiChunkPlan {
+    pub(super) sector_offset: u32,
+    pub(super) sector_count: u32,
+    pub(super) byte_size: usize,
+    pub(super) checksum: u32,
+    pub(super) cache_word_start: usize,
+}
+
+impl UiChunkPlan {
+    pub(super) const EMPTY: Self = Self {
+        sector_offset: 0,
+        sector_count: 0,
+        byte_size: 0,
+        checksum: 0,
+        cache_word_start: 0,
+    };
+}
+
+/// Read several CONTIGUOUS UI.PAK chunks in a SINGLE ReadN session: one
+/// SetMode + SetLoc + ReadN at the first chunk, stream every chunk's sectors
+/// back-to-back (the drive reads sequentially through the run), and one Pause
+/// at the end. This replaces N separate `SetLoc + ReadN + Pause` cycles -- and
+/// each of those forces a real CD-R drive to stop, seek, and re-acquire the
+/// stream, which is the menu's HUGE boot delay on hardware (cheap only in the
+/// emulator, which has no seek/spin model). `plans` must be in ascending
+/// `sector_offset` (disc) order; any gap between chunks is read and discarded
+/// so the stream stays aligned. Each chunk's status lands in `out_status[i]`.
+#[cfg(target_arch = "mips")]
+pub(super) fn read_chunks_contiguous(
+    pack_lba: u32,
+    plans: &[UiChunkPlan],
+    cache: &mut [u32],
+    out_status: &mut [u32],
+) {
+    for status in out_status.iter_mut() {
+        *status = STATUS_OK;
+    }
+    if plans.is_empty() {
+        return;
+    }
+    unsafe {
+        let mut polls = 0u32;
+        if let Err(status) = prepare_cd_read(&mut polls) {
+            for s in out_status.iter_mut() {
+                *s = status;
+            }
+            return;
+        }
+        let first = plans[0].sector_offset;
+        if let Err(status) = start_cd_read_at_lba(pack_lba.saturating_add(first), &mut polls) {
+            for s in out_status.iter_mut() {
+                *s = status;
+            }
+            cleanup_read_stream(&mut polls);
+            return;
+        }
+
+        let buffer = core::ptr::addr_of_mut!(CD_STREAM_SECTOR_BUFFER) as *mut u32;
+        let cache_ptr = cache.as_mut_ptr() as *mut u8;
+        let cache_bytes = cache.len().saturating_mul(4);
+        let mut cur = first;
+        let mut aborted = false;
+        let mut i = 0usize;
+        while i < plans.len() {
+            if aborted {
+                out_status[i] = STATUS_DATA_TIMEOUT;
+                i += 1;
+                continue;
+            }
+            let plan = plans[i];
+            // Read and discard any gap sectors before this chunk so the
+            // single continuous ReadN stays aligned to chunk boundaries.
+            while cur < plan.sector_offset {
+                if read_one_sector_blocking(buffer, &mut polls).is_err() {
+                    aborted = true;
+                    break;
+                }
+                cur = cur.saturating_add(1);
+            }
+            if aborted {
+                out_status[i] = STATUS_DATA_TIMEOUT;
+                i += 1;
+                continue;
+            }
+            let dst_base = plan.cache_word_start.saturating_mul(4);
+            let mut checksum = FNV_OFFSET;
+            let mut bytes = 0usize;
+            let mut sector = 0u32;
+            while sector < plan.sector_count {
+                if let Err(status) = read_one_sector_blocking(buffer, &mut polls) {
+                    out_status[i] = status;
+                    aborted = true;
+                    break;
+                }
+                cur = cur.saturating_add(1);
+                let off = (sector as usize).saturating_mul(SECTOR_BYTES);
+                let remaining = plan.byte_size.saturating_sub(off);
+                let copy_len = remaining.min(SECTOR_BYTES);
+                let dst_off = dst_base.saturating_add(off);
+                if copy_len > 0 && dst_off.saturating_add(copy_len) <= cache_bytes {
+                    core::ptr::copy_nonoverlapping(
+                        buffer as *const u8,
+                        cache_ptr.add(dst_off),
+                        copy_len,
+                    );
+                    checksum = checksum_bytes(buffer as *const u8, copy_len, checksum);
+                    bytes = bytes.saturating_add(copy_len);
+                }
+                sector += 1;
+            }
+            if !aborted {
+                if bytes != plan.byte_size {
+                    out_status[i] = STATUS_DATA_TIMEOUT;
+                } else if checksum != plan.checksum {
+                    out_status[i] = STATUS_CHECKSUM_MISMATCH;
+                }
+            }
+            i += 1;
+        }
+        cleanup_read_stream(&mut polls);
+    }
+}
+
+/// Host stub: no CD hardware, so streamed UI is unsupported (matches
+/// `read_chunk_blocking`).
+#[cfg(not(target_arch = "mips"))]
+pub(super) fn read_chunks_contiguous(
+    _pack_lba: u32,
+    plans: &[UiChunkPlan],
+    _cache: &mut [u32],
+    out_status: &mut [u32],
+) {
+    let n = plans.len().min(out_status.len());
+    for status in out_status.iter_mut().take(n) {
+        *status = STATUS_UNSUPPORTED;
     }
 }
 

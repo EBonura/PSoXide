@@ -51,10 +51,8 @@ use psx_iso::Disc;
 use std::path::PathBuf;
 
 const DEFAULT_BIOS: &str = "bios/SCPH1001.BIN";
-const CRASH_DISC: &str =
-    "<rom-path>";
-const TEKKEN_DISC: &str =
-    "<rom-path>";
+const CRASH_DISC: &str = "<rom-path>";
+const TEKKEN_DISC: &str = "<rom-path>";
 
 fn bios_path() -> PathBuf {
     std::env::var("PSOXIDE_BIOS")

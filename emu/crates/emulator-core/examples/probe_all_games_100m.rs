@@ -25,38 +25,14 @@ const EXPECTED_SONY_LOGO_HASH: u64 = 0xa3ac_6881_0443_33d0;
 fn main() {
     let games: &[(&str, &str)] = &[
         ("bios_no_disc", ""),
-        (
-            "crash",
-            "<rom-path>",
-        ),
-        (
-            "tekken",
-            "<rom-path>",
-        ),
-        (
-            "gt2",
-            "<rom-path>",
-        ),
-        (
-            "mgs",
-            "<rom-path>",
-        ),
-        (
-            "re2",
-            "<rom-path>",
-        ),
-        (
-            "wipeout1",
-            "<rom-path>",
-        ),
-        (
-            "wipeout2097",
-            "<rom-path>",
-        ),
-        (
-            "wipeout3",
-            "<rom-path>",
-        ),
+        ("crash", "<rom-path>"),
+        ("tekken", "<rom-path>"),
+        ("gt2", "<rom-path>"),
+        ("mgs", "<rom-path>"),
+        ("re2", "<rom-path>"),
+        ("wipeout1", "<rom-path>"),
+        ("wipeout2097", "<rom-path>"),
+        ("wipeout3", "<rom-path>"),
     ];
 
     let bios = std::fs::read("bios/SCPH1001.BIN").expect("BIOS");

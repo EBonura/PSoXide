@@ -18,11 +18,12 @@
 	examples hello-tri hello-tri-disc hello-input hello-input-disc hello-ot hello-ot-disc \
 	hello-tex hello-tex-disc hello-gte hello-gte-disc hello-audio hello-audio-disc \
 	hello-cdda hello-cdda-disc \
+	cdda-read-contention cdda-read-contention-disc cdda-contention-diff \
 	run-tri run-input run-ot run-tex run-gte run-audio run-cdda probe-cdda-audio \
 	showcase-text showcase-text-disc run-showcase-text \
 	game-pong game-pong-disc run-game-pong \
 	game-magikaaaaaarp-pong game-magikaaaaaarp-pong-disc magikaaaaaarp-pong-spectrum run-game-magikaaaaaarp-pong probe-magikaaaaaarp-pong-audio duckstation-magikaaaaaarp-pong \
-	cortex-override-v1-project-disc cortex-override-v1-project-disc-boot-trace cortex-override-v1-hardware-diagnostic-disc cortex-override-v1-preburn-local cortex-override-v1-preburn-struct cortex-override-v1-preburn-disc-reads cortex-override-v1-preburn-internal cortex-override-v1-preburn-cdda-audio cortex-override-v1-preburn-bios-cdrom cortex-override-v1-preburn-boot-flow cortex-override-v1-emulator-inventory cortex-override-v1-external-emulators duckstation-cortex-override-v1 duckstation-cortex-override-v1-bios redux-cortex-override-v1-bios mednafen-cortex-override-v1-bios retroarch-cortex-override-v1-bios \
+	cortex-ignition-v1-project-disc cortex-ignition-v1-project-disc-boot-trace cortex-ignition-v1-hardware-diagnostic-disc cortex-ignition-v1-preburn-local cortex-ignition-v1-preburn-struct cortex-ignition-v1-preburn-disc-reads cortex-ignition-v1-preburn-internal cortex-ignition-v1-preburn-cdda-audio cortex-ignition-v1-preburn-bios-cdrom cortex-ignition-v1-preburn-boot-flow cortex-ignition-v1-preburn-streaming-guard cortex-ignition-v1-emulator-inventory cortex-ignition-v1-external-emulators cortex-ignition-v1-bringup-report cortex-ignition-v1-burn-candidate duckstation-cortex-ignition-v1 duckstation-cortex-ignition-v1-bios redux-cortex-ignition-v1-bios mednafen-cortex-ignition-v1-bios retroarch-cortex-ignition-v1-bios ares-cortex-ignition-v1-bios \
 	game-breakout game-breakout-disc run-game-breakout \
         game-invaders game-invaders-disc run-game-invaders \
         showcase-3d showcase-3d-disc run-showcase-3d \
@@ -114,20 +115,26 @@ help:
 	@echo "                      - render magikAAAAArp Pong CD-DA to a WAV + silence check"
 	@echo "    make duckstation-magikaaaaaarp-pong"
 	@echo "                      - boot magikAAAAArp Pong in DuckStation and assert TTY markers"
-	@echo "    make duckstation-cortex-override-v1"
-	@echo "                      - build cortex_override_v1's project disc and assert DuckStation TTY markers"
-	@echo "    make cortex-override-v1-hardware-diagnostic-disc"
-	@echo "                      - build cortex_override_v1 with TV-visible boot color checkpoints"
-	@echo "    make cortex-override-v1-preburn-local"
+	@echo "    make duckstation-cortex-ignition-v1"
+	@echo "                      - build cortex_ignition_v1's project disc and assert DuckStation TTY markers"
+	@echo "    make cortex-ignition-v1-hardware-diagnostic-disc"
+	@echo "                      - build cortex_ignition_v1 with TV-visible boot color checkpoints"
+	@echo "    make cortex-ignition-v1-preburn-local"
 	@echo "                      - run local structural/headless/audio/CD probes before burning"
-	@echo "    make duckstation-cortex-override-v1-bios"
-	@echo "                      - assert cortex_override_v1 through DuckStation's full BIOS/logo path"
-	@echo "    make redux-cortex-override-v1-bios"
-	@echo "                      - assert cortex_override_v1 through PCSX-Redux's BIOS disc boot"
-	@echo "    make cortex-override-v1-emulator-inventory"
+	@echo "    make cortex-ignition-v1-preburn-streaming-guard"
+	@echo "                      - fail if CD-DA plus room-streaming telemetry is absent or red"
+	@echo "    make duckstation-cortex-ignition-v1-bios"
+	@echo "                      - assert cortex_ignition_v1 through DuckStation's full BIOS/logo path"
+	@echo "    make redux-cortex-ignition-v1-bios"
+	@echo "                      - assert cortex_ignition_v1 through PCSX-Redux's BIOS disc boot"
+	@echo "    make cortex-ignition-v1-emulator-inventory"
 	@echo "                      - list locally available external PS1 emulators"
-	@echo "    make cortex-override-v1-external-emulators"
-	@echo "                      - run DuckStation/Redux plus optional Mednafen/RetroArch local gates"
+	@echo "    make cortex-ignition-v1-external-emulators"
+	@echo "                      - run DuckStation/Redux plus optional Mednafen/RetroArch/ares local gates"
+	@echo "    make cortex-ignition-v1-bringup-report"
+	@echo "                      - summarize latest cortex_ignition_v1 bringup logs"
+	@echo "    make cortex-ignition-v1-burn-candidate"
+	@echo "                      - run preburn + emulator matrix and fail on WARN/MISSING report rows"
 	@echo "    make run-showcase-text"
 	@echo "                      - build + boot the text capabilities showcase disc"
 	@echo "    make run-game-pong     - build + boot the Pong mini-game disc"
@@ -282,26 +289,38 @@ MAGIKAAAAARP_PONG_TRACK ?= assets/audio/cdda/GONCHAROV.track02.cdda
 MAGIKAAAAARP_PONG_SPECTRUM := engine/examples/game-magikaaaaaarp-pong/assets/goncharov_spectrum_16x30hz.bin
 DUCKSTATION_TIMEOUT ?= 45
 DUCKSTATION_MAGIKARP_LOG ?= build/duckstation-harness/game-magikaaaaaarp-pong.log
-DUCKSTATION_CORTEX_OVERRIDE_V1_LOG ?= build/duckstation-harness/cortex_override_v1.log
-DUCKSTATION_CORTEX_OVERRIDE_V1_BIOS_LOG ?= build/duckstation-harness/cortex_override_v1-bios.log
-MEDNAFEN_CORTEX_OVERRIDE_V1_LOG ?= build/external-emulator-smoke/cortex_override_v1-mednafen.log
-RETROARCH_CORTEX_OVERRIDE_V1_LOG ?= build/external-emulator-smoke/cortex_override_v1-retroarch.log
+DUCKSTATION_CORTEX_IGNITION_V1_LOG ?= build/duckstation-harness/cortex_ignition_v1.log
+DUCKSTATION_CORTEX_IGNITION_V1_BIOS_LOG ?= build/duckstation-harness/cortex_ignition_v1-bios.log
+MEDNAFEN_CORTEX_IGNITION_V1_LOG ?= build/external-emulator-smoke/cortex_ignition_v1-mednafen.log
+RETROARCH_CORTEX_IGNITION_V1_LOG ?= build/external-emulator-smoke/cortex_ignition_v1-retroarch.log
+RETROARCH_CORTEX_IGNITION_V1_SCREENSHOT ?= build/external-emulator-smoke/cortex_ignition_v1-retroarch.png
+RETROARCH_CORTEX_IGNITION_V1_SCREENSHOT_FRAMES ?= 360
+ARES_CORTEX_IGNITION_V1_LOG ?= build/external-emulator-smoke/cortex_ignition_v1-ares.log
 EXTERNAL_EMULATOR_SMOKE_TIMEOUT ?= 12
-REDUX_CORTEX_OVERRIDE_V1_BIOS ?= $(HOME)/Downloads/ps1 bios/SCPH1001.BIN
-REDUX_CORTEX_OVERRIDE_V1_STEPS ?= 240000000
-CORTEX_OVERRIDE_V1_PROJECT ?= editor/projects/cortex_override_v1
-CORTEX_OVERRIDE_V1_CUE ?= $(CORTEX_OVERRIDE_V1_PROJECT)/baked/cortex_override_v1.cue
-CORTEX_OVERRIDE_V1_BIN ?= $(CORTEX_OVERRIDE_V1_PROJECT)/baked/cortex_override_v1.bin
-CORTEX_OVERRIDE_V1_PREBURN_OUT ?= build/preburn/cortex_override_v1
-CORTEX_OVERRIDE_V1_PREBURN_VISUAL_FRAMES ?= 90
-CORTEX_OVERRIDE_V1_PREBURN_GUEST_FRAMES ?= 360
-CORTEX_OVERRIDE_V1_PREBURN_STEPS ?= 240000000
-CORTEX_OVERRIDE_V1_PREBURN_BIOS_STEPS ?= 120000000
-CORTEX_OVERRIDE_V1_PREBURN_BOOT_FLOW_STEPS ?= 240000000
-CORTEX_OVERRIDE_V1_PREBURN_BOOT_FLOW_PAD1 ?= 0
-CORTEX_OVERRIDE_V1_PREBURN_BOOT_FLOW_PULSES ?= 0x4000@974+25
-CORTEX_OVERRIDE_V1_PREBURN_AUDIO_SECONDS ?= 6
-CORTEX_OVERRIDE_V1_PREBURN_AUDIO_MIN_PEAK ?= 256
+REDUX_CORTEX_IGNITION_V1_BIOS ?= $(PSOXIDE_BIOS)
+REDUX_CORTEX_IGNITION_V1_STEPS ?= 240000000
+CORTEX_IGNITION_V1_PROJECT ?= editor/projects/cortex_ignition_v1
+CORTEX_IGNITION_V1_CUE ?= $(CORTEX_IGNITION_V1_PROJECT)/baked/cortex_ignition_v1.cue
+CORTEX_IGNITION_V1_BIN ?= $(CORTEX_IGNITION_V1_PROJECT)/baked/cortex_ignition_v1.bin
+CORTEX_IGNITION_V1_PREBURN_OUT ?= build/preburn/cortex_ignition_v1
+CORTEX_IGNITION_V1_PREBURN_VISUAL_FRAMES ?= 90
+CORTEX_IGNITION_V1_PREBURN_GUEST_FRAMES ?= 360
+CORTEX_IGNITION_V1_PREBURN_STEPS ?= 240000000
+CORTEX_IGNITION_V1_PREBURN_BIOS_STEPS ?= 120000000
+# Real-BIOS boot path: BIOS POST (~213M cyc) + game load + intro before the menu
+# CD-DA Play (~cyc 577M, ~step 250M). Budget must clear that, unlike the faster
+# HLE internal launch above.
+CORTEX_IGNITION_V1_PREBURN_BOOT_FLOW_STEPS ?= 340000000
+CORTEX_IGNITION_V1_PREBURN_BOOT_FLOW_PAD1 ?= 0
+CORTEX_IGNITION_V1_PREBURN_BOOT_FLOW_PULSES ?= 0x4000@974+25
+CORTEX_IGNITION_V1_PREBURN_AUDIO_SECONDS ?= 6
+CORTEX_IGNITION_V1_PREBURN_AUDIO_MIN_PEAK ?= 256
+CORTEX_IGNITION_V1_PREBURN_FEATURES ?= cd-stream-bench emulator-telemetry
+CORTEX_IGNITION_V1_PREBURN_PAD_PULSES ?= 0x4000@45+12,0x4000@80+16,0x4000@120+20
+CORTEX_IGNITION_V1_PREBURN_INTERNAL_DISC_DIR ?= $(CORTEX_IGNITION_V1_PREBURN_OUT)/internal-disc
+CORTEX_IGNITION_V1_PREBURN_INTERNAL_CUE ?= $(CORTEX_IGNITION_V1_PREBURN_INTERNAL_DISC_DIR)/cortex_ignition_v1.cue
+CORTEX_IGNITION_V1_PREBURN_INTERNAL_BIN ?= $(CORTEX_IGNITION_V1_PREBURN_INTERNAL_DISC_DIR)/cortex_ignition_v1.bin
+CORTEX_IGNITION_V1_BRINGUP_REPORT ?= $(CORTEX_IGNITION_V1_PREBURN_OUT)/BRINGUP_REPORT.md
 PSOXIDE_DEV ?= cargo run --manifest-path tools/psoxide-dev/Cargo.toml --release --
 PROFILE_DEMO3_FRAMES ?= 60
 PROFILE_DEMO3_STEPS ?= 120000000
@@ -377,6 +396,25 @@ hello-cdda-disc: hello-cdda
 		--out ../../$(EXAMPLE_OUT)/hello-cdda.bin \
 		--volume PSOXIDE \
 		--cdda-track ../../$(CDDA_DEMO_TRACK)
+
+# CD-DA + data-read contention conformance probe (see
+# docs/cortex-ignition-v1-focused-probes.md FP-004). The guest plays a
+# CD-DA track, then issues the engine's exact read path (ReadN with no
+# Pause/Stop) and records which CD-ROM IRQ the controller produces.
+cdda-read-contention:
+	cd sdk/examples/cdda-read-contention && $(SDK_EXAMPLE_CARGO_ENV) cargo build --release $(PSX_BUILD_FLAGS)
+
+cdda-read-contention-disc: cdda-read-contention
+	cd tools/mkisopsx && cargo run --release -- \
+		--exe ../../$(EXAMPLE_OUT)/cdda-read-contention.exe \
+		--out ../../$(EXAMPLE_OUT)/cdda-read-contention.bin \
+		--volume PSOXIDE \
+		--cdda-track ../../$(CDDA_DEMO_TRACK)
+
+# Run the contention guest in PSoXide (always) and PCSX-Redux (when
+# PSOXIDE_REDUX_BIN + PSOXIDE_BIOS are set) and diff the IRQ result.
+cdda-contention-diff: cdda-read-contention-disc
+	cd emu && cargo run -q -p parity-oracle --example cdda_contention_diff --release
 
 showcase-text:
 	cd engine/examples/showcase-text && $(ENGINE_EXAMPLE_CARGO_ENV) cargo build --release $(PSX_BUILD_FLAGS)
@@ -633,24 +671,24 @@ duckstation-magikaaaaaarp-pong: game-magikaaaaaarp-pong-disc
 		--timeout $(DUCKSTATION_TIMEOUT) \
 		--log $(CURDIR)/$(DUCKSTATION_MAGIKARP_LOG)
 
-cortex-override-v1-project-disc:
-	cd emu && cargo run -p frontend --release -- build-project-disc --project ../$(CORTEX_OVERRIDE_V1_PROJECT)
+cortex-ignition-v1-project-disc:
+	cd emu && cargo run -p frontend --release -- build-project-disc --project ../$(CORTEX_IGNITION_V1_PROJECT)
 
-cortex-override-v1-project-disc-boot-trace:
-	cd emu && EDITOR_PLAYTEST_FEATURES='cd-stream-bench boot-trace' cargo run -p frontend --release -- build-project-disc --project ../$(CORTEX_OVERRIDE_V1_PROJECT)
+cortex-ignition-v1-project-disc-boot-trace:
+	cd emu && EDITOR_PLAYTEST_FEATURES='cd-stream-bench boot-trace' cargo run -p frontend --release -- build-project-disc --project ../$(CORTEX_IGNITION_V1_PROJECT)
 
-cortex-override-v1-hardware-diagnostic-disc:
-	cd emu && EDITOR_PLAYTEST_CARGO_FEATURE_FLAGS='--no-default-features --features "$(EDITOR_PLAYTEST_HARDWARE_FEATURES) hardware-boot-visual"' cargo run -p frontend --release -- build-project-disc --project ../$(CORTEX_OVERRIDE_V1_PROJECT)
+cortex-ignition-v1-hardware-diagnostic-disc:
+	cd emu && EDITOR_PLAYTEST_CARGO_FEATURE_FLAGS='--no-default-features --features "$(EDITOR_PLAYTEST_HARDWARE_FEATURES) hardware-boot-visual"' cargo run -p frontend --release -- build-project-disc --project ../$(CORTEX_IGNITION_V1_PROJECT)
 
-cortex-override-v1-preburn-local: cortex-override-v1-preburn-struct cortex-override-v1-preburn-disc-reads cortex-override-v1-preburn-internal cortex-override-v1-preburn-cdda-audio cortex-override-v1-preburn-bios-cdrom cortex-override-v1-preburn-boot-flow
-	@echo "cortex_override_v1 pre-burn local checks complete -> $(CORTEX_OVERRIDE_V1_PREBURN_OUT)"
+cortex-ignition-v1-preburn-local: cortex-ignition-v1-preburn-struct cortex-ignition-v1-preburn-disc-reads cortex-ignition-v1-preburn-internal cortex-ignition-v1-preburn-cdda-audio cortex-ignition-v1-preburn-bios-cdrom cortex-ignition-v1-preburn-boot-flow cortex-ignition-v1-preburn-streaming-guard
+	@echo "cortex_ignition_v1 pre-burn local checks complete -> $(CORTEX_IGNITION_V1_PREBURN_OUT)"
 
-cortex-override-v1-preburn-struct: cortex-override-v1-project-disc
-	@mkdir -p $(CORTEX_OVERRIDE_V1_PREBURN_OUT)
+cortex-ignition-v1-preburn-struct: cortex-ignition-v1-project-disc
+	@mkdir -p $(CORTEX_IGNITION_V1_PREBURN_OUT)
 	cd emu && cargo run -p frontend --release -- preburn-check \
-		--cue "$(CORTEX_OVERRIDE_V1_CUE)" \
+		--cue "$(CORTEX_IGNITION_V1_CUE)" \
 		--exe "$(EXAMPLE_OUT)/editor-playtest.exe" \
-		--volume CORTEX_OVERRIDE_V1 \
+		--volume CORTEX_IGNITION_V1 \
 		--require-file "SYSTEM.CNF;1" \
 		--require-file "PSX.EXE;1" \
 		--require-file "WORLD.PAK;1" \
@@ -663,79 +701,112 @@ cortex-override-v1-preburn-struct: cortex-override-v1-project-disc
 		--forbid-exe-string "psx-rt:" \
 		--forbid-exe-string "editor-playtest:"
 
-cortex-override-v1-preburn-disc-reads: cortex-override-v1-project-disc
-	@mkdir -p $(CORTEX_OVERRIDE_V1_PREBURN_OUT)
-	@(cd emu && PSOXIDE_DISC="../$(CORTEX_OVERRIDE_V1_BIN)" \
-		cargo run -p emulator-core --example verify_disc_reads --release) > "$(CORTEX_OVERRIDE_V1_PREBURN_OUT)/disc-reads.log" 2>&1; \
-	status=$$?; cat "$(CORTEX_OVERRIDE_V1_PREBURN_OUT)/disc-reads.log"; exit $$status
+cortex-ignition-v1-preburn-disc-reads: cortex-ignition-v1-project-disc
+	@mkdir -p $(CORTEX_IGNITION_V1_PREBURN_OUT)
+	@(cd emu && PSOXIDE_DISC="../$(CORTEX_IGNITION_V1_BIN)" \
+		cargo run -p emulator-core --example verify_disc_reads --release) > "$(CORTEX_IGNITION_V1_PREBURN_OUT)/disc-reads.log" 2>&1; \
+	status=$$?; cat "$(CORTEX_IGNITION_V1_PREBURN_OUT)/disc-reads.log"; exit $$status
 
-cortex-override-v1-preburn-internal: cortex-override-v1-project-disc
-	@mkdir -p $(CORTEX_OVERRIDE_V1_PREBURN_OUT)
+cortex-ignition-v1-preburn-internal:
+	@mkdir -p $(CORTEX_IGNITION_V1_PREBURN_OUT) $(CORTEX_IGNITION_V1_PREBURN_INTERNAL_DISC_DIR)
+	cd emu && EDITOR_PLAYTEST_FEATURES='$(CORTEX_IGNITION_V1_PREBURN_FEATURES)' cargo run -p frontend --release -- build-project-disc --project ../$(CORTEX_IGNITION_V1_PROJECT)
+	@cp "$(CORTEX_IGNITION_V1_CUE)" "$(CORTEX_IGNITION_V1_PREBURN_INTERNAL_CUE)"
+	@cp "$(CORTEX_IGNITION_V1_BIN)" "$(CORTEX_IGNITION_V1_PREBURN_INTERNAL_BIN)"
+	@$(MAKE) cortex-ignition-v1-project-disc
 	@(cd emu && cargo run -p frontend --release -- launch \
-		--path ../$(CORTEX_OVERRIDE_V1_CUE) \
+		--path ../$(CORTEX_IGNITION_V1_PREBURN_INTERNAL_CUE) \
 		--embedded-playtest \
-		--guest-visual-frames $(CORTEX_OVERRIDE_V1_PREBURN_VISUAL_FRAMES) \
-		--guest-frames $(CORTEX_OVERRIDE_V1_PREBURN_GUEST_FRAMES) \
-		--steps $(CORTEX_OVERRIDE_V1_PREBURN_STEPS) \
-		--dump-hw ../$(CORTEX_OVERRIDE_V1_PREBURN_OUT)/internal-hle.ppm \
-		--dump-audio ../$(CORTEX_OVERRIDE_V1_PREBURN_OUT)/internal-hle.wav \
-		--visual-hash-log ../$(CORTEX_OVERRIDE_V1_PREBURN_OUT)/visual-hashes.csv \
-		--guest-hash-log ../$(CORTEX_OVERRIDE_V1_PREBURN_OUT)/guest-hashes.csv \
-		--counter-log ../$(CORTEX_OVERRIDE_V1_PREBURN_OUT)/counters.csv \
-		--profile-log ../$(CORTEX_OVERRIDE_V1_PREBURN_OUT)/profile.csv \
+		--pad-pulses "$(CORTEX_IGNITION_V1_PREBURN_PAD_PULSES)" \
+		--guest-visual-frames $(CORTEX_IGNITION_V1_PREBURN_VISUAL_FRAMES) \
+		--guest-frames $(CORTEX_IGNITION_V1_PREBURN_GUEST_FRAMES) \
+		--steps $(CORTEX_IGNITION_V1_PREBURN_STEPS) \
+		--dump-hw ../$(CORTEX_IGNITION_V1_PREBURN_OUT)/internal-hle.ppm \
+		--dump-audio ../$(CORTEX_IGNITION_V1_PREBURN_OUT)/internal-hle.wav \
+		--visual-hash-log ../$(CORTEX_IGNITION_V1_PREBURN_OUT)/visual-hashes.csv \
+		--guest-hash-log ../$(CORTEX_IGNITION_V1_PREBURN_OUT)/guest-hashes.csv \
+		--counter-log ../$(CORTEX_IGNITION_V1_PREBURN_OUT)/counters.csv \
+		--profile-log ../$(CORTEX_IGNITION_V1_PREBURN_OUT)/profile.csv \
 		--dump-hash \
-		--dump-guest-profile) > "$(CORTEX_OVERRIDE_V1_PREBURN_OUT)/internal-hle.log" 2>&1; \
-	status=$$?; cat "$(CORTEX_OVERRIDE_V1_PREBURN_OUT)/internal-hle.log"; exit $$status
+		--dump-guest-profile) > "$(CORTEX_IGNITION_V1_PREBURN_OUT)/internal-hle.log" 2>&1; \
+	status=$$?; cat "$(CORTEX_IGNITION_V1_PREBURN_OUT)/internal-hle.log"; exit $$status
 
-cortex-override-v1-preburn-cdda-audio: cortex-override-v1-project-disc
-	@mkdir -p $(CORTEX_OVERRIDE_V1_PREBURN_OUT)
+cortex-ignition-v1-preburn-cdda-audio: cortex-ignition-v1-project-disc
+	@mkdir -p $(CORTEX_IGNITION_V1_PREBURN_OUT)
 	@(cd emu && PSOXIDE_EXE="../$(EXAMPLE_OUT)/editor-playtest.exe" \
-		PSOXIDE_DISC="../$(CORTEX_OVERRIDE_V1_CUE)" \
-		PSOXIDE_WAV="../$(CORTEX_OVERRIDE_V1_PREBURN_OUT)/cdda-probe.wav" \
-		PSOXIDE_AUDIO_SECONDS="$(CORTEX_OVERRIDE_V1_PREBURN_AUDIO_SECONDS)" \
-		PSOXIDE_MIN_PEAK="$(CORTEX_OVERRIDE_V1_PREBURN_AUDIO_MIN_PEAK)" \
-		cargo run -p emulator-core --example probe_cdda_wav --release) > "$(CORTEX_OVERRIDE_V1_PREBURN_OUT)/cdda-probe.log" 2>&1; \
-	status=$$?; cat "$(CORTEX_OVERRIDE_V1_PREBURN_OUT)/cdda-probe.log"; exit $$status
+		PSOXIDE_DISC="../$(CORTEX_IGNITION_V1_CUE)" \
+		PSOXIDE_WAV="../$(CORTEX_IGNITION_V1_PREBURN_OUT)/cdda-probe.wav" \
+		PSOXIDE_AUDIO_SECONDS="$(CORTEX_IGNITION_V1_PREBURN_AUDIO_SECONDS)" \
+		PSOXIDE_MIN_PEAK="$(CORTEX_IGNITION_V1_PREBURN_AUDIO_MIN_PEAK)" \
+		cargo run -p emulator-core --example probe_cdda_wav --release) > "$(CORTEX_IGNITION_V1_PREBURN_OUT)/cdda-probe.log" 2>&1; \
+	status=$$?; cat "$(CORTEX_IGNITION_V1_PREBURN_OUT)/cdda-probe.log"; exit $$status
 
-cortex-override-v1-preburn-bios-cdrom: cortex-override-v1-project-disc
-	@mkdir -p $(CORTEX_OVERRIDE_V1_PREBURN_OUT)
-	@if [ -f "$(REDUX_CORTEX_OVERRIDE_V1_BIOS)" ]; then \
-		(cd emu && PSOXIDE_BIOS="$(REDUX_CORTEX_OVERRIDE_V1_BIOS)" \
-			PSOXIDE_DISC="../$(CORTEX_OVERRIDE_V1_BIN)" \
-			cargo run -p emulator-core --example cdrom_probe --release -- $(CORTEX_OVERRIDE_V1_PREBURN_BIOS_STEPS)) > "$(CORTEX_OVERRIDE_V1_PREBURN_OUT)/bios-cdrom-probe.log" 2>&1; \
-		status=$$?; cat "$(CORTEX_OVERRIDE_V1_PREBURN_OUT)/bios-cdrom-probe.log"; exit $$status; \
+cortex-ignition-v1-preburn-bios-cdrom: cortex-ignition-v1-project-disc
+	@mkdir -p $(CORTEX_IGNITION_V1_PREBURN_OUT)
+	@rm -f "$(CORTEX_IGNITION_V1_PREBURN_OUT)/bios-cdrom-probe.log"
+	@if [ -f "$(REDUX_CORTEX_IGNITION_V1_BIOS)" ]; then \
+		(cd emu && PSOXIDE_BIOS="$(REDUX_CORTEX_IGNITION_V1_BIOS)" \
+			PSOXIDE_DISC="../$(CORTEX_IGNITION_V1_BIN)" \
+			cargo run -p emulator-core --example cdrom_probe --release -- $(CORTEX_IGNITION_V1_PREBURN_BIOS_STEPS)) > "$(CORTEX_IGNITION_V1_PREBURN_OUT)/bios-cdrom-probe.log" 2>&1; \
+		status=$$?; cat "$(CORTEX_IGNITION_V1_PREBURN_OUT)/bios-cdrom-probe.log"; exit $$status; \
 	else \
-		echo "skip BIOS CD-ROM probe: REDUX_CORTEX_OVERRIDE_V1_BIOS not found ($(REDUX_CORTEX_OVERRIDE_V1_BIOS))"; \
+		echo "skip BIOS CD-ROM probe: REDUX_CORTEX_IGNITION_V1_BIOS not found ($(REDUX_CORTEX_IGNITION_V1_BIOS))" > "$(CORTEX_IGNITION_V1_PREBURN_OUT)/bios-cdrom-probe.log"; \
+		cat "$(CORTEX_IGNITION_V1_PREBURN_OUT)/bios-cdrom-probe.log"; \
 	fi
 
-cortex-override-v1-preburn-boot-flow: cortex-override-v1-project-disc
-	@mkdir -p $(CORTEX_OVERRIDE_V1_PREBURN_OUT)
-	@if [ -f "$(REDUX_CORTEX_OVERRIDE_V1_BIOS)" ]; then \
-		(cd emu && PSOXIDE_BIOS="$(REDUX_CORTEX_OVERRIDE_V1_BIOS)" \
-			PSOXIDE_DISC="../$(CORTEX_OVERRIDE_V1_CUE)" \
-			PSOXIDE_PAD1="$(CORTEX_OVERRIDE_V1_PREBURN_BOOT_FLOW_PAD1)" \
-			PSOXIDE_PAD1_PULSES="$(CORTEX_OVERRIDE_V1_PREBURN_BOOT_FLOW_PULSES)" \
-			PSOXIDE_VISIBLE_DUMP="../$(CORTEX_OVERRIDE_V1_PREBURN_OUT)/boot-flow.ppm" \
+cortex-ignition-v1-preburn-boot-flow: cortex-ignition-v1-project-disc
+	@mkdir -p $(CORTEX_IGNITION_V1_PREBURN_OUT)
+	@rm -f "$(CORTEX_IGNITION_V1_PREBURN_OUT)/boot-flow.log"
+	@if [ -f "$(REDUX_CORTEX_IGNITION_V1_BIOS)" ]; then \
+		(cd emu && PSOXIDE_BIOS="$(REDUX_CORTEX_IGNITION_V1_BIOS)" \
+			PSOXIDE_DISC="../$(CORTEX_IGNITION_V1_CUE)" \
+			PSOXIDE_PAD1="$(CORTEX_IGNITION_V1_PREBURN_BOOT_FLOW_PAD1)" \
+			PSOXIDE_PAD1_PULSES="$(CORTEX_IGNITION_V1_PREBURN_BOOT_FLOW_PULSES)" \
+			PSOXIDE_VISIBLE_DUMP="../$(CORTEX_IGNITION_V1_PREBURN_OUT)/boot-flow.ppm" \
 			PSOXIDE_REQUIRE_CDDA=1 \
 			PSOXIDE_REQUIRE_CDROM_READS=1 \
-			PSOXIDE_MIN_PEAK="$(CORTEX_OVERRIDE_V1_PREBURN_AUDIO_MIN_PEAK)" \
-			cargo run -p emulator-core --example probe_disc_pad_trace --release -- $(CORTEX_OVERRIDE_V1_PREBURN_BOOT_FLOW_STEPS)) > "$(CORTEX_OVERRIDE_V1_PREBURN_OUT)/boot-flow.log" 2>&1; \
-		status=$$?; cat "$(CORTEX_OVERRIDE_V1_PREBURN_OUT)/boot-flow.log"; exit $$status; \
+			PSOXIDE_MIN_PEAK="$(CORTEX_IGNITION_V1_PREBURN_AUDIO_MIN_PEAK)" \
+			cargo run -p emulator-core --example probe_disc_pad_trace --release -- $(CORTEX_IGNITION_V1_PREBURN_BOOT_FLOW_STEPS)) > "$(CORTEX_IGNITION_V1_PREBURN_OUT)/boot-flow.log" 2>&1; \
+		status=$$?; cat "$(CORTEX_IGNITION_V1_PREBURN_OUT)/boot-flow.log"; exit $$status; \
 	else \
-		echo "skip BIOS boot-flow probe: REDUX_CORTEX_OVERRIDE_V1_BIOS not found ($(REDUX_CORTEX_OVERRIDE_V1_BIOS))"; \
+		echo "skip BIOS boot-flow probe: REDUX_CORTEX_IGNITION_V1_BIOS not found ($(REDUX_CORTEX_IGNITION_V1_BIOS))" > "$(CORTEX_IGNITION_V1_PREBURN_OUT)/boot-flow.log"; \
+		cat "$(CORTEX_IGNITION_V1_PREBURN_OUT)/boot-flow.log"; \
 	fi
 
-cortex-override-v1-emulator-inventory:
+cortex-ignition-v1-preburn-streaming-guard: cortex-ignition-v1-preburn-internal cortex-ignition-v1-preburn-cdda-audio cortex-ignition-v1-preburn-boot-flow
+	@mkdir -p $(CORTEX_IGNITION_V1_PREBURN_OUT)
+	@($(PSOXIDE_DEV) cortex-stream-guard \
+		--profile $(CURDIR)/$(CORTEX_IGNITION_V1_PREBURN_OUT)/profile.csv \
+		--cdda-log $(CURDIR)/$(CORTEX_IGNITION_V1_PREBURN_OUT)/cdda-probe.log \
+		--boot-flow-log $(CURDIR)/$(CORTEX_IGNITION_V1_PREBURN_OUT)/boot-flow.log) > "$(CORTEX_IGNITION_V1_PREBURN_OUT)/streaming-guard.log" 2>&1; \
+	status=$$?; cat "$(CORTEX_IGNITION_V1_PREBURN_OUT)/streaming-guard.log"; exit $$status
+
+cortex-ignition-v1-emulator-inventory:
 	$(PSOXIDE_DEV) emulator-inventory
 
-cortex-override-v1-external-emulators: duckstation-cortex-override-v1-bios redux-cortex-override-v1-bios mednafen-cortex-override-v1-bios retroarch-cortex-override-v1-bios
-	@echo "cortex_override_v1 external emulator matrix complete"
+cortex-ignition-v1-external-emulators: duckstation-cortex-ignition-v1-bios redux-cortex-ignition-v1-bios mednafen-cortex-ignition-v1-bios retroarch-cortex-ignition-v1-bios ares-cortex-ignition-v1-bios
+	@echo "cortex_ignition_v1 external emulator matrix complete"
 
-duckstation-cortex-override-v1: cortex-override-v1-project-disc-boot-trace
+cortex-ignition-v1-bringup-report:
+	$(PSOXIDE_DEV) cortex-bringup-report \
+		--out $(CURDIR)/$(CORTEX_IGNITION_V1_BRINGUP_REPORT) \
+		--preburn-dir $(CURDIR)/$(CORTEX_IGNITION_V1_PREBURN_OUT) \
+		--duckstation-log $(CURDIR)/$(DUCKSTATION_CORTEX_IGNITION_V1_BIOS_LOG) \
+		--external-dir $(CURDIR)/build/external-emulator-smoke
+
+cortex-ignition-v1-burn-candidate: cortex-ignition-v1-preburn-local cortex-ignition-v1-external-emulators
+	$(PSOXIDE_DEV) cortex-bringup-report \
+		--out $(CURDIR)/$(CORTEX_IGNITION_V1_BRINGUP_REPORT) \
+		--preburn-dir $(CURDIR)/$(CORTEX_IGNITION_V1_PREBURN_OUT) \
+		--duckstation-log $(CURDIR)/$(DUCKSTATION_CORTEX_IGNITION_V1_BIOS_LOG) \
+		--external-dir $(CURDIR)/build/external-emulator-smoke \
+		--fail-on-warn
+	@echo "cortex_ignition_v1 burn candidate passed -> $(CORTEX_IGNITION_V1_BRINGUP_REPORT)"
+
+duckstation-cortex-ignition-v1: cortex-ignition-v1-project-disc-boot-trace
 	$(PSOXIDE_DEV) duckstation-harness \
-		--cue $(CURDIR)/$(CORTEX_OVERRIDE_V1_CUE) \
+		--cue $(CURDIR)/$(CORTEX_IGNITION_V1_CUE) \
 		--timeout $(DUCKSTATION_TIMEOUT) \
-		--log $(CURDIR)/$(DUCKSTATION_CORTEX_OVERRIDE_V1_LOG) \
+		--log $(CURDIR)/$(DUCKSTATION_CORTEX_IGNITION_V1_LOG) \
 		--no-default-expect \
 		--expect "psx-rt: main" \
 		--expect "editor-playtest: init ok" \
@@ -744,11 +815,11 @@ duckstation-cortex-override-v1: cortex-override-v1-project-disc-boot-trace
 		--expect "psx-engine: cdda demute ok" \
 		--expect "psx-engine: cdda play ok"
 
-duckstation-cortex-override-v1-bios: cortex-override-v1-project-disc-boot-trace
+duckstation-cortex-ignition-v1-bios: cortex-ignition-v1-project-disc-boot-trace
 	$(PSOXIDE_DEV) duckstation-harness \
-		--cue $(CURDIR)/$(CORTEX_OVERRIDE_V1_CUE) \
+		--cue $(CURDIR)/$(CORTEX_IGNITION_V1_CUE) \
 		--timeout $(DUCKSTATION_TIMEOUT) \
-		--log $(CURDIR)/$(DUCKSTATION_CORTEX_OVERRIDE_V1_BIOS_LOG) \
+		--log $(CURDIR)/$(DUCKSTATION_CORTEX_IGNITION_V1_BIOS_LOG) \
 		--bios-boot \
 		--no-default-expect \
 		--expect "psx-rt: main" \
@@ -758,36 +829,54 @@ duckstation-cortex-override-v1-bios: cortex-override-v1-project-disc-boot-trace
 		--expect "psx-engine: cdda demute ok" \
 		--expect "psx-engine: cdda play ok"
 
-redux-cortex-override-v1-bios: cortex-override-v1-project-disc-boot-trace
-	cd emu && PSOXIDE_DISC="$(CURDIR)/$(CORTEX_OVERRIDE_V1_CUE)" \
-		PSOXIDE_BIOS="$(REDUX_CORTEX_OVERRIDE_V1_BIOS)" \
-		PSOXIDE_ORACLE_DISC_STEPS="$(REDUX_CORTEX_OVERRIDE_V1_STEPS)" \
+redux-cortex-ignition-v1-bios: cortex-ignition-v1-project-disc-boot-trace
+	cd emu && PSOXIDE_DISC="$(CURDIR)/$(CORTEX_IGNITION_V1_CUE)" \
+		PSOXIDE_BIOS="$(REDUX_CORTEX_IGNITION_V1_BIOS)" \
+		PSOXIDE_ORACLE_DISC_STEPS="$(REDUX_CORTEX_IGNITION_V1_STEPS)" \
 		PSOXIDE_REDUX_SKIP_DISPLAY_HASH=1 \
 		PSOXIDE_REDUX_EXPECT_STDOUT="psx-rt: main;;editor-playtest: init ok;;psx-engine: scene init ok;;psx-engine: cdda setmode ok;;psx-engine: cdda demute ok;;psx-engine: cdda play ok" \
 		cargo test -p parity-oracle --test commercial_disc_smoke --release -- --ignored --nocapture
 
-mednafen-cortex-override-v1-bios: cortex-override-v1-project-disc
+mednafen-cortex-ignition-v1-bios: cortex-ignition-v1-project-disc
 	@if $(PSOXIDE_DEV) emulator-inventory --require mednafen >/dev/null 2>&1; then \
 		$(PSOXIDE_DEV) external-emulator-smoke \
 			--emulator mednafen \
-			--cue $(CURDIR)/$(CORTEX_OVERRIDE_V1_CUE) \
-			--bios "$(REDUX_CORTEX_OVERRIDE_V1_BIOS)" \
+			--cue $(CURDIR)/$(CORTEX_IGNITION_V1_CUE) \
+			--bios "$(REDUX_CORTEX_IGNITION_V1_BIOS)" \
 			--timeout $(EXTERNAL_EMULATOR_SMOKE_TIMEOUT) \
-			--log $(CURDIR)/$(MEDNAFEN_CORTEX_OVERRIDE_V1_LOG); \
+			--log $(CURDIR)/$(MEDNAFEN_CORTEX_IGNITION_V1_LOG); \
 	else \
-		echo "skip Mednafen cortex_override_v1 smoke: emulator unavailable"; \
+		echo "skip Mednafen cortex_ignition_v1 smoke: emulator unavailable"; \
 		$(PSOXIDE_DEV) emulator-inventory; \
 	fi
 
-retroarch-cortex-override-v1-bios: cortex-override-v1-project-disc
+retroarch-cortex-ignition-v1-bios: cortex-ignition-v1-project-disc
 	@if $(PSOXIDE_DEV) emulator-inventory --require retroarch >/dev/null 2>&1; then \
 		$(PSOXIDE_DEV) external-emulator-smoke \
 			--emulator retroarch \
-			--cue $(CURDIR)/$(CORTEX_OVERRIDE_V1_CUE) \
+			--cue $(CURDIR)/$(CORTEX_IGNITION_V1_CUE) \
+			--bios "$(REDUX_CORTEX_IGNITION_V1_BIOS)" \
 			--timeout $(EXTERNAL_EMULATOR_SMOKE_TIMEOUT) \
-			--log $(CURDIR)/$(RETROARCH_CORTEX_OVERRIDE_V1_LOG); \
+			--log $(CURDIR)/$(RETROARCH_CORTEX_IGNITION_V1_LOG) \
+			--screenshot $(CURDIR)/$(RETROARCH_CORTEX_IGNITION_V1_SCREENSHOT) \
+			--screenshot-frames $(RETROARCH_CORTEX_IGNITION_V1_SCREENSHOT_FRAMES) \
+			--fail-on "Firmware is missing" \
+			--fail-on "Failed to load content"; \
 	else \
-		echo "skip RetroArch cortex_override_v1 smoke: emulator/core unavailable"; \
+		echo "skip RetroArch cortex_ignition_v1 smoke: emulator/core unavailable"; \
+		$(PSOXIDE_DEV) emulator-inventory; \
+	fi
+
+ares-cortex-ignition-v1-bios: cortex-ignition-v1-project-disc
+	@if $(PSOXIDE_DEV) emulator-inventory --require ares >/dev/null 2>&1; then \
+		$(PSOXIDE_DEV) external-emulator-smoke \
+			--emulator ares \
+			--cue $(CURDIR)/$(CORTEX_IGNITION_V1_CUE) \
+			--bios "$(REDUX_CORTEX_IGNITION_V1_BIOS)" \
+			--timeout $(EXTERNAL_EMULATOR_SMOKE_TIMEOUT) \
+			--log $(CURDIR)/$(ARES_CORTEX_IGNITION_V1_LOG); \
+	else \
+		echo "skip ares cortex_ignition_v1 smoke: emulator unavailable"; \
 		$(PSOXIDE_DEV) emulator-inventory; \
 	fi
 

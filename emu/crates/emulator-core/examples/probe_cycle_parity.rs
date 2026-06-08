@@ -39,10 +39,7 @@ fn main() {
         (
             "bios",
             None,
-            &[
-                (100_000_000, 233_653_764),
-                (500_000_000, 1_104_781_373),
-            ],
+            &[(100_000_000, 233_653_764), (500_000_000, 1_104_781_373)],
         ),
         (
             "crash",
@@ -67,8 +64,7 @@ fn main() {
             .filter_map(|s| s.trim().parse().ok())
             .collect();
         println!("(override) running crash at {steps:?}");
-        let disc =
-            "<rom-path>";
+        let disc = "<rom-path>";
         let bios = std::fs::read("bios/SCPH1001.BIN").expect("BIOS");
         let mut bus = Bus::new(bios).expect("bus");
         let disc_bytes = std::fs::read(disc).expect("disc");

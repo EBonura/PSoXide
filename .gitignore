@@ -20,11 +20,13 @@ Cargo.lock.orig
 .cargo/
 .codex/
 .claude/
+previous chat.md
 .github/rulesets/
 AGENTS.md
 CLAUDE.md
 NOTICE.md
 PROGRESS.md
+docs/cortex-ignition-v1-focused-probes.md
 
 # Local bios/game files — never commit
 bios/

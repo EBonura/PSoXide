@@ -371,6 +371,25 @@ fn load_next_sector_mode1_uses_payload_after_header() {
 }
 
 #[test]
+fn load_next_sector_skips_audio_track_during_data_read() {
+    // Match DuckStation: a data read (ReadN/ReadS) that advances into a Red
+    // Book audio track delivers no data and raises no DataReady.
+    let mut cd = CdRom::new();
+    cd.insert_disc(Some(cdda_disc()));
+
+    cd.read_lba = 12; // track 2 (audio) INDEX 01
+    let raise = cd.load_next_sector();
+    assert!(!raise, "audio-track sector must not raise DataReady");
+    assert_eq!(cd.data_fifo_len(), 0, "audio-track sector delivers no data");
+
+    // Control: a data-track sector still delivers its 2048-byte payload.
+    cd.read_lba = 0; // track 1 (data)
+    let raise = cd.load_next_sector();
+    assert!(raise, "data-track sector must raise DataReady");
+    assert_eq!(cd.data_fifo_len(), 2048);
+}
+
+#[test]
 fn load_next_sector_sets_ready_latch_but_leaves_transfer_disarmed() {
     let mut cd = CdRom::new();
     let raw = raw_sector([0x00, 0x02, 0x00, 0x02], [0; 4], 0x6C);
@@ -810,6 +829,73 @@ fn cdda_play_stops_at_audio_track_end() {
     assert_eq!(cd.read_lba, 14);
     assert_eq!(cd.cdda_sample_index, 0);
     assert_eq!(cd.drive_status & drive_status_bit::PLAYING, 0);
+}
+
+#[test]
+fn command_during_cdda_playback_acks_later_than_when_idle() {
+    // Baseline: GetStat while the drive is idle acks at the flat first-response
+    // delay (what every emulator models, and what makes the bug invisible).
+    let mut idle = CdRom::new();
+    idle.insert_disc(Some(cdda_disc()));
+    idle.queue_command(0x01, 1_000); // GetStat, not playing
+    let idle_ack = idle
+        .pending
+        .iter()
+        .find(|ev| ev.command == 0x01 && ev.irq == IrqType::Acknowledge)
+        .expect("idle GetStat ack pending");
+    assert_eq!(idle_ack.deadline, 1_000 + FIRST_RESPONSE_CYCLES);
+
+    // During CD-DA playback the same GetStat acks CDDA_BUSY_RESPONSE_CYCLES
+    // later -- the busy single controller modelled. This is the latency that
+    // makes "poll the drive every frame while music plays" stall on silicon,
+    // so the engine must not do it (see the menu CD-DA loop).
+    let mut playing = CdRom::new();
+    playing.insert_disc(Some(cdda_disc()));
+    playing.push_param(0x02);
+    playing.queue_command(0x03, 2_000); // Play track 2 -> sets PLAYING
+    assert_ne!(playing.drive_status & drive_status_bit::PLAYING, 0);
+    // The Play command itself was issued while idle, so its own ack is NOT
+    // penalised (only commands during an already-playing drive are).
+    let play_ack = playing
+        .pending
+        .iter()
+        .find(|ev| ev.command == 0x03 && ev.irq == IrqType::Acknowledge)
+        .expect("play ack pending");
+    assert_eq!(play_ack.deadline, 2_000 + FIRST_RESPONSE_CYCLES);
+
+    playing.queue_command(0x01, 3_000); // GetStat while playing
+    let busy_ack = playing
+        .pending
+        .iter()
+        .find(|ev| ev.command == 0x01 && ev.irq == IrqType::Acknowledge)
+        .expect("playing GetStat ack pending");
+    assert_eq!(
+        busy_ack.deadline,
+        3_000 + FIRST_RESPONSE_CYCLES + CDDA_BUSY_RESPONSE_CYCLES
+    );
+}
+
+#[test]
+fn getstat_after_cdda_track_end_is_prompt_and_reports_stopped() {
+    // The engine loops a menu track by polling until the drive reports stopped,
+    // then re-playing. That only works if, once the track ends, GetStat answers
+    // promptly (no busy penalty -- the drive is no longer streaming) AND reports
+    // PLAYING clear. This is the counterpart to the during-playback penalty.
+    let mut cd = CdRom::new();
+    cd.insert_disc(Some(cdda_disc()));
+    cd.push_param(0x02);
+    cd.queue_command(0x03, 1_000); // Play track 2
+    cd.pump_cdda_samples(CDDA_SAMPLES_PER_SECTOR * 2 + 1); // run past track end
+    assert_eq!(cd.drive_status & drive_status_bit::PLAYING, 0);
+
+    cd.queue_command(0x01, 2_000); // GetStat after the track ended
+    let ack = cd
+        .pending
+        .iter()
+        .find(|ev| ev.command == 0x01 && ev.irq == IrqType::Acknowledge)
+        .expect("post-end GetStat ack pending");
+    assert_eq!(ack.deadline, 2_000 + FIRST_RESPONSE_CYCLES);
+    assert_eq!(ack.bytes[0] & drive_status_bit::PLAYING, 0);
 }
 
 #[test]

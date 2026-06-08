@@ -101,7 +101,10 @@ pub fn read_tape(path: &Path) -> Result<Vec<PadSample>, String> {
         return Err(format!("{} is not a PSoXide input tape", path.display()));
     }
     if &bytes[..TAPE_MAGIC.len()] != TAPE_MAGIC {
-        return Err(format!("{} has an unknown input tape header", path.display()));
+        return Err(format!(
+            "{} has an unknown input tape header",
+            path.display()
+        ));
     }
     let count = u32::from_le_bytes(
         bytes[TAPE_MAGIC.len()..TAPE_HEADER_BYTES]
@@ -154,7 +157,10 @@ mod tests {
     #[test]
     fn from_buttons_centers_sticks() {
         let s = PadSample::from_buttons(0x00FF);
-        assert_eq!((s.right_x, s.right_y, s.left_x, s.left_y), (0x80, 0x80, 0x80, 0x80));
+        assert_eq!(
+            (s.right_x, s.right_y, s.left_x, s.left_y),
+            (0x80, 0x80, 0x80, 0x80)
+        );
     }
 
     #[test]

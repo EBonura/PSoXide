@@ -38,12 +38,12 @@ here; the tape drives the menu). Template: the `profile-demo3-disc-stream`
 target in the `Makefile`, with the project swapped:
 
 ```sh
-make cook-playtest PROJECT=editor/projects/cortex_override_v1/project.ron  # regenerates engine/examples/editor-playtest/generated/
+make cook-playtest PROJECT=editor/projects/cortex_ignition_v1/project.ron  # regenerates engine/examples/editor-playtest/generated/
 make build-editor-playtest                                  # MIPS guest exe (picks up uncommitted engine changes)
 cd tools/mkisopsx && cargo run --release -- \
   --exe ../../build/examples/mipsel-sony-psx/release/editor-playtest.exe \
   --out ../../build/examples/mipsel-sony-psx/release/editor-playtest.bin \
-  --volume CORTEX_OVERRIDE_V1 --cdtest-sectors 32 \
+  --volume CORTEX_IGNITION_V1 --cdtest-sectors 32 \
   --world-pack-rooms-dir ../../engine/examples/editor-playtest/generated/stream_chunks \
   --world-pack-order-file ../../engine/examples/editor-playtest/generated/world_pack_order.txt \
   --cdda-track-list ../../engine/examples/editor-playtest/generated/cdda_tracks.txt
@@ -55,9 +55,9 @@ Then replay and dump (`emu/crates/frontend/src/cli.rs`, `launch` subcommand):
 cd emu && cargo run -p frontend --release -- launch \
   --path ../build/examples/mipsel-sony-psx/release/editor-playtest.cue \
   --embedded-playtest \
-  --input-tape "$HOME/Library/Application Support/com.psoxide.PSoXide/editor/playtest_tapes/cortex_override_v1.pxtape" \
-  --profile-log /tmp/cortex-override-v1-vblank.csv \
-  --dump-hw /tmp/cortex-override-v1-vblank.ppm --dump-hash
+  --input-tape "$HOME/Library/Application Support/com.psoxide.PSoXide/editor/playtest_tapes/cortex_ignition_v1.pxtape" \
+  --profile-log /tmp/cortex-ignition-v1-vblank.csv \
+  --dump-hw /tmp/cortex-ignition-v1-vblank.ppm --dump-hash
 ```
 
 Result flags:
@@ -75,8 +75,8 @@ Gotchas:
 
 ```sh
 cargo run --manifest-path tools/psoxide-dev/Cargo.toml --release -- \
-  vblank-chart --in /tmp/cortex-override-v1-vblank.csv \
-  --out /tmp/cortex-override-v1-vblank.html --title "cortex_override_v1 per-vblank work"
+  vblank-chart --in /tmp/cortex-ignition-v1-vblank.csv \
+  --out /tmp/cortex-ignition-v1-vblank.html --title "cortex_ignition_v1 per-vblank work"
 ```
 
 Self-contained HTML: stacked per-vblank stage bars, 1-vblank (564,480 cyc NTSC)
