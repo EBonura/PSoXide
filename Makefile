@@ -22,7 +22,7 @@
 	showcase-text showcase-text-disc run-showcase-text \
 	game-pong game-pong-disc run-game-pong \
 	game-magikaaaaaarp-pong game-magikaaaaaarp-pong-disc magikaaaaaarp-pong-spectrum run-game-magikaaaaaarp-pong probe-magikaaaaaarp-pong-audio duckstation-magikaaaaaarp-pong \
-	cortex-override-v1-project-disc cortex-override-v1-hardware-diagnostic-disc cortex-override-v1-preburn-local cortex-override-v1-preburn-struct cortex-override-v1-preburn-disc-reads cortex-override-v1-preburn-internal cortex-override-v1-preburn-cdda-audio cortex-override-v1-preburn-bios-cdrom cortex-override-v1-preburn-boot-flow duckstation-cortex-override-v1 duckstation-cortex-override-v1-bios redux-cortex-override-v1-bios \
+	cortex-override-v1-project-disc cortex-override-v1-hardware-diagnostic-disc cortex-override-v1-preburn-local cortex-override-v1-preburn-struct cortex-override-v1-preburn-disc-reads cortex-override-v1-preburn-internal cortex-override-v1-preburn-cdda-audio cortex-override-v1-preburn-bios-cdrom cortex-override-v1-preburn-boot-flow cortex-override-v1-emulator-inventory cortex-override-v1-external-emulators duckstation-cortex-override-v1 duckstation-cortex-override-v1-bios redux-cortex-override-v1-bios mednafen-cortex-override-v1-bios retroarch-cortex-override-v1-bios \
 	game-breakout game-breakout-disc run-game-breakout \
         game-invaders game-invaders-disc run-game-invaders \
         showcase-3d showcase-3d-disc run-showcase-3d \
@@ -124,6 +124,10 @@ help:
 	@echo "                      - assert cortex_override_v1 through DuckStation's full BIOS/logo path"
 	@echo "    make redux-cortex-override-v1-bios"
 	@echo "                      - assert cortex_override_v1 through PCSX-Redux's BIOS disc boot"
+	@echo "    make cortex-override-v1-emulator-inventory"
+	@echo "                      - list locally available external PS1 emulators"
+	@echo "    make cortex-override-v1-external-emulators"
+	@echo "                      - run DuckStation/Redux plus optional Mednafen/RetroArch local gates"
 	@echo "    make run-showcase-text"
 	@echo "                      - build + boot the text capabilities showcase disc"
 	@echo "    make run-game-pong     - build + boot the Pong mini-game disc"
@@ -280,6 +284,9 @@ DUCKSTATION_TIMEOUT ?= 45
 DUCKSTATION_MAGIKARP_LOG ?= build/duckstation-harness/game-magikaaaaaarp-pong.log
 DUCKSTATION_CORTEX_OVERRIDE_V1_LOG ?= build/duckstation-harness/cortex_override_v1.log
 DUCKSTATION_CORTEX_OVERRIDE_V1_BIOS_LOG ?= build/duckstation-harness/cortex_override_v1-bios.log
+MEDNAFEN_CORTEX_OVERRIDE_V1_LOG ?= build/external-emulator-smoke/cortex_override_v1-mednafen.log
+RETROARCH_CORTEX_OVERRIDE_V1_LOG ?= build/external-emulator-smoke/cortex_override_v1-retroarch.log
+EXTERNAL_EMULATOR_SMOKE_TIMEOUT ?= 12
 REDUX_CORTEX_OVERRIDE_V1_BIOS ?= $(HOME)/Downloads/ps1 bios/SCPH1001.BIN
 REDUX_CORTEX_OVERRIDE_V1_STEPS ?= 70000000
 CORTEX_OVERRIDE_V1_PROJECT ?= editor/projects/cortex_override_v1
@@ -715,6 +722,12 @@ cortex-override-v1-preburn-boot-flow: cortex-override-v1-project-disc
 		echo "skip BIOS boot-flow probe: REDUX_CORTEX_OVERRIDE_V1_BIOS not found ($(REDUX_CORTEX_OVERRIDE_V1_BIOS))"; \
 	fi
 
+cortex-override-v1-emulator-inventory:
+	$(PSOXIDE_DEV) emulator-inventory
+
+cortex-override-v1-external-emulators: duckstation-cortex-override-v1-bios redux-cortex-override-v1-bios mednafen-cortex-override-v1-bios retroarch-cortex-override-v1-bios
+	@echo "cortex_override_v1 external emulator matrix complete"
+
 duckstation-cortex-override-v1: cortex-override-v1-project-disc
 	$(PSOXIDE_DEV) duckstation-harness \
 		--cue $(CURDIR)/$(CORTEX_OVERRIDE_V1_CUE) \
@@ -741,6 +754,31 @@ redux-cortex-override-v1-bios: cortex-override-v1-project-disc
 		PSOXIDE_BIOS="$(REDUX_CORTEX_OVERRIDE_V1_BIOS)" \
 		PSOXIDE_ORACLE_DISC_STEPS="$(REDUX_CORTEX_OVERRIDE_V1_STEPS)" \
 		cargo test -p parity-oracle --test commercial_disc_smoke --release -- --ignored --nocapture
+
+mednafen-cortex-override-v1-bios: cortex-override-v1-project-disc
+	@if $(PSOXIDE_DEV) emulator-inventory --require mednafen >/dev/null 2>&1; then \
+		$(PSOXIDE_DEV) external-emulator-smoke \
+			--emulator mednafen \
+			--cue $(CURDIR)/$(CORTEX_OVERRIDE_V1_CUE) \
+			--bios "$(REDUX_CORTEX_OVERRIDE_V1_BIOS)" \
+			--timeout $(EXTERNAL_EMULATOR_SMOKE_TIMEOUT) \
+			--log $(CURDIR)/$(MEDNAFEN_CORTEX_OVERRIDE_V1_LOG); \
+	else \
+		echo "skip Mednafen cortex_override_v1 smoke: emulator unavailable"; \
+		$(PSOXIDE_DEV) emulator-inventory; \
+	fi
+
+retroarch-cortex-override-v1-bios: cortex-override-v1-project-disc
+	@if $(PSOXIDE_DEV) emulator-inventory --require retroarch >/dev/null 2>&1; then \
+		$(PSOXIDE_DEV) external-emulator-smoke \
+			--emulator retroarch \
+			--cue $(CURDIR)/$(CORTEX_OVERRIDE_V1_CUE) \
+			--timeout $(EXTERNAL_EMULATOR_SMOKE_TIMEOUT) \
+			--log $(CURDIR)/$(RETROARCH_CORTEX_OVERRIDE_V1_LOG); \
+	else \
+		echo "skip RetroArch cortex_override_v1 smoke: emulator/core unavailable"; \
+		$(PSOXIDE_DEV) emulator-inventory; \
+	fi
 
 run-game-breakout: game-breakout-disc
 	cd emu && PSOXIDE_DISC=$(CURDIR)/$(EXAMPLE_OUT)/game-breakout.cue cargo run -p frontend --release
