@@ -66,6 +66,11 @@ fn commercial_disc_display_hash_matches_redux_at_checkpoint() {
 
     let run_timeout = Duration::from_secs((steps / 200_000).max(60));
     redux.run(steps, run_timeout).expect("Redux run");
+    assert_redux_stdout_markers(&redux);
+    if env_bool("PSOXIDE_REDUX_SKIP_DISPLAY_HASH") {
+        cleanup(redux);
+        return;
+    }
     if let Some((sub_step, err)) = step_ours_user_steps(&mut cpu, &mut bus, steps) {
         cleanup(redux);
         panic!("local emulator stopped at user step {sub_step}/{steps}: {err:?}");
@@ -109,6 +114,53 @@ fn step_count() -> u64 {
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(DEFAULT_STEPS)
+}
+
+fn env_bool(name: &str) -> bool {
+    matches!(
+        env::var(name).ok().as_deref(),
+        Some("1" | "true" | "TRUE" | "yes" | "YES")
+    )
+}
+
+fn stdout_expectations() -> Vec<String> {
+    env::var("PSOXIDE_REDUX_EXPECT_STDOUT")
+        .ok()
+        .map(|value| {
+            value
+                .split(";;")
+                .map(str::trim)
+                .filter(|part| !part.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn assert_redux_stdout_markers(redux: &ReduxProcess) {
+    let expected = stdout_expectations();
+    if expected.is_empty() {
+        return;
+    }
+    let stdout = redux.stdout_snapshot();
+    let missing: Vec<_> = expected
+        .iter()
+        .filter(|marker| !stdout.contains(marker.as_str()))
+        .collect();
+    if missing.is_empty() {
+        eprintln!("[commercial-disc-smoke] Redux stdout markers observed:");
+        for marker in expected {
+            eprintln!("  ok {marker}");
+        }
+        return;
+    }
+
+    eprintln!("[commercial-disc-smoke] missing Redux stdout markers:");
+    for marker in &missing {
+        eprintln!("  - {marker}");
+    }
+    eprintln!("[commercial-disc-smoke] Redux stdout tail:\n{stdout}");
+    panic!("Redux stdout markers missing");
 }
 
 fn load_disc_path(path: &Path) -> Result<Disc, String> {
