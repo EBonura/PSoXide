@@ -11,6 +11,11 @@ pub const BASE: u32 = 0x1F80_1800;
 
 /// Setmode bit: allow CD-DA playback via `Play`.
 pub const MODE_CDDA: u8 = 1 << 0;
+/// Setmode bit: auto-pause at the end of a CD-DA track. The drive stops on its
+/// own at the track boundary (reporting a clear PLAYING bit) instead of running
+/// on into the next track / lead-out, so software can detect end-of-track and
+/// loop without seeking the laser mid-playback.
+pub const MODE_AUTO_PAUSE: u8 = 1 << 1;
 /// Setmode bit: emit periodic play-report IRQs.
 pub const MODE_REPORT: u8 = 1 << 2;
 /// Setmode bit: double-speed data reads.

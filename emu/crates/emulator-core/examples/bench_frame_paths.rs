@@ -87,9 +87,7 @@ fn bench_display_rgba8_with_real_disc_state() {
     let bios_path = std::env::var("PSOXIDE_BIOS")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("bios/SCPH1001.BIN"));
-    let disc_path = std::env::var("PSOXIDE_DISC").unwrap_or_else(|_| {
-        "<rom-path>".into()
-    });
+    let disc_path = std::env::var("PSOXIDE_DISC").unwrap_or_else(|_| "<rom-path>".into());
     let bios = match std::fs::read(&bios_path) {
         Ok(b) => b,
         Err(e) => {

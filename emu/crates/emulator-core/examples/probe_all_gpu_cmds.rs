@@ -16,10 +16,7 @@ use std::collections::BTreeMap;
 
 fn main() {
     let bios = std::fs::read("bios/SCPH1001.BIN").expect("BIOS");
-    let disc = std::fs::read(
-        "<rom-path>",
-    )
-    .expect("disc");
+    let disc = std::fs::read("<rom-path>").expect("disc");
     let mut bus = Bus::new(bios).expect("bus");
     bus.cdrom.insert_disc(Some(Disc::from_bin(disc)));
     bus.gpu.enable_pixel_tracer();

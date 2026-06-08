@@ -18,8 +18,7 @@ use emulator_core::{
 
 const DEFAULT_BIOS: &str = "bios/SCPH1001.BIN";
 const DEFAULT_CTR_DISC: &str = "<rom-path>";
-const DEFAULT_METAL_SLUG_X_DISC: &str =
-    "<rom-path>";
+const DEFAULT_METAL_SLUG_X_DISC: &str = "<rom-path>";
 
 const SPU_PUMP_CYCLES: u64 = 560_000;
 const SPU_FRAME_SAMPLES: usize = 735;

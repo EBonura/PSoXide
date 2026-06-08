@@ -66,8 +66,7 @@ fn recorded_tape_replays_to_the_controller_a_game_polls() {
         sample.apply_to_bus(&mut bus);
         let wire = poll_pad_wire(&mut bus);
         assert_eq!(
-            wire,
-            !sample.buttons,
+            wire, !sample.buttons,
             "frame {i}: polled wire {wire:#06x} is not the active-low form of {:#06x}",
             sample.buttons
         );
