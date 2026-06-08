@@ -4,10 +4,9 @@
 //! clustering, normalises into Q3.12 fixed-point, and emits the
 //! binary layout defined in [`psxed_format::mesh`].
 //!
-//! This is the Rust port of an earlier one-off Python script
-//! (`sdk/examples/showcase-3d/tools/obj_to_psx.py`) lifted into
-//! the content pipeline. Same algorithm, same determinism, same
-//! output byte-for-byte -- but now reusable across every asset we
+//! This was lifted from an earlier one-off mesh-conversion prototype into
+//! the Rust content pipeline. Same algorithm, same determinism, same
+//! output byte-for-byte -- reusable across every asset we
 //! build from source meshes, and usable from `build.rs` hooks so
 //! asset generation happens as part of `cargo build`.
 //!

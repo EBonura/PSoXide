@@ -74,7 +74,7 @@ via the editor's texture cooker (`make assets`).
 | `assets/models/*/*.psxt` (model textures) | See "3D Models" above | (Meshy) | User-owned per Meshy premium plan terms; distributed here under GPL-2.0-or-later |
 | `engine/examples/game-magikaaaaaarp-pong/vendor/magikaaaaaarp_album.jpg` | magikAAAAArp album image provided locally by the project owner | magikAAAAArp / project owner | Project-local demo asset; distribution rights to be confirmed before public release |
 | `engine/examples/game-magikaaaaaarp-pong/assets/magikaaaaaarp_album.psxt` | Cooked from `magikaaaaaarp_album.jpg` | (derived) | Same as source |
-| `engine/examples/game-magikaaaaaarp-pong/assets/goncharov_spectrum_16x30hz.bin` | Baked 16-band, 30 Hz visualizer table from `assets/audio/cdda/GONCHAROV.wav` via `tools/bake_spectrum.py` | (derived) | Same as source |
+| `engine/examples/game-magikaaaaaarp-pong/assets/goncharov_spectrum_16x30hz.bin` | Baked 16-band, 30 Hz visualizer table from `assets/audio/cdda/GONCHAROV.wav` via `psoxide-dev bake-spectrum` | (derived) | Same as source |
 
 The Pexels License (https://www.pexels.com/license/) permits free
 commercial and non-commercial use, modification, and redistribution;
