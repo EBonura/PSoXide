@@ -210,10 +210,14 @@ impl PortDevice {
     }
 
     pub(crate) fn exchange_detailed(&mut self, tx: u8) -> SerialExchange {
+        self.exchange_detailed_at(tx, 0)
+    }
+
+    pub(crate) fn exchange_detailed_at(&mut self, tx: u8, now: u64) -> SerialExchange {
         match self.selected {
             Some(Selected::Pad) => match &mut self.pad {
                 Some(pad) => {
-                    let (rx, ack) = pad.exchange(tx);
+                    let (rx, ack) = pad.exchange_at(tx, now);
                     SerialExchange {
                         rx,
                         ack,
@@ -421,6 +425,8 @@ pub const STICK_CENTER: u8 = 0x80;
 /// One captured `0x42` poll transaction for diagnostics.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct PollSnapshot {
+    /// Bus cycle at which the poll command byte (`0x42`) was received.
+    pub cycle: u64,
     /// `true` when the poll reached its natural final byte
     /// (`ack=false` on the last response), `false` when the host
     /// reset/deselected partway through.
@@ -523,6 +529,7 @@ pub struct DigitalPad {
     current_tx_trace: [u8; 8],
     current_rx_trace: [u8; 8],
     current_trace_len: u8,
+    current_trace_cycle: u64,
     /// Rolling window of recent completed `0x42` polls.
     recent_polls: [PollSnapshot; 8],
     recent_poll_head: usize,
@@ -568,6 +575,7 @@ impl DigitalPad {
             current_tx_trace: [0; 8],
             current_rx_trace: [0; 8],
             current_trace_len: 0,
+            current_trace_cycle: 0,
             recent_polls: [PollSnapshot::default(); 8],
             recent_poll_head: 0,
             recent_poll_len: 0,
@@ -632,6 +640,7 @@ impl DigitalPad {
         self.step = 0;
         self.config_param = 0;
         self.current_trace_len = 0;
+        self.current_trace_cycle = 0;
     }
 
     /// Current operating mode. Diagnostic; games don't read this
@@ -707,12 +716,18 @@ impl DigitalPad {
     /// Process one byte of a transaction. Returns `(rx_byte,
     /// ack_is_low)` -- ACK stays low (true) for all bytes except the
     /// final one of the transaction.
+    #[cfg(test)]
     fn exchange(&mut self, tx: u8) -> (u8, bool) {
+        self.exchange_at(tx, 0)
+    }
+
+    fn exchange_at(&mut self, tx: u8, now: u64) -> (u8, bool) {
         // Step 0: host sent the command byte (`0x42`, `0x43`,
         // `0x44`, ...). Reply with ID_low and hold ACK to invite the
         // next byte.
         if self.step == 0 {
             self.cmd = tx;
+            self.current_trace_cycle = now;
             self.record_command(tx);
             self.step = 1;
             let rx = self.id_low_byte();
@@ -971,6 +986,7 @@ impl DigitalPad {
         }
         let slot = self.recent_poll_head;
         self.recent_polls[slot] = PollSnapshot {
+            cycle: self.current_trace_cycle,
             complete,
             len: self.current_trace_len,
             tx: self.current_tx_trace,

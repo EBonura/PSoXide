@@ -306,6 +306,25 @@ fn track_ui_image_slot(asset_id: AssetId) {
     }
 }
 
+#[cfg(feature = "cd-stream-bench")]
+fn scene_requests_music(scene_id: u16) -> bool {
+    let Some(scene) = UI_SCENES.iter().find(|scene| scene.id == scene_id) else {
+        return false;
+    };
+    let first = scene.node_first as usize;
+    let end = first
+        .saturating_add(scene.node_count as usize)
+        .min(UI_NODES.len());
+    UI_NODES[first..end]
+        .iter()
+        .any(|node| {
+            node.kind == psx_level::LevelUiNodeKind::Music
+                && node.option != psx_level::UI_OPTION_NONE
+                && node.option <= 99
+                && node.option != 0
+        })
+}
+
 /// Start a short grace period after entering a menu scene. This lets the boot
 /// frame (or transition cover) present before the next UI.PAK read starts.
 #[cfg(feature = "cd-stream-bench")]
@@ -335,7 +354,11 @@ pub(super) fn service_menu_ui_images(scene_id: u16) {
         }
     }
 
-    if !cache_one_missing_ui_image_for_scene(scene_id) {
+    if cache_one_missing_ui_image_for_scene(scene_id) {
+        load_ui_images_for_scene(scene_id);
+        return;
+    }
+    if !scene_requests_music(scene_id) {
         let _ = cache_one_missing_menu_ui_image();
     }
     load_ui_images_for_scene(scene_id);
