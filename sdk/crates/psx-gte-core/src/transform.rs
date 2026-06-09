@@ -270,6 +270,24 @@ mod tests {
         assert_eq!(lzcr(0x0000_0001), 31);
         assert_eq!(lzcr(0x7fff_ffff), 1);
         assert_eq!(lzcr(0x8000_0000), 1);
+
+        // MVMVA bugged FC mode (cv=2): the far-color translation AND the
+        // first matrix column are dropped -> MAC_i = (Mx_i2*Vy + Mx_i3*Vz).
+        // Confirmed against real hardware (cortex GTE disc 2026-06-09).
+        {
+            let mut g = crate::Gte::new();
+            seed_xform(&mut g);
+            g.write_control(21, 0x0000_1000); // FCX
+            g.write_control(22, 0x0000_2000); // FCY
+            g.write_control(23, 0x0000_3000); // FCZ
+            g.write_data(0, 0x2040_0340);
+            g.write_data(1, 0x0000_09c0);
+            g.execute(0x4a08_4012); // MVMVA mx=RT vx=V0 cv=FC sf=1 lm=0
+            assert_eq!(
+                (g.read_data(25), g.read_data(26), g.read_data(27)),
+                (0xffff_fcc5, 0xffff_e36c, 0xffff_ee75)
+            );
+        }
     }
 
     #[test]

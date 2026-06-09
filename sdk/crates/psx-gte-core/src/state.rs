@@ -707,18 +707,17 @@ impl Gte {
         let v = self.select_vector(cmd.vx);
         let tr = self.select_translation(cmd.cv);
 
-        // The cv=2 (FC) path is famously buggy: each row's TR term
-        // wipes the matrix product before the IR clamp because the
-        // hardware drops the matrix-times-V contribution into the
-        // wrong adder slot. We emulate by computing the FC + matrix-
-        // first-column product, clamping to IR (with lm=false), then
-        // doing the rest of the multiply with TR=0.
+        // The cv=2 (FC) path is famously buggy (PSX-SPX, "GTE Opcode
+        // Bugs"): the far-color translation is NOT added, and the bug
+        // also DROPS the first matrix column, so the result reduces to
+        // the last two products: MAC_i = (Mx_i2*Vy + Mx_i3*Vz) SAR sf.
+        // Confirmed against real hardware (cortex_ignition_v1 GTE disc
+        // 2026-06-09: MAC = 0xfffffcc5,0xffffe36c,0xffffee75).
+        //
+        // The FLAG/IR saturation, however, IS evaluated against the full
+        // first term (FC<<12 + Mx_i1*Vx): step 1 sets only the IR flags
+        // from that discarded value, step 2 computes the real result.
         if cmd.cv == 2 {
-            // Step 1: MAC = (FC << 12) + (MX_col0 * V_x)
-            //         IR = saturate(MAC, lm=false)  [flags only]
-            // Step 2: MAC = (MX * V), shifted; IR comes from MAC with
-            //         the user's lm. Final saturation flags reflect
-            //         step 2.
             for i in 0..3 {
                 let bias = (tr[i] as i64) << 12;
                 let prod = (mx[i][0] as i64) * (v[0] as i64);
@@ -726,8 +725,8 @@ impl Gte {
                 let _ = self.saturate_ir_flag_only((i + 1) as u8, stage1 as i32, false);
             }
             for i in 0..3 {
-                let prod = (mx[i][0] as i64) * (v[0] as i64)
-                    + (mx[i][1] as i64) * (v[1] as i64)
+                // Bug: first column (Mx_i1 * Vx) is dropped along with TR.
+                let prod = (mx[i][1] as i64) * (v[1] as i64)
                     + (mx[i][2] as i64) * (v[2] as i64);
                 let mac = self.check_mac((i + 1) as u8, prod) >> sf;
                 self.mac[i] = mac as i32;
@@ -2040,25 +2039,27 @@ mod tests {
     }
 
     #[test]
-    fn mvmva_cv2_fc_bug_flags_stage1_but_stores_stage2() {
-        // Documented FC-translation bug: stage 1 computes
-        //   (FC<<12) + MX_col0 * V.x   >> sf
-        // and saturation-flags the IR from that; stage 2 computes the
-        // real (MX · V) >> sf and stores MAC/IR from *that*. So large
-        // FC entries set flags even when the final result is small.
+    fn mvmva_cv2_fc_bug_drops_translation_and_first_column() {
+        // Documented FC-translation bug (PSX-SPX, confirmed on real
+        // hardware 2026-06-09): the far-color translation is NOT added,
+        // and the bug ALSO drops the first matrix column, so the result
+        // reduces to MAC_i = (Mx_i2*Vy + Mx_i3*Vz) >> sf. The IR
+        // saturation flags, however, still reflect the discarded first
+        // term (FC<<12 + Mx_i1*Vx).
         let mut g = Gte::new();
         install_identity_rotation(&mut g);
         g.write_control(21, 0x1000_0000); // FC.r
-        g.write_data(0, pack_xy_i16(1, 0));
+        g.write_data(0, pack_xy_i16(1, 0)); // V = (1, 0, 0)
         g.write_data(1, 0);
         g.execute(cmd_word(true, false, 0, 0, 2, 0x12));
-        // Stage 2 math: MAC1 = (identity · V) >> 12 = 1 for V=(1,0,0).
-        assert_eq!(g.read_data(25) as i32, 1, "MAC1 from clean stage 2");
-        assert_eq!(g.read_data(9), 1, "IR1 from clean stage 2");
-        // Stage 1 IR saturation: (FC<<12 + 0x1000*1) >> 12 ≈ 2^28 → IR_SAT.
+        // V=(1,0,0): the only contribution is column 0 (R11*Vx), which
+        // the bug drops, so MAC1 = 0 -- the Vx term is lost entirely.
+        assert_eq!(g.read_data(25) as i32, 0, "MAC1: column 0 (Vx) dropped");
+        assert_eq!(g.read_data(9), 0, "IR1: column 0 (Vx) dropped");
+        // Stage 1 IR saturation still fires: (FC<<12 + 0x1000*1) >> 12 huge.
         assert!(
             g.read_control(31) & flag::IR1_SAT != 0,
-            "IR1_SAT from stage 1"
+            "IR1_SAT from discarded first term"
         );
     }
 
