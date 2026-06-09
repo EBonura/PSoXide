@@ -36,7 +36,7 @@ const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
 const FONT_CLUT: Clut = Clut::new(320, 256);
 
 const ROWS_PER_PAGE: usize = 6;
-const TEST_COUNT: usize = 110;
+const TEST_COUNT: usize = 112;
 const PAD_POLL_TEST_INDEX: usize = 26;
 const MODE_COUNT: u8 = 15;
 const CHECK_MODES: [Mode; 11] = [
@@ -950,6 +950,16 @@ const TESTS: [TestSpec; TEST_COUNT] = [
         group: "GPU",
         name: "tri coord exceeds 11-bit (wrap)",
         run: test_gpu_tri_coord_wrap,
+    },
+    TestSpec {
+        group: "GPU",
+        name: "textured gouraud tri (player prim)",
+        run: test_gpu_textured_gouraud_tri,
+    },
+    TestSpec {
+        group: "GPU",
+        name: "OT + DMA linked-list draw",
+        run: test_gpu_ot_dma_draw,
     },
     TestSpec {
         group: "SPU",
@@ -2895,6 +2905,44 @@ fn test_gpu_tri_coord_wrap() -> TestResult {
     // x=1500 exceeds the 11-bit signed range (max 1023) -> wraps on silicon.
     let tri = prim::TriFlat::new([(8, 48), (1500, 8), (48, 88)], 0x80, 0x20, 0xff);
     expect_eq(0x7396_bad5, gpu_draw_and_hash(&tri, prim::TriFlat::WORDS), "gpu tri coord wrap")
+}
+// The player's EXACT primitive: a textured Gouraud triangle sampling a real
+// VRAM texture (cortex's player is TriTexturedGouraud via OT/DMA). Upload a
+// 16x16 15bpp texture into a tpage-aligned slot, then draw + read back.
+fn test_gpu_textured_gouraud_tri() -> TestResult {
+    let mut tex = [0u16; 16 * 16];
+    for i in 0..tex.len() {
+        let x = (i % 16) as u16;
+        let y = (i / 16) as u16;
+        tex[i] = 0x8000 | (x << 10) | (y << 5) | ((x ^ y) & 0x1f);
+    }
+    psx_vram::upload_16bpp(psx_vram::VramRect::new(768, 256, 16, 16), &tex);
+    let tpage = Tpage::new(768, 256, TexDepth::Bit15).uv_tpage_word(0);
+    let tri = prim::TriTexturedGouraud::new(
+        [(8, 8), (88, 16), (40, 88)],
+        [(0, 0), (15, 0), (8, 15)],
+        [(0x80, 0x80, 0x80), (0xc0, 0x80, 0x40), (0x40, 0xc0, 0x80)],
+        0, // clut unused for 15bpp
+        tpage,
+    );
+    expect_eq(0x3ae7_aba7, gpu_draw_and_hash(&tri, prim::TriTexturedGouraud::WORDS), "gpu tex gouraud tri")
+}
+// The player's submit PATH: build an ordering table, DMA it to the GPU
+// (linked-list mode), then read back -- exercises the OT + DMA stage.
+fn test_gpu_ot_dma_draw() -> TestResult {
+    gpu_fill(GPU_SX, GPU_SY, GPU_SW, GPU_SH, 0x0000_0000);
+    gpu_draw_env_scratch();
+    let mut ot = gpu::ot::OrderingTable::<4>::new();
+    ot.clear();
+    let mut t0 = prim::TriFlat::new([(4, 4), (90, 8), (4, 90)], 0xff, 0x20, 0x20);
+    let mut t1 = prim::TriFlat::new([(90, 90), (90, 8), (8, 90)], 0x20, 0xff, 0x20);
+    let mut t2 = prim::TriFlat::new([(40, 24), (72, 64), (20, 72)], 0x20, 0x20, 0xff);
+    ot.add(2, &mut t0, prim::TriFlat::WORDS);
+    ot.add(2, &mut t1, prim::TriFlat::WORDS);
+    ot.add(0, &mut t2, prim::TriFlat::WORDS);
+    ot.submit();
+    gpu_io::wait_cmd_ready();
+    expect_eq(0x2699_9363, gpu_hash_scratch(), "gpu ot dma draw")
 }
 
 fn seed_gte_state() {
