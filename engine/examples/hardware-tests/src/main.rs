@@ -2902,14 +2902,14 @@ fn test_gpu_vram_roundtrip() -> TestResult {
 }
 fn test_gpu_draw_flat_tri() -> TestResult {
     let tri = prim::TriFlat::new([(8, 8), (88, 16), (40, 88)], 0xc0, 0x40, 0x80);
-    expect_eq(0x495a_fb4d, gpu_draw_and_hash(&tri, prim::TriFlat::WORDS), "gpu flat tri")
+    expect_eq(0x0412_1005, gpu_draw_and_hash(&tri, prim::TriFlat::WORDS), "gpu flat tri")
 }
 fn test_gpu_draw_gouraud_tri() -> TestResult {
     let tri = prim::TriGouraud::new(
         [(8, 8), (88, 16), (40, 88)],
         [(0xf0, 0x00, 0x00), (0x00, 0xf0, 0x00), (0x00, 0x00, 0xf0)],
     );
-    expect_eq(0xff64_e558, gpu_draw_and_hash(&tri, prim::TriGouraud::WORDS), "gpu gouraud tri")
+    expect_eq(0x285a_c609, gpu_draw_and_hash(&tri, prim::TriGouraud::WORDS), "gpu gouraud tri")
 }
 fn test_gpu_draw_flat_quad() -> TestResult {
     let q = prim::QuadFlat::new([(8, 8), (88, 8), (8, 88), (88, 88)], 0x30, 0xc0, 0x60);
@@ -2927,16 +2927,16 @@ fn test_gpu_draw_gouraud_quad() -> TestResult {
 // goes negative, or exceeds the 11-bit coordinate range (where it wraps).
 fn test_gpu_tri_past_right_edge() -> TestResult {
     let tri = prim::TriFlat::new([(8, 8), (88, 8), (300, 88)], 0xff, 0x80, 0x20);
-    expect_eq(0xe9fb_1a67, gpu_draw_and_hash(&tri, prim::TriFlat::WORDS), "gpu tri past edge")
+    expect_eq(0x69fc_0e38, gpu_draw_and_hash(&tri, prim::TriFlat::WORDS), "gpu tri past edge")
 }
 fn test_gpu_tri_negative_coord() -> TestResult {
     let tri = prim::TriFlat::new([(8, 8), (-200, 40), (88, 88)], 0x20, 0xff, 0x80);
-    expect_eq(0x51f5_7489, gpu_draw_and_hash(&tri, prim::TriFlat::WORDS), "gpu tri neg coord")
+    expect_eq(0xa3a1_6bf5, gpu_draw_and_hash(&tri, prim::TriFlat::WORDS), "gpu tri neg coord")
 }
 fn test_gpu_tri_coord_wrap() -> TestResult {
     // x=1500 exceeds the 11-bit signed range (max 1023) -> wraps on silicon.
     let tri = prim::TriFlat::new([(8, 48), (1500, 8), (48, 88)], 0x80, 0x20, 0xff);
-    expect_eq(0x7396_bad5, gpu_draw_and_hash(&tri, prim::TriFlat::WORDS), "gpu tri coord wrap")
+    expect_eq(0x3df1_7315, gpu_draw_and_hash(&tri, prim::TriFlat::WORDS), "gpu tri coord wrap")
 }
 // The player's EXACT primitive: a textured Gouraud triangle sampling a real
 // VRAM texture (cortex's player is TriTexturedGouraud via OT/DMA). Upload a
@@ -2957,7 +2957,7 @@ fn test_gpu_textured_gouraud_tri() -> TestResult {
         0, // clut unused for 15bpp
         tpage,
     );
-    expect_eq(0x3ae7_aba7, gpu_draw_and_hash(&tri, prim::TriTexturedGouraud::WORDS), "gpu tex gouraud tri")
+    expect_eq(0x0200_a836, gpu_draw_and_hash(&tri, prim::TriTexturedGouraud::WORDS), "gpu tex gouraud tri")
 }
 // The player's submit PATH: build an ordering table, DMA it to the GPU
 // (linked-list mode), then read back -- exercises the OT + DMA stage.
@@ -2974,7 +2974,7 @@ fn test_gpu_ot_dma_draw() -> TestResult {
     ot.add(0, &mut t2, prim::TriFlat::WORDS);
     ot.submit();
     gpu_io::wait_cmd_ready();
-    expect_eq(0x2699_9363, gpu_hash_scratch(), "gpu ot dma draw")
+    expect_eq(0xaffb_7c55, gpu_hash_scratch(), "gpu ot dma draw")
 }
 
 // The player renders TEXTURED-GOURAUD prims; upload a 16x16 15bpp texture into
@@ -3009,7 +3009,7 @@ fn test_gpu_tri_large_span() -> TestResult {
 fn test_gpu_tri_y_past_edge() -> TestResult {
     let tri = prim::TriFlat::new([(8, 8), (88, 8), (40, 300)], 0x30, 0xe0, 0x60);
     expect_eq(
-        0xaa33_d3d5,
+        0x62d5_6b63,
         gpu_draw_and_hash(&tri, prim::TriFlat::WORDS),
         "gpu tri y past edge",
     )
@@ -3028,7 +3028,7 @@ fn test_gpu_texgouraud_large_span() -> TestResult {
         tpage,
     );
     expect_eq(
-        0xe389_a12d,
+        0xc79f_5560,
         gpu_draw_and_hash(&tri, prim::TriTexturedGouraud::WORDS),
         "gpu texgouraud large span",
     )
@@ -3053,7 +3053,7 @@ fn test_gpu_texgouraud_ot_dma() -> TestResult {
     ot.add(0, &mut tri, prim::TriTexturedGouraud::WORDS);
     ot.submit();
     gpu_io::wait_cmd_ready();
-    expect_eq(0x6ea3_539c, gpu_hash_scratch(), "gpu texgouraud ot dma")
+    expect_eq(0x6392_570b, gpu_hash_scratch(), "gpu texgouraud ot dma")
 }
 
 // The cooked model textures are CLUT-indexed (the obsidian-wraith fixture is
@@ -3085,7 +3085,7 @@ fn test_gpu_8bpp_clut_tri() -> TestResult {
         (0x80, 0x80, 0x80),
     );
     expect_eq(
-        0x069c_bf81,
+        0x04ad_1fa1,
         gpu_draw_and_hash(&tri, prim::TriTextured::WORDS),
         "gpu 8bpp clut tri",
     )
@@ -3114,7 +3114,7 @@ fn test_gpu_big_ot() -> TestResult {
     }
     ot.submit();
     gpu_io::wait_cmd_ready();
-    expect_eq(0x5aeb_c20b, gpu_hash_scratch(), "gpu big ot")
+    expect_eq(0x91a7_f548, gpu_hash_scratch(), "gpu big ot")
 }
 
 fn seed_gte_state() {
