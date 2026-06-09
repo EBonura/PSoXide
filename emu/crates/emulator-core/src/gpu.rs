@@ -1728,40 +1728,80 @@ impl Gpu {
         // the scanline walk itself is identical -- reuse `setup_sections`
         // with zeroed colour/UV and just plot `color` for every pixel
         // between leftX and rightX per scanline.
-        let Some(mut setup) = setup_sections(
-            [v0.0, v1.0, v2.0],
-            [v0.1, v1.1, v2.1],
-            [(0, 0, 0); 3],
-            [(0, 0); 3],
-        ) else {
-            return;
+        // PS1 silicon triangle coverage (Mednafen/DuckStation DDA): sort by
+        // Y, walk the long edge (a->c) and the two short edges (a->b, b->c)
+        // in Q32.32 with the half-pixel edge bias `makefp`, plot
+        // [unfp(left), unfp(right)) per scanline (right-exclusive). This is
+        // center-sampled; the Redux scanline-delta path it replaces sampled
+        // pixel corners, which real hardware (ledger HWB-005) rejects on
+        // every diagonal-edged triangle.
+        let mut p = [v0, v1, v2];
+        p.sort_by_key(|q| q.1);
+        let (a, b, c) = (p[0], p[1], p[2]);
+        if a.1 == c.1 {
+            return; // zero vertical extent
+        }
+        let makefp = |x: i32| -> i64 { ((x as i64) << 32) + ((1i64 << 32) - (1 << 11)) };
+        let makestep = |dx: i32, dy: i32| -> i64 {
+            let bias = if dx < 0 {
+                -((dy - 1) as i64)
+            } else if dx > 0 {
+                (dy - 1) as i64
+            } else {
+                0
+            };
+            (((dx as i64) << 32) + bias) / (dy as i64)
+        };
+        let unfp = |xfp: i64| -> i32 { (xfp >> 32) as i32 };
+        let base_coord = makefp(a.0);
+        let base_step = makestep(c.0 - a.0, c.1 - a.1);
+        let bound_us = if b.1 == a.1 {
+            0
+        } else {
+            makestep(b.0 - a.0, b.1 - a.1)
+        };
+        let bound_ls = if c.1 == b.1 {
+            0
+        } else {
+            makestep(c.0 - b.0, c.1 - b.1)
+        };
+        let right_facing = if b.1 == a.1 {
+            b.0 > a.0
+        } else {
+            bound_us > base_step
         };
 
         let draw_top = self.draw_area_top as i32;
         let draw_bottom = self.draw_area_bottom as i32;
         let draw_left = self.draw_area_left as i32;
         let draw_right = self.draw_area_right as i32;
-        let mut y = setup.y_min;
-        while y < draw_top {
-            if setup.next_row().is_err() {
-                return;
-            }
-            y += 1;
-        }
-        let y_max = setup.y_max.min(draw_bottom);
-        while y <= y_max {
-            let xmin = (setup.left_x >> 16) as i32;
-            let xmax = ((setup.right_x >> 16) as i32 - 1).min(draw_right);
-            let xmin_clipped = xmin.max(draw_left);
-            let mut j = xmin_clipped;
-            while j <= xmax {
-                self.plot_pixel(j as u16, y as u16, color, mode);
-                j += 1;
-            }
-            if setup.next_row().is_err() {
-                return;
-            }
-            y += 1;
+
+        let plot_part =
+            |this: &mut Self, y0: i32, y1: i32, mut lx: i64, lstep: i64, mut rx: i64, rstep: i64| {
+                let mut y = y0;
+                while y < y1 {
+                    if y >= draw_top && y <= draw_bottom {
+                        let xs = unfp(lx).max(draw_left);
+                        let xe = unfp(rx).min(draw_right + 1); // right-exclusive
+                        let mut x = xs;
+                        while x < xe {
+                            this.plot_pixel(x as u16, y as u16, color, mode);
+                            x += 1;
+                        }
+                    }
+                    lx += lstep;
+                    rx += rstep;
+                    y += 1;
+                }
+            };
+
+        let long_at_b = base_coord + ((b.1 - a.1) as i64) * base_step;
+        if right_facing {
+            plot_part(self, a.1, b.1, base_coord, base_step, makefp(a.0), bound_us);
+            plot_part(self, b.1, c.1, long_at_b, base_step, makefp(b.0), bound_ls);
+        } else {
+            plot_part(self, a.1, b.1, makefp(a.0), bound_us, base_coord, base_step);
+            plot_part(self, b.1, c.1, makefp(b.0), bound_ls, long_at_b, base_step);
         }
     }
 
