@@ -30,11 +30,178 @@ use blend::{
     blend_pixel, dither_rgb, modulate_tint, modulate_tint_dithered, prim_blend_mode,
     prim_is_semi_trans, rgb24_to_bgr15, split_tint, RAW_TEXTURE_TINT,
 };
-use raster::{setup_sections, triangle_exceeds_hw_extent};
+use raster::triangle_exceeds_hw_extent;
 use status::GpuStatus;
 
 use crate::vram::{Vram, VRAM_HEIGHT, VRAM_WIDTH};
 use commands::gp0_packet_size;
+
+/// Rasterize a triangle with PS1-silicon coverage AND attribute interpolation
+/// (Mednafen/DuckStation `DrawTriangle`), calling `plot(x, y, r, g, b, u, v)`
+/// for every covered pixel. Coverage is the center-sampled DDA (same rule the
+/// flat path uses); attributes use the determinant-plane interpolation with
+/// the exact `tl` (top-left) anchor, so the integer-truncated gradients land
+/// bit-identically to hardware. The caller's closure owns texture sampling,
+/// dither, blend and the actual VRAM write -- this just supplies coverage and
+/// the per-pixel interpolated R/G/B/U/V. Verified pixel-exact against real
+/// silicon (hardware-tests GPU read-back battery).
+///
+/// Caller must apply the polygon-too-large extent cull first; this assumes the
+/// triangle is drawable.
+#[allow(clippy::too_many_arguments)]
+fn for_each_tri_pixel(
+    mut v: [(i32, i32); 3],
+    mut rgb: [(i32, i32, i32); 3],
+    mut uv: [(i32, i32); 3],
+    draw_top: i32,
+    draw_bottom: i32,
+    draw_left: i32,
+    draw_right: i32,
+    mut plot: impl FnMut(i32, i32, u8, u8, u8, u8, u8),
+) {
+    // Top-left vertex (attribute-interpolation anchor): computed from the
+    // ORIGINAL vertex order, then carried through the Y-sort swaps. The anchor
+    // is bit-significant because the gradients below are integer-truncated.
+    let (o0, o1, o2) = (v[0], v[1], v[2]);
+    let mut tl: u32 = if o1.0 <= o0.0 {
+        if o2.0 <= o1.0 {
+            4
+        } else {
+            2
+        }
+    } else if o2.0 < o0.0 {
+        4
+    } else {
+        1
+    };
+    macro_rules! swap_attr {
+        ($i:expr, $j:expr) => {{
+            v.swap($i, $j);
+            rgb.swap($i, $j);
+            uv.swap($i, $j);
+        }};
+    }
+    if v[2].1 < v[1].1 {
+        swap_attr!(2, 1);
+        tl = ((tl >> 1) & 0x2) | ((tl << 1) & 0x4) | (tl & 0x1);
+    }
+    if v[1].1 < v[0].1 {
+        swap_attr!(1, 0);
+        tl = ((tl >> 1) & 0x1) | ((tl << 1) & 0x2) | (tl & 0x4);
+    }
+    if v[2].1 < v[1].1 {
+        swap_attr!(2, 1);
+        tl = ((tl >> 1) & 0x2) | ((tl << 1) & 0x4) | (tl & 0x1);
+    }
+    let tl = (tl >> 1) as usize;
+
+    let (a, b, c) = (v[0], v[1], v[2]); // sorted top, middle, bottom by Y
+    if a.1 == c.1 {
+        return;
+    }
+    let det =
+        ((b.0 - a.0) as i64) * ((c.1 - b.1) as i64) - ((c.0 - b.0) as i64) * ((b.1 - a.1) as i64);
+    if det == 0 {
+        return;
+    }
+    let anchor = v[tl];
+    // Determinant-plane for one attribute channel -> (dadx, dady, base) as u32,
+    // where attr(x, y) = (base + x*dadx + y*dady) >> 24 (low byte). Matches
+    // DuckStation's ATTRIB_STEP scaling (Q12 + Q12 post-shift) and the
+    // Init/StepX(-anchor)/StepY(-anchor) origin fold, in u32 wrapping math.
+    let mk = |a0: i32, a1: i32, a2: i32, anchor_a: i32| -> (u32, u32, u32) {
+        let num_dx =
+            ((a1 - a0) as i64) * ((c.1 - b.1) as i64) - ((a2 - a1) as i64) * ((b.1 - a.1) as i64);
+        let num_dy =
+            ((b.0 - a.0) as i64) * ((a2 - a1) as i64) - ((c.0 - b.0) as i64) * ((a1 - a0) as i64);
+        let dadx = ((num_dx * 4096 / det) as u32).wrapping_shl(12);
+        let dady = ((num_dy * 4096 / det) as u32).wrapping_shl(12);
+        let base = ((anchor_a as u32) << 24)
+            .wrapping_add(1u32 << 23)
+            .wrapping_sub((anchor.0 as u32).wrapping_mul(dadx))
+            .wrapping_sub((anchor.1 as u32).wrapping_mul(dady));
+        (dadx, dady, base)
+    };
+    let pr = mk(rgb[0].0, rgb[1].0, rgb[2].0, rgb[tl].0);
+    let pg = mk(rgb[0].1, rgb[1].1, rgb[2].1, rgb[tl].1);
+    let pb = mk(rgb[0].2, rgb[1].2, rgb[2].2, rgb[tl].2);
+    let pu = mk(uv[0].0, uv[1].0, uv[2].0, uv[tl].0);
+    let pv = mk(uv[0].1, uv[1].1, uv[2].1, uv[tl].1);
+    let eval = |p: (u32, u32, u32), x: i32, y: i32| -> u8 {
+        (p.2
+            .wrapping_add((x as u32).wrapping_mul(p.0))
+            .wrapping_add((y as u32).wrapping_mul(p.1))
+            >> 24) as u8
+    };
+
+    // Center-sampled coverage DDA (identical rule to the flat path).
+    let makefp = |x: i32| -> i64 { ((x as i64) << 32) + ((1i64 << 32) - (1 << 11)) };
+    let makestep = |dx: i32, dy: i32| -> i64 {
+        let bias = if dx < 0 {
+            -((dy - 1) as i64)
+        } else if dx > 0 {
+            (dy - 1) as i64
+        } else {
+            0
+        };
+        (((dx as i64) << 32) + bias) / (dy as i64)
+    };
+    let unfp = |xfp: i64| -> i32 { (xfp >> 32) as i32 };
+    let base_coord = makefp(a.0);
+    let base_step = makestep(c.0 - a.0, c.1 - a.1);
+    let bound_us = if b.1 == a.1 {
+        0
+    } else {
+        makestep(b.0 - a.0, b.1 - a.1)
+    };
+    let bound_ls = if c.1 == b.1 {
+        0
+    } else {
+        makestep(c.0 - b.0, c.1 - b.1)
+    };
+    let right_facing = if b.1 == a.1 {
+        b.0 > a.0
+    } else {
+        bound_us > base_step
+    };
+    let long_at_b = base_coord + ((b.1 - a.1) as i64) * base_step;
+    let parts: [(i32, i32, i64, i64, i64, i64); 2] = if right_facing {
+        [
+            (a.1, b.1, base_coord, base_step, makefp(a.0), bound_us),
+            (b.1, c.1, long_at_b, base_step, makefp(b.0), bound_ls),
+        ]
+    } else {
+        [
+            (a.1, b.1, makefp(a.0), bound_us, base_coord, base_step),
+            (b.1, c.1, makefp(b.0), bound_ls, long_at_b, base_step),
+        ]
+    };
+    for (y0, y1, mut lx, ls, mut rx, rs) in parts {
+        let mut y = y0;
+        while y < y1 {
+            if y >= draw_top && y <= draw_bottom {
+                let xs = unfp(lx).max(draw_left);
+                let xe = unfp(rx).min(draw_right + 1); // right-exclusive
+                let mut x = xs;
+                while x < xe {
+                    plot(
+                        x,
+                        y,
+                        eval(pr, x, y),
+                        eval(pg, x, y),
+                        eval(pb, x, y),
+                        eval(pu, x, y),
+                        eval(pv, x, y),
+                    );
+                    x += 1;
+                }
+            }
+            lx += ls;
+            rx += rs;
+            y += 1;
+        }
+    }
+}
 
 /// Physical address of the GP0 / GPUREAD port.
 pub const GP0_ADDR: u32 = 0x1F80_1810;
@@ -1724,10 +1891,6 @@ impl Gpu {
         if triangle_exceeds_hw_extent(v0, v1, v2) {
             return;
         }
-        // Flat triangles don't need Gouraud or UV interpolation, but
-        // the scanline walk itself is identical -- reuse `setup_sections`
-        // with zeroed colour/UV and just plot `color` for every pixel
-        // between leftX and rightX per scanline.
         // PS1 silicon triangle coverage (Mednafen/DuckStation DDA): sort by
         // Y, walk the long edge (a->c) and the two short edges (a->b, b->c)
         // in Q32.32 with the half-pixel edge bias `makefp`, plot
@@ -2124,90 +2287,40 @@ impl Gpu {
             (t1.0 as i32, t1.1 as i32),
             (t2.0 as i32, t2.1 as i32),
         ];
-        let Some(mut setup) = setup_sections([v0.0, v1.0, v2.0], [v0.1, v1.1, v2.1], v_rgb, v_uv)
-        else {
-            return;
-        };
-
-        let dif_r = setup.delta_col_r;
-        let dif_g = setup.delta_col_g;
-        let dif_b = setup.delta_col_b;
-        let dif_u = setup.delta_col_u;
-        let dif_v = setup.delta_col_v;
-
         let draw_top = self.draw_area_top as i32;
         let draw_bottom = self.draw_area_bottom as i32;
         let draw_left = self.draw_area_left as i32;
         let draw_right = self.draw_area_right as i32;
-        let mut y = setup.y_min;
-        while y < draw_top {
-            if setup.next_row().is_err() {
-                return;
-            }
-            y += 1;
-        }
-        let y_max = setup.y_max.min(draw_bottom);
-
-        while y <= y_max {
-            let xmin = (setup.left_x >> 16) as i32;
-            let xmax_raw = (setup.right_x >> 16) as i32 - 1;
-            let xmax = xmax_raw.min(draw_right);
-            if xmax >= xmin {
-                let mut c_r = setup.left_r;
-                let mut c_g = setup.left_g;
-                let mut c_b = setup.left_b;
-                let mut c_u = setup.left_u;
-                let mut c_v = setup.left_v;
-                let xmin_clipped = if xmin < draw_left {
-                    let skip = (draw_left - xmin) as i64;
-                    c_r += skip * dif_r;
-                    c_g += skip * dif_g;
-                    c_b += skip * dif_b;
-                    c_u += skip * dif_u;
-                    c_v += skip * dif_v;
-                    draw_left
-                } else {
-                    xmin
-                };
-                let mut j = xmin_clipped;
-                while j <= xmax {
-                    let u = (c_u >> 16) as u16;
-                    let v = (c_v >> 16) as u16;
-                    if let Some(texel) = self.sample_texture(u, v, clut_x, clut_y) {
-                        let (tint_r, tint_g, tint_b) = if raw_texture {
-                            RAW_TEXTURE_TINT
-                        } else {
-                            (
-                                ((c_r >> 16).clamp(0, 255)) as u32,
-                                ((c_g >> 16).clamp(0, 255)) as u32,
-                                ((c_b >> 16).clamp(0, 255)) as u32,
-                            )
-                        };
-                        let shaded = if !raw_texture && self.dither_enabled {
-                            modulate_tint_dithered(texel, tint_r, tint_g, tint_b, j, y)
-                        } else {
-                            modulate_tint(texel, tint_r, tint_g, tint_b)
-                        };
-                        let mode = if semi_trans && (texel & 0x8000) != 0 {
-                            tpage_mode
-                        } else {
-                            BlendMode::Opaque
-                        };
-                        self.plot_pixel(j as u16, y as u16, shaded, mode);
-                    }
-                    c_r += dif_r;
-                    c_g += dif_g;
-                    c_b += dif_b;
-                    c_u += dif_u;
-                    c_v += dif_v;
-                    j += 1;
+        let dither = self.dither_enabled;
+        for_each_tri_pixel(
+            [v0, v1, v2],
+            v_rgb,
+            v_uv,
+            draw_top,
+            draw_bottom,
+            draw_left,
+            draw_right,
+            |x, y, ri, gi, bi, u, v| {
+                if let Some(texel) = self.sample_texture(u as u16, v as u16, clut_x, clut_y) {
+                    let (tint_r, tint_g, tint_b) = if raw_texture {
+                        RAW_TEXTURE_TINT
+                    } else {
+                        (ri as u32, gi as u32, bi as u32)
+                    };
+                    let shaded = if !raw_texture && dither {
+                        modulate_tint_dithered(texel, tint_r, tint_g, tint_b, x, y)
+                    } else {
+                        modulate_tint(texel, tint_r, tint_g, tint_b)
+                    };
+                    let mode = if semi_trans && (texel & 0x8000) != 0 {
+                        tpage_mode
+                    } else {
+                        BlendMode::Opaque
+                    };
+                    self.plot_pixel(x as u16, y as u16, shaded, mode);
                 }
-            }
-            if setup.next_row().is_err() {
-                return;
-            }
-            y += 1;
-        }
+            },
+        );
     }
 
     /// Apply the tpage bits embedded in a textured-primitive UV word
@@ -2325,65 +2438,30 @@ impl Gpu {
             (t1.0 as i32, t1.1 as i32),
             (t2.0 as i32, t2.1 as i32),
         ];
-        let Some(mut setup) =
-            setup_sections([v0.0, v1.0, v2.0], [v0.1, v1.1, v2.1], [(0, 0, 0); 3], v_uv)
-        else {
-            return;
-        };
-
-        let dif_u = setup.delta_col_u;
-        let dif_v = setup.delta_col_v;
-
         let draw_top = self.draw_area_top as i32;
         let draw_bottom = self.draw_area_bottom as i32;
         let draw_left = self.draw_area_left as i32;
         let draw_right = self.draw_area_right as i32;
-        let mut y = setup.y_min;
-        while y < draw_top {
-            if setup.next_row().is_err() {
-                return;
-            }
-            y += 1;
-        }
-        let y_max = setup.y_max.min(draw_bottom);
-
-        while y <= y_max {
-            let xmin = (setup.left_x >> 16) as i32;
-            let xmax = ((setup.right_x >> 16) as i32 - 1).min(draw_right);
-            if xmax >= xmin {
-                let mut c_u = setup.left_u;
-                let mut c_v = setup.left_v;
-                let xmin_clipped = if xmin < draw_left {
-                    let skip = (draw_left - xmin) as i64;
-                    c_u += skip * dif_u;
-                    c_v += skip * dif_v;
-                    draw_left
-                } else {
-                    xmin
-                };
-                let mut j = xmin_clipped;
-                while j <= xmax {
-                    let u = (c_u >> 16) as u16;
-                    let v = (c_v >> 16) as u16;
-                    if let Some(texel) = self.sample_texture(u, v, clut_x, clut_y) {
-                        let shaded = modulate_tint(texel, tint.0, tint.1, tint.2);
-                        let mode = if semi_trans && (texel & 0x8000) != 0 {
-                            tpage_mode
-                        } else {
-                            BlendMode::Opaque
-                        };
-                        self.plot_pixel(j as u16, y as u16, shaded, mode);
-                    }
-                    c_u += dif_u;
-                    c_v += dif_v;
-                    j += 1;
+        for_each_tri_pixel(
+            [v0, v1, v2],
+            [(0, 0, 0); 3],
+            v_uv,
+            draw_top,
+            draw_bottom,
+            draw_left,
+            draw_right,
+            |x, y, _r, _g, _b, u, v| {
+                if let Some(texel) = self.sample_texture(u as u16, v as u16, clut_x, clut_y) {
+                    let shaded = modulate_tint(texel, tint.0, tint.1, tint.2);
+                    let mode = if semi_trans && (texel & 0x8000) != 0 {
+                        tpage_mode
+                    } else {
+                        BlendMode::Opaque
+                    };
+                    self.plot_pixel(x as u16, y as u16, shaded, mode);
                 }
-            }
-            if setup.next_row().is_err() {
-                return;
-            }
-            y += 1;
-        }
+            },
+        );
     }
 
     /// Rasterize a triangle with per-vertex colours -- Gouraud shading.
@@ -2410,14 +2488,6 @@ impl Gpu {
         if triangle_exceeds_hw_extent(v0, v1, v2) {
             return;
         }
-        let min_x = v0.0.min(v1.0).min(v2.0).max(self.draw_area_left as i32);
-        let max_x = v0.0.max(v1.0).max(v2.0).min(self.draw_area_right as i32);
-        let min_y = v0.1.min(v1.1).min(v2.1).max(self.draw_area_top as i32);
-        let max_y = v0.1.max(v1.1).max(v2.1).min(self.draw_area_bottom as i32);
-        if min_x > max_x || min_y > max_y {
-            return;
-        }
-
         // Channel-extract closures -- r/g/b are low/mid/high bytes of the
         // 24-bit word written in the command.
         let r = |c: u32| (c & 0xFF) as i32;
@@ -2428,87 +2498,28 @@ impl Gpu {
             (r(c1), g(c1), b(c1)),
             (r(c2), g(c2), b(c2)),
         ];
-        let Some(mut setup) =
-            setup_sections([v0.0, v1.0, v2.0], [v0.1, v1.1, v2.1], v_rgb, [(0, 0); 3])
-        else {
-            return;
-        };
-
-        // Per-column (per-pixel horizontal) deltas -- computed once at
-        // setup, applied on every step within a scanline.
-        let dif_r = setup.delta_col_r;
-        let dif_g = setup.delta_col_g;
-        let dif_b = setup.delta_col_b;
-
-        // Clip the top of the triangle against the draw-area top: step
-        // the sections down until `y_min` reaches `draw_area_top`. If we
-        // exit early, the triangle is entirely above the drawable region.
         let draw_top = self.draw_area_top as i32;
         let draw_bottom = self.draw_area_bottom as i32;
         let draw_left = self.draw_area_left as i32;
         let draw_right = self.draw_area_right as i32;
-        let mut y = setup.y_min;
-        while y < draw_top {
-            if setup.next_row().is_err() {
-                return;
-            }
-            y += 1;
-        }
-        let y_max = setup.y_max.min(draw_bottom);
-
-        while y <= y_max {
-            let xmin = (setup.left_x >> 16) as i32;
-            let xmax_raw = (setup.right_x >> 16) as i32 - 1;
-            let xmax = xmax_raw.min(draw_right);
-            if xmax >= xmin {
-                // Starting attributes at the left edge of this scanline.
-                let mut c_r = setup.left_r;
-                let mut c_g = setup.left_g;
-                let mut c_b = setup.left_b;
-                // Clip left to draw_area_left: step the per-column deltas
-                // forward by `(draw_left - xmin)` pixels to skip the
-                // hidden left portion.
-                let xmin_clipped = if xmin < draw_left {
-                    let skip = (draw_left - xmin) as i64;
-                    c_r += skip * dif_r;
-                    c_g += skip * dif_g;
-                    c_b += skip * dif_b;
-                    draw_left
+        let dither = self.dither_enabled;
+        for_each_tri_pixel(
+            [v0, v1, v2],
+            v_rgb,
+            [(0, 0); 3],
+            draw_top,
+            draw_bottom,
+            draw_left,
+            draw_right,
+            |x, y, ri, gi, bi, _u, _v| {
+                let colour = if dither {
+                    dither_rgb(ri as i32, gi as i32, bi as i32, x, y)
                 } else {
-                    xmin
+                    rgb24_to_bgr15((ri as u32) | ((gi as u32) << 8) | ((bi as u32) << 16))
                 };
-                let mut j = xmin_clipped;
-                while j <= xmax {
-                    // Redux packs the 8-bit channels into the top byte
-                    // of each Q16.16 accumulator -- recover them with
-                    // `>> 16`. Clamp isn't necessary for well-formed
-                    // triangles (vertex colours are 0..=255 and the
-                    // per-column deltas keep them in range), but we
-                    // clamp to match hardware's saturation anyway.
-                    let ri = (c_r >> 16) as i32;
-                    let gi = (c_g >> 16) as i32;
-                    let bi = (c_b >> 16) as i32;
-                    let colour = if self.dither_enabled {
-                        dither_rgb(ri, gi, bi, j, y)
-                    } else {
-                        rgb24_to_bgr15(
-                            (ri.clamp(0, 255) as u32)
-                                | ((gi.clamp(0, 255) as u32) << 8)
-                                | ((bi.clamp(0, 255) as u32) << 16),
-                        )
-                    };
-                    self.plot_pixel(j as u16, y as u16, colour, mode);
-                    c_r += dif_r;
-                    c_g += dif_g;
-                    c_b += dif_b;
-                    j += 1;
-                }
-            }
-            if setup.next_row().is_err() {
-                return;
-            }
-            y += 1;
-        }
+                self.plot_pixel(x as u16, y as u16, colour, mode);
+            },
+        );
     }
 
     // --- Lines (GP0 0x40..=0x5F) ---
