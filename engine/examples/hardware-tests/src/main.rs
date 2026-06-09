@@ -36,7 +36,7 @@ const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
 const FONT_CLUT: Clut = Clut::new(320, 256);
 
 const ROWS_PER_PAGE: usize = 6;
-const TEST_COUNT: usize = 68;
+const TEST_COUNT: usize = 94;
 const PAD_POLL_TEST_INDEX: usize = 26;
 const MODE_COUNT: u8 = 15;
 const CHECK_MODES: [Mode; 11] = [
@@ -740,6 +740,136 @@ const TESTS: [TestSpec; TEST_COUNT] = [
         group: "GTE",
         name: "NCLIP MAC0 after 16 nops",
         run: test_gte_nclip_mac0_nop16,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "scene MVMVA A (RT*V0+TR)",
+        run: test_gte_scene_mvmva_a,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "scene MVMVA B (RT*V0+TR)",
+        run: test_gte_scene_mvmva_b,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "scene MVMVA C (RT*V0+TR)",
+        run: test_gte_scene_mvmva_c,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "scene MVMVA D (RT*V0+TR)",
+        run: test_gte_scene_mvmva_d,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "scene RTPT A SXY (div-ovf)",
+        run: test_gte_scene_rtpt_a_sxy,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "scene RTPT B SXY (div-ovf)",
+        run: test_gte_scene_rtpt_b_sxy,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "scene RTPT C SXY (div-ovf)",
+        run: test_gte_scene_rtpt_c_sxy,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "scene RTPT D SXY (all-clamp)",
+        run: test_gte_scene_rtpt_d_sxy,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "scene RTPT E SXY (in-frustum)",
+        run: test_gte_scene_rtpt_e_sxy,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "scene RTPT F SXY (in-frustum)",
+        run: test_gte_scene_rtpt_f_sxy,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "scene RTPT A FLAG (0x80006000)",
+        run: test_gte_scene_rtpt_a_flag,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "scene RTPT B FLAG (0x80066000)",
+        run: test_gte_scene_rtpt_b_flag,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "scene RTPT A SZ3 depth",
+        run: test_gte_scene_rtpt_a_sz3,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "scene RTPT E SZ3 depth",
+        run: test_gte_scene_rtpt_e_sz3,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "scene NCLIP A MAC0 (real)",
+        run: test_gte_scene_nclip_a,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "scene NCLIP B MAC0 (real)",
+        run: test_gte_scene_nclip_b,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "scene NCLIP C MAC0 (real)",
+        run: test_gte_scene_nclip_c,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "LZCR 0x00ffffff = 8",
+        run: test_gte_lzcr_zeros,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "LZCR 0xffff0000 = 16",
+        run: test_gte_lzcr_half,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "LZCR 0x00000001 = 31",
+        run: test_gte_lzcr_one,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "LZCR 0x7fffffff = 1",
+        run: test_gte_lzcr_posmax,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "LZCR 0x80000000 = 1",
+        run: test_gte_lzcr_negmin,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "MVMVA FC-mode hardware bug",
+        run: test_gte_mvmva_fc_bug,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "SQR squares IR1..3",
+        run: test_gte_sqr,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "OP cross product",
+        run: test_gte_op,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "AVSZ3 averages SZ -> OTZ",
+        run: test_gte_avsz3,
     },
     TestSpec {
         group: "SPU",
@@ -2312,6 +2442,171 @@ fn test_gte_scene_rtps_d_sxy() -> TestResult {
 fn test_gte_scene_rtps_d_flag() -> TestResult {
     scene_rtps(0x099c_f335, 0x0000_0000);
     expect_eq(0x8000_6000, cfc2!(31), "scene rtps D FLAG")
+}
+
+// ---------------------------------------------------------------------------
+// Comprehensive GTE conformance, part 2: the ops the scene runs BESIDES RTPS
+// (inputs captured by probe_gameplay_gte_ops) plus a corner-case battery.
+// Expecteds are PSoXide's own outputs (verified by the gte_expected_values
+// host tool and the psx-gte-core mirror), so every case is green in-emulator
+// and any FAIL on silicon is a real divergence. MVMVA is the prime vertex-
+// explosion suspect; RTPT's divide-overflow SXY clamp is the other; NCLIP
+// MAC0 is the missing-wall backface test, here with the scene's REAL coords.
+
+/// Fold three GTE result words into one digest sensitive to each, so a single
+/// dashboard line can cover a 3-component output (a transformed vector or
+/// three projected screen XYs).
+fn gte_tri_digest(a: u32, b: u32, c: u32) -> u32 {
+    a ^ b.rotate_left(11) ^ c.rotate_left(22)
+}
+
+/// Rotation (RT) + real camera translation (TR) + projection (OFX/OFY/H) +
+/// zeroed depth-cue (DQA/DQB) shared across the captured gameplay frame.
+/// Unlike `seed_scene_rtps`, TR is nonzero here (world geometry).
+fn seed_scene_xform() {
+    ctc2!(31, 0); // FLAG
+    ctc2!(0, 0x0000_0f19);
+    ctc2!(1, 0x016e_fab4);
+    ctc2!(2, 0x0411_f098);
+    ctc2!(3, 0xfbb1_fae7);
+    ctc2!(4, 0xffff_f177);
+    ctc2!(5, 0xffff_eabc); // TRX
+    ctc2!(6, 0xffff_fdb9); // TRY
+    ctc2!(7, 0x0000_35be); // TRZ
+    ctc2!(24, 0x00a0_0000); // OFX
+    ctc2!(25, 0x0078_0000); // OFY
+    ctc2!(26, 0x0000_0140); // H
+    ctc2!(27, 0); // DQA
+    ctc2!(28, 0); // DQB
+}
+
+// Scene MVMVA: RT*V0 + TR, sf=1 (skinning/world transform). FLAG never fires
+// -- exact integer math -- so a divergence is a plain matrix-multiply miss.
+fn scene_mvmva_digest(vxy0: u32, vz0: u32) -> u32 {
+    seed_scene_xform();
+    mtc2!(0, vxy0);
+    mtc2!(1, vz0);
+    unsafe { gte_ops::mvmva_rt_v0_tr_sf1() };
+    gte_tri_digest(mfc2!(25), mfc2!(26), mfc2!(27))
+}
+fn test_gte_scene_mvmva_a() -> TestResult {
+    expect_eq(0xca74_6d65, scene_mvmva_digest(0x2040_0340, 0x0000_09c0), "scene mvmva A")
+}
+fn test_gte_scene_mvmva_b() -> TestResult {
+    expect_eq(0xd65a_09bf, scene_mvmva_digest(0x2040_0340, 0x0000_16c0), "scene mvmva B")
+}
+fn test_gte_scene_mvmva_c() -> TestResult {
+    expect_eq(0x511b_ee0c, scene_mvmva_digest(0x0b00_0340, 0x0000_23c0), "scene mvmva C")
+}
+fn test_gte_scene_mvmva_d() -> TestResult {
+    expect_eq(0x46ef_d743, scene_mvmva_digest(0x2040_09c0, 0x0000_09c0), "scene mvmva D")
+}
+
+// Scene RTPT: projects 3 verts; divide-overflow cases clamp SXY to the
+// screen-coord limits -- the exact regime behind missing/exploded triangles.
+const RTPT_A: [u32; 6] = [0x0480_2d80, 0x0000_2700, 0x0480_2080, 0x0000_2d80, 0x0480_1a00, 0x0000_2d80];
+const RTPT_B: [u32; 6] = [0x0480_2700, 0x0000_2d80, 0x0480_2d80, 0x0000_2d80, 0x0480_2080, 0x0000_3400];
+const RTPT_C: [u32; 6] = [0x0480_1a00, 0x0000_3400, 0x0480_2700, 0x0000_3400, 0x0480_2d80, 0x0000_3400];
+const RTPT_D: [u32; 6] = [0x0680_3400, 0x0000_2d80, 0x0480_3400, 0x0000_3400, 0x0680_3a80, 0x0000_2700];
+const RTPT_E: [u32; 6] = [0x10c0_0000, 0x0000_0d00, 0x10c0_0680, 0x0000_0d00, 0x1dc0_0680, 0x0000_0d00];
+const RTPT_F: [u32; 6] = [0x1dc0_0000, 0x0000_0d00, 0x10c0_0680, 0x0000_1380, 0x10c0_0000, 0x0000_1380];
+fn scene_rtpt(v: [u32; 6]) {
+    seed_scene_xform();
+    mtc2!(0, v[0]);
+    mtc2!(1, v[1]);
+    mtc2!(2, v[2]);
+    mtc2!(3, v[3]);
+    mtc2!(4, v[4]);
+    mtc2!(5, v[5]);
+    unsafe { gte_ops::rtpt() };
+}
+fn rtpt_sxy_digest(v: [u32; 6]) -> u32 {
+    scene_rtpt(v);
+    gte_tri_digest(mfc2!(12), mfc2!(13), mfc2!(14))
+}
+fn test_gte_scene_rtpt_a_sxy() -> TestResult { expect_eq(0xfc1f_e61f, rtpt_sxy_digest(RTPT_A), "rtpt A sxy") }
+fn test_gte_scene_rtpt_b_sxy() -> TestResult { expect_eq(0xfbe0_066f, rtpt_sxy_digest(RTPT_B), "rtpt B sxy") }
+fn test_gte_scene_rtpt_c_sxy() -> TestResult { expect_eq(0x03d5_13df, rtpt_sxy_digest(RTPT_C), "rtpt C sxy") }
+fn test_gte_scene_rtpt_d_sxy() -> TestResult { expect_eq(0x0420_0420, rtpt_sxy_digest(RTPT_D), "rtpt D sxy") }
+fn test_gte_scene_rtpt_e_sxy() -> TestResult { expect_eq(0xaf36_5a05, rtpt_sxy_digest(RTPT_E), "rtpt E sxy") }
+fn test_gte_scene_rtpt_f_sxy() -> TestResult { expect_eq(0x7931_abae, rtpt_sxy_digest(RTPT_F), "rtpt F sxy") }
+fn test_gte_scene_rtpt_a_flag() -> TestResult { scene_rtpt(RTPT_A); expect_eq(0x8000_6000, cfc2!(31), "rtpt A FLAG") }
+fn test_gte_scene_rtpt_b_flag() -> TestResult { scene_rtpt(RTPT_B); expect_eq(0x8006_6000, cfc2!(31), "rtpt B FLAG") }
+fn test_gte_scene_rtpt_a_sz3() -> TestResult { scene_rtpt(RTPT_A); expect_eq(0x0000_02e9, mfc2!(19), "rtpt A SZ3") }
+fn test_gte_scene_rtpt_e_sz3() -> TestResult { scene_rtpt(RTPT_E); expect_eq(0x0000_1fd9, mfc2!(19), "rtpt E SZ3") }
+
+// Scene NCLIP: the REAL backface cross products the scene runs (large
+// projected screen coords), unlike the synthetic (0,0)/(10,0)/(0,10). MAC0
+// sign decides face culling -> the missing-wall divergence with real inputs.
+fn scene_nclip_mac0(s0: u32, s1: u32, s2: u32) -> u32 {
+    ctc2!(31, 0);
+    mtc2!(12, s0);
+    mtc2!(13, s1);
+    mtc2!(14, s2);
+    unsafe { gte_ops::nclip() };
+    mfc2!(24)
+}
+fn test_gte_scene_nclip_a() -> TestResult {
+    expect_eq(0x0000_2764, scene_nclip_mac0(0x006e_0095, 0xffe2_0094, 0xffde_00dc), "scene nclip A")
+}
+fn test_gte_scene_nclip_b() -> TestResult {
+    expect_eq(0x0000_30ba, scene_nclip_mac0(0x0073_00d5, 0xffde_00dc, 0xffd8_0130), "scene nclip B")
+}
+fn test_gte_scene_nclip_c() -> TestResult {
+    expect_eq(0x0000_3e7e, scene_nclip_mac0(0x0079_011f, 0xffd8_0130, 0xffd2_0194), "scene nclip C")
+}
+
+// LZCS/LZCR: leading-bit count (bits equal to bit 31). A classic emulator-
+// vs-silicon divergence; writing LZCS (data reg 30) updates LZCR (reg 31).
+fn lzcr(value: u32) -> u32 {
+    mtc2!(30, value);
+    mfc2!(31)
+}
+fn test_gte_lzcr_zeros() -> TestResult { expect_eq(8, lzcr(0x00ff_ffff), "lzcr 00ffffff") }
+fn test_gte_lzcr_half() -> TestResult { expect_eq(16, lzcr(0xffff_0000), "lzcr ffff0000") }
+fn test_gte_lzcr_one() -> TestResult { expect_eq(31, lzcr(0x0000_0001), "lzcr 00000001") }
+fn test_gte_lzcr_posmax() -> TestResult { expect_eq(1, lzcr(0x7fff_ffff), "lzcr 7fffffff") }
+fn test_gte_lzcr_negmin() -> TestResult { expect_eq(1, lzcr(0x8000_0000), "lzcr 80000000") }
+
+// Corner ops: the famous bugged MVMVA far-color mode, plus SQR / OP / AVSZ3
+// to widen op coverage. Expecteds from psx-gte-core (gte_expected_values).
+fn test_gte_mvmva_fc_bug() -> TestResult {
+    seed_scene_xform();
+    ctc2!(21, 0x0000_1000); // FCX
+    ctc2!(22, 0x0000_2000); // FCY
+    ctc2!(23, 0x0000_3000); // FCZ
+    mtc2!(0, 0x2040_0340);
+    mtc2!(1, 0x0000_09c0);
+    unsafe { gte_ops::mvmva_rt_v0_fc_sf1() };
+    expect_eq(0x5bdd_bfd2, gte_tri_digest(mfc2!(25), mfc2!(26), mfc2!(27)), "mvmva FC bug")
+}
+fn test_gte_sqr() -> TestResult {
+    ctc2!(31, 0);
+    mtc2!(9, 0x0000_1234);
+    mtc2!(10, 0x0000_f8ee);
+    mtc2!(11, 0x0000_0567);
+    unsafe { gte_ops::sqr() };
+    expect_eq(0x7498_ecb5, gte_tri_digest(mfc2!(25), mfc2!(26), mfc2!(27)), "sqr")
+}
+fn test_gte_op() -> TestResult {
+    ctc2!(31, 0);
+    ctc2!(0, 0x0000_1000); // R11 (D1)
+    ctc2!(2, 0x0000_2000); // R22 (D2)
+    ctc2!(4, 0x0000_3000); // R33 (D3)
+    mtc2!(9, 0x0000_0400); // IR1
+    mtc2!(10, 0x0000_0500); // IR2
+    mtc2!(11, 0x0000_0600); // IR3
+    unsafe { gte_ops::op_sf1() };
+    expect_eq(0xbff0_02ff, gte_tri_digest(mfc2!(25), mfc2!(26), mfc2!(27)), "op")
+}
+fn test_gte_avsz3() -> TestResult {
+    ctc2!(31, 0);
+    ctc2!(29, 0x0000_0155); // ZSF3
+    mtc2!(17, 0x0000_1000); // SZ1
+    mtc2!(18, 0x0000_2000); // SZ2
+    mtc2!(19, 0x0000_3000); // SZ3
+    unsafe { gte_ops::avsz3() };
+    expect_eq(0x0000_07fe, mfc2!(7), "avsz3 OTZ")
 }
 
 fn seed_gte_state() {
