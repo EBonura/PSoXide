@@ -335,14 +335,16 @@ pub fn project_triangle_fogged(
     // one at a time to keep the RGB-FIFO semantics straightforward
     // (NCDS pushes newest → slot 2; we read slot 2 immediately).
     let mut verts_out = [ProjectedLit::default(); 3];
+    let mut screen = [(0i16, 0i16); 3];
     for i in 0..3 {
         // --- RTPS: project verts[i] ---
         mtc2!(0, verts[i].xy_packed());
         mtc2!(1, verts[i].z_packed());
         // SAFETY: V0 loaded; scene setup is caller-supplied.
         unsafe { ops::rtps() };
-        let sxy = mfc2!(14); // SXY2 (latest)
+        let sxy = mfc2!(14); // SXY2 (latest) -- SXY has no result-read latency
         let sz = mfc2!(19) as u16; // SZ3 (latest)
+        screen[i] = (sxy as i16, (sxy >> 16) as i16);
 
         // --- NCDS: lit + fogged colour for normals[i], using the
         // IR0 just written by the RTPS above. ---
@@ -356,12 +358,12 @@ pub fn project_triangle_fogged(
         verts_out[i] = unpack_projected(sxy, sz, rgb);
     }
 
-    // --- NCLIP: back-face cull via the SXY FIFO, which now holds
-    // the three vertex projections in slots 0/1/2. ---
-    // SAFETY: three RTPS calls populated the SXY FIFO.
-    unsafe { ops::nclip() };
-    let mac0 = mfc2!(24) as i32;
-    let front_facing = mac0 > 0;
+    // --- Back-face cull in software from the projected SXY. GTE NCLIP's
+    // MAC0 read-back is STALE on real hardware (the result-read hazard, see
+    // scene::screen_area_mac0), which mis-culls and drops faces on silicon
+    // while looking fine on emulators. The i32 cross product is exact and
+    // hazard-free; SXY itself has no read latency, so `screen` is correct. ---
+    let front_facing = crate::scene::screen_area_mac0(screen) > 0;
 
     // --- AVSZ3: OT key from SZ1/2/3, weighted by ZSF3. ---
     // SAFETY: three RTPS calls populated the SZ FIFO.
