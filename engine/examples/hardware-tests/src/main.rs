@@ -36,7 +36,7 @@ const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
 const FONT_CLUT: Clut = Clut::new(320, 256);
 
 const ROWS_PER_PAGE: usize = 6;
-const TEST_COUNT: usize = 112;
+const TEST_COUNT: usize = 118;
 const PAD_POLL_TEST_INDEX: usize = 26;
 const MODE_COUNT: u8 = 15;
 const CHECK_MODES: [Mode; 11] = [
@@ -960,6 +960,36 @@ const TESTS: [TestSpec; TEST_COUNT] = [
         group: "GPU",
         name: "OT + DMA linked-list draw",
         run: test_gpu_ot_dma_draw,
+    },
+    TestSpec {
+        group: "GPU",
+        name: "tri X-span > 1023 (poly-too-large)",
+        run: test_gpu_tri_large_span,
+    },
+    TestSpec {
+        group: "GPU",
+        name: "tri vertex past bottom edge",
+        run: test_gpu_tri_y_past_edge,
+    },
+    TestSpec {
+        group: "GPU",
+        name: "textured gouraud large span",
+        run: test_gpu_texgouraud_large_span,
+    },
+    TestSpec {
+        group: "GPU",
+        name: "textured gouraud via OT + DMA (player path)",
+        run: test_gpu_texgouraud_ot_dma,
+    },
+    TestSpec {
+        group: "GPU",
+        name: "8bpp CLUT textured tri (model format)",
+        run: test_gpu_8bpp_clut_tri,
+    },
+    TestSpec {
+        group: "GPU",
+        name: "deep OT + DMA (8 prims)",
+        run: test_gpu_big_ot,
     },
     TestSpec {
         group: "SPU",
@@ -2943,6 +2973,146 @@ fn test_gpu_ot_dma_draw() -> TestResult {
     ot.submit();
     gpu_io::wait_cmd_ready();
     expect_eq(0x2699_9363, gpu_hash_scratch(), "gpu ot dma draw")
+}
+
+// The player renders TEXTURED-GOURAUD prims; upload a 16x16 15bpp texture into
+// VRAM and return its tpage word, reused across the textured tests below.
+fn gpu_upload_tex15() -> u16 {
+    let mut tex = [0u16; 16 * 16];
+    for (i, t) in tex.iter_mut().enumerate() {
+        let x = (i % 16) as u16;
+        let y = (i / 16) as u16;
+        *t = 0x8000 | (x << 10) | (y << 5) | ((x ^ y) & 0x1f);
+    }
+    psx_vram::upload_16bpp(psx_vram::VramRect::new(768, 256, 16, 16), &tex);
+    Tpage::new(768, 256, TexDepth::Bit15).uv_tpage_word(0)
+}
+
+// Polygon-too-large rule: real hardware DROPS any primitive whose X-span
+// exceeds 1023 (or Y-span 511). These verts stay inside the 11-bit packet
+// range (no coord wrap) yet span 1040 px, so silicon draws NOTHING while an
+// emulator that skips the rule rasterises the clipped remainder. A prime
+// suspect for the on-hardware "vertex flung across the screen" symptom.
+fn test_gpu_tri_large_span() -> TestResult {
+    let tri = prim::TriFlat::new([(-520, 40), (520, 8), (0, 88)], 0xc0, 0x40, 0xf0);
+    expect_eq(
+        0x02b7_edc5,
+        gpu_draw_and_hash(&tri, prim::TriFlat::WORDS),
+        "gpu tri large span",
+    )
+}
+
+// Y-axis edge: mirror of the X edge/wrap cases -- a vertex far below the draw
+// area. Confirms vertical clipping matches silicon.
+fn test_gpu_tri_y_past_edge() -> TestResult {
+    let tri = prim::TriFlat::new([(8, 8), (88, 8), (40, 300)], 0x30, 0xe0, 0x60);
+    expect_eq(
+        0xaa33_d3d5,
+        gpu_draw_and_hash(&tri, prim::TriFlat::WORDS),
+        "gpu tri y past edge",
+    )
+}
+
+// The player's EXACT primitive WITH the stretch geometry: a textured-gouraud
+// triangle whose third vertex is flung far right. If the GPU mishandles a
+// large textured span, this reproduces the explosion's primitive in isolation.
+fn test_gpu_texgouraud_large_span() -> TestResult {
+    let tpage = gpu_upload_tex15();
+    let tri = prim::TriTexturedGouraud::new(
+        [(4, 4), (92, 8), (400, 90)],
+        [(0, 0), (15, 0), (8, 15)],
+        [(0x80, 0x80, 0x80), (0xc0, 0x80, 0x40), (0x40, 0xc0, 0x80)],
+        0,
+        tpage,
+    );
+    expect_eq(
+        0xe389_a12d,
+        gpu_draw_and_hash(&tri, prim::TriTexturedGouraud::WORDS),
+        "gpu texgouraud large span",
+    )
+}
+
+// The player's EXACT primitive through the player's EXACT submit path:
+// textured-gouraud via an ordering table + DMA linked-list, not a direct GP0
+// push. The closest single test to how the model reaches the GPU each frame.
+fn test_gpu_texgouraud_ot_dma() -> TestResult {
+    gpu_fill(GPU_SX, GPU_SY, GPU_SW, GPU_SH, 0x0000_0000);
+    let tpage = gpu_upload_tex15();
+    gpu_draw_env_scratch();
+    let mut ot = gpu::ot::OrderingTable::<4>::new();
+    ot.clear();
+    let mut tri = prim::TriTexturedGouraud::new(
+        [(6, 6), (90, 14), (40, 90)],
+        [(0, 0), (15, 0), (8, 15)],
+        [(0x80, 0x80, 0x80), (0xc0, 0x80, 0x40), (0x40, 0xc0, 0x80)],
+        0,
+        tpage,
+    );
+    ot.add(0, &mut tri, prim::TriTexturedGouraud::WORDS);
+    ot.submit();
+    gpu_io::wait_cmd_ready();
+    expect_eq(0x6ea3_539c, gpu_hash_scratch(), "gpu texgouraud ot dma")
+}
+
+// The cooked model textures are CLUT-indexed (the obsidian-wraith fixture is
+// 8bpp / 256-colour), a DIFFERENT GPU read path than 15bpp direct colour: each
+// texel is an index into a 256-entry palette. Upload an 8bpp texture + CLUT and
+// draw a textured triangle through the palette.
+fn test_gpu_8bpp_clut_tri() -> TestResult {
+    // 16x16 8bpp indices (2 texels/halfword -> 8 halfwords wide).
+    let mut idx = [0u8; 16 * 16];
+    for (i, b) in idx.iter_mut().enumerate() {
+        *b = ((i * 7) & 0xff) as u8;
+    }
+    psx_vram::upload_bytes(psx_vram::VramRect::new(832, 256, 8, 16), &idx);
+    let mut pal = [psx_vram::Color555::raw(0); 256];
+    for (i, c) in pal.iter_mut().enumerate() {
+        let n = i as u8;
+        *c = psx_vram::Color555::rgb5(n & 0x1f, (n >> 1) & 0x1f, (n >> 2) & 0x1f);
+    }
+    // CLUT is 256 entries wide (one row); place it low-left so x + 256 fits
+    // VRAM and it clears the scratch/textures/framebuffers.
+    let clut = Clut::new(0, 500);
+    psx_vram::upload_clut(clut, &pal);
+    let tpage = Tpage::new(832, 256, TexDepth::Bit8).uv_tpage_word(0);
+    let tri = prim::TriTextured::new(
+        [(8, 8), (88, 16), (40, 88)],
+        [(0, 0), (15, 0), (8, 15)],
+        clut.uv_clut_word(),
+        tpage,
+        (0x80, 0x80, 0x80),
+    );
+    expect_eq(
+        0x069c_bf81,
+        gpu_draw_and_hash(&tri, prim::TriTextured::WORDS),
+        "gpu 8bpp clut tri",
+    )
+}
+
+// DMA linked-list stress: a deeper ordering table (8 primitives across several
+// Z buckets) exercises the walker + chain termination harder than the 3-prim
+// case. A malformed link or early DMA stop shows as a wrong readback.
+fn test_gpu_big_ot() -> TestResult {
+    gpu_fill(GPU_SX, GPU_SY, GPU_SW, GPU_SH, 0x0000_0000);
+    gpu_draw_env_scratch();
+    let mut ot = gpu::ot::OrderingTable::<8>::new();
+    ot.clear();
+    let mut tris = [
+        prim::TriFlat::new([(2, 2), (30, 6), (4, 40)], 0xff, 0x20, 0x20),
+        prim::TriFlat::new([(34, 2), (62, 6), (36, 40)], 0x20, 0xff, 0x20),
+        prim::TriFlat::new([(66, 2), (94, 6), (68, 40)], 0x20, 0x20, 0xff),
+        prim::TriFlat::new([(2, 44), (30, 48), (4, 92)], 0xff, 0xff, 0x20),
+        prim::TriFlat::new([(34, 44), (62, 48), (36, 92)], 0x20, 0xff, 0xff),
+        prim::TriFlat::new([(66, 44), (94, 48), (68, 92)], 0xff, 0x20, 0xff),
+        prim::TriFlat::new([(20, 20), (76, 30), (40, 80)], 0xa0, 0xa0, 0xa0),
+        prim::TriFlat::new([(48, 8), (60, 60), (10, 70)], 0x60, 0xc0, 0x40),
+    ];
+    for (i, t) in tris.iter_mut().enumerate() {
+        ot.add(i % 7, t, prim::TriFlat::WORDS);
+    }
+    ot.submit();
+    gpu_io::wait_cmd_ready();
+    expect_eq(0x5aeb_c20b, gpu_hash_scratch(), "gpu big ot")
 }
 
 fn seed_gte_state() {
