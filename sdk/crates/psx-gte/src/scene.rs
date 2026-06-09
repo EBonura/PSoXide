@@ -381,18 +381,33 @@ pub fn average_z_triangle() -> u16 {
     mfc2!(7) as u16
 }
 
-/// Run NCLIP for three already-projected screen-space vertices.
+/// Signed screen-space area of a triangle -- the same value GTE `NCLIP`
+/// writes to MAC0: `SX0*(SY1-SY2) + SX1*(SY2-SY0) + SX2*(SY0-SY1)`.
+/// Positive = front-facing, `<= 0` = back-facing/degenerate.
 ///
-/// This is useful when a renderer cached/projected vertices first and
-/// later wants the GTE's signed screen-space area test for arbitrary
-/// indexed faces.
+/// Computed in software rather than via `NCLIP` on purpose: reading MAC0
+/// immediately after `NCLIP` returns a STALE value on real PS1 hardware
+/// (the GTE result-read hazard -- MAC0 settles a few cycles later than the
+/// CPU reads it), which mis-culls and drops wall faces on silicon while
+/// looking fine on every emulator. The i32 cross product is exact for
+/// screen coordinates (|coord| <= 0x400 after clamping) and has no read
+/// latency. Confirmed against real hardware (cortex GTE disc 2026-06-09:
+/// NCLIP MAC0 back-to-back read is stale, +8 nops reads correct).
+#[inline]
+pub fn screen_area_mac0(vertices: [(i16, i16); 3]) -> i32 {
+    let (sx0, sy0) = (vertices[0].0 as i32, vertices[0].1 as i32);
+    let (sx1, sy1) = (vertices[1].0 as i32, vertices[1].1 as i32);
+    let (sx2, sy2) = (vertices[2].0 as i32, vertices[2].1 as i32);
+    sx0 * (sy1 - sy2) + sx1 * (sy2 - sy0) + sx2 * (sy0 - sy1)
+}
+
+/// Back-face test for three already-projected screen-space vertices.
+///
+/// Useful when a renderer cached/projected vertices first and later wants
+/// the signed screen-space area test for arbitrary indexed faces. Uses the
+/// software [`screen_area_mac0`] (see its note on the NCLIP MAC0 hazard).
 pub fn screen_triangle_back_facing(vertices: [(i16, i16); 3]) -> bool {
-    mtc2!(12, pack_xy(vertices[0].0, vertices[0].1));
-    mtc2!(13, pack_xy(vertices[1].0, vertices[1].1));
-    mtc2!(14, pack_xy(vertices[2].0, vertices[2].1));
-    // SAFETY: SXY0..SXY2 have just been loaded.
-    unsafe { ops::nclip() };
-    (mfc2!(24) as i32) <= 0
+    screen_area_mac0(vertices) <= 0
 }
 
 /// Read the GTE FLAG register. Non-zero indicates at least one error
