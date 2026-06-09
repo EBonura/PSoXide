@@ -149,6 +149,36 @@ mod tests {
     }
 
     #[test]
+    fn scene_rtps_matches_captured_gameplay_outputs() {
+        // Register sets captured from a live cortex_ignition_v1 gameplay frame
+        // (probe_gameplay_gte_trace). These vertices saturate the screen coords
+        // and hit perspective-divide overflow (FLAG bit 17) -- the regime that
+        // drives the on-hardware vertex explosion and that the synthetic GTE
+        // battery never reaches. Host mirror of the hardware-tests disc cases:
+        // locks PSoXide's RTPS outputs for the scene's exact inputs, so the
+        // disc cases are green in-emulator and any hardware divergence is real.
+        fn rtps(vxy0: u32, vz0: u32) -> (u32, u32) {
+            let mut g = crate::Gte::new();
+            g.write_control(0, 0x0000_0f19); // R11,R12
+            g.write_control(1, 0x016e_fab4); // R13,R21
+            g.write_control(2, 0x0411_f098); // R22,R23
+            g.write_control(3, 0xfbb1_fae7); // R31,R32
+            g.write_control(4, 0xffff_f177); // R33
+            g.write_control(24, 0x00a0_0000); // OFX
+            g.write_control(25, 0x0078_0000); // OFY
+            g.write_control(26, 0x0000_0140); // H
+            g.write_data(0, vxy0); // VXY0
+            g.write_data(1, vz0); // VZ0
+            g.execute(0x4a08_0001); // RTPS (sf=1)
+            (g.read_data(14), g.read_control(31)) // (SXY2, FLAG)
+        }
+        assert_eq!(rtps(0x0c3e_0000, 0x0000_0a4d), (0xfc00_fc00, 0x8006_6000));
+        assert_eq!(rtps(0x0c3e_0529, 0x0000_08eb).0, 0xfc00_03ff);
+        assert_eq!(rtps(0x0c3e_0526, 0xffff_f714), (0xfc00_03b4, 0x8000_2000));
+        assert_eq!(rtps(0x099c_f335, 0x0000_0000), (0xfc00_fc00, 0x8000_6000));
+    }
+
+    #[test]
     fn sin_wraps_modulo_256() {
         // Angles outside 0..256 must wrap.
         assert_eq!(sin_1_3_12(256), sin_1_3_12(0));

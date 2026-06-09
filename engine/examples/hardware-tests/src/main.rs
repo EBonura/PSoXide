@@ -36,7 +36,7 @@ const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
 const FONT_CLUT: Clut = Clut::new(320, 256);
 
 const ROWS_PER_PAGE: usize = 6;
-const TEST_COUNT: usize = 56;
+const TEST_COUNT: usize = 63;
 const PAD_POLL_TEST_INDEX: usize = 26;
 const MODE_COUNT: u8 = 15;
 const CHECK_MODES: [Mode; 11] = [
@@ -680,6 +680,41 @@ const TESTS: [TestSpec; TEST_COUNT] = [
         group: "GTE",
         name: "RTPS off-centre projection value",
         run: test_gte_rtps_offcenter_value,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "scene RTPS A SXY2 (div-ovf+sat)",
+        run: test_gte_scene_rtps_a_sxy,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "scene RTPS A FLAG (0x80066000)",
+        run: test_gte_scene_rtps_a_flag,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "scene RTPS B SXY2 (clamp hi/lo)",
+        run: test_gte_scene_rtps_b_sxy,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "scene RTPS C SXY2 (SZ3 survives)",
+        run: test_gte_scene_rtps_c_sxy,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "scene RTPS C FLAG (0x80002000)",
+        run: test_gte_scene_rtps_c_flag,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "scene RTPS D SXY2 (neg-X vertex)",
+        run: test_gte_scene_rtps_d_sxy,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "scene RTPS D FLAG (0x80006000)",
+        run: test_gte_scene_rtps_d_flag,
     },
     TestSpec {
         group: "SPU",
@@ -2133,6 +2168,75 @@ fn test_gte_rtps_offcenter_value() -> TestResult {
     let p = gte_scene::project_vertex(Vec3I16::new(256, 128, 0));
     let observed = ((p.sx as u16 as u32) << 16) | p.sy as u16 as u32;
     TestResult::info(0x00B0_0080, observed, "rtps sx|sy")
+}
+
+// ---------------------------------------------------------------------------
+// Real-scene RTPS conformance: register sets captured from a live
+// cortex_ignition_v1 gameplay frame (probe_gameplay_gte_trace). Unlike the
+// gentle synthetic cases above, these vertices project past the screen-coord
+// clamp and into perspective-divide overflow (FLAG bit 17) -- the regime that
+// drives the on-hardware vertex explosion and that the synthetic battery never
+// exercises (it never sets FLAG). Expected values are PSoXide's outputs, so
+// these pass in-emulator and FAIL on silicon exactly where the GTE diverges.
+//
+// The rotation matrix + projection (H, screen offset) are shared across the
+// captured frame; only the input vertex V0 differs. Translation and depth-cue
+// are zero, as in the scene.
+fn seed_scene_rtps() {
+    ctc2!(31, 0); // clear FLAG
+    ctc2!(0, 0x0000_0f19); // R11,R12
+    ctc2!(1, 0x016e_fab4); // R13,R21
+    ctc2!(2, 0x0411_f098); // R22,R23
+    ctc2!(3, 0xfbb1_fae7); // R31,R32
+    ctc2!(4, 0xffff_f177); // R33
+    ctc2!(5, 0); // TRX
+    ctc2!(6, 0); // TRY
+    ctc2!(7, 0); // TRZ
+    ctc2!(24, 0x00a0_0000); // OFX
+    ctc2!(25, 0x0078_0000); // OFY
+    ctc2!(26, 0x0000_0140); // H (projection plane distance)
+    ctc2!(27, 0); // DQA
+    ctc2!(28, 0); // DQB
+}
+
+fn scene_rtps(vxy0: u32, vz0: u32) {
+    seed_scene_rtps();
+    mtc2!(0, vxy0); // VXY0
+    mtc2!(1, vz0); // VZ0
+    unsafe { gte_ops::rtps() };
+}
+
+// Sample A: FLAG=0x80066000 (divide overflow + SX/SY + SZ3 saturation); SXY2 clamps to (-1024,-1024).
+fn test_gte_scene_rtps_a_sxy() -> TestResult {
+    scene_rtps(0x0c3e_0000, 0x0000_0a4d);
+    expect_eq(0xfc00_fc00, mfc2!(14), "scene rtps A SXY2")
+}
+fn test_gte_scene_rtps_a_flag() -> TestResult {
+    scene_rtps(0x0c3e_0000, 0x0000_0a4d);
+    expect_eq(0x8006_6000, cfc2!(31), "scene rtps A FLAG")
+}
+// Sample B: same FLAG; SX clamps high (+1023), SY clamps low (-1024).
+fn test_gte_scene_rtps_b_sxy() -> TestResult {
+    scene_rtps(0x0c3e_0529, 0x0000_08eb);
+    expect_eq(0xfc00_03ff, mfc2!(14), "scene rtps B SXY2")
+}
+// Sample C: FLAG=0x80002000 (SY-only saturation); SZ3 survives (no divide overflow).
+fn test_gte_scene_rtps_c_sxy() -> TestResult {
+    scene_rtps(0x0c3e_0526, 0xffff_f714);
+    expect_eq(0xfc00_03b4, mfc2!(14), "scene rtps C SXY2")
+}
+fn test_gte_scene_rtps_c_flag() -> TestResult {
+    scene_rtps(0x0c3e_0526, 0xffff_f714);
+    expect_eq(0x8000_2000, cfc2!(31), "scene rtps C FLAG")
+}
+// Sample D: FLAG=0x80006000 (SX+SY saturation); negative-X vertex.
+fn test_gte_scene_rtps_d_sxy() -> TestResult {
+    scene_rtps(0x099c_f335, 0x0000_0000);
+    expect_eq(0xfc00_fc00, mfc2!(14), "scene rtps D SXY2")
+}
+fn test_gte_scene_rtps_d_flag() -> TestResult {
+    scene_rtps(0x099c_f335, 0x0000_0000);
+    expect_eq(0x8000_6000, cfc2!(31), "scene rtps D FLAG")
 }
 
 fn seed_gte_state() {
