@@ -366,6 +366,22 @@ fn font_atlas_dims(font: &BitmapFont) -> (u16, u16, u16, u16) {
     (glyphs_per_row, atlas_w, atlas_h, halfwords_per_row)
 }
 
+/// The four corner UVs (texel coords) of a glyph cell whose top-left is
+/// `(u, v)` and size is `gw × gh`, with the far edge **saturated at 255**
+/// instead of wrapping. Corner order matches the quad-path vertices: top-left,
+/// top-right, bottom-left, bottom-right.
+///
+/// A full-width 256-texel atlas (e.g. 16 columns of 16px glyphs) puts the
+/// rightmost column at `u = 240`, so the far U is `240 + 16 = 256`, which
+/// wraps to `0` in the `u8` UV field and makes the GPU interpolate U from 240
+/// down to 0 across the quad -- smearing that glyph (the classic 256-wide
+/// texture right-edge bug). Saturating pins the far edge to the last texel.
+fn glyph_quad_uvs(u: u8, v: u8, gw: u8, gh: u8) -> [(u8, u8); 4] {
+    let u1 = u.saturating_add(gw);
+    let v1 = v.saturating_add(gh);
+    [(u, v), (u1, v), (u, v1), (u1, v1)]
+}
+
 /// Halfwords spanned by one 4bpp texture page (64 halfwords = 256 texels).
 const FONT_PAGE_HALFWORDS: usize = 64;
 
@@ -801,12 +817,7 @@ impl FontAtlas {
                 (cursor_x, y + sh),
                 (cursor_x + sw, y + sh),
             ];
-            let uvs = [
-                (u, v),
-                (u + gw as u8, v),
-                (u, v + gh as u8),
-                (u + gw as u8, v + gh as u8),
-            ];
+            let uvs = glyph_quad_uvs(u, v, font.glyph_w, font.glyph_h);
             write_textured_quad_packet(verts, uvs, color_cmd, clut, tpage);
             cursor_x_q8 = cursor_x_q8
                 .saturating_add(i32::from(font.glyph_advance(ch)) * i32::from(scale_x_q8))
@@ -880,12 +891,7 @@ impl FontAtlas {
             let ly0 = origin_y;
             let ly1 = origin_y + gh;
             let verts = [rot(lx0, ly0), rot(lx1, ly0), rot(lx0, ly1), rot(lx1, ly1)];
-            let uvs = [
-                (u, v),
-                (u + gw as u8, v),
-                (u, v + gh as u8),
-                (u + gw as u8, v + gh as u8),
-            ];
+            let uvs = glyph_quad_uvs(u, v, font.glyph_w, font.glyph_h);
             write_textured_quad_packet(verts, uvs, color_cmd, clut, tpage);
             cursor_x += font.glyph_advance(ch) as i32;
         }
@@ -950,12 +956,7 @@ impl FontAtlas {
             let ly0 = 0;
             let ly1 = gh;
             let verts = [tx(lx0, ly0), tx(lx1, ly0), tx(lx0, ly1), tx(lx1, ly1)];
-            let uvs = [
-                (u, v),
-                (u + gw as u8, v),
-                (u, v + gh as u8),
-                (u + gw as u8, v + gh as u8),
-            ];
+            let uvs = glyph_quad_uvs(u, v, font.glyph_w, font.glyph_h);
             write_textured_quad_packet(verts, uvs, color_cmd, clut, tpage);
             cursor_x += font.glyph_advance(ch) as i32;
         }
@@ -1048,12 +1049,7 @@ impl FontAtlas {
                 (cursor_x, y + sh),
                 (cursor_x + sw, y + sh),
             ];
-            let uvs = [
-                (u, v),
-                (u + gw as u8, v),
-                (u, v + gh as u8),
-                (u + gw as u8, v + gh as u8),
-            ];
+            let uvs = glyph_quad_uvs(u, v, font.glyph_w, font.glyph_h);
             let colors = [top, top, bottom, bottom];
             write_textured_gouraud_quad_packet(verts, uvs, colors, color0_cmd, clut, tpage);
             cursor_x = cursor_x.wrapping_add(font.glyph_advance(ch) as i16 * scale_x as i16);
@@ -1112,12 +1108,7 @@ impl FontAtlas {
                 (cursor_x, y + sh),
                 (cursor_x + sw, y + sh),
             ];
-            let uvs = [
-                (u, v),
-                (u + gw as u8, v),
-                (u, v + gh as u8),
-                (u + gw as u8, v + gh as u8),
-            ];
+            let uvs = glyph_quad_uvs(u, v, font.glyph_w, font.glyph_h);
             write_textured_gouraud_quad_packet(verts, uvs, colors, color0_cmd, clut, tpage);
             cursor_x_q8 = cursor_x_q8
                 .saturating_add(i32::from(font.glyph_advance(ch)) * i32::from(scale_x_q8))
@@ -1232,5 +1223,26 @@ mod tests {
         assert_eq!(scale_q8_i16(17, 384), 26);
         assert_eq!(round_q8_to_i16(384), 2);
         assert_eq!(round_q8_to_i16(-384), -2);
+    }
+
+    #[test]
+    fn glyph_quad_uvs_saturate_the_rightmost_atlas_column() {
+        // A 256-texel-wide atlas (16 columns of 16px glyphs) places the last
+        // column's glyph at u=240, so its far U is 240+16=256, which wraps to 0
+        // in the u8 UV field and smears the glyph across the quad. It must
+        // saturate to 255 instead. (This was the "garbled O in MUSIC VOLUME"
+        // bug: 'O' is the only rightmost-column glyph in uppercase menu text.)
+        let edge = glyph_quad_uvs(240, 0, 16, 14);
+        assert_eq!(edge[1].0, 255, "far U must saturate, not wrap to 0");
+        assert_eq!(edge[3].0, 255);
+        // Interior columns stay exact (no clamping kicks in).
+        assert_eq!(
+            glyph_quad_uvs(224, 0, 16, 14),
+            [(224, 0), (240, 0), (224, 14), (240, 14)]
+        );
+        // V saturates the same way near the bottom edge of a tall atlas.
+        let tall = glyph_quad_uvs(0, 248, 16, 14);
+        assert_eq!(tall[2].1, 255);
+        assert_eq!(tall[3].1, 255);
     }
 }
