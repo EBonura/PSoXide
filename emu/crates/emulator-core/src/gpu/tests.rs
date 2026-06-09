@@ -1542,3 +1542,84 @@ fn oversize_quad_drops_only_the_oversize_half() {
         "oversize half should not rasterise",
     );
 }
+
+// ---------------------------------------------------------------------
+// Triangle rasterization vs REAL SILICON (hardware-tests GPU battery).
+//
+// The hardware-tests disc draws each primitive into an off-screen
+// scratch (VRAM 512,256 size 96x96) through the exact GP0 + draw-offset
+// path and FNV-1a hashes the VRAM read-back. On real PS1 hardware (burn
+// 2026-06-09, ledger HWB-005) every TRIANGLE's hash diverged while every
+// QUAD matched -> the emulator's triangle edge-coverage rule (copied
+// from Redux's soft renderer) is not silicon. These tests replay the
+// disc's exact path in-process so the rasterizer can be tuned against
+// the recorded hardware hashes WITHOUT a burn per iteration.
+const SCR_X: u16 = 512;
+const SCR_Y: u16 = 256;
+const SCR_W: u16 = 96;
+const SCR_H: u16 = 96;
+
+/// Replay the disc's `gpu_draw_and_hash`: fill the scratch black, set the
+/// draw area + offset to the scratch, run `draw`, then FNV-1a the scratch
+/// read-back row-major (the order GPUREAD streams, 2px/word).
+fn replay_scratch_hash<F: FnOnce(&mut Gpu)>(draw: F) -> u32 {
+    let mut gpu = Gpu::new();
+    // gpu_fill(scratch, black) -- GP0 0x02 fill rect, absolute VRAM coords.
+    gpu.write32(GP0_ADDR, 0x0200_0000);
+    gpu.write32(GP0_ADDR, ((SCR_Y as u32) << 16) | SCR_X as u32);
+    gpu.write32(GP0_ADDR, ((SCR_H as u32) << 16) | SCR_W as u32);
+    // gpu_draw_env_scratch() -- draw area E3/E4 + draw offset E5 = scratch.
+    let (x, y) = (SCR_X as u32, SCR_Y as u32);
+    gpu.write32(GP0_ADDR, 0xE300_0000 | (x & 0x3FF) | ((y & 0x1FF) << 10));
+    let (rx, ry) = (x + SCR_W as u32 - 1, y + SCR_H as u32 - 1);
+    gpu.write32(GP0_ADDR, 0xE400_0000 | (rx & 0x3FF) | ((ry & 0x1FF) << 10));
+    gpu.write32(GP0_ADDR, 0xE500_0000 | (x & 0x7FF) | ((y & 0x7FF) << 11));
+    draw(&mut gpu);
+    let mut hash = 0x811C_9DC5u32;
+    for yy in SCR_Y..SCR_Y + SCR_H {
+        for xx in SCR_X..SCR_X + SCR_W {
+            let p = gpu.vram.get_pixel(xx, yy) as u32;
+            hash = (hash ^ p).wrapping_mul(0x0100_0193);
+        }
+    }
+    hash
+}
+
+/// Feed a primitive struct to the GPU as a GP0 word stream, skipping the
+/// OT `tag` word (matches the disc's `gpu_send_prim`).
+fn replay_send_prim<T>(gpu: &mut Gpu, p: &T, words: u8) {
+    let base = (p as *const T).cast::<u32>();
+    for i in 0..words as usize {
+        let w = unsafe { core::ptr::read(base.add(1 + i)) };
+        gpu.write32(GP0_ADDR, w);
+    }
+}
+
+#[test]
+fn flat_tri_replay_reproduces_disc_emulator_hash() {
+    use psx_gpu::prim::TriFlat;
+    // The disc's `test_gpu_draw_flat_tri` primitive, verbatim.
+    let tri = TriFlat::new([(8, 8), (88, 16), (40, 88)], 0xc0, 0x40, 0x80);
+    let h = replay_scratch_hash(|g| replay_send_prim(g, &tri, TriFlat::WORDS));
+    // Target: REAL SILICON's recorded hash (HWB-005 detail line). The old
+    // Redux rasterizer produced 0x495AFB4D here and FAILED on hardware.
+    assert_eq!(
+        h, 0x0412_1005,
+        "replay {h:#010x} must match silicon 0x04121005"
+    );
+}
+
+#[test]
+fn flat_quad_replay_still_matches_silicon() {
+    use psx_gpu::prim::QuadFlat;
+    // The flat quad already PASSED on hardware (silicon == 0x79E53DC5). It
+    // draws as two triangles through the SAME rasterizer the flat-tri fix
+    // touched, so the new coverage rule must keep tiling the rectangle
+    // exactly -- no gap/overlap on the shared diagonal.
+    let q = QuadFlat::new([(8, 8), (88, 8), (8, 88), (88, 88)], 0x30, 0xc0, 0x60);
+    let h = replay_scratch_hash(|g| replay_send_prim(g, &q, QuadFlat::WORDS));
+    assert_eq!(
+        h, 0x79E5_3DC5,
+        "flat quad {h:#010x} must still match silicon 0x79E53DC5"
+    );
+}
