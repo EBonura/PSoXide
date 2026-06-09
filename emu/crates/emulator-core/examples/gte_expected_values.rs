@@ -128,7 +128,7 @@ fn main() {
         g.execute(0x4a08_4012); // MVMVA mx=RT vx=V0 cv=FC sf=1 lm=0 (bugged)
         let (m1, m2, m3) = (g.read_data(25), g.read_data(26), g.read_data(27));
         println!(
-            "MVMVA-FC: MAC=0x{m1:08x},0x{m2:08x},0x{m3:08x} digest=0x{:08x} flag=0x{:08x}",
+            "MVMVA-FC: MAC1=0x{m1:08x} MAC2=0x{m2:08x} MAC3=0x{m3:08x} digest=0x{:08x} flag=0x{:08x}",
             tri(m1, m2, m3),
             g.read_control(31)
         );
@@ -158,7 +158,45 @@ fn main() {
         g.write_data(11, 0x0000_0600); // IR3
         g.execute(0x4a08_000c); // OP
         let (m1, m2, m3) = (g.read_data(25), g.read_data(26), g.read_data(27));
-        println!("OP: MAC=0x{m1:08x},0x{m2:08x},0x{m3:08x} digest=0x{:08x}", tri(m1, m2, m3));
+        println!("OP: MAC1=0x{m1:08x} MAC2=0x{m2:08x} MAC3=0x{m3:08x} digest=0x{:08x}", tri(m1, m2, m3));
+    }
+
+    println!("\n// ---- CANDIDATE FIXES vs hardware (FC photo=0x9D9B64C, OP photo=0xBFF0043, high-7 nibbles) ----");
+    {
+        // RT matrix decoded from c0..c4 (1.3.12 i16 cells), V0 from the FC test.
+        let rt: [[i64; 3]; 3] = [
+            [0x0f19, 0x0000, 0xfab4u16 as i16 as i64], // R11,R12,R13
+            [0x016e, 0xf098u16 as i16 as i64, 0x0411], // R21,R22,R23
+            [0xfae7u16 as i16 as i64, 0xfbb1u16 as i16 as i64, 0xf177u16 as i16 as i64], // R31,R32,R33
+        ];
+        let v = [0x0340i64, 0x2040, 0x09c0]; // Vx,Vy,Vz from VXY0=0x20400340, VZ0=0x09c0
+        // psx-spx FC bug: drop translation AND first matrix column -> cols 1,2 only.
+        let mac: [i32; 3] = [
+            ((rt[0][1] * v[1] + rt[0][2] * v[2]) >> 12) as i32,
+            ((rt[1][1] * v[1] + rt[1][2] * v[2]) >> 12) as i32,
+            ((rt[2][1] * v[1] + rt[2][2] * v[2]) >> 12) as i32,
+        ];
+        println!(
+            "MVMVA-FC candidate (drop col0+TR): MAC=0x{:08x},0x{:08x},0x{:08x} digest=0x{:08x}",
+            mac[0], mac[1], mac[2],
+            tri(mac[0] as u32, mac[1] as u32, mac[2] as u32)
+        );
+    }
+    {
+        // OP with IR feedback: each component reuses the just-written IR.
+        let (d1, d2, d3) = (0x1000i64, 0x2000i64, 0x3000i64);
+        let (mut ir1, mut ir2, mut ir3) = (0x400i64, 0x500i64, 0x600i64);
+        let mac1 = ((ir3 * d2 - ir2 * d3) >> 12) as i32;
+        ir1 = mac1 as i64;
+        let mac2 = ((ir1 * d3 - ir3 * d1) >> 12) as i32;
+        ir2 = mac2 as i64;
+        let mac3 = ((ir2 * d1 - ir1 * d2) >> 12) as i32;
+        let _ = (ir2, ir3);
+        println!(
+            "OP candidate (IR feedback):        MAC=0x{:08x},0x{:08x},0x{:08x} digest=0x{:08x}",
+            mac1, mac2, mac3,
+            tri(mac1 as u32, mac2 as u32, mac3 as u32)
+        );
     }
 
     println!("\n// ---- AVSZ3 (Z average -> OTZ) ----");

@@ -36,7 +36,7 @@ const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
 const FONT_CLUT: Clut = Clut::new(320, 256);
 
 const ROWS_PER_PAGE: usize = 6;
-const TEST_COUNT: usize = 94;
+const TEST_COUNT: usize = 98;
 const PAD_POLL_TEST_INDEX: usize = 26;
 const MODE_COUNT: u8 = 15;
 const CHECK_MODES: [Mode; 11] = [
@@ -853,8 +853,18 @@ const TESTS: [TestSpec; TEST_COUNT] = [
     },
     TestSpec {
         group: "GTE",
-        name: "MVMVA FC-mode hardware bug",
-        run: test_gte_mvmva_fc_bug,
+        name: "MVMVA FC-bug MAC1",
+        run: test_gte_mvmva_fc_mac1,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "MVMVA FC-bug MAC2",
+        run: test_gte_mvmva_fc_mac2,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "MVMVA FC-bug MAC3",
+        run: test_gte_mvmva_fc_mac3,
     },
     TestSpec {
         group: "GTE",
@@ -863,8 +873,18 @@ const TESTS: [TestSpec; TEST_COUNT] = [
     },
     TestSpec {
         group: "GTE",
-        name: "OP cross product",
-        run: test_gte_op,
+        name: "OP cross product MAC1",
+        run: test_gte_op_mac1,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "OP cross product MAC2",
+        run: test_gte_op_mac2,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "OP cross product MAC3",
+        run: test_gte_op_mac3,
     },
     TestSpec {
         group: "GTE",
@@ -2570,7 +2590,12 @@ fn test_gte_lzcr_negmin() -> TestResult { expect_eq(1, lzcr(0x8000_0000), "lzcr 
 
 // Corner ops: the famous bugged MVMVA far-color mode, plus SQR / OP / AVSZ3
 // to widen op coverage. Expecteds from psx-gte-core (gte_expected_values).
-fn test_gte_mvmva_fc_bug() -> TestResult {
+// MVMVA bugged FC mode (cv=2): PSX-SPX documents that the far-color
+// translation is dropped AND the first matrix column is dropped, so the
+// result reduces to MAC_i = (Mx_i2*Vy + Mx_i3*Vz) >> sf. Per-component so
+// the disc pins each MAC exactly; hardware (2026-06-09) returned the same
+// fix, so these PASS on silicon = confirmation the GTE core now matches.
+fn run_mvmva_fc() {
     seed_scene_xform();
     ctc2!(21, 0x0000_1000); // FCX
     ctc2!(22, 0x0000_2000); // FCY
@@ -2578,8 +2603,10 @@ fn test_gte_mvmva_fc_bug() -> TestResult {
     mtc2!(0, 0x2040_0340);
     mtc2!(1, 0x0000_09c0);
     unsafe { gte_ops::mvmva_rt_v0_fc_sf1() };
-    expect_eq(0x5bdd_bfd2, gte_tri_digest(mfc2!(25), mfc2!(26), mfc2!(27)), "mvmva FC bug")
 }
+fn test_gte_mvmva_fc_mac1() -> TestResult { run_mvmva_fc(); expect_eq(0xffff_fcc5, mfc2!(25), "mvmva FC MAC1") }
+fn test_gte_mvmva_fc_mac2() -> TestResult { run_mvmva_fc(); expect_eq(0xffff_e36c, mfc2!(26), "mvmva FC MAC2") }
+fn test_gte_mvmva_fc_mac3() -> TestResult { run_mvmva_fc(); expect_eq(0xffff_ee75, mfc2!(27), "mvmva FC MAC3") }
 fn test_gte_sqr() -> TestResult {
     ctc2!(31, 0);
     mtc2!(9, 0x0000_1234);
@@ -2588,7 +2615,14 @@ fn test_gte_sqr() -> TestResult {
     unsafe { gte_ops::sqr() };
     expect_eq(0x7498_ecb5, gte_tri_digest(mfc2!(25), mfc2!(26), mfc2!(27)), "sqr")
 }
-fn test_gte_op() -> TestResult {
+// OP cross product. The formula here matches PSX-SPX exactly and MVMVA/SQR
+// read MAC1-3 immediately and pass, yet OP diverged on hardware
+// (digest 0xBFF0043 vs 0xBFF002F) -- an unresolved silicon quirk. Split
+// per-component so the next burn reveals WHICH MAC differs and by how
+// much; expecteds are the current GTE-core values, so the FAIL on silicon
+// captures the real number to fix `op_op` against. NOT latency (MAC1-3
+// reads are latency-free, proven by MVMVA/SQR).
+fn run_op() {
     ctc2!(31, 0);
     ctc2!(0, 0x0000_1000); // R11 (D1)
     ctc2!(2, 0x0000_2000); // R22 (D2)
@@ -2597,8 +2631,10 @@ fn test_gte_op() -> TestResult {
     mtc2!(10, 0x0000_0500); // IR2
     mtc2!(11, 0x0000_0600); // IR3
     unsafe { gte_ops::op_sf1() };
-    expect_eq(0xbff0_02ff, gte_tri_digest(mfc2!(25), mfc2!(26), mfc2!(27)), "op")
 }
+fn test_gte_op_mac1() -> TestResult { run_op(); expect_eq(0xffff_fd00, mfc2!(25), "op MAC1") }
+fn test_gte_op_mac2() -> TestResult { run_op(); expect_eq(0x0000_0600, mfc2!(26), "op MAC2") }
+fn test_gte_op_mac3() -> TestResult { run_op(); expect_eq(0xffff_fd00, mfc2!(27), "op MAC3") }
 fn test_gte_avsz3() -> TestResult {
     ctc2!(31, 0);
     ctc2!(29, 0x0000_0155); // ZSF3
