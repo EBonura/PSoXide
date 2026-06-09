@@ -36,7 +36,7 @@ const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
 const FONT_CLUT: Clut = Clut::new(320, 256);
 
 const ROWS_PER_PAGE: usize = 6;
-const TEST_COUNT: usize = 98;
+const TEST_COUNT: usize = 102;
 const PAD_POLL_TEST_INDEX: usize = 26;
 const MODE_COUNT: u8 = 15;
 const CHECK_MODES: [Mode; 11] = [
@@ -890,6 +890,26 @@ const TESTS: [TestSpec; TEST_COUNT] = [
         group: "GTE",
         name: "AVSZ3 averages SZ -> OTZ",
         run: test_gte_avsz3,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "RTPS SXY2 read-latency",
+        run: test_gte_lat_sxy2,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "RTPS SZ3 read-latency",
+        run: test_gte_lat_sz3,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "RTPS IR1 read-latency",
+        run: test_gte_lat_ir1,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "RTPS IR0 read-latency",
+        run: test_gte_lat_ir0,
     },
     TestSpec {
         group: "SPU",
@@ -2644,6 +2664,82 @@ fn test_gte_avsz3() -> TestResult {
     unsafe { gte_ops::avsz3() };
     expect_eq(0x0000_07fe, mfc2!(7), "avsz3 OTZ")
 }
+
+// ---------------------------------------------------------------------------
+// RTPS result-read latency sweep (chasing the player vertex EXPLOSION). The
+// scene RTPS/RTPT cases all read SXY2 after a function-return gap, so an
+// IMMEDIATE read of a freshly-projected register was never tested. If SXY /
+// SZ / IR lag like MAC0 does, the player's `_faces` stage (which reads the
+// projected SXY right after RTPS) would get stale coords -> scattered verts.
+//
+// Self-comparing so no baked expected is needed: project vertex A (let it
+// settle), project vertex B, then read register R both IMMEDIATELY and after
+// a settle delay. A and B give distinct SXY2/SZ3/IR1/IR0 (verified via the
+// gte_expected_values host tool), so if R has read latency the immediate read
+// returns A's value while the settled read returns B's -> the case FAILS on
+// silicon and the dashboard shows EXP=settled(B) GOT=stale(A). Reads are live
+// in-emulator (only MAC0/LZCR are modelled), so these PASS in emulation.
+const LAT_A_XY: u32 = 0x0080_0100; // (256, 128)
+const LAT_A_Z: u32 = 0x0000_0064; // 100
+const LAT_B_XY: u32 = 0xffc0_ff38; // (-200, -64)
+const LAT_B_Z: u32 = 0xffff_ff38; // -200
+
+fn seed_proj_latency() {
+    ctc2!(31, 0);
+    ctc2!(0, 0x0000_1000); // identity R11,R12
+    ctc2!(1, 0x0000_0000); // R13,R21
+    ctc2!(2, 0x0000_1000); // R22,R23
+    ctc2!(3, 0x0000_0000); // R31,R32
+    ctc2!(4, 0x0000_1000); // R33
+    ctc2!(5, 0);
+    ctc2!(6, 0);
+    ctc2!(7, 0x0000_1000); // TRZ
+    ctc2!(24, 0x00a0_0000); // OFX 160
+    ctc2!(25, 0x0078_0000); // OFY 120
+    ctc2!(26, 0x0000_0100); // H 256
+    ctc2!(27, 0x0000_0100); // DQA
+    ctc2!(28, 0);
+}
+
+fn rtps_lat(vxy0: u32, vz0: u32) {
+    mtc2!(0, vxy0);
+    mtc2!(1, vz0);
+    unsafe { gte_ops::rtps() };
+}
+
+/// Burn ~16 cycles so an in-flight GTE result settles before the read.
+#[inline(always)]
+fn gte_delay16() {
+    #[cfg(target_arch = "mips")]
+    unsafe {
+        core::arch::asm!(".rept 16\nnop\n.endr", options(nostack, nomem, preserves_flags));
+    }
+}
+
+macro_rules! gte_result_latency_test {
+    ($name:ident, $reg:literal, $label:literal) => {
+        fn $name() -> TestResult {
+            // Immediate read of B's result, primed with A settled.
+            seed_proj_latency();
+            rtps_lat(LAT_A_XY, LAT_A_Z);
+            gte_delay16();
+            rtps_lat(LAT_B_XY, LAT_B_Z);
+            let immediate = mfc2!($reg);
+            // Settled reference: identical sequence but wait before reading.
+            seed_proj_latency();
+            rtps_lat(LAT_A_XY, LAT_A_Z);
+            gte_delay16();
+            rtps_lat(LAT_B_XY, LAT_B_Z);
+            gte_delay16();
+            let settled = mfc2!($reg);
+            expect_eq(settled, immediate, $label)
+        }
+    };
+}
+gte_result_latency_test!(test_gte_lat_sxy2, 14, "rtps SXY2 read-latency");
+gte_result_latency_test!(test_gte_lat_sz3, 19, "rtps SZ3 read-latency");
+gte_result_latency_test!(test_gte_lat_ir1, 9, "rtps IR1 read-latency");
+gte_result_latency_test!(test_gte_lat_ir0, 8, "rtps IR0 read-latency");
 
 fn seed_gte_state() {
     ctc2!(31, 0);
