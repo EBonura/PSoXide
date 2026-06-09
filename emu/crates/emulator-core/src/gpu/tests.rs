@@ -868,8 +868,27 @@ fn textured_gouraud_quad_matches_two_triangle_split_bitexact() {
     ];
 
     for (qi, q) in quads.iter().enumerate() {
-        // Path A: two triangles, engine 0-2 split.
+        // Path A: the quad's OWN two triangles, in the exact order the
+        // 0x3C handler splits them -- [v1,v3,v2] then [v0,v1,v2]. Under
+        // silicon-accurate center-sampling a DIFFERENT triangulation
+        // (e.g. the engine's 0-2 split) is NOT bit-identical to the quad:
+        // the order-dependent tl interpolation anchor differs along the
+        // seam. So this asserts the true invariant -- the 0x3C packet
+        // renders exactly its constituent 0x34 triangles.
         let mut a = make_gpu();
+        for w in [
+            0x3400_0000 | q.c[1],
+            vert_word(q.v[1].0, q.v[1].1),
+            uv_word(q.uv[1].0, q.uv[1].1, 0),
+            q.c[3],
+            vert_word(q.v[3].0, q.v[3].1),
+            uv_word(q.uv[3].0, q.uv[3].1, TEXPAGE),
+            q.c[2],
+            vert_word(q.v[2].0, q.v[2].1),
+            uv_word(q.uv[2].0, q.uv[2].1, 0),
+        ] {
+            a.write32(GP0_ADDR, w);
+        }
         for w in [
             0x3400_0000 | q.c[0],
             vert_word(q.v[0].0, q.v[0].1),
@@ -883,24 +902,10 @@ fn textured_gouraud_quad_matches_two_triangle_split_bitexact() {
         ] {
             a.write32(GP0_ADDR, w);
         }
-        for w in [
-            0x3400_0000 | q.c[0],
-            vert_word(q.v[0].0, q.v[0].1),
-            uv_word(q.uv[0].0, q.uv[0].1, 0),
-            q.c[2],
-            vert_word(q.v[2].0, q.v[2].1),
-            uv_word(q.uv[2].0, q.uv[2].1, TEXPAGE),
-            q.c[3],
-            vert_word(q.v[3].0, q.v[3].1),
-            uv_word(q.uv[3].0, q.uv[3].1, 0),
-        ] {
-            a.write32(GP0_ADDR, w);
-        }
 
-        // Path B: one quad, packet order [v1,v0,v2,v3] so the hardware
-        // 1-2 split diagonal lands on the original 0-2 edge.
+        // Path B: one quad packet in natural order [v0,v1,v2,v3].
         let mut b = make_gpu();
-        let order = [1usize, 0, 2, 3];
+        let order = [0usize, 1, 2, 3];
         for w in [
             0x3C00_0000 | q.c[order[0]],
             vert_word(q.v[order[0]].0, q.v[order[0]].1),
@@ -976,7 +981,21 @@ fn textured_gouraud_quad_matches_two_triangle_split_bitexact() {
             ((next() % 64) as u8, (next() % 64) as u8),
         ];
 
+        // Path A: the quad's own split order [v1,v3,v2] then [v0,v1,v2].
         let mut a = make_gpu();
+        for w in [
+            0x3400_0000 | c[1],
+            vert_word(v[1].0, v[1].1),
+            uv_word(uv[1].0, uv[1].1, 0),
+            c[3],
+            vert_word(v[3].0, v[3].1),
+            uv_word(uv[3].0, uv[3].1, TEXPAGE),
+            c[2],
+            vert_word(v[2].0, v[2].1),
+            uv_word(uv[2].0, uv[2].1, 0),
+        ] {
+            a.write32(GP0_ADDR, w);
+        }
         for w in [
             0x3400_0000 | c[0],
             vert_word(v[0].0, v[0].1),
@@ -990,22 +1009,9 @@ fn textured_gouraud_quad_matches_two_triangle_split_bitexact() {
         ] {
             a.write32(GP0_ADDR, w);
         }
-        for w in [
-            0x3400_0000 | c[0],
-            vert_word(v[0].0, v[0].1),
-            uv_word(uv[0].0, uv[0].1, 0),
-            c[2],
-            vert_word(v[2].0, v[2].1),
-            uv_word(uv[2].0, uv[2].1, TEXPAGE),
-            c[3],
-            vert_word(v[3].0, v[3].1),
-            uv_word(uv[3].0, uv[3].1, 0),
-        ] {
-            a.write32(GP0_ADDR, w);
-        }
 
         let mut b = make_gpu();
-        let o = [1usize, 0, 2, 3];
+        let o = [0usize, 1, 2, 3];
         for w in [
             0x3C00_0000 | c[o[0]],
             vert_word(v[o[0]].0, v[o[0]].1),
@@ -1635,6 +1641,67 @@ fn flat_triangle_edge_cases_match_silicon() {
             h >> 4
         );
     }
+}
+
+/// Upload the disc's 16x16 15bpp test texture to VRAM (768,256) and return
+/// its tpage word (matches `gpu_upload_tex15` on the hardware-tests disc:
+/// Tpage::new(768,256,Bit15).uv_tpage_word -> 0x011C).
+fn replay_upload_tex15(gpu: &mut Gpu) -> u16 {
+    for y in 0..16u16 {
+        for x in 0..16u16 {
+            let p = 0x8000u16 | (x << 10) | (y << 5) | ((x ^ y) & 0x1f);
+            gpu.vram.set_pixel(768 + x, 256 + y, p);
+        }
+    }
+    0x011C
+}
+
+#[test]
+fn textured_gouraud_tris_replay_match_silicon() {
+    use psx_gpu::prim::TriTexturedGouraud;
+    let tpage = 0x011Cu16;
+    let cols = [(0x80, 0x80, 0x80), (0xc0, 0x80, 0x40), (0x40, 0xc0, 0x80)];
+    let uvs = [(0, 0), (15, 0), (8, 15)];
+    // The player's exact primitive. (name, verts, silicon hi7).
+    let cases: [(&str, [(i16, i16); 3], u32); 3] = [
+        // case 108: textured-gouraud tri (player prim), direct. hi7 0200A83.
+        ("player", [(8, 8), (88, 16), (40, 88)], 0x0020_0A83),
+        // case 112: textured-gouraud with a large span. hi7 C79F556.
+        ("large-span", [(4, 4), (92, 8), (400, 90)], 0x0C79_F556),
+        // case 113: same prim, the OT+DMA verts (rasterizes identically). hi7 6392570.
+        ("ot-dma", [(6, 6), (90, 14), (40, 90)], 0x0639_2570),
+    ];
+    for (name, verts, silicon_hi7) in cases {
+        let tri = TriTexturedGouraud::new(verts, uvs, cols, 0, tpage);
+        let h = replay_scratch_hash(|g| {
+            replay_upload_tex15(g);
+            replay_send_prim(g, &tri, TriTexturedGouraud::WORDS);
+        });
+        assert_eq!(
+            h >> 4,
+            silicon_hi7,
+            "tex-gouraud {name}: emulator {h:#010x} (>>4 {:#09x}) != silicon {silicon_hi7:#09x}",
+            h >> 4
+        );
+    }
+}
+
+#[test]
+fn gouraud_tri_replay_matches_silicon() {
+    use psx_gpu::prim::TriGouraud;
+    // case 102: per-vertex colours. Exercises the determinant-plane colour
+    // interpolation, not just coverage. Silicon hi7 = 0x285AC60 (HWB-005).
+    let tri = TriGouraud::new(
+        [(8, 8), (88, 16), (40, 88)],
+        [(0xf0, 0x00, 0x00), (0x00, 0xf0, 0x00), (0x00, 0x00, 0xf0)],
+    );
+    let h = replay_scratch_hash(|g| replay_send_prim(g, &tri, TriGouraud::WORDS));
+    assert_eq!(
+        h >> 4,
+        0x0285_AC60,
+        "gouraud tri {h:#010x} (>>4 {:#09x}) != silicon hi7 0x285AC60",
+        h >> 4
+    );
 }
 
 #[test]
