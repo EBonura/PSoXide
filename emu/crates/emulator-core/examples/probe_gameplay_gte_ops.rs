@@ -16,7 +16,7 @@
 mod disc_support;
 
 use emulator_core::{fast_boot_disc, Bus, Cpu};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 const PER_OP_FLAG: usize = 4;
@@ -40,6 +40,7 @@ fn main() {
     let mut by_op = [0u64; 64];
     let mut flag_by_op = [0u64; 64];
     let mut buckets: Vec<Bucket> = (0..64).map(|_| Bucket::default()).collect();
+    let mut pc_sites: HashMap<(u32, usize), u64> = HashMap::new();
     let mut total_func = 0u64;
 
     for _ in 1..=steps {
@@ -58,6 +59,7 @@ fn main() {
             total_func += 1;
             let func = (instr & 0x3F) as usize;
             by_op[func] += 1;
+            *pc_sites.entry((pc, func)).or_insert(0) += 1;
             let flag = cpu.cop2().read_control(31);
             let flag_master = flag & 0x8000_0000 != 0;
             if flag_master {
@@ -105,6 +107,14 @@ fn main() {
                 flag_by_op[func]
             );
         }
+    }
+
+    println!();
+    println!("--- top GTE call-sites (PC : mnemonic = count) -- tells player from world ---");
+    let mut sites: Vec<((u32, usize), u64)> = pc_sites.into_iter().collect();
+    sites.sort_by(|a, b| b.1.cmp(&a.1));
+    for ((pc, func), count) in sites.into_iter().take(24) {
+        println!("  0x{pc:08x}  {:<8} {count}", mnemonic(func as u32));
     }
 
     // Print buckets, MVMVA / RTPT / NCLIP first (the bug-relevant ops).

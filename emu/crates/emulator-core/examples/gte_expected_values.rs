@@ -199,6 +199,45 @@ fn main() {
         );
     }
 
+    println!("\n// ---- latency-probe vertices A/B (must differ in SXY2/SZ3/IR1/IR0) ----");
+    {
+        let proj = |vxy0: u32, vz0: u32| {
+            let mut g = Gte::new();
+            g.write_control(31, 0);
+            g.write_control(0, 0x0000_1000); // identity R11,R12
+            g.write_control(1, 0x0000_0000); // R13,R21
+            g.write_control(2, 0x0000_1000); // R22,R23
+            g.write_control(3, 0x0000_0000); // R31,R32
+            g.write_control(4, 0x0000_1000); // R33
+            g.write_control(5, 0);
+            g.write_control(6, 0);
+            g.write_control(7, 0x0000_1000); // TRZ
+            g.write_control(24, 0x00a0_0000); // OFX 160
+            g.write_control(25, 0x0078_0000); // OFY 120
+            g.write_control(26, 0x0000_0100); // H 256
+            g.write_control(27, 0x0000_0100); // DQA
+            g.write_control(28, 0);
+            g.write_data(0, vxy0);
+            g.write_data(1, vz0);
+            g.execute(0x4a08_0001); // RTPS sf=1
+            (
+                g.read_data(14), // SXY2
+                g.read_data(19), // SZ3
+                g.read_data(9),  // IR1
+                g.read_data(8),  // IR0
+                g.read_control(31),
+            )
+        };
+        let a = proj(0x0080_0100, 0x0000_0064); // (256,128,100)
+        let b = proj(0xffc0_ff38, 0xffff_ff38); // (-200,-64,-200)
+        println!("A SXY2=0x{:08x} SZ3=0x{:08x} IR1=0x{:08x} IR0=0x{:08x} flag=0x{:08x}", a.0, a.1, a.2, a.3, a.4);
+        println!("B SXY2=0x{:08x} SZ3=0x{:08x} IR1=0x{:08x} IR0=0x{:08x} flag=0x{:08x}", b.0, b.1, b.2, b.3, b.4);
+        println!(
+            "distinct: SXY2={} SZ3={} IR1={} IR0={}",
+            a.0 != b.0, a.1 != b.1, a.2 != b.2, a.3 != b.3
+        );
+    }
+
     println!("\n// ---- AVSZ3 (Z average -> OTZ) ----");
     {
         let mut g = Gte::new();
