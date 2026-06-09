@@ -1610,6 +1610,34 @@ fn flat_tri_replay_reproduces_disc_emulator_hash() {
 }
 
 #[test]
+fn flat_triangle_edge_cases_match_silicon() {
+    use psx_gpu::prim::TriFlat;
+    // Every flat-triangle GPU CHECKS case and its real-silicon hash (HWB-005
+    // photos, high 7 nibbles == hash>>4; the OBS column clips the low nibble).
+    // The Redux corner-sampled rasterizer failed ALL of these on hardware.
+    let cases: [(&str, [(i16, i16); 3], (u8, u8, u8), u32); 4] = [
+        // case 105: vertex past the right edge.
+        ("past-edge", [(8, 8), (88, 8), (300, 88)], (0xff, 0x80, 0x20), 0x069F_C0E3),
+        // case 106: negative X coordinate.
+        ("neg-coord", [(8, 8), (-200, 40), (88, 88)], (0x20, 0xff, 0x80), 0x0A3A_16BF),
+        // case 107: X coordinate beyond the 11-bit packet range (wraps).
+        ("coord-wrap", [(8, 48), (1500, 8), (48, 88)], (0x80, 0x20, 0xff), 0x03DF_1731),
+        // case 111: vertex past the bottom edge.
+        ("past-bottom", [(8, 8), (88, 8), (40, 300)], (0x30, 0xe0, 0x60), 0x062D_56B6),
+    ];
+    for (name, verts, (r, g, b), silicon_hi7) in cases {
+        let tri = TriFlat::new(verts, r, g, b);
+        let h = replay_scratch_hash(|gp| replay_send_prim(gp, &tri, TriFlat::WORDS));
+        assert_eq!(
+            h >> 4,
+            silicon_hi7,
+            "flat {name}: emulator {h:#010x} (>>4 {:#09x}) != silicon hi7 {silicon_hi7:#09x}",
+            h >> 4
+        );
+    }
+}
+
+#[test]
 fn flat_quad_replay_still_matches_silicon() {
     use psx_gpu::prim::QuadFlat;
     // The flat quad already PASSED on hardware (silicon == 0x79E53DC5). It
