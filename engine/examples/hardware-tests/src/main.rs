@@ -36,7 +36,7 @@ const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
 const FONT_CLUT: Clut = Clut::new(320, 256);
 
 const ROWS_PER_PAGE: usize = 6;
-const TEST_COUNT: usize = 63;
+const TEST_COUNT: usize = 68;
 const PAD_POLL_TEST_INDEX: usize = 26;
 const MODE_COUNT: u8 = 15;
 const CHECK_MODES: [Mode; 11] = [
@@ -715,6 +715,31 @@ const TESTS: [TestSpec; TEST_COUNT] = [
         group: "GTE",
         name: "scene RTPS D FLAG (0x80006000)",
         run: test_gte_scene_rtps_d_flag,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "NCLIP SXY0 input readback",
+        run: test_gte_nclip_in_sxy0,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "NCLIP SXY1 input readback",
+        run: test_gte_nclip_in_sxy1,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "NCLIP SXY2 input readback",
+        run: test_gte_nclip_in_sxy2,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "NCLIP MAC0 after 8 nops",
+        run: test_gte_nclip_mac0_nop8,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "NCLIP MAC0 after 16 nops",
+        run: test_gte_nclip_mac0_nop16,
     },
     TestSpec {
         group: "SPU",
@@ -2111,11 +2136,42 @@ fn test_gte_all_ops_digest() -> TestResult {
     expect_eq(0x003F_FFFF, observed, "gte ops")
 }
 
-fn test_gte_nclip_mac0() -> TestResult {
+/// Seed the positive-winding NCLIP triangle: SXY0=(0,0), SXY1=(10,0),
+/// SXY2=(0,10). The cross product is +100, so a faithful GTE leaves
+/// MAC0 = 0x64. Shared by every NCLIP MAC0 probe below.
+fn seed_nclip_pos_triangle() {
     ctc2!(31, 0);
     mtc2!(12, pack_gte_xy(0, 0));
     mtc2!(13, pack_gte_xy(10, 0));
     mtc2!(14, pack_gte_xy(0, 10));
+}
+
+/// Probe GTE result-read latency for NCLIP. Runs the positive-winding
+/// triangle, burns a fixed `nop` delay, then reports MAC0. On hardware:
+/// if MAC0 climbs from 0 toward 100 as the delay grows, the divergence
+/// is a read-too-soon hazard (the emulator completes the op instantly);
+/// if it stays 0, the GTE genuinely computes a different value for this
+/// winding (the negative winding already reads -100 correctly with no
+/// delay, which a uniform read-latency could not produce). INFO only;
+/// no delay is emitted on host, where the software GTE is instantaneous.
+macro_rules! nclip_mac0_delay_test {
+    ($name:ident, $delay:literal, $label:literal) => {
+        fn $name() -> TestResult {
+            seed_nclip_pos_triangle();
+            unsafe { gte_ops::nclip() };
+            #[cfg(target_arch = "mips")]
+            unsafe {
+                core::arch::asm!($delay, options(nostack, nomem, preserves_flags));
+            }
+            TestResult::info(100, mfc2!(24), $label)
+        }
+    };
+}
+nclip_mac0_delay_test!(test_gte_nclip_mac0_nop8, ".rept 8\nnop\n.endr", "nclip mac0 +8nop");
+nclip_mac0_delay_test!(test_gte_nclip_mac0_nop16, ".rept 16\nnop\n.endr", "nclip mac0 +16nop");
+
+fn test_gte_nclip_mac0() -> TestResult {
+    seed_nclip_pos_triangle();
     unsafe { gte_ops::nclip() };
     let positive = mfc2!(24) as i32;
     let positive_flag_clear = gte_flag_master_clear();
@@ -2143,13 +2199,32 @@ fn test_gte_nclip_mac0() -> TestResult {
 /// exact value we must replicate in the GTE core. INFO only -- expected
 /// shown as 100 for reference.
 fn test_gte_nclip_mac0_value() -> TestResult {
-    ctc2!(31, 0);
-    mtc2!(12, pack_gte_xy(0, 0));
-    mtc2!(13, pack_gte_xy(10, 0));
-    mtc2!(14, pack_gte_xy(0, 10));
+    seed_nclip_pos_triangle();
     unsafe { gte_ops::nclip() };
     let mac0 = mfc2!(24);
     TestResult::info(100, mac0, "nclip mac0")
+}
+
+// Inputs-survive check for the NCLIP MAC0 divergence. The positive
+// triangle reads MAC0 = 0 on silicon while the negative one reads -100
+// correctly (same code path, no delay), which a uniform read-latency
+// could not produce -- so the first thing to rule out is whether the
+// SXY0/1/2 the writes are supposed to leave in the GTE actually land.
+// These read each input register straight back after seeding (before
+// NCLIP). PSoXide returns exactly what was written (regs 12/13/14 are
+// direct, not the SXY FIFO); a mismatch on hardware means the mtc2
+// writes -- not NCLIP itself -- are the bug. INFO only.
+fn test_gte_nclip_in_sxy0() -> TestResult {
+    seed_nclip_pos_triangle();
+    TestResult::info(0x0000_0000, mfc2!(12), "nclip in sxy0")
+}
+fn test_gte_nclip_in_sxy1() -> TestResult {
+    seed_nclip_pos_triangle();
+    TestResult::info(0x0000_000A, mfc2!(13), "nclip in sxy1")
+}
+fn test_gte_nclip_in_sxy2() -> TestResult {
+    seed_nclip_pos_triangle();
+    TestResult::info(0x000A_0000, mfc2!(14), "nclip in sxy2")
 }
 
 /// Companion measurement for the GTE arithmetic surface. Projects a
