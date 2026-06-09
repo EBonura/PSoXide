@@ -36,7 +36,7 @@ const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
 const FONT_CLUT: Clut = Clut::new(320, 256);
 
 const ROWS_PER_PAGE: usize = 6;
-const TEST_COUNT: usize = 105;
+const TEST_COUNT: usize = 110;
 const PAD_POLL_TEST_INDEX: usize = 26;
 const MODE_COUNT: u8 = 15;
 const CHECK_MODES: [Mode; 11] = [
@@ -925,6 +925,31 @@ const TESTS: [TestSpec; TEST_COUNT] = [
         group: "GPU",
         name: "draw gouraud triangle",
         run: test_gpu_draw_gouraud_tri,
+    },
+    TestSpec {
+        group: "GPU",
+        name: "draw flat quad",
+        run: test_gpu_draw_flat_quad,
+    },
+    TestSpec {
+        group: "GPU",
+        name: "draw gouraud quad",
+        run: test_gpu_draw_gouraud_quad,
+    },
+    TestSpec {
+        group: "GPU",
+        name: "tri vertex past right edge",
+        run: test_gpu_tri_past_right_edge,
+    },
+    TestSpec {
+        group: "GPU",
+        name: "tri negative coordinate",
+        run: test_gpu_tri_negative_coord,
+    },
+    TestSpec {
+        group: "GPU",
+        name: "tri coord exceeds 11-bit (wrap)",
+        run: test_gpu_tri_coord_wrap,
     },
     TestSpec {
         group: "SPU",
@@ -2843,6 +2868,33 @@ fn test_gpu_draw_gouraud_tri() -> TestResult {
         [(0xf0, 0x00, 0x00), (0x00, 0xf0, 0x00), (0x00, 0x00, 0xf0)],
     );
     expect_eq(0xff64_e558, gpu_draw_and_hash(&tri, prim::TriGouraud::WORDS), "gpu gouraud tri")
+}
+fn test_gpu_draw_flat_quad() -> TestResult {
+    let q = prim::QuadFlat::new([(8, 8), (88, 8), (8, 88), (88, 88)], 0x30, 0xc0, 0x60);
+    expect_eq(0x79e5_3dc5, gpu_draw_and_hash(&q, prim::QuadFlat::WORDS), "gpu flat quad")
+}
+fn test_gpu_draw_gouraud_quad() -> TestResult {
+    let q = prim::QuadGouraud::new(
+        [(8, 8), (88, 8), (8, 88), (88, 88)],
+        [(0xf0, 0, 0), (0, 0xf0, 0), (0, 0, 0xf0), (0xf0, 0xf0, 0)],
+    );
+    expect_eq(0x22b3_d6c3, gpu_draw_and_hash(&q, prim::QuadGouraud::WORDS), "gpu gouraud quad")
+}
+// Edge-coordinate / large-span triangles -- the direct stretch suspects: how
+// the GPU rasterizes a triangle whose vertex lands far outside the draw area,
+// goes negative, or exceeds the 11-bit coordinate range (where it wraps).
+fn test_gpu_tri_past_right_edge() -> TestResult {
+    let tri = prim::TriFlat::new([(8, 8), (88, 8), (300, 88)], 0xff, 0x80, 0x20);
+    expect_eq(0xe9fb_1a67, gpu_draw_and_hash(&tri, prim::TriFlat::WORDS), "gpu tri past edge")
+}
+fn test_gpu_tri_negative_coord() -> TestResult {
+    let tri = prim::TriFlat::new([(8, 8), (-200, 40), (88, 88)], 0x20, 0xff, 0x80);
+    expect_eq(0x51f5_7489, gpu_draw_and_hash(&tri, prim::TriFlat::WORDS), "gpu tri neg coord")
+}
+fn test_gpu_tri_coord_wrap() -> TestResult {
+    // x=1500 exceeds the 11-bit signed range (max 1023) -> wraps on silicon.
+    let tri = prim::TriFlat::new([(8, 48), (1500, 8), (48, 88)], 0x80, 0x20, 0xff);
+    expect_eq(0x7396_bad5, gpu_draw_and_hash(&tri, prim::TriFlat::WORDS), "gpu tri coord wrap")
 }
 
 fn seed_gte_state() {
