@@ -171,7 +171,7 @@ impl Bus {
             .try_into()
             .expect("size was just checked");
 
-        Ok(Self {
+        let mut bus = Self {
             ram: zeroed_box(),
             bios: bios_arr,
             scratchpad: zeroed_box(),
@@ -216,7 +216,32 @@ impl Bus {
             unmapped_write_seen: std::collections::BTreeSet::new(),
             dma_log_enabled: false,
             dma_log: Vec::new(),
-        })
+        };
+
+        bus.maybe_poison_memory();
+        Ok(bus)
+    }
+
+    /// Debug aid for hardware-only bugs. Real hardware powers up with garbage
+    /// in RAM and VRAM; the emulator zeroes them, which hides guest code that
+    /// reads memory before writing it (an uninitialized read returns 0 here but
+    /// noise on silicon). Setting `PSOXIDE_POISON_MEM` fills RAM, scratchpad,
+    /// and VRAM with a non-zero pattern (a hex byte like `0xAA`, or `1` for the
+    /// 0xAA default) so those reads surface as visible corruption. No-op when
+    /// the env var is unset, so normal/parity runs stay deterministic.
+    fn maybe_poison_memory(&mut self) {
+        let Ok(spec) = std::env::var("PSOXIDE_POISON_MEM") else {
+            return;
+        };
+        let byte = match spec.trim() {
+            "" | "1" | "true" | "yes" => 0xAA,
+            s => u8::from_str_radix(s.trim_start_matches("0x"), 16).unwrap_or(0xAA),
+        };
+        self.ram.fill(byte);
+        self.scratchpad.fill(byte);
+        let halfword = (u16::from(byte) << 8) | u16::from(byte);
+        self.gpu.vram.words_mut().fill(halfword);
+        eprintln!("[poison] RAM + scratchpad + VRAM filled with 0x{byte:02x}");
     }
 
     /// Build a deterministic bus for HLE-BIOS side-loaded homebrew.
