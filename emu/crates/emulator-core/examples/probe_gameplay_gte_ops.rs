@@ -36,11 +36,19 @@ fn main() {
     bus.attach_digital_pad_port1();
     // Past the "ANALOG MODE REQUIRED" gate into actual gameplay.
     let _ = bus.force_port1_analog_mode();
+    // Drive the right stick (yaw orbit + pitch) so the camera visits the
+    // angles where the player stretches on hardware -- the skinning composes
+    // the view into the GTE matrix, so the captured MVMVA changes with angle.
+    bus.set_port1_sticks(0xFF, 0x00, 0x80, 0x80);
 
     let mut by_op = [0u64; 64];
     let mut flag_by_op = [0u64; 64];
     let mut buckets: Vec<Bucket> = (0..64).map(|_| Bucket::default()).collect();
     let mut pc_sites: HashMap<(u32, usize), u64> = HashMap::new();
+    // Per-PC RTPS depth stats: (count, divide-overflow count, min SZ3, max SZ3).
+    let mut rtps_sz: HashMap<u32, (u64, u64, i32, i32)> = HashMap::new();
+    // Per-PC RTPS screen-coord saturation (FLAG bits 14/13 = SX2/SY2 clamped to +/-0x3ff).
+    let mut rtps_sat: HashMap<u32, u64> = HashMap::new();
     let mut total_func = 0u64;
 
     for _ in 1..=steps {
@@ -61,6 +69,21 @@ fn main() {
             by_op[func] += 1;
             *pc_sites.entry((pc, func)).or_insert(0) += 1;
             let flag = cpu.cop2().read_control(31);
+            if func == 0x01 {
+                // RTPS: track output SZ3 (data reg 19) + divide-overflow (FLAG b17).
+                let sz3 = cpu.cop2().read_data(19) as i32;
+                let ovf = (flag & 0x0002_0000) != 0;
+                let e = rtps_sz.entry(pc).or_insert((0, 0, i32::MAX, i32::MIN));
+                e.0 += 1;
+                if ovf {
+                    e.1 += 1;
+                }
+                e.2 = e.2.min(sz3);
+                e.3 = e.3.max(sz3);
+                if flag & 0x0000_6000 != 0 {
+                    *rtps_sat.entry(pc).or_insert(0) += 1;
+                }
+            }
             let flag_master = flag & 0x8000_0000 != 0;
             if flag_master {
                 flag_by_op[func] += 1;
@@ -107,6 +130,15 @@ fn main() {
                 flag_by_op[func]
             );
         }
+    }
+
+    println!();
+    println!("--- RTPS depth (SZ3) per PC -- divide overflows at SZ3 <= H/2 (~160) ---");
+    let mut rtps_pcs: Vec<(u32, (u64, u64, i32, i32))> = rtps_sz.into_iter().collect();
+    rtps_pcs.sort_by(|a, b| b.1 .0.cmp(&a.1 .0));
+    for (pc, (count, ovf, min, max)) in rtps_pcs {
+        let sat = rtps_sat.get(&pc).copied().unwrap_or(0);
+        println!("  0x{pc:08x}  n={count:<7} div-ovf={ovf:<7} sx/sy-sat={sat:<7} SZ3 min={min} max={max}");
     }
 
     println!();
