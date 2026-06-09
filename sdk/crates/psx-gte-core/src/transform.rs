@@ -179,6 +179,100 @@ mod tests {
     }
 
     #[test]
+    fn scene_ops_and_corners_match_psx_gte_core() {
+        // Host mirror of the hardware-tests GTE conformance battery (part 2):
+        // scene-captured MVMVA / RTPT / NCLIP plus the LZCS corner case. Locks
+        // PSoXide's outputs for the exact inputs the disc replays, so the disc
+        // cases are green in-emulator and any hardware divergence is real.
+        fn tri(a: u32, b: u32, c: u32) -> u32 {
+            a ^ b.rotate_left(11) ^ c.rotate_left(22)
+        }
+        fn seed_xform(g: &mut crate::Gte) {
+            g.write_control(31, 0);
+            g.write_control(0, 0x0000_0f19);
+            g.write_control(1, 0x016e_fab4);
+            g.write_control(2, 0x0411_f098);
+            g.write_control(3, 0xfbb1_fae7);
+            g.write_control(4, 0xffff_f177);
+            g.write_control(5, 0xffff_eabc);
+            g.write_control(6, 0xffff_fdb9);
+            g.write_control(7, 0x0000_35be);
+            g.write_control(24, 0x00a0_0000);
+            g.write_control(25, 0x0078_0000);
+            g.write_control(26, 0x0000_0140);
+            g.write_control(27, 0);
+            g.write_control(28, 0);
+        }
+
+        // MVMVA (RT*V0 + TR, sf=1): digest of MAC1/2/3.
+        let mvmva = |vxy0: u32, vz0: u32| {
+            let mut g = crate::Gte::new();
+            seed_xform(&mut g);
+            g.write_data(0, vxy0);
+            g.write_data(1, vz0);
+            g.execute(0x4a08_0012);
+            tri(g.read_data(25), g.read_data(26), g.read_data(27))
+        };
+        assert_eq!(mvmva(0x2040_0340, 0x0000_09c0), 0xca74_6d65);
+        assert_eq!(mvmva(0x2040_0340, 0x0000_16c0), 0xd65a_09bf);
+        assert_eq!(mvmva(0x0b00_0340, 0x0000_23c0), 0x511b_ee0c);
+        assert_eq!(mvmva(0x2040_09c0, 0x0000_09c0), 0x46ef_d743);
+
+        // RTPT: SXY digest + FLAG + SZ3.
+        let rtpt = |v: [u32; 6]| {
+            let mut g = crate::Gte::new();
+            seed_xform(&mut g);
+            for (i, &w) in v.iter().enumerate() {
+                g.write_data(i as u8, w);
+            }
+            g.execute(0x4a08_0030);
+            (
+                tri(g.read_data(12), g.read_data(13), g.read_data(14)),
+                g.read_control(31),
+                g.read_data(19),
+            )
+        };
+        assert_eq!(
+            rtpt([0x0480_2d80, 0x0000_2700, 0x0480_2080, 0x0000_2d80, 0x0480_1a00, 0x0000_2d80]),
+            (0xfc1f_e61f, 0x8000_6000, 0x0000_02e9)
+        );
+        assert_eq!(
+            rtpt([0x0480_2700, 0x0000_2d80, 0x0480_2d80, 0x0000_2d80, 0x0480_2080, 0x0000_3400]),
+            (0xfbe0_066f, 0x8006_6000, 0x0000_0000)
+        );
+        assert_eq!(
+            rtpt([0x10c0_0000, 0x0000_0d00, 0x10c0_0680, 0x0000_0d00, 0x1dc0_0680, 0x0000_0d00]),
+            (0xaf36_5a05, 0x0000_0000, 0x0000_1fd9)
+        );
+
+        // NCLIP: real scene backface MAC0.
+        let nclip = |s0: u32, s1: u32, s2: u32| {
+            let mut g = crate::Gte::new();
+            g.write_control(31, 0);
+            g.write_data(12, s0);
+            g.write_data(13, s1);
+            g.write_data(14, s2);
+            g.execute(0x4a00_0006);
+            g.read_data(24)
+        };
+        assert_eq!(nclip(0x006e_0095, 0xffe2_0094, 0xffde_00dc), 0x0000_2764);
+        assert_eq!(nclip(0x0073_00d5, 0xffde_00dc, 0xffd8_0130), 0x0000_30ba);
+        assert_eq!(nclip(0x0079_011f, 0xffd8_0130, 0xffd2_0194), 0x0000_3e7e);
+
+        // LZCS/LZCR leading-bit count.
+        let lzcr = |v: u32| {
+            let mut g = crate::Gte::new();
+            g.write_data(30, v);
+            g.read_data(31)
+        };
+        assert_eq!(lzcr(0x00ff_ffff), 8);
+        assert_eq!(lzcr(0xffff_0000), 16);
+        assert_eq!(lzcr(0x0000_0001), 31);
+        assert_eq!(lzcr(0x7fff_ffff), 1);
+        assert_eq!(lzcr(0x8000_0000), 1);
+    }
+
+    #[test]
     fn sin_wraps_modulo_256() {
         // Angles outside 0..256 must wrap.
         assert_eq!(sin_1_3_12(256), sin_1_3_12(0));

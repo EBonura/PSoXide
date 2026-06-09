@@ -244,3 +244,16 @@ pub unsafe fn gpl() {
 pub unsafe fn mvmva_rt_v0_tr_sf1() {
     cofun!(0x4A08_0012)
 }
+
+/// MVMVA(`mx=RT, vx=V0, cv=FC, sf=1, lm=0`) -- the "far color" translation
+/// variant. PSX-SPX documents this `cv=FC` combination as hardware-bugged
+/// (the first matrix-row product is discarded mid-accumulate), which makes
+/// it a sharp emulator-vs-silicon conformance check rather than a useful
+/// transform.
+///
+/// # Safety
+/// See [`rtps`].
+#[inline(always)]
+pub unsafe fn mvmva_rt_v0_fc_sf1() {
+    cofun!(0x4A08_4012)
+}
