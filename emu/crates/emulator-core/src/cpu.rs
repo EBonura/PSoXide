@@ -28,6 +28,12 @@ mod timing;
 use branch::branch_target;
 use timing::cycle_cost;
 
+/// Cycles after `MTC2` to LZCS (data reg 30) before the recomputed LZCR
+/// (data reg 31) is readable. A read inside this window returns the prior
+/// count -- the off-by-one observed on real hardware for a back-to-back
+/// `mtc2 lzcs; mfc2 lzcr`.
+const LZCR_RESULT_LATENCY: u64 = 8;
+
 /// Errors raised during instruction execution.
 #[derive(Error, Debug, PartialEq, Eq)]
 pub enum ExecutionError {
@@ -102,6 +108,21 @@ pub struct Cpu {
     /// between an op and its result read hides the latency. The emulator
     /// computes GTE results eagerly, so this models timing only.
     gte_busy_until: u64,
+    /// Hardware GTE result-read latency. Unlike MAC1-3/SXY/SZ (which read
+    /// back-to-back fine), MAC0 (data reg 24) and LZCR (data reg 31) are
+    /// NOT readable the instant their producing op issues -- real silicon
+    /// returns the PRIOR value until the result settles. Reading them
+    /// before the ready cycle returns the stale snapshot. This reproduces
+    /// the cortex_ignition_v1 dropped-wall bug (the engine reads NCLIP's
+    /// MAC0 for backface culling one instruction too soon, so on hardware
+    /// it culls against the stale RTPT depth-cue MAC0 and drops faces) --
+    /// a bug every other emulator hides by computing the GTE instantly.
+    /// Confirmed on real hardware (cortex GTE conformance disc 2026-06-09:
+    /// MAC0 read +8 nops = correct, back-to-back = stale; LZCR off-by-one).
+    gte_mac0_ready_at: u64,
+    gte_mac0_stale: u32,
+    gte_lzcr_ready_at: u64,
+    gte_lzcr_stale: u32,
     /// Bus cycle at which the multiply/divide unit's HI/LO result becomes
     /// available. MFHI/MFLO stall to this point (the R3000A HI/LO interlock),
     /// and interleaving work between a MULT/DIV and its result read hides the
@@ -162,6 +183,10 @@ impl Cpu {
             pending_load: None,
             committing_load: None,
             gte_busy_until: 0,
+            gte_mac0_ready_at: 0,
+            gte_mac0_stale: 0,
+            gte_lzcr_ready_at: 0,
+            gte_lzcr_stale: 0,
             hilo_busy_until: 0,
             hi: 0,
             lo: 0,
@@ -232,6 +257,10 @@ impl Cpu {
         self.pending_load = None;
         self.committing_load = None;
         self.gte_busy_until = 0;
+        self.gte_mac0_ready_at = 0;
+        self.gte_mac0_stale = 0;
+        self.gte_lzcr_ready_at = 0;
+        self.gte_lzcr_stale = 0;
         self.hilo_busy_until = 0;
         self.pending_exception_pc = None;
         self.set_gpr(28, initial_gp);
@@ -614,23 +643,22 @@ impl Cpu {
             // The GTE is not pipelined: issuing a command while a previous one
             // is still in flight stalls until it completes.
             self.gte_sync(bus);
+            // MAC0 has result-read latency: snapshot the now-settled prior
+            // MAC0 so a too-soon read returns it (see gte_mac0_* docs).
+            self.gte_mac0_stale = self.cop2.read_data(24);
             self.cop2.execute(instr);
             self.gte_busy_until = bus.cycles() + Gte::command_cycles(instr) as u64;
+            self.gte_mac0_ready_at = self.gte_busy_until;
             return Ok(());
         }
         let cop_op = ((instr >> 21) & 0x1F) as u8;
         match cop_op {
-            // MFC2/CFC2 read a GTE result; the CPU stalls until the in-flight
-            // command finishes. Interleaving CPU work before the read hides it.
-            0x00 => {
-                self.gte_sync(bus);
-                self.op_mfc2(instr)
-            }
-            0x02 => {
-                self.gte_sync(bus);
-                self.op_cfc2(instr)
-            }
-            0x04 => self.op_mtc2(instr),
+            // MFC2/CFC2 read a GTE result. Real hardware does NOT stall these
+            // reads -- reading a result register before it has settled returns
+            // a stale value (modelled per-register in `gte_read_data_latency`).
+            0x00 => self.op_mfc2(instr, bus),
+            0x02 => self.op_cfc2(instr),
+            0x04 => self.op_mtc2(instr, bus),
             0x06 => self.op_ctc2(instr),
             _ => Err(ExecutionError::Unimplemented {
                 opcode: 0x12,
@@ -653,14 +681,26 @@ impl Cpu {
     /// `MFC2 rt, rd` -- move from COP2 data register `rd` into GPR
     /// `rt`. Like LW, this respects the one-slot load delay so the
     /// next instruction sees the *old* register value.
-    fn op_mfc2(&mut self, instr: u32) -> Result<(), ExecutionError> {
+    fn op_mfc2(&mut self, instr: u32, bus: &Bus) -> Result<(), ExecutionError> {
         let rt = ((instr >> 16) & 0x1F) as u8;
         let rd = ((instr >> 11) & 0x1F) as u8;
-        let value = self.cop2.read_data(rd);
+        let value = self.gte_read_data_latency(bus, rd);
         if rt != 0 {
             self.pending_load = Some((rt, value));
         }
         Ok(())
+    }
+
+    /// Read a GTE data register, applying the MAC0 / LZCR result-read
+    /// latency. Every other register reads the live (eagerly computed)
+    /// value, matching hardware where MAC1-3 / SXY / SZ settle in time
+    /// for a back-to-back read but MAC0 / LZCR do not.
+    fn gte_read_data_latency(&self, bus: &Bus, rd: u8) -> u32 {
+        match rd {
+            24 if bus.cycles() < self.gte_mac0_ready_at => self.gte_mac0_stale,
+            31 if bus.cycles() < self.gte_lzcr_ready_at => self.gte_lzcr_stale,
+            _ => self.cop2.read_data(rd),
+        }
     }
 
     /// `CFC2 rt, rd` -- same as MFC2 but reads a control register.
@@ -675,10 +715,17 @@ impl Cpu {
     }
 
     /// `MTC2 rt, rd` -- move from GPR `rt` to COP2 data register `rd`.
-    /// Coprocessor writes commit immediately (no delay slot).
-    fn op_mtc2(&mut self, instr: u32) -> Result<(), ExecutionError> {
+    /// Coprocessor writes commit immediately (no delay slot). Writing
+    /// LZCS (reg 30) recomputes LZCR (reg 31), which has the same
+    /// result-read latency as MAC0: a back-to-back LZCR read returns the
+    /// prior count (the off-by-one seen on real hardware).
+    fn op_mtc2(&mut self, instr: u32, bus: &Bus) -> Result<(), ExecutionError> {
         let rt = ((instr >> 16) & 0x1F) as u8;
         let rd = ((instr >> 11) & 0x1F) as u8;
+        if rd == 30 {
+            self.gte_lzcr_stale = self.cop2.read_data(31);
+            self.gte_lzcr_ready_at = bus.cycles() + LZCR_RESULT_LATENCY;
+        }
         self.cop2.write_data(rd, self.gpr(rt));
         Ok(())
     }
@@ -722,10 +769,10 @@ impl Cpu {
         let rt = ((instr >> 16) & 0x1F) as u8;
         let offset = (instr as i16) as i32 as u32;
         let addr = self.gpr(rs).wrapping_add(offset);
-        // SWC2 stores a GTE register, so it reads a result: stall until any
-        // in-flight GTE command has completed.
-        self.gte_sync(bus);
-        bus.write32(addr, self.cop2.read_data(rt));
+        // SWC2 stores a GTE register, so it reads a result -- subject to the
+        // same MAC0/LZCR read latency as MFC2 (no stall on real hardware).
+        let value = self.gte_read_data_latency(bus, rt);
+        bus.write32(addr, value);
         Ok(())
     }
 
