@@ -1309,7 +1309,9 @@ fn draw_rows(font: &FontAtlas, suite: &HardwareTests, mode: Mode) {
         font.draw_text(48, y, spec.group, (140, 170, 210));
         if matches!(result.status, Status::Fail | Status::Warn | Status::Info) {
             font.draw_text(216, y, "OBS", (140, 160, 190));
-            font.draw_text(248, y, hex8(result.observed).as_str(), color);
+            // Bare 8 nibbles (no `0x`) so the full value fits on a 320px
+            // screen -- the `0x`-prefixed form clipped the low nibble.
+            font.draw_text(248, y, hex8(result.observed).digits(), color);
         }
         font.draw_text(16, y + 10, clipped_text(spec.name, 37), (220, 224, 230));
         visible_index += 1;
@@ -3746,6 +3748,14 @@ struct Hex8 {
 impl Hex8 {
     fn as_str(&self) -> &str {
         unsafe { core::str::from_utf8_unchecked(&self.bytes) }
+    }
+
+    /// The 8 hex nibbles without the `0x` prefix. The OBS column lives at
+    /// x=248 on a 320px screen; `0x` + 8 nibbles = 80px overruns the right
+    /// edge and the low nibble is clipped off-screen. The bare 8 nibbles
+    /// (64px) fit, so the full hardware value is readable on a real TV.
+    fn digits(&self) -> &str {
+        unsafe { core::str::from_utf8_unchecked(&self.bytes[2..]) }
     }
 }
 
