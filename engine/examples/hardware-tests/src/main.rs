@@ -36,7 +36,7 @@ const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
 const FONT_CLUT: Clut = Clut::new(320, 256);
 
 const ROWS_PER_PAGE: usize = 6;
-const TEST_COUNT: usize = 102;
+const TEST_COUNT: usize = 105;
 const PAD_POLL_TEST_INDEX: usize = 26;
 const MODE_COUNT: u8 = 15;
 const CHECK_MODES: [Mode; 11] = [
@@ -910,6 +910,21 @@ const TESTS: [TestSpec; TEST_COUNT] = [
         group: "GTE",
         name: "RTPS IR0 read-latency",
         run: test_gte_lat_ir0,
+    },
+    TestSpec {
+        group: "GPU",
+        name: "VRAM fill + read-back",
+        run: test_gpu_vram_roundtrip,
+    },
+    TestSpec {
+        group: "GPU",
+        name: "draw flat triangle",
+        run: test_gpu_draw_flat_tri,
+    },
+    TestSpec {
+        group: "GPU",
+        name: "draw gouraud triangle",
+        run: test_gpu_draw_gouraud_tri,
     },
     TestSpec {
         group: "SPU",
@@ -2740,6 +2755,95 @@ gte_result_latency_test!(test_gte_lat_sxy2, 14, "rtps SXY2 read-latency");
 gte_result_latency_test!(test_gte_lat_sz3, 19, "rtps SZ3 read-latency");
 gte_result_latency_test!(test_gte_lat_ir1, 9, "rtps IR1 read-latency");
 gte_result_latency_test!(test_gte_lat_ir0, 8, "rtps IR0 read-latency");
+
+// ---------------------------------------------------------------------------
+// GPU render + VRAM read-back conformance. The GTE projects the player's
+// vertices to in-frame coords (proven on the GTE pages) and the packet build
+// is deterministic CPU -- so the on-hardware vertex stretching must be the GPU
+// or the OT/DMA drawing a good coordinate wrong. These cases draw into an
+// OFF-SCREEN scratch VRAM rect (clear of the framebuffer pages + font), read
+// the pixels back via GP0 0xC0 + GPUREAD, and FNV-1a hash them. Expecteds are
+// PSoXide's own pixel hashes (baked from a headless run), so green = GPU
+// matches emulator and a RED case on silicon is the GPU/DMA quirk.
+const GPU_SX: u16 = 512; // scratch VRAM x (clear of 320x240 fb pages + font tpage)
+const GPU_SY: u16 = 256;
+const GPU_SW: u16 = 96; // 16-aligned for the GP0 0x02 fill
+const GPU_SH: u16 = 96;
+
+/// GP0 0x02 fill rect (direct VRAM; ignores draw area/offset/mask).
+fn gpu_fill(x: u16, y: u16, w: u16, h: u16, rgb24: u32) {
+    gpu_io::wait_cmd_ready();
+    gpu_io::write_gp0(0x0200_0000 | (rgb24 & 0x00FF_FFFF));
+    gpu_io::write_gp0(((y as u32) << 16) | x as u32);
+    gpu_io::write_gp0(((h as u32) << 16) | w as u32);
+}
+
+/// Point the drawing area + offset at the scratch rect, so primitive coords
+/// are scratch-relative (0..GPU_SW / 0..GPU_SH).
+fn gpu_draw_env_scratch() {
+    let (x, y) = (GPU_SX as u32, GPU_SY as u32);
+    gpu_io::write_gp0(0xE300_0000 | (x & 0x3FF) | ((y & 0x1FF) << 10));
+    let (rx, ry) = (x + GPU_SW as u32 - 1, y + GPU_SH as u32 - 1);
+    gpu_io::write_gp0(0xE400_0000 | (rx & 0x3FF) | ((ry & 0x1FF) << 10));
+    gpu_io::write_gp0(0xE500_0000 | (x & 0x7FF) | ((y & 0x7FF) << 11));
+}
+
+/// Send a primitive's data words (skipping the leading OT tag) to GP0.
+fn gpu_send_prim<T>(prim_ref: &T, words: u8) {
+    let base = (prim_ref as *const T).cast::<u32>();
+    gpu_io::wait_cmd_ready();
+    for i in 0..words as usize {
+        // +1 skips the `tag` word that only the OT/DMA path consumes.
+        let word = unsafe { core::ptr::read(base.add(1 + i)) };
+        gpu_io::write_gp0(word);
+    }
+}
+
+/// Read the scratch rect back (GP0 0xC0 + GPUREAD) and FNV-1a hash the pixels.
+fn gpu_hash_scratch() -> u32 {
+    gpu_io::wait_cmd_ready();
+    gpu_io::write_gp0(0xC000_0000);
+    gpu_io::write_gp0(((GPU_SY as u32) << 16) | GPU_SX as u32);
+    gpu_io::write_gp0(((GPU_SH as u32) << 16) | GPU_SW as u32);
+    let words = (GPU_SW as u32 * GPU_SH as u32) / 2; // two 16bpp pixels per word
+    let mut hash = 0x811C_9DC5u32;
+    for _ in 0..words {
+        let mut guard = 0u32;
+        // GPUSTAT bit 27 = ready to send VRAM->CPU data.
+        while gpu_io::gpustat().bits() & (1 << 27) == 0 && guard < 100_000 {
+            guard += 1;
+        }
+        let w = gpu_io::gpuread();
+        hash = (hash ^ (w & 0xFFFF)).wrapping_mul(0x0100_0193);
+        hash = (hash ^ (w >> 16)).wrapping_mul(0x0100_0193);
+    }
+    hash
+}
+
+/// Clear the scratch rect, draw a primitive into it, return the VRAM hash.
+fn gpu_draw_and_hash<T>(prim_ref: &T, words: u8) -> u32 {
+    gpu_fill(GPU_SX, GPU_SY, GPU_SW, GPU_SH, 0x0000_0000);
+    gpu_draw_env_scratch();
+    gpu_send_prim(prim_ref, words);
+    gpu_io::wait_cmd_ready();
+    gpu_hash_scratch()
+}
+
+fn test_gpu_vram_roundtrip() -> TestResult {
+    gpu_fill(GPU_SX, GPU_SY, GPU_SW, GPU_SH, 0x0034_7c9a);
+    expect_eq(0x1f84_f1c5, gpu_hash_scratch(), "gpu vram fill+read")
+}
+fn test_gpu_draw_flat_tri() -> TestResult {
+    let tri = prim::TriFlat::new([(8, 8), (88, 16), (40, 88)], 0xc0, 0x40, 0x80);
+    expect_eq(0x495a_fb4d, gpu_draw_and_hash(&tri, prim::TriFlat::WORDS), "gpu flat tri")
+}
+fn test_gpu_draw_gouraud_tri() -> TestResult {
+    let tri = prim::TriGouraud::new(
+        [(8, 8), (88, 16), (40, 88)],
+        [(0xf0, 0x00, 0x00), (0x00, 0xf0, 0x00), (0x00, 0x00, 0xf0)],
+    );
+    expect_eq(0xff64_e558, gpu_draw_and_hash(&tri, prim::TriGouraud::WORDS), "gpu gouraud tri")
+}
 
 fn seed_gte_state() {
     ctc2!(31, 0);
