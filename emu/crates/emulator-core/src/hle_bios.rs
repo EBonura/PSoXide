@@ -115,10 +115,11 @@ fn run(table: Table, func: u8, bus: &mut Bus, args: [u32; 4]) -> u32 {
             0
         }
         (Table::A, 0x3F) => {
-            // Partial printf: emit the format string verbatim.
-            // Real %-format support lands when a game actually
-            // relies on it -- most debug output is static text.
-            write_cstring_to_stdout(bus, args[0]);
+            // printf with register varargs (a1-a3). The MIPS o32 ABI
+            // passes the first three varargs in registers, which covers
+            // the public test suites' debug output (ps1-tests, amidog);
+            // formats needing stack varargs print their tail verbatim.
+            hle_printf(bus, args[0], &[args[1], args[2], args[3]]);
             0
         }
 
@@ -225,4 +226,108 @@ fn write_cstring_to_stdout(bus: &mut Bus, addr: u32) {
         write_byte_to_stdout(b);
         p = p.wrapping_add(1);
     }
+}
+
+/// Minimal printf for A(0x3F): %% %c %s %d %i %u %x %X with optional
+/// zero-pad width (e.g. %08x). Consumes up to three register varargs;
+/// conversions past that print verbatim (stack varargs not modeled).
+fn hle_printf(bus: &mut Bus, fmt_addr: u32, varargs: &[u32; 3]) {
+    let mut out: Vec<u8> = Vec::with_capacity(128);
+    let mut next_arg = 0usize;
+    let mut take = |next: &mut usize| -> Option<u32> {
+        let v = varargs.get(*next).copied();
+        *next += 1;
+        v
+    };
+    let mut p = fmt_addr;
+    let mut budget = 4096;
+    while budget > 0 {
+        budget -= 1;
+        let b = bus.try_read8(p).unwrap_or(0);
+        p = p.wrapping_add(1);
+        if b == 0 {
+            break;
+        }
+        if b != b'%' {
+            out.push(b);
+            continue;
+        }
+        // Parse [0][width]conv -- enough for debug output in practice.
+        let mut zero_pad = false;
+        let mut width = 0usize;
+        let mut conv = 0u8;
+        loop {
+            let c = bus.try_read8(p).unwrap_or(0);
+            p = p.wrapping_add(1);
+            match c {
+                b'0' if width == 0 && !zero_pad => zero_pad = true,
+                b'0'..=b'9' => width = width * 10 + (c - b'0') as usize,
+                b'l' => {} // longs are 32-bit here; ignore the modifier
+                _ => {
+                    conv = c;
+                    break;
+                }
+            }
+        }
+        match conv {
+            b'%' => out.push(b'%'),
+            b'c' => {
+                if let Some(v) = take(&mut next_arg) {
+                    out.push(v as u8);
+                }
+            }
+            b's' => {
+                if let Some(v) = take(&mut next_arg) {
+                    let mut sp = v;
+                    for _ in 0..4096 {
+                        let sb = bus.try_read8(sp).unwrap_or(0);
+                        if sb == 0 {
+                            break;
+                        }
+                        out.push(sb);
+                        sp = sp.wrapping_add(1);
+                    }
+                }
+            }
+            b'd' | b'i' => {
+                if let Some(v) = take(&mut next_arg) {
+                    out.extend_from_slice(format!("{}", v as i32).as_bytes());
+                }
+            }
+            b'u' => {
+                if let Some(v) = take(&mut next_arg) {
+                    out.extend_from_slice(format!("{v}").as_bytes());
+                }
+            }
+            b'x' | b'X' => {
+                if let Some(v) = take(&mut next_arg) {
+                    let s = if conv == b'x' {
+                        format!("{v:x}")
+                    } else {
+                        format!("{v:X}")
+                    };
+                    if zero_pad && width > s.len() {
+                        out.extend(std::iter::repeat_n(b'0', width - s.len()));
+                    }
+                    out.extend_from_slice(s.as_bytes());
+                }
+            }
+            // Unknown / out-of-register conversion: emit verbatim so the
+            // reader at least sees what the guest meant.
+            other => {
+                out.push(b'%');
+                if zero_pad {
+                    out.push(b'0');
+                }
+                if width > 0 {
+                    out.extend_from_slice(format!("{width}").as_bytes());
+                }
+                out.push(other);
+            }
+        }
+    }
+    use std::io::Write;
+    let mut stdout = std::io::stdout().lock();
+    let _ = stdout.write_all(&out);
+    let _ = stdout.flush();
 }
