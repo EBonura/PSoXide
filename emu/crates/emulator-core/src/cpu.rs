@@ -793,7 +793,7 @@ impl Cpu {
     /// latency. Every other register reads the live (eagerly computed)
     /// value, matching hardware where MAC1-3 / SXY / SZ settle in time
     /// for a back-to-back read but MAC0 / LZCR do not.
-    fn gte_read_data_latency(&self, bus: &Bus, rd: u8) -> u32 {
+    fn gte_read_data_latency(&self, _bus: &Bus, rd: u8) -> u32 {
         // PSOXIDE_TRACE_STALE=1: log the first stale-serving reads (PC, reg,
         // tick distance) to identify exactly which game code trips the model.
         #[allow(clippy::collapsible_if)]
@@ -863,7 +863,7 @@ impl Cpu {
     /// LZCS (reg 30) recomputes LZCR (reg 31), which has the same
     /// result-read latency as MAC0: a back-to-back LZCR read returns the
     /// prior count (the off-by-one seen on real hardware).
-    fn op_mtc2(&mut self, instr: u32, bus: &Bus) -> Result<(), ExecutionError> {
+    fn op_mtc2(&mut self, instr: u32, _bus: &Bus) -> Result<(), ExecutionError> {
         let rt = ((instr >> 16) & 0x1F) as u8;
         let rd = ((instr >> 11) & 0x1F) as u8;
         self.gte_last_write_tick = self.tick;
