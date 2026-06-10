@@ -44,7 +44,7 @@ fn main() {
     let mut op_total: std::collections::BTreeMap<String, u64> = Default::default();
     let mut shown = 0;
 
-    let mut finish_test = |inputs: &mut Vec<(u8, u32)>,
+    let finish_test = |inputs: &mut Vec<(u8, u32)>,
                            expected: &mut Vec<(u8, u32)>,
                            cmd: &mut Option<u32>,
                            cmd_line: &mut String,
