@@ -1,45 +1,43 @@
-//! Dump GPU display-mode state for a commercial title at several
-//! instruction counts, so we can see what resolution / display-area
-//! Crash programs and when it changes modes. The user reported the
-//! game renders "stretched horizontally" -- the first question is
-//! whether that's our fault (mis-decoding GP1 0x08) or just an
-//! unusual-but-correct mode that our framebuffer painter handles
-//! without pixel-aspect correction.
+//! Probe the a commercial title intro display state at checkpoints: where is
+//! the copyright image, what does GP1 think the display is (bpp24?), and
+//! what reached the cmd_log? Chases the missing-intro divergence (CPU VRAM
+//! has the Universal/Naughty Dog screen, the HW-replay frame is black).
 //!
-//! ```bash
-//! cargo run -p emulator-core --example probe_crash_display --release
-//! ```
+//! Usage: probe_crash_display <disc.cue> [checkpoints...]
 
-use emulator_core::{Bus, Cpu};
-use psx_iso::Disc;
+#[path = "support/disc.rs"]
+mod disc_support;
+
+use emulator_core::{fast_boot_disc, Bus, Cpu};
+use std::path::Path;
 
 fn main() {
-    let bios = std::fs::read("bios/SCPH1001.BIN").expect("BIOS");
-    let disc = std::fs::read("<rom-path>").expect("disc");
+    let mut args = std::env::args().skip(1);
+    let disc_path = args.next().expect("usage: probe_crash_display <disc.cue> [steps...]");
+    let mut checkpoints: Vec<u64> = args.filter_map(|s| s.parse().ok()).collect();
+    if checkpoints.is_empty() {
+        checkpoints = vec![150_000_000, 250_000_000, 300_000_000, 350_000_000, 450_000_000];
+    }
+
+    let bios = std::fs::read("bios/SCPH1001.BIN").expect("BIOS at emu/bios/SCPH1001.BIN");
     let mut bus = Bus::new(bios).expect("bus");
-    bus.cdrom.insert_disc(Some(Disc::from_bin(disc)));
     let mut cpu = Cpu::new();
+    let disc = disc_support::load_disc_path(Path::new(&disc_path)).expect("disc readable");
+    fast_boot_disc(&mut bus, &mut cpu, &disc).expect("fast boot");
+    bus.cdrom.insert_disc(Some(disc));
+    bus.attach_digital_pad_port1();
 
-    // Checkpoints aligned with the parity suite so we can correlate.
-    let checkpoints = [
-        100_000_000u64,
-        200_000_000,
-        300_000_000,
-        400_000_000,
-        500_000_000,
-        600_000_000,
-        700_000_000,
-    ];
-
-    let mut cycles_at_last_pump = 0u64;
     let mut cursor = 0u64;
+    let mut cycles_at_last_pump = 0u64;
     for &cp in &checkpoints {
         while cursor < cp {
             if cpu.step(&mut bus).is_err() {
-                eprintln!("[crash_display] CPU errored at step {cursor}");
-                break;
+                eprintln!("CPU errored at step {cursor}");
+                return;
             }
             cursor += 1;
+            // Crash's boot blocks on CD/SPU progress: pump audio at roughly
+            // vblank cadence or the game spins on Sync/Ready forever.
             if bus.cycles() - cycles_at_last_pump > 560_000 {
                 cycles_at_last_pump = bus.cycles();
                 bus.run_spu_samples(735);
@@ -47,14 +45,36 @@ fn main() {
             }
         }
         let da = bus.gpu.display_area();
+        // Non-black CPU-vram pixels inside the display area = is the image
+        // actually there in the software rasterizer's VRAM?
+        let mut nonzero = 0u32;
+        for y in da.y..da.y.saturating_add(da.height).min(512) {
+            for x in da.x..da.x.saturating_add(da.width).min(1024) {
+                if bus.gpu.vram.get_pixel(x, y) != 0 {
+                    nonzero += 1;
+                }
+            }
+        }
+        // cmd_log composition: what command classes reached the GPU so far.
+        let (mut draws, mut fills, mut uploads, mut env, mut other) = (0u64, 0u64, 0u64, 0u64, 0u64);
+        for e in bus.gpu.cmd_log.iter() {
+            match e.opcode {
+                0x20..=0x7F => draws += 1,
+                0x02 => fills += 1,
+                0xA0..=0xBF => uploads += 1,
+                0xE0..=0xEF => env += 1,
+                _ => other += 1,
+            }
+        }
         println!(
-            "step={cp:>10}  display=({x}, {y})  size={w}×{h}  bpp={bpp}  pc=0x{pc:08x}",
+            "step={cp:>10} pc=0x{pc:08x} display=({x},{y}) {w}x{h} bpp={bpp} vram_nonzero={nonzero} cmd_log[{n}]: draws={draws} fills={fills} uploads={uploads} env={env} other={other}",
+            pc = cpu.pc(),
             x = da.x,
             y = da.y,
             w = da.width,
             h = da.height,
             bpp = if da.bpp24 { 24 } else { 15 },
-            pc = cpu.pc(),
+            n = bus.gpu.cmd_log.len(),
         );
     }
 }
