@@ -995,6 +995,13 @@ impl Scene for Playtest {
                 self.motor.stamina_q12(),
                 self.motor_config().stamina_max_q12,
             );
+            // EXPLOSION PROBE (diagnostic): overlay the player's skinned-vertex
+            // bounds (pre-projection joint/blend vs post-projection screen) so
+            // the on-hardware stretch can be localised in one burn. Resets the
+            // per-frame accumulator.
+            if let Some(font) = self.ui_fonts[0].as_ref() {
+                draw_player_vert_debug(font);
+            }
         }
 
         if let Some(font) = self.ui_fonts[0].as_ref() {
