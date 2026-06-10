@@ -105,6 +105,23 @@ pub struct Rasterizer {
     shaded_tri_scanline_rows: std::cell::RefCell<wgpu::Buffer>,
 }
 
+
+/// Prepend the shared PSX pixel-semantics header (blend modes,
+/// dither, tint modulation, plane evaluation, flag constants) to a
+/// shader body. WGSL has no include mechanism, so every compute
+/// shader is assembled as `semantics.wgsl + body` here.
+fn shader_src(body: &str) -> String {
+    concat_shader(include_str!("../shaders/semantics.wgsl"), body)
+}
+
+fn concat_shader(header: &str, body: &str) -> String {
+    let mut out = String::with_capacity(header.len() + 1 + body.len());
+    out.push_str(header);
+    out.push('\n');
+    out.push_str(body);
+    out
+}
+
 impl Rasterizer {
     /// Build all pipelines on top of the same device that owns
     /// `VramGpu`. Cheap to call multiple times in tests but in
@@ -248,7 +265,7 @@ impl Rasterizer {
         });
         let mono_rect_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("psx-rasterizer-mono-rect-shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/mono_rect.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(shader_src(include_str!("../shaders/mono_rect.wgsl")).into()),
         });
         let mono_rect_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("psx-rasterizer-mono-rect"),
@@ -275,7 +292,7 @@ impl Rasterizer {
         });
         let tex_rect_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("psx-rasterizer-tex-rect-shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/tex_rect.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(shader_src(include_str!("../shaders/tex_rect.wgsl")).into()),
         });
         let tex_rect_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("psx-rasterizer-tex-rect"),
@@ -434,9 +451,7 @@ impl Rasterizer {
         });
         let tex_tri_scanline_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("psx-rasterizer-tex-tri-scanline-shader"),
-            source: wgpu::ShaderSource::Wgsl(
-                include_str!("../shaders/tex_tri_scanline.wgsl").into(),
-            ),
+            source: wgpu::ShaderSource::Wgsl(shader_src(include_str!("../shaders/tex_tri_scanline.wgsl")).into()),
         });
         let tex_tri_scanline_pipeline =
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -475,9 +490,7 @@ impl Rasterizer {
         let shaded_tex_tri_scanline_shader =
             device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("psx-rasterizer-shaded-tex-tri-scanline-shader"),
-                source: wgpu::ShaderSource::Wgsl(
-                    include_str!("../shaders/shaded_tex_tri_scanline.wgsl").into(),
-                ),
+                source: wgpu::ShaderSource::Wgsl(shader_src(include_str!("../shaders/shaded_tex_tri_scanline.wgsl")).into()),
             });
         let shaded_tex_tri_scanline_pipeline =
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -512,9 +525,7 @@ impl Rasterizer {
         });
         let tex_quad_bilinear_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("psx-rasterizer-tex-quad-bilinear-shader"),
-            source: wgpu::ShaderSource::Wgsl(
-                include_str!("../shaders/tex_quad_bilinear.wgsl").into(),
-            ),
+            source: wgpu::ShaderSource::Wgsl(shader_src(include_str!("../shaders/tex_quad_bilinear.wgsl")).into()),
         });
         let tex_quad_bilinear_pipeline =
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -598,9 +609,7 @@ impl Rasterizer {
 
         let mono_tri_scanline_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("psx-rasterizer-mono-tri-scanline-shader"),
-            source: wgpu::ShaderSource::Wgsl(
-                include_str!("../shaders/mono_tri_scanline.wgsl").into(),
-            ),
+            source: wgpu::ShaderSource::Wgsl(shader_src(include_str!("../shaders/mono_tri_scanline.wgsl")).into()),
         });
         let mono_tri_scanline_pipeline =
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -627,9 +636,7 @@ impl Rasterizer {
         let shaded_tri_scanline_shader =
             device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("psx-rasterizer-shaded-tri-scanline-shader"),
-                source: wgpu::ShaderSource::Wgsl(
-                    include_str!("../shaders/shaded_tri_scanline.wgsl").into(),
-                ),
+                source: wgpu::ShaderSource::Wgsl(shader_src(include_str!("../shaders/shaded_tri_scanline.wgsl")).into()),
             });
         let shaded_tri_scanline_pipeline =
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
