@@ -6,9 +6,11 @@
 //! Inputs are intent-shaped rather than pad-shaped so callers can feed
 //! either player controls or future behaviour-tree output.
 
+use crate::floor_sample::{height_at_local, triangle_heights_to_quad};
 use crate::{
     fixed::div_q12_i32, Angle, RoomCollision, RoomPoint, RuntimeCollisionRoom, RuntimeRoom, Q12,
 };
+use psx_math::int32::{abs_i32, isqrt_i32, square_i32_saturating};
 
 const DEFAULT_STAMINA_MAX_Q12: i32 = 4096;
 const DEFAULT_BODY_HEIGHT: i32 = 768;
@@ -36,7 +38,6 @@ const MAX_WEIGHT_Q8: u16 = 4096;
 /// bounded and deterministic.
 const MAX_FALL_SPEED: i32 = 768;
 const MAX_MOTOR_CATCHUP_VBLANKS: u16 = 4;
-const SPLIT_NE_SW: u8 = 1;
 const DIR_NORTH: u8 = 0;
 const DIR_EAST: u8 = 1;
 const DIR_SOUTH: u8 = 2;
@@ -1372,46 +1373,6 @@ fn yaw_from_vector(dx: Q12, dz: Q12) -> Angle {
     Angle::from_q12((angle & 0x0FFF) as u16)
 }
 
-fn square_i32_saturating(value: i32) -> i32 {
-    let abs = abs_i32(value);
-    if abs > 46_340 {
-        return i32::MAX;
-    }
-    abs * abs
-}
-
-fn isqrt_i32(value: i32) -> i32 {
-    if value <= 0 {
-        return 0;
-    }
-    let mut x = value as u32;
-    let mut r = 0u32;
-    let mut bit = 1u32 << 30;
-    while bit > x {
-        bit >>= 2;
-    }
-    while bit != 0 {
-        if x >= r + bit {
-            x -= r + bit;
-            r = (r >> 1) + bit;
-        } else {
-            r >>= 1;
-        }
-        bit >>= 2;
-    }
-    r as i32
-}
-
-fn abs_i32(value: i32) -> i32 {
-    if value == i32::MIN {
-        i32::MAX
-    } else if value < 0 {
-        -value
-    } else {
-        value
-    }
-}
-
 fn stand_height(room: RoomCollision<'_, '_>, x: i32, z: i32, radius: i32) -> Option<i32> {
     let height = floor_height_at(room, x, z)?;
     if radius <= 0 {
@@ -1478,19 +1439,6 @@ fn floor_walkable_at(room: RoomCollision<'_, '_>, x: i32, z: i32) -> bool {
 
 fn triangle_index_at_local(split: u8, local_x: i32, local_z: i32, sector: i32) -> usize {
     psx_asset::world_topology::horizontal_triangle_at_local(split, local_x, local_z, sector)
-}
-
-fn triangle_heights_to_quad(
-    mut fallback: [i32; 4],
-    split: u8,
-    triangle: usize,
-    heights: [i32; 3],
-) -> [i32; 4] {
-    let corners = psx_asset::world_topology::split_triangles(split)[triangle.min(1)];
-    fallback[corners[0]] = heights[0];
-    fallback[corners[1]] = heights[1];
-    fallback[corners[2]] = heights[2];
-    fallback
 }
 
 fn body_hits_solid_wall(
@@ -1727,35 +1675,6 @@ fn cylinder_overlaps_aabb(
     let dz = position.z.saturating_sub(closest_z);
     square_i32_saturating(dx).saturating_add(square_i32_saturating(dz))
         <= square_i32_saturating(radius.max(0))
-}
-
-fn height_at_local(heights: [i32; 4], split: u8, local_x: i32, local_z: i32, sector: i32) -> i32 {
-    let u = local_x.clamp(0, sector);
-    let v = local_z.clamp(0, sector);
-    let [nw, ne, se, sw] = heights;
-    if split == SPLIT_NE_SW {
-        if u + v <= sector {
-            nw.saturating_add(mul_sector(ne.saturating_sub(nw), u, sector))
-                .saturating_add(mul_sector(sw.saturating_sub(nw), v, sector))
-        } else {
-            sw.saturating_add(mul_sector(se.saturating_sub(sw), u, sector))
-                .saturating_add(mul_sector(ne.saturating_sub(se), sector - v, sector))
-        }
-    } else if v <= u {
-        nw.saturating_add(mul_sector(ne.saturating_sub(nw), u - v, sector))
-            .saturating_add(mul_sector(se.saturating_sub(nw), v, sector))
-    } else {
-        nw.saturating_add(mul_sector(se.saturating_sub(sw), u, sector))
-            .saturating_add(mul_sector(sw.saturating_sub(nw), v, sector))
-    }
-}
-
-fn mul_sector(delta: i32, amount: i32, sector: i32) -> i32 {
-    if sector <= 0 {
-        0
-    } else {
-        delta.saturating_mul(amount) / sector
-    }
 }
 
 #[cfg(test)]

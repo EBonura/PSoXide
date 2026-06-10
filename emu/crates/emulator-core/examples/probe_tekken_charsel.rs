@@ -19,60 +19,16 @@
 
 #[path = "support/disc.rs"]
 mod disc_support;
+#[path = "support/pad.rs"]
+mod pad_support;
+
+use pad_support::{effective_mask, parse_pad_pulses, parse_u16_mask, PadPulse};
 
 use emulator_core::{
     fast_boot_disc_with_hle, warm_bios_for_disc_fast_boot, Bus, Cpu, DISC_FAST_BOOT_WARMUP_STEPS,
 };
 use std::io::Write;
 use std::path::PathBuf;
-
-#[derive(Copy, Clone, Debug)]
-struct PadPulse {
-    mask: u16,
-    start_vblank: u64,
-    frames: u64,
-}
-
-fn parse_u16_mask(s: &str) -> Option<u16> {
-    let s = s.trim();
-    if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
-        u16::from_str_radix(hex, 16).ok()
-    } else {
-        s.parse().ok()
-    }
-}
-
-fn parse_pad_pulses(text: &str) -> Vec<PadPulse> {
-    let mut out = Vec::new();
-    for entry in text.split(',') {
-        let entry = entry.trim();
-        if entry.is_empty() {
-            continue;
-        }
-        let (mask_text, rest) = entry.split_once('@').expect("pulse needs @");
-        let mask = parse_u16_mask(mask_text).expect("bad mask");
-        let (start_text, frames_text) = match rest.split_once('+') {
-            Some((s, f)) => (s.trim(), f.trim()),
-            None => (rest.trim(), "1"),
-        };
-        out.push(PadPulse {
-            mask,
-            start_vblank: start_text.parse().expect("bad vblank"),
-            frames: frames_text.parse().expect("bad frames"),
-        });
-    }
-    out
-}
-
-fn effective_mask(base: u16, pulses: &[PadPulse], current_vblank: u64) -> u16 {
-    let mut mask = base;
-    for p in pulses {
-        if current_vblank >= p.start_vblank && current_vblank < p.start_vblank + p.frames {
-            mask |= p.mask;
-        }
-    }
-    mask
-}
 
 fn main() {
     let mut steps: u64 = 3_000_000_000;
@@ -88,7 +44,7 @@ fn main() {
             "--dump-every" => dump_every = it.next().unwrap().parse().unwrap(),
             "--out-dir" => out_dir = PathBuf::from(it.next().unwrap()),
             "--pad-mask" => held_mask = parse_u16_mask(&it.next().unwrap()).unwrap(),
-            "--pad-pulses" => pulses = parse_pad_pulses(&it.next().unwrap()),
+            "--pad-pulses" => pulses = parse_pad_pulses(&it.next().unwrap()).unwrap_or_else(|e| panic!("{e}")),
             "--no-fastboot" => fastboot = false,
             other => panic!("unknown argument: {other}"),
         }

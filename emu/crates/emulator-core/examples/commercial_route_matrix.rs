@@ -17,6 +17,10 @@
 mod disc_support;
 #[path = "support/pad.rs"]
 mod pad_support;
+#[path = "support/args.rs"]
+mod args_support;
+
+use args_support::{take_path, take_u64, take_usize};
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -25,7 +29,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use emulator_core::{button, Bus, ButtonState, Cpu};
-use pad_support::{effective_mask, PadPulse};
+use pad_support::{effective_mask, format_pad_pulses, PadPulse};
 
 const DEFAULT_BIOS: &str = "bios/SCPH1001.BIN";
 const DEFAULT_GAMES_ROOT: &str = "discs";
@@ -270,27 +274,6 @@ Options:
                        abort an individual route after N wall seconds; 0 disables (default: 300)
 "
     );
-}
-
-fn take_path(args: &mut impl Iterator<Item = String>, flag: &str) -> PathBuf {
-    PathBuf::from(take_string(args, flag))
-}
-
-fn take_string(args: &mut impl Iterator<Item = String>, flag: &str) -> String {
-    args.next()
-        .unwrap_or_else(|| panic!("{flag} requires a value"))
-}
-
-fn take_u64(args: &mut impl Iterator<Item = String>, flag: &str) -> u64 {
-    take_string(args, flag)
-        .parse()
-        .unwrap_or_else(|_| panic!("{flag} requires an integer"))
-}
-
-fn take_usize(args: &mut impl Iterator<Item = String>, flag: &str) -> usize {
-    take_string(args, flag)
-        .parse()
-        .unwrap_or_else(|_| panic!("{flag} requires an integer"))
 }
 
 fn discover_discs(cfg: &Config) -> Vec<PathBuf> {
@@ -904,14 +887,6 @@ fn parity_command(disc: &Path, steps: u64, route: &RouteSpec) -> String {
         cmd.push_str(&format!(" --pad-pulses \"{pulses}\""));
     }
     cmd
-}
-
-fn format_pad_pulses(pulses: &[PadPulse]) -> String {
-    pulses
-        .iter()
-        .map(|p| format!("0x{:04x}@{}+{}", p.mask, p.start_vblank, p.frames))
-        .collect::<Vec<_>>()
-        .join(",")
 }
 
 fn dump_visible_ppm(bus: &Bus, path: &Path) -> std::io::Result<()> {
