@@ -13,11 +13,11 @@
 //! is correct.
 
 use emulator_core::gpu::GpuCmdLogEntry;
-use psx_gpu_compute::decode::{
+use crate::decode::{
     apply_primitive_tpage, decode_clut, decode_tint, decode_uv, decode_vertex, is_raw_texture,
     is_semi_trans, rgb24_to_bgr15, sign_extend_11, ReplayState,
 };
-use psx_gpu_compute::primitive::BlendMode;
+use crate::primitive::BlendMode;
 
 use crate::pipeline::{flags as fbits, BlendKind, HwVertex};
 
