@@ -36,7 +36,7 @@ const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
 const FONT_CLUT: Clut = Clut::new(320, 256);
 
 const ROWS_PER_PAGE: usize = 6;
-const TEST_COUNT: usize = 128;
+const TEST_COUNT: usize = 131;
 const PAD_POLL_TEST_INDEX: usize = 26;
 const MODE_COUNT: u8 = 15;
 const CHECK_MODES: [Mode; 11] = [
@@ -960,6 +960,21 @@ const TESTS: [TestSpec; TEST_COUNT] = [
         group: "GTE",
         name: "RT drop-during-RTPS +16",
         run: test_rt_drop_gap16,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "compose chain hot (engine shape)",
+        run: test_compose_chain_hot,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "compose chain V0-settled",
+        run: test_compose_chain_v0_settled,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "compose chain load-settled",
+        run: test_compose_chain_load_settled,
     },
     TestSpec {
         group: "GPU",
@@ -2946,6 +2961,81 @@ rt_drop_case!(test_rt_drop_gap0, 0);
 rt_drop_case!(test_rt_drop_gap4, 4);
 rt_drop_case!(test_rt_drop_gap8, 8);
 rt_drop_case!(test_rt_drop_gap16, 16);
+
+// --- Joint-compose chain replication -----------------------------------
+// The engine builds each joint matrix per-frame ON the GTE
+// (`gte_compose_joint_rotation`): load view rotation + zero TR, transform
+// the model matrix's three COLUMNS as vertices back-to-back (MTC2 V0 pair,
+// MVMVA, immediate MAC1-3 reads, zero gap between columns), then CTC2-load
+// the composed result as the rotation for the vertex loop. The simple RT
+// sweeps above passed on silicon, so THIS chained shape is the explosion's
+// last untested suspect. `mode` isolates where a settle would matter:
+//   0 = fully hot (the engine's exact shape)
+//   1 = settle everywhere (ground truth)
+//   2 = settle only before each MTC2 V0 pair
+//   3 = settle only before the final composed-matrix CTC2 load
+// All compare against mode 1; in-emulator every mode is identical. On
+// silicon, the modes that FAIL share the unsettled step that matters.
+fn compose_chain(mode: u8) -> u32 {
+    let s_all = mode == 1;
+    let s_writes = s_all || mode == 2;
+    let s_load = s_all || mode == 3;
+    seed_scene_xform();
+    ctc2!(5, 0); // TR = 0, matching gte_compose_joint_rotation
+    ctc2!(6, 0);
+    ctc2!(7, 0);
+    if s_all {
+        gte_nops!(64);
+    }
+    // Model matrix B fed column-wise, the engine's layout.
+    let cols: [(u32, u32); 3] = [
+        (pack_gte_xy(0x0FE0, 0x0200), 0x0100),
+        (pack_gte_xy(0x0180, 0x0F80), 0x0240),
+        (pack_gte_xy(0x00C0, 0x02C0), 0x0F40),
+    ];
+    let mut c = [[0i16; 3]; 3];
+    let mut j = 0usize;
+    while j < 3 {
+        if s_writes {
+            gte_nops!(64);
+        }
+        mtc2!(0, cols[j].0);
+        mtc2!(1, cols[j].1);
+        unsafe { gte_ops::mvmva_rt_v0_tr_sf1() };
+        if s_all {
+            gte_nops!(64);
+        }
+        c[0][j] = mfc2!(25) as i32 as i16;
+        c[1][j] = mfc2!(26) as i32 as i16;
+        c[2][j] = mfc2!(27) as i32 as i16;
+        j += 1;
+    }
+    if s_load {
+        gte_nops!(64);
+    }
+    ctc2!(0, pack_gte_xy(c[0][0], c[0][1]));
+    ctc2!(1, pack_gte_xy(c[0][2], c[1][0]));
+    ctc2!(2, pack_gte_xy(c[1][1], c[1][2]));
+    ctc2!(3, pack_gte_xy(c[2][0], c[2][1]));
+    ctc2!(4, c[2][2] as i32 as u32);
+    if s_all {
+        gte_nops!(64);
+    }
+    rt_sweep_vertex();
+    unsafe { gte_ops::mvmva_rt_v0_tr_sf1() };
+    gte_delay16();
+    gte_tri_digest(mfc2!(25), mfc2!(26), mfc2!(27))
+}
+
+fn test_compose_chain_hot() -> TestResult {
+    expect_eq(compose_chain(1), compose_chain(0), "compose chain hot")
+}
+fn test_compose_chain_v0_settled() -> TestResult {
+    expect_eq(compose_chain(1), compose_chain(2), "compose chain v0-settled")
+}
+fn test_compose_chain_load_settled() -> TestResult {
+    expect_eq(compose_chain(1), compose_chain(3), "compose chain load-settled")
+}
 
 macro_rules! gte_result_latency_test {
     ($name:ident, $reg:literal, $label:literal) => {
