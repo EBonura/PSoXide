@@ -6,7 +6,6 @@ members = [
     "crates/parity-oracle",
     "crates/psoxide-settings",
     "crates/psoxide-validation",
-    "crates/psx-gpu-compute",
     "crates/psx-gpu-render",
 ]
 
@@ -37,6 +36,7 @@ psx-gpu      = { path = "../sdk/crates/psx-gpu" }
 psx-vram     = { path = "../sdk/crates/psx-vram" }
 psx-gte      = { path = "../sdk/crates/psx-gte" }
 psx-gte-core = { path = "../sdk/crates/psx-gte-core" }
+psx-telemetry = { path = "../sdk/crates/psx-telemetry" }
 psx-engine    = { path = "../engine/crates/psx-engine" }
 psxed-audio   = { path = "../editor/crates/psxed-audio" }
 psxed-project = { path = "../editor/crates/psxed-project" }
@@ -46,7 +46,6 @@ emulator-core    = { path = "crates/emulator-core" }
 parity-oracle    = { path = "crates/parity-oracle" }
 psoxide-settings = { path = "crates/psoxide-settings" }
 psoxide-validation = { path = "crates/psoxide-validation" }
-psx-gpu-compute  = { path = "crates/psx-gpu-compute" }
 psx-gpu-render   = { path = "crates/psx-gpu-render" }
 psxed-ui         = { path = "../editor/crates/psxed-ui" }
 

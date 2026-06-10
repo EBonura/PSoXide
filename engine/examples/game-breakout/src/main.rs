@@ -29,7 +29,7 @@
 extern crate psx_rt;
 
 use psx_engine::{button, sfx, App, Config, Ctx, Scene};
-use psx_font::{fonts::BASIC_8X16, FontAtlas};
+use psx_font::{fonts::BASIC_8X16, u16_hex, FontAtlas};
 use psx_fx::{LcgRng, ParticlePool, ShakeState};
 use psx_gpu::ot::OrderingTable;
 use psx_gpu::prim::{QuadGouraud, RectFlat};
@@ -585,26 +585,6 @@ impl Breakout {
 // ----------------------------------------------------------------------
 // no_std formatting helpers
 // ----------------------------------------------------------------------
-
-fn u16_hex(v: u16) -> HexU16 {
-    const HEX: &[u8; 16] = b"0123456789ABCDEF";
-    let mut out = [0u8; 6];
-    out[0] = b'0';
-    out[1] = b'x';
-    out[2] = HEX[((v >> 12) & 0xF) as usize];
-    out[3] = HEX[((v >> 8) & 0xF) as usize];
-    out[4] = HEX[((v >> 4) & 0xF) as usize];
-    out[5] = HEX[(v & 0xF) as usize];
-    HexU16(out)
-}
-
-struct HexU16([u8; 6]);
-impl HexU16 {
-    fn as_str(&self) -> &str {
-        // SAFETY: all bytes are ASCII hex / '0' / 'x'.
-        unsafe { core::str::from_utf8_unchecked(&self.0) }
-    }
-}
 
 fn digit_char(n: u8) -> DigitChar {
     let c = if n <= 9 { b'0' + n } else { b'X' };

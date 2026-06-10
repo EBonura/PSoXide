@@ -1,3 +1,4 @@
+use crate::centered_aspect_rect;
 use std::{collections::HashSet, path::Path};
 
 use egui::{
@@ -1024,19 +1025,6 @@ fn effective_radius(state: &ModelAnimationViewerState, model: Option<&LoadedMode
             .unwrap_or(1536)
     }
     .clamp(256, 8192)
-}
-
-fn centered_aspect_rect(container: Rect, aspect: f32) -> Rect {
-    let size = container.size();
-    if size.x <= 0.0 || size.y <= 0.0 || aspect <= 0.0 {
-        return container;
-    }
-    let (width, height) = if size.x / size.y > aspect {
-        (size.y * aspect, size.y)
-    } else {
-        (size.x, size.x / aspect)
-    };
-    Rect::from_center_size(container.center(), Vec2::new(width, height))
 }
 
 #[cfg(test)]

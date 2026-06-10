@@ -174,12 +174,27 @@ pub fn rgb24_to_bgr15(rgb: u32) -> u16 {
 /// Apply a primitive's tpage word (the high half of UV1 in the GP0
 /// packet) to the replay state, mirroring
 /// `emulator-core::Gpu::apply_primitive_tpage` byte-for-byte.
+///
+/// The GP0(E2) texture window is independent state on the CPU side
+/// and survives tpage changes; `ReplayState` packs it into `Tpage`
+/// for the shader uniform, so it is explicitly carried across the
+/// `Tpage::new` reset here.
 pub fn apply_primitive_tpage(state: &mut ReplayState, uv_word: u32) {
     let tpage = (uv_word >> 16) & 0xFFFF;
     let tpage_x = (tpage & 0x0F) * 64;
     let tpage_y: u32 = if (tpage >> 4) & 1 != 0 { 256 } else { 0 };
     let tex_depth = (tpage >> 7) & 0x3;
+    let tw = (
+        state.tpage.tex_window_mask_x,
+        state.tpage.tex_window_mask_y,
+        state.tpage.tex_window_off_x,
+        state.tpage.tex_window_off_y,
+    );
     state.tpage = Tpage::new(tpage_x, tpage_y, tex_depth);
+    state.tpage.tex_window_mask_x = tw.0;
+    state.tpage.tex_window_mask_y = tw.1;
+    state.tpage.tex_window_off_x = tw.2;
+    state.tpage.tex_window_off_y = tw.3;
     state.tex_blend_mode = decode_blend_mode(tpage >> 5);
     // CPU `apply_primitive_tpage` also OR-folds dither_enabled
     // (`tpage |= 0x200` if dither was on globally). We mirror by

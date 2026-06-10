@@ -18,6 +18,7 @@
 //! before creating the resource -- bad bundles never produce a
 //! half-broken Model entry.
 
+use crate::import_util::{relativise, sanitize_name};
 use std::{
     collections::BTreeSet,
     path::{Path, PathBuf},
@@ -560,7 +561,7 @@ pub fn import_model_with_animation_sources(
 ) -> Result<ResourceId, ModelImportError> {
     let package = convert_rigid_model_source(source_path, extra_animation_paths, &config)?;
 
-    let safe = safe_dir_name(output_name);
+    let safe = sanitize_name(output_name, "model");
     let bundle_dir = project_root.join("assets").join("models").join(&safe);
     prepare_import_bundle_dir(&bundle_dir)?;
 
@@ -752,9 +753,9 @@ pub fn bake_animation_source_for_model(
     let model_prefix = cooked_model_path
         .file_stem()
         .and_then(|stem| stem.to_str())
-        .map(safe_dir_name)
+        .map(|stem| sanitize_name(stem, "model"))
         .filter(|stem| !stem.is_empty())
-        .unwrap_or_else(|| safe_dir_name(&model_name));
+        .unwrap_or_else(|| sanitize_name(&model_name, "model"));
     let clip_path = if let Some((_, existing_path)) = &existing_clip {
         resolve_path(existing_path, Some(project_root))
     } else {
@@ -1127,37 +1128,6 @@ fn role_tag_list(role: AnimationRole) -> Vec<String> {
 /// `project_root` is provided and `path` lives under it. Falls
 /// back to an absolute path so the editor can still find the
 /// file regardless of where the project moves later.
-fn relativise(path: &Path, project_root: Option<&Path>) -> String {
-    if let Some(root) = project_root {
-        if let Ok(rel) = path.strip_prefix(root) {
-            return rel.to_string_lossy().into_owned();
-        }
-    }
-    path.to_string_lossy().into_owned()
-}
-
-/// Sanitise a user-supplied resource name into a filesystem-safe
-/// directory name (lowercase ASCII alphanumerics + underscores).
-fn safe_dir_name(name: &str) -> String {
-    let mut out = String::with_capacity(name.len());
-    let mut last_was_sep = false;
-    for ch in name.chars() {
-        if ch.is_ascii_alphanumeric() {
-            out.push(ch.to_ascii_lowercase());
-            last_was_sep = false;
-        } else if !last_was_sep {
-            out.push('_');
-            last_was_sep = true;
-        }
-    }
-    let trimmed = out.trim_matches('_').to_string();
-    if trimmed.is_empty() {
-        "model".to_string()
-    } else {
-        trimmed
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1321,22 +1291,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[test]
-    fn relativise_under_project_root_is_relative() {
-        let root = PathBuf::from("/tmp/proj");
-        let path = PathBuf::from("/tmp/proj/assets/models/x.psxmdl");
-        assert_eq!(relativise(&path, Some(&root)), "assets/models/x.psxmdl");
-        // No root → absolute kept.
-        let abs = relativise(&path, None);
-        assert_eq!(abs, "/tmp/proj/assets/models/x.psxmdl");
-    }
 
-    #[test]
-    fn safe_dir_name_strips_punctuation() {
-        assert_eq!(safe_dir_name("Obsidian Wraith"), "obsidian_wraith");
-        assert_eq!(safe_dir_name("hooded-wretch"), "hooded_wretch");
-        assert_eq!(safe_dir_name("!!!"), "model");
-    }
 
     #[test]
     fn model_stats_from_obsidian_wraith() {
