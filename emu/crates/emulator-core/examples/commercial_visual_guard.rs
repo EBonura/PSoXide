@@ -17,6 +17,10 @@
 mod disc_support;
 #[path = "support/pad.rs"]
 mod pad_support;
+#[path = "support/args.rs"]
+mod args_support;
+
+use args_support::{take_path, take_string};
 
 use emulator_core::gpu::GpuCmdLogEntry;
 use emulator_core::{
@@ -476,15 +480,6 @@ fn parse_args() -> Config {
     }
 
     cfg
-}
-
-fn take_string(args: &mut impl Iterator<Item = String>, flag: &str) -> String {
-    args.next()
-        .unwrap_or_else(|| panic!("{flag} requires a value"))
-}
-
-fn take_path(args: &mut impl Iterator<Item = String>, flag: &str) -> PathBuf {
-    PathBuf::from(take_string(args, flag))
 }
 
 fn print_help() {
