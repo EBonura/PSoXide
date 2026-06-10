@@ -234,7 +234,7 @@ fn write_cstring_to_stdout(bus: &mut Bus, addr: u32) {
 fn hle_printf(bus: &mut Bus, fmt_addr: u32, varargs: &[u32; 3]) {
     let mut out: Vec<u8> = Vec::with_capacity(128);
     let mut next_arg = 0usize;
-    let mut take = |next: &mut usize| -> Option<u32> {
+    let take = |next: &mut usize| -> Option<u32> {
         let v = varargs.get(*next).copied();
         *next += 1;
         v
@@ -255,7 +255,7 @@ fn hle_printf(bus: &mut Bus, fmt_addr: u32, varargs: &[u32; 3]) {
         // Parse [0][width]conv -- enough for debug output in practice.
         let mut zero_pad = false;
         let mut width = 0usize;
-        let mut conv = 0u8;
+        let conv;
         loop {
             let c = bus.try_read8(p).unwrap_or(0);
             p = p.wrapping_add(1);

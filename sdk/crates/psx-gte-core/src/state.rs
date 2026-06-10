@@ -599,30 +599,27 @@ impl Gte {
         // [MAC1,MAC2,MAC3] = (TR << 12 + RT * V) >> sf
         let tr = self.translation;
         let rt = self.rotation;
-        let mac1 = self.mac_add_row(1, tr[0], &rt[0], &v, sf);
-        let mac2 = self.mac_add_row(2, tr[1], &rt[1], &v, sf);
-        let mac3 = self.mac_add_row(3, tr[2], &rt[2], &v, sf);
+        let acc1 = self.mac_add_row(1, tr[0], &rt[0], &v, sf);
+        let acc2 = self.mac_add_row(2, tr[1], &rt[1], &v, sf);
+        let acc3 = self.mac_add_row(3, tr[2], &rt[2], &v, sf);
+        let mac1 = (acc1 >> sf) as i32;
+        let mac2 = (acc2 >> sf) as i32;
+        let mac3 = (acc3 >> sf) as i32;
 
         self.ir[0] = self.saturate_ir(1, mac1, cmd.lm);
         self.ir[1] = self.saturate_ir(2, mac2, cmd.lm);
-        // IR3 quirk: the saturation flag is checked against the
-        // pre-shift value when sf=0 -- same value, but using a
-        // different lm choice (always lm=false). The IR3 storage
-        // itself uses cmd.lm. Matches Redux.
-        let ir3_flag_value = if cmd.sf {
-            mac3
-        } else {
-            (self.mac[2] as i64 >> 12) as i32
-        };
+        // IR3 quirk: the saturation FLAG is checked against the 44-bit
+        // accumulator >> 12 (always, regardless of sf, always lm=false),
+        // while the stored IR3 saturates the 32-bit MAC3 with cmd.lm.
+        // Console-verified by the fuzz corpus: with sf=0 the wrapped
+        // MAC3 and the 44-bit acc >> 12 land on opposite clamp sides.
+        let ir3_flag_value = (acc3 >> 12) as i32;
         let _ = self.saturate_ir_flag_only(3, ir3_flag_value, false);
         self.ir[2] = self.saturate_value_for_ir(mac3, cmd.lm);
 
-        // Push SZ3 = MAC3 >> ((1-sf)*12), saturated to 0..0xFFFF.
-        let sz_value = if cmd.sf {
-            self.mac[2]
-        } else {
-            (self.mac[2] as i64 >> 12) as i32
-        };
+        // Push SZ3 = 44-bit MAC3 accumulator >> 12 (NOT the wrapped
+        // 32-bit register), saturated to 0..0xFFFF.
+        let sz_value = (acc3 >> 12) as i32;
         self.push_sz(sz_value);
 
         // Perspective division: divisor = clamp_17((H<<16) / SZ3).
@@ -633,10 +630,14 @@ impl Gte {
         let mac0_y = (divisor as i64) * (self.ir[1] as i64) + (self.ofy as i64);
         // MAC0 stores the *post*-screen-X computation only briefly;
         // we re-overwrite it with the depth-cue result if last=true.
+        // The screen coordinate saturates on the 32-BIT WRAP of the shifted
+        // accumulator (s32(Sx >> 16)): a huge positive product can wrap
+        // negative and saturate to -0x400, not +0x3FF. Console-verified by
+        // the fuzz corpus (0xFC00 pairs where the unwrapped math says 0x3FF).
         let _ = self.check_mac0(mac0_x);
-        let sx = self.saturate_screen(mac0_x >> 16, true);
+        let sx = self.saturate_screen(((mac0_x >> 16) as i32) as i64, true);
         let _ = self.check_mac0(mac0_y);
-        let sy = self.saturate_screen(mac0_y >> 16, false);
+        let sy = self.saturate_screen(((mac0_y >> 16) as i32) as i64, false);
         self.push_sxy(sx, sy);
 
         if last {
@@ -726,23 +727,20 @@ impl Gte {
             }
             for i in 0..3 {
                 // Bug: first column (Mx_i1 * Vx) is dropped along with TR.
+                // The stage-2 result still runs the normal IR saturation
+                // (flag set with cmd.lm) on top of the stage-1 flags.
                 let prod = (mx[i][1] as i64) * (v[1] as i64)
                     + (mx[i][2] as i64) * (v[2] as i64);
                 let mac = self.check_mac((i + 1) as u8, prod) >> sf;
                 self.mac[i] = mac as i32;
-                self.ir[i] = self.saturate_value_for_ir(mac as i32, cmd.lm);
+                self.ir[i] = self.saturate_ir((i + 1) as u8, mac as i32, cmd.lm);
             }
             return;
         }
 
         for i in 0..3 {
-            let bias = (tr[i] as i64) << 12;
-            let prod = (mx[i][0] as i64) * (v[0] as i64)
-                + (mx[i][1] as i64) * (v[1] as i64)
-                + (mx[i][2] as i64) * (v[2] as i64);
-            let mac = self.check_mac((i + 1) as u8, bias + prod) >> sf;
-            self.mac[i] = mac as i32;
-            self.ir[i] = self.saturate_ir((i + 1) as u8, mac as i32, cmd.lm);
+            let acc = self.mac_add_row((i + 1) as u8, tr[i], &mx[i], &v, sf);
+            self.ir[i] = self.saturate_ir((i + 1) as u8, (acc >> sf) as i32, cmd.lm);
         }
     }
 
@@ -846,28 +844,11 @@ impl Gte {
     /// stages and overcounted the bias.) Stage 2 is where BK bias
     /// belongs: `MAC = (BK<<12 + LCM × IR) >> (sf×12)`.
     fn op_ncs(&mut self, cmd: Cmd, idx: usize) {
-        let sf = cmd.shift();
         let v = self.v[idx];
         // [IR1,IR2,IR3] = (LLM * V) >> (sf*12)
-        for i in 0..3 {
-            let prod = (self.light[i][0] as i64) * (v[0] as i64)
-                + (self.light[i][1] as i64) * (v[1] as i64)
-                + (self.light[i][2] as i64) * (v[2] as i64);
-            let mac = self.check_mac((i + 1) as u8, prod) >> sf;
-            self.mac[i] = mac as i32;
-            self.ir[i] = self.saturate_ir((i + 1) as u8, mac as i32, cmd.lm);
-        }
-        // [IR1,IR2,IR3] = LCM * IR  +  bg_color << 12
-        let n = self.ir;
-        for i in 0..3 {
-            let bias = (self.bg_color[i] as i64) << 12;
-            let prod = (self.light_color[i][0] as i64) * (n[0] as i64)
-                + (self.light_color[i][1] as i64) * (n[1] as i64)
-                + (self.light_color[i][2] as i64) * (n[2] as i64);
-            let mac = self.check_mac((i + 1) as u8, bias + prod) >> sf;
-            self.mac[i] = mac as i32;
-            self.ir[i] = self.saturate_ir((i + 1) as u8, mac as i32, cmd.lm);
-        }
+        self.light_matrix_pass(&v, cmd);
+        // [IR1,IR2,IR3] = (bg_color << 12  +  LCM * IR) >> (sf*12)
+        self.color_matrix_pass(cmd);
         self.push_color_from_mac(cmd);
     }
 
@@ -885,24 +866,8 @@ impl Gte {
     fn op_ncds(&mut self, cmd: Cmd, idx: usize) {
         let sf = cmd.shift();
         let v = self.v[idx];
-        for i in 0..3 {
-            let prod = (self.light[i][0] as i64) * (v[0] as i64)
-                + (self.light[i][1] as i64) * (v[1] as i64)
-                + (self.light[i][2] as i64) * (v[2] as i64);
-            let mac = self.check_mac((i + 1) as u8, prod) >> sf;
-            self.mac[i] = mac as i32;
-            self.ir[i] = self.saturate_ir((i + 1) as u8, mac as i32, cmd.lm);
-        }
-        let n = self.ir;
-        for i in 0..3 {
-            let bias = (self.bg_color[i] as i64) << 12;
-            let prod = (self.light_color[i][0] as i64) * (n[0] as i64)
-                + (self.light_color[i][1] as i64) * (n[1] as i64)
-                + (self.light_color[i][2] as i64) * (n[2] as i64);
-            let mac = self.check_mac((i + 1) as u8, bias + prod) >> sf;
-            self.mac[i] = mac as i32;
-            self.ir[i] = self.saturate_ir((i + 1) as u8, mac as i32, cmd.lm);
-        }
+        self.light_matrix_pass(&v, cmd);
+        self.color_matrix_pass(cmd);
         // Interpolate toward FC.
         let cs = [
             (self.rgbc[0] as i64) << 4,
@@ -937,24 +902,8 @@ impl Gte {
     fn op_nccs(&mut self, cmd: Cmd, idx: usize) {
         let sf = cmd.shift();
         let v = self.v[idx];
-        for i in 0..3 {
-            let prod = (self.light[i][0] as i64) * (v[0] as i64)
-                + (self.light[i][1] as i64) * (v[1] as i64)
-                + (self.light[i][2] as i64) * (v[2] as i64);
-            let mac = self.check_mac((i + 1) as u8, prod) >> sf;
-            self.mac[i] = mac as i32;
-            self.ir[i] = self.saturate_ir((i + 1) as u8, mac as i32, cmd.lm);
-        }
-        let n = self.ir;
-        for i in 0..3 {
-            let bias = (self.bg_color[i] as i64) << 12;
-            let prod = (self.light_color[i][0] as i64) * (n[0] as i64)
-                + (self.light_color[i][1] as i64) * (n[1] as i64)
-                + (self.light_color[i][2] as i64) * (n[2] as i64);
-            let mac = self.check_mac((i + 1) as u8, bias + prod) >> sf;
-            self.mac[i] = mac as i32;
-            self.ir[i] = self.saturate_ir((i + 1) as u8, mac as i32, cmd.lm);
-        }
+        self.light_matrix_pass(&v, cmd);
+        self.color_matrix_pass(cmd);
         let cs = [
             (self.rgbc[0] as i64) << 4,
             (self.rgbc[1] as i64) << 4,
@@ -978,16 +927,7 @@ impl Gte {
     /// background-colour bias.
     fn op_cc(&mut self, cmd: Cmd) {
         let sf = cmd.shift();
-        let n = self.ir;
-        for i in 0..3 {
-            let bias = (self.bg_color[i] as i64) << 12;
-            let prod = (self.light_color[i][0] as i64) * (n[0] as i64)
-                + (self.light_color[i][1] as i64) * (n[1] as i64)
-                + (self.light_color[i][2] as i64) * (n[2] as i64);
-            let mac = self.check_mac((i + 1) as u8, bias + prod) >> sf;
-            self.mac[i] = mac as i32;
-            self.ir[i] = self.saturate_ir((i + 1) as u8, mac as i32, cmd.lm);
-        }
+        self.color_matrix_pass(cmd);
         let cs = [
             (self.rgbc[0] as i64) << 4,
             (self.rgbc[1] as i64) << 4,
@@ -1004,16 +944,7 @@ impl Gte {
     /// `CDP` -- colour depth-queue: same as CC but with FC interpolation.
     fn op_cdp(&mut self, cmd: Cmd) {
         let sf = cmd.shift();
-        let n = self.ir;
-        for i in 0..3 {
-            let bias = (self.bg_color[i] as i64) << 12;
-            let prod = (self.light_color[i][0] as i64) * (n[0] as i64)
-                + (self.light_color[i][1] as i64) * (n[1] as i64)
-                + (self.light_color[i][2] as i64) * (n[2] as i64);
-            let mac = self.check_mac((i + 1) as u8, bias + prod) >> sf;
-            self.mac[i] = mac as i32;
-            self.ir[i] = self.saturate_ir((i + 1) as u8, mac as i32, cmd.lm);
-        }
+        self.color_matrix_pass(cmd);
         let cs = [
             (self.rgbc[0] as i64) << 4,
             (self.rgbc[1] as i64) << 4,
@@ -1095,19 +1026,49 @@ impl Gte {
     /// the 44-bit overflow check applied, then arithmetic-shift the
     /// 64-bit result right by `sf` and store the truncated 32-bit form
     /// into `MAC[idx]`.
-    fn mac_add_row(&mut self, idx: u8, tr: i32, row: &[i16; 3], v: &[i16; 3], sf: u32) -> i32 {
-        let bias = (tr as i64) << 12;
-        let prod = (row[0] as i64) * (v[0] as i64)
-            + (row[1] as i64) * (v[1] as i64)
-            + (row[2] as i64) * (v[2] as i64);
-        let checked = self.check_mac(idx, bias + prod);
-        let shifted = checked >> sf;
-        self.mac[(idx - 1) as usize] = shifted as i32;
-        shifted as i32
+    fn mac_add_row(&mut self, idx: u8, tr: i32, row: &[i16; 3], v: &[i16; 3], sf: u32) -> i64 {
+        // Hardware accumulates STAGED: the 44-bit overflow check fires and
+        // the accumulator sign-extends from bit 43 after EVERY addition
+        // step, so an intermediate overflow both flags and wraps even when
+        // the final sum is back in range. The console-verified fuzz corpus
+        // (gte_fuzz_replay) is sensitive to both effects.
+        //
+        // Returns the 44-bit accumulator UNSHIFTED: RTPS derives SZ3 and
+        // the IR3 saturation flag from `acc >> 12` of the full-width value
+        // even when sf=0 leaves MAC3 itself unshifted (and 32-bit wrapped).
+        let mut acc = self.check_mac(idx, ((tr as i64) << 12) + (row[0] as i64) * (v[0] as i64));
+        acc = self.check_mac(idx, acc + (row[1] as i64) * (v[1] as i64));
+        acc = self.check_mac(idx, acc + (row[2] as i64) * (v[2] as i64));
+        self.mac[(idx - 1) as usize] = (acc >> sf) as i32;
+        acc
+    }
+
+    /// Lighting stage 1: `[MAC,IR] = (LLM * V) >> sf` with staged 44-bit
+    /// accumulation (intermediate overflows flag and wrap per step).
+    fn light_matrix_pass(&mut self, v: &[i16; 3], cmd: Cmd) {
+        let sf = cmd.shift();
+        for i in 0..3 {
+            let row = self.light[i];
+            let acc = self.mac_add_row((i + 1) as u8, 0, &row, v, sf);
+            self.ir[i] = self.saturate_ir((i + 1) as u8, (acc >> sf) as i32, cmd.lm);
+        }
+    }
+
+    /// Lighting stage 2: `[MAC,IR] = (BK<<12 + LCM * IR) >> sf`, staged.
+    fn color_matrix_pass(&mut self, cmd: Cmd) {
+        let sf = cmd.shift();
+        let n = self.ir;
+        for i in 0..3 {
+            let row = self.light_color[i];
+            let bk = self.bg_color[i];
+            let acc = self.mac_add_row((i + 1) as u8, bk, &row, &n, sf);
+            self.ir[i] = self.saturate_ir((i + 1) as u8, (acc >> sf) as i32, cmd.lm);
+        }
     }
 
     /// Apply the 44-bit signed overflow check, returning the value
-    /// unchanged. Sets the appropriate `FLAG` bit on overflow.
+    /// SIGN-EXTENDED from bit 43 (the hardware accumulator width).
+    /// Sets the appropriate `FLAG` bit on overflow.
     fn check_mac(&mut self, idx: u8, value: i64) -> i64 {
         let pos_limit = (1i64 << 43) - 1;
         let neg_limit = -(1i64 << 43);
@@ -1127,7 +1088,7 @@ impl Gte {
                 _ => 0,
             };
         }
-        value
+        (value << 20) >> 20
     }
 
     /// MAC0 32-bit overflow check + truncation.
