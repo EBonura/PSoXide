@@ -357,6 +357,10 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         let mut projected_max_x = i16::MIN;
         let mut projected_min_y = i16::MAX;
         let mut projected_max_y = i16::MIN;
+        // EXPLOSION PROBE (diagnostic): blended-vertex count for THIS model,
+        // so the all-path projected-X bounds below are merged only for the
+        // skinned player model, not every textured prop.
+        let mut probe_model_blended = 0u32;
         crate::telemetry::stage_begin(crate::telemetry::stage::TEXTURED_MODEL_PROJECT);
         let parts = &geometry.parts[..model_part_count as usize];
         let vertices = &geometry.vertices[..model_vertex_count];
@@ -383,6 +387,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 let vertex = vertices[global_index];
                 if blend_vertices && model_vertex_uses_cpu_blend(vertex, joint_count) {
                     stats.cpu_blended_vertices = stats.cpu_blended_vertices.wrapping_add(1);
+                    probe_model_blended += 1;
                     let projected = project_blended_textured_model_vertex(
                         vertex,
                         primary,
@@ -481,6 +486,12 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             part_index += 1;
         }
         crate::telemetry::stage_end(crate::telemetry::stage::TEXTURED_MODEL_PROJECT);
+        // EXPLOSION PROBE (diagnostic): for the skinned player model, surface
+        // the ALL-path projected X bounds (blended + batch + remainder) so the
+        // overlay can split blended-only vs mesh-wide widening.
+        if probe_model_blended > 0 {
+            super::player_vert_debug::merge_all_x(projected_min_x, projected_max_x);
+        }
 
         let mut faces_considered = 0u32;
         let packet_material = material.textured_packet_material();
