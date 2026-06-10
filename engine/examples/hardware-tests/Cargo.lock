@@ -98,6 +98,9 @@ dependencies = [
 [[package]]
 name = "psx-level"
 version = "0.1.0"
+dependencies = [
+ "psx-math",
+]
 
 [[package]]
 name = "psx-math"
