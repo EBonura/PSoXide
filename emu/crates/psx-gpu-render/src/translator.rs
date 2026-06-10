@@ -1,23 +1,20 @@
 //! `cmd_log` → `Vec<HwVertex>` translator.
 //!
-//! Walks each frame's GP0 packet stream, tracks `ReplayState` for
-//! state setters (`0xE1..=0xE6`), and emits triangles for the
-//! primitive opcodes the renderer currently supports. Phase 1
-//! supports flat-color mono tris (`0x20..=0x23`) and mono quads
-//! (`0x28..=0x2B`, decomposed to two tris with the same winding
-//! the CPU rasterizer uses).
+//! Enhanced-backend lowering of the shared GP0 interpreter stream:
+//! packet decoding and state tracking live in [`Interpreter`]; this
+//! module turns each [`GpuEvent`] into batched [`HwVertex`] runs for
+//! the render pipeline. Quad decomposition, the textured semi-trans
+//! two-pass split, sprite UV-wrap chunking and the wireframe debug
+//! mode are all enhanced-path concerns and stay here.
 //!
-//! Other primitive opcodes are silently skipped -- their state
-//! setters still update `ReplayState` so that when later phases
-//! enable them the tpage / draw_offset / draw_area they observe
-//! is correct.
+//! Events this backend does not draw (VRAM copies, lines) are
+//! skipped; the interpreter has still updated the GP0 state so
+//! later primitives observe the right tpage / draw area.
 
-use emulator_core::gpu::GpuCmdLogEntry;
-use crate::decode::{
-    apply_primitive_tpage, decode_clut, decode_tint, decode_uv, decode_vertex, is_raw_texture,
-    is_semi_trans, rgb24_to_bgr15, sign_extend_11, ReplayState,
-};
+use crate::decode::{decode_tint, is_raw_texture, is_semi_trans, rgb24_to_bgr15};
+use crate::interpreter::{GpuEvent, Interpreter};
 use crate::primitive::BlendMode;
+use emulator_core::gpu::GpuCmdLogEntry;
 
 use crate::pipeline::{flags as fbits, BlendKind, HwVertex};
 
@@ -49,7 +46,7 @@ impl TranslatedFrame<'_> {
 }
 
 pub struct Translator {
-    state: ReplayState,
+    interp: Interpreter,
     /// Frontend debug mode mirroring `Gpu::wireframe_enabled`.
     /// Filled polygons become edge strips; rectangles remain filled
     /// to match the CPU rasterizer's debug path.
@@ -66,7 +63,7 @@ pub struct Translator {
 impl Translator {
     pub fn new() -> Self {
         Self {
-            state: ReplayState::new(),
+            interp: Interpreter::new(),
             wireframe: false,
             flat: Vec::with_capacity(4 * 1024),
             runs: Vec::with_capacity(1024),
@@ -109,7 +106,7 @@ impl Translator {
         if !is_semi_trans(cmd) {
             return BlendKind::Opaque;
         }
-        match self.state.tex_blend_mode {
+        match self.interp.state.tex_blend_mode {
             BlendMode::Average => BlendKind::Average,
             BlendMode::Add => BlendKind::Add,
             BlendMode::Sub => BlendKind::Sub,
@@ -118,7 +115,7 @@ impl Translator {
     }
 
     fn current_clip(&self) -> [u16; 4] {
-        let a = &self.state.draw_area;
+        let a = &self.interp.state.draw_area;
         [
             a.left.clamp(0, (crate::target::VRAM_WIDTH - 1) as i32) as u16,
             a.top.clamp(0, (crate::target::VRAM_HEIGHT - 1) as i32) as u16,
@@ -146,141 +143,54 @@ impl Translator {
     }
 
     fn process(&mut self, entry: &GpuCmdLogEntry) {
-        let fifo = &entry.fifo[..];
-        match entry.opcode {
-            // ---------- Fill rectangle (clear-screen primitive) ----------
-            0x02 => self.emit_fill_rect(fifo),
-
-            // ---------- State setters (always applied) ----------
-            0xE1 => self.handle_e1(fifo),
-            0xE2 => self.handle_e2(fifo),
-            0xE3 => self.handle_e3(fifo),
-            0xE4 => self.handle_e4(fifo),
-            0xE5 => self.handle_e5(fifo),
-            0xE6 => self.handle_e6(fifo),
-
-            // ---------- Phase 1 primitives ----------
-            0x20..=0x23 => self.emit_mono_tri(fifo),
-            0x28..=0x2B => self.emit_mono_quad(fifo),
-
-            // ---------- Phase 2 primitives ----------
-            0x24..=0x27 => self.emit_tex_tri(fifo),
-            0x2C..=0x2F => self.emit_tex_quad(fifo),
-
-            // ---------- Phase 3 primitives ----------
-            // Shaded (Gouraud) tris + quads.
-            0x30..=0x33 => self.emit_shaded_tri(fifo),
-            0x38..=0x3B => self.emit_shaded_quad(fifo),
-            // Shaded + textured.
-            0x34..=0x37 => self.emit_shaded_tex_tri(fifo),
-            0x3C..=0x3F => self.emit_shaded_tex_quad(fifo),
-            // Mono rectangles (variable + 1x1 / 8x8 / 16x16 fixed).
-            0x60..=0x63 => self.emit_mono_rect_variable(fifo),
-            0x68..=0x6B => self.emit_mono_rect_fixed(fifo, 1, 1),
-            0x70..=0x73 => self.emit_mono_rect_fixed(fifo, 8, 8),
-            0x78..=0x7B => self.emit_mono_rect_fixed(fifo, 16, 16),
-            // Textured rectangles (variable + fixed sizes).
-            0x64..=0x67 => self.emit_tex_rect_variable(fifo),
-            0x6C..=0x6F => self.emit_tex_rect_fixed(fifo, 1, 1),
-            0x74..=0x77 => self.emit_tex_rect_fixed(fifo, 8, 8),
-            0x7C..=0x7F => self.emit_tex_rect_fixed(fifo, 16, 16),
-
-            // ---------- Phase 4+ ---------- (silently skipped)
-            // 0x02         => fill rect
-            // 0x30..=0x33  => shaded tri
-            // 0x34..=0x37  => shaded-tex tri
-            // 0x38..=0x3B  => shaded quad
-            // 0x3C..=0x3F  => shaded-tex quad
-            // 0x40..=0x5F  => lines / polylines
-            // 0x60..=0x7F  => rectangles
-            // 0x80..=0x9F  => VRAM-VRAM copy
-            // 0xA0..=0xBF  => CPU-VRAM upload
-            // 0xC0..=0xDF  => VRAM-CPU readback (no draws)
-            _ => {}
-        }
-    }
-
-    // -------- State-setter handlers (mirror psx-gpu-compute::replay) --------
-
-    fn handle_e1(&mut self, fifo: &[u32]) {
-        if fifo.is_empty() {
+        let Some(event) = self.interp.interpret(entry) else {
             return;
+        };
+        match event {
+            GpuEvent::Fill { cmd, x, y, w, h } => self.emit_fill_rect(cmd, x, y, w, h),
+            GpuEvent::MonoTri { cmd, v } => self.emit_mono_tri(cmd, v),
+            GpuEvent::MonoQuad { cmd, v } => self.emit_mono_quad(cmd, v),
+            GpuEvent::TexTri { cmd, v, uv, clut } => self.emit_tex_tri(cmd, v, uv, clut),
+            GpuEvent::TexQuad { cmd, v, uv, clut } => self.emit_tex_quad(cmd, v, uv, clut),
+            GpuEvent::ShadedTri { cmd, v, colors } => self.emit_shaded_tri(cmd, v, colors),
+            GpuEvent::ShadedQuad { cmd, v, colors } => self.emit_shaded_quad(cmd, v, colors),
+            GpuEvent::ShadedTexTri {
+                cmd,
+                v,
+                uv,
+                colors,
+                clut,
+            } => self.emit_shaded_tex_tri(cmd, v, uv, colors, clut),
+            GpuEvent::ShadedTexQuad {
+                cmd,
+                v,
+                uv,
+                colors,
+                clut,
+            } => self.emit_shaded_tex_quad(cmd, v, uv, colors, clut),
+            GpuEvent::MonoRect { cmd, xy, w, h } => {
+                self.push_mono_rect(cmd, xy.0, xy.1, w as i32, h as i32)
+            }
+            GpuEvent::TexRect {
+                cmd,
+                xy,
+                uv,
+                clut,
+                w,
+                h,
+            } => self.push_tex_rect(cmd, xy.0, xy.1, w as i32, h as i32, uv, clut),
+            // The render path redraws on top of the VRAM-synced
+            // target; copies and lines are not lowered here.
+            GpuEvent::VramCopy { .. } | GpuEvent::Unhandled { .. } => {}
         }
-        let word = fifo[0];
-        // Re-applying the tpage word also resets `tex_blend_mode`;
-        // synthesise a "fake" UV1-high-half word that just carries
-        // the low 16 bits of E1 in its high half. E2 texture-window
-        // state is independent from the texture page and must survive
-        // this reset.
-        self.apply_primitive_tpage_preserving_window(word << 16);
-        self.state.dither = (word >> 9) & 1 != 0;
-        self.state.flip_x = (word >> 12) & 1 != 0;
-        self.state.flip_y = (word >> 13) & 1 != 0;
-    }
-
-    fn handle_e2(&mut self, fifo: &[u32]) {
-        if fifo.is_empty() {
-            return;
-        }
-        let word = fifo[0];
-        let mask_x = (word & 0x1F) * 8;
-        let mask_y = ((word >> 5) & 0x1F) * 8;
-        let off_x = ((word >> 10) & 0x1F) * 8;
-        let off_y = ((word >> 15) & 0x1F) * 8;
-        self.state.tpage.tex_window_mask_x = mask_x;
-        self.state.tpage.tex_window_mask_y = mask_y;
-        self.state.tpage.tex_window_off_x = off_x;
-        self.state.tpage.tex_window_off_y = off_y;
-    }
-
-    fn handle_e3(&mut self, fifo: &[u32]) {
-        if fifo.is_empty() {
-            return;
-        }
-        let word = fifo[0];
-        self.state.draw_area.left = (word & 0x3FF) as i32;
-        self.state.draw_area.top = ((word >> 10) & 0x1FF) as i32;
-    }
-
-    fn handle_e4(&mut self, fifo: &[u32]) {
-        if fifo.is_empty() {
-            return;
-        }
-        let word = fifo[0];
-        self.state.draw_area.right = (word & 0x3FF) as i32;
-        self.state.draw_area.bottom = ((word >> 10) & 0x1FF) as i32;
-    }
-
-    fn handle_e5(&mut self, fifo: &[u32]) {
-        if fifo.is_empty() {
-            return;
-        }
-        let word = fifo[0];
-        self.state.draw_offset_x = sign_extend_11((word & 0x7FF) as i32);
-        self.state.draw_offset_y = sign_extend_11(((word >> 11) & 0x7FF) as i32);
-    }
-
-    fn handle_e6(&mut self, fifo: &[u32]) {
-        if fifo.is_empty() {
-            return;
-        }
-        let word = fifo[0];
-        self.state.mask_set = (word & 1) != 0;
-        self.state.mask_check = (word & 2) != 0;
     }
 
     // -------- Primitive emitters --------
 
-    fn emit_mono_tri(&mut self, fifo: &[u32]) {
-        if fifo.len() < 4 {
-            return;
-        }
-        let cmd = fifo[0];
+    fn emit_mono_tri(&mut self, cmd: u32, v: [(i32, i32); 3]) {
         let color = mono_color_rgba8(cmd);
         let kind = self.blend_kind(cmd);
-        let v0 = decode_vertex(&self.state, fifo[1]);
-        let v1 = decode_vertex(&self.state, fifo[2]);
-        let v2 = decode_vertex(&self.state, fifo[3]);
+        let [v0, v1, v2] = v;
         if self.wireframe {
             self.push_wire_tri(v0, color, v1, color, v2, color, kind);
         } else {
@@ -288,17 +198,10 @@ impl Translator {
         }
     }
 
-    fn emit_mono_quad(&mut self, fifo: &[u32]) {
-        if fifo.len() < 5 {
-            return;
-        }
-        let cmd = fifo[0];
+    fn emit_mono_quad(&mut self, cmd: u32, v: [(i32, i32); 4]) {
         let color = mono_color_rgba8(cmd);
         let kind = self.blend_kind(cmd);
-        let v0 = decode_vertex(&self.state, fifo[1]);
-        let v1 = decode_vertex(&self.state, fifo[2]);
-        let v2 = decode_vertex(&self.state, fifo[3]);
-        let v3 = decode_vertex(&self.state, fifo[4]);
+        let [v0, v1, v2, v3] = v;
         // Match the CPU rasterizer's split order
         // (`Gpu::draw_monochrome_quad`): lower/right half first, then
         // upper/left, so pixels on the shared diagonal are owned by
@@ -384,26 +287,17 @@ impl Translator {
 
     // ----- Phase 2: textured tris + quads -----
 
-    /// `0x24..=0x27` -- textured triangle. Packet:
-    ///   `[cmd+tint, v0, uv0+clut, v1, uv1+tpage, v2, uv2]`
-    /// uv1's high half is the active tpage word; consume it via
-    /// `apply_primitive_tpage_preserving_window` so subsequent
-    /// primitives see the updated tpage without losing GP0(E2)
-    /// texture-window state.
-    fn emit_tex_tri(&mut self, fifo: &[u32]) {
-        if fifo.len() < 7 {
-            return;
-        }
-        let cmd = fifo[0];
-        let v0 = decode_vertex(&self.state, fifo[1]);
-        let uv0 = decode_uv(fifo[2]);
-        let clut = decode_clut(fifo[2]);
-        let v1 = decode_vertex(&self.state, fifo[3]);
-        let uv1 = decode_uv(fifo[4]);
-        self.apply_primitive_tpage_preserving_window(fifo[4]);
-        let v2 = decode_vertex(&self.state, fifo[5]);
-        let uv2 = decode_uv(fifo[6]);
-
+    /// `0x24..=0x27` -- textured triangle. The interpreter has
+    /// already applied uv1's tpage half to the state.
+    fn emit_tex_tri(
+        &mut self,
+        cmd: u32,
+        v: [(i32, i32); 3],
+        uv: [(u8, u8); 3],
+        clut: (u32, u32),
+    ) {
+        let [v0, v1, v2] = v;
+        let [uv0, uv1, uv2] = uv;
         let prim_flags = self.tex_prim_flags(cmd, clut);
         let color = tex_tint(cmd);
         let kind = self.blend_kind(cmd);
@@ -424,28 +318,19 @@ impl Translator {
         }
     }
 
-    /// `0x2C..=0x2F` -- textured quad. Packet:
-    ///   `[cmd+tint, v0, uv0+clut, v1, uv1+tpage, v2, uv2, v3, uv3]`
-    /// Decomposes to two triangles using the same winding/order the
-    /// CPU rasterizer's `draw_textured_quad` uses (`v1,v3,v2` then
-    /// `v0,v1,v2`), so semi-trans / mask behaviour stays
-    /// pixel-equivalent in later phases.
-    fn emit_tex_quad(&mut self, fifo: &[u32]) {
-        if fifo.len() < 9 {
-            return;
-        }
-        let cmd = fifo[0];
-        let v0 = decode_vertex(&self.state, fifo[1]);
-        let uv0 = decode_uv(fifo[2]);
-        let clut = decode_clut(fifo[2]);
-        let v1 = decode_vertex(&self.state, fifo[3]);
-        let uv1 = decode_uv(fifo[4]);
-        self.apply_primitive_tpage_preserving_window(fifo[4]);
-        let v2 = decode_vertex(&self.state, fifo[5]);
-        let uv2 = decode_uv(fifo[6]);
-        let v3 = decode_vertex(&self.state, fifo[7]);
-        let uv3 = decode_uv(fifo[8]);
-
+    /// `0x2C..=0x2F` -- textured quad. Decomposes to two triangles
+    /// using the same winding/order the CPU rasterizer's
+    /// `draw_textured_quad` uses (`v1,v3,v2` then `v0,v1,v2`), so
+    /// semi-trans / mask behaviour stays pixel-equivalent.
+    fn emit_tex_quad(
+        &mut self,
+        cmd: u32,
+        v: [(i32, i32); 4],
+        uv: [(u8, u8); 4],
+        clut: (u32, u32),
+    ) {
+        let [v0, v1, v2, v3] = v;
+        let [uv0, uv1, uv2, uv3] = uv;
         let prim_flags = self.tex_prim_flags(cmd, clut);
         let color = tex_tint(cmd);
         let kind = self.blend_kind(cmd);
@@ -483,7 +368,7 @@ impl Translator {
     /// `bits` into the format the shader expects. `clut` is in
     /// PSX VRAM pixels.
     fn tex_prim_flags(&self, cmd: u32, clut: (u32, u32)) -> u32 {
-        let tp = &self.state.tpage;
+        let tp = &self.interp.state.tpage;
         let depth = tp.tex_depth;
         let mut flags = fbits::TEXTURED;
         flags |= fbits::pack_tpage(tp.tpage_x, tp.tpage_y, depth);
@@ -502,25 +387,11 @@ impl Translator {
     }
 
     fn tex_window_word(&self) -> u32 {
-        let tp = &self.state.tpage;
+        let tp = &self.interp.state.tpage;
         (tp.tex_window_mask_x & 0xFF)
             | ((tp.tex_window_mask_y & 0xFF) << 8)
             | ((tp.tex_window_off_x & 0xFF) << 16)
             | ((tp.tex_window_off_y & 0xFF) << 24)
-    }
-
-    fn apply_primitive_tpage_preserving_window(&mut self, uv_word: u32) {
-        let tw = (
-            self.state.tpage.tex_window_mask_x,
-            self.state.tpage.tex_window_mask_y,
-            self.state.tpage.tex_window_off_x,
-            self.state.tpage.tex_window_off_y,
-        );
-        apply_primitive_tpage(&mut self.state, uv_word);
-        self.state.tpage.tex_window_mask_x = tw.0;
-        self.state.tpage.tex_window_mask_y = tw.1;
-        self.state.tpage.tex_window_off_x = tw.2;
-        self.state.tpage.tex_window_off_y = tw.3;
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -598,22 +469,13 @@ impl Translator {
 
     // ----- Phase 3: shaded (Gouraud) tris + quads -----
 
-    /// `0x30..=0x33` -- Gouraud-shaded triangle.
-    /// Words: `[cmd+c0, v0, c1, v1, c2, v2]`.
-    /// The fragment shader interpolates `color` linearly across
-    /// the tri; we just push three different vertex colours.
-    fn emit_shaded_tri(&mut self, fifo: &[u32]) {
-        if fifo.len() < 6 {
-            return;
-        }
-        let cmd = fifo[0];
+    /// `0x30..=0x33` -- Gouraud-shaded triangle. The fragment shader
+    /// interpolates `color` linearly across the tri; we just push
+    /// three different vertex colours.
+    fn emit_shaded_tri(&mut self, cmd: u32, v: [(i32, i32); 3], colors: [u32; 3]) {
         let kind = self.blend_kind(cmd);
-        let c0 = mono_color_rgba8(cmd);
-        let v0 = decode_vertex(&self.state, fifo[1]);
-        let c1 = mono_color_rgba8(fifo[2]);
-        let v1 = decode_vertex(&self.state, fifo[3]);
-        let c2 = mono_color_rgba8(fifo[4]);
-        let v2 = decode_vertex(&self.state, fifo[5]);
+        let [v0, v1, v2] = v;
+        let [c0, c1, c2] = colors.map(mono_color_rgba8);
         if self.wireframe {
             self.push_wire_tri(v0, c0, v1, c1, v2, c2, kind);
         } else {
@@ -622,21 +484,10 @@ impl Translator {
     }
 
     /// `0x38..=0x3B` -- Gouraud-shaded quad.
-    /// Words: `[cmd+c0, v0, c1, v1, c2, v2, c3, v3]`.
-    fn emit_shaded_quad(&mut self, fifo: &[u32]) {
-        if fifo.len() < 8 {
-            return;
-        }
-        let cmd = fifo[0];
+    fn emit_shaded_quad(&mut self, cmd: u32, v: [(i32, i32); 4], colors: [u32; 4]) {
         let kind = self.blend_kind(cmd);
-        let c0 = mono_color_rgba8(cmd);
-        let v0 = decode_vertex(&self.state, fifo[1]);
-        let c1 = mono_color_rgba8(fifo[2]);
-        let v1 = decode_vertex(&self.state, fifo[3]);
-        let c2 = mono_color_rgba8(fifo[4]);
-        let v2 = decode_vertex(&self.state, fifo[5]);
-        let c3 = mono_color_rgba8(fifo[6]);
-        let v3 = decode_vertex(&self.state, fifo[7]);
+        let [v0, v1, v2, v3] = v;
+        let [c0, c1, c2, c3] = colors.map(mono_color_rgba8);
         if self.wireframe {
             self.push_wire_tri(v1, c1, v3, c3, v2, c2, kind);
             self.push_wire_tri(v0, c0, v1, c1, v2, c2, kind);
@@ -647,24 +498,17 @@ impl Translator {
     }
 
     /// `0x34..=0x37` -- Gouraud + textured triangle.
-    /// Words: `[cmd+c0, v0, uv0+clut, c1, v1, uv1+tpage, c2, v2, uv2]`.
-    fn emit_shaded_tex_tri(&mut self, fifo: &[u32]) {
-        if fifo.len() < 9 {
-            return;
-        }
-        let cmd = fifo[0];
-        let c0 = mono_color_rgba8(cmd);
-        let v0 = decode_vertex(&self.state, fifo[1]);
-        let uv0 = decode_uv(fifo[2]);
-        let clut = decode_clut(fifo[2]);
-        let c1 = mono_color_rgba8(fifo[3]);
-        let v1 = decode_vertex(&self.state, fifo[4]);
-        let uv1 = decode_uv(fifo[5]);
-        self.apply_primitive_tpage_preserving_window(fifo[5]);
-        let c2 = mono_color_rgba8(fifo[6]);
-        let v2 = decode_vertex(&self.state, fifo[7]);
-        let uv2 = decode_uv(fifo[8]);
-
+    fn emit_shaded_tex_tri(
+        &mut self,
+        cmd: u32,
+        v: [(i32, i32); 3],
+        uv: [(u8, u8); 3],
+        colors: [u32; 3],
+        clut: (u32, u32),
+    ) {
+        let [v0, v1, v2] = v;
+        let [uv0, uv1, uv2] = uv;
+        let [c0, c1, c2] = colors.map(mono_color_rgba8);
         let prim_flags = self.tex_prim_flags(cmd, clut);
         let kind = self.blend_kind(cmd);
         if self.wireframe {
@@ -686,29 +530,18 @@ impl Translator {
         }
     }
 
-    /// `0x3C..=0x3F` -- Gouraud + textured quad. Words:
-    /// `[cmd+c0, v0, uv0+clut, c1, v1, uv1+tpage, c2, v2, uv2,
-    ///   c3, v3, uv3]`.
-    fn emit_shaded_tex_quad(&mut self, fifo: &[u32]) {
-        if fifo.len() < 12 {
-            return;
-        }
-        let cmd = fifo[0];
-        let c0 = mono_color_rgba8(cmd);
-        let v0 = decode_vertex(&self.state, fifo[1]);
-        let uv0 = decode_uv(fifo[2]);
-        let clut = decode_clut(fifo[2]);
-        let c1 = mono_color_rgba8(fifo[3]);
-        let v1 = decode_vertex(&self.state, fifo[4]);
-        let uv1 = decode_uv(fifo[5]);
-        self.apply_primitive_tpage_preserving_window(fifo[5]);
-        let c2 = mono_color_rgba8(fifo[6]);
-        let v2 = decode_vertex(&self.state, fifo[7]);
-        let uv2 = decode_uv(fifo[8]);
-        let c3 = mono_color_rgba8(fifo[9]);
-        let v3 = decode_vertex(&self.state, fifo[10]);
-        let uv3 = decode_uv(fifo[11]);
-
+    /// `0x3C..=0x3F` -- Gouraud + textured quad.
+    fn emit_shaded_tex_quad(
+        &mut self,
+        cmd: u32,
+        v: [(i32, i32); 4],
+        uv: [(u8, u8); 4],
+        colors: [u32; 4],
+        clut: (u32, u32),
+    ) {
+        let [v0, v1, v2, v3] = v;
+        let [uv0, uv1, uv2, uv3] = uv;
+        let [c0, c1, c2, c3] = colors.map(mono_color_rgba8);
         let prim_flags = self.tex_prim_flags(cmd, clut);
         let kind = self.blend_kind(cmd);
         if self.wireframe {
@@ -848,58 +681,6 @@ impl Translator {
 
     // ----- Phase 3: rectangles -----
 
-    /// `0x60..=0x63` -- variable-size mono rect.
-    /// Words: `[cmd+rgb24, xy, wh]`. Decomposes to two tris.
-    fn emit_mono_rect_variable(&mut self, fifo: &[u32]) {
-        if fifo.len() < 3 {
-            return;
-        }
-        let cmd = fifo[0];
-        let (x, y) = decode_vertex(&self.state, fifo[1]);
-        let (w, h) = decode_wh(fifo[2]);
-        self.push_mono_rect(cmd, x, y, w, h);
-    }
-
-    /// `0x68..=0x6B` (1×1), `0x70..=0x73` (8×8), `0x78..=0x7B` (16×16)
-    /// -- fixed-size mono rect. Words: `[cmd+rgb24, xy]`.
-    fn emit_mono_rect_fixed(&mut self, fifo: &[u32], w: i32, h: i32) {
-        if fifo.len() < 2 {
-            return;
-        }
-        let cmd = fifo[0];
-        let (x, y) = decode_vertex(&self.state, fifo[1]);
-        self.push_mono_rect(cmd, x, y, w, h);
-    }
-
-    /// `0x64..=0x67` -- variable-size textured rect.
-    /// Words: `[cmd+tint, xy, uv+clut, wh]`. Tpage is the active
-    /// state setter's; rectangles do NOT update tpage on their
-    /// own (unlike textured polys' uv1).
-    fn emit_tex_rect_variable(&mut self, fifo: &[u32]) {
-        if fifo.len() < 4 {
-            return;
-        }
-        let cmd = fifo[0];
-        let (x, y) = decode_vertex(&self.state, fifo[1]);
-        let uv0 = decode_uv(fifo[2]);
-        let clut = decode_clut(fifo[2]);
-        let (w, h) = decode_wh(fifo[3]);
-        self.push_tex_rect(cmd, x, y, w, h, uv0, clut);
-    }
-
-    /// `0x6C..=0x6F` (1×1), `0x74..=0x77` (8×8), `0x7C..=0x7F` (16×16).
-    /// Words: `[cmd+tint, xy, uv+clut]`.
-    fn emit_tex_rect_fixed(&mut self, fifo: &[u32], w: i32, h: i32) {
-        if fifo.len() < 3 {
-            return;
-        }
-        let cmd = fifo[0];
-        let (x, y) = decode_vertex(&self.state, fifo[1]);
-        let uv0 = decode_uv(fifo[2]);
-        let clut = decode_clut(fifo[2]);
-        self.push_tex_rect(cmd, x, y, w, h, uv0, clut);
-    }
-
     /// `0x02` -- fill rectangle. Clears a VRAM region to a solid
     /// colour. Bypasses `draw_offset` (XY is absolute VRAM coords)
     /// and `draw_area` (always opaque, ignores scissor). Most demos
@@ -911,17 +692,8 @@ impl Translator {
     /// - xy: 10-bit x in low 16, 9-bit y in high 16 (no sign extend)
     /// - wh: 10-bit w in low 16, 9-bit h in high 16
     /// - color: low 24 bits of cmd word
-    fn emit_fill_rect(&mut self, fifo: &[u32]) {
-        if fifo.len() < 3 {
-            return;
-        }
-        let cmd = fifo[0];
-        let xy = fifo[1];
-        let wh = fifo[2];
-        let x = (xy & 0x3FF) as i32;
-        let y = ((xy >> 16) & 0x1FF) as i32;
-        let w = (wh & 0x3FF) as i32;
-        let h = ((wh >> 16) & 0x1FF) as i32;
+    fn emit_fill_rect(&mut self, cmd: u32, x: u32, y: u32, w: u32, h: u32) {
+        let (x, y, w, h) = (x as i32, y as i32, w as i32, h as i32);
         if w <= 0 || h <= 0 {
             return;
         }
@@ -987,8 +759,8 @@ impl Translator {
         // rectangle flip bits reverse the counter direction.
         let u0 = uv0.0 as i32;
         let v0 = uv0.1 as i32;
-        let flip_x = self.state.flip_x;
-        let flip_y = self.state.flip_y;
+        let flip_x = self.interp.state.flip_x;
+        let flip_y = self.interp.state.flip_y;
         let mut dy = 0;
         while dy < h {
             let src_y = if flip_y { v0 + h - 1 - dy } else { v0 + dy };
@@ -1026,14 +798,6 @@ impl Translator {
             dy += chunk_h;
         }
     }
-}
-
-/// Decode a `WH` word into `(w, h)`. Layout matches the CPU
-/// rasterizer: low 16 bits = width, high 16 bits = height.
-fn decode_wh(word: u32) -> (i32, i32) {
-    let w = (word & 0xFFFF) as i32;
-    let h = ((word >> 16) & 0xFFFF) as i32;
-    (w, h)
 }
 
 fn full_clip() -> [u16; 4] {
