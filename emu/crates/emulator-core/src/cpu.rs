@@ -33,6 +33,24 @@ use timing::cycle_cost;
 /// count -- the off-by-one observed on real hardware for a back-to-back
 /// `mtc2 lzcs; mfc2 lzcr`.
 const LZCR_RESULT_LATENCY: u64 = 8;
+/// MAC0 settle latency in cycles from command ISSUE. The hardware-tests disc
+/// measured the endpoints only: back-to-back read = stale, +8 nops = settled.
+/// Modeling the window as the FULL command latency broke commercial 3D
+/// culling (libgte reads NCLIP MAC0 a few cycles after the op; real silicon
+/// has it settled, the over-long model returned stale and culled their
+/// polygons -- Crash menu logo + model vanished). 3 cycles keeps a true
+/// back-to-back read stale (cortex walls fix intact) while +2-instruction
+/// reads see the settled value. The exact silicon threshold is a pending
+/// test-CD nop-sweep (+1..+7) measurement.
+/// MAC0 settle window in INSTRUCTIONS retired since command issue. Cycle
+/// granularity cannot separate the two regimes in our accounting (the disc's
+/// stale back-to-back read and libgte's settled read land in the same cycle
+/// bucket), but instruction distance does: the hardware-tests cases that
+/// fail on silicon read MAC0 as the VERY NEXT instruction; commercial
+/// culling macros read it two or more instructions later and silicon has it
+/// settled. Window 2 = only the immediately-following instruction sees the
+/// stale value. Exact silicon threshold pending the test-CD nop sweep.
+const MAC0_RESULT_LATENCY: u64 = 2;
 
 /// Errors raised during instruction execution.
 #[derive(Error, Debug, PartialEq, Eq)]
@@ -155,6 +173,8 @@ pub struct Cpu {
     /// Env `PSOXIDE_CTC2_DROP_DURING_EXEC=1` + `PSOXIDE_CTC2_DROP_WINDOW=N`.
     gte_ctc2_drop_during_exec: bool,
     gte_ctc2_drop_window: u64,
+    /// Diagnostic: bypass the MAC0/LZCR stale-read model entirely.
+    gte_read_latency_bypass: bool,
     /// Bus cycle at which the multiply/divide unit's HI/LO result becomes
     /// available. MFHI/MFLO stall to this point (the R3000A HI/LO interlock),
     /// and interleaving work between a MULT/DIV and its result read hides the
@@ -232,6 +252,15 @@ impl Cpu {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0),
+            // Default OFF pending the silicon nop-sweep: with the model on,
+            // commercial 3D culling (back-to-back NCLIP MAC0 reads in libgte)
+            // gets stale winding and drops polygons (Crash menu logo/model).
+            // The walls fix is engine-side (software cull), so cortex no
+            // longer depends on this model. PSOXIDE_GTE_READ_LATENCY=1
+            // re-enables it for hazard experiments.
+            gte_read_latency_bypass: std::env::var("PSOXIDE_GTE_READ_LATENCY")
+                .map(|v| v != "1")
+                .unwrap_or(true),
             hilo_busy_until: 0,
             hi: 0,
             lo: 0,
@@ -698,7 +727,7 @@ impl Cpu {
             self.gte_mac0_stale = self.cop2.read_data(24);
             self.cop2.execute(instr);
             self.gte_busy_until = bus.cycles() + Gte::command_cycles(instr) as u64;
-            self.gte_mac0_ready_at = self.gte_busy_until;
+            self.gte_mac0_ready_at = self.tick + MAC0_RESULT_LATENCY;
             return Ok(());
         }
         let cop_op = ((instr >> 21) & 0x1F) as u8;
@@ -746,8 +775,14 @@ impl Cpu {
     /// value, matching hardware where MAC1-3 / SXY / SZ settle in time
     /// for a back-to-back read but MAC0 / LZCR do not.
     fn gte_read_data_latency(&self, bus: &Bus, rd: u8) -> u32 {
+        // Diagnostic bypass: PSOXIDE_NO_GTE_READ_LATENCY=1 returns live
+        // values (pre-latency-model behavior) to A/B the model against
+        // commercial 3D culling (missing-model investigations).
+        if self.gte_read_latency_bypass {
+            return self.cop2.read_data(rd);
+        }
         match rd {
-            24 if bus.cycles() < self.gte_mac0_ready_at => self.gte_mac0_stale,
+            24 if self.tick < self.gte_mac0_ready_at => self.gte_mac0_stale,
             31 if bus.cycles() < self.gte_lzcr_ready_at => self.gte_lzcr_stale,
             _ => self.cop2.read_data(rd),
         }
