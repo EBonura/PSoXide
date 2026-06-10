@@ -50,6 +50,7 @@
 
 pub mod decode;
 pub mod from_ot;
+pub mod interpreter;
 pub mod pipeline;
 pub mod primitive;
 pub mod rasterizer;
@@ -75,6 +76,7 @@ pub use primitive::{
     BlendMode, DrawArea, Fill, MonoRect, MonoTri, PrimFlags, ShadedTexTri, ShadedTri,
     TexQuadBilinear, TexRect, TexTri, Tpage,
 };
+pub use interpreter::{GpuEvent, Interpreter};
 pub use rasterizer::Rasterizer;
 pub use replay::ComputeBackend;
 pub use vram::{VramGpu, VramGpuError, VRAM_FORMAT};
