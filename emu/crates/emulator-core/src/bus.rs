@@ -2061,6 +2061,19 @@ impl Bus {
             self.ram[(phys as usize) % memory::ram::SIZE] = value;
             return;
         }
+        // Expansion-2 debug console char-out (PCSX-Redux convention,
+        // 0x1F802080): the port the public test suites print to
+        // (JaCzekanski ps1-tests, Redux homebrew). Forward to stdout so
+        // their console-verified corpora run headless with capturable TTY.
+        if phys == 0x1F80_2080 {
+            use std::io::Write;
+            let mut out = std::io::stdout().lock();
+            let _ = out.write_all(&[value]);
+            if value == b'\n' {
+                let _ = out.flush();
+            }
+            return;
+        }
         if let Some(offset) = scratchpad_offset(virt, phys) {
             self.scratchpad[offset] = value;
             return;

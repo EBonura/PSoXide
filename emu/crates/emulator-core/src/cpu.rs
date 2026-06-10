@@ -351,12 +351,15 @@ impl Cpu {
         self.hilo_busy_until = 0;
         self.pending_exception_pc = None;
         self.set_gpr(28, initial_gp);
-        if let Some(sp) = initial_sp {
-            self.set_gpr(29, sp);
-            // Frame pointer tracks SP on bare-metal boot so backtraces
-            // look sane before main() sets up its own frame.
-            self.set_gpr(30, sp);
-        }
+        // PSX-EXEs with a zero SP header (common in test homebrew like
+        // ps1-tests/amidog) expect the BIOS-default stack; a fresh CPU's
+        // reset SP is 0, which wraps the stack into unmapped 0xFFFFFFxx
+        // and crashes the side-load instantly.
+        let sp = initial_sp.unwrap_or(0x801F_FF00);
+        self.set_gpr(29, sp);
+        // Frame pointer tracks SP on bare-metal boot so backtraces
+        // look sane before main() sets up its own frame.
+        self.set_gpr(30, sp);
     }
 
     /// Seed CPU state from a PSX-EXE header plus BIOS `Exec` arguments.
