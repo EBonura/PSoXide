@@ -12,6 +12,9 @@
 //!
 //! - [`sincos`] -- Q0.12 angle type + 256-entry Q1.12 sine LUT +
 //!   interpolated `sin_q12` / `cos_q12` lookups.
+//! - [`int32`] -- saturating 32-bit scalar helpers: `abs_i32` /
+//!   `abs_i16`, `clamp_i16`, `square_i32_saturating`, `isqrt_i32`,
+//!   `mul_q12_i32`.
 //!
 //! ## What's planned (same crate, future modules)
 //!
@@ -61,6 +64,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
 
+pub mod int32;
 pub mod sincos;
 
 // Re-export the most common symbols at the crate root so users
