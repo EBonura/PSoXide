@@ -36,7 +36,7 @@ const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
 const FONT_CLUT: Clut = Clut::new(320, 256);
 
 const ROWS_PER_PAGE: usize = 6;
-const TEST_COUNT: usize = 131;
+const TEST_COUNT: usize = 141;
 const PAD_POLL_TEST_INDEX: usize = 26;
 const MODE_COUNT: u8 = 15;
 const CHECK_MODES: [Mode; 11] = [
@@ -975,6 +975,56 @@ const TESTS: [TestSpec; TEST_COUNT] = [
         group: "GTE",
         name: "compose chain load-settled",
         run: test_compose_chain_load_settled,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "NCLIP MAC0 settle +1",
+        run: test_mac0_settle_gap1,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "NCLIP MAC0 settle +2",
+        run: test_mac0_settle_gap2,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "NCLIP MAC0 settle +3",
+        run: test_mac0_settle_gap3,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "NCLIP MAC0 settle +4",
+        run: test_mac0_settle_gap4,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "NCLIP MAC0 settle +6",
+        run: test_mac0_settle_gap6,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "LZCR settle +1",
+        run: test_lzcr_settle_gap1,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "LZCR settle +2",
+        run: test_lzcr_settle_gap2,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "LZCR settle +3",
+        run: test_lzcr_settle_gap3,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "LZCR settle +4",
+        run: test_lzcr_settle_gap4,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "LZCR settle +6",
+        run: test_lzcr_settle_gap6,
     },
     TestSpec {
         group: "GPU",
@@ -3036,6 +3086,64 @@ fn test_compose_chain_v0_settled() -> TestResult {
 fn test_compose_chain_load_settled() -> TestResult {
     expect_eq(compose_chain(1), compose_chain(3), "compose chain load-settled")
 }
+
+// --- Result-read settle sweeps (MAC0 / LZCR) ----------------------------
+// Silicon showed only the ENDPOINTS so far: back-to-back reads are stale
+// (they return the PREVIOUS result), +8 nops are settled. The emulator
+// model needs the exact threshold to be faithful without breaking
+// commercial games (libgte reads at distances the endpoints never
+// measured -- the Crash menu regression). These sweep +1..+6: each case
+// primes the stale slot with a DIFFERENT prior result, re-runs the op,
+// reads after N nops, and compares against a settled reference. The
+// smallest passing N is the silicon threshold, per register.
+macro_rules! mac0_settle_case {
+    ($name:ident, $gap:tt) => {
+        fn $name() -> TestResult {
+            // Settled reference: positive winding, MAC0 = +100.
+            seed_nclip_pos_triangle();
+            unsafe { gte_ops::nclip() };
+            gte_nops!(64);
+            let expected = mfc2!(24);
+            // Poison the stale slot: reversed winding -> MAC0 = -100.
+            mtc2!(13, pack_gte_xy(0, 10));
+            mtc2!(14, pack_gte_xy(10, 0));
+            unsafe { gte_ops::nclip() };
+            gte_nops!(64);
+            // Probe: restore positive winding, read after N nops.
+            seed_nclip_pos_triangle();
+            unsafe { gte_ops::nclip() };
+            gte_nops!($gap);
+            let got = mfc2!(24);
+            expect_eq(expected, got, "nclip mac0 settle gap")
+        }
+    };
+}
+mac0_settle_case!(test_mac0_settle_gap1, 1);
+mac0_settle_case!(test_mac0_settle_gap2, 2);
+mac0_settle_case!(test_mac0_settle_gap3, 3);
+mac0_settle_case!(test_mac0_settle_gap4, 4);
+mac0_settle_case!(test_mac0_settle_gap6, 6);
+
+macro_rules! lzcr_settle_case {
+    ($name:ident, $gap:tt) => {
+        fn $name() -> TestResult {
+            // Prime the stale slot: LZCS 0x00ffffff -> LZCR 8, settled.
+            mtc2!(30, 0x00ff_ffff);
+            gte_nops!(64);
+            let _ = mfc2!(31);
+            // Probe: LZCS 0x00000001 -> LZCR 31, read after N nops.
+            mtc2!(30, 0x0000_0001);
+            gte_nops!($gap);
+            let got = mfc2!(31);
+            expect_eq(31, got, "lzcr settle gap")
+        }
+    };
+}
+lzcr_settle_case!(test_lzcr_settle_gap1, 1);
+lzcr_settle_case!(test_lzcr_settle_gap2, 2);
+lzcr_settle_case!(test_lzcr_settle_gap3, 3);
+lzcr_settle_case!(test_lzcr_settle_gap4, 4);
+lzcr_settle_case!(test_lzcr_settle_gap6, 6);
 
 macro_rules! gte_result_latency_test {
     ($name:ident, $reg:literal, $label:literal) => {
