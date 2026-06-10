@@ -36,7 +36,7 @@ const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
 const FONT_CLUT: Clut = Clut::new(320, 256);
 
 const ROWS_PER_PAGE: usize = 6;
-const TEST_COUNT: usize = 141;
+const TEST_COUNT: usize = 145;
 const PAD_POLL_TEST_INDEX: usize = 26;
 const MODE_COUNT: u8 = 15;
 const CHECK_MODES: [Mode; 11] = [
@@ -1025,6 +1025,26 @@ const TESTS: [TestSpec; TEST_COUNT] = [
         group: "GTE",
         name: "LZCR settle +6",
         run: test_lzcr_settle_gap6,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "NCLIP big-value settle +1",
+        run: test_mac0_big_settle_gap1,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "NCLIP big-value settle +2",
+        run: test_mac0_big_settle_gap2,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "NCLIP big-value settle +4",
+        run: test_mac0_big_settle_gap4,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "NCLIP big-value settle +8",
+        run: test_mac0_big_settle_gap8,
     },
     TestSpec {
         group: "GPU",
@@ -3144,6 +3164,45 @@ lzcr_settle_case!(test_lzcr_settle_gap2, 2);
 lzcr_settle_case!(test_lzcr_settle_gap3, 3);
 lzcr_settle_case!(test_lzcr_settle_gap4, 4);
 lzcr_settle_case!(test_lzcr_settle_gap6, 6);
+
+// Magnitude-dependent settle probe: the guest disassembly shows the scene
+// NCLIP A/B/C reads sit at the SAME +2-instruction distance as the small-
+// triangle settle sweep above -- yet on silicon the sweep PASSES and the
+// scene cases FAIL. Distance is not the discriminator; the remaining
+// variable is OPERAND MAGNITUDE (the scene cases compute with large real
+// coordinates). If big products take longer to settle in the read path,
+// these large-value sweeps fail at small N and pass at large N, giving
+// the worst-case threshold the emulator model must use.
+macro_rules! mac0_big_settle_case {
+    ($name:ident, $gap:tt) => {
+        fn $name() -> TestResult {
+            // Settled reference with the scene-A coordinates.
+            ctc2!(31, 0);
+            mtc2!(12, 0x006e_0095);
+            mtc2!(13, 0xffe2_0094);
+            mtc2!(14, 0xffde_00dc);
+            unsafe { gte_ops::nclip() };
+            gte_nops!(64);
+            let expected = mfc2!(24);
+            // Poison MAC0 with a different settled result (swap winding).
+            mtc2!(13, 0xffde_00dc);
+            mtc2!(14, 0xffe2_0094);
+            unsafe { gte_ops::nclip() };
+            gte_nops!(64);
+            // Probe at +N with the original large coordinates.
+            mtc2!(13, 0xffe2_0094);
+            mtc2!(14, 0xffde_00dc);
+            unsafe { gte_ops::nclip() };
+            gte_nops!($gap);
+            let got = mfc2!(24);
+            expect_eq(expected, got, "nclip big-value settle gap")
+        }
+    };
+}
+mac0_big_settle_case!(test_mac0_big_settle_gap1, 1);
+mac0_big_settle_case!(test_mac0_big_settle_gap2, 2);
+mac0_big_settle_case!(test_mac0_big_settle_gap4, 4);
+mac0_big_settle_case!(test_mac0_big_settle_gap8, 8);
 
 macro_rules! gte_result_latency_test {
     ($name:ident, $reg:literal, $label:literal) => {
