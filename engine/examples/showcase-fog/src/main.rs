@@ -57,7 +57,7 @@ use psx_asset::Texture;
 use psx_engine::{
     App, Config, Ctx, DepthBand, DepthRange, OtDepth, OtFrame, PrimitiveArena, Scene, SimTick,
 };
-use psx_font::{fonts::BASIC_8X16, FontAtlas};
+use psx_font::{fonts::BASIC_8X16, u16_hex, FontAtlas};
 use psx_gpu::ot::OrderingTable;
 use psx_gpu::prim::{QuadGouraud, TriTexturedGouraud};
 use psx_gte::lighting::{project_triangle_fogged, Light, LightRig};
@@ -581,25 +581,3 @@ fn main() -> ! {
     App::run(config, &mut scene);
 }
 
-// ----------------------------------------------------------------------
-// no_std hex formatter
-// ----------------------------------------------------------------------
-
-fn u16_hex(v: u16) -> HexU16 {
-    const HEX: &[u8; 16] = b"0123456789ABCDEF";
-    let mut out = [0u8; 6];
-    out[0] = b'0';
-    out[1] = b'x';
-    out[2] = HEX[((v >> 12) & 0xF) as usize];
-    out[3] = HEX[((v >> 8) & 0xF) as usize];
-    out[4] = HEX[((v >> 4) & 0xF) as usize];
-    out[5] = HEX[(v & 0xF) as usize];
-    HexU16(out)
-}
-
-struct HexU16([u8; 6]);
-impl HexU16 {
-    fn as_str(&self) -> &str {
-        unsafe { core::str::from_utf8_unchecked(&self.0) }
-    }
-}
