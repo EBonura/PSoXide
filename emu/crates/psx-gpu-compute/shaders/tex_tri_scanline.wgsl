@@ -1,14 +1,11 @@
-// Textured triangle rasterizer — scanline-delta version (B.x).
+// Textured triangle — silicon-matched coverage + plane interpolation.
 //
-// Reads per-row state from a storage buffer pre-computed on the host
-// (mirroring `emulator-core::gpu::setup_sections` + `next_row` exactly)
-// and walks per-pixel U / V using cumulative Q16.16 deltas. The math
-// is bit-exact with the CPU rasterizer because both walk the same
-// accumulator arithmetic.
-//
-// WGSL has no native i64. All Q16.16 values are split into
-// `(hi: i32, lo: u32)` and the per-pixel addition / multiplication
-// is done with explicit hi/lo emulation in `i64_*` helpers below.
+// The host (`scanline.rs`) mirrors the CPU rasterizer's
+// `for_each_tri_pixel`: the center-sampled Q32.32 DDA produces one
+// `[left_x, right_x)` span per scanline, and U/V come from
+// determinant planes `attr(x, y) = (base + x*dadx + y*dady) >> 24`
+// in wrapping u32 arithmetic. Evaluating the same plane here makes
+// the GPU output bit-exact with the CPU by construction.
 
 struct TexTri {
     v0: vec2<i32>,
@@ -47,41 +44,18 @@ struct DrawArea {
 }
 
 struct RowState {
-    left_x_hi: i32,
-    left_x_lo: u32,
-    right_x_hi: i32,
-    right_x_lo: u32,
-    left_u_hi: i32,
-    left_u_lo: u32,
-    left_v_hi: i32,
-    left_v_lo: u32,
-    left_r_hi: i32,
-    left_r_lo: u32,
-    left_g_hi: i32,
-    left_g_lo: u32,
-    left_b_hi: i32,
-    left_b_lo: u32,
-    _pad0: u32,
-    _pad1: u32,
+    left_x: i32,
+    right_x: i32,
 }
 
 struct ScanlineConsts {
-    y_min: i32,
-    y_max: i32,
-    _pad0: u32,
-    _pad1: u32,
-    delta_col_u_hi: i32,
-    delta_col_u_lo: u32,
-    delta_col_v_hi: i32,
-    delta_col_v_lo: u32,
-    delta_col_r_hi: i32,
-    delta_col_r_lo: u32,
-    delta_col_g_hi: i32,
-    delta_col_g_lo: u32,
-    delta_col_b_hi: i32,
-    delta_col_b_lo: u32,
-    _pad2: u32,
-    _pad3: u32,
+    y_min: i32, y_max: i32,
+    _pad0: u32, _pad1: u32,
+    r_dadx: u32, r_dady: u32, r_base: u32, _pad2: u32,
+    g_dadx: u32, g_dady: u32, g_base: u32, _pad3: u32,
+    b_dadx: u32, b_dady: u32, b_base: u32, _pad4: u32,
+    u_dadx: u32, u_dady: u32, u_base: u32, _pad5: u32,
+    v_dadx: u32, v_dady: u32, v_base: u32, _pad6: u32,
 }
 
 @group(0) @binding(0) var<storage, read_write> vram: array<u32>;
@@ -110,68 +84,11 @@ const DEPTH_4BPP:  u32 = 0u;
 const DEPTH_8BPP:  u32 = 1u;
 const DEPTH_15BPP: u32 = 2u;
 
-// =============================================================
-//  i64 emulation: stored as (hi: i32, lo: u32). The "logical"
-//  64-bit value is `(hi << 32) | lo`, treated as signed two's
-//  complement. WGSL's `i32 >> N` is arithmetic and its `u32 + u32`
-//  wraps mod 2^32 — both are what we need.
-// =============================================================
-
-struct I64 { hi: i32, lo: u32 }
-
-fn i64_pack(hi: i32, lo: u32) -> I64 { return I64(hi, lo); }
-
-// 64-bit add: a + b. Carry from the unsigned-low-half wrap.
-fn i64_add(a: I64, b: I64) -> I64 {
-    let new_lo = a.lo + b.lo;
-    let carry: i32 = select(0, 1, new_lo < a.lo);
-    let new_hi = a.hi + b.hi + carry;
-    return I64(new_hi, new_lo);
+// Wrapping-u32 determinant-plane evaluation, identical to the CPU's
+// `eval`: the result is already the 8-bit attribute value.
+fn plane_eval(dadx: u32, dady: u32, base: u32, x: i32, y: i32) -> u32 {
+    return (base + u32(x) * dadx + u32(y) * dady) >> 24u;
 }
-
-// 64-bit unsigned-i32 multiply: `col * b` where `col` is a u32 in
-// [0..1023] (always non-negative — `col = px - xmin`). The 64-bit
-// product fits because `col` is bounded.
-fn i64_mul_u32(col: u32, b: I64) -> I64 {
-    // Split b.lo into 16-bit halves so each per-half multiply
-    // fits in u32 (max `col * 0xFFFF = 1023 * 65535 ≈ 67M < 2^27`).
-    let b_lo_l16 = b.lo & 0xFFFFu;
-    let b_lo_h16 = b.lo >> 16u;
-    let prod_l = col * b_lo_l16;     // contributes to low 32
-    let prod_h = col * b_lo_h16;     // contributes to mid 32
-    // Combine: result = (prod_h << 16) + prod_l, with carry into
-    // the upper 32 bits.
-    let new_lo_a = prod_h << 16u;
-    let new_lo_b = prod_l;
-    let new_lo = new_lo_a + new_lo_b;
-    let carry_lo: u32 = select(0u, 1u, new_lo < new_lo_a);
-    let high_part_from_lo = (prod_h >> 16u) + carry_lo;
-    // `col * b.hi`: signed × unsigned. Treat col as i32 (it's small
-    // — bbox width ≤ 1023 — so safe to cast).
-    let high_part_from_hi = i32(col) * b.hi;
-    let new_hi = high_part_from_hi + i32(high_part_from_lo);
-    return I64(new_hi, new_lo);
-}
-
-// Arithmetic right-shift of an I64 by 16 — produces another I64,
-// preserving sign. Used to convert Q16.16 → Q32.0 (still 64-bit
-// in case the integer part doesn't fit in 32, though for PSX
-// rasterizer outputs it always does).
-fn i64_arsh16(a: I64) -> I64 {
-    let new_lo = (a.lo >> 16u) | (u32(a.hi) << 16u);
-    let new_hi = a.hi >> 16u; // arithmetic on i32
-    return I64(new_hi, new_lo);
-}
-
-// Project to i32 from an I64 we know fits — for rasterizer outputs
-// (xmin, u, v after >> 16) this is always true on real PSX content.
-fn i64_to_i32(a: I64) -> i32 {
-    return i32(a.lo);
-}
-
-// =============================================================
-//  Sampler / blend / modulator (same as `tex_tri.wgsl`).
-// =============================================================
 
 fn blend(bg_word: u32, fg_word: u32, mode: u32) -> u32 {
     let br = i32(bg_word & 0x1Fu);
@@ -261,31 +178,11 @@ fn rasterize(@builtin(global_invocation_id) gid: vec3<u32>) {
     if py < draw_area.top || py > draw_area.bottom { return; }
     if px < 0 || px >= VRAM_WIDTH || py < 0 || py >= VRAM_HEIGHT { return; }
 
-    // Fetch this row's CPU-equivalent left-edge state.
-    let row_idx = u32(py - consts.y_min);
-    let row = rows[row_idx];
+    let row = rows[u32(py - consts.y_min)];
+    if px < row.left_x || px >= row.right_x { return; }
 
-    // Per-row coverage (matches CPU: `xmin = left_x_q16 >> 16`,
-    // `xmax = (right_x_q16 >> 16) - 1`). Both are shifts of the
-    // hi-half (since left/right_x integer parts always fit in i32).
-    let left_x_q16 = i64_pack(row.left_x_hi, row.left_x_lo);
-    let right_x_q16 = i64_pack(row.right_x_hi, row.right_x_lo);
-    let xmin_q32 = i64_arsh16(left_x_q16);
-    let xmax_excl_q32 = i64_arsh16(right_x_q16);
-    let xmin = i64_to_i32(xmin_q32);
-    let xmax = i64_to_i32(xmax_excl_q32) - 1;
-    if px < xmin || px > xmax { return; }
-
-    // Per-pixel cumulative U / V via i64 add of (col * delta_col).
-    let col = u32(px - xmin);
-    let left_u_q16 = i64_pack(row.left_u_hi, row.left_u_lo);
-    let left_v_q16 = i64_pack(row.left_v_hi, row.left_v_lo);
-    let dcu = i64_pack(consts.delta_col_u_hi, consts.delta_col_u_lo);
-    let dcv = i64_pack(consts.delta_col_v_hi, consts.delta_col_v_lo);
-    let u_q16 = i64_add(left_u_q16, i64_mul_u32(col, dcu));
-    let v_q16 = i64_add(left_v_q16, i64_mul_u32(col, dcv));
-    let u = u32(i64_to_i32(i64_arsh16(u_q16)));
-    let v = u32(i64_to_i32(i64_arsh16(v_q16)));
+    let u = plane_eval(consts.u_dadx, consts.u_dady, consts.u_base, px, py);
+    let v = plane_eval(consts.v_dadx, consts.v_dady, consts.v_base, px, py);
 
     let texel = sample_texture(u, v);
     if texel == 0u { return; }

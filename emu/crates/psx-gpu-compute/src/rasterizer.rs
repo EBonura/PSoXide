@@ -37,14 +37,15 @@ pub struct Rasterizer {
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
 
-    // Mono-triangle pipeline.
-    mono_tri_pipeline: wgpu::ComputePipeline,
+    // Shared 3-binding layout (VRAM + prim + draw area) + the
+    // per-primitive uniform buffers. The layout is used by the
+    // mono-rect pipeline; the uniforms feed the scanline dispatches.
     mono_tri_bg_layout: wgpu::BindGroupLayout,
     mono_tri_uniform: wgpu::Buffer,
     draw_area_uniform: wgpu::Buffer,
 
-    // Textured-triangle pipeline.
-    tex_tri_pipeline: wgpu::ComputePipeline,
+    // Shared 4-binding layout (VRAM + prim + draw area + tpage),
+    // used by the tex-rect and tex-quad-bilinear pipelines.
     tex_tri_bg_layout: wgpu::BindGroupLayout,
     tex_tri_uniform: wgpu::Buffer,
     tpage_uniform: wgpu::Buffer,
@@ -64,14 +65,9 @@ pub struct Rasterizer {
     fill_bg_layout: wgpu::BindGroupLayout,
     fill_uniform: wgpu::Buffer,
 
-    // Shaded-triangle pipeline (B.3.a). Reuses `mono_tri_bg_layout`
-    // (same 3-binding shape: VRAM + prim + draw area).
-    shaded_tri_pipeline: wgpu::ComputePipeline,
+    // Per-primitive uniforms for the shaded / shaded-tex scanline
+    // dispatches.
     shaded_tri_uniform: wgpu::Buffer,
-
-    // Textured-shaded triangle pipeline (B.3.b). Reuses
-    // `tex_tri_bg_layout` (4 bindings: VRAM + prim + draw area + tpage).
-    shaded_tex_tri_pipeline: wgpu::ComputePipeline,
     shaded_tex_tri_uniform: wgpu::Buffer,
 
     // Phase B.x: textured triangle with bit-exact scanline-delta UV
@@ -159,26 +155,6 @@ impl Rasterizer {
                 ],
             });
 
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("psx-rasterizer-mono-tri-pl"),
-            bind_group_layouts: &[&mono_tri_bg_layout],
-            push_constant_ranges: &[],
-        });
-
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("psx-rasterizer-mono-tri-shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/mono_tri.wgsl").into()),
-        });
-
-        let mono_tri_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("psx-rasterizer-mono-tri"),
-            layout: Some(&pipeline_layout),
-            module: &shader,
-            entry_point: Some("rasterize"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
-
         // Reusable uniform buffers -- wgpu doesn't let us write a
         // struct directly into a freshly-bound resource per dispatch
         // without allocating, so we keep a stable buffer and update
@@ -249,23 +225,6 @@ impl Rasterizer {
             ],
         });
 
-        let tex_tri_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("psx-rasterizer-tex-tri-pl"),
-            bind_group_layouts: &[&tex_tri_bg_layout],
-            push_constant_ranges: &[],
-        });
-        let tex_tri_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("psx-rasterizer-tex-tri-shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/tex_tri.wgsl").into()),
-        });
-        let tex_tri_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("psx-rasterizer-tex-tri"),
-            layout: Some(&tex_tri_pl),
-            module: &tex_tri_shader,
-            entry_point: Some("rasterize"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
         let tex_tri_uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("psx-rasterizer-tex-tri-uniform"),
             size: std::mem::size_of::<TexTri>() as u64,
@@ -385,26 +344,6 @@ impl Rasterizer {
             mapped_at_creation: false,
         });
 
-        // ---------- Shaded-triangle pipeline (B.3.a) ----------
-        // Same binding shape as mono-tri (VRAM + prim + draw area).
-        let shaded_tri_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("psx-rasterizer-shaded-tri-pl"),
-            bind_group_layouts: &[&mono_tri_bg_layout],
-            push_constant_ranges: &[],
-        });
-        let shaded_tri_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("psx-rasterizer-shaded-tri-shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/shaded_tri.wgsl").into()),
-        });
-        let shaded_tri_pipeline =
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some("psx-rasterizer-shaded-tri"),
-                layout: Some(&shaded_tri_pl),
-                module: &shaded_tri_shader,
-                entry_point: Some("rasterize"),
-                compilation_options: Default::default(),
-                cache: None,
-            });
         let shaded_tri_uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("psx-rasterizer-shaded-tri-uniform"),
             size: std::mem::size_of::<ShadedTri>() as u64,
@@ -412,25 +351,6 @@ impl Rasterizer {
             mapped_at_creation: false,
         });
 
-        // ---------- Textured-shaded triangle pipeline (B.3.b) ----------
-        let shaded_tex_tri_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("psx-rasterizer-shaded-tex-tri-pl"),
-            bind_group_layouts: &[&tex_tri_bg_layout],
-            push_constant_ranges: &[],
-        });
-        let shaded_tex_tri_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("psx-rasterizer-shaded-tex-tri-shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/shaded_tex_tri.wgsl").into()),
-        });
-        let shaded_tex_tri_pipeline =
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some("psx-rasterizer-shaded-tex-tri"),
-                layout: Some(&shaded_tex_tri_pl),
-                module: &shaded_tex_tri_shader,
-                entry_point: Some("rasterize"),
-                compilation_options: Default::default(),
-                cache: None,
-            });
         let shaded_tex_tri_uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("psx-rasterizer-shaded-tex-tri-uniform"),
             size: std::mem::size_of::<ShadedTexTri>() as u64,
@@ -736,11 +656,9 @@ impl Rasterizer {
         Self {
             device,
             queue,
-            mono_tri_pipeline,
             mono_tri_bg_layout,
             mono_tri_uniform,
             draw_area_uniform,
-            tex_tri_pipeline,
             tex_tri_bg_layout,
             tex_tri_uniform,
             tpage_uniform,
@@ -751,9 +669,7 @@ impl Rasterizer {
             fill_pipeline,
             fill_bg_layout,
             fill_uniform,
-            shaded_tri_pipeline,
             shaded_tri_uniform,
-            shaded_tex_tri_pipeline,
             shaded_tex_tri_uniform,
             tex_tri_scanline_pipeline,
             tex_tri_scanline_bg_layout,
@@ -774,11 +690,11 @@ impl Rasterizer {
         }
     }
 
-    /// Bit-exact monochrome triangle dispatch via scanline-delta
-    /// coverage. Same drawing/RMW behaviour as `dispatch_mono_tri`
-    /// but uses the CPU rasterizer's per-row `(left_x, right_x)`
-    /// coverage rule instead of a per-pixel edge-function test, so
-    /// edge pixels match the CPU byte-for-byte.
+    /// Bit-exact monochrome triangle dispatch. The host runs the CPU
+    /// rasterizer's silicon-matched DDA (`scanline::build_setup`) and
+    /// the shader tests each pixel against its row's
+    /// `[left_x, right_x)` span, so coverage matches the CPU
+    /// byte-for-byte.
     pub fn dispatch_mono_tri_scanline(
         &self,
         vram: &VramGpu,
@@ -793,7 +709,7 @@ impl Rasterizer {
             (tri.v1[0], tri.v1[1]),
             (tri.v2[0], tri.v2[1]),
         ];
-        let setup = match scanline::build_setup(v, [(0, 0); 3], [(0, 0, 0); 3]) {
+        let setup = match scanline::build_setup(v, [(0, 0); 3], [(0, 0, 0); 3], false) {
             Some(s) => s,
             None => return false,
         };
@@ -812,7 +728,8 @@ impl Rasterizer {
         )
     }
 
-    /// Bit-exact Gouraud-shaded triangle dispatch via scanline-delta.
+    /// Bit-exact Gouraud-shaded triangle dispatch: silicon-matched
+    /// DDA coverage + determinant-plane RGB interpolation.
     pub fn dispatch_shaded_tri_scanline(
         &self,
         vram: &VramGpu,
@@ -835,7 +752,7 @@ impl Rasterizer {
             )
         };
         let rgb = [unpack_rgb(tri.c0), unpack_rgb(tri.c1), unpack_rgb(tri.c2)];
-        let setup = match scanline::build_setup(v, [(0, 0); 3], rgb) {
+        let setup = match scanline::build_setup(v, [(0, 0); 3], rgb, true) {
             Some(s) => s,
             None => return false,
         };
@@ -954,11 +871,9 @@ impl Rasterizer {
         true
     }
 
-    /// Bit-exact textured-Gouraud triangle dispatch (B.x). Composes
-    /// the scanline-delta UV walk from `dispatch_tex_tri_scanline`
-    /// with the per-vertex tint walk; the host runs the same
-    /// `setup_sections` + `next_row` loop the CPU does, with both
-    /// UV and RGB attributes populated, so the GPU output matches
+    /// Bit-exact textured-Gouraud triangle dispatch: silicon-matched
+    /// DDA coverage + determinant-plane interpolation for both the
+    /// UV pair and the per-vertex tint, so the GPU output matches
     /// the CPU rasterizer byte-for-byte.
     pub fn dispatch_shaded_tex_tri_scanline(
         &self,
@@ -989,7 +904,7 @@ impl Rasterizer {
             )
         };
         let rgb = [unpack_rgb(tri.c0), unpack_rgb(tri.c1), unpack_rgb(tri.c2)];
-        let setup = match scanline::build_setup(v, uv, rgb) {
+        let setup = match scanline::build_setup(v, uv, rgb, true) {
             Some(s) => s,
             None => return false,
         };
@@ -1078,14 +993,12 @@ impl Rasterizer {
         true
     }
 
-    /// Bit-exact textured-triangle dispatch via scanline-delta math.
-    /// The host runs the same `setup_sections` + `next_row` loop the
-    /// CPU rasterizer does, ships per-row state to the GPU, and the
-    /// shader walks per-pixel using i64-emulated Q16.16 arithmetic.
-    /// Results match the CPU rasterizer byte-for-byte.
+    /// Bit-exact textured-triangle dispatch: silicon-matched DDA
+    /// coverage + determinant-plane UV interpolation. Results match
+    /// the CPU rasterizer byte-for-byte.
     ///
-    /// Returns `false` if the triangle degenerates (zero height /
-    /// longest) -- same drop conditions as the CPU.
+    /// Returns `false` if the triangle degenerates (zero height or
+    /// zero determinant) -- same drop conditions as the CPU.
     pub fn dispatch_tex_tri_scanline(
         &self,
         vram: &VramGpu,
@@ -1106,7 +1019,7 @@ impl Rasterizer {
             ((tri.uv1 & 0xFF) as i32, ((tri.uv1 >> 8) & 0xFF) as i32),
             ((tri.uv2 & 0xFF) as i32, ((tri.uv2 >> 8) & 0xFF) as i32),
         ];
-        let setup = match scanline::build_setup(v, uv, [(0, 0, 0); 3]) {
+        let setup = match scanline::build_setup(v, uv, [(0, 0, 0); 3], true) {
             Some(s) => s,
             None => return false,
         };
@@ -1195,124 +1108,6 @@ impl Rasterizer {
         }
         self.queue.submit(Some(encoder.finish()));
         true
-    }
-
-    /// Dispatch one textured Gouraud-shaded triangle. Composes
-    /// texture sampling (`tex_tri`) with per-vertex tint
-    /// interpolation (`shaded_tri`).
-    pub fn dispatch_shaded_tex_tri(
-        &self,
-        vram: &VramGpu,
-        tri: &ShadedTexTri,
-        tpage: &Tpage,
-        area: &DrawArea,
-    ) {
-        if tri.exceeds_hw_extent() {
-            return;
-        }
-        let bbox_w = tri.bbox_max[0] - tri.bbox_min[0] + 1;
-        let bbox_h = tri.bbox_max[1] - tri.bbox_min[1] + 1;
-        if bbox_w <= 0 || bbox_h <= 0 {
-            return;
-        }
-        self.queue
-            .write_buffer(&self.shaded_tex_tri_uniform, 0, bytemuck::bytes_of(tri));
-        self.queue
-            .write_buffer(&self.draw_area_uniform, 0, bytemuck::bytes_of(area));
-        self.queue
-            .write_buffer(&self.tpage_uniform, 0, bytemuck::bytes_of(tpage));
-        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("psx-rasterizer-shaded-tex-tri-bg"),
-            layout: &self.tex_tri_bg_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: vram.buffer().as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: self.shaded_tex_tri_uniform.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: self.draw_area_uniform.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: self.tpage_uniform.as_entire_binding(),
-                },
-            ],
-        });
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("psx-rasterizer-shaded-tex-tri-encoder"),
-            });
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("psx-rasterizer-shaded-tex-tri-pass"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(&self.shaded_tex_tri_pipeline);
-            pass.set_bind_group(0, &bind_group, &[]);
-            let groups_x = (bbox_w as u32).div_ceil(WORKGROUP_SIZE_X);
-            let groups_y = (bbox_h as u32).div_ceil(WORKGROUP_SIZE_Y);
-            pass.dispatch_workgroups(groups_x, groups_y, 1);
-        }
-        self.queue.submit(Some(encoder.finish()));
-    }
-
-    /// Dispatch one Gouraud-shaded triangle. Same coverage rules as
-    /// `dispatch_mono_tri`; per-pixel colour interpolated from the
-    /// three vertex colours.
-    pub fn dispatch_shaded_tri(&self, vram: &VramGpu, tri: &ShadedTri, area: &DrawArea) {
-        if tri.exceeds_hw_extent() {
-            return;
-        }
-        let bbox_w = tri.bbox_max[0] - tri.bbox_min[0] + 1;
-        let bbox_h = tri.bbox_max[1] - tri.bbox_min[1] + 1;
-        if bbox_w <= 0 || bbox_h <= 0 {
-            return;
-        }
-        self.queue
-            .write_buffer(&self.shaded_tri_uniform, 0, bytemuck::bytes_of(tri));
-        self.queue
-            .write_buffer(&self.draw_area_uniform, 0, bytemuck::bytes_of(area));
-        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("psx-rasterizer-shaded-tri-bg"),
-            layout: &self.mono_tri_bg_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: vram.buffer().as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: self.shaded_tri_uniform.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: self.draw_area_uniform.as_entire_binding(),
-                },
-            ],
-        });
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("psx-rasterizer-shaded-tri-encoder"),
-            });
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("psx-rasterizer-shaded-tri-pass"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(&self.shaded_tri_pipeline);
-            pass.set_bind_group(0, &bind_group, &[]);
-            let groups_x = (bbox_w as u32).div_ceil(WORKGROUP_SIZE_X);
-            let groups_y = (bbox_h as u32).div_ceil(WORKGROUP_SIZE_Y);
-            pass.dispatch_workgroups(groups_x, groups_y, 1);
-        }
-        self.queue.submit(Some(encoder.finish()));
     }
 
     /// Dispatch one quick-fill primitive into VRAM. Bypasses all
@@ -1589,127 +1384,6 @@ impl Rasterizer {
         self.queue.submit(Some(encoder.finish()));
     }
 
-    /// Dispatch one textured triangle into VRAM. `tpage` selects the
-    /// 256×256 source rect + colour depth; `tri` carries vertices,
-    /// UVs, CLUT, tint, flags. Returns immediately after queuing.
-    pub fn dispatch_tex_tri(&self, vram: &VramGpu, tri: &TexTri, tpage: &Tpage, area: &DrawArea) {
-        if tri.exceeds_hw_extent() {
-            return;
-        }
-        let bbox_w = tri.bbox_max[0] - tri.bbox_min[0] + 1;
-        let bbox_h = tri.bbox_max[1] - tri.bbox_min[1] + 1;
-        if bbox_w <= 0 || bbox_h <= 0 {
-            return;
-        }
-
-        self.queue
-            .write_buffer(&self.tex_tri_uniform, 0, bytemuck::bytes_of(tri));
-        self.queue
-            .write_buffer(&self.draw_area_uniform, 0, bytemuck::bytes_of(area));
-        self.queue
-            .write_buffer(&self.tpage_uniform, 0, bytemuck::bytes_of(tpage));
-
-        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("psx-rasterizer-tex-tri-bg"),
-            layout: &self.tex_tri_bg_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: vram.buffer().as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: self.tex_tri_uniform.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: self.draw_area_uniform.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: self.tpage_uniform.as_entire_binding(),
-                },
-            ],
-        });
-
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("psx-rasterizer-tex-tri-encoder"),
-            });
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("psx-rasterizer-tex-tri-pass"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(&self.tex_tri_pipeline);
-            pass.set_bind_group(0, &bind_group, &[]);
-            let groups_x = (bbox_w as u32).div_ceil(WORKGROUP_SIZE_X);
-            let groups_y = (bbox_h as u32).div_ceil(WORKGROUP_SIZE_Y);
-            pass.dispatch_workgroups(groups_x, groups_y, 1);
-        }
-        self.queue.submit(Some(encoder.finish()));
-    }
-
-    /// Dispatch one monochrome triangle into VRAM. Returns immediately
-    /// after queuing the submit; callers must `download_*` from VRAM
-    /// (which inserts a wait) to read back results.
-    pub fn dispatch_mono_tri(&self, vram: &VramGpu, tri: &MonoTri, area: &DrawArea) {
-        // Hardware-extent rule mirrors the CPU rasterizer.
-        if tri.exceeds_hw_extent() {
-            return;
-        }
-        // Empty bounding box → nothing to do.
-        let bbox_w = tri.bbox_max[0] - tri.bbox_min[0] + 1;
-        let bbox_h = tri.bbox_max[1] - tri.bbox_min[1] + 1;
-        if bbox_w <= 0 || bbox_h <= 0 {
-            return;
-        }
-
-        // Update uniforms.
-        self.queue
-            .write_buffer(&self.mono_tri_uniform, 0, bytemuck::bytes_of(tri));
-        self.queue
-            .write_buffer(&self.draw_area_uniform, 0, bytemuck::bytes_of(area));
-
-        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("psx-rasterizer-mono-tri-bg"),
-            layout: &self.mono_tri_bg_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: vram.buffer().as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: self.mono_tri_uniform.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: self.draw_area_uniform.as_entire_binding(),
-                },
-            ],
-        });
-
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("psx-rasterizer-mono-tri-encoder"),
-            });
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("psx-rasterizer-mono-tri-pass"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(&self.mono_tri_pipeline);
-            pass.set_bind_group(0, &bind_group, &[]);
-            // One workgroup per `WG×WG` pixel tile of the bbox.
-            let groups_x = (bbox_w as u32).div_ceil(WORKGROUP_SIZE_X);
-            let groups_y = (bbox_h as u32).div_ceil(WORKGROUP_SIZE_Y);
-            pass.dispatch_workgroups(groups_x, groups_y, 1);
-        }
-        self.queue.submit(Some(encoder.finish()));
-    }
 }
 
 // `DrawArea` is exactly 16 bytes -- std::mem::size_of_val would also

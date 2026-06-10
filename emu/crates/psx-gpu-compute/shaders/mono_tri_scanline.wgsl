@@ -1,9 +1,11 @@
-// Monochrome triangle — scanline-delta coverage version (B.x).
-// No per-pixel UV / RGB walks, just the same coverage rule the CPU
-// uses (`xmin = left_x_q16 >> 16`, `xmax = (right_x_q16 >> 16) - 1`).
-// This catches the edge-pixel disagreements between barycentric and
-// scanline-delta that produced <0.5% diff on skewed triangles in
-// the original B.1 mono path.
+// Monochrome triangle — silicon-matched coverage.
+//
+// The host runs the CPU rasterizer's center-sampled Q32.32 DDA
+// (`emulator-core::gpu::rasterize_triangle`) and ships one
+// `[left_x, right_x)` span per scanline; this shader only tests the
+// pixel against its row's span and applies the draw-area clamp,
+// which is exactly the CPU loop's per-row
+// `xs = max(left, draw_left) .. xe = min(right, draw_right + 1)`.
 
 struct MonoTri {
     v0: vec2<i32>,
@@ -18,25 +20,18 @@ struct MonoTri {
 struct DrawArea { left: i32, top: i32, right: i32, bottom: i32 }
 
 struct RowState {
-    left_x_hi: i32, left_x_lo: u32,
-    right_x_hi: i32, right_x_lo: u32,
-    left_u_hi: i32, left_u_lo: u32,
-    left_v_hi: i32, left_v_lo: u32,
-    left_r_hi: i32, left_r_lo: u32,
-    left_g_hi: i32, left_g_lo: u32,
-    left_b_hi: i32, left_b_lo: u32,
-    _pad0: u32, _pad1: u32,
+    left_x: i32,
+    right_x: i32,
 }
 
 struct ScanlineConsts {
     y_min: i32, y_max: i32,
     _pad0: u32, _pad1: u32,
-    delta_col_u_hi: i32, delta_col_u_lo: u32,
-    delta_col_v_hi: i32, delta_col_v_lo: u32,
-    delta_col_r_hi: i32, delta_col_r_lo: u32,
-    delta_col_g_hi: i32, delta_col_g_lo: u32,
-    delta_col_b_hi: i32, delta_col_b_lo: u32,
-    _pad2: u32, _pad3: u32,
+    r_dadx: u32, r_dady: u32, r_base: u32, _pad2: u32,
+    g_dadx: u32, g_dady: u32, g_base: u32, _pad3: u32,
+    b_dadx: u32, b_dady: u32, b_base: u32, _pad4: u32,
+    u_dadx: u32, u_dady: u32, u_base: u32, _pad5: u32,
+    v_dadx: u32, v_dady: u32, v_base: u32, _pad6: u32,
 }
 
 @group(0) @binding(0) var<storage, read_write> vram: array<u32>;
@@ -56,13 +51,6 @@ const BLEND_AVERAGE:    u32 = 0u;
 const BLEND_ADD:        u32 = 1u;
 const BLEND_SUB:        u32 = 2u;
 const BLEND_ADDQUARTER: u32 = 3u;
-
-struct I64 { hi: i32, lo: u32 }
-fn i64_pack(hi: i32, lo: u32) -> I64 { return I64(hi, lo); }
-fn i64_arsh16(a: I64) -> I64 {
-    return I64(a.hi >> 16u, (a.lo >> 16u) | (u32(a.hi) << 16u));
-}
-fn i64_to_i32(a: I64) -> i32 { return i32(a.lo); }
 
 fn blend(bg_word: u32, fg_word: u32, mode: u32) -> u32 {
     let br = i32(bg_word & 0x1Fu);
@@ -103,12 +91,8 @@ fn rasterize(@builtin(global_invocation_id) gid: vec3<u32>) {
     if py < draw_area.top || py > draw_area.bottom { return; }
     if px < 0 || px >= VRAM_WIDTH || py < 0 || py >= VRAM_HEIGHT { return; }
 
-    let row_idx = u32(py - consts.y_min);
-    let row = rows[row_idx];
-
-    let xmin = i64_to_i32(i64_arsh16(i64_pack(row.left_x_hi, row.left_x_lo)));
-    let xmax = i64_to_i32(i64_arsh16(i64_pack(row.right_x_hi, row.right_x_lo))) - 1;
-    if px < xmin || px > xmax { return; }
+    let row = rows[u32(py - consts.y_min)];
+    if px < row.left_x || px >= row.right_x { return; }
 
     let idx = u32(py * VRAM_WIDTH + px);
     let needs_read =

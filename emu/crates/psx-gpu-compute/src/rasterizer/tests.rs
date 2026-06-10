@@ -109,24 +109,18 @@ fn mono_tri_axis_aligned_right_triangle_matches_cpu() {
     let r = Rasterizer::new(&vg);
     let tri = MonoTri::opaque(v0, v1, v2, color);
     let area = DrawArea::full_vram();
-    r.dispatch_mono_tri(&vg, &tri, &area);
+    r.dispatch_mono_tri_scanline(&vg, &tri, &area);
     let gpu_vram = vg.download_full().expect("download");
 
     let diffs = diff_count(&cpu_vram, &gpu_vram);
-    // Edge fill-rule differences may produce a handful of
-    // boundary pixels. Tolerance: <= 0.5% of the bbox.
-    let bbox_pixels = 41 * 41;
-    assert!(
-        diffs < bbox_pixels / 200,
-        "diffs={diffs}, bbox_pixels={bbox_pixels} — too many"
-    );
+    assert_eq!(diffs, 0, "axis-aligned mono triangle must be bit-exact");
 }
 
 #[test]
-fn mono_tri_skewed_matches_cpu_within_tolerance() {
-    // A non-axis-aligned triangle stresses the edge functions.
-    // We expect a handful of edge pixels to differ from the
-    // scanline rasterizer; assert the inside is fully matched.
+fn mono_tri_skewed_matches_cpu_exactly() {
+    // A non-axis-aligned triangle stresses the diagonal-edge
+    // coverage rule. The host ships the same DDA spans the CPU
+    // walks, so every edge pixel must match.
     let v0 = (50, 20);
     let v1 = (130, 70);
     let v2 = (30, 90);
@@ -138,19 +132,11 @@ fn mono_tri_skewed_matches_cpu_within_tolerance() {
     let r = Rasterizer::new(&vg);
     let tri = MonoTri::opaque(v0, v1, v2, color);
     let area = DrawArea::full_vram();
-    r.dispatch_mono_tri(&vg, &tri, &area);
+    r.dispatch_mono_tri_scanline(&vg, &tri, &area);
     let gpu_vram = vg.download_full().expect("download");
 
     let diffs = diff_count(&cpu_vram, &gpu_vram);
-    // The triangle covers ~3000 pixels. Allow 5% tolerance for
-    // edge-rule diffs in this first cut; tightening to exact
-    // parity is a Phase B.x follow-up.
-    let bbox_pixels = ((130 - 30 + 1) * (90 - 20 + 1)) as usize;
-    let tolerance = bbox_pixels / 20;
-    assert!(
-        diffs < tolerance,
-        "diffs={diffs}, tolerance={tolerance} — likely a real coverage bug"
-    );
+    assert_eq!(diffs, 0, "skewed mono triangle must be bit-exact");
 }
 
 #[test]
@@ -168,7 +154,7 @@ fn mono_tri_oversized_is_dropped_like_cpu() {
     let r = Rasterizer::new(&vg);
     let tri = MonoTri::opaque(v0, v1, v2, color);
     let area = DrawArea::full_vram();
-    r.dispatch_mono_tri(&vg, &tri, &area);
+    r.dispatch_mono_tri_scanline(&vg, &tri, &area);
     let gpu_vram = vg.download_full().expect("download");
 
     // Both should be all-zero VRAM (degenerate primitive
@@ -197,7 +183,7 @@ fn gpu_rasterize_mono_tri_full(
     let r = Rasterizer::new(&vg);
     let tri = MonoTri::new(v0, v1, v2, color, flags, blend_mode);
     let area = DrawArea::full_vram();
-    r.dispatch_mono_tri(&vg, &tri, &area);
+    r.dispatch_mono_tri_scanline(&vg, &tri, &area);
     vg.download_full().expect("download")
 }
 
@@ -421,7 +407,7 @@ fn mask_check_only_skips_protected_pixels_not_others() {
     vg.upload_full(&gpu_buffer).unwrap();
     let r = Rasterizer::new(&vg);
     let tri = MonoTri::new(v0, v1, v2, color, PrimFlags::MASK_CHECK, BlendMode::Average);
-    r.dispatch_mono_tri(&vg, &tri, &DrawArea::full_vram());
+    r.dispatch_mono_tri_scanline(&vg, &tri, &DrawArea::full_vram());
     let gpu = vg.download_full().unwrap();
 
     let diffs = diff_inside_bbox(&cpu, &gpu, (10, 10), (60, 60));
@@ -512,7 +498,7 @@ fn mono_tri_drawing_area_clips_correctly() {
         right: 40,
         bottom: 40,
     };
-    r.dispatch_mono_tri(&vg, &tri, &area);
+    r.dispatch_mono_tri_scanline(&vg, &tri, &area);
     let gpu_vram = vg.download_full().expect("download");
 
     // Strict assertions on the clip boundary. Pixels outside
@@ -640,7 +626,7 @@ fn tex_tri_15bpp_axis_aligned_matches_cpu() {
         BlendMode::Average,
     );
     let tp = Tpage::new(tpage_x, tpage_y, 2);
-    r.dispatch_tex_tri(&vg, &tri, &tp, &DrawArea::full_vram());
+    r.dispatch_tex_tri_scanline(&vg, &tri, &tp, &DrawArea::full_vram());
     let gpu_words = vg.download_full().unwrap();
 
     // Functional parity: the GPU samples the SAME texture cells
@@ -753,7 +739,7 @@ fn tex_tri_4bpp_with_clut_matches_cpu() {
         BlendMode::Average,
     );
     let tp = Tpage::new(tpage_x, tpage_y, 0);
-    r.dispatch_tex_tri(&vg, &tri, &tp, &DrawArea::full_vram());
+    r.dispatch_tex_tri_scanline(&vg, &tri, &tp, &DrawArea::full_vram());
     let gpu_words = vg.download_full().unwrap();
 
     // See `tex_tri_15bpp_axis_aligned_matches_cpu` for parity
@@ -831,7 +817,7 @@ fn tex_tri_8bpp_with_clut_matches_cpu() {
         BlendMode::Average,
     );
     let tp = Tpage::new(tpage_x, tpage_y, 1);
-    r.dispatch_tex_tri(&vg, &tri, &tp, &DrawArea::full_vram());
+    r.dispatch_tex_tri_scanline(&vg, &tri, &tp, &DrawArea::full_vram());
     let gpu_words = vg.download_full().unwrap();
 
     let diffs = diff_inside_bbox(&cpu_words, &gpu_words, (20, 20), (60, 60));
@@ -885,7 +871,7 @@ fn tex_tri_modulated_tint_matches_cpu() {
         BlendMode::Average,
     );
     let tp = Tpage::new(tpage_x, 0, 2);
-    r.dispatch_tex_tri(&vg, &tri, &tp, &DrawArea::full_vram());
+    r.dispatch_tex_tri_scanline(&vg, &tri, &tp, &DrawArea::full_vram());
     let gpu_words = vg.download_full().unwrap();
 
     let diffs = diff_inside_bbox(&cpu_words, &gpu_words, (20, 20), (60, 60));
@@ -970,7 +956,7 @@ fn tex_tri_transparent_texels_skip_writes() {
         BlendMode::Average,
     );
     let tp = Tpage::new(tpage_x, 0, 2);
-    r.dispatch_tex_tri(&vg, &tri, &tp, &DrawArea::full_vram());
+    r.dispatch_tex_tri_scanline(&vg, &tri, &tp, &DrawArea::full_vram());
     let gpu_words = vg.download_full().unwrap();
 
     // Inside the triangle, both backends should agree on coverage
@@ -2127,7 +2113,7 @@ fn shaded_tri_axis_aligned_matches_cpu_within_tolerance() {
         PrimFlags::empty(),
         BlendMode::Average,
     );
-    r.dispatch_shaded_tri(&vg, &tri, &DrawArea::full_vram());
+    r.dispatch_shaded_tri_scanline(&vg, &tri, &DrawArea::full_vram());
     let gpu = vg.download_full().unwrap();
 
     let diffs = diff_inside_bbox(&cpu, &gpu, (20, 20), (60, 60));
@@ -2186,13 +2172,13 @@ fn shaded_tri_uniform_color_matches_mono_tri_path() {
         PrimFlags::empty(),
         BlendMode::Average,
     );
-    r.dispatch_shaded_tri(&vg_shaded, &tri, &DrawArea::full_vram());
+    r.dispatch_shaded_tri_scanline(&vg_shaded, &tri, &DrawArea::full_vram());
     let gpu_shaded = vg_shaded.download_full().unwrap();
 
     let vg_mono = VramGpu::new_headless();
     let r2 = Rasterizer::new(&vg_mono);
     let mono = MonoTri::opaque(v[0], v[1], v[2], bgr15);
-    r2.dispatch_mono_tri(&vg_mono, &mono, &DrawArea::full_vram());
+    r2.dispatch_mono_tri_scanline(&vg_mono, &mono, &DrawArea::full_vram());
     let gpu_mono = vg_mono.download_full().unwrap();
 
     // GPU shaded path with uniform colour must match GPU mono path
@@ -2263,7 +2249,7 @@ fn shaded_tex_tri_axis_aligned_15bpp_matches_cpu_within_tolerance() {
         BlendMode::Average,
     );
     let tp = Tpage::new(tpage_x, 0, 2);
-    r.dispatch_shaded_tex_tri(&vg, &tri, &tp, &DrawArea::full_vram());
+    r.dispatch_shaded_tex_tri_scanline(&vg, &tri, &tp, &DrawArea::full_vram());
     let gpu_words = vg.download_full().unwrap();
 
     let diffs = diff_inside_bbox(&cpu_words, &gpu_words, (20, 20), (60, 60));
@@ -2310,7 +2296,7 @@ fn shaded_tri_oversized_is_dropped_like_cpu() {
         PrimFlags::empty(),
         BlendMode::Average,
     );
-    r.dispatch_shaded_tri(&vg, &tri, &DrawArea::full_vram());
+    r.dispatch_shaded_tri_scanline(&vg, &tri, &DrawArea::full_vram());
     let gpu = vg.download_full().unwrap();
     assert!(cpu.iter().all(|&w| w == 0));
     assert!(gpu.iter().all(|&w| w == 0));
