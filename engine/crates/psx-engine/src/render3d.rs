@@ -2179,9 +2179,138 @@ fn project_blended_textured_model_vertex(
     // hardware) instead of two CPU divides, then restore the primary joint so
     // the caller's GTE batch state is preserved on return.
     let projected = project_gte_view_vertex(view_blend, projection);
+    player_vert_debug::observe(view_a, view_b, view_blend, projected);
     scene::load_rotation(&primary.rotation);
     scene::load_translation(primary.translation);
     projected
+}
+
+/// DIAGNOSTIC (vertex-explosion probe, not for release): per-frame bounds of
+/// the player's skinned model vertices, captured in
+/// `project_blended_textured_model_vertex` to isolate where the on-hardware
+/// vertex stretch is born. Three stages, so one burn separates the suspects:
+///   - `joint_abs_max`: largest |coord| of a per-joint view-space transform
+///     (`view_a`/`view_b`) -> a bad JOINT MATRIX (the GTE rotation/translation).
+///   - `blend_abs_max`: largest |coord| of the blended view-space position
+///     -> the CPU lerp/SKINNING blend overflowing.
+///   - `scr_*` / `oob`: projected screen coords -> the RTPS PROJECTION flinging
+///     a vertex off-screen even from a sane view position.
+/// On the silicon-faithful emulator these stay small/in-bounds; if hardware
+/// blows one stage up while the others stay sane, that stage is the bug.
+pub mod player_vert_debug {
+    use super::{projected_model_vertex_inside_hw_bounds, ProjectedVertex, ViewVertex};
+
+    /// Per-frame player skinned-vertex bounds for the explosion probe.
+    /// Hardware vs the silicon-faithful emulator (controlled fixed-pose diff,
+    /// IMG_6161-6165) showed only the projected X widens -- the view-space X
+    /// is computed wider on hardware. So we track the view-space X EXTENT
+    /// (min..max), split per skinning stage, to find which step widens it:
+    /// `view_a` (primary joint), `view_b` (secondary joint AFTER the GTE
+    /// matrix reload -- the CTC2->MVMVA hazard suspect), and the lerp blend.
+    #[derive(Clone, Copy)]
+    pub struct Bounds {
+        /// Min/max view-space X of the PRIMARY joint transform (`view_a`).
+        pub ax_min: i32,
+        /// See [`Bounds::ax_min`].
+        pub ax_max: i32,
+        /// Min/max view-space X of the SECONDARY joint transform (`view_b`).
+        pub bx_min: i32,
+        /// See [`Bounds::bx_min`].
+        pub bx_max: i32,
+        /// Min/max view-space X of the blended (lerp) position.
+        pub lx_min: i32,
+        /// See [`Bounds::lx_min`].
+        pub lx_max: i32,
+        /// Min/max projected screen X across ALL player vertex paths
+        /// (blended + single-bone batch + remainder), merged from the model
+        /// pass's `projected_min_x/max_x` accumulator. The `scr_*` fields
+        /// below cover only the blended verts; comparing the two on hardware
+        /// tells whether the widening is blended-only or mesh-wide.
+        pub px_min: i16,
+        /// See [`Bounds::px_min`].
+        pub px_max: i16,
+        /// Min projected screen X.
+        pub scr_min_x: i16,
+        /// Max projected screen X.
+        pub scr_max_x: i16,
+        /// Min projected screen Y.
+        pub scr_min_y: i16,
+        /// Max projected screen Y.
+        pub scr_max_y: i16,
+        /// Vertices projected outside the hardware screen bounds.
+        pub oob: u16,
+        /// Total blended vertices observed this frame.
+        pub total: u16,
+    }
+
+    impl Bounds {
+        const EMPTY: Self = Self {
+            ax_min: i32::MAX,
+            ax_max: i32::MIN,
+            bx_min: i32::MAX,
+            bx_max: i32::MIN,
+            lx_min: i32::MAX,
+            lx_max: i32::MIN,
+            px_min: i16::MAX,
+            px_max: i16::MIN,
+            scr_min_x: i16::MAX,
+            scr_max_x: i16::MIN,
+            scr_min_y: i16::MAX,
+            scr_max_y: i16::MIN,
+            oob: 0,
+            total: 0,
+        };
+    }
+
+    static mut B: Bounds = Bounds::EMPTY;
+
+    /// Clear at the start of each frame's model pass.
+    pub fn reset() {
+        unsafe {
+            *core::ptr::addr_of_mut!(B) = Bounds::EMPTY;
+        }
+    }
+
+    /// Snapshot for the HUD overlay.
+    pub fn get() -> Bounds {
+        unsafe { *core::ptr::addr_of!(B) }
+    }
+
+    /// Merge the model pass's ALL-path projected X bounds (covers blended +
+    /// single-bone batch + remainder vertices). Called by the world model
+    /// pass for models that had at least one blended vertex (the player).
+    pub fn merge_all_x(min_x: i16, max_x: i16) {
+        unsafe {
+            let b = &mut *core::ptr::addr_of_mut!(B);
+            b.px_min = b.px_min.min(min_x);
+            b.px_max = b.px_max.max(max_x);
+        }
+    }
+
+    pub(super) fn observe(
+        view_a: ViewVertex,
+        view_b: ViewVertex,
+        view_blend: ViewVertex,
+        p: ProjectedVertex,
+    ) {
+        unsafe {
+            let b = &mut *core::ptr::addr_of_mut!(B);
+            b.ax_min = b.ax_min.min(view_a.x);
+            b.ax_max = b.ax_max.max(view_a.x);
+            b.bx_min = b.bx_min.min(view_b.x);
+            b.bx_max = b.bx_max.max(view_b.x);
+            b.lx_min = b.lx_min.min(view_blend.x);
+            b.lx_max = b.lx_max.max(view_blend.x);
+            b.scr_min_x = b.scr_min_x.min(p.sx);
+            b.scr_max_x = b.scr_max_x.max(p.sx);
+            b.scr_min_y = b.scr_min_y.min(p.sy);
+            b.scr_max_y = b.scr_max_y.max(p.sy);
+            b.total = b.total.wrapping_add(1);
+            if !projected_model_vertex_inside_hw_bounds(p) {
+                b.oob = b.oob.wrapping_add(1);
+            }
+        }
+    }
 }
 
 /// Minimum `joint1` weight (out of 255) for a vertex to take the two-bone
