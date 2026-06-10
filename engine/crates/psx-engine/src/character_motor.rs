@@ -9,6 +9,7 @@
 use crate::{
     fixed::div_q12_i32, Angle, RoomCollision, RoomPoint, RuntimeCollisionRoom, RuntimeRoom, Q12,
 };
+use psx_math::int32::{abs_i32, isqrt_i32, square_i32_saturating};
 
 const DEFAULT_STAMINA_MAX_Q12: i32 = 4096;
 const DEFAULT_BODY_HEIGHT: i32 = 768;
@@ -1370,46 +1371,6 @@ fn yaw_from_vector(dx: Q12, dz: Q12) -> Angle {
         2048 + base
     };
     Angle::from_q12((angle & 0x0FFF) as u16)
-}
-
-fn square_i32_saturating(value: i32) -> i32 {
-    let abs = abs_i32(value);
-    if abs > 46_340 {
-        return i32::MAX;
-    }
-    abs * abs
-}
-
-fn isqrt_i32(value: i32) -> i32 {
-    if value <= 0 {
-        return 0;
-    }
-    let mut x = value as u32;
-    let mut r = 0u32;
-    let mut bit = 1u32 << 30;
-    while bit > x {
-        bit >>= 2;
-    }
-    while bit != 0 {
-        if x >= r + bit {
-            x -= r + bit;
-            r = (r >> 1) + bit;
-        } else {
-            r >>= 1;
-        }
-        bit >>= 2;
-    }
-    r as i32
-}
-
-fn abs_i32(value: i32) -> i32 {
-    if value == i32::MIN {
-        i32::MAX
-    } else if value < 0 {
-        -value
-    } else {
-        value
-    }
 }
 
 fn stand_height(room: RoomCollision<'_, '_>, x: i32, z: i32, radius: i32) -> Option<i32> {
