@@ -5,6 +5,11 @@
 //! # writes /tmp/psoxide_hello_cdda.wav
 //! ```
 
+#[path = "support/frame_probe.rs"]
+mod frame_probe;
+
+use frame_probe::repo_root;
+
 use emulator_core::{spu, Bus, Cpu};
 use psx_iso::{Disc, Exe};
 use std::fs::File;
@@ -228,8 +233,4 @@ fn env_f32(name: &str) -> Option<f32> {
 
 fn env_u16(name: &str) -> Option<u16> {
     std::env::var(name).ok()?.parse().ok()
-}
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..")
 }

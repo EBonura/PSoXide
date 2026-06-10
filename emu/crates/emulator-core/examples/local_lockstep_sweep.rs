@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use emulator_core::{Bus, Cpu, ExecutionError};
-use pad_support::{effective_mask, parse_pad_pulses, parse_u16_mask, PadPulse};
+use pad_support::{effective_mask, format_pad_pulses, parse_pad_pulses, parse_u16_mask, PadPulse};
 use parity_oracle::{OracleConfig, OracleError, ReduxProcess, StateCheckpoint};
 use psx_trace::InstructionRecord;
 
@@ -879,22 +879,6 @@ fn sync_pad_mask(bus: &mut Bus, cfg: &Config, current_mask: &mut Option<u16>) {
     }
     bus.set_port1_buttons(emulator_core::ButtonState::from_bits(next));
     *current_mask = Some(next);
-}
-
-fn format_pad_pulses(pulses: &[PadPulse]) -> String {
-    if pulses.is_empty() {
-        return "-".to_string();
-    }
-    pulses
-        .iter()
-        .map(|pulse| {
-            format!(
-                "0x{:04x}@{}+{}",
-                pulse.mask, pulse.start_vblank, pulse.frames
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(",")
 }
 
 fn compare_visual(
