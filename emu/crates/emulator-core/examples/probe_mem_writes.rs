@@ -16,7 +16,7 @@ mod pad_support;
 use emulator_core::{
     fast_boot_disc_with_hle, warm_bios_for_disc_fast_boot, Bus, Cpu, DISC_FAST_BOOT_WARMUP_STEPS,
 };
-use pad_support::{effective_mask, parse_pad_pulses, parse_u16_mask};
+use pad_support::{parse_pad_pulses, parse_u16_mask, sync_pad_mask};
 use std::path::Path;
 
 fn parse_hex(s: &str) -> u32 {
@@ -77,7 +77,7 @@ fn main() {
         }
     }
 
-    let mut current_pad_mask = u16::MAX;
+    let mut current_pad_mask = None;
     for _ in 0..start_user_steps {
         sync_pad_mask(&mut bus, held_buttons, &pad_pulses, &mut current_pad_mask);
         let was_in_isr = cpu.in_isr();
@@ -164,18 +164,4 @@ fn parse_addrs(text: &str) -> Vec<u32> {
         .filter(|part| !part.trim().is_empty())
         .map(|part| parse_hex(part.trim()))
         .collect()
-}
-
-fn sync_pad_mask(
-    bus: &mut Bus,
-    held_buttons: u16,
-    pad_pulses: &[pad_support::PadPulse],
-    current_pad_mask: &mut u16,
-) {
-    let vblank = bus.irq().raise_counts()[0];
-    let pad_mask = effective_mask(held_buttons, pad_pulses, vblank);
-    if pad_mask != *current_pad_mask {
-        bus.set_port1_buttons(emulator_core::ButtonState::from_bits(pad_mask));
-        *current_pad_mask = pad_mask;
-    }
 }
