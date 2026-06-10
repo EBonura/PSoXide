@@ -20,7 +20,7 @@ use emulator_core::{
     fast_boot_disc_with_hle, warm_bios_for_disc_fast_boot, Bus, Cpu, Vram,
     DISC_FAST_BOOT_WARMUP_STEPS, VRAM_HEIGHT, VRAM_WIDTH,
 };
-use pad_support::{effective_mask, parse_pad_pulses, parse_u16_mask};
+use pad_support::{effective_mask, format_pad_pulses, parse_pad_pulses, parse_u16_mask};
 
 const DEFAULT_BIOS: &str = "bios/SCPH1001.BIN";
 const DEFAULT_DISC: &str = "<rom-path>";
@@ -353,22 +353,6 @@ fn main() {
             y.unwrap_or_else(|| bus.gpu.display_area().y)
         );
     }
-}
-
-fn format_pad_pulses(pulses: &[pad_support::PadPulse]) -> String {
-    if pulses.is_empty() {
-        return "(none)".into();
-    }
-    pulses
-        .iter()
-        .map(|pulse| {
-            format!(
-                "0x{:04x}@{}+{}",
-                pulse.mask, pulse.start_vblank, pulse.frames
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 fn print_cdrom_logs(bus: &Bus) {

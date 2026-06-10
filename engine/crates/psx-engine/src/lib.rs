@@ -56,6 +56,7 @@ pub mod angle;
 pub mod app;
 pub mod character_motor;
 pub mod fixed;
+mod floor_sample;
 pub mod frames;
 pub mod game_app;
 pub mod lighting;

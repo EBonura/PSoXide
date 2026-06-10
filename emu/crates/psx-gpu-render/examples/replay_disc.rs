@@ -26,7 +26,7 @@
 use std::path::PathBuf;
 
 use emulator_core::{Bus, Cpu};
-use psx_gpu_compute::ComputeBackend;
+use psx_gpu_render::ComputeBackend;
 use psx_iso::Disc;
 
 fn parse_args() -> (PathBuf, PathBuf, u64, u64) {

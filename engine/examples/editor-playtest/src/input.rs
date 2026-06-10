@@ -116,62 +116,10 @@ fn camera_axis_profile() -> InputAxisProfile {
     InputAxisProfile::new(CAMERA_STICK_DEADZONE, STICK_MAX)
 }
 
-pub(crate) fn clamp_i16(value: i32) -> i16 {
-    value.clamp(i16::MIN as i32, i16::MAX as i32) as i16
-}
-
-pub(crate) fn abs_i16(value: i16) -> i16 {
-    if value == i16::MIN {
-        i16::MAX
-    } else if value < 0 {
-        -value
-    } else {
-        value
-    }
-}
+pub(crate) use psx_math::int32::{abs_i16, abs_i32, clamp_i16, isqrt_i32, square_i32_saturating};
 
 pub(crate) fn distance_xz_sq(a: RoomPoint, b: RoomPoint) -> i32 {
     let dx = a.x.saturating_sub(b.x);
     let dz = a.z.saturating_sub(b.z);
     square_i32_saturating(dx).saturating_add(square_i32_saturating(dz))
-}
-
-pub(crate) fn square_i32_saturating(value: i32) -> i32 {
-    let abs = abs_i32(value);
-    if abs > 46_340 {
-        return i32::MAX;
-    }
-    abs * abs
-}
-
-pub(crate) fn isqrt_i32(value: i32) -> i32 {
-    if value <= 0 {
-        return 0;
-    }
-    let mut x = value as u32;
-    let mut r = 0u32;
-    let mut bit = 1u32 << 30;
-    while bit > x {
-        bit >>= 2;
-    }
-    while bit != 0 {
-        if x >= r + bit {
-            x -= r + bit;
-            r = (r >> 1) + bit;
-        } else {
-            r >>= 1;
-        }
-        bit >>= 2;
-    }
-    r as i32
-}
-
-pub(crate) fn abs_i32(value: i32) -> i32 {
-    if value == i32::MIN {
-        i32::MAX
-    } else if value < 0 {
-        -value
-    } else {
-        value
-    }
 }

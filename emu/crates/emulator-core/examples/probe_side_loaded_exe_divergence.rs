@@ -9,7 +9,12 @@
 //! cargo run -p emulator-core --example probe_side_loaded_exe_divergence --release -- hello-gte 250000 5000
 //! ```
 
-use std::path::{Path, PathBuf};
+#[path = "support/frame_probe.rs"]
+mod frame_probe;
+
+use frame_probe::repo_root;
+
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use emulator_core::{
@@ -295,13 +300,4 @@ fn print_record_diffs(
             }
         }
     }
-}
-
-fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .and_then(Path::parent)
-        .expect("repo root")
-        .to_path_buf()
 }

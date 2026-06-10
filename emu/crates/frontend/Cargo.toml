@@ -13,7 +13,6 @@ psoxide-validation = { workspace = true }
 psx-asset        = { workspace = true }
 psx-engine       = { workspace = true }
 psx-gpu          = { workspace = true }
-psx-gpu-compute  = { workspace = true }
 psx-gpu-render   = { workspace = true }
 psx-gte          = { workspace = true }
 psx-vram         = { workspace = true }

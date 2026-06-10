@@ -45,6 +45,7 @@ dependencies = [
  "psx-pad",
  "psx-rt",
  "psx-spu",
+ "psx-telemetry",
  "psx-vram",
 ]
 
@@ -98,6 +99,9 @@ dependencies = [
 [[package]]
 name = "psx-level"
 version = "0.1.0"
+dependencies = [
+ "psx-math",
+]
 
 [[package]]
 name = "psx-math"
@@ -126,6 +130,10 @@ dependencies = [
  "psx-hw",
  "psx-io",
 ]
+
+[[package]]
+name = "psx-telemetry"
+version = "0.1.0"
 
 [[package]]
 name = "psx-vram"
