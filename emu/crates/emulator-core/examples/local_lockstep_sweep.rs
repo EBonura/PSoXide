@@ -20,6 +20,10 @@
 mod disc_support;
 #[path = "support/pad.rs"]
 mod pad_support;
+#[path = "support/args.rs"]
+mod args_support;
+
+use args_support::{take_path, take_string, take_u64, take_usize};
 
 use std::fs;
 use std::io::Write;
@@ -235,29 +239,6 @@ fn parse_args() -> Config {
             .join(&cfg.report_dir);
     }
     cfg
-}
-
-fn take_path(args: &mut impl Iterator<Item = String>, flag: &str) -> PathBuf {
-    PathBuf::from(take_string(args, flag))
-}
-
-fn take_string(args: &mut impl Iterator<Item = String>, flag: &str) -> String {
-    args.next()
-        .unwrap_or_else(|| panic!("{flag} requires a value"))
-}
-
-fn take_u64(args: &mut impl Iterator<Item = String>, flag: &str) -> u64 {
-    args.next()
-        .unwrap_or_else(|| panic!("{flag} requires a value"))
-        .parse()
-        .unwrap_or_else(|_| panic!("{flag} requires an integer"))
-}
-
-fn take_usize(args: &mut impl Iterator<Item = String>, flag: &str) -> usize {
-    args.next()
-        .unwrap_or_else(|| panic!("{flag} requires a value"))
-        .parse()
-        .unwrap_or_else(|_| panic!("{flag} requires an integer"))
 }
 
 fn take_mask(args: &mut impl Iterator<Item = String>, flag: &str) -> u16 {
