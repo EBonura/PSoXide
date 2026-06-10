@@ -15,7 +15,7 @@
 use emulator_core::gpu::GpuCmdLogEntry;
 use psx_gpu_compute::decode::{
     apply_primitive_tpage, decode_clut, decode_tint, decode_uv, decode_vertex, is_raw_texture,
-    is_semi_trans, rgb24_to_bgr15, ReplayState,
+    is_semi_trans, rgb24_to_bgr15, sign_extend_11, ReplayState,
 };
 use psx_gpu_compute::primitive::BlendMode;
 
@@ -1077,13 +1077,6 @@ fn tex_tint(cmd: u32) -> [u8; 4] {
     [r, g, b, 0xFF]
 }
 
-fn sign_extend_11(v: i32) -> i32 {
-    if v & 0x400 != 0 {
-        v | !0x7FF
-    } else {
-        v & 0x7FF
-    }
-}
 
 fn uv16(uv: (u8, u8)) -> (u16, u16) {
     (uv.0 as u16, uv.1 as u16)
