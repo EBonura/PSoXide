@@ -2310,7 +2310,7 @@ fn project_saves_and_loads_from_disk() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
-fn unique_temp_dir(tag: &str) -> PathBuf {
+pub(crate) fn unique_temp_dir(tag: &str) -> PathBuf {
     std::env::temp_dir().join(format!(
         "psxed-project-{tag}-{}-{}",
         std::process::id(),

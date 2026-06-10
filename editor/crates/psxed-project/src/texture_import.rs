@@ -12,6 +12,7 @@
 //!   under `project/assets/textures/<safe_name>.psxt`, then registers
 //!   it as a Texture resource.
 
+use crate::import_util::{relativise, sanitize_name};
 use std::path::{Path, PathBuf};
 
 use psxed_format::{texture::TextureHeader, AssetHeader};
@@ -357,7 +358,7 @@ pub fn import_texture(
 ) -> Result<ResourceId, TextureImportError> {
     let preview = preview_texture_import(source_path, config)?;
     let display_name = display_name_from_input(output_name, source_path, "Texture");
-    let safe = safe_file_stem(&display_name);
+    let safe = sanitize_name(&display_name, "texture");
     let texture_dir = project_root.join("assets").join("textures");
     std::fs::create_dir_all(&texture_dir).map_err(|e| TextureImportError::Io {
         path: texture_dir.clone(),
@@ -564,35 +565,6 @@ fn display_name_from_input(name: &str, source_path: &Path, fallback: &str) -> St
         .unwrap_or_else(|| fallback.to_string())
 }
 
-fn relativise(path: &Path, project_root: Option<&Path>) -> String {
-    if let Some(root) = project_root {
-        if let Ok(rel) = path.strip_prefix(root) {
-            return rel.to_string_lossy().into_owned();
-        }
-    }
-    path.to_string_lossy().into_owned()
-}
-
-fn safe_file_stem(name: &str) -> String {
-    let mut out = String::with_capacity(name.len());
-    let mut last_was_sep = false;
-    for ch in name.chars() {
-        if ch.is_ascii_alphanumeric() {
-            out.push(ch.to_ascii_lowercase());
-            last_was_sep = false;
-        } else if !last_was_sep {
-            out.push('_');
-            last_was_sep = true;
-        }
-    }
-    let trimmed = out.trim_matches('_').to_string();
-    if trimmed.is_empty() {
-        "texture".to_string()
-    } else {
-        trimmed
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -683,12 +655,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn safe_file_stem_strips_punctuation() {
-        assert_eq!(safe_file_stem("Brick Wall"), "brick_wall");
-        assert_eq!(safe_file_stem("floor-tile_01"), "floor_tile_01");
-        assert_eq!(safe_file_stem("!!!"), "texture");
-    }
 
     #[test]
     fn tint_rgb555_preserves_stp_and_scales_channels() {
