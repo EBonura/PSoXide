@@ -36,7 +36,7 @@ const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
 const FONT_CLUT: Clut = Clut::new(320, 256);
 
 const ROWS_PER_PAGE: usize = 6;
-const TEST_COUNT: usize = 155;
+const TEST_COUNT: usize = 163;
 const PAD_POLL_TEST_INDEX: usize = 26;
 const MODE_COUNT: u8 = 15;
 const CHECK_MODES: [Mode; 11] = [
@@ -1095,6 +1095,46 @@ const TESTS: [TestSpec; TEST_COUNT] = [
         group: "GTE",
         name: "NCLIP controlled scene-C +2",
         run: test_mac0_ctrl_c,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "SXY0 dump after A writes",
+        run: test_sxy_dump_a_12,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "SXY1 dump after A writes",
+        run: test_sxy_dump_a_13,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "SXY2 dump after A writes",
+        run: test_sxy_dump_a_14,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "SXY0 dump after C writes",
+        run: test_sxy_dump_c_12,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "SXY1 dump after C writes",
+        run: test_sxy_dump_c_13,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "SXY2 dump after C writes",
+        run: test_sxy_dump_c_14,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "SXY0 after probe NCLIP (A)",
+        run: test_sxy_post_a,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "SXY0 after probe NCLIP (C)",
+        run: test_sxy_post_c,
     },
     TestSpec {
         group: "GPU",
@@ -3300,6 +3340,76 @@ mac0_ctrl_case!(test_mac0_mag_double, 4, 0x00dc_012a, 0xffc4_0128, 0xffbc_01b8);
 // Controlled-prestate replicas of scene B and C at the in-situ +2 distance.
 mac0_ctrl_case!(test_mac0_ctrl_b, 2, 0x0073_00d5, 0xffde_00dc, 0xffd8_0130);
 mac0_ctrl_case!(test_mac0_ctrl_c, 2, 0x0079_011f, 0xffd8_0130, 0xffd2_0194);
+
+// --- SXY state dumps -----------------------------------------------------
+// Every NCLIP result in the poison->probe shape matches "cross with the SY0
+// terms dropped" (five exact values), EXCEPT controlled scene-C which
+// computes correctly -- and no simple write-side-effect model explains both
+// (offline brute-force over shift/clear/burst rules: zero matches). So stop
+// inferring through the cross product: run the exact poison+probe write
+// sequence, SETTLE, then read SXY0/1/2 BACK. The OBS values show directly
+// what silicon left in each register. A-coords (a failing set) vs C-coords
+// (the passing set) side by side is the differential that pins the rule.
+macro_rules! sxy_dump_case {
+    ($name:ident, $reg:tt, $expect:literal, $s0:literal, $s1:literal, $s2:literal) => {
+        fn $name() -> TestResult {
+            // Same shape as mac0_ctrl_case up to the probe writes.
+            ctc2!(31, 0);
+            mtc2!(12, $s0);
+            mtc2!(13, $s1);
+            mtc2!(14, $s2);
+            unsafe { gte_ops::nclip() };
+            gte_nops!(64);
+            let _ = mfc2!(24);
+            mtc2!(13, $s2);
+            mtc2!(14, $s1);
+            unsafe { gte_ops::nclip() };
+            gte_nops!(64);
+            mtc2!(13, $s1);
+            mtc2!(14, $s2);
+            // No NCLIP here: settle, then dump the register state the probe
+            // NCLIP would have consumed.
+            gte_nops!(64);
+            let got = mfc2!($reg);
+            expect_eq($expect, got, "sxy state dump")
+        }
+    };
+}
+// A coordinates (the y0-drop regime on silicon).
+sxy_dump_case!(test_sxy_dump_a_12, 12, 0x006e_0095, 0x006e_0095, 0xffe2_0094, 0xffde_00dc);
+sxy_dump_case!(test_sxy_dump_a_13, 13, 0xffe2_0094, 0x006e_0095, 0xffe2_0094, 0xffde_00dc);
+sxy_dump_case!(test_sxy_dump_a_14, 14, 0xffde_00dc, 0x006e_0095, 0xffe2_0094, 0xffde_00dc);
+// C coordinates (the passing set).
+sxy_dump_case!(test_sxy_dump_c_12, 12, 0x0079_011f, 0x0079_011f, 0xffd8_0130, 0xffd2_0194);
+sxy_dump_case!(test_sxy_dump_c_13, 13, 0xffd8_0130, 0x0079_011f, 0xffd8_0130, 0xffd2_0194);
+sxy_dump_case!(test_sxy_dump_c_14, 14, 0xffd2_0194, 0x0079_011f, 0xffd8_0130, 0xffd2_0194);
+// And the probe-NCLIP variant: same sequence WITH the probe nclip, then a
+// long settle, then dump SXY0 -- does the op itself disturb the registers?
+macro_rules! sxy_dump_post_nclip {
+    ($name:ident, $expect:literal, $s0:literal, $s1:literal, $s2:literal) => {
+        fn $name() -> TestResult {
+            ctc2!(31, 0);
+            mtc2!(12, $s0);
+            mtc2!(13, $s1);
+            mtc2!(14, $s2);
+            unsafe { gte_ops::nclip() };
+            gte_nops!(64);
+            let _ = mfc2!(24);
+            mtc2!(13, $s2);
+            mtc2!(14, $s1);
+            unsafe { gte_ops::nclip() };
+            gte_nops!(64);
+            mtc2!(13, $s1);
+            mtc2!(14, $s2);
+            unsafe { gte_ops::nclip() };
+            gte_nops!(64);
+            let got = mfc2!(12);
+            expect_eq($expect, got, "sxy0 after probe nclip")
+        }
+    };
+}
+sxy_dump_post_nclip!(test_sxy_post_a, 0x006e_0095, 0x006e_0095, 0xffe2_0094, 0xffde_00dc);
+sxy_dump_post_nclip!(test_sxy_post_c, 0x0079_011f, 0x0079_011f, 0xffd8_0130, 0xffd2_0194);
 
 macro_rules! gte_result_latency_test {
     ($name:ident, $reg:literal, $label:literal) => {
