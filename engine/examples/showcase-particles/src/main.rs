@@ -14,7 +14,7 @@
 extern crate psx_rt;
 
 use psx_engine::{button, App, Config, Ctx, OtFrame, PrimitiveArena, Scene};
-use psx_font::{fonts::BASIC_8X16, FontAtlas};
+use psx_font::{fonts::BASIC_8X16, u16_hex, FontAtlas};
 use psx_fx::{LcgRng, ParticlePool};
 use psx_gpu::ot::OrderingTable;
 use psx_gpu::prim::{QuadGouraud, RectFlat};
@@ -186,24 +186,3 @@ fn main() -> ! {
     App::run(config, &mut scene);
 }
 
-struct HexU16 {
-    bytes: [u8; 6],
-}
-
-impl HexU16 {
-    fn as_str(&self) -> &str {
-        unsafe { core::str::from_utf8_unchecked(&self.bytes) }
-    }
-}
-
-fn u16_hex(v: u16) -> HexU16 {
-    const HEX: &[u8; 16] = b"0123456789ABCDEF";
-    let mut out = [0u8; 6];
-    out[0] = b'0';
-    out[1] = b'x';
-    out[2] = HEX[((v >> 12) & 0xF) as usize];
-    out[3] = HEX[((v >> 8) & 0xF) as usize];
-    out[4] = HEX[((v >> 4) & 0xF) as usize];
-    out[5] = HEX[(v & 0xF) as usize];
-    HexU16 { bytes: out }
-}

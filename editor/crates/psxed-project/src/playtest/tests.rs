@@ -1,19 +1,9 @@
 use super::*;
+use crate::tests::unique_temp_dir;
 use crate::{NodeKind, ProjectDocument, UiRect};
 
 fn starter_project_root() -> PathBuf {
     crate::default_project_dir()
-}
-
-fn unique_temp_dir(tag: &str) -> PathBuf {
-    std::env::temp_dir().join(format!(
-        "psxed-{tag}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos(),
-    ))
 }
 
 fn test_wav_mono_44k() -> Vec<u8> {

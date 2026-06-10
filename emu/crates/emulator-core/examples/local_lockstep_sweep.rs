@@ -20,6 +20,10 @@
 mod disc_support;
 #[path = "support/pad.rs"]
 mod pad_support;
+#[path = "support/args.rs"]
+mod args_support;
+
+use args_support::{take_path, take_string, take_u64, take_usize};
 
 use std::fs;
 use std::io::Write;
@@ -27,7 +31,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use emulator_core::{Bus, Cpu, ExecutionError};
-use pad_support::{effective_mask, parse_pad_pulses, parse_u16_mask, PadPulse};
+use pad_support::{effective_mask, format_pad_pulses, parse_pad_pulses, parse_u16_mask, PadPulse};
 use parity_oracle::{OracleConfig, OracleError, ReduxProcess, StateCheckpoint};
 use psx_trace::InstructionRecord;
 
@@ -235,29 +239,6 @@ fn parse_args() -> Config {
             .join(&cfg.report_dir);
     }
     cfg
-}
-
-fn take_path(args: &mut impl Iterator<Item = String>, flag: &str) -> PathBuf {
-    PathBuf::from(take_string(args, flag))
-}
-
-fn take_string(args: &mut impl Iterator<Item = String>, flag: &str) -> String {
-    args.next()
-        .unwrap_or_else(|| panic!("{flag} requires a value"))
-}
-
-fn take_u64(args: &mut impl Iterator<Item = String>, flag: &str) -> u64 {
-    args.next()
-        .unwrap_or_else(|| panic!("{flag} requires a value"))
-        .parse()
-        .unwrap_or_else(|_| panic!("{flag} requires an integer"))
-}
-
-fn take_usize(args: &mut impl Iterator<Item = String>, flag: &str) -> usize {
-    args.next()
-        .unwrap_or_else(|| panic!("{flag} requires a value"))
-        .parse()
-        .unwrap_or_else(|_| panic!("{flag} requires an integer"))
 }
 
 fn take_mask(args: &mut impl Iterator<Item = String>, flag: &str) -> u16 {
@@ -879,22 +860,6 @@ fn sync_pad_mask(bus: &mut Bus, cfg: &Config, current_mask: &mut Option<u16>) {
     }
     bus.set_port1_buttons(emulator_core::ButtonState::from_bits(next));
     *current_mask = Some(next);
-}
-
-fn format_pad_pulses(pulses: &[PadPulse]) -> String {
-    if pulses.is_empty() {
-        return "-".to_string();
-    }
-    pulses
-        .iter()
-        .map(|pulse| {
-            format!(
-                "0x{:04x}@{}+{}",
-                pulse.mask, pulse.start_vblank, pulse.frames
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(",")
 }
 
 fn compare_visual(
