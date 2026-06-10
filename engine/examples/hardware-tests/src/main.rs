@@ -36,7 +36,7 @@ const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
 const FONT_CLUT: Clut = Clut::new(320, 256);
 
 const ROWS_PER_PAGE: usize = 6;
-const TEST_COUNT: usize = 145;
+const TEST_COUNT: usize = 155;
 const PAD_POLL_TEST_INDEX: usize = 26;
 const MODE_COUNT: u8 = 15;
 const CHECK_MODES: [Mode; 11] = [
@@ -1045,6 +1045,56 @@ const TESTS: [TestSpec; TEST_COUNT] = [
         group: "GTE",
         name: "NCLIP big-value settle +8",
         run: test_mac0_big_settle_gap8,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "NCLIP big-value settle +12",
+        run: test_mac0_big_gap12,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "NCLIP big-value settle +16",
+        run: test_mac0_big_gap16,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "NCLIP big-value settle +24",
+        run: test_mac0_big_gap24,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "NCLIP big-value settle +32",
+        run: test_mac0_big_gap32,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "NCLIP big-value settle +48",
+        run: test_mac0_big_gap48,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "NCLIP magnitude quarter +4",
+        run: test_mac0_mag_quarter,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "NCLIP magnitude half +4",
+        run: test_mac0_mag_half,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "NCLIP magnitude double +4",
+        run: test_mac0_mag_double,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "NCLIP controlled scene-B +2",
+        run: test_mac0_ctrl_b,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "NCLIP controlled scene-C +2",
+        run: test_mac0_ctrl_c,
     },
     TestSpec {
         group: "GPU",
@@ -3203,6 +3253,53 @@ mac0_big_settle_case!(test_mac0_big_settle_gap1, 1);
 mac0_big_settle_case!(test_mac0_big_settle_gap2, 2);
 mac0_big_settle_case!(test_mac0_big_settle_gap4, 4);
 mac0_big_settle_case!(test_mac0_big_settle_gap8, 8);
+
+// Follow-up battery for the partial-accumulation discovery: the big-value
+// probe reads MAC0 = the four products NOT involving SY0 (0x874, exact term
+// match) at +1..+8 nops, settling only by +64. Three questions, one burn:
+// WHERE does it complete (gap bisect +12..+48)? WHAT makes "large" large
+// (magnitude ladder at +4)? And do the in-situ scene B/C values reproduce
+// under a CONTROLLED prestate (replicas with in-test poison at +2), or were
+// they contaminated by whatever the harness left in the GTE?
+macro_rules! mac0_ctrl_case {
+    ($name:ident, $gap:tt, $s0:literal, $s1:literal, $s2:literal) => {
+        fn $name() -> TestResult {
+            // Settled reference.
+            ctc2!(31, 0);
+            mtc2!(12, $s0);
+            mtc2!(13, $s1);
+            mtc2!(14, $s2);
+            unsafe { gte_ops::nclip() };
+            gte_nops!(64);
+            let expected = mfc2!(24);
+            // Poison: swap the two far vertices (negated cross), settled.
+            mtc2!(13, $s2);
+            mtc2!(14, $s1);
+            unsafe { gte_ops::nclip() };
+            gte_nops!(64);
+            // Probe at +N.
+            mtc2!(13, $s1);
+            mtc2!(14, $s2);
+            unsafe { gte_ops::nclip() };
+            gte_nops!($gap);
+            let got = mfc2!(24);
+            expect_eq(expected, got, "nclip controlled settle")
+        }
+    };
+}
+// Gap bisect with the scene-A coordinates (0x874 regime).
+mac0_ctrl_case!(test_mac0_big_gap12, 12, 0x006e_0095, 0xffe2_0094, 0xffde_00dc);
+mac0_ctrl_case!(test_mac0_big_gap16, 16, 0x006e_0095, 0xffe2_0094, 0xffde_00dc);
+mac0_ctrl_case!(test_mac0_big_gap24, 24, 0x006e_0095, 0xffe2_0094, 0xffde_00dc);
+mac0_ctrl_case!(test_mac0_big_gap32, 32, 0x006e_0095, 0xffe2_0094, 0xffde_00dc);
+mac0_ctrl_case!(test_mac0_big_gap48, 48, 0x006e_0095, 0xffe2_0094, 0xffde_00dc);
+// Magnitude ladder at +4: quarter / half / double scale of scene-A.
+mac0_ctrl_case!(test_mac0_mag_quarter, 4, 0x001c_0025, 0xfff8_0025, 0xfff7_0037);
+mac0_ctrl_case!(test_mac0_mag_half, 4, 0x0037_004a, 0xfff1_004a, 0xffef_006e);
+mac0_ctrl_case!(test_mac0_mag_double, 4, 0x00dc_012a, 0xffc4_0128, 0xffbc_01b8);
+// Controlled-prestate replicas of scene B and C at the in-situ +2 distance.
+mac0_ctrl_case!(test_mac0_ctrl_b, 2, 0x0073_00d5, 0xffde_00dc, 0xffd8_0130);
+mac0_ctrl_case!(test_mac0_ctrl_c, 2, 0x0079_011f, 0xffd8_0130, 0xffd2_0194);
 
 macro_rules! gte_result_latency_test {
     ($name:ident, $reg:literal, $label:literal) => {
