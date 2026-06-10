@@ -28,7 +28,7 @@ use std::time::Instant;
 
 use emulator_core::gpu::GpuCmdLogEntry;
 use emulator_core::{Bus, Cpu, Gpu};
-use psx_gpu_compute::ComputeBackend;
+use psx_gpu_render::ComputeBackend;
 use psx_iso::Disc;
 
 fn parse_args() -> (PathBuf, PathBuf, u64) {
