@@ -98,6 +98,9 @@ use psx_vram::{
 };
 
 pub mod fonts;
+pub mod hex;
+
+pub use hex::{u16_hex, HexU16};
 
 // ======================================================================
 // BitmapFont -- the static descriptor
