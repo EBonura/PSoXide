@@ -1,10 +1,13 @@
-// Textured Gouraud-shaded triangle — scanline-delta version (B.x).
+// Textured Gouraud-shaded triangle — silicon-matched coverage +
+// plane interpolation.
 //
-// Composes the bit-exact UV walk from `tex_tri_scanline.wgsl` with
-// the per-vertex tint interpolation walked the same way. The CPU
-// rasterizer accumulates `c_r += delta_col_r` per pixel after the
-// initial `left_r += delta_left_r` per row — we mirror it via the
-// host-prepared `RowState` + `ScanlineConsts`.
+// The host (`scanline.rs`) mirrors the CPU rasterizer's
+// `for_each_tri_pixel`: the center-sampled Q32.32 DDA produces one
+// `[left_x, right_x)` span per scanline, and all five attributes
+// (R/G/B tint + U/V) come from determinant planes
+// `attr(x, y) = (base + x*dadx + y*dady) >> 24` in wrapping u32
+// arithmetic. Evaluating the same planes here makes the GPU output
+// bit-exact with the CPU by construction.
 
 struct ShadedTexTri {
     v0: vec2<i32>,
@@ -40,25 +43,18 @@ struct DrawArea {
 }
 
 struct RowState {
-    left_x_hi: i32, left_x_lo: u32,
-    right_x_hi: i32, right_x_lo: u32,
-    left_u_hi: i32, left_u_lo: u32,
-    left_v_hi: i32, left_v_lo: u32,
-    left_r_hi: i32, left_r_lo: u32,
-    left_g_hi: i32, left_g_lo: u32,
-    left_b_hi: i32, left_b_lo: u32,
-    _pad0: u32, _pad1: u32,
+    left_x: i32,
+    right_x: i32,
 }
 
 struct ScanlineConsts {
     y_min: i32, y_max: i32,
     _pad0: u32, _pad1: u32,
-    delta_col_u_hi: i32, delta_col_u_lo: u32,
-    delta_col_v_hi: i32, delta_col_v_lo: u32,
-    delta_col_r_hi: i32, delta_col_r_lo: u32,
-    delta_col_g_hi: i32, delta_col_g_lo: u32,
-    delta_col_b_hi: i32, delta_col_b_lo: u32,
-    _pad2: u32, _pad3: u32,
+    r_dadx: u32, r_dady: u32, r_base: u32, _pad2: u32,
+    g_dadx: u32, g_dady: u32, g_base: u32, _pad3: u32,
+    b_dadx: u32, b_dady: u32, b_base: u32, _pad4: u32,
+    u_dadx: u32, u_dady: u32, u_base: u32, _pad5: u32,
+    v_dadx: u32, v_dady: u32, v_base: u32, _pad6: u32,
 }
 
 @group(0) @binding(0) var<storage, read_write> vram: array<u32>;
@@ -93,43 +89,13 @@ const DITHER_TABLE: array<u32, 16> = array<u32, 16>(
     1u, 6u, 0u, 7u, 4u, 3u, 5u, 2u,
 );
 
-// i64 emulation — same as tex_tri_scanline.wgsl. See that file for
-// the explanation; in short, WGSL has no native i64 so we split
-// every Q16.16 value into (hi: i32, lo: u32) and do explicit carry.
-struct I64 { hi: i32, lo: u32 }
-fn i64_pack(hi: i32, lo: u32) -> I64 { return I64(hi, lo); }
-
-fn i64_add(a: I64, b: I64) -> I64 {
-    let new_lo = a.lo + b.lo;
-    let carry: i32 = select(0, 1, new_lo < a.lo);
-    let new_hi = a.hi + b.hi + carry;
-    return I64(new_hi, new_lo);
+// Wrapping-u32 determinant-plane evaluation, identical to the CPU's
+// `eval`: the result is already the 8-bit attribute value.
+fn plane_eval(dadx: u32, dady: u32, base: u32, x: i32, y: i32) -> u32 {
+    return (base + u32(x) * dadx + u32(y) * dady) >> 24u;
 }
 
-fn i64_mul_u32(col: u32, b: I64) -> I64 {
-    let b_lo_l16 = b.lo & 0xFFFFu;
-    let b_lo_h16 = b.lo >> 16u;
-    let prod_l = col * b_lo_l16;
-    let prod_h = col * b_lo_h16;
-    let new_lo_a = prod_h << 16u;
-    let new_lo_b = prod_l;
-    let new_lo = new_lo_a + new_lo_b;
-    let carry_lo: u32 = select(0u, 1u, new_lo < new_lo_a);
-    let high_part_from_lo = (prod_h >> 16u) + carry_lo;
-    let high_part_from_hi = i32(col) * b.hi;
-    let new_hi = high_part_from_hi + i32(high_part_from_lo);
-    return I64(new_hi, new_lo);
-}
-
-fn i64_arsh16(a: I64) -> I64 {
-    let new_lo = (a.lo >> 16u) | (u32(a.hi) << 16u);
-    let new_hi = a.hi >> 16u;
-    return I64(new_hi, new_lo);
-}
-
-fn i64_to_i32(a: I64) -> i32 { return i32(a.lo); }
-
-// Texture sampling, blend, modulation — same as tex_tri.
+// Texture sampling, blend, modulation — same as tex_tri_scanline.
 
 fn blend(bg_word: u32, fg_word: u32, mode: u32) -> u32 {
     let br = i32(bg_word & 0x1Fu);
@@ -233,29 +199,11 @@ fn rasterize(@builtin(global_invocation_id) gid: vec3<u32>) {
     if py < draw_area.top || py > draw_area.bottom { return; }
     if px < 0 || px >= VRAM_WIDTH || py < 0 || py >= VRAM_HEIGHT { return; }
 
-    let row_idx = u32(py - consts.y_min);
-    let row = rows[row_idx];
+    let row = rows[u32(py - consts.y_min)];
+    if px < row.left_x || px >= row.right_x { return; }
 
-    // Coverage and per-pixel U/V (same as tex_tri_scanline).
-    let left_x_q16 = i64_pack(row.left_x_hi, row.left_x_lo);
-    let right_x_q16 = i64_pack(row.right_x_hi, row.right_x_lo);
-    let xmin = i64_to_i32(i64_arsh16(left_x_q16));
-    let xmax = i64_to_i32(i64_arsh16(right_x_q16)) - 1;
-    if px < xmin || px > xmax { return; }
-    let col = u32(px - xmin);
-
-    let dcu = i64_pack(consts.delta_col_u_hi, consts.delta_col_u_lo);
-    let dcv = i64_pack(consts.delta_col_v_hi, consts.delta_col_v_lo);
-    let u_q16 = i64_add(
-        i64_pack(row.left_u_hi, row.left_u_lo),
-        i64_mul_u32(col, dcu),
-    );
-    let v_q16 = i64_add(
-        i64_pack(row.left_v_hi, row.left_v_lo),
-        i64_mul_u32(col, dcv),
-    );
-    let u = u32(i64_to_i32(i64_arsh16(u_q16)));
-    let v = u32(i64_to_i32(i64_arsh16(v_q16)));
+    let u = plane_eval(consts.u_dadx, consts.u_dady, consts.u_base, px, py);
+    let v = plane_eval(consts.v_dadx, consts.v_dady, consts.v_base, px, py);
 
     let texel = sample_texture(u, v);
     if texel == 0u { return; }
@@ -264,27 +212,9 @@ fn rasterize(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (prim.flags & FLAG_RAW_TEXTURE) != 0u {
         fg = texel;
     } else {
-        // Per-pixel cumulative tint walk. Same i64 add as U/V but
-        // for the R/G/B channels, then `>> 16` to recover the 8-bit
-        // value the modulator expects.
-        let dcr = i64_pack(consts.delta_col_r_hi, consts.delta_col_r_lo);
-        let dcg = i64_pack(consts.delta_col_g_hi, consts.delta_col_g_lo);
-        let dcb = i64_pack(consts.delta_col_b_hi, consts.delta_col_b_lo);
-        let r_q16 = i64_add(
-            i64_pack(row.left_r_hi, row.left_r_lo),
-            i64_mul_u32(col, dcr),
-        );
-        let g_q16 = i64_add(
-            i64_pack(row.left_g_hi, row.left_g_lo),
-            i64_mul_u32(col, dcg),
-        );
-        let b_q16 = i64_add(
-            i64_pack(row.left_b_hi, row.left_b_lo),
-            i64_mul_u32(col, dcb),
-        );
-        let r = u32(clamp(i64_to_i32(i64_arsh16(r_q16)), 0, 255));
-        let g = u32(clamp(i64_to_i32(i64_arsh16(g_q16)), 0, 255));
-        let b = u32(clamp(i64_to_i32(i64_arsh16(b_q16)), 0, 255));
+        let r = plane_eval(consts.r_dadx, consts.r_dady, consts.r_base, px, py);
+        let g = plane_eval(consts.g_dadx, consts.g_dady, consts.g_base, px, py);
+        let b = plane_eval(consts.b_dadx, consts.b_dady, consts.b_base, px, py);
         let dither = (prim.flags & FLAG_DITHER) != 0u;
         if dither {
             fg = modulate_dithered(texel, r, g, b, px, py);
