@@ -37,6 +37,7 @@ psx-gpu      = { path = "../sdk/crates/psx-gpu" }
 psx-vram     = { path = "../sdk/crates/psx-vram" }
 psx-gte      = { path = "../sdk/crates/psx-gte" }
 psx-gte-core = { path = "../sdk/crates/psx-gte-core" }
+psx-telemetry = { path = "../sdk/crates/psx-telemetry" }
 psx-engine    = { path = "../engine/crates/psx-engine" }
 psxed-audio   = { path = "../editor/crates/psxed-audio" }
 psxed-project = { path = "../editor/crates/psxed-project" }
