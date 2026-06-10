@@ -44,56 +44,6 @@ struct DrawArea {
 @group(0) @binding(2) var<uniform> draw_area: DrawArea;
 @group(0) @binding(3) var<uniform> tpage: Tpage;
 
-const VRAM_WIDTH: i32 = 1024;
-const VRAM_HEIGHT: i32 = 512;
-const VRAM_WIDTH_U: u32 = 1024u;
-const VRAM_HEIGHT_U: u32 = 512u;
-
-const FLAG_SEMI_TRANS:  u32 = 1u << 0u;
-const FLAG_MASK_CHECK:  u32 = 1u << 1u;
-const FLAG_MASK_SET:    u32 = 1u << 2u;
-const FLAG_RAW_TEXTURE: u32 = 1u << 3u;
-const FLAG_FLIP_X:      u32 = 1u << 4u;
-const FLAG_FLIP_Y:      u32 = 1u << 5u;
-
-const BLEND_AVERAGE:    u32 = 0u;
-const BLEND_ADD:        u32 = 1u;
-const BLEND_SUB:        u32 = 2u;
-const BLEND_ADDQUARTER: u32 = 3u;
-
-const DEPTH_4BPP:  u32 = 0u;
-const DEPTH_8BPP:  u32 = 1u;
-const DEPTH_15BPP: u32 = 2u;
-
-fn blend(bg_word: u32, fg_word: u32, mode: u32) -> u32 {
-    let br = i32(bg_word & 0x1Fu);
-    let bg = i32((bg_word >> 5u) & 0x1Fu);
-    let bb = i32((bg_word >> 10u) & 0x1Fu);
-    let fr = i32(fg_word & 0x1Fu);
-    let fg = i32((fg_word >> 5u) & 0x1Fu);
-    let fb = i32((fg_word >> 10u) & 0x1Fu);
-    var r: i32; var g: i32; var b: i32;
-    switch mode {
-        case BLEND_AVERAGE: {
-            r = (br >> 1u) + (fr >> 1u);
-            g = (bg >> 1u) + (fg >> 1u);
-            b = (bb >> 1u) + (fb >> 1u);
-        }
-        case BLEND_ADD: {
-            r = min(br + fr, 31); g = min(bg + fg, 31); b = min(bb + fb, 31);
-        }
-        case BLEND_SUB: {
-            r = max(br - fr, 0); g = max(bg - fg, 0); b = max(bb - fb, 0);
-        }
-        case BLEND_ADDQUARTER, default: {
-            r = min(br + (fr >> 2u), 31);
-            g = min(bg + (fg >> 2u), 31);
-            b = min(bb + (fb >> 2u), 31);
-        }
-    }
-    return u32(r) | (u32(g) << 5u) | (u32(b) << 10u) | (fg_word & 0x8000u);
-}
-
 fn sample_texture(u_in: u32, v_in: u32) -> u32 {
     let u8v = u_in & 0xFFu;
     let v8v = v_in & 0xFFu;
@@ -128,19 +78,6 @@ fn sample_texture(u_in: u32, v_in: u32) -> u32 {
         }
     }
     return texel;
-}
-
-fn modulate_tint(texel: u32, tint_packed: u32) -> u32 {
-    let tr = texel & 0x1Fu;
-    let tg = (texel >> 5u) & 0x1Fu;
-    let tb = (texel >> 10u) & 0x1Fu;
-    let cr = tint_packed & 0xFFu;
-    let cg = (tint_packed >> 8u) & 0xFFu;
-    let cb = (tint_packed >> 16u) & 0xFFu;
-    let r = min((cr * tr) / 0x80u, 0x1Fu);
-    let g = min((cg * tg) / 0x80u, 0x1Fu);
-    let b = min((cb * tb) / 0x80u, 0x1Fu);
-    return r | (g << 5u) | (b << 10u) | (texel & 0x8000u);
 }
 
 @compute @workgroup_size(8, 8)
