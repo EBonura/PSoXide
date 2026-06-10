@@ -878,7 +878,7 @@ fn box_prop_movement_probe_target(
 }
 
 fn box_prop_break_impulse_from_delta(dx: i32, dz: i32) -> (i16, i16) {
-    let denom = abs_i32_saturating(dx).saturating_add(abs_i32_saturating(dz));
+    let denom = abs_i32(dx).saturating_add(abs_i32(dz));
     if denom <= 0 {
         return (0, 0);
     }
@@ -935,5 +935,5 @@ fn box_prop_intersects_attack_volume(
     let half_width = BOX_PROP_BREAK_ATTACK_WIDTH
         .saturating_add(config.radius.max(0))
         .saturating_add(prop_extent);
-    forward >= -prop_extent && forward <= reach && abs_i32_saturating(lateral) <= half_width
+    forward >= -prop_extent && forward <= reach && abs_i32(lateral) <= half_width
 }

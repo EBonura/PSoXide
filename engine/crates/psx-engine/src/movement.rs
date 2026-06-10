@@ -6,6 +6,7 @@
 //! pushing right moves toward screen-right.
 
 use crate::{Angle, Q12};
+use psx_math::int32::isqrt_i32;
 
 /// One centred analog input axis.
 ///
@@ -250,28 +251,6 @@ fn signed_forward_intent(forward: i16, deadzone: i16) -> i8 {
 fn square_i16(value: i16) -> i32 {
     let value = value as i32;
     value * value
-}
-
-fn isqrt_i32(value: i32) -> i32 {
-    if value <= 0 {
-        return 0;
-    }
-    let mut x = value as u32;
-    let mut r = 0u32;
-    let mut bit = 1u32 << 30;
-    while bit > x {
-        bit >>= 2;
-    }
-    while bit != 0 {
-        if x >= r + bit {
-            x -= r + bit;
-            r = (r >> 1) + bit;
-        } else {
-            r >>= 1;
-        }
-        bit >>= 2;
-    }
-    r as i32
 }
 
 #[cfg(test)]

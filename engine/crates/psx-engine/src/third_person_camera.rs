@@ -12,6 +12,7 @@ use crate::{
     fixed::div_q12_i32, Angle, CharacterCollisionRoom, RoomCollision, RoomPoint, WorldCamera,
     WorldProjection, Q12,
 };
+use psx_math::int32::{abs_i16, abs_i32, isqrt_i32};
 
 const RAY_STEPS_MAX: i32 = 8;
 const RAY_STEPS_MIN: i32 = 3;
@@ -1286,46 +1287,6 @@ fn lerp_vertex(from: RoomPoint, to: RoomPoint, num: i32, den: i32) -> RoomPoint 
         from.y + ((to.y - from.y) * num) / den,
         from.z + ((to.z - from.z) * num) / den,
     )
-}
-
-fn isqrt_i32(n: i32) -> i32 {
-    if n <= 0 {
-        return 0;
-    }
-    let mut bit = 1 << 30;
-    let mut rest = n;
-    let mut root = 0;
-    while bit > rest {
-        bit >>= 2;
-    }
-    while bit != 0 {
-        if rest >= root + bit {
-            rest -= root + bit;
-            root = (root >> 1) + bit;
-        } else {
-            root >>= 1;
-        }
-        bit >>= 2;
-    }
-    root
-}
-
-fn abs_i16(value: i16) -> i16 {
-    if value == i16::MIN {
-        i16::MAX
-    } else if value < 0 {
-        -value
-    } else {
-        value
-    }
-}
-
-fn abs_i32(value: i32) -> i32 {
-    if value == i32::MIN {
-        i32::MAX
-    } else {
-        value.abs()
-    }
 }
 
 #[cfg(test)]
