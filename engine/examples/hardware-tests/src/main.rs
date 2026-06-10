@@ -36,7 +36,7 @@ const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
 const FONT_CLUT: Clut = Clut::new(320, 256);
 
 const ROWS_PER_PAGE: usize = 6;
-const TEST_COUNT: usize = 163;
+const TEST_COUNT: usize = 166;
 const PAD_POLL_TEST_INDEX: usize = 26;
 const MODE_COUNT: u8 = 15;
 const CHECK_MODES: [Mode; 11] = [
@@ -885,6 +885,21 @@ const TESTS: [TestSpec; TEST_COUNT] = [
         group: "GTE",
         name: "OP cross product MAC3",
         run: test_gte_op_mac3,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "OP full-seed MAC1",
+        run: test_gte_op_full_seed_mac1,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "OP full-seed MAC2",
+        run: test_gte_op_full_seed_mac2,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "OP full-seed MAC3",
+        run: test_gte_op_full_seed_mac3,
     },
     TestSpec {
         group: "GTE",
@@ -2962,6 +2977,34 @@ fn run_op() {
 fn test_gte_op_mac1() -> TestResult { run_op(); expect_eq(0xffff_fd00, mfc2!(25), "op MAC1") }
 fn test_gte_op_mac2() -> TestResult { run_op(); expect_eq(0x0000_0600, mfc2!(26), "op MAC2") }
 fn test_gte_op_mac3() -> TestResult { run_op(); expect_eq(0xffff_fd00, mfc2!(27), "op MAC3") }
+
+// OP full-seed variant: identical diagonal + IR inputs to `run_op`, but with
+// EVERY rotation control reg (0..=4, including the off-diagonal pairs 1 and 3)
+// and the MAC/IR data regs written explicitly first -- the gte-fuzz pattern
+// that the real console matches 1100/1100 (so OP compute is console-correct
+// under full seeding). The original `run_op` leaves regs 1/3 holding leftover
+// state from earlier tests and FAILED on silicon (MAC1 OBS 0xFFFFFBCE vs
+// -768). Differential on one burn: full-seed PASS + original FAIL = hardware
+// OP reads stale off-diagonal state (write-semantics family, same hunt as the
+// SY0-drop battery); BOTH fail identically = input-independent OP quirk.
+fn run_op_full_seed() {
+    ctc2!(31, 0);
+    ctc2!(0, 0x0000_1000); // R11=D1, R12=0
+    ctc2!(1, 0x0000_0000); // R13=0, R21=0
+    ctc2!(2, 0x0000_2000); // R22=D2, R23=0
+    ctc2!(3, 0x0000_0000); // R31=0, R32=0
+    ctc2!(4, 0x0000_3000); // R33=D3
+    mtc2!(9, 0x0000_0400); // IR1
+    mtc2!(10, 0x0000_0500); // IR2
+    mtc2!(11, 0x0000_0600); // IR3
+    mtc2!(25, 0); // MAC1
+    mtc2!(26, 0); // MAC2
+    mtc2!(27, 0); // MAC3
+    unsafe { gte_ops::op_sf1() };
+}
+fn test_gte_op_full_seed_mac1() -> TestResult { run_op_full_seed(); expect_eq(0xffff_fd00, mfc2!(25), "op fs MAC1") }
+fn test_gte_op_full_seed_mac2() -> TestResult { run_op_full_seed(); expect_eq(0x0000_0600, mfc2!(26), "op fs MAC2") }
+fn test_gte_op_full_seed_mac3() -> TestResult { run_op_full_seed(); expect_eq(0xffff_fd00, mfc2!(27), "op fs MAC3") }
 fn test_gte_avsz3() -> TestResult {
     ctc2!(31, 0);
     ctc2!(29, 0x0000_0155); // ZSF3
