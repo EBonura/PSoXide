@@ -36,7 +36,7 @@ const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
 const FONT_CLUT: Clut = Clut::new(320, 256);
 
 const ROWS_PER_PAGE: usize = 6;
-const TEST_COUNT: usize = 118;
+const TEST_COUNT: usize = 128;
 const PAD_POLL_TEST_INDEX: usize = 26;
 const MODE_COUNT: u8 = 15;
 const CHECK_MODES: [Mode; 11] = [
@@ -910,6 +910,56 @@ const TESTS: [TestSpec; TEST_COUNT] = [
         group: "GTE",
         name: "RTPS IR0 read-latency",
         run: test_gte_lat_ir0,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "RT load settle +0",
+        run: test_rt_settle_gap0,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "RT load settle +2",
+        run: test_rt_settle_gap2,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "RT load settle +4",
+        run: test_rt_settle_gap4,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "RT load settle +8",
+        run: test_rt_settle_gap8,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "RT load settle +16",
+        run: test_rt_settle_gap16,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "RT load settle +32",
+        run: test_rt_settle_gap32,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "RT drop-during-RTPS +0",
+        run: test_rt_drop_gap0,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "RT drop-during-RTPS +4",
+        run: test_rt_drop_gap4,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "RT drop-during-RTPS +8",
+        run: test_rt_drop_gap8,
+    },
+    TestSpec {
+        group: "GTE",
+        name: "RT drop-during-RTPS +16",
+        run: test_rt_drop_gap16,
     },
     TestSpec {
         group: "GPU",
@@ -2797,6 +2847,105 @@ fn gte_delay16() {
         core::arch::asm!(".rept 16\nnop\n.endr", options(nostack, nomem, preserves_flags));
     }
 }
+
+/// Burn ~N cycles (literal NOP slide) for the GTE hazard sweeps.
+macro_rules! gte_nops {
+    (0) => {};
+    ($n:literal) => {
+        #[cfg(target_arch = "mips")]
+        unsafe {
+            core::arch::asm!(
+                concat!(".rept ", $n, "\nnop\n.endr"),
+                options(nostack, nomem, preserves_flags)
+            );
+        }
+    };
+}
+
+// --- CTC2 matrix-load hazard sweeps ----------------------------------
+// The cortex skinning path reloads the GTE rotation per blended vertex and
+// the player explodes on real hardware; an 18-NOP settle gap did NOT fix it
+// (HWB-007 follow-up). These sweeps MEASURE the hazard instead of guessing:
+// every case compares a gapped matrix-load + MVMVA against a long-settled
+// reference of the SAME load. Green in-emulator by construction (the CTC2
+// hazard models are env-gated off); on silicon, every gap inside the true
+// hazard window FAILs, and the OBS digest shows what the GTE actually
+// computed. Two shapes:
+//   "RT settle +N":  quiet load -> N nops -> MVMVA   (pure CTC2-use settle)
+//   "RT drop +N":    RTPS issue -> N nops -> load -> LONG settle -> MVMVA
+//                    (a failure here = the writes were LOST during the
+//                    in-flight op, not merely late)
+fn load_matrix_b() {
+    ctc2!(0, pack_gte_xy(0x2000, 0));
+    ctc2!(1, pack_gte_xy(0, 0));
+    ctc2!(2, pack_gte_xy(0x2000, 0));
+    ctc2!(3, pack_gte_xy(0, 0));
+    ctc2!(4, 0x2000);
+}
+
+fn rt_sweep_vertex() {
+    mtc2!(0, pack_gte_xy(0x123, -0x222));
+    mtc2!(1, 0x0333);
+}
+
+/// Long-settled ground truth: matrix B fully landed, then MVMVA.
+fn rt_sweep_reference() -> u32 {
+    seed_scene_xform();
+    load_matrix_b();
+    gte_nops!(64);
+    rt_sweep_vertex();
+    unsafe { gte_ops::mvmva_rt_v0_tr_sf1() };
+    gte_delay16();
+    gte_tri_digest(mfc2!(25), mfc2!(26), mfc2!(27))
+}
+
+macro_rules! rt_settle_case {
+    ($name:ident, $gap:tt) => {
+        fn $name() -> TestResult {
+            let expected = rt_sweep_reference();
+            seed_scene_xform(); // matrix A in the GTE
+            rt_sweep_vertex();
+            unsafe { gte_ops::mvmva_rt_v0_tr_sf1() }; // pipe warmed with A
+            gte_delay16();
+            let _ = mfc2!(25);
+            load_matrix_b();
+            gte_nops!($gap);
+            unsafe { gte_ops::mvmva_rt_v0_tr_sf1() };
+            gte_delay16();
+            let got = gte_tri_digest(mfc2!(25), mfc2!(26), mfc2!(27));
+            expect_eq(expected, got, "rt settle gap")
+        }
+    };
+}
+rt_settle_case!(test_rt_settle_gap0, 0);
+rt_settle_case!(test_rt_settle_gap2, 2);
+rt_settle_case!(test_rt_settle_gap4, 4);
+rt_settle_case!(test_rt_settle_gap8, 8);
+rt_settle_case!(test_rt_settle_gap16, 16);
+rt_settle_case!(test_rt_settle_gap32, 32);
+
+macro_rules! rt_drop_case {
+    ($name:ident, $gap:tt) => {
+        fn $name() -> TestResult {
+            let expected = rt_sweep_reference();
+            seed_scene_xform();
+            rt_sweep_vertex();
+            unsafe { gte_ops::rtps() }; // 15-cycle op now in flight
+            gte_nops!($gap);
+            load_matrix_b(); // writes land while RTPS may be executing
+            gte_nops!(64); // long settle: a failure means LOST, not late
+            rt_sweep_vertex();
+            unsafe { gte_ops::mvmva_rt_v0_tr_sf1() };
+            gte_delay16();
+            let got = gte_tri_digest(mfc2!(25), mfc2!(26), mfc2!(27));
+            expect_eq(expected, got, "rt drop-during-exec")
+        }
+    };
+}
+rt_drop_case!(test_rt_drop_gap0, 0);
+rt_drop_case!(test_rt_drop_gap4, 4);
+rt_drop_case!(test_rt_drop_gap8, 8);
+rt_drop_case!(test_rt_drop_gap16, 16);
 
 macro_rules! gte_result_latency_test {
     ($name:ident, $reg:literal, $label:literal) => {
