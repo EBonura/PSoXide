@@ -32,7 +32,10 @@ use timing::cycle_cost;
 /// (data reg 31) is readable. A read inside this window returns the prior
 /// count -- the off-by-one observed on real hardware for a back-to-back
 /// `mtc2 lzcs; mfc2 lzcr`.
-const LZCR_RESULT_LATENCY: u64 = 8;
+/// Measured on silicon (settle sweeps, 2026-06-10): LZCR reads are stale
+/// ONLY for the immediately-next instruction; one intervening instruction
+/// settles them. Same window as MAC0.
+const LZCR_RESULT_LATENCY: u64 = 2;
 /// MAC0 settle latency in cycles from command ISSUE. The hardware-tests disc
 /// measured the endpoints only: back-to-back read = stale, +8 nops = settled.
 /// Modeling the window as the FULL command latency broke commercial 3D
@@ -173,6 +176,14 @@ pub struct Cpu {
     /// Env `PSOXIDE_CTC2_DROP_DURING_EXEC=1` + `PSOXIDE_CTC2_DROP_WINDOW=N`.
     gte_ctc2_drop_during_exec: bool,
     gte_ctc2_drop_window: u64,
+    /// Tick of the most recent MTC2/CTC2. Silicon evidence (2026-06-10):
+    /// a result read in the very next instruction after a GTE op is stale
+    /// ONLY when COP2 writes immediately preceded the op (the disc's
+    /// winding case: mtc2 burst, nclip, mfc2 = stale; Crash's culling
+    /// loop: rtpt, nclip, mfc2 back-to-back = fresh on hardware). Model:
+    /// preceding writes delay the op's completion by the next-instruction
+    /// window; an op issued clear of writes serves its result instantly.
+    gte_last_write_tick: u64,
     /// Diagnostic: bypass the MAC0/LZCR stale-read model entirely.
     gte_read_latency_bypass: bool,
     /// Bus cycle at which the multiply/divide unit's HI/LO result becomes
@@ -252,15 +263,16 @@ impl Cpu {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0),
-            // Default OFF pending the silicon nop-sweep: with the model on,
-            // commercial 3D culling (back-to-back NCLIP MAC0 reads in libgte)
-            // gets stale winding and drops polygons (Crash menu logo/model).
-            // The walls fix is engine-side (software cull), so cortex no
-            // longer depends on this model. PSOXIDE_GTE_READ_LATENCY=1
-            // re-enables it for hazard experiments.
+            gte_last_write_tick: 0,
+            // Default ON with the SILICON-MEASURED window (settle sweeps,
+            // 2026-06-10): MAC0/LZCR are stale only for the immediately-next
+            // instruction; one intervening instruction settles them. The
+            // earlier guessed windows broke commercial culling; the measured
+            // tick-1 window leaves libgte reads (>= +2 instructions) live.
+            // PSOXIDE_GTE_READ_LATENCY=0 disables for A/B experiments.
             gte_read_latency_bypass: std::env::var("PSOXIDE_GTE_READ_LATENCY")
-                .map(|v| v != "1")
-                .unwrap_or(true),
+                .map(|v| v == "0")
+                .unwrap_or(false),
             hilo_busy_until: 0,
             hi: 0,
             lo: 0,
@@ -727,7 +739,11 @@ impl Cpu {
             self.gte_mac0_stale = self.cop2.read_data(24);
             self.cop2.execute(instr);
             self.gte_busy_until = bus.cycles() + Gte::command_cycles(instr) as u64;
-            self.gte_mac0_ready_at = self.tick + MAC0_RESULT_LATENCY;
+            self.gte_mac0_ready_at = if self.tick.wrapping_sub(self.gte_last_write_tick) <= 2 {
+                self.tick + MAC0_RESULT_LATENCY
+            } else {
+                self.tick // op clear of writes: result reads fresh immediately
+            };
             return Ok(());
         }
         let cop_op = ((instr >> 21) & 0x1F) as u8;
@@ -775,6 +791,25 @@ impl Cpu {
     /// value, matching hardware where MAC1-3 / SXY / SZ settle in time
     /// for a back-to-back read but MAC0 / LZCR do not.
     fn gte_read_data_latency(&self, bus: &Bus, rd: u8) -> u32 {
+        // PSOXIDE_TRACE_STALE=1: log the first stale-serving reads (PC, reg,
+        // tick distance) to identify exactly which game code trips the model.
+        #[allow(clippy::collapsible_if)]
+        if std::env::var_os("PSOXIDE_TRACE_STALE").is_some() {
+            use std::sync::atomic::{AtomicU32, Ordering};
+            static N: AtomicU32 = AtomicU32::new(0);
+            let stale = match rd {
+                24 => self.tick < self.gte_mac0_ready_at,
+                31 => self.tick < self.gte_lzcr_ready_at,
+                _ => false,
+            };
+            if stale && N.fetch_add(1, Ordering::Relaxed) < 24 {
+                let ready = if rd == 24 { self.gte_mac0_ready_at } else { self.gte_lzcr_ready_at };
+                eprintln!(
+                    "[stale] pc={:#010x} reg={} tick={} ready_at={} (dist {})",
+                    self.pc, rd, self.tick, ready, ready - self.tick
+                );
+            }
+        }
         // Diagnostic bypass: PSOXIDE_NO_GTE_READ_LATENCY=1 returns live
         // values (pre-latency-model behavior) to A/B the model against
         // commercial 3D culling (missing-model investigations).
@@ -783,7 +818,7 @@ impl Cpu {
         }
         match rd {
             24 if self.tick < self.gte_mac0_ready_at => self.gte_mac0_stale,
-            31 if bus.cycles() < self.gte_lzcr_ready_at => self.gte_lzcr_stale,
+            31 if self.tick < self.gte_lzcr_ready_at => self.gte_lzcr_stale,
             _ => self.cop2.read_data(rd),
         }
     }
@@ -828,9 +863,10 @@ impl Cpu {
     fn op_mtc2(&mut self, instr: u32, bus: &Bus) -> Result<(), ExecutionError> {
         let rt = ((instr >> 16) & 0x1F) as u8;
         let rd = ((instr >> 11) & 0x1F) as u8;
+        self.gte_last_write_tick = self.tick;
         if rd == 30 {
             self.gte_lzcr_stale = self.cop2.read_data(31);
-            self.gte_lzcr_ready_at = bus.cycles() + LZCR_RESULT_LATENCY;
+            self.gte_lzcr_ready_at = self.tick + LZCR_RESULT_LATENCY;
         }
         self.cop2.write_data(rd, self.gpr(rt));
         Ok(())
@@ -844,6 +880,7 @@ impl Cpu {
         let rt = ((instr >> 16) & 0x1F) as u8;
         let rd = ((instr >> 11) & 0x1F) as u8;
         let value = self.gpr(rt);
+        self.gte_last_write_tick = self.tick;
         if self.gte_ctc2_drop_during_exec
             && bus.cycles() < self.gte_busy_until + self.gte_ctc2_drop_window
         {
