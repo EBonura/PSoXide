@@ -1718,3 +1718,41 @@ fn flat_quad_replay_still_matches_silicon() {
         "flat quad {h:#010x} must still match silicon 0x79E53DC5"
     );
 }
+
+// a commercial title intro repro: the Universal/Naughty Dog screens are
+// composited as GP0 0x7C textured 16x16 sprites from an 8bpp texpage at
+// (256,256) with a CLUT at (512,304), per-sprite E1 0x6B4 + E2 0x04000
+// (offset-only window, mask 0 = no-op) -- captured from the real game's
+// cmd_log. The intro renders BLACK in both backends; this reconstructs the
+// exact draw state to pin where the sample chain breaks.
+#[test]
+fn crash_intro_sprite_8bpp_clut_paints() {
+    let mut gpu = Gpu::new();
+    gpu.write32(GP0_ADDR, 0xE300_0000); // draw area TL (0,0)
+    gpu.write32(GP0_ADDR, 0xE400_0000 | 0x3FF | (0x1FF << 10)); // BR
+    gpu.write32(GP0_ADDR, 0xE500_0000); // offset 0
+    // 8bpp texture page content at (256,256..511): every index byte 0x42.
+    for y in 256..512u16 {
+        for x in 256..384u16 {
+            gpu.vram.set_pixel(x, y, 0x4242);
+        }
+    }
+    // CLUT at (512,304): entry 0x42 = opaque white.
+    gpu.vram.set_pixel(512 + 0x42, 304, 0x7FFF);
+    // Captured env: E1 texpage 0x6B4 (base 256,256, 8bpp), E2 0x04000.
+    gpu.write32(GP0_ADDR, 0xE100_06B4);
+    gpu.write32(GP0_ADDR, 0xE200_4000);
+    // 0x7C sprite, neutral tint, at (10,10), uv (112,128), clut (512,304).
+    gpu.write32(GP0_ADDR, 0x7C80_8080);
+    gpu.write32(GP0_ADDR, (10 << 16) | 10);
+    gpu.write32(GP0_ADDR, 0x4C20_8070); // clut 0x4C20, v=0x80, u=0x70
+    let mut lit = 0;
+    for y in 10..26u16 {
+        for x in 10..26u16 {
+            if gpu.vram.get_pixel(x, y) != 0 {
+                lit += 1;
+            }
+        }
+    }
+    assert_eq!(lit, 256, "expected all 256 sprite pixels painted, got {lit}");
+}
