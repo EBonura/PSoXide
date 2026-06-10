@@ -123,6 +123,38 @@ pub struct Cpu {
     gte_mac0_stale: u32,
     gte_lzcr_ready_at: u64,
     gte_lzcr_stale: u32,
+    /// GTE control-register WRITE settle latency (the flip side of the
+    /// result-read latency above). On real silicon a CTC2 does not land in
+    /// the GTE control file instantly; a GTE command issued too soon after
+    /// reads the OLD value (psx-spx: "GTE commands should not be issued
+    /// right after MTC2/CTC2"). The cortex player skinning path reloads the
+    /// rotation matrix + translation via 8 back-to-back CTC2s immediately
+    /// before each MVMVA, which on hardware produces the vertex-explosion
+    /// (burn ledger HWB-007: view-space X ~10x wider at every skinning
+    /// stage); the world path loads matrices once per long batch and is
+    /// clean. Writes are STAGED for `gte_ctc2_latency` cycles and applied
+    /// when expired; a command executing earlier sees the stale value.
+    /// 0 = off. Tunable via env `PSOXIDE_CTC2_LATENCY` while the silicon
+    /// window is being established (HWB-007 follow-up scan).
+    gte_ctc2_latency: u64,
+    /// Staged CTC2 writes: (control reg, new value, apply-at cycle),
+    /// FIFO order. Sized for two full rotation+translation reloads.
+    gte_ctc2_staged: [(u8, u32, u64); 16],
+    gte_ctc2_staged_len: usize,
+    /// Alternative hazard model: a CTC2 executed while a GTE command is
+    /// still in flight is LOST -- the silicon "don't write GTE registers
+    /// during command execution" rule. The blend path's matrix reloads land
+    /// inside the preceding MVMVA / RTPS execution windows, so subsets of
+    /// the rotation rows are dropped (the X row is written FIRST, hence
+    /// closest to the still-executing command -- matching the X-only
+    /// corruption on hardware). The window extends `gte_ctc2_drop_window`
+    /// cycles past the modeled `gte_busy_until` to compensate for the
+    /// emulator's coarser cycle accounting (it charges more inter-
+    /// instruction cycles than silicon with a warm i-cache, so the modeled
+    /// busy window ends too early relative to the instruction stream).
+    /// Env `PSOXIDE_CTC2_DROP_DURING_EXEC=1` + `PSOXIDE_CTC2_DROP_WINDOW=N`.
+    gte_ctc2_drop_during_exec: bool,
+    gte_ctc2_drop_window: u64,
     /// Bus cycle at which the multiply/divide unit's HI/LO result becomes
     /// available. MFHI/MFLO stall to this point (the R3000A HI/LO interlock),
     /// and interleaving work between a MULT/DIV and its result read hides the
@@ -187,6 +219,19 @@ impl Cpu {
             gte_mac0_stale: 0,
             gte_lzcr_ready_at: 0,
             gte_lzcr_stale: 0,
+            gte_ctc2_latency: std::env::var("PSOXIDE_CTC2_LATENCY")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0),
+            gte_ctc2_staged: [(0, 0, 0); 16],
+            gte_ctc2_staged_len: 0,
+            gte_ctc2_drop_during_exec: std::env::var("PSOXIDE_CTC2_DROP_DURING_EXEC")
+                .map(|v| v == "1")
+                .unwrap_or(false),
+            gte_ctc2_drop_window: std::env::var("PSOXIDE_CTC2_DROP_WINDOW")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0),
             hilo_busy_until: 0,
             hi: 0,
             lo: 0,
@@ -261,6 +306,7 @@ impl Cpu {
         self.gte_mac0_stale = 0;
         self.gte_lzcr_ready_at = 0;
         self.gte_lzcr_stale = 0;
+        self.gte_ctc2_staged_len = 0;
         self.hilo_busy_until = 0;
         self.pending_exception_pc = None;
         self.set_gpr(28, initial_gp);
@@ -643,6 +689,10 @@ impl Cpu {
             // The GTE is not pipelined: issuing a command while a previous one
             // is still in flight stalls until it completes.
             self.gte_sync(bus);
+            // Apply only the staged control writes that have settled by now;
+            // anything still in flight stays stale for THIS command -- the
+            // CTC2 write hazard (see gte_ctc2_latency docs).
+            self.flush_expired_ctc2(bus.cycles());
             // MAC0 has result-read latency: snapshot the now-settled prior
             // MAC0 so a too-soon read returns it (see gte_mac0_* docs).
             self.gte_mac0_stale = self.cop2.read_data(24);
@@ -657,9 +707,9 @@ impl Cpu {
             // reads -- reading a result register before it has settled returns
             // a stale value (modelled per-register in `gte_read_data_latency`).
             0x00 => self.op_mfc2(instr, bus),
-            0x02 => self.op_cfc2(instr),
+            0x02 => self.op_cfc2(instr, bus),
             0x04 => self.op_mtc2(instr, bus),
-            0x06 => self.op_ctc2(instr),
+            0x06 => self.op_ctc2(instr, bus),
             _ => Err(ExecutionError::Unimplemented {
                 opcode: 0x12,
                 pc,
@@ -704,14 +754,35 @@ impl Cpu {
     }
 
     /// `CFC2 rt, rd` -- same as MFC2 but reads a control register.
-    fn op_cfc2(&mut self, instr: u32) -> Result<(), ExecutionError> {
+    fn op_cfc2(&mut self, instr: u32, bus: &Bus) -> Result<(), ExecutionError> {
         let rt = ((instr >> 16) & 0x1F) as u8;
         let rd = ((instr >> 11) & 0x1F) as u8;
+        self.flush_expired_ctc2(bus.cycles());
         let value = self.cop2.read_control(rd);
         if rt != 0 {
             self.pending_load = Some((rt, value));
         }
         Ok(())
+    }
+
+    /// Apply staged CTC2 control writes whose settle window has elapsed,
+    /// in FIFO order. Writes still inside the window stay staged -- a GTE
+    /// command executing now reads the old register value (the hazard).
+    fn flush_expired_ctc2(&mut self, now: u64) {
+        if self.gte_ctc2_staged_len == 0 {
+            return;
+        }
+        let mut kept = 0usize;
+        for i in 0..self.gte_ctc2_staged_len {
+            let (reg, value, apply_at) = self.gte_ctc2_staged[i];
+            if apply_at <= now {
+                self.cop2.write_control(reg, value);
+            } else {
+                self.gte_ctc2_staged[kept] = (reg, value, apply_at);
+                kept += 1;
+            }
+        }
+        self.gte_ctc2_staged_len = kept;
     }
 
     /// `MTC2 rt, rd` -- move from GPR `rt` to COP2 data register `rd`.
@@ -730,11 +801,38 @@ impl Cpu {
         Ok(())
     }
 
-    /// `CTC2 rt, rd` -- same as MTC2 but writes a control register.
-    fn op_ctc2(&mut self, instr: u32) -> Result<(), ExecutionError> {
+    /// `CTC2 rt, rd` -- same as MTC2 but writes a control register. With the
+    /// write-settle model on (`gte_ctc2_latency > 0`) the write is STAGED and
+    /// only lands after the settle window; a GTE command issued inside the
+    /// window reads the old value (see `gte_ctc2_latency` docs).
+    fn op_ctc2(&mut self, instr: u32, bus: &Bus) -> Result<(), ExecutionError> {
         let rt = ((instr >> 16) & 0x1F) as u8;
         let rd = ((instr >> 11) & 0x1F) as u8;
-        self.cop2.write_control(rd, self.gpr(rt));
+        let value = self.gpr(rt);
+        if self.gte_ctc2_drop_during_exec
+            && bus.cycles() < self.gte_busy_until + self.gte_ctc2_drop_window
+        {
+            // Write issued while a GTE command is executing: lost on silicon.
+            return Ok(());
+        }
+        if self.gte_ctc2_latency == 0 {
+            self.cop2.write_control(rd, value);
+            return Ok(());
+        }
+        let now = bus.cycles();
+        self.flush_expired_ctc2(now);
+        if self.gte_ctc2_staged_len == self.gte_ctc2_staged.len() {
+            // Queue full: force-apply the oldest write to make room. With a
+            // realistic window this only happens under pathological CTC2
+            // storms; correctness (eventual application) wins over the
+            // hazard model for the overflowing entry.
+            let (reg, val, _) = self.gte_ctc2_staged[0];
+            self.cop2.write_control(reg, val);
+            self.gte_ctc2_staged.copy_within(1.., 0);
+            self.gte_ctc2_staged_len -= 1;
+        }
+        self.gte_ctc2_staged[self.gte_ctc2_staged_len] = (rd, value, now + self.gte_ctc2_latency);
+        self.gte_ctc2_staged_len += 1;
         Ok(())
     }
 
