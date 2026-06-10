@@ -219,6 +219,12 @@ pub struct LaunchArgs {
     /// a window or screen-capture permission.
     #[arg(long)]
     pub dump_hw: Option<PathBuf>,
+    /// Optional path to dump the CPU rasterizer's DISPLAY image (the
+    /// `display_rgba8` view: the display sub-rect of software VRAM,
+    /// 24bpp-aware) as a PPM. Pair with `--dump-hw` at the same step
+    /// count for an apples-to-apples backend comparison.
+    #[arg(long)]
+    pub dump_display: Option<PathBuf>,
     /// Optional path to dump the SPU's mixed stereo output as a 16-bit
     /// 44.1 kHz WAV, for A/B comparison against a reference emulator.
     #[arg(long)]
@@ -956,6 +962,80 @@ fn run_headless_launch(
                     bus.gpu.cmd_log.len()
                 );
             }
+            // Display + cmd_log state at dump time: the first thing to read
+            // when a dump comes out black (wrong display area? bpp24? did
+            // any draw/upload reach the GPU at all?).
+            let da = bus.gpu.display_area();
+            let (mut draws, mut fills, mut uploads) = (0u64, 0u64, 0u64);
+            for e in bus.gpu.cmd_log.iter() {
+                match e.opcode {
+                    0x20..=0x7F => draws += 1,
+                    0x02 => fills += 1,
+                    0xA0..=0xBF => uploads += 1,
+                    _ => {}
+                }
+            }
+            eprintln!(
+                "[cli] display ({},{}) {}x{} bpp={} | cmd_log draws={} fills={} uploads={}",
+                da.x,
+                da.y,
+                da.width,
+                da.height,
+                if da.bpp24 { 24 } else { 15 },
+                draws,
+                fills,
+                uploads
+            );
+            // Every distinct GP1 08h display-mode word the game has set --
+            // bit 4 = 24bpp. Answers "did the game EVER request 24bpp?".
+            let modes: Vec<String> = bus
+                .gpu
+                .display_mode_history()
+                .map(|m| format!("{m:06X}{}", if m & 0x10 != 0 { "(24bpp)" } else { "" }))
+                .collect();
+            eprintln!("[cli] GP1 08h modes seen: {}", modes.join(" "));
+            // Recent display-start moves (GP1 05h), decoded to (x,y) -- the
+            // double-buffer flip trail. Shows where the display pointed.
+            let starts: Vec<String> = bus
+                .gpu
+                .gp1_write_history()
+                .iter()
+                .filter(|w| (**w >> 24) & 0x3F == 0x05)
+                .map(|w| format!("({},{})", w & 0x3FF, (w >> 10) & 0x1FF))
+                .collect();
+            let tail: Vec<&String> = starts.iter().rev().take(24).collect();
+            eprintln!(
+                "[cli] GP1 05h display-start trail (last {} of {}): {:?}",
+                tail.len(),
+                starts.len(),
+                tail.iter().rev().map(|s| s.as_str()).collect::<Vec<_>>()
+            );
+            // Optional raw cmd_log dump (index,opcode,word0) for offline
+            // analysis of draw parameters over time (e.g. fade tints).
+            if let Ok(p) = std::env::var("PSOXIDE_DUMP_CMDLOG") {
+                let mut out = String::new();
+                for e in bus.gpu.cmd_log.iter() {
+                    let w = |i: usize| e.fifo.get(i).copied().unwrap_or(0);
+                    out.push_str(&format!(
+                        "{},{:#04X},{:#010X},{:#010X},{:#010X}\n",
+                        e.index,
+                        e.opcode,
+                        w(0),
+                        w(1),
+                        w(2)
+                    ));
+                }
+                let _ = std::fs::write(&p, out);
+                eprintln!("[cli] cmd_log csv → {p}");
+            }
+        }
+    }
+
+    if let Some(path) = args.dump_display {
+        let (rgba, w, h) = bus.gpu.display_rgba8();
+        write_rgb_ppm_from_rgba(&path, w, h, &rgba)?;
+        if emit_summary {
+            eprintln!("[cli] CPU display → {} ({w}x{h})", path.display());
         }
     }
 
@@ -1546,6 +1626,7 @@ fn validation_launch_args(
         dump_vram: None,
         dump_ram: None,
         dump_hw: None,
+        dump_display: None,
         dump_audio: None,
         dump_guest_profile: false,
         hold_forward: checkpoint.hold_forward,
