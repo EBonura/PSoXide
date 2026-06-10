@@ -9,16 +9,14 @@
 //! cargo run --release --example probe_crash_hang -p emulator-core
 //! ```
 
+#[path = "support/pad.rs"]
+mod pad_support;
+
+use pad_support::{format_pad_pulses, parse_pad_pulses, parse_u16_mask, sync_pad_mask};
+
 use emulator_core::{Bus, Cpu};
 use psx_iso::Disc;
 use std::collections::HashMap;
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-struct PadPulse {
-    mask: u16,
-    start_vblank: u64,
-    frames: u64,
-}
 
 fn main() {
     let total_steps: u64 = std::env::var("PSOXIDE_STEPS")
@@ -39,7 +37,7 @@ fn main() {
         .ok()
         .filter(|s| !s.trim().is_empty())
         .map(|s| {
-            parse_pad_pulses(&s).unwrap_or_else(|| {
+            parse_pad_pulses(&s).ok().unwrap_or_else(|| {
                 panic!(
                     "PSOXIDE_PAD1_PULSES must be comma-separated \
                      <mask>@<start_vblank>+<frames> entries"
@@ -130,85 +128,4 @@ fn main() {
         bus.cdrom.last_command()
     );
     eprintln!("spu samples produced: {}", bus.spu.samples_produced());
-}
-
-fn parse_u16_mask(text: &str) -> Option<u16> {
-    let s = text.trim();
-    if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
-        u16::from_str_radix(hex, 16).ok()
-    } else {
-        s.parse::<u16>().ok()
-    }
-}
-
-fn parse_pad_pulses(text: &str) -> Option<Vec<PadPulse>> {
-    let mut pulses = Vec::new();
-    for entry in text.split(',') {
-        let entry = entry.trim();
-        if entry.is_empty() {
-            continue;
-        }
-        pulses.push(parse_pad_pulse(entry)?);
-    }
-    Some(pulses)
-}
-
-fn parse_pad_pulse(text: &str) -> Option<PadPulse> {
-    let (mask_text, rest) = text.split_once('@')?;
-    let mask = parse_u16_mask(mask_text)?;
-    let (start_text, frames_text) = match rest.split_once('+') {
-        Some((start, frames)) => (start.trim(), frames.trim()),
-        None => (rest.trim(), "1"),
-    };
-    let start_vblank = start_text.parse().ok()?;
-    let frames = frames_text.parse().ok()?;
-    if frames == 0 {
-        return None;
-    }
-    Some(PadPulse {
-        mask,
-        start_vblank,
-        frames,
-    })
-}
-
-fn format_pad_pulses(pulses: &[PadPulse]) -> String {
-    if pulses.is_empty() {
-        return "(none)".into();
-    }
-    pulses
-        .iter()
-        .map(|pulse| {
-            format!(
-                "0x{:04x}@{}+{}",
-                pulse.mask, pulse.start_vblank, pulse.frames
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-fn effective_pad_mask(base_mask: u16, pulses: &[PadPulse], current_vblank: u64) -> u16 {
-    let mut mask = base_mask;
-    for pulse in pulses {
-        let end_vblank = pulse.start_vblank.saturating_add(pulse.frames);
-        if current_vblank >= pulse.start_vblank && current_vblank < end_vblank {
-            mask |= pulse.mask;
-        }
-    }
-    mask
-}
-
-fn sync_pad_mask(
-    bus: &mut Bus,
-    base_mask: u16,
-    pulses: &[PadPulse],
-    current_mask: &mut Option<u16>,
-) {
-    let next_mask = effective_pad_mask(base_mask, pulses, bus.irq().raise_counts()[0]);
-    if current_mask.is_some_and(|mask| mask == next_mask) {
-        return;
-    }
-    bus.set_port1_buttons(emulator_core::ButtonState::from_bits(next_mask));
-    *current_mask = Some(next_mask);
 }

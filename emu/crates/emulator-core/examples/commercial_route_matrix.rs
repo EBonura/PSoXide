@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use emulator_core::{button, Bus, ButtonState, Cpu};
-use pad_support::{effective_mask, PadPulse};
+use pad_support::{effective_mask, format_pad_pulses, PadPulse};
 
 const DEFAULT_BIOS: &str = "bios/SCPH1001.BIN";
 const DEFAULT_GAMES_ROOT: &str = "discs";
@@ -904,14 +904,6 @@ fn parity_command(disc: &Path, steps: u64, route: &RouteSpec) -> String {
         cmd.push_str(&format!(" --pad-pulses \"{pulses}\""));
     }
     cmd
-}
-
-fn format_pad_pulses(pulses: &[PadPulse]) -> String {
-    pulses
-        .iter()
-        .map(|p| format!("0x{:04x}@{}+{}", p.mask, p.start_vblank, p.frames))
-        .collect::<Vec<_>>()
-        .join(",")
 }
 
 fn dump_visible_ppm(bus: &Bus, path: &Path) -> std::io::Result<()> {
