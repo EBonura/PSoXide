@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct PadPulse {
     pub mask: u16,
     pub start_vblank: u64,
@@ -55,6 +55,39 @@ pub fn effective_mask(base: u16, pulses: &[PadPulse], current_vblank: u64) -> u1
         }
     }
     mask
+}
+
+pub fn format_pad_pulses(pulses: &[PadPulse]) -> String {
+    if pulses.is_empty() {
+        return "(none)".into();
+    }
+    pulses
+        .iter()
+        .map(|pulse| {
+            format!(
+                "0x{:04x}@{}+{}",
+                pulse.mask, pulse.start_vblank, pulse.frames
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Drive port-1 buttons from a base mask plus timed pulses, writing to
+/// the bus only when the effective mask changes (including the first
+/// call, so the initial state always lands).
+pub fn sync_pad_mask(
+    bus: &mut emulator_core::Bus,
+    base_mask: u16,
+    pulses: &[PadPulse],
+    current_mask: &mut Option<u16>,
+) {
+    let next_mask = effective_mask(base_mask, pulses, bus.irq().raise_counts()[0]);
+    if current_mask.is_some_and(|mask| mask == next_mask) {
+        return;
+    }
+    bus.set_port1_buttons(emulator_core::ButtonState::from_bits(next_mask));
+    *current_mask = Some(next_mask);
 }
 
 #[cfg(test)]

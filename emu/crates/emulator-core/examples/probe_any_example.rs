@@ -14,6 +14,10 @@ use std::time::Instant;
 
 #[path = "support/frame_probe.rs"]
 mod frame_probe;
+#[path = "support/pad.rs"]
+mod pad_support;
+
+use pad_support::parse_u16_mask;
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -211,15 +215,6 @@ fn parse_targets(text: &str) -> Vec<u64> {
         out.push(8);
     }
     out
-}
-
-fn parse_u16_mask(text: &str) -> Option<u16> {
-    let text = text.trim();
-    if let Some(hex) = text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
-        u16::from_str_radix(hex, 16).ok()
-    } else {
-        text.parse().ok()
-    }
 }
 
 fn parse_pixel(text: &str) -> Option<(u16, u16)> {

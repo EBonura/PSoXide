@@ -17,7 +17,7 @@ mod pad_support;
 use std::path::Path;
 
 use emulator_core::{Bus, Cpu};
-use pad_support::{effective_mask, parse_pad_pulses, parse_u16_mask};
+use pad_support::{parse_pad_pulses, parse_u16_mask, sync_pad_mask};
 
 fn main() {
     let trigger_step: u64 = std::env::args()
@@ -50,7 +50,7 @@ fn main() {
         .unwrap_or_default();
     let wants_pad = std::env::var_os("PSOXIDE_NO_PAD").is_none()
         && (held_buttons != 0 || !pad_pulses.is_empty());
-    let mut current_pad_mask = u16::MAX;
+    let mut current_pad_mask = None;
     let max_isr_steps = std::env::var("PSOXIDE_ISR_DUMP_MAX")
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
@@ -133,19 +133,5 @@ fn main() {
             bus.irq().mask(),
             bus.read32(0x1f80_10f4),
         );
-    }
-}
-
-fn sync_pad_mask(
-    bus: &mut Bus,
-    held_buttons: u16,
-    pad_pulses: &[pad_support::PadPulse],
-    current_pad_mask: &mut u16,
-) {
-    let vblank = bus.irq().raise_counts()[0];
-    let pad_mask = effective_mask(held_buttons, pad_pulses, vblank);
-    if pad_mask != *current_pad_mask {
-        bus.set_port1_buttons(emulator_core::ButtonState::from_bits(pad_mask));
-        *current_pad_mask = pad_mask;
     }
 }
