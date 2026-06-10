@@ -44,31 +44,6 @@ pub struct Projected {
     pub sz: u16,
 }
 
-/// Wait out any in-flight GTE command before writing GTE registers.
-///
-/// Real silicon LOSES control-register writes (CTC2) issued while a GTE
-/// command is still executing -- the documented "don't write GTE registers
-/// during command execution" hazard. The longest op a hot path issues before
-/// reloading matrices is RTPS (15 cycles); a write landing inside that window
-/// silently keeps the OLD register value. This is the root cause of the
-/// cortex player vertex explosion (burn ledger HWB-007): the skinning path
-/// reloads rotation + translation per vertex right after MVMVA/RTPS, so the
-/// X row (written first, deepest inside the execution window) was dropped on
-/// hardware and vertices were transformed by a mixed stale matrix. No
-/// emulator interlocks this; PSoXide models it behind
-/// `PSOXIDE_CTC2_DROP_DURING_EXEC`.
-///
-/// 18 NOPs cover the worst case (RTPS 15) with margin even if the caller
-/// invokes this immediately after the result reads. Call before any
-/// `load_rotation`/`load_translation` that can follow a GTE op closely.
-#[inline(always)]
-pub fn gte_write_settle() {
-    #[cfg(target_arch = "mips")]
-    unsafe {
-        asm!(".rept 18", "nop", ".endr");
-    }
-}
-
 /// Load the rotation matrix into the GTE's RT control registers (0..=4).
 pub fn load_rotation(m: &Mat3I16) {
     ctc2!(0, pack_xy(m.m[0][0], m.m[0][1]));
