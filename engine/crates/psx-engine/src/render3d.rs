@@ -2169,10 +2169,7 @@ fn project_blended_textured_model_vertex(
     // project loop, so transform view_a there instead of by hand on the CPU.
     let a = scene::transform_vertex_scheduled(vertex.position);
     let view_a = ViewVertex::new(a.x, a.y, a.z);
-    // view_b needs the secondary joint: load it and transform. The MVMVA
-    // above may still be executing when the CTC2s land -- real silicon
-    // DROPS such writes (HWB-007 vertex explosion); settle first.
-    scene::gte_write_settle();
+    // view_b needs the secondary joint: load it and transform.
     scene::load_rotation(&secondary.rotation);
     scene::load_translation(secondary.translation);
     let b = scene::transform_vertex_scheduled(vertex.position);
@@ -2180,12 +2177,9 @@ fn project_blended_textured_model_vertex(
     let view_blend = lerp_view_vertex(view_a, view_b, vertex.blend);
     // Project the blended view-space vertex on the GTE (perspective divide in
     // hardware) instead of two CPU divides, then restore the primary joint so
-    // the caller's GTE batch state is preserved on return. The restore must
-    // also settle: RTPS (15 cycles) is still in flight when it starts, and a
-    // dropped X-row write here corrupts every vertex of the NEXT iteration.
+    // the caller's GTE batch state is preserved on return.
     let projected = project_gte_view_vertex(view_blend, projection);
     player_vert_debug::observe(view_a, view_b, view_blend, projected);
-    scene::gte_write_settle();
     scene::load_rotation(&primary.rotation);
     scene::load_translation(primary.translation);
     projected
