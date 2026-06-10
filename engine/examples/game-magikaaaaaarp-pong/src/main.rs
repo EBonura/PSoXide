@@ -14,6 +14,7 @@ use psx_gpu::material::TextureMaterial;
 use psx_gpu::ot::OrderingTable;
 use psx_gpu::prim::{QuadGouraud, QuadTexturedMaterial, RectFlat};
 use psx_io::cdrom;
+use psx_math::int32::clamp_i16;
 use psx_spu::{self as spu, CdVolume, SpuAddr, Voice, Volume};
 use psx_vram::{upload_bytes, Clut, TexDepth, Tpage, VramRect};
 
@@ -855,10 +856,6 @@ fn score_flyby_x(tick: u16, dir: i8) -> i16 {
     } else {
         SCREEN_W + margin - offset
     }
-}
-
-fn clamp_i16(value: i32) -> i16 {
-    value.clamp(i16::MIN as i32, i16::MAX as i32) as i16
 }
 
 fn clamp_paddle(y: &mut i16) {

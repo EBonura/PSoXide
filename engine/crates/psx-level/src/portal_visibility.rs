@@ -7,6 +7,7 @@
 //! footprint intersects the camera cone.
 
 use crate::{LevelRoomPortalRecord, LevelRoomRecord, RoomIndex, RuntimeDebugMask};
+use psx_math::int32::mul_q12_i32;
 
 const INVALID_ROOM: RoomIndex = RoomIndex(u16::MAX);
 const INVALID_PORTAL: u16 = u16::MAX;
@@ -1353,12 +1354,6 @@ fn portal_mask_bit(portal_index: usize) -> RuntimeDebugMask {
 
 fn clamp_slope_q12(value: i32) -> i32 {
     value.clamp(-SLOPE_LIMIT_Q12, SLOPE_LIMIT_Q12)
-}
-
-fn mul_q12_i32(value: i32, q12: i32) -> i32 {
-    let whole = (value >> Q12_SHIFT).saturating_mul(q12);
-    let frac = ((value & (Q12_ONE - 1)).saturating_mul(q12)) >> Q12_SHIFT;
-    whole.saturating_add(frac)
 }
 
 fn div_q12_i32(numerator: i32, denominator: i32) -> i32 {

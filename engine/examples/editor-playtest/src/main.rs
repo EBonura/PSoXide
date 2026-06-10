@@ -112,6 +112,7 @@ use psx_level::{
     LevelCachedRoomVertexRecord, STREAMED_ROOM_CHUNK_FLAG_COLLISION_COMPACT,
     STREAMED_ROOM_CHUNK_HEADER_BYTES, STREAMED_ROOM_CHUNK_MAGIC, STREAMED_ROOM_CHUNK_VERSION,
 };
+use psx_math::int32::mul_q12_i32;
 use psx_vram::{TexDepth, Tpage};
 
 mod active_room_cache;
@@ -221,19 +222,6 @@ static mut MODEL_VERTICES: [ProjectedVertex; MODEL_VERTEX_CAP] =
 static mut JOINT_VIEW_TRANSFORMS: [JointViewTransform; JOINT_CAP] =
     [JointViewTransform::ZERO; JOINT_CAP];
 
-fn square_i32_saturating(value: i32) -> i32 {
-    let abs = value.saturating_abs();
-    if abs > 46_340 {
-        i32::MAX
-    } else {
-        abs * abs
-    }
-}
-
-fn clamp_i16(value: i32) -> i16 {
-    value.clamp(i16::MIN as i32, i16::MAX as i32) as i16
-}
-
 fn world_camera_from_position_focus(
     projection: WorldProjection,
     position: RoomPoint,
@@ -261,8 +249,8 @@ fn yaw_q12_from_basis(sin_yaw: i32, cos_yaw: i32) -> u16 {
     if sin_yaw == 0 && cos_yaw == 0 {
         return 0;
     }
-    let ax = abs_i32_saturating(sin_yaw);
-    let az = abs_i32_saturating(cos_yaw);
+    let ax = abs_i32(sin_yaw);
+    let az = abs_i32(cos_yaw);
     let base = if ax <= az {
         ax.saturating_mul(512) / az.max(1)
     } else {
@@ -282,35 +270,6 @@ fn yaw_q12_from_basis(sin_yaw: i32, cos_yaw: i32) -> u16 {
     (angle & 0x0fff) as u16
 }
 
-fn abs_i32_saturating(value: i32) -> i32 {
-    if value == i32::MIN {
-        i32::MAX
-    } else {
-        value.abs()
-    }
-}
-
-fn isqrt_i32(n: i32) -> i32 {
-    if n <= 0 {
-        return 0;
-    }
-    let mut bit = 1 << 30;
-    let mut rest = n;
-    let mut root = 0;
-    while bit > rest {
-        bit >>= 2;
-    }
-    while bit != 0 {
-        if rest >= root + bit {
-            rest -= root + bit;
-            root = (root >> 1) + bit;
-        } else {
-            root >>= 1;
-        }
-        bit >>= 2;
-    }
-    root
-}
 
 struct Playtest {
     /// Active room. `None` until `init` runs and only `Some`
@@ -847,14 +806,6 @@ fn ratio_q8_i32(numerator: i32, denominator: i32) -> i32 {
     scaled_whole
         .saturating_add(scaled_remainder)
         .min(i32::MAX as u32) as i32
-}
-
-fn mul_q12_i32(value: i32, q12: i32) -> i32 {
-    let whole = value >> Q12::FRACTIONAL_BITS;
-    let fraction = value & (Q12::SCALE - 1);
-    whole
-        .saturating_mul(q12)
-        .saturating_add(fraction.saturating_mul(q12) >> Q12::FRACTIONAL_BITS)
 }
 
 fn playtest_visual_pacing(video_mode: VideoMode) -> VisualPacing {
