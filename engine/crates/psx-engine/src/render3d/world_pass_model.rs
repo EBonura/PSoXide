@@ -376,10 +376,6 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             }
             let primary = joint_view_transforms[primary_joint];
 
-            // The previous part's last GTE op can still be executing when
-            // this part's matrix CTC2s land; silicon drops such writes
-            // (HWB-007, the milder single-bone widening). Settle first.
-            scene::gte_write_settle();
             scene::load_rotation(&primary.rotation);
             scene::load_translation(primary.translation);
 
