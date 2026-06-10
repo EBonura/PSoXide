@@ -8,10 +8,12 @@
 //! lock-on facing, and a spring-arm collision solve that shortens the
 //! boom without taking yaw control away from the player.
 
+use crate::floor_sample::{height_at_local, triangle_heights_to_quad};
 use crate::{
     fixed::div_q12_i32, Angle, CharacterCollisionRoom, RoomCollision, RoomPoint, WorldCamera,
     WorldProjection, Q12,
 };
+use psx_math::int32::{abs_i16, abs_i32, isqrt_i32};
 
 const RAY_STEPS_MAX: i32 = 8;
 const RAY_STEPS_MIN: i32 = 3;
@@ -30,7 +32,6 @@ const DIR_SOUTH: u8 = 2;
 const DIR_WEST: u8 = 3;
 const DIR_NORTH_WEST_SOUTH_EAST: u8 = 4;
 const DIR_NORTH_EAST_SOUTH_WEST: u8 = 5;
-const SPLIT_NE_SW: u8 = psx_asset::WORLD_SPLIT_NORTH_EAST_SOUTH_WEST;
 
 /// Tunables for [`ThirdPersonCameraState`].
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -642,50 +643,6 @@ fn floor_height_at(room: RoomCollision<'_, '_>, x: i32, z: i32) -> Option<i32> {
     ))
 }
 
-fn triangle_heights_to_quad(
-    mut fallback: [i32; 4],
-    split: u8,
-    triangle: usize,
-    heights: [i32; 3],
-) -> [i32; 4] {
-    let corners = psx_asset::world_topology::split_triangles(split)[triangle.min(1)];
-    fallback[corners[0]] = heights[0];
-    fallback[corners[1]] = heights[1];
-    fallback[corners[2]] = heights[2];
-    fallback
-}
-
-fn height_at_local(heights: [i32; 4], split: u8, local_x: i32, local_z: i32, sector: i32) -> i32 {
-    let u = local_x.clamp(0, sector);
-    let v = local_z.clamp(0, sector);
-    let [nw, ne, se, sw] = heights;
-    if split == SPLIT_NE_SW {
-        if u + v <= sector {
-            nw.saturating_add(mul_sector(ne.saturating_sub(nw), u, sector))
-                .saturating_add(mul_sector(sw.saturating_sub(nw), v, sector))
-        } else {
-            sw.saturating_add(mul_sector(se.saturating_sub(sw), u, sector))
-                .saturating_add(mul_sector(ne.saturating_sub(se), sector - v, sector))
-        }
-    } else if v <= u {
-        nw.saturating_add(mul_sector(ne.saturating_sub(nw), u - v, sector))
-            .saturating_add(mul_sector(se.saturating_sub(nw), v, sector))
-    } else {
-        nw.saturating_add(mul_sector(se.saturating_sub(sw), u, sector))
-            .saturating_add(mul_sector(sw.saturating_sub(nw), v, sector))
-    }
-}
-
-fn mul_sector(delta: i32, amount: i32, sector: i32) -> i32 {
-    if sector <= 0 {
-        0
-    } else {
-        let whole = (delta / sector).saturating_mul(amount);
-        let remainder = delta % sector;
-        whole.saturating_add(remainder.saturating_mul(amount) / sector)
-    }
-}
-
 fn solve_camera_collision(
     collision: Option<RoomCollision<'_, '_>>,
     focus: RoomPoint,
@@ -1286,46 +1243,6 @@ fn lerp_vertex(from: RoomPoint, to: RoomPoint, num: i32, den: i32) -> RoomPoint 
         from.y + ((to.y - from.y) * num) / den,
         from.z + ((to.z - from.z) * num) / den,
     )
-}
-
-fn isqrt_i32(n: i32) -> i32 {
-    if n <= 0 {
-        return 0;
-    }
-    let mut bit = 1 << 30;
-    let mut rest = n;
-    let mut root = 0;
-    while bit > rest {
-        bit >>= 2;
-    }
-    while bit != 0 {
-        if rest >= root + bit {
-            rest -= root + bit;
-            root = (root >> 1) + bit;
-        } else {
-            root >>= 1;
-        }
-        bit >>= 2;
-    }
-    root
-}
-
-fn abs_i16(value: i16) -> i16 {
-    if value == i16::MIN {
-        i16::MAX
-    } else if value < 0 {
-        -value
-    } else {
-        value
-    }
-}
-
-fn abs_i32(value: i32) -> i32 {
-    if value == i32::MIN {
-        i32::MAX
-    } else {
-        value.abs()
-    }
 }
 
 #[cfg(test)]

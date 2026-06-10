@@ -11,7 +11,7 @@ mod pad_support;
 use emulator_core::{
     fast_boot_disc_with_hle, warm_bios_for_disc_fast_boot, Bus, Cpu, DISC_FAST_BOOT_WARMUP_STEPS,
 };
-use pad_support::{effective_mask, parse_pad_pulses, parse_u16_mask};
+use pad_support::{effective_mask, format_pad_pulses, parse_pad_pulses, parse_u16_mask};
 use std::path::Path;
 
 fn main() {
@@ -179,22 +179,6 @@ fn main() {
             cpu.exception_counts()[9],
         );
     }
-}
-
-fn format_pad_pulses(pulses: &[pad_support::PadPulse]) -> String {
-    if pulses.is_empty() {
-        return "(none)".into();
-    }
-    pulses
-        .iter()
-        .map(|pulse| {
-            format!(
-                "0x{:04x}@{}+{}",
-                pulse.mask, pulse.start_vblank, pulse.frames
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 fn dump_gprs(cpu: &Cpu) {

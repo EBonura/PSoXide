@@ -12,6 +12,7 @@ psx-hw       = { workspace = true }
 psx-iso      = { workspace = true }
 psx-trace    = { workspace = true }
 psx-gte-core = { workspace = true }
+psx-telemetry = { workspace = true }
 thiserror    = { workspace = true }
 
 [dev-dependencies]

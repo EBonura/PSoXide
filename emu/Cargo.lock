@@ -1106,6 +1106,7 @@ dependencies = [
  "psx-gte-core",
  "psx-hw",
  "psx-iso",
+ "psx-telemetry",
  "psx-trace",
  "thiserror 1.0.69",
 ]
@@ -1324,7 +1325,6 @@ dependencies = [
  "psx-asset",
  "psx-engine",
  "psx-gpu",
- "psx-gpu-compute",
  "psx-gpu-render",
  "psx-gte",
  "psx-iso",
@@ -2936,6 +2936,7 @@ dependencies = [
  "psx-pad",
  "psx-rt",
  "psx-spu",
+ "psx-telemetry",
  "psx-vram",
 ]
 
@@ -2959,23 +2960,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "psx-gpu-compute"
-version = "0.1.0"
-dependencies = [
- "bitflags 2.11.1",
- "bytemuck",
- "emulator-core",
- "pollster 0.3.0",
- "psoxide-settings",
- "psx-iso",
- "thiserror 1.0.69",
- "wgpu",
-]
-
-[[package]]
 name = "psx-gpu-render"
 version = "0.1.0"
 dependencies = [
+ "bitflags 2.11.1",
  "bytemuck",
  "egui",
  "egui-wgpu",
@@ -2983,8 +2971,8 @@ dependencies = [
  "pollster 0.3.0",
  "psoxide-settings",
  "psx-gpu",
- "psx-gpu-compute",
  "psx-iso",
+ "thiserror 1.0.69",
  "wgpu",
 ]
 
@@ -3023,6 +3011,9 @@ version = "0.1.0"
 [[package]]
 name = "psx-level"
 version = "0.1.0"
+dependencies = [
+ "psx-math",
+]
 
 [[package]]
 name = "psx-math"
@@ -3051,6 +3042,10 @@ dependencies = [
  "psx-hw",
  "psx-io",
 ]
+
+[[package]]
+name = "psx-telemetry"
+version = "0.1.0"
 
 [[package]]
 name = "psx-trace"

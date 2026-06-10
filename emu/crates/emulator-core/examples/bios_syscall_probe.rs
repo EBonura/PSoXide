@@ -17,7 +17,7 @@ mod disc_support;
 mod pad_support;
 
 use emulator_core::{Bus, Cpu};
-use pad_support::{effective_mask, parse_pad_pulses, parse_u16_mask};
+use pad_support::{parse_pad_pulses, parse_u16_mask, sync_pad_mask};
 use std::path::PathBuf;
 
 const SPU_PUMP_CYCLES: u64 = 560_000;
@@ -65,7 +65,7 @@ fn main() {
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(128);
     let mut trace_count = 0usize;
-    let mut current_pad_mask = u16::MAX;
+    let mut current_pad_mask = None;
     let mut cycles_at_last_pump = 0u64;
 
     // Histograms: [table][function_index] → call count.
@@ -240,20 +240,6 @@ fn main() {
             "  step {step:>10}  {}(0x{:02X}) {} ra=0x{:08x}",
             labels[*table as usize], fn_no, name, ra
         );
-    }
-}
-
-fn sync_pad_mask(
-    bus: &mut Bus,
-    held_buttons: u16,
-    pad_pulses: &[pad_support::PadPulse],
-    current_pad_mask: &mut u16,
-) {
-    let vblank = bus.irq().raise_counts()[0];
-    let pad_mask = effective_mask(held_buttons, pad_pulses, vblank);
-    if pad_mask != *current_pad_mask {
-        bus.set_port1_buttons(emulator_core::ButtonState::from_bits(pad_mask));
-        *current_pad_mask = pad_mask;
     }
 }
 
