@@ -24,47 +24,6 @@ struct DrawArea {
 @group(0) @binding(1) var<uniform> prim: MonoRect;
 @group(0) @binding(2) var<uniform> draw_area: DrawArea;
 
-const VRAM_WIDTH: i32 = 1024;
-const VRAM_HEIGHT: i32 = 512;
-
-const FLAG_SEMI_TRANS: u32 = 1u << 0u;
-const FLAG_MASK_CHECK: u32 = 1u << 1u;
-const FLAG_MASK_SET:   u32 = 1u << 2u;
-
-const BLEND_AVERAGE:    u32 = 0u;
-const BLEND_ADD:        u32 = 1u;
-const BLEND_SUB:        u32 = 2u;
-const BLEND_ADDQUARTER: u32 = 3u;
-
-fn blend(bg_word: u32, fg_word: u32, mode: u32) -> u32 {
-    let br = i32(bg_word & 0x1Fu);
-    let bg = i32((bg_word >> 5u) & 0x1Fu);
-    let bb = i32((bg_word >> 10u) & 0x1Fu);
-    let fr = i32(fg_word & 0x1Fu);
-    let fg = i32((fg_word >> 5u) & 0x1Fu);
-    let fb = i32((fg_word >> 10u) & 0x1Fu);
-    var r: i32; var g: i32; var b: i32;
-    switch mode {
-        case BLEND_AVERAGE: {
-            r = (br >> 1u) + (fr >> 1u);
-            g = (bg >> 1u) + (fg >> 1u);
-            b = (bb >> 1u) + (fb >> 1u);
-        }
-        case BLEND_ADD: {
-            r = min(br + fr, 31); g = min(bg + fg, 31); b = min(bb + fb, 31);
-        }
-        case BLEND_SUB: {
-            r = max(br - fr, 0); g = max(bg - fg, 0); b = max(bb - fb, 0);
-        }
-        case BLEND_ADDQUARTER, default: {
-            r = min(br + (fr >> 2u), 31);
-            g = min(bg + (fg >> 2u), 31);
-            b = min(bb + (fb >> 2u), 31);
-        }
-    }
-    return u32(r) | (u32(g) << 5u) | (u32(b) << 10u) | (fg_word & 0x8000u);
-}
-
 @compute @workgroup_size(8, 8)
 fn rasterize(@builtin(global_invocation_id) gid: vec3<u32>) {
     // One thread per pixel inside the rect. Out-of-rect threads

@@ -64,67 +64,7 @@ struct ScanlineConsts {
 @group(0) @binding(4) var<storage, read> rows: array<RowState>;
 @group(0) @binding(5) var<uniform> consts: ScanlineConsts;
 
-const VRAM_WIDTH: i32 = 1024;
-const VRAM_HEIGHT: i32 = 512;
-const VRAM_WIDTH_U: u32 = 1024u;
-const VRAM_HEIGHT_U: u32 = 512u;
-
-const FLAG_SEMI_TRANS:  u32 = 1u << 0u;
-const FLAG_MASK_CHECK:  u32 = 1u << 1u;
-const FLAG_MASK_SET:    u32 = 1u << 2u;
-const FLAG_RAW_TEXTURE: u32 = 1u << 3u;
-const FLAG_DITHER:      u32 = 1u << 6u;
-
-const BLEND_AVERAGE:    u32 = 0u;
-const BLEND_ADD:        u32 = 1u;
-const BLEND_SUB:        u32 = 2u;
-const BLEND_ADDQUARTER: u32 = 3u;
-
-const DEPTH_4BPP:  u32 = 0u;
-const DEPTH_8BPP:  u32 = 1u;
-const DEPTH_15BPP: u32 = 2u;
-
-const DITHER_TABLE: array<u32, 16> = array<u32, 16>(
-    7u, 0u, 6u, 1u, 2u, 5u, 3u, 4u,
-    1u, 6u, 0u, 7u, 4u, 3u, 5u, 2u,
-);
-
-// Wrapping-u32 determinant-plane evaluation, identical to the CPU's
-// `eval`: the result is already the 8-bit attribute value.
-fn plane_eval(dadx: u32, dady: u32, base: u32, x: i32, y: i32) -> u32 {
-    return (base + u32(x) * dadx + u32(y) * dady) >> 24u;
-}
-
 // Texture sampling, blend, modulation — same as tex_tri_scanline.
-
-fn blend(bg_word: u32, fg_word: u32, mode: u32) -> u32 {
-    let br = i32(bg_word & 0x1Fu);
-    let bg = i32((bg_word >> 5u) & 0x1Fu);
-    let bb = i32((bg_word >> 10u) & 0x1Fu);
-    let fr = i32(fg_word & 0x1Fu);
-    let fg = i32((fg_word >> 5u) & 0x1Fu);
-    let fb = i32((fg_word >> 10u) & 0x1Fu);
-    var r: i32; var g: i32; var b: i32;
-    switch mode {
-        case BLEND_AVERAGE: {
-            r = (br >> 1u) + (fr >> 1u);
-            g = (bg >> 1u) + (fg >> 1u);
-            b = (bb >> 1u) + (fb >> 1u);
-        }
-        case BLEND_ADD: {
-            r = min(br + fr, 31); g = min(bg + fg, 31); b = min(bb + fb, 31);
-        }
-        case BLEND_SUB: {
-            r = max(br - fr, 0); g = max(bg - fg, 0); b = max(bb - fb, 0);
-        }
-        case BLEND_ADDQUARTER, default: {
-            r = min(br + (fr >> 2u), 31);
-            g = min(bg + (fg >> 2u), 31);
-            b = min(bb + (fb >> 2u), 31);
-        }
-    }
-    return u32(r) | (u32(g) << 5u) | (u32(b) << 10u) | (fg_word & 0x8000u);
-}
 
 fn sample_texture(u_in: u32, v_in: u32) -> u32 {
     let u8v = u_in & 0xFFu;
@@ -160,33 +100,6 @@ fn sample_texture(u_in: u32, v_in: u32) -> u32 {
         }
     }
     return texel;
-}
-
-fn modulate_5bit(texel: u32, tr: u32, tg: u32, tb: u32) -> u32 {
-    let txr = texel & 0x1Fu;
-    let txg = (texel >> 5u) & 0x1Fu;
-    let txb = (texel >> 10u) & 0x1Fu;
-    let r = min((tr * txr) / 0x80u, 0x1Fu);
-    let g = min((tg * txg) / 0x80u, 0x1Fu);
-    let b = min((tb * txb) / 0x80u, 0x1Fu);
-    return r | (g << 5u) | (b << 10u) | (texel & 0x8000u);
-}
-
-fn modulate_dithered(texel: u32, tr: u32, tg: u32, tb: u32, x: i32, y: i32) -> u32 {
-    let txr = (texel & 0x1Fu) << 3u;
-    let txg = ((texel >> 5u) & 0x1Fu) << 3u;
-    let txb = ((texel >> 10u) & 0x1Fu) << 3u;
-    let r = min((tr * txr) / 0x80u, 0xFFu);
-    let g = min((tg * txg) / 0x80u, 0xFFu);
-    let b = min((tb * txb) / 0x80u, 0xFFu);
-    let coeff = DITHER_TABLE[u32(y & 3) * 4u + u32(x & 3)];
-    var rc = r >> 3u;
-    var gc = g >> 3u;
-    var bc = b >> 3u;
-    if rc < 0x1Fu && (r & 7u) > coeff { rc = rc + 1u; }
-    if gc < 0x1Fu && (g & 7u) > coeff { gc = gc + 1u; }
-    if bc < 0x1Fu && (b & 7u) > coeff { bc = bc + 1u; }
-    return rc | (gc << 5u) | (bc << 10u) | (texel & 0x8000u);
 }
 
 @compute @workgroup_size(8, 8)
