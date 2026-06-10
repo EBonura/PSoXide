@@ -196,6 +196,128 @@ pub(crate) fn draw_centered_text(font: &FontAtlas, y: i16, text: &str, tint: (u8
     font.draw_text(x, y, text, tint);
 }
 
+/// DIAGNOSTIC (vertex-explosion probe, not for release): the controlled
+/// fixed-pose diff (IMG_6161-6165) showed the stretch is HORIZONTAL -- only
+/// the projected X widens on hardware, while depth/Y/projection match the
+/// emulator. So the view-space X is computed wider on hardware. This overlay
+/// shows the view-space X EXTENT (min..max) per skinning stage to find which
+/// step widens it:
+///   AX = primary-joint transform view-space X
+///   BX = secondary-joint transform view-space X (AFTER the GTE matrix reload)
+///   LX = blended (lerp) view-space X
+///   SX = projected screen X range (the symptom), O = verts off hw bounds
+/// Whichever of AX/BX/LX widens on hardware vs the emulator is the culprit.
+/// Reads + RESETS the per-frame accumulator.
+pub(crate) fn draw_player_vert_debug(font: &FontAtlas) {
+    use psx_engine::render3d::player_vert_debug as vdbg;
+    let b = vdbg::get();
+
+    // No blended verts observed this frame (model culled / not yet rendered):
+    // the accumulator still holds its i32::MAX/MIN sentinels, which would
+    // photograph as plausible-looking garbage. Say so explicitly instead.
+    if b.total == 0 {
+        font.draw_text(8, 44, "NO VERTS", (255, 90, 90));
+        vdbg::reset();
+        return;
+    }
+
+    // Below the HUD bars. The stretch is HORIZONTAL, so we show the view-space
+    // X EXTENT (min..max) per skinning stage -- the stage whose X widens on
+    // hardware vs the emulator is the bug. AX = primary joint, BX = secondary
+    // joint after the GTE matrix reload, LX = blended (lerp). SX = projected.
+    let mut l1 = DbgLine::new();
+    l1.s(b"AX ");
+    l1.i(b.ax_min);
+    l1.s(b"..");
+    l1.i(b.ax_max);
+    font.draw_text(8, 44, l1.text(), (255, 232, 120));
+
+    let mut l2 = DbgLine::new();
+    l2.s(b"BX ");
+    l2.i(b.bx_min);
+    l2.s(b"..");
+    l2.i(b.bx_max);
+    font.draw_text(8, 56, l2.text(), (255, 200, 120));
+
+    let mut l3 = DbgLine::new();
+    l3.s(b"LX ");
+    l3.i(b.lx_min);
+    l3.s(b"..");
+    l3.i(b.lx_max);
+    font.draw_text(8, 68, l3.text(), (255, 170, 120));
+
+    let mut l4 = DbgLine::new();
+    l4.s(b"SX ");
+    l4.i(b.scr_min_x as i32);
+    l4.s(b"..");
+    l4.i(b.scr_max_x as i32);
+    l4.s(b" O ");
+    l4.i(b.oob as i32);
+    font.draw_text(8, 80, l4.text(), (160, 230, 255));
+
+    // ALL-path projected X (blended + single-bone batch + remainder), from
+    // the model pass accumulator. SX above covers only the blended verts;
+    // PX wider than SX on hardware = the single-bone paths widen too.
+    let mut l5 = DbgLine::new();
+    l5.s(b"PX ");
+    l5.i(b.px_min as i32);
+    l5.s(b"..");
+    l5.i(b.px_max as i32);
+    font.draw_text(8, 92, l5.text(), (120, 255, 220));
+
+    vdbg::reset();
+}
+
+/// Tiny stack-buffer line builder for the diagnostic overlay (no_std, no alloc).
+struct DbgLine {
+    buf: [u8; 48],
+    len: usize,
+}
+
+impl DbgLine {
+    fn new() -> Self {
+        Self {
+            buf: [0; 48],
+            len: 0,
+        }
+    }
+    fn b(&mut self, c: u8) {
+        if self.len < self.buf.len() {
+            self.buf[self.len] = c;
+            self.len += 1;
+        }
+    }
+    fn s(&mut self, t: &[u8]) {
+        for &c in t {
+            self.b(c);
+        }
+    }
+    fn i(&mut self, v: i32) {
+        if v < 0 {
+            self.b(b'-');
+        }
+        let mut n = v.unsigned_abs();
+        let mut tmp = [0u8; 10];
+        let mut t = 0;
+        loop {
+            tmp[t] = b'0' + (n % 10) as u8;
+            t += 1;
+            n /= 10;
+            if n == 0 {
+                break;
+            }
+        }
+        while t > 0 {
+            t -= 1;
+            self.b(tmp[t]);
+        }
+    }
+    fn text(&self) -> &str {
+        // SAFETY: only ASCII digits/letters/punctuation pushed above.
+        unsafe { core::str::from_utf8_unchecked(&self.buf[..self.len]) }
+    }
+}
+
 fn draw_status_bar(
     x: i16,
     y: i16,
