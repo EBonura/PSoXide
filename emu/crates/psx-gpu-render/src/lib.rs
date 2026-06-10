@@ -25,23 +25,59 @@
 //!   tracks the texture's pixel dims, so density follows S
 //!   automatically -- no shader maths changes when S does.
 //!
-//! ## Sibling crates
+//! ## Two backends, one crate
 //!
-//! - `psx-gpu-compute` -- compute-shader rasterizer that matches the
-//!   CPU rasterizer pixel-for-pixel; the parity oracle for the
-//!   shared decode path (`psx-gpu-compute::decode`).
+//! This crate owns BOTH host-GPU implementations of the PSX GPU:
+//!
+//! - **Enhanced** ([`HwRenderer`], `pipeline`/`target`/`translator`):
+//!   the user-facing render pipeline described above. Upscales, but
+//!   is not bit-exact (host coverage rule, f32 interpolation, no
+//!   dither).
+//! - **Accurate** ([`ComputeBackend`], `rasterizer`/`scanline`/
+//!   `vram`/`replay`): a compute-shader rasterizer that reproduces
+//!   the silicon-matched CPU rasterizer pixel-for-pixel at native
+//!   resolution. Serves as the parity oracle for the shared decode
+//!   path and as the seed for any future accurate display mode.
+//!
+//! Both consume the same `GpuCmdLogEntry` stream (recorded by
+//! `emulator-core::Gpu`, or synthesized from an engine OT by
+//! [`from_ot::build_cmd_log`]) through the shared `decode` helpers.
+//!
+//! ## Sibling crate
+//!
 //! - `emulator-core` -- owns `Gpu` (CPU rasterizer + VRAM + cmd_log)
-//!   and `Bus`.
+//!   and `Bus`. Its CPU rasterizer is the source of truth.
 
+pub mod decode;
 pub mod from_ot;
 pub mod pipeline;
+pub mod primitive;
+pub mod rasterizer;
+pub mod replay;
+pub mod scanline;
 pub mod target;
 pub mod translator;
+pub mod vram;
 
 pub use from_ot::build_cmd_log;
 pub use pipeline::{BlendKind, HwPipeline, HwVertex};
 pub use target::{RenderTarget, MAX_SCALE, VRAM_HEIGHT, VRAM_WIDTH};
 pub use translator::{DrawRun, TranslatedFrame, Translator};
+
+// Accurate (compute) backend surface, formerly the psx-gpu-compute
+// crate root. `vram` also defines VRAM_WIDTH/VRAM_HEIGHT with the
+// same values as `target`; reach them via the module path.
+pub use decode::{
+    apply_primitive_tpage, decode_blend_mode, decode_clut, decode_tint, decode_uv, decode_vertex,
+    is_raw_texture, is_semi_trans, rgb24_to_bgr15, sign_extend_11, ReplayState,
+};
+pub use primitive::{
+    BlendMode, DrawArea, Fill, MonoRect, MonoTri, PrimFlags, ShadedTexTri, ShadedTri,
+    TexQuadBilinear, TexRect, TexTri, Tpage,
+};
+pub use rasterizer::Rasterizer;
+pub use replay::ComputeBackend;
+pub use vram::{VramGpu, VramGpuError, VRAM_FORMAT};
 
 use emulator_core::gpu::GpuCmdLogEntry;
 use emulator_core::Gpu;

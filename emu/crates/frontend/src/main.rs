@@ -149,7 +149,7 @@ struct Shell {
     /// rasterizer is shadowing the CPU rasterizer: each frame the
     /// CPU's `cmd_log` is drained and replayed onto the GPU compute
     /// path, and the display reads from the GPU's VRAM.
-    compute_backend: Option<psx_gpu_compute::ComputeBackend>,
+    compute_backend: Option<psx_gpu_render::ComputeBackend>,
     /// Whether to display the GPU compute output instead of the CPU
     /// VRAM. Toggled at runtime by F12. Independent of whether the
     /// compute backend is active -- when off, GPU still runs (so it
@@ -196,7 +196,7 @@ impl Shell {
         // and is invisible next to the rasterizer cost.
         let compute_backend = if gpu_compute {
             eprintln!("[gpu-compute] enabling shadow compute rasterizer");
-            Some(psx_gpu_compute::ComputeBackend::new_headless())
+            Some(psx_gpu_render::ComputeBackend::new_headless())
         } else {
             None
         };
