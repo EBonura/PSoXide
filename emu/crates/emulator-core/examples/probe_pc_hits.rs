@@ -6,7 +6,7 @@ mod disc_support;
 mod pad_support;
 
 use emulator_core::{Bus, Cpu};
-use pad_support::{effective_mask, parse_pad_pulses, parse_u16_mask};
+use pad_support::{parse_pad_pulses, parse_u16_mask, sync_pad_mask};
 use std::path::Path;
 
 #[derive(Clone)]
@@ -51,7 +51,7 @@ fn main() {
     bus.attach_digital_pad_port1();
     bus.attach_memcard_port1(Vec::new());
     let mut cpu = Cpu::new();
-    let mut current_pad_mask = u16::MAX;
+    let mut current_pad_mask = None;
 
     let mut hits = 0usize;
     let hit_limit = std::env::var("PSOXIDE_PC_HIT_LIMIT")
@@ -182,20 +182,6 @@ fn maybe_log_hit(
         return true;
     }
     false
-}
-
-fn sync_pad_mask(
-    bus: &mut Bus,
-    held_buttons: u16,
-    pad_pulses: &[pad_support::PadPulse],
-    current_pad_mask: &mut u16,
-) {
-    let vblank = bus.irq().raise_counts()[0];
-    let pad_mask = effective_mask(held_buttons, pad_pulses, vblank);
-    if pad_mask != *current_pad_mask {
-        bus.set_port1_buttons(emulator_core::ButtonState::from_bits(pad_mask));
-        *current_pad_mask = pad_mask;
-    }
 }
 
 fn maybe_pump_spu(
