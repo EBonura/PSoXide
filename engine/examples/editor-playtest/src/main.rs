@@ -42,7 +42,10 @@ fn game_trace(message: &str) {
 fn game_trace(_message: &str) {}
 
 use psx_asset::{Animation, Model, ModelPart, ModelVertex, Texture};
-#[cfg(feature = "vis-full-active-chunks")]
+// Used by the vis-full-active-chunks default AND by the PVS path's
+// no-anchor fallback (a far room with no usable portal anchor draws
+// every cell through the cached path).
+#[cfg(feature = "world-grid-visible")]
 use psx_engine::draw_indexed_cached_room_vertex_lit_all_cells;
 use psx_engine::ui::UiTextureSlot;
 #[cfg(feature = "cd-stream-bench")]
