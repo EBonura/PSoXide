@@ -208,12 +208,16 @@ pub(super) const ROOM_VISIBLE_CELL_WEDGE_DEN: i32 = 4;
 ))]
 pub(super) const ROOM_VISIBLE_CELL_STATIONARY_CANDIDATES: bool = true;
 #[cfg(feature = "world-grid-visible")]
-pub(super) const MAX_PRECOMPUTED_VISIBLE_CELLS: usize = 1024;
+// Right-sized 2026-06-11 (perf-30fps RAM map): 1024-cell pools cost
+// ~26KB of .bss the 2MB budget cannot spare, while gameplay telemetry
+// peaks at 77 visible cells; the runtime degrades gracefully past the
+// cap (overflow guards fall back to uncached selection).
+pub(super) const MAX_PRECOMPUTED_VISIBLE_CELLS: usize = 192;
 #[cfg(all(
     feature = "world-grid-visible",
     not(feature = "vis-full-active-chunks")
 ))]
-pub(super) const MAX_ACTIVE_VISIBLE_CELLS: usize = 1024;
+pub(super) const MAX_ACTIVE_VISIBLE_CELLS: usize = 192;
 
 pub(super) fn room_draw_distance(record: &LevelRoomRecord) -> i32 {
     record.draw_distance.max(NEAR_Z + 128)
