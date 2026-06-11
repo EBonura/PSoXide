@@ -85,46 +85,27 @@ fn draw_header(
     cpu: &Cpu,
     breakpoints: &mut BTreeSet<u32>,
 ) {
+    // Two compact rows instead of four stacked strips:
+    //   1) address input + page nav + breakpoint toggle
+    //   2) region quick-jumps + view mode (wraps as a unit when narrow)
     ui.horizontal(|ui| {
-        ui.label("addr");
         let resp = ui.add(
             egui::TextEdit::singleline(&mut view.addr_input)
-                .desired_width(80.0)
+                .desired_width(78.0)
                 .font(egui::TextStyle::Monospace),
         );
         if resp.lost_focus() && resp.ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
             apply_addr_input(view);
         }
-    });
-
-    ui.horizontal_wrapped(|ui| {
-        if ui.button("RAM").clicked() {
-            view.jump_to(0x8000_0000);
-        }
-        if ui.button("Scratchpad").clicked() {
-            view.jump_to(0x1F80_0000);
-        }
-        if ui.button("MMIO").clicked() {
-            view.jump_to(0x1F80_1000);
-        }
-        if ui.button("BIOS").clicked() {
-            view.jump_to(0xBFC0_0000);
-        }
-        if ui.button("PC").clicked() {
-            view.jump_to(cpu.pc());
-        }
-    });
-
-    ui.horizontal(|ui| {
         let step = match view.mode {
             ViewMode::Hex => 256,
             ViewMode::Disasm => 64, // 16 instructions
         };
-        if ui.button(format!("◀ -{step}")).clicked() {
+        if ui.small_button("◀").on_hover_text(format!("-{step}")).clicked() {
             view.addr = view.addr.wrapping_sub(step);
             view.addr_input = format!("{:08X}", view.addr);
         }
-        if ui.button(format!("+{step} ▶")).clicked() {
+        if ui.small_button("▶").on_hover_text(format!("+{step}")).clicked() {
             view.addr = view.addr.wrapping_add(step);
             view.addr_input = format!("{:08X}", view.addr);
         }
@@ -133,14 +114,24 @@ fn draw_header(
         } else {
             "Set BP"
         };
-        if ui.button(bp_label).clicked() && !breakpoints.remove(&view.addr) {
+        if ui.small_button(bp_label).clicked() && !breakpoints.remove(&view.addr) {
             breakpoints.insert(view.addr);
         }
     });
 
-    // Mode toggle -- separate row so it doesn't fight for space with
-    // the nav buttons.
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
+        for (label, target) in [
+            ("RAM", Some(0x8000_0000)),
+            ("Scratch", Some(0x1F80_0000)),
+            ("MMIO", Some(0x1F80_1000)),
+            ("BIOS", Some(0xBFC0_0000)),
+            ("PC", None),
+        ] {
+            if ui.small_button(label).clicked() {
+                view.jump_to(target.unwrap_or_else(|| cpu.pc()));
+            }
+        }
+        ui.separator();
         ui.radio_value(&mut view.mode, ViewMode::Hex, "Hex");
         ui.radio_value(&mut view.mode, ViewMode::Disasm, "Disasm");
     });
