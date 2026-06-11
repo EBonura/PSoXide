@@ -3,7 +3,6 @@ resolver = "2"
 members = [
     "crates/emulator-core",
     "crates/frontend",
-    "crates/parity-oracle",
     "crates/psoxide-settings",
     "crates/psoxide-validation",
     "crates/psx-gpu-render",
@@ -43,7 +42,6 @@ psxed-project = { path = "../editor/crates/psxed-project" }
 
 # Host-workspace-internal deps (one crate depends on another here).
 emulator-core    = { path = "crates/emulator-core" }
-parity-oracle    = { path = "crates/parity-oracle" }
 psoxide-settings = { path = "crates/psoxide-settings" }
 psoxide-validation = { path = "crates/psoxide-validation" }
 psx-gpu-render   = { path = "crates/psx-gpu-render" }

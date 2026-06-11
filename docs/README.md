@@ -48,7 +48,7 @@ Per-subsystem behavioural notes backing the emulator, in [`hardware-refs/`](hard
 
 | Doc | Topic |
 |-----|-------|
-| [redux-oracle.md](redux-oracle.md) | PCSX-Redux parity oracle. |
+| [redux-oracle.md](redux-oracle.md) | PCSX-Redux parity oracle (retired; hardware is the oracle). |
 | [commercial-parity-tracker.md](commercial-parity-tracker.md) | Retail-disc compatibility status. |
 | [hardware-burn-ledger.md](hardware-burn-ledger.md) | Cortex Ignition V1 CD-R burn observations and follow-up gates. |
 | [hardware-visual-checkpoints.md](hardware-visual-checkpoints.md) | TV-visible Cortex Ignition V1 checkpoint code/color map. |
