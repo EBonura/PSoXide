@@ -902,61 +902,6 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         stats
     }
 
-    /// Submit a PREBUILT textured Gouraud quad from a caller-owned
-    /// static pool instead of the per-frame arena.
-    ///
-    /// `fill` writes the full packet skeleton (opcode, texture window,
-    /// UV/clut/tpage words) -- done once when the pool slot is claimed
-    /// for a room; afterwards only the four vertex words and four
-    /// colour words are rewritten per frame. In-place patching is safe
-    /// because the present flip drains the ordering-table DMA before
-    /// the next render touches any packet.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn submit_prebuilt_textured_gouraud_quad(
-        &mut self,
-        quad: &mut QuadTexturedGouraud,
-        fill: bool,
-        verts: [ProjectedVertex; 4],
-        uv_words: [u16; 4],
-        colors: [(u8, u8, u8); 4],
-        material: TexturedGouraudPacketMaterial,
-        options: WorldSurfaceOptions,
-        prepared_depth: PreparedTriangleDepth,
-    ) -> WorldRenderStats {
-        let mut stats = WorldRenderStats::default();
-        if self.command_len >= self.commands.len() {
-            stats.command_overflow = true;
-            return stats;
-        }
-        let xy = [
-            (verts[0].sx, verts[0].sy),
-            (verts[1].sx, verts[1].sy),
-            (verts[2].sx, verts[2].sy),
-            (verts[3].sx, verts[3].sy),
-        ];
-        if fill {
-            *quad = QuadTexturedGouraud::with_packet_material_packed_uv_words(
-                xy, uv_words, colors, material,
-            );
-        } else {
-            quad.set_positions(xy);
-            quad.set_colors(colors);
-        }
-        self.push_command(
-            prepared_depth.slot,
-            prepared_depth.depth,
-            if material.is_translucent() {
-                WorldRenderLayer::Transparent
-            } else {
-                options.render_layer
-            },
-            quad as *mut QuadTexturedGouraud as *mut u32,
-            QuadTexturedGouraud::WORDS,
-        );
-        stats.submitted_triangles = 1;
-        stats
-    }
-
     #[cfg(feature = "room-surface-profile")]
     #[allow(dead_code)]
     #[inline(always)]
