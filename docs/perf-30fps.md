@@ -536,3 +536,29 @@ reciprocal (MULT high-part, native on MIPS) removes a per-face DIV.
   (196%). Remaining program: update residual markers (99k
   unattributed), player LLM-slot (#43), joints (#45), image_props,
   visible-list camera split.
+
+## CORRECTION: room-quad round REVERTED (user-found visual regression)
+
+The prebuilt pool + quad upgrade (cd22fb12) is reverted: the user saw
+broken rendering in a plain `make run`. Root cause of the worst part:
+the pool's skeleton fill was lazy PER SURFACE while the fill flag was
+per ROOM -- a surface screen-culled or rejected on the frame its room
+claimed a pool slot never got its skeleton written, and every later
+frame patched and drew a ZEROED packet into the OT (invalid GP0
+opcode word = corrupted command stream). The quad-depth upgrade also
+changed draw order without a visual gate.
+
+Verification failure, recorded so it cannot repeat: the change was
+gated on cycle counts and ONE end-of-tape frame that did not exercise
+the broken surfaces. New protocol for ANY change that touches packet
+contents, draw order, or culling:
+1. Frame dumps at MULTIPLE tape positions (--guest-frames N for
+   several N), compared against the same positions on the previous
+   build; any unexplained pixel diff blocks the change.
+2. The DEFAULT build (`make run` features) must be one of the tested
+   shapes, not only the PVS profiling shape.
+3. Cycle wins are not evidence of correctness -- a change that draws
+   less is faster and wrong.
+If the prebuild returns, the fill must write EVERY surface's skeleton
+at claim time (a dedicated fill pass over the room's surface slice),
+not lazily from the draw path.
