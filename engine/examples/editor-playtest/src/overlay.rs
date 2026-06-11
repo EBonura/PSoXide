@@ -221,10 +221,42 @@ pub(crate) fn draw_player_vert_debug(font: &FontAtlas) {
         return;
     }
 
-    // Below the HUD bars. The stretch is HORIZONTAL, so we show the view-space
-    // X EXTENT (min..max) per skinning stage -- the stage whose X widens on
-    // hardware vs the emulator is the bug. AX = primary joint, BX = secondary
-    // joint after the GTE matrix reload, LX = blended (lerp). SX = projected.
+    // ALL-STAGES capture, auto-cycling pages (~3 s each at 30 Hz render).
+    // The pose is static while photographing, so each page shows the same
+    // worst vertex; one photo per page = the full chain for offline replay
+    // through the console-exact GTE core.
+    let page = unsafe {
+        PAGE_TICKS = PAGE_TICKS.wrapping_add(1);
+        (PAGE_TICKS / 90) % 4
+    };
+    // Header carries the latch score: identical SC on every photographed
+    // page proves all pages show the same latched event.
+    let mut hdr = DbgLine::new();
+    hdr.s(b"P");
+    hdr.i(page as i32 + 1);
+    hdr.s(b"/4 SC ");
+    hdr.i(vdbg::snapshot().score);
+    font.draw_text(216, 44, hdr.text(), (255, 255, 255));
+
+    match page {
+        0 => draw_vdbg_extents(font, &b),
+        1 => draw_vdbg_vertex_page(font),
+        2 => draw_vdbg_matrices_page(font),
+        _ => draw_vdbg_compose_inputs_page(font),
+    }
+
+    vdbg::reset();
+}
+
+static mut PAGE_TICKS: u32 = 0;
+
+/// Page 1: the original per-stage view-space X extents (kept so the new
+/// burn stays comparable with the IMG_6161-6172 rounds).
+fn draw_vdbg_extents(font: &FontAtlas, b: &psx_engine::render3d::player_vert_debug::Bounds) {
+    // The stretch is HORIZONTAL, so we show the view-space X EXTENT
+    // (min..max) per skinning stage -- the stage whose X widens on hardware
+    // vs the emulator is the bug. AX = primary joint, BX = secondary joint
+    // after the GTE matrix reload, LX = blended (lerp). SX = projected.
     let mut l1 = DbgLine::new();
     l1.s(b"AX ");
     l1.i(b.ax_min);
@@ -264,8 +296,122 @@ pub(crate) fn draw_player_vert_debug(font: &FontAtlas) {
     l5.s(b"..");
     l5.i(b.px_max as i32);
     font.draw_text(8, 92, l5.text(), (120, 255, 220));
+}
 
-    vdbg::reset();
+/// Page 2: worst vertex identity + every stage OUTPUT in hex. Offline:
+/// va =? MVMVA(rot0, tr0, pos), vb =? MVMVA(rot1, tr1, pos),
+/// vl =? lerp(va, vb, blend), (sx, sy) =? RTPS(vl).
+fn draw_vdbg_vertex_page(font: &FontAtlas) {
+    use psx_engine::render3d::player_vert_debug as vdbg;
+    let s = vdbg::snapshot();
+    if !s.valid {
+        font.draw_text(8, 44, "NO SNAP", (255, 90, 90));
+        return;
+    }
+    let mut l = DbgLine::new();
+    l.s(b"V ");
+    l.x16(s.pos.x as u16);
+    l.b(b' ');
+    l.x16(s.pos.y as u16);
+    l.b(b' ');
+    l.x16(s.pos.z as u16);
+    l.s(b" J");
+    l.i(s.j0 as i32);
+    l.b(b'/');
+    l.i(s.j1 as i32);
+    l.s(b" W");
+    l.i(s.blend as i32);
+    font.draw_text(8, 44, l.text(), (255, 255, 160));
+    draw_hex3(font, 56, b"VA", &s.va, (255, 232, 120));
+    draw_hex3(font, 68, b"VB", &s.vb, (255, 200, 120));
+    draw_hex3(font, 80, b"VL", &s.vl, (255, 170, 120));
+    let mut l5 = DbgLine::new();
+    l5.s(b"SXY ");
+    l5.x16(s.sx as u16);
+    l5.b(b' ');
+    l5.x16(s.sy as u16);
+    l5.s(b" FLG ");
+    l5.x32(s.flag);
+    font.draw_text(8, 92, l5.text(), (160, 230, 255));
+}
+
+/// Page 3: the matrices exactly as CTC2'd for the worst vertex (primary on
+/// the left column block, secondary below) + view-space translations.
+fn draw_vdbg_matrices_page(font: &FontAtlas) {
+    use psx_engine::render3d::player_vert_debug as vdbg;
+    let s = vdbg::snapshot();
+    if !s.valid {
+        font.draw_text(8, 44, "NO SNAP", (255, 90, 90));
+        return;
+    }
+    draw_mat3(font, 44, b"R0", &s.rot0.m, (255, 232, 120));
+    draw_hex3(font, 80, b"T0", &s.tr0, (255, 232, 120));
+    draw_mat3(font, 92, b"R1", &s.rot1.m, (255, 200, 120));
+    draw_hex3(font, 128, b"T1", &s.tr1, (255, 200, 120));
+}
+
+/// Page 4: the GTE compose INPUTS for the worst vertex's two joints:
+/// shared view*instance matrix, then each joint's model/pose matrix and
+/// pose translation. Offline: rot0 =? compose(VI, M0), rot1 =? compose(VI, M1).
+fn draw_vdbg_compose_inputs_page(font: &FontAtlas) {
+    use psx_engine::render3d::player_vert_debug as vdbg;
+    let s = vdbg::snapshot();
+    if !s.valid {
+        font.draw_text(8, 44, "NO SNAP", (255, 90, 90));
+        return;
+    }
+    draw_mat3(font, 44, b"VI", &s.vi.m, (160, 230, 255));
+    if s.m0.valid {
+        draw_mat3(font, 80, b"M0", &s.m0.model.m, (255, 232, 120));
+        let pt0 = [
+            s.m0.ptrans.x as i32,
+            s.m0.ptrans.y as i32,
+            s.m0.ptrans.z as i32,
+        ];
+        draw_hex3(font, 116, b"P0", &pt0, (255, 232, 120));
+    } else {
+        font.draw_text(8, 80, "M0 MISSING", (255, 90, 90));
+    }
+    if s.m1.valid {
+        draw_mat3(font, 128, b"M1", &s.m1.model.m, (255, 200, 120));
+        let pt1 = [
+            s.m1.ptrans.x as i32,
+            s.m1.ptrans.y as i32,
+            s.m1.ptrans.z as i32,
+        ];
+        draw_hex3(font, 164, b"P1", &pt1, (255, 200, 120));
+    } else {
+        font.draw_text(8, 128, "M1 MISSING", (255, 90, 90));
+    }
+}
+
+/// One labelled row of three 32-bit hex values.
+fn draw_hex3(font: &FontAtlas, y: i16, label: &[u8], v: &[i32; 3], color: (u8, u8, u8)) {
+    let mut l = DbgLine::new();
+    l.s(label);
+    l.b(b' ');
+    l.x32(v[0] as u32);
+    l.b(b' ');
+    l.x32(v[1] as u32);
+    l.b(b' ');
+    l.x32(v[2] as u32);
+    font.draw_text(8, y, l.text(), color);
+}
+
+/// A 3x3 i16 matrix as three rows of three 16-bit hex values.
+fn draw_mat3(font: &FontAtlas, y: i16, label: &[u8], m: &[[i16; 3]; 3], color: (u8, u8, u8)) {
+    for (row, values) in m.iter().enumerate() {
+        let mut l = DbgLine::new();
+        l.s(label);
+        l.i(row as i32);
+        l.b(b' ');
+        l.x16(values[0] as u16);
+        l.b(b' ');
+        l.x16(values[1] as u16);
+        l.b(b' ');
+        l.x16(values[2] as u16);
+        font.draw_text(8, y + (row as i16) * 12, l.text(), color);
+    }
 }
 
 /// Tiny stack-buffer line builder for the diagnostic overlay (no_std, no alloc).
@@ -310,6 +456,24 @@ impl DbgLine {
         while t > 0 {
             t -= 1;
             self.b(tmp[t]);
+        }
+    }
+    fn x16(&mut self, v: u16) {
+        self.hex(v as u32, 4);
+    }
+    fn x32(&mut self, v: u32) {
+        self.hex(v, 8);
+    }
+    fn hex(&mut self, v: u32, digits: u32) {
+        let mut d = digits;
+        while d > 0 {
+            d -= 1;
+            let nibble = ((v >> (d * 4)) & 0xF) as u8;
+            self.b(if nibble < 10 {
+                b'0' + nibble
+            } else {
+                b'A' + nibble - 10
+            });
         }
     }
     fn text(&self) -> &str {
