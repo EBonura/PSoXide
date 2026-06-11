@@ -459,6 +459,49 @@ pub fn transform_vertex_probed(v: Vec3I16) -> TransformProbe {
     }
 }
 
+/// [`transform_vertex_scheduled`] with the HWB-010 hazard closed: two
+/// buffer NOPs between the V0 writes and the MVMVA push the VXY0
+/// write's commit distance from 2 to 4 instructions, so the MAC1 phase
+/// reads the fresh V0.x even when the commit slips by the silicon-
+/// measured window. Costs 2 cycles per transform; keeps the math on
+/// the GTE (no CPU fallback). See docs/hardware-burn-ledger.md HWB-010.
+#[inline(always)]
+pub fn transform_vertex_padded(v: Vec3I16) -> Vec3I32 {
+    #[cfg(target_arch = "mips")]
+    {
+        let xy = v.xy_packed();
+        let z = v.z_packed();
+        let mac1: u32;
+        let mac2: u32;
+        let mac3: u32;
+        unsafe {
+            asm!(
+                // MTC2 $8,VXY0 / MTC2 $9,VZ0, then a 2-NOP commit gap
+                // BEFORE the MVMVA (the hazard fix), then the live
+                // result-read schedule.
+                ".word 0x48880000",
+                ".word 0x48890800",
+                ".word 0",
+                ".word 0",
+                ".word 0x4a080012",
+                ".word 0x4808c800",
+                ".word 0x4809d000",
+                ".word 0x480ad800",
+                ".word 0",
+                inlateout("$8") xy => mac1,
+                inlateout("$9") z => mac2,
+                lateout("$10") mac3,
+                options(nostack, nomem, preserves_flags),
+            );
+        }
+        Vec3I32::new(mac1 as i32, mac2 as i32, mac3 as i32)
+    }
+    #[cfg(not(target_arch = "mips"))]
+    {
+        transform_vertex(v)
+    }
+}
+
 /// Read the last three projected Z values and compute their average
 /// via AVSZ3 (weighted by ZSF3). Returns OTZ -- the depth key most
 /// renderers use for ordering-table inserts.
