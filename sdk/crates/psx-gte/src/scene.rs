@@ -371,6 +371,94 @@ fn transform_vertex_mips(v: Vec3I16) -> Vec3I32 {
     Vec3I32::new(mac1 as i32, mac2 as i32, mac3 as i32)
 }
 
+/// Result of [`transform_vertex_probed`]: the live-schedule transform
+/// output plus post-op hazard evidence.
+#[derive(Clone, Copy)]
+pub struct TransformProbe {
+    /// The transform result exactly as the hot path reads it (the
+    /// IMMEDIATE MAC1/2/3 reads, same schedule as
+    /// `transform_vertex_mips`). Consumers keep using this so the
+    /// probed build behaves identically to the live engine.
+    pub out: Vec3I32,
+    /// MAC1 re-read after a 4-NOP settle gap. Differs from `out.x`
+    /// only if the immediate MAC1 read was served stale.
+    pub x_settled: i32,
+    /// Translation control regs (TRX/TRY/TRZ, cr5..cr7) read back
+    /// AFTER the op (nothing writes them during, so this is the value
+    /// in effect while the MVMVA executed). The compose path loads
+    /// zero here; nonzero = the zero write did not land for this op.
+    pub tr: [i32; 3],
+}
+
+/// [`transform_vertex_scheduled`] with hazard probes appended AFTER the
+/// op and its result reads, so nothing before or during the MVMVA is
+/// perturbed (HWB-008: the live skinning chain corrupts the X row in a
+/// way no synthetic battery reproduces -- the probes must ride the real
+/// schedule).
+#[inline(always)]
+pub fn transform_vertex_probed(v: Vec3I16) -> TransformProbe {
+    #[cfg(target_arch = "mips")]
+    {
+        let xy = v.xy_packed();
+        let z = v.z_packed();
+        let mac1: u32;
+        let mac2: u32;
+        let mac3: u32;
+        let mac1_settled: u32;
+        let trx: u32;
+        let try_: u32;
+        let trz: u32;
+        unsafe {
+            asm!(
+                // Live schedule, byte-identical to transform_vertex_mips:
+                // MTC2 $8,VXY0 / MTC2 $9,VZ0 / MVMVA / MAC1,2,3 reads.
+                ".word 0x48880000",
+                ".word 0x48890800",
+                ".word 0x4a080012",
+                ".word 0x4808c800",
+                ".word 0x4809d000",
+                ".word 0x480ad800",
+                ".word 0",
+                // Probe tail, strictly AFTER the live reads: 4-NOP
+                // settle gap, MAC1 re-read ($11), then TRX/TRY/TRZ
+                // (cr5..cr7) read-back; chained CFC2s share delay
+                // slots, final NOP covers the last one.
+                ".word 0",
+                ".word 0",
+                ".word 0",
+                ".word 0",
+                ".word 0x480bc800",
+                ".word 0x484c2800",
+                ".word 0x484d3000",
+                ".word 0x484e3800",
+                ".word 0",
+                inlateout("$8") xy => mac1,
+                inlateout("$9") z => mac2,
+                lateout("$10") mac3,
+                lateout("$11") mac1_settled,
+                lateout("$12") trx,
+                lateout("$13") try_,
+                lateout("$14") trz,
+                options(nostack, nomem, preserves_flags),
+            );
+        }
+        TransformProbe {
+            out: Vec3I32::new(mac1 as i32, mac2 as i32, mac3 as i32),
+            x_settled: mac1_settled as i32,
+            tr: [trx as i32, try_ as i32, trz as i32],
+        }
+    }
+    #[cfg(not(target_arch = "mips"))]
+    {
+        let out = transform_vertex(v);
+        TransformProbe {
+            out,
+            x_settled: out.x,
+            tr: [cfc2!(5) as i32, cfc2!(6) as i32, cfc2!(7) as i32],
+        }
+    }
+}
+
 /// Read the last three projected Z values and compute their average
 /// via AVSZ3 (weighted by ZSF3). Returns OTZ -- the depth key most
 /// renderers use for ordering-table inserts.
