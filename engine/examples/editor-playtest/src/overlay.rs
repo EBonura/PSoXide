@@ -208,6 +208,7 @@ pub(crate) fn draw_centered_text(font: &FontAtlas, y: i16, text: &str, tint: (u8
 ///   SX = projected screen X range (the symptom), O = verts off hw bounds
 /// Whichever of AX/BX/LX widens on hardware vs the emulator is the culprit.
 /// Reads + RESETS the per-frame accumulator.
+#[cfg(feature = "vert-debug-overlay")]
 pub(crate) fn draw_player_vert_debug(font: &FontAtlas) {
     use psx_engine::render3d::player_vert_debug as vdbg;
     let b = vdbg::get();
@@ -248,10 +249,12 @@ pub(crate) fn draw_player_vert_debug(font: &FontAtlas) {
     vdbg::reset();
 }
 
+#[cfg(feature = "vert-debug-overlay")]
 static mut PAGE_TICKS: u32 = 0;
 
 /// Page 1: the original per-stage view-space X extents (kept so the new
 /// burn stays comparable with the IMG_6161-6172 rounds).
+#[cfg(feature = "vert-debug-overlay")]
 fn draw_vdbg_extents(font: &FontAtlas, b: &psx_engine::render3d::player_vert_debug::Bounds) {
     // The stretch is HORIZONTAL, so we show the view-space X EXTENT
     // (min..max) per skinning stage -- the stage whose X widens on hardware
@@ -301,6 +304,7 @@ fn draw_vdbg_extents(font: &FontAtlas, b: &psx_engine::render3d::player_vert_deb
 /// Page 2: worst vertex identity + every stage OUTPUT in hex. Offline:
 /// va =? MVMVA(rot0, tr0, pos), vb =? MVMVA(rot1, tr1, pos),
 /// vl =? lerp(va, vb, blend), (sx, sy) =? RTPS(vl).
+#[cfg(feature = "vert-debug-overlay")]
 fn draw_vdbg_vertex_page(font: &FontAtlas) {
     use psx_engine::render3d::player_vert_debug as vdbg;
     let s = vdbg::snapshot();
@@ -337,6 +341,7 @@ fn draw_vdbg_vertex_page(font: &FontAtlas) {
 
 /// Page 3: the matrices exactly as CTC2'd for the worst vertex (primary on
 /// the left column block, secondary below) + view-space translations.
+#[cfg(feature = "vert-debug-overlay")]
 fn draw_vdbg_matrices_page(font: &FontAtlas) {
     use psx_engine::render3d::player_vert_debug as vdbg;
     let s = vdbg::snapshot();
@@ -353,6 +358,7 @@ fn draw_vdbg_matrices_page(font: &FontAtlas) {
 /// Page 4: the GTE compose INPUTS for the worst vertex's two joints:
 /// shared view*instance matrix, then each joint's model/pose matrix and
 /// pose translation. Offline: rot0 =? compose(VI, M0), rot1 =? compose(VI, M1).
+#[cfg(feature = "vert-debug-overlay")]
 fn draw_vdbg_compose_inputs_page(font: &FontAtlas) {
     use psx_engine::render3d::player_vert_debug as vdbg;
     let s = vdbg::snapshot();
@@ -386,6 +392,7 @@ fn draw_vdbg_compose_inputs_page(font: &FontAtlas) {
 }
 
 /// One labelled row of three 32-bit hex values.
+#[cfg(feature = "vert-debug-overlay")]
 fn draw_hex3(font: &FontAtlas, y: i16, label: &[u8], v: &[i32; 3], color: (u8, u8, u8)) {
     let mut l = DbgLine::new();
     l.s(label);
@@ -399,6 +406,7 @@ fn draw_hex3(font: &FontAtlas, y: i16, label: &[u8], v: &[i32; 3], color: (u8, u
 }
 
 /// A 3x3 i16 matrix as three rows of three 16-bit hex values.
+#[cfg(feature = "vert-debug-overlay")]
 fn draw_mat3(font: &FontAtlas, y: i16, label: &[u8], m: &[[i16; 3]; 3], color: (u8, u8, u8)) {
     for (row, values) in m.iter().enumerate() {
         let mut l = DbgLine::new();
@@ -415,11 +423,13 @@ fn draw_mat3(font: &FontAtlas, y: i16, label: &[u8], m: &[[i16; 3]; 3], color: (
 }
 
 /// Tiny stack-buffer line builder for the diagnostic overlay (no_std, no alloc).
+#[cfg(feature = "vert-debug-overlay")]
 struct DbgLine {
     buf: [u8; 48],
     len: usize,
 }
 
+#[cfg(feature = "vert-debug-overlay")]
 impl DbgLine {
     fn new() -> Self {
         Self {
