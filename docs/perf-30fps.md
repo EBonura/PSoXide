@@ -324,6 +324,18 @@ BOTH the visual hole and a hidden cache-thrash tax.
 Gate before flipping the visibility default: eyes on the arch
 sightline in the editor with the PVS build.
 
+## Spike forensics: the hitches are room transitions (2026-06-11)
+
+On the benchmark tape (anchor-fixed build), the 62 update spikes
+(avg 716k vs 161k normal) correlate with room_visible_list at 16.2x
+(203k vs 12.5k) plus elevated portal_visibility and room bands, and
+cluster in ~20-tick bursts at room boundaries. A transition tick is
+double-billed: update does the streaming apply + collision rebind
+while the same slot's render cold-rebuilds the visible-cell lists for
+every newly activated room. Remedies for the next round: amortize
+the transition work across ticks (one room's visible-list prewarm per
+tick instead of all at once) and stagger the streaming apply.
+
 ## Pool right-sizing: RAM win is ALSO a cycle win (2026-06-11)
 
 MAX_TEXTURED_TRIS 3328 -> 1024 (tape peak 567, avg ~332; 2x headroom
