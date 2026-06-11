@@ -35,4 +35,3 @@ through the bit-exact GTE core).
 - [`docs/frontend.md`](../docs/frontend.md). Frontend architecture.
 - [`docs/hardware-burn-ledger.md`](../docs/hardware-burn-ledger.md). Real-hardware findings and the fixes they produced.
 - [`docs/commercial-parity-tracker.md`](../docs/commercial-parity-tracker.md). Retail-disc compatibility status.
-- [`docs/redux-oracle.md`](../docs/redux-oracle.md). The retired PCSX-Redux parity harness (bring-up era).

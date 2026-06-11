@@ -14,7 +14,6 @@ the [root README](../README.md) and the per-area READMEs
 | [frontend.md](frontend.md) | Emulator frontend architecture. |
 | [world-grid-architecture.md](world-grid-architecture.md) | Room/sector grid model. |
 | [level-residency.md](level-residency.md) | Streamed-room residency runtime. |
-| [architecture-cleanup-roadmap.md](architecture-cleanup-roadmap.md) | In-progress structural cleanup. |
 | [demo10-low-level-hot-paths-2026-06-02.md](demo10-low-level-hot-paths-2026-06-02.md) | Demo10 guest-cycle baseline for low-level optimization work. |
 
 ## Authoring & runtime
@@ -28,7 +27,6 @@ the [root README](../README.md) and the per-area READMEs
 | [floors-plan.md](floors-plan.md) | Vertical levels within a room. |
 | [floors-editor-architecture.md](floors-editor-architecture.md) | Editor-side floors design. |
 | [playtest-profiling.md](playtest-profiling.md) | Playtest capture, headless replay, per-vblank profiling. |
-| [vertical-rooms-investigation.md](vertical-rooms-investigation.md), [vertical-rooms-vr2-plan.md](vertical-rooms-vr2-plan.md) | Stacked-room support. |
 | [game-states-plan.md](game-states-plan.md) | Game-state system plan. |
 
 ## Hardware reference
@@ -48,7 +46,6 @@ Per-subsystem behavioural notes backing the emulator, in [`hardware-refs/`](hard
 
 | Doc | Topic |
 |-----|-------|
-| [redux-oracle.md](redux-oracle.md) | PCSX-Redux parity oracle (retired; hardware is the oracle). |
 | [commercial-parity-tracker.md](commercial-parity-tracker.md) | Retail-disc compatibility status. |
 | [hardware-burn-ledger.md](hardware-burn-ledger.md) | Cortex Ignition V1 CD-R burn observations and follow-up gates. |
 | [hardware-visual-checkpoints.md](hardware-visual-checkpoints.md) | TV-visible Cortex Ignition V1 checkpoint code/color map. |
