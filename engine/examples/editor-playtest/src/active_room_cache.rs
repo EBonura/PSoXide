@@ -444,6 +444,30 @@ fn streamed_active_room_surface_cache_for(index: RoomIndex) -> Option<ActiveRoom
     }
 }
 
+/// Prebuilt-quad pool slice + fill flag for `room`, claiming a slot
+/// round-robin on first use. `fill == true` means the caller's draw
+/// must write the packet skeletons this frame (the slot was just
+/// claimed or stolen from another room). With 8 slots and at most
+/// `visible_chunk_limit` (6) rooms drawn per frame, a slot claimed
+/// this frame cannot be re-stolen before its draw consumes the fill.
+pub(super) fn prebuilt_room_quads_for(
+    room: RoomIndex,
+) -> (&'static mut [QuadTexturedGouraud], bool) {
+    unsafe {
+        let mut i = 0usize;
+        while i < PREBUILT_ROOM_QUAD_SLOTS {
+            if PREBUILT_ROOM_QUAD_ROOMS[i] == room {
+                return (&mut PREBUILT_ROOM_QUADS[i][..], false);
+            }
+            i += 1;
+        }
+        let slot = (PREBUILT_ROOM_QUAD_NEXT as usize) % PREBUILT_ROOM_QUAD_SLOTS;
+        PREBUILT_ROOM_QUAD_NEXT = PREBUILT_ROOM_QUAD_NEXT.wrapping_add(1);
+        PREBUILT_ROOM_QUAD_ROOMS[slot] = room;
+        (&mut PREBUILT_ROOM_QUADS[slot][..], true)
+    }
+}
+
 pub(super) fn room_surface_cache_slices(
     index: RoomIndex,
     cache: ActiveRoomSurfaceCache,
