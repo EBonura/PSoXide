@@ -135,8 +135,8 @@ emulator-core (332) test suites pass after the rename.
 
 ### Dependency license audit (resolved 2026-04-30)
 
-`cargo-deny` was installed and run across all five workspaces (root,
-`emu`, `sdk`, `engine`, `editor`) with the allow-list defined in
+`cargo-deny` was installed and run across all workspaces (the repo-root
+host workspace plus the `sdk` and `engine` device workspaces) with the allow-list defined in
 [`deny.toml`](../deny.toml). All workspaces pass (`licenses ok`).
 
 The transitive dependency tree carries the following non-permissive
@@ -155,7 +155,7 @@ explicitly allow-listed:
 Re-run any time with:
 
 ```bash
-for ws in . emu sdk engine editor; do
+for ws in . sdk engine; do
   (cd "$ws" && cargo deny --manifest-path Cargo.toml check licenses \
     --config "$(git rev-parse --show-toplevel)/deny.toml")
 done
