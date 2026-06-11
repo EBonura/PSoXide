@@ -1982,6 +1982,11 @@ const PROFILE_LOG_HEADER: &[&str] = &[
     "world_flush",
     "ot_submit",
     "ot_wait",
+    "sim_collision",
+    "sim_room_track",
+    "sim_residency",
+    "sim_pump",
+    "sim_solve",
     "sim_ticks",
     "visual_frames",
     "visual_skipped_vblanks",
@@ -2199,6 +2204,11 @@ impl GuestProfileLog {
         push!(stage(s::WORLD_FLUSH));
         push!(stage(s::OT_SUBMIT));
         push!(stage(s::OT_WAIT));
+        push!(stage(s::SIM_COLLISION));
+        push!(stage(s::SIM_ROOM_TRACK));
+        push!(stage(s::SIM_RESIDENCY));
+        push!(stage(s::SIM_PUMP));
+        push!(stage(s::SIM_SOLVE));
         push!(counter_total(&summary, c::SIM_TICKS));
         push!(counter_total(&summary, c::VISUAL_FRAMES));
         push!(counter_total(&summary, c::VISUAL_SKIPPED_VBLANKS));
