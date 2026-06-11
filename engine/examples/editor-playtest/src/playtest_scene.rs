@@ -364,34 +364,44 @@ impl Scene for Playtest {
                     #[cfg(not(feature = "vis-full-active-chunks"))]
                     {
                         let player = self.motor.position();
-                        let global_visibility_anchor = player;
-                        let visibility_anchor = RoomPoint::new(
-                            global_visibility_anchor.x.saturating_sub(active.offset_x),
-                            player.y,
-                            global_visibility_anchor.z.saturating_sub(active.offset_z),
-                        );
-                        let visibility = GridVisibility::around(
-                            visibility_anchor,
-                            room_visibility_radius(room_record),
-                        )
-                        .with_screen_margin(ROOM_VISIBLE_CELL_SCREEN_MARGIN);
+                        // The player's own room anchors its per-cell PVS at
+                        // the player; a far room admitted by the portal walk
+                        // anchors at the portal that admitted it (the
+                        // doorway-eye view). Rooms with no usable anchor
+                        // draw every cell through the cached path below --
+                        // NEVER a silent skip (the arch-door regression).
+                        let global_visibility_anchor = if active.index == self.room_index {
+                            Some(player)
+                        } else {
+                            self.portal_entry_anchor(active.index, active.sector_size)
+                        };
                         telemetry::stage_begin(telemetry::stage::ROOM_VISIBLE_LIST);
-                        let visible_cells_result = self.cached_precomputed_visible_cells(
-                            active_slot,
-                            active.index,
-                            active.width,
-                            active.depth,
-                            active.sector_size,
-                            visibility_anchor,
-                            active.offset_x,
-                            active.offset_z,
-                            global_visibility_anchor,
-                            room_camera,
-                            ROOM_VISIBLE_CELL_STATIONARY_CANDIDATES
-                                && !self.player_moved_last_tick
-                                && self.camera_turning_last_tick
-                                && active.surface_cache.ready,
-                        );
+                        let visible_cells_result = match global_visibility_anchor {
+                            Some(global_anchor) => {
+                                let visibility_anchor = RoomPoint::new(
+                                    global_anchor.x.saturating_sub(active.offset_x),
+                                    global_anchor.y,
+                                    global_anchor.z.saturating_sub(active.offset_z),
+                                );
+                                self.cached_precomputed_visible_cells(
+                                    active_slot,
+                                    active.index,
+                                    active.width,
+                                    active.depth,
+                                    active.sector_size,
+                                    visibility_anchor,
+                                    active.offset_x,
+                                    active.offset_z,
+                                    global_anchor,
+                                    room_camera,
+                                    ROOM_VISIBLE_CELL_STATIONARY_CANDIDATES
+                                        && !self.player_moved_last_tick
+                                        && self.camera_turning_last_tick
+                                        && active.surface_cache.ready,
+                                )
+                            }
+                            None => None,
+                        };
                         telemetry::stage_end(telemetry::stage::ROOM_VISIBLE_LIST);
                         let stats = if let Some((cells, range_culled)) = visible_cells_result {
                             room_range_culled_cells =
@@ -444,7 +454,7 @@ impl Scene for Playtest {
                                         cached_room_depth_mode(),
                                         cached_room_subdivision_mode(),
                                         cells,
-                                        visibility.screen_margin,
+                                        ROOM_VISIBLE_CELL_SCREEN_MARGIN,
                                         &mut primitive_packets,
                                         &mut world,
                                     )
@@ -458,7 +468,7 @@ impl Scene for Playtest {
                                             &room_camera,
                                             room_options,
                                             cells,
-                                            visibility.screen_margin,
+                                            ROOM_VISIBLE_CELL_SCREEN_MARGIN,
                                             &mut primitive_packets,
                                             &mut world,
                                         )
@@ -480,7 +490,7 @@ impl Scene for Playtest {
                                         &room_camera,
                                         room_options,
                                         cells,
-                                        visibility.screen_margin,
+                                        ROOM_VISIBLE_CELL_SCREEN_MARGIN,
                                         &mut primitive_packets,
                                         &mut world,
                                     )
@@ -489,21 +499,92 @@ impl Scene for Playtest {
                                 }
                             }
                         } else {
-                            room_uncached_draws = room_uncached_draws.saturating_add(1);
+                            // No usable anchor or no PVS data for this room.
+                            // Draw EVERY cell through the cached path -- it
+                            // works for streamed rooms whose full render data
+                            // is not resident (active.render() == None), which
+                            // the old uncached-only fallback silently skipped
+                            // (the arch-door black-room regression).
                             room_visibility_fallback_draws =
                                 room_visibility_fallback_draws.saturating_add(1);
-                            if let Some(render_room) = active.render() {
-                                draw_room_vertex_lit(
-                                    render_room,
-                                    materials,
-                                    &lighting,
-                                    &room_camera,
-                                    room_options,
-                                    &mut primitive_packets,
-                                    &mut world,
-                                );
+                            if active.surface_cache.ready {
+                                if let Some((
+                                    cached_cells,
+                                    cached_cell_vertices,
+                                    cached_vertices,
+                                    cached_surfaces,
+                                )) =
+                                    room_surface_cache_slices(active.index, active.surface_cache)
+                                {
+                                    room_cached_draws = room_cached_draws.saturating_add(1);
+                                    let vertex_count = cached_vertices.len();
+                                    let projected_indices = unsafe {
+                                        &mut CACHED_ROOM_PROJECTED_INDICES[..vertex_count]
+                                    };
+                                    let projected_vertices = unsafe {
+                                        &mut CACHED_ROOM_PROJECTED_VERTICES[..vertex_count]
+                                    };
+                                    let projected_ready =
+                                        unsafe { &mut CACHED_ROOM_PROJECTED_READY[..vertex_count] };
+                                    let projected_depths = unsafe {
+                                        &mut CACHED_ROOM_PROJECTED_DEPTHS[..vertex_count]
+                                    };
+                                    let accepted_cell_indices =
+                                        unsafe { &mut CACHED_ROOM_ACCEPTED_CELL_INDICES[..] };
+                                    let accepted_cell_depths =
+                                        unsafe { &mut CACHED_ROOM_ACCEPTED_CELL_DEPTHS[..] };
+                                    draw_indexed_cached_room_vertex_lit_all_cells(
+                                        cached_cells,
+                                        cached_cell_vertices,
+                                        cached_vertices,
+                                        cached_surfaces,
+                                        projected_indices,
+                                        projected_vertices,
+                                        projected_ready,
+                                        projected_depths,
+                                        accepted_cell_indices,
+                                        accepted_cell_depths,
+                                        materials,
+                                        &lighting,
+                                        &room_camera,
+                                        room_options,
+                                        cached_room_depth_mode(),
+                                        cached_room_subdivision_mode(),
+                                        ROOM_VISIBLE_CELL_SCREEN_MARGIN,
+                                        active.index == self.portal_visibility_root,
+                                        &mut primitive_packets,
+                                        &mut world,
+                                    )
+                                } else {
+                                    room_uncached_draws = room_uncached_draws.saturating_add(1);
+                                    if let Some(render_room) = active.render() {
+                                        draw_room_vertex_lit(
+                                            render_room,
+                                            materials,
+                                            &lighting,
+                                            &room_camera,
+                                            room_options,
+                                            &mut primitive_packets,
+                                            &mut world,
+                                        );
+                                    }
+                                    GridVisibilityStats::default()
+                                }
+                            } else {
+                                room_uncached_draws = room_uncached_draws.saturating_add(1);
+                                if let Some(render_room) = active.render() {
+                                    draw_room_vertex_lit(
+                                        render_room,
+                                        materials,
+                                        &lighting,
+                                        &room_camera,
+                                        room_options,
+                                        &mut primitive_packets,
+                                        &mut world,
+                                    );
+                                }
+                                GridVisibilityStats::default()
                             }
-                            GridVisibilityStats::default()
                         };
                         if stats.cells_drawn > 0 || stats.surfaces_considered > 0 {
                             room_drawn_chunk_mask |= chunk_mask;
