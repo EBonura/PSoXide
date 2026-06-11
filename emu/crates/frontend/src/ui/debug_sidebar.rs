@@ -36,7 +36,10 @@ pub fn draw(ctx: &egui::Context, state: &mut AppState, vram_tex: egui::TextureId
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    collapsible(ui, "CPU Registers", state.panels.registers, |ui| {
+                    let regs_override = state
+                        .panels
+                        .take_override(crate::app::DebugSection::Registers);
+                    collapsible(ui, "CPU Registers", state.panels.registers, regs_override, |ui| {
                         registers::draw_contents(
                             ui,
                             &state.cpu,
@@ -45,7 +48,10 @@ pub fn draw(ctx: &egui::Context, state: &mut AppState, vram_tex: egui::TextureId
                             &mut state.gpr_snapshot,
                         );
                     });
-                    collapsible(ui, "Memory", state.panels.memory, |ui| {
+                    let mem_override = state
+                        .panels
+                        .take_override(crate::app::DebugSection::Memory);
+                    collapsible(ui, "Memory", state.panels.memory, mem_override, |ui| {
                         memory::draw_contents(
                             ui,
                             &mut state.memory_view,
@@ -54,10 +60,15 @@ pub fn draw(ctx: &egui::Context, state: &mut AppState, vram_tex: egui::TextureId
                             &mut state.breakpoints,
                         );
                     });
-                    collapsible(ui, "VRAM", state.panels.vram, |ui| {
+                    let vram_override =
+                        state.panels.take_override(crate::app::DebugSection::Vram);
+                    collapsible(ui, "VRAM", state.panels.vram, vram_override, |ui| {
                         vram::draw_contents(ui, vram_tex);
                     });
-                    collapsible(ui, "Frame Profiler", state.panels.profiler, |ui| {
+                    let prof_override = state
+                        .panels
+                        .take_override(crate::app::DebugSection::Profiler);
+                    collapsible(ui, "Frame Profiler", state.panels.profiler, prof_override, |ui| {
                         profiler::draw_contents(ui, &mut state.profiler);
                     });
                 });
@@ -68,10 +79,15 @@ fn collapsible(
     ui: &mut egui::Ui,
     title: &str,
     default_open: bool,
+    open_override: Option<bool>,
     add_contents: impl FnOnce(&mut egui::Ui),
 ) {
+    // `default_open` only seeds the FIRST render; egui persists collapse
+    // state afterwards. Menu toggles therefore pass a one-shot
+    // `open_override` that forces the state for this frame.
     egui::CollapsingHeader::new(RichText::new(title).color(theme::TEXT).strong())
         .default_open(default_open)
+        .open(open_override)
         .show(ui, |ui| {
             theme::viz_frame(ui, "", add_contents);
         });

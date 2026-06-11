@@ -25,30 +25,34 @@ These are pinned deliberately -- both priors independently converged on this set
 src/
 ├── main.rs           # winit ApplicationHandler shell, event dispatch, run loop
 ├── app.rs            # AppState -- emulator + UI state, no Arc/Mutex
-├── gfx.rs            # Graphics -- wgpu surface + egui renderer + VRAM texture
+├── gfx.rs            # Graphics -- wgpu surface + egui renderer + VRAM/display textures
 ├── theme.rs          # charcoal/teal palette, VT323 + Lucide fonts, section helpers
 ├── icons.rs          # Lucide codepoint constants
+├── cli.rs            # headless subcommands (launch, validate, build-project-disc, ...)
+├── disasm.rs         # MIPS disassembler for the registers/memory panels
 └── ui/
-    ├── mod.rs        # draw_layout -- composes panels in layer order
-    ├── registers.rs  # CPU + COP0 + history + breakpoints side panel
-    ├── memory.rs     # hex+ASCII viewer, quick-jump, BP toggle
-    ├── profiler.rs   # rolling frame-time breakdown + stderr summaries
-    ├── vram.rs       # 1024×512 VRAM as an egui::Image
-    ├── hud.rs        # FPS / frame-time / tick overlay
-    └── menu.rs        # launcher / pause menu overlay, Painter-drawn on Middle layer
+    ├── mod.rs           # draw_layout -- composes toolbar/sidebar/framebuffer/overlays
+    ├── toolbar.rs       # top strip: status, EMU/DRAW/HOST/MIPS/dt/AUDIO, transport, toggles
+    ├── debug_sidebar.rs # right sidebar docking the four debug sections below
+    ├── registers.rs     # CPU + COP0 + history + breakpoints section
+    ├── memory.rs        # hex+ASCII / disasm viewer, quick-jump, BP toggle
+    ├── profiler.rs      # FrameProfiler data model + profiler section + CSV/stderr
+    ├── vram.rs          # 1024×512 VRAM image section (true 2:1 aspect)
+    ├── framebuffer.rs   # central 4:3 game framebuffer image
+    ├── hud.rs           # HudState rolling metrics (data only; toolbar renders it)
+    ├── burn.rs          # CD-R burn window
+    └── menu.rs          # PSX-style overlay menu, Painter-drawn on Middle layer
 ```
 
 ## Layer order, outside-in
 
-1. **Central panel** -- the future PS1 framebuffer. Currently placeholder text.
-2. **Register side panel** (left, `egui::SidePanel::left`).
-3. **Memory side panel** (right, `egui::SidePanel::right`, hidden by default).
-4. **VRAM bottom panel** (`egui::TopBottomPanel::bottom`).
-5. **Profiler window** (`egui::Window`, hidden by default).
-6. **Menu overlay** on `egui::Order::Middle` -- dims background, slides animated category icons.
-7. **HUD bar** on `egui::Order::Foreground` -- always on top, above Menu.
+1. **Toolbar** (`egui::TopBottomPanel::top`) -- status dot, live metrics, transport controls, volume, debug toggles.
+2. **Debug sidebar** (`egui::SidePanel::right`, hidden by default) -- one resizable sidebar docking four `CollapsingHeader` sections: CPU Registers, Memory, VRAM, Frame Profiler. All sections lay out width-aware: the GPR grid reflows 1/2/4 columns, the hex dump adapts bytes-per-row (16/8/4), profiler bars stretch with the panel, and the VRAM image keeps its true 2:1 aspect.
+3. **Central panel** -- the live PS1 framebuffer at 4:3.
+4. **Menu overlay** on `egui::Order::Middle` -- dims background, slides animated category icons.
+5. **Burn window / status toast** on top.
 
-Each panel is its own module, so adding a new one is about 150 lines and touching `ui/mod.rs`' layout-orchestration function.
+Each section is its own module, so adding a new one is about 150 lines and touching `ui/debug_sidebar.rs`.
 
 ## Data flow per frame
 
@@ -61,7 +65,7 @@ winit event
         2. MenuState::update(input) → Option<MenuAction>
         3. ui::apply_menu_action (run/step/reset/toggle panels)
         4. run loop: bus + cpu → exec_history ring, breakpoint check
-        5. GPU command-log drain + optional compute replay
+        5. GPU command-log drain (+ opt-in --gpu-compute shadow replay)
         6. Graphics::prepare_vram(state.bus?.gpu.vram)
         7. HW renderer scale/update + frame replay
         8. Graphics::render(|ctx| ui::draw_layout(...))
@@ -78,8 +82,8 @@ The VRAM panel then renders the single `egui::Image` referencing this texture --
 
 ## Frame profiler
 
-The toolbar's monitor button opens a floating profiler window. It records a
-rolling sample per redraw: input/Menu, guest emulation, SPU/audio, command-log
+The Frame Profiler is a section of the debug sidebar (toolbar bug icon or
+Menu -> Debug to open). It records a rolling sample per redraw: input/Menu, guest emulation, SPU/audio, command-log
 drain, compute replay, VRAM upload, hardware-render scale/clone/replay, and
 egui/wgpu presentation. The same sample includes emulated frame count, CPU
 ticks, bus cycles, emulated VBlank cadence, draw-producing VBlank cadence,
@@ -128,9 +132,11 @@ The frontend is designed to double as a live debugger:
 
 ## What's intentionally absent
 
-- **No gamepad**. Lands with the controller subsystem (SIO0).
-- **No audio output**. Lands with SPU voice playback.
-- **No framebuffer display**. Lands with the GPU rasterizer -- the central panel stays placeholder until then.
-- **No save states**. Will require a serializable-state contract across all subsystems.
+- **No threads.** The single-threaded loop above is a design decision, not
+  a milestone gap; see "Why single-threaded?".
+- **No UI snapshot tests.** The data layer (profiler averaging, menu model)
+  is unit-tested; visual layout is verified by running the app.
 
-All of these are part of the canary ladder's later milestones; the frontend scaffolding is in place to slot them in when they land.
+(The gaps this section once listed -- gamepad, audio, framebuffer display,
+save states -- have all since landed: gilrs input, cpal output, the live
+central framebuffer, and savestates via `psoxide-settings`.)

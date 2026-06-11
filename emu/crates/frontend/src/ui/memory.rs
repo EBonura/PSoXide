@@ -166,14 +166,31 @@ fn draw_hex_dump(
         return;
     };
 
+    // Adapt bytes-per-row to the panel width (16 / 8 / 4) instead of
+    // clipping a fixed 78-char line: a hex row costs
+    // marker(2) + addr(8) + gap(2) + 3*b hex + mid-gap(1) + gap(1) + b ascii.
+    let glyph_w = ui.fonts(|fonts| {
+        fonts.glyph_width(&egui::FontId::monospace(theme::FONT_SIZE_MONO), '0')
+    });
+    let max_chars = (ui.available_width() / glyph_w.max(1.0)) as usize;
+    let bytes_per_row = if max_chars >= 14 + 4 * 16 {
+        16
+    } else if max_chars >= 14 + 4 * 8 {
+        8
+    } else {
+        4
+    };
+    // The same total window, repartitioned by the adaptive row width.
+    let rows = (WINDOW_SIZE as usize) / bytes_per_row;
+
     egui::ScrollArea::vertical()
         .auto_shrink([false, true])
         .show(ui, |ui| {
-            for row in 0..ROWS {
-                let row_addr = view.addr.wrapping_add(row as u32 * BYTES_PER_ROW as u32);
-                let has_bp = row_has_breakpoint(row_addr, breakpoints);
-                let has_pc = row_contains(row_addr, pc);
-                let text = format_row(bus, row_addr, has_bp, has_pc);
+            for row in 0..rows {
+                let row_addr = view.addr.wrapping_add((row * bytes_per_row) as u32);
+                let has_bp = row_has_breakpoint(row_addr, breakpoints, bytes_per_row);
+                let has_pc = row_contains(row_addr, pc, bytes_per_row);
+                let text = format_row(bus, row_addr, has_bp, has_pc, bytes_per_row);
 
                 let color = match (has_pc, has_bp) {
                     // PC wins over BP -- the arrow marker is the one we
@@ -186,16 +203,15 @@ fn draw_hex_dump(
                     Some(c) => ui.monospace(egui::RichText::new(text).color(c)),
                     None => ui.monospace(text),
                 };
-                if row_addr.wrapping_add(BYTES_PER_ROW as u32) < row_addr {
+                if row_addr.wrapping_add(bytes_per_row as u32) < row_addr {
                     break;
                 }
             }
-            let _ = WINDOW_SIZE;
         });
 }
 
-fn row_has_breakpoint(base: u32, breakpoints: &BTreeSet<u32>) -> bool {
-    for i in 0..BYTES_PER_ROW as u32 {
+fn row_has_breakpoint(base: u32, breakpoints: &BTreeSet<u32>, bytes_per_row: usize) -> bool {
+    for i in 0..bytes_per_row as u32 {
         if breakpoints.contains(&base.wrapping_add(i)) {
             return true;
         }
@@ -203,8 +219,8 @@ fn row_has_breakpoint(base: u32, breakpoints: &BTreeSet<u32>) -> bool {
     false
 }
 
-fn row_contains(base: u32, addr: u32) -> bool {
-    addr.wrapping_sub(base) < BYTES_PER_ROW as u32
+fn row_contains(base: u32, addr: u32, bytes_per_row: usize) -> bool {
+    addr.wrapping_sub(base) < bytes_per_row as u32
 }
 
 fn draw_disasm(
@@ -239,14 +255,16 @@ fn draw_disasm(
                 };
 
                 let color = match (has_pc, has_bp) {
-                    (true, _) => Some(egui::Color32::from_rgb(80, 200, 120)),
-                    (false, true) => Some(theme::ACCENT),
-                    (false, false) => None,
+                    (true, _) => egui::Color32::from_rgb(80, 200, 120),
+                    (false, true) => theme::ACCENT,
+                    (false, false) => theme::TEXT,
                 };
-                match color {
-                    Some(c) => ui.monospace(egui::RichText::new(text).color(c)),
-                    None => ui.monospace(text),
-                };
+                // Truncate gracefully instead of clipping mid-glyph when
+                // the sidebar is narrower than the longest mnemonic line.
+                ui.add(
+                    egui::Label::new(egui::RichText::new(text).monospace().color(color))
+                        .truncate(),
+                );
             }
         });
 }
@@ -259,7 +277,7 @@ fn read_instr(bus: &Bus, addr: u32) -> Option<u32> {
     Some(u32::from_le_bytes([b0, b1, b2, b3]))
 }
 
-fn format_row(bus: &Bus, base: u32, has_bp: bool, has_pc: bool) -> String {
+fn format_row(bus: &Bus, base: u32, has_bp: bool, has_pc: bool, bytes_per_row: usize) -> String {
     // Markers: `▸` for PC row, `●` for breakpoint row. PC wins since
     // knowing where execution is now is more urgent than which
     // addresses we've decided to stop on.
@@ -269,9 +287,9 @@ fn format_row(bus: &Bus, base: u32, has_bp: bool, has_pc: bool) -> String {
         (false, false) => ' ',
     };
     let mut out = format!("{marker} {base:08X}  ");
-    let mut ascii = String::with_capacity(BYTES_PER_ROW);
+    let mut ascii = String::with_capacity(bytes_per_row);
 
-    for i in 0..BYTES_PER_ROW {
+    for i in 0..bytes_per_row {
         let addr = base.wrapping_add(i as u32);
         match bus.try_read8(addr) {
             Some(b) => {
@@ -283,7 +301,8 @@ fn format_row(bus: &Bus, base: u32, has_bp: bool, has_pc: bool) -> String {
                 ascii.push('.');
             }
         }
-        if i == 7 {
+        // Mid-row visual gap at the halfway point (16- and 8-wide rows).
+        if bytes_per_row >= 8 && i == bytes_per_row / 2 - 1 {
             out.push(' ');
         }
     }
