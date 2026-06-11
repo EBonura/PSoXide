@@ -1,5 +1,30 @@
 # Architecture Cleanup Roadmap
 
+## Status (measured 2026-06-11)
+
+Most of this roadmap has been executed; the numbers below in the original
+text are the historical snapshot, kept for the rationale.
+
+| Stage | Status | Evidence (today's numbers) |
+|---|---|---|
+| 0 -- illegal states | **DONE** | `enum Interaction` + `enum Modal` exist in `psxed-ui/src/lib.rs` exactly as prescribed. |
+| 1/2 -- decompose + split the monolith | **DONE** | `psxed-ui/src/lib.rs` is 2,978 lines (was 40,324); the workspace struct lives across focused modules. |
+| 3 -- workspace topology | **OPEN** | Still 5 workspace roots + per-example workspaces, 29 `Cargo.lock` files; Makefile 876 lines. The host/device two-workspace split has not been attempted. |
+| 4 -- layering | **OPEN (partial)** | `psxed-project` carries no direct `egui` dependency, but still depends on `psx-engine`/`psx-level`/`psx-asset`/`psx-iso`; the adapter-trait boundary does not exist yet. |
+| 5 -- examples as applications | **DONE** | `editor-playtest/src/main.rs` is 860 lines (was 13,378); `psxed-project/src/lib.rs` is 276 (was 12,799). |
+| 6 -- domain god-files | **HALVED organically** | `render3d.rs` 3,337 (was 6,686), `gpu.rs` 3,037 (was 4,755), `cdrom.rs` 2,375, `spu.rs` 2,227; the compute rasterizer crate was removed entirely in the 2026-06 dedup. No file exceeds ~3.4K. Further splitting remains LOW priority. |
+
+Corrections to the original text below: the `parity-oracle` correctness
+harness it cites was retired 2026-06-11 (real PS1 hardware is the accuracy
+oracle now; see `hardware-burn-ledger.md`), and `psx-gpu-compute` no longer
+exists. Current totals: ~270K LOC (emu 72.5K, editor 99.9K, engine 67K,
+sdk 23.4K, crates 3.4K, tools 4.1K).
+
+Remaining actionable work: Stage 3 (do it when multi-workspace tooling pain
+actually bites) and Stage 4 (the `psxed-project` / engine adapter boundary).
+
+---
+
 Staged plan for tightening PSoXide's structure, ordered most-critical first.
 Each stage is independent enough to land on its own branch and be verified with
 `make check` / `make test` before the next.
