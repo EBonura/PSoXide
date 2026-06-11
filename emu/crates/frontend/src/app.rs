@@ -1271,6 +1271,16 @@ impl AppState {
             .current_dir(&workspace_root)
             .stdout(Stdio::from(log_file))
             .stderr(Stdio::from(log_stderr));
+        // The embedded preview only ever runs inside this emulator, so build
+        // it with the emulator-only stage/counter telemetry that feeds the
+        // debug sidebar profiler. Export builds keep the hardware-safe
+        // defaults (telemetry MMIO writes are not for real hardware).
+        if matches!(completion, EditorBuildCompletion::RunEmbedded { .. }) {
+            command.env(
+                "EDITOR_PLAYTEST_FEATURES",
+                "cd-stream-bench emulator-telemetry",
+            );
+        }
         let child = command
             .spawn()
             .map_err(|error| format!("spawn make: {error}"))?;
