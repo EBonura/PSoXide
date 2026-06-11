@@ -81,12 +81,13 @@ pub struct Cli {
     #[arg(long)]
     pub windowed: bool,
 
-    /// Run the experimental compute-shader rasterizer in parallel
-    /// with the CPU rasterizer (Phase C). Per-frame the frontend
-    /// drains the CPU's `cmd_log` and replays each GP0 packet
-    /// through the GPU compute path. Off by default -- opt-in until
-    /// parity is confirmed in a wide enough test set. Press F12 in
-    /// the GUI to toggle at runtime once the bus is wired up.
+    /// Run the shadow compute-shader rasterizer alongside the CPU
+    /// rasterizer: per frame the frontend drains the CPU's `cmd_log`
+    /// and replays each GP0 packet through the GPU compute path. This
+    /// is the A/B instrument for aligning the hardware renderer with
+    /// the silicon-verified CPU rasterizer (the CPU path is the
+    /// reference; burn ledger HWB-006). Press F12 in the GUI to switch
+    /// which output is displayed.
     #[arg(long)]
     pub gpu_compute: bool,
 

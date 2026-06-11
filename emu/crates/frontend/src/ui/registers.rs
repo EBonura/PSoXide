@@ -109,19 +109,28 @@ fn draw_gprs(ui: &mut egui::Ui, cpu: &Cpu, snapshot: &mut Option<[u32; 32]>) {
         }
     });
 
+    // Reflow the 32 registers to as many columns as the current panel
+    // width fits (1/2/4), instead of a hardcoded two-column grid that
+    // clips when narrow and wastes space when wide. One cell is
+    // "name=XXXXXXXX" (13 monospace chars) plus grid spacing.
+    let glyph_w = ui.fonts(|fonts| {
+        fonts.glyph_width(&egui::FontId::monospace(theme::FONT_SIZE_MONO), '0')
+    });
+    let col_stride = 13.0 * glyph_w + 12.0;
+    let cols = ((ui.available_width() / col_stride).floor() as usize).clamp(1, 4);
+    // Fill column-major so register order reads down each column.
+    let rows = 32usize.div_ceil(cols);
     egui::Grid::new("gprs")
-        .num_columns(2)
+        .num_columns(cols)
         .spacing(egui::vec2(12.0, 2.0))
         .show(ui, |ui| {
-            // Lay out as two columns: registers 0..16 on left, 16..32 on right.
-            for i in 0..16 {
-                reg_cell_diff(ui, GPR_NAMES[i], gprs[i], snapshot.map(|s| s[i]));
-                reg_cell_diff(
-                    ui,
-                    GPR_NAMES[i + 16],
-                    gprs[i + 16],
-                    snapshot.map(|s| s[i + 16]),
-                );
+            for row in 0..rows {
+                for col in 0..cols {
+                    let i = col * rows + row;
+                    if i < 32 {
+                        reg_cell_diff(ui, GPR_NAMES[i], gprs[i], snapshot.map(|s| s[i]));
+                    }
+                }
                 ui.end_row();
             }
         });

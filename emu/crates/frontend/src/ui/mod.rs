@@ -169,21 +169,37 @@ pub fn apply_menu_action(state: &mut AppState, action: menu::MenuAction) -> Menu
         ToggleRegisters => {
             state.panels.debug_sidebar = true;
             state.panels.registers = !state.panels.registers;
+            let open = state.panels.registers;
+            state
+                .panels
+                .set_override(crate::app::DebugSection::Registers, open);
             MenuOutcome::None
         }
         ToggleMemory => {
             state.panels.debug_sidebar = true;
             state.panels.memory = !state.panels.memory;
+            let open = state.panels.memory;
+            state
+                .panels
+                .set_override(crate::app::DebugSection::Memory, open);
             MenuOutcome::None
         }
         ToggleVram => {
             state.panels.debug_sidebar = true;
             state.panels.vram = !state.panels.vram;
+            let open = state.panels.vram;
+            state
+                .panels
+                .set_override(crate::app::DebugSection::Vram, open);
             MenuOutcome::None
         }
         ToggleProfiler => {
             state.panels.debug_sidebar = true;
             state.panels.profiler = !state.panels.profiler;
+            let open = state.panels.profiler;
+            state
+                .panels
+                .set_override(crate::app::DebugSection::Profiler, open);
             MenuOutcome::None
         }
         Quit => MenuOutcome::Quit,
