@@ -516,3 +516,23 @@ Also found while scoping faces (#44): DepthBand::slot_depth does a
 real 32-bit division per submitted face (offset*band_slots/span,
 ~36+ cycles); span is constant per draw call, so a per-call
 reciprocal (MULT high-part, native on MIPS) removes a per-face DIV.
+
+## Round results (2026-06-11, marathon session)
+
+- Prebuilt room-quad pool + single-packet risky whole-quads SHIPPED
+  (cd22fb12): room 328k -> 288k (-40k), -52 packets/frame. The win
+  split: most from the quad upgrade (one GP0(3Ch) packet where two
+  triangle leaves were submitted; per-surface averaged depth replaces
+  the leaves' near-identical keys), the prebuilt pool removes the
+  arena traffic for the quad path. Depth-key change awaits the user's
+  end-of-campaign visual pass.
+- slot_depth DIV hoist: measured NEGATIVE (+3.2k) and reverted. The
+  batch-hoisted reciprocal map's RAM field loads + fixup cost more
+  than the per-face 32-bit DIV in this timing model. Faces task
+  closed (NCLIP half was already dead by the silicon stale-MAC0
+  evidence). Lesson, twice confirmed now: per-primitive wins must
+  remove MEMORY traffic, not ALU ops.
+- Benchmark position with correct visuals: render vblank ~1,108k
+  (196%). Remaining program: update residual markers (99k
+  unattributed), player LLM-slot (#43), joints (#45), image_props,
+  visible-list camera split.
