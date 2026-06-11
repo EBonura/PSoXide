@@ -9,6 +9,64 @@ impl Playtest {
         ActiveRoomView::from_camera(self.render_camera)
     }
 
+    /// Global-space visibility anchor for a portal-admitted far room: the
+    /// center of the portal that admitted it, nudged half a sector INTO
+    /// the room so the grid lookup lands on an interior doorway cell. The
+    /// cooked PVS of that cell is, by construction, what is visible of
+    /// the room from its doorway -- the user-facing contract: rooms stay
+    /// drawn N portal hops down the line as long as the connecting
+    /// portals survive the frustum-clipped portal walk.
+    ///
+    /// Returns `None` when the room has no recorded entry frustum (the
+    /// caller then draws every cell through the cached path instead).
+    pub(super) fn portal_entry_anchor(
+        &self,
+        room: RoomIndex,
+        sector_size: i32,
+    ) -> Option<RoomPoint> {
+        let position = self.portal_visibility.room_position(room)?;
+        let visible = self.portal_visibility.rooms.get(position)?;
+        let frustum = self
+            .portal_visibility
+            .frustums
+            .get(visible.frustum_first as usize)?;
+        if frustum.room != room {
+            return None;
+        }
+        let record = ROOM_PORTALS.get(frustum.source_portal as usize)?;
+        let center_x = (record.vertex_x[0]
+            + record.vertex_x[1]
+            + record.vertex_x[2]
+            + record.vertex_x[3])
+            / 4;
+        let center_y = (record.vertex_y[0]
+            + record.vertex_y[1]
+            + record.vertex_y[2]
+            + record.vertex_y[3])
+            / 4;
+        let center_z = (record.vertex_z[0]
+            + record.vertex_z[1]
+            + record.vertex_z[2]
+            + record.vertex_z[3])
+            / 4;
+        // The cooked normal faces the record's SOURCE room. Nudge toward
+        // whichever side `room` is on; the walk traverses records in
+        // both directions, so check rather than assume orientation.
+        let nudge = (sector_size / 2).max(1);
+        let sign = if record.destination_room == room {
+            -1
+        } else if record.source_room == room {
+            1
+        } else {
+            return None;
+        };
+        Some(RoomPoint::new(
+            center_x + sign * (record.normal_x as i32) * nudge,
+            center_y + sign * (record.normal_y as i32) * nudge,
+            center_z + sign * (record.normal_z as i32) * nudge,
+        ))
+    }
+
     pub(super) fn rebuild_portal_visibility(
         &mut self,
         current_index: RoomIndex,
