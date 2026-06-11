@@ -5,6 +5,34 @@ optimise at any level (SDK to engine); rewrites welcome; aim for
 conciseness, elegance, simplicity. Most of the engine predates the
 silicon-accurate emulator, so architecture decisions are open.
 
+## STATUS (2026-06-11, end of visibility-fix session)
+
+Visibility: FIXED and tape-verified (portal-anchored PVS, all-cells
+fallback that always draws; 333 tris vs draw-everything's 341).
+Performance with CORRECT visuals: render vblank 1,126k (199%), ~20
+fps -- the earlier sub-900k numbers were measured against broken
+far-room culling and are void. The remaining ~250k to a clean 30 fps
+slot, mapped by instruments this session, in expected-value order:
+
+1. Room surface packets: prebuild at cache-build time (surfaces are
+   static; only XY/depth change per frame). Micro-profile: submit
+   36k/frame (~356/quad for ~101 quads), vertex gather 15k, lighting
+   3.4k, rest loop scaffolding. The classic precompiled-display-list
+   technique; biggest single design on the table (room band 328k).
+2. Player path: LLM-slot blend restructure + joints flattening +
+   faces DIV (designs recorded below; player 318k).
+3. Update residual: 99k avg / 310k max UNATTRIBUTED after the sim
+   sub-stages (solve 68k, collision 13k, room-track 6k with 83k
+   transition spikes). Needs 2-3 more stage markers; suspects are
+   anim sampling, props, interactables, camera.
+4. Visible-list cache split: the fill is camera-dependent (frustum
+   filtering at fill time) so it refills every frame the camera
+   moves; caching the camera-independent PVS candidate list per
+   (room, anchor) and filtering per frame in cell_select is worth
+   ~30k. The prewarm is already portal-anchored (tick B does the
+   fill under phase 1's GPU cover).
+5. image_props 139k: never opened.
+
 Budget: 564,480 cycles per NTSC vblank; the 30 fps slot is 2 vblanks.
 All numbers below are EMULATED cycles (relative guide, not silicon
 truth -- the cycle model is Redux-era and never silicon-calibrated;
