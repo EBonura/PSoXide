@@ -227,14 +227,14 @@ pub(crate) fn draw_player_vert_debug(font: &FontAtlas) {
     // through the console-exact GTE core.
     let page = unsafe {
         PAGE_TICKS = PAGE_TICKS.wrapping_add(1);
-        (PAGE_TICKS / 90) % 4
+        (PAGE_TICKS / 90) % 5
     };
     // Header carries the latch score: identical SC on every photographed
     // page proves all pages show the same latched event.
     let mut hdr = DbgLine::new();
     hdr.s(b"P");
     hdr.i(page as i32 + 1);
-    hdr.s(b"/4 SC ");
+    hdr.s(b"/5 SC ");
     hdr.i(vdbg::snapshot().score);
     font.draw_text(216, 44, hdr.text(), (255, 255, 255));
 
@@ -242,7 +242,8 @@ pub(crate) fn draw_player_vert_debug(font: &FontAtlas) {
         0 => draw_vdbg_extents(font, &b),
         1 => draw_vdbg_vertex_page(font),
         2 => draw_vdbg_matrices_page(font),
-        _ => draw_vdbg_compose_inputs_page(font),
+        3 => draw_vdbg_compose_inputs_page(font),
+        _ => draw_vdbg_hazard_probe_page(font),
     }
 
     vdbg::reset();
@@ -383,6 +384,56 @@ fn draw_vdbg_compose_inputs_page(font: &FontAtlas) {
     } else {
         font.draw_text(8, 128, "M1 MISSING", (255, 90, 90));
     }
+}
+
+/// Page 5: HWB-009 hazard probes for the latched event. Per compose joint:
+/// TR regs in effect during each column op (engine wrote ZERO; nonzero =
+/// the additive (D<<12) X-row signature is literal TR state) and the
+/// MAC1 immediate-minus-settled deltas (nonzero = stale result reads).
+/// Skin A/B rows: TR during the per-vertex MVMVAs (should equal T0/T1
+/// from page 3) plus their MAC1 deltas.
+fn draw_vdbg_hazard_probe_page(font: &FontAtlas) {
+    use psx_engine::render3d::player_vert_debug as vdbg;
+    let s = vdbg::snapshot();
+    if !s.valid {
+        font.draw_text(8, 44, "NO SNAP", (255, 90, 90));
+        return;
+    }
+    let joint = |font: &FontAtlas, y: i16, tag: u8, j: &psx_engine::render3d::player_vert_debug::JointComposeIn| {
+        // TRX during each of the three column ops (TRY/TRZ of c0 too).
+        let mut l = DbgLine::new();
+        l.b(tag);
+        l.s(b"U ");
+        l.x32(j.tr[0][0] as u32);
+        l.b(b' ');
+        l.x32(j.tr[1][0] as u32);
+        l.b(b' ');
+        l.x32(j.tr[2][0] as u32);
+        font.draw_text(8, y, l.text(), (255, 232, 120));
+        let mut l2 = DbgLine::new();
+        l2.b(tag);
+        l2.s(b"V ");
+        l2.x32(j.tr[0][1] as u32);
+        l2.b(b' ');
+        l2.x32(j.tr[0][2] as u32);
+        l2.s(b" D ");
+        l2.i(j.xd[0]);
+        l2.b(b' ');
+        l2.i(j.xd[1]);
+        l2.b(b' ');
+        l2.i(j.xd[2]);
+        font.draw_text(8, y + 12, l2.text(), (255, 200, 120));
+    };
+    joint(font, 44, b'0', &s.m0);
+    joint(font, 72, b'1', &s.m1);
+    draw_hex3(font, 104, b"AT", &s.a_tr, (160, 230, 255));
+    draw_hex3(font, 116, b"BT", &s.b_tr, (160, 230, 255));
+    let mut l = DbgLine::new();
+    l.s(b"AD ");
+    l.i(s.a_xd);
+    l.s(b" BD ");
+    l.i(s.b_xd);
+    font.draw_text(8, 128, l.text(), (200, 200, 200));
 }
 
 /// One labelled row of three 32-bit hex values.
