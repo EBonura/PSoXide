@@ -362,6 +362,32 @@ Next probe before any further rewrite: temporary sub-stage markers
 inside the blended path (transforms vs lerp vs projection) so the
 next attempt aims at a measured target, not a model.
 
+### Blended-path decomposition (measured, throwaway stub builds)
+
+Per blended vertex (161/frame), of ~590 total: projection segment
+(identity load + zero TR + RTPS wrapper + guards) = 264; secondary
+segment (matrix load + MVMVA + 6-multiply lerp) = 175; remainder
+(primary MVMVA + call glue + the 91 unblended verts' runs) = ~33k
+stage-wide. Cheap fixes measured small: scheduled RTPS wrapper in
+project_gte_view_vertex bought only -1.9k (committed; bit-exact);
+load_rotation is already lean (5 packed CTC2s, no padding). The
+per-segment costs are spread across many ~5-cycle COP2/RAM touches,
+not one hot spot.
+
+Remaining levers, in order of expected value (next session):
+1. Secondary joint into the GTE LLM slot: MVMVA can take LLM as its
+   matrix, so the part's primary stays in R untouched (no per-vertex
+   R thrash, no restore), the secondary reloads only when joint1
+   changes between consecutive blended vertices, and only the
+   projection still needs R=identity. Register-resident, no scratch.
+2. GTE GPF/GPL for the lerp (vector x IR0 interpolate-accumulate)
+   replacing 6 CPU multiplies, keeping work on the GTE.
+3. Content lever: 64% blended vertices is very high for PS1 skinning
+   (classic titles hard-skinned with overlapping parts). A cook-time
+   blend-weight threshold or seam-only blending would shrink the
+   expensive population directly -- an authoring decision, not an
+   engine one.
+
 Also found while scoping faces (#44): DepthBand::slot_depth does a
 real 32-bit division per submitted face (offset*band_slots/span,
 ~36+ cycles); span is constant per draw call, so a per-call
