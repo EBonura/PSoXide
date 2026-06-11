@@ -1,5 +1,8 @@
 # Demo10 Low-Level Hot-Path Baseline - 2026-06-02
 
+> Naming note: the project measured here is the one now shipped as
+> `cortex_ignition_v1`; newer docs and Makefile targets use that name.
+
 This note records the first measurement pass for SDK/engine low-level optimization work.
 The goal was to avoid guessing: capture guest-cycle telemetry first, then choose
 functions whose per-frame call volume makes cycle shaving meaningful.
