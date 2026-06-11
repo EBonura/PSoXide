@@ -9,7 +9,7 @@
 
 use psx_gpu::{
     material::{TextureMaterial, TexturedGouraudPacketMaterial},
-    prim::{QuadTexturedGouraud, TriTextured, TriTexturedGouraud},
+    prim::{TriTextured, TriTexturedGouraud},
 };
 use psx_level::{
     LevelCachedRoomCellRecord, LevelCachedRoomSurfaceRecord, LevelCachedRoomVertexRecord,
@@ -2362,7 +2362,6 @@ fn submit_sided_projected_gouraud_quad_cached_uv_words<const OT: usize>(
     prepared_depth: Option<PreparedTriangleDepth>,
     _base_cull: CullMode,
     split: u8,
-    prebuilt: Option<(&mut QuadTexturedGouraud, bool)>,
     profile: &mut RoomSurfaceMicroProfile,
 ) {
     let (verts, uv_words, colors) = match material.sidedness {
@@ -2394,23 +2393,6 @@ fn submit_sided_projected_gouraud_quad_cached_uv_words<const OT: usize>(
                 [colors[1], colors[0], colors[2], colors[3]],
             )
         };
-        // Prebuilt-pool path: the packet lives in a static pool; only
-        // positions/colours are rewritten per frame (skeleton on fill).
-        if let Some((quad, fill)) = prebuilt {
-            let _ = world.submit_prebuilt_textured_gouraud_quad(
-                quad,
-                fill,
-                quad_verts,
-                quad_uv_words,
-                quad_colors,
-                material.gouraud_packet,
-                opts,
-                prepared_depth,
-            );
-            #[cfg(not(feature = "room-surface-profile"))]
-            let _ = profile;
-            return;
-        }
         let _ = world.submit_textured_gouraud_quad_leaf_uv_words_prepared_depth(
             triangles,
             quad_verts,
