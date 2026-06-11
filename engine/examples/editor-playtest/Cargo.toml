@@ -26,11 +26,10 @@ default = [
     "world-grid-visible",
     "ot-2048",
     "vis-static-active-turn",
-    # The cooked per-cell PVS is the default again: the far-room hole it
-    # had (arch-door sightline) was the runtime anchor clamp, fixed
-    # 2026-06-11 -- rooms the player is not inside now take a full-room
-    # fallback draw, so nothing can be culled wholesale. The
-    # draw-everything escape hatch stays behind vis-full-active-chunks.
+    # Draw every cell of each node-traversal room and rely on per-polygon
+    # backface + screen culling, instead of the cooked per-cell PVS. Closes the
+    # far-room cull where distant cells were dropped by the PVS path.
+    "vis-full-active-chunks",
 ]
 cd-stream-bench = ["dep:psx-io"]
 cd-stream-benchmark = ["cd-stream-bench"]
