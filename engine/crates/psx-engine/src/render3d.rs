@@ -2632,6 +2632,40 @@ fn projected_from_gte(projected: scene::Projected) -> ProjectedVertex {
     ProjectedVertex::new(projected.sx, projected.sy, projected.sz as i32)
 }
 
+/// Store one RTPT triple and fold its bookkeeping (near-plane verdict,
+/// screen-extent bounds) in a single pass.
+///
+/// The GTE saturates SX/SY to the hardware vertex range, so the
+/// inside-hw-bounds verdict cannot fail for GTE-projected vertices and
+/// is intentionally not part of this path (the CPU-blend path keeps
+/// its own check). Called between an RTPT kick and its read, this is
+/// the scalar work that hides the GTE op latency.
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn commit_projected_triple(
+    base: usize,
+    triple: [scene::Projected; 3],
+    near_z: i32,
+    out: &mut [ProjectedVertex],
+    all_in_front: &mut bool,
+    min_x: &mut i16,
+    max_x: &mut i16,
+    min_y: &mut i16,
+    max_y: &mut i16,
+) {
+    let mut k = 0usize;
+    while k < 3 {
+        let p = triple[k];
+        *all_in_front &= (p.sz as i32) >= near_z;
+        *min_x = (*min_x).min(p.sx);
+        *max_x = (*max_x).max(p.sx);
+        *min_y = (*min_y).min(p.sy);
+        *max_y = (*max_y).max(p.sy);
+        out[base + k] = ProjectedVertex::new(p.sx, p.sy, p.sz as i32);
+        k += 1;
+    }
+}
+
 #[inline]
 fn projected_option_from_gte(projected: scene::Projected, near_z: i32) -> Option<ProjectedVertex> {
     if (projected.sz as i32) >= near_z {
