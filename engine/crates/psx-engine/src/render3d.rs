@@ -1691,6 +1691,7 @@ fn textured_model_part_gte_transform_with_view(
     origin: WorldVertex,
 ) -> (Mat3I16, Vec3I32) {
     let model = scaled_pose_matrix(pose, local_to_world);
+    player_vert_debug::record_compose_input(&model, Vec3I16::ZERO);
     // Composition order: view × instance × model. `instance` is
     // pre-multiplied through to rotate the joint pose around
     // the model origin in world space; `view` then rotates the
@@ -1855,6 +1856,7 @@ fn textured_model_part_gte_transform_with_view_gte_packed_translation(
 }
 
 fn gte_compose_joint_rotation(view_instance: Mat3I16, model: Mat3I16) -> Mat3I16 {
+    player_vert_debug::record_compose_input(&model, Vec3I16::ZERO);
     scene::load_rotation(&view_instance);
     scene::load_translation(Vec3I32::ZERO);
 
@@ -1888,6 +1890,7 @@ fn gte_compose_joint_rotation_and_translation(
     model: Mat3I16,
     pose_translation: Vec3I16,
 ) -> (Mat3I16, Vec3I32) {
+    player_vert_debug::record_compose_input(&model, pose_translation);
     scene::load_rotation(&view_instance);
     scene::load_translation(Vec3I32::ZERO);
 
@@ -2179,7 +2182,15 @@ fn project_blended_textured_model_vertex(
     // hardware) instead of two CPU divides, then restore the primary joint so
     // the caller's GTE batch state is preserved on return.
     let projected = project_gte_view_vertex(view_blend, projection);
-    player_vert_debug::observe(view_a, view_b, view_blend, projected);
+    player_vert_debug::observe(
+        vertex,
+        &primary,
+        &secondary,
+        view_a,
+        view_b,
+        view_blend,
+        projected,
+    );
     scene::load_rotation(&primary.rotation);
     scene::load_translation(primary.translation);
     projected
@@ -2198,7 +2209,11 @@ fn project_blended_textured_model_vertex(
 /// On the silicon-faithful emulator these stay small/in-bounds; if hardware
 /// blows one stage up while the others stay sane, that stage is the bug.
 pub mod player_vert_debug {
-    use super::{projected_model_vertex_inside_hw_bounds, ProjectedVertex, ViewVertex};
+    use super::{
+        projected_model_vertex_inside_hw_bounds, JointViewTransform, Mat3I16, ModelVertex,
+        ProjectedVertex, Vec3I16, ViewVertex,
+    };
+    use psx_gte::scene;
 
     /// Per-frame player skinned-vertex bounds for the explosion probe.
     /// Hardware vs the silicon-faithful emulator (controlled fixed-pose diff,
@@ -2264,10 +2279,14 @@ pub mod player_vert_debug {
 
     static mut B: Bounds = Bounds::EMPTY;
 
-    /// Clear at the start of each frame's model pass.
+    /// Clear at the start of each frame's model pass. The worst-vertex
+    /// snapshot is NOT cleared: it latches the all-time worst event so the
+    /// auto-cycling overlay pages stay mutually consistent across the
+    /// seconds it takes to photograph them.
     pub fn reset() {
         unsafe {
             *core::ptr::addr_of_mut!(B) = Bounds::EMPTY;
+            CAPTURED = false;
         }
     }
 
@@ -2288,6 +2307,9 @@ pub mod player_vert_debug {
     }
 
     pub(super) fn observe(
+        vertex: ModelVertex,
+        primary: &JointViewTransform,
+        secondary: &JointViewTransform,
         view_a: ViewVertex,
         view_b: ViewVertex,
         view_blend: ViewVertex,
@@ -2309,7 +2331,234 @@ pub mod player_vert_debug {
             if !projected_model_vertex_inside_hw_bounds(p) {
                 b.oob = b.oob.wrapping_add(1);
             }
+            // Freeze the joint compose table on the first blended vertex:
+            // this model IS the player, later models must not overwrite it.
+            CAPTURED = true;
+            // Worst-vertex snapshot, LATCHED ALL-TIME (not per frame): the
+            // idle animation drifts values frame to frame, and the overlay
+            // pages are photographed seconds apart -- a per-frame snapshot
+            // would mix frames and break same-frame offline replay. The
+            // latch holds the single worst event since boot (a hardware
+            // stretch event, |X| ~10x normal, dominates immediately), and
+            // the compose inputs for its two joints are copied in HERE so
+            // all four pages describe one frozen event.
+            let score = abs_i32(view_a.x).max(abs_i32(view_b.x)).max(abs_i32(view_blend.x));
+            if score > SNAP_SCORE {
+                SNAP_SCORE = score;
+                let joints = &*core::ptr::addr_of!(JOINTS);
+                let m0 = if (PRIMARY_JOINT as usize) < JOINT_CAP {
+                    joints[PRIMARY_JOINT as usize]
+                } else {
+                    JointComposeIn::EMPTY
+                };
+                let m1 = if (vertex.joint1 as usize) < JOINT_CAP {
+                    joints[vertex.joint1 as usize]
+                } else {
+                    JointComposeIn::EMPTY
+                };
+                *core::ptr::addr_of_mut!(SNAP) = Snapshot {
+                    valid: true,
+                    score,
+                    vi: *core::ptr::addr_of!(VIEW_INSTANCE),
+                    m0,
+                    m1,
+                    pos: vertex.position,
+                    j0: PRIMARY_JOINT,
+                    j1: vertex.joint1,
+                    blend: vertex.blend,
+                    rot0: primary.rotation,
+                    tr0: [
+                        primary.translation.x,
+                        primary.translation.y,
+                        primary.translation.z,
+                    ],
+                    rot1: secondary.rotation,
+                    tr1: [
+                        secondary.translation.x,
+                        secondary.translation.y,
+                        secondary.translation.z,
+                    ],
+                    va: [view_a.x, view_a.y, view_a.z],
+                    vb: [view_b.x, view_b.y, view_b.z],
+                    vl: [view_blend.x, view_blend.y, view_blend.z],
+                    sx: p.sx,
+                    sy: p.sy,
+                    flag: scene::read_flag(),
+                };
+            }
         }
+    }
+
+    fn abs_i32(v: i32) -> i32 {
+        if v == i32::MIN {
+            i32::MAX
+        } else {
+            v.abs()
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // ALL-STAGES live capture (single-burn bisection). For the worst
+    // blended vertex of the frame the overlay can show the FULL skinning
+    // chain in hex; each stage is then recomputable offline through the
+    // console-exact GTE core, and the FIRST stage where the photographed
+    // hardware value diverges from the recomputation is the bug locus:
+    //   compose inputs (view*instance + per-joint model matrix, page 4)
+    //     -> composed matrices as CTC2'd (rot0/rot1 + translations, page 3)
+    //     -> MVMVA outputs (view_a / view_b), lerp, projection, FLAG (page 2)
+    // ------------------------------------------------------------------
+
+    /// Worst-vertex full-chain snapshot for the overlay.
+    #[derive(Clone, Copy)]
+    pub struct Snapshot {
+        /// False until the first blended vertex of the frame lands.
+        pub valid: bool,
+        /// Model-local vertex position (MVMVA input vector).
+        pub pos: Vec3I16,
+        /// Primary joint index (the part's joint).
+        pub j0: u8,
+        /// Secondary joint index.
+        pub j1: u8,
+        /// Secondary blend weight (0..=255).
+        pub blend: u8,
+        /// Primary joint matrix exactly as CTC2'd for `view_a`.
+        pub rot0: Mat3I16,
+        /// Primary joint view-space translation.
+        pub tr0: [i32; 3],
+        /// Secondary joint matrix exactly as CTC2'd for `view_b`.
+        pub rot1: Mat3I16,
+        /// Secondary joint view-space translation.
+        pub tr1: [i32; 3],
+        /// Primary-joint MVMVA output (view-space A).
+        pub va: [i32; 3],
+        /// Secondary-joint MVMVA output (view-space B).
+        pub vb: [i32; 3],
+        /// CPU lerp of A/B by `blend`.
+        pub vl: [i32; 3],
+        /// Projected screen X (RTPS of `vl`).
+        pub sx: i16,
+        /// Projected screen Y.
+        pub sy: i16,
+        /// GTE FLAG read right after the projection.
+        pub flag: u32,
+        /// The latch score (max |view X| across the three stages).
+        pub score: i32,
+        /// View x instance compose input, from the LATCHED frame.
+        pub vi: Mat3I16,
+        /// Primary joint compose inputs from the latched frame.
+        pub m0: JointComposeIn,
+        /// Secondary joint compose inputs from the latched frame.
+        pub m1: JointComposeIn,
+    }
+
+    impl Snapshot {
+        const EMPTY: Self = Self {
+            valid: false,
+            pos: Vec3I16::ZERO,
+            j0: 0xFF,
+            j1: 0xFF,
+            blend: 0,
+            rot0: Mat3I16::IDENTITY,
+            tr0: [0; 3],
+            rot1: Mat3I16::IDENTITY,
+            tr1: [0; 3],
+            va: [0; 3],
+            vb: [0; 3],
+            vl: [0; 3],
+            sx: 0,
+            sy: 0,
+            flag: 0,
+            score: -1,
+            vi: Mat3I16::IDENTITY,
+            m0: JointComposeIn::EMPTY,
+            m1: JointComposeIn::EMPTY,
+        };
+    }
+
+    /// Per-joint GTE compose INPUTS (recorded inside the compose calls, so
+    /// they are exactly what the GTE saw, not a re-derivation).
+    #[derive(Clone, Copy)]
+    pub struct JointComposeIn {
+        /// True once this joint's compose ran this frame.
+        pub valid: bool,
+        /// Model/pose matrix fed column-by-column through MVMVA.
+        pub model: Mat3I16,
+        /// Pose translation fed to the translation MVMVA (zero for the
+        /// rotation-only compose path).
+        pub ptrans: Vec3I16,
+    }
+
+    impl JointComposeIn {
+        const EMPTY: Self = Self {
+            valid: false,
+            model: Mat3I16::IDENTITY,
+            ptrans: Vec3I16::ZERO,
+        };
+    }
+
+    /// Joint slots captured per frame (player joint counts are far below this).
+    pub const JOINT_CAP: usize = 24;
+
+    static mut SNAP: Snapshot = Snapshot::EMPTY;
+    static mut SNAP_SCORE: i32 = -1;
+    static mut CAPTURED: bool = false;
+    static mut PRIMARY_JOINT: u8 = 0xFF;
+    static mut CUR_SLOT: u8 = 0xFF;
+    static mut VIEW_INSTANCE: Mat3I16 = Mat3I16::IDENTITY;
+    static mut JOINTS: [JointComposeIn; JOINT_CAP] = [JointComposeIn::EMPTY; JOINT_CAP];
+
+    /// Start of a model's joint pass: reset the compose table for THIS model
+    /// unless the player (a model with blended verts) was already captured
+    /// this frame.
+    pub fn record_joints_begin(view_instance: &Mat3I16) {
+        unsafe {
+            if CAPTURED {
+                return;
+            }
+            *core::ptr::addr_of_mut!(VIEW_INSTANCE) = *view_instance;
+            let joints = &mut *core::ptr::addr_of_mut!(JOINTS);
+            let mut i = 0;
+            while i < JOINT_CAP {
+                joints[i].valid = false;
+                i += 1;
+            }
+        }
+    }
+
+    /// Sync the compose-record slot to the joint index about to be built
+    /// (compose functions don't know the index; jointless poses skip).
+    pub fn set_joint_slot(idx: u8) {
+        unsafe {
+            CUR_SLOT = idx;
+        }
+    }
+
+    /// Record the GTE compose inputs for the current joint slot. Called from
+    /// inside the compose functions with the exact values handed to the GTE.
+    pub(super) fn record_compose_input(model: &Mat3I16, ptrans: Vec3I16) {
+        unsafe {
+            if CAPTURED || CUR_SLOT as usize >= JOINT_CAP {
+                return;
+            }
+            let joints = &mut *core::ptr::addr_of_mut!(JOINTS);
+            joints[CUR_SLOT as usize] = JointComposeIn {
+                valid: true,
+                model: *model,
+                ptrans,
+            };
+        }
+    }
+
+    /// The part loop's current primary joint (for the snapshot's `j0`).
+    pub fn set_primary_joint(idx: u8) {
+        unsafe {
+            PRIMARY_JOINT = idx;
+        }
+    }
+
+    /// Worst-vertex snapshot for the HUD overlay (all-time latch).
+    pub fn snapshot() -> Snapshot {
+        unsafe { *core::ptr::addr_of!(SNAP) }
     }
 }
 

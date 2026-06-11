@@ -259,6 +259,9 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         let joint_count = (model.joint_count() as usize).min(joint_view_transforms.len());
         let pose_sample = animation.looped_pose_sample_q12(frame_q12);
         crate::telemetry::stage_begin(crate::telemetry::stage::TEXTURED_MODEL_JOINTS);
+        // EXPLOSION PROBE (diagnostic): capture this model's compose inputs;
+        // frozen once a blended (player) vertex is observed this frame.
+        super::player_vert_debug::record_joints_begin(&view_instance);
         if let Some(sample) = pose_sample {
             for (joint, joint_view_transform) in joint_view_transforms
                 .iter_mut()
@@ -266,6 +269,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 .take(joint_count)
             {
                 let joint_index = joint as u16;
+                super::player_vert_debug::set_joint_slot(joint as u8);
                 let joint_transform =
                     if MODEL_GTE_JOINT_TRANSLATION && MODEL_GTE_JOINT_PACKED_TRANSLATION {
                         sample
@@ -375,6 +379,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 continue;
             }
             let primary = joint_view_transforms[primary_joint];
+            super::player_vert_debug::set_primary_joint(primary_joint as u8);
 
             scene::load_rotation(&primary.rotation);
             scene::load_translation(primary.translation);
