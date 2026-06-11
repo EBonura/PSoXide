@@ -1860,21 +1860,26 @@ fn gte_compose_joint_rotation(view_instance: Mat3I16, model: Mat3I16) -> Mat3I16
     scene::load_rotation(&view_instance);
     scene::load_translation(Vec3I32::ZERO);
 
-    let c0 = scene::transform_vertex_scheduled(Vec3I16::new(
+    // HWB-009 measurement build: probed transforms (live schedule + post-op
+    // hazard evidence); the matrix still uses the IMMEDIATE outputs so this
+    // build behaves exactly like the live engine.
+    let p0 = scene::transform_vertex_probed(Vec3I16::new(
         model.m[0][0],
         model.m[1][0],
         model.m[2][0],
     ));
-    let c1 = scene::transform_vertex_scheduled(Vec3I16::new(
+    let p1 = scene::transform_vertex_probed(Vec3I16::new(
         model.m[0][1],
         model.m[1][1],
         model.m[2][1],
     ));
-    let c2 = scene::transform_vertex_scheduled(Vec3I16::new(
+    let p2 = scene::transform_vertex_probed(Vec3I16::new(
         model.m[0][2],
         model.m[1][2],
         model.m[2][2],
     ));
+    player_vert_debug::record_compose_probes(&[p0, p1, p2]);
+    let (c0, c1, c2) = (p0.out, p1.out, p2.out);
 
     Mat3I16 {
         m: [
@@ -1894,21 +1899,26 @@ fn gte_compose_joint_rotation_and_translation(
     scene::load_rotation(&view_instance);
     scene::load_translation(Vec3I32::ZERO);
 
-    let c0 = scene::transform_vertex_scheduled(Vec3I16::new(
+    // HWB-009 measurement build: probed transforms (live schedule + post-op
+    // hazard evidence); the matrix still uses the IMMEDIATE outputs so this
+    // build behaves exactly like the live engine.
+    let p0 = scene::transform_vertex_probed(Vec3I16::new(
         model.m[0][0],
         model.m[1][0],
         model.m[2][0],
     ));
-    let c1 = scene::transform_vertex_scheduled(Vec3I16::new(
+    let p1 = scene::transform_vertex_probed(Vec3I16::new(
         model.m[0][1],
         model.m[1][1],
         model.m[2][1],
     ));
-    let c2 = scene::transform_vertex_scheduled(Vec3I16::new(
+    let p2 = scene::transform_vertex_probed(Vec3I16::new(
         model.m[0][2],
         model.m[1][2],
         model.m[2][2],
     ));
+    player_vert_debug::record_compose_probes(&[p0, p1, p2]);
+    let (c0, c1, c2) = (p0.out, p1.out, p2.out);
     let translation = scene::transform_vertex_scheduled(pose_translation);
 
     (
@@ -2170,13 +2180,14 @@ fn project_blended_textured_model_vertex(
     let secondary = joint_view_transforms[vertex.joint1 as usize];
     // The part's primary joint is already loaded in the GTE by the caller's
     // project loop, so transform view_a there instead of by hand on the CPU.
-    let a = scene::transform_vertex_scheduled(vertex.position);
-    let view_a = ViewVertex::new(a.x, a.y, a.z);
+    // HWB-009: probed transforms (immediate outputs used, live behavior).
+    let a = scene::transform_vertex_probed(vertex.position);
+    let view_a = ViewVertex::new(a.out.x, a.out.y, a.out.z);
     // view_b needs the secondary joint: load it and transform.
     scene::load_rotation(&secondary.rotation);
     scene::load_translation(secondary.translation);
-    let b = scene::transform_vertex_scheduled(vertex.position);
-    let view_b = ViewVertex::new(b.x, b.y, b.z);
+    let b = scene::transform_vertex_probed(vertex.position);
+    let view_b = ViewVertex::new(b.out.x, b.out.y, b.out.z);
     let view_blend = lerp_view_vertex(view_a, view_b, vertex.blend);
     // Project the blended view-space vertex on the GTE (perspective divide in
     // hardware) instead of two CPU divides, then restore the primary joint so
@@ -2186,6 +2197,8 @@ fn project_blended_textured_model_vertex(
         vertex,
         &primary,
         &secondary,
+        &a,
+        &b,
         view_a,
         view_b,
         view_blend,
@@ -2310,6 +2323,8 @@ pub mod player_vert_debug {
         vertex: ModelVertex,
         primary: &JointViewTransform,
         secondary: &JointViewTransform,
+        a_probe: &scene::TransformProbe,
+        b_probe: &scene::TransformProbe,
         view_a: ViewVertex,
         view_b: ViewVertex,
         view_blend: ViewVertex,
@@ -2384,6 +2399,10 @@ pub mod player_vert_debug {
                     sx: p.sx,
                     sy: p.sy,
                     flag: scene::read_flag(),
+                    a_xd: a_probe.out.x - a_probe.x_settled,
+                    a_tr: a_probe.tr,
+                    b_xd: b_probe.out.x - b_probe.x_settled,
+                    b_tr: b_probe.tr,
                 };
             }
         }
@@ -2449,6 +2468,14 @@ pub mod player_vert_debug {
         pub m0: JointComposeIn,
         /// Secondary joint compose inputs from the latched frame.
         pub m1: JointComposeIn,
+        /// Skin-A MVMVA MAC1 stale delta (immediate minus settled).
+        pub a_xd: i32,
+        /// TR regs in effect during the skin-A MVMVA (should equal tr0).
+        pub a_tr: [i32; 3],
+        /// Skin-B MVMVA MAC1 stale delta.
+        pub b_xd: i32,
+        /// TR regs in effect during the skin-B MVMVA (should equal tr1).
+        pub b_tr: [i32; 3],
     }
 
     impl Snapshot {
@@ -2472,11 +2499,16 @@ pub mod player_vert_debug {
             vi: Mat3I16::IDENTITY,
             m0: JointComposeIn::EMPTY,
             m1: JointComposeIn::EMPTY,
+            a_xd: 0,
+            a_tr: [0; 3],
+            b_xd: 0,
+            b_tr: [0; 3],
         };
     }
 
     /// Per-joint GTE compose INPUTS (recorded inside the compose calls, so
-    /// they are exactly what the GTE saw, not a re-derivation).
+    /// they are exactly what the GTE saw, not a re-derivation), plus the
+    /// HWB-008 hazard probes from each column transform.
     #[derive(Clone, Copy)]
     pub struct JointComposeIn {
         /// True once this joint's compose ran this frame.
@@ -2486,6 +2518,13 @@ pub mod player_vert_debug {
         /// Pose translation fed to the translation MVMVA (zero for the
         /// rotation-only compose path).
         pub ptrans: Vec3I16,
+        /// Per-column MAC1 read-stale delta (immediate read minus the
+        /// settled re-read). Nonzero on hardware = stale MAC1 serve.
+        pub xd: [i32; 3],
+        /// TR control regs (TRX/TRY/TRZ) in effect during each column
+        /// op. The compose loads zero; nonzero = lost/late zero write,
+        /// the additive (D<<12) signature decoded from HWB-008.
+        pub tr: [[i32; 3]; 3],
     }
 
     impl JointComposeIn {
@@ -2493,6 +2532,8 @@ pub mod player_vert_debug {
             valid: false,
             model: Mat3I16::IDENTITY,
             ptrans: Vec3I16::ZERO,
+            xd: [0; 3],
+            tr: [[0; 3]; 3],
         };
     }
 
@@ -2545,7 +2586,28 @@ pub mod player_vert_debug {
                 valid: true,
                 model: *model,
                 ptrans,
+                xd: [0; 3],
+                tr: [[0; 3]; 3],
             };
+        }
+    }
+
+    /// Record the three column-transform hazard probes for the current
+    /// joint slot. Called ONCE after c2 (not between columns) so the
+    /// instrumentation adds no stores inside the hot GTE sequence.
+    pub(super) fn record_compose_probes(probes: &[scene::TransformProbe; 3]) {
+        unsafe {
+            if CAPTURED || CUR_SLOT as usize >= JOINT_CAP {
+                return;
+            }
+            let joints = &mut *core::ptr::addr_of_mut!(JOINTS);
+            let j = &mut joints[CUR_SLOT as usize];
+            let mut i = 0;
+            while i < 3 {
+                j.xd[i] = probes[i].out.x - probes[i].x_settled;
+                j.tr[i] = probes[i].tr;
+                i += 1;
+            }
         }
     }
 
