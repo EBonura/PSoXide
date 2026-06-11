@@ -9,8 +9,13 @@ use emulator_core::{VRAM_HEIGHT, VRAM_WIDTH};
 
 /// Draw the VRAM texture inside an existing sidebar/container.
 pub fn draw_contents(ui: &mut egui::Ui, tex: egui::TextureId) {
-    let width = ui.available_width().max(1.0);
-    let height = (width * VRAM_HEIGHT as f32 / VRAM_WIDTH as f32).clamp(120.0, 260.0);
+    // Always preserve VRAM's true 2:1 aspect: width-driven height with a
+    // height cap, never the old clamp that distorted the image once the
+    // panel width left the clamp band.
+    const MAX_HEIGHT: f32 = 320.0;
+    let aspect = VRAM_HEIGHT as f32 / VRAM_WIDTH as f32;
+    let width = ui.available_width().max(1.0).min(MAX_HEIGHT / aspect);
+    let height = width * aspect;
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
     egui::Image::new((tex, rect.size()))
         .uv(full_uv())
