@@ -1,4 +1,14 @@
-# PCSX-Redux oracle
+# PCSX-Redux oracle (retired)
+
+> **Retired 2026-06-11.** Real PS1 hardware is the authoritative accuracy
+> oracle (see `hardware-burn-ledger.md`); the lockstep parity harness
+> (`emu/crates/parity-oracle`, the `parity` test, and the `oracle-*` /
+> `redux-*` Makefile targets) was removed after silicon measurements
+> overruled Redux on the triangle edge rule and the GTE hazard models.
+> This doc is kept for provenance: it describes the setup that validated
+> the emulator's early bring-up. The patched Redux fork remains a useful
+> manual cross-reference.
+
 
 PSoXide does not include PCSX-Redux source or binaries. The oracle
 harness in `emu/crates/parity-oracle` launches an external patched

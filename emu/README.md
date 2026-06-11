@@ -17,7 +17,6 @@ hardware behaviour.
 | [`psx-gpu-compute`](crates/psx-gpu-compute) | GPU-side VRAM for the experimental compute-shader rasterizer. |
 | [`psoxide-settings`](crates/psoxide-settings) | On-disk settings, library cache, and save-state formats. Pure logic, no GUI/wgpu deps, usable from headless CLIs. |
 | [`psoxide-validation`](crates/psoxide-validation) | Manifest and exact-hash comparison primitives for validation. Runner-agnostic. |
-| [`parity-oracle`](crates/parity-oracle) | PCSX-Redux harness: manages a headless Redux subprocess and collects traces to validate `emulator-core` against. |
 
 ## See also
 
