@@ -304,6 +304,26 @@ does drop portal-visible far rooms. The PVS default stays blocked on
 the cook-side fix (task list); these tape numbers were taken WITH
 PVS, so the deficit above is what remains even once PVS ships.
 
+## The arch hole SOLVED: it was the runtime anchor, not the cook (2026-06-11)
+
+The cook-side BFS-cap theory was falsified (cap never triggered for
+this project; recook byte-identical). The real bug: the per-room
+visibility anchor is the PLAYER's position translated into each
+room's local frame, CLAMPED onto the grid edge for rooms the player
+is not inside. A far room seen through a portal used an arbitrary
+boundary cell's wall-gated PVS (tiny or empty -> room culled
+wholesale), and the clamped cell changed with every player step,
+thrashing the visible-cell cache with constant PVS refills.
+
+Fix: an outside anchor returns None and the existing full-room
+fallback draws the room. Benchmark tape (PVS config): room 220k ->
+108k, render vblank 954k -> 849k (150%), misses 78% -> 34% (~26 fps
+real gameplay, from ~19 at session start). The broken anchor was
+BOTH the visual hole and a hidden cache-thrash tax.
+
+Gate before flipping the visibility default: eyes on the arch
+sightline in the editor with the PVS build.
+
 ## Pool right-sizing: RAM win is ALSO a cycle win (2026-06-11)
 
 MAX_TEXTURED_TRIS 3328 -> 1024 (tape peak 567, avg ~332; 2x headroom
