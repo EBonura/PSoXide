@@ -165,3 +165,76 @@ Steady-state gameplay streams clean with 6 resident slots.
    GPU draws N) -- now that flush is cheap, this is about hiding the
    unmodeled GPU time; needs the hardware fps counter first.
 6. Hardware truth: on-screen fps counter burn per milestone.
+
+## Investigation: double buffering + vblank scheduling (2026-06-11)
+
+Code read: app.rs run_scheduled, scheduler.rs, time.rs,
+framebuf.rs, the OT submit path, and the playtest statics. Findings,
+each verified in source and against the bucketed profile:
+
+1. **The framebuffer is properly double-buffered** (vertical A/B at
+   Y=0/Y=240; swap flips GP1 display-start + draw area/offset).
+   The OT and the primitive arena are SINGLE-buffered; safe only
+   because submit blocks until the DMA walk completes.
+
+2. **present's vblank wait is edge-detect, not phase-aligned**
+   (time.rs: return as soon as vblank_count != last_present). Any
+   render frame slower than one vblank has already crossed an IRQ, so
+   the wait returns in ~0 and fb.swap() executes MID-SCANOUT. At
+   today's steady 859k build the flip lands ~52% down the visible
+   frame, every frame. GP1(05h) takes effect immediately on silicon:
+   that is a stable horizontal tear line on hardware. The emulator
+   samples display-start once per frame, so emulation CANNOT show this
+   artifact (and never has). Profile confirms: present stage = 130
+   cycles average on render vblanks.
+
+3. **Steady-state slot accounting** (bucketed + PVS): render row 859k
+   + sim row 264k = 1,123k of the 1,128,960-cycle 30 fps slot. 0.5%
+   headroom in emulated cycles, and the budget contains ZERO GPU draw
+   time: on hardware the kick-then-wait submit serializes the whole
+   GPU draw into that 6k margin. Emulated 30 fps therefore does NOT
+   imply hardware 30 fps; the GPU draw is fully exposed.
+
+4. **The scheduler itself is sound** (vblank-counter clock, sim
+   catch-up, no-cap default = drop visuals not gameplay time). The
+   30 fps cadence is work-driven, not phase-locked: it emerges only
+   because work happens to fill ~2 vblanks.
+
+5. **Pool sizes**: MAX_TEXTURED_TRIS = 3328 sizes both the primitive
+   arena (186,368 B) and WORLD_COMMANDS (53,248 B) for 11x the
+   observed ~290-tri peak. Right-sizing to 1024 frees ~166 KB -- more
+   than enough to double-buffer BOTH (2x 57 KB arena + 2x 16 KB
+   commands + 2x 8 KB OT) and still come out ~58 KB ahead of today.
+
+6. **The post-submit overlay set is the pipelining blocker**: the
+   atmosphere particles, collision debug, lock indicator and HUD draw
+   with immediate GP0 writes AFTER the blocking submit (composited on
+   top of the 3D scene). CPU GP0 writes during an active ch2
+   linked-list DMA corrupt the command stream on hardware, so any
+   async-submit design first needs these to become OT packets in the
+   front-most slot (a convention the OT already has for UI).
+
+### Proposed arc
+
+Phase 1 -- boundary flip + async kick, no extra RAM:
+- scene.render ends with submit_async (kick only).
+- The flip moves out of the render action: at the NEXT vblank IRQ
+  edge, draw_sync + swap + clear (a pending-flip flag in
+  run_scheduled). The row-B fixed update runs between kick and flip,
+  giving the GPU ~271k cycles (~8 ms) of free cover, and the flip is
+  tear-free by construction.
+- Prereq: overlays/HUD as OT packets (finding 6).
+- Expected hardware effect: hides up to ~8 ms of GPU draw; ~290
+  textured tris plus sky plausibly fit (3-9 ms by PS1 fill-rate
+  folklore); the fps counter burn decides.
+
+Phase 2 -- full pipeline, only if the counter says the window is
+short: double-buffer OT + arena (net RAM win after right-sizing,
+finding 5), kick frame N then immediately build N+1; GPU gets the
+whole 2-vblank slot; +1 visual frame (33 ms) of latency.
+
+Emulator follow-up (north star: match hardware): the frontend cannot
+display mid-scanout GP1(05h) flips, so silicon would tear where
+emulation looks clean. Add a cheap "display-start changed mid-scanout"
+hazard counter to the GPU backend + debug sidebar so this class of
+divergence becomes visible without a burn.
