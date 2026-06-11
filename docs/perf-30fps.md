@@ -320,3 +320,23 @@ Attack order (verify with the corridor profile after each):
    Target 49k -> ~25k.
 Combined target: player 315k -> ~145k; render vblank ~860k -> ~690k
 (122%), turning the 30 fps slot from razor-thin into comfortable.
+
+### Correction from the first rewrite (measured)
+
+The triple-loop rewrite (run-splitting, no staging copies, pipelined
+rtpt_kick/read, tautological hw-bounds checks dropped) is bit-exact
+(0/76,800 pixel diff) but bought only ~450 cycles: **64% of the
+player's vertices (161/252) take the CPU-BLEND path**, which the
+triple loop never touches. At ~590 cyc/vertex the blended path IS the
+project stage (~95k of 104k).
+
+Per blended vertex today: MVMVA with the primary joint, full CTC2
+matrix+translation swap to the secondary, second MVMVA, swap to the
+projection setup, RTPS, swap BACK to the primary -- ~3 full GTE
+matrix loads per vertex, ~483 per frame. The fix is batching by
+matrix: pass 1 transforms all of a part's blended vertices while the
+primary is loaded; pass 2 groups by secondary joint (one load per
+distinct joint); pass 3 lerps and projects the whole group under one
+projection setup, then restores the primary once per part. Matrix
+loads drop from ~3 per vertex to ~3 per part. Expected: project
+105k -> ~35k. This replaces item 1's remaining work.
