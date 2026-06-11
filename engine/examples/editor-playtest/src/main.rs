@@ -195,6 +195,19 @@ use generated::{GAME_FLOW, OPTIONS, UI_SCENES};
 ))]
 use generated::{VISIBILITY_PVS, VISIBILITY_PVS_BITS};
 
+// Prebuilt room-quad pool (docs/perf-30fps.md): precompiled GP0(3Ch)
+// packets for static room surfaces. One slot per recently drawn room;
+// per frame only the vertex/colour words are patched. Lives OUTSIDE
+// the per-frame arena so packets persist across frames; the present
+// flip's DMA drain makes in-place patching safe.
+const PREBUILT_ROOM_QUAD_SLOT_EMPTY: [QuadTexturedGouraud; PREBUILT_ROOM_QUAD_CAP] =
+    [QuadTexturedGouraud::EMPTY; PREBUILT_ROOM_QUAD_CAP];
+static mut PREBUILT_ROOM_QUADS: [[QuadTexturedGouraud; PREBUILT_ROOM_QUAD_CAP];
+    PREBUILT_ROOM_QUAD_SLOTS] = [PREBUILT_ROOM_QUAD_SLOT_EMPTY; PREBUILT_ROOM_QUAD_SLOTS];
+static mut PREBUILT_ROOM_QUAD_ROOMS: [RoomIndex; PREBUILT_ROOM_QUAD_SLOTS] =
+    [INVALID_ROOM_INDEX; PREBUILT_ROOM_QUAD_SLOTS];
+static mut PREBUILT_ROOM_QUAD_NEXT: u8 = 0;
+
 static mut OT: OrderingTable<OT_DEPTH> = OrderingTable::new();
 static mut PRIMITIVE_PACKETS: PrimitivePacketScratch<MAX_TEXTURED_TRIS> =
     PrimitivePacketScratch::ZERO;
