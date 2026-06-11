@@ -1,6 +1,6 @@
 # PSoXide License And Provenance Audit
 
-Audit date: 2026-04-29 (last revised 2026-06-03).
+Audit date: 2026-04-29 (last revised 2026-06-11).
 
 Scope: repository source, checked-in binary assets, generated artifacts,
 third-party references, and public README media.
@@ -37,16 +37,44 @@ trying to argue the derivation away.
 notice and third-party reference notes. All `Cargo.toml` `license`
 fields declare `GPL-2.0-or-later`.
 
-### PCSX-Redux derivation (addressed 2026-06-03)
+### PCSX-Redux derivation (addressed 2026-06-03; revised 2026-06-11)
 
 Several emulator-core subsystems are parity-matched against, and in
 places derived from, PCSX-Redux: the event scheduler, DMA DICR
 semantics, SPU ADSR tables and voice model, MDEC AAN IDCT + YUV->RGB
 pipeline, CD-ROM command timing (transcribed from `core/cdrom.cc` with
 upstream line numbers), SIO baud timing, CPU cycle bias, bus/video
-timing, timers, and the scanline-delta triangle rasterizer (both the CPU
-and compute-shader paths). These should be treated as derivative works
-of Redux.
+timing, timers, and the hardware-renderer primitive pipeline
+(`psx-gpu-render`). These should be treated as derivative works of
+Redux.
+
+Revision 2026-06-11, triangle rasterization: the CPU scanline-delta
+triangle rasterizer (formerly listed here as Redux-derived) was
+REPLACED in 2026-06 (`2f4b0063`) after real-hardware VRAM read-back
+tests proved Redux's edge-coverage rule wrong on silicon (burn ledger
+HWB-005/006). The current `gpu.rs` triangle path implements the
+silicon-verified center-sampled coverage rule, written from documented
+behaviour (the same rule Mednafen and DuckStation implement) with no
+source from either project, and is verified pixel-exact against a real
+console. The compute-shader rasterizer crate was removed in the
+2026-06 dedup. The `gpu.rs` module keeps its Redux provenance header
+for the non-triangle paths (fills, rects, blending, dither) that
+retain Redux lineage.
+
+Revision 2026-06-11, parity harness: the lockstep parity-oracle crate
+and its Makefile targets were removed (real PS1 hardware is the
+accuracy oracle; see `hardware-burn-ledger.md`). Retiring the testing
+harness does not change any derivation status above; provenance
+headers stay.
+
+Additional behavioural references now credited in `LICENSE` (no code
+derived from either): JaCzekanski's ps1-tests (the real-console GTE
+conformance corpus consumed at runtime by `gte_fuzz_replay`, fetched
+from upstream, never committed) and the MiSTer PSX core (GTE internal
+operation ordering). The GTE remains implemented from hardware
+documentation; as of 2026-06-11 it is additionally validated bit-exact
+against the ps1-tests real-console corpus (1100/1100), which is a
+stronger independence basis than the retired Redux parity diffing.
 
 GPL-2.0-or-later is the response the GPL prescribes for a derivative
 work, so distributing this code under it is compliant. To make the

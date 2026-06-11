@@ -36,15 +36,19 @@ use status::GpuStatus;
 use crate::vram::{Vram, VRAM_HEIGHT, VRAM_WIDTH};
 use commands::gp0_packet_size;
 
-/// Rasterize a triangle with PS1-silicon coverage AND attribute interpolation
-/// (Mednafen/DuckStation `DrawTriangle`), calling `plot(x, y, r, g, b, u, v)`
-/// for every covered pixel. Coverage is the center-sampled DDA (same rule the
-/// flat path uses); attributes use the determinant-plane interpolation with
-/// the exact `tl` (top-left) anchor, so the integer-truncated gradients land
-/// bit-identically to hardware. The caller's closure owns texture sampling,
-/// dither, blend and the actual VRAM write -- this just supplies coverage and
-/// the per-pixel interpolated R/G/B/U/V. Verified pixel-exact against real
-/// silicon (hardware-tests GPU read-back battery).
+/// Rasterize a triangle with PS1-silicon coverage AND attribute
+/// interpolation, calling `plot(x, y, r, g, b, u, v)` for every covered
+/// pixel. Coverage is the center-sampled DDA; attributes use the
+/// determinant-plane interpolation with the exact `tl` (top-left) anchor,
+/// so the integer-truncated gradients land bit-identically to hardware.
+/// The coverage/interpolation RULE is the documented PS1 behavior that
+/// Mednafen and DuckStation also implement (their `DrawTriangle`); this
+/// implementation was written from that documented behavior, contains no
+/// source from either project, and is verified pixel-exact against real
+/// silicon (hardware-tests GPU read-back battery, burn ledger HWB-006).
+/// The caller's closure owns texture sampling, dither, blend and the
+/// actual VRAM write -- this just supplies coverage and the per-pixel
+/// interpolated R/G/B/U/V.
 ///
 /// Caller must apply the polygon-too-large extent cull first; this assumes the
 /// triangle is drawable.
