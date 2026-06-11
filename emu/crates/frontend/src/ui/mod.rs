@@ -51,14 +51,19 @@ pub fn draw_layout(
         debug_sidebar::draw(ctx, state, vram_tex);
     }
 
-    egui::CentralPanel::default().show(ctx, |ui| {
-        framebuffer::draw(
-            ui,
-            display_tex,
-            display_uv,
-            &mut state.framebuffer_present_size_px,
-        );
-    });
+    // Zero-margin frame: the game screen gets every pixel between the
+    // toolbar and the sidebar; the 4:3 letterbox bars are plain black,
+    // CRT-bezel style, with no inset or border chrome.
+    egui::CentralPanel::default()
+        .frame(egui::Frame::NONE.fill(egui::Color32::BLACK))
+        .show(ctx, |ui| {
+            framebuffer::draw(
+                ui,
+                display_tex,
+                display_uv,
+                &mut state.framebuffer_present_size_px,
+            );
+        });
 
     let menu_warning = state.menu_setup_warning();
     state.menu.draw(ctx, dt, menu_warning);
