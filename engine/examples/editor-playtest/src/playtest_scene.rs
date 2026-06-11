@@ -141,6 +141,10 @@ impl Scene for Playtest {
         }
 
         let camera = self.render_camera;
+        // Snapshot for the deferred overlay pass: render_overlay runs at
+        // the flip, after the next fixed update has already moved
+        // render_camera, and must match the frame built here.
+        self.overlay_camera = camera;
         let post_cross_debug = POST_CROSS_RENDER_DEBUG_LOGS && self.post_cross_debug_frames != 0;
         let post_cross_detail = post_cross_debug
             && self.post_cross_debug_frames == RUNTIME_SCHEDULE.post_cross_render_debug_frames;
@@ -953,16 +957,25 @@ impl Scene for Playtest {
             primitive_packets.remaining() as u32,
         );
         telemetry::counter(telemetry::counter::WORLD_COMMANDS, world_command_len as u32);
-        // Split the submit so profiling can separate CPU build cost from
-        // GPU draw cost: OT_SUBMIT times the DMA kick (CPU), OT_WAIT times
-        // the blocking wait for the GPU/DMA walk. Waiting immediately after
-        // the kick keeps behaviour identical to the old blocking submit().
+        // Kick the ordering-table DMA and hand the wait to the app
+        // runner's presentation flip: the GPU walks the table while the
+        // next fixed update runs on the CPU. Everything that composites
+        // over the 3D frame lives in render_overlay below, which the
+        // runner calls after draining the walker. Nothing after this
+        // kick may touch GP0 or the OT/primitive storage.
         telemetry::stage_begin(telemetry::stage::OT_SUBMIT);
         let ot_in_flight = ot.submit_async();
         telemetry::stage_end(telemetry::stage::OT_SUBMIT);
-        telemetry::stage_begin(telemetry::stage::OT_WAIT);
-        ot_in_flight.wait();
-        telemetry::stage_end(telemetry::stage::OT_WAIT);
+        ot_in_flight.detach();
+    }
+
+    fn render_overlay(&mut self, ctx: &mut Ctx) {
+        // Mirror render()'s analog-prompt early-out: those frames draw
+        // only the prompt, no world frame and no overlay layer.
+        if !ctx.pad.is_analog() {
+            return;
+        }
+        let camera = self.overlay_camera;
 
         if let Some(room_record) = ROOMS.get(self.room_index.to_usize()) {
             draw_room_atmosphere_overlay(room_record, ctx.sim_tick);

@@ -36,6 +36,20 @@ impl EngineClock {
     pub(crate) fn wait_next_vblank(&mut self) {
         self.last_present_vblank = platform::wait_present_vblank(self.last_present_vblank);
     }
+
+    /// Wait for a fresh VBlank IRQ edge, regardless of how many vblanks
+    /// have already passed since the last present.
+    ///
+    /// [`wait_next_vblank`](Self::wait_next_vblank) returns immediately
+    /// when any vblank elapsed since the previous present, which is right
+    /// for pacing but wrong for the display flip: a flip issued mid-frame
+    /// shears the picture on real hardware (GP1 display-start applies to
+    /// the next scanline). This waits for the next actual edge so the
+    /// swap always lands inside the vertical blanking interval.
+    pub(crate) fn wait_vblank_edge(&mut self) {
+        let entry = platform::vblank_count();
+        self.last_present_vblank = platform::wait_present_vblank(entry);
+    }
 }
 
 #[cfg(target_arch = "mips")]

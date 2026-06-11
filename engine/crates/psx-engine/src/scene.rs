@@ -222,8 +222,26 @@ pub trait Scene {
     /// `ctx.fb` has been cleared. The engine submits the final
     /// swap after this returns.
     ///
+    /// A scene that kicks its ordering table asynchronously (via
+    /// [`OtFrame::submit_async`](crate::OtFrame::submit_async) +
+    /// [`OtSubmitInFlight::detach`](crate::OtSubmitInFlight::detach))
+    /// must not issue any immediate GP0 draw after the kick; put that
+    /// work in [`render_overlay`](Scene::render_overlay) instead, which
+    /// the engine calls once the GPU has drained the table.
+    ///
     /// [`update`]: Scene::update
     fn render(&mut self, ctx: &mut Ctx);
+
+    /// Draw the 2D overlay layer (HUD, prompts, debug readouts) on top
+    /// of the frame built by the last [`render`](Scene::render) call.
+    ///
+    /// The app runner invokes this at presentation time: the frame's
+    /// ordering-table DMA has been drained and the GPU is idle, but the
+    /// display has not flipped yet, so immediate GP0 draws here
+    /// composite over the finished 3D scene in the back buffer without
+    /// racing the linked-list walker. Default: no overlay.
+    #[allow(unused_variables)]
+    fn render_overlay(&mut self, ctx: &mut Ctx) {}
 
     /// Font the flow driver uses to draw front-end UI scene text (menu
     /// labels and buttons). The gameplay scene owns the font atlas it
