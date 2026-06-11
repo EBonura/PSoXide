@@ -980,6 +980,12 @@ pub fn upload_bytes(rect: VramRect, bytes: &[u8]) {
 /// either by the FIFO or by block DMA.
 #[inline]
 fn copy_to_vram_header(rect: VramRect) {
+    // An asynchronously kicked ordering-table walk may still be feeding
+    // GP0 over this same channel when streaming code uploads from a
+    // fixed update. Interleaving header words (or reprogramming the
+    // channel for the block-DMA path) mid-walk corrupts the command
+    // stream, so drain the channel first.
+    while dma::is_busy(Channel::Gpu) {}
     wait_cmd_ready();
     write_gp0(gp0::COPY_CPU_TO_VRAM);
     write_gp0(pack_xy(rect.x, rect.y));
