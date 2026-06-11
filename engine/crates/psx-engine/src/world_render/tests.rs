@@ -545,6 +545,7 @@ fn cached_full_ceiling_faces_playable_interior() {
         CachedRoomSubdivisionMode::All,
         &visible_cells,
         0,
+        None,
         &mut triangles,
         &mut pass,
     );
