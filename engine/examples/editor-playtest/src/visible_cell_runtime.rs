@@ -98,8 +98,23 @@ impl Playtest {
         camera_independent: bool,
     ) -> Option<(&[GridVisibleCell], u16)> {
         let sector_size = room_sector_size.max(1);
-        let anchor_x = grid_cell_for_room(anchor.x, sector_size).clamp(0, room_width as i32 - 1);
-        let anchor_z = grid_cell_for_room(anchor.z, sector_size).clamp(0, room_depth as i32 - 1);
+        let anchor_x = grid_cell_for_room(anchor.x, sector_size);
+        let anchor_z = grid_cell_for_room(anchor.z, sector_size);
+        // The anchor is the player's position in this room's local frame.
+        // For a room the player is not inside (a far room seen through a
+        // portal), clamping onto the grid edge selected an arbitrary
+        // boundary cell whose wall-gated PVS is often tiny or empty --
+        // which culled far rooms wholesale (the arch-door hole, confirmed
+        // live 2026-06-11). An outside anchor bails to the caller's
+        // full-room fallback draw instead: correct by construction, and
+        // the portal walk only admits genuinely visible far rooms.
+        if anchor_x < 0
+            || anchor_x >= room_width as i32
+            || anchor_z < 0
+            || anchor_z >= room_depth as i32
+        {
+            return None;
+        }
         let (view_sin_key, view_cos_key) = visible_cell_view_keys(camera, camera_independent);
         let cache = *self.visible_cell_caches.get(active_slot)?;
         if cache.ready
