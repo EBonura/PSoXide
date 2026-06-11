@@ -2762,7 +2762,10 @@ fn project_gte_view_vertex(view: ViewVertex, projection: WorldProjection) -> Pro
     };
     scene::load_rotation(&Mat3I16::IDENTITY);
     scene::load_translation(Vec3I32::ZERO);
-    let p = scene::project_vertex(Vec3I16::new(x, y, z));
+    // Scheduled RTPS wrapper: same op, shared load-delay slots. The
+    // compact macro wrapper measured substantially slower on the
+    // 161-blended-vertex player path (see docs/perf-30fps.md).
+    let p = scene::project_vertex_scheduled(Vec3I16::new(x, y, z));
     if (p.sz as i32) >= projection.near_z {
         ProjectedVertex::new(p.sx, p.sy, p.sz as i32)
     } else {
