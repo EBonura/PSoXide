@@ -19,6 +19,27 @@ slot, mapped by instruments this session, in expected-value order:
    36k/frame (~356/quad for ~101 quads), vertex gather 15k, lighting
    3.4k, rest loop scaffolding. The classic precompiled-display-list
    technique; biggest single design on the table (room band 328k).
+
+   DESIGN (locked 2026-06-11, implementation in flight):
+   - Per-frame variables ONLY: XY x4 (projection), OT slot/depth, and
+     fog-blended RGB x4 when the room has FOG_ENABLED. Constants per
+     resident room: command word, UV words, tpage/clut, baked base
+     RGB (indexed_vertex_lighting_colors already has the
+     use_direct_baked_rgb zero-cost path returning
+     surface.baked_vertex_rgb).
+   - Storage: a static per-slot packet pool OUTSIDE the per-frame
+     arena (the OT links into it each frame; in-place patching is
+     safe because the present flip drains ch2 before the next render
+     touches packets). ~52 B/quad x ~219 surfaces x 6 slots ~= 68 KB
+     against the ~196 KB freed by right-sizing.
+   - Skeletons fill at room surface-cache build time
+     (ROOM_SURFACE_CACHE stage, once per room load); per frame the
+     draw loop patches XY from the projected vertices, computes one
+     PER-CELL fog factor (cell verts share depth to within the fog
+     quantum) instead of 4 per-vertex blends, and pushes the
+     prebuilt packet pointer into the OT.
+   - Expected: ~250 cyc/quad saved (~26k) + most of the 15k gather +
+     lighting -> room band -40k to -60k/frame.
 2. Player path: LLM-slot blend restructure + joints flattening +
    faces DIV (designs recorded below; player 318k).
 3. Update residual: 99k avg / 310k max UNATTRIBUTED after the sim
