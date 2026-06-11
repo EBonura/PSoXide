@@ -1100,7 +1100,6 @@ checksum = "edd0f118536f44f5ccd48bcb8b111bdc3de888b58c74639dfb034a357d0f206d"
 name = "emulator-core"
 version = "0.1.0"
 dependencies = [
- "parity-oracle",
  "psoxide-settings",
  "psx-gpu",
  "psx-gte-core",
@@ -2676,19 +2675,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "36820e9051aca1014ddc75770aab4d68bc1e9e632f0f5627c4086bc216fb583b"
 dependencies = [
  "ttf-parser",
-]
-
-[[package]]
-name = "parity-oracle"
-version = "0.1.0"
-dependencies = [
- "emulator-core",
- "psoxide-settings",
- "psx-iso",
- "psx-trace",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
 ]
 
 [[package]]
