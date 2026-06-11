@@ -2213,6 +2213,7 @@ fn project_blended_textured_model_vertex(
 ///     a vertex off-screen even from a sane view position.
 /// On the silicon-faithful emulator these stay small/in-bounds; if hardware
 /// blows one stage up while the others stay sane, that stage is the bug.
+#[cfg(feature = "vert-debug")]
 pub mod player_vert_debug {
     use super::{
         projected_model_vertex_inside_hw_bounds, JointViewTransform, Mat3I16, ModelVertex,
@@ -2564,6 +2565,47 @@ pub mod player_vert_debug {
     /// Worst-vertex snapshot for the HUD overlay (all-time latch).
     pub fn snapshot() -> Snapshot {
         unsafe { *core::ptr::addr_of!(SNAP) }
+    }
+}
+
+/// No-op twin of [`player_vert_debug`] for builds without the
+/// `vert-debug` feature: identical signatures, empty inlined bodies, so
+/// the hot paths keep their unconditional calls at zero cost and no
+/// capture state exists in shipping or perf-measurement builds.
+#[cfg(not(feature = "vert-debug"))]
+pub mod player_vert_debug {
+    use super::{JointViewTransform, Mat3I16, ModelVertex, ProjectedVertex, Vec3I16, ViewVertex};
+
+    /// See the `vert-debug` build for the real implementation.
+    #[inline(always)]
+    pub fn reset() {}
+    /// See the `vert-debug` build for the real implementation.
+    #[inline(always)]
+    pub fn record_joints_begin(_view_instance: &Mat3I16) {}
+    /// See the `vert-debug` build for the real implementation.
+    #[inline(always)]
+    pub fn set_joint_slot(_idx: u8) {}
+    /// See the `vert-debug` build for the real implementation.
+    #[inline(always)]
+    pub fn set_primary_joint(_idx: u8) {}
+    /// See the `vert-debug` build for the real implementation.
+    #[inline(always)]
+    pub fn merge_all_x(_min_x: i16, _max_x: i16) {}
+
+    #[inline(always)]
+    pub(super) fn record_compose_input(_model: &Mat3I16, _ptrans: Vec3I16) {}
+
+    #[allow(clippy::too_many_arguments)]
+    #[inline(always)]
+    pub(super) fn observe(
+        _vertex: ModelVertex,
+        _primary: &JointViewTransform,
+        _secondary: &JointViewTransform,
+        _view_a: ViewVertex,
+        _view_b: ViewVertex,
+        _view_blend: ViewVertex,
+        _p: ProjectedVertex,
+    ) {
     }
 }
 
