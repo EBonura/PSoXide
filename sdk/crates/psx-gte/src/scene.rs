@@ -353,6 +353,14 @@ fn transform_vertex_mips(v: Vec3I16) -> Vec3I32 {
             // MTC2 $8,VXY0 and $9,VZ0.
             ".word 0x48880000",
             ".word 0x48890800",
+            // HWB-010/011 hazard gap (console-confirmed fix): two buffer
+            // NOPs push the VXY0 write's commit distance from 2 to 4
+            // instructions. Without them, real silicon can commit the
+            // write BETWEEN the MVMVA's sequential MAC1 and MAC2 compute
+            // phases, so MAC1 reads the previous V0.x -- the cortex
+            // vertex-explosion mechanism (docs/hardware-burn-ledger.md).
+            ".word 0",
+            ".word 0",
             // MVMVA RT,V0,TR,sf=1.
             ".word 0x4a080012",
             // Read MAC1/MAC2/MAC3. Consecutive MFC2 instructions fill
@@ -390,11 +398,16 @@ pub struct TransformProbe {
     pub tr: [i32; 3],
 }
 
-/// [`transform_vertex_scheduled`] with hazard probes appended AFTER the
-/// op and its result reads, so nothing before or during the MVMVA is
-/// perturbed (HWB-008: the live skinning chain corrupts the X row in a
-/// way no synthetic battery reproduces -- the probes must ride the real
-/// schedule).
+/// Hazard-hunt instrument (keep): one MVMVA on the DELIBERATELY
+/// UNPADDED pre-HWB-011 schedule (V0 writes 1-2 instructions before
+/// the op -- the schedule that trips the silicon MTC2-commit hazard),
+/// with evidence reads appended strictly AFTER the op: a settled MAC1
+/// re-read and a TRX/TRY/TRZ readback. This is the live evidence
+/// channel that decoded the vertex explosion (burn ledger HWB-009/010);
+/// it stays in the SDK so the next hardware mystery starts from a
+/// proven instrument. Not for production paths -- use
+/// [`transform_vertex_scheduled`], whose schedule carries the
+/// console-confirmed hazard gap.
 #[inline(always)]
 pub fn transform_vertex_probed(v: Vec3I16) -> TransformProbe {
     #[cfg(target_arch = "mips")]
@@ -456,49 +469,6 @@ pub fn transform_vertex_probed(v: Vec3I16) -> TransformProbe {
             x_settled: out.x,
             tr: [cfc2!(5) as i32, cfc2!(6) as i32, cfc2!(7) as i32],
         }
-    }
-}
-
-/// [`transform_vertex_scheduled`] with the HWB-010 hazard closed: two
-/// buffer NOPs between the V0 writes and the MVMVA push the VXY0
-/// write's commit distance from 2 to 4 instructions, so the MAC1 phase
-/// reads the fresh V0.x even when the commit slips by the silicon-
-/// measured window. Costs 2 cycles per transform; keeps the math on
-/// the GTE (no CPU fallback). See docs/hardware-burn-ledger.md HWB-010.
-#[inline(always)]
-pub fn transform_vertex_padded(v: Vec3I16) -> Vec3I32 {
-    #[cfg(target_arch = "mips")]
-    {
-        let xy = v.xy_packed();
-        let z = v.z_packed();
-        let mac1: u32;
-        let mac2: u32;
-        let mac3: u32;
-        unsafe {
-            asm!(
-                // MTC2 $8,VXY0 / MTC2 $9,VZ0, then a 2-NOP commit gap
-                // BEFORE the MVMVA (the hazard fix), then the live
-                // result-read schedule.
-                ".word 0x48880000",
-                ".word 0x48890800",
-                ".word 0",
-                ".word 0",
-                ".word 0x4a080012",
-                ".word 0x4808c800",
-                ".word 0x4809d000",
-                ".word 0x480ad800",
-                ".word 0",
-                inlateout("$8") xy => mac1,
-                inlateout("$9") z => mac2,
-                lateout("$10") mac3,
-                options(nostack, nomem, preserves_flags),
-            );
-        }
-        Vec3I32::new(mac1 as i32, mac2 as i32, mac3 as i32)
-    }
-    #[cfg(not(target_arch = "mips"))]
-    {
-        transform_vertex(v)
     }
 }
 
