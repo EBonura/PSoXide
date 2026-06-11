@@ -293,14 +293,6 @@ pub(super) fn room_visibility_radius(record: &LevelRoomRecord) -> u16 {
 /// Rooms that exceed this vertex budget fall back to the uncached draw.
 pub(super) const MAX_CACHED_ROOM_VERTICES: usize = 4096;
 
-/// Prebuilt room-quad pool sizing: slots for recently drawn rooms and
-/// the per-room quad capacity. 8 slots cover the at-most-6 rooms a
-/// frame draws (visible_chunk_limit) with reuse headroom, so a slot
-/// claimed this frame can never be stolen within the same frame.
-/// Surfaces beyond the cap fall back to the per-frame arena path.
-pub(super) const PREBUILT_ROOM_QUAD_SLOTS: usize = 8;
-pub(super) const PREBUILT_ROOM_QUAD_CAP: usize = 256;
-
 /// Per-frame triangle budget sizing the primitive packet arena and the
 /// world command list. Right-sized from measured data (2026-06-11): the
 /// real-gameplay benchmark tape peaks at 511 tri primitives per vblank
