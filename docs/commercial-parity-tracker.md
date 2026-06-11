@@ -6,8 +6,11 @@ work. It is intentionally parity-first: a title is not tracked as
 where PSoXide stops matching the reference emulator, plus the evidence
 needed to decide which emulation subsystem to improve next.
 
-The reference oracle is the external PCSX-Redux build documented in
-[`docs/redux-oracle.md`](redux-oracle.md). Test media must come from
+Historical rows below were recorded against an external PCSX-Redux
+build (the lockstep parity harness, retired 2026-06-11; real PS1
+hardware and the visual guards are the accuracy oracle now -- see
+`hardware-burn-ledger.md`). The recorded first-divergence evidence
+remains valid leads for compatibility work. Test media must come from
 legally owned discs or already-authorized preservation images.
 
 ## Parity workflow
