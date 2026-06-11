@@ -6,8 +6,9 @@ binary blobs the runtime consumes, and the reusable egui UI panels. The
 editor's Play action cooks the active scene and hands it to
 [`engine/examples/editor-playtest`](../engine/examples/editor-playtest).
 
-`editor/Cargo.toml` is its own workspace. These crates run on the host, not
-on PSX target.
+These crates run on the host, not on PSX target; they are members of
+the repo-root HOST workspace (one lockfile shared with `crates/`,
+`emu/`, and `tools/`).
 
 ## Crates
 

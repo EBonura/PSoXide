@@ -8,7 +8,8 @@ silicon pixel coverage, and the core models silicon-measured GTE hazards no
 other public emulator does (see `docs/hardware-burn-ledger.md` for the
 burn-by-burn evidence).
 
-`emu/Cargo.toml` is its own workspace. These crates run on the host.
+These crates run on the host and are members of the repo-root HOST
+workspace (one lockfile shared with `crates/`, `editor/`, and `tools/`).
 
 ## Crates
 

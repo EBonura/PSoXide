@@ -1,10 +1,37 @@
 [workspace]
 resolver = "2"
+# The HOST workspace: everything that runs on the development machine --
+# shared PSX primitives, the emulator + frontend, the editor stack, and
+# the disc/EXE tools. One lockfile, one rust-analyzer session.
+#
+# The DEVICE side (sdk/, engine/: no_std, mipsel-sony-psx, -Zbuild-std)
+# keeps its own workspaces -- host and bare-metal builds genuinely cannot
+# share one cargo invocation. Device crates consume host-workspace members
+# (and vice versa) through plain path dependencies.
 members = [
     "crates/psx-hw",
     "crates/psx-iso",
     "crates/psx-trace",
+    "emu/crates/emulator-core",
+    "emu/crates/frontend",
+    "emu/crates/psoxide-settings",
+    "emu/crates/psoxide-validation",
+    "emu/crates/psx-gpu-render",
+    "editor/crates/psxed",
+    "editor/crates/psxed-audio",
+    "editor/crates/psxed-format",
+    "editor/crates/psxed-gltf",
+    "editor/crates/psxed-obj",
+    "editor/crates/psxed-project",
+    "editor/crates/psxed-tex",
+    "editor/crates/psxed-ui",
+    "tools/mkisopsx",
+    "tools/psx-exe-pack",
+    "tools/psoxide-dev",
 ]
+# The device-side workspaces live inside this directory tree; cargo
+# requires nested workspace roots to be excluded explicitly.
+exclude = ["sdk", "engine", "build"]
 
 [workspace.package]
 edition = "2021"
@@ -24,6 +51,59 @@ todo = "deny"
 too_many_arguments = "allow"
 
 [workspace.dependencies]
+# ---- Workspace-internal path deps (relative to the repo root) ----------
+psx-hw       = { path = "crates/psx-hw" }
+psx-iso      = { path = "crates/psx-iso" }
+psx-trace    = { path = "crates/psx-trace" }
+emulator-core      = { path = "emu/crates/emulator-core" }
+psoxide-settings   = { path = "emu/crates/psoxide-settings" }
+psoxide-validation = { path = "emu/crates/psoxide-validation" }
+psx-gpu-render     = { path = "emu/crates/psx-gpu-render" }
+psxed-audio   = { path = "editor/crates/psxed-audio" }
+psxed-format  = { path = "editor/crates/psxed-format" }
+psxed-gltf    = { path = "editor/crates/psxed-gltf" }
+psxed-obj     = { path = "editor/crates/psxed-obj" }
+psxed-project = { path = "editor/crates/psxed-project" }
+psxed-tex     = { path = "editor/crates/psxed-tex" }
+psxed-ui      = { path = "editor/crates/psxed-ui" }
+
+# ---- Cross-workspace path deps into the DEVICE side --------------------
+psx-asset     = { path = "sdk/crates/psx-asset" }
+psx-gpu       = { path = "sdk/crates/psx-gpu" }
+psx-vram      = { path = "sdk/crates/psx-vram" }
+psx-gte       = { path = "sdk/crates/psx-gte" }
+psx-gte-core  = { path = "sdk/crates/psx-gte-core" }
+psx-telemetry = { path = "sdk/crates/psx-telemetry" }
+psx-engine    = { path = "engine/crates/psx-engine" }
+
+# ---- External deps ------------------------------------------------------
 bitflags   = { version = "2.6", default-features = false }
-serde      = { version = "1.0", default-features = false }
+# default-features = false so the no_std PSX primitives stay no_std; host
+# crates get serde/std transitively through serde_json / ron, and members
+# add features additively (`workspace = true, features = [...]`) as needed.
+serde      = { version = "1.0", default-features = false, features = ["derive"] }
 serde_json = { version = "1.0" }
+thiserror  = "1.0"
+sha2       = "0.10"
+tempfile   = "3.10"
+zip        = { version = "2", default-features = false, features = ["deflate"] }
+# Rust-native config + save-state formats. RON for human-editable
+# config (settings.ron, library.ron) -- tagged enums round-trip
+# losslessly; postcard for binary savestates (compact, serde-native).
+ron         = "0.8"
+postcard    = { version = "1.0", features = ["alloc"] }
+directories = "5.0"
+clap        = { version = "4.5", features = ["derive"] }
+
+# Frontend stack. Locked-in versions that PSoXide-1/-2 both converged on;
+# bumping is a deliberate decision, not a drift.
+winit       = "0.30"
+wgpu        = "24"
+egui        = "0.31"
+egui-wgpu   = "0.31"
+egui-winit  = "0.31"
+image       = { version = "0.25", default-features = false, features = ["png"] }
+pollster    = "0.3"
+cpal        = "0.15"
+gilrs       = "0.11"
+rfd         = "0.15"
