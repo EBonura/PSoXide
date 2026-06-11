@@ -562,3 +562,26 @@ contents, draw order, or culling:
 If the prebuild returns, the fill must write EVERY surface's skeleton
 at claim time (a dedicated fill pass over the room's surface slice),
 not lazily from the draw path.
+
+## New benchmark tape (2026-06-11 22:01, archived + committed)
+
+The original tape was lost to an accidental overwrite; the
+replacement (benchmarks/cortex_ignition_v1-bench-2026-06-11.pxtape,
+also backed up beside the live tape) is a heavier and better route:
+room transitions plus the arch-door sightline. Archival is step zero
+of the protocol now. Old CSV numbers remain internally comparable but
+all gates run against this tape.
+
+Baselines on the new tape:
+- DEFAULT build (make run shape): render 1,331k (236%), room 599k
+  (1,115k max), tris 422, misses 96% (~17 fps). Draw-everything pays
+  brutally on this route's multi-room sightlines.
+- PVS shape (anchor-fixed): render 1,265k, room 477k, tris 371,
+  misses 96%. Frame dumps at 400/700/1000/full are all CORRECT,
+  including far-room geometry visible through a doorway at frame
+  1000 (the arch-class case). -122k vs the default on this route.
+
+Protocol note: cross-build pixel comparison is only valid at 0-miss
+determinism (cadence diverges under overload), so per-build
+multi-frame sanity + the user's eyes gate cross-build changes like a
+default flip.
