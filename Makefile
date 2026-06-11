@@ -158,49 +158,28 @@ validate-bless:
 
 check:
 	cargo check --workspace --all-features
-	cd editor && cargo check --workspace --all-features
-	cd emu && cargo check --workspace --all-features
 	cd engine && cargo check --workspace --all-features
 	cd sdk && cargo check --workspace --all-features
-	cd tools/mkisopsx && cargo check
-	cd tools/psx-exe-pack && cargo check
-	cargo check --manifest-path tools/psoxide-dev/Cargo.toml
 
 test:
 	cargo test --workspace
-	cd editor && cargo test --workspace
-	cd emu && cargo test --workspace
 	cd engine && cargo test --workspace
 	cd sdk && cargo test --workspace
-	cd tools/mkisopsx && cargo test
-	cd tools/psx-exe-pack && cargo test
-	cargo test --manifest-path tools/psoxide-dev/Cargo.toml
 
 canaries:
 	cargo test --workspace -- --ignored
-	cd emu && cargo test --workspace -- --ignored
 
 fmt:
 	cargo fmt --all
-	cd editor && cargo fmt --all
-	cd emu && cargo fmt --all
 	cd engine && cargo fmt --all
 	cd sdk && cargo fmt --all
-	cd tools/mkisopsx && cargo fmt --all
-	cd tools/psx-exe-pack && cargo fmt --all
-	cargo fmt --manifest-path tools/psoxide-dev/Cargo.toml --all
 
 lint:
 	$(PSOXIDE_DEV) lint-policy-guard
 	$(PSOXIDE_DEV) runtime-numeric-guard
 	cargo clippy --workspace --all-targets --all-features -- -D warnings
-	cd editor && cargo clippy --workspace --all-targets --all-features -- -D warnings
-	cd emu && cargo clippy --workspace --all-targets --all-features -- -D warnings
 	cd engine && cargo clippy --workspace --all-targets --all-features -- -D warnings
 	cd sdk && cargo clippy --workspace --all-targets --all-features -- -D warnings
-	cd tools/mkisopsx && cargo clippy --all-targets --all-features -- -D warnings
-	cd tools/psx-exe-pack && cargo clippy --all-targets --all-features -- -D warnings
-	cargo clippy --manifest-path tools/psoxide-dev/Cargo.toml --all-targets --all-features -- -D warnings
 
 lint-policy-guard:
 	$(PSOXIDE_DEV) lint-policy-guard
@@ -210,13 +189,8 @@ runtime-numeric-guard:
 
 clean:
 	cargo clean
-	cd editor && cargo clean
-	cd emu && cargo clean
 	cd engine && cargo clean
 	cd sdk && cargo clean
-	cd tools/mkisopsx && cargo clean
-	cd tools/psx-exe-pack && cargo clean
-	cargo clean --manifest-path tools/psoxide-dev/Cargo.toml
 	rm -rf build
 
 commercial-visual-guards:
@@ -549,7 +523,7 @@ profile-demo7-camera-sweep:
 
 # --- Content pipeline (host-side editor tooling) ------------------------
 
-PSXED := editor/target/release/psxed
+PSXED := target/release/psxed
 
 # Build the content-pipeline CLI. Independent host workspace —
 # always builds fast, no MIPS toolchain needed.
