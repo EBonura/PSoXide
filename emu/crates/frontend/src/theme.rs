@@ -197,6 +197,20 @@ pub fn section<R>(
     resp.inner
 }
 
+/// Compact accent caption used to group rows INSIDE a debug section,
+/// replacing the heavy framed `section` blocks where nesting made the
+/// chrome outweigh the content.
+pub fn subhead(ui: &mut egui::Ui, title: &str) {
+    ui.add_space(6.0);
+    ui.label(
+        egui::RichText::new(title)
+            .color(ACCENT)
+            .monospace()
+            .size(FONT_SIZE_SMALL),
+    );
+    ui.add_space(2.0);
+}
+
 /// Compact flush header strip for a viz pane.
 pub fn pane_header(ui: &mut egui::Ui, title: &str) {
     egui::Frame::NONE
