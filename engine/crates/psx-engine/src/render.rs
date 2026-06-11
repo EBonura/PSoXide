@@ -428,6 +428,17 @@ impl OtSubmitInFlight {
     pub fn wait(self) {
         psx_gpu::submit_linked_list_wait();
     }
+
+    /// Hand completion to the app runner's presentation flip.
+    ///
+    /// The runner drains the channel (and the GPU queue) before calling
+    /// [`Scene::render_overlay`](crate::Scene::render_overlay) and
+    /// flipping the display, so a scene that kicks at the end of
+    /// [`Scene::render`](crate::Scene::render) can detach instead of
+    /// blocking. The ordering table and primitive storage stay borrowed
+    /// by the walker until that flip; the scene must not touch them or
+    /// issue immediate GP0 draws in between.
+    pub fn detach(self) {}
 }
 
 /// Fixed backing storage for primitive packets.

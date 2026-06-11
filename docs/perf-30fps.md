@@ -238,3 +238,43 @@ display mid-scanout GP1(05h) flips, so silicon would tear where
 emulation looks clean. Add a cheap "display-start changed mid-scanout"
 hazard counter to the GPU backend + debug sidebar so this class of
 divergence becomes visible without a burn.
+
+## Phase 1 SHIPPED: async kick + tear-free boundary flip (2026-06-11)
+
+Phase 2 (full double-buffer pipeline) rejected: +33 ms input-to-photon
+is too heavy for an action game. If silicon says phase 1's window is
+short, the fallback is the latency-free two-part kick (far geometry
+early, near + player late), not phase 2.
+
+What changed:
+- Scene::render_overlay: new hook for the 2D layer (HUD, prompts,
+  atmosphere, debug). The app runner calls it at flip time, after
+  draining the walker, so the immediate-GP0 font/UI stack stays as-is
+  -- no packet conversion needed.
+- The playtest render ends with submit_async + detach; the engine flip
+  (present_pending in app.rs) does OT drain -> overlay -> wait for a
+  true vblank IRQ edge -> swap. Under overload (next visual already
+  due) it flips immediately instead of holding for the edge.
+- GameApp routes pause-UI-over-gameplay and transition fades through
+  render_overlay; UI-only scenes keep drawing in render.
+- Hazard guards: VRAM uploads (psx-vram copy_to_vram_header) and
+  hardware-boot-visual checkpoints drain channel 2 before touching
+  GP0, so a fixed update streaming textures mid-walk cannot corrupt
+  the chain.
+- World-anchored overlay content uses a camera snapshotted at render
+  time (the flip runs after the next fixed update has already moved
+  the camera).
+
+Verification (1600-frame corridor, vs pre-phase-1 bucketed+PVS):
+0/792 deadline misses in both; slot total unchanged (1,126k of
+1,129k); render row sheds the overlay cost (render stage 676k ->
+636k), the sim row gains overlay 36k + present 76k (the tear-free
+edge wait, now measured instead of implicit); final frame differs by
+3/76,800 pixels (atmosphere particle time phase is one sim tick
+fresher at the flip). Engine suite 208/208.
+
+On hardware this buys: GPU draw overlapped by the tick-B update plus
+the edge wait (~270k cycles ≈ 8 ms of cover), and the swap always
+lands in the blanking interval (the standing mid-screen tear line is
+gone). The flip-side ot_wait band is the uncovered GPU remainder --
+the single number the fps-counter burn must read.
