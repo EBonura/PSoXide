@@ -146,16 +146,15 @@ runtime, and its toolchain makes cross-compiling to the PS1's bare-metal
 `mipsel-sony-psx` target a breeze rather than a build-system ordeal.
 
 The emulator core is not an independent clean-room implementation. It
-uses PCSX-Redux (GPL-2.0-or-later) in two ways: as a differential test
-oracle (a patched Redux build that the parity harness runs in lockstep
-against), and as a reference implementation for several subsystems.
-Real PS1 hardware has since become the authoritative accuracy oracle
-(see `docs/hardware-burn-ledger.md`); the Redux parity harness remains
-an optional regression check, and several Redux-derived behaviors have
-been corrected where silicon measurements proved Redux wrong (the
-triangle rasterizer's edge rule, the GTE read/write hazards). Some
-of those subsystems are parity-matched against, and in places derived
-from, Redux. The CD-ROM command-timing constants, for example, are
+used PCSX-Redux (GPL-2.0-or-later) in two ways during bring-up: as a
+differential test oracle (a patched Redux build run in lockstep by a
+parity harness, since retired), and as a reference implementation for
+several subsystems. Real PS1 hardware has since become the
+authoritative accuracy oracle (see `docs/hardware-burn-ledger.md`),
+and several Redux-derived behaviors have been corrected where silicon
+measurements proved Redux wrong (the triangle rasterizer's edge rule,
+the GTE read/write hazards). Some subsystems remain in places derived
+from Redux. The CD-ROM command-timing constants, for example, are
 transcribed directly from Redux's `core/cdrom.cc`. Every such file
 carries a `## Provenance` header naming PCSX-Redux, its copyright
 holders, and its license. Subsystems that are implemented from hardware
@@ -237,8 +236,8 @@ cargo check --manifest-path tools\mkisopsx\Cargo.toml
 cargo check --manifest-path tools\psx-exe-pack\Cargo.toml
 ```
 
-The fast defaults do not require commercial games or PCSX-Redux.
-Canaries and parity tests are ignored by default.
+The fast defaults do not require commercial games or a BIOS.
+Canaries are ignored by default.
 
 ### 3. Build and boot a homebrew example
 
@@ -298,9 +297,9 @@ for you. The bundled homebrew examples and editor Play flow do not need
 a user BIOS; they use PSoXide's HLE BIOS path and can run from a fresh
 checkout once built.
 
-A real BIOS is still required for retail/commercial disc boot, BIOS boot
-canaries, and parity work against PCSX-Redux. Dump your own BIOS image,
-then configure it in either place:
+A real BIOS is still required for retail/commercial disc boot and the
+BIOS boot canaries. Dump your own BIOS image, then configure it in
+either place:
 
 - In the frontend UI, open the Menu Settings column and use
   **Choose BIOS path**. This persists `paths.bios` in `settings.ron`.
@@ -408,15 +407,11 @@ make clean      # cargo clean across workspaces/tools and remove build/
 make validate   # exact-hash validation matrix
 ```
 
-Optional emulator parity and compatibility checks:
+Optional compatibility and regression checks:
 
 ```bash
 make canaries                 # ignored BIOS/commercial-disc canaries
 make commercial-visual-guards # local visual guards for owned disc images
-make parity                   # compare trace output against the oracle path
-make oracle-smoke             # verify the parity oracle can run
-make oracle-side-load         # compare SDK side-loaded EXEs against oracle
-make oracle-disc-smoke        # compare a local disc checkpoint against oracle
 make validate-repeat          # run validation repeatedly for determinism
 make validate-bless           # update validation baselines
 ```
@@ -538,7 +533,7 @@ disc, `make run-<name>` where supported).
 .
 ├── crates/                 shared no_std-compatible PSX primitives
 ├── editor/                 editor UI, project model, cook pipeline, psxed CLI
-├── emu/                    emulator core, frontend, settings, parity oracle
+├── emu/                    emulator core, frontend, renderer, settings
 ├── engine/                 PSX runtime engine crates and examples
 ├── sdk/                    PSX SDK crates and bare-metal examples
 ├── tools/                  standalone utilities
@@ -554,7 +549,7 @@ Each area has its own README with a per-crate breakdown:
 | [`sdk/`](sdk/README.md) | Bare-metal PSX SDK crates + `hello-*` examples. |
 | [`engine/`](engine/README.md) | Scene/App runtime engine, level schema, and the example games. |
 | [`editor/`](editor/README.md) | Project model, asset cookers, and editor UI. |
-| [`emu/`](emu/README.md) | Emulator core, desktop frontend, renderer, parity oracle. |
+| [`emu/`](emu/README.md) | Emulator core, desktop frontend, renderer, validation. |
 | [`tools/`](tools/README.md) | Disc-mastering and EXE utilities. |
 | [`docs/`](docs/README.md) | Architecture, hardware reference, and planning notes. |
 
@@ -581,11 +576,9 @@ Not included and intentionally ignored:
 - Large original texture/model/audio sources beyond the small committed
   demo inputs. Keep import experiments under `local-assets/`.
 
-Ignored tests and parity tools may require:
+Ignored tests (canaries, commercial guards) may require:
 
 - `PSOXIDE_BIOS=/path/to/bios.bin`
-- `PSOXIDE_REDUX_BIN=/path/to/patched/pcsx-redux`,
-- a local PCSX-Redux build from the PSoXide oracle branch,
 - local game images you legally own.
 
 PSoXide does not include or download Sony BIOS files or commercial game
@@ -599,10 +592,10 @@ or (at your option) any later version**. The full license text is in
 [LICENSE](LICENSE); third-party references and provenance notes are in
 the same file.
 
-The GPL choice is deliberate: parts of the emulator core are
-parity-matched against, and in places derived from, PCSX-Redux
-(GPL-2.0-or-later), used both as a differential test oracle and as a
-reference implementation. Releasing PSoXide under the same license is
+The GPL choice is deliberate: parts of the emulator core are in places
+derived from PCSX-Redux (GPL-2.0-or-later), which served during
+bring-up as both a differential test oracle and a reference
+implementation. Releasing PSoXide under the same license is
 what the GPL asks for work derived from Redux, and keeps the lineage
 explicit. See [`docs/license-audit.md`](docs/license-audit.md) and the
 per-file `Provenance` headers for specifics.
