@@ -1275,7 +1275,13 @@ impl AppState {
         // it with the emulator-only stage/counter telemetry that feeds the
         // debug sidebar profiler. Export builds keep the hardware-safe
         // defaults (telemetry MMIO writes are not for real hardware).
-        if matches!(completion, EditorBuildCompletion::RunEmbedded { .. }) {
+        // A feature env set when launching the editor wins, so experimental
+        // feature sets (e.g. the PVS visibility candidate) can be played
+        // without editing this default.
+        if matches!(completion, EditorBuildCompletion::RunEmbedded { .. })
+            && std::env::var_os("EDITOR_PLAYTEST_FEATURES").is_none()
+            && std::env::var_os("EDITOR_PLAYTEST_CARGO_FEATURE_FLAGS").is_none()
+        {
             command.env(
                 "EDITOR_PLAYTEST_FEATURES",
                 "cd-stream-bench emulator-telemetry",
