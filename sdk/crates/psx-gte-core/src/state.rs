@@ -148,6 +148,15 @@ pub struct Gte {
     lzcs: u32,
     lzcr: u32,
 
+    /// HWB-010 hazard injection: when set, the NEXT MVMVA computes its
+    /// MAC1 phase (executed first in the GTE's sequential row pipeline)
+    /// with this value as V0.x, while MAC2/MAC3 (executed later) see
+    /// the fresh register. Models the MTC2 VXY0 write committing
+    /// between the MAC1 and MAC2 compute windows, measured on silicon
+    /// (docs/hardware-burn-ledger.md HWB-010). Transient: cleared by
+    /// [`Gte::execute_with_stale_v0x`] after the command.
+    stale_v0x: Option<i16>,
+
     // Control registers -------------------------------------------------
     /// Rotation matrix RT, signed 1.3.12.
     rotation: [[i16; 3]; 3],
@@ -262,6 +271,7 @@ impl Gte {
             mac: [0; 3],
             lzcs: 0,
             lzcr: 0,
+            stale_v0x: None,
             rotation: [[0; 3]; 3],
             translation: [0; 3],
             light: [[0; 3]; 3],
@@ -536,6 +546,18 @@ impl Gte {
         }
     }
 
+    /// Execute one COP2 function with the HWB-010 MTC2-commit hazard
+    /// injected: the MAC1 phase of an MVMVA reading V0 sees `stale_x`
+    /// as V0.x (the value the register held before the in-flight MTC2
+    /// VXY0 write), while the MAC2/MAC3 phases see the fresh register.
+    /// Silicon-measured: six exact arithmetic confirmations across two
+    /// live captures (docs/hardware-burn-ledger.md HWB-009/010).
+    pub fn execute_with_stale_v0x(&mut self, instr: u32, stale_x: i16) {
+        self.stale_v0x = Some(stale_x);
+        self.execute(instr);
+        self.stale_v0x = None;
+    }
+
     /// Execute one COP2 function. `instr` is the full 32-bit
     /// instruction word so we can pull `sf`/`lm`/`mx`/`vx`/`cv`.
     /// Unrecognised commands return without updating state -- real
@@ -707,6 +729,14 @@ impl Gte {
         let mx = self.select_matrix(cmd.mx);
         let v = self.select_vector(cmd.vx);
         let tr = self.select_translation(cmd.cv);
+        // HWB-010 hazard injection: the GTE computes its MAC rows
+        // SEQUENTIALLY (MAC1 first); a V0.x value still committing from
+        // an MTC2 lands between the MAC1 and MAC2 phases, so only the
+        // MAC1 row sees the stale x. Applies to V0 reads only.
+        let v_mac1 = match self.stale_v0x {
+            Some(stale_x) if cmd.vx == 0 => [stale_x, v[1], v[2]],
+            _ => v,
+        };
 
         // The cv=2 (FC) path is famously buggy (PSX-SPX, "GTE Opcode
         // Bugs"): the far-color translation is NOT added, and the bug
@@ -721,7 +751,8 @@ impl Gte {
         if cmd.cv == 2 {
             for i in 0..3 {
                 let bias = (tr[i] as i64) << 12;
-                let prod = (mx[i][0] as i64) * (v[0] as i64);
+                let vx_in = if i == 0 { v_mac1[0] } else { v[0] };
+                let prod = (mx[i][0] as i64) * (vx_in as i64);
                 let stage1 = self.check_mac((i + 1) as u8, bias + prod) >> sf;
                 let _ = self.saturate_ir_flag_only((i + 1) as u8, stage1 as i32, false);
             }
@@ -739,7 +770,8 @@ impl Gte {
         }
 
         for i in 0..3 {
-            let acc = self.mac_add_row((i + 1) as u8, tr[i], &mx[i], &v, sf);
+            let v_row = if i == 0 { &v_mac1 } else { &v };
+            let acc = self.mac_add_row((i + 1) as u8, tr[i], &mx[i], v_row, sf);
             self.ir[i] = self.saturate_ir((i + 1) as u8, (acc >> sf) as i32, cmd.lm);
         }
     }
@@ -1392,6 +1424,52 @@ static UNR_TABLE: [u8; 257] = [
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// HWB-010 silicon values (docs/hardware-burn-ledger.md): joint 9's
+    /// compose column 1 from the SC 2147 live capture. With the stale
+    /// V0.x injected (previous column's x = 0x0218), the MAC1 phase
+    /// reproduces the photographed hardware value EXACTLY while
+    /// MAC2/MAC3 stay fresh; without injection, all three match the
+    /// clean compose.
+    #[test]
+    fn mvmva_stale_v0x_reproduces_hwb010_compose_column() {
+        let seed = |g: &mut Gte| {
+            // VI rotation: (0F6D 0000 FBC1 / 0125 F098 0427 / FBEA FBB1 F125)
+            g.write_control(0, 0x0000_0F6D);
+            g.write_control(1, 0x0125_FBC1);
+            g.write_control(2, 0x0427_F098);
+            g.write_control(3, 0xFBB1_FBEA);
+            g.write_control(4, 0xFFFF_F125);
+            g.write_control(5, 0);
+            g.write_control(6, 0);
+            g.write_control(7, 0);
+            // V0 = column 1 of the joint-9 model matrix: (-27, 536, 8).
+            g.write_data(0, 0x0218_FFE5);
+            g.write_data(1, 0x0000_0008);
+        };
+        const MVMVA_RT_V0_TR_SF1: u32 = 0x4A08_0012;
+
+        // Clean execute: the console-exact compose values.
+        let mut g = Gte::new();
+        seed(&mut g);
+        g.execute(MVMVA_RT_V0_TR_SF1);
+        assert_eq!(g.read_data(25), 0xFFFF_FFE3); // -29
+        assert_eq!(g.read_data(26), 0xFFFF_FDFC); // -516
+        assert_eq!(g.read_data(27), 0xFFFF_FF6F); // -145
+
+        // Hazard execute: stale x = previous column's x (0x0218 = 536).
+        // MAC1 flips to the photographed corrupt value; MAC2/3 unchanged.
+        let mut g = Gte::new();
+        seed(&mut g);
+        g.execute_with_stale_v0x(MVMVA_RT_V0_TR_SF1, 0x0218);
+        assert_eq!(g.read_data(25), 0x0000_0202); // 514 -- hardware photo
+        assert_eq!(g.read_data(26), 0xFFFF_FDFC);
+        assert_eq!(g.read_data(27), 0xFFFF_FF6F);
+
+        // The injection is one-shot: a following clean execute is clean.
+        g.execute(MVMVA_RT_V0_TR_SF1);
+        assert_eq!(g.read_data(25), 0xFFFF_FFE3);
+    }
 
     #[test]
     fn reset_state_is_zero() {
