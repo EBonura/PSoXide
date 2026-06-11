@@ -278,3 +278,45 @@ the edge wait (~270k cycles ≈ 8 ms of cover), and the swap always
 lands in the blanking interval (the standing mid-screen tear line is
 gone). The flip-side ot_wait band is the uncovered GPU remainder --
 the single number the fps-counter burn must read.
+
+## Diagnosis: player path / GTE starvation (2026-06-11)
+
+Phase-1 profile, per render vblank: player 315k = joints 49k +
+project 105k + faces 146k, for 252 vertices / 496 faces / 20 parts.
+That is 415 cyc/vertex to project and 294 cyc/face to cull+pack,
+while the GTE itself is ~0.3% of the frame. Code read
+(world_pass_model.rs + psx-gte scene.rs):
+
+- The GTE call is NOT the problem: project_triangle_mips is tight asm
+  (6 MTC2 + RTPT + reads, ~25 cyc/vertex amortized). ~94% of the
+  project stage is the Rust around it: per-triple `[vertex; 3]` batch
+  copies, a per-vertex CPU-blend re-check even for unblended models,
+  projected_from_gte unpack, 2 range-verdict checks and a 4-compare
+  min/max bounds update per vertex, all on a no-D-cache CPU.
+- The verdicts (in_front, inside_hw_bounds) and extent bounds feed
+  the packed-faces fast-path selector, so they cannot be dropped --
+  but the GTE FLAG register already records screen/Z saturation per
+  op: one MFC2 of FLAG per triple can replace 6 scalar range checks,
+  and the extent test can run on the GTE-side SXY values.
+- The asm reads results immediately after RTPT, so the CPU eats the
+  full GTE op latency (~23 cyc) every triple. Software-pipelining
+  (kick triple N, do triple N-1's bookkeeping during the op, read N
+  afterwards) hides it entirely under work we already do.
+- joints 49k for ~25 joints (~2k each) despite GTE-compose paths
+  existing (MODEL_GTE_JOINT_* flags): the cost is the per-joint
+  Option-chain wrappers and fallbacks around the math.
+- faces 294/face: backface cross on CPU (2 MULTs ~12 cyc each +
+  stalls) where GTE NCLIP does it in 8 cycles from already-packed
+  SXYs; plus per-face packet field writes.
+
+Attack order (verify with the corridor profile after each):
+1. Project loop rewrite: triple iteration without batch copies,
+   blend check hoisted out of the unblended path, FLAG-based
+   verdicts, software-pipelined RTPT. Target 415 -> ~120 cyc/vertex
+   (project 105k -> ~30k).
+2. Faces: NCLIP for backface, slim the packed writer. Target 294 ->
+   ~180 cyc/face (faces 146k -> ~90k).
+3. Joints: flatten the wrapper chains around the GTE compose.
+   Target 49k -> ~25k.
+Combined target: player 315k -> ~145k; render vblank ~860k -> ~690k
+(122%), turning the 30 fps slot from razor-thin into comfortable.
