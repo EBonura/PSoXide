@@ -60,6 +60,30 @@ What works today:
 
 - Emulator core for the major PS1 CPU, GTE, GPU, DMA, CD-ROM, SIO pad,
   timers, MDEC, and SPU paths needed by the current canaries.
+- Real-hardware accuracy validated on an actual PS1 console, not just
+  against other emulators:
+  - The GTE is bit-exact against a real-console captured conformance
+    corpus: 1100/1100 tests across all 22 opcodes and all 64 registers,
+    FLAG included, replayed in seconds via the `gte_fuzz_replay`
+    harness from JaCzekanski's ps1-tests console log.
+  - The triangle rasterizer matches silicon pixel coverage
+    (center-sampled DDA), confirmed by VRAM read-back tests
+    photographed on a real console after the Redux-derived scanline
+    rasterizer was proven wrong on hardware.
+  - Silicon-measured GTE hazards modeled by no other public emulator
+    nor the MiSTer FPGA core: MAC0/LZCR result reads serve a stale
+    value to the immediately-next instruction (on by default with the
+    measured write-adjacency gating), and an MTC2 V0 write can commit
+    between the MAC1 and MAC2 phases of the GTE's sequential MVMVA
+    execution, so MAC1 computes with the previous V0.x (env-gated
+    `PSOXIDE_GTE_V0X_STALE=1`; reproduces bit-exactly a real
+    skinned-mesh corruption seen on hardware that renders clean on
+    every other emulator).
+  - The methodology is documented burn by burn in
+    [`docs/hardware-burn-ledger.md`](docs/hardware-burn-ledger.md):
+    findings come from CD-Rs burned for a modchipped console, decoded
+    from photographed on-screen probes, and every divergence becomes a
+    conformance test or an emulator/engine/SDK fix.
 - Desktop frontend built with winit, wgpu, egui, cpal, and gilrs.
 - Debugger-style panels for registers, memory, VRAM, execution history,
   profiler data, savestates, library scanning, and game/example launching.
