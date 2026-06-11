@@ -18,7 +18,11 @@ lto           = true
 [features]
 default = [
     "cd-stream-bench",
-    "world-order-slot",
+    # Bucketed = OT-as-radix-sort, no per-frame comparison sort. The exact
+    # intra-slot ordering modes (slot/global/linked) cost 122k-313k extra
+    # cycles per render vblank for no observed visual difference; see
+    # docs/perf-30fps.md experiment 2.
+    "world-order-bucketed",
     "world-grid-visible",
     "ot-2048",
     "vis-static-active-turn",
