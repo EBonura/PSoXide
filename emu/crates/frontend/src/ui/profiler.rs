@@ -972,9 +972,8 @@ pub fn draw_contents(ui: &mut egui::Ui, profiler: &mut FrameProfiler) {
         metric(ui, "EMU Hz", format!("{:.1}", avg.emulated_vblank_hz()));
         if let Some(visual_hz) = avg.guest_visual_frame_hz() {
             metric(ui, "VIS Hz", format!("{visual_hz:.1}"));
-        } else {
-            metric(ui, "DRAW Hz", format!("{:.1}", avg.psx_draw_hz()));
         }
+        metric(ui, "DRAW Hz", format!("{:.1}", avg.psx_draw_hz()));
         metric(ui, "CAP", format!("{:.0}", avg.psx_step_cap_misses));
     });
     ui.horizontal_wrapped(|ui| {
@@ -997,7 +996,6 @@ pub fn draw_contents(ui: &mut egui::Ui, profiler: &mut FrameProfiler) {
         );
     });
     ui.horizontal_wrapped(|ui| {
-        metric(ui, "GPU Hz", format!("{:.1}", avg.psx_draw_hz()));
         metric(ui, "GPU/V", format!("{:.2}", avg.psx_draw_vblanks));
         metric(
             ui,
@@ -1031,28 +1029,35 @@ pub fn draw_contents(ui: &mut egui::Ui, profiler: &mut FrameProfiler) {
     });
 
     ui.add_space(4.0);
+    section_label(ui, "Host Frame");
     draw_history(ui, profiler);
     ui.add_space(6.0);
 
     let max_ms = avg.total_ms.max(BUDGET_60_MS).max(1.0);
-    egui::Grid::new("frame-profiler-stage-grid")
-        .num_columns(3)
-        .spacing(egui::vec2(8.0, 3.0))
-        .striped(false)
-        .show(ui, |ui| {
-            for (label, ms) in avg.stage_rows() {
-                stage_row(ui, label, ms, max_ms);
-            }
-        });
+    for (label, ms) in avg.stage_rows() {
+        // The compute shadow rasterizer is opt-in (--gpu-compute); hide its
+        // permanently-zero row for everyone else.
+        if label == "compute" && ms <= 0.0 {
+            continue;
+        }
+        let color = if label == "total" {
+            theme::ACCENT
+        } else {
+            theme::TEXT
+        };
+        bar_row(
+            ui,
+            label,
+            color,
+            ms / max_ms,
+            color_for_ms(ms),
+            &[(format!("{ms:6.2}"), VAL_MS_W, false)],
+        );
+    }
 
     if avg.guest.has_data() {
         ui.add_space(8.0);
-        ui.label(
-            RichText::new("Guest Runtime")
-                .color(theme::ACCENT)
-                .monospace()
-                .size(theme::FONT_SIZE_SMALL),
-        );
+        section_label(ui, "Guest Runtime");
         ui.horizontal_wrapped(|ui| {
             metric(ui, "GFR/R", format!("{:.1}", avg.guest.frames));
             metric(
@@ -1160,46 +1165,91 @@ pub fn draw_contents(ui: &mut egui::Ui, profiler: &mut FrameProfiler) {
 }
 
 fn metric(ui: &mut egui::Ui, label: &str, value: String) {
+    // One atomic chip: the nested horizontal keeps label+value together,
+    // so the wrapped parent row wraps BETWEEN chips, never inside one.
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        ui.label(
+            RichText::new(label)
+                .color(theme::TEXT_DIM)
+                .size(theme::FONT_SIZE_SMALL),
+        );
+        ui.label(
+            RichText::new(value)
+                .color(theme::TEXT)
+                .monospace()
+                .size(theme::FONT_SIZE_SMALL),
+        );
+    });
+}
+
+/// Small accent caption used to group the profiler's tables.
+fn section_label(ui: &mut egui::Ui, text: &str) {
     ui.label(
-        RichText::new(label)
-            .color(theme::TEXT_DIM)
-            .size(theme::FONT_SIZE_SMALL),
-    );
-    ui.label(
-        RichText::new(value)
-            .color(theme::TEXT)
+        RichText::new(text)
+            .color(theme::ACCENT)
             .monospace()
             .size(theme::FONT_SIZE_SMALL),
     );
 }
 
-fn stage_row(ui: &mut egui::Ui, label: &str, ms: f32, max_ms: f32) {
-    ui.label(
-        RichText::new(label)
-            .color(if label == "total" {
-                theme::ACCENT
-            } else {
-                theme::TEXT
-            })
-            .monospace()
-            .size(theme::FONT_SIZE_SMALL),
-    );
+// ---- Responsive bar rows --------------------------------------------------
+// Every bar table shares these fixed label/value column widths, so bars
+// align ACROSS sections, and the bar itself absorbs whatever width the
+// sidebar currently has: resizing stretches the bars, never the columns.
+const ROW_H: f32 = 13.0;
+const BAR_H: f32 = 9.0;
+const ROW_LABEL_W: f32 = 108.0;
+const BAR_MIN_W: f32 = 36.0;
+const VAL_MS_W: f32 = 52.0;
+const VAL_CYC_W: f32 = 78.0;
+const VAL_PCT_W: f32 = 46.0;
+const VAL_WORST_W: f32 = 88.0;
 
-    let width = ui.available_width().clamp(80.0, 240.0);
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 9.0), egui::Sense::hover());
-    let painter = ui.painter();
-    painter.rect_filled(rect, 2.0, theme::WIDGET_BG);
-    let fill_width = (rect.width() * (ms / max_ms).clamp(0.0, 1.0)).max(1.0);
-    let fill_rect = egui::Rect::from_min_size(rect.min, egui::vec2(fill_width, rect.height()));
-    painter.rect_filled(fill_rect, 2.0, color_for_ms(ms));
-
-    ui.label(
-        RichText::new(format!("{ms:6.2}"))
-            .color(theme::TEXT)
-            .monospace()
-            .size(theme::FONT_SIZE_SMALL),
-    );
-    ui.end_row();
+/// One `label | bar | values...` row. `values` are (text, cell width, dim).
+fn bar_row(
+    ui: &mut egui::Ui,
+    label: &str,
+    label_color: egui::Color32,
+    frac: f32,
+    fill: egui::Color32,
+    values: &[(String, f32, bool)],
+) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        ui.add_sized(
+            [ROW_LABEL_W, ROW_H],
+            egui::Label::new(
+                RichText::new(label)
+                    .color(label_color)
+                    .monospace()
+                    .size(theme::FONT_SIZE_SMALL),
+            )
+            .truncate(),
+        );
+        let reserved: f32 = values.iter().map(|v| v.1 + 6.0).sum();
+        let bar_w = (ui.available_width() - reserved).max(BAR_MIN_W);
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(bar_w, BAR_H), egui::Sense::hover());
+        let painter = ui.painter();
+        painter.rect_filled(rect, 2.0, theme::WIDGET_BG);
+        let fill_w = (rect.width() * frac.clamp(0.0, 1.0)).max(1.0);
+        painter.rect_filled(
+            egui::Rect::from_min_size(rect.min, egui::vec2(fill_w, rect.height())),
+            2.0,
+            fill,
+        );
+        for (text, width, dim) in values {
+            ui.add_sized(
+                [*width, ROW_H],
+                egui::Label::new(
+                    RichText::new(text)
+                        .color(if *dim { theme::TEXT_DIM } else { theme::TEXT })
+                        .monospace()
+                        .size(theme::FONT_SIZE_SMALL),
+                ),
+            );
+        }
+    });
 }
 
 fn draw_guest_scheduler_tasks(ui: &mut egui::Ui, guest: GuestRuntimeProfile) {
@@ -1209,146 +1259,101 @@ fn draw_guest_scheduler_tasks(ui: &mut egui::Ui, guest: GuestRuntimeProfile) {
     }
 
     ui.add_space(4.0);
-    ui.label(
-        RichText::new("Scheduler Tasks")
-            .color(theme::ACCENT)
-            .monospace()
-            .size(theme::FONT_SIZE_SMALL),
-    );
+    section_label(ui, "Scheduler Tasks");
 
     let max_cycles = (0..TASK_COUNT)
         .map(|id| guest.task_cycles_per_hit(id))
         .fold(NTSC_CPU_CYCLES_PER_VBLANK / 4.0, f32::max)
         .max(1.0);
 
-    egui::Grid::new("guest-scheduler-task-grid")
-        .num_columns(5)
-        .spacing(egui::vec2(8.0, 3.0))
-        .striped(false)
-        .show(ui, |ui| {
-            for id in 0..TASK_COUNT {
-                let cycles = guest.task_cycles_per_hit(id);
-                if cycles <= 0.0 {
-                    continue;
-                }
-                guest_task_row(
-                    ui,
-                    task_name(id as u16),
-                    cycles,
-                    guest.task_max_cycles[id],
-                    max_cycles,
-                );
-            }
-        });
-}
-
-fn guest_task_row(ui: &mut egui::Ui, label: &str, cycles: f32, max_hit: f32, max_cycles: f32) {
-    ui.label(
-        RichText::new(label)
-            .color(theme::TEXT)
-            .monospace()
-            .size(theme::FONT_SIZE_SMALL),
-    );
-
-    let width = ui.available_width().clamp(80.0, 240.0);
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 9.0), egui::Sense::hover());
-    let painter = ui.painter();
-    painter.rect_filled(rect, 2.0, theme::WIDGET_BG);
-    let fill_width = (rect.width() * (cycles / max_cycles).clamp(0.0, 1.0)).max(1.0);
-    let fill_rect = egui::Rect::from_min_size(rect.min, egui::vec2(fill_width, rect.height()));
-    painter.rect_filled(fill_rect, 2.0, theme::ACCENT_HOVER);
-
-    ui.label(
-        RichText::new(format!("{cycles:7.0} cyc"))
-            .color(theme::TEXT)
-            .monospace()
-            .size(theme::FONT_SIZE_SMALL),
-    );
-    ui.label(
-        RichText::new(format!("worst {max_hit:.0}"))
-            .color(theme::TEXT_DIM)
-            .monospace()
-            .size(theme::FONT_SIZE_SMALL),
-    );
-    ui.label(
-        RichText::new(format!("{:.3} ms", cycles / PSX_CYCLES_PER_MS))
-            .color(theme::TEXT_DIM)
-            .monospace()
-            .size(theme::FONT_SIZE_SMALL),
-    );
-    ui.end_row();
+    for id in 0..TASK_COUNT {
+        let cycles = guest.task_cycles_per_hit(id);
+        if cycles <= 0.0 {
+            continue;
+        }
+        bar_row(
+            ui,
+            task_name(id as u16),
+            theme::TEXT,
+            cycles / max_cycles,
+            theme::ACCENT_HOVER,
+            &[
+                (format!("{cycles:7.0} cyc"), VAL_CYC_W, false),
+                (
+                    format!("worst {:.0}", guest.task_max_cycles[id]),
+                    VAL_WORST_W,
+                    true,
+                ),
+                (
+                    format!("{:.3} ms", cycles / PSX_CYCLES_PER_MS),
+                    VAL_MS_W,
+                    true,
+                ),
+            ],
+        );
+    }
 }
 
 fn draw_guest_runtime(ui: &mut egui::Ui, guest: GuestRuntimeProfile) {
+    ui.add_space(4.0);
+    section_label(ui, "Guest Stages");
     let max_cycles = (1..STAGE_COUNT)
         .map(|id| guest.stage_cycles_per_hit(id))
         .fold(guest.cycle_budget_per_guest_frame() / 4.0, f32::max)
         .max(1.0);
 
-    egui::Grid::new("guest-runtime-stage-grid")
-        .num_columns(4)
-        .spacing(egui::vec2(8.0, 3.0))
-        .striped(false)
-        .show(ui, |ui| {
-            for id in 1..STAGE_COUNT {
-                let cycles = guest.stage_cycles_per_hit(id);
-                if cycles <= 0.0 {
-                    continue;
-                }
-                guest_stage_row(ui, stage_name(id as u16), cycles, max_cycles);
-            }
-        });
+    for id in 1..STAGE_COUNT {
+        let cycles = guest.stage_cycles_per_hit(id);
+        if cycles <= 0.0 {
+            continue;
+        }
+        bar_row(
+            ui,
+            stage_name(id as u16),
+            theme::TEXT,
+            cycles / max_cycles,
+            theme::ACCENT_HOVER,
+            &[
+                (format!("{cycles:7.0} cyc"), VAL_CYC_W, false),
+                (
+                    format!("{:.3} ms", cycles / PSX_CYCLES_PER_MS),
+                    VAL_MS_W,
+                    true,
+                ),
+            ],
+        );
+    }
 
     let has_counters = guest.counters.iter().any(|&value| value > 0.0);
     if !has_counters {
         return;
     }
 
+    // 200+ telemetry counter ids exist; the full dump is reference
+    // material, not at-a-glance data -- keep it folded by default.
     ui.add_space(4.0);
-    egui::Grid::new("guest-runtime-counter-grid")
-        .num_columns(2)
-        .spacing(egui::vec2(8.0, 3.0))
-        .striped(false)
-        .show(ui, |ui| {
-            for id in 1..COUNTER_COUNT {
-                let value = guest.counter_per_guest_frame(id);
-                if value <= 0.0 {
-                    continue;
-                }
-                counter_row(ui, counter_name(id as u16), value);
-            }
-        });
-}
-
-fn guest_stage_row(ui: &mut egui::Ui, label: &str, cycles: f32, max_cycles: f32) {
-    ui.label(
-        RichText::new(label)
-            .color(theme::TEXT)
-            .monospace()
-            .size(theme::FONT_SIZE_SMALL),
-    );
-
-    let width = ui.available_width().clamp(80.0, 240.0);
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 9.0), egui::Sense::hover());
-    let painter = ui.painter();
-    painter.rect_filled(rect, 2.0, theme::WIDGET_BG);
-    let fill_width = (rect.width() * (cycles / max_cycles).clamp(0.0, 1.0)).max(1.0);
-    let fill_rect = egui::Rect::from_min_size(rect.min, egui::vec2(fill_width, rect.height()));
-    painter.rect_filled(fill_rect, 2.0, theme::ACCENT_HOVER);
-
-    ui.label(
-        RichText::new(format!("{cycles:7.0} cyc"))
-            .color(theme::TEXT)
-            .monospace()
-            .size(theme::FONT_SIZE_SMALL),
-    );
-    ui.label(
-        RichText::new(format!("{:.3} ms", cycles / PSX_CYCLES_PER_MS))
+    egui::CollapsingHeader::new(
+        RichText::new("All counters")
             .color(theme::TEXT_DIM)
             .monospace()
             .size(theme::FONT_SIZE_SMALL),
-    );
-    ui.end_row();
+    )
+    .default_open(false)
+    .show(ui, |ui| {
+        egui::Grid::new("guest-runtime-counter-grid")
+            .num_columns(2)
+            .spacing(egui::vec2(8.0, 3.0))
+            .striped(false)
+            .show(ui, |ui| {
+                for id in 1..COUNTER_COUNT {
+                    let value = guest.counter_per_guest_frame(id);
+                    if value <= 0.0 {
+                        continue;
+                    }
+                    counter_row(ui, counter_name(id as u16), value);
+                }
+            });
+    });
 }
 
 fn counter_row(ui: &mut egui::Ui, label: &str, value: f32) {
@@ -1374,68 +1379,46 @@ fn draw_guest_render_breakdown(ui: &mut egui::Ui, guest: GuestRuntimeProfile) {
     }
 
     ui.add_space(4.0);
-    ui.label(
-        RichText::new("Render %")
-            .color(theme::ACCENT)
-            .monospace()
-            .size(theme::FONT_SIZE_SMALL),
-    );
+    section_label(ui, "Render %");
 
     let mut accounted = 0.0;
-    egui::Grid::new("guest-render-breakdown-grid")
-        .num_columns(4)
-        .spacing(egui::vec2(8.0, 3.0))
-        .striped(false)
-        .show(ui, |ui| {
-            for &(stage_id, label) in GUEST_RENDER_BREAKDOWN_STAGES {
-                let cycles = guest.stage_cycles[stage_id as usize];
-                if cycles <= 0.0 {
-                    continue;
-                }
-                accounted += cycles;
-                guest_render_percent_row(ui, label, cycles, render_cycles);
-            }
-            let other = (render_cycles - accounted).max(0.0);
-            if other > render_cycles * 0.005 {
-                guest_render_percent_row(ui, "other", other, render_cycles);
-            }
-        });
+    for &(stage_id, label) in GUEST_RENDER_BREAKDOWN_STAGES {
+        let cycles = guest.stage_cycles[stage_id as usize];
+        if cycles <= 0.0 {
+            continue;
+        }
+        accounted += cycles;
+        guest_render_percent_row(ui, label, cycles, render_cycles);
+    }
+    let other = (render_cycles - accounted).max(0.0);
+    if other > render_cycles * 0.005 {
+        guest_render_percent_row(ui, "other", other, render_cycles);
+    }
 }
 
 fn guest_render_percent_row(ui: &mut egui::Ui, label: &str, cycles: f32, render_cycles: f32) {
     let percent = cycles * 100.0 / render_cycles.max(1.0);
-    ui.label(
-        RichText::new(label)
-            .color(theme::TEXT)
-            .monospace()
-            .size(theme::FONT_SIZE_SMALL),
+    bar_row(
+        ui,
+        label,
+        theme::TEXT,
+        percent / 100.0,
+        theme::ACCENT_HOVER,
+        &[
+            (format!("{percent:5.1}%"), VAL_PCT_W, false),
+            (
+                format!("{:.3} ms", cycles / PSX_CYCLES_PER_MS),
+                VAL_MS_W,
+                true,
+            ),
+        ],
     );
-
-    let width = ui.available_width().clamp(80.0, 240.0);
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 9.0), egui::Sense::hover());
-    let painter = ui.painter();
-    painter.rect_filled(rect, 2.0, theme::WIDGET_BG);
-    let fill_width = (rect.width() * (percent / 100.0).clamp(0.0, 1.0)).max(1.0);
-    let fill_rect = egui::Rect::from_min_size(rect.min, egui::vec2(fill_width, rect.height()));
-    painter.rect_filled(fill_rect, 2.0, theme::ACCENT_HOVER);
-
-    ui.label(
-        RichText::new(format!("{percent:5.1}%"))
-            .color(theme::TEXT)
-            .monospace()
-            .size(theme::FONT_SIZE_SMALL),
-    );
-    ui.label(
-        RichText::new(format!("{:.3} ms", cycles / PSX_CYCLES_PER_MS))
-            .color(theme::TEXT_DIM)
-            .monospace()
-            .size(theme::FONT_SIZE_SMALL),
-    );
-    ui.end_row();
 }
 
 fn draw_history(ui: &mut egui::Ui, profiler: &FrameProfiler) {
-    let desired = egui::vec2(ui.available_width().max(260.0), 72.0);
+    // Follow the panel width down to a sane floor instead of overflowing
+    // the sidebar at its minimum width.
+    let desired = egui::vec2(ui.available_width().max(80.0), 72.0);
     let (rect, _) = ui.allocate_exact_size(desired, egui::Sense::hover());
     let painter = ui.painter();
     painter.rect_filled(rect, 3.0, theme::CONTENT_BG);
