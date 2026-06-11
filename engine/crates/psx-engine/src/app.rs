@@ -72,6 +72,10 @@ pub(crate) fn boot_visual_checkpoint_hold(
     message: &str,
     frames: u8,
 ) {
+    // A checkpoint can fire while a scene's async ordering-table DMA is
+    // still walking; drain the channel before issuing immediate draws so
+    // the diagnostic itself cannot corrupt the GP0 stream.
+    gpu::submit_linked_list_wait();
     for _ in 0..frames.max(1) {
         fb.clear(color.0, color.1, color.2);
         draw_boot_text(fb, message);
@@ -523,18 +527,46 @@ impl App {
         let mut traced_update = false;
         let mut traced_render = false;
         let mut traced_present = false;
+        // A built visual frame whose flip has not happened yet. The scene's
+        // ordering-table DMA may still be walking; fixed updates run in the
+        // gap so the GPU draw overlaps CPU work. Holds the frame's missed
+        // visual intervals for the deadline counters emitted at the flip.
+        let mut pending_present: Option<u16> = None;
 
         loop {
             let elapsed_sim_ticks = clock.elapsed_sim_ticks();
             match scheduler.next_action(elapsed_sim_ticks) {
                 SchedulerAction::WaitForVBlank => {
-                    if !traced_wait {
-                        boot_trace("psx-engine: wait vblank");
-                    }
-                    clock.wait_next_vblank();
-                    if !traced_wait {
-                        boot_trace("psx-engine: vblank ok");
-                        traced_wait = true;
+                    if pending_present.is_some() {
+                        if !traced_present {
+                            boot_trace("psx-engine: present begin");
+                        }
+                        Self::present_pending(
+                            scene,
+                            &mut clock,
+                            &mut ctx,
+                            &mut pending_present,
+                            true,
+                        );
+                        if !traced_present {
+                            boot_visual_checkpoint_hold(
+                                &mut ctx.fb,
+                                (0, 220, 0),
+                                "49 PRESENT OK",
+                                60,
+                            );
+                            boot_trace("psx-engine: present ok");
+                            traced_present = true;
+                        }
+                    } else {
+                        if !traced_wait {
+                            boot_trace("psx-engine: wait vblank");
+                        }
+                        clock.wait_next_vblank();
+                        if !traced_wait {
+                            boot_trace("psx-engine: vblank ok");
+                            traced_wait = true;
+                        }
                     }
                 }
                 SchedulerAction::RunFixedUpdate { tick } => {
@@ -582,6 +614,13 @@ impl App {
                     missed_visual_intervals,
                     fixed_update_clamped: _,
                 } => {
+                    // The previous visual frame can still be awaiting its
+                    // flip when the next one is already due (sim catch-up
+                    // after a stall). Flush it now, without holding for a
+                    // vblank edge since the slot is already blown, so the
+                    // swap happens before the clear below repaints the
+                    // back buffer.
+                    Self::present_pending(scene, &mut clock, &mut ctx, &mut pending_present, false);
                     if !traced_render {
                         boot_trace("psx-engine: render begin");
                         boot_visual_checkpoint(&mut ctx.fb, (120, 0, 180), "30 RENDER BEGIN");
@@ -631,32 +670,61 @@ impl App {
                     }
                     telemetry::task_end(telemetry::task::VISUAL_RENDER);
 
-                    if !traced_present {
-                        boot_trace("psx-engine: present begin");
-                        boot_visual_checkpoint_hold(
-                            &mut ctx.fb,
-                            (80, 80, 80),
-                            "40 PRESENT BEGIN",
-                            60,
-                        );
-                    }
-                    telemetry::stage_begin(telemetry::stage::PRESENT);
-                    clock.wait_next_vblank();
-                    gpu::draw_sync();
-                    ctx.fb.swap();
-                    telemetry::stage_end(telemetry::stage::PRESENT);
-                    if !traced_present {
-                        boot_visual_checkpoint_hold(&mut ctx.fb, (0, 220, 0), "49 PRESENT OK", 60);
-                        boot_trace("psx-engine: present ok");
-                        traced_present = true;
-                    }
-
+                    // The flip is deferred: the scene may have kicked its
+                    // ordering-table DMA asynchronously, and the fixed
+                    // updates that are due next run while the GPU draws.
+                    // The flip happens on the first idle wait (tear-free,
+                    // at a vblank edge) or, under overload, right before
+                    // the next visual frame starts building.
                     scheduler.complete_visual_frame();
-                    emit_visual_frame_counters(missed_visual_intervals);
-                    ctx.visual_frame = ctx.visual_frame.advance();
+                    pending_present = Some(missed_visual_intervals);
                 }
             }
         }
+    }
+
+    /// Drain the in-flight ordering-table DMA, draw the scene's 2D
+    /// overlay layer over the finished frame, and flip the display.
+    ///
+    /// `wait_edge` selects tear-free presentation: the swap is held to
+    /// the next VBlank IRQ edge so GP1 display-start changes land in
+    /// the blanking interval. The overload path passes `false` and
+    /// flips immediately -- the slot is already blown and holding the
+    /// swap would only fall further behind. No-op when no built frame
+    /// is awaiting its flip.
+    fn present_pending<S: Scene>(
+        scene: &mut S,
+        clock: &mut EngineClock,
+        ctx: &mut Ctx,
+        pending: &mut Option<u16>,
+        wait_edge: bool,
+    ) {
+        let Some(missed_visual_intervals) = pending.take() else {
+            return;
+        };
+
+        // After this drain the GPU has consumed the whole ordering
+        // table; immediate GP0 draws can no longer race the walker. On
+        // hardware this wait is the real GPU draw time left uncovered
+        // by the fixed updates that ran since the kick.
+        telemetry::stage_begin(telemetry::stage::OT_WAIT);
+        gpu::submit_linked_list_wait();
+        gpu::draw_sync();
+        telemetry::stage_end(telemetry::stage::OT_WAIT);
+
+        telemetry::stage_begin(telemetry::stage::RENDER);
+        scene.render_overlay(ctx);
+        telemetry::stage_end(telemetry::stage::RENDER);
+
+        telemetry::stage_begin(telemetry::stage::PRESENT);
+        if wait_edge {
+            clock.wait_vblank_edge();
+        }
+        ctx.fb.swap();
+        telemetry::stage_end(telemetry::stage::PRESENT);
+
+        emit_visual_frame_counters(missed_visual_intervals);
+        ctx.visual_frame = ctx.visual_frame.advance();
     }
 }
 

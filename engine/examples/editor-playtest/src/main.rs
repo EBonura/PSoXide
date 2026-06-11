@@ -387,6 +387,11 @@ struct Playtest {
     camera: ThirdPersonCameraState,
     /// Last visual camera produced by the simulation update.
     render_camera: WorldCamera,
+    /// Camera snapshot taken by `render` for the deferred overlay pass.
+    /// The flip (and so `render_overlay`) runs after the next fixed
+    /// update has already moved `render_camera`; world-anchored overlay
+    /// elements must use the camera the underlying frame was built with.
+    overlay_camera: WorldCamera,
     /// Last movement result; stationary frames can use a broader cached
     /// visibility candidate set without rebuilding it for camera-only turns.
     player_moved_last_tick: bool,
@@ -507,6 +512,14 @@ impl Playtest {
             orbit_radius: CAMERA_START_RADIUS,
             camera: ThirdPersonCameraState::new(CAMERA_START_YAW),
             render_camera: WorldCamera::from_basis(
+                PROJECTION,
+                WorldVertex::ZERO,
+                Q12::ZERO,
+                Q12::ONE,
+                Q12::ZERO,
+                Q12::ONE,
+            ),
+            overlay_camera: WorldCamera::from_basis(
                 PROJECTION,
                 WorldVertex::ZERO,
                 Q12::ZERO,

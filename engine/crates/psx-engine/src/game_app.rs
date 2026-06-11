@@ -1852,6 +1852,11 @@ impl<'a, S: Scene> Scene for GameApp<'a, S> {
                 (200, 80, 220),
                 "38 GAMEPLAY RENDER OK",
             );
+            // The gameplay scene may have kicked its ordering-table DMA
+            // asynchronously; everything that composites over it (pause
+            // UI, transition fades) draws in render_overlay, after the
+            // app runner drains the walker.
+            return;
         }
         if let Some(scene) = tag.ui_scene() {
             crate::app::boot_visual_checkpoint(&mut ctx.fb, (200, 120, 220), "37 UI RENDER BEGIN");
@@ -1863,18 +1868,24 @@ impl<'a, S: Scene> Scene for GameApp<'a, S> {
                 60,
             );
         }
+    }
+
+    fn render_overlay(&mut self, ctx: &mut Ctx) {
+        if self.loading_pending() {
+            return;
+        }
+        let tag = self.current_tag();
+        if tag.has_gameplay() {
+            self.gameplay.render_overlay(ctx);
+            // Pause/options UI over the live gameplay frame. UI-only
+            // states draw their scene in render(); only the
+            // over-gameplay composite moves here, behind the DMA drain.
+            if let Some(scene) = tag.ui_scene() {
+                self.render_ui_scene(scene, ctx);
+            }
+        }
         if let Some(transition) = self.transition {
-            crate::app::boot_visual_checkpoint(
-                &mut ctx.fb,
-                (220, 160, 220),
-                "38 TRANSITION RENDER BEGIN",
-            );
             render_transition_overlay(transition);
-            crate::app::boot_visual_checkpoint(
-                &mut ctx.fb,
-                (220, 200, 220),
-                "38 TRANSITION RENDER OK",
-            );
         }
     }
 }
