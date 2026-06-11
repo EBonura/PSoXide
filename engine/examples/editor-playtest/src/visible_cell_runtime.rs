@@ -43,7 +43,6 @@ impl Playtest {
             cached_room_draw_order_mode(),
         );
         let player = self.motor.position();
-        let global_visibility_anchor = player;
 
         telemetry::stage_begin(telemetry::stage::ROOM_VISIBLE_LIST);
         for &active_slot in &active_draw_order {
@@ -57,9 +56,22 @@ impl Playtest {
             if !self.portal_visibility_draws_room(active.index) {
                 continue;
             }
+            // Same anchor selection as the render pass: the player's own
+            // room anchors at the player, a far room at its admitting
+            // portal. Anything else would warm the wrong cache key and
+            // the render pass would refill anyway.
+            let global_visibility_anchor = if active.index == self.room_index {
+                player
+            } else if let Some(anchor) =
+                self.portal_entry_anchor(active.index, active.sector_size)
+            {
+                anchor
+            } else {
+                continue;
+            };
             let visibility_anchor = RoomPoint::new(
                 global_visibility_anchor.x.saturating_sub(active.offset_x),
-                player.y,
+                global_visibility_anchor.y,
                 global_visibility_anchor.z.saturating_sub(active.offset_z),
             );
             let room_camera = camera_for_room(camera, active);
