@@ -313,7 +313,6 @@ impl Scene for Playtest {
                                     cached_room_subdivision_mode(),
                                     ROOM_VISIBLE_CELL_SCREEN_MARGIN,
                                     active.index == self.portal_visibility_root,
-                                    Some(prebuilt_room_quads_for(active.index)),
                                     &mut primitive_packets,
                                     &mut world,
                                 )
@@ -456,7 +455,6 @@ impl Scene for Playtest {
                                         cached_room_subdivision_mode(),
                                         cells,
                                         ROOM_VISIBLE_CELL_SCREEN_MARGIN,
-                                        Some(prebuilt_room_quads_for(active.index)),
                                         &mut primitive_packets,
                                         &mut world,
                                     )
@@ -554,7 +552,6 @@ impl Scene for Playtest {
                                         cached_room_subdivision_mode(),
                                         ROOM_VISIBLE_CELL_SCREEN_MARGIN,
                                         active.index == self.portal_visibility_root,
-                                        Some(prebuilt_room_quads_for(active.index)),
                                         &mut primitive_packets,
                                         &mut world,
                                     )
