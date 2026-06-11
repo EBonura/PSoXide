@@ -186,6 +186,25 @@ pub struct Cpu {
     gte_last_write_tick: u64,
     /// Diagnostic: bypass the MAC0/LZCR stale-read model entirely.
     gte_read_latency_bypass: bool,
+    /// HWB-010 hazard model: an MVMVA issued within `gte_v0x_window`
+    /// ticks of an MTC2 VXY0 write computes its MAC1 phase with the
+    /// PREVIOUS V0.x (the GTE's sequential row pipeline runs MAC1 first;
+    /// the write commits between the MAC1 and MAC2 windows). Measured on
+    /// silicon with six exact arithmetic confirmations across two live
+    /// captures (docs/hardware-burn-ledger.md HWB-009/010). On hardware
+    /// the slip is INTERMITTENT (gated by external bus traffic the
+    /// emulator does not model), so a deterministic always-fire is
+    /// strictly worse than silicon for well-spaced code: env-gated OFF
+    /// by default. `PSOXIDE_GTE_V0X_STALE=1` enables (deterministic
+    /// fire inside the window -- the reproduction mode);
+    /// `PSOXIDE_GTE_V0X_WINDOW=N` tunes the window (default 2 = the
+    /// engine's mtc2-xy; mtc2-z; cop2 hot-path spacing).
+    gte_v0x_hazard: bool,
+    gte_v0x_window: u64,
+    /// Tick of the most recent MTC2 to VXY0 (data reg 0) and the V0.x
+    /// value it overwrote (what a hazarded MAC1 phase reads).
+    gte_v0xy_write_tick: u64,
+    gte_prev_v0x: i16,
     /// Bus cycle at which the multiply/divide unit's HI/LO result becomes
     /// available. MFHI/MFLO stall to this point (the R3000A HI/LO interlock),
     /// and interleaving work between a MULT/DIV and its result read hides the
@@ -273,6 +292,15 @@ impl Cpu {
             gte_read_latency_bypass: std::env::var("PSOXIDE_GTE_READ_LATENCY")
                 .map(|v| v == "0")
                 .unwrap_or(false),
+            gte_v0x_hazard: std::env::var("PSOXIDE_GTE_V0X_STALE")
+                .map(|v| v == "1")
+                .unwrap_or(false),
+            gte_v0x_window: std::env::var("PSOXIDE_GTE_V0X_WINDOW")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(2),
+            gte_v0xy_write_tick: u64::MAX / 2,
+            gte_prev_v0x: 0,
             hilo_busy_until: 0,
             hi: 0,
             lo: 0,
@@ -740,7 +768,18 @@ impl Cpu {
             // MAC0 has result-read latency: snapshot the now-settled prior
             // MAC0 so a too-soon read returns it (see gte_mac0_* docs).
             self.gte_mac0_stale = self.cop2.read_data(24);
-            self.cop2.execute(instr);
+            // HWB-010 hazard: an MVMVA reading V0 issued within the MTC2
+            // VXY0 commit window computes its MAC1 phase with the previous
+            // V0.x (see the gte_v0x_hazard field docs).
+            if self.gte_v0x_hazard
+                && (instr & 0x3F) == 0x12
+                && (instr >> 15) & 3 == 0
+                && self.tick.wrapping_sub(self.gte_v0xy_write_tick) <= self.gte_v0x_window
+            {
+                self.cop2.execute_with_stale_v0x(instr, self.gte_prev_v0x);
+            } else {
+                self.cop2.execute(instr);
+            }
             self.gte_busy_until = bus.cycles() + Gte::command_cycles(instr) as u64;
             self.gte_mac0_ready_at = if self.tick.wrapping_sub(self.gte_last_write_tick) <= 2 {
                 self.tick + MAC0_RESULT_LATENCY
@@ -870,6 +909,13 @@ impl Cpu {
         if rd == 30 {
             self.gte_lzcr_stale = self.cop2.read_data(31);
             self.gte_lzcr_ready_at = self.tick + LZCR_RESULT_LATENCY;
+        }
+        if rd == 0 {
+            // VXY0 write: remember the V0.x being overwritten and when.
+            // An MVMVA issued inside the commit window computes its MAC1
+            // phase with this stale value (HWB-010 hazard model).
+            self.gte_prev_v0x = self.cop2.read_data(0) as u16 as i16;
+            self.gte_v0xy_write_tick = self.tick;
         }
         self.cop2.write_data(rd, self.gpr(rt));
         Ok(())
