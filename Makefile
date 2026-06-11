@@ -3,7 +3,7 @@
 # Cargo workspaces:
 #   root   - no_std shared crates (psx-hw, psx-iso, psx-trace)
 #   editor - host-side editor/content pipeline crates
-#   emu    - host-side emulator/frontend/parity crates
+#   emu    - host-side emulator/frontend crates
 #   engine - PSX runtime engine crates
 #   sdk    - MIPS target SDK crates
 #
@@ -12,18 +12,18 @@
 # SDK and engine examples are compiled individually with explicit PSX
 # cargo flags from this Makefile.
 
-.PHONY: help check test canaries fmt lint lint-policy-guard runtime-numeric-guard clean fetch-opcode oracle-smoke oracle-side-load oracle-disc-smoke commercial-visual-guards tekken-mode-guard tekken-vs-guard tekken-fight-guard tekken-late-fight-guard parity run validate validate-repeat validate-bless \
+.PHONY: help check test canaries fmt lint lint-policy-guard runtime-numeric-guard clean commercial-visual-guards tekken-mode-guard tekken-vs-guard tekken-fight-guard tekken-late-fight-guard run validate validate-repeat validate-bless \
         test-sdk \
         psxed assets \
 	examples hello-tri hello-tri-disc hello-input hello-input-disc hello-ot hello-ot-disc \
 	hello-tex hello-tex-disc hello-gte hello-gte-disc hello-audio hello-audio-disc \
 	hello-cdda hello-cdda-disc \
-	cdda-read-contention cdda-read-contention-disc cdda-contention-diff \
+	cdda-read-contention cdda-read-contention-disc \
 	run-tri run-input run-ot run-tex run-gte run-audio run-cdda probe-cdda-audio \
 	showcase-text showcase-text-disc run-showcase-text \
 	game-pong game-pong-disc run-game-pong \
 	game-magikaaaaaarp-pong game-magikaaaaaarp-pong-disc magikaaaaaarp-pong-spectrum run-game-magikaaaaaarp-pong probe-magikaaaaaarp-pong-audio duckstation-magikaaaaaarp-pong \
-	cortex-ignition-v1-project-disc cortex-ignition-v1-project-disc-boot-trace cortex-ignition-v1-hardware-diagnostic-disc cortex-ignition-v1-preburn-local cortex-ignition-v1-preburn-struct cortex-ignition-v1-preburn-disc-reads cortex-ignition-v1-preburn-internal cortex-ignition-v1-preburn-cdda-audio cortex-ignition-v1-preburn-bios-cdrom cortex-ignition-v1-preburn-boot-flow cortex-ignition-v1-preburn-streaming-guard cortex-ignition-v1-emulator-inventory cortex-ignition-v1-external-emulators cortex-ignition-v1-bringup-report cortex-ignition-v1-burn-candidate duckstation-cortex-ignition-v1 duckstation-cortex-ignition-v1-bios redux-cortex-ignition-v1-bios mednafen-cortex-ignition-v1-bios retroarch-cortex-ignition-v1-bios ares-cortex-ignition-v1-bios \
+	cortex-ignition-v1-project-disc cortex-ignition-v1-project-disc-boot-trace cortex-ignition-v1-hardware-diagnostic-disc cortex-ignition-v1-preburn-local cortex-ignition-v1-preburn-struct cortex-ignition-v1-preburn-disc-reads cortex-ignition-v1-preburn-internal cortex-ignition-v1-preburn-cdda-audio cortex-ignition-v1-preburn-bios-cdrom cortex-ignition-v1-preburn-boot-flow cortex-ignition-v1-preburn-streaming-guard cortex-ignition-v1-emulator-inventory cortex-ignition-v1-external-emulators cortex-ignition-v1-bringup-report cortex-ignition-v1-burn-candidate duckstation-cortex-ignition-v1 duckstation-cortex-ignition-v1-bios mednafen-cortex-ignition-v1-bios retroarch-cortex-ignition-v1-bios ares-cortex-ignition-v1-bios \
 	game-breakout game-breakout-disc run-game-breakout \
         game-invaders game-invaders-disc run-game-invaders \
         showcase-3d showcase-3d-disc run-showcase-3d \
@@ -57,10 +57,6 @@ help:
 	@echo "                      - run exact-hash validation 3 times for determinism"
 	@echo "    make validate-bless"
 	@echo "                      - update exact-hash validation baselines"
-	@echo "    make parity       - step both emulators and assert bit-identical traces"
-	@echo "    make oracle-smoke - smoke: launch headless Redux and verify Lua runs"
-	@echo "    make oracle-side-load - compare side-loaded SDK EXEs against Redux"
-	@echo "    make oracle-disc-smoke - compare a local PSOXIDE_DISC checkpoint against Redux"
 	@echo "    make commercial-visual-guards - run all local commercial visual guards"
 	@echo "    make tekken-mode-guard - assert a commercial title mode-select coverage"
 	@echo "    make tekken-vs-guard - assert a commercial title VS portrait coverage"
@@ -125,7 +121,6 @@ help:
 	@echo "                      - fail if CD-DA plus room-streaming telemetry is absent or red"
 	@echo "    make duckstation-cortex-ignition-v1-bios"
 	@echo "                      - assert cortex_ignition_v1 through DuckStation's full BIOS/logo path"
-	@echo "    make redux-cortex-ignition-v1-bios"
 	@echo "                      - assert cortex_ignition_v1 through PCSX-Redux's BIOS disc boot"
 	@echo "    make cortex-ignition-v1-emulator-inventory"
 	@echo "                      - list locally available external PS1 emulators"
@@ -224,19 +219,6 @@ clean:
 	cargo clean --manifest-path tools/psoxide-dev/Cargo.toml
 	rm -rf build
 
-fetch-opcode:
-	@if [ -z "$(BIOS)" ]; then echo "usage: make fetch-opcode BIOS=/path/to/bios.bin"; exit 2; fi
-	cd emu && cargo run -p emulator-core --example fetch_first_opcode -- "$(BIOS)"
-
-oracle-smoke:
-	cd emu && cargo test -p parity-oracle --test smoke -- --ignored --nocapture
-
-oracle-side-load: examples
-	cd emu && cargo test -p parity-oracle --test side_loaded_exe --release -- --ignored --nocapture
-
-oracle-disc-smoke:
-	cd emu && cargo test -p parity-oracle --test commercial_disc_smoke -- --ignored --nocapture
-
 commercial-visual-guards:
 	cd emu && cargo run -p emulator-core --example commercial_visual_guard --release -- \
 		--all \
@@ -261,9 +243,6 @@ tekken-late-fight-guard:
 	cd emu && cargo run -p emulator-core --example commercial_visual_guard --release -- \
 		--guard tekken3-late-fight \
 		--out-dir $${PSOXIDE_TEKKEN_LATE_FIGHT_GUARD_OUT:-/tmp/tekken_late_fight_guard}
-
-parity:
-	cd emu && cargo test -p emulator-core --release --features trace-cop2 --test parity -- --ignored --nocapture
 
 # Milestone-C regression suite — every SDK example side-loaded into
 # the emulator, multi-signal state pinned. Depends on `examples` so
@@ -413,9 +392,6 @@ cdda-read-contention-disc: cdda-read-contention
 
 # Run the contention guest in PSoXide (always) and PCSX-Redux (when
 # PSOXIDE_REDUX_BIN + PSOXIDE_BIOS are set) and diff the IRQ result.
-cdda-contention-diff: cdda-read-contention-disc
-	cd emu && cargo run -q -p parity-oracle --example cdda_contention_diff --release
-
 showcase-text:
 	cd engine/examples/showcase-text && $(ENGINE_EXAMPLE_CARGO_ENV) cargo build --release $(PSX_BUILD_FLAGS)
 
@@ -783,7 +759,7 @@ cortex-ignition-v1-preburn-streaming-guard: cortex-ignition-v1-preburn-internal 
 cortex-ignition-v1-emulator-inventory:
 	$(PSOXIDE_DEV) emulator-inventory
 
-cortex-ignition-v1-external-emulators: duckstation-cortex-ignition-v1-bios redux-cortex-ignition-v1-bios mednafen-cortex-ignition-v1-bios retroarch-cortex-ignition-v1-bios ares-cortex-ignition-v1-bios
+cortex-ignition-v1-external-emulators: duckstation-cortex-ignition-v1-bios mednafen-cortex-ignition-v1-bios retroarch-cortex-ignition-v1-bios ares-cortex-ignition-v1-bios
 	@echo "cortex_ignition_v1 external emulator matrix complete"
 
 cortex-ignition-v1-bringup-report:
@@ -828,14 +804,6 @@ duckstation-cortex-ignition-v1-bios: cortex-ignition-v1-project-disc-boot-trace
 		--expect "psx-engine: cdda setmode ok" \
 		--expect "psx-engine: cdda demute ok" \
 		--expect "psx-engine: cdda play ok"
-
-redux-cortex-ignition-v1-bios: cortex-ignition-v1-project-disc-boot-trace
-	cd emu && PSOXIDE_DISC="$(CURDIR)/$(CORTEX_IGNITION_V1_CUE)" \
-		PSOXIDE_BIOS="$(REDUX_CORTEX_IGNITION_V1_BIOS)" \
-		PSOXIDE_ORACLE_DISC_STEPS="$(REDUX_CORTEX_IGNITION_V1_STEPS)" \
-		PSOXIDE_REDUX_SKIP_DISPLAY_HASH=1 \
-		PSOXIDE_REDUX_EXPECT_STDOUT="psx-rt: main;;editor-playtest: init ok;;psx-engine: scene init ok;;psx-engine: cdda setmode ok;;psx-engine: cdda demute ok;;psx-engine: cdda play ok" \
-		cargo test -p parity-oracle --test commercial_disc_smoke --release -- --ignored --nocapture
 
 mednafen-cortex-ignition-v1-bios: cortex-ignition-v1-project-disc
 	@if $(PSOXIDE_DEV) emulator-inventory --require mednafen >/dev/null 2>&1; then \
