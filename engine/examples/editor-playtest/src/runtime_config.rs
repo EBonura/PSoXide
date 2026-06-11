@@ -293,7 +293,13 @@ pub(super) fn room_visibility_radius(record: &LevelRoomRecord) -> u16 {
 /// Rooms that exceed this vertex budget fall back to the uncached draw.
 pub(super) const MAX_CACHED_ROOM_VERTICES: usize = 4096;
 
-pub(super) const MAX_TEXTURED_TRIS: usize = 3328;
+/// Per-frame triangle budget sizing the primitive packet arena and the
+/// world command list. Right-sized from measured data (2026-06-11): the
+/// real-gameplay benchmark tape peaks at 511 tri primitives per vblank
+/// (avg ~340), so 1024 is 2x the observed worst case. The old 3328
+/// figure cost ~166 KB of RAM for headroom no scene used; overflow
+/// degrades gracefully (commands stop accepting, counters flag it).
+pub(super) const MAX_TEXTURED_TRIS: usize = 1024;
 
 /// Cap on the per-room material slot count. Single source of truth is
 /// `psx_level::MAX_ROOM_MATERIALS` (the cook<->runtime contract): the cook now
