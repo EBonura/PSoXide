@@ -34,6 +34,11 @@ boot-trace = ["psx-rt/boot-trace"]
 emulator-telemetry = []
 hardware-boot-visual = []
 room-surface-profile = []
+# Player skinned-vertex live-capture instrument (the HWB-008..011
+# explosion-hunt channel). Off by default: the per-vertex observe and
+# per-joint compose recording cost real cycles and must not ride along
+# in shipping or performance-measurement builds.
+vert-debug = []
 
 [lints]
 workspace = true
