@@ -24,10 +24,6 @@ const GPR_NAMES: [&str; 32] = [
     "ra",
 ];
 
-/// COP0 register indices we display. These are the ones the emulator
-/// actually reads or writes today; others stay zeroed until needed.
-const COP0_LABELS: &[(usize, &str)] = &[(12, "SR"), (13, "Cause"), (14, "EPC"), (8, "BadVAddr")];
-
 /// R3000 exception codes, by their numeric value in `CAUSE.ExcCode`.
 const EXC_CODES: &[(u32, &str)] = &[
     (0, "Int"),
@@ -43,6 +39,10 @@ const EXC_CODES: &[(u32, &str)] = &[
 ];
 
 /// Paint the register viewer inside an existing container.
+///
+/// Flat layout: small accent subheads instead of stacked framed blocks
+/// (the section already sits inside the sidebar's frame; more nesting
+/// was chrome, not information).
 pub fn draw_contents(
     ui: &mut egui::Ui,
     cpu: &Cpu,
@@ -50,14 +50,14 @@ pub fn draw_contents(
     breakpoints: &mut BTreeSet<u32>,
     snapshot: &mut Option<[u32; 32]>,
 ) {
-    theme::section(ui, "GPR", |ui| draw_gprs(ui, cpu, snapshot));
-    theme::section(ui, "PC / HI / LO", |ui| draw_pc_hi_lo(ui, cpu));
-    theme::section(ui, "COP0", |ui| draw_cop0(ui, cpu));
-    theme::section(ui, "Retired", |ui| {
-        ui.monospace(format!("tick = {}", cpu.tick()));
-    });
-    theme::section(ui, "Breakpoints", |ui| draw_breakpoints(ui, breakpoints));
-    theme::section(ui, "Execution history", |ui| draw_history(ui, history));
+    theme::subhead(ui, "GPR");
+    draw_gprs(ui, cpu, snapshot);
+    theme::subhead(ui, "CPU State");
+    draw_cpu_state(ui, cpu);
+    theme::subhead(ui, "Breakpoints");
+    draw_breakpoints(ui, breakpoints);
+    theme::subhead(ui, "Execution History");
+    draw_history(ui, history);
 }
 
 fn draw_breakpoints(ui: &mut egui::Ui, breakpoints: &mut BTreeSet<u32>) {
@@ -82,12 +82,23 @@ fn draw_history(ui: &mut egui::Ui, history: &VecDeque<InstructionRecord>) {
         ui.monospace("(empty — step or run the CPU)");
         return;
     }
-    // Newest at the bottom: log-style reading order. Each row is
-    // "PC: mnemonic" via the in-tree MIPS disassembler.
-    for record in history {
-        let mnem = crate::disasm::disasm(record.pc, record.instr);
-        ui.monospace(format!("{:08X}  {mnem}", record.pc));
-    }
+    // Newest at the bottom: log-style reading order, capped to a fixed
+    // height with its own scroll so 64 rows don't swallow the sidebar.
+    egui::ScrollArea::vertical()
+        .id_salt("exec-history")
+        .max_height(150.0)
+        .stick_to_bottom(true)
+        .show(ui, |ui| {
+            for record in history {
+                let mnem = crate::disasm::disasm(record.pc, record.instr);
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(format!("{:08X}  {mnem}", record.pc)).monospace(),
+                    )
+                    .truncate(),
+                );
+            }
+        });
 }
 
 fn draw_gprs(ui: &mut egui::Ui, cpu: &Cpu, snapshot: &mut Option<[u32; 32]>) {
@@ -146,37 +157,43 @@ fn reg_cell_diff(ui: &mut egui::Ui, name: &str, value: u32, snap: Option<u32>) {
     }
 }
 
-fn draw_pc_hi_lo(ui: &mut egui::Ui, cpu: &Cpu) {
-    egui::Grid::new("pc_hi_lo")
-        .num_columns(2)
-        .spacing(egui::vec2(12.0, 2.0))
-        .show(ui, |ui| {
-            reg_cell(ui, "PC", cpu.pc());
-            reg_cell(ui, "HI", cpu.hi());
-            ui.end_row();
-            reg_cell(ui, "LO", cpu.lo());
-            ui.label(""); // keep 2 cols
-            ui.end_row();
-        });
-}
-
-fn draw_cop0(ui: &mut egui::Ui, cpu: &Cpu) {
+/// PC / HI / LO / retired tick + the COP0 registers we model, as one
+/// compact group laid out with the same width-reflow as the GPRs.
+fn draw_cpu_state(ui: &mut egui::Ui, cpu: &Cpu) {
     let cop0 = cpu.cop0();
-    egui::Grid::new("cop0")
-        .num_columns(2)
+    let cells: [(&str, u32); 7] = [
+        ("PC", cpu.pc()),
+        ("HI", cpu.hi()),
+        ("LO", cpu.lo()),
+        ("SR", cop0[12]),
+        ("Cause", cop0[13]),
+        ("EPC", cop0[14]),
+        ("BadVA", cop0[8]),
+    ];
+    let glyph_w = ui.fonts(|fonts| {
+        fonts.glyph_width(&egui::FontId::monospace(theme::FONT_SIZE_MONO), '0')
+    });
+    let col_stride = 14.0 * glyph_w + 12.0;
+    let cols = ((ui.available_width() / col_stride).floor() as usize).clamp(1, 4);
+    egui::Grid::new("cpu_state")
+        .num_columns(cols)
         .spacing(egui::vec2(12.0, 2.0))
         .show(ui, |ui| {
-            for (idx, label) in COP0_LABELS {
-                reg_cell(ui, label, cop0[*idx]);
-                ui.label(""); // single-column layout for COP0, keep grid aligned
-                ui.end_row();
+            for (i, (name, value)) in cells.iter().enumerate() {
+                reg_cell(ui, name, *value);
+                if (i + 1) % cols == 0 {
+                    ui.end_row();
+                }
             }
+            ui.end_row();
         });
+
+    ui.monospace(format!("tick={}", cpu.tick()));
 
     // Bit-level breakdowns for the two registers whose hex values are
     // opaque at a glance. BadVAddr / EPC are raw addresses; they don't
     // benefit from the same treatment.
-    ui.add_space(4.0);
+    ui.add_space(2.0);
     ui.small(format!("SR: {}", format_sr_bits(cop0[12])));
     ui.small(format!("Cause: {}", format_cause_bits(cop0[13])));
 }
