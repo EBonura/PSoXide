@@ -304,6 +304,24 @@ does drop portal-visible far rooms. The PVS default stays blocked on
 the cook-side fix (task list); these tape numbers were taken WITH
 PVS, so the deficit above is what remains even once PVS ships.
 
+## Pool right-sizing: RAM win is ALSO a cycle win (2026-06-11)
+
+MAX_TEXTURED_TRIS 3328 -> 1024 (tape peak 567, avg ~332; 2x headroom
+kept). Frees ~166 KB of RAM (packet arena + world commands) AND cuts
+the benchmark tape's render vblank by **-87k cycles (1,041k -> 954k,
+misses 88% -> 78%, +8% visual frames delivered)**: per-frame pool
+maintenance scales with CAPACITY, not usage, so oversized pools cost
+cycles every frame, hidden across stages. "Question everything
+cached" validated with a number; the remaining oversized pools
+(UI_IMAGE_CACHE 135k, FONT_PACK_SCRATCH 66k, MAX_CACHED_ROOM_VERTICES
+4096) deserve the same treatment.
+
+Also closed: the NCLIP-backface idea from the faces task is dead on
+arrival -- scene.rs already documents (silicon-measured) that the
+NCLIP -> MAC0 back-to-back read returns STALE data on real hardware
+and needs ~8 NOPs, which eats the win; the CPU cross stays. The faces
+task reduces to the per-face slot_depth DIV.
+
 ## Diagnosis: player path / GTE starvation (2026-06-11)
 
 Phase-1 profile, per render vblank: player 315k = joints 49k +
