@@ -16,7 +16,6 @@ psx-telemetry = { workspace = true }
 thiserror    = { workspace = true }
 
 [dev-dependencies]
-parity-oracle = { workspace = true }
 psoxide-settings = { workspace = true }
 # GPU packet structs (TriTexturedGouraud / QuadTexturedGouraud) so the
 # rasterizer tests can feed the *exact* bytes the engine emits, rather
