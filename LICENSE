@@ -365,24 +365,45 @@ hardware target this software emulates.
 The emulator core was developed alongside the following references:
 
 - PCSX-Redux (https://github.com/grumpycoders/pcsx-redux),
-  GPL-2.0-or-later. Used as a parity oracle and as a reference
-  implementation for ADSR envelope rate tables, AAN IDCT + YUV->RGB
-  pipeline (MDEC), DMA interrupt-controller register semantics, and
-  scanline-delta triangle rasterization. Algorithm shapes and naming
-  conventions are kept close to Redux's where doing so simplifies
-  side-by-side parity diffing.
+  GPL-2.0-or-later. Used during bring-up as a differential parity
+  oracle (that harness has since been retired; real PS1 hardware is
+  the accuracy oracle now) and as a reference implementation for ADSR
+  envelope rate tables, AAN IDCT + YUV->RGB pipeline (MDEC), DMA
+  interrupt-controller register semantics, CD-ROM command timing, and
+  the hardware-renderer primitive pipeline. Algorithm shapes and
+  naming conventions are kept close to Redux's in those modules. The
+  CPU triangle rasterizer is no longer Redux's scanline algorithm: it
+  was rewritten in 2026-06 to the silicon-verified coverage rule after
+  hardware measurements disproved Redux's edge behaviour.
 
 - nocash PSX-SPX (https://problemkaputt.de/psxspx.htm) -- public
   hardware documentation used for register layout, ADPCM filter
   tables, and observable behaviour.
 
 - DuckStation (https://github.com/stenzek/duckstation), CC-BY-NC-ND
-  4.0 -- consulted as a behavioural reference. No source code from
-  DuckStation is included or derived in this repository; observations
-  about its runtime behaviour informed parity testing only.
+  4.0 -- consulted as a behavioural reference (triangle coverage
+  rule, CD-ROM data-read semantics, GTE behaviour). No source code
+  from DuckStation is included or derived in this repository;
+  observations about its documented/runtime behaviour informed
+  implementations that are independently validated against real PS1
+  hardware.
 
 - Mednafen-PSX (https://mednafen.github.io/), GPL-2.0-or-later --
-  consulted as a behavioural reference for PSX subsystem semantics.
+  consulted as a behavioural reference for PSX subsystem semantics,
+  including the triangle coverage rule. No source code from Mednafen
+  is included or derived in this repository.
+
+- ps1-tests by Jakub Czekanski (JaCzekanski)
+  (https://github.com/JaCzekanski/ps1-tests) -- the real-console
+  captured GTE test corpus (gte-fuzz logs) is used as an external
+  conformance oracle by the `gte_fuzz_replay` harness. The corpus is
+  fetched by developers from its upstream releases and is not
+  included or redistributed in this repository.
+
+- MiSTer PSX core (https://github.com/MiSTer-devel/PSX_MiSTer) --
+  consulted as a behavioural/architectural reference (GTE internal
+  operation ordering). No HDL or code from it is included or derived
+  in this repository.
 
 - Neill Corlett's SPU envelope notes -- the canonical write-up of PSX
   SPU envelope decode behaviour, embedded as quoted commentary in
@@ -408,9 +429,7 @@ binaries or source trees are not included in this repository and are
 not redistributed by this project. Users must supply their own legally
 obtained copies.
 
-Ignored tests and parity tools may require:
+Ignored tests (canaries, commercial guards) may require:
 
 - PSOXIDE_BIOS=/path/to/bios.bin
-- PSOXIDE_REDUX_BIN=/path/to/patched/pcsx-redux
-- a local PCSX-Redux build from the PSoXide oracle branch
 - local game images you legally own
