@@ -19,18 +19,13 @@ pub fn draw(ctx: &egui::Context, state: &mut AppState, vram_tex: egui::TextureId
         .default_width(SIDEBAR_WIDTH)
         .min_width(SIDEBAR_MIN_WIDTH)
         .show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new("Debug")
-                        .color(theme::ACCENT)
-                        .size(theme::FONT_SIZE_HEADING),
-                );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.small_button("Close").clicked() {
-                        state.panels.debug_sidebar = false;
-                    }
-                });
-            });
+            // No close button: the sidebar is toggled from the toolbar's
+            // bug icon (or Menu -> Debug), same as it was opened.
+            ui.label(
+                RichText::new("Debug")
+                    .color(theme::ACCENT)
+                    .size(theme::FONT_SIZE_HEADING),
+            );
             ui.separator();
 
             egui::ScrollArea::vertical()

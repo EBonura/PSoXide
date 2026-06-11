@@ -83,16 +83,35 @@ impl PanelVisibility {
     pub fn take_override(&mut self, section: DebugSection) -> Option<bool> {
         self.overrides[section as usize].take()
     }
+
+    /// Startup visibility: everything collapsed and the sidebar hidden,
+    /// unless `PSOXIDE_DEBUG_SIDEBAR=1` (dev hook: open the sidebar with
+    /// every section expanded, e.g. for layout work / screenshots).
+    pub fn startup() -> Self {
+        let dev_open = std::env::var("PSOXIDE_DEBUG_SIDEBAR")
+            .map(|v| v == "1")
+            .unwrap_or(false);
+        Self {
+            debug_sidebar: dev_open,
+            registers: dev_open,
+            memory: dev_open,
+            vram: dev_open,
+            profiler: dev_open,
+            overrides: [None; 4],
+        }
+    }
 }
 
 impl Default for PanelVisibility {
     fn default() -> Self {
+        // Sections start COLLAPSED: the sidebar opens as a tidy list of
+        // headers and the user expands what they need.
         Self {
             debug_sidebar: false,
-            registers: true,
-            memory: true,
-            vram: true,
-            profiler: true,
+            registers: false,
+            memory: false,
+            vram: false,
+            profiler: false,
             overrides: [None; 4],
         }
     }
@@ -321,7 +340,7 @@ impl AppState {
             editor_build_completion: None,
             examples_build_child: None,
             burn: BurnState::default(),
-            panels: PanelVisibility::default(),
+            panels: PanelVisibility::startup(),
             scale_mode: ScaleMode::default(),
             framebuffer_present_size_px: (320, 240),
             cpu,
