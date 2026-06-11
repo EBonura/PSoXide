@@ -246,6 +246,122 @@ pub fn project_triangle_scheduled(v0: Vec3I16, v1: Vec3I16, v2: Vec3I16) -> [Pro
     }
 }
 
+/// In-flight RTPT kicked by [`rtpt_kick`]; [`read`](Self::read)
+/// collects the three projected results.
+///
+/// Between kick and read the caller must not issue any other GTE op
+/// or touch GTE registers; arbitrary scalar CPU work is fine and is
+/// the whole point -- it runs while the GTE projects. On the host
+/// build the projection happens eagerly at kick and `read` just
+/// returns it.
+#[must_use = "call read() to collect the projected triple"]
+pub struct RtptInFlight(#[cfg(not(target_arch = "mips"))] [Projected; 3]);
+
+/// Load V0..V2 and issue RTPT without reading results, so the caller
+/// can overlap the GTE op with scalar work for the previous triple.
+///
+/// The MTC2 order matches [`project_triangle_scheduled`]: V0 is
+/// written 6 instructions before RTPT issues and RTPT consumes V2
+/// last, so the HWB-010/011 commit-slip hazard profile is unchanged.
+#[inline(always)]
+pub fn rtpt_kick(v0: Vec3I16, v1: Vec3I16, v2: Vec3I16) -> RtptInFlight {
+    #[cfg(target_arch = "mips")]
+    {
+        let v0_xy = v0.xy_packed();
+        let v0_z = v0.z_packed();
+        let v1_xy = v1.xy_packed();
+        let v1_z = v1.z_packed();
+        let v2_xy = v2.xy_packed();
+        let v2_z = v2.z_packed();
+        unsafe {
+            asm!(
+                // MTC2 $8..$13 into V0/V1/V2 input registers.
+                ".word 0x48880000",
+                ".word 0x48890800",
+                ".word 0x488a1000",
+                ".word 0x488b1800",
+                ".word 0x488c2000",
+                ".word 0x488d2800",
+                // RTPT.
+                ".word 0x4a080030",
+                in("$8") v0_xy,
+                in("$9") v0_z,
+                in("$10") v1_xy,
+                in("$11") v1_z,
+                in("$12") v2_xy,
+                in("$13") v2_z,
+                options(nostack, nomem, preserves_flags),
+            );
+        }
+        RtptInFlight()
+    }
+    #[cfg(not(target_arch = "mips"))]
+    {
+        RtptInFlight(project_triangle(v0, v1, v2))
+    }
+}
+
+impl RtptInFlight {
+    /// Collect the projected triple. If the GTE is still busy the
+    /// first MFC2 interlocks until the op retires, exactly like the
+    /// blocking wrapper -- overlapped scalar work between kick and
+    /// read is pure profit.
+    #[inline(always)]
+    pub fn read(self) -> [Projected; 3] {
+        #[cfg(target_arch = "mips")]
+        {
+            let sxy0: u32;
+            let sxy1: u32;
+            let sxy2: u32;
+            let sz1: u32;
+            let sz2: u32;
+            let sz3: u32;
+            unsafe {
+                asm!(
+                    // Read SXY0/SXY1/SXY2/SZ1/SZ2/SZ3; each MFC2's
+                    // load-delay slot is filled by the next, so only
+                    // the final read needs the explicit NOP.
+                    ".word 0x48086000",
+                    ".word 0x48096800",
+                    ".word 0x480a7000",
+                    ".word 0x480b8800",
+                    ".word 0x480c9000",
+                    ".word 0x480d9800",
+                    ".word 0",
+                    out("$8") sxy0,
+                    out("$9") sxy1,
+                    out("$10") sxy2,
+                    out("$11") sz1,
+                    out("$12") sz2,
+                    out("$13") sz3,
+                    options(nostack, nomem, preserves_flags),
+                );
+            }
+            [
+                Projected {
+                    sx: sxy0 as i16,
+                    sy: (sxy0 >> 16) as i16,
+                    sz: sz1 as u16,
+                },
+                Projected {
+                    sx: sxy1 as i16,
+                    sy: (sxy1 >> 16) as i16,
+                    sz: sz2 as u16,
+                },
+                Projected {
+                    sx: sxy2 as i16,
+                    sy: (sxy2 >> 16) as i16,
+                    sz: sz3 as u16,
+                },
+            ]
+        }
+        #[cfg(not(target_arch = "mips"))]
+        {
+            self.0
+        }
+    }
+}
+
 #[cfg(target_arch = "mips")]
 #[inline(always)]
 fn project_vertex_mips(v: Vec3I16) -> Projected {

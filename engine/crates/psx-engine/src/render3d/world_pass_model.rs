@@ -389,8 +389,12 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 .saturating_add(part.vertex_count() as usize)
                 .min(project_count);
             while global_index < part_end {
-                let vertex = vertices[global_index];
-                if blend_vertices && model_vertex_uses_cpu_blend(vertex, joint_count) {
+                // Blended vertices (joint seams) take the scalar compose
+                // path one at a time.
+                if blend_vertices
+                    && model_vertex_uses_cpu_blend(vertices[global_index], joint_count)
+                {
+                    let vertex = vertices[global_index];
                     stats.cpu_blended_vertices = stats.cpu_blended_vertices.wrapping_add(1);
                     probe_model_blended += 1;
                     let projected = project_blended_textured_model_vertex(
@@ -415,77 +419,77 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                     continue;
                 }
 
-                let mut batch = [vertex; 3];
-                let mut batch_count = 1usize;
-                while batch_count < 3 && global_index + batch_count < part_end {
-                    let next = vertices[global_index + batch_count];
-                    if blend_vertices && model_vertex_uses_cpu_blend(next, joint_count) {
-                        break;
+                // Extent of the single-joint run starting here; unblended
+                // models take the whole part in one run with no per-vertex
+                // blend checks.
+                let run_end = if blend_vertices {
+                    let mut end = global_index + 1;
+                    while end < part_end
+                        && !model_vertex_uses_cpu_blend(vertices[end], joint_count)
+                    {
+                        end += 1;
                     }
-                    batch[batch_count] = next;
-                    batch_count += 1;
-                }
-
-                if batch_count == 3 {
-                    let projected = scene::project_triangle_scheduled(
-                        batch[0].position,
-                        batch[1].position,
-                        batch[2].position,
-                    );
-                    let a = projected_from_gte(projected[0]);
-                    let b = projected_from_gte(projected[1]);
-                    let c = projected_from_gte(projected[2]);
-                    all_projected_vertices_in_front &= projected_model_vertex_in_front(a, near_z)
-                        && projected_model_vertex_in_front(b, near_z)
-                        && projected_model_vertex_in_front(c, near_z);
-                    all_projected_vertices_inside_hw_bounds &=
-                        projected_model_vertex_inside_hw_bounds(a)
-                            && projected_model_vertex_inside_hw_bounds(b)
-                            && projected_model_vertex_inside_hw_bounds(c);
-                    track_projected_model_bounds(
-                        a,
-                        &mut projected_min_x,
-                        &mut projected_max_x,
-                        &mut projected_min_y,
-                        &mut projected_max_y,
-                    );
-                    track_projected_model_bounds(
-                        b,
-                        &mut projected_min_x,
-                        &mut projected_max_x,
-                        &mut projected_min_y,
-                        &mut projected_max_y,
-                    );
-                    track_projected_model_bounds(
-                        c,
-                        &mut projected_min_x,
-                        &mut projected_max_x,
-                        &mut projected_min_y,
-                        &mut projected_max_y,
-                    );
-                    projected_vertices[global_index] = a;
-                    projected_vertices[global_index + 1] = b;
-                    projected_vertices[global_index + 2] = c;
+                    end
                 } else {
-                    let mut batch_index = 0usize;
-                    while batch_index < batch_count {
-                        let projected = project_gte_model_vertex(batch[batch_index]);
-                        all_projected_vertices_in_front &=
-                            projected_model_vertex_in_front(projected, near_z);
-                        all_projected_vertices_inside_hw_bounds &=
-                            projected_model_vertex_inside_hw_bounds(projected);
-                        track_projected_model_bounds(
-                            projected,
+                    part_end
+                };
+
+                // Software-pipelined RTPT over the run's triples: kick
+                // triple N, fold triple N-1's bookkeeping while the GTE
+                // runs, then read N (the next kick would clobber the
+                // SXY/SZ FIFOs, so N must be read before N+1 starts).
+                // Inputs go straight from the vertex slice to the GTE --
+                // no staging copies, no per-vertex blend checks.
+                let mut pending: Option<(usize, [scene::Projected; 3])> = None;
+                while global_index + 3 <= run_end {
+                    let kicked = scene::rtpt_kick(
+                        vertices[global_index].position,
+                        vertices[global_index + 1].position,
+                        vertices[global_index + 2].position,
+                    );
+                    if let Some((done_index, triple)) = pending.take() {
+                        commit_projected_triple(
+                            done_index,
+                            triple,
+                            near_z,
+                            projected_vertices,
+                            &mut all_projected_vertices_in_front,
                             &mut projected_min_x,
                             &mut projected_max_x,
                             &mut projected_min_y,
                             &mut projected_max_y,
                         );
-                        projected_vertices[global_index + batch_index] = projected;
-                        batch_index += 1;
                     }
+                    pending = Some((global_index, kicked.read()));
+                    global_index += 3;
                 }
-                global_index += batch_count;
+                if let Some((done_index, triple)) = pending.take() {
+                    commit_projected_triple(
+                        done_index,
+                        triple,
+                        near_z,
+                        projected_vertices,
+                        &mut all_projected_vertices_in_front,
+                        &mut projected_min_x,
+                        &mut projected_max_x,
+                        &mut projected_min_y,
+                        &mut projected_max_y,
+                    );
+                }
+                while global_index < run_end {
+                    let projected = project_gte_model_vertex(vertices[global_index]);
+                    all_projected_vertices_in_front &=
+                        projected_model_vertex_in_front(projected, near_z);
+                    track_projected_model_bounds(
+                        projected,
+                        &mut projected_min_x,
+                        &mut projected_max_x,
+                        &mut projected_min_y,
+                        &mut projected_max_y,
+                    );
+                    projected_vertices[global_index] = projected;
+                    global_index += 1;
+                }
             }
 
             part_index += 1;
