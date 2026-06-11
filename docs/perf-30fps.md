@@ -279,6 +279,31 @@ lands in the blanking interval (the standing mid-screen tear line is
 gone). The flip-side ot_wait band is the uncovered GPU remainder --
 the single number the fps-counter burn must read.
 
+## Benchmark of record: user gameplay tape (2026-06-11)
+
+The user recorded a 2,157-frame real-gameplay tape in the editor
+(cortex_ignition_v1.pxtape in the playtest_tapes config dir). It
+replays headless into genuine gameplay (final-frame check passed), so
+it replaces the synthetic hold-forward corridor as the campaign's
+benchmark. Replay recipe: build-project-disc for cortex_ignition_v1
+with the candidate features, then launch --embedded-playtest
+--input-tape <tape> --steps 2000000000 --profile-log <csv>.
+
+First measurement (PVS + bucketed + phase 1): render vblank 1,041k
+avg (184%), 808/921 misses (~20 fps) -- REAL scenes are far heavier
+than the corridor: room 216k avg / 765k max (3+ visible rooms),
+update 209k avg / 600k max spikes, image_props 138k avg / 568k max
+spikes, player 318k, ~340 tris avg / 511 max. The corridor's 0-miss
+result was a gentle room ring; the slot must absorb these scenes.
+Revised cost ranking on real gameplay: player 318k, room 216k,
+update 209k (spiky), image_props 139k (spiky), world_flush 50k.
+
+Also confirmed live by the user: the PVS doorway hole (the room
+beyond the arch door culled out) -- the cooked per-cell PVS really
+does drop portal-visible far rooms. The PVS default stays blocked on
+the cook-side fix (task list); these tape numbers were taken WITH
+PVS, so the deficit above is what remains even once PVS ships.
+
 ## Diagnosis: player path / GTE starvation (2026-06-11)
 
 Phase-1 profile, per render vblank: player 315k = joints 49k +
