@@ -65,3 +65,51 @@ cycles.
 5. Hardware truth: add an on-screen frame-time/fps counter to the game
    build and burn once per milestone -- emulated cycles steer, silicon
    decides.
+
+## RAM budget (2026-06-11, linker-map instrument)
+
+Map recipe: add `-Clink-arg=-Map=<file>` to the playtest RUSTFLAGS.
+Region = 2M - 64K BIOS - 32K stack = 1,998,848 bytes. Used: .text 438k
++ .data 811k + .bss 717k = 1,966k -> **~32KB headroom**. Top consumers:
+SCENE 226k (.data), STREAMED_ROOM_WORDS 213k (7 chunk slots),
+PRIMITIVE_PACKETS 186k (single-buffered), UI_IMAGE_CACHE 135k (menu
+images held resident through gameplay to skip one re-seek),
+**~500k of .data is embedded assets** (all animation clips, atlas, UI
+sfx baked into the EXE despite the CD streaming system), FONT_PACK_
+SCRATCH 66k, WORLD_COMMANDS 53k. The memory budget is now a measured
+quantity; the asset embedding is the biggest structural lever.
+
+## Experiment 1: PVS vs draw-everything (2026-06-11)
+
+Unblocked by right-sizing the PVS pools 1024 -> 192 (corridor peak 77
+cells; overflow guards degrade gracefully; final size wants cook-time
+worst-room stats) and, probe-project-locally, one fewer streaming slot
+(7 -> 6; verified 0 stream misses).
+
+Result: render 1,347,960 -> 1,197,105 (**-151k, 239% -> 212%**).
+Cells drawn 76.7 -> 18.7 with **identical tri_primitives (286.2)**:
+the brute-force mode's extra cells held zero triangles -- the cost was
+pure per-cell bookkeeping (cell_select -78k, room_project -44k,
+surface_draw -30k).
+
+**Attribution correction:** world_flush is byte-identical across the
+two modes (356,799 vs 356,803) -- it was NEVER the visibility
+amplification. It regressed 47k -> 357k on its own since June 6
+(1,247 cycles/primitive to flush 286 tris) and is now standalone
+suspect #1 with its own forensic trail (whatever touched the flush /
+OT path since June 6).
+
+Cost ranking after PVS: world_flush 357k, player 330k, update 181k,
+image_props 137k, room 63k, camera 58k, sky 42k (render 212%).
+
+## Attack list (revised)
+
+1. world_flush forensics: find the June->now regression commit; then
+   the pipelining arc (double-buffered OT, async submit).
+2. PVS default decision: verify the far-cell visual bug vs PVS in this
+   build (frame diff), then retire vis-full-active-chunks if clean.
+3. RAM architecture: stream the ~500k of embedded assets; rethink the
+   135k always-resident menu-image cache; right-size from map data.
+   VRAM allocation survey (same instrument philosophy) queued.
+4. Player path / GTE utilisation (330k for ~250 verts).
+5. update (181k), image_props (137k).
