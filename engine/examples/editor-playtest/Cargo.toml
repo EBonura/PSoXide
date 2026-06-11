@@ -32,6 +32,11 @@ cd-stream-benchmark = ["cd-stream-bench"]
 boot-trace = ["psx-engine/boot-trace", "psx-rt/boot-trace"]
 emulator-telemetry = ["psx-engine/emulator-telemetry"]
 hardware-boot-visual = ["psx-engine/hardware-boot-visual"]
+# The HWB explosion-hunt live-capture overlay (4 cycling pages + the
+# engine-side per-vertex capture). NOT a default: it costs real cycles
+# and draw packets, so probe builds request it explicitly via
+# EDITOR_PLAYTEST_FEATURES="... vert-debug-overlay".
+vert-debug-overlay = ["psx-engine/vert-debug"]
 world-order-global = []
 world-order-slot = []
 world-order-linked = []
