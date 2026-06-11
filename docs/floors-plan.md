@@ -1,7 +1,7 @@
 # Floors: vertical levels within a room
 
-Supersedes the VR2b/VR2c "stack separate room nodes + manual vertical portals"
-framing in `docs/vertical-rooms-vr2-plan.md`. A project authors a single Room (one
+Supersedes the earlier VR2 "stack separate room nodes + manual vertical
+portals" framing (that plan doc has been removed; see git history). A project authors a single Room (one
 grid plus manually placed portals that the cook splits into streaming regions), so
 the right vertical primitive is FLOORS (levels) within that one room, navigated by an
 up/down button, not stacked room nodes.

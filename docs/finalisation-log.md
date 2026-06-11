@@ -5,7 +5,8 @@ into a cohesive project. This is deliberately broader than
 `docs/milestones.md`: the milestone ladder tracks emulator canaries,
 while this log tracks editor/runtime/SDK/product polish.
 
-Last updated: 2026-05-05.
+Last updated: 2026-06-11 (dead parity-oracle references cleaned; the
+backlog items themselves are unreviewed since 2026-05-05).
 
 ## Emulator compatibility target set
 
@@ -312,8 +313,9 @@ Decision paths:
 
 Done when:
 - `make hello-gte` and any documented run path produce a useful
-  visible result, or the target is gone everywhere;
-- README and `docs/redux-oracle.md` no longer contradict reality.
+  visible result, or the target is gone everywhere and README reflects it.
+  (The Redux parity oracle this section once referenced was retired
+  2026-06-11; hardware is the accuracy oracle.)
 
 ## Architecture hygiene
 

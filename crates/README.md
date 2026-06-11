@@ -17,4 +17,3 @@ nested workspace. See the README in each.
 ## See also
 
 - [Root README](../README.md). Project overview, quick start, build targets.
-- [`docs/redux-oracle.md`](../docs/redux-oracle.md). The retired parity harness `psx-trace` originally fed.
