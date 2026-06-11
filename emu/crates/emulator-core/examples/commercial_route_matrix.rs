@@ -268,7 +268,7 @@ Options:
   --disc PATH          add a specific CUE/CCD; can be repeated
   --steps N            override per-route probe+soak step budget
   --limit N            run only the first N discovered games
-  --report-dir PATH    output dir (default: emu/target/commercial-route-matrix/latest)
+  --report-dir PATH    output dir (default: target/commercial-route-matrix/latest)
   --dump-visible       write final visible framebuffer PPMs
   --wall-timeout-secs N
                        abort an individual route after N wall seconds; 0 disables (default: 300)

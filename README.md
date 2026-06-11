@@ -228,12 +228,8 @@ Windows PowerShell equivalent without `make`:
 
 ```powershell
 cargo check --workspace --all-features
-Push-Location editor; cargo check --workspace --all-features; Pop-Location
-Push-Location emu; cargo check --workspace --all-features; Pop-Location
 Push-Location engine; cargo check --workspace --all-features; Pop-Location
 Push-Location sdk; cargo check --workspace --all-features; Pop-Location
-cargo check --manifest-path tools\mkisopsx\Cargo.toml
-cargo check --manifest-path tools\psx-exe-pack\Cargo.toml
 ```
 
 The fast defaults do not require commercial games or a BIOS.
