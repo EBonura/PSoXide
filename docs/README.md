@@ -26,6 +26,8 @@ the [root README](../README.md) and the per-area READMEs
 | [editor-runtime-coordinates.md](editor-runtime-coordinates.md) | Editor ↔ runtime coordinate spaces. |
 | [playable-character.md](playable-character.md) | Playable-character model. |
 | [floors-plan.md](floors-plan.md) | Vertical levels within a room. |
+| [floors-editor-architecture.md](floors-editor-architecture.md) | Editor-side floors design. |
+| [playtest-profiling.md](playtest-profiling.md) | Playtest capture, headless replay, per-vblank profiling. |
 | [vertical-rooms-investigation.md](vertical-rooms-investigation.md), [vertical-rooms-vr2-plan.md](vertical-rooms-vr2-plan.md) | Stacked-room support. |
 | [game-states-plan.md](game-states-plan.md) | Game-state system plan. |
 
