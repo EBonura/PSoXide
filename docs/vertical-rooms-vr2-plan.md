@@ -1,5 +1,9 @@
 # Vertical Rooms: VR2 Implementation Plan
 
+> **Superseded by [`floors-plan.md`](floors-plan.md).** This doc describes the
+> older stacked-room-node approach; the agreed model is floors within a single
+> room. Kept for the investigation context it references.
+
 Builds the actual room-stacking feature on top of the VR1 groundwork (room
 elevation plumbed to `LevelRoomRecord.origin_y`, committed in `ae8a5f6b`). Companion
 to `docs/vertical-rooms-investigation.md`, which establishes that the runtime is

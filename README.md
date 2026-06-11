@@ -148,7 +148,12 @@ runtime, and its toolchain makes cross-compiling to the PS1's bare-metal
 The emulator core is not an independent clean-room implementation. It
 uses PCSX-Redux (GPL-2.0-or-later) in two ways: as a differential test
 oracle (a patched Redux build that the parity harness runs in lockstep
-against), and as a reference implementation for several subsystems. Some
+against), and as a reference implementation for several subsystems.
+Real PS1 hardware has since become the authoritative accuracy oracle
+(see `docs/hardware-burn-ledger.md`); the Redux parity harness remains
+an optional regression check, and several Redux-derived behaviors have
+been corrected where silicon measurements proved Redux wrong (the
+triangle rasterizer's edge rule, the GTE read/write hazards). Some
 of those subsystems are parity-matched against, and in places derived
 from, Redux. The CD-ROM command-timing constants, for example, are
 transcribed directly from Redux's `core/cdrom.cc`. Every such file
