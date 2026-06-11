@@ -340,3 +340,29 @@ distinct joint); pass 3 lerps and projects the whole group under one
 projection setup, then restores the primary once per part. Matrix
 loads drop from ~3 per vertex to ~3 per part. Expected: project
 105k -> ~35k. This replaces item 1's remaining work.
+
+### Batching NEGATIVE result (built, measured, reverted)
+
+The per-part batch (stage view_a in a scratch array, per-group
+secondary loads, one projection setup) was bit-exact (0/76,800 pixel
+diff) and made project WORSE: 104k -> 134k (+30k, 413 -> 533
+cyc/vertex). Two lessons, both PS1-shaped:
+- On a no-D-cache CPU, scratch-array round-trips (store view_a,
+  reload for lerp, store blended, reload to project, flags, index
+  re-derefs) cost MORE than the GTE matrix reloads they remove.
+  CTC2 writes are cheap; RAM traffic is not. Keep hot pipelines
+  register-resident.
+- The result falsifies the matrix-load cost model itself: if ~3
+  loads/vertex were the dominant ~120 cyc, removing two of them
+  would have won despite the scratch. They are cheaper than modeled.
+  The ~590 cyc/blended-vertex therefore lives elsewhere (the two
+  MVMVA wrappers' packing/unpacking, the 6-multiply CPU lerp, the
+  near-z/i16 guards, call overhead).
+Next probe before any further rewrite: temporary sub-stage markers
+inside the blended path (transforms vs lerp vs projection) so the
+next attempt aims at a measured target, not a model.
+
+Also found while scoping faces (#44): DepthBand::slot_depth does a
+real 32-bit division per submitted face (offset*band_slots/span,
+~36+ cycles); span is constant per draw call, so a per-call
+reciprocal (MULT high-part, native on MIPS) removes a per-face DIV.
