@@ -476,7 +476,7 @@ profile-demo3-paced20-forward:
 	$(MAKE) profile-demo3-disc-stream-forward PROFILE_DEMO3_DISC_STREAM_FORWARD_HW=$(PROFILE_DEMO3_PACED20_FORWARD_HW)
 
 profile-demo3-disc-stream:
-	$(MAKE) cook-playtest PROJECT=projects/demo3/project.ron
+	$(MAKE) cook-playtest PROJECT=projects/demo_03/project.ron
 	$(MAKE) build-editor-playtest
 	cd tools/mkisopsx && cargo run --release -- \
 		--exe ../../$(EXAMPLE_OUT)/editor-playtest.exe \
@@ -499,7 +499,7 @@ profile-demo3-disc-stream:
 		--dump-guest-profile
 
 profile-demo3-disc-stream-forward:
-	$(MAKE) cook-playtest PROJECT=projects/demo3/project.ron
+	$(MAKE) cook-playtest PROJECT=projects/demo_03/project.ron
 	$(MAKE) build-editor-playtest
 	cd tools/mkisopsx && cargo run --release -- \
 		--exe ../../$(EXAMPLE_OUT)/editor-playtest.exe \
@@ -523,7 +523,7 @@ profile-demo3-disc-stream-forward:
 		--dump-guest-profile
 
 profile-demo7-camera-sweep:
-	$(MAKE) cook-playtest PROJECT=projects/demo7/project.ron
+	$(MAKE) cook-playtest PROJECT=projects/demo_07/project.ron
 	PSXO_CAMERA_SWEEP=1 PSXO_PROFILE_MODELS=1 $(MAKE) build-editor-playtest EDITOR_PLAYTEST_FEATURES="cd-stream-bench room-surface-profile"
 	cd tools/mkisopsx && cargo run --release -- \
 		--exe ../../$(EXAMPLE_OUT)/editor-playtest.exe \
