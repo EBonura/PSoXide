@@ -284,6 +284,9 @@ pub enum UiValueBinding {
     PlayerStamina,
     /// Player stamina maximum.
     PlayerStaminaMax,
+    /// Live world-load progress (Q12, 0..=4096) while the engine
+    /// streams the next state's world. Zero outside loading screens.
+    LoadingProgress,
 }
 
 impl UiValueBinding {
@@ -296,6 +299,7 @@ impl UiValueBinding {
             Self::PlayerHealthMax => "Player Health Max",
             Self::PlayerStamina => "Player Stamina",
             Self::PlayerStaminaMax => "Player Stamina Max",
+            Self::LoadingProgress => "Loading Progress",
         }
     }
 }
@@ -912,16 +916,19 @@ pub enum UiImageEffect {
     DiagonalSweep,
     /// Whole-image brightness pulse.
     SoftPulse,
+    /// Gentle vertical bob (loading-screen mascot idiom).
+    Bob,
 }
 
 impl UiImageEffect {
     /// Stable list used by editor controls.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::None,
         Self::Shimmer,
         Self::FastShimmer,
         Self::DiagonalSweep,
         Self::SoftPulse,
+        Self::Bob,
     ];
 
     /// Compact display label.
@@ -932,6 +939,7 @@ impl UiImageEffect {
             Self::FastShimmer => "Fast Shimmer",
             Self::DiagonalSweep => "Diagonal Sweep",
             Self::SoftPulse => "Soft Pulse",
+            Self::Bob => "Bob",
         }
     }
 }

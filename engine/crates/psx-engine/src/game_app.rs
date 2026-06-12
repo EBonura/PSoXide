@@ -620,6 +620,14 @@ impl FlowCursor {
         self.menu_focus == MENU_FOCUS_LOADING_RENDERED
     }
 
+    /// True only before the loading screen's FIRST render of this
+    /// loading pass (the focus advances RENDERED -> INITED afterwards,
+    /// so `!loading_has_rendered()` is NOT a first-frame test).
+    #[inline]
+    fn loading_is_unrendered(self) -> bool {
+        self.menu_focus == MENU_FOCUS_LOADING_UNRENDERED
+    }
+
     #[inline]
     fn loading_is_inited(self) -> bool {
         self.menu_focus == MENU_FOCUS_LOADING_INITED
@@ -705,7 +713,25 @@ pub struct GameApp<'a, S: Scene> {
     /// Active full-screen transition, if a button-triggered flow change is
     /// delaying the cursor switch.
     transition: Option<FlowTransition>,
+    /// Authored loading-screen UI scene (`UI_SCENE_NONE` = built-in
+    /// fallback). See [`crate::app::Config::loading_ui_scene`].
+    loading_scene: u16,
+    /// Live world-load progress in Q12, fed to
+    /// [`LevelUiValueBinding::LoadingProgress`].
+    loading_progress_q12: i32,
+    /// Sim tick (vblank-anchored) at this loading pass's first render;
+    /// drives the minimum-hold so an authored loading scene never
+    /// flashes on a fast load. Vblank-clocked because the loading loop
+    /// free-runs faster than the visual cadence, so a frame COUNT is
+    /// not wall time.
+    loading_hold_start_tick: u32,
 }
+
+/// Minimum vblanks an AUTHORED loading scene stays up before handing
+/// over (~1.7s NTSC). The built-in fallback screen keeps the old
+/// immediate handover, so probe/profiling projects without a Loading
+/// scene are unaffected.
+const MIN_LOADING_HOLD_VBLANKS: u32 = 100;
 
 impl<'a, S: Scene> GameApp<'a, S> {
     /// Build a driver over `flow`, borrowing `gameplay`. The cursor is
@@ -722,6 +748,7 @@ impl<'a, S: Scene> GameApp<'a, S> {
         options: &'static [LevelOptionDef],
         ui_sfx_samples: &'static [LevelUiSfxSampleRecord],
         ui_sfx_cues: &'static [LevelUiSfxCueRecord],
+        loading_scene: u16,
         gameplay: &'a mut S,
     ) -> Self {
         let mut option_values = [0i32; MAX_OPTIONS];
@@ -746,7 +773,16 @@ impl<'a, S: Scene> GameApp<'a, S> {
             ui_sfx_runtime_len: 0,
             ui_sfx_cursor: 0,
             transition: None,
+            loading_scene,
+            loading_progress_q12: 0,
+            loading_hold_start_tick: 0,
         }
+    }
+
+    /// True when the project authored a usable loading scene.
+    fn loading_scene_active(&self) -> bool {
+        self.loading_scene != psx_level::UI_SCENE_NONE
+            && self.scene_node_range(self.loading_scene).1 != 0
     }
 
     /// Adjust the option with id `option_id` by `delta`, clamping the
@@ -1094,7 +1130,23 @@ impl<'a, S: Scene> GameApp<'a, S> {
 
     fn finish_loading_transition(&mut self, ctx: &mut Ctx) {
         if self.cursor.loading_is_inited() {
-            if self.gameplay.loading_update(ctx) {
+            let world_ready = self.gameplay.loading_update(ctx);
+            // Feed the authored loading scene's bound progress bar.
+            // Once the world is ready the bar pins full while the
+            // minimum-hold (authored scenes only) plays out.
+            self.loading_progress_q12 = if world_ready {
+                4096
+            } else {
+                self.gameplay.loading_progress_q12().clamp(0, 4096)
+            };
+            let hold_done = !self.loading_scene_active()
+                || ctx
+                    .sim_tick
+                    .as_u32()
+                    .wrapping_sub(self.loading_hold_start_tick)
+                    >= MIN_LOADING_HOLD_VBLANKS;
+            if world_ready && hold_done {
+                flow_trace("psx-engine: loading ready");
                 self.cursor.mark_loading_ready();
             }
             return;
@@ -1435,8 +1487,15 @@ impl<'a, S: Scene> GameApp<'a, S> {
         let option_values = self.option_values;
         let option_len = self.option_len;
         let mut textures = |asset| self.gameplay.ui_texture(asset);
+        let loading_progress_q12 = self.loading_progress_q12;
         let value = |binding: LevelUiValueBinding| {
-            resolve_ui_value(binding, options, &option_values, option_len)
+            resolve_ui_value(
+                binding,
+                options,
+                &option_values,
+                option_len,
+                loading_progress_q12,
+            )
         };
         // Slider fill reads the live option value by id from the copied
         // store, through the same resolver the input path uses so the knob
@@ -1484,8 +1543,26 @@ impl<'a, S: Scene> GameApp<'a, S> {
         }
     }
 
-    fn render_loading_screen(&mut self) {
+    fn render_loading_screen(&mut self, ctx: &mut Ctx) {
         draw_quad_flat([(0, 0), (320, 0), (0, 240), (320, 240)], 4, 6, 10);
+        if self.loading_scene_active() {
+            // Authored loading scene: re-upload its images from the
+            // front-end RAM cache (no CD contention with the world
+            // stream), then draw it like any other UI scene. Deferred
+            // until the state init ran (init releases the departing
+            // menu's UI VRAM, which would free an earlier upload out
+            // from under us) and RETRIED each frame: a VRAM slot can
+            // be momentarily unavailable while the world's textures
+            // stream in, and already-resident images short-circuit,
+            // so the steady-state cost is one slot lookup per image.
+            if self.cursor.loading_is_inited() {
+                self.gameplay.prepare_loading_assets(self.loading_scene);
+            }
+            let scene = self.loading_scene;
+            self.render_ui_scene(scene, ctx);
+            return;
+        }
+        // Built-in fallback: dark fill, divider, centered label.
         draw_quad_flat([(96, 136), (224, 136), (96, 138), (224, 138)], 34, 48, 64);
         if let Some(font) = self.gameplay.ui_font_at(0) {
             let text = "loading";
@@ -1557,12 +1634,14 @@ fn resolve_ui_value(
     options: &[LevelOptionDef],
     values: &[i32; MAX_OPTIONS],
     len: usize,
+    loading_progress_q12: i32,
 ) -> i32 {
     match binding {
         LevelUiValueBinding::ConstantQ12(value) => value,
         LevelUiValueBinding::Option(option_id) => {
             resolve_option_value(options, values, len, option_id)
         }
+        LevelUiValueBinding::LoadingProgress => loading_progress_q12,
         LevelUiValueBinding::PlayerHealth
         | LevelUiValueBinding::PlayerHealthMax
         | LevelUiValueBinding::PlayerStamina
@@ -1833,7 +1912,12 @@ impl<'a, S: Scene> Scene for GameApp<'a, S> {
                 (140, 40, 220),
                 "35 LOADING RENDER BEGIN",
             );
-            self.render_loading_screen();
+            if self.cursor.loading_is_unrendered() {
+                // First frame of this loading pass: anchor the hold timer.
+                self.loading_hold_start_tick = ctx.sim_tick.as_u32();
+                self.loading_progress_q12 = 0;
+            }
+            self.render_loading_screen(ctx);
             self.cursor.mark_loading_rendered();
             return;
         }
@@ -1978,7 +2062,7 @@ mod tests {
     #[test]
     fn gameplay_only_inits_once_then_forwards() {
         let mut scene = CountingScene::default();
-        let mut app = GameApp::new(&GAMEPLAY_ONLY, &[], &[], &[], &[], &[], &[], &mut scene);
+        let mut app = GameApp::new(&GAMEPLAY_ONLY, &[], &[], &[], &[], &[], &[], psx_level::UI_SCENE_NONE, &mut scene);
         let mut ctx = test_ctx();
 
         app.init(&mut ctx);
@@ -2002,7 +2086,7 @@ mod tests {
     #[test]
     fn gameplay_only_enters_resource_set_once_before_init() {
         let mut scene = CountingScene::default();
-        let mut app = GameApp::new(&GAMEPLAY_ONLY, &[], &[], &[], &[], &[], &[], &mut scene);
+        let mut app = GameApp::new(&GAMEPLAY_ONLY, &[], &[], &[], &[], &[], &[], psx_level::UI_SCENE_NONE, &mut scene);
         let mut ctx = test_ctx();
 
         app.init(&mut ctx);
@@ -2033,7 +2117,7 @@ mod tests {
             shared_resource_key: Some(42),
             ..Default::default()
         };
-        let mut app = GameApp::new(&FLOW, SCENES, &[], &[], &[], &[], &[], &mut scene);
+        let mut app = GameApp::new(&FLOW, SCENES, &[], &[], &[], &[], &[], psx_level::UI_SCENE_NONE, &mut scene);
         let mut ctx = test_ctx();
 
         app.init(&mut ctx);
@@ -2070,7 +2154,7 @@ mod tests {
         // No shared key: each state is its own set, so UI->gameplay exits the
         // UI set and enters the gameplay set.
         let mut scene = CountingScene::default();
-        let mut app = GameApp::new(&FLOW, SCENES, &[], &[], &[], &[], &[], &mut scene);
+        let mut app = GameApp::new(&FLOW, SCENES, &[], &[], &[], &[], &[], psx_level::UI_SCENE_NONE, &mut scene);
         let mut ctx = test_ctx();
 
         app.init(&mut ctx);
@@ -2088,7 +2172,7 @@ mod tests {
     #[test]
     fn gameplay_entry_loads_before_initialising() {
         let mut scene = CountingScene::default();
-        let mut app = GameApp::new(&GAMEPLAY_ONLY, &[], &[], &[], &[], &[], &[], &mut scene);
+        let mut app = GameApp::new(&GAMEPLAY_ONLY, &[], &[], &[], &[], &[], &[], psx_level::UI_SCENE_NONE, &mut scene);
         let mut ctx = test_ctx();
 
         app.init(&mut ctx);
@@ -2123,7 +2207,7 @@ mod tests {
         };
 
         let mut scene = CountingScene::default();
-        let mut app = GameApp::new(&FLOW, SCENES, &[], &[], &[], &[], &[], &mut scene);
+        let mut app = GameApp::new(&FLOW, SCENES, &[], &[], &[], &[], &[], psx_level::UI_SCENE_NONE, &mut scene);
         let mut ctx = test_ctx();
 
         app.init(&mut ctx);
@@ -2171,7 +2255,7 @@ mod tests {
     #[test]
     fn unknown_scene_id_yields_empty_node_range() {
         let mut scene = CountingScene::default();
-        let app = GameApp::new(&GAMEPLAY_ONLY, &[], &[], &[], &[], &[], &[], &mut scene);
+        let app = GameApp::new(&GAMEPLAY_ONLY, &[], &[], &[], &[], &[], &[], psx_level::UI_SCENE_NONE, &mut scene);
         assert_eq!(app.scene_node_range(999), (0, 0));
     }
 
@@ -2309,6 +2393,7 @@ mod tests {
             &[],
             &[],
             &[],
+            psx_level::UI_SCENE_NONE,
             &mut scene,
         );
         let mut ctx = test_ctx();
@@ -2373,6 +2458,7 @@ mod tests {
             &[],
             &[],
             &[],
+            psx_level::UI_SCENE_NONE,
             &mut scene,
         );
         let mut ctx = test_ctx();
@@ -2403,7 +2489,7 @@ mod tests {
             },
         ];
         let mut scene = CountingScene::default();
-        let mut app = GameApp::new(&GAMEPLAY_ONLY, &[], &[], &[], &[], &[], CUES, &mut scene);
+        let mut app = GameApp::new(&GAMEPLAY_ONLY, &[], &[], &[], &[], &[], CUES, psx_level::UI_SCENE_NONE, &mut scene);
         let node = LevelUiNodeRecord {
             sfx_first: 0,
             sfx_count: 2,
@@ -2428,6 +2514,7 @@ mod tests {
             &[],
             &[],
             &[],
+            psx_level::UI_SCENE_NONE,
             &mut scene,
         );
         let mut ctx = test_ctx();
@@ -2467,6 +2554,7 @@ mod tests {
             &[],
             &[],
             &[],
+            psx_level::UI_SCENE_NONE,
             &mut scene,
         );
         let mut ctx = test_ctx();
@@ -2511,6 +2599,7 @@ mod tests {
             &[],
             &[],
             &[],
+            psx_level::UI_SCENE_NONE,
             &mut scene,
         );
         let mut ctx = test_ctx();
@@ -2545,6 +2634,7 @@ mod tests {
             OPTIONS,
             &[],
             &[],
+            psx_level::UI_SCENE_NONE,
             &mut scene,
         );
         let mut ctx = test_ctx();
@@ -2578,6 +2668,7 @@ mod tests {
             &[],
             &[],
             &[],
+            psx_level::UI_SCENE_NONE,
             &mut scene,
         );
         let mut ctx = test_ctx();
@@ -2623,6 +2714,7 @@ mod tests {
             &[],
             &[],
             &[],
+            psx_level::UI_SCENE_NONE,
             &mut scene,
         );
         let mut ctx = test_ctx();
@@ -2650,7 +2742,7 @@ mod tests {
         // A gameplay-only flow never enters a UI arm, so d-pad presses do
         // not touch menu_focus and updates forward straight to gameplay.
         let mut scene = CountingScene::default();
-        let mut app = GameApp::new(&GAMEPLAY_ONLY, &[], &[], &[], &[], &[], &[], &mut scene);
+        let mut app = GameApp::new(&GAMEPLAY_ONLY, &[], &[], &[], &[], &[], &[], psx_level::UI_SCENE_NONE, &mut scene);
         let mut ctx = test_ctx();
         app.init(&mut ctx);
         complete_loading(&mut app, &mut ctx);
@@ -2830,6 +2922,7 @@ mod tests {
             OPTIONS,
             &[],
             &[],
+            psx_level::UI_SCENE_NONE,
             &mut scene,
         );
         assert_eq!(value_of(&app, OPT_ID), 4);
@@ -2849,6 +2942,7 @@ mod tests {
             OPTIONS,
             &[],
             &[],
+            psx_level::UI_SCENE_NONE,
             &mut scene,
         );
         let mut ctx = test_ctx();
@@ -2897,6 +2991,7 @@ mod tests {
             OPTIONS,
             &[],
             &[],
+            psx_level::UI_SCENE_NONE,
             &mut scene,
         );
         let mut ctx = test_ctx();
@@ -2943,6 +3038,7 @@ mod tests {
             MUSIC_OPTIONS,
             &[],
             &[],
+            psx_level::UI_SCENE_NONE,
             &mut scene,
         );
         let mut ctx = test_ctx();
@@ -2975,6 +3071,7 @@ mod tests {
             OPTIONS,
             &[],
             &[],
+            psx_level::UI_SCENE_NONE,
             &mut scene,
         );
         let mut ctx = test_ctx();
@@ -3005,6 +3102,7 @@ mod tests {
             OPTIONS,
             &[],
             &[],
+            psx_level::UI_SCENE_NONE,
             &mut scene,
         );
         app.adjust_option(UI_OPTION_NONE, 3);
