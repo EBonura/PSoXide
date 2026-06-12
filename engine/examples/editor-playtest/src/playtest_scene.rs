@@ -78,6 +78,11 @@ impl Scene for Playtest {
     /// gameplay room textures reclaim that VRAM. The shared UI font atlas is NOT
     /// released here (it serves the gameplay HUD too).
     fn on_exit_state(&mut self, state: SceneStateRef, _ctx: &mut Ctx) {
+        if state.has_gameplay() {
+            // Re-anchor the animation epoch on the next gameplay entry
+            // (see `gameplay_epoch` in main.rs).
+            self.gameplay_epoch_set = false;
+        }
         #[cfg(feature = "cd-stream-bench")]
         if state.has_gameplay() {
             release_streamed_sky();
@@ -143,8 +148,11 @@ impl Scene for Playtest {
         let camera = self.render_camera;
         // Snapshot for the deferred overlay pass: render_overlay runs at
         // the flip, after the next fixed update has already moved
-        // render_camera, and must match the frame built here.
+        // render_camera, and must match the frame built here. The tick
+        // snapshot keeps time-animated overlay elements on this frame's
+        // clock; the flip-time tick varies with deadline-miss cadence.
         self.overlay_camera = camera;
+        self.overlay_sim_tick = self.gameplay_tick(ctx.sim_tick);
         let post_cross_debug = POST_CROSS_RENDER_DEBUG_LOGS && self.post_cross_debug_frames != 0;
         let post_cross_detail = post_cross_debug
             && self.post_cross_debug_frames == RUNTIME_SCHEDULE.post_cross_render_debug_frames;
@@ -713,7 +721,7 @@ impl Scene for Playtest {
                 }
                 let instance_stats = draw_model_instances(
                     active.index,
-                    ctx.sim_tick,
+                    self.gameplay_tick(ctx.sim_tick),
                     ctx.video_hz,
                     &room_camera,
                     actor_options,
@@ -882,7 +890,7 @@ impl Scene for Playtest {
                     telemetry::stage_begin(telemetry::stage::MODEL_INSTANCES);
                     let instance_stats = draw_model_instances(
                         active.index,
-                        ctx.sim_tick,
+                        self.gameplay_tick(ctx.sim_tick),
                         ctx.video_hz,
                         &room_camera,
                         actor_options,
@@ -1041,7 +1049,12 @@ impl Scene for Playtest {
         telemetry::stage_begin(telemetry::stage::WORLD_FLUSH);
         world.flush();
         telemetry::stage_end(telemetry::stage::WORLD_FLUSH);
-        let _ = self.draw_particle_emitters(camera, ctx.sim_tick, &mut ot, &mut primitive_packets);
+        let _ = self.draw_particle_emitters(
+            camera,
+            self.gameplay_tick(ctx.sim_tick),
+            &mut ot,
+            &mut primitive_packets,
+        );
         telemetry::counter(
             telemetry::counter::TRI_PRIMITIVES,
             primitive_packets.len() as u32,
@@ -1070,9 +1083,10 @@ impl Scene for Playtest {
             return;
         }
         let camera = self.overlay_camera;
+        let overlay_tick = self.overlay_sim_tick;
 
         if let Some(room_record) = ROOMS.get(self.room_index.to_usize()) {
-            draw_room_atmosphere_overlay(room_record, ctx.sim_tick);
+            draw_room_atmosphere_overlay(room_record, overlay_tick);
         }
 
         if self.show_collision_debug {
@@ -1080,7 +1094,7 @@ impl Scene for Playtest {
         }
 
         if let Some(target) = self.lock_target_indicator_position() {
-            draw_lock_target_indicator(target, camera, ctx.sim_tick);
+            draw_lock_target_indicator(target, camera, overlay_tick);
         }
 
         if self.character.is_some() {
@@ -1098,7 +1112,7 @@ impl Scene for Playtest {
                 hud_first,
                 hud_count,
                 &font_table,
-                (ctx.sim_tick.as_u32() & 0xffff) as u16,
+                (overlay_tick.as_u32() & 0xffff) as u16,
                 self.motor.stamina_q12(),
                 self.motor_config().stamina_max_q12,
             );
