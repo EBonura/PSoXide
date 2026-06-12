@@ -1588,6 +1588,62 @@ pub struct LevelUiScene {
     pub node_first: u16,
     /// Number of nodes belonging to this scene.
     pub node_count: u16,
+    /// How the focused control's highlight ring is drawn and animated.
+    pub focus_style: LevelUiFocusStyle,
+}
+
+/// Animation applied to the focused control's highlight ring.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LevelUiFocusEffect {
+    /// Static outline in `color_a` (the classic ring).
+    Solid,
+    /// Outline colour breathes between `color_a` (bright) and
+    /// `color_b` (dim) on a triangle wave.
+    Pulse,
+    /// A bright `color_a` head with a gradient tail orbits the
+    /// outline perimeter over a faint `color_b` base ring.
+    Tracer,
+    /// Four corner brackets that breathe outward and pulse between
+    /// `color_a` and `color_b` (targeting-reticle look).
+    Corners,
+}
+
+/// Cooked focus-ring style for one UI scene. All animation is
+/// integer-only and driven by the scene clock the renderer already
+/// receives, so styles cost a handful of flat quads per frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelUiFocusStyle {
+    /// Which animation the ring runs.
+    pub effect: LevelUiFocusEffect,
+    /// Primary colour: solid ring, pulse bright end, tracer head,
+    /// bracket bright end.
+    pub color_a: (u8, u8, u8),
+    /// Secondary colour: pulse dim end, tracer tail/base ring,
+    /// bracket dim end. Unused by `Solid`.
+    pub color_b: (u8, u8, u8),
+    /// Full animation cycle in vblank-paced UI frames. `0` freezes
+    /// the animation at its brightest phase.
+    pub period: u16,
+    /// Ring/bracket line thickness in pixels, clamped to `1..=4`.
+    pub thickness: u8,
+    /// Gap between the control's rect and the ring, in pixels.
+    pub margin: u8,
+    /// Corner bracket arm length in pixels (`Corners` only).
+    pub corner_len: u8,
+}
+
+impl LevelUiFocusStyle {
+    /// The pre-style focus ring: static 1px yellow outline, 1px out.
+    /// Scenes cooked without an authored style keep this exact look.
+    pub const DEFAULT: Self = Self {
+        effect: LevelUiFocusEffect::Solid,
+        color_a: (248, 224, 96),
+        color_b: (96, 88, 40),
+        period: 96,
+        thickness: 1,
+        margin: 1,
+        corner_len: 8,
+    };
 }
 
 /// Runtime world layer attached to a composed scene state.

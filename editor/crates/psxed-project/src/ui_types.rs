@@ -944,6 +944,72 @@ impl UiImageEffect {
     }
 }
 
+/// Focus-ring animation selector. Mirrors
+/// `psx_level::LevelUiFocusEffect`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UiFocusEffect {
+    /// Static outline (the classic ring).
+    #[default]
+    Solid,
+    /// Outline colour breathes between the two style colours.
+    Pulse,
+    /// A bright head with a gradient tail orbits the outline.
+    Tracer,
+    /// Four corner brackets that breathe and pulse.
+    Corners,
+}
+
+impl UiFocusEffect {
+    /// Stable list used by editor controls.
+    pub const ALL: [Self; 4] = [Self::Solid, Self::Pulse, Self::Tracer, Self::Corners];
+
+    /// Compact display label.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Solid => "Solid",
+            Self::Pulse => "Pulse",
+            Self::Tracer => "Tracer",
+            Self::Corners => "Corners",
+        }
+    }
+}
+
+/// Authored focus-ring style for one UI scene. Mirrors
+/// `psx_level::LevelUiFocusStyle`; the cook copies it through.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UiFocusStyle {
+    /// Which animation the focused control's ring runs.
+    #[serde(default)]
+    pub effect: UiFocusEffect,
+    /// Primary colour (solid ring / bright end / tracer head).
+    pub color_a: [u8; 3],
+    /// Secondary colour (dim end / tracer tail and base ring).
+    pub color_b: [u8; 3],
+    /// Full animation cycle in vblank-paced frames. 0 freezes at the
+    /// brightest phase.
+    pub period: u16,
+    /// Line thickness in pixels (1..=4).
+    pub thickness: u8,
+    /// Gap between the control rect and the ring, in pixels.
+    pub margin: u8,
+    /// Corner bracket arm length in pixels (Corners only).
+    pub corner_len: u8,
+}
+
+impl Default for UiFocusStyle {
+    fn default() -> Self {
+        Self {
+            effect: UiFocusEffect::Solid,
+            color_a: [248, 224, 96],
+            color_b: [96, 88, 40],
+            period: 96,
+            thickness: 1,
+            margin: 1,
+            corner_len: 8,
+        }
+    }
+}
+
 /// Authored 2D UI node type.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UiNodeKind {
@@ -1288,6 +1354,9 @@ pub struct UiScene {
     /// active game state. `None` falls back to the root canvas.
     #[serde(default)]
     pub default_focus: Option<UiNodeId>,
+    /// Focus-ring style for this scene's focused control.
+    #[serde(default)]
+    pub focus_style: UiFocusStyle,
     next_node_id: u64,
     nodes: Vec<UiNode>,
 }
@@ -1338,6 +1407,7 @@ impl UiScene {
             name: "HUD".to_string(),
             root: UiNodeId::ROOT,
             default_focus: None,
+            focus_style: UiFocusStyle::default(),
             next_node_id: 4,
             nodes: vec![root, health, stamina],
         }
@@ -1362,6 +1432,7 @@ impl UiScene {
             name: name.into(),
             root: UiNodeId::ROOT,
             default_focus: None,
+            focus_style: UiFocusStyle::default(),
             next_node_id: UiNodeId::ROOT.raw().saturating_add(1),
             nodes: vec![root],
         }

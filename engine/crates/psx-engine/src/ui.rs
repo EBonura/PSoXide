@@ -38,9 +38,9 @@ use psx_gpu::{
     material::{TextureMaterial, TextureWindow},
 };
 use psx_level::{
-    ui_node_flags, AssetId, LevelOptionDef, LevelUiGradientDirection, LevelUiImageEffect,
-    LevelUiNodeKind, LevelUiNodeRecord, LevelUiPaintRecord, LevelUiValueBinding, NavRect,
-    UI_OPTION_NONE, UI_PAINT_NONE,
+    ui_node_flags, AssetId, LevelOptionDef, LevelUiFocusEffect, LevelUiFocusStyle,
+    LevelUiGradientDirection, LevelUiImageEffect, LevelUiNodeKind, LevelUiNodeRecord,
+    LevelUiPaintRecord, LevelUiValueBinding, NavRect, UI_OPTION_NONE, UI_PAINT_NONE,
 };
 use psx_math::{cos_q12, sin_q12};
 
@@ -405,6 +405,7 @@ pub fn draw_scene(
     paints: &[LevelUiPaintRecord],
     fonts: &[Option<&FontAtlas>],
     focused: Option<usize>,
+    focus_style: &LevelUiFocusStyle,
     frame: u16,
     textures: &mut impl FnMut(AssetId) -> Option<UiTextureSlot>,
     value: &impl Fn(LevelUiValueBinding) -> i32,
@@ -450,7 +451,7 @@ pub fn draw_scene(
             LevelUiNodeKind::Button => {
                 draw_button(node_font(fonts, node.font), node, resolved, paints);
                 if is_focused {
-                    draw_focus_ring(resolved);
+                    draw_focus_ring(resolved, focus_style, frame);
                 }
             }
             LevelUiNodeKind::Slider => {
@@ -467,28 +468,235 @@ pub fn draw_scene(
                     shape_paint(node.accent, node.accent_paint, paints),
                 );
                 if is_focused {
-                    draw_focus_ring(resolved);
+                    draw_focus_ring(resolved, focus_style, frame);
                 }
             }
         }
     }
 }
 
-/// Bright 1px outline drawn just outside a focused control's rect so
-/// the highlight reads regardless of the control's own colours. Four
-/// thin [`draw_rect`] edges, integer-only, no allocation.
-fn draw_focus_ring(node: UiResolvedNode) {
+/// Outline drawn just outside a focused control's rect so the
+/// highlight reads regardless of the control's own colours. The
+/// scene's [`LevelUiFocusStyle`] selects the animation; everything
+/// is integer-only flat quads, no allocation.
+fn draw_focus_ring(node: UiResolvedNode, style: &LevelUiFocusStyle, frame: u16) {
     let width = node.width as i16;
     let height = node.height as i16;
     if width <= 0 || height <= 0 {
         return;
     }
-    const RING: (u8, u8, u8) = (248, 224, 96);
-    let outer_w = width + 2;
-    draw_quad_flat(node.subrect(-1, -1, outer_w, 1), RING.0, RING.1, RING.2);
-    draw_quad_flat(node.subrect(-1, height, outer_w, 1), RING.0, RING.1, RING.2);
-    draw_quad_flat(node.subrect(-1, 0, 1, height), RING.0, RING.1, RING.2);
-    draw_quad_flat(node.subrect(width, 0, 1, height), RING.0, RING.1, RING.2);
+    let thickness = i16::from(style.thickness.clamp(1, 4));
+    let margin = i16::from(style.margin);
+    match style.effect {
+        LevelUiFocusEffect::Solid => {
+            draw_ring_edges(node, width, height, thickness, margin, style.color_a);
+        }
+        LevelUiFocusEffect::Pulse => {
+            let wave = focus_wave(frame, style.period);
+            let color = lerp_color(style.color_a, style.color_b, wave);
+            draw_ring_edges(node, width, height, thickness, margin, color);
+        }
+        LevelUiFocusEffect::Corners => {
+            draw_focus_corners(node, width, height, thickness, margin, style, frame);
+        }
+        LevelUiFocusEffect::Tracer => {
+            draw_focus_tracer(node, width, height, thickness, margin, style, frame);
+        }
+    }
+}
+
+/// Four-edge outline whose inner boundary sits `margin` pixels outside
+/// the control and whose band extends `thickness` pixels further out.
+/// `margin = 1, thickness = 1` reproduces the classic 1px ring.
+fn draw_ring_edges(
+    node: UiResolvedNode,
+    width: i16,
+    height: i16,
+    thickness: i16,
+    margin: i16,
+    (r, g, b): (u8, u8, u8),
+) {
+    let e = margin + thickness - 1;
+    let outer_w = width + 2 * e;
+    draw_quad_flat(node.subrect(-e, -e, outer_w, thickness), r, g, b);
+    draw_quad_flat(
+        node.subrect(-e, height + margin - 1, outer_w, thickness),
+        r,
+        g,
+        b,
+    );
+    draw_quad_flat(node.subrect(-e, 0, thickness, height), r, g, b);
+    draw_quad_flat(
+        node.subrect(width + margin - 1, 0, thickness, height),
+        r,
+        g,
+        b,
+    );
+}
+
+/// Triangle wave (0..=255..=0) over one `period`-frame cycle. A zero
+/// period freezes the animation at its brightest phase.
+fn focus_wave(frame: u16, period: u16) -> u8 {
+    if period == 0 {
+        return 255;
+    }
+    let pos = u32::from(frame % period);
+    triangle_wave_u8(((pos * 512) / u32::from(period)) as u16)
+}
+
+/// Integer colour mix: `t = 255` selects `a`, `t = 0` selects `b`.
+fn lerp_color(a: (u8, u8, u8), b: (u8, u8, u8), t: u8) -> (u8, u8, u8) {
+    let t = i32::from(t);
+    let mix = |x: u8, y: u8| ((i32::from(x) * t + i32::from(y) * (255 - t)) / 255) as u8;
+    (mix(a.0, b.0), mix(a.1, b.1), mix(a.2, b.2))
+}
+
+/// Targeting-reticle brackets: an L at each corner that breathes up to
+/// 2px outward while its colour pulses `color_b -> color_a`.
+fn draw_focus_corners(
+    node: UiResolvedNode,
+    width: i16,
+    height: i16,
+    thickness: i16,
+    margin: i16,
+    style: &LevelUiFocusStyle,
+    frame: u16,
+) {
+    let wave = focus_wave(frame, style.period);
+    let (r, g, b) = lerp_color(style.color_a, style.color_b, wave);
+    let push = i16::from(wave / 96); // 0..=2px breathing
+    let d = margin + push;
+    let e = d + thickness - 1;
+    // Arm length, clamped so opposing corners never merge.
+    let len = i16::from(style.corner_len.max(2))
+        .min(width / 2 + e)
+        .min(height / 2 + e);
+    let t = thickness;
+    // Top-left.
+    draw_quad_flat(node.subrect(-e, -e, len, t), r, g, b);
+    draw_quad_flat(node.subrect(-e, -e, t, len), r, g, b);
+    // Top-right.
+    draw_quad_flat(node.subrect(width + e - len, -e, len, t), r, g, b);
+    draw_quad_flat(node.subrect(width + d - 1, -e, t, len), r, g, b);
+    // Bottom-left.
+    draw_quad_flat(node.subrect(-e, height + d - 1, len, t), r, g, b);
+    draw_quad_flat(node.subrect(-e, height + e - len, t, len), r, g, b);
+    // Bottom-right.
+    draw_quad_flat(node.subrect(width + e - len, height + d - 1, len, t), r, g, b);
+    draw_quad_flat(node.subrect(width + d - 1, height + e - len, t, len), r, g, b);
+}
+
+/// Number of comet segments behind the tracer head; each one steps
+/// the colour further from `color_a` toward the `color_b` base ring.
+const TRACER_SEGMENTS: i32 = 6;
+
+/// A faint base ring plus a bright head orbiting the perimeter with a
+/// gradient tail. One lap per `period` frames, clockwise.
+fn draw_focus_tracer(
+    node: UiResolvedNode,
+    width: i16,
+    height: i16,
+    thickness: i16,
+    margin: i16,
+    style: &LevelUiFocusStyle,
+    frame: u16,
+) {
+    draw_ring_edges(node, width, height, thickness, margin, style.color_b);
+    if style.period == 0 {
+        return;
+    }
+    let e = i32::from(margin + thickness - 1);
+    let outer_w = i32::from(width) + 2 * e;
+    let outer_h = i32::from(height) + 2 * e;
+    let perimeter = 2 * (outer_w + outer_h);
+    if perimeter <= 0 {
+        return;
+    }
+    let pos = i32::from(frame % style.period);
+    let head = (pos * perimeter) / i32::from(style.period);
+    let seg = (perimeter / 28).max(2);
+    for k in 0..TRACER_SEGMENTS {
+        let brightness = (255 - k * 255 / TRACER_SEGMENTS) as u8;
+        let color = lerp_color(style.color_a, style.color_b, brightness);
+        let start = (head - (k + 1) * seg).rem_euclid(perimeter);
+        draw_perimeter_run(
+            node, width, height, thickness, margin, perimeter, outer_w, outer_h, start, seg,
+            color,
+        );
+    }
+}
+
+/// Draw `len` perimeter pixels starting at clockwise offset `start`
+/// along the focus ring band (top edge left-to-right, then right edge
+/// down, bottom right-to-left, left edge up), splitting across edges
+/// and the wrap point as needed.
+#[allow(clippy::too_many_arguments)]
+fn draw_perimeter_run(
+    node: UiResolvedNode,
+    width: i16,
+    height: i16,
+    thickness: i16,
+    margin: i16,
+    perimeter: i32,
+    outer_w: i32,
+    outer_h: i32,
+    mut start: i32,
+    mut len: i32,
+    (r, g, b): (u8, u8, u8),
+) {
+    let e = i32::from(margin + thickness - 1);
+    let d = margin;
+    while len > 0 {
+        start = start.rem_euclid(perimeter);
+        let (edge_off, edge_len, edge) = if start < outer_w {
+            (start, outer_w, 0)
+        } else if start < outer_w + outer_h {
+            (start - outer_w, outer_h, 1)
+        } else if start < 2 * outer_w + outer_h {
+            (start - outer_w - outer_h, outer_w, 2)
+        } else {
+            (start - 2 * outer_w - outer_h, outer_h, 3)
+        };
+        let run = len.min(edge_len - edge_off);
+        if run <= 0 {
+            return;
+        }
+        let run16 = run as i16;
+        let off16 = edge_off as i16;
+        let e16 = e as i16;
+        match edge {
+            // Top, left-to-right.
+            0 => draw_quad_flat(node.subrect(-e16 + off16, -e16, run16, thickness), r, g, b),
+            // Right, top-to-bottom.
+            1 => draw_quad_flat(
+                node.subrect(width + d - 1, -e16 + off16, thickness, run16),
+                r,
+                g,
+                b,
+            ),
+            // Bottom, right-to-left.
+            2 => draw_quad_flat(
+                node.subrect(
+                    width + e16 - off16 - run16,
+                    height + d - 1,
+                    run16,
+                    thickness,
+                ),
+                r,
+                g,
+                b,
+            ),
+            // Left, bottom-to-top.
+            _ => draw_quad_flat(
+                node.subrect(-e16, height + e16 - off16 - run16, thickness, run16),
+                r,
+                g,
+                b,
+            ),
+        }
+        start += run;
+        len -= run;
+    }
 }
 
 /// Fill proportion `(num, den)` for a slider bound to option `option_id`,
