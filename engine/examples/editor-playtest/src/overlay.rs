@@ -196,6 +196,44 @@ pub(crate) fn draw_centered_text(font: &FontAtlas, y: i16, text: &str, tint: (u8
     font.draw_text(x, y, text, tint);
 }
 
+/// Hardware-ratification overlay (burn builds only): presented frames
+/// per second and the worst inter-frame gap in vblanks over the last
+/// second, top-right. The emulator does not model GPU draw time, so
+/// silicon framerate is the only true measurement; this makes it
+/// readable from a console photo. 30 fps steady shows "30 W2".
+#[cfg(feature = "fps-overlay")]
+pub(crate) fn draw_fps_overlay(font: &FontAtlas, fps: u8, worst_gap_vblanks: u8) {
+    let mut buf = [0u8; 8];
+    let mut len = 0usize;
+    push_u8_decimal(&mut buf, &mut len, fps);
+    buf[len] = b' ';
+    len += 1;
+    buf[len] = b'W';
+    len += 1;
+    push_u8_decimal(&mut buf, &mut len, worst_gap_vblanks);
+    let Ok(text) = core::str::from_utf8(&buf[..len]) else {
+        return;
+    };
+    let width = font.text_width(text) as i16;
+    let x = SCREEN_W - 8 - width;
+    draw_rect(x - 3, 6, width + 6, 12, (10, 12, 16));
+    font.draw_text(x, 8, text, (170, 255, 190));
+}
+
+#[cfg(feature = "fps-overlay")]
+fn push_u8_decimal(buf: &mut [u8; 8], len: &mut usize, value: u8) {
+    if value >= 100 {
+        buf[*len] = b'0' + value / 100;
+        *len += 1;
+    }
+    if value >= 10 {
+        buf[*len] = b'0' + (value / 10) % 10;
+        *len += 1;
+    }
+    buf[*len] = b'0' + value % 10;
+    *len += 1;
+}
+
 /// DIAGNOSTIC (vertex-explosion probe, not for release): the controlled
 /// fixed-pose diff (IMG_6161-6165) showed the stretch is HORIZONTAL -- only
 /// the projected X widens on hardware, while depth/Y/projection match the
