@@ -57,6 +57,9 @@ vis-player-anchor = []
 vis-static-active-turn = []
 room-surface-profile = ["psx-engine/room-surface-profile"]
 cell-select-profile = ["psx-engine/cell-select-profile"]
+# On-screen presented-fps + worst-frame-gap counter for hardware
+# ratification burns. Off by default: shipping builds must not carry it.
+fps-overlay = []
 ot-1024 = []
 ot-2048 = []
 
