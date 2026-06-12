@@ -837,7 +837,25 @@ impl ProjectDocument {
         let Some(index) = self.resources.iter().position(|resource| resource.id == id) else {
             return Err(ResourceDeleteError::MissingResource(id));
         };
-        let plan = plan_resource_file_deletes(&self.resources[index], project_root);
+        let mut plan = plan_resource_file_deletes(&self.resources[index], project_root);
+        // A material's image file is shared when another material
+        // points at the same path; deleting one material must not
+        // strand the survivors without their texture.
+        if let ResourceData::Material(material) = &self.resources[index].data {
+            if let Some(psxt_path) = &material.psxt_path {
+                let shared = self.resources.iter().any(|other| {
+                    other.id != id
+                        && matches!(
+                            &other.data,
+                            ResourceData::Material(m)
+                                if m.psxt_path.as_deref() == Some(psxt_path.as_str())
+                        )
+                });
+                if shared {
+                    plan.files.clear();
+                }
+            }
+        }
         execute_resource_delete_plan(&plan, project_root)?;
 
         let mut report = self
@@ -885,6 +903,24 @@ impl ProjectDocument {
         match &mut data {
             ResourceData::Texture { psxt_path } => {
                 plan_path_rename(psxt_path, &safe_stem, "psxt", project_root, &mut plan);
+            }
+            // Materials own their image file; rename it alongside the
+            // resource unless another material shares the same path
+            // (file-level sharing), in which case the file stays put.
+            ResourceData::Material(material) => {
+                if let Some(psxt_path) = &mut material.psxt_path {
+                    let shared = self.resources.iter().any(|other| {
+                        other.id != resource.id
+                            && matches!(
+                                &other.data,
+                                ResourceData::Material(m)
+                                    if m.psxt_path.as_deref() == Some(psxt_path.as_str())
+                            )
+                    });
+                    if !shared {
+                        plan_path_rename(psxt_path, &safe_stem, "psxt", project_root, &mut plan);
+                    }
+                }
             }
             ResourceData::Model(model) => {
                 plan_model_resource_rename(model, &safe_stem, project_root, &mut plan);
@@ -1016,8 +1052,90 @@ impl ProjectDocument {
         Self::from_ron_str(&source)
     }
 
+    /// Fold legacy Texture resources into the materials that reference
+    /// them. Materials own their `.psxt` path now; the separate Texture
+    /// resource kind only exists in pre-merge project files.
+    ///
+    /// Texture ids referenced directly (UI image nodes, far-vista
+    /// rings/panels, particle emitter masks) are converted to materials
+    /// in place under the SAME resource id, so those references stay
+    /// valid without rewriting. Folded and orphaned Texture resources
+    /// are dropped. One-way: saves write only merged materials. See
+    /// docs/material-texture-merge-plan.md.
+    pub fn migrate_legacy_texture_resources(&mut self) {
+        use std::collections::{HashMap, HashSet};
+        let texture_paths: HashMap<ResourceId, String> = self
+            .resources
+            .iter()
+            .filter_map(|resource| match &resource.data {
+                ResourceData::Texture { psxt_path } => Some((resource.id, psxt_path.clone())),
+                _ => None,
+            })
+            .collect();
+
+        // Fold wrapped textures into their materials. Run even with no
+        // Texture resources so a stray legacy reference can't linger.
+        for resource in &mut self.resources {
+            if let ResourceData::Material(material) = &mut resource.data {
+                if let Some(texture_id) = material.legacy_texture.take() {
+                    if material.psxt_path.is_none() {
+                        material.psxt_path = texture_paths.get(&texture_id).cloned();
+                    }
+                }
+            }
+        }
+        if texture_paths.is_empty() {
+            return;
+        }
+
+        // Texture ids referenced directly stay alive as materials with
+        // the same id; raw-image consumers read just the image part.
+        let mut directly_referenced: HashSet<ResourceId> = HashSet::new();
+        let mut note = |id: Option<ResourceId>, set: &mut HashSet<ResourceId>| {
+            if let Some(id) = id {
+                if texture_paths.contains_key(&id) {
+                    set.insert(id);
+                }
+            }
+        };
+        for scene in &self.scenes {
+            for node in &scene.nodes {
+                match &node.kind {
+                    NodeKind::World { far_vista, .. } => {
+                        note(far_vista.texture, &mut directly_referenced);
+                        for panel in far_vista.texture_panels {
+                            note(panel, &mut directly_referenced);
+                        }
+                    }
+                    NodeKind::ParticleEmitter { settings } => {
+                        note(settings.texture, &mut directly_referenced);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        for scene in &self.ui_scenes {
+            for node in scene.nodes() {
+                if let UiNodeKind::Image { texture, .. } = &node.kind {
+                    note(*texture, &mut directly_referenced);
+                }
+            }
+        }
+        for resource in &mut self.resources {
+            if directly_referenced.contains(&resource.id) {
+                if let ResourceData::Texture { psxt_path } = &resource.data {
+                    resource.data =
+                        ResourceData::Material(MaterialResource::opaque(Some(psxt_path.clone())));
+                }
+            }
+        }
+        self.resources
+            .retain(|resource| !matches!(resource.data, ResourceData::Texture { .. }));
+    }
+
     /// Normalize legacy or hand-authored project data after load.
     pub fn normalize_loaded(&mut self) {
+        self.migrate_legacy_texture_resources();
         self.editor_camera.normalize();
         if self.ui_scenes.is_empty() {
             self.ui_scenes = default_ui_scenes();
@@ -1146,7 +1264,7 @@ impl ProjectDocument {
 
 pub(crate) fn resource_data_reference_count(data: &ResourceData, id: ResourceId) -> usize {
     match data {
-        ResourceData::Material(material) => option_resource_reference_count(material.texture, id),
+        ResourceData::Material(_) => 0,
         ResourceData::Model(model) => option_resource_reference_count(model.skeleton, id),
         ResourceData::AnimationSource(source) => {
             option_resource_reference_count(source.skeleton, id)
@@ -1188,7 +1306,7 @@ pub(crate) fn resource_data_reference_count(data: &ResourceData, id: ResourceId)
 
 pub(crate) fn clear_resource_data_references(data: &mut ResourceData, id: ResourceId) -> usize {
     match data {
-        ResourceData::Material(material) => clear_option_resource(&mut material.texture, id),
+        ResourceData::Material(_) => 0,
         ResourceData::Model(model) => clear_option_resource(&mut model.skeleton, id),
         ResourceData::AnimationSource(source) => {
             clear_option_resource(&mut source.skeleton, id)
@@ -1479,6 +1597,11 @@ pub(crate) fn plan_resource_file_deletes(
         ResourceData::Texture { psxt_path } => {
             plan_path_delete(psxt_path, project_root, &mut plan);
         }
+        ResourceData::Material(material) => {
+            if let Some(psxt_path) = &material.psxt_path {
+                plan_path_delete(psxt_path, project_root, &mut plan);
+            }
+        }
         ResourceData::Model(model) => {
             plan_path_delete(&model.model_path, project_root, &mut plan);
             if let Some(texture_path) = &model.texture_path {
@@ -1500,8 +1623,7 @@ pub(crate) fn plan_resource_file_deletes(
         | ResourceData::Audio { source_path } => {
             plan_path_delete(source_path, project_root, &mut plan);
         }
-        ResourceData::Material(_)
-        | ResourceData::Skeleton(_)
+        ResourceData::Skeleton(_)
         | ResourceData::AnimationSet(_)
         | ResourceData::Character(_)
         | ResourceData::Weapon(_) => {}
