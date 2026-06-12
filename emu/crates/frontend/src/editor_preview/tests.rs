@@ -1,17 +1,17 @@
 use super::{
-    face_side_visible, floor_anchored_model_origin, horizontal_triangle_world_points, light_face,
-    material_sized_uvs, material_texture_tint, node_room_local_origin, preview_lights,
-    preview_model_reference, preview_player_reference, preview_projected_triangle_hw_safe,
-    preview_scratch, preview_shadow_radius, preview_static_model_reference,
-    preview_vertices_in_front, push_clear, push_tri, push_wall_face, room_depth_slot,
-    rotate_image_prop_local, setup_gte_for_camera, shadow_depth_slot,
-    should_draw_culled_face_outline, wall_material_sidedness_for_edge, wall_side_visible,
-    yaw_rotation_q12, FaceShade, MaterialSlot, PreviewFog, WallEdge, GRID_TILE_UV,
-    PREVIEW_FLOOR_UVS, PREVIEW_GEOMETRY_SLOT_MAX, PREVIEW_GEOMETRY_SLOT_MIN,
+    euler_rotation_q12, face_side_visible, floor_anchored_model_origin,
+    horizontal_triangle_world_points, light_face, material_sized_uvs, material_texture_tint,
+    node_room_local_origin, preview_lights, preview_model_reference, preview_player_reference,
+    preview_projected_triangle_hw_safe, preview_scratch, preview_shadow_radius,
+    preview_static_model_reference, preview_vertices_in_front, push_clear, push_tri,
+    push_wall_face, room_depth_slot, rotate_image_prop_local, setup_gte_for_camera,
+    shadow_depth_slot, should_draw_culled_face_outline, wall_material_sidedness_for_edge,
+    wall_side_visible, yaw_rotation_q12, FaceShade, MaterialSlot, PreviewFog, WallEdge,
+    GRID_TILE_UV, PREVIEW_FLOOR_UVS, PREVIEW_GEOMETRY_SLOT_MAX, PREVIEW_GEOMETRY_SLOT_MIN,
     PREVIEW_SHADOW_DEPTH_BIAS, PREVIEW_SHADOW_RADIUS_MAX, PREVIEW_SHADOW_RADIUS_MIN,
     PREVIEW_WALL_UVS,
 };
-use psx_engine::{PointLightSample, WorldVertex};
+use psx_engine::{Mat3I16, PointLightSample, WorldVertex};
 use psx_gpu::material::BlendMode;
 use psx_gte::scene::Projected;
 use psxed_project::portal_rooms::PortalEdge;
@@ -254,6 +254,25 @@ fn image_prop_overlay_rotation_applies_yaw_q12_quarter_turn() {
 fn model_preview_yaw_matrix_uses_q12_quarter_turn() {
     let rotation = yaw_rotation_q12(1024);
     assert_eq!(rotation.m, [[0, 0, 4096], [0, 4096, 0], [-4096, 0, 0]]);
+}
+
+#[test]
+fn model_preview_euler_matrix_applies_pitch_and_roll() {
+    // Yaw-only inputs keep the exact single-axis build.
+    assert_eq!(euler_rotation_q12(0, 1024, 0).m, yaw_rotation_q12(1024).m);
+    // A quarter-turn pitch must move the model's local Y toward
+    // world Z (column 1 of Rx(90 deg)); the old yaw-only preview
+    // rendered this as identity, leaving pitched props upright.
+    let pitched = euler_rotation_q12(1024, 0, 0);
+    let col_y = [pitched.m[0][1], pitched.m[1][1], pitched.m[2][1]];
+    assert_eq!(col_y, [0, 0, 4096]);
+    // And the composition order matches the runtime's
+    // `euler_q12_rotation` (Rz * Ry * Rx).
+    let composed = euler_rotation_q12(512, 1024, 256);
+    let rx = Mat3I16::rotate_x(psx_engine::Angle::from_q12(512).rotate_y_arg());
+    let ry = Mat3I16::rotate_y(psx_engine::Angle::from_q12(1024).rotate_y_arg());
+    let rz = Mat3I16::rotate_z(psx_engine::Angle::from_q12(256).rotate_y_arg());
+    assert_eq!(composed.m, rz.mul(&ry).mul(&rx).m);
 }
 
 fn projected(sx: i16, sy: i16) -> Projected {

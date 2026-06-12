@@ -1555,7 +1555,13 @@ fn walk_model_instances(
         origin.y += y_offset;
 
         let yaw_q12 = yaw_to_q12(node.transform.rotation_degrees[1]);
-        let model_rotation = yaw_rotation_q12(yaw_q12.wrapping_add(reference.visual_yaw_q12));
+        // Match the cooked record: entity pitch/roll plus the combined
+        // entity + renderer yaw, composed exactly as the runtime does.
+        let model_rotation = euler_rotation_q12(
+            yaw_to_q12(node.transform.rotation_degrees[0]),
+            yaw_q12.wrapping_add(reference.visual_yaw_q12),
+            yaw_to_q12(node.transform.rotation_degrees[2]),
+        );
 
         instances_meta.push(InstanceMeta {
             mesh_id: reference.model_id,
@@ -2023,6 +2029,20 @@ fn yaw_rotation_q12(yaw_q12: u16) -> Mat3I16 {
     Mat3I16 {
         m: [[c, 0, s], [0, 0x1000, 0], [-s, 0, c]],
     }
+}
+
+/// Full instance rotation `Rz(roll) * Ry(yaw) * Rx(pitch)` in Q12.
+/// Mirrors the runtime's `euler_q12_rotation` so a pitched/rolled
+/// model prop previews exactly as it ships; keeps the cheaper
+/// single-axis build for the common upright case.
+fn euler_rotation_q12(pitch_q12: u16, yaw_q12: u16, roll_q12: u16) -> Mat3I16 {
+    if pitch_q12 == 0 && roll_q12 == 0 {
+        return yaw_rotation_q12(yaw_q12);
+    }
+    let rx = Mat3I16::rotate_x(psx_engine::Angle::from_q12(pitch_q12).rotate_y_arg());
+    let ry = Mat3I16::rotate_y(psx_engine::Angle::from_q12(yaw_q12).rotate_y_arg());
+    let rz = Mat3I16::rotate_z(psx_engine::Angle::from_q12(roll_q12).rotate_y_arg());
+    rz.mul(&ry).mul(&rx)
 }
 
 /// Submit all preview models through the same engine model pass used

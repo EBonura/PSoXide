@@ -730,19 +730,139 @@ fn node_gizmo_rotates_image_prop_around_y() {
     let ring = workspace
         .node_rotation_gizmo_screen_ring_for_axis(viewport, PrimitiveGizmoAxis::Y)
         .expect("rotation ring projects");
+    // Sweep the pointer along the ring in its own point order (ring
+    // points advance with a positive world rotation), so the drag must
+    // rotate by the swept screen angle, positively, no matter where
+    // the camera sits. Radial pointer motion sweeps no angle and must
+    // change nothing.
     let start = ring.points[0];
-    let unit = (start - ring.center).normalized();
+    let target = ring.points[8];
+    let start_angle = (start - ring.center).angle();
+    let target_angle = (target - ring.center).angle();
+    let mut swept = (target_angle - start_angle).to_degrees();
+    while swept > 180.0 {
+        swept -= 360.0;
+    }
+    while swept <= -180.0 {
+        swept += 360.0;
+    }
+    let expected_yaw = swept.abs().round();
+    assert!(expected_yaw >= 10.0, "test sweep too small: {swept}");
+
     assert!(workspace.begin_node_gizmo_drag(PrimitiveGizmoAxis::Y, viewport, start));
-    workspace.update_node_gizmo_drag(viewport, start + unit * 24.0);
+    let radial = (start - ring.center).normalized();
+    workspace.update_node_gizmo_drag(viewport, start + radial * 24.0);
+    let node = workspace.project.active_scene().node(prop).unwrap();
+    assert_eq!(
+        node.transform.rotation_degrees[1], 0.0,
+        "radial motion must not rotate"
+    );
+    workspace.update_node_gizmo_drag(viewport, target);
     workspace.end_node_gizmo_drag();
 
     let node = workspace.project.active_scene().node(prop).unwrap();
-    assert_eq!(node.transform.rotation_degrees, [0.0, 2.0, 0.0]);
+    assert_eq!(node.transform.rotation_degrees, [0.0, expected_yaw, 0.0]);
     assert!(workspace.is_dirty());
 
     workspace.do_undo();
     let node = workspace.project.active_scene().node(prop).unwrap();
     assert_eq!(node.transform.rotation_degrees, [0.0, 0.0, 0.0]);
+}
+
+#[test]
+fn node_gizmo_local_space_rotates_about_node_axis() {
+    let mut project = ProjectDocument::new("image-prop-gizmo-local");
+    let room = project.active_scene_mut().add_node(
+        NodeId::ROOT,
+        "Room",
+        NodeKind::Room {
+            grid: WorldGrid::empty(1, 1, 1024),
+        },
+    );
+    let prop = project.active_scene_mut().add_node(
+        room,
+        "Banner",
+        NodeKind::ImageProp {
+            material: None,
+            width: 1024,
+            height: 1024,
+            cylindrical_billboard: false,
+            collision_enabled: false,
+            collision_size: [1024, 1024, 1024],
+        },
+    );
+    let start_rotation = [90.0f32, 0.0, 0.0];
+    project
+        .active_scene_mut()
+        .node_mut(prop)
+        .unwrap()
+        .transform
+        .rotation_degrees = start_rotation;
+    let mut workspace =
+        EditorWorkspace::with_project(test_temp_dir("image-prop-gizmo-local"), project);
+    set_gizmo_test_camera(&mut workspace);
+    workspace.replace_node_selection(prop);
+    workspace.transform_gizmo_mode = TransformGizmoMode::Rotate;
+    workspace.gizmo_space = GizmoSpace::Local;
+
+    let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+    let ring = workspace
+        .node_rotation_gizmo_screen_ring_for_axis(viewport, PrimitiveGizmoAxis::Y)
+        .expect("local rotation ring projects");
+    let start = ring.points[0];
+    let target = ring.points[8];
+    let start_angle = (start - ring.center).angle();
+    let target_angle = (target - ring.center).angle();
+    let mut swept = (target_angle - start_angle).to_degrees();
+    while swept > 180.0 {
+        swept -= 360.0;
+    }
+    while swept <= -180.0 {
+        swept += 360.0;
+    }
+    let steps = swept.abs().round();
+    assert!(steps >= 10.0, "test sweep too small: {swept}");
+
+    assert!(workspace.begin_node_gizmo_drag(PrimitiveGizmoAxis::Y, viewport, start));
+    workspace.update_node_gizmo_drag(viewport, target);
+    workspace.end_node_gizmo_drag();
+
+    // A local-space drag must equal composing the delta in the node's
+    // own frame; compare rotation matrices since Euler triples alias.
+    let expected = psxed_project::spatial::rotate_euler_degrees(
+        start_rotation,
+        1,
+        steps,
+        psxed_project::spatial::RotationSpace::Local,
+    );
+    let node = workspace.project.active_scene().node(prop).unwrap();
+    let actual_m = psxed_project::spatial::euler_degrees_to_matrix(node.transform.rotation_degrees);
+    let expected_m = psxed_project::spatial::euler_degrees_to_matrix(expected);
+    for row in 0..3 {
+        for col in 0..3 {
+            assert!(
+                (actual_m[row][col] - expected_m[row][col]).abs() < 1e-3,
+                "actual {:?} expected {expected:?}",
+                node.transform.rotation_degrees
+            );
+        }
+    }
+    // And it must differ from the global-space composition, proving
+    // the toggle reached the apply path.
+    let global = psxed_project::spatial::rotate_euler_degrees(
+        start_rotation,
+        1,
+        steps,
+        psxed_project::spatial::RotationSpace::Global,
+    );
+    let global_m = psxed_project::spatial::euler_degrees_to_matrix(global);
+    let mut differs = false;
+    for row in 0..3 {
+        for col in 0..3 {
+            differs |= (actual_m[row][col] - global_m[row][col]).abs() > 1e-3;
+        }
+    }
+    assert!(differs, "local and global must diverge for a pitched prop");
 }
 
 #[test]
@@ -938,6 +1058,7 @@ fn runtime_vram_budget_counts_compact_room_texture_and_model_atlas() {
             world_height: 1024,
             collision_radius: default_model_collision_radius_for_height(1024),
             scale_q8: [MODEL_SCALE_ONE_Q8; 3],
+            default_visual_yaw_q12: 0,
             attachments: Vec::new(),
         }),
     );

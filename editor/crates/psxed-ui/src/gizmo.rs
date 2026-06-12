@@ -6,7 +6,49 @@
 
 use egui::{Color32, Pos2};
 
+use crate::icons;
 use crate::lerp_u8;
+
+/// Reference frame the transform gizmo draws and drags in.
+///
+/// `Global` keeps handles on the world axes; `Local` orients them by the
+/// active node's authored rotation. Rotation deltas compose in the chosen
+/// frame (see `psxed_project::spatial::rotate_euler_degrees`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GizmoSpace {
+    Global,
+    Local,
+}
+
+impl GizmoSpace {
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Global => "Global",
+            Self::Local => "Local",
+        }
+    }
+
+    pub(crate) const fn icon(self) -> char {
+        match self {
+            Self::Global => icons::GRID,
+            Self::Local => icons::BOX,
+        }
+    }
+
+    pub(crate) const fn toggled(self) -> Self {
+        match self {
+            Self::Global => Self::Local,
+            Self::Local => Self::Global,
+        }
+    }
+
+    pub(crate) const fn rotation_space(self) -> psxed_project::spatial::RotationSpace {
+        match self {
+            Self::Global => psxed_project::spatial::RotationSpace::Global,
+            Self::Local => psxed_project::spatial::RotationSpace::Local,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum PrimitiveGizmoAxis {
