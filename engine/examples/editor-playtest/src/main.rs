@@ -499,6 +499,14 @@ struct Playtest {
     /// Slow down verbose portal diagnostics so the host terminal cannot
     /// stall the playtest when a portal is rejected every camera tick.
     portal_debug_log_cooldown: u8,
+    /// True while any active room's texture is unresolved (in flight OR
+    /// dropped). Drives the material-refresh retry: a DROPPED texture
+    /// (upload queue full at build time) never produces an upload
+    /// completion, so a completion-gated refresh would leave it on the
+    /// untextured fallback forever (the menu-path wall-flicker bug:
+    /// the fallback's CLUT sits at VRAM (0,0) inside the framebuffer,
+    /// so the surface visibly tracks framebuffer contents).
+    room_materials_unresolved: bool,
 }
 
 impl Playtest {
@@ -624,6 +632,7 @@ impl Playtest {
             streaming_jobs: RuntimeStreamingJobs::new(),
             post_cross_debug_frames: 0,
             portal_debug_log_cooldown: 0,
+            room_materials_unresolved: true,
         }
     }
 
@@ -659,14 +668,12 @@ impl Playtest {
             // Pump the material refresh while any room texture is unresolved, not
             // only when an upload completes. A dropped texture (queue was full) is
             // never queued, so it produces no completion to wake a refresh; without
-            // this it stays the untextured fallback forever. Re-running refresh as
-            // the queue drains re-queues the drops until every room resolves.
-            // When an upload finishes, rebuild the active-room materials so they
-            // pick up the now-resident texture. With the deeper upload queue and
-            // faster drain, drops are queued and complete quickly, so this
-            // completion-gated refresh resolves them.
-            if self.streaming_jobs.step_vram_uploads() {
-                self.refresh_active_room_materials();
+            // the unresolved retry it stays the untextured fallback forever (and
+            // the fallback CLUT lives inside the framebuffer, so the surface
+            // visibly tracks stale frame contents -- the menu-path wall flicker).
+            let upload_completed = self.streaming_jobs.step_vram_uploads();
+            if upload_completed || self.room_materials_unresolved {
+                self.room_materials_unresolved = self.refresh_active_room_materials();
             }
             self.step_active_room_window_job();
         }

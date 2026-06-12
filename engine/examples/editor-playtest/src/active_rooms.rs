@@ -249,6 +249,7 @@ impl Playtest {
                 &mut next_slot,
             );
             self.apply_current_active_room_fields();
+            self.room_materials_unresolved = true;
             self.active_room_job = ActiveRoomWindowJob::EMPTY;
         }
     }
@@ -454,6 +455,7 @@ impl Playtest {
             }
         }
 
+        self.room_materials_unresolved = true;
         self.retain_previous_active_rooms(
             &previous_active_rooms,
             current_record,

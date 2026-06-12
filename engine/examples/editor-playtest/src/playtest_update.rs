@@ -65,6 +65,17 @@ impl Playtest {
         // epoch here so value-based phases do not inherit the variable
         // loading duration (see `gameplay_epoch` in main.rs).
         if !self.gameplay_epoch_set {
+            // First gameplay update after loading: the loading scene's
+            // streamed UI images (re-uploaded after the menu release for
+            // the loading screen) are no longer drawn. Free their VRAM
+            // slots so room textures stop competing with them, and force
+            // a material refresh so any upload that was dropped during
+            // the loading burst is re-queued into the freed space.
+            #[cfg(feature = "cd-stream-bench")]
+            {
+                release_ui_images();
+                self.room_materials_unresolved = true;
+            }
             self.gameplay_epoch = ctx.sim_tick;
             self.gameplay_epoch_set = true;
         }
