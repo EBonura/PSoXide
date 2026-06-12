@@ -1,5 +1,5 @@
 use super::*;
-use psxed_project::{UiTransition, UiTransitionKind, UiVisibilityCondition};
+use psxed_project::{UiFocusEffect, UiTransition, UiTransitionKind, UiVisibilityCondition};
 
 #[derive(Clone, Debug)]
 pub(crate) struct AnimationSetOption {
@@ -1227,6 +1227,25 @@ pub(crate) fn draw_ui_image_effect_picker(ui: &mut egui::Ui, effect: &mut UiImag
         .selected_text(effect.label())
         .show_ui(ui, |ui| {
             for candidate in UiImageEffect::ALL {
+                if ui
+                    .selectable_label(*effect == candidate, candidate.label())
+                    .clicked()
+                    && *effect != candidate
+                {
+                    *effect = candidate;
+                    changed = true;
+                }
+            }
+        });
+    changed
+}
+
+pub(crate) fn draw_ui_focus_effect_picker(ui: &mut egui::Ui, effect: &mut UiFocusEffect) -> bool {
+    let mut changed = false;
+    egui::ComboBox::from_label("Focus Effect")
+        .selected_text(effect.label())
+        .show_ui(ui, |ui| {
+            for candidate in UiFocusEffect::ALL {
                 if ui
                     .selectable_label(*effect == candidate, candidate.label())
                     .clicked()

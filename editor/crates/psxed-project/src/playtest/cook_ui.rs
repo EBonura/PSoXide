@@ -79,6 +79,7 @@ pub(crate) fn cook_ui_nodes(
             name: scene.name.clone(),
             node_first,
             node_count,
+            focus_style: scene.focus_style,
         });
     }
 
