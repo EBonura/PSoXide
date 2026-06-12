@@ -77,6 +77,7 @@ pub(crate) fn draw_player_hud(
         &[],
         fonts,
         None,
+        &psx_level::LevelUiFocusStyle::DEFAULT,
         frame,
         &mut resolve_texture,
         &resolve_value,
