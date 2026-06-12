@@ -151,6 +151,20 @@
                 /*[2]*/ (id: (3), parent: Some((1)), children: [], name: "Stamina Bar", kind: Bar(rect: (x: 16, y: 24, width: 88, height: 7, anchor: TopLeft, rotation_degrees: 0, flip_x: false, flip_y: false), value: PlayerStamina, max: PlayerStaminaMax, fill: (44, 98, 48), fill_gradient: None, background: (30, 26, 28), background_gradient: None), visible_when: Always),
             ],
         ),
+        /*[4]*/ (
+            id: (6),
+            name: "Loading",
+            root: (1),
+            default_focus: None,
+            next_node_id: 6,
+            nodes: [
+                /*[0]*/ (id: (1), parent: None, children: [(2), (3), (4), (5)], name: "Canvas", kind: Canvas(width: 320, height: 240), visible_when: Always),
+                /*[1]*/ (id: (2), parent: Some((1)), children: [], name: "Backdrop", kind: Rect(rect: (x: 0, y: 0, width: 320, height: 240, anchor: TopLeft, rotation_degrees: 0, flip_x: false, flip_y: false), color: (4, 6, 10), gradient: None), visible_when: Always),
+                /*[2]*/ (id: (3), parent: Some((1)), children: [], name: "Preacher", kind: Image(rect: (x: 18, y: 162, width: 64, height: 64, anchor: TopLeft, rotation_degrees: 0, flip_x: false, flip_y: false), texture: Some((1657)), tint: (255, 255, 255), effect: Bob), visible_when: Always),
+                /*[3]*/ (id: (4), parent: Some((1)), children: [], name: "Loading Label", kind: Label(rect: (x: 88, y: 196, width: 110, height: 14, anchor: TopLeft, rotation_degrees: 0, flip_x: false, flip_y: false), text: "LOADING", tag: "", align: Center, wrap: false, font: KenneyFuture, font_scale: 0.69921875, letter_spacing: 2, color: (205, 220, 232), gradient: None), visible_when: Always),
+                /*[4]*/ (id: (5), parent: Some((1)), children: [], name: "Progress", kind: Bar(rect: (x: 88, y: 214, width: 214, height: 5, anchor: TopLeft, rotation_degrees: 0, flip_x: false, flip_y: false), value: LoadingProgress, max: ConstantQ12(4096), fill: (94, 154, 134), fill_gradient: None, background: (24, 30, 38), background_gradient: None), visible_when: Always),
+            ],
+        ),
     ],
     scene_states: [
         /*[0]*/ (
@@ -14150,6 +14164,13 @@
                 psxt_path: "assets/textures/bonnie_studios_logo_128.psxt",
             ),
         ),
+        /*[1464]*/ (
+            id: (1657),
+            name: "LOADING_PREACHER",
+            data: Texture(
+                psxt_path: "assets/textures/loading_preacher.psxt",
+            ),
+        ),
     ],
-    next_resource_id: 1657,
+    next_resource_id: 1658,
 )

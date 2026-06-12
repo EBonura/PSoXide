@@ -60,6 +60,9 @@ pub(crate) fn draw_player_hud(
             LevelUiValueBinding::PlayerHealthMax => PLAYER_HEALTH_MAX_Q12,
             LevelUiValueBinding::PlayerStamina => stamina_q12,
             LevelUiValueBinding::PlayerStaminaMax => stamina_max_q12,
+            // Loading progress is a loading-screen binding; it has no
+            // meaning on the in-game HUD.
+            LevelUiValueBinding::LoadingProgress => 0,
         }
     };
 

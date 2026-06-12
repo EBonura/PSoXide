@@ -119,6 +119,48 @@ impl Scene for Playtest {
         self.initial_world_ready()
     }
 
+    /// Real load progress for the authored loading scene's bar: the
+    /// initial room ring dominates the load, so it spans 0..3072; the
+    /// texture/upload tail takes the last quarter. The engine pins the
+    /// bar full once `loading_update` reports ready.
+    fn loading_progress_q12(&self) -> i32 {
+        #[cfg(not(feature = "cd-stream-bench"))]
+        {
+            4096
+        }
+        #[cfg(feature = "cd-stream-bench")]
+        {
+            let count = self.resident_desired_count.min(STREAMED_ROOM_SLOT_COUNT);
+            if count == 0 {
+                return 0;
+            }
+            let mut resident = 0usize;
+            let mut i = 0usize;
+            while i < count {
+                let room = self.resident_desired[i];
+                if room != INVALID_ROOM_INDEX && streamed_room_is_resident(room) {
+                    resident += 1;
+                }
+                i += 1;
+            }
+            // Rooms span 0..3840; the texture/upload tail is the last
+            // stretch, pinned to 4096 by the engine once
+            // `loading_update` reports fully ready.
+            ((resident as i32).saturating_mul(3840) / count as i32).min(4096)
+        }
+    }
+
+    /// Re-upload the loading scene's streamed images into VRAM from
+    /// the front-end RAM cache (filled by the contiguous menu
+    /// preload). Never touches the CD: the laser belongs to the world
+    /// stream during loading.
+    fn prepare_loading_assets(&mut self, scene: u16) {
+        #[cfg(feature = "cd-stream-bench")]
+        load_ui_images_for_scene(scene);
+        #[cfg(not(feature = "cd-stream-bench"))]
+        let _ = scene;
+    }
+
     fn update_ui_resources(&mut self, state: SceneStateRef, _ctx: &mut Ctx) {
         #[cfg(feature = "cd-stream-bench")]
         if !state.has_gameplay() {

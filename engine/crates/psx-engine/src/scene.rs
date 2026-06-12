@@ -218,6 +218,24 @@ pub trait Scene {
         true
     }
 
+    /// Live world-load progress in Q12 (0..=4096) while
+    /// [`loading_update`](Scene::loading_update) streams the next
+    /// state's world. Feeds UI nodes bound to
+    /// `LevelUiValueBinding::LoadingProgress`. Default reports zero
+    /// (the engine pins the bar full once `loading_update` is ready).
+    #[inline]
+    fn loading_progress_q12(&self) -> i32 {
+        0
+    }
+
+    /// One-shot hook before the authored loading scene first draws:
+    /// re-upload any of its streamed images into VRAM (from a RAM
+    /// cache, never the CD -- the disc laser belongs to the world
+    /// stream during loading). Default no-op for scenes whose loading
+    /// art is baked.
+    #[inline]
+    fn prepare_loading_assets(&mut self, _scene: u16) {}
+
     /// Draw the current frame. Called after [`update`] and after
     /// `ctx.fb` has been cleared. The engine submits the final
     /// swap after this returns.
