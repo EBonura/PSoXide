@@ -436,7 +436,7 @@ struct Playtest {
     camera_collision_room_count: usize,
     /// (current room, player cell x/z at the cache quantum, active-room
     /// mask) the cached camera room set was gathered for.
-    camera_rooms_key: (RoomIndex, i32, i32, RuntimeDebugMask),
+    camera_rooms_key: (RoomIndex, i32, i32, RuntimeDebugMask, RuntimeDebugMask),
     /// Last movement result; stationary frames can use a broader cached
     /// visibility candidate set without rebuilding it for camera-only turns.
     player_moved_last_tick: bool,
@@ -578,7 +578,13 @@ impl Playtest {
             camera_collision_rooms: [const { CharacterCollisionRoom::EMPTY };
                 MAX_COLLISION_ROOMS],
             camera_collision_room_count: 0,
-            camera_rooms_key: (INVALID_ROOM_INDEX, i32::MIN, i32::MIN, RuntimeDebugMask::EMPTY),
+            camera_rooms_key: (
+                INVALID_ROOM_INDEX,
+                i32::MIN,
+                i32::MIN,
+                RuntimeDebugMask::EMPTY,
+                RuntimeDebugMask::EMPTY,
+            ),
             player_moved_last_tick: false,
             camera_turning_last_tick: false,
             lock_target: None,

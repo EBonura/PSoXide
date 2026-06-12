@@ -1,150 +1,125 @@
-# Level residency
+# Level residency and room streaming
 
 How rooms, materials, and texture assets reach RAM and VRAM at
-runtime -- the contract between the editor's playtest compiler
-and the runtime example.
+runtime. Rewritten 2026-06-12 from the phase-1 streaming audit
+(`docs/streaming-audit-2026-06-12.md`); the previous revision
+described the embedded `include_bytes!` era and called CD streaming
+out of scope, which has not been true since the world-pack loader
+shipped.
 
-## Current pass: granular residency, embedded backing store
-
-```text
-on disk                 in-memory
-  (later)              (now)
-  +-------+           +--------+
-  | pack0 |   ==>     | RAM    |   master asset table
-  | pack1 |           | VRAM   |   per-room residency
-  +-------+           +--------+
-```
-
-The runtime resolves room bytes through a **master asset
-table** (`ASSETS`) keyed by `AssetId`. Per-room residency
-records (`ROOM_RESIDENCY`) declare which assets must be in RAM
-or VRAM before the room renders. The active backing store is
-`include_bytes!`: every asset's payload sits next to the EXE's
-text section, RAM-resident from the moment the program loads.
-
-That's not the interesting part. The interesting part is that
-the **runtime doesn't know it's embedded**. It walks the same
-contract a future stream-pack loader will walk:
+## Two backing stores
 
 ```text
-current room  ── room.world_asset ──>  ASSETS[..]  ── asset.bytes
-              ── ROOM_RESIDENCY[..]  ──>  required_ram / required_vram
-              ── room.material_first / count ──>  MATERIALS[..]
-                                          ── material.texture_asset ──> ASSETS[..]
+baked     LevelAssetRecord { bytes: include_bytes!(...) }   pinned in the EXE
+streamed  world pack on CD: TOC + chunked room data         paged into slots
 ```
 
-When the backing store changes, the contract doesn't.
+Baked assets (textures, models, UI, small rooms) resolve through the
+master asset table (`ASSETS`, keyed by `AssetId`) exactly as before.
+Streamed ROOM chunks live in a world pack on disc
+(`--world-pack-rooms-dir` / `world_pack_order.txt` at mkiso time) and
+are paged into a fixed pool of RAM slots at runtime. The
+`cd-stream-bench` feature (a default feature of the playtest) selects
+the streamed path.
 
-## Schema (psx-level crate)
+## The streaming scheduler
 
-`engine/crates/psx-level` is a tiny `no_std` crate that defines
-the records the editor compiler writes and the runtime example
-reads. Every record is `&'static`-borrowing -- nothing
-allocates, everything pins to literal data.
-
-| Record                  | Purpose                                        |
-| ----------------------- | ---------------------------------------------- |
-| `LevelAssetRecord`      | One asset (room world or texture). Carries the byte slice + RAM/VRAM cost. |
-| `LevelRoomRecord`       | One room. Points at its world `AssetId` and a material slice. |
-| `LevelMaterialRecord`   | Per-room material slot binding (cooked local slot → texture `AssetId`). |
-| `RoomResidencyRecord`   | Per-room contract: required RAM + VRAM `AssetId` lists. Warm lists are reserved for future preload hints. |
-| `PlayerSpawnRecord`     | Spawn pose in room-local engine units.         |
-| `EntityRecord`          | Generic entity (Marker / StaticMesh).          |
-
-`AssetKind` enumerates the asset classes the writer + reader
-both understand right now. Today: `RoomWorld`, `Texture`. New
-kinds (actor models, lights, audio banks) land here when the
-writer + reader for them both ship in the same pass.
-
-## Writer (psxed-project::playtest)
-
-The editor's playtest compiler walks the project's scene tree
-once and emits:
-
-1. **Cooked rooms** -- `cook_world_grid` produces a
-   `CookedWorldGrid` per Room node. Bytes get written to
-   `generated/rooms/room_NNN.psxw`; a `LevelAssetRecord` of
-   kind `RoomWorld` is added to `ASSETS`.
-2. **Texture assets** -- for each cooked material slot, the
-   writer resolves the material's texture, dedupes by
-   `ResourceId`, copies the `.psxt` bytes into
-   `generated/textures/texture_NNN.psxt`, and adds a
-   `LevelAssetRecord` of kind `Texture`.
-3. **Material records** -- `LevelMaterialRecord`s pinned to
-   `(room, local_slot)`, ordered by slot. Each room's
-   `material_first..material_count` slice covers exactly its
-   cooked material count.
-4. **Residency records** -- `ROOM_RESIDENCY` lists required RAM
-   (the room's world asset) and required VRAM (the texture
-   assets the room's materials reference, deduplicated).
-
-`AssetId` order is deterministic across runs: rooms first (in
-scene-tree order), then textures (in first-use order from the
-material walk).
-
-## Reader (engine/examples/editor-playtest)
-
-The runtime example wires the contract end-to-end:
-
-```rust
-// 1. Pick a room.
-let room = &ROOMS[0];
-
-// 2. Run the residency contract. The manager tracks RAM/VRAM
-//    membership; this call says which assets are missing
-//    (need uploading) vs. already-resident.
-let residency = ROOM_RESIDENCY.iter().find(|r| r.room == 0).unwrap();
-let cs = RESIDENCY.ensure_room_resident(residency);
-
-// 3. Resolve the world asset and parse it.
-let asset = find_asset_of_kind(ASSETS, room.world_asset, AssetKind::RoomWorld)?;
-let world = AssetWorld::from_bytes(asset.bytes)?;
-let runtime_room = RuntimeRoom::from_world(world);
-
-// 4. Build a material table from the room's material slice.
-//    Each material's texture_asset is uploaded once (skipped
-//    on subsequent rooms) and its CLUT/tpage word is cached.
-let materials = build_room_materials(room);
-
-// 5. Render.
-draw_room(runtime_room.render(), &materials, &camera, options, ...);
-```
-
-`ResidencyManager<RAM_CAP, VRAM_CAP>` is a no-alloc fixed-size
-tracker. RAM membership is logical (every asset is
-`include_bytes!`-resident from program start), but VRAM
-membership is meaningful -- each texture uploads once, and
-subsequent room loads see them already-resident.
-
-## Future backing stores
-
-The schema doesn't change. What changes is who owns
-`asset.bytes`:
+`RoomStreamScheduler<N>` (`active_room_streaming.rs`) owns
+`N = STREAMED_ROOM_SLOT_COUNT` (currently 6) byte buffers of
+`STREAMED_ROOM_SLOT_BYTES` each. Per slot:
 
 ```text
-Today:    LevelAssetRecord { bytes: include_bytes!(...) }    pins to EXE text
-Soon:     AssetStorage::StreamPack { pack, offset, size }    paged by CD reader
-Later:    AssetStorage::Composite                            mixed embedded + paged
+StreamedRoomSlot { room, byte_count, last_used, state }
+state: Empty | Loading | Resident | Failed
 ```
 
-Stream packs are a **disk packaging optimisation**, not a
-memory-residency unit. Multiple stream packs may share assets,
-or one stream pack may carry assets that get evicted
-independently. The residency manager already operates on
-asset-granular RAM/VRAM membership; adding a CD-pager underneath
-won't change `ROOM_RESIDENCY`'s semantics.
+`room_slots` is a fixed array map (room index -> slot) whose entries
+are validated against the slot's current room and state on every
+lookup, so stale entries after slot reuse cannot resolve.
 
-## Out of scope (deliberate)
+Once per sim tick the residency owner calls `reconcile_residency`
+with the desired room window:
 
-- **CD streaming** -- no I/O, no async, no scheduler.
-- **Runtime baking** -- farfield impostors are an offline-baked
-  asset class. Render-to-texture from the runtime is not
-  planned.
-- **Portals / PVS** -- adjacency / visibility computation is the
-  job of a future cooker pass; the residency lists this pass
-  emits don't include warm preload hints yet.
-- **Actors / lights / audio / scripts** -- separate asset
-  kinds, separate writers, separate readers.
+1. `begin_window` bumps the epoch and clears the window counters.
+2. `set_resident_window` pins exactly the desired set. Pinned rooms
+   are never eviction candidates.
+3. `plan_window_loads` walks the requests: already-resident rooms
+   refresh `last_used`; missing rooms get slots via `choose_slot`
+   (free or Failed slots first, then LRU among unpinned, unrequested,
+   unreserved residents). Only the active prefix of the request list
+   may evict (`protected_count`); prefetch requests never push out
+   resident rooms.
+4. `start_load_plan` hands the plan to the single
+   `WorldRoomSlotsReadJob`, which streams sectors from the world pack
+   (`pump`, budgeted by `max_sectors` per tick) and validates a
+   per-chunk checksum. Slots promote to Resident per entry as each
+   chunk completes; a current-room request that cannot wait aborts
+   the in-flight job (`abort_active_load`) and reclaims its Loading
+   slots.
 
-The schema enforces that policy: a record type only exists
-when both the writer and reader for it ship in the same pass.
+### Failure policy
+
+A failed chunk (checksum mismatch, TOC miss, timeout, oversized)
+marks the slot Failed and enters the room into a retry backoff:
+first retry after 16 reconcile windows (~0.27 s), doubling per
+consecutive failure to a cap of 512 windows (~8.5 s), reset by any
+successful load. Failed slots count as free for other rooms. The
+room is never abandoned; the backoff only bounds how often a
+permanently bad chunk can churn the CD and occupy the job pipeline.
+`ROOM_STREAM_FAILED_LOADS` counts new failures per window.
+
+## Surface caches: baked pools vs streamed in-place slices
+
+Baked rooms copy parsed geometry into the `ROOM_CACHE_*` static
+pools; their cache records index those pools.
+
+Streamed rooms render DIRECTLY out of their slot bytes:
+`streamed_room_surface_cache_slices` re-resolves the resident slot
+and cross-checks all chunk-view offsets/counts against the cache
+snapshot on EVERY call before returning slices, and
+`parse_streamed_compact_collision_room` does the same for collision.
+A room whose slot was reused fails resolution and the caller falls
+back (the room pops for a frame instead of drawing foreign bytes).
+
+**Lifetime contract:** the returned slices are typed `'static` but
+point into slot buffers the scheduler overwrites on reuse. They are
+valid only until the next streaming step. Never store them across
+ticks; re-resolve per use. Holding them longer is sound only for
+active-window rooms (pinned against eviction) -- the camera collision
+cache relies on that and additionally keys on the streaming RESIDENT
+mask, so residency turnover forces a re-gather even while the
+incremental active-window job still lags the pin set.
+
+## Materials and VRAM
+
+- Streamed room materials are parsed once at room build and COPIED
+  into `ROOM_MATERIAL_POOL[stream_slot]`; they are only consumed
+  alongside successfully resolved geometry, so a reused slot's stale
+  pool entry is unreachable.
+- VRAM is a 64-slot allocator (`vram_runtime.rs`) with per-use CLUT
+  modes (opaque, transparent-zero, model atlas, sky panorama). Room
+  textures upload on demand and `evict_unreferenced_vram` reclaims
+  slots no longer referenced by the streaming window. Menu UI images
+  are scoped per UI scene; the sky panorama is gameplay-scoped
+  (loaded on gameplay entry, freed on exit). The VRAM seam is a
+  phase-2 audit item (slot exhaustion and fragmentation behavior as
+  content grows).
+
+## Invariants the render side relies on (verified in the audit)
+
+1. Slot lookups validate room identity and state; stale map entries
+   cannot resolve.
+2. The pinned window (the active room set) cannot be evicted mid-use.
+3. Streamed geometry/collision access re-validates per call; eviction
+   degrades to a fallback, never to foreign bytes.
+4. Departing rooms (left the window) may pop for the frames between
+   unpinning and the active-window job catching up; they cannot draw
+   another room's data.
+
+## Related
+
+- `docs/streaming-audit-2026-06-12.md` -- the audit this doc is built
+  from, including phase-2 candidates (cd_stream internals, VRAM seam,
+  window-job ordering, surface-cache Overflow retry).
+- `docs/world-grid-architecture.md` -- the cooked chunk format the
+  slots hold.
