@@ -102,18 +102,23 @@ pub mod stage {
     pub const BOX_PROP_SHARDS: u16 = 43;
     /// Editor-authored image/card props, excluding box props.
     pub const IMAGE_CARDS: u16 = 44;
+    /// Pre-collision actor work in the fixed update: prop advances,
+    /// interactables, lock-on, evade/anim input, attack break checks.
+    pub const UPDATE_ACTOR: u16 = 46;
+    /// Always-on active-room window refresh at the fixed-update tail.
+    pub const UPDATE_WINDOW: u16 = 47;
 }
 
 /// Number of stage slots, including index zero for unknown/reserved ids.
-/// Sized to the highest stage id (`OT_WAIT = 45`) plus one.
-pub const STAGE_COUNT: usize = 46;
+/// Sized to the highest stage id (`UPDATE_WINDOW = 47`) plus one.
+pub const STAGE_COUNT: usize = 48;
 
 // Enforce `STAGE_COUNT = highest stage id + 1` at compile time. The host's
 // stage arrays are indexed by id and out-of-range ids are dropped silently,
 // so a new higher id without a matching STAGE_COUNT bump would quietly
-// vanish from every summary. Adding an id above OT_WAIT trips this and
-// must update both the count and this guard.
-const _: () = assert!(stage::OT_WAIT as usize == STAGE_COUNT - 1);
+// vanish from every summary. Adding a higher id trips this and must
+// update both the count and this guard.
+const _: () = assert!(stage::UPDATE_WINDOW as usize == STAGE_COUNT - 1);
 
 /// Runtime task ids.
 pub mod task {

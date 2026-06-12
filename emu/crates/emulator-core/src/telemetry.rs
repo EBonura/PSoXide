@@ -461,6 +461,8 @@ pub fn stage_name(id: u16) -> &'static str {
         stage::BOX_PROP_DEBRIS => "box debris",
         stage::BOX_PROP_SHARDS => "box shards",
         stage::IMAGE_CARDS => "image cards",
+        stage::UPDATE_ACTOR => "update actor",
+        stage::UPDATE_WINDOW => "update window",
         _ => "unknown",
     }
 }

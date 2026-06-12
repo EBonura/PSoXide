@@ -1987,6 +1987,8 @@ const PROFILE_LOG_HEADER: &[&str] = &[
     "sim_residency",
     "sim_pump",
     "sim_solve",
+    "update_actor",
+    "update_window",
     "sim_ticks",
     "visual_frames",
     "visual_skipped_vblanks",
@@ -2209,6 +2211,8 @@ impl GuestProfileLog {
         push!(stage(s::SIM_RESIDENCY));
         push!(stage(s::SIM_PUMP));
         push!(stage(s::SIM_SOLVE));
+        push!(stage(s::UPDATE_ACTOR));
+        push!(stage(s::UPDATE_WINDOW));
         push!(counter_total(&summary, c::SIM_TICKS));
         push!(counter_total(&summary, c::VISUAL_FRAMES));
         push!(counter_total(&summary, c::VISUAL_SKIPPED_VBLANKS));
