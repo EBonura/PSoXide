@@ -22,10 +22,61 @@ const SKY_CYCLORAMA_COLUMNS_MAX: u8 = 12;
 /// behind all world geometry (which `WORLD_BAND` caps at `OT_DEPTH - 2`).
 const SKY_OT_SLOT: psx_engine::DepthSlot = psx_engine::DepthSlot::new(OT_DEPTH - 1);
 
+/// Rotation-keyed cache of the cyclorama's finished GP0 packets.
+///
+/// The whole sky draw is a pure function of the camera ROTATION (the
+/// dome is camera-centred, translation is ignored) plus the sky record,
+/// so on every frame where the camera does not turn the ~96 packets are
+/// bit-identical to the previous frame. Cache them in statics and only
+/// relink into the OT; rebuild on an exact rotation/record key change.
+/// Safe for the same reason the prebuilt room-quad pool is: the previous
+/// frame's OT DMA is drained at the present flip before the next visual
+/// frame relinks these packets.
+const SKY_CACHE_CAP: usize = SKY_CYCLORAMA_COLUMNS_MAX as usize * SKY_PANORAMA_PALETTE_BANDS;
+const SKY_CACHE_PACKET_EMPTY: QuadTexturedMaterial = QuadTexturedMaterial {
+    tag: 0,
+    tex_window: 0,
+    color_cmd: 0,
+    v0: 0,
+    uv0_clut: 0,
+    v1: 0,
+    uv1_tpage: 0,
+    v2: 0,
+    uv2: 0,
+    v3: 0,
+    uv3: 0,
+};
+#[derive(Copy, Clone, PartialEq, Eq)]
+struct SkyCacheKey {
+    sin_yaw: i32,
+    cos_yaw: i32,
+    sin_pitch: i32,
+    cos_pitch: i32,
+    texture_asset: u16,
+    flags: u32,
+    columns: u8,
+    rows: u8,
+    horizon_percent: u8,
+}
+static mut SKY_CACHE_PACKETS: [QuadTexturedMaterial; SKY_CACHE_CAP] =
+    [SKY_CACHE_PACKET_EMPTY; SKY_CACHE_CAP];
+static mut SKY_CACHE_COUNT: usize = 0;
+static mut SKY_CACHE_VALID: bool = false;
+static mut SKY_CACHE_KEY: SkyCacheKey = SkyCacheKey {
+    sin_yaw: 0,
+    cos_yaw: 0,
+    sin_pitch: 0,
+    cos_pitch: 0,
+    texture_asset: 0,
+    flags: 0,
+    columns: 0,
+    rows: 0,
+    horizon_percent: 0,
+};
+
 pub(super) fn draw_sky_panorama(
     sky: LevelSkyRecord,
     camera: WorldCamera,
-    primitive_packets: &mut PrimitivePacketArena<'_>,
     ot: &mut OtFrame<'_, OT_DEPTH>,
 ) {
     if sky.flags & sky_flags::ENABLED == 0 {
@@ -42,6 +93,38 @@ pub(super) fn draw_sky_panorama(
         return;
     }
 
+    let key = SkyCacheKey {
+        sin_yaw: camera.sin_yaw.raw(),
+        cos_yaw: camera.cos_yaw.raw(),
+        sin_pitch: camera.sin_pitch.raw(),
+        cos_pitch: camera.cos_pitch.raw(),
+        texture_asset: sky.cloud_layer.texture_asset.0,
+        flags: sky.flags as u32,
+        columns: sky.skybox_columns,
+        rows: sky.skybox_rows,
+        horizon_percent: sky.horizon_percent,
+    };
+    unsafe {
+        if !SKY_CACHE_VALID || SKY_CACHE_KEY != key {
+            SKY_CACHE_COUNT =
+                build_sky_panorama_packets(sky, camera, &mut *core::ptr::addr_of_mut!(SKY_CACHE_PACKETS));
+            SKY_CACHE_KEY = key;
+            SKY_CACHE_VALID = true;
+        }
+        let packets = &mut *core::ptr::addr_of_mut!(SKY_CACHE_PACKETS);
+        let mut i = 0usize;
+        while i < SKY_CACHE_COUNT {
+            ot.add_packet_slot(SKY_OT_SLOT, &mut packets[i]);
+            i += 1;
+        }
+    }
+}
+
+fn build_sky_panorama_packets(
+    sky: LevelSkyRecord,
+    camera: WorldCamera,
+    out: &mut [QuadTexturedMaterial; SKY_CACHE_CAP],
+) -> usize {
     let mut columns = sky
         .skybox_columns
         .clamp(SKY_CYCLORAMA_COLUMNS_MIN, SKY_CYCLORAMA_COLUMNS_MAX) as usize;
@@ -107,6 +190,7 @@ pub(super) fn draw_sky_panorama(
         );
     }
 
+    let mut count = 0usize;
     for row in 0..rows {
         let row_base = row * grid_stride;
         let next_row_base = row_base + grid_stride;
@@ -134,10 +218,13 @@ pub(super) fn draw_sky_panorama(
             if sky_quad_outside_screen(projected) {
                 continue;
             }
-            // Same GP0 words as the old immediate `draw_quad_textured_material`,
-            // but pushed into the OT background slot so the whole sky DMAs as
-            // one chain instead of per-quad FIFO writes + wait_cmd_ready spins.
-            let quad = QuadTexturedMaterial::with_material(
+            if count >= out.len() {
+                break;
+            }
+            // Same GP0 words as the old arena-pushed quad; the cyclorama
+            // packets now live in the rotation-keyed static cache and are
+            // relinked into the OT background slot each frame.
+            out[count] = QuadTexturedMaterial::with_material(
                 projected,
                 [
                     (column_u0[column], v0),
@@ -147,11 +234,10 @@ pub(super) fn draw_sky_panorama(
                 ],
                 material,
             );
-            if let Some(packet) = primitive_packets.push(quad) {
-                ot.add_packet_slot(SKY_OT_SLOT, packet);
-            }
+            count += 1;
         }
     }
+    count
 }
 
 fn sky_quad_outside_screen(points: [(i16, i16); 4]) -> bool {
