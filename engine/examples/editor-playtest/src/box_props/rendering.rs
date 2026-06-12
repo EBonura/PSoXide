@@ -8,6 +8,74 @@ struct BoxPropFaceTextureRuntime {
     v_max: u8,
 }
 
+/// Break-time debris cache: a broken box's floor chips re-derived the
+/// same world quads, UVs and bilinear base colours every frame (~36
+/// multiplies per chip for the colours alone), all fixed the moment
+/// the box breaks. The most recently drawn broken boxes keep those
+/// values here; per frame only projection, fog and the submit remain.
+/// A slot is filled EAGERLY for all chips when claimed, so there is no
+/// partial-validity hazard; boxes beyond the pool simply refill on
+/// their next draw (worst case equals the old recompute cost).
+const DEBRIS_CACHE_SLOTS: usize = 16;
+
+#[derive(Copy, Clone)]
+struct DebrisChipCache {
+    quad: [WorldVertex; 4],
+    uvs: [(u8, u8); 4],
+    colors: [(u8, u8, u8); 4],
+    material: TextureMaterial,
+}
+
+static mut DEBRIS_CACHE: [[Option<DebrisChipCache>; BOX_PROP_FLOOR_DEBRIS_CHIPS.len()];
+    DEBRIS_CACHE_SLOTS] =
+    [const { [const { None }; BOX_PROP_FLOOR_DEBRIS_CHIPS.len()] }; DEBRIS_CACHE_SLOTS];
+static mut DEBRIS_CACHE_PROP: [usize; DEBRIS_CACHE_SLOTS] = [usize::MAX; DEBRIS_CACHE_SLOTS];
+static mut DEBRIS_CACHE_NEXT: u8 = 0;
+
+fn debris_cache_for(
+    prop_index: usize,
+    prop: &LevelBoxPropRecord,
+    face_textures: &[Option<BoxPropFaceTextureRuntime>; psx_level::BOX_PROP_FACE_COUNT],
+    bounds: BoxPropDebrisBounds,
+    floor_y: i32,
+) -> &'static [Option<DebrisChipCache>; BOX_PROP_FLOOR_DEBRIS_CHIPS.len()] {
+    unsafe {
+        let mut i = 0usize;
+        while i < DEBRIS_CACHE_SLOTS {
+            if DEBRIS_CACHE_PROP[i] == prop_index {
+                return &DEBRIS_CACHE[i];
+            }
+            i += 1;
+        }
+        let slot = (DEBRIS_CACHE_NEXT as usize) % DEBRIS_CACHE_SLOTS;
+        DEBRIS_CACHE_NEXT = DEBRIS_CACHE_NEXT.wrapping_add(1);
+        DEBRIS_CACHE_PROP[slot] = prop_index;
+        let entries = &mut DEBRIS_CACHE[slot];
+        let mut c = 0usize;
+        while c < BOX_PROP_FLOOR_DEBRIS_CHIPS.len() {
+            let chip = BOX_PROP_FLOOR_DEBRIS_CHIPS[c];
+            let face = chip.face as usize;
+            entries[c] = if face < psx_level::BOX_PROP_FACE_COUNT {
+                face_textures[face].map(|texture| DebrisChipCache {
+                    quad: box_prop_floor_debris_quad(bounds, floor_y, chip),
+                    uvs: box_prop_floor_debris_uvs(texture.u_max, texture.v_max, chip),
+                    colors: [
+                        box_prop_face_color_at(prop, face, chip.u0_q8, chip.v0_q8),
+                        box_prop_face_color_at(prop, face, chip.u1_q8, chip.v0_q8),
+                        box_prop_face_color_at(prop, face, chip.u1_q8, chip.v1_q8),
+                        box_prop_face_color_at(prop, face, chip.u0_q8, chip.v1_q8),
+                    ],
+                    material: texture.material,
+                })
+            } else {
+                None
+            };
+            c += 1;
+        }
+        &DEBRIS_CACHE[slot]
+    }
+}
+
 fn box_prop_face_textures(
     prop: &LevelBoxPropRecord,
 ) -> [Option<BoxPropFaceTextureRuntime>; psx_level::BOX_PROP_FACE_COUNT] {
@@ -126,6 +194,7 @@ pub(super) fn draw_box_prop_floor_debris<T>(
         };
         let face_textures = box_prop_face_textures(prop);
         draw_box_prop_floor_debris_chips(
+            index,
             prop,
             &face_textures,
             box_runtime.debris_bounds,
@@ -140,7 +209,9 @@ pub(super) fn draw_box_prop_floor_debris<T>(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_box_prop_floor_debris_chips<T>(
+    prop_index: usize,
     prop: &LevelBoxPropRecord,
     face_textures: &[Option<BoxPropFaceTextureRuntime>; psx_level::BOX_PROP_FACE_COUNT],
     bounds: BoxPropDebrisBounds,
@@ -156,36 +227,19 @@ fn draw_box_prop_floor_debris_chips<T>(
         + PrimitiveSink<TriTextured>
         + PrimitiveSink<TriTexturedGouraud>,
 {
-    for chip in BOX_PROP_FLOOR_DEBRIS_CHIPS {
-        let face = chip.face as usize;
-        if face >= psx_level::BOX_PROP_FACE_COUNT {
+    let cache = debris_cache_for(prop_index, prop, face_textures, bounds, floor_y);
+    for entry in cache.iter() {
+        let Some(chip) = entry else {
             continue;
-        }
+        };
         draw_box_prop_floor_debris_chip(
-            prop,
-            face,
-            face_textures[face],
-            bounds,
-            floor_y,
-            chip,
-            projector,
-            camera,
-            options,
-            lighting,
-            triangles,
-            world,
+            chip, projector, camera, options, lighting, triangles, world,
         );
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn draw_box_prop_floor_debris_chip<T>(
-    prop: &LevelBoxPropRecord,
-    face: usize,
-    face_texture: Option<BoxPropFaceTextureRuntime>,
-    bounds: BoxPropDebrisBounds,
-    floor_y: i32,
-    chip: BoxPropFloorDebrisChip,
+    chip: &DebrisChipCache,
     projector: LoadedWorldCameraGte,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
@@ -197,13 +251,9 @@ fn draw_box_prop_floor_debris_chip<T>(
         + PrimitiveSink<TriTextured>
         + PrimitiveSink<TriTexturedGouraud>,
 {
-    let Some(face_texture) = face_texture else {
-        return;
-    };
-
-    let material = face_texture.material;
-    let uvs = box_prop_floor_debris_uvs(face_texture.u_max, face_texture.v_max, chip);
-    let quad = box_prop_floor_debris_quad(bounds, floor_y, chip);
+    let material = chip.material;
+    let uvs = chip.uvs;
+    let quad = chip.quad;
     let opts = options
         .with_depth_policy(DepthPolicy::Average)
         .with_cull_mode(CullMode::None)
@@ -214,19 +264,19 @@ fn draw_box_prop_floor_debris_chip<T>(
         if let Some(projected) = projector.project_world_quad(quad) {
             let colors = [
                 lighting.apply_vertex_fog_weight(
-                    box_prop_face_color_at(prop, face, chip.u0_q8, chip.v0_q8),
+                    chip.colors[0],
                     lighting.fog_weight_at_depth(projected[0].sz),
                 ),
                 lighting.apply_vertex_fog_weight(
-                    box_prop_face_color_at(prop, face, chip.u1_q8, chip.v0_q8),
+                    chip.colors[1],
                     lighting.fog_weight_at_depth(projected[1].sz),
                 ),
                 lighting.apply_vertex_fog_weight(
-                    box_prop_face_color_at(prop, face, chip.u1_q8, chip.v1_q8),
+                    chip.colors[2],
                     lighting.fog_weight_at_depth(projected[2].sz),
                 ),
                 lighting.apply_vertex_fog_weight(
-                    box_prop_face_color_at(prop, face, chip.u0_q8, chip.v1_q8),
+                    chip.colors[3],
                     lighting.fog_weight_at_depth(projected[3].sz),
                 ),
             ];
@@ -237,22 +287,10 @@ fn draw_box_prop_floor_debris_chip<T>(
         }
     }
     let colors = [
-        lighting.apply_vertex_fog(
-            box_prop_face_color_at(prop, face, chip.u0_q8, chip.v0_q8),
-            quad[0],
-        ),
-        lighting.apply_vertex_fog(
-            box_prop_face_color_at(prop, face, chip.u1_q8, chip.v0_q8),
-            quad[1],
-        ),
-        lighting.apply_vertex_fog(
-            box_prop_face_color_at(prop, face, chip.u1_q8, chip.v1_q8),
-            quad[2],
-        ),
-        lighting.apply_vertex_fog(
-            box_prop_face_color_at(prop, face, chip.u0_q8, chip.v1_q8),
-            quad[3],
-        ),
+        lighting.apply_vertex_fog(chip.colors[0], quad[0]),
+        lighting.apply_vertex_fog(chip.colors[1], quad[1]),
+        lighting.apply_vertex_fog(chip.colors[2], quad[2]),
+        lighting.apply_vertex_fog(chip.colors[3], quad[3]),
     ];
     if let Some(projected) = camera.project_world_quad(quad) {
         submit_projected_textured_gouraud_quad_u8(
