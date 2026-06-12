@@ -337,6 +337,11 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
     if visible_cells.is_empty() {
         return stats;
     }
+    // Pin the dedup scratch to exactly the room's vertex count so the
+    // ready-flag test inside the collect loop is the single bound that
+    // covers both slices (see push_unique_projected_index).
+    let projected_ready = &mut projected_ready[..cached_vertices.len()];
+    let projected_indices = &mut projected_indices[..cached_vertices.len()];
 
     let use_vertex_depths = lighting.uses_vertex_depths();
     let use_direct_baked_rgb = lighting.uses_direct_baked_vertex_rgb();
@@ -391,8 +396,13 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
         cell_stage_end(crate::telemetry::stage::CELL_DEPTH);
 
         stats.cells_drawn = stats.cells_drawn.wrapping_add(1);
-        accepted_cell_indices[accepted_cell_count] = cell_index as u16;
-        accepted_cell_depths[accepted_cell_count] = cell_depth;
+        // SAFETY: both accepted arrays were validated to hold at least
+        // `visible_cells.len()` entries at function entry, and the count
+        // grows at most once per visible cell, so it is always in range.
+        unsafe {
+            *accepted_cell_indices.get_unchecked_mut(accepted_cell_count) = cell_index as u16;
+            *accepted_cell_depths.get_unchecked_mut(accepted_cell_count) = cell_depth;
+        }
         accepted_cell_count += 1;
         cell_stage_begin(crate::telemetry::stage::CELL_COLLECT);
         projected_index_count = collect_cached_cell_vertex_indices(
@@ -541,6 +551,11 @@ pub fn draw_indexed_cached_room_vertex_lit_all_cells<const OT: usize, L: WorldSu
     if cached_cells.is_empty() || cached_surfaces.is_empty() {
         return stats;
     }
+    // Pin the dedup scratch to exactly the room's vertex count so the
+    // ready-flag test inside the collect loop is the single bound that
+    // covers both slices (see push_unique_projected_index).
+    let projected_ready = &mut projected_ready[..cached_vertices.len()];
+    let projected_indices = &mut projected_indices[..cached_vertices.len()];
 
     let use_vertex_depths = lighting.uses_vertex_depths();
     let use_direct_baked_rgb = lighting.uses_direct_baked_vertex_rgb();
@@ -552,8 +567,12 @@ pub fn draw_indexed_cached_room_vertex_lit_all_cells<const OT: usize, L: WorldSu
 
     let cell_frustum = CellFrustum::new(camera, options, screen_margin);
     cell_stage_begin(crate::telemetry::stage::CELL_DEPTH);
-    for (cell_index, cell) in cached_cells.iter().enumerate() {
-        if cell.surface_count == 0 || cell_index > u16::MAX as usize {
+    // Cap the scan slice up front instead of testing `cell_index >
+    // u16::MAX` on every iteration (everything past the cap would be
+    // skipped one by one anyway).
+    let scan_cells = &cached_cells[..cached_cells.len().min(u16::MAX as usize + 1)];
+    for (cell_index, cell) in scan_cells.iter().enumerate() {
+        if cell.surface_count == 0 {
             continue;
         }
         stats.cells_considered = stats.cells_considered.wrapping_add(1);
@@ -570,8 +589,13 @@ pub fn draw_indexed_cached_room_vertex_lit_all_cells<const OT: usize, L: WorldSu
             continue;
         }
         stats.cells_drawn = stats.cells_drawn.wrapping_add(1);
-        accepted_cell_indices[accepted_cell_count] = cell_index as u16;
-        accepted_cell_depths[accepted_cell_count] = visibility_view.z;
+        // SAFETY: both accepted arrays were validated to hold at least
+        // `cached_cells.len()` entries at function entry, and the count
+        // grows at most once per scanned cell, so it is always in range.
+        unsafe {
+            *accepted_cell_indices.get_unchecked_mut(accepted_cell_count) = cell_index as u16;
+            *accepted_cell_depths.get_unchecked_mut(accepted_cell_count) = visibility_view.z;
+        }
         accepted_cell_count += 1;
     }
     sort_cached_room_cell_indices_by_depth(
@@ -767,13 +791,12 @@ fn collect_cached_cell_vertex_indices(
     mut projected_index_count: usize,
 ) -> usize {
     if cell.vertex_count == 0 {
-        let first = cell.surface_first as usize;
+        let first = (cell.surface_first as usize).min(cached_surfaces.len());
         let end = first
             .saturating_add(cell.surface_count as usize)
             .min(cached_surfaces.len());
-        let mut surface_index = first;
-        while surface_index < end {
-            for raw_index in cached_surfaces[surface_index].vertex_indices {
+        for surface in &cached_surfaces[first..end] {
+            for raw_index in surface.vertex_indices {
                 projected_index_count = push_unique_projected_index(
                     raw_index,
                     projected_ready,
@@ -781,27 +804,30 @@ fn collect_cached_cell_vertex_indices(
                     projected_index_count,
                 );
             }
-            surface_index += 1;
         }
         return projected_index_count;
     }
-    let first = cell.vertex_first as usize;
+    let first = (cell.vertex_first as usize).min(cached_cell_vertices.len());
     let end = first
         .saturating_add(cell.vertex_count as usize)
         .min(cached_cell_vertices.len());
-    let mut i = first;
-    while i < end {
+    for &raw_index in &cached_cell_vertices[first..end] {
         projected_index_count = push_unique_projected_index(
-            cached_cell_vertices[i],
+            raw_index,
             projected_ready,
             projected_indices,
             projected_index_count,
         );
-        i += 1;
     }
     projected_index_count
 }
 
+/// Callers slice `projected_ready` and `projected_indices` to exactly
+/// the room's vertex count before the collect loop, so the ready-flag
+/// lookup below is the single data-dependent bound: an index that
+/// passes it is a valid vertex slot, and the write cursor (one push
+/// per distinct vertex) can never reach the indices slice end.
+#[inline(always)]
 fn push_unique_projected_index(
     raw_index: u16,
     projected_ready: &mut [bool],
@@ -809,16 +835,19 @@ fn push_unique_projected_index(
     projected_index_count: usize,
 ) -> usize {
     let vertex_index = raw_index as usize;
-    if vertex_index < projected_ready.len()
-        && !projected_ready[vertex_index]
-        && projected_index_count < projected_indices.len()
-    {
-        projected_ready[vertex_index] = true;
-        projected_indices[projected_index_count] = raw_index;
-        projected_index_count + 1
-    } else {
-        projected_index_count
+    if let Some(ready) = projected_ready.get_mut(vertex_index) {
+        if !*ready {
+            *ready = true;
+            debug_assert!(projected_index_count < projected_indices.len());
+            // SAFETY: see the function doc; distinct pushes are bounded
+            // by `projected_ready.len() == projected_indices.len()`.
+            unsafe {
+                *projected_indices.get_unchecked_mut(projected_index_count) = raw_index;
+            }
+            return projected_index_count + 1;
+        }
     }
+    projected_index_count
 }
 
 const fn cached_room_cell_key(x: u16, z: u16) -> u32 {
