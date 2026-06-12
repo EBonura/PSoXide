@@ -1034,6 +1034,27 @@ impl PreparedTriangleDepth {
             depth: depth.raw(),
         })
     }
+
+    /// Build a prepared depth from a whole-quad surface's own averaged
+    /// projected depth -- the same key its two split leaves would each
+    /// approximate. Lets risky (triangle-depth) whole-quad surfaces
+    /// stay on the single-packet quad path with a per-surface sort key
+    /// instead of falling back to two triangle leaves.
+    #[inline(always)]
+    pub(crate) fn from_quad_average<const OT_DEPTH: usize>(
+        options: WorldSurfaceOptions,
+        projected: [ProjectedVertex; 4],
+    ) -> Self {
+        let average =
+            (projected[0].sz + projected[1].sz + projected[2].sz + projected[3].sz) / 4;
+        let depth = CameraDepth::new(average.saturating_add(options.depth_bias));
+        Self {
+            slot: options
+                .depth_band
+                .slot_depth::<OT_DEPTH>(options.depth_range, depth),
+            depth: depth.raw(),
+        }
+    }
 }
 
 /// Scratch command for a mixed world render pass.
