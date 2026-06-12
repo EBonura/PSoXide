@@ -177,6 +177,11 @@ pub struct LaunchArgs {
     /// should produce identical numbers.
     #[arg(long)]
     pub dump_hash: bool,
+    /// Print guest debug-log lines (the editor's Debug Viz channel) to
+    /// stderr as they arrive. Requires a guest built with the
+    /// `emulator-telemetry` feature; silent otherwise.
+    #[arg(long)]
+    pub guest_debug_log: bool,
     /// Write visible-display FNV-1a hashes at rendered visual-frame
     /// checkpoints. The CSV is stable enough to diff across performance
     /// experiments.
@@ -246,6 +251,30 @@ pub struct LaunchArgs {
     /// `--hold-forward` walk never triggers.
     #[arg(long)]
     pub sweep: bool,
+    /// Simulate the GUI's live presentation loop headless: every
+    /// `--live-sim-cycles` bus cycles, drain the completed cmd log into a
+    /// PERSISTENT HW renderer (incremental replay, exactly like the editor
+    /// viewport) and snapshot what the viewport would show (display rect of
+    /// the persistent target, or the CPU display fallback) into this
+    /// directory. Diagnoses presentation bugs invisible to `--dump-hw`'s
+    /// fresh full-log replay.
+    #[arg(long)]
+    pub live_sim_dump: Option<PathBuf>,
+    /// Bus cycles per simulated host frame (default ~8.5ms at 33.8688 MHz,
+    /// matching a 118 Hz ProMotion host).
+    #[arg(long, default_value_t = 287_000)]
+    pub live_sim_cycles: u64,
+    /// Start writing snapshots once bus cycles pass this value (the
+    /// incremental replay itself runs from boot regardless).
+    #[arg(long, default_value_t = 0)]
+    pub live_sim_from: u64,
+    /// Maximum number of snapshots to write.
+    #[arg(long, default_value_t = 60)]
+    pub live_sim_frames: u32,
+    /// Internal resolution multiplier for the simulated live renderer
+    /// (the GUI session under investigation ran at 4).
+    #[arg(long, default_value_t = 4)]
+    pub live_sim_scale: u32,
 }
 
 /// Arguments for `build-project-disc`.
@@ -590,7 +619,7 @@ fn run_headless_launch(
     let mut bus = match ext.as_str() {
         "exe" => {
             let mut bus = Bus::new_without_bios();
-            if args.dump_hw.is_some() {
+            if args.dump_hw.is_some() || args.live_sim_dump.is_some() {
                 bus.gpu.enable_cmd_log();
             }
             let bytes = std::fs::read(&game_path).map_err(|e| e.to_string())?;
@@ -620,7 +649,7 @@ fn run_headless_launch(
             } else {
                 bus_from_configured_bios(&settings)?
             };
-            if args.dump_hw.is_some() {
+            if args.dump_hw.is_some() || args.live_sim_dump.is_some() {
                 bus.gpu.enable_cmd_log();
             }
             let bytes = std::fs::read(&game_path).map_err(|e| e.to_string())?;
@@ -649,7 +678,7 @@ fn run_headless_launch(
             } else {
                 bus_from_configured_bios(&settings)?
             };
-            if args.dump_hw.is_some() {
+            if args.dump_hw.is_some() || args.live_sim_dump.is_some() {
                 bus.gpu.enable_cmd_log();
             }
             let disc = psoxide_settings::library::load_disc_from_cue(&game_path)?;
@@ -676,7 +705,7 @@ fn run_headless_launch(
                 return Err("--embedded-playtest does not support .ccd".to_string());
             }
             let mut bus = bus_from_configured_bios(&settings)?;
-            if args.dump_hw.is_some() {
+            if args.dump_hw.is_some() || args.live_sim_dump.is_some() {
                 bus.gpu.enable_cmd_log();
             }
             let disc = psoxide_settings::library::load_disc_from_ccd(&game_path)?;
@@ -766,6 +795,37 @@ fn run_headless_launch(
     let mut observed_counter_frames = observed_guest_frames;
     let mut profile_log = GuestProfileLog::new(args.profile_log.as_deref())?;
 
+    // Live-presentation simulator: a persistent HW renderer fed by
+    // periodic drains of the completed cmd log, mirroring the GUI's
+    // per-host-frame incremental replay (main.rs run loop). `live_vram`
+    // mirrors the GUI's pre-slice software-VRAM snapshot: it always
+    // holds VRAM as of the START of the next drained batch.
+    let mut live_sim = if let Some(dir) = args.live_sim_dump.as_deref() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        let (device, queue) = headless_wgpu_device()?;
+        let mut hw = psx_gpu_render::HwRenderer::new_headless(device, queue);
+        // Match the live session's internal scale (profiler: hw_scale=4).
+        let _ = hw.set_internal_scale(args.live_sim_scale, None);
+        let log_path = dir.join("live_sim.csv");
+        let mut log =
+            std::fs::File::create(&log_path).map_err(|e| format!("{}: {e}", log_path.display()))?;
+        use std::io::Write;
+        writeln!(
+            log,
+            "snap,cycles,batch_entries,display_x,display_y,h_off,v_off,bpp24,path"
+        )
+        .map_err(|e| e.to_string())?;
+        Some((
+            hw,
+            bus.gpu.vram.words().to_vec(),
+            args.live_sim_cycles.max(1),
+            0u32,
+            log,
+        ))
+    } else {
+        None
+    };
+
     // Step the CPU. Report early on opcode errors -- they're usually
     // "we hit an unimplemented instruction" and worth surfacing.
     let mut stopped_at: Option<u64> = None;
@@ -791,6 +851,146 @@ fn run_headless_launch(
             }
         }
         let current_guest_frames = bus.telemetry.frames_seen();
+        if args.guest_debug_log {
+            for line in bus.telemetry.drain_debug_logs() {
+                eprintln!("[guest f{}] {}", line.frame, line.text);
+            }
+        }
+        if let Some((hw, live_vram, next_deadline, snaps, log)) = live_sim.as_mut() {
+            if bus.cycles() >= *next_deadline {
+                *next_deadline = bus.cycles().saturating_add(args.live_sim_cycles.max(1));
+                let batch = bus.gpu.drain_completed_cmd_log();
+                let env_before = hw.debug_env();
+                if bus.cycles() >= args.live_sim_from {
+                    let dir = args.live_sim_dump.as_deref().unwrap();
+                    let pre = dir.join("vram_pre.bin");
+                    if !pre.exists() {
+                        let mut raw = Vec::with_capacity(live_vram.len() * 2);
+                        for w in live_vram.iter() {
+                            raw.extend_from_slice(&w.to_le_bytes());
+                        }
+                        std::fs::write(&pre, &raw).map_err(|e| e.to_string())?;
+                    }
+                }
+                hw.render_frame(&bus.gpu, &batch, live_vram);
+                {
+                    // Append this batch to the raw batch tape for offline
+                    // poison-bisection (custom binary: per batch u32 entry
+                    // count; per entry u8 opcode + u32 word count + words).
+                    use std::io::Write;
+                    let dir = args.live_sim_dump.as_deref().unwrap();
+                    let mut tape = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(dir.join("batches.bin"))
+                        .map_err(|e| e.to_string())?;
+                    let mut buf: Vec<u8> = Vec::new();
+                    buf.extend_from_slice(&(batch.len() as u32).to_le_bytes());
+                    for entry in &batch {
+                        buf.push(entry.opcode);
+                        buf.extend_from_slice(&(entry.fifo.len() as u32).to_le_bytes());
+                        for w in &entry.fifo {
+                            buf.extend_from_slice(&w.to_le_bytes());
+                        }
+                    }
+                    tape.write_all(&buf).map_err(|e| e.to_string())?;
+                }
+                *live_vram = bus.gpu.vram.words().to_vec();
+                if bus.cycles() >= args.live_sim_from && *snaps < args.live_sim_frames {
+                    if *snaps == 0 {
+                        // Soft-VRAM snapshot so offline tests can replay
+                        // recorded batches with real textures.
+                        let dir = args.live_sim_dump.as_deref().unwrap();
+                        let mut raw = Vec::with_capacity(live_vram.len() * 2);
+                        for w in live_vram.iter() {
+                            raw.extend_from_slice(&w.to_le_bytes());
+                        }
+                        std::fs::write(dir.join("vram.bin"), &raw).map_err(|e| e.to_string())?;
+                    }
+                    let area = bus.gpu.display_area();
+                    let h_off = bus.gpu.horizontal_display_offset_px();
+                    let v_off = bus.gpu.vertical_display_offset_px();
+                    let dir = args.live_sim_dump.as_deref().unwrap();
+                    let path = dir.join(format!("live_{:04}.ppm", *snaps));
+                    // Mirror `frontend_display`: CPU display fallback for
+                    // 24bpp / screen-offset, HW target sub-rect otherwise.
+                    // Both framebuffer pages from the persistent target,
+                    // to separate "never painted" from "painted then wiped".
+                    let s4 = hw.internal_scale();
+                    let (pw, ph, prgba) = hw.read_subrect_rgba8(0, 0, 320 * s4, 480 * s4);
+                    let mut b0 = 0u32;
+                    let mut b240 = 0u32;
+                    for row in 0..ph {
+                        for col in 0..pw {
+                            let i = ((row * pw + col) * 4) as usize;
+                            let lum = prgba[i] as u32 + prgba[i + 1] as u32 + prgba[i + 2] as u32;
+                            if lum > 30 {
+                                if row < ph / 2 {
+                                    b0 += 1;
+                                } else {
+                                    b240 += 1;
+                                }
+                            }
+                        }
+                    }
+                    eprintln!(
+                        "[live-sim] snap {} batch={} disp_y={} page0={} page240={}",
+                        *snaps,
+                        batch.len(),
+                        area.y,
+                        b0,
+                        b240
+                    );
+                    write_rgb_ppm_from_rgba(
+                        &dir.join(format!("pages_{:04}.ppm", *snaps)),
+                        pw,
+                        ph,
+                        &prgba,
+                    )?;
+                    let tag = if area.bpp24 || h_off != 0 || v_off != 0 {
+                        let (rgba, w, hgt) = bus.gpu.display_rgba8();
+                        write_rgb_ppm_from_rgba(&path, w, hgt, &rgba)?;
+                        "cpu"
+                    } else {
+                        let s = hw.internal_scale();
+                        let (w, hgt, rgba) = hw.read_subrect_rgba8(
+                            area.x as u32 * s,
+                            area.y as u32 * s,
+                            area.width as u32 * s,
+                            area.height as u32 * s,
+                        );
+                        write_rgb_ppm_from_rgba(&path, w, hgt, &rgba)?;
+                        "hw"
+                    };
+                    use std::io::Write;
+                    let mut op_counts = std::collections::BTreeMap::new();
+                    for entry in &batch {
+                        *op_counts.entry(entry.opcode).or_insert(0u32) += 1;
+                    }
+                    let ops = op_counts
+                        .iter()
+                        .map(|(op, n)| format!("{op:02x}:{n}"))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    writeln!(
+                        log,
+                        "{},{},{},{},{},{},{},{},{},{}",
+                        snaps,
+                        bus.cycles(),
+                        batch.len(),
+                        area.x,
+                        area.y,
+                        h_off,
+                        v_off,
+                        area.bpp24,
+                        tag,
+                        format!("env{env_before:?} {ops}")
+                    )
+                    .map_err(|e| e.to_string())?;
+                    *snaps += 1;
+                }
+            }
+        }
         // Advance on the editor's tick clock (see setup above), not on
         // `frames_seen`: one sample/pulse window per vblank-period cycle
         // budget, capped at the same instruction budget `step_one_frame` uses.
@@ -1618,6 +1818,7 @@ fn validation_launch_args(
         embedded_playtest: artifact.embedded_playtest,
         bios_boot: artifact.bios_boot,
         dump_hash: false,
+        guest_debug_log: false,
         visual_hash_log: None,
         visual_hash_interval: 1,
         guest_hash_log: None,
@@ -1633,6 +1834,11 @@ fn validation_launch_args(
         hold_forward: checkpoint.hold_forward,
         hold_run: checkpoint.hold_run,
         sweep: false,
+        live_sim_dump: None,
+        live_sim_cycles: 287_000,
+        live_sim_from: 0,
+        live_sim_frames: 0,
+        live_sim_scale: 4,
     }
 }
 
@@ -2275,7 +2481,10 @@ impl GuestProfileLog {
         push!(counter_total(&summary, c::ROOM_SURF_BACKFACE_CULLED));
         push!(counter_total(&summary, c::ROOM_SUBMIT_HW_SAFE_TEST_CYCLES));
         push!(counter_total(&summary, c::ROOM_SUBMIT_PACKET_FILL_CYCLES));
-        push!(counter_total(&summary, c::ROOM_SUBMIT_PRIMITIVE_PUSH_CYCLES));
+        push!(counter_total(
+            &summary,
+            c::ROOM_SUBMIT_PRIMITIVE_PUSH_CYCLES
+        ));
         push!(counter_total(&summary, c::ROOM_SUBMIT_DEPTH_CYCLES));
         push!(counter_total(&summary, c::ROOM_SUBMIT_COMMAND_CYCLES));
         push!(counter_total(&summary, c::ROOM_SUBMIT_FALLBACK_CYCLES));
