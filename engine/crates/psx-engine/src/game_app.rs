@@ -1486,6 +1486,14 @@ impl<'a, S: Scene> GameApp<'a, S> {
         let options = self.options;
         let option_values = self.option_values;
         let option_len = self.option_len;
+        // The scene's authored focus-ring style; unknown ids keep the
+        // classic static ring.
+        let focus_style = self
+            .scenes
+            .iter()
+            .find(|record| record.id == scene)
+            .map(|record| record.focus_style)
+            .unwrap_or(psx_level::LevelUiFocusStyle::DEFAULT);
         let mut textures = |asset| self.gameplay.ui_texture(asset);
         let loading_progress_q12 = self.loading_progress_q12;
         let value = |binding: LevelUiValueBinding| {
@@ -1523,6 +1531,7 @@ impl<'a, S: Scene> GameApp<'a, S> {
             paints,
             &font_table,
             focused,
+            &focus_style,
             (ctx.sim_tick.as_u32() & 0xffff) as u16,
             &mut textures,
             &value,
@@ -2107,6 +2116,7 @@ mod tests {
             name: "title",
             node_first: 0,
             node_count: 0,
+            focus_style: psx_level::LevelUiFocusStyle::DEFAULT,
         }];
         static FLOW: GameFlow = GameFlow {
             states: &[FlowState::UiScene { scene: 7 }, FlowState::Gameplay],
@@ -2145,6 +2155,7 @@ mod tests {
             name: "title",
             node_first: 0,
             node_count: 0,
+            focus_style: psx_level::LevelUiFocusStyle::DEFAULT,
         }];
         static FLOW: GameFlow = GameFlow {
             states: &[FlowState::UiScene { scene: 7 }, FlowState::Gameplay],
@@ -2199,6 +2210,7 @@ mod tests {
             name: "title",
             node_first: 0,
             node_count: 0,
+            focus_style: psx_level::LevelUiFocusStyle::DEFAULT,
         }];
         static FLOW: GameFlow = GameFlow {
             states: &[FlowState::UiScene { scene: 7 }, FlowState::Gameplay],
@@ -2351,12 +2363,14 @@ mod tests {
             name: "title",
             node_first: 0,
             node_count: 3,
+            focus_style: psx_level::LevelUiFocusStyle::DEFAULT,
         },
         LevelUiScene {
             id: 2,
             name: "options",
             node_first: 3,
             node_count: 2,
+            focus_style: psx_level::LevelUiFocusStyle::DEFAULT,
         },
     ];
     static MENU_FLOW: GameFlow = GameFlow {
@@ -2826,12 +2840,14 @@ mod tests {
             name: "slider",
             node_first: 0,
             node_count: 2,
+            focus_style: psx_level::LevelUiFocusStyle::DEFAULT,
         },
         LevelUiScene {
             id: 2,
             name: "setoption",
             node_first: 2,
             node_count: 2,
+            focus_style: psx_level::LevelUiFocusStyle::DEFAULT,
         },
     ];
     static OPT_FLOW_SLIDER: GameFlow = GameFlow {
@@ -2891,6 +2907,7 @@ mod tests {
         name: "music",
         node_first: 0,
         node_count: 3,
+            focus_style: psx_level::LevelUiFocusStyle::DEFAULT,
     }];
     static MUSIC_FLOW: GameFlow = GameFlow {
         states: &[FlowState::UiScene { scene: 9 }],
