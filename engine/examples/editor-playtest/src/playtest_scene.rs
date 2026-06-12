@@ -167,7 +167,7 @@ impl Scene for Playtest {
         // the OT; world geometry (slots 0..=OT_DEPTH-2) then draws in front.
         if let Some(room_record) = room_record {
             telemetry::stage_begin(telemetry::stage::SKY);
-            draw_sky_panorama(room_record.sky, camera, &mut primitive_packets, &mut ot);
+            draw_sky_panorama(room_record.sky, camera, &mut ot);
             telemetry::stage_end(telemetry::stage::SKY);
         }
 
