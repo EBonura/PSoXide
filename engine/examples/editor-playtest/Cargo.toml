@@ -56,6 +56,7 @@ vis-full-active-chunks = []
 vis-player-anchor = []
 vis-static-active-turn = []
 room-surface-profile = ["psx-engine/room-surface-profile"]
+cell-select-profile = ["psx-engine/cell-select-profile"]
 ot-1024 = []
 ot-2048 = []
 
