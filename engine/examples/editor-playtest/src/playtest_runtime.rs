@@ -421,19 +421,39 @@ impl Playtest {
         let target = self.camera_target(lock_target, self.anim_state != PlayerAnim::Idle);
         let config = self.camera_config();
         if CAMERA_COLLISION_ENABLED && self.chunked_level() {
-            let mut collision_rooms =
-                [const { CharacterCollisionRoom::EMPTY }; MAX_COLLISION_ROOMS];
-            let margin = config
-                .distance
-                .saturating_add(config.collision_margin)
-                .max(config.min_distance);
-            let collision_room_count =
-                self.collect_collision_rooms(target.player, margin, &mut collision_rooms);
+            // The camera's blocking-room set changes only when the player
+            // crosses a coarse cell or the active window changes, so the
+            // per-tick gather (about half of the camera's measured 50k
+            // tick cost) is cached. The gather margin grows by the cache
+            // quantum, keeping the set a superset of "rooms within camera
+            // reach" anywhere inside the key cell -- the solve result is
+            // identical because out-of-reach rooms cannot block the sweep.
+            const CAMERA_ROOM_CACHE_QUANTUM: i32 = 512;
+            let key = (
+                self.room_index,
+                target.player.x.div_euclid(CAMERA_ROOM_CACHE_QUANTUM),
+                target.player.z.div_euclid(CAMERA_ROOM_CACHE_QUANTUM),
+                self.active_room_mask(),
+            );
+            if key != self.camera_rooms_key {
+                let mut collision_rooms =
+                    [const { CharacterCollisionRoom::EMPTY }; MAX_COLLISION_ROOMS];
+                let margin = config
+                    .distance
+                    .saturating_add(config.collision_margin)
+                    .max(config.min_distance)
+                    .saturating_add(CAMERA_ROOM_CACHE_QUANTUM);
+                let count =
+                    self.collect_collision_rooms(target.player, margin, &mut collision_rooms);
+                self.camera_collision_rooms = collision_rooms;
+                self.camera_collision_room_count = count;
+                self.camera_rooms_key = key;
+            }
             return self
                 .camera
                 .update_vblanks_with_collision_rooms(
                     PROJECTION,
-                    &collision_rooms[..collision_room_count],
+                    &self.camera_collision_rooms[..self.camera_collision_room_count],
                     target,
                     input,
                     config,
