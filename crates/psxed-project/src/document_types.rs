@@ -957,8 +957,7 @@ impl ProjectDocument {
                     &mut plan,
                 );
             }
-            ResourceData::Material(_)
-            | ResourceData::Skeleton(_)
+            ResourceData::Skeleton(_)
             | ResourceData::AnimationSet(_)
             | ResourceData::Character(_)
             | ResourceData::Weapon(_) => {}
@@ -1091,7 +1090,7 @@ impl ProjectDocument {
         // Texture ids referenced directly stay alive as materials with
         // the same id; raw-image consumers read just the image part.
         let mut directly_referenced: HashSet<ResourceId> = HashSet::new();
-        let mut note = |id: Option<ResourceId>, set: &mut HashSet<ResourceId>| {
+        let note = |id: Option<ResourceId>, set: &mut HashSet<ResourceId>| {
             if let Some(id) = id {
                 if texture_paths.contains_key(&id) {
                     set.insert(id);
