@@ -709,3 +709,42 @@ Conclusion: the joints band is content-shaped. It shrinks when
 Alberto's rigid-part robot models land (single-bone parts, no blend)
 or if the animation sample rate drops (visual change, user gate).
 No further engine-side lever here. Task #45 closed.
+
+## Sky cyclorama packet cache shipped + gate refinement (2026-06-12)
+
+Sky is a pure function of camera ROTATION (the dome is camera-centred;
+translation is ignored), so on every non-turning frame all ~96 sky
+packets are bit-identical to the previous frame. They now live in a
+rotation-keyed static cache (exact key: sin/cos yaw+pitch raws + sky
+record fields) and are relinked into the OT background slot per frame;
+the grid trig + ~117 RTPS + packet build only run on key change. Same
+DMA-drain invariant as the prebuilt room-quad pool.
+
+Tape: sky 38,837 -> 23,268 avg (p50 unchanged ~43k: the follow camera
+rotates on about half this route's frames; straights hit). Corridor
+probe: sky ~0.3k, and the run went 10 miss rows -> 0.
+
+GATE REFINEMENT (and a correction). The corridor gate compared FINAL
+frames; that is only valid when both builds share miss cadence. The
+sky and earlier joint-hoist builds eliminated the corridor's 10 miss
+rows, so their final frames are legitimately fresher; final-frame
+compare flags that as a "failure". The gate is now: pixel-compare a
+PRE-DIVERGENCE frame (e.g. 300, before the reference's first miss at
+row 309) plus the scene-matched checkpoint dumps. Correction to the
+joints entry above: the "not bit-neutral in the CTC2 settle model"
+claim was WRONG -- that 3-pixel diff reproduces with the joint hoist
+absent and is unrelated to it (the hoist stays out on flat-cycles
+grounds alone).
+
+NEW FINDING, filed separately: a binary-layout-sensitive 3-pixel LSB
+instability. Two unrelated builds (joint hoist; sky cache) produce
+byte-identical frames that differ from the committed tree's frames by
+exactly 3 fixed-position pixels ((216,30),(277,74),(240,226)), +-1
+LSB pre-dither on dark world surfaces, at frame 300 and 1600 alike;
+same tree cooks deterministically. Likely a layout-dependent guest
+read (OOB LUT or uninitialized static) feeding lighting by one LSB.
+Invisible in practice; tracked as its own hunt.
+
+Sky-cache gates: frame-300 world identical except those 3 pre-existing
+pixels, dumps 400/700/1000 clean with correct sky, engine suite 249
+green.
