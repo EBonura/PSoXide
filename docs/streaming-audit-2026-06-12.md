@@ -104,3 +104,63 @@ state at commit 6a4d46ef.
   ordering and its interaction with the portal-visibility mask.
 - Surface-cache Overflow handling (does an Overflow room ever retry
   after the pool frees up?).
+
+## Phase 2 (same day): cd_stream internals, VRAM seam, Overflow, window job
+
+Verified directly in source, continuing the phase-1 method.
+
+### cd_stream.rs
+
+- **Checksum is FNV-1a 32-bit** (FNV_OFFSET/FNV_PRIME), accumulated
+  per entry as sectors arrive and checked both at early commit
+  (`completed_entries`) and at job finish. Proper mixing, not a naive
+  sum; combined with CIRC this is adequate for room chunks.
+- **Multi-frame group state is sound.** `processed[]` persists across
+  pumps; `group_entries[]` clears only when a group completes; a
+  partial group resumes from `sector_offset` with the ReadN stream
+  still rolling. The phase-1 agent claim of per-frame state reset was
+  false.
+- **FIXED: late `fail_all` demoted verified rooms.** A group error
+  (timeout, CD error) fails ALL job entries, including chunks that
+  already completed, checksum-verified, and were early-committed
+  Resident by `commit_ready_job_entries`. `commit_window_loads` then
+  unconditionally demoted those healthy slots to Failed and charged
+  their retry backoff. Now guarded: an entry whose slot is already
+  Resident for the same room is kept (it holds verified bytes) and
+  its failure counter is not charged.
+- `start()` validates TOC presence and slot byte capacity per entry
+  up front; `abort()` pauses the drive and resets cleanly; the
+  begin-group pump intentionally defers the first sector read to the
+  next tick (seek pacing).
+
+### VRAM seam
+
+- Slot-table exhaustion is already observable:
+  `VRAM_SLOT_TABLE_FULL` counts the otherwise-silent drop
+  (vram_runtime.rs `next_vram_slot`).
+- `evict_unreferenced_vram` only touches READY room-texture-class
+  slots (Opaque/TransparentZero) not referenced by the desired
+  window; model atlas and sky modes are scoped elsewhere, and the
+  ready guard honors `free_vram_slot`'s pending-upload contract.
+- Remaining growth risk is allocator fragmentation of the texture
+  band as content diversifies; revisit when a level approaches the
+  64-asset table or the band fills.
+
+### Surface-cache Overflow
+
+There is no build to retry: `active_room_surface_cache_for` derives
+the descriptor FRESH per refresh from cooked data (baked table or
+streamed chunk-view header). `Overflow` therefore means the room's
+COOKED vertex count exceeds `MAX_CACHED_ROOM_VERTICES` permanently;
+such a room renders forever through the slower uncached fallback,
+visible as persistent `room_cache_fallback_draws`. Recommendation
+(cooker-side, future): warn at cook time when a room exceeds the
+runtime cache cap instead of silently shipping a slow room.
+
+### Window-job ordering
+
+The incremental active-window job lags the pin set by design;
+departing rooms pop out via slice re-validation rather than drawing
+stale bytes, and the camera collision cache now keys on the resident
+mask (phase-1 hardening), which closed the only stale-parse window
+found. No further change needed at current scale.
