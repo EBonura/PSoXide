@@ -216,6 +216,11 @@ impl HwRenderer {
         });
     }
 
+    /// Translator draw-env state for incremental-replay diagnostics.
+    pub fn debug_env(&self) -> (i32, i32, i32, i32, i32, i32) {
+        self.translator.debug_env()
+    }
+
     /// Render one frame's `cmd_log` into the persistent VRAM target.
     /// Always loads the existing texture -- never clears -- so PSX
     /// VRAM-style persistence holds across frames. `vram_words` is
@@ -805,6 +810,505 @@ mod tests {
             pixel_block(&renderer, psx_x, psx_y),
             vec![bgr15_to_rgba8(color); 4]
         );
+    }
+
+    fn load_batch_tape(path: &str) -> Vec<Vec<GpuCmdLogEntry>> {
+        let data = std::fs::read(path).expect("batch tape");
+        let mut batches = Vec::new();
+        let mut i = 0usize;
+        while i + 4 <= data.len() {
+            let n = u32::from_le_bytes(data[i..i + 4].try_into().unwrap()) as usize;
+            i += 4;
+            let mut batch = Vec::with_capacity(n);
+            for _ in 0..n {
+                let opcode = data[i];
+                i += 1;
+                let wc = u32::from_le_bytes(data[i..i + 4].try_into().unwrap()) as usize;
+                i += 4;
+                let mut fifo = Vec::with_capacity(wc);
+                for _ in 0..wc {
+                    fifo.push(u32::from_le_bytes(data[i..i + 4].try_into().unwrap()));
+                    i += 4;
+                }
+                batch.push(GpuCmdLogEntry {
+                    index: 0,
+                    opcode,
+                    fifo,
+                });
+            }
+            batches.push(batch);
+        }
+        batches
+    }
+
+    /// Probe: after replaying a prefix of the recorded batch tape, does a
+    /// page-0 quad still land? Binary-searches the first poisoned prefix.
+    /// Run with PSX_BATCH_TAPE=<batches.bin> -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn bisect_poison_batch() {
+        let Ok(tape_path) = std::env::var("PSX_BATCH_TAPE") else {
+            eprintln!("set PSX_BATCH_TAPE");
+            return;
+        };
+        let batches = load_batch_tape(&tape_path);
+        eprintln!("tape: {} batches", batches.len());
+        let vram_words = vec![0u16; (VRAM_WIDTH * VRAM_HEIGHT) as usize];
+        let gpu = Gpu::new();
+        let probe_fails = |prefix: usize| -> bool {
+            let Some(mut renderer) = headless_renderer() else {
+                panic!("no adapter");
+            };
+            let _ = renderer.set_internal_scale(1, None);
+            for batch in &batches[..prefix] {
+                renderer.render_frame(&gpu, batch, &vram_words);
+            }
+            let env_and_quad = [
+                GpuCmdLogEntry {
+                    index: 0,
+                    opcode: 0xE3,
+                    fifo: vec![0xE300_0000],
+                },
+                GpuCmdLogEntry {
+                    index: 1,
+                    opcode: 0xE4,
+                    fifo: vec![0xE400_0000 | (239 << 10) | 319],
+                },
+                GpuCmdLogEntry {
+                    index: 2,
+                    opcode: 0xE5,
+                    fifo: vec![0xE500_0000],
+                },
+                GpuCmdLogEntry {
+                    index: 3,
+                    opcode: 0x28,
+                    fifo: vec![
+                        0x2800_3050,
+                        (200 << 16) | 8,
+                        (200 << 16) | 24,
+                        (216 << 16) | 8,
+                        (216 << 16) | 24,
+                    ],
+                },
+            ];
+            renderer.render_frame(&gpu, &env_and_quad, &vram_words);
+            let (_, _, rgba) = renderer.read_subrect_rgba8(10, 202, 1, 1);
+            rgba[..3] != [0x50, 0x30, 0x00]
+        };
+        let total = batches.len();
+        if !probe_fails(total) {
+            eprintln!("probe PASSES after full tape -- no poison found");
+            return;
+        }
+        let mut lo = 0usize; // passes
+        let mut hi = total; // fails
+        while hi - lo > 1 {
+            let mid = (lo + hi) / 2;
+            let f = probe_fails(mid);
+            eprintln!("prefix {mid}: {}", if f { "FAIL" } else { "pass" });
+            if f {
+                hi = mid;
+            } else {
+                lo = mid;
+            }
+        }
+        eprintln!("first poisoned prefix: {hi} (poison batch index {})", hi - 1);
+        let poison = &batches[hi - 1];
+        eprintln!("poison batch: {} entries", poison.len());
+        for e in poison.iter().take(40) {
+            eprintln!("  op {:02x} words {:x?}", e.opcode, &e.fifo[..e.fifo.len().min(8)]);
+        }
+    }
+
+    /// Replay the recorded batch tape and dump both framebuffer pages
+    /// plus per-page brightness, to confirm the in-test reproduction.
+    /// PSX_BATCH_TAPE=<batches.bin> -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn replay_tape_and_dump_pages() {
+        let Ok(tape_path) = std::env::var("PSX_BATCH_TAPE") else {
+            eprintln!("set PSX_BATCH_TAPE");
+            return;
+        };
+        let batches = load_batch_tape(&tape_path);
+        let Some(mut renderer) = headless_renderer() else {
+            panic!("no adapter");
+        };
+        let vram_words = vec![0u16; (VRAM_WIDTH * VRAM_HEIGHT) as usize];
+        let gpu = Gpu::new();
+        for batch in &batches {
+            renderer.render_frame(&gpu, batch, &vram_words);
+        }
+        let (w, h, rgba) = renderer.read_subrect_rgba8(0, 0, 320, 480);
+        let mut bright0 = 0u32;
+        let mut bright240 = 0u32;
+        for y in 0..h {
+            for x in 0..w {
+                let i = ((y * w + x) * 4) as usize;
+                let s = rgba[i] as u32 + rgba[i + 1] as u32 + rgba[i + 2] as u32;
+                if s > 30 {
+                    if y < 240 {
+                        bright0 += 1;
+                    } else {
+                        bright240 += 1;
+                    }
+                }
+            }
+        }
+        eprintln!("page0 bright={bright0} page240 bright={bright240}");
+        let mut ppm = format!("P6\n{w} {h}\n255\n").into_bytes();
+        for px in rgba.chunks_exact(4) {
+            ppm.extend_from_slice(&px[..3]);
+        }
+        std::fs::write("/tmp/tape-replay-pages.ppm", ppm).unwrap();
+        eprintln!("wrote /tmp/tape-replay-pages.ppm");
+    }
+
+    /// Bisect with the REAL page0 cycle as probe: after a prefix of the
+    /// tape, replay the recorded page0 env+draw batches and check page0
+    /// receives non-fill content. PSX_BATCH_TAPE + PSX_PROBE_ENV +
+    /// PSX_PROBE_DRAW select the tape and probe batch indices.
+    #[test]
+    #[ignore]
+    fn bisect_poison_real_probe() {
+        let Ok(tape_path) = std::env::var("PSX_BATCH_TAPE") else {
+            return;
+        };
+        let env_idx: usize = std::env::var("PSX_PROBE_ENV").unwrap().parse().unwrap();
+        let draw_idx: usize = std::env::var("PSX_PROBE_DRAW").unwrap().parse().unwrap();
+        let batches = load_batch_tape(&tape_path);
+        let vram_words = vec![0u16; (VRAM_WIDTH * VRAM_HEIGHT) as usize];
+        let gpu = Gpu::new();
+        let probe_fails = |prefix: usize| -> bool {
+            let Some(mut renderer) = headless_renderer() else {
+                panic!("no adapter");
+            };
+            for batch in &batches[..prefix] {
+                renderer.render_frame(&gpu, batch, &vram_words);
+            }
+            renderer.render_frame(&gpu, &batches[env_idx], &vram_words);
+            renderer.render_frame(&gpu, &batches[draw_idx], &vram_words);
+            let (w, h, rgba) = renderer.read_subrect_rgba8(0, 0, 320, 240);
+            let mut content = 0u32;
+            for i in (0..(w * h * 4) as usize).step_by(4) {
+                let px = (rgba[i], rgba[i + 1], rgba[i + 2]);
+                if px != (5, 7, 12) && px != (0, 0, 0) {
+                    content += 1;
+                }
+            }
+            content < 100
+        };
+        eprintln!("standalone (prefix 0): {}", if probe_fails(0) { "FAIL" } else { "pass" });
+        let total = batches.len().min(env_idx);
+        if !probe_fails(total) {
+            eprintln!("probe passes after full prefix -- not state-armed");
+            return;
+        }
+        let mut lo = 0usize;
+        let mut hi = total;
+        if probe_fails(0) {
+            eprintln!("fails standalone -- batch content alone is broken");
+            return;
+        }
+        while hi - lo > 1 {
+            let mid = (lo + hi) / 2;
+            let f = probe_fails(mid);
+            eprintln!("prefix {mid}: {}", if f { "FAIL" } else { "pass" });
+            if f {
+                hi = mid;
+            } else {
+                lo = mid;
+            }
+        }
+        eprintln!("first arming prefix: {hi} (batch index {})", hi - 1);
+        let poison = &batches[hi - 1];
+        eprintln!("arming batch: {} entries", poison.len());
+        for e in poison.iter().take(40) {
+            eprintln!("  op {:02x} words {:x?}", e.opcode, &e.fifo[..e.fifo.len().min(8)]);
+        }
+    }
+
+    /// A quad with one vertex ABOVE the screen (negative Y after the
+    /// draw offset) must still rasterize its on-screen part -- the
+    /// page-0 case (offset 0) where room walls cross the top edge.
+    #[test]
+    fn negative_y_vertex_quad_rasterizes_on_page0() {
+        let Some(mut renderer) = headless_renderer() else {
+            eprintln!("skipping: no headless wgpu adapter");
+            return;
+        };
+        let vram_words = vec![0; (VRAM_WIDTH * VRAM_HEIGHT) as usize];
+        let gpu = Gpu::new();
+        for (e5, base_y, probe_y) in [(0xE500_0000u32, 0u32, 5u32), (0xE500_0000 | (240 << 11), 240, 245)] {
+            let neg40 = 0x7FFu32 & (-40i32 as u32 & 0x7FF);
+            let log = [
+                GpuCmdLogEntry {
+                    index: 0,
+                    opcode: 0xE3,
+                    fifo: vec![0xE300_0000 | (base_y << 10)],
+                },
+                GpuCmdLogEntry {
+                    index: 1,
+                    opcode: 0xE4,
+                    fifo: vec![0xE400_0000 | ((base_y + 239) << 10) | 319],
+                },
+                GpuCmdLogEntry {
+                    index: 2,
+                    opcode: 0xE5,
+                    fifo: vec![e5],
+                },
+                // Quad spanning y=-40..60, x=0..100: top edge off-screen.
+                GpuCmdLogEntry {
+                    index: 3,
+                    opcode: 0x28,
+                    fifo: vec![
+                        0x2800_3050,
+                        (neg40 << 16),
+                        (neg40 << 16) | 100,
+                        (60 << 16),
+                        (60 << 16) | 100,
+                    ],
+                },
+            ];
+            renderer.render_frame(&gpu, &log, &vram_words);
+            let (_, _, rgba) = renderer.read_subrect_rgba8(50, base_y + probe_y - base_y + 5, 1, 1);
+            assert_eq!(
+                &rgba[..3],
+                &[0x50, 0x30, 0x00],
+                "negative-Y quad missing at offset {base_y}"
+            );
+        }
+    }
+
+    /// Standalone replay of the recorded page0 cycle WITH real VRAM
+    /// textures: env+fill batch then draw batch, then dump page0 and
+    /// the wall probe pixel. PSX_BATCH_TAPE, PSX_VRAM_BIN, PSX_PROBE_ENV,
+    /// PSX_PROBE_DRAW.
+    #[test]
+    #[ignore]
+    fn standalone_page0_cycle_with_real_vram() {
+        let Ok(tape_path) = std::env::var("PSX_BATCH_TAPE") else {
+            return;
+        };
+        let vram_path = std::env::var("PSX_VRAM_BIN").unwrap();
+        let env_idx: usize = std::env::var("PSX_PROBE_ENV").unwrap().parse().unwrap();
+        let draw_idx: usize = std::env::var("PSX_PROBE_DRAW").unwrap().parse().unwrap();
+        let batches = load_batch_tape(&tape_path);
+        let raw = std::fs::read(&vram_path).unwrap();
+        let vram_words: Vec<u16> = raw
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        let Some(mut renderer) = headless_renderer() else {
+            panic!("no adapter");
+        };
+        let gpu = Gpu::new();
+        renderer.render_frame(&gpu, &batches[env_idx], &vram_words);
+        renderer.render_frame(&gpu, &batches[draw_idx], &vram_words);
+        let (w, h, rgba) = renderer.read_subrect_rgba8(0, 0, 320, 240);
+        let mut ppm = format!("P6\n{w} {h}\n255\n").into_bytes();
+        for px in rgba.chunks_exact(4) {
+            ppm.extend_from_slice(&px[..3]);
+        }
+        std::fs::write("/tmp/standalone-page0.ppm", ppm).unwrap();
+        let wall = |x: u32, y: u32| {
+            let i = ((y * w + x) * 4) as usize;
+            (rgba[i], rgba[i + 1], rgba[i + 2])
+        };
+        eprintln!(
+            "wall(290,80)={:?} floor(160,215)={:?} crate(100,80)={:?}",
+            wall(290, 80),
+            wall(160, 215),
+            wall(100, 80)
+        );
+        eprintln!("wrote /tmp/standalone-page0.ppm");
+    }
+
+    /// Bisect the first tape prefix after which the page0 wall pixel
+    /// stops rendering. Wall-pixel predicate with real VRAM textures.
+    #[test]
+    #[ignore]
+    fn bisect_wall_killer() {
+        let Ok(tape_path) = std::env::var("PSX_BATCH_TAPE") else {
+            return;
+        };
+        let vram_path = std::env::var("PSX_VRAM_BIN").unwrap();
+        let env_idx: usize = std::env::var("PSX_PROBE_ENV").unwrap().parse().unwrap();
+        let draw_idx: usize = std::env::var("PSX_PROBE_DRAW").unwrap().parse().unwrap();
+        let batches = load_batch_tape(&tape_path);
+        let raw = std::fs::read(&vram_path).unwrap();
+        let vram_words: Vec<u16> = raw
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        let gpu = Gpu::new();
+        let wall_dead = |prefix: usize| -> bool {
+            let Some(mut renderer) = headless_renderer() else {
+                panic!("no adapter");
+            };
+            for batch in &batches[..prefix] {
+                renderer.render_frame(&gpu, batch, &vram_words);
+            }
+            renderer.render_frame(&gpu, &batches[env_idx], &vram_words);
+            renderer.render_frame(&gpu, &batches[draw_idx], &vram_words);
+            let (_, _, rgba) = renderer.read_subrect_rgba8(290, 80, 1, 1);
+            rgba[0] as u32 + rgba[1] as u32 + rgba[2] as u32 <= 6
+        };
+        let total = env_idx;
+        eprintln!("prefix 0: {}", if wall_dead(0) { "DEAD" } else { "alive" });
+        eprintln!("prefix {total}: {}", if wall_dead(total) { "DEAD" } else { "alive" });
+        if !wall_dead(total) {
+            eprintln!("wall alive after full prefix -- cannot bisect");
+            return;
+        }
+        let mut lo = 0usize;
+        let mut hi = total;
+        while hi - lo > 1 {
+            let mid = (lo + hi) / 2;
+            let d = wall_dead(mid);
+            eprintln!("prefix {mid}: {}", if d { "DEAD" } else { "alive" });
+            if d {
+                hi = mid;
+            } else {
+                lo = mid;
+            }
+        }
+        eprintln!("first killing prefix: {hi} (batch {})", hi - 1);
+        let killer = &batches[hi - 1];
+        eprintln!("killer batch: {} entries", killer.len());
+        for e in killer.iter().take(50) {
+            eprintln!("  op {:02x} {:x?}", e.opcode, &e.fifo[..e.fifo.len().min(10)]);
+        }
+    }
+
+    /// Control: env + quad in ONE render_frame call must land.
+    #[test]
+    fn same_batch_env_and_draw_lands() {
+        let Some(mut renderer) = headless_renderer() else {
+            eprintln!("skipping: no headless wgpu adapter");
+            return;
+        };
+        assert!(renderer.set_internal_scale(2, None));
+        let vram_words = vec![0; (VRAM_WIDTH * VRAM_HEIGHT) as usize];
+        let gpu = Gpu::new();
+        let log = [
+            GpuCmdLogEntry {
+                index: 0,
+                opcode: 0xE3,
+                fifo: vec![0xE300_0000],
+            },
+            GpuCmdLogEntry {
+                index: 1,
+                opcode: 0xE4,
+                fifo: vec![0xE400_0000 | (239 << 10) | 319],
+            },
+            GpuCmdLogEntry {
+                index: 2,
+                opcode: 0xE5,
+                fifo: vec![0xE500_0000],
+            },
+            GpuCmdLogEntry {
+                index: 3,
+                opcode: 0x28,
+                fifo: vec![
+                    0x2800_3050,
+                    (8 << 16) | 8,
+                    (8 << 16) | 24,
+                    (24 << 16) | 8,
+                    (24 << 16) | 24,
+                ],
+            },
+        ];
+        renderer.render_frame(&gpu, &log, &vram_words);
+        assert_eq!(
+            pixel_block(&renderer, 10, 10),
+            vec![[0x50, 0x30, 0x00, 0xFF]; 4],
+            "same-batch draw missing"
+        );
+    }
+
+    /// A draw-only batch with NO env in it at all (fresh default state).
+    #[test]
+    fn draw_only_batch_lands_with_default_env() {
+        let Some(mut renderer) = headless_renderer() else {
+            eprintln!("skipping: no headless wgpu adapter");
+            return;
+        };
+        assert!(renderer.set_internal_scale(2, None));
+        let vram_words = vec![0; (VRAM_WIDTH * VRAM_HEIGHT) as usize];
+        let gpu = Gpu::new();
+        let quad = [GpuCmdLogEntry {
+            index: 0,
+            opcode: 0x28,
+            fifo: vec![
+                0x2800_3050,
+                (8 << 16) | 8,
+                (8 << 16) | 24,
+                (24 << 16) | 8,
+                (24 << 16) | 24,
+            ],
+        }];
+        renderer.render_frame(&gpu, &quad, &vram_words);
+        assert_eq!(
+            pixel_block(&renderer, 10, 10),
+            vec![[0x50, 0x30, 0x00, 0xFF]; 4],
+            "draw-only batch missing"
+        );
+    }
+
+    /// Split-batch incremental replay: the draw env (E3/E4/E5) arrives
+    /// in one render_frame call, the primitives in a LATER call, exactly
+    /// like the GUI's per-host-frame drains. Draws must land for both
+    /// framebuffer pages.
+    #[test]
+    fn split_batch_env_then_draw_lands_on_both_pages() {
+        let Some(mut renderer) = headless_renderer() else {
+            eprintln!("skipping HW split-batch test: no headless wgpu adapter");
+            return;
+        };
+        assert!(renderer.set_internal_scale(2, None));
+        let vram_words = vec![0; (VRAM_WIDTH * VRAM_HEIGHT) as usize];
+        let gpu = Gpu::new();
+        for page_y in [0u32, 240u32] {
+            // Batch 1: draw area + draw offset for this page, alone.
+            let env = [
+                GpuCmdLogEntry {
+                    index: 0,
+                    opcode: 0xE3,
+                    fifo: vec![0xE300_0000 | (page_y << 10)],
+                },
+                GpuCmdLogEntry {
+                    index: 1,
+                    opcode: 0xE4,
+                    fifo: vec![0xE400_0000 | ((page_y + 239) << 10) | 319],
+                },
+                GpuCmdLogEntry {
+                    index: 2,
+                    opcode: 0xE5,
+                    fifo: vec![0xE500_0000 | (page_y << 11)],
+                },
+            ];
+            renderer.render_frame(&gpu, &env, &vram_words);
+            // Batch 2: one opaque mono quad at (8,8)-(24,24), page-relative.
+            let quad = [GpuCmdLogEntry {
+                index: 0,
+                opcode: 0x28,
+                fifo: vec![
+                    0x2800_3050,
+                    (8 << 16) | 8,
+                    (8 << 16) | 24,
+                    (24 << 16) | 8,
+                    (24 << 16) | 24,
+                ],
+            }];
+            renderer.render_frame(&gpu, &quad, &vram_words);
+            let px = pixel_block(&renderer, 10, page_y + 10);
+            assert_eq!(
+                px,
+                vec![[0x50, 0x30, 0x00, 0xFF]; 4],
+                "split-batch draw missing on page y={page_y}"
+            );
+        }
     }
 
     #[test]

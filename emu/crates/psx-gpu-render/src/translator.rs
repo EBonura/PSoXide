@@ -70,6 +70,20 @@ impl Translator {
         }
     }
 
+    /// Current draw-env state (area l/t/r/b, offset x/y) for
+    /// incremental-replay diagnostics.
+    pub fn debug_env(&self) -> (i32, i32, i32, i32, i32, i32) {
+        let a = &self.interp.state.draw_area;
+        (
+            a.left,
+            a.top,
+            a.right,
+            a.bottom,
+            self.interp.state.draw_offset_x,
+            self.interp.state.draw_offset_y,
+        )
+    }
+
     /// Walk `cmd_log`, return the vertex stream for this frame
     /// laid out as one slice per `BlendKind`. The slices borrow
     /// from `self`; copy out before the next call.

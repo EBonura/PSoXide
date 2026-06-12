@@ -729,6 +729,13 @@ pub(super) fn debug_log_post_cross_render_room(
     line.push_u32(cache.vertex_count.min(u32::MAX as usize) as u32);
     line.push_str(" surf=");
     line.push_u32(cache.surface_count.min(u32::MAX as usize) as u32);
+    line.push_str(" amb=(");
+    line.push_u32(active.ambient_rgb[0] as u32);
+    line.push_byte(b',');
+    line.push_u32(active.ambient_rgb[1] as u32);
+    line.push_byte(b',');
+    line.push_u32(active.ambient_rgb[2] as u32);
+    line.push_byte(b')');
     line.push_str(" rr=");
     line.push_bool(active.render_room.is_some());
     line.push_str(" slices=");
