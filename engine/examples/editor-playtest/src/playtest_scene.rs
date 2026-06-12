@@ -153,6 +153,25 @@ impl Scene for Playtest {
         // clock; the flip-time tick varies with deadline-miss cadence.
         self.overlay_camera = camera;
         self.overlay_sim_tick = self.gameplay_tick(ctx.sim_tick);
+        #[cfg(feature = "fps-overlay")]
+        {
+            // One presented frame per render() call; measure against the
+            // gameplay-anchored tick so the readout is cadence-true.
+            let now = self.overlay_sim_tick.as_u32();
+            let gap = now.wrapping_sub(self.fps_last_tick).min(255) as u8;
+            if self.fps_window_frames > 0 {
+                self.fps_worst_gap = self.fps_worst_gap.max(gap);
+            }
+            self.fps_last_tick = now;
+            self.fps_window_frames = self.fps_window_frames.saturating_add(1);
+            if now.wrapping_sub(self.fps_window_start) >= 60 {
+                self.fps_display = self.fps_window_frames;
+                self.fps_display_worst = self.fps_worst_gap;
+                self.fps_window_start = now;
+                self.fps_window_frames = 0;
+                self.fps_worst_gap = 0;
+            }
+        }
         let post_cross_debug = POST_CROSS_RENDER_DEBUG_LOGS && self.post_cross_debug_frames != 0;
         let post_cross_detail = post_cross_debug
             && self.post_cross_debug_frames == RUNTIME_SCHEDULE.post_cross_render_debug_frames;
@@ -1095,6 +1114,11 @@ impl Scene for Playtest {
 
         if let Some(target) = self.lock_target_indicator_position() {
             draw_lock_target_indicator(target, camera, overlay_tick);
+        }
+
+        #[cfg(feature = "fps-overlay")]
+        if let Some(font) = self.ui_fonts[0].as_ref() {
+            draw_fps_overlay(font, self.fps_display, self.fps_display_worst);
         }
 
         if self.character.is_some() {
