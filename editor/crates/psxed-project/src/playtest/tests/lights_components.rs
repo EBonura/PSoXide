@@ -194,7 +194,7 @@ fn diagonal_walls_bake_static_surface_lights() {
             materials: vec![CookedWorldMaterial {
                 slot: 0,
                 source,
-                texture: None,
+                psxt_path: None,
                 blend_mode: PsxBlendMode::Opaque,
                 tint: [128, 128, 128],
                 face_sidedness: MaterialFaceSidedness::Both,
@@ -441,15 +441,11 @@ fn equipment_component_emits_weapon_and_hitbox_records() {
         calibration: Default::default(),
     });
     let mut project = ProjectDocument::new("equipment-test");
-    let texture = project.add_resource(
-        "Floor Texture",
-        ResourceData::Texture {
-            psxt_path: "assets/textures/delven_01_slateflr1a_q2.psxt".to_string(),
-        },
-    );
     let material = project.add_resource(
         "Floor",
-        ResourceData::Material(crate::MaterialResource::opaque(Some(texture))),
+        ResourceData::Material(crate::MaterialResource::opaque(Some(
+            "assets/textures/delven_01_slateflr1a_q2.psxt".to_string(),
+        ))),
     );
     let model = project.add_resource("Wraith Model", ResourceData::Model(starter_model));
     let character = project.add_resource(

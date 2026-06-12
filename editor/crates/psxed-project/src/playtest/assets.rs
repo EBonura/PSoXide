@@ -40,13 +40,12 @@ pub(super) fn find_resource(project: &ProjectDocument, id: ResourceId) -> Option
 /// CLUT). Both the editor preview material upload path and the
 /// runtime room material slots assume 4bpp; other depths
 /// render with wrong colours.
-pub(super) fn expect_room_material_depth(resource: &Resource, bytes: &[u8]) -> Result<(), String> {
+pub(super) fn expect_room_material_depth(label: &str, bytes: &[u8]) -> Result<(), String> {
     let texture = psx_asset::Texture::from_bytes(bytes)
-        .map_err(|e| format!("texture '{}' parse failed: {e:?}", resource.name))?;
+        .map_err(|e| format!("texture '{label}' parse failed: {e:?}"))?;
     if texture.clut_entries() != 16 {
         return Err(format!(
-            "texture '{}' must be 4bpp (16-entry CLUT) for room materials; found {} entries",
-            resource.name,
+            "texture '{label}' must be 4bpp (16-entry CLUT) for room materials; found {} entries",
             texture.clut_entries(),
         ));
     }
@@ -54,8 +53,7 @@ pub(super) fn expect_room_material_depth(resource: &Resource, bytes: &[u8]) -> R
         || !is_supported_room_material_dimension(texture.height())
     {
         return Err(format!(
-            "texture '{}' must be a power-of-two room material no larger than 64x64 texels and aligned to 8-texel texture-window units; found {}x{}",
-            resource.name,
+            "texture '{label}' must be a power-of-two room material no larger than 64x64 texels and aligned to 8-texel texture-window units; found {}x{}",
             texture.width(),
             texture.height(),
         ));
@@ -70,7 +68,6 @@ fn is_supported_room_material_dimension(size: u16) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ProjectDocument, ResourceData};
 
     #[test]
     fn room_material_rejects_non_texture_window_dimensions() {
@@ -82,40 +79,33 @@ mod tests {
         // payload offsets 2/4. Mutating only the dimensions is enough
         // to exercise the room-material contract.
         bytes[14..16].copy_from_slice(&48u16.to_le_bytes());
-        let mut project = ProjectDocument::new("room-materials");
-        let id = project.add_resource(
-            "Odd Tile",
-            ResourceData::Texture {
-                psxt_path: "assets/textures/odd.psxt".to_string(),
-            },
-        );
-        let resource = project.resource(id).expect("resource inserted");
 
-        let error = expect_room_material_depth(&resource, &bytes).expect_err("48-wide rejected");
+        let error = expect_room_material_depth("Odd Tile", &bytes).expect_err("48-wide rejected");
         assert!(error.contains("power-of-two room material"));
     }
 }
 
-/// Read the texture's `.psxt` bytes from disk. Resolves
-/// `psxt_path` first as-is (absolute paths), then relative to
-/// `project_root`. Returns a string error rather than `io::Error`
-/// so callers can prepend room/material context.
-pub(super) fn load_texture_bytes(
-    resource: &Resource,
+/// The `.psxt` path carried by a material resource, or `None` for
+/// flat-tint materials and non-material resources.
+pub(super) fn resource_psxt_path(resource: &Resource) -> Option<&str> {
+    match &resource.data {
+        ResourceData::Material(material) => material.psxt_path.as_deref(),
+        _ => None,
+    }
+}
+
+/// Read a material's `.psxt` bytes from disk. Resolves `psxt_path`
+/// first as-is (absolute paths), then relative to `project_root`.
+/// Returns a string error rather than `io::Error` so callers can
+/// prepend room/material context. `label` names the owning resource
+/// in error messages.
+pub(super) fn load_psxt_bytes(
+    label: &str,
+    psxt_path: &str,
     project_root: &Path,
 ) -> Result<Vec<u8>, String> {
-    let ResourceData::Texture { psxt_path } = &resource.data else {
-        return Err(format!(
-            "resource '{}' (#{}) is not a Texture",
-            resource.name,
-            resource.id.raw(),
-        ));
-    };
     if psxt_path.is_empty() {
-        return Err(format!(
-            "texture resource '{}' has empty path",
-            resource.name
-        ));
+        return Err(format!("texture resource '{label}' has empty path"));
     }
     let path = if Path::new(psxt_path).is_absolute() {
         PathBuf::from(psxt_path)
@@ -124,9 +114,8 @@ pub(super) fn load_texture_bytes(
     };
     std::fs::read(&path).map_err(|e| {
         format!(
-            "failed to read texture '{}' at {}: {e}",
-            resource.name,
-            path.display(),
+            "failed to read texture '{label}' at {}: {e}",
+            path.display()
         )
     })
 }

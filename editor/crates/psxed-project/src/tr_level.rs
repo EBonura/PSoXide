@@ -276,15 +276,11 @@ impl TrLevel {
 
     pub fn to_project(&self, project_name: String) -> ProjectDocument {
         let mut project = ProjectDocument::new(project_name);
-        let texture = project.add_resource(
-            "TR Import Texture",
-            ResourceData::Texture {
-                psxt_path: TR_IMPORT_TEXTURE_PATH.to_string(),
-            },
-        );
         let material = project.add_resource(
             "TR Import Material",
-            ResourceData::Material(MaterialResource::opaque(Some(texture))),
+            ResourceData::Material(MaterialResource::opaque(Some(
+                TR_IMPORT_TEXTURE_PATH.to_string(),
+            ))),
         );
         let world_id = project.active_scene().root;
         if let Some(world) = project.active_scene_mut().node_mut(world_id) {

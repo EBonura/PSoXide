@@ -207,10 +207,20 @@ impl MaterialFaceSidedness {
 }
 
 /// Authoring material. The cooker maps this to runtime texture/material state.
+///
+/// A material owns its image: `psxt_path` points at the cooked `.psxt`
+/// this material draws with (`None` renders flat tint). Materials and
+/// textures used to be separate resources with the material holding a
+/// `texture: ResourceId` reference; that split was folded here because
+/// the relationship was 1:1 in practice. Legacy projects migrate at
+/// load via [`crate::ProjectDocument::migrate_legacy_texture_resources`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MaterialResource {
-    /// Source texture resource, if any.
-    pub texture: Option<ResourceId>,
+    /// Cooked `.psxt` image this material draws with, or `None` for a
+    /// flat tinted material. Resolved first as-is (absolute paths),
+    /// then relative to the project file's directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub psxt_path: Option<String>,
     /// PS1 blend mode.
     pub blend_mode: PsxBlendMode,
     /// Texture modulation tint. `0x80` is neutral for PS1 textured polys.
@@ -218,6 +228,11 @@ pub struct MaterialResource {
     /// Which side(s) of faces using this material should render.
     #[serde(default)]
     pub face_sidedness: MaterialFaceSidedness,
+    /// Legacy pre-merge texture resource reference. Parsed from old
+    /// projects, folded into [`psxt_path`](Self::psxt_path) by the
+    /// load-time migration, never written back.
+    #[serde(rename = "texture", default, skip_serializing)]
+    pub legacy_texture: Option<ResourceId>,
     /// Legacy project field. New code reads/writes
     /// [`face_sidedness`](Self::face_sidedness); this remains so older
     /// `.ron` projects migrate without losing their two-sided setting.
@@ -281,23 +296,25 @@ pub const fn box_prop_vertices_for_size(size: u16) -> [[i16; 3]; BOX_PROP_VERTEX
 
 impl MaterialResource {
     /// Build an opaque neutral material.
-    pub const fn opaque(texture: Option<ResourceId>) -> Self {
+    pub const fn opaque(psxt_path: Option<String>) -> Self {
         Self {
-            texture,
+            psxt_path,
             blend_mode: PsxBlendMode::Opaque,
             tint: [0x80, 0x80, 0x80],
             face_sidedness: MaterialFaceSidedness::Both,
+            legacy_texture: None,
             double_sided: true,
         }
     }
 
     /// Build a translucent neutral material.
-    pub const fn translucent(texture: Option<ResourceId>, blend_mode: PsxBlendMode) -> Self {
+    pub const fn translucent(psxt_path: Option<String>, blend_mode: PsxBlendMode) -> Self {
         Self {
-            texture,
+            psxt_path,
             blend_mode,
             tint: [0x80, 0x80, 0x80],
             face_sidedness: MaterialFaceSidedness::Both,
+            legacy_texture: None,
             double_sided: true,
         }
     }

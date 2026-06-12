@@ -1086,20 +1086,25 @@ fn extend_to_include_grows_negatively_preserving_world_position() {
 #[test]
 fn embedded_default_project_ron_deserializes() {
     let project = ProjectDocument::from_ron_str(DEFAULT_PROJECT_RON).unwrap();
-    assert!(project.resources.iter().any(|r| matches!(
-        &r.data,
-        ResourceData::Texture { psxt_path } if psxt_path.ends_with("block_1a.psxt")
-    )));
-    assert!(project.resources.iter().any(|r| matches!(
-        &r.data,
-        ResourceData::Texture { psxt_path } if psxt_path.ends_with("fence_1a.psxt")
-    )));
-    assert!(!project.resources.iter().any(|r| matches!(
-        &r.data,
-        ResourceData::Texture { psxt_path }
-            if psxt_path.ends_with("floor.psxt")
-                || psxt_path.ends_with("brick-wall.psxt")
-    )));
+    let material_path = |r: &Resource| match &r.data {
+        ResourceData::Material(material) => material.psxt_path.clone(),
+        _ => None,
+    };
+    assert!(project
+        .resources
+        .iter()
+        .any(|r| material_path(r).is_some_and(|p| p.ends_with("block_1a.psxt"))));
+    assert!(project
+        .resources
+        .iter()
+        .any(|r| material_path(r).is_some_and(|p| p.ends_with("fence_1a.psxt"))));
+    assert!(!project.resources.iter().any(|r| material_path(r)
+        .is_some_and(|p| p.ends_with("floor.psxt") || p.ends_with("brick-wall.psxt"))));
+    // The legacy Texture resource kind is fully folded at load.
+    assert!(!project
+        .resources
+        .iter()
+        .any(|r| matches!(&r.data, ResourceData::Texture { .. })));
     // Starter seeds the active player with the Crimson Cross Knight profile,
     // its Meshy Gold animation library, and material atlas.
     let (character_id, character) = project
@@ -2336,9 +2341,9 @@ fn resource_rename_moves_project_owned_texture_file() {
     let mut project = ProjectDocument::new("test");
     let id = project.add_resource(
         "Floor",
-        ResourceData::Texture {
-            psxt_path: "assets/textures/floor.psxt".to_string(),
-        },
+        ResourceData::Material(MaterialResource::opaque(Some(
+            "assets/textures/floor.psxt".to_string(),
+        ))),
     );
 
     let report = project
@@ -2346,10 +2351,13 @@ fn resource_rename_moves_project_owned_texture_file() {
         .unwrap();
 
     assert_eq!(project.resource_name(id), Some("Stone Floor"));
-    let ResourceData::Texture { psxt_path } = &project.resource(id).unwrap().data else {
-        panic!("expected texture");
+    let ResourceData::Material(material) = &project.resource(id).unwrap().data else {
+        panic!("expected material");
     };
-    assert_eq!(psxt_path, "assets/textures/stone_floor.psxt");
+    assert_eq!(
+        material.psxt_path.as_deref(),
+        Some("assets/textures/stone_floor.psxt")
+    );
     assert!(!texture_dir.join("floor.psxt").exists());
     assert_eq!(
         std::fs::read(texture_dir.join("stone_floor.psxt")).unwrap(),
@@ -2445,9 +2453,9 @@ fn resource_rename_refuses_existing_target_without_mutating_project() {
     let mut project = ProjectDocument::new("test");
     let id = project.add_resource(
         "Floor",
-        ResourceData::Texture {
-            psxt_path: "assets/textures/floor.psxt".to_string(),
-        },
+        ResourceData::Material(MaterialResource::opaque(Some(
+            "assets/textures/floor.psxt".to_string(),
+        ))),
     );
 
     let error = project
@@ -2456,10 +2464,13 @@ fn resource_rename_refuses_existing_target_without_mutating_project() {
 
     assert!(matches!(error, ResourceRenameError::TargetExists(_)));
     assert_eq!(project.resource_name(id), Some("Floor"));
-    let ResourceData::Texture { psxt_path } = &project.resource(id).unwrap().data else {
-        panic!("expected texture");
+    let ResourceData::Material(material) = &project.resource(id).unwrap().data else {
+        panic!("expected material");
     };
-    assert_eq!(psxt_path, "assets/textures/floor.psxt");
+    assert_eq!(
+        material.psxt_path.as_deref(),
+        Some("assets/textures/floor.psxt")
+    );
     assert_eq!(
         std::fs::read(texture_dir.join("floor.psxt")).unwrap(),
         b"old"
@@ -2482,13 +2493,9 @@ fn delete_resource_removes_entry_and_clears_references() {
     let mut project = ProjectDocument::new("delete-resource");
     let target = project.add_resource(
         "Target",
-        ResourceData::Texture {
-            psxt_path: "assets/textures/target.psxt".to_string(),
-        },
-    );
-    let material = project.add_resource(
-        "Material",
-        ResourceData::Material(MaterialResource::opaque(Some(target))),
+        ResourceData::Material(MaterialResource::opaque(Some(
+            "assets/textures/target.psxt".to_string(),
+        ))),
     );
     let character = project.add_resource(
         "Character",
@@ -2560,12 +2567,12 @@ fn delete_resource_removes_entry_and_clears_references() {
             character: Some(target),
         },
     );
-    assert_eq!(project.resource_reference_count(target), 12);
+    assert_eq!(project.resource_reference_count(target), 11);
     let report = project
         .delete_resource_with_files(target, &root)
         .expect("resource exists");
     assert_eq!(report.removed.name, "Target");
-    assert_eq!(report.cleared_references, 12);
+    assert_eq!(report.cleared_references, 11);
     assert_eq!(
         report.deleted_files,
         vec![ResourceFileDelete {
@@ -2575,12 +2582,6 @@ fn delete_resource_removes_entry_and_clears_references() {
     assert!(report.skipped_files.is_empty());
     assert!(!texture_dir.join("target.psxt").exists());
     assert!(project.resource(target).is_none());
-    assert_eq!(project.resource_name(material), Some("Material"));
-
-    let ResourceData::Material(material_data) = &project.resource(material).unwrap().data else {
-        panic!("expected material");
-    };
-    assert_eq!(material_data.texture, None);
     let ResourceData::Character(character_data) = &project.resource(character).unwrap().data else {
         panic!("expected character");
     };
@@ -2878,4 +2879,93 @@ fn wall_split_height_segments_keeps_uvs_and_sloped_edges_connected() {
         );
     }
     assert!(segments.iter().all(|segment| segment.uv.span == [12, 96]));
+}
+
+#[test]
+fn legacy_texture_resources_migrate_into_materials_on_load() {
+    // Pre-merge project shape: Texture resources + materials that
+    // reference them by id, plus direct texture references from a UI
+    // image, a far-vista panel, and a particle emitter. Loading must
+    // fold wrapped textures into their materials, keep direct
+    // references valid by converting those textures into materials in
+    // place (same id), and drop the orphaned leftovers.
+    let mut project = ProjectDocument::new("legacy-textures");
+    let wrapped = project.add_resource(
+        "WALL_1A",
+        ResourceData::Texture {
+            psxt_path: "assets/textures/wall_1a.psxt".to_string(),
+        },
+    );
+    let material = project.add_resource(
+        "WALL_1A Material",
+        ResourceData::Material(MaterialResource::opaque(None)),
+    );
+    let direct = project.add_resource(
+        "VISTA_SLICE",
+        ResourceData::Texture {
+            psxt_path: "assets/textures/vista.psxt".to_string(),
+        },
+    );
+    let orphan = project.add_resource(
+        "UNUSED",
+        ResourceData::Texture {
+            psxt_path: "assets/textures/unused.psxt".to_string(),
+        },
+    );
+    let world_id = project.active_scene().root;
+    if let Some(node) = project.active_scene_mut().node_mut(world_id) {
+        if let NodeKind::World { far_vista, .. } = &mut node.kind {
+            far_vista.texture = Some(direct);
+        }
+    }
+
+    // New saves never write the legacy `texture:` field, so inject it
+    // textually the way a pre-merge project file carried it.
+    let ron = project.to_ron_string().expect("serializes");
+    assert_eq!(ron.matches("Material((").count(), 1);
+    let ron = ron.replace(
+        "Material((",
+        &format!("Material((texture: Some(({})),", wrapped.raw()),
+    );
+    let loaded = ProjectDocument::from_ron_str(&ron).expect("loads");
+
+    assert!(
+        !loaded
+            .resources
+            .iter()
+            .any(|r| matches!(&r.data, ResourceData::Texture { .. })),
+        "no Texture resources survive migration"
+    );
+    let ResourceData::Material(folded) = &loaded.resource(material).expect("material kept").data
+    else {
+        panic!("material kept its kind");
+    };
+    assert_eq!(
+        folded.psxt_path.as_deref(),
+        Some("assets/textures/wall_1a.psxt")
+    );
+    assert_eq!(folded.legacy_texture, None);
+    let ResourceData::Material(converted) = &loaded.resource(direct).expect("direct ref kept").data
+    else {
+        panic!("directly referenced texture converts in place");
+    };
+    assert_eq!(
+        converted.psxt_path.as_deref(),
+        Some("assets/textures/vista.psxt")
+    );
+    assert!(loaded.resource(orphan).is_none(), "orphan dropped");
+    let vista_ref = loaded
+        .active_scene()
+        .nodes()
+        .iter()
+        .find_map(|node| match &node.kind {
+            NodeKind::World { far_vista, .. } => far_vista.texture,
+            _ => None,
+        });
+    assert_eq!(vista_ref, Some(direct), "direct reference id unchanged");
+
+    // Round-trip stability: a migrated project reloads unchanged.
+    let ron2 = loaded.to_ron_string().expect("reserializes");
+    let reloaded = ProjectDocument::from_ron_str(&ron2).expect("reloads");
+    assert_eq!(loaded.resources, reloaded.resources);
 }

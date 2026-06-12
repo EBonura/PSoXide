@@ -351,8 +351,8 @@ pub struct CookedWorldMaterial {
     pub slot: u16,
     /// Source editor resource id.
     pub source: ResourceId,
-    /// Source texture resource, if any.
-    pub texture: Option<ResourceId>,
+    /// Resolved `.psxt` path carried by the material, if any.
+    pub psxt_path: Option<String>,
     /// PS1 semi-transparency mode.
     pub blend_mode: PsxBlendMode,
     /// Texture modulation tint.
@@ -366,7 +366,7 @@ impl CookedWorldMaterial {
         Self {
             slot,
             source,
-            texture: material.texture,
+            psxt_path: material.psxt_path.clone(),
             blend_mode: material.blend_mode,
             tint: material.tint,
             face_sidedness: material.sidedness(),
@@ -906,39 +906,35 @@ mod tests {
             .expect("starter floor has material")
     }
 
-    fn texture_named(project: &ProjectDocument, suffix: &str) -> ResourceId {
+    fn texture_named(project: &ProjectDocument, suffix: &str) -> String {
         project
             .resources
             .iter()
             .find_map(|resource| match &resource.data {
-                ResourceData::Texture { psxt_path } if psxt_path.ends_with(suffix) => {
-                    Some(resource.id)
-                }
+                ResourceData::Material(material) => material
+                    .psxt_path
+                    .as_ref()
+                    .filter(|path| path.ends_with(suffix))
+                    .cloned(),
                 _ => None,
             })
-            .expect("starter texture exists")
+            .expect("starter material texture exists")
     }
 
     fn material_for_texture(
         project: &mut ProjectDocument,
         name: &str,
-        texture: ResourceId,
+        psxt_path: String,
     ) -> ResourceId {
         project.add_resource(
             name,
-            ResourceData::Material(crate::MaterialResource::opaque(Some(texture))),
+            ResourceData::Material(crate::MaterialResource::opaque(Some(psxt_path))),
         )
     }
 
     fn minimal_material_project() -> (ProjectDocument, ResourceId) {
         let mut project = ProjectDocument::new("world-cook-test");
-        let texture = project.add_resource(
-            "test texture",
-            ResourceData::Texture {
-                psxt_path: "test.psxt".into(),
-            },
-        );
-        let material = material_for_texture(&mut project, "test material", texture);
+        let material = material_for_texture(&mut project, "test material", "test.psxt".into());
         (project, material)
     }
 
@@ -1247,20 +1243,20 @@ mod tests {
     #[test]
     fn rejects_non_material_resources() {
         let project = ProjectDocument::starter();
-        let texture = project
+        let model = project
             .resources
             .iter()
             .find_map(|resource| match resource.data {
-                ResourceData::Texture { .. } => Some(resource.id),
+                ResourceData::Model(_) => Some(resource.id),
                 _ => None,
             })
-            .expect("starter project should contain a texture");
+            .expect("starter project should contain a model");
         let mut grid = WorldGrid::empty(1, 1, world::SECTOR_SIZE);
-        grid.set_floor(0, 0, 0, Some(texture));
+        grid.set_floor(0, 0, 0, Some(model));
 
         assert_eq!(
             cook_world_grid(&project, &grid).unwrap_err(),
-            WorldGridCookError::ResourceIsNotMaterial { id: texture }
+            WorldGridCookError::ResourceIsNotMaterial { id: model }
         );
     }
 
@@ -1335,14 +1331,10 @@ mod tests {
         assert_eq!(cooked.materials.len(), 2);
 
         let psxt_path_for_slot = |slot: usize| -> String {
-            let texture_id = cooked.materials[slot]
-                .texture
-                .expect("starter material has a texture");
-            let texture = project.resource(texture_id).expect("texture in resources");
-            match &texture.data {
-                ResourceData::Texture { psxt_path } => psxt_path.clone(),
-                _ => panic!("slot {slot} resource isn't a texture"),
-            }
+            cooked.materials[slot]
+                .psxt_path
+                .clone()
+                .expect("starter material has a texture")
         };
 
         assert!(psxt_path_for_slot(0).ends_with("block_1a.psxt"));
