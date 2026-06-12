@@ -748,3 +748,27 @@ Invisible in practice; tracked as its own hunt.
 Sky-cache gates: frame-300 world identical except those 3 pre-existing
 pixels, dumps 400/700/1000 clean with correct sky, engine suite 249
 green.
+
+## Fallback rooms get the lateral cell cull (2026-06-12) -- the big one
+
+room_vis_fallback_draws (new CSV column) showed 3-4 of ~5 drawn rooms
+per frame have NO portal anchor (active-but-not-portal-visible) and
+took the all-cells fallback, which culled cells laterally ONLY for the
+root room; neighbour fallback rooms drew EVERY populated cell with no
+cell-level culling at all. Flipped cull_cells_laterally to true for
+all fallback rooms: the sphere radius+margin test is the same
+conservative bound the root room already trusts, so rejected cells are
+off-screen and pixels are unchanged; only their projection + surface
+walk is skipped.
+
+Tape: render 844,966 -> 634,883 avg (-25%), room 350k -> 217k,
+cells drawn 89 -> 37 avg (163 -> 92 p99), surfaces 135 -> 74,
+misses 113/868 -> 54/1106 (4.9%), presented frames +27%.
+
+Gates (max strictness -- this is the regression class the protocol
+was born from): corridor frame-300 pre-divergence compare shows ONLY
+the known 3-pixel layout-LSB signature; ten tape dumps
+(200/400/550/700/850/1000/1150/1300/1500/1700) eyeballed clean,
+including the arch-class far sightlines at 1000/1150/1300 with far
+rooms complete through doorways; engine suite 249 green. User make
+run remains the final gate.
