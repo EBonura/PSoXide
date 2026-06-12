@@ -26,6 +26,12 @@ default = [
     "world-grid-visible",
     "ot-2048",
     "vis-static-active-turn",
+    # Camera-independent visible-cell fills: the cached candidate list
+    # per (room, anchor) holds the full PVS set and per-frame camera
+    # culling happens downstream in cell_select/surface tests, so
+    # camera rotation no longer refills every drawn room each tick
+    # (was 33k avg / 184k spike ticks on the benchmark tape).
+    "vis-anchor-pvs-candidates",
 ]
 cd-stream-bench = ["dep:psx-io"]
 cd-stream-benchmark = ["cd-stream-bench"]
