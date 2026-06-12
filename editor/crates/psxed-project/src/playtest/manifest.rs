@@ -957,7 +957,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         };
         let _ = writeln!(
             out,
-            "    LevelModelInstanceRecord {{ room: RoomIndex({}), model: ModelIndex({}), clip: {clip}, pose_frame: {}, x: {}, y: {}, z: {}, yaw: {}, visual_yaw: {}, visual_offset: [{}, {}, {}], visual_scale_q8: {}, flags: {} }},",
+            "    LevelModelInstanceRecord {{ room: RoomIndex({}), model: ModelIndex({}), clip: {clip}, pose_frame: {}, x: {}, y: {}, z: {}, yaw: {}, visual_yaw: {}, pitch: {}, roll: {}, visual_offset: [{}, {}, {}], visual_scale_q8: {}, flags: {} }},",
             inst.room,
             inst.model,
             inst.pose_frame,
@@ -966,6 +966,8 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             inst.z,
             inst.yaw,
             inst.visual_yaw,
+            inst.pitch,
+            inst.roll,
             inst.visual_offset[0],
             inst.visual_offset[1],
             inst.visual_offset[2],

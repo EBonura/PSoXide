@@ -289,13 +289,6 @@ fn scaled_offset(scale: LocalToWorldScale, offset: [i32; 3]) -> [i32; 3] {
     ]
 }
 
-fn euler_q12_rotation(rotation_q12: [i16; 3]) -> Mat3I16 {
-    let rx = Mat3I16::rotate_x(Angle::from_q12(rotation_q12[0] as u16).rotate_y_arg());
-    let ry = Mat3I16::rotate_y(Angle::from_q12(rotation_q12[1] as u16).rotate_y_arg());
-    let rz = Mat3I16::rotate_z(Angle::from_q12(rotation_q12[2] as u16).rotate_y_arg());
-    rz.mul(&ry).mul(&rx)
-}
-
 fn euler_q12_rotation_inverse(rotation_q12: [i16; 3]) -> Mat3I16 {
     let inv_x = (-(rotation_q12[0] as i32)) as u16;
     let inv_y = (-(rotation_q12[1] as i32)) as u16;

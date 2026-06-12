@@ -511,6 +511,7 @@ pub fn register_cooked_model_bundle(
         world_height: 1024,
         collision_radius: default_model_collision_radius_for_height(1024),
         scale_q8: [crate::MODEL_SCALE_ONE_Q8; 3],
+        default_visual_yaw_q12: 0,
         attachments: Vec::new(),
     };
 
@@ -1290,8 +1291,6 @@ mod tests {
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
-
-
 
     #[test]
     fn model_stats_from_obsidian_wraith() {

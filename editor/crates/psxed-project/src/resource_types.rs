@@ -954,6 +954,11 @@ pub struct ModelResource {
     /// cook/import, not as runtime floats.
     #[serde(default = "default_model_scale_q8")]
     pub scale_q8: [u16; 3],
+    /// Default visual yaw in Q12 turns (`4096 = 360deg`) used by
+    /// editor preview and newly placed renderer nodes. This is
+    /// authoring metadata; gameplay actor yaw remains per-instance.
+    #[serde(default)]
+    pub default_visual_yaw_q12: i16,
     /// Named sockets used by equipment, VFX, and hitbox authoring.
     #[serde(default)]
     pub attachments: Vec<AttachmentSocket>,

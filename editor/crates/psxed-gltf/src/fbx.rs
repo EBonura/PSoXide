@@ -25,7 +25,18 @@ pub(crate) fn convert_fbx_rigid_model_scene_with_extra_animations(
         return Err(Error::BadSkin("animation sample rate must be non-zero"));
     }
 
-    let (mesh_node, mesh, skin) = fbx_skinned_mesh(scene)?;
+    let (mesh_node, mesh, skin) = match fbx_skinned_mesh(scene) {
+        Ok(mesh) => mesh,
+        Err(Error::MissingFbxSkinnedMesh) => {
+            if !extra_animation_scenes.is_empty() {
+                return Err(Error::BadSkin(
+                    "extra animation sources require a skinned source model",
+                ));
+            }
+            return convert_static_fbx_rigid_model_scene(scene, source_path, cfg);
+        }
+        Err(error) => return Err(error),
+    };
     let node_indices = fbx_node_indices(scene);
     let parents = fbx_parent_indices(scene, &node_indices);
     let base_trs = fbx_base_trs(scene);
@@ -138,6 +149,103 @@ pub(crate) fn convert_fbx_rigid_model_scene_with_extra_animations(
     )
 }
 
+pub(crate) fn convert_static_fbx_rigid_model_scene(
+    scene: &ufbx::Scene,
+    source_path: Option<&Path>,
+    cfg: &RigidModelConfig,
+) -> Result<RigidModelPackage, Error> {
+    let (mesh_node, mesh) = fbx_static_mesh(scene)?;
+    let mut source = read_fbx_static_mesh(mesh_node, mesh)?;
+    if source.faces.is_empty() {
+        return Err(Error::Empty);
+    }
+
+    let precision_bounds = collect_static_precision_bounds(&source)?;
+    let bounds = ModelBounds::from_min_max(
+        precision_bounds.min,
+        precision_bounds.max,
+        MODEL_LOCAL_COORD_LIMIT,
+    )?;
+    if prune_detached_face_islands(
+        &mut source,
+        &bounds,
+        cfg.prune_detached_face_islands as usize,
+    ) > 0
+    {
+        if source.faces.is_empty() {
+            return Err(Error::Empty);
+        }
+        let precision_bounds = collect_static_precision_bounds(&source)?;
+        let bounds = ModelBounds::from_min_max(
+            precision_bounds.min,
+            precision_bounds.max,
+            MODEL_LOCAL_COORD_LIMIT,
+        )?;
+        return finish_static_fbx_rigid_model_scene(
+            cfg,
+            source_path,
+            source,
+            bounds,
+            precision_bounds,
+            mesh,
+        );
+    }
+
+    finish_static_fbx_rigid_model_scene(cfg, source_path, source, bounds, precision_bounds, mesh)
+}
+
+pub(crate) fn finish_static_fbx_rigid_model_scene(
+    cfg: &RigidModelConfig,
+    source_path: Option<&Path>,
+    source: SkinnedSourceMesh,
+    bounds: ModelBounds,
+    precision_bounds: PrecisionBounds,
+    mesh: &ufbx::Mesh,
+) -> Result<RigidModelPackage, Error> {
+    let local_height = bounds.encoded_axis_size(precision_bounds.min[1], precision_bounds.max[1]);
+    let local_to_world_q12 = choose_local_to_world_q12(local_height, cfg.world_height);
+    let material_color = first_fbx_material_base_color(mesh);
+    let texture = cook_fbx_base_color_texture(mesh, source_path, material_color, cfg)?;
+    let parents = [None];
+    let joints = [0usize];
+    let (model, cooked_vertices, parts) = cook_model_blob(
+        &source,
+        &bounds,
+        &parents,
+        &joints,
+        material_color,
+        cfg.texture_width,
+        cfg.texture_height,
+        local_to_world_q12,
+    )?;
+    let clips = vec![bind_pose_clip(joints.len(), &bounds, cfg.animation_fps)?];
+    let animation_bytes = clips.iter().map(|c| c.bytes.len()).sum();
+    let clip_frames = clips
+        .iter()
+        .map(|c| (c.sanitized_name.clone(), c.frames))
+        .collect();
+    let report = RigidModelReport {
+        source_vertices: source.vertices.len(),
+        cooked_vertices,
+        faces: source.faces.len(),
+        parts,
+        joints: joints.len(),
+        clip_frames,
+        local_height: local_height.max(0) as usize,
+        local_to_world_q12,
+        model_bytes: model.len(),
+        animation_bytes,
+        texture_bytes: texture.as_ref().map_or(0, Vec::len),
+    };
+
+    Ok(RigidModelPackage {
+        model,
+        clips,
+        texture,
+        report,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn finish_fbx_rigid_model_scene(
     scene: &ufbx::Scene,
@@ -169,7 +277,7 @@ pub(crate) fn finish_fbx_rigid_model_scene(
         cfg.texture_height,
         local_to_world_q12,
     )?;
-    let clips = cook_all_fbx_animations(
+    let mut clips = cook_all_fbx_animations(
         scene,
         extra_animation_scenes,
         parents,
@@ -182,6 +290,9 @@ pub(crate) fn finish_fbx_rigid_model_scene(
         cfg.normalize_root_translation,
         cfg.strip_animation_scale,
     )?;
+    if clips.is_empty() {
+        clips.push(bind_pose_clip(joints.len(), &bounds, cfg.animation_fps)?);
+    }
 
     let animation_bytes = clips.iter().map(|c| c.bytes.len()).sum();
     let clip_frames = clips
@@ -225,6 +336,20 @@ pub(crate) fn fbx_skinned_mesh<'a>(
         }
     }
     Err(Error::MissingFbxSkinnedMesh)
+}
+
+pub(crate) fn fbx_static_mesh<'a>(
+    scene: &'a ufbx::Scene,
+) -> Result<(&'a ufbx::Node, &'a ufbx::Mesh), Error> {
+    for node in &scene.nodes {
+        let Some(mesh) = node.mesh.as_deref() else {
+            continue;
+        };
+        if mesh.num_vertices > 0 && mesh.num_faces > 0 {
+            return Ok((node, mesh));
+        }
+    }
+    Err(Error::Empty)
 }
 
 pub(crate) fn fbx_node_indices(scene: &ufbx::Scene) -> HashMap<usize, usize> {
@@ -348,6 +473,59 @@ pub(crate) fn read_fbx_skinned_mesh(
                     joints: cleaned_joints,
                     weights,
                     dominant_joint: dominant_vertex_joint(cleaned_joints, weights),
+                });
+            }
+            normal_faces.push(indices);
+            source.faces.push(SourceFace {
+                indices: [indices[0], indices[2], indices[1]],
+                joint: 0,
+            });
+        }
+    }
+    rebuild_source_normals(&mut source, &normal_faces);
+    Ok(source)
+}
+
+pub(crate) fn read_fbx_static_mesh(
+    mesh_node: &ufbx::Node,
+    mesh: &ufbx::Mesh,
+) -> Result<SkinnedSourceMesh, Error> {
+    if !mesh.vertex_position.exists {
+        return Err(Error::MissingAttribute {
+            primitive_index: 0,
+            attribute: "POSITION",
+        });
+    }
+
+    let transform = fbx_matrix_to_mat4(mesh_node.geometry_to_world);
+    let mut source = SkinnedSourceMesh::default();
+    let mut normal_faces = Vec::new();
+    let mut triangulated = Vec::new();
+    for face in mesh.faces.iter().copied() {
+        triangulated.clear();
+        ufbx::triangulate_face_vec(&mut triangulated, mesh, face);
+        for tri in triangulated.chunks_exact(3) {
+            let mut indices = [0usize; 3];
+            for (corner, fbx_index) in tri.iter().copied().enumerate() {
+                let fbx_index = fbx_index as usize;
+                if mesh.vertex_indices.get(fbx_index).is_none() {
+                    return Err(Error::BadSkin("FBX face index is outside vertex table"));
+                }
+                let position =
+                    transform_point(&transform, fbx_vec3(mesh.vertex_position[fbx_index]));
+                let uv = if mesh.vertex_uv.exists {
+                    fbx_vec2(mesh.vertex_uv[fbx_index])
+                } else {
+                    [0.0, 0.0]
+                };
+                indices[corner] = source.vertices.len();
+                source.vertices.push(SourceVertex {
+                    position,
+                    normal: [0.0, 1.0, 0.0],
+                    uv,
+                    joints: [0, 0, 0, 0],
+                    weights: [1.0, 0.0, 0.0, 0.0],
+                    dominant_joint: 0,
                 });
             }
             normal_faces.push(indices);

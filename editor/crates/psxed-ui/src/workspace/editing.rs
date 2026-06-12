@@ -547,6 +547,32 @@ impl EditorWorkspace {
         }
     }
 
+    /// World directions of the gizmo handle axes, as matrix columns.
+    ///
+    /// Identity in Global space; the active (first) target's authored
+    /// rotation in Local space. Scale handles always follow the object
+    /// regardless of the toggle: they edit object dimensions, so
+    /// world-aligned handles on a rotated prop would point away from
+    /// the extent they resize.
+    pub(crate) fn node_gizmo_basis(&self, targets: &[NodeId]) -> [[f32; 3]; 3] {
+        const IDENTITY: [[f32; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        let object_aligned = match self.transform_gizmo_mode {
+            TransformGizmoMode::Scale => true,
+            TransformGizmoMode::Move | TransformGizmoMode::Rotate => {
+                self.gizmo_space == GizmoSpace::Local
+            }
+        };
+        if !object_aligned {
+            return IDENTITY;
+        }
+        let scene = self.project.active_scene();
+        targets
+            .iter()
+            .find_map(|id| scene.node(*id))
+            .map(|node| euler_degrees_to_matrix(node.transform.rotation_degrees))
+            .unwrap_or(IDENTITY)
+    }
+
     pub(crate) fn node_gizmo_screen_axes(&self, rect: Rect) -> Vec<PrimitiveGizmoScreenAxis> {
         let targets = self.selected_node_gizmo_targets();
         if targets.is_empty() {
@@ -559,45 +585,40 @@ impl EditorWorkspace {
         let Some(start) = project_world_to_viewport_screen(camera, rect, pivot) else {
             return Vec::new();
         };
-        let axis_len = self.node_gizmo_axis_world_length(&targets);
-        let axes: &[PrimitiveGizmoAxis] = match self.transform_gizmo_mode {
-            TransformGizmoMode::Move => &[
-                PrimitiveGizmoAxis::X,
-                PrimitiveGizmoAxis::Y,
-                PrimitiveGizmoAxis::Z,
-            ],
-            TransformGizmoMode::Rotate => &[
-                PrimitiveGizmoAxis::X,
-                PrimitiveGizmoAxis::Y,
-                PrimitiveGizmoAxis::Z,
-            ],
-            TransformGizmoMode::Scale => &[
-                PrimitiveGizmoAxis::X,
-                PrimitiveGizmoAxis::Y,
-                PrimitiveGizmoAxis::Z,
-            ],
-        };
-        axes.iter()
-            .copied()
-            .filter_map(|axis| {
-                let delta = axis.world_delta(axis_len);
-                let end_world = [
-                    pivot[0] + delta[0],
-                    pivot[1] + delta[1],
-                    pivot[2] + delta[2],
-                ];
-                let end = project_world_to_viewport_screen(camera, rect, end_world)?;
-                ((end - start).length_sq() >= 64.0).then_some(PrimitiveGizmoScreenAxis {
-                    axis,
-                    start,
-                    end,
-                })
+        let axis_len = self.node_gizmo_axis_world_length(&targets) as f32;
+        let basis = self.node_gizmo_basis(&targets);
+        [
+            PrimitiveGizmoAxis::X,
+            PrimitiveGizmoAxis::Y,
+            PrimitiveGizmoAxis::Z,
+        ]
+        .into_iter()
+        .filter_map(|axis| {
+            let dir = basis_column(&basis, axis.index());
+            let end_world = [
+                pivot[0] + dir[0] * axis_len,
+                pivot[1] + dir[1] * axis_len,
+                pivot[2] + dir[2] * axis_len,
+            ];
+            let end = project_world_to_viewport_screen(camera, rect, end_world)?;
+            ((end - start).length_sq() >= 64.0).then_some(PrimitiveGizmoScreenAxis {
+                axis,
+                start,
+                end,
             })
-            .collect()
+        })
+        .collect()
     }
 
     pub(crate) fn node_gizmo_screen_planes(&self, rect: Rect) -> Vec<NodeGizmoScreenPlane> {
         if self.transform_gizmo_mode != TransformGizmoMode::Move {
+            return Vec::new();
+        }
+        // Plane handles drag along axis-aligned world planes and snap
+        // per world component; in Local space the axis handles carry
+        // the rotated directions and the planes are hidden rather than
+        // drawn misaligned with them.
+        if self.gizmo_space == GizmoSpace::Local {
             return Vec::new();
         }
         let targets = self.selected_node_gizmo_targets();
@@ -700,29 +721,23 @@ impl EditorWorkspace {
         let base_radius = self.node_gizmo_axis_world_length(&targets) as f32 * 0.65;
         let bound_radius = half[0].max(half[1]).max(half[2]) * 1.35;
         let radius = base_radius.max(bound_radius).max(128.0);
+        // Ring lies in the plane perpendicular to `axis`, spanned by
+        // the other two basis columns in the cyclic order that makes a
+        // positive rotation about `axis` carry `u` toward `v`. Ring
+        // points are therefore ordered so a positive world rotation
+        // advances them, which is what the drag's winding test reads.
+        let basis = self.node_gizmo_basis(&targets);
+        let u = basis_column(&basis, (axis.index() + 1) % 3);
+        let v = basis_column(&basis, (axis.index() + 2) % 3);
         let mut points = Vec::with_capacity(49);
         for step in 0..=48 {
             let angle = step as f32 / 48.0 * std::f32::consts::TAU;
-            // Ring lies in the plane perpendicular to `axis`. The
-            // ring's two basis vectors are the world axes that the
-            // chosen rotation keeps fixed.
-            let world = match axis {
-                PrimitiveGizmoAxis::X => [
-                    pivot[0],
-                    pivot[1] + angle.cos() * radius,
-                    pivot[2] + angle.sin() * radius,
-                ],
-                PrimitiveGizmoAxis::Y => [
-                    pivot[0] + angle.cos() * radius,
-                    pivot[1],
-                    pivot[2] + angle.sin() * radius,
-                ],
-                PrimitiveGizmoAxis::Z => [
-                    pivot[0] + angle.cos() * radius,
-                    pivot[1] + angle.sin() * radius,
-                    pivot[2],
-                ],
-            };
+            let (sin, cos) = angle.sin_cos();
+            let world = [
+                pivot[0] + (u[0] * cos + v[0] * sin) * radius,
+                pivot[1] + (u[1] * cos + v[1] * sin) * radius,
+                pivot[2] + (u[2] * cos + v[2] * sin) * radius,
+            ];
             if let Some(screen) = project_world_to_viewport_screen(camera, rect, world) {
                 points.push(screen);
             }
@@ -1292,16 +1307,34 @@ impl EditorWorkspace {
             return false;
         }
 
+        let mut rotate_state: Option<NodeGizmoRotateDrag> = None;
         let screen_axis_delta = match (mode, handle) {
             (TransformGizmoMode::Rotate, NodeGizmoHandle::Axis(axis)) => {
+                // Rotation tracks the angle the pointer sweeps around
+                // the projected pivot rather than linear motion along
+                // a fixed screen direction, so the ring can be grabbed
+                // anywhere and circled from any camera angle.
                 let Some(ring) = self.node_rotation_gizmo_screen_ring_for_axis(rect, axis) else {
                     return false;
                 };
-                ring.points
-                    .first()
-                    .map(|point| *point - ring.center)
-                    .filter(|delta| delta.length_sq() >= 64.0)
-                    .unwrap_or(Vec2::new(64.0, 0.0))
+                let grab = pointer - ring.center;
+                if grab.length_sq() < 64.0 {
+                    return false;
+                }
+                let winding = ring_screen_winding(&ring);
+                if winding == 0.0 {
+                    return false;
+                }
+                rotate_state = Some(NodeGizmoRotateDrag {
+                    center: ring.center,
+                    winding,
+                    last_angle: grab.y.atan2(grab.x),
+                    accumulated: 0.0,
+                    space: self.gizmo_space.rotation_space(),
+                });
+                // Unused by the angular path; non-degenerate so the
+                // shared length check below stays inert.
+                Vec2::new(64.0, 0.0)
             }
             (_, NodeGizmoHandle::Axis(axis)) => {
                 let Some(screen_axis) = self
@@ -1328,6 +1361,12 @@ impl EditorWorkspace {
         if screen_axis_delta.length_sq() < 64.0 {
             return false;
         }
+        let move_axis_world = match (mode, handle) {
+            (TransformGizmoMode::Move, NodeGizmoHandle::Axis(axis)) => {
+                basis_column(&self.node_gizmo_basis(&ids), axis.index())
+            }
+            _ => [0.0; 3],
+        };
 
         let scene = self.project.active_scene();
         let targets: Vec<NodeGizmoTarget> = ids
@@ -1360,6 +1399,8 @@ impl EditorWorkspace {
             screen_axis: screen_axis_delta,
             start_plane_hit,
             current_plane_delta_world: [0.0, 0.0, 0.0],
+            move_axis_world,
+            rotate: rotate_state,
             targets,
             current_steps: 0,
             snapshot_pushed: false,
@@ -1399,6 +1440,34 @@ impl EditorWorkspace {
             return;
         }
 
+        if let Some(rotate) = drag.rotate {
+            // Angular tracking: one step per degree the pointer sweeps
+            // around the projected pivot. Unwrapping per update lets a
+            // drag wind through multiple revolutions.
+            let current_steps = drag.current_steps;
+            let offset = pointer - rotate.center;
+            if offset.length_sq() < 16.0 {
+                return;
+            }
+            let angle = offset.y.atan2(offset.x);
+            let accumulated = rotate.accumulated + wrap_angle_radians(angle - rotate.last_angle);
+            if let Some(drag) = self.interaction.node_gizmo_drag_mut() {
+                if let Some(rotate) = drag.rotate.as_mut() {
+                    rotate.last_angle = angle;
+                    rotate.accumulated = accumulated;
+                }
+            }
+            let steps = (rotate.winding * accumulated.to_degrees()).round() as i32;
+            if steps == current_steps {
+                return;
+            }
+            if let Some(drag) = self.interaction.node_gizmo_drag_mut() {
+                drag.current_steps = steps;
+            }
+            self.apply_node_gizmo_drag();
+            return;
+        }
+
         let axis_len_sq = drag.screen_axis.length_sq();
         if axis_len_sq < f32::EPSILON {
             return;
@@ -1406,12 +1475,9 @@ impl EditorWorkspace {
         let pixels_per_step = match drag.mode {
             TransformGizmoMode::Move => 4.0,
             TransformGizmoMode::Scale => 8.0,
-            // Rotation steps are 1° each, so a low pixels-per-step
-            // makes the ring feel hair-trigger. 12 px / ° (a full
-            // 360° revolution costs roughly screen-width of drag)
-            // matches the editor's expectation that fine prop
-            // alignment is doable without modifier keys.
-            TransformGizmoMode::Rotate => 12.0,
+            // Rotate never reaches the linear path; it tracks the
+            // swept pointer angle above.
+            TransformGizmoMode::Rotate => return,
         };
         let pointer_delta = pointer - drag.start_pointer;
         let unit = drag.screen_axis / axis_len_sq.sqrt();
@@ -1445,6 +1511,11 @@ impl EditorWorkspace {
         let handle = drag.handle;
         let steps = drag.current_steps;
         let plane_delta_world = drag.current_plane_delta_world;
+        let move_axis_world = drag.move_axis_world;
+        let rotation_space = drag
+            .rotate
+            .map(|rotate| rotate.space)
+            .unwrap_or(RotationSpace::Global);
         let mode = drag.mode;
         let targets = drag.targets.clone();
         let scene = self.project.active_scene_mut();
@@ -1454,11 +1525,11 @@ impl EditorWorkspace {
             };
             match mode {
                 TransformGizmoMode::Move => match handle {
-                    NodeGizmoHandle::Axis(axis) => {
+                    NodeGizmoHandle::Axis(_) => {
                         node.transform.translation = node_gizmo_translation(
                             node,
                             target.start_translation,
-                            axis,
+                            move_axis_world,
                             steps,
                             target.sector_size,
                         );
@@ -1475,8 +1546,13 @@ impl EditorWorkspace {
                 },
                 TransformGizmoMode::Rotate => {
                     if let NodeGizmoHandle::Axis(axis) = handle {
-                        node.transform.rotation_degrees =
-                            node_gizmo_rotation(node, target.start_rotation_degrees, axis, steps);
+                        node.transform.rotation_degrees = node_gizmo_rotation(
+                            node,
+                            target.start_rotation_degrees,
+                            axis,
+                            steps,
+                            rotation_space,
+                        );
                     }
                 }
                 TransformGizmoMode::Scale => {
@@ -2088,4 +2164,41 @@ impl EditorWorkspace {
             count => format!("Selected {count} primitives"),
         };
     }
+}
+
+/// World direction of basis column `index` (the gizmo handle axis).
+fn basis_column(basis: &[[f32; 3]; 3], index: usize) -> [f32; 3] {
+    [basis[0][index], basis[1][index], basis[2][index]]
+}
+
+/// Screen winding of a projected rotation ring: `+1.0` when the ring's
+/// increasing-angle order (a positive world rotation) advances the
+/// pointer polar angle `atan2(dy, dx)` in viewport coordinates, `-1.0`
+/// when it runs the other way, `0.0` for a degenerate (edge-on) ring.
+fn ring_screen_winding(ring: &NodeRotationGizmoScreenRing) -> f32 {
+    let mut sum = 0.0f32;
+    for pair in ring.points.windows(2) {
+        let a = pair[0] - ring.center;
+        let b = pair[1] - ring.center;
+        sum += a.x * b.y - a.y * b.x;
+    }
+    if sum.abs() < 1.0 {
+        0.0
+    } else {
+        sum.signum()
+    }
+}
+
+/// Wrap an angle difference into `(-PI, PI]` so per-frame pointer
+/// deltas accumulate across the atan2 seam without 2*PI jumps.
+fn wrap_angle_radians(delta: f32) -> f32 {
+    use std::f32::consts::{PI, TAU};
+    let mut delta = delta;
+    while delta > PI {
+        delta -= TAU;
+    }
+    while delta <= -PI {
+        delta += TAU;
+    }
+    delta
 }
