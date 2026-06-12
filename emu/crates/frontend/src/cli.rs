@@ -2015,6 +2015,7 @@ const PROFILE_LOG_HEADER: &[&str] = &[
     "room_cells_considered",
     "room_cells_culled",
     "room_cells_range_culled",
+    "room_vis_fallback_draws",
     "room_surf_material",
     "room_surf_projected",
     "room_surf_screen",
@@ -2261,6 +2262,7 @@ impl GuestProfileLog {
         push!(counter_total(&summary, c::ROOM_CELLS_CONSIDERED));
         push!(counter_total(&summary, c::ROOM_CELLS_CULLED));
         push!(counter_total(&summary, c::ROOM_CELLS_RANGE_CULLED));
+        push!(counter_total(&summary, c::ROOM_VISIBILITY_FALLBACK_DRAWS));
         push!(counter_total(&summary, c::ROOM_SURF_MATERIAL_CYCLES));
         push!(counter_total(&summary, c::ROOM_SURF_PROJECTED_CYCLES));
         push!(counter_total(&summary, c::ROOM_SURF_SCREEN_CYCLES));
