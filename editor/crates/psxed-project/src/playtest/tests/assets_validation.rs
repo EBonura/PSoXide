@@ -277,16 +277,17 @@ fn texture_shared_across_materials_emits_single_asset() {
     // After cook + package the texture should appear once in
     // ASSETS even though both materials reference it.
     let mut project = project_with_one_room();
-    // Find the starter room texture id and an existing material to
-    // clone-and-retint as a second material referencing the
-    // same texture.
-    let room_texture_id = project
+    // Find the starter room texture path and build a second material
+    // pointing at the same image.
+    let room_texture_path = project
         .resources
         .iter()
         .find_map(|r| match &r.data {
-            ResourceData::Texture { psxt_path } if psxt_path.ends_with("bigdoor_1a.psxt") => {
-                Some(r.id)
-            }
+            ResourceData::Material(material) => material
+                .psxt_path
+                .as_ref()
+                .filter(|path| path.ends_with("bigdoor_1a.psxt"))
+                .cloned(),
             _ => None,
         })
         .expect("starter has room texture");
@@ -294,11 +295,11 @@ fn texture_shared_across_materials_emits_single_asset() {
     // Reassign every wall material in the room to a new
     // material that *also* points at the same room texture. After
     // cook the world has 2 cooker material slots (floor + the
-    // new wall material) but both resolve to the same texture,
-    // so playtest should emit 1 texture asset.
+    // new wall material) but both resolve to the same texture
+    // image, so playtest should emit 1 texture asset.
     let new_material_id = project.add_resource(
         "BigdoorOnWalls",
-        ResourceData::Material(crate::MaterialResource::opaque(Some(room_texture_id))),
+        ResourceData::Material(crate::MaterialResource::opaque(Some(room_texture_path))),
     );
     let scene = project.active_scene_mut();
     let room_id = scene
@@ -389,17 +390,17 @@ fn material_sidedness_reaches_playtest_manifest_flags() {
 
 #[test]
 fn missing_texture_path_fails_with_clear_error() {
-    // Point a texture resource at a bogus path; cook should
+    // Point a material's texture at a bogus path; cook should
     // refuse and the error should mention the file.
     let mut project = project_with_one_room();
     let target = project
         .resources
         .iter_mut()
         .find_map(|r| match &mut r.data {
-            ResourceData::Texture { psxt_path } => Some(psxt_path),
+            ResourceData::Material(material) => material.psxt_path.as_mut(),
             _ => None,
         })
-        .expect("starter has at least one texture");
+        .expect("starter has at least one textured material");
     *target = "this/does/not/exist.psxt".to_string();
 
     let (package, report) = build_package(&project, &starter_project_root());
