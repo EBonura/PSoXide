@@ -99,22 +99,15 @@ fn room_material_must_be_4bpp() {
     // Rewire the actually-used starter room texture to the
     // wraith atlas path so it parses but with the wrong CLUT
     // entry count.
-    let used_texture = project
+    let rewired = project
         .resources
-        .iter()
-        .find_map(|resource| match &resource.data {
-            ResourceData::Material(material) => material.texture,
+        .iter_mut()
+        .find_map(|resource| match &mut resource.data {
+            ResourceData::Material(material) => material.psxt_path.as_mut(),
             _ => None,
         })
         .expect("starter has a used room texture");
-    for resource in project.resources.iter_mut() {
-        if let ResourceData::Texture { psxt_path } = &mut resource.data {
-            if resource.id == used_texture {
-                *psxt_path =
-                    "assets/models/obsidian_wraith/obsidian_wraith_128x128_8bpp.psxt".to_string();
-            }
-        }
-    }
+    *rewired = "assets/models/obsidian_wraith/obsidian_wraith_128x128_8bpp.psxt".to_string();
     let (package, report) = build_package(&project, &starter_project_root());
     assert!(package.is_none());
     assert!(

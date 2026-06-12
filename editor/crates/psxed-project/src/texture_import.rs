@@ -1,7 +1,7 @@
 //! Cooked texture registration + image import.
 //!
 //! Two entry points feed the same end product --
-//! [`ResourceData::Texture`] -- from different sources:
+//! textured [`crate::MaterialResource`]s -- from different sources:
 //!
 //! * [`register_cooked_texture`] adopts an existing cooked `.psxt`
 //!   file, validates it through `psx_asset`, and records a
@@ -295,7 +295,7 @@ pub fn apply_texel_color_key_transparency(
     })
 }
 
-/// Adopt an existing cooked `.psxt` as a [`ResourceData::Texture`].
+/// Adopt an existing cooked `.psxt` as a textured Material resource.
 pub fn register_cooked_texture(
     project: &mut ProjectDocument,
     psxt_path: &Path,
@@ -316,11 +316,14 @@ pub fn register_cooked_texture(
     })?;
 
     let name = display_name_from_input(display_name, psxt_path, "Texture");
+    // Materials own their image since the material/texture merge, so
+    // importing a texture yields a paintable material directly.
     Ok(project.add_resource(
         name,
-        ResourceData::Texture {
-            psxt_path: relativise(psxt_path, project_root),
-        },
+        ResourceData::Material(crate::MaterialResource::opaque(Some(relativise(
+            psxt_path,
+            project_root,
+        )))),
     ))
 }
 
@@ -344,7 +347,7 @@ pub fn preview_texture_import(
 
 /// Convert a PNG/JPG/BMP source through the texture cooker, write the
 /// cooked output under `project_root/assets/textures/<safe_name>.psxt`,
-/// then register it as a [`ResourceData::Texture`].
+/// then register it as a textured Material resource.
 ///
 /// Existing `.psxt` files at the exact output path are replaced, which
 /// mirrors the model importer's "same cooked bundle output" workflow.
@@ -631,9 +634,13 @@ mod tests {
         .expect("import succeeds");
 
         let resource = project.resource(id).expect("resource exists");
-        let ResourceData::Texture { psxt_path } = &resource.data else {
-            panic!("expected Texture resource, got {:?}", resource.data);
+        let ResourceData::Material(material) = &resource.data else {
+            panic!("expected Material resource, got {:?}", resource.data);
         };
+        let psxt_path = material
+            .psxt_path
+            .clone()
+            .expect("imported material has image");
         assert_eq!(resource.name, "App Icon");
         assert_eq!(psxt_path, "assets/textures/app_icon.psxt");
 
