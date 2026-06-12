@@ -641,3 +641,39 @@ Tape vs pre-change reference (same script, same tape):
 Gates: corridor pixel-IDENTICAL (0-skew determinism held), dumps at
 400/700/1000/full clean and scene-matched to reference, engine suite
 249 green.
+
+## cell_select attributed + frustum hoist (2026-06-12)
+
+New gated sub-stages (psx-engine feature cell-select-profile; CSV
+columns cell_lookup/cell_depth/cell_collect) split room_cell_select
+(100,232 avg / 157k p99, ~133 cells considered per frame, ~754
+cycles/cell): lookup 3.9k + depth/cull 42.7k + collect 34.6k + ~23k
+loop/sort remainder. Volume is NOT the problem (PVS candidate lists
+total only ~65-79 cells); per-cell constant cost is.
+
+Shipped (behavior-preserving): CellFrustum hoists the clamped
+near/far/focal/screen constants out of the per-cell loop and replaces
+six saturating 32-bit products per test with exact widening 32x32->64
+products (single MULT each); CachedRoomCell now passes by reference in
+the select/collect loops. Cell depth still computed per frame on the
+GTE -- it feeds DepthPolicy::Fixed OT placement under HybridWalls, so
+staleness is not an option.
+
+Tape vs debris-cache baseline: cell_select 100.2k -> 95.7k avg,
+cell_depth p99 88k -> 56k (the all-cells fallback scan got the big
+cut), render avg 896.6k -> 858.0k (part denominator effect: 826 ->
+858 renders on the same tape as skips fell), misses 118 -> 113.
+Gates: corridor pixel-IDENTICAL, dumps 400/700/1000/1400/1700 clean
+(final-frame close-up is the camera against the slat wall at tape
+end, legit geometry), engine suite 249 green.
+
+Also exported (host CSV only): room_cells_considered/culled/
+range_culled and the room-surface-profile micro-profile counters
+(room_surf_*, room_submit_*) for the next decomposition target:
+room_surface_draw 173k avg / ~1.3k per surface considered.
+
+Parked note: per-frame accept set is ~72% of candidates (37/133
+culled); collect floor is the ready-flag dedup RAM traffic; further
+cell_select cuts need a pipelined GTE center-transform loop (fill the
+MTC2 settle gap with the previous cell's compare) -- do this only if
+the band stays hot after the bigger rows shrink.
