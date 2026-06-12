@@ -771,6 +771,14 @@ fn raster_textured_triangle(
     if area.abs() < f32::EPSILON {
         return;
     }
+    // Backface-cull with the engine's sign (front faces project with
+    // positive NCLIP, which is negative `edge` here) so the preview
+    // shows winding problems instead of silently drawing both sides;
+    // a source asset relying on double-sided materials used to look
+    // fine here and render inside-out in the scene.
+    if area > 0.0 {
+        return;
+    }
 
     let min_x = tri
         .iter()
@@ -1000,12 +1008,18 @@ mod tests {
     #[ignore]
     fn dump_preview_for_inspection() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-        let model =
-            std::fs::read(root.join("assets/models/obsidian_wraith/obsidian_wraith.psxmdl"))
-                .expect("tracked model fixture");
-        let clip =
-            std::fs::read(root.join("assets/models/obsidian_wraith/obsidian_wraith_idle.psxanim"))
-                .expect("tracked animation fixture");
+        let model_path = std::env::var("DUMP_MODEL").unwrap_or_else(|_| {
+            root.join("assets/models/obsidian_wraith/obsidian_wraith.psxmdl")
+                .to_string_lossy()
+                .into_owned()
+        });
+        let clip_path = std::env::var("DUMP_CLIP").unwrap_or_else(|_| {
+            root.join("assets/models/obsidian_wraith/obsidian_wraith_idle.psxanim")
+                .to_string_lossy()
+                .into_owned()
+        });
+        let model = std::fs::read(model_path).expect("model fixture");
+        let clip = std::fs::read(clip_path).expect("animation fixture");
         let atlas = ColorImage {
             size: [128, 128],
             pixels: vec![Color32::from_rgb(210, 90, 70); 128 * 128],
