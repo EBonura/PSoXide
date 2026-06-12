@@ -444,6 +444,43 @@ fn streamed_active_room_surface_cache_for(index: RoomIndex) -> Option<ActiveRoom
     }
 }
 
+/// Prebuilt-quad pool slices for `room`, claiming a slot round-robin
+/// on first use. A claim ZEROES the slot's per-surface validity bytes,
+/// so every surface fully reconstructs its packet on its first visible
+/// frame for this room and is position/colour-patched afterwards. With
+/// 8 slots and at most `visible_chunk_limit` (6) rooms drawn per
+/// frame, a slot claimed this frame cannot be re-stolen before its
+/// draw runs.
+pub(super) fn prebuilt_room_quads_for(
+    room: RoomIndex,
+) -> (&'static mut [QuadTexturedGouraud], &'static mut [u8]) {
+    unsafe {
+        let mut i = 0usize;
+        while i < PREBUILT_ROOM_QUAD_SLOTS {
+            if PREBUILT_ROOM_QUAD_ROOMS[i] == room {
+                return (
+                    &mut PREBUILT_ROOM_QUADS[i][..],
+                    &mut PREBUILT_ROOM_QUAD_VALID[i][..],
+                );
+            }
+            i += 1;
+        }
+        let slot = (PREBUILT_ROOM_QUAD_NEXT as usize) % PREBUILT_ROOM_QUAD_SLOTS;
+        PREBUILT_ROOM_QUAD_NEXT = PREBUILT_ROOM_QUAD_NEXT.wrapping_add(1);
+        PREBUILT_ROOM_QUAD_ROOMS[slot] = room;
+        let valid = &mut PREBUILT_ROOM_QUAD_VALID[slot];
+        let mut j = 0usize;
+        while j < valid.len() {
+            valid[j] = 0;
+            j += 1;
+        }
+        (
+            &mut PREBUILT_ROOM_QUADS[slot][..],
+            &mut PREBUILT_ROOM_QUAD_VALID[slot][..],
+        )
+    }
+}
+
 pub(super) fn room_surface_cache_slices(
     index: RoomIndex,
     cache: ActiveRoomSurfaceCache,
