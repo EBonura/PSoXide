@@ -902,6 +902,65 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         stats
     }
 
+    /// Submit a PREBUILT textured Gouraud quad from a caller-owned
+    /// static pool instead of the per-frame arena.
+    ///
+    /// `valid` is this surface's pool validity byte: zero means the
+    /// packet skeleton has never been written for the room currently
+    /// owning the pool slot, so the FULL packet is constructed here
+    /// (and the byte set); afterwards only the vertex and colour words
+    /// are rewritten per frame. A packet is therefore pushed only by
+    /// the call that constructed or patched it -- a surface culled on
+    /// earlier frames simply takes the constructor on its first
+    /// visible frame. In-place patching is safe behind the present
+    /// flip's DMA drain.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn submit_prebuilt_textured_gouraud_quad(
+        &mut self,
+        quad: &mut QuadTexturedGouraud,
+        valid: &mut u8,
+        verts: [ProjectedVertex; 4],
+        uv_words: [u16; 4],
+        colors: [(u8, u8, u8); 4],
+        material: TexturedGouraudPacketMaterial,
+        options: WorldSurfaceOptions,
+        prepared_depth: PreparedTriangleDepth,
+    ) -> WorldRenderStats {
+        let mut stats = WorldRenderStats::default();
+        if self.command_len >= self.commands.len() {
+            stats.command_overflow = true;
+            return stats;
+        }
+        let xy = [
+            (verts[0].sx, verts[0].sy),
+            (verts[1].sx, verts[1].sy),
+            (verts[2].sx, verts[2].sy),
+            (verts[3].sx, verts[3].sy),
+        ];
+        if *valid == 0 {
+            *quad = QuadTexturedGouraud::with_packet_material_packed_uv_words(
+                xy, uv_words, colors, material,
+            );
+            *valid = 1;
+        } else {
+            quad.set_positions(xy);
+            quad.set_colors(colors);
+        }
+        self.push_command(
+            prepared_depth.slot,
+            prepared_depth.depth,
+            if material.is_translucent() {
+                WorldRenderLayer::Transparent
+            } else {
+                options.render_layer
+            },
+            quad as *mut QuadTexturedGouraud as *mut u32,
+            QuadTexturedGouraud::WORDS,
+        );
+        stats.submitted_triangles = 1;
+        stats
+    }
+
     #[cfg(feature = "room-surface-profile")]
     #[allow(dead_code)]
     #[inline(always)]
