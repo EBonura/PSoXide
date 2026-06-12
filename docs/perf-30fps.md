@@ -677,3 +677,35 @@ culled); collect floor is the ready-flag dedup RAM traffic; further
 cell_select cuts need a pipelined GTE center-transform loop (fill the
 MTC2 settle gap with the previous cell's compare) -- do this only if
 the band stays hot after the bigger rows shrink.
+
+## Joints band: two negative results, task closed (2026-06-12)
+
+Volume recalibration first: textured_model_parts avg 18 (the player
+is the only animated model on the tape; model_instance_draws 0), so
+textured_model_joints 48k avg = ~2,700 cycles PER JOINT. The GTE
+compose itself (4 scheduled MVMVAs + loads) is ~250 of that; the band
+is dominated by animation pose DECODE (2 endpoint decodes x ~24
+bounds-checked i16 reads + a 12-lerp blend per joint per frame), not
+the compose wrappers. The "flatten wrapper chains" premise was wrong.
+
+Negative result 1, per-model RT/TR load hoist: moving the invariant
+load_rotation(view_instance)+load_translation(0) out of the per-joint
+compose measured FLAT (47.6k -> 48.9k, noise; only ~18 joints x ~25
+cycles existed to win) and FAILED the corridor pixel gate by 3 pixels:
+the emulator's CTC2 commit-delay model makes load-to-use distance
+observable, so the hoist is not bit-neutral in the exact joint-compose
+path that exploded on silicon (HWB-011). Flat win + hazard-path timing
+change = rejected and reverted.
+
+Negative result 2, endpoint-pose cache (decode endpoints on integer-
+frame change, re-blend alpha per frame): measured NEGATIVE. The
+player animation's endpoint frame pair advances on ~75% of rendered
+frames, so the cache refilled almost every frame and added overhead:
+joints distribution went bimodal 34k/58.6k (unblended/blended) to
+0/40k/58.8k/73.2k with a new worse refill mode. Reverted, including
+the psx-asset accessors.
+
+Conclusion: the joints band is content-shaped. It shrinks when
+Alberto's rigid-part robot models land (single-bone parts, no blend)
+or if the animation sample rate drops (visual change, user gate).
+No further engine-side lever here. Task #45 closed.
