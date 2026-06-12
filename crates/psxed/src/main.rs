@@ -31,7 +31,7 @@
 //!   --no-material-colors    Ignore glTF material base colours and use palette cycling.
 //! ```
 //!
-//! ## `glb-model`/`fbx-model` -- skinned model source → `.psxmdl` + `.psxanim` + `.psxt`
+//! ## `glb-model`/`fbx-model` -- model source → `.psxmdl` + `.psxanim` + `.psxt`
 //!
 //! ```bash
 //! psxed glb-model SRC.glb --out-dir assets/models/name --name name [options]
@@ -114,7 +114,7 @@ USAGE:
 SUBCOMMANDS:
     glb     Convert a glTF/.glb scene mesh to .psxm format
     glb-model
-            Convert a skinned GLB/glTF/FBX model to .psxmdl/.psxanim/.psxt
+            Convert a GLB/glTF/FBX model to .psxmdl/.psxanim/.psxt
     obj     Convert a Wavefront .obj mesh to .psxm format
     tex     Convert a PNG/JPG/BMP image to .psxt format
     audio-pack

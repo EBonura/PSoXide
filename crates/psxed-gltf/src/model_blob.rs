@@ -342,19 +342,35 @@ pub(crate) fn cook_base_color_texture(
         let bytes = buffer
             .get(start..end)
             .ok_or(Error::UnsupportedImageSource)?;
-        let tex_cfg = psxed_tex::Config {
-            width: cfg.texture_width,
-            height: cfg.texture_height,
-            depth: cfg.texture_depth,
-            crop: psxed_tex::CropMode::None,
-            resampler: psxed_tex::Resampler::Lanczos3,
-            transparent_index_zero: true,
-        };
+        let tex_cfg = model_texture_config(cfg);
         return psxed_tex::convert(bytes, &tex_cfg)
             .map(Some)
             .map_err(Error::TextureCook);
     }
     Ok(None)
+}
+
+pub(crate) fn cook_solid_base_color_texture(
+    color: [u8; 4],
+    cfg: &RigidModelConfig,
+) -> Result<Vec<u8>, Error> {
+    let bmp = solid_color_bmp_bytes(
+        cfg.texture_width.max(1) as u32,
+        cfg.texture_height.max(1) as u32,
+        color,
+    );
+    psxed_tex::convert(&bmp, &model_texture_config(cfg)).map_err(Error::TextureCook)
+}
+
+pub(crate) fn model_texture_config(cfg: &RigidModelConfig) -> psxed_tex::Config {
+    psxed_tex::Config {
+        width: cfg.texture_width,
+        height: cfg.texture_height,
+        depth: cfg.texture_depth,
+        crop: psxed_tex::CropMode::None,
+        resampler: psxed_tex::Resampler::Lanczos3,
+        transparent_index_zero: true,
+    }
 }
 
 pub(crate) fn first_material_base_color(mesh: &gltf::Mesh<'_>) -> [u8; 4] {
@@ -372,4 +388,36 @@ pub(crate) fn first_material_base_color(mesh: &gltf::Mesh<'_>) -> [u8; 4] {
     } else {
         [255, 255, 255, 255]
     }
+}
+
+fn solid_color_bmp_bytes(width: u32, height: u32, color: [u8; 4]) -> Vec<u8> {
+    let row_stride = (width * 3).div_ceil(4) * 4;
+    let pixel_bytes = row_stride * height;
+    let file_size = 14 + 40 + pixel_bytes;
+    let mut out = Vec::with_capacity(file_size as usize);
+    out.extend_from_slice(b"BM");
+    out.extend_from_slice(&file_size.to_le_bytes());
+    out.extend_from_slice(&[0u8; 4]);
+    out.extend_from_slice(&(14u32 + 40u32).to_le_bytes());
+    out.extend_from_slice(&40u32.to_le_bytes());
+    out.extend_from_slice(&(width as i32).to_le_bytes());
+    out.extend_from_slice(&(height as i32).to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&24u16.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out.extend_from_slice(&pixel_bytes.to_le_bytes());
+    out.extend_from_slice(&2835u32.to_le_bytes());
+    out.extend_from_slice(&2835u32.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    let pad = (row_stride - width * 3) as usize;
+    for _ in 0..height {
+        for _ in 0..width {
+            out.push(color[2]);
+            out.push(color[1]);
+            out.push(color[0]);
+        }
+        out.extend(std::iter::repeat(0u8).take(pad));
+    }
+    out
 }
