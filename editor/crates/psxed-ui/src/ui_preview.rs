@@ -649,6 +649,9 @@ pub(crate) fn ui_preview_image_effect_overlay_colors(
                 10 + (u16::from(preview_triangle_wave_u8(frame.wrapping_mul(3))) * 44 / 255) as u8;
             [lift; 4]
         }
+        // Bob displaces the quad instead of tinting it; the preview
+        // approximates the motion in the node rect, not the colours.
+        UiImageEffect::Bob => [0; 4],
     };
     [
         ui_preview_light_overlay(lift[0]),
@@ -1363,5 +1366,7 @@ pub(crate) fn ui_binding_preview_q12(binding: UiValueBinding) -> i32 {
         UiValueBinding::PlayerHealthMax => 4096,
         UiValueBinding::PlayerStamina => 3072,
         UiValueBinding::PlayerStaminaMax => 4096,
+        // Preview a load two-thirds done so the bar reads as a bar.
+        UiValueBinding::LoadingProgress => 2730,
     }
 }
