@@ -794,3 +794,36 @@ scene; corridor frame-300 bit-identical camera path (clear-path solves
 are constant, so hold-forward is unaffected); tape dumps 400/700/1000
 clean; engine suite 250 green. The real gate is the user's hands:
 worst-case collision reaction latency doubles to 33ms near walls.
+
+## Instruction-cut pass on the cell scan + collect loops (2026-06-12)
+
+The cost model discovery (cpu/timing.rs: flat BIAS=2 cycles per
+instruction, Redux parity, no load or COP2 penalties) reframes every
+hot-loop floor as an instruction-count problem. First pass over the
+cell loops, all behavior-preserving:
+- world_vertex_gte_input: one combined biased-range test (OR the three
+  v+0x8000 values, compare once) replaces three try_from/Option
+  chains; inlined-always. Also feeds the room projection funnel.
+- All-cells scan: the per-iteration cell_index > u16::MAX check is
+  hoisted into a slice cap before the loop.
+- Accept writes in both scan loops are get_unchecked (arrays validated
+  >= scan length at entry, one push per scanned element).
+- Collect: ready/indices scratch pinned to exactly the room's vertex
+  count at entry, making the ready-flag lookup the single
+  data-dependent bound; the write-cursor capacity check is dropped
+  (distinct pushes <= ready.len() == indices.len()); index loops are
+  slice iteration.
+
+Tape: render 583.3k -> 564.8k avg, p99 1,160k -> 1,127k (at the
+2-vblank budget line for the first time), room 194.5k -> 184.0k,
+room_project 24.0k -> 20.9k, cell_select 56.7k -> 54.3k, misses
+50/1199 -> 45/1235 (3.6%).
+
+Gates: corridor frame-300 shows only the known 3-pixel layout-LSB
+signature; tape dumps 400/700/1000/1270/1300/1330 scene-coherent (the
+dark 1300 right half is the camera swinging past the player's
+shoulder, confirmed by the adjacent frames); engine suite 250 green.
+
+Remaining instruction slack in these loops is the iterator/GTE-call
+shape itself (~200 instr/cell); next bites there need hand-shaped
+loops and are second-order to the player band (content) now.
