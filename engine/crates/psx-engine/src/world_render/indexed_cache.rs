@@ -320,6 +320,7 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
     subdivision_mode: CachedRoomSubdivisionMode,
     visible_cells: &[GridVisibleCell],
     screen_margin: i32,
+    mut prebuilt_pool: Option<(&mut [QuadTexturedGouraud], &mut [u8])>,
     triangles: &mut impl RoomSurfaceSink,
     world: &mut WorldRenderPass<'_, '_, OT>,
 ) -> GridVisibilityStats {
@@ -448,6 +449,17 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
             .min(cached_surfaces.len());
         let mut i = first;
         while i < end {
+            // Per-surface prebuilt pool entry: the packet and its
+            // validity byte share the surface's index in the room's
+            // surface slice. Out-of-pool surfaces fall back to the
+            // per-frame arena path.
+            let surface_prebuilt = match prebuilt_pool.as_mut() {
+                Some((pool, valid)) => match (pool.get_mut(i), valid.get_mut(i)) {
+                    (Some(quad), Some(valid)) => Some((quad, valid)),
+                    _ => None,
+                },
+                None => None,
+            };
             stats.surfaces_considered =
                 stats
                     .surfaces_considered
@@ -465,6 +477,7 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
                         submit_depths,
                         depth_mode,
                         subdivision_mode,
+                        surface_prebuilt,
                         triangles,
                         world,
                         &mut surface_profile,
@@ -508,6 +521,7 @@ pub fn draw_indexed_cached_room_vertex_lit_all_cells<const OT: usize, L: WorldSu
     subdivision_mode: CachedRoomSubdivisionMode,
     screen_margin: i32,
     cull_cells_laterally: bool,
+    mut prebuilt_pool: Option<(&mut [QuadTexturedGouraud], &mut [u8])>,
     triangles: &mut impl RoomSurfaceSink,
     world: &mut WorldRenderPass<'_, '_, OT>,
 ) -> GridVisibilityStats {
@@ -618,6 +632,17 @@ pub fn draw_indexed_cached_room_vertex_lit_all_cells<const OT: usize, L: WorldSu
             .min(cached_surfaces.len());
         let mut i = first;
         while i < end {
+            // Per-surface prebuilt pool entry: the packet and its
+            // validity byte share the surface's index in the room's
+            // surface slice. Out-of-pool surfaces fall back to the
+            // per-frame arena path.
+            let surface_prebuilt = match prebuilt_pool.as_mut() {
+                Some((pool, valid)) => match (pool.get_mut(i), valid.get_mut(i)) {
+                    (Some(quad), Some(valid)) => Some((quad, valid)),
+                    _ => None,
+                },
+                None => None,
+            };
             stats.surfaces_considered =
                 stats
                     .surfaces_considered
@@ -635,6 +660,7 @@ pub fn draw_indexed_cached_room_vertex_lit_all_cells<const OT: usize, L: WorldSu
                         submit_depths,
                         depth_mode,
                         subdivision_mode,
+                        surface_prebuilt,
                         triangles,
                         world,
                         &mut surface_profile,
@@ -792,6 +818,7 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
     submit_depths: CachedRoomSubmitDepths,
     depth_mode: CachedRoomDepthMode,
     subdivision_mode: CachedRoomSubdivisionMode,
+    prebuilt: Option<(&mut QuadTexturedGouraud, &mut u8)>,
     triangles: &mut impl RoomSurfaceSink,
     world: &mut WorldRenderPass<'_, '_, OT>,
     profile: &mut RoomSurfaceMicroProfile,
@@ -945,6 +972,14 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                     (projected, surface.uv_words, colors)
                 };
                 let submit_start = RoomSurfaceMicroProfile::cycle();
+                // Risky whole-quads keep the single-packet quad path
+                // with their own averaged depth (the key their two
+                // leaves would approximate) instead of splitting into
+                // two triangle packets: measured -55 packets/frame on
+                // the benchmark tape.
+                let prepared_depth = Some(prepared_depth.unwrap_or_else(|| {
+                    PreparedTriangleDepth::from_quad_average::<OT>(surface_options, projected)
+                }));
                 submit_sided_projected_gouraud_quad_cached_uv_words(
                     world,
                     triangles,
@@ -956,6 +991,7 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                     prepared_depth,
                     CullMode::Back,
                     surface.split,
+                    prebuilt,
                     profile,
                 );
                 profile.add_submit(RoomSurfaceMicroProfile::elapsed(submit_start));
@@ -1054,6 +1090,10 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                 };
                 profile.add_lighting(RoomSurfaceMicroProfile::elapsed(lighting_start));
                 let submit_start = RoomSurfaceMicroProfile::cycle();
+                // Same single-packet upgrade for risky whole-quad walls.
+                let prepared_depth = Some(prepared_depth.unwrap_or_else(|| {
+                    PreparedTriangleDepth::from_quad_average::<OT>(surface_options, projected)
+                }));
                 submit_sided_projected_gouraud_quad_cached_uv_words(
                     world,
                     triangles,
@@ -1065,6 +1105,7 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                     prepared_depth,
                     CullMode::Back,
                     SPLIT_NW_SE,
+                    prebuilt,
                     profile,
                 );
                 profile.add_submit(RoomSurfaceMicroProfile::elapsed(submit_start));
