@@ -1,6 +1,10 @@
 # Plan: merge Material and Texture into one resource
 
-Status: proposed (evaluated 2026-06-12). Verdict: worth doing, in phases.
+Status: DELIVERED 2026-06-12 (all phases). Validation: cortex_ignition_v1
+cook output byte-identical to the pre-merge baseline in all generated
+files except `///` doc-comment label lines in level_manifest.cooked.rs;
+psxed-project 280, psxed-ui 221, frontend 110 tests green; migration
+round-trip test covers fold/convert/drop and reload stability.
 
 ## The question
 

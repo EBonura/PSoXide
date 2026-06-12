@@ -966,63 +966,30 @@ impl EditorWorkspace {
             let Some(resource) = self.project.resource(id) else {
                 continue;
             };
-            match &resource.data {
-                ResourceData::Material(_) => return Ok((id, resource.name.clone())),
-                ResourceData::Texture { .. } => {
-                    let name = resource.name.clone();
-                    let material = self.material_for_image_texture(id, &name);
-                    return Ok((material, name));
-                }
-                _ => {}
+            if matches!(&resource.data, ResourceData::Material(_)) {
+                return Ok((id, resource.name.clone()));
             }
         }
 
-        let image_sources: Vec<(ResourceId, String, bool)> = self
+        let image_sources: Vec<(ResourceId, String)> = self
             .project
             .resources
             .iter()
             .filter_map(|resource| match &resource.data {
-                ResourceData::Material(_) => Some((resource.id, resource.name.clone(), false)),
-                ResourceData::Texture { .. } => Some((resource.id, resource.name.clone(), true)),
+                ResourceData::Material(_) => Some((resource.id, resource.name.clone())),
                 _ => None,
             })
             .collect();
         match image_sources.len() {
-            0 => Err("No Texture or Material resources exist. Import a texture first.".to_string()),
+            0 => Err("No Material resources exist. Import a texture first.".to_string()),
             1 => {
-                let (id, name, is_texture) = &image_sources[0];
-                let material = if *is_texture {
-                    self.material_for_image_texture(*id, name)
-                } else {
-                    *id
-                };
-                Ok((material, name.clone()))
+                let (id, name) = &image_sources[0];
+                Ok((*id, name.clone()))
             }
             n => Err(format!(
-                "Select a Texture or Material before placing an image prop ({n} available)"
+                "Select a Material before placing an image prop ({n} available)"
             )),
         }
-    }
-
-    pub(crate) fn material_for_image_texture(
-        &mut self,
-        texture_id: ResourceId,
-        texture_name: &str,
-    ) -> ResourceId {
-        if let Some(existing) = self.project.resources.iter().find(|resource| {
-            matches!(
-                &resource.data,
-                ResourceData::Material(material) if material.texture == Some(texture_id)
-            )
-        }) {
-            return existing.id;
-        }
-        let material_id = self.project.add_resource(
-            texture_name.to_string(),
-            ResourceData::Material(MaterialResource::opaque(Some(texture_id))),
-        );
-        self.place_resource = Some(material_id);
-        material_id
     }
 
     pub(crate) fn resolve_place_character_resource(

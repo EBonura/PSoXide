@@ -1377,48 +1377,24 @@ impl EditorWorkspace {
         if target_count == 0 {
             return None;
         }
-        let (resource_name, resource_data) = self
-            .project
-            .resource(resource_id)
-            .map(|resource| (resource.name.clone(), resource.data.clone()))?;
-        let mut material = match resource_data {
-            ResourceData::Material(_) => Some(resource_id),
-            ResourceData::Texture { .. } => self.project.resources.iter().find_map(|resource| {
-                matches!(
-                    &resource.data,
-                    ResourceData::Material(material) if material.texture == Some(resource_id)
-                )
-                .then_some(resource.id)
-            }),
+        let material = match self.project.resource(resource_id).map(|r| &r.data) {
+            Some(ResourceData::Material(_)) => resource_id,
             _ => return None,
         };
-        let needs_update = material
-            .map(|material| {
-                targets
-                    .iter()
-                    .any(|id| self.box_prop_materials_differ(*id, material))
-            })
-            .unwrap_or(true);
+        let needs_update = targets
+            .iter()
+            .any(|id| self.box_prop_materials_differ(*id, material));
         if !needs_update {
             return Some(BoxPropMaterialAssignment {
-                material: material.expect("existing material checked above"),
+                material,
                 targets: target_count,
                 updated: 0,
             });
         }
 
         self.push_undo();
-        let created_material = material.is_none();
-        let material = *material.get_or_insert_with(|| {
-            let id = self.project.add_resource(
-                resource_name,
-                ResourceData::Material(MaterialResource::opaque(Some(resource_id))),
-            );
-            self.place_resource = Some(id);
-            id
-        });
         let updated = self.assign_box_prop_nodes_material_no_undo(&targets, material);
-        if updated > 0 || created_material {
+        if updated > 0 {
             self.mark_dirty();
         }
         Some(BoxPropMaterialAssignment {

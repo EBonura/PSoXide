@@ -279,7 +279,8 @@ pub(crate) fn remap_resource_data(
     id_map: &HashMap<ResourceId, ResourceId>,
 ) {
     match data {
-        ResourceData::Material(material) => remap_resource_id_option(&mut material.texture, id_map),
+        // Materials own their image path; nothing to remap.
+        ResourceData::Material(_) => {}
         ResourceData::Model(model) => remap_resource_id_option(&mut model.skeleton, id_map),
         ResourceData::AnimationSource(source) => {
             remap_resource_id_option(&mut source.skeleton, id_map);

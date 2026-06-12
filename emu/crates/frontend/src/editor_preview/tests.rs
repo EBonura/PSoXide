@@ -282,13 +282,7 @@ fn projected(sx: i16, sy: i16) -> Projected {
 #[test]
 fn textured_preview_uses_authored_material_tint() {
     let mut project = ProjectDocument::new("test");
-    let texture = project.add_resource(
-        "Brick Texture",
-        ResourceData::Texture {
-            psxt_path: "brick.psxt".to_string(),
-        },
-    );
-    let mut material = MaterialResource::opaque(Some(texture));
+    let mut material = MaterialResource::opaque(Some("brick.psxt".to_string()));
     material.tint = [0x60, 0x70, 0x90];
     let material = project.add_resource("Brick Wall", ResourceData::Material(material));
 

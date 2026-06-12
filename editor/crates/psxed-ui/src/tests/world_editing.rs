@@ -1039,9 +1039,9 @@ fn runtime_vram_budget_counts_compact_room_texture_and_model_atlas() {
     let mut project = ProjectDocument::new("vram-budget");
     let floor = project.add_resource(
         "Floor Texture",
-        ResourceData::Texture {
-            psxt_path: "assets/textures/delven_01_slateflr1a_q2.psxt".to_string(),
-        },
+        ResourceData::Material(psxed_project::MaterialResource::opaque(Some(
+            "assets/textures/delven_01_slateflr1a_q2.psxt".to_string(),
+        ))),
     );
     let model = project.add_resource(
         "Obsidian Wraith",
@@ -1192,13 +1192,13 @@ fn material_click_assignment_updates_selected_box_prop_faces() {
 }
 
 #[test]
-fn texture_click_assignment_creates_material_for_selected_box_prop() {
+fn material_click_assignment_applies_to_selected_box_prop() {
     let mut project = ProjectDocument::new("box-prop-texture");
-    let texture = project.add_resource(
+    let material_id = project.add_resource(
         "Brick",
-        ResourceData::Texture {
-            psxt_path: "assets/textures/brick.psxt".to_string(),
-        },
+        ResourceData::Material(psxed_project::MaterialResource::opaque(Some(
+            "assets/textures/brick.psxt".to_string(),
+        ))),
     );
     let room = project.active_scene_mut().add_node(
         NodeId::ROOT,
@@ -1221,15 +1221,10 @@ fn texture_click_assignment_creates_material_for_selected_box_prop() {
     workspace.replace_node_selection(prop);
 
     let assignment = workspace
-        .assign_selected_box_props_resource(texture)
-        .expect("texture wraps into a material for selected box prop");
+        .assign_selected_box_props_resource(material_id)
+        .expect("material applies to selected box prop");
     assert_eq!(assignment.updated, 1);
-    assert_ne!(assignment.material, texture);
-    let material = workspace.project.resource(assignment.material).unwrap();
-    assert!(matches!(
-        &material.data,
-        ResourceData::Material(material) if material.texture == Some(texture)
-    ));
+    assert_eq!(assignment.material, material_id);
 
     let node = workspace.project.active_scene().node(prop).unwrap();
     let NodeKind::BoxProp { materials, .. } = &node.kind else {
