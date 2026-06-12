@@ -308,19 +308,23 @@ pub(crate) fn read_skinned_mesh(
             (0..vertex_count as u32).collect()
         };
         for face in triangulate_indices(&local_indices, primitive.mode())? {
-            let a = checked_index(face[0], vertex_count)? + base;
-            let b = checked_index(face[1], vertex_count)? + base;
-            let c = checked_index(face[2], vertex_count)? + base;
-            normal_faces.push([a, b, c]);
-            // glTF uses CCW front faces. The engine/GTE render
-            // path culls by positive screen-space NCLIP after the
-            // PS1-style Y projection flip, so cook imported models
-            // into that convention once instead of making every
-            // runtime submitter special-case glTF winding.
-            source.faces.push(SourceFace {
-                indices: [a, c, b],
-                joint: 0,
+            let la = checked_index(face[0], vertex_count)?;
+            let lb = checked_index(face[1], vertex_count)?;
+            let lc = checked_index(face[2], vertex_count)?;
+            // glTF fronts are CCW; the cooked order is the flip for
+            // the engine's NCLIP convention (see push_imported_face).
+            let reversed = normals.as_ref().is_some_and(|normals| {
+                winding_opposes_stored_normals(
+                    [positions[la], positions[lb], positions[lc]],
+                    [normals[la], normals[lb], normals[lc]],
+                )
             });
+            push_imported_face(
+                &mut source,
+                &mut normal_faces,
+                [la + base, lb + base, lc + base],
+                reversed,
+            );
         }
     }
     // Normals stay in the source surface convention: only the cooked
@@ -347,15 +351,30 @@ pub(crate) fn read_static_gltf_mesh(
             });
         }
         let reader = primitive.reader(|buffer| Some(buffers[buffer.index()].0.as_slice()));
-        let positions: Vec<[f32; 3]> = reader
+        let positions_raw: Vec<[f32; 3]> = reader
             .read_positions()
             .ok_or(Error::MissingAttribute {
                 primitive_index,
                 attribute: "POSITION",
             })?
-            .map(|position| transform_point(transform, position))
             .collect();
+        let positions: Vec<[f32; 3]> = positions_raw
+            .iter()
+            .map(|position| transform_point(transform, *position))
+            .collect();
+        // Authored normals (raw mesh space, matching `positions_raw`)
+        // drive per-face winding orientation below.
+        let normals: Option<Vec<[f32; 3]>> = reader
+            .read_normals()
+            .map(|iter| iter.map(normalize3).collect());
+        let mirrored = transform_reverses_winding(transform);
         let vertex_count = positions.len();
+        if normals
+            .as_ref()
+            .is_some_and(|normals| normals.len() != vertex_count)
+        {
+            return Err(Error::BadSkin("primitive attribute counts differ"));
+        }
         let uvs: Vec<[f32; 2]> = reader
             .read_tex_coords(0)
             .map(|iter| iter.into_f32().collect())
@@ -382,17 +401,88 @@ pub(crate) fn read_static_gltf_mesh(
             (0..vertex_count as u32).collect()
         };
         for face in triangulate_indices(&local_indices, primitive.mode())? {
-            let a = checked_index(face[0], vertex_count)? + base;
-            let b = checked_index(face[1], vertex_count)? + base;
-            let c = checked_index(face[2], vertex_count)? + base;
-            normal_faces.push([a, b, c]);
-            source.faces.push(SourceFace {
-                indices: [a, c, b],
-                joint: 0,
+            let la = checked_index(face[0], vertex_count)?;
+            let lb = checked_index(face[1], vertex_count)?;
+            let lc = checked_index(face[2], vertex_count)?;
+            // Test in raw mesh space (normals are raw); a mirroring
+            // node transform inverts the winding once more.
+            let opposes = normals.as_ref().is_some_and(|normals| {
+                winding_opposes_stored_normals(
+                    [positions_raw[la], positions_raw[lb], positions_raw[lc]],
+                    [normals[la], normals[lb], normals[lc]],
+                )
             });
+            push_imported_face(
+                source,
+                normal_faces,
+                [la + base, lb + base, lc + base],
+                opposes != mirrored,
+            );
         }
     }
     Ok(())
+}
+
+/// Push one imported triangle, choosing the cooked winding for the
+/// engine's single-sided render path.
+///
+/// `indices` is the source-order (CCW front) triangle; the cooked
+/// order is its flip, matching the GTE/NCLIP convention. `reversed`
+/// marks triangles whose source winding is itself backwards (judged
+/// against authored normals and/or a mirroring node transform):
+/// double-sided source materials frequently mix windings and rely on
+/// the renderer drawing both sides, which the engine does not, so
+/// such faces re-orient here instead of vanishing in the scene.
+/// `normal_faces` always receives the outward (front) order so
+/// rebuilt shading normals stay consistent with the corrected faces.
+pub(crate) fn push_imported_face(
+    source: &mut SkinnedSourceMesh,
+    normal_faces: &mut Vec<[usize; 3]>,
+    indices: [usize; 3],
+    reversed: bool,
+) {
+    let front = if reversed {
+        [indices[0], indices[2], indices[1]]
+    } else {
+        indices
+    };
+    normal_faces.push(front);
+    source.faces.push(SourceFace {
+        indices: [front[0], front[2], front[1]],
+        joint: 0,
+    });
+}
+
+/// `true` when a triangle's geometric winding normal opposes its
+/// authored vertex normals. Both inputs must be in the same
+/// coordinate space.
+pub(crate) fn winding_opposes_stored_normals(
+    positions: [[f32; 3]; 3],
+    normals: [[f32; 3]; 3],
+) -> bool {
+    let geometric = cross3(
+        sub3(positions[1], positions[0]),
+        sub3(positions[2], positions[0]),
+    );
+    if length_sq3(geometric) <= 0.000001 {
+        return false;
+    }
+    let stored = [
+        normals[0][0] + normals[1][0] + normals[2][0],
+        normals[0][1] + normals[1][1] + normals[2][1],
+        normals[0][2] + normals[1][2] + normals[2][2],
+    ];
+    geometric[0] * stored[0] + geometric[1] * stored[1] + geometric[2] * stored[2] < 0.0
+}
+
+/// `true` when a node transform mirrors geometry (negative
+/// determinant), which inverts triangle winding.
+pub(crate) fn transform_reverses_winding(transform: &[[f32; 4]; 4]) -> bool {
+    let m = transform;
+    let det = m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+        - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+        + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+    det < 0.0
 }
 
 pub(crate) fn rebuild_source_normals(source: &mut SkinnedSourceMesh, normal_faces: &[[usize; 3]]) {

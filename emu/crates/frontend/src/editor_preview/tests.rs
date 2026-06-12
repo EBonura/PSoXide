@@ -1112,3 +1112,156 @@ fn light_face_two_lights_accumulate_and_clamp() {
     // exceeds 255 per channel.
     assert_eq!((r, g, b), (255, 255, 255));
 }
+
+// Temporary end-to-end repro for the flipped-normal report: import the
+// suspect GLB for real, place it in a scratch scene next to the
+// known-good obsidian wraith, render through the actual editor scene
+// path, and dump the frame for visual inspection.
+// Run: cargo test -p frontend diagnose_static_glb_scene -- --ignored --nocapture
+#[test]
+#[ignore]
+fn diagnose_static_glb_scene_render() {
+    use psxed_project::WorldGrid;
+    let glb = std::path::PathBuf::from(
+        std::env::var("DIAG_GLB")
+            .unwrap_or_else(|_| "/Users/ebonura/Downloads/ps1_clean_power_barricade.glb".into()),
+    );
+    let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .canonicalize()
+        .expect("repo root");
+    let root = std::env::temp_dir().join("psoxide-diag-scene");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("scratch root");
+
+    let mut project = ProjectDocument::new("diag");
+    let room = project.active_scene_mut().add_node(
+        NodeId::ROOT,
+        "Room",
+        NodeKind::Room {
+            grid: WorldGrid::stone_room(6, 6, 1024, None, None),
+        },
+    );
+    let model_id = psxed_project::model_import::import_glb_model(
+        &mut project,
+        &glb,
+        "diag_prop",
+        &root,
+        psxed_project::model_import::RigidModelConfig::default(),
+    )
+    .expect("glb imports");
+
+    // Known-good baseline: the tracked wraith, absolute paths so the
+    // scratch project resolves them.
+    let wraith_dir = repo_root.join("assets/models/obsidian_wraith");
+    let wraith_id = project.add_resource(
+        "Wraith",
+        ResourceData::Model(psxed_project::ModelResource {
+            model_path: wraith_dir
+                .join("obsidian_wraith.psxmdl")
+                .to_string_lossy()
+                .into_owned(),
+            source_path: None,
+            texture_path: Some(
+                wraith_dir
+                    .join("obsidian_wraith.psxt")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            skeleton: None,
+            clips: vec![psxed_project::ModelAnimationClip {
+                name: "idle".into(),
+                psxanim_path: wraith_dir
+                    .join("obsidian_wraith_idle.psxanim")
+                    .to_string_lossy()
+                    .into_owned(),
+                calibration: Default::default(),
+            }],
+            default_clip: Some(0),
+            preview_clip: Some(0),
+            world_height: 1024,
+            collision_radius: 192,
+            scale_q8: [psxed_project::MODEL_SCALE_ONE_Q8; 3],
+            default_visual_yaw_q12: 0,
+            attachments: Vec::new(),
+        }),
+    );
+
+    for (name, id, x) in [("Prop", model_id, -0.8f32), ("Wraith", wraith_id, 0.8f32)] {
+        let scene = project.active_scene_mut();
+        let entity = scene.add_node(room, name, NodeKind::Entity);
+        if let Some(node) = scene.node_mut(entity) {
+            node.transform.translation = [x, 0.0, 0.0];
+        }
+        scene.add_node(
+            entity,
+            "Model Renderer",
+            NodeKind::ModelRenderer {
+                model: Some(id),
+                material: None,
+                visual_offset: [0; 3],
+                visual_scale_q8: psxed_project::MODEL_SCALE_ONE_Q8,
+            },
+        );
+    }
+
+    let mut textures = crate::editor_textures::EditorTextures::new();
+    textures.refresh(&project, &root);
+    textures.refresh_models(&project, &root);
+    let mut assets = crate::editor_assets::EditorAssets::new();
+    assets.refresh(&project, &root);
+
+    let camera = ViewportCameraState {
+        mode: ViewportCameraMode::Orbit,
+        yaw_q12: 600,
+        pitch_q12: 350,
+        radius: 1400,
+        target: [2253, 256, 3072],
+        position: [0, 0, 0],
+    };
+    let empty_hidden = std::collections::HashSet::new();
+    let frame = super::build_phase1_frame(
+        &project,
+        camera,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        &empty_hidden,
+        None,
+        0,
+        NodeId::ROOT,
+        None,
+        None,
+        &[],
+        &[],
+        None,
+        &[],
+        None,
+        &[],
+        None,
+        &textures,
+        &assets,
+    );
+    let Some(mut renderer) = headless_preview_renderer() else {
+        panic!("no headless adapter");
+    };
+    assert!(renderer.set_internal_scale(2, None));
+    let vram = textures.vram_words();
+    renderer.render_frame(&emulator_core::Gpu::new(), &frame.cmd_log, vram);
+    let scale = renderer.internal_scale();
+    let (w, h, rgba) = renderer.read_subrect_rgba8(0, 0, 320 * scale, 240 * scale);
+    let mut out = format!("P6\n{w} {h}\n255\n").into_bytes();
+    for px in rgba.chunks_exact(4) {
+        out.extend_from_slice(&px[..3]);
+    }
+    std::fs::write("/tmp/diag_scene.ppm", out).expect("write ppm");
+    let mut histogram = std::collections::BTreeMap::new();
+    for entry in frame.cmd_log.iter() {
+        *histogram.entry(entry.opcode).or_insert(0usize) += 1;
+    }
+    println!("opcode histogram: {histogram:x?}");
+    println!("wrote /tmp/diag_scene.ppm ({w}x{h})");
+}
