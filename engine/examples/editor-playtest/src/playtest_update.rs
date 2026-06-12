@@ -61,6 +61,13 @@ impl Playtest {
     }
 
     pub(super) fn update_gameplay(&mut self, ctx: &mut Ctx) {
+        // First gameplay update after loading: anchor the animation
+        // epoch here so value-based phases do not inherit the variable
+        // loading duration (see `gameplay_epoch` in main.rs).
+        if !self.gameplay_epoch_set {
+            self.gameplay_epoch = ctx.sim_tick;
+            self.gameplay_epoch_set = true;
+        }
         self.portal_debug_log_cooldown = self.portal_debug_log_cooldown.saturating_sub(1);
         self.step_streaming_jobs(ctx);
 
