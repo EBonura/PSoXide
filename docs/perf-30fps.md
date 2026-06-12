@@ -585,3 +585,21 @@ Protocol note: cross-build pixel comparison is only valid at 0-miss
 determinism (cadence diverges under overload), so per-build
 multi-frame sanity + the user's eyes gate cross-build changes like a
 default flip.
+
+## Update band decomposed (2026-06-12, UPDATE_ACTOR/WINDOW stages)
+
+New stages 46/47 + sim CSV columns split update (189k avg / 434k max
+on the tape) into: camera 50k/tick (!), sim_solve 63k (173k max),
+collision gather 13k, actor block 3k (innocent), window refresh 11k
+(47k max), residency/track ~12k -- and a 36k-avg residual whose 209
+spike ticks are the PREWARM's PVS fills (room_visible_list 184k on
+those ticks): the visible-list cache key is camera-dependent, so
+rotation refills every drawn room's set each tick. Two named targets:
+1. update_follow_camera 50k EVERY tick (100k per 30fps slot): does
+   its own collect_collision_rooms (margin = camera distance) plus a
+   camera collision solve per tick. Read the solve, then either
+   reuse/cached gather or solve-on-move-only.
+2. Visible-list camera split (existing item, now quantified): 33k avg
+   / 184k spikes on sim rows. The candidate list from a static anchor
+   is camera-independent; cache it per (room, anchor) and do the
+   cheap frustum filter per frame in cell_select.
