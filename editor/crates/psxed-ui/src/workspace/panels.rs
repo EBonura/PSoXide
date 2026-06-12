@@ -1,5 +1,6 @@
 mod resources;
 use super::*;
+use psxed_project::UiFocusEffect;
 
 impl EditorWorkspace {
     pub(crate) fn draw_build_status_strip(
@@ -1073,6 +1074,7 @@ impl EditorWorkspace {
             ui.weak("No UI scene");
             return;
         };
+        let selected_is_root = selected == scene.root;
         let Some(node) = scene.node_mut(selected) else {
             ui.weak("No UI node selected");
             return;
@@ -1352,6 +1354,26 @@ impl EditorWorkspace {
                     volume_option,
                     &option_choices,
                 );
+            }
+        }
+
+        // Scene-level focus-ring style, edited from the root canvas so
+        // the scene's shared chrome lives in one place.
+        if selected_is_root {
+            ui.separator();
+            ui.strong("Focus Ring");
+            ui.weak("Highlight drawn around the focused button/slider.");
+            let style = &mut scene.focus_style;
+            changed |= draw_ui_focus_effect_picker(ui, &mut style.effect);
+            changed |= color_editor(ui, "Color A", &mut style.color_a);
+            if style.effect != UiFocusEffect::Solid {
+                changed |= color_editor(ui, "Color B", &mut style.color_b);
+                changed |= drag_u16(ui, "Period (frames)", &mut style.period, 0, 600);
+            }
+            changed |= drag_u8(ui, "Thickness", &mut style.thickness, 1, 4);
+            changed |= drag_u8(ui, "Margin", &mut style.margin, 0, 8);
+            if style.effect == UiFocusEffect::Corners {
+                changed |= drag_u8(ui, "Corner Length", &mut style.corner_len, 2, 64);
             }
         }
 

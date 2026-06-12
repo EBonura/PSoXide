@@ -104,6 +104,7 @@
             name: "Main Menu",
             root: (1),
             default_focus: None,
+            focus_style: (effect: Tracer, color_a: (255, 120, 70), color_b: (70, 18, 12), period: 90, thickness: 1, margin: 2, corner_len: 8),
             next_node_id: 45,
             nodes: [
                 /*[0]*/ (id: (1), parent: None, children: [(8), (10), (9), (6), (3), (4), (44), (5)], name: "Canvas", kind: Canvas(width: 320, height: 240), visible_when: Always),
@@ -124,6 +125,7 @@
             name: "Settings",
             root: (1),
             default_focus: None,
+            focus_style: (effect: Corners, color_a: (150, 200, 255), color_b: (40, 60, 90), period: 70, thickness: 1, margin: 2, corner_len: 10),
             next_node_id: 14,
             nodes: [
                 /*[0]*/ (id: (1), parent: None, children: [(12), (3), (4), (7), (8), (9), (10), (5), (6), (13)], name: "Canvas", kind: Canvas(width: 320, height: 240), visible_when: Always),

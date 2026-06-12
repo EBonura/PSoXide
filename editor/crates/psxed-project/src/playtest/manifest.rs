@@ -1139,10 +1139,25 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     out.push_str("/// Addressable cooked UI scenes indexing `UI_NODES`.\n");
     out.push_str("pub static UI_SCENES: &[LevelUiScene] = &[\n");
     for scene in &package.ui_scenes {
+        let style = &scene.focus_style;
         let _ = writeln!(
             out,
-            "    LevelUiScene {{ id: {}, name: {:?}, node_first: {}, node_count: {} }},",
-            scene.id, scene.name, scene.node_first, scene.node_count,
+            "    LevelUiScene {{ id: {}, name: {:?}, node_first: {}, node_count: {}, focus_style: LevelUiFocusStyle {{ effect: LevelUiFocusEffect::{:?}, color_a: ({}, {}, {}), color_b: ({}, {}, {}), period: {}, thickness: {}, margin: {}, corner_len: {} }} }},",
+            scene.id,
+            scene.name,
+            scene.node_first,
+            scene.node_count,
+            style.effect,
+            style.color_a[0],
+            style.color_a[1],
+            style.color_a[2],
+            style.color_b[0],
+            style.color_b[1],
+            style.color_b[2],
+            style.period,
+            style.thickness,
+            style.margin,
+            style.corner_len,
         );
     }
     out.push_str("];\n\n");
@@ -3173,6 +3188,8 @@ use psx_level::{
     LevelTransition,
     LevelTransitionKind,
     LevelUiAction,
+    LevelUiFocusEffect,
+    LevelUiFocusStyle,
     LevelUiGradientDirection,
     LevelUiImageEffect,
     LevelUiNodeKind,
