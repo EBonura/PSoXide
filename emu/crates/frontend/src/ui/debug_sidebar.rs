@@ -34,18 +34,22 @@ pub fn draw(ctx: &egui::Context, state: &mut AppState, vram_tex: egui::TextureId
                     let regs_override = state
                         .panels
                         .take_override(crate::app::DebugSection::Registers);
-                    collapsible(ui, "CPU Registers", state.panels.registers, regs_override, |ui| {
-                        registers::draw_contents(
-                            ui,
-                            &state.cpu,
-                            &state.exec_history,
-                            &mut state.breakpoints,
-                            &mut state.gpr_snapshot,
-                        );
-                    });
-                    let mem_override = state
-                        .panels
-                        .take_override(crate::app::DebugSection::Memory);
+                    collapsible(
+                        ui,
+                        "CPU Registers",
+                        state.panels.registers,
+                        regs_override,
+                        |ui| {
+                            registers::draw_contents(
+                                ui,
+                                &state.cpu,
+                                &state.exec_history,
+                                &mut state.breakpoints,
+                                &mut state.gpr_snapshot,
+                            );
+                        },
+                    );
+                    let mem_override = state.panels.take_override(crate::app::DebugSection::Memory);
                     collapsible(ui, "Memory", state.panels.memory, mem_override, |ui| {
                         memory::draw_contents(
                             ui,
@@ -55,17 +59,22 @@ pub fn draw(ctx: &egui::Context, state: &mut AppState, vram_tex: egui::TextureId
                             &mut state.breakpoints,
                         );
                     });
-                    let vram_override =
-                        state.panels.take_override(crate::app::DebugSection::Vram);
+                    let vram_override = state.panels.take_override(crate::app::DebugSection::Vram);
                     collapsible(ui, "VRAM", state.panels.vram, vram_override, |ui| {
                         vram::draw_contents(ui, vram_tex);
                     });
                     let prof_override = state
                         .panels
                         .take_override(crate::app::DebugSection::Profiler);
-                    collapsible(ui, "Frame Profiler", state.panels.profiler, prof_override, |ui| {
-                        profiler::draw_contents(ui, &mut state.profiler);
-                    });
+                    collapsible(
+                        ui,
+                        "Frame Profiler",
+                        state.panels.profiler,
+                        prof_override,
+                        |ui| {
+                            profiler::draw_contents(ui, &mut state.profiler);
+                        },
+                    );
                 });
         });
 }

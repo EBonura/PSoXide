@@ -124,9 +124,8 @@ fn draw_gprs(ui: &mut egui::Ui, cpu: &Cpu, snapshot: &mut Option<[u32; 32]>) {
     // width fits (1/2/4), instead of a hardcoded two-column grid that
     // clips when narrow and wastes space when wide. One cell is
     // "name=XXXXXXXX" (13 monospace chars) plus grid spacing.
-    let glyph_w = ui.fonts(|fonts| {
-        fonts.glyph_width(&egui::FontId::monospace(theme::FONT_SIZE_MONO), '0')
-    });
+    let glyph_w =
+        ui.fonts(|fonts| fonts.glyph_width(&egui::FontId::monospace(theme::FONT_SIZE_MONO), '0'));
     let col_stride = 13.0 * glyph_w + 12.0;
     let cols = ((ui.available_width() / col_stride).floor() as usize).clamp(1, 4);
     // Fill column-major so register order reads down each column.
@@ -170,9 +169,8 @@ fn draw_cpu_state(ui: &mut egui::Ui, cpu: &Cpu) {
         ("EPC", cop0[14]),
         ("BadVA", cop0[8]),
     ];
-    let glyph_w = ui.fonts(|fonts| {
-        fonts.glyph_width(&egui::FontId::monospace(theme::FONT_SIZE_MONO), '0')
-    });
+    let glyph_w =
+        ui.fonts(|fonts| fonts.glyph_width(&egui::FontId::monospace(theme::FONT_SIZE_MONO), '0'));
     let col_stride = 14.0 * glyph_w + 12.0;
     let cols = ((ui.available_width() / col_stride).floor() as usize).clamp(1, 4);
     egui::Grid::new("cpu_state")

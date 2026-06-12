@@ -101,11 +101,19 @@ fn draw_header(
             ViewMode::Hex => 256,
             ViewMode::Disasm => 64, // 16 instructions
         };
-        if ui.small_button("◀").on_hover_text(format!("-{step}")).clicked() {
+        if ui
+            .small_button("◀")
+            .on_hover_text(format!("-{step}"))
+            .clicked()
+        {
             view.addr = view.addr.wrapping_sub(step);
             view.addr_input = format!("{:08X}", view.addr);
         }
-        if ui.small_button("▶").on_hover_text(format!("+{step}")).clicked() {
+        if ui
+            .small_button("▶")
+            .on_hover_text(format!("+{step}"))
+            .clicked()
+        {
             view.addr = view.addr.wrapping_add(step);
             view.addr_input = format!("{:08X}", view.addr);
         }
@@ -160,9 +168,8 @@ fn draw_hex_dump(
     // Adapt bytes-per-row to the panel width (16 / 8 / 4) instead of
     // clipping a fixed 78-char line: a hex row costs
     // marker(2) + addr(8) + gap(2) + 3*b hex + mid-gap(1) + gap(1) + b ascii.
-    let glyph_w = ui.fonts(|fonts| {
-        fonts.glyph_width(&egui::FontId::monospace(theme::FONT_SIZE_MONO), '0')
-    });
+    let glyph_w =
+        ui.fonts(|fonts| fonts.glyph_width(&egui::FontId::monospace(theme::FONT_SIZE_MONO), '0'));
     let max_chars = (ui.available_width() / glyph_w.max(1.0)) as usize;
     let bytes_per_row = if max_chars >= 14 + 4 * 16 {
         16
@@ -253,8 +260,7 @@ fn draw_disasm(
                 // Truncate gracefully instead of clipping mid-glyph when
                 // the sidebar is narrower than the longest mnemonic line.
                 ui.add(
-                    egui::Label::new(egui::RichText::new(text).monospace().color(color))
-                        .truncate(),
+                    egui::Label::new(egui::RichText::new(text).monospace().color(color)).truncate(),
                 );
             }
         });
