@@ -899,3 +899,46 @@ not make command-line vars -- command-line vars ride MAKEFLAGS
 through cargo into every nested make and silently override the
 recipe's internal-disc feature set (cost one confusing iteration:
 identical bins, empty telemetry profile).
+
+
+## Menu-path world flicker SOLVED: dropped room texture + framebuffer-
+## sampling fallback (2026-06-12)
+
+Symptom: hard 30 Hz flicker of world geometry in the editor viewport
+and the GUI emulator, only when entering gameplay through the full
+menu flow; straight-boot clean; every headless dump pixel-stable.
+
+Root cause chain (three bugs stacked):
+1. The menu path re-uploads streamed UI images (and the loading
+   scene's image) into the room-texture band during the gameplay
+   loading burst, so some room-texture uploads hit a full queue and
+   DROP.
+2. The material refresh was completion-gated. A dropped texture never
+   queues, so no upload completion ever wakes a refresh, and the
+   surface stays on the untextured fallback forever.
+3. The fallback material's CLUT word is 0 = VRAM (0,0), inside
+   framebuffer page A. The surface visibly tracks frame contents.
+   Offline full-log replays always sample the last frame (stable,
+   subtly wrong, invisible); the live host's incremental per-host-
+   frame cmd-log replay samples stale-frame vs just-cleared content
+   alternately, page-locked at 30 Hz = the flicker.
+
+Why no headless repro existed: --dump-hw replays the WHOLE cmd log
+into a fresh renderer, so framebuffer-sampling surfaces always see
+the final frame. The new `launch --live-sim-*` flags simulate the
+GUI's incremental replay headless (persistent HW renderer, drains
+every N cycles, per-snap display and page dumps, batch tape for
+offline bisection) and reproduced the flicker deterministically;
+a magenta-sentinel VRAM snapshot proved the framebuffer sampling.
+
+Fixes (cbd39d42): unresolved-flag retry pump for
+refresh_active_room_materials (drops re-queue as the queue drains,
+re-armed on window rebuilds), and the menu/loading streamed UI image
+slots are released on the first gameplay update so room textures
+stop competing. Verified: live-sim shows both framebuffer pages
+fully drawn every cycle through the menu path; corridor gate
+bit-identical; suites green; preburn PASS.
+
+Hardware note: on silicon the same fallback sampled the framebuffer
+too (VRAM is unified), just stably wrong rather than flickering, so
+the fix also removes a subtle wrong-texture artifact from the burn.
