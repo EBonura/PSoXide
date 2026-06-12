@@ -412,6 +412,15 @@ struct Playtest {
     /// update has already moved `render_camera`; world-anchored overlay
     /// elements must use the camera the underlying frame was built with.
     overlay_camera: WorldCamera,
+    /// Cached camera collision-room set: the follow camera's per-tick
+    /// room gather cost ~half of its 50k tick budget and the set only
+    /// changes when the player crosses a coarse cell or the active
+    /// window changes (see `camera_rooms_key`).
+    camera_collision_rooms: [CharacterCollisionRoom<'static>; MAX_COLLISION_ROOMS],
+    camera_collision_room_count: usize,
+    /// (current room, player cell x/z at the cache quantum, active-room
+    /// mask) the cached camera room set was gathered for.
+    camera_rooms_key: (RoomIndex, i32, i32, RuntimeDebugMask),
     /// Last movement result; stationary frames can use a broader cached
     /// visibility candidate set without rebuilding it for camera-only turns.
     player_moved_last_tick: bool,
@@ -547,6 +556,10 @@ impl Playtest {
                 Q12::ZERO,
                 Q12::ONE,
             ),
+            camera_collision_rooms: [const { CharacterCollisionRoom::EMPTY };
+                MAX_COLLISION_ROOMS],
+            camera_collision_room_count: 0,
+            camera_rooms_key: (INVALID_ROOM_INDEX, i32::MIN, i32::MIN, RuntimeDebugMask::EMPTY),
             player_moved_last_tick: false,
             camera_turning_last_tick: false,
             lock_target: None,
