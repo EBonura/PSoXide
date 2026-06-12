@@ -603,3 +603,41 @@ rotation refills every drawn room's set each tick. Two named targets:
    / 184k spikes on sim rows. The candidate list from a static anchor
    is camera-independent; cache it per (room, anchor) and do the
    cheap frustum filter per frame in cell_select.
+
+## Camera-independent visible-cell fills shipped (2026-06-12, d840595c)
+
+vis-anchor-pvs-candidates: the per-(room, anchor) candidate list is
+camera-independent (stored depth-0, global-range filter only); the
+per-frame camera work moves to the cheap accept test in cell_select.
+Tape: room_visible_list 36,515 avg / 258,517 max -> 4,873 / 75,734.
+cell_select takes the other side of the trade (+33k, ~2.6k per
+candidate accepted -- a future lever). Net render 1,131k -> 916k avg
+on the re-baselined script, misses 141/808. The rotation-refill
+hitch class is dead. Corridor gate pixel-identical; dumps clean;
+restored to default + hardware features.
+
+## image_props decomposed, debris cache shipped (2026-06-12)
+
+Instrumented run (PSXO_PROFILE_BOX_PROPS=1, sub-stage CSV columns):
+image_props 117,683 avg / 294,570 max = box_props 15,919 +
+box_prop_debris 72,835 (max 264,743!) + box_prop_shards 4,135 +
+image_cards 24,535. Debris is 62% of the band.
+
+Root cause: every broken prop re-derives break-time-static data per
+chip per frame -- bilinear base colors (box_prop_face_color_at, 36
+multiplies/chip), quad corner lerps, UV derivation. Only projection,
+fog, and submit are legitimately per-frame.
+
+Fix: 16-slot round-robin cache keyed by prop index (rendering.rs).
+On first sight of a broken prop all 12 chips are filled eagerly
+(quad, uvs, base colors, material); the draw path consumes cached
+data and does only opts + project + fog + submit per frame. Eager
+fill avoids any partial-validity hazard; 16 slots covers
+MAX_BOX_PROP_STATE eviction in practice (re-fill is one-time cost).
+
+Tape vs pre-change reference (same script, same tape):
+- image_props 106,432 avg / 299,639 max -> 81,852 / 237,828 (-24.6k)
+- render 915,674 avg -> 896,593; misses 141/808 -> 118/826
+Gates: corridor pixel-IDENTICAL (0-skew determinism held), dumps at
+400/700/1000/full clean and scene-matched to reference, engine suite
+249 green.
