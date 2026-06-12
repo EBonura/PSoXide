@@ -475,11 +475,12 @@ pub(crate) fn read_fbx_skinned_mesh(
                     dominant_joint: dominant_vertex_joint(cleaned_joints, weights),
                 });
             }
-            normal_faces.push(indices);
-            source.faces.push(SourceFace {
-                indices: [indices[0], indices[2], indices[1]],
-                joint: 0,
-            });
+            let reversed = mesh.vertex_normal.exists
+                && winding_opposes_stored_normals(
+                    indices.map(|index| source.vertices[index].position),
+                    indices.map(|index| source.vertices[index].normal),
+                );
+            push_imported_face(&mut source, &mut normal_faces, indices, reversed);
         }
     }
     rebuild_source_normals(&mut source, &normal_faces);
@@ -498,6 +499,7 @@ pub(crate) fn read_fbx_static_mesh(
     }
 
     let transform = fbx_matrix_to_mat4(mesh_node.geometry_to_world);
+    let mirrored = transform_reverses_winding(&transform);
     let mut source = SkinnedSourceMesh::default();
     let mut normal_faces = Vec::new();
     let mut triangulated = Vec::new();
@@ -506,13 +508,21 @@ pub(crate) fn read_fbx_static_mesh(
         ufbx::triangulate_face_vec(&mut triangulated, mesh, face);
         for tri in triangulated.chunks_exact(3) {
             let mut indices = [0usize; 3];
+            // Raw geometry-space corners for the winding test below;
+            // stored vertex positions are world-transformed.
+            let mut raw_positions = [[0.0f32; 3]; 3];
+            let mut raw_normals = [[0.0f32; 3]; 3];
             for (corner, fbx_index) in tri.iter().copied().enumerate() {
                 let fbx_index = fbx_index as usize;
                 if mesh.vertex_indices.get(fbx_index).is_none() {
                     return Err(Error::BadSkin("FBX face index is outside vertex table"));
                 }
-                let position =
-                    transform_point(&transform, fbx_vec3(mesh.vertex_position[fbx_index]));
+                let raw = fbx_vec3(mesh.vertex_position[fbx_index]);
+                raw_positions[corner] = raw;
+                if mesh.vertex_normal.exists {
+                    raw_normals[corner] = normalize3(fbx_vec3(mesh.vertex_normal[fbx_index]));
+                }
+                let position = transform_point(&transform, raw);
                 let uv = if mesh.vertex_uv.exists {
                     fbx_vec2(mesh.vertex_uv[fbx_index])
                 } else {
@@ -528,11 +538,9 @@ pub(crate) fn read_fbx_static_mesh(
                     dominant_joint: 0,
                 });
             }
-            normal_faces.push(indices);
-            source.faces.push(SourceFace {
-                indices: [indices[0], indices[2], indices[1]],
-                joint: 0,
-            });
+            let opposes = mesh.vertex_normal.exists
+                && winding_opposes_stored_normals(raw_positions, raw_normals);
+            push_imported_face(&mut source, &mut normal_faces, indices, opposes != mirrored);
         }
     }
     rebuild_source_normals(&mut source, &normal_faces);

@@ -661,3 +661,183 @@ fn test_source_vertex(position: [f32; 3]) -> SourceVertex {
         dominant_joint: 0,
     }
 }
+
+// Temporary diagnostic for the flipped-normal report on imported
+// static GLB props: prints source node determinants (a mirroring
+// transform inverts winding) and the cooked faces' outward-facing
+// ratio. Run with: cargo test -p psxed-gltf diagnose_static_glb -- --ignored --nocapture
+#[test]
+#[ignore]
+fn diagnose_static_glb_winding() {
+    let path = std::env::var("DIAG_GLB")
+        .unwrap_or_else(|_| "/Users/ebonura/Downloads/ps1_clean_power_barricade.glb".to_string());
+    let (document, _buffers, _images) = gltf::import(&path).expect("glb loads");
+    fn det3(m: &[[f32; 4]; 4]) -> f32 {
+        m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+            - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+            + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])
+    }
+    fn walk(node: gltf::Node<'_>, parent: [[f32; 4]; 4], depth: usize) {
+        let world = mul_matrix(&parent, &node.transform().matrix());
+        let has_mesh = node.mesh().is_some();
+        println!(
+            "{:indent$}node '{}' det={:.4} mesh={}",
+            "",
+            node.name().unwrap_or("?"),
+            det3(&world),
+            has_mesh,
+            indent = depth * 2
+        );
+        for child in node.children() {
+            walk(child, world, depth + 1);
+        }
+    }
+    for scene in document.scenes() {
+        for node in scene.nodes() {
+            walk(node, identity_matrix(), 0);
+        }
+    }
+
+    // Source-truth check: does the file's own winding agree with its
+    // authored normals? PS1-style hobby assets often ship reversed
+    // winding and rely on doubleSided materials.
+    let (document2, buffers2, _) = gltf::import(&path).expect("glb reloads");
+    for mesh in document2.meshes() {
+        for primitive in mesh.primitives() {
+            let double_sided = primitive.material().double_sided();
+            let reader = primitive.reader(|buffer| Some(buffers2[buffer.index()].0.as_slice()));
+            let positions: Vec<[f32; 3]> = reader.read_positions().unwrap().collect();
+            let normals: Vec<[f32; 3]> = reader
+                .read_normals()
+                .map(|iter| iter.collect())
+                .unwrap_or_default();
+            let indices: Vec<u32> = reader
+                .read_indices()
+                .map(|iter| iter.into_u32().collect())
+                .unwrap_or_else(|| (0..positions.len() as u32).collect());
+            let mut agree = 0usize;
+            let mut oppose = 0usize;
+            for tri in indices.chunks_exact(3) {
+                let (a, b, c) = (
+                    positions[tri[0] as usize],
+                    positions[tri[1] as usize],
+                    positions[tri[2] as usize],
+                );
+                let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+                let ac = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+                let geometric = [
+                    ab[1] * ac[2] - ab[2] * ac[1],
+                    ab[2] * ac[0] - ab[0] * ac[2],
+                    ab[0] * ac[1] - ab[1] * ac[0],
+                ];
+                if normals.is_empty() {
+                    continue;
+                }
+                let stored = tri
+                    .iter()
+                    .map(|i| normals[*i as usize])
+                    .fold([0f32; 3], |acc, n| {
+                        [acc[0] + n[0], acc[1] + n[1], acc[2] + n[2]]
+                    });
+                let dot =
+                    geometric[0] * stored[0] + geometric[1] * stored[1] + geometric[2] * stored[2];
+                if dot >= 0.0 {
+                    agree += 1;
+                } else {
+                    oppose += 1;
+                }
+            }
+            println!(
+                "primitive: double_sided={double_sided} winding-vs-normals agree={agree} oppose={oppose}"
+            );
+        }
+    }
+
+    let package =
+        convert_rigid_model_path(&path, &RigidModelConfig::default()).expect("rigid cook");
+    let model = psx_asset::Model::from_bytes(&package.model).expect("model decodes");
+    let mut centroid = [0f64; 3];
+    let count = model.vertex_count() as usize;
+    for index in 0..count {
+        let v = model.vertex(index as u16).unwrap().position;
+        centroid[0] += v.x as f64;
+        centroid[1] += v.y as f64;
+        centroid[2] += v.z as f64;
+    }
+    for c in &mut centroid {
+        *c /= count.max(1) as f64;
+    }
+    let mut outward = 0usize;
+    let mut inward = 0usize;
+    for face_index in 0..model.face_count() {
+        let face = model.face(face_index).unwrap();
+        let p = |corner: usize| {
+            let v = model
+                .vertex(face.corners[corner].vertex_index)
+                .unwrap()
+                .position;
+            [v.x as f64, v.y as f64, v.z as f64]
+        };
+        let (a, b, c) = (p(0), p(1), p(2));
+        let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+        let ac = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+        let normal = [
+            ab[1] * ac[2] - ab[2] * ac[1],
+            ab[2] * ac[0] - ab[0] * ac[2],
+            ab[0] * ac[1] - ab[1] * ac[0],
+        ];
+        let center = [
+            (a[0] + b[0] + c[0]) / 3.0 - centroid[0],
+            (a[1] + b[1] + c[1]) / 3.0 - centroid[1],
+            (a[2] + b[2] + c[2]) / 3.0 - centroid[2],
+        ];
+        let dot = normal[0] * center[0] + normal[1] * center[1] + normal[2] * center[2];
+        if dot >= 0.0 {
+            outward += 1;
+        } else {
+            inward += 1;
+        }
+    }
+    println!("cooked faces: outward={outward} inward={inward}");
+    std::fs::write("/tmp/diag_prop.psxmdl", &package.model).unwrap();
+    std::fs::write("/tmp/diag_prop.psxanim", &package.clips[0].bytes).unwrap();
+    println!("wrote /tmp/diag_prop.psxmdl + .psxanim");
+}
+
+#[test]
+fn mixed_winding_faces_orient_to_stored_normals() {
+    // Triangle in the XZ plane wound so its geometric normal points
+    // -Y, while the authored normals say +Y: the winding opposes the
+    // normals and must re-orient at import. The flipped order agrees.
+    let positions = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]];
+    let up = [[0.0, 1.0, 0.0]; 3];
+    assert!(winding_opposes_stored_normals(positions, up));
+    assert!(!winding_opposes_stored_normals(
+        [positions[0], positions[2], positions[1]],
+        up
+    ));
+
+    // A reversed source face cooks to the same engine winding as the
+    // equivalent correctly-wound face, and its shading-normal face
+    // entry is corrected too.
+    let mut source = SkinnedSourceMesh::default();
+    source.vertices.extend([
+        test_source_vertex([0.0, 0.0, 0.0]),
+        test_source_vertex([1.0, 0.0, 0.0]),
+        test_source_vertex([0.0, 0.0, 1.0]),
+    ]);
+    let mut normal_faces = Vec::new();
+    push_imported_face(&mut source, &mut normal_faces, [0, 1, 2], false);
+    push_imported_face(&mut source, &mut normal_faces, [0, 1, 2], true);
+    assert_eq!(source.faces[0].indices, [0, 2, 1]);
+    assert_eq!(source.faces[1].indices, [0, 1, 2]);
+    assert_eq!(normal_faces[0], [0, 1, 2]);
+    assert_eq!(normal_faces[1], [0, 2, 1]);
+
+    // Mirrored node transforms invert winding on their own.
+    let identity = identity_matrix();
+    assert!(!transform_reverses_winding(&identity));
+    let mut mirrored = identity_matrix();
+    mirrored[0][0] = -1.0;
+    assert!(transform_reverses_winding(&mirrored));
+}
