@@ -116,13 +116,16 @@ fn collect_resource_use(
         }
     }
 
+    // Materials own their texture image now; the texture-carrying
+    // resources for residency purposes are the textured materials
+    // themselves (plus the direct image references collected above).
     for material_id in use_set.materials.clone() {
         let Some(resource) = project.resource(material_id) else {
             continue;
         };
         if let ResourceData::Material(material) = &resource.data {
-            if let Some(texture_id) = material.texture {
-                push_unique(texture_id, &mut use_set.textures, &mut textures);
+            if material.psxt_path.is_some() {
+                push_unique(material_id, &mut use_set.textures, &mut textures);
             }
         }
     }
@@ -214,21 +217,15 @@ mod tests {
     #[test]
     fn scene_resource_use_follows_components_and_material_textures() {
         let mut project = ProjectDocument::new("test");
-        let texture = project.add_resource(
-            "atlas",
-            ResourceData::Texture {
-                psxt_path: "atlas.psxt".to_string(),
-            },
-        );
         let material = project.add_resource(
             "mat",
-            ResourceData::Material(MaterialResource::opaque(Some(texture))),
+            ResourceData::Material(MaterialResource::opaque(Some("atlas.psxt".to_string()))),
         );
         let particle_texture = project.add_resource(
             "particle_mask",
-            ResourceData::Texture {
-                psxt_path: "particle_mask.psxt".to_string(),
-            },
+            ResourceData::Material(MaterialResource::opaque(Some(
+                "particle_mask.psxt".to_string(),
+            ))),
         );
         let model = project.add_resource(
             "model",
@@ -297,7 +294,7 @@ mod tests {
         let use_set = collect_scene_resource_use(&project);
 
         assert_eq!(use_set.materials, vec![material]);
-        assert!(use_set.textures.contains(&texture));
+        assert!(use_set.textures.contains(&material));
         assert!(use_set.textures.contains(&particle_texture));
         assert_eq!(use_set.textures.len(), 2);
         assert_eq!(use_set.models, vec![model]);

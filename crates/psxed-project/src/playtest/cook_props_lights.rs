@@ -6,7 +6,7 @@ pub(crate) fn resolve_material_texture_asset(
     project_root: &Path,
     label: &str,
     material_id: ResourceId,
-    texture_asset_for_resource: &mut HashMap<ResourceId, usize>,
+    texture_asset_for_path: &mut HashMap<String, usize>,
     assets: &mut Vec<PlaytestAsset>,
     report: &mut PlaytestValidationReport,
 ) -> Option<(usize, [u8; 3])> {
@@ -24,45 +24,37 @@ pub(crate) fn resolve_material_texture_asset(
         ));
         return None;
     };
-    let Some(texture_id) = material.texture else {
+    let Some(psxt_path) = material.psxt_path.clone() else {
         report.warn(format!(
             "{label} material '{}' has no Texture — skipped",
             material_resource.name
         ));
         return None;
     };
-    let Some(texture_resource) = find_resource(project, texture_id) else {
-        report.warn(format!(
-            "{label} material '{}' references missing Texture #{} — skipped",
-            material_resource.name,
-            texture_id.raw()
-        ));
-        return None;
-    };
-    let texture_asset_index = if let Some(&existing) = texture_asset_for_resource.get(&texture_id) {
+    let texture_asset_index = if let Some(&existing) = texture_asset_for_path.get(&psxt_path) {
         existing
     } else {
-        let bytes = match load_texture_bytes(texture_resource, project_root) {
+        let bytes = match load_psxt_bytes(&material_resource.name, &psxt_path, project_root) {
             Ok(bytes) => bytes,
             Err(msg) => {
                 report.warn(format!("{label}: {msg} — skipped"));
                 return None;
             }
         };
-        if let Err(msg) = expect_room_material_depth(texture_resource, &bytes) {
+        if let Err(msg) = expect_room_material_depth(&material_resource.name, &bytes) {
             report.warn(format!("{label}: {msg} — skipped"));
             return None;
         }
-        let texture_index = texture_asset_for_resource.len();
+        let texture_index = texture_asset_for_path.len();
         let new_index = assets.len();
         assets.push(PlaytestAsset {
             kind: PlaytestAssetKind::Texture,
             bytes,
             filename: format!("texture_{texture_index:03}.psxt"),
-            source_label: texture_resource.name.clone(),
+            source_label: material_resource.name.clone(),
             streamed_class: StreamedClass::None,
         });
-        texture_asset_for_resource.insert(texture_id, new_index);
+        texture_asset_for_path.insert(psxt_path, new_index);
         new_index
     };
     Some((texture_asset_index, material.tint))
@@ -82,7 +74,7 @@ pub(crate) fn push_image_prop(
     width: u16,
     height: u16,
     cylindrical_billboard: bool,
-    texture_asset_for_resource: &mut HashMap<ResourceId, usize>,
+    texture_asset_for_path: &mut HashMap<String, usize>,
     assets: &mut Vec<PlaytestAsset>,
     image_props: &mut Vec<PlaytestImageProp>,
     report: &mut PlaytestValidationReport,
@@ -99,7 +91,7 @@ pub(crate) fn push_image_prop(
         project_root,
         &label,
         material_id,
-        texture_asset_for_resource,
+        texture_asset_for_path,
         assets,
         report,
     ) else {
@@ -151,7 +143,7 @@ pub(crate) fn push_box_prop(
     vertices: [[i16; 3]; crate::BOX_PROP_VERTEX_COUNT],
     collision_enabled: bool,
     break_flags: u16,
-    texture_asset_for_resource: &mut HashMap<ResourceId, usize>,
+    texture_asset_for_path: &mut HashMap<String, usize>,
     assets: &mut Vec<PlaytestAsset>,
     box_props: &mut Vec<PlaytestBoxProp>,
     report: &mut PlaytestValidationReport,
@@ -172,7 +164,7 @@ pub(crate) fn push_box_prop(
             project_root,
             &label,
             material_id,
-            texture_asset_for_resource,
+            texture_asset_for_path,
             assets,
             report,
         ) else {

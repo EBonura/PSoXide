@@ -1561,14 +1561,11 @@ impl Default for ParticleEmitterSettings {
 /// Resource payloads available to editor scenes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ResourceData {
-    /// Cooked PSXT artifact reference.
-    ///
-    /// The editor and the runtime both consume the same `.psxt` blob
-    /// -- the runtime via `include_bytes!` at compile time, the editor
-    /// via `std::fs::read` at refresh time and `psx_asset::Texture::from_bytes`
-    /// to extract pixel + CLUT bytes. PNG/JPG/BMP → PSXT cooking lives
-    /// in `texture_import` and the `psxed tex` CLI; runtime paths still
-    /// consume only cooked blobs.
+    /// LEGACY: pre-merge standalone texture reference. Parse-only --
+    /// materials own their `.psxt` image now (`MaterialResource::psxt_path`)
+    /// and `ProjectDocument::migrate_legacy_texture_resources` folds or
+    /// converts every Texture resource at load, so none survive in
+    /// memory or in saved projects. Kept so old project files load.
     Texture {
         /// Path to the cooked `.psxt` artifact. Resolved at refresh
         /// time first as-is (absolute paths), then relative to the

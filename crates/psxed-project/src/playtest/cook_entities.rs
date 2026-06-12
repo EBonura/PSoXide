@@ -36,13 +36,10 @@ pub(crate) fn cook_far_vista_texture_asset(
     project_root: &Path,
     texture_id: ResourceId,
     context: &str,
-    texture_asset_for_resource: &mut HashMap<ResourceId, usize>,
+    texture_asset_for_path: &mut HashMap<String, usize>,
     assets: &mut Vec<PlaytestAsset>,
     report: &mut PlaytestValidationReport,
 ) -> Option<usize> {
-    if let Some(existing) = texture_asset_for_resource.get(&texture_id).copied() {
-        return Some(existing);
-    }
     let Some(texture_resource) = find_resource(project, texture_id) else {
         report.warn(format!(
             "{context}: texture resource #{} is missing; using placeholder",
@@ -50,19 +47,30 @@ pub(crate) fn cook_far_vista_texture_asset(
         ));
         return None;
     };
-    let bytes = match load_texture_bytes(texture_resource, project_root) {
+    let Some(psxt_path) = resource_psxt_path(texture_resource) else {
+        report.warn(format!(
+            "{context}: material '{}' has no texture; using placeholder",
+            texture_resource.name
+        ));
+        return None;
+    };
+    if let Some(existing) = texture_asset_for_path.get(psxt_path).copied() {
+        return Some(existing);
+    }
+    let psxt_path = psxt_path.to_string();
+    let bytes = match load_psxt_bytes(&texture_resource.name, &psxt_path, project_root) {
         Ok(bytes) => bytes,
         Err(msg) => {
             report.warn(format!("{context}: {msg}; using placeholder"));
             return None;
         }
     };
-    if let Err(msg) = expect_room_material_depth(texture_resource, &bytes) {
+    if let Err(msg) = expect_room_material_depth(&texture_resource.name, &bytes) {
         report.warn(format!("{context}: {msg}; using placeholder"));
         return None;
     }
 
-    let texture_index = texture_asset_for_resource.len();
+    let texture_index = texture_asset_for_path.len();
     let new_index = assets.len();
     assets.push(PlaytestAsset {
         kind: PlaytestAssetKind::Texture,
@@ -71,7 +79,7 @@ pub(crate) fn cook_far_vista_texture_asset(
         source_label: texture_resource.name.clone(),
         streamed_class: StreamedClass::None,
     });
-    texture_asset_for_resource.insert(texture_id, new_index);
+    texture_asset_for_path.insert(psxt_path, new_index);
     Some(new_index)
 }
 

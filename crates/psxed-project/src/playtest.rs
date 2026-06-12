@@ -77,7 +77,7 @@ mod cook_world;
 pub(crate) use cook_world::*;
 
 use assets::{
-    expect_room_material_depth, find_resource, load_texture_bytes, resolve_path,
+    expect_room_material_depth, find_resource, load_psxt_bytes, resolve_path, resource_psxt_path,
     sanitise_model_dirname,
 };
 
@@ -218,13 +218,14 @@ pub fn build_package(
     let mut assets: Vec<PlaytestAsset> = Vec::new();
     let mut rooms: Vec<PlaytestRoom> = Vec::new();
     let mut materials: Vec<PlaytestMaterial> = Vec::new();
-    // ResourceId → index into `assets` for texture deduplication.
+    // Resolved psxt path → index into `assets` for texture page
+    // deduplication (materials sharing one image share one page).
     // First-use order is deterministic because we walk rooms +
     // material slots in deterministic order and assign the
-    // texture's compact "texture index" via `texture_asset_for_resource.len()`
+    // texture's compact "texture index" via `texture_asset_for_path.len()`
     // at first insertion (never removed). HashMap is fine -- we
     // only use it for presence tests.
-    let mut texture_asset_for_resource: std::collections::HashMap<ResourceId, usize> =
+    let mut texture_asset_for_path: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();
     let mut sky_texture_assets: Vec<(crate::ResolvedSkySettings, usize)> = Vec::new();
     let mut room_chunks_by_node: HashMap<NodeId, Vec<AuthoredRoomChunk>> = HashMap::new();
@@ -365,8 +366,11 @@ pub fn build_package(
                 sorted_materials.sort_by_key(|m| m.slot);
 
                 for cooked_material in sorted_materials {
-                    let texture_id = match cooked_material.texture {
-                        Some(id) => id,
+                    let material_label = find_resource(project, cooked_material.source)
+                        .map(|resource| resource.name.clone())
+                        .unwrap_or_else(|| format!("material #{}", cooked_material.source.raw()));
+                    let psxt_path = match &cooked_material.psxt_path {
+                        Some(path) => path.clone(),
                         None => {
                             report.error(format!(
                                 "Room '{}' material slot {} has no texture (resource #{})",
@@ -377,54 +381,45 @@ pub fn build_package(
                             return (None, report);
                         }
                     };
-                    let texture_resource = match find_resource(project, texture_id) {
-                        Some(r) => r,
-                        None => {
-                            report.error(format!(
-                            "Room '{}' material slot {} references missing texture resource #{}",
-                            room_node.name,
-                            cooked_material.slot,
-                            texture_id.raw(),
-                        ));
-                            return (None, report);
-                        }
-                    };
+                    // Texture pages dedupe by resolved path: materials
+                    // sharing one .psxt share one cooked asset.
                     let texture_asset_index =
-                        if let Some(&existing) = texture_asset_for_resource.get(&texture_id) {
+                        if let Some(&existing) = texture_asset_for_path.get(&psxt_path) {
                             existing
                         } else {
-                            let bytes = match load_texture_bytes(texture_resource, project_root) {
-                                Ok(b) => b,
-                                Err(msg) => {
-                                    report.error(format!(
-                                        "Room '{}' material slot {}: {}",
-                                        room_node.name, cooked_material.slot, msg,
-                                    ));
-                                    return (None, report);
-                                }
-                            };
+                            let bytes =
+                                match load_psxt_bytes(&material_label, &psxt_path, project_root) {
+                                    Ok(b) => b,
+                                    Err(msg) => {
+                                        report.error(format!(
+                                            "Room '{}' material slot {}: {}",
+                                            room_node.name, cooked_material.slot, msg,
+                                        ));
+                                        return (None, report);
+                                    }
+                                };
                             // Room materials must be 4bpp (16-entry CLUT) --
                             // both the editor preview's material upload
                             // path and the runtime room material slots
                             // assume the 4bpp tpage layout. Loud failure
                             // here beats wrong-colour rendering at runtime.
-                            if let Err(msg) = expect_room_material_depth(texture_resource, &bytes) {
+                            if let Err(msg) = expect_room_material_depth(&material_label, &bytes) {
                                 report.error(format!(
                                     "Room '{}' material slot {}: {}",
                                     room_node.name, cooked_material.slot, msg,
                                 ));
                                 return (None, report);
                             }
-                            let texture_index = texture_asset_for_resource.len();
+                            let texture_index = texture_asset_for_path.len();
                             let new_index = assets.len();
                             assets.push(PlaytestAsset {
                                 kind: PlaytestAssetKind::Texture,
                                 bytes,
                                 filename: format!("texture_{:03}.psxt", texture_index),
-                                source_label: texture_resource.name.clone(),
+                                source_label: material_label.clone(),
                                 streamed_class: StreamedClass::None,
                             });
-                            texture_asset_for_resource.insert(texture_id, new_index);
+                            texture_asset_for_path.insert(psxt_path.clone(), new_index);
                             new_index
                         };
 
@@ -510,7 +505,7 @@ pub fn build_package(
                                         project_root,
                                         texture_id,
                                         &context,
-                                        &mut texture_asset_for_resource,
+                                        &mut texture_asset_for_path,
                                         &mut assets,
                                         &mut report,
                                     )
@@ -527,7 +522,7 @@ pub fn build_package(
                                     project_root,
                                     texture_id,
                                     &context,
-                                    &mut texture_asset_for_resource,
+                                    &mut texture_asset_for_path,
                                     &mut assets,
                                     &mut report,
                                 )
@@ -1043,7 +1038,7 @@ pub fn build_package(
                     *width,
                     *height,
                     *cylindrical_billboard,
-                    &mut texture_asset_for_resource,
+                    &mut texture_asset_for_path,
                     &mut assets,
                     &mut image_props,
                     &mut report,
@@ -1078,7 +1073,7 @@ pub fn build_package(
                     *vertices,
                     *collision_enabled,
                     *break_flags,
-                    &mut texture_asset_for_resource,
+                    &mut texture_asset_for_path,
                     &mut assets,
                     &mut box_props,
                     &mut report,
@@ -1357,7 +1352,7 @@ pub fn build_package(
         cook_ui_nodes(
             project,
             project_root,
-            &mut texture_asset_for_resource,
+            &mut texture_asset_for_path,
             &mut assets,
             &mut report,
         );
