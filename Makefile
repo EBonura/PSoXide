@@ -432,7 +432,7 @@ cook-playtest:
 # streaming-only, so the default build includes the CD streaming reader.
 EDITOR_PLAYTEST_FEATURES ?= cd-stream-bench
 EDITOR_PLAYTEST_CARGO_FEATURE_FLAGS ?= --features "$(EDITOR_PLAYTEST_FEATURES)"
-EDITOR_PLAYTEST_HARDWARE_FEATURES ?= cd-stream-bench world-order-bucketed world-grid-visible ot-2048 vis-static-active-turn vis-full-active-chunks
+EDITOR_PLAYTEST_HARDWARE_FEATURES ?= cd-stream-bench world-order-bucketed world-grid-visible ot-2048 vis-static-active-turn
 
 build-editor-playtest:
 	cd engine/examples/editor-playtest && $(EDITOR_PLAYTEST_CARGO_ENV) cargo build --release $(PSX_BUILD_FLAGS) $(EDITOR_PLAYTEST_CARGO_FEATURE_FLAGS)
