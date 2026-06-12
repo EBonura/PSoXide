@@ -412,6 +412,22 @@ struct Playtest {
     /// update has already moved `render_camera`; world-anchored overlay
     /// elements must use the camera the underlying frame was built with.
     overlay_camera: WorldCamera,
+    /// Sim-tick snapshot taken by `render` alongside `overlay_camera`.
+    /// Time-animated overlay elements (atmosphere particles, lock-on
+    /// indicator) must use the tick of the frame they decorate: the
+    /// tick current at flip time depends on deadline-miss cadence, so
+    /// sampling it made the overlay's animation phase nondeterministic
+    /// across builds (the 3-pixel corridor LSB instability).
+    overlay_sim_tick: SimTick,
+    /// Tick of the first gameplay update after loading completed. The
+    /// engine clock origin is set at app init, BEFORE CD loading, so
+    /// raw `ctx.sim_tick` VALUES carry the build- and disc-dependent
+    /// loading duration. Gameplay logic is immune (it compares ticks
+    /// from the same clock), but value-based animation phase (ambient
+    /// model instances, particles, atmosphere) must subtract this
+    /// epoch so visuals are a pure function of gameplay time.
+    gameplay_epoch: SimTick,
+    gameplay_epoch_set: bool,
     /// Cached camera collision-room set: the follow camera's per-tick
     /// room gather cost ~half of its 50k tick budget and the set only
     /// changes when the player crosses a coarse cell or the active
@@ -556,6 +572,9 @@ impl Playtest {
                 Q12::ZERO,
                 Q12::ONE,
             ),
+            overlay_sim_tick: SimTick::ZERO,
+            gameplay_epoch: SimTick::ZERO,
+            gameplay_epoch_set: false,
             camera_collision_rooms: [const { CharacterCollisionRoom::EMPTY };
                 MAX_COLLISION_ROOMS],
             camera_collision_room_count: 0,

@@ -827,3 +827,40 @@ shoulder, confirmed by the adjacent frames); engine suite 250 green.
 Remaining instruction slack in these loops is the iterator/GTE-call
 shape itself (~200 instr/cell); next bites there need hand-shaped
 loops and are second-order to the player band (content) now.
+
+## 3-pixel LSB instability SOLVED: overlay clock anchoring (2026-06-12)
+
+Root cause found, and it is NOT a stray read. The three differing
+pixels are 1px atmosphere overlay particles whose flicker phase is a
+function of the raw `ctx.sim_tick` VALUE. Two anchoring leaks made
+that value build-dependent:
+1. `render_overlay` runs at the presentation flip and sampled the
+   tick CURRENT AT FLIP TIME, which shifts with deadline-miss cadence
+   (the overlay camera was already snapshotted in render() for exactly
+   this reason; the tick was not).
+2. The engine clock origin is set at app init, BEFORE CD loading, so
+   raw tick values carry the build- and disc-dependent loading
+   duration. Gameplay logic is immune (same-clock comparisons cancel
+   the offset), but every value-based animation phase inherited it.
+
+Diagnosis chain: the 3 pixels flicker over TIME within one build
+(frame 290/310/330 in one state, 300 in the other), with identical
+values at frame 300 and 1600 -- screen-anchored, blend-stable,
+time-flickering = the 1px Average-blended atmosphere particles, whose
+drift counters tick every 4-32 vblanks off the tick value.
+
+Fix: (a) render() snapshots `overlay_sim_tick` beside
+`overlay_camera`; (b) a `gameplay_epoch` captured at the first
+gameplay update (re-anchored per gameplay entry) is subtracted for
+every value-based animation phase: atmosphere, lock-on indicator, HUD
+pulse, particle emitters, ambient model instances
+(`phase_at_tick_q12`). Player/actor animation uses same-clock
+relative ticks and is untouched.
+
+Verification: timing-perturbed A/B (default vs cell-select-profile
+build, same source) is pixel-IDENTICAL at frame 300; tape dumps
+clean; suite 250 green. GATE UPGRADE: the corridor pixel gate is now
+STRICT identity -- the 3-pixel allowance is retired. New reference
+artifact: benchmarks/corridor-frame300-reference.ppm (regenerate by
+dumping --guest-frames 300 on the cortex_gameplay_probe disc whenever
+an intentional visual change lands).
