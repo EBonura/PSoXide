@@ -31,7 +31,7 @@ pub(crate) fn active_far_vista_panel_count(
 pub(crate) fn cook_ui_nodes(
     project: &ProjectDocument,
     project_root: &Path,
-    texture_asset_for_resource: &mut HashMap<ResourceId, usize>,
+    texture_asset_for_path: &mut HashMap<String, usize>,
     assets: &mut Vec<PlaytestAsset>,
     report: &mut PlaytestValidationReport,
 ) -> (
@@ -51,8 +51,7 @@ pub(crate) fn cook_ui_nodes(
     let mut ui_sfx_sample_for_wav: HashMap<String, u16> = HashMap::new();
     let mut cdda_tracks: Vec<PlaytestCddaTrack> = Vec::new();
     let mut cdda_track_for_wav: HashMap<String, u8> = HashMap::new();
-    let mut ui_image_texture_for_resource: HashMap<ResourceId, CookedUiImageTexture> =
-        HashMap::new();
+    let mut ui_image_texture_for_path: HashMap<String, CookedUiImageTexture> = HashMap::new();
 
     for scene in &project.ui_scenes {
         let node_first = ui_nodes.len().min(u16::MAX as usize) as u16;
@@ -61,10 +60,10 @@ pub(crate) fn cook_ui_nodes(
             node_first,
             project,
             project_root,
-            texture_asset_for_resource,
+            texture_asset_for_path,
             assets,
             report,
-            &mut ui_image_texture_for_resource,
+            &mut ui_image_texture_for_path,
             &mut cdda_tracks,
             &mut cdda_track_for_wav,
             &mut ui_sfx_samples,
@@ -179,10 +178,10 @@ pub(crate) fn cook_ui_scene_nodes(
     _node_first: u16,
     project: &ProjectDocument,
     project_root: &Path,
-    _texture_asset_for_resource: &mut HashMap<ResourceId, usize>,
+    _texture_asset_for_path: &mut HashMap<String, usize>,
     assets: &mut Vec<PlaytestAsset>,
     report: &mut PlaytestValidationReport,
-    ui_image_texture_for_resource: &mut HashMap<ResourceId, CookedUiImageTexture>,
+    ui_image_texture_for_path: &mut HashMap<String, CookedUiImageTexture>,
     cdda_tracks: &mut Vec<PlaytestCddaTrack>,
     cdda_track_for_wav: &mut HashMap<String, u8>,
     ui_sfx_samples: &mut Vec<PlaytestUiSfxSample>,
@@ -220,7 +219,7 @@ pub(crate) fn cook_ui_scene_nodes(
                 *effect,
                 project,
                 project_root,
-                ui_image_texture_for_resource,
+                ui_image_texture_for_path,
                 assets,
                 report,
                 out,
@@ -564,7 +563,7 @@ pub(crate) fn cook_ui_image_node(
     effect: UiImageEffect,
     project: &ProjectDocument,
     project_root: &Path,
-    ui_image_texture_for_resource: &mut HashMap<ResourceId, CookedUiImageTexture>,
+    ui_image_texture_for_path: &mut HashMap<String, CookedUiImageTexture>,
     assets: &mut Vec<PlaytestAsset>,
     report: &mut PlaytestValidationReport,
     out: &mut Vec<PlaytestUiNode>,
@@ -578,7 +577,7 @@ pub(crate) fn cook_ui_image_node(
         project_root,
         texture_id,
         &format!("UI image '{name}'"),
-        ui_image_texture_for_resource,
+        ui_image_texture_for_path,
         assets,
         report,
     ) else {
@@ -743,13 +742,10 @@ pub(crate) fn cook_ui_image_texture_asset(
     project_root: &Path,
     texture_id: ResourceId,
     context: &str,
-    ui_image_texture_for_resource: &mut HashMap<ResourceId, CookedUiImageTexture>,
+    ui_image_texture_for_path: &mut HashMap<String, CookedUiImageTexture>,
     assets: &mut Vec<PlaytestAsset>,
     report: &mut PlaytestValidationReport,
 ) -> Option<CookedUiImageTexture> {
-    if let Some(existing) = ui_image_texture_for_resource.get(&texture_id).cloned() {
-        return Some(existing);
-    }
     let Some(texture_resource) = find_resource(project, texture_id) else {
         report.warn(format!(
             "{context}: texture resource #{} is missing; using placeholder",
@@ -757,7 +753,17 @@ pub(crate) fn cook_ui_image_texture_asset(
         ));
         return None;
     };
-    let bytes = match load_texture_bytes(texture_resource, project_root) {
+    let Some(psxt_path) = resource_psxt_path(texture_resource).map(str::to_string) else {
+        report.warn(format!(
+            "{context}: material '{}' has no texture; using placeholder",
+            texture_resource.name
+        ));
+        return None;
+    };
+    if let Some(existing) = ui_image_texture_for_path.get(&psxt_path).cloned() {
+        return Some(existing);
+    }
+    let bytes = match load_psxt_bytes(&texture_resource.name, &psxt_path, project_root) {
         Ok(bytes) => bytes,
         Err(msg) => {
             report.warn(format!("{context}: {msg}; using placeholder"));
@@ -834,7 +840,7 @@ pub(crate) fn cook_ui_image_texture_asset(
         width: texture.width(),
         fragments,
     };
-    ui_image_texture_for_resource.insert(texture_id, cooked.clone());
+    ui_image_texture_for_path.insert(psxt_path, cooked.clone());
     Some(cooked)
 }
 

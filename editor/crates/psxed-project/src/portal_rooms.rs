@@ -940,16 +940,11 @@ mod tests {
     use crate::{GridVerticalFace, MaterialResource, ProjectDocument, PsxBlendMode, ResourceData};
 
     fn material(project: &mut ProjectDocument) -> crate::ResourceId {
-        let texture = project.add_resource(
-            "Texture",
-            ResourceData::Texture {
-                psxt_path: "texture.psxt".to_string(),
-            },
-        );
         project.add_resource(
             "Material",
             ResourceData::Material(MaterialResource {
-                texture: Some(texture),
+                psxt_path: Some("texture.psxt".to_string()),
+                legacy_texture: None,
                 blend_mode: PsxBlendMode::Opaque,
                 tint: [128, 128, 128],
                 face_sidedness: crate::MaterialFaceSidedness::Both,
