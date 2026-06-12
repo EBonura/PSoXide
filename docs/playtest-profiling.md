@@ -70,6 +70,15 @@ Gotchas:
 - `--input-tape` cannot combine with `--hold-forward`, `--hold-run`, or `--sweep`.
 - With `--input-tape`, `--guest-frames` defaults to the tape length (one sample per vblank), so it can be omitted.
 - The headless replay clock applies one tape sample per `step_one_frame` tick (vblank-period budget), mirroring the editor frame-for-frame. Keep it that way; it desyncs camera/collision otherwise (see the note in `cli.rs`).
+- Without a tape, `--guest-frames N` stops on the guest's telemetry frame
+  markers (`telemetry::frame_begin`, compiled out unless the guest has the
+  `emulator-telemetry` feature). On a non-telemetry build (e.g. the burn
+  feature set `cd-stream-bench fps-overlay`) the counter never advances and
+  the run silently continues to the `--steps` cap; the dump is then whatever
+  was last displayed at the cap, NOT frame N. Same for
+  `--guest-visual-frames`. Pad pulses are unaffected (they ride the host
+  vblank-period clock), so the game still progresses. For frame-addressed
+  dumps, use a disc built with `emulator-telemetry`.
 
 ## 3. Render the per-vblank chart
 
