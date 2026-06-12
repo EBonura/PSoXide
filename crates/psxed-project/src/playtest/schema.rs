@@ -946,6 +946,8 @@ pub struct PlaytestUiScene {
     pub node_first: u16,
     /// Number of nodes belonging to this scene.
     pub node_count: u16,
+    /// Authored focus-ring style, copied through to the cooked scene.
+    pub focus_style: crate::ui_types::UiFocusStyle,
 }
 
 /// One WAV source assigned to a cooked CD-DA track number.

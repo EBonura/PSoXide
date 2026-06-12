@@ -202,6 +202,7 @@ fn ui_scene_table_and_flow_emit_addressable_scenes() {
         name: "Pause".to_string(),
         node_first: 0,
         node_count: 1,
+        focus_style: crate::ui_types::UiFocusStyle::default(),
     }];
     package.game_flow = PlaytestGameFlow {
         states: vec![
@@ -222,7 +223,11 @@ fn ui_scene_table_and_flow_emit_addressable_scenes() {
     };
 
     let src = render_manifest_source(&package);
-    assert!(src.contains("LevelUiScene { id: 7, name: \"Pause\", node_first: 0, node_count: 1 },"));
+    assert!(src.contains(
+        "LevelUiScene { id: 7, name: \"Pause\", node_first: 0, node_count: 1, focus_style: \
+         LevelUiFocusStyle { effect: LevelUiFocusEffect::Solid, color_a: (248, 224, 96), \
+         color_b: (96, 88, 40), period: 96, thickness: 1, margin: 1, corner_len: 8 } },"
+    ));
     assert!(src.contains("LevelSceneState { id: 1, name: \"Pause\", world: LevelWorldLayer::None, ui_scene: 7, flags: 1 },"));
     assert!(src.contains("FlowState::SceneState { state: 1 },"));
     assert!(src.contains("FlowState::SceneState { state: 0 },"));
