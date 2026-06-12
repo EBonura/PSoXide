@@ -42,7 +42,6 @@ pub(crate) fn project_filesystem_rows(project: &ProjectDocument) -> Vec<ProjectF
     });
 
     push_resource_folder(project, &mut rows, "materials", ResourceFilter::Material);
-    push_resource_folder(project, &mut rows, "textures", ResourceFilter::Texture);
     push_resource_folder(project, &mut rows, "models", ResourceFilter::Model);
     push_resource_folder(project, &mut rows, "animations", ResourceFilter::Animation);
     push_resource_folder(project, &mut rows, "characters", ResourceFilter::Character);
@@ -165,7 +164,11 @@ pub(crate) fn draw_project_file_row(
 pub(crate) fn resource_file_name(resource: &Resource) -> String {
     match &resource.data {
         ResourceData::Texture { psxt_path } => cooked_name(&resource.name, psxt_path, "psxt"),
-        ResourceData::Material(_) => cooked_name(&resource.name, "", "mat"),
+        ResourceData::Material(material) => cooked_name(
+            &resource.name,
+            material.psxt_path.as_deref().unwrap_or(""),
+            "psxt",
+        ),
         ResourceData::Model(model) => cooked_name(&resource.name, &model.model_path, "psxmdl"),
         ResourceData::Skeleton(_) => cooked_name(&resource.name, "", "skeleton"),
         ResourceData::AnimationSource(source) => {
@@ -208,8 +211,7 @@ pub(crate) fn snake_name(name: &str) -> String {
     out.trim_matches('_').to_string()
 }
 
-pub(crate) fn resource_filter_counts(project: &ProjectDocument) -> [(ResourceFilter, usize); 9] {
-    let mut texture = 0;
+pub(crate) fn resource_filter_counts(project: &ProjectDocument) -> [(ResourceFilter, usize); 8] {
     let mut material = 0;
     let mut model = 0;
     let mut animation = 0;
@@ -220,8 +222,9 @@ pub(crate) fn resource_filter_counts(project: &ProjectDocument) -> [(ResourceFil
     let mut other = 0;
     for resource in &project.resources {
         match &resource.data {
-            ResourceData::Texture { .. } => texture += 1,
-            ResourceData::Material(_) => material += 1,
+            // Legacy Texture resources are folded into materials at
+            // load; none survive in memory.
+            ResourceData::Texture { .. } | ResourceData::Material(_) => material += 1,
             ResourceData::Model(_) => model += 1,
             ResourceData::Skeleton(_)
             | ResourceData::AnimationSource(_)
@@ -235,7 +238,6 @@ pub(crate) fn resource_filter_counts(project: &ProjectDocument) -> [(ResourceFil
         }
     }
     [
-        (ResourceFilter::Texture, texture),
         (ResourceFilter::Material, material),
         (ResourceFilter::Model, model),
         (ResourceFilter::Animation, animation),
@@ -267,6 +269,7 @@ pub(crate) fn resource_matches_filter(
 pub(crate) fn resource_source_path(resource: &Resource) -> Option<&str> {
     match &resource.data {
         ResourceData::Texture { psxt_path } => Some(psxt_path.as_str()),
+        ResourceData::Material(material) => material.psxt_path.as_deref(),
         ResourceData::Model(model) => Some(model.model_path.as_str()),
         ResourceData::AnimationSource(source) => Some(source.source_path.as_str()),
         ResourceData::AnimationClip(clip) => Some(clip.psxanim_path.as_str()),
@@ -274,8 +277,7 @@ pub(crate) fn resource_source_path(resource: &Resource) -> Option<&str> {
         | ResourceData::Scene { source_path }
         | ResourceData::Script { source_path }
         | ResourceData::Audio { source_path } => Some(source_path.as_str()),
-        ResourceData::Material(_)
-        | ResourceData::Skeleton(_)
+        ResourceData::Skeleton(_)
         | ResourceData::AnimationSet(_)
         | ResourceData::Character(_)
         | ResourceData::Weapon(_) => None,
@@ -413,19 +415,16 @@ pub(crate) fn draw_resource_card(
 pub(crate) fn draw_resource_preview(
     painter: &egui::Painter,
     preview: Rect,
-    project: &ProjectDocument,
+    _project: &ProjectDocument,
     resource: &Resource,
     thumb: Option<egui::TextureId>,
 ) {
     match &resource.data {
         ResourceData::Material(material) => {
-            // Material: blit the linked Texture's decoded thumbnail
-            // when available, fall back to the linked texture's
-            // procedural pattern, then to the material's own name.
+            // Material: blit its decoded image thumbnail when
+            // available, fall back to a procedural pattern.
             if let Some(id) = thumb {
                 blit_thumb(painter, preview, id);
-            } else if let Some(texture) = material.texture.and_then(|id| project.resource(id)) {
-                draw_texture_like_preview(painter, preview, texture);
             } else {
                 draw_texture_like_preview(painter, preview, resource);
             }
