@@ -31,9 +31,7 @@ use psx_gpu::material::TextureWindow;
 use psx_gpu_render::{VRAM_HEIGHT, VRAM_WIDTH};
 use psx_vram::TextureWindowAtlas;
 use psxed_project::streaming::collect_scene_resource_use;
-use psxed_project::{
-    MaterialResource, NodeKind, ProjectDocument, Resource, ResourceData, ResourceId,
-};
+use psxed_project::{MaterialResource, NodeKind, ProjectDocument, ResourceData, ResourceId};
 
 const ROOM_TPAGE_HALFWORDS: usize = 64;
 const ROOM_TPAGE_TEXEL_HEIGHT: usize = 256;
@@ -218,7 +216,8 @@ impl EditorTextures {
     ///
     /// Resolution order per material:
     ///
-    /// 1. Follow `material.texture` to a `ResourceData::Texture`.
+    /// 1. Read the material's own `psxt_path` (materials own their
+    ///    image since the material/texture merge).
     /// 2. Resolve `psxt_path` (absolute as-is, otherwise against
     ///    `project_root`).
     /// 3. `fs::read` and parse via [`psx_asset::Texture::from_bytes`].
@@ -819,14 +818,21 @@ fn push_texture_resource_upload(
     let Some(resource) = project.resource(id) else {
         return;
     };
-    let ResourceData::Texture { psxt_path } = &resource.data else {
-        return;
+    let psxt_path = match &resource.data {
+        // Direct image references (far vista, UI images, particle
+        // masks) point at textured materials since the merge.
+        ResourceData::Material(material) => match material.psxt_path.as_deref() {
+            Some(path) => path,
+            None => return,
+        },
+        ResourceData::Texture { psxt_path } => psxt_path.as_str(),
+        _ => return,
     };
     let cache_signature = texture_cache_signature(project_root, psxt_path);
     plan.push(PreviewTextureUploadPlan {
         id,
         name: resource.name.clone(),
-        signature: psxt_path.clone(),
+        signature: psxt_path.to_string(),
         cache_signature,
         force_zero_opaque: false,
         allow_procedural_fallback: false,
@@ -860,16 +866,11 @@ fn texture_cache_signature(project_root: &Path, stored: &str) -> String {
     }
 }
 
-/// Resolve a Material's texture link to the underlying `.psxt`
-/// path string, or `None` if the link is missing or the linked
-/// resource isn't a Texture.
-fn texture_path(project: &ProjectDocument, material: &MaterialResource) -> Option<String> {
-    let tex_id = material.texture?;
-    let resource: &Resource = project.resource(tex_id)?;
-    match &resource.data {
-        ResourceData::Texture { psxt_path } => Some(psxt_path.clone()),
-        _ => None,
-    }
+/// The `.psxt` path a material draws with, or `None` for flat-tint
+/// materials. Materials own their image since the material/texture
+/// merge.
+fn texture_path(_project: &ProjectDocument, material: &MaterialResource) -> Option<String> {
+    material.psxt_path.clone()
 }
 
 /// One generated procedural texture: `pixels` are raw 4bpp indices
@@ -1424,9 +1425,7 @@ mod tests {
         let mut project = ProjectDocument::new("preview");
         let panel = project.add_resource(
             "Vista Panel",
-            ResourceData::Texture {
-                psxt_path: "vista.psxt".to_string(),
-            },
+            ResourceData::Material(MaterialResource::opaque(Some("vista.psxt".to_string()))),
         );
         let mut far_vista = FarVistaSettings {
             enabled: true,
@@ -1468,9 +1467,7 @@ mod tests {
             .collect();
         let panel = project.add_resource(
             "Vista Panel",
-            ResourceData::Texture {
-                psxt_path: "vista.psxt".to_string(),
-            },
+            ResourceData::Material(MaterialResource::opaque(Some("vista.psxt".to_string()))),
         );
         let grid = WorldGrid::stone_room(1, 1, 1024, Some(used), Some(used));
         let mut far_vista = FarVistaSettings {

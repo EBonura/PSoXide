@@ -167,11 +167,6 @@ const PLACEMENT_DUPLICATE_EPSILON: f32 = 0.001;
 const EGUI_TEXTURE_RETIRE_FRAMES: u8 = 2;
 const RESOURCE_CARD_WIDTH: f32 = 120.0;
 const RESOURCE_CARD_HEIGHT: f32 = 128.0;
-const MATERIAL_TEXTURE_PICKER_POPUP_WIDTH: f32 = 320.0;
-const MATERIAL_TEXTURE_PICKER_POPUP_HEIGHT: f32 = 320.0;
-const MATERIAL_TEXTURE_PICKER_ROW_HEIGHT: f32 = 44.0;
-const MATERIAL_TEXTURE_PICKER_THUMB_SIZE: f32 = 34.0;
-const MATERIAL_TEXTURE_PICKER_BUTTON_WIDTH: f32 = 190.0;
 const VIEWPORT_PREVIEW_ASPECT: f32 = 320.0 / 240.0;
 const SHORTCUT_GROUP_FLASH_SECONDS: f32 = 0.85;
 const ACTION_BAR_COMPACT_HEIGHT: f32 = 50.0;
@@ -434,7 +429,6 @@ pub struct EditorWorkspace {
     left_dock_scene_fraction: f32,
     resource_search: String,
     resource_filter: ResourceFilter,
-    material_texture_search: String,
     /// `Some((id, buffer))` while the resource inspector's name
     /// field is editing. Committed resource renames may move backing
     /// files, so they happen on focus loss / Enter rather than on
@@ -535,13 +529,6 @@ struct TexturePreviewSnapshot {
     texture_id: egui::TextureId,
     image: ColorImage,
     stats: PsxtStats,
-}
-
-#[derive(Clone)]
-struct TexturePickerOption {
-    id: ResourceId,
-    name: String,
-    thumb: Option<(egui::TextureId, PsxtStats)>,
 }
 
 #[derive(Clone, Copy)]
@@ -1974,7 +1961,6 @@ impl ViewTool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ResourceFilter {
     All,
-    Texture,
     Material,
     ImagePropSource,
     Model,
@@ -2031,7 +2017,6 @@ impl ResourceFilter {
     const fn label(self) -> &'static str {
         match self {
             Self::All => "All Resources",
-            Self::Texture => "Texture",
             Self::Material => "Material",
             Self::ImagePropSource => "Image Source",
             Self::Model => "Model",
@@ -2047,7 +2032,6 @@ impl ResourceFilter {
     const fn icon(self) -> char {
         match self {
             Self::All => icons::LAYERS,
-            Self::Texture => icons::PALETTE,
             Self::Material => icons::BLEND,
             Self::ImagePropSource => icons::PALETTE,
             Self::Model => icons::BOX,
@@ -2063,14 +2047,8 @@ impl ResourceFilter {
     fn matches(self, data: &ResourceData) -> bool {
         match self {
             Self::All => true,
-            Self::Texture => matches!(data, ResourceData::Texture { .. }),
             Self::Material => matches!(data, ResourceData::Material(_)),
-            Self::ImagePropSource => {
-                matches!(
-                    data,
-                    ResourceData::Texture { .. } | ResourceData::Material(_)
-                )
-            }
+            Self::ImagePropSource => matches!(data, ResourceData::Material(_)),
             Self::Model => matches!(data, ResourceData::Model(_)),
             Self::Animation => matches!(
                 data,
@@ -2238,7 +2216,6 @@ impl EditorWorkspace {
             left_dock_scene_fraction: LEFT_DOCK_DEFAULT_SCENE_FRACTION,
             resource_search: String::new(),
             resource_filter: ResourceFilter::All,
-            material_texture_search: String::new(),
             resource_renaming: None,
             resource_delete_confirm: None,
             active_tool: ViewTool::Select,
