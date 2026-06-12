@@ -1584,11 +1584,26 @@ fn load_world_camera_gte(camera: WorldCamera) {
     scene::load_translation(translation);
 }
 
+#[inline(always)]
 fn world_vertex_gte_input(vertex: WorldVertex) -> Option<Vec3I16> {
+    // One combined i16 range test: `v + 0x8000` fits u16 exactly when
+    // `v` is in i16 range, so OR-ing the three biased axes and
+    // comparing once replaces three try_from/Option chains. This runs
+    // per cell / per vertex in the scan loops, and the in-emulator
+    // cost model is a flat 2 cycles per instruction, so the branch
+    // count IS the cost. Wrapping overflow only happens for values far
+    // outside i16 range and leaves a high bit set, so those still
+    // reject.
+    let bx = vertex.x.wrapping_add(0x8000);
+    let by = vertex.y.wrapping_add(0x8000);
+    let bz = vertex.z.wrapping_add(0x8000);
+    if (bx | by | bz) as u32 > 0xFFFF {
+        return None;
+    }
     Some(Vec3I16::new(
-        i16::try_from(vertex.x).ok()?,
-        i16::try_from(vertex.y).ok()?,
-        i16::try_from(vertex.z).ok()?,
+        vertex.x as i16,
+        vertex.y as i16,
+        vertex.z as i16,
     ))
 }
 
