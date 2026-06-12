@@ -428,6 +428,14 @@ struct Playtest {
     /// epoch so visuals are a pure function of gameplay time.
     gameplay_epoch: SimTick,
     gameplay_epoch_set: bool,
+    /// fps-overlay counter state (burn builds): presented frames and
+    /// worst inter-frame gap over a rolling ~1s gameplay-tick window.
+    fps_window_start: u32,
+    fps_window_frames: u8,
+    fps_last_tick: u32,
+    fps_worst_gap: u8,
+    fps_display: u8,
+    fps_display_worst: u8,
     /// Cached camera collision-room set: the follow camera's per-tick
     /// room gather cost ~half of its 50k tick budget and the set only
     /// changes when the player crosses a coarse cell or the active
@@ -575,6 +583,12 @@ impl Playtest {
             overlay_sim_tick: SimTick::ZERO,
             gameplay_epoch: SimTick::ZERO,
             gameplay_epoch_set: false,
+            fps_window_start: 0,
+            fps_window_frames: 0,
+            fps_last_tick: 0,
+            fps_worst_gap: 0,
+            fps_display: 0,
+            fps_display_worst: 0,
             camera_collision_rooms: [const { CharacterCollisionRoom::EMPTY };
                 MAX_COLLISION_ROOMS],
             camera_collision_room_count: 0,

@@ -218,7 +218,7 @@
             ),
         ),
     ],
-    boot: SceneState((4)),
+    boot: SceneState((5)),
     resources: [
         /*[0]*/ (
             id: (5),

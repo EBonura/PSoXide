@@ -864,3 +864,38 @@ STRICT identity -- the 3-pixel allowance is retired. New reference
 artifact: benchmarks/corridor-frame300-reference.ppm (regenerate by
 dumping --guest-frames 300 on the cortex_gameplay_probe disc whenever
 an intentional visual change lands).
+
+## Burn build prepared: fps overlay + menu boot restored (2026-06-12)
+
+fps-overlay feature (default OFF, feature-off build verified
+bit-identical on the strict corridor gate): presented-fps + worst
+inter-frame gap over a rolling 1s gameplay-tick window, drawn
+top-right via the HUD font in render_overlay ("30 W2" = 30 fps,
+worst gap 2 vblanks). Burn builds enable it so silicon framerate is
+readable from a console photo.
+
+FOUND DURING PREBURN: commit ef2cd557 ("streaming slots 7 -> 6")
+silently carried `boot: SceneState((5)) -> ((4))` -- the game has
+been booting STRAIGHT INTO GAMEPLAY since 2026-06-11 18:07, skipping
+the Bonnie Studios splash and the main menu. That is why the CD-DA
+preburn probe heard silence (no menu = no menu music; the cdda code
+path is fine and plays once the menu exists). Boot restored to the
+splash for the burn.
+
+PROFILING GOTCHA (important): every benchmark-tape replay in this
+campaign ran against boot-into-gameplay discs (boot=4). With the
+menu boot restored, replaying the benchmark tape against the MAIN
+project disc desyncs (its inputs assume gameplay from frame 0). For
+future tape profiling either temporarily set boot back to
+SceneState((4)) or re-record the tape on the menu flow. The corridor
+probe project is unaffected (separate project, still
+boot-into-gameplay).
+
+Preburn: all seven local checks PASS (struct, disc-reads, internal
+pad-pulse flow splash->menu->gameplay with the overlay visible,
+cdda-audio 83% nonzero peak 5.2k, bios-cdrom, boot-flow,
+streaming-guard). Pipeline note: pass the feature sets as SHELL ENV,
+not make command-line vars -- command-line vars ride MAKEFLAGS
+through cargo into every nested make and silently override the
+recipe's internal-disc feature set (cost one confusing iteration:
+identical bins, empty telemetry profile).
