@@ -12,20 +12,10 @@ impl EditorWorkspace {
             return Vec::new();
         };
         let label_for = |kind: &str, name: &str| format!("{kind}: {name}");
-        let mut crumbs = vec![BreadcrumbCrumb {
+        let crumbs = vec![BreadcrumbCrumb {
             label: label_for(resource.data.label(), &resource.name),
             nav: None,
         }];
-        if let ResourceData::Material(m) = &resource.data {
-            if let Some(tex_id) = m.texture {
-                if let Some(tex) = self.project.resource(tex_id) {
-                    crumbs.push(BreadcrumbCrumb {
-                        label: label_for(tex.data.label(), &tex.name),
-                        nav: Some(tex_id),
-                    });
-                }
-            }
-        }
         crumbs
     }
 
@@ -56,23 +46,6 @@ impl EditorWorkspace {
         // stats display). Cloned so the mutable resource borrow
         // below doesn't fight `&self.project_dir`.
         let project_root = self.project_dir.clone();
-        let texture_options: Vec<TexturePickerOption> = self
-            .project
-            .resources
-            .iter()
-            .filter_map(|r| match &r.data {
-                ResourceData::Texture { .. } => Some(TexturePickerOption {
-                    id: r.id,
-                    name: r.name.clone(),
-                    thumb: self
-                        .texture_thumbs
-                        .get(&r.id)
-                        .map(|entry| (entry.handle.id(), entry.stats)),
-                }),
-                _ => None,
-            })
-            .collect();
-        let mut material_texture_search = self.material_texture_search.clone();
         // Snapshot Model resources + their clip names so the
         // Character Profile inspector can populate model + clip pickers
         // without borrowing `self.project` while the mutable
@@ -192,19 +165,29 @@ impl EditorWorkspace {
             ResourceData::Material(material) => {
                 if let Some(pick) = draw_psxt_preview_block_pickable(ui, preview_snapshot.as_ref())
                 {
-                    if let Some(texture_id) = material.texture {
-                        transparency_key_action = Some((texture_id, pick));
+                    if material.psxt_path.is_some() {
+                        transparency_key_action = Some((id, pick));
                     }
                 }
                 egui::CollapsingHeader::new(icons::label(icons::BLEND, "Material"))
                     .default_open(true)
                     .show(ui, |ui| {
-                        changed |= material_texture_picker(
-                            ui,
-                            &mut material.texture,
-                            &texture_options,
-                            &mut material_texture_search,
-                            &mut nav_target,
+                        ui.label("Texture path");
+                        let mut path_buffer = material.psxt_path.clone().unwrap_or_default();
+                        if ui.text_edit_singleline(&mut path_buffer).changed() {
+                            material.psxt_path = if path_buffer.trim().is_empty() {
+                                None
+                            } else {
+                                Some(path_buffer)
+                            };
+                            changed = true;
+                        }
+                        ui.label(
+                            RichText::new(
+                                "Cooked .psxt this material draws with; empty renders flat tint.",
+                            )
+                            .color(STUDIO_TEXT_WEAK)
+                            .small(),
                         );
                         changed |= blend_mode_editor(ui, &mut material.blend_mode);
                         changed |= color_editor(ui, "Tint", &mut material.tint);
@@ -310,8 +293,6 @@ impl EditorWorkspace {
                     });
             }
         }
-
-        self.material_texture_search = material_texture_search;
 
         if changed {
             self.mark_dirty();
@@ -703,6 +684,7 @@ impl EditorWorkspace {
                 // thumbnail cache treats them uniformly.
                 let psxt_path = match &resource.data {
                     ResourceData::Texture { psxt_path } => psxt_path.as_str(),
+                    ResourceData::Material(material) => material.psxt_path.as_deref()?,
                     ResourceData::Model(model) => model.texture_path.as_deref()?,
                     _ => return None,
                 };
@@ -859,8 +841,7 @@ impl EditorWorkspace {
     /// or the PSXT blob cannot be decoded.
     pub(crate) fn texture_thumb_entry(&self, resource: &Resource) -> Option<&ThumbnailEntry> {
         let key = match &resource.data {
-            ResourceData::Texture { .. } => Some(resource.id),
-            ResourceData::Material(mat) => mat.texture,
+            ResourceData::Texture { .. } | ResourceData::Material(_) => Some(resource.id),
             _ => None,
         }?;
         self.texture_thumbs.get(&key)
