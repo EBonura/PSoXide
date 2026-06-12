@@ -27,8 +27,12 @@ pub(crate) const RUNTIME_SCHEDULE: RuntimeScheduleConfig = RuntimeScheduleConfig
     stream_load_batch_count: 4,
     stream_pump_sectors_per_tick: 8,
     stream_bootstrap_pump_limit: 4096,
-    // Prevent boot/menu-to-gameplay loads from building an unbounded fixed-update
-    // backlog before the first visual frame. Two ticks matches the 30Hz render
-    // cadence while still allowing one non-render tick for background work.
-    max_fixed_ticks_before_visual: 2,
+    // No cap: fixed simulation always catches up to real VBlank time, so
+    // slow visuals DROP FRAMES instead of dilating gameplay time. The old
+    // cap of 2 rationed sim ticks under render overload -- at 20 fps the
+    // whole game ran at ~2/3 speed (user-reported "everything slows
+    // down"; the benchmark tape's 1,371 ticks consumed 2,157 vblanks).
+    // The boot-backlog concern the cap addressed is handled upstream by
+    // EngineClock::reset_origin after init.
+    max_fixed_ticks_before_visual: 0,
 };
