@@ -1145,6 +1145,20 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     }
     out.push_str("];\n\n");
 
+    // Loading screen by authoring convention: a UI scene literally named
+    // "Loading" (case-insensitive) is drawn by the engine while it streams
+    // the next state's world. UI_SCENE_NONE selects the engine's built-in
+    // minimal fallback screen.
+    let loading_scene = package
+        .ui_scenes
+        .iter()
+        .find(|scene| scene.name.eq_ignore_ascii_case("loading"))
+        .map(|scene| scene.id.to_string())
+        .unwrap_or_else(|| "psx_level::UI_SCENE_NONE".to_string());
+    out.push_str("/// UI scene drawn during world-load (the scene named \"Loading\"),\n");
+    out.push_str("/// or `UI_SCENE_NONE` for the engine's built-in fallback.\n");
+    let _ = writeln!(out, "pub const LOADING_UI_SCENE: u16 = {loading_scene};\n");
+
     out.push_str("/// Composed runtime scene states.\n");
     out.push_str("pub static SCENE_STATES: &[LevelSceneState] = &[\n");
     for state in &package.game_flow.scene_states {
@@ -2635,6 +2649,7 @@ fn render_ui_image_effect(effect: UiImageEffect) -> &'static str {
         UiImageEffect::FastShimmer => "LevelUiImageEffect::FastShimmer",
         UiImageEffect::DiagonalSweep => "LevelUiImageEffect::DiagonalSweep",
         UiImageEffect::SoftPulse => "LevelUiImageEffect::SoftPulse",
+        UiImageEffect::Bob => "LevelUiImageEffect::Bob",
     }
 }
 
@@ -2720,6 +2735,7 @@ fn render_ui_value_binding(binding: UiValueBinding) -> String {
         UiValueBinding::PlayerHealthMax => "LevelUiValueBinding::PlayerHealthMax".to_string(),
         UiValueBinding::PlayerStamina => "LevelUiValueBinding::PlayerStamina".to_string(),
         UiValueBinding::PlayerStaminaMax => "LevelUiValueBinding::PlayerStaminaMax".to_string(),
+        UiValueBinding::LoadingProgress => "LevelUiValueBinding::LoadingProgress".to_string(),
     }
 }
 

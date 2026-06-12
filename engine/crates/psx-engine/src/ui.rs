@@ -961,8 +961,9 @@ fn draw_image(
     frame: u16,
     textures: &mut impl FnMut(AssetId) -> Option<UiTextureSlot>,
 ) {
+    let verts = image_effect_verts(resolved.verts, node.image_effect, frame);
     if node.texture_asset.0 == u16::MAX {
-        draw_quad_flat(resolved.verts, node.color[0], node.color[1], node.color[2]);
+        draw_quad_flat(verts, node.color[0], node.color[1], node.color[2]);
         return;
     }
     let Some(slot) = textures(node.texture_asset) else {
@@ -974,12 +975,12 @@ fn draw_image(
     let tex_h = texture_size_u8(slot.texture_height).saturating_sub(1);
     let uvs = [(0, 0), (tex_w, 0), (0, tex_h), (tex_w, tex_h)];
     if node.image_effect == LevelUiImageEffect::None {
-        draw_quad_textured_material(resolved.verts, uvs, material);
+        draw_quad_textured_material(verts, uvs, material);
     } else {
         draw_quad_textured_gouraud_material(
-            resolved.verts,
+            verts,
             uvs,
-            image_effect_vertex_colors(rgb(node.color), node.image_effect, frame, resolved.verts),
+            image_effect_vertex_colors(rgb(node.color), node.image_effect, frame, verts),
             material,
         );
     }
@@ -988,6 +989,30 @@ fn draw_image(
 /// Clamp a texel dimension into the GP0 8-bit UV range.
 fn texture_size_u8(size: u16) -> u8 {
     size.min(u16::from(u8::MAX)) as u8
+}
+
+/// Per-effect vertex displacement, applied before drawing. Colour-only
+/// effects pass through; `Bob` oscillates the whole quad vertically by
+/// a few pixels on a triangle wave (the loading-screen mascot idiom).
+fn image_effect_verts(
+    verts: [(i16, i16); 4],
+    effect: LevelUiImageEffect,
+    frame: u16,
+) -> [(i16, i16); 4] {
+    match effect {
+        LevelUiImageEffect::Bob => {
+            const BOB_AMPLITUDE: i16 = 4;
+            let wave = i16::from(triangle_wave_u8(frame.wrapping_mul(2)));
+            let offset = ((wave - 128) * BOB_AMPLITUDE) / 128;
+            [
+                (verts[0].0, verts[0].1.saturating_add(offset)),
+                (verts[1].0, verts[1].1.saturating_add(offset)),
+                (verts[2].0, verts[2].1.saturating_add(offset)),
+                (verts[3].0, verts[3].1.saturating_add(offset)),
+            ]
+        }
+        _ => verts,
+    }
 }
 
 fn image_effect_vertex_colors(
@@ -1028,6 +1053,9 @@ fn image_effect_vertex_colors(
             let lift = 10 + (u16::from(triangle_wave_u8(frame.wrapping_mul(3))) * 44 / 255) as u8;
             [add_light(base, lift); 4]
         }
+        // Bob displaces vertices (see `image_effect_verts`); colours
+        // stay flat.
+        LevelUiImageEffect::Bob => [base; 4],
     }
 }
 
