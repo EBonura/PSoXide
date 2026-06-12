@@ -93,9 +93,11 @@ impl Playtest {
             self.free_orbit = !self.free_orbit;
         }
         let delta_vblanks = 1u16;
+        telemetry::stage_begin(telemetry::stage::UPDATE_ACTOR);
         self.advance_box_prop_break_events(delta_vblanks);
         self.advance_box_prop_falls(delta_vblanks);
         if CAMERA_SWEEP_ENABLED {
+            telemetry::stage_end(telemetry::stage::UPDATE_ACTOR);
             self.update_camera_sweep(delta_vblanks);
             return;
         }
@@ -134,6 +136,7 @@ impl Playtest {
             }
             self.player_moved_last_tick = false;
             self.active_interactable = None;
+            telemetry::stage_end(telemetry::stage::UPDATE_ACTOR);
             telemetry::stage_begin(telemetry::stage::CAMERA);
             self.render_camera = self.free_orbit_camera();
             telemetry::stage_end(telemetry::stage::CAMERA);
@@ -155,6 +158,7 @@ impl Playtest {
                     self.evade_run_hold_ticks = 0;
                     self.evade_run_hold_consumed = false;
                     self.camera_turning_last_tick = false;
+                    telemetry::stage_end(telemetry::stage::UPDATE_ACTOR);
                     return;
                 }
             }
@@ -200,6 +204,7 @@ impl Playtest {
         {
             self.break_box_props_for_movement(trigger, input, config, delta_vblanks);
         }
+        telemetry::stage_end(telemetry::stage::UPDATE_ACTOR);
         telemetry::stage_begin(telemetry::stage::SIM_COLLISION);
         let mut collision_rooms = [const { CharacterCollisionRoom::EMPTY }; MAX_COLLISION_ROOMS];
         let collision_room_count = if self.chunked_level() {
@@ -290,7 +295,9 @@ impl Playtest {
         telemetry::stage_begin(telemetry::stage::CAMERA);
         self.render_camera = self.update_follow_camera(ctx);
         telemetry::stage_end(telemetry::stage::CAMERA);
+        telemetry::stage_begin(telemetry::stage::UPDATE_WINDOW);
         self.refresh_active_room_window_if_needed();
+        telemetry::stage_end(telemetry::stage::UPDATE_WINDOW);
         #[cfg(all(
             feature = "world-grid-visible",
             not(feature = "vis-full-active-chunks")
