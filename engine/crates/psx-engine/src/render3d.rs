@@ -699,12 +699,15 @@ impl WorldCamera {
             projection,
             position: WorldVertex::new(
                 target.x + sin_yaw.mul_i32(horiz),
-                target.y - sin_pitch.mul_i32(radius),
+                target.y + sin_pitch.mul_i32(radius),
                 target.z + cos_yaw.mul_i32(horiz),
             ),
             sin_yaw,
             cos_yaw,
-            sin_pitch,
+            // The view basis tilts opposite the camera's vertical offset so
+            // the target stays centred (world Y is up, view pitch is the
+            // angle the camera looks down from).
+            sin_pitch: Q12::from_raw(-sin_pitch.raw()),
             cos_pitch,
         }
     }
