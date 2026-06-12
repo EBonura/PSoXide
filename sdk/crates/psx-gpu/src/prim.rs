@@ -628,6 +628,52 @@ impl QuadTexturedGouraud {
             uv3: uv_words[3] as u32,
         }
     }
+
+    /// Zeroed packet for static prebuilt-pool initialisation. Real
+    /// content is written by the first draw of each surface before the
+    /// packet ever links into an ordering table (per-surface validity
+    /// bytes guarantee it).
+    pub const EMPTY: Self = Self {
+        tag: 0,
+        tex_window: 0,
+        color0_cmd: 0,
+        v0: 0,
+        uv0_clut: 0,
+        color1: 0,
+        v1: 0,
+        uv1_tpage: 0,
+        color2: 0,
+        v2: 0,
+        uv2: 0,
+        color3: 0,
+        v3: 0,
+        uv3: 0,
+    };
+
+    /// Rewrite the four vertex words of a prebuilt packet, leaving
+    /// every material/UV/colour word untouched. This is the per-frame
+    /// patch for precompiled static world geometry.
+    #[inline(always)]
+    pub fn set_positions(&mut self, verts: [(i16, i16); 4]) {
+        self.v0 = pack_vertex(verts[0].0, verts[0].1);
+        self.v1 = pack_vertex(verts[1].0, verts[1].1);
+        self.v2 = pack_vertex(verts[2].0, verts[2].1);
+        self.v3 = pack_vertex(verts[3].0, verts[3].1);
+    }
+
+    /// Rewrite the four colour words of a prebuilt packet, preserving
+    /// the opcode byte that shares v0's colour word.
+    #[inline(always)]
+    pub fn set_colors(&mut self, colors: [(u8, u8, u8); 4]) {
+        let (r0, g0, b0) = colors[0];
+        let (r1, g1, b1) = colors[1];
+        let (r2, g2, b2) = colors[2];
+        let (r3, g3, b3) = colors[3];
+        self.color0_cmd = (self.color0_cmd & 0xFF00_0000) | pack_color(r0, g0, b0);
+        self.color1 = pack_color(r1, g1, b1);
+        self.color2 = pack_color(r2, g2, b2);
+        self.color3 = pack_color(r3, g3, b3);
+    }
 }
 
 /// Textured quad with a single flat tint. 10 words (tag + 9 data).
