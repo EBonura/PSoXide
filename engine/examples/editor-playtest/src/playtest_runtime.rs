@@ -327,6 +327,15 @@ impl Playtest {
         submitted
     }
 
+    /// Gameplay-anchored animation tick: raw sim ticks minus the epoch
+    /// captured at the first gameplay update. Value-based animation
+    /// phases (ambient models, particles, atmosphere, HUD pulse) use
+    /// this so visuals are a pure function of gameplay time instead of
+    /// inheriting the build- and disc-dependent loading duration.
+    pub(super) fn gameplay_tick(&self, now: SimTick) -> SimTick {
+        SimTick::from_u32(now.as_u32().wrapping_sub(self.gameplay_epoch.as_u32()))
+    }
+
     pub(super) fn camera_config(&self) -> ThirdPersonCameraConfig {
         let camera = ROOMS
             .get(self.room_index.to_usize())
