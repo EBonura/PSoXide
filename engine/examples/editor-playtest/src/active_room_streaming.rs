@@ -493,6 +493,23 @@ impl<const N: usize> RoomStreamScheduler<N> {
                     byte_counts[loaded],
                     statuses[loaded],
                 );
+            } else if self.slots[target].state == RoomStreamSlotState::Resident
+                && self.slots[target].room == plan.rooms[loaded]
+            {
+                // The chunk completed and was early-committed by
+                // `commit_ready_job_entries` before a LATER group's
+                // error ran `fail_all`, which clobbers every entry's
+                // status including already-verified ones. The slot
+                // holds checksum-verified bytes; do not demote it or
+                // charge its failure backoff for another chunk's
+                // error (streaming audit phase 2).
+                debug_log_stream_entry(
+                    "stream kept (late fail_all)",
+                    plan.rooms[loaded],
+                    target,
+                    self.slots[target].byte_count,
+                    statuses[loaded],
+                );
             } else {
                 self.set_slot(
                     target,
