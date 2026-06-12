@@ -649,6 +649,12 @@ pub struct PlaytestModelInstance {
     pub yaw: i16,
     /// Render-only yaw from the Model Renderer component, PSX angle units.
     pub visual_yaw: i16,
+    /// Render-only pitch from the entity transform, PSX angle units.
+    /// The runtime composes `Rz(roll) * Ry(yaw + visual_yaw) * Rx(pitch)`,
+    /// matching the attachment-socket Euler convention.
+    pub pitch: i16,
+    /// Render-only roll from the entity transform, PSX angle units.
+    pub roll: i16,
     /// Render-only model offset from the authored floor anchor,
     /// in entity-local engine units.
     pub visual_offset: [i16; 3],

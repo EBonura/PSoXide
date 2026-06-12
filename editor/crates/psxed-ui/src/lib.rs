@@ -68,6 +68,7 @@ use psxed_project::portal_rooms::{
 use psxed_project::room_connections::{
     connection_for_portal, derive_room_connections, RoomConnection, RoomConnectionStatus,
 };
+use psxed_project::spatial::{euler_degrees_to_matrix, rotate_euler_degrees, RotationSpace};
 #[cfg(test)]
 use psxed_project::streaming::SceneResourceUse;
 use psxed_project::world_cook::{self, WorldGridCookError, WorldGridFaceKind};
@@ -114,6 +115,15 @@ const EDITOR_OUTLINE_GOLD: Color32 = Color32::from_rgb(255, 238, 150);
 const PORTAL_PINK: Color32 = Color32::from_rgb(255, 72, 214);
 const GIZMO_AXIS_PICK_RADIUS: f32 = 10.0;
 const GIZMO_ROTATION_PICK_RADIUS: f32 = 12.0;
+
+fn q12_turns_to_degrees(q12: i32) -> f32 {
+    q12.rem_euclid(4096) as f32 * (360.0 / 4096.0)
+}
+
+fn q12_turns_to_i16(q12: i32) -> i16 {
+    q12.rem_euclid(4096) as i16
+}
+
 /// Screen-space forgiveness, in pixels, for grabbing a translate move
 /// plane. The axes already pick within [`GIZMO_AXIS_PICK_RADIUS`]; the
 /// planes used strict polygon containment with no tolerance, so a click
@@ -325,6 +335,9 @@ pub struct EditorWorkspace {
     /// viewport. Move keeps the existing axis handles; Rotate edits
     /// yaw; Scale edits size data for node kinds that support it.
     transform_gizmo_mode: TransformGizmoMode,
+    /// Reference frame for the node transform gizmo: world axes or
+    /// the active node's own rotated axes.
+    gizmo_space: GizmoSpace,
     /// Transform mode for pointer drags in the 2D UI canvas.
     ui_transform_mode: UiTransformMode,
     /// Whether floor/ceiling face picks address the authored quad
@@ -652,6 +665,8 @@ struct ModelImportDialog {
     animation_fps: i32,
     world_height: i32,
     collision_radius: i32,
+    visual_scale_q8: i32,
+    default_visual_yaw_q12: i32,
     normalize_root_translation: bool,
     selected_clip: usize,
     preview_yaw_q12: i32,
@@ -675,6 +690,8 @@ impl Default for ModelImportDialog {
             animation_fps: 15,
             world_height: 1024,
             collision_radius: default_model_collision_radius_for_height(1024) as i32,
+            visual_scale_q8: MODEL_SCALE_ONE_Q8 as i32,
+            default_visual_yaw_q12: 0,
             normalize_root_translation: true,
             selected_clip: 0,
             preview_yaw_q12: 340,
@@ -1047,12 +1064,39 @@ struct NodeGizmoDrag {
     mode: TransformGizmoMode,
     handle: NodeGizmoHandle,
     start_pointer: Pos2,
+    /// Projected drag direction for Move/Scale axis handles. Unused by
+    /// Rotate, which tracks angular motion in `rotate` instead.
     screen_axis: Vec2,
     start_plane_hit: Option<[f32; 3]>,
     current_plane_delta_world: [f32; 3],
+    /// World-space direction (gizmo-basis column) a Move axis handle
+    /// translates along; identity-basis columns in Global space.
+    move_axis_world: [f32; 3],
+    /// Angular tracking state, present only for Rotate drags.
+    rotate: Option<NodeGizmoRotateDrag>,
     targets: Vec<NodeGizmoTarget>,
     current_steps: i32,
     snapshot_pushed: bool,
+}
+
+/// Angular state for a rotation-ring drag. Steps come from the angle
+/// the pointer sweeps around the projected pivot, not from linear
+/// pointer motion, so grabbing the ring anywhere and circling it works
+/// from any camera angle.
+#[derive(Debug, Clone, Copy)]
+struct NodeGizmoRotateDrag {
+    /// Projected ring centre (the gizmo pivot) in viewport points.
+    center: Pos2,
+    /// `+1`/`-1`: maps screen-space pointer sweep direction onto the
+    /// sign of the world rotation, from the projected ring's winding.
+    winding: f32,
+    /// Pointer polar angle (radians) at the last update.
+    last_angle: f32,
+    /// Total swept pointer angle (radians, signed, unwrapped across
+    /// revolutions).
+    accumulated: f32,
+    /// Frame the rotation composes in, captured at drag start.
+    space: RotationSpace,
 }
 
 #[derive(Debug, Clone)]
@@ -2161,6 +2205,7 @@ impl EditorWorkspace {
             interaction: Interaction::Idle,
             selection_mode: SelectionMode::default(),
             transform_gizmo_mode: TransformGizmoMode::Move,
+            gizmo_space: GizmoSpace::Global,
             ui_transform_mode: UiTransformMode::Move,
             horizontal_edit_mode: HorizontalEditMode::default(),
             vertex_connectivity: VertexConnectivity::default(),

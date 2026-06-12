@@ -236,7 +236,7 @@ fn entity_model_instance_preserves_authored_yaw() {
         .unwrap();
     let entity = scene.add_node(room_id, "Rotated Prop", NodeKind::Entity);
     if let Some(node) = scene.node_mut(entity) {
-        node.transform.rotation_degrees[1] = 90.0;
+        node.transform.rotation_degrees = [30.0, 90.0, 60.0];
     }
     scene.add_node(
         entity,
@@ -264,6 +264,8 @@ fn entity_model_instance_preserves_authored_yaw() {
     assert_eq!(package.model_instances.len(), 1);
     assert_eq!(package.model_instances[0].yaw, 1024);
     assert_eq!(package.model_instances[0].visual_yaw, 512);
+    assert_eq!(package.model_instances[0].pitch, 341);
+    assert_eq!(package.model_instances[0].roll, 682);
     assert_eq!(package.model_instances[0].visual_offset, [24, 8, -12]);
     assert_eq!(
         package.model_instances[0].visual_scale_q8,

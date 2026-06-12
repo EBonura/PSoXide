@@ -655,7 +655,6 @@ mod tests {
         }
     }
 
-
     #[test]
     fn tint_rgb555_preserves_stp_and_scales_channels() {
         let mut bytes = (0x8000_u16 | 31 | (16 << 5) | (8 << 10)).to_le_bytes();

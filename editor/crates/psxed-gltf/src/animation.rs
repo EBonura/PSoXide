@@ -140,6 +140,21 @@ pub(crate) fn cook_all_animations(
     Ok(clips)
 }
 
+pub(crate) fn bind_pose_clip(
+    joint_count: usize,
+    bounds: &ModelBounds,
+    fps: u16,
+) -> Result<CookedClip, Error> {
+    let joint_count_u16 = ensure_u16("joints", joint_count)?;
+    let records = vec![pose_record(&identity_matrix(), bounds); joint_count];
+    Ok(CookedClip {
+        source_name: Some("Bind Pose".to_string()),
+        sanitized_name: "bind_pose".to_string(),
+        bytes: finish_animation_bytes(joint_count_u16, 1, fps, &records)?,
+        frames: 1,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn cook_animation_bytes(
     channels: &[AnimationChannel],

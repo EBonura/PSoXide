@@ -243,6 +243,7 @@ mod tests {
                 world_height: 1024,
                 collision_radius: crate::default_model_collision_radius_for_height(1024),
                 scale_q8: [crate::MODEL_SCALE_ONE_Q8; 3],
+                default_visual_yaw_q12: 0,
                 attachments: Vec::new(),
             }),
         );

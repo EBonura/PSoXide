@@ -80,11 +80,13 @@ pub(crate) fn node_transform_inspector(kind: &NodeKind) -> NodeTransformInspecto
         | NodeKind::Equipment { .. }
         | NodeKind::PhysicsBody { .. }
         | NodeKind::Interactable { .. } => NodeTransformInspector::Hidden,
-        NodeKind::Entity
-        | NodeKind::MeshInstance { .. }
-        | NodeKind::SpawnPoint { .. }
-        | NodeKind::Portal { .. } => NodeTransformInspector::PositionYaw,
-        NodeKind::ImageProp { .. } | NodeKind::BoxProp { .. } => {
+        NodeKind::MeshInstance { .. } | NodeKind::SpawnPoint { .. } | NodeKind::Portal { .. } => {
+            NodeTransformInspector::PositionYaw
+        }
+        // Entities allow pitch/roll so placed model props can face any
+        // direction; the cook forwards all three axes to the runtime
+        // model instance (character gameplay still drives yaw only).
+        NodeKind::Entity | NodeKind::ImageProp { .. } | NodeKind::BoxProp { .. } => {
             NodeTransformInspector::PositionFullRotation
         }
         NodeKind::Node3D => NodeTransformInspector::FullTransform,
@@ -1190,47 +1192,56 @@ pub(crate) fn light_transform_editor(
     changed
 }
 
+/// Translate a node by `steps` gizmo increments along `direction`, a
+/// unit world-space vector (a gizmo basis column). Global space passes
+/// a world axis here, which keeps the old single-component stepping
+/// and snapping; Local space passes the node's rotated axis, where the
+/// quantum applies along the direction instead of per component so a
+/// diagonal slide doesn't zig.
 pub(crate) fn node_gizmo_translation(
     node: &psxed_project::SceneNode,
     start: [f32; 3],
-    axis: PrimitiveGizmoAxis,
+    direction: [f32; 3],
     steps: i32,
     sector_size: i32,
 ) -> [f32; 3] {
     let mut translation = start;
     let sector_size = sector_size.max(1);
-    let index = match axis {
-        PrimitiveGizmoAxis::X => 0,
-        PrimitiveGizmoAxis::Y => 1,
-        PrimitiveGizmoAxis::Z => 2,
-    };
-    let step = match (&node.kind, axis) {
-        (
-            NodeKind::Entity
-            | NodeKind::PointLight { .. }
-            | NodeKind::ParticleEmitter { .. }
-            | NodeKind::ImageProp { .. }
-            | NodeKind::BoxProp { .. },
-            _,
-        ) => node_transform_component_from_world_units(HEIGHT_QUANTUM, sector_size),
-        _ => 1.0,
-    };
-    translation[index] = start[index] + steps as f32 * step;
-
-    match &node.kind {
+    let step = match &node.kind {
         NodeKind::Entity
         | NodeKind::PointLight { .. }
         | NodeKind::ParticleEmitter { .. }
         | NodeKind::ImageProp { .. }
         | NodeKind::BoxProp { .. } => {
-            if steps != 0 {
-                translation[index] =
-                    snap_node_transform_component_to_world_step(translation[index], sector_size);
-            }
-            translation
+            node_transform_component_from_world_units(HEIGHT_QUANTUM, sector_size)
         }
-        _ => translation,
+        _ => 1.0,
+    };
+    let axis_aligned = direction.iter().filter(|c| c.abs() > 1e-4).count() <= 1;
+    for index in 0..3 {
+        if direction[index].abs() <= 1e-4 {
+            continue;
+        }
+        translation[index] = start[index] + direction[index] * steps as f32 * step;
+        // World-axis drags keep the legacy per-component snap; rotated
+        // directions own their quantum along the drag axis instead.
+        if axis_aligned && steps != 0 {
+            match &node.kind {
+                NodeKind::Entity
+                | NodeKind::PointLight { .. }
+                | NodeKind::ParticleEmitter { .. }
+                | NodeKind::ImageProp { .. }
+                | NodeKind::BoxProp { .. } => {
+                    translation[index] = snap_node_transform_component_to_world_step(
+                        translation[index],
+                        sector_size,
+                    );
+                }
+                _ => {}
+            }
+        }
     }
+    translation
 }
 
 pub(crate) fn node_gizmo_plane_translation(
@@ -1284,6 +1295,7 @@ pub(crate) fn node_gizmo_rotation(
     start: [f32; 3],
     axis: PrimitiveGizmoAxis,
     steps: i32,
+    space: RotationSpace,
 ) -> [f32; 3] {
     if !node_kind_supports_transform_gizmo(&node.kind, TransformGizmoMode::Rotate) {
         return start;
@@ -1292,13 +1304,11 @@ pub(crate) fn node_gizmo_rotation(
     if !supported.contains(&axis) {
         return start;
     }
-    let idx = match axis {
-        PrimitiveGizmoAxis::X => 0,
-        PrimitiveGizmoAxis::Y => 1,
-        PrimitiveGizmoAxis::Z => 2,
-    };
-    let mut result = start;
-    result[idx] = (start[idx] + steps as f32).rem_euclid(360.0);
+    // Compose the delta as a true rotation about the chosen world or
+    // node axis. Editing one Euler component directly is only correct
+    // while the other two are zero; `rotate_euler_degrees` keeps that
+    // exact-degree fast path and handles the general case by matrix.
+    let mut result = rotate_euler_degrees(start, axis.index(), steps as f32, space);
     // Force any unsupported axes back to zero so node kinds with
     // legacy yaw-only semantics don't accumulate stale roll/pitch.
     for (i, _) in [
@@ -1315,13 +1325,13 @@ pub(crate) fn node_gizmo_rotation(
     result
 }
 
-/// Rotation axes supported by `kind`'s transform gizmo. ImageProps
-/// rotate freely around all three world axes; every other gizmo
-/// target keeps the legacy yaw-only behavior so entity / spawn /
-/// trigger transforms stay flat without stray pitch / roll.
+/// Rotation axes supported by `kind`'s transform gizmo. Entities,
+/// ImageProps, and BoxProps rotate freely around all three world
+/// axes; every other gizmo target keeps the legacy yaw-only behavior
+/// so spawn / trigger transforms stay flat without stray pitch / roll.
 pub(crate) fn node_rotation_axes(kind: &NodeKind) -> &'static [PrimitiveGizmoAxis] {
     match kind {
-        NodeKind::ImageProp { .. } | NodeKind::BoxProp { .. } => &[
+        NodeKind::Entity | NodeKind::ImageProp { .. } | NodeKind::BoxProp { .. } => &[
             PrimitiveGizmoAxis::X,
             PrimitiveGizmoAxis::Y,
             PrimitiveGizmoAxis::Z,

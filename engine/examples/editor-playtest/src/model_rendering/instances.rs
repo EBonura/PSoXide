@@ -236,11 +236,18 @@ pub(crate) fn draw_model_instances(
         let pose_translation =
             model_pose_anchor_translation(anim, phase, clip_anchor, reference_anchor, None);
 
-        // Instance Y-axis rotation from authored yaw. PSX angle
-        // units (4096 per turn) → Q12 sin/cos via the existing
-        // GTE shim, then composed into a rotation matrix.
+        // Instance rotation from the authored transform. The entity
+        // yaw and the renderer's visual yaw share the Y axis; pitch
+        // and roll come from the entity transform and compose as
+        // `Rz(roll) * Ry(yaw) * Rx(pitch)` (the socket convention).
+        // The yaw-only case keeps the cheaper single-axis build.
         let root_yaw = Angle::from_q12(inst.yaw as u16);
-        let model_rotation = yaw_rotation_matrix(root_yaw.add_signed_q12(inst.visual_yaw));
+        let combined_yaw = root_yaw.add_signed_q12(inst.visual_yaw);
+        let model_rotation = if inst.pitch == 0 && inst.roll == 0 {
+            yaw_rotation_matrix(combined_yaw)
+        } else {
+            euler_q12_rotation([inst.pitch, combined_yaw.as_q12() as i16, inst.roll])
+        };
         // Authored instance positions are floor anchors; cooked
         // model vertices are centred around their bounds.
         let origin = visual_model_origin(

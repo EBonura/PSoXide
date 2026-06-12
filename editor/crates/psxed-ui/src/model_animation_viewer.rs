@@ -477,15 +477,15 @@ fn draw_preview(
     let (rect, response) = ui.allocate_exact_size(size, Sense::drag());
     if response.dragged() {
         let delta = ui.input(|input| input.pointer.delta());
-        state.yaw_q12 = (state.yaw_q12 + (delta.x * 6.0) as i32).rem_euclid(4096);
-        state.pitch_q12 = (state.pitch_q12 + (delta.y * 4.0) as i32).clamp(64, 960);
+        state.yaw_q12 = (state.yaw_q12 - (delta.x * 6.0) as i32).rem_euclid(4096);
+        state.pitch_q12 = (state.pitch_q12 - (delta.y * 4.0) as i32).clamp(64, 960);
     }
     if response.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
         let scroll = ui.input(|input| input.raw_scroll_delta.y);
         if scroll.abs() > f32::EPSILON {
             let current = effective_radius(state, model);
-            state.radius = (current - (scroll * 8.0) as i32).clamp(256, 8192);
+            state.radius = (current - (scroll * 8.0) as i32).clamp(640, 8192);
         }
     }
 
@@ -596,6 +596,9 @@ fn draw_preview(
         atlas,
         ImportPreviewOptions {
             world_height: model.world_height as i32,
+            visual_scale_q8: model.visual_scale_q8,
+            visual_yaw_q12: model.default_visual_yaw_q12,
+            collision_radius: model.collision_radius as i32,
             time_seconds: seconds,
             yaw_q12: state.yaw_q12.rem_euclid(4096) as u16,
             pitch_q12: state.pitch_q12.rem_euclid(4096) as u16,
@@ -604,6 +607,7 @@ fn draw_preview(
             preview_in_place: selected_clip.calibration.in_place,
             pose_offset: selected_clip.calibration.offset,
             show_animation_root: state.show_animation_root,
+            show_collision_guides: false,
             show_bones: state.show_bones,
         },
     );
@@ -868,6 +872,9 @@ struct LoadedModelContext {
     model_bytes: Vec<u8>,
     atlas: Option<ColorImage>,
     world_height: u16,
+    collision_radius: u16,
+    visual_scale_q8: u16,
+    default_visual_yaw_q12: i16,
 }
 
 fn load_model_context(
@@ -890,6 +897,9 @@ fn load_model_context(
         model_bytes,
         atlas,
         world_height: model_resource.world_height,
+        collision_radius: model_resource.collision_radius,
+        visual_scale_q8: model_resource.scale_q8[1].max(1),
+        default_visual_yaw_q12: model_resource.default_visual_yaw_q12,
     })
 }
 
@@ -1024,7 +1034,7 @@ fn effective_radius(state: &ModelAnimationViewerState, model: Option<&LoadedMode
             .map(|model| (model.world_height as i32).saturating_mul(3) / 2)
             .unwrap_or(1536)
     }
-    .clamp(256, 8192)
+    .clamp(640, 8192)
 }
 
 #[cfg(test)]
@@ -1048,6 +1058,7 @@ mod tests {
             world_height: 1024,
             collision_radius: default_model_collision_radius_for_height(1024),
             scale_q8: [MODEL_SCALE_ONE_Q8; 3],
+            default_visual_yaw_q12: 0,
             attachments: Vec::new(),
         }
     }

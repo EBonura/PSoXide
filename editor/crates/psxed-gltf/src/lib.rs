@@ -518,11 +518,12 @@ pub struct RigidModelPackage {
     pub model: Vec<u8>,
     /// Cooked `.psxanim` bytes per source animation clip.
     ///
-    /// Empty when the source has no animations. One entry per glTF
-    /// animation, in source order, each with a filesystem-safe name
-    /// derived from `gltf::Animation::name`.
+    /// When the source has no supported animations, the importer emits
+    /// a generated one-frame `bind_pose` clip so placed models remain
+    /// compatible with the runtime model path.
     pub clips: Vec<CookedClip>,
-    /// Cooked `.psxt` base-colour texture, if present.
+    /// Cooked `.psxt` base-colour texture. Sources with no texture
+    /// receive a solid atlas from the first material base colour.
     pub texture: Option<Vec<u8>>,
     /// Counts and byte sizes useful for build logs and tests.
     pub report: RigidModelReport,
@@ -749,10 +750,17 @@ fn convert_rigid_model_document_with_extra_animations(
         return Err(Error::BadSkin("animation sample rate must be non-zero"));
     }
 
-    let mesh_node = document
+    let Some(mesh_node) = document
         .nodes()
         .find(|node| node.mesh().is_some() && node.skin().is_some())
-        .ok_or(Error::MissingSkinnedMesh)?;
+    else {
+        if !extra_fbx_animation_scenes.is_empty() || !extra_gltf_animation_scenes.is_empty() {
+            return Err(Error::BadSkin(
+                "extra animation sources require a skinned source model",
+            ));
+        }
+        return convert_static_rigid_model_document(document, buffers, cfg);
+    };
     let mesh = mesh_node.mesh().ok_or(Error::MissingSkinnedMesh)?;
     let skin = mesh_node.skin().ok_or(Error::MissingSkinnedMesh)?;
     let joints: Vec<usize> = skin.joints().map(|joint| joint.index()).collect();
@@ -871,6 +879,185 @@ fn convert_rigid_model_document_with_extra_animations(
     )
 }
 
+struct StaticGltfModelSource<'a> {
+    source: SkinnedSourceMesh,
+    mesh: gltf::Mesh<'a>,
+}
+
+fn convert_static_rigid_model_document(
+    document: &gltf::Document,
+    buffers: &[gltf::buffer::Data],
+    cfg: &RigidModelConfig,
+) -> Result<RigidModelPackage, Error> {
+    let StaticGltfModelSource { mut source, mesh } =
+        collect_static_gltf_model_source(document, buffers)?;
+    let precision_bounds = collect_static_precision_bounds(&source)?;
+    let bounds = ModelBounds::from_min_max(
+        precision_bounds.min,
+        precision_bounds.max,
+        MODEL_LOCAL_COORD_LIMIT,
+    )?;
+    if prune_detached_face_islands(
+        &mut source,
+        &bounds,
+        cfg.prune_detached_face_islands as usize,
+    ) > 0
+    {
+        if source.faces.is_empty() {
+            return Err(Error::Empty);
+        }
+        let precision_bounds = collect_static_precision_bounds(&source)?;
+        let bounds = ModelBounds::from_min_max(
+            precision_bounds.min,
+            precision_bounds.max,
+            MODEL_LOCAL_COORD_LIMIT,
+        )?;
+        return finish_static_rigid_model_document(
+            buffers,
+            cfg,
+            source,
+            bounds,
+            precision_bounds,
+            mesh,
+        );
+    }
+
+    finish_static_rigid_model_document(buffers, cfg, source, bounds, precision_bounds, mesh)
+}
+
+fn collect_static_gltf_model_source<'a>(
+    document: &'a gltf::Document,
+    buffers: &[gltf::buffer::Data],
+) -> Result<StaticGltfModelSource<'a>, Error> {
+    let mut source = SkinnedSourceMesh::default();
+    let mut normal_faces = Vec::new();
+    let mut first_mesh = None;
+    let identity = identity_matrix();
+
+    let visited_scene_mesh = if let Some(scene) = document.default_scene() {
+        for node in scene.nodes() {
+            visit_static_gltf_node(
+                node,
+                &identity,
+                buffers,
+                &mut source,
+                &mut normal_faces,
+                &mut first_mesh,
+            )?;
+        }
+        !source.faces.is_empty()
+    } else {
+        for scene in document.scenes() {
+            for node in scene.nodes() {
+                visit_static_gltf_node(
+                    node,
+                    &identity,
+                    buffers,
+                    &mut source,
+                    &mut normal_faces,
+                    &mut first_mesh,
+                )?;
+            }
+        }
+        !source.faces.is_empty()
+    };
+
+    if !visited_scene_mesh {
+        for mesh in document.meshes() {
+            remember_static_gltf_mesh(&mut first_mesh, &mesh);
+            read_static_gltf_mesh(&mesh, &identity, buffers, &mut source, &mut normal_faces)?;
+        }
+    }
+
+    if source.faces.is_empty() {
+        return Err(Error::Empty);
+    }
+    rebuild_source_normals(&mut source, &normal_faces);
+    let mesh = first_mesh.ok_or(Error::Empty)?;
+    Ok(StaticGltfModelSource { source, mesh })
+}
+
+fn visit_static_gltf_node<'a>(
+    node: gltf::Node<'a>,
+    parent: &[[f32; 4]; 4],
+    buffers: &[gltf::buffer::Data],
+    source: &mut SkinnedSourceMesh,
+    normal_faces: &mut Vec<[usize; 3]>,
+    first_mesh: &mut Option<gltf::Mesh<'a>>,
+) -> Result<(), Error> {
+    let local = node.transform().matrix();
+    let world = mul_matrix(parent, &local);
+    if let Some(mesh) = node.mesh() {
+        remember_static_gltf_mesh(first_mesh, &mesh);
+        read_static_gltf_mesh(&mesh, &world, buffers, source, normal_faces)?;
+    }
+    for child in node.children() {
+        visit_static_gltf_node(child, &world, buffers, source, normal_faces, first_mesh)?;
+    }
+    Ok(())
+}
+
+fn remember_static_gltf_mesh<'a>(first_mesh: &mut Option<gltf::Mesh<'a>>, mesh: &gltf::Mesh<'a>) {
+    if first_mesh.is_none() {
+        *first_mesh = Some(mesh.clone());
+    }
+}
+
+fn finish_static_rigid_model_document(
+    buffers: &[gltf::buffer::Data],
+    cfg: &RigidModelConfig,
+    source: SkinnedSourceMesh,
+    bounds: ModelBounds,
+    precision_bounds: PrecisionBounds,
+    mesh: gltf::Mesh<'_>,
+) -> Result<RigidModelPackage, Error> {
+    let local_height = bounds.encoded_axis_size(precision_bounds.min[1], precision_bounds.max[1]);
+    let local_to_world_q12 = choose_local_to_world_q12(local_height, cfg.world_height);
+    let material_color = first_material_base_color(&mesh);
+    let texture = Some(match cook_base_color_texture(&mesh, buffers, cfg)? {
+        Some(texture) => texture,
+        None => cook_solid_base_color_texture(material_color, cfg)?,
+    });
+    let parents = [None];
+    let joints = [0usize];
+    let (model, cooked_vertices, parts) = cook_model_blob(
+        &source,
+        &bounds,
+        &parents,
+        &joints,
+        material_color,
+        cfg.texture_width,
+        cfg.texture_height,
+        local_to_world_q12,
+    )?;
+    let clips = vec![bind_pose_clip(joints.len(), &bounds, cfg.animation_fps)?];
+    let animation_bytes = clips.iter().map(|c| c.bytes.len()).sum();
+    let clip_frames = clips
+        .iter()
+        .map(|c| (c.sanitized_name.clone(), c.frames))
+        .collect();
+    let report = RigidModelReport {
+        source_vertices: source.vertices.len(),
+        cooked_vertices,
+        faces: source.faces.len(),
+        parts,
+        joints: joints.len(),
+        clip_frames,
+        local_height: local_height.max(0) as usize,
+        local_to_world_q12,
+        model_bytes: model.len(),
+        animation_bytes,
+        texture_bytes: texture.as_ref().map_or(0, Vec::len),
+    };
+
+    Ok(RigidModelPackage {
+        model,
+        clips,
+        texture,
+        report,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn finish_rigid_model_document(
     document: &gltf::Document,
@@ -891,8 +1078,11 @@ fn finish_rigid_model_document(
     let local_height = bounds.encoded_axis_size(precision_bounds.min[1], precision_bounds.max[1]);
     let local_to_world_q12 = choose_local_to_world_q12(local_height, cfg.world_height);
 
-    let texture = cook_base_color_texture(&mesh, buffers, cfg)?;
     let material_color = first_material_base_color(&mesh);
+    let texture = Some(match cook_base_color_texture(&mesh, buffers, cfg)? {
+        Some(texture) => texture,
+        None => cook_solid_base_color_texture(material_color, cfg)?,
+    });
     let (model, cooked_vertices, parts) = cook_model_blob(
         &source,
         &bounds,
@@ -903,7 +1093,7 @@ fn finish_rigid_model_document(
         cfg.texture_height,
         local_to_world_q12,
     )?;
-    let clips = cook_all_animations(
+    let mut clips = cook_all_animations(
         document,
         buffers,
         &parents,
@@ -918,6 +1108,9 @@ fn finish_rigid_model_document(
         cfg.normalize_root_translation,
         cfg.strip_animation_scale,
     )?;
+    if clips.is_empty() {
+        clips.push(bind_pose_clip(joints.len(), &bounds, cfg.animation_fps)?);
+    }
 
     let animation_bytes = clips.iter().map(|c| c.bytes.len()).sum();
     let clip_frames = clips
