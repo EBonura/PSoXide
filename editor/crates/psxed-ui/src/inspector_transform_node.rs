@@ -3050,6 +3050,9 @@ pub(crate) fn draw_inline_icon(ui: &mut egui::Ui, icon: char, color: Color32) {
     ui.label(icons::text(icon, 16.0).color(color));
 }
 
+/// Toolbar group button showing the group's icon plus its current
+/// value (e.g. rotate icon + "Rotate"), so the active mode is readable
+/// without hovering.
 pub(crate) fn toolbar_group_menu<R>(
     ui: &mut egui::Ui,
     number: u8,
@@ -3059,12 +3062,45 @@ pub(crate) fn toolbar_group_menu<R>(
     current: &str,
     add_contents: impl FnOnce(&mut egui::Ui) -> R,
 ) {
+    toolbar_group_menu_impl(ui, number, glow, icon, label, current, true, add_contents)
+}
+
+/// Icon-only toolbar group button for groups whose state is a set of
+/// toggles rather than a single mode (e.g. Visibility), where one
+/// word can't summarise the current value.
+pub(crate) fn toolbar_group_menu_icon_only<R>(
+    ui: &mut egui::Ui,
+    number: u8,
+    glow: f32,
+    icon: char,
+    label: &str,
+    current: &str,
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) {
+    toolbar_group_menu_impl(ui, number, glow, icon, label, current, false, add_contents)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn toolbar_group_menu_impl<R>(
+    ui: &mut egui::Ui,
+    number: u8,
+    glow: f32,
+    icon: char,
+    label: &str,
+    current: &str,
+    show_value: bool,
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) {
     let number_text = number.to_string();
     let shortcut = command_shortcut_text(&number_text);
     let reverse_shortcut = command_shift_shortcut_text(&number_text);
     let shortcut_summary = format!("Shortcut: {shortcut} / Reverse: {reverse_shortcut}");
     let glow = glow.clamp(0.0, 1.0);
-    let mut button = egui::Button::new(icons::text(icon, 15.0)).min_size(Vec2::new(30.0, 23.0));
+    let mut button = if show_value {
+        egui::Button::new(icons::label(icon, current)).min_size(Vec2::new(30.0, 23.0))
+    } else {
+        egui::Button::new(icons::text(icon, 15.0)).min_size(Vec2::new(30.0, 23.0))
+    };
     if glow > 0.0 {
         let fill_alpha = (34.0 + 58.0 * glow).round() as u8;
         let stroke_alpha = (120.0 + 120.0 * glow).round() as u8;
@@ -3088,15 +3124,20 @@ pub(crate) fn toolbar_group_menu<R>(
     ));
 }
 
+/// Toolbar option button showing the option's icon plus a short
+/// `button_text`; the full `label: current` state lives in the hover
+/// tooltip and the active fill marks enabled toggles.
 pub(crate) fn toolbar_option_menu<R>(
     ui: &mut egui::Ui,
     icon: char,
+    button_text: &str,
     label: &str,
     current: impl Into<String>,
     active: bool,
     add_contents: impl FnOnce(&mut egui::Ui) -> R,
 ) {
-    let mut button = egui::Button::new(icons::text(icon, 15.0)).min_size(Vec2::new(30.0, 23.0));
+    let mut button =
+        egui::Button::new(icons::label(icon, button_text)).min_size(Vec2::new(30.0, 23.0));
     if active {
         button = button
             .fill(Color32::from_rgba_unmultiplied(45, 177, 207, 44))
