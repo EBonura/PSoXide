@@ -28,6 +28,22 @@ enum RoomStreamSlotState {
     Failed,
 }
 
+/// First retry comes after 16 reconcile windows (~0.27s at 60Hz);
+/// each consecutive failure doubles the hold up to 16 << 5 = 512
+/// windows (~8.5s). A success resets the count, so transient CD
+/// hiccups recover fast while a permanently bad chunk settles into
+/// one retry every few seconds instead of one per frame.
+#[cfg(feature = "cd-stream-bench")]
+const STREAM_RETRY_BACKOFF_BASE_WINDOWS: u32 = 16;
+#[cfg(feature = "cd-stream-bench")]
+const STREAM_RETRY_BACKOFF_MAX_SHIFT: u32 = 5;
+
+#[cfg(feature = "cd-stream-bench")]
+fn stream_retry_backoff_windows(count: u8) -> u32 {
+    let shift = (count.saturating_sub(1) as u32).min(STREAM_RETRY_BACKOFF_MAX_SHIFT);
+    STREAM_RETRY_BACKOFF_BASE_WINDOWS << shift
+}
+
 #[cfg(feature = "cd-stream-bench")]
 #[derive(Copy, Clone)]
 pub(super) struct RoomStreamLoadPlan<const N: usize> {
@@ -59,6 +75,16 @@ pub(super) struct RoomStreamScheduler<const N: usize> {
     job_plan: RoomStreamLoadPlan<N>,
     slot_limit: usize,
     epoch: u32,
+    /// Consecutive failed loads per room index, saturating; reset by a
+    /// successful load. Drives the retry backoff so a permanently bad
+    /// chunk (TOC mismatch, unreadable sector) cannot churn the CD and
+    /// the single job pipeline every frame (streaming audit finding 2).
+    failure_counts: [u8; MAX_STREAMED_ROOM_INDEX_COUNT],
+    /// Epoch until which a previously failed room is not rescheduled
+    /// (exclusive, wrap-safe compare). The room is never abandoned:
+    /// the hold doubles per consecutive failure up to a cap, then
+    /// retries keep coming at the capped interval.
+    failure_hold_until: [u32; MAX_STREAMED_ROOM_INDEX_COUNT],
     window_requests: u16,
     window_misses: u16,
     window_prefetch_requests: u16,
@@ -79,6 +105,8 @@ impl<const N: usize> RoomStreamScheduler<N> {
             job_plan: RoomStreamLoadPlan::EMPTY,
             slot_limit: N,
             epoch: 0,
+            failure_counts: [0; MAX_STREAMED_ROOM_INDEX_COUNT],
+            failure_hold_until: [0; MAX_STREAMED_ROOM_INDEX_COUNT],
             window_requests: 0,
             window_misses: 0,
             window_prefetch_requests: 0,
@@ -172,6 +200,37 @@ impl<const N: usize> RoomStreamScheduler<N> {
         self.loading_slot_for(room).is_some()
     }
 
+    /// True while `room` is inside its failure-retry hold window.
+    /// Wrap-safe: holds shorter than 2^31 epochs compare correctly
+    /// across the u32 epoch wrap.
+    fn room_failure_hold_active(&self, room: RoomIndex) -> bool {
+        let index = room.to_usize();
+        if index >= MAX_STREAMED_ROOM_INDEX_COUNT || self.failure_counts[index] == 0 {
+            return false;
+        }
+        self.failure_hold_until[index].wrapping_sub(self.epoch) as i32 > 0
+    }
+
+    fn note_room_load_success(&mut self, room: RoomIndex) {
+        let index = room.to_usize();
+        if index < MAX_STREAMED_ROOM_INDEX_COUNT {
+            self.failure_counts[index] = 0;
+            self.failure_hold_until[index] = self.epoch;
+        }
+    }
+
+    fn note_room_load_failure(&mut self, room: RoomIndex) {
+        let index = room.to_usize();
+        if index >= MAX_STREAMED_ROOM_INDEX_COUNT {
+            return;
+        }
+        let count = self.failure_counts[index].saturating_add(1);
+        self.failure_counts[index] = count;
+        self.failure_hold_until[index] = self
+            .epoch
+            .wrapping_add(stream_retry_backoff_windows(count));
+    }
+
     fn mapped_slot_for(&self, room: RoomIndex, state: RoomStreamSlotState) -> Option<usize> {
         let room_index = room.to_usize();
         if room_index >= MAX_STREAMED_ROOM_INDEX_COUNT {
@@ -247,6 +306,10 @@ impl<const N: usize> RoomStreamScheduler<N> {
             }
 
             self.window_misses = self.window_misses.saturating_add(1);
+            if self.room_failure_hold_active(room) {
+                i += 1;
+                continue;
+            }
             if !can_schedule_new_loads {
                 i += 1;
                 continue;
@@ -422,6 +485,7 @@ impl<const N: usize> RoomStreamScheduler<N> {
                         state: RoomStreamSlotState::Resident,
                     },
                 );
+                self.note_room_load_success(plan.rooms[loaded]);
                 debug_log_stream_entry(
                     "stream loaded",
                     plan.rooms[loaded],
@@ -440,6 +504,7 @@ impl<const N: usize> RoomStreamScheduler<N> {
                     },
                 );
                 self.window_failed_loads = self.window_failed_loads.saturating_add(1);
+                self.note_room_load_failure(plan.rooms[loaded]);
                 debug_log_stream_entry(
                     "stream failed",
                     plan.rooms[loaded],
@@ -588,6 +653,16 @@ impl<const N: usize> RoomStreamScheduler<N> {
     }
 }
 
+/// Parse a streamed room's collision view out of its slot byte
+/// buffer, re-validating residency first. The `'static` lifetime on
+/// the result is a lie (see the contract on
+/// `streamed_record_slice` in active_room_cache.rs): the slices point
+/// into a slot the scheduler can overwrite, so the value is only good
+/// until the next streaming step. Holding it longer is sound only for
+/// ACTIVE-WINDOW rooms, which are pinned against eviction; the
+/// camera/motor collision caches rely on exactly that, plus cache
+/// keys that include the active-room mask so a room leaving the
+/// window forces a re-gather before its slot can be reused.
 #[cfg(feature = "cd-stream-bench")]
 pub(super) fn parse_streamed_compact_collision_room(
     slot: usize,
