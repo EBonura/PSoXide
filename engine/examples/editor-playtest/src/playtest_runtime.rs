@@ -342,6 +342,7 @@ impl Playtest {
         config.position_lag_shift = camera.position_lag_shift;
         config.focus_lag_shift = camera.focus_lag_shift;
         config.distance_lag_shift = camera.distance_lag_shift;
+        config.collision_solve_interval = CAMERA_COLLISION_SOLVE_INTERVAL;
         config
     }
 
