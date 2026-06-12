@@ -794,6 +794,15 @@ fn yaw_rotation_matrix(yaw: Angle) -> Mat3I16 {
     }
 }
 
+/// Euler rotation matrix in Q12 turns, composed as `Rz * Ry * Rx`.
+/// Shared by attachment sockets and full-rotation model instances.
+fn euler_q12_rotation(rotation_q12: [i16; 3]) -> Mat3I16 {
+    let rx = Mat3I16::rotate_x(Angle::from_q12(rotation_q12[0] as u16).rotate_y_arg());
+    let ry = Mat3I16::rotate_y(Angle::from_q12(rotation_q12[1] as u16).rotate_y_arg());
+    let rz = Mat3I16::rotate_z(Angle::from_q12(rotation_q12[2] as u16).rotate_y_arg());
+    rz.mul(&ry).mul(&rx)
+}
+
 fn visual_model_local_to_world(
     runtime_model: RuntimeModelAsset,
     visual_scale_q8: u16,

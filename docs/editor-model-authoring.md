@@ -41,9 +41,12 @@ The atlas + clips are technically optional in the data model
 (allowed for in-progress authoring), but the playtest cooker
 hard-fails any *placed* instance whose model has no atlas or
 no clips -- the runtime currently has no path for untextured
-or bind-pose-only rendering. Author-time bundles without an
-atlas / clips are fine; just don't place them in a Room until
-they're complete.
+or clipless bind-pose rendering. The model source importer now
+generates a solid fallback atlas and a one-frame `bind_pose`
+clip when a GLB/glTF/FBX has no texture or supported animation,
+so ordinary static props are placeable immediately. Author-time
+bundles registered by hand may still omit atlas / clips; just
+don't place them in a Room until they're complete.
 
 ## How to register a cooked model bundle
 
@@ -225,7 +228,8 @@ The cook (`build_package`) hard-fails on:
 - A placed model has no atlas (runtime can't render
   untextured).
 - A placed model has no clips (runtime requires at least
-  one clip -- bind-pose rendering is not implemented).
+  one clip; the source importer emits `bind_pose` automatically
+  for static/no-animation imports).
 - `ModelResource::default_clip` set to an out-of-range index
   (would emit a runtime record that can't resolve to a clip).
 - Room material texture is not 4bpp / 16-entry CLUT (the
@@ -257,7 +261,7 @@ There is no bind-pose sentinel.
 | Runtime baking / farfield | Out of scope. |
 | CD streaming | Out of scope. |
 | Material editor for model materials | Out of scope (model materials are baked into the `.psxmdl`). |
-| Bind-pose / untextured model rendering | Out of scope. The runtime model path renders textured animated models only; the cooker rejects placed instances of any model without an atlas or without clips. |
+| Bind-pose / untextured model rendering | Out of scope at runtime. The model source importer bridges static/no-texture props by generating a solid atlas and one-frame `bind_pose` clip; manually registered incomplete bundles are still rejected when placed. |
 | GLB-import-from-UI button | Out of scope (helper exists in `psxed_project::model_import::import_glb_model`; UI button lands once the editor adds a native file picker). |
 
 ## See also

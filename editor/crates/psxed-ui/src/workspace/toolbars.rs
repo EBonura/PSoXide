@@ -309,6 +309,20 @@ impl EditorWorkspace {
             self.transform_gizmo_mode.label(),
             |ui| self.draw_transform_group_menu(ui),
         );
+        let space = self.gizmo_space;
+        let space_response = ui
+            .add(
+                egui::Button::new(icons::label(space.icon(), space.label()))
+                    .min_size(Vec2::new(30.0, 23.0)),
+            )
+            .on_hover_text(
+                "Gizmo orientation. Global aligns handles to the world axes; \
+                 Local aligns them to the selected node's own rotation.",
+            );
+        if space_response.clicked() {
+            self.gizmo_space = space.toggled();
+            self.status = format!("Gizmo orientation: {}", self.gizmo_space.label());
+        }
         toolbar_group_menu(
             ui,
             4,

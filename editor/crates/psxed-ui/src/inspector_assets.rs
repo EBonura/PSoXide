@@ -7,6 +7,9 @@ pub(crate) fn draw_model_import_preview(
     preview_yaw_q12: &mut i32,
     preview_pitch_q12: &mut i32,
     preview_radius: &mut i32,
+    collision_radius: i32,
+    visual_scale_q8: i32,
+    default_visual_yaw_q12: i32,
     show_animation_root: bool,
     preview_in_place: bool,
 ) {
@@ -18,26 +21,36 @@ pub(crate) fn draw_model_import_preview(
         preview_yaw_q12,
         preview_pitch_q12,
         preview_radius,
+        collision_radius,
+        visual_scale_q8,
+        default_visual_yaw_q12,
         show_animation_root,
         preview_in_place,
     ) {
         draw_model_wireframe_preview(ui, &preview.model_bytes);
     }
+}
 
-    ui.add_space(8.0);
-    ui.horizontal(|ui| {
-        ui.vertical(|ui| {
-            ui.label(RichText::new("Atlas").strong());
-            match &preview.atlas {
-                Some((handle, stats)) => {
-                    draw_psxt_preview_block(ui, Some((handle.id(), *stats)));
-                }
-                None => {
-                    draw_psxt_preview_block(ui, None);
-                }
-            }
-        });
-    });
+/// Atlas, cook stats, and baked-clip details for the import dialog's
+/// side pane, kept separate from the preview viewport so the dialog
+/// can lay them out in their own column.
+pub(crate) fn draw_model_import_details(
+    ui: &mut egui::Ui,
+    preview: &ModelImportPreview,
+    selected_clip: &mut usize,
+    collision_radius: i32,
+    visual_scale_q8: i32,
+    default_visual_yaw_q12: i32,
+) {
+    ui.label(RichText::new("Atlas").strong());
+    match &preview.atlas {
+        Some((handle, stats)) => {
+            draw_psxt_preview_block(ui, Some((handle.id(), *stats)));
+        }
+        None => {
+            draw_psxt_preview_block(ui, None);
+        }
+    }
 
     ui.separator();
     egui::Grid::new("model-import-stats")
@@ -52,6 +65,29 @@ pub(crate) fn draw_model_import_preview(
             ui.end_row();
             stat_cell(ui, "Joints", preview.report.joints);
             stat_cell(ui, "Local height", preview.report.local_height);
+            ui.end_row();
+            stat_cell(ui, "World height", preview.world_height.max(0) as usize);
+            stat_cell(ui, "Actor radius", collision_radius.max(0) as usize);
+            ui.end_row();
+            ui.label(RichText::new("Scale").color(STUDIO_TEXT_WEAK).small());
+            ui.label(
+                RichText::new(format!(
+                    "{} ({:.3}x)",
+                    visual_scale_q8.max(1),
+                    visual_scale_q8.max(1) as f32 / MODEL_SCALE_ONE_Q8 as f32
+                ))
+                .color(STUDIO_TEXT_WEAK)
+                .monospace(),
+            );
+            ui.label(RichText::new("Default yaw").color(STUDIO_TEXT_WEAK).small());
+            ui.label(
+                RichText::new(format!(
+                    "{:.1} deg",
+                    q12_turns_to_degrees(default_visual_yaw_q12)
+                ))
+                .color(STUDIO_TEXT_WEAK)
+                .monospace(),
+            );
             ui.end_row();
             stat_cell(ui, "Model bytes", preview.report.model_bytes);
             stat_cell(ui, "Anim bytes", preview.report.animation_bytes);
@@ -107,6 +143,9 @@ pub(crate) fn draw_model_animated_import_preview(
     preview_yaw_q12: &mut i32,
     preview_pitch_q12: &mut i32,
     preview_radius: &mut i32,
+    collision_radius: i32,
+    visual_scale_q8: i32,
+    default_visual_yaw_q12: i32,
     show_animation_root: bool,
     preview_in_place: bool,
 ) -> bool {
@@ -124,15 +163,26 @@ pub(crate) fn draw_model_animated_import_preview(
     let (rect, response) = ui.allocate_exact_size(Vec2::new(width, height), Sense::drag());
     if response.dragged() {
         let delta = ui.input(|i| i.pointer.delta());
-        *preview_yaw_q12 = (*preview_yaw_q12 + (delta.x * 6.0) as i32).rem_euclid(4096);
-        *preview_pitch_q12 = (*preview_pitch_q12 + (delta.y * 4.0) as i32).clamp(64, 960);
+        *preview_yaw_q12 = (*preview_yaw_q12 - (delta.x * 6.0) as i32).rem_euclid(4096);
+        *preview_pitch_q12 = (*preview_pitch_q12 - (delta.y * 4.0) as i32).clamp(64, 960);
     }
     if response.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+        let scroll_y = ui.input(|i| i.raw_scroll_delta.y);
+        if scroll_y.abs() > 0.0 {
+            *preview_radius = (*preview_radius - (scroll_y * 3.0) as i32).clamp(640, 8192);
+        }
+        ui.ctx().set_cursor_icon(if response.dragged() {
+            egui::CursorIcon::Grabbing
+        } else {
+            egui::CursorIcon::Grab
+        });
     }
 
     let options = model_import_preview::ImportPreviewOptions {
         world_height: preview.world_height,
+        visual_scale_q8: visual_scale_q8.clamp(1, u16::MAX as i32) as u16,
+        visual_yaw_q12: q12_turns_to_i16(default_visual_yaw_q12),
+        collision_radius: collision_radius.clamp(1, i32::MAX),
         time_seconds: ui.input(|i| i.time),
         yaw_q12: (*preview_yaw_q12).rem_euclid(4096) as u16,
         pitch_q12: (*preview_pitch_q12).rem_euclid(4096) as u16,
@@ -141,6 +191,7 @@ pub(crate) fn draw_model_animated_import_preview(
         preview_in_place,
         pose_offset: [0, 0, 0],
         show_animation_root,
+        show_collision_guides: true,
         show_bones: false,
     };
     let Some(image) = model_import_preview::render_import_model_preview_with_options(
@@ -726,7 +777,8 @@ pub(crate) fn draw_model_resource_editor(
             }
 
             ui.add_space(4.0);
-            ui.label("Collision radius (engine units)");
+            ui.label("Actor collision radius (engine units)")
+                .on_hover_text("Runtime actor-cylinder metadata. Use Collider components for explicit scene collision.");
             let mut radius = model.collision_radius as i32;
             let radius_response =
                 ui.add(egui::DragValue::new(&mut radius).speed(8.0).range(1..=4096));
@@ -740,6 +792,26 @@ pub(crate) fn draw_model_resource_editor(
             changed |= model_scale_axis_editor(ui, "X", &mut model.scale_q8[0]);
             changed |= model_scale_axis_editor(ui, "Y", &mut model.scale_q8[1]);
             changed |= model_scale_axis_editor(ui, "Z", &mut model.scale_q8[2]);
+
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label("Default visual yaw");
+                let mut yaw = model.default_visual_yaw_q12 as i32;
+                let yaw_response = ui.add(
+                    egui::DragValue::new(&mut yaw)
+                        .range(0..=4095)
+                        .speed(16.0),
+                );
+                ui.label(
+                    RichText::new(format!("{:.1} deg", q12_turns_to_degrees(yaw)))
+                        .color(STUDIO_TEXT_WEAK)
+                        .monospace(),
+                );
+                if yaw_response.changed() {
+                    model.default_visual_yaw_q12 = q12_turns_to_i16(yaw);
+                    changed = true;
+                }
+            });
         });
 
     egui::CollapsingHeader::new(icons::label(icons::WAYPOINT, "Attachment Sockets"))
@@ -1038,11 +1110,19 @@ pub(crate) fn draw_model_resource_preview_panel(
             let (rect, response) = ui.allocate_exact_size(Vec2::new(width, height), Sense::drag());
             if response.dragged() {
                 let delta = ui.input(|i| i.pointer.delta());
-                yaw = (yaw + (delta.x * 6.0) as i32).rem_euclid(4096);
-                pitch = (pitch + (delta.y * 4.0) as i32).clamp(64, 960);
+                yaw = (yaw - (delta.x * 6.0) as i32).rem_euclid(4096);
+                pitch = (pitch - (delta.y * 4.0) as i32).clamp(64, 960);
             }
             if response.hovered() {
-                ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+                let scroll_y = ui.input(|i| i.raw_scroll_delta.y);
+                if scroll_y.abs() > 0.0 {
+                    radius = (radius - (scroll_y * 3.0) as i32).clamp(640, 8192);
+                }
+                ui.ctx().set_cursor_icon(if response.dragged() {
+                    egui::CursorIcon::Grabbing
+                } else {
+                    egui::CursorIcon::Grab
+                });
             }
 
             let image = model_import_preview::render_import_model_preview_with_options(
@@ -1051,6 +1131,9 @@ pub(crate) fn draw_model_resource_preview_panel(
                 &atlas_image,
                 model_import_preview::ImportPreviewOptions {
                     world_height: model.world_height as i32,
+                    visual_scale_q8: model.scale_q8[1].max(1),
+                    visual_yaw_q12: model.default_visual_yaw_q12,
+                    collision_radius: model.collision_radius as i32,
                     time_seconds: ui.input(|i| i.time),
                     yaw_q12: yaw.rem_euclid(4096) as u16,
                     pitch_q12: pitch.rem_euclid(4096) as u16,
@@ -1059,6 +1142,7 @@ pub(crate) fn draw_model_resource_preview_panel(
                     preview_in_place: clip.calibration.in_place,
                     pose_offset: clip.calibration.offset,
                     show_animation_root: false,
+                    show_collision_guides: true,
                     show_bones: false,
                 },
             );
