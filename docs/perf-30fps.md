@@ -772,3 +772,25 @@ the known 3-pixel layout-LSB signature; ten tape dumps
 including the arch-class far sightlines at 1000/1150/1300 with far
 rooms complete through doorways; engine suite 249 green. User make
 run remains the final gate.
+
+## Camera collision-solve throttle (2026-06-12, USER FEEL-GATE PENDING)
+
+The spring-arm sweep (ray march: up to 8 samples x 4 rooms x 9-cell
+neighborhoods with per-wall intersection math) is ~40k of the camera's
+~44k per-tick cost. New ThirdPersonCameraConfig::collision_solve_interval
+runs the sweep every Nth tick and reuses the previous solve in between;
+distance easing, pull-in snapping, and yaw/focus lag still run every
+tick. Manual orbit input, lock-on, and recenter ALWAYS solve fresh so
+the throttle never fights deliberate camera moves. Playtest sets 2 via
+runtime_config::CAMERA_COLLISION_SOLVE_INTERVAL (set 1 to revert);
+engine default stays 1.
+
+Tape: camera 43.3k -> 35.7k avg per tick (the tape's manual-orbit and
+lock-on stretches force fresh solves; plain walking gets the full
+halving), update 156k -> 147k, misses 54/1106 -> 50/1199.
+
+Gates: new unit test proves throttled == per-tick exactly in a static
+scene; corridor frame-300 bit-identical camera path (clear-path solves
+are constant, so hold-forward is unaffected); tape dumps 400/700/1000
+clean; engine suite 250 green. The real gate is the user's hands:
+worst-case collision reaction latency doubles to 33ms near walls.

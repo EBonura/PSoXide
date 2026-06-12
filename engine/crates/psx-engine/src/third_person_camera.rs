@@ -70,6 +70,13 @@ pub struct ThirdPersonCameraConfig {
     pub distance_lag_shift: u8,
     /// Display frames to hold the shortened boom before easing out.
     pub collision_release_delay_frames: u8,
+    /// Run the spring-arm collision sweep every Nth display tick and
+    /// reuse the previous solve in between (1 = every tick). Distance
+    /// easing, pull-in snapping, and yaw/focus lag still run every
+    /// tick; manual orbit input, lock-on, and recenter force a fresh
+    /// solve so stale collision never fights deliberate camera moves.
+    /// Worst-case collision reaction latency grows by (N-1) ticks.
+    pub collision_solve_interval: u8,
 }
 
 impl ThirdPersonCameraConfig {
@@ -93,6 +100,7 @@ impl ThirdPersonCameraConfig {
             focus_lag_shift: 2,
             distance_lag_shift: 3,
             collision_release_delay_frames: 4,
+            collision_solve_interval: 1,
         }
     }
 }
@@ -155,6 +163,8 @@ pub struct ThirdPersonCameraState {
     initialized: bool,
     last_pull_in: bool,
     last_rotated: bool,
+    solve_phase: u8,
+    cached_solve: CollisionSolve,
 }
 
 impl ThirdPersonCameraState {
@@ -171,6 +181,11 @@ impl ThirdPersonCameraState {
             initialized: false,
             last_pull_in: false,
             last_rotated: false,
+            solve_phase: 0,
+            cached_solve: CollisionSolve {
+                distance: 0,
+                pull_in: false,
+            },
         }
     }
 
@@ -207,6 +222,11 @@ impl ThirdPersonCameraState {
         self.initialized = true;
         self.last_pull_in = false;
         self.last_rotated = false;
+        self.solve_phase = 0;
+        self.cached_solve = CollisionSolve {
+            distance: self.distance,
+            pull_in: false,
+        };
     }
 
     /// Re-express the camera in a different room-local coordinate
@@ -351,8 +371,34 @@ impl ThirdPersonCameraState {
             approach_vertex_shift(self.focus, focus_goal, config.focus_lag_shift)
         };
 
-        let collision_solve =
-            solve_camera_collision_context(collision, self.focus, self.yaw, self.pitch_q12, config);
+        // Spring-arm sweep throttle: the sweep dominates the camera's
+        // per-tick cost, and between solves the focus/yaw move by one
+        // tick of easing, so reusing the previous solve only delays
+        // collision reaction by up to (interval - 1) ticks. Deliberate
+        // camera moves (manual orbit, lock-on, recenter) always solve
+        // fresh so the throttle never fights the player's hand.
+        let solve_now = self.solve_phase == 0
+            || input.yaw_delta_q12 != 0
+            || input.pitch_delta_q12 != 0
+            || input.recenter
+            || target.lock_target.is_some();
+        self.solve_phase = self.solve_phase.saturating_add(1);
+        if self.solve_phase >= config.collision_solve_interval.max(1) {
+            self.solve_phase = 0;
+        }
+        let collision_solve = if solve_now {
+            let solve = solve_camera_collision_context(
+                collision,
+                self.focus,
+                self.yaw,
+                self.pitch_q12,
+                config,
+            );
+            self.cached_solve = solve;
+            solve
+        } else {
+            self.cached_solve
+        };
 
         if collision_solve.distance < self.distance {
             self.distance = collision_solve.distance;
@@ -508,6 +554,7 @@ fn normalize_config(mut config: ThirdPersonCameraConfig) -> ThirdPersonCameraCon
     config.position_lag_shift = config.position_lag_shift.min(6);
     config.focus_lag_shift = config.focus_lag_shift.min(6);
     config.distance_lag_shift = config.distance_lag_shift.min(6);
+    config.collision_solve_interval = config.collision_solve_interval.clamp(1, 4);
     config
 }
 
@@ -1660,6 +1707,55 @@ mod tests {
         assert_eq!(caught_up.yaw(), stepped.yaw());
         assert_eq!(caught_up.position(), stepped.position());
         assert_eq!(caught_up.focus(), stepped.focus());
+    }
+
+    #[test]
+    fn solve_throttle_matches_per_tick_solve_in_static_scene() {
+        // With the player parked and no manual input, the sweep inputs
+        // are identical every tick once easing converges, so a reused
+        // solve equals a fresh one and the throttled camera must track
+        // the per-tick camera exactly.
+        let bytes = flat_floor_world();
+        let room = RuntimeRoom::from_bytes(&bytes).expect("test room parses");
+        let rooms = [CharacterCollisionRoom::new(room, 0, 0)];
+        let projection = WorldProjection::new(160, 120, 320, 64);
+        let mut per_tick_config = ThirdPersonCameraConfig::character(1400, 700, 0);
+        per_tick_config.min_distance = 0;
+        let mut throttled_config = per_tick_config;
+        throttled_config.collision_solve_interval = 2;
+        let target = ThirdPersonCameraTarget {
+            player: RoomPoint::new(512, 0, 512),
+            player_yaw: Angle::ZERO,
+            moving: false,
+            lock_target: None,
+        };
+        let input = ThirdPersonCameraInput::default();
+        let mut per_tick = ThirdPersonCameraState::new(Angle::ZERO);
+        let mut throttled = ThirdPersonCameraState::new(Angle::ZERO);
+        per_tick.snap_to_player(target, per_tick_config);
+        throttled.snap_to_player(target, throttled_config);
+
+        for _ in 0..8 {
+            let expected = per_tick.update_vblanks_with_collision_rooms(
+                projection,
+                &rooms,
+                target,
+                input,
+                per_tick_config,
+                1,
+            );
+            let actual = throttled.update_vblanks_with_collision_rooms(
+                projection,
+                &rooms,
+                target,
+                input,
+                throttled_config,
+                1,
+            );
+            assert_eq!(actual.camera.position, expected.camera.position);
+            assert_eq!(actual.distance, expected.distance);
+            assert_eq!(actual.focus, expected.focus);
+        }
     }
 
     #[test]
