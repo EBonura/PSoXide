@@ -349,16 +349,21 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
     // camera instead of redoing the camera rotation in CPU fixed-point for
     // every candidate cell; matches the rounding of the GTE vertex projection.
     let loaded_camera = LoadedWorldCameraGte::load(*camera);
+    let cell_frustum = CellFrustum::new(camera, options, screen_margin);
 
     for visible in visible_cells.iter().copied() {
-        let Some(cell_index) = cached_room_cell_index_for_visible(cached_cells, visible) else {
+        cell_stage_begin(crate::telemetry::stage::CELL_LOOKUP);
+        let looked_up = cached_room_cell_index_for_visible(cached_cells, visible);
+        cell_stage_end(crate::telemetry::stage::CELL_LOOKUP);
+        let Some(cell_index) = looked_up else {
             continue;
         };
-        let Some(cell) = cached_cells.get(cell_index).copied() else {
+        let Some(cell) = cached_cells.get(cell_index) else {
             continue;
         };
 
         stats.cells_considered = stats.cells_considered.wrapping_add(1);
+        cell_stage_begin(crate::telemetry::stage::CELL_DEPTH);
         let cell_depth = if visible.camera_depth == GridVisibleCell::CAMERA_DEPTH_PRECULLED {
             let visibility_center = WorldVertex::new(
                 cell.visibility_center[0],
@@ -373,14 +378,9 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
                 cell.visibility_center[2],
             );
             let visibility_view = loaded_camera.view_vertex(visibility_center);
-            if !cell_visibility_view_visible_to_camera(
-                camera,
-                options,
-                visibility_view,
-                cell.visibility_radius,
-                screen_margin,
-            ) {
+            if !cell_frustum.sphere_visible(visibility_view, cell.visibility_radius) {
                 stats.cells_frustum_culled = stats.cells_frustum_culled.wrapping_add(1);
+                cell_stage_end(crate::telemetry::stage::CELL_DEPTH);
                 continue;
             }
             accepted_depths_need_sort = true;
@@ -388,11 +388,13 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
         } else {
             visible.camera_depth as i32
         };
+        cell_stage_end(crate::telemetry::stage::CELL_DEPTH);
 
         stats.cells_drawn = stats.cells_drawn.wrapping_add(1);
         accepted_cell_indices[accepted_cell_count] = cell_index as u16;
         accepted_cell_depths[accepted_cell_count] = cell_depth;
         accepted_cell_count += 1;
+        cell_stage_begin(crate::telemetry::stage::CELL_COLLECT);
         projected_index_count = collect_cached_cell_vertex_indices(
             cell,
             cached_cell_vertices,
@@ -401,6 +403,7 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
             projected_indices,
             projected_index_count,
         );
+        cell_stage_end(crate::telemetry::stage::CELL_COLLECT);
     }
     if accepted_depths_need_sort {
         sort_cached_room_cell_indices_by_depth(
@@ -547,7 +550,9 @@ pub fn draw_indexed_cached_room_vertex_lit_all_cells<const OT: usize, L: WorldSu
     let mut accepted_cell_count = 0usize;
     let loaded_camera = LoadedWorldCameraGte::load(*camera);
 
-    for (cell_index, cell) in cached_cells.iter().copied().enumerate() {
+    let cell_frustum = CellFrustum::new(camera, options, screen_margin);
+    cell_stage_begin(crate::telemetry::stage::CELL_DEPTH);
+    for (cell_index, cell) in cached_cells.iter().enumerate() {
         if cell.surface_count == 0 || cell_index > u16::MAX as usize {
             continue;
         }
@@ -559,12 +564,7 @@ pub fn draw_indexed_cached_room_vertex_lit_all_cells<const OT: usize, L: WorldSu
         );
         let visibility_view = loaded_camera.view_vertex(visibility_center);
         if cull_cells_laterally
-            && !cell_visibility_view_in_lateral_frustum(
-                camera,
-                visibility_view,
-                cell.visibility_radius,
-                screen_margin,
-            )
+            && !cell_frustum.sphere_visible_no_far(visibility_view, cell.visibility_radius)
         {
             stats.cells_frustum_culled = stats.cells_frustum_culled.wrapping_add(1);
             continue;
@@ -578,8 +578,10 @@ pub fn draw_indexed_cached_room_vertex_lit_all_cells<const OT: usize, L: WorldSu
         &mut accepted_cell_indices[..accepted_cell_count],
         &mut accepted_cell_depths[..accepted_cell_count],
     );
+    cell_stage_end(crate::telemetry::stage::CELL_DEPTH);
+    cell_stage_begin(crate::telemetry::stage::CELL_COLLECT);
     for &cell_index in &accepted_cell_indices[..accepted_cell_count] {
-        let Some(cell) = cached_cells.get(cell_index as usize).copied() else {
+        let Some(cell) = cached_cells.get(cell_index as usize) else {
             continue;
         };
         projected_index_count = collect_cached_cell_vertex_indices(
@@ -591,6 +593,7 @@ pub fn draw_indexed_cached_room_vertex_lit_all_cells<const OT: usize, L: WorldSu
             projected_index_count,
         );
     }
+    cell_stage_end(crate::telemetry::stage::CELL_COLLECT);
     crate::telemetry::stage_end(crate::telemetry::stage::ROOM_CELL_SELECT);
 
     let projected_indices = &projected_indices[..projected_index_count];
@@ -678,6 +681,26 @@ pub fn draw_indexed_cached_room_vertex_lit_all_cells<const OT: usize, L: WorldSu
     stats
 }
 
+/// Stage marks for the per-candidate phases inside ROOM_CELL_SELECT
+/// (cell_lookup / cell_depth / cell_collect). Compiled out by default:
+/// the per-cell telemetry writes cost ~4k cycles/frame on the benchmark
+/// tape, so they only ride in `cell-select-profile` builds.
+#[inline(always)]
+fn cell_stage_begin(id: u16) {
+    #[cfg(feature = "cell-select-profile")]
+    crate::telemetry::stage_begin(id);
+    #[cfg(not(feature = "cell-select-profile"))]
+    let _ = id;
+}
+
+#[inline(always)]
+fn cell_stage_end(id: u16) {
+    #[cfg(feature = "cell-select-profile")]
+    crate::telemetry::stage_end(id);
+    #[cfg(not(feature = "cell-select-profile"))]
+    let _ = id;
+}
+
 fn sort_cached_room_cell_indices_by_depth(indices: &mut [u16], depths: &mut [i32]) {
     if indices.len() > depths.len() {
         return;
@@ -736,7 +759,7 @@ fn cached_room_cell_index_for_visible(
 }
 
 fn collect_cached_cell_vertex_indices(
-    cell: CachedRoomCell,
+    cell: &CachedRoomCell,
     cached_cell_vertices: &[u16],
     cached_surfaces: &[CachedRoomSurface],
     projected_ready: &mut [bool],

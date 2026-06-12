@@ -107,18 +107,24 @@ pub mod stage {
     pub const UPDATE_ACTOR: u16 = 46;
     /// Always-on active-room window refresh at the fixed-update tail.
     pub const UPDATE_WINDOW: u16 = 47;
+    /// Inside ROOM_CELL_SELECT: candidate -> cached cell index lookup.
+    pub const CELL_LOOKUP: u16 = 48;
+    /// Inside ROOM_CELL_SELECT: per-cell view transform + frustum accept.
+    pub const CELL_DEPTH: u16 = 49;
+    /// Inside ROOM_CELL_SELECT: unique vertex-index collection.
+    pub const CELL_COLLECT: u16 = 50;
 }
 
 /// Number of stage slots, including index zero for unknown/reserved ids.
-/// Sized to the highest stage id (`UPDATE_WINDOW = 47`) plus one.
-pub const STAGE_COUNT: usize = 48;
+/// Sized to the highest stage id (`CELL_COLLECT = 50`) plus one.
+pub const STAGE_COUNT: usize = 51;
 
 // Enforce `STAGE_COUNT = highest stage id + 1` at compile time. The host's
 // stage arrays are indexed by id and out-of-range ids are dropped silently,
 // so a new higher id without a matching STAGE_COUNT bump would quietly
 // vanish from every summary. Adding a higher id trips this and must
 // update both the count and this guard.
-const _: () = assert!(stage::UPDATE_WINDOW as usize == STAGE_COUNT - 1);
+const _: () = assert!(stage::CELL_COLLECT as usize == STAGE_COUNT - 1);
 
 /// Runtime task ids.
 pub mod task {

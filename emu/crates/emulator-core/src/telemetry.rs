@@ -463,6 +463,9 @@ pub fn stage_name(id: u16) -> &'static str {
         stage::IMAGE_CARDS => "image cards",
         stage::UPDATE_ACTOR => "update actor",
         stage::UPDATE_WINDOW => "update window",
+        stage::CELL_LOOKUP => "cell lookup",
+        stage::CELL_DEPTH => "cell depth",
+        stage::CELL_COLLECT => "cell collect",
         _ => "unknown",
     }
 }

@@ -34,6 +34,10 @@ boot-trace = ["psx-rt/boot-trace"]
 emulator-telemetry = []
 hardware-boot-visual = []
 room-surface-profile = []
+# Per-candidate stage marks inside ROOM_CELL_SELECT (cell_lookup /
+# cell_depth / cell_collect CSV columns). Off by default: the per-cell
+# begin/end telemetry writes cost ~4k cycles/frame on the benchmark tape.
+cell-select-profile = []
 # Player skinned-vertex live-capture instrument (the HWB-008..011
 # explosion-hunt channel). Off by default: the per-vertex observe and
 # per-joint compose recording cost real cycles and must not ride along
