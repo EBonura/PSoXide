@@ -925,6 +925,7 @@ fn main() -> ! {
         visual_pacing: playtest_visual_pacing(video_mode),
         scheduler: SchedulerConfig::new()
             .with_max_fixed_ticks_before_visual(RUNTIME_SCHEDULE.max_fixed_ticks_before_visual),
+        loading_ui_scene: generated::LOADING_UI_SCENE,
         ..Config::default()
     };
     // Drive the cooked game flow (front-end UI scenes + gameplay) rather than
