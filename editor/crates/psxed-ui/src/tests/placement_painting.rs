@@ -122,13 +122,16 @@ fn place_image_prop_defaults_to_room_sector_size() {
 }
 
 #[test]
-fn place_image_prop_with_texture_creates_material_wrapper() {
+fn place_image_prop_with_material_uses_it_directly() {
+    // Materials own their image since the material/texture merge, so
+    // placing an image prop uses the material as-is; no wrapper
+    // resource gets created.
     let mut project = ProjectDocument::new("image-prop-texture-place");
-    let texture = project.add_resource(
+    let material = project.add_resource(
         "Crimson Banner",
-        ResourceData::Texture {
-            psxt_path: "assets/textures/crimson_banner.psxt".to_string(),
-        },
+        ResourceData::Material(psxed_project::MaterialResource::opaque(Some(
+            "assets/textures/crimson_banner.psxt".to_string(),
+        ))),
     );
     let room = project.active_scene_mut().add_node(
         NodeId::ROOT,
@@ -139,7 +142,8 @@ fn place_image_prop_with_texture_creates_material_wrapper() {
     );
     let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
     workspace.place_kind = PlaceKind::ImageProp;
-    workspace.place_resource = Some(texture);
+    workspace.place_resource = Some(material);
+    let resource_count = workspace.project.resources.len();
 
     workspace.run_paint_action(ViewTool::Place, room, 0, 0, None, [512.0, 128.0, 512.0]);
 
@@ -149,22 +153,14 @@ fn place_image_prop_with_texture_creates_material_wrapper() {
         .node(workspace.selected_node_id())
         .expect("placed image prop is selected");
     let NodeKind::ImageProp {
-        material: Some(material),
+        material: Some(used),
         ..
     } = &node.kind
     else {
         panic!("expected image prop node");
     };
-    assert_ne!(*material, texture);
-    assert_eq!(workspace.place_resource, Some(*material));
-    let Some(resource) = workspace.project.resource(*material) else {
-        panic!("created material resource exists");
-    };
-    let ResourceData::Material(material_resource) = &resource.data else {
-        panic!("created resource is a material");
-    };
-    assert_eq!(resource.name, "Crimson Banner");
-    assert_eq!(material_resource.texture, Some(texture));
+    assert_eq!(*used, material);
+    assert_eq!(workspace.project.resources.len(), resource_count);
     assert_eq!(workspace.status, "Placed Image Prop at 0,0");
     assert!(workspace.is_dirty());
 }

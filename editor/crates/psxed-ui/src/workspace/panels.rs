@@ -1031,8 +1031,10 @@ impl EditorWorkspace {
             .project
             .resources
             .iter()
-            .filter_map(|resource| match resource.data {
-                ResourceData::Texture { .. } => Some((resource.id, resource.name.clone())),
+            .filter_map(|resource| match &resource.data {
+                ResourceData::Material(material) if material.psxt_path.is_some() => {
+                    Some((resource.id, resource.name.clone()))
+                }
                 _ => None,
             })
             .collect();
@@ -1709,16 +1711,6 @@ impl EditorWorkspace {
                     label: format!("Material: {}", material_resource.name),
                     nav: Some(material_id),
                 });
-                if let ResourceData::Material(m) = &material_resource.data {
-                    if let Some(tex_id) = m.texture {
-                        if let Some(tex_resource) = self.project.resource(tex_id) {
-                            crumbs.push(BreadcrumbCrumb {
-                                label: format!("Texture: {}", tex_resource.name),
-                                nav: Some(tex_id),
-                            });
-                        }
-                    }
-                }
             }
         }
         crumbs

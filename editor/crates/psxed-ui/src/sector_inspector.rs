@@ -20,12 +20,19 @@ pub(crate) fn runtime_vram_budget(
 ) -> RuntimeVramBudget {
     let mut budget = RuntimeVramBudget::default();
 
+    // Texture carriers are materials now; multiple materials can share
+    // one image file, which occupies VRAM once.
+    let mut counted_paths: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for id in &resource_use.textures {
         let Some(resource) = project.resource(*id) else {
             continue;
         };
-        if let ResourceData::Texture { psxt_path } = &resource.data {
-            add_runtime_texture_vram(project_root, psxt_path, true, &mut budget);
+        if let ResourceData::Material(material) = &resource.data {
+            if let Some(psxt_path) = material.psxt_path.as_deref() {
+                if counted_paths.insert(psxt_path) {
+                    add_runtime_texture_vram(project_root, psxt_path, true, &mut budget);
+                }
+            }
         }
     }
 

@@ -740,12 +740,6 @@ fn pick_entity_bound_includes_box_prop_bounds() {
 fn project_filesystem_rows_are_generated_from_resources() {
     let project = ProjectDocument::starter();
     let rows = project_filesystem_rows(&project);
-    let texture_name = project
-        .resources
-        .iter()
-        .find(|resource| matches!(resource.data, ResourceData::Texture { .. }))
-        .map(resource_file_name)
-        .expect("starter project has a texture resource");
     let material_name = project
         .resources
         .iter()
@@ -755,7 +749,6 @@ fn project_filesystem_rows_are_generated_from_resources() {
 
     assert!(rows.iter().any(|row| row.name == "res://"));
     assert!(rows.iter().any(|row| row.name == "main.map"));
-    assert!(rows.iter().any(|row| row.name == texture_name));
     assert!(rows.iter().any(|row| row.name == "characters"));
     assert!(rows
         .iter()
@@ -776,13 +769,12 @@ fn collapsed_project_filesystem_folder_hides_children() {
         .map(resource_file_name)
         .expect("starter project has a material resource");
     let mut collapsed = HashSet::new();
-    collapsed.insert("res://textures".to_string());
+    collapsed.insert("res://materials".to_string());
 
     let display_rows = project_filesystem_display_rows(&rows, "", &collapsed);
 
-    assert!(display_rows.iter().any(|row| row.name == "textures"));
-    assert!(!display_rows.iter().any(|row| row.name.ends_with(".psxt")));
-    assert!(display_rows.iter().any(|row| row.name == material_name));
+    assert!(display_rows.iter().any(|row| row.name == "materials"));
+    assert!(!display_rows.iter().any(|row| row.name == material_name));
 }
 
 #[test]
@@ -799,32 +791,31 @@ fn compact_middle_keeps_long_asset_names_dock_sized() {
 #[test]
 fn resource_filter_and_search_match_expected_resources() {
     let project = ProjectDocument::starter();
-    let texture = project
+    // Legacy Texture resources fold into materials at load.
+    assert!(!project
         .resources
         .iter()
-        .find(|resource| matches!(resource.data, ResourceData::Texture { .. }))
-        .unwrap();
+        .any(|resource| matches!(resource.data, ResourceData::Texture { .. })));
     let material = project
         .resources
         .iter()
         .find(|resource| matches!(resource.data, ResourceData::Material(_)))
         .unwrap();
-    let texture_search = resource_search_token(texture);
     let material_search = resource_search_token(material);
 
     assert!(resource_matches_filter(
-        texture,
-        ResourceFilter::Texture,
-        &texture_search
-    ));
-    assert!(!resource_matches_filter(
-        texture,
+        material,
         ResourceFilter::Material,
-        &texture_search
+        &material_search
     ));
     assert!(resource_matches_filter(
         material,
-        ResourceFilter::Material,
+        ResourceFilter::ImagePropSource,
+        &material_search
+    ));
+    assert!(!resource_matches_filter(
+        material,
+        ResourceFilter::Model,
         &material_search
     ));
 }
