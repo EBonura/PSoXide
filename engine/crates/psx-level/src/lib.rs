@@ -1749,6 +1749,11 @@ pub enum LevelUiValueBinding {
     PlayerStamina,
     /// Player stamina maximum.
     PlayerStaminaMax,
+    /// Live load progress while the engine streams the next state's
+    /// world, in Q12 (0..=4096). Resolves to 0 outside a loading
+    /// screen. Bind a Bar's value to this (max `ConstantQ12(4096)`)
+    /// to get a real filling load bar.
+    LoadingProgress,
 }
 
 /// UI event that can fire one of a node's cooked SFX cues.
@@ -1884,6 +1889,9 @@ pub enum LevelUiImageEffect {
     DiagonalSweep,
     /// Whole-image brightness pulse.
     SoftPulse,
+    /// Gentle vertical bob: the image oscillates a few pixels up and
+    /// down (loading-screen mascot idiom).
+    Bob,
 }
 
 /// One cooked project option: a runtime-tunable integer with a bounded

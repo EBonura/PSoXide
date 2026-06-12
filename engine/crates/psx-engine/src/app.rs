@@ -323,6 +323,12 @@ pub struct Config {
     pub visual_pacing: VisualPacing,
     /// Manual frame/task scheduler tuning.
     pub scheduler: SchedulerConfig,
+    /// Cooked UI scene drawn while the engine streams the next state's
+    /// world (the project's scene named "Loading"), or
+    /// `psx_level::UI_SCENE_NONE` for the engine's built-in minimal
+    /// loading screen. With an authored scene the loading screen also
+    /// holds a short minimum duration so fast loads do not flash.
+    pub loading_ui_scene: u16,
 }
 
 /// Engine-level visual render cadence.
@@ -357,6 +363,7 @@ impl Default for Config {
             clear_color: (0, 0, 0),
             visual_pacing: VisualPacing::EveryVBlank,
             scheduler: SchedulerConfig::new(),
+            loading_ui_scene: psx_level::UI_SCENE_NONE,
         }
     }
 }
@@ -500,6 +507,7 @@ impl App {
             options,
             ui_sfx_samples,
             ui_sfx_cues,
+            config.loading_ui_scene,
             scene,
         );
 
