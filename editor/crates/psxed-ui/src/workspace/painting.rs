@@ -1,5 +1,40 @@
 use super::*;
 
+fn add_model_renderer_node(
+    scene: &mut Scene,
+    entity: NodeId,
+    model_id: ResourceId,
+    visual_scale_q8: u16,
+    default_visual_yaw_q12: i16,
+) -> NodeId {
+    let renderer = scene.add_node(
+        entity,
+        "Model Renderer",
+        NodeKind::ModelRenderer {
+            model: Some(model_id),
+            material: None,
+            visual_offset: [0; 3],
+            visual_scale_q8,
+        },
+    );
+    if let Some(node) = scene.node_mut(renderer) {
+        node.transform.rotation_degrees[1] = q12_turns_to_degrees(default_visual_yaw_q12 as i32);
+    }
+    renderer
+}
+
+fn default_model_visual_defaults(project: &ProjectDocument, model_id: ResourceId) -> (u16, i16) {
+    project
+        .resource(model_id)
+        .and_then(|resource| match &resource.data {
+            ResourceData::Model(model) => {
+                Some((model.scale_q8[1].max(1), model.default_visual_yaw_q12))
+            }
+            _ => None,
+        })
+        .unwrap_or((psxed_project::MODEL_SCALE_ONE_Q8, 0))
+}
+
 impl EditorWorkspace {
     /// 3D paint / move click handler. `face_hit` is the ray-test
     /// result (`pick_face_with_hit`) and `fallback_hit` is the
@@ -249,6 +284,8 @@ impl EditorWorkspace {
     ) -> NodeId {
         let translation = self.placement_translation_for_room_hit(room_id, hit_world);
         let active_floor = self.active_floor;
+        let (visual_scale_q8, default_visual_yaw_q12) =
+            default_model_visual_defaults(&self.project, model_id);
         let scene = self.project.active_scene_mut();
         let entity = scene.add_node(room_id, name.to_string(), NodeKind::Entity);
         if let Some(node) = scene.node_mut(entity) {
@@ -257,15 +294,12 @@ impl EditorWorkspace {
             // entity to the right runtime room; Y can't select the floor.
             node.floor = active_floor;
         }
-        scene.add_node(
+        add_model_renderer_node(
+            scene,
             entity,
-            "Model Renderer",
-            NodeKind::ModelRenderer {
-                model: Some(model_id),
-                material: None,
-                visual_offset: [0; 3],
-                visual_scale_q8: psxed_project::MODEL_SCALE_ONE_Q8,
-            },
+            model_id,
+            visual_scale_q8,
+            default_visual_yaw_q12,
         );
         scene.add_node(
             entity,
@@ -292,6 +326,8 @@ impl EditorWorkspace {
     ) -> NodeId {
         let translation = self.placement_translation_for_room_hit(room_id, hit_world);
         let active_floor = self.active_floor;
+        let model_visual_defaults =
+            model_id.map(|model_id| default_model_visual_defaults(&self.project, model_id));
         let scene = self.project.active_scene_mut();
         let entity = scene.add_node(room_id, name.to_string(), NodeKind::Entity);
         if let Some(node) = scene.node_mut(entity) {
@@ -301,15 +337,14 @@ impl EditorWorkspace {
             node.floor = active_floor;
         }
         if let Some(model_id) = model_id {
-            scene.add_node(
+            let (visual_scale_q8, default_visual_yaw_q12) =
+                model_visual_defaults.unwrap_or((psxed_project::MODEL_SCALE_ONE_Q8, 0));
+            add_model_renderer_node(
+                scene,
                 entity,
-                "Model Renderer",
-                NodeKind::ModelRenderer {
-                    model: Some(model_id),
-                    material: None,
-                    visual_offset: [0; 3],
-                    visual_scale_q8: psxed_project::MODEL_SCALE_ONE_Q8,
-                },
+                model_id,
+                visual_scale_q8,
+                default_visual_yaw_q12,
             );
         }
         scene.add_node(

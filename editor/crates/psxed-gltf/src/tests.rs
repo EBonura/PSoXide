@@ -189,6 +189,34 @@ fn imports_minimal_glb_triangle() {
 }
 
 #[test]
+fn native_model_imports_static_glb_triangle_with_bind_pose_and_atlas() {
+    let glb = minimal_triangle_glb();
+    let package = convert_rigid_model_slice(&glb, &RigidModelConfig::default()).unwrap();
+
+    let model = psx_asset::Model::from_bytes(&package.model).unwrap();
+    assert_eq!(model.joint_count(), 1);
+    assert_eq!(model.part_count(), 1);
+    assert_eq!(model.vertex_count(), 3);
+    assert_eq!(model.face_count(), 1);
+
+    assert_eq!(package.clips.len(), 1);
+    assert_eq!(package.clips[0].sanitized_name, "bind_pose");
+    assert_eq!(package.clips[0].frames, 1);
+    let animation = psx_asset::Animation::from_bytes(&package.clips[0].bytes).unwrap();
+    assert_eq!(animation.joint_count(), 1);
+    assert_eq!(animation.frame_count(), 1);
+
+    let texture = psx_asset::Texture::from_bytes(package.texture.as_deref().unwrap()).unwrap();
+    assert_eq!(texture.depth(), psxed_format::texture::Depth::Bit8);
+    assert_eq!(texture.clut_entries(), 256);
+    assert_eq!(
+        package.report.clip_frames,
+        vec![("bind_pose".to_string(), 1)]
+    );
+    assert_eq!(package.report.texture_bytes, package.texture.unwrap().len());
+}
+
+#[test]
 fn triangle_strip_gets_triangulated() {
     let faces = triangulate_indices(&[0, 1, 2, 3], Mode::TriangleStrip).unwrap();
     assert_eq!(faces, vec![[0, 1, 2], [2, 1, 3]]);

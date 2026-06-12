@@ -1,11 +1,11 @@
 use egui::{Color32, ColorImage};
 use psx_asset::{Animation, JointPose, Model, ModelVertex};
 use psx_engine::{
-    compute_joint_view_transform, compute_joint_world_transform, Angle, JointViewTransform,
-    JointWorldTransform, LocalToWorldScale, Mat3I16, ProjectedVertex, ViewVertex, WorldCamera,
-    WorldProjection, WorldVertex,
+    compute_joint_world_transform, Angle, JointWorldTransform, LocalToWorldScale, Mat3I16,
+    ProjectedVertex, WorldCamera, WorldProjection, WorldVertex,
 };
 use psx_gte::math::Vec3I16;
+use psxed_project::MODEL_SCALE_ONE_Q8;
 
 pub const PREVIEW_WIDTH: usize = 320;
 pub const PREVIEW_HEIGHT: usize = 240;
@@ -17,6 +17,9 @@ const PREVIEW_PLAYBACK_HZ: u16 = 60;
 #[derive(Copy, Clone, Debug)]
 pub struct ImportPreviewOptions {
     pub world_height: i32,
+    pub visual_scale_q8: u16,
+    pub visual_yaw_q12: i16,
+    pub collision_radius: i32,
     pub time_seconds: f64,
     pub yaw_q12: u16,
     pub pitch_q12: u16,
@@ -25,6 +28,7 @@ pub struct ImportPreviewOptions {
     pub preview_in_place: bool,
     pub pose_offset: [i32; 3],
     pub show_animation_root: bool,
+    pub show_collision_guides: bool,
     pub show_bones: bool,
 }
 
@@ -47,6 +51,7 @@ pub fn render_import_model_preview_with_options(
         PREVIEW_NEAR_Z,
     );
     let height = options.world_height.max(128);
+    let visual_height = scale_q8_i32(height, options.visual_scale_q8).max(1);
     let origin = WorldVertex::new(0, height / 2, 0);
     let frame_q12 = animation.phase_at_tick_q12(
         (options.time_seconds.max(0.0) * PREVIEW_PLAYBACK_HZ as f64) as u32,
@@ -56,7 +61,8 @@ pub fn render_import_model_preview_with_options(
         .preview_in_place
         .then(|| root_motion_delta_q12(&animation, frame_q12))
         .flatten();
-    let local_to_world = LocalToWorldScale::from_q12(model.local_to_world_q12());
+    let local_to_world = preview_model_local_to_world(&model, options.visual_scale_q8);
+    let instance_rotation = yaw_rotation_matrix(options.visual_yaw_q12);
     let focus = options
         .focus_on_animated_bounds
         .then(|| {
@@ -64,6 +70,7 @@ pub fn render_import_model_preview_with_options(
                 &model,
                 &animation,
                 local_to_world,
+                instance_rotation,
                 origin,
                 height,
                 options.preview_in_place,
@@ -77,7 +84,7 @@ pub fn render_import_model_preview_with_options(
     } else {
         focus
             .map(|focus| focus.radius)
-            .unwrap_or_else(|| height.saturating_mul(3) / 2)
+            .unwrap_or_else(|| visual_height.saturating_mul(3) / 2)
     }
     .clamp(640, 8192);
     let camera = WorldCamera::orbit(
@@ -95,24 +102,19 @@ pub fn render_import_model_preview_with_options(
     draw_floor_grid(&mut image, camera, projection, focus, origin, height);
     let mut z_buffer = vec![f32::INFINITY; PREVIEW_WIDTH * PREVIEW_HEIGHT];
     let mut joint_transforms =
-        vec![JointViewTransform::ZERO; model.joint_count().min(animation.joint_count()) as usize];
+        vec![JointWorldTransform::ZERO; model.joint_count().min(animation.joint_count()) as usize];
     for (joint, transform) in joint_transforms.iter_mut().enumerate() {
         let mut pose = animation.pose_looped_q12(frame_q12, joint as u16)?;
         if let Some(delta) = root_delta {
             apply_root_motion_delta(&mut pose, delta);
         }
         apply_pose_offset(&mut pose, options.pose_offset);
-        let (rotation, translation) =
-            compute_joint_view_transform(camera, pose, Mat3I16::IDENTITY, local_to_world, origin);
-        *transform = JointViewTransform {
-            rotation,
-            translation,
-        };
+        *transform = compute_joint_world_transform(pose, instance_rotation, local_to_world, origin);
     }
     let projected_body_anchor =
         body_anchor_projected(camera, projection, focus.map(|focus| focus.center), origin);
     let joint_origins: Vec<Option<ProjectedVertex>> = if options.show_bones {
-        estimated_joint_points(&model, &joint_transforms, projection)
+        estimated_joint_points(&model, &joint_transforms, camera)
     } else {
         Vec::new()
     };
@@ -135,7 +137,7 @@ pub fn render_import_model_preview_with_options(
                 continue;
             };
             projected[vertex_index] =
-                project_import_model_vertex(vertex, primary, &joint_transforms, projection);
+                project_import_model_vertex(vertex, primary, &joint_transforms, camera);
         }
     }
 
@@ -177,11 +179,45 @@ pub fn render_import_model_preview_with_options(
             draw_animation_root_marker(&mut image, anchor);
         }
     }
+    if options.show_collision_guides {
+        draw_height_and_collision_guides(
+            &mut image,
+            camera,
+            projection,
+            focus,
+            origin,
+            visual_height,
+            options.collision_radius,
+        );
+    }
     if options.show_bones {
         draw_bone_overlay(&mut image, &model, &joint_origins);
     }
 
     Some(image)
+}
+
+fn preview_model_local_to_world(model: &Model<'_>, visual_scale_q8: u16) -> LocalToWorldScale {
+    let scale_q8 = visual_scale_q8.max(1) as u32;
+    let q12 = ((model.local_to_world_q12() as u32)
+        .saturating_mul(scale_q8)
+        .saturating_add((MODEL_SCALE_ONE_Q8 / 2) as u32))
+        / MODEL_SCALE_ONE_Q8 as u32;
+    LocalToWorldScale::from_q12(q12.clamp(1, u16::MAX as u32) as u16)
+}
+
+fn yaw_rotation_matrix(yaw_q12: i16) -> Mat3I16 {
+    let yaw = Angle::from_q12((yaw_q12 as i32).rem_euclid(4096) as u16);
+    let s = clamp_i16(yaw.sin().raw());
+    let c = clamp_i16(yaw.cos().raw());
+    Mat3I16 {
+        m: [[c, 0, s], [0, 0x1000, 0], [-s, 0, c]],
+    }
+}
+
+fn scale_q8_i32(value: i32, scale_q8: u16) -> i32 {
+    let scale = scale_q8.max(1) as i32;
+    value.saturating_mul(scale) / MODEL_SCALE_ONE_Q8 as i32
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -272,6 +308,7 @@ fn animation_preview_focus(
     model: &Model<'_>,
     animation: &Animation<'_>,
     local_to_world: LocalToWorldScale,
+    instance_rotation: Mat3I16,
     origin: WorldVertex,
     fallback_height: i32,
     preview_in_place: bool,
@@ -291,6 +328,7 @@ fn animation_preview_focus(
             animation,
             frame,
             local_to_world,
+            instance_rotation,
             origin,
             root_delta,
             pose_offset,
@@ -317,7 +355,7 @@ fn animation_preview_focus(
     Some(PreviewFocus {
         center,
         radius: preview_radius_for_focus(bounds, center, fallback_height),
-        floor_y: bounds.max.y,
+        floor_y: bounds.min.y,
     })
 }
 
@@ -330,6 +368,7 @@ fn build_joint_world_transforms_at_frame(
     animation: &Animation<'_>,
     frame: u16,
     local_to_world: LocalToWorldScale,
+    instance_rotation: Mat3I16,
     origin: WorldVertex,
     root_delta: Option<[i32; 3]>,
     pose_offset: [i32; 3],
@@ -343,7 +382,7 @@ fn build_joint_world_transforms_at_frame(
             }
             apply_pose_offset(&mut pose, pose_offset);
             *transform =
-                compute_joint_world_transform(pose, Mat3I16::IDENTITY, local_to_world, origin);
+                compute_joint_world_transform(pose, instance_rotation, local_to_world, origin);
         }
     }
     transforms
@@ -492,6 +531,118 @@ fn draw_floor_grid(
     }
 }
 
+fn draw_height_and_collision_guides(
+    image: &mut ColorImage,
+    camera: WorldCamera,
+    projection: WorldProjection,
+    focus: Option<PreviewFocus>,
+    origin: WorldVertex,
+    height: i32,
+    collision_radius: i32,
+) {
+    let floor_y = focus
+        .map(|focus| focus.floor_y)
+        .unwrap_or(origin.y - height / 2);
+    let top_y = floor_y.saturating_add(height.max(1));
+    let center_x = origin.x;
+    let center_z = origin.z;
+    let height_color = Color32::from_rgb(255, 210, 92);
+    let radius_color = Color32::from_rgb(88, 205, 255);
+
+    let height_x = center_x.saturating_sub(collision_radius.max(96).saturating_add(80));
+    draw_projected_world_line(
+        image,
+        camera,
+        projection,
+        WorldVertex::new(height_x, floor_y, center_z),
+        WorldVertex::new(height_x, top_y, center_z),
+        height_color,
+    );
+    for y in [floor_y, top_y] {
+        draw_projected_world_line(
+            image,
+            camera,
+            projection,
+            WorldVertex::new(height_x.saturating_sub(48), y, center_z),
+            WorldVertex::new(height_x.saturating_add(48), y, center_z),
+            height_color,
+        );
+    }
+
+    let radius = collision_radius.clamp(1, 8192);
+    draw_collision_ellipse(
+        image,
+        camera,
+        projection,
+        center_x,
+        floor_y,
+        center_z,
+        radius,
+        radius_color,
+    );
+    draw_collision_ellipse(
+        image,
+        camera,
+        projection,
+        center_x,
+        top_y,
+        center_z,
+        radius,
+        Color32::from_rgb(62, 150, 190),
+    );
+    for (x, z) in [
+        (center_x.saturating_add(radius), center_z),
+        (center_x.saturating_sub(radius), center_z),
+        (center_x, center_z.saturating_add(radius)),
+        (center_x, center_z.saturating_sub(radius)),
+    ] {
+        draw_projected_world_line(
+            image,
+            camera,
+            projection,
+            WorldVertex::new(x, floor_y, z),
+            WorldVertex::new(x, top_y, z),
+            radius_color,
+        );
+    }
+}
+
+fn draw_collision_ellipse(
+    image: &mut ColorImage,
+    camera: WorldCamera,
+    projection: WorldProjection,
+    center_x: i32,
+    y: i32,
+    center_z: i32,
+    radius: i32,
+    color: Color32,
+) {
+    const SEGMENTS: i32 = 32;
+    let mut prev = collision_ring_point(center_x, y, center_z, radius, SEGMENTS - 1, SEGMENTS);
+    for index in 0..SEGMENTS {
+        let next = collision_ring_point(center_x, y, center_z, radius, index, SEGMENTS);
+        draw_projected_world_line(image, camera, projection, prev, next, color);
+        prev = next;
+    }
+}
+
+fn collision_ring_point(
+    center_x: i32,
+    y: i32,
+    center_z: i32,
+    radius: i32,
+    index: i32,
+    segments: i32,
+) -> WorldVertex {
+    let angle_q12 = ((index * 4096) / segments).rem_euclid(4096) as u16;
+    let angle = Angle::from_q12(angle_q12);
+    WorldVertex::new(
+        center_x.saturating_add(angle.sin().mul_i32(radius)),
+        y,
+        center_z.saturating_add(angle.cos().mul_i32(radius)),
+    )
+}
+
 fn draw_projected_world_line(
     image: &mut ColorImage,
     camera: WorldCamera,
@@ -518,10 +669,10 @@ fn draw_projected_world_line(
 
 fn project_preview_world(
     camera: WorldCamera,
-    projection: WorldProjection,
+    _projection: WorldProjection,
     vertex: WorldVertex,
 ) -> Option<ProjectedVertex> {
-    cpu_project_gte_view(camera.view_vertex(vertex), projection)
+    camera.project_world(vertex)
 }
 
 fn body_anchor_projected(
@@ -556,27 +707,18 @@ impl PreviewVertex {
 
 fn project_import_model_vertex(
     vertex: ModelVertex,
-    primary: JointViewTransform,
-    joint_transforms: &[JointViewTransform],
-    projection: WorldProjection,
+    primary: JointWorldTransform,
+    joint_transforms: &[JointWorldTransform],
+    camera: WorldCamera,
 ) -> Option<ProjectedVertex> {
-    let view = if vertex.is_blend() && (vertex.joint1 as usize) < joint_transforms.len() {
-        let secondary = joint_transforms[vertex.joint1 as usize];
-        lerp_view_vertex(
-            cpu_view_transform(&primary, vertex.position),
-            cpu_view_transform(&secondary, vertex.position),
-            vertex.blend,
-        )
-    } else {
-        cpu_view_transform(&primary, vertex.position)
-    };
-    cpu_project_gte_view(view, projection)
+    let world = transform_import_model_vertex_world(vertex, primary, joint_transforms);
+    camera.project_world(world)
 }
 
 fn estimated_joint_points(
     model: &Model<'_>,
-    joint_transforms: &[JointViewTransform],
-    projection: WorldProjection,
+    joint_transforms: &[JointWorldTransform],
+    camera: WorldCamera,
 ) -> Vec<Option<ProjectedVertex>> {
     let mut sums = vec![[0i64; 3]; joint_transforms.len()];
     let mut counts = vec![0i64; joint_transforms.len()];
@@ -611,46 +753,12 @@ fn estimated_joint_points(
                     clamp_i16((sums[joint][1] / counts[joint]) as i32),
                     clamp_i16((sums[joint][2] / counts[joint]) as i32),
                 );
-                cpu_project_gte_view(cpu_view_transform(transform, local), projection)
+                camera.project_world(world_transform_model_vertex(transform, local))
             } else {
                 None
             }
         })
         .collect()
-}
-
-fn cpu_view_transform(transform: &JointViewTransform, position: Vec3I16) -> ViewVertex {
-    let vx = position.x as i32;
-    let vy = position.y as i32;
-    let vz = position.z as i32;
-    let m = &transform.rotation.m;
-    let x = ((m[0][0] as i32) * vx + (m[0][1] as i32) * vy + (m[0][2] as i32) * vz) >> 12;
-    let y = ((m[1][0] as i32) * vx + (m[1][1] as i32) * vy + (m[1][2] as i32) * vz) >> 12;
-    let z = ((m[2][0] as i32) * vx + (m[2][1] as i32) * vy + (m[2][2] as i32) * vz) >> 12;
-    ViewVertex::new(
-        x.saturating_add(transform.translation.x),
-        y.saturating_add(transform.translation.y),
-        z.saturating_add(transform.translation.z),
-    )
-}
-
-fn cpu_project_gte_view(view: ViewVertex, projection: WorldProjection) -> Option<ProjectedVertex> {
-    if view.z <= 0 || view.z < projection.near_z {
-        return None;
-    }
-    let sx = (projection.screen_x as i32) + (view.x * projection.focal_length) / view.z;
-    let sy = (projection.screen_y as i32) + (view.y * projection.focal_length) / view.z;
-    Some(ProjectedVertex::new(clamp_i16(sx), clamp_i16(sy), view.z))
-}
-
-fn lerp_view_vertex(a: ViewVertex, b: ViewVertex, t: u8) -> ViewVertex {
-    let t = t as i32;
-    let inv = 256 - t;
-    ViewVertex::new(
-        ((a.x.saturating_mul(inv)).saturating_add(b.x.saturating_mul(t))) >> 8,
-        ((a.y.saturating_mul(inv)).saturating_add(b.y.saturating_mul(t))) >> 8,
-        ((a.z.saturating_mul(inv)).saturating_add(b.z.saturating_mul(t))) >> 8,
-    )
 }
 
 fn raster_textured_triangle(
@@ -854,29 +962,81 @@ fn clamp_i16(value: i32) -> i16 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use psx_gte::math::Vec3I32;
+    use psx_engine::Q12;
     use std::path::Path;
+
+    fn looking_positive_z_camera() -> WorldCamera {
+        WorldCamera::from_basis(
+            WorldProjection::new(160, 120, 320, 1),
+            WorldVertex::ZERO,
+            Q12::ZERO,
+            Q12::NEG_ONE,
+            Q12::ZERO,
+            Q12::ONE,
+        )
+    }
 
     #[test]
     fn invalid_secondary_blend_uses_primary_transform() {
-        let primary = JointViewTransform {
+        let primary = JointWorldTransform {
             rotation: Mat3I16::IDENTITY,
-            translation: Vec3I32::new(0, 0, 100),
+            translation: WorldVertex::new(0, 0, 100),
         };
         let vertex = ModelVertex {
             position: Vec3I16::new(0, 0, 0),
             joint1: 99,
             blend: 128,
         };
-        let projected = project_import_model_vertex(
-            vertex,
-            primary,
-            &[primary],
-            WorldProjection::new(160, 120, 320, 1),
-        )
-        .expect("invalid secondary joint should stay on primary path");
+        let projected =
+            project_import_model_vertex(vertex, primary, &[primary], looking_positive_z_camera())
+                .expect("invalid secondary joint should stay on primary path");
 
         assert_eq!(projected, ProjectedVertex::new(160, 120, 100));
+    }
+
+    // Temporary visual-inspection dump: renders the tracked wraith preview
+    // to /tmp/preview_dump.ppm so orientation can be checked by eye.
+    #[test]
+    #[ignore]
+    fn dump_preview_for_inspection() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let model =
+            std::fs::read(root.join("assets/models/obsidian_wraith/obsidian_wraith.psxmdl"))
+                .expect("tracked model fixture");
+        let clip =
+            std::fs::read(root.join("assets/models/obsidian_wraith/obsidian_wraith_idle.psxanim"))
+                .expect("tracked animation fixture");
+        let atlas = ColorImage {
+            size: [128, 128],
+            pixels: vec![Color32::from_rgb(210, 90, 70); 128 * 128],
+        };
+        let image = render_import_model_preview_with_options(
+            &model,
+            &clip,
+            &atlas,
+            ImportPreviewOptions {
+                world_height: 1024,
+                visual_scale_q8: MODEL_SCALE_ONE_Q8,
+                visual_yaw_q12: 0,
+                collision_radius: 192,
+                time_seconds: 0.0,
+                yaw_q12: 0,
+                pitch_q12: 64,
+                radius: 2048,
+                focus_on_animated_bounds: true,
+                preview_in_place: true,
+                pose_offset: [0, 0, 0],
+                show_animation_root: true,
+                show_collision_guides: true,
+                show_bones: false,
+            },
+        )
+        .expect("tracked cooked model should render");
+        let mut out = format!("P6\n{} {}\n255\n", image.size[0], image.size[1]).into_bytes();
+        for pixel in &image.pixels {
+            out.extend_from_slice(&[pixel.r(), pixel.g(), pixel.b()]);
+        }
+        std::fs::write("/tmp/preview_dump.ppm", out).expect("write ppm");
     }
 
     #[test]
@@ -918,6 +1078,9 @@ mod tests {
             &atlas,
             ImportPreviewOptions {
                 world_height: 1024,
+                visual_scale_q8: MODEL_SCALE_ONE_Q8,
+                visual_yaw_q12: 0,
+                collision_radius: 192,
                 time_seconds: 0.0,
                 yaw_q12: 340,
                 pitch_q12: 350,
@@ -926,6 +1089,7 @@ mod tests {
                 preview_in_place: true,
                 pose_offset: [0, 0, 0],
                 show_animation_root: true,
+                show_collision_guides: true,
                 show_bones: false,
             },
         )
@@ -948,18 +1112,17 @@ mod tests {
         let model_bytes = two_joint_model_with_child_part();
         let model = Model::from_bytes(&model_bytes).expect("model fixture");
         let transforms = vec![
-            JointViewTransform {
+            JointWorldTransform {
                 rotation: Mat3I16::IDENTITY,
-                translation: Vec3I32::new(40, 0, 100),
+                translation: WorldVertex::new(40, 0, 100),
             },
-            JointViewTransform {
+            JointWorldTransform {
                 rotation: Mat3I16::IDENTITY,
-                translation: Vec3I32::new(0, 0, 100),
+                translation: WorldVertex::new(0, 0, 100),
             },
         ];
 
-        let joints =
-            estimated_joint_points(&model, &transforms, WorldProjection::new(160, 120, 320, 1));
+        let joints = estimated_joint_points(&model, &transforms, looking_positive_z_camera());
 
         assert_eq!(joints.len(), 2);
         assert_eq!(joints[0], None);
@@ -999,6 +1162,7 @@ mod tests {
             &model,
             &animation,
             LocalToWorldScale::from_q12(model.local_to_world_q12()),
+            Mat3I16::IDENTITY,
             WorldVertex::ZERO,
             1024,
             false,
@@ -1007,7 +1171,7 @@ mod tests {
         .expect("focus");
 
         assert_eq!(focus.center, WorldVertex::new(124, 24, 0));
-        assert_eq!(focus.floor_y, 48);
+        assert_eq!(focus.floor_y, 0);
         assert!(focus.radius >= 1536);
     }
 
@@ -1022,6 +1186,7 @@ mod tests {
             &model,
             &animation,
             LocalToWorldScale::from_q12(model.local_to_world_q12()),
+            Mat3I16::IDENTITY,
             WorldVertex::ZERO,
             1024,
             false,
@@ -1032,6 +1197,7 @@ mod tests {
             &model,
             &animation,
             LocalToWorldScale::from_q12(model.local_to_world_q12()),
+            Mat3I16::IDENTITY,
             WorldVertex::ZERO,
             1024,
             true,
@@ -1041,7 +1207,7 @@ mod tests {
 
         assert_eq!(moving.center, WorldVertex::new(124, 24, 0));
         assert_eq!(in_place.center, WorldVertex::new(24, 24, 0));
-        assert_eq!(in_place.floor_y, 48);
+        assert_eq!(in_place.floor_y, 0);
     }
 
     #[test]
@@ -1101,6 +1267,21 @@ mod tests {
             .filter(|pixel| **pixel != background)
             .count();
         assert!(grid_pixels > 16, "expected grid pixels, got {grid_pixels}");
+    }
+
+    #[test]
+    fn preview_visual_scale_multiplies_model_header_scale() {
+        let model_bytes = two_joint_model_with_child_part();
+        let model = Model::from_bytes(&model_bytes).expect("model fixture");
+
+        assert_eq!(
+            preview_model_local_to_world(&model, MODEL_SCALE_ONE_Q8).q12(),
+            4096
+        );
+        assert_eq!(
+            preview_model_local_to_world(&model, MODEL_SCALE_ONE_Q8 * 2).q12(),
+            8192
+        );
     }
 
     fn two_joint_model_with_child_part() -> Vec<u8> {

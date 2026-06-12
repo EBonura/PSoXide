@@ -329,6 +329,72 @@ pub(crate) fn read_skinned_mesh(
     Ok(source)
 }
 
+pub(crate) fn read_static_gltf_mesh(
+    mesh: &gltf::Mesh<'_>,
+    transform: &[[f32; 4]; 4],
+    buffers: &[gltf::buffer::Data],
+    source: &mut SkinnedSourceMesh,
+    normal_faces: &mut Vec<[usize; 3]>,
+) -> Result<(), Error> {
+    for primitive in mesh.primitives() {
+        let primitive_index = primitive.index();
+        if primitive.mode() != Mode::Triangles
+            && primitive.mode() != Mode::TriangleStrip
+            && primitive.mode() != Mode::TriangleFan
+        {
+            return Err(Error::UnsupportedMode {
+                mode: primitive.mode(),
+            });
+        }
+        let reader = primitive.reader(|buffer| Some(buffers[buffer.index()].0.as_slice()));
+        let positions: Vec<[f32; 3]> = reader
+            .read_positions()
+            .ok_or(Error::MissingAttribute {
+                primitive_index,
+                attribute: "POSITION",
+            })?
+            .map(|position| transform_point(transform, position))
+            .collect();
+        let vertex_count = positions.len();
+        let uvs: Vec<[f32; 2]> = reader
+            .read_tex_coords(0)
+            .map(|iter| iter.into_f32().collect())
+            .unwrap_or_else(|| vec![[0.0, 0.0]; vertex_count]);
+        if uvs.len() != vertex_count {
+            return Err(Error::BadSkin("primitive attribute counts differ"));
+        }
+
+        let base = source.vertices.len();
+        source
+            .vertices
+            .extend((0..vertex_count).map(|index| SourceVertex {
+                position: positions[index],
+                normal: [0.0, 1.0, 0.0],
+                uv: uvs[index],
+                joints: [0, 0, 0, 0],
+                weights: [1.0, 0.0, 0.0, 0.0],
+                dominant_joint: 0,
+            }));
+
+        let local_indices: Vec<u32> = if let Some(indices) = reader.read_indices() {
+            indices.into_u32().collect()
+        } else {
+            (0..vertex_count as u32).collect()
+        };
+        for face in triangulate_indices(&local_indices, primitive.mode())? {
+            let a = checked_index(face[0], vertex_count)? + base;
+            let b = checked_index(face[1], vertex_count)? + base;
+            let c = checked_index(face[2], vertex_count)? + base;
+            normal_faces.push([a, b, c]);
+            source.faces.push(SourceFace {
+                indices: [a, c, b],
+                joint: 0,
+            });
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn rebuild_source_normals(source: &mut SkinnedSourceMesh, normal_faces: &[[usize; 3]]) {
     let mut normals = vec![[0.0f32; 3]; source.vertices.len()];
     for face in normal_faces {
@@ -353,6 +419,18 @@ pub(crate) fn rebuild_source_normals(source: &mut SkinnedSourceMesh, normal_face
             vertex.normal = normalize3(vertex.normal);
         }
     }
+}
+
+pub(crate) fn collect_static_precision_bounds(
+    source: &SkinnedSourceMesh,
+) -> Result<PrecisionBounds, Error> {
+    let mut bounds = BoundsAccumulator::new();
+    for face in &source.faces {
+        for vertex_index in face.indices {
+            bounds.include(source.vertices[vertex_index].position);
+        }
+    }
+    bounds.finish()
 }
 
 pub(crate) fn prune_detached_face_islands(

@@ -1953,6 +1953,7 @@ fn model_resource_roundtrips_through_ron_string() {
                 MODEL_SCALE_ONE_Q8 * 2,
                 MODEL_SCALE_ONE_Q8,
             ],
+            default_visual_yaw_q12: 1024,
             attachments: vec![AttachmentSocket {
                 name: "right_hand_grip".to_string(),
                 joint: 3,
@@ -1982,6 +1983,7 @@ fn model_resource_roundtrips_through_ron_string() {
                     MODEL_SCALE_ONE_Q8
                 ]
             );
+            assert_eq!(m.default_visual_yaw_q12, 1024);
             assert_eq!(m.effective_preview_clip(), Some(1));
             assert_eq!(m.effective_runtime_clip(), Some(0));
             assert_eq!(m.attachments.len(), 1);
@@ -2049,6 +2051,7 @@ fn animation_library_resources_roundtrip_and_resolve_by_path() {
             world_height: 1024,
             collision_radius: default_model_collision_radius_for_height(1024),
             scale_q8: [MODEL_SCALE_ONE_Q8; 3],
+            default_visual_yaw_q12: 0,
             attachments: Vec::new(),
         }),
     );
@@ -2099,6 +2102,7 @@ fn animation_sources_and_target_specific_clips_roundtrip() {
             world_height: 1024,
             collision_radius: default_model_collision_radius_for_height(1024),
             scale_q8: [MODEL_SCALE_ONE_Q8; 3],
+            default_visual_yaw_q12: 0,
             attachments: Vec::new(),
         }),
     );
@@ -2115,6 +2119,7 @@ fn animation_sources_and_target_specific_clips_roundtrip() {
             world_height: 1024,
             collision_radius: default_model_collision_radius_for_height(1024),
             scale_q8: [MODEL_SCALE_ONE_Q8; 3],
+            default_visual_yaw_q12: 0,
             attachments: Vec::new(),
         }),
     );
@@ -2392,6 +2397,7 @@ fn resource_rename_moves_imported_model_bundle_files() {
             world_height: 1024,
             collision_radius: default_model_collision_radius_for_height(1024),
             scale_q8: [MODEL_SCALE_ONE_Q8; 3],
+            default_visual_yaw_q12: 0,
             attachments: Vec::new(),
         }),
     );

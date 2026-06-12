@@ -647,8 +647,8 @@ impl EditorWorkspace {
         egui::Window::new(icons::label(icons::FILE_PLUS, "Import Model"))
             .collapsible(false)
             .resizable(true)
-            .default_width(1160.0)
-            .default_height(820.0)
+            .default_width(1300.0)
+            .default_height(760.0)
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .show(ctx, |ui| {
                 ui.set_min_size(Vec2::new(980.0, 620.0));
@@ -739,7 +739,8 @@ impl EditorWorkspace {
                             );
                         });
                         ui.horizontal(|ui| {
-                            ui.label("World height");
+                            ui.label("World height")
+                                .on_hover_text("Target rendered height in engine units; recook preview after changing this bake setting.");
                             let previous_height = dialog.world_height.clamp(128, 8192) as u16;
                             let previous_default_radius =
                                 default_model_collision_radius_for_height(previous_height) as i32;
@@ -757,11 +758,48 @@ impl EditorWorkspace {
                             }
                         });
                         ui.horizontal(|ui| {
-                            ui.label("Collision radius");
+                            ui.label("Actor radius").on_hover_text(
+                                "Runtime actor-cylinder radius for model/character records. Use an explicit Collider node for authored prop collision.",
+                            );
                             ui.add(
                                 egui::DragValue::new(&mut dialog.collision_radius)
                                     .range(1..=4096)
                                     .speed(8.0),
+                            );
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Scale");
+                            ui.add(
+                                egui::DragValue::new(&mut dialog.visual_scale_q8)
+                                    .range(1..=4096)
+                                    .speed(16.0),
+                            );
+                            ui.label(
+                                RichText::new(format!(
+                                    "{:.3}x",
+                                    dialog.visual_scale_q8.max(1) as f32
+                                        / MODEL_SCALE_ONE_Q8 as f32
+                                ))
+                                .color(STUDIO_TEXT_WEAK)
+                                .monospace(),
+                            );
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Default yaw").on_hover_text(
+                                "Model-facing rotation used by preview and newly placed renderer nodes.",
+                            );
+                            ui.add(
+                                egui::DragValue::new(&mut dialog.default_visual_yaw_q12)
+                                    .range(0..=4095)
+                                    .speed(16.0),
+                            );
+                            ui.label(
+                                RichText::new(format!(
+                                    "{:.1} deg",
+                                    q12_turns_to_degrees(dialog.default_visual_yaw_q12)
+                                ))
+                                .color(STUDIO_TEXT_WEAK)
+                                .monospace(),
                             );
                         });
                         ui.checkbox(
@@ -842,7 +880,7 @@ impl EditorWorkspace {
 
                     ui.separator();
                     ui.vertical(|ui| {
-                        ui.set_min_width(700.0);
+                        ui.set_min_width(640.0);
                         if let Some(preview) = &mut dialog.preview {
                             draw_model_import_preview(
                                 ui,
@@ -851,9 +889,13 @@ impl EditorWorkspace {
                                 &mut dialog.preview_yaw_q12,
                                 &mut dialog.preview_pitch_q12,
                                 &mut dialog.preview_radius,
+                                dialog.collision_radius,
+                                dialog.visual_scale_q8,
+                                dialog.default_visual_yaw_q12,
                                 dialog.show_animation_root,
                                 dialog.preview_in_place,
                             );
+                            ui.add_space(4.0);
                         } else {
                             ui.vertical_centered(|ui| {
                                 ui.add_space(160.0);
@@ -868,6 +910,26 @@ impl EditorWorkspace {
                             });
                         }
                     });
+                    if dialog.preview.is_some() {
+                        ui.separator();
+                        ui.vertical(|ui| {
+                            ui.set_width(300.0);
+                            egui::ScrollArea::vertical()
+                                .id_salt("model-import-details")
+                                .show(ui, |ui| {
+                                    if let Some(preview) = &dialog.preview {
+                                        draw_model_import_details(
+                                            ui,
+                                            preview,
+                                            &mut dialog.selected_clip,
+                                            dialog.collision_radius,
+                                            dialog.visual_scale_q8,
+                                            dialog.default_visual_yaw_q12,
+                                        );
+                                    }
+                                });
+                        });
+                    }
                 });
 
                 if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
@@ -1082,9 +1144,17 @@ impl EditorWorkspace {
                     .model_import_dialog
                     .collision_radius
                     .clamp(1, u16::MAX as i32) as u16;
+                let visual_scale_q8 = self
+                    .model_import_dialog
+                    .visual_scale_q8
+                    .clamp(1, u16::MAX as i32) as u16;
+                let default_visual_yaw_q12 =
+                    q12_turns_to_i16(self.model_import_dialog.default_visual_yaw_q12);
                 if let Some(resource) = self.project.resource_mut(id) {
                     if let ResourceData::Model(model) = &mut resource.data {
                         model.collision_radius = collision_radius;
+                        model.scale_q8 = [visual_scale_q8; 3];
+                        model.default_visual_yaw_q12 = default_visual_yaw_q12;
                     }
                 }
                 self.replace_resource_selection(id);
