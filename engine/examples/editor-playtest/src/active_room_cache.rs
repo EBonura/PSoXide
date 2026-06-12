@@ -529,6 +529,12 @@ fn generated_room_surface_cache_slices(
     ))
 }
 
+/// Resolve a streamed room's surface-cache slices DIRECTLY INTO its
+/// slot byte buffer, re-validating residency and every chunk-view
+/// offset against the cache snapshot first. The result inherits the
+/// [`streamed_record_slice`] lifetime contract: consume it within the
+/// current render/update step and re-resolve next time; never store
+/// the slices.
 #[cfg(feature = "cd-stream-bench")]
 fn streamed_room_surface_cache_slices(
     index: RoomIndex,
@@ -591,6 +597,16 @@ fn streamed_room_surface_cache_slices(
     }
 }
 
+/// LIFETIME CONTRACT (streaming audit finding 3): the returned
+/// `&'static [T]` is a lie. It points into a streamed room slot
+/// buffer that the scheduler overwrites on eviction/reuse, so it is
+/// only valid until the next `RoomStreamScheduler::pump` /
+/// `reconcile_residency` call (the next streaming step of the next
+/// sim tick). NEVER store it across ticks or cache it in a struct;
+/// re-resolve through `streamed_room_surface_cache_slices` /
+/// `parse_streamed_compact_collision_room` on every use. Those entry
+/// points re-validate slot residency and the chunk-view offsets per
+/// call, which is what keeps this cast sound today.
 #[cfg(feature = "cd-stream-bench")]
 fn streamed_record_slice<T>(
     bytes: &'static [u8],
