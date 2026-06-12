@@ -110,6 +110,12 @@ pub(super) const CAMERA_RADIUS_STEP: i32 = 64;
 pub(super) const CAMERA_START_YAW: Angle = Angle::from_q12(220);
 pub(super) const CAMERA_YAW_STEP: Angle = Angle::from_q12(12);
 pub(super) const CAMERA_SWEEP_ENABLED: bool = option_env!("PSXO_CAMERA_SWEEP").is_some();
+/// Run the follow camera's spring-arm collision sweep every Nth tick
+/// (1 = every tick, the old behavior). The sweep is ~40k of the camera's
+/// ~44k per-tick cost; at 2 the collision reaction latency worst-cases
+/// at 33ms while easing/pull-in still run per tick. Feel-gated by the
+/// user; set back to 1 to revert.
+pub(super) const CAMERA_COLLISION_SOLVE_INTERVAL: u8 = 2;
 pub(super) const CAMERA_SWEEP_FAST_ENABLED: bool = option_env!("PSXO_CAMERA_SWEEP_FAST").is_some();
 pub(super) const CAMERA_SWEEP_WIDE_ENABLED: bool = option_env!("PSXO_CAMERA_SWEEP_WIDE").is_some();
 pub(super) const CAMERA_SWEEP_FORCE_VISIBILITY: bool =
