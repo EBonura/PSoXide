@@ -1989,6 +1989,9 @@ const PROFILE_LOG_HEADER: &[&str] = &[
     "sim_solve",
     "update_actor",
     "update_window",
+    "cell_lookup",
+    "cell_depth",
+    "cell_collect",
     "sim_ticks",
     "visual_frames",
     "visual_skipped_vblanks",
@@ -2009,6 +2012,25 @@ const PROFILE_LOG_HEADER: &[&str] = &[
     "room_active_chunks",
     "room_visible_cells",
     "room_cells_drawn",
+    "room_cells_considered",
+    "room_cells_culled",
+    "room_cells_range_culled",
+    "room_surf_material",
+    "room_surf_projected",
+    "room_surf_screen",
+    "room_surf_kind",
+    "room_surf_backface",
+    "room_surf_lighting",
+    "room_surf_submit",
+    "room_surf_profiled",
+    "room_surf_screen_culled",
+    "room_surf_backface_culled",
+    "room_submit_hw_safe_test",
+    "room_submit_packet_fill",
+    "room_submit_primitive_push",
+    "room_submit_depth",
+    "room_submit_command",
+    "room_submit_fallback",
     "room_surfaces_considered",
     "room_projected_vertices",
     "tri_primitives",
@@ -2213,6 +2235,9 @@ impl GuestProfileLog {
         push!(stage(s::SIM_SOLVE));
         push!(stage(s::UPDATE_ACTOR));
         push!(stage(s::UPDATE_WINDOW));
+        push!(stage(s::CELL_LOOKUP));
+        push!(stage(s::CELL_DEPTH));
+        push!(stage(s::CELL_COLLECT));
         push!(counter_total(&summary, c::SIM_TICKS));
         push!(counter_total(&summary, c::VISUAL_FRAMES));
         push!(counter_total(&summary, c::VISUAL_SKIPPED_VBLANKS));
@@ -2233,6 +2258,25 @@ impl GuestProfileLog {
         push!(counter_total(&summary, c::ROOM_ACTIVE_CHUNKS));
         push!(counter_total(&summary, c::ROOM_VISIBLE_CELLS));
         push!(counter_total(&summary, c::ROOM_CELLS_DRAWN));
+        push!(counter_total(&summary, c::ROOM_CELLS_CONSIDERED));
+        push!(counter_total(&summary, c::ROOM_CELLS_CULLED));
+        push!(counter_total(&summary, c::ROOM_CELLS_RANGE_CULLED));
+        push!(counter_total(&summary, c::ROOM_SURF_MATERIAL_CYCLES));
+        push!(counter_total(&summary, c::ROOM_SURF_PROJECTED_CYCLES));
+        push!(counter_total(&summary, c::ROOM_SURF_SCREEN_CYCLES));
+        push!(counter_total(&summary, c::ROOM_SURF_KIND_CYCLES));
+        push!(counter_total(&summary, c::ROOM_SURF_BACKFACE_CYCLES));
+        push!(counter_total(&summary, c::ROOM_SURF_LIGHTING_CYCLES));
+        push!(counter_total(&summary, c::ROOM_SURF_SUBMIT_CYCLES));
+        push!(counter_total(&summary, c::ROOM_SURF_PROFILED));
+        push!(counter_total(&summary, c::ROOM_SURF_SCREEN_CULLED));
+        push!(counter_total(&summary, c::ROOM_SURF_BACKFACE_CULLED));
+        push!(counter_total(&summary, c::ROOM_SUBMIT_HW_SAFE_TEST_CYCLES));
+        push!(counter_total(&summary, c::ROOM_SUBMIT_PACKET_FILL_CYCLES));
+        push!(counter_total(&summary, c::ROOM_SUBMIT_PRIMITIVE_PUSH_CYCLES));
+        push!(counter_total(&summary, c::ROOM_SUBMIT_DEPTH_CYCLES));
+        push!(counter_total(&summary, c::ROOM_SUBMIT_COMMAND_CYCLES));
+        push!(counter_total(&summary, c::ROOM_SUBMIT_FALLBACK_CYCLES));
         push!(counter_total(&summary, c::ROOM_SURFACES_CONSIDERED));
         push!(counter_total(&summary, c::ROOM_PROJECTED_VERTICES));
         push!(counter_total(&summary, c::TRI_PRIMITIVES));

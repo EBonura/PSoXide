@@ -1612,28 +1612,80 @@ fn cell_visibility_view_visible_to_camera(
     radius: i32,
     screen_margin: i32,
 ) -> bool {
-    let near = camera.projection.near_z.max(1);
-    let far = options.depth_range.far().max(near);
-    if view.z < near.saturating_sub(radius) || view.z > far.saturating_add(radius) {
-        return false;
+    CellFrustum::new(camera, options, screen_margin).sphere_visible(view, radius)
+}
+
+/// Per-draw precomputed constants for the per-cell sphere visibility tests.
+///
+/// The cell-select loops run one test per candidate cell per frame; deriving
+/// the clamped near/far/focal/screen extents once per draw call instead of
+/// per cell, and using exact widening 32x32->64 products (one MULT each on
+/// MIPS) instead of saturating 32-bit products, keeps the per-cell cost to
+/// the compares themselves. The widening products differ from the old
+/// saturating ones only where a product would have clamped at i32::MAX,
+/// which PVS-range-bounded cell centers cannot reach.
+#[derive(Copy, Clone)]
+pub(crate) struct CellFrustum {
+    near: i32,
+    far: i32,
+    focal: i32,
+    half_w: i32,
+    half_h: i32,
+}
+
+impl CellFrustum {
+    #[inline(always)]
+    pub(crate) fn new(
+        camera: &WorldCamera,
+        options: WorldSurfaceOptions,
+        screen_margin: i32,
+    ) -> Self {
+        let near = camera.projection.near_z.max(1);
+        Self {
+            near,
+            far: options.depth_range.far().max(near),
+            focal: camera.projection.focal_length.max(1),
+            half_w: (camera.projection.screen_x as i32)
+                .saturating_add(screen_margin)
+                .max(1),
+            half_h: (camera.projection.screen_y as i32)
+                .saturating_add(screen_margin)
+                .max(1),
+        }
     }
 
-    let z = view.z.max(near);
-    let focal = camera.projection.focal_length.max(1);
-    let half_w = (camera.projection.screen_x as i32)
-        .saturating_add(screen_margin)
-        .max(1);
-    let half_h = (camera.projection.screen_y as i32)
-        .saturating_add(screen_margin)
-        .max(1);
-    let projected_x = view.x.abs().saturating_sub(radius).saturating_mul(focal);
-    let projected_y = view.y.abs().saturating_sub(radius).saturating_mul(focal);
-    projected_x <= half_w.saturating_mul(z) && projected_y <= half_h.saturating_mul(z)
+    /// Near/far band plus lateral extent test for a view-space sphere.
+    #[inline(always)]
+    pub(crate) fn sphere_visible(self, view: ViewVertex, radius: i32) -> bool {
+        if view.z < self.near.saturating_sub(radius) || view.z > self.far.saturating_add(radius) {
+            return false;
+        }
+        self.sphere_lateral(view, radius)
+    }
+
+    /// Lateral plus near test with NO far plane (the all-cells root-room
+    /// cull; see `cell_visibility_view_in_lateral_frustum`).
+    #[inline(always)]
+    pub(crate) fn sphere_visible_no_far(self, view: ViewVertex, radius: i32) -> bool {
+        if view.z < self.near.saturating_sub(radius) {
+            return false;
+        }
+        self.sphere_lateral(view, radius)
+    }
+
+    #[inline(always)]
+    fn sphere_lateral(self, view: ViewVertex, radius: i32) -> bool {
+        let z = view.z.max(self.near);
+        let px = view.x.abs().saturating_sub(radius) as i64 * self.focal as i64;
+        let py = view.y.abs().saturating_sub(radius) as i64 * self.focal as i64;
+        px <= self.half_w as i64 * z as i64 && py <= self.half_h as i64 * z as i64
+    }
 }
 
 /// Lateral + near frustum test for a cell visibility sphere, with NO far plane.
 /// The all-cells path uses this only for the camera/root room; neighbouring
 /// active rooms skip coarse cell culling so portal-edge geometry is not dropped.
+#[allow(dead_code)]
 fn cell_visibility_view_in_lateral_frustum(
     camera: &WorldCamera,
     view: ViewVertex,
@@ -1641,20 +1693,18 @@ fn cell_visibility_view_in_lateral_frustum(
     screen_margin: i32,
 ) -> bool {
     let near = camera.projection.near_z.max(1);
-    if view.z < near.saturating_sub(radius) {
-        return false;
-    }
-    let z = view.z.max(near);
-    let focal = camera.projection.focal_length.max(1);
-    let half_w = (camera.projection.screen_x as i32)
-        .saturating_add(screen_margin)
-        .max(1);
-    let half_h = (camera.projection.screen_y as i32)
-        .saturating_add(screen_margin)
-        .max(1);
-    let projected_x = view.x.abs().saturating_sub(radius).saturating_mul(focal);
-    let projected_y = view.y.abs().saturating_sub(radius).saturating_mul(focal);
-    projected_x <= half_w.saturating_mul(z) && projected_y <= half_h.saturating_mul(z)
+    let lateral = CellFrustum {
+        near,
+        far: i32::MAX,
+        focal: camera.projection.focal_length.max(1),
+        half_w: (camera.projection.screen_x as i32)
+            .saturating_add(screen_margin)
+            .max(1),
+        half_h: (camera.projection.screen_y as i32)
+            .saturating_add(screen_margin)
+            .max(1),
+    };
+    lateral.sphere_visible_no_far(view, radius)
 }
 
 /// Emit one floor quad. Cooked corners are `[NW, NE, SE, SW]`,
