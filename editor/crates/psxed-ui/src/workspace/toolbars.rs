@@ -350,7 +350,7 @@ impl EditorWorkspace {
             self.vertex_connectivity.label(),
             |ui| self.draw_vertex_connectivity_group_menu(ui),
         );
-        toolbar_group_menu(
+        toolbar_group_menu_icon_only(
             ui,
             7,
             self.shortcut_group_glow(ShortcutGroup::Visibility),
@@ -444,7 +444,7 @@ impl EditorWorkspace {
             },
         );
 
-        toolbar_option_menu(ui, icons::PLUS, "Add UI Node", "Add", false, |ui| {
+        toolbar_option_menu(ui, icons::PLUS, "Add", "Add UI Node", "Add", false, |ui| {
             ui.set_min_width(160.0);
             for (label, kind) in default_addable_ui_kinds() {
                 if ui.button(label).clicked() {
@@ -458,6 +458,7 @@ impl EditorWorkspace {
         toolbar_option_menu(
             ui,
             icons::FOCUS,
+            "Snap",
             "Center Snap",
             center_snap_label,
             self.ui_center_snap,
@@ -484,6 +485,7 @@ impl EditorWorkspace {
         toolbar_option_menu(
             ui,
             icons::PLAY,
+            "Preview",
             "Navigation Preview",
             nav_preview_label,
             self.ui_nav_preview,
@@ -513,8 +515,9 @@ impl EditorWorkspace {
         toolbar_option_menu(
             ui,
             icons::MOVE,
+            &screen_offset_label,
             "Screen Offset",
-            screen_offset_label,
+            screen_offset_label.clone(),
             self.screen_offset_sim_px != 0,
             |ui| {
                 ui.set_min_width(220.0);
