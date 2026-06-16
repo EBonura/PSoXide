@@ -110,17 +110,10 @@ impl ModelAnimationViewerState {
 
     fn preferred_model_clip_path(&self, project: &ProjectDocument) -> Option<String> {
         self.selected_model.and_then(|model_id| {
-            let model = project
-                .resource(model_id)
-                .and_then(|resource| match &resource.data {
-                    ResourceData::Model(model) => Some(model),
-                    _ => None,
-                })?;
-            model
-                .effective_preview_clip()
-                .and_then(|index| model.clips.get(index as usize))
+            project
+                .resolved_model_animation_clips(model_id)
+                .first()
                 .map(|clip| clip.psxanim_path.clone())
-                .or_else(|| model.clips.first().map(|clip| clip.psxanim_path.clone()))
         })
     }
 
@@ -448,20 +441,10 @@ fn store_clip_calibration(
             }
         }
     }
-    let (Some(model_id), Some(index)) = (selected_model, clip.model_clip_index) else {
-        return false;
-    };
-    let Some(resource) = project.resource_mut(model_id) else {
-        return false;
-    };
-    let ResourceData::Model(model) = &mut resource.data else {
-        return false;
-    };
-    let Some(model_clip) = model.clips.get_mut(index) else {
-        return false;
-    };
-    model_clip.calibration = calibration;
-    true
+    // Clips live on AnimationClip resources now; without a backing
+    // resource there is nowhere to store calibration.
+    let _ = (selected_model, clip);
+    false
 }
 
 fn draw_preview(
@@ -778,13 +761,8 @@ fn build_clip_options(project: &ProjectDocument, model_id: ResourceId) -> Vec<Vi
             .and_then(|id| project.resource(id).map(|resource| (id, resource)))
             .and_then(|(id, resource)| match &resource.data {
                 ResourceData::AnimationClip(clip) => {
-                    let origin = if clip.target_model == Some(model_id) {
-                        ClipOrigin::Target
-                    } else {
-                        ClipOrigin::Library
-                    };
                     seen_resources.insert(id);
-                    Some((clip.role, clip.looping, origin))
+                    Some((clip.role, clip.looping, ClipOrigin::Library))
                 }
                 _ => None,
             })
@@ -818,11 +796,7 @@ fn build_clip_options(project: &ProjectDocument, model_id: ResourceId) -> Vec<Vi
         out.push(ViewerClipOption {
             label: resource.name.clone(),
             path: clip.psxanim_path.clone(),
-            origin: if clip.target_model == Some(model_id) {
-                ClipOrigin::Target
-            } else {
-                ClipOrigin::Library
-            },
+            origin: ClipOrigin::Library,
             role: clip.role,
             looping: clip.looping,
             resource: Some(resource.id),

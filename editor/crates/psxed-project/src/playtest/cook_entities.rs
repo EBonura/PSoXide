@@ -188,23 +188,6 @@ pub(crate) fn add_character_clip_requirements(
     };
     add_model_clip_requirement(project, out, model, None);
 
-    for legacy in [
-        character.idle_clip,
-        character.walk_clip,
-        character.run_clip,
-        character.turn_clip,
-        character.roll_clip,
-        character.backstep_clip,
-    ]
-    .into_iter()
-    .flatten()
-    {
-        add_model_clip_requirement(project, out, model, Some(legacy));
-    }
-    for binding in &character.action_clips {
-        add_model_clip_requirement(project, out, model, Some(binding.clip));
-    }
-
     let Some(set) = character.animation_set.and_then(|id| {
         project
             .resource(id)
@@ -336,16 +319,7 @@ pub(crate) fn add_model_clip_requirement(
     if resolved_len == 0 {
         return;
     }
-    let index = clip
-        .or_else(|| {
-            project
-                .resource(model)
-                .and_then(|resource| match &resource.data {
-                    ResourceData::Model(model) => model.default_clip,
-                    _ => None,
-                })
-        })
-        .unwrap_or(0);
+    let index = clip.unwrap_or(0);
     if (index as usize) < resolved_len {
         out.entry(model).or_default().insert(index);
     }
@@ -579,52 +553,23 @@ pub(crate) fn cook_player_character(
             }
         }
 
-        let character_binding = character.action_binding(action);
-        match character_binding
-            .map(|binding| binding.clip)
-            .or_else(|| character.action_clip(action))
-        {
-            Some(idx) => {
-                match remap_runtime_model_clip(model_clip_remaps, model_resource_id, idx) {
-                    Some(local) => Some((
-                        local,
-                        character_action_flags_for(
-                            action,
-                            character_binding.and_then(|binding| binding.options),
-                        ),
-                        character_action_speed_for(
-                            character_binding.and_then(|binding| binding.options),
-                        ),
-                        character_action_frame_range_for(
-                            character_binding.and_then(|binding| binding.options),
-                        ),
-                        character_action_push_for(
-                            character_binding.and_then(|binding| binding.options),
-                        ),
-                    )),
-                    None => {
-                        report.error(format!(
-                            "Character '{}' {action_label} clip {idx} was not packaged for runtime",
-                            character_name
-                        ));
-                        None
-                    }
-                }
-            }
-            None if required => {
-                report.error(format!(
-                    "Character '{}' has no {action_label} clip assigned",
-                    character_name
-                ));
-                None
-            }
-            None => Some((
+        // No per-character inline binding: animations resolve only
+        // through the AnimationSet (above). A required action with no
+        // set entry is an error; an optional one falls back to "none".
+        if required {
+            report.error(format!(
+                "Character '{}' has no {action_label} clip -- assign one in its Animation Set",
+                character_name
+            ));
+            None
+        } else {
+            Some((
                 CHARACTER_CLIP_NONE,
                 character_action_flags_for(action, None),
                 character_action_speed_for(None),
                 character_action_frame_range_for(None),
                 character_action_push_for(None),
-            )),
+            ))
         }
     };
 
@@ -921,18 +866,9 @@ pub(crate) fn register_model_for_instance(
         None
     };
 
-    let authored_default_clip = match model.default_clip {
-        Some(idx) if (idx as usize) < resolved_clips.len() => idx,
-        Some(idx) => {
-            report.error(format!(
-                "Model '{}' default_clip {idx} is out of range ({} clips)",
-                resource.name,
-                resolved_clips.len()
-            ));
-            return None;
-        }
-        None => 0,
-    };
+    // A Model carries no clips of its own, so the runtime default is
+    // simply the first resolved (skeleton-scoped) clip.
+    let authored_default_clip = 0u16;
     let selected_clip_indices = runtime_model_clip_indices(
         resolved_clips.len(),
         runtime_model_clips.get(&model_resource_id),
@@ -1690,19 +1626,8 @@ pub(crate) fn character_idle_clip_for_model_instance(
         }
     }
 
-    match character.idle_clip {
-        Some(idx) => {
-            if let Some(local) = remap_runtime_model_clip(model_clip_remaps, model_resource_id, idx)
-            {
-                return Some(local);
-            }
-            report.error(format!(
-                "Character '{character_name}' idle clip {idx} was not packaged for runtime"
-            ));
-            None
-        }
-        None => Some(model.default_clip),
-    }
+    // No AnimationSet idle: fall back to the model's runtime default clip.
+    Some(model.default_clip)
 }
 
 #[allow(clippy::too_many_arguments)]

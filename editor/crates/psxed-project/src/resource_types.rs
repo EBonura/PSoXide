@@ -579,11 +579,6 @@ pub struct AnimationClipResource {
     /// Optional authoring source this cooked clip was baked from.
     #[serde(default)]
     pub source: Option<ResourceId>,
-    /// Optional model this cooked clip was baked for. When present,
-    /// `resolved_model_animation_clips` only exposes the clip to that
-    /// exact model.
-    #[serde(default)]
-    pub target_model: Option<ResourceId>,
     /// Bake provenance. Runtime ignores this; editor tooling uses it
     /// to distinguish native Meshy clips from future retargeted Mixamo
     /// clips.
@@ -919,24 +914,10 @@ pub struct ModelResource {
     /// omitting is allowed for placeholder / debug bundles.
     #[serde(default)]
     pub texture_path: Option<String>,
-    /// Skeleton this model was cooked against. Models can still
-    /// carry legacy local clips for compatibility, but shared
-    /// animation matching should use this resource id.
+    /// Skeleton this model is built on. Animations are skeleton-scoped
+    /// `AnimationClip` resources; a Model carries no clips of its own.
     #[serde(default)]
     pub skeleton: Option<ResourceId>,
-    /// Cooked animation clips, sorted by file name. Empty for
-    /// static models (rendered in bind pose).
-    #[serde(default)]
-    pub clips: Vec<ModelAnimationClip>,
-    /// Index into `clips` used at runtime when no per-instance
-    /// override is set. `None` means "first clip if any, else
-    /// bind pose".
-    #[serde(default)]
-    pub default_clip: Option<u16>,
-    /// Index into `clips` shown in the editor inspector preview.
-    /// Falls back to `default_clip` when unset.
-    #[serde(default)]
-    pub preview_clip: Option<u16>,
     /// Suggested world-space height in engine units (mirrors the
     /// value the cooker stamped into the `.psxmdl` header). Used
     /// by the inspector for sanity checks and by the editor
@@ -993,19 +974,6 @@ impl ModelResource {
             / MODEL_SCALE_ONE_Q8 as f32
     }
 
-    /// Index of the clip the editor inspector should preview --
-    /// `preview_clip` if set, else `default_clip`, else `None`.
-    pub fn effective_preview_clip(&self) -> Option<u16> {
-        self.preview_clip.or(self.default_clip)
-    }
-
-    /// Index of the clip a runtime instance with no override
-    /// should play -- `default_clip` if set, else clip 0 if any
-    /// clip exists, else `None`.
-    pub fn effective_runtime_clip(&self) -> Option<u16> {
-        self.default_clip
-            .or_else(|| (!self.clips.is_empty()).then_some(0))
-    }
 }
 
 /// Gameplay metadata layered on top of a Model. The Model owns
@@ -1025,35 +993,11 @@ pub struct CharacterResource {
     /// validated at cook time when assigned to the player.
     #[serde(default)]
     pub model: Option<ResourceId>,
-    /// Preferred reusable animation set. When present, cook/preview
-    /// resolve role clips from this set and fall back to the legacy
-    /// per-model clip indices only for unset roles.
+    /// Reusable animation set on the model's skeleton. This is the
+    /// single binding for the character's gameplay animations (idle /
+    /// walk / run / actions); cook/preview resolve roles from it.
     #[serde(default)]
     pub animation_set: Option<ResourceId>,
-    /// Index into the model's clip list -- played when the
-    /// character has no movement input. Required for the player.
-    #[serde(default)]
-    pub idle_clip: Option<u16>,
-    /// Index into the model's clip list -- played while walking.
-    /// Required for the player.
-    #[serde(default)]
-    pub walk_clip: Option<u16>,
-    /// Index into the model's clip list -- optional run clip.
-    #[serde(default)]
-    pub run_clip: Option<u16>,
-    /// Index into the model's clip list -- optional turn clip.
-    #[serde(default)]
-    pub turn_clip: Option<u16>,
-    /// Index into the model's clip list -- optional roll clip.
-    #[serde(default)]
-    pub roll_clip: Option<u16>,
-    /// Index into the model's clip list -- optional backstep clip.
-    #[serde(default)]
-    pub backstep_clip: Option<u16>,
-    /// Model-local fallback action bindings. Animation Set
-    /// bindings are preferred when present.
-    #[serde(default)]
-    pub action_clips: Vec<CharacterActionClip>,
     /// Capsule radius (engine units). Used by collision +
     /// editor preview gizmo.
     pub radius: u16,
@@ -1124,13 +1068,6 @@ impl CharacterResource {
         Self {
             model: None,
             animation_set: None,
-            idle_clip: None,
-            walk_clip: None,
-            run_clip: None,
-            turn_clip: None,
-            roll_clip: None,
-            backstep_clip: None,
-            action_clips: Vec::new(),
             radius: default_character_radius(),
             height: default_character_height(),
             walk_speed: default_character_walk_speed(),
@@ -1156,66 +1093,6 @@ impl CharacterResource {
         }
     }
 
-    pub fn action_clip(&self, action: CharacterAnimationAction) -> Option<u16> {
-        self.action_clips
-            .iter()
-            .find_map(|binding| (binding.action == action).then_some(binding.clip))
-            .or_else(|| match action {
-                CharacterAnimationAction::Idle => self.idle_clip,
-                CharacterAnimationAction::Walk => self.walk_clip,
-                CharacterAnimationAction::Run => self.run_clip,
-                CharacterAnimationAction::Turn => self.turn_clip,
-                CharacterAnimationAction::Roll => self.roll_clip,
-                CharacterAnimationAction::Backstep => self.backstep_clip,
-                CharacterAnimationAction::LightAttack
-                | CharacterAnimationAction::HeavyAttack
-                | CharacterAnimationAction::ComboAttack
-                | CharacterAnimationAction::Block
-                | CharacterAnimationAction::HitReact
-                | CharacterAnimationAction::Death => None,
-            })
-    }
-
-    pub fn action_binding(&self, action: CharacterAnimationAction) -> Option<&CharacterActionClip> {
-        self.action_clips
-            .iter()
-            .find(|binding| binding.action == action)
-    }
-
-    pub fn set_action_clip(&mut self, action: CharacterAnimationAction, clip: Option<u16>) {
-        match action {
-            CharacterAnimationAction::Idle => self.idle_clip = None,
-            CharacterAnimationAction::Walk => self.walk_clip = None,
-            CharacterAnimationAction::Run => self.run_clip = None,
-            CharacterAnimationAction::Turn => self.turn_clip = None,
-            CharacterAnimationAction::Roll => self.roll_clip = None,
-            CharacterAnimationAction::Backstep => self.backstep_clip = None,
-            CharacterAnimationAction::LightAttack
-            | CharacterAnimationAction::HeavyAttack
-            | CharacterAnimationAction::ComboAttack
-            | CharacterAnimationAction::Block
-            | CharacterAnimationAction::HitReact
-            | CharacterAnimationAction::Death => {}
-        }
-        match clip {
-            Some(clip) => {
-                if let Some(binding) = self
-                    .action_clips
-                    .iter_mut()
-                    .find(|binding| binding.action == action)
-                {
-                    binding.clip = clip;
-                } else {
-                    self.action_clips.push(CharacterActionClip {
-                        action,
-                        clip,
-                        options: None,
-                    });
-                }
-            }
-            None => self.action_clips.retain(|binding| binding.action != action),
-        }
-    }
 }
 
 pub(crate) const fn default_character_stamina_max_q12() -> i32 {
