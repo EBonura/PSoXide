@@ -809,6 +809,13 @@ impl EditorWorkspace {
                         .on_hover_text(
                             "Removes root-joint translation while baking clips so gameplay code owns character movement.",
                         );
+                        ui.checkbox(
+                            &mut dialog.force_single_bind,
+                            "Pure rigid (1 bone/vertex)",
+                        )
+                        .on_hover_text(
+                            "Collapse every vertex to its dominant bone, dropping secondary skin weights. Keeps the model on the GTE single-bone fast path with no CPU-blend vertices -- the PS1-preferred rigid skinning.",
+                        );
                         ui.label(
                             RichText::new("Texture depth: 8bpp indexed")
                                 .color(STUDIO_TEXT_WEAK)
@@ -1183,6 +1190,7 @@ impl EditorWorkspace {
             strip_animation_scale: true,
             prune_detached_face_islands: 4,
             extra_animations_affect_bounds: true,
+            force_single_bind: self.model_import_dialog.force_single_bind,
         }
     }
 
