@@ -720,44 +720,28 @@ impl ProjectDocument {
             return Vec::new();
         };
 
+        // Animations are skeleton-scoped: every AnimationClip on the
+        // model's skeleton is available to it.
+        let Some(skeleton) = model.skeleton else {
+            return Vec::new();
+        };
         let mut out = Vec::new();
         let mut seen_paths = HashSet::new();
-        for (model_clip_index, clip) in model.clips.iter().enumerate() {
+        for resource in &self.resources {
+            let ResourceData::AnimationClip(clip) = &resource.data else {
+                continue;
+            };
+            if clip.skeleton != Some(skeleton) {
+                continue;
+            }
             if seen_paths.insert(clip.psxanim_path.clone()) {
                 out.push(ResolvedModelAnimationClip {
-                    name: clip.name.clone(),
+                    name: resource.name.clone(),
                     psxanim_path: clip.psxanim_path.clone(),
-                    animation_resource: None,
-                    model_clip_index: Some(model_clip_index),
+                    animation_resource: Some(resource.id),
+                    model_clip_index: None,
                     calibration: clip.calibration,
                 });
-            }
-        }
-
-        for target_required in [true, false] {
-            for resource in &self.resources {
-                let ResourceData::AnimationClip(clip) = &resource.data else {
-                    continue;
-                };
-                let is_target_clip = clip.target_model == Some(model_id);
-                if is_target_clip != target_required {
-                    continue;
-                }
-                if model.skeleton.is_none() || clip.skeleton != model.skeleton {
-                    continue;
-                }
-                if clip.target_model.is_some_and(|target| target != model_id) {
-                    continue;
-                }
-                if seen_paths.insert(clip.psxanim_path.clone()) {
-                    out.push(ResolvedModelAnimationClip {
-                        name: resource.name.clone(),
-                        psxanim_path: clip.psxanim_path.clone(),
-                        animation_resource: Some(resource.id),
-                        model_clip_index: None,
-                        calibration: clip.calibration,
-                    });
-                }
             }
         }
         out
@@ -1272,7 +1256,6 @@ pub(crate) fn resource_data_reference_count(data: &ResourceData, id: ResourceId)
         ResourceData::AnimationClip(clip) => {
             option_resource_reference_count(clip.skeleton, id)
                 + option_resource_reference_count(clip.source, id)
-                + option_resource_reference_count(clip.target_model, id)
         }
         ResourceData::AnimationSet(set) => {
             option_resource_reference_count(set.skeleton, id)
@@ -1314,7 +1297,6 @@ pub(crate) fn clear_resource_data_references(data: &mut ResourceData, id: Resour
         ResourceData::AnimationClip(clip) => {
             clear_option_resource(&mut clip.skeleton, id)
                 + clear_option_resource(&mut clip.source, id)
-                + clear_option_resource(&mut clip.target_model, id)
         }
         ResourceData::AnimationSet(set) => {
             let mut cleared = clear_option_resource(&mut set.skeleton, id)
@@ -1333,18 +1315,8 @@ pub(crate) fn clear_resource_data_references(data: &mut ResourceData, id: Resour
             cleared
         }
         ResourceData::Character(character) => {
-            let cleared_model = clear_option_resource(&mut character.model, id);
-            let cleared_set = clear_option_resource(&mut character.animation_set, id);
-            if cleared_model > 0 {
-                character.idle_clip = None;
-                character.walk_clip = None;
-                character.run_clip = None;
-                character.turn_clip = None;
-                character.roll_clip = None;
-                character.backstep_clip = None;
-                character.action_clips.clear();
-            }
-            cleared_model + cleared_set
+            clear_option_resource(&mut character.model, id)
+                + clear_option_resource(&mut character.animation_set, id)
         }
         ResourceData::Weapon(weapon) => clear_option_resource(&mut weapon.model, id),
         ResourceData::Texture { .. }
@@ -1606,9 +1578,6 @@ pub(crate) fn plan_resource_file_deletes(
             if let Some(texture_path) = &model.texture_path {
                 plan_path_delete(texture_path, project_root, &mut plan);
             }
-            for clip in &model.clips {
-                plan_path_delete(&clip.psxanim_path, project_root, &mut plan);
-            }
         }
         ResourceData::AnimationClip(clip) => {
             plan_path_delete(&clip.psxanim_path, project_root, &mut plan);
@@ -1737,27 +1706,6 @@ pub(crate) fn plan_model_resource_rename(
         }
     }
 
-    let mut seen_clip_stems = HashSet::new();
-    for (index, clip) in model.clips.iter_mut().enumerate() {
-        let clip_suffix = resource_file_stem(&clip.name, "clip");
-        let mut clip_stem = format!("{safe_stem}_{clip_suffix}");
-        if !seen_clip_stems.insert(clip_stem.clone()) {
-            clip_stem = format!("{safe_stem}_{index}_{clip_suffix}");
-            seen_clip_stems.insert(clip_stem.clone());
-        }
-        let original = clip.psxanim_path.clone();
-        if let Some(op) = build_path_rename_in_dir(
-            &original,
-            &clip_stem,
-            "psxanim",
-            target_dir.as_deref(),
-            project_root,
-            plan,
-        ) {
-            clip.psxanim_path = op.to_stored.clone();
-            plan.ops.push(op);
-        }
-    }
 }
 
 pub(crate) fn build_path_rename(

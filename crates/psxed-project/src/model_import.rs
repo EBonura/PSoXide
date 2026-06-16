@@ -27,8 +27,8 @@ use std::{
 
 use crate::{
     default_model_collision_radius_for_height, AnimationClipBakeKind, AnimationClipResource,
-    AnimationRole, AnimationSetResource, CharacterAnimationAction, ModelAnimationClip,
-    ModelResource, ProjectDocument, ResourceData, ResourceId, SkeletonResource,
+    AnimationRole, AnimationSetResource, CharacterAnimationAction, ModelResource, ProjectDocument,
+    ResourceData, ResourceId, SkeletonResource,
 };
 
 pub use psxed_format::texture::Depth as TextureDepth;
@@ -397,7 +397,6 @@ pub fn register_cooked_model_bundle(
 ) -> Result<ResourceId, ModelImportError> {
     let mut psxmdl: Vec<PathBuf> = Vec::new();
     let mut psxt: Vec<PathBuf> = Vec::new();
-    let mut psxanim: Vec<PathBuf> = Vec::new();
 
     let read = std::fs::read_dir(bundle_dir).map_err(|e| {
         if matches!(e.kind(), std::io::ErrorKind::NotFound)
@@ -423,7 +422,6 @@ pub fn register_cooked_model_bundle(
         match path.extension().and_then(|e| e.to_str()) {
             Some("psxmdl") => psxmdl.push(path),
             Some("psxt") => psxt.push(path),
-            Some("psxanim") => psxanim.push(path),
             _ => {}
         }
     }
@@ -440,13 +438,11 @@ pub fn register_cooked_model_bundle(
         return Err(ModelImportError::MultipleTextureFiles { paths: psxt });
     }
 
-    psxanim.sort();
     let model_path = psxmdl.pop().unwrap();
     let texture_path = psxt.pop();
 
-    // Validate the model + texture + every animation. Failure
-    // here means the resource is never created -- we never leave
-    // a half-broken `Model` entry in `project.resources`.
+    // Validate the model + texture. Failure here means the resource is
+    // never created -- we never leave a half-broken `Model` entry.
     let model_bytes = std::fs::read(&model_path).map_err(|e| ModelImportError::Io {
         path: model_path.clone(),
         detail: e.to_string(),
@@ -456,7 +452,6 @@ pub fn register_cooked_model_bundle(
             path: model_path.clone(),
             detail: format!("{:?}", e),
         })?;
-    let model_joint_count = model.joint_count();
     let skeleton = SkeletonResource::from_model(&model);
     let skeleton_id = find_or_add_skeleton(project, display_name, skeleton);
 
@@ -471,50 +466,13 @@ pub fn register_cooked_model_bundle(
         })?;
     }
 
-    let mut clips: Vec<ModelAnimationClip> = Vec::with_capacity(psxanim.len());
-    for path in &psxanim {
-        let bytes = std::fs::read(path).map_err(|e| ModelImportError::Io {
-            path: path.clone(),
-            detail: e.to_string(),
-        })?;
-        let anim = psx_asset::Animation::from_bytes(&bytes).map_err(|e| {
-            ModelImportError::InvalidAnimation {
-                path: path.clone(),
-                detail: format!("{:?}", e),
-            }
-        })?;
-        if anim.joint_count() != model_joint_count {
-            return Err(ModelImportError::JointCountMismatch {
-                path: path.clone(),
-                animation_joints: anim.joint_count(),
-                model_joints: model_joint_count,
-            });
-        }
-        clips.push(ModelAnimationClip {
-            name: clip_name_from_path(path),
-            psxanim_path: relativise(path, project_root),
-            calibration: Default::default(),
-        });
-    }
-
-    let default_clip = if clips.is_empty() {
-        None
-    } else {
-        Some(default_clip_index(&clips))
-    };
-
+    // A Model is pure geometry: mesh + atlas + skeleton. Animations are
+    // skeleton-scoped AnimationClip resources (see import_animation_library).
     let model_resource = ModelResource {
         model_path: relativise(&model_path, project_root),
         source_path: None,
         texture_path: texture_path.as_ref().map(|p| relativise(p, project_root)),
         skeleton: Some(skeleton_id),
-        clips,
-        // Prefer an authored idle clip for first preview/runtime
-        // playback. Alphabetical bundle order often puts one-shot
-        // clips like "dead" before "idle", which makes index 0 a bad
-        // default even though the clip list itself is valid.
-        default_clip,
-        preview_clip: default_clip,
         world_height: 1024,
         collision_radius: default_model_collision_radius_for_height(1024),
         scale_q8: [crate::MODEL_SCALE_ONE_Q8; 3],
@@ -566,19 +524,8 @@ pub fn import_model_with_animation_sources(
             detail: e.to_string(),
         })?;
     }
-
-    let mut used_clip_stems = BTreeSet::new();
-    for clip in &package.clips {
-        let clip_stem = unique_clip_stem(
-            &mut used_clip_stems,
-            &format!("{}_{}", safe, clip.sanitized_name),
-        );
-        let clip_path = bundle_dir.join(format!("{clip_stem}.psxanim"));
-        std::fs::write(&clip_path, &clip.bytes).map_err(|e| ModelImportError::Io {
-            path: clip_path,
-            detail: e.to_string(),
-        })?;
-    }
+    // A Model is geometry only; its source's own animation takes are not
+    // written. Animations come from import_animation_library.
 
     let model_id =
         register_cooked_model_bundle(project, &bundle_dir, output_name, Some(project_root))?;
@@ -713,7 +660,6 @@ pub fn import_animation_library(
                 psxanim_path: relativise(&path, Some(project_root)),
                 skeleton: Some(skeleton_id),
                 source: None,
-                target_model: None,
                 bake: AnimationClipBakeKind::LegacyShared,
                 role,
                 looping: matches!(
@@ -791,7 +737,7 @@ pub fn bake_animation_source_for_model(
         let ResourceData::AnimationClip(clip) = &resource.data else {
             return None;
         };
-        (clip.source == Some(source_id) && clip.target_model == Some(model_id))
+        (clip.source == Some(source_id) && clip.skeleton == skeleton)
             .then(|| (resource.id, clip.psxanim_path.clone()))
     });
 
@@ -878,7 +824,6 @@ pub fn bake_animation_source_for_model(
         psxanim_path: stored_path,
         skeleton,
         source: Some(source_id),
-        target_model: Some(model_id),
         bake: AnimationClipBakeKind::Retargeted,
         role,
         looping: source_meta.looping,
@@ -930,49 +875,6 @@ fn unique_animation_clip_path(bundle_dir: &Path, stem: &str) -> PathBuf {
         index += 1;
     }
     candidate
-}
-
-/// Derive a clip display name from a `.psxanim` path. Strips the
-/// extension and any leading `<model>_` prefix when one of the
-/// canonical stems is recognised, so a bundle called
-/// `obsidian_wraith` produces clip names like `idle` rather than
-/// `obsidian_wraith_idle`.
-fn clip_name_from_path(path: &Path) -> String {
-    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("clip");
-    // Bundle-prefix stripping: pick the longest known model
-    // prefix that the stem starts with. This is heuristic -- when
-    // we don't recognise the prefix we keep the full stem so the
-    // user can rename in the inspector.
-    let parent_name = path
-        .parent()
-        .and_then(|p| p.file_name())
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
-    let prefix_len = parent_name.len() + 1;
-    if !parent_name.is_empty()
-        && stem.len() > prefix_len
-        && stem.starts_with(parent_name)
-        && stem.as_bytes().get(parent_name.len()) == Some(&b'_')
-    {
-        return stem[prefix_len..].to_string();
-    }
-    stem.to_string()
-}
-
-fn default_clip_index(clips: &[ModelAnimationClip]) -> u16 {
-    if let Some(index) = clips
-        .iter()
-        .position(|clip| clip.name.eq_ignore_ascii_case("idle"))
-    {
-        return index as u16;
-    }
-    if let Some(index) = clips
-        .iter()
-        .position(|clip| clip.name.to_ascii_lowercase().contains("idle"))
-    {
-        return index as u16;
-    }
-    0
 }
 
 fn find_or_add_skeleton(
