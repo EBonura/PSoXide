@@ -480,12 +480,14 @@ pub struct RigidModelConfig {
     /// imported animations strip basis scale by default.
     pub strip_animation_scale: bool,
     /// Drop detached mesh islands with at most this many faces after
-    /// cooked-position welding. Zero disables pruning.
+    /// cooked-position welding. Zero (the default) disables pruning.
     ///
-    /// Meshy-style character exports can contain one- or two-triangle
-    /// loose scraps that survive normal vertex welding. This pass runs
-    /// after the model precision bounds are known so it uses the same
-    /// quantised positions as the final `.psxmdl`.
+    /// Hand-authored low-poly models legitimately contain small separate
+    /// pieces (armor plates, detail bits), so pruning is OFF by default
+    /// and only useful for Meshy-style exports that carry one- or
+    /// two-triangle auto-generated scraps. This pass runs after the model
+    /// precision bounds are known so it uses the same quantised positions
+    /// as the final `.psxmdl`.
     pub prune_detached_face_islands: u16,
     /// Collapse every vertex to a pure single-bone bind before cooking,
     /// dropping all secondary skin influences. The result has no
@@ -510,7 +512,7 @@ impl Default for RigidModelConfig {
             world_height: DEFAULT_MODEL_WORLD_HEIGHT,
             normalize_root_translation: false,
             strip_animation_scale: true,
-            prune_detached_face_islands: 4,
+            prune_detached_face_islands: 0,
             extra_animations_affect_bounds: true,
             force_single_bind: false,
         }
