@@ -284,6 +284,7 @@ fn native_model_compacts_duplicate_part_vertices() {
         128,
         128,
         psxed_format::model::DEFAULT_LOCAL_TO_WORLD_Q12,
+        false,
     )
     .unwrap();
 
@@ -373,6 +374,7 @@ fn native_model_reassigns_vertex_only_joints_to_face_part() {
         128,
         128,
         psxed_format::model::DEFAULT_LOCAL_TO_WORLD_Q12,
+        false,
     )
     .unwrap();
 
