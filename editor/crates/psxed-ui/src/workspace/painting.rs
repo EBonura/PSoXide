@@ -586,7 +586,6 @@ impl EditorWorkspace {
                     )
                 })
             })
-            .or_else(|| character.action_clip(psxed_project::CharacterAnimationAction::Idle))
     }
 
     /// Build the dedupe key for the next paint dispatch. PaintWall

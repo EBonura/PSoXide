@@ -189,10 +189,6 @@ pub(crate) fn legacy_obsidian_warden_resource(resource: &Resource) -> bool {
                     .texture_path
                     .as_deref()
                     .is_some_and(legacy_obsidian_warden_asset_path)
-                || model
-                    .clips
-                    .iter()
-                    .any(|clip| legacy_obsidian_warden_asset_path(&clip.psxanim_path))
         }
         ResourceData::AnimationClip(clip) => legacy_obsidian_warden_asset_path(&clip.psxanim_path),
         _ => false,
@@ -289,7 +285,6 @@ pub(crate) fn remap_resource_data(
         ResourceData::AnimationClip(clip) => {
             remap_resource_id_option(&mut clip.skeleton, id_map);
             remap_resource_id_option(&mut clip.source, id_map);
-            remap_resource_id_option(&mut clip.target_model, id_map);
         }
         ResourceData::AnimationSet(set) => {
             remap_resource_id_option(&mut set.skeleton, id_map);

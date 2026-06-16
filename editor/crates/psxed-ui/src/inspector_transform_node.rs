@@ -1691,18 +1691,16 @@ pub(crate) fn character_profile_action_clip(
     character: &psxed_project::CharacterResource,
     action: psxed_project::CharacterAnimationAction,
 ) -> Option<u16> {
-    character.action_clip(action).or_else(|| {
-        let set = character.animation_set.and_then(|id| {
-            project
-                .resource(id)
-                .and_then(|resource| match &resource.data {
-                    ResourceData::AnimationSet(set) => Some(set),
-                    _ => None,
-                })
-        })?;
-        let clip = set.action_clip(action)?;
-        project.resolved_model_animation_index(model_id, clip)
-    })
+    let set = character.animation_set.and_then(|id| {
+        project
+            .resource(id)
+            .and_then(|resource| match &resource.data {
+                ResourceData::AnimationSet(set) => Some(set),
+                _ => None,
+            })
+    })?;
+    let clip = set.action_clip(action)?;
+    project.resolved_model_animation_index(model_id, clip)
 }
 
 pub(crate) fn draw_node_kind_editor(
