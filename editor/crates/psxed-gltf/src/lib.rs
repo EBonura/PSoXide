@@ -494,6 +494,12 @@ pub struct RigidModelConfig {
     /// `BLEND_SKIN` vertices and stays on the GTE single-bone fast path
     /// -- the rigid representation preferred for PS1 characters.
     pub force_single_bind: bool,
+    /// Cook the model double-sided: set the `DOUBLE_SIDED` header flag so
+    /// the runtime renders both face windings (no backface culling).
+    /// Use for hollow / open-faced models that would otherwise show
+    /// through. Costs roughly 2x submitted faces, so keep it off by
+    /// default and enable per model.
+    pub double_sided: bool,
     /// Include standalone animation sources when choosing model/pose
     /// precision bounds. Full bundle imports should keep this enabled
     /// so every generated clip matches the generated model. Add-on
@@ -515,6 +521,7 @@ impl Default for RigidModelConfig {
             prune_detached_face_islands: 0,
             extra_animations_affect_bounds: true,
             force_single_bind: false,
+            double_sided: false,
         }
     }
 }
@@ -1040,6 +1047,7 @@ fn finish_static_rigid_model_document(
         cfg.texture_width,
         cfg.texture_height,
         local_to_world_q12,
+        cfg.double_sided,
     )?;
     let clips = vec![bind_pose_clip(joints.len(), &bounds, cfg.animation_fps)?];
     let animation_bytes = clips.iter().map(|c| c.bytes.len()).sum();
@@ -1103,6 +1111,7 @@ fn finish_rigid_model_document(
         cfg.texture_width,
         cfg.texture_height,
         local_to_world_q12,
+        cfg.double_sided,
     )?;
     let mut clips = cook_all_animations(
         document,

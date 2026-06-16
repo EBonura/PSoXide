@@ -95,6 +95,13 @@ pub mod flags {
     /// rigid models clear this bit so the runtime can stay on the
     /// single-bone fast path without inspecting per-vertex blend.
     pub const BLEND_SKIN: u16 = 1 << 3;
+    /// Render both face windings (no backface culling) for this model.
+    ///
+    /// Set when the model is authored double-sided (e.g. a hollow prop
+    /// with open faces that would otherwise show through). The runtime
+    /// picks `CullMode::None` instead of the default `Back` so every
+    /// face draws regardless of its normal direction.
+    pub const DOUBLE_SIDED: u16 = 1 << 4;
 }
 
 /// Byte layout of the model payload header.

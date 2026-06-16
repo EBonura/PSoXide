@@ -220,6 +220,7 @@ pub(crate) fn finish_static_fbx_rigid_model_scene(
         cfg.texture_width,
         cfg.texture_height,
         local_to_world_q12,
+        cfg.double_sided,
     )?;
     let clips = vec![bind_pose_clip(joints.len(), &bounds, cfg.animation_fps)?];
     let animation_bytes = clips.iter().map(|c| c.bytes.len()).sum();
@@ -279,6 +280,7 @@ pub(crate) fn finish_fbx_rigid_model_scene(
         cfg.texture_width,
         cfg.texture_height,
         local_to_world_q12,
+        cfg.double_sided,
     )?;
     let mut clips = cook_all_fbx_animations(
         scene,
@@ -462,7 +464,10 @@ pub(crate) fn read_fbx_skinned_mesh(
                     [0.0, 1.0, 0.0]
                 };
                 let uv = if mesh.vertex_uv.exists {
-                    fbx_vec2(mesh.vertex_uv[fbx_index])
+                    // FBX UVs use a bottom-origin V; the cooked atlas is stored
+                    // top-origin, so flip V to match.
+                    let uv = fbx_vec2(mesh.vertex_uv[fbx_index]);
+                    [uv[0], 1.0 - uv[1]]
                 } else {
                     [0.0, 0.0]
                 };
@@ -527,7 +532,10 @@ pub(crate) fn read_fbx_static_mesh(
                 }
                 let position = transform_point(&transform, raw);
                 let uv = if mesh.vertex_uv.exists {
-                    fbx_vec2(mesh.vertex_uv[fbx_index])
+                    // FBX UVs use a bottom-origin V; the cooked atlas is stored
+                    // top-origin, so flip V to match.
+                    let uv = fbx_vec2(mesh.vertex_uv[fbx_index]);
+                    [uv[0], 1.0 - uv[1]]
                 } else {
                     [0.0, 0.0]
                 };

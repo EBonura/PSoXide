@@ -12,6 +12,7 @@ pub(crate) fn cook_model_blob(
     texture_width: u16,
     texture_height: u16,
     local_to_world_q12: u16,
+    double_sided: bool,
 ) -> Result<(Vec<u8>, usize, usize), Error> {
     let mut node_to_joint = vec![None; parents.len()];
     for (joint_index, node_index) in joints.iter().copied().enumerate() {
@@ -162,6 +163,9 @@ pub(crate) fn cook_model_blob(
         psxed_format::model::flags::HAS_UVS | psxed_format::model::flags::RIGID_SKINNED;
     if blend_skin {
         model_flags |= psxed_format::model::flags::BLEND_SKIN;
+    }
+    if double_sided {
+        model_flags |= psxed_format::model::flags::DOUBLE_SIDED;
     }
     append_asset_header(
         &mut out,

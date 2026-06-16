@@ -26,6 +26,7 @@ pub(super) struct RuntimeModelAsset {
     pub(super) vertex_first: u16,
     pub(super) vertex_count: u16,
     pub(super) requires_cpu_blend: bool,
+    pub(super) double_sided: bool,
     pub(super) world_height: u16,
     pub(super) collision_radius: u16,
     pub(super) local_to_world: LocalToWorldScale,
@@ -88,6 +89,7 @@ impl RuntimeModelAsset {
             vertex_first: vertex_first as u16,
             vertex_count: vertex_count as u16,
             requires_cpu_blend: model_requires_cpu_blend(model),
+            double_sided: model.double_sided(),
             world_height: record.world_height,
             collision_radius: record.collision_radius,
             local_to_world: LocalToWorldScale::from_q12(model.local_to_world_q12()),
@@ -491,9 +493,14 @@ pub(super) fn draw_player(
     }
 
     let material = lighting.shade_model_material(origin, runtime_model.material);
+    let cull_mode = if runtime_model.double_sided {
+        CullMode::None
+    } else {
+        CullMode::Back
+    };
     let model_options = options
         .with_depth_policy(DepthPolicy::Average)
-        .with_cull_mode(CullMode::Back)
+        .with_cull_mode(cull_mode)
         .with_material_layer(material)
         .with_textured_triangle_splitting(true)
         .with_textured_triangle_max_edge(MODEL_TEXTURE_SPLIT_MAX_EDGE);
