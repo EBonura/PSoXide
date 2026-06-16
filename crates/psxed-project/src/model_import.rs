@@ -1053,14 +1053,9 @@ mod tests {
         };
         assert!(model.model_path.ends_with("obsidian_wraith.psxmdl"));
         assert!(model.texture_path.is_some());
-        assert!(!model.clips.is_empty(), "expected at least one clip");
-        // Clips are sorted by file name, but default/preview should
-        // prefer the idle clip instead of blindly picking slot 0.
-        let mut sorted_names: Vec<&str> = model.clips.iter().map(|c| c.name.as_str()).collect();
-        sorted_names.sort();
-        assert!(sorted_names.contains(&"idle"));
-        assert_eq!(model.default_clip, Some(3));
-        assert_eq!(model.preview_clip, Some(3));
+        // A Model is geometry only: it registers with a skeleton and no
+        // clips of its own (animations are skeleton-scoped resources).
+        assert!(model.skeleton.is_some(), "model registers with a skeleton");
     }
 
     #[test]
