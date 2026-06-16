@@ -72,40 +72,13 @@ pub fn resolve_spawn_character(
     }
 }
 
-/// Clip shown for a placed Model instance in the editor preview.
-pub fn resolve_model_instance_preview_clip(
-    model: &ModelResource,
-    override_clip: Option<u16>,
-) -> Option<u16> {
-    override_clip
-        .or(model.effective_preview_clip())
-        .or_else(|| {
-            if model.clips.is_empty() {
-                None
-            } else {
-                Some(0)
-            }
-        })
-}
-
-/// Clip shown for a player spawn's Character in the editor preview.
-pub fn resolve_character_idle_preview_clip(
-    character: &CharacterResource,
-    model: &ModelResource,
-) -> Option<u16> {
-    character
-        .action_clip(CharacterAnimationAction::Idle)
-        .or(model.effective_preview_clip())
-        .or_else(|| (!model.clips.is_empty()).then_some(0))
-}
-
-/// Clip shown for a player spawn's Character in the editor preview
-/// when the project has standalone Animation Set resources.
+/// Clip shown for a player spawn's Character in the editor preview:
+/// the Idle clip from its Animation Set, else the first skeleton clip.
 pub fn resolve_character_idle_preview_clip_for_model(
     project: &ProjectDocument,
     character: &CharacterResource,
     model_id: ResourceId,
-    model: &ModelResource,
+    _model: &ModelResource,
 ) -> Option<u16> {
     if let Some(animation_id) = character.animation_set.and_then(|set_id| {
         project
@@ -119,8 +92,7 @@ pub fn resolve_character_idle_preview_clip_for_model(
             return Some(index);
         }
     }
-    resolve_character_idle_preview_clip(character, model)
-        .or_else(|| (!project.resolved_model_animation_clips(model_id).is_empty()).then_some(0))
+    (!project.resolved_model_animation_clips(model_id).is_empty()).then_some(0)
 }
 
 #[cfg(test)]
