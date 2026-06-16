@@ -493,10 +493,8 @@ fn model_with_no_clips_fails_when_placed() {
             let ResourceData::Model(model) = &mut resource.data else {
                 continue;
             };
+            // No skeleton -> no resolvable skeleton clips.
             model.skeleton = None;
-            model.clips.clear();
-            model.default_clip = None;
-            model.preview_clip = None;
             break;
         }
     }
