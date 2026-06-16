@@ -101,101 +101,35 @@ pub(crate) fn draw_character_resource_editor(
     egui::CollapsingHeader::new(icons::label(icons::PALETTE, "Animation Actions"))
         .default_open(true)
         .show(ui, |ui| {
-            let clips: &[String] = bound.map(|(_, _, c)| c.as_slice()).unwrap_or(&[]);
-            if character.animation_set.is_some() {
-                ui.label(
-                    RichText::new(
-                        "Preset clips below are fallback defaults. Animator components can override action clips per entity.",
-                    )
-                    .color(STUDIO_TEXT_WEAK)
-                    .small(),
-                );
-            }
-            if bound.is_none() {
+            if character.animation_set.is_none() {
                 ui.colored_label(
-                    STUDIO_TEXT_WEAK,
-                    "Pick a Model to surface its clip list.",
+                    Color32::from_rgb(220, 120, 100),
+                    "Assign an Action Map (Animation Set) above to give this character animations.",
                 );
+                return;
             }
-            for action in psxed_project::CharacterAnimationAction::ALL {
-                let mut current = character.action_clip(action);
-                changed |= clip_role_picker(
-                    ui,
-                    action.label(),
-                    &format!("character-action-clip-{}", action.to_index()),
-                    &mut current,
-                    clips,
-                );
-                if current != character.action_clip(action) {
-                    character.set_action_clip(action, current);
-                    changed = true;
-                }
-            }
+            ui.label(
+                RichText::new(
+                    "Animations resolve from the assigned Action Map. Edit clip roles on that Animation Set resource.",
+                )
+                .color(STUDIO_TEXT_WEAK)
+                .small(),
+            );
+            draw_character_effective_roles(ui, selected_set, ctx);
 
-            draw_character_effective_roles(ui, character, selected_set, clips, ctx);
-
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                let auto_enabled = !clips.is_empty();
-                if ui
-                    .add_enabled(
-                        auto_enabled,
-                        egui::Button::new(icons::label(icons::SCAN, "Auto Assign Clips By Name")),
-                    )
-                    .on_hover_text(
-                        "Match clip names against gameplay action names (case-insensitive).",
-                    )
-                    .clicked()
-                {
-                    let before = character.action_clips.clone();
-                    auto_assign_character_clips(character, clips);
-                    if character.action_clips != before {
-                        changed = true;
-                    }
-                }
-            });
-
-            // Inline warnings: required roles missing, or slot
-            // points past end of the model's clip list.
-            let warn_idx = |label: &str, slot: Option<u16>| -> Option<String> {
-                let idx = slot?;
-                if (idx as usize) >= clips.len() {
-                    Some(format!(
-                        "{label} clip index {idx} exceeds model's clip list ({} clips).",
-                        clips.len()
-                    ))
-                } else {
-                    None
-                }
-            };
-            for action in psxed_project::CharacterAnimationAction::ALL {
-                if let Some(warning) = warn_idx(action.label(), character.action_clip(action)) {
-                    ui.colored_label(Color32::from_rgb(220, 160, 80), warning);
-                }
-            }
             let has_set_idle = selected_set
                 .and_then(|set| set.action_clips[psxed_project::CharacterAnimationAction::Idle.to_index()])
                 .is_some();
             let has_set_walk = selected_set
                 .and_then(|set| set.action_clips[psxed_project::CharacterAnimationAction::Walk.to_index()])
                 .is_some();
-            if character.model.is_some()
-                && character
-                    .action_clip(psxed_project::CharacterAnimationAction::Idle)
-                    .is_none()
-                && !has_set_idle
-            {
+            if character.model.is_some() && !has_set_idle {
                 ui.colored_label(
                     Color32::from_rgb(220, 120, 100),
                     "Idle clip is required for the player character.",
                 );
             }
-            if character.model.is_some()
-                && character
-                    .action_clip(psxed_project::CharacterAnimationAction::Walk)
-                    .is_none()
-                && !has_set_walk
-            {
+            if character.model.is_some() && !has_set_walk {
                 ui.colored_label(
                     Color32::from_rgb(220, 120, 100),
                     "Walk clip is required for the player character.",
@@ -317,9 +251,7 @@ pub(crate) fn draw_character_controller_settings(
 
 pub(crate) fn draw_character_effective_roles(
     ui: &mut egui::Ui,
-    character: &psxed_project::CharacterResource,
     set: Option<&AnimationSetOption>,
-    model_clips: &[String],
     ctx: &CharacterEditorContext,
 ) {
     ui.add_space(4.0);
@@ -329,29 +261,18 @@ pub(crate) fn draw_character_effective_roles(
             .small(),
     );
     egui::Grid::new("character-effective-roles")
-        .num_columns(3)
+        .num_columns(2)
         .spacing([8.0, 3.0])
         .show(ui, |ui| {
             for action in psxed_project::CharacterAnimationAction::ALL {
                 let set_clip = set.and_then(|set| set.action_clips[action.to_index()]);
-                let legacy_clip = character.action_clip(action);
                 ui.label(action.label());
                 if let Some(clip) = set_clip {
                     ui.label(ctx.animation_clip_name(clip));
-                    ui.label(RichText::new("set").color(STUDIO_TEXT_WEAK).small());
-                } else if let Some(index) = legacy_clip {
-                    let name = model_clips
-                        .get(index as usize)
-                        .map(String::as_str)
-                        .unwrap_or("(missing)");
-                    ui.label(format!("{index}: {name}"));
-                    ui.label(RichText::new("fallback").color(STUDIO_TEXT_WEAK).small());
                 } else if action.required_for_player() {
                     ui.colored_label(Color32::from_rgb(220, 120, 100), "missing");
-                    ui.label("");
                 } else {
                     ui.label(RichText::new("(none)").color(STUDIO_TEXT_WEAK));
-                    ui.label("");
                 }
                 ui.end_row();
             }
@@ -888,81 +809,6 @@ pub(crate) fn set_node_action_options(
         .find(|binding| binding.action == action)
     {
         binding.options = options;
-    }
-}
-
-/// Heuristic clip-by-name auto-assignment. Case-insensitive
-/// substring match. Leaves missing roles unset so the validation
-/// warnings still fire.
-pub(crate) fn auto_assign_character_clips(
-    character: &mut psxed_project::CharacterResource,
-    clips: &[String],
-) {
-    let lower: Vec<String> = clips.iter().map(|c| c.to_ascii_lowercase()).collect();
-    let find_exact = |needles: &[&str]| -> Option<u16> {
-        lower
-            .iter()
-            .position(|name| needles.iter().any(|needle| name == needle))
-            .map(|i| i as u16)
-    };
-    let find_contains = |needle: &str, reject: &[&str]| -> Option<u16> {
-        lower
-            .iter()
-            .position(|name| {
-                name.contains(needle) && !reject.iter().any(|blocked| name.contains(blocked))
-            })
-            .map(|i| i as u16)
-    };
-
-    for action in psxed_project::CharacterAnimationAction::ALL {
-        let index = match action {
-            psxed_project::CharacterAnimationAction::Idle => {
-                find_exact(&["idle"]).or_else(|| find_contains("idle", &[]))
-            }
-            psxed_project::CharacterAnimationAction::Walk => {
-                find_exact(&["walking", "walk", "walk_forward", "forward_walk"])
-                    .or_else(|| find_contains("walk", &["back", "backward", "unsteady"]))
-                    .or_else(|| find_contains("walk", &[]))
-            }
-            psxed_project::CharacterAnimationAction::Run => {
-                find_exact(&["running", "run"]).or_else(|| find_contains("run", &[]))
-            }
-            psxed_project::CharacterAnimationAction::Turn => {
-                find_exact(&["turn", "turning"]).or_else(|| find_contains("turn", &[]))
-            }
-            psxed_project::CharacterAnimationAction::Roll => {
-                find_exact(&["roll", "dodge", "dodge_roll"])
-                    .or_else(|| find_contains("roll", &[]))
-                    .or_else(|| find_contains("dodge", &[]))
-            }
-            psxed_project::CharacterAnimationAction::Backstep => {
-                find_exact(&["backstep", "back_step", "step_back"])
-                    .or_else(|| find_contains("backstep", &[]))
-                    .or_else(|| find_contains("back_step", &[]))
-                    .or_else(|| find_contains("back step", &[]))
-                    .or_else(|| find_contains("step_back", &[]))
-                    .or_else(|| find_contains("step back", &[]))
-            }
-            psxed_project::CharacterAnimationAction::LightAttack => find_contains("light", &[])
-                .or_else(|| find_contains("attack", &["heavy", "combo"]))
-                .or_else(|| find_contains("melee", &["heavy", "combo"])),
-            psxed_project::CharacterAnimationAction::HeavyAttack => {
-                find_contains("heavy", &[]).or_else(|| find_contains("strong", &[]))
-            }
-            psxed_project::CharacterAnimationAction::ComboAttack => find_contains("combo", &[]),
-            psxed_project::CharacterAnimationAction::Block => {
-                find_contains("block", &[]).or_else(|| find_contains("guard", &[]))
-            }
-            psxed_project::CharacterAnimationAction::HitReact => {
-                find_contains("hit", &[]).or_else(|| find_contains("reaction", &[]))
-            }
-            psxed_project::CharacterAnimationAction::Death => {
-                find_contains("death", &[]).or_else(|| find_contains("dead", &[]))
-            }
-        };
-        if let Some(index) = index {
-            character.set_action_clip(action, Some(index));
-        }
     }
 }
 

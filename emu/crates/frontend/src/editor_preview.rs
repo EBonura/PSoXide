@@ -1534,12 +1534,9 @@ fn walk_model_instances(
             continue;
         };
 
-        // Resolve clip: explicit instance override → preview clip → default.
-        let clip_local = psxed_project::resolve::resolve_model_instance_preview_clip(
-            model,
-            reference.clip_override,
-        )
-        .unwrap_or(0);
+        // Geometry-only models: preview the instance's clip override,
+        // else the first skeleton-scoped clip.
+        let clip_local = reference.clip_override.unwrap_or(0);
         if (clip_local as usize)
             >= project
                 .resolved_model_animation_clips(reference.model_id)

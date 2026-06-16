@@ -530,34 +530,6 @@ impl EditorWorkspace {
             ui.separator();
 
             if ui
-                .button(icons::label(icons::SCAN, "Catalogue Animations"))
-                .on_hover_text(
-                    "Build Skeleton, Animation Clip, and Clip Role Map resources from existing Model clip lists.",
-                )
-                .clicked()
-            {
-                match catalogue_animation_library(&mut self.project, &self.project_dir) {
-                    Ok(report) => {
-                        self.status = format!(
-                            "Catalogued animations: {} skeleton(s), {} source(s), {} source update(s), {} clip(s), {} set(s), {} updated",
-                            report.skeletons_added,
-                            report.sources_added,
-                            report.sources_updated,
-                            report.clips_added,
-                            report.sets_added,
-                            report.sets_updated + report.models_updated + report.characters_updated
-                        );
-                        if report.changed() {
-                            self.mark_dirty();
-                        }
-                    }
-                    Err(error) => {
-                        self.status = format!("Animation catalogue failed: {error}");
-                    }
-                }
-                ui.close_menu();
-            }
-            if ui
                 .button(icons::label(icons::SCAN, "Catalogue Animation Source Folder"))
                 .on_hover_text(
                     "Catalogue raw FBX/GLB animation source files without copying them into the project.",

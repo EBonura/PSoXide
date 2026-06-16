@@ -869,129 +869,16 @@ pub(crate) fn draw_model_resource_editor(
         );
     }
 
-    egui::CollapsingHeader::new(icons::label(icons::PLAY, "Animation Clips"))
-        .default_open(true)
+    egui::CollapsingHeader::new(icons::label(icons::PLAY, "Animations"))
+        .default_open(false)
         .show(ui, |ui| {
-            let available_clips = available_animation_clips(project_root);
-            if available_clips.is_empty() {
-                ui.label(
-                    RichText::new("No .psxanim files found in this project.")
-                        .color(STUDIO_TEXT_WEAK)
-                        .small(),
-                );
-            }
-
-            // Walk a copy of the indices so we can offer add /
-            // remove buttons without confusing the borrow checker.
-            let mut to_remove: Option<usize> = None;
-            for (i, clip) in model.clips.iter_mut().enumerate() {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(format!("#{i}")).color(STUDIO_TEXT_WEAK));
-                    if ui.text_edit_singleline(&mut clip.name).changed() {
-                        changed = true;
-                    }
-                    if ui.small_button(icons::label(icons::TRASH, "")).clicked() {
-                        to_remove = Some(i);
-                    }
-                });
-                changed |= animation_clip_source_picker(
-                    ui,
-                    ui.id().with("model-animation-clip-source").with(i),
-                    clip,
-                    &available_clips,
-                );
-                let calibration_id = ui.id().with("model-animation-clip-calibration").with(i);
-                changed |= draw_animation_clip_calibration_controls(
-                    ui,
-                    &mut clip.calibration,
-                    calibration_id,
-                );
-                // Inline per-clip stats: parse on the fly. Joint
-                // mismatch is the most actionable thing to surface
-                // -- the cooker rejects the bundle if it persists.
-                if let Some(model_stats) = &model_stats {
-                    let clip_path = psxed_project::model_import::resolve_path(
-                        &clip.psxanim_path,
-                        Some(project_root),
-                    );
-                    if let Ok(bytes) = std::fs::read(&clip_path) {
-                        match psxed_project::model_import::animation_stats_from_bytes(
-                            &clip.name,
-                            &bytes,
-                            model_stats.joint_count,
-                        ) {
-                            Ok(stats) => {
-                                let label = format!(
-                                    "{} frames @ {} Hz, {} joints",
-                                    stats.frame_count, stats.sample_rate_hz, stats.joint_count,
-                                );
-                                if stats.valid_for_model {
-                                    ui.label(RichText::new(label).color(STUDIO_TEXT_WEAK).small());
-                                } else {
-                                    ui.colored_label(
-                                        Color32::from_rgb(220, 160, 80),
-                                        format!(
-                                            "{label} — joint mismatch (model {})",
-                                            model_stats.joint_count
-                                        ),
-                                    );
-                                }
-                            }
-                            Err(e) => {
-                                ui.colored_label(
-                                    Color32::from_rgb(220, 120, 100),
-                                    format!("parse failed: {e}"),
-                                );
-                            }
-                        }
-                    }
-                }
-                ui.add_space(2.0);
-            }
-            if let Some(i) = to_remove {
-                model.clips.remove(i);
-                // Drop indices that referenced the removed clip
-                // or anything past it so they stay valid.
-                if let Some(d) = model.default_clip {
-                    model.default_clip = match (d as usize).cmp(&i) {
-                        std::cmp::Ordering::Less => Some(d),
-                        std::cmp::Ordering::Equal => None,
-                        std::cmp::Ordering::Greater => Some(d.saturating_sub(1)),
-                    };
-                }
-                if let Some(p) = model.preview_clip {
-                    model.preview_clip = match (p as usize).cmp(&i) {
-                        std::cmp::Ordering::Less => Some(p),
-                        std::cmp::Ordering::Equal => None,
-                        std::cmp::Ordering::Greater => Some(p.saturating_sub(1)),
-                    };
-                }
-                changed = true;
-            }
-            if ui.button(icons::label(icons::PLUS, "Add clip")).clicked() {
-                let used_paths: HashSet<&str> = model
-                    .clips
-                    .iter()
-                    .map(|c| c.psxanim_path.as_str())
-                    .collect();
-                let source = available_clips
-                    .iter()
-                    .find(|clip| !used_paths.contains(clip.stored_path.as_str()))
-                    .or_else(|| available_clips.first());
-                let (name, psxanim_path) = source
-                    .map(|clip| (clip.default_name.clone(), clip.stored_path.clone()))
-                    .unwrap_or_else(|| (format!("clip_{}", model.clips.len()), String::new()));
-                model.clips.push(psxed_project::ModelAnimationClip {
-                    name,
-                    psxanim_path,
-                    calibration: Default::default(),
-                });
-                changed = true;
-            }
-
-            ui.separator();
-            changed |= clip_picker(ui, "Default clip", &mut model.default_clip, &model.clips);
-            changed |= clip_picker(ui, "Preview clip", &mut model.preview_clip, &model.clips);
+            ui.label(
+                RichText::new(
+                    "Models are geometry only. Animations are skeleton-scoped AnimationClip resources: import them with the animation library tools and bind them via a Character's Animation Set.",
+                )
+                .color(STUDIO_TEXT_WEAK)
+                .small(),
+            );
         });
 
     changed
@@ -1023,201 +910,37 @@ pub(crate) fn register_bundle_into_model(
     let psxed_project::ResourceData::Model(model) = &resource.data else {
         return Err("scratch resource is not a Model".to_string());
     };
-    let clip_count = model.clips.len();
     let mut model = model.clone();
-    // The scratch helper creates Skeleton / AnimationClip /
-    // AnimationSet resources in the scratch project. Do not copy
-    // its ResourceIds into the real project; the Catalogue action
-    // can create matching library resources there.
+    // Don't copy the scratch project's Skeleton ResourceId into the
+    // real project; the animation library import resolves the shared
+    // skeleton by signature.
     model.skeleton = None;
     *target = model;
-    Ok(clip_count)
+    // A Model is geometry only -- no clips are registered in place.
+    Ok(0)
 }
 
 pub(crate) fn draw_model_resource_preview_panel(
     ui: &mut egui::Ui,
-    model: &psxed_project::ModelResource,
-    project_root: &Path,
+    _model: &psxed_project::ModelResource,
+    _project_root: &Path,
     model_bytes: Option<&[u8]>,
-    preview_texture: &mut Option<egui::TextureHandle>,
+    _preview_texture: &mut Option<egui::TextureHandle>,
 ) {
-    egui::CollapsingHeader::new(icons::label(icons::EYE, "Animated Preview"))
+    egui::CollapsingHeader::new(icons::label(icons::EYE, "Model Preview"))
         .default_open(true)
         .show(ui, |ui| {
             let Some(model_bytes) = model_bytes else {
                 ui.colored_label(Color32::from_rgb(220, 120, 100), "Model file is missing.");
                 return;
             };
-
-            let Some(clip_index) = model.effective_preview_clip() else {
-                draw_model_wireframe_preview(ui, model_bytes);
-                return;
-            };
-            let Some(clip) = model.clips.get(clip_index as usize) else {
-                ui.colored_label(
-                    Color32::from_rgb(220, 160, 80),
-                    format!("Preview clip {clip_index} is out of range."),
-                );
-                draw_model_wireframe_preview(ui, model_bytes);
-                return;
-            };
-            let clip_path =
-                psxed_project::model_import::resolve_path(&clip.psxanim_path, Some(project_root));
-            let Ok(clip_bytes) = std::fs::read(&clip_path) else {
-                ui.colored_label(
-                    Color32::from_rgb(220, 120, 100),
-                    format!("Animation file is missing: {}", clip_path.display()),
-                );
-                draw_model_wireframe_preview(ui, model_bytes);
-                return;
-            };
-
-            let Some(atlas_path) = model.texture_path.as_ref() else {
-                draw_model_wireframe_preview(ui, model_bytes);
-                return;
-            };
-            let atlas_path =
-                psxed_project::model_import::resolve_path(atlas_path, Some(project_root));
-            let atlas_image = std::fs::read(&atlas_path)
-                .ok()
-                .and_then(|bytes| decode_psxt_thumbnail(&bytes).map(|(image, _)| image));
-            let Some(atlas_image) = atlas_image else {
-                ui.colored_label(
-                    Color32::from_rgb(220, 120, 100),
-                    format!("Atlas preview failed: {}", atlas_path.display()),
-                );
-                draw_model_wireframe_preview(ui, model_bytes);
-                return;
-            };
-
-            let yaw_id = ui.id().with("model-resource-preview-yaw");
-            let pitch_id = ui.id().with("model-resource-preview-pitch");
-            let radius_id = ui.id().with("model-resource-preview-radius");
-            let mut yaw: i32 = ui
-                .memory_mut(|m| m.data.get_persisted::<i32>(yaw_id))
-                .unwrap_or(340);
-            let mut pitch: i32 = ui
-                .memory_mut(|m| m.data.get_persisted::<i32>(pitch_id))
-                .unwrap_or(350);
-            let mut radius: i32 = ui
-                .memory_mut(|m| m.data.get_persisted::<i32>(radius_id))
-                .unwrap_or((model.world_height as i32).saturating_mul(3) / 2);
-
-            let width = ui.available_width().clamp(300.0, 640.0);
-            let height = width
-                * (model_import_preview::PREVIEW_HEIGHT as f32
-                    / model_import_preview::PREVIEW_WIDTH as f32);
-            let (rect, response) = ui.allocate_exact_size(Vec2::new(width, height), Sense::drag());
-            if response.dragged() {
-                let delta = ui.input(|i| i.pointer.delta());
-                yaw = (yaw - (delta.x * 6.0) as i32).rem_euclid(4096);
-                pitch = (pitch - (delta.y * 4.0) as i32).clamp(64, 960);
-            }
-            if response.hovered() {
-                let scroll_y = ui.input(|i| i.raw_scroll_delta.y);
-                if scroll_y.abs() > 0.0 {
-                    radius = (radius - (scroll_y * 3.0) as i32).clamp(640, 8192);
-                }
-                ui.ctx().set_cursor_icon(if response.dragged() {
-                    egui::CursorIcon::Grabbing
-                } else {
-                    egui::CursorIcon::Grab
-                });
-            }
-
-            let image = model_import_preview::render_import_model_preview_with_options(
-                model_bytes,
-                &clip_bytes,
-                &atlas_image,
-                model_import_preview::ImportPreviewOptions {
-                    world_height: model.world_height as i32,
-                    visual_scale_q8: model.scale_q8[1].max(1),
-                    visual_yaw_q12: model.default_visual_yaw_q12,
-                    collision_radius: model.collision_radius as i32,
-                    time_seconds: ui.input(|i| i.time),
-                    yaw_q12: yaw.rem_euclid(4096) as u16,
-                    pitch_q12: pitch.rem_euclid(4096) as u16,
-                    radius,
-                    focus_on_animated_bounds: true,
-                    preview_in_place: clip.calibration.in_place,
-                    pose_offset: clip.calibration.offset,
-                    show_animation_root: false,
-                    show_collision_guides: true,
-                    show_bones: false,
-                },
-            );
-
-            ui.memory_mut(|m| {
-                m.data.insert_persisted(yaw_id, yaw);
-                m.data.insert_persisted(pitch_id, pitch);
-                m.data.insert_persisted(radius_id, radius);
-            });
-            ui.ctx()
-                .request_repaint_after(std::time::Duration::from_millis(33));
-
-            let painter = ui.painter_at(rect);
-            painter.rect_filled(rect, 4.0, STUDIO_PANEL);
-            match image {
-                Some(image) => {
-                    let texture_id = match preview_texture {
-                        Some(handle) => {
-                            handle.set(image, egui::TextureOptions::NEAREST);
-                            handle.id()
-                        }
-                        None => {
-                            let handle = ui.ctx().load_texture(
-                                "model-resource-animated-preview",
-                                image,
-                                egui::TextureOptions::NEAREST,
-                            );
-                            let id = handle.id();
-                            *preview_texture = Some(handle);
-                            id
-                        }
-                    };
-                    painter.image(
-                        texture_id,
-                        rect,
-                        Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
-                        Color32::WHITE,
-                    );
-                }
-                None => {
-                    painter.text(
-                        rect.center(),
-                        Align2::CENTER_CENTER,
-                        "preview failed",
-                        FontId::proportional(12.0),
-                        Color32::from_rgb(220, 120, 100),
-                    );
-                }
-            }
-            painter.rect_stroke(
-                rect,
-                4.0,
-                Stroke::new(1.0, STUDIO_BORDER),
-                StrokeKind::Inside,
-            );
-
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(format!("Clip: {}", clip.name)).color(STUDIO_TEXT_WEAK));
-                ui.add_space(8.0);
-                ui.label(RichText::new("Radius").color(STUDIO_TEXT_WEAK));
-                if ui
-                    .add(
-                        egui::DragValue::new(&mut radius)
-                            .speed(16.0)
-                            .range(256..=8192),
-                    )
-                    .changed()
-                {
-                    ui.memory_mut(|m| m.data.insert_persisted(radius_id, radius));
-                }
-            });
+            // A Model is geometry only; animations live on the skeleton.
+            // Preview the static mesh here and use the animation viewer
+            // (bound to a Character + Animation Set) for animated playback.
+            draw_model_wireframe_preview(ui, model_bytes);
         });
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct AvailableAnimationClip {
     pub(crate) label: String,
     pub(crate) default_name: String,
@@ -1571,13 +1294,6 @@ pub(crate) fn draw_animation_clip_resource_editor(
                 "animation-clip-source-picker",
                 &mut clip.source,
                 source_options,
-            );
-            changed |= resource_id_picker(
-                ui,
-                "Target model",
-                "animation-clip-target-model-picker",
-                &mut clip.target_model,
-                model_options,
             );
 
             ui.horizontal(|ui| {
