@@ -39,14 +39,7 @@ fn main() {
     let model_name = args.next().unwrap_or_else(|| "Rust Mantis".into());
     let lib_name = args.next().unwrap_or_else(|| "Biped Library".into());
     let root = project_path.parent().unwrap().to_path_buf();
-    // prune_detached_face_islands=0: keep hand-authored separate pieces
-    // (armor plates, detail bits). The default (4) is tuned for Meshy
-    // auto-gen scraps and wrongly deletes small intentional parts.
-    let cfg = RigidModelConfig {
-        force_single_bind: true,
-        prune_detached_face_islands: 0,
-        ..Default::default()
-    };
+    let cfg = RigidModelConfig { force_single_bind: true, ..Default::default() };
 
     let mut project = ProjectDocument::load_from_path(&project_path).expect("load");
 
