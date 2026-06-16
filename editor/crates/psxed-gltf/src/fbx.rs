@@ -83,6 +83,7 @@ pub(crate) fn convert_fbx_rigid_model_scene_with_extra_animations(
         cfg.animation_fps,
         cfg.normalize_root_translation,
         cfg.strip_animation_scale,
+        !cfg.ignore_embedded_animations,
     )?;
     let bounds = ModelBounds::from_min_max(
         precision_bounds.min,
@@ -110,6 +111,7 @@ pub(crate) fn convert_fbx_rigid_model_scene_with_extra_animations(
             cfg.animation_fps,
             cfg.normalize_root_translation,
             cfg.strip_animation_scale,
+            !cfg.ignore_embedded_animations,
         )?;
         let bounds = ModelBounds::from_min_max(
             precision_bounds.min,
@@ -294,6 +296,7 @@ pub(crate) fn finish_fbx_rigid_model_scene(
         cfg.animation_fps,
         cfg.normalize_root_translation,
         cfg.strip_animation_scale,
+        !cfg.ignore_embedded_animations,
     )?;
     if clips.is_empty() {
         clips.push(bind_pose_clip(joints.len(), &bounds, cfg.animation_fps)?);
@@ -607,8 +610,18 @@ pub(crate) fn collect_fbx_precision_bounds(
     fps: u16,
     normalize_root_translation: bool,
     strip_animation_scale: bool,
+    include_embedded: bool,
 ) -> Result<PrecisionBounds, Error> {
     let mut bounds = BoundsAccumulator::new();
+    // The cooked vertex records store RAW mesh-local positions, so the
+    // quantization bounds must contain them. include_pose_bounds only adds
+    // the SKINNED bind positions; when a model's rest pose diverges from its
+    // skin bind pose those skinned positions don't cover the raw mesh, and
+    // the divergent parts (e.g. the head) overflow i16 and clamp flat. Seed
+    // the bounds with the raw positions first so nothing clamps.
+    for vertex in &source.vertices {
+        bounds.include(vertex.position);
+    }
     include_pose_bounds(
         &mut bounds,
         base_trs,
@@ -619,27 +632,29 @@ pub(crate) fn collect_fbx_precision_bounds(
         strip_animation_scale,
     );
 
-    for stack in &scene.anim_stacks {
-        let Some((min_time, max_time)) = fbx_stack_time_range(stack) else {
-            continue;
-        };
-        let frame_count = ((max_time - min_time) * fps as f64).round() as usize + 1;
-        ensure_u16("animation frames", frame_count)?;
-        for frame in 0..frame_count {
-            let time = (min_time + frame as f64 / fps as f64).min(max_time);
-            let mut frame_trs = evaluate_fbx_frame_trs(scene, &stack.anim, time);
-            if normalize_root_translation {
-                restore_root_translations(&mut frame_trs, base_trs, root_joint_nodes);
+    if include_embedded {
+        for stack in &scene.anim_stacks {
+            let Some((min_time, max_time)) = fbx_stack_time_range(stack) else {
+                continue;
+            };
+            let frame_count = ((max_time - min_time) * fps as f64).round() as usize + 1;
+            ensure_u16("animation frames", frame_count)?;
+            for frame in 0..frame_count {
+                let time = (min_time + frame as f64 / fps as f64).min(max_time);
+                let mut frame_trs = evaluate_fbx_frame_trs(scene, &stack.anim, time);
+                if normalize_root_translation {
+                    restore_root_translations(&mut frame_trs, base_trs, root_joint_nodes);
+                }
+                include_pose_bounds(
+                    &mut bounds,
+                    &frame_trs,
+                    source,
+                    parents,
+                    joints,
+                    inverse_bind_matrices,
+                    strip_animation_scale,
+                );
             }
-            include_pose_bounds(
-                &mut bounds,
-                &frame_trs,
-                source,
-                parents,
-                joints,
-                inverse_bind_matrices,
-                strip_animation_scale,
-            );
         }
     }
 
@@ -1018,39 +1033,42 @@ pub(crate) fn cook_all_fbx_animations(
     fps: u16,
     normalize_root_translation: bool,
     strip_animation_scale: bool,
+    include_embedded: bool,
 ) -> Result<Vec<CookedClip>, Error> {
     let mut clips = Vec::new();
-    for (index, stack) in scene.anim_stacks.iter().enumerate() {
-        let Some((min_time, max_time)) = fbx_stack_time_range(stack) else {
-            continue;
-        };
-        let Some(bytes) = cook_fbx_animation_bytes(
-            scene,
-            &stack.anim,
-            parents,
-            base_trs,
-            root_joint_nodes,
-            joints,
-            inverse_bind_matrices,
-            bounds,
-            min_time,
-            max_time,
-            fps,
-            normalize_root_translation,
-            strip_animation_scale,
-            None,
-        )?
-        else {
-            continue;
-        };
-        let frames = animation_frame_count_from_bytes(&bytes);
-        let raw_name = fbx_stack_source_name(stack, None);
-        clips.push(CookedClip {
-            source_name: raw_name.clone(),
-            sanitized_name: sanitize_clip_name(raw_name.as_deref(), index),
-            bytes,
-            frames,
-        });
+    if include_embedded {
+        for (index, stack) in scene.anim_stacks.iter().enumerate() {
+            let Some((min_time, max_time)) = fbx_stack_time_range(stack) else {
+                continue;
+            };
+            let Some(bytes) = cook_fbx_animation_bytes(
+                scene,
+                &stack.anim,
+                parents,
+                base_trs,
+                root_joint_nodes,
+                joints,
+                inverse_bind_matrices,
+                bounds,
+                min_time,
+                max_time,
+                fps,
+                normalize_root_translation,
+                strip_animation_scale,
+                None,
+            )?
+            else {
+                continue;
+            };
+            let frames = animation_frame_count_from_bytes(&bytes);
+            let raw_name = fbx_stack_source_name(stack, None);
+            clips.push(CookedClip {
+                source_name: raw_name.clone(),
+                sanitized_name: sanitize_clip_name(raw_name.as_deref(), index),
+                bytes,
+                frames,
+            });
+        }
     }
     let mut clip_index = clips.len();
     for extra in extra_animation_scenes {
