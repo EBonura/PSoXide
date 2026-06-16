@@ -286,9 +286,14 @@ pub(crate) fn draw_model_instances(
         }
 
         let material = lighting.shade_model_material(origin, runtime_model.material);
+        let cull_mode = if runtime_model.double_sided {
+            CullMode::None
+        } else {
+            CullMode::Back
+        };
         let model_options = options
             .with_depth_policy(DepthPolicy::Average)
-            .with_cull_mode(CullMode::Back)
+            .with_cull_mode(cull_mode)
             .with_material_layer(material)
             .with_textured_triangle_splitting(true)
             .with_textured_triangle_max_edge(MODEL_TEXTURE_SPLIT_MAX_EDGE);

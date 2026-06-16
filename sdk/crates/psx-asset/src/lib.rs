@@ -432,6 +432,13 @@ impl<'a> Model<'a> {
         self.flags
     }
 
+    /// Whether this model should render double-sided (no backface
+    /// culling). Set by the cooker for hollow / open-faced models.
+    #[inline]
+    pub fn double_sided(&self) -> bool {
+        self.flags & psxed_format::model::flags::DOUBLE_SIDED != 0
+    }
+
     /// Number of joint records.
     #[inline]
     pub fn joint_count(&self) -> u16 {

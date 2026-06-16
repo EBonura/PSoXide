@@ -1192,6 +1192,9 @@ impl EditorWorkspace {
             prune_detached_face_islands: 0,
             extra_animations_affect_bounds: true,
             force_single_bind: self.model_import_dialog.force_single_bind,
+            // Per-model opt-in; the in-editor dialog defaults single-sided.
+            // Double-sided models are imported via the dedicated tooling.
+            double_sided: false,
         }
     }
 

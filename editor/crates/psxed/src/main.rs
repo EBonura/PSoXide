@@ -327,6 +327,7 @@ fn run_glb_model(args: &[String]) -> Result<(), String> {
     let mut world_height: u16 = 1024;
     let mut normalize_root_translation = false;
     let mut force_single_bind = false;
+    let mut double_sided = false;
     let mut animation_paths: Vec<PathBuf> = Vec::new();
     let mut prune_detached_face_islands =
         psxed_gltf::RigidModelConfig::default().prune_detached_face_islands;
@@ -390,6 +391,9 @@ fn run_glb_model(args: &[String]) -> Result<(), String> {
             "--single-bind" | "--force-single-bind" => {
                 force_single_bind = true;
             }
+            "--double-sided" => {
+                double_sided = true;
+            }
             "--animation" | "--anim" => {
                 i += 1;
                 animation_paths
@@ -437,6 +441,7 @@ fn run_glb_model(args: &[String]) -> Result<(), String> {
         prune_detached_face_islands,
         extra_animations_affect_bounds: true,
         force_single_bind,
+        double_sided,
     };
     let package = convert_rigid_model_source(&input, &animation_paths, &cfg)
         .map_err(|e| format!("convert: {e}"))?;
