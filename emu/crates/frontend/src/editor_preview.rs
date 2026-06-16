@@ -2111,7 +2111,7 @@ fn submit_preview_model_instance(
         instance.atlas.tpage_word,
         instance.tint,
     );
-    let options = preview_model_surface_options(material);
+    let options = preview_model_surface_options(material, instance.model.double_sided());
     let Some((geometry, faces)) = predecode_preview_model_geometry_faces(
         instance.model,
         face_pool,
@@ -2226,7 +2226,15 @@ fn clamp_preview_model_uv(uv: (u8, u8), max_u: u8, max_v: u8) -> (u8, u8) {
     (uv.0.min(max_u), uv.1.min(max_v))
 }
 
-fn preview_model_surface_options(material: TextureMaterial) -> psx_engine::WorldSurfaceOptions {
+fn preview_model_surface_options(
+    material: TextureMaterial,
+    double_sided: bool,
+) -> psx_engine::WorldSurfaceOptions {
+    let cull_mode = if double_sided {
+        psx_engine::CullMode::None
+    } else {
+        psx_engine::CullMode::Back
+    };
     psx_engine::WorldSurfaceOptions::new(
         psx_engine::DepthBand::new(PREVIEW_GEOMETRY_SLOT_MIN, PREVIEW_GEOMETRY_SLOT_MAX),
         psx_engine::DepthRange::new(
@@ -2235,7 +2243,7 @@ fn preview_model_surface_options(material: TextureMaterial) -> psx_engine::World
         ),
     )
     .with_depth_policy(psx_engine::DepthPolicy::Average)
-    .with_cull_mode(psx_engine::CullMode::Back)
+    .with_cull_mode(cull_mode)
     .with_material_layer(material)
     .with_textured_triangle_splitting(false)
 }
