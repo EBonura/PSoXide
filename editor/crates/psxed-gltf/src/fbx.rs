@@ -61,6 +61,9 @@ pub(crate) fn convert_fbx_rigid_model_scene_with_extra_animations(
     if source.faces.is_empty() {
         return Err(Error::Empty);
     }
+    if cfg.force_single_bind {
+        collapse_to_single_bind(&mut source);
+    }
     assign_face_joints(&mut source, joints.len());
     let bounds_extra_animation_scenes = if cfg.extra_animations_affect_bounds {
         extra_animation_scenes
