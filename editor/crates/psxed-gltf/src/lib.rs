@@ -487,6 +487,11 @@ pub struct RigidModelConfig {
     /// after the model precision bounds are known so it uses the same
     /// quantised positions as the final `.psxmdl`.
     pub prune_detached_face_islands: u16,
+    /// Collapse every vertex to a pure single-bone bind before cooking,
+    /// dropping all secondary skin influences. The result has no
+    /// `BLEND_SKIN` vertices and stays on the GTE single-bone fast path
+    /// -- the rigid representation preferred for PS1 characters.
+    pub force_single_bind: bool,
     /// Include standalone animation sources when choosing model/pose
     /// precision bounds. Full bundle imports should keep this enabled
     /// so every generated clip matches the generated model. Add-on
@@ -507,6 +512,7 @@ impl Default for RigidModelConfig {
             strip_animation_scale: true,
             prune_detached_face_islands: 4,
             extra_animations_affect_bounds: true,
+            force_single_bind: false,
         }
     }
 }
@@ -782,6 +788,9 @@ fn convert_rigid_model_document_with_extra_animations(
     let mut source = read_skinned_mesh(&mesh, buffers, joints.len())?;
     if source.faces.is_empty() {
         return Err(Error::Empty);
+    }
+    if cfg.force_single_bind {
+        collapse_to_single_bind(&mut source);
     }
     assign_face_joints(&mut source, joints.len());
     let bounds_extra_fbx_animation_scenes = if cfg.extra_animations_affect_bounds {
