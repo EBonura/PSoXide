@@ -442,6 +442,7 @@ fn run_glb_model(args: &[String]) -> Result<(), String> {
         extra_animations_affect_bounds: true,
         force_single_bind,
         double_sided,
+        ignore_embedded_animations: false,
     };
     let package = convert_rigid_model_source(&input, &animation_paths, &cfg)
         .map_err(|e| format!("convert: {e}"))?;
