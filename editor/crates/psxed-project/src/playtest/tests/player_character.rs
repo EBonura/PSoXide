@@ -55,7 +55,6 @@ fn animation_set_infers_evade_roles_from_extra_clip_names() {
             psxanim_path: "roll.psxanim".to_string(),
             skeleton: Some(skeleton),
             source: None,
-            target_model: None,
             bake: crate::AnimationClipBakeKind::ModelNative,
             role: AnimationRole::Generic,
             looping: false,
@@ -69,7 +68,6 @@ fn animation_set_infers_evade_roles_from_extra_clip_names() {
             psxanim_path: "backstep.psxanim".to_string(),
             skeleton: Some(skeleton),
             source: None,
-            target_model: None,
             bake: crate::AnimationClipBakeKind::ModelNative,
             role: AnimationRole::Generic,
             looping: false,
@@ -83,7 +81,6 @@ fn animation_set_infers_evade_roles_from_extra_clip_names() {
             psxanim_path: "attack.psxanim".to_string(),
             skeleton: Some(skeleton),
             source: None,
-            target_model: None,
             bake: crate::AnimationClipBakeKind::ModelNative,
             role: AnimationRole::Attack,
             looping: false,
@@ -97,7 +94,6 @@ fn animation_set_infers_evade_roles_from_extra_clip_names() {
             psxanim_path: "heavy.psxanim".to_string(),
             skeleton: Some(skeleton),
             source: None,
-            target_model: None,
             bake: crate::AnimationClipBakeKind::ModelNative,
             role: AnimationRole::Generic,
             looping: false,
@@ -404,34 +400,6 @@ fn rendered_manifest_includes_characters_and_player_controller() {
 }
 
 #[test]
-fn player_spawn_with_invalid_idle_clip_fails_validation() {
-    let mut project = project_with_one_room();
-    let character_id = player_character_resource_id(&project);
-    // Bump idle clip past the model's clip count so cook
-    // validation must reject.
-    if let Some(resource) = project.resource_mut(character_id) {
-        if let crate::ResourceData::Character(c) = &mut resource.data {
-            c.animation_set = None;
-            c.action_clips.clear();
-            c.idle_clip = Some(99);
-        }
-    }
-    let animator_ids: Vec<NodeId> = project
-        .active_scene()
-        .nodes()
-        .iter()
-        .filter(|node| matches!(node.kind, NodeKind::Animator { .. }))
-        .map(|node| node.id)
-        .collect();
-    for id in animator_ids {
-        project.active_scene_mut().remove_node(id);
-    }
-    let (package, report) = build_package(&project, &starter_project_root());
-    assert!(package.is_none());
-    assert!(report.errors.iter().any(|e| e.contains("idle clip 99")));
-}
-
-#[test]
 fn legacy_spawn_without_character_assignment_auto_picks_when_one_exists() {
     // Keep exactly one Character. Component-authored players use
     // their Model Renderer directly, so this legacy auto-pick path
@@ -624,10 +592,6 @@ fn character_resource_roundtrips_through_ron() {
         crate::ResourceData::Character(CharacterResource {
             model: None,
             animation_set: None,
-            idle_clip: Some(0),
-            walk_clip: Some(1),
-            run_clip: None,
-            turn_clip: None,
             radius: 200,
             height: 1024,
             walk_speed: 50,
@@ -644,8 +608,6 @@ fn character_resource_roundtrips_through_ron() {
     let resource = reloaded.resource(id).expect("character preserved");
     match &resource.data {
         crate::ResourceData::Character(c) => {
-            assert_eq!(c.idle_clip, Some(0));
-            assert_eq!(c.walk_clip, Some(1));
             assert_eq!(c.radius, 200);
             assert_eq!(c.walk_speed, 50);
             assert_eq!(

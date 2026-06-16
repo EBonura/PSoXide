@@ -1133,17 +1133,10 @@ fn embedded_default_project_ron_deserializes() {
         .as_deref()
         .is_some_and(|path| path.ends_with("crimson_cross_knight.psxt")));
     assert!(model.skeleton.is_some());
-    assert!(model.clips.len() >= 50);
-    assert_eq!(model.default_clip, Some(22));
     assert_eq!(
         model.collision_radius,
         default_model_collision_radius_for_height(model.world_height)
     );
-    let resolved_clips = project.resolved_model_animation_clips(model_id);
-    assert!(resolved_clips.len() >= 50);
-    assert!(resolved_clips
-        .iter()
-        .any(|clip| clip.name == "Meshy Gold / idle 03"));
     assert_eq!(model.scale_q8, [MODEL_SCALE_ONE_Q8; 3]);
     assert!(project.active_scene().nodes().iter().any(|node| matches!(
         &node.kind,
@@ -1925,81 +1918,6 @@ fn runtime_depth_sort_mode_roundtrips_through_ron_string() {
 }
 
 #[test]
-fn model_resource_roundtrips_through_ron_string() {
-    let mut project = ProjectDocument::starter();
-    let id = project.add_resource(
-        "TestModel",
-        ResourceData::Model(ModelResource {
-            model_path: "assets/models/x/x.psxmdl".to_string(),
-            source_path: None,
-            texture_path: Some("assets/models/x/x.psxt".to_string()),
-            skeleton: None,
-            clips: vec![
-                ModelAnimationClip {
-                    name: "idle".to_string(),
-                    psxanim_path: "assets/models/x/x_idle.psxanim".to_string(),
-                    calibration: Default::default(),
-                },
-                ModelAnimationClip {
-                    name: "walk".to_string(),
-                    psxanim_path: "assets/models/x/x_walk.psxanim".to_string(),
-                    calibration: AnimationClipCalibration {
-                        in_place: false,
-                        offset: [12, -8, 24],
-                    },
-                },
-            ],
-            default_clip: Some(0),
-            preview_clip: Some(1),
-            world_height: 1280,
-            collision_radius: 240,
-            scale_q8: [
-                MODEL_SCALE_ONE_Q8,
-                MODEL_SCALE_ONE_Q8 * 2,
-                MODEL_SCALE_ONE_Q8,
-            ],
-            default_visual_yaw_q12: 1024,
-            attachments: vec![AttachmentSocket {
-                name: "right_hand_grip".to_string(),
-                joint: 3,
-                translation: [16, 32, -8],
-                rotation_q12: [0, 1024, 0],
-            }],
-        }),
-    );
-    let ron = project.to_ron_string().unwrap();
-    let restored = ProjectDocument::from_ron_str(&ron).unwrap();
-    assert_eq!(restored, project);
-    let resource = restored.resource(id).unwrap();
-    match &resource.data {
-        ResourceData::Model(m) => {
-            assert_eq!(m.clips.len(), 2);
-            assert_eq!(m.default_clip, Some(0));
-            assert_eq!(m.preview_clip, Some(1));
-            assert_eq!(m.clips[1].calibration.offset, [12, -8, 24]);
-            assert!(!m.clips[1].calibration.in_place);
-            assert_eq!(m.world_height, 1280);
-            assert_eq!(m.collision_radius, 240);
-            assert_eq!(
-                m.scale_q8,
-                [
-                    MODEL_SCALE_ONE_Q8,
-                    MODEL_SCALE_ONE_Q8 * 2,
-                    MODEL_SCALE_ONE_Q8
-                ]
-            );
-            assert_eq!(m.default_visual_yaw_q12, 1024);
-            assert_eq!(m.effective_preview_clip(), Some(1));
-            assert_eq!(m.effective_runtime_clip(), Some(0));
-            assert_eq!(m.attachments.len(), 1);
-            assert_eq!(m.attachments[0].joint, 3);
-            assert_eq!(m.attachments[0].translation, [16, 32, -8]);
-        }
-        _ => panic!("expected Model"),
-    }
-}
-
-#[test]
 fn animation_library_resources_roundtrip_and_resolve_by_path() {
     let mut project = ProjectDocument::new("Animation Test");
     let skeleton = project.add_resource(
@@ -2017,7 +1935,6 @@ fn animation_library_resources_roundtrip_and_resolve_by_path() {
             psxanim_path: "assets/animations/idle.psxanim".to_string(),
             skeleton: Some(skeleton),
             source: None,
-            target_model: None,
             bake: AnimationClipBakeKind::LegacyShared,
             role: AnimationRole::Idle,
             looping: true,
@@ -2046,13 +1963,6 @@ fn animation_library_resources_roundtrip_and_resolve_by_path() {
             source_path: None,
             texture_path: Some("assets/models/humanoid.psxt".to_string()),
             skeleton: Some(skeleton),
-            clips: vec![ModelAnimationClip {
-                name: "legacy idle".to_string(),
-                psxanim_path: "assets/animations/idle.psxanim".to_string(),
-                calibration: Default::default(),
-            }],
-            default_clip: Some(0),
-            preview_clip: Some(0),
             world_height: 1024,
             collision_radius: default_model_collision_radius_for_height(1024),
             scale_q8: [MODEL_SCALE_ONE_Q8; 3],
@@ -2065,11 +1975,7 @@ fn animation_library_resources_roundtrip_and_resolve_by_path() {
         ResourceData::Character(CharacterResource {
             model: Some(model),
             animation_set: Some(set),
-            idle_clip: None,
-            walk_clip: None,
-            run_clip: None,
-            turn_clip: None,
-            ..CharacterResource::default()
+            ..CharacterResource::defaults()
         }),
     );
 
@@ -2080,130 +1986,6 @@ fn animation_library_resources_roundtrip_and_resolve_by_path() {
         Some(0),
         "standalone clips matching legacy model-local paths resolve to the stable legacy index",
     );
-}
-
-#[test]
-fn animation_sources_and_target_specific_clips_roundtrip() {
-    let mut project = ProjectDocument::new("Animation Source Test");
-    let skeleton = project.add_resource(
-        "Meshy Biped Skeleton",
-        ResourceData::Skeleton(SkeletonResource {
-            joint_count: 24,
-            parents: vec![None],
-            signature: "psx-parent-v1:24:root".to_string(),
-            note: "test skeleton".to_string(),
-        }),
-    );
-    let model_a = project.add_resource(
-        "Knight",
-        ResourceData::Model(ModelResource {
-            model_path: "assets/models/knight/knight.psxmdl".to_string(),
-            source_path: None,
-            texture_path: None,
-            skeleton: Some(skeleton),
-            clips: Vec::new(),
-            default_clip: None,
-            preview_clip: None,
-            world_height: 1024,
-            collision_radius: default_model_collision_radius_for_height(1024),
-            scale_q8: [MODEL_SCALE_ONE_Q8; 3],
-            default_visual_yaw_q12: 0,
-            attachments: Vec::new(),
-        }),
-    );
-    let model_b = project.add_resource(
-        "Wraith",
-        ResourceData::Model(ModelResource {
-            model_path: "assets/models/wraith/wraith.psxmdl".to_string(),
-            source_path: None,
-            texture_path: None,
-            skeleton: Some(skeleton),
-            clips: Vec::new(),
-            default_clip: None,
-            preview_clip: None,
-            world_height: 1024,
-            collision_radius: default_model_collision_radius_for_height(1024),
-            scale_q8: [MODEL_SCALE_ONE_Q8; 3],
-            default_visual_yaw_q12: 0,
-            attachments: Vec::new(),
-        }),
-    );
-    let source = project.add_resource(
-        "Mixamo Roll",
-        ResourceData::AnimationSource(AnimationSourceResource {
-            source_path: "assets/animations/source/stand_to_roll.fbx".to_string(),
-            clip_name: "Stand To Roll".to_string(),
-            provider: AnimationSourceProvider::Mixamo,
-            skeleton: Some(skeleton),
-            target_model: None,
-            role: AnimationRole::Generic,
-            looping: false,
-            tags: vec!["roll".to_string()],
-        }),
-    );
-    let shared_walk = project.add_resource(
-        "Shared Walk",
-        ResourceData::AnimationClip(AnimationClipResource {
-            psxanim_path: "assets/animations/shared_walk.psxanim".to_string(),
-            skeleton: Some(skeleton),
-            source: None,
-            target_model: None,
-            bake: AnimationClipBakeKind::LegacyShared,
-            role: AnimationRole::Walk,
-            looping: true,
-            tags: vec!["walk".to_string()],
-            calibration: Default::default(),
-        }),
-    );
-    let baked_for_a = project.add_resource(
-        "Knight Roll",
-        ResourceData::AnimationClip(AnimationClipResource {
-            psxanim_path: "assets/models/knight/knight_roll.psxanim".to_string(),
-            skeleton: Some(skeleton),
-            source: Some(source),
-            target_model: Some(model_a),
-            bake: AnimationClipBakeKind::Retargeted,
-            role: AnimationRole::Generic,
-            looping: false,
-            tags: vec!["roll".to_string()],
-            calibration: Default::default(),
-        }),
-    );
-    project.add_resource(
-        "Wraith Roll",
-        ResourceData::AnimationClip(AnimationClipResource {
-            psxanim_path: "assets/models/wraith/wraith_roll.psxanim".to_string(),
-            skeleton: Some(skeleton),
-            source: Some(source),
-            target_model: Some(model_b),
-            bake: AnimationClipBakeKind::Retargeted,
-            role: AnimationRole::Generic,
-            looping: false,
-            tags: vec!["roll".to_string()],
-            calibration: Default::default(),
-        }),
-    );
-
-    let restored = ProjectDocument::from_ron_str(&project.to_ron_string().unwrap()).unwrap();
-    assert_eq!(restored, project);
-    let model_a_clips = restored.resolved_model_animation_clips(model_a);
-    let baked_for_a_index = model_a_clips
-        .iter()
-        .position(|clip| clip.animation_resource == Some(baked_for_a))
-        .expect("target-specific clip should resolve for its model");
-    let shared_walk_index = model_a_clips
-        .iter()
-        .position(|clip| clip.animation_resource == Some(shared_walk))
-        .expect("generic clip should still resolve for matching skeleton");
-    assert!(
-        baked_for_a_index < shared_walk_index,
-        "target-specific clips should be offered before generic skeleton-shared clips",
-    );
-    assert!(!restored
-        .resolved_model_animation_clips(model_b)
-        .iter()
-        .any(|clip| clip.animation_resource == Some(baked_for_a)));
-    assert_eq!(restored.resource_reference_count(source), 2);
 }
 
 #[test]
@@ -2375,8 +2157,6 @@ fn resource_rename_moves_imported_model_bundle_files() {
     std::fs::create_dir_all(&bundle_dir).unwrap();
     std::fs::write(bundle_dir.join("obsidian_wraith.psxmdl"), b"model").unwrap();
     std::fs::write(bundle_dir.join("obsidian_wraith.psxt"), b"atlas").unwrap();
-    std::fs::write(bundle_dir.join("obsidian_wraith_idle.psxanim"), b"idle").unwrap();
-    std::fs::write(bundle_dir.join("obsidian_wraith_walk.psxanim"), b"walk").unwrap();
 
     let mut project = ProjectDocument::new("test");
     let id = project.add_resource(
@@ -2386,22 +2166,6 @@ fn resource_rename_moves_imported_model_bundle_files() {
             source_path: None,
             texture_path: Some("assets/models/obsidian_wraith/obsidian_wraith.psxt".to_string()),
             skeleton: None,
-            clips: vec![
-                ModelAnimationClip {
-                    name: "idle".to_string(),
-                    psxanim_path: "assets/models/obsidian_wraith/obsidian_wraith_idle.psxanim"
-                        .to_string(),
-                    calibration: Default::default(),
-                },
-                ModelAnimationClip {
-                    name: "walk".to_string(),
-                    psxanim_path: "assets/models/obsidian_wraith/obsidian_wraith_walk.psxanim"
-                        .to_string(),
-                    calibration: Default::default(),
-                },
-            ],
-            default_clip: Some(0),
-            preview_clip: Some(0),
             world_height: 1024,
             collision_radius: default_model_collision_radius_for_height(1024),
             scale_q8: [MODEL_SCALE_ONE_Q8; 3],
@@ -2425,15 +2189,7 @@ fn resource_rename_moves_imported_model_bundle_files() {
         model.texture_path.as_deref(),
         Some("assets/models/hooded_wretch/hooded_wretch.psxt")
     );
-    assert_eq!(
-        model.clips[0].psxanim_path,
-        "assets/models/hooded_wretch/hooded_wretch_idle.psxanim"
-    );
-    assert_eq!(
-        model.clips[1].psxanim_path,
-        "assets/models/hooded_wretch/hooded_wretch_walk.psxanim"
-    );
-    assert_eq!(report.renamed_files.len(), 4);
+    assert_eq!(report.renamed_files.len(), 2);
     assert!(!bundle_dir.exists());
     assert!(root
         .join("assets/models/hooded_wretch/hooded_wretch.psxmdl")
@@ -2501,10 +2257,6 @@ fn delete_resource_removes_entry_and_clears_references() {
         "Character",
         ResourceData::Character(CharacterResource {
             model: Some(target),
-            idle_clip: Some(0),
-            walk_clip: Some(1),
-            run_clip: Some(2),
-            turn_clip: Some(3),
             ..CharacterResource::defaults()
         }),
     );
@@ -2586,10 +2338,6 @@ fn delete_resource_removes_entry_and_clears_references() {
         panic!("expected character");
     };
     assert_eq!(character_data.model, None);
-    assert_eq!(character_data.idle_clip, None);
-    assert_eq!(character_data.walk_clip, None);
-    assert_eq!(character_data.run_clip, None);
-    assert_eq!(character_data.turn_clip, None);
     let ResourceData::Weapon(weapon_data) = &project.resource(weapon).unwrap().data else {
         panic!("expected weapon");
     };

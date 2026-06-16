@@ -435,12 +435,42 @@ fn equipment_component_emits_weapon_and_hitbox_records() {
             _ => None,
         })
         .expect("starter has a model");
-    starter_model.clips.push(crate::ModelAnimationClip {
-        name: "neutral idle".to_string(),
-        psxanim_path: "assets/animations/standalone_fbx/neutral_idle.psxanim".to_string(),
-        calibration: Default::default(),
-    });
     let mut project = ProjectDocument::new("equipment-test");
+    // Skeleton-scoped animation fixture so the model is renderable and
+    // the player has idle/walk via its Animation Set.
+    let skeleton = project.add_resource(
+        "Skeleton",
+        ResourceData::Skeleton(crate::SkeletonResource {
+            joint_count: 1,
+            parents: vec![None],
+            signature: "equip-test".to_string(),
+            note: String::new(),
+        }),
+    );
+    starter_model.skeleton = Some(skeleton);
+    let idle = project.add_resource(
+        "idle",
+        ResourceData::AnimationClip(crate::AnimationClipResource {
+            psxanim_path: "assets/models/obsidian_wraith/obsidian_wraith_unsteady_walk.psxanim"
+                .to_string(),
+            skeleton: Some(skeleton),
+            source: None,
+            bake: crate::AnimationClipBakeKind::LegacyShared,
+            role: crate::AnimationRole::Idle,
+            looping: true,
+            tags: Vec::new(),
+            calibration: Default::default(),
+        }),
+    );
+    let set = project.add_resource(
+        "Set",
+        ResourceData::AnimationSet(crate::AnimationSetResource {
+            skeleton: Some(skeleton),
+            idle_clip: Some(idle),
+            walk_clip: Some(idle),
+            ..crate::AnimationSetResource::defaults()
+        }),
+    );
     let material = project.add_resource(
         "Floor",
         ResourceData::Material(crate::MaterialResource::opaque(Some(
@@ -452,9 +482,7 @@ fn equipment_component_emits_weapon_and_hitbox_records() {
         "Wraith Character",
         ResourceData::Character(crate::CharacterResource {
             model: Some(model),
-            idle_clip: Some(0),
-            walk_clip: Some(0),
-            run_clip: Some(0),
+            animation_set: Some(set),
             ..crate::CharacterResource::defaults()
         }),
     );

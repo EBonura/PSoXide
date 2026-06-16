@@ -1,56 +1,6 @@
 use super::*;
 
 #[test]
-fn out_of_range_model_default_clip_fails_at_cook() {
-    // Bend the starter player's default_clip past its clip
-    // count; cook must refuse rather than emit a runtime
-    // record that resolves to no animation.
-    let mut project = ProjectDocument::starter();
-    let player_model = player_model_resource_id(&project);
-    for resource in project.resources.iter_mut() {
-        if resource.id == player_model {
-            let ResourceData::Model(model) = &mut resource.data else {
-                continue;
-            };
-            model.default_clip = Some(999);
-            break;
-        }
-    }
-    let (package, report) = build_package(&project, &starter_project_root());
-    assert!(package.is_none());
-    assert!(
-        report.errors.iter().any(|e| e.contains("default_clip 999")),
-        "errors: {:?}",
-        report.errors,
-    );
-}
-
-#[test]
-fn missing_default_clip_resolves_to_clip_zero() {
-    // A model with `default_clip: None` plus a populated
-    // clip list should cook fine -- runtime gets clip 0 as
-    // the resolved default. No bind-pose sentinel.
-    let mut project = ProjectDocument::starter();
-    let player_model = player_model_resource_id(&project);
-    for resource in project.resources.iter_mut() {
-        if resource.id == player_model {
-            let ResourceData::Model(model) = &mut resource.data else {
-                continue;
-            };
-            model.default_clip = None;
-            break;
-        }
-    }
-    let (package, report) = build_package(&project, &starter_project_root());
-    assert!(report.is_ok(), "errors: {:?}", report.errors);
-    let package = package.expect("cooks");
-    let model = &package.models[0];
-    assert_eq!(model.default_clip, 0);
-    // Sanity: never emit the old u16::MAX sentinel.
-    assert!(model.default_clip < model.clip_count);
-}
-
-#[test]
 fn playtest_packages_only_runtime_required_player_clips() {
     let project = ProjectDocument::starter();
     let player_model = player_model_resource_id(&project);
