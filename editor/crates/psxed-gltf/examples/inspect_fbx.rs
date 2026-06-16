@@ -154,6 +154,35 @@ fn main() {
     }
 
     // --- Cook with engine defaults ---
+    // Compare cook configs to isolate missing-poly / tearing causes.
+    println!("\n=== COOK CONFIG COMPARISON (source faces above) ===");
+    println!("{:<28}{:>8}{:>8}{:>8}{:>10}", "config", "verts", "faces", "parts", "blendV");
+    for (label, prune, rigid) in [
+        ("rigid + prune=4 (current)", 4u16, true),
+        ("rigid + prune=0 (no prune)", 0, true),
+        ("blend + prune=4", 4, false),
+        ("blend + prune=0", 0, false),
+    ] {
+        let c = psxed_gltf::RigidModelConfig {
+            force_single_bind: rigid,
+            prune_detached_face_islands: prune,
+            ..Default::default()
+        };
+        match psxed_gltf::convert_fbx_rigid_model_path(path, &c) {
+            Ok(p) => {
+                let m = &p.model;
+                let vc = u16::from_le_bytes([m[16], m[17]]) as usize;
+                let jc = u16::from_le_bytes([m[12], m[13]]) as usize;
+                let pc = u16::from_le_bytes([m[14], m[15]]) as usize;
+                let mc = u16::from_le_bytes([m[20], m[21]]) as usize;
+                let voff = 12 + 16 + jc * 4 + mc * 8 + pc * 16;
+                let blendv = (0..vc).filter(|i| m[voff + i * 8 + 7] != 0).count();
+                println!("{:<28}{:>8}{:>8}{:>8}{:>10}", label, p.report.cooked_vertices, p.report.faces, p.report.parts, blendv);
+            }
+            Err(e) => println!("{label}: ERR {e}"),
+        }
+    }
+
     let force = std::env::args().any(|a| a == "--single-bind");
     println!("\n=== COOK (128x128 8bpp, 15Hz, force_single_bind={force}) ===");
     let cfg = psxed_gltf::RigidModelConfig { force_single_bind: force, ..Default::default() };
