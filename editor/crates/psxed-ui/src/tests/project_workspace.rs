@@ -673,35 +673,6 @@ fn menu_labels_include_discoverable_shortcut_text() {
 }
 
 #[test]
-fn available_animation_clips_scan_project_relative_psxanim_files() {
-    let dir = test_temp_dir("animation-clips-scan");
-    let model_dir = dir.join("assets/models/wraith");
-    std::fs::create_dir_all(&model_dir).unwrap();
-    std::fs::write(model_dir.join("idle.psxanim"), []).unwrap();
-    std::fs::write(model_dir.join("walk.PSXANIM"), []).unwrap();
-    std::fs::write(model_dir.join("notes.txt"), []).unwrap();
-    std::fs::create_dir_all(dir.join(".hidden")).unwrap();
-    std::fs::write(dir.join(".hidden/ghost.psxanim"), []).unwrap();
-    std::fs::create_dir_all(dir.join("target/debug")).unwrap();
-    std::fs::write(dir.join("target/debug/generated.psxanim"), []).unwrap();
-
-    let clips = available_animation_clips(&dir);
-    let paths: Vec<&str> = clips.iter().map(|clip| clip.stored_path.as_str()).collect();
-
-    assert_eq!(
-        paths,
-        vec![
-            "assets/models/wraith/idle.psxanim",
-            "assets/models/wraith/walk.PSXANIM"
-        ]
-    );
-    assert_eq!(clips[0].default_name, "idle");
-    assert_eq!(clips[0].label, "idle (wraith)");
-
-    let _ = std::fs::remove_dir_all(dir);
-}
-
-#[test]
 fn animation_source_catalogue_scans_synty_source_tree() {
     let dir = test_temp_dir("animation-source-catalogue");
     let anim_dir = dir.join("SourceFiles/Animations/Polygon/Dodge");
@@ -776,43 +747,6 @@ fn materialize_authoring_source_path_extracts_deflated_zip_entry() {
 
     assert_eq!(std::fs::read(extracted).unwrap(), b"fake-fbx-data");
     let _ = std::fs::remove_dir_all(dir);
-}
-
-#[test]
-fn selecting_animation_clip_source_updates_placeholder_names_only() {
-    let mut placeholder = psxed_project::ModelAnimationClip {
-        name: "clip_0".to_string(),
-        psxanim_path: String::new(),
-        calibration: Default::default(),
-    };
-    assert!(set_model_animation_clip_source(
-        &mut placeholder,
-        "assets/models/wraith/run.psxanim"
-    ));
-    assert_eq!(placeholder.psxanim_path, "assets/models/wraith/run.psxanim");
-    assert_eq!(placeholder.name, "run");
-
-    let mut default_named = psxed_project::ModelAnimationClip {
-        name: "idle".to_string(),
-        psxanim_path: "assets/models/wraith/idle.psxanim".to_string(),
-        calibration: Default::default(),
-    };
-    assert!(set_model_animation_clip_source(
-        &mut default_named,
-        "assets/models/wraith/walk.psxanim"
-    ));
-    assert_eq!(default_named.name, "walk");
-
-    let mut custom_named = psxed_project::ModelAnimationClip {
-        name: "Combat Idle".to_string(),
-        psxanim_path: "assets/models/wraith/idle.psxanim".to_string(),
-        calibration: Default::default(),
-    };
-    assert!(set_model_animation_clip_source(
-        &mut custom_named,
-        "assets/models/wraith/walk.psxanim"
-    ));
-    assert_eq!(custom_named.name, "Combat Idle");
 }
 
 #[test]
@@ -931,14 +865,6 @@ fn open_directory_purges_legacy_obsidian_warden_catalogue() {
                 "assets/models/obsidian_warden/obsidian_warden_128x128_8bpp.psxt".to_string(),
             ),
             skeleton: Some(skeleton),
-            clips: vec![psxed_project::ModelAnimationClip {
-                name: "walking".to_string(),
-                psxanim_path: "assets/models/obsidian_warden/obsidian_warden_walking.psxanim"
-                    .to_string(),
-                calibration: Default::default(),
-            }],
-            default_clip: Some(0),
-            preview_clip: Some(0),
             world_height: 1024,
             collision_radius: default_model_collision_radius_for_height(1024),
             scale_q8: [psxed_project::MODEL_SCALE_ONE_Q8; 3],
