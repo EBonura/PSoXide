@@ -8,7 +8,7 @@
 
 use std::path::PathBuf;
 
-use psxed_project::model_import::{import_animation_library, import_model_only};
+use psxed_project::model_import::{import_animation_library, import_model_with_animation_sources};
 use psxed_project::{NodeKind, ProjectDocument, ResourceData};
 use psxed_gltf::RigidModelConfig;
 
@@ -71,9 +71,10 @@ fn main() {
         }
     }
 
-    // 1. MODEL ONLY (no auto-library)
-    let model_id = import_model_only(&mut project, &model_fbx, &model_name, &root, cfg.clone())
-        .expect("import_model_only");
+    // 1. MODEL ONLY (registration never auto-builds a library)
+    let model_id =
+        import_model_with_animation_sources(&mut project, &model_fbx, &[], &model_name, &root, cfg.clone())
+            .expect("import model");
     println!("imported model only: {model_id:?} '{model_name}'");
 
     // 2. SHARED ANIMATION LIBRARY (one bake, target_model=None)
