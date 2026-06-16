@@ -613,6 +613,22 @@ pub(crate) fn prune_detached_face_islands(
     removed
 }
 
+/// Collapse every vertex to a pure single-bone bind: keep only the
+/// dominant joint at full weight and drop all secondary influences.
+///
+/// The cooked PSMD format already stores one dominant joint per vertex
+/// plus an optional secondary blend bone (the CPU-blend path). Forcing
+/// single bind here removes the secondary entirely, so the cooked model
+/// stays on the GTE single-bone fast path with no `BLEND_SKIN` verts --
+/// the ideal rigid representation for PS1 segmented characters.
+pub(crate) fn collapse_to_single_bind(source: &mut SkinnedSourceMesh) {
+    for vertex in &mut source.vertices {
+        let dominant = vertex.dominant_joint;
+        vertex.joints = [dominant, 0, 0, 0];
+        vertex.weights = [1.0, 0.0, 0.0, 0.0];
+    }
+}
+
 pub(crate) fn joint_indices_or_zero(joints: [u16; 4], weights: [f32; 4]) -> [u16; 4] {
     let mut out = joints;
     for i in 0..4 {
