@@ -136,6 +136,7 @@ pub(crate) fn quat_inverse(q: [f32; 4]) -> [f32; 4] {
     [-x, -y, -z, w]
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) const fn identity_quat() -> [f32; 4] {
     [0.0, 0.0, 0.0, 1.0]
 }
