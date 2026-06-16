@@ -500,6 +500,16 @@ pub struct RigidModelConfig {
     /// through. Costs roughly 2x submitted faces, so keep it off by
     /// default and enable per model.
     pub double_sided: bool,
+    /// Ignore animation takes embedded in the model FBX itself.
+    ///
+    /// When set, the model's own `anim_stacks` are excluded from both the
+    /// precision-bounds computation and clip cooking. Vertex positions
+    /// then quantize to the BIND extent instead of the (much larger)
+    /// animated extent, which otherwise collapses small bind features
+    /// (e.g. a head squashed flat) when the FBX ships with wild test
+    /// takes baked in. Clips are expected to come from separate pack
+    /// files. Keep off for legacy single-file model+animation imports.
+    pub ignore_embedded_animations: bool,
     /// Include standalone animation sources when choosing model/pose
     /// precision bounds. Full bundle imports should keep this enabled
     /// so every generated clip matches the generated model. Add-on
@@ -522,6 +532,7 @@ impl Default for RigidModelConfig {
             extra_animations_affect_bounds: true,
             force_single_bind: false,
             double_sided: false,
+            ignore_embedded_animations: false,
         }
     }
 }
