@@ -27,8 +27,8 @@ use std::{
 
 use crate::{
     default_model_collision_radius_for_height, AnimationClipBakeKind, AnimationClipResource,
-    AnimationRole, AnimationSetResource, AnimationSourceResource, CharacterAnimationAction,
-    ModelAnimationClip, ModelResource, ProjectDocument, ResourceData, ResourceId, SkeletonResource,
+    AnimationRole, AnimationSetResource, CharacterAnimationAction, ModelAnimationClip,
+    ModelResource, ProjectDocument, ResourceData, ResourceId, SkeletonResource,
 };
 
 pub use psxed_format::texture::Depth as TextureDepth;
@@ -383,26 +383,17 @@ fn paths_list(paths: &[PathBuf]) -> String {
 ///
 /// Returns the new resource's id. The project gains a single
 /// `Model` resource named `display_name`.
+///
+/// Registration only ever creates the `Model` (mesh + skeleton + inline
+/// clips). It does NOT build a standalone `AnimationClip` / `AnimationSource`
+/// / `AnimationSet` library -- animations come from a separate,
+/// skeleton-shared library ([`import_animation_library`]) or, for the legacy
+/// per-model flow, the editor's "Catalogue animation library" action.
 pub fn register_cooked_model_bundle(
     project: &mut ProjectDocument,
     bundle_dir: &Path,
     display_name: &str,
     project_root: Option<&Path>,
-) -> Result<ResourceId, ModelImportError> {
-    register_cooked_model_bundle_impl(project, bundle_dir, display_name, project_root, true)
-}
-
-/// `create_animation_library`: when false, register only the `Model`
-/// (mesh + skeleton + inline clips) and skip the standalone
-/// `AnimationClip` / `AnimationSource` / `AnimationSet` resources. Use
-/// false for the clean "model only" import where animations come from a
-/// separate, skeleton-shared library.
-fn register_cooked_model_bundle_impl(
-    project: &mut ProjectDocument,
-    bundle_dir: &Path,
-    display_name: &str,
-    project_root: Option<&Path>,
-    create_animation_library: bool,
 ) -> Result<ResourceId, ModelImportError> {
     let mut psxmdl: Vec<PathBuf> = Vec::new();
     let mut psxt: Vec<PathBuf> = Vec::new();
@@ -531,29 +522,23 @@ fn register_cooked_model_bundle_impl(
         attachments: Vec::new(),
     };
 
-    let model_id = project.add_resource(display_name, ResourceData::Model(model_resource.clone()));
-    if create_animation_library {
-        let animation_ids =
-            register_animation_clip_resources(project, skeleton_id, model_id, &model_resource);
-        if !animation_ids.is_empty() {
-            register_animation_set_resource(project, display_name, skeleton_id, &animation_ids);
-        }
-    }
+    let model_id = project.add_resource(display_name, ResourceData::Model(model_resource));
     Ok(model_id)
 }
 
-/// Convert a `.glb`, `.gltf`, or `.fbx` source through the rigid-model
-/// cooker, write the cooked outputs under
-/// `project_root/assets/models/<safe_name>/`, then register that
-/// directory as a [`ResourceData::Model`].
+/// Convert a `.glb`, `.gltf`, or `.fbx` source (plus optional standalone
+/// FBX/GLB animation takes) through the rigid-model cooker, write the
+/// cooked outputs under `project_root/assets/models/<safe_name>/`, and
+/// register that directory as a [`ResourceData::Model`]. Pass an empty
+/// `extra_animation_paths` for a plain model import.
 ///
-/// Existing bundle directories are accepted only when they
-/// contain exactly the same kinds of files this importer
-/// produces -- anything else and the import refuses rather than
-/// clobbering user data.
-/// Convert a model source plus optional standalone FBX animation takes
-/// through the rigid-model cooker and register the cooked bundle. Pass
-/// an empty `extra_animation_paths` for a plain model import.
+/// Existing bundle directories are accepted only when they contain
+/// exactly the same kinds of files this importer produces -- anything
+/// else and the import refuses rather than clobbering user data.
+///
+/// Registers only the `Model` (mesh + skeleton + inline clips). It does
+/// not build a standalone animation library; use
+/// [`import_animation_library`] for skeleton-shared animations.
 pub fn import_model_with_animation_sources(
     project: &mut ProjectDocument,
     source_path: &Path,
@@ -561,40 +546,6 @@ pub fn import_model_with_animation_sources(
     output_name: &str,
     project_root: &Path,
     config: psxed_gltf::RigidModelConfig,
-) -> Result<ResourceId, ModelImportError> {
-    import_model_impl(
-        project,
-        source_path,
-        extra_animation_paths,
-        output_name,
-        project_root,
-        config,
-        true,
-    )
-}
-
-/// Clean "model only" import: cook mesh + atlas + skeleton (+ the
-/// source's own inline clips) and register just the `Model`. Does NOT
-/// create the standalone per-model animation library -- animations come
-/// from a separate skeleton-shared library (see [`import_animation_library`]).
-pub fn import_model_only(
-    project: &mut ProjectDocument,
-    source_path: &Path,
-    output_name: &str,
-    project_root: &Path,
-    config: psxed_gltf::RigidModelConfig,
-) -> Result<ResourceId, ModelImportError> {
-    import_model_impl(project, source_path, &[], output_name, project_root, config, false)
-}
-
-fn import_model_impl(
-    project: &mut ProjectDocument,
-    source_path: &Path,
-    extra_animation_paths: &[PathBuf],
-    output_name: &str,
-    project_root: &Path,
-    config: psxed_gltf::RigidModelConfig,
-    create_animation_library: bool,
 ) -> Result<ResourceId, ModelImportError> {
     let package = convert_rigid_model_source(source_path, extra_animation_paths, &config)?;
 
@@ -629,13 +580,8 @@ fn import_model_impl(
         })?;
     }
 
-    let model_id = register_cooked_model_bundle_impl(
-        project,
-        &bundle_dir,
-        output_name,
-        Some(project_root),
-        create_animation_library,
-    )?;
+    let model_id =
+        register_cooked_model_bundle(project, &bundle_dir, output_name, Some(project_root))?;
     if let Some(resource) = project.resource_mut(model_id) {
         if let ResourceData::Model(model) = &mut resource.data {
             model.source_path = Some(relativise(source_path, Some(project_root)));
@@ -1059,103 +1005,6 @@ fn find_or_add_skeleton(
     )
 }
 
-fn register_animation_clip_resources(
-    project: &mut ProjectDocument,
-    skeleton_id: ResourceId,
-    model_id: ResourceId,
-    model: &ModelResource,
-) -> Vec<ResourceId> {
-    let mut ids = Vec::new();
-    for clip in &model.clips {
-        let existing = project
-            .resources
-            .iter()
-            .find_map(|resource| match &resource.data {
-                ResourceData::AnimationClip(existing)
-                    if existing.psxanim_path == clip.psxanim_path
-                        && existing.skeleton == Some(skeleton_id) =>
-                {
-                    Some(resource.id)
-                }
-                _ => None,
-            });
-        if let Some(id) = existing {
-            ids.push(id);
-            continue;
-        }
-        let role = AnimationRole::guess_from_name(&clip.name);
-        let source_id =
-            find_or_add_animation_source_for_clip(project, skeleton_id, model_id, clip, role);
-        let id = project.add_resource(
-            clip.name.clone(),
-            ResourceData::AnimationClip(AnimationClipResource {
-                psxanim_path: clip.psxanim_path.clone(),
-                skeleton: Some(skeleton_id),
-                source: Some(source_id),
-                target_model: Some(model_id),
-                bake: AnimationClipBakeKind::ModelNative,
-                role,
-                looping: !matches!(
-                    role,
-                    AnimationRole::Roll
-                        | AnimationRole::Backstep
-                        | AnimationRole::Attack
-                        | AnimationRole::Hit
-                        | AnimationRole::Death
-                ),
-                tags: role_tag_list(role),
-                calibration: clip.calibration,
-            }),
-        );
-        ids.push(id);
-    }
-    ids
-}
-
-fn find_or_add_animation_source_for_clip(
-    project: &mut ProjectDocument,
-    skeleton_id: ResourceId,
-    model_id: ResourceId,
-    clip: &ModelAnimationClip,
-    role: AnimationRole,
-) -> ResourceId {
-    if let Some(existing) = project
-        .resources
-        .iter()
-        .find_map(|resource| match &resource.data {
-            ResourceData::AnimationSource(source)
-                if source.source_path == clip.psxanim_path
-                    && source.clip_name == clip.name
-                    && source.target_model == Some(model_id) =>
-            {
-                Some(resource.id)
-            }
-            _ => None,
-        })
-    {
-        return existing;
-    }
-
-    let mut source =
-        AnimationSourceResource::from_path(clip.psxanim_path.clone(), clip.name.clone());
-    source.skeleton = Some(skeleton_id);
-    source.target_model = Some(model_id);
-    source.role = role;
-    source.looping = !matches!(
-        role,
-        AnimationRole::Roll
-            | AnimationRole::Backstep
-            | AnimationRole::Attack
-            | AnimationRole::Hit
-            | AnimationRole::Death
-    );
-    source.tags = role_tag_list(role);
-    project.add_resource(
-        format!("{} Source", clip.name),
-        ResourceData::AnimationSource(source),
-    )
-}
-
 fn register_animation_set_resource(
     project: &mut ProjectDocument,
     display_name: &str,
@@ -1239,18 +1088,6 @@ fn merge_animation_set(target: &mut AnimationSetResource, source: &AnimationSetR
     }
 }
 
-fn role_tag_list(role: AnimationRole) -> Vec<String> {
-    if matches!(role, AnimationRole::Generic) {
-        Vec::new()
-    } else {
-        vec![role.label().to_ascii_lowercase()]
-    }
-}
-
-/// Convert `path` into a relative-to-project string when
-/// `project_root` is provided and `path` lives under it. Falls
-/// back to an absolute path so the editor can still find the
-/// file regardless of where the project moves later.
 #[cfg(test)]
 mod tests {
     use super::*;
