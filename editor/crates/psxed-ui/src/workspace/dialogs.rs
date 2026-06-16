@@ -1188,7 +1188,8 @@ impl EditorWorkspace {
             world_height: self.model_import_dialog.world_height.clamp(128, 8192) as u16,
             normalize_root_translation: self.model_import_dialog.normalize_root_translation,
             strip_animation_scale: true,
-            prune_detached_face_islands: 4,
+            // Keep hand-authored separate pieces (armor plates, detail bits).
+            prune_detached_face_islands: 0,
             extra_animations_affect_bounds: true,
             force_single_bind: self.model_import_dialog.force_single_bind,
         }
