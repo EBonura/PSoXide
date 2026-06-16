@@ -795,32 +795,3 @@ pub(crate) fn compute_global_matrix(
     global
 }
 
-pub(crate) fn compute_global_rotations(parents: &[Option<usize>], trs: &[Trs]) -> Vec<[f32; 4]> {
-    let mut globals = vec![identity_quat(); trs.len()];
-    let mut done = vec![false; trs.len()];
-    for index in 0..trs.len() {
-        compute_global_rotation(index, parents, trs, &mut globals, &mut done);
-    }
-    globals
-}
-
-pub(crate) fn compute_global_rotation(
-    index: usize,
-    parents: &[Option<usize>],
-    trs: &[Trs],
-    globals: &mut [[f32; 4]],
-    done: &mut [bool],
-) -> [f32; 4] {
-    if done[index] {
-        return globals[index];
-    }
-    let global = if let Some(parent) = parents[index] {
-        let parent_global = compute_global_rotation(parent, parents, trs, globals, done);
-        quat_mul(parent_global, trs[index].rotation)
-    } else {
-        normalize4(trs[index].rotation)
-    };
-    globals[index] = global;
-    done[index] = true;
-    global
-}

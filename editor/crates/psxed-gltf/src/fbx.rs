@@ -763,89 +763,42 @@ pub(crate) fn evaluate_mapped_gltf_frame_trs(
 }
 
 pub(crate) fn retarget_mapped_frame_trs(
-    target_parents: &[Option<usize>],
+    _target_parents: &[Option<usize>],
     target_base_trs: &[Trs],
-    source_parents: &[Option<usize>],
+    _source_parents: &[Option<usize>],
     source_base_trs: &[Trs],
     source_pose_trs: &[Trs],
     mapping: &[Option<usize>],
 ) -> Vec<Trs> {
-    let source_base_global = compute_global_rotations(source_parents, source_base_trs);
-    let source_pose_global = compute_global_rotations(source_parents, source_pose_trs);
-    let target_base_global = compute_global_rotations(target_parents, target_base_trs);
-
+    // Parent-relative (local) joint-angle retarget: each mapped target bone
+    // takes the source bone's LOCAL rotation delta from its own bind, re-based
+    // onto the target bone's bind. The bone keeps the TARGET's translation and
+    // scale (its own proportions); only the joint angle is borrowed.
+    //
+    // Working in local (parent-relative) space is what makes this correct
+    // through a hierarchy: any two same-axis rigs (e.g. two Mixamo skeletons)
+    // reproduce the motion exactly, and a matching bind collapses to a direct
+    // local copy. The previous implementation took the delta in GLOBAL bind
+    // frames, which distorted every child bone whenever the source and target
+    // rest poses differed (arms arched backward, mangled feet). The single-root
+    // retarget tests passed because for a root node local == global; the bug
+    // only surfaced on real multi-bone skeletons.
     let mut out = target_base_trs.to_vec();
-    let mut target_pose_global = vec![identity_quat(); target_base_trs.len()];
-    let mut done = vec![false; target_base_trs.len()];
-    for index in 0..target_base_trs.len() {
-        retarget_target_node_rotation(
-            index,
-            target_parents,
-            target_base_trs,
-            &target_base_global,
-            &source_base_global,
-            &source_pose_global,
-            mapping,
-            &mut out,
-            &mut target_pose_global,
-            &mut done,
-        );
+    for (target_index, source_index) in mapping.iter().copied().enumerate() {
+        let Some(source_index) = source_index else {
+            continue;
+        };
+        let (Some(source_bind), Some(source_pose), Some(target)) = (
+            source_base_trs.get(source_index),
+            source_pose_trs.get(source_index),
+            out.get_mut(target_index),
+        ) else {
+            continue;
+        };
+        let joint_delta = quat_mul(quat_inverse(source_bind.rotation), source_pose.rotation);
+        target.rotation = quat_mul(target.rotation, joint_delta);
     }
     out
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn retarget_target_node_rotation(
-    index: usize,
-    target_parents: &[Option<usize>],
-    target_base_trs: &[Trs],
-    target_base_global: &[[f32; 4]],
-    source_base_global: &[[f32; 4]],
-    source_pose_global: &[[f32; 4]],
-    mapping: &[Option<usize>],
-    out: &mut [Trs],
-    target_pose_global: &mut [[f32; 4]],
-    done: &mut [bool],
-) -> [f32; 4] {
-    if done[index] {
-        return target_pose_global[index];
-    }
-    let parent_global = if let Some(parent) = target_parents[index] {
-        retarget_target_node_rotation(
-            parent,
-            target_parents,
-            target_base_trs,
-            target_base_global,
-            source_base_global,
-            source_pose_global,
-            mapping,
-            out,
-            target_pose_global,
-            done,
-        )
-    } else {
-        identity_quat()
-    };
-    let local_rotation = mapping
-        .get(index)
-        .copied()
-        .flatten()
-        .and_then(|source_index| {
-            let source_base = source_base_global.get(source_index).copied()?;
-            let source_pose = source_pose_global.get(source_index).copied()?;
-            let target_base = target_base_global.get(index).copied()?;
-            let local_delta = quat_mul(quat_inverse(source_base), source_pose);
-            let desired_global = quat_mul(target_base, local_delta);
-            Some(quat_mul(quat_inverse(parent_global), desired_global))
-        })
-        .unwrap_or(target_base_trs[index].rotation);
-    out[index].translation = target_base_trs[index].translation;
-    out[index].rotation = local_rotation;
-    out[index].scale = target_base_trs[index].scale;
-    let global = quat_mul(parent_global, local_rotation);
-    target_pose_global[index] = global;
-    done[index] = true;
-    global
 }
 
 pub(crate) fn fbx_animation_node_mapping(
