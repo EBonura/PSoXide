@@ -388,6 +388,21 @@ pub fn register_cooked_model_bundle(
     display_name: &str,
     project_root: Option<&Path>,
 ) -> Result<ResourceId, ModelImportError> {
+    register_cooked_model_bundle_impl(project, bundle_dir, display_name, project_root, true)
+}
+
+/// `create_animation_library`: when false, register only the `Model`
+/// (mesh + skeleton + inline clips) and skip the standalone
+/// `AnimationClip` / `AnimationSource` / `AnimationSet` resources. Use
+/// false for the clean "model only" import where animations come from a
+/// separate, skeleton-shared library.
+fn register_cooked_model_bundle_impl(
+    project: &mut ProjectDocument,
+    bundle_dir: &Path,
+    display_name: &str,
+    project_root: Option<&Path>,
+    create_animation_library: bool,
+) -> Result<ResourceId, ModelImportError> {
     let mut psxmdl: Vec<PathBuf> = Vec::new();
     let mut psxt: Vec<PathBuf> = Vec::new();
     let mut psxanim: Vec<PathBuf> = Vec::new();
@@ -516,10 +531,12 @@ pub fn register_cooked_model_bundle(
     };
 
     let model_id = project.add_resource(display_name, ResourceData::Model(model_resource.clone()));
-    let animation_ids =
-        register_animation_clip_resources(project, skeleton_id, model_id, &model_resource);
-    if !animation_ids.is_empty() {
-        register_animation_set_resource(project, display_name, skeleton_id, &animation_ids);
+    if create_animation_library {
+        let animation_ids =
+            register_animation_clip_resources(project, skeleton_id, model_id, &model_resource);
+        if !animation_ids.is_empty() {
+            register_animation_set_resource(project, display_name, skeleton_id, &animation_ids);
+        }
     }
     Ok(model_id)
 }
@@ -560,6 +577,40 @@ pub fn import_model_with_animation_sources(
     project_root: &Path,
     config: psxed_gltf::RigidModelConfig,
 ) -> Result<ResourceId, ModelImportError> {
+    import_model_impl(
+        project,
+        source_path,
+        extra_animation_paths,
+        output_name,
+        project_root,
+        config,
+        true,
+    )
+}
+
+/// Clean "model only" import: cook mesh + atlas + skeleton (+ the
+/// source's own inline clips) and register just the `Model`. Does NOT
+/// create the standalone per-model animation library -- animations come
+/// from a separate skeleton-shared library (see [`import_animation_library`]).
+pub fn import_model_only(
+    project: &mut ProjectDocument,
+    source_path: &Path,
+    output_name: &str,
+    project_root: &Path,
+    config: psxed_gltf::RigidModelConfig,
+) -> Result<ResourceId, ModelImportError> {
+    import_model_impl(project, source_path, &[], output_name, project_root, config, false)
+}
+
+fn import_model_impl(
+    project: &mut ProjectDocument,
+    source_path: &Path,
+    extra_animation_paths: &[PathBuf],
+    output_name: &str,
+    project_root: &Path,
+    config: psxed_gltf::RigidModelConfig,
+    create_animation_library: bool,
+) -> Result<ResourceId, ModelImportError> {
     let package = convert_rigid_model_source(source_path, extra_animation_paths, &config)?;
 
     let safe = sanitize_name(output_name, "model");
@@ -593,8 +644,13 @@ pub fn import_model_with_animation_sources(
         })?;
     }
 
-    let model_id =
-        register_cooked_model_bundle(project, &bundle_dir, output_name, Some(project_root))?;
+    let model_id = register_cooked_model_bundle_impl(
+        project,
+        &bundle_dir,
+        output_name,
+        Some(project_root),
+        create_animation_library,
+    )?;
     if let Some(resource) = project.resource_mut(model_id) {
         if let ResourceData::Model(model) = &mut resource.data {
             model.source_path = Some(relativise(source_path, Some(project_root)));
@@ -656,6 +712,96 @@ fn prepare_import_bundle_dir(bundle_dir: &Path) -> Result<(), ModelImportError> 
     }
 
     Ok(())
+}
+
+/// Result of importing a skeleton-shared animation library.
+#[derive(Debug, Clone)]
+pub struct AnimationLibraryImport {
+    /// Shared skeleton the library targets (deduped by signature).
+    pub skeleton_id: ResourceId,
+    /// AnimationSet binding gameplay roles to the cooked clips.
+    pub set_id: ResourceId,
+    /// One AnimationClip resource per cooked clip (`target_model: None`).
+    pub clip_ids: Vec<ResourceId>,
+}
+
+/// Import an animation pack as a **skeleton-shared library**, decoupled
+/// from any one model. The `model_reference_source` (a rigged FBX/GLB on
+/// the target skeleton, e.g. the canonical enemy) supplies the bind pose
+/// and bounds used to bake the clips; `pack_sources` are extra animation
+/// FBX/GLB files retargeted onto it. Every cooked clip is registered as
+/// an `AnimationClip` with `target_model: None`, so any model sharing the
+/// skeleton can use it via the returned `AnimationSet`. No `Model`
+/// resource is created.
+///
+/// `clip_filter`, when `Some`, keeps only clips whose cooked
+/// (sanitized) name appears in the list -- the curation point.
+pub fn import_animation_library(
+    project: &mut ProjectDocument,
+    model_reference_source: &Path,
+    pack_sources: &[PathBuf],
+    library_name: &str,
+    project_root: &Path,
+    config: psxed_gltf::RigidModelConfig,
+    clip_filter: Option<&[String]>,
+) -> Result<AnimationLibraryImport, ModelImportError> {
+    let package = convert_rigid_model_source(model_reference_source, pack_sources, &config)?;
+    let model = psx_asset::Model::from_bytes(&package.model).map_err(|e| {
+        ModelImportError::InvalidModel {
+            path: model_reference_source.to_path_buf(),
+            detail: format!("{e:?}"),
+        }
+    })?;
+    let skeleton_id = find_or_add_skeleton(project, library_name, SkeletonResource::from_model(&model));
+
+    let safe = sanitize_name(library_name, "library");
+    let dir = project_root.join("assets").join("animations").join(&safe);
+    std::fs::create_dir_all(&dir).map_err(|e| ModelImportError::Io {
+        path: dir.clone(),
+        detail: e.to_string(),
+    })?;
+
+    let mut clip_ids = Vec::new();
+    let mut used_stems = BTreeSet::new();
+    for clip in &package.clips {
+        if let Some(filter) = clip_filter {
+            if !filter.iter().any(|name| name == &clip.sanitized_name) {
+                continue;
+            }
+        }
+        let stem = unique_clip_stem(&mut used_stems, &clip.sanitized_name);
+        let path = dir.join(format!("{stem}.psxanim"));
+        std::fs::write(&path, &clip.bytes).map_err(|e| ModelImportError::Io {
+            path: path.clone(),
+            detail: e.to_string(),
+        })?;
+        let role = AnimationRole::guess_from_name(&clip.sanitized_name);
+        let id = project.add_resource(
+            clip.sanitized_name.clone(),
+            ResourceData::AnimationClip(AnimationClipResource {
+                psxanim_path: relativise(&path, Some(project_root)),
+                skeleton: Some(skeleton_id),
+                source: None,
+                target_model: None,
+                bake: AnimationClipBakeKind::LegacyShared,
+                role,
+                looping: matches!(
+                    role,
+                    AnimationRole::Idle | AnimationRole::Walk | AnimationRole::Run
+                ),
+                tags: Vec::new(),
+                calibration: Default::default(),
+            }),
+        );
+        clip_ids.push(id);
+    }
+
+    let set_id = register_animation_set_resource(project, library_name, skeleton_id, &clip_ids);
+    Ok(AnimationLibraryImport {
+        skeleton_id,
+        set_id,
+        clip_ids,
+    })
 }
 
 /// Convert a GLB/glTF/FBX into the cooked model package without
