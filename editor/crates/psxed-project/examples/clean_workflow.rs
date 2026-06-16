@@ -9,7 +9,10 @@
 use std::path::PathBuf;
 
 use psxed_project::model_import::{import_animation_library, import_model_with_animation_sources};
-use psxed_project::{NodeKind, ProjectDocument, ResourceData};
+use psxed_project::{
+    AnimationClipBakeKind, AnimationClipResource, AnimationRole, NodeKind, ProjectDocument,
+    ResourceData,
+};
 use psxed_gltf::RigidModelConfig;
 
 const KEEP_MODEL_MARKER: &str = "ps1_clean_power_barricade";
@@ -91,14 +94,8 @@ fn main() {
             res.name = name;
             if let ResourceData::Character(ch) = &mut res.data {
                 ch.model = Some(model_id);
+                // Animations resolve entirely from the shared Animation Set.
                 ch.animation_set = Some(lib.set_id);
-                ch.idle_clip = None;  // resolved from the shared set
-                ch.walk_clip = None;
-                ch.run_clip = None;
-                ch.turn_clip = None;
-                ch.roll_clip = None;
-                ch.backstep_clip = None;
-                ch.action_clips.clear();
             }
         }
     }
@@ -125,6 +122,41 @@ fn main() {
                 }
             }
         }
+    }
+
+    // Ensure every Model is renderable: a geometry-only model with no
+    // skeleton clips (e.g. a static prop) gets its bundle's bind-pose
+    // .psxanim registered as a skeleton-scoped AnimationClip.
+    let models: Vec<_> = project.resources.iter().filter_map(|r| match &r.data {
+        ResourceData::Model(m) => Some((r.id, m.skeleton, m.model_path.clone())),
+        _ => None,
+    }).collect();
+    for (model_id, skeleton, model_path) in models {
+        if !project.resolved_model_animation_clips(model_id).is_empty() {
+            continue;
+        }
+        let Some(skeleton) = skeleton else { continue };
+        let bundle = root.join(&model_path);
+        let Some(dir) = bundle.parent() else { continue };
+        let psxanim = std::fs::read_dir(dir).ok().and_then(|rd| {
+            rd.flatten()
+                .map(|e| e.path())
+                .find(|p| p.extension().and_then(|x| x.to_str()) == Some("psxanim"))
+        });
+        let Some(psxanim) = psxanim else { continue };
+        let rel = psxanim.strip_prefix(&root).unwrap_or(&psxanim).to_string_lossy().replace('\\', "/");
+        let name = psxanim.file_stem().and_then(|s| s.to_str()).unwrap_or("bind_pose").to_string();
+        project.add_resource(name, ResourceData::AnimationClip(AnimationClipResource {
+            psxanim_path: rel,
+            skeleton: Some(skeleton),
+            source: None,
+            bake: AnimationClipBakeKind::LegacyShared,
+            role: AnimationRole::Generic,
+            looping: false,
+            tags: Vec::new(),
+            calibration: Default::default(),
+        }));
+        println!("registered bind-pose clip for geometry-only model {model_id:?}");
     }
 
     project.save_to_path(&project_path).expect("save");
