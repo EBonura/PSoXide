@@ -8,10 +8,11 @@
 //!   `.psxt` atlas, and any number of `.psxanim` clips. Use this
 //!   when the assets ship with the repo or were cooked elsewhere.
 //!
-//! * [`import_glb_model`] runs GLB/glTF/FBX sources through the
-//!   rigid-model cooker, drops the
-//!   cooked outputs under `project/assets/models/<safe_name>/`,
-//!   then registers them. Use this for fresh authoring.
+//! * [`import_model_with_animation_sources`] / [`import_model_only`]
+//!   run GLB/glTF/FBX sources through the rigid-model cooker, drop the
+//!   cooked outputs under `project/assets/models/<safe_name>/`, then
+//!   register them. Use these for fresh authoring;
+//!   [`import_animation_library`] bakes a skeleton-shared clip library.
 //!
 //! Both paths validate every blob through `psx_asset` parsers and
 //! confirm animation joint counts match the model's joint count
@@ -550,25 +551,9 @@ fn register_cooked_model_bundle_impl(
 /// contain exactly the same kinds of files this importer
 /// produces -- anything else and the import refuses rather than
 /// clobbering user data.
-pub fn import_glb_model(
-    project: &mut ProjectDocument,
-    source_path: &Path,
-    output_name: &str,
-    project_root: &Path,
-    config: psxed_gltf::RigidModelConfig,
-) -> Result<ResourceId, ModelImportError> {
-    import_model_with_animation_sources(
-        project,
-        source_path,
-        &[],
-        output_name,
-        project_root,
-        config,
-    )
-}
-
 /// Convert a model source plus optional standalone FBX animation takes
-/// through the rigid-model cooker and register the cooked bundle.
+/// through the rigid-model cooker and register the cooked bundle. Pass
+/// an empty `extra_animation_paths` for a plain model import.
 pub fn import_model_with_animation_sources(
     project: &mut ProjectDocument,
     source_path: &Path,
@@ -804,19 +789,10 @@ pub fn import_animation_library(
     })
 }
 
-/// Convert a GLB/glTF/FBX into the cooked model package without
-/// writing files or mutating a project. The editor uses this for
-/// the import preview dialog so authors can inspect the baked
-/// model, atlas, and animation clips before committing the bundle.
-pub fn preview_glb_model(
-    source_path: &Path,
-    config: psxed_gltf::RigidModelConfig,
-) -> Result<psxed_gltf::RigidModelPackage, ModelImportError> {
-    preview_model_with_animation_sources(source_path, &[], config)
-}
-
 /// Convert a model source plus optional standalone FBX animation takes
-/// without writing files or mutating a project.
+/// into the cooked package without writing files or mutating a project.
+/// The editor uses this for the import preview dialog so authors can
+/// inspect the baked model, atlas, and clips before committing.
 pub fn preview_model_with_animation_sources(
     source_path: &Path,
     extra_animation_paths: &[PathBuf],
