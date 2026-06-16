@@ -1195,6 +1195,7 @@ impl EditorWorkspace {
             // Per-model opt-in; the in-editor dialog defaults single-sided.
             // Double-sided models are imported via the dedicated tooling.
             double_sided: false,
+            ignore_embedded_animations: false,
         }
     }
 
