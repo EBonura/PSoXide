@@ -141,6 +141,7 @@ pub fn render_import_model_preview_with_options(
         }
     }
 
+    let double_sided = model.double_sided();
     for part_index in 0..model.part_count() {
         let Some(part) = model.part(part_index) else {
             continue;
@@ -170,6 +171,7 @@ pub fn render_import_model_preview_with_options(
                     PreviewVertex::from_projected(pb, b.uv),
                     PreviewVertex::from_projected(pc, c.uv),
                 ],
+                double_sided,
             );
         }
     }
@@ -766,6 +768,7 @@ fn raster_textured_triangle(
     z_buffer: &mut [f32],
     atlas: &ColorImage,
     tri: [PreviewVertex; 3],
+    double_sided: bool,
 ) {
     let area = edge(tri[0], tri[1], tri[2]);
     if area.abs() < f32::EPSILON {
@@ -775,8 +778,10 @@ fn raster_textured_triangle(
     // positive NCLIP, which is negative `edge` here) so the preview
     // shows winding problems instead of silently drawing both sides;
     // a source asset relying on double-sided materials used to look
-    // fine here and render inside-out in the scene.
-    if area > 0.0 {
+    // fine here and render inside-out in the scene. Double-sided models
+    // skip the cull (the fill below already handles both windings) so
+    // the preview matches the in-game double-sided render.
+    if !double_sided && area > 0.0 {
         return;
     }
 
