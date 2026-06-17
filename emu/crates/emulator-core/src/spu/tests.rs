@@ -1882,3 +1882,124 @@ fn kon_applies_after_sample_emit_not_before_for_hardware_parity() {
         "first Attack step must land on the tick AFTER KON, not the KON tick"
     );
 }
+
+// ---- spu-capture-status faithfulness tests ----
+// ---- spu capture-buffer + SPUSTAT status accuracy tests ----
+
+#[test]
+fn cd_audio_writes_l_r_capture_buffers() {
+    // PSX-SPX: the SPU mirrors the CD input (post CD-input volume) into the
+    // CD-L capture buffer at SPU RAM 0x000 and CD-R at 0x400 every sample.
+    // Previously these stayed frozen at whatever DMA last left there.
+    let mut s = Spu::new();
+    s.write16(SPUCNT, SPUCNT_CD_AUDIO_ENABLE);
+    s.write16(CD_VOL_L, 0x4000); // +0.5 in Q15
+    s.write16(CD_VOL_R, 0x2000); // +0.25 in Q15
+    let sample = 0x4000i16;
+    s.feed_cd_audio(&[(sample, sample)]);
+    s.tick_sample(SAMPLE_CYCLES);
+
+    let want_l = ((sample as i32 * 0x4000) >> 15) as u16;
+    let want_r = ((sample as i32 * 0x2000) >> 15) as u16;
+    assert_eq!(s.ram[0x000 >> 1], want_l, "CD-L capture buffer (post CD volume)");
+    assert_eq!(s.ram[0x400 >> 1], want_r, "CD-R capture buffer (post CD volume)");
+
+    // The ring advances one halfword (2 bytes) per sample: a second sample
+    // lands at the next slot, not back at 0.
+    let s2 = 0x2000i16;
+    s.feed_cd_audio(&[(s2, s2)]);
+    s.tick_sample(2 * SAMPLE_CYCLES);
+    let want_l2 = ((s2 as i32 * 0x4000) >> 15) as u16;
+    assert_eq!(
+        s.ram[(0x000 + 2) >> 1],
+        want_l2,
+        "capture ring must advance 2 bytes per sample"
+    );
+}
+
+#[test]
+fn voice1_voice3_outputs_written_to_capture_buffers() {
+    // PSX-SPX: Voice1's post-ADSR output is captured at SPU RAM 0x800 and
+    // Voice3's at 0xC00 every sample. Drive voice 1 with a constant decoded
+    // sample so it produces a known non-zero output, leave voice 3 idle.
+    let mut s = Spu::new();
+    s.write16(SPUCNT, SPUCNT_UNMUTE);
+    s.voices[1].phase = AdsrPhase::Sustain;
+    s.voices[1].envelope = 0x7FFF;
+    s.voices[1].sample_buf = [0x4000; ADPCM_SAMPLES_PER_BLOCK];
+    s.voices[1].sample_index = 0;
+    s.voices[1].sample_pos = 0;
+    s.voices[1].interp_ring = [0x4000; 4];
+
+    s.tick_sample(SAMPLE_CYCLES);
+
+    assert_ne!(s.voices[1].last_sample, 0, "voice 1 must have produced a sample");
+    assert_eq!(
+        s.ram[0x800 >> 1],
+        s.voices[1].last_sample as u16,
+        "voice 1 post-ADSR output must land in its capture buffer (0x800)"
+    );
+    assert_eq!(
+        s.ram[0xC00 >> 1],
+        0,
+        "idle voice 3 captures silence (0xC00)"
+    );
+}
+
+#[test]
+fn capture_write_can_latch_spu_irq_on_low_ram() {
+    // An SPU IRQ armed on the capture region must latch from a capture
+    // write, not only from the decode cursor. Arm IRQ at byte 0x800
+    // (Voice1 capture bank start) and tick: the voice-1 capture write at
+    // ring pos 0 hits it.
+    let mut s = Spu::new();
+    s.write16(SPUCNT, (1 << 6) | (1 << 4)); // IRQ enable + Manual-Write mode
+    s.write16(IRQ_ADDR, 0x0100); // 0x100 * 8 = byte 0x800
+
+    s.tick_sample(SAMPLE_CYCLES);
+
+    assert!(s.take_irq_pending(), "capture write at 0x800 must latch the armed IRQ");
+    assert_ne!(s.spustat() & (1 << 6), 0, "SPUSTAT IRQ9 flag must be set");
+}
+
+#[test]
+fn spustat_exposes_dma_request_bits_from_transfer_mode() {
+    // PSX-SPX SPUSTAT: bit 7 = DMA read/write request (mirrors SPUCNT bit
+    // 5, set for both DMA modes), bit 8 = DMA write request (mode 2), bit
+    // 9 = DMA read request (mode 3). These previously read back 0 forever.
+    let mut s = Spu::new();
+
+    s.write16(SPUCNT, 2 << 4); // DMA write mode
+    assert_ne!(s.spustat() & (1 << 7), 0, "DMA write mode sets the request bit (7)");
+    assert_ne!(s.spustat() & (1 << 8), 0, "DMA write mode sets the write-request bit (8)");
+    assert_eq!(s.spustat() & (1 << 9), 0, "DMA write mode must not set read-request bit (9)");
+
+    s.write16(SPUCNT, 3 << 4); // DMA read mode
+    assert_ne!(s.spustat() & (1 << 7), 0, "DMA read mode sets the request bit (7)");
+    assert_ne!(s.spustat() & (1 << 9), 0, "DMA read mode sets the read-request bit (9)");
+    assert_eq!(s.spustat() & (1 << 8), 0, "DMA read mode must not set write-request bit (8)");
+
+    s.write16(SPUCNT, 0); // Stop mode
+    assert_eq!(s.spustat() & 0x0380, 0, "Stop mode clears DMA request bits 7/8/9");
+    s.write16(SPUCNT, 1 << 4); // Manual-Write mode
+    assert_eq!(s.spustat() & 0x0380, 0, "Manual-Write mode sets no DMA request bits");
+}
+
+#[test]
+fn spustat_capture_half_flag_toggles_at_ring_midpoint() {
+    // PSX-SPX SPUSTAT bit 11 = which half of each 0x400 capture ring is
+    // being written. From reset the ring index starts at 0 and advances 2
+    // bytes per tick, wrapping at 0x400; the flag is updated after each
+    // advance (0 for pos < 0x200, 1 for pos >= 0x200).
+    let mut s = Spu::new();
+    for tick in 1..=512u32 {
+        s.tick_sample(tick as u64 * SAMPLE_CYCLES);
+        let pos = (tick * 2) % 0x400;
+        let want = if pos >= 0x200 { 0x800 } else { 0 };
+        assert_eq!(
+            s.read16(SPUSTAT) & 0x800,
+            want,
+            "tick {tick}: capture-half flag must follow ring pos {pos:#06x}"
+        );
+    }
+}
