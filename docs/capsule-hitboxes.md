@@ -71,18 +71,25 @@ else, for parity and shared code.)
 
 ### 2) Weapon attack capsule(s)
 
-The attack volume is the **same capsule primitive**, just flagged attack-role
-and active only on an attack's active frames:
+The weapon is **built into the model mesh** (the Rust Mantis claws, skinned to
+the hand/forearm joints) -- not a separate equipped weapon. So the attack
+volume is a capsule **authored on the hand joint, extending out along the claw
+to its tip**. The claw tip is not a bone, so this capsule is authored per model
+(it cannot be auto-derived like the hurt template); it just reuses the same
+primitive, flagged `role = Attack`, and is active only on an attack's active
+frames.
 
-- **Armed**: authored on the weapon model (the blade volume, in weapon-local
-  space). The weapon attaches at a hand socket, so it is placed by that
-  socket's joint world transform -- the same `place()` routine.
-- **Unarmed / claws**: an attack capsule on the hand/forearm joint of the
-  shared rig (reuse a template slot, flagged attack instead of hurt).
+- Built-in claws (current): authored attack capsule per claw, on the
+  `Left/RightHand` joint, `a = hand origin`, `b = claw-tip offset`, radius =
+  claw thickness.
+- Future equipped weapon: the same primitive authored on the weapon model and
+  placed by its hand socket -- no new machinery needed.
 
 So a "hitbox" is one type with a role flag (`Hurt` | `Attack`) and timing; the
 geometry, placement, and test are identical for player hurt, enemy hurt, and
-weapon attack. Query = active attack capsules x enabled hurt capsules.
+the claw/weapon attack. **Hurt body capsules are shared/derived; attack
+capsules are authored per model** (the weapon/claw shape is not a bone). Query
+= active attack capsules x enabled hurt capsules.
 
 ## Representation
 
