@@ -8,50 +8,33 @@ pub(super) fn rgb24_to_bgr15(rgb24: u32) -> u16 {
     r | (g << 5) | (b << 10)
 }
 
-/// Redux's 4×4 dither coefficient table, indexed by
-/// `(y & 3) * 4 + (x & 3)`. See `s_dithertable` in
-/// `pcsx-redux/src/gpu/soft/soft.cc`. Note these are NOT the signed
-/// Bayer offsets you'll see quoted in some PSX-SPX derivatives --
-/// they're threshold coefficients for Redux's "conditional round-up"
-/// dither model, which produces the exact bit pattern PSX hardware
-/// uses.
-const DITHER_COEFFS: [u8; 16] = [7, 0, 6, 1, 2, 5, 3, 4, 1, 6, 0, 7, 4, 3, 5, 2];
+/// The PS1's 4×4 ordered-dither matrix, indexed by
+/// `(y & 3) * 4 + (x & 3)`. These are the *signed* per-pixel offsets
+/// the PSX-SPX spec defines for 24-bit-to-15-bit dithering: each
+/// channel's 8-bit value has the offset added before the high 3 bits
+/// are dropped. The offsets sum to zero over the tile, so dithering
+/// is brightness-neutral -- it rounds individual pixels both up and
+/// down to approximate intermediate shades, which is what produces
+/// the characteristic checkerboard on a flat mid-tone.
+const DITHER_OFFSETS: [i32; 16] = [-4, 0, -3, 1, 2, -2, 3, -1, -3, 1, -4, 0, 3, -1, 2, -2];
 
-/// Dither an 8-bit RGB triple to 15bpp, matching Redux's
-/// `prepareDitherLut` / `applyDither` byte-for-byte.
+/// Dither an 8-bit RGB triple to 15bpp using the PS1's signed
+/// additive 4×4 ordered-dither matrix (PSX-SPX '24bit-to-15bit
+/// dithering').
 ///
-/// The algorithm: for each channel split into a 5-bit quotient and a
-/// 3-bit remainder; if the remainder beats the coefficient for this
-/// pixel AND the quotient isn't already saturated (0x1F), round the
-/// quotient up by one. That produces the characteristic PSX 4×4
-/// dither pattern -- fundamentally different from the additive
-/// `-4..+3` offset model PSX-SPX sometimes describes, and
-/// producing different bit patterns. Matching Redux's algorithm
-/// exactly is the only way to hit pixel-exact parity on Gouraud
-/// gradients (which is most of what the Sony logo is).
+/// The algorithm per channel: add this pixel's signed matrix offset
+/// to the 8-bit value, clamp the result to `0..=255`, then take the
+/// high 5 bits (`>> 3`). The clamp doubles as the saturation guard:
+/// a 255 channel with a `+3` offset clamps back to 255 (still 31),
+/// and a 0 channel with a `-4` offset clamps to 0. Because the
+/// offsets are signed (range `-4..=+3`) a pixel can round *down* as
+/// well as up -- e.g. a flat 24-bit mid-grey dithers to an
+/// alternating 15/16 checkerboard rather than a uniform value,
+/// matching PS1 hardware.
 pub(super) fn dither_rgb(r: i32, g: i32, b: i32, x: i32, y: i32) -> u16 {
-    let coeff = DITHER_COEFFS[((y & 3) * 4 + (x & 3)) as usize] as u32;
-    let r = r.clamp(0, 255) as u32;
-    let g = g.clamp(0, 255) as u32;
-    let b = b.clamp(0, 255) as u32;
-    let mut rc = r >> 3;
-    let mut gc = g >> 3;
-    let mut bc = b >> 3;
-    // Round-up rule: if the low 3 bits exceed the coefficient AND we
-    // have headroom, increment. The saturation guard is essential --
-    // without it pure-white pixels would get stuck rounding up past
-    // 0x1F and wrapping (or in Redux's case, indexing past the
-    // precomputed LUT).
-    if rc < 0x1F && (r & 7) > coeff {
-        rc += 1;
-    }
-    if gc < 0x1F && (g & 7) > coeff {
-        gc += 1;
-    }
-    if bc < 0x1F && (b & 7) > coeff {
-        bc += 1;
-    }
-    (bc << 10) as u16 | ((gc << 5) as u16) | rc as u16
+    let off = DITHER_OFFSETS[((y & 3) * 4 + (x & 3)) as usize];
+    let ch = |c: i32| -> u16 { ((c + off).clamp(0, 255) >> 3) as u16 };
+    ch(r) | (ch(g) << 5) | (ch(b) << 10)
 }
 
 /// PSX semi-transparency mode. The four non-`Opaque` variants map
@@ -176,14 +159,13 @@ pub(super) const RAW_TEXTURE_TINT: (u32, u32, u32) = (0x80, 0x80, 0x80);
 /// bit of the result comes from the foreground so semi-transparent
 /// texels keep marking themselves.
 ///
-/// Matches Redux's per-channel arithmetic in
-/// `pcsx-redux/src/gpu/soft/soft.cc` byte-for-byte. The subtle one
-/// is **Average**: Redux computes `(bg >> 1) + (fg >> 1)` independent
-/// per-channel, dropping each operand's LSB *before* summing. The
-/// naive `(bg + fg) / 2` rounds differently when both inputs are
-/// odd -- e.g. `(3 + 3) / 2 = 3` vs Redux's `1 + 1 = 2`. That bug
-/// alone produces off-by-1 diffs on the Sony logo's semi-
-/// transparent gradient edges.
+/// **Average** (Mode 0) follows the PSX-SPX spec definition
+/// `0.5*B + 0.5*F`, i.e. sum the two operands then halve: `(B + F) >> 1`
+/// per channel. Summing before the shift keeps the low bit, so an
+/// odd+odd pair such as `(3 + 3) >> 1 = 3` does not lose 1 LSB the way
+/// a per-operand `(B >> 1) + (F >> 1)` approximation would (that gives
+/// `1 + 1 = 2`, one step too dark). Range stays 0..=31, so no clamp is
+/// needed.
 pub(super) fn blend_pixel(bg: u16, fg: u16, mode: BlendMode) -> u16 {
     if mode == BlendMode::Opaque {
         return fg;
@@ -196,13 +178,10 @@ pub(super) fn blend_pixel(bg: u16, fg: u16, mode: BlendMode) -> u16 {
     let fb = ((fg >> 10) & 0x1F) as i16;
     let (r, g, b) = match mode {
         BlendMode::Opaque => unreachable!(),
-        // Half-back + half-front -- per-channel right-shift before
-        // summing, matching Redux's `& 0x7bde >> 1` pattern.
-        BlendMode::Average => (
-            (br >> 1) + (fr >> 1),
-            (bgg >> 1) + (fgg >> 1),
-            (bb >> 1) + (fb >> 1),
-        ),
+        // Half-back + half-front -- sum the operands THEN halve, per the
+        // PSX-SPX `0.5*B + 0.5*F` definition. Max is (31+31)>>1 = 31, so
+        // the result never needs clamping.
+        BlendMode::Average => (((br + fr) >> 1), ((bgg + fgg) >> 1), ((bb + fb) >> 1)),
         BlendMode::Add => ((br + fr).min(31), (bgg + fgg).min(31), (bb + fb).min(31)),
         BlendMode::Sub => ((br - fr).max(0), (bgg - fgg).max(0), (bb - fb).max(0)),
         // Full-back + quarter-front -- `fg / 4` via integer division

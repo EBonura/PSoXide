@@ -41,11 +41,10 @@ use commands::gp0_packet_size;
 /// pixel. Coverage is the center-sampled DDA; attributes use the
 /// determinant-plane interpolation with the exact `tl` (top-left) anchor,
 /// so the integer-truncated gradients land bit-identically to hardware.
-/// The coverage/interpolation RULE is the documented PS1 behavior that
-/// Mednafen and DuckStation also implement (their `DrawTriangle`); this
-/// implementation was written from that documented behavior, contains no
-/// source from either project, and is verified pixel-exact against real
-/// silicon (hardware-tests GPU read-back battery, burn ledger HWB-006).
+/// The coverage/interpolation RULE is the documented PS1 (PSX-SPX) behavior;
+/// this implementation was written from that public hardware documentation
+/// and is verified pixel-exact against real silicon (hardware-tests GPU
+/// read-back battery, burn ledger HWB-006).
 /// The caller's closure owns texture sampling, dither, blend and the
 /// actual VRAM write -- this just supplies coverage and the per-pixel
 /// interpolated R/G/B/U/V.
@@ -111,7 +110,7 @@ fn for_each_tri_pixel(
     let anchor = v[tl];
     // Determinant-plane for one attribute channel -> (dadx, dady, base) as u32,
     // where attr(x, y) = (base + x*dadx + y*dady) >> 24 (low byte). Matches
-    // DuckStation's ATTRIB_STEP scaling (Q12 + Q12 post-shift) and the
+    // the PS1 GPU's attribute-step scaling (Q12 + Q12 post-shift) and the
     // Init/StepX(-anchor)/StepY(-anchor) origin fold, in u32 wrapping math.
     let mk = |a0: i32, a1: i32, a2: i32, anchor_a: i32| -> (u32, u32, u32) {
         let num_dx =
@@ -1090,6 +1089,15 @@ impl Gpu {
                 self.mask_check_before_draw = false;
                 self.status.raw &= !0x1800;
                 self.texture_window_raw = 0;
+                // GP1(00) is defined by the PSX-SPX spec as equivalent to
+                // GP0(E1h..E6h)=0, so the active (decoded) texture window
+                // must be cleared too -- not just the E2 readback latch.
+                // Otherwise a draw issued after reset but before the next
+                // GP0(E2) would mask UVs with the stale window.
+                self.tex_window_mask_x = 0;
+                self.tex_window_mask_y = 0;
+                self.tex_window_offset_x = 0;
+                self.tex_window_offset_y = 0;
                 self.drawing_start_raw = 0;
                 self.drawing_end_raw = 0;
                 self.drawing_offset_raw = 0;
@@ -1452,14 +1460,28 @@ impl Gpu {
         let raw_h = ((wh_word >> 16) & 0x1FF) as u16;
         let w = if raw_w == 0 { 1024 } else { raw_w };
         let h = if raw_h == 0 { 512 } else { raw_h };
+        // Per PSX-SPX the GP0(E6h) Set-Mask / Check-Mask bits DO apply to
+        // VRAM->VRAM copies (unlike GP0(02h) Fill, which ignores them):
+        // check-mask preserves destination pixels whose bit15 is set, and
+        // force-mask ORs bit15 into every written pixel.
+        let mask_check = self.mask_check_before_draw;
+        let mask_set = self.mask_set_on_draw;
         let mut row = vec![0u16; w as usize];
         for dy_off in 0..h {
             for dx_off in 0..w {
                 row[dx_off as usize] = self.vram.get_pixel(sx + dx_off, sy + dy_off);
             }
             for dx_off in 0..w {
-                self.vram
-                    .set_pixel(dx + dx_off, dy + dy_off, row[dx_off as usize]);
+                let (px, py) = (dx + dx_off, dy + dy_off);
+                if mask_check && self.vram.get_pixel(px, py) & 0x8000 != 0 {
+                    continue;
+                }
+                let pixel = if mask_set {
+                    row[dx_off as usize] | 0x8000
+                } else {
+                    row[dx_off as usize]
+                };
+                self.vram.set_pixel(px, py, pixel);
             }
         }
         // Charge busy: VRAM↔VRAM copies cost one cycle per pixel
@@ -1895,7 +1917,7 @@ impl Gpu {
         if triangle_exceeds_hw_extent(v0, v1, v2) {
             return;
         }
-        // PS1 silicon triangle coverage (Mednafen/DuckStation DDA): sort by
+        // PS1 silicon triangle coverage (half-pixel-biased DDA): sort by
         // Y, walk the long edge (a->c) and the two short edges (a->b, b->c)
         // in Q32.32 with the half-pixel edge bias `makefp`, plot
         // [unfp(left), unfp(right)) per scanline (right-exclusive). This is
@@ -2188,6 +2210,10 @@ impl Gpu {
         let clut_x = (clut_word & 0x3F) * 16;
         let clut_y = (clut_word >> 6) & 0x1FF;
         let tpage_mode = self.tex_blend_mode;
+        // Same per-primitive dither rule as the textured-triangle
+        // path: flat-tint (non-raw) textured prims are dithered when
+        // GP0 0xE1 bit 9 is set; raw-texture prims are not.
+        let dither = self.dither_enabled && tint != RAW_TEXTURE_TINT;
         let (top_a, bottom_a, top_b, bottom_b) = if y0 <= y1 {
             (t0, t2, t1, t3)
         } else {
@@ -2225,7 +2251,11 @@ impl Gpu {
                 let u = (pos_u >> 16) as u16;
                 let v = (pos_v >> 16) as u16;
                 if let Some(texel) = self.sample_texture(u, v, clut_x, clut_y) {
-                    let shaded = modulate_tint(texel, tint.0, tint.1, tint.2);
+                    let shaded = if dither {
+                        modulate_tint_dithered(texel, tint.0, tint.1, tint.2, px, py)
+                    } else {
+                        modulate_tint(texel, tint.0, tint.1, tint.2)
+                    };
                     let mode = if semi_trans && (texel & 0x8000) != 0 {
                         tpage_mode
                     } else {
@@ -2436,6 +2466,11 @@ impl Gpu {
         let clut_x = (clut_word & 0x3F) * 16;
         let clut_y = (clut_word >> 6) & 0x1FF;
         let tpage_mode = self.tex_blend_mode;
+        // Hardware dithers texture-blended (non-raw) polygons even
+        // without Gouraud shading: a flat-tint textured prim still
+        // gets the 4×4 ordered dither when GP0 0xE1 bit 9 is set.
+        // Raw-texture prims (tint == identity) are never dithered.
+        let dither = self.dither_enabled && tint != RAW_TEXTURE_TINT;
 
         let v_uv = [
             (t0.0 as i32, t0.1 as i32),
@@ -2456,7 +2491,11 @@ impl Gpu {
             draw_right,
             |x, y, _r, _g, _b, u, v| {
                 if let Some(texel) = self.sample_texture(u as u16, v as u16, clut_x, clut_y) {
-                    let shaded = modulate_tint(texel, tint.0, tint.1, tint.2);
+                    let shaded = if dither {
+                        modulate_tint_dithered(texel, tint.0, tint.1, tint.2, x, y)
+                    } else {
+                        modulate_tint(texel, tint.0, tint.1, tint.2)
+                    };
                     let mode = if semi_trans && (texel & 0x8000) != 0 {
                         tpage_mode
                     } else {
@@ -2531,11 +2570,21 @@ impl Gpu {
     /// GP0 0x40..=0x43 -- single monochrome line. Packet: `[cmd+color, v0, v1]`.
     fn draw_line_mono_single(&mut self) {
         let cmd = self.gp0_fifo[0];
-        let color = rgb24_to_bgr15(cmd & 0x00FF_FFFF);
+        let rgb24 = cmd & 0x00FF_FFFF;
+        let color = rgb24_to_bgr15(rgb24);
         let mode = prim_blend_mode(cmd, self.tex_blend_mode);
         let v0 = self.decode_vertex(self.gp0_fifo[1]);
         let v1 = self.decode_vertex(self.gp0_fifo[2]);
-        self.rasterize_line(v0, v1, color, color, mode, false);
+        // Hardware dithers ALL lines (mono and shaded) when GP0 0xE1
+        // bit 9 is set. Route a dithered mono line through the shaded
+        // walker with both endpoints sharing the same 24-bit colour;
+        // that path already applies per-pixel ordered dither. With
+        // dither off, keep the parity-tuned mono Bresenham walk.
+        if self.dither_enabled {
+            self.rasterize_line_shaded(v0, v1, rgb24, rgb24, mode);
+        } else {
+            self.rasterize_line(v0, v1, color, color, mode, false);
+        }
     }
 
     /// GP0 0x50..=0x53 -- single Gouraud-shaded line. Packet:
@@ -2556,11 +2605,17 @@ impl Gpu {
     /// v1); after executing it we switch to receive mode.
     fn draw_line_mono_start_polyline(&mut self) {
         let cmd = self.gp0_fifo[0];
-        let color = rgb24_to_bgr15(cmd & 0x00FF_FFFF);
+        let rgb24 = cmd & 0x00FF_FFFF;
+        let color = rgb24_to_bgr15(rgb24);
         let mode = prim_blend_mode(cmd, self.tex_blend_mode);
         let v0 = self.decode_vertex(self.gp0_fifo[1]);
         let v1 = self.decode_vertex(self.gp0_fifo[2]);
-        self.rasterize_line(v0, v1, color, color, mode, false);
+        // Dither the first segment too (see draw_line_mono_single).
+        if self.dither_enabled {
+            self.rasterize_line_shaded(v0, v1, rgb24, rgb24, mode);
+        } else {
+            self.rasterize_line(v0, v1, color, color, mode, false);
+        }
         // Enter receive mode with `v1` as the starting point for
         // the next segment.
         self.polyline = Some(PolylineState::Mono {
@@ -2895,14 +2950,19 @@ impl Gpu {
                 entry.fifo.push(word);
             }
         }
+        // Per PSX-SPX the GP0(E6h) Set-Mask / Check-Mask bits apply to
+        // CPU->VRAM uploads too. Capture them before borrowing the
+        // transfer so the per-pixel writer can honour them.
+        let mask_check = self.mask_check_before_draw;
+        let mask_set = self.mask_set_on_draw;
         let done = {
             let Some(t) = self.vram_upload.as_mut() else {
                 return;
             };
             let pix_a = word as u16;
             let pix_b = (word >> 16) as u16;
-            Self::write_upload_pixel(t, pix_a, &mut self.vram);
-            Self::write_upload_pixel(t, pix_b, &mut self.vram);
+            Self::write_upload_pixel(t, pix_a, &mut self.vram, mask_check, mask_set);
+            Self::write_upload_pixel(t, pix_b, &mut self.vram, mask_check, mask_set);
             t.remaining = t.remaining.saturating_sub(1);
             t.remaining == 0
         };
@@ -2915,13 +2975,26 @@ impl Gpu {
     /// the right edge wraps to the next `row`. Pixels past the final
     /// row are silently dropped (VRAM wrap on the destination only
     /// applies to coordinates, not to an over-long upload payload).
-    fn write_upload_pixel(t: &mut VramTransfer, pixel: u16, vram: &mut Vram) {
+    fn write_upload_pixel(
+        t: &mut VramTransfer,
+        pixel: u16,
+        vram: &mut Vram,
+        mask_check: bool,
+        mask_set: bool,
+    ) {
         if t.row >= t.h {
             return;
         }
         let px = t.x.wrapping_add(t.col);
         let py = t.y.wrapping_add(t.row);
-        vram.set_pixel(px, py, pixel);
+        // Honour GP0(E6h): with check-mask on, leave a destination pixel
+        // whose bit15 is set untouched (but still advance the cursor); with
+        // force-mask on, OR bit15 into the stored value. Matches PSX-SPX,
+        // which exempts only GP0(02h) Fill from the mask bits.
+        if !(mask_check && vram.get_pixel(px, py) & 0x8000 != 0) {
+            let out = if mask_set { pixel | 0x8000 } else { pixel };
+            vram.set_pixel(px, py, out);
+        }
         t.col += 1;
         if t.col >= t.w {
             t.col = 0;
