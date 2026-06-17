@@ -969,6 +969,12 @@ pub struct Spu {
     /// sample and can trigger SPU IRQs for games that synchronize audio
     /// streaming on that low-memory address range.
     decode_irq_cursor: u32,
+    /// SPU capture-buffer write index (byte offset 0..=0x3FE, even).
+    /// Per the PSX-SPX spec the SPU mirrors CD-L/R and Voice1/Voice3 into
+    /// SPU RAM 0x000/0x400/0x800/0xC00 each 44.1 kHz sample, all sharing
+    /// this 0x400-byte ring index. SPUSTAT bit 11 reports which half of
+    /// the ring is currently being written.
+    capture_buffer_pos: u16,
     /// SPU IRQ pending flag -- bus drains this to decide whether to
     /// raise `IrqSource::Spu`. Set when an enabled IRQ-addr match
     /// occurs on a voice's read pointer or the transfer-FIFO write.
@@ -1053,6 +1059,7 @@ impl Spu {
             last_sample_cycle: 0,
             samples_produced: 0,
             decode_irq_cursor: 0,
+            capture_buffer_pos: 0,
             irq_pending: false,
             // Redux/hardware reset value -- must be non-zero or the
             // LFSR's NoiseWaveAdd lookup is stuck at index 0 forever.
@@ -1149,9 +1156,23 @@ impl Spu {
 
     /// Current SPUSTAT value. Lower 6 bits mirror SPUCNT; bit 6 is the
     /// IRQ latch (set when an enabled SPU IRQ has fired, cleared by
-    /// software writing SPUCNT with bit 6 clear).
+    /// software writing SPUCNT with bit 6 clear). Bits 7..9 are the
+    /// DMA-request bits synthesised from the SPUCNT transfer mode, and
+    /// bit 11 (capture-buffer half) is held in `self.spustat`.
     pub fn spustat(&self) -> u16 {
-        (self.spustat & !0x3F) | (self.spucnt & 0x3F)
+        // Bits 0..5 mirror SPUCNT; bits 6/10/11 are held in self.spustat
+        // (IRQ latch / transfer-busy / capture-buffer half).
+        let mut s = (self.spustat & !0x3F) | (self.spucnt & 0x3F);
+        // DMA-request status bits (PSX-SPX SPUSTAT): bit 7 = DMA
+        // read/write request (mirrors SPUCNT bit 5, i.e. set for both
+        // DMA transfer modes), bit 8 = DMA write request (transfer
+        // mode 2), bit 9 = DMA read request (transfer mode 3).
+        match (self.spucnt >> 4) & 3 {
+            2 => s |= (1 << 7) | (1 << 8),
+            3 => s |= (1 << 7) | (1 << 9),
+            _ => {}
+        }
+        s
     }
 
     /// Diagnostic: total samples produced since reset. One sample pair
@@ -1582,6 +1603,21 @@ impl Spu {
         }
     }
 
+    /// Write one SPU capture-buffer halfword. The four capture banks live
+    /// at SPU RAM 0x000 (CD-L), 0x400 (CD-R), 0x800 (Voice1) and 0xC00
+    /// (Voice3); each is a 0x400-byte ring written at the shared
+    /// `capture_buffer_pos`. Per the PSX-SPX spec a capture write can also
+    /// latch an SPU IRQ when the armed IRQ address falls on the written
+    /// halfword (same sticky IRQ9 gate as every other SPU-RAM access).
+    fn write_to_capture(&mut self, bank: u32, value: u16) {
+        let byte_addr = bank * 0x400 + self.capture_buffer_pos as u32;
+        self.ram[(byte_addr >> 1) as usize] = value;
+        if self.irq_triggerable() && (self.irq_addr & !0x7) == (byte_addr & !0x7) {
+            self.spustat |= 1 << 6;
+            self.irq_pending = true;
+        }
+    }
+
     // ============================================================
     //  DMA -- SPU channel 4.
     // ============================================================
@@ -1911,20 +1947,26 @@ impl Spu {
         //    both fed via [`Spu::feed_cd_audio`]. When the queue is
         //    empty, CD contribution is zero -- matches real hardware
         //    where "no CD playing" means no CD input signal.
+        // CD post-volume samples. These are also tapped into the CD-L/R
+        // capture buffers (PSX-SPX: SPU RAM 0x000/0x400 capture the CD
+        // input *after* the CD-input volume), independently of whether the
+        // CD input is routed to the main mix or the reverb bus.
+        let mut cd_cap_l: i32 = 0;
+        let mut cd_cap_r: i32 = 0;
         if let Some((cd_l, cd_r)) = self.cd_audio_in.pop_front() {
             // CD_VOL regs are Q15 signed -- range -0x8000..=0x7FFF.
             // `>> 15` brings them back to i16 scale. Always consume
             // the stream so timing stays live while muted/disabled;
             // only route it into the mixer when SPUCNT bit 0 is set.
+            let cl = ((cd_l as i32) * self.cd_vol_l.current as i32) >> 15;
+            let cr = ((cd_r as i32) * self.cd_vol_r.current as i32) >> 15;
+            cd_cap_l = cl;
+            cd_cap_r = cr;
             if self.spucnt & SPUCNT_CD_AUDIO_ENABLE != 0 {
-                let cl = ((cd_l as i32) * self.cd_vol_l.current as i32) >> 15;
-                let cr = ((cd_r as i32) * self.cd_vol_r.current as i32) >> 15;
                 sum_l = sum_l.saturating_add(cl);
                 sum_r = sum_r.saturating_add(cr);
             }
             if self.spucnt & SPUCNT_CD_REVERB_ENABLE != 0 {
-                let cl = ((cd_l as i32) * self.cd_vol_l.current as i32) >> 15;
-                let cr = ((cd_r as i32) * self.cd_vol_r.current as i32) >> 15;
                 reverb_in_l = reverb_in_l.saturating_add(cl);
                 reverb_in_r = reverb_in_r.saturating_add(cr);
             }
@@ -1932,6 +1974,27 @@ impl Spu {
         // External-audio input is not wired (no hardware source
         // available on a closed console); EXT_VOL_L/R are stored for
         // round-trip reads only.
+
+        // 3b. Write the four SPU capture buffers (PSX-SPX). The SPU mirrors
+        //     CD-L, CD-R, Voice1 and Voice3 into SPU RAM 0x000/0x400/
+        //     0x800/0xC00 every sample, advancing a shared 0x400-byte ring
+        //     index. Games read these back for CD-DA sync and audio
+        //     visualisers, and an SPU IRQ armed on the capture region
+        //     latches from these writes. Voice1/Voice3 use their post-ADSR
+        //     `last_sample` (already i16); CD-L/R saturate the post-volume
+        //     value to i16.
+        self.write_to_capture(0, saturate_i16(cd_cap_l) as u16);
+        self.write_to_capture(1, saturate_i16(cd_cap_r) as u16);
+        self.write_to_capture(2, self.voices[1].last_sample as u16);
+        self.write_to_capture(3, self.voices[3].last_sample as u16);
+        self.capture_buffer_pos = (self.capture_buffer_pos + 2) & 0x3FF;
+        // SPUSTAT bit 11 = which half of each 0x400 capture ring is being
+        // written (0 = first half, 1 = second), per the PSX-SPX spec.
+        if self.capture_buffer_pos >= 0x200 {
+            self.spustat |= 1 << 11;
+        } else {
+            self.spustat &= !(1 << 11);
+        }
 
         // 4. Process the wet reverb bus, then apply MAIN VOLUME as the final
         //    stage. PSX-SPX both scale the clamped (dry+wet)
