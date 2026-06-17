@@ -2,9 +2,9 @@
     name: "cortex_ignition_v1",
     editor_camera: (
         mode: Orbit,
-        orbit_yaw_q12: 1665,
-        orbit_pitch_q12: 3957,
-        orbit_radius: 3865,
+        orbit_yaw_q12: 551,
+        orbit_pitch_q12: 4089,
+        orbit_radius: 11834,
         orbit_target: (
             5147,
             1836,
