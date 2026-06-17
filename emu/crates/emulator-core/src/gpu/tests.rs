@@ -202,9 +202,9 @@ fn blend_opaque_returns_foreground_unchanged() {
 }
 
 #[test]
-fn blend_average_halves_each_operand_then_sums() {
-    // Even+even case: per-channel `(bg >> 1) + (fg >> 1)`.
-    // BG = (10, 10, 10), FG = (20, 20, 20) → (5+10, 5+10, 5+10) = (15, 15, 15).
+fn blend_average_sums_then_halves() {
+    // Mode 0 = `(B + F) >> 1` (PSX-SPX). Even+even is unaffected by the
+    // sum-vs-per-operand distinction: (10 + 20) >> 1 = 15 per channel.
     let bg = 10 | (10 << 5) | (10 << 10);
     let fg = 20 | (20 << 5) | (20 << 10);
     let out = blend_pixel(bg, fg, BlendMode::Average);
@@ -214,23 +214,22 @@ fn blend_average_halves_each_operand_then_sums() {
 }
 
 #[test]
-fn blend_average_odd_plus_odd_matches_redux() {
-    // The bug that cost pixel parity on Sony-logo letter edges:
-    // naive `(bg + fg) / 2` gives `(3 + 3) / 2 = 3`; Redux does
-    // `(3 >> 1) + (3 >> 1) = 1 + 1 = 2`. Assert the Redux result.
+fn blend_average_odd_plus_odd_sums_then_halves() {
+    // PS1 hardware halves the SUM: `(3 + 3) >> 1 = 3`, keeping the LSB
+    // (a per-operand `(3>>1)+(3>>1) = 2` would be one step too dark).
     let bg = 3 | (3 << 5) | (3 << 10);
     let fg = 3 | (3 << 5) | (3 << 10);
     let out = blend_pixel(bg, fg, BlendMode::Average);
-    assert_eq!(out & 0x1F, 2, "R: odd+odd must lose LSB per-operand");
-    assert_eq!((out >> 5) & 0x1F, 2, "G: same");
-    assert_eq!((out >> 10) & 0x1F, 2, "B: same");
+    assert_eq!(out & 0x1F, 3, "R: (3+3)>>1 = 3");
+    assert_eq!((out >> 5) & 0x1F, 3, "G: same");
+    assert_eq!((out >> 10) & 0x1F, 3, "B: same");
 
-    // Asymmetric: BG=5 (odd), FG=3 (odd) → (5>>1)+(3>>1) = 2+1 = 3.
-    // Naive would give (5+3)/2 = 4.
+    // Asymmetric odd pair: BG=5, FG=3 → (5 + 3) >> 1 = 4
+    // (the per-operand approximation gives 2 + 1 = 3).
     let bg = 5u16;
     let fg = 3u16;
     let out = blend_pixel(bg, fg, BlendMode::Average);
-    assert_eq!(out & 0x1F, 3);
+    assert_eq!(out & 0x1F, 4);
 }
 
 #[test]
@@ -492,25 +491,24 @@ fn gp0_e1_bit_9_toggles_dither_flag() {
 }
 
 #[test]
-fn dither_rgb_matches_redux_truth_table() {
-    // Hand-computed expected outputs from Redux's `prepareDitherLut`
-    // at `pcsx-redux/src/gpu/soft/soft.cc:277`. Each row is a
-    // different (input, x, y) combination; each column the
-    // expected R/G/B 5-bit quotient after the conditional round-up.
+fn dither_rgb_matches_signed_matrix_truth_table() {
+    // Hand-computed expected outputs for the PSX-SPX signed additive
+    // 4×4 dither matrix. Per channel: clamp(value + offset, 0..=255)
+    // then `>> 3`. Offset is indexed by `(y & 3) * 4 + (x & 3)`:
+    //   row 0: -4  0 -3  1
+    //   row 1:  2 -2  3 -1
+    //   row 2: -3  1 -4  0
+    //   row 3:  3 -1  2 -2
     //
-    //   input r,g,b | (x,y)  | coeff | expected_r expected_g expected_b
-    //
-    //   128,128,128 | (0,0)  |   7   |    16         16         16
-    //     (128 >> 3 = 16; 128 & 7 = 0; 0 > 7? no → keep 16)
-    //   128,128,128 | (1,0)  |   0   |    17         17         17
-    //     (128 >> 3 = 16; 128 & 7 = 0; 0 > 0? no → keep 16)
-    //     (wait: 128 & 7 = 0. Redux needs low > coeff, 0 > 0 is false.)
-    //   255,255,255 | (3,3)  |   2   |    31         31         31  (saturated)
-    //   0,0,0       | (0,0)  |   7   |     0          0          0  (round-up guarded)
-    //   7,7,7       | (0,0)  |   7   |     0          0          0   (7 > 7? no)
-    //   7,7,7       | (1,0)  |   0   |     1          1          1   (7 > 0? yes)
-    //   5,5,5       | (1,0)  |   0   |     1          1          1   (5 > 0? yes)
-    //   5,5,5       | (2,0)  |   6   |     0          0          0   (5 > 6? no)
+    //   input r,g,b | (x,y) | offset | expected_r expected_g expected_b
+    //   128,128,128 | (0,0) |  -4    |    15         15         15
+    //   128,128,128 | (1,0) |   0    |    16         16         16
+    //   120,120,120 | (0,0) |  -4    |    14         14         14  (rounds DOWN)
+    //   126,126,126 | (2,1) |  +3    |    16         16         16  (rounds UP)
+    //   255,255,255 | (3,3) |  -2    |    31         31         31  (clamp hi)
+    //   0,0,0       | (0,0) |  -4    |     0          0          0  (clamp lo)
+    //   7,7,7       | (1,0) |   0    |     0          0          0  (was 1 under old model)
+    //   3,3,3       | (2,0) |  -3    |     0          0          0
 
     let check = |r: i32, g: i32, b: i32, x: i32, y: i32, er: u16, eg: u16, eb: u16| {
         let v = dither_rgb(r, g, b, x, y);
@@ -518,20 +516,22 @@ fn dither_rgb_matches_redux_truth_table() {
         assert_eq!((v >> 5) & 0x1F, eg, "G mismatch");
         assert_eq!((v >> 10) & 0x1F, eb, "B mismatch");
     };
-    // coeff[0]=7 → only strictly-greater-than-7 rounds up; 128&7=0 keeps 16.
-    check(128, 128, 128, 0, 0, 16, 16, 16);
-    // coeff[1]=0 → any non-zero low bits round up. But 128&7=0, so stays 16.
+    // offset -4 at (0,0): (128-4)>>3 = 15.
+    check(128, 128, 128, 0, 0, 15, 15, 15);
+    // offset 0 at (1,0): 128>>3 = 16 -> 15/16 checkerboard exists.
     check(128, 128, 128, 1, 0, 16, 16, 16);
-    // coeff[1]=0, 7&7=7 > 0 → round up 0→1.
-    check(7, 7, 7, 1, 0, 1, 1, 1);
-    // coeff[0]=7, 7&7=7 not > 7 → stays 0.
-    check(7, 7, 7, 0, 0, 0, 0, 0);
-    // Saturation guard: 255 >> 3 = 31 already, can't increment.
+    // offset -4: (120-4)>>3 = 14, below plain 120>>3 = 15.
+    check(120, 120, 120, 0, 0, 14, 14, 14);
+    // offset +3 at (2,1): (126+3)>>3 = 16, above plain 126>>3 = 15.
+    check(126, 126, 126, 2, 1, 16, 16, 16);
+    // Clamp guard: 255 + offset clamps to 255, still 31.
     check(255, 255, 255, 3, 3, 31, 31, 31);
-    // Zero stays zero.
+    // Clamp guard: 0 + (-4) clamps to 0.
     check(0, 0, 0, 0, 0, 0, 0, 0);
-    // coeff[2]=6, 5&7=5, 5 > 6 is false → stays 0.
-    check(5, 5, 5, 2, 0, 0, 0, 0);
+    // offset 0: 7>>3 = 0 (the old round-up model returned 1 here).
+    check(7, 7, 7, 1, 0, 0, 0, 0);
+    // offset -3: (3-3)>>3 = 0.
+    check(3, 3, 3, 2, 0, 0, 0, 0);
 }
 
 #[test]
@@ -1755,4 +1755,202 @@ fn crash_intro_sprite_8bpp_clut_paints() {
         }
     }
     assert_eq!(lit, 256, "expected all 256 sprite pixels painted, got {lit}");
+}
+
+// ---- gpu-dither faithfulness tests ----
+#[test]
+fn dither_rgb_produces_checkerboard_on_flat_midtone() {
+    // A flat 24-bit mid-grey (128) must alternate 5-bit 15/16 across
+    // a scanline -- the signed matrix rounds some cells DOWN. The
+    // old brighten-only model returned a uniform 16 for the whole
+    // tile, which is the artifact this fix removes.
+    //   x=0 -> offset -4 -> (128-4)>>3 = 15
+    //   x=1 -> offset  0 -> (128  )>>3 = 16
+    //   x=2 -> offset -3 -> (128-3)>>3 = 15
+    //   x=3 -> offset  1 -> (128+1)>>3 = 16
+    let expected = [15u16, 16, 15, 16];
+    for (x, &er) in expected.iter().enumerate() {
+        let v = dither_rgb(128, 128, 128, x as i32, 0);
+        assert_eq!(v & 0x1F, er, "R at x={x}");
+        assert_eq!((v >> 5) & 0x1F, er, "G at x={x}");
+        assert_eq!((v >> 10) & 0x1F, er, "B at x={x}");
+    }
+}
+
+#[test]
+fn dither_rgb_can_round_down() {
+    // The signed model rounds DOWN where the old round-up model never
+    // could: 120 at cell (0,0) has offset -4 -> (116)>>3 = 14, below
+    // the plain truncation 120>>3 = 15.
+    let v = dither_rgb(120, 120, 120, 0, 0);
+    assert_eq!(v & 0x1F, 14, "negative offset must round the channel down");
+    // And it rounds UP where the offset is positive: 126 at (2,1)
+    // has offset +3 -> (129)>>3 = 16, above plain 126>>3 = 15.
+    let v = dither_rgb(126, 126, 126, 2, 1);
+    assert_eq!(v & 0x1F, 16, "positive offset must round the channel up");
+}
+
+#[test]
+fn dither_rgb_clamps_both_ends() {
+    // Max channel stays 31 for every cell (the +offset clamp guard),
+    // and min channel stays 0 (the -offset clamp guard).
+    for x in 0..4 {
+        for y in 0..4 {
+            let hi = dither_rgb(255, 255, 255, x, y);
+            assert_eq!(hi & 0x1F, 31);
+            assert_eq!((hi >> 5) & 0x1F, 31);
+            assert_eq!((hi >> 10) & 0x1F, 31);
+            let lo = dither_rgb(0, 0, 0, x, y);
+            assert_eq!(lo, 0, "black must stay 0 at ({x},{y})");
+        }
+    }
+}
+
+#[test]
+fn flat_tint_textured_poly_dither_varies_across_tile() {
+    // Finding [7]: the flat-tint textured-poly path now feeds
+    // modulate_tint_dithered when dither is enabled. Verify the
+    // dithered modulation actually varies across the 4×4 tile for a
+    // mid texel + flat tint, whereas the undithered modulation is a
+    // single constant value -- this is exactly the difference the
+    // call-site change exposes for non-Gouraud textured polygons.
+    let texel = 16u16 | (16 << 5) | (16 << 10); // mid 5-bit grey
+    let (tr, tg, tb) = (0xC0u32, 0xC0u32, 0xC0u32); // flat tint, not raw
+
+    let flat = modulate_tint(texel, tr, tg, tb);
+    let mut seen = std::collections::BTreeSet::new();
+    for y in 0..4 {
+        for x in 0..4 {
+            seen.insert(modulate_tint_dithered(texel, tr, tg, tb, x, y));
+        }
+    }
+    assert!(
+        seen.len() > 1,
+        "dithered flat-tint modulation must vary across the tile, got only {flat:#06x}"
+    );
+}
+
+#[test]
+fn modulate_tint_dithered_preserves_mask_bit() {
+    // The texel's bit 15 must survive the dithered tint path so the
+    // semi-transparency check downstream still sees it.
+    let texel = 0x8000u16 | 16 | (16 << 5) | (16 << 10);
+    let out = modulate_tint_dithered(texel, 0x80, 0x80, 0x80, 0, 0);
+    assert_eq!(out & 0x8000, 0x8000);
+}
+
+// ---- gpu-misc faithfulness tests ----
+#[test]
+fn gp1_reset_clears_active_texture_window() {
+    // [5] GP1(00) must clear the DECODED texture-window mask/offset, not
+    // just the E2 readback latch -- PSX-SPX defines reset as GP0(E2)=0.
+    let mut gpu = Gpu::new();
+    // Full mask on both axes + non-zero offsets.
+    let word = 0xE200_0000u32 | 0x1F | (0x1F << 5) | (0x1F << 10) | (0x1F << 15);
+    gpu.write32(GP0_ADDR, word);
+    assert_eq!(gpu.tex_window_mask_x, 0xF8);
+    assert_eq!(gpu.tex_window_mask_y, 0xF8);
+    assert_eq!(gpu.tex_window_offset_x, 0xF8);
+    assert_eq!(gpu.tex_window_offset_y, 0xF8);
+
+    gpu.write32(GP1_ADDR, 0x0000_0000); // GP1(00) reset
+    assert_eq!(gpu.tex_window_mask_x, 0, "reset must clear mask_x");
+    assert_eq!(gpu.tex_window_mask_y, 0, "reset must clear mask_y");
+    assert_eq!(gpu.tex_window_offset_x, 0, "reset must clear offset_x");
+    assert_eq!(gpu.tex_window_offset_y, 0, "reset must clear offset_y");
+    // The E2 readback latch (GP1 0x10 sub-op 2) is now consistent: 0.
+    gpu.write32(GP1_ADDR, 0x1000_0002);
+    assert_eq!(gpu.read32(GP0_ADDR).unwrap(), 0);
+}
+
+#[test]
+fn blend_average_sums_then_halves_over_full_sweep() {
+    // [6] Mode 0 is `(B + F) >> 1` per PSX-SPX/PS1 hardware: sum first,
+    // then halve. Sweep every 5-bit (B, F) pair on one channel.
+    for b in 0..=31u16 {
+        for f in 0..=31u16 {
+            let out = blend_pixel(b, f, BlendMode::Average);
+            let expect = (b + f) >> 1;
+            assert_eq!(out & 0x1F, expect, "R: B={b} F={f}");
+            // Same on green/blue lanes.
+            let bg = b | (b << 5) | (b << 10);
+            let fg = f | (f << 5) | (f << 10);
+            let out3 = blend_pixel(bg, fg, BlendMode::Average);
+            assert_eq!(out3 & 0x1F, expect, "R3: B={b} F={f}");
+            assert_eq!((out3 >> 5) & 0x1F, expect, "G3: B={b} F={f}");
+            assert_eq!((out3 >> 10) & 0x1F, expect, "B3: B={b} F={f}");
+        }
+    }
+    // The two canonical odd+odd cases that were 1 LSB too dark before.
+    assert_eq!(blend_pixel(3, 3, BlendMode::Average) & 0x1F, 3);
+    assert_eq!(blend_pixel(5, 3, BlendMode::Average) & 0x1F, 4);
+}
+
+#[test]
+fn cpu_vram_upload_honours_check_mask_bit() {
+    // [8] With check-mask (E6h bit1) on, a CPU->VRAM upload must not
+    // overwrite a destination pixel whose bit15 is already set.
+    let mut gpu = Gpu::new();
+    gpu.vram.set_pixel(0, 0, 0x8000); // mask bit only
+    gpu.write32(GP0_ADDR, 0xE600_0002); // check-mask
+    gpu.gp0_push(0xA0_00_00_00);
+    gpu.gp0_push(0x0000_0000); // x=0, y=0
+    gpu.gp0_push(0x0001_0001); // w=1, h=1 -> 1 payload word
+    gpu.gp0_push(0x0000_001F); // upload red into (0,0); second pixel off-rect
+    assert_eq!(
+        gpu.vram.get_pixel(0, 0),
+        0x8000,
+        "protected pixel survives a masked upload"
+    );
+}
+
+#[test]
+fn cpu_vram_upload_honours_force_mask_bit() {
+    // [8] With force-mask (E6h bit0) on, uploaded pixels get bit15 forced.
+    let mut gpu = Gpu::new();
+    gpu.write32(GP0_ADDR, 0xE600_0001); // force-mask
+    gpu.gp0_push(0xA0_00_00_00);
+    gpu.gp0_push(0x0000_0000); // x=0, y=0
+    gpu.gp0_push(0x0001_0001); // w=1, h=1
+    gpu.gp0_push(0x0000_001F); // red, bit15 clear in the source word
+    assert_eq!(
+        gpu.vram.get_pixel(0, 0),
+        0x801F,
+        "force-mask must OR bit15 into the uploaded pixel"
+    );
+}
+
+#[test]
+fn vram_copy_honours_check_mask_bit() {
+    // [8] Check-mask must also protect VRAM->VRAM copy destinations.
+    let mut gpu = Gpu::new();
+    gpu.vram.set_pixel(2, 3, 0x001F); // source = red
+    gpu.vram.set_pixel(5, 6, 0x8000); // dest pre-masked
+    gpu.write32(GP0_ADDR, 0xE600_0002); // check-mask
+    gpu.write32(GP0_ADDR, 0x80_00_00_00);
+    gpu.write32(GP0_ADDR, 0x0003_0002); // src (2,3)
+    gpu.write32(GP0_ADDR, 0x0006_0005); // dst (5,6)
+    gpu.write32(GP0_ADDR, 0x0001_0001); // 1x1
+    assert_eq!(
+        gpu.vram.get_pixel(5, 6),
+        0x8000,
+        "masked dest survives VRAM->VRAM copy"
+    );
+}
+
+#[test]
+fn vram_copy_honours_force_mask_bit() {
+    // [8] Force-mask must OR bit15 into VRAM->VRAM copy destinations.
+    let mut gpu = Gpu::new();
+    gpu.vram.set_pixel(2, 3, 0x001F); // source = red, bit15 clear
+    gpu.write32(GP0_ADDR, 0xE600_0001); // force-mask
+    gpu.write32(GP0_ADDR, 0x80_00_00_00);
+    gpu.write32(GP0_ADDR, 0x0003_0002); // src (2,3)
+    gpu.write32(GP0_ADDR, 0x0006_0005); // dst (5,6)
+    gpu.write32(GP0_ADDR, 0x0001_0001); // 1x1
+    assert_eq!(
+        gpu.vram.get_pixel(5, 6),
+        0x801F,
+        "force-mask must set bit15 on the copied pixel"
+    );
 }
