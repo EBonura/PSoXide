@@ -24,6 +24,7 @@ use psx_gte::regs::pack_xy as pack_gte_xy;
 use psx_gte::{cfc2, ctc2, mfc2, mtc2, scene as gte_scene};
 use psx_io::{cdrom, dma, gpu as gpu_io, irq, sio, timers};
 use psx_rt::tty;
+use psx_spu::SpuAddr;
 use psx_vram::{Clut, TexDepth, Tpage};
 
 mod cpu_tests;
@@ -36,7 +37,7 @@ const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
 const FONT_CLUT: Clut = Clut::new(320, 256);
 
 const ROWS_PER_PAGE: usize = 6;
-const TEST_COUNT: usize = 166;
+const TEST_COUNT: usize = 170;
 const PAD_POLL_TEST_INDEX: usize = 26;
 const MODE_COUNT: u8 = 15;
 const CHECK_MODES: [Mode; 11] = [
@@ -1240,6 +1241,26 @@ const TESTS: [TestSpec; TEST_COUNT] = [
         group: "SPU",
         name: "voice0 pitch/ADSR readback",
         run: test_spu_voice_reg_readback,
+    },
+    TestSpec {
+        group: "SPU",
+        name: "SPU RAM DMA upload round-trip",
+        run: test_spu_ram_dma_roundtrip,
+    },
+    TestSpec {
+        group: "SPU",
+        name: "SPU RAM manual-FIFO upload round-trip",
+        run: test_spu_ram_manual_fifo_roundtrip,
+    },
+    TestSpec {
+        group: "GPU",
+        name: "ordered-dither checkerboard (flat mid-tone)",
+        run: test_gpu_dither_checkerboard,
+    },
+    TestSpec {
+        group: "GPU",
+        name: "mask bit on CPU->VRAM copy",
+        run: test_gpu_cpu_vram_upload_mask,
     },
 ];
 
@@ -3940,6 +3961,204 @@ fn test_spu_voice_reg_readback() -> TestResult {
         psx_io::write16(voice0 + 0x8, old_adsr1);
         TestResult::info(0xFFFF_FFFF, (pitch << 16) | adsr1, "pitch|adsr1")
     }
+}
+
+// ============================================================
+//  2026-06 hardware-accuracy pass -- on-device validation of the
+//  SPU-RAM upload fix (the bug that droned/garbled audio on a real
+//  console) and the GPU dither + mask-bit faithfulness fixes. These
+//  use VRAM / SPU-RAM read-back so the same PASS/FAIL shows up on the
+//  emulator and on silicon.
+// ============================================================
+
+/// FNV-1a over a slice of 32-bit words (low halfword first), matching
+/// [`gpu_hash_scratch`]'s mixing so expected hashes are comparable.
+fn fnv32_words(words: &[u32]) -> u32 {
+    let mut hash = 0x811C_9DC5u32;
+    for &w in words {
+        hash = (hash ^ (w & 0xFFFF)).wrapping_mul(0x0100_0193);
+        hash = (hash ^ (w >> 16)).wrapping_mul(0x0100_0193);
+    }
+    hash
+}
+
+/// FNV-1a over a slice of halfwords (same mixing constants).
+fn fnv16_halfwords(hws: &[u16]) -> u32 {
+    let mut hash = 0x811C_9DC5u32;
+    for &h in hws {
+        hash = (hash ^ h as u32).wrapping_mul(0x0100_0193);
+    }
+    hash
+}
+
+/// DMA `out.len()` words out of SPU RAM at byte address `addr` back into
+/// main RAM (channel 4, from-device, block-sync). Arms SPUCNT DMA-Read
+/// mode (bits 5..4 = 11) around the transfer, the read-side mirror of the
+/// SDK's DMA upload.
+fn spu_dma_read(addr: u32, out: &mut [u32]) {
+    use psx_io::spu::{SPUCNT, TRANSFER_ADDR, TRANSFER_CTRL};
+    let words = out.len() as u32;
+    let block_size: u32 = if words % 16 == 0 {
+        16
+    } else if words % 8 == 0 {
+        8
+    } else if words % 4 == 0 {
+        4
+    } else if words % 2 == 0 {
+        2
+    } else {
+        1
+    };
+    let block_count = words / block_size;
+    unsafe {
+        let spucnt = psx_io::read16(SPUCNT) & !0x0030;
+        psx_io::write16(SPUCNT, spucnt);
+        psx_io::write16(TRANSFER_CTRL, 0x0004);
+        psx_io::write16(TRANSFER_ADDR, (addr / 8) as u16);
+        psx_io::write16(SPUCNT, spucnt | 0x0030); // transfer mode = DMA Read
+        dma::enable_channel(dma::Channel::Spu);
+        dma::set_madr(dma::Channel::Spu, out.as_ptr() as u32);
+        dma::set_bcr_block(dma::Channel::Spu, block_size as u16, block_count as u16);
+        // from-device (no CHCR_TO_DEVICE), block-sync, start.
+        dma::set_chcr(dma::Channel::Spu, dma::CHCR_SYNC_BLOCK | dma::CHCR_START);
+        while dma::is_busy(dma::Channel::Spu) {}
+        psx_io::write16(SPUCNT, spucnt); // back to Stop
+    }
+}
+
+/// AUDIO: the bug the user heard on hardware was ADPCM never reaching SPU
+/// RAM (drone / garble). Upload a known 64-byte block through the fixed
+/// `upload_adpcm` (DMA path) to SPU RAM above the capture region, DMA it
+/// back, and hash-compare. PASS proves the upload path lands on silicon.
+fn test_spu_ram_dma_roundtrip() -> TestResult {
+    let mut src = [0u32; 16];
+    let mut i = 0;
+    while i < 16 {
+        src[i] = 0xC0DE_0000u32.wrapping_add((i as u32) * 0x111);
+        i += 1;
+    }
+    let dest: u32 = 0x3000; // clear of the 0x000-0xFFF capture buffers
+    let bytes = unsafe { core::slice::from_raw_parts(src.as_ptr() as *const u8, 64) };
+    psx_spu::upload_adpcm(SpuAddr::new(dest), bytes);
+    let mut back = [0u32; 16];
+    spu_dma_read(dest, &mut back);
+    expect_eq(fnv32_words(&src), fnv32_words(&back), "spu dma upload")
+}
+
+/// AUDIO: the same SPU-RAM landing check via the manual-write FIFO -- the
+/// path the SDK's PIO fallback uses and the one the original bug skipped
+/// (it never armed Manual-Write mode, so the FIFO writes were dropped).
+/// Arm mode 01, push 8 halfwords, DMA them back, hash-compare.
+fn test_spu_ram_manual_fifo_roundtrip() -> TestResult {
+    use psx_io::spu::{SPUCNT, TRANSFER_ADDR, TRANSFER_CTRL, TRANSFER_DATA};
+    let mut src = [0u16; 8];
+    let mut i = 0;
+    while i < 8 {
+        src[i] = 0xBEEFu16.wrapping_add((i as u16) * 0x101);
+        i += 1;
+    }
+    let dest: u32 = 0x3400;
+    unsafe {
+        psx_io::write16(TRANSFER_CTRL, 0x0000);
+        psx_io::write16(TRANSFER_ADDR, (dest / 8) as u16);
+        psx_io::write16(TRANSFER_CTRL, 0x0004);
+        let spucnt = psx_io::read16(SPUCNT) & !0x0030;
+        psx_io::write16(SPUCNT, spucnt | 0x0010); // transfer mode = Manual Write
+        for &hw in src.iter() {
+            psx_io::write16(TRANSFER_DATA, hw);
+        }
+        psx_io::write16(SPUCNT, spucnt); // back to Stop
+        psx_io::write16(TRANSFER_CTRL, 0x0000);
+    }
+    spin(4000); // let the FIFO drain to SPU RAM on hardware
+    let mut back = [0u32; 4];
+    spu_dma_read(dest, &mut back);
+    let mut got = [0u16; 8];
+    let mut j = 0;
+    while j < 4 {
+        got[j * 2] = (back[j] & 0xFFFF) as u16;
+        got[j * 2 + 1] = (back[j] >> 16) as u16;
+        j += 1;
+    }
+    expect_eq(fnv16_halfwords(&src), fnv16_halfwords(&got), "spu fifo upload")
+}
+
+/// Read one 32-bit VRAM word (two 15bpp pixels) at `(vx, vy)` via GP0 0xC0
+/// + GPUREAD: low halfword is `(vx, vy)`, high is `(vx + 1, vy)`.
+fn gpu_read_word_at(vx: u16, vy: u16) -> u32 {
+    gpu_io::wait_cmd_ready();
+    gpu_io::write_gp0(0xC000_0000);
+    gpu_io::write_gp0(((vy as u32) << 16) | vx as u32);
+    gpu_io::write_gp0((1u32 << 16) | 2); // 2 wide, 1 tall
+    let mut guard = 0u32;
+    while gpu_io::gpustat().bits() & (1 << 27) == 0 && guard < 100_000 {
+        guard += 1;
+    }
+    gpu_io::gpuread()
+}
+
+/// CPU->VRAM block transfer (GP0 0xA0). Honours the current GP0 0xE6 mask
+/// state on silicon (and now in the emulator).
+fn gpu_cpu_to_vram(vx: u16, vy: u16, w: u16, h: u16, data: &[u32]) {
+    gpu_io::wait_cmd_ready();
+    gpu_io::write_gp0(0xA000_0000);
+    gpu_io::write_gp0(((vy as u32) << 16) | vx as u32);
+    gpu_io::write_gp0(((h as u32) << 16) | w as u32);
+    for &d in data {
+        gpu_io::write_gp0(d);
+    }
+    gpu_io::wait_cmd_ready();
+}
+
+/// VISUAL: ordered dither. With dithering on, a flat mid-grey Gouraud fill
+/// must resolve to the signed 4x4 checkerboard, NOT a uniform value. Colour
+/// 120 sits on an 8-boundary, so the negative matrix offsets round it down
+/// to channel 14 and the non-negative ones to 15. Scratch (4,4)/(5,4) land
+/// on matrix phases (0,0) and (1,0) -> pixels 0x39CE and 0x3DEF. The scratch
+/// origin (512,256) is 4-aligned so the VRAM dither phase equals the scratch
+/// phase.
+fn test_gpu_dither_checkerboard() -> TestResult {
+    gpu_fill(GPU_SX, GPU_SY, GPU_SW, GPU_SH, 0x0000_0000);
+    gpu_draw_env_scratch();
+    gpu_io::write_gp0(0xE100_0000 | (1 << 9)); // draw mode: dither ON
+    let mid = (120u8, 120u8, 120u8);
+    let tri0 = prim::TriGouraud::new(
+        [(0, 0), (GPU_SW as i16 - 1, 0), (0, GPU_SH as i16 - 1)],
+        [mid, mid, mid],
+    );
+    let tri1 = prim::TriGouraud::new(
+        [
+            (GPU_SW as i16 - 1, 0),
+            (0, GPU_SH as i16 - 1),
+            (GPU_SW as i16 - 1, GPU_SH as i16 - 1),
+        ],
+        [mid, mid, mid],
+    );
+    gpu_send_prim(&tri0, prim::TriGouraud::WORDS);
+    gpu_send_prim(&tri1, prim::TriGouraud::WORDS);
+    gpu_io::wait_cmd_ready();
+    gpu_io::write_gp0(0xE100_0000); // dither OFF (restore default)
+    let observed = gpu_read_word_at(GPU_SX + 4, GPU_SY + 4);
+    expect_eq(0x3DEF_39CE, observed, "gpu dither")
+}
+
+/// VISUAL: the mask bit on CPU->VRAM copies. Upload colour A with set-mask
+/// (forces bit15=1), then upload colour B over the same pixels with
+/// check-mask (must skip already-masked pixels). The first colour has to
+/// survive: silicon honours the mask on the copy command, and now so does
+/// the emulator.
+fn test_gpu_cpu_vram_upload_mask() -> TestResult {
+    let (px, py) = (GPU_SX, GPU_SY);
+    let a: u32 = 0x168A; // colour A (bgr15)
+    let b: u32 = 0x7FFF; // colour B -- would overwrite if the mask were ignored
+    gpu_fill(GPU_SX, GPU_SY, GPU_SW, GPU_SH, 0x0000_0000);
+    gpu_io::write_gp0(0xE600_0000 | 1); // set-mask on, check-mask off
+    gpu_cpu_to_vram(px, py, 2, 1, &[a | (a << 16)]);
+    gpu_io::write_gp0(0xE600_0000 | 2); // check-mask on
+    gpu_cpu_to_vram(px, py, 2, 1, &[b | (b << 16)]);
+    gpu_io::write_gp0(0xE600_0000); // restore
+    let observed = gpu_read_word_at(px, py);
+    expect_eq(0x968A_968A, observed, "gpu copy mask")
 }
 
 fn test_pad_poll() -> TestResult {
