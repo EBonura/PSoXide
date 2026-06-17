@@ -64,7 +64,8 @@ use psx_engine::{
     CharacterCollision, CharacterCollisionAabb, CharacterCollisionCylinder, CharacterCollisionRoom,
     CharacterMotorAnim, CharacterMotorConfig, CharacterMotorInput, CharacterMotorState, Config,
     Ctx, CullMode, DepthBand, DepthPolicy, DepthRange, JointViewTransform, JointWorldTransform,
-    LoadedWorldCameraGte, LocalToWorldScale, Mat3I16, MaterialTint, ModelPoseTranslation, OtFrame,
+    LoadedWorldCameraGte, LocalToWorldScale, Mat3I16, MaterialTint, ModelPoseBlend,
+    ModelPoseTranslation, OtFrame,
     PointLightSample, PrimitivePacketArena, PrimitivePacketScratch, PrimitiveSink, ProjectedVertex,
     Rgb8, RoomPoint, RoomRender, RuntimeCollisionRoom, RuntimeRoom, Scene, SceneStateRef,
     SchedulerConfig, SimTick, TexturedModelGeometry, TexturedModelRenderFace,
@@ -241,6 +242,9 @@ static mut MODEL_VERTICES: [ProjectedVertex; MODEL_VERTEX_CAP] =
     [ProjectedVertex::new(0, 0, 0); MODEL_VERTEX_CAP];
 static mut JOINT_VIEW_TRANSFORMS: [JointViewTransform; JOINT_CAP] =
     [JointViewTransform::ZERO; JOINT_CAP];
+// Scratch buffer for the outgoing clip during an animation cross-fade.
+static mut JOINT_VIEW_TRANSFORMS_BLEND: [JointViewTransform; JOINT_CAP] =
+    [JointViewTransform::ZERO; JOINT_CAP];
 
 fn world_camera_from_position_focus(
     projection: WorldProjection,
@@ -379,6 +383,12 @@ struct Playtest {
     /// the loop relative to clip switches so transitions don't
     /// pop into the middle of the new clip.
     anim_start_tick: SimTick,
+    /// Previous animation state, kept alive during a cross-fade so the
+    /// renderer can blend the outgoing clip into the incoming one.
+    prev_anim_state: PlayerAnim,
+    /// Tick the previous (outgoing) clip started at. The outgoing clip
+    /// keeps advancing from here while it fades out.
+    prev_anim_start_tick: SimTick,
     /// Non-looping gameplay animation lock. While active,
     /// locomotion input is ignored and the current action clip
     /// plays from start to finish.
@@ -561,6 +571,8 @@ impl Playtest {
             character: None,
             anim_state: PlayerAnim::Idle,
             anim_start_tick: SimTick::ZERO,
+            prev_anim_state: PlayerAnim::Idle,
+            prev_anim_start_tick: SimTick::ZERO,
             anim_lock_until_tick: SimTick::ZERO,
             box_prop_broken: [0; BOX_PROP_BROKEN_WORDS],
             box_prop_runtime: [BoxPropRuntime::EMPTY; MAX_BOX_PROP_STATE],

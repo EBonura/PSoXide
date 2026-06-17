@@ -101,7 +101,7 @@ pub use render3d::{
     apply_model_pose_translation, compute_joint_view_transform, compute_joint_world_transform,
     project_model_vertex_with_joint_transforms, CullMode, DepthPolicy, GouraudMeshOptions,
     GouraudRenderPass, GouraudTriCommand, JointViewTransform, JointWorldTransform,
-    LoadedWorldCameraGte, LocalToWorldScale, MeshRenderStats, ModelPoseTranslation,
+    LoadedWorldCameraGte, LocalToWorldScale, MeshRenderStats, ModelPoseBlend, ModelPoseTranslation,
     ProjectedTexturedVertex, ProjectedVertex, SkyDirectionProjector, TexturedModelGeometry,
     TexturedModelRenderFace, TexturedModelRenderStats, TexturedViewVertex, ViewVertex, WorldCamera,
     WorldProjection, WorldRenderLayer, WorldRenderPass, WorldRenderStats, WorldSurfaceOptions,

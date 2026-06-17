@@ -17,7 +17,9 @@ use crate::render::{
 };
 use crate::{Angle, WorldVertex, Q12};
 use core::mem::MaybeUninit;
-use psx_asset::{Animation, GteJointPose, JointPose, Mesh, Model, ModelPart, ModelVertex};
+use psx_asset::{
+    Animation, AnimationPoseSample, GteJointPose, JointPose, Mesh, Model, ModelPart, ModelVertex,
+};
 use psx_gpu::{
     material::{TextureMaterial, TexturedGouraudPacketMaterial, TexturedPacketMaterial},
     prim::{QuadTexturedGouraud, TriGouraud, TriTextured, TriTexturedGouraud},
@@ -515,6 +517,27 @@ impl JointViewTransform {
         rotation: Mat3I16::ZERO,
         translation: Vec3I32::ZERO,
     };
+}
+
+/// Outgoing-clip pose source for cross-fading between animations.
+///
+/// During an animation transition the renderer samples both the
+/// incoming clip (the primary `animation`/`frame_q12` arguments of the
+/// submit call) and this outgoing clip, then linearly blends the
+/// per-joint view transforms by [`alpha_q12`](Self::alpha_q12): `0`
+/// shows the outgoing pose, `4096` (Q12 one) the incoming pose. The
+/// element-wise matrix lerp is the same approximation already used for
+/// inter-frame interpolation, so it is only correct for short blends.
+#[derive(Copy, Clone)]
+pub struct ModelPoseBlend<'a> {
+    /// Outgoing clip being faded out.
+    pub animation: Animation<'a>,
+    /// Outgoing clip phase, Q12 frame index (same encoding as `frame_q12`).
+    pub frame_q12: u32,
+    /// Outgoing clip root anchor translation.
+    pub pose_translation: ModelPoseTranslation,
+    /// Blend weight, Q12: `0` = fully outgoing, `4096` = fully incoming.
+    pub alpha_q12: u16,
 }
 
 /// Per-joint room/world transform for gameplay attachment points.

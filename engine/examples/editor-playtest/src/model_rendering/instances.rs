@@ -311,6 +311,7 @@ pub(crate) fn draw_model_instances(
             model_rotation,
             local_to_world,
             pose_translation,
+            None,
             material,
             model_options,
             faces,

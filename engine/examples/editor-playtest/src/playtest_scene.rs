@@ -820,6 +820,7 @@ impl Scene for Playtest {
                         &mut world,
                     );
                 }
+                let player_anim_blend = self.player_anim_blend(character, ctx.sim_tick);
                 let player_draw =
                     player_lighting.map_or(PlayerModelDrawStats::default(), |lighting| {
                         draw_player(
@@ -838,6 +839,7 @@ impl Scene for Playtest {
                             self.anim_start_tick,
                             ctx.sim_tick,
                             ctx.video_hz,
+                            player_anim_blend,
                             &camera,
                             actor_options,
                             &lighting,

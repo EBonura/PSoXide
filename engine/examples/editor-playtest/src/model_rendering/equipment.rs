@@ -135,6 +135,7 @@ pub(super) fn draw_player_equipment(
                         weapon_rotation,
                         weapon_model.local_to_world,
                         ModelPoseTranslation::ZERO,
+                        None,
                         material,
                         model_options,
                         faces,
