@@ -623,6 +623,16 @@ pub fn import_animation_library(
     config: psxed_gltf::RigidModelConfig,
     clip_filter: Option<&[String]>,
 ) -> Result<AnimationLibraryImport, ModelImportError> {
+    // Clips bake against an already-cooked target model and the runtime decodes
+    // their .psxanim joint translations using the MODEL's center/extent (the
+    // clip blob stores none of its own). The clip must therefore quantize
+    // against the same bounds as the model: never let a clip inflate its own
+    // bounds, or the model/clip scales desync and poses distort (worst on
+    // high-travel clips like a run). Force it off regardless of the caller.
+    let config = psxed_gltf::RigidModelConfig {
+        extra_animations_affect_bounds: false,
+        ..config
+    };
     let package = convert_rigid_model_source(model_reference_source, pack_sources, &config)?;
     let model = psx_asset::Model::from_bytes(&package.model).map_err(|e| {
         ModelImportError::InvalidModel {
