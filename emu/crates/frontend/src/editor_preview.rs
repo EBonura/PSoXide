@@ -2137,6 +2137,8 @@ fn submit_preview_model_instance(
         options,
         faces,
         geometry,
+        None,
+        &mut [],
     );
 
     stats.primitive_overflow || stats.command_overflow || stats.vertex_overflow

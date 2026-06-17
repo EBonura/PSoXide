@@ -246,6 +246,33 @@ fn runtime_model_geometry<'a>(
 }
 
 impl Playtest {
+    /// Build the outgoing-clip cross-fade descriptor for this frame, or
+    /// `None` if no blend is active (no recent clip switch, or the blend
+    /// window has elapsed). `alpha_q12` ramps `0 -> 4096` across
+    /// [`PLAYER_ANIM_BLEND_TICKS`] so the outgoing clip fades out.
+    pub(super) fn player_anim_blend(
+        &self,
+        character: RuntimeCharacter,
+        now: SimTick,
+    ) -> Option<PlayerAnimBlend> {
+        if self.prev_anim_state == self.anim_state {
+            return None;
+        }
+        let elapsed = now.saturating_sub(self.anim_start_tick);
+        if elapsed >= PLAYER_ANIM_BLEND_TICKS {
+            return None;
+        }
+        let alpha_q12 = (elapsed.saturating_mul(ANIM_BLEND_Q12_ONE as u32)
+            / PLAYER_ANIM_BLEND_TICKS)
+            .min(ANIM_BLEND_Q12_ONE as u32) as u16;
+        Some(PlayerAnimBlend {
+            anim_action: self.prev_anim_state.action(),
+            clip_local: character.clip_for(self.prev_anim_state),
+            anim_start_tick: self.prev_anim_start_tick,
+            alpha_q12,
+        })
+    }
+
     pub(super) fn player_clip_duration_vblanks(
         &self,
         character: RuntimeCharacter,
@@ -407,6 +434,26 @@ pub(super) struct PlayerModelDrawStats {
     pub(super) bounds_culled: u16,
 }
 
+/// Outgoing-clip descriptor for a player animation cross-fade. The
+/// renderer fades this clip out into the current one over the blend
+/// window. `alpha_q12` is the blend weight (`0` = fully outgoing,
+/// `4096` = fully the current clip); at `>= 4096` the blend is done.
+#[derive(Copy, Clone)]
+pub(super) struct PlayerAnimBlend {
+    pub(super) anim_action: CharacterAnimationAction,
+    pub(super) clip_local: ModelClipIndex,
+    pub(super) anim_start_tick: SimTick,
+    pub(super) alpha_q12: u16,
+}
+
+/// Q12 one (1.0) for animation cross-fade weights.
+pub(super) const ANIM_BLEND_Q12_ONE: u16 = 1 << 12;
+
+/// Cross-fade window between player animation clips, in sim ticks
+/// (60 Hz). ~8 ticks is about 133 ms: long enough to kill the snap,
+/// short enough to stay responsive for a Souls-like.
+pub(super) const PLAYER_ANIM_BLEND_TICKS: u32 = 8;
+
 pub(super) fn draw_player(
     character: RuntimeCharacter,
     models: &[Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
@@ -423,6 +470,7 @@ pub(super) fn draw_player(
     anim_start_tick: SimTick,
     elapsed_tick: SimTick,
     video_hz: VideoHz,
+    blend: Option<PlayerAnimBlend>,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
     lighting: &RuntimeRoomLighting,
@@ -457,6 +505,38 @@ pub(super) fn draw_player(
         reference_anchor,
         character.action_in_place_override(anim_action),
     );
+
+    // Resolve the outgoing clip for the cross-fade, phased and anchored
+    // exactly like the incoming clip. Sampled in the renderer; blended
+    // into the incoming per-joint view transforms by `alpha_q12`.
+    let pose_blend = blend.and_then(|blend| {
+        if blend.alpha_q12 >= ANIM_BLEND_Q12_ONE {
+            return None;
+        }
+        let prev_anim = runtime_model.clip(clips, blend.clip_local)?;
+        let prev_local_tick = elapsed_tick.saturating_sub(blend.anim_start_tick);
+        let prev_phase = animation_phase_at_tick_q12(
+            prev_anim,
+            prev_local_tick,
+            video_hz,
+            character.action_loops(blend.anim_action),
+            character.action_speed(blend.anim_action),
+            character.action_frame_range(blend.anim_action),
+        );
+        let prev_pose_translation = model_pose_anchor_translation(
+            prev_anim,
+            prev_phase,
+            model_clip_anchor(runtime_model, blend.clip_local),
+            reference_anchor,
+            character.action_in_place_override(blend.anim_action),
+        );
+        Some(ModelPoseBlend {
+            animation: prev_anim,
+            frame_q12: prev_phase,
+            pose_translation: prev_pose_translation,
+            alpha_q12: blend.alpha_q12,
+        })
+    });
 
     let model_rotation = yaw_rotation_matrix(yaw.add_signed_q12(character.visual_yaw));
     let origin = visual_model_origin(
@@ -518,6 +598,7 @@ pub(super) fn draw_player(
         model_rotation,
         local_to_world,
         pose_translation,
+        pose_blend,
         material,
         model_options,
         faces,
@@ -545,6 +626,7 @@ fn submit_runtime_model_predecoded(
     rotation: Mat3I16,
     local_to_world: LocalToWorldScale,
     pose_translation: ModelPoseTranslation,
+    pose_blend: Option<ModelPoseBlend<'static>>,
     material: TextureMaterial,
     options: WorldSurfaceOptions,
     faces: &[TexturedModelRenderFace],
@@ -578,6 +660,8 @@ fn submit_runtime_model_predecoded(
             options,
             faces,
             geometry,
+            pose_blend,
+            unsafe { &mut JOINT_VIEW_TRANSFORMS_BLEND },
         )
     } else {
         world.submit_textured_model_primary_joints_predecoded_geometry_faces(
@@ -596,6 +680,8 @@ fn submit_runtime_model_predecoded(
             options,
             faces,
             geometry,
+            pose_blend,
+            unsafe { &mut JOINT_VIEW_TRANSFORMS_BLEND },
         )
     };
     if MODEL_PROFILE_ENABLED {

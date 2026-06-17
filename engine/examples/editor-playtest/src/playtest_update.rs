@@ -35,6 +35,8 @@ impl Playtest {
         self.room_index = spawn.room;
         self.anim_state = PlayerAnim::Idle;
         self.anim_start_tick = SimTick::ZERO;
+        self.prev_anim_state = PlayerAnim::Idle;
+        self.prev_anim_start_tick = SimTick::ZERO;
         self.anim_lock_until_tick = SimTick::ZERO;
         self.active_interactable = None;
         self.checkpoint = None;
@@ -283,6 +285,9 @@ impl Playtest {
             player_anim_from_motor(motor_frame.anim)
         };
         if new_state != self.anim_state {
+            // Keep the outgoing clip alive for the cross-fade.
+            self.prev_anim_state = self.anim_state;
+            self.prev_anim_start_tick = self.anim_start_tick;
             self.anim_state = new_state;
             self.anim_start_tick = now;
             if new_state.is_motor_fixed_action() {

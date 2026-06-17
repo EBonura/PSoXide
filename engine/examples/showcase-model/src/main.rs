@@ -423,6 +423,8 @@ fn draw_animated_model(
         options,
         faces,
         geometry,
+        None,
+        &mut [],
     );
     if stats.primitive_overflow || stats.command_overflow || stats.vertex_overflow {
         return;

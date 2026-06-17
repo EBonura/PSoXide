@@ -157,6 +157,8 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         options: WorldSurfaceOptions,
         faces: &[TexturedModelRenderFace],
         geometry: TexturedModelGeometry<'_>,
+        pose_blend: Option<ModelPoseBlend<'_>>,
+        blend_joint_view_transforms: &mut [JointViewTransform],
     ) -> TexturedModelRenderStats {
         self.submit_textured_model_geometry_impl(
             triangles,
@@ -174,6 +176,8 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             options,
             faces,
             geometry,
+            pose_blend,
+            blend_joint_view_transforms,
             true,
         )
     }
@@ -201,6 +205,8 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         options: WorldSurfaceOptions,
         faces: &[TexturedModelRenderFace],
         geometry: TexturedModelGeometry<'_>,
+        pose_blend: Option<ModelPoseBlend<'_>>,
+        blend_joint_view_transforms: &mut [JointViewTransform],
     ) -> TexturedModelRenderStats {
         self.submit_textured_model_geometry_impl(
             triangles,
@@ -218,6 +224,8 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             options,
             faces,
             geometry,
+            pose_blend,
+            blend_joint_view_transforms,
             false,
         )
     }
@@ -240,6 +248,8 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         options: WorldSurfaceOptions,
         faces: &[TexturedModelRenderFace],
         geometry: TexturedModelGeometry<'_>,
+        pose_blend: Option<ModelPoseBlend<'_>>,
+        blend_joint_view_transforms: &mut [JointViewTransform],
         blend_vertices: bool,
     ) -> TexturedModelRenderStats {
         let mut stats = TexturedModelRenderStats::default();
@@ -262,81 +272,49 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         // EXPLOSION PROBE (diagnostic): capture this model's compose inputs;
         // frozen once a blended (player) vertex is observed this frame.
         super::player_vert_debug::record_joints_begin(&view_instance);
-        if let Some(sample) = pose_sample {
-            for (joint, joint_view_transform) in joint_view_transforms
-                .iter_mut()
-                .enumerate()
-                .take(joint_count)
-            {
-                let joint_index = joint as u16;
-                super::player_vert_debug::set_joint_slot(joint as u8);
-                let joint_transform =
-                    if MODEL_GTE_JOINT_TRANSLATION && MODEL_GTE_JOINT_PACKED_TRANSLATION {
-                        sample
-                            .gte_pose(joint_index)
-                            .and_then(|pose| {
-                                textured_model_part_gte_transform_with_view_gte_packed_translation(
-                                    view_instance,
-                                    view_origin_translation,
-                                    pose,
-                                    pose_translation,
-                                    local_to_world,
-                                )
-                            })
-                            .or_else(|| {
-                                sample.pose(joint_index).map(|pose| {
-                                    textured_model_part_gte_transform_with_view_gte_translation(
-                                        view_instance,
-                                        view_origin_translation,
-                                        apply_model_pose_translation(pose, pose_translation),
-                                        local_to_world,
-                                    )
-                                })
-                            })
-                    } else {
-                        sample.pose(joint_index).map(|pose| {
-                            let pose = apply_model_pose_translation(pose, pose_translation);
-                            if MODEL_GTE_JOINT_TRANSLATION {
-                                textured_model_part_gte_transform_with_view_gte_translation(
-                                    view_instance,
-                                    view_origin_translation,
-                                    pose,
-                                    local_to_world,
-                                )
-                            } else if MODEL_GTE_JOINT_COMPOSE {
-                                textured_model_part_gte_transform_with_view_gte_compose(
-                                    camera_view,
-                                    view_instance,
-                                    camera.position,
-                                    pose,
-                                    instance_rotation,
-                                    local_to_world,
-                                    origin,
-                                )
-                            } else {
-                                textured_model_part_gte_transform_with_view(
-                                    camera_view,
-                                    camera.position,
-                                    pose,
-                                    instance_rotation,
-                                    local_to_world,
-                                    origin,
-                                )
-                            }
-                        })
-                    };
-
-                *joint_view_transform = match joint_transform {
-                    Some((rotation, translation)) => JointViewTransform {
-                        rotation,
-                        translation,
-                    },
-                    None => JointViewTransform::default(),
-                };
-            }
-        } else {
-            for joint_view_transform in joint_view_transforms.iter_mut().take(joint_count) {
-                *joint_view_transform = JointViewTransform::default();
+        fill_joint_view_transforms(
+            pose_sample,
+            pose_translation,
+            view_instance,
+            view_origin_translation,
+            camera_view,
+            camera,
+            instance_rotation,
+            origin,
+            local_to_world,
+            joint_count,
+            true,
+            joint_view_transforms,
+        );
+        // Cross-fade: blend the outgoing clip's per-joint view transforms
+        // into the incoming ones. Blending in view space keeps the
+        // GTE-packed sampling above untouched; both clips share this
+        // frame's camera, so the view-space lerp is consistent.
+        if let Some(blend) = pose_blend {
+            if blend.alpha_q12 < BLEND_Q12_ONE {
+                let from_sample = blend.animation.looped_pose_sample_q12(blend.frame_q12);
+                fill_joint_view_transforms(
+                    from_sample,
+                    blend.pose_translation,
+                    view_instance,
+                    view_origin_translation,
+                    camera_view,
+                    camera,
+                    instance_rotation,
+                    origin,
+                    local_to_world,
+                    joint_count,
+                    false,
+                    blend_joint_view_transforms,
+                );
+                let blend_count = joint_count.min(blend_joint_view_transforms.len());
+                for joint in 0..blend_count {
+                    joint_view_transforms[joint] = lerp_joint_view_transform(
+                        blend_joint_view_transforms[joint],
+                        joint_view_transforms[joint],
+                        blend.alpha_q12,
+                    );
+                }
             }
         }
         crate::telemetry::stage_end(crate::telemetry::stage::TEXTURED_MODEL_JOINTS);
@@ -1432,5 +1410,201 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             material,
             options,
         )
+    }
+}
+
+/// Q12 one (1.0) for animation cross-fade weights.
+const BLEND_Q12_ONE: u16 = 1 << 12;
+
+/// Fill `out` with the per-joint view transforms sampled from one clip
+/// pose. Factored out of the submit path so a cross-fade can run it
+/// twice (incoming + outgoing) and lerp the two arrays. `probe` gates
+/// the explosion diagnostics so only the primary pass records them.
+#[allow(clippy::too_many_arguments)]
+fn fill_joint_view_transforms(
+    pose_sample: Option<AnimationPoseSample<'_>>,
+    pose_translation: ModelPoseTranslation,
+    view_instance: Mat3I16,
+    view_origin_translation: Vec3I32,
+    camera_view: Mat3I16,
+    camera: WorldCamera,
+    instance_rotation: Mat3I16,
+    origin: WorldVertex,
+    local_to_world: LocalToWorldScale,
+    joint_count: usize,
+    probe: bool,
+    out: &mut [JointViewTransform],
+) {
+    let Some(sample) = pose_sample else {
+        for joint_view_transform in out.iter_mut().take(joint_count) {
+            *joint_view_transform = JointViewTransform::default();
+        }
+        return;
+    };
+    for (joint, joint_view_transform) in out.iter_mut().enumerate().take(joint_count) {
+        let joint_index = joint as u16;
+        if probe {
+            super::player_vert_debug::set_joint_slot(joint as u8);
+        }
+        let joint_transform = if MODEL_GTE_JOINT_TRANSLATION && MODEL_GTE_JOINT_PACKED_TRANSLATION {
+            sample
+                .gte_pose(joint_index)
+                .and_then(|pose| {
+                    textured_model_part_gte_transform_with_view_gte_packed_translation(
+                        view_instance,
+                        view_origin_translation,
+                        pose,
+                        pose_translation,
+                        local_to_world,
+                    )
+                })
+                .or_else(|| {
+                    sample.pose(joint_index).map(|pose| {
+                        textured_model_part_gte_transform_with_view_gte_translation(
+                            view_instance,
+                            view_origin_translation,
+                            apply_model_pose_translation(pose, pose_translation),
+                            local_to_world,
+                        )
+                    })
+                })
+        } else {
+            sample.pose(joint_index).map(|pose| {
+                let pose = apply_model_pose_translation(pose, pose_translation);
+                if MODEL_GTE_JOINT_TRANSLATION {
+                    textured_model_part_gte_transform_with_view_gte_translation(
+                        view_instance,
+                        view_origin_translation,
+                        pose,
+                        local_to_world,
+                    )
+                } else if MODEL_GTE_JOINT_COMPOSE {
+                    textured_model_part_gte_transform_with_view_gte_compose(
+                        camera_view,
+                        view_instance,
+                        camera.position,
+                        pose,
+                        instance_rotation,
+                        local_to_world,
+                        origin,
+                    )
+                } else {
+                    textured_model_part_gte_transform_with_view(
+                        camera_view,
+                        camera.position,
+                        pose,
+                        instance_rotation,
+                        local_to_world,
+                        origin,
+                    )
+                }
+            })
+        };
+        *joint_view_transform = match joint_transform {
+            Some((rotation, translation)) => JointViewTransform {
+                rotation,
+                translation,
+            },
+            None => JointViewTransform::default(),
+        };
+    }
+}
+
+/// Linear blend between two view-space joint transforms (Q12 weight,
+/// `alpha_q12 = 0` -> `from`, `4096` -> `to`). Element-wise on the
+/// rotation matrix and translation, matching the inter-frame lerp in
+/// `psx-asset`; the blended rotation is slightly non-orthonormal, so it
+/// is only correct for short cross-fades.
+fn lerp_joint_view_transform(
+    from: JointViewTransform,
+    to: JointViewTransform,
+    alpha_q12: u16,
+) -> JointViewTransform {
+    let mut rotation = Mat3I16::ZERO;
+    let mut row = 0usize;
+    while row < 3 {
+        let mut col = 0usize;
+        while col < 3 {
+            rotation.m[row][col] = blend_lerp_i16_q12(
+                from.rotation.m[row][col],
+                to.rotation.m[row][col],
+                alpha_q12,
+            );
+            col += 1;
+        }
+        row += 1;
+    }
+    JointViewTransform {
+        rotation,
+        translation: Vec3I32::new(
+            blend_lerp_i32_q12(from.translation.x, to.translation.x, alpha_q12),
+            blend_lerp_i32_q12(from.translation.y, to.translation.y, alpha_q12),
+            blend_lerp_i32_q12(from.translation.z, to.translation.z, alpha_q12),
+        ),
+    }
+}
+
+#[inline]
+fn blend_lerp_i16_q12(a: i16, b: i16, alpha_q12: u16) -> i16 {
+    let value = a as i32 + (((b as i32 - a as i32) * alpha_q12 as i32) >> 12);
+    value.clamp(i16::MIN as i32, i16::MAX as i32) as i16
+}
+
+#[inline]
+fn blend_lerp_i32_q12(a: i32, b: i32, alpha_q12: u16) -> i32 {
+    let delta = b.saturating_sub(a);
+    a.saturating_add(psx_math::int32::mul_q12_i32(delta, alpha_q12 as i32))
+}
+
+#[cfg(test)]
+mod blend_tests {
+    use super::*;
+
+    #[test]
+    fn lerp_i16_q12_endpoints_and_midpoint() {
+        assert_eq!(blend_lerp_i16_q12(-100, 300, 0), -100);
+        assert_eq!(blend_lerp_i16_q12(-100, 300, BLEND_Q12_ONE), 300);
+        // Halfway: -100 + (400 * 2048 >> 12) = -100 + 200 = 100.
+        assert_eq!(blend_lerp_i16_q12(-100, 300, BLEND_Q12_ONE / 2), 100);
+    }
+
+    #[test]
+    fn lerp_i16_q12_saturates() {
+        // Full-scale rotation elements must not wrap.
+        let v = blend_lerp_i16_q12(i16::MIN, i16::MAX, BLEND_Q12_ONE / 2);
+        assert!(v >= -1 && v <= 1, "midpoint of full range should be ~0, got {v}");
+    }
+
+    #[test]
+    fn lerp_i32_q12_endpoints_and_large_values() {
+        assert_eq!(blend_lerp_i32_q12(1000, 5000, 0), 1000);
+        assert_eq!(blend_lerp_i32_q12(1000, 5000, BLEND_Q12_ONE), 5000);
+        assert_eq!(blend_lerp_i32_q12(1000, 5000, BLEND_Q12_ONE / 2), 3000);
+        // Large view-space translations (the overflow risk) stay bounded
+        // and ordered, never panic.
+        let lo = blend_lerp_i32_q12(-1_000_000, 1_000_000, 0);
+        let mid = blend_lerp_i32_q12(-1_000_000, 1_000_000, BLEND_Q12_ONE / 2);
+        let hi = blend_lerp_i32_q12(-1_000_000, 1_000_000, BLEND_Q12_ONE);
+        assert_eq!(lo, -1_000_000);
+        assert_eq!(hi, 1_000_000);
+        assert!(mid.abs() < 2048, "midpoint of symmetric range ~0, got {mid}");
+    }
+
+    #[test]
+    fn lerp_joint_view_transform_endpoints() {
+        let from = JointViewTransform {
+            rotation: Mat3I16::IDENTITY,
+            translation: Vec3I32::new(-500, 0, 12_345),
+        };
+        let to = JointViewTransform {
+            rotation: Mat3I16::ZERO,
+            translation: Vec3I32::new(500, 4096, -54_321),
+        };
+        let at0 = lerp_joint_view_transform(from, to, 0);
+        assert_eq!(at0.translation, from.translation);
+        assert_eq!(at0.rotation.m, from.rotation.m);
+        let at1 = lerp_joint_view_transform(from, to, BLEND_Q12_ONE);
+        assert_eq!(at1.translation, to.translation);
+        assert_eq!(at1.rotation.m, to.rotation.m);
     }
 }
