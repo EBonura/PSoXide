@@ -193,6 +193,7 @@ pub(crate) fn draw_model_animated_import_preview(
         show_animation_root,
         show_collision_guides: true,
         show_bones: false,
+        show_hitboxes: false,
     };
     let Some(image) = model_import_preview::render_import_model_preview_with_options(
         &preview.model_bytes,

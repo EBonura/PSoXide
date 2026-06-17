@@ -30,6 +30,8 @@ pub struct ImportPreviewOptions {
     pub show_animation_root: bool,
     pub show_collision_guides: bool,
     pub show_bones: bool,
+    /// Draw the derived humanoid hurt-capsule template as an overlay.
+    pub show_hitboxes: bool,
 }
 
 pub fn render_import_model_preview_with_options(
@@ -194,6 +196,10 @@ pub fn render_import_model_preview_with_options(
     }
     if options.show_bones {
         draw_bone_overlay(&mut image, &model, &joint_origins);
+    }
+    if options.show_hitboxes {
+        let joint_world = estimated_joint_world_points(&model, &joint_transforms);
+        draw_hitbox_overlay(&mut image, &model, &joint_transforms, camera, &joint_world);
     }
 
     Some(image)
@@ -717,11 +723,14 @@ fn project_import_model_vertex(
     camera.project_world(world)
 }
 
-fn estimated_joint_points(
+/// World-space estimated center of each joint, derived by averaging the
+/// model-local positions of the vertices that joint owns (the skeleton
+/// stores only parent links, no bind offsets) and transforming through
+/// the joint's world transform. Shared by the bone and hitbox overlays.
+fn estimated_joint_world_points(
     model: &Model<'_>,
     joint_transforms: &[JointWorldTransform],
-    camera: WorldCamera,
-) -> Vec<Option<ProjectedVertex>> {
+) -> Vec<Option<WorldVertex>> {
     let mut sums = vec![[0i64; 3]; joint_transforms.len()];
     let mut counts = vec![0i64; joint_transforms.len()];
     for part_index in 0..model.part_count() {
@@ -755,12 +764,192 @@ fn estimated_joint_points(
                     clamp_i16((sums[joint][1] / counts[joint]) as i32),
                     clamp_i16((sums[joint][2] / counts[joint]) as i32),
                 );
-                camera.project_world(world_transform_model_vertex(transform, local))
+                Some(world_transform_model_vertex(transform, local))
             } else {
                 None
             }
         })
         .collect()
+}
+
+fn estimated_joint_points(
+    model: &Model<'_>,
+    joint_transforms: &[JointWorldTransform],
+    camera: WorldCamera,
+) -> Vec<Option<ProjectedVertex>> {
+    estimated_joint_world_points(model, joint_transforms)
+        .into_iter()
+        .map(|world| world.and_then(|world| camera.project_world(world)))
+        .collect()
+}
+
+/// Derived humanoid hurt-capsule template. Each entry is a bone segment
+/// `joint_a -> joint_b`; the radius is auto-derived from the mesh by
+/// measuring the perpendicular spread of `radius_joint`'s owned vertices
+/// about that segment, times `inflate_pct/100`. Deriving from vertex
+/// spread (not bone length) gives correct, naturally tapering thickness
+/// per limb. Joint indices follow the shared Mixamo rig order.
+/// Tuple: (joint_a, joint_b, radius_joint, inflate_pct, rgb).
+const HURT_TEMPLATE: &[(u16, u16, u16, i32, (u8, u8, u8))] = &[
+    (4, 5, 5, 115, (255, 90, 90)),      // head   (Neck -> Head)
+    (0, 4, 3, 110, (255, 150, 60)),     // torso  (Hips -> Neck, chest width)
+    (7, 8, 7, 120, (120, 200, 255)),    // L upper arm
+    (8, 9, 8, 120, (120, 200, 255)),    // L forearm
+    (11, 12, 11, 120, (120, 200, 255)), // R upper arm
+    (12, 13, 12, 120, (120, 200, 255)), // R forearm
+    (14, 15, 14, 115, (180, 255, 140)), // L thigh
+    (15, 16, 15, 115, (180, 255, 140)), // L shin
+    (18, 19, 18, 115, (180, 255, 140)), // R thigh
+    (19, 20, 19, 115, (180, 255, 140)), // R shin
+];
+
+fn draw_hitbox_overlay(
+    image: &mut ColorImage,
+    model: &Model<'_>,
+    joint_transforms: &[JointWorldTransform],
+    camera: WorldCamera,
+    joint_world: &[Option<WorldVertex>],
+) {
+    for &(ja, jb, radius_joint, inflate, rgb) in HURT_TEMPLATE {
+        let Some(Some(a_world)) = joint_world.get(ja as usize).copied() else {
+            continue;
+        };
+        let Some(Some(b_world)) = joint_world.get(jb as usize).copied() else {
+            continue;
+        };
+        let dx = (b_world.x - a_world.x) as f32;
+        let dy = (b_world.y - a_world.y) as f32;
+        let dz = (b_world.z - a_world.z) as f32;
+        let bone_len = (dx * dx + dy * dy + dz * dz).sqrt().max(1.0);
+        let (ux, uy, uz) = (dx / bone_len, dy / bone_len, dz / bone_len);
+        let radius_world = limb_radius_world(
+            model,
+            joint_transforms,
+            radius_joint,
+            (a_world.x as f32, a_world.y as f32, a_world.z as f32),
+            (ux, uy, uz),
+        )
+        .map(|r| r * inflate as f32 / 100.0)
+        .unwrap_or(bone_len * 0.3);
+        let (Some(pa), Some(pb)) = (
+            camera.project_world(a_world),
+            camera.project_world(b_world),
+        ) else {
+            continue;
+        };
+        let ra = screen_radius(radius_world, pa.sz);
+        let rb = screen_radius(radius_world, pb.sz);
+        draw_capsule_outline(
+            image,
+            pa.sx as f32,
+            pa.sy as f32,
+            ra,
+            pb.sx as f32,
+            pb.sy as f32,
+            rb,
+            Color32::from_rgb(rgb.0, rgb.1, rgb.2),
+        );
+    }
+}
+
+/// Mean perpendicular distance (world units) of `radius_joint`'s owned
+/// vertices from the bone axis (point `a`, unit direction `u`) -- the
+/// limb's cross-sectional radius. `None` if the joint owns no vertices.
+fn limb_radius_world(
+    model: &Model<'_>,
+    joint_transforms: &[JointWorldTransform],
+    radius_joint: u16,
+    a: (f32, f32, f32),
+    u: (f32, f32, f32),
+) -> Option<f32> {
+    let transform = joint_transforms.get(radius_joint as usize)?;
+    let mut sum = 0.0f32;
+    let mut count = 0u32;
+    for part_index in 0..model.part_count() {
+        let Some(part) = model.part(part_index) else {
+            continue;
+        };
+        if part.joint_index() != radius_joint {
+            continue;
+        }
+        let start = part.first_vertex();
+        let end = start.saturating_add(part.vertex_count());
+        for vertex_index in start..end {
+            let Some(vertex) = model.vertex(vertex_index) else {
+                continue;
+            };
+            let w = world_transform_model_vertex(transform, vertex.position);
+            let px = w.x as f32 - a.0;
+            let py = w.y as f32 - a.1;
+            let pz = w.z as f32 - a.2;
+            let dot = px * u.0 + py * u.1 + pz * u.2;
+            let ex = px - dot * u.0;
+            let ey = py - dot * u.1;
+            let ez = pz - dot * u.2;
+            sum += (ex * ex + ey * ey + ez * ez).sqrt();
+            count += 1;
+        }
+    }
+    (count > 0).then(|| sum / count as f32)
+}
+
+/// Perspective-correct screen radius for a world-space radius at a given
+/// view depth: `focal * radius / depth`.
+fn screen_radius(radius_world: f32, depth: i32) -> f32 {
+    let z = depth.max(PREVIEW_NEAR_Z) as f32;
+    (PREVIEW_FOCAL_LENGTH as f32 * radius_world / z).clamp(1.0, 96.0)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_capsule_outline(
+    image: &mut ColorImage,
+    ax: f32,
+    ay: f32,
+    ra: f32,
+    bx: f32,
+    by: f32,
+    rb: f32,
+    color: Color32,
+) {
+    draw_image_circle(image, ax, ay, ra, color);
+    draw_image_circle(image, bx, by, rb, color);
+    let dx = bx - ax;
+    let dy = by - ay;
+    let len = (dx * dx + dy * dy).sqrt();
+    if len > 0.5 {
+        let (nx, ny) = (-dy / len, dx / len);
+        draw_image_line(
+            image,
+            (ax + nx * ra) as i32,
+            (ay + ny * ra) as i32,
+            (bx + nx * rb) as i32,
+            (by + ny * rb) as i32,
+            color,
+        );
+        draw_image_line(
+            image,
+            (ax - nx * ra) as i32,
+            (ay - ny * ra) as i32,
+            (bx - nx * rb) as i32,
+            (by - ny * rb) as i32,
+            color,
+        );
+    }
+}
+
+fn draw_image_circle(image: &mut ColorImage, cx: f32, cy: f32, r: f32, color: Color32) {
+    let r = r.max(1.0);
+    let steps = ((r * 6.0) as i32).clamp(12, 96);
+    let mut prev: Option<(i32, i32)> = None;
+    for i in 0..=steps {
+        let t = (i as f32) / (steps as f32) * std::f32::consts::TAU;
+        let x = (cx + r * t.cos()) as i32;
+        let y = (cy + r * t.sin()) as i32;
+        if let Some((px, py)) = prev {
+            draw_image_line(image, px, py, x, y, color);
+        }
+        prev = Some((x, y));
+    }
 }
 
 fn raster_textured_triangle(
@@ -1048,6 +1237,7 @@ mod tests {
                 show_animation_root: true,
                 show_collision_guides: true,
                 show_bones: false,
+                show_hitboxes: false,
             },
         )
         .expect("tracked cooked model should render");
@@ -1110,6 +1300,7 @@ mod tests {
                 show_animation_root: true,
                 show_collision_guides: true,
                 show_bones: false,
+                show_hitboxes: false,
             },
         )
         .expect("tracked cooked model should render");
