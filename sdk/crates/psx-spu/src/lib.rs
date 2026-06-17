@@ -55,6 +55,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
 
+use psx_io::dma::{self, Channel};
 use psx_io::spu::{SPUCNT, SPUSTAT, SPU_BASE};
 
 pub mod tones;
@@ -583,12 +584,75 @@ pub fn upload_adpcm(dest: SpuAddr, bytes: &[u8]) {
         bytes.len().is_multiple_of(2),
         "upload_adpcm: byte slice must be a multiple of 2",
     );
-    // Halt any in-flight transfer.
-    write_reg16(TRANSFER_CTRL, 0x0000);
-    // Target address.
-    write_reg16(TRANSFER_ADDR, dest.reg_field());
-    // Select manual write mode.
+    // Prefer DMA (channel 4): fast, and the only reliable path for uploads
+    // larger than the 32-halfword transfer FIFO. Falls back to PIO when the
+    // source is not word-aligned / a whole number of 32-bit words.
+    if !upload_adpcm_dma(dest, bytes) {
+        upload_adpcm_pio(dest, bytes);
+    }
+}
+
+/// DMA upload (channel 4, RAM -> SPU RAM), block-sync. Returns `false` (so the
+/// caller falls back to PIO) when `bytes` is not 4-byte aligned or not a whole
+/// number of 32-bit words -- the DMA controller is word-addressed.
+fn upload_adpcm_dma(dest: SpuAddr, bytes: &[u8]) -> bool {
+    let src = bytes.as_ptr() as u32;
+    if src % 4 != 0 || !bytes.len().is_multiple_of(4) {
+        return false;
+    }
+    let words = (bytes.len() / 4) as u32;
+    // Largest block size (in words) that divides the count; the SPU transfer
+    // FIFO is 16 words, so cap there. ADPCM is whole 16-byte (4-word) blocks,
+    // so 4 always divides.
+    let block_size = if words % 16 == 0 {
+        16
+    } else if words % 8 == 0 {
+        8
+    } else if words % 4 == 0 {
+        4
+    } else if words % 2 == 0 {
+        2
+    } else {
+        1
+    };
+    let block_count = words / block_size;
+    if block_count > 0xFFFF {
+        return false; // larger than one block-sync transfer can describe
+    }
+
+    // Stop any in-flight transfer; set transfer type (normal) + target address.
+    let spucnt = read_reg16(SPUCNT) & !0x0030;
+    write_reg16(SPUCNT, spucnt);
     write_reg16(TRANSFER_CTRL, 0x0004);
+    write_reg16(TRANSFER_ADDR, dest.reg_field());
+    // SPUCNT transfer mode = DMA Write (bits 5..4 = 10).
+    write_reg16(SPUCNT, spucnt | 0x0020);
+
+    // Channel 4: main RAM -> SPU, block-sync, forward, start; block until done.
+    dma::enable_channel(Channel::Spu);
+    dma::set_madr(Channel::Spu, src);
+    dma::set_bcr_block(Channel::Spu, block_size as u16, block_count as u16);
+    dma::set_chcr(
+        Channel::Spu,
+        dma::CHCR_TO_DEVICE | dma::CHCR_SYNC_BLOCK | dma::CHCR_START,
+    );
+    while dma::is_busy(Channel::Spu) {}
+
+    // Return to Stop transfer-mode.
+    write_reg16(SPUCNT, spucnt);
+    true
+}
+
+/// PIO upload (manual FIFO writes) -- small or non-word-aligned uploads. Sets
+/// SPUCNT Manual-Write mode (bits 5..4 = 01) around the writes, the step the
+/// original path was missing (it only poked TRANSFER_CTRL), which silently
+/// no-op'd the upload on hardware and on FIFO-accurate emulators.
+fn upload_adpcm_pio(dest: SpuAddr, bytes: &[u8]) {
+    write_reg16(TRANSFER_CTRL, 0x0000);
+    write_reg16(TRANSFER_ADDR, dest.reg_field());
+    write_reg16(TRANSFER_CTRL, 0x0004);
+    let spucnt = read_reg16(SPUCNT) & !0x0030;
+    write_reg16(SPUCNT, spucnt | 0x0010);
 
     let mut i = 0;
     while i + 1 < bytes.len() {
@@ -598,8 +662,7 @@ pub fn upload_adpcm(dest: SpuAddr, bytes: &[u8]) {
         i += 2;
     }
 
-    // Flush: transfer-control back to "stop" so the SPU latches
-    // the writes. A short wait gives hardware time to settle.
+    write_reg16(SPUCNT, spucnt);
     write_reg16(TRANSFER_CTRL, 0x0000);
     for _ in 0..200 {
         core::hint::spin_loop();
