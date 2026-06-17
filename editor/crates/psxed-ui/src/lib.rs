@@ -8,7 +8,7 @@ mod gizmo;
 mod history;
 mod icons;
 mod model_animation_viewer;
-mod model_import_preview;
+pub mod model_import_preview;
 mod play_mode;
 mod selection;
 pub use selection::*;
