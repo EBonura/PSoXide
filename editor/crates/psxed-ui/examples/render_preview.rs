@@ -58,6 +58,7 @@ fn main() {
             show_animation_root: false,
             show_collision_guides: false,
             show_bones: false,
+            show_hitboxes: true,
         };
         if let Some(img) = render_import_model_preview_with_options(&model, &clip, &atlas, opts) {
             let p = format!("/tmp/preview_yaw{yi}.ppm");

@@ -27,6 +27,7 @@ pub(crate) struct ModelAnimationViewerState {
     radius: i32,
     show_animation_root: bool,
     show_bones: bool,
+    show_hitboxes: bool,
     last_time_seconds: f64,
 }
 
@@ -44,6 +45,7 @@ impl Default for ModelAnimationViewerState {
             radius: 0,
             show_animation_root: false,
             show_bones: false,
+            show_hitboxes: false,
             last_time_seconds: 0.0,
         }
     }
@@ -350,6 +352,11 @@ fn draw_overlay_toggles(ui: &mut egui::Ui, state: &mut ModelAnimationViewerState
         icons::label(icons::CIRCLE_DOT, "Anchor"),
     )
     .on_hover_text("Draw the body-derived preview anchor");
+    ui.toggle_value(
+        &mut state.show_hitboxes,
+        icons::label(icons::SCAN, "Hitboxes"),
+    )
+    .on_hover_text("Draw the derived humanoid hurt-capsule template");
 }
 
 fn draw_selected_clip_calibration(
@@ -590,6 +597,7 @@ fn draw_preview(
             show_animation_root: state.show_animation_root,
             show_collision_guides: false,
             show_bones: state.show_bones,
+            show_hitboxes: state.show_hitboxes,
         },
     );
 
