@@ -170,6 +170,7 @@ fn kon_clears_endx_for_started_voices() {
 #[test]
 fn transfer_fifo_writes_into_spu_ram_and_advances() {
     let mut s = Spu::new();
+    s.write16(SPUCNT, 1 << 4); // arm Manual-Write transfer mode
     s.write16(TRANSFER_ADDR, 0x0010); // 0x10 * 8 = 0x80 bytes
     s.write16(TRANSFER_FIFO, 0xBEEF);
     s.write16(TRANSFER_FIFO, 0xCAFE);
@@ -177,6 +178,23 @@ fn transfer_fifo_writes_into_spu_ram_and_advances() {
     assert_eq!(s.ram[(0x80 >> 1) + 1], 0xCAFE);
     // Transfer addr advanced by 4 bytes.
     assert_eq!(s.transfer_addr, 0x84);
+}
+
+#[test]
+fn transfer_fifo_write_without_manual_mode_does_not_commit() {
+    // The transfer FIFO (0x1F801DA8) only reaches SPU RAM when SPUCNT's
+    // transfer mode (bits 5..4) is Manual-Write. With the mode left at Stop --
+    // an upload that pokes the FIFO but forgets to arm the mode -- the write
+    // must NOT land, so the upload silently no-ops exactly as on real hardware
+    // (garbled/silent audio on console, but fine if the emulator is lenient).
+    let mut s = Spu::new();
+    s.write16(TRANSFER_ADDR, 0x0010); // 0x80 bytes; mode still Stop (0)
+    s.write16(TRANSFER_FIFO, 0xBEEF);
+    assert_eq!(s.ram[0x80 >> 1], 0, "Stop-mode FIFO write must not commit to SPU RAM");
+    // Arm Manual-Write mode -> the same write now commits.
+    s.write16(SPUCNT, 1 << 4);
+    s.write16(TRANSFER_FIFO, 0xBEEF);
+    assert_eq!(s.ram[0x80 >> 1], 0xBEEF, "Manual-Write mode commits the FIFO to SPU RAM");
 }
 
 #[test]
@@ -195,7 +213,7 @@ fn dma_write_fills_spu_ram_contiguously() {
 #[test]
 fn irq_fires_when_transfer_hits_irq_addr_with_enable() {
     let mut s = Spu::new();
-    s.write16(SPUCNT, 1 << 6); // IRQ enable
+    s.write16(SPUCNT, (1 << 6) | (1 << 4)); // IRQ enable + Manual-Write transfer mode
     s.write16(IRQ_ADDR, 0x0010); // 0x10 * 8 = 0x80 bytes
     s.write16(TRANSFER_ADDR, 0x0010);
     s.write16(TRANSFER_FIFO, 0xAAAA);
@@ -218,7 +236,7 @@ fn irq_does_not_fire_without_enable_bit() {
 #[test]
 fn decoded_buffer_irq_fires_in_low_capture_banks() {
     let mut s = Spu::new();
-    s.write16(SPUCNT, 1 << 6); // IRQ enable
+    s.write16(SPUCNT, (1 << 6) | (1 << 4)); // IRQ enable + Manual-Write transfer mode
     s.write16(IRQ_ADDR, 0x0080); // 0x80 * 8 = 0x400 bytes
 
     s.tick_sample(0);
@@ -234,7 +252,7 @@ fn decoded_buffer_irq_fires_at_zero_irq_address() {
     // it off (the old behavior) froze the game on the SCEA screen.
     // SPUCNT bit 6 already guards against firing before a game arms.
     let mut s = Spu::new();
-    s.write16(SPUCNT, 1 << 6); // IRQ enable
+    s.write16(SPUCNT, (1 << 6) | (1 << 4)); // IRQ enable + Manual-Write transfer mode
     s.write16(IRQ_ADDR, 0x0000);
 
     s.tick_sample(0);
@@ -246,7 +264,7 @@ fn decoded_buffer_irq_fires_at_zero_irq_address() {
 #[test]
 fn clearing_spucnt_irq_enable_acks_status_bit() {
     let mut s = Spu::new();
-    s.write16(SPUCNT, 1 << 6); // IRQ enable
+    s.write16(SPUCNT, (1 << 6) | (1 << 4)); // IRQ enable + Manual-Write transfer mode
     s.write16(IRQ_ADDR, 0x0010);
     s.write16(TRANSFER_ADDR, 0x0010);
     s.write16(TRANSFER_FIFO, 0x1234);
@@ -1651,7 +1669,7 @@ fn spu_irq_does_not_relatch_until_acknowledged() {
     // PSX-SPX is_irq_triggerable / PSX-SPX IsRAMIRQTriggerable and the
     // nocash PSX-SPX sticky-IRQ9 semantics.
     let mut s = Spu::new();
-    s.write16(SPUCNT, 1 << 6); // IRQ enable
+    s.write16(SPUCNT, (1 << 6) | (1 << 4)); // IRQ enable + Manual-Write transfer mode
     s.write16(IRQ_ADDR, 0x0000); // byte addr 0
     s.write16(TRANSFER_ADDR, 0x0000); // start the transfer pointer at byte 0
 
@@ -1674,7 +1692,7 @@ fn spu_irq_does_not_relatch_until_acknowledged() {
     // Acknowledge: clear SPUCNT bit 6 (clears the SPUSTAT flag), then re-enable.
     s.write16(SPUCNT, 0);
     assert_eq!(s.spustat() & (1 << 6), 0, "clearing SPUCNT.6 acks the flag");
-    s.write16(SPUCNT, 1 << 6);
+    s.write16(SPUCNT, (1 << 6) | (1 << 4)); // re-enable IRQ + Manual-Write mode
 
     // A fresh match after acknowledge latches again.
     s.write16(TRANSFER_ADDR, 0x0000);
