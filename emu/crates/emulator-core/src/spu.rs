@@ -1525,6 +1525,15 @@ impl Spu {
     // ============================================================
 
     fn transfer_fifo_write(&mut self, value: u16) {
+        // A 0x1F801DA8 write only reaches SPU RAM when SPUCNT's transfer mode
+        // (bits 5..4) selects Manual Write (= 1). With the mode left at Stop (0)
+        // -- e.g. software that pokes the FIFO but forgets to arm the mode -- the
+        // write does NOT commit, so the upload silently no-ops, exactly as on
+        // real hardware. PSoXide previously committed unconditionally, which hid
+        // that whole class of bug (garbled/silent audio on console, fine in-emu).
+        if (self.spucnt >> 4) & 0x3 != 1 {
+            return;
+        }
         // Push to SPU RAM at the current transfer address; the address
         // post-increments by 2 bytes each write.
         let idx = (self.transfer_addr >> 1) as usize % SPU_RAM_HALFWORDS;
