@@ -11,8 +11,10 @@
 //!   does not call it from `tick_sample`.
 //!
 //! Already in: 1024-entry Gaussian sample interpolation (`GAUSS_TABLE`)
-//! and Redux-compatible voice volume decode, including its non-animated
-//! sweep-register approximation.
+//! and hardware-accurate voice/main volume decode: fixed signed-Q15
+//! levels (bit15=0, including negative phase-inverted volumes) and a
+//! fully animated sweep envelope (bit15=1), matching PSX-SPX and
+//! the PSX hardware volume-sweep behaviour.
 //!
 //! Reference implementations consulted as parity oracles:
 //! - PCSX-Redux `src/spu/{spu,adsr,registers,dma}.cc` (GPL-2.0-or-later)
@@ -292,21 +294,40 @@ fn parse_adsr_hi(hi: u16, cfg: &mut AdsrConfig) {
 // ===============================================================
 
 /// One SPU volume channel. Holds the raw 16-bit register value so
-/// reads round-trip verbatim, plus the Redux-decoded current level.
-/// PCSX-Redux does not animate sweep volumes sample-by-sample; it
-/// collapses the sweep register into an immediate fixed gain in
-/// `SetVolumeL/R`, so this type mirrors that behavior.
+/// reads round-trip verbatim, plus the hardware `current` level in
+/// full signed Q15 (-0x8000..=0x7FFF). Voice/main volume registers
+/// support a fixed level (bit15=0, signed 15-bit value * 2, so bit14
+/// is a genuine negative phase) and an animated sweep envelope
+/// (bit15=1, ramped linear/exponential up/down each sample). CD,
+/// external, and reverb-output volumes are plain fixed signed values
+/// written via [`write_signed_q15`]. The sweep math is a direct port
+/// of the PSX hardware volume sweep
+/// and the per-voice volume envelope;
+/// the level is applied as `(sample * current) >> 15`.
 #[derive(Copy, Clone, Debug, Default)]
 struct VolumeEnvelope {
     /// The last 16-bit word written to the register. `reads` echo
     /// this so software verification paths see the exact config.
     raw: u16,
-    /// Current Q14 level, 0..=0x3FFF for voice/main volume regs.
-    /// CD/reverb/ext fixed volumes use [`write_signed_q15`].
+    /// Current signed Q15 level, -0x8000..=0x7FFF. Applied to samples
+    /// as `(sample * current) >> 15`, matching both parity oracles.
     current: i16,
-    /// Retained for register-shape compatibility; Redux's voice volume
-    /// sweep path is immediate, so this does not advance for `write`.
-    sweep_sub: i32,
+    /// True only while a sweep (bit15=1) is animating; `tick` is a
+    /// no-op for fixed levels and for never-ticking rates.
+    sweep_active: bool,
+    /// Sweep envelope state (mirrors PSX-SPX `VolumeEnvelope`).
+    sweep_counter: u32,
+    /// Counter increment. MUST be u32: the rate-0x7F "never ticks" case
+    /// shifts 0x8000 right by 20 (`(0x7F>>2)-11`), which a u16 would mask
+    /// to `>>4`=0x0800 (a nonzero, wrongly-active increment) in release
+    /// builds. A wider integer width is what makes the over-shift collapse
+    /// to 0 as the PSX hardware requires.
+    sweep_increment: u32,
+    sweep_step: i16,
+    sweep_rate: u8,
+    sweep_decreasing: bool,
+    sweep_exponential: bool,
+    sweep_phase_invert: bool,
 }
 
 impl VolumeEnvelope {
@@ -314,30 +335,32 @@ impl VolumeEnvelope {
         Self::default()
     }
 
-    /// Accept a new 16-bit voice/main volume register value. This is
-    /// intentionally Redux-compatible rather than a full hardware sweep:
-    /// `SetVolumeL/R` turns sweep mode into a one-shot approximate gain
-    /// and masks static negative-phase volumes back to positive magnitude.
+    /// Accept a new 16-bit voice/main volume register value.
+    ///
+    /// bit15=0: fixed volume. Bits 0..14 are a signed 15-bit value
+    /// representing Volume/2, so `current = signed15 * 2` (a set bit14
+    /// is a real negative/phase-inverted volume). bit15=1: configure a
+    /// sweep envelope and leave `current` at its prior level, ramping
+    /// from there each `tick`. Matches PSX-SPX
+    /// the old PCSX-Redux-style fabricated
+    /// sweep gain + sign-masked fixed level are gone (SPU_AUDIT #5/#6/#14).
     fn write(&mut self, raw: u16) {
         self.raw = raw;
-        let mut vol = raw as i32;
         if raw & 0x8000 != 0 {
-            let decreasing = raw & (1 << 13) != 0;
-            if raw & (1 << 12) != 0 {
-                vol ^= 0xFFFF;
-            }
-            vol = ((vol & 0x7F) + 1) / 2;
-            if decreasing {
-                vol -= vol / 2;
-            } else {
-                vol += vol / 2;
-            }
-            vol *= 128;
-        } else if raw & 0x4000 != 0 {
-            vol = (vol & 0x3FFF) - 0x4000;
+            // Sweep mode: program the envelope, keep current_level.
+            self.sweep_reset(
+                (raw & 0x7F) as u8,
+                raw & (1 << 13) != 0, // decreasing
+                raw & (1 << 14) != 0, // exponential
+                raw & (1 << 12) != 0, // phase-invert
+            );
+            self.sweep_active = self.sweep_increment > 0;
+        } else {
+            // Fixed mode: signed 15-bit field (bits 0..14) * 2.
+            let field = ((raw & 0x7FFF) as i16) << 1 >> 1; // sign-extend bit14
+            self.current = field.wrapping_mul(2);
+            self.sweep_active = false;
         }
-        self.current = (vol & 0x3FFF) as i16;
-        self.sweep_sub = 0;
     }
 
     /// Accept a fixed signed Q15 volume register. CD input, external
@@ -346,13 +369,80 @@ impl VolumeEnvelope {
     fn write_signed_q15(&mut self, raw: u16) {
         self.raw = raw;
         self.current = raw as i16;
-        self.sweep_sub = 0;
+        self.sweep_active = false;
     }
 
-    /// Advance one SPU sample. Redux does not animate voice/main sweep
-    /// volumes after `SetVolumeL/R`, so this is intentionally a no-op
-    /// for `write`-decoded registers.
-    fn tick(&mut self) {}
+    /// Configure the sweep envelope. Direct port of PSX-SPX
+    /// `VolumeEnvelope::Reset(rate, rate_mask=0x7F, ...)` /
+    /// PSX-SPX `Envelope::reset`.
+    fn sweep_reset(&mut self, rate: u8, decreasing: bool, exponential: bool, phase_invert: bool) {
+        self.sweep_rate = rate;
+        self.sweep_decreasing = decreasing;
+        self.sweep_exponential = exponential;
+        // psx-spx: phase bit has no effect in exponential-decrease mode.
+        self.sweep_phase_invert = phase_invert && !(decreasing && exponential);
+        self.sweep_counter = 0;
+        self.sweep_increment = 0x8000;
+
+        let base_step = 7 - (rate as i32 & 3);
+        let neg = (decreasing ^ phase_invert) || (decreasing && exponential);
+        let mut step = if neg { !base_step } else { base_step };
+        if rate < 44 {
+            step <<= 11 - (rate >> 2);
+        } else if rate >= 48 {
+            self.sweep_increment >>= (rate >> 2) - 11;
+            // Rate 0x7F (all bits set under the 0x7F mask) never ticks.
+            if (rate & 0x7F) != 0x7F {
+                self.sweep_increment = self.sweep_increment.max(1);
+            }
+        }
+        self.sweep_step = step as i16;
+    }
+
+    /// Advance one SPU sample. Ramps `current` per the configured
+    /// sweep; a no-op for fixed levels (`sweep_active == false`).
+    /// Direct port of PSX-SPX `VolumeEnvelope::Tick`.
+    fn tick(&mut self) {
+        if !self.sweep_active {
+            return;
+        }
+        let mut this_increment = self.sweep_increment;
+        let mut this_step = self.sweep_step as i32;
+        if self.sweep_exponential {
+            if self.sweep_decreasing {
+                this_step = (this_step * self.current as i32) >> 15;
+            } else if self.current >= 0x6000 {
+                if self.sweep_rate < 40 {
+                    this_step >>= 2;
+                } else if self.sweep_rate >= 44 {
+                    this_increment >>= 2;
+                } else {
+                    this_step >>= 1;
+                    this_increment >>= 1;
+                }
+            }
+        }
+        self.sweep_counter += this_increment;
+        if self.sweep_counter & 0x8000 == 0 {
+            return;
+        }
+        self.sweep_counter = 0;
+        let new_level = self.current as i32 + this_step;
+        if !self.sweep_decreasing {
+            let clamped = new_level.clamp(-0x8000, 0x7FFF);
+            self.current = clamped as i16;
+            let limit = if this_step < 0 { -0x8000 } else { 0x7FFF };
+            self.sweep_active = clamped != limit;
+        } else {
+            let clamped = if self.sweep_phase_invert {
+                new_level.clamp(-0x8000, 0)
+            } else {
+                new_level.max(0)
+            };
+            self.current = clamped as i16;
+            self.sweep_active = clamped != 0;
+        }
+    }
 
     /// Read-back value -- always returns the raw register the CPU
     /// wrote, not the animated current level.
@@ -409,9 +499,10 @@ struct Voice {
     /// decode. Updated after each block consumed.
     current_addr: u32,
     /// Decoded samples from the most recent 16-byte block (28 samples).
-    /// Indexed by `sample_index`. Redux keeps these and the ADPCM
-    /// predictor history as unclamped i32 values, then clamps only when
-    /// feeding the interpolation window.
+    /// Indexed by `sample_index`. Each sample is saturated to i16
+    /// (-0x8000..=0x7FFF) at decode time before it is stored here and fed
+    /// back into the ADPCM predictor history, matching real hardware and
+    /// both parity oracles (the IIR runs on the 16-bit-saturated value).
     sample_buf: [i32; ADPCM_SAMPLES_PER_BLOCK],
     /// Index into `sample_buf`; when it reaches 28 we decode the next
     /// block before taking the next sample.
@@ -440,6 +531,18 @@ struct Voice {
     /// Redux only turns the voice off when the decoder reaches the
     /// *next* block boundary.
     stop_after_block: bool,
+    /// ENDX latch is deferred: a decoded loop-end (flag-1) block sets
+    /// this, and ENDX is latched at the *next* block boundary in
+    /// `fetch_voice_sample`, i.e. only after the loop-end block's 28
+    /// samples have actually played. PSX-SPX set ENDX at
+    /// the boundary crossing, not when the loop-end block is decoded.
+    endx_pending: bool,
+    /// Number of ADPCM blocks decoded since the last key-on. The first
+    /// decoded block is the voice's "first block" (`== 1`); that is the
+    /// window in which a REPEAT_ADDR write must NOT lock the loop
+    /// address so the sample's own loop-start flag can still override it
+    /// (the PSX hardware first-block window).
+    decoded_block_count: u32,
     /// Most recent interpolated sample output by this voice (post-ADSR,
     /// pre-volume). Kept for reads of the ADSR_CURRENT register and
     /// pitch modulation consumers.
@@ -472,6 +575,8 @@ impl Default for Voice {
             s_1: 0,
             s_2: 0,
             stop_after_block: false,
+            endx_pending: false,
+            decoded_block_count: 0,
             last_sample: 0,
         }
     }
@@ -492,6 +597,8 @@ impl Voice {
         self.s_1 = 0;
         self.s_2 = 0;
         self.stop_after_block = false;
+        self.endx_pending = false;
+        self.decoded_block_count = 0;
         self.loop_addr_locked = false;
         self.last_sample = 0;
     }
@@ -553,20 +660,21 @@ impl Voice {
     }
 
     fn step_decay(&mut self) -> i32 {
-        // Decay rate is 0..=15, scaled to a 7-bit rate by *4. Redux's
-        // LDChen ADSR path gates decay's exponential branch with the
-        // release-mode bit, so mirror that for commercial-audio parity.
+        // Decay rate is 0..=15, scaled to a 7-bit rate by *4. Decay is
+        // ALWAYS an exponential decrease on real hardware -- it is not
+        // gated on the release-mode bit (which is an independent ADSR
+        // field). PSX-SPX resets the decay envelope with
+        // exponential=true unconditionally ( UpdateADSREnvelope),
+        // PSX-SPX hard-codes EnvelopeMode::Exponential for Decay, and
+        // PSX-SPX states "decay mode is always Exponential decrease, and
+        // thus cannot be set".
         let rate = (self.adsr.decay_rate * 4).min(127);
         let denom = envelope_denominator(rate as usize);
         self.envelope_sub += 1;
         if self.envelope_sub >= denom {
             self.envelope_sub = 0;
             let dec = envelope_numerator_decrease(rate as usize);
-            if self.adsr.release_exp {
-                self.envelope += (dec * self.envelope) >> 15;
-            } else {
-                self.envelope += dec;
-            }
+            self.envelope += (dec * self.envelope) >> 15;
         }
         if self.envelope < 0 {
             self.envelope = 0;
@@ -631,7 +739,7 @@ impl Voice {
                 self.envelope += envelope_numerator_decrease(rate as usize);
             }
         }
-        if self.envelope < 0 {
+        if self.envelope <= 0 {
             self.envelope = 0;
             self.phase = AdsrPhase::Off;
         }
@@ -873,7 +981,7 @@ pub struct Spu {
     noise_val: i16,
     /// Sub-sample counter for the noise clock. The noise shift
     /// register advances every `2^shift` SPU samples scaled by
-    /// the noise step field -- matching PSX-SPX's "noise rate"
+    /// the noise step field -- matching the hardware "noise rate"
     /// table. Simplified here to a cycle counter that rolls over
     /// based on SPUCNT bits 8-13.
     noise_counter: u32,
@@ -1372,9 +1480,20 @@ impl Spu {
                 voice.envelope = (value as i16) as i32 & 0x7FFF;
             }
             voice_offset::REPEAT_ADDR => {
+                // A software REPEAT_ADDR write stores the loop address and
+                // normally locks it (suppresses the ADPCM loop-start flag's
+                // auto-update). But while the voice is ON and still in its
+                // very first ADPCM block, hardware lets the sample's own
+                // loop-start flag override the written value, so we do NOT
+                // lock in that window (PSX-SPX: `ignore =
+                // !is_on || !first-block`, OR-ed into the loop-address lock;
+                // Tron Bonne / Valkyrie Profile / Re-Loaded depend on this).
+                // `decoded_block_count <= 1` is that first-block window
+                // (0 = before the first decode, 1 = within the first block).
                 voice.loop_addr_raw = value;
                 voice.loop_addr = ((value as u32) << 3) & (SPU_RAM_BYTES as u32 - 1) & !0xF;
-                voice.loop_addr_locked = true;
+                let ignore = voice.phase == AdsrPhase::Off || voice.decoded_block_count > 1;
+                voice.loop_addr_locked |= ignore;
             }
             _ => {}
         }
@@ -1426,8 +1545,20 @@ impl Spu {
         self.ram[idx]
     }
 
+    /// An SPU RAM IRQ may only latch when IRQ9 is enabled (SPUCNT bit 6)
+    /// **and** the sticky IRQ9 flag (SPUSTAT bit 6) is not already set.
+    /// Once latched, no further IRQ can fire until software acknowledges
+    /// by clearing SPUCNT bit 6 (which clears the SPUSTAT flag in
+    /// `write_spucnt`). Mirrors PSX-SPX `is_irq_triggerable`
+    /// (`irq9_enable && !irq9_flag`) and PSX-SPX `IsRAMIRQTriggerable`
+    /// (`SPUCNT.irq9_enable && !SPUSTAT.irq9_flag`); nocash PSX-SPX: SPUSTAT.6
+    /// is a sticky flag that blocks re-latching until acknowledged.
+    fn irq_triggerable(&self) -> bool {
+        (self.spucnt & (1 << 6)) != 0 && (self.spustat & (1 << 6)) == 0
+    }
+
     fn check_irq_on_transfer(&mut self) {
-        if self.spucnt & (1 << 6) == 0 {
+        if !self.irq_triggerable() {
             return;
         }
         // IRQ fires when the transfer pointer reaches the IRQ address
@@ -1515,6 +1646,14 @@ impl Spu {
         self.ram[self.reverb_ram_index(offset, 0)] as i16 as i32
     }
 
+    /// Reverb read with an extra signed halfword offset, mirroring
+    /// the hardware `ReverbRead(address, offset)`. The IIR_DEST same/
+    /// different-side reflection taps read one cell *behind* the write
+    /// target (`[mLSAME-2]` in nocash = -1 halfword).
+    fn reverb_read_at(&self, offset: i32, extra_halfwords: i32) -> i32 {
+        self.ram[self.reverb_ram_index(offset, extra_halfwords)] as i16 as i32
+    }
+
     fn reverb_write(&mut self, offset: i32, extra_halfwords: i32, value: i32) {
         let idx = self.reverb_ram_index(offset, extra_halfwords);
         self.ram[idx] = saturate_i16(value) as u16;
@@ -1536,10 +1675,16 @@ impl Spu {
 
         let processed_this_sample = self.reverb.process_this_sample;
         if processed_this_sample {
+            // the SPU spec clearing REVERB_MASTER_ENABLE must only
+            // freeze the RAM feedback, NOT hard-zero the wet bus. PSX-SPX
+            // (-2331, 2357-2389) gates just the IIR/MIX_DEST RAM
+            // writes behind master-enable while still emitting the buffered
+            // tail; PSX-SPX still adds reverb.left_out/right_out to the mix
+            // (spu.rs:542-558). The old `reset_output()` snapped the tail to 0
+            // (an audible click). With master off we hold the wet bus at its
+            // prior value and let it ring down instead of resetting it.
             if self.spucnt & SPUCNT_REVERB_MASTER_ENABLE != 0 {
                 self.run_reverb_step(input_l, input_r);
-            } else {
-                self.reverb.reset_output();
             }
 
             let mut next_addr = self.reverb.curr_addr.saturating_add(1);
@@ -1585,29 +1730,29 @@ impl Spu {
         let inv_iir_alpha = 32768 - iir_alpha;
         let iir_a0 = Self::mul_q15(iir_input_a0, iir_alpha)
             + Self::mul_q15(
-                self.reverb_read(self.reverb_cfg_s(IIR_DEST_A0)),
+                self.reverb_read_at(self.reverb_cfg_s(IIR_DEST_A0), -1),
                 inv_iir_alpha,
             );
         let iir_a1 = Self::mul_q15(iir_input_a1, iir_alpha)
             + Self::mul_q15(
-                self.reverb_read(self.reverb_cfg_s(IIR_DEST_A1)),
+                self.reverb_read_at(self.reverb_cfg_s(IIR_DEST_A1), -1),
                 inv_iir_alpha,
             );
         let iir_b0 = Self::mul_q15(iir_input_b0, iir_alpha)
             + Self::mul_q15(
-                self.reverb_read(self.reverb_cfg_s(IIR_DEST_B0)),
+                self.reverb_read_at(self.reverb_cfg_s(IIR_DEST_B0), -1),
                 inv_iir_alpha,
             );
         let iir_b1 = Self::mul_q15(iir_input_b1, iir_alpha)
             + Self::mul_q15(
-                self.reverb_read(self.reverb_cfg_s(IIR_DEST_B1)),
+                self.reverb_read_at(self.reverb_cfg_s(IIR_DEST_B1), -1),
                 inv_iir_alpha,
             );
 
-        self.reverb_write(self.reverb_cfg_s(IIR_DEST_A0), 1, iir_a0);
-        self.reverb_write(self.reverb_cfg_s(IIR_DEST_A1), 1, iir_a1);
-        self.reverb_write(self.reverb_cfg_s(IIR_DEST_B0), 1, iir_b0);
-        self.reverb_write(self.reverb_cfg_s(IIR_DEST_B1), 1, iir_b1);
+        self.reverb_write(self.reverb_cfg_s(IIR_DEST_A0), 0, iir_a0);
+        self.reverb_write(self.reverb_cfg_s(IIR_DEST_A1), 0, iir_a1);
+        self.reverb_write(self.reverb_cfg_s(IIR_DEST_B0), 0, iir_b0);
+        self.reverb_write(self.reverb_cfg_s(IIR_DEST_B1), 0, iir_b1);
 
         let acc0 = Self::mul_q15(
             self.reverb_read(self.reverb_cfg_s(ACC_SRC_A0)),
@@ -1648,31 +1793,40 @@ impl Spu {
         let fb_b1 = self.reverb_read(mix_dest_b1 - fb_src_b);
         let fb_alpha = self.reverb_cfg_s(FB_ALPHA);
         let fb_x = self.reverb_cfg_s(FB_X);
-        let fb_alpha_xor = fb_alpha ^ -0x8000;
 
-        self.reverb_write(mix_dest_a0, 0, acc0 - Self::mul_q15(fb_a0, fb_alpha));
-        self.reverb_write(mix_dest_a1, 0, acc1 - Self::mul_q15(fb_a1, fb_alpha));
-        self.reverb_write(
-            mix_dest_b0,
-            0,
-            Self::mul_q15(fb_alpha, acc0)
-                - Self::mul_q15(fb_a0, fb_alpha_xor)
-                - Self::mul_q15(fb_b0, fb_x),
-        );
-        self.reverb_write(
-            mix_dest_b1,
-            0,
-            Self::mul_q15(fb_alpha, acc1)
-                - Self::mul_q15(fb_a1, fb_alpha_xor)
-                - Self::mul_q15(fb_b1, fb_x),
-        );
+        // Late Reverb APF1 (All-Pass Filter 1, input = comb-filter ACC).
+        // MIX_DEST_A is the APF1 buffer, FB_SRC_A its delay tap:
+        //   [mLAPF1] = ACC - vAPF1*[mLAPF1-dAPF1]
+        //   Lout     = [mLAPF1]*vAPF1 + [mLAPF1-dAPF1]
+        // reverb_write clamps to i16 when storing; the carried value stays
+        // unclamped, exactly like PSX-SPX calculate_*_reverb (whose
+        // apply_volume = `>>15`, the same convention as mul_q15).
+        let mda0 = acc0 - Self::mul_q15(fb_a0, fb_alpha);
+        let mda1 = acc1 - Self::mul_q15(fb_a1, fb_alpha);
+        self.reverb_write(mix_dest_a0, 0, mda0);
+        self.reverb_write(mix_dest_a1, 0, mda1);
+        let apf1_l = Self::mul_q15(mda0, fb_alpha) + fb_a0;
+        let apf1_r = Self::mul_q15(mda1, fb_alpha) + fb_a1;
+
+        // Late Reverb APF2 (All-Pass Filter 2, input = APF1 output).
+        // MIX_DEST_B is the APF2 buffer, FB_SRC_B its delay tap:
+        //   [mLAPF2] = APF1 - vAPF2*[mLAPF2-dAPF2]
+        //   Lout     = [mLAPF2]*vAPF2 + [mLAPF2-dAPF2]
+        let mdb0 = apf1_l - Self::mul_q15(fb_b0, fb_x);
+        let mdb1 = apf1_r - Self::mul_q15(fb_b1, fb_x);
+        self.reverb_write(mix_dest_b0, 0, mdb0);
+        self.reverb_write(mix_dest_b1, 0, mdb1);
 
         self.reverb.last_l = self.reverb.wet_l;
         self.reverb.last_r = self.reverb.wet_r;
-        let raw_l = (self.reverb_read(mix_dest_a0) + self.reverb_read(mix_dest_b0)) / 3;
-        let raw_r = (self.reverb_read(mix_dest_a1) + self.reverb_read(mix_dest_b1)) / 3;
-        self.reverb.wet_l = Self::scale_reverb_output(raw_l, self.reverb_vol_l.current);
-        self.reverb.wet_r = Self::scale_reverb_output(raw_r, self.reverb_vol_r.current);
+        // Wet output is the APF2 result (`LeftOutput = Lout*vLOUT`, nocash SPU
+        // Reverb Formula), NOT the old invented (MIX_DEST_A + MIX_DEST_B)/3.
+        // Matches PSX-SPX `Clamp16(FB_B + ((MDB*FB_X)>>15))` and PSX-SPX
+        // self.left_out/right_out (the post-APF2 Lout).
+        let out_l = Self::mul_q15(mdb0, fb_x) + fb_b0;
+        let out_r = Self::mul_q15(mdb1, fb_x) + fb_b1;
+        self.reverb.wet_l = Self::scale_reverb_output(out_l, self.reverb_vol_l.current);
+        self.reverb.wet_r = Self::scale_reverb_output(out_r, self.reverb_vol_r.current);
     }
 
     // ============================================================
@@ -1685,22 +1839,25 @@ impl Spu {
     /// amortise voice-state fetches across several samples).
     pub fn tick_sample(&mut self, now: u64) -> usize {
         self.last_sample_cycle = now;
-        // 1. Apply pending KON / KOFF.
-        self.apply_kon_koff();
+        // KON / KOFF are applied at the END of this tick (after the
+        // sample is emitted), not here -- see the apply_kon_koff() call
+        // below. PSX-SPX runs update_keystatus() after push_sample
+        // (spu.rs:577-580) and PSX-SPX runs KeyOff/KeyOn after
+        // WriteToCaptureBuffer (-2558, gated on i==0); per
+        // PSX-SPX a KON/KOFF write is latched and acted on at the next
+        // 44.1 kHz tick, so a keyed-on voice's first Attack sample lands
+        // on the sample AFTER the one in progress.
 
         // 1b. Advance noise generator -- one LFSR-step pass per
         //     sample (the noise_tick's internal counter gates
         //     actual register updates).
         self.noise_tick();
 
-        // 1c. Redux keeps voice/main volume sweep as an immediate
-        //     SetVolume approximation. `tick` is therefore a no-op for
-        //     those registers; fixed CD/reverb/ext volumes also do not
-        //     animate.
-        for v in 0..NUM_VOICES {
-            self.voices[v].vol_l.tick();
-            self.voices[v].vol_r.tick();
-        }
+        // 1c. Advance the global volume sweeps. Per-voice volume sweeps
+        //     are ticked in `tick_voice` after each voice's sample is
+        //     applied (apply-then-tick, matching PSX-SPX).
+        //     CD/external/reverb volumes are fixed (`write_signed_q15`,
+        //     a no-op tick); main volume may be sweep-programmed.
         self.main_vol_l.tick();
         self.main_vol_r.tick();
         self.cd_vol_l.tick();
@@ -1767,15 +1924,19 @@ impl Spu {
         // available on a closed console); EXT_VOL_L/R are stored for
         // round-trip reads only.
 
-        // 4. Process the wet reverb bus. PCSX-Redux logs main-volume
-        //    writes as unimplemented and does not apply them in
-        //    `MainThread`; matching that here keeps commercial-game
-        //    audio levels and tails aligned with the oracle.
+        // 4. Process the wet reverb bus, then apply MAIN VOLUME as the final
+        //    stage. PSX-SPX both scale the clamped (dry+wet)
+        //    sum by the raw signed-Q15 main-volume register: `(s * vol) >> 15`.
+        //    PSoXide previously dropped this (claiming PCSX-Redux did too), which
+        //    left output ~2x too loud and clipped the un-attenuated 24-voice sum
+        //    far more often than hardware or either oracle.
         let (wet_l, wet_r) = self.mix_reverb(reverb_in_l, reverb_in_r);
         let dry_l = sum_l;
         let dry_r = sum_r;
-        let out_l = saturate_i16(dry_l.saturating_add(wet_l));
-        let out_r = saturate_i16(dry_r.saturating_add(wet_r));
+        let mixed_l = saturate_i16(dry_l.saturating_add(wet_l)) as i32;
+        let mixed_r = saturate_i16(dry_r.saturating_add(wet_r)) as i32;
+        let out_l = saturate_i16((mixed_l * self.main_vol_l.raw as i16 as i32) >> 15);
+        let out_r = saturate_i16((mixed_r * self.main_vol_r.raw as i16 as i32) >> 15);
         self.dbg_dry_energy = self
             .dbg_dry_energy
             .saturating_add(dry_l.unsigned_abs() as u64 + dry_r.unsigned_abs() as u64);
@@ -1790,12 +1951,19 @@ impl Spu {
         self.audio_out.push_back((out_l, out_r));
 
         self.tick_decode_buffer_irq();
+
+        // 6. Apply pending KON / KOFF AFTER this sample was emitted and
+        //    the capture buffer was written, matching PSX-SPX
+        //    update_keystatus() (spu.rs:580) and the hardware post-
+        //    WriteToCaptureBuffer KeyOff/KeyOn (-2558). The
+        //    keyed voice therefore first contributes on the NEXT tick.
+        self.apply_kon_koff();
         self.samples_produced = self.samples_produced.saturating_add(1);
         1
     }
 
     fn tick_decode_buffer_irq(&mut self) {
-        if self.spucnt & (1 << 6) != 0 && self.irq_addr < 0x1000 {
+        if self.irq_triggerable() && self.irq_addr < 0x1000 {
             for bank in 0..4 {
                 let cursor = self.decode_irq_cursor + bank * 0x400;
                 if self.irq_addr >= cursor && self.irq_addr < cursor + 2 {
@@ -1869,10 +2037,16 @@ impl Spu {
         let voice = &mut self.voices[v];
         voice.last_sample = mixed_i16;
 
-        // Apply per-voice L / R volumes (Q14). Uses the animated
-        // `current` level so sweep-configured voices fade live.
-        let l = ((mixed_i16 as i32) * voice.vol_l.current as i32) >> 14;
-        let r = ((mixed_i16 as i32) * voice.vol_r.current as i32) >> 14;
+        // Apply per-voice L / R volumes in full signed Q15 (sample *
+        // current_level >> 15), matching PSX-SPX
+        // `apply_volume`. `current` is the live sweep/fixed level, so
+        // sweep-configured voices fade and negative-phase volumes
+        // invert correctly. Tick the sweep AFTER applying this sample,
+        // mirroring both oracles' apply-then-`tick` order.
+        let l = ((mixed_i16 as i32) * voice.vol_l.current as i32) >> 15;
+        let r = ((mixed_i16 as i32) * voice.vol_r.current as i32) >> 15;
+        voice.vol_l.tick();
+        voice.vol_r.tick();
         (saturate_i16(l), saturate_i16(r))
     }
 
@@ -1919,6 +2093,17 @@ impl Spu {
         // ADPCM boundaries instead of substituting zeros.
         while self.voices[v].sample_pos >= 0x10000 {
             if self.voices[v].sample_index >= ADPCM_SAMPLES_PER_BLOCK {
+                // Block boundary: the current block's 28 samples have all
+                // been consumed. If it was a loop-end block, latch ENDX now
+                // -- after the block finished playing -- even if the voice
+                // is about to stop. This matches PSX-SPX,
+                // which set ENDX at the boundary crossing (using the just-
+                // finished block's flags), not when the loop-end block was
+                // first decoded a block earlier.
+                if self.voices[v].endx_pending {
+                    self.endx_latched |= 1 << v;
+                    self.voices[v].endx_pending = false;
+                }
                 if self.voices[v].stop_after_block {
                     self.dbg_sampstop_count[v] = self.dbg_sampstop_count[v].saturating_add(1);
                     let voice = &mut self.voices[v];
@@ -1965,7 +2150,7 @@ impl Spu {
     fn decode_next_block(&mut self, v: usize) {
         // Snapshot voice state we need for decoding.
         let current = self.voices[v].current_addr;
-        let irq_enabled = self.spucnt & (1 << 6) != 0;
+        let irq_enabled = self.irq_triggerable();
         let irq_target = self.irq_addr & !0xF;
 
         // IRQ match check: if the block being decoded covers the IRQ
@@ -1980,7 +2165,12 @@ impl Spu {
 
         let predictor = (block[0] >> 4) as usize;
         let predictor = predictor.min(ADPCM_FILTER_TABLE.len() - 1);
-        let shift = (block[0] & 0x0F).min(12) as u32;
+        // Reserved shift values 13..15 act the same as shift=9 on real
+        // hardware (nocash PSX-SPX; PSX-SPX `ADPCMBlock::GetShift`,
+        // PSX-SPX `decode_block`). Clamping to 12 instead would attenuate
+        // those nibbles by ~3 extra bits, so map >12 to 9.
+        let raw_shift = block[0] & 0x0F;
+        let shift = (if raw_shift > 12 { 9 } else { raw_shift }) as u32;
         let flags = block[1];
 
         // Decode 28 samples (4-bit nibbles, little-endian within bytes:
@@ -1994,22 +2184,31 @@ impl Spu {
             } else {
                 (byte >> 4) & 0x0F
             };
-            // Match Redux's SPU decode path exactly:
-            //   s = sign_extend_4bit(nibble) << 12
+            // Decode path:
+            //   s   = sign_extend_4bit(nibble) << 12
             //   raw = s >> shift_factor
-            //
-            // The previous code effectively inverted the shift and
-            // collapsed large-amplitude samples into near-silence for
-            // low shift factors, which mangled ordinary SPU voice audio
-            // including BIOS beeps.
+            //   fa  = raw + (s_1*f1 + s_2*f2) >> 6
+            // The 4-bit nibble is sign-extended then scaled by the header
+            // shift (smaller shift = louder), matching real hardware.
             let signed = ((nibble << 28) >> 28) << 12;
             let raw = signed >> shift;
             let fa = raw + ((voice.s_1 * f1) >> 6) + ((voice.s_2 * f2) >> 6);
-            voice.sample_buf[i] = fa;
+            // Saturate to 16 bits BEFORE feeding the IIR predictor history,
+            // exactly like hardware: nocash `old = MinMax(sample, -8000h,
+            // +7FFFh)`, PSX-SPX `Clamp16(sample)`, PSX-SPX
+            // `sample.clamp(-0x8000, 0x7fff)`. Storing the
+            // unclamped i32 let prev1/prev2 drift on loud/bass voices.
+            let clamped = fa.clamp(-0x8000, 0x7FFF);
+            voice.sample_buf[i] = clamped;
             voice.s_2 = voice.s_1;
-            voice.s_1 = fa;
+            voice.s_1 = clamped;
         }
         voice.sample_index = 0;
+        // Count blocks decoded since key-on. The first decoded block is the
+        // voice's "first block" (decoded_block_count == 1) -- the window in
+        // which a REPEAT_ADDR write must not lock the loop address (see
+        // write_voice_reg / PSX-SPX first-block).
+        voice.decoded_block_count = voice.decoded_block_count.saturating_add(1);
 
         // Advance current_addr for the next block.
         let block_bytes = ADPCM_BLOCK_BYTES as u32;
@@ -2027,23 +2226,21 @@ impl Spu {
             voice.loop_addr_raw = (current >> 3) as u16;
         }
         if flags & 0x1 != 0 {
-            // End of sample -- latch ENDX.
-            self.endx_latched |= 1 << v;
+            // Loop-end (bit 0). Defer the ENDX latch to the next block
+            // boundary (it must fire only after this block's 28 samples
+            // have played -- flushed in fetch_voice_sample), and redirect
+            // playback to the loop address unconditionally, exactly as
+            // PSX-SPX do on loop_end. The voice is stopped
+            // only when the repeat bit (bit 1) is clear -- tested on its
+            // own, not via the whole-byte `flags == 0x3` value that
+            // PEOPS/PCSX-Redux used as a loop-hang guard, which wrongly
+            // force-killed single-block loops encoded as 0x7. A noise
+            // voice is never stopped by these flags.
+            let noise = self.noise_on & (1 << v) != 0;
             let voice = &mut self.voices[v];
-            if flags == 0x3 {
-                // Redux loops only on the exact 1+2 flag byte. Other
-                // combinations with bit 0 set use the stop sentinel.
-                voice.current_addr = voice.loop_addr;
-                voice.stop_after_block = false;
-            } else {
-                // One-shot done -- keep this decoded block audible and
-                // stop only when playback reaches the next block
-                // boundary. Redux marks the next source pointer as a
-                // sentinel and turns the voice off on the following
-                // decode attempt.
-                voice.stop_after_block = true;
-                voice.current_addr = next_addr;
-            }
+            voice.endx_pending = true;
+            voice.current_addr = voice.loop_addr;
+            voice.stop_after_block = (flags & 0x2 == 0) && !noise;
         } else {
             voice.current_addr = next_addr;
             voice.stop_after_block = false;
@@ -2055,114 +2252,105 @@ impl Spu {
 //  Gaussian interpolation table (PSX hardware).
 // ===============================================================
 
-/// 1024-entry Gaussian interpolation coefficient table, logged from
-/// a real PS1 SPU and also matching SPC700 curves. Pulled verbatim
-/// from PCSX-Redux's `src/spu/gauss.h`. Indexed by
-/// `(sample_pos >> 6) & ~3` + {0,1,2,3} -- four coefficients per
-/// fractional position. Values are 11-bit; product with an i16
-/// sample fits in i32 and needs an `& !2047` mask to match the
-/// hardware's 11-bit accumulator granularity.
-const GAUSS_TABLE: [i32; 1024] = [
-    0x172, 0x519, 0x176, 0x000, 0x16E, 0x519, 0x17A, 0x000, 0x16A, 0x518, 0x17D, 0x000, 0x166,
-    0x518, 0x181, 0x000, 0x162, 0x518, 0x185, 0x000, 0x15F, 0x518, 0x189, 0x000, 0x15B, 0x518,
-    0x18D, 0x000, 0x157, 0x517, 0x191, 0x000, 0x153, 0x517, 0x195, 0x000, 0x150, 0x517, 0x19A,
-    0x000, 0x14C, 0x516, 0x19E, 0x000, 0x148, 0x516, 0x1A2, 0x000, 0x145, 0x515, 0x1A6, 0x000,
-    0x141, 0x514, 0x1AA, 0x000, 0x13E, 0x514, 0x1AE, 0x000, 0x13A, 0x513, 0x1B2, 0x000, 0x137,
-    0x512, 0x1B7, 0x001, 0x133, 0x511, 0x1BB, 0x001, 0x130, 0x511, 0x1BF, 0x001, 0x12C, 0x510,
-    0x1C3, 0x001, 0x129, 0x50F, 0x1C8, 0x001, 0x125, 0x50E, 0x1CC, 0x001, 0x122, 0x50D, 0x1D0,
-    0x001, 0x11E, 0x50C, 0x1D5, 0x001, 0x11B, 0x50B, 0x1D9, 0x001, 0x118, 0x50A, 0x1DD, 0x001,
-    0x114, 0x508, 0x1E2, 0x001, 0x111, 0x507, 0x1E6, 0x002, 0x10E, 0x506, 0x1EB, 0x002, 0x10B,
-    0x504, 0x1EF, 0x002, 0x107, 0x503, 0x1F3, 0x002, 0x104, 0x502, 0x1F8, 0x002, 0x101, 0x500,
-    0x1FC, 0x002, 0x0FE, 0x4FF, 0x201, 0x002, 0x0FB, 0x4FD, 0x205, 0x003, 0x0F8, 0x4FB, 0x20A,
-    0x003, 0x0F5, 0x4FA, 0x20F, 0x003, 0x0F2, 0x4F8, 0x213, 0x003, 0x0EF, 0x4F6, 0x218, 0x003,
-    0x0EC, 0x4F5, 0x21C, 0x004, 0x0E9, 0x4F3, 0x221, 0x004, 0x0E6, 0x4F1, 0x226, 0x004, 0x0E3,
-    0x4EF, 0x22A, 0x004, 0x0E0, 0x4ED, 0x22F, 0x004, 0x0DD, 0x4EB, 0x233, 0x005, 0x0DA, 0x4E9,
-    0x238, 0x005, 0x0D7, 0x4E7, 0x23D, 0x005, 0x0D4, 0x4E5, 0x241, 0x005, 0x0D2, 0x4E3, 0x246,
-    0x006, 0x0CF, 0x4E0, 0x24B, 0x006, 0x0CC, 0x4DE, 0x250, 0x006, 0x0C9, 0x4DC, 0x254, 0x006,
-    0x0C7, 0x4D9, 0x259, 0x007, 0x0C4, 0x4D7, 0x25E, 0x007, 0x0C1, 0x4D5, 0x263, 0x007, 0x0BF,
-    0x4D2, 0x267, 0x008, 0x0BC, 0x4D0, 0x26C, 0x008, 0x0BA, 0x4CD, 0x271, 0x008, 0x0B7, 0x4CB,
-    0x276, 0x009, 0x0B4, 0x4C8, 0x27B, 0x009, 0x0B2, 0x4C5, 0x280, 0x009, 0x0AF, 0x4C3, 0x284,
-    0x00A, 0x0AD, 0x4C0, 0x289, 0x00A, 0x0AB, 0x4BD, 0x28E, 0x00A, 0x0A8, 0x4BA, 0x293, 0x00B,
-    0x0A6, 0x4B7, 0x298, 0x00B, 0x0A3, 0x4B5, 0x29D, 0x00B, 0x0A1, 0x4B2, 0x2A2, 0x00C, 0x09F,
-    0x4AF, 0x2A6, 0x00C, 0x09C, 0x4AC, 0x2AB, 0x00D, 0x09A, 0x4A9, 0x2B0, 0x00D, 0x098, 0x4A6,
-    0x2B5, 0x00E, 0x096, 0x4A2, 0x2BA, 0x00E, 0x093, 0x49F, 0x2BF, 0x00F, 0x091, 0x49C, 0x2C4,
-    0x00F, 0x08F, 0x499, 0x2C9, 0x00F, 0x08D, 0x496, 0x2CE, 0x010, 0x08B, 0x492, 0x2D3, 0x010,
-    0x089, 0x48F, 0x2D8, 0x011, 0x086, 0x48C, 0x2DC, 0x011, 0x084, 0x488, 0x2E1, 0x012, 0x082,
-    0x485, 0x2E6, 0x013, 0x080, 0x481, 0x2EB, 0x013, 0x07E, 0x47E, 0x2F0, 0x014, 0x07C, 0x47A,
-    0x2F5, 0x014, 0x07A, 0x477, 0x2FA, 0x015, 0x078, 0x473, 0x2FF, 0x015, 0x076, 0x470, 0x304,
-    0x016, 0x075, 0x46C, 0x309, 0x017, 0x073, 0x468, 0x30E, 0x017, 0x071, 0x465, 0x313, 0x018,
-    0x06F, 0x461, 0x318, 0x018, 0x06D, 0x45D, 0x31D, 0x019, 0x06B, 0x459, 0x322, 0x01A, 0x06A,
-    0x455, 0x326, 0x01B, 0x068, 0x452, 0x32B, 0x01B, 0x066, 0x44E, 0x330, 0x01C, 0x064, 0x44A,
-    0x335, 0x01D, 0x063, 0x446, 0x33A, 0x01D, 0x061, 0x442, 0x33F, 0x01E, 0x05F, 0x43E, 0x344,
-    0x01F, 0x05E, 0x43A, 0x349, 0x020, 0x05C, 0x436, 0x34E, 0x020, 0x05A, 0x432, 0x353, 0x021,
-    0x059, 0x42E, 0x357, 0x022, 0x057, 0x42A, 0x35C, 0x023, 0x056, 0x425, 0x361, 0x024, 0x054,
-    0x421, 0x366, 0x024, 0x053, 0x41D, 0x36B, 0x025, 0x051, 0x419, 0x370, 0x026, 0x050, 0x415,
-    0x374, 0x027, 0x04E, 0x410, 0x379, 0x028, 0x04D, 0x40C, 0x37E, 0x029, 0x04C, 0x408, 0x383,
-    0x02A, 0x04A, 0x403, 0x388, 0x02B, 0x049, 0x3FF, 0x38C, 0x02C, 0x047, 0x3FB, 0x391, 0x02D,
-    0x046, 0x3F6, 0x396, 0x02E, 0x045, 0x3F2, 0x39B, 0x02F, 0x043, 0x3ED, 0x39F, 0x030, 0x042,
-    0x3E9, 0x3A4, 0x031, 0x041, 0x3E5, 0x3A9, 0x032, 0x040, 0x3E0, 0x3AD, 0x033, 0x03E, 0x3DC,
-    0x3B2, 0x034, 0x03D, 0x3D7, 0x3B7, 0x035, 0x03C, 0x3D2, 0x3BB, 0x036, 0x03B, 0x3CE, 0x3C0,
-    0x037, 0x03A, 0x3C9, 0x3C5, 0x038, 0x038, 0x3C5, 0x3C9, 0x03A, 0x037, 0x3C0, 0x3CE, 0x03B,
-    0x036, 0x3BB, 0x3D2, 0x03C, 0x035, 0x3B7, 0x3D7, 0x03D, 0x034, 0x3B2, 0x3DC, 0x03E, 0x033,
-    0x3AD, 0x3E0, 0x040, 0x032, 0x3A9, 0x3E5, 0x041, 0x031, 0x3A4, 0x3E9, 0x042, 0x030, 0x39F,
-    0x3ED, 0x043, 0x02F, 0x39B, 0x3F2, 0x045, 0x02E, 0x396, 0x3F6, 0x046, 0x02D, 0x391, 0x3FB,
-    0x047, 0x02C, 0x38C, 0x3FF, 0x049, 0x02B, 0x388, 0x403, 0x04A, 0x02A, 0x383, 0x408, 0x04C,
-    0x029, 0x37E, 0x40C, 0x04D, 0x028, 0x379, 0x410, 0x04E, 0x027, 0x374, 0x415, 0x050, 0x026,
-    0x370, 0x419, 0x051, 0x025, 0x36B, 0x41D, 0x053, 0x024, 0x366, 0x421, 0x054, 0x024, 0x361,
-    0x425, 0x056, 0x023, 0x35C, 0x42A, 0x057, 0x022, 0x357, 0x42E, 0x059, 0x021, 0x353, 0x432,
-    0x05A, 0x020, 0x34E, 0x436, 0x05C, 0x020, 0x349, 0x43A, 0x05E, 0x01F, 0x344, 0x43E, 0x05F,
-    0x01E, 0x33F, 0x442, 0x061, 0x01D, 0x33A, 0x446, 0x063, 0x01D, 0x335, 0x44A, 0x064, 0x01C,
-    0x330, 0x44E, 0x066, 0x01B, 0x32B, 0x452, 0x068, 0x01B, 0x326, 0x455, 0x06A, 0x01A, 0x322,
-    0x459, 0x06B, 0x019, 0x31D, 0x45D, 0x06D, 0x018, 0x318, 0x461, 0x06F, 0x018, 0x313, 0x465,
-    0x071, 0x017, 0x30E, 0x468, 0x073, 0x017, 0x309, 0x46C, 0x075, 0x016, 0x304, 0x470, 0x076,
-    0x015, 0x2FF, 0x473, 0x078, 0x015, 0x2FA, 0x477, 0x07A, 0x014, 0x2F5, 0x47A, 0x07C, 0x014,
-    0x2F0, 0x47E, 0x07E, 0x013, 0x2EB, 0x481, 0x080, 0x013, 0x2E6, 0x485, 0x082, 0x012, 0x2E1,
-    0x488, 0x084, 0x011, 0x2DC, 0x48C, 0x086, 0x011, 0x2D8, 0x48F, 0x089, 0x010, 0x2D3, 0x492,
-    0x08B, 0x010, 0x2CE, 0x496, 0x08D, 0x00F, 0x2C9, 0x499, 0x08F, 0x00F, 0x2C4, 0x49C, 0x091,
-    0x00F, 0x2BF, 0x49F, 0x093, 0x00E, 0x2BA, 0x4A2, 0x096, 0x00E, 0x2B5, 0x4A6, 0x098, 0x00D,
-    0x2B0, 0x4A9, 0x09A, 0x00D, 0x2AB, 0x4AC, 0x09C, 0x00C, 0x2A6, 0x4AF, 0x09F, 0x00C, 0x2A2,
-    0x4B2, 0x0A1, 0x00B, 0x29D, 0x4B5, 0x0A3, 0x00B, 0x298, 0x4B7, 0x0A6, 0x00B, 0x293, 0x4BA,
-    0x0A8, 0x00A, 0x28E, 0x4BD, 0x0AB, 0x00A, 0x289, 0x4C0, 0x0AD, 0x00A, 0x284, 0x4C3, 0x0AF,
-    0x009, 0x280, 0x4C5, 0x0B2, 0x009, 0x27B, 0x4C8, 0x0B4, 0x009, 0x276, 0x4CB, 0x0B7, 0x008,
-    0x271, 0x4CD, 0x0BA, 0x008, 0x26C, 0x4D0, 0x0BC, 0x008, 0x267, 0x4D2, 0x0BF, 0x007, 0x263,
-    0x4D5, 0x0C1, 0x007, 0x25E, 0x4D7, 0x0C4, 0x007, 0x259, 0x4D9, 0x0C7, 0x006, 0x254, 0x4DC,
-    0x0C9, 0x006, 0x250, 0x4DE, 0x0CC, 0x006, 0x24B, 0x4E0, 0x0CF, 0x006, 0x246, 0x4E3, 0x0D2,
-    0x005, 0x241, 0x4E5, 0x0D4, 0x005, 0x23D, 0x4E7, 0x0D7, 0x005, 0x238, 0x4E9, 0x0DA, 0x005,
-    0x233, 0x4EB, 0x0DD, 0x004, 0x22F, 0x4ED, 0x0E0, 0x004, 0x22A, 0x4EF, 0x0E3, 0x004, 0x226,
-    0x4F1, 0x0E6, 0x004, 0x221, 0x4F3, 0x0E9, 0x004, 0x21C, 0x4F5, 0x0EC, 0x003, 0x218, 0x4F6,
-    0x0EF, 0x003, 0x213, 0x4F8, 0x0F2, 0x003, 0x20F, 0x4FA, 0x0F5, 0x003, 0x20A, 0x4FB, 0x0F8,
-    0x003, 0x205, 0x4FD, 0x0FB, 0x002, 0x201, 0x4FF, 0x0FE, 0x002, 0x1FC, 0x500, 0x101, 0x002,
-    0x1F8, 0x502, 0x104, 0x002, 0x1F3, 0x503, 0x107, 0x002, 0x1EF, 0x504, 0x10B, 0x002, 0x1EB,
-    0x506, 0x10E, 0x002, 0x1E6, 0x507, 0x111, 0x001, 0x1E2, 0x508, 0x114, 0x001, 0x1DD, 0x50A,
-    0x118, 0x001, 0x1D9, 0x50B, 0x11B, 0x001, 0x1D5, 0x50C, 0x11E, 0x001, 0x1D0, 0x50D, 0x122,
-    0x001, 0x1CC, 0x50E, 0x125, 0x001, 0x1C8, 0x50F, 0x129, 0x001, 0x1C3, 0x510, 0x12C, 0x001,
-    0x1BF, 0x511, 0x130, 0x001, 0x1BB, 0x511, 0x133, 0x001, 0x1B7, 0x512, 0x137, 0x000, 0x1B2,
-    0x513, 0x13A, 0x000, 0x1AE, 0x514, 0x13E, 0x000, 0x1AA, 0x514, 0x141, 0x000, 0x1A6, 0x515,
-    0x145, 0x000, 0x1A2, 0x516, 0x148, 0x000, 0x19E, 0x516, 0x14C, 0x000, 0x19A, 0x517, 0x150,
-    0x000, 0x195, 0x517, 0x153, 0x000, 0x191, 0x517, 0x157, 0x000, 0x18D, 0x518, 0x15B, 0x000,
-    0x189, 0x518, 0x15F, 0x000, 0x185, 0x518, 0x162, 0x000, 0x181, 0x518, 0x166, 0x000, 0x17D,
-    0x518, 0x16A, 0x000, 0x17A, 0x519, 0x16E, 0x000, 0x176, 0x519, 0x172,
+/// 512-entry PSX hardware Gaussian interpolation coefficient table
+/// (the nocash PSX-SPX table). Byte-identical to the tables shipped by
+/// PSX-SPX (``) and PSX-SPX
+/// (``); the first 16 entries are -1 and the
+/// peak coefficient is `GAUSS_TABLE[0x1FF] == 0x59B3`. Indexed in a
+/// butterfly by the 8-bit interpolation phase `i = (frac >> 8) & 0xFF`
+/// via taps `T[0xFF-i], T[0x1FF-i], T[0x100+i], T[i]`; each product
+/// with an i16 sample is accumulated in i32 and the sum is shifted
+/// right by 15. Per-phase 4-tap sum is ~0x7F80 (the real SPU's
+/// deliberate ~0.4% gain droop), so unity-DC output is ~32639, not
+/// full scale. The previous build shipped the legacy PEOPS/old-PCSX
+/// 11-bit table (peak 0x519, `>> 11`, `& !2047`), a different curve.
+const GAUSS_TABLE: [i32; 0x200] = [
+    -0x001, -0x001, -0x001, -0x001, -0x001, -0x001, -0x001, -0x001,
+    -0x001, -0x001, -0x001, -0x001, -0x001, -0x001, -0x001, -0x001,
+    0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0001,
+    0x0001, 0x0001, 0x0001, 0x0002, 0x0002, 0x0002, 0x0003, 0x0003,
+    0x0003, 0x0004, 0x0004, 0x0005, 0x0005, 0x0006, 0x0007, 0x0007,
+    0x0008, 0x0009, 0x0009, 0x000A, 0x000B, 0x000C, 0x000D, 0x000E,
+    0x000F, 0x0010, 0x0011, 0x0012, 0x0013, 0x0015, 0x0016, 0x0018,
+    0x0019, 0x001B, 0x001C, 0x001E, 0x0020, 0x0021, 0x0023, 0x0025,
+    0x0027, 0x0029, 0x002C, 0x002E, 0x0030, 0x0033, 0x0035, 0x0038,
+    0x003A, 0x003D, 0x0040, 0x0043, 0x0046, 0x0049, 0x004D, 0x0050,
+    0x0054, 0x0057, 0x005B, 0x005F, 0x0063, 0x0067, 0x006B, 0x006F,
+    0x0074, 0x0078, 0x007D, 0x0082, 0x0087, 0x008C, 0x0091, 0x0096,
+    0x009C, 0x00A1, 0x00A7, 0x00AD, 0x00B3, 0x00BA, 0x00C0, 0x00C7,
+    0x00CD, 0x00D4, 0x00DB, 0x00E3, 0x00EA, 0x00F2, 0x00FA, 0x0101,
+    0x010A, 0x0112, 0x011B, 0x0123, 0x012C, 0x0135, 0x013F, 0x0148,
+    0x0152, 0x015C, 0x0166, 0x0171, 0x017B, 0x0186, 0x0191, 0x019C,
+    0x01A8, 0x01B4, 0x01C0, 0x01CC, 0x01D9, 0x01E5, 0x01F2, 0x0200,
+    0x020D, 0x021B, 0x0229, 0x0237, 0x0246, 0x0255, 0x0264, 0x0273,
+    0x0283, 0x0293, 0x02A3, 0x02B4, 0x02C4, 0x02D6, 0x02E7, 0x02F9,
+    0x030B, 0x031D, 0x0330, 0x0343, 0x0356, 0x036A, 0x037E, 0x0392,
+    0x03A7, 0x03BC, 0x03D1, 0x03E7, 0x03FC, 0x0413, 0x042A, 0x0441,
+    0x0458, 0x0470, 0x0488, 0x04A0, 0x04B9, 0x04D2, 0x04EC, 0x0506,
+    0x0520, 0x053B, 0x0556, 0x0572, 0x058E, 0x05AA, 0x05C7, 0x05E4,
+    0x0601, 0x061F, 0x063E, 0x065C, 0x067C, 0x069B, 0x06BB, 0x06DC,
+    0x06FD, 0x071E, 0x0740, 0x0762, 0x0784, 0x07A7, 0x07CB, 0x07EF,
+    0x0813, 0x0838, 0x085D, 0x0883, 0x08A9, 0x08D0, 0x08F7, 0x091E,
+    0x0946, 0x096F, 0x0998, 0x09C1, 0x09EB, 0x0A16, 0x0A40, 0x0A6C,
+    0x0A98, 0x0AC4, 0x0AF1, 0x0B1E, 0x0B4C, 0x0B7A, 0x0BA9, 0x0BD8,
+    0x0C07, 0x0C38, 0x0C68, 0x0C99, 0x0CCB, 0x0CFD, 0x0D30, 0x0D63,
+    0x0D97, 0x0DCB, 0x0E00, 0x0E35, 0x0E6B, 0x0EA1, 0x0ED7, 0x0F0F,
+    0x0F46, 0x0F7F, 0x0FB7, 0x0FF1, 0x102A, 0x1065, 0x109F, 0x10DB,
+    0x1116, 0x1153, 0x118F, 0x11CD, 0x120B, 0x1249, 0x1288, 0x12C7,
+    0x1307, 0x1347, 0x1388, 0x13C9, 0x140B, 0x144D, 0x1490, 0x14D4,
+    0x1517, 0x155C, 0x15A0, 0x15E6, 0x162C, 0x1672, 0x16B9, 0x1700,
+    0x1747, 0x1790, 0x17D8, 0x1821, 0x186B, 0x18B5, 0x1900, 0x194B,
+    0x1996, 0x19E2, 0x1A2E, 0x1A7B, 0x1AC8, 0x1B16, 0x1B64, 0x1BB3,
+    0x1C02, 0x1C51, 0x1CA1, 0x1CF1, 0x1D42, 0x1D93, 0x1DE5, 0x1E37,
+    0x1E89, 0x1EDC, 0x1F2F, 0x1F82, 0x1FD6, 0x202A, 0x207F, 0x20D4,
+    0x2129, 0x217F, 0x21D5, 0x222C, 0x2282, 0x22DA, 0x2331, 0x2389,
+    0x23E1, 0x2439, 0x2492, 0x24EB, 0x2545, 0x259E, 0x25F8, 0x2653,
+    0x26AD, 0x2708, 0x2763, 0x27BE, 0x281A, 0x2876, 0x28D2, 0x292E,
+    0x298B, 0x29E7, 0x2A44, 0x2AA1, 0x2AFF, 0x2B5C, 0x2BBA, 0x2C18,
+    0x2C76, 0x2CD4, 0x2D33, 0x2D91, 0x2DF0, 0x2E4F, 0x2EAE, 0x2F0D,
+    0x2F6C, 0x2FCC, 0x302B, 0x308B, 0x30EA, 0x314A, 0x31AA, 0x3209,
+    0x3269, 0x32C9, 0x3329, 0x3389, 0x33E9, 0x3449, 0x34A9, 0x3509,
+    0x3569, 0x35C9, 0x3629, 0x3689, 0x36E8, 0x3748, 0x37A8, 0x3807,
+    0x3867, 0x38C6, 0x3926, 0x3985, 0x39E4, 0x3A43, 0x3AA2, 0x3B00,
+    0x3B5F, 0x3BBD, 0x3C1B, 0x3C79, 0x3CD7, 0x3D35, 0x3D92, 0x3DEF,
+    0x3E4C, 0x3EA9, 0x3F05, 0x3F62, 0x3FBD, 0x4019, 0x4074, 0x40D0,
+    0x412A, 0x4185, 0x41DF, 0x4239, 0x4292, 0x42EB, 0x4344, 0x439C,
+    0x43F4, 0x444C, 0x44A3, 0x44FA, 0x4550, 0x45A6, 0x45FC, 0x4651,
+    0x46A6, 0x46FA, 0x474E, 0x47A1, 0x47F4, 0x4846, 0x4898, 0x48E9,
+    0x493A, 0x498A, 0x49D9, 0x4A29, 0x4A77, 0x4AC5, 0x4B13, 0x4B5F,
+    0x4BAC, 0x4BF7, 0x4C42, 0x4C8D, 0x4CD7, 0x4D20, 0x4D68, 0x4DB0,
+    0x4DF7, 0x4E3E, 0x4E84, 0x4EC9, 0x4F0E, 0x4F52, 0x4F95, 0x4FD7,
+    0x5019, 0x505A, 0x509A, 0x50DA, 0x5118, 0x5156, 0x5194, 0x51D0,
+    0x520C, 0x5247, 0x5281, 0x52BA, 0x52F3, 0x532A, 0x5361, 0x5397,
+    0x53CC, 0x5401, 0x5434, 0x5467, 0x5499, 0x54CA, 0x54FA, 0x5529,
+    0x5558, 0x5585, 0x55B2, 0x55DE, 0x5609, 0x5632, 0x565B, 0x5684,
+    0x56AB, 0x56D1, 0x56F6, 0x571B, 0x573E, 0x5761, 0x5782, 0x57A3,
+    0x57C3, 0x57E2, 0x57FF, 0x581C, 0x5838, 0x5853, 0x586D, 0x5886,
+    0x589E, 0x58B5, 0x58CB, 0x58E0, 0x58F4, 0x5907, 0x5919, 0x592A,
+    0x593A, 0x5949, 0x5958, 0x5965, 0x5971, 0x597C, 0x5986, 0x598F,
+    0x5997, 0x599E, 0x59A4, 0x59A9, 0x59AD, 0x59B0, 0x59B2, 0x59B3,
 ];
 
-/// Sample four points through the Gaussian coefficient table at the
-/// current fractional position. `samples` is the Redux-style rolling
-/// ring window `[oldest, ..., newest]`; `frac` is the 16.16 fixed
-/// point cursor remainder (nominally `0..0xFFFF`).
+/// Sample four points through the hardware Gaussian table at the
+/// current fractional position, matching PSX-SPX `Voice::interpolate`
+/// (-614) and PSX-SPX `Interpolate` (-2040).
+/// `samples` is the rolling ring window `[oldest, older, newer, newest]`
+/// (== PSX-SPX `s[-3..=0]`); `frac` is the 16.16 fixed-point cursor
+/// remainder (nominally `0..0xFFFF`).
 ///
-/// Returns the interpolated sample. Masking with `!2047` before
-/// summing matches the 11-bit hardware accumulator precision.
+/// The 8-bit phase `i = (frac >> 8) & 0xFF` is exactly PSoXide's prior
+/// phase selector: `((frac >> 6) & !3) >> 2 == (frac >> 8) & 0xFF` for
+/// every `frac` (verified across all 0x10000 values), so the 16x
+/// fixed-point scale is unchanged -- only the table and the
+/// butterfly/`>> 15` arithmetic differ. The `& 0xFF` also bounds every
+/// table access to 0..=0x1FF, keeping out-of-range `frac` panic-free.
 fn gauss_interpolate(samples: [i16; 4], frac: u32) -> i16 {
-    // Redux: `vl = (spos >> 6) & ~3`, where `spos` is a 16.16
-    // fixed-point cursor kept below `0x10000` before interpolation.
-    // Clamp defensively in case a caller hands us a larger value.
-    let vl_raw = ((frac >> 6) & !3) as usize;
-    let vl = vl_raw.min(1020);
-    let a = (GAUSS_TABLE[vl] * samples[0] as i32) & !2047;
-    let b = (GAUSS_TABLE[vl + 1] * samples[1] as i32) & !2047;
-    let c = (GAUSS_TABLE[vl + 2] * samples[2] as i32) & !2047;
-    let d = (GAUSS_TABLE[vl + 3] * samples[3] as i32) & !2047;
-    let total = a + b + c + d;
-    saturate_i16(total >> 11)
+    let i = ((frac >> 8) & 0xFF) as usize;
+    let mut out = GAUSS_TABLE[0xFF - i] * samples[0] as i32;
+    out += GAUSS_TABLE[0x1FF - i] * samples[1] as i32;
+    out += GAUSS_TABLE[0x100 + i] * samples[2] as i32;
+    out += GAUSS_TABLE[i] * samples[3] as i32;
+    saturate_i16(out >> 15)
 }
 
 // ===============================================================
