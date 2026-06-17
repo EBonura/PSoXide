@@ -31,18 +31,80 @@ For *joint-attached, animated* volumes the cost ranking on PS1 is
 
 So capsules are both cheaper than cubes here *and* fit limbs better.
 
+## Shared humanoid rig: one template for every character
+
+Every model rides the same Mixamo humanoid skeleton (same joint count, names,
+order). So hurt volumes are **not authored per model** -- there is one shared
+**humanoid hurt template** keyed by canonical joint, reused by the player and
+every enemy. This is where most of the code sharing lives:
+
+- **One placement routine** `place(joint_world, capsule)` -- character-agnostic.
+- **One test** -- character-agnostic.
+- **One template** -- the body layout below, derived from the rig.
+
+The template can be **auto-derived from the bones**: for a bone from joint `J`
+to its child `C`, the default capsule is `A = J origin (0)`, `B = C's
+joint-local offset`, `radius = per-region default`. Bone lengths come straight
+from the skeleton, so the same template fits any rig-compatible model with zero
+authoring. Per-model override is just a radius scale (a hulking enemy scales it
+up; the slim Mantis down), with optional per-region tweaks.
+
+### 1) Player hurt template (shared body capsules)
+
+Canonical humanoid layout (~10-12 capsules), each on the named joint, segment
+running down the bone to its child:
+
+| Region        | Joint            | Segment              | Shape   |
+| ---           | ---              | ---                  | ---     |
+| Head          | Head             | sphere (`a==b`)      | sphere  |
+| Torso         | Spine1           | Hips .. Neck         | capsule |
+| Upper arm L/R | Left/RightArm    | Arm .. ForeArm       | capsule |
+| Forearm L/R   | Left/RightForeArm| ForeArm .. Hand      | capsule |
+| Thigh L/R     | Left/RightUpLeg  | UpLeg .. Leg         | capsule |
+| Shin L/R      | Left/RightLeg    | Leg .. Foot          | capsule |
+
+Groups (for damage multipliers / reactions): `Head`, `Torso`, `Limb`. The
+player is a humanoid character, so the player hurt set **is** this template --
+no special-casing. (Open question still stands on whether the player reuses the
+movement cylinder instead; default plan: player uses the template like everyone
+else, for parity and shared code.)
+
+### 2) Weapon attack capsule(s)
+
+The attack volume is the **same capsule primitive**, just flagged attack-role
+and active only on an attack's active frames:
+
+- **Armed**: authored on the weapon model (the blade volume, in weapon-local
+  space). The weapon attaches at a hand socket, so it is placed by that
+  socket's joint world transform -- the same `place()` routine.
+- **Unarmed / claws**: an attack capsule on the hand/forearm joint of the
+  shared rig (reuse a template slot, flagged attack instead of hurt).
+
+So a "hitbox" is one type with a role flag (`Hurt` | `Attack`) and timing; the
+geometry, placement, and test are identical for player hurt, enemy hurt, and
+weapon attack. Query = active attack capsules x enabled hurt capsules.
+
 ## Representation
 
+One primitive for hurt and attack, distinguished by `role` + timing:
+
 ```
-HurtCapsule {
+Capsule {
     joint: u16,         // joint index in the cooked .psxmdl skeleton
     a: [i16; 3],        // segment endpoint A, joint-local units (like a vertex)
-    b: [i16; 3],        // segment endpoint B, joint-local
+    b: [i16; 3],        // segment endpoint B, joint-local (a==b -> sphere)
     radius: u16,        // local units
-    group: u8,          // bitmask: which layer (head/torso/limb/weapon...)
-    flags: u8,          // enabled, attack-vs-hurt, damage-multiplier index...
+    role: u8,           // Hurt | Attack
+    group: u8,          // Head / Torso / Limb / Weapon (multipliers, reactions)
+    flags: u8,          // enabled, ...
 }
 ```
+
+The **body hurt capsules come from the shared humanoid template** (above), not
+from each model's bundle -- they are derived/shared. A model bundle only
+carries its **overrides** (radius scale) and any **non-template capsules**
+(a weapon's attack blade, an extra spike). So the per-model cooked data stays
+tiny.
 
 Endpoints live in **joint-local space** exactly like a cooked vertex, so they
 inherit the same model-local quantization and `local_to_world_q12` scale -- no
@@ -142,9 +204,12 @@ with the animation, including a "show on attack frames" toggle.
 
 ## Phases
 
-1. **Format + author + draw.** `HurtCapsule` in `ModelResource`, cooked
-   `CapsuleRecord` table, editor authoring + overlay in the animation viewer.
-   No queries yet -- just see capsules ride the bones.
+1. **Shared template + player hurt + weapon attack, drawn.** Auto-derive the
+   humanoid hurt template from the rig (the table above), place it on the
+   player via `JointWorldTransform`, define the weapon attack capsule on the
+   weapon (placed via its hand socket), and draw both as overlays in the
+   animation viewer / preview. No queries yet -- just see player-hurt and
+   weapon-attack capsules ride the bones. Per-model override = radius scale.
 2. **Geometry core.** Fixed-point point/segment + segment/segment tests +
    broad-phase sphere reject, in a small `psx-*` crate with unit tests
    (overflow cases first).
