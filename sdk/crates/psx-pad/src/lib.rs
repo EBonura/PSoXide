@@ -266,11 +266,52 @@ pub fn enable_analog_port2() -> bool {
     enable_analog(true)
 }
 
+/// Poll a port, retrying a garbled response.
+///
+/// On real hardware a poll occasionally desyncs -- a stale byte lingering in
+/// the RX FIFO from the previous transaction, or a slipped /ACK between bytes --
+/// and the ID handshake comes back wrong. A single such frame reads as "every
+/// button released", which makes a *held* button (jump, Start) look like a fresh
+/// press the next frame. So: when a controller answered but the DualShock ID
+/// handshake didn't validate, retry a few times and take the first clean read.
+/// A genuinely empty port returns immediately (no wasted retries).
 fn poll_state(port2: bool) -> PadState {
+    let mut last = PadState::NONE;
+    let mut tries = 0;
+    while tries < 4 {
+        let s = unsafe { poll_once(port2) };
+        if !s.is_connected() {
+            return s; // nothing attached -- not a glitch, don't retry
+        }
+        if s.mode != PadMode::Unknown {
+            return s; // valid digital/analog response
+        }
+        last = s; // answered but ID garbled -- retry
+        tries += 1;
+    }
+    last
+}
+
+/// Drain up to a few stale bytes from the RX FIFO so the poll's first read
+/// lines up with the controller's first response byte. Bounded so a stuck
+/// "RX not empty" flag can never spin forever.
+#[inline]
+unsafe fn drain_rx() {
+    let mut n = 0;
+    unsafe {
+        while psx_io::read32(sio::STAT) & 0x2 != 0 && n < 16 {
+            let _ = psx_io::read8(sio::DATA);
+            n += 1;
+        }
+    }
+}
+
+unsafe fn poll_once(port2: bool) -> PadState {
     unsafe {
         // Reset port state: raise JOYN then drop it, so the attached
         // device's state machine starts from idle.
         select(port2);
+        drain_rx();
 
         let _select = exchange(0x01);
         let id_lo = exchange(0x42);
