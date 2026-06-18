@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! PNG/JPG → PSXT texture converter.
 //!
 //! Runs the standard PSX-era texture-cook pipeline:

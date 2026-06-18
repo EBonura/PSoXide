@@ -1,0 +1,69 @@
+name: CI
+
+# Host-side CI for PSoXide.
+#
+# Reliability split:
+#   - deps (gating): dependency license + source policy via cargo-deny.
+#     Verified green locally; it does not depend on toolchain formatting or
+#     lint drift, so it is a stable gate.
+#   - build-test (advisory): formatting, build, tests, and lint. The repo
+#     pins a FLOATING `nightly` channel (rust-toolchain.toml: channel =
+#     "nightly"), so rustfmt and clippy output are not reproducible across
+#     nightly releases: `cargo fmt --check` and `clippy -D warnings` drift on
+#     a fresh runner with no source change. This job runs them for visibility
+#     but is marked continue-on-error so known nightly drift does not block
+#     merges. Run them locally with `make fmt`, `make check`, `make test`,
+#     `make lint`. To make this job gating, pin a dated nightly first.
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  deps:
+    name: Dependency policy (gating)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned toolchain (from rust-toolchain.toml)
+        run: rustup show
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      - name: cargo-deny (licenses + sources, all workspaces)
+        run: |
+          root="$(git rev-parse --show-toplevel)"
+          for ws in . sdk engine; do
+            (cd "$ws" && cargo deny --manifest-path Cargo.toml check licenses sources --config "$root/deny.toml")
+          done
+
+  build-test:
+    name: Build, test, lint (advisory; see workflow notes)
+    runs-on: ubuntu-latest
+    # Advisory because the repo pins a floating `nightly`: rustfmt/clippy
+    # output is not reproducible across nightlies. Do not gate on this until
+    # a dated nightly is pinned.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned toolchain (from rust-toolchain.toml)
+        run: rustup show
+      - name: Install Linux native deps for the desktop frontend
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential make pkg-config \
+            libasound2-dev libudev-dev libx11-dev libxi-dev libxrandr-dev \
+            libxinerama-dev libxcursor-dev libxkbcommon-dev libwayland-dev \
+            mesa-vulkan-drivers
+      - name: cargo fmt --check (advisory; floating-nightly drift expected)
+        run: |
+          cargo fmt --all -- --check
+          (cd engine && cargo fmt --all -- --check)
+          (cd sdk && cargo fmt --all -- --check)
+      - name: make check
+        run: make check
+      - name: make test
+        run: make test
+      - name: make lint
+        run: make lint

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! Runtime parsers for PSoXide cooked-asset blobs.
 //!
 //! Pairs with `editor/crates/psxed`, the host-side tool that

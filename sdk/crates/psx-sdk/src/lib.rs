@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! PSoXide SDK -- umbrella crate.
 //!
 //! Re-exports the per-subsystem crates so homebrew doesn't have to
