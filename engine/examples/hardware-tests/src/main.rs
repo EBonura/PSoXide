@@ -4021,7 +4021,13 @@ fn spu_dma_read(addr: u32, out: &mut [u32]) {
         dma::set_bcr_block(dma::Channel::Spu, block_size as u16, block_count as u16);
         // from-device (no CHCR_TO_DEVICE), block-sync, start.
         dma::set_chcr(dma::Channel::Spu, dma::CHCR_SYNC_BLOCK | dma::CHCR_START);
-        while dma::is_busy(dma::Channel::Spu) {}
+        // Bounded wait: never spin forever on silicon -- if SPU->RAM DMA
+        // stalls the test fails gracefully (zeroed read-back) instead of
+        // hanging the whole suite at a black screen.
+        let mut guard = 0u32;
+        while dma::is_busy(dma::Channel::Spu) && guard < 1_000_000 {
+            guard += 1;
+        }
         psx_io::write16(SPUCNT, spucnt); // back to Stop
     }
 }
