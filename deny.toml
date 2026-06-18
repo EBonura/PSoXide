@@ -9,8 +9,10 @@
 # Or to check everything:
 #   cargo deny check
 #
-# This config focuses on the licenses check (the relevant one for the
-# release audit). Advisories / bans / sources checks are left at defaults.
+# The licenses check is the primary one for the release audit. The sources
+# check is hardened to deny (crates.io only; no git or alternate-registry
+# deps, verified across every workspace Cargo.lock). Advisories and bans are
+# left at warn on purpose; see their sections below.
 
 [graph]
 all-features = true
@@ -69,11 +71,22 @@ unused-allowed-license = "allow"
 exceptions = []
 
 [bans]
+# Left at warn: duplicate transitive versions are common and largely
+# unavoidable in a tree this size; denying them would fail CI without a real
+# licensing or supply-chain benefit.
 multiple-versions = "warn"
 
 [advisories]
+# Left at warn deliberately. A crate being yanked upstream should not break an
+# unrelated change's CI, and the RUSTSEC vulnerability check needs network to
+# fetch the advisory DB and can fail on newly published advisories with no code
+# change here. Run `cargo deny check advisories` periodically instead of as a
+# per-PR gate.
 yanked = "warn"
 
 [sources]
-unknown-registry = "warn"
-unknown-git = "warn"
+# Hardened to deny: the dependency tree resolves entirely from crates.io, with
+# no git or alternate-registry sources (verified across all workspace
+# Cargo.lock files). Denying unknown sources keeps it that way.
+unknown-registry = "deny"
+unknown-git = "deny"

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! Wavefront OBJ → PSXM mesh converter.
 //!
 //! Parses `.obj` ASCII meshes, optionally decimates via vertex

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! PSoXide emulator core.
 //!
 //! At this stage the core exposes just enough to load a BIOS, seat a

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! A generic, fixed-capacity slot cache for `no_std`/no-heap targets (PS1).
 //!
 //! This captures the shape shared by every residency pool in the engine (the

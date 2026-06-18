@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! Fixed-point math primitives for the PS1 SDK.
 //!
 //! The PS1 has no FPU. Games that want sine-driven animation,
