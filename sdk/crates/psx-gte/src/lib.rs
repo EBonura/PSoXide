@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! GTE (COP2) access -- PS1 Geometry Transformation Engine.
 //!
 //! The GTE isn't memory-mapped. It's MIPS coprocessor 2, accessed via

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! Volatile MMIO primitives.
 //!
 //! The lowest layer of the SDK. Wraps `core::ptr::read_volatile` /
