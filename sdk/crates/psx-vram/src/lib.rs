@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! Typed VRAM primitives.
 //!
 //! PS1 VRAM is a 1024×512 halfword frame, and getting a sprite

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! Arcade-style visual effects for PS1 homebrew.
 //!
 //! Extracted from the duplicated particle / shake / RNG pattern

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! Trace record format for parity testing.
 //!
 //! Both the emulator (Rust) and the PCSX-Redux oracle (via Lua exports)

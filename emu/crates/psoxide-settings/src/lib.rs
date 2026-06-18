@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! Persistence layer for PSoXide.
 //!
 //! Three kinds of data land on disk:
