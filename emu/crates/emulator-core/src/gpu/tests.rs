@@ -1196,10 +1196,14 @@ fn tri_textured_gouraud_struct_rasterizes_and_matches_quad() {
 // black where the CLUT had deliberately-zero entries at non-zero
 // indices to punch the letter cutouts.
 
+// `sample_texture` now reads the CLUT from the cache, which a textured prim
+// loads via `update_clut_if_needed(clut_word)`. clut_word -> address:
+// clut_x = (word & 0x3F) * 16, clut_y = (word >> 6) & 0x1FF. So word 0x10
+// -> x=0x100, word 0x20 -> x=0x200.
 #[test]
 fn sample_texture_4bpp_idx0_resolves_to_clut_entry() {
-    // CLUT entry at index 0 is non-zero → idx==0 is NOT transparent.
-    // Matches Redux: only the resolved colour's 0x0000 is skipped.
+    // CLUT entry at index 0 is non-zero → idx==0 is NOT transparent:
+    // only the resolved colour's 0x0000 is skipped.
     let mut gpu = Gpu::new();
     gpu.tex_depth = 0; // 4bpp
     gpu.tex_page_x = 0;
@@ -1208,10 +1212,11 @@ fn sample_texture_4bpp_idx0_resolves_to_clut_entry() {
     gpu.vram.set_pixel(0, 0, 0x0000);
     // CLUT row at (0x100, 0), entry 0 = red (0x001F).
     gpu.vram.set_pixel(0x100, 0, 0x001F);
+    gpu.update_clut_if_needed(0x10); // load the CLUT cache from (0x100, 0)
     // u=0..3 all sample idx=0 → all must resolve to CLUT[0] = 0x001F.
     for u in 0..4u16 {
         assert_eq!(
-            gpu.sample_texture(u, 0, 0x100, 0),
+            gpu.sample_texture(u, 0),
             Some(0x001F),
             "u={u}: CLUT[0]=0x001F should be opaque, not transparent",
         );
@@ -1227,19 +1232,16 @@ fn sample_texture_4bpp_nonzero_idx_with_zero_clut_is_transparent() {
     gpu.tex_depth = 0;
     gpu.tex_page_x = 0;
     gpu.tex_page_y = 0;
-    // Texture word at (0, 0): idx[0]=5, idx[1]=3, idx[2]=2, idx[3]=1.
-    // We want to hit idx=5 -- that means bits 0..3 should be 5.
-    // (word >> 0) & 0xF = 5. So word low nibble = 5.
+    // Texture word at (0, 0): low nibble = 5 → idx 5.
     gpu.vram.set_pixel(0, 0, 0x0005);
-    // CLUT at (0x200, 0): entry 5 is 0x0000 (punch-through).
-    // All others set to non-zero so we can be sure the transparency
-    // comes from CLUT[5]=0 and not from a wrong index.
+    // CLUT at (0x200, 0): entry 5 is 0x0000 (punch-through), others non-zero.
     for e in 0..16u16 {
         gpu.vram
             .set_pixel(0x200 + e, 0, if e == 5 { 0x0000 } else { 0x7FFF });
     }
+    gpu.update_clut_if_needed(0x20); // load the CLUT cache from (0x200, 0)
     assert_eq!(
-        gpu.sample_texture(0, 0, 0x200, 0),
+        gpu.sample_texture(0, 0),
         None,
         "CLUT[5]=0x0000 should be transparent even though idx=5, not 0",
     );
@@ -1256,23 +1258,63 @@ fn sample_texture_8bpp_zero_clut_is_transparent_regardless_of_idx() {
     gpu.vram.set_pixel(0, 0, 42);
     // CLUT[42] = 0x0000 → should be transparent.
     gpu.vram.set_pixel(0x100 + 42, 0, 0x0000);
-    assert_eq!(gpu.sample_texture(0, 0, 0x100, 0), None);
-    // Flip CLUT[42] to non-zero → must draw opaque.
+    gpu.update_clut_if_needed(0x10);
+    assert_eq!(gpu.sample_texture(0, 0), None);
+    // Flip CLUT[42] non-zero in VRAM. Same clut word -> the cache stays stale
+    // (faithful PS1 behaviour), so force a reload to read the new palette.
     gpu.vram.set_pixel(0x100 + 42, 0, 0x1234);
-    assert_eq!(gpu.sample_texture(0, 0, 0x100, 0), Some(0x1234));
+    gpu.clut_cache_reg = u32::MAX;
+    gpu.update_clut_if_needed(0x10);
+    assert_eq!(gpu.sample_texture(0, 0), Some(0x1234));
 }
 
 #[test]
 fn sample_texture_15bpp_zero_is_transparent() {
-    // Direct-colour mode: 0x0000 is transparent, anything else opaque.
+    // Direct-colour mode: 0x0000 is transparent, anything else opaque. No CLUT.
     let mut gpu = Gpu::new();
     gpu.tex_depth = 2; // 15bpp
     gpu.tex_page_x = 0;
     gpu.tex_page_y = 0;
     gpu.vram.set_pixel(0, 0, 0x0000);
-    assert_eq!(gpu.sample_texture(0, 0, 0, 0), None);
+    assert_eq!(gpu.sample_texture(0, 0), None);
     gpu.vram.set_pixel(1, 0, 0x1234);
-    assert_eq!(gpu.sample_texture(1, 0, 0, 0), Some(0x1234));
+    assert_eq!(gpu.sample_texture(1, 0), Some(0x1234));
+}
+
+#[test]
+fn clut_cache_serves_stale_palette_until_clut_word_changes() {
+    // PS1 GPU CLUT-cache fidelity: the cache reloads only when the CLUT word
+    // changes, NOT when the CLUT data in VRAM is overwritten. This reproduces
+    // the PICO-8 `pal()` recolour-via-reupload bug -- a sprite whose CLUT is
+    // re-uploaded to the SAME slot keeps sampling the old palette (Madeline's
+    // hair stuck on the previous colour) until the clut word actually changes.
+    let mut gpu = Gpu::new();
+    gpu.tex_depth = 0; // 4bpp
+    gpu.tex_page_x = 0;
+    gpu.tex_page_y = 0;
+    gpu.vram.set_pixel(0, 0, 0x0001); // texel -> CLUT idx 1
+    gpu.vram.set_pixel(0x100 + 1, 0, 0x001F); // CLUT v1: red
+    gpu.update_clut_if_needed(0x10);
+    assert_eq!(gpu.sample_texture(0, 0), Some(0x001F), "first draw loads v1");
+
+    // Re-upload the CLUT to the SAME slot (v2: blue), same clut word.
+    gpu.vram.set_pixel(0x100 + 1, 0, 0x7C00);
+    gpu.update_clut_if_needed(0x10); // same word -> NO reload
+    assert_eq!(
+        gpu.sample_texture(0, 0),
+        Some(0x001F),
+        "stale cache keeps v1 -- the bug, faithfully reproduced",
+    );
+
+    // The game-side fix: recolour into a DIFFERENT CLUT slot so the clut word
+    // changes, forcing the GPU to reload -> the new palette takes effect.
+    gpu.vram.set_pixel(0x110 + 1, 0, 0x7C00); // v2 at a second slot (x=0x110)
+    gpu.update_clut_if_needed(0x11); // word 0x11 -> x=0x110, reloads
+    assert_eq!(
+        gpu.sample_texture(0, 0),
+        Some(0x7C00),
+        "changing the clut word reloads the cache -> new palette",
+    );
 }
 
 #[test]
@@ -1297,12 +1339,12 @@ fn sample_texture_uv_wrap_at_256_per_psx_spx() {
     gpu.vram.set_pixel(0, 0, 0x1111); // tpage origin
     gpu.vram.set_pixel(256, 0, 0x2222); // outside the tpage
     assert_eq!(
-        gpu.sample_texture(256, 0, 0, 0),
+        gpu.sample_texture(256, 0),
         Some(0x1111),
         "u=256 should wrap to u=0 within the tpage"
     );
     assert_eq!(
-        gpu.sample_texture(257, 0, 0, 0),
+        gpu.sample_texture(257, 0),
         None,
         "u=257 should wrap to u=1 → vram(1,0)=0 → transparent"
     );
@@ -1310,12 +1352,12 @@ fn sample_texture_uv_wrap_at_256_per_psx_spx() {
     // v&0xFF=1 → vram(0,1) (a different row), confirms v wraps too.
     gpu.vram.set_pixel(0, 1, 0x3333);
     assert_eq!(
-        gpu.sample_texture(0, 256, 0, 0),
+        gpu.sample_texture(0, 256),
         Some(0x1111),
         "v=256 wraps to v=0"
     );
     assert_eq!(
-        gpu.sample_texture(0, 257, 0, 0),
+        gpu.sample_texture(0, 257),
         Some(0x3333),
         "v=257 wraps to v=1"
     );

@@ -269,6 +269,15 @@ pub struct Gpu {
     /// Texture colour depth: 0 = 4bpp (CLUT), 1 = 8bpp (CLUT),
     /// 2 = 15bpp (direct).
     tex_depth: u8,
+    /// The PS1 GPU caches the active CLUT and reloads it from VRAM only when
+    /// the CLUT *register* (the clut word in a textured primitive) changes --
+    /// NOT when the CLUT data in VRAM is overwritten. A game that recolours by
+    /// re-uploading the *same* CLUT (e.g. PICO-8 `pal()`) keeps sampling the
+    /// stale cache until the clut word actually changes. `clut_cache_reg` is
+    /// `u32::MAX` while invalid, forcing a reload on the next textured draw.
+    clut_cache: [u16; 256],
+    clut_cache_reg: u32,
+    clut_cache_8bit: bool,
     /// Semi-transparency mode from the current texpage (bits 5-6 of
     /// GP0 0xE1 or of a textured-primitive's tpage override). Kept
     /// as a [`BlendMode`] so primitives can plug it straight into
@@ -526,6 +535,9 @@ impl Gpu {
             tex_page_x: 0,
             tex_page_y: 0,
             tex_depth: 0,
+            clut_cache: [0; 256],
+            clut_cache_reg: u32::MAX,
+            clut_cache_8bit: false,
             tex_blend_mode: BlendMode::Average,
             tex_window_mask_x: 0,
             tex_window_mask_y: 0,
@@ -1087,6 +1099,9 @@ impl Gpu {
                 // Mask flags reset per PSX-SPX (GP1 0x00 clears both).
                 self.mask_set_on_draw = false;
                 self.mask_check_before_draw = false;
+                // GP1(00) drops the GPU's CLUT cache; force a reload on the
+                // next textured draw (PSX-SPX reset behaviour).
+                self.clut_cache_reg = u32::MAX;
                 self.status.raw &= !0x1800;
                 self.texture_window_raw = 0;
                 // GP1(00) is defined by the PSX-SPX spec as equivalent to
@@ -1719,8 +1734,7 @@ impl Gpu {
         if w <= 0 || h <= 0 {
             return;
         }
-        let clut_x = (clut_word & 0x3F) * 16;
-        let clut_y = (clut_word >> 6) & 0x1FF;
+        self.update_clut_if_needed(clut_word);
         let tpage_mode = self.tex_blend_mode;
 
         let left = x.max(self.draw_area_left as i32);
@@ -1743,7 +1757,7 @@ impl Gpu {
                 let v_off = if flip_y { last_row - dy } else { dy };
                 let tex_u = u0.wrapping_add(u_off);
                 let tex_v = v0.wrapping_add(v_off);
-                if let Some(texel) = self.sample_texture(tex_u, tex_v, clut_x, clut_y) {
+                if let Some(texel) = self.sample_texture(tex_u, tex_v) {
                     let shaded = modulate_tint(texel, tint.0, tint.1, tint.2);
                     let mode = if semi_trans && (texel & 0x8000) != 0 {
                         tpage_mode
@@ -1773,7 +1787,32 @@ impl Gpu {
     /// With the default (all zeroes) that's a no-op; games that use
     /// tiling set non-zero mask/offset to reuse a sub-rectangle of
     /// the tpage across multiple primitives.
-    fn sample_texture(&self, u: u16, v: u16, clut_x: u16, clut_y: u16) -> Option<u16> {
+    /// Reload the CLUT cache from VRAM when the CLUT register (the clut word
+    /// of a textured primitive) changes -- or when a 4bpp-loaded cache is
+    /// reused for an 8bpp draw. Crucially the cache is NOT reloaded when VRAM
+    /// is overwritten, so a game that re-uploads the same CLUT keeps sampling
+    /// the stale palette until the clut word changes. Call once per textured
+    /// primitive before sampling. 15bpp (direct) has no CLUT.
+    fn update_clut_if_needed(&mut self, clut_word: u16) {
+        if self.tex_depth >= 2 {
+            return;
+        }
+        let is_8bit = self.tex_depth == 1;
+        let reg = clut_word as u32;
+        if reg == self.clut_cache_reg && (!is_8bit || self.clut_cache_8bit) {
+            return; // cache still valid for this CLUT word
+        }
+        let clut_x = (clut_word & 0x3F) * 16;
+        let clut_y = (clut_word >> 6) & 0x1FF;
+        let n = if is_8bit { 256 } else { 16 };
+        for i in 0..n {
+            self.clut_cache[i] = self.vram.get_pixel(clut_x + i as u16, clut_y);
+        }
+        self.clut_cache_reg = reg;
+        self.clut_cache_8bit = is_8bit;
+    }
+
+    fn sample_texture(&self, u: u16, v: u16) -> Option<u16> {
         // PSX-SPX: the GPU's U/V counters are 8 bits -- texture pages
         // wrap every 256 texels horizontally and vertically. Callers
         // pass u16 because rasterizer interpolation works in a wider
@@ -1803,14 +1842,14 @@ impl Gpu {
                 let tpx = self.tex_page_x.wrapping_add(u / 4);
                 let word = self.vram.get_pixel(tpx, tpy);
                 let idx = (word >> ((u & 3) * 4)) & 0xF;
-                self.vram.get_pixel(clut_x + idx, clut_y)
+                self.clut_cache[idx as usize]
             }
             1 => {
                 // 8bpp: 2 texels per VRAM word.
                 let tpx = self.tex_page_x.wrapping_add(u / 2);
                 let word = self.vram.get_pixel(tpx, tpy);
                 let idx = (word >> ((u & 1) * 8)) & 0xFF;
-                self.vram.get_pixel(clut_x + idx, clut_y)
+                self.clut_cache[idx as usize]
             }
             _ => {
                 // 15bpp: direct colour, 1 texel per word.
@@ -2207,8 +2246,7 @@ impl Gpu {
             return true;
         }
 
-        let clut_x = (clut_word & 0x3F) * 16;
-        let clut_y = (clut_word >> 6) & 0x1FF;
+        self.update_clut_if_needed(clut_word);
         let tpage_mode = self.tex_blend_mode;
         // Same per-primitive dither rule as the textured-triangle
         // path: flat-tint (non-raw) textured prims are dithered when
@@ -2250,7 +2288,7 @@ impl Gpu {
             for px in x_start..=x_end {
                 let u = (pos_u >> 16) as u16;
                 let v = (pos_v >> 16) as u16;
-                if let Some(texel) = self.sample_texture(u, v, clut_x, clut_y) {
+                if let Some(texel) = self.sample_texture(u, v) {
                     let shaded = if dither {
                         modulate_tint_dithered(texel, tint.0, tint.1, tint.2, px, py)
                     } else {
@@ -2304,8 +2342,7 @@ impl Gpu {
         if triangle_exceeds_hw_extent(v0, v1, v2) {
             return;
         }
-        let clut_x = (clut_word & 0x3F) * 16;
-        let clut_y = (clut_word >> 6) & 0x1FF;
+        self.update_clut_if_needed(clut_word);
         let tpage_mode = self.tex_blend_mode;
 
         let r = |c: u32| (c & 0xFF) as i32;
@@ -2335,7 +2372,7 @@ impl Gpu {
             draw_left,
             draw_right,
             |x, y, ri, gi, bi, u, v| {
-                if let Some(texel) = self.sample_texture(u as u16, v as u16, clut_x, clut_y) {
+                if let Some(texel) = self.sample_texture(u as u16, v as u16) {
                     let (tint_r, tint_g, tint_b) = if raw_texture {
                         RAW_TEXTURE_TINT
                     } else {
@@ -2463,8 +2500,7 @@ impl Gpu {
         if triangle_exceeds_hw_extent(v0, v1, v2) {
             return;
         }
-        let clut_x = (clut_word & 0x3F) * 16;
-        let clut_y = (clut_word >> 6) & 0x1FF;
+        self.update_clut_if_needed(clut_word);
         let tpage_mode = self.tex_blend_mode;
         // Hardware dithers texture-blended (non-raw) polygons even
         // without Gouraud shading: a flat-tint textured prim still
@@ -2490,7 +2526,7 @@ impl Gpu {
             draw_left,
             draw_right,
             |x, y, _r, _g, _b, u, v| {
-                if let Some(texel) = self.sample_texture(u as u16, v as u16, clut_x, clut_y) {
+                if let Some(texel) = self.sample_texture(u as u16, v as u16) {
                     let shaded = if dither {
                         modulate_tint_dithered(texel, tint.0, tint.1, tint.2, x, y)
                     } else {
