@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! Digital / DualShock pad polling via SIO0.
 //!
 //! Talks directly to the SIO0 hardware (no BIOS syscalls) so the

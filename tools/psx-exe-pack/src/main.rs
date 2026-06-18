@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! `psx-exe-info` -- validate a PSX-EXE and print its header.
 //!
 //! Our linker script emits a binary that already has the PSX-EXE header

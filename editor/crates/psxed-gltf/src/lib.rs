@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! glTF/GLB -> PSXM mesh converter.
 //!
 //! This is a host-side importer only. The editor/content pipeline can

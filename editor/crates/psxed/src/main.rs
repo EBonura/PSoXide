@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! `psxed` -- PSoXide content-pipeline CLI.
 //!
 //! Cooks source assets into the compact binary formats the PS1

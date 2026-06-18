@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! Manifest and exact-hash comparison primitives for PSoXide validation.
 //!
 //! The crate is deliberately runner-agnostic. The frontend, Redux, and

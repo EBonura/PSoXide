@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! PSX hardware renderer -- wgpu render pipeline that draws each
 //! GP0 primitive at the internal-resolution multiple of native PSX
 //! VRAM, producing fractional upscaling for free.

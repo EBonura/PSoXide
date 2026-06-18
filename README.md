@@ -174,6 +174,32 @@ editor's authoring model is inspired by Godot. Those are influences, not
 code derivations. PCSX-Redux is the one genuine code derivation, credited
 above and in [`LICENSE`](LICENSE).
 
+## Licensing and Provenance
+
+PSoXide is **GPL-2.0-or-later**, was built with **heavy AI assistance**
+(disclosed above), and is **not** a clean-room implementation. The GPL is
+required rather than chosen for style: parts of the emulator core are derived
+from PCSX-Redux (GPL-2.0-or-later), and the GPL is what that derivation
+obliges. The AI disclosure is an honest statement about how the code was
+written, not a warranty of clean-room provenance or non-infringement.
+
+If you intend to build and **distribute** a project on top of PSoXide, read
+[`docs/downstream-licensing.md`](docs/downstream-licensing.md) first. It
+explains the GPL obligations for covered engine/runtime/SDK code, the
+code-versus-content split (your own art, models, levels, and music stay
+yours), and the project's provenance risk model.
+
+Full details:
+
+- [`LICENSE`](LICENSE) — license text, project notice, and third-party credits.
+- [`docs/license-audit.md`](docs/license-audit.md) — derivation list,
+  corrections, dependency audit, and a cross-language similarity scan against
+  the reference emulators.
+- [`docs/asset-provenance.md`](docs/asset-provenance.md) — per-asset source
+  and license, including known unresolved items.
+- [`docs/downstream-licensing.md`](docs/downstream-licensing.md) — what all of
+  the above means if you build on PSoXide.
+
 ## Quick Start
 
 ### 1. Install dependencies

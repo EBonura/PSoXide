@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! Cooked-asset binary formats for PSoXide.
 //!
 //! This crate defines the on-disk layouts produced by the host

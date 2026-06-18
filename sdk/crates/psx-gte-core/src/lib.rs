@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! Pure-Rust GTE shared math types and host state machine.
 //!
 //! The math types are register-shaped and are available on every target.
