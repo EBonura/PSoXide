@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! `psx-engine` -- PSoXide engine layer.
 //!
 //! The SDK exposes the PS1's hardware surface (GPU, SPU, GTE, pad

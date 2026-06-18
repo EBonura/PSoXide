@@ -94,6 +94,46 @@ derivative work, both GPL compliance and plain honesty call for louder
 attribution, not quieter. The per-file provenance headers described
 above supersede that change and restore explicit derivation language.
 
+### Cross-language similarity scan (2026-06-18)
+
+To check the AI-assisted emulator code against the reference emulators
+beyond the per-file provenance headers, a cross-language similarity scan was
+run over the emulator layer (`emu/crates/emulator-core/src` and
+`emu/crates/psx-gpu-render/src`) against full checkouts of DuckStation,
+PCSX-Redux, and the Mednafen PS1 core (Beetle-PSX). Three methods were used:
+identifier isolation (identifiers shared with one reference but not the
+others), verbatim 7-word comment-phrase matching, and numeric
+table/constant-sequence fingerprinting (to catch a copied lookup table).
+
+Findings:
+
+- Identifier overlap was comparable across all three references (DuckStation
+  46%, Redux 40%, Mednafen 39% of the emulator's identifiers). A line-by-line
+  translation of one emulator would put that emulator far above the others;
+  the flat distribution is consistent with a hardware-focused implementation
+  sharing common PS1 vocabulary, rather than an obvious line-by-line port of
+  one reference emulator. The DuckStation-isolated identifiers were
+  common English words, Rust standard idioms, shared PSX-SPX hardware names
+  and register addresses, and standard graphics-API terms, with none of
+  DuckStation's distinctive internal names.
+- Only three verbatim comment phrases were shared with DuckStation, all
+  benign: two are nocash PSX-SPX SPU reverb register names (shared upstream
+  documentation) and one is a generic rasterization fragment.
+- The only non-trivial shared numeric sequence is the standard JPEG/MPEG
+  zigzag scan order used by the PS1 MDEC, a published specification constant
+  present in every JPEG/MDEC implementation.
+
+Conclusion: no copied code was found from DuckStation, Redux, or Mednafen
+beyond the Redux derivations already disclosed above. Redux overlap is
+expected and GPL-compatible.
+
+Honest caveat: cross-language similarity scanning compares tokens, constants,
+and comments, not semantics, so it cannot prove the absence of a line-by-line
+semantic translation with mathematical certainty. The result is strong
+corroboration of the provenance model above, read together with the
+real-hardware development methodology (`hardware-burn-ledger.md`), which
+provides an additional non-source-code basis for validating behaviour.
+
 ## Resolved (continued)
 
 ### Bundled asset provenance (resolved 2026-04-30)
@@ -161,10 +201,16 @@ for ws in . sdk engine; do
 done
 ```
 
-`cargo-deny` advisories / bans / sources checks have not been run yet
-(separate from licenses). They are left at their default-permissive
-settings in `deny.toml`; tightening them is a future-hardening item,
-not a publish blocker.
+`cargo-deny` now also runs in CI (see
+[`.github/workflows/ci.yml`](../.github/workflows/ci.yml)) on every push and
+pull request, checking `licenses` and `sources` across all three workspaces.
+The `sources` check was hardened from `warn` to `deny` after confirming the
+dependency tree resolves entirely from crates.io with no git or
+alternate-registry sources. The `advisories` and `bans` checks are left at
+`warn` on purpose (rationale is in the `deny.toml` section comments): a
+crate's yanked/advisory status changing upstream should not break an
+unrelated change's CI, and duplicate transitive versions carry no licensing
+risk.
 
 ## Outstanding Blockers
 

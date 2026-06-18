@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! `mkisopsx` -- wrap a PSX-EXE into a bootable PS1 disc image.
 //!
 //! Usage:

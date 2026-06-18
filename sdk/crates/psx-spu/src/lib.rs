@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! High-level PS1 SPU (Sound Processing Unit) API.
 //!
 //! Turns SPU-programming-by-magic-numbers into typed primitives:

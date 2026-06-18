@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! PS1 bare-metal runtime.
 //!
 //! Provides the `_start` entry point that the PSX-EXE loader jumps to,

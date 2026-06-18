@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! Shared guest/host telemetry id tables.
 //!
 //! The guest runtime (`psx-engine`) emits stage/task/counter events

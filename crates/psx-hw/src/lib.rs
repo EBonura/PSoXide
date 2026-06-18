@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! PlayStation 1 hardware model.
 //!
 //! This crate is the single source of truth for PS1 hardware details:

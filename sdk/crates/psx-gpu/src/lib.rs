@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! High-level PS1 GPU interface.
 //!
 //! Sits on top of `psx-io::gpu` + `psx-hw::gpu` constructors to expose
