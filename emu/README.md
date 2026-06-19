@@ -4,9 +4,8 @@ The PlayStation 1 emulator and the desktop application that wraps it: a
 pure-state-machine core, a wgpu/egui frontend, and the hardware renderer.
 Accuracy is validated against real PS1 hardware: the GTE is bit-exact
 against a real-console conformance corpus, the triangle rasterizer matches
-silicon pixel coverage, and the core models silicon-measured GTE hazards no
-other public emulator does (see `docs/hardware-burn-ledger.md` for the
-burn-by-burn evidence).
+silicon pixel coverage, and the core models silicon-measured GTE hazards found
+during hardware validation.
 
 These crates run on the host and are members of the repo-root HOST
 workspace (one lockfile shared with `crates/`, `editor/`, and `tools/`).
@@ -32,7 +31,6 @@ through the bit-exact GTE core).
 
 ## See also
 
-- [Root README](../README.md#5-launch-the-frontend). Launching the frontend.
+- [Root README](../README.md#quick-start). Launching the frontend.
 - [`docs/frontend.md`](../docs/frontend.md). Frontend architecture.
-- [`docs/hardware-burn-ledger.md`](../docs/hardware-burn-ledger.md). Real-hardware findings and the fixes they produced.
 - [`docs/commercial-parity-tracker.md`](../docs/commercial-parity-tracker.md). Retail-disc compatibility status.

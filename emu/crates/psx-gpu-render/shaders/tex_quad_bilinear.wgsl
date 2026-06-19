@@ -11,7 +11,7 @@
 // v1/v3 share the other, but either edge may be left/right and either
 // row may be top/bottom. UVs follow the submitted vertex order.
 //
-// i64 emulation helpers identical to the scanline shaders — see
+// i64 emulation helpers identical to the scanline shaders - see
 // `tex_tri_scanline.wgsl` for explanation.
 
 struct TexQuadBilinear {
@@ -73,7 +73,7 @@ fn i64_mul_u32(col: u32, b: I64) -> I64 {
 // Q16.16 divide of an I64 by a positive i32 scalar. Used to compute
 // per-pixel `delta_u = (right_u - pos_u) / width`. Implementation:
 // long division. Width is at most 1023, so we don't need full
-// 64-bit-by-32-bit precision — but we DO need it to handle negative
+// 64-bit-by-32-bit precision - but we DO need it to handle negative
 // numerators correctly.
 fn i64_div_i32(a: I64, divisor: i32) -> I64 {
     // For PSX rasterizer outputs, `a` always fits in i32 by the

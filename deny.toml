@@ -21,7 +21,7 @@ all-features = true
 # Allow-list of acceptable dependency licenses. Each must be a valid SPDX
 # identifier. A dep carrying any other license fails the check.
 allow = [
-    # Permissive — universally GPL-compatible.
+    # Permissive - universally GPL-compatible.
     "MIT",
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
@@ -32,7 +32,7 @@ allow = [
     "0BSD",
     "Unlicense",
     "CC0-1.0",
-    # Weak copyleft — GPL-compatible.
+    # Weak copyleft - GPL-compatible.
     "MPL-2.0",
     # GPL family.
     "GPL-2.0",
@@ -47,13 +47,13 @@ allow = [
     "LGPL-2.1-or-later",
     "LGPL-3.0-only",
     "LGPL-3.0-or-later",
-    # Unicode crates — Unicode license is GPL-compatible.
+    # Unicode crates - Unicode license is GPL-compatible.
     "Unicode-3.0",
     "Unicode-DFS-2016",
-    # Boost Software License — permissive, OSI-approved, FSF Free/Libre.
+    # Boost Software License - permissive, OSI-approved, FSF Free/Libre.
     # Reaches us via clipboard-win / error-code through arboard → egui-winit.
     "BSL-1.0",
-    # Font licenses — GPL-compatible when fonts are bundled as data
+    # Font licenses - GPL-compatible when fonts are bundled as data
     # ("mere aggregation"), which is what epaint_default_fonts and the
     # frontend's own font assets do. Fonts are not linked into our code.
     "OFL-1.1",

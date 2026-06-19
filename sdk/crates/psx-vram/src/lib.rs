@@ -918,7 +918,7 @@ pub fn upload_16bpp(rect: VramRect, pixels: &[u16]) {
     );
     assert!(
         expected.is_multiple_of(2),
-        "upload_16bpp: odd pixel count ({expected}) not supported — caller should round up",
+        "upload_16bpp: odd pixel count ({expected}) not supported - caller should round up",
     );
 
     if try_dma_copy_to_vram(rect, pixels.as_ptr() as *const u32) {

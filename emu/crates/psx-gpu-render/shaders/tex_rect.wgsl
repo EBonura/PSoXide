@@ -1,6 +1,6 @@
 // Textured rectangle rasterizer (GP0 0x64..=0x67 + fixed-size
 // variants). Direct (U, V) blit from the active tpage with optional
-// X/Y flip from GP0 0xE1 bits 12/13. No UV interpolation — the
+// X/Y flip from GP0 0xE1 bits 12/13. No UV interpolation - the
 // shader steps through texels linearly with `(base_u + dx,
 // base_v + dy)`, so parity vs the CPU rasterizer is bit-exact.
 //

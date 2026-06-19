@@ -218,7 +218,7 @@ tekken-late-fight-guard:
 		--guard tekken3-late-fight \
 		--out-dir $${PSOXIDE_TEKKEN_LATE_FIGHT_GUARD_OUT:-/tmp/tekken_late_fight_guard}
 
-# Milestone-C regression suite — every SDK example side-loaded into
+# Milestone-C regression suite - every SDK example side-loaded into
 # the emulator, multi-signal state pinned. Depends on `examples` so
 # every .exe referenced by the tests exists before we run them; the
 # tests themselves skip gracefully when an .exe is missing, but
@@ -326,7 +326,7 @@ hello-input:
 hello-ot:
 	cd sdk/examples/hello-ot && $(SDK_EXAMPLE_CARGO_ENV) cargo build --release $(PSX_BUILD_FLAGS)
 
-# engine/ examples live outside sdk/examples/ — the engine is its
+# engine/ examples live outside sdk/examples/ - the engine is its
 # own domain and its demos exercise the engine framework.
 hello-engine:
 	cd engine/examples/hello-engine && $(ENGINE_EXAMPLE_CARGO_ENV) cargo build --release $(PSX_BUILD_FLAGS)
@@ -350,10 +350,9 @@ hello-cdda-disc: hello-cdda
 		--volume PSOXIDE \
 		--cdda-track ../../$(CDDA_DEMO_TRACK)
 
-# CD-DA + data-read contention conformance probe (see
-# docs/cortex-ignition-v1-focused-probes.md FP-004). The guest plays a
-# CD-DA track, then issues the engine's exact read path (ReadN with no
-# Pause/Stop) and records which CD-ROM IRQ the controller produces.
+# CD-DA + data-read contention conformance probe. The guest plays a CD-DA
+# track, then issues the engine's exact read path (ReadN with no Pause/Stop)
+# and records which CD-ROM IRQ the controller produces.
 cdda-read-contention:
 	cd sdk/examples/cdda-read-contention && $(SDK_EXAMPLE_CARGO_ENV) cargo build --release $(PSX_BUILD_FLAGS)
 
@@ -427,7 +426,7 @@ cook-playtest:
 
 # Build the editor-playtest example against whatever is in
 # `generated/level_manifest.cooked.rs` if present, otherwise
-# the tracked placeholder. Does NOT recook — that's the editor's
+# the tracked placeholder. Does NOT recook - that's the editor's
 # job (or `make cook-playtest` if you want the starter). The playtest runtime is
 # streaming-only, so the default build includes the CD streaming reader.
 EDITOR_PLAYTEST_FEATURES ?= cd-stream-bench
@@ -525,7 +524,7 @@ profile-demo7-camera-sweep:
 
 PSXED := target/release/psxed
 
-# Build the content-pipeline CLI. Independent host workspace —
+# Build the content-pipeline CLI. Independent host workspace -
 # always builds fast, no MIPS toolchain needed.
 psxed:
 	cd editor && cargo build --release --bin psxed

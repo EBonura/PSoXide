@@ -8,8 +8,7 @@ make cortex-ignition-v1-hardware-diagnostic-disc
 
 Each checkpoint clears the framebuffer to the listed RGB color and draws
 `CORTEX_IGNITION_V1` plus the message text. When reporting a hardware stop,
-record the full message and color in `docs/hardware-burn-ledger.md`; the text is
-the stable identifier.
+record the full message and color; the text is the stable identifier.
 
 ## Engine Spine
 
@@ -72,8 +71,7 @@ the whole message as the checkpoint key.
 ## Maintenance
 
 - Add new checkpoints only with a unique message string.
-- If a hardware burn stops on a checkpoint, add that exact message and color to
-  `docs/hardware-burn-ledger.md` before changing code.
+- If a hardware run stops on a checkpoint, preserve the exact message and color
+  before changing code.
 - If an emulator disagrees with the hardware stop point, add a preburn or
   emulator assertion first, then change the emulator/engine/SDK code.
-

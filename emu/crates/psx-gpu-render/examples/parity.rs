@@ -180,7 +180,7 @@ fn run_fixture(
     // ---- Validate shape ----------------------------------------------------
     if (cpu_w, cpu_h) != (hw_w, hw_h) {
         eprintln!(
-            "[parity] SHAPE MISMATCH: cpu={cpu_w}x{cpu_h} hw={hw_w}x{hw_h} — \
+            "[parity] SHAPE MISMATCH: cpu={cpu_w}x{cpu_h} hw={hw_w}x{hw_h} - \
              can't pixel-compare. Likely the HW renderer is sized to a \
              different rect than the CPU display."
         );
