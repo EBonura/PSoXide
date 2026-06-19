@@ -1136,9 +1136,10 @@ fn diagnose_static_glb_scene_render() {
             grid: WorldGrid::stone_room(6, 6, 1024, None, None),
         },
     );
-    let model_id = psxed_project::model_import::import_glb_model(
+    let model_id = psxed_project::model_import::import_model_with_animation_sources(
         &mut project,
         &glb,
+        &[],
         "diag_prop",
         &root,
         psxed_project::model_import::RigidModelConfig::default(),
@@ -1163,16 +1164,6 @@ fn diagnose_static_glb_scene_render() {
                     .into_owned(),
             ),
             skeleton: None,
-            clips: vec![psxed_project::ModelAnimationClip {
-                name: "idle".into(),
-                psxanim_path: wraith_dir
-                    .join("obsidian_wraith_idle.psxanim")
-                    .to_string_lossy()
-                    .into_owned(),
-                calibration: Default::default(),
-            }],
-            default_clip: Some(0),
-            preview_clip: Some(0),
             world_height: 1024,
             collision_radius: 192,
             scale_q8: [psxed_project::MODEL_SCALE_ONE_Q8; 3],
