@@ -116,7 +116,7 @@ fn main() {
     }
 
     if found.is_empty() {
-        println!("[audit] NO 'CD001' magic in RAM — PVD didn't land.");
+        println!("[audit] NO 'CD001' magic in RAM - PVD didn't land.");
         println!("[audit] Diagnostic state:");
         let chcr = bus.read32(0x1F801088);
         let bcr = bus.read32(0x1F801084);

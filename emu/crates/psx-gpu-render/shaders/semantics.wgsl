@@ -1,4 +1,4 @@
-// Shared PSX pixel semantics — prepended to every compute shader at
+// Shared PSX pixel semantics - prepended to every compute shader at
 // pipeline creation (`rasterizer::shader_src`). WGSL has no include
 // mechanism, so the host concatenates this header with each shader
 // body; the bodies keep only their primitive struct, bindings,
@@ -14,7 +14,7 @@ const VRAM_HEIGHT: i32 = 512;
 const VRAM_WIDTH_U: u32 = 1024u;
 const VRAM_HEIGHT_U: u32 = 512u;
 
-// `prim.flags` bit layout — mirrors `primitive::PrimFlags` plus the
+// `prim.flags` bit layout - mirrors `primitive::PrimFlags` plus the
 // blend mode in bits 8..=9.
 const FLAG_SEMI_TRANS:  u32 = 1u << 0u;
 const FLAG_MASK_CHECK:  u32 = 1u << 1u;

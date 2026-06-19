@@ -5,7 +5,7 @@
 - **Designer**: Peter Hull
 - **Source**: https://fonts.google.com/specimen/VT323
 - **License**: SIL Open Font License 1.1
-  (https://openfontlicense.org/) — full text embedded in the TTF's
+  (https://openfontlicense.org/) - full text embedded in the TTF's
   metadata.
 - **Used for**: monospace / debugger / register-panel typography in
   the PSoXide frontend.

@@ -678,7 +678,7 @@ impl EditorWorkspace {
             || projected_d as u32 > AUTO_GROW_LIMIT as u32
         {
             self.status =
-                format!("Auto-grow capped at {AUTO_GROW_LIMIT} — resize the grid manually");
+                format!("Auto-grow capped at {AUTO_GROW_LIMIT} - resize the grid manually");
             return None;
         }
         self.push_undo();

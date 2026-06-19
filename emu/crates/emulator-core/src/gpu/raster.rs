@@ -10,8 +10,8 @@
 // The old Redux-parity scanline-delta rasterizer that lived here was
 // retired once hardware proved Redux samples pixel CORNERS while silicon
 // samples pixel CENTERS -- every drawn triangle's read-back diverged on
-// real hardware (burn ledger HWB-005) while quads matched. What remains is
-// the hardware extent rule, shared by every triangle path.
+// real hardware while quads matched. What remains is the hardware extent rule,
+// shared by every triangle path.
 
 /// Hardware extent rule: any triangle whose vertex pairs span more than 1023
 /// pixels horizontally or 511 vertically is silently dropped on real PS1

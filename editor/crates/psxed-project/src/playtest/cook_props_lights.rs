@@ -12,21 +12,21 @@ pub(crate) fn resolve_material_texture_asset(
 ) -> Option<(usize, [u8; 3])> {
     let Some(material_resource) = project.resource(material_id) else {
         report.warn(format!(
-            "{label} references missing Material #{} — skipped",
+            "{label} references missing Material #{} - skipped",
             material_id.raw()
         ));
         return None;
     };
     let ResourceData::Material(material) = &material_resource.data else {
         report.warn(format!(
-            "{label} references '{}' but it is not a Material — skipped",
+            "{label} references '{}' but it is not a Material - skipped",
             material_resource.name
         ));
         return None;
     };
     let Some(psxt_path) = material.psxt_path.clone() else {
         report.warn(format!(
-            "{label} material '{}' has no Texture — skipped",
+            "{label} material '{}' has no Texture - skipped",
             material_resource.name
         ));
         return None;
@@ -37,12 +37,12 @@ pub(crate) fn resolve_material_texture_asset(
         let bytes = match load_psxt_bytes(&material_resource.name, &psxt_path, project_root) {
             Ok(bytes) => bytes,
             Err(msg) => {
-                report.warn(format!("{label}: {msg} — skipped"));
+                report.warn(format!("{label}: {msg} - skipped"));
                 return None;
             }
         };
         if let Err(msg) = expect_room_material_depth(&material_resource.name, &bytes) {
-            report.warn(format!("{label}: {msg} — skipped"));
+            report.warn(format!("{label}: {msg} - skipped"));
             return None;
         }
         let texture_index = texture_asset_for_path.len();
@@ -81,7 +81,7 @@ pub(crate) fn push_image_prop(
 ) -> bool {
     let Some(material_id) = material else {
         report.warn(format!(
-            "Image Prop '{node_name}' has no Material — skipped"
+            "Image Prop '{node_name}' has no Material - skipped"
         ));
         return true;
     };
@@ -177,7 +177,7 @@ pub(crate) fn push_box_prop(
 
     if valid_faces == 0 {
         report.warn(format!(
-            "Box Prop '{node_name}' has no drawable Material faces — skipped"
+            "Box Prop '{node_name}' has no drawable Material faces - skipped"
         ));
         return true;
     }

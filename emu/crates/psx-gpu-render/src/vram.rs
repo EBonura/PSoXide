@@ -105,7 +105,7 @@ impl VramGpu {
             compatible_surface: None,
             force_fallback_adapter: false,
         }))
-        .expect("no wgpu adapter available — install Metal/Vulkan/DX12 driver");
+        .expect("no wgpu adapter available - install Metal/Vulkan/DX12 driver");
         let (device, queue) = pollster::block_on(adapter.request_device(
             &wgpu::DeviceDescriptor {
                 label: Some("psx-gpu-compute-headless"),

@@ -7,18 +7,17 @@
 <p align="center">
   <a href="LICENSE"><img alt="License: GPL-2.0-or-later" src="https://img.shields.io/badge/license-GPL--2.0--or--later-blue.svg"></a>
   <img alt="Rust: nightly" src="https://img.shields.io/badge/rust-nightly-orange.svg">
-  <img alt="Platforms: macOS · Linux" src="https://img.shields.io/badge/platforms-macOS%20%C2%B7%20Linux-lightgrey.svg">
+  <img alt="Platforms: macOS · Linux · Windows" src="https://img.shields.io/badge/platforms-macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-lightgrey.svg">
 </p>
 
-**PSoXide is an open-source PlayStation 1 development stack, written in Rust.**
-One repository, five parts: an accuracy-focused **emulator** and debugger, a
-bare-metal **SDK**, a runtime **engine**, an asset **editor**, and **disc
-tooling**. It targets the real machine, projects export to CUE/BIN images that
-boot in emulators or on original hardware.
+**PSoXide is an open-source PlayStation 1 development stack written in Rust.**
+It brings together an accuracy-focused **emulator** and debugger, a bare-metal
+**SDK**, a runtime **engine**, an asset **editor**, and **disc tooling**. The
+pipeline is designed to author content, cook PS1-ready assets, build CUE/BIN
+disc images, and run them in emulators or on original hardware.
 
-It exists to build one game: a dark, third-person PS1 souls-like. Everything
-else is in service of shipping that vertical slice and proving the full pipeline
-end to end.
+The primary reference project is a dark, third-person PS1 action-RPG vertical
+slice. The public tools are built around proving the full workflow end to end.
 
 ![PSoXide editor](assets/media/readme/editor-preview.png)
 
@@ -27,26 +26,26 @@ end to end.
 | ![Streamed playtest](assets/media/readme/demo2-playtest.png) | ![Streamed playtest](assets/media/readme/demo3-playtest.png) |
 | ![Streamed playtest](assets/media/readme/demo4-playtest.png) | ![Streamed playtest](assets/media/readme/demo5-playtest.png) |
 
-> **Early software**, useful, hackable, and moving fast, but APIs are not stable
-> and there are no release binaries yet. See [Status](#status) for what works and
-> what does not. Project page:
+> **Pre-release software.** The end-to-end pipeline works, but APIs, file
+> formats, and editor workflows may still change. There are no release binaries
+> yet; build from source. Project page:
 > [bonnie-games.itch.io/psoxide](https://bonnie-games.itch.io/psoxide).
 
 ## Features
 
-- **Emulator** — CPU, GTE, GPU, DMA, CD-ROM, SIO, timers, MDEC, and SPU, with an
+- **Emulator** - CPU, GTE, GPU, DMA, CD-ROM, SIO, timers, MDEC, and SPU, with an
   HLE BIOS path so homebrew needs no retail BIOS. Desktop frontend
   (winit/wgpu/egui) with debugger panels for registers, memory, VRAM, execution
   history, profiling, and savestates.
-- **SDK** — bare-metal Rust crates for the `mipsel-sony-psx` target: GPU, GTE,
+- **SDK** - bare-metal Rust crates for the `mipsel-sony-psx` target: GPU, GTE,
   SPU, pad, fonts, DMA/ordering tables, and runtime.
-- **Engine** — a Scene/App framework with a streamed room runtime (chunk
+- **Engine** - a Scene/App framework with a streamed room runtime (chunk
   residency, CD-sector packing, 60 Hz paced simulation), 3D with hardware
   lighting and fog, particles, and CD-DA.
-- **Editor** — project model, 2D/3D viewports, room-grid authoring, asset
+- **Editor** - project model, 2D/3D viewports, room-grid authoring, asset
   cooking (`psxed`), and one-click **Play** that cooks, builds, boots a disc, and
   shows the live framebuffer in the viewport.
-- **Disc tooling** — CUE/BIN builders and headless export of an authored project
+- **Disc tooling** - CUE/BIN builders and headless export of an authored project
   to a bootable image.
 
 Per-crate detail lives in each area's README (see [Repository
@@ -54,17 +53,13 @@ layout](#repository-layout)).
 
 ## Status
 
-Early, but the whole pipeline works end to end: author a project in the editor,
-cook it, build a PS1 disc, and boot it. APIs and data formats still move, and
-there are no release binaries yet, so build from source.
+The project can currently author a project in the editor, cook assets, build a
+PS1 disc image, and boot that image. The emulator implements the main PS1
+subsystems (CPU, GTE, GPU, DMA, CD-ROM with XA-ADPCM and CD-DA, SIO, timers,
+MDEC, interrupts, SPU, and memory cards), and the SDK/engine examples build into
+bootable homebrew discs.
 
-**More built-out than "early" suggests.** The emulator implements the full set
-of PS1 subsystems, CPU, GTE, GPU, DMA, CD-ROM (with XA-ADPCM and CD-DA), SIO with
-digital and DualShock pads, timers, MDEC, interrupts, a 24-voice SPU with reverb,
-and memory cards that persist to disk. The SDK and engine are substantial, and
-the editor is a real authoring tool rather than a mock-up.
-
-**Rough edges and known gaps:**
+Known gaps:
 
 - Broad commercial-game compatibility is incomplete; timing drift and long-tail
   peripheral behaviour are active research, tracked per game.
@@ -79,27 +74,27 @@ the editor is a real authoring tool rather than a mock-up.
 
 ## Real-hardware accuracy
 
-PSoXide is validated against an actual PS1 console, not just against other
-emulators:
+PSoXide uses real-console validation where it matters most:
 
 - **GTE: bit-for-bit** against JaCzekanski's real-console `ps1-tests` corpus
   (1100/1100 across all opcodes and registers), with the software GTE also
   covered by an extensive in-tree unit-test suite.
-- **Triangle rasterizer matches silicon** — center-sampled coverage confirmed by
+- **Triangle rasterizer matches silicon** - center-sampled coverage confirmed by
   VRAM read-back photographed on hardware, after the original reference edge rule
   was proven wrong on the console.
-- **Silicon-measured GTE hazards** modeled by no other public emulator or the
-  MiSTer core (the 2-instruction GTE load delay; a mid-MVMVA register commit) —
-  they reproduce a real skinned-mesh corruption bit-for-bit.
+- **Silicon-measured GTE hazards** are modeled, including the 2-instruction GTE
+  load delay and a mid-MVMVA register commit case that reproduces a real
+  skinned-mesh corruption bit-for-bit.
 
-Every finding is logged burn by burn in
-[`docs/hardware-burn-ledger.md`](docs/hardware-burn-ledger.md): each divergence
-between console and emulator becomes a conformance test or a fix.
+Hardware findings are converted into regression tests or validation tools when
+they become part of the public engineering surface.
 
 ## Quick start
 
-You need a nightly Rust toolchain (pinned by `rust-toolchain.toml`) and `make`.
-On Linux you also need the frontend's native libraries (see prerequisites below).
+You need the nightly Rust toolchain pinned by `rust-toolchain.toml`. On macOS
+and Linux, the top-level `Makefile` is the easiest way to build and run the
+project. On Windows, install the MSVC toolchain and use Cargo directly for host
+builds; the Makefile targets assume a Unix-like shell.
 
 ```bash
 git clone https://github.com/EBonura/PSoXide.git psoxide
@@ -132,7 +127,10 @@ sudo apt install build-essential make pkg-config libasound2-dev libudev-dev \
 **Windows** (MSVC host; `make` is optional, use `cargo` directly)
 ```powershell
 winget install Rustlang.Rustup
-winget install Microsoft.VisualStudio.2022.BuildTools --override "--add Microsoft.VisualStudio.Workload.VCTools --passive --wait"
+winget install Microsoft.VisualStudio.2022.BuildTools --override "--add Microsoft.VisualStudio.Workload.VCTools --includeRecommended --passive --wait"
+rustup show
+cargo check --workspace --all-features
+cargo run -p frontend --release
 ```
 
 The pinned nightly installs `rustfmt`, `clippy`, `rust-src`, and `llvm-tools`
@@ -166,15 +164,15 @@ cover everything else.
 
 ## Provenance and licensing
 
-PSoXide is developed with **heavy AI assistance**, with a human directing the
-architecture, debugging, and hardware verification (that accounts for the commit
-volume). This is disclosed openly and is **not** a clean-room claim.
+PSoXide is developed with substantial AI assistance, with a human directing the
+architecture, debugging, and hardware verification. This is disclosed openly and
+is **not** a clean-room claim.
 
 It is licensed **GPL-2.0-or-later**, and that is *required*, not stylistic: parts
 of the emulator core are derived from **PCSX-Redux** (GPL-2.0-or-later), and the
 GPL is what that derivation obliges. Derived files carry per-file `## Provenance`
 headers; subsystems written from hardware documentation and only parity-checked
-say so explicitly. Your own game content — art, models, levels, music — stays
+say so explicitly. Your own game content - art, models, levels, music - stays
 yours.
 
 If you plan to build and **distribute** on top of PSoXide, start with

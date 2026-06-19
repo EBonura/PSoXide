@@ -44,7 +44,7 @@ use commands::gp0_packet_size;
 /// The coverage/interpolation RULE is the documented PS1 (PSX-SPX) behavior;
 /// this implementation was written from that public hardware documentation
 /// and is verified pixel-exact against real silicon (hardware-tests GPU
-/// read-back battery, burn ledger HWB-006).
+/// read-back battery).
 /// The caller's closure owns texture sampling, dither, blend and the
 /// actual VRAM write -- this just supplies coverage and the per-pixel
 /// interpolated R/G/B/U/V.

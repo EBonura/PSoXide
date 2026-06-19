@@ -1,5 +1,5 @@
 // Quick fill (GP0 0x02). Writes a constant 15bpp colour into a
-// rectangle. No clip, no RMW, no semi-trans, no mask-bit — fill
+// rectangle. No clip, no RMW, no semi-trans, no mask-bit - fill
 // bypasses all of those by hardware design. The host has already
 // applied the 16-pixel alignment to x / w.
 

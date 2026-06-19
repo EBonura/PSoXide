@@ -694,8 +694,8 @@ compose measured FLAT (47.6k -> 48.9k, noise; only ~18 joints x ~25
 cycles existed to win) and FAILED the corridor pixel gate by 3 pixels:
 the emulator's CTC2 commit-delay model makes load-to-use distance
 observable, so the hoist is not bit-neutral in the exact joint-compose
-path that exploded on silicon (HWB-011). Flat win + hazard-path timing
-change = rejected and reverted.
+path that exposed the silicon hazard. Flat win + hazard-path timing change =
+rejected and reverted.
 
 Negative result 2, endpoint-pose cache (decode endpoints on integer-
 frame change, re-blend alpha per frame): measured NEGATIVE. The

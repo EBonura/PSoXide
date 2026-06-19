@@ -10,5 +10,5 @@ flow. Each is its own workspace.
 
 ## See also
 
-- [Root README](../README.md#7-export-an-authored-project-disc). Disc export flow.
+- [Root README](../README.md#quick-start). Build and run flow.
 - [`crates/psx-iso`](../crates/psx-iso). The BIN/CUE / ISO9660 parsing these build on.

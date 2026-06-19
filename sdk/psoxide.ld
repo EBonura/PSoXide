@@ -99,7 +99,7 @@ SECTIONS {
         __data_end = .;
     } > RAM
 
-    /* Uninitialised data — zeroed by `_start`, not stored in file. */
+    /* Uninitialised data - zeroed by `_start`, not stored in file. */
     .bss (NOLOAD) : {
         __bss_start = .;
         *(.bss .bss.*);

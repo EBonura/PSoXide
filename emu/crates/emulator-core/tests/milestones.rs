@@ -137,7 +137,7 @@ fn assert_milestone(
     assert_eq!(
         (state.display_width, state.display_height),
         expected_display_size,
-        "{name}: display dimensions changed — width/height from V-range or mode-bit differ",
+        "{name}: display dimensions changed - width/height from V-range or mode-bit differ",
     );
     assert_eq!(
         state.display_hash, expected_display_hash,
@@ -147,7 +147,7 @@ fn assert_milestone(
     assert_eq!(
         state.vram_hash, expected_vram_hash,
         "{name}: full-VRAM hash changed (off-screen VRAM differs). \
-         Display may still look right — check display_hash first.",
+         Display may still look right - check display_hash first.",
     );
     if let Some(expected) = redux_display_hash {
         assert_eq!(
@@ -248,7 +248,7 @@ fn milestone_d_bios_accepts_licensed_disc() {
         for _ in 0..300_000_000u64 {
             if cpu.step(&mut bus).is_err() {
                 panic!(
-                    "CPU stepping errored at pc=0x{:08x} — game regressed into a crash",
+                    "CPU stepping errored at pc=0x{:08x} - game regressed into a crash",
                     cpu.pc()
                 );
             }
@@ -268,7 +268,7 @@ fn milestone_d_bios_accepts_licensed_disc() {
         let in_scratch = final_pc < 0x0000_2000;
         assert!(
             in_ram || in_bios || in_scratch,
-            "CPU PC ended up at wild address 0x{final_pc:08x} — game crashed"
+            "CPU PC ended up at wild address 0x{final_pc:08x} - game crashed"
         );
     }
 

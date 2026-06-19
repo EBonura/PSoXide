@@ -145,7 +145,7 @@ fn main() {
             if cpu_h == gpu_h {
                 "OK"
             } else {
-                "ALREADY DIVERGED — narrow --steps"
+                "ALREADY DIVERGED - narrow --steps"
             },
         );
         if cpu_h != gpu_h {

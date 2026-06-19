@@ -1,6 +1,6 @@
 // Monochrome rectangle rasterizer (GP0 0x60..=0x63 + fixed-size
 // 1×1 / 8×8 / 16×16 variants). Conceptually a tile of `MonoTri`
-// minus the edge-function test — every pixel inside `wh` is
+// minus the edge-function test - every pixel inside `wh` is
 // covered. Drawing-area clip + RMW (mask + semi-trans) match
 // `mono_tri.wgsl` byte-for-byte.
 

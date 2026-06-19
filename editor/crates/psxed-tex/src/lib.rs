@@ -191,7 +191,7 @@ pub fn encode_indexed_psxt(
         return Err(Error::ZeroSize);
     }
     let Some(n_entries) = depth.clut_entries() else {
-        // Bit15 has no CLUT — caller should use `convert` for direct
+        // Bit15 has no CLUT - caller should use `convert` for direct
         // 15bpp instead.
         return Err(Error::InvalidIndexedInput);
     };

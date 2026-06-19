@@ -474,7 +474,7 @@ fn transform_vertex_mips(v: Vec3I16) -> Vec3I32 {
             // instructions. Without them, real silicon can commit the
             // write BETWEEN the MVMVA's sequential MAC1 and MAC2 compute
             // phases, so MAC1 reads the previous V0.x -- the cortex
-            // vertex-explosion mechanism (docs/hardware-burn-ledger.md).
+            // vertex-explosion mechanism seen in the HWB-010 live capture.
             ".word 0",
             ".word 0",
             // MVMVA RT,V0,TR,sf=1.
@@ -519,9 +519,8 @@ pub struct TransformProbe {
 /// the op -- the schedule that trips the silicon MTC2-commit hazard),
 /// with evidence reads appended strictly AFTER the op: a settled MAC1
 /// re-read and a TRX/TRY/TRZ readback. This is the live evidence
-/// channel that decoded the vertex explosion (burn ledger HWB-009/010);
-/// it stays in the SDK so the next hardware mystery starts from a
-/// proven instrument. Not for production paths -- use
+/// channel that decoded the vertex explosion; it stays in the SDK so the
+/// next hardware mystery starts from a proven instrument. Not for production paths -- use
 /// [`transform_vertex_scheduled`], whose schedule carries the
 /// console-confirmed hazard gap.
 #[inline(always)]

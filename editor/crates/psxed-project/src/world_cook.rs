@@ -289,7 +289,7 @@ impl std::fmt::Display for WorldGridCookError {
             ),
             Self::UnsupportedDiagonalWall { x, z, direction } => write!(
                 f,
-                "sector {x},{z} has a {direction:?} diagonal wall — diagonals aren't supported by the v1 cooker / runtime yet"
+                "sector {x},{z} has a {direction:?} diagonal wall - diagonals aren't supported by the v1 cooker / runtime yet"
             ),
             Self::RoomDimensionExceeded { axis, value, limit } => write!(
                 f,
