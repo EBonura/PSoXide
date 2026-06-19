@@ -561,7 +561,6 @@ impl FontAtlas {
             }
         }
 
-        let tex_rect = VramRect::new(tpage.x(), tpage.y(), atlas_w, atlas_h);
         // upload_16bpp takes pixel count = w*h, which for a 4bpp
         // texture uploaded as a 16bpp rect works out to
         // halfwords_per_row × atlas_h halfwords = the 4bpp pixel
@@ -579,7 +578,6 @@ impl FontAtlas {
         let clut_entries = [Color555::TRANSPARENT, Color555::rgb5(31, 31, 31)];
         upload_clut(clut, &clut_entries);
 
-        let _ = tex_rect;
         Self {
             font,
             tpage,
