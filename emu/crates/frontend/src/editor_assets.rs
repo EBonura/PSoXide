@@ -259,7 +259,8 @@ fn resolve_path(stored: &str, project_root: &Path) -> PathBuf {
 mod tests {
     use super::*;
     use psxed_project::{
-        default_model_collision_radius_for_height, ModelAnimationClip, ModelResource,
+        default_model_collision_radius_for_height, AnimationClipResource, ModelResource,
+        SkeletonResource,
     };
     use std::thread::sleep;
     use std::time::Duration;
@@ -308,32 +309,58 @@ mod tests {
         // relative to the real project root, which would never
         // resolve under our scratch dir.
         let mut project = ProjectDocument::new("Test");
+        // Clips are skeleton-scoped now: the model carries a
+        // skeleton reference, and `resolved_model_animation_clips`
+        // gathers every AnimationClip resource bound to that
+        // skeleton in resource order. Register clip_a before
+        // clip_b so they resolve as clip index 0 and 1.
+        let skeleton_id = project.add_resource(
+            "Test Skeleton",
+            ResourceData::Skeleton(SkeletonResource {
+                joint_count: 1,
+                parents: vec![None],
+                signature: "psx-parent-v1:1:root".to_string(),
+                note: "test skeleton".to_string(),
+            }),
+        );
         let id = project.add_resource(
             "Test Model",
             ResourceData::Model(ModelResource {
                 model_path: mesh_rel,
                 source_path: None,
                 texture_path: None,
-                skeleton: None,
-                clips: vec![
-                    ModelAnimationClip {
-                        name: "a".into(),
-                        psxanim_path: clip_a_rel,
-                        calibration: Default::default(),
-                    },
-                    ModelAnimationClip {
-                        name: "b".into(),
-                        psxanim_path: clip_b_rel,
-                        calibration: Default::default(),
-                    },
-                ],
-                default_clip: Some(0),
-                preview_clip: Some(0),
+                skeleton: Some(skeleton_id),
                 world_height: 1024,
                 collision_radius: default_model_collision_radius_for_height(1024),
                 scale_q8: [psxed_project::MODEL_SCALE_ONE_Q8; 3],
                 default_visual_yaw_q12: 0,
                 attachments: Vec::new(),
+            }),
+        );
+        project.add_resource(
+            "Clip A",
+            ResourceData::AnimationClip(AnimationClipResource {
+                psxanim_path: clip_a_rel,
+                skeleton: Some(skeleton_id),
+                source: None,
+                bake: Default::default(),
+                role: Default::default(),
+                looping: true,
+                tags: Vec::new(),
+                calibration: Default::default(),
+            }),
+        );
+        project.add_resource(
+            "Clip B",
+            ResourceData::AnimationClip(AnimationClipResource {
+                psxanim_path: clip_b_rel,
+                skeleton: Some(skeleton_id),
+                source: None,
+                bake: Default::default(),
+                role: Default::default(),
+                looping: true,
+                tags: Vec::new(),
+                calibration: Default::default(),
             }),
         );
         (project, id)
@@ -451,9 +478,6 @@ mod tests {
                 source_path: None,
                 texture_path: None,
                 skeleton: None,
-                clips: vec![],
-                default_clip: None,
-                preview_clip: None,
                 world_height: 1024,
                 collision_radius: default_model_collision_radius_for_height(1024),
                 scale_q8: [psxed_project::MODEL_SCALE_ONE_Q8; 3],
