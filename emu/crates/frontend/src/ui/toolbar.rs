@@ -232,7 +232,7 @@ fn draw_debug_toggles(ui: &mut egui::Ui, state: &mut AppState) {
     let wf_btn = toggle_button(icons::GRID, wf_active);
     if ui
         .add(wf_btn)
-        .on_hover_text("Wireframe mode — edges only")
+        .on_hover_text("Wireframe mode - edges only")
         .clicked()
     {
         if let Some(bus) = state.bus.as_mut() {

@@ -1,4 +1,4 @@
-# Hand-authored face-split cube — each of 6 faces has its own 4
+# Hand-authored face-split cube - each of 6 faces has its own 4
 # vertices so per-vertex normals after `--compute-normals` come
 # out equal to the face normal (flat-shaded cube faces, no
 # rounded corners).
@@ -43,7 +43,7 @@ v  0.5  0.5 -0.5
 v  0.5  0.5  0.5
 v -0.5  0.5  0.5
 
-# Triangles — CCW when viewed from outside the cube.
+# Triangles - CCW when viewed from outside the cube.
 # -Z face
 f 1 2 3
 f 1 3 4

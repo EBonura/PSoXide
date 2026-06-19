@@ -2941,7 +2941,7 @@ impl EditorWorkspace {
                     None => ", no player".to_string(),
                 };
                 format!(
-                    " — {} room{}, {} model{}, {} character{}{}, {} light{}, {} asset{}, {} texture{}, {} material{}, {} entit{}",
+                    " - {} room{}, {} model{}, {} character{}{}, {} light{}, {} asset{}, {} texture{}, {} material{}, {} entit{}",
                     s.rooms,
                     if s.rooms == 1 { "" } else { "s" },
                     s.models,

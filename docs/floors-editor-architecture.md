@@ -15,11 +15,11 @@ shows one "active floor" (Sims-style: active floor is the working plane at
 Y=0, floors below render descending, floors above hidden). Three
 subsystems must agree on a node's floor and its world Y:
 
-1. RENDER (editor preview) — draw each node once, on its floor, at that
+1. RENDER (editor preview) - draw each node once, on its floor, at that
    floor's elevation offset.
-2. PICK / SELECTION / MOVE (psxed-ui viewport) — only the active floor's
+2. PICK / SELECTION / MOVE (psxed-ui viewport) - only the active floor's
    geometry and the nodes on it are selectable, at the drawn Y.
-3. COOK (psxed-project) — bind each node to its floor's runtime room.
+3. COOK (psxed-project) - bind each node to its floor's runtime room.
 
 ## Current handling (the evidence)
 
@@ -29,7 +29,7 @@ subsystems must agree on a node's floor and its world Y:
 - placement helper (~8511)
 - `run_paint_action` Place arm (~9176)
 All do `node.floor = self.active_floor`. (Floating-geometry duplicate /
-rotate / paste paths do NOT set it — gap.)
+rotate / paste paths do NOT set it - gap.)
 
 ### Where floor is READ for RENDER (editor_preview.rs)
 `node_enclosing_floor(scene, id)` walks ancestors to the room, max of
@@ -44,7 +44,7 @@ context threaded into all six.
 `chunk_for_node` binds a node to the chunk whose `floor_idx == node.floor`
 (clamped). One site. Correct.
 
-### Where floor is IGNORED — the bugs
+### Where floor is IGNORED - the bugs
 - `collect_entity_bounds` (psxed-ui): filters by room + visibility, NOT
   by floor, and computes bounds at the node's own transform Y with NO
   active-floor offset. So object selection/move (a) shows handles for
@@ -67,10 +67,10 @@ dispatch is scattered.
 
 ## Designs
 
-### Option A — Floor-resolved scene view (single source of truth)
+### Option A - Floor-resolved scene view (single source of truth)
 One function, given `(scene, active_room, active_floor)`, produces the set
 of (node, floor_index, y_offset, visible) the editor should act on this
-frame — the SAME resolution for render AND pick/bounds. Render walks
+frame - the SAME resolution for render AND pick/bounds. Render walks
 iterate it; `collect_entity_bounds` / pick iterate it. Nobody re-derives
 floor; selection becomes floor-tied for free because it reads the same
 resolved list the renderer drew.
@@ -81,7 +81,7 @@ resolved list the renderer drew.
   per-walk kind-matching. ~1 focused day.
 - Data change: none.
 
-### Option B — Floor as a first-class filter in pick + bounds only
+### Option B - Floor as a first-class filter in pick + bounds only
 Leave the six render walks as-is (they already work post-fixes). Just make
 `collect_entity_bounds` + the gizmo bounds take `active_floor`, filter by
 `node_enclosing_floor`, and apply the active-floor `y_offset` so handles
@@ -93,7 +93,7 @@ sit on the drawn node.
   pattern.
 - Data change: none.
 
-### Option C — Resolved-floor cache on the workspace
+### Option C - Resolved-floor cache on the workspace
 Compute once per frame a `HashMap<NodeId, ResolvedFloor { floor_index,
 y_offset, visible }>` on `EditorWorkspace`, and have every consumer
 (render via a passed reference, pick, bounds, gizmo, cook-preview) look up
@@ -101,7 +101,7 @@ that map instead of calling `node_enclosing_floor` + recomputing offset.
 - Pros: single source like A, but consumers stay in place (less
   restructuring of the six walks); cheap lookups.
 - Cons: a per-frame cache that must be invalidated on edits (staleness
-  risk — the exact kind of bug that's hard to see); render is in the
+  risk - the exact kind of bug that's hard to see); render is in the
   frontend crate, pick in psxed-ui, so the map must cross the crate
   boundary (it already passes active_floor across it, so feasible).
 - Data change: none.
@@ -122,7 +122,7 @@ Suggested sequence if we pick A:
 2. Port the six render walks to consume it (behavior-preserving; verify by
    the existing demo11 dumps + editor_preview tests staying identical for
    floor 0).
-3. Port `collect_entity_bounds` + gizmo bounds + pick to consume it —
+3. Port `collect_entity_bounds` + gizmo bounds + pick to consume it -
    this is what newly makes selection/move floor-tied.
 4. Regression: per-floor demo11 dumps (entity once, on its floor, at the
    right Y) + a psxed-ui test that selection on an upper floor returns a

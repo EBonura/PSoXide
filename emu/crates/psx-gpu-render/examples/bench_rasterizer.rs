@@ -169,7 +169,7 @@ fn main() {
     eprintln!("[bench] steps={steps}");
     let log = capture_cmd_log(&bios, &disc_path, steps);
     if log.is_empty() {
-        eprintln!("[bench] no packets captured — nothing to compare");
+        eprintln!("[bench] no packets captured - nothing to compare");
         return;
     }
 

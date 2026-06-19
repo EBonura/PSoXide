@@ -258,34 +258,34 @@ fn assert_sdk_golden(state: &SdkExampleState, golden: &SdkGolden) {
     }
     assert_eq!(
         state.display_size, golden.display_size,
-        "{name}: display dimensions changed — GP1 display-mode regression",
+        "{name}: display dimensions changed - GP1 display-mode regression",
     );
     assert_eq!(
         state.vblank_raises, golden.vblank_raises,
-        "{name}: VBlank raise count drifted — scheduler / video-timing regression",
+        "{name}: VBlank raise count drifted - scheduler / video-timing regression",
     );
     assert_eq!(
         state.display_hash, golden.display_hash,
-        "{name}: display-area hash changed — rendering regression \
+        "{name}: display-area hash changed - rendering regression \
          (check dither / rasterizer / blend / CLUT / texture window)",
     );
     assert_eq!(
         state.vram_hash, golden.vram_hash,
-        "{name}: full-VRAM hash changed. Display may still look right — \
+        "{name}: full-VRAM hash changed. Display may still look right - \
          check off-screen VRAM (CLUT / textures / double-buffer).",
     );
     assert_eq!(
         state.spu_samples, golden.spu_samples,
-        "{name}: SPU samples_produced drifted — audio pump / voice scheduling regression",
+        "{name}: SPU samples_produced drifted - audio pump / voice scheduling regression",
     );
     assert_eq!(
         state.final_pc, golden.final_pc,
-        "{name}: final PC drifted — control-flow / IRQ-timing regression",
+        "{name}: final PC drifted - control-flow / IRQ-timing regression",
     );
     if let Some(expected) = golden.redux_display_hash {
         assert_eq!(
             state.display_hash, expected,
-            "{name}: display hash doesn't match Redux's for the same binary — \
+            "{name}: display hash doesn't match Redux's for the same binary - \
              we're rendering the wrong pixels.",
         );
     }
@@ -690,7 +690,7 @@ fn run_sdk_milestone(example: &'static str, vblanks: u64) {
 }
 
 #[test]
-#[ignore = "SDK milestone: hello-tri roundtrip — requires `make examples` + captured golden"]
+#[ignore = "SDK milestone: hello-tri roundtrip - requires `make examples` + captured golden"]
 fn milestone_c_hello_tri() {
     run_sdk_milestone("hello-tri", 2);
 }
@@ -813,7 +813,7 @@ fn milestone_c_showcase_particles() {
 }
 
 #[test]
-#[ignore = "SDK milestone: hello-engine — smallest Scene/App round-trip"]
+#[ignore = "SDK milestone: hello-engine - smallest Scene/App round-trip"]
 fn milestone_c_hello_engine() {
     // 4 VBlanks lands the drifting quad at a non-zero sine offset
     // from centre. Pins the engine's main-loop cadence

@@ -171,9 +171,9 @@ The following categories are deliberately not tracked or distributed:
 - Commercial game disc images.
 - PCSX-Redux binaries or source.
 - Direct renders of Sony's BIOS firmware output (logos, splashes, shell)
-  — golden-image PNGs were removed from `emu/crates/emulator-core/tests/milestones/`
+  - golden-image PNGs were removed from `emu/crates/emulator-core/tests/milestones/`
   on 2026-04-30; tests now rely on hashes only.
-- Mednafen / DuckStation source — used only as behavioural references
+- Mednafen / DuckStation source - used only as behavioural references
   (see [`LICENSE`](../LICENSE)).
 
 ## Pre-Publish Action Items

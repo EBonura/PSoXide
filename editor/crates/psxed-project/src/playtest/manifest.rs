@@ -205,7 +205,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         };
         let _ = writeln!(
             out,
-            "/// {} — {}",
+            "/// {} - {}",
             asset_static_name(asset, i),
             asset.source_label,
         );
@@ -255,7 +255,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     }
     out.push_str("];\n\n");
 
-    out.push_str("/// Per-room material bindings — slot the `.psxw` stores → texture asset.\n");
+    out.push_str("/// Per-room material bindings - slot the `.psxw` stores → texture asset.\n");
     out.push_str("pub static MATERIALS: &[LevelMaterialRecord] = &[\n");
     for material in &package.materials {
         let flags = material_flags_for_sidedness(material.face_sidedness);
@@ -921,7 +921,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     }
     out.push_str("];\n\n");
 
-    out.push_str("/// Cooked models — instances reference these by index.\n");
+    out.push_str("/// Cooked models - instances reference these by index.\n");
     out.push_str("pub static MODELS: &[LevelModelRecord] = &[\n");
     for model in &package.models {
         let texture = match model.texture_asset_index {
@@ -1373,7 +1373,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     }
     out.push_str("];\n\n");
 
-    out.push_str("/// Cooked Character resources — gameplay metadata layered on top of MODELS.\n");
+    out.push_str("/// Cooked Character resources - gameplay metadata layered on top of MODELS.\n");
     out.push_str("pub static CHARACTERS: &[LevelCharacterRecord] = &[\n");
     for character in &package.characters {
         let clip_or_none = |slot: u16| -> String {
@@ -1468,13 +1468,13 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         Some(pc) => {
             let _ = writeln!(
                 out,
-                "/// Player controller — spawn + Character that drives the player.\npub static PLAYER_CONTROLLER: Option<PlayerControllerRecord> = Some(PlayerControllerRecord {{ spawn: PlayerSpawnRecord {{ room: RoomIndex({}), x: {}, y: {}, z: {}, yaw: {}, flags: {} }}, character: CharacterIndex({}), flags: 0 }});",
+                "/// Player controller - spawn + Character that drives the player.\npub static PLAYER_CONTROLLER: Option<PlayerControllerRecord> = Some(PlayerControllerRecord {{ spawn: PlayerSpawnRecord {{ room: RoomIndex({}), x: {}, y: {}, z: {}, yaw: {}, flags: {} }}, character: CharacterIndex({}), flags: 0 }});",
                 pc.spawn.room, pc.spawn.x, pc.spawn.y, pc.spawn.z, pc.spawn.yaw, pc.spawn.flags, pc.character,
             );
         }
         None => {
             out.push_str(
-                "/// Player controller — `None` means no playable character was authored.\n\
+                "/// Player controller - `None` means no playable character was authored.\n\
                 pub static PLAYER_CONTROLLER: Option<PlayerControllerRecord> = None;\n",
             );
         }

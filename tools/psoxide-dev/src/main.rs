@@ -1467,8 +1467,8 @@ fn cortex_bringup_report(args: &[String]) -> Result<(), String> {
          - a `hardware-boot-visual` checkpoint or text label when the finding is visible on a TV;\n\
          - a preburn/emulator assertion when the finding is reproducible without hardware;\n\
          - a tracked emulator, engine, or SDK fix when the finding explains a behavioral gap.\n\n\
-         Record real CD-R observations in `docs/hardware-burn-ledger.md` and decode \
-         color/text stops with `docs/hardware-visual-checkpoints.md`. \
+         Record real CD-R observations in local hardware notes and decode color/text stops \
+         with `docs/hardware-visual-checkpoints.md`. \
          The current visible checkpoint sources are `engine/crates/psx-engine/src/app.rs` and \
          `engine/crates/psx-engine/src/game_app.rs`. If the next CD stops on a color/text code, \
          preserve that code here and convert it into a named gate before burning again.\n"
@@ -1477,8 +1477,8 @@ fn cortex_bringup_report(args: &[String]) -> Result<(), String> {
     writeln!(
         report,
         "## Focused Probe Routing\n\n\
-         Use `docs/cortex-ignition-v1-focused-probes.md` when hardware and emulators disagree. \
-         Active red rows should route to one narrow owner at a time: CD-ROM IRQ/data timing, \
+         When hardware and emulators disagree, route active red rows to one narrow owner at a time: \
+         CD-ROM IRQ/data timing, \
          CD-DA/data arbitration, SIO/pad timing, GPU display area, or engine/SDK disc layout.\n"
     )
     .map_err(|e| e.to_string())?;

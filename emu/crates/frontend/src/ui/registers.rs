@@ -62,7 +62,7 @@ pub fn draw_contents(
 
 fn draw_breakpoints(ui: &mut egui::Ui, breakpoints: &mut BTreeSet<u32>) {
     if breakpoints.is_empty() {
-        ui.monospace("(none — set from the memory panel)");
+        ui.monospace("(none - set from the memory panel)");
         return;
     }
     // Collect first so we can mutate the set while iterating.
@@ -79,7 +79,7 @@ fn draw_breakpoints(ui: &mut egui::Ui, breakpoints: &mut BTreeSet<u32>) {
 
 fn draw_history(ui: &mut egui::Ui, history: &VecDeque<InstructionRecord>) {
     if history.is_empty() {
-        ui.monospace("(empty — step or run the CPU)");
+        ui.monospace("(empty - step or run the CPU)");
         return;
     }
     // Newest at the bottom: log-style reading order, capped to a fixed

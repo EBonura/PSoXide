@@ -177,7 +177,7 @@ impl Shell {
         if let Some(a) = audio.as_ref() {
             eprintln!("[audio] opened host stream @ {} Hz", a.host_sample_rate());
         } else {
-            eprintln!("[audio] no host output device available — running silent");
+            eprintln!("[audio] no host output device available - running silent");
         }
         let input = input::InputRouter::new();
         if input.is_connected() {
@@ -186,7 +186,7 @@ impl Shell {
                 input.connected_names()
             );
         } else {
-            eprintln!("[input] no pads connected at startup — watching for hot-plug");
+            eprintln!("[input] no pads connected at startup - watching for hot-plug");
         }
         // The compute backend gets its own headless wgpu device.
         // We *could* share the main `Graphics` device for zero-copy

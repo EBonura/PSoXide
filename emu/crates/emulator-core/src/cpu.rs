@@ -159,7 +159,7 @@ pub struct Cpu {
     /// PREVIOUS V0.x (the GTE's sequential row pipeline runs MAC1 first;
     /// the write commits between the MAC1 and MAC2 windows). Measured on
     /// silicon with six exact arithmetic confirmations across two live
-    /// captures (docs/hardware-burn-ledger.md HWB-009/010). On hardware
+    /// hardware captures, HWB-009 and HWB-010. On hardware
     /// the slip is INTERMITTENT (gated by external bus traffic the
     /// emulator does not model), so a deterministic always-fire is
     /// strictly worse than silicon for well-spaced code: env-gated OFF
@@ -852,8 +852,8 @@ impl Cpu {
 
     /// `CTC2 rt, rd` -- same as MTC2 but writes a control register.
     /// Writes commit immediately: the staged-settle and drop-during-exec
-    /// CTC2 hazard models that once lived here were REFUTED on silicon
-    /// (burn ledger HWB-008: every RT settle/drop sweep case passed).
+    /// CTC2 hazard models that once lived here were refuted on silicon:
+    /// every RT settle/drop sweep case passed.
     fn op_ctc2(&mut self, instr: u32, _bus: &Bus) -> Result<(), ExecutionError> {
         let rt = ((instr >> 16) & 0x1F) as u8;
         let rd = ((instr >> 11) & 0x1F) as u8;

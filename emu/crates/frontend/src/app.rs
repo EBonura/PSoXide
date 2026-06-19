@@ -289,7 +289,7 @@ impl AppState {
         let legacy_workspace = paths.editor_dir().join("workspace.ron");
         if legacy_workspace.is_file() {
             eprintln!(
-                "[frontend] legacy editor/workspace.ron at {} ignored — projects now live under editor/projects/",
+                "[frontend] legacy editor/workspace.ron at {} ignored - projects now live under editor/projects/",
                 legacy_workspace.display()
             );
         }

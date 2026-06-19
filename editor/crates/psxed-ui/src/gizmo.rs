@@ -1,7 +1,7 @@
 //! Transform-gizmo primitives: axis / plane handles, their colors and sizes.
 //!
 //! Pure value types extracted from the editor UI module. No `App` state or
-//! panel logic lives here — only geometry/color helpers that depend on the
+//! panel logic lives here - only geometry/color helpers that depend on the
 //! `egui` space and color types.
 
 use egui::{Color32, Pos2};

@@ -2,16 +2,15 @@
 
 Durable host-side tools that run the emulator core headless. Each is a
 standalone binary: `cargo run -p emulator-core --release --example <name>`.
-One-off investigation probes are deleted once their hunt closes (the
-outcome lives in `docs/hardware-burn-ledger.md`; git history keeps the
-tools), so everything listed here is maintained.
+One-off investigation probes are deleted once their hunt closes; git history
+keeps the tools, so everything listed here is maintained.
 
 ## GTE accuracy (real-hardware oracles)
 
 | Example | Purpose |
 |---------|---------|
 | `gte_fuzz_replay` | Replays JaCzekanski's real-console captured gte-fuzz log against `psx-gte-core`: 1100 tests, all 22 opcodes, all 64 registers including FLAG. The zero-burn GTE conformance gate. |
-| `gte_skin_replay` | Replays a live capture (values transcribed from overlay photos taken off a real console) through the bit-exact GTE core, stage by stage. The tool that decoded the HWB-010 MTC2-commit hazard. |
+| `gte_skin_replay` | Replays a live capture (values transcribed from overlay photos taken off a real console) through the bit-exact GTE core, stage by stage. The tool that decoded the MTC2-commit hazard. |
 | `gte_expected_values` | Computes the baked expected values for the `hardware-tests` disc through `psx-gte-core`, so no disc expectation is ever hand-invented. |
 
 ## Boot, disc, and commercial-game harnesses
