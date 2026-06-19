@@ -27,10 +27,10 @@ end to end.
 | ![Streamed playtest](assets/media/readme/demo2-playtest.png) | ![Streamed playtest](assets/media/readme/demo3-playtest.png) |
 | ![Streamed playtest](assets/media/readme/demo4-playtest.png) | ![Streamed playtest](assets/media/readme/demo5-playtest.png) |
 
-> **Status: early, but real.** Useful, hackable, and moving fast. It is not yet
-> a stable SDK, a general-purpose engine, or a tool for editing existing PS1
-> games, and there are no release binaries yet (build from source). Project
-> page: [bonnie-games.itch.io/psoxide](https://bonnie-games.itch.io/psoxide).
+> **Early software**, useful, hackable, and moving fast, but APIs are not stable
+> and there are no release binaries yet. See [Status](#status) for what works and
+> what does not. Project page:
+> [bonnie-games.itch.io/psoxide](https://bonnie-games.itch.io/psoxide).
 
 ## Features
 
@@ -52,13 +52,39 @@ end to end.
 Per-crate detail lives in each area's README (see [Repository
 layout](#repository-layout)).
 
+## Status
+
+Early, but the whole pipeline works end to end: author a project in the editor,
+cook it, build a PS1 disc, and boot it. APIs and data formats still move, and
+there are no release binaries yet, so build from source.
+
+**More built-out than "early" suggests.** The emulator implements the full set
+of PS1 subsystems, CPU, GTE, GPU, DMA, CD-ROM (with XA-ADPCM and CD-DA), SIO with
+digital and DualShock pads, timers, MDEC, interrupts, a 24-voice SPU with reverb,
+and memory cards that persist to disk. The SDK and engine are substantial, and
+the editor is a real authoring tool rather than a mock-up.
+
+**Rough edges and known gaps:**
+
+- Broad commercial-game compatibility is incomplete; timing drift and long-tail
+  peripheral behaviour are active research, tracked per game.
+- Peripherals cover the digital/analog pad and memory cards only (no multitap,
+  mouse, or light-gun).
+- A few deliberate emulator simplifications: no instruction-cache model, and some
+  rarely-used GPU/DMA/timer edge cases favour parity over silicon-exactness.
+- The editor is usable but pre-1.0 (import UX, project templates, undo depth, and
+  packaging still need work).
+- No published release binaries, and the public CI currently gates dependency
+  policy only, with build/test/lint advisory.
+
 ## Real-hardware accuracy
 
 PSoXide is validated against an actual PS1 console, not just against other
 emulators:
 
-- **GTE: bit-exact** — 1100/1100 across all opcodes and registers, replayed from
-  a real-console conformance corpus.
+- **GTE: bit-for-bit** against JaCzekanski's real-console `ps1-tests` corpus
+  (1100/1100 across all opcodes and registers), with the software GTE also
+  covered by an extensive in-tree unit-test suite.
 - **Triangle rasterizer matches silicon** — center-sampled coverage confirmed by
   VRAM read-back photographed on hardware, after the original reference edge rule
   was proven wrong on the console.
