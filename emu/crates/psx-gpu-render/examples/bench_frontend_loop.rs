@@ -188,7 +188,7 @@ fn main() {
         );
     } else {
         eprintln!(
-            "  30fps OVER by {:.2} ms — won't sustain 30 fps",
+            "  30fps OVER by {:.2} ms - won't sustain 30 fps",
             total_per_frame_ms - budget_30fps
         );
     }

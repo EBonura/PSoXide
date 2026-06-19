@@ -53,7 +53,7 @@ fn bench(label: &str, iters: u32, mut body: impl FnMut()) {
 }
 
 fn bench_vram_to_rgba8_zeroed() {
-    eprintln!("[1] Vram::to_rgba8 — full 1024x512 (zeroed VRAM)");
+    eprintln!("[1] Vram::to_rgba8 - full 1024x512 (zeroed VRAM)");
     let vram = Vram::new();
     bench("zeroed VRAM, fresh allocation each call", 200, || {
         let buf = vram.to_rgba8(0, 0, VRAM_WIDTH as u16, VRAM_HEIGHT as u16);
@@ -63,7 +63,7 @@ fn bench_vram_to_rgba8_zeroed() {
 }
 
 fn bench_vram_to_rgba8_filled() {
-    eprintln!("[2] Vram::to_rgba8 — full 1024x512 (random VRAM, no allocator-friendly zeros)");
+    eprintln!("[2] Vram::to_rgba8 - full 1024x512 (random VRAM, no allocator-friendly zeros)");
     let mut vram = Vram::new();
     // Fill with non-zero data so the inner loop branch isn't biased.
     let mut s = 0xACE1u16;
@@ -82,7 +82,7 @@ fn bench_vram_to_rgba8_filled() {
 }
 
 fn bench_display_rgba8_with_real_disc_state() {
-    eprintln!("[3] Gpu::display_rgba8 — visible-area readback");
+    eprintln!("[3] Gpu::display_rgba8 - visible-area readback");
     // Boot a disc enough to have a 320x240 display configured + content.
     let bios_path = std::env::var("PSOXIDE_BIOS")
         .map(PathBuf::from)
@@ -92,7 +92,7 @@ fn bench_display_rgba8_with_real_disc_state() {
         Ok(b) => b,
         Err(e) => {
             eprintln!(
-                "  (skipped — BIOS not readable at {}: {e})",
+                "  (skipped - BIOS not readable at {}: {e})",
                 bios_path.display()
             );
             return;
@@ -124,7 +124,7 @@ fn bench_display_rgba8_with_real_disc_state() {
 
 fn bench_packed_copy_only() {
     eprintln!(
-        "[4] gfx.rs prepare_display — pack {w}x{h} into 1024x512 RGBA buffer",
+        "[4] gfx.rs prepare_display - pack {w}x{h} into 1024x512 RGBA buffer",
         w = 320,
         h = 240
     );
@@ -177,7 +177,7 @@ fn bench_full_prepare_pair() {
 }
 
 fn bench_rasterizer_textured_quad() {
-    eprintln!("[6] Emulator-core rasterizer — emit 1000 textured quads");
+    eprintln!("[6] Emulator-core rasterizer - emit 1000 textured quads");
     use emulator_core::Gpu;
     let mut gpu = Gpu::new();
     // Set up a tpage + draw area first.

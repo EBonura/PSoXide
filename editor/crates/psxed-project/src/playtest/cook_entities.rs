@@ -1520,7 +1520,7 @@ pub(crate) fn push_character_controller_idle_instance(
     };
     let Some(model_resource_id) = character.model else {
         report.error(format!(
-            "Character '{}' has no Model assigned — required for non-player Entity '{}'",
+            "Character '{}' has no Model assigned - required for non-player Entity '{}'",
             resource.name, node_name
         ));
         return false;

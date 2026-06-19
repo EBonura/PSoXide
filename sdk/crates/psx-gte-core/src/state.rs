@@ -152,8 +152,8 @@ pub struct Gte {
     /// MAC1 phase (executed first in the GTE's sequential row pipeline)
     /// with this value as V0.x, while MAC2/MAC3 (executed later) see
     /// the fresh register. Models the MTC2 VXY0 write committing
-    /// between the MAC1 and MAC2 compute windows, measured on silicon
-    /// (docs/hardware-burn-ledger.md HWB-010). Transient: cleared by
+    /// between the MAC1 and MAC2 compute windows, measured on silicon in the
+    /// HWB-010 live capture. Transient: cleared by
     /// [`Gte::execute_with_stale_v0x`] after the command.
     stale_v0x: Option<i16>,
 
@@ -550,8 +550,8 @@ impl Gte {
     /// injected: the MAC1 phase of an MVMVA reading V0 sees `stale_x`
     /// as V0.x (the value the register held before the in-flight MTC2
     /// VXY0 write), while the MAC2/MAC3 phases see the fresh register.
-    /// Silicon-measured: six exact arithmetic confirmations across two
-    /// live captures (docs/hardware-burn-ledger.md HWB-009/010).
+    /// Silicon-measured: six exact arithmetic confirmations across two live
+    /// hardware captures, HWB-009 and HWB-010.
     pub fn execute_with_stale_v0x(&mut self, instr: u32, stale_x: i16) {
         self.stale_v0x = Some(stale_x);
         self.execute(instr);
@@ -1425,9 +1425,9 @@ static UNR_TABLE: [u8; 257] = [
 mod tests {
     use super::*;
 
-    /// HWB-010 silicon values (docs/hardware-burn-ledger.md): joint 9's
-    /// compose column 1 from the SC 2147 live capture. With the stale
-    /// V0.x injected (previous column's x = 0x0218), the MAC1 phase
+    /// HWB-010 silicon values: joint 9's compose column 1 from the SC 2147
+    /// live capture. With the stale V0.x injected (previous column's x = 0x0218),
+    /// the MAC1 phase
     /// reproduces the photographed hardware value EXACTLY while
     /// MAC2/MAC3 stay fresh; without injection, all three match the
     /// clean compose.

@@ -874,7 +874,7 @@ pub(crate) fn draw_character_selector(
     } else if options.len() > 1 {
         ui.colored_label(
             STUDIO_TEXT_WEAK,
-            "Multiple Character Profiles available — pick one explicitly to avoid Cook failures.",
+            "Multiple Character Profiles available - pick one explicitly to avoid Cook failures.",
         );
     } else {
         ui.colored_label(

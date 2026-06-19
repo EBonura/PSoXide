@@ -208,7 +208,7 @@ pub fn build_package(
     room_nodes.sort_by_key(|node| node.id.raw());
 
     if room_nodes.is_empty() {
-        report.error("playtest needs at least one Room node — none found");
+        report.error("playtest needs at least one Room node - none found");
         return (None, report);
     }
 
@@ -250,7 +250,7 @@ pub fn build_package(
         };
         if base_grid.populated_sector_count() == 0 {
             report.warn(format!(
-                "Room '{}' has no geometry — skipped",
+                "Room '{}' has no geometry - skipped",
                 room_node.name
             ));
             continue;
@@ -663,7 +663,7 @@ pub fn build_package(
     }
 
     if rooms.is_empty() {
-        report.error("every Room is empty — cook needs at least one populated room");
+        report.error("every Room is empty - cook needs at least one populated room");
         return (None, report);
     }
     let mut chunks = build_playtest_chunks(&room_chunks_by_node, rooms.len());
@@ -706,7 +706,7 @@ pub fn build_package(
                 NodeKind::Node | NodeKind::Node3D | NodeKind::Entity | NodeKind::World { .. }
             ) {
                 report.warn(format!(
-                    "{} '{}' has no enclosing Room — dropped",
+                    "{} '{}' has no enclosing Room - dropped",
                     node.kind.label(),
                     node.name
                 ));
@@ -725,7 +725,7 @@ pub fn build_package(
                 NodeKind::Node | NodeKind::Node3D | NodeKind::Entity | NodeKind::World { .. }
             ) {
                 report.warn(format!(
-                    "{} '{}' is outside cooked Room '{}' chunks — dropped",
+                    "{} '{}' is outside cooked Room '{}' chunks - dropped",
                     node.kind.label(),
                     node.name,
                     room_node.name
@@ -815,7 +815,7 @@ pub fn build_package(
                     } else if component_model_renderer(scene, node).is_none() {
                         let Some(character_id) = controller.character else {
                             report.warn(format!(
-                                "Non-player Character Controller on '{}' has no Character — skipped",
+                                "Non-player Character Controller on '{}' has no Character - skipped",
                                 node.name
                             ));
                             continue;

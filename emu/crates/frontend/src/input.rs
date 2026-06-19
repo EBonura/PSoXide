@@ -193,7 +193,7 @@ impl InputRouter {
                         gp.name(),
                         gp.is_connected(),
                         if gp.mapping_source() == gilrs::MappingSource::None {
-                            "none (raw HID — face buttons may not map)"
+                            "none (raw HID - face buttons may not map)"
                         } else {
                             "SDL_GameControllerDB"
                         },
@@ -202,7 +202,7 @@ impl InputRouter {
                 Some(g)
             }
             Err(e) => {
-                eprintln!("[input] gilrs init failed: {e} — keyboard only");
+                eprintln!("[input] gilrs init failed: {e} - keyboard only");
                 None
             }
         };
@@ -258,7 +258,7 @@ impl InputRouter {
                     let gp = gilrs.gamepad(id);
                     let name = gp.name().to_string();
                     let mapping = if gp.mapping_source() == gilrs::MappingSource::None {
-                        "none (raw HID — face buttons may not map)"
+                        "none (raw HID - face buttons may not map)"
                     } else {
                         "SDL_GameControllerDB"
                     };

@@ -1,4 +1,4 @@
-// Monochrome triangle — silicon-matched coverage.
+// Monochrome triangle - silicon-matched coverage.
 //
 // The host runs the CPU rasterizer's center-sampled Q32.32 DDA
 // (`emulator-core::gpu::rasterize_triangle`) and ships one

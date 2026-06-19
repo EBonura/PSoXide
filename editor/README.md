@@ -32,6 +32,6 @@ editor crates here are the **producers**, and the SDK's
 
 ## See also
 
-- [Root README](../README.md#6-open-the-editor). Launching the editor.
+- [Root README](../README.md#quick-start). Launching the editor.
 - [`docs/editor-architecture.md`](../docs/editor-architecture.md). Editor internals.
 - [`docs/editor-model-authoring.md`](../docs/editor-model-authoring.md), [`docs/editor-lighting.md`](../docs/editor-lighting.md), [`docs/editor-runtime-coordinates.md`](../docs/editor-runtime-coordinates.md). Authoring workflows.

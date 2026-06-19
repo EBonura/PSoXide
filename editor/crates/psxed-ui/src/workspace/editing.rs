@@ -1748,7 +1748,7 @@ impl EditorWorkspace {
             self.dirty = true;
         }
         self.status = format!(
-            "Drag node — ({:.2}, {:.2})",
+            "Drag node - ({:.2}, {:.2})",
             new_translation[0], new_translation[2]
         );
     }

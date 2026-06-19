@@ -1,4 +1,4 @@
-// Gouraud-shaded triangle — silicon-matched coverage + plane
+// Gouraud-shaded triangle - silicon-matched coverage + plane
 // interpolation.
 //
 // The host (`scanline.rs`) mirrors the CPU rasterizer's

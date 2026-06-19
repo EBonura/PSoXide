@@ -51,21 +51,18 @@ Redux.
 Revision 2026-06-11, triangle rasterization: the CPU scanline-delta
 triangle rasterizer (formerly listed here as Redux-derived) was
 REPLACED in 2026-06 (`2f4b0063`) after real-hardware VRAM read-back
-tests proved Redux's edge-coverage rule wrong on silicon (burn ledger
-HWB-005/006). The current `gpu.rs` triangle path implements the
-silicon-verified center-sampled coverage rule, written from documented
-behaviour (the same rule Mednafen and DuckStation implement) with no
-source from either project, and is verified pixel-exact against a real
-console. The compute-shader rasterizer crate was removed in the
-2026-06 dedup. The `gpu.rs` module keeps its Redux provenance header
-for the non-triangle paths (fills, rects, blending, dither) that
-retain Redux lineage.
+tests proved Redux's edge-coverage rule wrong on silicon. The current
+`gpu.rs` triangle path implements the silicon-verified center-sampled coverage
+rule, written from documented behaviour (the same rule Mednafen and DuckStation
+implement) with no source from either project, and is verified pixel-exact
+against a real console. The compute-shader rasterizer crate was removed in the
+2026-06 dedup. The `gpu.rs` module keeps its Redux provenance header for the
+non-triangle paths (fills, rects, blending, dither) that retain Redux lineage.
 
 Revision 2026-06-11, parity harness: the lockstep parity-oracle crate
 and its Makefile targets were removed (real PS1 hardware is the
-accuracy oracle; see `hardware-burn-ledger.md`). Retiring the testing
-harness does not change any derivation status above; provenance
-headers stay.
+accuracy oracle). Retiring the testing harness does not change any derivation
+status above; provenance headers stay.
 
 Additional behavioural references now credited in `LICENSE` (no code
 derived from either): JaCzekanski's ps1-tests (the real-console GTE
@@ -131,8 +128,8 @@ Honest caveat: cross-language similarity scanning compares tokens, constants,
 and comments, not semantics, so it cannot prove the absence of a line-by-line
 semantic translation with mathematical certainty. The result is strong
 corroboration of the provenance model above, read together with the
-real-hardware development methodology (`hardware-burn-ledger.md`), which
-provides an additional non-source-code basis for validating behaviour.
+real-hardware validation process, which provides an additional non-source-code
+basis for validating behaviour.
 
 ## Resolved (continued)
 
@@ -183,14 +180,14 @@ The transitive dependency tree carries the following non-permissive
 licenses, all of which are compatible with GPL-2.0-or-later and are
 explicitly allow-listed:
 
-- **BSL-1.0** (Boost Software License 1.0) — permissive, OSI-approved,
+- **BSL-1.0** (Boost Software License 1.0) - permissive, OSI-approved,
   FSF Free/Libre. Reaches the tree via `clipboard-win` and
   `error-code` through `arboard` → `egui-winit`.
-- **OFL-1.1** (SIL Open Font License) — covers fonts bundled by
+- **OFL-1.1** (SIL Open Font License) - covers fonts bundled by
   `epaint_default_fonts` (the egui default font crate). Fonts are
   data, not linked code; bundling is "mere aggregation", not
   derivative work.
-- **Ubuntu-font-1.0** — same crate, same aggregation rationale.
+- **Ubuntu-font-1.0** - same crate, same aggregation rationale.
 
 Re-run any time with:
 

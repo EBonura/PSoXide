@@ -47,9 +47,6 @@ Per-subsystem behavioural notes backing the emulator, in [`hardware-refs/`](hard
 | Doc | Topic |
 |-----|-------|
 | [commercial-parity-tracker.md](commercial-parity-tracker.md) | Retail-disc compatibility status. |
-| [hardware-burn-ledger.md](hardware-burn-ledger.md) | Cortex Ignition V1 CD-R burn observations and follow-up gates. |
-| [hardware-visual-checkpoints.md](hardware-visual-checkpoints.md) | TV-visible Cortex Ignition V1 checkpoint code/color map. |
-| [cortex-ignition-v1-focused-probes.md](cortex-ignition-v1-focused-probes.md) | Probe routing for hardware/emulator disagreements. |
 | [asset-provenance.md](asset-provenance.md) | Asset and media provenance. |
 | [license-audit.md](license-audit.md) | License and provenance audit. |
 | [finalisation-log.md](finalisation-log.md) | Project finalisation log. |
