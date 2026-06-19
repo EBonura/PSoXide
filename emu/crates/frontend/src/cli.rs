@@ -86,8 +86,8 @@ pub struct Cli {
     /// and replays each GP0 packet through the GPU compute path. This
     /// is the A/B instrument for aligning the hardware renderer with
     /// the silicon-verified CPU rasterizer (the CPU path is the
-    /// reference; burn ledger HWB-006). Press F12 in the GUI to switch
-    /// which output is displayed.
+    /// reference). Press F12 in the GUI to switch which output is
+    /// displayed.
     #[arg(long)]
     pub gpu_compute: bool,
 
@@ -494,7 +494,7 @@ fn cmd_scan(paths: &ConfigPaths, args: ScanArgs) -> Result<(), String> {
 fn cmd_list(paths: &ConfigPaths) -> Result<(), String> {
     let lib = Library::load_or_empty(&paths.library_file());
     if lib.entries.is_empty() {
-        println!("(library is empty — run `scan` first)");
+        println!("(library is empty - run `scan` first)");
         return Ok(());
     }
     // Sort alphabetically by title for stable output.
@@ -635,7 +635,7 @@ fn run_headless_launch(
             attach_headless_playtest_pad(&mut bus);
             if emit_summary {
                 eprintln!(
-                    "[cli] side-loaded {} — entry=0x{:08x} payload={}B",
+                    "[cli] side-loaded {} - entry=0x{:08x} payload={}B",
                     game_path.display(),
                     exe.initial_pc,
                     exe.payload.len()

@@ -1,10 +1,10 @@
-// PSX hardware-renderer shader — VRAM-shaped target.
+// PSX hardware-renderer shader - VRAM-shaped target.
 //
 // The target is a `(1024 * S) × (512 * S)` texture (S = internal
 // resolution multiplier). PSX vertex coords are in VRAM space
 // (`pos.x ∈ 0..1024`, `pos.y ∈ 0..512`); the vertex shader maps them
 // directly to NDC of that target. The wgpu viewport == target dims,
-// so the rasterizer rasterises at S× density automatically — no
+// so the rasterizer rasterises at S× density automatically - no
 // per-S math anywhere in the shader.
 //
 // `HwVertex::flags` bit layout (must mirror `pipeline::flags`):
@@ -44,7 +44,7 @@ struct VertexOut {
     @builtin(position) position: vec4<f32>,
     @location(0)       color:    vec4<f32>,
     // UV interpolates as f32 so the rasterizer gives a fresh sample
-    // per fragment. WGSL can't interpolate integer types — passing
+    // per fragment. WGSL can't interpolate integer types - passing
     // `vec2<u32>` here was a silent no-op (defaults to flat) and the
     // fragment got the provoking vertex's UV for every pixel.
     @location(1)       uv:       vec2<f32>,

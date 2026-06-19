@@ -663,11 +663,11 @@ fn tex_tri_15bpp_axis_aligned_matches_cpu() {
     }
     assert!(
         diffs * 4 < bbox,
-        "tex 15bpp coverage: {diffs} / {bbox} pixels differ — too many"
+        "tex 15bpp coverage: {diffs} / {bbox} pixels differ - too many"
     );
     assert!(
         max_chan_delta <= 2,
-        "tex 15bpp colour error: max channel delta {max_chan_delta} > 2 — \
+        "tex 15bpp colour error: max channel delta {max_chan_delta} > 2 - \
              likely a sampling / CLUT / depth bug"
     );
 }

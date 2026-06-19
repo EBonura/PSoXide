@@ -53,11 +53,11 @@ portals), and the runtime `floor_above_room`/`floor_below_room` consumption
 (`editor-playtest/src/main.rs:6235`). The new work is the floors dimension, the up/down
 editor with ghosting, and the cook auto-wiring.
 
-## RUNTIME: can't cross to the upper floor (round 6) — DIAGNOSED via user tape
+## RUNTIME: can't cross to the upper floor (round 6) - DIAGNOSED via user tape
 
 Replayed the user's recorded tape (`<config>/editor/playtest_tapes/demo11.pxtape`, PXITAPE1)
 headless via `--input-tape` + `--counter-log`. Result: active room mask stays 1 (room 0)
-the whole climb — the room switch into room 1 NEVER fires. Player ends visually atop the
+the whole climb - the room switch into room 1 NEVER fires. Player ends visually atop the
 stairs but still "in" room 0, blocked from entering room 1.
 
 Cooked links are fine: ALL 36 room-0 cells have `above=Some(1)`. So the bug is the SWITCH,
@@ -79,24 +79,24 @@ Both are runtime changes in the shared main.rs (co-mingled with the other lane's
 The Y-rebase touches ALL room transitions (horizontal portals too), so it needs care +
 regression on the existing flat-seam crossing.
 
-## RUNTIME: upper room vanishes mid-climb (round 5) — FIXED
+## RUNTIME: upper room vanishes mid-climb (round 5) - FIXED
 
 After the offset_y + stair-step fixes, climbing demo11's stairs works and the upper room
-shows — but it DISAPPEARS as the eye nears/crosses the portal plane on the top steps.
+shows - but it DISAPPEARS as the eye nears/crosses the portal plane on the top steps.
 Cause: `portal_front_faces_camera` for the up-portal (normal [0,-1,0], plane Y=elev)
 back-faces once `camera.y >= plane`, so crossing the portal Y while climbing culls the
 upper room from the visibility BFS (which roots at the still-current lower room). FIX
-(portal_visibility.rs): `camera_in_vertical_portal_footprint` — when the camera's XZ is
+(portal_visibility.rs): `camera_in_vertical_portal_footprint` - when the camera's XZ is
 inside the hole's rectangle, a vertical portal stays admitted across the plane regardless
 of front-face (you're physically in the opening). Outside the footprint the front-face test
 still applies, so the sealed-slab reject (`vertical_portal_backface_still_rejected`, camera
 above plane but off the hole) is preserved. Red→green test
 `vertical_portal_stays_visible_in_hole_across_plane`. psx-level 39 green.
 
-## RUNTIME: upper room drawn but at Y=0 (round 4) — ROOT CAUSE FOUND
+## RUNTIME: upper room drawn but at Y=0 (round 4) - ROOT CAUSE FOUND
 
 demo11 overlay showed `vis 2` and counter-log `drawn=3` (both rooms resident AND drawn),
-yet the upper room is invisible in-game. NOT a streaming/visibility/draw-gate bug — those
+yet the upper room is invisible in-game. NOT a streaming/visibility/draw-gate bug - those
 are all correct now. ROOT CAUSE: the runtime never applies a room's `origin_y` at render
 time. `ActiveRuntimeRoom` has `offset_x`/`offset_z` but NO `offset_y`;
 `local_to_global_room_point` (main.rs ~9547) passes `point.y` through unchanged;
@@ -105,7 +105,7 @@ cooked `origin_y=3584` is ignored and the upper room renders stacked ON TOP of f
 Y=0 (overlapping/z-fighting), instead of a storey up. The whole vertical separation
 collapses at draw.
 
-FIX (editor-playtest, the runtime — shared with the streaming lane): add `offset_y` to
+FIX (editor-playtest, the runtime - shared with the streaming lane): add `offset_y` to
 `ActiveRuntimeRoom`, compute it in `with_current_room_offsets` as
 `record.origin_y - current_record.origin_y` (origin_y is ABSOLUTE, floors don't shift with
 the current room, unlike x/z which are relative), and subtract it in `camera_for_room` so
@@ -177,12 +177,12 @@ Full pipeline run: `make cook-playtest PROJECT=projects/demo11/project.ron` →
 Cooked manifest: ROOMS[0] origin_y=0, ROOMS[1] origin_y=3584; PLAYER_SPAWN room=0
 x=5184 y=0 z=5056; ROOM_PORTALS = 72 vertical (kind=1, ±Y normals). Headless HW dump
 (`/tmp/demo11_spawn_hw.ppm`): player (Crimson Cross Knight) stands on the stone GROUND
-floor with brick walls + HUD bars — bug 1 (wrong spawn floor) CONFIRMED FIXED in-engine,
+floor with brick walls + HUD bars - bug 1 (wrong spawn floor) CONFIRMED FIXED in-engine,
 scene renders with no crash. Hold-forward sweep + `--counter-log`: room mask stays `1`
 (room 0) for all 458 post-boot frames; room 1 never streams; cam_y stays ground-level.
 
 WHY YOU CAN'T REACH FLOOR 1 (not a bug): demo11 is authored SEALED. Floor 0 has 25
-ceiling faces; floor 1 has 25 floor faces and 0 ceilings — a solid slab between the two,
+ceiling faces; floor 1 has 25 floor faces and 0 ceilings - a solid slab between the two,
 no traversable hole. Runtime floor-switch (`current_floor_link_switch_target`,
 main.rs:6231) crosses DOWN only when `!sector.has_floor()` (a hole) and the player falls
 below it, UP only when above the ceiling. With a sealed slab neither can trigger, so the
@@ -190,7 +190,7 @@ player is correctly locked to floor 0. The cook/link/portal machinery is verifie
 the MAP just has no stairs/opening. To actually walk between floors, author a hole (erase a
 floor-1 floor cell AND the floor-0 ceiling cell beneath it) and/or stairs.
 
-## demo11 reproduction (cook ground truth) — OPEN BUGS (historical; all fixed)
+## demo11 reproduction (cook ground truth) - OPEN BUGS (historical; all fixed)
 
 Loaded `editor/projects/demo11/project.ron` and cooked it via `build_package` in a
 diagnostic test (`diag_demo11_cook`, `#[ignore]`, run with `--ignored --nocapture`).
@@ -199,10 +199,10 @@ elevation 0, floor 1 elevation 3584 = 2 sectors), each 36 populated cells. Playe
 (id 28) at translation.y = 2.892857 sectors (= 5184 engine units). Cook output:
 - rooms: room[0] origin_y=0, room[1] origin_y=3584. Good.
 - room_portals: **0**. Floor links exist (72) but NO vertical portal quads.
-- SPAWN room=1 (origin_y 3584) — WRONG, player authored on floor 0.
+- SPAWN room=1 (origin_y 3584) - WRONG, player authored on floor 0.
 
 Three root causes, all from the floors design conflict (Slice 1 renders floors IN PLACE at
-base Y; Slice 2 cook + entities use REAL elevation — the editor and cook disagree on where
+base Y; Slice 2 cook + entities use REAL elevation - the editor and cook disagree on where
 a floor is):
 
 1. PLAYER SPAWNS ON WRONG FLOOR. `chunk_for_node` "closest elevation" picks floor 1:
@@ -225,7 +225,7 @@ a floor is):
    `translation.y` (`node_room_local_origin`, raw transform). Switching floors swaps the
    geometry under a fixed-Y entity, so the player appears to shift relative to the floor.
 
-Fix direction (NEEDS USER CALL — reverses Slice 1's "render in place"): make the editor
+Fix direction (NEEDS USER CALL - reverses Slice 1's "render in place"): make the editor
 render each floor at its REAL elevation (stack visibly), so authored Y, cook elevation, and
 render agree. Then: stamp/track the floor a node belongs to explicitly; generate vertical
 portal quads from the floor links; entities move with their floor because the floor is
@@ -252,14 +252,14 @@ where its elevation says.
   floor surface like the model (was raw translation.y=5184, floating); (b) `preview_room_grids`
   now returns `PreviewFloor { room, grid, y_offset, active }` and emits EVERY floor of the
   active room at its real elevation (`grid.elevation - base.elevation`), threaded into
-  `walk_room` via off3/off4 height offsets — the whole stack renders at true Y, so switching
+  `walk_room` via off3/off4 height offsets - the whole stack renders at true Y, so switching
   the active floor no longer shifts the world. Edit overlays (selection/hover/paint) gate on
   the active floor (`active || y_offset==0`) so they stay aligned to floor-local geometry.
-  Removed the now-dead floor-below ghost (`walk_room_ghost`/`GHOST_FLOOR_SHADE`) — the real
+  Removed the now-dead floor-below ghost (`walk_room_ghost`/`GHOST_FLOOR_SHADE`) - the real
   floor below renders instead. Added a `--active-floor` flag to the dump CLI for inspection.
   Verified: demo11 dumps show floor 0 and floor 1 stacked with a real vertical gap.
   REMAINING (not exercised by demo11, all entities on floor 0): entities/props/lights on
-  UPPER floors still render at floor-local Y (not +y_offset) — the walks position via the
+  UPPER floors still render at floor-local Y (not +y_offset) - the walks position via the
   per-floor grid but don't add the elevation. Thread y_offset through walk_entities/
   image/box props/model_instances/light_gizmos when stacked-floor entities are authored.
 - KNOWN EDGE: cook's `floor_anchored_node_chunk_local_position` samples the BASE grid's
@@ -268,7 +268,7 @@ where its elevation says.
 
 ## Status
 
-- Per-floor entities/lights (post-selection-fix): DONE (but see demo11 bug 1 — the
+- Per-floor entities/lights (post-selection-fix): DONE (but see demo11 bug 1 - the
   elevation-inference binding is unreliable for nodes authored against the in-place render;
   revisit alongside the render-at-real-elevation fix). Entity/light chunk binding was
   XZ-only, so on stacked floors a node bound to floor 0's chunk. Root cause: entities

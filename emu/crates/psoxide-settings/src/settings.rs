@@ -154,7 +154,7 @@ impl InputBinding {
         match self {
             InputBinding::Named(name) => name.clone(),
             InputBinding::Character(c) => c.to_uppercase().next().unwrap_or(*c).to_string(),
-            InputBinding::Unbound => "—".to_string(),
+            InputBinding::Unbound => "-".to_string(),
         }
     }
 }
@@ -508,7 +508,7 @@ impl Settings {
             "// PSoXide user settings.\n",
             "//\n",
             "// RON (Rusty Object Notation). Comments and whitespace are\n",
-            "// preserved on load but *not* on save — if you edit this file\n",
+            "// preserved on load but *not* on save - if you edit this file\n",
             "// and the app re-saves it, your comments will go away. Best\n",
             "// practice: edit, don't re-save (or treat this as read-only).\n",
             "//\n",
@@ -715,6 +715,6 @@ mod tests {
     fn binding_labels_are_sensible() {
         assert_eq!(InputBinding::named("Enter").label(), "Enter");
         assert_eq!(InputBinding::Character('j').label(), "J");
-        assert_eq!(InputBinding::Unbound.label(), "—");
+        assert_eq!(InputBinding::Unbound.label(), "-");
     }
 }

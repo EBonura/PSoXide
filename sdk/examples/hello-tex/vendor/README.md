@@ -1,11 +1,11 @@
-# hello-tex — source texture assets
+# hello-tex - source texture assets
 
 Both the **pre-cropped 512×512 source JPGs** and the **cooked
 `.psxt` blobs** (in `../assets/`) live in the repo. Keeping both
 means:
 
 - `make assets` regenerates the `.psxt` byte-for-byte from the
-  committed sources — any fresh clone can rebuild the pipeline
+  committed sources - any fresh clone can rebuild the pipeline
   without downloading extra data.
 - The repo stays small: a 512×512 JPG is ~50-150 KB. The
   multi-megapixel photographs these were cropped from (several
@@ -22,7 +22,7 @@ macOS:
 sips -c 1024 1024 ORIGINAL.jpg --out sdk/examples/hello-tex/vendor/brick-wall.jpg
 ```
 
-Then `make assets` — the cooker re-quantises from the new source.
+Then `make assets` - the cooker re-quantises from the new source.
 Commit both the updated JPG and the regenerated `.psxt`; update
 the milestone golden for `hello-tex` to match.
 
@@ -51,6 +51,6 @@ editor/target/release/psxed tex vendor/brick-wall.jpg \
 ```
 
 The cooker's default **centre-square-crop** is applied before
-resize — so source JPGs don't strictly have to be square. Pass
+resize - so source JPGs don't strictly have to be square. Pass
 `--no-crop` to disable (rarely useful; causes aspect distortion
 on non-square sources), or `--crop X,Y,W,H` for manual control.

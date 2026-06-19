@@ -1,4 +1,4 @@
-// Textured triangle — silicon-matched coverage + plane interpolation.
+// Textured triangle - silicon-matched coverage + plane interpolation.
 //
 // The host (`scanline.rs`) mirrors the CPU rasterizer's
 // `for_each_tri_pixel`: the center-sampled Q32.32 DDA produces one

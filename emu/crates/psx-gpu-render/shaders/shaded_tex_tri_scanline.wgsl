@@ -1,4 +1,4 @@
-// Textured Gouraud-shaded triangle — silicon-matched coverage +
+// Textured Gouraud-shaded triangle - silicon-matched coverage +
 // plane interpolation.
 //
 // The host (`scanline.rs`) mirrors the CPU rasterizer's
@@ -64,7 +64,7 @@ struct ScanlineConsts {
 @group(0) @binding(4) var<storage, read> rows: array<RowState>;
 @group(0) @binding(5) var<uniform> consts: ScanlineConsts;
 
-// Texture sampling, blend, modulation — same as tex_tri_scanline.
+// Texture sampling, blend, modulation - same as tex_tri_scanline.
 
 fn sample_texture(u_in: u32, v_in: u32) -> u32 {
     let u8v = u_in & 0xFFu;
