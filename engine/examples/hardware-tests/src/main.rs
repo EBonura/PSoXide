@@ -37,9 +37,9 @@ const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
 const FONT_CLUT: Clut = Clut::new(320, 256);
 
 const ROWS_PER_PAGE: usize = 6;
-const TEST_COUNT: usize = 170;
+const TEST_COUNT: usize = 173;
 const PAD_POLL_TEST_INDEX: usize = 26;
-const MODE_COUNT: u8 = 15;
+const MODE_COUNT: u8 = 16;
 const CHECK_MODES: [Mode; 11] = [
     Mode::AllChecks,
     Mode::CpuChecks,
@@ -86,6 +86,7 @@ enum Status {
 
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum Mode {
+    ControllerProbe,
     AllChecks,
     CpuChecks,
     MemoryChecks,
@@ -106,6 +107,7 @@ enum Mode {
 impl Mode {
     const fn label(self) -> &'static str {
         match self {
+            Self::ControllerProbe => "CONTROLLER PROBE",
             Self::AllChecks => "ALL CHECKS",
             Self::CpuChecks => "CPU CHECKS",
             Self::MemoryChecks => "RAM CHECKS",
@@ -126,6 +128,7 @@ impl Mode {
 
     const fn hint(self) -> &'static str {
         match self {
+            Self::ControllerProbe => "DOWN=TESTS  NO PAD NEEDED TO READ THIS",
             Self::AllChecks
             | Self::CpuChecks
             | Self::MemoryChecks
@@ -146,6 +149,7 @@ impl Mode {
 
     const fn description(self) -> &'static str {
         match self {
+            Self::ControllerProbe => "RAW PAD HANDSHAKE: NO-WAIT VS ACK-WAIT",
             Self::AllChecks => "ALL STABLE PASS/FAIL CHECKS",
             Self::CpuChecks => "CPU INSTRUCTIONS AND MEMORY ACCESS",
             Self::MemoryChecks => "RAM KSEG AND SCRATCHPAD CHECKS",
@@ -166,6 +170,7 @@ impl Mode {
 
     const fn aux_label(self) -> &'static str {
         match self {
+            Self::ControllerProbe => "ACK",
             Self::AllChecks
             | Self::CpuChecks
             | Self::MemoryChecks
@@ -186,40 +191,42 @@ impl Mode {
 
     const fn index(self) -> u8 {
         match self {
-            Self::AllChecks => 0,
-            Self::CpuChecks => 1,
-            Self::MemoryChecks => 2,
-            Self::IrqChecks => 3,
-            Self::DmaChecks => 4,
-            Self::TimerChecks => 5,
-            Self::GpuChecks => 6,
-            Self::GteChecks => 7,
-            Self::SpuChecks => 8,
-            Self::CdromChecks => 9,
-            Self::SioChecks => 10,
-            Self::CpuScan => 11,
-            Self::GteScan => 12,
-            Self::SpuScan => 13,
-            Self::TimingScan => 14,
+            Self::ControllerProbe => 0,
+            Self::AllChecks => 1,
+            Self::CpuChecks => 2,
+            Self::MemoryChecks => 3,
+            Self::IrqChecks => 4,
+            Self::DmaChecks => 5,
+            Self::TimerChecks => 6,
+            Self::GpuChecks => 7,
+            Self::GteChecks => 8,
+            Self::SpuChecks => 9,
+            Self::CdromChecks => 10,
+            Self::SioChecks => 11,
+            Self::CpuScan => 12,
+            Self::GteScan => 13,
+            Self::SpuScan => 14,
+            Self::TimingScan => 15,
         }
     }
 
     const fn from_index(index: u8) -> Self {
         match index % MODE_COUNT {
-            0 => Self::AllChecks,
-            1 => Self::CpuChecks,
-            2 => Self::MemoryChecks,
-            3 => Self::IrqChecks,
-            4 => Self::DmaChecks,
-            5 => Self::TimerChecks,
-            6 => Self::GpuChecks,
-            7 => Self::GteChecks,
-            8 => Self::SpuChecks,
-            9 => Self::CdromChecks,
-            10 => Self::SioChecks,
-            11 => Self::CpuScan,
-            12 => Self::GteScan,
-            13 => Self::SpuScan,
+            0 => Self::ControllerProbe,
+            1 => Self::AllChecks,
+            2 => Self::CpuChecks,
+            3 => Self::MemoryChecks,
+            4 => Self::IrqChecks,
+            5 => Self::DmaChecks,
+            6 => Self::TimerChecks,
+            7 => Self::GpuChecks,
+            8 => Self::GteChecks,
+            9 => Self::SpuChecks,
+            10 => Self::CdromChecks,
+            11 => Self::SioChecks,
+            12 => Self::CpuScan,
+            13 => Self::GteScan,
+            14 => Self::SpuScan,
             _ => Self::TimingScan,
         }
     }
@@ -1262,6 +1269,21 @@ const TESTS: [TestSpec; TEST_COUNT] = [
         name: "mask bit on CPU->VRAM copy",
         run: test_gpu_cpu_vram_upload_mask,
     },
+    TestSpec {
+        group: "SIO",
+        name: "port 1 handshake strict (ack-paced)",
+        run: test_pad_handshake_strict,
+    },
+    TestSpec {
+        group: "SIO",
+        name: "port 1 /ACK observed each byte",
+        run: test_pad_ack_observed,
+    },
+    TestSpec {
+        group: "SIO",
+        name: "DualShock analog enable handshake",
+        run: test_pad_analog_handshake,
+    },
 ];
 
 struct HardwareTests {
@@ -1278,6 +1300,11 @@ struct HardwareTests {
     info_count: u8,
     page: usize,
     rerun_count: u8,
+    /// Latest raw port-1 poll using the hardware-correct ACK-paced timing.
+    probe_ack: psx_pad::RawPoll,
+    /// Latest raw port-1 poll using the legacy no-wait timing (reproduces the
+    /// slow-original-controller failure for side-by-side comparison).
+    probe_nowait: psx_pad::RawPoll,
 }
 
 #[cfg(target_arch = "mips")]
@@ -1304,7 +1331,9 @@ impl HardwareTests {
     const fn new() -> Self {
         Self {
             font: None,
-            mode: Mode::AllChecks,
+            // Boot straight into the controller probe: it needs no pad input to
+            // read, so a non-working controller can still be diagnosed.
+            mode: Mode::ControllerProbe,
             results: [TestResult::pending(); TEST_COUNT],
             cpu_scan: ScanReport::pending("press x to sweep"),
             gte_scan: ScanReport::pending("press x to sweep"),
@@ -1316,6 +1345,8 @@ impl HardwareTests {
             info_count: 0,
             page: 0,
             rerun_count: 0,
+            probe_ack: psx_pad::RawPoll::NONE,
+            probe_nowait: psx_pad::RawPoll::NONE,
         }
     }
 
@@ -1418,6 +1449,15 @@ impl Scene for HardwareTests {
         self.results[PAD_POLL_TEST_INDEX] = pad_poll_result(ctx.pad);
         self.recount();
 
+        if matches!(self.mode, Mode::ControllerProbe) {
+            // Refresh both timings so the probe shows the legacy no-wait failure
+            // next to the ACK-paced fix. Polled on the update tick (not render)
+            // to keep all SIO traffic on one clock. Each poll selects/deselects
+            // independently, so the two are isolated.
+            self.probe_ack = psx_pad::poll_port1_raw(psx_pad::Pacing::AckWait);
+            self.probe_nowait = psx_pad::poll_port1_raw(psx_pad::Pacing::NoAckWait);
+        }
+
         if ctx.just_pressed(button::UP) {
             self.mode = self.mode.previous();
             self.page = 0;
@@ -1457,6 +1497,7 @@ impl Scene for HardwareTests {
             draw_problem_detail(font, self, self.mode);
         } else {
             match self.mode {
+                Mode::ControllerProbe => draw_controller_probe(font, self),
                 Mode::CpuScan => draw_scan_report(font, self.mode, self.cpu_scan),
                 Mode::GteScan => draw_scan_report(font, self.mode, self.gte_scan),
                 Mode::SpuScan => draw_scan_report(font, self.mode, self.spu_scan),
@@ -1705,6 +1746,154 @@ fn draw_case_diagnostic_pass(
         drawn += 1;
     }
     drawn
+}
+
+/// The boot screen: poll port 1 two ways and show the raw handshake so a
+/// controller can be diagnosed with no working controller needed to navigate.
+/// Column A uses the legacy no-wait timing (which desyncs slow original pads);
+/// column B uses the `/ACK`-paced timing the SDK now ships. On an SCPH-1200 the
+/// two columns disagree (A garbage, B clean); on a fast clone or in the emulator
+/// they agree.
+fn draw_controller_probe(font: &FontAtlas, suite: &HardwareTests) {
+    font.draw_text(8, 30, "PORT 1 RAW HANDSHAKE", (232, 236, 244));
+    font.draw_text(8, 42, "A=LEGACY NO-WAIT  B=/ACK-PACED FIX", (150, 170, 200));
+
+    font.draw_text(8, 58, "A: NO-WAIT", (220, 190, 120));
+    font.draw_text(168, 58, "B: ACK-WAIT", (140, 210, 160));
+
+    draw_probe_column(font, 8, suite.probe_nowait, false);
+    draw_probe_column(font, 168, suite.probe_ack, true);
+
+    let present =
+        suite.probe_ack.mode.is_connected() || suite.probe_nowait.mode.is_connected();
+    let aok = probe_column_ok(suite.probe_ack);
+    let nwok = probe_column_ok(suite.probe_nowait);
+    let (msg, color) = if !present {
+        ("NO PAD ON PORT 1 - CHECK CABLE/PORT", Status::Warn.color())
+    } else if aok && !nwok {
+        ("SLOW PAD: NEEDS ACK PACING - FIX OK", Status::Pass.color())
+    } else if aok && nwok {
+        ("PAD OK ON BOTH TIMINGS", Status::Pass.color())
+    } else if !aok && nwok {
+        ("REGRESSION: ACK BROKE A NO-WAIT PAD", Status::Fail.color())
+    } else {
+        ("PAD ANSWERS BUT HANDSHAKE UNSTABLE", Status::Fail.color())
+    };
+    font.draw_text(8, 168, "VERDICT", (140, 160, 190));
+    font.draw_text(8, 180, msg, color);
+    font.draw_text(8, 200, "ANALOG LED ON => MODE 73 EXPECTED", (112, 136, 170));
+    font.draw_text(8, 212, "RERUNS LIVE. DOWN = TEST DASHBOARD", (150, 170, 200));
+}
+
+/// Draw one timing column of the controller probe at horizontal origin `x`.
+fn draw_probe_column(font: &FontAtlas, x: i16, raw: psx_pad::RawPoll, ack_paced: bool) {
+    let ok = probe_column_ok(raw);
+    let ok_color = if ok {
+        Status::Pass.color()
+    } else {
+        Status::Fail.color()
+    };
+    let label = (150, 170, 200);
+    let val = (224, 228, 234);
+    let bad = Status::Fail.color();
+
+    font.draw_text(x, 72, "ID", label);
+    font.draw_text(
+        x + 40,
+        72,
+        hex2(raw.id_high).as_str(),
+        if raw.id_high == 0x5A { val } else { bad },
+    );
+    font.draw_text(x + 56, 72, hex2(raw.id_low).as_str(), val);
+
+    font.draw_text(x, 84, "MODE", label);
+    font.draw_text(x + 40, 84, mode_text(raw.mode), ok_color);
+
+    font.draw_text(x, 96, "BTN", label);
+    font.draw_text(x + 40, 96, hex2(raw.buttons_low).as_str(), val);
+    font.draw_text(x + 56, 96, hex2(raw.buttons_high).as_str(), val);
+
+    font.draw_text(x, 108, "LXY", label);
+    font.draw_text(x + 40, 108, hex2(raw.sticks.left_x).as_str(), val);
+    font.draw_text(x + 56, 108, hex2(raw.sticks.left_y).as_str(), val);
+
+    font.draw_text(x, 120, "RXY", label);
+    font.draw_text(x + 40, 120, hex2(raw.sticks.right_x).as_str(), val);
+    font.draw_text(x + 56, 120, hex2(raw.sticks.right_y).as_str(), val);
+
+    font.draw_text(x, 132, "ACK", label);
+    if ack_paced {
+        font.draw_text(x + 40, 132, ack_frac(raw).as_str(), val);
+    } else {
+        font.draw_text(x + 40, 132, "n/a", (120, 130, 150));
+    }
+
+    font.draw_text(x, 144, "RES", label);
+    let res = if !raw.mode.is_connected() {
+        "NO PAD"
+    } else if ok {
+        "CLEAN"
+    } else {
+        "DESYNC"
+    };
+    font.draw_text(x + 40, 144, res, ok_color);
+}
+
+/// A column is clean when something answered with a valid 0x5A magic and a
+/// classified mode (not the `Unknown` desync bucket).
+fn probe_column_ok(raw: psx_pad::RawPoll) -> bool {
+    raw.mode.is_connected()
+        && !matches!(raw.mode, psx_pad::PadMode::Unknown)
+        && raw.id_high == 0x5A
+}
+
+const fn mode_text(mode: psx_pad::PadMode) -> &'static str {
+    match mode {
+        psx_pad::PadMode::Digital => "DIGITAL 41",
+        psx_pad::PadMode::Analog => "ANALOG 73",
+        psx_pad::PadMode::Config => "CONFIG F3",
+        psx_pad::PadMode::Unknown => "UNKNOWN",
+        psx_pad::PadMode::Disconnected => "NONE",
+    }
+}
+
+struct Hex2 {
+    bytes: [u8; 2],
+}
+
+impl Hex2 {
+    fn as_str(&self) -> &str {
+        unsafe { core::str::from_utf8_unchecked(&self.bytes) }
+    }
+}
+
+fn hex2(value: u8) -> Hex2 {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    Hex2 {
+        bytes: [HEX[(value >> 4) as usize], HEX[(value & 0xF) as usize]],
+    }
+}
+
+struct AckFrac {
+    bytes: [u8; 3],
+}
+
+impl AckFrac {
+    fn as_str(&self) -> &str {
+        unsafe { core::str::from_utf8_unchecked(&self.bytes) }
+    }
+}
+
+/// "acked/needed" -- how many of the bytes that should have been acknowledged
+/// actually were. The final packet byte is never acknowledged, so `needed` is
+/// `exchanges - 1`.
+fn ack_frac(raw: psx_pad::RawPoll) -> AckFrac {
+    let needed = raw.exchanges.saturating_sub(1);
+    let mask = (1u16 << needed.min(15)).wrapping_sub(1);
+    let acked = (raw.ack_seen & mask).count_ones() as u8;
+    AckFrac {
+        bytes: [b'0' + acked.min(9), b'/', b'0' + needed.min(9)],
+    }
 }
 
 fn test_count_for_mode(mode: Mode) -> usize {
@@ -4176,6 +4365,65 @@ fn pad_poll_result(pad: psx_engine::PadState) -> TestResult {
         TestResult::info(1, pad.id_low as u32, "connected")
     } else {
         TestResult::info(0, 0, "optional")
+    }
+}
+
+/// Strict port-1 handshake under the shipping ACK-paced timing: a connected
+/// controller must answer with the 0x5A magic and a classified mode. A desync
+/// (wrong magic / Unknown mode) is a hard FAIL, not the old benign "optional".
+/// An empty port stays optional -- absence is not a failure.
+fn test_pad_handshake_strict() -> TestResult {
+    let raw = psx_pad::poll_port1_raw(psx_pad::Pacing::AckWait);
+    let observed = ((raw.id_high as u32) << 8) | raw.id_low as u32;
+    if !raw.mode.is_connected() {
+        return TestResult::info(0, observed, "optional");
+    }
+    if raw.id_high == 0x5A && !matches!(raw.mode, psx_pad::PadMode::Unknown) {
+        TestResult::pass(0x5A41, observed, "clean")
+    } else {
+        TestResult::fail(0x5A41, observed, "desync")
+    }
+}
+
+/// The connected controller should pull `/ACK` low for every non-final byte
+/// under the ACK-paced timing. PASS when every expected ACK was seen; WARN when
+/// a pad answers but is not acknowledging (reading blind -- the SCPH-1200
+/// failure mode that the legacy no-wait path papered over). Empty port stays
+/// optional. `observed` packs acked count (hi byte) and needed count (lo byte).
+fn test_pad_ack_observed() -> TestResult {
+    let raw = psx_pad::poll_port1_raw(psx_pad::Pacing::AckWait);
+    let needed = raw.exchanges.saturating_sub(1);
+    let mask = (1u16 << needed.min(15)).wrapping_sub(1);
+    let acked = (raw.ack_seen & mask).count_ones();
+    let observed = ((acked) << 8) | needed as u32;
+    if !raw.mode.is_connected() {
+        return TestResult::info(0, observed, "optional");
+    }
+    if raw.ack_complete() {
+        TestResult::pass(needed as u32, observed, "acks ok")
+    } else {
+        TestResult::warn(needed as u32, observed, "no ack")
+    }
+}
+
+/// DualShock analog handshake: request analog mode via the same ACK-paced config
+/// transaction games use, then confirm the pad reports ID 0x73 with stick bytes.
+/// A digital-only pad is INFO, not a failure; an empty port is optional.
+fn test_pad_analog_handshake() -> TestResult {
+    if !psx_pad::poll_port1().is_connected() {
+        return TestResult::info(0, 0, "optional");
+    }
+    let became_analog = psx_pad::enable_analog_port1();
+    let raw = psx_pad::poll_port1_raw(psx_pad::Pacing::AckWait);
+    let observed = ((raw.id_low as u32) << 16)
+        | ((raw.sticks.left_x as u32) << 8)
+        | raw.sticks.left_y as u32;
+    if became_analog && raw.id_low == 0x73 {
+        TestResult::pass(0x73, observed, "analog")
+    } else if raw.mode.is_connected() {
+        TestResult::info(raw.id_low as u32, observed, "digital-only")
+    } else {
+        TestResult::warn(0x73, observed, "lost pad")
     }
 }
 
