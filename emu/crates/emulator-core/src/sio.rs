@@ -126,6 +126,17 @@ pub struct Sio0 {
     /// transitions (deselect → select) to reset device state
     /// machines, matching hardware.
     last_joyn: bool,
+    /// Opt-in: model a slow original controller (e.g. SCPH-1200) that only
+    /// becomes ready for the next byte once it has pulsed `/ACK`. A host that
+    /// clocks the next byte without waiting for that pulse desyncs the packet.
+    /// Off by default; the idealized fast pad above is what normal runs use.
+    slow_pad: bool,
+    /// While `slow_pad`: the cycle the device is ready for the next byte (the
+    /// current byte's `/ACK` deadline). `None` between transactions.
+    slow_ready_cycle: Option<u64>,
+    /// While `slow_pad`: set once a byte was clocked before the device was
+    /// ready; the rest of the packet then returns `0xFF` until deselect.
+    slow_desynced: bool,
 }
 
 impl Sio0 {
@@ -163,6 +174,21 @@ impl Sio0 {
                 .with_memcard(crate::pad::MemoryCard::new()),
             port2: crate::pad::PortDevice::empty().with_memcard(crate::pad::MemoryCard::new()),
             last_joyn: false,
+            slow_pad: false,
+            slow_ready_cycle: None,
+            slow_desynced: false,
+        }
+    }
+
+    /// Enable or disable the slow original-controller timing model. When on, a
+    /// poll that does not wait for each byte's `/ACK` pulse desyncs, reproducing
+    /// an SCPH-1200 against a host that clocks bytes back-to-back. Used by the
+    /// regression test and the `--slow-pad` headless flag.
+    pub fn set_slow_pad(&mut self, slow: bool) {
+        self.slow_pad = slow;
+        if !slow {
+            self.slow_ready_cycle = None;
+            self.slow_desynced = false;
         }
     }
 
@@ -456,19 +482,34 @@ impl Sio0 {
         }
         let (rx, ack, _device_present, ack_delay_ticks) = if self.ctrl & ctrl_bit::JOYN_OUTPUT != 0
         {
-            let port = self.active_port();
-            let result = port.exchange_detailed_at(value, now);
-            let ack_delay_ticks = if port.selected_is_memcard() {
-                MEMCARD_ACK_DELAY_TICKS
+            // Slow original-controller timing: a byte clocked before the
+            // previous byte's `/ACK` deadline arrives while the device is still
+            // busy, so it misses the clock and the rest of the packet desyncs.
+            if self.slow_pad {
+                if self.slow_ready_cycle.is_some_and(|ready| now < ready) {
+                    self.slow_desynced = true;
+                }
+                self.slow_ready_cycle = Some(now.saturating_add(self.transfer_ticks()));
+            }
+            if self.slow_pad && self.slow_desynced {
+                // The device missed the clock; it returns idle and does not
+                // advance its state machine.
+                (0xFF, false, true, PAD_ACK_DELAY_TICKS)
             } else {
-                PAD_ACK_DELAY_TICKS
-            };
-            (
-                result.rx,
-                result.ack,
-                result.device_present,
-                ack_delay_ticks,
-            )
+                let port = self.active_port();
+                let result = port.exchange_detailed_at(value, now);
+                let ack_delay_ticks = if port.selected_is_memcard() {
+                    MEMCARD_ACK_DELAY_TICKS
+                } else {
+                    PAD_ACK_DELAY_TICKS
+                };
+                (
+                    result.rx,
+                    result.ack,
+                    result.device_present,
+                    ack_delay_ticks,
+                )
+            }
         } else {
             (0xFF, false, true, PAD_ACK_DELAY_TICKS)
         };
@@ -525,6 +566,9 @@ impl Sio0 {
             self.port1.deselect();
             self.port2.deselect();
             self.last_joyn = false;
+            // Keep the slow-pad opt-in, drop its per-transaction state.
+            self.slow_ready_cycle = None;
+            self.slow_desynced = false;
             return;
         }
         if value & ctrl_bit::ACK != 0 {
@@ -551,6 +595,9 @@ impl Sio0 {
             self.ack_end_deadline = None;
             self.port1.deselect();
             self.port2.deselect();
+            // A fresh select starts a clean packet for the slow-pad model.
+            self.slow_ready_cycle = None;
+            self.slow_desynced = false;
         }
         self.last_joyn = new_joyn;
         self.ctrl = new_ctrl;
@@ -1093,6 +1140,68 @@ mod tests {
             Some(11 + DEFAULT_TRANSFER_TICKS),
             "new synchronous byte should replace the next delayed IRQ deadline"
         );
+    }
+
+    #[test]
+    fn slow_pad_desyncs_without_ack_wait() {
+        use crate::pad::{button, ButtonState, DigitalPad, PortDevice};
+
+        let mut sio = Sio0::new();
+        sio.attach_port1(PortDevice::empty().with_pad(DigitalPad::new()));
+        sio.set_port1_buttons(ButtonState::from_bits(button::START));
+        sio.set_slow_pad(true);
+        sio.write16(Sio0::BASE + 0xE, 0x0088); // baud -> transfer_ticks = 1088
+        sio.write16(Sio0::BASE + 0xA, ctrl_bit::JOYN_OUTPUT); // select port 1
+
+        let mut now = 100u64;
+        // The select byte is always fine (no prior /ACK deadline to beat).
+        sio.write8_at(Sio0::BASE, 0x01, now);
+        assert_eq!(sio.pop_rx(), 0xFF);
+
+        // The command byte is clocked only a few cycles later -- long before the
+        // slow pad's /ACK deadline (now + 1088) -- so the device misses it.
+        now += 8;
+        sio.write8_at(Sio0::BASE, 0x42, now);
+        assert_eq!(
+            sio.pop_rx(),
+            0xFF,
+            "a slow pad must not return its 0x41 id when the host skips the /ACK wait"
+        );
+
+        // Every subsequent byte of the packet stays desynced.
+        now += 8;
+        sio.write8_at(Sio0::BASE, 0x00, now);
+        assert_eq!(sio.pop_rx(), 0xFF, "packet remains desynced after a missed byte");
+    }
+
+    #[test]
+    fn slow_pad_reads_clean_with_ack_wait() {
+        use crate::pad::{button, ButtonState, DigitalPad, PortDevice};
+
+        let mut sio = Sio0::new();
+        sio.attach_port1(PortDevice::empty().with_pad(DigitalPad::new()));
+        sio.set_port1_buttons(ButtonState::from_bits(button::START | button::CROSS));
+        sio.set_slow_pad(true);
+        sio.write16(Sio0::BASE + 0xE, 0x0088);
+        sio.write16(Sio0::BASE + 0xA, ctrl_bit::JOYN_OUTPUT);
+
+        // Mirror the ACK-paced driver: wait past each byte's /ACK deadline
+        // (transfer_ticks = 0x88 * 8 = 1088) before clocking the next byte.
+        let gap = 0x88u64 * 8 + 16;
+        let mut now = 100u64;
+        let mut ex = |sio: &mut Sio0, now: &mut u64, tx: u8| -> u8 {
+            sio.write8_at(Sio0::BASE, tx, *now);
+            sio.tick(*now);
+            let rx = sio.read8(Sio0::BASE).unwrap();
+            *now += gap; // host waited for /ACK before clocking the next byte
+            rx
+        };
+
+        assert_eq!(ex(&mut sio, &mut now, 0x01), 0xFF);
+        assert_eq!(ex(&mut sio, &mut now, 0x42), 0x41, "id after /ACK wait");
+        assert_eq!(ex(&mut sio, &mut now, 0x00), 0x5A, "magic after /ACK wait");
+        assert_eq!(ex(&mut sio, &mut now, 0x00), 0xF7, "buttons1 (START)");
+        assert_eq!(ex(&mut sio, &mut now, 0x00), 0xBF, "buttons2 (CROSS)");
     }
 
     #[test]
