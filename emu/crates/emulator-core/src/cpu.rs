@@ -20,6 +20,7 @@ use psx_trace::InstructionRecord;
 use thiserror::Error;
 
 use crate::bus::Bus;
+use crate::freelook::{self, FreelookState};
 use psx_gte_core::Gte;
 
 mod branch;
@@ -198,6 +199,9 @@ pub struct Cpu {
     /// COP2 -- Geometry Transformation Engine. Holds 32 data + 32
     /// control registers and dispatches the GTE function set.
     cop2: Gte,
+    /// Optional debug freelook camera delta injected into the GTE view
+    /// transform for RTPS/RTPT. Off by default; set by the frontend.
+    freelook: FreelookState,
     /// Depth of nested exception handlers. Incremented on every
     /// exception entry (IRQ, syscall, break) and decremented on
     /// every `RFE`. `in_isr()` returns `true` iff this is > 0.
@@ -264,9 +268,17 @@ impl Cpu {
             irq_line_high_steps: 0,
             should_take_interrupt_steps: 0,
             cop2: Gte::new(),
+            freelook: FreelookState::default(),
             isr_depth: 0,
             clean_irq_entry: false,
         }
+    }
+
+    /// Set the debug freelook camera delta (see [`FreelookState`]). The
+    /// frontend calls this once per frame; `FreelookState::default()`
+    /// (disabled) turns it off.
+    pub fn set_freelook(&mut self, freelook: FreelookState) {
+        self.freelook = freelook;
     }
 
     /// `true` while the CPU is inside any exception handler (at any
@@ -718,6 +730,10 @@ impl Cpu {
             // MAC0 has result-read latency: snapshot the now-settled prior
             // MAC0 so a too-soon read returns it (see gte_mac0_* docs).
             self.gte_mac0_stale = self.cop2.read_data(24);
+            // FREELOOK (debug): compose the camera delta onto the view
+            // transform for RTPS/RTPT only; restored right after the op.
+            let fl = self.freelook;
+            let freelook_saved = freelook::apply_for_op(&mut self.cop2, &fl, instr);
             // HWB-010 hazard: an MVMVA reading V0 issued within the MTC2
             // VXY0 commit window computes its MAC1 phase with the previous
             // V0.x (see the gte_v0x_hazard field docs).
@@ -729,6 +745,9 @@ impl Cpu {
                 self.cop2.execute_with_stale_v0x(instr, self.gte_prev_v0x);
             } else {
                 self.cop2.execute(instr);
+            }
+            if let Some(saved) = freelook_saved {
+                freelook::restore(&mut self.cop2, &saved);
             }
             self.gte_busy_until = bus.cycles() + Gte::command_cycles(instr) as u64;
             self.gte_mac0_ready_at = if self.tick.wrapping_sub(self.gte_last_write_tick) <= 2 {
