@@ -1,0 +1,70 @@
+name: Deploy web emulator to Pages
+
+# Builds the editor-less emulator frontend to wasm (release) and publishes it to
+# GitHub Pages. Release is mandatory: a debug wasm emulator is ~10-50x slower.
+on:
+  push:
+    branches: [main, web-build]
+    paths:
+      - "emu/**"
+      - "crates/**"
+      - "sdk/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/deploy-web.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deploy at a time; let an in-progress run finish.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  TRUNK_VERSION: "0.21.14"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install wasm target (honors rust-toolchain.toml)
+        run: rustup target add wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - name: Install Trunk
+        run: |
+          curl -fsSL "https://github.com/trunk-rs/trunk/releases/download/v${TRUNK_VERSION}/trunk-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar -xzf - -C "$HOME/.cargo/bin"
+          trunk --version
+
+      - name: Configure Pages (self-enables on first run)
+        uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
+      - name: Build (release, emulator-only, /PSoXide/ base)
+        working-directory: emu/crates/frontend
+        run: trunk build --release --public-url "/PSoXide/"
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: emu/crates/frontend/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
