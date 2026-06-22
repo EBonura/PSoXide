@@ -12,12 +12,17 @@ use emulator_core::{
 };
 use psoxide_settings::library::{GameKind, Region};
 use psoxide_settings::{ConfigPaths, Library, LibraryEntry, Settings};
-use psx_iso::{build_world_pack, Disc, Exe, IsoBuilder, SECTOR_BYTES};
+use psx_iso::{Disc, Exe, SECTOR_BYTES};
+#[cfg(feature = "editor")]
+use psx_iso::{build_world_pack, IsoBuilder};
 use psx_trace::InstructionRecord;
+#[cfg(feature = "editor")]
 use psxed_ui::{EditorPlaytestStatus, EditorWorkspace};
 
 use crate::burn::{validate_burn_target_path, BurnState};
+#[cfg(feature = "editor")]
 use crate::embedded_playtest::EmbeddedPlaytestState;
+#[cfg(feature = "editor")]
 use crate::playtest_input::{PlaytestInputEvent, PlaytestInputTape, Port1PadSample};
 use crate::ui;
 use crate::ui::hud::HudState;
@@ -135,17 +140,27 @@ pub enum Workspace {
     /// Emulator/debugger workspace.
     Emulator,
     /// Mouse/keyboard editor workspace.
+    #[cfg(feature = "editor")]
     Editor,
 }
 
 impl Workspace {
-    /// True when editor panels own the central UI.
+    /// True when editor panels own the central UI. Always false without the
+    /// editor feature (there is no editor workspace to switch into).
     pub const fn is_editor(self) -> bool {
-        matches!(self, Self::Editor)
+        #[cfg(feature = "editor")]
+        {
+            matches!(self, Self::Editor)
+        }
+        #[cfg(not(feature = "editor"))]
+        {
+            false
+        }
     }
 }
 
 /// Work to perform after the shared editor-playtest MIPS build exits.
+#[cfg(feature = "editor")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum EditorBuildCompletion {
     /// Wrap the built runtime into a CUE/BIN disc and load it into the
@@ -194,18 +209,23 @@ pub struct AppState {
     pub workspace: Workspace,
     /// Embedded editor workspace. Kept alive while hidden so editor
     /// state survives a quick trip back to the Menu/emulator.
+    #[cfg(feature = "editor")]
     pub editor: EditorWorkspace,
     /// In-process playtest launched from the editor viewport.
+    #[cfg(feature = "editor")]
     pub embedded_playtest: EmbeddedPlaytestState,
     /// Recorded/replayed input for embedded editor play sessions.
+    #[cfg(feature = "editor")]
     playtest_input_tape: PlaytestInputTape,
     /// Editor project directory observed at the last
     /// [`AppState::sync_embedded_playtest_with_editor_project`]
     /// call. When the editor's current project_dir diverges, the
     /// embedded playtest belongs to a different project and gets
     /// stopped so the viewport doesn't keep showing stale output.
+    #[cfg(feature = "editor")]
     editor_project_dir_seen: PathBuf,
     /// Deferred action attached to the currently running editor build.
+    #[cfg(feature = "editor")]
     editor_build_completion: Option<EditorBuildCompletion>,
     /// Background `make examples` job launched from the Examples menu.
     examples_build_child: Option<Child>,
@@ -320,12 +340,15 @@ impl AppState {
         // The new model is project = directory under
         // editor/projects/. No automated migration; a stale
         // workspace.ron is just a starter snapshot.
-        let legacy_workspace = paths.editor_dir().join("workspace.ron");
-        if legacy_workspace.is_file() {
-            eprintln!(
-                "[frontend] legacy editor/workspace.ron at {} ignored - projects now live under editor/projects/",
-                legacy_workspace.display()
-            );
+        #[cfg(feature = "editor")]
+        {
+            let legacy_workspace = paths.editor_dir().join("workspace.ron");
+            if legacy_workspace.is_file() {
+                eprintln!(
+                    "[frontend] legacy editor/workspace.ron at {} ignored - projects now live under editor/projects/",
+                    legacy_workspace.display()
+                );
+            }
         }
 
         let settings = match Settings::load(&paths.settings_file()) {
@@ -336,22 +359,25 @@ impl AppState {
             }
         };
 
-        let preferred_dir = settings
-            .editor
-            .last_project_dir
-            .clone()
-            .unwrap_or_else(psxed_project::default_project_dir);
-        let editor = EditorWorkspace::open_directory(&preferred_dir)
-            .or_else(|first_err| {
-                eprintln!(
-                    "[frontend] open editor project at {} failed: {first_err}; falling back to default",
-                    preferred_dir.display()
-                );
-                EditorWorkspace::open_directory(psxed_project::default_project_dir())
-            })
-            .unwrap_or_else(|err| {
-                panic!("open default editor project: {err}");
-        });
+        #[cfg(feature = "editor")]
+        let editor = {
+            let preferred_dir = settings
+                .editor
+                .last_project_dir
+                .clone()
+                .unwrap_or_else(psxed_project::default_project_dir);
+            EditorWorkspace::open_directory(&preferred_dir)
+                .or_else(|first_err| {
+                    eprintln!(
+                        "[frontend] open editor project at {} failed: {first_err}; falling back to default",
+                        preferred_dir.display()
+                    );
+                    EditorWorkspace::open_directory(psxed_project::default_project_dir())
+                })
+                .unwrap_or_else(|err| {
+                    panic!("open default editor project: {err}");
+                })
+        };
         let library = Library::load_or_empty(&paths.library_file());
 
         // Legacy env-var side-load path: if PSOXIDE_EXE or
@@ -364,13 +390,19 @@ impl AppState {
         let autorun = bus.is_some() && env_flag("PSOXIDE_AUTORUN");
 
         let initial_gpu_resync_generation = if bus.is_some() { 1 } else { 0 };
+        #[cfg(feature = "editor")]
         let editor_project_dir_seen = editor.project_dir().to_path_buf();
         let mut out = Self {
             workspace: Workspace::Emulator,
+            #[cfg(feature = "editor")]
             editor,
+            #[cfg(feature = "editor")]
             embedded_playtest: EmbeddedPlaytestState::default(),
+            #[cfg(feature = "editor")]
             playtest_input_tape: PlaytestInputTape::default(),
+            #[cfg(feature = "editor")]
             editor_project_dir_seen,
+            #[cfg(feature = "editor")]
             editor_build_completion: None,
             examples_build_child: None,
             burn: BurnState::default(),
@@ -427,6 +459,7 @@ impl AppState {
         out.refresh_menu_library();
         out.menu
             .sync_fast_boot_label(out.settings.emulator.fast_boot_disc);
+        #[cfg(feature = "editor")]
         out.menu.sync_editor_label(out.workspace.is_editor());
         out.sync_menu_settings_paths();
         out
@@ -435,14 +468,19 @@ impl AppState {
 
 impl AppState {
     /// Append guest-runtime debug output captured from the telemetry port.
+    /// Without the editor there is no Play debug terminal to receive it, so
+    /// the lines are dropped.
     pub fn append_guest_debug_logs(
         &mut self,
         logs: Vec<emulator_core::telemetry::GuestDebugLogLine>,
     ) {
+        #[cfg(feature = "editor")]
         self.editor.append_play_debug_terminal_lines(
             logs.into_iter()
                 .map(|line| format!("[f{} c{}] {}", line.frame, line.cycles, line.text)),
         );
+        #[cfg(not(feature = "editor"))]
+        let _ = logs;
     }
 
     /// Rebuild the emulator state around `entry`. Same flow the
@@ -562,6 +600,7 @@ impl AppState {
         self.gpr_snapshot = None;
         self.current_game = Some(entry.clone());
         self.menu.sync_run_label(true);
+        #[cfg(feature = "editor")]
         self.menu.sync_editor_label(false);
         self.status_message = Some((
             format!("Launched: {} ({boot_mode})", entry.title),
@@ -896,18 +935,25 @@ impl AppState {
                         .as_ref()
                         .is_some_and(|root| path_is_under(&e.path, root)) =>
                 {
-                    let root = project_root.as_ref().expect("checked above");
-                    if let Some(metadata) = project_build_menu_metadata(&e.path, root) {
-                        if !metadata.current {
-                            continue;
+                    // Project-baked discs are surfaced from their project.ron
+                    // metadata, which lives in the editor crates. Without the
+                    // editor feature there is no project metadata to read, so
+                    // project CUEs are skipped.
+                    #[cfg(feature = "editor")]
+                    {
+                        let root = project_root.as_ref().expect("checked above");
+                        if let Some(metadata) = project_build_menu_metadata(&e.path, root) {
+                            if !metadata.current {
+                                continue;
+                            }
+                            projects.push(MenuLibraryItem {
+                                id: project_build_launch_id(&e.path),
+                                title: metadata.title,
+                                subtitle: metadata.subtitle,
+                                burnable: true,
+                                launchable: true,
+                            });
                         }
-                        projects.push(MenuLibraryItem {
-                            id: project_build_launch_id(&e.path),
-                            title: metadata.title,
-                            subtitle: metadata.subtitle,
-                            burnable: true,
-                            launchable: true,
-                        });
                     }
                 }
                 // Retail CUEs are not shown directly -- their BIN is.
@@ -1084,6 +1130,7 @@ impl AppState {
     /// Persist the embedded editor project if it has unsaved edits,
     /// and remember which project directory is active so the next
     /// launch reopens it.
+    #[cfg(feature = "editor")]
     pub fn save_editor_project(&mut self) -> Result<bool, String> {
         let saved = self
             .editor
@@ -1122,6 +1169,13 @@ impl AppState {
         }
     }
 
+}
+
+/// Editor-workspace orchestration: entering/leaving the editor, the embedded
+/// Play state machine, project builds, and input-tape recording/replay. The
+/// whole surface drops out without the `editor` feature.
+#[cfg(feature = "editor")]
+impl AppState {
     /// Enter the embedded editor workspace.
     pub fn open_editor_workspace(&mut self) {
         self.running = false;
@@ -1668,7 +1722,9 @@ impl AppState {
         }
         Ok(message)
     }
+}
 
+impl AppState {
     /// Flush any dirty memory-card state on port 1 back to its
     /// `<config>/games/<id>/memcard-1.mcd` file. A no-op when no
     /// card is attached or when no writes have landed since load.
@@ -2247,6 +2303,7 @@ fn repo_root_dir() -> PathBuf {
 
 /// File the editor-playtest build's stdout+stderr is captured to, so a failed
 /// Play surfaces the real compiler error instead of just an exit code.
+#[cfg(feature = "editor")]
 fn editor_playtest_build_log_path() -> PathBuf {
     repo_root_dir()
         .join("logs")
@@ -2256,6 +2313,7 @@ fn editor_playtest_build_log_path() -> PathBuf {
 /// Build a one-line failure detail from the captured build log: the first
 /// actionable compiler error line, plus where to read the full log. Falls back
 /// to just the log path when the log can't be read or has no obvious error.
+#[cfg(feature = "editor")]
 fn build_log_failure_detail(log_path: &std::path::Path) -> String {
     let where_full = format!("Full log: {}", log_path.display());
     let Ok(text) = std::fs::read_to_string(log_path) else {
@@ -2281,6 +2339,7 @@ fn build_log_failure_detail(log_path: &std::path::Path) -> String {
 
 /// Clamp a status string to `max` chars on a char boundary, appending an
 /// ellipsis when truncated, so a long compiler line cannot blow out the toast.
+#[cfg(feature = "editor")]
 fn truncate_for_status(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
         return text.to_string();
@@ -2290,6 +2349,7 @@ fn truncate_for_status(text: &str, max: usize) -> String {
     out
 }
 
+#[cfg(feature = "editor")]
 fn editor_playtest_exe_path() -> PathBuf {
     repo_root_dir()
         .join("build")
@@ -2299,6 +2359,7 @@ fn editor_playtest_exe_path() -> PathBuf {
         .join("editor-playtest.exe")
 }
 
+#[cfg(feature = "editor")]
 fn editor_playtest_disc_path() -> PathBuf {
     repo_root_dir()
         .join("build")
@@ -2310,9 +2371,12 @@ fn editor_playtest_disc_path() -> PathBuf {
 
 /// Wrap the current editor-playtest executable and generated world pack into
 /// the local embedded playtest disc image.
+#[cfg(feature = "editor")]
 pub(crate) const DEFAULT_EMBEDDED_PLAYTEST_VOLUME_ID: &str = "PSOXIDE";
+#[cfg(feature = "editor")]
 const ISO_VOLUME_ID_BYTES: usize = 32;
 
+#[cfg(feature = "editor")]
 pub(crate) fn build_embedded_playtest_disc(volume_id: &str) -> Result<PathBuf, String> {
     let exe_path = editor_playtest_exe_path();
     let exe_bytes = std::fs::read(&exe_path).map_err(|e| format!("{}: {e}", exe_path.display()))?;
@@ -2333,10 +2397,12 @@ pub(crate) fn build_embedded_playtest_disc(volume_id: &str) -> Result<PathBuf, S
     Ok(cue_path)
 }
 
+#[cfg(feature = "editor")]
 fn write_single_data_track_cue(cue_path: &Path, bin_path: &Path) -> Result<(), String> {
     write_cue(cue_path, bin_path, &[])
 }
 
+#[cfg(feature = "editor")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct CddaCueTrack {
     number: u8,
@@ -2344,6 +2410,7 @@ struct CddaCueTrack {
     index1_sector: u32,
 }
 
+#[cfg(feature = "editor")]
 fn write_cue(cue_path: &Path, bin_path: &Path, cdda_tracks: &[CddaCueTrack]) -> Result<(), String> {
     let file_name = bin_path
         .file_name()
@@ -2363,6 +2430,7 @@ fn write_cue(cue_path: &Path, bin_path: &Path, cdda_tracks: &[CddaCueTrack]) -> 
     std::fs::write(cue_path, cue).map_err(|e| format!("write {}: {e}", cue_path.display()))
 }
 
+#[cfg(feature = "editor")]
 fn cue_msf(frames: u32) -> String {
     format!(
         "{:02}:{:02}:{:02}",
@@ -2372,6 +2440,7 @@ fn cue_msf(frames: u32) -> String {
     )
 }
 
+#[cfg(feature = "editor")]
 fn append_cdda_tracks_to_image(
     image: &mut Vec<u8>,
     payloads: &[PathBuf],
@@ -2403,6 +2472,7 @@ fn append_cdda_tracks_to_image(
     Ok(cue_tracks)
 }
 
+#[cfg(feature = "editor")]
 fn embedded_playtest_disc_image(
     volume_id: &str,
     exe_bytes: Vec<u8>,
@@ -2430,6 +2500,7 @@ fn embedded_playtest_disc_image(
     Ok(builder.build_bin())
 }
 
+#[cfg(feature = "editor")]
 fn embedded_playtest_system_area() -> Result<Option<Vec<u8>>, String> {
     let Some(path) = std::env::var_os("PSOXIDE_SYSTEM_AREA") else {
         return Ok(None);
@@ -2444,6 +2515,7 @@ fn embedded_playtest_system_area() -> Result<Option<Vec<u8>>, String> {
     })
 }
 
+#[cfg(feature = "editor")]
 fn extract_playstation_system_area(bytes: &[u8]) -> Result<Vec<u8>, String> {
     const COOKED_BYTES: usize = 16 * psx_iso::iso9660::SECTOR_SIZE;
     const RAW_BYTES: usize = 16 * psx_iso::iso9660::RAW_SECTOR_SIZE;
@@ -2465,6 +2537,7 @@ fn extract_playstation_system_area(bytes: &[u8]) -> Result<Vec<u8>, String> {
     ))
 }
 
+#[cfg(feature = "editor")]
 fn looks_like_raw_sector(sector: &[u8]) -> bool {
     sector.len() >= SECTOR_BYTES
         && sector[0] == 0x00
@@ -2472,6 +2545,7 @@ fn looks_like_raw_sector(sector: &[u8]) -> bool {
         && sector[1..11] == [0xFF; 10]
 }
 
+#[cfg(feature = "editor")]
 fn editor_playtest_generated_dir() -> PathBuf {
     repo_root_dir()
         .join("engine")
@@ -2480,6 +2554,7 @@ fn editor_playtest_generated_dir() -> PathBuf {
         .join("generated")
 }
 
+#[cfg(feature = "editor")]
 fn embedded_cdda_track_payloads() -> Result<Vec<PathBuf>, String> {
     let tracks_file =
         editor_playtest_generated_dir().join(psxed_project::playtest::CDDA_TRACKS_FILENAME);
@@ -2499,6 +2574,7 @@ fn embedded_cdda_track_payloads() -> Result<Vec<PathBuf>, String> {
     Ok(out)
 }
 
+#[cfg(feature = "editor")]
 fn embedded_world_pack_payload() -> Result<Option<Vec<u8>>, String> {
     let generated_dir = editor_playtest_generated_dir();
     let chunks_dir = generated_dir.join(psxed_project::playtest::STREAM_CHUNKS_DIRNAME);
@@ -2547,6 +2623,7 @@ fn embedded_world_pack_payload() -> Result<Option<Vec<u8>>, String> {
 /// `ui_{index}.psxt` chunk is keyed by its cooked asset index; `ui_pack_order.txt`
 /// fixes the on-disc order so the offsets match the cooked `UI_PACK_TOC`. Returns
 /// `None` when the project cooked no streamed UI assets.
+#[cfg(feature = "editor")]
 fn embedded_ui_pack_payload() -> Result<Option<Vec<u8>>, String> {
     let generated_dir = editor_playtest_generated_dir();
     let chunks_dir = generated_dir.join(psxed_project::playtest::UI_STREAM_CHUNKS_DIRNAME);
@@ -2590,6 +2667,7 @@ fn embedded_ui_pack_payload() -> Result<Option<Vec<u8>>, String> {
     Ok(Some(build_world_pack(&refs)))
 }
 
+#[cfg(feature = "editor")]
 fn read_embedded_world_pack_order(path: &Path) -> Result<Vec<u32>, String> {
     let text =
         std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
@@ -2615,6 +2693,7 @@ fn read_embedded_world_pack_order(path: &Path) -> Result<Vec<u32>, String> {
     Ok(order)
 }
 
+#[cfg(feature = "editor")]
 fn apply_embedded_world_pack_order(
     rooms: &mut Vec<(u32, Vec<u8>)>,
     order: &[u32],
@@ -2651,16 +2730,19 @@ fn apply_embedded_world_pack_order(
     Ok(())
 }
 
+#[cfg(feature = "editor")]
 fn project_baked_disc_path(project_dir: &Path, project_name: &str) -> PathBuf {
     project_dir
         .join("baked")
         .join(format!("{}.cue", safe_project_build_stem(project_name)))
 }
 
+#[cfg(feature = "editor")]
 fn safe_project_build_stem(name: &str) -> String {
     psxed_project::project_file_stem(name)
 }
 
+#[cfg(feature = "editor")]
 pub(crate) fn project_disc_volume_id(project_name: &str) -> String {
     let mut volume_id = safe_project_build_stem(project_name).to_ascii_uppercase();
     if volume_id.len() > ISO_VOLUME_ID_BYTES {
@@ -2669,6 +2751,7 @@ pub(crate) fn project_disc_volume_id(project_name: &str) -> String {
     volume_id
 }
 
+#[cfg(feature = "editor")]
 fn remove_stale_project_builds(dest_path: &Path) -> Result<usize, String> {
     let dest_dir = dest_path
         .parent()
@@ -2710,6 +2793,7 @@ fn remove_stale_project_builds(dest_path: &Path) -> Result<usize, String> {
     Ok(removed)
 }
 
+#[cfg(feature = "editor")]
 pub(crate) fn copy_project_disc(
     source_cue_path: &Path,
     dest_cue_path: &Path,
@@ -2736,6 +2820,7 @@ pub(crate) fn copy_project_disc(
     Ok(bin_bytes + cue_bytes)
 }
 
+#[cfg(feature = "editor")]
 fn rewrite_cue_for_copied_bin(
     source_cue_path: &Path,
     dest_cue_path: &Path,
@@ -2766,6 +2851,7 @@ fn rewrite_cue_for_copied_bin(
         .map_err(|error| format!("write {}: {error}", dest_cue_path.display()))
 }
 
+#[cfg(feature = "editor")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ProjectBuildMenuMetadata {
     title: String,
@@ -2773,6 +2859,7 @@ struct ProjectBuildMenuMetadata {
     current: bool,
 }
 
+#[cfg(feature = "editor")]
 fn project_build_menu_metadata(
     path: &Path,
     project_root: &Path,
@@ -2795,6 +2882,7 @@ fn project_build_menu_metadata(
     })
 }
 
+#[cfg(feature = "editor")]
 fn project_dir_for_build(path: &Path, project_root: &Path) -> Option<PathBuf> {
     let mut dir = path.parent()?;
     loop {
@@ -2888,7 +2976,7 @@ pub fn build_ui(
     state: &mut AppState,
     vram_tex: egui::TextureId,
     display_tex: egui::TextureId,
-    editor_viewport: psxed_ui::EditorViewport3dPresentation,
+    #[cfg(feature = "editor")] editor_viewport: psxed_ui::EditorViewport3dPresentation,
     display_uv: egui::Rect,
     dt: f32,
 ) {
@@ -2897,6 +2985,7 @@ pub fn build_ui(
         state,
         vram_tex,
         display_tex,
+        #[cfg(feature = "editor")]
         editor_viewport,
         display_uv,
         dt,
@@ -2933,6 +3022,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "editor")]
     fn project_build_disc_name_is_filesystem_safe() {
         assert_eq!(
             safe_project_build_stem("Stone Room: Vertical Slice!"),
@@ -2948,6 +3038,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "editor")]
     fn project_disc_volume_id_uses_project_name() {
         assert_eq!(project_disc_volume_id("Demo 10"), "DEMO_10");
         assert_eq!(project_disc_volume_id("..."), "PROJECT");
@@ -2958,6 +3049,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "editor")]
     fn embedded_playtest_disc_image_boots_psx_exe() {
         let mut exe = vec![0u8; psx_iso::EXE_HEADER_BYTES];
         exe[..8].copy_from_slice(b"PS-X EXE");
@@ -3004,6 +3096,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "editor")]
     fn project_build_export_removes_stale_sibling_builds() {
         let root = frontend_test_temp_dir("stale-project-build-exes");
         let baked = root.join("baked");
@@ -3033,6 +3126,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "editor")]
     fn project_build_export_rewrites_cue_for_renamed_bin() {
         let root = frontend_test_temp_dir("project-build-export-cue");
         let source_dir = root.join("source");
@@ -3059,6 +3153,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "editor")]
     fn project_build_menu_metadata_uses_project_name_and_marks_stale_builds() {
         let root = frontend_test_temp_dir("project-build-menu-metadata");
         let project_dir = root.join("demo2");
