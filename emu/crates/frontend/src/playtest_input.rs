@@ -18,7 +18,9 @@ use psxed_ui::{EditorPlaytestTapeMode, EditorPlaytestTapeStatus};
 /// format live in the core crate.
 pub(crate) use emulator_core::input_tape::PadSample as Port1PadSample;
 
-/// Read a persisted input tape.
+/// Read a persisted input tape. Only the headless CLI (`--input-tape`) reads
+/// tapes from a path; that CLI is compiled out on wasm, so this is dead there.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(crate) fn read_input_tape(path: &Path) -> Result<Vec<Port1PadSample>, String> {
     read_tape(path)
 }
