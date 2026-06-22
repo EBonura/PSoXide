@@ -60,6 +60,7 @@ pub enum MenuAction {
     /// library once the background make job completes.
     BuildExamples,
     /// Enter or leave the host-side editor workspace.
+    #[cfg(feature = "editor")]
     ToggleEditorWorkspace,
     /// Pick and persist the BIOS image path.
     ChooseBiosPath,
@@ -172,6 +173,9 @@ impl MenuState {
             build_examples_category(&[]),
             build_projects_category(&[]),
             build_settings_category(),
+            // The Create category is the entry point into the host editor
+            // workspace; it is absent in emulator-only builds.
+            #[cfg(feature = "editor")]
             build_create_category(false),
             build_system_category(running),
             build_debug_category(),
@@ -273,6 +277,7 @@ impl MenuState {
     }
 
     /// Update the Create category label for the current workspace.
+    #[cfg(feature = "editor")]
     pub fn sync_editor_label(&mut self, editor_open: bool) {
         if let Some(create) = self.categories.iter_mut().find(|c| c.name == "Create") {
             if let Some(item) = create
@@ -894,6 +899,7 @@ fn build_projects_category(projects: &[LibraryItem]) -> Category {
 }
 
 /// Host-side creation tools.
+#[cfg(feature = "editor")]
 fn build_create_category(editor_open: bool) -> Category {
     Category {
         name: "Create",

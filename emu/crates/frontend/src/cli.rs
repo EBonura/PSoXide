@@ -21,6 +21,7 @@
 //! returns -- `main()` never spins up winit/wgpu. Without a
 //! subcommand, the GUI runs as normal.
 
+#[cfg(feature = "editor")]
 use std::collections::HashSet;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -28,8 +29,11 @@ use std::path::{Path, PathBuf};
 use clap::{Args, Parser, Subcommand};
 use emulator_core::{
     button, fast_boot_disc_with_hle, spu::SAMPLE_CYCLES, telemetry, warm_bios_for_disc_fast_boot,
-    Bus, ButtonState, Cpu, Gpu, GteProfileSnapshot, DISC_FAST_BOOT_WARMUP_STEPS,
+    Bus, ButtonState, Cpu, GteProfileSnapshot, DISC_FAST_BOOT_WARMUP_STEPS,
 };
+// `Gpu` is only constructed for the editor 3D preview dump.
+#[cfg(feature = "editor")]
+use emulator_core::Gpu;
 use psoxide_settings::{
     library::{GameKind, LibraryEntry},
     ConfigPaths, Library, Settings,
@@ -38,13 +42,14 @@ use psoxide_validation::{
     format_hash, ActualHashes, PixelHash, ValidationArtifact, ValidationRunner, ValidationSuite,
 };
 use psx_iso::{Disc, Exe, TrackType};
+#[cfg(feature = "editor")]
 use psxed_project::{NodeId, ProjectDocument};
+#[cfg(feature = "editor")]
 use psxed_ui::{ViewportCameraMode, ViewportCameraState};
 
-use crate::app::{
-    build_embedded_playtest_disc, bus_from_configured_bios, copy_project_disc,
-    fast_boot_embedded_playtest_disc,
-};
+#[cfg(feature = "editor")]
+use crate::app::{build_embedded_playtest_disc, copy_project_disc};
+use crate::app::{bus_from_configured_bios, fast_boot_embedded_playtest_disc};
 use crate::playtest_input::read_input_tape;
 
 const NTSC_CPU_CYCLES_PER_VBLANK: u64 = 33_868_800 / 60;
@@ -112,12 +117,15 @@ pub enum Command {
     /// emit final state info.
     Launch(LaunchArgs),
     /// Build the in-editor Play disc image from the current generated package.
+    #[cfg(feature = "editor")]
     BuildEditorPlaytestDisc,
     /// Cook, build, and export a project CUE/BIN disc without opening the GUI.
+    #[cfg(feature = "editor")]
     BuildProjectDisc(BuildProjectDiscArgs),
     /// Validate an authored CUE/BIN image before burning it to CD-R.
     PreburnCheck(PreburnCheckArgs),
     /// Render an editor 3D preview screenshot without opening the GUI.
+    #[cfg(feature = "editor")]
     DumpEditorPreview(DumpEditorPreviewArgs),
     /// Run exact-hash validation checkpoints from a manifest.
     Validate(ValidateArgs),
@@ -284,6 +292,7 @@ pub struct LaunchArgs {
 }
 
 /// Arguments for `build-project-disc`.
+#[cfg(feature = "editor")]
 #[derive(Debug, Args)]
 pub struct BuildProjectDiscArgs {
     /// Project directory containing `project.ron`, or a direct path to a project file.
@@ -315,6 +324,7 @@ pub struct PreburnCheckArgs {
 }
 
 /// Arguments for `dump-editor-preview`.
+#[cfg(feature = "editor")]
 #[derive(Debug, Args)]
 pub struct DumpEditorPreviewArgs {
     /// Project directory containing `project.ron`, or a direct path to a project file.
@@ -389,9 +399,12 @@ pub fn run(cli: Cli) -> Result<(), String> {
         Command::Scan(args) => cmd_scan(&paths, args),
         Command::List => cmd_list(&paths),
         Command::Launch(args) => cmd_launch(&paths, args),
+        #[cfg(feature = "editor")]
         Command::BuildEditorPlaytestDisc => cmd_build_editor_playtest_disc(),
+        #[cfg(feature = "editor")]
         Command::BuildProjectDisc(args) => cmd_build_project_disc(args),
         Command::PreburnCheck(args) => cmd_preburn_check(args),
+        #[cfg(feature = "editor")]
         Command::DumpEditorPreview(args) => cmd_dump_editor_preview(args),
         Command::Validate(args) => cmd_validate(&paths, args),
     }
@@ -1313,12 +1326,14 @@ fn write_wav_s16_stereo(
     std::fs::write(path, out).map_err(|e| format!("write wav {}: {e}", path.display()))
 }
 
+#[cfg(feature = "editor")]
 fn cmd_build_editor_playtest_disc() -> Result<(), String> {
     let disc_path = build_embedded_playtest_disc(crate::app::DEFAULT_EMBEDDED_PLAYTEST_VOLUME_ID)?;
     println!("{}", disc_path.display());
     Ok(())
 }
 
+#[cfg(feature = "editor")]
 fn cmd_build_project_disc(args: BuildProjectDiscArgs) -> Result<(), String> {
     let dest_cue = build_project_disc_path(&args.project)?;
     println!("{}", dest_cue.display());
@@ -1515,6 +1530,7 @@ fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
             .any(|window| window == needle)
 }
 
+#[cfg(feature = "editor")]
 fn build_project_disc_path(project_path: &Path) -> Result<PathBuf, String> {
     let (project_root, project_file) = resolve_project_arg(project_path);
     let project_root = std::fs::canonicalize(&project_root)
@@ -1782,8 +1798,20 @@ fn resolve_validation_artifact(
 ) -> Result<ResolvedValidationArtifact, String> {
     let (path, embedded_playtest, bios_boot) = match artifact {
         ValidationArtifact::Project { project } => {
-            let project = resolve_manifest_path(repo_root, manifest_dir, project);
-            (build_project_disc_path(&project)?, true, false)
+            // Project artifacts are cooked + built through the editor's
+            // disc-build pipeline, which is absent in emulator-only builds.
+            #[cfg(feature = "editor")]
+            {
+                let project = resolve_manifest_path(repo_root, manifest_dir, project);
+                (build_project_disc_path(&project)?, true, false)
+            }
+            #[cfg(not(feature = "editor"))]
+            {
+                let _ = project;
+                return Err(
+                    "validation Project artifacts require the `editor` feature".to_string(),
+                );
+            }
         }
         ValidationArtifact::Disc {
             path,
@@ -1877,6 +1905,7 @@ fn resolve_manifest_path(repo_root: &Path, manifest_dir: &Path, path: &Path) -> 
     }
 }
 
+#[cfg(feature = "editor")]
 fn run_make(repo_root: &Path, target: &str, extra_args: &[String]) -> Result<(), String> {
     let status = std::process::Command::new("make")
         .arg(target)
@@ -2546,6 +2575,7 @@ impl GuestProfileLog {
     }
 }
 
+#[cfg(feature = "editor")]
 fn cmd_dump_editor_preview(args: DumpEditorPreviewArgs) -> Result<(), String> {
     let (project_root, project_file) = resolve_project_arg(&args.project);
     let project = ProjectDocument::load_from_path(&project_file)
@@ -2612,6 +2642,7 @@ fn cmd_dump_editor_preview(args: DumpEditorPreviewArgs) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(feature = "editor")]
 fn resolve_project_arg(path: &Path) -> (PathBuf, PathBuf) {
     let path = if path.is_absolute() || path.exists() {
         path.to_path_buf()

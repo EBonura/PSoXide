@@ -6,6 +6,15 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+[features]
+# `editor` (default) compiles the full host editor workspace into the
+# frontend: the embedded 3D preview, the in-editor Play viewport, and the
+# project/disc authoring CLI. Building with `--no-default-features` drops the
+# psxed-* dependencies and every editor reference, leaving an emulator-only
+# binary (the target for a future web/wasm build).
+default = ["editor"]
+editor = ["dep:psxed-ui", "dep:psxed-project"]
+
 [dependencies]
 emulator-core    = { workspace = true }
 psoxide-settings = { workspace = true }
@@ -18,8 +27,8 @@ psx-gte          = { workspace = true }
 psx-vram         = { workspace = true }
 psx-iso          = { workspace = true }
 psx-trace        = { workspace = true }
-psxed-project    = { workspace = true }
-psxed-ui         = { workspace = true }
+psxed-project    = { workspace = true, optional = true }
+psxed-ui         = { workspace = true, optional = true }
 
 clap       = { workspace = true }
 winit      = { workspace = true }

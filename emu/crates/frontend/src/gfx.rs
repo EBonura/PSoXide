@@ -57,24 +57,30 @@ pub struct Graphics {
     /// running game; the editor's egui panel paints its texture as
     /// an Image so the preview is bit-faithful to what the PS1 would
     /// draw given the same input data.
+    #[cfg(feature = "editor")]
     editor_hw_renderer: HwRenderer,
     /// Dedicated editor renderer for the selected Camera inspector preview.
+    #[cfg(feature = "editor")]
     camera_preview_hw_renderer: HwRenderer,
     /// Stub `Gpu` consumed by [`HwRenderer::render_frame`]. The
     /// renderer only reads `wireframe_enabled` from it; the editor
     /// preview always renders solid, so we hand it a freshly-zeroed
     /// instance.
+    #[cfg(feature = "editor")]
     editor_gpu_stub: Gpu,
     /// Per-material procedural textures + the VRAM mirror they're
     /// stamped into. Refreshed each frame against the project; new
     /// materials get a tpage allocated lazily.
+    #[cfg(feature = "editor")]
     editor_textures: crate::editor_textures::EditorTextures,
     /// Persistent on-disk byte cache for `.psxmdl` + `.psxanim`
     /// reads. Walked once per frame to pull in newly-authored
     /// models / clips and evict stale entries; the per-frame
     /// preview pass never touches the filesystem.
+    #[cfg(feature = "editor")]
     editor_assets: crate::editor_assets::EditorAssets,
     /// Host-drawn editor overlay lines from the last preview build.
+    #[cfg(feature = "editor")]
     editor_overlay_lines: Vec<psxed_ui::EditorViewportOverlayLine>,
 }
 
@@ -144,15 +150,19 @@ impl Graphics {
         );
 
         let hw_renderer = HwRenderer::new(device.clone(), queue.clone(), &mut egui_renderer);
-        let mut editor_hw_renderer =
-            HwRenderer::new(device.clone(), queue.clone(), &mut egui_renderer);
-        let mut camera_preview_hw_renderer =
-            HwRenderer::new(device.clone(), queue.clone(), &mut egui_renderer);
-        // Higher internal scale for the editor preview -- the game's
-        // renderer follows user/scale-mode preference, but the editor
-        // viewport is always overlay-friendly host resolution.
-        editor_hw_renderer.set_internal_scale(2, Some(&mut egui_renderer));
-        camera_preview_hw_renderer.set_internal_scale(2, Some(&mut egui_renderer));
+        #[cfg(feature = "editor")]
+        let (editor_hw_renderer, camera_preview_hw_renderer) = {
+            let mut editor_hw_renderer =
+                HwRenderer::new(device.clone(), queue.clone(), &mut egui_renderer);
+            let mut camera_preview_hw_renderer =
+                HwRenderer::new(device.clone(), queue.clone(), &mut egui_renderer);
+            // Higher internal scale for the editor preview -- the game's
+            // renderer follows user/scale-mode preference, but the editor
+            // viewport is always overlay-friendly host resolution.
+            editor_hw_renderer.set_internal_scale(2, Some(&mut egui_renderer));
+            camera_preview_hw_renderer.set_internal_scale(2, Some(&mut egui_renderer));
+            (editor_hw_renderer, camera_preview_hw_renderer)
+        };
 
         Self {
             window,
@@ -168,11 +178,17 @@ impl Graphics {
             display_texture,
             display_texture_id,
             hw_renderer,
+            #[cfg(feature = "editor")]
             editor_hw_renderer,
+            #[cfg(feature = "editor")]
             camera_preview_hw_renderer,
+            #[cfg(feature = "editor")]
             editor_gpu_stub: Gpu::new(),
+            #[cfg(feature = "editor")]
             editor_textures: crate::editor_textures::EditorTextures::new(),
+            #[cfg(feature = "editor")]
             editor_assets: crate::editor_assets::EditorAssets::new(),
+            #[cfg(feature = "editor")]
             editor_overlay_lines: Vec::new(),
         }
     }
@@ -195,16 +211,19 @@ impl Graphics {
 
     /// Egui handle for the editor's preview HW target. Stable across
     /// frames; the editor's 3D viewport panel paints it as an Image.
+    #[cfg(feature = "editor")]
     pub fn editor_hw_texture_id(&self) -> egui::TextureId {
         self.editor_hw_renderer.texture_id()
     }
 
     /// Egui handle for the selected Camera inspector preview target.
+    #[cfg(feature = "editor")]
     pub fn camera_preview_texture_id(&self) -> egui::TextureId {
         self.camera_preview_hw_renderer.texture_id()
     }
 
     /// Host-drawn overlay lines from the latest editor preview pass.
+    #[cfg(feature = "editor")]
     pub fn editor_overlay_lines(&self) -> &[psxed_ui::EditorViewportOverlayLine] {
         &self.editor_overlay_lines
     }
@@ -219,6 +238,7 @@ impl Graphics {
     /// step is replaced by `build_cmd_log` + `render_frame`. Editor
     /// affordance lines are returned separately for egui to draw over
     /// the preview texture.
+    #[cfg(feature = "editor")]
     #[allow(clippy::too_many_arguments)]
     pub fn render_editor_preview(
         &mut self,
@@ -283,6 +303,7 @@ impl Graphics {
 
     /// Render a clean scene view from the selected gameplay Camera into the
     /// inspector preview target.
+    #[cfg(feature = "editor")]
     pub fn render_editor_camera_preview(
         &mut self,
         project: &psxed_project::ProjectDocument,
