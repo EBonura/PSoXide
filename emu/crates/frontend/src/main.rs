@@ -272,6 +272,33 @@ fn key_is_analog_button(key: &Key, bindings: &PortBindings) -> bool {
     binding_matches_key(&bindings.analog, key)
 }
 
+/// Update held freelook-camera key state from a keyboard event. These keys are
+/// intentionally outside the PSX pad bindings (T/F/G/H move, I/J/K/L look, U/O
+/// up-down, Shift boost), so tracking them never double-drives the guest pad.
+fn update_freelook_keys(keys: &mut crate::app::FreelookKeys, logical: &Key, state: ElementState) {
+    let pressed = state == ElementState::Pressed;
+    if matches!(logical, Key::Named(NamedKey::Shift)) {
+        keys.boost = pressed;
+        return;
+    }
+    let Key::Character(s) = logical else {
+        return;
+    };
+    match s.chars().next().map(|c| c.to_ascii_lowercase()) {
+        Some('t') => keys.fwd = pressed,
+        Some('g') => keys.back = pressed,
+        Some('f') => keys.left = pressed,
+        Some('h') => keys.right = pressed,
+        Some('u') => keys.up = pressed,
+        Some('o') => keys.down = pressed,
+        Some('i') => keys.pitch_up = pressed,
+        Some('k') => keys.pitch_down = pressed,
+        Some('j') => keys.yaw_left = pressed,
+        Some('l') => keys.yaw_right = pressed,
+        _ => {}
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct KeyboardStickState {
     up: bool,
@@ -467,6 +494,9 @@ impl ApplicationHandler for Shell {
                         press_port1_analog_button(&mut self.state);
                     }
                 }
+                // Freelook camera keys are free (never pad-bound), so track
+                // them regardless of pad routing; step_one_frame applies them.
+                update_freelook_keys(&mut self.state.freelook_keys, &logical_key, state);
                 // The Menu *does* honour OS-level key-repeat: holding
                 // down-arrow scrolls through a long Examples list one
                 // row per repeat tick, matching GUI-standard behaviour.
