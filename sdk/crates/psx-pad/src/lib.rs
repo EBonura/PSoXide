@@ -337,6 +337,15 @@ const EXCHANGE_WAIT_SPINS: u32 = 32_768;
 /// ~100us DSR timeout on hardware and the emulator's ~1k-cycle ACK deadline,
 /// so a genuinely slow original controller is still given time to answer.
 const ACK_WAIT_SPINS: u32 = 2_048;
+/// Setup delay (bounded STAT reads) after asserting the select line, before the
+/// first clock. The original SCPH-1200 gives NO response without it and a clean
+/// `5A41` digital read with it; fast clones tolerate it either way (silicon,
+/// 2026-06-22). The on-console sweep put the floor between 384 (no response) and
+/// 768 (clean) under a 5-polls-per-frame stress harder than the in-game one poll
+/// per frame, so 1024 is a comfortable margin while keeping the per-poll
+/// busy-wait small. (The BIOS uses ~7us of setup but also paces every byte; our
+/// setup-only path trades a bigger setup for no inter-byte delay.)
+pub const DEFAULT_SETUP_SPINS: u32 = 1_024;
 
 /// Poll the controller in port 1 once.
 ///
@@ -365,6 +374,16 @@ pub fn poll_port1_raw(pacing: Pacing) -> RawPoll {
 /// Port-2 counterpart of [`poll_port1_raw`].
 pub fn poll_port2_raw(pacing: Pacing) -> RawPoll {
     unsafe { poll_once_raw(true, pacing) }
+}
+
+/// Poll port 1 once with explicit fixed timing, for hardware diagnostics:
+/// `setup_spins` of delay after asserting the select line, plus `interbyte_spins`
+/// of fixed delay after each byte (bounded STAT reads -- no CTRL writes, no
+/// `/ACK` wait, no DSR IRQ). This isolates the two timings a strict original pad
+/// (SCPH-1200) might need -- setup time after `/CS`, and an inter-byte gap --
+/// without the machinery that corrupted the ack-wait path on silicon.
+pub fn poll_port1_diag(setup_spins: u32, interbyte_spins: u32) -> RawPoll {
+    unsafe { poll_once_diag(false, setup_spins, interbyte_spins) }
 }
 
 /// Ask the port-1 controller to enter DualShock analog mode. Returns
@@ -396,7 +415,10 @@ fn poll_state(port2: bool) -> PadState {
     let mut last = PadState::NONE;
     let mut tries = 0;
     while tries < 4 {
-        let s = unsafe { poll_once_raw(port2, Pacing::AckWait) }.to_state();
+        // The default poll uses a setup delay after select: the original
+        // SCPH-1200 will not answer without it (silicon-confirmed), clones are
+        // fine with it. No inter-byte delay is needed.
+        let s = unsafe { poll_once_diag(port2, DEFAULT_SETUP_SPINS, 0) }.to_state();
         if !s.is_connected() {
             return s; // nothing attached -- not a glitch, don't retry
         }
@@ -425,9 +447,9 @@ unsafe fn drain_rx() {
 
 unsafe fn poll_once_raw(port2: bool, pacing: Pacing) -> RawPoll {
     unsafe {
-        // Raise JOYN (and arm the DSR latch) so the device's state machine
-        // starts from idle, then drain any stale RX byte.
-        select(port2);
+        // Raise JOYN so the device's state machine starts from idle, then drain
+        // any stale RX byte. Only the ack-wait path arms the DSR IRQ.
+        select(port2, matches!(pacing, Pacing::AckWait));
         drain_rx();
 
         let mut ack = 0u16;
@@ -520,6 +542,73 @@ unsafe fn ex(
     }
 }
 
+/// Diagnostic poll with fixed setup and inter-byte delays (no `/ACK` wait).
+/// Mirrors [`poll_once_raw`]'s byte sequence but paces purely with time.
+unsafe fn poll_once_diag(port2: bool, setup_spins: u32, interbyte_spins: u32) -> RawPoll {
+    unsafe {
+        select(port2, false);
+        // Setup time after asserting /CS, before the first clock -- the strict
+        // original pad may need this where a fast clone does not.
+        delay_reads(setup_spins);
+        drain_rx();
+
+        let mut i = 0u8;
+        let _select = exchange_delayed(0x01, interbyte_spins);
+        i += 1;
+        let id_low = exchange_delayed(0x42, interbyte_spins);
+        i += 1;
+        let mut mode = mode_from_id_low(id_low);
+        if !mode.is_connected() {
+            deselect();
+            return RawPoll {
+                exchanges: i,
+                ..RawPoll::disconnected(id_low)
+            };
+        }
+
+        let analog = mode.has_sticks();
+        let id_high = exchange_delayed(0x00, interbyte_spins);
+        i += 1;
+        if id_high != 0x5A {
+            mode = PadMode::Unknown;
+        }
+        let read_sticks = analog && mode != PadMode::Unknown;
+        let b0 = exchange_delayed(0x00, interbyte_spins);
+        i += 1;
+        let b1 = exchange_delayed(0x00, interbyte_spins);
+        i += 1;
+
+        let sticks = if read_sticks {
+            let right_x = exchange_delayed(0x00, interbyte_spins);
+            let right_y = exchange_delayed(0x00, interbyte_spins);
+            let left_x = exchange_delayed(0x00, interbyte_spins);
+            let left_y = exchange_delayed(0x00, interbyte_spins);
+            i += 4;
+            AnalogSticks {
+                right_x,
+                right_y,
+                left_x,
+                left_y,
+            }
+        } else {
+            AnalogSticks::CENTERED
+        };
+
+        deselect();
+
+        RawPoll {
+            id_low,
+            id_high,
+            buttons_low: b0,
+            buttons_high: b1,
+            sticks,
+            mode,
+            ack_seen: 0,
+            exchanges: i,
+        }
+    }
+}
+
 fn enable_analog(port2: bool) -> bool {
     unsafe {
         // Enter config mode.
@@ -552,42 +641,53 @@ fn decode_buttons(b0: u8, b1: u8) -> ButtonState {
 }
 
 /// CTRL value held while a port is selected: JOYN asserted, TX/RX enabled, and
-/// the DSR (`/ACK`) interrupt armed so STAT bit 9 latches each pulse.
+/// (only when `ack_irq`) the DSR (`/ACK`) interrupt armed so STAT bit 9 latches
+/// each pulse. The default no-wait poll leaves the DSR IRQ off -- enabling it
+/// turned out to disturb real-hardware transfers (the official SCPH-1200 stopped
+/// answering, the clone's bytes corrupted), so it is reserved for the opt-in
+/// ack-wait diagnostic only.
 #[inline]
-const fn active_ctrl(port2: bool) -> u16 {
+const fn active_ctrl(port2: bool, ack_irq: bool) -> u16 {
     let slot = if port2 { CTRL_SLOT_PORT2 } else { 0 };
-    slot | CTRL_TXEN | CTRL_RXEN | CTRL_JOYN | CTRL_ACK_IRQ_EN
+    let base = slot | CTRL_TXEN | CTRL_RXEN | CTRL_JOYN;
+    if ack_irq {
+        base | CTRL_ACK_IRQ_EN
+    } else {
+        base
+    }
 }
 
 /// Select the requested controller port and prepare SIO0 for a new
-/// transaction.
+/// transaction. `ack_irq` arms the DSR interrupt (only the ack-wait diagnostic
+/// path wants it).
 #[inline]
-unsafe fn select(port2: bool) {
+unsafe fn select(port2: bool, ack_irq: bool) {
     unsafe {
         psx_io::write16(sio::MODE, MODE_8N1);
         psx_io::write16(sio::BAUD, BAUD_PAD);
         // Clear any stale IRQ latch from the previous transaction, then assert
-        // JOYN with the DSR interrupt enabled.
+        // JOYN.
         psx_io::write16(sio::CTRL, CTRL_ACK);
-        psx_io::write16(sio::CTRL, active_ctrl(port2));
+        psx_io::write16(sio::CTRL, active_ctrl(port2, ack_irq));
     }
 }
 
 /// Run a fixed eight-byte DualShock command after the port-level controller
-/// select byte. ACK-paced like a normal poll: every byte except the last of the
-/// nine-byte packet is `/ACK`-acknowledged by the device.
+/// select byte, using the default no-wait timing (matching the reverted poll
+/// path).
 #[inline]
 unsafe fn transaction(port2: bool, bytes: [u8; 8]) -> [u8; 8] {
     unsafe {
-        select(port2);
+        select(port2, false);
+        delay_reads(DEFAULT_SETUP_SPINS);
         let mut ack = 0u16;
         let mut idx = 0u8;
-        let _select = ex(port2, Pacing::AckWait, 0x01, false, &mut ack, &mut idx);
+        let _select = ex(port2, Pacing::NoAckWait, 0x01, false, &mut ack, &mut idx);
         let mut out = [0u8; 8];
         let mut i = 0;
         while i < bytes.len() {
             let is_last = i == bytes.len() - 1;
-            out[i] = ex(port2, Pacing::AckWait, bytes[i], is_last, &mut ack, &mut idx);
+            out[i] = ex(port2, Pacing::NoAckWait, bytes[i], is_last, &mut ack, &mut idx);
             i += 1;
         }
         deselect();
@@ -626,6 +726,30 @@ unsafe fn exchange_nowait(tx: u8) -> u8 {
     }
 }
 
+/// One no-wait byte exchange followed by a fixed inter-byte delay, giving a
+/// strict pad time to be ready for the next byte without any `/ACK`/CTRL games.
+#[inline]
+unsafe fn exchange_delayed(tx: u8, interbyte_spins: u32) -> u8 {
+    unsafe {
+        let rx = exchange_nowait(tx);
+        delay_reads(interbyte_spins);
+        rx
+    }
+}
+
+/// Burn time by reading STAT `n` times -- a real, non-optimizable MMIO delay.
+#[inline]
+unsafe fn delay_reads(n: u32) {
+    let mut k = n;
+    unsafe {
+        while k > 0 {
+            let _ = psx_io::read32(sio::STAT);
+            k -= 1;
+            core::hint::spin_loop();
+        }
+    }
+}
+
 /// Clock one byte, then wait for the device's `/ACK` (DSR) pulse before
 /// returning so the caller does not clock the next byte until the controller is
 /// ready. Returns `(rx_byte, ack_observed)`.
@@ -654,7 +778,7 @@ unsafe fn exchange_ack(port2: bool, tx: u8) -> (u8, bool) {
             // pulse CTRL.ACK while keeping JOYN asserted so the device stays
             // selected for the next byte.
             let _ = wait_stat_low(STAT_DSR_LEVEL, ACK_WAIT_SPINS);
-            psx_io::write16(sio::CTRL, active_ctrl(port2) | CTRL_ACK);
+            psx_io::write16(sio::CTRL, active_ctrl(port2, true) | CTRL_ACK);
         }
         (rx, acked)
     }

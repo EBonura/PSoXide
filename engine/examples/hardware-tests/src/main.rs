@@ -39,6 +39,20 @@ const FONT_CLUT: Clut = Clut::new(320, 256);
 const ROWS_PER_PAGE: usize = 6;
 const TEST_COUNT: usize = 173;
 const PAD_POLL_TEST_INDEX: usize = 26;
+
+/// Number of timing variants the controller probe sweeps.
+const PROBE_VARIANT_COUNT: usize = 5;
+/// `(label, setup_spins, interbyte_spins)` the controller probe tries each frame
+/// to find what timing a strict original pad (SCPH-1200) needs. `setup_spins` is
+/// a delay after asserting the select line; `interbyte_spins` is a fixed gap
+/// after each byte. Both are bounded STAT reads, no `/ACK`/CTRL machinery.
+const PROBE_VARIANTS: [(&str, u32, u32); PROBE_VARIANT_COUNT] = [
+    ("SETUP 0", 0, 0),
+    ("SETUP 128", 128, 0),
+    ("SETUP 384", 384, 0),
+    ("SETUP 768", 768, 0),
+    ("SETUP 2K", 2048, 0),
+];
 const MODE_COUNT: u8 = 16;
 const CHECK_MODES: [Mode; 11] = [
     Mode::AllChecks,
@@ -1271,13 +1285,13 @@ const TESTS: [TestSpec; TEST_COUNT] = [
     },
     TestSpec {
         group: "SIO",
-        name: "port 1 handshake strict (ack-paced)",
+        name: "port 1 handshake strict (no-wait)",
         run: test_pad_handshake_strict,
     },
     TestSpec {
         group: "SIO",
-        name: "port 1 /ACK observed each byte",
-        run: test_pad_ack_observed,
+        name: "port 1 diag setup+inter timing",
+        run: test_pad_diag_timing,
     },
     TestSpec {
         group: "SIO",
@@ -1300,11 +1314,10 @@ struct HardwareTests {
     info_count: u8,
     page: usize,
     rerun_count: u8,
-    /// Latest raw port-1 poll using the hardware-correct ACK-paced timing.
-    probe_ack: psx_pad::RawPoll,
-    /// Latest raw port-1 poll using the legacy no-wait timing (reproduces the
-    /// slow-original-controller failure for side-by-side comparison).
-    probe_nowait: psx_pad::RawPoll,
+    /// Latest port-1 poll for each [`PROBE_VARIANTS`] timing, refreshed every
+    /// frame while in the controller probe. Used to find which setup/inter-byte
+    /// timing wakes a strict original pad.
+    probe_variants: [psx_pad::RawPoll; PROBE_VARIANT_COUNT],
 }
 
 #[cfg(target_arch = "mips")]
@@ -1345,8 +1358,7 @@ impl HardwareTests {
             info_count: 0,
             page: 0,
             rerun_count: 0,
-            probe_ack: psx_pad::RawPoll::NONE,
-            probe_nowait: psx_pad::RawPoll::NONE,
+            probe_variants: [psx_pad::RawPoll::NONE; PROBE_VARIANT_COUNT],
         }
     }
 
@@ -1450,12 +1462,16 @@ impl Scene for HardwareTests {
         self.recount();
 
         if matches!(self.mode, Mode::ControllerProbe) {
-            // Refresh both timings so the probe shows the legacy no-wait failure
-            // next to the ACK-paced fix. Polled on the update tick (not render)
-            // to keep all SIO traffic on one clock. Each poll selects/deselects
-            // independently, so the two are isolated.
-            self.probe_ack = psx_pad::poll_port1_raw(psx_pad::Pacing::AckWait);
-            self.probe_nowait = psx_pad::poll_port1_raw(psx_pad::Pacing::NoAckWait);
+            // Sweep every timing variant once per frame. Each poll selects and
+            // deselects independently, so the variants stay isolated; the strict
+            // original pad either wakes up for some setup/inter-byte timing or it
+            // does not, and we see exactly which.
+            let mut i = 0;
+            while i < PROBE_VARIANT_COUNT {
+                let (_, setup, interbyte) = PROBE_VARIANTS[i];
+                self.probe_variants[i] = psx_pad::poll_port1_diag(setup, interbyte);
+                i += 1;
+            }
         }
 
         if ctx.just_pressed(button::UP) {
@@ -1484,6 +1500,11 @@ impl Scene for HardwareTests {
 
     fn render(&mut self, ctx: &mut Ctx) {
         draw_test_pattern(ctx.sim_tick.as_u32());
+        // GPU line liveness cross only on the GPU section -- keeps the controller
+        // probe and other focused screens clean.
+        if matches!(self.mode, Mode::GpuChecks) {
+            draw_gpu_line_probe();
+        }
 
         let Some(font) = self.font.as_ref() else {
             return;
@@ -1755,91 +1776,84 @@ fn draw_case_diagnostic_pass(
 /// two columns disagree (A garbage, B clean); on a fast clone or in the emulator
 /// they agree.
 fn draw_controller_probe(font: &FontAtlas, suite: &HardwareTests) {
-    font.draw_text(8, 30, "PORT 1 RAW HANDSHAKE", (232, 236, 244));
-    font.draw_text(8, 42, "A=LEGACY NO-WAIT  B=/ACK-PACED FIX", (150, 170, 200));
+    font.draw_text(8, 30, "PORT 1 SETUP-DELAY SWEEP", (232, 236, 244));
+    font.draw_text(8, 42, "MIN SELECT SETUP THE PAD NEEDS (FIX=2K)", (150, 170, 200));
 
-    font.draw_text(8, 58, "A: NO-WAIT", (220, 190, 120));
-    font.draw_text(168, 58, "B: ACK-WAIT", (140, 210, 160));
+    let hdr = (140, 160, 190);
+    font.draw_text(8, 58, "VARIANT", hdr);
+    font.draw_text(112, 58, "ID", hdr);
+    font.draw_text(160, 58, "MOD", hdr);
+    font.draw_text(200, 58, "BTN", hdr);
+    font.draw_text(248, 58, "RES", hdr);
 
-    draw_probe_column(font, 8, suite.probe_nowait, false);
-    draw_probe_column(font, 168, suite.probe_ack, true);
+    let base_ok = probe_column_ok(suite.probe_variants[0]);
+    let mut woke: Option<&'static str> = None;
+    let mut any_present = false;
 
-    let present =
-        suite.probe_ack.mode.is_connected() || suite.probe_nowait.mode.is_connected();
-    let aok = probe_column_ok(suite.probe_ack);
-    let nwok = probe_column_ok(suite.probe_nowait);
-    let (msg, color) = if !present {
-        ("NO PAD ON PORT 1 - CHECK CABLE/PORT", Status::Warn.color())
-    } else if aok && !nwok {
-        ("SLOW PAD: NEEDS ACK PACING - FIX OK", Status::Pass.color())
-    } else if aok && nwok {
-        ("PAD OK ON BOTH TIMINGS", Status::Pass.color())
-    } else if !aok && nwok {
-        ("REGRESSION: ACK BROKE A NO-WAIT PAD", Status::Fail.color())
-    } else {
-        ("PAD ANSWERS BUT HANDSHAKE UNSTABLE", Status::Fail.color())
-    };
-    font.draw_text(8, 168, "VERDICT", (140, 160, 190));
-    font.draw_text(8, 180, msg, color);
-    font.draw_text(8, 200, "ANALOG LED ON => MODE 73 EXPECTED", (112, 136, 170));
-    font.draw_text(8, 212, "RERUNS LIVE. DOWN = TEST DASHBOARD", (150, 170, 200));
-}
+    let mut i = 0usize;
+    while i < PROBE_VARIANT_COUNT {
+        let (label, _, _) = PROBE_VARIANTS[i];
+        let raw = suite.probe_variants[i];
+        let ok = probe_column_ok(raw);
+        let connected = raw.mode.is_connected();
+        any_present |= connected;
+        let y = 72 + i as i16 * 16;
+        let color = if ok {
+            Status::Pass.color()
+        } else if connected {
+            Status::Fail.color()
+        } else {
+            (130, 140, 160)
+        };
 
-/// Draw one timing column of the controller probe at horizontal origin `x`.
-fn draw_probe_column(font: &FontAtlas, x: i16, raw: psx_pad::RawPoll, ack_paced: bool) {
-    let ok = probe_column_ok(raw);
-    let ok_color = if ok {
-        Status::Pass.color()
-    } else {
-        Status::Fail.color()
-    };
-    let label = (150, 170, 200);
-    let val = (224, 228, 234);
-    let bad = Status::Fail.color();
+        font.draw_text(8, y, label, (220, 224, 230));
+        font.draw_text(
+            112,
+            y,
+            hex2(raw.id_high).as_str(),
+            if raw.id_high == 0x5A {
+                (224, 228, 234)
+            } else {
+                color
+            },
+        );
+        font.draw_text(128, y, hex2(raw.id_low).as_str(), color);
+        font.draw_text(160, y, mode_short(raw.mode), color);
+        font.draw_text(200, y, hex2(raw.buttons_low).as_str(), (200, 206, 214));
+        font.draw_text(216, y, hex2(raw.buttons_high).as_str(), (200, 206, 214));
+        let res = if !connected {
+            "NOPAD"
+        } else if ok {
+            "CLEAN"
+        } else {
+            "DSYNC"
+        };
+        font.draw_text(248, y, res, color);
 
-    font.draw_text(x, 72, "ID", label);
-    font.draw_text(
-        x + 40,
-        72,
-        hex2(raw.id_high).as_str(),
-        if raw.id_high == 0x5A { val } else { bad },
-    );
-    font.draw_text(x + 56, 72, hex2(raw.id_low).as_str(), val);
-
-    font.draw_text(x, 84, "MODE", label);
-    font.draw_text(x + 40, 84, mode_text(raw.mode), ok_color);
-
-    font.draw_text(x, 96, "BTN", label);
-    font.draw_text(x + 40, 96, hex2(raw.buttons_low).as_str(), val);
-    font.draw_text(x + 56, 96, hex2(raw.buttons_high).as_str(), val);
-
-    font.draw_text(x, 108, "LXY", label);
-    font.draw_text(x + 40, 108, hex2(raw.sticks.left_x).as_str(), val);
-    font.draw_text(x + 56, 108, hex2(raw.sticks.left_y).as_str(), val);
-
-    font.draw_text(x, 120, "RXY", label);
-    font.draw_text(x + 40, 120, hex2(raw.sticks.right_x).as_str(), val);
-    font.draw_text(x + 56, 120, hex2(raw.sticks.right_y).as_str(), val);
-
-    font.draw_text(x, 132, "ACK", label);
-    if ack_paced {
-        font.draw_text(x + 40, 132, ack_frac(raw).as_str(), val);
-    } else {
-        font.draw_text(x + 40, 132, "n/a", (120, 130, 150));
+        // First clean variant that the base (old no-wait) timing did NOT get is
+        // the timing the strict pad needs.
+        if ok && !base_ok && woke.is_none() {
+            woke = Some(label);
+        }
+        i += 1;
     }
 
-    font.draw_text(x, 144, "RES", label);
-    let res = if !raw.mode.is_connected() {
-        "NO PAD"
-    } else if ok {
-        "CLEAN"
+    font.draw_text(8, 168, "VERDICT", (140, 160, 190));
+    if let Some(label) = woke {
+        font.draw_text(8, 180, "OFFICIAL PAD NEEDS:", Status::Pass.color());
+        font.draw_text(160, 180, label, Status::Pass.color());
+    } else if base_ok {
+        font.draw_text(8, 180, "PAD WORKS AT BASE TIMING (CLONE)", Status::Pass.color());
+    } else if any_present {
+        font.draw_text(8, 180, "ANSWERS BUT NO VARIANT CLEAN", Status::Warn.color());
     } else {
-        "DESYNC"
-    };
-    font.draw_text(x + 40, 144, res, ok_color);
+        font.draw_text(8, 180, "NO PAD - ALL VARIANTS DEAD", Status::Warn.color());
+    }
+    font.draw_text(8, 200, "BASE = OLD NO-WAIT. RERUNS LIVE.", (112, 136, 170));
+    font.draw_text(8, 212, "DOWN = TEST DASHBOARD", (150, 170, 200));
 }
 
-/// A column is clean when something answered with a valid 0x5A magic and a
+/// A poll is clean when something answered with a valid 0x5A magic and a
 /// classified mode (not the `Unknown` desync bucket).
 fn probe_column_ok(raw: psx_pad::RawPoll) -> bool {
     raw.mode.is_connected()
@@ -1847,13 +1861,13 @@ fn probe_column_ok(raw: psx_pad::RawPoll) -> bool {
         && raw.id_high == 0x5A
 }
 
-const fn mode_text(mode: psx_pad::PadMode) -> &'static str {
+const fn mode_short(mode: psx_pad::PadMode) -> &'static str {
     match mode {
-        psx_pad::PadMode::Digital => "DIGITAL 41",
-        psx_pad::PadMode::Analog => "ANALOG 73",
-        psx_pad::PadMode::Config => "CONFIG F3",
-        psx_pad::PadMode::Unknown => "UNKNOWN",
-        psx_pad::PadMode::Disconnected => "NONE",
+        psx_pad::PadMode::Digital => "DIG",
+        psx_pad::PadMode::Analog => "ANA",
+        psx_pad::PadMode::Config => "CFG",
+        psx_pad::PadMode::Unknown => "UNK",
+        psx_pad::PadMode::Disconnected => "---",
     }
 }
 
@@ -1871,28 +1885,6 @@ fn hex2(value: u8) -> Hex2 {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
     Hex2 {
         bytes: [HEX[(value >> 4) as usize], HEX[(value & 0xF) as usize]],
-    }
-}
-
-struct AckFrac {
-    bytes: [u8; 3],
-}
-
-impl AckFrac {
-    fn as_str(&self) -> &str {
-        unsafe { core::str::from_utf8_unchecked(&self.bytes) }
-    }
-}
-
-/// "acked/needed" -- how many of the bytes that should have been acknowledged
-/// actually were. The final packet byte is never acknowledged, so `needed` is
-/// `exchanges - 1`.
-fn ack_frac(raw: psx_pad::RawPoll) -> AckFrac {
-    let needed = raw.exchanges.saturating_sub(1);
-    let mask = (1u16 << needed.min(15)).wrapping_sub(1);
-    let acked = (raw.ack_seen & mask).count_ones() as u8;
-    AckFrac {
-        bytes: [b'0' + acked.min(9), b'/', b'0' + needed.min(9)],
     }
 }
 
@@ -2256,6 +2248,12 @@ fn draw_test_pattern(_tick: u32) {
     gpu::draw_quad_flat([(0, 188), (320, 188), (0, 240), (320, 240)], 8, 12, 28);
     gpu::draw_line_mono(0, 48, 319, 48, 60, 80, 110);
     gpu::draw_line_mono(0, 187, 319, 187, 60, 80, 110);
+}
+
+/// GPU monochrome-line liveness check: a red and a blue diagonal crossing in a
+/// small box. Only shown on the GPU section now (it is cosmetic -- the GPU draw
+/// tests assert the real line behaviour), so the focused screens stay clean.
+fn draw_gpu_line_probe() {
     gpu::draw_line_mono(272, 50, 312, 90, 255, 80, 80);
     gpu::draw_line_mono(312, 50, 272, 90, 80, 180, 255);
 }
@@ -4368,12 +4366,12 @@ fn pad_poll_result(pad: psx_engine::PadState) -> TestResult {
     }
 }
 
-/// Strict port-1 handshake under the shipping ACK-paced timing: a connected
+/// Strict port-1 handshake under the shipping no-wait timing: a connected
 /// controller must answer with the 0x5A magic and a classified mode. A desync
 /// (wrong magic / Unknown mode) is a hard FAIL, not the old benign "optional".
 /// An empty port stays optional -- absence is not a failure.
 fn test_pad_handshake_strict() -> TestResult {
-    let raw = psx_pad::poll_port1_raw(psx_pad::Pacing::AckWait);
+    let raw = psx_pad::poll_port1_diag(psx_pad::DEFAULT_SETUP_SPINS, 0);
     let observed = ((raw.id_high as u32) << 8) | raw.id_low as u32;
     if !raw.mode.is_connected() {
         return TestResult::info(0, observed, "optional");
@@ -4385,36 +4383,32 @@ fn test_pad_handshake_strict() -> TestResult {
     }
 }
 
-/// The connected controller should pull `/ACK` low for every non-final byte
-/// under the ACK-paced timing. PASS when every expected ACK was seen; WARN when
-/// a pad answers but is not acknowledging (reading blind -- the SCPH-1200
-/// failure mode that the legacy no-wait path papered over). Empty port stays
-/// optional. `observed` packs acked count (hi byte) and needed count (lo byte).
-fn test_pad_ack_observed() -> TestResult {
-    let raw = psx_pad::poll_port1_raw(psx_pad::Pacing::AckWait);
-    let needed = raw.exchanges.saturating_sub(1);
-    let mask = (1u16 << needed.min(15)).wrapping_sub(1);
-    let acked = (raw.ack_seen & mask).count_ones();
-    let observed = ((acked) << 8) | needed as u32;
+/// The fixed setup+inter-byte diagnostic timing must read a connected pad as
+/// cleanly as the base no-wait timing (it is the same no-wait exchange plus
+/// fixed delays, no `/ACK`/CTRL machinery). PASS clean, WARN if a connected pad
+/// desyncs under the delays, optional when nothing is plugged in.
+fn test_pad_diag_timing() -> TestResult {
+    let raw = psx_pad::poll_port1_diag(2048, 2048);
+    let observed = ((raw.id_high as u32) << 8) | raw.id_low as u32;
     if !raw.mode.is_connected() {
         return TestResult::info(0, observed, "optional");
     }
-    if raw.ack_complete() {
-        TestResult::pass(needed as u32, observed, "acks ok")
+    if raw.id_high == 0x5A && !matches!(raw.mode, psx_pad::PadMode::Unknown) {
+        TestResult::pass(0x5A41, observed, "clean")
     } else {
-        TestResult::warn(needed as u32, observed, "no ack")
+        TestResult::warn(0x5A41, observed, "diag desync")
     }
 }
 
-/// DualShock analog handshake: request analog mode via the same ACK-paced config
-/// transaction games use, then confirm the pad reports ID 0x73 with stick bytes.
-/// A digital-only pad is INFO, not a failure; an empty port is optional.
+/// DualShock analog handshake: request analog mode via the config transaction
+/// games use, then confirm the pad reports ID 0x73 with stick bytes. A
+/// digital-only pad is INFO, not a failure; an empty port is optional.
 fn test_pad_analog_handshake() -> TestResult {
     if !psx_pad::poll_port1().is_connected() {
         return TestResult::info(0, 0, "optional");
     }
     let became_analog = psx_pad::enable_analog_port1();
-    let raw = psx_pad::poll_port1_raw(psx_pad::Pacing::AckWait);
+    let raw = psx_pad::poll_port1_diag(psx_pad::DEFAULT_SETUP_SPINS, 0);
     let observed = ((raw.id_low as u32) << 16)
         | ((raw.sticks.left_x as u32) << 8)
         | raw.sticks.left_y as u32;
