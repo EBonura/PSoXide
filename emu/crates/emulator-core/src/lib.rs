@@ -14,6 +14,7 @@ pub mod cdrom;
 pub mod cpu;
 pub mod dma;
 pub mod fastboot;
+pub mod freelook;
 pub mod gpu;
 pub mod hle_bios;
 pub mod input_tape;
@@ -32,6 +33,7 @@ pub use bus::{Bus, BusError};
 pub use cdrom::CdRom;
 pub use cpu::{Cpu, ExecutionError};
 pub use dma::{Dma, DmaChannel};
+pub use freelook::FreelookState;
 pub use fastboot::{
     fast_boot_disc, fast_boot_disc_with_hle, warm_bios_for_disc_fast_boot, DiscFastBootInfo,
     DISC_FAST_BOOT_WARMUP_STEPS,
