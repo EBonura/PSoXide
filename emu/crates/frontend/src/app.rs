@@ -329,10 +329,16 @@ impl AppState {
         // persistence.
         let paths = match override_dir {
             Some(p) => ConfigPaths::rooted(p),
+            #[cfg(not(target_arch = "wasm32"))]
             None => ConfigPaths::platform_default().unwrap_or_else(|e| {
                 eprintln!("[frontend] no platform config dir ({e}); persistence disabled");
                 ConfigPaths::rooted(std::env::temp_dir().join("PSoXide-ephemeral"))
             }),
+            // wasm has no filesystem: root at a virtual path and skip the
+            // directories/temp_dir resolution (both panic on wasm). Persistence
+            // is in-memory only; the fs reads below degrade to defaults.
+            #[cfg(target_arch = "wasm32")]
+            None => ConfigPaths::rooted(PathBuf::from("/psoxide")),
         };
         let _ = paths.ensure_dir(paths.root());
 
@@ -1050,6 +1056,9 @@ impl AppState {
     }
 
     /// Choose and persist a BIOS image from the Menu Settings column.
+    /// `rfd` (native file dialog) has no wasm backend, so the web build gets a
+    /// stub below; disc/BIOS loading on the web is a later phase.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn choose_bios_path(&mut self) {
         let mut dialog = rfd::FileDialog::new()
             .set_title("Choose PlayStation BIOS")
@@ -1073,7 +1082,15 @@ impl AppState {
         }
     }
 
+    /// Web stub: no native file dialog. A browser BIOS/disc picker lands in a
+    /// later phase.
+    #[cfg(target_arch = "wasm32")]
+    pub fn choose_bios_path(&mut self) {
+        self.status_message_set("File picker is not available in the browser build yet");
+    }
+
     /// Choose and persist the games folder from the Menu Settings column.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn choose_games_path(&mut self) {
         let mut dialog = rfd::FileDialog::new().set_title("Choose games folder");
         if let Some(dir) = path_parent_or_self(self.settings.paths.game_library.trim()) {
@@ -1099,6 +1116,12 @@ impl AppState {
                 self.status_message_set(e);
             }
         }
+    }
+
+    /// Web stub: no native folder picker.
+    #[cfg(target_arch = "wasm32")]
+    pub fn choose_games_path(&mut self) {
+        self.status_message_set("Folder picker is not available in the browser build yet");
     }
 
     /// Refresh the Settings Menu row values from persisted path state.
@@ -1971,6 +1994,9 @@ pub(crate) fn bus_from_configured_bios(settings: &Settings) -> Result<Bus, Strin
     Bus::new(bios).map_err(|e| format!("BIOS rejected: {e}"))
 }
 
+// Only the native file-dialog helpers (`choose_*_path`) use this to seed the
+// dialog's starting directory; the web build has no native dialog.
+#[cfg(not(target_arch = "wasm32"))]
 fn path_parent_or_self(value: &str) -> Option<PathBuf> {
     if value.is_empty() {
         return None;
@@ -2138,7 +2164,9 @@ pub fn step_one_frame(state: &mut AppState) -> StepFrameReport {
 }
 
 /// Fast-boot an embedded editor playtest disc through the same no-BIOS path
-/// used by the in-editor Play viewport.
+/// used by the in-editor Play viewport. Reached via the editor Play path and
+/// the headless CLI; both are compiled out on wasm, so it is dead there.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(crate) fn fast_boot_embedded_playtest_disc(
     bus: &mut Bus,
     cpu: &mut Cpu,
