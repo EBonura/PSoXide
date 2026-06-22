@@ -24,13 +24,17 @@ pub fn draw_layout(
     state: &mut AppState,
     vram_tex: egui::TextureId,
     display_tex: egui::TextureId,
-    editor_viewport: psxed_ui::EditorViewport3dPresentation,
+    #[cfg(feature = "editor")] editor_viewport: psxed_ui::EditorViewport3dPresentation,
     display_uv: egui::Rect,
     dt: f32,
 ) {
     state.hud.update(dt, state.cpu.tick());
     state.tick_status(dt);
 
+    // When the editor workspace owns the central UI it takes over the whole
+    // frame; the emulator panels below never run. Compiled out without the
+    // editor feature (the workspace can never be the editor then).
+    #[cfg(feature = "editor")]
     if state.workspace.is_editor() {
         let playtest_status = state.editor_playtest_status();
         state.editor.draw(ctx, editor_viewport, playtest_status);
@@ -158,6 +162,7 @@ pub fn apply_menu_action(state: &mut AppState, action: menu::MenuAction) -> Menu
             state.start_examples_build();
             MenuOutcome::None
         }
+        #[cfg(feature = "editor")]
         ToggleEditorWorkspace => {
             state.toggle_editor_workspace();
             state.menu.open = false;
