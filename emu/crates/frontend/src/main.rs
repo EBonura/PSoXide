@@ -1149,7 +1149,25 @@ impl ApplicationHandler for Shell {
         // On the web, GPU init finishes asynchronously after `resumed`; pick it
         // up here so the first redraw can fire once it lands. No-op on native.
         #[cfg(target_arch = "wasm32")]
-        self.install_pending_graphics();
+        {
+            self.install_pending_graphics();
+            // winit on web does not auto-size the canvas to the page, so the
+            // surface and egui's screen rect (both read from inner_size()) would
+            // stay at the 1x1 init size and nothing would be visible. Match the
+            // canvas to the browser window, but only when it actually changed
+            // (setting a canvas's size clears it, which would flicker per frame).
+            if let Some(gfx) = self.graphics.as_ref() {
+                if let Some(desired) = web_window_logical_size() {
+                    let sf = gfx.window.scale_factor();
+                    let current = gfx.window.inner_size().to_logical::<f64>(sf);
+                    if (current.width - desired.width).abs() > 0.5
+                        || (current.height - desired.height).abs() > 0.5
+                    {
+                        let _ = gfx.window.request_inner_size(desired);
+                    }
+                }
+            }
+        }
         if let Some(gfx) = self.graphics.as_ref() {
             gfx.window.request_redraw();
         }
@@ -1170,6 +1188,16 @@ impl Shell {
             self.graphics = Some(graphics);
         }
     }
+}
+
+/// The browser window's logical (CSS-pixel) size, used to keep the winit canvas
+/// matched to the page. winit on web does not size the canvas automatically.
+#[cfg(target_arch = "wasm32")]
+fn web_window_logical_size() -> Option<winit::dpi::LogicalSize<f64>> {
+    let win = web_sys::window()?;
+    let w = win.inner_width().ok()?.as_f64()?;
+    let h = win.inner_height().ok()?.as_f64()?;
+    Some(winit::dpi::LogicalSize::new(w.max(1.0), h.max(1.0)))
 }
 
 /// OR a keypress into the next-frame Menu input. `Escape` both toggles
