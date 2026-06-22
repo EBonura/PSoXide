@@ -2,7 +2,10 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+// web_time::Instant is a drop-in that works on wasm (std::time::Instant panics
+// there). Burn is inert on wasm, but BurnState is still constructed at startup.
+use web_time::Instant;
 
 use psoxide_settings::library::{cue_referenced_files, LibraryEntry};
 
