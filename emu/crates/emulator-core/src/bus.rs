@@ -445,6 +445,13 @@ impl Bus {
         self.sio0.set_port1_buttons(buttons);
     }
 
+    /// Enable/disable the slow original-controller (SCPH-1200) timing model on
+    /// SIO0. When on, a guest poll that clocks bytes without waiting for each
+    /// `/ACK` pulse desyncs, reproducing the hardware failure headlessly.
+    pub fn set_slow_pad(&mut self, slow: bool) {
+        self.sio0.set_slow_pad(slow);
+    }
+
     /// Update the analog-stick positions on the port-1
     /// controller. Each axis is `0..=255` with `0x80` = centre.
     /// No-op when no pad is attached to port 1. The stick values

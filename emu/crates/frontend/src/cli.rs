@@ -172,6 +172,12 @@ pub struct LaunchArgs {
     /// SYSTEM.CNF fast boot.
     #[arg(long)]
     pub bios_boot: bool,
+    /// Model a slow original controller (SCPH-1200) on SIO0: a guest poll that
+    /// clocks bytes without waiting for each `/ACK` pulse desyncs, reproducing
+    /// the hardware failure headlessly. Pair with the controller-probe disc to
+    /// see the no-wait column go DESYNC while the ACK-paced column stays clean.
+    #[arg(long)]
+    pub slow_pad: bool,
     /// Print an FNV-1a-64 VRAM hash at the end. Same algorithm the
     /// milestone regression tests use, so a CLI run + a unit test
     /// should produce identical numbers.
@@ -727,6 +733,10 @@ fn run_headless_launch(
             return Err(format!("unsupported file extension: .{other}"));
         }
     };
+
+    if args.slow_pad {
+        bus.set_slow_pad(true);
+    }
 
     let mut held_button_mask = 0u16;
     if args.hold_forward || args.hold_run {
@@ -1817,6 +1827,7 @@ fn validation_launch_args(
         pad_pulses: None,
         embedded_playtest: artifact.embedded_playtest,
         bios_boot: artifact.bios_boot,
+        slow_pad: false,
         dump_hash: false,
         guest_debug_log: false,
         visual_hash_log: None,
