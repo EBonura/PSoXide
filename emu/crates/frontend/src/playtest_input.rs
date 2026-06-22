@@ -6,7 +6,11 @@
 
 use std::path::Path;
 
-use emulator_core::input_tape::{read_tape, write_tape};
+use emulator_core::input_tape::read_tape;
+// `write_tape` only persists tapes recorded from the editor Play viewport.
+#[cfg(feature = "editor")]
+use emulator_core::input_tape::write_tape;
+#[cfg(feature = "editor")]
 use psxed_ui::{EditorPlaytestTapeMode, EditorPlaytestTapeStatus};
 
 /// One emulated frame's port-1 pad state. Alias to the shared tape sample
@@ -19,6 +23,7 @@ pub(crate) fn read_input_tape(path: &Path) -> Result<Vec<Port1PadSample>, String
     read_tape(path)
 }
 
+#[cfg(feature = "editor")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PlaytestInputMode {
     Idle,
@@ -26,6 +31,7 @@ enum PlaytestInputMode {
     Replaying,
 }
 
+#[cfg(feature = "editor")]
 impl Default for PlaytestInputMode {
     fn default() -> Self {
         Self::Idle
@@ -33,6 +39,7 @@ impl Default for PlaytestInputMode {
 }
 
 /// One state transition emitted while applying a tape frame.
+#[cfg(feature = "editor")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PlaytestInputEvent {
     /// Replay consumed the final recorded frame.
@@ -40,6 +47,7 @@ pub(crate) enum PlaytestInputEvent {
 }
 
 /// Mutable input tape state owned by the frontend app.
+#[cfg(feature = "editor")]
 #[derive(Debug, Default)]
 pub(crate) struct PlaytestInputTape {
     mode: PlaytestInputMode,
@@ -47,6 +55,7 @@ pub(crate) struct PlaytestInputTape {
     replay_cursor: usize,
 }
 
+#[cfg(feature = "editor")]
 impl PlaytestInputTape {
     /// Editor-facing summary for controls and overlays.
     pub(crate) fn editor_status(&self) -> EditorPlaytestTapeStatus {
