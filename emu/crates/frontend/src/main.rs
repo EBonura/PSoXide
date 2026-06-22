@@ -14,6 +14,11 @@ mod app;
 mod app_icon;
 mod audio;
 mod burn;
+// The headless CLI (`scan`/`list`/`launch`/...) is a native developer tool:
+// it reads argv, the filesystem, and spins up its own offscreen wgpu device.
+// None of that applies in the browser, so it is compiled out on wasm and the
+// web entry point goes straight to the GUI.
+#[cfg(not(target_arch = "wasm32"))]
 mod cli;
 mod disasm;
 #[cfg(feature = "editor")]
@@ -32,8 +37,12 @@ mod theme;
 mod ui;
 
 use std::sync::Arc;
-use std::time::Instant;
+// `web_time::Instant` is a drop-in for `std::time::Instant`: on native it
+// re-exports the std type, and on wasm it reads the browser performance clock
+// instead of std's clock, which panics on wasm32-unknown-unknown.
+use web_time::Instant;
 
+#[cfg(not(target_arch = "wasm32"))]
 use clap::Parser;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, KeyEvent, WindowEvent};
@@ -42,6 +51,7 @@ use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
 use crate::app::AppState;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::cli::Cli;
 use crate::gfx::Graphics;
 use crate::playtest_input::Port1PadSample;
@@ -79,6 +89,7 @@ fn elapsed_ms(start: Instant) -> f32 {
     start.elapsed().as_secs_f32() * 1000.0
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn main() {
     // Argument parsing first -- if a subcommand is present, we
     // dispatch through the headless CLI and never open a window.
@@ -107,6 +118,30 @@ fn main() {
 
     let mut app = Shell::new(config_dir, fullscreen, gpu_compute);
     event_loop.run_app(&mut app).expect("event loop");
+}
+
+/// Browser entry point. Trunk builds this bin and calls `main`, so no explicit
+/// `#[wasm_bindgen(start)]` is needed. There is no argv, filesystem, or headless
+/// CLI on the web: the canvas is attached in `resumed` (see the wasm branch of
+/// `Shell::resumed`) and the app boots straight into the GUI. winit's
+/// `spawn_app` drives the event loop without returning, which is required on
+/// the web because the loop is owned by the browser, not by Rust.
+#[cfg(target_arch = "wasm32")]
+fn main() {
+    use winit::platform::web::EventLoopExtWebSys;
+
+    // Forward Rust panics to the devtools console instead of an opaque
+    // `RuntimeError: unreachable`, so a panic during init is debuggable.
+    console_error_panic_hook::set_once();
+
+    let event_loop = EventLoop::new().expect("event loop");
+    event_loop.set_control_flow(ControlFlow::Poll);
+
+    // No `--config-dir`/`--windowed`/`--gpu-compute` on the web: windowed
+    // (a canvas), no shadow compute backend, platform-default config (which
+    // degrades to in-memory since the browser has no config directory).
+    let app = Shell::new(None, false, false);
+    event_loop.spawn_app(app);
 }
 
 struct Shell {
@@ -167,6 +202,14 @@ struct Shell {
     /// 15bpp gameplay needs a target rebuild because the visible panel
     /// was using the CPU-decoded fallback while 24bpp was active.
     hw_last_display_bpp24: bool,
+    /// Deferred GPU init landing pad for the web build. wgpu's adapter/device
+    /// request is async and the browser main thread cannot block on it, so
+    /// `resumed` kicks the init off `spawn_local` and the finished `Graphics`
+    /// is dropped in here; the shell installs it on the next tick. Empty until
+    /// init completes. `Rc<RefCell<..>>` (not a channel) because wgpu types are
+    /// `!Send` on single-threaded wasm.
+    #[cfg(target_arch = "wasm32")]
+    graphics_init: std::rc::Rc<std::cell::RefCell<Option<Graphics>>>,
 }
 
 impl Default for Shell {
@@ -222,6 +265,8 @@ impl Shell {
             display_gpu_compute: gpu_compute,
             hw_seen_gpu_resync_generation: 0,
             hw_last_display_bpp24: false,
+            #[cfg(target_arch = "wasm32")]
+            graphics_init: std::rc::Rc::new(std::cell::RefCell::new(None)),
         }
     }
 }
@@ -407,6 +452,7 @@ impl ApplicationHandler for Shell {
         // Borderless-fullscreen on the primary monitor by default.
         // `--windowed` switches to a 1600×1000 floating window so
         // dev work next to a terminal / docs stays bearable.
+        #[allow(unused_mut)]
         let mut attrs = Window::default_attributes()
             .with_title("PSoXide")
             .with_inner_size(winit::dpi::PhysicalSize::new(INITIAL_WIDTH, INITIAL_HEIGHT))
@@ -417,9 +463,48 @@ impl ApplicationHandler for Shell {
         if self.fullscreen {
             attrs = attrs.with_fullscreen(Some(winit::window::Fullscreen::Borderless(None)));
         }
-        let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
 
-        self.graphics = Some(pollster::block_on(Graphics::new(window)));
+        // Native: create the window and block on GPU init -- the OS owns the
+        // window and blocking on adapter/device is fine off the main browser
+        // thread.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
+            self.graphics = Some(pollster::block_on(Graphics::new(window)));
+        }
+
+        // Web: build a canvas, append it to the document body, hand it to
+        // winit, then kick GPU init off `spawn_local`. The browser main thread
+        // cannot block on the async adapter/device request, so the finished
+        // `Graphics` lands in `graphics_init` and the shell installs it on a
+        // later tick (see `install_pending_graphics`).
+        #[cfg(target_arch = "wasm32")]
+        {
+            use wasm_bindgen::JsCast;
+            use winit::platform::web::WindowAttributesExtWebSys;
+
+            let canvas = web_sys::window()
+                .and_then(|win| win.document())
+                .and_then(|doc| {
+                    let canvas = doc
+                        .create_element("canvas")
+                        .ok()?
+                        .dyn_into::<web_sys::HtmlCanvasElement>()
+                        .ok()?;
+                    doc.body()?.append_child(&canvas).ok()?;
+                    Some(canvas)
+                })
+                .expect("append canvas to document body");
+
+            attrs = attrs.with_canvas(Some(canvas));
+            let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
+
+            let slot = self.graphics_init.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                let graphics = Graphics::new(window).await;
+                *slot.borrow_mut() = Some(graphics);
+            });
+        }
     }
 
     fn window_event(
@@ -1061,8 +1146,28 @@ impl ApplicationHandler for Shell {
     }
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        // On the web, GPU init finishes asynchronously after `resumed`; pick it
+        // up here so the first redraw can fire once it lands. No-op on native.
+        #[cfg(target_arch = "wasm32")]
+        self.install_pending_graphics();
         if let Some(gfx) = self.graphics.as_ref() {
             gfx.window.request_redraw();
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl Shell {
+    /// Move the deferred web GPU init into `self.graphics` once `spawn_local`
+    /// has finished building it, and request the first redraw. Cheap to call
+    /// every tick: it only does work on the tick the `Graphics` first arrives.
+    fn install_pending_graphics(&mut self) {
+        if self.graphics.is_some() {
+            return;
+        }
+        if let Some(graphics) = self.graphics_init.borrow_mut().take() {
+            graphics.window.request_redraw();
+            self.graphics = Some(graphics);
         }
     }
 }

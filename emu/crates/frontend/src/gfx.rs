@@ -5,7 +5,8 @@
 //! without wgpu types leaking into it.
 
 use std::sync::Arc;
-use std::time::Instant;
+// Drop-in `std::time::Instant` that also works on wasm (see main.rs).
+use web_time::Instant;
 
 use emulator_core::{Gpu, Vram, VRAM_HEIGHT, VRAM_WIDTH};
 use psx_gpu_render::HwRenderer;

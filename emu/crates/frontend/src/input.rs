@@ -60,20 +60,33 @@
 //! normal held button. It toggles the controller's Digital/Analog
 //! response mode instead.
 
+// gilrs has no wasm32 backend, so the entire gamepad path (router, pad
+// sampling, hot-plug tracking) is native-only. On the web the shell uses the
+// keyboard-only [`InputRouter`] stub at the bottom of this file; keyboard
+// events already flow through winit `WindowEvent`s and work unchanged.
+#[cfg(not(target_arch = "wasm32"))]
 use emulator_core::button;
+#[cfg(not(target_arch = "wasm32"))]
 use gilrs::{Axis, Button, Event, EventType, GamepadId, Gilrs};
+#[cfg(not(target_arch = "wasm32"))]
 use std::collections::HashMap;
 
 /// Left-stick deadzone for the D-pad proxy path.
+#[cfg(not(target_arch = "wasm32"))]
 const STICK_DEADZONE: f32 = 0.3;
 
 /// Analog trigger activation threshold.
+#[cfg(not(target_arch = "wasm32"))]
 const TRIGGER_THRESHOLD: f32 = 0.5;
 
 /// The Select+Start combination, precomputed.
+#[cfg(not(target_arch = "wasm32"))]
 const CHORD_MASK: u16 = button::SELECT | button::START;
 
 /// Gamepad hotplug notification surfaced to the frontend toast.
+// Only the native gilrs router constructs these; the wasm router never sees a
+// pad, so the variants are intentionally unconstructed there.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InputNotice {
     /// A pad became available to gilrs.
@@ -154,11 +167,13 @@ pub struct InputFrame {
 /// One tracked pad. Name is captured at connect time so we can
 /// still identify the pad in a disconnect log message after gilrs
 /// has already dropped the handle.
+#[cfg(not(target_arch = "wasm32"))]
 struct TrackedPad {
     name: String,
 }
 
 /// Central input router. One per shell; polled once per frame.
+#[cfg(not(target_arch = "wasm32"))]
 pub struct InputRouter {
     /// `None` when gilrs init failed (headless / locked-down
     /// Linux / missing permissions). Keyboard still works.
@@ -176,6 +191,7 @@ pub struct InputRouter {
     pending_notices: Vec<InputNotice>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl InputRouter {
     /// Initialise gilrs and enumerate any pads already known at
     /// startup. A failed init is non-fatal -- subsequent polls
@@ -384,6 +400,7 @@ impl InputRouter {
 ///   East  (B / right)  → Circle
 ///   West  (X / left)   → Square
 ///   North (Y / top)    → Triangle
+#[cfg(not(target_arch = "wasm32"))]
 fn sample_pad(gp: &gilrs::Gamepad<'_>) -> u16 {
     let mut mask: u16 = 0;
 
@@ -464,4 +481,36 @@ fn sample_pad(gp: &gilrs::Gamepad<'_>) -> u16 {
     }
 
     mask
+}
+
+/// Keyboard-only input router for the web build. There is no gamepad backend
+/// on wasm (gilrs does not target it), so every poll returns an empty
+/// [`InputFrame`]; keyboard input reaches the guest through winit
+/// `WindowEvent`s in the shell, exactly as on native, so nothing is lost for a
+/// keyboard player. The surface matches the native router so the shell needs no
+/// per-platform branching at the call sites.
+#[cfg(target_arch = "wasm32")]
+pub struct InputRouter;
+
+#[cfg(target_arch = "wasm32")]
+impl InputRouter {
+    /// Construct the no-op router. Always succeeds.
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// No pads on the web yet.
+    pub fn poll(&mut self) -> InputFrame {
+        InputFrame::default()
+    }
+
+    /// Never any gamepad connected.
+    pub fn is_connected(&self) -> bool {
+        false
+    }
+
+    /// No connected pads, so the name list is empty.
+    pub fn connected_names(&self) -> String {
+        String::new()
+    }
 }
