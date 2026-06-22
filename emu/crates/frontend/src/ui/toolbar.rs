@@ -222,6 +222,24 @@ fn draw_debug_toggles(ui: &mut egui::Ui, state: &mut AppState) {
         "Toggle debug sidebar",
         &mut state.panels.debug_sidebar,
     );
+    // Freelook camera toggle. Resets the pose on disable so re-enabling
+    // starts centred on the game's own camera.
+    let fl_btn = toggle_button(icons::EYE, state.freelook.enabled);
+    if ui
+        .add(fl_btn)
+        .on_hover_text("Freelook camera - move T/F/G/H, look I/J/K/L, up/down U/O (Shift = fast)")
+        .clicked()
+    {
+        state.freelook.enabled = !state.freelook.enabled;
+        if !state.freelook.enabled {
+            state.freelook = emulator_core::FreelookState::default();
+        }
+        state.status_message_set(if state.freelook.enabled {
+            "Freelook ON - T/F/G/H move, I/J/K/L look, U/O up/down"
+        } else {
+            "Freelook off"
+        });
+    }
     // Wireframe mode lives on the GPU, not a frontend panel -- we
     // dereference through Bus to flip it.
     let wf_active = state
