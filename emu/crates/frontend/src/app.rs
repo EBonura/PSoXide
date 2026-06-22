@@ -468,6 +468,15 @@ impl AppState {
         #[cfg(feature = "editor")]
         out.menu.sync_editor_label(out.workspace.is_editor());
         out.sync_menu_settings_paths();
+        #[cfg(target_arch = "wasm32")]
+        {
+            // Auto-boot the bundled homebrew disc (Celeste) on the web build so
+            // the page lands straight in a playable game. Native uses the menu.
+            const BUNDLED_DISC: &[u8] = include_bytes!("../assets/celeste-collection.bin");
+            if let Err(e) = out.boot_disc_bytes(BUNDLED_DISC.to_vec()) {
+                eprintln!("[frontend] bundled disc boot failed: {e}");
+            }
+        }
         out
     }
 }
@@ -495,6 +504,30 @@ impl AppState {
     /// disc paths. On success the emulator is paused at the reset
     /// vector (or the legacy EXE entry point); the user clicks Run
     /// to start stepping.
+    /// Boot a homebrew disc image from raw bytes via the no-BIOS HLE path (the
+    /// same one embedded Play uses for PSoXide-authored discs). Used by the web
+    /// build to auto-boot a bundled disc, and later a user-supplied one.
+    pub fn boot_disc_bytes(&mut self, bytes: Vec<u8>) -> Result<(), String> {
+        if bytes.len() < SECTOR_BYTES {
+            return Err("disc image too small to be valid".to_string());
+        }
+        let mut bus = Bus::new_without_bios();
+        let mut cpu = Cpu::new();
+        let disc = Disc::from_bin(bytes);
+        fast_boot_disc_with_hle(&mut bus, &mut cpu, &disc, true)
+            .map_err(|e| format!("boot disc: {e:?}"))?;
+        bus.cdrom.insert_disc(Some(disc));
+        bus.attach_digital_pad_port1();
+        let _ = bus.force_port1_analog_mode();
+        self.bus = Some(bus);
+        self.gpu_resync_generation = self.gpu_resync_generation.wrapping_add(1);
+        self.cpu = cpu;
+        self.running = true;
+        self.menu.open = false;
+        self.menu.sync_run_label(true);
+        Ok(())
+    }
+
     pub fn launch_entry(&mut self, entry: &LibraryEntry) -> Result<(), String> {
         // Flush the outgoing game's memcard before we discard its
         // Bus state. Silently log on failure -- we'd rather launch
