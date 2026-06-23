@@ -38,8 +38,11 @@ const BAR_HEIGHT: f32 = 34.0;
 const TOOLBAR_MARGIN_X: f32 = 8.0;
 /// Gap between the metrics lane and the controls lane.
 const TOOLBAR_CLUSTER_GAP: f32 = 8.0;
-/// Right-side lane: transport, volume slider, BIOS toggle, debug tools.
-const CONTROLS_WIDTH: f32 = 480.0;
+/// Right-side lane: transport, volume slider, BIOS toggle, debug tools. The
+/// controls render right-anchored and are clipped to this width, so it must
+/// comfortably exceed their natural content width -- otherwise the leftmost
+/// button (the native/high-res scale toggle) loses its left edge to the clip.
+const CONTROLS_WIDTH: f32 = 540.0;
 /// Keep enough room for the status dot + RUNNING/PAUSED label.
 const METRICS_MIN_WIDTH: f32 = 116.0;
 /// Slider width used in the toolbar.
