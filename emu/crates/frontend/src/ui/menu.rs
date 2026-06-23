@@ -77,6 +77,9 @@ pub enum MenuAction {
     /// Web: reconnect a previously-saved BIOS + games folder.
     #[cfg(target_arch = "wasm32")]
     Reconnect,
+    /// A non-actionable row, e.g. the "not available in the web build"
+    /// placeholder on a desktop-only category. Selecting it does nothing.
+    Noop,
     /// Quit the application.
     Quit,
 }
@@ -114,6 +117,14 @@ struct Category {
     name: &'static str,
     icon: char,
     items: Vec<MenuItem>,
+}
+
+impl Category {
+    /// True when this category is a desktop-only stand-in: a single
+    /// non-actionable placeholder row. Drawn greyed in the icon row.
+    fn disabled(&self) -> bool {
+        matches!(self.items.as_slice(), [item] if item.action == MenuAction::Noop)
+    }
 }
 
 pub struct MenuState {
@@ -192,11 +203,18 @@ impl MenuState {
             // has neither, so the category is dropped there.
             #[cfg(not(target_arch = "wasm32"))]
             build_projects_category(&[]),
+            // On web these two desktop-only features are shown greyed (a single
+            // "not available" row) instead of dropped, so the gap is explained
+            // rather than silent.
+            #[cfg(target_arch = "wasm32")]
+            disabled_category("Projects", icons::LAYERS),
             build_settings_category(),
             // The Create category is the entry point into the host editor
             // workspace; it is absent in emulator-only builds.
             #[cfg(feature = "editor")]
             build_create_category(false),
+            #[cfg(target_arch = "wasm32")]
+            disabled_category("Create", icons::FOLDER),
             build_system_category(running),
             // There is no "quit" in a browser tab, so the web build omits it.
             #[cfg(not(target_arch = "wasm32"))]
@@ -524,11 +542,17 @@ impl MenuState {
             } else {
                 ICON_SIZE_INACTIVE
             };
-            let color = fade(if is_active {
-                theme::MENU_ACCENT
+            let disabled = cat.disabled();
+            let color = if disabled {
+                // Desktop-only category: always greyed, even when selected.
+                fade(theme::MENU_TEXT_DIM.gamma_multiply(0.45))
             } else {
-                theme::MENU_TEXT_DIM
-            });
+                fade(if is_active {
+                    theme::MENU_ACCENT
+                } else {
+                    theme::MENU_TEXT_DIM
+                })
+            };
 
             if x < -50.0 || x > sw + 50.0 {
                 continue;
@@ -546,7 +570,11 @@ impl MenuState {
                     Align2::CENTER_TOP,
                     cat.name,
                     FontId::proportional(16.0),
-                    fade(theme::MENU_TEXT_BRIGHT),
+                    if disabled {
+                        fade(theme::MENU_TEXT_DIM)
+                    } else {
+                        fade(theme::MENU_TEXT_BRIGHT)
+                    },
                 );
             }
         }
@@ -1290,6 +1318,23 @@ fn build_create_category(editor_open: bool) -> Category {
             action: MenuAction::ToggleEditorWorkspace,
             burn_action: None,
             value: Some(if editor_open { "Active" } else { "Studio" }.into()),
+        }],
+    }
+}
+
+/// Web-only stand-in for a desktop-only category (Projects, Create): a greyed
+/// icon plus a single non-actionable "not available" row, so the feature is
+/// visible but clearly unavailable in the browser.
+#[cfg(target_arch = "wasm32")]
+fn disabled_category(name: &'static str, icon: char) -> Category {
+    Category {
+        name,
+        icon,
+        items: vec![MenuItem {
+            label: "Not available in the web build".into(),
+            action: MenuAction::Noop,
+            burn_action: None,
+            value: None,
         }],
     }
 }
