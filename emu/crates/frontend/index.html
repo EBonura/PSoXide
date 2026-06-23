@@ -4,6 +4,32 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>PSoXide</title>
+    <script>
+      // Browsers suspend the WebAudio context until a user gesture (autoplay
+      // policy), so cpal's audio stays silent on an auto-booting page. Capture
+      // the AudioContext cpal creates and resume it on the first user input.
+      (function () {
+        var Orig = window.AudioContext || window.webkitAudioContext;
+        if (!Orig) return;
+        var ctxs = [];
+        function Patched(opts) {
+          var c = new Orig(opts);
+          ctxs.push(c);
+          return c;
+        }
+        Patched.prototype = Orig.prototype;
+        window.AudioContext = Patched;
+        window.webkitAudioContext = Patched;
+        function resume() {
+          ctxs.forEach(function (c) {
+            if (c.state === "suspended") c.resume();
+          });
+        }
+        ["pointerdown", "keydown", "touchstart"].forEach(function (ev) {
+          window.addEventListener(ev, resume, true);
+        });
+      })();
+    </script>
     <style>
       html, body { margin: 0; padding: 0; height: 100%; background: #000; overflow: hidden; }
       canvas { display: block; }
