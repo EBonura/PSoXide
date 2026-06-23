@@ -446,7 +446,11 @@ impl MenuState {
         // keep drawing (faded) until it reaches 0. Every colour below is run
         // through `fade`, so the whole overlay cross-fades in and out.
         let target = if self.open { 1.0 } else { 0.0 };
-        self.appear += (target - self.appear) * FADE_SPEED * dt;
+        // Cap the per-frame step so a single long frame (e.g. the hitch when a
+        // game/example/demo boots) can't collapse the fade into a hard cut --
+        // it stays a dissolve across the following frames.
+        let k = (FADE_SPEED * dt).min(0.5);
+        self.appear += (target - self.appear) * k;
         if (self.appear - target).abs() < 0.01 {
             self.appear = target;
         }
@@ -916,13 +920,24 @@ fn build_settings_category() -> Category {
         icon: icons::HARD_DRIVE,
         items: vec![
             MenuItem {
-                label: "Choose BIOS path".into(),
+                // Native picks a file path; the web build uploads the bytes.
+                label: if cfg!(target_arch = "wasm32") {
+                    "Load BIOS file"
+                } else {
+                    "Choose BIOS path"
+                }
+                .into(),
                 action: MenuAction::ChooseBiosPath,
                 burn_action: None,
                 value: Some("Missing".into()),
             },
             MenuItem {
-                label: "Choose games path".into(),
+                label: if cfg!(target_arch = "wasm32") {
+                    "Load game file"
+                } else {
+                    "Choose games path"
+                }
+                .into(),
                 action: MenuAction::ChooseGamesPath,
                 burn_action: None,
                 value: Some("Missing".into()),
@@ -941,7 +956,16 @@ fn build_settings_category() -> Category {
 /// libraries get a helpful placeholder item so the user
 /// understands the category isn't broken, just unpopulated.
 fn build_games_category(games: &[LibraryItem]) -> Category {
-    let mut items = Vec::with_capacity(games.len() + 1);
+    let mut items = Vec::with_capacity(games.len() + 2);
+    // Web: a quick "load your own game file" entry at the top of Games (the
+    // browser has no scanned library folder). Reuses the Settings action.
+    #[cfg(target_arch = "wasm32")]
+    items.push(MenuItem {
+        label: "Load game file".into(),
+        action: MenuAction::ChooseGamesPath,
+        burn_action: None,
+        value: None,
+    });
     if games.is_empty() {
         items.push(MenuItem {
             label: "No games found yet".into(),
@@ -1108,7 +1132,7 @@ fn build_system_category(running: bool) -> Category {
                 value: None,
             },
             MenuItem {
-                label: "Reset emulator".into(),
+                label: "Reset".into(),
                 action: MenuAction::Reset,
                 burn_action: None,
                 value: None,

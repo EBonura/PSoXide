@@ -294,7 +294,12 @@ fn toggle_button(icon: char, active: bool) -> Button<'static> {
     let label = RichText::new(icon.to_string())
         .font(icons::font(ICON_SIZE))
         .color(color);
-    Button::new(label).min_size(BUTTON_SIZE)
+    // `Extend` stops egui truncating/clipping the glyph to its advance width;
+    // some Lucide icons (e.g. DISC) have ink that overruns the advance and
+    // would otherwise render with the right edge sliced off in the tight button.
+    Button::new(label)
+        .min_size(BUTTON_SIZE)
+        .wrap_mode(egui::TextWrapMode::Extend)
 }
 
 /// Left-hand cluster: status pill + responsive FPS / MIPS / dt metrics.
@@ -377,12 +382,11 @@ fn draw_buttons(ui: &mut egui::Ui, state: &mut AppState) {
     // Reset -- rebuild the CPU, clear VRAM, keep the Bus (disc stays
     // inserted).
     let reset_btn = Button::new(icons::text(icons::ROTATE_CCW, ICON_SIZE)).min_size(BUTTON_SIZE);
-    if ui.add(reset_btn).on_hover_text("Reset CPU").clicked() {
+    if ui.add(reset_btn).on_hover_text("Reset").clicked() {
+        // Reboot the CPU but keep the run state -- reset shouldn't force a pause.
         state.cpu = emulator_core::Cpu::new();
-        state.running = false;
         state.exec_history.clear();
         state.gpr_snapshot = None;
-        state.menu.sync_run_label(false);
         if let Some(bus) = state.bus.as_mut() {
             bus.gpu.vram.clear();
             state.gpu_resync_generation = state.gpu_resync_generation.wrapping_add(1);

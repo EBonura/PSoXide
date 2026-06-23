@@ -14,6 +14,9 @@ mod app;
 mod app_icon;
 mod audio;
 mod burn;
+// Browser file upload (BIOS + game). wasm-only: the native build uses rfd.
+#[cfg(target_arch = "wasm32")]
+mod web_files;
 // The headless CLI (`scan`/`list`/`launch`/...) is a native developer tool:
 // it reads argv, the filesystem, and spins up its own offscreen wgpu device.
 // None of that applies in the browser, so it is compiled out on wasm and the
@@ -1151,6 +1154,8 @@ impl ApplicationHandler for Shell {
         #[cfg(target_arch = "wasm32")]
         {
             self.install_pending_graphics();
+            // Apply any BIOS / game file the user picked since the last frame.
+            self.state.poll_web_uploads();
             // winit on web does not auto-size the canvas to the page, so the
             // surface and egui's screen rect (both read from inner_size()) would
             // stay at the 1x1 init size and nothing would be visible. Match the
