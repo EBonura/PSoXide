@@ -57,38 +57,9 @@ pub struct PanelVisibility {
     pub vram: bool,
     /// Frame-profiler section.
     pub profiler: bool,
-    /// One-shot open/close overrides consumed by the sidebar on its next
-    /// frame. egui's `CollapsingHeader` persists its own collapse state
-    /// after first render, so the booleans above only set the DEFAULT;
-    /// menu toggles must force the state through `CollapsingHeader::open`
-    /// for exactly one frame or they silently do nothing.
-    pub overrides: [Option<bool>; 4],
-}
-
-/// Index into [`PanelVisibility::overrides`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DebugSection {
-    /// CPU registers section.
-    Registers = 0,
-    /// Memory viewer section.
-    Memory = 1,
-    /// VRAM viewer section.
-    Vram = 2,
-    /// Frame profiler section.
-    Profiler = 3,
 }
 
 impl PanelVisibility {
-    /// Queue a one-shot forced open/close for a sidebar section.
-    pub fn set_override(&mut self, section: DebugSection, open: bool) {
-        self.overrides[section as usize] = Some(open);
-    }
-
-    /// Consume the pending override for a section, if any.
-    pub fn take_override(&mut self, section: DebugSection) -> Option<bool> {
-        self.overrides[section as usize].take()
-    }
-
     /// Startup visibility: everything collapsed and the sidebar hidden,
     /// unless `PSOXIDE_DEBUG_SIDEBAR=1` (dev hook: open the sidebar with
     /// every section expanded, e.g. for layout work / screenshots).
@@ -102,7 +73,6 @@ impl PanelVisibility {
             memory: dev_open,
             vram: dev_open,
             profiler: dev_open,
-            overrides: [None; 4],
         }
     }
 }
@@ -117,7 +87,6 @@ impl Default for PanelVisibility {
             memory: false,
             vram: false,
             profiler: false,
-            overrides: [None; 4],
         }
     }
 }

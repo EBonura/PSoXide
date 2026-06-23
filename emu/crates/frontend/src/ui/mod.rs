@@ -111,13 +111,6 @@ pub fn apply_menu_action(state: &mut AppState, action: menu::MenuAction) -> Menu
             state.toggle_fast_boot_disc();
             MenuOutcome::None
         }
-        FillVramTestPattern => {
-            if let Some(bus) = state.bus.as_mut() {
-                fill_vram_test_pattern(&mut bus.gpu.vram);
-                state.gpu_resync_generation = state.gpu_resync_generation.wrapping_add(1);
-            }
-            MenuOutcome::None
-        }
         LaunchGame(id) => {
             // Game-launch rebuilds Bus + Cpu from scratch. Close
             // the Menu on success so the user sees the freshly-
@@ -176,42 +169,6 @@ pub fn apply_menu_action(state: &mut AppState, action: menu::MenuAction) -> Menu
             state.choose_games_path();
             MenuOutcome::None
         }
-        ToggleRegisters => {
-            state.panels.debug_sidebar = true;
-            state.panels.registers = !state.panels.registers;
-            let open = state.panels.registers;
-            state
-                .panels
-                .set_override(crate::app::DebugSection::Registers, open);
-            MenuOutcome::None
-        }
-        ToggleMemory => {
-            state.panels.debug_sidebar = true;
-            state.panels.memory = !state.panels.memory;
-            let open = state.panels.memory;
-            state
-                .panels
-                .set_override(crate::app::DebugSection::Memory, open);
-            MenuOutcome::None
-        }
-        ToggleVram => {
-            state.panels.debug_sidebar = true;
-            state.panels.vram = !state.panels.vram;
-            let open = state.panels.vram;
-            state
-                .panels
-                .set_override(crate::app::DebugSection::Vram, open);
-            MenuOutcome::None
-        }
-        ToggleProfiler => {
-            state.panels.debug_sidebar = true;
-            state.panels.profiler = !state.panels.profiler;
-            let open = state.panels.profiler;
-            state
-                .panels
-                .set_override(crate::app::DebugSection::Profiler, open);
-            MenuOutcome::None
-        }
         Quit => MenuOutcome::Quit,
     }
 }
@@ -221,22 +178,6 @@ pub fn apply_menu_action(state: &mut AppState, action: menu::MenuAction) -> Menu
 pub enum MenuOutcome {
     None,
     Quit,
-}
-
-fn fill_vram_test_pattern(vram: &mut emulator_core::Vram) {
-    use emulator_core::{VRAM_HEIGHT, VRAM_WIDTH};
-    // Gradient: R = x/32, G = y/16, B = (x^y) & 0x1F. Makes the viewer
-    // instantly recognisable as "working" -- distinct from the noise a
-    // buggy upload would produce.
-    for y in 0..VRAM_HEIGHT {
-        for x in 0..VRAM_WIDTH {
-            let r = ((x * 31 / VRAM_WIDTH) & 0x1F) as u16;
-            let g = ((y * 31 / VRAM_HEIGHT) & 0x1F) as u16;
-            let b = ((x ^ y) as u16) & 0x1F;
-            let color = r | (g << 5) | (b << 10);
-            vram.set_pixel(x as u16, y as u16, color);
-        }
-    }
 }
 
 fn draw_status_toast(ctx: &egui::Context, state: &AppState) {
