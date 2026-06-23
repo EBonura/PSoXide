@@ -168,12 +168,13 @@ PSoXide is developed with substantial AI assistance, with a human directing the
 architecture, debugging, and hardware verification. This is disclosed openly and
 is **not** a clean-room claim.
 
-It is licensed **GPL-2.0-or-later**, and that is *required*, not stylistic: parts
-of the emulator core are derived from **PCSX-Redux** (GPL-2.0-or-later), and the
-GPL is what that derivation obliges. Derived files carry per-file `## Provenance`
-headers; subsystems written from hardware documentation and only parity-checked
-say so explicitly. Your own game content - art, models, levels, music - stays
-yours.
+It is licensed **GPL-2.0-or-later**, and that is *required*, not stylistic. PSoXide
+leaned heavily on **PCSX-Redux** (GPL-2.0-or-later) early on and has since diverged
+substantially, with many subsystems rewritten from hardware documentation and
+silicon testing. The parts that remain derived from PCSX-Redux are individually
+marked with per-file `## Provenance` headers, and the GPL is what that remaining
+derivation obliges; subsystems written from hardware docs and only parity-checked
+say so explicitly. Your own game content - art, models, levels, music - stays yours.
 
 If you plan to build and **distribute** on top of PSoXide, start with
 **[`docs/downstream-licensing.md`](docs/downstream-licensing.md)**. Full detail:
