@@ -17,26 +17,23 @@
 //! We keep the cpal host + stream + config alive inside [`AudioOut`].
 //! Dropping the struct stops the stream.
 //!
-//! cpal has no wasm32 backend, so on the web the whole cpal path is replaced
-//! by a silent stub (see the bottom of this file) that keeps [`AudioOut`]'s
-//! public surface identical -- the shell pushes samples that are dropped, and
-//! the SPU still drains into the void so its internal queue cannot grow.
+//! On wasm, cpal uses its WebAudio backend (a main-thread ScriptProcessor
+//! callback), so the same [`AudioOut`] runs on the web -- single threaded, no
+//! SharedArrayBuffer needed. Browsers suspend the audio context until a user
+//! gesture, so sound starts once the player first interacts with the page.
 
 #![cfg_attr(target_arch = "wasm32", allow(rustdoc::broken_intra_doc_links))]
 
-#[cfg(not(target_arch = "wasm32"))]
 use std::sync::{
     atomic::{AtomicU32, Ordering},
     Arc, Mutex,
 };
 
-#[cfg(not(target_arch = "wasm32"))]
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
 /// Target sample rate -- PSX SPU native rate. Host may negotiate up
 /// (48 kHz is common); cpal handles any rate we ask for or tells us
 /// the default.
-#[cfg(not(target_arch = "wasm32"))]
 const TARGET_SAMPLE_RATE: u32 = 44_100;
 
 /// Shared producer/consumer queue. Producer = emulation thread;
@@ -46,15 +43,12 @@ const TARGET_SAMPLE_RATE: u32 = 44_100;
 ///
 /// `VecDeque<(i16, i16)>` stores interleaved stereo; the callback
 /// pops `(l, r)` pairs and interleaves them into cpal's f32 output.
-#[cfg(not(target_arch = "wasm32"))]
 pub type SampleQueue = Arc<Mutex<std::collections::VecDeque<(i16, i16)>>>;
-#[cfg(not(target_arch = "wasm32"))]
 type VolumeControl = Arc<AtomicU32>;
 
 /// Live audio output. Owns the cpal stream (which runs on an OS
 /// audio thread) and exposes the producer handle to the shell's
 /// per-frame SPU drain.
-#[cfg(not(target_arch = "wasm32"))]
 pub struct AudioOut {
     /// Sample producer -- the shell clones this to push drained
     /// SPU samples after each CPU frame.
@@ -75,7 +69,6 @@ pub struct AudioOut {
     trace_stats: Mutex<AudioTraceStats>,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 #[derive(Default)]
 struct AudioTraceStats {
     samples: usize,
@@ -84,7 +77,6 @@ struct AudioTraceStats {
     peak_r: u16,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl AudioTraceStats {
     fn add(&mut self, samples: &[(i16, i16)]) {
         self.samples += samples.len();
@@ -102,7 +94,6 @@ impl AudioTraceStats {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl AudioOut {
     /// Spin up the host audio stream. Returns `None` when no output
     /// device is available (headless CI, WSL without PulseAudio).
@@ -271,7 +262,6 @@ impl AudioOut {
 /// It keeps its interpolation phase across callbacks; resetting this
 /// state per callback is audible as periodic ticks on hosts whose
 /// native rate is 48 kHz.
-#[cfg(not(target_arch = "wasm32"))]
 struct LinearResampler {
     phase: f32,
     prev: (i16, i16),
@@ -279,7 +269,6 @@ struct LinearResampler {
     primed: bool,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl LinearResampler {
     fn new() -> Self {
         Self {
@@ -312,67 +301,29 @@ impl LinearResampler {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn lerp_sample(a: (i16, i16), b: (i16, i16), t: f32) -> (i16, i16) {
     (lerp_i16(a.0, b.0, t), lerp_i16(a.1, b.1, t))
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn lerp_i16(a: i16, b: i16, t: f32) -> i16 {
     let value = a as f32 + (b as f32 - a as f32) * t;
     value.round().clamp(i16::MIN as f32, i16::MAX as f32) as i16
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn apply_gain_f32(sample: i16, gain: f32) -> f32 {
     ((sample as f32) / 32768.0 * gain).clamp(-1.0, 1.0)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn apply_gain_i16(sample: i16, gain: f32) -> i16 {
     ((sample as f32) * gain)
         .round()
         .clamp(i16::MIN as f32, i16::MAX as f32) as i16
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn env_flag(name: &str) -> bool {
     std::env::var(name).ok().is_some_and(|value| {
         !matches!(value.as_str(), "" | "0" | "false" | "FALSE" | "off" | "OFF")
     })
 }
 
-/// Silent wasm audio output. WebAudio is not wired yet, so this keeps the
-/// same surface the shell calls every frame ([`AudioOut::open`],
-/// [`AudioOut::push_samples`], [`AudioOut::set_volume`], [`AudioOut::queue_len`],
-/// [`AudioOut::host_sample_rate`]) while doing nothing: pushed samples are
-/// dropped on the floor. The shell still drains the SPU into it, so the SPU's
-/// internal queue never grows unbounded.
-#[cfg(target_arch = "wasm32")]
-pub struct AudioOut;
-
-#[cfg(target_arch = "wasm32")]
-impl AudioOut {
-    /// No host audio on the web yet. Returning `None` makes the shell treat
-    /// audio as unavailable -- emulation runs, output is silent.
-    pub fn open() -> Option<Self> {
-        None
-    }
-
-    /// Nominal sample rate. Never observed since [`Self::open`] returns `None`,
-    /// but kept so the type's surface matches the native build.
-    pub fn host_sample_rate(&self) -> u32 {
-        44_100
-    }
-
-    /// Drop pushed samples -- no WebAudio sink yet.
-    pub fn push_samples(&self, _samples: &[(i16, i16)]) {}
-
-    /// Volume is meaningless without a sink; ignore it.
-    pub fn set_volume(&self, _volume: f32) {}
-
-    /// No queue exists, so depth is always zero.
-    pub fn queue_len(&self) -> usize {
-        0
-    }
-}
+// (Web audio uses the same cpal `AudioOut` above, via the WebAudio backend.)
