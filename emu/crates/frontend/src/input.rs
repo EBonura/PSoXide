@@ -490,27 +490,130 @@ fn sample_pad(gp: &gilrs::Gamepad<'_>) -> u16 {
 /// keyboard player. The surface matches the native router so the shell needs no
 /// per-platform branching at the call sites.
 #[cfg(target_arch = "wasm32")]
-pub struct InputRouter;
+#[derive(Default)]
+pub struct InputRouter {
+    /// Previous frame's pad mask, for menu-nav rising edges.
+    prev_mask: u16,
+    /// Previous Select+Start-held state, for the menu-toggle rising edge.
+    prev_chord: bool,
+    /// Previous analog-button state, for its rising edge.
+    prev_analog: bool,
+}
 
 #[cfg(target_arch = "wasm32")]
 impl InputRouter {
-    /// Construct the no-op router. Always succeeds.
+    /// Construct the web gamepad router. Always succeeds.
     pub fn new() -> Self {
-        Self
+        Self::default()
     }
 
-    /// No pads on the web yet.
+    /// Poll the browser Gamepad API for the first connected pad and map the
+    /// "standard" layout onto the PSX pad. Keyboard input still flows through
+    /// winit `WindowEvent`s in the shell, exactly as on native.
     pub fn poll(&mut self) -> InputFrame {
-        InputFrame::default()
+        use emulator_core::button;
+        use wasm_bindgen::JsCast;
+
+        let mut frame = InputFrame::default();
+        let Some(gp) = first_connected_gamepad() else {
+            self.prev_mask = 0;
+            self.prev_chord = false;
+            self.prev_analog = false;
+            return frame;
+        };
+
+        let buttons = gp.buttons();
+        let pressed = |i: u32| -> bool {
+            buttons
+                .get(i)
+                .dyn_into::<web_sys::GamepadButton>()
+                .map(|b| b.pressed())
+                .unwrap_or(false)
+        };
+
+        // Standard gamepad layout -> PSX pad; face buttons follow Sony's order
+        // (bottom = Cross). See https://w3c.github.io/gamepad/#remapping.
+        let mut mask = 0u16;
+        if pressed(0) { mask |= button::CROSS; }
+        if pressed(1) { mask |= button::CIRCLE; }
+        if pressed(2) { mask |= button::SQUARE; }
+        if pressed(3) { mask |= button::TRIANGLE; }
+        if pressed(4) { mask |= button::L1; }
+        if pressed(5) { mask |= button::R1; }
+        if pressed(6) { mask |= button::L2; }
+        if pressed(7) { mask |= button::R2; }
+        if pressed(8) { mask |= button::SELECT; }
+        if pressed(9) { mask |= button::START; }
+        if pressed(10) { mask |= button::L3; }
+        if pressed(11) { mask |= button::R3; }
+        if pressed(12) { mask |= button::UP; }
+        if pressed(13) { mask |= button::DOWN; }
+        if pressed(14) { mask |= button::LEFT; }
+        if pressed(15) { mask |= button::RIGHT; }
+
+        // Sticks: axes 0/1 left, 2/3 right, with a small deadzone.
+        let axes = gp.axes();
+        let axis = |i: u32| -> f32 {
+            let v = axes.get(i).as_f64().unwrap_or(0.0) as f32;
+            if v.abs() < 0.15 {
+                0.0
+            } else {
+                v
+            }
+        };
+        frame.left_stick = (axis(0), axis(1));
+        frame.right_stick = (axis(2), axis(3));
+
+        // Select + Start -> menu toggle (rising edge); strip the bits so a game
+        // does not see the combo on the toggle frame.
+        let chord = (mask & button::SELECT != 0) && (mask & button::START != 0);
+        frame.toggle_menu = chord && !self.prev_chord;
+        if chord {
+            mask &= !(button::SELECT | button::START);
+        }
+        self.prev_chord = chord;
+
+        // Analog/Mode toggle from the guide button (index 16) when present.
+        let analog = pressed(16);
+        frame.analog_button = analog && !self.prev_analog;
+        self.prev_analog = analog;
+
+        // Menu-nav rising edges off the D-pad and face buttons.
+        let edge = |bit: u16| (mask & bit != 0) && (self.prev_mask & bit == 0);
+        frame.menu_up = edge(button::UP);
+        frame.menu_down = edge(button::DOWN);
+        frame.menu_left = edge(button::LEFT);
+        frame.menu_right = edge(button::RIGHT);
+        frame.menu_confirm = edge(button::CROSS);
+        frame.menu_back = edge(button::CIRCLE);
+
+        self.prev_mask = mask;
+        frame.pad1_mask = mask;
+        frame
     }
 
-    /// Never any gamepad connected.
+    /// Whether a gamepad is currently connected.
     pub fn is_connected(&self) -> bool {
-        false
+        first_connected_gamepad().is_some()
     }
 
-    /// No connected pads, so the name list is empty.
+    /// Name of the first connected pad, or empty.
     pub fn connected_names(&self) -> String {
-        String::new()
+        first_connected_gamepad().map(|g| g.id()).unwrap_or_default()
     }
+}
+
+/// The first connected pad reported by the browser Gamepad API, if any.
+#[cfg(target_arch = "wasm32")]
+fn first_connected_gamepad() -> Option<web_sys::Gamepad> {
+    use wasm_bindgen::JsCast;
+    let pads = web_sys::window()?.navigator().get_gamepads().ok()?;
+    for i in 0..pads.length() {
+        if let Ok(gp) = pads.get(i).dyn_into::<web_sys::Gamepad>() {
+            if gp.connected() {
+                return Some(gp);
+            }
+        }
+    }
+    None
 }
