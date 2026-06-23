@@ -1124,12 +1124,17 @@ impl AppState {
         // library at a folder when none is configured yet.
         #[cfg(target_arch = "wasm32")]
         {
-            if self.bios_bytes.is_none() && self.web_games.is_empty() {
-                return Some(
-                    "Tip: load a BIOS and a games folder from Settings to play your own games",
-                );
-            }
-            return None;
+            // Banner whenever the user's own content is incomplete: BIOS
+            // missing, games folder not loaded, or both. The bundled discs
+            // still play without either.
+            return match (self.bios_bytes.is_some(), !self.web_games.is_empty()) {
+                (true, true) => None,
+                (false, false) => {
+                    Some("Load a BIOS and a games folder from Settings to play your own games")
+                }
+                (false, true) => Some("Load a BIOS from Settings to boot retail discs"),
+                (true, false) => Some("Load a games folder from Settings to play your own games"),
+            };
         }
         #[cfg(not(target_arch = "wasm32"))]
         if self.games_path_missing() {
