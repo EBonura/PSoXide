@@ -307,6 +307,11 @@ pub struct AppState {
     /// Toolbar mute latch. Kept separate from `audio_volume` so
     /// unmuting restores the prior level.
     pub audio_muted: bool,
+    /// Web build only: the BIOS image uploaded this session. The browser has no
+    /// filesystem, so a real-BIOS retail disc boot reads its BIOS from here
+    /// instead of `settings.paths.bios`. `None` until the user loads one.
+    #[cfg(target_arch = "wasm32")]
+    bios_bytes: Option<Vec<u8>>,
 }
 
 impl Default for AppState {
@@ -435,6 +440,8 @@ impl AppState {
             status_message: None,
             audio_volume: 1.0,
             audio_muted: false,
+            #[cfg(target_arch = "wasm32")]
+            bios_bytes: None,
         };
         // Startup auto-rescan: always run when a developer-facing build dir
         // exists so stale `library.ron` entries (e.g. cargo
@@ -469,14 +476,9 @@ impl AppState {
         #[cfg(feature = "editor")]
         out.menu.sync_editor_label(out.workspace.is_editor());
         out.sync_menu_settings_paths();
-        // Auto-boot the first bundled disc (Celeste) so the web build lands
-        // straight in a playable game; it is also re-launchable from the menu.
-        #[cfg(target_arch = "wasm32")]
-        if let Some(disc) = bundled::DISCS.first() {
-            if let Err(e) = out.boot_disc_bytes(disc.bytes.to_vec()) {
-                eprintln!("[frontend] bundled disc boot failed: {e}");
-            }
-        }
+        // Both builds start on the open menu (bundled discs like Celeste are
+        // launchable from the Games/Examples categories), rather than
+        // auto-booting into a game.
         out
     }
 }
@@ -1131,11 +1133,101 @@ impl AppState {
         }
     }
 
-    /// Web stub: no native file dialog. A browser BIOS/disc picker lands in a
-    /// later phase.
+    /// Web: open a browser file picker for the BIOS image. The chosen bytes
+    /// land in `bios_bytes` via `poll_web_uploads` on a later frame.
     #[cfg(target_arch = "wasm32")]
     pub fn choose_bios_path(&mut self) {
-        self.status_message_set("File picker is not available in the browser build yet");
+        crate::web_files::pick(crate::web_files::Upload::Bios);
+    }
+
+    /// Web: drain any BIOS / game files the user picked and apply them. Called
+    /// once per frame from the shell (uploads complete asynchronously).
+    #[cfg(target_arch = "wasm32")]
+    pub fn poll_web_uploads(&mut self) {
+        for (kind, name, bytes) in crate::web_files::drain() {
+            match kind {
+                crate::web_files::Upload::Bios => {
+                    let kib = bytes.len() / 1024;
+                    self.bios_bytes = Some(bytes);
+                    self.sync_menu_settings_paths();
+                    self.status_message_set(format!("BIOS loaded: {name} ({kib} KiB)"));
+                }
+                crate::web_files::Upload::Game => {
+                    // PS-EXE homebrew boots via HLE (no BIOS); anything else is
+                    // treated as a raw disc image and needs the real BIOS.
+                    let result = if bytes.starts_with(b"PS-X EXE") {
+                        self.boot_exe_bytes(bytes)
+                    } else {
+                        self.boot_disc_bytes_with_bios(bytes)
+                    };
+                    match result {
+                        Ok(()) => self.status_message_set(format!("Launched: {name}")),
+                        Err(e) => self.status_message_set(e),
+                    }
+                }
+            }
+        }
+    }
+
+    /// Web: boot a raw `.bin` disc image through the uploaded real BIOS,
+    /// mirroring the native `GameKind::DiscBin` path (minus the filesystem
+    /// memcard -- the web build uses a blank in-memory card).
+    #[cfg(target_arch = "wasm32")]
+    fn boot_disc_bytes_with_bios(&mut self, bytes: Vec<u8>) -> Result<(), String> {
+        let Some(bios) = self.bios_bytes.clone() else {
+            return Err("Load a BIOS first (Settings -> Load BIOS file)".to_string());
+        };
+        if bytes.len() < SECTOR_BYTES {
+            return Err("disc image too small to be valid".to_string());
+        }
+        let mut bus = Bus::new(bios).map_err(|e| format!("BIOS rejected: {e}"))?;
+        let mut cpu = Cpu::new();
+        let disc = Disc::from_bin(bytes);
+        maybe_fast_boot_disc_path(
+            &mut bus,
+            &mut cpu,
+            &disc,
+            std::path::Path::new("uploaded.bin"),
+            self.settings.emulator.fast_boot_disc,
+        );
+        bus.cdrom.insert_disc(Some(disc));
+        bus.attach_digital_pad_port1();
+        let _ = bus.force_port1_analog_mode();
+        bus.attach_memcard_port1(Vec::new());
+        self.swap_in_booted(bus, cpu);
+        Ok(())
+    }
+
+    /// Web: side-load a homebrew PS-EXE via the no-BIOS HLE path, mirroring the
+    /// native `GameKind::Exe` branch.
+    #[cfg(target_arch = "wasm32")]
+    fn boot_exe_bytes(&mut self, bytes: Vec<u8>) -> Result<(), String> {
+        let exe = Exe::parse(&bytes).map_err(|e| format!("parse EXE: {e:?}"))?;
+        let mut bus = Bus::new_without_bios();
+        let mut cpu = Cpu::new();
+        bus.load_exe_payload(exe.load_addr, &exe.payload);
+        bus.clear_exe_bss(exe.bss_addr, exe.bss_size);
+        cpu.seed_from_exe(exe.initial_pc, exe.initial_gp, exe.initial_sp());
+        bus.enable_hle_bios();
+        bus.attach_digital_pad_port1();
+        let _ = bus.force_port1_analog_mode();
+        self.swap_in_booted(bus, cpu);
+        Ok(())
+    }
+
+    /// Web: common tail for an upload boot -- swap in the new machine, start
+    /// running, and close the menu so the game is visible.
+    #[cfg(target_arch = "wasm32")]
+    fn swap_in_booted(&mut self, bus: Bus, cpu: Cpu) {
+        self.bus = Some(bus);
+        self.gpu_resync_generation = self.gpu_resync_generation.wrapping_add(1);
+        self.cpu = cpu;
+        self.running = true;
+        self.current_game = None;
+        self.exec_history.clear();
+        self.gpr_snapshot = None;
+        self.menu.open = false;
+        self.menu.sync_run_label(true);
     }
 
     /// Choose and persist the games folder from the Menu Settings column.
@@ -1167,10 +1259,11 @@ impl AppState {
         }
     }
 
-    /// Web stub: no native folder picker.
+    /// Web: open a browser file picker for a game image (.bin disc or .exe
+    /// homebrew). The chosen file boots via `poll_web_uploads` on a later frame.
     #[cfg(target_arch = "wasm32")]
     pub fn choose_games_path(&mut self) {
-        self.status_message_set("Folder picker is not available in the browser build yet");
+        crate::web_files::pick(crate::web_files::Upload::Game);
     }
 
     /// Refresh the Settings Menu row values from persisted path state.
@@ -1179,6 +1272,7 @@ impl AppState {
             .sync_settings_paths(self.bios_path_label(), self.games_path_label());
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn bios_path_label(&self) -> String {
         let configured = self.settings.paths.bios.trim();
         if !configured.is_empty() {
@@ -1190,6 +1284,17 @@ impl AppState {
         "Missing".into()
     }
 
+    /// Web: the BIOS is held in memory (uploaded), not a path.
+    #[cfg(target_arch = "wasm32")]
+    fn bios_path_label(&self) -> String {
+        if self.bios_bytes.is_some() {
+            "Loaded".into()
+        } else {
+            "None".into()
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     fn games_path_label(&self) -> String {
         let configured = self.settings.paths.game_library.trim();
         if configured.is_empty() {
@@ -1197,6 +1302,12 @@ impl AppState {
         } else {
             path_label(PathBuf::from(configured))
         }
+    }
+
+    /// Web: games are picked per-file, so there is no folder path to show.
+    #[cfg(target_arch = "wasm32")]
+    fn games_path_label(&self) -> String {
+        String::new()
     }
 
     /// Persist the embedded editor project if it has unsaved edits,
@@ -2080,6 +2191,8 @@ fn path_parent_or_self(value: &str) -> Option<PathBuf> {
     }
 }
 
+// Only the native file-path UI uses this; the web build shows "Loaded"/"None".
+#[cfg(not(target_arch = "wasm32"))]
 fn path_label(path: impl AsRef<Path>) -> String {
     let path = path.as_ref();
     path.file_name()

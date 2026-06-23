@@ -13,6 +13,7 @@ pub mod memory;
 pub mod menu;
 pub mod profiler;
 pub mod registers;
+pub mod splash;
 pub mod toolbar;
 pub mod vram;
 
@@ -30,6 +31,10 @@ pub fn draw_layout(
 ) {
     state.hud.update(dt, state.cpu.tick());
     state.tick_status(dt);
+
+    // One-shot boot splash on a foreground layer (drawn before the workspace
+    // branch so it overlays both the emulator and editor at launch).
+    splash::draw(ctx);
 
     // When the editor workspace owns the central UI it takes over the whole
     // frame; the emulator panels below never run. Compiled out without the
@@ -96,11 +101,11 @@ pub fn apply_menu_action(state: &mut AppState, action: menu::MenuAction) -> Menu
             MenuOutcome::None
         }
         Reset => {
+            // Reboot the CPU but keep the run state -- reset shouldn't drop
+            // you into a paused state.
             state.cpu = emulator_core::Cpu::new();
-            state.running = false;
             state.exec_history.clear();
             state.gpr_snapshot = None;
-            state.menu.sync_run_label(false);
             if let Some(bus) = state.bus.as_mut() {
                 bus.gpu.vram.clear();
                 state.gpu_resync_generation = state.gpu_resync_generation.wrapping_add(1);
