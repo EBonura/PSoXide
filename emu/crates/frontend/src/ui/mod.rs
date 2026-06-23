@@ -183,6 +183,10 @@ pub fn apply_menu_action(state: &mut AppState, action: menu::MenuAction) -> Menu
             state.reconnect_web_files();
             MenuOutcome::None
         }
+        ShowAbout => {
+            state.menu.show_about();
+            MenuOutcome::None
+        }
         Noop => MenuOutcome::None,
         Quit => MenuOutcome::Quit,
     }

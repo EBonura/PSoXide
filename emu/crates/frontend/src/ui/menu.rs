@@ -77,6 +77,8 @@ pub enum MenuAction {
     /// Web: reconnect a previously-saved BIOS + games folder.
     #[cfg(target_arch = "wasm32")]
     Reconnect,
+    /// Open the About card (from the Settings menu).
+    ShowAbout,
     /// A non-actionable row, e.g. the "not available in the web build"
     /// placeholder on a desktop-only category. Selecting it does nothing.
     Noop,
@@ -383,6 +385,11 @@ impl MenuState {
         }
     }
 
+    /// Open the About card. Driven by the Settings "About" row.
+    pub fn show_about(&mut self) {
+        self.about_open = true;
+    }
+
     /// Feed one frame of input. Returns `Some(action)` when a confirm
     /// selects an item.
     pub fn update(&mut self, input: &MenuInput) -> Option<MenuAction> {
@@ -393,6 +400,15 @@ impl MenuState {
             self.open = !self.open;
         }
         if !self.open {
+            return None;
+        }
+
+        // The About card is modal: swallow menu navigation while it is up, and
+        // let confirm or back dismiss it (mouse users get Close / click-outside).
+        if self.about_open {
+            if input.confirm || input.back {
+                self.about_open = false;
+            }
             return None;
         }
 
@@ -630,40 +646,6 @@ impl MenuState {
         });
         let pointer_hover = ctx.input(|input| input.pointer.hover_pos());
 
-        // Top-right brand mark. Clicking it toggles the About card. Drawn here so
-        // it can reuse the pointer release/hover already gathered above. It is run
-        // through `fade`, so it joins the open/close dissolve.
-        let logo_tex = crate::ui::splash::logo_texture(ctx);
-        let [logo_tw, logo_th] = logo_tex.size();
-        let logo_aspect = logo_tw as f32 / logo_th.max(1) as f32;
-        let logo_h = 22.0;
-        let logo_w = logo_h * logo_aspect;
-        // Drop below the setup banner when one is showing, else hug the top.
-        let logo_top = if warning.is_some() { 42.0 } else { 14.0 };
-        let logo_rect = Rect::from_min_size(
-            Pos2::new(sw - 16.0 - logo_w, logo_top),
-            Vec2::new(logo_w, logo_h),
-        );
-        let logo_hovered = pointer_hover.is_some_and(|p| logo_rect.contains(p));
-        if logo_hovered {
-            ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
-        }
-        painter.image(
-            logo_tex.id(),
-            logo_rect,
-            Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
-            fade(egui::Color32::from_white_alpha(
-                if logo_hovered || self.about_open {
-                    255
-                } else {
-                    190
-                },
-            )),
-        );
-        let logo_clicked = pointer_release.is_some_and(|p| logo_rect.contains(p));
-        if logo_clicked {
-            self.about_open = !self.about_open;
-        }
         // While the About card is up, swallow row-icon clicks behind it.
         let row_release = if self.about_open { None } else { pointer_release };
 
@@ -879,9 +861,9 @@ impl MenuState {
             fade(theme::MENU_HINT),
         );
 
-        // About card overlay (mouse-driven), painted on top when toggled.
+        // About card overlay, painted on top when opened from Settings.
         if self.about_open {
-            about_panel(ctx, &mut self.about_open, logo_clicked);
+            about_panel(ctx, &mut self.about_open);
         }
     }
 }
@@ -1008,9 +990,10 @@ fn draw_row_icon_action(
 
 /// The About card: brand mark, build info, and a few real links. Built from
 /// egui widgets (not the painter) so the links are first-class clickable
-/// `ui.link`s -- much less code than hand-rolled hit-testing. Mouse-driven;
-/// closes on its Close button, a second logo click, or a click outside it.
-fn about_panel(ctx: &egui::Context, open: &mut bool, logo_clicked: bool) {
+/// `ui.link`s -- much less code than hand-rolled hit-testing. Opened from the
+/// Settings "About" row; closes on its Close button, confirm/back, or a click
+/// outside it.
+fn about_panel(ctx: &egui::Context, open: &mut bool) {
     let logo_tex = crate::ui::splash::logo_texture(ctx);
     let [tw, th] = logo_tex.size();
     let aspect = tw as f32 / th.max(1) as f32;
@@ -1056,11 +1039,6 @@ fn about_panel(ctx: &egui::Context, open: &mut bool, logo_clicked: bool) {
                                 .color(theme::MENU_TEXT_DIM)
                                 .size(13.0),
                         );
-                        ui.label(
-                            egui::RichText::new("Built on PCSX-Redux")
-                                .color(theme::MENU_TEXT_DIM)
-                                .size(13.0),
-                        );
                         ui.add_space(8.0);
                         ui.label(
                             egui::RichText::new("Use only a BIOS and games you legally own.")
@@ -1076,9 +1054,7 @@ fn about_panel(ctx: &egui::Context, open: &mut bool, logo_clicked: bool) {
                         ui.add_space(16.0);
                         link(ui, "Source code on GitHub", "https://github.com/EBonura/PSoXide");
                         ui.add_space(4.0);
-                        link(ui, "Play in your browser", "https://ebonura.github.io/PSoXide/");
-                        ui.add_space(4.0);
-                        link(ui, "Created by EBonura", "https://github.com/EBonura");
+                        link(ui, "Bonnie Studios on itch.io", "https://bonnie-studios.itch.io/");
                         ui.add_space(18.0);
                         if ui.button("Close").clicked() {
                             *open = false;
@@ -1087,9 +1063,8 @@ fn about_panel(ctx: &egui::Context, open: &mut bool, logo_clicked: bool) {
                 });
         });
 
-    // A click anywhere outside the card closes it -- except the logo click that
-    // toggled it this very frame (which would otherwise re-close immediately).
-    if !logo_clicked && area.response.clicked_elsewhere() {
+    // A click anywhere outside the card closes it.
+    if area.response.clicked_elsewhere() {
         *open = false;
     }
 }
@@ -1157,6 +1132,12 @@ fn build_settings_category() -> Category {
             MenuItem {
                 label: "Reconnect saved files".into(),
                 action: MenuAction::Reconnect,
+                burn_action: None,
+                value: None,
+            },
+            MenuItem {
+                label: "About".into(),
+                action: MenuAction::ShowAbout,
                 burn_action: None,
                 value: None,
             },
