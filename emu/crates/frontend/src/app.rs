@@ -175,6 +175,36 @@ enum EditorBuildCompletion {
 
 /// Top-level app state. Owns the emulator state directly -- no Arc/Mutex,
 /// single-threaded, UI reads state in-place per frame.
+/// Discs baked into the web build. They appear in the menu (under Games) and
+/// boot via the no-BIOS HLE path; the first one auto-boots on page load.
+#[cfg(target_arch = "wasm32")]
+pub mod bundled {
+    /// One baked-in disc.
+    pub struct BundledDisc {
+        /// Menu launch id; the `bundled:` prefix is how launch routing spots it.
+        pub id: &'static str,
+        /// Menu title.
+        pub title: &'static str,
+        /// Menu subtitle.
+        pub subtitle: &'static str,
+        /// Raw disc-image bytes.
+        pub bytes: &'static [u8],
+    }
+
+    /// The baked-in discs in menu order. The first auto-boots on load.
+    pub static DISCS: &[BundledDisc] = &[BundledDisc {
+        id: "bundled:celeste",
+        title: "Celeste Classic Collection",
+        subtitle: "homebrew",
+        bytes: include_bytes!("../assets/celeste-collection.bin"),
+    }];
+
+    /// Look up a baked-in disc by its menu launch id.
+    pub fn find(id: &str) -> Option<&'static BundledDisc> {
+        DISCS.iter().find(|d| d.id == id)
+    }
+}
+
 /// Held state of the freelook-camera keys (see the toolbar EYE toggle).
 /// All are keyboard keys outside the PSX pad bindings, so they never
 /// double-drive the guest. Updated from keyboard events, applied per frame.
@@ -468,12 +498,11 @@ impl AppState {
         #[cfg(feature = "editor")]
         out.menu.sync_editor_label(out.workspace.is_editor());
         out.sync_menu_settings_paths();
+        // Auto-boot the first bundled disc (Celeste) so the web build lands
+        // straight in a playable game; it is also re-launchable from the menu.
         #[cfg(target_arch = "wasm32")]
-        {
-            // Auto-boot the bundled homebrew disc (Celeste) on the web build so
-            // the page lands straight in a playable game. Native uses the menu.
-            const BUNDLED_DISC: &[u8] = include_bytes!("../assets/celeste-collection.bin");
-            if let Err(e) = out.boot_disc_bytes(BUNDLED_DISC.to_vec()) {
+        if let Some(disc) = bundled::DISCS.first() {
+            if let Err(e) = out.boot_disc_bytes(disc.bytes.to_vec()) {
                 eprintln!("[frontend] bundled disc boot failed: {e}");
             }
         }
@@ -653,6 +682,11 @@ impl AppState {
     /// path-qualified tokens because authored PSoXide discs can still
     /// share a PSX volume ID.
     pub fn launch_by_id(&mut self, id: &str) -> Result<(), String> {
+        // Baked-in web discs boot via the no-BIOS HLE path, not the library.
+        #[cfg(target_arch = "wasm32")]
+        if let Some(disc) = bundled::find(id) {
+            return self.boot_disc_bytes(disc.bytes.to_vec());
+        }
         let Some(entry) = library_entry_for_launch_id(&self.library.entries, id).cloned() else {
             return Err(format!("no library entry with id={id}"));
         };
@@ -1057,6 +1091,17 @@ impl AppState {
         games.sort_by_key(|a| a.title.to_lowercase());
         examples.sort_by_key(|a| a.title.to_lowercase());
         projects.sort_by_key(|a| a.title.to_lowercase());
+        // Web build: surface the baked-in discs (Celeste, ...) under Games.
+        #[cfg(target_arch = "wasm32")]
+        for disc in bundled::DISCS {
+            games.push(MenuLibraryItem {
+                id: disc.id.to_string(),
+                title: disc.title.to_string(),
+                subtitle: disc.subtitle.to_string(),
+                burnable: false,
+                launchable: true,
+            });
+        }
         self.menu.set_library(&games, &examples, &projects);
     }
 
