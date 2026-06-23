@@ -171,6 +171,9 @@ impl MenuState {
         let categories = vec![
             build_games_category(&[]),
             build_examples_category(&[]),
+            // Projects are editor-authored and filesystem-backed; the web build
+            // has neither, so the category is dropped there.
+            #[cfg(not(target_arch = "wasm32"))]
             build_projects_category(&[]),
             build_settings_category(),
             // The Create category is the entry point into the host editor
@@ -179,6 +182,8 @@ impl MenuState {
             build_create_category(false),
             build_system_category(running),
             build_debug_category(),
+            // There is no "quit" in a browser tab, so the web build omits it.
+            #[cfg(not(target_arch = "wasm32"))]
             Category {
                 name: "Quit",
                 icon: icons::POWER,
@@ -227,9 +232,14 @@ impl MenuState {
         if let Some(examples_cat) = self.categories.get_mut(1) {
             *examples_cat = build_examples_category(examples);
         }
+        // The web build has no Projects category (see `with_running`), so the
+        // index-2 slot is Settings there; only update Projects off-web.
+        #[cfg(not(target_arch = "wasm32"))]
         if let Some(projects_cat) = self.categories.get_mut(2) {
             *projects_cat = build_projects_category(projects);
         }
+        #[cfg(target_arch = "wasm32")]
+        let _ = projects;
 
         // Try to preserve the user's category if it still exists.
         if let Some(idx) = self
