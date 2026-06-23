@@ -140,6 +140,9 @@ pub struct MenuState {
     /// The (category, item) the marquee is tracking; resets `marquee_t`
     /// when the selection moves.
     marquee_key: (usize, usize),
+    /// Whether the top-right About card is showing. Mouse-driven; cleared
+    /// whenever the menu itself closes.
+    about_open: bool,
     pending_pointer_action: Option<MenuAction>,
     categories: Vec<Category>,
 }
@@ -219,6 +222,7 @@ impl MenuState {
             scroll_y: 0.0,
             marquee_t: 0.0,
             marquee_key: (0, 0),
+            about_open: false,
             pending_pointer_action: None,
             categories,
         }
@@ -445,6 +449,11 @@ impl MenuState {
     /// Draw the Menu overlay on a middle-layer painter. `dt` drives the
     /// slide animation.
     pub fn draw(&mut self, ctx: &egui::Context, dt: f32, warning: Option<&str>) {
+        // The About card belongs to the open menu; drop it the moment the menu
+        // is dismissed so it can't linger through the close dissolve.
+        if !self.open {
+            self.about_open = false;
+        }
         // Quick dissolve: ease `appear` toward 1 when open / 0 when closed, and
         // keep drawing (faded) until it reaches 0. Every colour below is run
         // through `fade`, so the whole overlay cross-fades in and out.
@@ -593,6 +602,43 @@ impl MenuState {
         });
         let pointer_hover = ctx.input(|input| input.pointer.hover_pos());
 
+        // Top-right brand mark. Clicking it toggles the About card. Drawn here so
+        // it can reuse the pointer release/hover already gathered above. It is run
+        // through `fade`, so it joins the open/close dissolve.
+        let logo_tex = crate::ui::splash::logo_texture(ctx);
+        let [logo_tw, logo_th] = logo_tex.size();
+        let logo_aspect = logo_tw as f32 / logo_th.max(1) as f32;
+        let logo_h = 22.0;
+        let logo_w = logo_h * logo_aspect;
+        // Drop below the setup banner when one is showing, else hug the top.
+        let logo_top = if warning.is_some() { 42.0 } else { 14.0 };
+        let logo_rect = Rect::from_min_size(
+            Pos2::new(sw - 16.0 - logo_w, logo_top),
+            Vec2::new(logo_w, logo_h),
+        );
+        let logo_hovered = pointer_hover.is_some_and(|p| logo_rect.contains(p));
+        if logo_hovered {
+            ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        painter.image(
+            logo_tex.id(),
+            logo_rect,
+            Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
+            fade(egui::Color32::from_white_alpha(
+                if logo_hovered || self.about_open {
+                    255
+                } else {
+                    190
+                },
+            )),
+        );
+        let logo_clicked = pointer_release.is_some_and(|p| logo_rect.contains(p));
+        if logo_clicked {
+            self.about_open = !self.about_open;
+        }
+        // While the About card is up, swallow row-icon clicks behind it.
+        let row_release = if self.about_open { None } else { pointer_release };
+
         // How many full rows fit between `items_start_y` and the
         // bottom edge of the screen (with a small bottom margin so
         // the list doesn't butt against the edge).
@@ -731,7 +777,7 @@ impl MenuState {
                     &painter,
                     row_action_rect(items_x, item_width, y, action_index),
                     pointer_hover,
-                    pointer_release,
+                    row_release,
                     icons::DISC,
                     "Burn disc",
                     is_selected,
@@ -748,7 +794,7 @@ impl MenuState {
                     &painter,
                     row_action_rect(items_x, item_width, y, action_index),
                     pointer_hover,
-                    pointer_release,
+                    row_release,
                     icons::PLAY,
                     "Play",
                     is_selected,
@@ -804,6 +850,11 @@ impl MenuState {
             FontId::proportional(12.0),
             fade(theme::MENU_HINT),
         );
+
+        // About card overlay (mouse-driven), painted on top when toggled.
+        if self.about_open {
+            about_panel(ctx, &mut self.about_open, logo_clicked);
+        }
     }
 }
 
@@ -924,6 +975,110 @@ fn draw_row_icon_action(
 
     if pointer_release.is_some_and(|pos| rect.contains(pos)) {
         *pending_pointer_action = Some(action.clone());
+    }
+}
+
+/// The About card: brand mark, build info, and a few real links. Built from
+/// egui widgets (not the painter) so the links are first-class clickable
+/// `ui.link`s -- much less code than hand-rolled hit-testing. Mouse-driven;
+/// closes on its Close button, a second logo click, or a click outside it.
+fn about_panel(ctx: &egui::Context, open: &mut bool, logo_clicked: bool) {
+    let logo_tex = crate::ui::splash::logo_texture(ctx);
+    let [tw, th] = logo_tex.size();
+    let aspect = tw as f32 / th.max(1) as f32;
+    let link = |ui: &mut egui::Ui, text: &str, url: &str| {
+        if ui
+            .link(egui::RichText::new(text).color(theme::MENU_ACCENT).size(14.0))
+            .clicked()
+        {
+            open_external_url(url);
+        }
+    };
+
+    let area = egui::Area::new(egui::Id::new("about-card"))
+        .order(egui::Order::Foreground)
+        .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+        .show(ctx, |ui| {
+            egui::Frame::NONE
+                .fill(egui::Color32::from_rgb(18, 20, 26))
+                .stroke(egui::Stroke::new(1.0, theme::MENU_ACCENT))
+                .corner_radius(egui::CornerRadius::same(8))
+                .inner_margin(egui::Margin::symmetric(30, 26))
+                .show(ui, |ui| {
+                    ui.set_width(300.0);
+                    ui.vertical_centered(|ui| {
+                        let w = 210.0;
+                        ui.image(egui::load::SizedTexture::new(
+                            logo_tex.id(),
+                            egui::vec2(w, w / aspect),
+                        ));
+                        ui.add_space(12.0);
+                        ui.label(
+                            egui::RichText::new(concat!("Version ", env!("CARGO_PKG_VERSION")))
+                                .color(theme::MENU_TEXT_BRIGHT),
+                        );
+                        ui.label(
+                            egui::RichText::new("Independent, open-source emulator")
+                                .color(theme::MENU_TEXT_DIM)
+                                .size(13.0),
+                        );
+                        ui.add_space(8.0);
+                        ui.label(
+                            egui::RichText::new("License: GPL-2.0-or-later")
+                                .color(theme::MENU_TEXT_DIM)
+                                .size(13.0),
+                        );
+                        ui.label(
+                            egui::RichText::new("Built on PCSX-Redux")
+                                .color(theme::MENU_TEXT_DIM)
+                                .size(13.0),
+                        );
+                        ui.add_space(8.0);
+                        ui.label(
+                            egui::RichText::new("Use only a BIOS and games you legally own.")
+                                .color(theme::MENU_TEXT_DIM)
+                                .size(12.0),
+                        );
+                        ui.add_space(16.0);
+                        link(ui, "Source code on GitHub", "https://github.com/EBonura/PSoXide");
+                        ui.add_space(4.0);
+                        link(ui, "Play in your browser", "https://ebonura.github.io/PSoXide/");
+                        ui.add_space(4.0);
+                        link(ui, "Created by EBonura", "https://github.com/EBonura");
+                        ui.add_space(18.0);
+                        if ui.button("Close").clicked() {
+                            *open = false;
+                        }
+                    });
+                });
+        });
+
+    // A click anywhere outside the card closes it -- except the logo click that
+    // toggled it this very frame (which would otherwise re-close immediately).
+    if !logo_clicked && area.response.clicked_elsewhere() {
+        *open = false;
+    }
+}
+
+/// Open a URL in the user's default browser (native) or a new tab (web).
+#[cfg(not(target_arch = "wasm32"))]
+fn open_external_url(url: &str) {
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else if cfg!(target_os = "windows") {
+        "explorer"
+    } else {
+        "xdg-open"
+    };
+    if let Err(e) = std::process::Command::new(opener).arg(url).spawn() {
+        eprintln!("[frontend] open url failed: {e}");
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn open_external_url(url: &str) {
+    if let Some(w) = web_sys::window() {
+        let _ = w.open_with_url_and_target(url, "_blank");
     }
 }
 
