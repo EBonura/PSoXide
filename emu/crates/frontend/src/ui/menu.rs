@@ -7,9 +7,9 @@
 //! Navigation: arrows + Enter + Escape (gamepad will land when the
 //! input subsystem does). Escape also toggles the overlay open/closed.
 //!
-//! Phase 1e ships three categories -- Game / Debug / System. Games,
-//! Examples, Save States, Video, Input gain their sections as the
-//! corresponding subsystems come online.
+//! Categories: Games / Examples / Projects / Settings / Create / System
+//! (Projects + Create are editor/native-only). The debug sidebar is
+//! toggled from the toolbar, not the menu.
 
 use egui::{Align2, FontId, Pos2, Rect, Vec2};
 
@@ -43,8 +43,6 @@ pub enum MenuAction {
     /// Toggle warm SYSTEM.CNF disc fast boot. When disabled, discs
     /// boot through the full BIOS logo path.
     ToggleFastBoot,
-    /// Paint a test pattern into VRAM (dev aid until the GPU renders).
-    FillVramTestPattern,
     /// Launch a game by its menu launch token. Retail games use the
     /// stable library ID; authored project builds use a path-qualified
     /// token so projects sharing the same PSX volume ID remain distinct.
@@ -66,14 +64,6 @@ pub enum MenuAction {
     ChooseBiosPath,
     /// Pick and persist the games library root.
     ChooseGamesPath,
-    /// Toggle visibility of the register sidebar section.
-    ToggleRegisters,
-    /// Toggle visibility of the memory viewer sidebar section.
-    ToggleMemory,
-    /// Toggle visibility of the VRAM sidebar section.
-    ToggleVram,
-    /// Toggle visibility of the frame-profiler sidebar section.
-    ToggleProfiler,
     /// Quit the application.
     Quit,
 }
@@ -181,7 +171,6 @@ impl MenuState {
             #[cfg(feature = "editor")]
             build_create_category(false),
             build_system_category(running),
-            build_debug_category(),
             // There is no "quit" in a browser tab, so the web build omits it.
             #[cfg(not(target_arch = "wasm32"))]
             Category {
@@ -964,46 +953,6 @@ fn build_system_category(running: bool) -> Category {
     }
 }
 
-/// Debug utilities -- panel toggles + VRAM test pattern.
-fn build_debug_category() -> Category {
-    Category {
-        name: "Debug",
-        icon: icons::BUG,
-        items: vec![
-            MenuItem {
-                label: "Toggle registers section".into(),
-                action: MenuAction::ToggleRegisters,
-                burn_action: None,
-                value: None,
-            },
-            MenuItem {
-                label: "Toggle memory section".into(),
-                action: MenuAction::ToggleMemory,
-                burn_action: None,
-                value: None,
-            },
-            MenuItem {
-                label: "Toggle VRAM section".into(),
-                action: MenuAction::ToggleVram,
-                burn_action: None,
-                value: None,
-            },
-            MenuItem {
-                label: "Toggle profiler section".into(),
-                action: MenuAction::ToggleProfiler,
-                burn_action: None,
-                value: None,
-            },
-            MenuItem {
-                label: "Fill VRAM test pattern".into(),
-                action: MenuAction::FillVramTestPattern,
-                burn_action: None,
-                value: None,
-            },
-        ],
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1021,15 +970,14 @@ mod tests {
     #[test]
     fn fresh_state_has_expected_categories() {
         let s = MenuState::new();
-        assert_eq!(s.categories.len(), 8);
+        assert_eq!(s.categories.len(), 7);
         assert_eq!(s.categories[0].name, "Games");
         assert_eq!(s.categories[1].name, "Examples");
         assert_eq!(s.categories[2].name, "Projects");
         assert_eq!(s.categories[3].name, "Settings");
         assert_eq!(s.categories[4].name, "Create");
         assert_eq!(s.categories[5].name, "System");
-        assert_eq!(s.categories[6].name, "Debug");
-        assert_eq!(s.categories[7].name, "Quit");
+        assert_eq!(s.categories[6].name, "Quit");
     }
 
     #[test]
@@ -1166,7 +1114,6 @@ mod tests {
         s.update(&right); // Settings
         s.update(&right); // Create
         s.update(&right); // System
-        s.update(&right); // Debug
         s.update(&right); // Quit
         s.update(&right); // past end -- should clamp
         assert_eq!(s.current_category(), Some("Quit"));
