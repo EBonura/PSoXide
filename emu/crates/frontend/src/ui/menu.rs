@@ -20,10 +20,18 @@ const CATEGORY_SPACING: f32 = 100.0;
 const ICON_SIZE_ACTIVE: f32 = 32.0;
 const ICON_SIZE_INACTIVE: f32 = 20.0;
 const ITEM_HEIGHT: f32 = 40.0;
-const ITEM_WIDTH: f32 = 400.0;
+/// Hard ceiling on item-row width (huge libraries / long paths elide past it).
+const ITEM_MAX_WIDTH: f32 = 820.0;
+/// Floor so short categories (System, Settings) don't shrink to a sliver.
+const ITEM_MIN_WIDTH: f32 = 260.0;
+/// How much a row's right-aligned value (path / region tag) may contribute to
+/// the auto-sizing, and how wide it may draw before eliding.
+const VALUE_WIDTH_CAP: f32 = 240.0;
 const ITEM_GAP: f32 = 2.0;
 const ROW_ACTION_WIDTH: f32 = 40.0;
 const ANIM_SPEED: f32 = 10.0;
+/// Open/close dissolve speed (exponential ease). Higher = snappier.
+const FADE_SPEED: f32 = 16.0;
 
 /// A menu action the Menu emits when the user confirms an item. The
 /// app layer interprets these -- Menu stays stateless about the
@@ -64,6 +72,8 @@ pub enum MenuAction {
     ChooseBiosPath,
     /// Pick and persist the games library root.
     ChooseGamesPath,
+    /// Cycle the menu backdrop opacity through a few presets.
+    CycleMenuOpacity,
     /// Quit the application.
     Quit,
 }
@@ -108,6 +118,11 @@ pub struct MenuState {
     category_index: usize,
     item_index: usize,
     anim_x: f32,
+    /// Open/close dissolve factor: 0 (hidden) .. 1 (fully shown).
+    appear: f32,
+    /// Menu backdrop opacity (percent), synced from settings; drives the
+    /// `draw` backdrop alpha.
+    backdrop_pct: u8,
     /// Per-frame animated scroll position for the item list, in
     /// "rows of (ITEM_HEIGHT + ITEM_GAP)". A value of `N` means
     /// item `N` is drawn at the top of the visible strip.
@@ -116,6 +131,12 @@ pub struct MenuState {
     /// category slide, so navigating a long list produces a smooth
     /// scroll rather than a snap.
     scroll_y: f32,
+    /// Seconds the current selection has been highlighted -- drives the
+    /// marquee scroll of an overflowing selected label.
+    marquee_t: f32,
+    /// The (category, item) the marquee is tracking; resets `marquee_t`
+    /// when the selection moves.
+    marquee_key: (usize, usize),
     pending_pointer_action: Option<MenuAction>,
     categories: Vec<Category>,
 }
@@ -190,7 +211,11 @@ impl MenuState {
             category_index: 0,
             item_index: 0,
             anim_x: 0.0,
+            appear: 0.0,
+            backdrop_pct: 90,
             scroll_y: 0.0,
+            marquee_t: 0.0,
+            marquee_key: (0, 0),
             pending_pointer_action: None,
             categories,
         }
@@ -275,6 +300,21 @@ impl MenuState {
         }
     }
 
+    /// Store the menu-backdrop opacity (percent) and reflect it in the
+    /// Settings item's displayed value. Driven by `video.menu_opacity_pct`.
+    pub fn set_menu_opacity(&mut self, pct: u8) {
+        self.backdrop_pct = pct.min(100);
+        if let Some(settings) = self.categories.iter_mut().find(|c| c.name == "Settings") {
+            if let Some(item) = settings
+                .items
+                .iter_mut()
+                .find(|item| item.action == MenuAction::CycleMenuOpacity)
+            {
+                item.value = Some(format!("{}%", self.backdrop_pct));
+            }
+        }
+    }
+
     /// Update the Create category label for the current workspace.
     #[cfg(feature = "editor")]
     pub fn sync_editor_label(&mut self, editor_open: bool) {
@@ -332,20 +372,25 @@ impl MenuState {
         }
 
         let num_cats = self.categories.len();
-        if input.left && self.category_index > 0 {
-            self.category_index -= 1;
-            self.item_index = 0;
-            // Snap the scroll so the new category's list shows from
-            // the top -- matches the Menu convention. The target for
-            // next frame will be 0.0 regardless; this avoids an
-            // awkward animation from mid-list in the previous
-            // category to top of the new one.
-            self.scroll_y = 0.0;
-        }
-        if input.right && self.category_index + 1 < num_cats {
-            self.category_index += 1;
-            self.item_index = 0;
-            self.scroll_y = 0.0;
+        if num_cats > 0 {
+            if input.left {
+                // Wrap to the last category from the first, mirroring the
+                // up/down item wrap below.
+                self.category_index = if self.category_index == 0 {
+                    num_cats - 1
+                } else {
+                    self.category_index - 1
+                };
+                self.item_index = 0;
+                // Snap the scroll so the new category's list shows from the
+                // top -- avoids an awkward animation from mid-list.
+                self.scroll_y = 0.0;
+            }
+            if input.right {
+                self.category_index = (self.category_index + 1) % num_cats;
+                self.item_index = 0;
+                self.scroll_y = 0.0;
+            }
         }
 
         let num_items = self.categories[self.category_index].items.len();
@@ -397,9 +442,22 @@ impl MenuState {
     /// Draw the Menu overlay on a middle-layer painter. `dt` drives the
     /// slide animation.
     pub fn draw(&mut self, ctx: &egui::Context, dt: f32, warning: Option<&str>) {
-        if !self.open {
+        // Quick dissolve: ease `appear` toward 1 when open / 0 when closed, and
+        // keep drawing (faded) until it reaches 0. Every colour below is run
+        // through `fade`, so the whole overlay cross-fades in and out.
+        let target = if self.open { 1.0 } else { 0.0 };
+        self.appear += (target - self.appear) * FADE_SPEED * dt;
+        if (self.appear - target).abs() < 0.01 {
+            self.appear = target;
+        }
+        if self.appear <= 0.0 {
             return;
         }
+        if self.appear != target {
+            ctx.request_repaint();
+        }
+        let appear = self.appear;
+        let fade = |c: egui::Color32| c.gamma_multiply(appear);
 
         let screen = ctx.screen_rect();
         let sw = screen.width();
@@ -410,17 +468,22 @@ impl MenuState {
             egui::Id::new("menu"),
         ));
 
-        painter.rect_filled(screen, 0.0, theme::MENU_BACKDROP);
+        let backdrop_alpha = (self.backdrop_pct as u16 * 255 / 100) as u8;
+        painter.rect_filled(
+            screen,
+            0.0,
+            fade(egui::Color32::from_rgba_premultiplied(0, 0, 0, backdrop_alpha)),
+        );
         if let Some(warning) = warning {
             let banner_h = 34.0;
             let rect = Rect::from_min_size(screen.min, Vec2::new(sw, banner_h));
-            painter.rect_filled(rect, 0.0, egui::Color32::from_rgb(126, 24, 34));
+            painter.rect_filled(rect, 0.0, fade(egui::Color32::from_rgb(126, 24, 34)));
             painter.text(
                 Pos2::new(sw / 2.0, banner_h / 2.0),
                 Align2::CENTER_CENTER,
                 warning,
                 FontId::proportional(15.0),
-                egui::Color32::WHITE,
+                fade(egui::Color32::WHITE),
             );
         }
 
@@ -444,11 +507,11 @@ impl MenuState {
             } else {
                 ICON_SIZE_INACTIVE
             };
-            let color = if is_active {
+            let color = fade(if is_active {
                 theme::MENU_ACCENT
             } else {
                 theme::MENU_TEXT_DIM
-            };
+            });
 
             if x < -50.0 || x > sw + 50.0 {
                 continue;
@@ -466,17 +529,52 @@ impl MenuState {
                     Align2::CENTER_TOP,
                     cat.name,
                     FontId::proportional(16.0),
-                    theme::MENU_TEXT_BRIGHT,
+                    fade(theme::MENU_TEXT_BRIGHT),
                 );
             }
         }
 
         // Item list.
+        // Reset the selected-row marquee when the selection changes, then
+        // advance it (it only actually scrolls labels that overflow).
+        let sel_key = (self.category_index, self.item_index);
+        if sel_key != self.marquee_key {
+            self.marquee_key = sel_key;
+            self.marquee_t = 0.0;
+        }
+        self.marquee_t += dt;
+        let marquee_t = self.marquee_t;
+
         let cat = &self.categories[self.category_index];
         let items_start_y = center_y + ICON_SIZE_ACTIVE + 44.0;
-        let items_x = center_x - ITEM_WIDTH / 2.0;
         let label_font = FontId::proportional(15.0);
         let value_font = FontId::proportional(13.0);
+
+        // Auto-size the row box to THIS category's content: fit the widest
+        // label fully, plus its action icons, plus a capped value column -- so
+        // each category is only as wide as it needs (no global stretch).
+        // Values past the cap elide; the window width is the hard ceiling.
+        let max_avail = (sw - 2.0 * 40.0).min(ITEM_MAX_WIDTH);
+        let measure = |text: &str, font: FontId| {
+            line_galley(ctx, text, font, theme::MENU_TEXT_DIM, None).size().x
+        };
+        let needed = cat.items.iter().fold(0.0_f32, |acc, item| {
+            let label_w = measure(&item.label, label_font.clone());
+            let value_w = item
+                .value
+                .as_deref()
+                .filter(|v| !v.is_empty())
+                .map_or(0.0, |v| measure(v, value_font.clone()).min(VALUE_WIDTH_CAP));
+            let has_play =
+                matches!(item.action, MenuAction::LaunchGame(_)) && item.burn_action.is_some();
+            let action_w = (usize::from(item.burn_action.is_some()) + usize::from(has_play)) as f32
+                * ROW_ACTION_WIDTH;
+            let value_gap = if value_w > 0.0 { 16.0 } else { 0.0 };
+            // 14px left pad + 12px right pad = 26.
+            acc.max(26.0 + label_w + value_gap + value_w + action_w)
+        });
+        let item_width = needed.clamp(ITEM_MIN_WIDTH, max_avail);
+        let items_x = center_x - item_width / 2.0;
         let row_stride = ITEM_HEIGHT + ITEM_GAP;
         let pointer_release = ctx.input(|input| {
             input
@@ -547,45 +645,83 @@ impl MenuState {
             }
             let is_selected = i == self.item_index;
 
-            let bg = if is_selected {
+            let bg = fade(if is_selected {
                 theme::MENU_ITEM_SEL
             } else {
                 theme::MENU_ITEM_BG
-            };
+            });
             let rect =
-                Rect::from_min_size(Pos2::new(items_x, y), Vec2::new(ITEM_WIDTH, ITEM_HEIGHT));
+                Rect::from_min_size(Pos2::new(items_x, y), Vec2::new(item_width, ITEM_HEIGHT));
             painter.rect_filled(rect, 0.0, bg);
 
             if is_selected {
                 painter.rect_filled(
                     Rect::from_min_size(Pos2::new(items_x, y), Vec2::new(3.0, ITEM_HEIGHT)),
                     0.0,
-                    theme::MENU_ACCENT,
+                    fade(theme::MENU_ACCENT),
                 );
             }
 
-            let label_color = if is_selected {
-                theme::MENU_TEXT_BRIGHT
-            } else {
-                theme::MENU_TEXT_DIM
-            };
-            painter.text(
-                Pos2::new(items_x + 14.0, y + ITEM_HEIGHT / 2.0),
-                Align2::LEFT_CENTER,
-                item.label.clone(),
-                label_font.clone(),
-                label_color,
-            );
-
+            // Text lives between `content_left` and the action icons. The value
+            // (right) is capped + elided; the label (left) takes the rest --
+            // elided when idle, marquee-scrolled when selected and overflowing.
             let launch_action = matches!(item.action, MenuAction::LaunchGame(_))
                 .then_some(&item.action)
                 .filter(|_| item.burn_action.is_some());
+            let action_count =
+                usize::from(item.burn_action.is_some()) + usize::from(launch_action.is_some());
+            let content_left = items_x + 14.0;
+            let avail_right = items_x + item_width - 12.0 - action_count as f32 * ROW_ACTION_WIDTH;
+
+            let value_galley = item.value.as_deref().filter(|v| !v.is_empty()).map(|val| {
+                let vcolor = fade(if is_selected {
+                    theme::MENU_TEXT_VALUE
+                } else {
+                    theme::MENU_TEXT_DIM
+                });
+                let vmax = VALUE_WIDTH_CAP.min((avail_right - content_left).max(0.0));
+                line_galley(ctx, val, value_font.clone(), vcolor, Some(vmax))
+            });
+            let value_w = value_galley.as_ref().map_or(0.0, |g| g.size().x);
+            let value_left = avail_right - value_w;
+
+            let label_color = fade(if is_selected {
+                theme::MENU_TEXT_BRIGHT
+            } else {
+                theme::MENU_TEXT_DIM
+            });
+            let label_gap = if value_w > 0.0 { 16.0 } else { 0.0 };
+            let label_budget = (value_left - label_gap - content_left).max(8.0);
+            let full = line_galley(ctx, &item.label, label_font.clone(), label_color, None);
+            if is_selected && full.size().x > label_budget {
+                let overflow = full.size().x - label_budget;
+                let off = marquee_offset(marquee_t, overflow);
+                let clip = Rect::from_min_size(
+                    Pos2::new(content_left, y),
+                    Vec2::new(label_budget, ITEM_HEIGHT),
+                );
+                let ty = y + (ITEM_HEIGHT - full.size().y) / 2.0;
+                painter
+                    .with_clip_rect(clip)
+                    .galley(Pos2::new(content_left - off, ty), full, label_color);
+            } else {
+                let g =
+                    line_galley(ctx, &item.label, label_font.clone(), label_color, Some(label_budget));
+                let ty = y + (ITEM_HEIGHT - g.size().y) / 2.0;
+                painter.galley(Pos2::new(content_left, ty), g, label_color);
+            }
+
+            if let Some(g) = value_galley {
+                let ty = y + (ITEM_HEIGHT - g.size().y) / 2.0;
+                painter.galley(Pos2::new(value_left, ty), g, fade(theme::MENU_TEXT_DIM));
+            }
+
             let mut action_index = 0;
             if let Some(action) = item.burn_action.as_ref() {
                 draw_row_icon_action(
                     ctx,
                     &painter,
-                    row_action_rect(items_x, y, action_index),
+                    row_action_rect(items_x, item_width, y, action_index),
                     pointer_hover,
                     pointer_release,
                     icons::DISC,
@@ -594,6 +730,7 @@ impl MenuState {
                     action,
                     &mut self.pending_pointer_action,
                     value_font.clone(),
+                    appear,
                 );
                 action_index += 1;
             }
@@ -601,7 +738,7 @@ impl MenuState {
                 draw_row_icon_action(
                     ctx,
                     &painter,
-                    row_action_rect(items_x, y, action_index),
+                    row_action_rect(items_x, item_width, y, action_index),
                     pointer_hover,
                     pointer_release,
                     icons::PLAY,
@@ -610,28 +747,7 @@ impl MenuState {
                     action,
                     &mut self.pending_pointer_action,
                     value_font.clone(),
-                );
-            }
-
-            if let Some(val) = item.value.as_deref() {
-                let val_color = if is_selected {
-                    theme::MENU_TEXT_VALUE
-                } else {
-                    theme::MENU_TEXT_DIM
-                };
-                let action_count =
-                    usize::from(item.burn_action.is_some()) + usize::from(launch_action.is_some());
-                let value_right = if action_count > 0 {
-                    items_x + ITEM_WIDTH - action_count as f32 * ROW_ACTION_WIDTH - 10.0
-                } else {
-                    items_x + ITEM_WIDTH - 12.0
-                };
-                painter.text(
-                    Pos2::new(value_right, y + ITEM_HEIGHT / 2.0),
-                    Align2::RIGHT_CENTER,
-                    val.to_string(),
-                    value_font.clone(),
-                    val_color,
+                    appear,
                 );
             }
         }
@@ -640,7 +756,7 @@ impl MenuState {
         // of the item strip when there's content outside the visible
         // window. Gives the user an affordance that "there's more
         // here" without waiting for them to hit the edge.
-        let indicator_color = theme::MENU_TEXT_DIM;
+        let indicator_color = fade(theme::MENU_TEXT_DIM);
         let has_above = self.scroll_y > 0.1;
         let has_below = (self.scroll_y + visible_rows as f32) < num_items as f32 - 0.1;
         if has_above {
@@ -668,17 +784,63 @@ impl MenuState {
             Align2::CENTER_TOP,
             "Enter: Select   Esc: Close   Arrows: Navigate",
             FontId::proportional(12.0),
-            theme::MENU_HINT,
+            fade(theme::MENU_HINT),
         );
     }
 }
 
-fn row_action_rect(items_x: f32, y: f32, index_from_right: usize) -> Rect {
-    let right = items_x + ITEM_WIDTH - index_from_right as f32 * ROW_ACTION_WIDTH;
+fn row_action_rect(items_x: f32, item_width: f32, y: f32, index_from_right: usize) -> Rect {
+    let right = items_x + item_width - index_from_right as f32 * ROW_ACTION_WIDTH;
     Rect::from_min_size(
         Pos2::new(right - ROW_ACTION_WIDTH, y),
         Vec2::new(ROW_ACTION_WIDTH, ITEM_HEIGHT),
     )
+}
+
+/// Lay out one line of text. `max_width = Some(w)` elides to `w` with an
+/// ellipsis; `None` lays the full line out (for marquee scrolling).
+fn line_galley(
+    ctx: &egui::Context,
+    text: &str,
+    font_id: FontId,
+    color: egui::Color32,
+    max_width: Option<f32>,
+) -> std::sync::Arc<egui::Galley> {
+    let mut job = egui::text::LayoutJob::single_section(
+        text.to_owned(),
+        egui::text::TextFormat {
+            font_id,
+            color,
+            ..Default::default()
+        },
+    );
+    job.wrap = egui::text::TextWrapping {
+        max_width: max_width.unwrap_or(f32::INFINITY),
+        max_rows: 1,
+        overflow_character: max_width.map(|_| '…'),
+        ..Default::default()
+    };
+    ctx.fonts(|f| f.layout_job(job))
+}
+
+/// Ping-pong marquee offset (px) for an overflowing label: pause, scroll to
+/// the end, pause, scroll back. `t` is seconds since the row was selected.
+fn marquee_offset(t: f32, overflow: f32) -> f32 {
+    const SPEED: f32 = 45.0; // px/s
+    const PAUSE: f32 = 1.3; // s held at each end
+    let travel = (overflow / SPEED).max(0.001);
+    let period = 2.0 * (PAUSE + travel);
+    let mut p = t % period;
+    if p < PAUSE {
+        0.0
+    } else if p < PAUSE + travel {
+        (p - PAUSE) / travel * overflow
+    } else if p < 2.0 * PAUSE + travel {
+        overflow
+    } else {
+        p -= 2.0 * PAUSE + travel;
+        overflow - (p / travel) * overflow
+    }
 }
 
 fn draw_row_icon_action(
@@ -693,6 +855,7 @@ fn draw_row_icon_action(
     action: &MenuAction,
     pending_pointer_action: &mut Option<MenuAction>,
     tooltip_font: FontId,
+    alpha: f32,
 ) {
     let hovered = pointer_hover.is_some_and(|pos| rect.contains(pos));
     if hovered {
@@ -701,21 +864,22 @@ fn draw_row_icon_action(
         painter.rect_filled(
             hover_rect,
             4.0,
-            egui::Color32::from_rgba_premultiplied(0, 191, 230, 42),
+            egui::Color32::from_rgba_premultiplied(0, 191, 230, 42).gamma_multiply(alpha),
         );
         painter.rect_stroke(
             hover_rect,
             4.0,
-            egui::Stroke::new(1.0, theme::MENU_ACCENT),
+            egui::Stroke::new(1.0, theme::MENU_ACCENT.gamma_multiply(alpha)),
             egui::StrokeKind::Inside,
         );
     }
 
-    let icon_color = if hovered || selected {
+    let icon_color = (if hovered || selected {
         theme::MENU_ACCENT
     } else {
         theme::MENU_TEXT_DIM
-    };
+    })
+    .gamma_multiply(alpha);
     painter.text(
         rect.center(),
         Align2::CENTER_CENTER,
@@ -730,13 +894,13 @@ fn draw_row_icon_action(
             Pos2::new(rect.right() - width - 6.0, rect.top() - 26.0),
             Vec2::new(width, 22.0),
         );
-        painter.rect_filled(tooltip_rect, 3.0, theme::MENU_ITEM_BG);
+        painter.rect_filled(tooltip_rect, 3.0, theme::MENU_ITEM_BG.gamma_multiply(alpha));
         painter.text(
             tooltip_rect.center(),
             Align2::CENTER_CENTER,
             tooltip,
             tooltip_font,
-            theme::MENU_TEXT_BRIGHT,
+            theme::MENU_TEXT_BRIGHT.gamma_multiply(alpha),
         );
     }
 
@@ -762,6 +926,12 @@ fn build_settings_category() -> Category {
                 action: MenuAction::ChooseGamesPath,
                 burn_action: None,
                 value: Some("Missing".into()),
+            },
+            MenuItem {
+                label: "Menu opacity".into(),
+                action: MenuAction::CycleMenuOpacity,
+                burn_action: None,
+                value: Some("90%".into()),
             },
         ],
     }
@@ -1093,36 +1263,31 @@ mod tests {
     }
 
     #[test]
-    fn navigation_stays_in_bounds() {
+    fn left_right_wraps_around_categories() {
         let mut s = MenuState::new();
-        // Populate some games so there's something to navigate.
-        s.set_library(
-            &[
-                dummy_item("a", "A", ""),
-                dummy_item("b", "B", ""),
-                dummy_item("c", "C", ""),
-            ],
-            &[],
-            &[],
-        );
-        let right = MenuInput {
-            right: true,
-            ..Default::default()
-        };
-        s.update(&right); // Examples
-        s.update(&right); // Projects
-        s.update(&right); // Settings
-        s.update(&right); // Create
-        s.update(&right); // System
-        s.update(&right); // Quit
-        s.update(&right); // past end -- should clamp
-        assert_eq!(s.current_category(), Some("Quit"));
+        s.set_library(&[dummy_item("a", "A", "")], &[], &[]);
+        let n = s.categories.len();
+        assert!(n >= 2);
+        assert_eq!(s.current_category(), Some("Games")); // first category
+
         let left = MenuInput {
             left: true,
             ..Default::default()
         };
-        for _ in 0..10 {
-            s.update(&left);
+        let right = MenuInput {
+            right: true,
+            ..Default::default()
+        };
+
+        // Left from the first category wraps to the last.
+        s.update(&left);
+        assert_eq!(s.current_category(), s.categories.last().map(|c| c.name));
+        // Right from the last wraps back to the first.
+        s.update(&right);
+        assert_eq!(s.current_category(), Some("Games"));
+        // A full lap of rights returns to the start.
+        for _ in 0..n {
+            s.update(&right);
         }
         assert_eq!(s.current_category(), Some("Games"));
     }
