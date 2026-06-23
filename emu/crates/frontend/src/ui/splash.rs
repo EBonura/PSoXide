@@ -60,8 +60,8 @@ fn start_time(now: f64) -> f64 {
 
 /// Decode + upload the logo once, then hand back the cached handle. Kept in a
 /// thread-local `OnceCell` so `draw` can stay stateless (egui runs on one
-/// thread).
-fn logo_texture(ctx: &egui::Context) -> TextureHandle {
+/// thread). Shared with the menu's About card so the brand mark is uploaded once.
+pub(crate) fn logo_texture(ctx: &egui::Context) -> TextureHandle {
     thread_local! {
         static TEX: OnceCell<TextureHandle> = const { OnceCell::new() };
     }
