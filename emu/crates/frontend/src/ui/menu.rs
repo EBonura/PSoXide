@@ -74,6 +74,9 @@ pub enum MenuAction {
     ChooseGamesPath,
     /// Cycle the menu backdrop opacity through a few presets.
     CycleMenuOpacity,
+    /// Web: reconnect a previously-saved BIOS + games folder.
+    #[cfg(target_arch = "wasm32")]
+    Reconnect,
     /// Quit the application.
     Quit,
 }
@@ -958,6 +961,15 @@ fn build_settings_category() -> Category {
                 action: MenuAction::CycleMenuOpacity,
                 burn_action: None,
                 value: Some("90%".into()),
+            },
+            // Web only: reload the BIOS + games folder remembered from a
+            // previous visit (Chrome/Edge; no-op where unsupported).
+            #[cfg(target_arch = "wasm32")]
+            MenuItem {
+                label: "Reconnect saved files".into(),
+                action: MenuAction::Reconnect,
+                burn_action: None,
+                value: None,
             },
         ],
     }
