@@ -1143,10 +1143,10 @@ impl AppState {
             return match (has_bios, has_games) {
                 (true, true) => None,
                 (false, false) => {
-                    Some("Load a BIOS and a games folder from Settings to play your own games")
+                    Some("Load a BIOS and a games folder you legally own from Settings")
                 }
-                (false, true) => Some("Load a BIOS from Settings to boot retail discs"),
-                (true, false) => Some("Load a games folder from Settings to play your own games"),
+                (false, true) => Some("Load a BIOS you legally own from Settings"),
+                (true, false) => Some("Load a games folder you legally own from Settings"),
             };
         }
         #[cfg(not(target_arch = "wasm32"))]
