@@ -36,12 +36,15 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 /// the default.
 const TARGET_SAMPLE_RATE: u32 = 44_100;
 
-/// Max audio backlog before the oldest samples are dropped. Bounds output
-/// latency: a deep queue means the sound lags the action. The web has no
-/// separate audio thread (cpal's callback shares the main thread with the
-/// emulator), so the queue builds up -- keep it short. ~100 ms trades a little
-/// underrun headroom for far less lag than the old half-second buffer.
-const MAX_BACKLOG_SAMPLES: usize = (TARGET_SAMPLE_RATE as usize) / 10;
+/// Target output latency. The backlog cap below bounds how far the sound can
+/// lag the action. The web has no separate audio thread (cpal's callback shares
+/// the main thread with the emulator), so the queue builds up -- keep it short.
+/// Lower = tighter sync but less underrun headroom (audible as crackle if too
+/// low). This is the knob to tune.
+const TARGET_LATENCY_MS: usize = 64;
+
+/// Max audio backlog before the oldest samples are dropped.
+const MAX_BACKLOG_SAMPLES: usize = (TARGET_SAMPLE_RATE as usize) * TARGET_LATENCY_MS / 1000;
 
 /// Shared producer/consumer queue. Producer = emulation thread;
 /// consumer = cpal callback. `Arc<Mutex<...>>` is overkill for the
