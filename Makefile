@@ -12,7 +12,7 @@
 # SDK and engine examples are compiled individually with explicit PSX
 # cargo flags from this Makefile.
 
-.PHONY: help check test canaries fmt lint lint-policy-guard runtime-numeric-guard clean commercial-visual-guards tekken-mode-guard tekken-vs-guard tekken-fight-guard tekken-late-fight-guard run validate validate-repeat validate-bless \
+.PHONY: help check test canaries fmt lint lint-policy-guard runtime-numeric-guard clean commercial-visual-guards tekken-mode-guard tekken-vs-guard tekken-fight-guard tekken-late-fight-guard run web validate validate-repeat validate-bless \
         test-sdk \
         psxed assets \
 	examples hello-tri hello-tri-disc hello-input hello-input-disc hello-ot hello-ot-disc \
@@ -52,6 +52,7 @@ help:
 	@echo "                      - reject floats/wide ints in PS1 runtime code"
 	@echo "    make clean        - cargo clean all workspaces"
 	@echo "    make run          - launch the desktop frontend (no EXE)"
+	@echo "    make web          - serve the wasm web build locally (release, :8080)"
 	@echo "    make validate     - run exact-hash validation matrix"
 	@echo "    make validate-repeat"
 	@echo "                      - run exact-hash validation 3 times for determinism"
@@ -146,6 +147,12 @@ help:
 
 run:
 	cd emu && cargo run -p frontend --release
+
+# Serve the emulator-only wasm build locally (optimized) at http://127.0.0.1:8080.
+# `env -u NO_COLOR` works around trunk choking on the NO_COLOR=1 shell env.
+web:
+	@-lsof -ti tcp:8080 | xargs kill -9 2>/dev/null || true
+	cd emu/crates/frontend && env -u NO_COLOR trunk serve --release
 
 validate:
 	cd emu && cargo run -p frontend --release -- validate --manifest ../validation/suite.ron
