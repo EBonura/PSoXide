@@ -31,8 +31,14 @@
       })();
     </script>
     <style>
-      html, body { margin: 0; padding: 0; height: 100%; background: #000; overflow: hidden; }
-      canvas { display: block; }
+      html, body {
+        margin: 0; padding: 0; height: 100%; background: #000; overflow: hidden;
+        user-select: none; -webkit-user-select: none;
+        -webkit-tap-highlight-color: transparent;
+      }
+      /* No text-selection highlight or focus ring around the game canvas. */
+      canvas { display: block; outline: none; }
+      canvas:focus, canvas:focus-visible { outline: none; }
     </style>
     <!-- Build the emulator-only frontend (editor feature off) to wasm. -->
     <link data-trunk rel="rust" data-cargo-no-default-features />
