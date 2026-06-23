@@ -481,13 +481,14 @@ impl MenuState {
         if let Some(warning) = warning {
             let banner_h = 34.0;
             let rect = Rect::from_min_size(screen.min, Vec2::new(sw, banner_h));
-            painter.rect_filled(rect, 0.0, fade(egui::Color32::from_rgb(126, 24, 34)));
+            // A calm info bar, not an alarm: this is setup guidance, not an error.
+            painter.rect_filled(rect, 0.0, fade(egui::Color32::from_rgb(28, 42, 50)));
             painter.text(
                 Pos2::new(sw / 2.0, banner_h / 2.0),
                 Align2::CENTER_CENTER,
                 warning,
-                FontId::proportional(15.0),
-                fade(egui::Color32::WHITE),
+                FontId::proportional(14.0),
+                fade(theme::MENU_ACCENT),
             );
         }
 
@@ -933,7 +934,7 @@ fn build_settings_category() -> Category {
             },
             MenuItem {
                 label: if cfg!(target_arch = "wasm32") {
-                    "Load game file"
+                    "Load games folder"
                 } else {
                     "Choose games path"
                 }
@@ -961,7 +962,7 @@ fn build_games_category(games: &[LibraryItem]) -> Category {
     // browser has no scanned library folder). Reuses the Settings action.
     #[cfg(target_arch = "wasm32")]
     items.push(MenuItem {
-        label: "Load game file".into(),
+        label: "Load games folder".into(),
         action: MenuAction::ChooseGamesPath,
         burn_action: None,
         value: None,

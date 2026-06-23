@@ -312,6 +312,11 @@ pub struct AppState {
     /// instead of `settings.paths.bios`. `None` until the user loads one.
     #[cfg(target_arch = "wasm32")]
     bios_bytes: Option<Vec<u8>>,
+    /// Web build: games found by the last folder scan, as `(id, title,
+    /// subtitle)`. Injected into the Games menu category; launching one reads
+    /// its file bytes on demand.
+    #[cfg(target_arch = "wasm32")]
+    web_games: Vec<(String, String, String)>,
 }
 
 impl Default for AppState {
@@ -442,6 +447,8 @@ impl AppState {
             audio_muted: false,
             #[cfg(target_arch = "wasm32")]
             bios_bytes: None,
+            #[cfg(target_arch = "wasm32")]
+            web_games: Vec::new(),
         };
         // Startup auto-rescan: always run when a developer-facing build dir
         // exists so stale `library.ron` entries (e.g. cargo
@@ -659,6 +666,14 @@ impl AppState {
         #[cfg(target_arch = "wasm32")]
         if let Some(disc) = bundled::find(id) {
             return self.boot_disc_bytes(disc.bytes.to_vec());
+        }
+        // Web folder-scanned games: read the file's bytes asynchronously, then
+        // boot on a later frame via `poll_web_uploads`.
+        #[cfg(target_arch = "wasm32")]
+        if id.starts_with("web:") {
+            crate::web_files::read_game(id);
+            self.status_message_set("Loading game...");
+            return Ok(());
         }
         let Some(entry) = library_entry_for_launch_id(&self.library.entries, id).cloned() else {
             return Err(format!("no library entry with id={id}"));
@@ -1064,13 +1079,24 @@ impl AppState {
         games.sort_by_key(|a| a.title.to_lowercase());
         examples.sort_by_key(|a| a.title.to_lowercase());
         projects.sort_by_key(|a| a.title.to_lowercase());
-        // Web build: surface the baked-in discs (Celeste, ...) under Games.
+        // Web build: surface the baked-in discs (Celeste, ...) plus any games
+        // found by a folder scan, under Games.
         #[cfg(target_arch = "wasm32")]
         for disc in bundled::DISCS {
             games.push(MenuLibraryItem {
                 id: disc.id.to_string(),
                 title: disc.title.to_string(),
                 subtitle: disc.subtitle.to_string(),
+                burnable: false,
+                launchable: true,
+            });
+        }
+        #[cfg(target_arch = "wasm32")]
+        for (id, title, subtitle) in &self.web_games {
+            games.push(MenuLibraryItem {
+                id: id.clone(),
+                title: title.clone(),
+                subtitle: subtitle.clone(),
                 burnable: false,
                 launchable: true,
             });
@@ -1093,8 +1119,21 @@ impl AppState {
 
     /// Warning banner to show at the top of the Menu, if any.
     pub fn menu_setup_warning(&self) -> Option<&'static str> {
+        // Web: a gentle onboarding hint until the user loads their own content
+        // (the bundled discs play with no setup). Native: prompt to point the
+        // library at a folder when none is configured yet.
+        #[cfg(target_arch = "wasm32")]
+        {
+            if self.bios_bytes.is_none() && self.web_games.is_empty() {
+                return Some(
+                    "Tip: load a BIOS and a games folder from Settings to play your own games",
+                );
+            }
+            return None;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
         if self.games_path_missing() {
-            Some("choose a games path to scan retail discs")
+            Some("Set a games folder in Settings to list your disc collection")
         } else {
             None
         }
@@ -1144,6 +1183,14 @@ impl AppState {
     /// once per frame from the shell (uploads complete asynchronously).
     #[cfg(target_arch = "wasm32")]
     pub fn poll_web_uploads(&mut self) {
+        // A folder scan finished: rebuild the Games list and jump to it.
+        if let Some(scanned) = crate::web_files::take_scanned() {
+            let n = scanned.len();
+            self.web_games = scanned;
+            self.refresh_menu_library();
+            self.menu.select_category("Games");
+            self.status_message_set(format!("Found {n} game(s) in folder"));
+        }
         for (kind, name, bytes) in crate::web_files::drain() {
             match kind {
                 crate::web_files::Upload::Bios => {
@@ -1259,11 +1306,12 @@ impl AppState {
         }
     }
 
-    /// Web: open a browser file picker for a game image (.bin disc or .exe
-    /// homebrew). The chosen file boots via `poll_web_uploads` on a later frame.
+    /// Web: pick a games *folder*; it is scanned recursively for .bin/.exe
+    /// games (mirroring the native library scan). Results land via
+    /// `poll_web_uploads` on a later frame.
     #[cfg(target_arch = "wasm32")]
     pub fn choose_games_path(&mut self) {
-        crate::web_files::pick(crate::web_files::Upload::Game);
+        crate::web_files::pick_folder();
     }
 
     /// Refresh the Settings Menu row values from persisted path state.
