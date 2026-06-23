@@ -498,6 +498,10 @@ pub struct InputRouter {
     prev_chord: bool,
     /// Previous analog-button state, for its rising edge.
     prev_analog: bool,
+    /// Whether a pad was connected last frame, for connect/disconnect notices.
+    prev_connected: bool,
+    /// Connected pad's name, kept so the disconnect notice can report it.
+    prev_name: String,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -515,7 +519,28 @@ impl InputRouter {
         use wasm_bindgen::JsCast;
 
         let mut frame = InputFrame::default();
-        let Some(gp) = first_connected_gamepad() else {
+        let gp = first_connected_gamepad();
+
+        // Connect/disconnect notices for the status toast -- also confirms to
+        // the player that the browser actually picked the pad up.
+        match (gp.is_some(), self.prev_connected) {
+            (true, false) => {
+                self.prev_name = gp.as_ref().map(|g| g.id()).unwrap_or_default();
+                frame.notices.push(InputNotice::Connected {
+                    name: self.prev_name.clone(),
+                    mapping: "web gamepad".to_string(),
+                });
+            }
+            (false, true) => {
+                frame.notices.push(InputNotice::Disconnected {
+                    name: std::mem::take(&mut self.prev_name),
+                });
+            }
+            _ => {}
+        }
+        self.prev_connected = gp.is_some();
+
+        let Some(gp) = gp else {
             self.prev_mask = 0;
             self.prev_chord = false;
             self.prev_analog = false;
@@ -524,11 +549,11 @@ impl InputRouter {
 
         let buttons = gp.buttons();
         let pressed = |i: u32| -> bool {
-            buttons
-                .get(i)
-                .dyn_into::<web_sys::GamepadButton>()
-                .map(|b| b.pressed())
-                .unwrap_or(false)
+            let b = buttons.get(i);
+            if b.is_null() || b.is_undefined() {
+                return false;
+            }
+            b.unchecked_into::<web_sys::GamepadButton>().pressed()
         };
 
         // Standard gamepad layout -> PSX pad; face buttons follow Sony's order
@@ -609,10 +634,14 @@ fn first_connected_gamepad() -> Option<web_sys::Gamepad> {
     use wasm_bindgen::JsCast;
     let pads = web_sys::window()?.navigator().get_gamepads().ok()?;
     for i in 0..pads.length() {
-        if let Ok(gp) = pads.get(i).dyn_into::<web_sys::Gamepad>() {
-            if gp.connected() {
-                return Some(gp);
-            }
+        let val = pads.get(i);
+        if val.is_null() || val.is_undefined() {
+            continue;
+        }
+        // getGamepads() slots are Gamepad-or-null; non-null is always a Gamepad.
+        let gp: web_sys::Gamepad = val.unchecked_into();
+        if gp.connected() {
+            return Some(gp);
         }
     }
     None
