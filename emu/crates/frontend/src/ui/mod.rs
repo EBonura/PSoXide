@@ -178,6 +178,11 @@ pub fn apply_menu_action(state: &mut AppState, action: menu::MenuAction) -> Menu
             state.cycle_menu_opacity();
             MenuOutcome::None
         }
+        #[cfg(target_arch = "wasm32")]
+        Reconnect => {
+            state.reconnect_web_files();
+            MenuOutcome::None
+        }
         Quit => MenuOutcome::Quit,
     }
 }

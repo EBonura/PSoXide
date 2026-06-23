@@ -483,6 +483,10 @@ impl AppState {
         #[cfg(feature = "editor")]
         out.menu.sync_editor_label(out.workspace.is_editor());
         out.sync_menu_settings_paths();
+        // Web: look (async) for a previously-saved BIOS/folder so the menu can
+        // offer a one-click reconnect.
+        #[cfg(target_arch = "wasm32")]
+        crate::web_files::check_saved();
         // Both builds start on the open menu (bundled discs like Celeste are
         // launchable from the Games/Examples categories), rather than
         // auto-booting into a game.
@@ -1124,10 +1128,19 @@ impl AppState {
         // library at a folder when none is configured yet.
         #[cfg(target_arch = "wasm32")]
         {
-            // Banner whenever the user's own content is incomplete: BIOS
-            // missing, games folder not loaded, or both. The bundled discs
-            // still play without either.
-            return match (self.bios_bytes.is_some(), !self.web_games.is_empty()) {
+            let (has_bios, has_games) = (self.bios_bytes.is_some(), !self.web_games.is_empty());
+            if has_bios && has_games {
+                return None;
+            }
+            // A saved BIOS/folder from a previous visit: offer one-click reload.
+            if crate::web_files::saved_available() {
+                return Some(
+                    "Saved BIOS / games folder found - pick Reconnect in Settings to reload them",
+                );
+            }
+            // Otherwise prompt for whatever's missing (bundled discs still play
+            // without either).
+            return match (has_bios, has_games) {
                 (true, true) => None,
                 (false, false) => {
                     Some("Load a BIOS and a games folder from Settings to play your own games")
@@ -1177,11 +1190,20 @@ impl AppState {
         }
     }
 
-    /// Web: open a browser file picker for the BIOS image. The chosen bytes
-    /// land in `bios_bytes` via `poll_web_uploads` on a later frame.
+    /// Web: pick a BIOS (persistent File System Access picker where available,
+    /// else a one-shot `<input>`). Bytes land in `bios_bytes` via
+    /// `poll_web_uploads` on a later frame; the chosen location is remembered.
     #[cfg(target_arch = "wasm32")]
     pub fn choose_bios_path(&mut self) {
-        crate::web_files::pick(crate::web_files::Upload::Bios);
+        crate::web_files::pick_bios();
+    }
+
+    /// Web: reconnect the previously-saved BIOS + games folder (one click to
+    /// re-grant; the browser won't re-read remembered files without a gesture).
+    #[cfg(target_arch = "wasm32")]
+    pub fn reconnect_web_files(&mut self) {
+        crate::web_files::reconnect();
+        self.status_message_set("Reconnecting saved BIOS / games...");
     }
 
     /// Web: drain any BIOS / game files the user picked and apply them. Called
@@ -1311,12 +1333,12 @@ impl AppState {
         }
     }
 
-    /// Web: pick a games *folder*; it is scanned recursively for .bin/.exe
-    /// games (mirroring the native library scan). Results land via
-    /// `poll_web_uploads` on a later frame.
+    /// Web: pick a games *folder* (persistent File System Access picker where
+    /// available, else `<input webkitdirectory>`). Scanned recursively for
+    /// .bin/.exe; results land via `poll_web_uploads`. The folder is remembered.
     #[cfg(target_arch = "wasm32")]
     pub fn choose_games_path(&mut self) {
-        crate::web_files::pick_folder();
+        crate::web_files::pick_games();
     }
 
     /// Refresh the Settings Menu row values from persisted path state.
