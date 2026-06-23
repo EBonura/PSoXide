@@ -40,8 +40,8 @@ pub const SECTION_BG: Color32 = Color32::from_rgb(30, 30, 35);
 
 // --- Menu-specific palette ---
 
-/// Menu backdrop overlay (dims the game below).
-pub const MENU_BACKDROP: Color32 = Color32::from_rgba_premultiplied(0, 0, 0, 128);
+// Menu backdrop opacity is a user setting (`video.menu_opacity_pct`), applied
+// dynamically in `MenuState::draw`, not a fixed constant.
 /// Menu accent (selected category icon + selection bar).
 pub const MENU_ACCENT: Color32 = Color32::from_rgb(0, 191, 230);
 pub const MENU_TEXT_BRIGHT: Color32 = Color32::from_rgb(230, 230, 230);

@@ -464,6 +464,8 @@ impl AppState {
         out.refresh_menu_library();
         out.menu
             .sync_fast_boot_label(out.settings.emulator.fast_boot_disc);
+        out.menu
+            .set_menu_opacity(out.settings.video.menu_opacity_pct);
         #[cfg(feature = "editor")]
         out.menu.sync_editor_label(out.workspace.is_editor());
         out.sync_menu_settings_paths();
@@ -1239,6 +1241,28 @@ impl AppState {
         }
     }
 
+    /// Cycle the menu backdrop opacity through a few presets, keep the Menu
+    /// in sync, and persist immediately.
+    pub fn cycle_menu_opacity(&mut self) {
+        const PRESETS: [u8; 5] = [50, 65, 80, 90, 100];
+        let current = self.settings.video.menu_opacity_pct;
+        let next = PRESETS
+            .iter()
+            .copied()
+            .find(|&p| p > current)
+            .unwrap_or(PRESETS[0]);
+        self.settings.video.menu_opacity_pct = next;
+        self.menu.set_menu_opacity(next);
+
+        let msg = format!("Menu opacity: {next}%");
+        match self.save_settings() {
+            Ok(()) => self.status_message_set(msg),
+            Err(e) => {
+                eprintln!("[frontend] {e}");
+                self.status_message_set(format!("{msg} (settings save failed)"));
+            }
+        }
+    }
 }
 
 /// Editor-workspace orchestration: entering/leaving the editor, the embedded
