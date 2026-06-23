@@ -1059,6 +1059,12 @@ fn about_panel(ctx: &egui::Context, open: &mut bool) {
                         if ui.button("Close").clicked() {
                             *open = false;
                         }
+                        ui.add_space(6.0);
+                        ui.label(
+                            egui::RichText::new("Cross / Enter to close")
+                                .color(theme::MENU_HINT)
+                                .size(11.0),
+                        );
                     });
                 });
         });
