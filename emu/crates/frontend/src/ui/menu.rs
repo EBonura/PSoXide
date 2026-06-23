@@ -783,6 +783,24 @@ impl MenuState {
             );
         }
 
+        // Independence / trademark / BIOS disclaimer, shown on every menu
+        // screen in both builds (legal hygiene -- see docs/perf notes & the
+        // legal review).
+        painter.text(
+            Pos2::new(sw / 2.0, sh - 58.0),
+            Align2::CENTER_TOP,
+            "PSoXide is an independent emulator, not affiliated with Sony Interactive Entertainment.",
+            FontId::proportional(11.0),
+            fade(theme::MENU_TEXT_DIM),
+        );
+        painter.text(
+            Pos2::new(sw / 2.0, sh - 45.0),
+            Align2::CENTER_TOP,
+            "PlayStation is their trademark. Bring your own BIOS.",
+            FontId::proportional(11.0),
+            fade(theme::MENU_TEXT_DIM),
+        );
+
         // Bottom hint bar.
         painter.text(
             Pos2::new(sw / 2.0, sh - 30.0),
