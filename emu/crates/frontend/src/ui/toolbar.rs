@@ -302,6 +302,15 @@ fn toggle_button(icon: char, active: bool) -> Button<'static> {
         .wrap_mode(egui::TextWrapMode::Extend)
 }
 
+/// Plain icon button (no toggle tint) at the shared size. Carries the same
+/// `Extend` guard as `toggle_button` so wide Lucide glyphs aren't sliced to
+/// their advance width in the tight button.
+fn icon_button(icon: char) -> Button<'static> {
+    Button::new(icons::text(icon, ICON_SIZE))
+        .min_size(BUTTON_SIZE)
+        .wrap_mode(egui::TextWrapMode::Extend)
+}
+
 /// Left-hand cluster: status pill + responsive FPS / MIPS / dt metrics.
 fn draw_metrics(ui: &mut egui::Ui, state: &AppState, available_width: f32) {
     ui.add_space(2.0);
@@ -373,7 +382,7 @@ fn draw_buttons(ui: &mut egui::Ui, state: &mut AppState) {
     } else {
         (icons::PLAY, "Play")
     };
-    let play_btn = Button::new(icons::text(icon, ICON_SIZE)).min_size(BUTTON_SIZE);
+    let play_btn = icon_button(icon);
     if ui.add(play_btn).on_hover_text(tooltip).clicked() {
         state.running = !state.running;
         state.menu.sync_run_label(state.running);
@@ -381,7 +390,7 @@ fn draw_buttons(ui: &mut egui::Ui, state: &mut AppState) {
 
     // Reset -- rebuild the CPU, clear VRAM, keep the Bus (disc stays
     // inserted).
-    let reset_btn = Button::new(icons::text(icons::ROTATE_CCW, ICON_SIZE)).min_size(BUTTON_SIZE);
+    let reset_btn = icon_button(icons::ROTATE_CCW);
     if ui.add(reset_btn).on_hover_text("Reset").clicked() {
         // Reboot the CPU but keep the run state -- reset shouldn't force a pause.
         state.cpu = emulator_core::Cpu::new();
@@ -396,7 +405,7 @@ fn draw_buttons(ui: &mut egui::Ui, state: &mut AppState) {
     // Advance one emulated frame. Pauses first so clicking while
     // running doesn't advance two frames (one from the click, one
     // from the shell's run loop).
-    let step_btn = Button::new(icons::text(icons::SKIP_FORWARD, ICON_SIZE)).min_size(BUTTON_SIZE);
+    let step_btn = icon_button(icons::SKIP_FORWARD);
     if ui
         .add(step_btn)
         .on_hover_text("Advance one frame")
