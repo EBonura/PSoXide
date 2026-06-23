@@ -786,12 +786,12 @@ impl MenuState {
             );
         }
 
-        // Independence + bring-your-own-BIOS notice, shown on every menu screen
+        // Independence + legal-ownership notice, shown on every menu screen
         // in both builds. Deliberately names no third-party marks.
         painter.text(
             Pos2::new(sw / 2.0, sh - 46.0),
             Align2::CENTER_TOP,
-            "PSoXide is an independent, open-source emulator. Bring your own BIOS.",
+            "PSoXide is an independent, open-source emulator. Use only a BIOS and games you legally own.",
             FontId::proportional(11.0),
             fade(theme::MENU_TEXT_DIM),
         );
