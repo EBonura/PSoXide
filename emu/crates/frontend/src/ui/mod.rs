@@ -169,6 +169,10 @@ pub fn apply_menu_action(state: &mut AppState, action: menu::MenuAction) -> Menu
             state.choose_games_path();
             MenuOutcome::None
         }
+        CycleMenuOpacity => {
+            state.cycle_menu_opacity();
+            MenuOutcome::None
+        }
         Quit => MenuOutcome::Quit,
     }
 }
