@@ -1039,6 +1039,12 @@ fn about_panel(ctx: &egui::Context, open: &mut bool, logo_clicked: bool) {
                                 .color(theme::MENU_TEXT_DIM)
                                 .size(12.0),
                         );
+                        ui.add_space(4.0);
+                        link(
+                            ui,
+                            "How to dump your own BIOS and discs",
+                            "https://emulation.gametechwiki.com/index.php/Sony_PlayStation",
+                        );
                         ui.add_space(16.0);
                         link(ui, "Source code on GitHub", "https://github.com/EBonura/PSoXide");
                         ui.add_space(4.0);
