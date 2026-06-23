@@ -75,6 +75,15 @@ pub struct VideoSettings {
     pub integer_scale: bool,
     /// Optional CRT-scanline shader overlay. Off by default.
     pub scanline_filter: bool,
+    /// Launcher/pause-menu backdrop opacity, as a percentage (0 = fully
+    /// transparent, 100 = solid black). Defaults to 90 so the menu reads
+    /// clearly over gameplay.
+    #[serde(default = "default_menu_opacity_pct")]
+    pub menu_opacity_pct: u8,
+}
+
+fn default_menu_opacity_pct() -> u8 {
+    90
 }
 
 impl Default for VideoSettings {
@@ -82,6 +91,7 @@ impl Default for VideoSettings {
         Self {
             integer_scale: true,
             scanline_filter: false,
+            menu_opacity_pct: default_menu_opacity_pct(),
         }
     }
 }
