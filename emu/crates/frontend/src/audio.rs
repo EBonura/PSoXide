@@ -36,6 +36,13 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 /// the default.
 const TARGET_SAMPLE_RATE: u32 = 44_100;
 
+/// Max audio backlog before the oldest samples are dropped. Bounds output
+/// latency: a deep queue means the sound lags the action. The web has no
+/// separate audio thread (cpal's callback shares the main thread with the
+/// emulator), so the queue builds up -- keep it short. ~100 ms trades a little
+/// underrun headroom for far less lag than the old half-second buffer.
+const MAX_BACKLOG_SAMPLES: usize = (TARGET_SAMPLE_RATE as usize) / 10;
+
 /// Shared producer/consumer queue. Producer = emulation thread;
 /// consumer = cpal callback. `Arc<Mutex<...>>` is overkill for the
 /// real-time audio path but cpal's callback lives longer than the
@@ -208,14 +215,13 @@ impl AudioOut {
 
     /// Push drained SPU samples into the ring. The shell calls this
     /// after each `run_spu_samples` pump. Discards oldest samples
-    /// when the queue grows past a ~0.5-second backlog -- prevents
+    /// when the queue grows past the backlog cap -- prevents
     /// unbounded growth when the emulator runs faster than real time
     /// (fast-forward, rewind).
     pub fn push_samples(&self, samples: &[(i16, i16)]) {
         let mut q = self.queue.lock().unwrap();
-        // Cap the backlog. Anything beyond ~0.5 s is audible lag
-        // and we're better off dropping it.
-        let cap = (TARGET_SAMPLE_RATE as usize) / 2;
+        // Cap the backlog to keep latency low; drop the oldest beyond it.
+        let cap = MAX_BACKLOG_SAMPLES;
         let overflow = (q.len() + samples.len()).saturating_sub(cap);
         for _ in 0..overflow {
             q.pop_front();
