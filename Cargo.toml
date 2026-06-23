@@ -107,3 +107,18 @@ pollster    = "0.3"
 cpal        = "0.15"
 gilrs       = "0.11"
 rfd         = "0.15"
+
+# Optimize the emulator's hot code at -O3 even in debug builds so `cargo run` /
+# `trunk serve` run near release speed, while the crate under edit (frontend)
+# stays at opt-level 0 for fast incremental rebuilds.
+#
+# `"*"` covers third-party deps only -- Cargo deliberately excludes workspace
+# members -- so emulator-core (the host interpreter + GPU/SPU emulation) and
+# psx-gte-core (the per-vertex GTE math), where ~all emulation time goes, need
+# explicit entries to actually run fast.
+[profile.dev.package."*"]
+opt-level = 3
+[profile.dev.package.emulator-core]
+opt-level = 3
+[profile.dev.package.psx-gte-core]
+opt-level = 3
