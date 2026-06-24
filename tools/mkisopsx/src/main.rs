@@ -41,6 +41,7 @@ struct Args {
     cooked_iso: bool,
     cdtest_sectors: Option<usize>,
     world_pack_rooms_dir: Option<PathBuf>,
+    world_pack_extra_dirs: Vec<PathBuf>,
     world_pack_order_file: Option<PathBuf>,
     ui_pack_dir: Option<PathBuf>,
     ui_pack_order_file: Option<PathBuf>,
@@ -55,6 +56,7 @@ fn parse_args() -> Result<Args, String> {
     let mut cooked_iso = false;
     let mut cdtest_sectors = None;
     let mut world_pack_rooms_dir = None;
+    let mut world_pack_extra_dirs = Vec::new();
     let mut world_pack_order_file = None;
     let mut ui_pack_dir = None;
     let mut ui_pack_order_file = None;
@@ -99,6 +101,12 @@ fn parse_args() -> Result<Args, String> {
                         "--world-pack-rooms-dir takes a path".to_string()
                     })?));
             }
+            "--world-pack-extra-dir" => {
+                world_pack_extra_dirs
+                    .push(PathBuf::from(it.next().ok_or_else(|| {
+                        "--world-pack-extra-dir takes a path".to_string()
+                    })?));
+            }
             "--world-pack-order-file" => {
                 world_pack_order_file =
                     Some(PathBuf::from(it.next().ok_or_else(|| {
@@ -112,10 +120,10 @@ fn parse_args() -> Result<Args, String> {
                 ));
             }
             "--ui-pack-order-file" => {
-                ui_pack_order_file = Some(PathBuf::from(
-                    it.next()
-                        .ok_or_else(|| "--ui-pack-order-file takes a path".to_string())?,
-                ));
+                ui_pack_order_file =
+                    Some(PathBuf::from(it.next().ok_or_else(|| {
+                        "--ui-pack-order-file takes a path".to_string()
+                    })?));
             }
             "--cdda-track" => {
                 cdda_tracks.push(PathBuf::from(
@@ -151,6 +159,7 @@ fn parse_args() -> Result<Args, String> {
         cooked_iso,
         cdtest_sectors,
         world_pack_rooms_dir,
+        world_pack_extra_dirs,
         world_pack_order_file,
         ui_pack_dir,
         ui_pack_order_file,
@@ -175,6 +184,9 @@ fn print_usage() {
          --world-pack-rooms-dir PATH\n\
                          Pack room_*.psxc stream chunks into WORLD.PAK after\n\
                          the fixed boot area.\n\
+         --world-pack-extra-dir PATH\n\
+                         Also pack chunk_<id>.* payloads into WORLD.PAK.\n\
+                         May be repeated for typed game asset chunks.\n\
          --world-pack-order-file PATH\n\
                          Optional newline-delimited room id order for\n\
                          WORLD.PAK payload placement.\n\
@@ -259,18 +271,22 @@ fn main() -> ExitCode {
             "warning: no PS1 system area supplied; emulators may boot this, real hardware may not"
         );
     }
-    let world_pack = match args.world_pack_rooms_dir.as_deref() {
-        Some(dir) => {
-            match build_world_pack_from_rooms_dir(dir, args.world_pack_order_file.as_deref()) {
+    let world_pack =
+        if args.world_pack_rooms_dir.is_some() || !args.world_pack_extra_dirs.is_empty() {
+            match build_world_pack_from_inputs(
+                args.world_pack_rooms_dir.as_deref(),
+                &args.world_pack_extra_dirs,
+                args.world_pack_order_file.as_deref(),
+            ) {
                 Ok(pack) => Some(pack),
                 Err(e) => {
                     eprintln!("{e}");
                     return ExitCode::from(1);
                 }
             }
-        }
-        None => None,
-    };
+        } else {
+            None
+        };
     let ui_pack = match args.ui_pack_dir.as_deref() {
         Some(dir) => match build_ui_pack_from_dir(dir, args.ui_pack_order_file.as_deref()) {
             Ok(pack) => Some(pack),
@@ -285,9 +301,13 @@ fn main() -> ExitCode {
     // padding, optional CDTEST.BIN, WORLD.PAK, UI.PAK), shared with the editor's
     // embedded Play via add_playtest_files so the on-disc order cannot drift
     // from the cooked *_PACK_START_LBA values.
-    if let Err(error) =
-        add_playtest_files(&mut builder, exe_bytes, world_pack, ui_pack, args.cdtest_sectors)
-    {
+    if let Err(error) = add_playtest_files(
+        &mut builder,
+        exe_bytes,
+        world_pack,
+        ui_pack,
+        args.cdtest_sectors,
+    ) {
         eprintln!("playtest disc layout error: {error:?}");
         return ExitCode::from(1);
     }
@@ -477,11 +497,38 @@ fn looks_like_raw_sector(sector: &[u8]) -> bool {
         && sector[1..11] == [0xFF; 10]
 }
 
-fn build_world_pack_from_rooms_dir(
-    dir: &std::path::Path,
+fn build_world_pack_from_inputs(
+    rooms_dir: Option<&std::path::Path>,
+    extra_dirs: &[PathBuf],
     order_file: Option<&std::path::Path>,
 ) -> Result<Vec<u8>, String> {
-    let mut rooms = Vec::new();
+    let mut chunks = Vec::new();
+    if let Some(dir) = rooms_dir {
+        append_world_pack_room_chunks(&mut chunks, dir)?;
+    }
+    for dir in extra_dirs {
+        append_world_pack_extra_chunks(&mut chunks, dir)?;
+    }
+    chunks.sort_by_key(|(chunk_id, _)| *chunk_id);
+    reject_duplicate_chunk_ids(&chunks)?;
+    if chunks.is_empty() {
+        return Err("no WORLD.PAK chunks found".to_string());
+    }
+    if let Some(order_file) = order_file {
+        let order = read_world_pack_order_file(order_file)?;
+        apply_world_pack_order(&mut chunks, &order, order_file)?;
+    }
+    let refs: Vec<(u32, &[u8])> = chunks
+        .iter()
+        .map(|(chunk_id, bytes)| (*chunk_id, bytes.as_slice()))
+        .collect();
+    Ok(build_world_pack(&refs))
+}
+
+fn append_world_pack_room_chunks(
+    chunks: &mut Vec<(u32, Vec<u8>)>,
+    dir: &std::path::Path,
+) -> Result<(), String> {
     let entries = fs::read_dir(dir).map_err(|e| format!("read {}: {e}", dir.display()))?;
     for entry in entries {
         let entry = entry.map_err(|e| format!("read {}: {e}", dir.display()))?;
@@ -499,24 +546,45 @@ fn build_world_pack_from_rooms_dir(
             .parse::<u32>()
             .map_err(|_| format!("invalid room chunk filename: {}", path.display()))?;
         let bytes = fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
-        rooms.push((chunk_id, bytes));
+        chunks.push((chunk_id, bytes));
     }
-    rooms.sort_by_key(|(chunk_id, _)| *chunk_id);
-    if rooms.is_empty() {
-        return Err(format!(
-            "no room_*.psxc or room_*.psxw files found in {}",
-            dir.display()
-        ));
+    Ok(())
+}
+
+fn append_world_pack_extra_chunks(
+    chunks: &mut Vec<(u32, Vec<u8>)>,
+    dir: &std::path::Path,
+) -> Result<(), String> {
+    let entries = fs::read_dir(dir).map_err(|e| format!("read {}: {e}", dir.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("read {}: {e}", dir.display()))?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        let Some(raw_index) = stem.strip_prefix("chunk_") else {
+            continue;
+        };
+        let chunk_id = raw_index
+            .parse::<u32>()
+            .map_err(|_| format!("invalid WORLD.PAK chunk filename: {}", path.display()))?;
+        let bytes = fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        chunks.push((chunk_id, bytes));
     }
-    if let Some(order_file) = order_file {
-        let order = read_world_pack_order_file(order_file)?;
-        apply_world_pack_order(&mut rooms, &order, order_file)?;
+    Ok(())
+}
+
+fn reject_duplicate_chunk_ids(chunks: &[(u32, Vec<u8>)]) -> Result<(), String> {
+    let mut seen = HashSet::new();
+    for (chunk_id, _) in chunks {
+        if !seen.insert(*chunk_id) {
+            return Err(format!("duplicate WORLD.PAK chunk id {chunk_id}"));
+        }
     }
-    let refs: Vec<(u32, &[u8])> = rooms
-        .iter()
-        .map(|(chunk_id, bytes)| (*chunk_id, bytes.as_slice()))
-        .collect();
-    Ok(build_world_pack(&refs))
+    Ok(())
 }
 
 fn build_ui_pack_from_dir(
@@ -660,6 +728,26 @@ mod tests {
             rooms.iter().map(|(room, _)| *room).collect::<Vec<_>>(),
             vec![2, 0, 1]
         );
+    }
+
+    #[test]
+    fn world_pack_extra_dir_packs_chunk_prefixed_payloads() {
+        let dir = std::env::temp_dir().join(format!(
+            "mkisopsx-test-{}-{}",
+            std::process::id(),
+            "extra-world-pack"
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("chunk_1000.psxm"), [0xA5, 0x5A]).unwrap();
+        std::fs::write(dir.join("ignored.psxm"), [0]).unwrap();
+
+        let pack = build_world_pack_from_inputs(None, &[dir.clone()], None).unwrap();
+        assert_eq!(&pack[..8], b"PSOXWPAK");
+        assert_eq!(u32::from_le_bytes(pack[12..16].try_into().unwrap()), 1);
+        assert_eq!(u32::from_le_bytes(pack[28..32].try_into().unwrap()), 1000);
+
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
