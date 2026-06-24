@@ -1132,10 +1132,11 @@ impl AppState {
             if has_bios && has_games {
                 return None;
             }
-            // A saved BIOS/folder from a previous visit: offer one-click reload.
+            // A saved BIOS/folder from a previous visit that the browser won't
+            // re-open without a user gesture: offer one-click Reconnect.
             if crate::web_files::saved_available() {
                 return Some(
-                    "Saved BIOS / games folder found - pick Reconnect in Settings to reload them",
+                    "Saved BIOS / games found - your browser needs one click: Reconnect in Settings",
                 );
             }
             // Otherwise prompt for whatever's missing (bundled discs still play

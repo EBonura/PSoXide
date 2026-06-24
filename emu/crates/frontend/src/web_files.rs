@@ -46,8 +46,9 @@ thread_local! {
     static SCANNED: RefCell<Vec<ScannedGame>> = const { RefCell::new(Vec::new()) };
     /// Set true the frame a scan finishes, so the shell rebuilds the menu.
     static SCAN_READY: Cell<bool> = const { Cell::new(false) };
-    /// True once a reconnectable handle is found in IndexedDB (set async at
-    /// startup), cleared once the user triggers a reconnect.
+    /// True when a saved handle exists but the browser needs a user gesture to
+    /// re-grant access (set async at startup); cleared once the user reconnects.
+    /// When permission is still granted we auto-load instead and never set this.
     static SAVED: Cell<bool> = const { Cell::new(false) };
 }
 
@@ -111,8 +112,31 @@ export async function pickFolder() {
   _dir = dh;
   return await _list(dh);
 }
-export async function hasSaved() {
-  return (await _get('bios')) != null || (await _get('folder')) != null;
+// Gesture-free restore: only succeeds when the browser still reports the saved
+// handle's permission as 'granted' (persistent permissions / installed PWA).
+// Returns the data when granted, `false` when a handle exists but a user gesture
+// is needed, `undefined` when there is no saved handle.
+export async function autoBios() {
+  const h = await _get('bios');
+  if (!h) return undefined;
+  try {
+    if ((await h.queryPermission({ mode: 'read' })) === 'granted') {
+      const f = await h.getFile();
+      return new Uint8Array(await f.arrayBuffer());
+    }
+  } catch (e) {}
+  return false;
+}
+export async function autoFolder() {
+  const dh = await _get('folder');
+  if (!dh) return undefined;
+  try {
+    if ((await dh.queryPermission({ mode: 'read' })) === 'granted') {
+      _dir = dh;
+      return await _list(dh);
+    }
+  } catch (e) {}
+  return false;
 }
 export async function reconnectBios() {
   const h = await _get('bios');
@@ -150,8 +174,10 @@ extern "C" {
     fn fsa_pick_bios() -> js_sys::Promise;
     #[wasm_bindgen(js_name = pickFolder)]
     fn fsa_pick_folder() -> js_sys::Promise;
-    #[wasm_bindgen(js_name = hasSaved)]
-    fn fsa_has_saved() -> js_sys::Promise;
+    #[wasm_bindgen(js_name = autoBios)]
+    fn fsa_auto_bios() -> js_sys::Promise;
+    #[wasm_bindgen(js_name = autoFolder)]
+    fn fsa_auto_folder() -> js_sys::Promise;
     #[wasm_bindgen(js_name = reconnectBios)]
     fn fsa_reconnect_bios() -> js_sys::Promise;
     #[wasm_bindgen(js_name = reconnectFolder)]
@@ -170,16 +196,39 @@ pub fn saved_available() -> bool {
     SAVED.with(|s| s.get())
 }
 
-/// Kick off the async check for saved handles. Call once at startup.
+/// At startup, try to silently restore the saved BIOS + games folder. The File
+/// System Access API only lets us re-read a stored handle without a user gesture
+/// when the browser still reports permission as `granted` (persistent
+/// permissions / installed PWA) -- that path loads everything automatically.
+/// After a normal reload the grant resets to `prompt`, so re-reading needs a
+/// click; we flag `SAVED` and the shell offers Reconnect. Call once at startup.
 pub fn check_saved() {
     if !supported() {
         return;
     }
     spawn_local(async {
-        if let Ok(v) = JsFuture::from(fsa_has_saved()).await {
-            if v.as_bool() == Some(true) {
-                SAVED.with(|s| s.set(true));
+        let mut needs_gesture = false;
+
+        if let Ok(v) = JsFuture::from(fsa_auto_bios()).await {
+            if v.as_bool() == Some(false) {
+                // Handle exists, but the browser needs a gesture to re-grant.
+                needs_gesture = true;
+            } else if !v.is_undefined() && !v.is_null() {
+                // Permission still granted: the bytes came back, load them now.
+                push_bytes(Upload::Bios, "BIOS".to_string(), &v);
             }
+        }
+
+        if let Ok(v) = JsFuture::from(fsa_auto_folder()).await {
+            if v.as_bool() == Some(false) {
+                needs_gesture = true;
+            } else if let Some(list) = v.as_string() {
+                set_scanned_from_paths(&list);
+            }
+        }
+
+        if needs_gesture {
+            SAVED.with(|s| s.set(true));
         }
     });
 }
