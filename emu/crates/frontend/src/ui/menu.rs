@@ -7,7 +7,7 @@
 //! Navigation: arrows + Enter + Escape (gamepad will land when the
 //! input subsystem does). Escape also toggles the overlay open/closed.
 //!
-//! Categories: Games / Examples / Projects / Settings / Create / System
+//! Categories: Games / Examples / Projects / Editor / Settings / System
 //! (Projects + Create are editor/native-only). The debug sidebar is
 //! toggled from the toolbar, not the menu.
 
@@ -210,13 +210,13 @@ impl MenuState {
             // rather than silent.
             #[cfg(target_arch = "wasm32")]
             disabled_category("Projects", icons::LAYERS),
-            build_settings_category(),
-            // The Create category is the entry point into the host editor
+            // The Editor category is the entry point into the host editor
             // workspace; it is absent in emulator-only builds.
             #[cfg(feature = "editor")]
             build_create_category(false),
             #[cfg(target_arch = "wasm32")]
-            disabled_category("Create", icons::FOLDER),
+            disabled_category("Editor", icons::FOLDER),
+            build_settings_category(),
             build_system_category(running),
             // There is no "quit" in a browser tab, so the web build omits it.
             #[cfg(not(target_arch = "wasm32"))]
@@ -342,10 +342,10 @@ impl MenuState {
         }
     }
 
-    /// Update the Create category label for the current workspace.
+    /// Update the Editor category label for the current workspace.
     #[cfg(feature = "editor")]
     pub fn sync_editor_label(&mut self, editor_open: bool) {
-        if let Some(create) = self.categories.iter_mut().find(|c| c.name == "Create") {
+        if let Some(create) = self.categories.iter_mut().find(|c| c.name == "Editor") {
             if let Some(item) = create
                 .items
                 .iter_mut()
@@ -1294,7 +1294,7 @@ fn build_projects_category(projects: &[LibraryItem]) -> Category {
 #[cfg(feature = "editor")]
 fn build_create_category(editor_open: bool) -> Category {
     Category {
-        name: "Create",
+        name: "Editor",
         icon: icons::FOLDER,
         items: vec![MenuItem {
             label: if editor_open {
@@ -1384,8 +1384,8 @@ mod tests {
         assert_eq!(s.categories[0].name, "Games");
         assert_eq!(s.categories[1].name, "Examples");
         assert_eq!(s.categories[2].name, "Projects");
-        assert_eq!(s.categories[3].name, "Settings");
-        assert_eq!(s.categories[4].name, "Create");
+        assert_eq!(s.categories[3].name, "Editor");
+        assert_eq!(s.categories[4].name, "Settings");
         assert_eq!(s.categories[5].name, "System");
         assert_eq!(s.categories[6].name, "Quit");
     }
@@ -1577,9 +1577,9 @@ mod tests {
         s.sync_settings_paths("SCPH1001.BIN", "discs");
         assert_eq!(s.categories[2].items[0].value.as_deref(), Some("Refresh"));
         assert_eq!(
-            s.categories[3].items[0].value.as_deref(),
+            s.categories[4].items[0].value.as_deref(),
             Some("SCPH1001.BIN")
         );
-        assert_eq!(s.categories[3].items[1].value.as_deref(), Some("discs"));
+        assert_eq!(s.categories[4].items[1].value.as_deref(), Some("discs"));
     }
 }
