@@ -541,6 +541,61 @@ impl TriTexturedGouraud {
             uv2: uv_words[2] as u32,
         }
     }
+
+    /// Zeroed packet for static prebuilt-pool initialisation. Real
+    /// content is written before the packet is ever linked into an
+    /// ordering table.
+    pub const EMPTY: Self = Self {
+        tag: 0,
+        tex_window: 0,
+        color0_cmd: 0,
+        v0: 0,
+        uv0_clut: 0,
+        color1: 0,
+        v1: 0,
+        uv1_tpage: 0,
+        color2: 0,
+        v2: 0,
+        uv2: 0,
+    };
+
+    /// Rewrite the three vertex words of a prebuilt packet, leaving
+    /// material, UV, and colour words untouched.
+    #[inline(always)]
+    pub fn set_positions(&mut self, verts: [(i16, i16); 3]) {
+        self.v0 = pack_vertex(verts[0].0, verts[0].1);
+        self.v1 = pack_vertex(verts[1].0, verts[1].1);
+        self.v2 = pack_vertex(verts[2].0, verts[2].1);
+    }
+
+    /// Copy every packet word except the OT tag from a prebuilt
+    /// skeleton. The destination can then patch positions and link
+    /// into an ordering table without inheriting a stale DMA link.
+    #[inline(always)]
+    pub fn copy_payload_from(&mut self, source: &Self) {
+        self.tex_window = source.tex_window;
+        self.color0_cmd = source.color0_cmd;
+        self.v0 = source.v0;
+        self.uv0_clut = source.uv0_clut;
+        self.color1 = source.color1;
+        self.v1 = source.v1;
+        self.uv1_tpage = source.uv1_tpage;
+        self.color2 = source.color2;
+        self.v2 = source.v2;
+        self.uv2 = source.uv2;
+    }
+
+    /// Rewrite the three colour words of a prebuilt packet, preserving
+    /// the opcode byte that shares v0's colour word.
+    #[inline(always)]
+    pub fn set_colors(&mut self, colors: [(u8, u8, u8); 3]) {
+        let (r0, g0, b0) = colors[0];
+        let (r1, g1, b1) = colors[1];
+        let (r2, g2, b2) = colors[2];
+        self.color0_cmd = (self.color0_cmd & 0xFF00_0000) | pack_color(r0, g0, b0);
+        self.color1 = pack_color(r1, g1, b1);
+        self.color2 = pack_color(r2, g2, b2);
+    }
 }
 
 /// Textured Gouraud quad with inline texture-window state. Mirrors
@@ -659,6 +714,26 @@ impl QuadTexturedGouraud {
         self.v1 = pack_vertex(verts[1].0, verts[1].1);
         self.v2 = pack_vertex(verts[2].0, verts[2].1);
         self.v3 = pack_vertex(verts[3].0, verts[3].1);
+    }
+
+    /// Copy every packet word except the OT tag from a prebuilt
+    /// skeleton. The destination can then patch positions and link
+    /// into an ordering table without inheriting a stale DMA link.
+    #[inline(always)]
+    pub fn copy_payload_from(&mut self, source: &Self) {
+        self.tex_window = source.tex_window;
+        self.color0_cmd = source.color0_cmd;
+        self.v0 = source.v0;
+        self.uv0_clut = source.uv0_clut;
+        self.color1 = source.color1;
+        self.v1 = source.v1;
+        self.uv1_tpage = source.uv1_tpage;
+        self.color2 = source.color2;
+        self.v2 = source.v2;
+        self.uv2 = source.uv2;
+        self.color3 = source.color3;
+        self.v3 = source.v3;
+        self.uv3 = source.uv3;
     }
 
     /// Rewrite the four colour words of a prebuilt packet, preserving
