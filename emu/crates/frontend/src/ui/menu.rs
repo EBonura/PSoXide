@@ -842,12 +842,19 @@ impl MenuState {
             );
         }
 
-        // Independence + legal-ownership notice, shown on every menu screen
-        // in both builds. Deliberately names no third-party marks.
+        // Project framing + WIP/legal notice, shown on every menu screen in
+        // both builds.
+        painter.text(
+            Pos2::new(sw / 2.0, sh - 62.0),
+            Align2::CENTER_TOP,
+            "The emulator is early, game compatibility is still low.",
+            FontId::proportional(11.0),
+            fade(theme::MENU_TEXT_DIM),
+        );
         painter.text(
             Pos2::new(sw / 2.0, sh - 46.0),
             Align2::CENTER_TOP,
-            "PSoXide is an independent, open-source emulator. Use only a BIOS and games you legally own.",
+            "PSoXide is an independent, open-source PS1 developer environment. Use only a BIOS and games you legally own.",
             FontId::proportional(11.0),
             fade(theme::MENU_TEXT_DIM),
         );
@@ -1016,7 +1023,7 @@ fn about_panel(ctx: &egui::Context, open: &mut bool) {
                 .corner_radius(egui::CornerRadius::same(8))
                 .inner_margin(egui::Margin::symmetric(30, 26))
                 .show(ui, |ui| {
-                    ui.set_width(300.0);
+                    ui.set_width(340.0);
                     ui.vertical_centered(|ui| {
                         let w = 210.0;
                         ui.image(egui::load::SizedTexture::new(
@@ -1029,7 +1036,12 @@ fn about_panel(ctx: &egui::Context, open: &mut bool) {
                                 .color(theme::MENU_TEXT_BRIGHT),
                         );
                         ui.label(
-                            egui::RichText::new("Independent, open-source emulator")
+                            egui::RichText::new("Independent, open-source PS1 developer environment")
+                                .color(theme::MENU_TEXT_DIM)
+                                .size(13.0),
+                        );
+                        ui.label(
+                            egui::RichText::new("Emulator is early, game compatibility is still low")
                                 .color(theme::MENU_TEXT_DIM)
                                 .size(13.0),
                         );
