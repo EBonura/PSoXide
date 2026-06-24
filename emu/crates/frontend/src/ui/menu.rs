@@ -1057,6 +1057,15 @@ fn about_panel(ctx: &egui::Context, open: &mut bool) {
                                 .color(theme::MENU_TEXT_DIM)
                                 .size(12.0),
                         );
+                        ui.add_space(6.0);
+                        ui.label(
+                            egui::RichText::new(
+                                "PlayStation and PS1 are trademarks of Sony Interactive \
+                                 Entertainment. PSoXide is unaffiliated.",
+                            )
+                            .color(theme::MENU_HINT)
+                            .size(11.0),
+                        );
                         ui.add_space(4.0);
                         link(
                             ui,
