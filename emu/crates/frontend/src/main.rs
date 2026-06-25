@@ -974,7 +974,7 @@ impl ApplicationHandler for Shell {
                     .as_ref()
                     .map(|b| {
                         let area = b.gpu.display_area();
-                        ((area.width as u32).max(320), (area.height as u32).max(240))
+                        (area.width as u32, area.height as u32)
                     })
                     .unwrap_or((320, 240));
                 let hw_scale_start = Instant::now();
@@ -1282,8 +1282,8 @@ fn display_area_or_default(bus: Option<&emulator_core::Bus>) -> emulator_core::D
 }
 
 fn cpu_display_uv(area: emulator_core::DisplayArea) -> egui::Rect {
-    let width = area.width.max(320) as f32;
-    let height = area.height.max(240) as f32;
+    let width = area.width.max(1) as f32;
+    let height = area.height.max(1) as f32;
     egui::Rect::from_min_max(
         egui::pos2(0.0, 0.0),
         egui::pos2(
@@ -1294,8 +1294,8 @@ fn cpu_display_uv(area: emulator_core::DisplayArea) -> egui::Rect {
 }
 
 fn hw_display_uv(area: emulator_core::DisplayArea) -> egui::Rect {
-    let width = area.width.max(320) as f32;
-    let height = area.height.max(240) as f32;
+    let width = area.width.max(1) as f32;
+    let height = area.height.max(1) as f32;
     egui::Rect::from_min_max(
         egui::pos2(
             area.x as f32 / psx_gpu_render::VRAM_WIDTH as f32,
@@ -1849,5 +1849,26 @@ mod tests {
 
         assert!(!hw_target_needs_resync(&mut seen, &mut last_24bpp, 7, true));
         assert!(hw_target_needs_resync(&mut seen, &mut last_24bpp, 7, false));
+    }
+
+    #[test]
+    fn display_uv_honors_256_wide_modes() {
+        let area = emulator_core::DisplayArea {
+            x: 0,
+            y: 0,
+            width: 256,
+            height: 240,
+            bpp24: false,
+        };
+
+        let hw = hw_display_uv(area);
+        assert_eq!(hw.min, egui::pos2(0.0, 0.0));
+        assert_eq!(hw.max.x, 256.0 / psx_gpu_render::VRAM_WIDTH as f32);
+        assert_eq!(hw.max.y, 240.0 / psx_gpu_render::VRAM_HEIGHT as f32);
+
+        let cpu = cpu_display_uv(area);
+        assert_eq!(cpu.min, egui::pos2(0.0, 0.0));
+        assert_eq!(cpu.max.x, 256.0 / gfx::MAX_DISPLAY_WIDTH as f32);
+        assert_eq!(cpu.max.y, 240.0 / gfx::MAX_DISPLAY_HEIGHT as f32);
     }
 }
