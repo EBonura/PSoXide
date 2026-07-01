@@ -201,6 +201,17 @@ pub fn set_draw_offset(x: i16, y: i16) {
     write_gp0(gp0::draw_offset(x as i32, y as i32));
 }
 
+/// Set the GPU mask-bit (stencil-style) mode via GP0(E6h). `set_on_draw` forces
+/// bit 15 of every pixel written; `check_before_draw` skips pixels whose mask
+/// bit is already set. Together (both true) they give front-to-back occlusion
+/// without a Z-buffer: draw nearest first with the mask set, and farther pixels
+/// that would overdraw are rejected. Applies until changed, so reset to
+/// `(false, false)` before the translucent/blended passes that must not mask.
+pub fn set_mask_mode(set_on_draw: bool, check_before_draw: bool) {
+    wait_cmd_ready();
+    write_gp0(gp0::mask_bit(set_on_draw, check_before_draw));
+}
+
 /// Shift the displayed picture horizontally on the TV by `offset_px` pixels
 /// (positive = right) via the authentic GP1(06h) horizontal display range --
 /// the same mechanism period games used to recentre the image inside a CRT's
