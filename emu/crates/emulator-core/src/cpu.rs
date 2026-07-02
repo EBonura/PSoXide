@@ -936,6 +936,18 @@ impl Cpu {
 
     /// `MTC0 rt, rd` -- move from CPU GPR `rt` to COP0 register `rd`.
     fn op_mtc0(&mut self, instr: u32) -> Result<(), ExecutionError> {
+        // Opt-in trace: catch anything setting SR.BEV (bit 22) mid-run --
+        // exceptions then vector through the ROM handler and fall off the
+        // mapped BIOS, which presents as a wild pc at 0xbfc80000.
+        if std::env::var_os("PSOXIDE_TRACE_EXC").is_some() {
+            let rd = (instr >> 11) & 31;
+            let rt = ((instr >> 16) & 31) as u8;
+            let v = self.gpr(rt);
+            if rd == 12 && v & (1 << 22) != 0 {
+                eprintln!("[cpu] MTC0 SR with BEV set: value=0x{v:08x} pc=0x{:08x}", self.pc());
+            }
+        }
+
         let rt = ((instr >> 16) & 0x1F) as u8;
         let rd = ((instr >> 11) & 0x1F) as usize;
         self.cop0[rd] = self.gpr(rt);
@@ -1843,6 +1855,16 @@ impl Cpu {
         let code_bits = (code as u32) & 0x1F;
         self.exception_counts[code_bits as usize] =
             self.exception_counts[code_bits as usize].saturating_add(1);
+        // Opt-in fault tracing for guest debugging: every non-IRQ exception
+        // with its cause, EPC, and delay-slot flag.
+        if !matches!(code, ExceptionCode::Interrupt)
+            && std::env::var_os("PSOXIDE_TRACE_EXC").is_some()
+        {
+            eprintln!(
+                "[cpu] exception code {} at pc=0x{:08x} bd={}",
+                code_bits, pc, in_delay_slot as u32
+            );
+        }
 
         let mut cause = code_bits << 2;
         if matches!(code, ExceptionCode::Interrupt) {
