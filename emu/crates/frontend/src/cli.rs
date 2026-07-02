@@ -920,7 +920,7 @@ fn run_headless_launch(
         let current_guest_frames = bus.telemetry.frames_seen();
         if args.guest_debug_log {
             for line in bus.telemetry.drain_debug_logs() {
-                eprintln!("[guest f{}] {}", line.frame, line.text);
+                eprintln!("[guest f{} c{}] {}", line.frame, line.cycles, line.text);
             }
         }
         if let Some((hw, live_vram, next_deadline, snaps, log)) = live_sim.as_mut() {
