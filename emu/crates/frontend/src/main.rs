@@ -882,6 +882,13 @@ impl ApplicationHandler for Shell {
                         };
                         let guest_profile = self.state.profiler.consume_guest_events(&guest_events);
                         if !guest_debug_logs.is_empty() {
+                            // Surface guest debug logs to the host console. The
+                            // editor routes them to its Play debug terminal; in
+                            // the plain emulator/library frontend there is no such
+                            // panel, so without this they were silently dropped.
+                            for line in &guest_debug_logs {
+                                eprintln!("[guest f{} c{}] {}", line.frame, line.cycles, line.text);
+                            }
                             self.state.append_guest_debug_logs(guest_debug_logs);
                         }
                         profile.add_guest_profile(guest_profile);

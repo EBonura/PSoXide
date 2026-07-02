@@ -867,14 +867,42 @@ fn run_headless_launch(
     let mut audio_capture: Vec<(i16, i16)> = Vec::new();
     let mut pc_hist: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
     let pc_every = args.pc_sample_every.max(1);
+    let trace_ring = std::env::var_os("PSOXIDE_TRACE_EXC").is_some();
+    let mut pc_ring = [0u32; 64];
+    let mut pc_ring_i = 0usize;
     let gte_profile_before = cpu.cop2().profile_snapshot();
     for i in 0..args.steps {
         if args.pc_sample.is_some() && i >= args.pc_sample_from && i % pc_every == 0 {
             *pc_hist.entry(cpu.pc() & !3).or_insert(0) += 1;
         }
         let cycles_before = bus.cycles();
+        if trace_ring {
+            let pc_now = cpu.pc();
+            let prev = if pc_ring_i > 0 { pc_ring[(pc_ring_i - 1) & 63] } else { 0 };
+            if pc_now >= 0xBFC0_0000 && (0x8000_0000..0xA000_0000).contains(&prev) {
+                eprintln!(
+                    "[cli] RAM->ROM jump at step {i}: from pc=0x{prev:08x} to 0x{pc_now:08x} ra=0x{:08x} sp=0x{:08x}",
+                    cpu.gpr(31), cpu.gpr(29)
+                );
+            }
+            pc_ring[pc_ring_i & 63] = pc_now;
+            pc_ring_i += 1;
+        }
         if let Err(e) = cpu.step(&mut bus) {
             eprintln!("[cli] step {i} failed: {e:?}");
+            if trace_ring {
+                let mut trail = String::new();
+                for k in 0..64usize {
+                    let idx = (pc_ring_i + k) & 63;
+                    trail.push_str(&format!(" {:08x}", pc_ring[idx]));
+                }
+                eprintln!("[cli] last pcs:{trail}");
+            }
+            eprintln!(
+                "[cli] regs: ra=0x{:08x} sp=0x{:08x} gp=0x{:08x} fp=0x{:08x} a0=0x{:08x} a1=0x{:08x} v0=0x{:08x} v1=0x{:08x} t9=0x{:08x}",
+                cpu.gpr(31), cpu.gpr(29), cpu.gpr(28), cpu.gpr(30),
+                cpu.gpr(4), cpu.gpr(5), cpu.gpr(2), cpu.gpr(3), cpu.gpr(25)
+            );
             stopped_at = Some(i);
             break;
         }
