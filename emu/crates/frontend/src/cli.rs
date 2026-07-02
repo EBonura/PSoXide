@@ -167,6 +167,17 @@ pub struct LaunchArgs {
     /// emitted guest frame-begin marker.
     #[arg(long)]
     pub input_tape: Option<PathBuf>,
+    /// Write a guest-PC sampling histogram CSV (pc,count) for hotspot
+    /// profiling. Resolve addresses against the game's linker map.
+    #[arg(long)]
+    pub pc_sample: Option<PathBuf>,
+    /// Sample the guest PC every N retired instructions (with --pc-sample).
+    #[arg(long, default_value_t = 61)]
+    pub pc_sample_every: u64,
+    /// Start PC sampling only after this many retired instructions, to skip
+    /// menu/loading phases (with --pc-sample).
+    #[arg(long, default_value_t = 0)]
+    pub pc_sample_from: u64,
     /// Press pad-1 button masks on the headless route clock. Format:
     /// `<mask>@<tick>+<frames>`, comma-separated, e.g.
     /// `0x4000@45+12,0x4000@80+16`.
@@ -854,8 +865,13 @@ fn run_headless_launch(
     let mut stopped_at: Option<u64> = None;
     let mut audio_cycle_accum = 0u64;
     let mut audio_capture: Vec<(i16, i16)> = Vec::new();
+    let mut pc_hist: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+    let pc_every = args.pc_sample_every.max(1);
     let gte_profile_before = cpu.cop2().profile_snapshot();
     for i in 0..args.steps {
+        if args.pc_sample.is_some() && i >= args.pc_sample_from && i % pc_every == 0 {
+            *pc_hist.entry(cpu.pc() & !3).or_insert(0) += 1;
+        }
         let cycles_before = bus.cycles();
         if let Err(e) = cpu.step(&mut bus) {
             eprintln!("[cli] step {i} failed: {e:?}");
@@ -1117,6 +1133,17 @@ fn run_headless_launch(
         profile_log.add_events(&events, cpu.tick(), bus.cycles())?;
     }
     profile_log.finish(cpu.tick(), bus.cycles())?;
+    if let Some(path) = &args.pc_sample {
+        let mut rows: Vec<(u32, u32)> = pc_hist.into_iter().collect();
+        rows.sort_by(|a, b| b.1.cmp(&a.1));
+        let mut out = String::from("pc,count\n");
+        for (pc, n) in &rows {
+            out.push_str(&format!("0x{pc:08x},{n}\n"));
+        }
+        std::fs::write(path, out).map_err(|e| e.to_string())?;
+        let total: u64 = rows.iter().map(|(_, n)| *n as u64).sum();
+        println!("[cli] pc-sample → {} ({} samples, {} unique pcs)", path.display(), total, rows.len());
+    }
     visual_hash_log.flush()?;
     guest_hash_log.flush()?;
     counter_log.flush()?;
@@ -1808,9 +1835,7 @@ fn resolve_validation_artifact(
             #[cfg(not(feature = "editor"))]
             {
                 let _ = project;
-                return Err(
-                    "validation Project artifacts require the `editor` feature".to_string(),
-                );
+                return Err("validation Project artifacts require the `editor` feature".to_string());
             }
         }
         ValidationArtifact::Disc {
@@ -1852,6 +1877,9 @@ fn validation_launch_args(
         guest_frames: checkpoint.stop.guest_frames,
         guest_visual_frames: checkpoint.stop.guest_visual_frames,
         input_tape,
+        pc_sample: None,
+        pc_sample_every: 61,
+        pc_sample_from: 0,
         pad_pulses: None,
         embedded_playtest: artifact.embedded_playtest,
         bios_boot: artifact.bios_boot,
@@ -2280,8 +2308,12 @@ const PROFILE_LOG_HEADER: &[&str] = &[
     "room_submit_fallback",
     "room_surfaces_considered",
     "room_projected_vertices",
+    "room_surf_whole_quads",
+    "room_surf_split_tris",
     "tri_primitives",
+    "tri_primitive_remaining",
     "world_commands",
+    "room_submit_primitive_overflows",
     "model_instance_draws",
     "player_projected_vertices",
     "player_submitted_tris",
@@ -2302,6 +2334,7 @@ const PROFILE_LOG_HEADER: &[&str] = &[
     "camera_x_biased",
     "camera_y_biased",
     "camera_z_biased",
+    "player_view_yaw_q12",
     "current_room",
     "player_room",
 ];
@@ -2530,8 +2563,12 @@ impl GuestProfileLog {
         push!(counter_total(&summary, c::ROOM_SUBMIT_FALLBACK_CYCLES));
         push!(counter_total(&summary, c::ROOM_SURFACES_CONSIDERED));
         push!(counter_total(&summary, c::ROOM_PROJECTED_VERTICES));
+        push!(counter_total(&summary, c::ROOM_SURF_WHOLE_QUADS));
+        push!(counter_total(&summary, c::ROOM_SURF_SPLIT_TRIS));
         push!(counter_total(&summary, c::TRI_PRIMITIVES));
+        push!(counter_latest(c::TRI_PRIMITIVE_REMAINING));
         push!(counter_total(&summary, c::WORLD_COMMANDS));
+        push!(counter_total(&summary, c::ROOM_SUBMIT_PRIMITIVE_OVERFLOWS));
         push!(counter_total(&summary, c::MODEL_INSTANCE_DRAWS));
         push!(counter_total(&summary, c::PLAYER_PROJECTED_VERTICES));
         push!(counter_total(&summary, c::PLAYER_SUBMITTED_TRIS));
@@ -2567,6 +2604,7 @@ impl GuestProfileLog {
         push!(counter_latest(c::ROOM_CAMERA_GLOBAL_X_BIASED));
         push!(counter_latest(c::ROOM_CAMERA_GLOBAL_Y_BIASED));
         push!(counter_latest(c::ROOM_CAMERA_GLOBAL_Z_BIASED));
+        push!(counter_latest(c::ROOM_PLAYER_VIEW_YAW_Q12));
         push!(counter_latest(c::PORTAL_VIS_CURRENT_ROOM));
         push!(counter_latest(c::ROOM_PLAYER_ROOM_INDEX));
 
