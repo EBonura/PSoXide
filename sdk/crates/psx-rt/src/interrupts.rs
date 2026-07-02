@@ -97,7 +97,11 @@ unsafe fn enable_cpu_interrupts() {
     const STATUS_CU2: u32 = 1 << 30;
 
     let mut sr: u32;
-    unsafe { core::arch::asm!("mfc0 $8, $12", lateout("$8") sr) };
+    // MFC0 has a one-instruction load-delay hazard on the R3000: without the
+    // nop the asm block hands back the STALE $8, and whatever garbage it held
+    // gets OR'd into SR (seen in the wild as BEV set -> exceptions vectoring
+    // into ROM -> pc walking off the end of the BIOS).
+    unsafe { core::arch::asm!("mfc0 $8, $12", "nop", lateout("$8") sr) };
     sr |= STATUS_IE | STATUS_IM2 | STATUS_CU2;
     unsafe { core::arch::asm!("mtc0 $8, $12", in("$8") sr) };
 }
