@@ -6,7 +6,8 @@ license = "GPL-2.0-or-later"
 
 
 [dependencies]
-psx-iso = { path = "../../crates/psx-iso" }
+psx-iso  = { path = "../../crates/psx-iso" }
+lz4_flex = { version = "0.11", default-features = false }
 
 [[bin]]
 name = "mkisopsx"
