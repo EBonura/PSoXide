@@ -42,6 +42,7 @@ struct Args {
     cdtest_sectors: Option<usize>,
     world_pack_rooms_dir: Option<PathBuf>,
     world_pack_extra_dirs: Vec<PathBuf>,
+    world_pack_compress_rooms: bool,
     world_pack_order_file: Option<PathBuf>,
     ui_pack_dir: Option<PathBuf>,
     ui_pack_order_file: Option<PathBuf>,
@@ -57,6 +58,7 @@ fn parse_args() -> Result<Args, String> {
     let mut cdtest_sectors = None;
     let mut world_pack_rooms_dir = None;
     let mut world_pack_extra_dirs = Vec::new();
+    let mut world_pack_compress_rooms = false;
     let mut world_pack_order_file = None;
     let mut ui_pack_dir = None;
     let mut ui_pack_order_file = None;
@@ -94,6 +96,9 @@ fn parse_args() -> Result<Args, String> {
                     return Err("--cdtest-sectors must be greater than zero".to_string());
                 }
                 cdtest_sectors = Some(sectors);
+            }
+            "--world-pack-compress-rooms" => {
+                world_pack_compress_rooms = true;
             }
             "--world-pack-rooms-dir" => {
                 world_pack_rooms_dir =
@@ -160,6 +165,7 @@ fn parse_args() -> Result<Args, String> {
         cdtest_sectors,
         world_pack_rooms_dir,
         world_pack_extra_dirs,
+        world_pack_compress_rooms,
         world_pack_order_file,
         ui_pack_dir,
         ui_pack_order_file,
@@ -183,6 +189,9 @@ fn print_usage() {
                          before WORLD.PAK in the fixed boot-area padding.\n\
          --world-pack-rooms-dir PATH\n\
                          Pack room_*.psxc stream chunks into WORLD.PAK after\n\
+         --world-pack-compress-rooms\n\
+                         LZ4-compress each room chunk payload (HLZC wrapper);\n\
+                         the guest decompresses in place after the CD read.\n\
                          the fixed boot area.\n\
          --world-pack-extra-dir PATH\n\
                          Also pack chunk_<id>.* payloads into WORLD.PAK.\n\
@@ -277,6 +286,7 @@ fn main() -> ExitCode {
                 args.world_pack_rooms_dir.as_deref(),
                 &args.world_pack_extra_dirs,
                 args.world_pack_order_file.as_deref(),
+                args.world_pack_compress_rooms,
             ) {
                 Ok(pack) => Some(pack),
                 Err(e) => {
@@ -501,10 +511,11 @@ fn build_world_pack_from_inputs(
     rooms_dir: Option<&std::path::Path>,
     extra_dirs: &[PathBuf],
     order_file: Option<&std::path::Path>,
+    compress_rooms: bool,
 ) -> Result<Vec<u8>, String> {
     let mut chunks = Vec::new();
     if let Some(dir) = rooms_dir {
-        append_world_pack_room_chunks(&mut chunks, dir)?;
+        append_world_pack_room_chunks(&mut chunks, dir, compress_rooms)?;
     }
     for dir in extra_dirs {
         append_world_pack_extra_chunks(&mut chunks, dir)?;
@@ -528,6 +539,7 @@ fn build_world_pack_from_inputs(
 fn append_world_pack_room_chunks(
     chunks: &mut Vec<(u32, Vec<u8>)>,
     dir: &std::path::Path,
+    compress: bool,
 ) -> Result<(), String> {
     let entries = fs::read_dir(dir).map_err(|e| format!("read {}: {e}", dir.display()))?;
     for entry in entries {
@@ -546,9 +558,30 @@ fn append_world_pack_room_chunks(
             .parse::<u32>()
             .map_err(|_| format!("invalid room chunk filename: {}", path.display()))?;
         let bytes = fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        let bytes = if compress {
+            compress_room_chunk(bytes)
+        } else {
+            bytes
+        };
         chunks.push((chunk_id, bytes));
     }
     Ok(())
+}
+
+/// LZ4-wrap one room payload: `HLZC | u32 raw_len | lz4 block`. The guest
+/// reads the (smaller) chunk to the head of its map buffer, moves the payload
+/// to the buffer tail, and decompresses tail -> head in place. Keeps the raw
+/// bytes when compression doesn't help (guest passes non-HLZC through).
+fn compress_room_chunk(raw: Vec<u8>) -> Vec<u8> {
+    let comp = lz4_flex::block::compress(&raw);
+    if comp.len() + 8 >= raw.len() {
+        return raw;
+    }
+    let mut out = Vec::with_capacity(comp.len() + 8);
+    out.extend_from_slice(b"HLZC");
+    out.extend_from_slice(&(raw.len() as u32).to_le_bytes());
+    out.extend_from_slice(&comp);
+    out
 }
 
 fn append_world_pack_extra_chunks(
