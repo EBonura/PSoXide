@@ -166,6 +166,23 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     if let Some(loc) = info.location() {
         tty::print("  at ");
         tty::print(loc.file());
+        tty::print(":");
+        // Print the line number (no fmt machinery in no_std): up to 7 digits.
+        let mut line = loc.line();
+        let mut buf = [0u8; 8];
+        let mut i = buf.len();
+        if line == 0 {
+            i -= 1;
+            buf[i] = b'0';
+        }
+        while line > 0 && i > 0 {
+            i -= 1;
+            buf[i] = b'0' + (line % 10) as u8;
+            line /= 10;
+        }
+        if let Ok(s) = core::str::from_utf8(&buf[i..]) {
+            tty::print(s);
+        }
         tty::print("\n");
     }
     halt()
