@@ -518,7 +518,7 @@ fn build_world_pack_from_inputs(
         append_world_pack_room_chunks(&mut chunks, dir, compress_rooms)?;
     }
     for dir in extra_dirs {
-        append_world_pack_extra_chunks(&mut chunks, dir)?;
+        append_world_pack_extra_chunks(&mut chunks, dir, compress_rooms)?;
     }
     chunks.sort_by_key(|(chunk_id, _)| *chunk_id);
     reject_duplicate_chunk_ids(&chunks)?;
@@ -587,6 +587,7 @@ fn compress_room_chunk(raw: Vec<u8>) -> Vec<u8> {
 fn append_world_pack_extra_chunks(
     chunks: &mut Vec<(u32, Vec<u8>)>,
     dir: &std::path::Path,
+    compress: bool,
 ) -> Result<(), String> {
     let entries = fs::read_dir(dir).map_err(|e| format!("read {}: {e}", dir.display()))?;
     for entry in entries {
@@ -605,6 +606,11 @@ fn append_world_pack_extra_chunks(
             .parse::<u32>()
             .map_err(|_| format!("invalid WORLD.PAK chunk filename: {}", path.display()))?;
         let bytes = fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        let bytes = if compress && chunk_id >= 3000 {
+            compress_room_chunk(bytes)
+        } else {
+            bytes
+        };
         chunks.push((chunk_id, bytes));
     }
     Ok(())
