@@ -48,6 +48,11 @@ __psx_rt_exception_handler:
 #[no_mangle]
 pub static mut __psx_rt_vblank_count: u32 = 0;
 
+/// Set once [`install_vblank_counter`] has run, so [`wait_vblank`] can
+/// install lazily without resetting a counter the game is already using.
+#[cfg(target_arch = "mips")]
+static mut INSTALLED: bool = false;
+
 #[cfg(target_arch = "mips")]
 extern "C" {
     fn __psx_rt_exception_handler();
@@ -77,6 +82,7 @@ pub fn install_vblank_counter() {
         // preserve CD-ROM/DMA/etc. bits the BIOS may have left enabled.
         irq::set_mask(1 << irq::source::VBLANK);
         enable_cpu_interrupts();
+        core::ptr::write_volatile(&raw mut INSTALLED, true);
     }
 }
 
@@ -89,6 +95,33 @@ pub fn install_vblank_counter() {}
 pub fn vblank_count() -> u32 {
     unsafe { core::ptr::read_volatile(&raw const __psx_rt_vblank_count) }
 }
+
+/// Block until the next VBlank IRQ.
+///
+/// This is the display-sync primitive: a frame that finishes early sleeps
+/// until the blank, and a slow frame snaps to the next one, so presentation
+/// quantizes to whole display periods. (`psx_gpu::vsync()` cannot do this:
+/// it reconfigures Timer 1 on every call, and a mode write resets the
+/// counter, so it busy-waits a fixed 242 HBlanks from the call site
+/// instead of syncing to the display.)
+///
+/// Installs the VBlank counter on first use if the game has not already
+/// called [`install_vblank_counter`].
+#[cfg(target_arch = "mips")]
+pub fn wait_vblank() {
+    unsafe {
+        if !core::ptr::read_volatile(&raw const INSTALLED) {
+            install_vblank_counter();
+        }
+    }
+    let v = vblank_count();
+    while vblank_count() == v {}
+}
+
+/// Block until the next VBlank IRQ. Host no-op: the counter never
+/// advances off-target, so waiting would hang.
+#[cfg(not(target_arch = "mips"))]
+pub fn wait_vblank() {}
 
 #[cfg(target_arch = "mips")]
 unsafe fn enable_cpu_interrupts() {
