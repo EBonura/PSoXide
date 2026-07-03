@@ -100,7 +100,7 @@ fn main() {
         }
 
         gpu::draw_sync();
-        gpu::vsync();
+        psx_rt::interrupts::wait_vblank();
         fb.swap();
         frame = frame.wrapping_add(1);
     }

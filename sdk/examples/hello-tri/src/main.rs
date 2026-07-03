@@ -55,7 +55,7 @@ fn main() {
         gpu::draw_tri_gouraud(verts, [(255, 64, 64), (64, 255, 64), (64, 64, 255)]);
 
         gpu::draw_sync();
-        gpu::vsync();
+        psx_rt::interrupts::wait_vblank();
         fb.swap();
 
         frame = frame.wrapping_add(1);
