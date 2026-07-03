@@ -12,7 +12,7 @@
 //!     gpu::init(gpu::VideoMode::Ntsc, gpu::Resolution::R320X240);
 //!     loop {
 //!         gpu::fill_rect(0, 0, 320, 240, 255, 0, 0);
-//!         gpu::vsync();
+//!         rt::interrupts::wait_vblank();
 //!     }
 //! }
 //! ```
