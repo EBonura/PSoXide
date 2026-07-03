@@ -140,7 +140,7 @@ fn main() {
             OT.submit();
         }
 
-        gpu::vsync();
+        psx_rt::interrupts::wait_vblank();
         fb.swap();
         frame = frame.wrapping_add(1);
     }

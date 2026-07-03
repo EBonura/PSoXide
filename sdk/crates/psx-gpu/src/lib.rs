@@ -156,8 +156,9 @@ pub fn draw_sync() {
 
 /// Configure Timer 1 as an HBlank-counting scanline counter.
 ///
-/// The counter is used by [`vsync`] and engine-level presentation
-/// clocks. Calling it repeatedly is harmless.
+/// WARNING: writing a timer's mode register resets its counter, so every
+/// call restarts the count from zero. That is why the helpers below cannot
+/// observe the real display position: they reconfigure before reading.
 #[inline]
 pub fn configure_vsync_timer() {
     // Mode: bit0=sync enable, bits1-2=01 (reset at VBlank), bit8=1
@@ -166,6 +167,11 @@ pub fn configure_vsync_timer() {
 }
 
 /// Timer-1 scanline counter used by the VBlank wait helpers.
+#[deprecated(
+    note = "reconfigures Timer 1 before reading, which resets the counter, \
+            so this returns ~0 rather than the display scanline; use \
+            psx_rt::interrupts for display timing"
+)]
 #[inline]
 pub fn scanline_counter() -> u16 {
     configure_vsync_timer();
@@ -173,13 +179,29 @@ pub fn scanline_counter() -> u16 {
 }
 
 /// Whether Timer 1 currently reports the VBlank scanline region.
+#[deprecated(
+    note = "built on scanline_counter(), whose reconfigure-before-read \
+            resets the counter, so this is almost always false; use \
+            psx_rt::interrupts for display timing"
+)]
+#[allow(deprecated)]
 #[inline]
 pub fn in_vblank() -> bool {
     scanline_counter() >= 242
 }
 
-/// Wait for the next vertical blank by polling Timer 1 in HBlank-source
-/// mode.
+/// Wait 242 HBlank periods (~15.4ms) from the moment of the call.
+///
+/// Despite the name, this does NOT sync to the display: reconfiguring
+/// Timer 1 resets its counter, so the wait starts from zero at the call
+/// site. Frame time becomes `work + 15.4ms` instead of snapping to the
+/// next VBlank -- nearly right for light frames, badly slow for heavy
+/// ones. It cannot be repaired here: syncing needs the VBlank IRQ, which
+/// the runtime owns.
+#[deprecated(
+    note = "busy-waits a fixed 242 HBlanks from the call site instead of \
+            syncing to the display; use psx_rt::interrupts::wait_vblank()"
+)]
 pub fn vsync() {
     configure_vsync_timer();
     while timers::counter(timers::Timer::Timer1) < 242 {}
