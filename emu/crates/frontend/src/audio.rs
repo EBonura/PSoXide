@@ -120,6 +120,20 @@ impl AudioOut {
             if cfg.channels() != 2 {
                 continue;
             }
+            // Only consider formats the stream-building match below actually
+            // handles (F32 / I16). Some devices (observed: a Bluetooth
+            // headset reporting U8/I16/I32/F32, all at 44.1 kHz, with U8
+            // listed *first*) would otherwise have their very first --
+            // otherwise-perfectly-matching-rate -- config picked here, land
+            // on the `_ => return None` catch-all below, and silently report
+            // "no output device available" despite the same device working
+            // fine for a format we do support.
+            if !matches!(
+                cfg.sample_format(),
+                cpal::SampleFormat::F32 | cpal::SampleFormat::I16
+            ) {
+                continue;
+            }
             let min = cfg.min_sample_rate().0;
             let max = cfg.max_sample_rate().0;
             if (min..=max).contains(&TARGET_SAMPLE_RATE) {
