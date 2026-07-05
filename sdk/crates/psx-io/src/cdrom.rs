@@ -35,6 +35,8 @@ pub const CMD_MUTE: u8 = 0x0B;
 pub const CMD_DEMUTE: u8 = 0x0C;
 /// CdlSetmode command.
 pub const CMD_SETMODE: u8 = 0x0E;
+/// CdlGetlocP command: current physical play position.
+pub const CMD_GETLOCP: u8 = 0x11;
 
 const REG_INDEX: u32 = BASE;
 const REG_COMMAND_RESPONSE: u32 = BASE + 1;
@@ -191,6 +193,81 @@ pub fn try_stop(spin_limit: u32) -> Option<Response> {
 pub const fn bin_to_bcd(v: u8) -> u8 {
     let v = if v > 99 { 99 } else { v };
     ((v / 10) << 4) | (v % 10)
+}
+
+/// Convert a BCD byte back to binary. Inverse of [`bin_to_bcd`] for well-formed
+/// input; nibbles above 9 are not normalised (the drive never emits them).
+pub const fn bcd_to_bin(v: u8) -> u8 {
+    (v >> 4) * 10 + (v & 0x0F)
+}
+
+/// Get the current physical play position (CdlGetlocP). The 8-byte reply is
+/// `[Track(bcd), Index(raw), RMM, RSS, RSECT, AMM, ASS, ASECT]`; parse it with
+/// [`PlayPosition::parse`].
+pub fn get_loc_p() -> Response {
+    command(CMD_GETLOCP, &[])
+}
+
+/// Try to get the current physical play position, giving up after `spin_limit`.
+pub fn try_get_loc_p(spin_limit: u32) -> Option<Response> {
+    try_command(CMD_GETLOCP, &[], spin_limit)
+}
+
+/// Decoded CdlGetlocP reply. The relative MSF (`relative_*`) is elapsed time
+/// into the current track, independent of the pregap, which makes it the source
+/// of truth for a music/song clock. The absolute MSF (`absolute_*`) is the raw
+/// disc position.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct PlayPosition {
+    /// 1-based track number the drive is currently in.
+    pub track: u8,
+    /// Track index (raw): 0 = pregap, 1 = program area.
+    pub index: u8,
+    /// Minutes elapsed into the current track.
+    pub relative_min: u8,
+    /// Seconds elapsed into the current track (0..=59).
+    pub relative_sec: u8,
+    /// MSF frames elapsed into the current track (0..=74, 75 per second).
+    pub relative_frame: u8,
+    /// Absolute disc position, minutes.
+    pub absolute_min: u8,
+    /// Absolute disc position, seconds (0..=59).
+    pub absolute_sec: u8,
+    /// Absolute disc position, MSF frames (0..=74).
+    pub absolute_frame: u8,
+}
+
+impl PlayPosition {
+    /// Parse a GetlocP [`Response`]. Returns `None` if fewer than 8 bytes came
+    /// back (drive not ready / no disc). Track and MSF fields are BCD; index is
+    /// raw.
+    pub fn parse(resp: &Response) -> Option<Self> {
+        let b = resp.bytes();
+        if b.len() < 8 {
+            return None;
+        }
+        Some(PlayPosition {
+            track: bcd_to_bin(b[0]),
+            index: b[1],
+            relative_min: bcd_to_bin(b[2]),
+            relative_sec: bcd_to_bin(b[3]),
+            relative_frame: bcd_to_bin(b[4]),
+            absolute_min: bcd_to_bin(b[5]),
+            absolute_sec: bcd_to_bin(b[6]),
+            absolute_frame: bcd_to_bin(b[7]),
+        })
+    }
+
+    /// Elapsed sectors into the current track (75 sectors per second).
+    pub fn relative_sectors(&self) -> u32 {
+        (self.relative_min as u32 * 60 + self.relative_sec as u32) * 75
+            + self.relative_frame as u32
+    }
+
+    /// Elapsed milliseconds into the current track. This is the song clock feed.
+    pub fn relative_millis(&self) -> u32 {
+        self.relative_sectors() * 1000 / 75
+    }
 }
 
 fn begin_polled_command() -> u8 {
@@ -385,5 +462,46 @@ mod tests {
         assert_eq!(bin_to_bcd(2), 0x02);
         assert_eq!(bin_to_bcd(42), 0x42);
         assert_eq!(bin_to_bcd(100), 0x99);
+    }
+
+    #[test]
+    fn bcd_to_bin_roundtrips() {
+        for v in 0u8..=99 {
+            assert_eq!(bcd_to_bin(bin_to_bcd(v)), v);
+        }
+    }
+
+    fn response_from(bytes: &[u8]) -> Response {
+        let mut buf = [0u8; 16];
+        buf[..bytes.len()].copy_from_slice(bytes);
+        Response { bytes: buf, len: bytes.len() }
+    }
+
+    #[test]
+    fn play_position_parses_and_converts() {
+        // Track 2, index 1, relative 01:23:45 (min:sec:frame), absolute 04:56:00.
+        let resp = response_from(&[
+            bin_to_bcd(2),
+            0x01,
+            bin_to_bcd(1),
+            bin_to_bcd(23),
+            bin_to_bcd(45),
+            bin_to_bcd(4),
+            bin_to_bcd(56),
+            bin_to_bcd(0),
+        ]);
+        let p = PlayPosition::parse(&resp).unwrap();
+        assert_eq!(p.track, 2);
+        assert_eq!(p.index, 1);
+        assert_eq!((p.relative_min, p.relative_sec, p.relative_frame), (1, 23, 45));
+        // (1*60 + 23) * 75 + 45 = 6270 sectors.
+        assert_eq!(p.relative_sectors(), 6270);
+        // 6270 * 1000 / 75 = 83600 ms.
+        assert_eq!(p.relative_millis(), 83_600);
+    }
+
+    #[test]
+    fn play_position_rejects_short_response() {
+        assert!(PlayPosition::parse(&response_from(&[0x02, 0x01, 0x00])).is_none());
     }
 }
