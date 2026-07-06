@@ -8,9 +8,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 
 use emulator_core::{
-    fast_boot_disc_with_hle, warm_bios_for_disc_fast_boot, Bus, Cpu, DISC_FAST_BOOT_WARMUP_STEPS,
+    fast_boot_disc_with_hle, warm_bios_for_disc_fast_boot, Bus, Cpu, EmulatorState,
+    EmulatorStateRef, DISC_FAST_BOOT_WARMUP_STEPS,
 };
 use psoxide_settings::library::{GameKind, Region};
+use psoxide_settings::savestate::SaveStateV1;
 use psoxide_settings::{ConfigPaths, Library, LibraryEntry, Settings};
 use psx_iso::{Disc, Exe, SECTOR_BYTES};
 use psx_trace::InstructionRecord;
@@ -698,6 +700,77 @@ impl AppState {
             STATUS_MESSAGE_TTL_SECS,
         ));
         Ok(())
+    }
+
+    /// Write the running emulator's state to `<config>/games/<id>/savestates/slot{slot}.psx`.
+    /// No-op (with a status toast) if no game is currently running --
+    /// there's nothing meaningful to key the save off of.
+    pub fn save_state(&mut self, slot: u8) {
+        let Some(game_id) = self.current_game.as_ref().map(|g| g.id.clone()) else {
+            self.status_message_set("Save state: no game running");
+            return;
+        };
+        if self.bus.is_none() {
+            self.status_message_set("Save state: no game running");
+            return;
+        }
+        if let Err(e) = self.paths.ensure_game_tree(&game_id) {
+            self.status_message_set(format!("Save state failed: {e}"));
+            return;
+        }
+        let tick = self.cpu.tick();
+        let snapshot = EmulatorStateRef {
+            cpu: &self.cpu,
+            bus: self.bus.as_ref().expect("checked above"),
+        };
+        let state = SaveStateV1::new(snapshot, game_id.clone(), tick);
+        let path = self.paths.savestate_file(&game_id, slot);
+        match state.write_to(&path) {
+            Ok(()) => self.status_message_set(format!("Saved slot {slot}")),
+            Err(e) => self.status_message_set(format!("Save state failed: {e}")),
+        }
+    }
+
+    /// Load `<config>/games/<id>/savestates/slot{slot}.psx` back into
+    /// the running emulator.
+    ///
+    /// The save file deliberately omits the BIOS image and the
+    /// mounted disc (see [`Bus::restore_excluded_from`]) to keep save
+    /// files small, so this re-runs the normal boot path for the
+    /// current game first -- purely to obtain a correctly-configured
+    /// donor `Bus` (right BIOS, right disc, right memory card) -- and
+    /// then splices the restored CPU/Bus register state on top of it.
+    pub fn load_state(&mut self, slot: u8) {
+        let Some(game) = self.current_game.clone() else {
+            self.status_message_set("Load state: no game running");
+            return;
+        };
+        let path = self.paths.savestate_file(&game.id, slot);
+        let loaded: SaveStateV1<EmulatorState> = match SaveStateV1::read_from(&path) {
+            Ok(s) => s,
+            Err(e) => {
+                self.status_message_set(format!("Load state failed: {e}"));
+                return;
+            }
+        };
+        if loaded.header.game_id != game.id {
+            self.status_message_set("Load state failed: save is from a different game".to_string());
+            return;
+        }
+        if let Err(e) = self.launch_entry(&game) {
+            self.status_message_set(format!("Load state failed: could not remount game: {e}"));
+            return;
+        }
+        let mut payload = loaded.payload;
+        if let Some(fresh_bus) = self.bus.as_mut() {
+            payload.bus.restore_excluded_from(fresh_bus);
+        }
+        let mc_bytes = std::fs::read(self.paths.memcard_file(&game.id, 1)).unwrap_or_default();
+        payload.bus.attach_memcard_port1(mc_bytes);
+        self.cpu = payload.cpu;
+        self.bus = Some(payload.bus);
+        self.gpu_resync_generation = self.gpu_resync_generation.wrapping_add(1);
+        self.status_message_set(format!("Loaded slot {slot}"));
     }
 
     /// Convenience: look up an entry by menu launch token and launch

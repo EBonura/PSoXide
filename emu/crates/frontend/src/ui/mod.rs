@@ -116,6 +116,14 @@ pub fn apply_menu_action(state: &mut AppState, action: menu::MenuAction) -> Menu
             state.toggle_fast_boot_disc();
             MenuOutcome::None
         }
+        SaveState(slot) => {
+            state.save_state(slot);
+            MenuOutcome::None
+        }
+        LoadState(slot) => {
+            state.load_state(slot);
+            MenuOutcome::None
+        }
         LaunchGame(id) => {
             // Game-launch rebuilds Bus + Cpu from scratch. Close
             // the Menu on success so the user sees the freshly-
