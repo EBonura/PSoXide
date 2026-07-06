@@ -660,16 +660,20 @@ impl ApplicationHandler for Shell {
                         }
                     );
                 }
-                // F5 / F7 -- quick-save (pushes a new save) / quick-load
-                // the most recent one. Mirrors the System menu's "Save
-                // state" row and the top ("newest") "Load state" row;
-                // F9 is already the DualShock analog-mode toggle (see
+                // F5 / F7 -- quick-save (pushes a new save, and pins it
+                // as the new quick-load target) / quick-load whichever
+                // save is pinned "on top" (see `ConfigPaths::read_top_slot`),
+                // falling back to the most recent one. F7 loads paused,
+                // matching the save-states panel's "Resume paused"
+                // default -- the two entry points for "load a state"
+                // should behave the same way. F9 is already the
+                // DualShock analog-mode toggle (see
                 // `key_is_analog_button`), so quick-save/-load land on
                 // F5/F7 instead of the more conventional F5/F9.
                 if state == ElementState::Pressed && !repeat {
                     match &logical_key {
                         Key::Named(NamedKey::F5) => self.state.save_state(),
-                        Key::Named(NamedKey::F7) => self.state.load_latest_state(),
+                        Key::Named(NamedKey::F7) => self.state.load_latest_state(true),
                         _ => {}
                     }
                 }
