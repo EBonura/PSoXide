@@ -13,7 +13,7 @@
 /// uses the last two decoded samples (`y0` = most recent,
 /// `y1` = second-most-recent) as feedback. Callers hold one of
 /// these per stereo channel (or one total for mono).
-#[derive(Default, Clone, Debug)]
+#[derive(Default, Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct XaDecoderState {
     y0: i32,
     y1: i32,

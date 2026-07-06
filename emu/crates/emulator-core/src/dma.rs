@@ -43,7 +43,7 @@
 pub const NUM_CHANNELS: usize = 7;
 
 /// Per-channel register state.
-#[derive(Default, Clone, Copy)]
+#[derive(Default, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct DmaChannel {
     /// `MADR` -- base address (destination for RAM-bound transfers,
     /// source otherwise). Lower 24 bits are the physical RAM offset;
@@ -58,6 +58,7 @@ pub struct DmaChannel {
 }
 
 /// Global controller state + 7 channels.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Dma {
     /// Per-channel register blocks.
     pub channels: [DmaChannel; NUM_CHANNELS],
@@ -69,12 +70,15 @@ pub struct Dma {
     pub dicr: u32,
     /// Per-channel count of CHCR writes with the start bit set.
     /// Diagnostic only -- tells us which channels software is using
-    /// and how often. Cleared on `new()`, never decremented.
+    /// and how often. Cleared on `new()`, never decremented. Excluded
+    /// from save states.
+    #[serde(skip)]
     pub start_trigger_counts: [u64; NUM_CHANNELS],
     /// Mirror of `start_trigger_counts` that survives cargo-naming
     /// nuance -- a second counter bumped in the same place so a
     /// probe can distinguish "channel never touched" from "channel
-    /// touched but we haven't picked it up."
+    /// touched but we haven't picked it up." Excluded from save states.
+    #[serde(skip)]
     pub chcr_write_count: [u64; NUM_CHANNELS],
 }
 
