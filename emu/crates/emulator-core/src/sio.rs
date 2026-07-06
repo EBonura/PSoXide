@@ -77,6 +77,7 @@ const ACK_PULSE_TICKS: u64 = 100;
 /// SIO0 state. Register-level accuracy for the "nothing plugged in"
 /// path; no shift-clock simulation, but every byte-write pulses an
 /// IRQ7 so the BIOS's pad-poll handler advances its descriptors.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Sio0 {
     mode: u16,
     ctrl: u16,
