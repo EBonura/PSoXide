@@ -175,11 +175,28 @@ fn draw_toolbar_controls(ui: &mut egui::Ui, state: &mut AppState) {
     ui.add_space(TOOLBAR_CLUSTER_GAP);
     draw_buttons(ui, state);
     ui.add_space(TOOLBAR_CLUSTER_GAP);
+    draw_save_states_button(ui, state);
+    ui.add_space(TOOLBAR_CLUSTER_GAP);
     draw_audio_controls(ui, state);
     ui.add_space(TOOLBAR_CLUSTER_GAP);
     draw_boot_toggle(ui, state);
     ui.add_space(TOOLBAR_CLUSTER_GAP);
     draw_debug_toggles(ui, state);
+}
+
+/// Always-visible entry point into the save-states panel (thumbnail
+/// list, pin-to-top, load-with-confirmation) -- distinct from the
+/// System category buried inside the full Menu overlay, so saving/
+/// loading doesn't require opening and navigating the Menu first.
+fn draw_save_states_button(ui: &mut egui::Ui, state: &mut AppState) {
+    let btn = icon_button(icons::SAVE);
+    if ui
+        .add(btn)
+        .on_hover_text("Save states (F5 save, F7 load)")
+        .clicked()
+    {
+        state.menu.open_save_states();
+    }
 }
 
 fn toolbar_label(text: impl Into<String>, color: Color32) -> Label {
