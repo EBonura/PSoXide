@@ -313,7 +313,7 @@ DATA_DISC_EXAMPLES := \
 	hello-tri hello-input hello-ot hello-tex hello-gte hello-audio \
 	showcase-text game-pong game-breakout game-invaders \
 	showcase-3d showcase-model showcase-lights showcase-fog showcase-particles \
-	hardware-tests hello-engine
+	hardware-tests hello-engine hello-memcard hello-i64probe
 PUBLIC_EXAMPLE_DISCS := $(addsuffix -disc,$(DATA_DISC_EXAMPLES)) hello-cdda-disc game-magikaaaaaarp-pong-disc
 
 define build_data_disc
@@ -329,6 +329,15 @@ hello-tri:
 
 hello-input:
 	cd sdk/examples/hello-input && $(SDK_EXAMPLE_CARGO_ENV) cargo build --release $(PSX_BUILD_FLAGS)
+
+# psx-mc memory-card round-trip smoke test (format/write/read/verify + compressed).
+hello-memcard:
+	cd sdk/examples/hello-memcard && $(SDK_EXAMPLE_CARGO_ENV) cargo build --release $(PSX_BUILD_FLAGS)
+
+# Software 64-bit integer correctness probe (signed __divdi3 is broken on-target;
+# unsigned works -- see the example's docs).
+hello-i64probe:
+	cd sdk/examples/hello-i64probe && $(SDK_EXAMPLE_CARGO_ENV) cargo build --release $(PSX_BUILD_FLAGS)
 
 hello-ot:
 	cd sdk/examples/hello-ot && $(SDK_EXAMPLE_CARGO_ENV) cargo build --release $(PSX_BUILD_FLAGS)
