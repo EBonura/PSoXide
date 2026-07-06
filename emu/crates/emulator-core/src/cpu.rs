@@ -95,6 +95,7 @@ struct ExecutedInstruction {
 }
 
 /// MIPS R3000A CPU state.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Cpu {
     pc: u32,
     gprs: [u32; 32],
@@ -154,6 +155,13 @@ pub struct Cpu {
     /// window; an op issued clear of writes serves its result instantly.
     gte_last_write_tick: u64,
     /// Diagnostic: bypass the MAC0/LZCR stale-read model entirely.
+    /// Seeded from an env var at [`Cpu::new`] -- excluded from save
+    /// states (loading doesn't re-run `Cpu::new`, so this and its two
+    /// siblings below always come back to their type default, i.e.
+    /// hazard modelling off, regardless of the process's env at save
+    /// time; re-set the env var and start a fresh emulator instance
+    /// to resume a hazard-repro session).
+    #[serde(skip)]
     gte_read_latency_bypass: bool,
     /// HWB-010 hazard model: an MVMVA issued within `gte_v0x_window`
     /// ticks of an MTC2 VXY0 write computes its MAC1 phase with the
@@ -168,7 +176,9 @@ pub struct Cpu {
     /// fire inside the window -- the reproduction mode);
     /// `PSOXIDE_GTE_V0X_WINDOW=N` tunes the window (default 2 = the
     /// engine's mtc2-xy; mtc2-z; cop2 hot-path spacing).
+    #[serde(skip)]
     gte_v0x_hazard: bool,
+    #[serde(skip)]
     gte_v0x_window: u64,
     /// Tick of the most recent MTC2 to VXY0 (data reg 0) and the V0.x
     /// value it overwrote (what a hazarded MAC1 phase reads).
@@ -187,20 +197,28 @@ pub struct Cpu {
     /// the BEV bit in SR).
     pending_exception_pc: Option<u32>,
     /// Per-ExcCode (0..=31) count of exception entries. Diagnostic only.
+    /// Excluded from save states.
+    #[serde(skip)]
     exception_counts: [u64; 32],
     /// Count of `step()` calls where `bus.external_interrupt_pending()`
     /// was true -- answers "did the IRQ line ever go high from the
-    /// CPU's point of view?". Diagnostic.
+    /// CPU's point of view?". Diagnostic. Excluded from save states.
+    #[serde(skip)]
     irq_line_high_steps: u64,
     /// Count of `step()` calls where `should_take_interrupt()` was
     /// true -- answers "did we reach the threshold that enters an IRQ
-    /// exception?".
+    /// exception?". Excluded from save states.
+    #[serde(skip)]
     should_take_interrupt_steps: u64,
     /// COP2 -- Geometry Transformation Engine. Holds 32 data + 32
     /// control registers and dispatches the GTE function set.
     cop2: Gte,
     /// Optional debug freelook camera delta injected into the GTE view
     /// transform for RTPS/RTPT. Off by default; set by the frontend.
+    /// Host-side debug camera hack, not emulated game state -- excluded
+    /// from save states, always comes back disabled on load (the
+    /// frontend re-applies it every frame from its own UI state anyway).
+    #[serde(skip)]
     freelook: FreelookState,
     /// Depth of nested exception handlers. Incremented on every
     /// exception entry (IRQ, syscall, break) and decremented on
