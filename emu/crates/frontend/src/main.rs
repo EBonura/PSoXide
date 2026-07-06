@@ -660,6 +660,18 @@ impl ApplicationHandler for Shell {
                         }
                     );
                 }
+                // F5 / F7 -- quick-save / quick-load slot 0. Mirrors the
+                // slot-0 rows in the System menu's "Save state" / "Load
+                // state" groups; F9 is already the DualShock analog-mode
+                // toggle (see `key_is_analog_button`), so quick-save/-load
+                // land on F5/F7 instead of the more conventional F5/F9.
+                if state == ElementState::Pressed && !repeat {
+                    match &logical_key {
+                        Key::Named(NamedKey::F5) => self.state.save_state(0),
+                        Key::Named(NamedKey::F7) => self.state.load_state(0),
+                        _ => {}
+                    }
+                }
                 gfx.window.request_redraw();
             }
             WindowEvent::RedrawRequested => {

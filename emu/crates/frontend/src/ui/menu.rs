@@ -51,6 +51,10 @@ pub enum MenuAction {
     /// Toggle warm SYSTEM.CNF disc fast boot. When disabled, discs
     /// boot through the full BIOS logo path.
     ToggleFastBoot,
+    /// Write the running game's state to the numbered save slot.
+    SaveState(u8),
+    /// Load the running game's state from the numbered save slot.
+    LoadState(u8),
     /// Launch a game by its menu launch token. Retail games use the
     /// stable library ID; authored project builds use a path-qualified
     /// token so projects sharing the same PSX volume ID remain distinct.
@@ -1381,40 +1385,62 @@ fn disabled_category(name: &'static str, icon: char) -> Category {
     }
 }
 
+/// Number of on-disk save-state slots exposed in the System menu.
+/// Purely a UI constant -- the on-disk format (`psoxide_settings::savestate`)
+/// doesn't cap slot numbers; this just bounds how many rows we render.
+const SAVE_STATE_SLOTS: u8 = 4;
+
 /// The System category holds emulator-wide actions: run/pause,
 /// step, reset. The Games column stays focused on launchable entries,
 /// while System carries runtime controls.
 fn build_system_category(running: bool) -> Category {
     let run_label = if running { "Pause" } else { "Run" };
+    let mut items = vec![
+        MenuItem {
+            label: run_label.into(),
+            action: MenuAction::ToggleRun,
+            burn_action: None,
+            value: Some("Space".into()),
+        },
+        MenuItem {
+            label: "Step one instruction".into(),
+            action: MenuAction::StepOne,
+            burn_action: None,
+            value: None,
+        },
+        MenuItem {
+            label: "Reset".into(),
+            action: MenuAction::Reset,
+            burn_action: None,
+            value: None,
+        },
+        MenuItem {
+            label: "Fast boot discs".into(),
+            action: MenuAction::ToggleFastBoot,
+            burn_action: None,
+            value: Some("On".into()),
+        },
+    ];
+    for slot in 0..SAVE_STATE_SLOTS {
+        items.push(MenuItem {
+            label: format!("Save state (slot {slot})"),
+            action: MenuAction::SaveState(slot),
+            burn_action: None,
+            value: if slot == 0 { Some("F5".into()) } else { None },
+        });
+    }
+    for slot in 0..SAVE_STATE_SLOTS {
+        items.push(MenuItem {
+            label: format!("Load state (slot {slot})"),
+            action: MenuAction::LoadState(slot),
+            burn_action: None,
+            value: if slot == 0 { Some("F7".into()) } else { None },
+        });
+    }
     Category {
         name: "System",
         icon: icons::CPU,
-        items: vec![
-            MenuItem {
-                label: run_label.into(),
-                action: MenuAction::ToggleRun,
-                burn_action: None,
-                value: Some("Space".into()),
-            },
-            MenuItem {
-                label: "Step one instruction".into(),
-                action: MenuAction::StepOne,
-                burn_action: None,
-                value: None,
-            },
-            MenuItem {
-                label: "Reset".into(),
-                action: MenuAction::Reset,
-                burn_action: None,
-                value: None,
-            },
-            MenuItem {
-                label: "Fast boot discs".into(),
-                action: MenuAction::ToggleFastBoot,
-                burn_action: None,
-                value: Some("On".into()),
-            },
-        ],
+        items,
     }
 }
 
