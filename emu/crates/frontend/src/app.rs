@@ -740,6 +740,7 @@ impl AppState {
         let cpu = &self.cpu;
         let bus = self.bus.as_ref().expect("checked above");
         let path = self.paths.savestate_file(&game_id, slot);
+        let thumb_path = self.paths.savestate_thumbnail_file(&game_id, slot);
         // The derive-generated (de)serialize walk over the emulator's
         // nested state graph (Bus -> Gpu/Spu/CdRom/... -> further
         // nested structs) adds enough stack depth that, stacked on top
@@ -756,13 +757,23 @@ impl AppState {
                 .spawn_scoped(scope, || {
                     let snapshot = EmulatorStateRef { cpu, bus };
                     let state = SaveStateV1::new(snapshot, game_id.clone(), tick);
-                    state.write_to(&path)
+                    let result = state.write_to(&path);
+                    if result.is_ok() {
+                        // Best-effort: a missing thumbnail just means no
+                        // preview in the panel, not a failed save.
+                        write_savestate_thumbnail(bus, &thumb_path);
+                    }
+                    result
                 })
                 .expect("spawn save-state thread")
                 .join()
         });
         match result {
             Ok(Ok(())) => {
+                // A fresh save always becomes the new quick-load target --
+                // "undo to my last save" should mean *this* save until the
+                // user explicitly pins something else.
+                let _ = self.paths.write_top_slot(&game_id, slot);
                 self.status_message_set(format!("Saved slot {slot}"));
                 self.refresh_save_state_menu_rows();
             }
@@ -771,17 +782,46 @@ impl AppState {
         }
     }
 
-    /// Load whichever save is most recent (highest slot number) for
-    /// the running game -- "undo to my last save." Status-toasts
-    /// "No save states yet" rather than erroring if none exist.
-    pub fn load_latest_state(&mut self) {
+    /// Load whichever save is "on top" -- the pinned quick-load target
+    /// (see [`ConfigPaths::read_top_slot`]) if one is set and still
+    /// exists, otherwise the most recent (highest slot number) save --
+    /// "undo to my last save." Status-toasts "No save states yet"
+    /// rather than erroring if none exist. `start_paused` is forwarded
+    /// to [`AppState::load_state`].
+    pub fn load_latest_state(&mut self, start_paused: bool) {
         let Some(game_id) = self.current_game.as_ref().map(|g| g.id.clone()) else {
             self.status_message_set("Load state: no game running");
             return;
         };
-        match self.paths.list_savestate_slots(&game_id).last() {
-            Some(&slot) => self.load_state(slot),
+        let slot = self
+            .paths
+            .read_top_slot(&game_id)
+            .or_else(|| self.paths.list_savestate_slots(&game_id).last().copied());
+        match slot {
+            Some(slot) => self.load_state(slot, start_paused),
             None => self.status_message_set("No save states yet"),
+        }
+    }
+
+    /// Pin `slot` as the save history's "top" -- what
+    /// [`AppState::load_latest_state`] (and F7) target next -- without
+    /// touching slot numbering or any other save's position in the
+    /// chronological list. No-op (status toast) if the slot doesn't
+    /// exist, e.g. it was deleted out from under the menu.
+    pub fn pin_save_state_as_top(&mut self, slot: u8) {
+        let Some(game_id) = self.current_game.as_ref().map(|g| g.id.clone()) else {
+            return;
+        };
+        if !self.paths.list_savestate_slots(&game_id).contains(&slot) {
+            self.status_message_set(format!("Pin failed: slot {slot} no longer exists"));
+            return;
+        }
+        match self.paths.write_top_slot(&game_id, slot) {
+            Ok(()) => {
+                self.status_message_set(format!("Slot {slot} pinned as quick-load target"));
+                self.refresh_save_state_menu_rows();
+            }
+            Err(e) => self.status_message_set(format!("Pin failed: {e}")),
         }
     }
 
@@ -794,7 +834,12 @@ impl AppState {
     /// current game first -- purely to obtain a correctly-configured
     /// donor `Bus` (right BIOS, right disc, right memory card) -- and
     /// then splices the restored CPU/Bus register state on top of it.
-    pub fn load_state(&mut self, slot: u8) {
+    ///
+    /// `start_paused` leaves the emulator paused on the restored frame
+    /// instead of immediately resuming -- the sensible default when a
+    /// human just asked to jump back in time and probably wants to
+    /// look around before continuing.
+    pub fn load_state(&mut self, slot: u8, start_paused: bool) {
         let Some(game) = self.current_game.clone() else {
             self.status_message_set("Load state: no game running");
             return;
@@ -842,6 +887,10 @@ impl AppState {
         self.cpu = payload.cpu;
         self.bus = Some(payload.bus);
         self.gpu_resync_generation = self.gpu_resync_generation.wrapping_add(1);
+        if start_paused {
+            self.running = false;
+            self.menu.sync_run_label(false);
+        }
         self.status_message_set(format!("Loaded slot {slot}"));
         self.refresh_save_state_menu_rows();
     }
@@ -869,11 +918,20 @@ impl AppState {
     fn build_save_state_rows(&self, game_id: &str) -> Vec<SaveStateRow> {
         let mut slots = self.paths.list_savestate_slots(game_id);
         slots.reverse();
+        // Fall back to "highest slot" for the top marker exactly the
+        // same way `load_latest_state` does, so the row the panel
+        // highlights as "Top (F7)" always agrees with what F7 will
+        // actually load.
+        let top = self
+            .paths
+            .read_top_slot(game_id)
+            .or_else(|| slots.first().copied());
         slots
             .into_iter()
             .filter_map(|slot| {
                 let path = self.paths.savestate_file(game_id, slot);
                 let header = peek_header(&path).ok()?;
+                let thumbnail = self.paths.savestate_thumbnail_file(game_id, slot);
                 Some(SaveStateRow {
                     slot,
                     label: format!(
@@ -881,6 +939,8 @@ impl AppState {
                         format_relative_time(header.created_at),
                         header.cpu_tick
                     ),
+                    thumbnail_path: thumbnail.exists().then_some(thumbnail),
+                    is_top: Some(slot) == top,
                 })
             })
             .collect()
@@ -2344,6 +2404,33 @@ fn format_relative_time(unix_secs: u64) -> String {
     } else {
         format!("{}d ago", elapsed / 86_400)
     }
+}
+
+/// Best-effort screenshot capture for the save-states panel: downscale
+/// whatever's currently on the PS1's display (not the full 1024x512
+/// VRAM -- just the visible framebuffer area) to a small PNG next to
+/// the save file. Pure-CPU (no wgpu/GPU-resource access), so it's safe
+/// to call from the save's dedicated big-stack thread alongside the
+/// rest of the (de)serialize work. Failures (bad dimensions, I/O,
+/// encode) are swallowed -- a missing thumbnail just means the panel
+/// shows a placeholder for that slot, not a failed save.
+fn write_savestate_thumbnail(bus: &emulator_core::Bus, path: &std::path::Path) {
+    const THUMB_WIDTH: u32 = 160;
+    let (rgba, width, height) = bus.gpu.display_rgba8();
+    if width == 0 || height == 0 {
+        return;
+    }
+    let Some(frame) = image::RgbaImage::from_raw(width, height, rgba) else {
+        return;
+    };
+    let thumb_height = ((THUMB_WIDTH as u64 * height as u64) / width as u64).max(1) as u32;
+    let thumb = image::imageops::resize(
+        &frame,
+        THUMB_WIDTH,
+        thumb_height,
+        image::imageops::FilterType::Triangle,
+    );
+    let _ = thumb.save(path);
 }
 
 fn display_size_bytes(e: &LibraryEntry) -> u64 {
