@@ -51,8 +51,10 @@ pub enum MenuAction {
     /// Toggle warm SYSTEM.CNF disc fast boot. When disabled, discs
     /// boot through the full BIOS logo path.
     ToggleFastBoot,
-    /// Write the running game's state to the numbered save slot.
-    SaveState(u8),
+    /// Push a new save state for the running game (always creates a
+    /// new slot -- see [`SaveStateRow`]/[`MenuState::sync_save_states`],
+    /// saves are a history, not fixed named slots).
+    SaveState,
     /// Load the running game's state from the numbered save slot.
     LoadState(u8),
     /// Launch a game by its menu launch token. Retail games use the
@@ -192,6 +194,21 @@ pub struct LibraryItem {
     pub launchable: bool,
 }
 
+/// One existing save state, as far as the Menu needs to know to draw
+/// a "Load state" row -- the fully-formatted display label (e.g. "2m
+/// ago -- tick 45,000,667") plus the slot number to dispatch on
+/// selection. Built by `AppState` from `psoxide_settings::savestate`
+/// data; kept as a plain string here for the same reason as
+/// [`LibraryItem`] -- the Menu module doesn't depend on the settings
+/// crate's types.
+#[derive(Debug, Clone)]
+pub struct SaveStateRow {
+    /// Slot number to pass to [`MenuAction::LoadState`].
+    pub slot: u8,
+    /// Pre-formatted row label.
+    pub label: String,
+}
+
 impl MenuState {
     pub fn new() -> Self {
         Self::with_running(false)
@@ -221,7 +238,7 @@ impl MenuState {
             #[cfg(target_arch = "wasm32")]
             disabled_category("Editor", icons::FOLDER),
             build_settings_category(),
-            build_system_category(running),
+            build_system_category(running, &[]),
             // There is no "quit" in a browser tab, so the web build omits it.
             #[cfg(not(target_arch = "wasm32"))]
             Category {
@@ -328,6 +345,19 @@ impl MenuState {
             {
                 item.value = Some(if enabled { "On" } else { "Off" }.into());
             }
+        }
+    }
+
+    /// Rebuild the System category's save-state rows from a live save
+    /// listing. Call after a save/load completes and whenever the
+    /// running game changes (a different game has different saves).
+    /// Rebuilds the whole category (like [`build_system_category`]
+    /// does at startup) rather than patching rows in place, since the
+    /// row *count* changes as saves are added -- `running` is passed
+    /// through unchanged so this doesn't clobber the Run/Pause label.
+    pub fn sync_save_states(&mut self, running: bool, rows: &[SaveStateRow]) {
+        if let Some(idx) = self.categories.iter().position(|c| c.name == "System") {
+            self.categories[idx] = build_system_category(running, rows);
         }
     }
 
@@ -1385,15 +1415,17 @@ fn disabled_category(name: &'static str, icon: char) -> Category {
     }
 }
 
-/// Number of on-disk save-state slots exposed in the System menu.
-/// Purely a UI constant -- the on-disk format (`psoxide_settings::savestate`)
-/// doesn't cap slot numbers; this just bounds how many rows we render.
-const SAVE_STATE_SLOTS: u8 = 4;
-
 /// The System category holds emulator-wide actions: run/pause,
 /// step, reset. The Games column stays focused on launchable entries,
 /// while System carries runtime controls.
-fn build_system_category(running: bool) -> Category {
+///
+/// `save_rows` is the live list of existing saves for whichever game
+/// is currently running (empty if none, or no game running at all) --
+/// see [`MenuState::sync_save_states`]. "Save state" is always a
+/// single row (saving always pushes a new entry); "Load state" gets
+/// one row per existing save, newest first, or a single non-actionable
+/// placeholder when there are none yet.
+fn build_system_category(running: bool, save_rows: &[SaveStateRow]) -> Category {
     let run_label = if running { "Pause" } else { "Run" };
     let mut items = vec![
         MenuItem {
@@ -1420,22 +1452,31 @@ fn build_system_category(running: bool) -> Category {
             burn_action: None,
             value: Some("On".into()),
         },
+        MenuItem {
+            label: "Save state".into(),
+            action: MenuAction::SaveState,
+            burn_action: None,
+            value: Some("F5".into()),
+        },
     ];
-    for slot in 0..SAVE_STATE_SLOTS {
+    if save_rows.is_empty() {
         items.push(MenuItem {
-            label: format!("Save state (slot {slot})"),
-            action: MenuAction::SaveState(slot),
+            label: "No saves yet".into(),
+            action: MenuAction::Noop,
             burn_action: None,
-            value: if slot == 0 { Some("F5".into()) } else { None },
+            value: None,
         });
-    }
-    for slot in 0..SAVE_STATE_SLOTS {
-        items.push(MenuItem {
-            label: format!("Load state (slot {slot})"),
-            action: MenuAction::LoadState(slot),
-            burn_action: None,
-            value: if slot == 0 { Some("F7".into()) } else { None },
-        });
+    } else {
+        for (i, row) in save_rows.iter().enumerate() {
+            items.push(MenuItem {
+                label: format!("Load: {}", row.label),
+                action: MenuAction::LoadState(row.slot),
+                burn_action: None,
+                // F7 always loads the newest save, i.e. this list's
+                // first (newest-first) entry.
+                value: if i == 0 { Some("F7".into()) } else { None },
+            });
+        }
     }
     Category {
         name: "System",

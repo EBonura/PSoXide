@@ -12,7 +12,7 @@ use emulator_core::{
     EmulatorStateRef, DISC_FAST_BOOT_WARMUP_STEPS,
 };
 use psoxide_settings::library::{GameKind, Region};
-use psoxide_settings::savestate::SaveStateV1;
+use psoxide_settings::savestate::{peek_header, SaveStateV1};
 use psoxide_settings::{ConfigPaths, Library, LibraryEntry, Settings};
 use psx_iso::{Disc, Exe, SECTOR_BYTES};
 use psx_trace::InstructionRecord;
@@ -33,7 +33,7 @@ use crate::playtest_input::{PlaytestInputEvent, PlaytestInputTape, Port1PadSampl
 use crate::ui;
 use crate::ui::hud::HudState;
 use crate::ui::memory::MemoryView;
-use crate::ui::menu::{LibraryItem as MenuLibraryItem, MenuState};
+use crate::ui::menu::{LibraryItem as MenuLibraryItem, MenuState, SaveStateRow};
 use crate::{paths_equivalent, repo_root_dir};
 
 /// Ring-buffer capacity for the execution-history panel. 16 rows is
@@ -692,6 +692,7 @@ impl AppState {
         self.exec_history.clear();
         self.gpr_snapshot = None;
         self.current_game = Some(entry.clone());
+        self.refresh_save_state_menu_rows();
         self.menu.sync_run_label(true);
         #[cfg(feature = "editor")]
         self.menu.sync_editor_label(false);
@@ -702,10 +703,16 @@ impl AppState {
         Ok(())
     }
 
-    /// Write the running emulator's state to `<config>/games/<id>/savestates/slot{slot}.psx`.
-    /// No-op (with a status toast) if no game is currently running --
-    /// there's nothing meaningful to key the save off of.
-    pub fn save_state(&mut self, slot: u8) {
+    /// Push a new save state for the running game to
+    /// `<config>/games/<id>/savestates/slot{N}.psx`, where `N` is one
+    /// past whatever the highest existing slot is (0 if this is the
+    /// first save). Saves are a history, not fixed named slots -- this
+    /// never overwrites a previous save; use [`AppState::load_state`]
+    /// to pick a specific past one or [`AppState::load_latest_state`]
+    /// for "undo to my last save." No-op (with a status toast) if no
+    /// game is currently running -- there's nothing meaningful to key
+    /// the save off of.
+    pub fn save_state(&mut self) {
         let Some(game_id) = self.current_game.as_ref().map(|g| g.id.clone()) else {
             self.status_message_set("Save state: no game running");
             return;
@@ -718,6 +725,17 @@ impl AppState {
             self.status_message_set(format!("Save state failed: {e}"));
             return;
         }
+        let existing = self.paths.list_savestate_slots(&game_id);
+        let Some(slot) = existing
+            .last()
+            .map_or(Some(0u8), |&max| max.checked_add(1))
+        else {
+            self.status_message_set(
+                "Save state failed: 256 saves for this game already, delete some first"
+                    .to_string(),
+            );
+            return;
+        };
         let tick = self.cpu.tick();
         let cpu = &self.cpu;
         let bus = self.bus.as_ref().expect("checked above");
@@ -744,9 +762,26 @@ impl AppState {
                 .join()
         });
         match result {
-            Ok(Ok(())) => self.status_message_set(format!("Saved slot {slot}")),
+            Ok(Ok(())) => {
+                self.status_message_set(format!("Saved slot {slot}"));
+                self.refresh_save_state_menu_rows();
+            }
             Ok(Err(e)) => self.status_message_set(format!("Save state failed: {e}")),
             Err(_) => self.status_message_set("Save state failed: internal error".to_string()),
+        }
+    }
+
+    /// Load whichever save is most recent (highest slot number) for
+    /// the running game -- "undo to my last save." Status-toasts
+    /// "No save states yet" rather than erroring if none exist.
+    pub fn load_latest_state(&mut self) {
+        let Some(game_id) = self.current_game.as_ref().map(|g| g.id.clone()) else {
+            self.status_message_set("Load state: no game running");
+            return;
+        };
+        match self.paths.list_savestate_slots(&game_id).last() {
+            Some(&slot) => self.load_state(slot),
+            None => self.status_message_set("No save states yet"),
         }
     }
 
@@ -808,6 +843,47 @@ impl AppState {
         self.bus = Some(payload.bus);
         self.gpu_resync_generation = self.gpu_resync_generation.wrapping_add(1);
         self.status_message_set(format!("Loaded slot {slot}"));
+        self.refresh_save_state_menu_rows();
+    }
+
+    /// Rebuild the System menu's save-state rows from whatever's
+    /// actually on disk for the running game. Call after anything
+    /// that could change the set of saves (a save, a load, launching
+    /// a different game) -- cheap (one directory listing plus a
+    /// header-only peek per file, no full-state decode) so there's no
+    /// need to cache this across frames.
+    fn refresh_save_state_menu_rows(&mut self) {
+        let rows = match self.current_game.as_ref().map(|g| g.id.clone()) {
+            Some(game_id) => self.build_save_state_rows(&game_id),
+            None => Vec::new(),
+        };
+        self.menu.sync_save_states(self.running, &rows);
+    }
+
+    /// Newest-first `SaveStateRow`s for `game_id`, each labeled with a
+    /// relative save time and the CPU tick it was taken at. Slots
+    /// whose header can't be read (corrupt/truncated file) are
+    /// silently dropped from the list rather than breaking the whole
+    /// menu -- the file still exists on disk if someone wants to poke
+    /// at it manually.
+    fn build_save_state_rows(&self, game_id: &str) -> Vec<SaveStateRow> {
+        let mut slots = self.paths.list_savestate_slots(game_id);
+        slots.reverse();
+        slots
+            .into_iter()
+            .filter_map(|slot| {
+                let path = self.paths.savestate_file(game_id, slot);
+                let header = peek_header(&path).ok()?;
+                Some(SaveStateRow {
+                    slot,
+                    label: format!(
+                        "{} -- tick {}",
+                        format_relative_time(header.created_at),
+                        header.cpu_tick
+                    ),
+                })
+            })
+            .collect()
     }
 
     /// Convenience: look up an entry by menu launch token and launch
@@ -2243,6 +2319,30 @@ fn format_subtitle(e: &LibraryEntry) -> String {
             }
         }
         _ => String::new(),
+    }
+}
+
+/// Format a Unix timestamp (seconds) as a short "N ago" string
+/// relative to now, for save-state menu row labels. No date/time
+/// crate needed for this -- it's one coarse bucket, not a calendar.
+/// Treats anything under 2 seconds as "just now" rather than showing
+/// "0s ago" or "1s ago" (also absorbs small clock skew).
+fn format_relative_time(unix_secs: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(unix_secs);
+    let elapsed = now.saturating_sub(unix_secs);
+    if elapsed < 2 {
+        "just now".to_string()
+    } else if elapsed < 60 {
+        format!("{elapsed}s ago")
+    } else if elapsed < 3600 {
+        format!("{}m ago", elapsed / 60)
+    } else if elapsed < 86_400 {
+        format!("{}h ago", elapsed / 3600)
+    } else {
+        format!("{}d ago", elapsed / 86_400)
     }
 }
 
