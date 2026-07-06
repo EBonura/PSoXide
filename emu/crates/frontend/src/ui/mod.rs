@@ -116,8 +116,8 @@ pub fn apply_menu_action(state: &mut AppState, action: menu::MenuAction) -> Menu
             state.toggle_fast_boot_disc();
             MenuOutcome::None
         }
-        SaveState(slot) => {
-            state.save_state(slot);
+        SaveState => {
+            state.save_state();
             MenuOutcome::None
         }
         LoadState(slot) => {
