@@ -11,9 +11,13 @@ description = "PSoXide emulator core: CPU, bus, and peripherals. No UI, no windo
 psx-hw       = { workspace = true }
 psx-iso      = { workspace = true }
 psx-trace    = { workspace = true }
-psx-gte-core = { workspace = true }
+# "serde" enables Gte's Serialize/Deserialize derive -- off by default in
+# psx-gte-core itself so the no_std SDK build never pulls serde in.
+psx-gte-core = { workspace = true, features = ["serde"] }
 psx-telemetry = { workspace = true }
 thiserror    = { workspace = true }
+serde        = { workspace = true, features = ["std"] }
+serde_bytes  = { workspace = true }
 
 [dev-dependencies]
 psoxide-settings = { workspace = true }
