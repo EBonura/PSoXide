@@ -719,15 +719,34 @@ impl AppState {
             return;
         }
         let tick = self.cpu.tick();
-        let snapshot = EmulatorStateRef {
-            cpu: &self.cpu,
-            bus: self.bus.as_ref().expect("checked above"),
-        };
-        let state = SaveStateV1::new(snapshot, game_id.clone(), tick);
+        let cpu = &self.cpu;
+        let bus = self.bus.as_ref().expect("checked above");
         let path = self.paths.savestate_file(&game_id, slot);
-        match state.write_to(&path) {
-            Ok(()) => self.status_message_set(format!("Saved slot {slot}")),
-            Err(e) => self.status_message_set(format!("Save state failed: {e}")),
+        // The derive-generated (de)serialize walk over the emulator's
+        // nested state graph (Bus -> Gpu/Spu/CdRom/... -> further
+        // nested structs) adds enough stack depth that, stacked on top
+        // of wherever winit/egui/wgpu's own call chain happens to be
+        // when a key is pressed, it can exceed Windows' 1 MiB default
+        // main-thread stack (confirmed: the same encode/decode works
+        // fine standalone, only overflows when invoked from inside the
+        // real event-handling call stack). Run it on a dedicated thread
+        // with a generous stack instead of chasing the exact
+        // contributing frames.
+        let result = std::thread::scope(|scope| {
+            std::thread::Builder::new()
+                .stack_size(64 * 1024 * 1024)
+                .spawn_scoped(scope, || {
+                    let snapshot = EmulatorStateRef { cpu, bus };
+                    let state = SaveStateV1::new(snapshot, game_id.clone(), tick);
+                    state.write_to(&path)
+                })
+                .expect("spawn save-state thread")
+                .join()
+        });
+        match result {
+            Ok(Ok(())) => self.status_message_set(format!("Saved slot {slot}")),
+            Ok(Err(e)) => self.status_message_set(format!("Save state failed: {e}")),
+            Err(_) => self.status_message_set("Save state failed: internal error".to_string()),
         }
     }
 
@@ -746,10 +765,28 @@ impl AppState {
             return;
         };
         let path = self.paths.savestate_file(&game.id, slot);
-        let loaded: SaveStateV1<EmulatorState> = match SaveStateV1::read_from(&path) {
-            Ok(s) => s,
-            Err(e) => {
+        // See the comment in `save_state`: decoding the full state
+        // graph back into owned `Cpu`/`Bus` values overflows Windows'
+        // default 1 MiB main-thread stack when invoked from deep
+        // inside the real winit/egui/wgpu event-handling call chain
+        // (reproduced: the identical on-disk save decodes fine
+        // standalone, only crashes from inside the running GUI). Same
+        // fix: run it on a dedicated large-stack thread.
+        let load_result = std::thread::scope(|scope| {
+            std::thread::Builder::new()
+                .stack_size(64 * 1024 * 1024)
+                .spawn_scoped(scope, || SaveStateV1::<EmulatorState>::read_from(&path))
+                .expect("spawn save-state thread")
+                .join()
+        });
+        let loaded = match load_result {
+            Ok(Ok(s)) => s,
+            Ok(Err(e)) => {
                 self.status_message_set(format!("Load state failed: {e}"));
+                return;
+            }
+            Err(_) => {
+                self.status_message_set("Load state failed: internal error".to_string());
                 return;
             }
         };
