@@ -1265,6 +1265,7 @@ fn save_states_panel(
         egui::Window::new("Load this save?")
             .collapsible(false)
             .resizable(false)
+            .order(egui::Order::Foreground)
             .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
