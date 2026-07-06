@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+[package]
+name         = "psx-mc"
+version      = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description  = "PlayStation 1 memory-card driver: SIO0 transport, BIOS-compatible filesystem, optional compression."
+
+[dependencies]
+# Only needed by the hardware (SIO0) transport; the filesystem + compression
+# layers are pure and build/test on the host without it.
+psx-io = { workspace = true, optional = true }
+
+[features]
+# `hw` compiles the on-device SIO0 transport (`HardwareCard`). It is on by
+# default for game builds; host unit tests run with `--no-default-features` so
+# only the pure logic (filesystem, compression, RamCard) is exercised.
+default  = ["hw"]
+hw       = ["dep:psx-io"]
+# Optional LZSS payload compression for saves.
+compress = []
+
+[lints]
+workspace = true
