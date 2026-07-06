@@ -120,8 +120,16 @@ pub fn apply_menu_action(state: &mut AppState, action: menu::MenuAction) -> Menu
             state.save_state();
             MenuOutcome::None
         }
-        LoadState(slot) => {
-            state.load_state(slot);
+        LoadState(slot, start_paused) => {
+            state.load_state(slot, start_paused);
+            MenuOutcome::None
+        }
+        OpenSaveStates => {
+            state.menu.open_save_states();
+            MenuOutcome::None
+        }
+        PinAsTop(slot) => {
+            state.pin_save_state_as_top(slot);
             MenuOutcome::None
         }
         LaunchGame(id) => {
