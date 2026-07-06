@@ -133,6 +133,7 @@ impl EventSlot {
 /// previous deadline (matches Redux's behaviour -- see
 /// `scheduleInterrupt` which unconditionally overwrites
 /// `m_regs.intTargets[interrupt]`).
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Scheduler {
     /// Absolute bus-cycle at which each slot's event is due.
     /// Meaningful only when the slot's bit is set in `active`.
@@ -145,10 +146,14 @@ pub struct Scheduler {
     lowest_target: u64,
     /// Cumulative count of [`Scheduler::schedule`] calls. Diagnostic
     /// only -- lets tests + the probe CLI see how busy the queue has
-    /// been without inspecting handler counts per subsystem.
+    /// been without inspecting handler counts per subsystem. Excluded
+    /// from save states.
+    #[serde(skip)]
     total_scheduled: u64,
     /// Cumulative count of [`Scheduler::take_due`] returns that
-    /// were `Some`. Matches Redux's "events fired" quantity.
+    /// were `Some`. Matches Redux's "events fired" quantity. Excluded
+    /// from save states.
+    #[serde(skip)]
     total_fired: u64,
 }
 

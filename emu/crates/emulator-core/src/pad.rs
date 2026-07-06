@@ -38,7 +38,7 @@
 /// Logical button bit positions. `ButtonState::bits()` returns a
 /// `u16` where bit N = 1 means button N is currently held. The
 /// device converts to wire-active-low at TX time.
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct ButtonState(u16);
 
 impl ButtonState {
@@ -122,8 +122,16 @@ pub mod button {
 /// real hardware multiplexes them on the same port via different
 /// leading address bytes (`0x01` = talk to controller, `0x81` =
 /// talk to memory card). Both slots can be empty independently.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct PortDevice {
     pad: Option<DigitalPad>,
+    /// Excluded from save states: memory cards are independently
+    /// persisted as `.mcd` files (see `psoxide_settings::paths`), so
+    /// embedding the full 128 KiB card here on every save would
+    /// duplicate data that already round-trips through its own file.
+    /// Reset to `None` on load; the frontend re-attaches the card from
+    /// its `.mcd` file the same way it does on a fresh boot.
+    #[serde(skip)]
     memcard: Option<MemoryCard>,
     /// Which slot is driving the current transaction. `None` on
     /// the first byte (we haven't decoded the address yet); set
@@ -132,16 +140,29 @@ pub struct PortDevice {
     selected: Option<Selected>,
     /// Histogram of address/select bytes observed at the start of a
     /// transaction (`0x01` = controller, `0x81` = memcard, etc.).
+    /// Diagnostic -- excluded from save states.
+    #[serde(skip, default = "default_u32_256")]
     first_byte_histogram: [u32; 256],
-    /// Rolling window of recent transaction-leading bytes.
+    /// Rolling window of recent transaction-leading bytes. Diagnostic.
+    #[serde(skip)]
     recent_first_bytes: [u8; 16],
+    #[serde(skip)]
     recent_first_head: usize,
+    #[serde(skip)]
     recent_first_len: usize,
+}
+
+/// `#[serde(default = ...)]` target for `[u32; 256]`-shaped diagnostic
+/// histograms in this module -- `Default` only covers arrays up to
+/// length 32 on stable Rust, so skipped 256-entry histograms need an
+/// explicit zeroed literal instead.
+fn default_u32_256() -> [u32; 256] {
+    [0; 256]
 }
 
 /// Which of the two sub-devices is active in the current SIO
 /// transaction.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum Selected {
     Pad,
     Memcard,
@@ -447,7 +468,7 @@ pub struct PollSnapshot {
 /// responses (racers, souls-likes, most modern ports) rely on the
 /// mode transition working correctly -- reporting Analog from the
 /// start confuses games that assume a Digital → Analog sequence.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PadMode {
     /// SCPH-1080 digital protocol. ID byte `0x41`, 4-byte poll.
     /// Default for fresh-plugged controllers.
@@ -465,6 +486,7 @@ pub enum PadMode {
 /// PS1 controller -- digital by default, DualShock-capable. Tracks
 /// the active operating mode, the 16 digital buttons, the four
 /// analog axes, and DualShock vibration state.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct DigitalPad {
     buttons: ButtonState,
     /// Right-stick horizontal axis, 0..=255 (centre `0x80`).
@@ -519,20 +541,33 @@ pub struct DigitalPad {
     /// Histogram of command bytes observed at step 1 of each
     /// transaction. Useful for diagnosing retail games that use the
     /// BIOS pad driver instead of the SDK's raw `0x42` poll loop.
+    /// Diagnostic -- excluded from save states.
+    #[serde(skip, default = "default_u32_256")]
     cmd_histogram: [u32; 256],
-    /// Rolling window of the most recent command bytes seen.
+    /// Rolling window of the most recent command bytes seen. Diagnostic.
+    #[serde(skip)]
     recent_cmds: [u8; 16],
+    #[serde(skip)]
     recent_cmd_head: usize,
+    #[serde(skip)]
     recent_cmd_len: usize,
     /// Bytes of the currently active transaction, used to snapshot
     /// complete `0x42` polls for debugging retail input issues.
+    /// Diagnostic -- excluded from save states.
+    #[serde(skip)]
     current_tx_trace: [u8; 8],
+    #[serde(skip)]
     current_rx_trace: [u8; 8],
+    #[serde(skip)]
     current_trace_len: u8,
+    #[serde(skip)]
     current_trace_cycle: u64,
-    /// Rolling window of recent completed `0x42` polls.
+    /// Rolling window of recent completed `0x42` polls. Diagnostic.
+    #[serde(skip)]
     recent_polls: [PollSnapshot; 8],
+    #[serde(skip)]
     recent_poll_head: usize,
+    #[serde(skip)]
     recent_poll_len: usize,
 }
 

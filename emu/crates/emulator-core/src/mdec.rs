@@ -196,6 +196,7 @@ pub enum MdecState {
 
 /// Full MDEC subsystem state. Owns quantization tables, a decode
 /// output buffer, and the register pair visible to software.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Mdec {
     /// Last write to the command register (`reg0`).
     reg0: u32,
@@ -203,9 +204,13 @@ pub struct Mdec {
     /// value directly rather than synthesizing empty/DREQ/format bits
     /// when software reads the status port.
     reg1: u32,
-    /// Luminance quantization table (64 × 16-bit pre-scaled).
+    /// Luminance quantization table (64 × 16-bit pre-scaled). `DSIZE2`
+    /// (64) is past serde's built-in 32-element array cap, so this
+    /// round-trips through [`crate::serde_big_array::array`].
+    #[serde(with = "crate::serde_big_array::array")]
     iq_y: [i32; DSIZE2],
     /// Chrominance quantization table.
+    #[serde(with = "crate::serde_big_array::array")]
     iq_uv: [i32; DSIZE2],
     /// Buffered RLE halfwords received via DMA0 since the decode
     /// command was issued. Drained during decode_macroblocks.
@@ -222,17 +227,24 @@ pub struct Mdec {
     expected_param_words: u32,
     /// Diagnostic: raw command words seen since reset. Games might
     /// ship thousands; we just count so probes can tell "MDEC was
-    /// spoken to" vs "MDEC was ignored".
+    /// spoken to" vs "MDEC was ignored". Excluded from save states.
+    #[serde(skip)]
     commands_seen: u64,
-    /// Diagnostic: raw parameter-data words seen since reset.
+    /// Diagnostic: raw parameter-data words seen since reset. Excluded
+    /// from save states.
+    #[serde(skip)]
     params_seen: u64,
     /// Enable DMA0 (data-in) -- bit 30 of the last control write.
     dma_in_enabled: bool,
     /// Enable DMA1 (data-out) -- bit 29 of the last control write.
     dma_out_enabled: bool,
-    /// Diagnostic: total macroblocks decoded since reset.
+    /// Diagnostic: total macroblocks decoded since reset. Excluded
+    /// from save states.
+    #[serde(skip)]
     macroblocks_decoded: u64,
-    /// Recent command-register writes, newest at the end.
+    /// Recent command-register writes, newest at the end. Diagnostic
+    /// -- excluded from save states.
+    #[serde(skip)]
     command_history: Vec<u32>,
 }
 
