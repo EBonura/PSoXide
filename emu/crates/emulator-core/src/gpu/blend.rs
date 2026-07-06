@@ -41,7 +41,7 @@ pub(super) fn dither_rgb(r: i32, g: i32, b: i32, x: i32, y: i32) -> u16 {
 /// directly to the four encodings in GP0 0xE1 / tpage bits 5-6.
 /// `Opaque` is our shortcut for "don't touch the destination -- just
 /// overwrite" so primitives share one rasterizer.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum BlendMode {
     /// Write the foreground pixel directly, ignoring the background.
     Opaque,
