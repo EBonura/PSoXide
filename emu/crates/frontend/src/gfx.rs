@@ -369,6 +369,11 @@ impl Graphics {
         self.hw_renderer.render_frame(gpu, cmd_log, vram_words);
     }
 
+    /// Set the HW renderer's in-shader texture filter. Cheap uniform write.
+    pub fn set_hw_texture_filter(&self, filter: psx_gpu_render::TextureFilter) {
+        self.hw_renderer.set_texture_filter(filter);
+    }
+
     /// Pick the right internal-resolution multiplier for the current
     /// scale-mode + panel size and reallocate the HW target to it
     /// if changed. Cheap when the size is stable. Returns `true` when

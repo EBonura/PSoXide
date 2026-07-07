@@ -129,6 +129,28 @@ pub enum ScaleMode {
     Window,
 }
 
+/// In-shader texture-sampling filter. Mirrors the frontend's
+/// `app::TextureFilter`. Maps to the `u_filter.x` uniform the fragment
+/// shader reads (see `shaders/prim.wgsl`).
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
+pub enum TextureFilter {
+    /// PSX-native point sampling (no filtering).
+    #[default]
+    None,
+    /// CLUT-aware 2x2 bilinear on the texel colour; silhouette/STP stay nearest.
+    Bilinear,
+}
+
+impl TextureFilter {
+    /// The `u_filter.x` value the shader branches on.
+    pub fn shader_mode(self) -> u32 {
+        match self {
+            TextureFilter::None => 0,
+            TextureFilter::Bilinear => 1,
+        }
+    }
+}
+
 impl HwRenderer {
     /// Live constructor -- registers the target with `egui_renderer`
     /// so the central panel can paint it. Initial scale = 1; bump
@@ -204,6 +226,11 @@ impl HwRenderer {
     ) -> bool {
         self.target
             .ensure_scale(&self.device, &self.queue, egui_renderer, scale)
+    }
+
+    /// Set the in-shader texture filter. Cheap uniform write; call every frame.
+    pub fn set_texture_filter(&self, filter: TextureFilter) {
+        self.pipeline.set_filter_mode(&self.queue, filter.shader_mode());
     }
 
     /// Rebuild the persistent HW target from the CPU VRAM mirror.

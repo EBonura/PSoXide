@@ -1000,6 +1000,7 @@ impl ApplicationHandler for Shell {
                         (area.width as u32, area.height as u32)
                     })
                     .unwrap_or((320, 240));
+                gfx.set_hw_texture_filter(state.texture_filter.to_render());
                 let hw_scale_start = Instant::now();
                 let hw_scale_changed = gfx.update_hw_scale(
                     scale_mode,
