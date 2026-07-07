@@ -31,6 +31,9 @@ const VRAM_W_F: f32 = 1024.0;
 const VRAM_H_F: f32 =  512.0;
 
 @group(0) @binding(0) var vram: texture_2d<u32>;
+// Texture-filter mode in `.x`: 0 = nearest (PSX-native point sampling),
+// 1 = bilinear. Global per frame; written by the host on the toolbar toggle.
+@group(0) @binding(1) var<uniform> u_filter: vec4<u32>;
 
 struct VertexIn {
     @location(0) pos:   vec2<i32>,
@@ -165,6 +168,41 @@ fn sample_texel(flags: u32, uv8: vec2<u32>) -> u32 {
     return vram_load(tp.x + uv8.x, tp.y + uv8.y);
 }
 
+// One bilinear corner: floor+wrap the PSX UV, sample, decode. Returns
+// PREMULTIPLIED colour (rgb, coverage): transparent texels (word 0) contribute
+// (0,0,0,0) so they never bleed colour into an opaque neighbour.
+fn sample_corner(flags: u32, tex_window: u32, uvf: vec2<f32>) -> vec4<f32> {
+    let uv8 = apply_tex_window(page_uv(uvf), tex_window);
+    let word = sample_texel(flags, uv8);
+    if word == 0u {
+        return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    }
+    return vec4<f32>(bgr15_to_rgb(word), 1.0);
+}
+
+// 2x2 bilinear blend around the fractional PSX UV. Colour only -- the caller
+// keeps the transparency/STP decision on the nearest (center) texel so the
+// sprite silhouette and semi-transparency passes stay pixel-identical to
+// nearest sampling; only the interior colour is smoothed. `fallback` is the
+// center colour, used when all four corners are transparent.
+fn bilinear_rgb(flags: u32, tex_window: u32, uv: vec2<f32>, fallback: vec3<f32>) -> vec3<f32> {
+    // -0.5 puts the sample at texel centers (PSX texel n covers [n, n+1)).
+    let uvf = uv - vec2<f32>(0.5, 0.5);
+    let base = floor(uvf);
+    let fr = uvf - base;
+    let c00 = sample_corner(flags, tex_window, base);
+    let c10 = sample_corner(flags, tex_window, base + vec2<f32>(1.0, 0.0));
+    let c01 = sample_corner(flags, tex_window, base + vec2<f32>(0.0, 1.0));
+    let c11 = sample_corner(flags, tex_window, base + vec2<f32>(1.0, 1.0));
+    let top = mix(c00, c10, fr.x);
+    let bot = mix(c01, c11, fr.x);
+    let acc = mix(top, bot, fr.y);
+    if acc.a > 0.0039 {
+        return acc.rgb / acc.a;
+    }
+    return fallback;
+}
+
 // PSX modulate: each channel = clamp(channel * tint * 2, 0..=1).
 // `RAW_TEXTURE` skips this and returns the texel verbatim.
 fn modulate(texel_rgb: vec3<f32>, tint_rgba: vec4<f32>, raw: bool) -> vec3<f32> {
@@ -180,6 +218,9 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     if !textured {
         return vec4<f32>(srgb_to_linear(in.color.rgb), in.color.a);
     }
+    // Transparency, STP bit and the opaque/semi passes are always decided by
+    // the nearest (center) texel -- this keeps the silhouette and semi-trans
+    // behaviour identical to point sampling regardless of filter mode.
     let uv8 = apply_tex_window(page_uv(in.uv), in.tex_window);
     let texel = sample_texel(in.flags, uv8);
     if texel == 0u {
@@ -192,7 +233,12 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     if ((in.flags & FLAG_TEX_SEMI_PASS) != 0u) && !stp {
         discard;
     }
+    let center_rgb = bgr15_to_rgb(texel);
+    var tex_rgb = center_rgb;
+    if u_filter.x == 1u {
+        tex_rgb = bilinear_rgb(in.flags, in.tex_window, in.uv, center_rgb);
+    }
     let raw = (in.flags & FLAG_RAW_TEXTURE) != 0u;
-    let rgb = modulate(bgr15_to_rgb(texel), in.color, raw);
+    let rgb = modulate(tex_rgb, in.color, raw);
     return vec4<f32>(srgb_to_linear(rgb), 1.0);
 }
