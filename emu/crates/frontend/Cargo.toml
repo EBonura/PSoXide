@@ -14,6 +14,13 @@ publish = false
 # binary (the target for a future web/wasm build).
 default = ["editor"]
 editor = ["dep:psxed-ui", "dep:psxed-project"]
+# `mcp` (native-only) embeds a live MCP debug server (official `rmcp` SDK over
+# streamable HTTP) inside the running GUI, so an agent can drive the emulator:
+# screenshot, read/write RAM+VRAM, step/run frames, toggle wireframe, save/load
+# state, load discs. Optional rmcp/tokio/axum deps live in the not(wasm32) table
+# below and never enter the wasm dep graph; the module is additionally
+# `#[cfg(not(target_arch = "wasm32"))]`.
+mcp = ["dep:rmcp", "dep:tokio", "dep:axum", "dep:schemars", "dep:serde", "dep:base64"]
 
 [dependencies]
 emulator-core    = { workspace = true }
@@ -56,6 +63,16 @@ cpal  = { workspace = true }
 gilrs = { workspace = true }
 rfd   = { workspace = true }
 egui-winit = { version = "0.31", default-features = false, features = ["links", "clipboard", "wayland", "x11"] }
+
+# MCP debug server (native, behind the `mcp` feature). Kept here so the wasm
+# build never sees rmcp/tokio/axum. `tokio = "full"` deliberately: this is a
+# native-only debug tool, not worth feature-golfing the runtime.
+rmcp   = { version = "2.1", default-features = false, features = ["server", "macros", "schemars", "transport-streamable-http-server"], optional = true }
+tokio  = { version = "1", features = ["full"], optional = true }
+axum   = { version = "0.8", optional = true }
+schemars = { version = "1", optional = true }
+serde  = { version = "1", features = ["derive"], optional = true }
+base64 = { version = "0.22", optional = true }
 
 # Browser entry points: canvas + document access, async GPU init, and a panic
 # hook that forwards Rust panics to the devtools console. `wgpu`'s `webgl`
