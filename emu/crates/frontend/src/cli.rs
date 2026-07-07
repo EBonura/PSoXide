@@ -300,6 +300,11 @@ pub struct LaunchArgs {
     /// (the GUI session under investigation ran at 4).
     #[arg(long, default_value_t = 4)]
     pub live_sim_scale: u32,
+    /// Enable GPU wireframe render mode (edges only) for this run, mirroring the
+    /// toolbar toggle. Pair with `--live-sim-dump` to reproduce the live
+    /// per-frame accumulation, or `--dump-hw` for a single-frame edge render.
+    #[arg(long)]
+    pub wireframe: bool,
 }
 
 /// Arguments for `build-project-disc`.
@@ -761,6 +766,9 @@ fn run_headless_launch(
     if args.slow_pad {
         bus.set_slow_pad(true);
     }
+    if args.wireframe {
+        bus.gpu.wireframe_enabled = true;
+    }
 
     let mut held_button_mask = 0u16;
     if args.hold_forward || args.hold_run {
@@ -1014,7 +1022,9 @@ fn run_headless_launch(
                         ph,
                         &prgba,
                     )?;
-                    let tag = if area.bpp24 || h_off != 0 || v_off != 0 {
+                    // Mirror frontend_display: only 24bpp uses the CPU texture;
+                    // 16bpp (incl. screen-offset) goes through the HW target.
+                    let tag = if area.bpp24 {
                         let (rgba, w, hgt) = bus.gpu.display_rgba8();
                         write_rgb_ppm_from_rgba(&path, w, hgt, &rgba)?;
                         "cpu"
@@ -1934,6 +1944,7 @@ fn validation_launch_args(
         live_sim_from: 0,
         live_sim_frames: 0,
         live_sim_scale: 4,
+        wireframe: false,
     }
 }
 
