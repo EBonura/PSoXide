@@ -305,6 +305,10 @@ pub struct LaunchArgs {
     /// per-frame accumulation, or `--dump-hw` for a single-frame edge render.
     #[arg(long)]
     pub wireframe: bool,
+    /// In-shader texture filter for the HW renderer output (`--dump-hw` /
+    /// `--live-sim-dump`): `none` (default) or `bilinear`.
+    #[arg(long, default_value = "none")]
+    pub texture_filter: String,
 }
 
 /// Arguments for `build-project-disc`.
@@ -848,6 +852,7 @@ fn run_headless_launch(
         let mut hw = psx_gpu_render::HwRenderer::new_headless(device, queue);
         // Match the live session's internal scale (profiler: hw_scale=4).
         let _ = hw.set_internal_scale(args.live_sim_scale, None);
+        hw.set_texture_filter(parse_texture_filter(&args.texture_filter));
         let log_path = dir.join("live_sim.csv");
         let mut log =
             std::fs::File::create(&log_path).map_err(|e| format!("{}: {e}", log_path.display()))?;
@@ -1240,7 +1245,7 @@ fn run_headless_launch(
     }
 
     if let Some(path) = args.dump_hw {
-        let fallback = dump_hw_ppm(&bus, &path)?;
+        let fallback = dump_hw_ppm(&bus, &path, parse_texture_filter(&args.texture_filter))?;
         if emit_summary {
             if let Some(reason) = fallback {
                 eprintln!("[cli] HW renderer → {} ({reason})", path.display());
@@ -1945,6 +1950,7 @@ fn validation_launch_args(
         live_sim_frames: 0,
         live_sim_scale: 4,
         wireframe: false,
+        texture_filter: "none".to_string(),
     }
 }
 
@@ -3121,7 +3127,18 @@ fn region_label(e: &LibraryEntry) -> &'static str {
     }
 }
 
-fn dump_hw_ppm(bus: &Bus, path: &std::path::Path) -> Result<Option<&'static str>, String> {
+fn parse_texture_filter(s: &str) -> psx_gpu_render::TextureFilter {
+    match s.to_ascii_lowercase().as_str() {
+        "bilinear" => psx_gpu_render::TextureFilter::Bilinear,
+        _ => psx_gpu_render::TextureFilter::None,
+    }
+}
+
+fn dump_hw_ppm(
+    bus: &Bus,
+    path: &std::path::Path,
+    filter: psx_gpu_render::TextureFilter,
+) -> Result<Option<&'static str>, String> {
     let display = bus.gpu.display_area();
     let has_screen_offset =
         bus.gpu.horizontal_display_offset_px() != 0 || bus.gpu.vertical_display_offset_px() != 0;
@@ -3138,6 +3155,7 @@ fn dump_hw_ppm(bus: &Bus, path: &std::path::Path) -> Result<Option<&'static str>
     let (device, queue) = headless_wgpu_device()?;
 
     let mut hw = psx_gpu_render::HwRenderer::new_headless(device, queue);
+    hw.set_texture_filter(filter);
     let initial_vram =
         vec![0u16; (psx_gpu_render::VRAM_WIDTH * psx_gpu_render::VRAM_HEIGHT) as usize];
     hw.render_frame(&bus.gpu, &bus.gpu.cmd_log, &initial_vram);
