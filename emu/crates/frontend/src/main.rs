@@ -35,6 +35,8 @@ mod embedded_playtest;
 mod gfx;
 mod icons;
 mod input;
+#[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
+mod mcp;
 mod playtest_input;
 mod theme;
 mod ui;
@@ -205,6 +207,10 @@ struct Shell {
     /// 15bpp gameplay needs a target rebuild because the visible panel
     /// was using the CPU-decoded fallback while 24bpp was active.
     hw_last_display_bpp24: bool,
+    /// Live MCP debug server bridge. `None` if the server failed to start
+    /// (e.g. port already bound). Drained each redraw against the emulator.
+    #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
+    mcp: Option<mcp::McpBridge>,
     /// Deferred GPU init landing pad for the web build. wgpu's adapter/device
     /// request is async and the browser main thread cannot block on it, so
     /// `resumed` kicks the init off `spawn_local` and the finished `Graphics`
@@ -268,6 +274,8 @@ impl Shell {
             display_gpu_compute: gpu_compute,
             hw_seen_gpu_resync_generation: 0,
             hw_last_display_bpp24: false,
+            #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
+            mcp: mcp::start(),
             #[cfg(target_arch = "wasm32")]
             graphics_init: std::rc::Rc::new(std::cell::RefCell::new(None)),
         }
@@ -628,6 +636,14 @@ impl ApplicationHandler for Shell {
                 gfx.window.request_redraw();
             }
             WindowEvent::RedrawRequested => {
+                // Service any queued MCP tool calls against the live emulator
+                // before this frame runs. Runs whether or not we're in run mode,
+                // so `step`/`screenshot`/`read_ram` work while paused.
+                #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
+                if let Some(bridge) = self.mcp.as_mut() {
+                    bridge.drain(&mut self.state);
+                }
+
                 let profile_start = Instant::now();
                 let now = Instant::now();
                 let dt = (now - self.last_frame).as_secs_f32().min(0.1);
@@ -1268,10 +1284,17 @@ fn frontend_display(
     gfx: &gfx::Graphics,
 ) -> (egui::TextureId, egui::Rect) {
     let area = display_area_or_default(bus);
-    let screen_offset_active = bus.is_some_and(|bus| {
-        bus.gpu.horizontal_display_offset_px() != 0 || bus.gpu.vertical_display_offset_px() != 0
-    });
-    if area.bpp24 || screen_offset_active {
+    // Only true-colour (24bpp) frames must use the CPU display texture -- the HW
+    // target is BGR15 and can't represent 24bpp pre-rendered backgrounds (a commercial title/a commercial title
+    // rooms). Everything else, INCLUDING 16bpp frames with a GP1(06/07) screen
+    // offset, goes through the upscaling HW target so the Window/hi-res toggle
+    // actually applies. Before, any non-zero display offset forced the native CPU
+    // path, so a game with a constant 1px pan (a commercial title h_off=-1, a commercial title h_off=-1/v_off=8)
+    // silently lost hi-res while an offset-free sibling (a commercial title) kept it.
+    // ponytail: the fine display offset (a few px of CRT-window pan) is dropped in
+    // the HW path -- imperceptible in a scale-to-fit window. Apply it at the paint
+    // rect if an animated-offset (screen-shake) title ever needs it.
+    if area.bpp24 {
         return (gfx.display_texture_id(), cpu_display_uv(area));
     }
     (gfx.hw_texture_id(), hw_display_uv(area))

@@ -630,6 +630,19 @@ impl Gpu {
 
     /// Snapshot of the currently-configured display area, for the
     /// frontend's framebuffer panel. Cheap to call each frame. The
+    /// Current drawing-area rectangle (GP0 0xE3 top-left / 0xE4 bottom-right),
+    /// inclusive corners `(left, top, right, bottom)`. This is the VRAM
+    /// back-buffer the GPU is drawing into -- used by the wireframe renderer to
+    /// clear the page each frame so edges don't accumulate.
+    pub fn drawing_area(&self) -> (u16, u16, u16, u16) {
+        (
+            self.draw_area_left,
+            self.draw_area_top,
+            self.draw_area_right,
+            self.draw_area_bottom,
+        )
+    }
+
     /// `height` is derived from the V-range + 480-mode flag (see
     /// [`Gpu::effective_display_height`]) so it matches what Redux's
     /// screenshot path reports -- letting milestone parity tests
@@ -1297,6 +1310,23 @@ impl Gpu {
                 self.drawing_end_raw = word & 0x000F_FFFF;
                 self.draw_area_right = (word & 0x3FF) as u16;
                 self.draw_area_bottom = ((word >> 10) & 0x1FF) as u16;
+                // Wireframe: clear the back-buffer page each time the draw area
+                // is (re)defined, so edges don't pile up across frames on the
+                // CPU display path (e.g. a commercial title's screen-offset attract fight,
+                // which routes through display_rgba8, not the HW target). Games
+                // set E3/E4 once per frame at back-buffer setup; a rare
+                // mid-frame clip reprogram would over-clear -- acceptable for a
+                // debug view. The HW target gets the equivalent clear in
+                // psx-gpu-render's render_frame.
+                if self.wireframe_enabled {
+                    self.vram.fill_rect_unwrapped(
+                        self.draw_area_left,
+                        self.draw_area_top,
+                        self.draw_area_right,
+                        self.draw_area_bottom,
+                        0,
+                    );
+                }
             }
             // GP0 0xE5 -- drawing offset. X / Y are both signed 11-bit.
             0xE5 => {
