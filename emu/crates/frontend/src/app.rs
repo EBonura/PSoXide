@@ -273,6 +273,9 @@ pub struct AppState {
     pub scale_mode: ScaleMode,
     /// Sample-time texture filter, cycled from the toolbar.
     pub texture_filter: TextureFilter,
+    /// When true the top toolbar is slid up out of view, leaving only a
+    /// small floating restore tab at the top-right.
+    pub toolbar_hidden: bool,
     /// Physical pixel size used by the central framebuffer on the
     /// previous UI frame. The renderer uses this as its internal
     /// resolution budget; one-frame latency is fine because it only
@@ -463,6 +466,7 @@ impl AppState {
             panels: PanelVisibility::startup(),
             scale_mode: ScaleMode::default(),
             texture_filter: TextureFilter::default(),
+            toolbar_hidden: false,
             framebuffer_present_size_px: (320, 240),
             cpu,
             freelook: emulator_core::FreelookState::default(),
