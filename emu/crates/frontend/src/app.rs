@@ -111,10 +111,6 @@ pub enum TextureFilter {
     /// PSX-native point sampling.
     #[default]
     None,
-    /// 2x2 bilinear (cheap, soft).
-    Bilinear,
-    /// Windowed-jinc 2-lobe with anti-ringing (sharper than bilinear).
-    Jinc2,
     /// Edge-directed xBR (best on 3D; soft/odd on 2D/tiled backgrounds).
     Xbr,
 }
@@ -123,9 +119,7 @@ impl TextureFilter {
     /// Cycle to the next mode (wraps).
     pub fn next(self) -> Self {
         match self {
-            TextureFilter::None => TextureFilter::Bilinear,
-            TextureFilter::Bilinear => TextureFilter::Jinc2,
-            TextureFilter::Jinc2 => TextureFilter::Xbr,
+            TextureFilter::None => TextureFilter::Xbr,
             TextureFilter::Xbr => TextureFilter::None,
         }
     }
@@ -133,8 +127,6 @@ impl TextureFilter {
     pub fn label(self) -> &'static str {
         match self {
             TextureFilter::None => "None",
-            TextureFilter::Bilinear => "Bilinear",
-            TextureFilter::Jinc2 => "JINC2",
             TextureFilter::Xbr => "xBR",
         }
     }
@@ -143,8 +135,6 @@ impl TextureFilter {
     pub fn mode(self) -> u32 {
         match self {
             TextureFilter::None => 0,
-            TextureFilter::Bilinear => 1,
-            TextureFilter::Jinc2 => 2,
             TextureFilter::Xbr => 3,
         }
     }
