@@ -159,6 +159,9 @@ struct Shell {
     /// frame before running CPU steps so the guest always sees the
     /// latest state.
     pad1_mask: u16,
+    /// Previous-frame state of the L3+R3 freelook chord, for rising-edge
+    /// toggle detection.
+    prev_freelook_chord: bool,
     /// Keyboard-emulated left analog stick state.
     keyboard_left_stick: KeyboardStickState,
     /// Keyboard-emulated right analog stick state.
@@ -263,6 +266,7 @@ impl Shell {
             pending_input: MenuInput::default(),
             last_frame: Instant::now(),
             pad1_mask: 0,
+            prev_freelook_chord: false,
             keyboard_left_stick: KeyboardStickState::default(),
             keyboard_right_stick: KeyboardStickState::default(),
             fullscreen,
@@ -335,30 +339,6 @@ fn key_is_analog_button(key: &Key, bindings: &PortBindings) -> bool {
 /// Update held freelook-camera key state from a keyboard event. These keys are
 /// intentionally outside the PSX pad bindings (T/F/G/H move, I/J/K/L look, U/O
 /// up-down, Shift boost), so tracking them never double-drives the guest pad.
-fn update_freelook_keys(keys: &mut crate::app::FreelookKeys, logical: &Key, state: ElementState) {
-    let pressed = state == ElementState::Pressed;
-    if matches!(logical, Key::Named(NamedKey::Shift)) {
-        keys.boost = pressed;
-        return;
-    }
-    let Key::Character(s) = logical else {
-        return;
-    };
-    match s.chars().next().map(|c| c.to_ascii_lowercase()) {
-        Some('t') => keys.fwd = pressed,
-        Some('g') => keys.back = pressed,
-        Some('f') => keys.left = pressed,
-        Some('h') => keys.right = pressed,
-        Some('u') => keys.up = pressed,
-        Some('o') => keys.down = pressed,
-        Some('i') => keys.pitch_up = pressed,
-        Some('k') => keys.pitch_down = pressed,
-        Some('j') => keys.yaw_left = pressed,
-        Some('l') => keys.yaw_right = pressed,
-        _ => {}
-    }
-}
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct KeyboardStickState {
     up: bool,
@@ -601,9 +581,6 @@ impl ApplicationHandler for Shell {
                         press_port1_analog_button(&mut self.state);
                     }
                 }
-                // Freelook camera keys are free (never pad-bound), so track
-                // them regardless of pad routing; step_one_frame applies them.
-                update_freelook_keys(&mut self.state.freelook_keys, &logical_key, state);
                 // The Menu *does* honour OS-level key-repeat: holding
                 // down-arrow scrolls through a long Examples list one
                 // row per repeat tick, matching GUI-standard behaviour.
@@ -687,6 +664,40 @@ impl ApplicationHandler for Shell {
                 if pad_frame.analog_button {
                     press_port1_analog_button(&mut self.state);
                 }
+
+                // Merge keyboard-emulated and real-pad sticks once; used both
+                // to drive the freelook camera and (unless freelook steals
+                // them) to feed the guest pad below.
+                let merged_left =
+                    merge_sticks(pad_frame.left_stick, self.keyboard_left_stick.vector());
+                let merged_right =
+                    merge_sticks(pad_frame.right_stick, self.keyboard_right_stick.vector());
+                let merged_mask = self.pad1_mask | pad_frame.pad1_mask;
+
+                // L3 + R3 chord toggles the twin-stick freelook camera on a
+                // rising edge (works from keyboard or pad). The toolbar EYE
+                // button toggles the same flag.
+                let chord = merged_mask & (button::L3 | button::R3) == (button::L3 | button::R3);
+                if chord && !self.prev_freelook_chord {
+                    self.state.freelook.enabled = !self.state.freelook.enabled;
+                    if !self.state.freelook.enabled {
+                        self.state.freelook = emulator_core::FreelookState::default();
+                    }
+                    self.state.status_message_set(if self.state.freelook.enabled {
+                        "Freelook ON - left stick move, right stick look, R2 boost (L3+R3 to exit)"
+                    } else {
+                        "Freelook off"
+                    });
+                }
+                self.prev_freelook_chord = chord;
+
+                // Feed the camera from the sticks while engaged; R2 boosts.
+                self.state.freelook_input = crate::app::FreelookInput {
+                    left: merged_left,
+                    right: merged_right,
+                    boost: merged_mask & button::R2 != 0,
+                };
+
                 // When the Menu is open OR currently paused, the
                 // gamepad doubles as the menu navigator. D-pad /
                 // left-stick edges become up/down/left/right, Cross
@@ -802,21 +813,16 @@ impl ApplicationHandler for Shell {
                     self.emu_frame_accum = (self.emu_frame_accum + dt).min(0.25);
                     let frames_to_run =
                         ((self.emu_frame_accum / TARGET_FRAME_DT) as u32).min(MAX_CATCHUP_FRAMES);
-                    // Merge the current keyboard-derived pad mask with
-                    // gamepad input before stepping, so the game/homebrew
-                    // sees fresh input this frame. `pad_frame.pad1_mask`
-                    // already has the Select+Start chord stripped for
-                    // the frame the chord fires -- prevents in-game
-                    // handlers from seeing the "open menu" combo.
-                    let right_stick =
-                        merge_sticks(pad_frame.right_stick, self.keyboard_right_stick.vector());
-                    let left_stick =
-                        merge_sticks(pad_frame.left_stick, self.keyboard_left_stick.vector());
-                    let live_pad_sample = Port1PadSample::from_host(
-                        self.pad1_mask | pad_frame.pad1_mask,
-                        right_stick,
-                        left_stick,
-                    );
+                    // Feed the guest the merged mask + sticks computed above.
+                    // While freelook is engaged the sticks drive the camera
+                    // only, so the game sees them neutral (freecam-only).
+                    let (game_left, game_right) = if self.state.freelook.enabled {
+                        ((0.0, 0.0), (0.0, 0.0))
+                    } else {
+                        (merged_left, merged_right)
+                    };
+                    let live_pad_sample =
+                        Port1PadSample::from_host(merged_mask, game_right, game_left);
                     for _ in 0..frames_to_run {
                         // The editor can splice a recorded tape over the live pad;
                         // without it the host pad sample drives the game directly.
