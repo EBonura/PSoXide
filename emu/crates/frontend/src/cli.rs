@@ -305,9 +305,9 @@ pub struct LaunchArgs {
     /// per-frame accumulation, or `--dump-hw` for a single-frame edge render.
     #[arg(long)]
     pub wireframe: bool,
-    /// Enable bilinear texture filtering for `--dump-hw`.
-    #[arg(long)]
-    pub texture_filter: bool,
+    /// Sample-time texture filter for `--dump-hw`: none|bilinear|jinc2|xbr.
+    #[arg(long, default_value = "none")]
+    pub texture_filter: String,
 }
 
 /// Arguments for `build-project-disc`.
@@ -1243,7 +1243,7 @@ fn run_headless_launch(
     }
 
     if let Some(path) = args.dump_hw {
-        let fallback = dump_hw_ppm(&bus, &path, args.texture_filter)?;
+        let fallback = dump_hw_ppm(&bus, &path, parse_texture_filter(&args.texture_filter))?;
         if emit_summary {
             if let Some(reason) = fallback {
                 eprintln!("[cli] HW renderer → {} ({reason})", path.display());
@@ -1948,7 +1948,7 @@ fn validation_launch_args(
         live_sim_frames: 0,
         live_sim_scale: 4,
         wireframe: false,
-        texture_filter: false,
+        texture_filter: "none".to_string(),
     }
 }
 
@@ -3125,10 +3125,19 @@ fn region_label(e: &LibraryEntry) -> &'static str {
     }
 }
 
+fn parse_texture_filter(s: &str) -> u32 {
+    match s.to_ascii_lowercase().as_str() {
+        "bilinear" => 1,
+        "jinc2" => 2,
+        "xbr" => 3,
+        _ => 0,
+    }
+}
+
 fn dump_hw_ppm(
     bus: &Bus,
     path: &std::path::Path,
-    texture_filter: bool,
+    texture_filter: u32,
 ) -> Result<Option<&'static str>, String> {
     let display = bus.gpu.display_area();
     let has_screen_offset =

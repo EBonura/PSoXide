@@ -103,6 +103,53 @@ pub enum ScaleMode {
     Native,
 }
 
+/// Sample-time texture filter, cycled from the toolbar. Maps to the
+/// `u_texfilter` uniform the fragment shader reads. Seam-free filtering isn't
+/// possible on PSX's packed VRAM (matches DuckStation).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TextureFilter {
+    /// PSX-native point sampling.
+    #[default]
+    None,
+    /// 2x2 bilinear (cheap, soft).
+    Bilinear,
+    /// Windowed-jinc 2-lobe with anti-ringing (sharper than bilinear).
+    Jinc2,
+    /// Edge-directed xBR (best on 3D; soft/odd on 2D/tiled backgrounds).
+    Xbr,
+}
+
+impl TextureFilter {
+    /// Cycle to the next mode (wraps).
+    pub fn next(self) -> Self {
+        match self {
+            TextureFilter::None => TextureFilter::Bilinear,
+            TextureFilter::Bilinear => TextureFilter::Jinc2,
+            TextureFilter::Jinc2 => TextureFilter::Xbr,
+            TextureFilter::Xbr => TextureFilter::None,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            TextureFilter::None => "None",
+            TextureFilter::Bilinear => "Bilinear",
+            TextureFilter::Jinc2 => "JINC2",
+            TextureFilter::Xbr => "xBR",
+        }
+    }
+
+    /// `u_texfilter.x` value the shader branches on.
+    pub fn mode(self) -> u32 {
+        match self {
+            TextureFilter::None => 0,
+            TextureFilter::Bilinear => 1,
+            TextureFilter::Jinc2 => 2,
+            TextureFilter::Xbr => 3,
+        }
+    }
+}
+
 /// Active host workspace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Workspace {
@@ -234,8 +281,8 @@ pub struct AppState {
     /// Framebuffer mode -- shared HW renderer at native scale vs
     /// window-fitted high resolution. Toggled via the debug toolbar.
     pub scale_mode: ScaleMode,
-    /// Bilinear texture filtering (toolbar toggle). `false` = PSX-native nearest.
-    pub texture_filter: bool,
+    /// Sample-time texture filter, cycled from the toolbar.
+    pub texture_filter: TextureFilter,
     /// Physical pixel size used by the central framebuffer on the
     /// previous UI frame. The renderer uses this as its internal
     /// resolution budget; one-frame latency is fine because it only
@@ -425,7 +472,7 @@ impl AppState {
             burn: BurnState::default(),
             panels: PanelVisibility::startup(),
             scale_mode: ScaleMode::default(),
-            texture_filter: false,
+            texture_filter: TextureFilter::default(),
             framebuffer_present_size_px: (320, 240),
             cpu,
             freelook: emulator_core::FreelookState::default(),

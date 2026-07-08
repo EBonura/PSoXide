@@ -369,9 +369,9 @@ impl Graphics {
         self.hw_renderer.render_frame(gpu, cmd_log, vram_words);
     }
 
-    /// Enable/disable bilinear texture filtering on the game renderer.
-    pub fn set_hw_texture_filter(&self, bilinear: bool) {
-        self.hw_renderer.set_texture_filter(bilinear);
+    /// Set the sample-time texture filter mode on the game renderer.
+    pub fn set_hw_texture_filter(&self, mode: u32) {
+        self.hw_renderer.set_texture_filter(mode);
     }
 
     /// Pick the right internal-resolution multiplier for the current
