@@ -369,27 +369,6 @@ impl Graphics {
         self.hw_renderer.render_frame(gpu, cmd_log, vram_words);
     }
 
-    /// Select the HW renderer's screen-space post-process filter.
-    pub fn set_hw_texture_filter(&mut self, filter: psx_gpu_render::TextureFilter) {
-        self.hw_renderer.set_texture_filter(filter);
-    }
-
-    /// Size the post-process output for the current display sub-rect.
-    pub fn update_hw_postfx(&mut self, display_size: (u32, u32)) {
-        self.hw_renderer
-            .update_postfx_size(display_size, Some(&mut self.egui_renderer));
-    }
-
-    /// True when a post-process filter is active (paint the filtered texture).
-    pub fn hw_filter_active(&self) -> bool {
-        self.hw_renderer.filter_active()
-    }
-
-    /// egui id of the post-process (xBR) output texture.
-    pub fn hw_filtered_texture_id(&self) -> egui::TextureId {
-        self.hw_renderer.filtered_texture_id()
-    }
-
     /// Pick the right internal-resolution multiplier for the current
     /// scale-mode + panel size and reallocate the HW target to it
     /// if changed. Cheap when the size is stable. Returns `true` when

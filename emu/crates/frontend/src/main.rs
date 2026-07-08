@@ -988,17 +988,9 @@ impl ApplicationHandler for Shell {
                 // target on change. Reallocation clears the target,
                 // so we immediately resync it from CPU VRAM before
                 // replaying this frame's command log.
-                // A screen-space filter (xBR) upscales the native frame itself,
-                // so force native internal scale (S=1) when one is active --
-                // otherwise we'd upscale twice.
-                let filter_active = state.texture_filter != app::TextureFilter::None;
-                let scale_mode = if filter_active {
-                    psx_gpu_render::ScaleMode::Native
-                } else {
-                    match state.scale_mode {
-                        app::ScaleMode::Native => psx_gpu_render::ScaleMode::Native,
-                        app::ScaleMode::Window => psx_gpu_render::ScaleMode::Window,
-                    }
+                let scale_mode = match state.scale_mode {
+                    app::ScaleMode::Native => psx_gpu_render::ScaleMode::Native,
+                    app::ScaleMode::Window => psx_gpu_render::ScaleMode::Window,
                 };
                 let display_size = state
                     .bus
@@ -1008,8 +1000,6 @@ impl ApplicationHandler for Shell {
                         (area.width as u32, area.height as u32)
                     })
                     .unwrap_or((320, 240));
-                gfx.set_hw_texture_filter(state.texture_filter.to_render());
-                gfx.update_hw_postfx(display_size);
                 let hw_scale_start = Instant::now();
                 let hw_scale_changed = gfx.update_hw_scale(
                     scale_mode,
@@ -1306,14 +1296,6 @@ fn frontend_display(
     // rect if an animated-offset (screen-shake) title ever needs it.
     if area.bpp24 {
         return (gfx.display_texture_id(), cpu_display_uv(area));
-    }
-    // With a screen-space filter (xBR) active, the postfx output already is the
-    // upscaled display region, so paint it with a full-texture UV.
-    if gfx.hw_filter_active() {
-        return (
-            gfx.hw_filtered_texture_id(),
-            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-        );
     }
     (gfx.hw_texture_id(), hw_display_uv(area))
 }
