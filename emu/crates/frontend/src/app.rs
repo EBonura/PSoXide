@@ -253,6 +253,9 @@ pub struct AppState {
     /// CD burning submenu state and burner hotplug watcher.
     pub(crate) burn: BurnState,
     pub panels: PanelVisibility,
+    /// Last rendered debug-sidebar width, used as the slide-in animation
+    /// target so a resized sidebar animates to its own width.
+    pub sidebar_width: f32,
     /// Framebuffer mode -- shared HW renderer at native scale vs
     /// window-fitted high resolution. Toggled via the debug toolbar.
     pub scale_mode: ScaleMode,
@@ -450,6 +453,7 @@ impl AppState {
             examples_build_child: None,
             burn: BurnState::default(),
             panels: PanelVisibility::startup(),
+            sidebar_width: 430.0,
             scale_mode: ScaleMode::default(),
             texture_filter: TextureFilter::default(),
             toolbar_hidden: false,
