@@ -248,7 +248,6 @@ impl Translator {
                     uv: [0, 0],
                     flags: 0,
                     tex_window: 0,
-                    uv_bounds: 0,
                 },
             );
         }
@@ -470,14 +469,12 @@ impl Translator {
     ) {
         let clip = self.current_clip();
         let tex_window = self.tex_window_word();
-        let uv_bounds = pack_uv_bounds(&[uv0, uv1, uv2]);
         let make = |v: (i32, i32), uv: (u16, u16)| HwVertex {
             pos: [v.0 as i16, v.1 as i16],
             color,
             uv: [uv.0, uv.1],
             flags: prim_flags,
             tex_window,
-            uv_bounds,
         };
         self.push_vertex(kind, clip, make(v0, uv0));
         self.push_vertex(kind, clip, make(v1, uv1));
@@ -613,7 +610,6 @@ impl Translator {
             uv: [0, 0],
             flags: prim_flags,
             tex_window: 0,
-            uv_bounds: 0,
         };
         self.push_vertex(kind, clip, make(v0, c0));
         self.push_vertex(kind, clip, make(v1, c1));
@@ -685,14 +681,12 @@ impl Translator {
     ) {
         let clip = self.current_clip();
         let tex_window = self.tex_window_word();
-        let uv_bounds = pack_uv_bounds(&[uv0, uv1, uv2]);
         let make = |v: (i32, i32), uv: (u16, u16), c: [u8; 4]| HwVertex {
             pos: [v.0 as i16, v.1 as i16],
             color: c,
             uv: [uv.0, uv.1],
             flags: prim_flags,
             tex_window,
-            uv_bounds,
         };
         self.push_vertex(kind, clip, make(v0, uv0, c0));
         self.push_vertex(kind, clip, make(v1, uv1, c1));
@@ -726,7 +720,6 @@ impl Translator {
             uv: [0, 0],
             flags: 0,
             tex_window: 0,
-            uv_bounds: 0,
         };
         // Two tris covering [x..x+w] × [y..y+h]. Same winding as
         // push_mono_rect -- semi-trans / mask-bit behaviour stays
@@ -865,26 +858,6 @@ fn tex_tint(cmd: u32) -> [u8; 4] {
 
 fn uv16(uv: (u8, u8)) -> (u16, u16) {
     (uv.0 as u16, uv.1 as u16)
-}
-
-/// Pack a textured primitive's UV bounding box into `HwVertex::uv_bounds`
-/// (min_u | min_v<<8 | max_u<<16 | max_v<<24). The bilinear filter clamps its
-/// taps to this box so it can't sample a neighbouring texture packed elsewhere
-/// in the same VRAM page -- the tile-seam artefact. For an axis-aligned quad
-/// each of its two tris spans the same box (the diagonal carries both extremes),
-/// so per-tri bounds match the full quad rect in the common case.
-fn pack_uv_bounds(uvs: &[(u16, u16)]) -> u32 {
-    let mut min_u = 255u16;
-    let mut min_v = 255u16;
-    let mut max_u = 0u16;
-    let mut max_v = 0u16;
-    for &(u, v) in uvs {
-        min_u = min_u.min(u & 0xFF);
-        min_v = min_v.min(v & 0xFF);
-        max_u = max_u.max(u & 0xFF);
-        max_v = max_v.max(v & 0xFF);
-    }
-    (min_u as u32) | ((min_v as u32) << 8) | ((max_u as u32) << 16) | ((max_v as u32) << 24)
 }
 
 #[cfg(test)]

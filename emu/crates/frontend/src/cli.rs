@@ -3129,8 +3129,7 @@ fn region_label(e: &LibraryEntry) -> &'static str {
 
 fn parse_texture_filter(s: &str) -> psx_gpu_render::TextureFilter {
     match s.to_ascii_lowercase().as_str() {
-        "bilinear" => psx_gpu_render::TextureFilter::Bilinear,
-        "sharp" => psx_gpu_render::TextureFilter::Sharp,
+        "xbr" => psx_gpu_render::TextureFilter::Xbr,
         _ => psx_gpu_render::TextureFilter::None,
     }
 }
@@ -3157,17 +3156,23 @@ fn dump_hw_ppm(
 
     let mut hw = psx_gpu_render::HwRenderer::new_headless(device, queue);
     hw.set_texture_filter(filter);
+    // Size the post-process output before rendering (headless: no egui id).
+    hw.update_postfx_size((display.width as u32, display.height as u32), None);
     let initial_vram =
         vec![0u16; (psx_gpu_render::VRAM_WIDTH * psx_gpu_render::VRAM_HEIGHT) as usize];
     hw.render_frame(&bus.gpu, &bus.gpu.cmd_log, &initial_vram);
 
-    let s = hw.internal_scale();
-    let (w, h, rgba) = hw.read_subrect_rgba8(
-        display.x as u32 * s,
-        display.y as u32 * s,
-        display.width as u32 * s,
-        display.height as u32 * s,
-    );
+    let (w, h, rgba) = if hw.filter_active() {
+        hw.read_filtered_rgba8()
+    } else {
+        let s = hw.internal_scale();
+        hw.read_subrect_rgba8(
+            display.x as u32 * s,
+            display.y as u32 * s,
+            display.width as u32 * s,
+            display.height as u32 * s,
+        )
+    };
     write_rgb_ppm_from_rgba(path, w, h, &rgba)?;
     Ok(None)
 }

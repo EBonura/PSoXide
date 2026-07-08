@@ -31,12 +31,6 @@ pub struct HwVertex {
     /// offset_y in the same pre-shifted pixel units used by the
     /// CPU GPU path.
     pub tex_window: u32,
-    /// Per-primitive texture UV bounding box in page space, packed as
-    /// four bytes: min_u, min_v, max_u, max_v. The bilinear filter clamps
-    /// its taps to this box so it never samples a neighbouring texture
-    /// packed elsewhere in the VRAM page (the tile-seam artefact). 0 on
-    /// untextured vertices (unused).
-    pub uv_bounds: u32,
 }
 
 /// `HwVertex::flags` bit layout. Host + shader must agree --
@@ -162,9 +156,6 @@ pub struct HwPipeline {
     /// through the bind group; never queried directly.
     #[allow(dead_code)]
     vram_view: wgpu::TextureView,
-    /// 16-byte uniform holding the texture-filter mode in `.x`
-    /// (0 = nearest, 1 = bilinear). Written by [`HwPipeline::set_filter_mode`].
-    filter_buffer: wgpu::Buffer,
 }
 
 impl HwPipeline {
@@ -194,13 +185,6 @@ impl HwPipeline {
         });
         let vram_view = vram_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        // 16-byte uniform: texture-filter mode in `.x`, rest padding.
-        let filter_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("psx-hw-filter"),
-            contents: bytemuck::cast_slice(&[0u32; 4]),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
-
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("psx-hw-bgl"),
             entries: &[
@@ -217,33 +201,16 @@ impl HwPipeline {
                     },
                     count: None,
                 },
-                // 1: texture-filter mode uniform.
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
             ],
         });
 
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("psx-hw-bg"),
             layout: &bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&vram_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: filter_buffer.as_entire_binding(),
-                },
-            ],
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&vram_view),
+            }],
         });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -285,12 +252,6 @@ impl HwPipeline {
                     format: wgpu::VertexFormat::Uint32,
                     offset: 16,
                     shader_location: 4,
-                },
-                // uv_bounds: u32 → Uint32 (4 bytes), offset 20
-                wgpu::VertexAttribute {
-                    format: wgpu::VertexFormat::Uint32,
-                    offset: 20,
-                    shader_location: 5,
                 },
             ],
         };
@@ -361,14 +322,7 @@ impl HwPipeline {
             vertex_capacity_bytes,
             vram_texture,
             vram_view,
-            filter_buffer,
         }
-    }
-
-    /// Set the texture-filter mode (0 = nearest, 1 = bilinear). Cheap 16-byte
-    /// uniform write; safe to call every frame.
-    pub fn set_filter_mode(&self, queue: &wgpu::Queue, mode: u32) {
-        queue.write_buffer(&self.filter_buffer, 0, bytemuck::cast_slice(&[mode, 0, 0, 0]));
     }
 
     /// Mirror CPU VRAM into the GPU-side `R16Uint` texture used by
