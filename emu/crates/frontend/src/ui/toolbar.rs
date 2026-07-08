@@ -293,7 +293,9 @@ fn draw_debug_toggles(ui: &mut egui::Ui, state: &mut AppState) {
     let fl_btn = toggle_button(icons::EYE, state.freelook.enabled);
     if ui
         .add(fl_btn)
-        .on_hover_text("Freelook camera - move T/F/G/H, look I/J/K/L, up/down U/O (Shift = fast)")
+        .on_hover_text(
+            "Freelook camera (or L3+R3 on a pad) - left stick move, right stick look, R2 boost",
+        )
         .clicked()
     {
         state.freelook.enabled = !state.freelook.enabled;
@@ -301,7 +303,7 @@ fn draw_debug_toggles(ui: &mut egui::Ui, state: &mut AppState) {
             state.freelook = emulator_core::FreelookState::default();
         }
         state.status_message_set(if state.freelook.enabled {
-            "Freelook ON - T/F/G/H move, I/J/K/L look, U/O up/down"
+            "Freelook ON - left stick move, right stick look, R2 boost (L3+R3 to exit)"
         } else {
             "Freelook off"
         });
