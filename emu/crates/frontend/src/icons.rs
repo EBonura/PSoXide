@@ -37,6 +37,11 @@ pub const VOLUME_X: char = '\u{e45c}'; // ph-speaker-x
 pub const EYE: char = '\u{e220}'; // ph-eye
 pub const EYE_OFF: char = '\u{e224}'; // ph-eye-slash
 
+/// Hide-toolbar chevron (slides the bar up out of view).
+pub const CARET_UP: char = '\u{e13c}'; // ph-caret-up
+/// Restore-toolbar chevron (floating tab pulls the bar back down).
+pub const CARET_DOWN: char = '\u{e136}'; // ph-caret-down
+
 /// Power-off / quit icon -- used for the rightmost Menu category
 /// so "close the app" has its own place instead of hiding inside
 /// Debug.
