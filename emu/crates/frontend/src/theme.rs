@@ -62,22 +62,35 @@ pub const FONT_SIZE_MONO: f32 = 16.0;
 pub fn apply(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
 
-    const LUCIDE_TTF: &[u8] = include_bytes!("../assets/fonts/lucide.ttf");
+    // Phosphor icon font, two weights: regular (outline) for the default
+    // state, fill (solid) for active toggles. Same codepoints in both.
+    const PHOSPHOR_TTF: &[u8] = include_bytes!("../assets/fonts/Phosphor.ttf");
+    const PHOSPHOR_FILL_TTF: &[u8] = include_bytes!("../assets/fonts/Phosphor-Fill.ttf");
     fonts.font_data.insert(
-        "lucide".to_owned(),
-        egui::FontData::from_static(LUCIDE_TTF).into(),
+        "phosphor".to_owned(),
+        egui::FontData::from_static(PHOSPHOR_TTF).into(),
+    );
+    fonts.font_data.insert(
+        "phosphor-fill".to_owned(),
+        egui::FontData::from_static(PHOSPHOR_FILL_TTF).into(),
     );
     fonts
         .families
-        .entry(FontFamily::Name("lucide".into()))
+        .entry(FontFamily::Name("phosphor".into()))
         .or_default()
-        .push("lucide".to_owned());
+        .push("phosphor".to_owned());
+    fonts
+        .families
+        .entry(FontFamily::Name("phosphor-fill".into()))
+        .or_default()
+        .push("phosphor-fill".to_owned());
+    // Fallback so inline icon glyphs still resolve inside normal text runs.
     for family in [FontFamily::Proportional, FontFamily::Monospace] {
         fonts
             .families
             .entry(family)
             .or_default()
-            .push("lucide".to_owned());
+            .push("phosphor".to_owned());
     }
 
     const VT323_TTF: &[u8] = include_bytes!("../assets/fonts/VT323-Regular.ttf");
