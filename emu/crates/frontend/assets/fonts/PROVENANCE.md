@@ -10,16 +10,17 @@
 - **Used for**: monospace / debugger / register-panel typography in
   the PSoXide frontend.
 
-## lucide.ttf
+## Phosphor.ttf / Phosphor-Fill.ttf
 
-- **Source**: https://lucide.dev/ (icon font build of the Lucide icon
-  set).
-- **License**: ISC
-  (https://github.com/lucide-icons/lucide/blob/main/LICENSE).
+- **Source**: https://phosphoricons.com/
+  (`@phosphor-icons/web`, regular + fill weights).
+- **License**: MIT
+  (https://github.com/phosphor-icons/homepage/blob/master/LICENSE).
 - **Used for**: UI iconography in the frontend (codepoints listed in
-  `emu/crates/frontend/src/icons.rs`).
+  `emu/crates/frontend/src/icons.rs`). Regular is the default weight;
+  fill is used for active toggle buttons.
 
-Both fonts are bundled as binary `.ttf` files. Their licenses are
+All fonts are bundled as binary `.ttf` files. Their licenses are
 GPL-compatible: the SIL Open Font License is explicitly compatible
-with GPL when fonts are bundled with software, and ISC is a
+with GPL when fonts are bundled with software, and MIT is a
 permissive license.
