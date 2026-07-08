@@ -107,22 +107,19 @@ pub enum ScaleMode {
 /// `psx_gpu_render::TextureFilter`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TextureFilter {
-    /// PSX-native point sampling.
+    /// No post-process; raw PSX-native output.
     #[default]
     None,
-    /// CLUT-aware 2x2 bilinear (smooths texel colour, keeps the silhouette).
-    Bilinear,
-    /// Sharp bilinear -- crisp interiors, antialiased texel edges (less blur).
-    Sharp,
+    /// xBR edge-directed screen-space upscaler.
+    Xbr,
 }
 
 impl TextureFilter {
     /// Next mode in the cycle (wraps). Extend here when more filters land.
     pub fn next(self) -> Self {
         match self {
-            TextureFilter::None => TextureFilter::Bilinear,
-            TextureFilter::Bilinear => TextureFilter::Sharp,
-            TextureFilter::Sharp => TextureFilter::None,
+            TextureFilter::None => TextureFilter::Xbr,
+            TextureFilter::Xbr => TextureFilter::None,
         }
     }
 
@@ -130,8 +127,7 @@ impl TextureFilter {
     pub fn label(self) -> &'static str {
         match self {
             TextureFilter::None => "None",
-            TextureFilter::Bilinear => "Bilinear",
-            TextureFilter::Sharp => "Sharp",
+            TextureFilter::Xbr => "xBR",
         }
     }
 
@@ -139,8 +135,7 @@ impl TextureFilter {
     pub fn to_render(self) -> psx_gpu_render::TextureFilter {
         match self {
             TextureFilter::None => psx_gpu_render::TextureFilter::None,
-            TextureFilter::Bilinear => psx_gpu_render::TextureFilter::Bilinear,
-            TextureFilter::Sharp => psx_gpu_render::TextureFilter::Sharp,
+            TextureFilter::Xbr => psx_gpu_render::TextureFilter::Xbr,
         }
     }
 }
