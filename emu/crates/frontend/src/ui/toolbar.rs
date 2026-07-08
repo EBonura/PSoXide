@@ -279,6 +279,20 @@ fn draw_debug_toggles(ui: &mut egui::Ui, state: &mut AppState) {
             ScaleMode::Native => ScaleMode::Window,
         };
     }
+    // Bilinear texture filtering (sample-time, DuckStation-style).
+    let tex_btn = toggle_button(icons::LAYERS, state.texture_filter);
+    if ui
+        .add(tex_btn)
+        .on_hover_text("Bilinear texture filtering")
+        .clicked()
+    {
+        state.texture_filter = !state.texture_filter;
+        state.status_message_set(if state.texture_filter {
+            "Texture filter: Bilinear"
+        } else {
+            "Texture filter: off"
+        });
+    }
 }
 
 /// One flag-backed toggle button. Tooltip + tint reflect the flag;

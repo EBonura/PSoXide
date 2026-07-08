@@ -156,6 +156,8 @@ pub struct HwPipeline {
     /// through the bind group; never queried directly.
     #[allow(dead_code)]
     vram_view: wgpu::TextureView,
+    /// Texture-filter mode uniform (0 nearest, 1 bilinear).
+    filter_buffer: wgpu::Buffer,
 }
 
 impl HwPipeline {
@@ -185,12 +187,17 @@ impl HwPipeline {
         });
         let vram_view = vram_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
+        // 16-byte uniform: texture-filter mode in `.x` (0 nearest, 1 bilinear).
+        let filter_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("psx-hw-texfilter"),
+            contents: bytemuck::cast_slice(&[0u32; 4]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("psx-hw-bgl"),
             entries: &[
-                // 0: VRAM texture (fragment shader). Vertex shader
-                // doesn't need any uniforms -- VRAM dims are
-                // hardcoded constants in the WGSL.
+                // 0: VRAM texture (fragment shader).
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
                     visibility: wgpu::ShaderStages::FRAGMENT,
@@ -201,16 +208,33 @@ impl HwPipeline {
                     },
                     count: None,
                 },
+                // 1: texture-filter mode uniform.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("psx-hw-bg"),
             layout: &bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::TextureView(&vram_view),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&vram_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: filter_buffer.as_entire_binding(),
+                },
+            ],
         });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -322,7 +346,13 @@ impl HwPipeline {
             vertex_capacity_bytes,
             vram_texture,
             vram_view,
+            filter_buffer,
         }
+    }
+
+    /// Set the texture-filter mode (0 nearest, 1 bilinear). Cheap uniform write.
+    pub fn set_filter_mode(&self, queue: &wgpu::Queue, mode: u32) {
+        queue.write_buffer(&self.filter_buffer, 0, bytemuck::cast_slice(&[mode, 0, 0, 0]));
     }
 
     /// Mirror CPU VRAM into the GPU-side `R16Uint` texture used by

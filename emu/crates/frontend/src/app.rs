@@ -234,6 +234,8 @@ pub struct AppState {
     /// Framebuffer mode -- shared HW renderer at native scale vs
     /// window-fitted high resolution. Toggled via the debug toolbar.
     pub scale_mode: ScaleMode,
+    /// Bilinear texture filtering (toolbar toggle). `false` = PSX-native nearest.
+    pub texture_filter: bool,
     /// Physical pixel size used by the central framebuffer on the
     /// previous UI frame. The renderer uses this as its internal
     /// resolution budget; one-frame latency is fine because it only
@@ -423,6 +425,7 @@ impl AppState {
             burn: BurnState::default(),
             panels: PanelVisibility::startup(),
             scale_mode: ScaleMode::default(),
+            texture_filter: false,
             framebuffer_present_size_px: (320, 240),
             cpu,
             freelook: emulator_core::FreelookState::default(),

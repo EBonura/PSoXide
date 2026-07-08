@@ -31,6 +31,9 @@ const VRAM_W_F: f32 = 1024.0;
 const VRAM_H_F: f32 =  512.0;
 
 @group(0) @binding(0) var vram: texture_2d<u32>;
+// Texture filter in `.x`: 0 = nearest (PSX-native), 1 = bilinear. Global per
+// frame; set by the toolbar toggle.
+@group(0) @binding(1) var<uniform> u_texfilter: vec4<u32>;
 
 struct VertexIn {
     @location(0) pos:   vec2<i32>,
@@ -174,6 +177,18 @@ fn modulate(texel_rgb: vec3<f32>, tint_rgba: vec4<f32>, raw: bool) -> vec3<f32> 
     return clamp(texel_rgb * tint_rgba.rgb * 2.0, vec3<f32>(0.0), vec3<f32>(1.0));
 }
 
+// One bilinear corner: premultiplied colour, coverage 0 on transparent texels
+// (DuckStation "no edge blending" / binary alpha -- transparent neighbours
+// never bleed colour into an opaque edge).
+fn tex_corner(flags: u32, tex_window: u32, uvf: vec2<f32>) -> vec4<f32> {
+    let uv8 = apply_tex_window(page_uv(uvf), tex_window);
+    let w = sample_texel(flags, uv8);
+    if w == 0u {
+        return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    }
+    return vec4<f32>(bgr15_to_rgb(w), 1.0);
+}
+
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let textured = (in.flags & FLAG_TEXTURED) != 0u;
@@ -192,7 +207,26 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     if ((in.flags & FLAG_TEX_SEMI_PASS) != 0u) && !stp {
         discard;
     }
+    // Bilinear (u_texfilter.x == 1) with binary-alpha edge handling: blend the
+    // 2x2 texel colours premultiplied so transparent neighbours never bleed;
+    // the silhouette/STP stay on the nearest (center) texel above. Seam-free
+    // filtering isn't possible on PSX's packed VRAM (even DuckStation leaves
+    // texture-boundary seams), so this matches the established emulator result.
+    var tex_rgb = bgr15_to_rgb(texel);
+    if u_texfilter.x == 1u {
+        let uvf = in.uv - vec2<f32>(0.5, 0.5);
+        let base = floor(uvf);
+        let fr = uvf - base;
+        let c00 = tex_corner(in.flags, in.tex_window, base);
+        let c10 = tex_corner(in.flags, in.tex_window, base + vec2<f32>(1.0, 0.0));
+        let c01 = tex_corner(in.flags, in.tex_window, base + vec2<f32>(0.0, 1.0));
+        let c11 = tex_corner(in.flags, in.tex_window, base + vec2<f32>(1.0, 1.0));
+        let acc = mix(mix(c00, c10, fr.x), mix(c01, c11, fr.x), fr.y);
+        if acc.a > 0.0039 {
+            tex_rgb = acc.rgb / acc.a;
+        }
+    }
     let raw = (in.flags & FLAG_RAW_TEXTURE) != 0u;
-    let rgb = modulate(bgr15_to_rgb(texel), in.color, raw);
+    let rgb = modulate(tex_rgb, in.color, raw);
     return vec4<f32>(srgb_to_linear(rgb), 1.0);
 }

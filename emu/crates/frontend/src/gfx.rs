@@ -369,6 +369,11 @@ impl Graphics {
         self.hw_renderer.render_frame(gpu, cmd_log, vram_words);
     }
 
+    /// Enable/disable bilinear texture filtering on the game renderer.
+    pub fn set_hw_texture_filter(&self, bilinear: bool) {
+        self.hw_renderer.set_texture_filter(bilinear);
+    }
+
     /// Pick the right internal-resolution multiplier for the current
     /// scale-mode + panel size and reallocate the HW target to it
     /// if changed. Cheap when the size is stable. Returns `true` when

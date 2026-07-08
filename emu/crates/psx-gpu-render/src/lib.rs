@@ -206,6 +206,13 @@ impl HwRenderer {
             .ensure_scale(&self.device, &self.queue, egui_renderer, scale)
     }
 
+    /// Enable bilinear texture filtering (`false` = PSX-native nearest). Cheap
+    /// uniform write; safe to call every frame.
+    pub fn set_texture_filter(&self, bilinear: bool) {
+        self.pipeline
+            .set_filter_mode(&self.queue, if bilinear { 1 } else { 0 });
+    }
+
     /// Rebuild the persistent HW target from the CPU VRAM mirror.
     /// Use after internal-scale reallocations, which necessarily
     /// clear the target texture while CPU VRAM still contains the
