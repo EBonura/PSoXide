@@ -41,6 +41,7 @@ struct VertexIn {
     @location(2) uv:    vec2<u32>,
     @location(3) flags: u32,
     @location(4) tex_window: u32,
+    @location(5) uv_bounds: u32,
 }
 
 struct VertexOut {
@@ -53,6 +54,7 @@ struct VertexOut {
     @location(1)       uv:       vec2<f32>,
     @location(2) @interpolate(flat) flags: u32,
     @location(3) @interpolate(flat) tex_window: u32,
+    @location(4) @interpolate(flat) uv_bounds: u32,
 }
 
 const FLAG_TEXTURED:    u32 = 1u << 22u;
@@ -71,6 +73,7 @@ fn vs_main(in: VertexIn) -> VertexOut {
     out.uv       = vec2<f32>(f32(in.uv.x), f32(in.uv.y));
     out.flags    = in.flags;
     out.tex_window = in.tex_window;
+    out.uv_bounds = in.uv_bounds;
     return out;
 }
 
@@ -171,8 +174,12 @@ fn sample_texel(flags: u32, uv8: vec2<u32>) -> u32 {
 // One bilinear corner: floor+wrap the PSX UV, sample, decode. Returns
 // PREMULTIPLIED colour (rgb, coverage): transparent texels (word 0) contribute
 // (0,0,0,0) so they never bleed colour into an opaque neighbour.
-fn sample_corner(flags: u32, tex_window: u32, uvf: vec2<f32>) -> vec4<f32> {
-    let uv8 = apply_tex_window(page_uv(uvf), tex_window);
+fn sample_corner(flags: u32, tex_window: u32, bounds: vec4<f32>, uvf: vec2<f32>) -> vec4<f32> {
+    // Clamp the tap to the primitive's UV bounding box so a corner at a
+    // texture edge can't sample the neighbouring texture packed next to it in
+    // the VRAM page -- that cross-texture bleed is the tile-seam artefact.
+    let clamped = clamp(uvf, bounds.xy, bounds.zw);
+    let uv8 = apply_tex_window(page_uv(clamped), tex_window);
     let word = sample_texel(flags, uv8);
     if word == 0u {
         return vec4<f32>(0.0, 0.0, 0.0, 0.0);
@@ -185,15 +192,26 @@ fn sample_corner(flags: u32, tex_window: u32, uvf: vec2<f32>) -> vec4<f32> {
 // sprite silhouette and semi-transparency passes stay pixel-identical to
 // nearest sampling; only the interior colour is smoothed. `fallback` is the
 // center colour, used when all four corners are transparent.
-fn bilinear_rgb(flags: u32, tex_window: u32, uv: vec2<f32>, fallback: vec3<f32>) -> vec3<f32> {
+fn bilinear_rgb(flags: u32, tex_window: u32, uv_bounds: u32, uv: vec2<f32>, sharpness: f32, fallback: vec3<f32>) -> vec3<f32> {
+    // Unpack the primitive UV box (min_u|min_v<<8|max_u<<16|max_v<<24).
+    let bounds = vec4<f32>(
+        f32(uv_bounds & 0xFFu),
+        f32((uv_bounds >> 8u) & 0xFFu),
+        f32((uv_bounds >> 16u) & 0xFFu),
+        f32((uv_bounds >> 24u) & 0xFFu),
+    );
     // -0.5 puts the sample at texel centers (PSX texel n covers [n, n+1)).
     let uvf = uv - vec2<f32>(0.5, 0.5);
     let base = floor(uvf);
-    let fr = uvf - base;
-    let c00 = sample_corner(flags, tex_window, base);
-    let c10 = sample_corner(flags, tex_window, base + vec2<f32>(1.0, 0.0));
-    let c01 = sample_corner(flags, tex_window, base + vec2<f32>(0.0, 1.0));
-    let c11 = sample_corner(flags, tex_window, base + vec2<f32>(1.0, 1.0));
+    // Sharpen the interpolation ramp: sharpness 1 = plain bilinear; higher
+    // compresses the blend into a narrow band at each texel edge, so texel
+    // interiors stay crisp and only the seam between texels antialiases. This
+    // is "sharp bilinear" -- far less blur than full bilinear.
+    let fr = clamp((uvf - base - 0.5) * sharpness + 0.5, vec2<f32>(0.0), vec2<f32>(1.0));
+    let c00 = sample_corner(flags, tex_window, bounds, base);
+    let c10 = sample_corner(flags, tex_window, bounds, base + vec2<f32>(1.0, 0.0));
+    let c01 = sample_corner(flags, tex_window, bounds, base + vec2<f32>(0.0, 1.0));
+    let c11 = sample_corner(flags, tex_window, bounds, base + vec2<f32>(1.0, 1.0));
     let top = mix(c00, c10, fr.x);
     let bot = mix(c01, c11, fr.x);
     let acc = mix(top, bot, fr.y);
@@ -235,8 +253,11 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     }
     let center_rgb = bgr15_to_rgb(texel);
     var tex_rgb = center_rgb;
-    if u_filter.x == 1u {
-        tex_rgb = bilinear_rgb(in.flags, in.tex_window, in.uv, center_rgb);
+    // 1 = bilinear (smooth), 2 = sharp bilinear (crisp). Both clamp taps to the
+    // primitive UV box so neither bleeds across a texture edge.
+    if u_filter.x >= 1u {
+        let sharpness = select(1.0, 3.0, u_filter.x == 2u);
+        tex_rgb = bilinear_rgb(in.flags, in.tex_window, in.uv_bounds, in.uv, sharpness, center_rgb);
     }
     let raw = (in.flags & FLAG_RAW_TEXTURE) != 0u;
     let rgb = modulate(tex_rgb, in.color, raw);
