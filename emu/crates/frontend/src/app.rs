@@ -103,43 +103,6 @@ pub enum ScaleMode {
     Native,
 }
 
-/// In-shader texture filter, cycled from the toolbar. Mirrors
-/// `psx_gpu_render::TextureFilter`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum TextureFilter {
-    /// No post-process; raw PSX-native output.
-    #[default]
-    None,
-    /// xBR edge-directed screen-space upscaler.
-    Xbr,
-}
-
-impl TextureFilter {
-    /// Next mode in the cycle (wraps). Extend here when more filters land.
-    pub fn next(self) -> Self {
-        match self {
-            TextureFilter::None => TextureFilter::Xbr,
-            TextureFilter::Xbr => TextureFilter::None,
-        }
-    }
-
-    /// Short label for the toolbar tooltip.
-    pub fn label(self) -> &'static str {
-        match self {
-            TextureFilter::None => "None",
-            TextureFilter::Xbr => "xBR",
-        }
-    }
-
-    /// Map to the renderer's filter enum.
-    pub fn to_render(self) -> psx_gpu_render::TextureFilter {
-        match self {
-            TextureFilter::None => psx_gpu_render::TextureFilter::None,
-            TextureFilter::Xbr => psx_gpu_render::TextureFilter::Xbr,
-        }
-    }
-}
-
 /// Active host workspace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Workspace {
@@ -271,8 +234,6 @@ pub struct AppState {
     /// Framebuffer mode -- shared HW renderer at native scale vs
     /// window-fitted high resolution. Toggled via the debug toolbar.
     pub scale_mode: ScaleMode,
-    /// In-shader texture filter (None/Bilinear), cycled from the toolbar.
-    pub texture_filter: TextureFilter,
     /// Physical pixel size used by the central framebuffer on the
     /// previous UI frame. The renderer uses this as its internal
     /// resolution budget; one-frame latency is fine because it only
@@ -462,7 +423,6 @@ impl AppState {
             burn: BurnState::default(),
             panels: PanelVisibility::startup(),
             scale_mode: ScaleMode::default(),
-            texture_filter: TextureFilter::default(),
             framebuffer_present_size_px: (320, 240),
             cpu,
             freelook: emulator_core::FreelookState::default(),
