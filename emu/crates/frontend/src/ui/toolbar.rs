@@ -42,7 +42,7 @@ const TOOLBAR_CLUSTER_GAP: f32 = 8.0;
 /// controls render right-anchored and are clipped to this width, so it must
 /// comfortably exceed their natural content width -- otherwise the leftmost
 /// button (the native/high-res scale toggle) loses its left edge to the clip.
-const CONTROLS_WIDTH: f32 = 540.0;
+const CONTROLS_WIDTH: f32 = 580.0;
 /// Keep enough room for the status dot + RUNNING/PAUSED label.
 const METRICS_MIN_WIDTH: f32 = 116.0;
 /// Slider width used in the toolbar.
@@ -63,60 +63,111 @@ const METRIC_LABEL: Color32 = Color32::from_rgb(102, 102, 115);
 
 /// Paint the top toolbar. Called once per frame before the central
 /// panel so the framebuffer clips underneath it.
+///
+/// The bar slides up when hidden: the panel height animates to 0 while
+/// the row stays anchored to the panel's bottom edge, so the whole
+/// cluster translates up and clips off under the window top. A small
+/// floating tab in the top-right corner brings it back.
 pub fn draw(ctx: &Context, state: &mut AppState) {
-    TopBottomPanel::top("toolbar")
-        .resizable(false)
-        .exact_height(BAR_HEIGHT)
+    // 0.0 = fully shown, 1.0 = fully hidden.
+    let t = ctx.animate_bool_with_time(
+        egui::Id::new("toolbar_slide"),
+        state.toolbar_hidden,
+        0.22,
+    );
+    let height = (BAR_HEIGHT * (1.0 - t)).max(0.0);
+
+    if height >= 0.5 {
+        TopBottomPanel::top("toolbar")
+            .resizable(false)
+            .exact_height(height)
+            .show(ctx, |ui| {
+                let panel_rect = ui.max_rect();
+                // Anchor the row to the panel bottom at full height; the
+                // shrinking panel clips the overflow above -> slide-up.
+                let row_top = panel_rect.bottom() - BAR_HEIGHT;
+                let row_left = panel_rect.left() + TOOLBAR_MARGIN_X;
+                let row_right = (panel_rect.right() - TOOLBAR_MARGIN_X).max(row_left);
+                let row_rect = Rect::from_min_max(
+                    egui::pos2(row_left, row_top),
+                    egui::pos2(row_right, panel_rect.bottom()),
+                );
+
+                let controls_width = CONTROLS_WIDTH
+                    .min((row_rect.width() - METRICS_MIN_WIDTH - TOOLBAR_CLUSTER_GAP).max(0.0));
+                let controls_left = (row_rect.right() - controls_width).max(row_rect.left());
+                let metrics_right = (controls_left - TOOLBAR_CLUSTER_GAP).max(row_rect.left());
+
+                let metrics_rect = Rect::from_min_max(
+                    egui::pos2(row_rect.left(), row_rect.top()),
+                    egui::pos2(metrics_right, row_rect.bottom()),
+                );
+                let controls_rect = Rect::from_min_max(
+                    egui::pos2(controls_left, row_rect.top()),
+                    egui::pos2(row_rect.right(), row_rect.bottom()),
+                );
+
+                ui.scope_builder(
+                    egui::UiBuilder::new()
+                        .max_rect(metrics_rect)
+                        .layout(Layout::left_to_right(Align::Center)),
+                    |ui| {
+                        ui.set_clip_rect(metrics_rect.intersect(panel_rect));
+                        ui.set_width(metrics_rect.width());
+                        ui.set_height(metrics_rect.height());
+                        draw_metrics(ui, state, metrics_rect.width());
+                    },
+                );
+
+                ui.scope_builder(
+                    egui::UiBuilder::new()
+                        .max_rect(controls_rect)
+                        .layout(Layout::right_to_left(Align::Center)),
+                    |ui| {
+                        ui.set_clip_rect(controls_rect.intersect(panel_rect));
+                        ui.set_width(controls_rect.width());
+                        ui.set_height(controls_rect.height());
+                        draw_toolbar_controls(ui, state);
+                    },
+                );
+            });
+    }
+
+    // Fade the restore tab in only once the bar has mostly cleared, so it
+    // never overlaps the sliding toolbar.
+    if t > 0.5 {
+        draw_restore_tab(ctx, state, ((t - 0.5) / 0.5).clamp(0.0, 1.0));
+    }
+}
+
+/// Floating tab shown when the toolbar is hidden. Anchored to the
+/// top-right so it sits over the framebuffer corner; clicking pulls the
+/// bar back down. `opacity` fades it in with the slide.
+fn draw_restore_tab(ctx: &Context, state: &mut AppState, opacity: f32) {
+    egui::Area::new(egui::Id::new("toolbar_restore"))
+        .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-6.0, 6.0))
         .show(ctx, |ui| {
-            let panel_rect = ui.max_rect();
-            let row_left = panel_rect.left() + TOOLBAR_MARGIN_X;
-            let row_right = (panel_rect.right() - TOOLBAR_MARGIN_X).max(row_left);
-            let row_rect = Rect::from_min_max(
-                egui::pos2(row_left, panel_rect.top()),
-                egui::pos2(row_right, panel_rect.bottom()),
-            );
-
-            let controls_width = CONTROLS_WIDTH
-                .min((row_rect.width() - METRICS_MIN_WIDTH - TOOLBAR_CLUSTER_GAP).max(0.0));
-            let controls_left = (row_rect.right() - controls_width).max(row_rect.left());
-            let metrics_right = (controls_left - TOOLBAR_CLUSTER_GAP).max(row_rect.left());
-
-            let metrics_rect = Rect::from_min_max(
-                egui::pos2(row_rect.left(), row_rect.top()),
-                egui::pos2(metrics_right, row_rect.bottom()),
-            );
-            let controls_rect = Rect::from_min_max(
-                egui::pos2(controls_left, row_rect.top()),
-                egui::pos2(row_rect.right(), row_rect.bottom()),
-            );
-
-            ui.scope_builder(
-                egui::UiBuilder::new()
-                    .max_rect(metrics_rect)
-                    .layout(Layout::left_to_right(Align::Center)),
-                |ui| {
-                    ui.set_clip_rect(metrics_rect);
-                    ui.set_width(metrics_rect.width());
-                    ui.set_height(metrics_rect.height());
-                    draw_metrics(ui, state, metrics_rect.width());
-                },
-            );
-
-            ui.scope_builder(
-                egui::UiBuilder::new()
-                    .max_rect(controls_rect)
-                    .layout(Layout::right_to_left(Align::Center)),
-                |ui| {
-                    ui.set_clip_rect(controls_rect);
-                    ui.set_width(controls_rect.width());
-                    ui.set_height(controls_rect.height());
-                    draw_toolbar_controls(ui, state);
-                },
-            );
+            ui.set_opacity(opacity);
+            egui::Frame::new()
+                .fill(ui.visuals().panel_fill)
+                .corner_radius(6.0)
+                .inner_margin(egui::Margin::symmetric(2, 0))
+                .show(ui, |ui| {
+                    let btn = icon_button(icons::CARET_DOWN);
+                    if ui.add(btn).on_hover_text("Show toolbar").clicked() {
+                        state.toolbar_hidden = false;
+                    }
+                });
         });
 }
 
 fn draw_toolbar_controls(ui: &mut egui::Ui, state: &mut AppState) {
+    // Right-to-left layout: first added sits furthest right.
+    let hide_btn = icon_button(icons::CARET_UP);
+    if ui.add(hide_btn).on_hover_text("Hide toolbar").clicked() {
+        state.toolbar_hidden = true;
+    }
+    ui.add_space(TOOLBAR_CLUSTER_GAP);
     draw_buttons(ui, state);
     ui.add_space(TOOLBAR_CLUSTER_GAP);
     draw_audio_controls(ui, state);
