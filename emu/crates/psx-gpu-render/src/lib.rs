@@ -53,7 +53,6 @@ pub mod decode;
 pub mod from_ot;
 pub mod interpreter;
 pub mod pipeline;
-pub mod post;
 pub mod primitive;
 pub mod rasterizer;
 pub mod replay;
@@ -64,7 +63,6 @@ pub mod vram;
 
 pub use from_ot::build_cmd_log;
 pub use pipeline::{BlendKind, HwPipeline, HwVertex};
-pub use post::{PostFx, XBR_SCALE};
 pub use target::{RenderTarget, MAX_SCALE, VRAM_HEIGHT, VRAM_WIDTH};
 pub use translator::{DrawRun, TranslatedFrame, Translator};
 
@@ -103,10 +101,6 @@ pub struct HwRenderer {
     target: RenderTarget,
     translator: Translator,
     texture_words: Vec<u16>,
-    /// Screen-space upscaler (xBR). Runs after the target is drawn when a
-    /// filter is active; the frontend paints its output instead of the target.
-    postfx: PostFx,
-    filter: TextureFilter,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -135,18 +129,6 @@ pub enum ScaleMode {
     Window,
 }
 
-/// Screen-space post-process filter. Mirrors the frontend's
-/// `app::TextureFilter`. Filtering runs on the composited frame (see
-/// [`PostFx`]), so it has no per-texture VRAM seams.
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
-pub enum TextureFilter {
-    /// No post-process; the raw HW target is presented.
-    #[default]
-    None,
-    /// xBR edge-directed upscaler.
-    Xbr,
-}
-
 impl HwRenderer {
     /// Live constructor -- registers the target with `egui_renderer`
     /// so the central panel can paint it. Initial scale = 1; bump
@@ -158,7 +140,6 @@ impl HwRenderer {
     ) -> Self {
         let pipeline = HwPipeline::new(&device);
         let target = RenderTarget::new(&device, &queue, egui_renderer);
-        let postfx = PostFx::new(device.clone(), queue.clone(), Some(egui_renderer));
         Self {
             device,
             queue,
@@ -166,8 +147,6 @@ impl HwRenderer {
             target,
             translator: Translator::new(),
             texture_words: vec![0; (VRAM_WIDTH * VRAM_HEIGHT) as usize],
-            postfx,
-            filter: TextureFilter::None,
         }
     }
 
@@ -176,7 +155,6 @@ impl HwRenderer {
     pub fn new_headless(device: wgpu::Device, queue: wgpu::Queue) -> Self {
         let pipeline = HwPipeline::new(&device);
         let target = RenderTarget::new_headless(&device, &queue);
-        let postfx = PostFx::new(device.clone(), queue.clone(), None);
         Self {
             device,
             queue,
@@ -184,8 +162,6 @@ impl HwRenderer {
             target,
             translator: Translator::new(),
             texture_words: vec![0; (VRAM_WIDTH * VRAM_HEIGHT) as usize],
-            postfx,
-            filter: TextureFilter::None,
         }
     }
 
@@ -228,39 +204,6 @@ impl HwRenderer {
     ) -> bool {
         self.target
             .ensure_scale(&self.device, &self.queue, egui_renderer, scale)
-    }
-
-    /// Select the active post-process filter. Cheap; call every frame.
-    pub fn set_texture_filter(&mut self, filter: TextureFilter) {
-        self.filter = filter;
-    }
-
-    /// True when a post-process filter is active (the frontend should paint
-    /// [`HwRenderer::filtered_texture_id`] instead of the raw target).
-    pub fn filter_active(&self) -> bool {
-        self.filter != TextureFilter::None
-    }
-
-    /// egui id of the post-process output texture.
-    pub fn filtered_texture_id(&self) -> egui::TextureId {
-        self.postfx.texture_id()
-    }
-
-    /// Read the post-process (xBR) output back to RGBA8 (headless dump).
-    pub fn read_filtered_rgba8(&self) -> (u32, u32, Vec<u8>) {
-        self.postfx.read_rgba8()
-    }
-
-    /// Size the post-process output for the current display sub-rect. Frontend
-    /// drives this (it owns the egui renderer), like [`HwRenderer::set_internal_scale`].
-    pub fn update_postfx_size(
-        &mut self,
-        display_size: (u32, u32),
-        egui_renderer: Option<&mut egui_wgpu::Renderer>,
-    ) {
-        if self.filter != TextureFilter::None {
-            self.postfx.ensure_size(display_size, egui_renderer);
-        }
     }
 
     /// Rebuild the persistent HW target from the CPU VRAM mirror.
@@ -316,23 +259,6 @@ impl HwRenderer {
             }
         }
         self.render_draw_segment(&cmd_log[segment_start..], gpu.wireframe_enabled);
-
-        // Post-process: xBR-upscale the display sub-rect into the postfx output,
-        // which the frontend paints instead of the raw target. The frontend
-        // forces native scale (S=1) when a filter is active, so the display rect
-        // is in native target texels; ensure_size already sized the output.
-        if self.filter != TextureFilter::None {
-            let area = gpu.display_area();
-            self.postfx.run(
-                self.target.view(),
-                (
-                    area.x as u32,
-                    area.y as u32,
-                    area.width as u32,
-                    area.height as u32,
-                ),
-            );
-        }
     }
 
     fn render_draw_segment(&mut self, cmd_log: &[GpuCmdLogEntry], wireframe: bool) {
