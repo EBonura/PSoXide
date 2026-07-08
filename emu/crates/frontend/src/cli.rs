@@ -305,7 +305,7 @@ pub struct LaunchArgs {
     /// per-frame accumulation, or `--dump-hw` for a single-frame edge render.
     #[arg(long)]
     pub wireframe: bool,
-    /// Sample-time texture filter for `--dump-hw`: none|bilinear|jinc2|xbr.
+    /// Sample-time texture filter for `--dump-hw`: none|xbr.
     #[arg(long, default_value = "none")]
     pub texture_filter: String,
 }
@@ -3127,8 +3127,6 @@ fn region_label(e: &LibraryEntry) -> &'static str {
 
 fn parse_texture_filter(s: &str) -> u32 {
     match s.to_ascii_lowercase().as_str() {
-        "bilinear" => 1,
-        "jinc2" => 2,
         "xbr" => 3,
         _ => 0,
     }
