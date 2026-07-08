@@ -279,18 +279,6 @@ fn draw_debug_toggles(ui: &mut egui::Ui, state: &mut AppState) {
             ScaleMode::Native => ScaleMode::Window,
         };
     }
-    // Texture filter: cycle None -> Bilinear (-> ... future modes). Active tint
-    // whenever a filter is on; click advances to the next mode.
-    let filter_active = state.texture_filter != app::TextureFilter::None;
-    let filter_btn = toggle_button(icons::LAYERS, filter_active);
-    if ui
-        .add(filter_btn)
-        .on_hover_text(format!("Texture filter: {}", state.texture_filter.label()))
-        .clicked()
-    {
-        state.texture_filter = state.texture_filter.next();
-        state.status_message_set(format!("Texture filter: {}", state.texture_filter.label()));
-    }
 }
 
 /// One flag-backed toggle button. Tooltip + tint reflect the flag;
