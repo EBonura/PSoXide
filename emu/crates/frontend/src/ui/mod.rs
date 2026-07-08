@@ -56,9 +56,9 @@ pub fn draw_layout(
     // docks next so the framebuffer gives it room.
     toolbar::draw(ctx, state);
 
-    if state.panels.debug_sidebar {
-        debug_sidebar::draw(ctx, state, vram_tex);
-    }
+    // Always called: the sidebar animates itself open/closed from the
+    // `debug_sidebar` flag and early-returns when fully closed.
+    debug_sidebar::draw(ctx, state, vram_tex);
 
     // Zero-margin frame: the game screen gets every pixel between the
     // toolbar and the sidebar; the 4:3 letterbox bars are plain black,
