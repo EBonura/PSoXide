@@ -189,6 +189,203 @@ fn tex_corner(flags: u32, tex_window: u32, uvf: vec2<f32>) -> vec4<f32> {
     return vec4<f32>(bgr15_to_rgb(w), 1.0);
 }
 
+// JINC2: Hyllian's windowed-jinc 2-lobe + anti-ringing (beetle-psx / DuckStation
+// port). Samples a 4x4 texel neighbourhood via tex_corner (premultiplied,
+// binary alpha), so transparent neighbours never bleed. Returns (rgb, coverage).
+fn jinc_resampler(x: vec4<f32>) -> vec4<f32> {
+    let wa = 1.382300768;
+    let wb = 2.576105976;
+    let a = sin(x * wa) * sin(x * wb) / (x * x);
+    return select(a, vec4<f32>(wa * wb), x == vec4<f32>(0.0));
+}
+
+fn filter_jinc2(flags: u32, tw: u32, uv: vec2<f32>) -> vec4<f32> {
+    let dx = vec2<f32>(1.0, 0.0);
+    let dy = vec2<f32>(0.0, 1.0);
+    let pc = uv;
+    let tc = floor(pc - vec2<f32>(0.5, 0.5)) + vec2<f32>(0.5, 0.5);
+    let w0 = jinc_resampler(vec4<f32>(length(pc - (tc - dx - dy)), length(pc - (tc - dy)), length(pc - (tc + dx - dy)), length(pc - (tc + 2.0 * dx - dy))));
+    let w1 = jinc_resampler(vec4<f32>(length(pc - (tc - dx)), length(pc - tc), length(pc - (tc + dx)), length(pc - (tc + 2.0 * dx))));
+    let w2 = jinc_resampler(vec4<f32>(length(pc - (tc - dx + dy)), length(pc - (tc + dy)), length(pc - (tc + dx + dy)), length(pc - (tc + 2.0 * dx + dy))));
+    let w3 = jinc_resampler(vec4<f32>(length(pc - (tc - dx + 2.0 * dy)), length(pc - (tc + 2.0 * dy)), length(pc - (tc + dx + 2.0 * dy)), length(pc - (tc + 2.0 * dx + 2.0 * dy))));
+    let c00 = tex_corner(flags, tw, tc - dx - dy); let c10 = tex_corner(flags, tw, tc - dy); let c20 = tex_corner(flags, tw, tc + dx - dy); let c30 = tex_corner(flags, tw, tc + 2.0 * dx - dy);
+    let c01 = tex_corner(flags, tw, tc - dx); let c11 = tex_corner(flags, tw, tc); let c21 = tex_corner(flags, tw, tc + dx); let c31 = tex_corner(flags, tw, tc + 2.0 * dx);
+    let c02 = tex_corner(flags, tw, tc - dx + dy); let c12 = tex_corner(flags, tw, tc + dy); let c22 = tex_corner(flags, tw, tc + dx + dy); let c32 = tex_corner(flags, tw, tc + 2.0 * dx + dy);
+    let c03 = tex_corner(flags, tw, tc - dx + 2.0 * dy); let c13 = tex_corner(flags, tw, tc + 2.0 * dy); let c23 = tex_corner(flags, tw, tc + dx + 2.0 * dy); let c33 = tex_corner(flags, tw, tc + 2.0 * dx + 2.0 * dy);
+    let wsum = dot(w0, vec4<f32>(1.0)) + dot(w1, vec4<f32>(1.0)) + dot(w2, vec4<f32>(1.0)) + dot(w3, vec4<f32>(1.0));
+    var color = w0.x * c00.rgb + w0.y * c10.rgb + w0.z * c20.rgb + w0.w * c30.rgb;
+    color += w1.x * c01.rgb + w1.y * c11.rgb + w1.z * c21.rgb + w1.w * c31.rgb;
+    color += w2.x * c02.rgb + w2.y * c12.rgb + w2.z * c22.rgb + w2.w * c32.rgb;
+    color += w3.x * c03.rgb + w3.y * c13.rgb + w3.z * c23.rgb + w3.w * c33.rgb;
+    color = color / wsum;
+    var alpha = w0.x * c00.a + w0.y * c10.a + w0.z * c20.a + w0.w * c30.a;
+    alpha += w1.x * c01.a + w1.y * c11.a + w1.z * c21.a + w1.w * c31.a;
+    alpha += w2.x * c02.a + w2.y * c12.a + w2.z * c22.a + w2.w * c32.a;
+    alpha += w3.x * c03.a + w3.y * c13.a + w3.z * c23.a + w3.w * c33.a;
+    alpha = alpha / wsum;
+    // Anti-ringing: pull back toward the centre-4 range.
+    let mn = min(min(c11.rgb, c21.rgb), min(c12.rgb, c22.rgb));
+    let mx = max(max(c11.rgb, c21.rgb), max(c12.rgb, c22.rgb));
+    color = mix(color, clamp(color, mn, mx), 0.8);
+    if alpha > 0.0 {
+        color = color / alpha;
+    }
+    return vec4<f32>(color, alpha);
+}
+
+// xBR: Hyllian's xBR-vertex, sample-time port (DuckStation shadergen). Samples a
+// 5x5 texel neighbourhood via tex_corner (premultiplied, binary alpha). Edge-
+// directed: sharp on drawn art, but poor on dithered/tiled 2D content.
+const XBR_LUM: f32 = 1.0;
+const XBR_EQ_TOL: f32 = 0.1176470588235294;
+const XBR_STEEP: f32 = 2.2;
+const XBR_DOMINANT: f32 = 3.6;
+const XBR_W: vec4<f32> = vec4<f32>(0.2627, 0.6780, 0.0593, 0.5);
+
+fn xbr_dist(a: vec4<f32>, b: vec4<f32>) -> f32 {
+    let scaleB = 0.5 / (1.0 - XBR_W.b);
+    let scaleR = 0.5 / (1.0 - XBR_W.r);
+    let diff = a - b;
+    let Y = dot(diff, XBR_W);
+    let Cb = scaleB * (diff.b - Y);
+    let Cr = scaleR * (diff.r - Y);
+    return sqrt((XBR_LUM * Y) * (XBR_LUM * Y) + Cb * Cb + Cr * Cr);
+}
+
+fn xbr_eq(a: vec4<f32>, b: vec4<f32>) -> bool { return xbr_dist(a, b) < XBR_EQ_TOL; }
+fn xbr_veq(a: vec4<f32>, b: vec4<f32>) -> bool { return all(a == b); }
+fn xbr_vneq(a: vec4<f32>, b: vec4<f32>) -> bool { return !all(a == b); }
+
+fn xbr_left_ratio(center: vec2<f32>, origin: vec2<f32>, direction: vec2<f32>, scale: vec2<f32>) -> f32 {
+    let P0 = center - origin;
+    let proj = direction * (dot(P0, direction) / dot(direction, direction));
+    let distv = P0 - proj;
+    let orth = vec2<f32>(-direction.y, direction.x);
+    let side = sign(dot(P0, orth));
+    let v = side * length(distv * scale);
+    let s = sqrt(2.0) / 2.0;
+    return smoothstep(-s, s, v);
+}
+
+fn filter_xbr(flags: u32, tw: u32, uv: vec2<f32>) -> vec4<f32> {
+    let coords = uv;
+    let scale = vec2<f32>(8.0, 8.0);
+    let pos = fract(coords) - vec2<f32>(0.5, 0.5);
+    let coord = coords - pos;
+
+    let A = tex_corner(flags, tw, coord + vec2<f32>(-1.0, -1.0));
+    let B = tex_corner(flags, tw, coord + vec2<f32>(0.0, -1.0));
+    let C = tex_corner(flags, tw, coord + vec2<f32>(1.0, -1.0));
+    let D = tex_corner(flags, tw, coord + vec2<f32>(-1.0, 0.0));
+    let E = tex_corner(flags, tw, coord + vec2<f32>(0.0, 0.0));
+    let F = tex_corner(flags, tw, coord + vec2<f32>(1.0, 0.0));
+    let G = tex_corner(flags, tw, coord + vec2<f32>(-1.0, 1.0));
+    let H = tex_corner(flags, tw, coord + vec2<f32>(0.0, 1.0));
+    let I = tex_corner(flags, tw, coord + vec2<f32>(1.0, 1.0));
+
+    var br = vec4<i32>(0, 0, 0, 0); // x|y / w|z
+
+    if !((xbr_veq(E, F) && xbr_veq(H, I)) || (xbr_veq(E, H) && xbr_veq(F, I))) {
+        let dist_H_F = xbr_dist(G, E) + xbr_dist(E, C) + xbr_dist(tex_corner(flags, tw, coord + vec2<f32>(0.0, 2.0)), I) + xbr_dist(I, tex_corner(flags, tw, coord + vec2<f32>(2.0, 0.0))) + 4.0 * xbr_dist(H, F);
+        let dist_E_I = xbr_dist(D, H) + xbr_dist(H, tex_corner(flags, tw, coord + vec2<f32>(1.0, 2.0))) + xbr_dist(B, F) + xbr_dist(F, tex_corner(flags, tw, coord + vec2<f32>(2.0, 1.0))) + 4.0 * xbr_dist(E, I);
+        let dom = (XBR_DOMINANT * dist_H_F) < dist_E_I;
+        if (dist_H_F < dist_E_I) && xbr_vneq(E, F) && xbr_vneq(E, H) { br.z = select(1, 2, dom); }
+    }
+    if !((xbr_veq(D, E) && xbr_veq(G, H)) || (xbr_veq(D, G) && xbr_veq(E, H))) {
+        let dist_G_E = xbr_dist(tex_corner(flags, tw, coord + vec2<f32>(-2.0, 1.0)), D) + xbr_dist(D, B) + xbr_dist(tex_corner(flags, tw, coord + vec2<f32>(-1.0, 2.0)), H) + xbr_dist(H, F) + 4.0 * xbr_dist(G, E);
+        let dist_D_H = xbr_dist(tex_corner(flags, tw, coord + vec2<f32>(-2.0, 0.0)), G) + xbr_dist(G, tex_corner(flags, tw, coord + vec2<f32>(0.0, 2.0))) + xbr_dist(A, E) + xbr_dist(E, I) + 4.0 * xbr_dist(D, H);
+        let dom = (XBR_DOMINANT * dist_D_H) < dist_G_E;
+        if (dist_G_E > dist_D_H) && xbr_vneq(E, D) && xbr_vneq(E, H) { br.w = select(1, 2, dom); }
+    }
+    if !((xbr_veq(B, C) && xbr_veq(E, F)) || (xbr_veq(B, E) && xbr_veq(C, F))) {
+        let dist_E_C = xbr_dist(D, B) + xbr_dist(B, tex_corner(flags, tw, coord + vec2<f32>(1.0, -2.0))) + xbr_dist(H, F) + xbr_dist(F, tex_corner(flags, tw, coord + vec2<f32>(2.0, -1.0))) + 4.0 * xbr_dist(E, C);
+        let dist_B_F = xbr_dist(A, E) + xbr_dist(E, I) + xbr_dist(tex_corner(flags, tw, coord + vec2<f32>(0.0, -2.0)), C) + xbr_dist(C, tex_corner(flags, tw, coord + vec2<f32>(2.0, 0.0))) + 4.0 * xbr_dist(B, F);
+        let dom = (XBR_DOMINANT * dist_B_F) < dist_E_C;
+        if (dist_E_C > dist_B_F) && xbr_vneq(E, B) && xbr_vneq(E, F) { br.y = select(1, 2, dom); }
+    }
+    if !((xbr_veq(A, B) && xbr_veq(D, E)) || (xbr_veq(A, D) && xbr_veq(B, E))) {
+        let dist_D_B = xbr_dist(tex_corner(flags, tw, coord + vec2<f32>(-2.0, 0.0)), A) + xbr_dist(A, tex_corner(flags, tw, coord + vec2<f32>(0.0, -2.0))) + xbr_dist(G, E) + xbr_dist(E, C) + 4.0 * xbr_dist(D, B);
+        let dist_A_E = xbr_dist(tex_corner(flags, tw, coord + vec2<f32>(-2.0, -1.0)), D) + xbr_dist(D, H) + xbr_dist(tex_corner(flags, tw, coord + vec2<f32>(-1.0, -2.0)), B) + xbr_dist(B, F) + 4.0 * xbr_dist(A, E);
+        let dom = (XBR_DOMINANT * dist_D_B) < dist_A_E;
+        if (dist_D_B < dist_A_E) && xbr_vneq(E, D) && xbr_vneq(E, B) { br.x = select(1, 2, dom); }
+    }
+
+    var res = E;
+    let inv_sqrt2 = 1.0 / sqrt(2.0);
+
+    if br.z != 0 {
+        let dist_F_G = xbr_dist(F, G);
+        let dist_H_C = xbr_dist(H, C);
+        let doLineBlend = br.z == 2 || !((br.y != 0 && !xbr_eq(E, G)) || (br.w != 0 && !xbr_eq(E, C)) || (xbr_eq(G, H) && xbr_eq(H, I) && xbr_eq(I, F) && xbr_eq(F, C) && !xbr_eq(E, I)));
+        var origin = vec2<f32>(0.0, inv_sqrt2);
+        var direction = vec2<f32>(1.0, -1.0);
+        if doLineBlend {
+            let shallow = (XBR_STEEP * dist_F_G <= dist_H_C) && xbr_vneq(E, G) && xbr_vneq(D, G);
+            let steep = (XBR_STEEP * dist_H_C <= dist_F_G) && xbr_vneq(E, C) && xbr_vneq(B, C);
+            origin = select(vec2<f32>(0.0, 0.5), vec2<f32>(0.0, 0.25), shallow);
+            direction.x += select(0.0, 1.0, shallow);
+            direction.y -= select(0.0, 1.0, steep);
+        }
+        let blendPix = mix(H, F, step(xbr_dist(E, F), xbr_dist(E, H)));
+        res = mix(res, blendPix, xbr_left_ratio(pos, origin, direction, scale));
+    }
+    if br.w != 0 {
+        let dist_H_A = xbr_dist(H, A);
+        let dist_D_I = xbr_dist(D, I);
+        let doLineBlend = br.w == 2 || !((br.z != 0 && !xbr_eq(E, A)) || (br.x != 0 && !xbr_eq(E, I)) || (xbr_eq(A, D) && xbr_eq(D, G) && xbr_eq(G, H) && xbr_eq(H, I) && !xbr_eq(E, G)));
+        var origin = vec2<f32>(-inv_sqrt2, 0.0);
+        var direction = vec2<f32>(1.0, 1.0);
+        if doLineBlend {
+            let shallow = (XBR_STEEP * dist_H_A <= dist_D_I) && xbr_vneq(E, A) && xbr_vneq(B, A);
+            let steep = (XBR_STEEP * dist_D_I <= dist_H_A) && xbr_vneq(E, I) && xbr_vneq(F, I);
+            origin = select(vec2<f32>(-0.5, 0.0), vec2<f32>(-0.25, 0.0), shallow);
+            direction.y += select(0.0, 1.0, shallow);
+            direction.x += select(0.0, 1.0, steep);
+        }
+        let blendPix = mix(H, D, step(xbr_dist(E, D), xbr_dist(E, H)));
+        res = mix(res, blendPix, xbr_left_ratio(pos, origin, direction, scale));
+    }
+    if br.y != 0 {
+        let dist_B_I = xbr_dist(B, I);
+        let dist_F_A = xbr_dist(F, A);
+        let doLineBlend = br.y == 2 || !((br.x != 0 && !xbr_eq(E, I)) || (br.z != 0 && !xbr_eq(E, A)) || (xbr_eq(I, F) && xbr_eq(F, C) && xbr_eq(C, B) && xbr_eq(B, A) && !xbr_eq(E, C)));
+        var origin = vec2<f32>(inv_sqrt2, 0.0);
+        var direction = vec2<f32>(-1.0, -1.0);
+        if doLineBlend {
+            let shallow = (XBR_STEEP * dist_B_I <= dist_F_A) && xbr_vneq(E, I) && xbr_vneq(H, I);
+            let steep = (XBR_STEEP * dist_F_A <= dist_B_I) && xbr_vneq(E, A) && xbr_vneq(D, A);
+            origin = select(vec2<f32>(0.5, 0.0), vec2<f32>(0.25, 0.0), shallow);
+            direction.y -= select(0.0, 1.0, shallow);
+            direction.x -= select(0.0, 1.0, steep);
+        }
+        let blendPix = mix(F, B, step(xbr_dist(E, B), xbr_dist(E, F)));
+        res = mix(res, blendPix, xbr_left_ratio(pos, origin, direction, scale));
+    }
+    if br.x != 0 {
+        let dist_D_C = xbr_dist(D, C);
+        let dist_B_G = xbr_dist(B, G);
+        let doLineBlend = br.x == 2 || !((br.w != 0 && !xbr_eq(E, C)) || (br.y != 0 && !xbr_eq(E, G)) || (xbr_eq(C, B) && xbr_eq(B, A) && xbr_eq(A, D) && xbr_eq(D, G) && !xbr_eq(E, A)));
+        var origin = vec2<f32>(0.0, -inv_sqrt2);
+        var direction = vec2<f32>(-1.0, 1.0);
+        if doLineBlend {
+            let shallow = (XBR_STEEP * dist_D_C <= dist_B_G) && xbr_vneq(E, C) && xbr_vneq(F, C);
+            let steep = (XBR_STEEP * dist_B_G <= dist_D_C) && xbr_vneq(E, G) && xbr_vneq(H, G);
+            origin = select(vec2<f32>(0.0, -0.5), vec2<f32>(0.0, -0.25), shallow);
+            direction.x -= select(0.0, 1.0, shallow);
+            direction.y += select(0.0, 1.0, steep);
+        }
+        let blendPix = mix(D, B, step(xbr_dist(E, B), xbr_dist(E, D)));
+        res = mix(res, blendPix, xbr_left_ratio(pos, origin, direction, scale));
+    }
+
+    var alpha = res.a;
+    var rgb = res.rgb;
+    if alpha > 0.0 {
+        rgb = rgb / alpha;
+    }
+    return vec4<f32>(rgb, alpha);
+}
+
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let textured = (in.flags & FLAG_TEXTURED) != 0u;
@@ -224,6 +421,16 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         let acc = mix(mix(c00, c10, fr.x), mix(c01, c11, fr.x), fr.y);
         if acc.a > 0.0039 {
             tex_rgb = acc.rgb / acc.a;
+        }
+    } else if u_texfilter.x == 2u {
+        let j = filter_jinc2(in.flags, in.tex_window, in.uv);
+        if j.a > 0.0039 {
+            tex_rgb = j.rgb;
+        }
+    } else if u_texfilter.x == 3u {
+        let x = filter_xbr(in.flags, in.tex_window, in.uv);
+        if x.a > 0.0039 {
+            tex_rgb = x.rgb;
         }
     }
     let raw = (in.flags & FLAG_RAW_TEXTURE) != 0u;

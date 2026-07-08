@@ -988,7 +988,7 @@ impl ApplicationHandler for Shell {
                 // target on change. Reallocation clears the target,
                 // so we immediately resync it from CPU VRAM before
                 // replaying this frame's command log.
-                gfx.set_hw_texture_filter(state.texture_filter);
+                gfx.set_hw_texture_filter(state.texture_filter.mode());
                 let scale_mode = match state.scale_mode {
                     app::ScaleMode::Native => psx_gpu_render::ScaleMode::Native,
                     app::ScaleMode::Window => psx_gpu_render::ScaleMode::Window,
