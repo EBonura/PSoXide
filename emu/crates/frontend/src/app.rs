@@ -211,32 +211,17 @@ pub mod bundled {
     }
 }
 
-/// Held state of the freelook-camera keys (see the toolbar EYE toggle).
-/// All are keyboard keys outside the PSX pad bindings, so they never
-/// double-drive the guest. Updated from keyboard events, applied per frame.
+/// Analog-stick drive for the freelook camera (see the toolbar EYE toggle
+/// and the L3+R3 pad chord). Filled each frame from the merged host sticks
+/// (keyboard-emulated + real gamepad); applied per frame. Left stick moves,
+/// right stick looks, matching the standard twin-stick freecam.
 #[derive(Copy, Clone, Default)]
-pub struct FreelookKeys {
-    /// `T` -- dolly forward.
-    pub fwd: bool,
-    /// `G` -- dolly back.
-    pub back: bool,
-    /// `F` -- strafe left.
-    pub left: bool,
-    /// `H` -- strafe right.
-    pub right: bool,
-    /// `U` -- rise.
-    pub up: bool,
-    /// `O` -- descend.
-    pub down: bool,
-    /// `I` -- pitch up.
-    pub pitch_up: bool,
-    /// `K` -- pitch down.
-    pub pitch_down: bool,
-    /// `J` -- yaw left.
-    pub yaw_left: bool,
-    /// `L` -- yaw right.
-    pub yaw_right: bool,
-    /// `Shift` -- move and look faster.
+pub struct FreelookInput {
+    /// Left stick, −1.0..=1.0 per axis. x = strafe, y = dolly (up = forward).
+    pub left: (f32, f32),
+    /// Right stick, −1.0..=1.0 per axis. x = yaw, y = pitch (up = look up).
+    pub right: (f32, f32),
+    /// Held while R2 is down -- move and look faster.
     pub boost: bool,
 }
 
@@ -285,8 +270,9 @@ pub struct AppState {
     /// Debug freelook camera pose pushed to the CPU each frame (off
     /// unless the toolbar EYE toggle is on).
     pub freelook: emulator_core::FreelookState,
-    /// Held state of the freelook keys, updated from keyboard events.
-    pub freelook_keys: FreelookKeys,
+    /// Latest twin-stick freelook drive, refreshed each frame from the
+    /// merged host sticks (only consumed while `freelook.enabled`).
+    pub freelook_input: FreelookInput,
     /// Optional because we let the frontend run without a BIOS for UI
     /// development. If absent, register panels show the reset-state CPU
     /// but no instruction stepping is possible. Unused until the step
@@ -470,7 +456,7 @@ impl AppState {
             framebuffer_present_size_px: (320, 240),
             cpu,
             freelook: emulator_core::FreelookState::default(),
-            freelook_keys: FreelookKeys::default(),
+            freelook_input: FreelookInput::default(),
             bus,
             gpu_resync_generation: initial_gpu_resync_generation,
             menu: MenuState::with_running(autorun),
@@ -2360,42 +2346,34 @@ pub struct StepFrameReport {
 /// Per-frame freelook integration: accumulate held-key deltas into the camera
 /// pose. ponytail: rates and signs are consts, easy to tune or flip if a
 /// direction feels inverted on real content (translation is in GTE view units).
-fn integrate_freelook(fl: &mut emulator_core::FreelookState, keys: &FreelookKeys) {
-    const LOOK: f32 = 0.03; // radians per frame
-    const MOVE: f32 = 24.0; // view units per frame
-    let boost = if keys.boost { 4.0 } else { 1.0 };
+fn integrate_freelook(fl: &mut emulator_core::FreelookState, input: &FreelookInput) {
+    const LOOK: f32 = 0.03; // radians per frame at full deflection
+    const MOVE: f32 = 24.0; // view units per frame at full deflection
+    const DEADZONE: f32 = 0.15; // ignore stick drift / resting jitter
+
+    // Radial deadzone + rescale so the usable range still spans 0..1.
+    let apply = |v: f32| -> f32 {
+        let a = v.abs();
+        if a <= DEADZONE {
+            0.0
+        } else {
+            ((a - DEADZONE) / (1.0 - DEADZONE)).min(1.0) * v.signum()
+        }
+    };
+    let (lx, ly) = (apply(input.left.0), apply(input.left.1));
+    let (rx, ry) = (apply(input.right.0), apply(input.right.1));
+
+    let boost = if input.boost { 4.0 } else { 1.0 };
     let (look, mv) = (LOOK * boost, MOVE * boost);
-    if keys.yaw_left {
-        fl.yaw += look;
-    }
-    if keys.yaw_right {
-        fl.yaw -= look;
-    }
-    if keys.pitch_up {
-        fl.pitch += look;
-    }
-    if keys.pitch_down {
-        fl.pitch -= look;
-    }
-    // Translation is applied in the rotated (look-relative) view frame.
-    if keys.fwd {
-        fl.tz -= mv;
-    }
-    if keys.back {
-        fl.tz += mv;
-    }
-    if keys.left {
-        fl.tx += mv;
-    }
-    if keys.right {
-        fl.tx -= mv;
-    }
-    if keys.up {
-        fl.ty -= mv;
-    }
-    if keys.down {
-        fl.ty += mv;
-    }
+
+    // Right stick looks: right = yaw right, up = pitch up. Signs match the
+    // old key scheme (yaw_right did -=, pitch_up did +=).
+    fl.yaw -= look * rx;
+    fl.pitch += look * ry;
+    // Left stick moves in the rotated (look-relative) view frame: up = dolly
+    // forward (tz -=), right = strafe right (tx -=).
+    fl.tz -= mv * ly;
+    fl.tx -= mv * lx;
 }
 
 pub fn step_one_frame(state: &mut AppState) -> StepFrameReport {
@@ -2403,7 +2381,7 @@ pub fn step_one_frame(state: &mut AppState) -> StepFrameReport {
     // Freelook: integrate held keys into the camera pose, then push it to the
     // GTE hook for this frame (a no-op while the toggle is off).
     if state.freelook.enabled {
-        integrate_freelook(&mut state.freelook, &state.freelook_keys);
+        integrate_freelook(&mut state.freelook, &state.freelook_input);
     }
     state.cpu.set_freelook(state.freelook);
     let Some(bus) = state.bus.as_mut() else {
