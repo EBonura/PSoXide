@@ -31,6 +31,12 @@ pub struct HwVertex {
     /// offset_y in the same pre-shifted pixel units used by the
     /// CPU GPU path.
     pub tex_window: u32,
+    /// Per-primitive texture UV bounding box in page space, packed as
+    /// four bytes: min_u, min_v, max_u, max_v. The bilinear filter clamps
+    /// its taps to this box so it never samples a neighbouring texture
+    /// packed elsewhere in the VRAM page (the tile-seam artefact). 0 on
+    /// untextured vertices (unused).
+    pub uv_bounds: u32,
 }
 
 /// `HwVertex::flags` bit layout. Host + shader must agree --
@@ -279,6 +285,12 @@ impl HwPipeline {
                     format: wgpu::VertexFormat::Uint32,
                     offset: 16,
                     shader_location: 4,
+                },
+                // uv_bounds: u32 → Uint32 (4 bytes), offset 20
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Uint32,
+                    offset: 20,
+                    shader_location: 5,
                 },
             ],
         };

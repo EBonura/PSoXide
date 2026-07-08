@@ -139,6 +139,9 @@ pub enum TextureFilter {
     None,
     /// CLUT-aware 2x2 bilinear on the texel colour; silhouette/STP stay nearest.
     Bilinear,
+    /// Sharp bilinear -- same taps, but the blend is compressed to a narrow band
+    /// at texel edges so interiors stay crisp (much less blur than Bilinear).
+    Sharp,
 }
 
 impl TextureFilter {
@@ -147,6 +150,7 @@ impl TextureFilter {
         match self {
             TextureFilter::None => 0,
             TextureFilter::Bilinear => 1,
+            TextureFilter::Sharp => 2,
         }
     }
 }
