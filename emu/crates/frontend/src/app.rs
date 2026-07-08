@@ -112,6 +112,8 @@ pub enum TextureFilter {
     None,
     /// CLUT-aware 2x2 bilinear (smooths texel colour, keeps the silhouette).
     Bilinear,
+    /// Sharp bilinear -- crisp interiors, antialiased texel edges (less blur).
+    Sharp,
 }
 
 impl TextureFilter {
@@ -119,7 +121,8 @@ impl TextureFilter {
     pub fn next(self) -> Self {
         match self {
             TextureFilter::None => TextureFilter::Bilinear,
-            TextureFilter::Bilinear => TextureFilter::None,
+            TextureFilter::Bilinear => TextureFilter::Sharp,
+            TextureFilter::Sharp => TextureFilter::None,
         }
     }
 
@@ -128,6 +131,7 @@ impl TextureFilter {
         match self {
             TextureFilter::None => "None",
             TextureFilter::Bilinear => "Bilinear",
+            TextureFilter::Sharp => "Sharp",
         }
     }
 
@@ -136,6 +140,7 @@ impl TextureFilter {
         match self {
             TextureFilter::None => psx_gpu_render::TextureFilter::None,
             TextureFilter::Bilinear => psx_gpu_render::TextureFilter::Bilinear,
+            TextureFilter::Sharp => psx_gpu_render::TextureFilter::Sharp,
         }
     }
 }

@@ -3130,6 +3130,7 @@ fn region_label(e: &LibraryEntry) -> &'static str {
 fn parse_texture_filter(s: &str) -> psx_gpu_render::TextureFilter {
     match s.to_ascii_lowercase().as_str() {
         "bilinear" => psx_gpu_render::TextureFilter::Bilinear,
+        "sharp" => psx_gpu_render::TextureFilter::Sharp,
         _ => psx_gpu_render::TextureFilter::None,
     }
 }
