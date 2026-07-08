@@ -279,9 +279,9 @@ fn draw_debug_toggles(ui: &mut egui::Ui, state: &mut AppState) {
             ScaleMode::Native => ScaleMode::Window,
         };
     }
-    // Sample-time texture filter: cycle None -> Bilinear -> JINC2 -> xBR.
+    // Sample-time texture filter: cycle None -> xBR.
     let tex_active = state.texture_filter != app::TextureFilter::None;
-    let tex_btn = toggle_button(icons::LAYERS, tex_active);
+    let tex_btn = toggle_button(icons::FILTER, tex_active);
     if ui
         .add(tex_btn)
         .on_hover_text(format!("Texture filter: {}", state.texture_filter.label()))
@@ -305,9 +305,13 @@ fn debug_toggle(ui: &mut egui::Ui, icon: char, tooltip: &str, flag: &mut bool) {
 /// vs. inactive state. Keeps the toggle cluster visually coherent.
 fn toggle_button(icon: char, active: bool) -> Button<'static> {
     let color = if active { STATUS_RUNNING } else { METRIC_LABEL };
-    let label = RichText::new(icon.to_string())
-        .font(icons::font(ICON_SIZE))
-        .color(color);
+    // Active toggles use the solid (fill) weight, inactive the outline.
+    let icon_font = if active {
+        icons::font_fill(ICON_SIZE)
+    } else {
+        icons::font(ICON_SIZE)
+    };
+    let label = RichText::new(icon.to_string()).font(icon_font).color(color);
     // `Extend` stops egui truncating/clipping the glyph to its advance width;
     // some Lucide icons (e.g. DISC) have ink that overruns the advance and
     // would otherwise render with the right edge sliced off in the tight button.
