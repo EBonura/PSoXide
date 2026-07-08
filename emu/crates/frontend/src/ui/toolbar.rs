@@ -78,11 +78,23 @@ pub fn draw(ctx: &Context, state: &mut AppState) {
     let height = (BAR_HEIGHT * (1.0 - t)).max(0.0);
 
     if height >= 0.5 {
+        // Zero-margin frame so `max_rect()` is exactly [0, height]; we paint
+        // the fill/separator ourselves and place the row by hand. With the
+        // default frame's inner margin the bottom-anchored row math would be
+        // off by the margin and the buttons would sit too high.
+        let panel_fill = ctx.style().visuals.panel_fill;
+        let separator = ctx.style().visuals.widgets.noninteractive.bg_stroke;
         TopBottomPanel::top("toolbar")
             .resizable(false)
             .exact_height(height)
+            .frame(egui::Frame::NONE.fill(panel_fill))
             .show(ctx, |ui| {
                 let panel_rect = ui.max_rect();
+                ui.painter().hline(
+                    panel_rect.x_range(),
+                    panel_rect.bottom() - 0.5,
+                    separator,
+                );
                 // Anchor the row to the panel bottom at full height; the
                 // shrinking panel clips the overflow above -> slide-up.
                 let row_top = panel_rect.bottom() - BAR_HEIGHT;
