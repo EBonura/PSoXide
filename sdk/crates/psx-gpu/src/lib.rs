@@ -356,6 +356,17 @@ pub fn draw_line_gouraud(x0: i16, y0: i16, c0: (u8, u8, u8), x1: i16, y1: i16, c
     write_gp0(pack_vertex(x1, y1));
 }
 
+/// Fill an axis-aligned rectangle with a flat color, as a polygon draw.
+///
+/// Unlike [`fill_rect`] (the GP0 02h VRAM fill), this goes through the
+/// rasterizer, so it respects the draw area and draw offset and works with
+/// double-buffered coordinates; it is the right call for UI panels and HUD
+/// backgrounds.
+pub fn draw_rect_flat(x: i16, y: i16, w: u16, h: u16, r: u8, g: u8, b: u8) {
+    let (x1, y1) = (x + w as i16, y + h as i16);
+    draw_quad_flat([(x, y), (x1, y), (x, y1), (x1, y1)], r, g, b);
+}
+
 /// Draw a flat-shaded quad (two triangles sharing the v1-v2 edge).
 pub fn draw_quad_flat(verts: [(i16, i16); 4], r: u8, g: u8, b: u8) {
     wait_cmd_ready();
