@@ -8,6 +8,7 @@
   <a href="LICENSE"><img alt="License: GPL-2.0-or-later" src="https://img.shields.io/badge/license-GPL--2.0--or--later-blue.svg"></a>
   <img alt="Rust: nightly" src="https://img.shields.io/badge/rust-nightly-orange.svg">
   <img alt="Platforms: macOS · Linux · Windows" src="https://img.shields.io/badge/platforms-macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-lightgrey.svg">
+  <a href="https://ebonura.github.io/PSoXide/"><img alt="Web emulator: live" src="https://img.shields.io/badge/web%20emulator-live-brightgreen.svg"></a>
 </p>
 
 **PSoXide is an open-source PlayStation 1 development stack written in Rust.**
@@ -15,6 +16,11 @@ It brings together an accuracy-focused **emulator** and debugger, a bare-metal
 **SDK**, a runtime **engine**, an asset **editor**, and **disc tooling**. The
 pipeline is designed to author content, cook PS1-ready assets, build CUE/BIN
 disc images, and run them in emulators or on original hardware.
+
+**Try it now:** the emulator runs in your browser at
+[ebonura.github.io/PSoXide](https://ebonura.github.io/PSoXide/), booting the
+bundled homebrew Celeste Classic Collection. No install, no BIOS; it rebuilds
+and redeploys from `main` on every push.
 
 The primary reference project is a dark, third-person PS1 action-RPG vertical
 slice. The public tools are built around proving the full workflow end to end.
@@ -25,8 +31,10 @@ slice. The public tools are built around proving the full workflow end to end.
 | ![PSoXide emulator](assets/media/readme/emulator-preview.png) | ![Streamed playtest](assets/media/readme/demo3-playtest.png) |
 
 > **Pre-release software.** The end-to-end pipeline works, but APIs, file
-> formats, and editor workflows may still change. There are no release binaries
-> yet; build from source. Project page:
+> formats, and editor workflows may still change. There are no native release
+> binaries yet; build from source, or try the
+> [web emulator](https://ebonura.github.io/PSoXide/) without installing
+> anything. Project page:
 > [bonnie-games.itch.io/psoxide](https://bonnie-games.itch.io/psoxide).
 
 ## Features
