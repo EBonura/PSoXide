@@ -82,6 +82,7 @@ version = "0.1.0"
 name = "psx-mc"
 version = "0.1.0"
 dependencies = [
+ "psx-hw",
  "psx-io",
 ]
 
