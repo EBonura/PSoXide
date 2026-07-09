@@ -21,6 +21,8 @@ slice. The public tools are built around proving the full workflow end to end.
 
 ![PSoXide editor](assets/media/readme/editor-preview.png)
 
+![PSoXide UI editor](assets/media/readme/editor-ui-preview.png)
+
 | | |
 | --- | --- |
 | ![Streamed playtest](assets/media/readme/demo2-playtest.png) | ![Streamed playtest](assets/media/readme/demo3-playtest.png) |
