@@ -305,6 +305,11 @@ pub struct LaunchArgs {
     /// per-frame accumulation, or `--dump-hw` for a single-frame edge render.
     #[arg(long)]
     pub wireframe: bool,
+    /// Enable wireframe mid-run once bus cycles reach this value, mirroring a
+    /// GUI toolbar toggle during gameplay (`--wireframe` enables from boot, so
+    /// it never exercises the toggle-on transition against a live frame).
+    #[arg(long)]
+    pub wireframe_from: Option<u64>,
     /// Sample-time texture filter for `--dump-hw`: none|xbr.
     #[arg(long, default_value = "none")]
     pub texture_filter: String,
@@ -926,6 +931,12 @@ fn run_headless_launch(
             let drained = bus.spu.drain_audio();
             if args.dump_audio.is_some() {
                 audio_capture.extend(drained);
+            }
+        }
+        if let Some(at) = args.wireframe_from {
+            if !bus.gpu.wireframe_enabled && bus.cycles() >= at {
+                bus.gpu.wireframe_enabled = true;
+                eprintln!("[wireframe] enabled at cycle {}", bus.cycles());
             }
         }
         let current_guest_frames = bus.telemetry.frames_seen();
@@ -1948,6 +1959,7 @@ fn validation_launch_args(
         live_sim_frames: 0,
         live_sim_scale: 4,
         wireframe: false,
+        wireframe_from: None,
         texture_filter: "none".to_string(),
     }
 }
