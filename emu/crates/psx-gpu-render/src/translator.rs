@@ -4,12 +4,13 @@
 //! packet decoding and state tracking live in [`Interpreter`]; this
 //! module turns each [`GpuEvent`] into batched [`HwVertex`] runs for
 //! the render pipeline. Quad decomposition, the textured semi-trans
-//! two-pass split, sprite UV-wrap chunking and the wireframe debug
-//! mode are all enhanced-path concerns and stay here.
+//! two-pass split, sprite UV-wrap chunking, GP0 line quad-expansion
+//! and the wireframe debug mode are all enhanced-path concerns and
+//! stay here.
 //!
-//! Events this backend does not draw (VRAM copies, lines) are
-//! skipped; the interpreter has still updated the GP0 state so
-//! later primitives observe the right tpage / draw area.
+//! Events this backend does not draw (VRAM copies) are skipped; the
+//! interpreter has still updated the GP0 state so later primitives
+//! observe the right tpage / draw area.
 
 use crate::decode::{decode_tint, is_raw_texture, is_semi_trans, rgb24_to_bgr15};
 use crate::interpreter::{GpuEvent, Interpreter};
@@ -193,8 +194,14 @@ impl Translator {
                 w,
                 h,
             } => self.push_tex_rect(cmd, xy.0, xy.1, w as i32, h as i32, uv, clut),
+            GpuEvent::MonoLine { cmd, points } => self.emit_mono_line(cmd, &points),
+            GpuEvent::ShadedLine {
+                cmd,
+                points,
+                colors,
+            } => self.emit_shaded_line(cmd, &points, &colors),
             // The render path redraws on top of the VRAM-synced
-            // target; copies and lines are not lowered here.
+            // target; copies are not lowered here.
             GpuEvent::VramCopy { .. } | GpuEvent::Unhandled { .. } => {}
         }
     }
@@ -278,11 +285,7 @@ impl Translator {
         kind: BlendKind,
     ) {
         if v0 == v1 {
-            let v2 = (v0.0 + 1, v0.1);
-            let v3 = (v0.0, v0.1 + 1);
-            let v4 = (v0.0 + 1, v0.1 + 1);
-            self.push_shaded_tri(v0, c0, v2, c0, v3, c0, 0, kind);
-            self.push_shaded_tri(v2, c0, v4, c0, v3, c0, 0, kind);
+            self.push_pixel_quad(v0, c0, kind);
             return;
         }
 
@@ -297,6 +300,117 @@ impl Translator {
         let v1b = (v1.0 + ox, v1.1 + oy);
         self.push_shaded_tri(v0, c0, v1, c1, v0b, c0, 0, kind);
         self.push_shaded_tri(v1, c1, v1b, c1, v0b, c0, 0, kind);
+    }
+
+    /// One PSX pixel as a quad -- two triangles over
+    /// `[x, x+1] × [y, y+1]`, which lights exactly the `S × S`
+    /// target block at any internal scale.
+    fn push_pixel_quad(&mut self, v: (i32, i32), c: [u8; 4], kind: BlendKind) {
+        let v2 = (v.0 + 1, v.1);
+        let v3 = (v.0, v.1 + 1);
+        let v4 = (v.0 + 1, v.1 + 1);
+        self.push_shaded_tri(v, c, v2, c, v3, c, 0, kind);
+        self.push_shaded_tri(v2, c, v4, c, v3, c, 0, kind);
+    }
+
+    // ----- GP0 lines (0x40..=0x5F) -----
+
+    /// `0x40..=0x43` / `0x48..=0x4B` -- monochrome line / polyline.
+    /// One quad band per consecutive point pair. Zero-length
+    /// segments draw nothing: the CPU's mono Bresenham walker
+    /// early-outs on `dx == 0 && dy == 0` (unlike the shaded walker,
+    /// which plots one pixel -- see [`Translator::emit_shaded_line`]).
+    /// The CPU routes dithered mono lines through its shaded walker;
+    /// this backend has no dither anywhere, so the colours already
+    /// match and only the (absent) dither pattern differs.
+    fn emit_mono_line(&mut self, cmd: u32, points: &[(i32, i32)]) {
+        let color = mono_color_rgba8(cmd);
+        let kind = self.blend_kind(cmd);
+        for pair in points.windows(2) {
+            let (v0, v1) = (pair[0], pair[1]);
+            if v0 == v1 {
+                continue;
+            }
+            self.push_gp0_line_segment(v0, color, v1, color, kind);
+        }
+    }
+
+    /// `0x50..=0x53` / `0x58..=0x5B` -- Gouraud line / polyline.
+    /// Host interpolation replaces the CPU's per-step colour walk;
+    /// endpoint colours land exactly, mid-segment colours carry the
+    /// same f32-vs-integer tolerance as shaded triangles.
+    fn emit_shaded_line(&mut self, cmd: u32, points: &[(i32, i32)], colors: &[u32]) {
+        let kind = self.blend_kind(cmd);
+        let n = points.len().min(colors.len());
+        for i in 1..n {
+            let (v0, v1) = (points[i - 1], points[i]);
+            let c0 = mono_color_rgba8(colors[i - 1]);
+            let c1 = mono_color_rgba8(colors[i]);
+            if v0 == v1 {
+                // The CPU shaded walker plots exactly one pixel for
+                // a zero-length segment (plot, then break) at the
+                // segment's start colour.
+                self.push_pixel_quad(v0, c0, kind);
+                continue;
+            }
+            self.push_gp0_line_segment(v0, c0, v1, c1, kind);
+        }
+    }
+
+    /// One GP0 line segment as a one-PSX-pixel quad band (two
+    /// triangles) -- the wireframe edge strip's construction
+    /// ([`Translator::push_line_strip`]) plus a +1 extension on the
+    /// major-axis max end. GP0 lines are endpoint-inclusive in the
+    /// CPU rasterizer's Bresenham walk, and the host GPU samples
+    /// pixel centers at +0.5: without the extension the far
+    /// column/row's center falls just outside the band and the
+    /// endpoint pixel goes dark. Wireframe edges keep the
+    /// unextended strip: triangle outlines close their loops (the
+    /// next edge covers the shared corner), and extending them
+    /// would double-blend the corners of semi-transparent
+    /// outlines. Polyline joints double-blend HERE by design: the
+    /// CPU walker also plots every segment endpoint-inclusive, so
+    /// shared polyline vertices are written twice on both paths.
+    ///
+    /// At native scale the band lights one pixel per major-axis
+    /// step, connected like Bresenham; individual steps may sit one
+    /// minor-axis pixel off the CPU's walk on rounding ties
+    /// (center-sampled band vs integer-stepped walker). At internal
+    /// scale S the band scales with the target like every other
+    /// primitive.
+    fn push_gp0_line_segment(
+        &mut self,
+        v0: (i32, i32),
+        c0: [u8; 4],
+        v1: (i32, i32),
+        c1: [u8; 4],
+        kind: BlendKind,
+    ) {
+        debug_assert_ne!(v0, v1, "degenerate segments handled by callers");
+        let dx = v1.0 - v0.0;
+        let dy = v1.1 - v0.1;
+        let (mut e0, mut e1) = (v0, v1);
+        let (ox, oy) = if dx.abs() >= dy.abs() {
+            // x-major: one-pixel-tall band, extend the max-x end.
+            if dx >= 0 {
+                e1.0 += 1;
+            } else {
+                e0.0 += 1;
+            }
+            (0, 1)
+        } else {
+            // y-major: one-pixel-wide band, extend the max-y end.
+            if dy >= 0 {
+                e1.1 += 1;
+            } else {
+                e0.1 += 1;
+            }
+            (1, 0)
+        };
+        let e0b = (e0.0 + ox, e0.1 + oy);
+        let e1b = (e1.0 + ox, e1.1 + oy);
+        self.push_shaded_tri(e0, c0, e1, c1, e0b, c0, 0, kind);
+        self.push_shaded_tri(e1, c1, e1b, c1, e0b, c0, 0, kind);
     }
 
     // ----- Phase 2: textured tris + quads -----
@@ -1154,4 +1268,158 @@ mod tests {
         assert_eq!(frame.runs[0].count, 6);
     }
 
+    #[test]
+    fn mono_line_emits_endpoint_extended_band() {
+        // Horizontal line (10,20)->(30,20): x-major, the max-x end
+        // extends by 1 so pixel-center sampling covers column 30
+        // (the CPU walk plots x0..=x1 inclusive).
+        let log = [entry(0x40, vec![0x40FF_FFFF, xy(10, 20), xy(30, 20)])];
+        let mut translator = Translator::new();
+        let frame = translator.translate(&log);
+
+        assert_eq!(frame.total(), 6);
+        assert_eq!(frame.runs.len(), 1);
+        assert_eq!(frame.runs[0].kind, BlendKind::Opaque);
+        let pos: Vec<[i16; 2]> = frame.vertices.iter().map(|v| v.pos).collect();
+        assert_eq!(
+            pos,
+            vec![
+                [10, 20],
+                [31, 20],
+                [10, 21],
+                [31, 20],
+                [31, 21],
+                [10, 21],
+            ]
+        );
+        for v in frame.vertices {
+            assert_eq!(v.color, [0xFF, 0xFF, 0xFF, 0xFF]);
+            assert_eq!(v.flags, 0);
+        }
+    }
+
+    #[test]
+    fn mono_line_reversed_extends_the_max_end_not_the_start() {
+        // Same segment drawn right-to-left: the +1 lands on the
+        // max-x endpoint (the START here), producing the same band.
+        let log = [entry(0x40, vec![0x40FF_FFFF, xy(30, 20), xy(10, 20)])];
+        let mut translator = Translator::new();
+        let frame = translator.translate(&log);
+
+        let pos: Vec<[i16; 2]> = frame.vertices.iter().map(|v| v.pos).collect();
+        assert_eq!(
+            pos,
+            vec![
+                [31, 20],
+                [10, 20],
+                [31, 21],
+                [10, 20],
+                [10, 21],
+                [31, 21],
+            ]
+        );
+    }
+
+    #[test]
+    fn vertical_line_band_is_one_pixel_wide() {
+        let log = [entry(0x40, vec![0x40FF_FFFF, xy(5, 10), xy(5, 20)])];
+        let mut translator = Translator::new();
+        let frame = translator.translate(&log);
+
+        let pos: Vec<[i16; 2]> = frame.vertices.iter().map(|v| v.pos).collect();
+        assert_eq!(
+            pos,
+            vec![[5, 10], [5, 21], [6, 10], [5, 21], [6, 21], [6, 10]]
+        );
+    }
+
+    #[test]
+    fn zero_length_mono_line_draws_nothing() {
+        // CPU mono Bresenham early-outs on dx == 0 && dy == 0.
+        let log = [entry(0x40, vec![0x40FF_FFFF, xy(10, 10), xy(10, 10)])];
+        let mut translator = Translator::new();
+        let frame = translator.translate(&log);
+        assert_eq!(frame.total(), 0);
+    }
+
+    #[test]
+    fn zero_length_shaded_line_plots_one_pixel() {
+        // CPU shaded walker plots one pixel then breaks.
+        let log = [entry(
+            0x50,
+            vec![0x5000_00FF, xy(10, 10), 0x0000_FF00, xy(10, 10)],
+        )];
+        let mut translator = Translator::new();
+        let frame = translator.translate(&log);
+
+        assert_eq!(frame.total(), 6);
+        let pos: Vec<[i16; 2]> = frame.vertices.iter().map(|v| v.pos).collect();
+        assert_eq!(
+            pos,
+            vec![[10, 10], [11, 10], [10, 11], [11, 10], [11, 11], [10, 11]]
+        );
+        for v in frame.vertices {
+            assert_eq!(v.color, [0xFF, 0x00, 0x00, 0xFF]);
+        }
+    }
+
+    #[test]
+    fn shaded_line_carries_endpoint_colors() {
+        let log = [entry(
+            0x50,
+            vec![0x5000_00FF, xy(0, 0), 0x0000_FF00, xy(0, 10)],
+        )];
+        let mut translator = Translator::new();
+        let frame = translator.translate(&log);
+
+        assert_eq!(frame.total(), 6);
+        // y-major band; per-vertex colours follow the endpoints.
+        let cv: Vec<([i16; 2], [u8; 4])> =
+            frame.vertices.iter().map(|v| (v.pos, v.color)).collect();
+        assert_eq!(
+            cv,
+            vec![
+                ([0, 0], [0xFF, 0x00, 0x00, 0xFF]),
+                ([0, 11], [0x00, 0xFF, 0x00, 0xFF]),
+                ([1, 0], [0xFF, 0x00, 0x00, 0xFF]),
+                ([0, 11], [0x00, 0xFF, 0x00, 0xFF]),
+                ([1, 11], [0x00, 0xFF, 0x00, 0xFF]),
+                ([1, 0], [0xFF, 0x00, 0x00, 0xFF]),
+            ]
+        );
+    }
+
+    #[test]
+    fn semi_trans_line_routes_through_tpage_blend_kind() {
+        // E1 selects Add (bits 5-6 = 1); cmd bit 25 arms semi-trans.
+        let log = [
+            entry(0xE1, vec![0xE100_0020]),
+            entry(0x42, vec![0x42FF_FFFF, xy(0, 0), xy(10, 0)]),
+        ];
+        let mut translator = Translator::new();
+        let frame = translator.translate(&log);
+
+        assert_eq!(frame.runs.len(), 1);
+        assert_eq!(frame.runs[0].kind, BlendKind::Add);
+    }
+
+    #[test]
+    fn mono_polyline_emits_one_band_per_segment() {
+        let log = [entry(
+            0x48,
+            vec![
+                0x48FF_FFFF,
+                xy(0, 0),
+                xy(10, 0),
+                xy(10, 10), // continuation vertex from the cmd_log capture
+            ],
+        )];
+        let mut translator = Translator::new();
+        let frame = translator.translate(&log);
+
+        // Two segments x 6 vertices.
+        assert_eq!(frame.total(), 12);
+        assert_eq!(frame.runs.len(), 1);
+        assert_eq!(frame.runs[0].count, 12);
+    }
 }
