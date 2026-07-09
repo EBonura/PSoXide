@@ -348,14 +348,20 @@ pub struct Gpu {
     /// submitting.
     pub wireframe_enabled: bool,
     /// Wireframe edge-pixel journal: every pixel plotted by line
-    /// rasterization while wireframe is on, for the frame in flight.
-    /// At each vblank the *previous* frame's pixels are erased to
-    /// black (see [`Gpu::wireframe_frame_boundary`]), so stale edges
-    /// never accumulate -- without clearing any pixel the game itself
-    /// drew (poly interiors stay transparent).
+    /// rasterization while wireframe is on, for the render in flight.
+    /// Aged two generations and then erased to black (see
+    /// [`Gpu::wireframe_frame_boundary`]), so stale edges never
+    /// accumulate -- without clearing any pixel the game itself drew
+    /// (poly interiors stay transparent).
     wire_pixels_current: Vec<(u16, u16)>,
-    /// Last frame's journal, erased at the next vblank.
+    /// One render old. NOT erased yet: in a double-buffered game these
+    /// pixels sit on the currently-displayed buffer; erasing them at the
+    /// vblank IRQ blanks the screen for the window between our erase and
+    /// the game's own display flip (the IRQ handler flips after us).
     wire_pixels_prev: Vec<(u16, u16)>,
+    /// Two renders old -- these pixels are on the back buffer the game
+    /// is about to redraw, never on the displayed one. Safe to erase.
+    wire_pixels_prev2: Vec<(u16, u16)>,
 
     /// Pixel-owner trace -- when `Some`, every `plot_pixel` records
     /// the index of the currently-executing GPU command into
@@ -561,6 +567,7 @@ impl Gpu {
             wireframe_enabled: false,
             wire_pixels_current: Vec::new(),
             wire_pixels_prev: Vec::new(),
+            wire_pixels_prev2: Vec::new(),
             pixel_owner: None,
             cmd_log: Vec::new(),
             cmd_log_enabled: false,
@@ -946,39 +953,63 @@ impl Gpu {
         self.wireframe_frame_boundary();
     }
 
-    /// Erase the previous frame's wireframe edges and rotate the journal.
+    /// Erase two-render-old wireframe edges and rotate the journal.
     ///
-    /// Pixels also plotted this frame are skipped: in a single-buffered
-    /// game (a commercial title's 480i attract) static edges land on the same spot
-    /// every frame, and erasing a just-redrawn pixel would make the whole
-    /// wireframe flicker at the erase/redraw duty cycle. Double-buffered
-    /// games journal alternating pages, so the skip never triggers and the
-    /// back buffer's stale edges are wiped right before the game redraws
-    /// it. When wireframe is switched off, both journals are erased so no
-    /// edge pixels linger in guest VRAM.
+    /// Three rules, each earned by a live repro:
+    /// - Rotate only when the game drew NEW wireframe geometry since the
+    ///   last rotation. Games render slower than vblank (30/15 fps, or a
+    ///   menu that draws once); rotating on a bare vblank ages the edges
+    ///   out and the wireframe blanks until the next render.
+    /// - Erase the two-renders-old generation, not last render's. Last
+    ///   render's pixels live on the buffer being DISPLAYED right now
+    ///   (the game's IRQ handler flips the display after this vblank
+    ///   callback); erasing them blanked the screen for the window
+    ///   between our erase and the game's flip (Crash intro: black every
+    ///   other frame). The two-old generation is on the back buffer the
+    ///   game is about to redraw, never the displayed one.
+    /// - Skip pixels still present in a newer generation: static scenes
+    ///   redraw the same edges in place; erasing a live pixel flickers.
+    ///
+    /// When wireframe is switched off, all journals are erased so no edge
+    /// pixels linger in guest VRAM.
     fn wireframe_frame_boundary(&mut self) {
-        if self.wire_pixels_prev.is_empty() && self.wire_pixels_current.is_empty() {
-            return;
-        }
         if !self.wireframe_enabled {
-            for &(x, y) in self.wire_pixels_prev.iter().chain(&self.wire_pixels_current) {
+            if self.wire_pixels_prev2.is_empty()
+                && self.wire_pixels_prev.is_empty()
+                && self.wire_pixels_current.is_empty()
+            {
+                return;
+            }
+            for &(x, y) in self
+                .wire_pixels_prev2
+                .iter()
+                .chain(&self.wire_pixels_prev)
+                .chain(&self.wire_pixels_current)
+            {
                 self.vram.set_pixel(x, y, 0);
             }
+            self.wire_pixels_prev2 = Vec::new();
             self.wire_pixels_prev = Vec::new();
             self.wire_pixels_current = Vec::new();
             return;
         }
+        if self.wire_pixels_current.is_empty() {
+            return;
+        }
+        let key = |&(x, y): &(u16, u16)| ((y as u32) << 16) | x as u32;
         let live: std::collections::HashSet<u32> = self
             .wire_pixels_current
             .iter()
-            .map(|&(x, y)| ((y as u32) << 16) | x as u32)
+            .chain(&self.wire_pixels_prev)
+            .map(key)
             .collect();
-        let prev = std::mem::take(&mut self.wire_pixels_prev);
-        for (x, y) in prev {
-            if !live.contains(&(((y as u32) << 16) | x as u32)) {
-                self.vram.set_pixel(x, y, 0);
+        let prev2 = std::mem::take(&mut self.wire_pixels_prev2);
+        for p in prev2 {
+            if !live.contains(&key(&p)) {
+                self.vram.set_pixel(p.0, p.1, 0);
             }
         }
+        self.wire_pixels_prev2 = std::mem::take(&mut self.wire_pixels_prev);
         self.wire_pixels_prev = std::mem::take(&mut self.wire_pixels_current);
     }
 

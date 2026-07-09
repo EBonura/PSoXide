@@ -1304,13 +1304,6 @@ fn frontend_display(
     if area.bpp24 {
         return (gfx.display_texture_id(), cpu_display_uv(area));
     }
-    // Wireframe debug mode also routes through the CPU display: the CPU
-    // rasterizer's per-frame edge journal keeps guest VRAM free of stale
-    // edges, while the persistent HW target has no equivalent cleanup and
-    // would smear. Native-res edges are fine for a debug view.
-    if bus.is_some_and(|b| b.gpu.wireframe_enabled) {
-        return (gfx.display_texture_id(), cpu_display_uv(area));
-    }
     (gfx.hw_texture_id(), hw_display_uv(area))
 }
 

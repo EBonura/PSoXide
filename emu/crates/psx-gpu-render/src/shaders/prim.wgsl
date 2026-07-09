@@ -55,6 +55,38 @@ struct VertexOut {
     @location(3) @interpolate(flat) tex_window: u32,
 }
 
+// ---------------------------------------------------------------------------
+// Fullscreen VRAM->target blit. Used by wireframe mode to rebuild the scaled
+// persistent target from the (journal-clean) CPU VRAM every frame, so stale
+// edges never accumulate in the target at any internal scale. One oversized
+// triangle, no vertex buffer.
+// ---------------------------------------------------------------------------
+
+struct BlitOut {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+}
+
+@vertex
+fn vs_blit(@builtin(vertex_index) vi: u32) -> BlitOut {
+    // (-1,-1), (3,-1), (-1,3): one triangle covering the whole target.
+    let x = f32(i32((vi & 1u) * 4u) - 1);
+    let y = f32(i32((vi >> 1u) * 4u) - 1);
+    var out: BlitOut;
+    out.position = vec4<f32>(x, y, 0.0, 1.0);
+    // NDC y points up, VRAM row 0 is the top row.
+    out.uv = vec2<f32>((x + 1.0) * 0.5, (1.0 - y) * 0.5);
+    return out;
+}
+
+@fragment
+fn fs_blit(in: BlitOut) -> @location(0) vec4<f32> {
+    let tx = min(u32(in.uv.x * 1024.0), 1023u);
+    let ty = min(u32(in.uv.y * 512.0), 511u);
+    let word = textureLoad(vram, vec2<u32>(tx, ty), 0).r;
+    return vec4<f32>(bgr15_to_rgb(word), 1.0);
+}
+
 const FLAG_TEXTURED:    u32 = 1u << 22u;
 const FLAG_RAW_TEXTURE: u32 = 1u << 23u;
 const FLAG_TEX_OPAQUE_PASS: u32 = 1u << 25u;
