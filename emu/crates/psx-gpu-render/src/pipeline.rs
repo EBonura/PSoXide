@@ -140,6 +140,8 @@ pub struct HwPipeline {
     /// vertex layout -- only `BlendState` differs. Indexed by
     /// `BlendKind::index()`.
     pipelines: [wgpu::RenderPipeline; BlendKind::COUNT],
+    /// Fullscreen VRAM->target blit used by wireframe mode.
+    blit_pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     bind_group: wgpu::BindGroup,
     vertex_buffer: wgpu::Buffer,
@@ -331,6 +333,35 @@ impl HwPipeline {
             make_pipeline("psx-hw-pipeline-add-quarter", blend_state_add_quarter()),
         ];
 
+        // Fullscreen VRAM->target blit (wireframe mode rebuilds the
+        // persistent target from clean CPU VRAM each frame). No vertex
+        // buffer; same bind group (only binding 0 is read).
+        let blit_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("psx-hw-pipeline-blit"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_blit"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_blit"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: TARGET_FORMAT,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            multiview: None,
+            cache: None,
+        });
+
         let vertex_capacity_bytes =
             INITIAL_VERTEX_CAPACITY * std::mem::size_of::<HwVertex>() as u64;
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -341,6 +372,7 @@ impl HwPipeline {
 
         Self {
             pipelines,
+            blit_pipeline,
             bind_group_layout,
             bind_group,
             vertex_buffer,
@@ -349,6 +381,11 @@ impl HwPipeline {
             vram_view,
             filter_buffer,
         }
+    }
+
+    /// The fullscreen VRAM->target blit pipeline (3 vertices, no buffers).
+    pub fn blit_pipeline(&self) -> &wgpu::RenderPipeline {
+        &self.blit_pipeline
     }
 
     /// Set the texture-filter mode (0 nearest, 1 bilinear, 2 JINC2, 3 xBR).
