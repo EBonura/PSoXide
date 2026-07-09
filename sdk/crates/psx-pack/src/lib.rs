@@ -103,14 +103,35 @@ pub fn parse_header(bytes: &[u8]) -> Option<PackHeader> {
 /// `header.header_sectors * SECTOR_BYTES` up front and every entry is in
 /// range. `None` when the slice is too short.
 pub fn parse_entry(bytes: &[u8], index: usize) -> Option<PackEntry> {
-    let at = HEADER_BYTES + index * ENTRY_BYTES;
+    parse_entry_at(bytes, HEADER_BYTES + index * ENTRY_BYTES)
+}
+
+/// Parse one [`ENTRY_BYTES`]-sized table entry starting at an arbitrary byte
+/// `offset`. This is the sector-local primitive behind [`parse_entry`]: a
+/// caller holding a single 2048-byte header sector (not the whole pack) can
+/// parse the entries it contains directly, and stitch the one entry that
+/// straddles into the next sector through a small [`ENTRY_BYTES`] buffer
+/// (see [`entry_location`]). `None` when the slice is too short.
+pub fn parse_entry_at(bytes: &[u8], offset: usize) -> Option<PackEntry> {
     Some(PackEntry {
-        chunk_id: le32(bytes, at)?,
-        sector_offset: le32(bytes, at + 4)?,
-        sector_count: le32(bytes, at + 8)?,
-        byte_size: le32(bytes, at + 12)?,
-        checksum: le32(bytes, at + 16)?,
+        chunk_id: le32(bytes, offset)?,
+        sector_offset: le32(bytes, offset + 4)?,
+        sector_count: le32(bytes, offset + 8)?,
+        byte_size: le32(bytes, offset + 12)?,
+        checksum: le32(bytes, offset + 16)?,
     })
+}
+
+/// Locate table entry `index` on disc: `(header_sector, byte_offset_within_it)`.
+///
+/// The chunk table is packed right after the 28-byte header with no sector
+/// alignment, so every 85th entry straddles a sector boundary
+/// (`offset + ENTRY_BYTES > SECTOR_BYTES`, first at index 84). Sector-by-sector
+/// readers must detect that case and stitch the entry from the tail of this
+/// sector plus the head of the next one.
+pub const fn entry_location(index: u32) -> (u32, usize) {
+    let byte = HEADER_BYTES + index as usize * ENTRY_BYTES;
+    ((byte / SECTOR_BYTES) as u32, byte % SECTOR_BYTES)
 }
 
 /// Linear-scan the table for `chunk_id`. Same slice contract as
@@ -321,9 +342,14 @@ mod tests {
     fn incompressible_payload_passes_through_raw() {
         // mkisopsx stores raw bytes when compression does not help; the
         // decoder must hand them back untouched.
-        let raw: Vec<u8> = (0..999u32).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8).collect();
+        let raw: Vec<u8> = (0..999u32)
+            .map(|i| (i.wrapping_mul(2654435761) >> 13) as u8)
+            .collect();
         let mut buf = raw.clone();
-        assert_eq!(decompress_hlzc_in_place(&mut buf, raw.len()), Some(raw.len()));
+        assert_eq!(
+            decompress_hlzc_in_place(&mut buf, raw.len()),
+            Some(raw.len())
+        );
         assert_eq!(buf, raw);
     }
 
@@ -359,6 +385,69 @@ mod tests {
         let mut tight = vec![0u8; framed.len()];
         tight.copy_from_slice(&framed);
         assert_eq!(decompress_hlzc_in_place(&mut tight, framed.len()), None);
+    }
+
+    #[test]
+    fn entry_location_matches_flat_table_offsets() {
+        for index in 0..300u32 {
+            let flat = HEADER_BYTES + index as usize * ENTRY_BYTES;
+            let (sector, within) = entry_location(index);
+            assert_eq!(sector as usize * SECTOR_BYTES + within, flat);
+            assert!(within < SECTOR_BYTES);
+        }
+        // The first straddling entry: 28 + 84*24 = 2044, crossing into sector 1.
+        assert_eq!(entry_location(84), (0, 2044));
+        assert_eq!(entry_location(85), (1, 20));
+    }
+
+    /// Scan a real psx-iso pack the way the CD reader does: one buffered
+    /// sector at a time, stitching entries that straddle sector boundaries
+    /// through a 24-byte staging buffer. Every entry must parse identically
+    /// to the flat whole-pack parse.
+    #[test]
+    fn sector_local_scan_with_straddles_matches_flat_parse() {
+        // 90 chunks make the table span three sectors' worth of entries is
+        // not needed; two sectors with one straddle (index 84) is the case
+        // that matters. Non-contiguous ids prove index != id.
+        let payloads: Vec<(u32, Vec<u8>)> = (0..90u32)
+            .map(|i| (i * 3 + 1, vec![i as u8; 5 + (i as usize % 40)]))
+            .collect();
+        let refs: Vec<(u32, &[u8])> = payloads
+            .iter()
+            .map(|(id, bytes)| (*id, bytes.as_slice()))
+            .collect();
+        let pack = psx_iso::build_world_pack(&refs);
+
+        let header = parse_header(&pack).expect("header");
+        assert_eq!(header.chunk_count, 90);
+        assert!(
+            header.header_sectors >= 2,
+            "fixture must produce a multi-sector table"
+        );
+
+        let sector = |s: u32| -> &[u8] {
+            let at = s as usize * SECTOR_BYTES;
+            &pack[at..at + SECTOR_BYTES]
+        };
+
+        let mut straddles = 0;
+        for index in 0..header.chunk_count {
+            let (sec, within) = entry_location(index);
+            assert!(sec < header.header_sectors);
+            let entry = if within + ENTRY_BYTES <= SECTOR_BYTES {
+                parse_entry_at(sector(sec), within).expect("in-sector entry")
+            } else {
+                straddles += 1;
+                let first = SECTOR_BYTES - within;
+                let mut stitched = [0u8; ENTRY_BYTES];
+                stitched[..first].copy_from_slice(&sector(sec)[within..]);
+                stitched[first..].copy_from_slice(&sector(sec + 1)[..ENTRY_BYTES - first]);
+                parse_entry_at(&stitched, 0).expect("stitched entry")
+            };
+            let flat = parse_entry(&pack, index as usize).expect("flat entry");
+            assert_eq!(entry, flat, "entry {index} diverged");
+        }
+        assert_eq!(straddles, 1, "index 84 must straddle sectors 0 and 1");
     }
 
     #[test]
