@@ -21,14 +21,9 @@ slice. The public tools are built around proving the full workflow end to end.
 
 ![PSoXide editor](assets/media/readme/editor-preview.png)
 
-![PSoXide UI editor](assets/media/readme/editor-ui-preview.png)
-
-![PSoXide emulator](assets/media/readme/emulator-preview.png)
-
 | | |
 | --- | --- |
-| ![Streamed playtest](assets/media/readme/demo2-playtest.png) | ![Streamed playtest](assets/media/readme/demo3-playtest.png) |
-| ![Streamed playtest](assets/media/readme/demo4-playtest.png) | ![Streamed playtest](assets/media/readme/demo5-playtest.png) |
+| ![PSoXide UI editor](assets/media/readme/editor-ui-preview.png) | ![PSoXide emulator](assets/media/readme/emulator-preview.png) |
 
 > **Pre-release software.** The end-to-end pipeline works, but APIs, file
 > formats, and editor workflows may still change. There are no release binaries
