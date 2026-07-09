@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+[package]
+name         = "psx-osk"
+version      = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description  = "On-screen keyboard for pad-driven text entry: QWERTY + symbols pages, shift, PS4-style boxed keys."
+
+[dependencies]
+psx-font = { workspace = true }
+psx-gpu  = { workspace = true }
+
+[lints]
+workspace = true
