@@ -80,6 +80,12 @@ pub(crate) fn boot_visual_checkpoint_hold(
         fb.clear(color.0, color.1, color.2);
         draw_boot_text(fb, message);
         gpu::draw_sync();
+        // Deliberately the deprecated fixed 242-HBlank delay, not
+        // rt::wait_vblank(): a checkpoint can fire before platform::init,
+        // and wait_vblank's lazy install would rewrite the exception
+        // vector and clobber I_MASK mid-boot. A fixed hold is all this
+        // diagnostic needs, and it is what was verified on silicon.
+        #[allow(deprecated)]
         gpu::vsync();
         fb.swap();
     }

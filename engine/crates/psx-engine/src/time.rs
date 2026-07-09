@@ -54,10 +54,7 @@ impl EngineClock {
 
 #[cfg(target_arch = "mips")]
 mod platform {
-    use psx_gpu as gpu;
-
     pub(super) fn init() {
-        gpu::configure_vsync_timer();
         psx_rt::interrupts::install_vblank_counter();
     }
 
