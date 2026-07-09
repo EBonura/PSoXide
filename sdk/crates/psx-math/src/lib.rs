@@ -12,10 +12,13 @@
 //! ## What's here today
 //!
 //! - [`sincos`] -- Q0.12 angle type + 256-entry Q1.12 sine LUT +
-//!   interpolated `sin_q12` / `cos_q12` lookups.
+//!   interpolated `sin_q12` / `cos_q12` lookups, and the matching
+//!   octant-linear `atan2_q12`.
 //! - [`int32`] -- saturating 32-bit scalar helpers: `abs_i32` /
 //!   `abs_i16`, `clamp_i16`, `square_i32_saturating`, `isqrt_i32`,
 //!   `mul_q12_i32`.
+//! - [`fmt`] -- integer-to-decimal ASCII without `core::fmt`, for
+//!   HUD/score text drawn with `psx-font`.
 //!
 //! ## What's planned (same crate, future modules)
 //!
@@ -65,10 +68,11 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
 
+pub mod fmt;
 pub mod int32;
 pub mod sincos;
 
 // Re-export the most common symbols at the crate root so users
 // can `use psx_math::{sin_q12, cos_q12}` without reaching through
 // the submodule -- these are the hot-loop primitives.
-pub use sincos::{cos_q12, sin_q12, SIN_TABLE};
+pub use sincos::{atan2_q12, cos_q12, sin_q12, SIN_TABLE};
