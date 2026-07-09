@@ -16,7 +16,7 @@ workspace (one lockfile shared with `crates/`, `editor/`, and `tools/`).
 |-------|---------|
 | [`emulator-core`](crates/emulator-core) | CPU, bus, and peripherals. No UI, no window. Pure state machine. |
 | [`frontend`](crates/frontend) | PSoXide desktop frontend (winit + wgpu + egui). Embeds the emulator and the editor. |
-| [`psx-gpu-render`](crates/psx-gpu-render) | Hardware renderer: wgpu pipeline drawing each GP0 primitive at an internal-resolution multiple of native VRAM (free upscaling). |
+| [`psx-gpu-render`](crates/psx-gpu-render) | Hardware renderer: wgpu pipeline drawing GP0 primitives at an internal-resolution multiple of native VRAM (free upscaling). Known gap: line/polyline primitives are skipped (the software GPU draws them), so hw output and `--dump-hw` omit lines. |
 | [`psoxide-settings`](crates/psoxide-settings) | On-disk settings, library cache, and save-state formats. Pure logic, no GUI/wgpu deps, usable from headless CLIs. |
 | [`psoxide-validation`](crates/psoxide-validation) | Manifest and exact-hash comparison primitives for validation. Runner-agnostic. |
 

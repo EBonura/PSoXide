@@ -131,16 +131,17 @@ address match.
 
 ## What's missing
 
-- GP0 command FIFO / packet accumulator
-- Drawing primitives (triangle rasterizer, line, rect, fill)
-- Texture cache / CLUT lookup
-- VRAM transfer state machine (CPU↔VRAM / VRAM↔VRAM)
-- Display output (scan-out to the frontend's framebuffer texture)
-- VBlank generation + interlace field toggle (bit 31)
-- GPU IRQ (via GP0 0x1F, acked by GP1 0x02)
-- DMA channel 2 consumer (sync-mode 2 linked-list walker)
+Everything the original milestone-A list named (command FIFO, triangle /
+line / rect / fill rasterizers, texture cache + CLUT lookup, VRAM
+transfers, scan-out, VBlank + interlace, GPU IRQ, DMA ch2 linked-list
+walker) has since shipped in the software GPU.
 
-Each of these is its own milestone-A subtask.
+The one known remaining gap is in the HARDWARE renderer
+(`psx-gpu-render`), not here: GP0 line/polyline primitives (0x40..0x5F)
+lower to `GpuEvent::Unhandled` and are skipped, so hw-rendered output
+(including headless `--dump-hw` frames) omits lines that the software
+GPU draws. Guests that must verify line output through `--dump-hw`
+currently draw thin quads instead (see PSXcel's `draw_seg`).
 
 ## References
 
