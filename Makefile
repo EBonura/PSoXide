@@ -18,6 +18,7 @@
 	examples hello-tri hello-tri-disc hello-input hello-input-disc hello-ot hello-ot-disc \
 	hello-tex hello-tex-disc hello-gte hello-gte-disc hello-audio hello-audio-disc \
 	hello-cdda hello-cdda-disc \
+	hello-pack hello-pack-fixture hello-pack-disc verify-hello-pack \
 	cdda-read-contention cdda-read-contention-disc \
 	run-tri run-input run-ot run-tex run-gte run-audio run-cdda probe-cdda-audio \
 	showcase-text showcase-text-disc run-showcase-text \
@@ -83,6 +84,8 @@ help:
 	@echo "    make hello-gte-disc    - build the GTE perspective-transform demo disc"
 	@echo "    make hello-audio-disc  - build the imported SPU sample demo disc"
 	@echo "    make hello-cdda-disc   - build the CD-DA playback demo disc"
+	@echo "    make hello-pack-disc   - build the WORLD.PAK CD-streaming smoke-test disc"
+	@echo "    make verify-hello-pack - run hello-pack headless + assert ALL PASS"
 	@echo "    make showcase-text"
 	@echo "                      - build the text / font capabilities showcase disc"
 	@echo "    make game-pong-disc - build the Pong mini-game disc"
@@ -314,7 +317,7 @@ DATA_DISC_EXAMPLES := \
 	showcase-text game-pong game-breakout game-invaders \
 	showcase-3d showcase-model showcase-lights showcase-fog showcase-particles \
 	hardware-tests hello-engine hello-memcard hello-i64probe
-PUBLIC_EXAMPLE_DISCS := $(addsuffix -disc,$(DATA_DISC_EXAMPLES)) hello-cdda-disc game-magikaaaaaarp-pong-disc
+PUBLIC_EXAMPLE_DISCS := $(addsuffix -disc,$(DATA_DISC_EXAMPLES)) hello-cdda-disc hello-pack-disc game-magikaaaaaarp-pong-disc
 
 define build_data_disc
 $(1)-disc: $(1)
@@ -338,6 +341,43 @@ hello-memcard:
 # unsigned works -- see the example's docs).
 hello-i64probe:
 	cd sdk/examples/hello-i64probe && $(SDK_EXAMPLE_CARGO_ENV) cargo build --release $(PSX_BUILD_FLAGS)
+
+# psx-pack CD-streaming smoke test: SectorReader + load_chunk stream WORLD.PAK
+# chunks off the disc (table straddle, FNV checksums, HLZC decompression).
+hello-pack:
+	cd sdk/examples/hello-pack && $(SDK_EXAMPLE_CARGO_ENV) cargo build --release $(PSX_BUILD_FLAGS)
+
+HELLO_PACK_FIXTURE_DIR := build/hello-pack-fixture
+HELLO_PACK_STEPS ?= 400000000
+HELLO_PACK_HW ?= /tmp/hello-pack.ppm
+HELLO_PACK_LOG ?= /tmp/hello-pack-run.log
+
+# 86 room_<id>.psxc chunks so the pack table spans two sectors (entry 84
+# straddles the boundary); ids 84/85 carry the patterns the guest verifies.
+hello-pack-fixture:
+	python3 tools/hello_pack_fixture.py $(HELLO_PACK_FIXTURE_DIR)
+
+hello-pack-disc: hello-pack hello-pack-fixture
+	cd tools/mkisopsx && cargo run --release -- \
+		--exe ../../$(EXAMPLE_OUT)/hello-pack.exe \
+		--out ../../$(EXAMPLE_OUT)/hello-pack.bin \
+		--volume PSOXIDE \
+		--world-pack-rooms-dir ../../$(HELLO_PACK_FIXTURE_DIR) \
+		--world-pack-compress-rooms
+
+# Headless end-to-end check: boot the disc, let the guest stream + verify the
+# fixture chunks, then assert its TTY verdict (the dump shows the banner too).
+# --embedded-playtest = no-BIOS HLE fast boot, whose A(3Ch) putchar prints to
+# stdout; the default warm real-BIOS boot routes putchar into the kernel's
+# dummy TTY device and the verdict line never reaches the host.
+verify-hello-pack: hello-pack-disc
+	cd emu && cargo run -p frontend --release -- launch \
+		--path ../$(EXAMPLE_OUT)/hello-pack.cue \
+		--embedded-playtest \
+		--steps $(HELLO_PACK_STEPS) \
+		--dump-hw $(HELLO_PACK_HW) \
+		--dump-hash | tee $(HELLO_PACK_LOG)
+	grep -q "hello-pack: ALL PASS" $(HELLO_PACK_LOG)
 
 hello-ot:
 	cd sdk/examples/hello-ot && $(SDK_EXAMPLE_CARGO_ENV) cargo build --release $(PSX_BUILD_FLAGS)
