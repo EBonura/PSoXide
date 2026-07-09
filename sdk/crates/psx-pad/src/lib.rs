@@ -42,6 +42,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
 
+use psx_hw::sio::sio0;
 use psx_io::sio;
 
 /// Named button bitmasks (active-high in this representation).
@@ -234,8 +235,11 @@ pub enum Pacing {
     /// side-by-side with [`Pacing::AckWait`].
     NoAckWait,
     /// Wait for the device's `/ACK` (DSR) pulse after each non-final byte before
-    /// clocking the next one. Hardware-correct and universally compatible; this
-    /// is what [`poll_port1`] and the analog-enable handshake use.
+    /// clocking the next one. Matches the BIOS pacing, but corrupted frames on a
+    /// third-party clone pad, so no default path uses it anymore: [`poll_port1`]
+    /// and the analog-enable handshake pace with a post-select setup delay and
+    /// no `/ACK` wait instead (see [`DEFAULT_SETUP_SPINS`]). Kept so the
+    /// on-console diagnostic can compare both pacings side-by-side.
     AckWait,
 }
 
@@ -306,31 +310,27 @@ impl RawPoll {
     }
 }
 
-// --- SIO0 CTRL bits we care about ---
+// --- SIO0 register layout, from the shared hardware-model crate ---
+// (`psx_hw::sio::sio0` is the single source of truth for these bits; the spin
+// budgets below are this driver's behavior, not layout, and stay local.)
 
-const CTRL_TXEN: u16 = 1 << 0;
-const CTRL_JOYN: u16 = 1 << 1;
-const CTRL_RXEN: u16 = 1 << 2;
-/// Write-1 to acknowledge / clear the latched SIO IRQ (STAT bit 9).
-const CTRL_ACK: u16 = 1 << 4;
-/// Enable IRQ7 generation from the device `/ACK` (DSR) pulse. We never take the
-/// CPU interrupt -- the controller source stays masked in `I_MASK` (the runtime
-/// only unmasks VBlank) -- but enabling it is what latches `STAT` bit 9 on the
-/// `/ACK` edge, so a brief pulse cannot be missed by polling.
-const CTRL_ACK_IRQ_EN: u16 = 1 << 12;
-const CTRL_SLOT_PORT2: u16 = 1 << 13;
+const CTRL_TXEN: u16 = sio0::ctrl::TXEN;
+const CTRL_JOYN: u16 = sio0::ctrl::DTR;
+const CTRL_RXEN: u16 = sio0::ctrl::RXEN;
+const CTRL_ACK: u16 = sio0::ctrl::ACK;
+/// We never take the CPU interrupt (the controller source stays masked in
+/// `I_MASK`; the runtime only unmasks VBlank), but see the layout doc: enabling
+/// this is what latches `STAT` bit 9 on the `/ACK` edge for polling.
+const CTRL_ACK_IRQ_EN: u16 = sio0::ctrl::ACK_IRQ_EN;
+const CTRL_SLOT_PORT2: u16 = sio0::ctrl::SLOT_PORT2;
 
-// --- SIO0 STAT bits we care about ---
+const STAT_TX_READY: u32 = sio0::stat::TX_READY;
+const STAT_RX_NOT_EMPTY: u32 = sio0::stat::RX_NOT_EMPTY;
+const STAT_DSR_LEVEL: u32 = sio0::stat::DSR_LEVEL;
+const STAT_IRQ: u32 = sio0::stat::IRQ;
 
-const STAT_TX_READY: u32 = 1 << 0;
-const STAT_RX_NOT_EMPTY: u32 = 1 << 1;
-/// Live `/ACK` (DSR) input level: 1 while the device holds `/ACK` asserted.
-const STAT_DSR_LEVEL: u32 = 1 << 7;
-/// Latched DSR/ACK interrupt: set on the `/ACK` edge, held until CTRL.ACK clears it.
-const STAT_IRQ: u32 = 1 << 9;
-
-const MODE_8N1: u16 = 0x000D;
-const BAUD_PAD: u16 = 0x0088;
+const MODE_8N1: u16 = sio0::MODE_8N1;
+const BAUD_PAD: u16 = sio0::BAUD_250KHZ;
 /// Spin budget waiting for the byte shift itself (TX-ready / RX-not-empty).
 const EXCHANGE_WAIT_SPINS: u32 = 32_768;
 /// Spin budget waiting for the `/ACK` pulse. Comfortably exceeds the kernel's
