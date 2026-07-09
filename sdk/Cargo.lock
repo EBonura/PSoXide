@@ -97,6 +97,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "psx-osk"
+version = "0.1.0"
+dependencies = [
+ "psx-font",
+ "psx-gpu",
+]
+
+[[package]]
 name = "psx-pack"
 version = "0.1.0"
 dependencies = [

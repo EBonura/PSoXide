@@ -29,6 +29,8 @@ the [root README](../README.md) and the per-area READMEs
 | [playtest-profiling.md](playtest-profiling.md) | Playtest capture, headless replay, per-vblank profiling. |
 | [downstream-projects.md](downstream-projects.md) | Canonical structure for game repos built on PSoXide. |
 | [game-states-plan.md](game-states-plan.md) | Game-state system plan. |
+| [multi-gameplay-scenes.md](multi-gameplay-scenes.md) | Design note: more than one gameplay Scene in GameFlow. |
+| [gte-camera-kit.md](gte-camera-kit.md) | Design note: shared GTE camera/projection kit. |
 
 ## Hardware reference
 
