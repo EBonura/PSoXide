@@ -206,6 +206,7 @@ impl Translator {
         let kind = self.blend_kind(cmd);
         let [v0, v1, v2] = v;
         if self.wireframe {
+            self.push_wire_fill_flat(v0, v1, v2, kind);
             self.push_wire_tri(v0, color, v1, color, v2, color, kind);
         } else {
             self.push_tri(v0, v1, v2, color, kind);
@@ -221,6 +222,8 @@ impl Translator {
         // upper/left, so pixels on the shared diagonal are owned by
         // (v0, v1, v2).
         if self.wireframe {
+            self.push_wire_fill_flat(v1, v3, v2, kind);
+            self.push_wire_fill_flat(v0, v1, v2, kind);
             self.push_wire_tri(v1, color, v3, color, v2, color, kind);
             self.push_wire_tri(v0, color, v1, color, v2, color, kind);
         } else {
@@ -249,6 +252,60 @@ impl Translator {
                     flags: 0,
                     tex_window: 0,
                 },
+            );
+        }
+    }
+
+    /// Black interior fill for an *opaque* non-textured wireframe prim.
+    /// Preserves the game's implicit "clear by overdraw" (an opaque poly
+    /// would have painted over last frame's pixels), so stale edges never
+    /// accumulate in the persistent target. Semi-trans prims skip the
+    /// fill: they blend over existing content on real hardware, so a
+    /// black interior would blot out whatever they were layered on
+    /// (e.g. UI under a gradient). Mirrors the CPU rasterizer's
+    /// `wireframe_fill_black`.
+    fn push_wire_fill_flat(
+        &mut self,
+        v0: (i32, i32),
+        v1: (i32, i32),
+        v2: (i32, i32),
+        prim_kind: BlendKind,
+    ) {
+        if prim_kind == BlendKind::Opaque {
+            self.push_tri(v0, v1, v2, [0, 0, 0, 255], BlendKind::Opaque);
+        }
+    }
+
+    /// Texel-aware black interior for an *opaque* textured wireframe
+    /// prim: draw the texture with a zero tint (modulation forces every
+    /// drawn texel to black) so transparent color-0 texels stay undrawn.
+    /// Coverage exactly matches what the game would have painted -- a
+    /// flat fill would also black out stipple-"transparent" texture
+    /// holes (e.g. a commercial title's leaderboard banner gradient). RAW is
+    /// stripped so the zero tint actually applies.
+    #[allow(clippy::too_many_arguments)]
+    fn push_wire_fill_tex(
+        &mut self,
+        v0: (i32, i32),
+        uv0: (u16, u16),
+        v1: (i32, i32),
+        uv1: (u16, u16),
+        v2: (i32, i32),
+        uv2: (u16, u16),
+        prim_flags: u32,
+        prim_kind: BlendKind,
+    ) {
+        if prim_kind == BlendKind::Opaque {
+            self.push_tex_tri_psx(
+                v0,
+                uv0,
+                v1,
+                uv1,
+                v2,
+                uv2,
+                [0, 0, 0, 255],
+                prim_flags & !fbits::RAW_TEXTURE,
+                BlendKind::Opaque,
             );
         }
     }
@@ -316,6 +373,16 @@ impl Translator {
         let color = tex_tint(cmd);
         let kind = self.blend_kind(cmd);
         if self.wireframe {
+            self.push_wire_fill_tex(
+                v0,
+                uv16(uv0),
+                v1,
+                uv16(uv1),
+                v2,
+                uv16(uv2),
+                prim_flags,
+                kind,
+            );
             self.push_wire_tri(v0, color, v1, color, v2, color, BlendKind::Opaque);
         } else {
             self.push_tex_tri_psx(
@@ -350,6 +417,26 @@ impl Translator {
         let kind = self.blend_kind(cmd);
 
         if self.wireframe {
+            self.push_wire_fill_tex(
+                v1,
+                uv16(uv1),
+                v3,
+                uv16(uv3),
+                v2,
+                uv16(uv2),
+                prim_flags,
+                kind,
+            );
+            self.push_wire_fill_tex(
+                v0,
+                uv16(uv0),
+                v1,
+                uv16(uv1),
+                v2,
+                uv16(uv2),
+                prim_flags,
+                kind,
+            );
             self.push_wire_tri(v1, color, v3, color, v2, color, BlendKind::Opaque);
             self.push_wire_tri(v0, color, v1, color, v2, color, BlendKind::Opaque);
         } else {
@@ -491,6 +578,7 @@ impl Translator {
         let [v0, v1, v2] = v;
         let [c0, c1, c2] = colors.map(mono_color_rgba8);
         if self.wireframe {
+            self.push_wire_fill_flat(v0, v1, v2, kind);
             self.push_wire_tri(v0, c0, v1, c1, v2, c2, kind);
         } else {
             self.push_shaded_tri(v0, c0, v1, c1, v2, c2, 0, kind);
@@ -503,6 +591,8 @@ impl Translator {
         let [v0, v1, v2, v3] = v;
         let [c0, c1, c2, c3] = colors.map(mono_color_rgba8);
         if self.wireframe {
+            self.push_wire_fill_flat(v1, v3, v2, kind);
+            self.push_wire_fill_flat(v0, v1, v2, kind);
             self.push_wire_tri(v1, c1, v3, c3, v2, c2, kind);
             self.push_wire_tri(v0, c0, v1, c1, v2, c2, kind);
         } else {
@@ -526,6 +616,16 @@ impl Translator {
         let prim_flags = self.tex_prim_flags(cmd, clut);
         let kind = self.blend_kind(cmd);
         if self.wireframe {
+            self.push_wire_fill_tex(
+                v0,
+                uv16(uv0),
+                v1,
+                uv16(uv1),
+                v2,
+                uv16(uv2),
+                prim_flags,
+                kind,
+            );
             self.push_wire_tri(v0, c0, v1, c1, v2, c2, BlendKind::Opaque);
         } else {
             self.push_tex_tri_shaded_psx(
@@ -559,6 +659,26 @@ impl Translator {
         let prim_flags = self.tex_prim_flags(cmd, clut);
         let kind = self.blend_kind(cmd);
         if self.wireframe {
+            self.push_wire_fill_tex(
+                v1,
+                uv16(uv1),
+                v3,
+                uv16(uv3),
+                v2,
+                uv16(uv2),
+                prim_flags,
+                kind,
+            );
+            self.push_wire_fill_tex(
+                v0,
+                uv16(uv0),
+                v1,
+                uv16(uv1),
+                v2,
+                uv16(uv2),
+                prim_flags,
+                kind,
+            );
             self.push_wire_tri(v1, c1, v3, c3, v2, c2, BlendKind::Opaque);
             self.push_wire_tri(v0, c0, v1, c1, v2, c2, BlendKind::Opaque);
         } else {
@@ -1104,10 +1224,11 @@ mod tests {
         let mut translator = Translator::new();
         let frame = translator.translate_with_wireframe(&log, true);
 
-        assert_eq!(frame.total(), 18);
+        // 3 verts of black interior fill + 3 edge strips x 6 verts.
+        assert_eq!(frame.total(), 21);
         assert_eq!(frame.runs.len(), 1);
         assert_eq!(frame.runs[0].kind, BlendKind::Opaque);
-        assert_eq!(frame.runs[0].count, 18);
+        assert_eq!(frame.runs[0].count, 21);
         for v in frame.vertices {
             assert_eq!(v.flags, 0);
         }
@@ -1130,6 +1251,9 @@ mod tests {
         let mut translator = Translator::new();
         let frame = translator.translate_with_wireframe(&log, true);
 
+        // 0x26 is a SEMI-TRANS textured tri: no black interior fill (it
+        // would blot out the content the prim blends over), just the 3
+        // edge strips x 6 verts. Edges still render opaque.
         assert_eq!(frame.total(), 18);
         assert_eq!(frame.runs.len(), 1);
         assert_eq!(frame.runs[0].kind, BlendKind::Opaque);
@@ -1149,5 +1273,38 @@ mod tests {
         assert_eq!(frame.runs.len(), 1);
         assert_eq!(frame.runs[0].kind, BlendKind::Opaque);
         assert_eq!(frame.runs[0].count, 6);
+    }
+
+    #[test]
+    fn wireframe_opaque_textured_tri_gets_texel_aware_black_fill() {
+        // 0x24 (opaque textured tri): 3 verts of TEXTURED black-tint fill
+        // (transparent color-0 texels stay undrawn via the shader's texel
+        // discard) + 3 edge strips x 6 verts.
+        let log = [entry(
+            0x24,
+            vec![
+                0x2480_8080,
+                xy(10, 10),
+                uv(0, 0, 0),
+                xy(20, 10),
+                uv(8, 0, 0),
+                xy(10, 20),
+                uv(0, 8, 0),
+            ],
+        )];
+        let mut translator = Translator::new();
+        let frame = translator.translate_with_wireframe(&log, true);
+
+        assert_eq!(frame.total(), 21);
+        let fill = &frame.vertices[..3];
+        for v in fill {
+            assert_ne!(v.flags & fbits::TEXTURED, 0);
+            assert_eq!(v.flags & fbits::RAW_TEXTURE, 0);
+            assert_eq!([v.color[0], v.color[1], v.color[2]], [0, 0, 0]);
+        }
+        // Edge strips stay untextured.
+        for v in &frame.vertices[3..] {
+            assert_eq!(v.flags & fbits::TEXTURED, 0);
+        }
     }
 }
