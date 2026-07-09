@@ -5,10 +5,15 @@ version      = "0.1.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description  = "Guest-side WORLD.PAK (PSOXWPAK) parsing and in-place HLZC/LZ4 chunk decompression. The reader half of psx-iso's pack writer."
+description  = "Guest-side WORLD.PAK (PSOXWPAK) parsing, in-place HLZC/LZ4 chunk decompression, and the CD-ROM sector-read state machine that streams chunks off the disc. The reader half of psx-iso's pack writer."
 
 [dependencies]
-# Pure logic, no MMIO, no deps: builds for the guest and the host alike.
+# The root module is pure logic and builds for guest and host alike. The
+# MMIO half (`cd`, the CD-ROM sector reader) only exists on the MIPS guest,
+# so its register/DMA/IRQ helpers are a target-gated dependency.
+
+[target.'cfg(target_arch = "mips")'.dependencies]
+psx-io = { workspace = true }
 
 [dev-dependencies]
 # Host tests round-trip against the REAL producers: psx-iso is the pack
