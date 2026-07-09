@@ -2554,11 +2554,18 @@ fn test_timer2_increments() -> TestResult {
 }
 
 fn test_timer1_scanline() -> TestResult {
-    let scanline = gpu::scanline_counter();
-    if scanline <= 340 {
-        TestResult::pass(340, scanline as u32, "scanline")
+    // Configure once, then let the counter run: Timer 1 in HBlank mode must
+    // advance on its own. (The old form read gpu::scanline_counter(), which
+    // reconfigures Timer 1 before every read and so always returned ~0; the
+    // `<= 340` range check passed vacuously.)
+    gpu::configure_vsync_timer();
+    let start = timers::counter(timers::Timer::Timer1);
+    spin(65_536);
+    let end = timers::counter(timers::Timer::Timer1);
+    if end != start {
+        TestResult::pass(1, end.wrapping_sub(start) as u32, "delta")
     } else {
-        TestResult::fail(340, scanline as u32, "range")
+        TestResult::fail(1, 0, "no tick")
     }
 }
 
