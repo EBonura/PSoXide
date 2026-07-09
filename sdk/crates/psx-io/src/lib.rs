@@ -14,6 +14,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
 
+pub mod cdda;
 pub mod cdrom;
 pub mod dma;
 pub mod gpu;
