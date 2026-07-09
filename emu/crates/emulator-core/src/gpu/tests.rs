@@ -663,6 +663,102 @@ fn cmd_log_drain_keeps_in_flight_upload_payload_attached() {
 }
 
 #[test]
+fn cmd_log_captures_mono_polyline_continuations() {
+    let mut gpu = Gpu::new();
+    gpu.enable_cmd_log();
+
+    gpu.gp0_push(0x48_FF_FF_FF); // mono polyline start
+    gpu.gp0_push(0x0000_0000); // v0
+    gpu.gp0_push(0x0000_0005); // v1
+    gpu.gp0_push(0x0000_000A); // continuation vertex
+    gpu.gp0_push(0x0005_000A); // continuation vertex
+    gpu.gp0_push(0x5555_5555); // terminator (not logged)
+
+    assert!(gpu.polyline.is_none());
+    assert_eq!(gpu.cmd_log.len(), 1);
+    assert_eq!(gpu.cmd_log[0].opcode, 0x48);
+    assert_eq!(
+        gpu.cmd_log[0].fifo,
+        vec![
+            0x48_FF_FF_FF,
+            0x0000_0000,
+            0x0000_0005,
+            0x0000_000A,
+            0x0005_000A
+        ]
+    );
+    // Terminated: the entry drains as a completed command.
+    let drained = gpu.drain_completed_cmd_log();
+    assert_eq!(drained.len(), 1);
+    assert!(gpu.cmd_log.is_empty());
+}
+
+#[test]
+fn cmd_log_captures_shaded_polyline_continuations() {
+    let mut gpu = Gpu::new();
+    gpu.enable_cmd_log();
+
+    gpu.gp0_push(0x58_FF_00_00); // shaded polyline start, c0
+    gpu.gp0_push(0x0000_0000); // v0
+    gpu.gp0_push(0x0000_FF00); // c1
+    gpu.gp0_push(0x0000_0008); // v1
+    gpu.gp0_push(0x00FF_0000); // continuation colour
+    gpu.gp0_push(0x0008_0008); // continuation vertex
+    gpu.gp0_push(0x5000_5000); // terminator (not logged)
+
+    assert!(gpu.polyline.is_none());
+    assert_eq!(gpu.cmd_log.len(), 1);
+    assert_eq!(gpu.cmd_log[0].opcode, 0x58);
+    assert_eq!(
+        gpu.cmd_log[0].fifo,
+        vec![
+            0x58_FF_00_00,
+            0x0000_0000,
+            0x0000_FF00,
+            0x0000_0008,
+            0x00FF_0000,
+            0x0008_0008
+        ]
+    );
+}
+
+#[test]
+fn cmd_log_drain_keeps_in_flight_polyline_attached() {
+    let mut gpu = Gpu::new();
+    gpu.enable_cmd_log();
+
+    gpu.gp0_push(0xE1_00_00_00);
+    gpu.gp0_push(0x48_FF_FF_FF); // mono polyline start
+    gpu.gp0_push(0x0000_0000); // v0
+    gpu.gp0_push(0x0000_0005); // v1
+    gpu.gp0_push(0x0000_000A); // continuation vertex, still in flight
+
+    let drained = gpu.drain_completed_cmd_log();
+    assert_eq!(drained.len(), 1);
+    assert_eq!(drained[0].opcode, 0xE1);
+    assert_eq!(gpu.cmd_log.len(), 1);
+    assert_eq!(gpu.cmd_log[0].opcode, 0x48);
+
+    // Continuations after the drain keep appending to the retained
+    // entry; the terminator releases it for the next drain.
+    gpu.gp0_push(0x0005_000A);
+    gpu.gp0_push(0x5555_5555);
+    let drained = gpu.drain_completed_cmd_log();
+    assert!(gpu.cmd_log.is_empty());
+    assert_eq!(drained.len(), 1);
+    assert_eq!(
+        drained[0].fifo,
+        vec![
+            0x48_FF_FF_FF,
+            0x0000_0000,
+            0x0000_0005,
+            0x0000_000A,
+            0x0005_000A
+        ]
+    );
+}
+
+#[test]
 fn vram_copy_masks_coordinates_and_size_fields() {
     let mut gpu = Gpu::new();
 
