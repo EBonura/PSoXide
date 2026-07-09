@@ -532,6 +532,13 @@ impl<B: Block> Card<B> {
         }
 
         if flags & FLAG_COMPRESSED == 0 {
+            // Writer invariant: uncompressed saves store the payload verbatim,
+            // so the two lengths must agree. A mismatch means a corrupt header;
+            // reject it instead of trusting stored_len (which was never checked
+            // against buf and could slice out of bounds).
+            if stored_len != raw_len {
+                return Err(Error::BadContainer);
+            }
             cur.read_exact(&mut self.dev, &mut buf[..stored_len])?;
             return Ok(stored_len);
         }
