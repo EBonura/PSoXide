@@ -362,6 +362,16 @@ pub struct Gpu {
     /// Two renders old -- these pixels are on the back buffer the game
     /// is about to redraw, never on the displayed one. Safe to erase.
     wire_pixels_prev2: Vec<(u16, u16)>,
+    /// `(pre-edge value, value the edge wrote)` for every pixel
+    /// currently owned by an edge, keyed by `(y << 16) | x`. Erasing
+    /// restores the pre-edge value instead of writing black -- games
+    /// that never repaint their background (a commercial title's menus draw
+    /// the car over a static backdrop) would otherwise accumulate a
+    /// black scar wherever an edge ever was. The restore only applies
+    /// while the pixel still holds what the edge wrote: if the game
+    /// overdrew our edge (a commercial title's leaderboard redraws its text rows),
+    /// restoring would smear stale content over the newer frame.
+    wire_saved: std::collections::HashMap<u32, (u16, u16)>,
 
     /// Pixel-owner trace -- when `Some`, every `plot_pixel` records
     /// the index of the currently-executing GPU command into
@@ -568,6 +578,7 @@ impl Gpu {
             wire_pixels_current: Vec::new(),
             wire_pixels_prev: Vec::new(),
             wire_pixels_prev2: Vec::new(),
+            wire_saved: std::collections::HashMap::new(),
             pixel_owner: None,
             cmd_log: Vec::new(),
             cmd_log_enabled: false,
@@ -974,19 +985,16 @@ impl Gpu {
     /// pixels linger in guest VRAM.
     fn wireframe_frame_boundary(&mut self) {
         if !self.wireframe_enabled {
-            if self.wire_pixels_prev2.is_empty()
-                && self.wire_pixels_prev.is_empty()
-                && self.wire_pixels_current.is_empty()
-            {
+            // Toggle just turned off: put every owned pixel back to its
+            // pre-wireframe content and drop all journals.
+            if self.wire_saved.is_empty() {
                 return;
             }
-            for &(x, y) in self
-                .wire_pixels_prev2
-                .iter()
-                .chain(&self.wire_pixels_prev)
-                .chain(&self.wire_pixels_current)
-            {
-                self.vram.set_pixel(x, y, 0);
+            for (key, (old, written)) in std::mem::take(&mut self.wire_saved) {
+                let (x, y) = ((key & 0xFFFF) as u16, (key >> 16) as u16);
+                if self.vram.get_pixel(x, y) == written {
+                    self.vram.set_pixel(x, y, old);
+                }
             }
             self.wire_pixels_prev2 = Vec::new();
             self.wire_pixels_prev = Vec::new();
@@ -1005,8 +1013,18 @@ impl Gpu {
             .collect();
         let prev2 = std::mem::take(&mut self.wire_pixels_prev2);
         for p in prev2 {
-            if !live.contains(&key(&p)) {
-                self.vram.set_pixel(p.0, p.1, 0);
+            let k = key(&p);
+            if !live.contains(&k) {
+                // Restore the pre-edge content (not black -- see
+                // `wire_saved`), but only while the pixel still holds
+                // our edge; if the game overdrew it, its newer content
+                // stands. Removal ends our ownership either way, so a
+                // future edge re-saves whatever is there by then.
+                if let Some((old, written)) = self.wire_saved.remove(&k) {
+                    if self.vram.get_pixel(p.0, p.1) == written {
+                        self.vram.set_pixel(p.0, p.1, old);
+                    }
+                }
             }
         }
         self.wire_pixels_prev2 = std::mem::take(&mut self.wire_pixels_prev);
@@ -2943,10 +2961,25 @@ impl Gpu {
         let (min_y, max_y) = (self.draw_area_top as i32, self.draw_area_bottom as i32);
         if (min_x..=max_x).contains(&x) && (min_y..=max_y).contains(&y) {
             if self.wireframe_enabled {
-                self.wire_pixels_current.push((x as u16, y as u16));
+                self.wire_plot_recorded(x as u16, y as u16, colour, mode);
+            } else {
+                self.plot_pixel(x as u16, y as u16, colour, mode);
             }
-            self.plot_pixel(x as u16, y as u16, colour, mode);
         }
+    }
+
+    /// Plot an edge pixel in wireframe mode, journaling it. Saves the
+    /// pixel's pre-edge VRAM value the first time an edge claims it
+    /// (later plots see our own edge colour, not the real content), and
+    /// records what the plot actually wrote (read back post-plot, so
+    /// dither/masking are accounted for) for the conditional restore.
+    fn wire_plot_recorded(&mut self, x: u16, y: u16, colour: u16, mode: BlendMode) {
+        let old = self.vram.get_pixel(x, y);
+        self.plot_pixel(x, y, colour, mode);
+        let written = self.vram.get_pixel(x, y);
+        let key = ((y as u32) << 16) | x as u32;
+        self.wire_saved.entry(key).or_insert((old, written)).1 = written;
+        self.wire_pixels_current.push((x, y));
     }
 
     /// Rasterize a Gouraud-shaded line -- interpolates RGB between
@@ -2997,9 +3030,10 @@ impl Gpu {
                     )
                 };
                 if self.wireframe_enabled {
-                    self.wire_pixels_current.push((x as u16, y as u16));
+                    self.wire_plot_recorded(x as u16, y as u16, colour, mode);
+                } else {
+                    self.plot_pixel(x as u16, y as u16, colour, mode);
                 }
-                self.plot_pixel(x as u16, y as u16, colour, mode);
             }
             if x == x1 && y == y1 {
                 break;
