@@ -68,6 +68,22 @@ simpler to reason about for bundled SDK font data. The visual output
 is the same IBM-VGA look - these are all derivatives of the same
 1981 IBM character-generator ROM.
 
+## `spleen-LICENSE` - Spleen 5x8
+
+Author: Frederic Cambus
+Upstream: https://github.com/fcambus/spleen (`spleen-5x8.bdf`)
+License: **BSD-2-Clause** (full text in `spleen-LICENSE`)
+
+Spleen is a monospaced bitmap font family; the 5x8 size is the
+smallest readable ASCII cell and suits dense guest UI (tables,
+spreadsheets) where the 8x8 fonts waste horizontal space. Only the
+converted Rust const data is vendored (`src/fonts/spleen_5x8.rs`,
+U+0020..U+007E, MSB-first rows, generated from the upstream BDF);
+the BDF itself is not checked in. BSD-2-Clause requires reproducing
+the copyright notice and disclaimer in binary distributions, which
+`spleen-LICENSE` satisfies; downstream discs that embed this font
+should carry the same notice (see `docs/downstream-licensing.md`).
+
 ## `kenney-fonts/*.ttf` - Kenney Fonts
 
 Author: Kenney
