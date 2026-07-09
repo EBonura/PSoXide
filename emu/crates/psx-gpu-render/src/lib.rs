@@ -237,12 +237,16 @@ impl HwRenderer {
     pub fn render_frame(&mut self, gpu: &Gpu, cmd_log: &[GpuCmdLogEntry], vram_words: &[u16]) {
         self.sync_texture_from_vram(vram_words);
 
-        // Wireframe note: edge strips draw with transparent interiors and no
-        // cleanup here -- stale edges would accumulate in this persistent
-        // target, which is why the GUI routes wireframe display through the
-        // CPU path (whose per-frame edge journal erases them; see
-        // Gpu::wireframe_frame_boundary). This target still replays edges
-        // for callers that sample it directly (e.g. --dump-hw).
+        // Wireframe: edge strips draw with transparent interiors, so stale
+        // edges would accumulate in this persistent target. Rebuild it from
+        // CPU VRAM (kept clean per frame by the rasterizer's edge journal,
+        // Gpu::wireframe_frame_boundary) before replaying, via a fullscreen
+        // GPU blit -- works at any internal scale, so wireframe is correct
+        // in both native and hi-res modes. Normal mode never blits: PSX
+        // VRAM persistence semantics stay untouched.
+        if gpu.wireframe_enabled {
+            self.blit_vram_to_target();
+        }
         let mut segment_start = 0;
         for (i, entry) in cmd_log.iter().enumerate() {
             if is_vram_image_op(entry) {
@@ -270,6 +274,37 @@ impl HwRenderer {
             );
             self.draw_runs(&runs);
         }
+    }
+
+    /// Overwrite the whole scaled target with the current contents of the
+    /// VRAM sampler texture (one fullscreen triangle). Wireframe-mode
+    /// helper; see the call site in [`HwRenderer::render_frame`].
+    fn blit_vram_to_target(&mut self) {
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("psx-hw-blit-encoder"),
+            });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("psx-hw-blit-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: self.target.view(),
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_bind_group(0, self.pipeline.bind_group(), &[]);
+            pass.set_pipeline(self.pipeline.blit_pipeline());
+            pass.draw(0..3, 0..1);
+        }
+        self.queue.submit(Some(encoder.finish()));
     }
 
     fn draw_runs(&mut self, runs: &[DrawRun]) {
