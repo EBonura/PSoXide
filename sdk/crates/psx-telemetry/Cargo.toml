@@ -4,7 +4,13 @@ version      = "0.1.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description  = "Shared guest/host telemetry id tables: stage, task and counter ids plus slot counts."
+description  = "Shared guest/host telemetry id tables plus the guest-side event emitters."
+
+[features]
+# Compile the Expansion 2 MMIO writes in `emit`. Games forward their own
+# telemetry feature here (emulator-telemetry = ["psx-telemetry/emit"]); with
+# it off every emitter compiles to a no-op, so shipping builds pay nothing.
+emit = []
 
 [lints.rust]
 missing_docs = "warn"
