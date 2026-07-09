@@ -10,6 +10,8 @@
 
 #![no_std]
 
+pub mod emit;
+
 /// Runtime stage ids.
 pub mod stage {
     /// Per-frame gameplay/update work.
