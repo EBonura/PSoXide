@@ -11,7 +11,7 @@
 //! `compiler-builtins` exports these as **weak** symbols, so the strong
 //! definitions here override them for every guest that links `psx-rt`. We route
 //! the signed operations through the working unsigned path with the sign handled
-//! explicitly, so `i64` division just works — no per-project workaround.
+//! explicitly, so `i64` division just works; no per-project workaround.
 //!
 //! This only overrides the two broken signed symbols; the (correct) unsigned
 //! ones are left to `compiler-builtins`. i64 remains slower than i32 (the house
