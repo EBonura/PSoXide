@@ -372,6 +372,21 @@ pub struct Gpu {
     /// overdrew our edge (a commercial title's leaderboard redraws its text rows),
     /// restoring would smear stale content over the newer frame.
     wire_saved: std::collections::HashMap<u32, (u16, u16)>,
+    /// Previous-vblank value of `wireframe_enabled`, for detecting the
+    /// on/off transitions in [`Gpu::wireframe_frame_boundary`].
+    wireframe_was_on: bool,
+    /// Full-VRAM snapshot taken at the wireframe on-transition, before
+    /// the framebuffer rects are cleared. Used at the off-transition to
+    /// put back what the clear removed (see `wire_cleared_rects`).
+    wire_toggle_snapshot: Option<Vec<u16>>,
+    /// Framebuffer rects cleared at the on-transition (draw area +
+    /// display area, inclusive corners). Toggling wireframe on clears
+    /// them once: polygons no longer overwrite the framebuffer, so the
+    /// last textured frame would otherwise sit frozen behind the edges
+    /// for the rest of the session (GT races / a commercial title fights looked
+    /// like wires over a stale photo of the scene). Live 2D content
+    /// (sprites, HUD, MDEC) still draws on top of the black canvas.
+    wire_cleared_rects: Vec<(u16, u16, u16, u16)>,
 
     /// Pixel-owner trace -- when `Some`, every `plot_pixel` records
     /// the index of the currently-executing GPU command into
@@ -579,6 +594,9 @@ impl Gpu {
             wire_pixels_prev: Vec::new(),
             wire_pixels_prev2: Vec::new(),
             wire_saved: std::collections::HashMap::new(),
+            wireframe_was_on: false,
+            wire_toggle_snapshot: None,
+            wire_cleared_rects: Vec::new(),
             pixel_owner: None,
             cmd_log: Vec::new(),
             cmd_log_enabled: false,
@@ -984,12 +1002,45 @@ impl Gpu {
     /// When wireframe is switched off, all journals are erased so no edge
     /// pixels linger in guest VRAM.
     fn wireframe_frame_boundary(&mut self) {
+        let was_on = self.wireframe_was_on;
+        self.wireframe_was_on = self.wireframe_enabled;
+        if self.wireframe_enabled && !was_on {
+            // Toggle just turned on: black out the framebuffer pages once.
+            // Polygons stop overwriting the framebuffer in wireframe mode,
+            // so the last textured frame would sit frozen behind the edges
+            // for the rest of the session (GT races / a commercial title fights looked
+            // like wires over a stale photo). Live 2D content still draws
+            // on top of the black canvas. Snapshot first so toggling off
+            // can put back what this clear removed.
+            self.wire_toggle_snapshot = Some(self.vram.words().to_vec());
+            self.wire_cleared_rects.clear();
+            self.wire_cleared_rects.push((
+                self.draw_area_left,
+                self.draw_area_top,
+                self.draw_area_right,
+                self.draw_area_bottom,
+            ));
+            let d = self.display_area();
+            if d.width > 0 && d.height > 0 {
+                // Display width is in pixels; 24bpp packs 2 pixels into
+                // 3 VRAM words.
+                let w_vram = if d.bpp24 { d.width as u32 * 3 / 2 } else { d.width as u32 };
+                let r = (d.x as u32 + w_vram - 1).min(VRAM_WIDTH as u32 - 1) as u16;
+                let b = (d.y as u32 + d.height as u32 - 1).min(VRAM_HEIGHT as u32 - 1) as u16;
+                self.wire_cleared_rects.push((d.x, d.y, r, b));
+            }
+            for &(l, t, r, b) in &self.wire_cleared_rects {
+                self.vram.fill_rect_unwrapped(l, t, r, b, 0);
+            }
+        }
         if !self.wireframe_enabled {
-            // Toggle just turned off: put every owned pixel back to its
-            // pre-wireframe content and drop all journals.
-            if self.wire_saved.is_empty() {
+            if !was_on {
                 return;
             }
+            // Toggle just turned off: put every edge-owned pixel back to
+            // its pre-edge content (only where our edge still stands),
+            // then undo the on-transition clear for pixels still black --
+            // content the game drew during wireframe stays.
             for (key, (old, written)) in std::mem::take(&mut self.wire_saved) {
                 let (x, y) = ((key & 0xFFFF) as u16, (key >> 16) as u16);
                 if self.vram.get_pixel(x, y) == written {
@@ -999,6 +1050,19 @@ impl Gpu {
             self.wire_pixels_prev2 = Vec::new();
             self.wire_pixels_prev = Vec::new();
             self.wire_pixels_current = Vec::new();
+            if let Some(snap) = self.wire_toggle_snapshot.take() {
+                for &(l, t, r, b) in &self.wire_cleared_rects {
+                    for y in t..=b {
+                        for x in l..=r {
+                            if self.vram.get_pixel(x, y) == 0 {
+                                let old = snap[y as usize * VRAM_WIDTH + x as usize];
+                                self.vram.set_pixel(x, y, old);
+                            }
+                        }
+                    }
+                }
+            }
+            self.wire_cleared_rects.clear();
             return;
         }
         if self.wire_pixels_current.is_empty() {
