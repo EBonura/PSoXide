@@ -62,6 +62,33 @@ pub const FONT_SIZE_MONO: f32 = 16.0;
 pub fn apply(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
 
+    // Lucide icon font: the EDITOR's icon set (psxed-ui/src/icons.rs binds
+    // FontFamily::Name("lucide")). The emulator toolbar moved to Phosphor,
+    // but the editor keeps lucide -- both fonts must stay registered or the
+    // editor build panics at startup ("lucide is not bound to any fonts").
+    const LUCIDE_TTF: &[u8] = include_bytes!("../assets/fonts/lucide.ttf");
+    fonts.font_data.insert(
+        "lucide".to_owned(),
+        egui::FontData::from_static(LUCIDE_TTF).into(),
+    );
+    fonts
+        .families
+        .entry(FontFamily::Name("lucide".into()))
+        .or_default()
+        .push("lucide".to_owned());
+    // The editor also embeds lucide glyphs inline in normal text runs, so
+    // lucide owns the Proportional/Monospace icon fallback. The emulator's
+    // Phosphor glyphs always render through the named families (icons.rs
+    // helpers), never the fallback -- the two sets' private-use codepoint
+    // ranges overlap, so only one can hold this slot.
+    for family in [FontFamily::Proportional, FontFamily::Monospace] {
+        fonts
+            .families
+            .entry(family)
+            .or_default()
+            .push("lucide".to_owned());
+    }
+
     // Phosphor icon font, two weights: regular (outline) for the default
     // state, fill (solid) for active toggles. Same codepoints in both.
     const PHOSPHOR_TTF: &[u8] = include_bytes!("../assets/fonts/Phosphor.ttf");
@@ -84,14 +111,6 @@ pub fn apply(ctx: &egui::Context) {
         .entry(FontFamily::Name("phosphor-fill".into()))
         .or_default()
         .push("phosphor-fill".to_owned());
-    // Fallback so inline icon glyphs still resolve inside normal text runs.
-    for family in [FontFamily::Proportional, FontFamily::Monospace] {
-        fonts
-            .families
-            .entry(family)
-            .or_default()
-            .push("phosphor".to_owned());
-    }
 
     const VT323_TTF: &[u8] = include_bytes!("../assets/fonts/VT323-Regular.ttf");
     fonts.font_data.insert(
