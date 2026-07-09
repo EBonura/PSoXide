@@ -98,7 +98,8 @@ const VOICE_PITCH: u32 = 0x4;
 const VOICE_START_ADDR: u32 = 0x6;
 const VOICE_ADSR_LO: u32 = 0x8;
 const VOICE_ADSR_HI: u32 = 0xA;
-// 0xC = current ADSR envelope (read-only); 0xE = repeat addr.
+// 0xC = current ADSR envelope (read-only).
+const VOICE_REPEAT_ADDR: u32 = 0xE;
 
 // Global registers (PSX-SPX § "SPU Registers").
 const MAIN_VOL_LEFT: u32 = 0x1F80_1D80;
@@ -498,6 +499,15 @@ impl Voice {
         write_reg16(self.reg_base() + VOICE_START_ADDR, addr.reg_field());
     }
 
+    /// Set the voice's loop (repeat) address: where playback jumps when a
+    /// sample block with the loop-end flag finishes. The hardware itself
+    /// rewrites this register when a block with the loop-start flag passes,
+    /// so set it AFTER key-on to override; chaining two buffers' loop
+    /// addresses is how streamed audio ping-pongs without a key-off.
+    pub fn set_loop_addr(self, addr: SpuAddr) {
+        write_reg16(self.reg_base() + VOICE_REPEAT_ADDR, addr.reg_field());
+    }
+
     /// Install ADSR envelope parameters on this voice.
     pub fn set_adsr(self, adsr: Adsr) {
         write_reg16(self.reg_base() + VOICE_ADSR_LO, adsr.lower);
@@ -528,6 +538,16 @@ impl Voice {
         write_reg16(KEY_OFF_LO, mask as u16);
         write_reg16(KEY_OFF_HI, (mask >> 16) as u16);
     }
+
+    /// Route the voices whose bits are set in `mask` to the noise generator
+    /// instead of their ADPCM data (the classic PSX percussion/wind source);
+    /// voices outside `mask` play normally. [`init`] clears the mask. Pitch
+    /// comes from the shared noise clock, [`set_noise_clock`], not the
+    /// voice's pitch register.
+    pub fn set_noise_mask(mask: u32) {
+        write_reg16(NOISE_LO, mask as u16);
+        write_reg16(NOISE_HI, (mask >> 16) as u16);
+    }
 }
 
 // ======================================================================
@@ -547,6 +567,17 @@ pub fn set_main_volume(left: Volume, right: Volume) {
 pub fn set_cd_volume(left: CdVolume, right: CdVolume) {
     write_reg16(CD_VOL_LEFT, left.0 as u16);
     write_reg16(CD_VOL_RIGHT, right.0 as u16);
+}
+
+/// Set the shared noise-generator clock, SPUCNT bits 8..=13: `shift`
+/// (0..=15) halves the frequency per step, 0 = highest pitch; `step`
+/// (0..=3) selects the +4..+7 fine increment. Applies to every voice
+/// routed to noise via [`Voice::set_noise_mask`].
+pub fn set_noise_clock(shift: u8, step: u8) {
+    const NOISE_BITS: u16 = 0x3F00; // bits 8..=13
+    let field = (((shift as u16) & 0xF) << 10) | (((step as u16) & 0x3) << 8);
+    let control = read_reg16(SPUCNT) & !NOISE_BITS;
+    write_reg16(SPUCNT, control | field);
 }
 
 /// Enable or disable routing CD-DA/XA input into the SPU mixer.
