@@ -6,7 +6,8 @@
 //! resets after a match ends). The only change is *how it's wired*:
 //!
 //! - No hand-rolled main loop. [`App::run`] drives the cadence:
-//!   poll-pad → update → clear → render → draw-sync → vsync → swap.
+//!   poll-pad → update → clear → render, then the pipelined present
+//!   (async kick, overlay, true VBlank-edge wait, swap).
 //! - [`Scene::update`] and [`Scene::render`] split the per-frame
 //!   work, both receive `&mut Ctx`.
 //! - Pad edge detection uses [`Ctx::just_pressed`] instead of
