@@ -9,11 +9,13 @@
 //! `cdstream.rs`. Reader and writer now live in one repo so the format
 //! cannot drift.
 //!
-//! Scope: PURE logic only. Feeding sectors in (the CD-ROM command/DMA state
-//! machine) stays with the caller for now; the proven reference is
-//! `engine/examples/editor-playtest/src/cd_stream/hw.rs`. Folding that state
-//! machine into the SDK is the planned follow-up; it needs emulator + silicon
-//! verification that pure parsing does not.
+//! Scope: this root module is PURE logic (parsing + decompression), building
+//! and testing on the host. The CD-ROM command/DMA state machine that feeds
+//! sectors in lives in [`cd`] ([`cd::SectorReader`] + [`cd::load_chunk`]),
+//! `cfg(target_arch = "mips")`-gated, ported from hl-psx's silicon-proven
+//! `cdstream.rs` (second generation of the engine's
+//! `editor-playtest/src/cd_stream/hw.rs`). Note [`cd::SectorReader::prepare`]
+//! masks `I_MASK` to VBlank-only; read its docs before adopting.
 //!
 //! Pack layout (all little-endian, from `psx-iso`):
 //!
@@ -33,6 +35,8 @@
 #![no_std]
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
+
+pub mod cd;
 
 /// Pack magic, first 8 header bytes.
 pub const MAGIC: [u8; 8] = *b"PSOXWPAK";
