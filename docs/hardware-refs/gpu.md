@@ -136,12 +136,19 @@ line / rect / fill rasterizers, texture cache + CLUT lookup, VRAM
 transfers, scan-out, VBlank + interlace, GPU IRQ, DMA ch2 linked-list
 walker) has since shipped in the software GPU.
 
-The one known remaining gap is in the HARDWARE renderer
-(`psx-gpu-render`), not here: GP0 line/polyline primitives (0x40..0x5F)
-lower to `GpuEvent::Unhandled` and are skipped, so hw-rendered output
-(including headless `--dump-hw` frames) omits lines that the software
-GPU draws. Guests that must verify line output through `--dump-hw`
-currently draw thin quads instead (see PSXcel's `draw_seg`).
+The hardware renderer (`psx-gpu-render`) draws GP0 line/polyline
+primitives (0x40..0x5F) too, as of the emu-gpu-lines work: the shared
+interpreter decodes the whole family (the CPU GPU appends polyline
+continuation words to the cmd_log entry, terminator excluded) and the
+translator expands each segment into a one-PSX-pixel quad band,
+endpoint-inclusive and connected at any slope, upscaling with the
+internal-resolution target. `--dump-hw` frames therefore include
+lines. The band is center-sampled rather than Bresenham-stepped, so
+arbitrary-slope segments may round individual steps one minor-axis
+pixel away from the CPU walk (endpoints and h/v/45-degree lines land
+exactly); this CPU rasterizer stays the pixel-exact oracle. The
+accurate compute backend still skips lines and counts them as
+unhandled.
 
 ## References
 
