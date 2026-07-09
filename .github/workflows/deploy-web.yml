@@ -4,7 +4,7 @@ name: Deploy web emulator to Pages
 # GitHub Pages. Release is mandatory: a debug wasm emulator is ~10-50x slower.
 on:
   push:
-    branches: [main, web-build]
+    branches: [main]
     paths:
       - "emu/**"
       - "crates/**"
