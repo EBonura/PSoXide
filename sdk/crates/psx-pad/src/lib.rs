@@ -45,6 +45,9 @@
 use psx_hw::sio::sio0;
 use psx_io::sio;
 
+pub mod tracker;
+pub use tracker::PadTracker;
+
 /// Named button bitmasks (active-high in this representation).
 /// Hardware's active-low wire format is hidden inside [`poll_port1`].
 pub mod button {
