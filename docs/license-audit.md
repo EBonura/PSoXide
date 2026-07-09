@@ -216,8 +216,11 @@ items below are quality / completeness, not legal blockers.
 
 ## Lower-Risk Or Documented Items
 
-- `sdk/crates/psx-font/vendor/PROVENANCE.md` documents font8x8 and IBM
-  VGA font sources as Public Domain.
+- `sdk/crates/psx-font/vendor/PROVENANCE.md` documents the bundled font
+  sources: font8x8 and IBM VGA (Public Domain), Kenney (CC0-1.0),
+  Google Fonts families (OFL-1.1 / Apache-2.0), and Spleen 5x8
+  (BSD-2-Clause; binary distributions embedding it must carry the
+  notice in `vendor/spleen-LICENSE`).
 - `engine/examples/showcase-lights/vendor/cube.obj` is marked
   hand-authored public domain in the file header.
 - `engine/examples/showcase-3d/vendor/teapot.obj` identifies itself as
