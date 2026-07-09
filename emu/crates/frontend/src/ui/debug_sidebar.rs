@@ -72,6 +72,12 @@ pub fn draw(ctx: &egui::Context, state: &mut AppState, vram_tex: egui::TextureId
                 draw_contents(ui, state, vram_tex);
             },
         );
+        // egui persists the panel's width from the frame content's measured
+        // rect (`PanelState { rect }`), and the padded scope above measures
+        // SIDEBAR_PAD narrower than the panel. Without claiming the full
+        // width here, the stored width erodes by the padding every repaint
+        // and a dragged sidebar creeps back to min_width.
+        ui.expand_to_include_rect(content_rect);
     });
 
     if !animating {
