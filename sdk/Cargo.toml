@@ -17,6 +17,7 @@ members = [
     "crates/psx-asset",
     "crates/psx-mc",
     "crates/psx-pack",
+    "crates/psx-osk",
 ]
 
 # The examples are built against the MIPS target via a separate
@@ -58,3 +59,4 @@ psx-fx   = { path = "crates/psx-fx" }
 psx-asset = { path = "crates/psx-asset" }
 psx-mc  = { path = "crates/psx-mc" }
 psx-pack = { path = "crates/psx-pack" }
+psx-osk = { path = "crates/psx-osk" }
