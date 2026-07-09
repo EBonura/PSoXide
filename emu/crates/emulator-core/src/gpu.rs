@@ -339,6 +339,14 @@ pub struct Gpu {
     /// interpreted as polyline continuation data, bypassing the
     /// regular packet assembler.
     polyline: Option<PolylineState>,
+    /// `cmd_log` index of the in-flight polyline's start packet, so
+    /// continuation words (vertices / colours, not the terminator)
+    /// append to that entry's fifo -- same scheme as
+    /// `VramTransfer::cmd_log_index` for upload payloads. `None`
+    /// when no polyline is in flight or the log isn't armed. The
+    /// HW renderer replays lines from the cmd_log; without this the
+    /// log only carries the first segment of every polyline.
+    polyline_cmd_log_index: Option<usize>,
 
     /// Wireframe mode -- replaces filled triangles with their
     /// three edges, rendered as lines at the triangle's primary
@@ -589,6 +597,7 @@ impl Gpu {
             tex_rect_flip_x: false,
             tex_rect_flip_y: false,
             polyline: None,
+            polyline_cmd_log_index: None,
             wireframe_enabled: false,
             wire_pixels_current: Vec::new(),
             wire_pixels_prev: Vec::new(),
@@ -794,13 +803,21 @@ impl Gpu {
     /// Drain only complete command-log entries.
     ///
     /// CPU→VRAM uploads are one GP0 setup packet followed by many
-    /// payload writes. The setup entry owns the payload words in
-    /// `cmd_log`; if a frontend drains the log mid-upload, the
-    /// remaining payload would otherwise append to an entry that has
-    /// already been moved out. Keep that in-flight upload entry in
-    /// place and return only the commands before it.
+    /// payload writes, and polylines are one start packet followed by
+    /// streamed vertex/colour words. The setup entry owns the
+    /// follow-on words in `cmd_log`; if a frontend drains the log
+    /// mid-upload / mid-polyline, the remaining words would otherwise
+    /// append to an entry that has already been moved out. Keep that
+    /// in-flight entry in place and return only the commands before
+    /// it. (Both modes consume every GP0 word until they end, so at
+    /// most one of the two indices is pending at a time.)
     pub fn drain_completed_cmd_log(&mut self) -> Vec<GpuCmdLogEntry> {
-        let Some(pending_index) = self.vram_upload.and_then(|t| t.cmd_log_index) else {
+        let upload_index = self.vram_upload.and_then(|t| t.cmd_log_index);
+        let pending_index = match (upload_index, self.polyline_cmd_log_index) {
+            (Some(u), Some(p)) => Some(u.min(p)),
+            (u, p) => u.or(p),
+        };
+        let Some(pending_index) = pending_index else {
             return std::mem::take(&mut self.cmd_log);
         };
         if pending_index >= self.cmd_log.len() {
@@ -810,7 +827,12 @@ impl Gpu {
         let pending = self.cmd_log.split_off(pending_index);
         let drained = std::mem::replace(&mut self.cmd_log, pending);
         if let Some(upload) = self.vram_upload.as_mut() {
-            upload.cmd_log_index = Some(0);
+            if upload.cmd_log_index.is_some() {
+                upload.cmd_log_index = Some(0);
+            }
+        }
+        if self.polyline_cmd_log_index.is_some() {
+            self.polyline_cmd_log_index = Some(0);
         }
         if let Some(entry) = self.cmd_log.first_mut() {
             entry.index = 0;
@@ -2823,6 +2845,11 @@ impl Gpu {
             mode,
             last_vertex: v1,
         });
+        self.polyline_cmd_log_index = if self.cmd_log_enabled {
+            self.cmd_log.len().checked_sub(1)
+        } else {
+            None
+        };
     }
 
     /// GP0 0x58..=0x5B -- start a Gouraud polyline. Initial packet
@@ -2844,6 +2871,11 @@ impl Gpu {
             awaiting_color: true,
             pending_color: 0,
         });
+        self.polyline_cmd_log_index = if self.cmd_log_enabled {
+            self.cmd_log.len().checked_sub(1)
+        } else {
+            None
+        };
     }
 
     /// Consume one GP0 word while in polyline mode. Terminator
@@ -2857,7 +2889,19 @@ impl Gpu {
         let is_term = (word & 0xF000_F000) == 0x5000_5000;
         if is_term {
             self.polyline = None;
+            self.polyline_cmd_log_index = None;
             return;
+        }
+        // Append the continuation word to the start packet's cmd_log
+        // entry so log consumers (HW renderer) see the whole
+        // polyline. The terminator is deliberately NOT appended: the
+        // logged fifo holds exactly the drawn data, and data words can
+        // never match the sentinel (the check above would have ended
+        // the polyline first).
+        if let Some(log_index) = self.polyline_cmd_log_index {
+            if let Some(entry) = self.cmd_log.get_mut(log_index) {
+                entry.fifo.push(word);
+            }
         }
         match self.polyline.as_mut().unwrap() {
             PolylineState::Mono {
