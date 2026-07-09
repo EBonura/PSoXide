@@ -237,10 +237,12 @@ impl HwRenderer {
     pub fn render_frame(&mut self, gpu: &Gpu, cmd_log: &[GpuCmdLogEntry], vram_words: &[u16]) {
         self.sync_texture_from_vram(vram_words);
 
-        // Wireframe accumulation is handled at the primitive level: the
-        // translator emits a black interior fill under each edge strip
-        // (push_wire_tri), preserving the game's clear-by-overdraw without
-        // clearing anything -- PSX VRAM persistence holds in wireframe too.
+        // Wireframe note: edge strips draw with transparent interiors and no
+        // cleanup here -- stale edges would accumulate in this persistent
+        // target, which is why the GUI routes wireframe display through the
+        // CPU path (whose per-frame edge journal erases them; see
+        // Gpu::wireframe_frame_boundary). This target still replays edges
+        // for callers that sample it directly (e.g. --dump-hw).
         let mut segment_start = 0;
         for (i, entry) in cmd_log.iter().enumerate() {
             if is_vram_image_op(entry) {
