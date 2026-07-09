@@ -109,6 +109,7 @@ name = "psx-pack"
 version = "0.1.0"
 dependencies = [
  "lz4_flex",
+ "psx-io",
  "psx-iso",
 ]
 
