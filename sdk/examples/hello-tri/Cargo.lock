@@ -14,7 +14,6 @@ version = "0.1.0"
 dependencies = [
  "psx-gpu",
  "psx-rt",
- "psx-sdk",
 ]
 
 [[package]]
@@ -23,20 +22,6 @@ version = "0.1.0"
 dependencies = [
  "psx-hw",
  "psx-io",
-]
-
-[[package]]
-name = "psx-gte"
-version = "0.1.0"
-dependencies = [
- "psx-gte-core",
-]
-
-[[package]]
-name = "psx-gte-core"
-version = "0.1.0"
-dependencies = [
- "psx-math",
 ]
 
 [[package]]
@@ -54,33 +39,9 @@ dependencies = [
 ]
 
 [[package]]
-name = "psx-math"
-version = "0.1.0"
-
-[[package]]
-name = "psx-pad"
-version = "0.1.0"
-dependencies = [
- "psx-hw",
- "psx-io",
-]
-
-[[package]]
 name = "psx-rt"
 version = "0.1.0"
 dependencies = [
  "psx-hw",
  "psx-io",
-]
-
-[[package]]
-name = "psx-sdk"
-version = "0.1.0"
-dependencies = [
- "psx-gpu",
- "psx-gte",
- "psx-hw",
- "psx-io",
- "psx-pad",
- "psx-rt",
 ]

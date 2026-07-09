@@ -14,8 +14,8 @@
 #![no_main]
 
 // Pull psx-rt in so the linker keeps `_start`, the panic handler,
-// and (if enabled) the heap allocator. Re-exports via psx-sdk
-// don't force the link because we don't call anything from them.
+// and (if enabled) the heap allocator; a plain dependency doesn't
+// force the link because we don't call anything from it.
 extern crate psx_rt;
 
 use psx_gpu::{self as gpu, Resolution, VideoMode, framebuf::FrameBuffer};
