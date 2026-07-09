@@ -776,6 +776,7 @@ impl Gpu {
         self.cmd_log.clear();
         self.current_cmd_index = 0;
         self.cmd_log_enabled = true;
+        self.unpin_in_flight_cmd_log();
     }
 
     /// Enable cmd_log capture WITHOUT allocating the per-pixel owner
@@ -790,6 +791,19 @@ impl Gpu {
         self.cmd_log.clear();
         self.current_cmd_index = 0;
         self.cmd_log_enabled = true;
+        self.unpin_in_flight_cmd_log();
+    }
+
+    /// Enabling (or re-enabling) capture clears `cmd_log`, so an index
+    /// pinned by an in-flight VRAM upload or polyline would dangle into
+    /// the fresh log and misattribute the remaining continuation words.
+    /// Unpin them: a transfer whose setup packet predates the log simply
+    /// is not attributed, which is what an armed-mid-stream log means.
+    fn unpin_in_flight_cmd_log(&mut self) {
+        if let Some(upload) = self.vram_upload.as_mut() {
+            upload.cmd_log_index = None;
+        }
+        self.polyline_cmd_log_index = None;
     }
 
     /// Whether `cmd_log` capture is currently armed (either via
