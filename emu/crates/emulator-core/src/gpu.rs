@@ -630,19 +630,6 @@ impl Gpu {
 
     /// Snapshot of the currently-configured display area, for the
     /// frontend's framebuffer panel. Cheap to call each frame. The
-    /// Current drawing-area rectangle (GP0 0xE3 top-left / 0xE4 bottom-right),
-    /// inclusive corners `(left, top, right, bottom)`. This is the VRAM
-    /// back-buffer the GPU is drawing into -- used by the wireframe renderer to
-    /// clear the page each frame so edges don't accumulate.
-    pub fn drawing_area(&self) -> (u16, u16, u16, u16) {
-        (
-            self.draw_area_left,
-            self.draw_area_top,
-            self.draw_area_right,
-            self.draw_area_bottom,
-        )
-    }
-
     /// `height` is derived from the V-range + 480-mode flag (see
     /// [`Gpu::effective_display_height`]) so it matches what Redux's
     /// screenshot path reports -- letting milestone parity tests
@@ -1310,23 +1297,6 @@ impl Gpu {
                 self.drawing_end_raw = word & 0x000F_FFFF;
                 self.draw_area_right = (word & 0x3FF) as u16;
                 self.draw_area_bottom = ((word >> 10) & 0x1FF) as u16;
-                // Wireframe: clear the back-buffer page each time the draw area
-                // is (re)defined, so edges don't pile up across frames on the
-                // CPU display path (e.g. a commercial title's screen-offset attract fight,
-                // which routes through display_rgba8, not the HW target). Games
-                // set E3/E4 once per frame at back-buffer setup; a rare
-                // mid-frame clip reprogram would over-clear -- acceptable for a
-                // debug view. The HW target gets the equivalent clear in
-                // psx-gpu-render's render_frame.
-                if self.wireframe_enabled {
-                    self.vram.fill_rect_unwrapped(
-                        self.draw_area_left,
-                        self.draw_area_top,
-                        self.draw_area_right,
-                        self.draw_area_bottom,
-                        0,
-                    );
-                }
             }
             // GP0 0xE5 -- drawing offset. X / Y are both signed 11-bit.
             0xE5 => {
@@ -1959,6 +1929,22 @@ impl Gpu {
         }
     }
 
+    /// Wireframe helper: fill an *opaque* triangle's interior with black
+    /// before its edges are drawn. This preserves the game's implicit
+    /// "clear by overdraw" (an opaque poly would have painted over last
+    /// frame's pixels), so stale edges never accumulate -- without
+    /// clearing guest VRAM, which broke single-buffered games (a commercial title
+    /// 3's 480i attract draws over the live display; an E4-time clear
+    /// black-flashed it every frame). Semi-transparent prims skip the
+    /// fill: they blend over existing content on real hardware (no
+    /// overdraw-clear to preserve), and filling them black would blot
+    /// out whatever they were layered on (e.g. UI under a gradient).
+    fn wireframe_fill_black(&mut self, v0: (i32, i32), v1: (i32, i32), v2: (i32, i32)) {
+        self.wireframe_enabled = false;
+        self.rasterize_triangle(v0, v1, v2, 0, BlendMode::Opaque);
+        self.wireframe_enabled = true;
+    }
+
     /// Scanline-ish triangle rasterizer using the edge-function test.
     /// For each pixel in the bounding box we evaluate three edge
     /// equations; a pixel is inside iff all three have the same sign.
@@ -1972,12 +1958,15 @@ impl Gpu {
         color: u16,
         mode: BlendMode,
     ) {
-        // Wireframe debug mode: replace the filled fill with three
-        // edge lines. Useful for visualising the geometry a game
-        // actually submits, independent of shading / texturing --
-        // including over-sized triangles that would normally be
-        // dropped by the hardware extent check below.
+        // Wireframe debug mode: black interior + three edge lines.
+        // Useful for visualising the geometry a game actually submits,
+        // independent of shading / texturing -- including over-sized
+        // triangles that would normally be dropped by the hardware
+        // extent check below (their edges draw, their fill doesn't).
         if self.wireframe_enabled {
+            if mode == BlendMode::Opaque {
+                self.wireframe_fill_black(v0, v1, v2);
+            }
             self.rasterize_line(v0, v1, color, color, mode, false);
             self.rasterize_line(v1, v2, color, color, mode, false);
             self.rasterize_line(v2, v0, color, color, mode, false);
@@ -2361,12 +2350,20 @@ impl Gpu {
         raw_texture: bool,
     ) {
         if self.wireframe_enabled {
+            // Texel-aware black interior (see `wireframe_fill_black` for
+            // the why): re-rasterize with a zero tint so drawn texels go
+            // black while transparent color-0 texels stay undrawn.
+            if !semi_trans {
+                self.wireframe_enabled = false;
+                self.rasterize_textured_shaded_triangle(
+                    v0, v1, v2, t0, t1, t2, 0, 0, 0, clut_word, false, false,
+                );
+                self.wireframe_enabled = true;
+            }
             self.rasterize_line_shaded(v0, v1, c0, c1, BlendMode::Opaque);
             self.rasterize_line_shaded(v1, v2, c1, c2, BlendMode::Opaque);
             self.rasterize_line_shaded(v2, v0, c2, c0, BlendMode::Opaque);
-            // Silence unused-var warnings for the texture args we
-            // intentionally drop in wireframe mode.
-            let _ = (t0, t1, t2, clut_word, semi_trans, raw_texture);
+            let _ = raw_texture;
             return;
         }
         if triangle_exceeds_hw_extent(v0, v1, v2) {
@@ -2521,10 +2518,27 @@ impl Gpu {
             // for the outline colour (or white for raw-texture prims).
             let edge_rgb = tint.0 | (tint.1 << 8) | (tint.2 << 16);
             let colour = rgb24_to_bgr15(edge_rgb);
+            // Texel-aware black interior (see `wireframe_fill_black` for
+            // the why): re-rasterize with a zero tint so drawn texels go
+            // black while transparent color-0 texels stay undrawn.
+            if !semi_trans {
+                self.wireframe_enabled = false;
+                self.rasterize_textured_triangle(
+                    v0,
+                    v1,
+                    v2,
+                    t0,
+                    t1,
+                    t2,
+                    clut_word,
+                    false,
+                    (0, 0, 0),
+                );
+                self.wireframe_enabled = true;
+            }
             self.rasterize_line(v0, v1, colour, colour, BlendMode::Opaque, false);
             self.rasterize_line(v1, v2, colour, colour, BlendMode::Opaque, false);
             self.rasterize_line(v2, v0, colour, colour, BlendMode::Opaque, false);
-            let _ = (t0, t1, t2, clut_word, semi_trans);
             return;
         }
         if triangle_exceeds_hw_extent(v0, v1, v2) {
@@ -2589,6 +2603,9 @@ impl Gpu {
         mode: BlendMode,
     ) {
         if self.wireframe_enabled {
+            if mode == BlendMode::Opaque {
+                self.wireframe_fill_black(v0, v1, v2);
+            }
             self.rasterize_line_shaded(v0, v1, c0, c1, mode);
             self.rasterize_line_shaded(v1, v2, c1, c2, mode);
             self.rasterize_line_shaded(v2, v0, c2, c0, mode);
