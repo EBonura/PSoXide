@@ -1379,4 +1379,312 @@ mod tests {
             vec![[0x30, 0x20, 0x10, 0xFF]; 4]
         );
     }
+
+    // ---- GP0 line parity vs the CPU rasterizer ----
+    //
+    // These run the FULL pipeline the frontend uses: raw GP0 words
+    // into `emulator_core::Gpu` (which rasterizes them AND captures
+    // the cmd_log, including polyline continuation words), then the
+    // drained log through `HwRenderer::render_frame`, then pixel-set
+    // comparison of both outputs. The CPU rasterizer is the
+    // semantics oracle; tolerances are stated per test.
+
+    use std::collections::BTreeSet;
+
+    /// Draw env used by the line tests: draw area (0,0)-(319,239),
+    /// zero draw offset.
+    fn line_env() -> Vec<u32> {
+        vec![0xE300_0000, 0xE400_0000 | (239 << 10) | 319, 0xE500_0000]
+    }
+
+    fn xyw(x: u16, y: u16) -> u32 {
+        u32::from(x) | (u32::from(y) << 16)
+    }
+
+    /// Feed raw GP0 words to a fresh CPU Gpu with the cmd_log armed,
+    /// optionally pre-filling VRAM (both rasterizers must start from
+    /// the same background for blend tests). Returns the rasterizing
+    /// Gpu, the drained log and the pre-draw VRAM snapshot to hand to
+    /// `render_frame`.
+    fn cpu_run_gp0(words: &[u32], prefill: u16) -> (Gpu, Vec<GpuCmdLogEntry>, Vec<u16>) {
+        let mut gpu = Gpu::new();
+        if prefill != 0 {
+            for y in 0..VRAM_HEIGHT as u16 {
+                for x in 0..VRAM_WIDTH as u16 {
+                    gpu.vram.set_pixel(x, y, prefill);
+                }
+            }
+        }
+        let vram_before: Vec<u16> = gpu.vram.words().to_vec();
+        gpu.enable_cmd_log();
+        for &w in words {
+            gpu.gp0_push(w);
+        }
+        let log = gpu.drain_completed_cmd_log();
+        (gpu, log, vram_before)
+    }
+
+    fn cpu_changed_pixels(gpu: &Gpu, background: u16) -> BTreeSet<(u16, u16)> {
+        let mut set = BTreeSet::new();
+        for y in 0..240u16 {
+            for x in 0..320u16 {
+                if gpu.vram.get_pixel(x, y) != background {
+                    set.insert((x, y));
+                }
+            }
+        }
+        set
+    }
+
+    fn hw_changed_pixels(renderer: &HwRenderer, background: [u8; 4]) -> BTreeSet<(u16, u16)> {
+        let (w, h, rgba) = renderer.read_subrect_rgba8(0, 0, 320, 240);
+        let mut set = BTreeSet::new();
+        for y in 0..h {
+            for x in 0..w {
+                let i = ((y * w + x) * 4) as usize;
+                if [rgba[i], rgba[i + 1], rgba[i + 2], rgba[i + 3]] != background {
+                    set.insert((x as u16, y as u16));
+                }
+            }
+        }
+        set
+    }
+
+    /// Run one GP0 stream through both rasterizers at internal scale
+    /// 1 and return `(cpu gpu, cpu lit, hw lit, renderer)` over the
+    /// 320x240 draw area. `None` = no wgpu adapter (test self-skips).
+    #[allow(clippy::type_complexity)]
+    fn line_case(
+        words: &[u32],
+        prefill: u16,
+    ) -> Option<(Gpu, BTreeSet<(u16, u16)>, BTreeSet<(u16, u16)>, HwRenderer)> {
+        let mut renderer = headless_renderer()?;
+        let (gpu, log, vram_before) = cpu_run_gp0(words, prefill);
+        if prefill != 0 {
+            // Seed the persistent target with the background so the
+            // HW blend sees the same destination the CPU had.
+            renderer.sync_target_from_vram(&vram_before);
+        }
+        renderer.render_frame(&gpu, &log, &vram_before);
+        let cpu = cpu_changed_pixels(&gpu, prefill);
+        let hw = hw_changed_pixels(&renderer, bgr15_to_rgba8(prefill));
+        Some((gpu, cpu, hw, renderer))
+    }
+
+    /// Horizontal / vertical / 45-degree flat lines light the exact
+    /// pixel set the CPU Bresenham walker lights (both directions),
+    /// endpoint-inclusive, at the exact flat colour.
+    #[test]
+    fn gp0_flat_lines_match_cpu_pixel_sets_exactly() {
+        let cases: [(&str, u32, u32); 4] = [
+            ("horizontal", xyw(10, 10), xyw(60, 10)),
+            ("reversed horizontal", xyw(60, 30), xyw(10, 30)),
+            ("vertical", xyw(20, 20), xyw(20, 80)),
+            ("45 degree diagonal", xyw(10, 100), xyw(40, 130)),
+        ];
+        for (name, v0, v1) in cases {
+            let mut words = line_env();
+            words.extend([0x40FF_FFFF, v0, v1]);
+            let Some((_gpu, cpu, hw, renderer)) = line_case(&words, 0) else {
+                eprintln!("skipping: no headless wgpu adapter");
+                return;
+            };
+            assert!(!cpu.is_empty(), "{name}: CPU drew nothing");
+            assert_eq!(cpu, hw, "{name}: pixel sets diverge");
+            let &(px, py) = cpu.iter().next().unwrap();
+            assert_eq!(
+                pixel_block(&renderer, px as u32, py as u32),
+                vec![[0xFF, 0xFF, 0xFF, 0xFF]],
+                "{name}: flat white must land exactly"
+            );
+        }
+    }
+
+    /// Arbitrary-slope lines: the HW band samples pixel centers
+    /// while the CPU walks integer steps, so individual columns may
+    /// round to a neighbouring row. Contract: exactly one pixel per
+    /// column (x-major), each within one row of the CPU's choice,
+    /// endpoints exact.
+    #[test]
+    fn gp0_arbitrary_slope_line_stays_within_one_pixel_of_cpu() {
+        let mut words = line_env();
+        words.extend([0x40FF_FFFF, xyw(10, 20), xyw(50, 35)]);
+        let Some((_gpu, cpu, hw, _renderer)) = line_case(&words, 0) else {
+            eprintln!("skipping: no headless wgpu adapter");
+            return;
+        };
+        for x in 10..=50u16 {
+            let cpu_rows: Vec<u16> = cpu.iter().filter(|p| p.0 == x).map(|p| p.1).collect();
+            let hw_rows: Vec<u16> = hw.iter().filter(|p| p.0 == x).map(|p| p.1).collect();
+            assert_eq!(cpu_rows.len(), 1, "CPU column {x}");
+            assert_eq!(hw_rows.len(), 1, "HW column {x}");
+            let diff = (i32::from(cpu_rows[0]) - i32::from(hw_rows[0])).abs();
+            assert!(
+                diff <= 1,
+                "column {x}: CPU row {} vs HW row {}",
+                cpu_rows[0],
+                hw_rows[0]
+            );
+        }
+        assert!(hw.contains(&(10, 20)), "start endpoint missing");
+        assert!(hw.contains(&(50, 35)), "end endpoint missing");
+        assert!(hw.iter().all(|p| (10..=50).contains(&p.0)), "column overrun");
+    }
+
+    /// Gouraud line: coverage matches the CPU exactly on an
+    /// axis-aligned segment; colours interpolate within a small
+    /// tolerance of the CPU's per-step integer walk (host f32
+    /// interpolation + the CPU's 5-bit VRAM quantization).
+    #[test]
+    fn gp0_gouraud_line_matches_cpu_coverage_and_colors() {
+        let mut words = line_env();
+        words.extend([0x5000_00FF, xyw(10, 10), 0x0000_FF00, xyw(60, 10)]);
+        let Some((gpu, cpu, hw, renderer)) = line_case(&words, 0) else {
+            eprintln!("skipping: no headless wgpu adapter");
+            return;
+        };
+        assert_eq!(cpu, hw, "gouraud coverage diverges");
+
+        for x in [10u16, 35, 60] {
+            let cpu_px = bgr15_to_rgba8(gpu.vram.get_pixel(x, 10));
+            let hw_px = pixel_block(&renderer, x as u32, 10)[0];
+            for c in 0..3 {
+                let diff = (i32::from(cpu_px[c]) - i32::from(hw_px[c])).abs();
+                assert!(
+                    diff <= 8,
+                    "x={x} channel {c}: CPU {:?} vs HW {:?}",
+                    cpu_px,
+                    hw_px
+                );
+            }
+        }
+    }
+
+    /// Mono polyline: all segments must draw, which exercises the
+    /// cmd_log continuation-word capture end-to-end (without it the
+    /// HW renderer only sees the first segment). Axis-aligned
+    /// segments so the pixel sets match exactly.
+    #[test]
+    fn gp0_mono_polyline_draws_every_segment() {
+        let mut words = line_env();
+        words.extend([
+            0x48FF_FFFF, // polyline start
+            xyw(20, 20),
+            xyw(80, 20),
+            xyw(80, 60), // continuation vertex
+            xyw(20, 60), // continuation vertex
+            0x5555_5555, // terminator
+        ]);
+        let Some((_gpu, cpu, hw, _renderer)) = line_case(&words, 0) else {
+            eprintln!("skipping: no headless wgpu adapter");
+            return;
+        };
+        // Sanity: the CPU drew all three segments.
+        assert!(cpu.contains(&(50, 20)) && cpu.contains(&(80, 40)) && cpu.contains(&(50, 60)));
+        assert_eq!(cpu, hw, "polyline pixel sets diverge");
+    }
+
+    /// Shaded polyline continuation pair (colour + vertex words)
+    /// draws with matching coverage.
+    #[test]
+    fn gp0_shaded_polyline_draws_every_segment() {
+        let mut words = line_env();
+        words.extend([
+            0x5800_00FF, // polyline start, c0 red
+            xyw(20, 100),
+            0x0000_FF00, // c1 green
+            xyw(80, 100),
+            0x00FF_0000, // continuation colour (blue)
+            xyw(80, 140), // continuation vertex
+            0x5000_5000, // terminator
+        ]);
+        let Some((_gpu, cpu, hw, _renderer)) = line_case(&words, 0) else {
+            eprintln!("skipping: no headless wgpu adapter");
+            return;
+        };
+        assert!(cpu.contains(&(50, 100)) && cpu.contains(&(80, 120)));
+        assert_eq!(cpu, hw, "shaded polyline pixel sets diverge");
+    }
+
+    /// Semi-transparent line: coverage (which pixels changed against
+    /// the prefilled background) matches the CPU exactly; every
+    /// covered pixel is actually blended, not replaced. Blend VALUES
+    /// are not compared: the HW path blends in linear space on the
+    /// sRGB target while the CPU does PSX 5-bit integer math, the
+    /// same enhanced-backend divergence semi-trans triangles have.
+    #[test]
+    fn gp0_semi_trans_line_blends_with_background_coverage_parity() {
+        let prefill = 0x4210; // mid grey (r=g=b=16 in 5-bit)
+        let mut words = line_env();
+        words.push(0xE100_0000); // blend mode 0 (Average)
+        words.extend([0x42FF_FFFF, xyw(10, 50), xyw(60, 50)]);
+        let Some((_gpu, cpu, hw, renderer)) = line_case(&words, prefill) else {
+            eprintln!("skipping: no headless wgpu adapter");
+            return;
+        };
+        assert!(!cpu.is_empty());
+        assert_eq!(cpu, hw, "semi-trans coverage diverges");
+        let blended = pixel_block(&renderer, 30, 50)[0];
+        assert_ne!(blended, bgr15_to_rgba8(prefill), "pixel not touched");
+        assert_ne!(
+            blended,
+            [0xFF, 0xFF, 0xFF, 0xFF],
+            "pixel replaced instead of blended"
+        );
+    }
+
+    /// Zero-length segments mirror the CPU walkers: the mono
+    /// Bresenham early-outs and draws NOTHING, the shaded walker
+    /// plots exactly one pixel.
+    #[test]
+    fn gp0_zero_length_lines_match_cpu_walkers() {
+        let mut words = line_env();
+        words.extend([0x40FF_FFFF, xyw(15, 15), xyw(15, 15)]);
+        let Some((_gpu, cpu, hw, _renderer)) = line_case(&words, 0) else {
+            eprintln!("skipping: no headless wgpu adapter");
+            return;
+        };
+        assert!(cpu.is_empty(), "CPU mono zero-length must draw nothing");
+        assert!(hw.is_empty(), "HW mono zero-length must draw nothing");
+
+        let mut words = line_env();
+        words.extend([0x5000_00FF, xyw(15, 15), 0x0000_FF00, xyw(15, 15)]);
+        let Some((_gpu, cpu, hw, _renderer)) = line_case(&words, 0) else {
+            return;
+        };
+        let expected: BTreeSet<(u16, u16)> = [(15u16, 15u16)].into_iter().collect();
+        assert_eq!(cpu, expected, "CPU shaded zero-length plots one pixel");
+        assert_eq!(hw, expected, "HW shaded zero-length plots one pixel");
+    }
+
+    /// At internal scale 2 a line's band covers the full S x S block
+    /// of every PSX pixel it lights -- lines upscale like every
+    /// other primitive, endpoint block included.
+    #[test]
+    fn gp0_line_scales_with_internal_resolution() {
+        let Some(mut renderer) = headless_renderer() else {
+            eprintln!("skipping: no headless wgpu adapter");
+            return;
+        };
+        assert!(renderer.set_internal_scale(2, None));
+        let mut words = line_env();
+        words.extend([0x40FF_FFFF, xyw(10, 10), xyw(20, 10)]);
+        let (gpu, log, vram_before) = cpu_run_gp0(&words, 0);
+        renderer.render_frame(&gpu, &log, &vram_before);
+
+        // HW flat colours keep full 8-bit precision (the 5-bit
+        // clamp is a CPU-side property).
+        let white = [0xFF, 0xFF, 0xFF, 0xFF];
+        let black = [0x00, 0x00, 0x00, 0xFF];
+        for x in [10u32, 15, 20] {
+            assert_eq!(
+                pixel_block(&renderer, x, 10),
+                vec![white; 4],
+                "PSX pixel ({x}, 10) must be fully lit at scale 2"
+            );
+        }
+        assert_eq!(pixel_block(&renderer, 21, 10), vec![black; 4]);
+        assert_eq!(pixel_block(&renderer, 15, 9), vec![black; 4]);
+        assert_eq!(pixel_block(&renderer, 15, 11), vec![black; 4]);
+    }
 }
