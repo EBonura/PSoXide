@@ -22,28 +22,33 @@
 //! `LICENSE` and `docs/license-audit.md`.
 
 mod stat_bit {
-    pub const TX_READY_1: u32 = 1 << 0;
-    pub const RX_NOT_EMPTY: u32 = 1 << 1;
-    pub const TX_READY_2: u32 = 1 << 2;
+    // Layout facts come from the shared hardware-model crate, the same
+    // source psx-pad and psx-mc consume, so the third hand-copied set of
+    // these bits is gone. Local names kept for the emulator's call sites.
+    use psx_hw::sio::sio0;
+    pub const TX_READY_1: u32 = sio0::stat::TX_READY;
+    pub const RX_NOT_EMPTY: u32 = sio0::stat::RX_NOT_EMPTY;
+    pub const TX_READY_2: u32 = sio0::stat::TX_IDLE;
     /// ACK/DSR input level from the selected device.
-    pub const ACK_INPUT: u32 = 1 << 7;
+    pub const ACK_INPUT: u32 = sio0::stat::DSR_LEVEL;
     /// SIO0 interrupt latched in the controller's own STAT register.
-    pub const IRQ: u32 = 1 << 9;
+    pub const IRQ: u32 = sio0::stat::IRQ;
 }
 
 mod ctrl_bit {
+    use psx_hw::sio::sio0;
     /// bit 1 -- drive `/JOYN` output. Transitioning high-to-low is how
     /// the CPU "selects" the device at the start of a transfer; going
     /// low-to-high deselects and resets the device state machine.
-    pub const JOYN_OUTPUT: u16 = 1 << 1;
+    pub const JOYN_OUTPUT: u16 = sio0::ctrl::DTR;
     /// Write-1 to acknowledge pending IRQ bits in STAT.
-    pub const ACK: u16 = 1 << 4;
+    pub const ACK: u16 = sio0::ctrl::ACK;
     /// Write-1 to soft-reset the port.
-    pub const RESET: u16 = 1 << 6;
+    pub const RESET: u16 = sio0::ctrl::RESET;
     /// bit 12 -- enable IRQ7 generation from controller ACK pulses.
-    pub const ACK_IRQ_ENABLE: u16 = 1 << 12;
+    pub const ACK_IRQ_ENABLE: u16 = sio0::ctrl::ACK_IRQ_EN;
     /// bit 13 -- port / slot select (0 = JOY1, 1 = JOY2).
-    pub const SLOT: u16 = 1 << 13;
+    pub const SLOT: u16 = sio0::ctrl::SLOT_PORT2;
 }
 
 mod offset {
