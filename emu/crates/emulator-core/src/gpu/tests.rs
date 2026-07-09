@@ -1996,3 +1996,75 @@ fn vram_copy_honours_force_mask_bit() {
         "force-mask must set bit15 on the copied pixel"
     );
 }
+
+/// Wireframe edge journal: aged-out edges must restore the pixel's
+/// pre-edge content bit-exact, not black. Erasing to black left a
+/// permanent dark scar in games that never repaint their background
+/// (a commercial title menus: rotating wireframe car accumulated a black
+/// silhouette over the static backdrop).
+#[test]
+fn wireframe_erase_restores_background_not_black() {
+    let xy = |x: u32, y: u32| (y << 16) | x;
+    let mut gpu = Gpu::new();
+    gpu.write32(GP0_ADDR, 0xE300_0000); // draw area top-left (0,0)
+    gpu.write32(GP0_ADDR, 0xE400_0000 | (255 << 10) | 255); // bottom-right (255,255)
+
+    // Static background the game draws once and never repaints.
+    for y in 0..64u16 {
+        for x in 0..64u16 {
+            gpu.vram.set_pixel(x, y, 0x1234);
+        }
+    }
+
+    gpu.wireframe_enabled = true;
+    // Frame A: mono opaque tri over the background -- edges journaled.
+    gpu.write32(GP0_ADDR, 0x20FF_FFFF);
+    gpu.write32(GP0_ADDR, xy(5, 5));
+    gpu.write32(GP0_ADDR, xy(40, 10));
+    gpu.write32(GP0_ADDR, xy(10, 40));
+    assert_ne!(gpu.vram.get_pixel(5, 5), 0x1234, "edge drawn over the bg");
+
+    // The game also redraws part of its UI over one of our edge pixels
+    // (a commercial title's leaderboard scrolls its text rows). When that edge ages
+    // out, the game's newer content must stand -- restoring the stale
+    // saved value would leave ghost content.
+    let (gx, gy) = (40u16, 10u16); // triangle vertex = guaranteed edge pixel
+    assert_ne!(gpu.vram.get_pixel(gx, gy), 0x1234, "vertex pixel is an edge");
+    gpu.vram.set_pixel(gx, gy, 0x5678); // game draws new content over it
+
+    // The scene moves on: new geometry elsewhere, one vblank per render.
+    // After two more renders frame A is two generations old and erased.
+    for i in 0..3u32 {
+        gpu.toggle_vblank_field();
+        gpu.write32(GP0_ADDR, 0x20FF_FFFF);
+        gpu.write32(GP0_ADDR, xy(100 + i, 100));
+        gpu.write32(GP0_ADDR, xy(140 + i, 110));
+        gpu.write32(GP0_ADDR, xy(110 + i, 140));
+    }
+    gpu.toggle_vblank_field();
+
+    assert_eq!(
+        gpu.vram.get_pixel(5, 5),
+        0x1234,
+        "aged-out edge restores the original background, not black"
+    );
+    assert_eq!(
+        gpu.vram.get_pixel(gx, gy),
+        0x5678,
+        "content the game drew over an aged-out edge is preserved"
+    );
+
+    // Toggling wireframe off flushes everything owned back to pre-edge
+    // content at the next vblank.
+    gpu.wireframe_enabled = false;
+    gpu.toggle_vblank_field();
+    for y in 0..64u16 {
+        for x in 0..64u16 {
+            if (x, y) == (gx, gy) {
+                continue; // game-overdrawn pixel keeps the game's content
+            }
+            assert_eq!(gpu.vram.get_pixel(x, y), 0x1234, "flush at ({x},{y})");
+        }
+    }
+    assert_eq!(gpu.vram.get_pixel(gx, gy), 0x5678);
+}
