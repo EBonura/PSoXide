@@ -171,7 +171,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
         tty::print("  at ");
         tty::print(loc.file());
         tty::print(":");
-        // Print the line number (no fmt machinery in no_std): up to 7 digits.
+        // Print the line number (no fmt machinery in no_std): up to 8 digits.
         let mut line = loc.line();
         let mut buf = [0u8; 8];
         let mut i = buf.len();

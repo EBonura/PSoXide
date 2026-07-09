@@ -8,14 +8,14 @@ allocation-free.
 
 Three layers, each usable on its own:
 
-1. **Transport** — [`Block`] exposes a card as 1024 raw 128-byte frames.
+1. **Transport**: [`Block`] exposes a card as 1024 raw 128-byte frames.
    `HardwareCard` drives a physical card over SIO0 (feature `hw`, default on);
    `RamCard` is a 128 KiB in-memory image for host tests and virtual saves.
-2. **Filesystem** — `Card<B: Block>` implements the real PS1 directory: named
+2. **Filesystem**: `Card<B: Block>` implements the real PS1 directory: named
    files, block allocation with the link-chain, BIOS-visible title + icon
    frames, and per-frame XOR checksums. Saves appear in the console's memory-card
    manager like a retail game.
-3. **Container** — `Card::write` wraps payloads in a small self-describing header
+3. **Container**: `Card::write` wraps payloads in a small self-describing header
    so `Card::read` transparently handles plain and (feature `compress`) compressed
    saves.
 
@@ -46,7 +46,7 @@ card.write_compressed("BESLES-00000MYGAME01", "MY GAME", &save_bytes, &mut scrat
 ```
 
 A small LZSS codec, chosen because it is tiny and decodes using only the output
-buffer as its history window — so a compressed read streams straight into the
+buffer as its history window, so a compressed read streams straight into the
 caller's buffer with no scratch. If compression does not shrink the data it is
 stored verbatim, so `write_compressed` never makes a save larger.
 
@@ -73,5 +73,5 @@ cargo test -p psx-mc --no-default-features --features compress
   paints `ALL PASS`; verified green under the PSoXide emulator's card model.
 - **On-silicon timing** is console-pending. The per-byte `/ACK` waits and the
   post-select setup delay are conservative defaults exposed as a runtime knob
-  (`HardwareCard::with_timing`) — tune `Timing::ack_spins` up first if a real
+  (`HardwareCard::with_timing`); tune `Timing::ack_spins` up first if a real
   card's write commit is slow.

@@ -89,7 +89,7 @@ pub enum Error {
     NoCard,
     /// The card broke protocol (bad ID/ACK/terminator byte).
     Protocol,
-    /// A frame's stored checksum did not match its data (read) — likely a
+    /// A frame's stored checksum did not match its data (read); likely a
     /// corrupt or half-written card.
     BadChecksum,
     /// Frame index past the end of the card.
