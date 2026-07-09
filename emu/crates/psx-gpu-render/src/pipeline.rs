@@ -156,7 +156,7 @@ pub struct HwPipeline {
     /// through the bind group; never queried directly.
     #[allow(dead_code)]
     vram_view: wgpu::TextureView,
-    /// Texture-filter mode uniform (0 nearest, 1 bilinear).
+    /// Texture-filter mode uniform (0 nearest, 1 bilinear, 2 JINC2, 3 xBR).
     filter_buffer: wgpu::Buffer,
 }
 
@@ -187,7 +187,8 @@ impl HwPipeline {
         });
         let vram_view = vram_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        // 16-byte uniform: texture-filter mode in `.x` (0 nearest, 1 bilinear).
+        // 16-byte uniform: texture-filter mode in `.x` (0 nearest, 1 bilinear,
+        // 2 JINC2, 3 xBR; the UI currently exposes 0 and 3).
         let filter_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("psx-hw-texfilter"),
             contents: bytemuck::cast_slice(&[0u32; 4]),
@@ -350,7 +351,8 @@ impl HwPipeline {
         }
     }
 
-    /// Set the texture-filter mode (0 nearest, 1 bilinear). Cheap uniform write.
+    /// Set the texture-filter mode (0 nearest, 1 bilinear, 2 JINC2, 3 xBR).
+    /// Cheap uniform write.
     pub fn set_filter_mode(&self, queue: &wgpu::Queue, mode: u32) {
         queue.write_buffer(&self.filter_buffer, 0, bytemuck::cast_slice(&[mode, 0, 0, 0]));
     }
