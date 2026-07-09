@@ -148,6 +148,23 @@ pub fn init(mode: VideoMode, res: Resolution) {
     write_gp1(gp1::display_enable(true));
 }
 
+/// Re-issue the display windows shifted by `dx` pixels / `dy` scanlines
+/// from the standard picture [`init`] programs. Moves the picture on the
+/// TV without touching the VRAM layout or the display mode, which is
+/// exactly what a "screen position" option needs (CRTs differ by several
+/// pixels in where they center). Pass the same `mode`/`res` given to
+/// [`init`]; the shift is clamped so the window never starts before the
+/// blanking edge.
+pub fn set_display_offset(mode: VideoMode, res: Resolution, dx: i16, dy: i16) {
+    let h_start = (H_DISPLAY_WINDOW_START as i32 + dx as i32 * H_CLOCKS_PER_PIXEL as i32).max(0);
+    let h_end = h_start as u32 + (res.width as u32) * H_CLOCKS_PER_PIXEL;
+    write_gp1(gp1::h_display_range(h_start as u32, h_end));
+
+    let v_start = (v_display_window_start(mode) as i32 + dy as i32).max(0);
+    let v_end = v_start as u32 + res.height as u32;
+    write_gp1(gp1::v_display_range(v_start as u32, v_end));
+}
+
 /// Block until the GPU has drained its command queue.
 #[inline]
 pub fn draw_sync() {
