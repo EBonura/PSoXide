@@ -69,6 +69,39 @@ pub fn cos_q12(angle_q12: u16) -> i32 {
     sin_q12(angle_q12.wrapping_add(1024))
 }
 
+/// Q0.12 angle of the vector `(x, y)`: the inverse of [`sin_q12`] /
+/// [`cos_q12`], so `atan2_q12(sin, cos)` round-trips an angle.
+///
+/// Octant-linear approximation (exact on the axes and diagonals, worst
+/// error about 4° mid-octant): right for facing/steering/aiming logic,
+/// not for precision geometry. `(0, 0)` returns 0. Integer-only; large
+/// coordinates are pre-scaled so the math never leaves u32.
+pub fn atan2_q12(y: i32, x: i32) -> u16 {
+    if x == 0 && y == 0 {
+        return 0;
+    }
+    let (mut ax, mut ay) = (x.unsigned_abs(), y.unsigned_abs());
+    // Keep `small * 512` inside u32: scale both magnitudes below 2^23
+    // together, which preserves their ratio (the only thing used below).
+    while ax >= (1 << 23) || ay >= (1 << 23) {
+        ax >>= 8;
+        ay >>= 8;
+    }
+    // First-octant fold: angle 0..1024 (= 90°), 45° exactly at ax == ay.
+    let q = if ax >= ay {
+        (ay * 512 / ax) as i32
+    } else {
+        1024 - (ax * 512 / ay) as i32
+    };
+    let a = match (x >= 0, y >= 0) {
+        (true, true) => q,
+        (false, true) => 2048 - q,
+        (false, false) => 2048 + q,
+        (true, false) => 4096 - q,
+    };
+    (a & 0xFFF) as u16
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -102,6 +135,39 @@ mod tests {
         assert!(sin_q12(1) > sin_q12(0));
         assert!(sin_q12(1) < SIN_TABLE[1] as i32);
         assert_eq!(sin_q12(16), SIN_TABLE[1] as i32);
+    }
+
+    #[test]
+    fn atan2_cardinals_and_diagonals() {
+        assert_eq!(atan2_q12(0, 0), 0);
+        assert_eq!(atan2_q12(0, 100), 0); //     +x =   0°
+        assert_eq!(atan2_q12(100, 100), 512); // diag = 45°
+        assert_eq!(atan2_q12(100, 0), 1024); //  +y =  90°
+        assert_eq!(atan2_q12(100, -100), 1536);
+        assert_eq!(atan2_q12(0, -100), 2048); // -x = 180°
+        assert_eq!(atan2_q12(-100, -100), 2560);
+        assert_eq!(atan2_q12(-100, 0), 3072); // -y = 270°
+        assert_eq!(atan2_q12(-100, 100), 3584);
+    }
+
+    #[test]
+    fn atan2_roundtrips_sincos_within_octant_error() {
+        // Octant-linear: allow ~4° (= 46 Q0.12 units) of error.
+        for &angle in &[0u16, 100, 512, 900, 1024, 2000, 2048, 3000, 3072, 4000] {
+            let (s, c) = (sin_q12(angle), cos_q12(angle));
+            let back = atan2_q12(s, c);
+            let diff = (back.wrapping_sub(angle) & 0xFFF).min(angle.wrapping_sub(back) & 0xFFF);
+            assert!(diff <= 46, "angle {angle} came back as {back}");
+        }
+    }
+
+    #[test]
+    fn atan2_large_coordinates_stay_in_u32() {
+        // Same direction at any magnitude; the pre-scale must not change it.
+        assert_eq!(atan2_q12(i32::MAX, i32::MAX), 512);
+        assert_eq!(atan2_q12(0, i32::MIN), 2048);
+        assert_eq!(atan2_q12(i32::MIN, 0), 3072);
+        assert_eq!(atan2_q12(1 << 28, 1 << 28), atan2_q12(1, 1));
     }
 
     #[test]
