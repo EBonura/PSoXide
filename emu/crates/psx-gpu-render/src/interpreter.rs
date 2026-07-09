@@ -107,6 +107,20 @@ pub enum GpuEvent {
         w: u32,
         h: u32,
     },
+    /// GP0 0x40..=0x43 single / 0x48..=0x4B polyline, monochrome.
+    /// `points` holds the decoded vertices in draw order: the two
+    /// start-packet vertices plus any polyline continuation words the
+    /// CPU GPU appended to the entry's fifo (terminator excluded).
+    /// One segment per consecutive pair.
+    MonoLine { cmd: u32, points: Vec<(i32, i32)> },
+    /// GP0 0x50..=0x53 single / 0x58..=0x5B polyline, Gouraud.
+    /// `colors[i]` pairs with `points[i]`; `colors[0]` is the command
+    /// word itself (low 24 bits significant, like the tri events).
+    ShadedLine {
+        cmd: u32,
+        points: Vec<(i32, i32)>,
+        colors: Vec<u32>,
+    },
     /// GP0 0x80..=0x9F VRAM-to-VRAM copy, masked to hardware ranges
     /// with the zero-means-full-size rule applied.
     VramCopy {
@@ -117,7 +131,9 @@ pub enum GpuEvent {
         w: u32,
         h: u32,
     },
-    /// Anything not yet lowered (lines / polylines, unknown ops).
+    /// Anything not yet lowered (unknown ops; also the line-family
+    /// mirror opcodes 0x44..=0x47 / 0x4C..=0x4F / 0x54..=0x57 /
+    /// 0x5C..=0x5F, which the CPU GPU treats as single-word no-ops).
     Unhandled { opcode: u8 },
 }
 
@@ -184,6 +200,13 @@ impl Interpreter {
             0x38..=0x3B => self.decode_shaded_quad(fifo),
             0x34..=0x37 => self.decode_shaded_tex_tri(fifo),
             0x3C..=0x3F => self.decode_shaded_tex_quad(fifo),
+
+            // ---------- Lines / polylines ----------
+            // Only the sub-ranges the CPU GPU dispatches; the mirror
+            // opcodes (0x44.., 0x4C.., 0x54.., 0x5C..) fall through
+            // to `Unhandled` like the CPU's single-word no-op.
+            0x40..=0x43 | 0x48..=0x4B => self.decode_mono_line(fifo),
+            0x50..=0x53 | 0x58..=0x5B => self.decode_shaded_line(fifo),
 
             // ---------- Rectangles ----------
             0x60..=0x63 => self.decode_mono_rect_variable(fifo),
@@ -424,6 +447,65 @@ impl Interpreter {
         })
     }
 
+    /// GP0 0x40..=0x43 / 0x48..=0x4B. Packet: `[cmd+color, v0, v1]`;
+    /// polyline entries carry extra vertex words appended by the CPU
+    /// GPU's cmd_log capture. The capture never logs the terminator,
+    /// but the per-word sentinel check is kept for hand-built logs so
+    /// both parsers apply the same rule as `Gpu::ingest_polyline_word`.
+    fn decode_mono_line(&self, fifo: &[u32]) -> Option<GpuEvent> {
+        if fifo.len() < 3 {
+            return None;
+        }
+        let mut points = vec![
+            decode_vertex(&self.state, fifo[1]),
+            decode_vertex(&self.state, fifo[2]),
+        ];
+        for &word in &fifo[3..] {
+            if is_polyline_terminator(word) {
+                break;
+            }
+            points.push(decode_vertex(&self.state, word));
+        }
+        Some(GpuEvent::MonoLine {
+            cmd: fifo[0],
+            points,
+        })
+    }
+
+    /// GP0 0x50..=0x53 / 0x58..=0x5B. Packet: `[cmd+c0, v0, c1, v1]`;
+    /// polyline continuations alternate (colour, vertex) words. The
+    /// terminator check applies to EVERY word (colour slots included),
+    /// mirroring the CPU; a trailing colour without its vertex is
+    /// dropped, exactly like the CPU's `pending_color` never drawing.
+    fn decode_shaded_line(&self, fifo: &[u32]) -> Option<GpuEvent> {
+        if fifo.len() < 4 {
+            return None;
+        }
+        let mut points = vec![
+            decode_vertex(&self.state, fifo[1]),
+            decode_vertex(&self.state, fifo[3]),
+        ];
+        let mut colors = vec![fifo[0], fifo[2]];
+        let mut pending_color: Option<u32> = None;
+        for &word in &fifo[4..] {
+            if is_polyline_terminator(word) {
+                break;
+            }
+            match pending_color.take() {
+                None => pending_color = Some(word),
+                Some(color) => {
+                    colors.push(color);
+                    points.push(decode_vertex(&self.state, word));
+                }
+            }
+        }
+        Some(GpuEvent::ShadedLine {
+            cmd: fifo[0],
+            points,
+            colors,
+        })
+    }
+
     fn decode_mono_rect_variable(&self, fifo: &[u32]) -> Option<GpuEvent> {
         if fifo.len() < 3 {
             return None;
@@ -481,6 +563,14 @@ impl Default for Interpreter {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Polyline end sentinel -- both halves carry the `0x5xxx` pattern.
+/// Same rule as `emulator-core::Gpu::ingest_polyline_word` (Redux:
+/// `(word & 0xF000F000) == 0x50005000`).
+#[inline]
+fn is_polyline_terminator(word: u32) -> bool {
+    (word & 0xF000_F000) == 0x5000_5000
 }
 
 /// Decode a GP0 0x80..=0x9F packet: `[cmd, src_xy, dst_xy, wh]`,
@@ -583,5 +673,115 @@ mod tests {
         assert!(it.interpret(&entry(0xE5, vec![0])).is_none());
         // Truncated mono tri: dropped, no panic.
         assert!(it.interpret(&entry(0x20, vec![0x2000_0000, 0])).is_none());
+    }
+
+    #[test]
+    fn mono_line_single_decodes_two_points_with_offset() {
+        let mut it = Interpreter::new();
+        // Draw offset (16, 32) must apply to line vertices too.
+        it.interpret(&entry(0xE5, vec![0xE500_0000 | 16 | (32 << 11)]));
+        let ev = it
+            .interpret(&entry(
+                0x40,
+                vec![0x40FF_FFFF, 0x0005_000A, 0x0014_001E],
+            ))
+            .unwrap();
+        assert_eq!(
+            ev,
+            GpuEvent::MonoLine {
+                cmd: 0x40FF_FFFF,
+                points: vec![(26, 37), (46, 52)],
+            }
+        );
+    }
+
+    #[test]
+    fn mono_polyline_decodes_continuations_and_stops_at_terminator() {
+        let mut it = Interpreter::new();
+        let ev = it
+            .interpret(&entry(
+                0x48,
+                vec![
+                    0x48FF_FFFF,
+                    0x0000_0000,
+                    0x0000_0005,
+                    0x0000_000A,
+                    // Hand-built logs may still carry the sentinel;
+                    // parsing must stop exactly like the CPU receive
+                    // mode does.
+                    0x5555_5555,
+                    0x0000_0014,
+                ],
+            ))
+            .unwrap();
+        assert_eq!(
+            ev,
+            GpuEvent::MonoLine {
+                cmd: 0x48FF_FFFF,
+                points: vec![(0, 0), (5, 0), (10, 0)],
+            }
+        );
+    }
+
+    #[test]
+    fn shaded_polyline_alternates_colors_and_drops_trailing_color() {
+        let mut it = Interpreter::new();
+        let ev = it
+            .interpret(&entry(
+                0x58,
+                vec![
+                    0x5800_00FF, // cmd + c0
+                    0x0000_0000, // v0
+                    0x0000_FF00, // c1
+                    0x0000_0008, // v1
+                    0x00FF_0000, // c2
+                    0x0008_0008, // v2
+                    0x0012_3456, // trailing colour without a vertex
+                ],
+            ))
+            .unwrap();
+        assert_eq!(
+            ev,
+            GpuEvent::ShadedLine {
+                cmd: 0x5800_00FF,
+                points: vec![(0, 0), (8, 0), (8, 8)],
+                colors: vec![0x5800_00FF, 0x0000_FF00, 0x00FF_0000],
+            }
+        );
+    }
+
+    #[test]
+    fn shaded_polyline_terminator_in_color_slot_ends_parse() {
+        let mut it = Interpreter::new();
+        let ev = it
+            .interpret(&entry(
+                0x58,
+                vec![
+                    0x5800_00FF,
+                    0x0000_0000,
+                    0x0000_FF00,
+                    0x0000_0008,
+                    0x5000_5000, // terminator where a colour would go
+                    0x0008_0008,
+                ],
+            ))
+            .unwrap();
+        assert_eq!(
+            ev,
+            GpuEvent::ShadedLine {
+                cmd: 0x5800_00FF,
+                points: vec![(0, 0), (8, 0)],
+                colors: vec![0x5800_00FF, 0x0000_FF00],
+            }
+        );
+    }
+
+    #[test]
+    fn line_mirror_opcodes_stay_unhandled_like_cpu_no_ops() {
+        let mut it = Interpreter::new();
+        for op in [0x44u8, 0x4C, 0x54, 0x5C] {
+            let ev = it.interpret(&entry(op, vec![(op as u32) << 24]));
+            assert_eq!(ev, Some(GpuEvent::Unhandled { opcode: op }), "op {op:#04x}");
+        }
     }
 }
