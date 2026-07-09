@@ -182,6 +182,26 @@ fn compressed_falls_back_when_incompressible() {
     assert_eq!(&buf[..n], &data[..]);
 }
 
+#[test]
+fn corrupt_stored_len_is_rejected_not_panicking() {
+    // A corrupt container header whose stored_len exceeds both raw_len and the
+    // caller's buffer used to slice out of bounds; it must surface as an error.
+    let mut image;
+    {
+        let mut c = fresh();
+        c.write(NAME, "T", b"0123456789").unwrap();
+        image = *c.into_inner().image();
+    }
+    let at = image
+        .windows(4)
+        .position(|w| w == crate::CONTAINER_MAGIC)
+        .unwrap();
+    image[at + 12..at + 16].copy_from_slice(&u32::MAX.to_le_bytes());
+    let mut c = Card::new(crate::RamCard::from_image(&image).unwrap());
+    let mut buf = [0u8; 10];
+    assert_eq!(c.read(NAME, &mut buf), Err(Error::BadContainer));
+}
+
 fn blank_entry() -> Entry {
     Entry {
         name: [0; crate::MAX_NAME + 1],
