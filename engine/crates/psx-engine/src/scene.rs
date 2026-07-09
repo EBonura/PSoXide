@@ -89,6 +89,14 @@ impl Ctx {
         self.pad.buttons.is_held(button)
     }
 
+    /// The raw active-high mask of buttons held this frame. Feed it to a
+    /// [`psx_pad::PadTracker`] for delay-then-rate auto-repeat or handoff
+    /// suppression, which `Ctx` itself does not track.
+    #[inline]
+    pub fn held_mask(&self) -> u16 {
+        self.pad.buttons.bits()
+    }
+
     /// `true` if `button` transitioned from released to pressed
     /// *this frame*. Exactly the edge-detect pattern every game
     /// reinvents; factored here so menus / fire buttons / etc don't

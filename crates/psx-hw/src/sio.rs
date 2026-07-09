@@ -30,6 +30,8 @@ pub mod sio0 {
         pub const RXEN: u16 = 1 << 2;
         /// Write-1 to acknowledge / clear the latched SIO IRQ ([`super::stat::IRQ`]).
         pub const ACK: u16 = 1 << 4;
+        /// Write-1 to reset the SIO port (registers back to defaults).
+        pub const RESET: u16 = 1 << 6;
         /// Enable IRQ7 generation from the device `/ACK` (DSR) pulse. Even with
         /// the CPU interrupt masked in `I_MASK`, enabling this is what latches
         /// [`super::stat::IRQ`] on the `/ACK` edge, so a brief pulse cannot be
@@ -45,6 +47,9 @@ pub mod sio0 {
         pub const TX_READY: u32 = 1 << 0;
         /// RX FIFO holds at least one byte.
         pub const RX_NOT_EMPTY: u32 = 1 << 1;
+        /// TX idle: the last byte has finished shifting onto the wire
+        /// (nocash "TX Ready Flag 2").
+        pub const TX_IDLE: u32 = 1 << 2;
         /// Live `/ACK` (DSR) input level: 1 while the device holds it asserted.
         pub const DSR_LEVEL: u32 = 1 << 7;
         /// Latched DSR/ACK interrupt: set on the `/ACK` edge, held until
