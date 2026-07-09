@@ -237,25 +237,10 @@ impl HwRenderer {
     pub fn render_frame(&mut self, gpu: &Gpu, cmd_log: &[GpuCmdLogEntry], vram_words: &[u16]) {
         self.sync_texture_from_vram(vram_words);
 
-        // Wireframe replaces opaque fills with thin edges, so the game's
-        // implicit "clear by overdraw" never happens and edges from prior
-        // frames pile up in the persistent target (the a commercial title smear). Clear
-        // the back-buffer (draw-area) rect to black each frame so only this
-        // frame's edges show. Wireframe-only -- normal rendering must keep PSX
-        // VRAM persistence (that is what makes present-flips work, lib.rs:16).
-        if gpu.wireframe_enabled {
-            let (l, t, r, b) = gpu.drawing_area();
-            if r >= l && b >= t {
-                self.write_scaled_vram_rect_wrapped(
-                    l as u32,
-                    t as u32,
-                    (r - l + 1) as u32,
-                    (b - t + 1) as u32,
-                    |_, _| 0,
-                );
-            }
-        }
-
+        // Wireframe accumulation is handled at the primitive level: the
+        // translator emits a black interior fill under each edge strip
+        // (push_wire_tri), preserving the game's clear-by-overdraw without
+        // clearing anything -- PSX VRAM persistence holds in wireframe too.
         let mut segment_start = 0;
         for (i, entry) in cmd_log.iter().enumerate() {
             if is_vram_image_op(entry) {
