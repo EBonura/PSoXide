@@ -16,24 +16,25 @@
 //! constants are conservative starting points pending console validation.
 
 use crate::{Block, Error, Result, FRAME_COUNT, FRAME_SIZE};
+use psx_hw::sio::sio0;
 use psx_io::sio;
 
-// SIO0 CTRL bits.
-const CTRL_TXEN: u16 = 1 << 0;
-const CTRL_DTR: u16 = 1 << 1; // JOYN / select line
-const CTRL_RXEN: u16 = 1 << 2;
-const CTRL_ACK: u16 = 1 << 4;
-const CTRL_ACK_IRQ_EN: u16 = 1 << 12;
-const CTRL_SLOT_PORT2: u16 = 1 << 13;
+// SIO0 register layout: `psx_hw::sio::sio0` is the single source of truth,
+// shared with psx-pad. Only protocol bytes and timing stay local.
+const CTRL_TXEN: u16 = sio0::ctrl::TXEN;
+const CTRL_DTR: u16 = sio0::ctrl::DTR;
+const CTRL_RXEN: u16 = sio0::ctrl::RXEN;
+const CTRL_ACK: u16 = sio0::ctrl::ACK;
+const CTRL_ACK_IRQ_EN: u16 = sio0::ctrl::ACK_IRQ_EN;
+const CTRL_SLOT_PORT2: u16 = sio0::ctrl::SLOT_PORT2;
 
-// SIO0 STAT bits.
-const STAT_TX_READY: u32 = 1 << 0;
-const STAT_RX_NOT_EMPTY: u32 = 1 << 1;
-const STAT_DSR_LEVEL: u32 = 1 << 7;
-const STAT_IRQ: u32 = 1 << 9;
+const STAT_TX_READY: u32 = sio0::stat::TX_READY;
+const STAT_RX_NOT_EMPTY: u32 = sio0::stat::RX_NOT_EMPTY;
+const STAT_DSR_LEVEL: u32 = sio0::stat::DSR_LEVEL;
+const STAT_IRQ: u32 = sio0::stat::IRQ;
 
-const MODE_8N1: u16 = 0x000D;
-const BAUD: u16 = 0x0088;
+const MODE_8N1: u16 = sio0::MODE_8N1;
+const BAUD: u16 = sio0::BAUD_250KHZ;
 
 // Protocol bytes.
 const CARD_SELECT: u8 = 0x81;
