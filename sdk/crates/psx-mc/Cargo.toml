@@ -9,15 +9,16 @@ description  = "PlayStation 1 memory-card driver: SIO0 transport, BIOS-compatibl
 
 [dependencies]
 # Only needed by the hardware (SIO0) transport; the filesystem + compression
-# layers are pure and build/test on the host without it.
+# layers are pure and build/test on the host without them.
 psx-io = { workspace = true, optional = true }
+psx-hw = { workspace = true, optional = true }
 
 [features]
 # `hw` compiles the on-device SIO0 transport (`HardwareCard`). It is on by
 # default for game builds; host unit tests run with `--no-default-features` so
 # only the pure logic (filesystem, compression, RamCard) is exercised.
 default  = ["hw"]
-hw       = ["dep:psx-io"]
+hw       = ["dep:psx-io", "dep:psx-hw"]
 # Optional LZSS payload compression for saves.
 compress = []
 
