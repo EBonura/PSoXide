@@ -1997,11 +1997,16 @@ fn vram_copy_honours_force_mask_bit() {
     );
 }
 
-/// Wireframe edge journal: aged-out edges must restore the pixel's
-/// pre-edge content bit-exact, not black. Erasing to black left a
-/// permanent dark scar in games that never repaint their background
-/// (a commercial title menus: rotating wireframe car accumulated a black
-/// silhouette over the static backdrop).
+/// Wireframe edge journal + toggle transitions.
+///
+/// - Toggling ON blacks out the framebuffer once (the last textured
+///   frame would otherwise sit frozen behind the edges -- GT races /
+///   a commercial title fights looked like wires over a stale photo).
+/// - Edges over content the game draws DURING wireframe restore that
+///   content bit-exact when they age out, not black (erase-to-black
+///   scarred a commercial title's never-repainted menu backdrop).
+/// - Pixels the game overdraws keep the game's content.
+/// - Toggling OFF restores what the on-clear removed.
 #[test]
 fn wireframe_erase_restores_background_not_black() {
     let xy = |x: u32, y: u32| (y << 16) | x;
@@ -2009,14 +2014,26 @@ fn wireframe_erase_restores_background_not_black() {
     gpu.write32(GP0_ADDR, 0xE300_0000); // draw area top-left (0,0)
     gpu.write32(GP0_ADDR, 0xE400_0000 | (255 << 10) | 255); // bottom-right (255,255)
 
-    // Static background the game draws once and never repaints.
+    // The pre-wireframe frame (what the on-transition must clear and
+    // the off-transition must bring back).
+    for y in 0..64u16 {
+        for x in 0..64u16 {
+            gpu.vram.set_pixel(x, y, 0x4321);
+        }
+    }
+
+    gpu.wireframe_enabled = true;
+    gpu.toggle_vblank_field(); // on-transition: framebuffer blacked out
+    assert_eq!(gpu.vram.get_pixel(5, 5), 0, "frozen frame cleared on toggle-on");
+
+    // The game repaints its background while wireframe is on (Crash
+    // re-blits every frame). Edges must not scar it.
     for y in 0..64u16 {
         for x in 0..64u16 {
             gpu.vram.set_pixel(x, y, 0x1234);
         }
     }
 
-    gpu.wireframe_enabled = true;
     // Frame A: mono opaque tri over the background -- edges journaled.
     gpu.write32(GP0_ADDR, 0x20FF_FFFF);
     gpu.write32(GP0_ADDR, xy(5, 5));
@@ -2054,8 +2071,8 @@ fn wireframe_erase_restores_background_not_black() {
         "content the game drew over an aged-out edge is preserved"
     );
 
-    // Toggling wireframe off flushes everything owned back to pre-edge
-    // content at the next vblank.
+    // Toggling wireframe off flushes live edges and undoes the
+    // on-transition clear where nothing was drawn since.
     gpu.wireframe_enabled = false;
     gpu.toggle_vblank_field();
     for y in 0..64u16 {
@@ -2067,4 +2084,11 @@ fn wireframe_erase_restores_background_not_black() {
         }
     }
     assert_eq!(gpu.vram.get_pixel(gx, gy), 0x5678);
+    // Outside the game-repainted region, black canvas pixels return to
+    // the pre-wireframe frame.
+    assert_eq!(
+        gpu.vram.get_pixel(200, 200),
+        0,
+        "untouched region was 0 before wireframe and stays 0"
+    );
 }
