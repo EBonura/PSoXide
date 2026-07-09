@@ -347,6 +347,15 @@ pub struct Gpu {
     /// debug toolbar for visualising the geometry a game is
     /// submitting.
     pub wireframe_enabled: bool,
+    /// Wireframe edge-pixel journal: every pixel plotted by line
+    /// rasterization while wireframe is on, for the frame in flight.
+    /// At each vblank the *previous* frame's pixels are erased to
+    /// black (see [`Gpu::wireframe_frame_boundary`]), so stale edges
+    /// never accumulate -- without clearing any pixel the game itself
+    /// drew (poly interiors stay transparent).
+    wire_pixels_current: Vec<(u16, u16)>,
+    /// Last frame's journal, erased at the next vblank.
+    wire_pixels_prev: Vec<(u16, u16)>,
 
     /// Pixel-owner trace -- when `Some`, every `plot_pixel` records
     /// the index of the currently-executing GPU command into
@@ -550,6 +559,8 @@ impl Gpu {
             tex_rect_flip_y: false,
             polyline: None,
             wireframe_enabled: false,
+            wire_pixels_current: Vec::new(),
+            wire_pixels_prev: Vec::new(),
             pixel_owner: None,
             cmd_log: Vec::new(),
             cmd_log_enabled: false,
@@ -929,6 +940,46 @@ impl Gpu {
     /// independent of the VBlank IRQ.
     pub fn toggle_vblank_field(&mut self) {
         self.status.toggle_field();
+        // Piggy-back the wireframe journal rotation on the vblank pulse --
+        // it's the GPU's only per-frame hook. No-op unless wireframe drew
+        // something recently.
+        self.wireframe_frame_boundary();
+    }
+
+    /// Erase the previous frame's wireframe edges and rotate the journal.
+    ///
+    /// Pixels also plotted this frame are skipped: in a single-buffered
+    /// game (a commercial title's 480i attract) static edges land on the same spot
+    /// every frame, and erasing a just-redrawn pixel would make the whole
+    /// wireframe flicker at the erase/redraw duty cycle. Double-buffered
+    /// games journal alternating pages, so the skip never triggers and the
+    /// back buffer's stale edges are wiped right before the game redraws
+    /// it. When wireframe is switched off, both journals are erased so no
+    /// edge pixels linger in guest VRAM.
+    fn wireframe_frame_boundary(&mut self) {
+        if self.wire_pixels_prev.is_empty() && self.wire_pixels_current.is_empty() {
+            return;
+        }
+        if !self.wireframe_enabled {
+            for &(x, y) in self.wire_pixels_prev.iter().chain(&self.wire_pixels_current) {
+                self.vram.set_pixel(x, y, 0);
+            }
+            self.wire_pixels_prev = Vec::new();
+            self.wire_pixels_current = Vec::new();
+            return;
+        }
+        let live: std::collections::HashSet<u32> = self
+            .wire_pixels_current
+            .iter()
+            .map(|&(x, y)| ((y as u32) << 16) | x as u32)
+            .collect();
+        let prev = std::mem::take(&mut self.wire_pixels_prev);
+        for (x, y) in prev {
+            if !live.contains(&(((y as u32) << 16) | x as u32)) {
+                self.vram.set_pixel(x, y, 0);
+            }
+        }
+        self.wire_pixels_prev = std::mem::take(&mut self.wire_pixels_current);
     }
 
     /// Charge "busy credit" that clears the GPU's ready-bits until
@@ -1929,22 +1980,6 @@ impl Gpu {
         }
     }
 
-    /// Wireframe helper: fill an *opaque* triangle's interior with black
-    /// before its edges are drawn. This preserves the game's implicit
-    /// "clear by overdraw" (an opaque poly would have painted over last
-    /// frame's pixels), so stale edges never accumulate -- without
-    /// clearing guest VRAM, which broke single-buffered games (a commercial title
-    /// 3's 480i attract draws over the live display; an E4-time clear
-    /// black-flashed it every frame). Semi-transparent prims skip the
-    /// fill: they blend over existing content on real hardware (no
-    /// overdraw-clear to preserve), and filling them black would blot
-    /// out whatever they were layered on (e.g. UI under a gradient).
-    fn wireframe_fill_black(&mut self, v0: (i32, i32), v1: (i32, i32), v2: (i32, i32)) {
-        self.wireframe_enabled = false;
-        self.rasterize_triangle(v0, v1, v2, 0, BlendMode::Opaque);
-        self.wireframe_enabled = true;
-    }
-
     /// Scanline-ish triangle rasterizer using the edge-function test.
     /// For each pixel in the bounding box we evaluate three edge
     /// equations; a pixel is inside iff all three have the same sign.
@@ -1958,15 +1993,12 @@ impl Gpu {
         color: u16,
         mode: BlendMode,
     ) {
-        // Wireframe debug mode: black interior + three edge lines.
-        // Useful for visualising the geometry a game actually submits,
-        // independent of shading / texturing -- including over-sized
-        // triangles that would normally be dropped by the hardware
-        // extent check below (their edges draw, their fill doesn't).
+        // Wireframe debug mode: replace the filled interior with three
+        // edge lines (interiors stay transparent). Stale-edge cleanup is
+        // handled by the per-frame journal (`wireframe_frame_boundary`),
+        // not by filling or clearing. Includes over-sized triangles that
+        // would normally be dropped by the extent check below.
         if self.wireframe_enabled {
-            if mode == BlendMode::Opaque {
-                self.wireframe_fill_black(v0, v1, v2);
-            }
             self.rasterize_line(v0, v1, color, color, mode, false);
             self.rasterize_line(v1, v2, color, color, mode, false);
             self.rasterize_line(v2, v0, color, color, mode, false);
@@ -2350,20 +2382,12 @@ impl Gpu {
         raw_texture: bool,
     ) {
         if self.wireframe_enabled {
-            // Texel-aware black interior (see `wireframe_fill_black` for
-            // the why): re-rasterize with a zero tint so drawn texels go
-            // black while transparent color-0 texels stay undrawn.
-            if !semi_trans {
-                self.wireframe_enabled = false;
-                self.rasterize_textured_shaded_triangle(
-                    v0, v1, v2, t0, t1, t2, 0, 0, 0, clut_word, false, false,
-                );
-                self.wireframe_enabled = true;
-            }
             self.rasterize_line_shaded(v0, v1, c0, c1, BlendMode::Opaque);
             self.rasterize_line_shaded(v1, v2, c1, c2, BlendMode::Opaque);
             self.rasterize_line_shaded(v2, v0, c2, c0, BlendMode::Opaque);
-            let _ = raw_texture;
+            // Silence unused-var warnings for the texture args we
+            // intentionally drop in wireframe mode.
+            let _ = (t0, t1, t2, clut_word, semi_trans, raw_texture);
             return;
         }
         if triangle_exceeds_hw_extent(v0, v1, v2) {
@@ -2518,27 +2542,10 @@ impl Gpu {
             // for the outline colour (or white for raw-texture prims).
             let edge_rgb = tint.0 | (tint.1 << 8) | (tint.2 << 16);
             let colour = rgb24_to_bgr15(edge_rgb);
-            // Texel-aware black interior (see `wireframe_fill_black` for
-            // the why): re-rasterize with a zero tint so drawn texels go
-            // black while transparent color-0 texels stay undrawn.
-            if !semi_trans {
-                self.wireframe_enabled = false;
-                self.rasterize_textured_triangle(
-                    v0,
-                    v1,
-                    v2,
-                    t0,
-                    t1,
-                    t2,
-                    clut_word,
-                    false,
-                    (0, 0, 0),
-                );
-                self.wireframe_enabled = true;
-            }
             self.rasterize_line(v0, v1, colour, colour, BlendMode::Opaque, false);
             self.rasterize_line(v1, v2, colour, colour, BlendMode::Opaque, false);
             self.rasterize_line(v2, v0, colour, colour, BlendMode::Opaque, false);
+            let _ = (t0, t1, t2, clut_word, semi_trans);
             return;
         }
         if triangle_exceeds_hw_extent(v0, v1, v2) {
@@ -2603,9 +2610,6 @@ impl Gpu {
         mode: BlendMode,
     ) {
         if self.wireframe_enabled {
-            if mode == BlendMode::Opaque {
-                self.wireframe_fill_black(v0, v1, v2);
-            }
             self.rasterize_line_shaded(v0, v1, c0, c1, mode);
             self.rasterize_line_shaded(v1, v2, c1, c2, mode);
             self.rasterize_line_shaded(v2, v0, c2, c0, mode);
@@ -2907,6 +2911,9 @@ impl Gpu {
         let (min_x, max_x) = (self.draw_area_left as i32, self.draw_area_right as i32);
         let (min_y, max_y) = (self.draw_area_top as i32, self.draw_area_bottom as i32);
         if (min_x..=max_x).contains(&x) && (min_y..=max_y).contains(&y) {
+            if self.wireframe_enabled {
+                self.wire_pixels_current.push((x as u16, y as u16));
+            }
             self.plot_pixel(x as u16, y as u16, colour, mode);
         }
     }
@@ -2958,6 +2965,9 @@ impl Gpu {
                             | ((b.clamp(0, 255) as u32) << 16),
                     )
                 };
+                if self.wireframe_enabled {
+                    self.wire_pixels_current.push((x as u16, y as u16));
+                }
                 self.plot_pixel(x as u16, y as u16, colour, mode);
             }
             if x == x1 && y == y1 {
