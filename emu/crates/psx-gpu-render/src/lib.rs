@@ -1687,4 +1687,96 @@ mod tests {
         assert_eq!(pixel_block(&renderer, 15, 9), vec![black; 4]);
         assert_eq!(pixel_block(&renderer, 15, 11), vec![black; 4]);
     }
+
+    /// Visual showcase, not an assertion test: renders a line scene
+    /// (star burst, gouraud polyline, mono polyline outline,
+    /// semi-trans lines over a filled patch) through BOTH
+    /// rasterizers and writes a side-by-side PPM (CPU left, HW
+    /// right) for eyeballing. Run manually:
+    /// `cargo test -p psx-gpu-render --lib dump_gp0_line_showcase -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn dump_gp0_line_showcase() {
+        let mut words = line_env();
+        // Dark blue backdrop + mid-grey patch for the blend lines.
+        words.extend([0x0230_1810, 0, (240 << 16) | 320]);
+        words.extend([
+            0x2860_6060,
+            xyw(200, 90),
+            xyw(310, 90),
+            xyw(200, 190),
+            xyw(310, 190),
+        ]);
+        // White star burst (mono singles at assorted slopes).
+        let (cx, cy) = (80i32, 150i32);
+        for (dx, dy) in [
+            (70, 0),
+            (-70, 0),
+            (0, 60),
+            (0, -60),
+            (60, 30),
+            (-60, 30),
+            (60, -30),
+            (-60, -30),
+            (30, 55),
+            (-30, 55),
+            (30, -55),
+            (-30, -55),
+        ] {
+            words.extend([
+                0x40FF_FFFF,
+                xyw(cx as u16, cy as u16),
+                xyw((cx + dx) as u16, (cy + dy) as u16),
+            ]);
+        }
+        // Gouraud polyline zigzag across the top.
+        words.extend([
+            0x5800_00FF, // red
+            xyw(10, 20),
+            0x0000_FF00, // green
+            xyw(60, 50),
+            0x00FF_0000, // blue
+            xyw(110, 20),
+            0x0000_FFFF, // yellow
+            xyw(160, 50),
+            0x00FF_00FF, // magenta
+            xyw(210, 20),
+            0x5555_5555,
+        ]);
+        // Mono polyline outline (closed rectangle).
+        words.extend([
+            0x4800_FFFF, // yellow
+            xyw(20, 200),
+            xyw(170, 200),
+            xyw(170, 230),
+            xyw(20, 230),
+            xyw(20, 200),
+            0x5555_5555,
+        ]);
+        // Semi-trans (Average) white lines crossing the grey patch.
+        words.push(0xE100_0000);
+        words.extend([0x42FF_FFFF, xyw(190, 80), xyw(310, 200)]);
+        words.extend([0x42FF_FFFF, xyw(310, 80), xyw(190, 200)]);
+        words.extend([0x42FF_FFFF, xyw(190, 140), xyw(310, 140)]);
+
+        let Some((gpu, _cpu, _hw, renderer)) = line_case(&words, 0) else {
+            eprintln!("skipping: no headless wgpu adapter");
+            return;
+        };
+        let (w, h) = (320u32, 240u32);
+        let (_, _, hw_rgba) = renderer.read_subrect_rgba8(0, 0, w, h);
+        let mut ppm = format!("P6\n{} {h}\n255\n", w * 2).into_bytes();
+        for y in 0..h {
+            for x in 0..w {
+                let px = bgr15_to_rgba8(gpu.vram.get_pixel(x as u16, y as u16));
+                ppm.extend_from_slice(&px[..3]);
+            }
+            for x in 0..w {
+                let i = ((y * w + x) * 4) as usize;
+                ppm.extend_from_slice(&hw_rgba[i..i + 3]);
+            }
+        }
+        std::fs::write("/tmp/gp0-lines-cpu-vs-hw.ppm", ppm).unwrap();
+        eprintln!("wrote /tmp/gp0-lines-cpu-vs-hw.ppm (left CPU, right HW)");
+    }
 }
