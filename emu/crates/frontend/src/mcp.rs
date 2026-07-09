@@ -136,8 +136,14 @@ fn handle(cmd: Cmd, state: &mut AppState) {
             let _ = reply.send(read_ram(state, addr, len));
         }
         Cmd::ReadWord { addr, reply } => {
-            let _ = reply.send(read_ram(state, addr, 4).map(|b| {
-                u32::from_le_bytes([b[0], b[1], b[2], b[3]])
+            // read_ram clamps at the end of the RAM window, so a read near
+            // the top can return fewer than 4 bytes -- error instead of
+            // indexing past the slice (a panic here kills the GUI thread).
+            let _ = reply.send(read_ram(state, addr, 4).and_then(|b| {
+                let b: [u8; 4] = b
+                    .try_into()
+                    .map_err(|_| "address too close to the end of RAM".to_string())?;
+                Ok(u32::from_le_bytes(b))
             }));
         }
         Cmd::WriteRam { addr, bytes, reply } => {
