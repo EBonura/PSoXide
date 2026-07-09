@@ -84,6 +84,8 @@ pub mod syncopate;
 pub mod share_tech_mono;
 /// Built-in font: `jura` (U+0020..U+007F, 96 glyphs).
 pub mod jura;
+/// Built-in font: `spleen_5x8` (U+0020..U+007E, 95 glyphs). BSD-2-Clause.
+pub mod spleen_5x8;
 
 // Flat re-exports so call sites read as
 // `psx_font::fonts::BASIC` etc.
@@ -125,3 +127,4 @@ pub use aldrich::ALDRICH;
 pub use syncopate::SYNCOPATE;
 pub use share_tech_mono::SHARE_TECH_MONO;
 pub use jura::JURA;
+pub use spleen_5x8::SPLEEN_5X8;
