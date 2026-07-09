@@ -20,7 +20,10 @@
 //! don't accumulate. Behind the runtime `--gpu-compute` flag.
 //!
 //! What's NOT handled here yet
-//!   - Lines / polylines (`0x40..=0x5F`) -- rare in real games; skip.
+//!   - Lines / polylines (`0x40..=0x5F`) -- rare in real games; the
+//!     shared interpreter decodes them and the render backend
+//!     (`translator`) draws them, but this compute path has no line
+//!     dispatcher yet and counts them as unhandled.
 //!   - GP1 commands -- display-mode state, not rendering.
 //!   - VRAM-to-CPU readback (`0xC0..=0xDF`) -- game-side reads, no
 //!     visible output.
@@ -177,6 +180,13 @@ impl ComputeBackend {
             } => {
                 self.rasterizer
                     .dispatch_vram_copy(&self.vram, (sx, sy), (dx, dy), (w, h));
+            }
+            // Lines decode in the shared interpreter now (the render
+            // backend draws them), but this compute path still has no
+            // line dispatcher -- keep counting them as unhandled so
+            // the frontend warning stays truthful.
+            GpuEvent::MonoLine { cmd, .. } | GpuEvent::ShadedLine { cmd, .. } => {
+                *self.unhandled.entry((cmd >> 24) as u8).or_insert(0) += 1;
             }
             GpuEvent::Unhandled { opcode } => {
                 *self.unhandled.entry(opcode).or_insert(0) += 1;
