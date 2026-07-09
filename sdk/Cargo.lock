@@ -121,18 +121,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "psx-sdk"
-version = "0.1.0"
-dependencies = [
- "psx-gpu",
- "psx-gte",
- "psx-hw",
- "psx-io",
- "psx-pad",
- "psx-rt",
-]
-
-[[package]]
 name = "psx-spu"
 version = "0.1.0"
 dependencies = [

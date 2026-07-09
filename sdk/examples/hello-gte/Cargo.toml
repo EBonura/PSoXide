@@ -23,7 +23,6 @@ codegen-units = 1
 lto = true
 
 [dependencies]
-psx-sdk = { path = "../../crates/psx-sdk" }
 psx-gpu = { path = "../../crates/psx-gpu" }
 psx-gte = { path = "../../crates/psx-gte" }
 psx-rt  = { path = "../../crates/psx-rt" }
