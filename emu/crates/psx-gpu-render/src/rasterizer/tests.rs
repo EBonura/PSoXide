@@ -1423,6 +1423,35 @@ fn tex_quad_bilinear_bottom_to_top_order_matches_cpu() {
     );
 }
 
+/// X-flipped sprite: vertices run left-to-right but U runs right-to-
+/// left, so the per-row `delta_u = (right_u - left_u) / width` is
+/// NEGATIVE. The shader's `i64_div_i32` used to fold the sign-
+/// extension high word into the low word with a bitwise OR, which
+/// collapsed every negative numerator to -1 -- the UV walk stepped by
+/// ~0 and the quad sampled the wrong texel columns. Dozens of alttp
+/// gameplay sprites (op 0x2C, identity tint, 56 px each) hit this;
+/// found by replay_bisect's owner report on gameplay chunk 16.
+#[test]
+fn tex_quad_bilinear_flipped_u_matches_cpu() {
+    assert_tex_quad_bilinear_order_matches_cpu(
+        [(0i32, 0i32), (4, 0), (0, 4), (4, 4)],
+        [(4u8, 0u8), (0, 0), (4, 4), (0, 4)],
+        "x-flipped (reversed U, straight vertices)",
+    );
+}
+
+/// Y-flip counterpart: straight vertices, V decreasing top-to-bottom.
+/// The row walk multiplies a negative Q16.16 delta through
+/// `i64_mul_u32`; pin it too.
+#[test]
+fn tex_quad_bilinear_flipped_v_matches_cpu() {
+    assert_tex_quad_bilinear_order_matches_cpu(
+        [(0i32, 0i32), (4, 0), (0, 4), (4, 4)],
+        [(0u8, 4u8), (4, 4), (0, 0), (4, 0)],
+        "y-flipped (reversed V, straight vertices)",
+    );
+}
+
 #[test]
 fn mono_tri_scanline_skewed_is_bit_exact() {
     // The B.1 skewed triangle case had ≤0.5% edge-rule diffs
