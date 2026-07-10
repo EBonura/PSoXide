@@ -248,6 +248,19 @@ fn rasterize(@builtin(global_invocation_id) gid: vec3<u32>) {
     var fg: u32;
     if (prim.flags & FLAG_RAW_TEXTURE) != 0u {
         fg = texel;
+    } else if (prim.flags & FLAG_DITHER) != 0u && (prim.tint & 0xFFFFFFu) != 0x808080u {
+        // Flat-tint textured prims dither their modulated texels when
+        // GP0 0xE1 bit 9 is set -- same rule as the CPU's
+        // `modulate_tint_dithered` in the axis-aligned quad path.
+        // Identity tint (0x808080) matches the CPU's RAW_TEXTURE_TINT
+        // sentinel and is never dithered.
+        fg = modulate_dithered(
+            texel,
+            prim.tint & 0xFFu,
+            (prim.tint >> 8u) & 0xFFu,
+            (prim.tint >> 16u) & 0xFFu,
+            px, py,
+        );
     } else {
         fg = modulate_tint(texel, prim.tint);
     }

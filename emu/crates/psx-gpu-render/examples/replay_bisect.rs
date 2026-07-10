@@ -296,6 +296,36 @@ fn main() {
         }
         eprintln!("=== No per-packet divergence found ===");
         eprintln!("(but {} pixels still differ at end of window)", diff_count);
+        // Aggregate the damage by owning packet so the unattributed
+        // case still names its suspects: which opcodes own bad pixels?
+        // Use the RAW plot-pixel owner map here, not `owner_aug`: the
+        // bulk overlay is order-blind (every fill in the window stamps
+        // over the final owner regardless of sequence), so it can
+        // attribute a tri's pixels to an earlier fill. The raw map is
+        // the true last plot_pixel writer.
+        let mut by_owner: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
+        for (i, (&c, &g)) in cpu_words.iter().zip(final_gpu.iter()).enumerate() {
+            if c != g {
+                *by_owner.entry(owner[i]).or_insert(0) += 1;
+            }
+        }
+        let mut owners: Vec<(u32, usize)> = by_owner.into_iter().collect();
+        owners.sort_by_key(|&(_, n)| std::cmp::Reverse(n));
+        eprintln!("  top owning packets:");
+        for (own, n) in owners.iter().take(8) {
+            if *own == u32::MAX {
+                eprintln!("    warmup-era owner: {n} px");
+            } else if let Some(e) = log.iter().find(|e| e.index == *own) {
+                eprintln!(
+                    "    #{own} op=0x{:02X} ({}) {n} px fifo[0]=0x{:08X}",
+                    e.opcode,
+                    opcode_name(e.opcode),
+                    e.fifo[0],
+                );
+            } else {
+                eprintln!("    #{own} (not in window log) {n} px");
+            }
+        }
         for (i, c, g, own) in &samples {
             let x = i % 1024;
             let y = i / 1024;
