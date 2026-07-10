@@ -12,7 +12,7 @@
 # SDK and engine examples are compiled individually with explicit PSX
 # cargo flags from this Makefile.
 
-.PHONY: help check test canaries fmt lint lint-policy-guard runtime-numeric-guard clean commercial-visual-guards tekken-mode-guard tekken-vs-guard tekken-fight-guard tekken-late-fight-guard run web validate validate-repeat validate-bless \
+.PHONY: help check test canaries fmt lint lint-policy-guard runtime-numeric-guard clean commercial-visual-guards tekken-mode-guard tekken-vs-guard tekken-fight-guard tekken-late-fight-guard run pgo web validate validate-repeat validate-bless \
         test-sdk \
         psxed assets \
 	examples hello-tri hello-tri-disc hello-input hello-input-disc hello-ot hello-ot-disc \
@@ -53,6 +53,7 @@ help:
 	@echo "                      - reject floats/wide ints in PS1 runtime code"
 	@echo "    make clean        - cargo clean all workspaces"
 	@echo "    make run          - launch the desktop frontend (no EXE)"
+	@echo "    make pgo          - PGO-optimised frontend build (PGO_GAME=<.cue/.exe>, PSOXIDE_BIOS set; ~2x faster core)"
 	@echo "    make web          - serve the wasm web build locally (release, :8080)"
 	@echo "    make validate     - run exact-hash validation matrix"
 	@echo "    make validate-repeat"
@@ -150,6 +151,29 @@ help:
 
 run:
 	cd emu && cargo run -p frontend --release
+
+# Profile-guided release build. Interpreters are the canonical PGO
+# winner: measured 8.1s -> 3.9s (-52%) on the 500M-instruction ALTTP
+# benchmark, identical VRAM/display hashes. Trains on PGO_GAME (any
+# .cue/.exe; pick something representative of what you'll run) plus a
+# short BIOS boot, then rebuilds with the merged profile. The .profdata
+# is toolchain-specific scratch, never committed. Plain `make run` /
+# cargo builds are unaffected (no default RUSTFLAGS).
+PGO_DIR := target/pgo-profiles
+pgo:
+ifndef PGO_GAME
+	$(error PGO_GAME is required, e.g. make pgo PGO_GAME=path/to/game.cue)
+endif
+	rm -rf $(PGO_DIR)
+	cd emu && RUSTFLAGS="-Cprofile-generate=$(abspath $(PGO_DIR))" \
+		cargo build -p frontend --release --features mcp
+	target/release/frontend launch --path "$(PGO_GAME)" --steps 500000000
+	target/release/frontend launch --path "$(PGO_GAME)" --steps 150000000 --bios-boot
+	"$$(rustc --print sysroot)"/lib/rustlib/*/bin/llvm-profdata merge \
+		-o $(PGO_DIR)/merged.profdata $(PGO_DIR)/*.profraw
+	cd emu && RUSTFLAGS="-Cprofile-use=$(abspath $(PGO_DIR))/merged.profdata" \
+		cargo build -p frontend --release --features mcp
+	@echo "PGO build ready: target/release/frontend"
 
 # Serve the emulator-only wasm build locally (optimized) at http://127.0.0.1:8080.
 # `env -u NO_COLOR` works around trunk choking on the NO_COLOR=1 shell env.
