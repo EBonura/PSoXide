@@ -21,8 +21,10 @@ const VRAM_HEIGHT: u32 = 512u;
 @compute @workgroup_size(8, 8)
 fn rasterize(@builtin(global_invocation_id) gid: vec3<u32>) {
     if gid.x >= prim.wh.x || gid.y >= prim.wh.y { return; }
-    let px = prim.xy.x + gid.x;
-    let py = prim.xy.y + gid.y;
-    if px >= VRAM_WIDTH || py >= VRAM_HEIGHT { return; }
+    // Coordinates WRAP mod VRAM dimensions (CPU fill_rect does
+    // `% VRAM_WIDTH/HEIGHT` per pixel) -- clamping instead would
+    // silently drop the wrapped tail of an oversized fill.
+    let px = (prim.xy.x + gid.x) % VRAM_WIDTH;
+    let py = (prim.xy.y + gid.y) % VRAM_HEIGHT;
     vram[py * VRAM_WIDTH + px] = prim.color;
 }
