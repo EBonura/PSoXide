@@ -317,10 +317,14 @@ fn main() {
                 eprintln!("    warmup-era owner: {n} px");
             } else if let Some(e) = log.iter().find(|e| e.index == *own) {
                 eprintln!(
-                    "    #{own} op=0x{:02X} ({}) {n} px fifo[0]=0x{:08X}",
+                    "    #{own} op=0x{:02X} ({}) {n} px fifo=[{}]",
                     e.opcode,
                     opcode_name(e.opcode),
-                    e.fifo[0],
+                    e.fifo
+                        .iter()
+                        .map(|w| format!("0x{w:08X}"))
+                        .collect::<Vec<_>>()
+                        .join(" "),
                 );
             } else {
                 eprintln!("    #{own} (not in window log) {n} px");
