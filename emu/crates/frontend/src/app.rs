@@ -2398,6 +2398,10 @@ pub fn step_one_frame(state: &mut AppState) -> StepFrameReport {
     // inspected; otherwise the 404-byte `InstructionRecord` per step
     // is pure overhead.
     let trace = state.panels.debug_sidebar && state.panels.registers;
+    // Hash-set lookups aren't free at ~250K steps/frame; skip the
+    // per-instruction breakpoint probe entirely in the common
+    // no-breakpoints case.
+    let check_breakpoints = !state.breakpoints.is_empty();
     let cycles_before = bus.cycles();
     let tick_before = state.cpu.tick();
     let vblank_before = bus.irq().raise_counts()[0];
@@ -2411,7 +2415,7 @@ pub fn step_one_frame(state: &mut AppState) -> StepFrameReport {
         // Breakpoint check happens BEFORE stepping so the paused PC
         // is the BP address itself -- the instruction at that PC has
         // not yet executed.
-        if state.breakpoints.contains(&state.cpu.pc()) {
+        if check_breakpoints && state.breakpoints.contains(&state.cpu.pc()) {
             state.running = false;
             state.menu.sync_run_label(false);
             state.menu.open = true;
