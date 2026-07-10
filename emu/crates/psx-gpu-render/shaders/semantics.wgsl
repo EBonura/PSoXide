@@ -33,10 +33,24 @@ const DEPTH_4BPP:  u32 = 0u;
 const DEPTH_8BPP:  u32 = 1u;
 const DEPTH_15BPP: u32 = 2u;
 
-const DITHER_TABLE: array<u32, 16> = array<u32, 16>(
-    7u, 0u, 6u, 1u, 2u, 5u, 3u, 4u,
-    1u, 6u, 0u, 7u, 4u, 3u, 5u, 2u,
+// PSX-SPX signed additive 4x4 dither offsets, row-major, indexed by
+// (y & 3) * 4 + (x & 3). Must stay in lockstep with the CPU
+// rasterizer's `dither_rgb` (emulator-core gpu/blend.rs): clamp the
+// 8-bit channel AFTER adding the offset, then truncate to 5 bits.
+// (An older round-up threshold table lived here and diverged from
+// the CPU by one 5-bit step on gouraud gradients -- replay_bisect
+// alttp op 0x38 caught it.)
+const DITHER_OFFSETS: array<i32, 16> = array<i32, 16>(
+    -4,  0, -3,  1,
+     2, -2,  3, -1,
+    -3,  1, -4,  0,
+     3, -1,  2, -2,
 );
+
+// One 8-bit channel + signed dither offset -> 5-bit channel.
+fn dither_channel(c: i32, off: i32) -> u32 {
+    return u32(clamp(c + off, 0, 255)) >> 3u;
+}
 
 // Semi-transparency blend of fg over bg, both 15bpp words. The
 // foreground's mask bit rides through.
@@ -50,9 +64,13 @@ fn blend(bg_word: u32, fg_word: u32, mode: u32) -> u32 {
     var r: i32; var g: i32; var b: i32;
     switch mode {
         case BLEND_AVERAGE: {
-            r = (br >> 1u) + (fr >> 1u);
-            g = (bg >> 1u) + (fg >> 1u);
-            b = (bb >> 1u) + (fb >> 1u);
+            // Sum THEN halve (PSX-SPX 0.5*B + 0.5*F, same as the CPU's
+            // blend_pixel). Halving each operand first drops both LSBs
+            // and lands one step dark whenever back and front are both
+            // odd. Max (31+31)>>1 = 31, no clamp needed.
+            r = (br + fr) >> 1;
+            g = (bg + fg) >> 1;
+            b = (bb + fb) >> 1;
         }
         case BLEND_ADD: {
             r = min(br + fr, 31); g = min(bg + fg, 31); b = min(bb + fb, 31);
@@ -75,21 +93,19 @@ fn plane_eval(dadx: u32, dady: u32, base: u32, x: i32, y: i32) -> u32 {
     return (base + u32(x) * dadx + u32(y) * dady) >> 24u;
 }
 
-// 8-bit RGB -> 15bpp with the optional 4x4 dither round-up rule.
+// 8-bit RGB -> 15bpp with the optional signed 4x4 dither (mirrors
+// `dither_rgb` on the CPU side).
 fn pack_rgb_5bit(r8: u32, g8: u32, b8: u32, dither: bool, x: i32, y: i32) -> u32 {
     let r = clamp(i32(r8), 0, 255);
     let g = clamp(i32(g8), 0, 255);
     let b = clamp(i32(b8), 0, 255);
-    var rc = u32(r) >> 3u;
-    var gc = u32(g) >> 3u;
-    var bc = u32(b) >> 3u;
     if dither {
-        let coeff = DITHER_TABLE[u32(y & 3) * 4u + u32(x & 3)];
-        if rc < 0x1Fu && (u32(r) & 7u) > coeff { rc = rc + 1u; }
-        if gc < 0x1Fu && (u32(g) & 7u) > coeff { gc = gc + 1u; }
-        if bc < 0x1Fu && (u32(b) & 7u) > coeff { bc = bc + 1u; }
+        let off = DITHER_OFFSETS[u32(y & 3) * 4u + u32(x & 3)];
+        return dither_channel(r, off)
+            | (dither_channel(g, off) << 5u)
+            | (dither_channel(b, off) << 10u);
     }
-    return rc | (gc << 5u) | (bc << 10u);
+    return (u32(r) >> 3u) | ((u32(g) >> 3u) << 5u) | ((u32(b) >> 3u) << 10u);
 }
 
 // Texel tint modulation, packed 24-bit tint variant (flat-tint
@@ -119,20 +135,17 @@ fn modulate_5bit(texel: u32, tr: u32, tg: u32, tb: u32) -> u32 {
 }
 
 // Dithered per-channel tint modulation: modulate in 8-bit space,
-// dither, truncate to 5 bits (mirrors `modulate_tint_dithered`).
+// signed-dither, truncate to 5 bits (mirrors `modulate_tint_dithered`).
 fn modulate_dithered(texel: u32, tr: u32, tg: u32, tb: u32, x: i32, y: i32) -> u32 {
     let txr = (texel & 0x1Fu) << 3u;
     let txg = ((texel >> 5u) & 0x1Fu) << 3u;
     let txb = ((texel >> 10u) & 0x1Fu) << 3u;
-    let r = min((tr * txr) / 0x80u, 0xFFu);
-    let g = min((tg * txg) / 0x80u, 0xFFu);
-    let b = min((tb * txb) / 0x80u, 0xFFu);
-    let coeff = DITHER_TABLE[u32(y & 3) * 4u + u32(x & 3)];
-    var rc = r >> 3u;
-    var gc = g >> 3u;
-    var bc = b >> 3u;
-    if rc < 0x1Fu && (r & 7u) > coeff { rc = rc + 1u; }
-    if gc < 0x1Fu && (g & 7u) > coeff { gc = gc + 1u; }
-    if bc < 0x1Fu && (b & 7u) > coeff { bc = bc + 1u; }
-    return rc | (gc << 5u) | (bc << 10u) | (texel & 0x8000u);
+    let r = i32(min((tr * txr) / 0x80u, 0xFFu));
+    let g = i32(min((tg * txg) / 0x80u, 0xFFu));
+    let b = i32(min((tb * txb) / 0x80u, 0xFFu));
+    let off = DITHER_OFFSETS[u32(y & 3) * 4u + u32(x & 3)];
+    return dither_channel(r, off)
+        | (dither_channel(g, off) << 5u)
+        | (dither_channel(b, off) << 10u)
+        | (texel & 0x8000u);
 }
