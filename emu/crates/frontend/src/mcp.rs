@@ -292,6 +292,11 @@ fn load_game(state: &mut AppState, path: &str) -> Result<String, String> {
         diagnostic: None,
     };
     state.launch_entry(&entry)?;
+    // The GUI launch path closes the Menu overlay in `apply_menu_action::
+    // LaunchGame`; mirror that here so an MCP-loaded game is actually
+    // visible in the window (and the paused redraw scheduler doesn't hold
+    // the active tick for an overlay nobody opened).
+    state.menu.open = false;
     Ok(format!("loaded {stem}"))
 }
 

@@ -89,6 +89,23 @@ const PSX_CYCLES_PER_MS: f32 = 33_868_800.0 / 1000.0;
 /// cap the burst so a debugger stop or window drag doesn't spend
 /// seconds chewing through delayed emu frames.
 const MAX_CATCHUP_FRAMES: u32 = 4;
+/// Paused redraw cadence while interaction is plausible: a pad was
+/// recently used, the Menu overlay is up, or the editor workspace is
+/// front. Matches the run cadence so pad-driven menu navigation feels
+/// identical paused or running.
+#[cfg(not(target_arch = "wasm32"))]
+const ACTIVE_TICK_DT: f32 = 1.0 / 60.0;
+/// Paused redraw cadence when fully idle. Redraws still happen (each
+/// one drains queued MCP tool calls and polls gilrs for pad hot-plug /
+/// first input) but at a rate whose UI cost rounds to nothing.
+#[cfg(not(target_arch = "wasm32"))]
+const IDLE_TICK_DT: f32 = 1.0 / 15.0;
+/// How long after the last gamepad edge the paused shell stays at the
+/// active tick. Pad input arrives by polling, not as window events, so
+/// it cannot wake the loop itself; this window keeps controller menu
+/// navigation at the active cadence between presses.
+#[cfg(not(target_arch = "wasm32"))]
+const PAD_ACTIVITY_WINDOW_SECS: f32 = 1.5;
 
 fn elapsed_ms(start: Instant) -> f32 {
     start.elapsed().as_secs_f32() * 1000.0
@@ -210,6 +227,18 @@ struct Shell {
     /// 15bpp gameplay needs a target rebuild because the visible panel
     /// was using the CPU-decoded fallback while 24bpp was active.
     hw_last_display_bpp24: bool,
+    /// When the gamepad last produced input (buttons, sticks, or the
+    /// analog toggle). Drives the paused redraw scheduler's active
+    /// window; see [`PAD_ACTIVITY_WINDOW_SECS`].
+    last_pad_activity: Instant,
+    /// Stamp of the machine state (bus cycles, GPU resync generation,
+    /// wireframe flag) at the last VRAM-derived sync, or `None` when no
+    /// bus existed. While the stamp is unchanged the guest cannot have
+    /// touched VRAM, so the per-redraw VRAM snapshot, RGBA debug-view
+    /// conversion, and full-VRAM texture re-uploads are all skipped --
+    /// on a 120 Hz host they were burning over half a core with the
+    /// emulator sitting paused.
+    vram_synced_stamp: Option<(u64, u64, bool)>,
     /// Live MCP debug server bridge. `None` if the server failed to start
     /// (e.g. port already bound). Drained each redraw against the emulator.
     #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
@@ -278,6 +307,8 @@ impl Shell {
             display_gpu_compute: gpu_compute,
             hw_seen_gpu_resync_generation: 0,
             hw_last_display_bpp24: false,
+            last_pad_activity: Instant::now(),
+            vram_synced_stamp: None,
             #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
             mcp: mcp::start(),
             #[cfg(target_arch = "wasm32")]
@@ -674,6 +705,19 @@ impl ApplicationHandler for Shell {
                     merge_sticks(pad_frame.right_stick, self.keyboard_right_stick.vector());
                 let merged_mask = self.pad1_mask | pad_frame.pad1_mask;
 
+                // Gamepad input arrives by polling, not as window events,
+                // so it cannot wake the redraw scheduler the way keyboard
+                // and mouse do. Remember when the pad was last live; the
+                // paused scheduler holds the active tick inside this window
+                // so controller menu navigation stays responsive.
+                if merged_mask != 0
+                    || pad_frame.analog_button
+                    || merged_left != (0.0, 0.0)
+                    || merged_right != (0.0, 0.0)
+                {
+                    self.last_pad_activity = Instant::now();
+                }
+
                 // L3 + R3 chord toggles the twin-stick freelook camera on a
                 // rising edge (works from keyboard or pad). The toolbar EYE
                 // button toggles the same flag.
@@ -799,20 +843,33 @@ impl ApplicationHandler for Shell {
                         bus.gpu.enable_cmd_log();
                     }
                 }
-                let hw_frame_start_vram = self
-                    .state
-                    .bus
-                    .as_ref()
-                    .map(|bus| bus.gpu.vram.words().to_vec());
+                // Convert wall-clock into whole guest frames up front so the
+                // frame-start VRAM snapshot below is taken only when the
+                // guest will actually run this redraw. The snapshot is a
+                // 1 MB clone; on redraws that retire zero guest frames
+                // (paused, or the off-beat of a 120 Hz host pacing a 60 Hz
+                // guest) it would be identical to live VRAM anyway, which
+                // is exactly what the replay path falls back to.
+                let frames_to_run = if self.state.running {
+                    self.emu_frame_accum = (self.emu_frame_accum + dt).min(0.25);
+                    ((self.emu_frame_accum / TARGET_FRAME_DT) as u32).min(MAX_CATCHUP_FRAMES)
+                } else {
+                    0
+                };
+                let hw_frame_start_vram = if frames_to_run > 0 {
+                    self.state
+                        .bus
+                        .as_ref()
+                        .map(|bus| bus.gpu.vram.words().to_vec())
+                } else {
+                    None
+                };
 
                 // Run loop: retire one video frame's worth of PSX cycles
                 // if we're in run mode. Any execution error auto-pauses
                 // and surfaces via the register panel. History captures
                 // only the tail via `push_history`'s ring-buffer semantics.
                 if self.state.running {
-                    self.emu_frame_accum = (self.emu_frame_accum + dt).min(0.25);
-                    let frames_to_run =
-                        ((self.emu_frame_accum / TARGET_FRAME_DT) as u32).min(MAX_CATCHUP_FRAMES);
                     // Feed the guest the merged mask + sticks computed above.
                     // While freelook is engaged the sticks drive the camera
                     // only, so the game sees them neutral (freecam-only).
@@ -941,6 +998,24 @@ impl ApplicationHandler for Shell {
 
                 let state = &mut self.state;
 
+                // Post-step machine stamp. Guest VRAM can only change when
+                // the bus advances (run loop above, or an MCP `step` /
+                // `load_game` drained at the top of this redraw, both of
+                // which move `cycles` or bump the resync generation), so an
+                // unchanged stamp means every VRAM-derived sync below --
+                // compute-backend mirror, RGBA debug view, HW sampler
+                // upload -- would rewrite identical bytes and is skipped.
+                // Wireframe sits in the stamp so toggling it while paused
+                // still repaints the HW target.
+                let vram_stamp = state.bus.as_ref().map(|bus| {
+                    (
+                        bus.cycles(),
+                        state.gpu_resync_generation,
+                        bus.gpu.wireframe_enabled,
+                    )
+                });
+                let vram_dirty = vram_stamp != self.vram_synced_stamp;
+
                 let cmd_log_start = Instant::now();
                 let frame_log = if let Some(bus) = state.bus.as_mut() {
                     bus.gpu.drain_completed_cmd_log()
@@ -961,12 +1036,14 @@ impl ApplicationHandler for Shell {
                 // not, when paused -- in which case `cmd_log` will
                 // be empty and the loop is a no-op).
                 let compute_start = Instant::now();
-                if let (Some(backend), Some(bus)) =
-                    (self.compute_backend.as_mut(), state.bus.as_mut())
+                if let (true, Some(backend), Some(bus)) =
+                    (vram_dirty, self.compute_backend.as_mut(), state.bus.as_mut())
                 {
                     // Sync VRAM so any uploads / FMV writes / VRAM-to-
                     // VRAM copies are reflected on the compute side
-                    // before we replay this frame's draw commands.
+                    // before we replay this frame's draw commands. With a
+                    // clean stamp `frame_log` is empty and pixel_owner has
+                    // not accumulated, so the whole body is skippable.
                     backend.sync_vram_from_cpu(bus.gpu.vram.words());
                     for entry in &frame_log {
                         backend.replay_packet(entry);
@@ -980,13 +1057,15 @@ impl ApplicationHandler for Shell {
                 }
                 profile.compute_ms = elapsed_ms(compute_start);
 
-                let vram_upload_start = Instant::now();
-                gfx.prepare_vram(state.bus.as_ref().map(|b| &b.gpu.vram));
-                profile.vram_upload_ms = elapsed_ms(vram_upload_start);
-
-                let display_upload_start = Instant::now();
-                gfx.prepare_display(state.bus.as_ref().map(|b| &b.gpu));
-                profile.display_upload_ms = elapsed_ms(display_upload_start);
+                // The 24bpp/offset display fallback only reflects guest
+                // scanout state, so a clean stamp skips it. The bus-went-
+                // away transition still lands here once (Some -> None flips
+                // the stamp) so `prepare_display` clears its texture.
+                if vram_dirty {
+                    let display_upload_start = Instant::now();
+                    gfx.prepare_display(state.bus.as_ref().map(|b| &b.gpu));
+                    profile.display_upload_ms = elapsed_ms(display_upload_start);
+                }
 
                 // Match the HW renderer's internal scale to the
                 // current Native↔Window mode + framebuffer pixel budget.
@@ -1028,36 +1107,62 @@ impl ApplicationHandler for Shell {
                     )
                 };
 
-                // Drive the hardware renderer once per frame. The
-                // VRAM-shaped target persists across frames the way
-                // PSX VRAM does; the framebuffer panel UV-samples
-                // the active display sub-rect.
-                if let Some(bus) = state.bus.as_mut() {
-                    let clone_start = Instant::now();
-                    let frame_start_vram = hw_frame_start_vram
-                        .as_deref()
-                        .unwrap_or_else(|| bus.gpu.vram.words());
-                    profile.hw_vram_clone_ms = elapsed_ms(clone_start);
-                    if hw_scale_changed || hw_target_needs_resync {
-                        gfx.sync_hw_target_from_vram(frame_start_vram);
+                // Drive the hardware renderer when this redraw can have
+                // changed it: guest VRAM moved (dirty stamp), the internal
+                // scale was reallocated, or a resync was requested. The
+                // VRAM-shaped target persists across frames the way PSX
+                // VRAM does -- which is exactly why a clean, stable frame
+                // can present the existing target without re-uploading a
+                // megabyte of unchanged VRAM first. The framebuffer panel
+                // UV-samples the active display sub-rect.
+                if vram_dirty || hw_scale_changed || hw_target_needs_resync {
+                    if let Some(bus) = state.bus.as_mut() {
+                        let clone_start = Instant::now();
+                        let frame_start_vram = hw_frame_start_vram
+                            .as_deref()
+                            .unwrap_or_else(|| bus.gpu.vram.words());
+                        profile.hw_vram_clone_ms = elapsed_ms(clone_start);
+                        if hw_scale_changed || hw_target_needs_resync {
+                            gfx.sync_hw_target_from_vram(frame_start_vram);
+                        }
+                        let hw_render_start = Instant::now();
+                        gfx.render_hw_frame(&bus.gpu, &frame_log, frame_start_vram);
+                        profile.hw_render_ms = elapsed_ms(hw_render_start);
+                    } else {
+                        let empty_log: Vec<emulator_core::gpu::GpuCmdLogEntry> = Vec::new();
+                        let empty_vram: Vec<u16> = vec![0; 1024 * 512];
+                        let dummy_gpu = emulator_core::Gpu::new();
+                        let hw_render_start = Instant::now();
+                        gfx.render_hw_frame(&dummy_gpu, &empty_log, &empty_vram);
+                        profile.hw_render_ms = elapsed_ms(hw_render_start);
                     }
-                    let hw_render_start = Instant::now();
-                    gfx.render_hw_frame(&bus.gpu, &frame_log, frame_start_vram);
-                    profile.hw_render_ms = elapsed_ms(hw_render_start);
-                } else {
-                    let empty_log: Vec<emulator_core::gpu::GpuCmdLogEntry> = Vec::new();
-                    let empty_vram: Vec<u16> = vec![0; 1024 * 512];
-                    let dummy_gpu = emulator_core::Gpu::new();
-                    let hw_render_start = Instant::now();
-                    gfx.render_hw_frame(&dummy_gpu, &empty_log, &empty_vram);
-                    profile.hw_render_ms = elapsed_ms(hw_render_start);
+                }
+                self.vram_synced_stamp = vram_stamp;
+
+                // VRAM debug view: GPU-side expand of the HW renderer's
+                // R16Uint VRAM mirror (kept current by the block above)
+                // into the texture the sidebar samples. Runs after the HW
+                // frame so an open sidebar shows this frame, and only when
+                // the sidebar can actually be seen -- a hidden panel costs
+                // nothing at all.
+                if state.panels.debug_sidebar && state.bus.is_some() {
+                    let vram_upload_start = Instant::now();
+                    gfx.prepare_vram();
+                    profile.vram_upload_ms = elapsed_ms(vram_upload_start);
                 }
 
                 // Editor 3D preview: drive the editor-owned HwRenderer
                 // while editing. During embedded Play, the viewport
-                // paints the live emulator framebuffer instead.
+                // paints the live emulator framebuffer instead. Gated on
+                // the editor workspace actually being front: the refresh
+                // stats every material file on disk for hot-reload, which
+                // is pure per-frame syscall churn while playing a game in
+                // the emulator workspace.
                 #[cfg(feature = "editor")]
-                if !state.embedded_playtest_running() && state.editor.editor_3d_preview_visible() {
+                if state.workspace.is_editor()
+                    && !state.embedded_playtest_running()
+                    && state.editor.editor_3d_preview_visible()
+                {
                     let editor_camera = state.editor.viewport_3d_camera();
                     let editor_preview_fog = state.editor.preview_fog_enabled();
                     let editor_preview_backface_wireframe =
@@ -1178,11 +1283,19 @@ impl ApplicationHandler for Shell {
         }
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // Native: schedule the next redraw instead of redrawing at host
+        // vsync unconditionally (the old Poll + request-every-tick shell
+        // rebuilt an unchanged UI at 120 Hz and burned half a core idle).
+        #[cfg(not(target_arch = "wasm32"))]
+        self.schedule_next_redraw(event_loop);
+
         // On the web, GPU init finishes asynchronously after `resumed`; pick it
-        // up here so the first redraw can fire once it lands. No-op on native.
+        // up here so the first redraw can fire once it lands. The browser paces
+        // rAF-driven redraws itself, so the web shell keeps redrawing per tick.
         #[cfg(target_arch = "wasm32")]
         {
+            let _ = event_loop;
             self.install_pending_graphics();
             // Apply any BIOS / game file the user picked since the last frame.
             self.state.poll_web_uploads();
@@ -1202,9 +1315,72 @@ impl ApplicationHandler for Shell {
                     }
                 }
             }
+            if let Some(gfx) = self.graphics.as_ref() {
+                gfx.window.request_redraw();
+            }
         }
-        if let Some(gfx) = self.graphics.as_ref() {
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Shell {
+    /// Decide when the next redraw is due and park the loop until then.
+    ///
+    /// Running: wake exactly when the wall clock owes the guest its next
+    /// 60 Hz frame (`emu_frame_accum` holds the unpaid fraction, anchored
+    /// at `last_frame`); the Fifo present keeps the actual paint aligned
+    /// to vblank. Paused: take the earliest of egui's own repaint request
+    /// (slide animations, caret blink) and a tick -- ACTIVE_TICK_DT while
+    /// interaction is plausible (recent pad input, Menu overlay, editor
+    /// workspace), IDLE_TICK_DT otherwise. Every tick's redraw still
+    /// drains queued MCP tool calls and polls gilrs, so debug tooling and
+    /// pad hot-plug keep working while idle. Keyboard and mouse never
+    /// wait for a tick: their window events request immediate redraws in
+    /// `window_event`.
+    fn schedule_next_redraw(&mut self, event_loop: &ActiveEventLoop) {
+        use std::time::Duration;
+
+        let Some(gfx) = self.graphics.as_ref() else {
+            event_loop.set_control_flow(ControlFlow::Wait);
+            return;
+        };
+        let now = Instant::now();
+        let next = if self.state.running {
+            let owed = (TARGET_FRAME_DT - self.emu_frame_accum).max(0.0);
+            self.last_frame
+                .checked_add(Duration::from_secs_f32(owed))
+                .unwrap_or(now)
+        } else {
+            let in_editor = self.state.workspace.is_editor();
+            let pad_active = now.duration_since(self.last_pad_activity).as_secs_f32()
+                < PAD_ACTIVITY_WINDOW_SECS;
+            let tick = if self.state.menu.open || in_editor || pad_active {
+                ACTIVE_TICK_DT
+            } else {
+                IDLE_TICK_DT
+            };
+            let tick_next = self
+                .last_frame
+                .checked_add(Duration::from_secs_f32(tick))
+                .unwrap_or(now);
+            // egui measures its repaint delay from the end of the last
+            // frame; `Duration::MAX` (nothing animating) overflows to None.
+            match self.last_frame.checked_add(gfx.repaint_delay()) {
+                Some(egui_next) => tick_next.min(egui_next),
+                None => tick_next,
+            }
+        };
+        if next <= now {
             gfx.window.request_redraw();
+            // Park on a short safety deadline rather than `Poll`: the
+            // redraw event wakes the loop as soon as it is delivered, and
+            // if the OS coalesces or suppresses it (occluded window) the
+            // deadline re-runs this scheduler instead of busy-looping.
+            event_loop.set_control_flow(ControlFlow::WaitUntil(
+                now + Duration::from_millis(16),
+            ));
+        } else {
+            event_loop.set_control_flow(ControlFlow::WaitUntil(next));
         }
     }
 }
