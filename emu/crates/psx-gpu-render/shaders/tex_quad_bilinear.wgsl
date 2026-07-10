@@ -80,11 +80,13 @@ fn i64_div_i32(a: I64, divisor: i32) -> I64 {
     // time it's being divided here (it's the difference of two
     // 5-bit-channel-times-Q16.16 values, whose magnitude is bounded
     // by 255 << 16 = 16M, well within i32). So we can safely
-    // collapse to i32 division.
-    let n_i32 = (i32(a.lo)) | (a.hi << 0); // hi already 0 or -1 typically
-    // Defensive: if `a.hi` is non-zero AND inconsistent with the
-    // sign of a.lo's MSB, the value didn't fit in i32 and we'd
-    // overflow. In practice rasterizer values are within range.
+    // collapse to i32 division: for an in-range value the two's-
+    // complement bits ARE `a.lo` (hi is pure sign extension, 0 or
+    // -1). The old `i32(a.lo) | a.hi` collapse forced every
+    // NEGATIVE numerator to -1, so reversed-UV (X-flipped sprite)
+    // quads walked their texture with delta 0 instead of a negative
+    // step -- alttp gameplay chunk-16 parity divergence.
+    let n_i32 = i32(a.lo);
     let q = n_i32 / divisor;
     if q < 0 { return I64(-1, u32(q)); }
     return I64(0, u32(q));
