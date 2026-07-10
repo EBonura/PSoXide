@@ -64,3 +64,6 @@ engine/examples/editor-playtest/build/
 
 # Trunk wasm build output (the web emulator bundle).
 emu/crates/frontend/dist/
+
+# Runtime emulator captures (MCP screenshot tool output).
+/emu/captures/
