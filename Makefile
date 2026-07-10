@@ -152,6 +152,11 @@ help:
 run:
 	cd emu && cargo run -p frontend --release
 
+# CI and the web deploy deliberately skip PGO: rustc's PGO does not
+# target wasm (browsers JIT-optimize at runtime instead), and no CI
+# pipeline ships native binaries -- fast local builds come from this
+# target.
+#
 # Profile-guided release build. Interpreters are the canonical PGO
 # winner: measured 8.1s -> 3.9s (-52%) on the 500M-instruction ALTTP
 # benchmark, identical VRAM/display hashes. Trains on PGO_GAME (any
