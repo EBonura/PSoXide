@@ -108,6 +108,18 @@ cpal        = "0.15"
 gilrs       = "0.11"
 rfd         = "0.15"
 
+# Host-only tuning (the MIPS device workspaces under sdk/ and engine/ are
+# excluded above and keep their own profiles). Measured on the headless
+# 500M-instruction ALTTP benchmark: fat LTO + codegen-units=1 is speed-
+# neutral vs stock release (the hot interpreter already lives in one
+# crate), and thin LTO was ~3% slower. Fat is kept anyway for the whole-
+# program optimisation and the smaller artifacts -- the wasm build ships
+# to browsers, where binary size is user-facing. Release links get
+# slower; day-to-day iteration uses the tuned dev profile below.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+
 # Optimize the emulator's hot code at -O3 even in debug builds so `cargo run` /
 # `trunk serve` run near release speed, while the crate under edit (frontend)
 # stays at opt-level 0 for fast incremental rebuilds.

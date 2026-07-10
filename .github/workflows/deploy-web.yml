@@ -53,6 +53,11 @@ jobs:
 
       - name: Build (release, emulator-only, /PSoXide/ base)
         working-directory: emu/crates/frontend
+        env:
+          # WebAssembly-2.0 SIMD baseline (all current engines). Mirrors
+          # the local (gitignored) .cargo/config.toml -- CI can't read
+          # that file, so the flag lives here for the shipped build.
+          RUSTFLAGS: -C target-feature=+simd128
         run: trunk build --release --public-url "/PSoXide/"
 
       - uses: actions/upload-pages-artifact@v3
