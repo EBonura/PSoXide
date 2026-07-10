@@ -290,9 +290,15 @@ impl Interpreter {
         }
         Some(GpuEvent::Fill {
             cmd: fifo[0],
-            x: fifo[1] & 0x3FF,
+            // Hardware coordinate rounding (PSX-SPX, Redux cmdFillRect,
+            // CPU fill_rect): X snaps DOWN to a 16-pixel boundary and
+            // width rounds UP to the next multiple of 16. Decoding the
+            // raw fields instead fills a narrower rect and leaves bands
+            // of stale pixels at the edges (alttp gameplay, replay_bisect
+            // owner=QuickFill).
+            x: fifo[1] & 0x3F0,
             y: (fifo[1] >> 16) & 0x1FF,
-            w: fifo[2] & 0x3FF,
+            w: ((fifo[2] & 0x3FF) + 0xF) & !0xF,
             h: (fifo[2] >> 16) & 0x1FF,
         })
     }
