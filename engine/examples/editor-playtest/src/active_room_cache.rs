@@ -30,43 +30,10 @@ pub(super) fn active_room_materials(active: &ActiveRuntimeRoom) -> &[WorldRender
     }
 }
 
-#[cfg(all(
-    feature = "world-grid-visible",
-    not(feature = "vis-full-active-chunks")
-))]
-#[derive(Copy, Clone)]
-pub(super) struct ActiveVisibleCellCache {
-    pub(super) room: RoomIndex,
-    pub(super) anchor_x: i32,
-    pub(super) anchor_z: i32,
-    pub(super) view_sin_key: i16,
-    pub(super) view_cos_key: i16,
-    pub(super) camera_independent: bool,
-    pub(super) rejected_global: u16,
-    pub(super) first: u16,
-    pub(super) count: u16,
-    pub(super) ready: bool,
-}
-
-#[cfg(all(
-    feature = "world-grid-visible",
-    not(feature = "vis-full-active-chunks")
-))]
-impl ActiveVisibleCellCache {
-    pub(super) const EMPTY: Self = Self {
-        room: RoomIndex::ZERO,
-        anchor_x: 0,
-        anchor_z: 0,
-        view_sin_key: 0,
-        view_cos_key: 0,
-        camera_independent: false,
-        rejected_global: 0,
-        first: 0,
-        count: 0,
-        ready: false,
-    };
-}
-
+/// Both remaining callers sit on `not(cd-stream-bench)` branches (the
+/// crate's grid queries parse rooms themselves since the phase-2
+/// `world_visibility` carve).
+#[cfg(not(feature = "cd-stream-bench"))]
 pub(super) fn parse_runtime_room(record: &LevelRoomRecord) -> Option<RuntimeRoom<'static>> {
     room_cache::parse_runtime_room(ASSETS, record)
 }
