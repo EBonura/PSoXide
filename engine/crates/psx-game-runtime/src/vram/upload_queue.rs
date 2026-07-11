@@ -3,6 +3,11 @@
 //! stepped a bounded number of texture rows per call so a room
 //! activation's upload burst spreads across background ticks instead
 //! of stalling a frame; [`super::VramRuntime`] owns the one instance.
+//!
+//! Jobs identify their source texture by [`AssetId`] and re-resolve the
+//! bytes through the caller's resolver on every step (phase 1.5): the
+//! queue retains no byte slices across frames, so upload sources only
+//! need to outlive each step call instead of being `&'static`.
 
 use super::{upload_clut, upload_opaque_clut, VramSlotClutMode};
 use psx_asset::Texture;
@@ -29,7 +34,6 @@ pub(crate) struct VramUploadJob {
     pub(crate) asset: AssetId,
     pub(crate) clut_mode: VramSlotClutMode,
     pub(crate) kind: VramUploadKind,
-    pub(crate) bytes: Option<&'static [u8]>,
     pub(crate) texture_x: u16,
     pub(crate) texture_y: u16,
     pub(crate) texture_width_halfwords: u16,
@@ -48,7 +52,6 @@ impl VramUploadJob {
         asset: AssetId(0),
         clut_mode: VramSlotClutMode::OpaqueZero,
         kind: VramUploadKind::TextureAndClut,
-        bytes: None,
         texture_x: 0,
         texture_y: 0,
         texture_width_halfwords: 0,
@@ -126,7 +129,12 @@ impl VramUploadQueue {
         false
     }
 
-    pub(crate) fn step(&mut self, row_budget: u16, mut mark_ready: impl FnMut(usize)) -> bool {
+    pub(crate) fn step<'r>(
+        &mut self,
+        row_budget: u16,
+        resolve: &impl Fn(AssetId) -> Option<&'r [u8]>,
+        mut mark_ready: impl FnMut(usize),
+    ) -> bool {
         let mut remaining_rows = row_budget;
         let mut completed_any = false;
         let mut i = 0usize;
@@ -138,10 +146,10 @@ impl VramUploadQueue {
 
             telemetry::stage_begin(telemetry::stage::VRAM_UPLOAD);
             if !self.jobs[i].texture_complete() {
-                let rows = self.upload_texture_rows(i, remaining_rows);
+                let rows = self.upload_texture_rows(i, remaining_rows, resolve);
                 remaining_rows = remaining_rows.saturating_sub(rows.max(1));
             } else if !self.jobs[i].clut_uploaded {
-                self.upload_clut(i);
+                self.upload_clut(i, resolve);
                 remaining_rows = remaining_rows.saturating_sub(1);
             }
             telemetry::stage_end(telemetry::stage::VRAM_UPLOAD);
@@ -157,8 +165,13 @@ impl VramUploadQueue {
         completed_any
     }
 
-    fn upload_texture_rows(&mut self, index: usize, row_budget: u16) -> u16 {
-        let Some(bytes) = self.jobs[index].bytes else {
+    fn upload_texture_rows<'r>(
+        &mut self,
+        index: usize,
+        row_budget: u16,
+        resolve: &impl Fn(AssetId) -> Option<&'r [u8]>,
+    ) -> u16 {
+        let Some(bytes) = resolve(self.jobs[index].asset) else {
             self.jobs[index] = VramUploadJob::EMPTY;
             return 0;
         };
@@ -196,8 +209,8 @@ impl VramUploadQueue {
         uploaded
     }
 
-    fn upload_clut(&mut self, index: usize) {
-        let Some(bytes) = self.jobs[index].bytes else {
+    fn upload_clut<'r>(&mut self, index: usize, resolve: &impl Fn(AssetId) -> Option<&'r [u8]>) {
+        let Some(bytes) = resolve(self.jobs[index].asset) else {
             self.jobs[index] = VramUploadJob::EMPTY;
             return;
         };
