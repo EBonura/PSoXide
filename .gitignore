@@ -64,3 +64,9 @@ engine/examples/editor-playtest/build/
 
 # Trunk wasm build output (the web emulator bundle).
 emu/crates/frontend/dist/
+
+# Runtime emulator captures (MCP screenshot tool output).
+/emu/captures/
+
+# Validation run outputs (make validate writes failure artifacts here).
+/validation/artifacts/

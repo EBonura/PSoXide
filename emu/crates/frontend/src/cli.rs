@@ -167,17 +167,6 @@ pub struct LaunchArgs {
     /// emitted guest frame-begin marker.
     #[arg(long)]
     pub input_tape: Option<PathBuf>,
-    /// Write a guest-PC sampling histogram CSV (pc,count) for hotspot
-    /// profiling. Resolve addresses against the game's linker map.
-    #[arg(long)]
-    pub pc_sample: Option<PathBuf>,
-    /// Sample the guest PC every N retired instructions (with --pc-sample).
-    #[arg(long, default_value_t = 61)]
-    pub pc_sample_every: u64,
-    /// Start PC sampling only after this many retired instructions, to skip
-    /// menu/loading phases (with --pc-sample).
-    #[arg(long, default_value_t = 0)]
-    pub pc_sample_from: u64,
     /// Press pad-1 button masks on the headless route clock. Format:
     /// `<mask>@<tick>+<frames>`, comma-separated, e.g.
     /// `0x4000@45+12,0x4000@80+16`.
@@ -191,12 +180,6 @@ pub struct LaunchArgs {
     /// SYSTEM.CNF fast boot.
     #[arg(long)]
     pub bios_boot: bool,
-    /// Model a slow original controller (SCPH-1200) on SIO0: a guest poll that
-    /// clocks bytes without waiting for each `/ACK` pulse desyncs, reproducing
-    /// the hardware failure headlessly. Pair with the controller-probe disc to
-    /// see the no-wait column go DESYNC while the ACK-paced column stays clean.
-    #[arg(long)]
-    pub slow_pad: bool,
     /// Print an FNV-1a-64 VRAM hash at the end. Same algorithm the
     /// milestone regression tests use, so a CLI run + a unit test
     /// should produce identical numbers.
@@ -269,47 +252,10 @@ pub struct LaunchArgs {
     /// Hold the game run button during the headless run.
     #[arg(long)]
     pub hold_run: bool,
-    /// Scripted camera sweep: alternate rotating the camera in place (right
-    /// stick) with walking forward (left stick), so a recorded window visits
-    /// several positions and full rotations. Use with `--counter-log` to
-    /// reproduce portal-visibility false-positives/flicker that a straight
-    /// `--hold-forward` walk never triggers.
-    #[arg(long)]
-    pub sweep: bool,
-    /// Simulate the GUI's live presentation loop headless: every
-    /// `--live-sim-cycles` bus cycles, drain the completed cmd log into a
-    /// PERSISTENT HW renderer (incremental replay, exactly like the editor
-    /// viewport) and snapshot what the viewport would show (display rect of
-    /// the persistent target, or the CPU display fallback) into this
-    /// directory. Diagnoses presentation bugs invisible to `--dump-hw`'s
-    /// fresh full-log replay.
-    #[arg(long)]
-    pub live_sim_dump: Option<PathBuf>,
-    /// Bus cycles per simulated host frame (default ~8.5ms at 33.8688 MHz,
-    /// matching a 118 Hz ProMotion host).
-    #[arg(long, default_value_t = 287_000)]
-    pub live_sim_cycles: u64,
-    /// Start writing snapshots once bus cycles pass this value (the
-    /// incremental replay itself runs from boot regardless).
-    #[arg(long, default_value_t = 0)]
-    pub live_sim_from: u64,
-    /// Maximum number of snapshots to write.
-    #[arg(long, default_value_t = 60)]
-    pub live_sim_frames: u32,
-    /// Internal resolution multiplier for the simulated live renderer
-    /// (the GUI session under investigation ran at 4).
-    #[arg(long, default_value_t = 4)]
-    pub live_sim_scale: u32,
     /// Enable GPU wireframe render mode (edges only) for this run, mirroring the
-    /// toolbar toggle. Pair with `--live-sim-dump` to reproduce the live
-    /// per-frame accumulation, or `--dump-hw` for a single-frame edge render.
+    /// toolbar toggle. Pair with `--dump-hw` for a single-frame edge render.
     #[arg(long)]
     pub wireframe: bool,
-    /// Enable wireframe mid-run once bus cycles reach this value, mirroring a
-    /// GUI toolbar toggle during gameplay (`--wireframe` enables from boot, so
-    /// it never exercises the toggle-on transition against a live frame).
-    #[arg(long)]
-    pub wireframe_from: Option<u64>,
     /// Sample-time texture filter for `--dump-hw`: none|xbr.
     #[arg(long, default_value = "none")]
     pub texture_filter: String,
@@ -596,15 +542,6 @@ fn run_headless_launch(
         .transpose()?
         .unwrap_or_default();
     let has_pad_pulses = !pad_pulses.is_empty();
-    if args.sweep && (args.input_tape.is_some() || args.hold_forward || args.hold_run) {
-        return Err(
-            "--sweep cannot be combined with --input-tape, --hold-forward, or --hold-run"
-                .to_string(),
-        );
-    }
-    if args.sweep && has_pad_pulses {
-        return Err("--sweep cannot be combined with --pad-pulses".to_string());
-    }
     if args.input_tape.is_some() && (args.hold_forward || args.hold_run) {
         return Err(
             "--input-tape cannot be combined with --hold-forward or --hold-run".to_string(),
@@ -662,7 +599,7 @@ fn run_headless_launch(
     let mut bus = match ext.as_str() {
         "exe" => {
             let mut bus = Bus::new_without_bios();
-            if args.dump_hw.is_some() || args.live_sim_dump.is_some() {
+            if args.dump_hw.is_some() {
                 bus.gpu.enable_cmd_log();
             }
             let bytes = std::fs::read(&game_path).map_err(|e| e.to_string())?;
@@ -692,7 +629,7 @@ fn run_headless_launch(
             } else {
                 bus_from_configured_bios(&settings)?
             };
-            if args.dump_hw.is_some() || args.live_sim_dump.is_some() {
+            if args.dump_hw.is_some() {
                 bus.gpu.enable_cmd_log();
             }
             let bytes = std::fs::read(&game_path).map_err(|e| e.to_string())?;
@@ -721,7 +658,7 @@ fn run_headless_launch(
             } else {
                 bus_from_configured_bios(&settings)?
             };
-            if args.dump_hw.is_some() || args.live_sim_dump.is_some() {
+            if args.dump_hw.is_some() {
                 bus.gpu.enable_cmd_log();
             }
             let disc = psoxide_settings::library::load_disc_from_cue(&game_path)?;
@@ -748,7 +685,7 @@ fn run_headless_launch(
                 return Err("--embedded-playtest does not support .ccd".to_string());
             }
             let mut bus = bus_from_configured_bios(&settings)?;
-            if args.dump_hw.is_some() || args.live_sim_dump.is_some() {
+            if args.dump_hw.is_some() {
                 bus.gpu.enable_cmd_log();
             }
             let disc = psoxide_settings::library::load_disc_from_ccd(&game_path)?;
@@ -771,9 +708,6 @@ fn run_headless_launch(
         }
     };
 
-    if args.slow_pad {
-        bus.set_slow_pad(true);
-    }
     if args.wireframe {
         bus.gpu.wireframe_enabled = true;
     }
@@ -788,14 +722,6 @@ fn run_headless_launch(
             bus.set_port1_sticks(0x80, 0x80, 0x80, 0x00);
         }
     }
-    if args.sweep {
-        let mut buttons = ButtonState::NONE;
-        buttons.press(button::CIRCLE);
-        bus.set_port1_buttons(buttons);
-        let (rx, ry, lx, ly) = sweep_pad(1);
-        bus.set_port1_sticks(rx, ry, lx, ly);
-    }
-    let mut sweep_frame = 0u64;
     // Headless route clock. The editor records/replays exactly one tape sample
     // per `app::step_one_frame` tick -- a `vblank_period` cycle budget (capped
     // at `run_steps_per_frame` instructions). It does NOT key scripted input to
@@ -845,75 +771,16 @@ fn run_headless_launch(
     let mut observed_counter_frames = observed_guest_frames;
     let mut profile_log = GuestProfileLog::new(args.profile_log.as_deref())?;
 
-    // Live-presentation simulator: a persistent HW renderer fed by
-    // periodic drains of the completed cmd log, mirroring the GUI's
-    // per-host-frame incremental replay (main.rs run loop). `live_vram`
-    // mirrors the GUI's pre-slice software-VRAM snapshot: it always
-    // holds VRAM as of the START of the next drained batch.
-    let mut live_sim = if let Some(dir) = args.live_sim_dump.as_deref() {
-        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-        let (device, queue) = headless_wgpu_device()?;
-        let mut hw = psx_gpu_render::HwRenderer::new_headless(device, queue);
-        // Match the live session's internal scale (profiler: hw_scale=4).
-        let _ = hw.set_internal_scale(args.live_sim_scale, None);
-        let log_path = dir.join("live_sim.csv");
-        let mut log =
-            std::fs::File::create(&log_path).map_err(|e| format!("{}: {e}", log_path.display()))?;
-        use std::io::Write;
-        writeln!(
-            log,
-            "snap,cycles,batch_entries,display_x,display_y,h_off,v_off,bpp24,path"
-        )
-        .map_err(|e| e.to_string())?;
-        Some((
-            hw,
-            bus.gpu.vram.words().to_vec(),
-            args.live_sim_cycles.max(1),
-            0u32,
-            log,
-        ))
-    } else {
-        None
-    };
-
     // Step the CPU. Report early on opcode errors -- they're usually
     // "we hit an unimplemented instruction" and worth surfacing.
     let mut stopped_at: Option<u64> = None;
     let mut audio_cycle_accum = 0u64;
     let mut audio_capture: Vec<(i16, i16)> = Vec::new();
-    let mut pc_hist: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
-    let pc_every = args.pc_sample_every.max(1);
-    let trace_ring = std::env::var_os("PSOXIDE_TRACE_EXC").is_some();
-    let mut pc_ring = [0u32; 64];
-    let mut pc_ring_i = 0usize;
     let gte_profile_before = cpu.cop2().profile_snapshot();
     for i in 0..args.steps {
-        if args.pc_sample.is_some() && i >= args.pc_sample_from && i % pc_every == 0 {
-            *pc_hist.entry(cpu.pc() & !3).or_insert(0) += 1;
-        }
         let cycles_before = bus.cycles();
-        if trace_ring {
-            let pc_now = cpu.pc();
-            let prev = if pc_ring_i > 0 { pc_ring[(pc_ring_i - 1) & 63] } else { 0 };
-            if pc_now >= 0xBFC0_0000 && (0x8000_0000..0xA000_0000).contains(&prev) {
-                eprintln!(
-                    "[cli] RAM->ROM jump at step {i}: from pc=0x{prev:08x} to 0x{pc_now:08x} ra=0x{:08x} sp=0x{:08x}",
-                    cpu.gpr(31), cpu.gpr(29)
-                );
-            }
-            pc_ring[pc_ring_i & 63] = pc_now;
-            pc_ring_i += 1;
-        }
         if let Err(e) = cpu.step(&mut bus) {
             eprintln!("[cli] step {i} failed: {e:?}");
-            if trace_ring {
-                let mut trail = String::new();
-                for k in 0..64usize {
-                    let idx = (pc_ring_i + k) & 63;
-                    trail.push_str(&format!(" {:08x}", pc_ring[idx]));
-                }
-                eprintln!("[cli] last pcs:{trail}");
-            }
             eprintln!(
                 "[cli] regs: ra=0x{:08x} sp=0x{:08x} gp=0x{:08x} fp=0x{:08x} a0=0x{:08x} a1=0x{:08x} v0=0x{:08x} v1=0x{:08x} t9=0x{:08x}",
                 cpu.gpr(31), cpu.gpr(29), cpu.gpr(28), cpu.gpr(30),
@@ -933,153 +800,10 @@ fn run_headless_launch(
                 audio_capture.extend(drained);
             }
         }
-        if let Some(at) = args.wireframe_from {
-            if !bus.gpu.wireframe_enabled && bus.cycles() >= at {
-                bus.gpu.wireframe_enabled = true;
-                eprintln!("[wireframe] enabled at cycle {}", bus.cycles());
-            }
-        }
         let current_guest_frames = bus.telemetry.frames_seen();
         if args.guest_debug_log {
             for line in bus.telemetry.drain_debug_logs() {
                 eprintln!("[guest f{} c{}] {}", line.frame, line.cycles, line.text);
-            }
-        }
-        if let Some((hw, live_vram, next_deadline, snaps, log)) = live_sim.as_mut() {
-            if bus.cycles() >= *next_deadline {
-                *next_deadline = bus.cycles().saturating_add(args.live_sim_cycles.max(1));
-                let batch = bus.gpu.drain_completed_cmd_log();
-                let env_before = hw.debug_env();
-                if bus.cycles() >= args.live_sim_from {
-                    let dir = args.live_sim_dump.as_deref().unwrap();
-                    let pre = dir.join("vram_pre.bin");
-                    if !pre.exists() {
-                        let mut raw = Vec::with_capacity(live_vram.len() * 2);
-                        for w in live_vram.iter() {
-                            raw.extend_from_slice(&w.to_le_bytes());
-                        }
-                        std::fs::write(&pre, &raw).map_err(|e| e.to_string())?;
-                    }
-                }
-                hw.render_frame(&bus.gpu, &batch, live_vram);
-                {
-                    // Append this batch to the raw batch tape for offline
-                    // poison-bisection (custom binary: per batch u32 entry
-                    // count; per entry u8 opcode + u32 word count + words).
-                    use std::io::Write;
-                    let dir = args.live_sim_dump.as_deref().unwrap();
-                    let mut tape = std::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(dir.join("batches.bin"))
-                        .map_err(|e| e.to_string())?;
-                    let mut buf: Vec<u8> = Vec::new();
-                    buf.extend_from_slice(&(batch.len() as u32).to_le_bytes());
-                    for entry in &batch {
-                        buf.push(entry.opcode);
-                        buf.extend_from_slice(&(entry.fifo.len() as u32).to_le_bytes());
-                        for w in &entry.fifo {
-                            buf.extend_from_slice(&w.to_le_bytes());
-                        }
-                    }
-                    tape.write_all(&buf).map_err(|e| e.to_string())?;
-                }
-                *live_vram = bus.gpu.vram.words().to_vec();
-                if bus.cycles() >= args.live_sim_from && *snaps < args.live_sim_frames {
-                    if *snaps == 0 {
-                        // Soft-VRAM snapshot so offline tests can replay
-                        // recorded batches with real textures.
-                        let dir = args.live_sim_dump.as_deref().unwrap();
-                        let mut raw = Vec::with_capacity(live_vram.len() * 2);
-                        for w in live_vram.iter() {
-                            raw.extend_from_slice(&w.to_le_bytes());
-                        }
-                        std::fs::write(dir.join("vram.bin"), &raw).map_err(|e| e.to_string())?;
-                    }
-                    let area = bus.gpu.display_area();
-                    let h_off = bus.gpu.horizontal_display_offset_px();
-                    let v_off = bus.gpu.vertical_display_offset_px();
-                    let dir = args.live_sim_dump.as_deref().unwrap();
-                    let path = dir.join(format!("live_{:04}.ppm", *snaps));
-                    // Mirror `frontend_display`: CPU display fallback for
-                    // 24bpp / screen-offset, HW target sub-rect otherwise.
-                    // Both framebuffer pages from the persistent target,
-                    // to separate "never painted" from "painted then wiped".
-                    let s4 = hw.internal_scale();
-                    let (pw, ph, prgba) = hw.read_subrect_rgba8(0, 0, 320 * s4, 480 * s4);
-                    let mut b0 = 0u32;
-                    let mut b240 = 0u32;
-                    for row in 0..ph {
-                        for col in 0..pw {
-                            let i = ((row * pw + col) * 4) as usize;
-                            let lum = prgba[i] as u32 + prgba[i + 1] as u32 + prgba[i + 2] as u32;
-                            if lum > 30 {
-                                if row < ph / 2 {
-                                    b0 += 1;
-                                } else {
-                                    b240 += 1;
-                                }
-                            }
-                        }
-                    }
-                    eprintln!(
-                        "[live-sim] snap {} batch={} disp_y={} page0={} page240={}",
-                        *snaps,
-                        batch.len(),
-                        area.y,
-                        b0,
-                        b240
-                    );
-                    write_rgb_ppm_from_rgba(
-                        &dir.join(format!("pages_{:04}.ppm", *snaps)),
-                        pw,
-                        ph,
-                        &prgba,
-                    )?;
-                    // Mirror frontend_display: only 24bpp uses the CPU texture;
-                    // 16bpp (incl. screen-offset) goes through the HW target.
-                    let tag = if area.bpp24 {
-                        let (rgba, w, hgt) = bus.gpu.display_rgba8();
-                        write_rgb_ppm_from_rgba(&path, w, hgt, &rgba)?;
-                        "cpu"
-                    } else {
-                        let s = hw.internal_scale();
-                        let (w, hgt, rgba) = hw.read_subrect_rgba8(
-                            area.x as u32 * s,
-                            area.y as u32 * s,
-                            area.width as u32 * s,
-                            area.height as u32 * s,
-                        );
-                        write_rgb_ppm_from_rgba(&path, w, hgt, &rgba)?;
-                        "hw"
-                    };
-                    use std::io::Write;
-                    let mut op_counts = std::collections::BTreeMap::new();
-                    for entry in &batch {
-                        *op_counts.entry(entry.opcode).or_insert(0u32) += 1;
-                    }
-                    let ops = op_counts
-                        .iter()
-                        .map(|(op, n)| format!("{op:02x}:{n}"))
-                        .collect::<Vec<_>>()
-                        .join(" ");
-                    writeln!(
-                        log,
-                        "{},{},{},{},{},{},{},{},{},{}",
-                        snaps,
-                        bus.cycles(),
-                        batch.len(),
-                        area.x,
-                        area.y,
-                        h_off,
-                        v_off,
-                        area.bpp24,
-                        tag,
-                        format!("env{env_before:?} {ops}")
-                    )
-                    .map_err(|e| e.to_string())?;
-                    *snaps += 1;
-                }
             }
         }
         // Advance on the editor's tick clock (see setup above), not on
@@ -1106,11 +830,6 @@ fn run_headless_launch(
                     &mut current_pulsed_button_mask,
                 );
             }
-        }
-        if args.sweep && current_guest_frames != sweep_frame {
-            sweep_frame = current_guest_frames;
-            let (rx, ry, lx, ly) = sweep_pad(current_guest_frames);
-            bus.set_port1_sticks(rx, ry, lx, ly);
         }
         if current_guest_frames != observed_guest_frames {
             if collect_profile_events {
@@ -1185,17 +904,6 @@ fn run_headless_launch(
         profile_log.add_events(&events, cpu.tick(), bus.cycles())?;
     }
     profile_log.finish(cpu.tick(), bus.cycles())?;
-    if let Some(path) = &args.pc_sample {
-        let mut rows: Vec<(u32, u32)> = pc_hist.into_iter().collect();
-        rows.sort_by(|a, b| b.1.cmp(&a.1));
-        let mut out = String::from("pc,count\n");
-        for (pc, n) in &rows {
-            out.push_str(&format!("0x{pc:08x},{n}\n"));
-        }
-        std::fs::write(path, out).map_err(|e| e.to_string())?;
-        let total: u64 = rows.iter().map(|(_, n)| *n as u64).sum();
-        println!("[cli] pc-sample → {} ({} samples, {} unique pcs)", path.display(), total, rows.len());
-    }
     visual_hash_log.flush()?;
     guest_hash_log.flush()?;
     counter_log.flush()?;
@@ -1929,13 +1637,9 @@ fn validation_launch_args(
         guest_frames: checkpoint.stop.guest_frames,
         guest_visual_frames: checkpoint.stop.guest_visual_frames,
         input_tape,
-        pc_sample: None,
-        pc_sample_every: 61,
-        pc_sample_from: 0,
         pad_pulses: None,
         embedded_playtest: artifact.embedded_playtest,
         bios_boot: artifact.bios_boot,
-        slow_pad: false,
         dump_hash: false,
         guest_debug_log: false,
         visual_hash_log: None,
@@ -1952,14 +1656,7 @@ fn validation_launch_args(
         dump_guest_profile: false,
         hold_forward: checkpoint.hold_forward,
         hold_run: checkpoint.hold_run,
-        sweep: false,
-        live_sim_dump: None,
-        live_sim_cycles: 287_000,
-        live_sim_from: 0,
-        live_sim_frames: 0,
-        live_sim_scale: 4,
         wireframe: false,
-        wireframe_from: None,
         texture_filter: "none".to_string(),
     }
 }
@@ -2097,29 +1794,12 @@ fn sync_pad_pulses(
     *current_mask = Some(next_mask);
 }
 
-/// Scripted DualShock state for `--sweep`, keyed on guest frame. Alternates
-/// ~180 frames rotating the camera in place (right stick) with ~180 frames
-/// walking forward (left stick), so a recorded window visits several positions
-/// and full rotations -- exercising multi-portal viewpoints a straight walk
-/// never reaches. Returns `(right_x, right_y, left_x, left_y)` in the DualShock
-/// 0x00..=0xFF byte convention (0x80 centered; left_y 0x00 = forward).
-fn sweep_pad(frame: u64) -> (u8, u8, u8, u8) {
-    if frame % 360 < 180 {
-        (0xFF, 0x80, 0x80, 0x80)
-    } else {
-        (0x80, 0x80, 0x80, 0x00)
-    }
-}
-
 fn hash_vram(bus: &Bus) -> u64 {
-    let mut hash = 0xCBF2_9CE4_8422_2325u64;
+    let mut h = psx_hw::hash::Fnv1a64::new();
     for &word in bus.gpu.vram.words() {
-        for byte in word.to_le_bytes() {
-            hash ^= byte as u64;
-            hash = hash.wrapping_mul(0x0100_0000_01B3);
-        }
+        h.update(&word.to_le_bytes());
     }
-    hash
+    h.finish()
 }
 
 struct DisplayHashLog {

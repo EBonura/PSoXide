@@ -1,14 +1,11 @@
-//! Host-side mirror of the CPU rasterizer's silicon-matched triangle
-//! coverage and attribute interpolation
-//! (`emulator-core/src/gpu.rs::for_each_tri_pixel`).
+//! Compute-shader encoding of the CPU rasterizer's triangle setup.
 //!
-//! The CPU rasterizer was re-tuned to real PS1 silicon (hardware-tests
-//! GPU read-back battery, ledger HWB-006): coverage is the
-//! center-sampled Mednafen/DuckStation DDA walked in Q32.32, and
-//! attributes (R/G/B/U/V) come from a determinant-plane equation
-//! evaluated per pixel in wrapping u32 arithmetic with a top-left
-//! anchor. This module re-runs exactly that setup on the host and
-//! ships two things to the compute shader:
+//! Coverage and attribute planes come from
+//! `emulator_core::gpu::tri_raster_setup` -- the SAME function the
+//! CPU's flat and attribute-interpolating walkers consume, so the GPU
+//! result is bit-exact by construction (it is not a hand-synced copy;
+//! it used to be, and drifted). This module only reshapes that setup
+//! for the shader:
 //!
 //! - one [`RowState`] per covered scanline: the `[left_x, right_x)`
 //!   span the DDA produced (right-exclusive, unclamped -- the shader
@@ -16,14 +13,7 @@
 //! - one [`ScanlineConsts`]: the five attribute planes as
 //!   `(dadx, dady, base)` u32 triples, where
 //!   `attr(x, y) = (base + x*dadx + y*dady) >> 24` in wrapping u32
-//!   math -- the same `eval` the CPU runs per pixel, so the GPU result
-//!   is bit-exact by construction.
-//!
-//! **DO NOT MODIFY** the math here without keeping
-//! `emulator-core::gpu::for_each_tri_pixel` (and the flat
-//! `rasterize_triangle` DDA) in sync -- the anchor selection, the
-//! half-pixel edge bias and the step rounding were all verified
-//! against recorded silicon hashes.
+//!   math -- the same `tri_plane_eval` the CPU runs per pixel.
 
 use bytemuck::{Pod, Zeroable};
 
@@ -102,132 +92,20 @@ pub fn build_setup(
     rgb: [(i32, i32, i32); 3],
     require_attrs: bool,
 ) -> Option<ScanlineSetup> {
-    let mut v = v;
-    let mut rgb = rgb;
-    let mut uv = uv;
+    let setup = emulator_core::gpu::tri_raster_setup(v, rgb, uv, require_attrs)?;
+    let [pr, pg, pb, pu, pv] = setup.planes;
 
-    // Top-left vertex (attribute-interpolation anchor): computed from
-    // the ORIGINAL vertex order, then carried through the Y-sort
-    // swaps. Mirrors `for_each_tri_pixel` exactly.
-    let (o0, o1, o2) = (v[0], v[1], v[2]);
-    let mut tl: u32 = if o1.0 <= o0.0 {
-        if o2.0 <= o1.0 {
-            4
-        } else {
-            2
-        }
-    } else if o2.0 < o0.0 {
-        4
-    } else {
-        1
-    };
-    macro_rules! swap_attr {
-        ($i:expr, $j:expr) => {{
-            v.swap($i, $j);
-            rgb.swap($i, $j);
-            uv.swap($i, $j);
-        }};
-    }
-    if v[2].1 < v[1].1 {
-        swap_attr!(2, 1);
-        tl = ((tl >> 1) & 0x2) | ((tl << 1) & 0x4) | (tl & 0x1);
-    }
-    if v[1].1 < v[0].1 {
-        swap_attr!(1, 0);
-        tl = ((tl >> 1) & 0x1) | ((tl << 1) & 0x2) | (tl & 0x4);
-    }
-    if v[2].1 < v[1].1 {
-        swap_attr!(2, 1);
-        tl = ((tl >> 1) & 0x2) | ((tl << 1) & 0x4) | (tl & 0x1);
-    }
-    let tl = (tl >> 1) as usize;
-
-    let (a, b, c) = (v[0], v[1], v[2]); // sorted top, middle, bottom by Y
-    if a.1 == c.1 {
-        return None; // zero vertical extent
-    }
-    let det =
-        ((b.0 - a.0) as i64) * ((c.1 - b.1) as i64) - ((c.0 - b.0) as i64) * ((b.1 - a.1) as i64);
-    if require_attrs && det == 0 {
-        return None;
-    }
-
-    // Determinant-plane for one attribute channel -> (dadx, dady,
-    // base), where attr(x, y) = (base + x*dadx + y*dady) >> 24 (low
-    // byte). u32 wrapping math, identical to the CPU's `mk`. For the
-    // mono path with det == 0 the planes are never read; emit zeros.
-    let anchor = v[tl];
-    let mk = |a0: i32, a1: i32, a2: i32, anchor_a: i32| -> (u32, u32, u32) {
-        if det == 0 {
-            return (0, 0, 0);
-        }
-        let num_dx =
-            ((a1 - a0) as i64) * ((c.1 - b.1) as i64) - ((a2 - a1) as i64) * ((b.1 - a.1) as i64);
-        let num_dy =
-            ((b.0 - a.0) as i64) * ((a2 - a1) as i64) - ((c.0 - b.0) as i64) * ((a1 - a0) as i64);
-        let dadx = ((num_dx * 4096 / det) as u32).wrapping_shl(12);
-        let dady = ((num_dy * 4096 / det) as u32).wrapping_shl(12);
-        let base = ((anchor_a as u32) << 24)
-            .wrapping_add(1u32 << 23)
-            .wrapping_sub((anchor.0 as u32).wrapping_mul(dadx))
-            .wrapping_sub((anchor.1 as u32).wrapping_mul(dady));
-        (dadx, dady, base)
-    };
-    let pr = mk(rgb[0].0, rgb[1].0, rgb[2].0, rgb[tl].0);
-    let pg = mk(rgb[0].1, rgb[1].1, rgb[2].1, rgb[tl].1);
-    let pb = mk(rgb[0].2, rgb[1].2, rgb[2].2, rgb[tl].2);
-    let pu = mk(uv[0].0, uv[1].0, uv[2].0, uv[tl].0);
-    let pv = mk(uv[0].1, uv[1].1, uv[2].1, uv[tl].1);
-
-    // Center-sampled coverage DDA, Q32.32 (identical to the CPU).
-    let makefp = |x: i32| -> i64 { ((x as i64) << 32) + ((1i64 << 32) - (1 << 11)) };
-    let makestep = |dx: i32, dy: i32| -> i64 {
-        let bias = if dx < 0 {
-            -((dy - 1) as i64)
-        } else if dx > 0 {
-            (dy - 1) as i64
-        } else {
-            0
-        };
-        (((dx as i64) << 32) + bias) / (dy as i64)
-    };
-    let unfp = |xfp: i64| -> i32 { (xfp >> 32) as i32 };
-    let base_coord = makefp(a.0);
-    let base_step = makestep(c.0 - a.0, c.1 - a.1);
-    let bound_us = if b.1 == a.1 {
-        0
-    } else {
-        makestep(b.0 - a.0, b.1 - a.1)
-    };
-    let bound_ls = if c.1 == b.1 {
-        0
-    } else {
-        makestep(c.0 - b.0, c.1 - b.1)
-    };
-    let right_facing = if b.1 == a.1 {
-        b.0 > a.0
-    } else {
-        bound_us > base_step
-    };
-    let long_at_b = base_coord + ((b.1 - a.1) as i64) * base_step;
-    let parts: [(i32, i32, i64, i64, i64, i64); 2] = if right_facing {
-        [
-            (a.1, b.1, base_coord, base_step, makefp(a.0), bound_us),
-            (b.1, c.1, long_at_b, base_step, makefp(b.0), bound_ls),
-        ]
-    } else {
-        [
-            (a.1, b.1, makefp(a.0), bound_us, base_coord, base_step),
-            (b.1, c.1, makefp(b.0), bound_ls, long_at_b, base_step),
-        ]
-    };
-    let mut rows = Vec::with_capacity((c.1 - a.1) as usize);
-    for (y0, y1, mut lx, ls, mut rx, rs) in parts {
+    // One RowState per covered scanline, in the exact order the CPU
+    // walks them: segment 0 (top..mid), then segment 1 (mid..bottom).
+    let y_min = setup.parts[0].0;
+    let y_max = setup.parts[1].1 - 1;
+    let mut rows = Vec::with_capacity((y_max - y_min + 1).max(0) as usize);
+    for (y0, y1, mut lx, ls, mut rx, rs) in setup.parts {
         let mut y = y0;
         while y < y1 {
             rows.push(RowState {
-                left_x: unfp(lx),
-                right_x: unfp(rx),
+                left_x: emulator_core::gpu::tri_span_x(lx),
+                right_x: emulator_core::gpu::tri_span_x(rx),
             });
             lx += ls;
             rx += rs;
@@ -238,8 +116,8 @@ pub fn build_setup(
     Some(ScanlineSetup {
         rows,
         consts: ScanlineConsts {
-            y_min: a.1,
-            y_max: c.1 - 1,
+            y_min,
+            y_max,
             _pad0: 0,
             _pad1: 0,
             r_dadx: pr.0,
