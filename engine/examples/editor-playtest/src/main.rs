@@ -128,6 +128,7 @@ mod playtest_runtime;
 mod playtest_scene;
 mod playtest_update;
 mod room_lighting_runtime;
+mod runtime_arenas;
 mod runtime_config;
 mod runtime_schedule;
 mod sky_runtime;
@@ -147,6 +148,7 @@ use model_rendering::*;
 use overlay::*;
 use particle_runtime::*;
 use room_lighting_runtime::*;
+use runtime_arenas::*;
 use runtime_config::*;
 use runtime_schedule::RUNTIME_SCHEDULE;
 use sky_runtime::*;
@@ -184,16 +186,6 @@ use generated::{GAME_FLOW, OPTIONS, UI_SCENES};
 ))]
 use generated::{VISIBILITY_PVS, VISIBILITY_PVS_BITS};
 
-// Prebuilt room-quad pool (docs/perf-30fps.md): precompiled GP0(3Ch)
-// packets for static room surfaces. The pool policy and full docs live
-// on `psx_game_runtime::room_cache::PrebuiltRoomQuads`; this is the
-// example's one instance, in static storage outside the per-frame
-// arena (the present flip's DMA drain makes in-place patching safe).
-static mut PREBUILT_ROOM_QUADS: psx_game_runtime::room_cache::PrebuiltRoomQuads<
-    PREBUILT_ROOM_QUAD_SLOTS,
-    PREBUILT_ROOM_QUAD_CAP,
-> = psx_game_runtime::room_cache::PrebuiltRoomQuads::EMPTY;
-
 static mut OT: OrderingTable<OT_DEPTH> = OrderingTable::new();
 static mut PRIMITIVE_PACKETS: PrimitivePacketScratch<MAX_TEXTURED_TRIS> =
     PrimitivePacketScratch::ZERO;
@@ -213,24 +205,6 @@ static mut CACHED_ROOM_ACCEPTED_CELL_INDICES: [u16; MAX_PRECOMPUTED_VISIBLE_CELL
 #[cfg(feature = "world-grid-visible")]
 static mut CACHED_ROOM_ACCEPTED_CELL_DEPTHS: [i32; MAX_PRECOMPUTED_VISIBLE_CELLS] =
     [0; MAX_PRECOMPUTED_VISIBLE_CELLS];
-// Streamed-room slot buffers live on
-// `psx_game_runtime::room_streaming::StreamedRoomSlots`; this is the
-// example's one instance, in static storage (zero-init, so it stays in
-// `.bss`) next to the scheduler that loads into it.
-#[cfg(feature = "cd-stream-bench")]
-static mut STREAMED_ROOM_SLOTS: StreamedRoomSlots<
-    STREAMED_ROOM_SLOT_WORDS,
-    STREAMED_ROOM_SLOT_COUNT,
-> = StreamedRoomSlots::new();
-// Streamed-room scheduler policy lives on
-// `psx_game_runtime::room_streaming::RoomStreamScheduler`; this is the
-// example's one instance, in static storage next to the slot word
-// buffers it schedules into.
-#[cfg(feature = "cd-stream-bench")]
-static mut ROOM_STREAM_SCHEDULER: RoomStreamScheduler<
-    STREAMED_ROOM_SLOT_COUNT,
-    MAX_STREAMED_ROOM_INDEX_COUNT,
-> = RoomStreamScheduler::new();
 static mut MODEL_VERTICES: [ProjectedVertex; MODEL_VERTEX_CAP] =
     [ProjectedVertex::new(0, 0, 0); MODEL_VERTEX_CAP];
 static mut JOINT_VIEW_TRANSFORMS: [JointViewTransform; JOINT_CAP] =
@@ -877,6 +851,9 @@ fn main() -> ! {
     // corrupting `static` buffers at runtime.
     #[cfg(target_arch = "mips")]
     psx_rt::assert_stack_headroom();
+    // Stamp the runtime arenas' initial state onto their link-time-zero
+    // storage before anything can touch them (see `runtime_arenas`).
+    init_runtime_arenas();
     game_trace("editor-playtest: init ok");
     let video_mode = VideoMode::Ntsc;
     let config = Config {

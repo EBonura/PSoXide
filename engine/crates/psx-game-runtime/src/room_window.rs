@@ -25,6 +25,23 @@ pub struct RoomWindowStep {
     pub current_active: Option<ActiveRuntimeRoom>,
 }
 
+/// Outcome of a synchronous [`RoomWindow::rebuild_from_visible`].
+pub struct RoomWindowRebuild {
+    /// Staged room count (the next free window slot).
+    pub next_slot: usize,
+    /// The freshly built current room, when the rebuild produced it.
+    pub current_active: Option<ActiveRuntimeRoom>,
+}
+
+/// Whether a staged room is drawable enough to occupy a window slot.
+/// The shared accept policy of [`RoomWindow::step_job`] and the
+/// synchronous rebuild/preload paths: the first requested room (the
+/// current room) is always accepted; any other room must carry a
+/// render payload or a ready surface cache.
+fn staged_room_accepted(active: &ActiveRuntimeRoom, first_requested: bool) -> bool {
+    first_requested || active.render_room.is_some() || active.surface_cache.ready
+}
+
 /// Owned active-room window state: the resident draw window, the
 /// incremental rebuild job staged against it, the player anchor the
 /// latest window request ran for, and the skipped-build diagnostics.
@@ -198,11 +215,7 @@ impl<const MAX_ACTIVE_ROOMS: usize> RoomWindow<MAX_ACTIVE_ROOMS> {
                     continue;
                 };
                 match build(job.next_slot, index, record, &job.previous_rooms) {
-                    Some(active)
-                        if job.cursor == 0
-                            || active.render_room.is_some()
-                            || active.surface_cache.ready =>
-                    {
+                    Some(active) if staged_room_accepted(&active, job.cursor == 0) => {
                         job.rooms[job.next_slot] = Some(active);
                         if active.index == current_room {
                             current_active = Some(active);
@@ -231,6 +244,164 @@ impl<const MAX_ACTIVE_ROOMS: usize> RoomWindow<MAX_ACTIVE_ROOMS> {
             unbuilt_room,
             current_active,
         }
+    }
+
+    /// Build `visible_rooms` into the live window with the shared
+    /// accept/skip/block policy (see [`staged_room_accepted`]): a
+    /// skipped room counts a cache skip, a failed build reports through
+    /// `mark_unbuilt`, and a failed FIRST visible room stops the pass
+    /// (nothing closer can unblock it). Returns the freshly built
+    /// current room, if this pass produced it.
+    fn stage_visible_rooms(
+        &mut self,
+        rooms: &'static [LevelRoomRecord],
+        visible_rooms: &[RoomIndex],
+        current_room: RoomIndex,
+        skip_room: Option<RoomIndex>,
+        slot_cap: usize,
+        next_slot: &mut usize,
+        previous_rooms: &[Option<ActiveRuntimeRoom>; MAX_ACTIVE_ROOMS],
+        build: &mut impl FnMut(
+            usize,
+            RoomIndex,
+            &'static LevelRoomRecord,
+            &[Option<ActiveRuntimeRoom>; MAX_ACTIVE_ROOMS],
+        ) -> Option<ActiveRuntimeRoom>,
+        mark_unbuilt: &mut impl FnMut(RoomIndex),
+    ) -> Option<ActiveRuntimeRoom> {
+        let mut current_active = None;
+        let mut visible_slot = 0usize;
+        while visible_slot < visible_rooms.len() && *next_slot < slot_cap.min(MAX_ACTIVE_ROOMS) {
+            let index = visible_rooms[visible_slot];
+            if skip_room == Some(index) {
+                visible_slot += 1;
+                continue;
+            }
+            let Some(record) = rooms.get(index.to_usize()) else {
+                visible_slot += 1;
+                continue;
+            };
+            match build(*next_slot, index, record, previous_rooms) {
+                Some(active) if staged_room_accepted(&active, visible_slot == 0) => {
+                    if active.index == current_room {
+                        current_active = Some(active);
+                    }
+                    self.rooms[*next_slot] = Some(active);
+                    *next_slot += 1;
+                }
+                Some(_) => {
+                    self.cache_skips = self.cache_skips.saturating_add(1);
+                }
+                None => {
+                    mark_unbuilt(index);
+                    if visible_slot == 0 {
+                        break;
+                    }
+                }
+            }
+            visible_slot += 1;
+        }
+        current_active
+    }
+
+    /// Synchronous full-window rebuild over the frustum-visible room
+    /// list: reset the window, stage every drawable visible room
+    /// eagerly, and fall back to building the current room alone when
+    /// the visible pass did not produce it (collision must never go
+    /// missing). The caller applies `current_active`'s fields, retains
+    /// previous rooms, and owns its diagnostics through `mark_unbuilt`.
+    pub fn rebuild_from_visible(
+        &mut self,
+        rooms: &'static [LevelRoomRecord],
+        visible_rooms: &[RoomIndex],
+        current_room: RoomIndex,
+        current_record: &'static LevelRoomRecord,
+        anchor: RoomPoint,
+        previous_rooms: &[Option<ActiveRuntimeRoom>; MAX_ACTIVE_ROOMS],
+        mut build: impl FnMut(
+            usize,
+            RoomIndex,
+            &'static LevelRoomRecord,
+            &[Option<ActiveRuntimeRoom>; MAX_ACTIVE_ROOMS],
+        ) -> Option<ActiveRuntimeRoom>,
+        mut mark_unbuilt: impl FnMut(RoomIndex),
+    ) -> RoomWindowRebuild {
+        self.rooms = [const { None }; MAX_ACTIVE_ROOMS];
+        self.cache_skips = 0;
+        self.anchor = anchor;
+        let mut next_slot = 0usize;
+        let mut current_active = self.stage_visible_rooms(
+            rooms,
+            visible_rooms,
+            current_room,
+            None,
+            MAX_ACTIVE_ROOMS,
+            &mut next_slot,
+            previous_rooms,
+            &mut build,
+            &mut mark_unbuilt,
+        );
+        // The visible pass did not build the current room (not listed,
+        // or its build failed): try it alone so collision stays live.
+        if current_active.is_none() && next_slot < MAX_ACTIVE_ROOMS {
+            if let Some(active) = build(next_slot, current_room, current_record, previous_rooms) {
+                current_active = Some(active);
+                self.rooms[next_slot] = Some(active);
+                next_slot += 1;
+            }
+        }
+        RoomWindowRebuild {
+            next_slot,
+            current_active,
+        }
+    }
+
+    /// Synchronous window rebuild for the streamed preload path: the
+    /// current room builds first (accepted regardless of drawability),
+    /// then the visible list fills the remaining slots up to
+    /// `active_limit`, skipping the current room. Returns the next free
+    /// window slot; the caller retains previous rooms and re-applies its
+    /// current-room fields from the landed window.
+    pub fn preload_from_visible(
+        &mut self,
+        rooms: &'static [LevelRoomRecord],
+        visible_rooms: &[RoomIndex],
+        current_room: RoomIndex,
+        current_record: &'static LevelRoomRecord,
+        active_limit: usize,
+        previous_rooms: &[Option<ActiveRuntimeRoom>; MAX_ACTIVE_ROOMS],
+        mut build: impl FnMut(
+            usize,
+            RoomIndex,
+            &'static LevelRoomRecord,
+            &[Option<ActiveRuntimeRoom>; MAX_ACTIVE_ROOMS],
+        ) -> Option<ActiveRuntimeRoom>,
+        mut mark_unbuilt: impl FnMut(RoomIndex),
+    ) -> usize {
+        self.rooms = [const { None }; MAX_ACTIVE_ROOMS];
+        let active_limit = active_limit.min(MAX_ACTIVE_ROOMS);
+        let mut next_slot = 0usize;
+        if next_slot < active_limit {
+            match build(next_slot, current_room, current_record, previous_rooms) {
+                Some(active) => {
+                    self.rooms[next_slot] = Some(active);
+                    next_slot += 1;
+                }
+                None => mark_unbuilt(current_room),
+            }
+        }
+        let _ = self.stage_visible_rooms(
+            rooms,
+            visible_rooms,
+            current_room,
+            Some(current_room),
+            active_limit,
+            &mut next_slot,
+            previous_rooms,
+            &mut build,
+            &mut mark_unbuilt,
+        );
+        next_slot
     }
 
     /// When the pending job has consumed its request list (or filled the

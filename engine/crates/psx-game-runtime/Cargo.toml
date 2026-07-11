@@ -11,6 +11,12 @@ description = "PSoXide game layer: streaming/residency/VRAM policy and (in later
 # it): room-surface materials pool by resident stream slot instead of
 # living inline in `ActiveRuntimeRoom`.
 cd-stream-bench = []
+# CD throughput probe (`cd_stream::run_benchmark`). Declared here since
+# phase 1.5: the module carried its `cd-stream-benchmark` cfgs from the
+# example verbatim in the phase-1 carve, but the crate never declared
+# the feature, so the probe silently compiled out (and every cfg warned)
+# until the game's own feature forwarded it again.
+cd-stream-benchmark = ["cd-stream-bench"]
 
 [dependencies]
 # Explicit paths, same rationale as psx-engine: resolvable when
