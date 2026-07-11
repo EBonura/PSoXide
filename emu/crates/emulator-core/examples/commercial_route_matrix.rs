@@ -13,12 +13,12 @@
 //!   --report-dir target/commercial-route-matrix/local-300m
 //! ```
 
+#[path = "support/args.rs"]
+mod args_support;
 #[path = "support/disc.rs"]
 mod disc_support;
 #[path = "support/pad.rs"]
 mod pad_support;
-#[path = "support/args.rs"]
-mod args_support;
 
 use args_support::{take_path, take_u64, take_usize};
 

@@ -145,7 +145,6 @@ impl ConfigPaths {
             .join(format!("memcard-{clamped}.mcd"))
     }
 
-
     /// Ensure `dir` exists as a directory, creating parents as
     /// needed. Idempotent. Errors are wrapped with the path so
     /// callers can include it in user messages.

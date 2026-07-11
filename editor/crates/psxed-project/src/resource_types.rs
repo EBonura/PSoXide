@@ -973,7 +973,6 @@ impl ModelResource {
             .unwrap_or(MODEL_SCALE_ONE_Q8) as f32
             / MODEL_SCALE_ONE_Q8 as f32
     }
-
 }
 
 /// Gameplay metadata layered on top of a Model. The Model owns
@@ -1092,7 +1091,6 @@ impl CharacterResource {
             camera_target_height: 640,
         }
     }
-
 }
 
 pub(crate) const fn default_character_stamina_max_q12() -> i32 {

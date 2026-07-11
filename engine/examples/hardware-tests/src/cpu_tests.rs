@@ -653,10 +653,12 @@ pub(super) fn emulate_cpu_i(instr: u32, rs_value: u32) -> u32 {
 pub(super) fn emulate_cpu_hilo(instr: u32, rs_value: u32, rt_value: u32) -> (u32, u32) {
     match instr & 0x3F {
         0x18 => {
+            // psx-numeric-allow-next-line: MULT test computes the reference 64-bit product on purpose
             let value = (rs_value as i32 as i64).wrapping_mul(rt_value as i32 as i64);
             (value as u32, (value >> 32) as u32)
         }
         0x19 => {
+            // psx-numeric-allow-next-line: MULTU test computes the reference 64-bit product on purpose
             let value = (rs_value as u64).wrapping_mul(rt_value as u64);
             (value as u32, (value >> 32) as u32)
         }

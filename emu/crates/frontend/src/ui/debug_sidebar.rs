@@ -34,7 +34,9 @@ pub fn draw(ctx: &egui::Context, state: &mut AppState, vram_tex: egui::TextureId
         return;
     }
     let animating = t < 0.998;
-    let target = state.sidebar_width.clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
+    let target = state
+        .sidebar_width
+        .clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
     let panel_fill = ctx.style().visuals.panel_fill;
     let separator = ctx.style().visuals.widgets.noninteractive.bg_stroke;
 
@@ -58,11 +60,13 @@ pub fn draw(ctx: &egui::Context, state: &mut AppState, vram_tex: egui::TextureId
             .vline(panel_rect.left() + 0.5, panel_rect.y_range(), separator);
         // Anchor content at full width so a narrow (animating) panel clips it
         // rather than reflowing; at rest it just fills the panel exactly.
-        let content_w = if animating { target } else { panel_rect.width() };
-        let content_rect = Rect::from_min_size(
-            panel_rect.min,
-            egui::vec2(content_w, panel_rect.height()),
-        );
+        let content_w = if animating {
+            target
+        } else {
+            panel_rect.width()
+        };
+        let content_rect =
+            Rect::from_min_size(panel_rect.min, egui::vec2(content_w, panel_rect.height()));
         ui.scope_builder(
             UiBuilder::new()
                 .max_rect(content_rect.shrink(SIDEBAR_PAD))

@@ -202,11 +202,14 @@ impl UiResolvedNode {
 }
 
 fn mul_q12(a: i32, b_q12: i32) -> i32 {
+    // psx-numeric-allow-next-line: Q12 multiply widens through i64; R3000 mult yields the 64-bit product natively
     ((i64::from(a) * i64::from(b_q12)) >> 12).clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
 }
 
 fn mul_scale_q8_to_i16(value_q12: i32, scale_q8: u16) -> i16 {
+    // psx-numeric-allow-next-line: Q12 scale widens through i64; R3000 mult yields the 64-bit product natively
     ((i64::from(value_q12) * i64::from(scale_q8)) >> 8)
+        // psx-numeric-allow-next-line: Q12 clamp widens through i64; R3000 mult yields the 64-bit product natively
         .clamp(i64::from(i16::MIN), i64::from(i16::MAX)) as i16
 }
 
@@ -582,8 +585,18 @@ fn draw_focus_corners(
     draw_quad_flat(node.subrect(-e, height + d - 1, len, t), r, g, b);
     draw_quad_flat(node.subrect(-e, height + e - len, t, len), r, g, b);
     // Bottom-right.
-    draw_quad_flat(node.subrect(width + e - len, height + d - 1, len, t), r, g, b);
-    draw_quad_flat(node.subrect(width + d - 1, height + e - len, t, len), r, g, b);
+    draw_quad_flat(
+        node.subrect(width + e - len, height + d - 1, len, t),
+        r,
+        g,
+        b,
+    );
+    draw_quad_flat(
+        node.subrect(width + d - 1, height + e - len, t, len),
+        r,
+        g,
+        b,
+    );
 }
 
 /// Number of comet segments behind the tracer head; each one steps
@@ -620,8 +633,7 @@ fn draw_focus_tracer(
         let color = lerp_color(style.color_a, style.color_b, brightness);
         let start = (head - (k + 1) * seg).rem_euclid(perimeter);
         draw_perimeter_run(
-            node, width, height, thickness, margin, perimeter, outer_w, outer_h, start, seg,
-            color,
+            node, width, height, thickness, margin, perimeter, outer_w, outer_h, start, seg, color,
         );
     }
 }
