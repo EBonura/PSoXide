@@ -446,7 +446,7 @@ impl Playtest {
             // 'static slice contract).
             const CAMERA_ROOM_CACHE_QUANTUM: i32 = 512;
             #[cfg(feature = "cd-stream-bench")]
-            let resident_mask = unsafe { ROOM_STREAM_SCHEDULER.resident_room_mask() };
+            let resident_mask = room_streams_arena().resident_room_mask();
             #[cfg(not(feature = "cd-stream-bench"))]
             let resident_mask = RuntimeDebugMask::EMPTY;
             let key = (

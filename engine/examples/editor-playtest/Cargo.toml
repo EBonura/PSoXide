@@ -33,7 +33,7 @@ default = [
     "vis-anchor-pvs-candidates",
 ]
 cd-stream-bench = ["dep:psx-io", "psx-game-runtime/cd-stream-bench"]
-cd-stream-benchmark = ["cd-stream-bench"]
+cd-stream-benchmark = ["cd-stream-bench", "psx-game-runtime/cd-stream-benchmark"]
 boot-trace = ["psx-engine/boot-trace", "psx-rt/boot-trace"]
 emulator-telemetry = ["psx-engine/emulator-telemetry"]
 hardware-boot-visual = ["psx-engine/hardware-boot-visual"]

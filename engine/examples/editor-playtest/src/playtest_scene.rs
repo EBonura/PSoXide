@@ -995,20 +995,21 @@ impl Scene for Playtest {
             );
             self.emit_portal_visibility_counters();
             #[cfg(feature = "cd-stream-bench")]
-            unsafe {
+            {
+                let room_streams = room_streams_arena();
                 telemetry::counter(
                     telemetry::counter::ROOM_STREAM_RESIDENT_SLOTS,
-                    ROOM_STREAM_SCHEDULER.resident_slot_count() as u32,
+                    room_streams.resident_slot_count() as u32,
                 );
                 emit_room_chunk_mask(
                     telemetry::counter::ROOM_STREAM_LOADING_MASK_LO,
                     telemetry::counter::ROOM_STREAM_LOADING_MASK_HI,
-                    ROOM_STREAM_SCHEDULER.loading_room_mask(),
+                    room_streams.loading_room_mask(),
                 );
                 emit_room_chunk_mask(
                     telemetry::counter::ROOM_STREAM_RESIDENT_MASK_LO,
                     telemetry::counter::ROOM_STREAM_RESIDENT_MASK_HI,
-                    ROOM_STREAM_SCHEDULER.resident_room_mask(),
+                    room_streams.resident_room_mask(),
                 );
             }
             telemetry::counter(telemetry::counter::ROOM_CACHED_DRAWS, room_cached_draws);
