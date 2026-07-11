@@ -1,105 +1,32 @@
+//! Glue over `psx_game_runtime::room_cache`: re-exports the window
+//! vocabulary, threads the cooked manifest tables and VRAM-layout
+//! consts into the crate, and keeps the streamed-slot resolution and
+//! build orchestration (residency, streaming, lighting) here until
+//! those modules move in the next slices. The example holds the crate
+//! pool structs as its usual `static mut` instances (phase 1.5 cleans
+//! that style up).
+
 use super::*;
+use psx_game_runtime::room_cache;
 
-#[derive(Copy, Clone)]
-pub(super) struct ActiveRoomSurfaceCache {
-    pub(super) cell_first: usize,
-    pub(super) cell_count: usize,
-    pub(super) cell_vertex_first: usize,
-    pub(super) cell_vertex_count: usize,
-    pub(super) vertex_first: usize,
-    pub(super) vertex_count: usize,
-    pub(super) surface_first: usize,
-    pub(super) surface_count: usize,
-    pub(super) status: ActiveRoomCacheStatus,
-    pub(super) ready: bool,
-}
+pub(super) use psx_game_runtime::room_cache::{
+    active_surface_cache_failed, ActiveRoomCacheStatus, ActiveRoomSurfaceCache, ActiveRuntimeRoom,
+};
 
-impl ActiveRoomSurfaceCache {
-    pub(super) const EMPTY: Self = Self {
-        cell_first: 0,
-        cell_count: 0,
-        cell_vertex_first: 0,
-        cell_vertex_count: 0,
-        vertex_first: 0,
-        vertex_count: 0,
-        surface_first: 0,
-        surface_count: 0,
-        status: ActiveRoomCacheStatus::NotBuilt,
-        ready: false,
-    };
-}
+/// The crate window-job record instantiated with this example's window
+/// capacity.
+pub(super) type ActiveRoomWindowJob = room_cache::ActiveRoomWindowJob<MAX_ACTIVE_ROOMS>;
 
-#[derive(Copy, Clone, PartialEq, Eq)]
-pub(super) enum ActiveRoomCacheStatus {
-    Ready,
-    NotBuilt,
-    Overflow,
-    Empty,
-}
-
-#[derive(Copy, Clone)]
-pub(super) struct ActiveRuntimeRoom {
-    pub(super) index: RoomIndex,
-    pub(super) stream_slot: u16,
-    pub(super) render_room: Option<RuntimeRoom<'static>>,
-    pub(super) collision_room: RuntimeCollisionRoom<'static>,
-    pub(super) width: u16,
-    pub(super) depth: u16,
-    pub(super) sector_size: i32,
-    pub(super) ambient_rgb: [u8; 3],
-    /// Non-streamed builds keep materials inline; streamed builds pool them by
-    /// `stream_slot` (see [`ROOM_MATERIAL_POOL`]) to keep this struct small.
-    #[cfg(not(feature = "cd-stream-bench"))]
-    pub(super) materials: [WorldRenderMaterial; MAX_ROOM_MATERIALS],
-    #[cfg(not(feature = "cd-stream-bench"))]
-    pub(super) material_count: usize,
-    /// Offset from the current chunk's origin to this chunk's
-    /// origin, in engine units.
-    pub(super) offset_x: i32,
-    pub(super) offset_z: i32,
-    /// Vertical offset from the current room's elevation to this room's,
-    /// in engine units. Stacked floors cook to distinct `origin_y`; this
-    /// places the room's geometry at its real height relative to the
-    /// camera so an upper floor renders a storey up, not on top of the
-    /// current one at Y=0.
-    pub(super) offset_y: i32,
-    pub(super) surface_cache: ActiveRoomSurfaceCache,
-}
-
-impl ActiveRuntimeRoom {
-    pub(super) fn render(&self) -> Option<RoomRender<'static, '_>> {
-        self.render_room.as_ref().map(|room| room.render())
+/// In-use room-surface materials. Streamed builds read the
+/// `stream_slot` pool; non-streamed builds read the inline array.
+pub(super) fn active_room_materials(active: &ActiveRuntimeRoom) -> &[WorldRenderMaterial] {
+    #[cfg(feature = "cd-stream-bench")]
+    {
+        active.materials(unsafe { &*core::ptr::addr_of!(ROOM_MATERIAL_POOL) })
     }
-
-    /// In-use room-surface materials. Streamed builds read the `stream_slot`
-    /// pool; non-streamed builds read the inline array.
-    pub(super) fn materials(&self) -> &[WorldRenderMaterial] {
-        #[cfg(feature = "cd-stream-bench")]
-        {
-            let slot = self.stream_slot as usize;
-            if slot < STREAMED_ROOM_SLOT_COUNT {
-                let pool = unsafe { &*core::ptr::addr_of!(ROOM_MATERIAL_POOL) };
-                return &pool[slot].materials[..pool[slot].count];
-            }
-            &[]
-        }
-        #[cfg(not(feature = "cd-stream-bench"))]
-        {
-            &self.materials[..self.material_count]
-        }
-    }
-
-    pub(super) fn with_current_room_offsets(
-        mut self,
-        record: &LevelRoomRecord,
-        current_record: &LevelRoomRecord,
-    ) -> Self {
-        self.offset_x = room_origin_x(record).saturating_sub(room_origin_x(current_record));
-        self.offset_z = room_origin_z(record).saturating_sub(room_origin_z(current_record));
-        // `origin_y` is absolute engine units (not sector-scaled like
-        // x/z), so the vertical offset is a plain record difference.
-        self.offset_y = record.origin_y.saturating_sub(current_record.origin_y);
-        self
+    #[cfg(not(feature = "cd-stream-bench"))]
+    {
+        active.materials()
     }
 }
 
@@ -140,36 +67,8 @@ impl ActiveVisibleCellCache {
     };
 }
 
-#[derive(Copy, Clone)]
-pub(super) struct ActiveRoomWindowJob {
-    pub(super) active: bool,
-    pub(super) update_streaming: bool,
-    pub(super) current_room: RoomIndex,
-    pub(super) requested_rooms: [RoomIndex; MAX_ACTIVE_ROOMS],
-    pub(super) requested_count: usize,
-    pub(super) cursor: usize,
-    pub(super) next_slot: usize,
-    pub(super) rooms: [Option<ActiveRuntimeRoom>; MAX_ACTIVE_ROOMS],
-    pub(super) previous_rooms: [Option<ActiveRuntimeRoom>; MAX_ACTIVE_ROOMS],
-}
-
-impl ActiveRoomWindowJob {
-    pub(super) const EMPTY: Self = Self {
-        active: false,
-        update_streaming: false,
-        current_room: RoomIndex::ZERO,
-        requested_rooms: [INVALID_ROOM_INDEX; MAX_ACTIVE_ROOMS],
-        requested_count: 0,
-        cursor: 0,
-        next_slot: 0,
-        rooms: [const { None }; MAX_ACTIVE_ROOMS],
-        previous_rooms: [const { None }; MAX_ACTIVE_ROOMS],
-    };
-}
-
 pub(super) fn parse_runtime_room(record: &LevelRoomRecord) -> Option<RuntimeRoom<'static>> {
-    let asset = find_asset_of_kind(ASSETS, record.world_asset, AssetKind::RoomWorld)?;
-    RuntimeRoom::from_bytes(asset.bytes).ok()
+    room_cache::parse_runtime_room(ASSETS, record)
 }
 
 pub(super) fn parse_collision_room_for_index(
@@ -234,30 +133,14 @@ fn parse_active_room_payload(
     }
 }
 
-// Retained after the BFS-ring residency rewrite (the desired-set is now copied
-// from the cached stream ring); kept for other build paths / future reuse.
+/// This example's untextured fallback, on its shared room tpage.
 pub(super) const fn room_material_fallback() -> WorldRenderMaterial {
-    WorldRenderMaterial::both(TextureMaterial::opaque(0, TPAGE_WORD, (0x80, 0x80, 0x80)))
-}
-
-/// Refactor B: room-surface materials live in a pool keyed by the resident
-/// `stream_slot` rather than inline in `ActiveRuntimeRoom`, so the per-crossing
-/// copy of the `[ActiveRuntimeRoom; MAX_ACTIVE_ROOMS]` window stays small. An
-/// entry is (re)built whenever a room becomes active in its slot and read at
-/// render through `ActiveRuntimeRoom::materials()`.
-#[cfg(feature = "cd-stream-bench")]
-#[derive(Copy, Clone)]
-struct ResidentRoomMaterials {
-    materials: [WorldRenderMaterial; MAX_ROOM_MATERIALS],
-    count: usize,
+    room_cache::room_material_fallback(TPAGE_WORD)
 }
 
 #[cfg(feature = "cd-stream-bench")]
-static mut ROOM_MATERIAL_POOL: [ResidentRoomMaterials; STREAMED_ROOM_SLOT_COUNT] =
-    [ResidentRoomMaterials {
-        materials: [room_material_fallback(); MAX_ROOM_MATERIALS],
-        count: 0,
-    }; STREAMED_ROOM_SLOT_COUNT];
+static mut ROOM_MATERIAL_POOL: room_cache::RoomMaterialPool<STREAMED_ROOM_SLOT_COUNT> =
+    room_cache::RoomMaterialPool::new(room_material_fallback());
 
 #[cfg(feature = "cd-stream-bench")]
 pub(super) fn store_room_materials(
@@ -265,11 +148,8 @@ pub(super) fn store_room_materials(
     materials: [WorldRenderMaterial; MAX_ROOM_MATERIALS],
     count: usize,
 ) {
-    let slot = stream_slot as usize;
-    if slot < STREAMED_ROOM_SLOT_COUNT {
-        let pool = unsafe { &mut *core::ptr::addr_of_mut!(ROOM_MATERIAL_POOL) };
-        pool[slot] = ResidentRoomMaterials { materials, count };
-    }
+    let pool = unsafe { &mut *core::ptr::addr_of_mut!(ROOM_MATERIAL_POOL) };
+    pool.store(stream_slot, materials, count);
 }
 
 pub(super) fn build_active_room(
@@ -364,50 +244,18 @@ pub(super) fn room_material_textures_ready(record: &LevelRoomRecord) -> bool {
 
 pub(super) fn active_room_surface_cache_for(index: RoomIndex) -> ActiveRoomSurfaceCache {
     #[cfg(feature = "cd-stream-bench")]
-    if let Some(cache) = streamed_active_room_surface_cache_for(index) {
-        return cache;
-    }
-
-    let Some(cache) = ROOM_SURFACE_CACHES.iter().find(|cache| cache.room == index) else {
-        return ActiveRoomSurfaceCache::EMPTY;
-    };
-    let cell_first = cache.cell_first as usize;
-    let cell_count = cache.cell_count as usize;
-    let cell_vertex_first = cache.cell_vertex_first as usize;
-    let cell_vertex_count = cache.cell_vertex_count as usize;
-    let vertex_first = cache.vertex_first as usize;
-    let vertex_count = cache.vertex_count as usize;
-    let surface_first = cache.surface_first as usize;
-    let surface_count = cache.surface_count as usize;
-    if vertex_count > MAX_CACHED_ROOM_VERTICES
-        || cell_first.saturating_add(cell_count) > ROOM_CACHE_CELLS.len()
-        || cell_vertex_first.saturating_add(cell_vertex_count) > ROOM_CACHE_CELL_VERTICES.len()
-        || vertex_first.saturating_add(vertex_count) > ROOM_CACHE_VERTICES.len()
-        || surface_first.saturating_add(surface_count) > ROOM_CACHE_SURFACES.len()
-    {
-        return ActiveRoomSurfaceCache {
-            status: ActiveRoomCacheStatus::Overflow,
-            ..ActiveRoomSurfaceCache::EMPTY
-        };
-    }
-    if cell_count == 0 || vertex_count == 0 || surface_count == 0 {
-        return ActiveRoomSurfaceCache {
-            status: ActiveRoomCacheStatus::Empty,
-            ..ActiveRoomSurfaceCache::EMPTY
-        };
-    }
-    ActiveRoomSurfaceCache {
-        cell_first,
-        cell_count,
-        cell_vertex_first,
-        cell_vertex_count,
-        vertex_first,
-        vertex_count,
-        surface_first,
-        surface_count,
-        status: ActiveRoomCacheStatus::Ready,
-        ready: true,
-    }
+    let streamed = streamed_active_room_surface_cache_for(index);
+    #[cfg(not(feature = "cd-stream-bench"))]
+    let streamed = None;
+    room_cache::active_room_surface_cache_for::<MAX_CACHED_ROOM_VERTICES>(
+        streamed,
+        ROOM_SURFACE_CACHES,
+        ROOM_CACHE_CELLS,
+        ROOM_CACHE_CELL_VERTICES,
+        ROOM_CACHE_VERTICES,
+        ROOM_CACHE_SURFACES,
+        index,
+    )
 }
 
 #[cfg(feature = "cd-stream-bench")]
@@ -444,41 +292,14 @@ fn streamed_active_room_surface_cache_for(index: RoomIndex) -> Option<ActiveRoom
     }
 }
 
-/// Prebuilt-quad pool slices for `room`, claiming a slot round-robin
-/// on first use. A claim ZEROES the slot's per-surface validity bytes,
-/// so every surface fully reconstructs its packet on its first visible
-/// frame for this room and is position/colour-patched afterwards. With
-/// 8 slots and at most `visible_chunk_limit` (6) rooms drawn per
-/// frame, a slot claimed this frame cannot be re-stolen before its
-/// draw runs.
+/// Prebuilt-quad pool slices for `room` from the example's static pool
+/// instance; the claim policy lives in
+/// [`room_cache::PrebuiltRoomQuads::claim`].
 pub(super) fn prebuilt_room_quads_for(
     room: RoomIndex,
 ) -> (&'static mut [QuadTexturedGouraud], &'static mut [u8]) {
-    unsafe {
-        let mut i = 0usize;
-        while i < PREBUILT_ROOM_QUAD_SLOTS {
-            if PREBUILT_ROOM_QUAD_ROOMS[i] == room {
-                return (
-                    &mut PREBUILT_ROOM_QUADS[i][..],
-                    &mut PREBUILT_ROOM_QUAD_VALID[i][..],
-                );
-            }
-            i += 1;
-        }
-        let slot = (PREBUILT_ROOM_QUAD_NEXT as usize) % PREBUILT_ROOM_QUAD_SLOTS;
-        PREBUILT_ROOM_QUAD_NEXT = PREBUILT_ROOM_QUAD_NEXT.wrapping_add(1);
-        PREBUILT_ROOM_QUAD_ROOMS[slot] = room;
-        let valid = &mut PREBUILT_ROOM_QUAD_VALID[slot];
-        let mut j = 0usize;
-        while j < valid.len() {
-            valid[j] = 0;
-            j += 1;
-        }
-        (
-            &mut PREBUILT_ROOM_QUADS[slot][..],
-            &mut PREBUILT_ROOM_QUAD_VALID[slot][..],
-        )
-    }
+    let pool = unsafe { &mut *core::ptr::addr_of_mut!(PREBUILT_ROOM_QUADS) };
+    pool.claim(room)
 }
 
 pub(super) fn room_surface_cache_slices(
@@ -497,36 +318,13 @@ pub(super) fn room_surface_cache_slices(
     #[cfg(not(feature = "cd-stream-bench"))]
     let _ = index;
 
-    generated_room_surface_cache_slices(cache)
-}
-
-fn generated_room_surface_cache_slices(
-    cache: ActiveRoomSurfaceCache,
-) -> Option<(
-    &'static [CachedRoomCell],
-    &'static [u16],
-    &'static [WorldVertex],
-    &'static [CachedRoomSurface],
-)> {
-    if !cache.ready || cache.vertex_count > MAX_CACHED_ROOM_VERTICES {
-        return None;
-    }
-    let cell_end = cache.cell_first.checked_add(cache.cell_count)?;
-    let cell_vertex_end = cache
-        .cell_vertex_first
-        .checked_add(cache.cell_vertex_count)?;
-    let vertex_end = cache.vertex_first.checked_add(cache.vertex_count)?;
-    let surface_end = cache.surface_first.checked_add(cache.surface_count)?;
-    let cells = ROOM_CACHE_CELLS.get(cache.cell_first..cell_end)?;
-    let cell_vertices = ROOM_CACHE_CELL_VERTICES.get(cache.cell_vertex_first..cell_vertex_end)?;
-    let vertices = ROOM_CACHE_VERTICES.get(cache.vertex_first..vertex_end)?;
-    let surfaces = ROOM_CACHE_SURFACES.get(cache.surface_first..surface_end)?;
-    Some((
-        cached_room_cells_from_level_records(cells),
-        cell_vertices,
-        cached_room_vertices_from_level_records(vertices),
-        cached_room_surfaces_from_level_records(surfaces),
-    ))
+    room_cache::generated_room_surface_cache_slices::<MAX_CACHED_ROOM_VERTICES>(
+        ROOM_CACHE_CELLS,
+        ROOM_CACHE_CELL_VERTICES,
+        ROOM_CACHE_VERTICES,
+        ROOM_CACHE_SURFACES,
+        cache,
+    )
 }
 
 /// Resolve a streamed room's surface-cache slices DIRECTLY INTO its
@@ -620,8 +418,4 @@ fn streamed_record_slice<T>(
     let byte_count = count.checked_mul(core::mem::size_of::<T>())?;
     let slice = bytes.get(offset..offset + byte_count)?;
     Some(unsafe { core::slice::from_raw_parts(slice.as_ptr().cast::<T>(), count) })
-}
-
-pub(super) fn active_surface_cache_failed(cache: ActiveRoomSurfaceCache) -> bool {
-    !cache.ready && cache.status != ActiveRoomCacheStatus::Empty
 }
