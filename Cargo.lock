@@ -3280,13 +3280,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "psx-exe-pack"
-version = "0.1.0"
-dependencies = [
- "psx-iso",
-]
-
-[[package]]
 name = "psx-font"
 version = "0.1.0"
 dependencies = [

@@ -1176,7 +1176,11 @@ mod tests {
         // Every subsequent byte of the packet stays desynced.
         now += 8;
         sio.write8_at(Sio0::BASE, 0x00, now);
-        assert_eq!(sio.pop_rx(), 0xFF, "packet remains desynced after a missed byte");
+        assert_eq!(
+            sio.pop_rx(),
+            0xFF,
+            "packet remains desynced after a missed byte"
+        );
     }
 
     #[test]

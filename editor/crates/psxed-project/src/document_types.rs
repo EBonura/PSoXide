@@ -1705,7 +1705,6 @@ pub(crate) fn plan_model_resource_rename(
             plan.ops.push(op);
         }
     }
-
 }
 
 pub(crate) fn build_path_rename(

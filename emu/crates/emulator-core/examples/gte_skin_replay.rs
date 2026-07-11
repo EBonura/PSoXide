@@ -47,7 +47,9 @@ struct Capture {
 }
 
 fn main() {
-    let path = std::env::args().nth(1).expect("usage: gte_skin_replay <capture.txt>");
+    let path = std::env::args()
+        .nth(1)
+        .expect("usage: gte_skin_replay <capture.txt>");
     let text = std::fs::read_to_string(&path).expect("capture file readable");
     let c = parse(&text);
 
@@ -161,9 +163,11 @@ fn parse(text: &str) -> Capture {
         let mut tok = line.split_whitespace();
         let Some(label) = tok.next() else { continue };
         let rest: Vec<&str> = tok.collect();
-        let h16 = |s: &str| i16::from_str_radix(s, 16).ok().or_else(|| {
-            u16::from_str_radix(s, 16).ok().map(|v| v as i16)
-        });
+        let h16 = |s: &str| {
+            i16::from_str_radix(s, 16)
+                .ok()
+                .or_else(|| u16::from_str_radix(s, 16).ok().map(|v| v as i16))
+        };
         let h32 = |s: &str| u32::from_str_radix(s, 16).ok().map(|v| v as i32);
         let row16 = |out: &mut [i16; 3], rest: &[&str]| {
             for i in 0..3 {

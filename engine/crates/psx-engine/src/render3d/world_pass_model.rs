@@ -424,8 +424,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 // blend checks.
                 let run_end = if blend_vertices {
                     let mut end = global_index + 1;
-                    while end < part_end
-                        && !model_vertex_uses_cpu_blend(vertices[end], joint_count)
+                    while end < part_end && !model_vertex_uses_cpu_blend(vertices[end], joint_count)
                     {
                         end += 1;
                     }

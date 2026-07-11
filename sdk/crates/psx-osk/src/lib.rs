@@ -103,18 +103,8 @@ enum Key {
 }
 
 // Four character rows per page, ten keys each; row 4 is the function row.
-const LETTERS: [&[u8; 10]; 4] = [
-    b"1234567890",
-    b"QWERTYUIOP",
-    b"ASDFGHJKL'",
-    b"ZXCVBNM.,:",
-];
-const SYMBOLS: [&[u8; 10]; 4] = [
-    b"1234567890",
-    b"+-*/=()%^$",
-    b".,:;!?@#&|",
-    b"<>[]{}\"'\\`",
-];
+const LETTERS: [&[u8; 10]; 4] = [b"1234567890", b"QWERTYUIOP", b"ASDFGHJKL'", b"ZXCVBNM.,:"];
+const SYMBOLS: [&[u8; 10]; 4] = [b"1234567890", b"+-*/=()%^$", b".,:;!?@#&|", b"<>[]{}\"'\\`"];
 
 // Function row: (key, unit_start, unit_span) inside the 10-unit column grid.
 const FROW: [(Key, i16, i16); 5] = [
@@ -247,7 +237,15 @@ impl Keyboard {
     /// Draw the panel, keys, and `hint` line with the caller's palette.
     /// Immediate GP0 quads + psx-font text; call after the scene draw.
     pub fn draw(&self, font: &FontAtlas, p: &Palette, hint: &str) {
-        draw_rect_flat(0, Y0 - 14, 320, (240 - (Y0 - 14)) as u16, p.panel.0, p.panel.1, p.panel.2);
+        draw_rect_flat(
+            0,
+            Y0 - 14,
+            320,
+            (240 - (Y0 - 14)) as u16,
+            p.panel.0,
+            p.panel.1,
+            p.panel.2,
+        );
         font.draw_text(6, Y0 - 12, hint, p.dim);
 
         for r in 0..ROWS {
@@ -268,7 +266,15 @@ impl Keyboard {
                 } else {
                     p.key
                 };
-                draw_rect_flat(x + 1, y + 1, (kw - 2) as u16, (KH - 2) as u16, bg.0, bg.1, bg.2);
+                draw_rect_flat(
+                    x + 1,
+                    y + 1,
+                    (kw - 2) as u16,
+                    (KH - 2) as u16,
+                    bg.0,
+                    bg.1,
+                    bg.2,
+                );
 
                 let mut buf = [0u8; 6];
                 let label: &[u8] = match key {
