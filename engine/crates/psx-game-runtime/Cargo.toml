@@ -1,0 +1,18 @@
+[package]
+name    = "psx-game-runtime"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "PSoXide game layer: streaming/residency/VRAM policy and (in later phases) the entity/combat/AI runtime, between psx-engine's primitives and a game. See docs/game-runtime-plan.md."
+
+[dependencies]
+# Explicit paths, same rationale as psx-engine: resolvable when
+# consumed from outside the engine workspace.
+psx-engine    = { path = "../psx-engine" }
+psx-level     = { path = "../psx-level" }
+psx-io        = { path = "../../../sdk/crates/psx-io" }
+psx-telemetry = { path = "../../../sdk/crates/psx-telemetry" }
+
+[lints]
+workspace = true
