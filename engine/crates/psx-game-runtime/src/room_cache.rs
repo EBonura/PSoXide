@@ -283,6 +283,31 @@ impl<const SLOTS: usize> RoomMaterialPool<SLOTS> {
         }
     }
 
+    /// All-zero-bytes placeholder so a game can hold this pool inside a
+    /// link-time-zero (`.bss`) arena static instead of storing `new`'s
+    /// fallback-material image in the flat PSX-EXE. The value is NOT
+    /// ready for use: call [`Self::init`] over it (once, before first
+    /// use) to stamp the fallback state.
+    pub const fn zeroed() -> Self {
+        // SAFETY: the pool is plain old data plus fieldless enums whose
+        // discriminant 0 is a valid variant (`BlendMode::Opaque`,
+        // `SurfaceSidedness::Front`); every material read is gated by its
+        // slot's `count`, zero until `init`/`store` writes it.
+        unsafe { core::mem::zeroed() }
+    }
+
+    /// Stamp `new(fallback)`'s state onto zeroed storage, slot by slot
+    /// (avoids materializing the whole pool as a temporary).
+    pub fn init(&mut self, fallback: WorldRenderMaterial) {
+        let empty = ResidentRoomMaterials {
+            materials: [fallback; MAX_ROOM_MATERIALS],
+            count: 0,
+        };
+        for slot in self.slots.iter_mut() {
+            *slot = empty;
+        }
+    }
+
     /// Store a room's material table in its resident stream slot.
     pub fn store(
         &mut self,
@@ -319,6 +344,32 @@ impl<const SLOTS: usize, const CAP: usize> PrebuiltRoomQuads<SLOTS, CAP> {
         rooms: [INVALID_ROOM_INDEX; SLOTS],
         next: 0,
     };
+
+    /// All-zero-bytes placeholder so a game can hold this pool inside a
+    /// link-time-zero (`.bss`) arena static instead of storing `EMPTY`'s
+    /// image (~`SLOTS * CAP` packets) in the flat PSX-EXE. Built from
+    /// honest zero-value literals: `EMPTY`'s packet and validity words
+    /// are already all-zero, so only the room sentinels differ. The value
+    /// is NOT ready for use: call [`Self::reset_claims`] over it (once,
+    /// before first use) to stamp the sentinels, which makes it equal to
+    /// `EMPTY` bit for bit.
+    pub const fn zeroed() -> Self {
+        Self {
+            quads: [const { [QuadTexturedGouraud::EMPTY; CAP] }; SLOTS],
+            valid: [[0u8; CAP]; SLOTS],
+            rooms: [RoomIndex(0); SLOTS],
+            next: 0,
+        }
+    }
+
+    /// Stamp `EMPTY`'s claim state (no rooms claimed) onto zeroed
+    /// storage. Only the room sentinels and the round-robin cursor are
+    /// written: the packet and validity words of `EMPTY` are all-zero
+    /// already, and every packet read is gated by its validity byte.
+    pub fn reset_claims(&mut self) {
+        self.rooms = [INVALID_ROOM_INDEX; SLOTS];
+        self.next = 0;
+    }
 
     /// Prebuilt-quad pool slices for `room`, claiming a slot round-robin
     /// on first use. A claim ZEROES the slot's per-surface validity bytes,

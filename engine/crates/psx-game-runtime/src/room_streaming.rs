@@ -58,6 +58,16 @@ impl StreamedRoomSlot {
         last_used: 0,
         state: RoomStreamSlotState::Empty,
     };
+
+    /// All-zero-bytes placeholder for [`RoomStreamScheduler::zeroed`];
+    /// differs from [`Self::EMPTY`] only in the `room` sentinel, which
+    /// `state: Empty` keeps unread.
+    const ZEROED: Self = Self {
+        room: RoomIndex(0),
+        byte_count: 0,
+        last_used: 0,
+        state: RoomStreamSlotState::Empty,
+    };
 }
 
 #[cfg(feature = "cd-stream-bench")]
@@ -103,6 +113,15 @@ impl<const N: usize> RoomStreamLoadPlan<N> {
     pub const EMPTY: Self = Self {
         rooms: [INVALID_ROOM_INDEX; N],
         slots: [usize::MAX; N],
+        count: 0,
+    };
+
+    /// All-zero-bytes placeholder for [`RoomStreamScheduler::zeroed`];
+    /// differs from [`Self::EMPTY`] only in sentinel values that
+    /// `count: 0` keeps unread.
+    const ZEROED: Self = Self {
+        rooms: [RoomIndex(0); N],
+        slots: [0; N],
         count: 0,
     };
 }
@@ -152,6 +171,34 @@ pub struct RoomStreamScheduler<const N: usize, const MAX_STREAMED_ROOM_INDEX_COU
 impl<const N: usize, const MAX_STREAMED_ROOM_INDEX_COUNT: usize>
     RoomStreamScheduler<N, MAX_STREAMED_ROOM_INDEX_COUNT>
 {
+    /// All-zero-bytes placeholder so a game can hold this scheduler inside
+    /// a link-time-zero (`.bss`) arena static instead of storing `new`'s
+    /// non-zero image (room-to-slot sentinels, the slot limit) in the flat
+    /// PSX-EXE. The value is NOT ready for use: assign `Self::new()` over
+    /// it (once, before first use) to stamp the real initial state. Built
+    /// from honest zero-value literals; the sentinel-bearing fields are
+    /// unread while their gating fields (`state`, `count`) are zero.
+    pub const fn zeroed() -> Self {
+        Self {
+            slots: [StreamedRoomSlot::ZEROED; N],
+            room_slots: [0; MAX_STREAMED_ROOM_INDEX_COUNT],
+            pinned_rooms: [false; MAX_STREAMED_ROOM_INDEX_COUNT],
+            job: cd_stream::WorldRoomSlotsReadJob::zeroed(),
+            job_plan: RoomStreamLoadPlan::ZEROED,
+            slot_limit: 0,
+            epoch: 0,
+            failure_counts: [0; MAX_STREAMED_ROOM_INDEX_COUNT],
+            failure_hold_until: [0; MAX_STREAMED_ROOM_INDEX_COUNT],
+            window_requests: 0,
+            window_misses: 0,
+            window_prefetch_requests: 0,
+            window_evictions: 0,
+            window_failed_loads: 0,
+            window_pending_loads: 0,
+            window_protected_full: 0,
+        }
+    }
+
     /// Empty scheduler; `const` so the game can keep it in link-time
     /// zero-initialized storage.
     pub const fn new() -> Self {
