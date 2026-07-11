@@ -304,8 +304,10 @@ pub(crate) fn push_interactable(
     pos: [i32; 3],
     yaw: i16,
     component: InteractableComponent<'_>,
+    names: &mut NameInterner,
     messages: &mut Vec<PlaytestInteractableMessage>,
     interactables: &mut Vec<PlaytestInteractable>,
+    logic: &mut Vec<PlaytestLogic>,
     report: &mut PlaytestValidationReport,
 ) -> bool {
     if component.radius == 0 {
@@ -319,9 +321,10 @@ pub(crate) fn push_interactable(
         component.prompt,
         default_prompt_for_interactable(component.kind),
     );
-    let (kind, title, body, checkpoint_id) = match component.kind {
+    let (kind, logic_kind, title, body, checkpoint_id) = match component.kind {
         crate::InteractableKind::Message { title, body } => (
             PlaytestInteractableKind::Message,
+            psx_level::logic_kind::MESSAGE,
             non_empty_or(title, "ECHO REMNANT").to_string(),
             body.clone(),
             String::new(),
@@ -332,6 +335,7 @@ pub(crate) fn push_interactable(
             body,
         } => (
             PlaytestInteractableKind::Checkpoint,
+            psx_level::logic_kind::CHECKPOINT,
             non_empty_or(title, "SYNC RELAY").to_string(),
             non_empty_or(body, "Relay synchronized.").to_string(),
             non_empty_or(checkpoint_id, node_name).to_string(),
@@ -339,6 +343,11 @@ pub(crate) fn push_interactable(
     };
     let message = messages.len().min(u16::MAX as usize) as u16;
     messages.push(PlaytestInteractableMessage { title, body });
+    let flags = if component.enabled {
+        psx_level::interactable_flags::ENABLED
+    } else {
+        0
+    };
     interactables.push(PlaytestInteractable {
         room: room_index,
         kind,
@@ -350,11 +359,102 @@ pub(crate) fn push_interactable(
         prompt: prompt.to_string(),
         message,
         checkpoint_id,
+        flags,
+    });
+    // The paired event-graph record: same authored source, interned
+    // name, XZ-radius bounds (zero height -- interactable range tests
+    // are XZ-only, and the runtime keeps that semantics for these
+    // kinds). Target/kill/master stay NONE until trigger/relay/door
+    // authoring lands; graph edges can already point AT this record
+    // by node name.
+    let radius = i32::from(component.radius);
+    logic.push(PlaytestLogic {
+        room: room_index,
+        kind: logic_kind,
+        spawnflags: 0,
+        targetname: names.intern(node_name),
+        target: psx_level::LOGIC_NAME_NONE,
+        killtarget: psx_level::LOGIC_NAME_NONE,
+        master: psx_level::LOGIC_NAME_NONE,
+        delay_ticks: 0,
+        wait_ticks: 0,
+        arg0: 0,
+        arg1: 0,
+        link: psx_level::LOGIC_LINK_NONE,
+        message,
+        x: pos[0],
+        y: pos[1],
+        z: pos[2],
+        min: [pos[0] - radius, pos[1], pos[2] - radius],
+        max: [pos[0] + radius, pos[1], pos[2] + radius],
         flags: if component.enabled {
-            psx_level::interactable_flags::ENABLED
+            psx_level::logic_flags::ENABLED
         } else {
             0
         },
+    });
+    true
+}
+
+/// Cook one souls-like game entity from a non-player Character
+/// Controller that opted in with `EnemyBehaviorSettings`. `kind` is
+/// the interned Character resource name so every placement of one
+/// archetype shares the tag; the spawn is patrol anchor zero and
+/// `patrol_offset` authors anchor one relative to it.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn push_game_entity(
+    node_name: &str,
+    archetype_name: &str,
+    room_index: u16,
+    pos: [i32; 3],
+    yaw: i16,
+    enemy: crate::EnemyBehaviorSettings,
+    model_instance: Option<u16>,
+    names: &mut NameInterner,
+    game_entities: &mut Vec<PlaytestGameEntity>,
+    report: &mut PlaytestValidationReport,
+) -> bool {
+    if enemy.aggro_radius == 0 {
+        report.error(format!(
+            "Enemy on '{node_name}' has aggro radius 0 (must be > 0)"
+        ));
+        return false;
+    }
+    if enemy.windup_ticks == 0 {
+        report.error(format!(
+            "Enemy on '{node_name}' has windup 0 ticks - a souls-like \
+             attack must telegraph (must be > 0)"
+        ));
+        return false;
+    }
+    if enemy.max_health == 0 {
+        report.error(format!(
+            "Enemy on '{node_name}' has max health 0 (must be > 0)"
+        ));
+        return false;
+    }
+    game_entities.push(PlaytestGameEntity {
+        room: room_index,
+        kind: names.intern(archetype_name),
+        targetname: names.intern(node_name),
+        model_instance: model_instance.unwrap_or(psx_level::GAME_ENTITY_MODEL_INSTANCE_NONE),
+        x: pos[0],
+        y: pos[1],
+        z: pos[2],
+        yaw,
+        patrol: [
+            pos[0].saturating_add(enemy.patrol_offset[0]),
+            pos[1].saturating_add(enemy.patrol_offset[1]),
+            pos[2].saturating_add(enemy.patrol_offset[2]),
+        ],
+        patrol_wait_ticks: enemy.patrol_wait_ticks,
+        aggro_radius: enemy.aggro_radius,
+        windup_ticks: enemy.windup_ticks,
+        recovery_ticks: enemy.recovery_ticks,
+        poise: enemy.poise,
+        touch_damage: enemy.touch_damage,
+        max_health: enemy.max_health,
+        flags: psx_level::game_entity_flags::ENABLED,
     });
     true
 }

@@ -16,7 +16,9 @@
 pub mod box_props;
 pub mod cd_stream;
 pub mod character;
+pub mod entities;
 pub mod image_props;
+pub mod logic;
 pub mod model_rendering;
 pub mod particles;
 pub mod room_cache;

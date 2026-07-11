@@ -1342,6 +1342,187 @@ pub struct InteractableRecord {
     pub flags: u16,
 }
 
+/// Sentinel for interned cook-time name ids: "no name". The playtest
+/// compiler interns authored strings (node names used as targetnames,
+/// Character resource names used as enemy archetype tags) into one
+/// deterministic u16 namespace starting at 1; the strings die on the
+/// host, hl-psx-style, and the runtime compares ids only.
+pub const LOGIC_NAME_NONE: u16 = 0;
+
+/// Sentinel for [`LevelLogicRecord::link`]: no linked entity.
+pub const LOGIC_LINK_NONE: u16 = u16::MAX;
+
+/// Sentinel for [`LevelGameEntityRecord::model_instance`]: the entity
+/// has no cooked visual instance.
+pub const GAME_ENTITY_MODEL_INSTANCE_NONE: u16 = u16::MAX;
+
+/// Cook<->runtime contract cap for cooked [`LevelGameEntityRecord`]s.
+///
+/// Like [`MAX_ROOM_MATERIALS`], both sides reference this constant:
+/// the runtime's SoA entity state is sized by it, and the cook MUST
+/// reject a project that exceeds it so over-cap enemies fail loudly at
+/// cook time instead of silently never spawning. Sized in the phase-3
+/// budget (docs/game-runtime-plan.md): 8 rooms x up to 8 placed
+/// enemies at cortex scale.
+pub const MAX_GAME_ENTITY_RECORDS: usize = 64;
+
+/// Cook<->runtime contract cap for cooked [`LevelLogicRecord`]s.
+/// Same contract rule as [`MAX_GAME_ENTITY_RECORDS`].
+pub const MAX_LOGIC_RECORDS: usize = 64;
+
+/// Runtime kind for [`LevelLogicRecord`], hl-psx `LOGIC_*` style:
+/// a compact table-driven u8, not an enum, so cooked manifests stay
+/// POD and new kinds never break old readers.
+pub mod logic_kind {
+    /// Reserved invalid kind (an all-zero record is inert).
+    pub const NONE: u8 = 0;
+    /// Show a message overlay when used. Cooked today from
+    /// `Interactable::Message` components.
+    pub const MESSAGE: u8 = 1;
+    /// Update the in-memory checkpoint when used. Cooked today from
+    /// `Interactable::Checkpoint` components.
+    pub const CHECKPOINT: u8 = 2;
+    /// AABB volume that fires `target` when the player enters it.
+    /// Runtime support lands with this record; the authoring node
+    /// arrives with the next editor slice.
+    pub const TRIGGER_VOLUME: u8 = 3;
+    /// Fires `target` after `delay_ticks` when triggered (the
+    /// fan-out/delay building block). Authoring pending, as above.
+    pub const RELAY: u8 = 4;
+    /// AND gate: satisfied while all `arg0` inputs are on; records
+    /// naming it as `master` are gated by it. Authoring pending.
+    pub const MULTISOURCE: u8 = 5;
+    /// Toggles the linked entity (`link` = `BOX_PROPS` index) between
+    /// closed (drawn + solid) and open (hidden + passable). Authoring
+    /// pending.
+    pub const DOOR: u8 = 6;
+}
+
+/// Runtime flags for [`LevelLogicRecord`].
+pub mod logic_flags {
+    /// Record is active in gameplay.
+    pub const ENABLED: u16 = 1 << 0;
+    /// Record starts in the "on"/open state (kind-specific).
+    pub const START_ON: u16 = 1 << 1;
+}
+
+/// Runtime flags for [`LevelGameEntityRecord`].
+pub mod game_entity_flags {
+    /// Record spawns in gameplay.
+    pub const ENABLED: u16 = 1 << 0;
+}
+
+/// One cooked logic entity, shaped after hl-psx's campaign-proven
+/// `LogicEnt` (docs/game-runtime-plan.md, "Adopted from hl-psx"):
+/// authored names are interned to u16 ids at cook, targets fan out
+/// through a delay queue at runtime, and a `master` id AND-gates
+/// activation. Trigger volumes are this record plus `min`/`max`
+/// bounds -- no separate volume record. Coordinates are room-local
+/// engine units, same convention as [`InteractableRecord`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelLogicRecord {
+    /// Owning room index.
+    pub room: RoomIndex,
+    /// Behavior selector from [`logic_kind`].
+    pub kind: u8,
+    /// Kind-specific authored flag bits (hl's spawnflags slot).
+    pub spawnflags: u16,
+    /// Interned name of this record, or [`LOGIC_NAME_NONE`].
+    pub targetname: u16,
+    /// Interned name this record fires when it triggers, or
+    /// [`LOGIC_NAME_NONE`].
+    pub target: u16,
+    /// Interned name this record removes when it triggers, or
+    /// [`LOGIC_NAME_NONE`].
+    pub killtarget: u16,
+    /// Interned name of a [`logic_kind::MULTISOURCE`] gate that must
+    /// be satisfied before this record reacts, or [`LOGIC_NAME_NONE`]
+    /// for ungated. Unresolvable masters fail open (hl parity): a
+    /// content typo can never hard-lock a door.
+    pub master: u16,
+    /// 60 Hz ticks between triggering and firing `target`.
+    pub delay_ticks: u16,
+    /// 60 Hz ticks before the record re-arms after firing. Negative
+    /// means fire once, then retire (hl's `wait -1`).
+    pub wait_ticks: i16,
+    /// First kind-specific argument.
+    pub arg0: u16,
+    /// Second kind-specific argument.
+    pub arg1: u16,
+    /// Kind-defined entity link ([`logic_kind::DOOR`] stores a
+    /// `BOX_PROPS` index here), or [`LOGIC_LINK_NONE`].
+    pub link: u16,
+    /// Index into the generated interactable message table, or
+    /// [`INTERACTABLE_MESSAGE_NONE`]. Shared with
+    /// [`InteractableRecord`] so text cooks once.
+    pub message: u16,
+    /// Room-local origin X.
+    pub x: i32,
+    /// Y.
+    pub y: i32,
+    /// Room-local origin Z.
+    pub z: i32,
+    /// Trigger AABB minimum corner, room-local engine units. Equal to
+    /// `max` for point records (no volume).
+    pub min: [i32; 3],
+    /// Trigger AABB maximum corner.
+    pub max: [i32; 3],
+    /// Runtime flags from [`logic_flags`].
+    pub flags: u16,
+}
+
+/// One placed souls-like game entity (enemy). Cooked today from an
+/// Entity node whose non-player Character Controller opts in with
+/// `EnemyBehaviorSettings`; `kind` is the interned Character resource
+/// name (the archetype tag), so every placement of one archetype
+/// shares an id. Coordinates are room-local engine units with the
+/// floor-anchor convention of [`PlayerSpawnRecord`]. The spawn
+/// position is patrol anchor zero; `patrol_*` is anchor one (equal to
+/// the spawn when no patrol is authored, which reads as "hold
+/// position").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelGameEntityRecord {
+    /// Owning room index.
+    pub room: RoomIndex,
+    /// Interned archetype tag, or [`LOGIC_NAME_NONE`].
+    pub kind: u16,
+    /// Interned name logic can target, or [`LOGIC_NAME_NONE`].
+    pub targetname: u16,
+    /// Index of this entity's cooked visual in `MODEL_INSTANCES`, or
+    /// [`GAME_ENTITY_MODEL_INSTANCE_NONE`].
+    pub model_instance: u16,
+    /// Room-local spawn X.
+    pub x: i32,
+    /// Y.
+    pub y: i32,
+    /// Room-local spawn Z.
+    pub z: i32,
+    /// Spawn yaw, PSX angle units.
+    pub yaw: i16,
+    /// Patrol anchor one X (== `x` when no patrol is authored).
+    pub patrol_x: i32,
+    /// Patrol anchor one Y.
+    pub patrol_y: i32,
+    /// Patrol anchor one Z.
+    pub patrol_z: i32,
+    /// 60 Hz ticks the entity idles at a reached patrol anchor.
+    pub patrol_wait_ticks: u16,
+    /// XZ radius (engine units) inside which the player is noticed.
+    pub aggro_radius: u16,
+    /// 60 Hz ticks of attack windup (the souls-like telegraph).
+    pub windup_ticks: u8,
+    /// 60 Hz ticks of post-attack recovery (the punish window).
+    pub recovery_ticks: u8,
+    /// Poise pool; poise damage past it staggers the entity.
+    pub poise: u16,
+    /// Damage dealt by a connecting touch/melee attack.
+    pub touch_damage: u16,
+    /// Health pool at spawn.
+    pub max_health: u16,
+    /// Runtime flags from [`game_entity_flags`].
+    pub flags: u16,
+}
+
 /// One animation clip bound to a [`LevelModelRecord`]. The clip
 /// asset's joint count is checked against the owning model's
 /// joint count at cook time; runtime trusts the contract.
