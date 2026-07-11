@@ -20,7 +20,7 @@ pub(super) enum WaitOutcome {
 /// CD IRQs, drain any boot leftovers (first call only), and set
 /// double-speed 2048-byte data mode.
 #[cfg(target_arch = "mips")]
-pub(super) fn prepare_cd_read(polls: &mut u32) -> Result<(), u32> {
+pub(super) fn prepare_cd_read(cd: &mut CdController, polls: &mut u32) -> Result<(), u32> {
     // The engine installs a VBlank-only exception handler. After a real BIOS
     // disc boot, keep CD-ROM at the controller level and poll its IRQ flags
     // manually so DataReady cannot enter an unhandled CPU IRQ storm.
@@ -29,19 +29,17 @@ pub(super) fn prepare_cd_read(polls: &mut u32) -> Result<(), u32> {
     cd_enable_irqs();
     cd_ack_all();
     psx_io::dma::enable_channel(psx_io::dma::Channel::Cdrom);
-    // SAFETY: single-threaded read/write of the module's own first-call
-    // flag; nothing else touches it (no reentrancy -- see module doc).
-    if !unsafe { CD_READ_PREPARED } {
+    if !cd.read_prepared {
         // BIOS disc boot has already finished its file load. Do not send Pause
         // before our first stream; on real BIOS boot paths some emulators have
         // no active read command to pause and never acknowledge it. Drain any
         // already-latched data/ack instead.
-        drain_pending_irqs(polls);
+        drain_pending_irqs(cd, polls);
         cd_ack_all();
-        // SAFETY: as above.
-        unsafe { CD_READ_PREPARED = true };
+        cd.read_prepared = true;
     }
     if !send_command(
+        cd,
         CMD_SETMODE,
         &[CD_MODE_DOUBLE_SPEED_2048],
         IRQ_ACK,
@@ -56,14 +54,14 @@ pub(super) fn prepare_cd_read(polls: &mut u32) -> Result<(), u32> {
 /// Acknowledge (and for DataReady, drain) every already-latched CD IRQ,
 /// bounded so a stuck flag cannot spin forever.
 #[cfg(target_arch = "mips")]
-pub(super) fn drain_pending_irqs(polls: &mut u32) {
+pub(super) fn drain_pending_irqs(cd: &mut CdController, polls: &mut u32) {
     let mut i = 0;
     while i < 16 {
         let flag = cd_irq_flag();
         if flag == 0 {
             break;
         }
-        ack_unexpected_irq(flag, polls);
+        ack_unexpected_irq(cd, flag, polls);
         i += 1;
     }
 }
@@ -71,9 +69,14 @@ pub(super) fn drain_pending_irqs(polls: &mut u32) {
 /// Seek to `lba` and start a ReadN stream (SetLoc + ReadN, both
 /// ack-polled).
 #[cfg(target_arch = "mips")]
-pub(super) fn start_cd_read_at_lba(lba: u32, polls: &mut u32) -> Result<(), u32> {
+pub(super) fn start_cd_read_at_lba(
+    cd: &mut CdController,
+    lba: u32,
+    polls: &mut u32,
+) -> Result<(), u32> {
     let (minute, second, frame) = lba_to_bcd_msf(lba);
     if !send_command(
+        cd,
         CMD_SETLOC,
         &[minute, second, frame],
         IRQ_ACK,
@@ -82,7 +85,7 @@ pub(super) fn start_cd_read_at_lba(lba: u32, polls: &mut u32) -> Result<(), u32>
     ) {
         return Err(classify_command_failure(STATUS_SETLOC_TIMEOUT));
     }
-    if !send_command(CMD_READN, &[], IRQ_ACK, COMMAND_ACK_POLL_LIMIT, polls) {
+    if !send_command(cd, CMD_READN, &[], IRQ_ACK, COMMAND_ACK_POLL_LIMIT, polls) {
         return Err(classify_command_failure(STATUS_READ_ACK_TIMEOUT));
     }
     cd_enable_irqs();
@@ -93,6 +96,7 @@ pub(super) fn start_cd_read_at_lba(lba: u32, polls: &mut u32) -> Result<(), u32>
 /// `expected_irq`, preserving the caller-visible IRQ-enable mask.
 #[cfg(target_arch = "mips")]
 pub(super) fn send_command(
+    cd: &mut CdController,
     command: u8,
     params: &[u8],
     expected_irq: u8,
@@ -120,7 +124,7 @@ pub(super) fn send_command(
     }
     // SAFETY: CD_RESPONSE at index 0 is the command register.
     unsafe { psx_io::write8(CD_RESPONSE, command) };
-    let ok = match wait_irq(expected_irq, poll_limit, polls) {
+    let ok = match wait_irq(cd, expected_irq, poll_limit, polls) {
         WaitOutcome::Matched => {
             drain_responses();
             cd_ack(expected_irq);
@@ -156,7 +160,12 @@ pub(super) fn wait_parameter_room(polls: &mut u32) -> bool {
 /// Poll (bounded) for `expected`, acking and draining any other latched
 /// IRQ along the way.
 #[cfg(target_arch = "mips")]
-pub(super) fn wait_irq(expected: u8, poll_limit: u32, polls: &mut u32) -> WaitOutcome {
+pub(super) fn wait_irq(
+    cd: &mut CdController,
+    expected: u8,
+    poll_limit: u32,
+    polls: &mut u32,
+) -> WaitOutcome {
     let mut i = 0;
     while i < poll_limit {
         let flag = cd_irq_flag();
@@ -170,7 +179,7 @@ pub(super) fn wait_irq(expected: u8, poll_limit: u32, polls: &mut u32) -> WaitOu
             return WaitOutcome::CdError;
         }
         if flag != 0 {
-            ack_unexpected_irq(flag, polls);
+            ack_unexpected_irq(cd, flag, polls);
         }
         *polls = (*polls).saturating_add(1);
         i += 1;
@@ -178,14 +187,14 @@ pub(super) fn wait_irq(expected: u8, poll_limit: u32, polls: &mut u32) -> WaitOu
     WaitOutcome::Timeout
 }
 
-/// Ack a stray IRQ; a stray DataReady is drained into the module's own
+/// Ack a stray IRQ; a stray DataReady is drained into the controller's
 /// sector buffer so the data FIFO cannot wedge the stream.
 #[cfg(target_arch = "mips")]
-pub(super) fn ack_unexpected_irq(flag: u8, polls: &mut u32) {
+pub(super) fn ack_unexpected_irq(cd: &mut CdController, flag: u8, polls: &mut u32) {
     match flag {
         IRQ_DATA_READY => {
-            let buffer = core::ptr::addr_of_mut!(CD_STREAM_SECTOR_BUFFER) as *mut u32;
-            // SAFETY: `buffer` is the module-owned sector buffer, valid
+            let buffer = cd.sector_buffer.as_mut_ptr();
+            // SAFETY: `buffer` is the controller-owned sector buffer, valid
             // for one whole-sector DMA write; single-threaded access.
             unsafe { dma_read_sector(buffer, polls) };
             drain_responses();
@@ -203,13 +212,10 @@ pub(super) fn ack_unexpected_irq(flag: u8, polls: &mut u32) {
 }
 
 /// Blocking single-sector read for the benchmark stream: wait (bounded)
-/// for DataReady, then DMA the sector into `buffer`.
-///
-/// # Safety
-/// `buffer` must be valid for a whole-sector (2048-byte) DMA write.
+/// for DataReady, then DMA the sector into the controller's buffer.
 #[cfg(all(feature = "cd-stream-benchmark", target_arch = "mips"))]
-pub(super) unsafe fn read_stream_sector(buffer: *mut u32, polls: &mut u32) -> Result<(), u32> {
-    match wait_irq(IRQ_DATA_READY, DATA_READY_POLL_LIMIT, polls) {
+pub(super) fn read_stream_sector(cd: &mut CdController, polls: &mut u32) -> Result<(), u32> {
+    match wait_irq(cd, IRQ_DATA_READY, DATA_READY_POLL_LIMIT, polls) {
         WaitOutcome::Matched => {}
         WaitOutcome::CdError => {
             drain_responses();
@@ -218,27 +224,21 @@ pub(super) unsafe fn read_stream_sector(buffer: *mut u32, polls: &mut u32) -> Re
         }
         WaitOutcome::Timeout => return Err(STATUS_DATA_TIMEOUT),
     }
-    // SAFETY: caller guarantees `buffer` is valid for a sector write.
-    unsafe { dma_read_sector(buffer, polls) };
+    // SAFETY: the controller-owned sector buffer is valid for a sector write.
+    unsafe { dma_read_sector(cd.sector_buffer.as_mut_ptr(), polls) };
     drain_responses();
     cd_ack(IRQ_DATA_READY);
     Ok(())
 }
 
 /// Blocking single-sector read. Waits for the next DataReady IRQ,
-/// DMAs the sector into `buffer`, and acks. Mirrors the benchmark's
-/// `read_stream_sector` but is available outside the benchmark
-/// feature so the UI image loader can read whole UI.PAK chunks one
-/// sector at a time.
-///
-/// # Safety
-/// `buffer` must be valid for a whole-sector (2048-byte) DMA write.
+/// DMAs the sector into the controller's buffer, and acks. Mirrors the
+/// benchmark's `read_stream_sector` but is available outside the
+/// benchmark feature so the UI image loader can read whole UI.PAK
+/// chunks one sector at a time.
 #[cfg(target_arch = "mips")]
-pub(super) unsafe fn read_one_sector_blocking(
-    buffer: *mut u32,
-    polls: &mut u32,
-) -> Result<(), u32> {
-    match wait_irq(IRQ_DATA_READY, DATA_READY_BLOCKING_POLL_LIMIT, polls) {
+pub(super) fn read_one_sector_blocking(cd: &mut CdController, polls: &mut u32) -> Result<(), u32> {
+    match wait_irq(cd, IRQ_DATA_READY, DATA_READY_BLOCKING_POLL_LIMIT, polls) {
         WaitOutcome::Matched => {}
         WaitOutcome::CdError => {
             drain_responses();
@@ -247,28 +247,23 @@ pub(super) unsafe fn read_one_sector_blocking(
         }
         WaitOutcome::Timeout => return Err(STATUS_DATA_TIMEOUT),
     }
-    // SAFETY: caller guarantees `buffer` is valid for a sector write.
-    unsafe { dma_read_sector(buffer, polls) };
+    // SAFETY: the controller-owned sector buffer is valid for a sector write.
+    unsafe { dma_read_sector(cd.sector_buffer.as_mut_ptr(), polls) };
     drain_responses();
     cd_ack(IRQ_DATA_READY);
     Ok(())
 }
 
-/// Non-blocking sector poll: `Ok(true)` when a sector landed in
-/// `buffer`, `Ok(false)` when no data is ready yet.
-///
-/// # Safety
-/// `buffer` must be valid for a whole-sector (2048-byte) DMA write.
+/// Non-blocking sector poll: `Ok(true)` when a sector landed in the
+/// controller's buffer, `Ok(false)` when no data is ready yet.
 #[cfg(target_arch = "mips")]
-pub(super) unsafe fn try_read_stream_sector(
-    buffer: *mut u32,
-    polls: &mut u32,
-) -> Result<bool, u32> {
+pub(super) fn try_read_stream_sector(cd: &mut CdController, polls: &mut u32) -> Result<bool, u32> {
     let flag = cd_irq_flag();
     match flag {
         IRQ_DATA_READY => {
-            // SAFETY: caller guarantees `buffer` is valid for a sector write.
-            unsafe { dma_read_sector(buffer, polls) };
+            // SAFETY: the controller-owned sector buffer is valid for a
+            // sector write.
+            unsafe { dma_read_sector(cd.sector_buffer.as_mut_ptr(), polls) };
             drain_responses();
             cd_ack(IRQ_DATA_READY);
             Ok(true)
@@ -287,8 +282,9 @@ pub(super) unsafe fn try_read_stream_sector(
             Ok(false)
         }
         _ if cd_data_fifo_ready() => {
-            // SAFETY: caller guarantees `buffer` is valid for a sector write.
-            unsafe { dma_read_sector(buffer, polls) };
+            // SAFETY: the controller-owned sector buffer is valid for a
+            // sector write.
+            unsafe { dma_read_sector(cd.sector_buffer.as_mut_ptr(), polls) };
             drain_responses();
             cd_ack(IRQ_DATA_READY);
             Ok(true)
@@ -302,25 +298,21 @@ pub(super) unsafe fn try_read_stream_sector(
 
 /// Stream and checksum the whole WORLD.PAK region for the benchmark,
 /// validating its header out of the first sector.
-///
-/// # Safety
-/// `buffer` must be valid for whole-sector (2048-byte) DMA writes and
-/// readable for the same length.
 #[cfg(all(feature = "cd-stream-benchmark", target_arch = "mips"))]
-pub(super) unsafe fn stream_world_pack(buffer: *mut u32, result: &mut BenchResult) {
+pub(super) fn stream_world_pack(cd: &mut CdController, result: &mut BenchResult) {
     telemetry::stage_begin(telemetry::stage::CD_WORLD_PACK_STREAM);
     result.world_status = STATUS_OK;
     let mut checksum = FNV_OFFSET;
 
-    // SAFETY: caller guarantees `buffer` for sector-sized reads/writes;
-    // forwarded to the sector reader and byte checkers below unchanged.
+    // SAFETY: the controller-owned sector buffer is valid for sector-sized
+    // reads/writes; forwarded to the byte checkers below unchanged.
     unsafe {
-        if let Err(status) = read_stream_sector(buffer, &mut result.polls) {
+        if let Err(status) = read_stream_sector(cd, &mut result.polls) {
             result.world_status = status;
             telemetry::stage_end(telemetry::stage::CD_WORLD_PACK_STREAM);
             return;
         }
-        let sector = buffer as *const u8;
+        let sector = cd.sector_buffer.as_ptr() as *const u8;
         checksum = checksum_sector(sector, checksum);
         result.world_bytes = result.world_bytes.saturating_add(SECTOR_BYTES as u32);
         result.world_sectors = result.world_sectors.saturating_add(1);
@@ -354,11 +346,11 @@ pub(super) unsafe fn stream_world_pack(buffer: *mut u32, result: &mut BenchResul
 
         let mut sector_index = 1;
         while sector_index < total_sectors {
-            if let Err(status) = read_stream_sector(buffer, &mut result.polls) {
+            if let Err(status) = read_stream_sector(cd, &mut result.polls) {
                 result.world_status = status;
                 break;
             }
-            checksum = checksum_sector(buffer as *const u8, checksum);
+            checksum = checksum_sector(cd.sector_buffer.as_ptr() as *const u8, checksum);
             result.world_bytes = result.world_bytes.saturating_add(SECTOR_BYTES as u32);
             result.world_sectors = result.world_sectors.saturating_add(1);
             sector_index += 1;
@@ -401,9 +393,9 @@ pub(super) fn cd_arm_data_transfer() {
 /// Pause the drive and ack whatever the pause latched, restoring the
 /// idle controller state after a stream (best-effort, bounded).
 #[cfg(target_arch = "mips")]
-pub(super) fn cleanup_read_stream(polls: &mut u32) {
-    if send_command(CMD_PAUSE, &[], IRQ_ACK, CLEANUP_POLL_LIMIT, polls) {
-        let _ = wait_irq(IRQ_COMPLETE, CLEANUP_POLL_LIMIT, polls);
+pub(super) fn cleanup_read_stream(cd: &mut CdController, polls: &mut u32) {
+    if send_command(cd, CMD_PAUSE, &[], IRQ_ACK, CLEANUP_POLL_LIMIT, polls) {
+        let _ = wait_irq(cd, IRQ_COMPLETE, CLEANUP_POLL_LIMIT, polls);
         drain_responses();
         cd_ack(IRQ_COMPLETE);
     }

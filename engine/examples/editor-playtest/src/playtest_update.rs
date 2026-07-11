@@ -18,7 +18,7 @@ impl Playtest {
             Some(pc) => {
                 let character = CHARACTERS
                     .get(pc.character.to_usize())
-                    .map(RuntimeCharacter::from_record);
+                    .map(runtime_character_from_record);
                 (pc.spawn, character)
             }
             None => (PLAYER_SPAWN, None),
@@ -39,9 +39,7 @@ impl Playtest {
         self.active_interactable = None;
         self.checkpoint = None;
         self.message_overlay = None;
-        self.box_prop_broken = [0; BOX_PROP_BROKEN_WORDS];
-        self.box_prop_fall = [BoxPropFallState::EMPTY; MAX_BOX_PROP_STATE];
-        self.box_prop_break_events = [BoxPropBreakEvent::EMPTY; MAX_BOX_PROP_BREAK_EVENTS];
+        self.box_props.reset_dynamic_state();
         self.camera.snap_to_player_with_yaw(
             self.camera_target(None, false),
             self.camera_config(),
@@ -57,7 +55,7 @@ impl Playtest {
         #[cfg(not(feature = "cd-stream-bench"))]
         self.load_active_room_window();
         #[cfg(feature = "cd-stream-benchmark")]
-        cd_stream::run_benchmark();
+        cd_stream::run_benchmark(cd_arena());
     }
 
     pub(super) fn update_gameplay(&mut self, ctx: &mut Ctx) {
