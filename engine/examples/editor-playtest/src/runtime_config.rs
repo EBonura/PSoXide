@@ -71,8 +71,9 @@ pub(super) const MENU_RESOURCE_KEY: u32 = 2;
 pub(super) const GAMEPLAY_RESOURCE_KEY: u32 = 3;
 pub(super) static SHADOW_CIRCLE_BLOB: &[u8] = include_bytes!("../assets/shadow_circle_64.psxt");
 /// Shadow decals share the shadow/particle 4bpp page allocated by the unified
-/// VRAM allocator. UVs are page-relative, so only the page base moves.
-pub(super) const SHADOW_TEXEL_U: u8 = 64;
+/// VRAM allocator. UVs are page-relative, so only the page base moves; the
+/// texel origin is the crate vram module's placement contract.
+pub(super) use psx_game_runtime::vram::SHADOW_TEXEL_U;
 pub(super) const SHADOW_UV_MAX: u8 = SHADOW_TEXEL_U + 63;
 pub(super) const SCREEN_W: i16 = 320;
 pub(super) const SCREEN_H: i16 = 240;
@@ -373,7 +374,6 @@ pub(super) const STREAMED_ROOM_SLOT_BYTES: usize =
 pub(super) const STREAMED_ROOM_SLOT_WORDS: usize = STREAMED_ROOM_SLOT_BYTES / 4;
 #[cfg(feature = "cd-stream-bench")]
 pub(super) const MAX_STREAMED_ROOM_SLOT_COUNT: usize = 256;
-pub(super) use psx_game_runtime::room_streaming::STREAMED_ROOM_SLOT_NONE;
 #[cfg(feature = "cd-stream-bench")]
 pub(super) const MAX_STREAMED_ROOM_INDEX_COUNT: usize = 256;
 /// CD-backed room residency cache. The cooked manifest selects the byte

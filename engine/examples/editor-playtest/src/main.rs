@@ -41,12 +41,13 @@ fn game_trace(message: &str) {
 #[cfg(not(all(target_arch = "mips", feature = "boot-trace")))]
 fn game_trace(_message: &str) {}
 
-use psx_asset::{Animation, Model, ModelPart, ModelVertex, Texture};
+use psx_asset::{Animation, Model, ModelPart, ModelVertex};
 // Used by the vis-full-active-chunks default AND by the PVS path's
 // no-anchor fallback (a far room with no usable portal anchor draws
 // every cell through the cached path).
 #[cfg(feature = "world-grid-visible")]
 use psx_engine::draw_indexed_cached_room_vertex_lit_all_cells;
+use psx_engine::draw_room_vertex_lit;
 use psx_engine::ui::UiTextureSlot;
 #[cfg(feature = "cd-stream-bench")]
 use psx_engine::CompactCollisionRoom;
@@ -73,10 +74,6 @@ use psx_engine::{
     WorldRenderMaterial, WorldRenderPass, WorldSurfaceLighting, WorldSurfaceOptions,
     WorldSurfaceSample, WorldTriCommand, WorldVertex, Q12, Q8,
 };
-use psx_engine::{
-    cached_room_cells_from_level_records, cached_room_surfaces_from_level_records,
-    cached_room_vertices_from_level_records, draw_room_vertex_lit,
-};
 #[cfg(all(
     feature = "world-grid-visible",
     not(feature = "vis-full-active-chunks")
@@ -88,7 +85,7 @@ use psx_engine::{
 use psx_font::FontAtlas;
 use psx_gpu::{
     draw_line_mono, draw_tri_flat_blended,
-    material::{BlendMode, TextureMaterial, TextureWindow},
+    material::{BlendMode, TextureMaterial},
     ot::OrderingTable,
     prim::{QuadTexturedGouraud, QuadTexturedMaterial, TriTextured, TriTexturedGouraud},
     VideoMode,
@@ -106,13 +103,8 @@ use psx_level::{
     LevelCharacterRecord, LevelChunkRecord, LevelFarVistaRecord, LevelImagePropRecord,
     LevelMaterialRecord, LevelMaterialSidedness, LevelModelFrameBoundsRecord, LevelModelRecord,
     LevelModelSocketRecord, LevelRoomRecord, LevelSkyRecord, ModelClipIndex, ModelClipTableIndex,
-    ModelIndex, ModelSocketIndex, OptionalModelClipIndex, ParticleEmitterRecord, ResidencyManager,
-    RoomIndex, RuntimeDebugMask, WeaponHitShapeRecord, CHARACTER_ANIMATION_ACTION_COUNT,
-};
-#[cfg(feature = "cd-stream-bench")]
-use psx_level::{
-    LevelCachedRoomCellRecord, LevelCachedRoomSurfaceRecord, LevelCachedRoomVertexRecord,
-    STREAMED_ROOM_CHUNK_FLAG_COLLISION_COMPACT,
+    ModelIndex, ModelSocketIndex, OptionalModelClipIndex, ParticleEmitterRecord, RoomIndex,
+    RuntimeDebugMask, WeaponHitShapeRecord, CHARACTER_ANIMATION_ACTION_COUNT,
 };
 use psx_math::int32::mul_q12_i32;
 use psx_vram::{TexDepth, Tpage};
@@ -122,7 +114,7 @@ mod active_room_streaming;
 mod active_room_visibility;
 mod active_rooms;
 mod box_props;
-#[cfg(feature = "cd-stream-bench")]
+#[cfg(feature = "cd-stream-benchmark")]
 use psx_game_runtime::cd_stream;
 mod character_runtime;
 mod debug_runtime;
@@ -142,8 +134,6 @@ mod sky_runtime;
 mod visibility_runtime;
 mod visible_cell_runtime;
 mod vram_runtime;
-mod vram_upload;
-mod vram_upload_queue;
 
 use active_room_cache::*;
 use active_room_streaming::*;
@@ -223,9 +213,15 @@ static mut CACHED_ROOM_ACCEPTED_CELL_INDICES: [u16; MAX_PRECOMPUTED_VISIBLE_CELL
 #[cfg(feature = "world-grid-visible")]
 static mut CACHED_ROOM_ACCEPTED_CELL_DEPTHS: [i32; MAX_PRECOMPUTED_VISIBLE_CELLS] =
     [0; MAX_PRECOMPUTED_VISIBLE_CELLS];
+// Streamed-room slot buffers live on
+// `psx_game_runtime::room_streaming::StreamedRoomSlots`; this is the
+// example's one instance, in static storage (zero-init, so it stays in
+// `.bss`) next to the scheduler that loads into it.
 #[cfg(feature = "cd-stream-bench")]
-static mut STREAMED_ROOM_WORDS: [[u32; STREAMED_ROOM_SLOT_WORDS]; STREAMED_ROOM_SLOT_COUNT] =
-    [[0; STREAMED_ROOM_SLOT_WORDS]; STREAMED_ROOM_SLOT_COUNT];
+static mut STREAMED_ROOM_SLOTS: StreamedRoomSlots<
+    STREAMED_ROOM_SLOT_WORDS,
+    STREAMED_ROOM_SLOT_COUNT,
+> = StreamedRoomSlots::new();
 // Streamed-room scheduler policy lives on
 // `psx_game_runtime::room_streaming::RoomStreamScheduler`; this is the
 // example's one instance, in static storage next to the slot word
