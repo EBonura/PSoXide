@@ -67,7 +67,7 @@ Result flags:
 - `--dump-hw <ppm>` and `--dump-hash`: final frame image plus vram/display hashes. Look at the frame to confirm gameplay rendered, not menu or sky-only.
 
 Gotchas:
-- `--input-tape` cannot combine with `--hold-forward`, `--hold-run`, or `--sweep`.
+- `--input-tape` cannot combine with `--hold-forward` or `--hold-run`.
 - With `--input-tape`, `--guest-frames` defaults to the tape length (one sample per vblank), so it can be omitted.
 - The headless replay clock applies one tape sample per `step_one_frame` tick (vblank-period budget), mirroring the editor frame-for-frame. Keep it that way; it desyncs camera/collision otherwise (see the note in `cli.rs`).
 - Without a tape, `--guest-frames N` stops on the guest's telemetry frame
