@@ -2332,8 +2332,8 @@ fn zeroed_box<const N: usize>() -> Box<[u8; N]> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scheduler::EventSlot;
     use crate::irq::IrqSource;
+    use crate::scheduler::EventSlot;
 
     fn synthetic_bios() -> Vec<u8> {
         // 512 KiB. First word is 0xDEADBEEF little-endian, then zeros.

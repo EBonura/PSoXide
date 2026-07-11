@@ -690,7 +690,14 @@ unsafe fn transaction(port2: bool, bytes: [u8; 8]) -> [u8; 8] {
         let mut i = 0;
         while i < bytes.len() {
             let is_last = i == bytes.len() - 1;
-            out[i] = ex(port2, Pacing::NoAckWait, bytes[i], is_last, &mut ack, &mut idx);
+            out[i] = ex(
+                port2,
+                Pacing::NoAckWait,
+                bytes[i],
+                is_last,
+                &mut ack,
+                &mut idx,
+            );
             i += 1;
         }
         deselect();

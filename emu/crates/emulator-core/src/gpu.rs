@@ -37,7 +37,6 @@ use status::GpuStatus;
 use crate::vram::{Vram, VRAM_HEIGHT, VRAM_WIDTH};
 use commands::gp0_packet_size;
 
-
 /// Physical address of the GP0 / GPUREAD port.
 pub const GP0_ADDR: u32 = 0x1F80_1810;
 /// Physical address of the GP1 / GPUSTAT port.
@@ -885,7 +884,11 @@ impl Gpu {
             if d.width > 0 && d.height > 0 {
                 // Display width is in pixels; 24bpp packs 2 pixels into
                 // 3 VRAM words.
-                let w_vram = if d.bpp24 { d.width as u32 * 3 / 2 } else { d.width as u32 };
+                let w_vram = if d.bpp24 {
+                    d.width as u32 * 3 / 2
+                } else {
+                    d.width as u32
+                };
                 let r = (d.x as u32 + w_vram - 1).min(VRAM_WIDTH as u32 - 1) as u16;
                 let b = (d.y as u32 + d.height as u32 - 1).min(VRAM_HEIGHT as u32 - 1) as u16;
                 self.wire_cleared_rects.push((d.x, d.y, r, b));
@@ -1990,9 +1993,7 @@ impl Gpu {
         // (ledger HWB-005) rejects on every diagonal-edged triangle.
         // Flat fill has no determinant bail (`require_attrs = false`):
         // collinear triangles still walk their (empty-ish) spans.
-        let Some(setup) =
-            tri_raster_setup([v0, v1, v2], [(0, 0, 0); 3], [(0, 0); 3], false)
-        else {
+        let Some(setup) = tri_raster_setup([v0, v1, v2], [(0, 0, 0); 3], [(0, 0); 3], false) else {
             return; // zero vertical extent
         };
 

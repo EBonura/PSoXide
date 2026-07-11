@@ -1868,7 +1868,17 @@ mod tests {
     #[test]
     fn gameplay_only_inits_once_then_forwards() {
         let mut scene = CountingScene::default();
-        let mut app = GameApp::new(&GAMEPLAY_ONLY, &[], &[], &[], &[], &[], &[], psx_level::UI_SCENE_NONE, &mut scene);
+        let mut app = GameApp::new(
+            &GAMEPLAY_ONLY,
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            psx_level::UI_SCENE_NONE,
+            &mut scene,
+        );
         let mut ctx = test_ctx();
 
         app.init(&mut ctx);
@@ -1892,7 +1902,17 @@ mod tests {
     #[test]
     fn gameplay_only_enters_resource_set_once_before_init() {
         let mut scene = CountingScene::default();
-        let mut app = GameApp::new(&GAMEPLAY_ONLY, &[], &[], &[], &[], &[], &[], psx_level::UI_SCENE_NONE, &mut scene);
+        let mut app = GameApp::new(
+            &GAMEPLAY_ONLY,
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            psx_level::UI_SCENE_NONE,
+            &mut scene,
+        );
         let mut ctx = test_ctx();
 
         app.init(&mut ctx);
@@ -1924,7 +1944,17 @@ mod tests {
             shared_resource_key: Some(42),
             ..Default::default()
         };
-        let mut app = GameApp::new(&FLOW, SCENES, &[], &[], &[], &[], &[], psx_level::UI_SCENE_NONE, &mut scene);
+        let mut app = GameApp::new(
+            &FLOW,
+            SCENES,
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            psx_level::UI_SCENE_NONE,
+            &mut scene,
+        );
         let mut ctx = test_ctx();
 
         app.init(&mut ctx);
@@ -1962,7 +1992,17 @@ mod tests {
         // No shared key: each state is its own set, so UI->gameplay exits the
         // UI set and enters the gameplay set.
         let mut scene = CountingScene::default();
-        let mut app = GameApp::new(&FLOW, SCENES, &[], &[], &[], &[], &[], psx_level::UI_SCENE_NONE, &mut scene);
+        let mut app = GameApp::new(
+            &FLOW,
+            SCENES,
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            psx_level::UI_SCENE_NONE,
+            &mut scene,
+        );
         let mut ctx = test_ctx();
 
         app.init(&mut ctx);
@@ -1980,7 +2020,17 @@ mod tests {
     #[test]
     fn gameplay_entry_loads_before_initialising() {
         let mut scene = CountingScene::default();
-        let mut app = GameApp::new(&GAMEPLAY_ONLY, &[], &[], &[], &[], &[], &[], psx_level::UI_SCENE_NONE, &mut scene);
+        let mut app = GameApp::new(
+            &GAMEPLAY_ONLY,
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            psx_level::UI_SCENE_NONE,
+            &mut scene,
+        );
         let mut ctx = test_ctx();
 
         app.init(&mut ctx);
@@ -2016,7 +2066,17 @@ mod tests {
         };
 
         let mut scene = CountingScene::default();
-        let mut app = GameApp::new(&FLOW, SCENES, &[], &[], &[], &[], &[], psx_level::UI_SCENE_NONE, &mut scene);
+        let mut app = GameApp::new(
+            &FLOW,
+            SCENES,
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            psx_level::UI_SCENE_NONE,
+            &mut scene,
+        );
         let mut ctx = test_ctx();
 
         app.init(&mut ctx);
@@ -2064,7 +2124,17 @@ mod tests {
     #[test]
     fn unknown_scene_id_yields_empty_node_range() {
         let mut scene = CountingScene::default();
-        let app = GameApp::new(&GAMEPLAY_ONLY, &[], &[], &[], &[], &[], &[], psx_level::UI_SCENE_NONE, &mut scene);
+        let app = GameApp::new(
+            &GAMEPLAY_ONLY,
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            psx_level::UI_SCENE_NONE,
+            &mut scene,
+        );
         assert_eq!(app.scene_node_range(999), (0, 0));
     }
 
@@ -2300,7 +2370,17 @@ mod tests {
             },
         ];
         let mut scene = CountingScene::default();
-        let mut app = GameApp::new(&GAMEPLAY_ONLY, &[], &[], &[], &[], &[], CUES, psx_level::UI_SCENE_NONE, &mut scene);
+        let mut app = GameApp::new(
+            &GAMEPLAY_ONLY,
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            CUES,
+            psx_level::UI_SCENE_NONE,
+            &mut scene,
+        );
         let node = LevelUiNodeRecord {
             sfx_first: 0,
             sfx_count: 2,
@@ -2553,7 +2633,17 @@ mod tests {
         // A gameplay-only flow never enters a UI arm, so d-pad presses do
         // not touch menu_focus and updates forward straight to gameplay.
         let mut scene = CountingScene::default();
-        let mut app = GameApp::new(&GAMEPLAY_ONLY, &[], &[], &[], &[], &[], &[], psx_level::UI_SCENE_NONE, &mut scene);
+        let mut app = GameApp::new(
+            &GAMEPLAY_ONLY,
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            psx_level::UI_SCENE_NONE,
+            &mut scene,
+        );
         let mut ctx = test_ctx();
         app.init(&mut ctx);
         complete_loading(&mut app, &mut ctx);
@@ -2704,7 +2794,7 @@ mod tests {
         name: "music",
         node_first: 0,
         node_count: 3,
-            focus_style: psx_level::LevelUiFocusStyle::DEFAULT,
+        focus_style: psx_level::LevelUiFocusStyle::DEFAULT,
     }];
     static MUSIC_FLOW: GameFlow = GameFlow {
         states: &[FlowState::UiScene { scene: 9 }],

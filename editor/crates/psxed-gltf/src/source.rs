@@ -794,4 +794,3 @@ pub(crate) fn compute_global_matrix(
     done[index] = true;
     global
 }
-

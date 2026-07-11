@@ -37,14 +37,34 @@ type Reply<T> = oneshot::Sender<Result<T, String>>;
 enum Cmd {
     Screenshot(Reply<Vec<u8>>),
     DumpVram(Reply<Vec<u8>>),
-    ReadRam { addr: u32, len: u32, reply: Reply<Vec<u8>> },
-    ReadWord { addr: u32, reply: Reply<u32> },
-    WriteRam { addr: u32, bytes: Vec<u8>, reply: Reply<usize> },
+    ReadRam {
+        addr: u32,
+        len: u32,
+        reply: Reply<Vec<u8>>,
+    },
+    ReadWord {
+        addr: u32,
+        reply: Reply<u32>,
+    },
+    WriteRam {
+        addr: u32,
+        bytes: Vec<u8>,
+        reply: Reply<usize>,
+    },
     Pause(Reply<String>),
     Resume(Reply<String>),
-    Step { frames: u32, reply: Reply<String> },
-    ToggleWireframe { on: Option<bool>, reply: Reply<bool> },
-    LoadGame { path: String, reply: Reply<String> },
+    Step {
+        frames: u32,
+        reply: Reply<String>,
+    },
+    ToggleWireframe {
+        on: Option<bool>,
+        reply: Reply<bool>,
+    },
+    LoadGame {
+        path: String,
+        reply: Reply<String>,
+    },
     Reset(Reply<String>),
     Status(Reply<String>),
 }
@@ -448,8 +468,7 @@ impl PsxMcp {
         &self,
         Parameters(WriteRamReq { addr, hex }): Parameters<WriteRamReq>,
     ) -> Result<CallToolResult, ErrorData> {
-        let bytes =
-            parse_hex(&hex).map_err(|e| ErrorData::invalid_params(e, None))?;
+        let bytes = parse_hex(&hex).map_err(|e| ErrorData::invalid_params(e, None))?;
         let n = self
             .call(|reply| Cmd::WriteRam { addr, bytes, reply })
             .await?;
@@ -543,7 +562,10 @@ mod tests {
     #[test]
     fn parse_hex_roundtrips_and_ignores_whitespace() {
         assert_eq!(parse_hex("deadbeef").unwrap(), vec![0xde, 0xad, 0xbe, 0xef]);
-        assert_eq!(parse_hex("de ad be ef").unwrap(), vec![0xde, 0xad, 0xbe, 0xef]);
+        assert_eq!(
+            parse_hex("de ad be ef").unwrap(),
+            vec![0xde, 0xad, 0xbe, 0xef]
+        );
         assert_eq!(hex(&[0xde, 0xad]), "dead");
         assert!(parse_hex("abc").is_err()); // odd length
         assert!(parse_hex("zz").is_err()); // non-hex
@@ -595,7 +617,10 @@ mod tests {
         assert!(resp.contains("protocolVersion"), "no init result: {resp}");
         let session = resp
             .lines()
-            .find_map(|l| l.strip_prefix("mcp-session-id: ").or_else(|| l.strip_prefix("Mcp-Session-Id: ")))
+            .find_map(|l| {
+                l.strip_prefix("mcp-session-id: ")
+                    .or_else(|| l.strip_prefix("Mcp-Session-Id: "))
+            })
             .map(|s| s.trim().to_string())
             .expect("server returned no session id");
 
@@ -613,7 +638,13 @@ mod tests {
             Some(&session),
         )
         .await;
-        for tool in ["screenshot", "toggle_wireframe", "read_ram", "load_game", "status"] {
+        for tool in [
+            "screenshot",
+            "toggle_wireframe",
+            "read_ram",
+            "load_game",
+            "status",
+        ] {
             assert!(list.contains(tool), "tools/list missing {tool}: {list}");
         }
     }

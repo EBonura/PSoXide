@@ -640,7 +640,8 @@ pub fn import_animation_library(
             detail: format!("{e:?}"),
         }
     })?;
-    let skeleton_id = find_or_add_skeleton(project, library_name, SkeletonResource::from_model(&model));
+    let skeleton_id =
+        find_or_add_skeleton(project, library_name, SkeletonResource::from_model(&model));
 
     let safe = sanitize_name(library_name, "library");
     let dir = project_root.join("assets").join("animations").join(&safe);

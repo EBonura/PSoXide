@@ -178,14 +178,22 @@ mod tests {
     fn mat_approx(a: Mat3, b: Mat3) {
         for i in 0..3 {
             for j in 0..3 {
-                assert!(approx(a[i][j], b[i][j]), "i{i} j{j}: {} != {}", a[i][j], b[i][j]);
+                assert!(
+                    approx(a[i][j], b[i][j]),
+                    "i{i} j{j}: {} != {}",
+                    a[i][j],
+                    b[i][j]
+                );
             }
         }
     }
 
     #[test]
     fn identity_delta_is_passthrough() {
-        let fl = FreelookState { enabled: true, ..Default::default() };
+        let fl = FreelookState {
+            enabled: true,
+            ..Default::default()
+        };
         let (rt2, tr2) = compose(ID, [10.0, 20.0, 30.0], &fl);
         mat_approx(rt2, ID);
         assert!(approx(tr2[0], 10.0) && approx(tr2[1], 20.0) && approx(tr2[2], 30.0));
@@ -193,14 +201,24 @@ mod tests {
 
     #[test]
     fn yaw_90_rotates_identity_to_yaw_matrix() {
-        let fl = FreelookState { enabled: true, yaw: std::f32::consts::FRAC_PI_2, ..Default::default() };
+        let fl = FreelookState {
+            enabled: true,
+            yaw: std::f32::consts::FRAC_PI_2,
+            ..Default::default()
+        };
         let (rt2, _) = compose(ID, [0.0; 3], &fl);
         mat_approx(rt2, [[0.0, 0.0, 1.0], [0.0, 1.0, 0.0], [-1.0, 0.0, 0.0]]);
     }
 
     #[test]
     fn translation_offset_adds_in_view_space() {
-        let fl = FreelookState { enabled: true, tx: 5.0, ty: -7.0, tz: 100.0, ..Default::default() };
+        let fl = FreelookState {
+            enabled: true,
+            tx: 5.0,
+            ty: -7.0,
+            tz: 100.0,
+            ..Default::default()
+        };
         let (_, tr2) = compose(ID, [1.0, 2.0, 3.0], &fl);
         assert!(approx(tr2[0], 6.0) && approx(tr2[1], -5.0) && approx(tr2[2], 103.0));
     }
