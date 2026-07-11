@@ -10,7 +10,8 @@
 use emulator_core::{
     button,
     input_tape::{read_tape, write_tape, PadSample},
-    Bus, Sio0,
+    sio::Sio0,
+    Bus,
 };
 
 /// JOY_CTRL select bit (`1 << 1`): asserts /DTR so port 1 is addressed.

@@ -49,38 +49,32 @@
 //! - `emulator-core` -- owns `Gpu` (CPU rasterizer + VRAM + cmd_log)
 //!   and `Bus`. Its CPU rasterizer is the source of truth.
 
-pub mod decode;
-pub mod from_ot;
-pub mod interpreter;
-pub mod pipeline;
-pub mod primitive;
-pub mod rasterizer;
-pub mod replay;
-pub mod scanline;
-pub mod target;
-pub mod translator;
-pub mod vram;
+// Internals: two renderer implementations over one decode layer. The
+// crate's public surface is deliberately tiny (see the re-exports
+// below) -- everything else is plumbing the frontend never touches.
+pub(crate) mod decode;
+mod from_ot;
+pub(crate) mod interpreter;
+pub(crate) mod pipeline;
+pub(crate) mod primitive;
+pub(crate) mod rasterizer;
+mod replay;
+pub(crate) mod scanline;
+pub(crate) mod target;
+mod translator;
+pub(crate) mod vram;
 
+// The whole external API: the Enhanced renderer (HwRenderer +
+// ScaleMode below), the Accurate/oracle backend, the OT-to-cmd_log
+// bridge the editor preview uses, and the VRAM dimensions.
 pub use from_ot::build_cmd_log;
-pub use pipeline::{BlendKind, HwPipeline, HwVertex};
-pub use target::{RenderTarget, MAX_SCALE, VRAM_HEIGHT, VRAM_WIDTH};
-pub use translator::{DrawRun, TranslatedFrame, Translator};
-
-// Accurate (compute) backend surface, formerly the psx-gpu-compute
-// crate root. `vram` also defines VRAM_WIDTH/VRAM_HEIGHT with the
-// same values as `target`; reach them via the module path.
-pub use decode::{
-    apply_primitive_tpage, decode_blend_mode, decode_clut, decode_tint, decode_uv, decode_vertex,
-    is_raw_texture, is_semi_trans, rgb24_to_bgr15, sign_extend_11, ReplayState,
-};
-pub use primitive::{
-    BlendMode, DrawArea, Fill, MonoRect, MonoTri, PrimFlags, ShadedTexTri, ShadedTri,
-    TexQuadBilinear, TexRect, TexTri, Tpage,
-};
-pub use interpreter::{GpuEvent, Interpreter};
-pub use rasterizer::Rasterizer;
 pub use replay::ComputeBackend;
-pub use vram::{VramGpu, VramGpuError, VRAM_FORMAT};
+pub use target::{VRAM_HEIGHT, VRAM_WIDTH};
+pub use translator::Translator;
+
+use pipeline::HwPipeline;
+use target::{RenderTarget, MAX_SCALE};
+use translator::{DrawRun, TranslatedFrame};
 
 use emulator_core::gpu::GpuCmdLogEntry;
 use emulator_core::Gpu;

@@ -44,7 +44,7 @@ fn main() {
     bus.cdrom.insert_disc(Some(disc));
     let mut cpu = Cpu::new();
 
-    let mut stopped_at: Option<(u64, emulator_core::ExecutionError)> = None;
+    let mut stopped_at: Option<(u64, emulator_core::cpu::ExecutionError)> = None;
     for i in 0..n {
         if let Err(e) = cpu.step(&mut bus) {
             stopped_at = Some((i, e));
