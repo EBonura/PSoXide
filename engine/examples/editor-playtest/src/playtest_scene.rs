@@ -288,7 +288,7 @@ impl Scene for Playtest {
             let mut room_stats_total = GridVisibilityStats::default();
 
             let active_draw_order = active_room_draw_order(
-                &self.active_rooms,
+                &self.window.rooms,
                 camera,
                 &self.visibility.result,
                 self.room_index,
@@ -299,7 +299,7 @@ impl Scene for Playtest {
                     continue;
                 }
                 let active_slot = active_slot as usize;
-                let Some(active) = self.active_rooms[active_slot] else {
+                let Some(active) = self.window.rooms[active_slot] else {
                     continue;
                 };
                 let draws_room = self.portal_visibility_draws_room(active.index);
@@ -919,7 +919,7 @@ impl Scene for Playtest {
                     if active_slot == INVALID_ACTIVE_ROOM_SLOT {
                         continue;
                     }
-                    let Some(active) = self.active_rooms[active_slot as usize] else {
+                    let Some(active) = self.window.rooms[active_slot as usize] else {
                         continue;
                     };
                     if !self.portal_visibility_draws_room(active.index) {
@@ -1030,7 +1030,7 @@ impl Scene for Playtest {
             );
             telemetry::counter(
                 telemetry::counter::ROOM_CHUNK_CACHE_SKIPS,
-                self.active_room_cache_skips as u32,
+                self.window.cache_skips as u32,
             );
             #[cfg(feature = "world-grid-visible")]
             {

@@ -1,3 +1,14 @@
+//! Glue over `psx_game_runtime::room_window`: threads the cooked room
+//! table, the schedule knobs, and the streaming/residency-coupled room
+//! builders into the crate-owned [`RoomWindow`] instance held by
+//! `Playtest::window`. The residency owner, the full-rebuild and
+//! streamed-preload orchestration (both interleave current-room field
+//! application with VRAM/residency-coupled builders), the floor-link
+//! switching, and the room-crossing logic stay here until those
+//! modules move.
+//!
+//! [`RoomWindow`]: psx_game_runtime::room_window::RoomWindow
+
 use super::*;
 
 impl Playtest {
@@ -8,44 +19,19 @@ impl Playtest {
         active_limit: usize,
         next_slot: &mut usize,
     ) {
-        let retained_limit = next_slot
-            .saturating_add(RUNTIME_SCHEDULE.retained_inactive_rooms)
-            .min(active_limit)
-            .min(MAX_ACTIVE_ROOMS);
-        let mut previous_slot = 0usize;
-        while *next_slot < retained_limit && previous_slot < MAX_ACTIVE_ROOMS {
-            let Some(previous) = previous_active_rooms[previous_slot] else {
-                previous_slot += 1;
-                continue;
-            };
-            previous_slot += 1;
-            if previous.stream_slot != active_room_stream_slot(previous.index)
-                || self.active_room_contains(previous.index)
-            {
-                continue;
-            }
-            let Some(record) = ROOMS.get(previous.index.to_usize()) else {
-                continue;
-            };
-            self.active_rooms[*next_slot] =
-                Some(previous.with_current_room_offsets(record, current_record));
-            *next_slot += 1;
-        }
-    }
-
-    pub(super) fn active_room_contains(&self, index: RoomIndex) -> bool {
-        let mut slot = 0usize;
-        while slot < MAX_ACTIVE_ROOMS {
-            if self.active_rooms[slot].is_some_and(|active| active.index == index) {
-                return true;
-            }
-            slot += 1;
-        }
-        false
+        self.window.retain_previous_rooms(
+            ROOMS,
+            previous_active_rooms,
+            current_record,
+            RUNTIME_SCHEDULE.retained_inactive_rooms,
+            active_limit,
+            next_slot,
+            active_room_stream_slot,
+        );
     }
 
     pub(super) fn load_active_room_window(&mut self) {
-        self.active_room_job = ActiveRoomWindowJob::EMPTY;
+        self.window.job = ActiveRoomWindowJob::EMPTY;
         if !self.chunked_level() {
             self.rebuild_active_room_window(true);
             return;
@@ -69,26 +55,8 @@ impl Playtest {
         let Some(current_record) = ROOMS.get(self.room_index.to_usize()) else {
             return;
         };
-        let mut slot = 0usize;
-        while slot < MAX_ACTIVE_ROOMS {
-            let Some(active) = self.active_rooms[slot] else {
-                slot += 1;
-                continue;
-            };
-            let Some(record) = ROOMS.get(active.index.to_usize()) else {
-                self.active_rooms[slot] = None;
-                slot += 1;
-                continue;
-            };
-            if active.stream_slot != active_room_stream_slot(active.index) {
-                self.active_rooms[slot] = None;
-                slot += 1;
-                continue;
-            }
-            self.active_rooms[slot] =
-                Some(active.with_current_room_offsets(record, current_record));
-            slot += 1;
-        }
+        self.window
+            .rebase_to_current_room(ROOMS, current_record, active_room_stream_slot);
     }
 
     pub(super) fn begin_active_room_window_job(&mut self, update_streaming: bool) {
@@ -127,130 +95,70 @@ impl Playtest {
             i += 1;
         }
 
-        self.active_room_anchor = self.motor.position();
-        self.active_room_cache_skips = 0;
-        self.active_room_job = ActiveRoomWindowJob {
-            active: true,
-            update_streaming,
-            current_room: current_index,
+        self.window.begin_job(
+            current_index,
             requested_rooms,
             requested_count,
-            cursor: 0,
-            next_slot: 0,
-            rooms: [const { None }; MAX_ACTIVE_ROOMS],
-            previous_rooms: self.active_rooms,
-        };
-        telemetry::counter(telemetry::counter::ROOM_WINDOW_REBUILDS, 1);
+            update_streaming,
+            self.motor.position(),
+        );
     }
 
     pub(super) fn step_active_room_window_job(&mut self) {
-        if !self.active_room_job.active {
+        if !self.window.job.active {
             return;
         }
-        let current_room = self.active_room_job.current_room;
+        let current_room = self.window.job.current_room;
         if current_room != self.room_index {
-            self.active_room_job = ActiveRoomWindowJob::EMPTY;
+            self.window.job = ActiveRoomWindowJob::EMPTY;
             return;
         }
         let Some(current_record) = ROOMS.get(current_room.to_usize()) else {
-            self.active_room_job = ActiveRoomWindowJob::EMPTY;
+            self.window.job = ActiveRoomWindowJob::EMPTY;
             return;
         };
 
         // Residency is owned by update_room_residency now; the build job no
         // longer requests streaming itself, it only builds from resident rooms.
 
+        #[cfg(feature = "cd-stream-bench")]
+        let build_blocked = |index: RoomIndex| {
+            streamed_room_is_loading(index) || !streamed_room_is_resident(index)
+        };
+        #[cfg(not(feature = "cd-stream-bench"))]
+        let build_blocked = |_: RoomIndex| false;
+
         telemetry::stage_begin(telemetry::stage::ACTIVE_ROOM_WINDOW);
-        let mut built_this_tick = 0usize;
-        let mut skipped = 0u16;
-        let mut unbuilt_room = INVALID_ROOM_INDEX;
-        let mut current_active = None;
-        {
-            let job = &mut self.active_room_job;
-            while job.cursor < job.requested_count
-                && job.next_slot < MAX_ACTIVE_ROOMS
-                && built_this_tick < RUNTIME_SCHEDULE.active_job_builds_per_tick
-            {
-                let index = job.requested_rooms[job.cursor];
-                if index == INVALID_ROOM_INDEX {
-                    job.cursor += 1;
-                    continue;
-                }
-                let Some(record) = ROOMS.get(index.to_usize()) else {
-                    job.cursor += 1;
-                    continue;
-                };
-                match reuse_or_build_active_room(
-                    job.next_slot,
-                    index,
-                    record,
-                    current_record,
-                    &job.previous_rooms,
-                ) {
-                    Some(active)
-                        if job.cursor == 0
-                            || active.render_room.is_some()
-                            || active.surface_cache.ready =>
-                    {
-                        job.rooms[job.next_slot] = Some(active);
-                        if active.index == current_room {
-                            current_active = Some(active);
-                        }
-                        job.next_slot += 1;
-                        job.cursor += 1;
-                        built_this_tick += 1;
-                    }
-                    Some(_) => {
-                        skipped = skipped.saturating_add(1);
-                        job.cursor += 1;
-                    }
-                    None => {
-                        unbuilt_room = index;
-                        #[cfg(feature = "cd-stream-bench")]
-                        {
-                            if streamed_room_is_loading(index) || !streamed_room_is_resident(index)
-                            {
-                                break;
-                            }
-                            job.cursor += 1;
-                        }
-                        #[cfg(not(feature = "cd-stream-bench"))]
-                        {
-                            job.cursor += 1;
-                        }
-                    }
-                }
-            }
+        let step = self.window.step_job(
+            ROOMS,
+            RUNTIME_SCHEDULE.active_job_builds_per_tick,
+            |slot, index, record, previous_rooms| {
+                reuse_or_build_active_room(slot, index, record, current_record, previous_rooms)
+            },
+            build_blocked,
+        );
+        if step.unbuilt_room != INVALID_ROOM_INDEX {
+            self.mark_visible_room_unbuilt(step.unbuilt_room);
         }
-        self.active_room_cache_skips = self.active_room_cache_skips.saturating_add(skipped);
-        if unbuilt_room != INVALID_ROOM_INDEX {
-            self.mark_visible_room_unbuilt(unbuilt_room);
-        }
-        if let Some(active) = current_active {
+        if let Some(active) = step.current_active {
             self.apply_current_active_room(active);
         }
 
         telemetry::counter(
             telemetry::counter::ROOM_WINDOW_BUILT_CHUNKS,
-            built_this_tick as u32,
+            step.built as u32,
         );
         telemetry::stage_end(telemetry::stage::ACTIVE_ROOM_WINDOW);
 
-        if self.active_room_job.cursor >= self.active_room_job.requested_count
-            || self.active_room_job.next_slot >= MAX_ACTIVE_ROOMS
-        {
-            self.active_rooms = self.active_room_job.rooms;
-            let previous_rooms = self.active_room_job.previous_rooms;
-            let mut next_slot = self.active_room_job.next_slot;
-            self.retain_previous_active_rooms(
-                &previous_rooms,
-                current_record,
-                room_active_chunk_limit(current_record),
-                &mut next_slot,
-            );
+        if self.window.finish_job(
+            ROOMS,
+            current_record,
+            RUNTIME_SCHEDULE.retained_inactive_rooms,
+            room_active_chunk_limit(current_record),
+            active_room_stream_slot,
+        ) {
             self.apply_current_active_room_fields();
             self.room_materials_unresolved = true;
-            self.active_room_job = ActiveRoomWindowJob::EMPTY;
         }
     }
 
@@ -262,7 +170,7 @@ impl Playtest {
         self.material_count = 0;
         let mut slot = 0usize;
         while slot < MAX_ACTIVE_ROOMS {
-            if let Some(active) = self.active_rooms[slot] {
+            if let Some(active) = self.window.rooms[slot] {
                 if active.index == self.room_index {
                     self.apply_current_active_room(active);
                     return;
@@ -296,7 +204,7 @@ impl Playtest {
         let mut unresolved = false;
         let mut slot = 0usize;
         while slot < MAX_ACTIVE_ROOMS {
-            if let Some(active) = self.active_rooms[slot] {
+            if let Some(active) = self.window.rooms[slot] {
                 if let Some(record) = ROOMS.get(active.index.to_usize()) {
                     let (materials, material_count, all_resolved) =
                         build_runtime_room_material_table(record);
@@ -310,7 +218,7 @@ impl Playtest {
                         let mut active = active;
                         active.materials = materials;
                         active.material_count = material_count;
-                        self.active_rooms[slot] = Some(active);
+                        self.window.rooms[slot] = Some(active);
                     }
                 }
             }
@@ -347,15 +255,15 @@ impl Playtest {
 
         telemetry::stage_begin(telemetry::stage::ACTIVE_ROOM_WINDOW);
         telemetry::counter(telemetry::counter::ROOM_WINDOW_REBUILDS, 1);
-        let previous_active_rooms = self.active_rooms;
+        let previous_active_rooms = self.window.rooms;
         self.room = None;
         self.current_collision_room = None;
         self.current_ambient_rgb = [0x80, 0x80, 0x80];
         self.materials = [room_material_fallback(); MAX_ROOM_MATERIALS];
         self.material_count = 0;
-        self.active_rooms = [const { None }; MAX_ACTIVE_ROOMS];
+        self.window.rooms = [const { None }; MAX_ACTIVE_ROOMS];
         self.visibility.candidates = 0;
-        self.active_room_cache_skips = 0;
+        self.window.cache_skips = 0;
         #[cfg(all(
             feature = "world-grid-visible",
             not(feature = "vis-full-active-chunks")
@@ -377,7 +285,7 @@ impl Playtest {
         let desired_visible_count = self.portal_visible_room_limit(current_record);
         let mut next_slot = 0usize;
         let mut visible_slot = 0usize;
-        self.active_room_anchor = player;
+        self.window.anchor = player;
 
         while visible_slot < desired_visible_count && next_slot < MAX_ACTIVE_ROOMS {
             let index = self.visibility.result.rooms[visible_slot].room;
@@ -403,11 +311,11 @@ impl Playtest {
                         self.current_ambient_rgb = active.ambient_rgb;
                         self.set_current_materials(&active);
                     }
-                    self.active_rooms[next_slot] = Some(active);
+                    self.window.rooms[next_slot] = Some(active);
                     next_slot += 1;
                 }
                 Some(_) => {
-                    self.active_room_cache_skips = self.active_room_cache_skips.saturating_add(1);
+                    self.window.cache_skips = self.window.cache_skips.saturating_add(1);
                 }
                 None => {
                     self.mark_visible_room_unbuilt(index);
@@ -431,7 +339,7 @@ impl Playtest {
                 self.current_collision_room = Some(active.collision_room);
                 self.current_ambient_rgb = active.ambient_rgb;
                 self.set_current_materials(&active);
-                self.active_rooms[next_slot] = Some(active);
+                self.window.rooms[next_slot] = Some(active);
                 next_slot += 1;
             }
         }
@@ -450,7 +358,7 @@ impl Playtest {
                     self.current_collision_room = Some(active.collision_room);
                     self.current_ambient_rgb = active.ambient_rgb;
                     self.set_current_materials(&active);
-                    self.active_rooms[0] = Some(active);
+                    self.window.rooms[0] = Some(active);
                     next_slot = 1;
                 }
             }
@@ -505,7 +413,7 @@ impl Playtest {
             .min(self.visibility.result.room_count)
             .min(room_active_chunk_limit(current_record));
 
-        let previous_active_rooms = self.active_rooms;
+        let previous_active_rooms = self.window.rooms;
         let mut rebuilt = [const { None }; MAX_ACTIVE_ROOMS];
         let mut next_slot = 0usize;
         let active_limit = room_active_chunk_limit(current_record).min(MAX_ACTIVE_ROOMS);
@@ -552,8 +460,7 @@ impl Playtest {
                         next_slot += 1;
                     }
                     Some(_) => {
-                        self.active_room_cache_skips =
-                            self.active_room_cache_skips.saturating_add(1);
+                        self.window.cache_skips = self.window.cache_skips.saturating_add(1);
                     }
                     None => {
                         self.mark_visible_room_unbuilt(index);
@@ -565,7 +472,7 @@ impl Playtest {
             }
             visible_slot += 1;
         }
-        self.active_rooms = rebuilt;
+        self.window.rooms = rebuilt;
         self.retain_previous_active_rooms(
             &previous_active_rooms,
             current_record,
@@ -577,7 +484,13 @@ impl Playtest {
 
     #[cfg(feature = "cd-stream-bench")]
     pub(super) fn pump_room_stream(&mut self, max_sectors: usize) -> bool {
-        unsafe { ROOM_STREAM_SCHEDULER.pump(&mut STREAMED_ROOM_WORDS, max_sectors) }
+        unsafe {
+            ROOM_STREAM_SCHEDULER.pump(
+                &mut STREAMED_ROOM_WORDS,
+                max_sectors,
+                debug_log_stream_entry,
+            )
+        }
     }
 
     /// The residency owner: computes the single desired resident set -- the
@@ -629,7 +542,17 @@ impl Playtest {
         }
         self.resident_desired = desired;
         self.resident_desired_count = count;
-        unsafe { ROOM_STREAM_SCHEDULER.reconcile_residency(&desired, count) };
+        unsafe {
+            ROOM_STREAM_SCHEDULER.reconcile_residency::<STREAMED_ROOM_SLOT_BYTES>(
+                &desired,
+                count,
+                RUNTIME_SCHEDULE.stream_load_batch_count,
+                WORLD_PACK_START_LBA,
+                WORLD_PACK_TOC,
+                debug_log_stream_plan,
+                debug_log_stream_entry,
+            )
+        };
         // The ring only moves when the camera changes room, so the desired set is
         // stable between crossings; debounce eviction on the camera room (not the
         // player) and let the scheduler LRU absorb visible-set jitter.
@@ -654,8 +577,8 @@ impl Playtest {
             };
 
             if stream_progress {
-                if self.active_room_job.active {
-                    self.active_room_job.update_streaming = true;
+                if self.window.job.active {
+                    self.window.job.update_streaming = true;
                 } else {
                     self.begin_active_room_window_job(true);
                 }
@@ -663,7 +586,7 @@ impl Playtest {
 
             self.step_active_room_window_job();
 
-            if self.current_collision_room.is_some() && !self.active_room_job.active {
+            if self.current_collision_room.is_some() && !self.window.job.active {
                 break;
             }
 
@@ -846,7 +769,7 @@ impl Playtest {
         let view = self.active_room_selection_view();
         let (view_sin_key, view_cos_key, view_pitch_sin_key, view_pitch_cos_key) =
             portal_visibility_view_keys(view);
-        let moved_far = point_xz_axis_moved_at_least(player, self.active_room_anchor, threshold);
+        let moved_far = point_xz_axis_moved_at_least(player, self.window.anchor, threshold);
         let camera_moved_far = point_xyz_axis_moved_at_least(
             view.position,
             self.visibility.view_anchor,
@@ -864,7 +787,7 @@ impl Playtest {
             return;
         }
         self.refresh_portal_visibility_for_view(self.room_index, record, view);
-        if !self.active_room_job.active && !self.portal_visible_rooms_are_active(record) {
+        if !self.window.job.active && !self.portal_visible_rooms_are_active(record) {
             self.begin_active_room_window_job(true);
         }
     }
@@ -878,7 +801,7 @@ impl Playtest {
         };
         let view = self.active_room_selection_view();
         self.refresh_portal_visibility_for_view(self.room_index, record, view);
-        if !self.active_room_job.active && !self.portal_visible_rooms_are_active(record) {
+        if !self.window.job.active && !self.portal_visible_rooms_are_active(record) {
             self.begin_active_room_window_job(true);
         }
     }

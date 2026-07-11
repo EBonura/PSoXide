@@ -1,16 +1,7 @@
-#[derive(Copy, Clone)]
-pub(crate) struct RuntimeScheduleConfig {
-    pub(crate) portal_max_depth: u8,
-    pub(crate) portal_min_width_q12: i32,
-    pub(crate) active_refresh_sectors: i32,
-    pub(crate) active_job_builds_per_tick: usize,
-    pub(crate) retained_inactive_rooms: usize,
-    pub(crate) post_cross_render_debug_frames: u8,
-    pub(crate) stream_load_batch_count: usize,
-    pub(crate) stream_pump_sectors_per_tick: usize,
-    pub(crate) stream_bootstrap_pump_limit: usize,
-    pub(crate) max_fixed_ticks_before_visual: u16,
-}
+//! This example's instantiation of the crate-owned
+//! [`RuntimeScheduleConfig`] policy knobs.
+
+use psx_game_runtime::schedule::RuntimeScheduleConfig;
 
 /// Central runtime scheduling policy.
 ///
