@@ -71,6 +71,7 @@ pub mod telemetry;
 pub mod third_person_camera;
 mod time;
 pub mod transform;
+mod transitions;
 pub mod ui;
 pub mod world;
 pub mod world_render;
