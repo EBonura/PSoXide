@@ -74,7 +74,7 @@ pub use translator::Translator;
 
 use pipeline::HwPipeline;
 use target::{RenderTarget, MAX_SCALE};
-use translator::{DrawRun, TranslatedFrame};
+use translator::DrawRun;
 
 use emulator_core::gpu::GpuCmdLogEntry;
 use emulator_core::Gpu;
