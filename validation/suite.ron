@@ -19,8 +19,8 @@
                     hold_forward: false,
                     hold_run: false,
                     expected: (
-                        display: Some((hash: "0x413932ddb97fc77f", width: 320, height: 240, byte_len: 153600)),
-                        vram: Some("0x8e184e9f57db4293"),
+                        display: Some((hash: "0xc009f6733d377f66", width: 320, height: 240, byte_len: 153600)),
+                        vram: Some("0x5e7f7ca302f47c7c"),
                     ),
                 ),
                 (
@@ -35,8 +35,8 @@
                     hold_forward: true,
                     hold_run: false,
                     expected: (
-                        display: Some((hash: "0xf02c4cfd1053085d", width: 320, height: 240, byte_len: 153600)),
-                        vram: Some("0x94d7d95fce3b951f"),
+                        display: Some((hash: "0xc009f6733d377f66", width: 320, height: 240, byte_len: 153600)),
+                        vram: Some("0x5e7f7ca302f47c7c"),
                     ),
                 ),
             ],

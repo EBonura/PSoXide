@@ -1151,29 +1151,15 @@ pub fn cue_referenced_files(cue_path: &Path) -> Result<Vec<PathBuf>, String> {
     Ok(files)
 }
 
-/// Return the decoded `.img` sidecar for a `.ccd` sheet, or the
-/// `.img.ecm` sidecar when the decoded image has not been created yet.
-pub fn primary_image_from_ccd(ccd_path: &Path) -> Option<PathBuf> {
-    let decoded_img = ccd_decoded_img_path(ccd_path);
-    if decoded_img.exists() {
-        return Some(decoded_img);
-    }
-    let ecm_img = ecm_sidecar_path(&decoded_img);
-    ecm_img.exists().then_some(ecm_img)
-}
-
 /// FNV-1a-64 over any number of input slices, rendered as a
 /// 16-hex-char string. Same algorithm the parity-cache uses -- no
 /// adversarial input, just a stable fingerprint.
 fn fingerprint(parts: &[&[u8]]) -> String {
-    let mut h = 0xCBF2_9CE4_8422_2325u64;
+    let mut h = psx_hw::hash::Fnv1a64::new();
     for p in parts {
-        for &b in *p {
-            h ^= b as u64;
-            h = h.wrapping_mul(0x0100_0000_01B3);
-        }
+        h.update(p);
     }
-    format!("{h:016x}")
+    format!("{:016x}", h.finish())
 }
 
 fn exe_fingerprint(path: &Path, fallback_title: &str) -> String {

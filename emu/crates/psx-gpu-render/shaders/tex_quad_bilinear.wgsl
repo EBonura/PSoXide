@@ -80,11 +80,13 @@ fn i64_div_i32(a: I64, divisor: i32) -> I64 {
     // time it's being divided here (it's the difference of two
     // 5-bit-channel-times-Q16.16 values, whose magnitude is bounded
     // by 255 << 16 = 16M, well within i32). So we can safely
-    // collapse to i32 division.
-    let n_i32 = (i32(a.lo)) | (a.hi << 0); // hi already 0 or -1 typically
-    // Defensive: if `a.hi` is non-zero AND inconsistent with the
-    // sign of a.lo's MSB, the value didn't fit in i32 and we'd
-    // overflow. In practice rasterizer values are within range.
+    // collapse to i32 division: for an in-range value the two's-
+    // complement bits ARE `a.lo` (hi is pure sign extension, 0 or
+    // -1). The old `i32(a.lo) | a.hi` collapse forced every
+    // NEGATIVE numerator to -1, so reversed-UV (X-flipped sprite)
+    // quads walked their texture with delta 0 instead of a negative
+    // step -- alttp gameplay chunk-16 parity divergence.
+    let n_i32 = i32(a.lo);
     let q = n_i32 / divisor;
     if q < 0 { return I64(-1, u32(q)); }
     return I64(0, u32(q));
@@ -248,6 +250,19 @@ fn rasterize(@builtin(global_invocation_id) gid: vec3<u32>) {
     var fg: u32;
     if (prim.flags & FLAG_RAW_TEXTURE) != 0u {
         fg = texel;
+    } else if (prim.flags & FLAG_DITHER) != 0u && (prim.tint & 0xFFFFFFu) != 0x808080u {
+        // Flat-tint textured prims dither their modulated texels when
+        // GP0 0xE1 bit 9 is set -- same rule as the CPU's
+        // `modulate_tint_dithered` in the axis-aligned quad path.
+        // Identity tint (0x808080) matches the CPU's RAW_TEXTURE_TINT
+        // sentinel and is never dithered.
+        fg = modulate_dithered(
+            texel,
+            prim.tint & 0xFFu,
+            (prim.tint >> 8u) & 0xFFu,
+            (prim.tint >> 16u) & 0xFFu,
+            px, py,
+        );
     } else {
         fg = modulate_tint(texel, prim.tint);
     }
