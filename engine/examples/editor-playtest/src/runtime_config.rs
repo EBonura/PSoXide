@@ -1,4 +1,9 @@
 use super::*;
+#[cfg(feature = "cd-stream-bench")]
+use psx_game_runtime::room_streaming::{RoomStreamScheduler, StreamedRoomSlots};
+#[cfg(feature = "cd-stream-bench")]
+use psx_game_runtime::vram::UiImageCache;
+use psx_game_runtime::vram::{FontPackScratch, VramRuntime, FONT_ATLAS_MAX_ROWS};
 
 pub(super) const fn cached_room_depth_mode() -> CachedRoomDepthMode {
     match CACHED_ROOM_DEPTH_MODE {
@@ -345,17 +350,6 @@ pub(super) const PORTAL_ROOM_BOUNDS_MIN_Y: i32 = -4096;
 pub(super) const PORTAL_ROOM_BOUNDS_MAX_Y: i32 = 8192;
 pub(super) type RuntimePortalVisibility =
     PortalVisibilityResult<MAX_ACTIVE_ROOMS, MAX_PORTAL_FRUSTUMS, MAX_PORTAL_FRONTIER_ROOMS>;
-/// Crate-owned portal-visibility state instantiated with this example's
-/// budget consts (its `result` field is a [`RuntimePortalVisibility`]).
-pub(super) type RuntimeRoomVisibility = psx_game_runtime::room_visibility::RoomVisibility<
-    MAX_ACTIVE_ROOMS,
-    MAX_PORTAL_FRUSTUMS,
-    MAX_PORTAL_FRONTIER_ROOMS,
-    MAX_PORTAL_ROOM_BOUNDS,
->;
-/// Crate-owned active-room window state instantiated with this
-/// example's window capacity.
-pub(super) type RuntimeRoomWindow = psx_game_runtime::room_window::RoomWindow<MAX_ACTIVE_ROOMS>;
 /// Streamed room slot budget. A slot stores one runtime room payload:
 /// the room `.psxw` plus the room-local render cache records carried by
 /// the `.psxc` payload. Slots are sized to the largest payload in the cooked
@@ -488,3 +482,101 @@ pub(super) const PROP_PARTICLE_GTE_PROJECT_ENABLED: bool =
     option_env!("PSXO_GTE_PROP_PARTICLE_PROJECT").is_some();
 pub(super) const BOX_PROP_GTE_PROJECT_ENABLED: bool = true;
 pub(super) const BOX_PROP_PROFILE_ENABLED: bool = option_env!("PSXO_PROFILE_BOX_PROPS").is_some();
+
+// ---------------------------------------------------------------------------
+// RuntimeBudgets: every `psx_game_runtime` const-generic instantiation, in one
+// place (phase 1.5 of docs/game-runtime-plan.md). Each alias below names the
+// budget consts a crate type is instantiated with, so this section is the
+// single place to read what this game grants the runtime. The consts feeding
+// the aliases carry their provenance; the `build.rs`-generated `RuntimeBudgets`
+// value struct replaces the hand-written numbers in a later pass.
+// ---------------------------------------------------------------------------
+
+/// Capacity of the residency manager's RAM table. Holds room
+/// world + model meshes + animation clips.
+pub(super) const MAX_RESIDENT_RAM_ASSETS: usize = 128;
+/// Capacity of the residency manager's VRAM table. Holds room
+/// material atlases + model atlases.
+pub(super) const MAX_RESIDENT_VRAM_ASSETS: usize = 64;
+/// CLUT-band rows the unified VRAM allocator manages, just past the back
+/// buffer (Stage 1: only the shared font CLUT lands here).
+pub(super) const VRAM_CLUT_ROWS: usize = 16;
+/// The crate VRAM runtime (slot table, unified allocator, residency
+/// tracker, upload queue) instantiated with this example's budget consts.
+pub(super) type RuntimeVram = VramRuntime<
+    MAX_RESIDENT_RAM_ASSETS,
+    MAX_RESIDENT_VRAM_ASSETS,
+    ROOM_TPAGE_COUNT,
+    VRAM_CLUT_ROWS,
+>;
+
+/// Font-pack staging length in u16s, sized to the larger of the two scratch
+/// uses (font atlas packing vs the streamed sky chunk); see the doc on
+/// `psx_game_runtime::vram::FontPackScratch`.
+const FONT_PACK_U16: usize = MAX_RUNTIME_UI_FONTS * 64 * FONT_ATLAS_MAX_ROWS;
+#[cfg(feature = "cd-stream-bench")]
+pub(super) const FONT_PACK_SCRATCH_LEN: usize = {
+    let sky_u16 = (GAMEPLAY_PACK_MAX_CHUNK_BYTES + 1) / 2;
+    if FONT_PACK_U16 > sky_u16 {
+        FONT_PACK_U16
+    } else {
+        sky_u16
+    }
+};
+#[cfg(not(feature = "cd-stream-bench"))]
+pub(super) const FONT_PACK_SCRATCH_LEN: usize = FONT_PACK_U16;
+/// The crate font/sky staging scratch instantiated with this example's length.
+pub(super) type RuntimeFontPackScratch = FontPackScratch<FONT_PACK_SCRATCH_LEN>;
+
+#[cfg(feature = "cd-stream-bench")]
+const SKY_STAGE_WORDS: usize = (GAMEPLAY_PACK_MAX_CHUNK_BYTES + 3) / 4;
+#[cfg(feature = "cd-stream-bench")]
+const _: () = assert!(
+    SKY_STAGE_WORDS * 4 <= FONT_PACK_SCRATCH_LEN * 2,
+    "streamed sky chunk does not fit the font-pack staging buffer"
+);
+
+/// RAM cache slot width for one streamed menu UI image chunk.
+#[cfg(feature = "cd-stream-bench")]
+pub(super) const UI_STAGE_WORDS: usize = (UI_PACK_MAX_CHUNK_BYTES + 3) / 4;
+/// The crate streamed-menu-UI image cache instantiated with this example's
+/// chunk width and the cooked manifest's slot count.
+#[cfg(feature = "cd-stream-bench")]
+pub(super) type RuntimeUiImageCache = UiImageCache<UI_STAGE_WORDS, UI_PACK_IMAGE_CACHE_SLOTS>;
+
+/// The crate streamed-room slot buffers instantiated with this example's
+/// slot width and count (see `STREAMED_ROOM_SLOT_*` above).
+#[cfg(feature = "cd-stream-bench")]
+pub(super) type RuntimeStreamedRoomSlots =
+    StreamedRoomSlots<STREAMED_ROOM_SLOT_WORDS, STREAMED_ROOM_SLOT_COUNT>;
+
+/// The crate streamed-room scheduler instantiated with this example's slot
+/// count and room-index capacity.
+#[cfg(feature = "cd-stream-bench")]
+pub(super) type RuntimeRoomStreamScheduler =
+    RoomStreamScheduler<STREAMED_ROOM_SLOT_COUNT, MAX_STREAMED_ROOM_INDEX_COUNT>;
+
+/// The crate per-stream-slot room-material pool instantiated with this
+/// example's slot count.
+#[cfg(feature = "cd-stream-bench")]
+pub(super) type RuntimeRoomMaterialPool =
+    psx_game_runtime::room_cache::RoomMaterialPool<STREAMED_ROOM_SLOT_COUNT>;
+
+/// The crate prebuilt room-quad pool instantiated with this example's slot
+/// and per-room quad budgets (see `PREBUILT_ROOM_QUAD_*` above).
+pub(super) type RuntimePrebuiltRoomQuads = psx_game_runtime::room_cache::PrebuiltRoomQuads<
+    PREBUILT_ROOM_QUAD_SLOTS,
+    PREBUILT_ROOM_QUAD_CAP,
+>;
+
+/// Crate-owned portal-visibility state instantiated with this example's
+/// budget consts (its `result` field is a [`RuntimePortalVisibility`]).
+pub(super) type RuntimeRoomVisibility = psx_game_runtime::room_visibility::RoomVisibility<
+    MAX_ACTIVE_ROOMS,
+    MAX_PORTAL_FRUSTUMS,
+    MAX_PORTAL_FRONTIER_ROOMS,
+    MAX_PORTAL_ROOM_BOUNDS,
+>;
+/// Crate-owned active-room window state instantiated with this
+/// example's window capacity.
+pub(super) type RuntimeRoomWindow = psx_game_runtime::room_window::RoomWindow<MAX_ACTIVE_ROOMS>;

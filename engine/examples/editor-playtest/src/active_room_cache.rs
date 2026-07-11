@@ -1,10 +1,10 @@
 //! Glue over `psx_game_runtime::room_cache`: re-exports the window
 //! vocabulary, threads the cooked manifest tables into the crate, and
 //! keeps the build orchestration (residency, streaming, lighting)
-//! whose inputs still span example statics. Streamed-slot resolution
+//! whose inputs span the runtime arenas. Streamed-slot resolution
 //! lives on `StreamedRoomSlots` since the vram_runtime carve; the
-//! example holds the crate pool structs as its usual `static mut`
-//! instances (phase 1.5 cleans that style up).
+//! crate pool structs are arena-owned since phase 1.5 (see
+//! `runtime_arenas`).
 
 use super::*;
 use psx_game_runtime::room_cache;
@@ -22,7 +22,7 @@ pub(super) type ActiveRoomWindowJob = room_cache::ActiveRoomWindowJob<MAX_ACTIVE
 pub(super) fn active_room_materials(active: &ActiveRuntimeRoom) -> &[WorldRenderMaterial] {
     #[cfg(feature = "cd-stream-bench")]
     {
-        active.materials(unsafe { &*core::ptr::addr_of!(ROOM_MATERIAL_POOL) })
+        active.materials(room_materials_arena())
     }
     #[cfg(not(feature = "cd-stream-bench"))]
     {
@@ -139,17 +139,12 @@ pub(super) const fn room_material_fallback() -> WorldRenderMaterial {
 }
 
 #[cfg(feature = "cd-stream-bench")]
-static mut ROOM_MATERIAL_POOL: room_cache::RoomMaterialPool<STREAMED_ROOM_SLOT_COUNT> =
-    room_cache::RoomMaterialPool::new(room_material_fallback());
-
-#[cfg(feature = "cd-stream-bench")]
 pub(super) fn store_room_materials(
     stream_slot: u16,
     materials: [WorldRenderMaterial; MAX_ROOM_MATERIALS],
     count: usize,
 ) {
-    let pool = unsafe { &mut *core::ptr::addr_of_mut!(ROOM_MATERIAL_POOL) };
-    pool.store(stream_slot, materials, count);
+    room_materials_arena_mut().store(stream_slot, materials, count);
 }
 
 pub(super) fn build_active_room(
@@ -205,8 +200,8 @@ pub(super) fn reuse_or_build_active_room(
 
 pub(super) fn active_room_stream_slot(index: RoomIndex) -> u16 {
     #[cfg(feature = "cd-stream-bench")]
-    unsafe {
-        ROOM_STREAM_SCHEDULER.resident_stream_slot(index)
+    {
+        room_streams_arena().resident_stream_slot(index)
     }
     #[cfg(not(feature = "cd-stream-bench"))]
     {
@@ -256,23 +251,17 @@ pub(super) fn active_room_surface_cache_for(index: RoomIndex) -> ActiveRoomSurfa
 
 #[cfg(feature = "cd-stream-bench")]
 fn streamed_active_room_surface_cache_for(index: RoomIndex) -> Option<ActiveRoomSurfaceCache> {
-    unsafe {
-        (*core::ptr::addr_of!(STREAMED_ROOM_SLOTS))
-            .surface_cache_for::<MAX_CACHED_ROOM_VERTICES, _>(
-                &mut *core::ptr::addr_of_mut!(ROOM_STREAM_SCHEDULER),
-                index,
-            )
-    }
+    streamed_slots_arena()
+        .surface_cache_for::<MAX_CACHED_ROOM_VERTICES, _>(room_streams_arena(), index)
 }
 
-/// Prebuilt-quad pool slices for `room` from the example's static pool
+/// Prebuilt-quad pool slices for `room` from the arena-owned pool
 /// instance; the claim policy lives in
 /// [`room_cache::PrebuiltRoomQuads::claim`].
 pub(super) fn prebuilt_room_quads_for(
     room: RoomIndex,
 ) -> (&'static mut [QuadTexturedGouraud], &'static mut [u8]) {
-    let pool = unsafe { &mut *core::ptr::addr_of_mut!(PREBUILT_ROOM_QUADS) };
-    pool.claim(room)
+    prebuilt_quads_arena().claim(room)
 }
 
 pub(super) fn room_surface_cache_slices(
@@ -303,10 +292,10 @@ pub(super) fn room_surface_cache_slices(
 /// Resolve a streamed room's surface-cache slices DIRECTLY INTO its
 /// slot byte buffer, re-validating residency and every chunk-view
 /// offset against the cache snapshot first. The `'static` on the
-/// result comes from borrowing the example's static slot-buffer
-/// instance (the [`StreamedRoomSlots`] staleness contract): consume it
-/// within the current render/update step and re-resolve next time;
-/// never store the slices.
+/// result comes from borrowing the arena-owned slot-buffer instance
+/// (the `StreamedRoomSlots` staleness contract): consume it within the
+/// current render/update step and re-resolve next time; never store
+/// the slices.
 #[cfg(feature = "cd-stream-bench")]
 fn streamed_room_surface_cache_slices(
     index: RoomIndex,
@@ -317,12 +306,9 @@ fn streamed_room_surface_cache_slices(
     &'static [WorldVertex],
     &'static [CachedRoomSurface],
 )> {
-    unsafe {
-        (*core::ptr::addr_of!(STREAMED_ROOM_SLOTS))
-            .surface_cache_slices::<MAX_CACHED_ROOM_VERTICES, _>(
-                &mut *core::ptr::addr_of_mut!(ROOM_STREAM_SCHEDULER),
-                index,
-                cache,
-            )
-    }
+    streamed_slots_arena().surface_cache_slices::<MAX_CACHED_ROOM_VERTICES, _>(
+        room_streams_arena(),
+        index,
+        cache,
+    )
 }
