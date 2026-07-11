@@ -22,13 +22,6 @@ pub(super) const fn cached_room_subdivision_mode() -> CachedRoomSubdivisionMode 
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub(super) enum CachedRoomDrawOrderMode {
-    Distance,
-    Portal,
-    Slot,
-}
-
 pub(super) const fn cached_room_draw_order_mode() -> CachedRoomDrawOrderMode {
     match CACHED_ROOM_DRAW_ORDER_MODE {
         1 => CachedRoomDrawOrderMode::Portal,
@@ -75,11 +68,6 @@ pub(super) const MENU_RESOURCE_KEY: u32 = 2;
 /// Resource-set key for gameplay states (see `MENU_RESOURCE_KEY`).
 pub(super) const GAMEPLAY_RESOURCE_KEY: u32 = 3;
 pub(super) static SHADOW_CIRCLE_BLOB: &[u8] = include_bytes!("../assets/shadow_circle_64.psxt");
-/// Shadow decals share the shadow/particle 4bpp page allocated by the unified
-/// VRAM allocator. UVs are page-relative, so only the page base moves; the
-/// texel origin is the crate vram module's placement contract.
-pub(super) use psx_game_runtime::vram::SHADOW_TEXEL_U;
-pub(super) const SHADOW_UV_MAX: u8 = SHADOW_TEXEL_U + 63;
 pub(super) const SCREEN_W: i16 = 320;
 pub(super) const SCREEN_H: i16 = 240;
 pub(super) const SCREEN_CX: i16 = 160;
@@ -96,8 +84,6 @@ pub(super) const SHADOW_RADIUS_SCALE_DEN: i32 = 4;
 pub(super) const SHADOW_RADIUS_MIN: i32 = 160;
 pub(super) const SHADOW_RADIUS_MAX: i32 = 320;
 pub(super) const COLLISION_DEBUG_BUTTON: u16 = button::L3;
-pub(super) const COLLISION_DEBUG_SEGMENTS: usize = 8;
-pub(super) const COLLISION_DEBUG_FLOOR_LIFT: i32 = 8;
 pub(super) const FLOOR_LINK_CROSS_EPSILON: i32 = 32;
 /// Dead-band (engine units) below a floor boundary before a downward room
 /// switch fires. Climbing up lands the player AT the boundary; without a
@@ -232,7 +218,7 @@ pub(super) const MAX_PRECOMPUTED_VISIBLE_CELLS: usize = 192;
 pub(super) const MAX_ACTIVE_VISIBLE_CELLS: usize = 192;
 
 pub(super) fn room_draw_distance(record: &LevelRoomRecord) -> i32 {
-    record.draw_distance.max(NEAR_Z + 128)
+    psx_game_runtime::world_cells::room_draw_distance(record, NEAR_Z)
 }
 
 pub(super) fn room_depth_range(record: &LevelRoomRecord) -> DepthRange {
@@ -264,13 +250,6 @@ pub(super) fn current_room_surface_options(room_index: RoomIndex) -> WorldSurfac
         .unwrap_or_else(fallback_surface_options)
 }
 
-#[cfg(all(
-    feature = "world-grid-visible",
-    not(feature = "vis-full-active-chunks")
-))]
-pub(super) fn room_chunk_activation_radius_sectors(record: &LevelRoomRecord) -> i32 {
-    record.chunk_activation_radius_sectors.max(1)
-}
 
 #[cfg(feature = "cd-stream-bench")]
 pub(super) fn room_resident_chunk_limit(record: &LevelRoomRecord) -> usize {
@@ -434,8 +413,6 @@ pub(super) const MAX_RUNTIME_MODEL_PARTS: usize = 128;
 pub(super) const MAX_RUNTIME_MODEL_DECODED_VERTICES: usize = 1024;
 /// Projected edge threshold used to subdivide close model triangles.
 pub(super) const MODEL_TEXTURE_SPLIT_MAX_EDGE: u16 = 0;
-/// Q8 fixed-point identity for per-instance visual model scale.
-pub(super) const MODEL_VISUAL_SCALE_ONE_Q8: u16 = 256;
 /// Joint-transform scratch -- all biped rigs we currently cook
 /// fit comfortably in 32.
 pub(super) const JOINT_CAP: usize = 32;
@@ -449,22 +426,6 @@ pub(super) const MAX_BOX_PROP_STATE: usize = 128;
 pub(super) const BOX_PROP_BROKEN_WORDS: usize = (MAX_BOX_PROP_STATE + 31) / 32;
 /// Active baked break bursts retained after a prop is marked broken.
 pub(super) const MAX_BOX_PROP_BREAK_EVENTS: usize = 16;
-pub(super) const BOX_PROP_BREAK_FRAMES: u8 = 24;
-pub(super) const BOX_PROP_BREAK_MOTION_FRAMES: u8 = 20;
-pub(super) const BOX_PROP_BREAK_SHARD_COUNT: usize = 8;
-/// Gravity applied to an unsupported, falling box (room units per vblank,
-/// per vblank). Tuned so a stacked box drops over a handful of frames.
-pub(super) const BOX_PROP_FALL_GRAVITY: i32 = 28;
-/// Per-vblank fall-speed cap so a tall drop cannot tunnel past its
-/// landing in one step (the landing check snaps any overshoot anyway).
-pub(super) const BOX_PROP_FALL_MAX_VEL: i32 = 384;
-/// Slack for "rests on the floor / on the box below" support tests, in
-/// room units. Boxes are ~900+ units tall, so this only absorbs rounding
-/// and small authored gaps.
-pub(super) const BOX_PROP_SUPPORT_TOLERANCE: i32 = 64;
-pub(super) const BOX_PROP_BREAK_ATTACK_REACH: i32 = 768;
-pub(super) const BOX_PROP_BREAK_ATTACK_WIDTH: i32 = 320;
-pub(super) const BOX_PROP_FACE_NORMAL_SHIFT: u32 = 10;
 /// Cap on attached weapon/equipment visuals rendered per frame.
 pub(super) const MAX_EQUIPMENT_DRAWS: usize = 8;
 /// Runtime model cache capacity. The current playtest package only
@@ -580,3 +541,58 @@ pub(super) type RuntimeRoomVisibility = psx_game_runtime::room_visibility::RoomV
 /// Crate-owned active-room window state instantiated with this
 /// example's window capacity.
 pub(super) type RuntimeRoomWindow = psx_game_runtime::room_window::RoomWindow<MAX_ACTIVE_ROOMS>;
+
+/// Crate-owned box-prop state instantiated with this example's
+/// state/word/event budgets (see `MAX_BOX_PROP_*` above).
+pub(super) type RuntimeBoxProps = psx_game_runtime::box_props::BoxProps<
+    MAX_BOX_PROP_STATE,
+    BOX_PROP_BROKEN_WORDS,
+    MAX_BOX_PROP_BREAK_EVENTS,
+>;
+
+/// Crate-owned visible-cell selection state instantiated with this
+/// example's window/pool/candidate capacities.
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
+pub(super) type RuntimeVisibleCellSelector = psx_game_runtime::world_cells::VisibleCellSelector<
+    MAX_ACTIVE_ROOMS,
+    MAX_ACTIVE_VISIBLE_CELLS,
+    MAX_PRECOMPUTED_VISIBLE_CELLS,
+>;
+
+/// The crate accepted-cell draw scratch instantiated with this
+/// example's candidate capacity.
+#[cfg(feature = "world-grid-visible")]
+pub(super) type RuntimeCellDrawScratch =
+    psx_game_runtime::world_cells::CellDrawScratch<MAX_PRECOMPUTED_VISIBLE_CELLS>;
+
+/// The crate model projected-vertex + joint scratch instantiated with
+/// this example's caps (see `MODEL_VERTEX_CAP`/`JOINT_CAP` above).
+pub(super) type RuntimeModelDrawScratch =
+    psx_game_runtime::model_rendering::ModelDrawScratch<MODEL_VERTEX_CAP, JOINT_CAP>;
+
+/// The crate cached-room projection scratch instantiated with this
+/// example's per-room vertex budget (see `MAX_CACHED_ROOM_VERTICES`).
+pub(super) type RuntimeCachedRoomProjection =
+    psx_game_runtime::room_cache::CachedRoomProjection<MAX_CACHED_ROOM_VERTICES>;
+
+/// This example's visible-cell selection tuning (the
+/// `ROOM_VISIBLE_CELL_*` consts above, as the crate value struct).
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
+pub(super) const VISIBLE_CELL_TUNING: psx_game_runtime::world_cells::VisibleCellTuning =
+    psx_game_runtime::world_cells::VisibleCellTuning {
+        screen_margin: ROOM_VISIBLE_CELL_SCREEN_MARGIN,
+        camera_margin: ROOM_VISIBLE_CELL_CAMERA_MARGIN,
+        safety_ring: ROOM_VISIBLE_CELL_SAFETY_RING,
+        near_ring: ROOM_VISIBLE_CELL_NEAR_RING,
+        rear_ring: ROOM_VISIBLE_CELL_REAR_RING,
+        wedge_margin_sectors: ROOM_VISIBLE_CELL_WEDGE_MARGIN_SECTORS,
+        wedge_num: ROOM_VISIBLE_CELL_WEDGE_NUM,
+        wedge_den: ROOM_VISIBLE_CELL_WEDGE_DEN,
+        near_z: NEAR_Z,
+    };

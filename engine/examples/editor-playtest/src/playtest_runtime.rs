@@ -379,6 +379,7 @@ impl Playtest {
             fog_rgb: Rgb8::from_array(room_record.fog_rgb),
             fog_near: room_record.fog_near,
             fog_far: room_record.fog_far,
+            lights: LIGHTS,
         })
     }
 
