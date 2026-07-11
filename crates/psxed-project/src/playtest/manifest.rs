@@ -1373,6 +1373,82 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     }
     out.push_str("];\n\n");
 
+    out.push_str("/// Cooked logic entities (phase-3 event graph), room-local coordinates.\n");
+    out.push_str("/// Authored names are interned to u16 ids; the strings died at cook.\n");
+    out.push_str("pub static LOGIC: &[LevelLogicRecord] = &[\n");
+    for logic in &package.logic {
+        let message = if logic.message == psx_level::INTERACTABLE_MESSAGE_NONE {
+            "psx_level::INTERACTABLE_MESSAGE_NONE".to_string()
+        } else {
+            logic.message.to_string()
+        };
+        let link = if logic.link == psx_level::LOGIC_LINK_NONE {
+            "psx_level::LOGIC_LINK_NONE".to_string()
+        } else {
+            logic.link.to_string()
+        };
+        let _ = writeln!(
+            out,
+            "    LevelLogicRecord {{ room: RoomIndex({}), kind: {}, spawnflags: {}, targetname: {}, target: {}, killtarget: {}, master: {}, delay_ticks: {}, wait_ticks: {}, arg0: {}, arg1: {}, link: {link}, message: {message}, x: {}, y: {}, z: {}, min: [{}, {}, {}], max: [{}, {}, {}], flags: {} }},",
+            logic.room,
+            logic.kind,
+            logic.spawnflags,
+            logic.targetname,
+            logic.target,
+            logic.killtarget,
+            logic.master,
+            logic.delay_ticks,
+            logic.wait_ticks,
+            logic.arg0,
+            logic.arg1,
+            logic.x,
+            logic.y,
+            logic.z,
+            logic.min[0],
+            logic.min[1],
+            logic.min[2],
+            logic.max[0],
+            logic.max[1],
+            logic.max[2],
+            logic.flags,
+        );
+    }
+    out.push_str("];\n\n");
+
+    out.push_str("/// Placed souls-like game entities, room-local coordinates.\n");
+    out.push_str("pub static GAME_ENTITIES: &[LevelGameEntityRecord] = &[\n");
+    for entity in &package.game_entities {
+        let model_instance = if entity.model_instance == psx_level::GAME_ENTITY_MODEL_INSTANCE_NONE
+        {
+            "psx_level::GAME_ENTITY_MODEL_INSTANCE_NONE".to_string()
+        } else {
+            entity.model_instance.to_string()
+        };
+        let _ = writeln!(
+            out,
+            "    LevelGameEntityRecord {{ room: RoomIndex({}), kind: {}, targetname: {}, model_instance: {model_instance}, x: {}, y: {}, z: {}, yaw: {}, patrol_x: {}, patrol_y: {}, patrol_z: {}, patrol_wait_ticks: {}, aggro_radius: {}, windup_ticks: {}, recovery_ticks: {}, poise: {}, touch_damage: {}, max_health: {}, flags: {} }},",
+            entity.room,
+            entity.kind,
+            entity.targetname,
+            entity.x,
+            entity.y,
+            entity.z,
+            entity.yaw,
+            entity.patrol[0],
+            entity.patrol[1],
+            entity.patrol[2],
+            entity.patrol_wait_ticks,
+            entity.aggro_radius,
+            entity.windup_ticks,
+            entity.recovery_ticks,
+            entity.poise,
+            entity.touch_damage,
+            entity.max_health,
+            entity.flags,
+        );
+    }
+    out.push_str("];\n\n");
+
     out.push_str("/// Cooked Character resources - gameplay metadata layered on top of MODELS.\n");
     out.push_str("pub static CHARACTERS: &[LevelCharacterRecord] = &[\n");
     for character in &package.characters {
@@ -3166,6 +3242,8 @@ use psx_level::{
     LevelCameraRecord,
     LevelCloudLayerRecord,
     LevelCharacterRecord,
+    LevelGameEntityRecord,
+    LevelLogicRecord,
     LevelChunkNeighbours,
     LevelChunkRecord,
     LevelCycloramaQuadRecord,
