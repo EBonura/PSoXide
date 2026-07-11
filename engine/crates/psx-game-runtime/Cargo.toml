@@ -15,11 +15,14 @@ cd-stream-bench = []
 [dependencies]
 # Explicit paths, same rationale as psx-engine: resolvable when
 # consumed from outside the engine workspace.
+psx-asset     = { path = "../../../sdk/crates/psx-asset" }
 psx-engine    = { path = "../psx-engine" }
+psx-font      = { path = "../../../sdk/crates/psx-font" }
 psx-gpu       = { path = "../../../sdk/crates/psx-gpu" }
 psx-level     = { path = "../psx-level" }
 psx-io        = { path = "../../../sdk/crates/psx-io" }
 psx-telemetry = { path = "../../../sdk/crates/psx-telemetry" }
+psx-vram      = { path = "../../../sdk/crates/psx-vram" }
 
 [lints]
 workspace = true

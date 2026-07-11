@@ -29,3 +29,4 @@ pub mod room_streaming;
 pub mod room_visibility;
 pub mod room_window;
 pub mod schedule;
+pub mod vram;
