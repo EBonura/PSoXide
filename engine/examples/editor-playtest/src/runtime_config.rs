@@ -578,6 +578,30 @@ pub(super) type RuntimeModelDrawScratch =
 pub(super) type RuntimeCachedRoomProjection =
     psx_game_runtime::room_cache::CachedRoomProjection<MAX_CACHED_ROOM_VERTICES>;
 
+/// Phase-3 gameplay capacities (docs/game-runtime-plan.md, "Phase 3
+/// budget"). The record caps are the psx-level cook<->runtime
+/// contract (the cook rejects over-cap content), so the SoA arrays
+/// here can never silently drop a cooked record.
+pub(super) const MAX_GAME_ENTITIES: usize = psx_level::MAX_GAME_ENTITY_RECORDS;
+/// See [`MAX_GAME_ENTITIES`].
+pub(super) const MAX_LOGIC_RECORDS: usize = psx_level::MAX_LOGIC_RECORDS;
+/// Fired-bitset words for the logic runtime (the BoxProps
+/// broken-words pattern).
+pub(super) const LOGIC_FIRED_WORDS: usize = MAX_LOGIC_RECORDS.div_ceil(32);
+/// In-flight delayed logic events (budget line: hl-psx ships 64 for
+/// full HL campaign maps; one 8-room cortex level gets 32 plus an
+/// overflow counter).
+pub(super) const MAX_LOGIC_EVENTS: usize = 32;
+
+/// The crate souls-like entity state instantiated with this example's
+/// entity cap.
+pub(super) type RuntimeGameEntities = psx_game_runtime::entities::GameEntities<MAX_GAME_ENTITIES>;
+
+/// The crate logic-entity runtime instantiated with this example's
+/// record/word/event caps.
+pub(super) type RuntimeLogic =
+    psx_game_runtime::logic::LogicRuntime<MAX_LOGIC_RECORDS, LOGIC_FIRED_WORDS, MAX_LOGIC_EVENTS>;
+
 /// This example's visible-cell selection tuning (the
 /// `ROOM_VISIBLE_CELL_*` consts above, as the crate value struct).
 #[cfg(all(
