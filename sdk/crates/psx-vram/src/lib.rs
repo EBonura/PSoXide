@@ -646,6 +646,7 @@ pub trait VramRegionSource {
 #[derive(Copy, Clone, Debug)]
 pub struct ClutRowAllocator<const ROWS: usize> {
     base_y: u16,
+    // psx-numeric-allow-next-line: 64-slot occupancy bitmask is a u64 by definition
     rows: [u64; ROWS],
 }
 
@@ -669,7 +670,9 @@ impl<const ROWS: usize> ClutRowAllocator<ROWS> {
         if slots == 0 || slots > cap.min(64) {
             return None;
         }
+        // psx-numeric-allow-next-line: 64-slot occupancy bitmask is a u64 by definition
         let want: u64 = if slots == 64 {
+            // psx-numeric-allow-next-line: 64-slot occupancy bitmask is a u64 by definition
             u64::MAX
         } else {
             (1u64 << slots) - 1
@@ -696,7 +699,9 @@ impl<const ROWS: usize> ClutRowAllocator<ROWS> {
         if r >= ROWS || s + slots > 64 {
             return;
         }
+        // psx-numeric-allow-next-line: 64-slot occupancy bitmask is a u64 by definition
         let mask: u64 = if slots == 64 {
+            // psx-numeric-allow-next-line: 64-slot occupancy bitmask is a u64 by definition
             u64::MAX
         } else {
             (1u64 << slots) - 1

@@ -897,6 +897,7 @@ impl<'a> Animation<'a> {
         speed_q8: u16,
     ) -> u32 {
         let scaled_step =
+            // psx-numeric-allow-next-line: phase-step scale widens through u64; one multu, no 64-bit division
             ((self.phase_step_q12(playback_hz) as u64 * speed_q8 as u64) / 256) as u32;
         playback_tick.wrapping_mul(scaled_step)
     }

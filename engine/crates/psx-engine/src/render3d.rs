@@ -2050,6 +2050,7 @@ fn round_shift_i32(value: i32, shift: u8) -> i32 {
     if shift == 0 {
         return value;
     }
+    // psx-numeric-allow-next-line: depth-key widening; single 64-bit product from one mult
     let value = value as i64;
     let half = 1i64 << (shift - 1);
     if value >= 0 {
