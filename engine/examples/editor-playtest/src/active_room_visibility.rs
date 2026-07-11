@@ -104,19 +104,19 @@ impl Playtest {
     }
 
     pub(super) fn portal_visible_rooms_are_active(&self, current_record: &LevelRoomRecord) -> bool {
-        self.visibility.visible_rooms_are_active(
-            &self.active_rooms,
+        self.window.visible_rooms_are_active(
+            &self.visibility,
             self.room_index,
             room_active_chunk_limit(current_record),
         )
     }
 
     pub(super) fn active_room_mask(&self) -> RuntimeDebugMask {
-        room_cache::active_room_mask(&self.active_rooms)
+        room_cache::active_room_mask(&self.window.rooms)
     }
 
     pub(super) fn active_room_drawable_mask(&self) -> RuntimeDebugMask {
-        room_cache::active_room_drawable_mask(&self.active_rooms, self.room_index)
+        room_cache::active_room_drawable_mask(&self.window.rooms, self.room_index)
     }
 
     pub(super) fn portal_visibility_draws_room(&self, index: RoomIndex) -> bool {
