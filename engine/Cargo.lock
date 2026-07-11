@@ -105,6 +105,7 @@ dependencies = [
  "psx-gpu",
  "psx-io",
  "psx-level",
+ "psx-math",
  "psx-telemetry",
  "psx-vram",
 ]

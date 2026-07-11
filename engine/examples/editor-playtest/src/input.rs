@@ -1,7 +1,7 @@
 //! Player movement and camera input helpers.
 
 use psx_engine::{
-    camera_relative_move_axes, Angle, InputAxis, InputAxisProfile, InputVector, RoomPoint,
+    camera_relative_move_axes, Angle, InputAxis, InputAxisProfile, InputVector,
 };
 
 use super::*;
@@ -117,9 +117,3 @@ fn camera_axis_profile() -> InputAxisProfile {
 }
 
 pub(crate) use psx_math::int32::{abs_i16, abs_i32, clamp_i16, isqrt_i32, square_i32_saturating};
-
-pub(crate) fn distance_xz_sq(a: RoomPoint, b: RoomPoint) -> i32 {
-    let dx = a.x.saturating_sub(b.x);
-    let dz = a.z.saturating_sub(b.z);
-    square_i32_saturating(dx).saturating_add(square_i32_saturating(dz))
-}

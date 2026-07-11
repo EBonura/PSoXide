@@ -9,8 +9,8 @@
 
 use psx_engine::{
     cached_room_cells_from_level_records, cached_room_surfaces_from_level_records,
-    cached_room_vertices_from_level_records, CachedRoomCell, CachedRoomSurface, RoomRender,
-    RuntimeCollisionRoom, RuntimeRoom, WorldRenderMaterial, WorldVertex,
+    cached_room_vertices_from_level_records, CachedRoomCell, CachedRoomSurface, ProjectedVertex,
+    RoomRender, RuntimeCollisionRoom, RuntimeRoom, WorldRenderMaterial, WorldVertex,
 };
 use psx_gpu::material::TextureMaterial;
 use psx_gpu::prim::QuadTexturedGouraud;
@@ -555,4 +555,32 @@ pub fn active_room_drawable_mask<const MAX_ACTIVE_ROOMS: usize>(
         slot += 1;
     }
     mask
+}
+
+/// Per-frame projected-vertex scratch for the indexed cached-room draw
+/// paths (formerly the example's `CACHED_ROOM_PROJECTED_*` statics).
+/// One set is enough: rooms are drawn one at a time and every use
+/// resets its prefix before reading.
+pub struct CachedRoomProjection<const MAX_CACHED_ROOM_VERTICES: usize> {
+    /// Projected-vertex slot indices.
+    pub indices: [u16; MAX_CACHED_ROOM_VERTICES],
+    /// Projected vertices.
+    pub vertices: [ProjectedVertex; MAX_CACHED_ROOM_VERTICES],
+    /// Per-vertex "already projected this frame" flags.
+    pub ready: [bool; MAX_CACHED_ROOM_VERTICES],
+    /// Per-vertex camera depths.
+    pub depths: [i32; MAX_CACHED_ROOM_VERTICES],
+}
+
+impl<const MAX_CACHED_ROOM_VERTICES: usize> CachedRoomProjection<MAX_CACHED_ROOM_VERTICES> {
+    /// All-zero scratch (link-time `.bss`-safe); every use overwrites
+    /// before reading.
+    pub const fn zeroed() -> Self {
+        Self {
+            indices: [0; MAX_CACHED_ROOM_VERTICES],
+            vertices: [ProjectedVertex::new(0, 0, 0); MAX_CACHED_ROOM_VERTICES],
+            ready: [false; MAX_CACHED_ROOM_VERTICES],
+            depths: [0; MAX_CACHED_ROOM_VERTICES],
+        }
+    }
 }

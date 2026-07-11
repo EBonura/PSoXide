@@ -1,4 +1,13 @@
 use super::*;
+use crate::vram::SHADOW_TEXEL_U;
+use psx_gpu::draw_line_mono;
+
+/// Shadow decals share the shadow/particle 4bpp page allocated by the unified
+/// VRAM allocator. UVs are page-relative, so only the page base moves; the
+/// texel origin is the crate vram module's placement contract.
+const SHADOW_UV_MAX: u8 = SHADOW_TEXEL_U + 63;
+const COLLISION_DEBUG_SEGMENTS: usize = 8;
+const COLLISION_DEBUG_FLOOR_LIFT: i32 = 8;
 
 /// Animate + render placed model instances whose owning room matches
 /// `current_room`. Meshes, clips, and atlas materials are resolved by
@@ -8,17 +17,26 @@ use super::*;
 /// Errors (parse failure, missing asset) skip the instance
 /// rather than crashing.
 #[derive(Copy, Clone, Debug, Default)]
-pub(crate) struct ModelInstanceDrawStats {
-    pub(crate) draws: u16,
-    pub(crate) bounds_tests: u16,
-    pub(crate) bounds_culled: u16,
-    pub(crate) stats: TexturedModelRenderStats,
+pub struct ModelInstanceDrawStats {
+    /// Instances drawn.
+    pub draws: u16,
+    /// Bounds tests run.
+    pub bounds_tests: u16,
+    /// Bounds tests that culled the instance.
+    pub bounds_culled: u16,
+    /// Model submit stats.
+    pub stats: TexturedModelRenderStats,
 }
 
+/// Depth-pass selector for the two-pass instance draw around the
+/// player.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub(crate) enum ModelInstanceDepthPass {
+pub enum ModelInstanceDepthPass {
+    /// Draw every instance.
     All,
+    /// Draw instances at or beyond the player's view depth.
     BehindPlayer(i32),
+    /// Draw instances nearer than the player's view depth.
     InFrontOfPlayer(i32),
 }
 
@@ -32,7 +50,8 @@ impl ModelInstanceDepthPass {
     }
 }
 
-pub(crate) fn accumulate_model_instance_draw_stats(
+/// Sum instance draw stats across rooms/passes.
+pub fn accumulate_model_instance_draw_stats(
     total: &mut ModelInstanceDrawStats,
     stats: ModelInstanceDrawStats,
 ) {
@@ -42,7 +61,14 @@ pub(crate) fn accumulate_model_instance_draw_stats(
     accumulate_model_stats(&mut total.stats, stats.stats);
 }
 
-pub(crate) fn draw_model_instance_shadows(
+/// Draw the floor shadow decal under every placed model instance of
+/// `current_room`.
+#[allow(clippy::too_many_arguments)]
+#[inline]
+pub fn draw_model_instance_shadows<const MAX_RUNTIME_MODELS: usize, const OT_DEPTH: usize>(
+    tables: ModelTables,
+    knobs: ModelDrawKnobs,
+    shadow: ShadowTuning,
     current_room: RoomIndex,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
@@ -52,8 +78,8 @@ pub(crate) fn draw_model_instance_shadows(
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) {
     let mut drawn = 0usize;
-    for inst in MODEL_INSTANCES {
-        if inst.room != current_room || drawn >= MAX_MODEL_INSTANCES {
+    for inst in tables.model_instances {
+        if inst.room != current_room || drawn >= knobs.max_model_instances {
             continue;
         }
         let Some(runtime_model) = models.get(inst.model.to_usize()).copied().flatten() else {
@@ -61,10 +87,11 @@ pub(crate) fn draw_model_instance_shadows(
         };
 
         draw_actor_shadow(
+            shadow,
             inst.x,
             inst.y,
             inst.z,
-            actor_shadow_radius(i32::from(runtime_model.collision_radius)),
+            actor_shadow_radius(shadow, i32::from(runtime_model.collision_radius)),
             camera,
             options,
             material,
@@ -75,7 +102,11 @@ pub(crate) fn draw_model_instance_shadows(
     }
 }
 
-pub(crate) fn draw_actor_shadow(
+/// Draw one actor's circular floor shadow decal.
+#[allow(clippy::too_many_arguments)]
+#[inline]
+pub fn draw_actor_shadow<const OT_DEPTH: usize>(
+    shadow: ShadowTuning,
     x: i32,
     floor_y: i32,
     z: i32,
@@ -89,7 +120,7 @@ pub(crate) fn draw_actor_shadow(
     if radius <= 0 {
         return;
     }
-    let y = floor_y.saturating_add(SHADOW_FLOOR_LIFT);
+    let y = floor_y.saturating_add(shadow.floor_lift);
     let h = radius;
     let verts = [
         WorldVertex::new(x.saturating_sub(h), y, z.saturating_sub(h)),
@@ -99,7 +130,7 @@ pub(crate) fn draw_actor_shadow(
     ];
     let shadow_options = options
         .with_depth_policy(DepthPolicy::Nearest)
-        .with_depth_bias(SHADOW_DEPTH_BIAS.saturating_neg())
+        .with_depth_bias(shadow.depth_bias.saturating_neg())
         .with_cull_mode(CullMode::None)
         .with_material_layer(material);
     const UVS: [(u8, u8); 4] = [
@@ -112,15 +143,18 @@ pub(crate) fn draw_actor_shadow(
         world.submit_textured_world_quad(triangles, *camera, verts, UVS, material, shadow_options);
 }
 
-pub(crate) fn actor_shadow_radius(base_radius: i32) -> i32 {
+/// Shadow decal radius for an actor's collision radius.
+#[inline]
+pub fn actor_shadow_radius(shadow: ShadowTuning, base_radius: i32) -> i32 {
     base_radius
-        .saturating_mul(SHADOW_RADIUS_SCALE_NUM)
-        .checked_div(SHADOW_RADIUS_SCALE_DEN)
+        .saturating_mul(shadow.radius_scale_num)
+        .checked_div(shadow.radius_scale_den)
         .unwrap_or(base_radius)
-        .clamp(SHADOW_RADIUS_MIN, SHADOW_RADIUS_MAX)
+        .clamp(shadow.radius_min, shadow.radius_max)
 }
 
-pub(crate) fn draw_collision_cylinder_debug(
+/// Immediate-mode wireframe cylinder for tuning actor blockers.
+pub fn draw_collision_cylinder_debug(
     position: RoomPoint,
     radius: i32,
     height: i32,
@@ -188,7 +222,22 @@ fn draw_optional_debug_line(a: Option<(i16, i16)>, b: Option<(i16, i16)>, color:
     draw_line_mono(a.0, a.1, b.0, b.1, color.0, color.1, color.2);
 }
 
-pub(crate) fn draw_model_instances(
+/// Animate + draw the placed model instances of `current_room` that
+/// fall in `depth_pass`.
+#[allow(clippy::too_many_arguments)]
+#[inline]
+pub fn draw_model_instances<
+    const MAX_RUNTIME_MODELS: usize,
+    const MAX_RUNTIME_MODEL_CLIPS: usize,
+    const MODEL_VERTEX_CAP: usize,
+    const JOINT_CAP: usize,
+    const OT_DEPTH: usize,
+    const BOUNDS_CULL: bool,
+    const PROFILE: bool,
+>(
+    tables: ModelTables,
+    knobs: ModelDrawKnobs,
+    scratch: &mut ModelDrawScratch<MODEL_VERTEX_CAP, JOINT_CAP>,
     current_room: RoomIndex,
     elapsed_tick: SimTick,
     video_hz: VideoHz,
@@ -206,8 +255,8 @@ pub(crate) fn draw_model_instances(
 ) -> ModelInstanceDrawStats {
     let mut drawn = 0usize;
     let mut out = ModelInstanceDrawStats::default();
-    for inst in MODEL_INSTANCES {
-        if inst.room != current_room || drawn >= MAX_MODEL_INSTANCES {
+    for inst in tables.model_instances {
+        if inst.room != current_room || drawn >= knobs.max_model_instances {
             continue;
         }
         let Some(runtime_model) = models.get(inst.model.to_usize()).copied().flatten() else {
@@ -230,9 +279,9 @@ pub(crate) fn draw_model_instances(
         } else {
             (inst.pose_frame.min(anim.frame_count().saturating_sub(1)) as u32) << 12
         };
-        let bounds = model_frame_bounds(runtime_model, clip_local, phase);
-        let clip_anchor = model_clip_anchor(runtime_model, clip_local);
-        let reference_anchor = model_clip_anchor(runtime_model, runtime_model.default_clip);
+        let bounds = model_frame_bounds(tables, runtime_model, clip_local, phase);
+        let clip_anchor = model_clip_anchor(tables, runtime_model, clip_local);
+        let reference_anchor = model_clip_anchor(tables, runtime_model, runtime_model.default_clip);
         let pose_translation =
             model_pose_anchor_translation(anim, phase, clip_anchor, reference_anchor, None);
 
@@ -268,7 +317,7 @@ pub(crate) fn draw_model_instances(
         telemetry::stage_begin(telemetry::stage::MODEL_BOUNDS);
         out.bounds_tests = out.bounds_tests.saturating_add(1);
         let visible = match bounds {
-            Some(bounds) if MODEL_BOUNDS_CULLING_ENABLED => model_bounds_visible(
+            Some(bounds) if BOUNDS_CULL => model_bounds_visible(
                 camera,
                 options,
                 bounds_origin,
@@ -296,7 +345,7 @@ pub(crate) fn draw_model_instances(
             .with_cull_mode(cull_mode)
             .with_material_layer(material)
             .with_textured_triangle_splitting(true)
-            .with_textured_triangle_max_edge(MODEL_TEXTURE_SPLIT_MAX_EDGE);
+            .with_textured_triangle_max_edge(knobs.texture_split_max_edge);
 
         telemetry::stage_begin(telemetry::stage::MODEL_DRAW);
         let faces = runtime_model_faces(runtime_model, model_faces);
@@ -316,6 +365,8 @@ pub(crate) fn draw_model_instances(
             faces,
             model_parts,
             model_vertices,
+            PROFILE,
+            scratch,
         );
         telemetry::stage_end(telemetry::stage::MODEL_DRAW);
         accumulate_model_stats(&mut out.stats, stats);

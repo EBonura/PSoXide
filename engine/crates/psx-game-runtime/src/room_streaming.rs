@@ -251,6 +251,7 @@ impl<const N: usize, const MAX_STREAMED_ROOM_INDEX_COUNT: usize>
     /// no longer requested ad-hoc from the build paths.
     pub fn reconcile_residency<const STREAMED_ROOM_SLOT_BYTES: usize>(
         &mut self,
+        cd: &mut cd_stream::CdController,
         desired: &[RoomIndex; N],
         count: usize,
         stream_load_batch_count: usize,
@@ -261,8 +262,14 @@ impl<const N: usize, const MAX_STREAMED_ROOM_INDEX_COUNT: usize>
     ) {
         self.begin_window();
         self.set_resident_window(desired, count);
-        let plan =
-            self.plan_window_loads(desired, count, count, stream_load_batch_count, &log_plan);
+        let plan = self.plan_window_loads(
+            cd,
+            desired,
+            count,
+            count,
+            stream_load_batch_count,
+            &log_plan,
+        );
         self.start_load_plan::<STREAMED_ROOM_SLOT_BYTES>(
             plan,
             world_pack_start_lba,
@@ -395,6 +402,7 @@ impl<const N: usize, const MAX_STREAMED_ROOM_INDEX_COUNT: usize>
 
     fn plan_window_loads(
         &mut self,
+        cd: &mut cd_stream::CdController,
         requested_rooms: &[RoomIndex; N],
         requested_count: usize,
         active_count: usize,
@@ -403,7 +411,7 @@ impl<const N: usize, const MAX_STREAMED_ROOM_INDEX_COUNT: usize>
     ) -> RoomStreamLoadPlan<N> {
         let mut plan = RoomStreamLoadPlan::EMPTY;
         if requested_count > 0 && !self.current_room_request_can_wait(requested_rooms[0]) {
-            self.abort_active_load(log_plan);
+            self.abort_active_load(cd, log_plan);
         }
         let can_schedule_new_loads = !self.job.is_active();
         let protected_count = active_count
@@ -486,12 +494,16 @@ impl<const N: usize, const MAX_STREAMED_ROOM_INDEX_COUNT: usize>
             || !self.job.is_active()
     }
 
-    fn abort_active_load(&mut self, log_plan: impl Fn(&str, &RoomStreamLoadPlan<N>)) {
+    fn abort_active_load(
+        &mut self,
+        cd: &mut cd_stream::CdController,
+        log_plan: impl Fn(&str, &RoomStreamLoadPlan<N>),
+    ) {
         if !self.job.is_active() {
             return;
         }
         log_plan("stream abort", &self.job_plan);
-        self.job.abort();
+        self.job.abort(cd);
         let plan = self.job_plan;
         let mut i = 0usize;
         while i < plan.count.min(N) {
@@ -542,6 +554,7 @@ impl<const N: usize, const MAX_STREAMED_ROOM_INDEX_COUNT: usize>
     /// Returns whether any room became resident this call.
     pub fn pump<const STREAMED_ROOM_SLOT_WORDS: usize>(
         &mut self,
+        cd: &mut cd_stream::CdController,
         dst: &mut [[u32; STREAMED_ROOM_SLOT_WORDS]; N],
         max_sectors: usize,
         log_entry: impl Fn(&str, RoomIndex, usize, usize, u32),
@@ -550,7 +563,7 @@ impl<const N: usize, const MAX_STREAMED_ROOM_INDEX_COUNT: usize>
             return false;
         }
         self.job
-            .poll_words::<STREAMED_ROOM_SLOT_WORDS>(dst, max_sectors);
+            .poll_words::<STREAMED_ROOM_SLOT_WORDS>(cd, dst, max_sectors);
         let committed = self.commit_ready_job_entries();
         if self.job.is_done() {
             self.commit_completed_job(log_entry);

@@ -13,10 +13,19 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
 
+pub mod box_props;
 pub mod cd_stream;
+pub mod character;
+pub mod image_props;
+pub mod model_rendering;
+pub mod particles;
 pub mod room_cache;
+pub mod room_lighting;
 pub mod room_streaming;
 pub mod room_visibility;
 pub mod room_window;
 pub mod schedule;
+pub mod sky;
 pub mod vram;
+pub mod world_cells;
+pub mod world_visibility;

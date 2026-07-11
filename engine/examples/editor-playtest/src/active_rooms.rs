@@ -421,6 +421,7 @@ impl Playtest {
     #[cfg(feature = "cd-stream-bench")]
     pub(super) fn pump_room_stream(&mut self, max_sectors: usize) -> bool {
         room_streams_arena().pump(
+            cd_arena(),
             streamed_slots_arena_mut().words_mut(),
             max_sectors,
             debug_log_stream_entry,
@@ -477,6 +478,7 @@ impl Playtest {
         self.resident_desired = desired;
         self.resident_desired_count = count;
         room_streams_arena().reconcile_residency::<STREAMED_ROOM_SLOT_BYTES>(
+            cd_arena(),
             &desired,
             count,
             RUNTIME_SCHEDULE.stream_load_batch_count,

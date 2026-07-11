@@ -47,6 +47,24 @@ pub(super) struct RuntimeArenas {
     pub(super) room_materials: RuntimeRoomMaterialPool,
     /// Prebuilt GP0(3Ch) room-quad packets (docs/perf-30fps.md).
     pub(super) prebuilt_quads: RuntimePrebuiltRoomQuads,
+    /// Rotation-keyed sky-cyclorama packet cache (phase-2 sky carve).
+    pub(super) sky: psx_game_runtime::sky::SkyCyclorama,
+    /// Accepted-cell draw scratch for the cached-room draw paths
+    /// (phase-2 visible-cell carve).
+    #[cfg(feature = "world-grid-visible")]
+    pub(super) cell_scratch: RuntimeCellDrawScratch,
+    /// Projected-vertex + joint scratch for the model submit paths
+    /// (phase-2 model-rendering carve).
+    pub(super) model_scratch: RuntimeModelDrawScratch,
+    /// Break-time box-prop floor-debris cache (phase-2 box-prop carve).
+    pub(super) debris_cache: psx_game_runtime::box_props::DebrisCache,
+    /// Owned CD controller driver state (phase-2 retirement of the
+    /// crate's carried `cd_stream` statics).
+    #[cfg(feature = "cd-stream-bench")]
+    pub(super) cd: psx_game_runtime::cd_stream::CdController,
+    /// Per-frame projected-vertex scratch for the cached-room draws
+    /// (the room_cache module's scratch, folded in with phase 2).
+    pub(super) room_projection: RuntimeCachedRoomProjection,
 }
 
 impl RuntimeArenas {
@@ -67,6 +85,16 @@ impl RuntimeArenas {
         #[cfg(feature = "cd-stream-bench")]
         room_materials: RuntimeRoomMaterialPool::zeroed(),
         prebuilt_quads: RuntimePrebuiltRoomQuads::zeroed(),
+        // Zero state = invalid cache key, so the first draw rebuilds;
+        // no init stamping needed.
+        sky: psx_game_runtime::sky::SkyCyclorama::zeroed(),
+        #[cfg(feature = "world-grid-visible")]
+        cell_scratch: RuntimeCellDrawScratch::zeroed(),
+        model_scratch: RuntimeModelDrawScratch::zeroed(),
+        debris_cache: psx_game_runtime::box_props::DebrisCache::zeroed(),
+        room_projection: RuntimeCachedRoomProjection::zeroed(),
+        #[cfg(feature = "cd-stream-bench")]
+        cd: psx_game_runtime::cd_stream::CdController::zeroed(),
     };
 
     /// Stamp the non-zero initial state (what the old per-instance
@@ -79,6 +107,7 @@ impl RuntimeArenas {
             self.room_materials.init(room_material_fallback());
         }
         self.prebuilt_quads.reset_claims();
+        self.debris_cache.init();
     }
 }
 
@@ -173,4 +202,42 @@ pub(super) fn room_materials_arena_mut() -> &'static mut RuntimeRoomMaterialPool
 pub(super) fn prebuilt_quads_arena() -> &'static mut RuntimePrebuiltRoomQuads {
     // SAFETY: see `vram_arena`.
     unsafe { &mut (*arenas_ptr()).prebuilt_quads }
+}
+
+/// Exclusive borrow of the sky-cyclorama packet cache.
+pub(super) fn sky_arena() -> &'static mut psx_game_runtime::sky::SkyCyclorama {
+    // SAFETY: see `vram_arena`.
+    unsafe { &mut (*arenas_ptr()).sky }
+}
+
+/// Exclusive borrow of the accepted-cell draw scratch.
+#[cfg(feature = "world-grid-visible")]
+pub(super) fn cell_scratch_arena() -> &'static mut RuntimeCellDrawScratch {
+    // SAFETY: see `vram_arena`.
+    unsafe { &mut (*arenas_ptr()).cell_scratch }
+}
+
+/// Exclusive borrow of the model draw scratch.
+pub(super) fn model_scratch_arena() -> &'static mut RuntimeModelDrawScratch {
+    // SAFETY: see `vram_arena`.
+    unsafe { &mut (*arenas_ptr()).model_scratch }
+}
+
+/// Exclusive borrow of the box-prop floor-debris cache.
+pub(super) fn debris_cache_arena() -> &'static mut psx_game_runtime::box_props::DebrisCache {
+    // SAFETY: see `vram_arena`.
+    unsafe { &mut (*arenas_ptr()).debris_cache }
+}
+
+/// Exclusive borrow of the cached-room projection scratch.
+pub(super) fn room_projection_arena() -> &'static mut RuntimeCachedRoomProjection {
+    // SAFETY: see `vram_arena`.
+    unsafe { &mut (*arenas_ptr()).room_projection }
+}
+
+/// Exclusive borrow of the CD controller driver state.
+#[cfg(feature = "cd-stream-bench")]
+pub(super) fn cd_arena() -> &'static mut psx_game_runtime::cd_stream::CdController {
+    // SAFETY: see `vram_arena`.
+    unsafe { &mut (*arenas_ptr()).cd }
 }

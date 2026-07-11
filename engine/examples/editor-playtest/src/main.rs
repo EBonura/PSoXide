@@ -41,7 +41,7 @@ fn game_trace(message: &str) {
 #[cfg(not(all(target_arch = "mips", feature = "boot-trace")))]
 fn game_trace(_message: &str) {}
 
-use psx_asset::{Animation, Model, ModelPart, ModelVertex};
+use psx_asset::{Animation, ModelPart, ModelVertex};
 // Used by the vis-full-active-chunks default AND by the PVS path's
 // no-anchor fallback (a far room with no usable portal anchor draws
 // every cell through the cached path).
@@ -58,21 +58,18 @@ use psx_engine::GridVisibilityStats;
     not(feature = "vis-full-active-chunks")
 ))]
 use psx_engine::GridVisibleCell;
-use psx_engine::SkyDirectionProjector;
 use psx_engine::{
-    apply_model_pose_translation, button, compute_joint_world_transform, telemetry, Angle, App,
+    button, telemetry, Angle, App,
     CachedRoomCell, CachedRoomDepthMode, CachedRoomSubdivisionMode, CachedRoomSurface,
     CharacterCollision, CharacterCollisionAabb, CharacterCollisionCylinder, CharacterCollisionRoom,
     CharacterMotorAnim, CharacterMotorConfig, CharacterMotorInput, CharacterMotorState, Config,
-    Ctx, CullMode, DepthBand, DepthPolicy, DepthRange, JointViewTransform, JointWorldTransform,
-    LoadedWorldCameraGte, LocalToWorldScale, Mat3I16, MaterialTint, ModelPoseTranslation, OtFrame,
-    PointLightSample, PrimitivePacketArena, PrimitivePacketScratch, PrimitiveSink, ProjectedVertex,
-    Rgb8, RoomPoint, RuntimeCollisionRoom, RuntimeRoom, Scene, SceneStateRef, SchedulerConfig,
-    SimTick, TexturedModelGeometry, TexturedModelRenderFace, TexturedModelRenderStats,
+    Ctx, DepthBand, DepthRange, LoadedWorldCameraGte, OtFrame,
+    PrimitivePacketArena, PrimitivePacketScratch, PrimitiveSink, ProjectedVertex, Rgb8, RoomPoint,
+    RuntimeCollisionRoom, RuntimeRoom, Scene, SceneStateRef, SchedulerConfig, SimTick,
+    TexturedModelRenderFace,
     ThirdPersonCameraConfig, ThirdPersonCameraInput, ThirdPersonCameraState,
     ThirdPersonCameraTarget, VideoHz, VisualPacing, WorldCamera, WorldProjection,
-    WorldRenderMaterial, WorldRenderPass, WorldSurfaceLighting, WorldSurfaceOptions,
-    WorldSurfaceSample, WorldTriCommand, WorldVertex, Q12, Q8,
+    WorldRenderMaterial, WorldRenderPass, WorldSurfaceOptions, WorldTriCommand, WorldVertex, Q12,
 };
 #[cfg(all(
     feature = "world-grid-visible",
@@ -84,10 +81,10 @@ use psx_engine::{
 };
 use psx_font::FontAtlas;
 use psx_gpu::{
-    draw_line_mono, draw_tri_flat_blended,
+    draw_tri_flat_blended,
     material::{BlendMode, TextureMaterial},
     ot::OrderingTable,
-    prim::{QuadTexturedGouraud, QuadTexturedMaterial, TriTextured, TriTexturedGouraud},
+    prim::{QuadTexturedGouraud, TriTextured, TriTexturedGouraud},
     VideoMode,
 };
 use psx_level::portal_visibility::{
@@ -96,17 +93,12 @@ use psx_level::portal_visibility::{
     PortalVisibilityResult,
 };
 use psx_level::{
-    box_prop_flags, character_action_flags, equipment_flags, far_vista_flags, find_asset_of_kind,
-    image_prop_flags, model_clip_flags, particle_emitter_flags, room_flags, sky_flags,
-    visibility_cell_flags, AssetId, AssetKind, CharacterAnimationAction, EntityRecord,
-    InteractableKind, InteractableRecord, LevelBoxPropRecord, LevelCameraRecord,
+    find_asset_of_kind, room_flags, AssetId, AssetKind, CharacterAnimationAction,
+    EntityRecord, InteractableKind, InteractableRecord, LevelBoxPropRecord, LevelCameraRecord,
     LevelCharacterRecord, LevelChunkRecord, LevelFarVistaRecord, LevelImagePropRecord,
-    LevelMaterialRecord, LevelMaterialSidedness, LevelModelFrameBoundsRecord, LevelModelRecord,
-    LevelModelSocketRecord, LevelRoomRecord, LevelSkyRecord, ModelClipIndex, ModelClipTableIndex,
-    ModelIndex, ModelSocketIndex, OptionalModelClipIndex, ParticleEmitterRecord, RoomIndex,
-    RuntimeDebugMask, WeaponHitShapeRecord, CHARACTER_ANIMATION_ACTION_COUNT,
+    LevelRoomRecord, LevelSkyRecord, ModelClipIndex, ParticleEmitterRecord, RoomIndex,
+    RuntimeDebugMask,
 };
-use psx_math::int32::mul_q12_i32;
 use psx_vram::{TexDepth, Tpage};
 
 mod active_room_cache;
@@ -191,25 +183,6 @@ static mut PRIMITIVE_PACKETS: PrimitivePacketScratch<MAX_TEXTURED_TRIS> =
     PrimitivePacketScratch::ZERO;
 static mut WORLD_COMMANDS: [WorldTriCommand; MAX_TEXTURED_TRIS] =
     [WorldTriCommand::EMPTY; MAX_TEXTURED_TRIS];
-static mut CACHED_ROOM_PROJECTED_VERTICES: [ProjectedVertex; MAX_CACHED_ROOM_VERTICES] =
-    [ProjectedVertex::new(0, 0, 0); MAX_CACHED_ROOM_VERTICES];
-static mut CACHED_ROOM_PROJECTED_INDICES: [u16; MAX_CACHED_ROOM_VERTICES] =
-    [0; MAX_CACHED_ROOM_VERTICES];
-static mut CACHED_ROOM_PROJECTED_READY: [bool; MAX_CACHED_ROOM_VERTICES] =
-    [false; MAX_CACHED_ROOM_VERTICES];
-static mut CACHED_ROOM_PROJECTED_DEPTHS: [i32; MAX_CACHED_ROOM_VERTICES] =
-    [0; MAX_CACHED_ROOM_VERTICES];
-#[cfg(feature = "world-grid-visible")]
-static mut CACHED_ROOM_ACCEPTED_CELL_INDICES: [u16; MAX_PRECOMPUTED_VISIBLE_CELLS] =
-    [0; MAX_PRECOMPUTED_VISIBLE_CELLS];
-#[cfg(feature = "world-grid-visible")]
-static mut CACHED_ROOM_ACCEPTED_CELL_DEPTHS: [i32; MAX_PRECOMPUTED_VISIBLE_CELLS] =
-    [0; MAX_PRECOMPUTED_VISIBLE_CELLS];
-static mut MODEL_VERTICES: [ProjectedVertex; MODEL_VERTEX_CAP] =
-    [ProjectedVertex::new(0, 0, 0); MODEL_VERTEX_CAP];
-static mut JOINT_VIEW_TRANSFORMS: [JointViewTransform; JOINT_CAP] =
-    [JointViewTransform::ZERO; JOINT_CAP];
-
 fn world_camera_from_position_focus(
     projection: WorldProjection,
     position: RoomPoint,
@@ -280,21 +253,13 @@ struct Playtest {
     portal_stream_priority_current: u16,
     portal_stream_priority_visible: u16,
     portal_stream_priority_frontier: u16,
+    /// Per-active-slot visible-cell caches over one shared pool, owned
+    /// by `psx_game_runtime::world_cells` since the phase-2 carve.
     #[cfg(all(
         feature = "world-grid-visible",
         not(feature = "vis-full-active-chunks")
     ))]
-    visible_cell_caches: [ActiveVisibleCellCache; MAX_ACTIVE_ROOMS],
-    #[cfg(all(
-        feature = "world-grid-visible",
-        not(feature = "vis-full-active-chunks")
-    ))]
-    visible_cell_cache_cells: [GridVisibleCell; MAX_ACTIVE_VISIBLE_CELLS],
-    #[cfg(all(
-        feature = "world-grid-visible",
-        not(feature = "vis-full-active-chunks")
-    ))]
-    visible_cell_cache_cursor: usize,
+    visible_cells: RuntimeVisibleCellSelector,
     /// Index in ROOMS the player is currently in. Used to scope
     /// model-instance + light queries.
     room_index: RoomIndex,
@@ -328,15 +293,10 @@ struct Playtest {
     /// locomotion input is ignored and the current action clip
     /// plays from start to finish.
     anim_lock_until_tick: SimTick,
-    /// Persistent runtime state for authored breakable box props.
-    box_prop_broken: [u32; BOX_PROP_BROKEN_WORDS],
-    /// Static derived box-prop data used by render, break tests, and collision.
-    box_prop_runtime: [BoxPropRuntime; MAX_BOX_PROP_STATE],
-    /// Dynamic fall state per box, parallel to `box_prop_broken`. A box
-    /// starts falling when its support is removed and breaks on landing.
-    box_prop_fall: [BoxPropFallState; MAX_BOX_PROP_STATE],
-    /// Short-lived baked face-burst events for newly broken box props.
-    box_prop_break_events: [BoxPropBreakEvent; MAX_BOX_PROP_BREAK_EVENTS],
+    /// Breakable box-prop state (broken bits, derived data, falls,
+    /// break bursts), owned by `psx_game_runtime::box_props` since the
+    /// phase-2 carve.
+    box_props: RuntimeBoxProps,
     /// Circle is shared by tap-evade and hold-sprint. We delay
     /// either decision for a few simulation ticks: release before
     /// the threshold becomes evade; holding past it becomes sprint.
@@ -469,17 +429,7 @@ impl Playtest {
                 feature = "world-grid-visible",
                 not(feature = "vis-full-active-chunks")
             ))]
-            visible_cell_caches: [const { ActiveVisibleCellCache::EMPTY }; MAX_ACTIVE_ROOMS],
-            #[cfg(all(
-                feature = "world-grid-visible",
-                not(feature = "vis-full-active-chunks")
-            ))]
-            visible_cell_cache_cells: [GridVisibleCell::EMPTY; MAX_ACTIVE_VISIBLE_CELLS],
-            #[cfg(all(
-                feature = "world-grid-visible",
-                not(feature = "vis-full-active-chunks")
-            ))]
-            visible_cell_cache_cursor: 0,
+            visible_cells: RuntimeVisibleCellSelector::EMPTY,
             room_index: RoomIndex::ZERO,
             resident_desired: [INVALID_ROOM_INDEX; STREAMED_ROOM_SLOT_COUNT],
             resident_desired_count: 0,
@@ -490,10 +440,7 @@ impl Playtest {
             anim_state: PlayerAnim::Idle,
             anim_start_tick: SimTick::ZERO,
             anim_lock_until_tick: SimTick::ZERO,
-            box_prop_broken: [0; BOX_PROP_BROKEN_WORDS],
-            box_prop_runtime: [BoxPropRuntime::EMPTY; MAX_BOX_PROP_STATE],
-            box_prop_fall: [BoxPropFallState::EMPTY; MAX_BOX_PROP_STATE],
-            box_prop_break_events: [BoxPropBreakEvent::EMPTY; MAX_BOX_PROP_BREAK_EVENTS],
+            box_props: RuntimeBoxProps::EMPTY,
             evade_run_hold_ticks: 0,
             evade_run_hold_consumed: false,
             free_orbit: false,
@@ -806,25 +753,6 @@ fn begin_world_render_pass<'a, 'ot>(
     {
         WorldRenderPass::new_deferred_sorted(ot, commands)
     }
-}
-
-fn ratio_q8_i32(numerator: i32, denominator: i32) -> i32 {
-    if numerator <= 0 || denominator <= 0 {
-        return 0;
-    }
-    let numerator = numerator as u32;
-    let denominator = denominator as u32;
-    let whole = numerator / denominator;
-    let remainder = numerator % denominator;
-    let scaled_whole = if whole > (i32::MAX as u32 / 256) {
-        return i32::MAX;
-    } else {
-        whole * 256
-    };
-    let scaled_remainder = remainder.saturating_mul(256) / denominator;
-    scaled_whole
-        .saturating_add(scaled_remainder)
-        .min(i32::MAX as u32) as i32
 }
 
 fn playtest_visual_pacing(video_mode: VideoMode) -> VisualPacing {
