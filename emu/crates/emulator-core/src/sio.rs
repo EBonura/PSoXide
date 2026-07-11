@@ -188,7 +188,7 @@ impl Sio0 {
     /// Enable or disable the slow original-controller timing model. When on, a
     /// poll that does not wait for each byte's `/ACK` pulse desyncs, reproducing
     /// an SCPH-1200 against a host that clocks bytes back-to-back. Used by the
-    /// regression test and the `--slow-pad` headless flag.
+    /// regression tests below.
     pub fn set_slow_pad(&mut self, slow: bool) {
         self.slow_pad = slow;
         if !slow {
