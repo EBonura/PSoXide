@@ -90,11 +90,11 @@ fn relative_to_root(path: &Path) -> String {
 
 fn lint_policy_guard() -> Result<(), String> {
     let root = repo_root();
+    // The three real workspace roots. editor/ and emu/ merged into the
+    // root workspace (abeb9fef) -- their crates inherit root's lints.
     let manifests = [
         root.join("Cargo.toml"),
         root.join("engine/Cargo.toml"),
-        root.join("editor/Cargo.toml"),
-        root.join("emu/Cargo.toml"),
         root.join("sdk/Cargo.toml"),
     ];
     let sections = ["workspace.lints.rust", "workspace.lints.clippy"];
@@ -179,11 +179,22 @@ fn runtime_numeric_guard() -> Result<(), String> {
         runtime_roots.push(entry.join("src"));
     }
 
+    // Whole-file exemptions: files whose PURPOSE is 64-bit math.
+    // psx-rt/builtins.rs implements the __divdi3/__moddi3 compiler
+    // shims (their signatures are i64 by ABI definition); psx-math's
+    // fmt.rs is the u64 decimal formatter. Line markers inside them
+    // would just repeat the file header.
+    let exempt_files = [
+        root.join("sdk/crates/psx-rt/src/builtins.rs"),
+        root.join("sdk/crates/psx-math/src/fmt.rs"),
+    ];
+
     let mut files = Vec::new();
     let mut seen = HashSet::new();
     for runtime_root in runtime_roots {
         collect_rs_files(&runtime_root, &mut files, &mut seen)?;
     }
+    files.retain(|f| !exempt_files.contains(f));
     files.sort();
 
     let mut violations = Vec::new();

@@ -202,11 +202,14 @@ impl UiResolvedNode {
 }
 
 fn mul_q12(a: i32, b_q12: i32) -> i32 {
+    // psx-numeric-allow-next-line: Q12 multiply widens through i64; R3000 mult yields the 64-bit product natively
     ((i64::from(a) * i64::from(b_q12)) >> 12).clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
 }
 
 fn mul_scale_q8_to_i16(value_q12: i32, scale_q8: u16) -> i16 {
+    // psx-numeric-allow-next-line: Q12 scale widens through i64; R3000 mult yields the 64-bit product natively
     ((i64::from(value_q12) * i64::from(scale_q8)) >> 8)
+        // psx-numeric-allow-next-line: Q12 clamp widens through i64; R3000 mult yields the 64-bit product natively
         .clamp(i64::from(i16::MIN), i64::from(i16::MAX)) as i16
 }
 
