@@ -158,9 +158,9 @@ mod generated {
 use generated::{
     ASSETS, BOX_PROPS, CACHED_ROOM_DEPTH_MODE, CACHED_ROOM_DRAW_ORDER_MODE,
     CACHED_ROOM_TEXTURE_SPLIT_MAX_EDGE, CACHED_ROOM_TEXTURE_SPLIT_MODE, CHARACTERS, ENTITIES,
-    EQUIPMENT, IMAGE_PROPS, INTERACTABLES, INTERACTABLE_MESSAGES, LIGHTS, MATERIALS, MODELS,
-    MODEL_CLIPS, MODEL_CLIP_BOUNDS, MODEL_FRAME_BOUNDS, MODEL_INSTANCES, MODEL_SOCKETS,
-    PARTICLE_EMITTERS, PLAYER_CONTROLLER, PLAYER_SPAWN, ROOMS, ROOM_CACHE_CELLS,
+    EQUIPMENT, GAME_ENTITIES, IMAGE_PROPS, INTERACTABLES, INTERACTABLE_MESSAGES, LIGHTS, LOGIC,
+    MATERIALS, MODELS, MODEL_CLIPS, MODEL_CLIP_BOUNDS, MODEL_FRAME_BOUNDS, MODEL_INSTANCES,
+    MODEL_SOCKETS, PARTICLE_EMITTERS, PLAYER_CONTROLLER, PLAYER_SPAWN, ROOMS, ROOM_CACHE_CELLS,
     ROOM_CACHE_CELL_VERTICES, ROOM_CACHE_SURFACES, ROOM_CACHE_VERTICES, ROOM_CHUNKS, ROOM_PORTALS,
     ROOM_RESIDENCY, ROOM_SURFACE_CACHES, ROOM_VISIBILITY, UI_FONTS, UI_NODES, UI_PAINTS,
     UI_SFX_CUES, UI_SFX_SAMPLES, VISIBILITY_CELLS, WEAPONS, WEAPON_HITBOXES,
@@ -297,6 +297,13 @@ struct Playtest {
     /// break bursts), owned by `psx_game_runtime::box_props` since the
     /// phase-2 carve.
     box_props: RuntimeBoxProps,
+    /// Souls-like game-entity SoA state over the cooked
+    /// `GAME_ENTITIES` records (phase 3; empty for record-free
+    /// projects and then inert).
+    game_entities: RuntimeGameEntities,
+    /// Logic-entity runtime (delay queue, master gating, fan-out)
+    /// over the cooked `LOGIC` records (phase 3).
+    logic: RuntimeLogic,
     /// Circle is shared by tap-evade and hold-sprint. We delay
     /// either decision for a few simulation ticks: release before
     /// the threshold becomes evade; holding past it becomes sprint.
@@ -441,6 +448,8 @@ impl Playtest {
             anim_start_tick: SimTick::ZERO,
             anim_lock_until_tick: SimTick::ZERO,
             box_props: RuntimeBoxProps::EMPTY,
+            game_entities: RuntimeGameEntities::EMPTY,
+            logic: RuntimeLogic::EMPTY,
             evade_run_hold_ticks: 0,
             evade_run_hold_consumed: false,
             free_orbit: false,
