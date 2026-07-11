@@ -34,7 +34,10 @@ mod pad_support;
 
 use pad_support::{effective_mask, format_pad_pulses, parse_pad_pulses, parse_u16_mask, PadPulse};
 
-use emulator_core::{fast_boot_disc_with_hle, spu, warm_bios_for_disc_fast_boot, Bus, Cpu, DISC_FAST_BOOT_WARMUP_STEPS};
+use emulator_core::{
+    fast_boot_disc_with_hle, spu, warm_bios_for_disc_fast_boot, Bus, Cpu,
+    DISC_FAST_BOOT_WARMUP_STEPS,
+};
 use std::path::PathBuf;
 
 #[cfg(feature = "trace-mmio")]

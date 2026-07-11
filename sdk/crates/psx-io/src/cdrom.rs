@@ -260,8 +260,7 @@ impl PlayPosition {
 
     /// Elapsed sectors into the current track (75 sectors per second).
     pub fn relative_sectors(&self) -> u32 {
-        (self.relative_min as u32 * 60 + self.relative_sec as u32) * 75
-            + self.relative_frame as u32
+        (self.relative_min as u32 * 60 + self.relative_sec as u32) * 75 + self.relative_frame as u32
     }
 
     /// Elapsed milliseconds into the current track. This is the song clock feed.
@@ -474,7 +473,10 @@ mod tests {
     fn response_from(bytes: &[u8]) -> Response {
         let mut buf = [0u8; 16];
         buf[..bytes.len()].copy_from_slice(bytes);
-        Response { bytes: buf, len: bytes.len() }
+        Response {
+            bytes: buf,
+            len: bytes.len(),
+        }
     }
 
     #[test]
@@ -493,7 +495,10 @@ mod tests {
         let p = PlayPosition::parse(&resp).unwrap();
         assert_eq!(p.track, 2);
         assert_eq!(p.index, 1);
-        assert_eq!((p.relative_min, p.relative_sec, p.relative_frame), (1, 23, 45));
+        assert_eq!(
+            (p.relative_min, p.relative_sec, p.relative_frame),
+            (1, 23, 45)
+        );
         // (1*60 + 23) * 75 + 45 = 6270 sectors.
         assert_eq!(p.relative_sectors(), 6270);
         // 6270 * 1000 / 75 = 83600 ms.
