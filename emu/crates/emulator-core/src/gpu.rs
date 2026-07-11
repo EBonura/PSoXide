@@ -53,18 +53,102 @@ use commands::gp0_packet_size;
 /// triangle is drawable.
 #[allow(clippy::too_many_arguments)]
 fn for_each_tri_pixel(
-    mut v: [(i32, i32); 3],
-    mut rgb: [(i32, i32, i32); 3],
-    mut uv: [(i32, i32); 3],
+    v: [(i32, i32); 3],
+    rgb: [(i32, i32, i32); 3],
+    uv: [(i32, i32); 3],
     draw_top: i32,
     draw_bottom: i32,
     draw_left: i32,
     draw_right: i32,
     mut plot: impl FnMut(i32, i32, u8, u8, u8, u8, u8),
 ) {
-    // Top-left vertex (attribute-interpolation anchor): computed from the
-    // ORIGINAL vertex order, then carried through the Y-sort swaps. The anchor
-    // is bit-significant because the gradients below are integer-truncated.
+    let Some(setup) = tri_raster_setup(v, rgb, uv, true) else {
+        return;
+    };
+    let [pr, pg, pb, pu, pv] = setup.planes;
+    for (y0, y1, mut lx, ls, mut rx, rs) in setup.parts {
+        let mut y = y0;
+        while y < y1 {
+            if y >= draw_top && y <= draw_bottom {
+                let xs = tri_span_x(lx).max(draw_left);
+                let xe = tri_span_x(rx).min(draw_right + 1); // right-exclusive
+                let mut x = xs;
+                while x < xe {
+                    plot(
+                        x,
+                        y,
+                        tri_plane_eval(pr, x, y),
+                        tri_plane_eval(pg, x, y),
+                        tri_plane_eval(pb, x, y),
+                        tri_plane_eval(pu, x, y),
+                        tri_plane_eval(pv, x, y),
+                    );
+                    x += 1;
+                }
+            }
+            lx += ls;
+            rx += rs;
+            y += 1;
+        }
+    }
+}
+
+/// The CPU rasterizer's complete triangle setup: top-left attribute
+/// anchor from the ORIGINAL vertex order, Y-sort, determinant planes,
+/// and the center-sampled Q32.32 coverage DDA. This is the SINGLE
+/// source of truth -- the flat and attribute-interpolating CPU walkers
+/// above/below consume it, and `psx-gpu-render::scanline` builds the
+/// compute shader's row spans + plane uniforms from the same call, so
+/// CPU and GPU coverage/interpolation cannot drift (they used to be
+/// three hand-synced copies; two of this session's parity bugs lived
+/// in exactly that drift).
+pub struct TriRasterSetup {
+    /// `(dadx, dady, base)` per channel, order `[r, g, b, u, v]`;
+    /// `attr(x, y) = (base + x*dadx + y*dady) >> 24` in wrapping u32
+    /// math (see [`tri_plane_eval`]). All zeros when the determinant
+    /// is zero and the caller passed `require_attrs = false`.
+    pub planes: [(u32, u32, u32); 5],
+    /// Two Y-segments `(y0, y1, left_x, left_step, right_x,
+    /// right_step)` in Q32.32: walk `y0..y1`, span is
+    /// `[tri_span_x(left), tri_span_x(right))`, stepping both edges
+    /// per row. Segment 0 is `top..mid`, segment 1 `mid..bottom`.
+    pub parts: [(i32, i32, i64, i64, i64, i64); 2],
+}
+
+/// Evaluate one attribute plane at a pixel -- the PS1 GPU's
+/// integer-truncated gradient rule.
+#[inline]
+pub fn tri_plane_eval(p: (u32, u32, u32), x: i32, y: i32) -> u8 {
+    (p.2
+        .wrapping_add((x as u32).wrapping_mul(p.0))
+        .wrapping_add((y as u32).wrapping_mul(p.1))
+        >> 24) as u8
+}
+
+/// Convert a Q32.32 span coordinate to its pixel X.
+#[inline]
+pub fn tri_span_x(xfp: i64) -> i32 {
+    (xfp >> 32) as i32
+}
+
+/// Build the triangle setup, or `None` when the CPU draws nothing:
+/// zero vertical extent always, zero determinant (collinear vertices)
+/// only when `require_attrs` is set. Attribute-interpolating
+/// primitives bail on a zero determinant; the flat mono path has no
+/// determinant check and still walks the DDA, so flat callers pass
+/// `require_attrs = false` (planes come back as zeros, never read).
+///
+/// `v` must be in ORIGINAL submission order: the top-left anchor is
+/// derived from that order before the Y-sort and is bit-significant
+/// because the gradients are integer-truncated.
+pub fn tri_raster_setup(
+    mut v: [(i32, i32); 3],
+    mut rgb: [(i32, i32, i32); 3],
+    mut uv: [(i32, i32); 3],
+    require_attrs: bool,
+) -> Option<TriRasterSetup> {
+    // Top-left vertex (attribute-interpolation anchor), carried
+    // through the Y-sort swaps.
     let (o0, o1, o2) = (v[0], v[1], v[2]);
     let mut tl: u32 = if o1.0 <= o0.0 {
         if o2.0 <= o1.0 {
@@ -100,19 +184,21 @@ fn for_each_tri_pixel(
 
     let (a, b, c) = (v[0], v[1], v[2]); // sorted top, middle, bottom by Y
     if a.1 == c.1 {
-        return;
+        return None;
     }
     let det =
         ((b.0 - a.0) as i64) * ((c.1 - b.1) as i64) - ((c.0 - b.0) as i64) * ((b.1 - a.1) as i64);
-    if det == 0 {
-        return;
+    if require_attrs && det == 0 {
+        return None;
     }
     let anchor = v[tl];
-    // Determinant-plane for one attribute channel -> (dadx, dady, base) as u32,
-    // where attr(x, y) = (base + x*dadx + y*dady) >> 24 (low byte). Matches
-    // the PS1 GPU's attribute-step scaling (Q12 + Q12 post-shift) and the
-    // Init/StepX(-anchor)/StepY(-anchor) origin fold, in u32 wrapping math.
+    // Determinant-plane for one attribute channel -> (dadx, dady, base) as u32.
+    // Matches the PS1 GPU's attribute-step scaling (Q12 + Q12 post-shift) and
+    // the Init/StepX(-anchor)/StepY(-anchor) origin fold, in u32 wrapping math.
     let mk = |a0: i32, a1: i32, a2: i32, anchor_a: i32| -> (u32, u32, u32) {
+        if det == 0 {
+            return (0, 0, 0);
+        }
         let num_dx =
             ((a1 - a0) as i64) * ((c.1 - b.1) as i64) - ((a2 - a1) as i64) * ((b.1 - a.1) as i64);
         let num_dy =
@@ -125,19 +211,15 @@ fn for_each_tri_pixel(
             .wrapping_sub((anchor.1 as u32).wrapping_mul(dady));
         (dadx, dady, base)
     };
-    let pr = mk(rgb[0].0, rgb[1].0, rgb[2].0, rgb[tl].0);
-    let pg = mk(rgb[0].1, rgb[1].1, rgb[2].1, rgb[tl].1);
-    let pb = mk(rgb[0].2, rgb[1].2, rgb[2].2, rgb[tl].2);
-    let pu = mk(uv[0].0, uv[1].0, uv[2].0, uv[tl].0);
-    let pv = mk(uv[0].1, uv[1].1, uv[2].1, uv[tl].1);
-    let eval = |p: (u32, u32, u32), x: i32, y: i32| -> u8 {
-        (p.2
-            .wrapping_add((x as u32).wrapping_mul(p.0))
-            .wrapping_add((y as u32).wrapping_mul(p.1))
-            >> 24) as u8
-    };
+    let planes = [
+        mk(rgb[0].0, rgb[1].0, rgb[2].0, rgb[tl].0),
+        mk(rgb[0].1, rgb[1].1, rgb[2].1, rgb[tl].1),
+        mk(rgb[0].2, rgb[1].2, rgb[2].2, rgb[tl].2),
+        mk(uv[0].0, uv[1].0, uv[2].0, uv[tl].0),
+        mk(uv[0].1, uv[1].1, uv[2].1, uv[tl].1),
+    ];
 
-    // Center-sampled coverage DDA (identical rule to the flat path).
+    // Center-sampled coverage DDA, Q32.32, half-pixel edge bias.
     let makefp = |x: i32| -> i64 { ((x as i64) << 32) + ((1i64 << 32) - (1 << 11)) };
     let makestep = |dx: i32, dy: i32| -> i64 {
         let bias = if dx < 0 {
@@ -149,7 +231,6 @@ fn for_each_tri_pixel(
         };
         (((dx as i64) << 32) + bias) / (dy as i64)
     };
-    let unfp = |xfp: i64| -> i32 { (xfp >> 32) as i32 };
     let base_coord = makefp(a.0);
     let base_step = makestep(c.0 - a.0, c.1 - a.1);
     let bound_us = if b.1 == a.1 {
@@ -168,7 +249,7 @@ fn for_each_tri_pixel(
         bound_us > base_step
     };
     let long_at_b = base_coord + ((b.1 - a.1) as i64) * base_step;
-    let parts: [(i32, i32, i64, i64, i64, i64); 2] = if right_facing {
+    let parts = if right_facing {
         [
             (a.1, b.1, base_coord, base_step, makefp(a.0), bound_us),
             (b.1, c.1, long_at_b, base_step, makefp(b.0), bound_ls),
@@ -179,31 +260,7 @@ fn for_each_tri_pixel(
             (b.1, c.1, makefp(b.0), bound_ls, long_at_b, base_step),
         ]
     };
-    for (y0, y1, mut lx, ls, mut rx, rs) in parts {
-        let mut y = y0;
-        while y < y1 {
-            if y >= draw_top && y <= draw_bottom {
-                let xs = unfp(lx).max(draw_left);
-                let xe = unfp(rx).min(draw_right + 1); // right-exclusive
-                let mut x = xs;
-                while x < xe {
-                    plot(
-                        x,
-                        y,
-                        eval(pr, x, y),
-                        eval(pg, x, y),
-                        eval(pb, x, y),
-                        eval(pu, x, y),
-                        eval(pv, x, y),
-                    );
-                    x += 1;
-                }
-            }
-            lx += ls;
-            rx += rs;
-            y += 1;
-        }
-    }
+    Some(TriRasterSetup { planes, parts })
 }
 
 /// Physical address of the GP0 / GPUREAD port.
@@ -727,17 +784,12 @@ impl Gpu {
     /// behaviour.
     pub fn display_hash(&self) -> (u64, u32, u32, usize) {
         let da = self.display_area();
-        let mut h = 0xCBF2_9CE4_8422_2325u64;
+        let mut h = psx_hw::hash::Fnv1a64::new();
         let mut byte_len = 0usize;
         let vram_w = crate::VRAM_WIDTH as u16;
         let vram_h = crate::VRAM_HEIGHT as u16;
         let effective_h = da.height.min(vram_h.saturating_sub(da.y));
         let effective_w = da.width.min(vram_w.saturating_sub(da.x));
-        let mut fold = |b: u8, byte_len: &mut usize| {
-            h ^= b as u64;
-            h = h.wrapping_mul(0x0100_0000_01B3);
-            *byte_len += 1;
-        };
         if da.bpp24 {
             // 24-bit mode: each pixel is 3 bytes packed in VRAM. A row
             // of W 24-bit pixels occupies W*3 bytes = 1.5 * W 16-bit
@@ -745,22 +797,20 @@ impl Gpu {
             for dy in 0..effective_h {
                 for dx in 0..effective_w {
                     let (r, g, b) = self.read_pixel_rgb24(da.x + dx, da.y + dy);
-                    fold(r, &mut byte_len);
-                    fold(g, &mut byte_len);
-                    fold(b, &mut byte_len);
+                    h.update(&[r, g, b]);
+                    byte_len += 3;
                 }
             }
         } else {
             for dy in 0..effective_h {
                 for dx in 0..effective_w {
                     let pixel = self.vram.get_pixel(da.x + dx, da.y + dy);
-                    for b in pixel.to_le_bytes() {
-                        fold(b, &mut byte_len);
-                    }
+                    h.update(&pixel.to_le_bytes());
+                    byte_len += 2;
                 }
             }
         }
-        (h, effective_w as u32, effective_h as u32, byte_len)
+        (h.finish(), effective_w as u32, effective_h as u32, byte_len)
     }
 
     /// Enable per-pixel command tracing. Allocates the 2 MiB owner
@@ -2156,47 +2206,19 @@ impl Gpu {
         if triangle_exceeds_hw_extent(v0, v1, v2) {
             return;
         }
-        // PS1 silicon triangle coverage (half-pixel-biased DDA): sort by
-        // Y, walk the long edge (a->c) and the two short edges (a->b, b->c)
-        // in Q32.32 with the half-pixel edge bias `makefp`, plot
-        // [unfp(left), unfp(right)) per scanline (right-exclusive). This is
-        // center-sampled; the Redux scanline-delta path it replaces sampled
-        // pixel corners, which real hardware (ledger HWB-005) rejects on
-        // every diagonal-edged triangle.
-        let mut p = [v0, v1, v2];
-        p.sort_by_key(|q| q.1);
-        let (a, b, c) = (p[0], p[1], p[2]);
-        if a.1 == c.1 {
+        // PS1 silicon triangle coverage (half-pixel-biased DDA), from
+        // the shared `tri_raster_setup`: walk the long edge (a->c) and
+        // the two short edges (a->b, b->c) in Q32.32, plot
+        // [tri_span_x(left), tri_span_x(right)) per scanline
+        // (right-exclusive). Center-sampled; the Redux scanline-delta
+        // path it replaces sampled pixel corners, which real hardware
+        // (ledger HWB-005) rejects on every diagonal-edged triangle.
+        // Flat fill has no determinant bail (`require_attrs = false`):
+        // collinear triangles still walk their (empty-ish) spans.
+        let Some(setup) =
+            tri_raster_setup([v0, v1, v2], [(0, 0, 0); 3], [(0, 0); 3], false)
+        else {
             return; // zero vertical extent
-        }
-        let makefp = |x: i32| -> i64 { ((x as i64) << 32) + ((1i64 << 32) - (1 << 11)) };
-        let makestep = |dx: i32, dy: i32| -> i64 {
-            let bias = if dx < 0 {
-                -((dy - 1) as i64)
-            } else if dx > 0 {
-                (dy - 1) as i64
-            } else {
-                0
-            };
-            (((dx as i64) << 32) + bias) / (dy as i64)
-        };
-        let unfp = |xfp: i64| -> i32 { (xfp >> 32) as i32 };
-        let base_coord = makefp(a.0);
-        let base_step = makestep(c.0 - a.0, c.1 - a.1);
-        let bound_us = if b.1 == a.1 {
-            0
-        } else {
-            makestep(b.0 - a.0, b.1 - a.1)
-        };
-        let bound_ls = if c.1 == b.1 {
-            0
-        } else {
-            makestep(c.0 - b.0, c.1 - b.1)
-        };
-        let right_facing = if b.1 == a.1 {
-            b.0 > a.0
-        } else {
-            bound_us > base_step
         };
 
         let draw_top = self.draw_area_top as i32;
@@ -2204,32 +2226,22 @@ impl Gpu {
         let draw_left = self.draw_area_left as i32;
         let draw_right = self.draw_area_right as i32;
 
-        let plot_part =
-            |this: &mut Self, y0: i32, y1: i32, mut lx: i64, lstep: i64, mut rx: i64, rstep: i64| {
-                let mut y = y0;
-                while y < y1 {
-                    if y >= draw_top && y <= draw_bottom {
-                        let xs = unfp(lx).max(draw_left);
-                        let xe = unfp(rx).min(draw_right + 1); // right-exclusive
-                        let mut x = xs;
-                        while x < xe {
-                            this.plot_pixel(x as u16, y as u16, color, mode);
-                            x += 1;
-                        }
+        for (y0, y1, mut lx, ls, mut rx, rs) in setup.parts {
+            let mut y = y0;
+            while y < y1 {
+                if y >= draw_top && y <= draw_bottom {
+                    let xs = tri_span_x(lx).max(draw_left);
+                    let xe = tri_span_x(rx).min(draw_right + 1); // right-exclusive
+                    let mut x = xs;
+                    while x < xe {
+                        self.plot_pixel(x as u16, y as u16, color, mode);
+                        x += 1;
                     }
-                    lx += lstep;
-                    rx += rstep;
-                    y += 1;
                 }
-            };
-
-        let long_at_b = base_coord + ((b.1 - a.1) as i64) * base_step;
-        if right_facing {
-            plot_part(self, a.1, b.1, base_coord, base_step, makefp(a.0), bound_us);
-            plot_part(self, b.1, c.1, long_at_b, base_step, makefp(b.0), bound_ls);
-        } else {
-            plot_part(self, a.1, b.1, makefp(a.0), bound_us, base_coord, base_step);
-            plot_part(self, b.1, c.1, makefp(b.0), bound_ls, long_at_b, base_step);
+                lx += ls;
+                rx += rs;
+                y += 1;
+            }
         }
     }
 

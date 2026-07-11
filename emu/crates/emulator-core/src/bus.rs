@@ -691,6 +691,7 @@ impl Bus {
     /// enough for a CDROM-polling spin-wait (e.g. a commercial title's BIOS
     /// ReadTOC-Ack wait at step ~90M) to see a different register
     /// byte than Redux and exit the loop early.
+    #[inline]
     pub fn tick(&mut self, n: u32) {
         self.advance_cycles(n);
         self.drain_scheduler_events_without_cdr_dma();
@@ -751,6 +752,7 @@ impl Bus {
     /// them -- the legacy timers still own those. Each migration
     /// replaces a legacy timer with `scheduler.schedule(...)` and
     /// adds a `match` arm here.
+    #[inline]
     fn drain_scheduler_events_without_cdr_dma(&mut self) {
         self.drain_scheduler_events_inner(false, false);
     }
@@ -762,6 +764,18 @@ impl Bus {
     fn drain_scheduler_events_inner(&mut self, include_cdr_dma: bool, include_sio: bool) {
         use crate::scheduler::EventSlot;
         let now = self.cycles;
+        // Fast path -- runs once per retired instruction via
+        // `Bus::tick`. `lowest_target` is the cached minimum across
+        // every active slot (VBlank included), and both take rules
+        // (`take_slot_due_inclusive`: fire when `target <= now`;
+        // `take_due`: fire when `target < now`) can only fire once
+        // `now` has reached the target, so `now < lowest_target`
+        // proves every taker below would return `None`. One compare
+        // instead of the VBlank check + exclude-mask setup + queue
+        // walk that used to run on every instruction.
+        if now < self.scheduler.lowest_target() {
+            return;
+        }
         let mut dma_edge = false;
         // NOTE: `service_timers()` is intentionally NOT called here.
         // This function runs from the per-instruction `Bus::tick`
@@ -1821,8 +1835,20 @@ impl Bus {
     ///
     /// `&mut self` because CD-ROM byte reads (composited into a u32 for
     /// the rare case software word-accesses that range) mutate.
+    #[inline]
     pub fn read32(&mut self, virt: u32) -> u32 {
         let phys = to_physical(virt);
+        // RAM first, ahead of the telemetry hook, the MMIO trace, and
+        // the peripheral dispatch cascade. Exact by address disjointness:
+        // the telemetry ports live in expansion-2 and `is_mmio` covers
+        // only the I/O window, so no RAM access ever hits either. This
+        // is the hottest load in the emulator -- every instruction
+        // fetch and almost every guest load lands here -- and inlining
+        // just this arm into `Cpu::execute_one` skips an outlined call.
+        if phys < memory::ram::MIRROR_END {
+            let offset = (phys as usize) % memory::ram::SIZE;
+            return read_u32_le(&self.ram[offset..]);
+        }
         let value = self.read32_impl(virt, phys);
         self.trace_mmio(MmioKind::R32, phys, value);
         value
@@ -1930,12 +1956,20 @@ impl Bus {
     ///   for now. Individual peripheral stubs will attach as we add
     ///   them; until then, BIOS's memory-controller init writes are
     ///   no-ops for architectural parity.
+    #[inline]
     pub fn write32(&mut self, virt: u32, value: u32) {
         if virt == memory::cache_control::ADDR {
             return;
         }
 
         let phys = to_physical(virt);
+        // RAM-first fast path; see `read32` for the exactness argument
+        // (every telemetry / trace / peripheral address is outside RAM).
+        if phys < memory::ram::MIRROR_END {
+            let offset = (phys as usize) % memory::ram::SIZE;
+            self.ram[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+            return;
+        }
         self.trace_mmio(MmioKind::W32, phys, value);
         self.write32_impl(virt, phys, value);
     }

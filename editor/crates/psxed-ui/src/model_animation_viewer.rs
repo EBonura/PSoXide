@@ -766,7 +766,7 @@ fn build_clip_options(project: &ProjectDocument, model_id: ResourceId) -> Vec<Vi
             })
             .unwrap_or_else(|| {
                 let role = AnimationRole::guess_from_name(&clip.name);
-                (role, role.matches_looping_default(), ClipOrigin::Model)
+                (role, role_loops_by_default(role), ClipOrigin::Model)
             });
         seen_paths.insert(clip.psxanim_path.clone());
         out.push(ViewerClipOption {
@@ -827,17 +827,12 @@ fn build_clip_options(project: &ProjectDocument, model_id: ResourceId) -> Vec<Vi
     out
 }
 
-trait AnimationRoleLoopingDefault {
-    fn matches_looping_default(self) -> bool;
-}
-
-impl AnimationRoleLoopingDefault for AnimationRole {
-    fn matches_looping_default(self) -> bool {
-        matches!(
-            self,
-            AnimationRole::Idle | AnimationRole::Walk | AnimationRole::Run | AnimationRole::Turn
-        )
-    }
+/// Roles that default to looping playback in the animation viewer.
+fn role_loops_by_default(role: AnimationRole) -> bool {
+    matches!(
+        role,
+        AnimationRole::Idle | AnimationRole::Walk | AnimationRole::Run | AnimationRole::Turn
+    )
 }
 
 struct LoadedModelContext {

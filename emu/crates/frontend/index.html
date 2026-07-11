@@ -41,8 +41,13 @@
       canvas { display: block; outline: none; }
       canvas:focus, canvas:focus-visible { outline: none; }
     </style>
-    <!-- Build the emulator-only frontend (editor feature off) to wasm. -->
-    <link data-trunk rel="rust" data-cargo-no-default-features />
+    <!-- Build the emulator-only frontend (editor feature off) to wasm.
+         wasm-opt -O4 is the speed-leaning Binaryen pass stack (an
+         emulator's inner loop should not trade speed for density);
+         strip-debug/-producers drop sections browsers never read. -->
+    <link data-trunk rel="rust" data-cargo-no-default-features
+          data-wasm-opt="4"
+          data-wasm-opt-params="--strip-debug --strip-producers" />
   </head>
   <body></body>
 </html>

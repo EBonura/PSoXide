@@ -24,6 +24,7 @@ pub mod cdrom;
 pub mod dma;
 pub mod gpu;
 pub mod gte;
+pub mod hash;
 pub mod interrupt;
 pub mod mdec;
 pub mod memory;
