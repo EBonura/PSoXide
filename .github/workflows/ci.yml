@@ -30,7 +30,12 @@ jobs:
       - name: Install cargo-deny
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-deny
+          # Pinned: this job GATES merges, so its tool must not float.
+          # (Unpinned, the 2026-07-11 cargo-deny release changed the
+          # `check ... --config` CLI and broke every branch overnight
+          # while main sat green from two days earlier.) Bump
+          # deliberately, together with the command syntax below.
+          tool: cargo-deny@0.19.4
       - name: cargo-deny (licenses + sources, all workspaces)
         run: |
           root="$(git rev-parse --show-toplevel)"
