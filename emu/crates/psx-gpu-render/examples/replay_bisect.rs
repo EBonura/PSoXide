@@ -343,14 +343,7 @@ fn main() {
     }
 }
 
-fn fnv1a_64(bytes: &[u8]) -> u64 {
-    let mut h: u64 = 0xCBF29CE484222325;
-    for &b in bytes {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x100000001B3);
-    }
-    h
-}
+use psx_hw::hash::fnv1a_64;
 
 /// Return the destination-pixel footprint of bulk-write packets that
 /// bypass `plot_pixel` (FillRect, VRAM-to-VRAM copy, CPU-to-VRAM
