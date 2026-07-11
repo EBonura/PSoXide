@@ -1,10 +1,10 @@
 //! Glue over `psx_game_runtime::room_cache`: re-exports the window
-//! vocabulary, threads the cooked manifest tables and VRAM-layout
-//! consts into the crate, and keeps the streamed-slot resolution and
-//! build orchestration (residency, streaming, lighting) here until
-//! those modules move in the next slices. The example holds the crate
-//! pool structs as its usual `static mut` instances (phase 1.5 cleans
-//! that style up).
+//! vocabulary, threads the cooked manifest tables into the crate, and
+//! keeps the build orchestration (residency, streaming, lighting)
+//! whose inputs still span example statics. Streamed-slot resolution
+//! lives on `StreamedRoomSlots` since the vram_runtime carve; the
+//! example holds the crate pool structs as its usual `static mut`
+//! instances (phase 1.5 cleans that style up).
 
 use super::*;
 use psx_game_runtime::room_cache;
@@ -159,7 +159,7 @@ pub(super) fn build_active_room(
     current_record: &LevelRoomRecord,
 ) -> Option<ActiveRuntimeRoom> {
     if let Some(residency) = ROOM_RESIDENCY.iter().find(|r| r.room == index) {
-        let _ = unsafe { RESIDENCY.ensure_room_resident(residency) };
+        ensure_room_resident(residency);
     }
     let payload = parse_active_room_payload(slot, index, record)?;
     let (materials, material_count, _all_resolved) = build_runtime_room_material_table(record);
@@ -195,11 +195,10 @@ pub(super) fn reuse_or_build_active_room(
     previous_rooms: &[Option<ActiveRuntimeRoom>; MAX_ACTIVE_ROOMS],
 ) -> Option<ActiveRuntimeRoom> {
     let stream_slot = active_room_stream_slot(index);
-    for previous in previous_rooms.iter().flatten().copied() {
-        if previous.index != index || previous.stream_slot != stream_slot {
-            continue;
-        }
-        return Some(previous.with_current_room_offsets(record, current_record));
+    if let Some(previous) =
+        room_cache::reuse_active_room(previous_rooms, index, stream_slot, record, current_record)
+    {
+        return Some(previous);
     }
     build_active_room(slot, index, record, current_record)
 }
@@ -207,10 +206,7 @@ pub(super) fn reuse_or_build_active_room(
 pub(super) fn active_room_stream_slot(index: RoomIndex) -> u16 {
     #[cfg(feature = "cd-stream-bench")]
     unsafe {
-        ROOM_STREAM_SCHEDULER
-            .resident_slot_for(index)
-            .and_then(|slot| u16::try_from(slot).ok())
-            .unwrap_or(STREAMED_ROOM_SLOT_NONE)
+        ROOM_STREAM_SCHEDULER.resident_stream_slot(index)
     }
     #[cfg(not(feature = "cd-stream-bench"))]
     {
@@ -261,34 +257,11 @@ pub(super) fn active_room_surface_cache_for(index: RoomIndex) -> ActiveRoomSurfa
 #[cfg(feature = "cd-stream-bench")]
 fn streamed_active_room_surface_cache_for(index: RoomIndex) -> Option<ActiveRoomSurfaceCache> {
     unsafe {
-        let resident_slot = ROOM_STREAM_SCHEDULER.resident_slot_for(index)?;
-        let byte_count = ROOM_STREAM_SCHEDULER.resident_byte_count(resident_slot)?;
-        let bytes = streamed_room_slot_bytes(resident_slot, byte_count)?;
-        let view = streamed_room_chunk_view(bytes, index)?;
-        if view.vertex_count > MAX_CACHED_ROOM_VERTICES {
-            return Some(ActiveRoomSurfaceCache {
-                status: ActiveRoomCacheStatus::Overflow,
-                ..ActiveRoomSurfaceCache::EMPTY
-            });
-        }
-        if view.cell_count == 0 || view.vertex_count == 0 || view.surface_count == 0 {
-            return Some(ActiveRoomSurfaceCache {
-                status: ActiveRoomCacheStatus::Empty,
-                ..ActiveRoomSurfaceCache::EMPTY
-            });
-        }
-        Some(ActiveRoomSurfaceCache {
-            cell_first: view.cells_offset,
-            cell_count: view.cell_count,
-            cell_vertex_first: view.cell_vertices_offset,
-            cell_vertex_count: view.cell_vertex_count,
-            vertex_first: view.vertices_offset,
-            vertex_count: view.vertex_count,
-            surface_first: view.surfaces_offset,
-            surface_count: view.surface_count,
-            status: ActiveRoomCacheStatus::Ready,
-            ready: true,
-        })
+        (*core::ptr::addr_of!(STREAMED_ROOM_SLOTS))
+            .surface_cache_for::<MAX_CACHED_ROOM_VERTICES, _>(
+                &mut *core::ptr::addr_of_mut!(ROOM_STREAM_SCHEDULER),
+                index,
+            )
     }
 }
 
@@ -329,10 +302,11 @@ pub(super) fn room_surface_cache_slices(
 
 /// Resolve a streamed room's surface-cache slices DIRECTLY INTO its
 /// slot byte buffer, re-validating residency and every chunk-view
-/// offset against the cache snapshot first. The result inherits the
-/// [`streamed_record_slice`] lifetime contract: consume it within the
-/// current render/update step and re-resolve next time; never store
-/// the slices.
+/// offset against the cache snapshot first. The `'static` on the
+/// result comes from borrowing the example's static slot-buffer
+/// instance (the [`StreamedRoomSlots`] staleness contract): consume it
+/// within the current render/update step and re-resolve next time;
+/// never store the slices.
 #[cfg(feature = "cd-stream-bench")]
 fn streamed_room_surface_cache_slices(
     index: RoomIndex,
@@ -343,79 +317,12 @@ fn streamed_room_surface_cache_slices(
     &'static [WorldVertex],
     &'static [CachedRoomSurface],
 )> {
-    if !cache.ready || cache.vertex_count > MAX_CACHED_ROOM_VERTICES {
-        return None;
-    }
     unsafe {
-        let resident_slot = ROOM_STREAM_SCHEDULER.resident_slot_for(index)?;
-        let byte_count = ROOM_STREAM_SCHEDULER.resident_byte_count(resident_slot)?;
-        let bytes = streamed_room_slot_bytes(resident_slot, byte_count)?;
-        let view = streamed_room_chunk_view(bytes, index)?;
-        if cache.cell_first != view.cells_offset
-            || cache.cell_count != view.cell_count
-            || cache.cell_vertex_first != view.cell_vertices_offset
-            || cache.cell_vertex_count != view.cell_vertex_count
-            || cache.vertex_first != view.vertices_offset
-            || cache.vertex_count != view.vertex_count
-            || cache.surface_first != view.surfaces_offset
-            || cache.surface_count != view.surface_count
-        {
-            return None;
-        }
-        let cells = streamed_record_slice::<LevelCachedRoomCellRecord>(
-            bytes,
-            view.total_bytes,
-            view.cells_offset,
-            view.cell_count,
-        )?;
-        let cell_vertices = streamed_record_slice::<u16>(
-            bytes,
-            view.total_bytes,
-            view.cell_vertices_offset,
-            view.cell_vertex_count,
-        )?;
-        let vertices = streamed_record_slice::<LevelCachedRoomVertexRecord>(
-            bytes,
-            view.total_bytes,
-            view.vertices_offset,
-            view.vertex_count,
-        )?;
-        let surfaces = streamed_record_slice::<LevelCachedRoomSurfaceRecord>(
-            bytes,
-            view.total_bytes,
-            view.surfaces_offset,
-            view.surface_count,
-        )?;
-        Some((
-            cached_room_cells_from_level_records(cells),
-            cell_vertices,
-            cached_room_vertices_from_level_records(vertices),
-            cached_room_surfaces_from_level_records(surfaces),
-        ))
+        (*core::ptr::addr_of!(STREAMED_ROOM_SLOTS))
+            .surface_cache_slices::<MAX_CACHED_ROOM_VERTICES, _>(
+                &mut *core::ptr::addr_of_mut!(ROOM_STREAM_SCHEDULER),
+                index,
+                cache,
+            )
     }
-}
-
-/// LIFETIME CONTRACT (streaming audit finding 3): the returned
-/// `&'static [T]` is a lie. It points into a streamed room slot
-/// buffer that the scheduler overwrites on eviction/reuse, so it is
-/// only valid until the next `RoomStreamScheduler::pump` /
-/// `reconcile_residency` call (the next streaming step of the next
-/// sim tick). NEVER store it across ticks or cache it in a struct;
-/// re-resolve through `streamed_room_surface_cache_slices` /
-/// `parse_streamed_compact_collision_room` on every use. Those entry
-/// points re-validate slot residency and the chunk-view offsets per
-/// call, which is what keeps this cast sound today.
-#[cfg(feature = "cd-stream-bench")]
-fn streamed_record_slice<T>(
-    bytes: &'static [u8],
-    total_bytes: usize,
-    offset: usize,
-    count: usize,
-) -> Option<&'static [T]> {
-    if !streamed_chunk_range_valid::<T>(total_bytes, offset, count) {
-        return None;
-    }
-    let byte_count = count.checked_mul(core::mem::size_of::<T>())?;
-    let slice = bytes.get(offset..offset + byte_count)?;
-    Some(unsafe { core::slice::from_raw_parts(slice.as_ptr().cast::<T>(), count) })
 }

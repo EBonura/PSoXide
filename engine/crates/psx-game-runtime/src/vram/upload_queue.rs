@@ -1,6 +1,13 @@
-use super::vram_runtime::VramSlotClutMode;
-use super::vram_upload::{upload_clut, upload_opaque_clut};
-use super::*;
+//! Async VRAM upload queue, carved out of `editor-playtest`'s
+//! `vram_upload_queue` module (phase 1, vram_runtime slice). Jobs are
+//! stepped a bounded number of texture rows per call so a room
+//! activation's upload burst spreads across background ticks instead
+//! of stalling a frame; [`super::VramRuntime`] owns the one instance.
+
+use super::{upload_clut, upload_opaque_clut, VramSlotClutMode};
+use psx_asset::Texture;
+use psx_engine::telemetry;
+use psx_level::AssetId;
 use psx_vram::{upload_bytes, VramRect};
 
 // Concurrent in-flight texture uploads. A room activation can request a burst
@@ -8,6 +15,7 @@ use psx_vram::{upload_bytes, VramRect};
 // untextured fallback until the material pump re-queues it, so a slightly deeper
 // queue reduces those transient drops during heavy streaming.
 const VRAM_UPLOAD_QUEUE_CAP: usize = 12;
+
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub(crate) enum VramUploadKind {
     TextureAndClut,
@@ -66,7 +74,7 @@ pub(crate) struct VramUploadQueue {
 }
 
 impl VramUploadQueue {
-    const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self {
             jobs: [VramUploadJob::EMPTY; VRAM_UPLOAD_QUEUE_CAP],
         }
@@ -118,7 +126,7 @@ impl VramUploadQueue {
         false
     }
 
-    pub(crate) fn step(&mut self, row_budget: u16, mark_ready: fn(usize)) -> bool {
+    pub(crate) fn step(&mut self, row_budget: u16, mut mark_ready: impl FnMut(usize)) -> bool {
         let mut remaining_rows = row_budget;
         let mut completed_any = false;
         let mut i = 0usize;
@@ -217,5 +225,3 @@ impl VramUploadQueue {
         self.jobs[index].clut_uploaded = true;
     }
 }
-
-pub(crate) static mut VRAM_UPLOAD_QUEUE: VramUploadQueue = VramUploadQueue::new();
