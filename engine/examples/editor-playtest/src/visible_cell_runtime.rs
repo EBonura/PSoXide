@@ -36,7 +36,7 @@ impl Playtest {
         }
         let camera = self.render_camera;
         let active_draw_order = active_room_draw_order(
-            &self.active_rooms,
+            &self.window.rooms,
             camera,
             &self.visibility.result,
             self.room_index,
@@ -50,7 +50,7 @@ impl Playtest {
                 continue;
             }
             let active_slot = active_slot as usize;
-            let Some(active) = self.active_rooms[active_slot] else {
+            let Some(active) = self.window.rooms[active_slot] else {
                 continue;
             };
             if !self.portal_visibility_draws_room(active.index) {

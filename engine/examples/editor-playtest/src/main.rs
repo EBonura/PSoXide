@@ -111,9 +111,8 @@ use psx_level::{
 };
 #[cfg(feature = "cd-stream-bench")]
 use psx_level::{
-    streamed_room_chunk_header, LevelCachedRoomCellRecord, LevelCachedRoomSurfaceRecord,
-    LevelCachedRoomVertexRecord, STREAMED_ROOM_CHUNK_FLAG_COLLISION_COMPACT,
-    STREAMED_ROOM_CHUNK_HEADER_BYTES, STREAMED_ROOM_CHUNK_MAGIC, STREAMED_ROOM_CHUNK_VERSION,
+    LevelCachedRoomCellRecord, LevelCachedRoomSurfaceRecord, LevelCachedRoomVertexRecord,
+    STREAMED_ROOM_CHUNK_FLAG_COLLISION_COMPACT,
 };
 use psx_math::int32::mul_q12_i32;
 use psx_vram::{TexDepth, Tpage};
@@ -227,9 +226,15 @@ static mut CACHED_ROOM_ACCEPTED_CELL_DEPTHS: [i32; MAX_PRECOMPUTED_VISIBLE_CELLS
 #[cfg(feature = "cd-stream-bench")]
 static mut STREAMED_ROOM_WORDS: [[u32; STREAMED_ROOM_SLOT_WORDS]; STREAMED_ROOM_SLOT_COUNT] =
     [[0; STREAMED_ROOM_SLOT_WORDS]; STREAMED_ROOM_SLOT_COUNT];
+// Streamed-room scheduler policy lives on
+// `psx_game_runtime::room_streaming::RoomStreamScheduler`; this is the
+// example's one instance, in static storage next to the slot word
+// buffers it schedules into.
 #[cfg(feature = "cd-stream-bench")]
-static mut ROOM_STREAM_SCHEDULER: RoomStreamScheduler<STREAMED_ROOM_SLOT_COUNT> =
-    RoomStreamScheduler::new();
+static mut ROOM_STREAM_SCHEDULER: RoomStreamScheduler<
+    STREAMED_ROOM_SLOT_COUNT,
+    MAX_STREAMED_ROOM_INDEX_COUNT,
+> = RoomStreamScheduler::new();
 static mut MODEL_VERTICES: [ProjectedVertex; MODEL_VERTEX_CAP] =
     [ProjectedVertex::new(0, 0, 0); MODEL_VERTEX_CAP];
 static mut JOINT_VIEW_TRANSFORMS: [JointViewTransform; JOINT_CAP] =
@@ -293,12 +298,11 @@ struct Playtest {
     current_collision_room: Option<RuntimeCollisionRoom<'static>>,
     /// Ambient RGB for the room containing the player.
     current_ambient_rgb: [u8; 3],
-    /// Cache-budgeted draw chunks, all expressed relative to
-    /// `room_index`.
-    active_rooms: [Option<ActiveRuntimeRoom>; MAX_ACTIVE_ROOMS],
-    /// Incremental active-room cache rebuild in progress. The old
-    /// `active_rooms` remain drawable until the staged replacement is ready.
-    active_room_job: ActiveRoomWindowJob,
+    /// Active-room window runtime state (the cache-budgeted draw
+    /// chunks, the incremental rebuild job staged against them, the
+    /// request anchor, and skip diagnostics), owned by
+    /// `psx_game_runtime::room_window` since the phase-1 carve.
+    window: RuntimeRoomWindow,
     /// Portal-visibility runtime state (traversal result, root, bounds
     /// cache, view keys, per-refresh diagnostics), owned by
     /// `psx_game_runtime::room_visibility` since the phase-1 carve.
@@ -321,8 +325,6 @@ struct Playtest {
         not(feature = "vis-full-active-chunks")
     ))]
     visible_cell_cache_cursor: usize,
-    active_room_cache_skips: u16,
-    active_room_anchor: RoomPoint,
     /// Index in ROOMS the player is currently in. Used to scope
     /// model-instance + light queries.
     room_index: RoomIndex,
@@ -488,8 +490,7 @@ impl Playtest {
             room: None,
             current_collision_room: None,
             current_ambient_rgb: [0x80, 0x80, 0x80],
-            active_rooms: [const { None }; MAX_ACTIVE_ROOMS],
-            active_room_job: ActiveRoomWindowJob::EMPTY,
+            window: RuntimeRoomWindow::EMPTY,
             visibility: RuntimeRoomVisibility::EMPTY,
             portal_stream_priority_current: 0,
             portal_stream_priority_visible: 0,
@@ -509,8 +510,6 @@ impl Playtest {
                 not(feature = "vis-full-active-chunks")
             ))]
             visible_cell_cache_cursor: 0,
-            active_room_cache_skips: 0,
-            active_room_anchor: RoomPoint::ZERO,
             room_index: RoomIndex::ZERO,
             resident_desired: [INVALID_ROOM_INDEX; STREAMED_ROOM_SLOT_COUNT],
             resident_desired_count: 0,
@@ -617,8 +616,8 @@ impl Playtest {
         if background_tick {
             #[cfg(feature = "cd-stream-bench")]
             if stream_progress {
-                if self.active_room_job.active {
-                    self.active_room_job.update_streaming = true;
+                if self.window.job.active {
+                    self.window.job.update_streaming = true;
                 } else {
                     self.begin_active_room_window_job(true);
                 }
@@ -652,7 +651,7 @@ impl Playtest {
             };
             let textures_ready = self.initial_stream_ring_textures_ready();
             self.current_collision_room.is_some()
-                && !self.active_room_job.active
+                && !self.window.job.active
                 && self.portal_visible_rooms_are_active(record)
                 && self.initial_stream_ring_resident()
                 && textures_ready

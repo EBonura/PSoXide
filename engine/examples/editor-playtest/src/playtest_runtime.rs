@@ -102,7 +102,7 @@ impl Playtest {
         let mut count = 0usize;
         let mut collected_rooms = [INVALID_ROOM_INDEX; MAX_COLLISION_ROOMS];
         let current_authored = authored_room_for_chunk(self.room_index);
-        for active in self.active_rooms.iter().flatten() {
+        for active in self.window.rooms.iter().flatten() {
             if count >= out.len() {
                 break;
             }
@@ -255,7 +255,7 @@ impl Playtest {
             );
         }
 
-        for active in self.active_rooms.iter().flatten().copied() {
+        for active in self.window.rooms.iter().flatten().copied() {
             let room_camera = camera_for_room(camera, active);
             for inst in MODEL_INSTANCES {
                 if inst.room != active.index {
@@ -286,7 +286,7 @@ impl Playtest {
             return 0;
         };
         let mut submitted = 0usize;
-        for active in self.active_rooms.iter().flatten().copied() {
+        for active in self.window.rooms.iter().flatten().copied() {
             if !self.portal_visibility_draws_room(active.index) {
                 continue;
             }
