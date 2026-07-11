@@ -6,14 +6,14 @@ name: CI
 #   - deps (gating): dependency license + source policy via cargo-deny.
 #     Verified green locally; it does not depend on toolchain formatting or
 #     lint drift, so it is a stable gate.
-#   - build-test (advisory): formatting, build, tests, and lint. The repo
-#     pins a FLOATING `nightly` channel (rust-toolchain.toml: channel =
-#     "nightly"), so rustfmt and clippy output are not reproducible across
-#     nightly releases: `cargo fmt --check` and `clippy -D warnings` drift on
-#     a fresh runner with no source change. This job runs them for visibility
-#     but is marked continue-on-error so known nightly drift does not block
-#     merges. Run them locally with `make fmt`, `make check`, `make test`,
-#     `make lint`. To make this job gating, pin a dated nightly first.
+#   - build-test (advisory): formatting, build, tests, and lint.
+#     rust-toolchain.toml pins a dated nightly (since 2026-07-09), so
+#     rustfmt/clippy output is reproducible until the pin is bumped --
+#     fmt/clippy findings here are real, and the tree was normalized
+#     against the pinned rustfmt on 2026-07-11. The job stays
+#     continue-on-error so a deliberate pin bump (which may re-drift
+#     formatting) never blocks merges mid-transition. Run locally with
+#     `make fmt`, `make check`, `make test`, `make lint`.
 
 on:
   push:

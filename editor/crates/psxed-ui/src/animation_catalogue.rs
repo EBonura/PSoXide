@@ -26,7 +26,6 @@ impl AnimationCatalogueReport {
     }
 }
 
-
 #[derive(Debug, Clone)]
 pub(crate) struct AnimationSourceCandidate {
     pub(crate) resource_name: String,

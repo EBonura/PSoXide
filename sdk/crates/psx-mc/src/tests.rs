@@ -176,7 +176,8 @@ fn compressed_falls_back_when_incompressible() {
         *b = (i * 131 + 7) as u8; // high-entropy-ish
     }
     let mut scratch = [0u8; 1024];
-    c.write_compressed(NAME, "RAW", &data, &mut scratch).unwrap();
+    c.write_compressed(NAME, "RAW", &data, &mut scratch)
+        .unwrap();
     let mut buf = [0u8; 512];
     let n = c.read(NAME, &mut buf).unwrap();
     assert_eq!(&buf[..n], &data[..]);

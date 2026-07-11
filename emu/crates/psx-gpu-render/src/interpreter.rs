@@ -638,7 +638,10 @@ mod tests {
     fn texture_window_survives_primitive_tpage_words() {
         let mut it = Interpreter::new();
         // GP0(E2): mask 8px / offset 16px on both axes.
-        it.interpret(&entry(0xE2, vec![0xE200_0000 | 1 | (1 << 5) | (2 << 10) | (2 << 15)]));
+        it.interpret(&entry(
+            0xE2,
+            vec![0xE200_0000 | 1 | (1 << 5) | (2 << 10) | (2 << 15)],
+        ));
         assert_eq!(it.state.tpage.tex_window_mask_x, 8);
         assert_eq!(it.state.tpage.tex_window_off_x, 16);
         // A textured tri whose UV1 word carries a tpage half must
@@ -687,10 +690,7 @@ mod tests {
         // Draw offset (16, 32) must apply to line vertices too.
         it.interpret(&entry(0xE5, vec![0xE500_0000 | 16 | (32 << 11)]));
         let ev = it
-            .interpret(&entry(
-                0x40,
-                vec![0x40FF_FFFF, 0x0005_000A, 0x0014_001E],
-            ))
+            .interpret(&entry(0x40, vec![0x40FF_FFFF, 0x0005_000A, 0x0014_001E]))
             .unwrap();
         assert_eq!(
             ev,

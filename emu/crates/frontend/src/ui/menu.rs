@@ -522,7 +522,12 @@ impl MenuState {
         painter.rect_filled(
             screen,
             0.0,
-            fade(egui::Color32::from_rgba_premultiplied(0, 0, 0, backdrop_alpha)),
+            fade(egui::Color32::from_rgba_premultiplied(
+                0,
+                0,
+                0,
+                backdrop_alpha,
+            )),
         );
         if let Some(warning) = warning {
             let banner_h = 34.0;
@@ -617,7 +622,9 @@ impl MenuState {
         // Values past the cap elide; the window width is the hard ceiling.
         let max_avail = (sw - 2.0 * 40.0).min(ITEM_MAX_WIDTH);
         let measure = |text: &str, font: FontId| {
-            line_galley(ctx, text, font, theme::MENU_TEXT_DIM, None).size().x
+            line_galley(ctx, text, font, theme::MENU_TEXT_DIM, None)
+                .size()
+                .x
         };
         let needed = cat.items.iter().fold(0.0_f32, |acc, item| {
             let label_w = measure(&item.label, label_font.clone());
@@ -647,7 +654,11 @@ impl MenuState {
         let pointer_hover = ctx.input(|input| input.pointer.hover_pos());
 
         // While the About card is up, swallow row-icon clicks behind it.
-        let row_release = if self.about_open { None } else { pointer_release };
+        let row_release = if self.about_open {
+            None
+        } else {
+            pointer_release
+        };
 
         // How many full rows fit between `items_start_y` and the
         // bottom edge of the screen (with a small bottom margin so
@@ -765,12 +776,19 @@ impl MenuState {
                     Vec2::new(label_budget, ITEM_HEIGHT),
                 );
                 let ty = y + (ITEM_HEIGHT - full.size().y) / 2.0;
-                painter
-                    .with_clip_rect(clip)
-                    .galley(Pos2::new(content_left - off, ty), full, label_color);
+                painter.with_clip_rect(clip).galley(
+                    Pos2::new(content_left - off, ty),
+                    full,
+                    label_color,
+                );
             } else {
-                let g =
-                    line_galley(ctx, &item.label, label_font.clone(), label_color, Some(label_budget));
+                let g = line_galley(
+                    ctx,
+                    &item.label,
+                    label_font.clone(),
+                    label_color,
+                    Some(label_budget),
+                );
                 let ty = y + (ITEM_HEIGHT - g.size().y) / 2.0;
                 painter.galley(Pos2::new(content_left, ty), g, label_color);
             }
@@ -1006,7 +1024,11 @@ fn about_panel(ctx: &egui::Context, open: &mut bool) {
     let aspect = tw as f32 / th.max(1) as f32;
     let link = |ui: &mut egui::Ui, text: &str, url: &str| {
         if ui
-            .link(egui::RichText::new(text).color(theme::MENU_ACCENT).size(14.0))
+            .link(
+                egui::RichText::new(text)
+                    .color(theme::MENU_ACCENT)
+                    .size(14.0),
+            )
             .clicked()
         {
             open_external_url(url);
@@ -1036,14 +1058,18 @@ fn about_panel(ctx: &egui::Context, open: &mut bool) {
                                 .color(theme::MENU_TEXT_BRIGHT),
                         );
                         ui.label(
-                            egui::RichText::new("Independent, open-source PS1 developer environment")
-                                .color(theme::MENU_TEXT_DIM)
-                                .size(13.0),
+                            egui::RichText::new(
+                                "Independent, open-source PS1 developer environment",
+                            )
+                            .color(theme::MENU_TEXT_DIM)
+                            .size(13.0),
                         );
                         ui.label(
-                            egui::RichText::new("Emulator is early, game compatibility is still low")
-                                .color(theme::MENU_TEXT_DIM)
-                                .size(13.0),
+                            egui::RichText::new(
+                                "Emulator is early, game compatibility is still low",
+                            )
+                            .color(theme::MENU_TEXT_DIM)
+                            .size(13.0),
                         );
                         ui.add_space(8.0);
                         ui.label(
@@ -1073,9 +1099,17 @@ fn about_panel(ctx: &egui::Context, open: &mut bool) {
                             "https://emulation.gametechwiki.com/index.php/Sony_PlayStation",
                         );
                         ui.add_space(16.0);
-                        link(ui, "Source code on GitHub", "https://github.com/EBonura/PSoXide");
+                        link(
+                            ui,
+                            "Source code on GitHub",
+                            "https://github.com/EBonura/PSoXide",
+                        );
                         ui.add_space(4.0);
-                        link(ui, "Bonnie Studios on itch.io", "https://bonnie-studios.itch.io/");
+                        link(
+                            ui,
+                            "Bonnie Studios on itch.io",
+                            "https://bonnie-studios.itch.io/",
+                        );
                         ui.add_space(18.0);
                         if ui.button("Close").clicked() {
                             *open = false;

@@ -814,10 +814,18 @@ impl Cpu {
                 _ => false,
             };
             if stale && N.fetch_add(1, Ordering::Relaxed) < 24 {
-                let ready = if rd == 24 { self.gte_mac0_ready_at } else { self.gte_lzcr_ready_at };
+                let ready = if rd == 24 {
+                    self.gte_mac0_ready_at
+                } else {
+                    self.gte_lzcr_ready_at
+                };
                 eprintln!(
                     "[stale] pc={:#010x} reg={} tick={} ready_at={} (dist {})",
-                    self.pc, rd, self.tick, ready, ready - self.tick
+                    self.pc,
+                    rd,
+                    self.tick,
+                    ready,
+                    ready - self.tick
                 );
             }
         }
@@ -944,7 +952,10 @@ impl Cpu {
             let rt = ((instr >> 16) & 31) as u8;
             let v = self.gpr(rt);
             if rd == 12 && v & (1 << 22) != 0 {
-                eprintln!("[cpu] MTC0 SR with BEV set: value=0x{v:08x} pc=0x{:08x}", self.pc());
+                eprintln!(
+                    "[cpu] MTC0 SR with BEV set: value=0x{v:08x} pc=0x{:08x}",
+                    self.pc()
+                );
             }
         }
 

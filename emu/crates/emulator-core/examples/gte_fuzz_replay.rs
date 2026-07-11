@@ -22,12 +22,20 @@ fn parse_cmd(line: &str) -> Option<u32> {
             .and_then(|c| c.to_digit(10))
             .unwrap_or(0)
     };
-    let (sf, lm, tx, vx, mx) = (field("sf"), field("lm"), field("tx"), field("vx"), field("mx"));
+    let (sf, lm, tx, vx, mx) = (
+        field("sf"),
+        field("lm"),
+        field("tx"),
+        field("vx"),
+        field("mx"),
+    );
     Some(0x4A00_0000 | op | (sf << 19) | (mx << 17) | (vx << 15) | (tx << 13) | (lm << 10))
 }
 
 fn main() {
-    let path = std::env::args().nth(1).expect("usage: gte_fuzz_replay <log>");
+    let path = std::env::args()
+        .nth(1)
+        .expect("usage: gte_fuzz_replay <log>");
     let log = std::fs::read_to_string(&path).expect("log readable");
 
     let mut inputs: Vec<(u8, u32)> = Vec::with_capacity(64);
@@ -45,17 +53,17 @@ fn main() {
     let mut shown = 0;
 
     let finish_test = |inputs: &mut Vec<(u8, u32)>,
-                           expected: &mut Vec<(u8, u32)>,
-                           cmd: &mut Option<u32>,
-                           cmd_line: &mut String,
-                           section: &str,
-                           test_no: u32,
-                           total: &mut u64,
-                           failed_tests: &mut u64,
-                           reg_mismatches: &mut std::collections::BTreeMap<u8, u64>,
-                           op_fail: &mut std::collections::BTreeMap<String, u64>,
-                           op_total: &mut std::collections::BTreeMap<String, u64>,
-                           shown: &mut i32| {
+                       expected: &mut Vec<(u8, u32)>,
+                       cmd: &mut Option<u32>,
+                       cmd_line: &mut String,
+                       section: &str,
+                       test_no: u32,
+                       total: &mut u64,
+                       failed_tests: &mut u64,
+                       reg_mismatches: &mut std::collections::BTreeMap<u8, u64>,
+                       op_fail: &mut std::collections::BTreeMap<String, u64>,
+                       op_total: &mut std::collections::BTreeMap<String, u64>,
+                       shown: &mut i32| {
         let Some(instr) = cmd.take() else {
             inputs.clear();
             expected.clear();
@@ -184,5 +192,8 @@ fn main() {
 fn parse_reg(rest: &str) -> Option<(u8, u32)> {
     // "12] = 0xdeadbeef"
     let (idx, val) = rest.split_once("] = 0x")?;
-    Some((idx.trim().parse().ok()?, u32::from_str_radix(val.trim(), 16).ok()?))
+    Some((
+        idx.trim().parse().ok()?,
+        u32::from_str_radix(val.trim(), 16).ok()?,
+    ))
 }
