@@ -3,11 +3,11 @@ use super::*;
 /// Cooked sky panoramas occupy two side-by-side 4bpp pages. The
 /// texture pixels are outside the double-buffered framebuffer and
 /// model-atlas upload regions; each horizontal band gets a dedicated
-/// CLUT row so the sky can spend 16 colours per altitude range.
-pub(super) const SKY_PANORAMA_CLUT_ENTRIES: u16 = 16;
-pub(super) const SKY_PANORAMA_PALETTE_BANDS: usize = 8;
-pub(super) const SKY_PANORAMA_WIDTH: u16 = 512;
-pub(super) const SKY_PANORAMA_HEIGHT: u16 = 256;
+/// CLUT row so the sky can spend 16 colours per altitude range. The
+/// panorama dimensions are the crate vram module's contract.
+pub(super) use psx_game_runtime::vram::{
+    SKY_PANORAMA_HEIGHT, SKY_PANORAMA_PALETTE_BANDS, SKY_PANORAMA_WIDTH,
+};
 const SKY_PANORAMA_PAGE_WIDTH: u16 = 256;
 const SKY_CYCLORAMA_GRID_POINTS_MAX: usize =
     (SKY_CYCLORAMA_COLUMNS_MAX as usize + 1) * (SKY_PANORAMA_PALETTE_BANDS + 1);
@@ -106,8 +106,11 @@ pub(super) fn draw_sky_panorama(
     };
     unsafe {
         if !SKY_CACHE_VALID || SKY_CACHE_KEY != key {
-            SKY_CACHE_COUNT =
-                build_sky_panorama_packets(sky, camera, &mut *core::ptr::addr_of_mut!(SKY_CACHE_PACKETS));
+            SKY_CACHE_COUNT = build_sky_panorama_packets(
+                sky,
+                camera,
+                &mut *core::ptr::addr_of_mut!(SKY_CACHE_PACKETS),
+            );
             SKY_CACHE_KEY = key;
             SKY_CACHE_VALID = true;
         }

@@ -1,11 +1,11 @@
 use super::*;
 
-/// Particle decals use the U=0 half of the shared shadow/particle 4bpp page.
-pub(super) const PARTICLE_TEXEL_U: u8 = 0;
+/// Particle decals use the U=0 half of the shared shadow/particle 4bpp page;
+/// the placement and generated-texture sizing are the crate vram module's
+/// contract.
+pub(super) use psx_game_runtime::vram::{PARTICLE_TEXEL_U, PARTICLE_TEXTURE_SIZE};
 const PARTICLE_TEXEL_V: u8 = 0;
-pub(super) const PARTICLE_TEXTURE_SIZE: u16 = 16;
 const PARTICLE_UV_MAX: u8 = PARTICLE_TEXEL_U + PARTICLE_TEXTURE_SIZE as u8 - 1;
-pub(super) const PARTICLE_TEXTURE_HALFWORDS_PER_ROW: u16 = PARTICLE_TEXTURE_SIZE / 4;
 
 const ATMOSPHERE_PARTICLE_MAX: u32 = 96;
 const ATMOSPHERE_SCREEN_MARGIN: i32 = 24;
