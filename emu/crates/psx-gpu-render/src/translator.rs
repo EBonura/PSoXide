@@ -417,13 +417,7 @@ impl Translator {
 
     /// `0x24..=0x27` -- textured triangle. The interpreter has
     /// already applied uv1's tpage half to the state.
-    fn emit_tex_tri(
-        &mut self,
-        cmd: u32,
-        v: [(i32, i32); 3],
-        uv: [(u8, u8); 3],
-        clut: (u32, u32),
-    ) {
+    fn emit_tex_tri(&mut self, cmd: u32, v: [(i32, i32); 3], uv: [(u8, u8); 3], clut: (u32, u32)) {
         let [v0, v1, v2] = v;
         let [uv0, uv1, uv2] = uv;
         let prim_flags = self.tex_prim_flags(cmd, clut);
@@ -450,13 +444,7 @@ impl Translator {
     /// using the same winding/order the CPU rasterizer's
     /// `draw_textured_quad` uses (`v1,v3,v2` then `v0,v1,v2`), so
     /// semi-trans / mask behaviour stays pixel-equivalent.
-    fn emit_tex_quad(
-        &mut self,
-        cmd: u32,
-        v: [(i32, i32); 4],
-        uv: [(u8, u8); 4],
-        clut: (u32, u32),
-    ) {
+    fn emit_tex_quad(&mut self, cmd: u32, v: [(i32, i32); 4], uv: [(u8, u8); 4], clut: (u32, u32)) {
         let [v0, v1, v2, v3] = v;
         let [uv0, uv1, uv2, uv3] = uv;
         let prim_flags = self.tex_prim_flags(cmd, clut);
@@ -969,7 +957,6 @@ fn tex_tint(cmd: u32) -> [u8; 4] {
     [r, g, b, 0xFF]
 }
 
-
 fn uv16(uv: (u8, u8)) -> (u16, u16) {
     (uv.0 as u16, uv.1 as u16)
 }
@@ -1283,14 +1270,7 @@ mod tests {
         let pos: Vec<[i16; 2]> = frame.vertices.iter().map(|v| v.pos).collect();
         assert_eq!(
             pos,
-            vec![
-                [10, 20],
-                [31, 20],
-                [10, 21],
-                [31, 20],
-                [31, 21],
-                [10, 21],
-            ]
+            vec![[10, 20], [31, 20], [10, 21], [31, 20], [31, 21], [10, 21],]
         );
         for v in frame.vertices {
             assert_eq!(v.color, [0xFF, 0xFF, 0xFF, 0xFF]);
@@ -1309,14 +1289,7 @@ mod tests {
         let pos: Vec<[i16; 2]> = frame.vertices.iter().map(|v| v.pos).collect();
         assert_eq!(
             pos,
-            vec![
-                [31, 20],
-                [10, 20],
-                [31, 21],
-                [10, 20],
-                [10, 21],
-                [31, 21],
-            ]
+            vec![[31, 20], [10, 20], [31, 21], [10, 20], [10, 21], [31, 21],]
         );
     }
 

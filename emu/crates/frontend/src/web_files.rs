@@ -358,7 +358,10 @@ fn set_scanned_from_paths(list: &str) {
 /// Filename without extension.
 fn title_of(path: &str) -> String {
     let name = path.rsplit('/').next().unwrap_or(path);
-    name.rsplit_once('.').map(|(s, _)| s).unwrap_or(name).to_string()
+    name.rsplit_once('.')
+        .map(|(s, _)| s)
+        .unwrap_or(name)
+        .to_string()
 }
 
 /// Immediate parent folder of a relative path (empty if top-level).
@@ -410,13 +413,10 @@ fn pick_folder_input() {
             if !(lower.ends_with(".bin") || lower.ends_with(".exe")) {
                 continue;
             }
-            let rel = js_sys::Reflect::get(
-                file.as_ref(),
-                &JsValue::from_str("webkitRelativePath"),
-            )
-            .ok()
-            .and_then(|v| v.as_string())
-            .unwrap_or_default();
+            let rel = js_sys::Reflect::get(file.as_ref(), &JsValue::from_str("webkitRelativePath"))
+                .ok()
+                .and_then(|v| v.as_string())
+                .unwrap_or_default();
             let path = if rel.is_empty() { name.clone() } else { rel };
             scanned.push(ScannedGame {
                 id: format!("web:{path}"),

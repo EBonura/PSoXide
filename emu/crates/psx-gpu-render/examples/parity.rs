@@ -73,17 +73,26 @@ fn main() {
     let bios_bytes = std::fs::read(&bios).expect("read BIOS");
 
     if args[2] != "all" {
-        let pass = run_fixture(&bios_bytes, &PathBuf::from(&args[2]), steps, &out_dir, tolerance);
+        let pass = run_fixture(
+            &bios_bytes,
+            &PathBuf::from(&args[2]),
+            steps,
+            &out_dir,
+            tolerance,
+        );
         std::process::exit(if pass { 0 } else { 1 });
     }
 
     // ---- All-fixtures sweep -------------------------------------------------
     // Locate the example build dir from either the repo root or emu/.
-    let bin_dir = ["build/examples/mipsel-sony-psx/release", "../build/examples/mipsel-sony-psx/release"]
-        .iter()
-        .map(PathBuf::from)
-        .find(|p| p.is_dir())
-        .expect("build/examples/mipsel-sony-psx/release not found; run `make examples` first");
+    let bin_dir = [
+        "build/examples/mipsel-sony-psx/release",
+        "../build/examples/mipsel-sony-psx/release",
+    ]
+    .iter()
+    .map(PathBuf::from)
+    .find(|p| p.is_dir())
+    .expect("build/examples/mipsel-sony-psx/release not found; run `make examples` first");
 
     let (mut pass, mut fail, mut missing) = (0u32, 0u32, 0u32);
     for fixture in ALL_FIXTURES {
