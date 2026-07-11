@@ -307,6 +307,55 @@ impl<const STAGE_WORDS: usize, const SLOTS: usize> UiImageCache<STAGE_WORDS, SLO
         self.ready = true;
     }
 
+    /// Advance menu UI streaming by at most one CD chunk, then upload any
+    /// active scene image whose bytes are already cached. Prioritising the
+    /// active scene keeps the visible menu complete, while the fallback
+    /// preloads the other menu states so later transitions avoid CD reads.
+    /// Collapsed from the game's glue in phase 1.5: one owner drives the
+    /// defer window, the contiguous preload, and the VRAM upload pass.
+    #[allow(clippy::too_many_arguments)]
+    pub fn service_menu_images<
+        const RAM_ASSETS: usize,
+        const VRAM_ASSETS: usize,
+        const TPAGES: usize,
+        const CLUT_ROWS: usize,
+    >(
+        &mut self,
+        vram: &mut VramRuntime<RAM_ASSETS, VRAM_ASSETS, TPAGES, CLUT_ROWS>,
+        layout: VramLayout,
+        scene_id: u16,
+        ui_scenes: &'static [LevelUiScene],
+        ui_nodes: &'static [LevelUiNodeRecord],
+        assets: &'static [LevelAssetRecord],
+        rooms: &'static [LevelRoomRecord],
+        ui_pack_start_lba: u32,
+        ui_pack_toc: &'static [LevelWorldPackEntryRecord],
+    ) {
+        if scene_id == UI_SCENE_NONE {
+            return;
+        }
+
+        if self.defer_tick() {
+            vram.load_ui_images_for_scene(
+                layout, self, scene_id, ui_scenes, ui_nodes, assets, rooms,
+            );
+            return;
+        }
+
+        // Stream the WHOLE front-end UI image run from UI.PAK in ONE
+        // contiguous CD read (one seek, sequential sectors, one pause)
+        // instead of N separate SetLoc+ReadN+Pause cycles. Each per-image
+        // cycle forces a real CD-R drive to stop/seek/re-acquire -- a HUGE
+        // boot stall on hardware, cheap only in the emulator. The front-end
+        // CD-DA is held until this completes (the game gates its
+        // front-end-assets-ready on `ready`), so no music contends with
+        // the read.
+        if !self.ready() {
+            self.preload_all_contiguous(assets, rooms, ui_pack_start_lba, ui_pack_toc);
+        }
+        vram.load_ui_images_for_scene(layout, self, scene_id, ui_scenes, ui_nodes, assets, rooms);
+    }
+
     fn find_entry(&self, asset_id: AssetId) -> Option<(usize, UiImageCacheEntry)> {
         let mut i = 0usize;
         while i < self.count {
@@ -317,6 +366,13 @@ impl<const STAGE_WORDS: usize, const SLOTS: usize> UiImageCache<STAGE_WORDS, SLO
             i += 1;
         }
         None
+    }
+
+    /// Cached bytes for `asset_id`, when its chunk loaded. The upload
+    /// resolver's streamed-UI source (see `VramRuntime::step_uploads`).
+    pub fn bytes_for(&self, asset_id: AssetId) -> Option<&[u8]> {
+        let (slot, entry) = self.find_entry(asset_id)?;
+        self.image_bytes(slot, entry.bytes)
     }
 
     fn image_bytes(&self, slot: usize, bytes: usize) -> Option<&[u8]> {
@@ -382,6 +438,33 @@ pub fn is_sky_panorama_asset(rooms: &'static [LevelRoomRecord], asset_id: AssetI
     rooms.iter().any(|room| {
         room.sky.flags & sky_flags::ENABLED != 0 && room.sky.cloud_layer.texture_asset == asset_id
     })
+}
+
+/// Baked (non-streamed) texture bytes for `asset_id` out of the asset
+/// table: the upload resolver's primary source. Streamed textures carry
+/// empty baked bytes and resolve from their RAM cache instead.
+pub fn baked_texture_bytes(
+    assets: &'static [LevelAssetRecord],
+    asset_id: AssetId,
+) -> Option<&'static [u8]> {
+    let asset = find_asset_of_kind(assets, asset_id, AssetKind::Texture)?;
+    if asset.bytes.is_empty() {
+        return None;
+    }
+    Some(asset.bytes)
+}
+
+/// The upload queue's byte-resolution rule (see `VramRuntime::step_uploads`):
+/// a queued job's bytes come from the asset table when baked, else from
+/// the streamed-UI RAM cache. One definition so the game's resolver and
+/// the crate's internal UI passes can never disagree.
+#[cfg(feature = "cd-stream-bench")]
+pub fn resolve_upload_bytes<'a, const STAGE_WORDS: usize, const SLOTS: usize>(
+    assets: &'static [LevelAssetRecord],
+    ui_images: &'a UiImageCache<STAGE_WORDS, SLOTS>,
+    asset_id: AssetId,
+) -> Option<&'a [u8]> {
+    baked_texture_bytes(assets, asset_id).or_else(|| ui_images.bytes_for(asset_id))
 }
 
 /// Clamp a texture edge into the u8 the render material carries.
@@ -482,6 +565,24 @@ impl<
         const CLUT_ROWS: usize,
     > VramRuntime<RAM_ASSETS, VRAM_ASSETS, TPAGES, CLUT_ROWS>
 {
+    /// All-zero-bytes placeholder so a game can hold this runtime inside a
+    /// link-time-zero (`.bss`) arena static instead of storing `new`'s
+    /// non-zero image (allocator CLUT base, eviction sentinel) in the flat
+    /// PSX-EXE. The value is NOT ready for use: assign `Self::new(layout)`
+    /// over it (once, before first use) to stamp the real initial state.
+    ///
+    /// Zero-bytes validity, field by field: integer/bool/array fields are
+    /// plain old data; `VramHandle`/`VramSlotClutMode` and the upload
+    /// queue's enums all have a valid variant at discriminant 0; the
+    /// niche-optimized `Option`s (`Option<VramSlot>`, `Option<Tpage>`)
+    /// read back as `Some(zeroed payload)` whose payload is itself a valid
+    /// (if meaningless) value; `Option<&[u8]>` reads back as `None`.
+    pub const fn zeroed() -> Self {
+        // SAFETY: every field tolerates the all-zero bit pattern (see the
+        // doc above); the placeholder is overwritten by `new` before use.
+        unsafe { core::mem::zeroed() }
+    }
+
     /// Empty runtime with the allocator's CLUT band rooted at
     /// `layout.clut_base_y`; `const` so the game can keep it in static
     /// storage.
@@ -636,14 +737,22 @@ impl<
 
     /// Advance the upload queue by up to `row_budget` texture rows,
     /// marking completed slots ready. Returns whether any job completed.
-    pub fn step_uploads(&mut self, row_budget: u16) -> bool {
+    /// `resolve` maps a queued job's [`AssetId`] back to its source
+    /// bytes (the game's asset table, or its streamed-UI cache); the
+    /// queue re-resolves per step instead of retaining slices, so the
+    /// sources only need to outlive this call.
+    pub fn step_uploads<'r>(
+        &mut self,
+        row_budget: u16,
+        resolve: &impl Fn(AssetId) -> Option<&'r [u8]>,
+    ) -> bool {
         let Self {
             upload_queue,
             slots,
             residency,
             ..
         } = self;
-        upload_queue.step(row_budget, |index| {
+        upload_queue.step(row_budget, resolve, |index| {
             mark_vram_slot_ready(slots, residency, index)
         })
     }
@@ -656,10 +765,14 @@ impl<
     /// Run the VRAM upload queue to idle so the shared UI staging buffer can be
     /// safely overwritten. Bounded so a stuck job can't hang the loader.
     #[cfg(feature = "cd-stream-bench")]
-    fn drain_ui_upload_queue(&mut self, layout: VramLayout) {
+    fn drain_ui_upload_queue<'r>(
+        &mut self,
+        layout: VramLayout,
+        resolve: &impl Fn(AssetId) -> Option<&'r [u8]>,
+    ) {
         let mut steps = 0u32;
         while !self.upload_queue.is_idle() && steps < 4096 {
-            self.step_uploads(layout.room_tile_texels);
+            self.step_uploads(layout.room_tile_texels, resolve);
             steps += 1;
         }
     }
@@ -828,7 +941,7 @@ impl<
         &mut self,
         layout: VramLayout,
         asset_id: AssetId,
-        asset_bytes: &'static [u8],
+        asset_bytes: &[u8],
     ) -> Option<VramSlot> {
         let texture = Texture::from_bytes(asset_bytes).ok()?;
         let clut_mode = if texture.index_zero_transparent() {
@@ -844,7 +957,7 @@ impl<
         &mut self,
         layout: VramLayout,
         asset_id: AssetId,
-        asset_bytes: &'static [u8],
+        asset_bytes: &[u8],
     ) -> Option<VramSlot> {
         self.ensure_texture_uploaded_with_clut_mode(
             layout,
@@ -855,12 +968,14 @@ impl<
     }
 
     /// Upload a UI texture, stepping the upload queue a bounded number of
-    /// times so menu images resolve within the calling frame.
-    pub fn ensure_ui_texture_uploaded(
+    /// times (through `resolve`, see [`Self::step_uploads`]) so menu
+    /// images resolve within the calling frame.
+    pub fn ensure_ui_texture_uploaded<'r>(
         &mut self,
         layout: VramLayout,
         asset_id: AssetId,
-        asset_bytes: &'static [u8],
+        asset_bytes: &[u8],
+        resolve: &impl Fn(AssetId) -> Option<&'r [u8]>,
     ) -> Option<VramSlot> {
         let texture = Texture::from_bytes(asset_bytes).ok()?;
         let clut_mode = if texture.index_zero_transparent() {
@@ -888,7 +1003,7 @@ impl<
         };
         let mut steps = 0u8;
         while self.pending_vram_upload(asset_id, clut_mode) && steps < UI_TEXTURE_UPLOAD_MAX_STEPS {
-            self.step_uploads(layout.room_tile_texels);
+            self.step_uploads(layout.room_tile_texels, resolve);
             steps = steps.saturating_add(1);
         }
 
@@ -899,7 +1014,7 @@ impl<
         &mut self,
         layout: VramLayout,
         asset_id: AssetId,
-        asset_bytes: &'static [u8],
+        asset_bytes: &[u8],
         clut_mode: VramSlotClutMode,
     ) -> Option<VramSlot> {
         if let Some(slot) = self.find_vram_slot(asset_id, clut_mode) {
@@ -961,7 +1076,6 @@ impl<
             asset: asset_id,
             clut_mode,
             kind: VramUploadKind::TextureAndClut,
-            bytes: Some(asset_bytes),
             texture_x: tpage_x,
             texture_y: layout.shared_tpage.y(),
             texture_width_halfwords,
@@ -987,7 +1101,7 @@ impl<
         &mut self,
         layout: VramLayout,
         asset_id: AssetId,
-        asset_bytes: &'static [u8],
+        asset_bytes: &[u8],
         clut_mode: VramSlotClutMode,
     ) -> Option<VramSlot> {
         // The slot table is the source of truth for "have we actually
@@ -1068,7 +1182,6 @@ impl<
                 asset: asset_id,
                 clut_mode,
                 kind: VramUploadKind::ClutOnly,
-                bytes: Some(asset_bytes),
                 texture_x: 0,
                 texture_y: 0,
                 texture_width_halfwords: 0,
@@ -1139,7 +1252,6 @@ impl<
             asset: asset_id,
             clut_mode,
             kind: VramUploadKind::TextureAndClut,
-            bytes: Some(asset_bytes),
             texture_x,
             texture_y,
             texture_width_halfwords,
@@ -1495,13 +1607,14 @@ impl<
 
     /// Upload the active UI scene's streamed images into VRAM from the RAM cache.
     /// Tracks each created slot so `release_ui_images` can free it when the scene
-    /// changes or gameplay starts. The cache is `&'static` because queued upload
-    /// jobs hold its byte slices across frames.
+    /// changes or gameplay starts. The cache is an ordinary borrow since the
+    /// upload queue re-resolves job bytes through `resolve` per step (phase
+    /// 1.5) instead of retaining `&'static` slices across frames.
     #[cfg(feature = "cd-stream-bench")]
-    pub fn load_ui_images_for_scene<const STAGE_WORDS: usize, const SLOTS: usize>(
+    pub fn load_ui_images_for_scene<'r, const STAGE_WORDS: usize, const SLOTS: usize>(
         &mut self,
         layout: VramLayout,
-        cache: &'static UiImageCache<STAGE_WORDS, SLOTS>,
+        cache: &'r UiImageCache<STAGE_WORDS, SLOTS>,
         scene_id: u16,
         ui_scenes: &'static [LevelUiScene],
         ui_nodes: &'static [LevelUiNodeRecord],
@@ -1511,6 +1624,9 @@ impl<
         if scene_id == UI_SCENE_NONE {
             return;
         }
+        // One byte-resolution rule for the whole pass; queued jobs
+        // re-resolve through this same cache borrow per step.
+        let resolve = |asset_id| resolve_upload_bytes(assets, cache, asset_id);
 
         let Some(scene) = ui_scenes.iter().find(|scene| scene.id == scene_id) else {
             return;
@@ -1549,17 +1665,17 @@ impl<
                 continue;
             };
             if self
-                .ensure_ui_texture_uploaded(layout, asset.id, bytes)
+                .ensure_ui_texture_uploaded(layout, asset.id, bytes, &resolve)
                 .is_none()
             {
                 // Drain in case a job was queued but not yet completed, then
                 // retry the lookup before giving up on this image.
-                self.drain_ui_upload_queue(layout);
+                self.drain_ui_upload_queue(layout, &resolve);
             }
 
             // Make sure this asset's upload has fully drained before render
             // asks the UI texture resolver for its slot.
-            self.drain_ui_upload_queue(layout);
+            self.drain_ui_upload_queue(layout, &resolve);
 
             if self.find_room_texture_vram_slot(asset.id).is_some() {
                 self.track_ui_image_slot(asset.id);

@@ -13,16 +13,6 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
 
-// Carried verbatim from editor-playtest in the phase-1 carve. The
-// example was an excluded package and never inherited the workspace
-// lints, so its `unsafe fn` bodies predate unsafe_op_in_unsafe_fn
-// hygiene (108 sites) and it manages state through `static mut`.
-// Both get fixed together in the phase-1.5 API pass (see
-// docs/game-runtime-plan.md boundary rules) -- wrapping 108 unsafe
-// sites by hand mid-carve invites exactly the drift the carve's
-// bit-identical gate exists to prevent.
-#[allow(unsafe_op_in_unsafe_fn)]
-#[allow(missing_docs)]
 pub mod cd_stream;
 pub mod room_cache;
 pub mod room_streaming;
