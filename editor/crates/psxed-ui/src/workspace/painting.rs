@@ -571,21 +571,19 @@ impl EditorWorkspace {
         &self,
         character: &psxed_project::CharacterResource,
     ) -> Option<u16> {
-        character
-            .model
-            .and_then(|model_id| {
-                self.project.resource(model_id).and_then(|resource| {
-                    let ResourceData::Model(model) = &resource.data else {
-                        return None;
-                    };
-                    psxed_project::resolve::resolve_character_idle_preview_clip_for_model(
-                        &self.project,
-                        character,
-                        model_id,
-                        model,
-                    )
-                })
+        character.model.and_then(|model_id| {
+            self.project.resource(model_id).and_then(|resource| {
+                let ResourceData::Model(model) = &resource.data else {
+                    return None;
+                };
+                psxed_project::resolve::resolve_character_idle_preview_clip_for_model(
+                    &self.project,
+                    character,
+                    model_id,
+                    model,
+                )
             })
+        })
     }
 
     /// Build the dedupe key for the next paint dispatch. PaintWall

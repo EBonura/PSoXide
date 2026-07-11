@@ -43,7 +43,7 @@ use std::path::PathBuf;
 #[cfg(feature = "trace-mmio")]
 use emulator_core::mmio_trace::MmioEntry;
 #[cfg(feature = "trace-mmio")]
-use emulator_core::{MmioKind, Sio0};
+use emulator_core::{mmio_trace::MmioKind, sio::Sio0};
 #[cfg(feature = "trace-mmio")]
 use std::collections::BTreeMap;
 

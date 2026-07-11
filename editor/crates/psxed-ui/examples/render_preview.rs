@@ -4,7 +4,9 @@
 
 use egui::{Color32, ColorImage};
 use psx_asset::Texture;
-use psxed_ui::model_import_preview::{render_import_model_preview_with_options, ImportPreviewOptions};
+use psxed_ui::model_import_preview::{
+    render_import_model_preview_with_options, ImportPreviewOptions,
+};
 
 fn decode_atlas(bytes: &[u8]) -> ColorImage {
     let t = Texture::from_bytes(bytes).unwrap();
@@ -22,7 +24,10 @@ fn decode_atlas(bytes: &[u8]) -> ColorImage {
             pixels[y * w + x] = Color32::from_rgb(r, g, b);
         }
     }
-    ColorImage { size: [w, h], pixels }
+    ColorImage {
+        size: [w, h],
+        pixels,
+    }
 }
 
 fn save_ppm(img: &ColorImage, path: &str) {
