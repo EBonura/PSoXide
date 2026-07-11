@@ -167,6 +167,88 @@ Phase 3 -- the gameplay layer (the new code): entity/logic runtime
   per-frame cycle envelope measured against the 30fps target on the
   gameplay tape before content scales up.
 
+### Phase 3 budget (written before code, per constraint 4)
+
+Measured 2026-07-11 on the phase-2 tip (467ea54b + this slice's
+baseline), cortex_ignition_v1, telemetry disc (`cd-stream-bench
+emulator-telemetry`), temporary `boot: Gameplay` flip (reverted
+byte-identical, the phase-1/2 tape recipe). Two runs, 2,400 guest
+frames each, headless:
+
+- Controlled idle (no input, standing at spawn -- the phase-2
+  idle A/B shape; byte-deterministic, every per-frame stage count
+  is constant): update band 37,941 cycles per 30 fps frame, frame
+  total 873,778 of the 1,128,960-cycle slot (2 vblanks at
+  564,480), 0 deadline misses, 33.0 cells drawn per frame at
+  4,952 room cycles/drawn-cell. Slot headroom at idle: ~255k.
+- Loaded route (`--hold-forward` corridor): update band avg
+  157,959 / p50 142,407 / p95 196,124 per frame; frame total avg
+  981,967 / p95 1,025,082; misses 4.88%; 12.6 cells per frame at
+  6,733 room cycles/drawn-cell. Slot headroom: avg ~147k, p95
+  ~104k. (The heavier committed bench tape,
+  `benchmarks/cortex_ignition_v1-bench-2026-06-11.pxtape`, does
+  not replay headless past the splash -- known menu-desync gotcha
+  -- so its 12.59% miss figure from the phase-2 gate stands as
+  the worst-route reference; these idle/forward runs are the
+  reproducible A/B anchors.)
+
+The envelope: the phase-3 gameplay layer (entity ticks + AI +
+logic events + combat resolution) gets **60k cycles per 30 fps
+frame** (~30k per 60 Hz tick) inside the update band -- p95 route
+headroom is ~104k, so the grant leaves ~44k p95 margin for the
+render-side cost of visible enemies (which rides the existing
+`model_instances` band and gets re-measured at the first live
+archetype). Sub-split: entity/AI ticks 40k, logic queue +
+triggers 10k, combat resolution 10k. Per-thinker target: with
+visibility-gated thinking and <=8 concurrently awake entities,
+5k per entity per frame. An EMPTY gameplay layer (zero cooked
+records -- cortex today) must cost <1k cycles per frame; the
+idle run is byte-deterministic, so the A/B delta is exact.
+
+Capacity budgets (SoA, all-zero constructors, sized against
+cortex's 8-room scale with growth margin; contract caps live in
+psx-level like `MAX_ROOM_MATERIALS` so the cook rejects over-cap
+content loudly):
+
+- `MAX_GAME_ENTITY_RECORDS` = 64: 8 rooms x up to 8 placed
+  enemies (souls density is 2-4 deliberate enemies per room; 64
+  is ~2x that at today's scale). As built: SoA 22 B/entity = 1.4
+  KB .bss; cooked `LevelGameEntityRecord` = 48 B rodata each.
+- `MAX_LOGIC_RECORDS` = 64: interactables + trigger/door/relay
+  graphs, ~8 nodes per room average. As built: runtime state 7
+  B/record ~= 450 B .bss; cooked `LevelLogicRecord` = 64 B rodata
+  each.
+- `MAX_LOGIC_EVENTS` = 32 in-flight delayed events (hl-psx ships
+  64 for full HL campaign maps; our graphs are one 8-room level;
+  overflow increments a saturating drop counter instead of
+  silently vanishing). As built: 12 B/event = 384 B.
+- `LOGIC_FIRE_DEPTH_MAX` = 8 (hl-psx parity; bounds one tick's
+  fan-out recursion).
+
+Slice-1 result (2026-07-11, the foundation slice): with cortex
+cooking zero records, the identical-work A/B (same idle and
+forward runs, before vs after) measured EXACTLY +0 cycles on the
+update band, frame totals, and miss counts, with byte-identical
+display hashes -- LTO folds the empty-table guard away, so the
+record-free gameplay layer beats the <1k rule at literally zero.
+
+Seams for the next phase-3 slice (first live archetype +
+trigger-door in cortex content): enemy authoring exists
+(non-player Character Controller + `EnemyBehaviorSettings`
+opt-in; archetype tag = Character resource name) but needs its
+inspector UI and real content in cortex (user authoring);
+trigger/relay/multisource/door logic kinds run in the runtime
+(host-tested) but have no authoring node yet -- the door's `link`
+targets a `BOX_PROPS` index (toggle draw + collision); the entity
+skeleton's placeholder constants (`GAME_ENTITY_ATTACK_RANGE`,
+`GAME_ENTITY_WALK_STEP`) must be replaced by Character-bound
+speeds and motor-integrated movement; `LogicRuntime::take_fired`
+marks await example-side effect dispatch (message overlay /
+checkpoint / door visual), at which point the interactable UI
+path migrates onto LOGIC records; enemy RENDER cost rides the
+existing `model_instances` band and must be re-measured against
+the 60k envelope at first live content.
+
 Phase 4 -- persistence: memory-card saves via psx-mc (checkpoint
   model designed for souls-like respawn loops), settings, session
   flags. Greenfield; nothing to port.

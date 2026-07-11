@@ -1,6 +1,49 @@
 use super::*;
 
 impl Playtest {
+    /// Phase-3 gameplay layer tick: entity state machines plus the
+    /// logic event graph, both gated on the portal-expanded
+    /// active-room window. Runs unconditionally on every gameplay
+    /// update (before input-mode early returns -- the souls sim does
+    /// not pause with the pad); with zero cooked records (cortex
+    /// today) the guard keeps it to a two-load check, preserving the
+    /// bit-identical gates and the budget's <1k idle rule.
+    pub(super) fn tick_gameplay_layer(&mut self, ctx: &Ctx) {
+        if GAME_ENTITIES.is_empty() && LOGIC.is_empty() {
+            return;
+        }
+        // The portal-expanded active set as a compact index list; a
+        // handful of loads per tick at MAX_ACTIVE_ROOMS = 16.
+        let mut active_rooms = [INVALID_ROOM_INDEX; MAX_ACTIVE_ROOMS];
+        let mut active_count = 0usize;
+        for slot in self.window.rooms.iter() {
+            if let Some(active) = slot {
+                active_rooms[active_count] = active.index;
+                active_count += 1;
+            }
+        }
+        let player = self.motor.position();
+        let player_pos = [player.x, player.y, player.z];
+        let now = ctx.sim_tick.as_u32();
+        self.game_entities.tick(
+            GAME_ENTITIES,
+            psx_game_runtime::entities::GameEntityTickInput {
+                player: player_pos,
+                player_room: self.room_index,
+                active_rooms: &active_rooms[..active_count],
+            },
+        );
+        self.logic.tick(
+            LOGIC,
+            psx_game_runtime::logic::LogicTickInput {
+                player: player_pos,
+                player_room: self.room_index,
+                active_rooms: &active_rooms[..active_count],
+            },
+            now,
+        );
+    }
+
     pub(super) fn init_gameplay(&mut self) {
         self.shadow_material = upload_shadow_texture();
         self.particle_material = upload_particle_texture();
@@ -40,6 +83,11 @@ impl Playtest {
         self.checkpoint = None;
         self.message_overlay = None;
         self.box_props.reset_dynamic_state();
+        // Phase-3 gameplay layer: spawn entity/logic state 1:1 from
+        // the cooked tables (empty tables leave both inert; the same
+        // calls re-run on future checkpoint respawns).
+        self.game_entities.spawn_from_records(GAME_ENTITIES);
+        self.logic.init_from_records(LOGIC);
         self.camera.snap_to_player_with_yaw(
             self.camera_target(None, false),
             self.camera_config(),
@@ -79,6 +127,7 @@ impl Playtest {
         }
         self.portal_debug_log_cooldown = self.portal_debug_log_cooldown.saturating_sub(1);
         self.step_streaming_jobs(ctx);
+        self.tick_gameplay_layer(ctx);
 
         if ctx.just_pressed(button::R3) {
             self.lock_target = match self.lock_target {
