@@ -32,7 +32,7 @@ default = [
     # (was 33k avg / 184k spike ticks on the benchmark tape).
     "vis-anchor-pvs-candidates",
 ]
-cd-stream-bench = ["dep:psx-io"]
+cd-stream-bench = ["dep:psx-io", "psx-game-runtime/cd-stream-bench"]
 cd-stream-benchmark = ["cd-stream-bench"]
 boot-trace = ["psx-engine/boot-trace", "psx-rt/boot-trace"]
 emulator-telemetry = ["psx-engine/emulator-telemetry"]

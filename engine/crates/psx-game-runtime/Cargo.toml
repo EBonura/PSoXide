@@ -6,10 +6,17 @@ license.workspace = true
 repository.workspace = true
 description = "PSoXide game layer: streaming/residency/VRAM policy and (in later phases) the entity/combat/AI runtime, between psx-engine's primitives and a game. See docs/game-runtime-plan.md."
 
+[features]
+# Streamed-world build shape (editor-playtest's default, which forwards
+# it): room-surface materials pool by resident stream slot instead of
+# living inline in `ActiveRuntimeRoom`.
+cd-stream-bench = []
+
 [dependencies]
 # Explicit paths, same rationale as psx-engine: resolvable when
 # consumed from outside the engine workspace.
 psx-engine    = { path = "../psx-engine" }
+psx-gpu       = { path = "../../../sdk/crates/psx-gpu" }
 psx-level     = { path = "../psx-level" }
 psx-io        = { path = "../../../sdk/crates/psx-io" }
 psx-telemetry = { path = "../../../sdk/crates/psx-telemetry" }
