@@ -8,7 +8,7 @@ use std::sync::Arc;
 // Drop-in `std::time::Instant` that also works on wasm (see main.rs).
 use web_time::Instant;
 
-use emulator_core::{Gpu, Vram, VRAM_HEIGHT, VRAM_WIDTH};
+use emulator_core::{Gpu, VRAM_HEIGHT, VRAM_WIDTH};
 use psx_gpu_render::HwRenderer;
 use winit::window::Window;
 
@@ -34,9 +34,16 @@ pub struct Graphics {
     pub egui_winit: egui_winit::State,
     pub egui_renderer: egui_wgpu::Renderer,
 
-    /// Persistent 1024×512 RGBA8 texture that mirrors VRAM for display.
-    /// Uploaded once per frame in `prepare_vram`.
-    vram_texture: wgpu::Texture,
+    /// Render-attachment view of the persistent 1024×512 RGBA8 VRAM
+    /// debug texture (the view keeps the texture alive). Filled GPU-side
+    /// in `prepare_vram` by expanding the HW renderer's R16Uint VRAM
+    /// mirror (no CPU decode, no re-upload); the debug sidebar samples
+    /// it through [`Graphics::vram_texture_id`].
+    vram_view: wgpu::TextureView,
+    /// egui's requested time-to-next-repaint from the last frame
+    /// (`Duration::MAX` when nothing is animating). Feeds the shell's
+    /// redraw scheduler.
+    last_repaint_delay: std::time::Duration,
     /// Egui-side handle for the VRAM texture; panels reference it via
     /// [`Graphics::vram_texture_id`].
     vram_texture_id: egui::TextureId,
@@ -174,7 +181,8 @@ impl Graphics {
             egui_ctx,
             egui_winit,
             egui_renderer,
-            vram_texture,
+            vram_view,
+            last_repaint_delay: std::time::Duration::MAX,
             vram_texture_id,
             display_texture,
             display_texture_id,
@@ -198,6 +206,12 @@ impl Graphics {
     /// window; safe to pass to panels once per frame.
     pub fn vram_texture_id(&self) -> egui::TextureId {
         self.vram_texture_id
+    }
+
+    /// egui's requested time-to-next-repaint from the last rendered
+    /// frame (`Duration::MAX` when nothing is animating).
+    pub fn repaint_delay(&self) -> std::time::Duration {
+        self.last_repaint_delay
     }
 
     /// Egui handle for the packed 24bpp display fallback texture.
@@ -397,33 +411,14 @@ impl Graphics {
         self.hw_renderer.sync_target_from_vram(vram_words);
     }
 
-    /// Upload a full VRAM snapshot to the GPU-side texture. Called once
-    /// per frame from `App` before `render`. `None` means "no Bus yet"
-    /// -- we leave the last texture contents alone (typically zeros).
-    pub fn prepare_vram(&self, vram: Option<&Vram>) {
-        let Some(vram) = vram else {
-            return;
-        };
-        let rgba = vram.to_rgba8(0, 0, VRAM_WIDTH as u16, VRAM_HEIGHT as u16);
-        self.queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &self.vram_texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            &rgba,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(VRAM_WIDTH as u32 * 4),
-                rows_per_image: Some(VRAM_HEIGHT as u32),
-            },
-            wgpu::Extent3d {
-                width: VRAM_WIDTH as u32,
-                height: VRAM_HEIGHT as u32,
-                depth_or_array_layers: 1,
-            },
-        );
+    /// Fill the VRAM debug-view texture by expanding the HW renderer's
+    /// live R16Uint VRAM mirror on the GPU (`fs_blit`, same BGR15->RGB8
+    /// math `Vram::to_rgba8` uses). Replaces the old per-frame CPU
+    /// decode of all 512K pixels plus a 2 MB `write_texture` upload;
+    /// the mirror itself is kept current by `render_hw_frame`. The
+    /// caller gates this on the debug sidebar being visible.
+    pub fn prepare_vram(&self) {
+        self.hw_renderer.blit_vram_to_view(&self.vram_view);
     }
 
     /// Upload the CPU-decoded visible display area for presentation cases the
@@ -513,6 +508,15 @@ impl Graphics {
         let t = Instant::now();
         let full_output = self.egui_ctx.run(raw_input, build_ui);
         profile.ui_ms = elapsed_ms(t);
+
+        // Remember egui's own repaint request (slide animations, caret
+        // blink, tooltips) so the shell's redraw scheduler can honor it
+        // now that redraws are no longer continuous while paused.
+        self.last_repaint_delay = full_output
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .map(|v| v.repaint_delay)
+            .unwrap_or(std::time::Duration::MAX);
 
         let t = Instant::now();
         self.egui_winit
@@ -633,7 +637,10 @@ fn create_rgba_texture(device: &wgpu::Device, label: &'static str) -> wgpu::Text
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::Rgba8UnormSrgb,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        // RENDER_ATTACHMENT: filled by the GPU-side VRAM expand blit.
+        usage: wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_DST
+            | wgpu::TextureUsages::RENDER_ATTACHMENT,
         view_formats: &[],
     })
 }

@@ -253,10 +253,11 @@ impl ComputeBackend {
     fn lower_mono_quad(&mut self, cmd: u32, v: [(i32, i32); 4]) {
         let color = rgb24_to_bgr15(cmd & 0x00FF_FFFF);
         let (flags, mode) = self.mono_blend_mode_and_flags(cmd);
-        // Quad → 2 triangles: (v0, v1, v2) + (v1, v3, v2). Same
-        // split order the CPU rasterizer uses.
-        let t1 = MonoTri::new(v[0], v[1], v[2], color, flags, mode);
-        let t2 = MonoTri::new(v[1], v[3], v[2], color, flags, mode);
+        // Quad → 2 triangles in Redux/CPU order: (v1, v3, v2) then
+        // (v0, v1, v2). Flat color makes the order invisible today,
+        // but keep every quad lowering on the same convention.
+        let t1 = MonoTri::new(v[1], v[3], v[2], color, flags, mode);
+        let t2 = MonoTri::new(v[0], v[1], v[2], color, flags, mode);
         self.rasterizer
             .dispatch_mono_tri_scanline(&self.vram, &t1, &self.interp.state.draw_area);
         self.rasterizer
@@ -345,8 +346,13 @@ impl ComputeBackend {
         let c2 = decode_tint(colors[2] & 0x00FF_FFFF);
         let c3 = decode_tint(colors[3] & 0x00FF_FFFF);
         let (flags, mode) = self.mono_blend_mode_and_flags(cmd);
-        let t1 = ShadedTri::new(v[0], v[1], v[2], c0, c1, c2, flags, mode);
-        let t2 = ShadedTri::new(v[1], v[3], v[2], c1, c3, c2, flags, mode);
+        // Redux/CPU split order: (v1, v3, v2) first, then (v0, v1, v2)
+        // so the first half wins the shared diagonal. Gouraud colors
+        // interpolate slightly differently per half, so drawing the
+        // halves in the other order diverges by one LSB on diagonal
+        // pixels (alttp menu quad, replay_bisect op 0x38).
+        let t1 = ShadedTri::new(v[1], v[3], v[2], c1, c3, c2, flags, mode);
+        let t2 = ShadedTri::new(v[0], v[1], v[2], c0, c1, c2, flags, mode);
         self.rasterizer
             .dispatch_shaded_tri_scanline(&self.vram, &t1, &self.interp.state.draw_area);
         self.rasterizer

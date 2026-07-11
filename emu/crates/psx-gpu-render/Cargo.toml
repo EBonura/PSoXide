@@ -9,6 +9,7 @@ repository.workspace  = true
 path = "src/lib.rs"
 
 [dependencies]
+psx-hw = { workspace = true }
 emulator-core = { workspace = true }
 psx-gpu       = { workspace = true }
 wgpu          = { workspace = true }

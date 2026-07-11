@@ -280,6 +280,15 @@ impl HwRenderer {
     /// VRAM sampler texture (one fullscreen triangle). Wireframe-mode
     /// helper; see the call site in [`HwRenderer::render_frame`].
     fn blit_vram_to_target(&mut self) {
+        self.blit_vram_to_view(self.target.view());
+    }
+
+    /// Expand the R16Uint VRAM texture into any `TARGET_FORMAT` color
+    /// attachment (one fullscreen triangle, `fs_blit`'s BGR15 -> RGB8
+    /// decode). Public so the frontend's VRAM debug view can be filled
+    /// GPU-side instead of re-decoding half a million pixels on the CPU
+    /// every frame the way `Vram::to_rgba8` does.
+    pub fn blit_vram_to_view(&self, view: &wgpu::TextureView) {
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -289,7 +298,7 @@ impl HwRenderer {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("psx-hw-blit-pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: self.target.view(),
+                    view,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Load,
