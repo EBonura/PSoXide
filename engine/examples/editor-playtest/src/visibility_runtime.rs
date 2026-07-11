@@ -164,41 +164,9 @@ fn active_room_sort_depth(active: ActiveRuntimeRoom, camera: WorldCamera) -> i32
         .z
 }
 
-pub(super) fn room_origin_x(record: &LevelRoomRecord) -> i32 {
-    record.origin_x.saturating_mul(record.sector_size)
-}
+pub(super) use psx_game_runtime::room_cache::{room_origin_x, room_origin_y, room_origin_z};
 
-pub(super) fn room_origin_z(record: &LevelRoomRecord) -> i32 {
-    record.origin_z.saturating_mul(record.sector_size)
-}
-
-/// Vertical origin of a room in engine units. Unlike X/Z (`origin_*` in
-/// sectors), `origin_y` is already stored in engine units, so it is used
-/// directly. Drives Y rebasing across room transitions for stacked floors.
-pub(super) fn room_origin_y(record: &LevelRoomRecord) -> i32 {
-    record.origin_y
-}
-
-#[derive(Copy, Clone)]
-pub(super) struct ActiveRoomView {
-    pub(super) position: RoomPoint,
-    pub(super) sin_yaw: i32,
-    pub(super) cos_yaw: i32,
-    pub(super) sin_pitch: i32,
-    pub(super) cos_pitch: i32,
-}
-
-impl ActiveRoomView {
-    pub(super) fn from_camera(camera: WorldCamera) -> Self {
-        Self {
-            position: RoomPoint::new(camera.position.x, camera.position.y, camera.position.z),
-            sin_yaw: camera.sin_yaw.raw(),
-            cos_yaw: camera.cos_yaw.raw(),
-            sin_pitch: camera.sin_pitch.raw(),
-            cos_pitch: camera.cos_pitch.raw(),
-        }
-    }
-}
+pub(super) use psx_game_runtime::room_visibility::ActiveRoomView;
 
 #[derive(Copy, Clone)]
 pub(super) struct PortalVisibilitySpace {

@@ -38,7 +38,7 @@ impl Playtest {
         let active_draw_order = active_room_draw_order(
             &self.active_rooms,
             camera,
-            &self.portal_visibility,
+            &self.visibility.result,
             self.room_index,
             cached_room_draw_order_mode(),
         );
@@ -62,8 +62,7 @@ impl Playtest {
             // the render pass would refill anyway.
             let global_visibility_anchor = if active.index == self.room_index {
                 player
-            } else if let Some(anchor) =
-                self.portal_entry_anchor(active.index, active.sector_size)
+            } else if let Some(anchor) = self.portal_entry_anchor(active.index, active.sector_size)
             {
                 anchor
             } else {
