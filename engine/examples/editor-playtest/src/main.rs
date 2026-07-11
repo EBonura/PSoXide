@@ -66,12 +66,12 @@ use psx_engine::{
     Ctx, CullMode, DepthBand, DepthPolicy, DepthRange, JointViewTransform, JointWorldTransform,
     LoadedWorldCameraGte, LocalToWorldScale, Mat3I16, MaterialTint, ModelPoseTranslation, OtFrame,
     PointLightSample, PrimitivePacketArena, PrimitivePacketScratch, PrimitiveSink, ProjectedVertex,
-    Rgb8, RoomPoint, RoomRender, RuntimeCollisionRoom, RuntimeRoom, Scene, SceneStateRef,
-    SchedulerConfig, SimTick, TexturedModelGeometry, TexturedModelRenderFace,
-    TexturedModelRenderStats, ThirdPersonCameraConfig, ThirdPersonCameraInput,
-    ThirdPersonCameraState, ThirdPersonCameraTarget, VideoHz, VisualPacing, WorldCamera,
-    WorldProjection, WorldRenderMaterial, WorldRenderPass, WorldSurfaceLighting,
-    WorldSurfaceOptions, WorldSurfaceSample, WorldTriCommand, WorldVertex, Q12, Q8,
+    Rgb8, RoomPoint, RuntimeCollisionRoom, RuntimeRoom, Scene, SceneStateRef, SchedulerConfig,
+    SimTick, TexturedModelGeometry, TexturedModelRenderFace, TexturedModelRenderStats,
+    ThirdPersonCameraConfig, ThirdPersonCameraInput, ThirdPersonCameraState,
+    ThirdPersonCameraTarget, VideoHz, VisualPacing, WorldCamera, WorldProjection,
+    WorldRenderMaterial, WorldRenderPass, WorldSurfaceLighting, WorldSurfaceOptions,
+    WorldSurfaceSample, WorldTriCommand, WorldVertex, Q12, Q8,
 };
 use psx_engine::{
     cached_room_cells_from_level_records, cached_room_surfaces_from_level_records,
@@ -94,9 +94,9 @@ use psx_gpu::{
     VideoMode,
 };
 use psx_level::portal_visibility::{
-    build_portal_visibility_with_room_bounds, debug_portal_clip, PortalClipDebug,
-    PortalClipDebugDecision, PortalClipDebugPlane, PortalClipDebugRect, PortalFrustum,
-    PortalRoomBounds, PortalVisibilityCamera, PortalVisibilityResult,
+    debug_portal_clip, PortalClipDebug, PortalClipDebugDecision, PortalClipDebugPlane,
+    PortalClipDebugRect, PortalFrustum, PortalRoomBounds, PortalVisibilityCamera,
+    PortalVisibilityResult,
 };
 use psx_level::{
     box_prop_flags, character_action_flags, equipment_flags, far_vista_flags, find_asset_of_kind,
@@ -196,21 +196,14 @@ use generated::{GAME_FLOW, OPTIONS, UI_SCENES};
 use generated::{VISIBILITY_PVS, VISIBILITY_PVS_BITS};
 
 // Prebuilt room-quad pool (docs/perf-30fps.md): precompiled GP0(3Ch)
-// packets for static room surfaces. One slot per recently drawn room;
-// a packet is fully constructed the first frame its surface is drawn
-// for the owning room (per-surface validity bytes, zeroed on claim)
-// and only position/colour-patched afterwards. Lives OUTSIDE the
-// per-frame arena; the present flip's DMA drain makes in-place
-// patching safe.
-const PREBUILT_ROOM_QUAD_SLOT_EMPTY: [QuadTexturedGouraud; PREBUILT_ROOM_QUAD_CAP] =
-    [QuadTexturedGouraud::EMPTY; PREBUILT_ROOM_QUAD_CAP];
-static mut PREBUILT_ROOM_QUADS: [[QuadTexturedGouraud; PREBUILT_ROOM_QUAD_CAP];
-    PREBUILT_ROOM_QUAD_SLOTS] = [PREBUILT_ROOM_QUAD_SLOT_EMPTY; PREBUILT_ROOM_QUAD_SLOTS];
-static mut PREBUILT_ROOM_QUAD_VALID: [[u8; PREBUILT_ROOM_QUAD_CAP]; PREBUILT_ROOM_QUAD_SLOTS] =
-    [[0u8; PREBUILT_ROOM_QUAD_CAP]; PREBUILT_ROOM_QUAD_SLOTS];
-static mut PREBUILT_ROOM_QUAD_ROOMS: [RoomIndex; PREBUILT_ROOM_QUAD_SLOTS] =
-    [INVALID_ROOM_INDEX; PREBUILT_ROOM_QUAD_SLOTS];
-static mut PREBUILT_ROOM_QUAD_NEXT: u8 = 0;
+// packets for static room surfaces. The pool policy and full docs live
+// on `psx_game_runtime::room_cache::PrebuiltRoomQuads`; this is the
+// example's one instance, in static storage outside the per-frame
+// arena (the present flip's DMA drain makes in-place patching safe).
+static mut PREBUILT_ROOM_QUADS: psx_game_runtime::room_cache::PrebuiltRoomQuads<
+    PREBUILT_ROOM_QUAD_SLOTS,
+    PREBUILT_ROOM_QUAD_CAP,
+> = psx_game_runtime::room_cache::PrebuiltRoomQuads::EMPTY;
 
 static mut OT: OrderingTable<OT_DEPTH> = OrderingTable::new();
 static mut PRIMITIVE_PACKETS: PrimitivePacketScratch<MAX_TEXTURED_TRIS> =
@@ -290,7 +283,6 @@ fn yaw_q12_from_basis(sin_yaw: i32, cos_yaw: i32) -> u16 {
     (angle & 0x0fff) as u16
 }
 
-
 struct Playtest {
     /// Active room. `None` until `init` runs and only `Some`
     /// when the manifest had at least one room and its bytes
@@ -307,23 +299,10 @@ struct Playtest {
     /// Incremental active-room cache rebuild in progress. The old
     /// `active_rooms` remain drawable until the staged replacement is ready.
     active_room_job: ActiveRoomWindowJob,
-    /// Portal traversal result for the current player/camera room.
-    portal_visibility: RuntimePortalVisibility,
-    /// Runtime room used as the root for the latest portal traversal.
-    portal_visibility_root: RoomIndex,
-    /// Absolute level-space render camera used by the latest portal traversal.
-    portal_visibility_camera_global: RoomPoint,
-    /// Global chunk bounds retained for portal diagnostics and streaming.
-    portal_room_bounds: [PortalRoomBounds; MAX_PORTAL_ROOM_BOUNDS],
-    /// Cached `portal_room_bounds` length. The bounds are a pure function of the
-    /// static cooked geometry (ROOM_VISIBILITY / VISIBILITY_CELLS / ROOMS), so
-    /// they are computed once and reused; recomputing them per portal-visibility
-    /// refresh was ~74% of the portal-visibility cost.
-    portal_room_bounds_count: Option<usize>,
-    portal_visible_missing_resident: u16,
-    portal_visible_missing_mask: RuntimeDebugMask,
-    portal_visible_build_failed: u16,
-    portal_visible_build_failed_mask: RuntimeDebugMask,
+    /// Portal-visibility runtime state (traversal result, root, bounds
+    /// cache, view keys, per-refresh diagnostics), owned by
+    /// `psx_game_runtime::room_visibility` since the phase-1 carve.
+    visibility: RuntimeRoomVisibility,
     portal_stream_priority_current: u16,
     portal_stream_priority_visible: u16,
     portal_stream_priority_frontier: u16,
@@ -342,14 +321,8 @@ struct Playtest {
         not(feature = "vis-full-active-chunks")
     ))]
     visible_cell_cache_cursor: usize,
-    active_room_candidates: u16,
     active_room_cache_skips: u16,
     active_room_anchor: RoomPoint,
-    active_room_view_anchor: RoomPoint,
-    active_room_view_sin_key: i16,
-    active_room_view_cos_key: i16,
-    active_room_view_pitch_sin_key: i16,
-    active_room_view_pitch_cos_key: i16,
     /// Index in ROOMS the player is currently in. Used to scope
     /// model-instance + light queries.
     room_index: RoomIndex,
@@ -517,15 +490,7 @@ impl Playtest {
             current_ambient_rgb: [0x80, 0x80, 0x80],
             active_rooms: [const { None }; MAX_ACTIVE_ROOMS],
             active_room_job: ActiveRoomWindowJob::EMPTY,
-            portal_visibility: RuntimePortalVisibility::EMPTY,
-            portal_visibility_root: RoomIndex::ZERO,
-            portal_visibility_camera_global: RoomPoint::ZERO,
-            portal_room_bounds: [PortalRoomBounds::EMPTY; MAX_PORTAL_ROOM_BOUNDS],
-            portal_room_bounds_count: None,
-            portal_visible_missing_resident: 0,
-            portal_visible_missing_mask: RuntimeDebugMask::EMPTY,
-            portal_visible_build_failed: 0,
-            portal_visible_build_failed_mask: RuntimeDebugMask::EMPTY,
+            visibility: RuntimeRoomVisibility::EMPTY,
             portal_stream_priority_current: 0,
             portal_stream_priority_visible: 0,
             portal_stream_priority_frontier: 0,
@@ -544,14 +509,8 @@ impl Playtest {
                 not(feature = "vis-full-active-chunks")
             ))]
             visible_cell_cache_cursor: 0,
-            active_room_candidates: 0,
             active_room_cache_skips: 0,
             active_room_anchor: RoomPoint::ZERO,
-            active_room_view_anchor: RoomPoint::ZERO,
-            active_room_view_sin_key: 0,
-            active_room_view_cos_key: 0,
-            active_room_view_pitch_sin_key: 0,
-            active_room_view_pitch_cos_key: 0,
             room_index: RoomIndex::ZERO,
             resident_desired: [INVALID_ROOM_INDEX; STREAMED_ROOM_SLOT_COUNT],
             resident_desired_count: 0,
@@ -597,8 +556,7 @@ impl Playtest {
             fps_worst_gap: 0,
             fps_display: 0,
             fps_display_worst: 0,
-            camera_collision_rooms: [const { CharacterCollisionRoom::EMPTY };
-                MAX_COLLISION_ROOMS],
+            camera_collision_rooms: [const { CharacterCollisionRoom::EMPTY }; MAX_COLLISION_ROOMS],
             camera_collision_room_count: 0,
             camera_rooms_key: (
                 INVALID_ROOM_INDEX,
@@ -724,7 +682,7 @@ impl Playtest {
         let visible_limit = self.portal_visible_room_limit(record);
         let mut visible = 0usize;
         while visible < visible_limit {
-            let room = self.portal_visibility.rooms[visible].room;
+            let room = self.visibility.result.rooms[visible].room;
             if room != INVALID_ROOM_INDEX && !streamed_room_is_resident(room) {
                 return false;
             }
@@ -756,7 +714,7 @@ impl Playtest {
         let visible_limit = self.portal_visible_room_limit(record);
         let mut visible = 0usize;
         while visible < visible_limit {
-            let room = self.portal_visibility.rooms[visible].room;
+            let room = self.visibility.result.rooms[visible].room;
             if room != INVALID_ROOM_INDEX && !room_requested(room, &self.resident_desired, count) {
                 if let Some(record) = ROOMS.get(room.to_usize()) {
                     ready &= room_material_textures_ready(record);

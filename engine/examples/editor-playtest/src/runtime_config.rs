@@ -344,6 +344,14 @@ pub(super) const PORTAL_ROOM_BOUNDS_MIN_Y: i32 = -4096;
 pub(super) const PORTAL_ROOM_BOUNDS_MAX_Y: i32 = 8192;
 pub(super) type RuntimePortalVisibility =
     PortalVisibilityResult<MAX_ACTIVE_ROOMS, MAX_PORTAL_FRUSTUMS, MAX_PORTAL_FRONTIER_ROOMS>;
+/// Crate-owned portal-visibility state instantiated with this example's
+/// budget consts (its `result` field is a [`RuntimePortalVisibility`]).
+pub(super) type RuntimeRoomVisibility = psx_game_runtime::room_visibility::RoomVisibility<
+    MAX_ACTIVE_ROOMS,
+    MAX_PORTAL_FRUSTUMS,
+    MAX_PORTAL_FRONTIER_ROOMS,
+    MAX_PORTAL_ROOM_BOUNDS,
+>;
 /// Streamed room slot budget. A slot stores one runtime room payload:
 /// the room `.psxw` plus the room-local render cache records carried by
 /// the `.psxc` payload. Slots are sized to the largest payload in the cooked
@@ -412,7 +420,7 @@ pub(super) const fn clamp_streamed_room_slot_bytes(raw: usize) -> usize {
     };
     (clamped + 3) & !3
 }
-pub(super) const INVALID_ROOM_INDEX: RoomIndex = RoomIndex(u16::MAX);
+pub(super) use psx_game_runtime::room_cache::INVALID_ROOM_INDEX;
 
 /// Per-frame projected-vertex scratch for the model renderer.
 /// Sized to the largest part vertex count we expect; instances
