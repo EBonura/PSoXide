@@ -620,7 +620,7 @@ fn first_status_error(current: u32, next: u32) -> u32 {
 /// which load one chunk at a time into a shared staging buffer, so a
 /// blocking read is the simplest correct shape. Non-mips builds return
 /// `STATUS_UNSUPPORTED`.
-pub(super) fn read_chunk_blocking(
+pub fn read_chunk_blocking(
     pack_lba: u32,
     toc: &[LevelWorldPackEntryRecord],
     chunk_id: u32,
@@ -706,16 +706,16 @@ pub(super) fn read_chunk_blocking(
 /// (`sector_offset` / `sector_count` within UI.PAK) and where its unpadded
 /// bytes go in the caller's flat cache (`cache_word_start`, in u32 words).
 #[derive(Copy, Clone)]
-pub(super) struct UiChunkPlan {
-    pub(super) sector_offset: u32,
-    pub(super) sector_count: u32,
-    pub(super) byte_size: usize,
-    pub(super) checksum: u32,
-    pub(super) cache_word_start: usize,
+pub struct UiChunkPlan {
+    pub sector_offset: u32,
+    pub sector_count: u32,
+    pub byte_size: usize,
+    pub checksum: u32,
+    pub cache_word_start: usize,
 }
 
 impl UiChunkPlan {
-    pub(super) const EMPTY: Self = Self {
+    pub const EMPTY: Self = Self {
         sector_offset: 0,
         sector_count: 0,
         byte_size: 0,
@@ -734,7 +734,7 @@ impl UiChunkPlan {
 /// `sector_offset` (disc) order; any gap between chunks is read and discarded
 /// so the stream stays aligned. Each chunk's status lands in `out_status[i]`.
 #[cfg(target_arch = "mips")]
-pub(super) fn read_chunks_contiguous(
+pub fn read_chunks_contiguous(
     pack_lba: u32,
     plans: &[UiChunkPlan],
     cache: &mut [u32],
@@ -832,7 +832,7 @@ pub(super) fn read_chunks_contiguous(
 /// Host stub: no CD hardware, so streamed UI is unsupported (matches
 /// `read_chunk_blocking`).
 #[cfg(not(target_arch = "mips"))]
-pub(super) fn read_chunks_contiguous(
+pub fn read_chunks_contiguous(
     _pack_lba: u32,
     plans: &[UiChunkPlan],
     _cache: &mut [u32],
