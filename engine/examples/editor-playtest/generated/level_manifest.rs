@@ -6,9 +6,9 @@ use psx_level::{
     EntityRecord, EquipmentRecord, FlowState, GameFlow, InteractableMessageRecord,
     InteractableRecord, LevelAssetRecord, LevelBoxPropRecord, LevelCachedRoomCellRecord,
     LevelCachedRoomSurfaceRecord, LevelCachedRoomVertexRecord, LevelCameraRecord,
-    LevelCharacterRecord, LevelChunkRecord, LevelFarVistaRecord, LevelImagePropRecord,
-    LevelMaterialRecord, LevelModelClipBoundsRecord, LevelModelClipRecord,
-    LevelModelFrameBoundsRecord, LevelModelInstanceRecord, LevelModelRecord,
+    LevelCharacterRecord, LevelChunkRecord, LevelFarVistaRecord, LevelGameEntityRecord,
+    LevelImagePropRecord, LevelLogicRecord, LevelMaterialRecord, LevelModelClipBoundsRecord,
+    LevelModelClipRecord, LevelModelFrameBoundsRecord, LevelModelInstanceRecord, LevelModelRecord,
     LevelModelSocketRecord, LevelOptionDef, LevelRoomPortalRecord, LevelRoomRecord,
     LevelRoomSurfaceCacheRecord, LevelRoomVisibilityRecord, LevelSceneState, LevelSkyRecord,
     LevelUiNodeRecord, LevelUiPaintRecord, LevelUiScene, LevelUiSfxCueRecord,
@@ -80,6 +80,8 @@ pub static LIGHTS: &[PointLightRecord] = &[];
 pub static PARTICLE_EMITTERS: &[ParticleEmitterRecord] = &[];
 pub static INTERACTABLE_MESSAGES: &[InteractableMessageRecord] = &[];
 pub static INTERACTABLES: &[InteractableRecord] = &[];
+pub static LOGIC: &[LevelLogicRecord] = &[];
+pub static GAME_ENTITIES: &[LevelGameEntityRecord] = &[];
 pub static CHARACTERS: &[LevelCharacterRecord] = &[];
 pub static PLAYER_CONTROLLER: Option<PlayerControllerRecord> = None;
 pub static ENTITIES: &[EntityRecord] = &[];
