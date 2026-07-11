@@ -1676,8 +1676,11 @@ impl CellFrustum {
     #[inline(always)]
     fn sphere_lateral(self, view: ViewVertex, radius: i32) -> bool {
         let z = view.z.max(self.near);
+        // psx-numeric-allow-next-line: projected-extent product widens to i64; native mult result
         let px = view.x.abs().saturating_sub(radius) as i64 * self.focal as i64;
+        // psx-numeric-allow-next-line: projected-extent product widens to i64; native mult result
         let py = view.y.abs().saturating_sub(radius) as i64 * self.focal as i64;
+        // psx-numeric-allow-next-line: frustum compare of two 64-bit products; native mult results
         px <= self.half_w as i64 * z as i64 && py <= self.half_h as i64 * z as i64
     }
 }
