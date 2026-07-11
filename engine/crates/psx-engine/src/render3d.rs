@@ -1048,8 +1048,7 @@ impl PreparedTriangleDepth {
         options: WorldSurfaceOptions,
         projected: [ProjectedVertex; 4],
     ) -> Self {
-        let average =
-            (projected[0].sz + projected[1].sz + projected[2].sz + projected[3].sz) / 4;
+        let average = (projected[0].sz + projected[1].sz + projected[2].sz + projected[3].sz) / 4;
         let depth = CameraDepth::new(average.saturating_add(options.depth_bias));
         Self {
             slot: options
@@ -2227,13 +2226,7 @@ fn project_blended_textured_model_vertex(
     // the caller's GTE batch state is preserved on return.
     let projected = project_gte_view_vertex(view_blend, projection);
     player_vert_debug::observe(
-        vertex,
-        &primary,
-        &secondary,
-        view_a,
-        view_b,
-        view_blend,
-        projected,
+        vertex, &primary, &secondary, view_a, view_b, view_blend, projected,
     );
     scene::load_rotation(&primary.rotation);
     scene::load_translation(primary.translation);
@@ -2387,7 +2380,9 @@ pub mod player_vert_debug {
             // stretch event, |X| ~10x normal, dominates immediately), and
             // the compose inputs for its two joints are copied in HERE so
             // all four pages describe one frozen event.
-            let score = abs_i32(view_a.x).max(abs_i32(view_b.x)).max(abs_i32(view_blend.x));
+            let score = abs_i32(view_a.x)
+                .max(abs_i32(view_b.x))
+                .max(abs_i32(view_blend.x));
             if score > SNAP_SCORE {
                 SNAP_SCORE = score;
                 let joints = &*core::ptr::addr_of!(JOINTS);
