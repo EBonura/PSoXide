@@ -29,23 +29,19 @@ pub mod telemetry;
 pub mod timers;
 pub mod vram;
 
-pub use bus::{Bus, BusError};
-pub use cdrom::CdRom;
-pub use cpu::{Cpu, ExecutionError};
-pub use dma::{Dma, DmaChannel};
+// Root re-exports: only what the two consumers (frontend and
+// psx-gpu-render) actually reach by name. Everything else stays on
+// its module path.
+pub use bus::Bus;
+pub use cpu::Cpu;
 pub use freelook::FreelookState;
 pub use fastboot::{
-    fast_boot_disc, fast_boot_disc_with_hle, warm_bios_for_disc_fast_boot, DiscFastBootInfo,
+    fast_boot_disc, fast_boot_disc_with_hle, warm_bios_for_disc_fast_boot,
     DISC_FAST_BOOT_WARMUP_STEPS,
 };
 pub use gpu::{DisplayArea, Gpu};
 pub use input_tape::{read_tape, write_tape, PadSample};
-pub use irq::{Irq, IrqSource};
-pub use mmio_trace::{MmioKind, MmioTrace};
-pub use pad::{button, ButtonState, DigitalPad, PortDevice};
-pub use psx_gte_core::{Gte, GteProfileSnapshot};
-pub use sio::Sio0;
-pub use spu::{Spu, XaDecoderState};
+pub use pad::{button, ButtonState};
+pub use psx_gte_core::GteProfileSnapshot;
 pub use telemetry::{GuestTelemetry, GuestTelemetryEvent, GuestTelemetryKind};
-pub use timers::{Timer, Timers};
 pub use vram::{Vram, VRAM_HEIGHT, VRAM_WIDTH};

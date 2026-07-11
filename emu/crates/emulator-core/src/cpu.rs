@@ -2283,7 +2283,7 @@ mod tests {
         // Set SR IEc (bit 0) + IM2 (bit 10) so IRQ is unmasked.
         cpu.cop0[12] = 0x401;
         // Raise a hardware IRQ and set the mask so it's pending.
-        bus.irq_mut().raise(crate::IrqSource::VBlank);
+        bus.irq_mut().raise(crate::irq::IrqSource::VBlank);
         bus.irq_mut().write_mask(0x1);
         // PC points at the cofun at the BIOS reset vector.
         assert_eq!(cpu.pc(), 0xBFC0_0000);
@@ -2293,7 +2293,7 @@ mod tests {
         // area but bit 25 clear (MFC2): top byte becomes 0x48 which
         // doesn't match the mask. The IRQ should fire.
         bus = Bus::new(synthetic_bios_with_first_word(0x4800_0000)).unwrap();
-        bus.irq_mut().raise(crate::IrqSource::VBlank);
+        bus.irq_mut().raise(crate::irq::IrqSource::VBlank);
         bus.irq_mut().write_mask(0x1);
         assert!(cpu.should_take_interrupt(&mut bus));
     }
