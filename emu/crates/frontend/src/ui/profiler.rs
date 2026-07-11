@@ -1666,6 +1666,7 @@ fn per_guest_frame(total: f32, frames_run: f32) -> f32 {
 fn format_log_line(kind: &str, sample: FrameProfileSample) -> String {
     let mut line = format!(
         "[profile {kind}] total={:.2}ms host_dt={:.2}ms fps={:.1} run={:.1} \
+         input={:.2}ms cmdlog={:.2}ms compute={:.2}ms disp={:.2}ms hwscale={:.2}ms \
          emu={:.2}ms audio={:.2}ms vram={:.2}ms hw={:.2}ms ui={:.2}ms \
          host_fps={:.1} emu_hz={:.1} vis_hz={:.1} draw_hz={:.1} step={:.1}% \
          cyc_f={:.0} budget_f={:.0} instr_f={:.0} vblanks={:.1} capmiss={:.0} \
@@ -1679,6 +1680,11 @@ fn format_log_line(kind: &str, sample: FrameProfileSample) -> String {
         sample.host_dt_ms,
         fps_from_ms(sample.host_dt_ms),
         sample.frames_run,
+        sample.input_ms,
+        sample.cmd_log_ms,
+        sample.compute_ms,
+        sample.display_upload_ms,
+        sample.hw_scale_ms,
         sample.emu_ms,
         sample.audio_ms,
         sample.vram_upload_ms,
