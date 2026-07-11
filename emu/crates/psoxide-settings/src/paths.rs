@@ -145,10 +145,6 @@ impl ConfigPaths {
             .join(format!("memcard-{clamped}.mcd"))
     }
 
-    /// Rolling crash-log file. Appended to from panic hooks.
-    pub fn crash_log(&self) -> PathBuf {
-        self.root.join("logs").join("last-crash.log")
-    }
 
     /// Ensure `dir` exists as a directory, creating parents as
     /// needed. Idempotent. Errors are wrapped with the path so

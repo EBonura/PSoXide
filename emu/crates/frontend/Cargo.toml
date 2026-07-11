@@ -24,6 +24,7 @@ mcp = ["dep:rmcp", "dep:tokio", "dep:axum", "dep:schemars", "dep:serde", "dep:ba
 
 [dependencies]
 emulator-core    = { workspace = true }
+psx-hw           = { workspace = true }
 psoxide-settings = { workspace = true }
 psoxide-validation = { workspace = true }
 psx-asset        = { workspace = true }
