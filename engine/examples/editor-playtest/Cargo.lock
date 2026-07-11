@@ -66,11 +66,14 @@ dependencies = [
 name = "psx-game-runtime"
 version = "0.1.0"
 dependencies = [
+ "psx-asset",
  "psx-engine",
+ "psx-font",
  "psx-gpu",
  "psx-io",
  "psx-level",
  "psx-telemetry",
+ "psx-vram",
 ]
 
 [[package]]

@@ -5,18 +5,29 @@
 //! retry-backoff policy over the crate's `cd_stream` read job; cooked
 //! pack tables arrive as psx-level record params, capacities as
 //! `const N` generic parameters, the game's slot word buffers as `&mut`
-//! parameters, and its debug logging as closures. The slot byte
-//! buffers themselves (and every unsafe resolver that reads them) stay
-//! with the game until the statics/VRAM carve.
+//! parameters, and its debug logging as closures. Since the
+//! vram_runtime slice, the slot byte buffers live here too as
+//! [`StreamedRoomSlots`], whose resolvers replace the game's unsafe
+//! `&'static`-lying readers with borrows tied to the buffer.
 
 #[cfg(feature = "cd-stream-bench")]
 use crate::cd_stream;
 use crate::room_cache::INVALID_ROOM_INDEX;
+#[cfg(feature = "cd-stream-bench")]
+use crate::room_cache::{ActiveRoomCacheStatus, ActiveRoomSurfaceCache};
 use psx_engine::telemetry;
+#[cfg(feature = "cd-stream-bench")]
+use psx_engine::CompactCollisionRoom;
+#[cfg(feature = "cd-stream-bench")]
+use psx_engine::{
+    cached_room_cells_from_level_records, cached_room_surfaces_from_level_records,
+    cached_room_vertices_from_level_records, CachedRoomCell, CachedRoomSurface, WorldVertex,
+};
 #[cfg(feature = "cd-stream-bench")]
 use psx_level::{
     streamed_room_chunk_header, LevelCachedRoomCellRecord, LevelCachedRoomSurfaceRecord,
-    LevelCachedRoomVertexRecord, LevelWorldPackEntryRecord, STREAMED_ROOM_CHUNK_HEADER_BYTES,
+    LevelCachedRoomVertexRecord, LevelWorldPackEntryRecord,
+    STREAMED_ROOM_CHUNK_FLAG_COLLISION_COMPACT, STREAMED_ROOM_CHUNK_HEADER_BYTES,
     STREAMED_ROOM_CHUNK_MAGIC, STREAMED_ROOM_CHUNK_VERSION,
 };
 use psx_level::{LevelRoomPortalRecord, LevelRoomRecord, RoomIndex, RuntimeDebugMask};
@@ -233,6 +244,16 @@ impl<const N: usize, const MAX_STREAMED_ROOM_INDEX_COUNT: usize>
             return Some(slot);
         }
         None
+    }
+
+    /// Resident slot for `room` as the u16 stream-slot id the material
+    /// pool keys on ([`STREAMED_ROOM_SLOT_NONE`] when not resident),
+    /// refreshing the slot's LRU age.
+    #[inline]
+    pub fn resident_stream_slot(&mut self, room: RoomIndex) -> u16 {
+        self.resident_slot_for(room)
+            .and_then(|slot| u16::try_from(slot).ok())
+            .unwrap_or(STREAMED_ROOM_SLOT_NONE)
     }
 
     /// Whether `room` is resident in some slot.
@@ -882,6 +903,221 @@ pub fn streamed_chunk_range_valid<T>(total_bytes: usize, offset: usize, count: u
     offset
         .checked_add(byte_count)
         .is_some_and(|end| end <= total_bytes)
+}
+
+/// Streamed-room slot word buffers: the RAM the scheduler loads CD
+/// chunks into, owned as one struct over the game's `(SLOT_WORDS, N)`
+/// budget (replacing the example's `STREAMED_ROOM_WORDS` static).
+/// Zero-initialized `const` construction keeps the game's static
+/// instance in `.bss` (NOLOAD) instead of storing ~200 KB of zeros in
+/// the flat PSX-EXE image.
+///
+/// The resolvers are lifetime-honest: every returned slice borrows
+/// `self`, so it cannot outlive the buffer it points into. The
+/// STALENESS caveat from the streaming audit (finding 3) still applies
+/// across calls: a resolved slice describes the slot's contents only
+/// until the next `RoomStreamScheduler::pump` / `reconcile_residency`
+/// overwrites that slot, so re-resolve per use; holding one longer is
+/// sound only for ACTIVE-WINDOW rooms, which are pinned against
+/// eviction (the camera/motor collision caches rely on exactly that,
+/// plus cache keys that include the active-room mask so a room leaving
+/// the window forces a re-gather before its slot can be reused).
+#[cfg(feature = "cd-stream-bench")]
+pub struct StreamedRoomSlots<const WORDS: usize, const N: usize> {
+    words: [[u32; WORDS]; N],
+}
+
+#[cfg(feature = "cd-stream-bench")]
+impl<const WORDS: usize, const N: usize> StreamedRoomSlots<WORDS, N> {
+    /// Zero-initialized slot buffers; `const` so the game's static
+    /// instance stays in `.bss`.
+    pub const fn new() -> Self {
+        Self {
+            words: [[0; WORDS]; N],
+        }
+    }
+
+    /// Raw per-slot word buffers for [`RoomStreamScheduler::pump`].
+    pub fn words_mut(&mut self) -> &mut [[u32; WORDS]; N] {
+        &mut self.words
+    }
+
+    /// Byte view of `slot`'s first `byte_count` bytes.
+    #[inline]
+    pub fn slot_bytes(&self, slot: usize, byte_count: usize) -> Option<&[u8]> {
+        if slot >= N || byte_count > WORDS * 4 {
+            return None;
+        }
+        // SAFETY: in-bounds u32 -> u8 reinterpretation of one slot row
+        // (plain old data, alignment only loosens). Moved from the
+        // example's `streamed_room_slot_bytes`, which returned the same
+        // view with a lied `'static` lifetime; the borrow of `self` now
+        // carries the real one.
+        Some(unsafe {
+            core::slice::from_raw_parts(self.words[slot].as_ptr().cast::<u8>(), byte_count)
+        })
+    }
+
+    /// Resident chunk bytes for `index`, re-validating residency (and
+    /// refreshing the room's LRU age) through the scheduler.
+    #[inline]
+    pub fn resident_chunk_bytes<const M: usize>(
+        &self,
+        scheduler: &mut RoomStreamScheduler<N, M>,
+        index: RoomIndex,
+    ) -> Option<&[u8]> {
+        let resident_slot = scheduler.resident_slot_for(index)?;
+        let byte_count = scheduler.resident_byte_count(resident_slot)?;
+        self.slot_bytes(resident_slot, byte_count)
+    }
+
+    /// Parse a streamed room's collision view out of its slot byte
+    /// buffer, re-validating residency first. The result is only good
+    /// until the next streaming step (see the type-level staleness
+    /// caveat).
+    #[inline]
+    pub fn compact_collision_room<const M: usize>(
+        &self,
+        scheduler: &mut RoomStreamScheduler<N, M>,
+        index: RoomIndex,
+    ) -> Option<CompactCollisionRoom<'_>> {
+        let bytes = self.resident_chunk_bytes(scheduler, index)?;
+        let view = streamed_room_chunk_view(bytes, index)?;
+        if view.flags & STREAMED_ROOM_CHUNK_FLAG_COLLISION_COMPACT == 0 {
+            return None;
+        }
+        let collision =
+            bytes.get(view.collision_offset..view.collision_offset + view.collision_bytes)?;
+        telemetry::counter(telemetry::counter::CD_ROOM_CHUNK_HITS, 1);
+        CompactCollisionRoom::from_bytes(collision).ok()
+    }
+
+    /// Surface-cache descriptor for a streamed room, read out of its
+    /// resident chunk header.
+    #[inline]
+    pub fn surface_cache_for<const MAX_VERTICES: usize, const M: usize>(
+        &self,
+        scheduler: &mut RoomStreamScheduler<N, M>,
+        index: RoomIndex,
+    ) -> Option<ActiveRoomSurfaceCache> {
+        let bytes = self.resident_chunk_bytes(scheduler, index)?;
+        let view = streamed_room_chunk_view(bytes, index)?;
+        if view.vertex_count > MAX_VERTICES {
+            return Some(ActiveRoomSurfaceCache {
+                status: ActiveRoomCacheStatus::Overflow,
+                ..ActiveRoomSurfaceCache::EMPTY
+            });
+        }
+        if view.cell_count == 0 || view.vertex_count == 0 || view.surface_count == 0 {
+            return Some(ActiveRoomSurfaceCache {
+                status: ActiveRoomCacheStatus::Empty,
+                ..ActiveRoomSurfaceCache::EMPTY
+            });
+        }
+        Some(ActiveRoomSurfaceCache {
+            cell_first: view.cells_offset,
+            cell_count: view.cell_count,
+            cell_vertex_first: view.cell_vertices_offset,
+            cell_vertex_count: view.cell_vertex_count,
+            vertex_first: view.vertices_offset,
+            vertex_count: view.vertex_count,
+            surface_first: view.surfaces_offset,
+            surface_count: view.surface_count,
+            status: ActiveRoomCacheStatus::Ready,
+            ready: true,
+        })
+    }
+
+    /// Resolve a streamed room's surface-cache slices DIRECTLY INTO its
+    /// slot byte buffer, re-validating residency and every chunk-view
+    /// offset against the cache snapshot first. The result inherits the
+    /// type-level staleness caveat: consume it within the current
+    /// render/update step and re-resolve next time; never store the
+    /// slices.
+    #[allow(clippy::type_complexity)]
+    #[inline]
+    pub fn surface_cache_slices<const MAX_VERTICES: usize, const M: usize>(
+        &self,
+        scheduler: &mut RoomStreamScheduler<N, M>,
+        index: RoomIndex,
+        cache: ActiveRoomSurfaceCache,
+    ) -> Option<(
+        &[CachedRoomCell],
+        &[u16],
+        &[WorldVertex],
+        &[CachedRoomSurface],
+    )> {
+        if !cache.ready || cache.vertex_count > MAX_VERTICES {
+            return None;
+        }
+        let bytes = self.resident_chunk_bytes(scheduler, index)?;
+        let view = streamed_room_chunk_view(bytes, index)?;
+        if cache.cell_first != view.cells_offset
+            || cache.cell_count != view.cell_count
+            || cache.cell_vertex_first != view.cell_vertices_offset
+            || cache.cell_vertex_count != view.cell_vertex_count
+            || cache.vertex_first != view.vertices_offset
+            || cache.vertex_count != view.vertex_count
+            || cache.surface_first != view.surfaces_offset
+            || cache.surface_count != view.surface_count
+        {
+            return None;
+        }
+        let cells = streamed_record_slice::<LevelCachedRoomCellRecord>(
+            bytes,
+            view.total_bytes,
+            view.cells_offset,
+            view.cell_count,
+        )?;
+        let cell_vertices = streamed_record_slice::<u16>(
+            bytes,
+            view.total_bytes,
+            view.cell_vertices_offset,
+            view.cell_vertex_count,
+        )?;
+        let vertices = streamed_record_slice::<LevelCachedRoomVertexRecord>(
+            bytes,
+            view.total_bytes,
+            view.vertices_offset,
+            view.vertex_count,
+        )?;
+        let surfaces = streamed_record_slice::<LevelCachedRoomSurfaceRecord>(
+            bytes,
+            view.total_bytes,
+            view.surfaces_offset,
+            view.surface_count,
+        )?;
+        Some((
+            cached_room_cells_from_level_records(cells),
+            cell_vertices,
+            cached_room_vertices_from_level_records(vertices),
+            cached_room_surfaces_from_level_records(surfaces),
+        ))
+    }
+}
+
+/// Typed record slice out of a chunk's validated byte payload. The
+/// returned slice borrows `bytes` (lifetime-honest since the
+/// vram_runtime carve; the old example version lied `'static`). Entry
+/// points re-validate slot residency and the chunk-view offsets per
+/// call, which is what keeps this cast sound.
+#[cfg(feature = "cd-stream-bench")]
+#[inline]
+fn streamed_record_slice<T>(
+    bytes: &[u8],
+    total_bytes: usize,
+    offset: usize,
+    count: usize,
+) -> Option<&[T]> {
+    if !streamed_chunk_range_valid::<T>(total_bytes, offset, count) {
+        return None;
+    }
+    let byte_count = count.checked_mul(core::mem::size_of::<T>())?;
+    let slice = bytes.get(offset..offset + byte_count)?;
+    // SAFETY: `streamed_chunk_range_valid` checked alignment and bounds
+    // for `count` records of `T` at `offset`; the records are plain old
+    // cooked data.
+    Some(unsafe { core::slice::from_raw_parts(slice.as_ptr().cast::<T>(), count) })
 }
 
 #[cfg(feature = "cd-stream-bench")]

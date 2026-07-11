@@ -179,6 +179,26 @@ impl ActiveRuntimeRoom {
     }
 }
 
+/// Reuse a previous window entry for `index` when it still occupies the
+/// same stream slot, re-based onto the current room's frame; `None`
+/// sends the caller down its build path.
+#[inline]
+pub fn reuse_active_room<const MAX_ACTIVE_ROOMS: usize>(
+    previous_rooms: &[Option<ActiveRuntimeRoom>; MAX_ACTIVE_ROOMS],
+    index: RoomIndex,
+    stream_slot: u16,
+    record: &LevelRoomRecord,
+    current_record: &LevelRoomRecord,
+) -> Option<ActiveRuntimeRoom> {
+    for previous in previous_rooms.iter().flatten().copied() {
+        if previous.index != index || previous.stream_slot != stream_slot {
+            continue;
+        }
+        return Some(previous.with_current_room_offsets(record, current_record));
+    }
+    None
+}
+
 /// Incremental active-room window rebuild. The old window stays
 /// drawable until the staged replacement is ready.
 #[derive(Copy, Clone)]
