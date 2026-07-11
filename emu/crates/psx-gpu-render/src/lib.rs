@@ -963,11 +963,18 @@ mod tests {
                 lo = mid;
             }
         }
-        eprintln!("first poisoned prefix: {hi} (poison batch index {})", hi - 1);
+        eprintln!(
+            "first poisoned prefix: {hi} (poison batch index {})",
+            hi - 1
+        );
         let poison = &batches[hi - 1];
         eprintln!("poison batch: {} entries", poison.len());
         for e in poison.iter().take(40) {
-            eprintln!("  op {:02x} words {:x?}", e.opcode, &e.fifo[..e.fifo.len().min(8)]);
+            eprintln!(
+                "  op {:02x} words {:x?}",
+                e.opcode,
+                &e.fifo[..e.fifo.len().min(8)]
+            );
         }
     }
 
@@ -1049,7 +1056,10 @@ mod tests {
             }
             content < 100
         };
-        eprintln!("standalone (prefix 0): {}", if probe_fails(0) { "FAIL" } else { "pass" });
+        eprintln!(
+            "standalone (prefix 0): {}",
+            if probe_fails(0) { "FAIL" } else { "pass" }
+        );
         let total = batches.len().min(env_idx);
         if !probe_fails(total) {
             eprintln!("probe passes after full prefix -- not state-armed");
@@ -1075,7 +1085,11 @@ mod tests {
         let poison = &batches[hi - 1];
         eprintln!("arming batch: {} entries", poison.len());
         for e in poison.iter().take(40) {
-            eprintln!("  op {:02x} words {:x?}", e.opcode, &e.fifo[..e.fifo.len().min(8)]);
+            eprintln!(
+                "  op {:02x} words {:x?}",
+                e.opcode,
+                &e.fifo[..e.fifo.len().min(8)]
+            );
         }
     }
 
@@ -1090,7 +1104,10 @@ mod tests {
         };
         let vram_words = vec![0; (VRAM_WIDTH * VRAM_HEIGHT) as usize];
         let gpu = Gpu::new();
-        for (e5, base_y, probe_y) in [(0xE500_0000u32, 0u32, 5u32), (0xE500_0000 | (240 << 11), 240, 245)] {
+        for (e5, base_y, probe_y) in [
+            (0xE500_0000u32, 0u32, 5u32),
+            (0xE500_0000 | (240 << 11), 240, 245),
+        ] {
             let neg40 = 0x7FFu32 & (-40i32 as u32 & 0x7FF);
             let log = [
                 GpuCmdLogEntry {
@@ -1207,7 +1224,10 @@ mod tests {
         };
         let total = env_idx;
         eprintln!("prefix 0: {}", if wall_dead(0) { "DEAD" } else { "alive" });
-        eprintln!("prefix {total}: {}", if wall_dead(total) { "DEAD" } else { "alive" });
+        eprintln!(
+            "prefix {total}: {}",
+            if wall_dead(total) { "DEAD" } else { "alive" }
+        );
         if !wall_dead(total) {
             eprintln!("wall alive after full prefix -- cannot bisect");
             return;
@@ -1228,7 +1248,11 @@ mod tests {
         let killer = &batches[hi - 1];
         eprintln!("killer batch: {} entries", killer.len());
         for e in killer.iter().take(50) {
-            eprintln!("  op {:02x} {:x?}", e.opcode, &e.fifo[..e.fifo.len().min(10)]);
+            eprintln!(
+                "  op {:02x} {:x?}",
+                e.opcode,
+                &e.fifo[..e.fifo.len().min(10)]
+            );
         }
     }
 
@@ -1531,7 +1555,10 @@ mod tests {
         }
         assert!(hw.contains(&(10, 20)), "start endpoint missing");
         assert!(hw.contains(&(50, 35)), "end endpoint missing");
-        assert!(hw.iter().all(|p| (10..=50).contains(&p.0)), "column overrun");
+        assert!(
+            hw.iter().all(|p| (10..=50).contains(&p.0)),
+            "column overrun"
+        );
     }
 
     /// Gouraud line: coverage matches the CPU exactly on an
@@ -1597,9 +1624,9 @@ mod tests {
             xyw(20, 100),
             0x0000_FF00, // c1 green
             xyw(80, 100),
-            0x00FF_0000, // continuation colour (blue)
+            0x00FF_0000,  // continuation colour (blue)
             xyw(80, 140), // continuation vertex
-            0x5000_5000, // terminator
+            0x5000_5000,  // terminator
         ]);
         let Some((_gpu, cpu, hw, _renderer)) = line_case(&words, 0) else {
             eprintln!("skipping: no headless wgpu adapter");

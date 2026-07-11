@@ -70,11 +70,7 @@ const METRIC_LABEL: Color32 = Color32::from_rgb(102, 102, 115);
 /// floating tab in the top-right corner brings it back.
 pub fn draw(ctx: &Context, state: &mut AppState) {
     // 0.0 = fully shown, 1.0 = fully hidden.
-    let t = ctx.animate_bool_with_time(
-        egui::Id::new("toolbar_slide"),
-        state.toolbar_hidden,
-        0.22,
-    );
+    let t = ctx.animate_bool_with_time(egui::Id::new("toolbar_slide"), state.toolbar_hidden, 0.22);
     let height = (BAR_HEIGHT * (1.0 - t)).max(0.0);
 
     if height >= 0.5 {
@@ -90,11 +86,8 @@ pub fn draw(ctx: &Context, state: &mut AppState) {
             .frame(egui::Frame::NONE.fill(panel_fill))
             .show(ctx, |ui| {
                 let panel_rect = ui.max_rect();
-                ui.painter().hline(
-                    panel_rect.x_range(),
-                    panel_rect.bottom() - 0.5,
-                    separator,
-                );
+                ui.painter()
+                    .hline(panel_rect.x_range(), panel_rect.bottom() - 0.5, separator);
                 // Anchor the row to the panel bottom at full height; the
                 // shrinking panel clips the overflow above -> slide-up.
                 let row_top = panel_rect.bottom() - BAR_HEIGHT;

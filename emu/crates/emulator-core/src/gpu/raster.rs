@@ -117,8 +117,7 @@ pub struct TriRasterSetup {
 /// integer-truncated gradient rule.
 #[inline]
 pub fn tri_plane_eval(p: (u32, u32, u32), x: i32, y: i32) -> u8 {
-    (p.2
-        .wrapping_add((x as u32).wrapping_mul(p.0))
+    (p.2.wrapping_add((x as u32).wrapping_mul(p.0))
         .wrapping_add((y as u32).wrapping_mul(p.1))
         >> 24) as u8
 }

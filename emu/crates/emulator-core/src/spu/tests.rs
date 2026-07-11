@@ -190,11 +190,19 @@ fn transfer_fifo_write_without_manual_mode_does_not_commit() {
     let mut s = Spu::new();
     s.write16(TRANSFER_ADDR, 0x0010); // 0x80 bytes; mode still Stop (0)
     s.write16(TRANSFER_FIFO, 0xBEEF);
-    assert_eq!(s.ram[0x80 >> 1], 0, "Stop-mode FIFO write must not commit to SPU RAM");
+    assert_eq!(
+        s.ram[0x80 >> 1],
+        0,
+        "Stop-mode FIFO write must not commit to SPU RAM"
+    );
     // Arm Manual-Write mode -> the same write now commits.
     s.write16(SPUCNT, 1 << 4);
     s.write16(TRANSFER_FIFO, 0xBEEF);
-    assert_eq!(s.ram[0x80 >> 1], 0xBEEF, "Manual-Write mode commits the FIFO to SPU RAM");
+    assert_eq!(
+        s.ram[0x80 >> 1],
+        0xBEEF,
+        "Manual-Write mode commits the FIFO to SPU RAM"
+    );
 }
 
 #[test]
@@ -685,7 +693,10 @@ fn main_volume_scales_the_final_mix() {
     assert_eq!(cap(0), (0, 0), "main volume 0 must silence the mix");
     let (half_l, _) = cap(0x3FFF);
     let (full_l, _) = cap(0x7FFF);
-    assert!(half_l > 0 && full_l > 0, "positive main volume must pass audio");
+    assert!(
+        half_l > 0 && full_l > 0,
+        "positive main volume must pass audio"
+    );
     assert!(
         (half_l as i32 * 2 - full_l as i32).abs() <= 4,
         "0x3FFF main volume should be ~half of 0x7FFF: {half_l} vs {full_l}"
@@ -895,7 +906,11 @@ fn volume_envelope_sweep_mode_animates_from_prior_level() {
     assert_eq!(env.current, 0, "sweep write does not jump the level");
     assert!(env.sweep_active);
     env.tick();
-    assert!(env.current > 0, "increasing sweep ramps up: {}", env.current);
+    assert!(
+        env.current > 0,
+        "increasing sweep ramps up: {}",
+        env.current
+    );
 
     // Rate 0x7F is the hardware never-ticks case: level frozen.
     let mut frozen = VolumeEnvelope::new();
@@ -918,7 +933,11 @@ fn volume_envelope_sweep_decrease_ramps_down_from_prior_level() {
     assert!(env.sweep_active);
     let before = env.current;
     env.tick();
-    assert!(env.current < before, "decreasing sweep falls: {} !< {before}", env.current);
+    assert!(
+        env.current < before,
+        "decreasing sweep falls: {} !< {before}",
+        env.current
+    );
 }
 
 #[test]
@@ -1408,7 +1427,10 @@ fn adsr_release_exponential_reaches_off_at_zero() {
     );
     assert_eq!(v.envelope, 0);
     // rate-0 exponential release from 0x7FFF reaches 0 on the 15th step.
-    assert_eq!(steps, 15, "rate-0 exponential release should hit 0 at step 15");
+    assert_eq!(
+        steps, 15,
+        "rate-0 exponential release should hit 0 at step 15"
+    );
 }
 
 // ---- voice-volume accuracy tests ----
@@ -1477,11 +1499,17 @@ fn volume_envelope_rate_0x7f_sweep_never_ticks() {
     let mut env = VolumeEnvelope::new();
     env.current = 0x1234;
     env.write(0x8000 | 0x007F);
-    assert!(!env.sweep_active, "rate 0x7F has zero increment -> inactive");
+    assert!(
+        !env.sweep_active,
+        "rate 0x7F has zero increment -> inactive"
+    );
     for _ in 0..50 {
         env.tick();
     }
-    assert_eq!(env.current, 0x1234, "never-ticking sweep leaves level unchanged");
+    assert_eq!(
+        env.current, 0x1234,
+        "never-ticking sweep leaves level unchanged"
+    );
 }
 
 #[test]
@@ -1503,7 +1531,10 @@ fn volume_envelope_fixed_level_is_signed_q15_times_two() {
         let mut env = VolumeEnvelope::new();
         env.write(raw);
         assert_eq!(env.current, want, "fixed volume {raw:#06x}");
-        assert!(!env.sweep_active, "fixed volume must not animate: {raw:#06x}");
+        assert!(
+            !env.sweep_active,
+            "fixed volume must not animate: {raw:#06x}"
+        );
     }
 }
 
@@ -1534,8 +1565,14 @@ fn negative_fixed_voice_volume_inverts_output_sign() {
 
     let (pos_l, _) = mix(0x3FFF); // +0x7FFE current
     let (neg_l, _) = mix(0x4000); // -0x8000 current
-    assert!(pos_l > 0, "positive fixed volume must stay positive: {pos_l}");
-    assert!(neg_l < 0, "negative fixed volume (0x4000) must invert sign: {neg_l}");
+    assert!(
+        pos_l > 0,
+        "positive fixed volume must stay positive: {pos_l}"
+    );
+    assert!(
+        neg_l < 0,
+        "negative fixed volume (0x4000) must invert sign: {neg_l}"
+    );
     assert!(
         (pos_l as i32 + neg_l as i32).abs() <= 4,
         "+0x7FFE and -0x8000 volumes should be near mirror images: {pos_l} vs {neg_l}"
@@ -1643,7 +1680,7 @@ fn reverb_master_disable_holds_tail_not_silence() {
     // tail to 0 (an audible click). After the fix the held wet survives.
     let mut s = Spu::new();
     s.write16(REVERB_BASE, 0x1000); // reverb area active
-    // Establish a non-zero wet tail, then process a tick with master off.
+                                    // Establish a non-zero wet tail, then process a tick with master off.
     s.reverb.process_this_sample = true;
     s.reverb.last_l = 1000;
     s.reverb.wet_l = 1000;
@@ -1676,7 +1713,11 @@ fn spu_irq_does_not_relatch_until_acknowledged() {
     // First halfword write hits the IRQ address: latch fires once.
     s.write16(TRANSFER_FIFO, 0x1111);
     assert!(s.take_irq_pending(), "first IRQ-addr match must latch");
-    assert_ne!(s.spustat() & (1 << 6), 0, "SPUSTAT IRQ9 flag must be sticky");
+    assert_ne!(
+        s.spustat() & (1 << 6),
+        0,
+        "SPUSTAT IRQ9 flag must be sticky"
+    );
 
     // Two more writes still fall inside the same 8-byte IRQ window. With the
     // re-arm gate, the already-latched (unacknowledged) IRQ9 flag blocks any
@@ -1797,7 +1838,10 @@ fn gaussian_interp_dc_gain_has_hardware_droop() {
     // gain droop, not pass through at unity. At phase 0 the hardware
     // table yields 32639 for +32767 and -32640 for -32768 (the 4-tap
     // sum at this phase is 0x7F80 = 32640). Unity would be 32767.
-    assert_eq!(gauss_interpolate([32767, 32767, 32767, 32767], 0x0000), 32639);
+    assert_eq!(
+        gauss_interpolate([32767, 32767, 32767, 32767], 0x0000),
+        32639
+    );
     assert_eq!(
         gauss_interpolate([-32768, -32768, -32768, -32768], 0x0000),
         -32640
@@ -1812,7 +1856,11 @@ fn gaussian_interp_phase_index_is_high_byte_of_frac() {
     for frac in [0x0000u32, 0x0123, 0x8000, 0xFA13, 0xFFFF] {
         let i = ((frac >> 8) & 0xFF) as usize;
         let expected = saturate_i16((GAUSS_TABLE[i] * 0x4000) >> 15);
-        assert_eq!(gauss_interpolate([0, 0, 0, 0x4000], frac), expected, "frac={frac:#06x}");
+        assert_eq!(
+            gauss_interpolate([0, 0, 0, 0x4000], frac),
+            expected,
+            "frac={frac:#06x}"
+        );
     }
 }
 
@@ -1901,8 +1949,16 @@ fn cd_audio_writes_l_r_capture_buffers() {
 
     let want_l = ((sample as i32 * 0x4000) >> 15) as u16;
     let want_r = ((sample as i32 * 0x2000) >> 15) as u16;
-    assert_eq!(s.ram[0x000 >> 1], want_l, "CD-L capture buffer (post CD volume)");
-    assert_eq!(s.ram[0x400 >> 1], want_r, "CD-R capture buffer (post CD volume)");
+    assert_eq!(
+        s.ram[0x000 >> 1],
+        want_l,
+        "CD-L capture buffer (post CD volume)"
+    );
+    assert_eq!(
+        s.ram[0x400 >> 1],
+        want_r,
+        "CD-R capture buffer (post CD volume)"
+    );
 
     // The ring advances one halfword (2 bytes) per sample: a second sample
     // lands at the next slot, not back at 0.
@@ -1933,7 +1989,10 @@ fn voice1_voice3_outputs_written_to_capture_buffers() {
 
     s.tick_sample(SAMPLE_CYCLES);
 
-    assert_ne!(s.voices[1].last_sample, 0, "voice 1 must have produced a sample");
+    assert_ne!(
+        s.voices[1].last_sample, 0,
+        "voice 1 must have produced a sample"
+    );
     assert_eq!(
         s.ram[0x800 >> 1],
         s.voices[1].last_sample as u16,
@@ -1958,7 +2017,10 @@ fn capture_write_can_latch_spu_irq_on_low_ram() {
 
     s.tick_sample(SAMPLE_CYCLES);
 
-    assert!(s.take_irq_pending(), "capture write at 0x800 must latch the armed IRQ");
+    assert!(
+        s.take_irq_pending(),
+        "capture write at 0x800 must latch the armed IRQ"
+    );
     assert_ne!(s.spustat() & (1 << 6), 0, "SPUSTAT IRQ9 flag must be set");
 }
 
@@ -1970,19 +2032,51 @@ fn spustat_exposes_dma_request_bits_from_transfer_mode() {
     let mut s = Spu::new();
 
     s.write16(SPUCNT, 2 << 4); // DMA write mode
-    assert_ne!(s.spustat() & (1 << 7), 0, "DMA write mode sets the request bit (7)");
-    assert_ne!(s.spustat() & (1 << 8), 0, "DMA write mode sets the write-request bit (8)");
-    assert_eq!(s.spustat() & (1 << 9), 0, "DMA write mode must not set read-request bit (9)");
+    assert_ne!(
+        s.spustat() & (1 << 7),
+        0,
+        "DMA write mode sets the request bit (7)"
+    );
+    assert_ne!(
+        s.spustat() & (1 << 8),
+        0,
+        "DMA write mode sets the write-request bit (8)"
+    );
+    assert_eq!(
+        s.spustat() & (1 << 9),
+        0,
+        "DMA write mode must not set read-request bit (9)"
+    );
 
     s.write16(SPUCNT, 3 << 4); // DMA read mode
-    assert_ne!(s.spustat() & (1 << 7), 0, "DMA read mode sets the request bit (7)");
-    assert_ne!(s.spustat() & (1 << 9), 0, "DMA read mode sets the read-request bit (9)");
-    assert_eq!(s.spustat() & (1 << 8), 0, "DMA read mode must not set write-request bit (8)");
+    assert_ne!(
+        s.spustat() & (1 << 7),
+        0,
+        "DMA read mode sets the request bit (7)"
+    );
+    assert_ne!(
+        s.spustat() & (1 << 9),
+        0,
+        "DMA read mode sets the read-request bit (9)"
+    );
+    assert_eq!(
+        s.spustat() & (1 << 8),
+        0,
+        "DMA read mode must not set write-request bit (8)"
+    );
 
     s.write16(SPUCNT, 0); // Stop mode
-    assert_eq!(s.spustat() & 0x0380, 0, "Stop mode clears DMA request bits 7/8/9");
+    assert_eq!(
+        s.spustat() & 0x0380,
+        0,
+        "Stop mode clears DMA request bits 7/8/9"
+    );
     s.write16(SPUCNT, 1 << 4); // Manual-Write mode
-    assert_eq!(s.spustat() & 0x0380, 0, "Manual-Write mode sets no DMA request bits");
+    assert_eq!(
+        s.spustat() & 0x0380,
+        0,
+        "Manual-Write mode sets no DMA request bits"
+    );
 }
 
 #[test]

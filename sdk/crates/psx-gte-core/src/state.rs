@@ -760,8 +760,7 @@ impl Gte {
                 // Bug: first column (Mx_i1 * Vx) is dropped along with TR.
                 // The stage-2 result still runs the normal IR saturation
                 // (flag set with cmd.lm) on top of the stage-1 flags.
-                let prod = (mx[i][1] as i64) * (v[1] as i64)
-                    + (mx[i][2] as i64) * (v[2] as i64);
+                let prod = (mx[i][1] as i64) * (v[1] as i64) + (mx[i][2] as i64) * (v[2] as i64);
                 let mac = self.check_mac((i + 1) as u8, prod) >> sf;
                 self.mac[i] = mac as i32;
                 self.ir[i] = self.saturate_ir((i + 1) as u8, mac as i32, cmd.lm);

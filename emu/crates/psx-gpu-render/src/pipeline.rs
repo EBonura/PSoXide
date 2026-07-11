@@ -391,7 +391,11 @@ impl HwPipeline {
     /// Set the texture-filter mode (0 nearest, 1 bilinear, 2 JINC2, 3 xBR).
     /// Cheap uniform write.
     pub fn set_filter_mode(&self, queue: &wgpu::Queue, mode: u32) {
-        queue.write_buffer(&self.filter_buffer, 0, bytemuck::cast_slice(&[mode, 0, 0, 0]));
+        queue.write_buffer(
+            &self.filter_buffer,
+            0,
+            bytemuck::cast_slice(&[mode, 0, 0, 0]),
+        );
     }
 
     /// Mirror CPU VRAM into the GPU-side `R16Uint` texture used by

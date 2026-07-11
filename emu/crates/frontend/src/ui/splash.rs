@@ -37,7 +37,11 @@ pub fn draw(ctx: &egui::Context) {
     let painter = ctx.layer_painter(LayerId::new(Order::Foreground, Id::new("boot-splash")));
 
     // Dark cover that fades out with the logo: hides boot flicker, then reveals.
-    painter.rect_filled(screen, 0.0, Color32::from_black_alpha((235.0 * alpha) as u8));
+    painter.rect_filled(
+        screen,
+        0.0,
+        Color32::from_black_alpha((235.0 * alpha) as u8),
+    );
 
     // Single logo draw (the artwork already carries its own glow). Fading via a
     // white tint so the texture's alpha scales down uniformly.
@@ -47,7 +51,12 @@ pub fn draw(ctx: &egui::Context) {
     let w = (screen.width() * 0.5).min(tw as f32).min(640.0) * scale;
     let rect = Rect::from_center_size(screen.center(), Vec2::new(w, w / aspect));
     let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
-    painter.image(tex.id(), rect, uv, Color32::from_white_alpha((255.0 * alpha) as u8));
+    painter.image(
+        tex.id(),
+        rect,
+        uv,
+        Color32::from_white_alpha((255.0 * alpha) as u8),
+    );
 }
 
 /// The egui time of the first frame the splash painted (its timeline origin).

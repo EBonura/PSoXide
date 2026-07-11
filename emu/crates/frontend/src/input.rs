@@ -559,22 +559,54 @@ impl InputRouter {
         // Standard gamepad layout -> PSX pad; face buttons follow Sony's order
         // (bottom = Cross). See https://w3c.github.io/gamepad/#remapping.
         let mut mask = 0u16;
-        if pressed(0) { mask |= button::CROSS; }
-        if pressed(1) { mask |= button::CIRCLE; }
-        if pressed(2) { mask |= button::SQUARE; }
-        if pressed(3) { mask |= button::TRIANGLE; }
-        if pressed(4) { mask |= button::L1; }
-        if pressed(5) { mask |= button::R1; }
-        if pressed(6) { mask |= button::L2; }
-        if pressed(7) { mask |= button::R2; }
-        if pressed(8) { mask |= button::SELECT; }
-        if pressed(9) { mask |= button::START; }
-        if pressed(10) { mask |= button::L3; }
-        if pressed(11) { mask |= button::R3; }
-        if pressed(12) { mask |= button::UP; }
-        if pressed(13) { mask |= button::DOWN; }
-        if pressed(14) { mask |= button::LEFT; }
-        if pressed(15) { mask |= button::RIGHT; }
+        if pressed(0) {
+            mask |= button::CROSS;
+        }
+        if pressed(1) {
+            mask |= button::CIRCLE;
+        }
+        if pressed(2) {
+            mask |= button::SQUARE;
+        }
+        if pressed(3) {
+            mask |= button::TRIANGLE;
+        }
+        if pressed(4) {
+            mask |= button::L1;
+        }
+        if pressed(5) {
+            mask |= button::R1;
+        }
+        if pressed(6) {
+            mask |= button::L2;
+        }
+        if pressed(7) {
+            mask |= button::R2;
+        }
+        if pressed(8) {
+            mask |= button::SELECT;
+        }
+        if pressed(9) {
+            mask |= button::START;
+        }
+        if pressed(10) {
+            mask |= button::L3;
+        }
+        if pressed(11) {
+            mask |= button::R3;
+        }
+        if pressed(12) {
+            mask |= button::UP;
+        }
+        if pressed(13) {
+            mask |= button::DOWN;
+        }
+        if pressed(14) {
+            mask |= button::LEFT;
+        }
+        if pressed(15) {
+            mask |= button::RIGHT;
+        }
 
         // Sticks: axes 0/1 left, 2/3 right, with a small deadzone.
         let axes = gp.axes();
@@ -624,7 +656,9 @@ impl InputRouter {
 
     /// Name of the first connected pad, or empty.
     pub fn connected_names(&self) -> String {
-        first_connected_gamepad().map(|g| g.id()).unwrap_or_default()
+        first_connected_gamepad()
+            .map(|g| g.id())
+            .unwrap_or_default()
     }
 }
 

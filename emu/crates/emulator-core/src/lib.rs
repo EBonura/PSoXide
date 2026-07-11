@@ -34,11 +34,11 @@ pub mod vram;
 // its module path.
 pub use bus::Bus;
 pub use cpu::Cpu;
-pub use freelook::FreelookState;
 pub use fastboot::{
     fast_boot_disc, fast_boot_disc_with_hle, warm_bios_for_disc_fast_boot,
     DISC_FAST_BOOT_WARMUP_STEPS,
 };
+pub use freelook::FreelookState;
 pub use gpu::{DisplayArea, Gpu};
 pub use input_tape::{read_tape, write_tape, PadSample};
 pub use pad::{button, ButtonState};

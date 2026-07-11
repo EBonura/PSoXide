@@ -336,8 +336,11 @@ impl ComputeBackend {
         let c2 = decode_tint(colors[2] & 0x00FF_FFFF);
         let (flags, mode) = self.mono_blend_mode_and_flags(cmd);
         let tri = ShadedTri::new(v[0], v[1], v[2], c0, c1, c2, flags, mode);
-        self.rasterizer
-            .dispatch_shaded_tri_scanline(&self.vram, &tri, &self.interp.state.draw_area);
+        self.rasterizer.dispatch_shaded_tri_scanline(
+            &self.vram,
+            &tri,
+            &self.interp.state.draw_area,
+        );
     }
 
     fn lower_shaded_quad(&mut self, cmd: u32, v: [(i32, i32); 4], colors: [u32; 4]) {

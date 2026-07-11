@@ -22,8 +22,8 @@
 //! `[10..30]` NUL-terminated name, `[127]` XOR checksum of `[0..127)`.
 
 use crate::{
-    Block, Card, Entry, Error, Result, CONTAINER_LEN, CONTAINER_MAGIC, DATA_BLOCKS, FLAG_COMPRESSED,
-    FRAMES_PER_BLOCK, FRAME_SIZE, MAX_NAME,
+    Block, Card, Entry, Error, Result, CONTAINER_LEN, CONTAINER_MAGIC, DATA_BLOCKS,
+    FLAG_COMPRESSED, FRAMES_PER_BLOCK, FRAME_SIZE, MAX_NAME,
 };
 
 // Directory entry field offsets.
@@ -94,9 +94,9 @@ struct Chain {
 
 struct DataCursor<'a> {
     blocks: &'a [u8],
-    li: usize,          // index into `blocks`
-    fib: usize,         // frame-in-block (starts at 2 for the first block)
-    off: usize,         // byte within the current frame
+    li: usize,  // index into `blocks`
+    fib: usize, // frame-in-block (starts at 2 for the first block)
+    off: usize, // byte within the current frame
     frame: [u8; FRAME_SIZE],
     loaded: bool,
 }
