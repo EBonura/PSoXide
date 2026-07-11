@@ -1472,6 +1472,7 @@ dependencies = [
  "psx-gpu",
  "psx-gpu-render",
  "psx-gte",
+ "psx-hw",
  "psx-iso",
  "psx-trace",
  "psx-vram",
@@ -3234,6 +3235,7 @@ version = "0.1.0"
 dependencies = [
  "directories",
  "postcard",
+ "psx-hw",
  "psx-iso",
  "ron",
  "serde",
@@ -3315,6 +3317,7 @@ dependencies = [
  "pollster 0.3.0",
  "psoxide-settings",
  "psx-gpu",
+ "psx-hw",
  "psx-iso",
  "thiserror 1.0.69",
  "wgpu",
