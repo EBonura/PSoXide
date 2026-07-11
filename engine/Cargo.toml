@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/psx-engine",
+    "crates/psx-game-runtime",
     "crates/psx-level",
 ]
 

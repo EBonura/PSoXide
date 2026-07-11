@@ -124,7 +124,7 @@ mod active_room_visibility;
 mod active_rooms;
 mod box_props;
 #[cfg(feature = "cd-stream-bench")]
-mod cd_stream;
+use psx_game_runtime::cd_stream;
 mod character_runtime;
 mod debug_runtime;
 mod image_props_runtime;
