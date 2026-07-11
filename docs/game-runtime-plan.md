@@ -125,6 +125,34 @@ Phase 1 -- streaming + residency + VRAM (this branch):
   overlays. Gate: cortex boots bit-identical (validate suite +
   checkpoint hashes), MIPS build, zero new cost on the perf tape.
 
+### Phase 1, slice 2: the active_room family (design notes, 2026-07-11)
+
+Coupling facts (measured, not guessed):
+- Capacities live in `runtime_config.rs` consts (`MAX_ACTIVE_ROOMS`,
+  `STREAMED_ROOM_SLOT_COUNT`, `RESIDENT_DRAW_DEPTH`, ...) and are
+  already consumed const-generically in places
+  (`RoomStreamScheduler<STREAMED_ROOM_SLOT_COUNT>`): the carve keeps
+  that pattern -- runtime types take `const N: usize` parameters and
+  the game supplies its generated budget consts. `RuntimeBudgets` as
+  a value struct is phase-1.5 (when build.rs generation lands);
+  const generics are the phase-1 seam.
+- State lives in `main.rs` `static mut`s (`ROOM_STREAM_SCHEDULER`,
+  `ACTIVE_ROOM_WINDOW`, caches). The carve turns each into an owned
+  runtime struct (`RoomStreaming<const SLOTS: usize>` etc.) with
+  `&mut self` methods; the example keeps ONE instance wherever it
+  keeps its scene state today. New crate code holds no statics.
+- Cooked data (`ROOMS`, visibility cells, materials) comes from the
+  example's `generated::` module as `&'static` psx-level records:
+  runtime methods take these as parameters -- the crate must never
+  name `generated::`.
+- Module order for the move (least to most coupled):
+  `active_room_visibility` -> `active_room_cache` -> `active_rooms`
+  -> `active_room_streaming`; `runtime_schedule.rs`'s
+  `RuntimeScheduleConfig` moves alongside as the shared knob struct.
+- Gate per move: identical to slice 1 (validate bit-identical, MIPS
+  build, engine tests) plus a perf-tape spot check after the last
+  move since this family is on the hot path.
+
 Phase 2 -- world runtime: model instances/equipment rendering, image
   props, box props, sky, particles, room lighting runtime. Same gate.
 
