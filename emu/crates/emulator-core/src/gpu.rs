@@ -727,17 +727,12 @@ impl Gpu {
     /// behaviour.
     pub fn display_hash(&self) -> (u64, u32, u32, usize) {
         let da = self.display_area();
-        let mut h = 0xCBF2_9CE4_8422_2325u64;
+        let mut h = psx_hw::hash::Fnv1a64::new();
         let mut byte_len = 0usize;
         let vram_w = crate::VRAM_WIDTH as u16;
         let vram_h = crate::VRAM_HEIGHT as u16;
         let effective_h = da.height.min(vram_h.saturating_sub(da.y));
         let effective_w = da.width.min(vram_w.saturating_sub(da.x));
-        let mut fold = |b: u8, byte_len: &mut usize| {
-            h ^= b as u64;
-            h = h.wrapping_mul(0x0100_0000_01B3);
-            *byte_len += 1;
-        };
         if da.bpp24 {
             // 24-bit mode: each pixel is 3 bytes packed in VRAM. A row
             // of W 24-bit pixels occupies W*3 bytes = 1.5 * W 16-bit
@@ -745,22 +740,20 @@ impl Gpu {
             for dy in 0..effective_h {
                 for dx in 0..effective_w {
                     let (r, g, b) = self.read_pixel_rgb24(da.x + dx, da.y + dy);
-                    fold(r, &mut byte_len);
-                    fold(g, &mut byte_len);
-                    fold(b, &mut byte_len);
+                    h.update(&[r, g, b]);
+                    byte_len += 3;
                 }
             }
         } else {
             for dy in 0..effective_h {
                 for dx in 0..effective_w {
                     let pixel = self.vram.get_pixel(da.x + dx, da.y + dy);
-                    for b in pixel.to_le_bytes() {
-                        fold(b, &mut byte_len);
-                    }
+                    h.update(&pixel.to_le_bytes());
+                    byte_len += 2;
                 }
             }
         }
-        (h, effective_w as u32, effective_h as u32, byte_len)
+        (h.finish(), effective_w as u32, effective_h as u32, byte_len)
     }
 
     /// Enable per-pixel command tracing. Allocates the 2 MiB owner

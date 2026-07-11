@@ -57,13 +57,12 @@ fn load_disc(p: &std::path::Path) -> Disc {
 }
 
 fn vram_hash(words: &[u16]) -> u64 {
-    // FNV-1a-64 over the BGR15 cells.
-    let mut h: u64 = 0xCBF29CE484222325;
-    for &w in words {
-        h ^= w as u64;
-        h = h.wrapping_mul(0x100000001B3);
-    }
-    h
+    // Byte-wise FNV-1a-64 over the BGR15 cells -- the same shared
+    // hash every other checkpoint tool uses (replay_bisect, the
+    // --dump-hash CLI, the validation suite), so hashes printed here
+    // are directly comparable across tools. This used to fold whole
+    // u16 words and could never be cross-checked.
+    psx_hw::hash::fnv1a_64(bytemuck::cast_slice(words))
 }
 
 fn main() {
