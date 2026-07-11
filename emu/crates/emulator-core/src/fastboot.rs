@@ -7,7 +7,8 @@
 
 use psx_iso::{load_boot_exe_from_disc, BootError, Disc};
 
-use crate::{gpu::GP1_ADDR, Bus, Cpu, ExecutionError};
+use crate::cpu::ExecutionError;
+use crate::{gpu::GP1_ADDR, Bus, Cpu};
 
 /// Number of BIOS instructions to run before warm disc fast boot.
 ///
