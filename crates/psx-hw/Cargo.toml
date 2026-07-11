@@ -12,6 +12,3 @@ bitflags = { workspace = true }
 
 [features]
 default = []
-# When enabled, Debug/Display impls are provided for bitflag types.
-# Adds ~nothing at runtime but pulls in core::fmt machinery.
-std-fmt = []

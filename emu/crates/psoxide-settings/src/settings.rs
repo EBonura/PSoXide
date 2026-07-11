@@ -342,21 +342,6 @@ impl Default for InputSettings {
     }
 }
 
-/// Top-level grouping of all input-related settings. Factored so
-/// the settings panel can focus its "Input" tab on this subtree
-/// without touching anything else.
-impl InputSettings {
-    /// Return port N's bindings (1 or 2). Out-of-range returns
-    /// port1 as a safe default.
-    pub fn port(&self, port: u8) -> &PortBindings {
-        if port == 2 {
-            &self.port2
-        } else {
-            &self.port1
-        }
-    }
-}
-
 /// Emulator-level toggles. `hle_bios` is the big one -- everything
 /// else can grow as we add features.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -25,7 +25,6 @@ default = [
     "world-order-bucketed",
     "world-grid-visible",
     "ot-2048",
-    "vis-static-active-turn",
     # Camera-independent visible-cell fills: the cached candidate list
     # per (room, anchor) holds the full PVS set and per-frame camera
     # culling happens downstream in cell_select/surface tests, so
@@ -54,7 +53,6 @@ vis-broad-pvs = []
 vis-coarse-yaw = []
 vis-full-active-chunks = []
 vis-player-anchor = []
-vis-static-active-turn = []
 room-surface-profile = ["psx-engine/room-surface-profile"]
 cell-select-profile = ["psx-engine/cell-select-profile"]
 # On-screen presented-fps + worst-frame-gap counter for hardware
