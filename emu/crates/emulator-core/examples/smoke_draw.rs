@@ -45,7 +45,7 @@ fn main() {
     let sample_start = n.saturating_sub(n / 100);
     let mut pc_hits: std::collections::BTreeMap<u32, u32> = std::collections::BTreeMap::new();
 
-    let mut stopped_at: Option<(u64, emulator_core::ExecutionError)> = None;
+    let mut stopped_at: Option<(u64, emulator_core::cpu::ExecutionError)> = None;
     for i in 0..n {
         if i >= sample_start {
             *pc_hits.entry(cpu.pc()).or_insert(0) += 1;

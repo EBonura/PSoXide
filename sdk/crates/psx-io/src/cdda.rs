@@ -89,8 +89,7 @@ impl CddaStarter {
     /// Drive one attempt if due. Returns true exactly once, on the tick the
     /// Play command is accepted. Safe to keep calling afterwards (no-op).
     pub fn tick(&mut self, now_tick: u32, track: u8) -> bool {
-        if self.step == StartStep::Done
-            || now_tick.wrapping_sub(self.next_try_tick) > u32::MAX / 2
+        if self.step == StartStep::Done || now_tick.wrapping_sub(self.next_try_tick) > u32::MAX / 2
         {
             return false;
         }

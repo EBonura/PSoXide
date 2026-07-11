@@ -1309,7 +1309,7 @@ fn sample_texture_4bpp_idx0_resolves_to_clut_entry() {
     // CLUT row at (0x100, 0), entry 0 = red (0x001F).
     gpu.vram.set_pixel(0x100, 0, 0x001F);
     gpu.update_clut_if_needed(0x10); // load the CLUT cache from (0x100, 0)
-    // u=0..3 all sample idx=0 → all must resolve to CLUT[0] = 0x001F.
+                                     // u=0..3 all sample idx=0 → all must resolve to CLUT[0] = 0x001F.
     for u in 0..4u16 {
         assert_eq!(
             gpu.sample_texture(u, 0),
@@ -1391,7 +1391,11 @@ fn clut_cache_serves_stale_palette_until_clut_word_changes() {
     gpu.vram.set_pixel(0, 0, 0x0001); // texel -> CLUT idx 1
     gpu.vram.set_pixel(0x100 + 1, 0, 0x001F); // CLUT v1: red
     gpu.update_clut_if_needed(0x10);
-    assert_eq!(gpu.sample_texture(0, 0), Some(0x001F), "first draw loads v1");
+    assert_eq!(
+        gpu.sample_texture(0, 0),
+        Some(0x001F),
+        "first draw loads v1"
+    );
 
     // Re-upload the CLUT to the SAME slot (v2: blue), same clut word.
     gpu.vram.set_pixel(0x100 + 1, 0, 0x7C00);
@@ -1761,13 +1765,33 @@ fn flat_triangle_edge_cases_match_silicon() {
     // The Redux corner-sampled rasterizer failed ALL of these on hardware.
     let cases: [(&str, [(i16, i16); 3], (u8, u8, u8), u32); 4] = [
         // case 105: vertex past the right edge.
-        ("past-edge", [(8, 8), (88, 8), (300, 88)], (0xff, 0x80, 0x20), 0x069F_C0E3),
+        (
+            "past-edge",
+            [(8, 8), (88, 8), (300, 88)],
+            (0xff, 0x80, 0x20),
+            0x069F_C0E3,
+        ),
         // case 106: negative X coordinate.
-        ("neg-coord", [(8, 8), (-200, 40), (88, 88)], (0x20, 0xff, 0x80), 0x0A3A_16BF),
+        (
+            "neg-coord",
+            [(8, 8), (-200, 40), (88, 88)],
+            (0x20, 0xff, 0x80),
+            0x0A3A_16BF,
+        ),
         // case 107: X coordinate beyond the 11-bit packet range (wraps).
-        ("coord-wrap", [(8, 48), (1500, 8), (48, 88)], (0x80, 0x20, 0xff), 0x03DF_1731),
+        (
+            "coord-wrap",
+            [(8, 48), (1500, 8), (48, 88)],
+            (0x80, 0x20, 0xff),
+            0x03DF_1731,
+        ),
         // case 111: vertex past the bottom edge.
-        ("past-bottom", [(8, 8), (88, 8), (40, 300)], (0x30, 0xe0, 0x60), 0x062D_56B6),
+        (
+            "past-bottom",
+            [(8, 8), (88, 8), (40, 300)],
+            (0x30, 0xe0, 0x60),
+            0x062D_56B6,
+        ),
     ];
     for (name, verts, (r, g, b), silicon_hi7) in cases {
         let tri = TriFlat::new(verts, r, g, b);
@@ -1869,7 +1893,7 @@ fn crash_intro_sprite_8bpp_clut_paints() {
     gpu.write32(GP0_ADDR, 0xE300_0000); // draw area TL (0,0)
     gpu.write32(GP0_ADDR, 0xE400_0000 | 0x3FF | (0x1FF << 10)); // BR
     gpu.write32(GP0_ADDR, 0xE500_0000); // offset 0
-    // 8bpp texture page content at (256,256..511): every index byte 0x42.
+                                        // 8bpp texture page content at (256,256..511): every index byte 0x42.
     for y in 256..512u16 {
         for x in 256..384u16 {
             gpu.vram.set_pixel(x, y, 0x4242);
@@ -1892,7 +1916,10 @@ fn crash_intro_sprite_8bpp_clut_paints() {
             }
         }
     }
-    assert_eq!(lit, 256, "expected all 256 sprite pixels painted, got {lit}");
+    assert_eq!(
+        lit, 256,
+        "expected all 256 sprite pixels painted, got {lit}"
+    );
 }
 
 // ---- gpu-dither faithfulness tests ----
@@ -2120,7 +2147,11 @@ fn wireframe_erase_restores_background_not_black() {
 
     gpu.wireframe_enabled = true;
     gpu.toggle_vblank_field(); // on-transition: framebuffer blacked out
-    assert_eq!(gpu.vram.get_pixel(5, 5), 0, "frozen frame cleared on toggle-on");
+    assert_eq!(
+        gpu.vram.get_pixel(5, 5),
+        0,
+        "frozen frame cleared on toggle-on"
+    );
 
     // The game repaints its background while wireframe is on (Crash
     // re-blits every frame). Edges must not scar it.
@@ -2142,7 +2173,11 @@ fn wireframe_erase_restores_background_not_black() {
     // out, the game's newer content must stand -- restoring the stale
     // saved value would leave ghost content.
     let (gx, gy) = (40u16, 10u16); // triangle vertex = guaranteed edge pixel
-    assert_ne!(gpu.vram.get_pixel(gx, gy), 0x1234, "vertex pixel is an edge");
+    assert_ne!(
+        gpu.vram.get_pixel(gx, gy),
+        0x1234,
+        "vertex pixel is an edge"
+    );
     gpu.vram.set_pixel(gx, gy, 0x5678); // game draws new content over it
 
     // The scene moves on: new geometry elsewhere, one vblank per render.

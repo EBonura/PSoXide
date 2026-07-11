@@ -196,11 +196,9 @@ pub fn scanline_counter() -> u16 {
 }
 
 /// Whether Timer 1 currently reports the VBlank scanline region.
-#[deprecated(
-    note = "built on scanline_counter(), whose reconfigure-before-read \
+#[deprecated(note = "built on scanline_counter(), whose reconfigure-before-read \
             resets the counter, so this is almost always false; use \
-            psx_rt::interrupts for display timing"
-)]
+            psx_rt::interrupts for display timing")]
 #[allow(deprecated)]
 #[inline]
 pub fn in_vblank() -> bool {
@@ -215,10 +213,8 @@ pub fn in_vblank() -> bool {
 /// next VBlank -- nearly right for light frames, badly slow for heavy
 /// ones. It cannot be repaired here: syncing needs the VBlank IRQ, which
 /// the runtime owns.
-#[deprecated(
-    note = "busy-waits a fixed 242 HBlanks from the call site instead of \
-            syncing to the display; use psx_rt::interrupts::wait_vblank()"
-)]
+#[deprecated(note = "busy-waits a fixed 242 HBlanks from the call site instead of \
+            syncing to the display; use psx_rt::interrupts::wait_vblank()")]
 pub fn vsync() {
     configure_vsync_timer();
     while timers::counter(timers::Timer::Timer1) < 242 {}
