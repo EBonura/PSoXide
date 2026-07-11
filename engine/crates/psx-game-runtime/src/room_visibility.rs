@@ -6,7 +6,6 @@
 //! arrive as `&'static` psx-level records, capacities as `const N`
 //! generic parameters, and example-side policy knobs as plain values.
 
-use crate::room_cache::{active_room_contains_drawable, ActiveRuntimeRoom};
 use psx_engine::{telemetry, RoomPoint, WorldCamera, WorldProjection};
 use psx_level::portal_visibility::{
     build_portal_visibility_with_room_bounds, PortalRoomBounds, PortalVisibilityCamera,
@@ -257,29 +256,6 @@ impl<
             .room_count
             .min(active_chunk_limit)
             .min(MAX_ACTIVE_ROOMS)
-    }
-
-    /// Whether the current room and every frustum-visible room (up to
-    /// `active_chunk_limit`) is present and drawable in the active window.
-    pub fn visible_rooms_are_active(
-        &self,
-        active_rooms: &[Option<ActiveRuntimeRoom>; MAX_ACTIVE_ROOMS],
-        current_room: RoomIndex,
-        active_chunk_limit: usize,
-    ) -> bool {
-        if !active_room_contains_drawable(active_rooms, current_room, current_room) {
-            return false;
-        }
-        let visible_limit = self.visible_room_limit(active_chunk_limit);
-        let mut i = 0usize;
-        while i < visible_limit {
-            if !active_room_contains_drawable(active_rooms, current_room, self.result.rooms[i].room)
-            {
-                return false;
-            }
-            i += 1;
-        }
-        true
     }
 
     /// Whether the latest traversal draws `_index`.

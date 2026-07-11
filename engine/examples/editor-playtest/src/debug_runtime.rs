@@ -4,10 +4,7 @@ pub(super) fn room_index_debug_mask(index: RoomIndex) -> RuntimeDebugMask {
     RuntimeDebugMask::from_room(index)
 }
 
-pub(super) fn emit_room_chunk_mask(counter_lo: u16, counter_hi: u16, mask: RuntimeDebugMask) {
-    telemetry::counter(counter_lo, mask.lo());
-    telemetry::counter(counter_hi, mask.hi());
-}
+pub(super) use psx_game_runtime::room_streaming::emit_room_chunk_mask;
 
 const DEBUG_LOG_LINE_CAP: usize = 256;
 /// Master gate for the verbose portal-visibility snapshot log. Default off: the

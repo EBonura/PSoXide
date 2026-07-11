@@ -352,6 +352,9 @@ pub(super) type RuntimeRoomVisibility = psx_game_runtime::room_visibility::RoomV
     MAX_PORTAL_FRONTIER_ROOMS,
     MAX_PORTAL_ROOM_BOUNDS,
 >;
+/// Crate-owned active-room window state instantiated with this
+/// example's window capacity.
+pub(super) type RuntimeRoomWindow = psx_game_runtime::room_window::RoomWindow<MAX_ACTIVE_ROOMS>;
 /// Streamed room slot budget. A slot stores one runtime room payload:
 /// the room `.psxw` plus the room-local render cache records carried by
 /// the `.psxc` payload. Slots are sized to the largest payload in the cooked
@@ -370,7 +373,7 @@ pub(super) const STREAMED_ROOM_SLOT_BYTES: usize =
 pub(super) const STREAMED_ROOM_SLOT_WORDS: usize = STREAMED_ROOM_SLOT_BYTES / 4;
 #[cfg(feature = "cd-stream-bench")]
 pub(super) const MAX_STREAMED_ROOM_SLOT_COUNT: usize = 256;
-pub(super) const STREAMED_ROOM_SLOT_NONE: u16 = u16::MAX;
+pub(super) use psx_game_runtime::room_streaming::STREAMED_ROOM_SLOT_NONE;
 #[cfg(feature = "cd-stream-bench")]
 pub(super) const MAX_STREAMED_ROOM_INDEX_COUNT: usize = 256;
 /// CD-backed room residency cache. The cooked manifest selects the byte
