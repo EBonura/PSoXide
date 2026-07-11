@@ -335,6 +335,7 @@ impl Scene for Playtest {
                     fog_rgb: Rgb8::from_array(room_record.fog_rgb),
                     fog_near: room_record.fog_near,
                     fog_far: room_record.fog_far,
+                    lights: LIGHTS,
                 };
                 telemetry::stage_begin(telemetry::stage::ROOM);
                 #[cfg(feature = "world-grid-visible")]
@@ -351,18 +352,16 @@ impl Scene for Playtest {
                             )) = room_surface_cache_slices(active.index, active.surface_cache)
                             {
                                 let vertex_count = cached_vertices.len();
+                                let room_projection = room_projection_arena();
                                 let projected_indices =
-                                    unsafe { &mut CACHED_ROOM_PROJECTED_INDICES[..vertex_count] };
+                                    &mut room_projection.indices[..vertex_count];
                                 let projected_vertices =
-                                    unsafe { &mut CACHED_ROOM_PROJECTED_VERTICES[..vertex_count] };
-                                let projected_ready =
-                                    unsafe { &mut CACHED_ROOM_PROJECTED_READY[..vertex_count] };
-                                let projected_depths =
-                                    unsafe { &mut CACHED_ROOM_PROJECTED_DEPTHS[..vertex_count] };
-                                let accepted_cell_indices =
-                                    unsafe { &mut CACHED_ROOM_ACCEPTED_CELL_INDICES[..] };
-                                let accepted_cell_depths =
-                                    unsafe { &mut CACHED_ROOM_ACCEPTED_CELL_DEPTHS[..] };
+                                    &mut room_projection.vertices[..vertex_count];
+                                let projected_ready = &mut room_projection.ready[..vertex_count];
+                                let projected_depths = &mut room_projection.depths[..vertex_count];
+                                let cell_scratch = cell_scratch_arena();
+                                let accepted_cell_indices = &mut cell_scratch.indices[..];
+                                let accepted_cell_depths = &mut cell_scratch.depths[..];
                                 draw_indexed_cached_room_vertex_lit_all_cells(
                                     cached_cells,
                                     cached_cell_vertices,
@@ -489,21 +488,18 @@ impl Scene for Playtest {
                                     room_surface_cache_slices(active.index, active.surface_cache)
                                 {
                                     let vertex_count = cached_vertices.len();
-                                    let projected_indices = unsafe {
-                                        &mut CACHED_ROOM_PROJECTED_INDICES[..vertex_count]
-                                    };
-                                    let projected_vertices = unsafe {
-                                        &mut CACHED_ROOM_PROJECTED_VERTICES[..vertex_count]
-                                    };
+                                    let room_projection = room_projection_arena();
+                                    let projected_indices =
+                                        &mut room_projection.indices[..vertex_count];
+                                    let projected_vertices =
+                                        &mut room_projection.vertices[..vertex_count];
                                     let projected_ready =
-                                        unsafe { &mut CACHED_ROOM_PROJECTED_READY[..vertex_count] };
-                                    let projected_depths = unsafe {
-                                        &mut CACHED_ROOM_PROJECTED_DEPTHS[..vertex_count]
-                                    };
-                                    let accepted_cell_indices =
-                                        unsafe { &mut CACHED_ROOM_ACCEPTED_CELL_INDICES[..] };
-                                    let accepted_cell_depths =
-                                        unsafe { &mut CACHED_ROOM_ACCEPTED_CELL_DEPTHS[..] };
+                                        &mut room_projection.ready[..vertex_count];
+                                    let projected_depths =
+                                        &mut room_projection.depths[..vertex_count];
+                                    let cell_scratch = cell_scratch_arena();
+                                    let accepted_cell_indices = &mut cell_scratch.indices[..];
+                                    let accepted_cell_depths = &mut cell_scratch.depths[..];
                                     draw_indexed_cached_room_vertex_lit_visible_cells(
                                         cached_cells,
                                         cached_cell_vertices,
@@ -589,21 +585,18 @@ impl Scene for Playtest {
                                 {
                                     room_cached_draws = room_cached_draws.saturating_add(1);
                                     let vertex_count = cached_vertices.len();
-                                    let projected_indices = unsafe {
-                                        &mut CACHED_ROOM_PROJECTED_INDICES[..vertex_count]
-                                    };
-                                    let projected_vertices = unsafe {
-                                        &mut CACHED_ROOM_PROJECTED_VERTICES[..vertex_count]
-                                    };
+                                    let room_projection = room_projection_arena();
+                                    let projected_indices =
+                                        &mut room_projection.indices[..vertex_count];
+                                    let projected_vertices =
+                                        &mut room_projection.vertices[..vertex_count];
                                     let projected_ready =
-                                        unsafe { &mut CACHED_ROOM_PROJECTED_READY[..vertex_count] };
-                                    let projected_depths = unsafe {
-                                        &mut CACHED_ROOM_PROJECTED_DEPTHS[..vertex_count]
-                                    };
-                                    let accepted_cell_indices =
-                                        unsafe { &mut CACHED_ROOM_ACCEPTED_CELL_INDICES[..] };
-                                    let accepted_cell_depths =
-                                        unsafe { &mut CACHED_ROOM_ACCEPTED_CELL_DEPTHS[..] };
+                                        &mut room_projection.ready[..vertex_count];
+                                    let projected_depths =
+                                        &mut room_projection.depths[..vertex_count];
+                                    let cell_scratch = cell_scratch_arena();
+                                    let accepted_cell_indices = &mut cell_scratch.indices[..];
+                                    let accepted_cell_depths = &mut cell_scratch.depths[..];
                                     draw_indexed_cached_room_vertex_lit_all_cells(
                                         cached_cells,
                                         cached_cell_vertices,
@@ -709,9 +702,7 @@ impl Scene for Playtest {
                 box_prop_profile_begin(telemetry::stage::BOX_PROPS);
                 draw_box_props(
                     BOX_PROPS,
-                    &self.box_prop_broken,
-                    &self.box_prop_runtime,
-                    &self.box_prop_fall,
+                    &self.box_props,
                     active.index,
                     &room_camera,
                     actor_options,
@@ -723,8 +714,7 @@ impl Scene for Playtest {
                 box_prop_profile_begin(telemetry::stage::BOX_PROP_DEBRIS);
                 draw_box_prop_floor_debris(
                     BOX_PROPS,
-                    &self.box_prop_broken,
-                    &self.box_prop_runtime,
+                    &self.box_props,
                     active.index,
                     &room_camera,
                     actor_options,
@@ -735,9 +725,8 @@ impl Scene for Playtest {
                 box_prop_profile_end(telemetry::stage::BOX_PROP_DEBRIS);
                 box_prop_profile_begin(telemetry::stage::BOX_PROP_SHARDS);
                 draw_box_prop_break_events(
-                    &self.box_prop_break_events,
                     BOX_PROPS,
-                    &self.box_prop_runtime,
+                    &self.box_props,
                     active.index,
                     &room_camera,
                     actor_options,
@@ -947,6 +936,7 @@ impl Scene for Playtest {
                         fog_rgb: Rgb8::from_array(room_record.fog_rgb),
                         fog_near: room_record.fog_near,
                         fog_far: room_record.fog_far,
+                        lights: LIGHTS,
                     };
                     telemetry::stage_begin(telemetry::stage::MODEL_INSTANCES);
                     let instance_stats = draw_model_instances(

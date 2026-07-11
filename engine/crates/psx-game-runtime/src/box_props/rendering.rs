@@ -1,5 +1,18 @@
 use super::geometry::*;
 use super::*;
+use crate::image_props::{average4_i32, average_vertex_rgb};
+use crate::model_rendering::{model_render_uv_max, sphere_visible_to_camera};
+use crate::room_lighting::RuntimeRoomLighting;
+use crate::vram::VramSlot;
+use psx_engine::{
+    CullMode, DepthPolicy, LoadedWorldCameraGte, PrimitiveSink, ProjectedVertex, WorldCamera,
+    WorldRenderPass, WorldSurfaceOptions,
+};
+use psx_gpu::{
+    material::TextureMaterial,
+    prim::{QuadTexturedGouraud, TriTextured, TriTexturedGouraud},
+};
+use psx_level::AssetId;
 
 #[derive(Copy, Clone)]
 struct BoxPropFaceTextureRuntime {
@@ -26,58 +39,96 @@ struct DebrisChipCache {
     material: TextureMaterial,
 }
 
-static mut DEBRIS_CACHE: [[Option<DebrisChipCache>; BOX_PROP_FLOOR_DEBRIS_CHIPS.len()];
-    DEBRIS_CACHE_SLOTS] =
-    [const { [const { None }; BOX_PROP_FLOOR_DEBRIS_CHIPS.len()] }; DEBRIS_CACHE_SLOTS];
-static mut DEBRIS_CACHE_PROP: [usize; DEBRIS_CACHE_SLOTS] = [usize::MAX; DEBRIS_CACHE_SLOTS];
-static mut DEBRIS_CACHE_NEXT: u8 = 0;
+/// Owned break-time floor-debris cache (formerly the example's
+/// `DEBRIS_CACHE*` statics). The game keeps one instance in its
+/// runtime arenas; [`DebrisCache::init`] stamps the unclaimed-slot
+/// sentinels onto the zeroed storage at boot. Chip validity rides in
+/// a parallel flag array (not `Option`) so the zeroed image stays
+/// all-zero bytes and the arena static stays in `.bss`.
+pub struct DebrisCache {
+    entries: [[DebrisChipCache; BOX_PROP_FLOOR_DEBRIS_CHIPS.len()]; DEBRIS_CACHE_SLOTS],
+    valid: [[bool; BOX_PROP_FLOOR_DEBRIS_CHIPS.len()]; DEBRIS_CACHE_SLOTS],
+    props: [usize; DEBRIS_CACHE_SLOTS],
+    next: u8,
+}
 
-fn debris_cache_for(
-    prop_index: usize,
-    prop: &LevelBoxPropRecord,
-    face_textures: &[Option<BoxPropFaceTextureRuntime>; psx_level::BOX_PROP_FACE_COUNT],
-    bounds: BoxPropDebrisBounds,
-    floor_y: i32,
-) -> &'static [Option<DebrisChipCache>; BOX_PROP_FLOOR_DEBRIS_CHIPS.len()] {
-    unsafe {
+impl DebrisCache {
+    /// All-zero state (link-time `.bss`-safe). NOT ready for use until
+    /// [`Self::init`] stamps the unclaimed-slot sentinels.
+    pub const fn zeroed() -> Self {
+        // SAFETY: the cache is plain old data plus fieldless enums whose
+        // discriminant 0 is a valid variant (`BlendMode::Opaque` inside
+        // `TextureMaterial`); every chip read is gated by its `valid`
+        // flag, zero (false) until a fill writes it.
+        unsafe { core::mem::zeroed() }
+    }
+
+    /// Stamp the unclaimed-slot sentinels (what the old static
+    /// initializer stored) onto the zeroed storage.
+    pub fn init(&mut self) {
+        self.props = [usize::MAX; DEBRIS_CACHE_SLOTS];
+    }
+
+    fn entries_for(
+        &mut self,
+        prop_index: usize,
+        prop: &LevelBoxPropRecord,
+        face_textures: &[Option<BoxPropFaceTextureRuntime>; psx_level::BOX_PROP_FACE_COUNT],
+        bounds: BoxPropDebrisBounds,
+        floor_y: i32,
+    ) -> (
+        &[DebrisChipCache; BOX_PROP_FLOOR_DEBRIS_CHIPS.len()],
+        &[bool; BOX_PROP_FLOOR_DEBRIS_CHIPS.len()],
+    ) {
         let mut i = 0usize;
         while i < DEBRIS_CACHE_SLOTS {
-            if DEBRIS_CACHE_PROP[i] == prop_index {
-                return &DEBRIS_CACHE[i];
+            if self.props[i] == prop_index {
+                return (&self.entries[i], &self.valid[i]);
             }
             i += 1;
         }
-        let slot = (DEBRIS_CACHE_NEXT as usize) % DEBRIS_CACHE_SLOTS;
-        DEBRIS_CACHE_NEXT = DEBRIS_CACHE_NEXT.wrapping_add(1);
-        DEBRIS_CACHE_PROP[slot] = prop_index;
-        let entries = &mut DEBRIS_CACHE[slot];
+        let slot = (self.next as usize) % DEBRIS_CACHE_SLOTS;
+        self.next = self.next.wrapping_add(1);
+        self.props[slot] = prop_index;
+        let entries = &mut self.entries[slot];
+        let valid = &mut self.valid[slot];
         let mut c = 0usize;
         while c < BOX_PROP_FLOOR_DEBRIS_CHIPS.len() {
             let chip = BOX_PROP_FLOOR_DEBRIS_CHIPS[c];
             let face = chip.face as usize;
-            entries[c] = if face < psx_level::BOX_PROP_FACE_COUNT {
-                face_textures[face].map(|texture| DebrisChipCache {
-                    quad: box_prop_floor_debris_quad(bounds, floor_y, chip),
-                    uvs: box_prop_floor_debris_uvs(texture.u_max, texture.v_max, chip),
-                    colors: [
-                        box_prop_face_color_at(prop, face, chip.u0_q8, chip.v0_q8),
-                        box_prop_face_color_at(prop, face, chip.u1_q8, chip.v0_q8),
-                        box_prop_face_color_at(prop, face, chip.u1_q8, chip.v1_q8),
-                        box_prop_face_color_at(prop, face, chip.u0_q8, chip.v1_q8),
-                    ],
-                    material: texture.material,
-                })
+            let texture = if face < psx_level::BOX_PROP_FACE_COUNT {
+                face_textures[face]
             } else {
                 None
             };
+            match texture {
+                Some(texture) => {
+                    entries[c] = DebrisChipCache {
+                        quad: box_prop_floor_debris_quad(bounds, floor_y, chip),
+                        uvs: box_prop_floor_debris_uvs(texture.u_max, texture.v_max, chip),
+                        colors: [
+                            box_prop_face_color_at(prop, face, chip.u0_q8, chip.v0_q8),
+                            box_prop_face_color_at(prop, face, chip.u1_q8, chip.v0_q8),
+                            box_prop_face_color_at(prop, face, chip.u1_q8, chip.v1_q8),
+                            box_prop_face_color_at(prop, face, chip.u0_q8, chip.v1_q8),
+                        ],
+                        material: texture.material,
+                    };
+                    valid[c] = true;
+                }
+                None => {
+                    valid[c] = false;
+                }
+            }
             c += 1;
         }
-        &DEBRIS_CACHE[slot]
+        (&self.entries[slot], &self.valid[slot])
     }
 }
 
 fn box_prop_face_textures(
     prop: &LevelBoxPropRecord,
+    prop_texture_slot: &mut impl FnMut(AssetId) -> Option<VramSlot>,
 ) -> [Option<BoxPropFaceTextureRuntime>; psx_level::BOX_PROP_FACE_COUNT] {
     let mut textures = [None; psx_level::BOX_PROP_FACE_COUNT];
     let mut face = 0usize;
@@ -101,15 +152,24 @@ fn box_prop_face_textures(
     textures
 }
 
-pub(super) fn draw_box_props<T>(
+/// Draw the unbroken box props of `current_room` (a falling box draws
+/// shifted by its current fall offset).
+#[allow(clippy::too_many_arguments)]
+#[inline]
+pub fn draw_box_props<
+    T,
+    const MAX_BOX_PROP_STATE: usize,
+    const BOX_PROP_BROKEN_WORDS: usize,
+    const MAX_BOX_PROP_BREAK_EVENTS: usize,
+    const OT_DEPTH: usize,
+>(
     props: &[LevelBoxPropRecord],
-    broken: &[u32; BOX_PROP_BROKEN_WORDS],
-    runtime: &[BoxPropRuntime; MAX_BOX_PROP_STATE],
-    fall: &[BoxPropFallState; MAX_BOX_PROP_STATE],
+    state: &BoxProps<MAX_BOX_PROP_STATE, BOX_PROP_BROKEN_WORDS, MAX_BOX_PROP_BREAK_EVENTS>,
     current_room: RoomIndex,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
     lighting: &RuntimeRoomLighting,
+    mut prop_texture_slot: impl FnMut(AssetId) -> Option<VramSlot>,
     triangles: &mut T,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) where
@@ -118,14 +178,16 @@ pub(super) fn draw_box_props<T>(
         + PrimitiveSink<QuadTexturedGouraud>,
 {
     for (index, prop) in props.iter().enumerate() {
-        if prop.room != current_room || box_prop_broken_in_words(broken, index) {
+        if prop.room != current_room
+            || box_prop_broken_in_words::<MAX_BOX_PROP_STATE>(&state.broken, index)
+        {
             continue;
         }
-        let Some(box_runtime) = runtime.get(index) else {
+        let Some(box_runtime) = state.runtime.get(index) else {
             continue;
         };
         // A box mid-fall is drawn shifted down by its current fall offset.
-        let fall_y = fall[index].fall_y;
+        let fall_y = state.fall[index].fall_y;
         let cull_center = WorldVertex::new(
             box_runtime.cull_center.x,
             box_runtime.cull_center.y.saturating_add(fall_y),
@@ -141,20 +203,33 @@ pub(super) fn draw_box_props<T>(
             camera,
             options,
             lighting,
+            &mut prop_texture_slot,
             triangles,
             world,
         );
     }
 }
 
-pub(super) fn draw_box_prop_floor_debris<T>(
+/// Draw the settled floor-debris chips of the broken box props of
+/// `current_room` through the owned debris cache.
+#[allow(clippy::too_many_arguments)]
+#[inline]
+pub fn draw_box_prop_floor_debris<
+    T,
+    const MAX_BOX_PROP_STATE: usize,
+    const BOX_PROP_BROKEN_WORDS: usize,
+    const MAX_BOX_PROP_BREAK_EVENTS: usize,
+    const GTE_PROJECT: bool,
+    const OT_DEPTH: usize,
+>(
     props: &[LevelBoxPropRecord],
-    broken: &[u32; BOX_PROP_BROKEN_WORDS],
-    runtime: &[BoxPropRuntime; MAX_BOX_PROP_STATE],
+    state: &BoxProps<MAX_BOX_PROP_STATE, BOX_PROP_BROKEN_WORDS, MAX_BOX_PROP_BREAK_EVENTS>,
+    debris: &mut DebrisCache,
     current_room: RoomIndex,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
     lighting: &RuntimeRoomLighting,
+    mut prop_texture_slot: impl FnMut(AssetId) -> Option<VramSlot>,
     triangles: &mut T,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) where
@@ -164,10 +239,12 @@ pub(super) fn draw_box_prop_floor_debris<T>(
 {
     let mut projector = None;
     for (index, prop) in props.iter().enumerate() {
-        if prop.room != current_room || !box_prop_broken_in_words(broken, index) {
+        if prop.room != current_room
+            || !box_prop_broken_in_words::<MAX_BOX_PROP_STATE>(&state.broken, index)
+        {
             continue;
         }
-        let Some(box_runtime) = runtime.get(index) else {
+        let Some(box_runtime) = state.runtime.get(index) else {
             continue;
         };
         let debris_center = WorldVertex::new(
@@ -192,8 +269,9 @@ pub(super) fn draw_box_prop_floor_debris<T>(
                 loaded
             }
         };
-        let face_textures = box_prop_face_textures(prop);
-        draw_box_prop_floor_debris_chips(
+        let face_textures = box_prop_face_textures(prop, &mut prop_texture_slot);
+        draw_box_prop_floor_debris_chips::<T, GTE_PROJECT, OT_DEPTH>(
+            debris,
             index,
             prop,
             &face_textures,
@@ -210,7 +288,8 @@ pub(super) fn draw_box_prop_floor_debris<T>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn draw_box_prop_floor_debris_chips<T>(
+fn draw_box_prop_floor_debris_chips<T, const GTE_PROJECT: bool, const OT_DEPTH: usize>(
+    debris: &mut DebrisCache,
     prop_index: usize,
     prop: &LevelBoxPropRecord,
     face_textures: &[Option<BoxPropFaceTextureRuntime>; psx_level::BOX_PROP_FACE_COUNT],
@@ -227,18 +306,19 @@ fn draw_box_prop_floor_debris_chips<T>(
         + PrimitiveSink<TriTextured>
         + PrimitiveSink<TriTexturedGouraud>,
 {
-    let cache = debris_cache_for(prop_index, prop, face_textures, bounds, floor_y);
-    for entry in cache.iter() {
-        let Some(chip) = entry else {
+    let (chips, valid) = debris.entries_for(prop_index, prop, face_textures, bounds, floor_y);
+    for (chip, valid) in chips.iter().zip(valid.iter()) {
+        if !valid {
             continue;
-        };
-        draw_box_prop_floor_debris_chip(
+        }
+        draw_box_prop_floor_debris_chip::<T, GTE_PROJECT, OT_DEPTH>(
             chip, projector, camera, options, lighting, triangles, world,
         );
     }
 }
 
-fn draw_box_prop_floor_debris_chip<T>(
+#[allow(clippy::too_many_arguments)]
+fn draw_box_prop_floor_debris_chip<T, const GTE_PROJECT: bool, const OT_DEPTH: usize>(
     chip: &DebrisChipCache,
     projector: LoadedWorldCameraGte,
     camera: &WorldCamera,
@@ -260,7 +340,7 @@ fn draw_box_prop_floor_debris_chip<T>(
         .with_material_layer(material)
         .with_textured_triangle_splitting(true)
         .with_textured_triangle_max_edge(0);
-    if BOX_PROP_GTE_PROJECT_ENABLED {
+    if GTE_PROJECT {
         if let Some(projected) = projector.project_world_quad(quad) {
             let colors = [
                 lighting.apply_vertex_fog_weight(
@@ -304,14 +384,24 @@ fn draw_box_prop_floor_debris_chip<T>(
     }
 }
 
-pub(super) fn draw_box_prop_break_events<T>(
-    events: &[BoxPropBreakEvent; MAX_BOX_PROP_BREAK_EVENTS],
+/// Draw the live break bursts (flying shards) of `current_room`.
+#[allow(clippy::too_many_arguments)]
+#[inline]
+pub fn draw_box_prop_break_events<
+    T,
+    const MAX_BOX_PROP_STATE: usize,
+    const BOX_PROP_BROKEN_WORDS: usize,
+    const MAX_BOX_PROP_BREAK_EVENTS: usize,
+    const GTE_PROJECT: bool,
+    const OT_DEPTH: usize,
+>(
     props: &[LevelBoxPropRecord],
-    runtime: &[BoxPropRuntime; MAX_BOX_PROP_STATE],
+    state: &BoxProps<MAX_BOX_PROP_STATE, BOX_PROP_BROKEN_WORDS, MAX_BOX_PROP_BREAK_EVENTS>,
     current_room: RoomIndex,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
     lighting: &RuntimeRoomLighting,
+    mut prop_texture_slot: impl FnMut(AssetId) -> Option<VramSlot>,
     triangles: &mut T,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) where
@@ -320,7 +410,7 @@ pub(super) fn draw_box_prop_break_events<T>(
         + PrimitiveSink<TriTexturedGouraud>,
 {
     let mut projector = None;
-    for event in events {
+    for event in &state.break_events {
         if !event.is_active() || event.age >= BOX_PROP_BREAK_FRAMES {
             continue;
         }
@@ -330,7 +420,7 @@ pub(super) fn draw_box_prop_break_events<T>(
         if prop.room != current_room {
             continue;
         }
-        let Some(box_runtime) = runtime.get(event.prop_index as usize) else {
+        let Some(box_runtime) = state.runtime.get(event.prop_index as usize) else {
             continue;
         };
         if !sphere_visible_to_camera(
@@ -350,8 +440,8 @@ pub(super) fn draw_box_prop_break_events<T>(
                 loaded
             }
         };
-        let face_textures = box_prop_face_textures(prop);
-        draw_box_prop_break_shards(
+        let face_textures = box_prop_face_textures(prop, &mut prop_texture_slot);
+        draw_box_prop_break_shards::<T, GTE_PROJECT, OT_DEPTH>(
             &face_textures,
             &box_runtime.break_shards,
             *event,
@@ -365,7 +455,8 @@ pub(super) fn draw_box_prop_break_events<T>(
     }
 }
 
-fn draw_box_prop_break_shards<T>(
+#[allow(clippy::too_many_arguments)]
+fn draw_box_prop_break_shards<T, const GTE_PROJECT: bool, const OT_DEPTH: usize>(
     face_textures: &[Option<BoxPropFaceTextureRuntime>; psx_level::BOX_PROP_FACE_COUNT],
     shard_runtimes: &[BoxPropBreakShardRuntime; BOX_PROP_BREAK_SHARD_COUNT],
     event: BoxPropBreakEvent,
@@ -389,7 +480,7 @@ fn draw_box_prop_break_shards<T>(
         if face >= psx_level::BOX_PROP_FACE_COUNT {
             continue;
         }
-        draw_box_prop_break_shard(
+        draw_box_prop_break_shard::<T, GTE_PROJECT, OT_DEPTH>(
             face_textures[face],
             shard_runtime,
             event,
@@ -406,7 +497,7 @@ fn draw_box_prop_break_shards<T>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn draw_box_prop_break_shard<T>(
+fn draw_box_prop_break_shard<T, const GTE_PROJECT: bool, const OT_DEPTH: usize>(
     face_texture: Option<BoxPropFaceTextureRuntime>,
     shard_runtime: BoxPropBreakShardRuntime,
     event: BoxPropBreakEvent,
@@ -436,7 +527,7 @@ fn draw_box_prop_break_shard<T>(
         .with_material_layer(material)
         .with_textured_triangle_splitting(true)
         .with_textured_triangle_max_edge(0);
-    if BOX_PROP_GTE_PROJECT_ENABLED {
+    if GTE_PROJECT {
         if let Some(projected) = projector.project_world_quad(quad) {
             let fog_weight = lighting.fog_weight_at_depth(average4_i32(
                 projected[0].sz,
@@ -466,7 +557,8 @@ fn draw_box_prop_break_shard<T>(
     }
 }
 
-fn submit_projected_textured_gouraud_quad_u8<T>(
+#[inline]
+fn submit_projected_textured_gouraud_quad_u8<T, const OT_DEPTH: usize>(
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
     triangles: &mut T,
     projected: [ProjectedVertex; 4],
@@ -495,13 +587,15 @@ fn box_prop_apply_fog_weight(
     ]
 }
 
-fn draw_box_prop_faces<T>(
+#[allow(clippy::too_many_arguments)]
+fn draw_box_prop_faces<T, const OT_DEPTH: usize>(
     prop: &LevelBoxPropRecord,
     faces: &[BoxPropFaceRuntime; psx_level::BOX_PROP_FACE_COUNT],
     fall_y: i32,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
     lighting: &RuntimeRoomLighting,
+    prop_texture_slot: &mut impl FnMut(AssetId) -> Option<VramSlot>,
     triangles: &mut T,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) where
@@ -657,7 +751,7 @@ fn rotate_world_vertex_y_around_q12(
         vertex.y.saturating_sub(center.y),
         vertex.z.saturating_sub(center.z),
     ];
-    let rotated = rotate_y_q12(relative, angle_q12);
+    let rotated = crate::image_props::rotate_y_q12(relative, angle_q12);
     WorldVertex::new(
         center.x.saturating_add(rotated[0]),
         center.y.saturating_add(rotated[1]),
@@ -679,8 +773,8 @@ fn box_prop_floor_debris_quad(
     let center_z = bounds
         .center_z
         .saturating_add(bounds.span_z.saturating_mul(chip.offset_z_q8 as i32) / 256);
-    let long = rotate_y_q12([half_length, 0, 0], chip.yaw_q12);
-    let short = rotate_y_q12([0, 0, half_width], chip.yaw_q12);
+    let long = crate::image_props::rotate_y_q12([half_length, 0, 0], chip.yaw_q12);
+    let short = crate::image_props::rotate_y_q12([0, 0, half_width], chip.yaw_q12);
     let y = floor_y.saturating_add(chip.lift as i32);
     [
         WorldVertex::new(

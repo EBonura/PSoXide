@@ -1,4 +1,5 @@
 use super::*;
+use crate::image_props::{average4_i32, rotate_x_q12, rotate_y_q12, rotate_z_q12};
 
 fn box_prop_face_point_q8(face: [WorldVertex; 4], u_q8: u16, v_q8: u16) -> WorldVertex {
     let left = lerp_world_vertex_q8(face[0], face[3], v_q8);

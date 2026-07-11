@@ -8,7 +8,7 @@
 use super::*;
 use psx_game_runtime::vram::VramLayout;
 
-pub(super) use psx_game_runtime::vram::{vram_slot_texture_size_u8, VramSlot, VramSlotClutMode};
+pub(super) use psx_game_runtime::vram::{VramSlot, VramSlotClutMode};
 
 /// This example's VRAM placement, threaded into every crate
 /// `VramRuntime` method as one value (the PROJECTION pattern).
@@ -72,6 +72,7 @@ pub(super) fn service_menu_ui_images(scene_id: u16) {
     ui_images_arena_mut().service_menu_images(
         vram_arena(),
         VRAM_LAYOUT,
+        cd_arena(),
         scene_id,
         UI_SCENES,
         UI_NODES,
@@ -256,6 +257,7 @@ pub(super) fn ensure_sky_panorama_uploaded(
 #[cfg(feature = "cd-stream-bench")]
 pub(super) fn load_streamed_sky_from_cd() {
     vram_arena().load_streamed_sky_from_cd(
+        cd_arena(),
         font_scratch_arena(),
         GAMEPLAY_PACK_MAX_CHUNK_BYTES,
         ASSETS,

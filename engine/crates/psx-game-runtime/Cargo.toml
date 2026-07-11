@@ -17,6 +17,16 @@ cd-stream-bench = []
 # the feature, so the probe silently compiled out (and every cfg warned)
 # until the game's own feature forwarded it again.
 cd-stream-benchmark = ["cd-stream-bench"]
+# Grid-visibility build shape + its algorithm-variant toggles, declared
+# here since the phase-2 visible-cell carve so the moved policy keeps
+# compiling to the exact same shape the example selects (the example
+# forwards each of these from its own feature of the same name).
+world-grid-visible = []
+vis-full-active-chunks = []
+vis-anchor-cache = []
+vis-anchor-pvs-candidates = []
+vis-coarse-yaw = []
+vis-broad-pvs = []
 
 [dependencies]
 # Explicit paths, same rationale as psx-engine: resolvable when
@@ -27,6 +37,7 @@ psx-font      = { path = "../../../sdk/crates/psx-font" }
 psx-gpu       = { path = "../../../sdk/crates/psx-gpu" }
 psx-level     = { path = "../psx-level" }
 psx-io        = { path = "../../../sdk/crates/psx-io" }
+psx-math      = { path = "../../../sdk/crates/psx-math" }
 psx-telemetry = { path = "../../../sdk/crates/psx-telemetry" }
 psx-vram      = { path = "../../../sdk/crates/psx-vram" }
 

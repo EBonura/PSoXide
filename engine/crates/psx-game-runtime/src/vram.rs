@@ -238,6 +238,7 @@ impl<const STAGE_WORDS: usize, const SLOTS: usize> UiImageCache<STAGE_WORDS, SLO
     /// relocated-read penalty collapsing from N reads to 1.
     pub fn preload_all_contiguous(
         &mut self,
+        cd: &mut cd_stream::CdController,
         assets: &'static [LevelAssetRecord],
         rooms: &'static [LevelRoomRecord],
         ui_pack_start_lba: u32,
@@ -284,6 +285,7 @@ impl<const STAGE_WORDS: usize, const SLOTS: usize> UiImageCache<STAGE_WORDS, SLO
 
         let mut statuses = [cd_stream::ROOM_CHUNK_STATUS_OK; SLOTS];
         cd_stream::read_chunks_contiguous(
+            cd,
             ui_pack_start_lba,
             &plans[..n],
             self.words.as_flattened_mut(),
@@ -323,6 +325,7 @@ impl<const STAGE_WORDS: usize, const SLOTS: usize> UiImageCache<STAGE_WORDS, SLO
         &mut self,
         vram: &mut VramRuntime<RAM_ASSETS, VRAM_ASSETS, TPAGES, CLUT_ROWS>,
         layout: VramLayout,
+        cd: &mut cd_stream::CdController,
         scene_id: u16,
         ui_scenes: &'static [LevelUiScene],
         ui_nodes: &'static [LevelUiNodeRecord],
@@ -351,7 +354,7 @@ impl<const STAGE_WORDS: usize, const SLOTS: usize> UiImageCache<STAGE_WORDS, SLO
         // front-end-assets-ready on `ready`), so no music contends with
         // the read.
         if !self.ready() {
-            self.preload_all_contiguous(assets, rooms, ui_pack_start_lba, ui_pack_toc);
+            self.preload_all_contiguous(cd, assets, rooms, ui_pack_start_lba, ui_pack_toc);
         }
         vram.load_ui_images_for_scene(layout, self, scene_id, ui_scenes, ui_nodes, assets, rooms);
     }
@@ -1436,6 +1439,7 @@ impl<
     #[cfg(feature = "cd-stream-bench")]
     pub fn load_streamed_sky_from_cd<const LEN: usize>(
         &mut self,
+        cd: &mut cd_stream::CdController,
         scratch: &mut FontPackScratch<LEN>,
         gameplay_pack_max_chunk_bytes: usize,
         assets: &'static [LevelAssetRecord],
@@ -1467,6 +1471,7 @@ impl<
             };
 
             let res = cd_stream::read_chunk_blocking(
+                cd,
                 ui_pack_start_lba,
                 ui_pack_toc,
                 asset.id.0 as u32,
