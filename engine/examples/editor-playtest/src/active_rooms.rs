@@ -122,9 +122,8 @@ impl Playtest {
         // longer requests streaming itself, it only builds from resident rooms.
 
         #[cfg(feature = "cd-stream-bench")]
-        let build_blocked = |index: RoomIndex| {
-            streamed_room_is_loading(index) || !streamed_room_is_resident(index)
-        };
+        let build_blocked =
+            |index: RoomIndex| streamed_room_is_loading(index) || !streamed_room_is_resident(index);
         #[cfg(not(feature = "cd-stream-bench"))]
         let build_blocked = |_: RoomIndex| false;
 
@@ -485,8 +484,8 @@ impl Playtest {
     #[cfg(feature = "cd-stream-bench")]
     pub(super) fn pump_room_stream(&mut self, max_sectors: usize) -> bool {
         unsafe {
-            ROOM_STREAM_SCHEDULER.pump(
-                &mut STREAMED_ROOM_WORDS,
+            (*core::ptr::addr_of_mut!(ROOM_STREAM_SCHEDULER)).pump(
+                (*core::ptr::addr_of_mut!(STREAMED_ROOM_SLOTS)).words_mut(),
                 max_sectors,
                 debug_log_stream_entry,
             )
@@ -556,11 +555,7 @@ impl Playtest {
         // The ring only moves when the camera changes room, so the desired set is
         // stable between crossings; debounce eviction on the camera room (not the
         // player) and let the scheduler LRU absorb visible-set jitter.
-        let current = self.visibility.root;
-        if unsafe { LAST_EVICT_ROOM } != current {
-            evict_unreferenced_vram(&desired, count);
-            unsafe { LAST_EVICT_ROOM = current };
-        }
+        evict_unreferenced_vram(self.visibility.root, &desired, count);
     }
 
     #[cfg(feature = "cd-stream-bench")]
