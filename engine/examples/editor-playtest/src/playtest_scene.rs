@@ -222,7 +222,7 @@ impl Scene for Playtest {
             debug_log_post_cross_render_start(
                 self.room_index,
                 camera,
-                self.portal_visibility.visible_room_mask(),
+                self.visibility.result.visible_room_mask(),
                 self.active_room_mask(),
                 self.current_collision_room.is_some(),
             );
@@ -290,7 +290,7 @@ impl Scene for Playtest {
             let active_draw_order = active_room_draw_order(
                 &self.active_rooms,
                 camera,
-                &self.portal_visibility,
+                &self.visibility.result,
                 self.room_index,
                 cached_room_draw_order_mode(),
             );
@@ -320,7 +320,7 @@ impl Scene for Playtest {
                     room_cache_surfaces = room_cache_surfaces
                         .saturating_add(active.surface_cache.surface_count as u32);
                 }
-                let materials = active.materials();
+                let materials = active_room_materials(&active);
                 let Some(room_record) = ROOMS.get(active.index.to_usize()) else {
                     continue;
                 };
@@ -381,7 +381,7 @@ impl Scene for Playtest {
                                     cached_room_depth_mode(),
                                     cached_room_subdivision_mode(),
                                     ROOM_VISIBLE_CELL_SCREEN_MARGIN,
-                                    active.index == self.portal_visibility_root,
+                                    active.index == self.visibility.root,
                                     Some(prebuilt_room_quads_for(active.index)),
                                     &mut primitive_packets,
                                     &mut world,
@@ -986,7 +986,7 @@ impl Scene for Playtest {
                 self.room_index,
                 self.motor.position(),
                 RoomPoint::new(camera.position.x, camera.position.y, camera.position.z),
-                self.portal_visibility_camera_global,
+                self.visibility.camera_global,
                 yaw_q12_from_basis(debug_view.sin_yaw, debug_view.cos_yaw),
                 debug_view.sin_yaw,
                 debug_view.cos_yaw,
@@ -1026,7 +1026,7 @@ impl Scene for Playtest {
             );
             telemetry::counter(
                 telemetry::counter::ROOM_CHUNKS_CONSIDERED,
-                self.active_room_candidates as u32,
+                self.visibility.candidates as u32,
             );
             telemetry::counter(
                 telemetry::counter::ROOM_CHUNK_CACHE_SKIPS,
