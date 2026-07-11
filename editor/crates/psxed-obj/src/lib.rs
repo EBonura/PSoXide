@@ -178,14 +178,14 @@ pub fn convert(obj_bytes: &[u8], cfg: &Config) -> Result<Vec<u8>, Error> {
 // ----------------------------------------------------------------------
 
 /// Parsed OBJ geometry: vertex positions and triangle indices.
-pub type ObjGeometry = (Vec<[f32; 3]>, Vec<[usize; 3]>);
+pub(crate) type ObjGeometry = (Vec<[f32; 3]>, Vec<[usize; 3]>);
 
 /// Parse a Wavefront OBJ source into vertex + triangle lists.
 ///
 /// Handles vertex lines (`v x y z`) and face lines (`f a b c …`)
 /// with fan-triangulation for n-gons. `vt` / `vn` / `o` / `g` /
 /// `usemtl` etc. are ignored -- we only need geometry.
-pub fn parse_obj(src: &str) -> Result<ObjGeometry, Error> {
+pub(crate) fn parse_obj(src: &str) -> Result<ObjGeometry, Error> {
     let mut verts = Vec::new();
     let mut faces = Vec::new();
     for (line_no_zero, raw) in src.lines().enumerate() {
@@ -295,7 +295,7 @@ pub fn normalise(verts: &[[f32; 3]]) -> Vec<[f32; 3]> {
 /// drops degenerate triangles (where ≥ 2 verts collapse to the
 /// same cell), and deduplicates triangles that end up with the
 /// same three output indices after collapse.
-pub fn cluster_decimate(
+pub(crate) fn cluster_decimate(
     verts: &[[f32; 3]],
     faces: &[[usize; 3]],
     grid: u32,

@@ -19,15 +19,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
 
-pub mod bios;
-pub mod cdrom;
-pub mod dma;
 pub mod gpu;
-pub mod gte;
 pub mod hash;
-pub mod interrupt;
-pub mod mdec;
 pub mod memory;
 pub mod sio;
-pub mod spu;
-pub mod timer;
