@@ -37,10 +37,13 @@ mod icons;
 mod input;
 #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
 mod mcp;
+#[cfg(feature = "editor")]
+mod playtest_disc;
 mod playtest_input;
 mod theme;
 mod ui;
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 // `web_time::Instant` is a drop-in for `std::time::Instant`: on native it
 // re-exports the std type, and on wasm it reads the browser performance clock
@@ -109,6 +112,22 @@ const PAD_ACTIVITY_WINDOW_SECS: f32 = 1.5;
 
 fn elapsed_ms(start: Instant) -> f32 {
     start.elapsed().as_secs_f32() * 1000.0
+}
+
+// Path helpers shared by `app` and the editor-gated `playtest_disc` module,
+// kept private at the crate root so both sibling modules can reach them.
+fn repo_root_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("..")
+}
+
+fn paths_equivalent(path: &Path, other: &Path) -> bool {
+    match (path.canonicalize(), other.canonicalize()) {
+        (Ok(path), Ok(other)) => path == other,
+        _ => path == other,
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1036,9 +1055,11 @@ impl ApplicationHandler for Shell {
                 // not, when paused -- in which case `cmd_log` will
                 // be empty and the loop is a no-op).
                 let compute_start = Instant::now();
-                if let (true, Some(backend), Some(bus)) =
-                    (vram_dirty, self.compute_backend.as_mut(), state.bus.as_mut())
-                {
+                if let (true, Some(backend), Some(bus)) = (
+                    vram_dirty,
+                    self.compute_backend.as_mut(),
+                    state.bus.as_mut(),
+                ) {
                     // Sync VRAM so any uploads / FMV writes / VRAM-to-
                     // VRAM copies are reflected on the compute side
                     // before we replay this frame's draw commands. With a
@@ -1352,8 +1373,8 @@ impl Shell {
                 .unwrap_or(now)
         } else {
             let in_editor = self.state.workspace.is_editor();
-            let pad_active = now.duration_since(self.last_pad_activity).as_secs_f32()
-                < PAD_ACTIVITY_WINDOW_SECS;
+            let pad_active =
+                now.duration_since(self.last_pad_activity).as_secs_f32() < PAD_ACTIVITY_WINDOW_SECS;
             let tick = if self.state.menu.open || in_editor || pad_active {
                 ACTIVE_TICK_DT
             } else {
@@ -1376,9 +1397,7 @@ impl Shell {
             // redraw event wakes the loop as soon as it is delivered, and
             // if the OS coalesces or suppresses it (occluded window) the
             // deadline re-runs this scheduler instead of busy-looping.
-            event_loop.set_control_flow(ControlFlow::WaitUntil(
-                now + Duration::from_millis(16),
-            ));
+            event_loop.set_control_flow(ControlFlow::WaitUntil(now + Duration::from_millis(16)));
         } else {
             event_loop.set_control_flow(ControlFlow::WaitUntil(next));
         }
