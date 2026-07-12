@@ -16,6 +16,7 @@
                         guest_visual_frames: Some(120),
                     ),
                     input_tape: None,
+                    pad_pulses: None,
                     hold_forward: false,
                     hold_run: false,
                     expected: (
@@ -32,11 +33,55 @@
                         guest_visual_frames: Some(120),
                     ),
                     input_tape: None,
+                    pad_pulses: None,
                     hold_forward: true,
                     hold_run: false,
                     expected: (
                         display: Some((hash: "0xc009f6733d377f66", width: 320, height: 240, byte_len: 153600)),
                         vram: Some("0x5e7f7ca302f47c7c"),
+                    ),
+                ),
+            ],
+        ),
+        (
+            name: "runtime_gauntlet",
+            category: Project,
+            artifact: Project(
+                project: "editor/projects/runtime_gauntlet",
+            ),
+            checkpoints: [
+                (
+                    name: "boot_steps_200m",
+                    runner: Psoxide,
+                    stop: (
+                        steps: 200000000,
+                        guest_frames: None,
+                        guest_visual_frames: None,
+                    ),
+                    input_tape: None,
+                    pad_pulses: None,
+                    hold_forward: false,
+                    hold_run: false,
+                    expected: (
+                        display: Some((hash: "0x7d5eba329935db1e", width: 320, height: 240, byte_len: 153600)),
+                        vram: Some("0x3be09d0a6aa06a1c"),
+                    ),
+                ),
+                (
+                    name: "gate_route_steps_300m",
+                    runner: Psoxide,
+                    stop: (
+                        steps: 300000000,
+                        guest_frames: None,
+                        guest_visual_frames: None,
+                    ),
+                    input_tape: None,
+                    pad_pulses: Some("16@100+600"),
+                    hold_forward: false,
+                    hold_run: false,
+                    expected: (
+                        display: Some((hash: "0x2ab0943311d6bee7", width: 320, height: 240, byte_len: 153600)),
+                        vram: Some("0xc57d4c705c52b4ee"),
                     ),
                 ),
             ],
