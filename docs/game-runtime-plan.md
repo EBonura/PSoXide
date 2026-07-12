@@ -253,6 +253,47 @@ Phase 4 -- persistence: memory-card saves via psx-mc (checkpoint
   model designed for souls-like respawn loops), settings, session
   flags. Greenfield; nothing to port.
 
+### Phase 4 design (written 2026-07-12, before implementation)
+
+Souls checkpoint model, chosen for both design and PS1 pragmatics:
+- Resting at a Checkpoint interactable is the ONLY save moment.
+  Memory-card sector writes are slow; the rest transition (fade)
+  hides the latency -- the hl-psx trick of hiding I/O behind
+  transitions, applied to saves.
+- What persists: the resting checkpoint's id, player HP/max (stats
+  when they exist), and a PERSISTENT WORLD FLAG bitset (bosses dead,
+  one-way doors opened, fired-once triggers). What deliberately does
+  NOT persist: ordinary enemy state -- enemies respawn on rest and
+  on death, souls-style, which collapses the save payload to well
+  under one memory-card sector and matches the genre.
+- Death loop: death -> fade -> load-equivalent reset (respawn at
+  last checkpoint, world re-init, persistent flags reapplied).
+  Currency/penalty hooks deferred until such a system exists.
+
+Technical shape:
+- One card file per project (id from the cooked manifest). Fixed
+  block: header (magic, format version, FNV-1a-64 checksum via
+  psx-hw::hash) + checkpoint id u16 + hp/max u16s + flag bitset
+  sized AT COOK from the count of persist-marked records + padding
+  to the card frame size. Corrupt/mismatched saves reject loudly to
+  "new game".
+- Editor story (the rule of this plan): logic records gain an
+  optional `persist` bool (serde-defaulted false; inspector line on
+  the Interactable/logic node), the cook interns persist-marked
+  records into a flag-index table in the manifest, the runtime maps
+  fired-once state onto the bitset through that table. No .psxw
+  VERSION bump (same manifest-transport reasoning as phase 3).
+- Runtime: a SaveState + CardIo pair in the crate, owned state (no
+  statics), psx-mc underneath; save on checkpoint-rest fire; load
+  behind the boot/Continue path. No per-frame budget line -- saves
+  are boundary events; RAM cost is one <=1 KB block buffer in the
+  arena.
+- Proof: unit tests for roundtrip/corrupt-reject/version-mismatch,
+  plus a gauntlet checkpoint variant proving the full loop headless
+  (rest -> save -> die -> respawn at checkpoint with flags intact)
+  once the emulator-side memcard attach path is wired into the
+  headless launch (the GUI already attaches memcards).
+
 ## Verification protocol (every phase)
 
 1. `make validate` (cortex checkpoints) green before and after.
