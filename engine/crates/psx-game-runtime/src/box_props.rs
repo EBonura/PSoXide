@@ -247,8 +247,11 @@ impl<
         const MAX_BOX_PROP_BREAK_EVENTS: usize,
     > BoxProps<MAX_BOX_PROP_STATE, BOX_PROP_BROKEN_WORDS, MAX_BOX_PROP_BREAK_EVENTS>
 {
-    /// Empty state; `const` so the game can keep it in its
-    /// statically-initialized scene storage.
+    /// Empty state. NOT all-zero bytes: the runtime slots carry safe
+    /// placeholder cull/debris extents and the break-event slots carry
+    /// inactive-sentinel indices, so a game keeping this state in
+    /// link-time-zero (`.bss`) storage must stamp it at boot via
+    /// [`Self::init`] instead of storing this `const` directly.
     pub const EMPTY: Self = Self {
         broken: [0; BOX_PROP_BROKEN_WORDS],
         door_open: [0; BOX_PROP_BROKEN_WORDS],
@@ -256,6 +259,18 @@ impl<
         fall: [BoxPropFallState::EMPTY; MAX_BOX_PROP_STATE],
         break_events: [BoxPropBreakEvent::EMPTY; MAX_BOX_PROP_BREAK_EVENTS],
     };
+
+    /// Stamp the non-zero pieces of [`Self::EMPTY`] onto link-time-zero
+    /// storage: the unbuilt-slot runtime placeholders (element by
+    /// element, so no whole-struct temporary is built) plus the dynamic
+    /// state via [`Self::reset_dynamic_state`]. Equivalent to `*self =
+    /// Self::EMPTY` over zeroed storage.
+    pub fn init(&mut self) {
+        for slot in self.runtime.iter_mut() {
+            *slot = BoxPropRuntime::EMPTY;
+        }
+        self.reset_dynamic_state();
+    }
 
     /// Reset the persistent + transient dynamic state (broken bits,
     /// door-open bits, falls, break bursts) on gameplay (re)entry.
