@@ -1357,9 +1357,14 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         } else {
             interactable.message.to_string()
         };
+        let logic = if interactable.logic == psx_level::INTERACTABLE_LOGIC_NONE {
+            "psx_level::INTERACTABLE_LOGIC_NONE".to_string()
+        } else {
+            interactable.logic.to_string()
+        };
         let _ = writeln!(
             out,
-            "    InteractableRecord {{ room: RoomIndex({}), kind: {kind}, x: {}, y: {}, z: {}, yaw: {}, radius: {}, prompt: {:?}, message: {message}, checkpoint_id: {:?}, flags: {} }},",
+            "    InteractableRecord {{ room: RoomIndex({}), kind: {kind}, x: {}, y: {}, z: {}, yaw: {}, radius: {}, prompt: {:?}, message: {message}, logic: {logic}, checkpoint_id: {:?}, flags: {} }},",
             interactable.room,
             interactable.x,
             interactable.y,
@@ -1426,7 +1431,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         };
         let _ = writeln!(
             out,
-            "    LevelGameEntityRecord {{ room: RoomIndex({}), kind: {}, targetname: {}, model_instance: {model_instance}, x: {}, y: {}, z: {}, yaw: {}, patrol_x: {}, patrol_y: {}, patrol_z: {}, patrol_wait_ticks: {}, aggro_radius: {}, windup_ticks: {}, recovery_ticks: {}, poise: {}, touch_damage: {}, max_health: {}, flags: {} }},",
+            "    LevelGameEntityRecord {{ room: RoomIndex({}), kind: {}, targetname: {}, model_instance: {model_instance}, x: {}, y: {}, z: {}, yaw: {}, radius: {}, height: {}, walk_speed: {}, run_speed: {}, patrol_x: {}, patrol_y: {}, patrol_z: {}, patrol_wait_ticks: {}, aggro_radius: {}, windup_ticks: {}, recovery_ticks: {}, poise: {}, touch_damage: {}, max_health: {}, flags: {} }},",
             entity.room,
             entity.kind,
             entity.targetname,
@@ -1434,6 +1439,10 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             entity.y,
             entity.z,
             entity.yaw,
+            entity.radius,
+            entity.height,
+            entity.walk_speed,
+            entity.run_speed,
             entity.patrol[0],
             entity.patrol[1],
             entity.patrol[2],

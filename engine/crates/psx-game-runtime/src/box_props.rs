@@ -225,6 +225,13 @@ pub struct BoxProps<
 > {
     /// Persistent runtime state for authored breakable box props.
     broken: [u32; BOX_PROP_BROKEN_WORDS],
+    /// Door-open bits: a box a [`logic_kind::DOOR`] record links is
+    /// hidden and passable while its door is open, and comes back
+    /// solid + drawn when it closes -- unlike `broken`, this state is
+    /// reversible and spawns no debris.
+    ///
+    /// [`logic_kind::DOOR`]: psx_level::logic_kind::DOOR
+    door_open: [u32; BOX_PROP_BROKEN_WORDS],
     /// Static derived box-prop data used by render, break tests, and collision.
     runtime: [BoxPropRuntime; MAX_BOX_PROP_STATE],
     /// Dynamic fall state per box, parallel to `broken`. A box
@@ -244,17 +251,41 @@ impl<
     /// statically-initialized scene storage.
     pub const EMPTY: Self = Self {
         broken: [0; BOX_PROP_BROKEN_WORDS],
+        door_open: [0; BOX_PROP_BROKEN_WORDS],
         runtime: [BoxPropRuntime::EMPTY; MAX_BOX_PROP_STATE],
         fall: [BoxPropFallState::EMPTY; MAX_BOX_PROP_STATE],
         break_events: [BoxPropBreakEvent::EMPTY; MAX_BOX_PROP_BREAK_EVENTS],
     };
 
     /// Reset the persistent + transient dynamic state (broken bits,
-    /// falls, break bursts) on gameplay (re)entry.
+    /// door-open bits, falls, break bursts) on gameplay (re)entry.
     pub fn reset_dynamic_state(&mut self) {
         self.broken = [0; BOX_PROP_BROKEN_WORDS];
+        self.door_open = [0; BOX_PROP_BROKEN_WORDS];
         self.fall = [BoxPropFallState::EMPTY; MAX_BOX_PROP_STATE];
         self.break_events = [BoxPropBreakEvent::EMPTY; MAX_BOX_PROP_BREAK_EVENTS];
+    }
+
+    /// Set the door-open state for box `index` (the logic runtime's
+    /// DOOR kind drives this through its `link`): open = hidden +
+    /// passable, closed = drawn + solid.
+    pub fn set_door_open(&mut self, index: usize, open: bool) {
+        let Some((word, mask)) = box_prop_state_bit::<MAX_BOX_PROP_STATE>(index) else {
+            return;
+        };
+        if open {
+            self.door_open[word] |= mask;
+        } else {
+            self.door_open[word] &= !mask;
+        }
+    }
+
+    /// True when box `index` is hidden by an open door.
+    pub fn is_door_open(&self, index: usize) -> bool {
+        let Some((word, mask)) = box_prop_state_bit::<MAX_BOX_PROP_STATE>(index) else {
+            return false;
+        };
+        self.door_open[word] & mask != 0
     }
 
     /// Rebuild the static derived per-box data from the cooked records.
@@ -365,6 +396,11 @@ impl<
                 if self.is_box_prop_broken(index) || self.fall[index].falling {
                     continue;
                 }
+                // A door-linked box is anchored architecture: it never
+                // falls, whatever happened beneath it.
+                if self.is_door_open(index) {
+                    continue;
+                }
                 if self.box_prop_supported(props, index, count) {
                     continue;
                 }
@@ -396,6 +432,7 @@ impl<
             if other == index
                 || props[other].room != room
                 || self.is_box_prop_broken(other)
+                || self.is_door_open(other)
                 || self.fall[other].falling
             {
                 continue;
@@ -474,6 +511,7 @@ impl<
             if prop.room != current_room
                 || prop.flags & trigger == 0
                 || self.is_box_prop_broken(index)
+                || self.is_door_open(index)
             {
                 continue;
             }
@@ -506,6 +544,7 @@ impl<
             if prop.room != current_room
                 || prop.flags & box_prop_flags::BREAK_ON_ATTACK == 0
                 || self.is_box_prop_broken(index)
+                || self.is_door_open(index)
             {
                 continue;
             }
@@ -528,8 +567,8 @@ impl<
         }
     }
 
-    /// Collect the unbroken collision-enabled boxes of `current_room`
-    /// as AABB blockers. Returns the filled count.
+    /// Collect the unbroken, door-closed collision-enabled boxes of
+    /// `current_room` as AABB blockers. Returns the filled count.
     pub fn collect_collision_blockers<const MAX_BOX_PROP_BLOCKERS: usize>(
         &self,
         props: &'static [LevelBoxPropRecord],
@@ -541,6 +580,7 @@ impl<
             if prop.room != current_room
                 || prop.flags & box_prop_flags::COLLISION_ENABLED == 0
                 || self.is_box_prop_broken(index)
+                || self.is_door_open(index)
                 || count >= out.len()
             {
                 continue;

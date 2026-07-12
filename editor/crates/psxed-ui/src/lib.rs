@@ -1883,10 +1883,13 @@ enum PlaceKind {
     /// `Portal` marker. Runtime cooking snaps it to the nearest
     /// cardinal sector edge and treats that edge as an open seam.
     Portal,
+    /// Placed `Logic` graph node (trigger volume by default; switch
+    /// the kind to relay/multisource/door in the inspector).
+    Logic,
 }
 
 impl PlaceKind {
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 10] = [
         Self::PlayerSpawn,
         Self::SpawnMarker,
         Self::ModelInstance,
@@ -1896,6 +1899,7 @@ impl PlaceKind {
         Self::PointLightMarker,
         Self::ParticleEmitter,
         Self::Portal,
+        Self::Logic,
     ];
 
     const fn label(self) -> &'static str {
@@ -1909,6 +1913,7 @@ impl PlaceKind {
             Self::PointLightMarker => "Point Light",
             Self::ParticleEmitter => "Particle Emitter",
             Self::Portal => "Portal",
+            Self::Logic => "Logic",
         }
     }
 
@@ -1922,6 +1927,7 @@ impl PlaceKind {
             Self::PointLightMarker => icons::SUN,
             Self::ParticleEmitter => icons::FOCUS,
             Self::Portal => icons::WAYPOINT,
+            Self::Logic => icons::BLEND,
         }
     }
 }

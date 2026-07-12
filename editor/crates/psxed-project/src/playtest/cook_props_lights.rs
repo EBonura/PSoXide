@@ -348,6 +348,10 @@ pub(crate) fn push_interactable(
     } else {
         0
     };
+    // The paired event-graph record lands at this index; the
+    // interactable stores it so the interact prompt can fire the
+    // record directly (and the effect dispatch can walk back).
+    let paired_logic = logic.len().min(u16::MAX as usize) as u16;
     interactables.push(PlaytestInteractable {
         room: room_index,
         kind,
@@ -358,15 +362,16 @@ pub(crate) fn push_interactable(
         radius: component.radius,
         prompt: prompt.to_string(),
         message,
+        logic: paired_logic,
         checkpoint_id,
         flags,
     });
     // The paired event-graph record: same authored source, interned
     // name, XZ-radius bounds (zero height -- interactable range tests
     // are XZ-only, and the runtime keeps that semantics for these
-    // kinds). Target/kill/master stay NONE until trigger/relay/door
-    // authoring lands; graph edges can already point AT this record
-    // by node name.
+    // kinds). Target/kill/master stay NONE for interactable-paired
+    // records; placed Logic nodes carry the graph edges, which can
+    // point AT this record by node name.
     let radius = i32::from(component.radius);
     logic.push(PlaytestLogic {
         room: room_index,
@@ -396,11 +401,194 @@ pub(crate) fn push_interactable(
     true
 }
 
+/// Door link waiting on the box-prop table: cooked while walking the
+/// scene, resolved to a `BOX_PROPS` index after every Box Prop has
+/// been pushed (a door may name a box that cooks later).
+pub(crate) struct PendingDoorLink {
+    /// Index into the cooked logic table.
+    pub logic_index: usize,
+    /// Authored Box Prop node name.
+    pub box_prop: String,
+    /// Door node name, for error text.
+    pub node_name: String,
+}
+
+/// Cook one placed Logic node (trigger volume / relay / multisource /
+/// door) into a [`PlaytestLogic`] record. Door box-prop links resolve
+/// after the scene walk through `pending_door_links`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn push_logic_node(
+    node_name: &str,
+    room_index: u16,
+    pos: [i32; 3],
+    kind: &crate::LogicNodeKind,
+    target: &str,
+    killtarget: &str,
+    master: &str,
+    delay_ticks: u16,
+    wait_ticks: i16,
+    enabled: bool,
+    names: &mut NameInterner,
+    logic: &mut Vec<PlaytestLogic>,
+    pending_door_links: &mut Vec<PendingDoorLink>,
+    report: &mut PlaytestValidationReport,
+) -> bool {
+    let mut record = PlaytestLogic {
+        room: room_index,
+        kind: psx_level::logic_kind::NONE,
+        spawnflags: 0,
+        targetname: names.intern(node_name),
+        // The interner maps empty/whitespace to LOGIC_NAME_NONE.
+        target: names.intern(target),
+        killtarget: names.intern(killtarget),
+        master: names.intern(master),
+        delay_ticks,
+        wait_ticks,
+        arg0: 0,
+        arg1: 0,
+        link: psx_level::LOGIC_LINK_NONE,
+        message: psx_level::INTERACTABLE_MESSAGE_NONE,
+        x: pos[0],
+        y: pos[1],
+        z: pos[2],
+        min: [pos[0], pos[1], pos[2]],
+        max: [pos[0], pos[1], pos[2]],
+        flags: if enabled {
+            psx_level::logic_flags::ENABLED
+        } else {
+            0
+        },
+    };
+    match kind {
+        crate::LogicNodeKind::TriggerVolume { size } => {
+            if size[0] == 0 || size[1] == 0 || size[2] == 0 {
+                report.error(format!(
+                    "Trigger Volume '{node_name}' has a zero-size extent \
+                     (must be > 0 on every axis)"
+                ));
+                return false;
+            }
+            if record.target == psx_level::LOGIC_NAME_NONE
+                && record.killtarget == psx_level::LOGIC_NAME_NONE
+            {
+                report.error(format!(
+                    "Trigger Volume '{node_name}' has no target - a volume \
+                     that fires nothing is dead content"
+                ));
+                return false;
+            }
+            record.kind = psx_level::logic_kind::TRIGGER_VOLUME;
+            // Floor-anchored center: XZ centered on the node, Y up
+            // from the anchor.
+            let half_x = i32::from(size[0]) / 2;
+            let half_z = i32::from(size[2]) / 2;
+            record.min = [pos[0] - half_x, pos[1], pos[2] - half_z];
+            record.max = [
+                pos[0] + half_x,
+                pos[1] + i32::from(size[1]),
+                pos[2] + half_z,
+            ];
+        }
+        crate::LogicNodeKind::Relay => {
+            if record.target == psx_level::LOGIC_NAME_NONE
+                && record.killtarget == psx_level::LOGIC_NAME_NONE
+            {
+                report.error(format!(
+                    "Relay '{node_name}' has no target - a relay that fires \
+                     nothing is dead content"
+                ));
+                return false;
+            }
+            record.kind = psx_level::logic_kind::RELAY;
+        }
+        crate::LogicNodeKind::Multisource { required } => {
+            if *required == 0 {
+                report.error(format!(
+                    "Multisource '{node_name}' requires 0 inputs (must be > 0)"
+                ));
+                return false;
+            }
+            record.kind = psx_level::logic_kind::MULTISOURCE;
+            record.arg0 = *required;
+        }
+        crate::LogicNodeKind::Door {
+            box_prop,
+            start_open,
+        } => {
+            if box_prop.trim().is_empty() {
+                report.error(format!(
+                    "Door '{node_name}' names no Box Prop - the door's link \
+                     is the box it opens"
+                ));
+                return false;
+            }
+            record.kind = psx_level::logic_kind::DOOR;
+            if *start_open {
+                record.flags |= psx_level::logic_flags::START_ON;
+            }
+            pending_door_links.push(PendingDoorLink {
+                logic_index: logic.len(),
+                box_prop: box_prop.clone(),
+                node_name: node_name.to_string(),
+            });
+        }
+    }
+    logic.push(record);
+    true
+}
+
+/// Resolve every pending door link against the cooked box-prop name
+/// table. Loud failures: an unresolved or ambiguous name is a cook
+/// error, never a silently unlinked door.
+pub(crate) fn resolve_door_links(
+    pending: &[PendingDoorLink],
+    box_prop_indices_by_name: &HashMap<String, Vec<u16>>,
+    logic: &mut [PlaytestLogic],
+    report: &mut PlaytestValidationReport,
+) -> bool {
+    let mut ok = true;
+    for link in pending {
+        match box_prop_indices_by_name
+            .get(&link.box_prop)
+            .map(Vec::as_slice)
+        {
+            Some([index]) => {
+                if let Some(record) = logic.get_mut(link.logic_index) {
+                    record.link = *index;
+                }
+            }
+            Some(indices) => {
+                report.error(format!(
+                    "Door '{}' names Box Prop '{}', but {} placed boxes share \
+                     that name - rename the box so the link is unambiguous",
+                    link.node_name,
+                    link.box_prop,
+                    indices.len()
+                ));
+                ok = false;
+            }
+            None => {
+                report.error(format!(
+                    "Door '{}' names Box Prop '{}', which is not a placed \
+                     Box Prop in any cooked room",
+                    link.node_name, link.box_prop
+                ));
+                ok = false;
+            }
+        }
+    }
+    ok
+}
+
 /// Cook one souls-like game entity from a non-player Character
 /// Controller that opted in with `EnemyBehaviorSettings`. `kind` is
 /// the interned Character resource name so every placement of one
 /// archetype shares the tag; the spawn is patrol anchor zero and
-/// `patrol_offset` authors anchor one relative to it.
+/// `patrol_offset` authors anchor one relative to it. Body radius/
+/// height and walk/run speeds cook from the controller's effective
+/// `CharacterControllerSettings` -- the same source the player motor
+/// config uses -- so the runtime's movement is Character-bound (the
+/// phase-3 seam note).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn push_game_entity(
     node_name: &str,
@@ -408,6 +596,7 @@ pub(crate) fn push_game_entity(
     room_index: u16,
     pos: [i32; 3],
     yaw: i16,
+    settings: &crate::CharacterControllerSettings,
     enemy: crate::EnemyBehaviorSettings,
     model_instance: Option<u16>,
     names: &mut NameInterner,
@@ -433,6 +622,22 @@ pub(crate) fn push_game_entity(
         ));
         return false;
     }
+    // The same > 0 contract the player controller cook enforces:
+    // entity movement divides through these at runtime.
+    if settings.radius == 0 || settings.height == 0 {
+        report.error(format!(
+            "Enemy on '{node_name}' has a zero body radius/height - the \
+             Character Controller capsule must be > 0"
+        ));
+        return false;
+    }
+    if settings.walk_speed <= 0 || settings.run_speed <= 0 {
+        report.error(format!(
+            "Enemy on '{node_name}' has non-positive walk/run speed - the \
+             Character Controller speeds drive patrol and chase"
+        ));
+        return false;
+    }
     game_entities.push(PlaytestGameEntity {
         room: room_index,
         kind: names.intern(archetype_name),
@@ -442,6 +647,10 @@ pub(crate) fn push_game_entity(
         y: pos[1],
         z: pos[2],
         yaw,
+        radius: settings.radius,
+        height: settings.height,
+        walk_speed: settings.walk_speed,
+        run_speed: settings.run_speed,
         patrol: [
             pos[0].saturating_add(enemy.patrol_offset[0]),
             pos[1].saturating_add(enemy.patrol_offset[1]),

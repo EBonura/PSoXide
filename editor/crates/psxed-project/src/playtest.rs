@@ -687,10 +687,14 @@ pub fn build_package(
     let mut interactable_messages: Vec<PlaytestInteractableMessage> = Vec::new();
     let mut interactables: Vec<PlaytestInteractable> = Vec::new();
     // Phase-3 gameplay records: interned names, the logic event graph,
-    // and placed souls-like game entities.
+    // and placed souls-like game entities. Door links resolve against
+    // the box-prop name table after the walk (a door may name a box
+    // that cooks later in scene order).
     let mut names = NameInterner::default();
     let mut logic: Vec<PlaytestLogic> = Vec::new();
     let mut game_entities: Vec<PlaytestGameEntity> = Vec::new();
+    let mut box_prop_indices_by_name: HashMap<String, Vec<u16>> = HashMap::new();
+    let mut pending_door_links: Vec<PendingDoorLink> = Vec::new();
     // ResourceId → index into `models` for instance dedup.
     let runtime_model_clips = collect_runtime_model_clip_requirements(project, scene);
     let mut model_for_resource: HashMap<ResourceId, u16> = HashMap::new();
@@ -908,6 +912,7 @@ pub fn build_package(
                                 room_index,
                                 pos,
                                 yaw,
+                                &controller.settings,
                                 enemy,
                                 node_model_instance,
                                 &mut names,
@@ -1134,6 +1139,7 @@ pub fn build_package(
                 // like the editor preview's raw origin. They are NOT
                 // floor-anchored: snapping to the floor grid ignores a box
                 // stacked beneath and would collapse the stack to the floor.
+                let box_props_before = box_props.len();
                 if !push_box_prop(
                     project,
                     project_root,
@@ -1153,6 +1159,46 @@ pub fn build_package(
                     &mut texture_asset_for_path,
                     &mut assets,
                     &mut box_props,
+                    &mut report,
+                ) {
+                    return (None, report);
+                }
+                // Record the cooked index under the node name so Door
+                // logic nodes can link this box. A material-less box
+                // is skipped by the push (warned), so only a box that
+                // actually cooked registers -- a door naming a skipped
+                // box fails the link resolution loudly.
+                if box_props.len() > box_props_before {
+                    let cooked_index = box_props_before.min(u16::MAX as usize) as u16;
+                    box_prop_indices_by_name
+                        .entry(node.name.clone())
+                        .or_default()
+                        .push(cooked_index);
+                }
+            }
+            NodeKind::Logic {
+                kind,
+                target,
+                killtarget,
+                master,
+                delay_ticks,
+                wait_ticks,
+                enabled,
+            } => {
+                if !push_logic_node(
+                    node.name.as_str(),
+                    room_index,
+                    floor_pos,
+                    kind,
+                    target,
+                    killtarget,
+                    master,
+                    *delay_ticks,
+                    *wait_ticks,
+                    *enabled,
+                    &mut names,
+                    &mut logic,
+                    &mut pending_door_links,
                     &mut report,
                 ) {
                     return (None, report);
@@ -1189,6 +1235,17 @@ pub fn build_package(
             | NodeKind::PhysicsBody { .. }
             | NodeKind::Interactable { .. } => {}
         }
+    }
+
+    // Door links resolve now that every Box Prop has cooked: an
+    // unresolved or ambiguous box name is a hard cook error.
+    if !resolve_door_links(
+        &pending_door_links,
+        &box_prop_indices_by_name,
+        &mut logic,
+        &mut report,
+    ) {
+        return (None, report);
     }
 
     // Contract caps (psx-level is the single source, like
