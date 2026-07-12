@@ -14,8 +14,15 @@
 //!   message overlay, CHECKPOINT records update the in-memory
 //!   checkpoint -- the same UI paths the legacy interactable flow
 //!   used, now driven off LOGIC records (the cook pairs them 1:1).
+//! - Player melee resolution (the combat slice) maps the locked
+//!   attack animation onto the crate's melee arc: the cooked weapon
+//!   spec sizes the arc and its hitbox frame windows gate WHEN the
+//!   swing is live, using the exact animation-phase math the render
+//!   path plays, so contact frames match what the player sees.
 
 use super::*;
+use psx_game_runtime::combat::{self, MeleeArc};
+use psx_game_runtime::model_rendering as mr;
 
 /// Movement backend for game entities: the entity room's grid
 /// collision from the active window, closed box props, the other
@@ -27,6 +34,8 @@ pub(super) struct SceneEntityMover<'a> {
     /// Pre-tick entity positions (entities move one at a time inside
     /// the tick; the snapshot keeps blocker order deterministic).
     pub(super) entity_positions: [[i32; 3]; MAX_GAME_ENTITIES],
+    /// Pre-tick dead flags: corpses stop blocking other movers.
+    pub(super) entity_dead: [bool; MAX_GAME_ENTITIES],
     pub(super) player: RoomPoint,
     pub(super) player_room: RoomIndex,
     pub(super) player_radius: i32,
@@ -93,7 +102,12 @@ impl psx_game_runtime::entities::GameEntityMover for SceneEntityMover<'_> {
             let body_height = (model.world_height as i32).max(1);
             let center = match game_entity_for_instance(inst_index) {
                 Some(other) => {
-                    let live = self.entity_positions[other.min(MAX_GAME_ENTITIES - 1)];
+                    let other = other.min(MAX_GAME_ENTITIES - 1);
+                    // Dead entities stop blocking (souls corpses).
+                    if self.entity_dead[other] {
+                        continue;
+                    }
+                    let live = self.entity_positions[other];
                     RoomPoint::new(live[0], live[1], live[2])
                 }
                 None => RoomPoint::new(inst.x, inst.y, inst.z),
@@ -144,6 +158,86 @@ pub(super) fn game_entity_for_instance(instance: u16) -> Option<usize> {
 }
 
 impl Playtest {
+    /// Player melee resolution for the combat slice: while an attack
+    /// action is locked and the current attack-clip frame is inside
+    /// the weapon's active window, sweep the melee arc over the live
+    /// entities. The swing mask keeps one swing to one connection per
+    /// enemy; `start_player_anim_action` clears it when a new attack
+    /// starts. Outside attack locks this is two compares.
+    pub(super) fn resolve_player_melee(&mut self, ctx: &Ctx) {
+        let now = ctx.sim_tick;
+        if !player_anim_is_attack(self.anim_state) || self.anim_lock_until_tick <= now {
+            return;
+        }
+        let Some(character) = self.character else {
+            return;
+        };
+        let spec = combat::player_melee_spec(EQUIPMENT, WEAPONS, WEAPON_HITBOXES);
+        let spec = if self.anim_state == PlayerAnim::HeavyAttack {
+            spec.heavy()
+        } else {
+            spec
+        };
+        // Current attack-clip animation frame, through the same phase
+        // math the render path uses -- the cooked hitbox window is
+        // authored against the frames the player SEES.
+        let action = self.anim_state.action();
+        let clip = character.clip_for(self.anim_state);
+        let Some(model) = self
+            .models
+            .get(character.model.to_usize())
+            .copied()
+            .flatten()
+        else {
+            return;
+        };
+        let Some(animation) = model.clip(&self.clips, clip) else {
+            return;
+        };
+        let phase = mr::animation_phase_at_tick_q12(
+            animation,
+            now.saturating_sub(self.anim_start_tick),
+            ctx.video_hz,
+            character.action_loops(action),
+            character.action_speed(action),
+            character.action_frame_range(action),
+        );
+        if !spec.frame_active(phase >> 12) {
+            return;
+        }
+        let player = self.motor.position();
+        let arc = MeleeArc {
+            room: self.room_index,
+            x: player.x,
+            z: player.z,
+            yaw: self.motor.yaw().as_q12(),
+            reach: spec.reach,
+            half_angle: spec.half_angle,
+        };
+        let stats = self.game_entities.apply_melee_arc(
+            GAME_ENTITIES,
+            &arc,
+            spec.damage,
+            spec.poise_damage,
+            &mut self.swing_hit_mask,
+        );
+        if stats.hits > 0 {
+            telemetry::counter(telemetry::counter::PLAYER_MELEE_HITS, u32::from(stats.hits));
+        }
+        if stats.staggers > 0 {
+            telemetry::counter(
+                telemetry::counter::GAME_ENTITY_STAGGER_ENTERS,
+                u32::from(stats.staggers),
+            );
+        }
+        if stats.deaths > 0 {
+            telemetry::counter(
+                telemetry::counter::GAME_ENTITY_DEATHS,
+                u32::from(stats.deaths),
+            );
+        }
+    }
+
     /// Build the per-frame pose-override list: every live (visible)
     /// entity with a cooked visual renders at its runtime position and
     /// facing. Returns the filled count.

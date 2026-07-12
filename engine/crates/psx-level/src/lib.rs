@@ -2420,6 +2420,18 @@ pub struct WeaponHitboxRecord {
 /// Cooked weapon resource: optional visual model plus grip and
 /// hitbox slice. The visual model is optional so designers can
 /// author combat volumes before art exists.
+///
+/// The `arc_*`/`damage` fields are the phase-3 melee-combat contract
+/// (docs/game-runtime-plan.md): update-band hit resolution sweeps a
+/// flat XZ ARC in front of the wielder -- `arc_reach` engine units
+/// long, `arc_half_angle` PSX angle units wide to each side of the
+/// facing -- against enemy hurtbox cylinders. The grip-local hitbox
+/// SHAPES stay a render/debug aid; the arc is the authoritative
+/// gameplay volume (capsule/point vs arc is the phase-3 shape, no
+/// per-bone hitboxes). The hitboxes' `active_start_frame`/
+/// `active_end_frame` windows double as the attack's ACTIVE window in
+/// character attack-clip animation frames: frames before the earliest
+/// window are the windup, frames after the latest are the recovery.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LevelWeaponRecord {
     /// Display name.
@@ -2438,6 +2450,17 @@ pub struct LevelWeaponRecord {
     pub hitbox_first: WeaponHitboxIndex,
     /// Number of hitboxes.
     pub hitbox_count: u16,
+    /// Melee arc reach from the wielder's origin, engine units.
+    /// The cook rejects 0 (a reachless weapon can never connect).
+    pub arc_reach: u16,
+    /// Melee arc half-width to each side of the facing, PSX angle
+    /// units (4096 = full turn; cooked from authored degrees).
+    pub arc_half_angle: u16,
+    /// Damage one light-attack connection applies. The cook rejects 0.
+    pub damage: u16,
+    /// Poise damage one light-attack connection applies (0 = this
+    /// weapon never staggers).
+    pub poise_damage: u16,
     /// Reserved.
     pub flags: u16,
 }
