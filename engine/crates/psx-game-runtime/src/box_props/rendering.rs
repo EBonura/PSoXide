@@ -180,6 +180,7 @@ pub fn draw_box_props<
     for (index, prop) in props.iter().enumerate() {
         if prop.room != current_room
             || box_prop_broken_in_words::<MAX_BOX_PROP_STATE>(&state.broken, index)
+            || box_prop_broken_in_words::<MAX_BOX_PROP_STATE>(&state.door_open, index)
         {
             continue;
         }

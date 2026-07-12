@@ -1,17 +1,20 @@
 use super::*;
 
 impl Playtest {
-    /// Phase-3 gameplay layer tick: entity state machines plus the
-    /// logic event graph, both gated on the portal-expanded
-    /// active-room window. Runs unconditionally on every gameplay
-    /// update (before input-mode early returns -- the souls sim does
-    /// not pause with the pad); with zero cooked records (cortex
-    /// today) the guard keeps it to a two-load check, preserving the
-    /// bit-identical gates and the budget's <1k idle rule.
+    /// Phase-3 gameplay layer tick: entity state machines (moved
+    /// through the engine motor's collision by [`SceneEntityMover`]),
+    /// the logic event graph, and the effect dispatch that maps fire
+    /// marks onto doors / message overlays / checkpoints. Runs
+    /// unconditionally on every gameplay update (before input-mode
+    /// early returns -- the souls sim does not pause with the pad);
+    /// with zero cooked records (cortex today) the guard keeps it to
+    /// a two-load check, preserving the bit-identical gates and the
+    /// budget's <1k idle rule.
     pub(super) fn tick_gameplay_layer(&mut self, ctx: &Ctx) {
         if GAME_ENTITIES.is_empty() && LOGIC.is_empty() {
             return;
         }
+        telemetry::stage_begin(telemetry::stage::GAME_LOGIC);
         // The portal-expanded active set as a compact index list; a
         // handful of loads per tick at MAX_ACTIVE_ROOMS = 16.
         let mut active_rooms = [INVALID_ROOM_INDEX; MAX_ACTIVE_ROOMS];
@@ -24,14 +27,38 @@ impl Playtest {
         }
         let player = self.motor.position();
         let player_pos = [player.x, player.y, player.z];
+        let (player_radius, player_height) = match self.character {
+            Some(character) => (character.radius, character.height),
+            None => (0, 0),
+        };
         let now = ctx.sim_tick.as_u32();
-        self.game_entities.tick(
+        let mut entity_positions = [[0i32; 3]; MAX_GAME_ENTITIES];
+        for (index, slot) in entity_positions
+            .iter_mut()
+            .enumerate()
+            .take(self.game_entities.count())
+        {
+            *slot = self.game_entities.position(index);
+        }
+        let mut mover = SceneEntityMover {
+            window: &self.window,
+            box_props: &self.box_props,
+            models: &self.models,
+            entity_positions,
+            player,
+            player_room: self.room_index,
+            player_radius,
+            player_height,
+        };
+        let entity_stats = self.game_entities.tick(
             GAME_ENTITIES,
             psx_game_runtime::entities::GameEntityTickInput {
                 player: player_pos,
                 player_room: self.room_index,
+                player_radius,
                 active_rooms: &active_rooms[..active_count],
             },
+            &mut mover,
         );
         self.logic.tick(
             LOGIC,
@@ -42,6 +69,45 @@ impl Playtest {
             },
             now,
         );
+        self.dispatch_logic_effects();
+        telemetry::counter(
+            telemetry::counter::GAME_ENTITIES_THOUGHT,
+            u32::from(entity_stats.thought),
+        );
+        if entity_stats.patrol_enters > 0 {
+            telemetry::counter(
+                telemetry::counter::GAME_ENTITY_PATROL_ENTERS,
+                u32::from(entity_stats.patrol_enters),
+            );
+        }
+        if entity_stats.aggro_enters > 0 {
+            telemetry::counter(
+                telemetry::counter::GAME_ENTITY_AGGRO_ENTERS,
+                u32::from(entity_stats.aggro_enters),
+            );
+        }
+        if entity_stats.windup_enters > 0 {
+            telemetry::counter(
+                telemetry::counter::GAME_ENTITY_WINDUP_ENTERS,
+                u32::from(entity_stats.windup_enters),
+            );
+        }
+        if entity_stats.attack_enters > 0 {
+            telemetry::counter(
+                telemetry::counter::GAME_ENTITY_ATTACK_ENTERS,
+                u32::from(entity_stats.attack_enters),
+            );
+        }
+        let fired_total = self.logic.stats().fired;
+        let fired_delta = fired_total.saturating_sub(self.logic_fired_reported);
+        if fired_delta > 0 {
+            telemetry::counter(
+                telemetry::counter::LOGIC_RECORDS_FIRED,
+                u32::from(fired_delta),
+            );
+        }
+        self.logic_fired_reported = fired_total;
+        telemetry::stage_end(telemetry::stage::GAME_LOGIC);
     }
 
     pub(super) fn init_gameplay(&mut self) {
@@ -85,9 +151,13 @@ impl Playtest {
         self.box_props.reset_dynamic_state();
         // Phase-3 gameplay layer: spawn entity/logic state 1:1 from
         // the cooked tables (empty tables leave both inert; the same
-        // calls re-run on future checkpoint respawns).
+        // calls re-run on future checkpoint respawns), then push the
+        // initial door states onto their box props (START_ON doors
+        // begin open without a fire event).
         self.game_entities.spawn_from_records(GAME_ENTITIES);
         self.logic.init_from_records(LOGIC);
+        self.logic_fired_reported = 0;
+        self.sync_door_box_props();
         self.camera.snap_to_player_with_yaw(
             self.camera_target(None, false),
             self.camera_config(),
@@ -219,7 +289,9 @@ impl Playtest {
         self.refresh_active_interactable();
         if !action_locked {
             if let Some(index) = self.active_interactable {
-                if ctx.just_pressed(INTERACT_BUTTON) && self.activate_interactable(index) {
+                if ctx.just_pressed(INTERACT_BUTTON)
+                    && self.activate_interactable(index, now.as_u32())
+                {
                     self.evade_run_hold_ticks = 0;
                     self.evade_run_hold_consumed = false;
                     self.camera_turning_last_tick = false;

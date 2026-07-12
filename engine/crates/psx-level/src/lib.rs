@@ -1303,6 +1303,10 @@ pub mod interactable_flags {
 /// associated with the interaction.
 pub const INTERACTABLE_MESSAGE_NONE: u16 = u16::MAX;
 
+/// Sentinel for [`InteractableRecord::logic`] when the interactable
+/// has no paired logic record (hand-rolled placeholder manifests).
+pub const INTERACTABLE_LOGIC_NONE: u16 = u16::MAX;
+
 /// Text shown by an interactable. Kept separate so future records can
 /// share/localize messages without changing the spatial table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1336,6 +1340,11 @@ pub struct InteractableRecord {
     /// Index into the generated interactable message table, or
     /// [`INTERACTABLE_MESSAGE_NONE`].
     pub message: u16,
+    /// Index of this interactable's paired [`LevelLogicRecord`] (the
+    /// cook emits both from one authored component), or
+    /// [`INTERACTABLE_LOGIC_NONE`]. The interact prompt fires the
+    /// paired record; terminal effects run off the logic fire marks.
+    pub logic: u16,
     /// Stable checkpoint id for [`InteractableKind::Checkpoint`].
     pub checkpoint_id: &'static str,
     /// Runtime flags from [`interactable_flags`].
@@ -1479,7 +1488,10 @@ pub struct LevelLogicRecord {
 /// floor-anchor convention of [`PlayerSpawnRecord`]. The spawn
 /// position is patrol anchor zero; `patrol_*` is anchor one (equal to
 /// the spawn when no patrol is authored, which reads as "hold
-/// position").
+/// position"). Body/speed fields are Character-bound: cooked from the
+/// controller's effective `CharacterControllerSettings`, the same
+/// source the player motor config uses, so entity movement and the
+/// player share one unit system (engine units per 60 Hz tick).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LevelGameEntityRecord {
     /// Owning room index.
@@ -1499,6 +1511,16 @@ pub struct LevelGameEntityRecord {
     pub z: i32,
     /// Spawn yaw, PSX angle units.
     pub yaw: i16,
+    /// Body cylinder radius, engine units (Character-bound).
+    pub radius: u16,
+    /// Body cylinder height, engine units (Character-bound).
+    pub height: u16,
+    /// Patrol movement speed, engine units per 60 Hz tick
+    /// (Character walk speed).
+    pub walk_speed: i32,
+    /// Chase movement speed, engine units per 60 Hz tick
+    /// (Character run speed).
+    pub run_speed: i32,
     /// Patrol anchor one X (== `x` when no patrol is authored).
     pub patrol_x: i32,
     /// Patrol anchor one Y.
