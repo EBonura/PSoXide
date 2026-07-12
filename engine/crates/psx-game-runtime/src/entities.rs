@@ -416,14 +416,17 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         arc: &MeleeArc,
         damage: u16,
         poise_damage: u16,
+        // psx-numeric-allow-next-line: one-hit-per-swing bitmask; bit ops only, two-word on R3000
         already_hit: &mut u64,
     ) -> MeleeArcStats {
+        // psx-numeric-allow-next-line: the 64-record cap IS the mask width
         const { assert!(MAX_ENTITIES <= 64, "swing mask is a u64") };
         let mut stats = MeleeArcStats::default();
         let count = self.count().min(records.len());
         let mut entity = 0usize;
         while entity < count {
             let record = &records[entity];
+            // psx-numeric-allow-next-line: swing bitmask bit select; no 64-bit arithmetic
             let mask = 1u64 << entity;
             let skip = *already_hit & mask != 0
                 || record.room != arc.room
@@ -1177,6 +1180,7 @@ mod tests {
             reach: 640,
             half_angle: 683,
         };
+        // psx-numeric-allow-next-line: swing bitmask scratch in tests
         let mut swing = 0u64;
         // Swing 1: connects (poise 40 <= pool 50, no stagger)...
         let stats = entities.apply_melee_arc(&IDLE_ENEMY, &arc, 30, 40, &mut swing);
