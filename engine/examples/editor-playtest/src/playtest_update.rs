@@ -33,33 +33,54 @@ impl Playtest {
         };
         let now = ctx.sim_tick.as_u32();
         let mut entity_positions = [[0i32; 3]; MAX_GAME_ENTITIES];
+        let mut entity_dead = [false; MAX_GAME_ENTITIES];
         for (index, slot) in entity_positions
             .iter_mut()
             .enumerate()
             .take(self.game_entities.count())
         {
             *slot = self.game_entities.position(index);
+            entity_dead[index] = self.game_entities.state(index)
+                == psx_game_runtime::entities::GameEntityState::Dead;
         }
         let mut mover = SceneEntityMover {
             window: &self.window,
             box_props: &self.box_props,
             models: &self.models,
             entity_positions,
+            entity_dead,
             player,
             player_room: self.room_index,
             player_radius,
             player_height,
         };
+        // Souls i-frames: the motor's roll/backstep invulnerability
+        // window makes entity attacks whiff. Queried BEFORE this
+        // tick's motor update, so it matches the frames the motor
+        // will report.
+        let player_invulnerable = self.motor.is_action_invulnerable(self.motor_config());
         let entity_stats = self.game_entities.tick(
             GAME_ENTITIES,
             psx_game_runtime::entities::GameEntityTickInput {
                 player: player_pos,
                 player_room: self.room_index,
                 player_radius,
+                player_invulnerable,
                 active_rooms: &active_rooms[..active_count],
             },
             &mut mover,
         );
+        // Entity attack connections damage the player (floors at 0;
+        // death/respawn handling is phase 4).
+        if entity_stats.player_damage > 0 {
+            self.player_health = self
+                .player_health
+                .saturating_sub(entity_stats.player_damage);
+        }
+        // Player melee resolution: while an attack action is locked
+        // and its active window is live, sweep the weapon arc over
+        // the entities. Costs nothing outside attacks.
+        self.resolve_player_melee(ctx);
         self.logic.tick(
             LOGIC,
             psx_game_runtime::logic::LogicTickInput {
@@ -96,6 +117,12 @@ impl Playtest {
             telemetry::counter(
                 telemetry::counter::GAME_ENTITY_ATTACK_ENTERS,
                 u32::from(entity_stats.attack_enters),
+            );
+        }
+        if entity_stats.player_hits > 0 {
+            telemetry::counter(
+                telemetry::counter::PLAYER_HITS_TAKEN,
+                u32::from(entity_stats.player_hits),
             );
         }
         let fired_total = self.logic.stats().fired;
@@ -157,6 +184,9 @@ impl Playtest {
         self.game_entities.spawn_from_records(GAME_ENTITIES);
         self.logic.init_from_records(LOGIC);
         self.logic_fired_reported = 0;
+        self.player_health = PLAYER_MAX_HEALTH;
+        self.player_health_max = PLAYER_MAX_HEALTH;
+        self.swing_hit_mask = 0;
         self.sync_door_box_props();
         self.camera.snap_to_player_with_yaw(
             self.camera_target(None, false),

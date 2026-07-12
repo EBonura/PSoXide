@@ -249,6 +249,68 @@ path migrates onto LOGIC records; enemy RENDER cost rides the
 existing `model_instances` band and must be re-measured against
 the 60k envelope at first live content.
 
+### Phase 3 combat slice (landed; measured 2026-07-12)
+
+Souls combat resolution, editor-first, per constraint 1: melee
+ARCS vs hurtbox cylinders, deliberately NOT per-bone hitboxes.
+The cooked contract is the Weapon resource: four new
+serde-defaulted authored fields (`arc_reach`, engine units;
+`arc_half_angle_degrees`; `damage`; `poise_damage`) cook into
+four new `LevelWeaponRecord` fields (half-angle converted to PSX
+angle units), with loud cook rejections for reach 0, damage 0,
+and half-angles outside 1..=170 degrees. The existing
+`WeaponHitboxRecord` frame windows double as the attack's ACTIVE
+window in attack-clip animation frames (windup before, recovery
+after; the grip-local hitbox SHAPES stay a render/debug aid).
+Runtime: `psx-game-runtime::combat` (integer arc-vs-circle with
+per-axis/squared early-outs, one octant atan2 on survivors, a
+point-blank pass, and the player spec resolver over the first
+PLAYER-flagged equipment -- room-agnostic, unarmed fallback);
+`GameEntities::apply_melee_arc` sweeps O(live entities) with a
+u64 one-hit-per-swing mask (the 64-record contract cap is the
+mask width); entity Attack windows resolve contact against the
+player through the same arc shape (front 60-degree half-arc
+around the facing committed at windup), once per swing, whiffing
+entirely against motor i-frames
+(`CharacterMotorState::is_action_invulnerable`, the roll/backstep
+invulnerability window -- constraint 1's dodge rule). Damage and
+poise flow through `apply_hit` (poise break -> Staggered, health
+0 -> Dead); dead entities stop blocking and stop being targets.
+The example wires real player HP (100 cooked default; the
+Character record carries no health field yet) onto the existing
+PlayerHealth HUD binding; heavy attacks scale the authored light
+numbers (x3/2 damage, x2 poise) as runtime policy.
+
+Measured on the runtime_gauntlet fight route (telemetry disc,
+per-frame GAME_LOGIC stage, 612-frame fight window): whole
+gameplay band avg 15.1k / p95 49.6k / max 53.7k cycles per frame
+against the 60k envelope. Decomposition: engaged-but-stationary
+baseline ~8.3k (entity tick + 6 logic records + effect dispatch
++ the per-tick mover snapshot); a MOVING entity costs ~45k more
+(the motor-honest `commit_body_step` + blocker gather -- about
+half the player's own ~91k collision+solve band); the player
+melee sweep adds ~0.5k on swing frames and enemy contact ~1.6k
+during attack windows, so combat RESOLUTION proper sits far
+inside its 10k line. Budget finding for the next slice: the
+5k-per-thinker target holds only for non-moving thinkers -- one
+chasing enemy eats ~53k, so 8 CONCURRENTLY MOVING enemies do not
+fit the 40k entities+AI line under the current per-entity
+full-collision mover (seam: batched/cheaper entity stepping).
+The gauntlet gate route now also proves combat headlessly
+(counters on the instrumented build: 3 player melee hits -> 1
+poise break -> 1 death; 8 enemy connections -> player HP 100 ->
+36): both gauntlet checkpoints re-blessed, cortex's two stayed
+bit-identical (its WEAPONS table is empty and the empty-layer
+guard still folds).
+
+Combat visual seams (deliberately deferred): dead entities keep
+rendering their idle instance pose (the death CLIP needs a
+Character binding on the game-entity record); the equipment
+render path still filters by the equipment record's cooked room
+while combat resolution is room-agnostic; enemy attack windows
+are tick-based (`GAME_ENTITY_ATTACK_ACTIVE_TICKS`), not sourced
+from their attack clips.
+
 Phase 4 -- persistence: memory-card saves via psx-mc (checkpoint
   model designed for souls-like respawn loops), settings, session
   flags. Greenfield; nothing to port.
