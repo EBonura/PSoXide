@@ -116,18 +116,23 @@ pub mod stage {
     pub const CELL_DEPTH: u16 = 49;
     /// Inside ROOM_CELL_SELECT: unique vertex-index collection.
     pub const CELL_COLLECT: u16 = 50;
+    /// Phase-3 gameplay layer: entity state machines + logic event
+    /// graph + effect dispatch, ticked at the top of the update band.
+    /// Budgeted at 60k cycles per 30 fps frame in
+    /// docs/game-runtime-plan.md ("Phase 3 budget").
+    pub const GAME_LOGIC: u16 = 51;
 }
 
 /// Number of stage slots, including index zero for unknown/reserved ids.
-/// Sized to the highest stage id (`CELL_COLLECT = 50`) plus one.
-pub const STAGE_COUNT: usize = 51;
+/// Sized to the highest stage id (`GAME_LOGIC = 51`) plus one.
+pub const STAGE_COUNT: usize = 52;
 
 // Enforce `STAGE_COUNT = highest stage id + 1` at compile time. The host's
 // stage arrays are indexed by id and out-of-range ids are dropped silently,
 // so a new higher id without a matching STAGE_COUNT bump would quietly
 // vanish from every summary. Adding a higher id trips this and must
 // update both the count and this guard.
-const _: () = assert!(stage::CELL_COLLECT as usize == STAGE_COUNT - 1);
+const _: () = assert!(stage::GAME_LOGIC as usize == STAGE_COUNT - 1);
 
 /// Runtime task ids.
 pub mod task {
@@ -601,11 +606,25 @@ pub mod counter {
     /// material count). This was the silent root cause of the demo10 invisible
     /// frieze/stairs.
     pub const ROOM_MATERIAL_SLOT_OVERFLOW: u16 = 223;
+    /// Game entities that ran their state machine this tick (the
+    /// phase-3 per-tick "thinker" count; budget target <= 8).
+    pub const GAME_ENTITIES_THOUGHT: u16 = 224;
+    /// Game-entity transitions INTO Patrol since spawn.
+    pub const GAME_ENTITY_PATROL_ENTERS: u16 = 225;
+    /// Game-entity transitions INTO Aggro since spawn.
+    pub const GAME_ENTITY_AGGRO_ENTERS: u16 = 226;
+    /// Game-entity transitions INTO Windup since spawn.
+    pub const GAME_ENTITY_WINDUP_ENTERS: u16 = 227;
+    /// Game-entity transitions INTO Attack since spawn (the souls
+    /// commit; contact resolution is the combat slice).
+    pub const GAME_ENTITY_ATTACK_ENTERS: u16 = 228;
+    /// Logic records fired since init (LogicRuntime rolling total).
+    pub const LOGIC_RECORDS_FIRED: u16 = 229;
 }
 
 /// Number of counter slots, including index zero for unknown/reserved ids.
 /// Must stay larger than the highest counter id emitted by the guest; a
 /// counter id >= this is silently dropped.
-pub const COUNTER_COUNT: usize = 224;
+pub const COUNTER_COUNT: usize = 230;
 
-const _: () = assert!(counter::ROOM_MATERIAL_SLOT_OVERFLOW as usize == COUNTER_COUNT - 1);
+const _: () = assert!(counter::LOGIC_RECORDS_FIRED as usize == COUNTER_COUNT - 1);

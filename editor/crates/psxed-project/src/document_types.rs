@@ -1363,6 +1363,7 @@ pub(crate) fn node_kind_reference_count(kind: &NodeKind, id: ResourceId) -> usiz
         | NodeKind::Camera { .. }
         | NodeKind::PhysicsBody { .. }
         | NodeKind::Interactable { .. }
+        | NodeKind::Logic { .. }
         | NodeKind::PointLight { .. }
         | NodeKind::Portal { .. } => 0,
     }
@@ -1421,6 +1422,7 @@ pub(crate) fn clear_node_kind_references(kind: &mut NodeKind, id: ResourceId) ->
         | NodeKind::Camera { .. }
         | NodeKind::PhysicsBody { .. }
         | NodeKind::Interactable { .. }
+        | NodeKind::Logic { .. }
         | NodeKind::PointLight { .. }
         | NodeKind::Portal { .. } => 0,
     }

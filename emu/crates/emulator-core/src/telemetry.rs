@@ -466,6 +466,7 @@ pub fn stage_name(id: u16) -> &'static str {
         stage::CELL_LOOKUP => "cell lookup",
         stage::CELL_DEPTH => "cell depth",
         stage::CELL_COLLECT => "cell collect",
+        stage::GAME_LOGIC => "game logic",
         _ => "unknown",
     }
 }
@@ -711,6 +712,12 @@ pub fn counter_name(id: u16) -> &'static str {
         counter::VRAM_UPLOAD_QUEUE_FULL => "vram upload queue full",
         counter::ROOM_MATERIAL_TEXTURE_DROPS => "room material texture drops",
         counter::ROOM_MATERIAL_SLOT_OVERFLOW => "room material slot overflow",
+        counter::GAME_ENTITIES_THOUGHT => "game entities thought",
+        counter::GAME_ENTITY_PATROL_ENTERS => "game entity patrol enters",
+        counter::GAME_ENTITY_AGGRO_ENTERS => "game entity aggro enters",
+        counter::GAME_ENTITY_WINDUP_ENTERS => "game entity windup enters",
+        counter::GAME_ENTITY_ATTACK_ENTERS => "game entity attack enters",
+        counter::LOGIC_RECORDS_FIRED => "logic records fired",
         _ => "unknown",
     }
 }

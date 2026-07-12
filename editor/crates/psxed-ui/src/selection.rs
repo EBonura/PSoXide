@@ -404,6 +404,9 @@ pub enum EntityBoundKind {
     ParticleEmitter,
     /// `Portal`.
     Portal,
+    /// Placed `Logic` graph node (trigger volume / relay /
+    /// multisource / door).
+    Logic,
 }
 
 /// World-space AABB for one selectable scene entity.

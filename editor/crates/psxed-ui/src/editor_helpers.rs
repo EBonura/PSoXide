@@ -885,6 +885,20 @@ pub(crate) fn entity_bound_kind_and_size(
             Some((EntityBoundKind::ParticleEmitter, [160.0, 160.0, 160.0]))
         }
         NodeKind::Portal { .. } => Some((EntityBoundKind::Portal, [256.0, 256.0, 64.0])),
+        // Trigger volumes read as their authored extent so the box is
+        // clickable where it fires; point-like logic nodes get a
+        // small marker bound.
+        NodeKind::Logic { kind, .. } => match kind {
+            psxed_project::LogicNodeKind::TriggerVolume { size } => Some((
+                EntityBoundKind::Logic,
+                [
+                    (f32::from(size[0]) * 0.5).max(32.0),
+                    (f32::from(size[1]) * 0.5).max(32.0),
+                    (f32::from(size[2]) * 0.5).max(32.0),
+                ],
+            )),
+            _ => Some((EntityBoundKind::Logic, [128.0, 192.0, 128.0])),
+        },
     }
 }
 

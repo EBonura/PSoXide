@@ -1039,6 +1039,22 @@ impl EditorWorkspace {
                         },
                     )
                 }
+                PlaceKind::Logic => (
+                    // Default to a trigger volume; the inspector's
+                    // kind picker switches it to relay/multisource/
+                    // door. Rename the node to give the record its
+                    // targetname.
+                    "Trigger Volume".to_string(),
+                    NodeKind::Logic {
+                        kind: psxed_project::LogicNodeKind::default(),
+                        target: String::new(),
+                        killtarget: String::new(),
+                        master: String::new(),
+                        delay_ticks: 0,
+                        wait_ticks: 0,
+                        enabled: true,
+                    },
+                ),
                 PlaceKind::Portal => return,
             };
             self.push_undo();

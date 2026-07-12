@@ -36,7 +36,7 @@ mod instances;
 pub use self::instances::{
     accumulate_model_instance_draw_stats, actor_shadow_radius, draw_actor_shadow,
     draw_collision_cylinder_debug, draw_model_instance_shadows, draw_model_instances,
-    ModelInstanceDepthPass, ModelInstanceDrawStats,
+    ModelInstanceDepthPass, ModelInstanceDrawStats, ModelInstancePoseOverride,
 };
 
 /// The cooked model-family tables the render policy walks, bundled so
