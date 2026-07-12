@@ -718,6 +718,10 @@ pub fn counter_name(id: u16) -> &'static str {
         counter::GAME_ENTITY_WINDUP_ENTERS => "game entity windup enters",
         counter::GAME_ENTITY_ATTACK_ENTERS => "game entity attack enters",
         counter::LOGIC_RECORDS_FIRED => "logic records fired",
+        counter::GAME_ENTITY_STAGGER_ENTERS => "game entity stagger enters",
+        counter::GAME_ENTITY_DEATHS => "game entity deaths",
+        counter::PLAYER_MELEE_HITS => "player melee hits",
+        counter::PLAYER_HITS_TAKEN => "player hits taken",
         _ => "unknown",
     }
 }

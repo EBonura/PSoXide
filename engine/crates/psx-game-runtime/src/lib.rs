@@ -16,6 +16,7 @@
 pub mod box_props;
 pub mod cd_stream;
 pub mod character;
+pub mod combat;
 pub mod entities;
 pub mod image_props;
 pub mod logic;

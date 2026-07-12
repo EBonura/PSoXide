@@ -13,9 +13,12 @@
 //! goes through a [`GameEntityMover`] the owning game backs with the
 //! engine motor's [`commit_body_step`] -- the exact grid-collision
 //! stand/slide/step rules the player uses. Attack CONTACT resolution
-//! (melee arcs vs hurtboxes) is the combat slice's job. With zero
-//! cooked records every entry point returns immediately, so a
-//! record-free game pays a handful of cycles per tick (measured in
+//! is the combat slice (see [`crate::combat`]): an entity's Attack
+//! active window tests the player against its Character-derived reach
+//! inside a front arc (once per swing, whiffing on roll i-frames),
+//! and the player's swings come back through [`Self::apply_melee_arc`].
+//! With zero cooked records every entry point returns immediately, so
+//! a record-free game pays a handful of cycles per tick (measured in
 //! the phase-3 budget's idle A/B).
 //!
 //! Crate rules hold: no statics, no unsafe, capacities are `const N`
@@ -25,6 +28,7 @@
 //!
 //! [`commit_body_step`]: psx_engine::character_motor::commit_body_step
 
+use crate::combat::{arc_hits_circle, MeleeArc};
 use psx_level::{game_entity_flags, LevelGameEntityRecord, RoomIndex};
 use psx_math::atan2_q12;
 
@@ -80,8 +84,14 @@ impl GameEntityState {
 /// arcs.
 pub const GAME_ENTITY_ATTACK_REACH_MARGIN: i32 = 128;
 
-/// Ticks the attack active window lasts in the skeleton.
+/// Ticks the attack active window lasts.
 pub const GAME_ENTITY_ATTACK_ACTIVE_TICKS: u16 = 6;
+
+/// Front-arc half-width for entity attacks, PSX angle units
+/// (60 degrees). The entity faced the player when it committed to
+/// its windup; a player who rolls past the body during the swing
+/// leaves this arc and the attack whiffs -- the souls punish loop.
+pub const GAME_ENTITY_ATTACK_HALF_ANGLE: u16 = 683;
 
 /// Ticks a poise break keeps the entity staggered.
 pub const GAME_ENTITY_STAGGER_TICKS: u16 = 45;
@@ -152,6 +162,12 @@ pub struct GameEntityTickInput<'a> {
     /// Player body radius, engine units (the player Character's
     /// capsule; the other half of Character-derived attack reach).
     pub player_radius: i32,
+    /// True while the player's motor action grants i-frames (roll /
+    /// backstep active invulnerability). Entity attacks resolve no
+    /// contact against an invulnerable player -- the swing stays
+    /// live, so i-framing only the first half of a window still eats
+    /// the tail (souls timing rules).
+    pub player_invulnerable: bool,
     /// Rooms currently in the active window (the portal-expanded
     /// set). Entities in other rooms and with no engaged behavior do
     /// not think this tick.
@@ -176,6 +192,42 @@ pub struct GameEntityTickStats {
     pub windup_enters: u16,
     /// Transitions INTO Attack this tick.
     pub attack_enters: u16,
+    /// Entity attacks that CONNECTED with the player this tick.
+    pub player_hits: u16,
+    /// Total damage those connections apply to the player this tick
+    /// (the owning game subtracts it from its player health).
+    pub player_damage: u16,
+}
+
+/// What one [`GameEntities::apply_hit`] did.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GameEntityHitOutcome {
+    /// The hit landed on a live entity.
+    pub connected: bool,
+    /// The hit broke poise (entity is now [`GameEntityState::Staggered`]).
+    pub staggered: bool,
+    /// The hit was lethal (entity is now [`GameEntityState::Dead`]).
+    pub died: bool,
+}
+
+impl GameEntityHitOutcome {
+    /// Out-of-range / already-dead target: nothing happened.
+    pub const MISS: Self = Self {
+        connected: false,
+        staggered: false,
+        died: false,
+    };
+}
+
+/// Aggregate outcome of one [`GameEntities::apply_melee_arc`] sweep.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MeleeArcStats {
+    /// Entities the sweep connected with.
+    pub hits: u16,
+    /// Connections that broke poise.
+    pub staggers: u16,
+    /// Connections that killed.
+    pub deaths: u16,
 }
 
 /// SoA runtime state for cooked game entities. Entity `i` mirrors
@@ -204,6 +256,9 @@ pub struct GameEntities<const MAX_ENTITIES: usize> {
     poise_damage: [u16; MAX_ENTITIES],
     /// Patrol leg: 0 = toward the patrol anchor, 1 = toward spawn.
     patrol_leg: [u8; MAX_ENTITIES],
+    /// 1 while the current Attack window already connected (one hit
+    /// per swing); cleared on entering Attack.
+    attack_hit: [u8; MAX_ENTITIES],
 }
 
 impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
@@ -222,6 +277,7 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         health: [0; MAX_ENTITIES],
         poise_damage: [0; MAX_ENTITIES],
         patrol_leg: [0; MAX_ENTITIES],
+        attack_hit: [0; MAX_ENTITIES],
     };
 
     /// Reset and spawn entity state 1:1 from the cooked records
@@ -300,19 +356,20 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
     /// Apply a hit to entity `index`: health damage plus poise
     /// damage. Health reaching zero kills; accumulated poise damage
     /// past the record's pool staggers (and the accumulator resets).
-    /// The combat-resolution slice routes weapon hits through here.
+    /// Combat resolution routes every player weapon hit through here
+    /// (usually via [`Self::apply_melee_arc`]).
     pub fn apply_hit(
         &mut self,
         records: &'static [LevelGameEntityRecord],
         index: usize,
         damage: u16,
         poise_damage: u16,
-    ) {
+    ) -> GameEntityHitOutcome {
         if index >= self.count() || index >= records.len() {
-            return;
+            return GameEntityHitOutcome::MISS;
         }
         if self.state(index) == GameEntityState::Dead {
-            return;
+            return GameEntityHitOutcome::MISS;
         }
         self.health[index] = self.health[index].saturating_sub(damage);
         if self.health[index] == 0 {
@@ -321,10 +378,15 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
                 GameEntityState::Dead,
                 &mut GameEntityTickStats::default(),
             );
-            return;
+            return GameEntityHitOutcome {
+                connected: true,
+                staggered: false,
+                died: true,
+            };
         }
         self.poise_damage[index] = self.poise_damage[index].saturating_add(poise_damage);
-        if self.poise_damage[index] > records[index].poise {
+        let staggered = self.poise_damage[index] > records[index].poise;
+        if staggered {
             self.poise_damage[index] = 0;
             self.enter_state(
                 index,
@@ -332,6 +394,56 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
                 &mut GameEntityTickStats::default(),
             );
         }
+        GameEntityHitOutcome {
+            connected: true,
+            staggered,
+            died: false,
+        }
+    }
+
+    /// Sweep the player's melee arc over the live entities: every
+    /// enemy in the arc's room whose hurtbox cylinder the arc reaches
+    /// (and whose bit in `already_hit` is clear) takes one
+    /// [`Self::apply_hit`], and its bit latches so one swing connects
+    /// at most once per enemy. `O(live entities)` with the
+    /// per-axis/squared early-outs of [`arc_hits_circle`]; the owning
+    /// game clears `already_hit` when a new swing starts. Bit `i`
+    /// tracks entity `i` (the [`psx_level::MAX_GAME_ENTITY_RECORDS`]
+    /// = 64 contract cap is exactly the u64 width).
+    pub fn apply_melee_arc(
+        &mut self,
+        records: &'static [LevelGameEntityRecord],
+        arc: &MeleeArc,
+        damage: u16,
+        poise_damage: u16,
+        already_hit: &mut u64,
+    ) -> MeleeArcStats {
+        const { assert!(MAX_ENTITIES <= 64, "swing mask is a u64") };
+        let mut stats = MeleeArcStats::default();
+        let count = self.count().min(records.len());
+        let mut entity = 0usize;
+        while entity < count {
+            let record = &records[entity];
+            let mask = 1u64 << entity;
+            let skip = *already_hit & mask != 0
+                || record.room != arc.room
+                || self.state(entity) == GameEntityState::Dead
+                || !arc_hits_circle(
+                    arc,
+                    self.x[entity],
+                    self.z[entity],
+                    i32::from(record.radius),
+                );
+            if !skip {
+                *already_hit |= mask;
+                let outcome = self.apply_hit(records, entity, damage, poise_damage);
+                stats.hits += u16::from(outcome.connected);
+                stats.staggers += u16::from(outcome.staggered);
+                stats.deaths += u16::from(outcome.died);
+            }
+            entity += 1;
+        }
+        stats
     }
 
     /// Advance every entity one 60 Hz tick. Thinking is gated on the
@@ -376,6 +488,7 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
                 }
                 GameEntityState::Attack => {
                     stats.attacking += 1;
+                    self.resolve_attack_contact(record, index, input, &mut stats);
                     if self.state_ticks[index] >= GAME_ENTITY_ATTACK_ACTIVE_TICKS {
                         self.enter_state(index, GameEntityState::Recover, &mut stats);
                     }
@@ -409,9 +522,51 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
             GameEntityState::Patrol => stats.patrol_enters += 1,
             GameEntityState::Aggro => stats.aggro_enters += 1,
             GameEntityState::Windup => stats.windup_enters += 1,
-            GameEntityState::Attack => stats.attack_enters += 1,
+            GameEntityState::Attack => {
+                stats.attack_enters += 1;
+                // A fresh swing gets one connection.
+                self.attack_hit[index] = 0;
+            }
             _ => {}
         }
+    }
+
+    /// One Attack-window contact test against the player: the same
+    /// Character-derived reach that committed the windup, gated to a
+    /// front arc around the facing the entity locked when it
+    /// committed. Connects at most once per swing, and never against
+    /// an i-framing player (see [`GameEntityTickInput::player_invulnerable`]).
+    fn resolve_attack_contact(
+        &mut self,
+        record: &LevelGameEntityRecord,
+        index: usize,
+        input: GameEntityTickInput<'_>,
+        stats: &mut GameEntityTickStats,
+    ) {
+        if self.attack_hit[index] != 0
+            || input.player_invulnerable
+            || input.player_room != record.room
+        {
+            return;
+        }
+        let arc = MeleeArc {
+            room: record.room,
+            x: self.x[index],
+            z: self.z[index],
+            yaw: self.yaw[index] as u16,
+            reach: Self::attack_reach(record, input),
+            half_angle: GAME_ENTITY_ATTACK_HALF_ANGLE,
+        };
+        // The player hurtbox center is the motor position; its radius
+        // is already inside `attack_reach` (radius + radius + margin),
+        // so the arc tests the CENTER (radius 0) to avoid counting the
+        // player capsule twice.
+        if !arc_hits_circle(&arc, input.player[0], input.player[2], 0) {
+            return;
+        }
+        self.attack_hit[index] = 1;
+        stats.player_hits += 1;
+        stats.player_damage = stats.player_damage.saturating_add(record.touch_damage);
     }
 
     fn player_within(&self, index: usize, input: GameEntityTickInput<'_>, radius: i32) -> bool {
@@ -659,6 +814,7 @@ mod tests {
             player: [100_000, 0, 100_000],
             player_room: RoomIndex(0),
             player_radius: 192,
+            player_invulnerable: false,
             active_rooms,
         }
     }
@@ -668,6 +824,7 @@ mod tests {
             player: [1200, 0, 1000],
             player_room: RoomIndex(0),
             player_radius: 192,
+            player_invulnerable: false,
             active_rooms,
         }
     }
@@ -814,6 +971,7 @@ mod tests {
             player: [1800, 0, 1000],
             player_room: RoomIndex(0),
             player_radius: 192,
+            player_invulnerable: false,
             active_rooms: &ACTIVE,
         };
         // Move the player into the 512 aggro radius first.
@@ -856,6 +1014,7 @@ mod tests {
             player: [1200, 0, 1000],
             player_room: RoomIndex(7),
             player_radius: 192,
+            player_invulnerable: false,
             active_rooms: rooms,
         };
         // Room 7 not active: gated, no thinking.
@@ -884,6 +1043,7 @@ mod tests {
             player: [1200, 0, 1000],
             player_room: RoomIndex(3),
             player_radius: 192,
+            player_invulnerable: false,
             active_rooms: &ACTIVE,
         };
         entities.tick(&IDLE_ENEMY, aliased, &mut NoClipMover);
@@ -895,18 +1055,187 @@ mod tests {
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&IDLE_ENEMY);
         // Poise pool is 50: 60 poise damage staggers.
-        entities.apply_hit(&IDLE_ENEMY, 0, 10, 60);
+        let outcome = entities.apply_hit(&IDLE_ENEMY, 0, 10, 60);
         assert_eq!(entities.state(0), GameEntityState::Staggered);
         assert_eq!(entities.health(0), 90);
+        assert!(outcome.connected && outcome.staggered && !outcome.died);
         // Stagger expires back into Aggro.
         for _ in 0..GAME_ENTITY_STAGGER_TICKS {
             entities.tick(&IDLE_ENEMY, far_input(&ACTIVE), &mut NoClipMover);
         }
         assert_eq!(entities.state(0), GameEntityState::Aggro);
         // Lethal damage kills; dead entities stop thinking.
-        entities.apply_hit(&IDLE_ENEMY, 0, 200, 0);
+        let outcome = entities.apply_hit(&IDLE_ENEMY, 0, 200, 0);
+        assert!(outcome.connected && outcome.died);
         assert_eq!(entities.state(0), GameEntityState::Dead);
         let stats = entities.tick(&IDLE_ENEMY, near_input(&ACTIVE), &mut NoClipMover);
         assert_eq!(stats.thought, 0);
+        // A dead entity refuses further hits.
+        assert_eq!(
+            entities.apply_hit(&IDLE_ENEMY, 0, 10, 10),
+            GameEntityHitOutcome::MISS
+        );
+    }
+
+    /// Drive IDLE_ENEMY from spawn into its Attack window against the
+    /// near-input player (windup_ticks = 3): Idle -> Aggro -> Windup
+    /// -> 3 windup ticks -> Attack.
+    fn advance_into_attack(entities: &mut GameEntities<8>, input: GameEntityTickInput<'_>) {
+        for _ in 0..5 {
+            entities.tick(&IDLE_ENEMY, input, &mut NoClipMover);
+        }
+        assert_eq!(entities.state(0), GameEntityState::Attack);
+    }
+
+    #[test]
+    fn attack_window_damages_the_player_once_per_swing() {
+        let mut entities = GameEntities::<8>::EMPTY;
+        entities.spawn_from_records(&IDLE_ENEMY);
+        advance_into_attack(&mut entities, near_input(&ACTIVE));
+        // First active tick connects with the record's touch damage.
+        let stats = entities.tick(&IDLE_ENEMY, near_input(&ACTIVE), &mut NoClipMover);
+        assert_eq!(stats.player_hits, 1);
+        assert_eq!(stats.player_damage, IDLE_ENEMY[0].touch_damage);
+        // The rest of the window and the recovery stay dry: one
+        // swing, one connection. (The NEXT windup->attack loop may
+        // legitimately connect again, so only the dry span is
+        // walked.)
+        let mut later_damage = 0u16;
+        for _ in 0..8 {
+            later_damage += entities
+                .tick(&IDLE_ENEMY, near_input(&ACTIVE), &mut NoClipMover)
+                .player_damage;
+        }
+        assert_eq!(later_damage, 0);
+        assert_eq!(entities.state(0), GameEntityState::Recover);
+    }
+
+    #[test]
+    fn i_frames_whiff_the_swing_but_the_tail_still_bites() {
+        // Fully i-framed window: no contact at all.
+        let mut entities = GameEntities::<8>::EMPTY;
+        entities.spawn_from_records(&IDLE_ENEMY);
+        advance_into_attack(&mut entities, near_input(&ACTIVE));
+        let rolling = GameEntityTickInput {
+            player_invulnerable: true,
+            ..near_input(&ACTIVE)
+        };
+        let mut damage = 0u16;
+        for _ in 0..u16::from(GAME_ENTITY_ATTACK_ACTIVE_TICKS) {
+            damage += entities
+                .tick(&IDLE_ENEMY, rolling, &mut NoClipMover)
+                .player_damage;
+        }
+        assert_eq!(damage, 0);
+        assert_eq!(entities.state(0), GameEntityState::Recover);
+
+        // I-framing only the first half leaves the tail live: rolling
+        // too early still gets clipped (souls timing rules).
+        let mut entities = GameEntities::<8>::EMPTY;
+        entities.spawn_from_records(&IDLE_ENEMY);
+        advance_into_attack(&mut entities, near_input(&ACTIVE));
+        let early_roll = entities.tick(&IDLE_ENEMY, rolling, &mut NoClipMover);
+        assert_eq!(early_roll.player_hits, 0);
+        let tail = entities.tick(&IDLE_ENEMY, near_input(&ACTIVE), &mut NoClipMover);
+        assert_eq!(tail.player_hits, 1);
+    }
+
+    #[test]
+    fn attacks_whiff_behind_the_committed_facing() {
+        let mut entities = GameEntities::<8>::EMPTY;
+        entities.spawn_from_records(&IDLE_ENEMY);
+        // Commit the windup against a player at +X (facing locks to
+        // 1024)...
+        advance_into_attack(&mut entities, near_input(&ACTIVE));
+        // ...then the player rolls PAST the body to -X: same reach,
+        // outside the front arc, outside the point-blank ring.
+        let behind = GameEntityTickInput {
+            player: [800, 0, 1000],
+            ..near_input(&ACTIVE)
+        };
+        let mut damage = 0u16;
+        for _ in 0..u16::from(GAME_ENTITY_ATTACK_ACTIVE_TICKS) {
+            damage += entities
+                .tick(&IDLE_ENEMY, behind, &mut NoClipMover)
+                .player_damage;
+        }
+        assert_eq!(damage, 0);
+        assert_eq!(entities.state(0), GameEntityState::Recover);
+    }
+
+    #[test]
+    fn melee_arc_hits_once_per_swing_and_skips_dead_and_other_rooms() {
+        let mut entities = GameEntities::<8>::EMPTY;
+        entities.spawn_from_records(&IDLE_ENEMY);
+        // Player at (1200, 1000) facing -X: the enemy at (1000, 1000)
+        // sits dead ahead, 200 units out.
+        let arc = MeleeArc {
+            room: RoomIndex(0),
+            x: 1200,
+            z: 1000,
+            yaw: 3072,
+            reach: 640,
+            half_angle: 683,
+        };
+        let mut swing = 0u64;
+        // Swing 1: connects (poise 40 <= pool 50, no stagger)...
+        let stats = entities.apply_melee_arc(&IDLE_ENEMY, &arc, 30, 40, &mut swing);
+        assert_eq!(
+            stats,
+            MeleeArcStats {
+                hits: 1,
+                staggers: 0,
+                deaths: 0
+            }
+        );
+        assert_eq!(entities.health(0), 70);
+        // ...and the same swing never double-taps.
+        let stats = entities.apply_melee_arc(&IDLE_ENEMY, &arc, 30, 40, &mut swing);
+        assert_eq!(stats, MeleeArcStats::default());
+        // Swing 2: accumulated poise (40 + 40) breaks the 50 pool.
+        swing = 0;
+        let stats = entities.apply_melee_arc(&IDLE_ENEMY, &arc, 30, 40, &mut swing);
+        assert_eq!(stats.staggers, 1);
+        assert_eq!(entities.state(0), GameEntityState::Staggered);
+        // Swing 3 (health 40 - 30 = 10), swing 4 kills.
+        swing = 0;
+        entities.apply_melee_arc(&IDLE_ENEMY, &arc, 30, 40, &mut swing);
+        swing = 0;
+        let stats = entities.apply_melee_arc(&IDLE_ENEMY, &arc, 30, 40, &mut swing);
+        assert_eq!(stats.deaths, 1);
+        assert_eq!(entities.state(0), GameEntityState::Dead);
+        // Dead entities are no longer targets.
+        swing = 0;
+        let stats = entities.apply_melee_arc(&IDLE_ENEMY, &arc, 30, 40, &mut swing);
+        assert_eq!(stats, MeleeArcStats::default());
+
+        // Wrong-room arcs never connect (cooked positions are
+        // room-local; a same-coordinate player in another room is an
+        // alias, not a neighbor).
+        entities.spawn_from_records(&IDLE_ENEMY);
+        swing = 0;
+        let wrong_room = MeleeArc {
+            room: RoomIndex(2),
+            ..arc
+        };
+        let stats = entities.apply_melee_arc(&IDLE_ENEMY, &wrong_room, 30, 40, &mut swing);
+        assert_eq!(stats, MeleeArcStats::default());
+        assert_eq!(entities.health(0), 100);
+
+        // Facing away whiffs once the target is outside the
+        // point-blank ring: from 600 units out (ring is 192 + 64),
+        // facing +X misses the enemy at -X, facing -X connects.
+        swing = 0;
+        let away = MeleeArc {
+            x: 1600,
+            yaw: 1024,
+            ..arc
+        };
+        let stats = entities.apply_melee_arc(&IDLE_ENEMY, &away, 30, 40, &mut swing);
+        assert_eq!(stats, MeleeArcStats::default());
+        swing = 0;
+        let toward = MeleeArc { yaw: 3072, ..away };
+        let stats = entities.apply_melee_arc(&IDLE_ENEMY, &toward, 30, 40, &mut swing);
+        assert_eq!(stats.hits, 1);
     }
 }

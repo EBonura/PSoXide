@@ -1185,6 +1185,8 @@ impl Scene for Playtest {
                 hud_count,
                 &font_table,
                 (overlay_tick.as_u32() & 0xffff) as u16,
+                self.player_health,
+                self.player_health_max,
                 self.motor.stamina_q12(),
                 self.motor_config().stamina_max_q12,
             );

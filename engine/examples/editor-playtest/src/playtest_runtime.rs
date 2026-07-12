@@ -15,6 +15,10 @@ impl Playtest {
         }
         self.anim_state = anim;
         self.anim_start_tick = now;
+        if player_anim_is_attack(anim) {
+            // A fresh swing gets a fresh one-hit-per-enemy mask.
+            self.swing_hit_mask = 0;
+        }
         true
     }
 
@@ -86,9 +90,16 @@ impl Playtest {
             // An instance bound to a game entity blocks at the
             // entity's LIVE position (phase 3): the player collides
             // with the enemy where it stands, not its spawn point.
+            // Dead entities stop blocking (souls corpses are not
+            // walls).
             let inst_index = index.min(u16::MAX as usize) as u16;
             let center = match game_entity_for_instance(inst_index) {
                 Some(entity) => {
+                    if self.game_entities.state(entity)
+                        == psx_game_runtime::entities::GameEntityState::Dead
+                    {
+                        continue;
+                    }
                     let live = self.game_entities.position(entity);
                     RoomPoint::new(live[0], live[1], live[2])
                 }
