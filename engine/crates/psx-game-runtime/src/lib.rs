@@ -27,6 +27,7 @@ pub mod room_lighting;
 pub mod room_streaming;
 pub mod room_visibility;
 pub mod room_window;
+pub mod save;
 pub mod schedule;
 pub mod sky;
 pub mod vram;
