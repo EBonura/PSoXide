@@ -114,6 +114,7 @@ impl SaveBlock {
         if version != SAVE_VERSION {
             return None;
         }
+        // psx-numeric-allow-next-line: FNV-1a-64 checksum decode; xor/mul via compiler builtins at save/load only
         let checksum = u64::from_le_bytes([
             buf[120], buf[121], buf[122], buf[123], buf[124], buf[125], buf[126], buf[127],
         ]);
