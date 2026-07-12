@@ -705,6 +705,18 @@ impl CharacterMotorState {
         self.action
     }
 
+    /// True while the current fixed action grants invulnerability
+    /// (the souls i-frame window: `roll_invulnerable_frames` /
+    /// `backstep_invulnerable_frames` display frames from action
+    /// start). Queried BEFORE this tick's motor update it reports
+    /// exactly the invulnerability the update will apply, so combat
+    /// resolution that runs earlier in the tick agrees with the
+    /// motor's own frame result. Idle is never invulnerable.
+    pub fn is_action_invulnerable(&self, config: CharacterMotorConfig) -> bool {
+        let profile = ActionProfile::for_action(self.action, normalize_config(config));
+        self.action_frame < profile.invulnerable_frames
+    }
+
     fn try_start_evade(&mut self, input: CharacterMotorInput, config: CharacterMotorConfig) {
         let analog = analog_move_vector(input);
         if let Some((move_x, move_z, _)) = analog {
@@ -2571,6 +2583,37 @@ mod tests {
         assert_eq!(frame.anim, CharacterMotorAnim::Roll);
         assert!(frame.invulnerable);
         assert_eq!(frame.position, RoomPoint::new(0, 0, 96));
+    }
+
+    #[test]
+    fn is_action_invulnerable_tracks_the_roll_i_frame_window() {
+        let mut motor = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO);
+        let mut cfg = config();
+        cfg.roll_active_frames = 4;
+        cfg.roll_recovery_frames = 4;
+        cfg.roll_invulnerable_frames = 3;
+
+        // Idle: never invulnerable.
+        assert!(!motor.is_action_invulnerable(cfg));
+
+        let evade = CharacterMotorInput {
+            walk: 1,
+            evade: true,
+            ..CharacterMotorInput::default()
+        };
+        // Start the roll. Queried between ticks, the accessor reports
+        // the invulnerability the NEXT update will apply, so it must
+        // agree with that update's frame result for the whole action.
+        let frame = motor.update(None, evade, cfg);
+        assert!(frame.invulnerable);
+        for _ in 0..8 {
+            let expected = motor.is_action_invulnerable(cfg);
+            let frame = motor.update(None, CharacterMotorInput::default(), cfg);
+            assert_eq!(frame.invulnerable, expected);
+        }
+        // Action finished: back to never-invulnerable.
+        assert_eq!(motor.action(), CharacterMotorAction::Idle);
+        assert!(!motor.is_action_invulnerable(cfg));
     }
 
     #[test]

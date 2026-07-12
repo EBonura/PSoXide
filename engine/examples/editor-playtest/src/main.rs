@@ -309,6 +309,17 @@ struct Playtest {
     /// Rolling fired total already reported to telemetry, so the
     /// LOGIC_RECORDS_FIRED counter emits per-tick deltas.
     logic_fired_reported: u16,
+    /// Player health (phase-3 combat slice). Stamped to
+    /// `PLAYER_MAX_HEALTH` at gameplay init; entity attack
+    /// connections subtract from it; floors at 0 (death/respawn is
+    /// phase 4).
+    player_health: u16,
+    /// See [`Self::player_health`].
+    player_health_max: u16,
+    /// Entities already hit by the CURRENT player swing (bit i =
+    /// entity i): one swing connects at most once per enemy. Cleared
+    /// when an attack action starts.
+    swing_hit_mask: u64,
     /// Circle is shared by tap-evade and hold-sprint. We delay
     /// either decision for a few simulation ticks: release before
     /// the threshold becomes evade; holding past it becomes sprint.

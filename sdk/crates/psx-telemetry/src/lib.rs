@@ -616,15 +616,25 @@ pub mod counter {
     /// Game-entity transitions INTO Windup since spawn.
     pub const GAME_ENTITY_WINDUP_ENTERS: u16 = 227;
     /// Game-entity transitions INTO Attack since spawn (the souls
-    /// commit; contact resolution is the combat slice).
+    /// commit; contact resolves through the combat counters below).
     pub const GAME_ENTITY_ATTACK_ENTERS: u16 = 228;
     /// Logic records fired since init (LogicRuntime rolling total).
     pub const LOGIC_RECORDS_FIRED: u16 = 229;
+    /// Game-entity poise breaks (transitions INTO Staggered) from
+    /// player hits (phase-3 combat slice).
+    pub const GAME_ENTITY_STAGGER_ENTERS: u16 = 230;
+    /// Game-entity deaths from player hits.
+    pub const GAME_ENTITY_DEATHS: u16 = 231;
+    /// Player melee-arc swings that connected with an entity.
+    pub const PLAYER_MELEE_HITS: u16 = 232;
+    /// Entity attacks that connected with the player (i-framed and
+    /// out-of-arc swings whiff and do not count).
+    pub const PLAYER_HITS_TAKEN: u16 = 233;
 }
 
 /// Number of counter slots, including index zero for unknown/reserved ids.
 /// Must stay larger than the highest counter id emitted by the guest; a
 /// counter id >= this is silently dropped.
-pub const COUNTER_COUNT: usize = 230;
+pub const COUNTER_COUNT: usize = 234;
 
-const _: () = assert!(counter::LOGIC_RECORDS_FIRED as usize == COUNTER_COUNT - 1);
+const _: () = assert!(counter::PLAYER_HITS_TAKEN as usize == COUNTER_COUNT - 1);
