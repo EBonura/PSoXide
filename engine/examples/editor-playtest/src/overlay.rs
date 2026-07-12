@@ -20,17 +20,28 @@ const STAMINA_BAR_W: i16 = 96;
 const STAMINA_BAR_H: i16 = 5;
 const HUD_BAR_GAP: i16 = 5;
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_player_hud(
     nodes: &[LevelUiNodeRecord],
     hud_first: usize,
     hud_count: usize,
     fonts: &[Option<&FontAtlas>],
     frame: u16,
+    health: u16,
+    health_max: u16,
     stamina_q12: i32,
     stamina_max_q12: i32,
 ) {
+    // Real player HP (the combat slice) scaled onto the HUD's Q12
+    // bar convention; a zero max (pre-init) reads as a full bar so
+    // hand-rolled manifests keep their old look.
+    let health_q12 = if health_max == 0 {
+        PLAYER_HEALTH_MAX_Q12
+    } else {
+        (i32::from(health) * PLAYER_HEALTH_MAX_Q12) / i32::from(health_max)
+    };
     if nodes.is_empty() || hud_count == 0 {
-        draw_legacy_player_hud(stamina_q12, stamina_max_q12);
+        draw_legacy_player_hud(health_q12, stamina_q12, stamina_max_q12);
         return;
     }
 
@@ -56,7 +67,7 @@ pub(crate) fn draw_player_hud(
         match binding {
             LevelUiValueBinding::ConstantQ12(value) => value,
             LevelUiValueBinding::Option(_) => 0,
-            LevelUiValueBinding::PlayerHealth => PLAYER_HEALTH_MAX_Q12,
+            LevelUiValueBinding::PlayerHealth => health_q12,
             LevelUiValueBinding::PlayerHealthMax => PLAYER_HEALTH_MAX_Q12,
             LevelUiValueBinding::PlayerStamina => stamina_q12,
             LevelUiValueBinding::PlayerStaminaMax => stamina_max_q12,
@@ -87,13 +98,13 @@ pub(crate) fn draw_player_hud(
     );
 }
 
-fn draw_legacy_player_hud(stamina_q12: i32, stamina_max_q12: i32) {
+fn draw_legacy_player_hud(health_q12: i32, stamina_q12: i32, stamina_max_q12: i32) {
     draw_status_bar(
         HUD_X,
         HUD_Y,
         HEALTH_BAR_W,
         HEALTH_BAR_H,
-        PLAYER_HEALTH_MAX_Q12,
+        health_q12,
         PLAYER_HEALTH_MAX_Q12,
         (94, 16, 24),
         (30, 26, 28),

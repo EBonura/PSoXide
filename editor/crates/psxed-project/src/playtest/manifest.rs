@@ -1243,7 +1243,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             .unwrap_or_else(|| "None".to_string());
         let _ = writeln!(
             out,
-            "    LevelWeaponRecord {{ name: {:?}, model: {model}, default_character_socket: {:?}, grip_name: {:?}, grip_translation: [{}, {}, {}], grip_rotation_q12: [{}, {}, {}], hitbox_first: WeaponHitboxIndex({}), hitbox_count: {}, flags: 0 }},",
+            "    LevelWeaponRecord {{ name: {:?}, model: {model}, default_character_socket: {:?}, grip_name: {:?}, grip_translation: [{}, {}, {}], grip_rotation_q12: [{}, {}, {}], hitbox_first: WeaponHitboxIndex({}), hitbox_count: {}, arc_reach: {}, arc_half_angle: {}, damage: {}, poise_damage: {}, flags: 0 }},",
             weapon.name,
             weapon.default_character_socket,
             weapon.grip_name,
@@ -1255,6 +1255,10 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             weapon.grip_rotation_q12[2],
             weapon.hitbox_first,
             weapon.hitbox_count,
+            weapon.arc_reach,
+            weapon.arc_half_angle,
+            weapon.damage,
+            weapon.poise_damage,
         );
     }
     out.push_str("];\n\n");

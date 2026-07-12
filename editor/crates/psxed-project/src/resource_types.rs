@@ -849,8 +849,13 @@ impl Default for WeaponHitbox {
     }
 }
 
-/// Gameplay weapon resource: model reference, grip/pivot, and
-/// authored attack hit volumes.
+/// Gameplay weapon resource: model reference, grip/pivot, authored
+/// attack hit volumes, and the melee-arc combat numbers (the phase-3
+/// combat contract: update-band hit resolution sweeps a flat arc in
+/// front of the wielder; the grip-local hitboxes stay a render/debug
+/// aid whose frame windows double as the attack's active window).
+/// The arc fields are serde-defaulted to sane sword numbers so every
+/// existing weapon RON loads (and fights) unchanged.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WeaponResource {
     /// Visual model used for the weapon. `None` is allowed during
@@ -866,6 +871,21 @@ pub struct WeaponResource {
     /// Hit volumes authored relative to [`Self::grip`].
     #[serde(default)]
     pub hitboxes: Vec<WeaponHitbox>,
+    /// Melee arc reach from the wielder's origin, engine units.
+    /// The cook rejects 0.
+    #[serde(default = "default_weapon_arc_reach")]
+    pub arc_reach: u16,
+    /// Melee arc half-width to each side of the facing, degrees.
+    /// The cook rejects 0 and anything past 170.
+    #[serde(default = "default_weapon_arc_half_angle_degrees")]
+    pub arc_half_angle_degrees: u16,
+    /// Damage one light-attack connection applies. The cook rejects 0.
+    #[serde(default = "default_weapon_damage")]
+    pub damage: u16,
+    /// Poise damage one light-attack connection applies (0 = never
+    /// staggers).
+    #[serde(default = "default_weapon_poise_damage")]
+    pub poise_damage: u16,
 }
 
 impl WeaponResource {
@@ -876,8 +896,28 @@ impl WeaponResource {
             default_character_socket: default_character_socket(),
             grip: WeaponGrip::default(),
             hitboxes: vec![WeaponHitbox::default()],
+            arc_reach: default_weapon_arc_reach(),
+            arc_half_angle_degrees: default_weapon_arc_half_angle_degrees(),
+            damage: default_weapon_damage(),
+            poise_damage: default_weapon_poise_damage(),
         }
     }
+}
+
+pub(crate) const fn default_weapon_arc_reach() -> u16 {
+    640
+}
+
+pub(crate) const fn default_weapon_arc_half_angle_degrees() -> u16 {
+    60
+}
+
+pub(crate) const fn default_weapon_damage() -> u16 {
+    25
+}
+
+pub(crate) const fn default_weapon_poise_damage() -> u16 {
+    25
 }
 
 impl Default for WeaponResource {

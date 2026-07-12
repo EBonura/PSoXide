@@ -230,6 +230,7 @@ fn weapon_attachment_summary_reports_socket_and_reach() {
             active_start_frame: 4,
             active_end_frame: 12,
         }],
+        ..psxed_project::WeaponResource::default()
     };
 
     let summary = weapon_attachment_summary(&weapon, &["right_hand_grip".to_string()]);

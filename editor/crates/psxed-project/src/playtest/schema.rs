@@ -1144,6 +1144,15 @@ pub struct PlaytestWeapon {
     pub hitbox_first: u16,
     /// Number of hitboxes.
     pub hitbox_count: u16,
+    /// Melee arc reach from the wielder's origin, engine units.
+    pub arc_reach: u16,
+    /// Melee arc half-width, PSX angle units (cooked from authored
+    /// degrees: `deg * 4096 / 360`).
+    pub arc_half_angle: u16,
+    /// Damage per light-attack connection.
+    pub damage: u16,
+    /// Poise damage per light-attack connection.
+    pub poise_damage: u16,
 }
 
 /// Cooked Equipment component on an Entity.
