@@ -71,7 +71,7 @@ impl Playtest {
         out: &mut [CharacterCollisionCylinder; MAX_MODEL_INSTANCES],
     ) -> usize {
         let mut count = 0usize;
-        for inst in MODEL_INSTANCES {
+        for (index, inst) in MODEL_INSTANCES.iter().enumerate() {
             if inst.room != self.room_index || count >= out.len() {
                 continue;
             }
@@ -83,11 +83,18 @@ impl Playtest {
             if radius <= 0 {
                 continue;
             }
-            out[count] = CharacterCollisionCylinder::new(
-                RoomPoint::new(inst.x, inst.y, inst.z),
-                radius,
-                height,
-            );
+            // An instance bound to a game entity blocks at the
+            // entity's LIVE position (phase 3): the player collides
+            // with the enemy where it stands, not its spawn point.
+            let inst_index = index.min(u16::MAX as usize) as u16;
+            let center = match game_entity_for_instance(inst_index) {
+                Some(entity) => {
+                    let live = self.game_entities.position(entity);
+                    RoomPoint::new(live[0], live[1], live[2])
+                }
+                None => RoomPoint::new(inst.x, inst.y, inst.z),
+            };
+            out[count] = CharacterCollisionCylinder::new(center, radius, height);
             count += 1;
         }
         count
@@ -534,12 +541,35 @@ impl Playtest {
         best
     }
 
-    pub(super) fn activate_interactable(&mut self, index: usize) -> bool {
+    /// Interact-prompt activation, migrated onto the LOGIC event
+    /// graph (phase 3): the cook pairs every interactable with a
+    /// logic record 1:1, so the prompt fires that record and the
+    /// terminal effect (message overlay / checkpoint) runs through
+    /// `dispatch_logic_effects` -- one dispatch path whether the
+    /// record fired from a prompt, a trigger volume, or a relay
+    /// chain. A record the runtime refuses (removed by a killtarget,
+    /// gated by an unsatisfied master, waiting out its re-arm)
+    /// refuses the interaction. The legacy direct path remains only
+    /// for hand-rolled manifests whose interactables carry no paired
+    /// record.
+    pub(super) fn activate_interactable(&mut self, index: usize, now: u32) -> bool {
         let Some(interactable) = INTERACTABLES.get(index) else {
             return false;
         };
         if !interactable_is_active(interactable) {
             return false;
+        }
+        if interactable.logic != psx_level::INTERACTABLE_LOGIC_NONE {
+            let fired = self.logic.fire_index(
+                LOGIC,
+                usize::from(interactable.logic),
+                psx_game_runtime::logic::use_type::TOGGLE,
+                now,
+            );
+            if fired {
+                self.dispatch_logic_effects();
+            }
+            return fired;
         }
         match interactable.kind {
             InteractableKind::Message => {

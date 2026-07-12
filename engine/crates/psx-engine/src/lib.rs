@@ -79,9 +79,9 @@ pub mod world_render;
 pub use angle::Angle;
 pub use app::{App, Config, VisualPacing};
 pub use character_motor::{
-    CharacterCollision, CharacterCollisionAabb, CharacterCollisionCylinder, CharacterCollisionRoom,
-    CharacterMotorAction, CharacterMotorAnim, CharacterMotorConfig, CharacterMotorFrame,
-    CharacterMotorInput, CharacterMotorState,
+    commit_body_step, BodyStep, CharacterCollision, CharacterCollisionAabb,
+    CharacterCollisionCylinder, CharacterCollisionRoom, CharacterMotorAction, CharacterMotorAnim,
+    CharacterMotorConfig, CharacterMotorFrame, CharacterMotorInput, CharacterMotorState,
 };
 pub use fixed::{Q12, Q8};
 pub use frames::{Frames, SimTick, Ticks, VideoHz, VisualFrame};

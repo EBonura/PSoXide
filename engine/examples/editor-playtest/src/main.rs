@@ -110,6 +110,7 @@ mod box_props;
 use psx_game_runtime::cd_stream;
 mod character_runtime;
 mod debug_runtime;
+mod game_logic_runtime;
 mod image_props_runtime;
 mod input;
 mod marker_runtime;
@@ -133,6 +134,7 @@ use active_room_streaming::*;
 use box_props::*;
 use character_runtime::*;
 use debug_runtime::*;
+use game_logic_runtime::*;
 use image_props_runtime::*;
 use input::*;
 use marker_runtime::*;
@@ -304,6 +306,9 @@ struct Playtest {
     /// Logic-entity runtime (delay queue, master gating, fan-out)
     /// over the cooked `LOGIC` records (phase 3).
     logic: RuntimeLogic,
+    /// Rolling fired total already reported to telemetry, so the
+    /// LOGIC_RECORDS_FIRED counter emits per-tick deltas.
+    logic_fired_reported: u16,
     /// Circle is shared by tap-evade and hold-sprint. We delay
     /// either decision for a few simulation ticks: release before
     /// the threshold becomes evade; holding past it becomes sprint.
@@ -450,6 +455,7 @@ impl Playtest {
             box_props: RuntimeBoxProps::EMPTY,
             game_entities: RuntimeGameEntities::EMPTY,
             logic: RuntimeLogic::EMPTY,
+            logic_fired_reported: 0,
             evade_run_hold_ticks: 0,
             evade_run_hold_consumed: false,
             free_orbit: false,

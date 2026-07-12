@@ -1273,6 +1273,9 @@ pub struct PlaytestInteractable {
     /// Index into [`PlaytestPackage::interactable_messages`], or
     /// [`psx_level::INTERACTABLE_MESSAGE_NONE`].
     pub message: u16,
+    /// Index of the paired record in [`PlaytestPackage::logic`] (the
+    /// cook emits both from one authored component).
+    pub logic: u16,
     /// Stable authored checkpoint id. Empty for message-only records.
     pub checkpoint_id: String,
     /// Runtime flags from [`psx_level::interactable_flags`].
@@ -1347,6 +1350,14 @@ pub struct PlaytestGameEntity {
     pub z: i32,
     /// Spawn yaw, PSX angle units.
     pub yaw: i16,
+    /// Body cylinder radius, engine units (Character-bound).
+    pub radius: u16,
+    /// Body cylinder height, engine units (Character-bound).
+    pub height: u16,
+    /// Patrol speed, engine units per 60 Hz tick (Character walk).
+    pub walk_speed: i32,
+    /// Chase speed, engine units per 60 Hz tick (Character run).
+    pub run_speed: i32,
     /// Patrol anchor one, room-local (== spawn when unauthored).
     pub patrol: [i32; 3],
     /// 60 Hz ticks idled at a reached patrol anchor.

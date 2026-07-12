@@ -40,6 +40,35 @@ pub enum ModelInstanceDepthPass {
     InFrontOfPlayer(i32),
 }
 
+/// Live pose override for one cooked model instance: a game entity
+/// bound to an instance renders at the entity runtime's position and
+/// facing instead of the cooked spawn transform (phase 3 of
+/// docs/game-runtime-plan.md). The owning game rebuilds the (tiny)
+/// list each frame from its `GameEntities` state.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct ModelInstancePoseOverride {
+    /// Index into the cooked `MODEL_INSTANCES` table.
+    pub instance: u16,
+    /// Live position, room-local engine units (floor anchor).
+    pub x: i32,
+    /// Y.
+    pub y: i32,
+    /// Z.
+    pub z: i32,
+    /// Live facing yaw, PSX angle units.
+    pub yaw: i16,
+}
+
+/// Look up the pose override for instance `index`, if any (linear
+/// scan; the list is at most the awake-entity count).
+fn pose_override_for(
+    overrides: &[ModelInstancePoseOverride],
+    index: usize,
+) -> Option<ModelInstancePoseOverride> {
+    let index = u16::try_from(index).ok()?;
+    overrides.iter().copied().find(|o| o.instance == index)
+}
+
 impl ModelInstanceDepthPass {
     fn includes(self, depth: i32) -> bool {
         match self {
@@ -74,23 +103,28 @@ pub fn draw_model_instance_shadows<const MAX_RUNTIME_MODELS: usize, const OT_DEP
     options: WorldSurfaceOptions,
     material: TextureMaterial,
     models: &[Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
+    pose_overrides: &[ModelInstancePoseOverride],
     triangles: &mut impl PrimitiveSink<TriTextured>,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) {
     let mut drawn = 0usize;
-    for inst in tables.model_instances {
+    for (index, inst) in tables.model_instances.iter().enumerate() {
         if inst.room != current_room || drawn >= knobs.max_model_instances {
             continue;
         }
         let Some(runtime_model) = models.get(inst.model.to_usize()).copied().flatten() else {
             continue;
         };
+        let (x, y, z) = match pose_override_for(pose_overrides, index) {
+            Some(live) => (live.x, live.y, live.z),
+            None => (inst.x, inst.y, inst.z),
+        };
 
         draw_actor_shadow(
             shadow,
-            inst.x,
-            inst.y,
-            inst.z,
+            x,
+            y,
+            z,
             actor_shadow_radius(shadow, i32::from(runtime_model.collision_radius)),
             camera,
             options,
@@ -249,18 +283,24 @@ pub fn draw_model_instances<
     model_parts: &[ModelPart],
     model_vertices: &[ModelVertex],
     clips: &[Option<Animation<'static>>; MAX_RUNTIME_MODEL_CLIPS],
+    pose_overrides: &[ModelInstancePoseOverride],
     depth_pass: ModelInstanceDepthPass,
     triangles: &mut impl PrimitiveSink<TriTextured>,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) -> ModelInstanceDrawStats {
     let mut drawn = 0usize;
     let mut out = ModelInstanceDrawStats::default();
-    for inst in tables.model_instances {
+    for (instance_index, inst) in tables.model_instances.iter().enumerate() {
         if inst.room != current_room || drawn >= knobs.max_model_instances {
             continue;
         }
         let Some(runtime_model) = models.get(inst.model.to_usize()).copied().flatten() else {
             continue;
+        };
+        let live = pose_override_for(pose_overrides, instance_index);
+        let (inst_x, inst_y, inst_z, inst_yaw) = match live {
+            Some(live) => (live.x, live.y, live.z, live.yaw),
+            None => (inst.x, inst.y, inst.z, inst.yaw),
         };
 
         // Clip resolution: per-instance override → model default.
@@ -285,12 +325,13 @@ pub fn draw_model_instances<
         let pose_translation =
             model_pose_anchor_translation(anim, phase, clip_anchor, reference_anchor, None);
 
-        // Instance rotation from the authored transform. The entity
-        // yaw and the renderer's visual yaw share the Y axis; pitch
-        // and roll come from the entity transform and compose as
-        // `Rz(roll) * Ry(yaw) * Rx(pitch)` (the socket convention).
-        // The yaw-only case keeps the cheaper single-axis build.
-        let root_yaw = Angle::from_q12(inst.yaw as u16);
+        // Instance rotation from the authored transform (or the live
+        // entity pose). The entity yaw and the renderer's visual yaw
+        // share the Y axis; pitch and roll come from the entity
+        // transform and compose as `Rz(roll) * Ry(yaw) * Rx(pitch)`
+        // (the socket convention). The yaw-only case keeps the
+        // cheaper single-axis build.
+        let root_yaw = Angle::from_q12(inst_yaw as u16);
         let combined_yaw = root_yaw.add_signed_q12(inst.visual_yaw);
         let model_rotation = if inst.pitch == 0 && inst.roll == 0 {
             yaw_rotation_matrix(combined_yaw)
@@ -300,9 +341,9 @@ pub fn draw_model_instances<
         // Authored instance positions are floor anchors; cooked
         // model vertices are centred around their bounds.
         let origin = visual_model_origin(
-            inst.x,
-            inst.y,
-            inst.z,
+            inst_x,
+            inst_y,
+            inst_z,
             runtime_model.world_height,
             inst.visual_offset,
             inst.visual_scale_q8,
