@@ -103,6 +103,7 @@ dependencies = [
  "psx-engine",
  "psx-font",
  "psx-gpu",
+ "psx-hw",
  "psx-io",
  "psx-level",
  "psx-math",
