@@ -62,8 +62,11 @@ pub struct RoomWindow<const MAX_ACTIVE_ROOMS: usize> {
 }
 
 impl<const MAX_ACTIVE_ROOMS: usize> RoomWindow<MAX_ACTIVE_ROOMS> {
-    /// Zeroed state; `const` so the game can keep it in link-time
-    /// zero-initialized storage.
+    /// Empty boot state. NOT all-zero bytes: `job.requested_rooms` holds
+    /// `INVALID_ROOM_INDEX` sentinels, and the `Option` room slots niche
+    /// their `None` into a payload byte, so a game keeping this state in
+    /// link-time-zero (`.bss`) storage must stamp it at boot instead of
+    /// storing this `const` directly (every field is `pub`).
     pub const EMPTY: Self = Self {
         rooms: [const { None }; MAX_ACTIVE_ROOMS],
         job: ActiveRoomWindowJob::EMPTY,

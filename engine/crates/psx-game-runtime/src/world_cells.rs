@@ -196,13 +196,27 @@ impl<
     >
     VisibleCellSelector<MAX_ACTIVE_ROOMS, MAX_ACTIVE_VISIBLE_CELLS, MAX_PRECOMPUTED_VISIBLE_CELLS>
 {
-    /// Empty state; `const` so the game can keep it in link-time
-    /// zero-initialized storage.
+    /// Empty boot state. NOT all-zero bytes: the shared cell pool is
+    /// filled with `GridVisibleCell::EMPTY` sentinel slots (unknown
+    /// cache-cell index / camera depth), so a game keeping this state in
+    /// link-time-zero (`.bss`) storage must stamp it at boot via
+    /// [`Self::init`] instead of storing this `const` directly.
     pub const EMPTY: Self = Self {
         caches: [const { ActiveVisibleCellCache::EMPTY }; MAX_ACTIVE_ROOMS],
         cells: [GridVisibleCell::EMPTY; MAX_ACTIVE_VISIBLE_CELLS],
         cursor: 0,
     };
+
+    /// Stamp the non-zero pieces of [`Self::EMPTY`] (the sentinel-filled
+    /// cell pool) onto link-time-zero storage, element by element so no
+    /// whole-struct temporary is built. Equivalent to `*self =
+    /// Self::EMPTY` over zeroed storage.
+    pub fn init(&mut self) {
+        self.clear();
+        for cell in self.cells.iter_mut() {
+            *cell = GridVisibleCell::EMPTY;
+        }
+    }
 
     /// Invalidate every per-slot cache and reset the shared pool.
     pub fn clear(&mut self) {
