@@ -427,102 +427,115 @@ struct Playtest {
 }
 
 impl Playtest {
-    const fn new() -> Self {
-        Self {
-            room: None,
-            current_collision_room: None,
-            current_ambient_rgb: [0x80, 0x80, 0x80],
-            window: RuntimeRoomWindow::EMPTY,
-            visibility: RuntimeRoomVisibility::EMPTY,
-            portal_stream_priority_current: 0,
-            portal_stream_priority_visible: 0,
-            portal_stream_priority_frontier: 0,
-            #[cfg(all(
-                feature = "world-grid-visible",
-                not(feature = "vis-full-active-chunks")
-            ))]
-            visible_cells: RuntimeVisibleCellSelector::EMPTY,
-            room_index: RoomIndex::ZERO,
-            resident_desired: [INVALID_ROOM_INDEX; STREAMED_ROOM_SLOT_COUNT],
-            resident_desired_count: 0,
-            materials: [room_material_fallback(); MAX_ROOM_MATERIALS],
-            material_count: 0,
-            motor: CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO),
-            character: None,
-            anim_state: PlayerAnim::Idle,
-            anim_start_tick: SimTick::ZERO,
-            anim_lock_until_tick: SimTick::ZERO,
-            box_props: RuntimeBoxProps::EMPTY,
-            game_entities: RuntimeGameEntities::EMPTY,
-            logic: RuntimeLogic::EMPTY,
-            logic_fired_reported: 0,
-            evade_run_hold_ticks: 0,
-            evade_run_hold_consumed: false,
-            free_orbit: false,
-            orbit_yaw: CAMERA_START_YAW,
-            orbit_radius: CAMERA_START_RADIUS,
-            camera: ThirdPersonCameraState::new(CAMERA_START_YAW),
-            render_camera: WorldCamera::from_basis(
-                PROJECTION,
-                WorldVertex::ZERO,
-                Q12::ZERO,
-                Q12::ONE,
-                Q12::ZERO,
-                Q12::ONE,
-            ),
-            overlay_camera: WorldCamera::from_basis(
-                PROJECTION,
-                WorldVertex::ZERO,
-                Q12::ZERO,
-                Q12::ONE,
-                Q12::ZERO,
-                Q12::ONE,
-            ),
-            overlay_sim_tick: SimTick::ZERO,
-            gameplay_epoch: SimTick::ZERO,
-            gameplay_epoch_set: false,
-            fps_window_start: 0,
-            fps_window_frames: 0,
-            fps_last_tick: 0,
-            fps_worst_gap: 0,
-            fps_display: 0,
-            fps_display_worst: 0,
-            camera_collision_rooms: [const { CharacterCollisionRoom::EMPTY }; MAX_COLLISION_ROOMS],
-            camera_collision_room_count: 0,
-            camera_rooms_key: (
-                INVALID_ROOM_INDEX,
-                i32::MIN,
-                i32::MIN,
-                RuntimeDebugMask::EMPTY,
-                RuntimeDebugMask::EMPTY,
-            ),
-            player_moved_last_tick: false,
-            camera_turning_last_tick: false,
-            lock_target: None,
-            lock_switch_stick_held: false,
-            soft_lock_target: None,
-            soft_lock_suppressed: false,
-            active_interactable: None,
-            checkpoint: None,
-            message_overlay: None,
-            spawn: RoomPoint::ZERO,
-            ui_fonts: [const { None }; MAX_RUNTIME_UI_FONTS],
-            models: [const { None }; MAX_RUNTIME_MODELS],
-            model_faces: [TexturedModelRenderFace::ZERO; MAX_RUNTIME_MODEL_FACES],
-            model_face_count: 0,
-            model_parts: [ModelPart::ZERO; MAX_RUNTIME_MODEL_PARTS],
-            model_part_count: 0,
-            model_vertices: [ModelVertex::ZERO; MAX_RUNTIME_MODEL_DECODED_VERTICES],
-            model_vertex_count: 0,
-            clips: [const { None }; MAX_RUNTIME_MODEL_CLIPS],
-            shadow_material: None,
-            particle_material: None,
-            show_collision_debug: false,
-            streaming_jobs: RuntimeStreamingJobs::new(),
-            post_cross_debug_frames: 0,
-            portal_debug_log_cooldown: 0,
-            room_materials_unresolved: true,
+    /// Make the zeroed `SCENE` storage a valid `Playtest`, then stamp the
+    /// boot-time initial state (everything the old `const fn new()`
+    /// initializer stored as non-zero `.data` bytes).
+    ///
+    /// # Safety
+    ///
+    /// `scene` must point to `SCENE`'s link-time-zero storage, before any
+    /// other access to it: phase 1 below writes `None` into every
+    /// `Option` field through raw places because a niched `Option`'s
+    /// all-zero bytes can decode as `Some(<invalid payload>)`, and a
+    /// `&mut Playtest` may only be minted once every field holds a valid
+    /// value. Single-threaded boot path.
+    unsafe fn init_zeroed(scene: *mut Self) {
+        use core::ptr::addr_of_mut;
+        // Phase 1 -- validity: `None` for EVERY `Option` field, so the
+        // borrow below stays sound no matter which payload niche the
+        // compiler picked for each `None` encoding (empirically, the
+        // room/model/font/material `Option`s niche into a payload
+        // bool/enum byte, making their `None` a NON-zero byte).
+        addr_of_mut!((*scene).room).write(None);
+        addr_of_mut!((*scene).current_collision_room).write(None);
+        addr_of_mut!((*scene).character).write(None);
+        addr_of_mut!((*scene).lock_target).write(None);
+        addr_of_mut!((*scene).soft_lock_target).write(None);
+        addr_of_mut!((*scene).active_interactable).write(None);
+        addr_of_mut!((*scene).checkpoint).write(None);
+        addr_of_mut!((*scene).message_overlay).write(None);
+        addr_of_mut!((*scene).shadow_material).write(None);
+        addr_of_mut!((*scene).particle_material).write(None);
+        for slot in 0..MAX_RUNTIME_UI_FONTS {
+            addr_of_mut!((*scene).ui_fonts[slot]).write(None);
         }
+        for slot in 0..MAX_RUNTIME_MODELS {
+            addr_of_mut!((*scene).models[slot]).write(None);
+        }
+        for slot in 0..MAX_RUNTIME_MODEL_CLIPS {
+            addr_of_mut!((*scene).clips[slot]).write(None);
+        }
+        for slot in 0..MAX_ACTIVE_ROOMS {
+            addr_of_mut!((*scene).window.rooms[slot]).write(None);
+            addr_of_mut!((*scene).window.job.rooms[slot]).write(None);
+            addr_of_mut!((*scene).window.job.previous_rooms[slot]).write(None);
+        }
+        for slot in 0..MAX_COLLISION_ROOMS {
+            addr_of_mut!((*scene).camera_collision_rooms[slot].room).write(None);
+        }
+        // Phase 2 -- boot state: every field is now a valid value, so
+        // mint the exclusive borrow and stamp the non-zero initial state.
+        (*scene).init_boot_state();
+    }
+
+    /// Stamp the non-zero boot state (what the old `const fn new()`
+    /// stored in `.data`) onto the zeroed-and-made-valid scene: ambient
+    /// light, sentinel-filled pools, camera rig, fallback materials, and
+    /// the streaming-job budget. Per-element loops for the pools -- no
+    /// whole-array temporaries. Every field not stamped here boots as
+    /// all-zero bytes, which IS its old initializer value.
+    fn init_boot_state(&mut self) {
+        self.current_ambient_rgb = [0x80; 3];
+        self.visibility.init();
+        #[cfg(all(
+            feature = "world-grid-visible",
+            not(feature = "vis-full-active-chunks")
+        ))]
+        self.visible_cells.init();
+        for room in self.window.job.requested_rooms.iter_mut() {
+            *room = INVALID_ROOM_INDEX;
+        }
+        for room in self.resident_desired.iter_mut() {
+            *room = INVALID_ROOM_INDEX;
+        }
+        for material in self.materials.iter_mut() {
+            *material = room_material_fallback();
+        }
+        self.motor = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO);
+        // Zero bytes already decode as `Idle`; stamped for self-documentation.
+        self.anim_state = PlayerAnim::Idle;
+        self.box_props.init();
+        self.orbit_yaw = CAMERA_START_YAW;
+        self.orbit_radius = CAMERA_START_RADIUS;
+        self.camera = ThirdPersonCameraState::new(CAMERA_START_YAW);
+        self.render_camera = WorldCamera::from_basis(
+            PROJECTION,
+            WorldVertex::ZERO,
+            Q12::ZERO,
+            Q12::ONE,
+            Q12::ZERO,
+            Q12::ONE,
+        );
+        self.overlay_camera = WorldCamera::from_basis(
+            PROJECTION,
+            WorldVertex::ZERO,
+            Q12::ZERO,
+            Q12::ONE,
+            Q12::ZERO,
+            Q12::ONE,
+        );
+        self.camera_rooms_key = (
+            INVALID_ROOM_INDEX,
+            i32::MIN,
+            i32::MIN,
+            RuntimeDebugMask::EMPTY,
+            RuntimeDebugMask::EMPTY,
+        );
+        for vertex in self.model_vertices.iter_mut() {
+            *vertex = ModelVertex::ZERO;
+        }
+        self.streaming_jobs = RuntimeStreamingJobs::new();
+        self.room_materials_unresolved = true;
     }
 
     fn step_streaming_jobs(&mut self, ctx: &mut Ctx) {
@@ -779,15 +792,37 @@ fn playtest_visual_pacing(video_mode: VideoMode) -> VisualPacing {
     }
 }
 
-/// The `Playtest` scene is ~225 KB; keeping it as a `main` stack local
-/// pushed `$sp` down into `.bss`. Place it in static storage (`.bss`) so it
-/// no longer competes with the stack for the same region. `Playtest::new()`
-/// is `const fn`, so this is zero-initialized at link time.
-static mut SCENE: Playtest = Playtest::new();
+/// The `Playtest` scene is ~227 KB; keeping it as a `main` stack local
+/// pushed `$sp` down into `.bss`. Place it in static storage so it no
+/// longer competes with the stack for the same region.
+///
+/// Flat-binary discipline (same as `runtime_arenas`): the storage must be
+/// link-time zero so it lands in `.bss` -- NOLOAD in the PSX-EXE -- instead
+/// of storing ~227 KB of initializer bytes in the flat binary's `.data`
+/// (which the old `Playtest::new()` image did: sentinel-filled pools,
+/// fallback materials, and niched `Option` fields are non-zero bytes).
+///
+/// `MaybeUninit` storage rather than an all-zero `const Playtest` because
+/// no such value exists: several `Option` fields niche their discriminant
+/// into a payload bool/enum byte, so their `None` is a NON-zero byte and
+/// the all-zero pattern would decode as `Some(<invalid payload>)`. NOT
+/// ready for use until [`Playtest::init_zeroed`] stamps validity and the
+/// boot state at the top of `main`, before anything else touches it.
+static mut SCENE: core::mem::MaybeUninit<Playtest> = core::mem::MaybeUninit::zeroed();
 
 #[no_mangle]
 fn main() -> ! {
-    let scene: &mut Playtest = unsafe { &mut *core::ptr::addr_of_mut!(SCENE) };
+    // Stamp the scene's boot state onto its link-time-zero storage BEFORE
+    // any other use (see `SCENE` and `Playtest::init_zeroed`).
+    // SAFETY: single-threaded boot path; the raw stamping happens before
+    // this one exclusive borrow is minted (`MaybeUninit<T>` is
+    // `#[repr(transparent)]`, so the cast is layout-exact), and nothing
+    // else touches the static.
+    let scene: &mut Playtest = unsafe {
+        let scene = core::ptr::addr_of_mut!(SCENE).cast::<Playtest>();
+        Playtest::init_zeroed(scene);
+        &mut *scene
+    };
     // The scene now lives in `.bss`, not on the stack; this guard still
     // checks that the live stack frames (and the rest of static data) leave
     // headroom between `$sp` and the top of `.bss` instead of silently

@@ -8,8 +8,8 @@
 
 use psx_engine::{telemetry, RoomPoint, WorldCamera, WorldProjection};
 use psx_level::portal_visibility::{
-    build_portal_visibility_with_room_bounds, PortalRoomBounds, PortalVisibilityCamera,
-    PortalVisibilityResult,
+    build_portal_visibility_with_room_bounds, PortalFrontierRoom, PortalFrustum, PortalRoomBounds,
+    PortalVisibilityCamera, PortalVisibilityResult, PortalVisibleRoom,
 };
 use psx_level::{
     LevelChunkRecord, LevelRoomPortalRecord, LevelRoomRecord, RoomIndex, RuntimeDebugMask,
@@ -110,8 +110,10 @@ impl<
         MAX_PORTAL_ROOM_BOUNDS,
     >
 {
-    /// Zeroed state; `const` so the game can keep it in link-time
-    /// zero-initialized storage.
+    /// Empty boot state. NOT all-zero bytes: the result/bounds pools
+    /// are filled with `INVALID_ROOM` sentinel slots, so a game keeping
+    /// this state in link-time-zero (`.bss`) storage must stamp it at
+    /// boot via [`Self::init`] instead of storing this `const` directly.
     pub const EMPTY: Self = Self {
         result: PortalVisibilityResult::EMPTY,
         root: RoomIndex::ZERO,
@@ -129,6 +131,26 @@ impl<
         view_pitch_cos_key: 0,
         candidates: 0,
     };
+
+    /// Stamp the non-zero pieces of [`Self::EMPTY`] (the sentinel-filled
+    /// result and bounds pools) onto link-time-zero storage, element by
+    /// element so no whole-struct temporary is built. Equivalent to
+    /// `*self = Self::EMPTY` over zeroed storage.
+    pub fn init(&mut self) {
+        for room in self.result.rooms.iter_mut() {
+            *room = PortalVisibleRoom::EMPTY;
+        }
+        for frustum in self.result.frustums.iter_mut() {
+            *frustum = PortalFrustum::EMPTY;
+        }
+        for frontier in self.result.frontier_rooms.iter_mut() {
+            *frontier = PortalFrontierRoom::EMPTY;
+        }
+        for bounds in self.room_bounds.iter_mut() {
+            *bounds = PortalRoomBounds::EMPTY;
+        }
+        self.room_bounds_count = None;
+    }
 
     /// Global-space visibility anchor for a portal-admitted far room: the
     /// center of the portal that admitted it, nudged half a sector INTO
