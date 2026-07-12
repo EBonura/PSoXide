@@ -287,6 +287,18 @@ impl Scene for Playtest {
             #[cfg(feature = "world-grid-visible")]
             let mut room_stats_total = GridVisibilityStats::default();
 
+            // Live entity poses: instances bound to game entities
+            // render where the entity runtime moved them (phase 3).
+            let mut entity_poses = [ModelInstancePoseOverride {
+                instance: u16::MAX,
+                x: 0,
+                y: 0,
+                z: 0,
+                yaw: 0,
+            }; MAX_GAME_ENTITIES];
+            let entity_pose_count = self.game_entity_pose_overrides(&mut entity_poses);
+            let entity_poses = &entity_poses[..entity_pose_count];
+
             let active_draw_order = active_room_draw_order(
                 &self.window.rooms,
                 camera,
@@ -765,6 +777,7 @@ impl Scene for Playtest {
                         actor_options,
                         shadow_material,
                         &self.models,
+                        entity_poses,
                         &mut primitive_packets,
                         &mut world,
                     );
@@ -781,6 +794,7 @@ impl Scene for Playtest {
                     &self.model_parts[..self.model_part_count],
                     &self.model_vertices[..self.model_vertex_count],
                     &self.clips,
+                    entity_poses,
                     instance_depth_pass,
                     &mut primitive_packets,
                     &mut world,
@@ -951,6 +965,7 @@ impl Scene for Playtest {
                         &self.model_parts[..self.model_part_count],
                         &self.model_vertices[..self.model_vertex_count],
                         &self.clips,
+                        entity_poses,
                         ModelInstanceDepthPass::InFrontOfPlayer(player_depth),
                         &mut primitive_packets,
                         &mut world,

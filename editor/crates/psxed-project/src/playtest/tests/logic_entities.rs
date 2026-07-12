@@ -6,7 +6,68 @@
 //! `psx-game-runtime`'s `entities`/`logic` tests.
 
 use super::*;
-use crate::EnemyBehaviorSettings;
+use crate::{EnemyBehaviorSettings, LogicNodeKind};
+
+fn first_material_id(project: &ProjectDocument) -> ResourceId {
+    project
+        .resources
+        .iter()
+        .find(|resource| matches!(resource.data, ResourceData::Material(_)))
+        .map(|resource| resource.id)
+        .expect("starter has a material")
+}
+
+fn room_node_id(project: &ProjectDocument) -> NodeId {
+    project
+        .active_scene()
+        .nodes()
+        .iter()
+        .find(|n| matches!(n.kind, NodeKind::Room { .. }))
+        .map(|n| n.id)
+        .expect("room exists")
+}
+
+fn add_box_prop(project: &mut ProjectDocument, name: &str) {
+    let material = Some(first_material_id(project));
+    let room_id = room_node_id(project);
+    let scene = project.active_scene_mut();
+    scene.add_node(
+        room_id,
+        name,
+        NodeKind::BoxProp {
+            materials: [material; crate::BOX_PROP_FACE_COUNT],
+            vertices: crate::default_box_prop_vertices(),
+            collision_enabled: true,
+            break_flags: 0,
+        },
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn add_logic_node(
+    project: &mut ProjectDocument,
+    name: &str,
+    kind: LogicNodeKind,
+    target: &str,
+    delay_ticks: u16,
+    wait_ticks: i16,
+) {
+    let room_id = room_node_id(project);
+    let scene = project.active_scene_mut();
+    scene.add_node(
+        room_id,
+        name,
+        NodeKind::Logic {
+            kind,
+            target: target.to_string(),
+            killtarget: String::new(),
+            master: String::new(),
+            delay_ticks,
+            wait_ticks,
+            enabled: true,
+        },
+    );
+}
 
 fn add_interactable_entity(
     project: &mut ProjectDocument,
@@ -263,6 +324,282 @@ fn malformed_enemies_fail_the_cook_loudly() {
     assert!(package.is_none());
     assert!(
         report.errors.iter().any(|e| e.contains("has no Character")),
+        "errors: {:?}",
+        report.errors
+    );
+}
+
+#[test]
+fn trigger_relay_door_chain_cooks_with_resolved_box_link() {
+    let mut project = project_with_one_room();
+    add_box_prop(&mut project, "Gate Box");
+    add_logic_node(
+        &mut project,
+        "Entry Trigger",
+        LogicNodeKind::TriggerVolume {
+            size: [768, 1024, 512],
+        },
+        "Gate Relay",
+        0,
+        -1,
+    );
+    add_logic_node(
+        &mut project,
+        "Gate Relay",
+        LogicNodeKind::Relay,
+        "Gate Door",
+        30,
+        0,
+    );
+    add_logic_node(
+        &mut project,
+        "Gate Door",
+        LogicNodeKind::Door {
+            box_prop: "Gate Box".to_string(),
+            start_open: false,
+        },
+        "",
+        0,
+        0,
+    );
+
+    let (package, report) = build_package(&project, &starter_project_root());
+    assert!(report.is_ok(), "errors: {:?}", report.errors);
+    let package = package.expect("cooks");
+    assert_eq!(package.logic.len(), 3);
+    assert_eq!(package.box_props.len(), 1);
+
+    let trigger = &package.logic[0];
+    let relay = &package.logic[1];
+    let door = &package.logic[2];
+    assert_eq!(trigger.kind, psx_level::logic_kind::TRIGGER_VOLUME);
+    assert_eq!(relay.kind, psx_level::logic_kind::RELAY);
+    assert_eq!(door.kind, psx_level::logic_kind::DOOR);
+    // Graph edges intern to the same ids the named records carry.
+    assert_eq!(trigger.target, relay.targetname);
+    assert_eq!(relay.target, door.targetname);
+    assert_eq!(trigger.wait_ticks, -1);
+    assert_eq!(relay.delay_ticks, 30);
+    // The trigger AABB is the authored extent, floor-anchored.
+    assert_eq!(trigger.max[0] - trigger.min[0], 768);
+    assert_eq!(trigger.max[1] - trigger.min[1], 1024);
+    assert_eq!(trigger.max[2] - trigger.min[2], 512);
+    // The door links the cooked box prop by index.
+    assert_eq!(door.link, 0);
+    // START_ON follows start_open (false here).
+    assert_eq!(door.flags & psx_level::logic_flags::START_ON, 0);
+}
+
+#[test]
+fn door_box_links_fail_loudly_when_missing_or_ambiguous() {
+    // Unknown box name.
+    let mut project = project_with_one_room();
+    add_logic_node(
+        &mut project,
+        "Doomed Door",
+        LogicNodeKind::Door {
+            box_prop: "No Such Box".to_string(),
+            start_open: false,
+        },
+        "",
+        0,
+        0,
+    );
+    let (package, report) = build_package(&project, &starter_project_root());
+    assert!(package.is_none());
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|e| e.contains("No Such Box") && e.contains("not a placed")),
+        "errors: {:?}",
+        report.errors
+    );
+
+    // Ambiguous box name (two boxes share it).
+    let mut project = project_with_one_room();
+    add_box_prop(&mut project, "Twin Box");
+    add_box_prop(&mut project, "Twin Box");
+    add_logic_node(
+        &mut project,
+        "Confused Door",
+        LogicNodeKind::Door {
+            box_prop: "Twin Box".to_string(),
+            start_open: false,
+        },
+        "",
+        0,
+        0,
+    );
+    let (package, report) = build_package(&project, &starter_project_root());
+    assert!(package.is_none());
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|e| e.contains("2 placed boxes share")),
+        "errors: {:?}",
+        report.errors
+    );
+
+    // Door with no box named at all.
+    let mut project = project_with_one_room();
+    add_logic_node(
+        &mut project,
+        "Empty Door",
+        LogicNodeKind::Door {
+            box_prop: String::new(),
+            start_open: false,
+        },
+        "",
+        0,
+        0,
+    );
+    let (package, report) = build_package(&project, &starter_project_root());
+    assert!(package.is_none());
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|e| e.contains("names no Box Prop")),
+        "errors: {:?}",
+        report.errors
+    );
+}
+
+#[test]
+fn dead_triggers_and_relays_are_rejected() {
+    let mut project = project_with_one_room();
+    add_logic_node(
+        &mut project,
+        "Dead Trigger",
+        LogicNodeKind::TriggerVolume {
+            size: [768, 1024, 768],
+        },
+        "",
+        0,
+        0,
+    );
+    let (package, report) = build_package(&project, &starter_project_root());
+    assert!(package.is_none());
+    assert!(
+        report.errors.iter().any(|e| e.contains("has no target")),
+        "errors: {:?}",
+        report.errors
+    );
+
+    let mut project = project_with_one_room();
+    add_logic_node(&mut project, "Dead Relay", LogicNodeKind::Relay, "", 5, 0);
+    let (package, report) = build_package(&project, &starter_project_root());
+    assert!(package.is_none());
+    assert!(
+        report.errors.iter().any(|e| e.contains("has no target")),
+        "errors: {:?}",
+        report.errors
+    );
+
+    // Zero-size trigger volumes are dead content too.
+    let mut project = project_with_one_room();
+    add_logic_node(
+        &mut project,
+        "Flat Trigger",
+        LogicNodeKind::TriggerVolume {
+            size: [768, 0, 768],
+        },
+        "Somewhere",
+        0,
+        0,
+    );
+    let (package, report) = build_package(&project, &starter_project_root());
+    assert!(package.is_none());
+    assert!(
+        report.errors.iter().any(|e| e.contains("zero-size")),
+        "errors: {:?}",
+        report.errors
+    );
+}
+
+#[test]
+fn interactables_carry_their_paired_logic_index_between_placed_nodes() {
+    // Placed logic records interleave with interactable-paired ones;
+    // the interactable must point at ITS record, not rely on table
+    // position.
+    let mut project = project_with_one_room();
+    add_logic_node(
+        &mut project,
+        "Early Relay",
+        LogicNodeKind::Relay,
+        "Echo Stone",
+        0,
+        0,
+    );
+    add_interactable_entity(
+        &mut project,
+        "Echo Stone",
+        crate::InteractableKind::Message {
+            title: "T".to_string(),
+            body: "B".to_string(),
+        },
+        96,
+    );
+    let (package, report) = build_package(&project, &starter_project_root());
+    assert!(report.is_ok(), "errors: {:?}", report.errors);
+    let package = package.expect("cooks");
+    assert_eq!(package.logic.len(), 2);
+    assert_eq!(package.interactables.len(), 1);
+    let interactable = &package.interactables[0];
+    let paired = &package.logic[usize::from(interactable.logic)];
+    assert_eq!(paired.kind, psx_level::logic_kind::MESSAGE);
+    assert_eq!(paired.message, interactable.message);
+    // The relay's edge resolves to the paired record's interned name.
+    assert_eq!(package.logic[0].target, paired.targetname);
+}
+
+#[test]
+fn game_entities_cook_character_bound_body_and_speeds() {
+    let mut project = project_with_one_room();
+    let character = player_character_resource_id(&project);
+    add_enemy_entity(
+        &mut project,
+        "Runner",
+        Some(character),
+        EnemyBehaviorSettings::defaults(),
+    );
+    let (package, report) = build_package(&project, &starter_project_root());
+    assert!(report.is_ok(), "errors: {:?}", report.errors);
+    let package = package.expect("cooks");
+    let entity = &package.game_entities[0];
+    let defaults = crate::CharacterControllerSettings::defaults();
+    assert_eq!(entity.radius, defaults.radius);
+    assert_eq!(entity.height, defaults.height);
+    assert_eq!(entity.walk_speed, defaults.walk_speed);
+    assert_eq!(entity.run_speed, defaults.run_speed);
+
+    // Malformed speeds fail loudly.
+    let mut project = project_with_one_room();
+    let character = player_character_resource_id(&project);
+    let room_id = room_node_id(&project);
+    let scene = project.active_scene_mut();
+    let entity_id = scene.add_node(room_id, "Slug", NodeKind::Entity);
+    let mut settings = crate::CharacterControllerSettings::defaults();
+    settings.walk_speed = 0;
+    settings.enemy = Some(EnemyBehaviorSettings::defaults());
+    scene.add_node(
+        entity_id,
+        "Character Controller",
+        NodeKind::CharacterController {
+            character: Some(character),
+            settings,
+            player: false,
+        },
+    );
+    let (package, report) = build_package(&project, &starter_project_root());
+    assert!(package.is_none());
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|e| e.contains("non-positive walk/run speed")),
         "errors: {:?}",
         report.errors
     );

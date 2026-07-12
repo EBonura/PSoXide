@@ -7,10 +7,12 @@
 //! portal-expanded ACTIVE ROOM set instead of BSP PVS, and melee
 //! windup/commit/punish is the first-class attack grammar.
 //!
-//! This slice is the foundation skeleton: states advance and gate
-//! correctly, movement is a straight-line placeholder step (the
-//! character-motor integration and real Character-bound speeds arrive
-//! with the first live archetype), and attack CONTACT resolution
+//! Movement is Character-bound and motor-honest (the phase-3 seam
+//! note): speeds come from the cooked record's Character-derived
+//! `walk_speed`/`run_speed` (patrol walks, chase runs), and every step
+//! goes through a [`GameEntityMover`] the owning game backs with the
+//! engine motor's [`commit_body_step`] -- the exact grid-collision
+//! stand/slide/step rules the player uses. Attack CONTACT resolution
 //! (melee arcs vs hurtboxes) is the combat slice's job. With zero
 //! cooked records every entry point returns immediately, so a
 //! record-free game pays a handful of cycles per tick (measured in
@@ -20,8 +22,11 @@
 //! parameters, cooked data arrives as `&'static` psx-level records,
 //! and [`GameEntities::EMPTY`] is all-zero so the owning game can keep
 //! the state in link-time-zero storage (`.bss`).
+//!
+//! [`commit_body_step`]: psx_engine::character_motor::commit_body_step
 
 use psx_level::{game_entity_flags, LevelGameEntityRecord, RoomIndex};
+use psx_math::atan2_q12;
 
 /// Souls behavior state for one entity. The all-zero pattern is
 /// [`GameEntityState::Idle`], preserving the crate's zeroed-storage
@@ -65,14 +70,15 @@ impl GameEntityState {
     }
 }
 
-/// Attack range placeholder for the skeleton state machine, engine
-/// units in XZ. The first live archetype replaces this with
-/// Character-derived reach (seam note in the phase-3 plan).
-pub const GAME_ENTITY_ATTACK_RANGE: i32 = 512;
-
-/// Straight-line placeholder step per 60 Hz tick, engine units. The
-/// motor integration slice binds real Character walk speeds.
-pub const GAME_ENTITY_WALK_STEP: i32 = 16;
+/// Melee close-in margin added on top of the two body radii when
+/// deriving attack reach: an entity commits to its windup when the
+/// player is within `record.radius + player_radius + MARGIN` in XZ.
+/// The radii are Character-bound (cooked from the same
+/// `CharacterControllerSettings` the motors use); this constant is the
+/// one runtime tuning knob (roughly half a demo-scale step) standing
+/// in for per-weapon reach until the combat slice cooks real melee
+/// arcs.
+pub const GAME_ENTITY_ATTACK_REACH_MARGIN: i32 = 128;
 
 /// Ticks the attack active window lasts in the skeleton.
 pub const GAME_ENTITY_ATTACK_ACTIVE_TICKS: u16 = 6;
@@ -84,6 +90,56 @@ pub const GAME_ENTITY_STAGGER_TICKS: u16 = 45;
 /// factor drops the entity back to its idle/patrol loop.
 pub const GAME_ENTITY_LEASH_FACTOR: i32 = 2;
 
+/// Movement backend the owning game supplies per tick: one
+/// collision-checked walk step for a body cylinder, in the entity's
+/// own room-local space. The reference game backs this with the
+/// engine motor's `commit_body_step` over the entity room's active
+/// collision (grid floors, step rules, walls, prop blockers), so
+/// entities move under exactly the player's movement rules.
+pub trait GameEntityMover {
+    /// Attempt to move the body of entity `entity` at `position`
+    /// (feet anchor, room-local engine units, in `room`) by
+    /// `(dx, dz)`. Returns the committed position: the target when
+    /// free, an axis-slide when partially blocked, or `position`
+    /// unchanged when fully blocked (including "the room's collision
+    /// is not resident"). `entity` lets the backing collision exclude
+    /// the mover's own body from its blocker set.
+    #[allow(clippy::too_many_arguments)]
+    fn step(
+        &mut self,
+        entity: usize,
+        room: RoomIndex,
+        position: [i32; 3],
+        dx: i32,
+        dz: i32,
+        radius: i32,
+        height: i32,
+    ) -> [i32; 3];
+}
+
+/// No-clip mover: commits every step verbatim. Host-test shape, and
+/// the honest fallback for games without collision wired yet.
+pub struct NoClipMover;
+
+impl GameEntityMover for NoClipMover {
+    fn step(
+        &mut self,
+        _entity: usize,
+        _room: RoomIndex,
+        position: [i32; 3],
+        dx: i32,
+        dz: i32,
+        _radius: i32,
+        _height: i32,
+    ) -> [i32; 3] {
+        [
+            position[0].saturating_add(dx),
+            position[1],
+            position[2].saturating_add(dz),
+        ]
+    }
+}
+
 /// Per-tick inputs the owning game threads in: the player pose and
 /// the portal-expanded active-room set the AI gating reads.
 #[derive(Clone, Copy)]
@@ -93,6 +149,9 @@ pub struct GameEntityTickInput<'a> {
     pub player: [i32; 3],
     /// Room containing the player.
     pub player_room: RoomIndex,
+    /// Player body radius, engine units (the player Character's
+    /// capsule; the other half of Character-derived attack reach).
+    pub player_radius: i32,
     /// Rooms currently in the active window (the portal-expanded
     /// set). Entities in other rooms and with no engaged behavior do
     /// not think this tick.
@@ -109,6 +168,14 @@ pub struct GameEntityTickStats {
     /// Entities whose attack window is active this tick (the combat
     /// slice consumes these for contact resolution).
     pub attacking: u16,
+    /// Transitions INTO Patrol this tick.
+    pub patrol_enters: u16,
+    /// Transitions INTO Aggro this tick.
+    pub aggro_enters: u16,
+    /// Transitions INTO Windup this tick.
+    pub windup_enters: u16,
+    /// Transitions INTO Attack this tick.
+    pub attack_enters: u16,
 }
 
 /// SoA runtime state for cooked game entities. Entity `i` mirrors
@@ -249,13 +316,21 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         }
         self.health[index] = self.health[index].saturating_sub(damage);
         if self.health[index] == 0 {
-            self.enter_state(index, GameEntityState::Dead);
+            self.enter_state(
+                index,
+                GameEntityState::Dead,
+                &mut GameEntityTickStats::default(),
+            );
             return;
         }
         self.poise_damage[index] = self.poise_damage[index].saturating_add(poise_damage);
         if self.poise_damage[index] > records[index].poise {
             self.poise_damage[index] = 0;
-            self.enter_state(index, GameEntityState::Staggered);
+            self.enter_state(
+                index,
+                GameEntityState::Staggered,
+                &mut GameEntityTickStats::default(),
+            );
         }
     }
 
@@ -268,6 +343,7 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         &mut self,
         records: &'static [LevelGameEntityRecord],
         input: GameEntityTickInput<'_>,
+        mover: &mut impl GameEntityMover,
     ) -> GameEntityTickStats {
         let mut stats = GameEntityTickStats::default();
         let count = self.count().min(records.len());
@@ -288,28 +364,30 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
             stats.thought += 1;
             self.state_ticks[index] = self.state_ticks[index].saturating_add(1);
             match state {
-                GameEntityState::Idle => self.tick_idle(record, index, input),
-                GameEntityState::Patrol => self.tick_patrol(record, index, input),
-                GameEntityState::Aggro => self.tick_aggro(record, index, input),
+                GameEntityState::Idle => self.tick_idle(record, index, input, &mut stats),
+                GameEntityState::Patrol => {
+                    self.tick_patrol(record, index, input, mover, &mut stats)
+                }
+                GameEntityState::Aggro => self.tick_aggro(record, index, input, mover, &mut stats),
                 GameEntityState::Windup => {
                     if self.state_ticks[index] >= u16::from(record.windup_ticks) {
-                        self.enter_state(index, GameEntityState::Attack);
+                        self.enter_state(index, GameEntityState::Attack, &mut stats);
                     }
                 }
                 GameEntityState::Attack => {
                     stats.attacking += 1;
                     if self.state_ticks[index] >= GAME_ENTITY_ATTACK_ACTIVE_TICKS {
-                        self.enter_state(index, GameEntityState::Recover);
+                        self.enter_state(index, GameEntityState::Recover, &mut stats);
                     }
                 }
                 GameEntityState::Recover => {
                     if self.state_ticks[index] >= u16::from(record.recovery_ticks) {
-                        self.enter_state(index, GameEntityState::Aggro);
+                        self.enter_state(index, GameEntityState::Aggro, &mut stats);
                     }
                 }
                 GameEntityState::Staggered => {
                     if self.state_ticks[index] >= GAME_ENTITY_STAGGER_TICKS {
-                        self.enter_state(index, GameEntityState::Aggro);
+                        self.enter_state(index, GameEntityState::Aggro, &mut stats);
                     }
                 }
                 GameEntityState::Dead => {}
@@ -319,9 +397,21 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         stats
     }
 
-    fn enter_state(&mut self, index: usize, state: GameEntityState) {
+    fn enter_state(
+        &mut self,
+        index: usize,
+        state: GameEntityState,
+        stats: &mut GameEntityTickStats,
+    ) {
         self.state[index] = state as u8;
         self.state_ticks[index] = 0;
+        match state {
+            GameEntityState::Patrol => stats.patrol_enters += 1,
+            GameEntityState::Aggro => stats.aggro_enters += 1,
+            GameEntityState::Windup => stats.windup_enters += 1,
+            GameEntityState::Attack => stats.attack_enters += 1,
+            _ => {}
+        }
     }
 
     fn player_within(&self, index: usize, input: GameEntityTickInput<'_>, radius: i32) -> bool {
@@ -330,6 +420,14 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
             [input.player[0], input.player[2]],
             radius,
         )
+    }
+
+    /// Character-derived melee reach: both body radii plus the
+    /// close-in margin (see [`GAME_ENTITY_ATTACK_REACH_MARGIN`]).
+    fn attack_reach(record: &LevelGameEntityRecord, input: GameEntityTickInput<'_>) -> i32 {
+        i32::from(record.radius)
+            .saturating_add(input.player_radius.max(0))
+            .saturating_add(GAME_ENTITY_ATTACK_REACH_MARGIN)
     }
 
     /// Aggro notice test: distance AND same room. Cooked positions
@@ -351,16 +449,17 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         record: &LevelGameEntityRecord,
         index: usize,
         input: GameEntityTickInput<'_>,
+        stats: &mut GameEntityTickStats,
     ) {
         if self.player_noticed(record, index, input) {
-            self.enter_state(index, GameEntityState::Aggro);
+            self.enter_state(index, GameEntityState::Aggro, stats);
             return;
         }
         let has_patrol = record.patrol_x != record.x
             || record.patrol_y != record.y
             || record.patrol_z != record.z;
         if has_patrol && self.state_ticks[index] >= record.patrol_wait_ticks {
-            self.enter_state(index, GameEntityState::Patrol);
+            self.enter_state(index, GameEntityState::Patrol, stats);
         }
     }
 
@@ -369,9 +468,11 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         record: &LevelGameEntityRecord,
         index: usize,
         input: GameEntityTickInput<'_>,
+        mover: &mut impl GameEntityMover,
+        stats: &mut GameEntityTickStats,
     ) {
         if self.player_noticed(record, index, input) {
-            self.enter_state(index, GameEntityState::Aggro);
+            self.enter_state(index, GameEntityState::Aggro, stats);
             return;
         }
         let goal = if self.patrol_leg[index] == 0 {
@@ -379,9 +480,9 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         } else {
             [record.x, record.y, record.z]
         };
-        if self.step_toward(index, goal, GAME_ENTITY_WALK_STEP) {
+        if self.step_toward(record, index, goal, record.walk_speed, mover) {
             self.patrol_leg[index] ^= 1;
-            self.enter_state(index, GameEntityState::Idle);
+            self.enter_state(index, GameEntityState::Idle, stats);
         }
     }
 
@@ -390,34 +491,81 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         record: &LevelGameEntityRecord,
         index: usize,
         input: GameEntityTickInput<'_>,
+        mover: &mut impl GameEntityMover,
+        stats: &mut GameEntityTickStats,
     ) {
         let leash = i32::from(record.aggro_radius).saturating_mul(GAME_ENTITY_LEASH_FACTOR);
         if !self.player_within(index, input, leash) {
             // Souls de-aggro: drop the chase and return to the idle
             // loop (return-to-post pathing is the nav slice).
-            self.enter_state(index, GameEntityState::Idle);
+            self.enter_state(index, GameEntityState::Idle, stats);
             return;
         }
-        if self.player_within(index, input, GAME_ENTITY_ATTACK_RANGE) {
-            self.enter_state(index, GameEntityState::Windup);
+        if self.player_within(index, input, Self::attack_reach(record, input)) {
+            self.face_toward(index, input.player);
+            self.enter_state(index, GameEntityState::Windup, stats);
             return;
         }
-        self.step_toward(index, input.player, GAME_ENTITY_WALK_STEP);
+        self.step_toward(record, index, input.player, record.run_speed, mover);
     }
 
-    /// Straight-line XZ placeholder step (no collision -- the motor
-    /// slice replaces this). Returns `true` on arrival.
-    fn step_toward(&mut self, index: usize, goal: [i32; 3], step: i32) -> bool {
+    /// One motor-checked step toward `goal` in XZ at `speed` engine
+    /// units per tick. The step direction quantizes through the same
+    /// Q12 yaw sin/cos the player motor uses, the entity faces its
+    /// movement, and the committed position (full, slid, or held) is
+    /// whatever the mover's collision allows. Returns `true` on
+    /// arrival (within one step of the goal and the final hop
+    /// committed).
+    fn step_toward(
+        &mut self,
+        record: &LevelGameEntityRecord,
+        index: usize,
+        goal: [i32; 3],
+        speed: i32,
+        mover: &mut impl GameEntityMover,
+    ) -> bool {
+        let speed = speed.max(1);
         let dx = goal[0].saturating_sub(self.x[index]);
         let dz = goal[2].saturating_sub(self.z[index]);
-        if dx.abs() <= step && dz.abs() <= step {
-            self.x[index] = goal[0];
-            self.z[index] = goal[2];
+        if dx == 0 && dz == 0 {
             return true;
         }
-        self.x[index] = self.x[index].saturating_add(dx.clamp(-step, step));
-        self.z[index] = self.z[index].saturating_add(dz.clamp(-step, step));
-        false
+        self.face_toward(index, goal);
+        let arriving = dx.abs() <= speed && dz.abs() <= speed;
+        let (step_x, step_z) = if arriving {
+            (dx, dz)
+        } else {
+            // The player motor's move shape: yaw -> Q12 sin/cos * speed.
+            let yaw = atan2_q12(dx, dz);
+            let sin = i32::from(psx_math::sin_q12(yaw));
+            let cos = i32::from(psx_math::cos_q12(yaw));
+            ((sin * speed) >> 12, (cos * speed) >> 12)
+        };
+        let position = [self.x[index], self.y[index], self.z[index]];
+        let committed = mover.step(
+            index,
+            record.room,
+            position,
+            step_x,
+            step_z,
+            i32::from(record.radius),
+            i32::from(record.height).max(1),
+        );
+        self.x[index] = committed[0];
+        self.y[index] = committed[1];
+        self.z[index] = committed[2];
+        arriving && committed[0] == goal[0] && committed[2] == goal[2]
+    }
+
+    /// Face the XZ direction toward `goal` (PSX angle units, the
+    /// motor's yaw convention: x = sin, z = cos).
+    fn face_toward(&mut self, index: usize, goal: [i32; 3]) {
+        let dx = goal[0].saturating_sub(self.x[index]);
+        let dz = goal[2].saturating_sub(self.z[index]);
+        if dx == 0 && dz == 0 {
+            return;
+        }
+        self.yaw[index] = atan2_q12(dx, dz) as i16;
     }
 }
 
@@ -471,6 +619,10 @@ mod tests {
             y: 0,
             z,
             yaw: 0,
+            radius: 192,
+            height: 1024,
+            walk_speed: 16,
+            run_speed: 48,
             patrol_x: x + patrol_dx,
             patrol_y: 0,
             patrol_z: z,
@@ -506,6 +658,7 @@ mod tests {
         GameEntityTickInput {
             player: [100_000, 0, 100_000],
             player_room: RoomIndex(0),
+            player_radius: 192,
             active_rooms,
         }
     }
@@ -514,7 +667,25 @@ mod tests {
         GameEntityTickInput {
             player: [1200, 0, 1000],
             player_room: RoomIndex(0),
+            player_radius: 192,
             active_rooms,
+        }
+    }
+
+    /// Mover that refuses every step (a body wedged into a corner).
+    struct BlockedMover;
+    impl GameEntityMover for BlockedMover {
+        fn step(
+            &mut self,
+            _entity: usize,
+            _room: RoomIndex,
+            position: [i32; 3],
+            _dx: i32,
+            _dz: i32,
+            _radius: i32,
+            _height: i32,
+        ) -> [i32; 3] {
+            position
         }
     }
 
@@ -522,7 +693,7 @@ mod tests {
     fn empty_records_tick_is_inert() {
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&[]);
-        let stats = entities.tick(&[], far_input(&ACTIVE));
+        let stats = entities.tick(&[], far_input(&ACTIVE), &mut NoClipMover);
         assert_eq!(entities.count(), 0);
         assert_eq!(stats, GameEntityTickStats::default());
     }
@@ -557,27 +728,36 @@ mod tests {
     fn souls_attack_grammar_advances_through_windup_commit_punish() {
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&IDLE_ENEMY);
-        // Player inside aggro and attack range: Idle -> Aggro.
-        entities.tick(&IDLE_ENEMY, near_input(&ACTIVE));
+        // Player inside aggro and attack reach (192 + 192 + 128 = 512
+        // >= the 200-unit gap): Idle -> Aggro.
+        let stats = entities.tick(&IDLE_ENEMY, near_input(&ACTIVE), &mut NoClipMover);
         assert_eq!(entities.state(0), GameEntityState::Aggro);
-        // Aggro -> Windup (in attack range).
-        entities.tick(&IDLE_ENEMY, near_input(&ACTIVE));
+        assert_eq!(stats.aggro_enters, 1);
+        // Aggro -> Windup (in attack reach).
+        let stats = entities.tick(&IDLE_ENEMY, near_input(&ACTIVE), &mut NoClipMover);
         assert_eq!(entities.state(0), GameEntityState::Windup);
+        assert_eq!(stats.windup_enters, 1);
+        // Committing to the windup faces the player.
+        assert!(entities.yaw(0) != 0, "windup facing turns toward player");
         // Windup lasts windup_ticks (3).
+        let mut attack_enters = 0;
         for _ in 0..3 {
-            entities.tick(&IDLE_ENEMY, near_input(&ACTIVE));
+            attack_enters += entities
+                .tick(&IDLE_ENEMY, near_input(&ACTIVE), &mut NoClipMover)
+                .attack_enters;
         }
         assert_eq!(entities.state(0), GameEntityState::Attack);
+        assert_eq!(attack_enters, 1);
         // Attack window then recovery.
         let mut saw_attacking = false;
         for _ in 0..GAME_ENTITY_ATTACK_ACTIVE_TICKS {
-            let stats = entities.tick(&IDLE_ENEMY, near_input(&ACTIVE));
+            let stats = entities.tick(&IDLE_ENEMY, near_input(&ACTIVE), &mut NoClipMover);
             saw_attacking |= stats.attacking > 0;
         }
         assert!(saw_attacking);
         assert_eq!(entities.state(0), GameEntityState::Recover);
         for _ in 0..4 {
-            entities.tick(&IDLE_ENEMY, near_input(&ACTIVE));
+            entities.tick(&IDLE_ENEMY, near_input(&ACTIVE), &mut NoClipMover);
         }
         assert_eq!(entities.state(0), GameEntityState::Aggro);
     }
@@ -587,23 +767,85 @@ mod tests {
         let mut entities = GameEntities::<8>::EMPTY;
         entities.spawn_from_records(&PATROL_ENEMY);
         // Aggro from proximity...
-        entities.tick(&PATROL_ENEMY, near_input(&ACTIVE));
+        entities.tick(&PATROL_ENEMY, near_input(&ACTIVE), &mut NoClipMover);
         assert_eq!(entities.state(0), GameEntityState::Aggro);
         // ...then the player leaves: leash drop back to Idle.
-        entities.tick(&PATROL_ENEMY, far_input(&ACTIVE));
+        entities.tick(&PATROL_ENEMY, far_input(&ACTIVE), &mut NoClipMover);
         assert_eq!(entities.state(0), GameEntityState::Idle);
         // Idle waits patrol_wait_ticks (2) then patrols to the anchor
-        // 400 units away at GAME_ENTITY_WALK_STEP per tick.
-        entities.tick(&PATROL_ENEMY, far_input(&ACTIVE));
-        entities.tick(&PATROL_ENEMY, far_input(&ACTIVE));
+        // 400 units away at the record's Character walk speed.
+        entities.tick(&PATROL_ENEMY, far_input(&ACTIVE), &mut NoClipMover);
+        let stats = entities.tick(&PATROL_ENEMY, far_input(&ACTIVE), &mut NoClipMover);
         assert_eq!(entities.state(0), GameEntityState::Patrol);
+        assert_eq!(stats.patrol_enters, 1);
         let mut walked = 0;
         while entities.state(0) == GameEntityState::Patrol && walked < 100 {
-            entities.tick(&PATROL_ENEMY, far_input(&ACTIVE));
+            entities.tick(&PATROL_ENEMY, far_input(&ACTIVE), &mut NoClipMover);
             walked += 1;
         }
         assert_eq!(entities.state(0), GameEntityState::Idle);
         assert_eq!(entities.position(0)[0], 1400);
+        // Walking the +X leg faced +X (quarter turn = 1024 PSX units).
+        assert_eq!(entities.yaw(0), 1024);
+    }
+
+    #[test]
+    fn chase_runs_at_run_speed_and_patrol_walks_at_walk_speed() {
+        // Patrol leg: one tick moves exactly walk_speed toward the
+        // anchor. Chase: one tick moves run_speed toward the player.
+        let mut entities = GameEntities::<8>::EMPTY;
+        entities.spawn_from_records(&PATROL_ENEMY);
+        entities.tick(&PATROL_ENEMY, far_input(&ACTIVE), &mut NoClipMover);
+        entities.tick(&PATROL_ENEMY, far_input(&ACTIVE), &mut NoClipMover);
+        assert_eq!(entities.state(0), GameEntityState::Patrol);
+        let before = entities.position(0)[0];
+        entities.tick(&PATROL_ENEMY, far_input(&ACTIVE), &mut NoClipMover);
+        assert_eq!(
+            entities.position(0)[0] - before,
+            PATROL_ENEMY[0].walk_speed,
+            "patrol leg advances at Character walk speed"
+        );
+
+        // Fresh spawn; player inside aggro (and inside the 1024
+        // leash) but outside the 512 attack reach, straight down +X:
+        // the chase closes at run_speed.
+        entities.spawn_from_records(&IDLE_ENEMY);
+        let chase_input = GameEntityTickInput {
+            player: [1800, 0, 1000],
+            player_room: RoomIndex(0),
+            player_radius: 192,
+            active_rooms: &ACTIVE,
+        };
+        // Move the player into the 512 aggro radius first.
+        let notice_input = GameEntityTickInput {
+            player: [1500, 0, 1000],
+            ..chase_input
+        };
+        entities.tick(&IDLE_ENEMY, notice_input, &mut NoClipMover);
+        assert_eq!(entities.state(0), GameEntityState::Aggro);
+        let before = entities.position(0)[0];
+        entities.tick(&IDLE_ENEMY, chase_input, &mut NoClipMover);
+        assert_eq!(
+            entities.position(0)[0] - before,
+            IDLE_ENEMY[0].run_speed,
+            "chase closes at Character run speed"
+        );
+    }
+
+    #[test]
+    fn blocked_mover_holds_position_but_state_machine_still_runs() {
+        let mut entities = GameEntities::<8>::EMPTY;
+        entities.spawn_from_records(&PATROL_ENEMY);
+        entities.tick(&PATROL_ENEMY, far_input(&ACTIVE), &mut BlockedMover);
+        entities.tick(&PATROL_ENEMY, far_input(&ACTIVE), &mut BlockedMover);
+        assert_eq!(entities.state(0), GameEntityState::Patrol);
+        for _ in 0..10 {
+            entities.tick(&PATROL_ENEMY, far_input(&ACTIVE), &mut BlockedMover);
+        }
+        // Fully blocked: never arrives, never leaves Patrol, position
+        // pinned to spawn -- and no state corruption.
+        assert_eq!(entities.state(0), GameEntityState::Patrol);
+        assert_eq!(entities.position(0), [1000, 0, 1000]);
     }
 
     #[test]
@@ -613,21 +855,22 @@ mod tests {
         let near_in_room_7 = |rooms: &'static [RoomIndex]| GameEntityTickInput {
             player: [1200, 0, 1000],
             player_room: RoomIndex(7),
+            player_radius: 192,
             active_rooms: rooms,
         };
         // Room 7 not active: gated, no thinking.
-        let stats = entities.tick(&FAR_ROOM_ENEMY, near_in_room_7(&ACTIVE));
+        let stats = entities.tick(&FAR_ROOM_ENEMY, near_in_room_7(&ACTIVE), &mut NoClipMover);
         assert_eq!(stats.gated, 1);
         assert_eq!(stats.thought, 0);
         assert_eq!(entities.state(0), GameEntityState::Idle);
         // Room 7 active + player in room 7: thinks and aggros.
         static BOTH: [RoomIndex; 2] = [RoomIndex(0), RoomIndex(7)];
-        let stats = entities.tick(&FAR_ROOM_ENEMY, near_in_room_7(&BOTH));
+        let stats = entities.tick(&FAR_ROOM_ENEMY, near_in_room_7(&BOTH), &mut NoClipMover);
         assert_eq!(stats.thought, 1);
         assert_eq!(entities.state(0), GameEntityState::Aggro);
         // Engaged behavior stays awake outside the active set
         // (hl-psx: combat continues outside the PVS).
-        let stats = entities.tick(&FAR_ROOM_ENEMY, near_in_room_7(&ACTIVE));
+        let stats = entities.tick(&FAR_ROOM_ENEMY, near_in_room_7(&ACTIVE), &mut NoClipMover);
         assert_eq!(stats.thought, 1);
     }
 
@@ -640,9 +883,10 @@ mod tests {
         let aliased = GameEntityTickInput {
             player: [1200, 0, 1000],
             player_room: RoomIndex(3),
+            player_radius: 192,
             active_rooms: &ACTIVE,
         };
-        entities.tick(&IDLE_ENEMY, aliased);
+        entities.tick(&IDLE_ENEMY, aliased, &mut NoClipMover);
         assert_eq!(entities.state(0), GameEntityState::Idle);
     }
 
@@ -656,13 +900,13 @@ mod tests {
         assert_eq!(entities.health(0), 90);
         // Stagger expires back into Aggro.
         for _ in 0..GAME_ENTITY_STAGGER_TICKS {
-            entities.tick(&IDLE_ENEMY, far_input(&ACTIVE));
+            entities.tick(&IDLE_ENEMY, far_input(&ACTIVE), &mut NoClipMover);
         }
         assert_eq!(entities.state(0), GameEntityState::Aggro);
         // Lethal damage kills; dead entities stop thinking.
         entities.apply_hit(&IDLE_ENEMY, 0, 200, 0);
         assert_eq!(entities.state(0), GameEntityState::Dead);
-        let stats = entities.tick(&IDLE_ENEMY, near_input(&ACTIVE));
+        let stats = entities.tick(&IDLE_ENEMY, near_input(&ACTIVE), &mut NoClipMover);
         assert_eq!(stats.thought, 0);
     }
 }

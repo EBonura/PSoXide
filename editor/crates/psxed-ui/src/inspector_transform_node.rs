@@ -69,7 +69,7 @@ pub(crate) fn node_transform_inspector(kind: &NodeKind) -> NodeTransformInspecto
     match kind {
         NodeKind::World { .. } | NodeKind::Node => NodeTransformInspector::Hidden,
         NodeKind::Room { .. } => NodeTransformInspector::RoomGrid,
-        NodeKind::PointLight { .. } | NodeKind::ParticleEmitter { .. } => {
+        NodeKind::PointLight { .. } | NodeKind::ParticleEmitter { .. } | NodeKind::Logic { .. } => {
             NodeTransformInspector::PositionOnly
         }
         NodeKind::ModelRenderer { .. }
@@ -2542,6 +2542,161 @@ pub(crate) fn draw_node_kind_editor(
                         .changed();
                 }
             }
+        }
+        NodeKind::Logic {
+            kind: logic_kind,
+            target,
+            killtarget,
+            master,
+            delay_ticks,
+            wait_ticks,
+            enabled,
+        } => {
+            ui.weak(
+                "Event-graph node. The NODE NAME is its targetname; \
+                 target/killtarget/master name other nodes (Logic, \
+                 Interactable, or enemy entities).",
+            );
+            changed |= ui.checkbox(enabled, "Enabled").changed();
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Kind").color(STUDIO_TEXT_WEAK));
+                let current = match logic_kind {
+                    psxed_project::LogicNodeKind::TriggerVolume { .. } => "Trigger Volume",
+                    psxed_project::LogicNodeKind::Relay => "Relay",
+                    psxed_project::LogicNodeKind::Multisource { .. } => "Multisource",
+                    psxed_project::LogicNodeKind::Door { .. } => "Door",
+                };
+                egui::ComboBox::from_id_salt("logic-node-kind")
+                    .selected_text(current)
+                    .show_ui(ui, |ui| {
+                        let is_trigger = matches!(
+                            logic_kind,
+                            psxed_project::LogicNodeKind::TriggerVolume { .. }
+                        );
+                        if ui.selectable_label(is_trigger, "Trigger Volume").clicked()
+                            && !is_trigger
+                        {
+                            *logic_kind = psxed_project::LogicNodeKind::default();
+                            changed = true;
+                        }
+                        let is_relay = matches!(logic_kind, psxed_project::LogicNodeKind::Relay);
+                        if ui.selectable_label(is_relay, "Relay").clicked() && !is_relay {
+                            *logic_kind = psxed_project::LogicNodeKind::Relay;
+                            changed = true;
+                        }
+                        let is_multisource =
+                            matches!(logic_kind, psxed_project::LogicNodeKind::Multisource { .. });
+                        if ui.selectable_label(is_multisource, "Multisource").clicked()
+                            && !is_multisource
+                        {
+                            *logic_kind = psxed_project::LogicNodeKind::Multisource { required: 1 };
+                            changed = true;
+                        }
+                        let is_door =
+                            matches!(logic_kind, psxed_project::LogicNodeKind::Door { .. });
+                        if ui.selectable_label(is_door, "Door").clicked() && !is_door {
+                            *logic_kind = psxed_project::LogicNodeKind::Door {
+                                box_prop: String::new(),
+                                start_open: false,
+                            };
+                            changed = true;
+                        }
+                    });
+            });
+            match logic_kind {
+                psxed_project::LogicNodeKind::TriggerVolume { size } => {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Extent").color(STUDIO_TEXT_WEAK));
+                        for (axis, label) in ["X", "Y", "Z"].iter().enumerate() {
+                            let mut value = i32::from(size[axis]);
+                            if ui
+                                .add(
+                                    egui::DragValue::new(&mut value)
+                                        .speed(16.0)
+                                        .range(1..=16384)
+                                        .prefix(format!("{label} ")),
+                                )
+                                .changed()
+                            {
+                                size[axis] = value.clamp(1, u16::MAX as i32) as u16;
+                                changed = true;
+                            }
+                        }
+                    });
+                    if size.iter().any(|axis| *axis == 0) {
+                        ui.colored_label(
+                            Color32::from_rgb(220, 120, 100),
+                            "Extent must be > 0 on every axis (cook will fail)",
+                        );
+                    }
+                }
+                psxed_project::LogicNodeKind::Relay => {}
+                psxed_project::LogicNodeKind::Multisource { required } => {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Required inputs").color(STUDIO_TEXT_WEAK));
+                        let mut value = i32::from(*required);
+                        if ui
+                            .add(egui::DragValue::new(&mut value).speed(0.1).range(1..=32))
+                            .changed()
+                        {
+                            *required = value.clamp(1, u16::MAX as i32) as u16;
+                            changed = true;
+                        }
+                    });
+                }
+                psxed_project::LogicNodeKind::Door {
+                    box_prop,
+                    start_open,
+                } => {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Box Prop").color(STUDIO_TEXT_WEAK));
+                        changed |= ui.text_edit_singleline(box_prop).changed();
+                    });
+                    if box_prop.trim().is_empty() {
+                        ui.colored_label(
+                            Color32::from_rgb(220, 120, 100),
+                            "Name the Box Prop this door opens (cook will fail)",
+                        );
+                    }
+                    changed |= ui.checkbox(start_open, "Start open").changed();
+                }
+            }
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Target").color(STUDIO_TEXT_WEAK));
+                changed |= ui.text_edit_singleline(target).changed();
+            });
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Killtarget").color(STUDIO_TEXT_WEAK));
+                changed |= ui.text_edit_singleline(killtarget).changed();
+            });
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Master").color(STUDIO_TEXT_WEAK));
+                changed |= ui.text_edit_singleline(master).changed();
+            });
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Delay (ticks)").color(STUDIO_TEXT_WEAK));
+                let mut value = i32::from(*delay_ticks);
+                if ui
+                    .add(egui::DragValue::new(&mut value).speed(1.0).range(0..=3600))
+                    .changed()
+                {
+                    *delay_ticks = value.clamp(0, u16::MAX as i32) as u16;
+                    changed = true;
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Wait (ticks)").color(STUDIO_TEXT_WEAK));
+                let mut value = i32::from(*wait_ticks);
+                if ui
+                    .add(egui::DragValue::new(&mut value).speed(1.0).range(-1..=3600))
+                    .changed()
+                {
+                    *wait_ticks = value.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
+                    changed = true;
+                }
+            });
+            ui.weak("Wait -1 fires once, then retires.");
         }
         NodeKind::PointLight {
             color,

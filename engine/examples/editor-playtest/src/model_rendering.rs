@@ -10,7 +10,7 @@ use psx_game_runtime::model_rendering as mr;
 pub(super) use psx_game_runtime::model_rendering::{
     accumulate_model_instance_draw_stats, distance_xz_sq, draw_collision_cylinder_debug,
     emit_model_counters, ratio_q8_i32, EquipmentDrawStats, ModelInstanceDepthPass,
-    ModelInstanceDrawStats, PlayerModelDrawStats, RuntimeModelAsset,
+    ModelInstanceDrawStats, ModelInstancePoseOverride, PlayerModelDrawStats, RuntimeModelAsset,
 };
 
 /// The cooked model-family tables bundled for the crate render policy.
@@ -235,6 +235,7 @@ pub(super) fn draw_model_instances(
     model_parts: &[ModelPart],
     model_vertices: &[ModelVertex],
     clips: &[Option<Animation<'static>>; MAX_RUNTIME_MODEL_CLIPS],
+    pose_overrides: &[ModelInstancePoseOverride],
     depth_pass: ModelInstanceDepthPass,
     triangles: &mut impl PrimitiveSink<TriTextured>,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
@@ -262,6 +263,7 @@ pub(super) fn draw_model_instances(
         model_parts,
         model_vertices,
         clips,
+        pose_overrides,
         depth_pass,
         triangles,
         world,
@@ -269,12 +271,14 @@ pub(super) fn draw_model_instances(
 }
 
 /// Draw the floor shadow decal under every placed model instance.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn draw_model_instance_shadows(
     current_room: RoomIndex,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
     material: TextureMaterial,
     models: &[Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
+    pose_overrides: &[ModelInstancePoseOverride],
     triangles: &mut impl PrimitiveSink<TriTextured>,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) {
@@ -287,6 +291,7 @@ pub(super) fn draw_model_instance_shadows(
         options,
         material,
         models,
+        pose_overrides,
         triangles,
         world,
     );

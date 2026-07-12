@@ -1164,6 +1164,110 @@ fn body_stand_position(
     Some(position)
 }
 
+/// Outcome of one AI-body walk step through [`commit_body_step`].
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct BodyStep {
+    /// Committed position after the step (== the start when blocked).
+    pub position: RoomPoint,
+    /// Whether the body changed X/Z position.
+    pub moved: bool,
+    /// Whether any axis of the requested step was rejected.
+    pub blocked: bool,
+}
+
+/// One collision-checked walk step for a non-player body cylinder (the
+/// game-entity runtime's movement primitive, phase 3 of
+/// docs/game-runtime-plan.md). Attempts `start + (dx, 0, dz)` with the
+/// same stand test / axis-slide cascade the player motor's move commit
+/// uses ([`body_stand_position`]: grid floor lookup, walkable-footprint
+/// samples, [`STEP_UP_HEIGHT`]/[`STEP_DOWN_HEIGHT`] step rules, wall and
+/// blocker rejection), so entities obey exactly the collision rules the
+/// player does.
+///
+/// One deliberate difference from the player: entities do not fall in
+/// this slice. Where the player walks out over a deep ledge and
+/// `apply_vertical` drops them, an AI step whose destination floor is
+/// more than [`STEP_DOWN_HEIGHT`] below the feet is REJECTED (the axis
+/// slide still applies), so patrol/chase paths never leave the walkable
+/// grid. Gravity for thrown/falling entities is the combat slice's
+/// work.
+pub fn commit_body_step(
+    collision: CharacterCollision<'_, '_, '_>,
+    start: RoomPoint,
+    dx: i32,
+    dz: i32,
+    radius: i32,
+    height: i32,
+) -> BodyStep {
+    let target = RoomPoint::new(
+        start.x.saturating_add(dx),
+        start.y,
+        start.z.saturating_add(dz),
+    );
+    if target.x == start.x && target.z == start.z {
+        return BodyStep {
+            position: start,
+            moved: false,
+            blocked: false,
+        };
+    }
+
+    if let Some(position) = body_grounded_stand_position(collision, target, radius, height) {
+        return BodyStep {
+            position,
+            moved: true,
+            blocked: false,
+        };
+    }
+
+    // Blocked on the full step: slide along the free axis, exactly the
+    // player commit's cascade order (X first, then Z).
+    let x_only = RoomPoint::new(target.x, start.y, start.z);
+    if let Some(position) = body_grounded_stand_position(collision, x_only, radius, height) {
+        return BodyStep {
+            position,
+            moved: position.x != start.x || position.z != start.z,
+            blocked: true,
+        };
+    }
+    let z_only = RoomPoint::new(start.x, start.y, target.z);
+    if let Some(position) = body_grounded_stand_position(collision, z_only, radius, height) {
+        return BodyStep {
+            position,
+            moved: position.x != start.x || position.z != start.z,
+            blocked: true,
+        };
+    }
+    BodyStep {
+        position: start,
+        moved: false,
+        blocked: true,
+    }
+}
+
+/// [`body_stand_position`] plus the AI grounding rule: the committed
+/// spot must have supporting floor within [`STEP_DOWN_HEIGHT`] of the
+/// feet (`body_stand_position` holds the feet height over deeper
+/// drops for the player's fall path; for AI that reads as "off the
+/// walkable grid" and rejects the candidate).
+fn body_grounded_stand_position(
+    collision: CharacterCollision<'_, '_, '_>,
+    target: RoomPoint,
+    radius: i32,
+    height: i32,
+) -> Option<RoomPoint> {
+    let position = body_stand_position(collision, target, radius, height)?;
+    if collision.rooms.is_empty() && collision.room.is_none() {
+        // No room collision wired (unit-test/no-clip shapes): trust it.
+        return Some(position);
+    }
+    let floor = supporting_floor_height(&collision, position.x, position.z, position.y)?;
+    if position.y.saturating_sub(floor) > STEP_DOWN_HEIGHT {
+        return None;
+    }
+    Some(position.with_y(floor))
+}
+
 fn stand_height_in_rooms(
     rooms: &[CharacterCollisionRoom<'_>],
     x: i32,
@@ -2484,5 +2588,140 @@ mod tests {
         assert_eq!(frame.action, CharacterMotorAction::Backstep);
         assert_eq!(frame.anim, CharacterMotorAnim::Backstep);
         assert_eq!(frame.position, RoomPoint::new(0, 0, -72));
+    }
+
+    #[test]
+    fn body_step_moves_on_open_floor_and_no_clips_without_collision() {
+        // On a flat floor the step commits fully.
+        let bytes = flat_floor_world();
+        let room = RuntimeRoom::from_bytes(&bytes).expect("room parses");
+        let rooms = [CharacterCollisionRoom::new(room, 0, 0)];
+        let step = commit_body_step(
+            CharacterCollision::rooms(&rooms, &[]),
+            RoomPoint::new(400, 0, 400),
+            96,
+            32,
+            64,
+            768,
+        );
+        assert_eq!(step.position, RoomPoint::new(496, 0, 432));
+        assert!(step.moved);
+        assert!(!step.blocked);
+        // With no collision wired at all, the step passes through
+        // (the player commit's no-room fallback; unit-test shape).
+        let step = commit_body_step(
+            CharacterCollision::room(None),
+            RoomPoint::new(0, 0, 0),
+            10,
+            -10,
+            64,
+            768,
+        );
+        assert_eq!(step.position, RoomPoint::new(10, 0, -10));
+        assert!(step.moved);
+    }
+
+    #[test]
+    fn body_step_blocks_on_solid_wall_like_the_player() {
+        // The internal south wall between the two sectors blocks the
+        // +Z step, exactly as the player motor test above.
+        let bytes = world_with_internal_south_wall();
+        let room = RuntimeRoom::from_bytes(&bytes).expect("test room parses");
+        let step = commit_body_step(
+            CharacterCollision::room(Some(room.collision())),
+            RoomPoint::new(512, 0, 800),
+            0,
+            288,
+            64,
+            768,
+        );
+        assert_eq!(step.position, RoomPoint::new(512, 0, 800));
+        assert!(!step.moved);
+        assert!(step.blocked);
+    }
+
+    #[test]
+    fn body_step_slides_along_the_blocked_axis() {
+        // Diagonal step into the same south wall: Z is rejected, X
+        // slides (the player commit's axis cascade).
+        let bytes = world_with_internal_south_wall();
+        let room = RuntimeRoom::from_bytes(&bytes).expect("test room parses");
+        let step = commit_body_step(
+            CharacterCollision::room(Some(room.collision())),
+            RoomPoint::new(400, 0, 800),
+            96,
+            288,
+            64,
+            768,
+        );
+        assert_eq!(step.position, RoomPoint::new(496, 0, 800));
+        assert!(step.moved);
+        assert!(step.blocked);
+    }
+
+    #[test]
+    fn body_step_refuses_to_leave_the_walkable_grid() {
+        // One walkable sector (1024x1024): stepping past its edge finds
+        // no floor and is rejected -- an AI body never walks into the
+        // void the way a player can walk off a ledge and fall.
+        let bytes = flat_floor_world();
+        let room = RuntimeRoom::from_bytes(&bytes).expect("room parses");
+        let rooms = [CharacterCollisionRoom::new(room, 0, 0)];
+        let step = commit_body_step(
+            CharacterCollision::rooms(&rooms, &[]),
+            RoomPoint::new(900, 0, 512),
+            600,
+            0,
+            32,
+            768,
+        );
+        assert_eq!(step.position, RoomPoint::new(900, 0, 512));
+        assert!(!step.moved);
+        assert!(step.blocked);
+    }
+
+    #[test]
+    fn body_step_respects_cylinder_and_aabb_blockers() {
+        let bytes = flat_floor_world();
+        let room = RuntimeRoom::from_bytes(&bytes).expect("room parses");
+        let rooms = [CharacterCollisionRoom::new(room, 0, 0)];
+        let cylinders = [CharacterCollisionCylinder::new(
+            RoomPoint::new(512, 0, 700),
+            64,
+            768,
+        )];
+        let step = commit_body_step(
+            CharacterCollision::rooms(&rooms, &cylinders),
+            RoomPoint::new(512, 0, 500),
+            0,
+            160,
+            64,
+            768,
+        );
+        assert_eq!(
+            step.position,
+            RoomPoint::new(512, 0, 500),
+            "cylinder blocker rejects the step"
+        );
+        assert!(step.blocked);
+
+        let aabbs = [CharacterCollisionAabb::new(
+            RoomPoint::new(400, 0, 600),
+            RoomPoint::new(624, 768, 700),
+        )];
+        let step = commit_body_step(
+            CharacterCollision::rooms_with_aabbs(&rooms, &[], &aabbs),
+            RoomPoint::new(512, 0, 480),
+            0,
+            160,
+            32,
+            768,
+        );
+        assert_eq!(
+            step.position,
+            RoomPoint::new(512, 0, 480),
+            "aabb blocker rejects the step"
+        );
+        assert!(step.blocked);
     }
 }
