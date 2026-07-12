@@ -257,6 +257,44 @@ impl<const MAX_LOGIC: usize, const LOGIC_FIRED_WORDS: usize, const MAX_EVENTS: u
         self.fire_targets(records, target, code, now, 0);
     }
 
+    /// Fire exactly record `index` (the interact-prompt entry point:
+    /// an interactable's paired record is addressed by index, so two
+    /// nodes sharing a name never double-fire). Master gating and
+    /// removed/waiting state apply as usual. Returns whether the
+    /// record reacted.
+    pub fn fire_index(
+        &mut self,
+        records: &'static [LevelLogicRecord],
+        index: usize,
+        code: u8,
+        now: u32,
+    ) -> bool {
+        if index >= self.count().min(records.len()) {
+            return false;
+        }
+        if LogicState::from_raw(self.state[index]) != LogicState::Ready {
+            return false;
+        }
+        if !self.master_satisfied(records, records[index].master) {
+            return false;
+        }
+        self.activate(records, index, code, now, 0);
+        true
+    }
+
+    /// True when any fired mark is pending (the drain loop's cheap
+    /// front gate: two word loads at MAX_LOGIC = 64).
+    pub fn any_fired(&self) -> bool {
+        let mut word = 0usize;
+        while word < self.fired_marks.len() {
+            if self.fired_marks[word] != 0 {
+                return true;
+            }
+            word += 1;
+        }
+        false
+    }
+
     /// Advance one 60 Hz tick: drain due events, re-arm waiting
     /// records, and run the player-touch scan over trigger volumes in
     /// active rooms.
@@ -808,6 +846,67 @@ mod tests {
         };
         logic.tick(&FAR_TRIGGER, input, 2);
         assert!(logic.door_open(1));
+    }
+
+    #[test]
+    fn fire_index_fires_exactly_one_record_and_respects_state() {
+        // Two doors SHARING a name: fire_index opens only its record
+        // (fire_by_name would toggle both).
+        static TWINS: [LevelLogicRecord; 2] = [
+            LevelLogicRecord {
+                targetname: 3,
+                ..blank(logic_kind::DOOR)
+            },
+            LevelLogicRecord {
+                targetname: 3,
+                ..blank(logic_kind::DOOR)
+            },
+        ];
+        let mut logic = TestLogic::EMPTY;
+        logic.init_from_records(&TWINS);
+        assert!(!logic.any_fired());
+        assert!(logic.fire_index(&TWINS, 1, use_type::TOGGLE, 1));
+        assert!(!logic.door_open(0));
+        assert!(logic.door_open(1));
+        assert!(logic.any_fired());
+        assert!(!logic.take_fired(0));
+        assert!(logic.take_fired(1));
+        assert!(!logic.any_fired());
+        // Out of range: refused.
+        assert!(!logic.fire_index(&TWINS, 2, use_type::TOGGLE, 2));
+
+        // A retired (fire-once) record refuses an indexed fire.
+        static ONCE: [LevelLogicRecord; 1] = [LevelLogicRecord {
+            targetname: 5,
+            wait_ticks: -1,
+            ..blank(logic_kind::MESSAGE)
+        }];
+        let mut logic = TestLogic::EMPTY;
+        logic.init_from_records(&ONCE);
+        assert!(logic.fire_index(&ONCE, 0, use_type::TOGGLE, 1));
+        assert!(logic.is_removed(0));
+        assert!(!logic.fire_index(&ONCE, 0, use_type::TOGGLE, 2));
+    }
+
+    #[test]
+    fn fire_index_respects_master_gate() {
+        static GATED: [LevelLogicRecord; 2] = [
+            LevelLogicRecord {
+                targetname: 1,
+                master: 4,
+                ..blank(logic_kind::MESSAGE)
+            },
+            LevelLogicRecord {
+                targetname: 4,
+                arg0: 1,
+                ..blank(logic_kind::MULTISOURCE)
+            },
+        ];
+        let mut logic = TestLogic::EMPTY;
+        logic.init_from_records(&GATED);
+        assert!(!logic.fire_index(&GATED, 0, use_type::TOGGLE, 1));
+        logic.fire_by_name(&GATED, 4, use_type::ON, 2);
+        assert!(logic.fire_index(&GATED, 0, use_type::TOGGLE, 3));
     }
 
     #[test]
