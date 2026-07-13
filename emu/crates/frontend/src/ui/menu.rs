@@ -1182,7 +1182,13 @@ fn save_states_panel(
                     .stroke(egui::Stroke::new(1.0, theme::MENU_ACCENT))
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
-                            draw_thumb(ui, ctx, thumb_cache, top.thumbnail_path.as_deref(), THUMB_SIZE);
+                            draw_thumb(
+                                ui,
+                                ctx,
+                                thumb_cache,
+                                top.thumbnail_path.as_deref(),
+                                THUMB_SIZE,
+                            );
                             ui.vertical(|ui| {
                                 ui.label(
                                     egui::RichText::new("Top -- loads on F7")
@@ -1218,7 +1224,13 @@ fn save_states_panel(
                 .show(ui, |ui| {
                     for row in rows {
                         ui.horizontal(|ui| {
-                            draw_thumb(ui, ctx, thumb_cache, row.thumbnail_path.as_deref(), THUMB_SIZE);
+                            draw_thumb(
+                                ui,
+                                ctx,
+                                thumb_cache,
+                                row.thumbnail_path.as_deref(),
+                                THUMB_SIZE,
+                            );
                             ui.vertical(|ui| {
                                 ui.label(egui::RichText::new(&row.label).size(13.0));
                                 ui.horizontal(|ui| {

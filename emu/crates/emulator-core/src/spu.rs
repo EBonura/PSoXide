@@ -981,8 +981,9 @@ pub struct Spu {
     /// mixes it via `CD_VOL_L/R` into the main output. When the
     /// queue is empty, CD contribution is zero. Bounded at
     /// ~0.5 s to prevent runaway growth during emulator fast-
-    /// forward. Transient -- excluded from save states.
-    #[serde(skip)]
+    /// forward. This is pending emulated input rather than host
+    /// output: consuming it can mutate SPU RAM/capture state, so it
+    /// must round-trip through save states.
     cd_audio_in: std::collections::VecDeque<(i16, i16)>,
 
     /// Absolute cycle count at which we last produced an audio sample.
