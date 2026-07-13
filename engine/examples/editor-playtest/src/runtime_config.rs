@@ -1,4 +1,9 @@
 use super::*;
+#[cfg(feature = "cd-stream-bench")]
+use psx_game_runtime::room_streaming::{RoomStreamScheduler, StreamedRoomSlots};
+#[cfg(feature = "cd-stream-bench")]
+use psx_game_runtime::vram::UiImageCache;
+use psx_game_runtime::vram::{FontPackScratch, VramRuntime, FONT_ATLAS_MAX_ROWS};
 
 pub(super) const fn cached_room_depth_mode() -> CachedRoomDepthMode {
     match CACHED_ROOM_DEPTH_MODE {
@@ -15,13 +20,6 @@ pub(super) const fn cached_room_subdivision_mode() -> CachedRoomSubdivisionMode 
         2 => CachedRoomSubdivisionMode::Risky,
         _ => CachedRoomSubdivisionMode::All,
     }
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub(super) enum CachedRoomDrawOrderMode {
-    Distance,
-    Portal,
-    Slot,
 }
 
 pub(super) const fn cached_room_draw_order_mode() -> CachedRoomDrawOrderMode {
@@ -70,10 +68,6 @@ pub(super) const MENU_RESOURCE_KEY: u32 = 2;
 /// Resource-set key for gameplay states (see `MENU_RESOURCE_KEY`).
 pub(super) const GAMEPLAY_RESOURCE_KEY: u32 = 3;
 pub(super) static SHADOW_CIRCLE_BLOB: &[u8] = include_bytes!("../assets/shadow_circle_64.psxt");
-/// Shadow decals share the shadow/particle 4bpp page allocated by the unified
-/// VRAM allocator. UVs are page-relative, so only the page base moves.
-pub(super) const SHADOW_TEXEL_U: u8 = 64;
-pub(super) const SHADOW_UV_MAX: u8 = SHADOW_TEXEL_U + 63;
 pub(super) const SCREEN_W: i16 = 320;
 pub(super) const SCREEN_H: i16 = 240;
 pub(super) const SCREEN_CX: i16 = 160;
@@ -90,8 +84,6 @@ pub(super) const SHADOW_RADIUS_SCALE_DEN: i32 = 4;
 pub(super) const SHADOW_RADIUS_MIN: i32 = 160;
 pub(super) const SHADOW_RADIUS_MAX: i32 = 320;
 pub(super) const COLLISION_DEBUG_BUTTON: u16 = button::L3;
-pub(super) const COLLISION_DEBUG_SEGMENTS: usize = 8;
-pub(super) const COLLISION_DEBUG_FLOOR_LIFT: i32 = 8;
 pub(super) const FLOOR_LINK_CROSS_EPSILON: i32 = 32;
 /// Dead-band (engine units) below a floor boundary before a downward room
 /// switch fires. Climbing up lands the player AT the boundary; without a
@@ -156,6 +148,11 @@ pub(super) const EVADE_RUN_HOLD_VBLANKS: u8 = 8;
 pub(super) const INTERACT_BUTTON: u16 = button::CROSS;
 pub(super) const LIGHT_ATTACK_BUTTON: u16 = button::R1;
 pub(super) const HEAVY_ATTACK_BUTTON: u16 = button::R2;
+/// Player health pool at gameplay init (the phase-3 combat slice's
+/// sane cooked default -- the Character record carries no health
+/// field yet; authoring it is a future editor slice). Death/respawn
+/// handling is phase 4 (checkpoint loops): health floors at 0.
+pub(super) const PLAYER_MAX_HEALTH: u16 = 100;
 
 #[cfg(feature = "ot-2048")]
 pub(super) const OT_DEPTH: usize = 2048;
@@ -226,7 +223,7 @@ pub(super) const MAX_PRECOMPUTED_VISIBLE_CELLS: usize = 192;
 pub(super) const MAX_ACTIVE_VISIBLE_CELLS: usize = 192;
 
 pub(super) fn room_draw_distance(record: &LevelRoomRecord) -> i32 {
-    record.draw_distance.max(NEAR_Z + 128)
+    psx_game_runtime::world_cells::room_draw_distance(record, NEAR_Z)
 }
 
 pub(super) fn room_depth_range(record: &LevelRoomRecord) -> DepthRange {
@@ -258,13 +255,6 @@ pub(super) fn current_room_surface_options(room_index: RoomIndex) -> WorldSurfac
         .unwrap_or_else(fallback_surface_options)
 }
 
-#[cfg(all(
-    feature = "world-grid-visible",
-    not(feature = "vis-full-active-chunks")
-))]
-pub(super) fn room_chunk_activation_radius_sectors(record: &LevelRoomRecord) -> i32 {
-    record.chunk_activation_radius_sectors.max(1)
-}
 
 #[cfg(feature = "cd-stream-bench")]
 pub(super) fn room_resident_chunk_limit(record: &LevelRoomRecord) -> usize {
@@ -362,7 +352,6 @@ pub(super) const STREAMED_ROOM_SLOT_BYTES: usize =
 pub(super) const STREAMED_ROOM_SLOT_WORDS: usize = STREAMED_ROOM_SLOT_BYTES / 4;
 #[cfg(feature = "cd-stream-bench")]
 pub(super) const MAX_STREAMED_ROOM_SLOT_COUNT: usize = 256;
-pub(super) const STREAMED_ROOM_SLOT_NONE: u16 = u16::MAX;
 #[cfg(feature = "cd-stream-bench")]
 pub(super) const MAX_STREAMED_ROOM_INDEX_COUNT: usize = 256;
 /// CD-backed room residency cache. The cooked manifest selects the byte
@@ -412,7 +401,7 @@ pub(super) const fn clamp_streamed_room_slot_bytes(raw: usize) -> usize {
     };
     (clamped + 3) & !3
 }
-pub(super) const INVALID_ROOM_INDEX: RoomIndex = RoomIndex(u16::MAX);
+pub(super) use psx_game_runtime::room_cache::INVALID_ROOM_INDEX;
 
 /// Per-frame projected-vertex scratch for the model renderer.
 /// Sized to the largest part vertex count we expect; instances
@@ -429,8 +418,6 @@ pub(super) const MAX_RUNTIME_MODEL_PARTS: usize = 128;
 pub(super) const MAX_RUNTIME_MODEL_DECODED_VERTICES: usize = 1024;
 /// Projected edge threshold used to subdivide close model triangles.
 pub(super) const MODEL_TEXTURE_SPLIT_MAX_EDGE: u16 = 0;
-/// Q8 fixed-point identity for per-instance visual model scale.
-pub(super) const MODEL_VISUAL_SCALE_ONE_Q8: u16 = 256;
 /// Joint-transform scratch -- all biped rigs we currently cook
 /// fit comfortably in 32.
 pub(super) const JOINT_CAP: usize = 32;
@@ -444,22 +431,6 @@ pub(super) const MAX_BOX_PROP_STATE: usize = 128;
 pub(super) const BOX_PROP_BROKEN_WORDS: usize = (MAX_BOX_PROP_STATE + 31) / 32;
 /// Active baked break bursts retained after a prop is marked broken.
 pub(super) const MAX_BOX_PROP_BREAK_EVENTS: usize = 16;
-pub(super) const BOX_PROP_BREAK_FRAMES: u8 = 24;
-pub(super) const BOX_PROP_BREAK_MOTION_FRAMES: u8 = 20;
-pub(super) const BOX_PROP_BREAK_SHARD_COUNT: usize = 8;
-/// Gravity applied to an unsupported, falling box (room units per vblank,
-/// per vblank). Tuned so a stacked box drops over a handful of frames.
-pub(super) const BOX_PROP_FALL_GRAVITY: i32 = 28;
-/// Per-vblank fall-speed cap so a tall drop cannot tunnel past its
-/// landing in one step (the landing check snaps any overshoot anyway).
-pub(super) const BOX_PROP_FALL_MAX_VEL: i32 = 384;
-/// Slack for "rests on the floor / on the box below" support tests, in
-/// room units. Boxes are ~900+ units tall, so this only absorbs rounding
-/// and small authored gaps.
-pub(super) const BOX_PROP_SUPPORT_TOLERANCE: i32 = 64;
-pub(super) const BOX_PROP_BREAK_ATTACK_REACH: i32 = 768;
-pub(super) const BOX_PROP_BREAK_ATTACK_WIDTH: i32 = 320;
-pub(super) const BOX_PROP_FACE_NORMAL_SHIFT: u32 = 10;
 /// Cap on attached weapon/equipment visuals rendered per frame.
 pub(super) const MAX_EQUIPMENT_DRAWS: usize = 8;
 /// Runtime model cache capacity. The current playtest package only
@@ -477,3 +448,180 @@ pub(super) const PROP_PARTICLE_GTE_PROJECT_ENABLED: bool =
     option_env!("PSXO_GTE_PROP_PARTICLE_PROJECT").is_some();
 pub(super) const BOX_PROP_GTE_PROJECT_ENABLED: bool = true;
 pub(super) const BOX_PROP_PROFILE_ENABLED: bool = option_env!("PSXO_PROFILE_BOX_PROPS").is_some();
+
+// ---------------------------------------------------------------------------
+// RuntimeBudgets: every `psx_game_runtime` const-generic instantiation, in one
+// place (phase 1.5 of docs/game-runtime-plan.md). Each alias below names the
+// budget consts a crate type is instantiated with, so this section is the
+// single place to read what this game grants the runtime. The consts feeding
+// the aliases carry their provenance; the `build.rs`-generated `RuntimeBudgets`
+// value struct replaces the hand-written numbers in a later pass.
+// ---------------------------------------------------------------------------
+
+/// Capacity of the residency manager's RAM table. Holds room
+/// world + model meshes + animation clips.
+pub(super) const MAX_RESIDENT_RAM_ASSETS: usize = 128;
+/// Capacity of the residency manager's VRAM table. Holds room
+/// material atlases + model atlases.
+pub(super) const MAX_RESIDENT_VRAM_ASSETS: usize = 64;
+/// CLUT-band rows the unified VRAM allocator manages, just past the back
+/// buffer (Stage 1: only the shared font CLUT lands here).
+pub(super) const VRAM_CLUT_ROWS: usize = 16;
+/// The crate VRAM runtime (slot table, unified allocator, residency
+/// tracker, upload queue) instantiated with this example's budget consts.
+pub(super) type RuntimeVram = VramRuntime<
+    MAX_RESIDENT_RAM_ASSETS,
+    MAX_RESIDENT_VRAM_ASSETS,
+    ROOM_TPAGE_COUNT,
+    VRAM_CLUT_ROWS,
+>;
+
+/// Font-pack staging length in u16s, sized to the larger of the two scratch
+/// uses (font atlas packing vs the streamed sky chunk); see the doc on
+/// `psx_game_runtime::vram::FontPackScratch`.
+const FONT_PACK_U16: usize = MAX_RUNTIME_UI_FONTS * 64 * FONT_ATLAS_MAX_ROWS;
+#[cfg(feature = "cd-stream-bench")]
+pub(super) const FONT_PACK_SCRATCH_LEN: usize = {
+    let sky_u16 = (GAMEPLAY_PACK_MAX_CHUNK_BYTES + 1) / 2;
+    if FONT_PACK_U16 > sky_u16 {
+        FONT_PACK_U16
+    } else {
+        sky_u16
+    }
+};
+#[cfg(not(feature = "cd-stream-bench"))]
+pub(super) const FONT_PACK_SCRATCH_LEN: usize = FONT_PACK_U16;
+/// The crate font/sky staging scratch instantiated with this example's length.
+pub(super) type RuntimeFontPackScratch = FontPackScratch<FONT_PACK_SCRATCH_LEN>;
+
+#[cfg(feature = "cd-stream-bench")]
+const SKY_STAGE_WORDS: usize = (GAMEPLAY_PACK_MAX_CHUNK_BYTES + 3) / 4;
+#[cfg(feature = "cd-stream-bench")]
+const _: () = assert!(
+    SKY_STAGE_WORDS * 4 <= FONT_PACK_SCRATCH_LEN * 2,
+    "streamed sky chunk does not fit the font-pack staging buffer"
+);
+
+/// RAM cache slot width for one streamed menu UI image chunk.
+#[cfg(feature = "cd-stream-bench")]
+pub(super) const UI_STAGE_WORDS: usize = (UI_PACK_MAX_CHUNK_BYTES + 3) / 4;
+/// The crate streamed-menu-UI image cache instantiated with this example's
+/// chunk width and the cooked manifest's slot count.
+#[cfg(feature = "cd-stream-bench")]
+pub(super) type RuntimeUiImageCache = UiImageCache<UI_STAGE_WORDS, UI_PACK_IMAGE_CACHE_SLOTS>;
+
+/// The crate streamed-room slot buffers instantiated with this example's
+/// slot width and count (see `STREAMED_ROOM_SLOT_*` above).
+#[cfg(feature = "cd-stream-bench")]
+pub(super) type RuntimeStreamedRoomSlots =
+    StreamedRoomSlots<STREAMED_ROOM_SLOT_WORDS, STREAMED_ROOM_SLOT_COUNT>;
+
+/// The crate streamed-room scheduler instantiated with this example's slot
+/// count and room-index capacity.
+#[cfg(feature = "cd-stream-bench")]
+pub(super) type RuntimeRoomStreamScheduler =
+    RoomStreamScheduler<STREAMED_ROOM_SLOT_COUNT, MAX_STREAMED_ROOM_INDEX_COUNT>;
+
+/// The crate per-stream-slot room-material pool instantiated with this
+/// example's slot count.
+#[cfg(feature = "cd-stream-bench")]
+pub(super) type RuntimeRoomMaterialPool =
+    psx_game_runtime::room_cache::RoomMaterialPool<STREAMED_ROOM_SLOT_COUNT>;
+
+/// The crate prebuilt room-quad pool instantiated with this example's slot
+/// and per-room quad budgets (see `PREBUILT_ROOM_QUAD_*` above).
+pub(super) type RuntimePrebuiltRoomQuads = psx_game_runtime::room_cache::PrebuiltRoomQuads<
+    PREBUILT_ROOM_QUAD_SLOTS,
+    PREBUILT_ROOM_QUAD_CAP,
+>;
+
+/// Crate-owned portal-visibility state instantiated with this example's
+/// budget consts (its `result` field is a [`RuntimePortalVisibility`]).
+pub(super) type RuntimeRoomVisibility = psx_game_runtime::room_visibility::RoomVisibility<
+    MAX_ACTIVE_ROOMS,
+    MAX_PORTAL_FRUSTUMS,
+    MAX_PORTAL_FRONTIER_ROOMS,
+    MAX_PORTAL_ROOM_BOUNDS,
+>;
+/// Crate-owned active-room window state instantiated with this
+/// example's window capacity.
+pub(super) type RuntimeRoomWindow = psx_game_runtime::room_window::RoomWindow<MAX_ACTIVE_ROOMS>;
+
+/// Crate-owned box-prop state instantiated with this example's
+/// state/word/event budgets (see `MAX_BOX_PROP_*` above).
+pub(super) type RuntimeBoxProps = psx_game_runtime::box_props::BoxProps<
+    MAX_BOX_PROP_STATE,
+    BOX_PROP_BROKEN_WORDS,
+    MAX_BOX_PROP_BREAK_EVENTS,
+>;
+
+/// Crate-owned visible-cell selection state instantiated with this
+/// example's window/pool/candidate capacities.
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
+pub(super) type RuntimeVisibleCellSelector = psx_game_runtime::world_cells::VisibleCellSelector<
+    MAX_ACTIVE_ROOMS,
+    MAX_ACTIVE_VISIBLE_CELLS,
+    MAX_PRECOMPUTED_VISIBLE_CELLS,
+>;
+
+/// The crate accepted-cell draw scratch instantiated with this
+/// example's candidate capacity.
+#[cfg(feature = "world-grid-visible")]
+pub(super) type RuntimeCellDrawScratch =
+    psx_game_runtime::world_cells::CellDrawScratch<MAX_PRECOMPUTED_VISIBLE_CELLS>;
+
+/// The crate model projected-vertex + joint scratch instantiated with
+/// this example's caps (see `MODEL_VERTEX_CAP`/`JOINT_CAP` above).
+pub(super) type RuntimeModelDrawScratch =
+    psx_game_runtime::model_rendering::ModelDrawScratch<MODEL_VERTEX_CAP, JOINT_CAP>;
+
+/// The crate cached-room projection scratch instantiated with this
+/// example's per-room vertex budget (see `MAX_CACHED_ROOM_VERTICES`).
+pub(super) type RuntimeCachedRoomProjection =
+    psx_game_runtime::room_cache::CachedRoomProjection<MAX_CACHED_ROOM_VERTICES>;
+
+/// Phase-3 gameplay capacities (docs/game-runtime-plan.md, "Phase 3
+/// budget"). The record caps are the psx-level cook<->runtime
+/// contract (the cook rejects over-cap content), so the SoA arrays
+/// here can never silently drop a cooked record.
+pub(super) const MAX_GAME_ENTITIES: usize = psx_level::MAX_GAME_ENTITY_RECORDS;
+/// See [`MAX_GAME_ENTITIES`].
+pub(super) const MAX_LOGIC_RECORDS: usize = psx_level::MAX_LOGIC_RECORDS;
+/// Fired-bitset words for the logic runtime (the BoxProps
+/// broken-words pattern).
+pub(super) const LOGIC_FIRED_WORDS: usize = MAX_LOGIC_RECORDS.div_ceil(32);
+/// In-flight delayed logic events (budget line: hl-psx ships 64 for
+/// full HL campaign maps; one 8-room cortex level gets 32 plus an
+/// overflow counter).
+pub(super) const MAX_LOGIC_EVENTS: usize = 32;
+
+/// The crate souls-like entity state instantiated with this example's
+/// entity cap.
+pub(super) type RuntimeGameEntities = psx_game_runtime::entities::GameEntities<MAX_GAME_ENTITIES>;
+
+/// The crate logic-entity runtime instantiated with this example's
+/// record/word/event caps.
+pub(super) type RuntimeLogic =
+    psx_game_runtime::logic::LogicRuntime<MAX_LOGIC_RECORDS, LOGIC_FIRED_WORDS, MAX_LOGIC_EVENTS>;
+
+/// This example's visible-cell selection tuning (the
+/// `ROOM_VISIBLE_CELL_*` consts above, as the crate value struct).
+#[cfg(all(
+    feature = "world-grid-visible",
+    not(feature = "vis-full-active-chunks")
+))]
+pub(super) const VISIBLE_CELL_TUNING: psx_game_runtime::world_cells::VisibleCellTuning =
+    psx_game_runtime::world_cells::VisibleCellTuning {
+        screen_margin: ROOM_VISIBLE_CELL_SCREEN_MARGIN,
+        camera_margin: ROOM_VISIBLE_CELL_CAMERA_MARGIN,
+        safety_ring: ROOM_VISIBLE_CELL_SAFETY_RING,
+        near_ring: ROOM_VISIBLE_CELL_NEAR_RING,
+        rear_ring: ROOM_VISIBLE_CELL_REAR_RING,
+        wedge_margin_sectors: ROOM_VISIBLE_CELL_WEDGE_MARGIN_SECTORS,
+        wedge_num: ROOM_VISIBLE_CELL_WEDGE_NUM,
+        wedge_den: ROOM_VISIBLE_CELL_WEDGE_DEN,
+        near_z: NEAR_Z,
+    };

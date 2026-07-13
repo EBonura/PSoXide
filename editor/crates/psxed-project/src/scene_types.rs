@@ -250,6 +250,35 @@ pub enum NodeKind {
         #[serde(default)]
         settings: ParticleEmitterSettings,
     },
+    /// Placed logic-graph node (the phase-3 event graph): a trigger
+    /// volume, relay, multisource gate, or door. The node NAME is the
+    /// record's targetname (interned at cook); `target`, `killtarget`
+    /// and `master` name other nodes the same way interactables and
+    /// enemies are named. Cooks to a `psx_level::LevelLogicRecord`.
+    Logic {
+        /// Kind-specific behavior + payload.
+        #[serde(default)]
+        kind: LogicNodeKind,
+        /// Node name this record fires when it triggers ("" = none).
+        #[serde(default)]
+        target: String,
+        /// Node name this record removes when it triggers ("" = none).
+        #[serde(default)]
+        killtarget: String,
+        /// Multisource node name gating this record ("" = ungated).
+        #[serde(default)]
+        master: String,
+        /// 60 Hz ticks between triggering and firing `target`.
+        #[serde(default)]
+        delay_ticks: u16,
+        /// 60 Hz ticks before re-arming after a fire; negative means
+        /// fire once then retire (hl's `wait -1`).
+        #[serde(default)]
+        wait_ticks: i16,
+        /// Disabled nodes stay authored but cook flag-disabled.
+        #[serde(default = "default_true")]
+        enabled: bool,
+    },
     /// Spawn marker.
     SpawnPoint {
         /// Whether this is the player spawn.
@@ -312,6 +341,7 @@ impl NodeKind {
             Self::Equipment { .. } => "Equipment",
             Self::PhysicsBody { .. } => "Physics Body",
             Self::Interactable { .. } => "Interactable",
+            Self::Logic { .. } => "Logic",
             Self::PointLight { .. } => "Point Light",
             Self::ParticleEmitter { .. } => "Particle Emitter",
             Self::SpawnPoint { .. } => "Spawn Point",
@@ -392,6 +422,59 @@ pub(crate) fn default_interactable_checkpoint_title() -> String {
 
 pub(crate) fn default_interactable_checkpoint_body() -> String {
     "Relay synchronized.".to_string()
+}
+
+/// Kind payload for a placed [`NodeKind::Logic`] node. Mirrors the
+/// runtime's `psx_level::logic_kind` selectors that are placed (not
+/// paired from interactables): trigger volumes, relays, multisource
+/// AND gates, and doors.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LogicNodeKind {
+    /// AABB volume that fires `target` when the player enters it.
+    /// The node transform is the floor-anchored center; `size` is the
+    /// full extent in engine units (XZ centered, Y up from the floor).
+    TriggerVolume {
+        /// Full volume extent, engine units.
+        #[serde(default = "default_logic_trigger_size")]
+        size: [u16; 3],
+    },
+    /// Fires `target` after `delay_ticks` when triggered (the
+    /// fan-out/delay building block).
+    Relay,
+    /// AND gate: satisfied while `required` inputs are on; records
+    /// naming this node as `master` are gated by it.
+    Multisource {
+        /// Inputs required to satisfy the gate.
+        #[serde(default = "default_logic_multisource_required")]
+        required: u16,
+    },
+    /// Toggles the named Box Prop between closed (drawn + solid) and
+    /// open (hidden + passable) when used.
+    Door {
+        /// Name of the Box Prop node this door drives. Must resolve
+        /// to exactly one placed Box Prop at cook time.
+        #[serde(default)]
+        box_prop: String,
+        /// Whether the door starts open.
+        #[serde(default)]
+        start_open: bool,
+    },
+}
+
+impl Default for LogicNodeKind {
+    fn default() -> Self {
+        Self::TriggerVolume {
+            size: default_logic_trigger_size(),
+        }
+    }
+}
+
+pub(crate) const fn default_logic_trigger_size() -> [u16; 3] {
+    [768, 1024, 768]
+}
+
+pub(crate) const fn default_logic_multisource_required() -> u16 {
+    1
 }
 
 /// Authored collision shape for component-node entities.

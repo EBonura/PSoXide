@@ -127,6 +127,13 @@ pub struct ValidationCheckpoint {
     /// Optional input tape to replay.
     #[serde(default)]
     pub input_tape: Option<PathBuf>,
+    /// Optional scripted pad-pulse route, the frontend's
+    /// `--pad-pulses` syntax: comma-separated
+    /// `<mask>@<tick>+<frames>` entries keyed to the headless route
+    /// clock (e.g. `"16@240+300"` holds D-pad UP for 300 ticks from
+    /// tick 240). Cannot be combined with `input_tape`.
+    #[serde(default)]
+    pub pad_pulses: Option<String>,
     /// Hold the in-game forward input for simple motion benchmarks.
     #[serde(default)]
     pub hold_forward: bool,
@@ -496,6 +503,7 @@ mod tests {
                         guest_visual_frames: Some(2),
                     },
                     input_tape: None,
+                    pad_pulses: None,
                     hold_forward: false,
                     hold_run: false,
                     expected: ExpectedHashes::default(),

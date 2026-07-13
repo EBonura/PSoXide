@@ -1,4 +1,13 @@
 use super::*;
+use crate::vram::SHADOW_TEXEL_U;
+use psx_gpu::draw_line_mono;
+
+/// Shadow decals share the shadow/particle 4bpp page allocated by the unified
+/// VRAM allocator. UVs are page-relative, so only the page base moves; the
+/// texel origin is the crate vram module's placement contract.
+const SHADOW_UV_MAX: u8 = SHADOW_TEXEL_U + 63;
+const COLLISION_DEBUG_SEGMENTS: usize = 8;
+const COLLISION_DEBUG_FLOOR_LIFT: i32 = 8;
 
 /// Animate + render placed model instances whose owning room matches
 /// `current_room`. Meshes, clips, and atlas materials are resolved by
@@ -8,18 +17,56 @@ use super::*;
 /// Errors (parse failure, missing asset) skip the instance
 /// rather than crashing.
 #[derive(Copy, Clone, Debug, Default)]
-pub(crate) struct ModelInstanceDrawStats {
-    pub(crate) draws: u16,
-    pub(crate) bounds_tests: u16,
-    pub(crate) bounds_culled: u16,
-    pub(crate) stats: TexturedModelRenderStats,
+pub struct ModelInstanceDrawStats {
+    /// Instances drawn.
+    pub draws: u16,
+    /// Bounds tests run.
+    pub bounds_tests: u16,
+    /// Bounds tests that culled the instance.
+    pub bounds_culled: u16,
+    /// Model submit stats.
+    pub stats: TexturedModelRenderStats,
 }
 
+/// Depth-pass selector for the two-pass instance draw around the
+/// player.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub(crate) enum ModelInstanceDepthPass {
+pub enum ModelInstanceDepthPass {
+    /// Draw every instance.
     All,
+    /// Draw instances at or beyond the player's view depth.
     BehindPlayer(i32),
+    /// Draw instances nearer than the player's view depth.
     InFrontOfPlayer(i32),
+}
+
+/// Live pose override for one cooked model instance: a game entity
+/// bound to an instance renders at the entity runtime's position and
+/// facing instead of the cooked spawn transform (phase 3 of
+/// docs/game-runtime-plan.md). The owning game rebuilds the (tiny)
+/// list each frame from its `GameEntities` state.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct ModelInstancePoseOverride {
+    /// Index into the cooked `MODEL_INSTANCES` table.
+    pub instance: u16,
+    /// Live position, room-local engine units (floor anchor).
+    pub x: i32,
+    /// Y.
+    pub y: i32,
+    /// Z.
+    pub z: i32,
+    /// Live facing yaw, PSX angle units.
+    pub yaw: i16,
+}
+
+/// Look up the pose override for instance `index`, if any (linear
+/// scan; the list is at most the awake-entity count).
+fn pose_override_for(
+    overrides: &[ModelInstancePoseOverride],
+    index: usize,
+) -> Option<ModelInstancePoseOverride> {
+    let index = u16::try_from(index).ok()?;
+    overrides.iter().copied().find(|o| o.instance == index)
 }
 
 impl ModelInstanceDepthPass {
@@ -32,7 +79,8 @@ impl ModelInstanceDepthPass {
     }
 }
 
-pub(crate) fn accumulate_model_instance_draw_stats(
+/// Sum instance draw stats across rooms/passes.
+pub fn accumulate_model_instance_draw_stats(
     total: &mut ModelInstanceDrawStats,
     stats: ModelInstanceDrawStats,
 ) {
@@ -42,29 +90,42 @@ pub(crate) fn accumulate_model_instance_draw_stats(
     accumulate_model_stats(&mut total.stats, stats.stats);
 }
 
-pub(crate) fn draw_model_instance_shadows(
+/// Draw the floor shadow decal under every placed model instance of
+/// `current_room`.
+#[allow(clippy::too_many_arguments)]
+#[inline]
+pub fn draw_model_instance_shadows<const MAX_RUNTIME_MODELS: usize, const OT_DEPTH: usize>(
+    tables: ModelTables,
+    knobs: ModelDrawKnobs,
+    shadow: ShadowTuning,
     current_room: RoomIndex,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
     material: TextureMaterial,
     models: &[Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
+    pose_overrides: &[ModelInstancePoseOverride],
     triangles: &mut impl PrimitiveSink<TriTextured>,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) {
     let mut drawn = 0usize;
-    for inst in MODEL_INSTANCES {
-        if inst.room != current_room || drawn >= MAX_MODEL_INSTANCES {
+    for (index, inst) in tables.model_instances.iter().enumerate() {
+        if inst.room != current_room || drawn >= knobs.max_model_instances {
             continue;
         }
         let Some(runtime_model) = models.get(inst.model.to_usize()).copied().flatten() else {
             continue;
         };
+        let (x, y, z) = match pose_override_for(pose_overrides, index) {
+            Some(live) => (live.x, live.y, live.z),
+            None => (inst.x, inst.y, inst.z),
+        };
 
         draw_actor_shadow(
-            inst.x,
-            inst.y,
-            inst.z,
-            actor_shadow_radius(i32::from(runtime_model.collision_radius)),
+            shadow,
+            x,
+            y,
+            z,
+            actor_shadow_radius(shadow, i32::from(runtime_model.collision_radius)),
             camera,
             options,
             material,
@@ -75,7 +136,11 @@ pub(crate) fn draw_model_instance_shadows(
     }
 }
 
-pub(crate) fn draw_actor_shadow(
+/// Draw one actor's circular floor shadow decal.
+#[allow(clippy::too_many_arguments)]
+#[inline]
+pub fn draw_actor_shadow<const OT_DEPTH: usize>(
+    shadow: ShadowTuning,
     x: i32,
     floor_y: i32,
     z: i32,
@@ -89,7 +154,7 @@ pub(crate) fn draw_actor_shadow(
     if radius <= 0 {
         return;
     }
-    let y = floor_y.saturating_add(SHADOW_FLOOR_LIFT);
+    let y = floor_y.saturating_add(shadow.floor_lift);
     let h = radius;
     let verts = [
         WorldVertex::new(x.saturating_sub(h), y, z.saturating_sub(h)),
@@ -99,7 +164,7 @@ pub(crate) fn draw_actor_shadow(
     ];
     let shadow_options = options
         .with_depth_policy(DepthPolicy::Nearest)
-        .with_depth_bias(SHADOW_DEPTH_BIAS.saturating_neg())
+        .with_depth_bias(shadow.depth_bias.saturating_neg())
         .with_cull_mode(CullMode::None)
         .with_material_layer(material);
     const UVS: [(u8, u8); 4] = [
@@ -112,15 +177,18 @@ pub(crate) fn draw_actor_shadow(
         world.submit_textured_world_quad(triangles, *camera, verts, UVS, material, shadow_options);
 }
 
-pub(crate) fn actor_shadow_radius(base_radius: i32) -> i32 {
+/// Shadow decal radius for an actor's collision radius.
+#[inline]
+pub fn actor_shadow_radius(shadow: ShadowTuning, base_radius: i32) -> i32 {
     base_radius
-        .saturating_mul(SHADOW_RADIUS_SCALE_NUM)
-        .checked_div(SHADOW_RADIUS_SCALE_DEN)
+        .saturating_mul(shadow.radius_scale_num)
+        .checked_div(shadow.radius_scale_den)
         .unwrap_or(base_radius)
-        .clamp(SHADOW_RADIUS_MIN, SHADOW_RADIUS_MAX)
+        .clamp(shadow.radius_min, shadow.radius_max)
 }
 
-pub(crate) fn draw_collision_cylinder_debug(
+/// Immediate-mode wireframe cylinder for tuning actor blockers.
+pub fn draw_collision_cylinder_debug(
     position: RoomPoint,
     radius: i32,
     height: i32,
@@ -188,7 +256,22 @@ fn draw_optional_debug_line(a: Option<(i16, i16)>, b: Option<(i16, i16)>, color:
     draw_line_mono(a.0, a.1, b.0, b.1, color.0, color.1, color.2);
 }
 
-pub(crate) fn draw_model_instances(
+/// Animate + draw the placed model instances of `current_room` that
+/// fall in `depth_pass`.
+#[allow(clippy::too_many_arguments)]
+#[inline]
+pub fn draw_model_instances<
+    const MAX_RUNTIME_MODELS: usize,
+    const MAX_RUNTIME_MODEL_CLIPS: usize,
+    const MODEL_VERTEX_CAP: usize,
+    const JOINT_CAP: usize,
+    const OT_DEPTH: usize,
+    const BOUNDS_CULL: bool,
+    const PROFILE: bool,
+>(
+    tables: ModelTables,
+    knobs: ModelDrawKnobs,
+    scratch: &mut ModelDrawScratch<MODEL_VERTEX_CAP, JOINT_CAP>,
     current_room: RoomIndex,
     elapsed_tick: SimTick,
     video_hz: VideoHz,
@@ -200,18 +283,24 @@ pub(crate) fn draw_model_instances(
     model_parts: &[ModelPart],
     model_vertices: &[ModelVertex],
     clips: &[Option<Animation<'static>>; MAX_RUNTIME_MODEL_CLIPS],
+    pose_overrides: &[ModelInstancePoseOverride],
     depth_pass: ModelInstanceDepthPass,
     triangles: &mut impl PrimitiveSink<TriTextured>,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) -> ModelInstanceDrawStats {
     let mut drawn = 0usize;
     let mut out = ModelInstanceDrawStats::default();
-    for inst in MODEL_INSTANCES {
-        if inst.room != current_room || drawn >= MAX_MODEL_INSTANCES {
+    for (instance_index, inst) in tables.model_instances.iter().enumerate() {
+        if inst.room != current_room || drawn >= knobs.max_model_instances {
             continue;
         }
         let Some(runtime_model) = models.get(inst.model.to_usize()).copied().flatten() else {
             continue;
+        };
+        let live = pose_override_for(pose_overrides, instance_index);
+        let (inst_x, inst_y, inst_z, inst_yaw) = match live {
+            Some(live) => (live.x, live.y, live.z, live.yaw),
+            None => (inst.x, inst.y, inst.z, inst.yaw),
         };
 
         // Clip resolution: per-instance override → model default.
@@ -230,18 +319,19 @@ pub(crate) fn draw_model_instances(
         } else {
             (inst.pose_frame.min(anim.frame_count().saturating_sub(1)) as u32) << 12
         };
-        let bounds = model_frame_bounds(runtime_model, clip_local, phase);
-        let clip_anchor = model_clip_anchor(runtime_model, clip_local);
-        let reference_anchor = model_clip_anchor(runtime_model, runtime_model.default_clip);
+        let bounds = model_frame_bounds(tables, runtime_model, clip_local, phase);
+        let clip_anchor = model_clip_anchor(tables, runtime_model, clip_local);
+        let reference_anchor = model_clip_anchor(tables, runtime_model, runtime_model.default_clip);
         let pose_translation =
             model_pose_anchor_translation(anim, phase, clip_anchor, reference_anchor, None);
 
-        // Instance rotation from the authored transform. The entity
-        // yaw and the renderer's visual yaw share the Y axis; pitch
-        // and roll come from the entity transform and compose as
-        // `Rz(roll) * Ry(yaw) * Rx(pitch)` (the socket convention).
-        // The yaw-only case keeps the cheaper single-axis build.
-        let root_yaw = Angle::from_q12(inst.yaw as u16);
+        // Instance rotation from the authored transform (or the live
+        // entity pose). The entity yaw and the renderer's visual yaw
+        // share the Y axis; pitch and roll come from the entity
+        // transform and compose as `Rz(roll) * Ry(yaw) * Rx(pitch)`
+        // (the socket convention). The yaw-only case keeps the
+        // cheaper single-axis build.
+        let root_yaw = Angle::from_q12(inst_yaw as u16);
         let combined_yaw = root_yaw.add_signed_q12(inst.visual_yaw);
         let model_rotation = if inst.pitch == 0 && inst.roll == 0 {
             yaw_rotation_matrix(combined_yaw)
@@ -251,9 +341,9 @@ pub(crate) fn draw_model_instances(
         // Authored instance positions are floor anchors; cooked
         // model vertices are centred around their bounds.
         let origin = visual_model_origin(
-            inst.x,
-            inst.y,
-            inst.z,
+            inst_x,
+            inst_y,
+            inst_z,
             runtime_model.world_height,
             inst.visual_offset,
             inst.visual_scale_q8,
@@ -268,7 +358,7 @@ pub(crate) fn draw_model_instances(
         telemetry::stage_begin(telemetry::stage::MODEL_BOUNDS);
         out.bounds_tests = out.bounds_tests.saturating_add(1);
         let visible = match bounds {
-            Some(bounds) if MODEL_BOUNDS_CULLING_ENABLED => model_bounds_visible(
+            Some(bounds) if BOUNDS_CULL => model_bounds_visible(
                 camera,
                 options,
                 bounds_origin,
@@ -296,7 +386,7 @@ pub(crate) fn draw_model_instances(
             .with_cull_mode(cull_mode)
             .with_material_layer(material)
             .with_textured_triangle_splitting(true)
-            .with_textured_triangle_max_edge(MODEL_TEXTURE_SPLIT_MAX_EDGE);
+            .with_textured_triangle_max_edge(knobs.texture_split_max_edge);
 
         telemetry::stage_begin(telemetry::stage::MODEL_DRAW);
         let faces = runtime_model_faces(runtime_model, model_faces);
@@ -316,6 +406,8 @@ pub(crate) fn draw_model_instances(
             faces,
             model_parts,
             model_vertices,
+            PROFILE,
+            scratch,
         );
         telemetry::stage_end(telemetry::stage::MODEL_DRAW);
         accumulate_model_stats(&mut out.stats, stats);

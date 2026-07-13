@@ -1529,7 +1529,7 @@ fn validation_launch_args(
         guest_frames: checkpoint.stop.guest_frames,
         guest_visual_frames: checkpoint.stop.guest_visual_frames,
         input_tape,
-        pad_pulses: None,
+        pad_pulses: checkpoint.pad_pulses.clone(),
         embedded_playtest: artifact.embedded_playtest,
         bios_boot: artifact.bios_boot,
         dump_hash: false,

@@ -1,4 +1,8 @@
 use super::*;
+use psx_engine::{
+    apply_model_pose_translation, compute_joint_world_transform, JointWorldTransform,
+};
+use psx_level::{equipment_flags, WeaponHitShapeRecord};
 
 #[derive(Copy, Clone)]
 struct AttachmentPose {
@@ -7,7 +11,17 @@ struct AttachmentPose {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn draw_player_equipment(
+pub(super) fn draw_player_equipment<
+    const MAX_RUNTIME_MODELS: usize,
+    const MAX_RUNTIME_MODEL_CLIPS: usize,
+    const MODEL_VERTEX_CAP: usize,
+    const JOINT_CAP: usize,
+    const OT_DEPTH: usize,
+    const PROFILE: bool,
+>(
+    tables: ModelTables,
+    knobs: ModelDrawKnobs,
+    scratch: &mut ModelDrawScratch<MODEL_VERTEX_CAP, JOINT_CAP>,
     current_room: RoomIndex,
     character: RuntimeCharacter,
     models: &[Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
@@ -46,8 +60,12 @@ pub(super) fn draw_player_equipment(
         character.action_speed(anim_action),
         character.action_frame_range(anim_action),
     );
-    let character_anchor = model_clip_anchor(character_model, clip_local);
-    let reference_anchor = model_clip_anchor(character_model, character.clip_for(PlayerAnim::Idle));
+    let character_anchor = model_clip_anchor(tables, character_model, clip_local);
+    let reference_anchor = model_clip_anchor(
+        tables,
+        character_model,
+        character.clip_for(PlayerAnim::Idle),
+    );
     let character_pose_translation = model_pose_anchor_translation(
         character_anim,
         character_phase,
@@ -70,18 +88,20 @@ pub(super) fn draw_player_equipment(
         visual_model_local_to_world(character_model, character.visual_scale_q8);
 
     let mut drawn = 0usize;
-    for equipment in EQUIPMENT {
+    for equipment in tables.equipment {
         if equipment.room != current_room
             || equipment.flags & equipment_flags::PLAYER == 0
-            || drawn >= MAX_EQUIPMENT_DRAWS
+            || drawn >= knobs.max_equipment_draws
         {
             continue;
         }
-        let Some(weapon) = WEAPONS.get(equipment.weapon.to_usize()) else {
+        let Some(weapon) = tables.weapons.get(equipment.weapon.to_usize()) else {
             continue;
         };
-        let Some(socket) = find_model_socket(character_model, equipment.character_socket)
-            .or_else(|| find_model_socket(character_model, weapon.default_character_socket))
+        let Some(socket) = find_model_socket(tables, character_model, equipment.character_socket)
+            .or_else(|| {
+                find_model_socket(tables, character_model, weapon.default_character_socket)
+            })
         else {
             continue;
         };
@@ -122,7 +142,7 @@ pub(super) fn draw_player_equipment(
                         .with_cull_mode(CullMode::Back)
                         .with_material_layer(material)
                         .with_textured_triangle_splitting(true)
-                        .with_textured_triangle_max_edge(MODEL_TEXTURE_SPLIT_MAX_EDGE);
+                        .with_textured_triangle_max_edge(knobs.texture_split_max_edge);
                     let faces = runtime_model_faces(weapon_model, model_faces);
                     let stats = submit_runtime_model_predecoded(
                         world,
@@ -140,6 +160,8 @@ pub(super) fn draw_player_equipment(
                         faces,
                         model_parts,
                         model_vertices,
+                        PROFILE,
+                        scratch,
                     );
                     accumulate_model_stats(&mut out.stats, stats);
                     if stats.primitive_overflow || stats.command_overflow {
@@ -154,6 +176,7 @@ pub(super) fn draw_player_equipment(
         };
 
         let (active, hits) = evaluate_weapon_hitboxes(
+            tables,
             current_room,
             weapon.hitbox_first.to_usize(),
             weapon.hitbox_count,
@@ -168,15 +191,19 @@ pub(super) fn draw_player_equipment(
 }
 
 fn find_model_socket(
+    tables: ModelTables,
     model: RuntimeModelAsset,
     name: &str,
 ) -> Option<&'static LevelModelSocketRecord> {
     let first = model.socket_first.to_usize();
     let count = model.socket_count as usize;
-    let sockets = MODEL_SOCKETS.get(first..first.saturating_add(count))?;
+    let sockets = tables
+        .model_sockets
+        .get(first..first.saturating_add(count))?;
     sockets.iter().find(|socket| socket.name == name)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn attachment_socket_pose(
     _model: RuntimeModelAsset,
     animation: Animation<'static>,
@@ -217,6 +244,7 @@ fn compose_socket_pose(
 }
 
 fn evaluate_weapon_hitboxes(
+    tables: ModelTables,
     current_room: RoomIndex,
     first: usize,
     count: u16,
@@ -226,7 +254,10 @@ fn evaluate_weapon_hitboxes(
 ) -> (u16, u16) {
     let mut active = 0u16;
     let mut hits = 0u16;
-    let Some(hitboxes) = WEAPON_HITBOXES.get(first..first.saturating_add(count as usize)) else {
+    let Some(hitboxes) = tables
+        .weapon_hitboxes
+        .get(first..first.saturating_add(count as usize))
+    else {
         return (0, 0);
     };
     for hitbox in hitboxes {
@@ -234,7 +265,7 @@ fn evaluate_weapon_hitboxes(
             continue;
         }
         active = active.saturating_add(1);
-        for entity in ENTITIES {
+        for entity in tables.entities {
             if entity.room != current_room {
                 continue;
             }
