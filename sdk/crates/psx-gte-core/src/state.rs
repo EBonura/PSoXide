@@ -208,10 +208,7 @@ pub struct Gte {
     /// Per-opcode diagnostic counts, indexed by the low 6 command bits.
     /// Pure profiling data -- excluded from save states (see
     /// [`default_opcode_counts`]).
-    #[cfg_attr(
-        feature = "serde",
-        serde(skip, default = "default_opcode_counts")
-    )]
+    #[cfg_attr(feature = "serde", serde(skip, default = "default_opcode_counts"))]
     profile_opcode_counts: [u64; 64],
 }
 

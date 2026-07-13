@@ -48,8 +48,16 @@ fn save_state_round_trips_cpu_and_bus_state() {
 
     // Sanity check the program actually did something before we
     // trust the round-trip assertions below.
-    assert_eq!(cpu.gpr(8), 0x1234_5678, "t0 should hold the assembled constant");
-    assert_eq!(bus.read32(0), 0x1234_5678, "sw should have landed in RAM at address 0");
+    assert_eq!(
+        cpu.gpr(8),
+        0x1234_5678,
+        "t0 should hold the assembled constant"
+    );
+    assert_eq!(
+        bus.read32(0),
+        0x1234_5678,
+        "sw should have landed in RAM at address 0"
+    );
     let tick_before = cpu.tick();
     assert!(tick_before >= 5);
 
@@ -59,7 +67,16 @@ fn save_state_round_trips_cpu_and_bus_state() {
     bus.gpu.vram.words_mut()[0] = 0xBEEF;
     bus.gpu.vram.words_mut()[1024 * 511 + 1023] = 0xCAFE; // last pixel
 
-    let snapshot = EmulatorStateRef { cpu: &cpu, bus: &bus };
+    // Pending CD samples are still emulator input: once consumed they
+    // update capture buffers in SPU RAM. Losing the queue would make a
+    // restored run diverge even though the host-facing output queue is
+    // intentionally discarded.
+    bus.spu.feed_cd_audio(&[(1_234, -1_234), (5_678, -5_678)]);
+
+    let snapshot = EmulatorStateRef {
+        cpu: &cpu,
+        bus: &bus,
+    };
     let state = SaveStateV1::new(snapshot, "test-game-id", cpu.tick());
     let bytes = state.to_bytes().expect("in-memory encode must succeed");
 
@@ -75,11 +92,16 @@ fn save_state_round_trips_cpu_and_bus_state() {
     assert_eq!(restored_cpu.pc(), cpu.pc());
     assert_eq!(restored_cpu.tick(), tick_before);
     for i in 0..32 {
-        assert_eq!(restored_cpu.gpr(i), cpu.gpr(i), "gpr {i} mismatch after restore");
+        assert_eq!(
+            restored_cpu.gpr(i),
+            cpu.gpr(i),
+            "gpr {i} mismatch after restore"
+        );
     }
     assert_eq!(restored_bus.read32(0), 0x1234_5678);
     assert_eq!(restored_bus.gpu.vram.words()[0], 0xBEEF);
     assert_eq!(restored_bus.gpu.vram.words()[1024 * 511 + 1023], 0xCAFE);
+    assert_eq!(restored_bus.spu.cd_audio_queue_len(), 2);
 
     // The restored state must also keep running: step both the
     // original and the restored copy the same way and confirm they

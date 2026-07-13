@@ -325,8 +325,15 @@ mod tests {
         std::fs::write(p.savestate_file("g", 1), b"x").unwrap();
         let slots = p.list_savestate_slots("g");
         let next = slots.last().map_or(0, |m| m + 1);
-        assert_eq!(next, 2, "next free slot should be one past the highest existing");
-        assert_eq!(slots.last().copied(), Some(1), "latest save is the highest slot");
+        assert_eq!(
+            next, 2,
+            "next free slot should be one past the highest existing"
+        );
+        assert_eq!(
+            slots.last().copied(),
+            Some(1),
+            "latest save is the highest slot"
+        );
     }
 
     #[test]
@@ -345,7 +352,11 @@ mod tests {
         std::fs::write(p.savestate_file("g", 0), b"x").unwrap();
         std::fs::write(p.savestate_file("g", 1), b"x").unwrap();
         p.write_top_slot("g", 0).unwrap();
-        assert_eq!(p.read_top_slot("g"), Some(0), "pinning an older slot must stick");
+        assert_eq!(
+            p.read_top_slot("g"),
+            Some(0),
+            "pinning an older slot must stick"
+        );
     }
 
     #[test]
