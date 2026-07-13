@@ -1,6 +1,18 @@
-use super::vram_runtime::VramSlotClutMode;
-use super::vram_upload::{upload_clut, upload_opaque_clut};
-use super::*;
+//! Async VRAM upload queue, carved out of `editor-playtest`'s
+//! `vram_upload_queue` module (phase 1, vram_runtime slice). Jobs are
+//! stepped a bounded number of texture rows per call so a room
+//! activation's upload burst spreads across background ticks instead
+//! of stalling a frame; [`super::VramRuntime`] owns the one instance.
+//!
+//! Jobs identify their source texture by [`AssetId`] and re-resolve the
+//! bytes through the caller's resolver on every step (phase 1.5): the
+//! queue retains no byte slices across frames, so upload sources only
+//! need to outlive each step call instead of being `&'static`.
+
+use super::{upload_clut, upload_opaque_clut, VramSlotClutMode};
+use psx_asset::Texture;
+use psx_engine::telemetry;
+use psx_level::AssetId;
 use psx_vram::{upload_bytes, VramRect};
 
 // Concurrent in-flight texture uploads. A room activation can request a burst
@@ -8,6 +20,7 @@ use psx_vram::{upload_bytes, VramRect};
 // untextured fallback until the material pump re-queues it, so a slightly deeper
 // queue reduces those transient drops during heavy streaming.
 const VRAM_UPLOAD_QUEUE_CAP: usize = 12;
+
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub(crate) enum VramUploadKind {
     TextureAndClut,
@@ -21,7 +34,6 @@ pub(crate) struct VramUploadJob {
     pub(crate) asset: AssetId,
     pub(crate) clut_mode: VramSlotClutMode,
     pub(crate) kind: VramUploadKind,
-    pub(crate) bytes: Option<&'static [u8]>,
     pub(crate) texture_x: u16,
     pub(crate) texture_y: u16,
     pub(crate) texture_width_halfwords: u16,
@@ -40,7 +52,6 @@ impl VramUploadJob {
         asset: AssetId(0),
         clut_mode: VramSlotClutMode::OpaqueZero,
         kind: VramUploadKind::TextureAndClut,
-        bytes: None,
         texture_x: 0,
         texture_y: 0,
         texture_width_halfwords: 0,
@@ -66,7 +77,7 @@ pub(crate) struct VramUploadQueue {
 }
 
 impl VramUploadQueue {
-    const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self {
             jobs: [VramUploadJob::EMPTY; VRAM_UPLOAD_QUEUE_CAP],
         }
@@ -118,7 +129,12 @@ impl VramUploadQueue {
         false
     }
 
-    pub(crate) fn step(&mut self, row_budget: u16, mark_ready: fn(usize)) -> bool {
+    pub(crate) fn step<'r>(
+        &mut self,
+        row_budget: u16,
+        resolve: &impl Fn(AssetId) -> Option<&'r [u8]>,
+        mut mark_ready: impl FnMut(usize),
+    ) -> bool {
         let mut remaining_rows = row_budget;
         let mut completed_any = false;
         let mut i = 0usize;
@@ -130,10 +146,10 @@ impl VramUploadQueue {
 
             telemetry::stage_begin(telemetry::stage::VRAM_UPLOAD);
             if !self.jobs[i].texture_complete() {
-                let rows = self.upload_texture_rows(i, remaining_rows);
+                let rows = self.upload_texture_rows(i, remaining_rows, resolve);
                 remaining_rows = remaining_rows.saturating_sub(rows.max(1));
             } else if !self.jobs[i].clut_uploaded {
-                self.upload_clut(i);
+                self.upload_clut(i, resolve);
                 remaining_rows = remaining_rows.saturating_sub(1);
             }
             telemetry::stage_end(telemetry::stage::VRAM_UPLOAD);
@@ -149,8 +165,13 @@ impl VramUploadQueue {
         completed_any
     }
 
-    fn upload_texture_rows(&mut self, index: usize, row_budget: u16) -> u16 {
-        let Some(bytes) = self.jobs[index].bytes else {
+    fn upload_texture_rows<'r>(
+        &mut self,
+        index: usize,
+        row_budget: u16,
+        resolve: &impl Fn(AssetId) -> Option<&'r [u8]>,
+    ) -> u16 {
+        let Some(bytes) = resolve(self.jobs[index].asset) else {
             self.jobs[index] = VramUploadJob::EMPTY;
             return 0;
         };
@@ -188,8 +209,8 @@ impl VramUploadQueue {
         uploaded
     }
 
-    fn upload_clut(&mut self, index: usize) {
-        let Some(bytes) = self.jobs[index].bytes else {
+    fn upload_clut<'r>(&mut self, index: usize, resolve: &impl Fn(AssetId) -> Option<&'r [u8]>) {
+        let Some(bytes) = resolve(self.jobs[index].asset) else {
             self.jobs[index] = VramUploadJob::EMPTY;
             return;
         };
@@ -217,5 +238,3 @@ impl VramUploadQueue {
         self.jobs[index].clut_uploaded = true;
     }
 }
-
-pub(crate) static mut VRAM_UPLOAD_QUEUE: VramUploadQueue = VramUploadQueue::new();

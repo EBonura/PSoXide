@@ -169,6 +169,7 @@ fn runtime_numeric_guard() -> Result<(), String> {
     let root = repo_root();
     let mut runtime_roots = vec![
         root.join("engine/crates/psx-engine/src"),
+        root.join("engine/crates/psx-game-runtime/src"),
         root.join("engine/crates/psx-level/src"),
     ];
     push_child_src_dirs(&mut runtime_roots, &root.join("engine/examples"))?;
