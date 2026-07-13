@@ -467,6 +467,7 @@ fn set_first_model_instance_clip(project: &mut ProjectDocument, clip_index: u16)
 
 mod assets_validation;
 mod lights_components;
+mod logic_entities;
 mod models_entities;
 mod player_character;
 mod rooms_visibility;

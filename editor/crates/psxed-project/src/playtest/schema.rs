@@ -8,6 +8,36 @@ use crate::{
 /// Number of cooked character animation action slots.
 pub const PLAYTEST_CHARACTER_ACTION_COUNT: usize = psx_level::CHARACTER_ANIMATION_ACTION_COUNT;
 
+/// Cook-time string interner (hl-psx style): authored names become
+/// deterministic u16 ids in first-intern order (the scene walk is
+/// deterministic), starting at 1; empty/whitespace names intern to
+/// `psx_level::LOGIC_NAME_NONE`. The strings never reach the runtime.
+#[derive(Default)]
+pub(crate) struct NameInterner {
+    ids: std::collections::HashMap<String, u16>,
+}
+
+impl NameInterner {
+    /// Intern `name`, returning its stable id.
+    pub(crate) fn intern(&mut self, name: &str) -> u16 {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return psx_level::LOGIC_NAME_NONE;
+        }
+        if let Some(&id) = self.ids.get(trimmed) {
+            return id;
+        }
+        let id = u16::try_from(self.ids.len() + 1).unwrap_or(u16::MAX);
+        self.ids.insert(trimmed.to_string(), id);
+        id
+    }
+
+    /// Number of distinct interned names.
+    pub(crate) fn len(&self) -> usize {
+        self.ids.len()
+    }
+}
+
 /// Generated subdirectory inside the playtest example that
 /// receives manifest source + `rooms/` + `textures/`. Stable
 /// so the example's `include!` paths don't move.
@@ -1114,6 +1144,15 @@ pub struct PlaytestWeapon {
     pub hitbox_first: u16,
     /// Number of hitboxes.
     pub hitbox_count: u16,
+    /// Melee arc reach from the wielder's origin, engine units.
+    pub arc_reach: u16,
+    /// Melee arc half-width, PSX angle units (cooked from authored
+    /// degrees: `deg * 4096 / 360`).
+    pub arc_half_angle: u16,
+    /// Damage per light-attack connection.
+    pub damage: u16,
+    /// Poise damage per light-attack connection.
+    pub poise_damage: u16,
 }
 
 /// Cooked Equipment component on an Entity.
@@ -1243,9 +1282,108 @@ pub struct PlaytestInteractable {
     /// Index into [`PlaytestPackage::interactable_messages`], or
     /// [`psx_level::INTERACTABLE_MESSAGE_NONE`].
     pub message: u16,
+    /// Index of the paired record in [`PlaytestPackage::logic`] (the
+    /// cook emits both from one authored component).
+    pub logic: u16,
     /// Stable authored checkpoint id. Empty for message-only records.
     pub checkpoint_id: String,
     /// Runtime flags from [`psx_level::interactable_flags`].
+    pub flags: u16,
+}
+
+/// One cooked logic entity (hl-psx `LogicEnt`-shaped). Mirrors
+/// `psx_level::LevelLogicRecord`; see that type for field semantics.
+/// All names are already interned to u16 ids -- the strings die here,
+/// on the host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestLogic {
+    /// Owning room.
+    pub room: u16,
+    /// Behavior selector from `psx_level::logic_kind`.
+    pub kind: u8,
+    /// Kind-specific authored flag bits.
+    pub spawnflags: u16,
+    /// Interned record name, or `psx_level::LOGIC_NAME_NONE`.
+    pub targetname: u16,
+    /// Interned fire target, or `psx_level::LOGIC_NAME_NONE`.
+    pub target: u16,
+    /// Interned kill target, or `psx_level::LOGIC_NAME_NONE`.
+    pub killtarget: u16,
+    /// Interned multisource gate, or `psx_level::LOGIC_NAME_NONE`.
+    pub master: u16,
+    /// 60 Hz ticks between triggering and firing `target`.
+    pub delay_ticks: u16,
+    /// Re-arm delay in 60 Hz ticks; negative = fire once.
+    pub wait_ticks: i16,
+    /// First kind-specific argument.
+    pub arg0: u16,
+    /// Second kind-specific argument.
+    pub arg1: u16,
+    /// Kind-defined entity link, or `psx_level::LOGIC_LINK_NONE`.
+    pub link: u16,
+    /// Index into [`PlaytestPackage::interactable_messages`], or
+    /// `psx_level::INTERACTABLE_MESSAGE_NONE`.
+    pub message: u16,
+    /// Room-local origin X.
+    pub x: i32,
+    /// Y.
+    pub y: i32,
+    /// Room-local origin Z.
+    pub z: i32,
+    /// Trigger AABB minimum corner, room-local.
+    pub min: [i32; 3],
+    /// Trigger AABB maximum corner.
+    pub max: [i32; 3],
+    /// Runtime flags from `psx_level::logic_flags`.
+    pub flags: u16,
+}
+
+/// One placed souls-like game entity. Mirrors
+/// `psx_level::LevelGameEntityRecord`; see that type for semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestGameEntity {
+    /// Owning room.
+    pub room: u16,
+    /// Interned archetype tag (the Character resource name).
+    pub kind: u16,
+    /// Interned name logic can target, or `psx_level::LOGIC_NAME_NONE`.
+    pub targetname: u16,
+    /// Index into [`PlaytestPackage::model_instances`], or
+    /// `psx_level::GAME_ENTITY_MODEL_INSTANCE_NONE`.
+    pub model_instance: u16,
+    /// Room-local spawn X.
+    pub x: i32,
+    /// Y.
+    pub y: i32,
+    /// Room-local spawn Z.
+    pub z: i32,
+    /// Spawn yaw, PSX angle units.
+    pub yaw: i16,
+    /// Body cylinder radius, engine units (Character-bound).
+    pub radius: u16,
+    /// Body cylinder height, engine units (Character-bound).
+    pub height: u16,
+    /// Patrol speed, engine units per 60 Hz tick (Character walk).
+    pub walk_speed: i32,
+    /// Chase speed, engine units per 60 Hz tick (Character run).
+    pub run_speed: i32,
+    /// Patrol anchor one, room-local (== spawn when unauthored).
+    pub patrol: [i32; 3],
+    /// 60 Hz ticks idled at a reached patrol anchor.
+    pub patrol_wait_ticks: u16,
+    /// XZ aggro radius in engine units.
+    pub aggro_radius: u16,
+    /// Attack windup ticks.
+    pub windup_ticks: u8,
+    /// Post-attack recovery ticks.
+    pub recovery_ticks: u8,
+    /// Poise pool.
+    pub poise: u16,
+    /// Touch/melee damage.
+    pub touch_damage: u16,
+    /// Health pool at spawn.
+    pub max_health: u16,
+    /// Runtime flags from `psx_level::game_entity_flags`.
     pub flags: u16,
 }
 
@@ -1490,6 +1628,13 @@ pub struct PlaytestPackage {
     pub interactable_messages: Vec<PlaytestInteractableMessage>,
     /// Placed gameplay interactables.
     pub interactables: Vec<PlaytestInteractable>,
+    /// Cooked logic entities (phase-3 event graph). Interactables
+    /// emit one of these alongside their `PlaytestInteractable` so
+    /// the graph can reference them; trigger/relay/door authoring
+    /// nodes land with the next editor slice.
+    pub logic: Vec<PlaytestLogic>,
+    /// Placed souls-like game entities (enemies).
+    pub game_entities: Vec<PlaytestGameEntity>,
     /// Single player spawn -- required.
     pub spawn: Option<PlaytestSpawn>,
     /// Cooked Character resources used by player / future

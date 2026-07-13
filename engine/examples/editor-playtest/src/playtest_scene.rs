@@ -222,7 +222,7 @@ impl Scene for Playtest {
             debug_log_post_cross_render_start(
                 self.room_index,
                 camera,
-                self.portal_visibility.visible_room_mask(),
+                self.visibility.result.visible_room_mask(),
                 self.active_room_mask(),
                 self.current_collision_room.is_some(),
             );
@@ -287,10 +287,22 @@ impl Scene for Playtest {
             #[cfg(feature = "world-grid-visible")]
             let mut room_stats_total = GridVisibilityStats::default();
 
+            // Live entity poses: instances bound to game entities
+            // render where the entity runtime moved them (phase 3).
+            let mut entity_poses = [ModelInstancePoseOverride {
+                instance: u16::MAX,
+                x: 0,
+                y: 0,
+                z: 0,
+                yaw: 0,
+            }; MAX_GAME_ENTITIES];
+            let entity_pose_count = self.game_entity_pose_overrides(&mut entity_poses);
+            let entity_poses = &entity_poses[..entity_pose_count];
+
             let active_draw_order = active_room_draw_order(
-                &self.active_rooms,
+                &self.window.rooms,
                 camera,
-                &self.portal_visibility,
+                &self.visibility.result,
                 self.room_index,
                 cached_room_draw_order_mode(),
             );
@@ -299,7 +311,7 @@ impl Scene for Playtest {
                     continue;
                 }
                 let active_slot = active_slot as usize;
-                let Some(active) = self.active_rooms[active_slot] else {
+                let Some(active) = self.window.rooms[active_slot] else {
                     continue;
                 };
                 let draws_room = self.portal_visibility_draws_room(active.index);
@@ -320,7 +332,7 @@ impl Scene for Playtest {
                     room_cache_surfaces = room_cache_surfaces
                         .saturating_add(active.surface_cache.surface_count as u32);
                 }
-                let materials = active.materials();
+                let materials = active_room_materials(&active);
                 let Some(room_record) = ROOMS.get(active.index.to_usize()) else {
                     continue;
                 };
@@ -335,6 +347,7 @@ impl Scene for Playtest {
                     fog_rgb: Rgb8::from_array(room_record.fog_rgb),
                     fog_near: room_record.fog_near,
                     fog_far: room_record.fog_far,
+                    lights: LIGHTS,
                 };
                 telemetry::stage_begin(telemetry::stage::ROOM);
                 #[cfg(feature = "world-grid-visible")]
@@ -351,18 +364,16 @@ impl Scene for Playtest {
                             )) = room_surface_cache_slices(active.index, active.surface_cache)
                             {
                                 let vertex_count = cached_vertices.len();
+                                let room_projection = room_projection_arena();
                                 let projected_indices =
-                                    unsafe { &mut CACHED_ROOM_PROJECTED_INDICES[..vertex_count] };
+                                    &mut room_projection.indices[..vertex_count];
                                 let projected_vertices =
-                                    unsafe { &mut CACHED_ROOM_PROJECTED_VERTICES[..vertex_count] };
-                                let projected_ready =
-                                    unsafe { &mut CACHED_ROOM_PROJECTED_READY[..vertex_count] };
-                                let projected_depths =
-                                    unsafe { &mut CACHED_ROOM_PROJECTED_DEPTHS[..vertex_count] };
-                                let accepted_cell_indices =
-                                    unsafe { &mut CACHED_ROOM_ACCEPTED_CELL_INDICES[..] };
-                                let accepted_cell_depths =
-                                    unsafe { &mut CACHED_ROOM_ACCEPTED_CELL_DEPTHS[..] };
+                                    &mut room_projection.vertices[..vertex_count];
+                                let projected_ready = &mut room_projection.ready[..vertex_count];
+                                let projected_depths = &mut room_projection.depths[..vertex_count];
+                                let cell_scratch = cell_scratch_arena();
+                                let accepted_cell_indices = &mut cell_scratch.indices[..];
+                                let accepted_cell_depths = &mut cell_scratch.depths[..];
                                 draw_indexed_cached_room_vertex_lit_all_cells(
                                     cached_cells,
                                     cached_cell_vertices,
@@ -381,7 +392,7 @@ impl Scene for Playtest {
                                     cached_room_depth_mode(),
                                     cached_room_subdivision_mode(),
                                     ROOM_VISIBLE_CELL_SCREEN_MARGIN,
-                                    active.index == self.portal_visibility_root,
+                                    active.index == self.visibility.root,
                                     Some(prebuilt_room_quads_for(active.index)),
                                     &mut primitive_packets,
                                     &mut world,
@@ -489,21 +500,18 @@ impl Scene for Playtest {
                                     room_surface_cache_slices(active.index, active.surface_cache)
                                 {
                                     let vertex_count = cached_vertices.len();
-                                    let projected_indices = unsafe {
-                                        &mut CACHED_ROOM_PROJECTED_INDICES[..vertex_count]
-                                    };
-                                    let projected_vertices = unsafe {
-                                        &mut CACHED_ROOM_PROJECTED_VERTICES[..vertex_count]
-                                    };
+                                    let room_projection = room_projection_arena();
+                                    let projected_indices =
+                                        &mut room_projection.indices[..vertex_count];
+                                    let projected_vertices =
+                                        &mut room_projection.vertices[..vertex_count];
                                     let projected_ready =
-                                        unsafe { &mut CACHED_ROOM_PROJECTED_READY[..vertex_count] };
-                                    let projected_depths = unsafe {
-                                        &mut CACHED_ROOM_PROJECTED_DEPTHS[..vertex_count]
-                                    };
-                                    let accepted_cell_indices =
-                                        unsafe { &mut CACHED_ROOM_ACCEPTED_CELL_INDICES[..] };
-                                    let accepted_cell_depths =
-                                        unsafe { &mut CACHED_ROOM_ACCEPTED_CELL_DEPTHS[..] };
+                                        &mut room_projection.ready[..vertex_count];
+                                    let projected_depths =
+                                        &mut room_projection.depths[..vertex_count];
+                                    let cell_scratch = cell_scratch_arena();
+                                    let accepted_cell_indices = &mut cell_scratch.indices[..];
+                                    let accepted_cell_depths = &mut cell_scratch.depths[..];
                                     draw_indexed_cached_room_vertex_lit_visible_cells(
                                         cached_cells,
                                         cached_cell_vertices,
@@ -589,21 +597,18 @@ impl Scene for Playtest {
                                 {
                                     room_cached_draws = room_cached_draws.saturating_add(1);
                                     let vertex_count = cached_vertices.len();
-                                    let projected_indices = unsafe {
-                                        &mut CACHED_ROOM_PROJECTED_INDICES[..vertex_count]
-                                    };
-                                    let projected_vertices = unsafe {
-                                        &mut CACHED_ROOM_PROJECTED_VERTICES[..vertex_count]
-                                    };
+                                    let room_projection = room_projection_arena();
+                                    let projected_indices =
+                                        &mut room_projection.indices[..vertex_count];
+                                    let projected_vertices =
+                                        &mut room_projection.vertices[..vertex_count];
                                     let projected_ready =
-                                        unsafe { &mut CACHED_ROOM_PROJECTED_READY[..vertex_count] };
-                                    let projected_depths = unsafe {
-                                        &mut CACHED_ROOM_PROJECTED_DEPTHS[..vertex_count]
-                                    };
-                                    let accepted_cell_indices =
-                                        unsafe { &mut CACHED_ROOM_ACCEPTED_CELL_INDICES[..] };
-                                    let accepted_cell_depths =
-                                        unsafe { &mut CACHED_ROOM_ACCEPTED_CELL_DEPTHS[..] };
+                                        &mut room_projection.ready[..vertex_count];
+                                    let projected_depths =
+                                        &mut room_projection.depths[..vertex_count];
+                                    let cell_scratch = cell_scratch_arena();
+                                    let accepted_cell_indices = &mut cell_scratch.indices[..];
+                                    let accepted_cell_depths = &mut cell_scratch.depths[..];
                                     draw_indexed_cached_room_vertex_lit_all_cells(
                                         cached_cells,
                                         cached_cell_vertices,
@@ -709,9 +714,7 @@ impl Scene for Playtest {
                 box_prop_profile_begin(telemetry::stage::BOX_PROPS);
                 draw_box_props(
                     BOX_PROPS,
-                    &self.box_prop_broken,
-                    &self.box_prop_runtime,
-                    &self.box_prop_fall,
+                    &self.box_props,
                     active.index,
                     &room_camera,
                     actor_options,
@@ -723,8 +726,7 @@ impl Scene for Playtest {
                 box_prop_profile_begin(telemetry::stage::BOX_PROP_DEBRIS);
                 draw_box_prop_floor_debris(
                     BOX_PROPS,
-                    &self.box_prop_broken,
-                    &self.box_prop_runtime,
+                    &self.box_props,
                     active.index,
                     &room_camera,
                     actor_options,
@@ -735,9 +737,8 @@ impl Scene for Playtest {
                 box_prop_profile_end(telemetry::stage::BOX_PROP_DEBRIS);
                 box_prop_profile_begin(telemetry::stage::BOX_PROP_SHARDS);
                 draw_box_prop_break_events(
-                    &self.box_prop_break_events,
                     BOX_PROPS,
-                    &self.box_prop_runtime,
+                    &self.box_props,
                     active.index,
                     &room_camera,
                     actor_options,
@@ -776,6 +777,7 @@ impl Scene for Playtest {
                         actor_options,
                         shadow_material,
                         &self.models,
+                        entity_poses,
                         &mut primitive_packets,
                         &mut world,
                     );
@@ -792,6 +794,7 @@ impl Scene for Playtest {
                     &self.model_parts[..self.model_part_count],
                     &self.model_vertices[..self.model_vertex_count],
                     &self.clips,
+                    entity_poses,
                     instance_depth_pass,
                     &mut primitive_packets,
                     &mut world,
@@ -919,7 +922,7 @@ impl Scene for Playtest {
                     if active_slot == INVALID_ACTIVE_ROOM_SLOT {
                         continue;
                     }
-                    let Some(active) = self.active_rooms[active_slot as usize] else {
+                    let Some(active) = self.window.rooms[active_slot as usize] else {
                         continue;
                     };
                     if !self.portal_visibility_draws_room(active.index) {
@@ -947,6 +950,7 @@ impl Scene for Playtest {
                         fog_rgb: Rgb8::from_array(room_record.fog_rgb),
                         fog_near: room_record.fog_near,
                         fog_far: room_record.fog_far,
+                        lights: LIGHTS,
                     };
                     telemetry::stage_begin(telemetry::stage::MODEL_INSTANCES);
                     let instance_stats = draw_model_instances(
@@ -961,6 +965,7 @@ impl Scene for Playtest {
                         &self.model_parts[..self.model_part_count],
                         &self.model_vertices[..self.model_vertex_count],
                         &self.clips,
+                        entity_poses,
                         ModelInstanceDepthPass::InFrontOfPlayer(player_depth),
                         &mut primitive_packets,
                         &mut world,
@@ -986,7 +991,7 @@ impl Scene for Playtest {
                 self.room_index,
                 self.motor.position(),
                 RoomPoint::new(camera.position.x, camera.position.y, camera.position.z),
-                self.portal_visibility_camera_global,
+                self.visibility.camera_global,
                 yaw_q12_from_basis(debug_view.sin_yaw, debug_view.cos_yaw),
                 debug_view.sin_yaw,
                 debug_view.cos_yaw,
@@ -995,20 +1000,21 @@ impl Scene for Playtest {
             );
             self.emit_portal_visibility_counters();
             #[cfg(feature = "cd-stream-bench")]
-            unsafe {
+            {
+                let room_streams = room_streams_arena();
                 telemetry::counter(
                     telemetry::counter::ROOM_STREAM_RESIDENT_SLOTS,
-                    ROOM_STREAM_SCHEDULER.resident_slot_count() as u32,
+                    room_streams.resident_slot_count() as u32,
                 );
                 emit_room_chunk_mask(
                     telemetry::counter::ROOM_STREAM_LOADING_MASK_LO,
                     telemetry::counter::ROOM_STREAM_LOADING_MASK_HI,
-                    ROOM_STREAM_SCHEDULER.loading_room_mask(),
+                    room_streams.loading_room_mask(),
                 );
                 emit_room_chunk_mask(
                     telemetry::counter::ROOM_STREAM_RESIDENT_MASK_LO,
                     telemetry::counter::ROOM_STREAM_RESIDENT_MASK_HI,
-                    ROOM_STREAM_SCHEDULER.resident_room_mask(),
+                    room_streams.resident_room_mask(),
                 );
             }
             telemetry::counter(telemetry::counter::ROOM_CACHED_DRAWS, room_cached_draws);
@@ -1026,11 +1032,11 @@ impl Scene for Playtest {
             );
             telemetry::counter(
                 telemetry::counter::ROOM_CHUNKS_CONSIDERED,
-                self.active_room_candidates as u32,
+                self.visibility.candidates as u32,
             );
             telemetry::counter(
                 telemetry::counter::ROOM_CHUNK_CACHE_SKIPS,
-                self.active_room_cache_skips as u32,
+                self.window.cache_skips as u32,
             );
             #[cfg(feature = "world-grid-visible")]
             {
@@ -1179,6 +1185,8 @@ impl Scene for Playtest {
                 hud_count,
                 &font_table,
                 (overlay_tick.as_u32() & 0xffff) as u16,
+                self.player_health,
+                self.player_health_max,
                 self.motor.stamina_q12(),
                 self.motor_config().stamina_max_q12,
             );

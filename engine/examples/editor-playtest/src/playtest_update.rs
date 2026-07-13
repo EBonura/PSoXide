@@ -1,6 +1,142 @@
 use super::*;
 
 impl Playtest {
+    /// Phase-3 gameplay layer tick: entity state machines (moved
+    /// through the engine motor's collision by [`SceneEntityMover`]),
+    /// the logic event graph, and the effect dispatch that maps fire
+    /// marks onto doors / message overlays / checkpoints. Runs
+    /// unconditionally on every gameplay update (before input-mode
+    /// early returns -- the souls sim does not pause with the pad);
+    /// with zero cooked records (cortex today) the guard keeps it to
+    /// a two-load check, preserving the bit-identical gates and the
+    /// budget's <1k idle rule.
+    pub(super) fn tick_gameplay_layer(&mut self, ctx: &Ctx) {
+        if GAME_ENTITIES.is_empty() && LOGIC.is_empty() {
+            return;
+        }
+        telemetry::stage_begin(telemetry::stage::GAME_LOGIC);
+        // The portal-expanded active set as a compact index list; a
+        // handful of loads per tick at MAX_ACTIVE_ROOMS = 16.
+        let mut active_rooms = [INVALID_ROOM_INDEX; MAX_ACTIVE_ROOMS];
+        let mut active_count = 0usize;
+        for slot in self.window.rooms.iter() {
+            if let Some(active) = slot {
+                active_rooms[active_count] = active.index;
+                active_count += 1;
+            }
+        }
+        let player = self.motor.position();
+        let player_pos = [player.x, player.y, player.z];
+        let (player_radius, player_height) = match self.character {
+            Some(character) => (character.radius, character.height),
+            None => (0, 0),
+        };
+        let now = ctx.sim_tick.as_u32();
+        let mut entity_positions = [[0i32; 3]; MAX_GAME_ENTITIES];
+        let mut entity_dead = [false; MAX_GAME_ENTITIES];
+        for (index, slot) in entity_positions
+            .iter_mut()
+            .enumerate()
+            .take(self.game_entities.count())
+        {
+            *slot = self.game_entities.position(index);
+            entity_dead[index] = self.game_entities.state(index)
+                == psx_game_runtime::entities::GameEntityState::Dead;
+        }
+        let mut mover = SceneEntityMover {
+            window: &self.window,
+            box_props: &self.box_props,
+            models: &self.models,
+            entity_positions,
+            entity_dead,
+            player,
+            player_room: self.room_index,
+            player_radius,
+            player_height,
+        };
+        // Souls i-frames: the motor's roll/backstep invulnerability
+        // window makes entity attacks whiff. Queried BEFORE this
+        // tick's motor update, so it matches the frames the motor
+        // will report.
+        let player_invulnerable = self.motor.is_action_invulnerable(self.motor_config());
+        let entity_stats = self.game_entities.tick(
+            GAME_ENTITIES,
+            psx_game_runtime::entities::GameEntityTickInput {
+                player: player_pos,
+                player_room: self.room_index,
+                player_radius,
+                player_invulnerable,
+                active_rooms: &active_rooms[..active_count],
+            },
+            &mut mover,
+        );
+        // Entity attack connections damage the player (floors at 0;
+        // death/respawn handling is phase 4).
+        if entity_stats.player_damage > 0 {
+            self.player_health = self
+                .player_health
+                .saturating_sub(entity_stats.player_damage);
+        }
+        // Player melee resolution: while an attack action is locked
+        // and its active window is live, sweep the weapon arc over
+        // the entities. Costs nothing outside attacks.
+        self.resolve_player_melee(ctx);
+        self.logic.tick(
+            LOGIC,
+            psx_game_runtime::logic::LogicTickInput {
+                player: player_pos,
+                player_room: self.room_index,
+                active_rooms: &active_rooms[..active_count],
+            },
+            now,
+        );
+        self.dispatch_logic_effects();
+        telemetry::counter(
+            telemetry::counter::GAME_ENTITIES_THOUGHT,
+            u32::from(entity_stats.thought),
+        );
+        if entity_stats.patrol_enters > 0 {
+            telemetry::counter(
+                telemetry::counter::GAME_ENTITY_PATROL_ENTERS,
+                u32::from(entity_stats.patrol_enters),
+            );
+        }
+        if entity_stats.aggro_enters > 0 {
+            telemetry::counter(
+                telemetry::counter::GAME_ENTITY_AGGRO_ENTERS,
+                u32::from(entity_stats.aggro_enters),
+            );
+        }
+        if entity_stats.windup_enters > 0 {
+            telemetry::counter(
+                telemetry::counter::GAME_ENTITY_WINDUP_ENTERS,
+                u32::from(entity_stats.windup_enters),
+            );
+        }
+        if entity_stats.attack_enters > 0 {
+            telemetry::counter(
+                telemetry::counter::GAME_ENTITY_ATTACK_ENTERS,
+                u32::from(entity_stats.attack_enters),
+            );
+        }
+        if entity_stats.player_hits > 0 {
+            telemetry::counter(
+                telemetry::counter::PLAYER_HITS_TAKEN,
+                u32::from(entity_stats.player_hits),
+            );
+        }
+        let fired_total = self.logic.stats().fired;
+        let fired_delta = fired_total.saturating_sub(self.logic_fired_reported);
+        if fired_delta > 0 {
+            telemetry::counter(
+                telemetry::counter::LOGIC_RECORDS_FIRED,
+                u32::from(fired_delta),
+            );
+        }
+        self.logic_fired_reported = fired_total;
+        telemetry::stage_end(telemetry::stage::GAME_LOGIC);
+    }
+
     pub(super) fn init_gameplay(&mut self) {
         self.shadow_material = upload_shadow_texture();
         self.particle_material = upload_particle_texture();
@@ -18,7 +154,7 @@ impl Playtest {
             Some(pc) => {
                 let character = CHARACTERS
                     .get(pc.character.to_usize())
-                    .map(RuntimeCharacter::from_record);
+                    .map(runtime_character_from_record);
                 (pc.spawn, character)
             }
             None => (PLAYER_SPAWN, None),
@@ -39,9 +175,19 @@ impl Playtest {
         self.active_interactable = None;
         self.checkpoint = None;
         self.message_overlay = None;
-        self.box_prop_broken = [0; BOX_PROP_BROKEN_WORDS];
-        self.box_prop_fall = [BoxPropFallState::EMPTY; MAX_BOX_PROP_STATE];
-        self.box_prop_break_events = [BoxPropBreakEvent::EMPTY; MAX_BOX_PROP_BREAK_EVENTS];
+        self.box_props.reset_dynamic_state();
+        // Phase-3 gameplay layer: spawn entity/logic state 1:1 from
+        // the cooked tables (empty tables leave both inert; the same
+        // calls re-run on future checkpoint respawns), then push the
+        // initial door states onto their box props (START_ON doors
+        // begin open without a fire event).
+        self.game_entities.spawn_from_records(GAME_ENTITIES);
+        self.logic.init_from_records(LOGIC);
+        self.logic_fired_reported = 0;
+        self.player_health = PLAYER_MAX_HEALTH;
+        self.player_health_max = PLAYER_MAX_HEALTH;
+        self.swing_hit_mask = 0;
+        self.sync_door_box_props();
         self.camera.snap_to_player_with_yaw(
             self.camera_target(None, false),
             self.camera_config(),
@@ -57,7 +203,7 @@ impl Playtest {
         #[cfg(not(feature = "cd-stream-bench"))]
         self.load_active_room_window();
         #[cfg(feature = "cd-stream-benchmark")]
-        cd_stream::run_benchmark();
+        cd_stream::run_benchmark(cd_arena());
     }
 
     pub(super) fn update_gameplay(&mut self, ctx: &mut Ctx) {
@@ -81,6 +227,7 @@ impl Playtest {
         }
         self.portal_debug_log_cooldown = self.portal_debug_log_cooldown.saturating_sub(1);
         self.step_streaming_jobs(ctx);
+        self.tick_gameplay_layer(ctx);
 
         if ctx.just_pressed(button::R3) {
             self.lock_target = match self.lock_target {
@@ -172,7 +319,9 @@ impl Playtest {
         self.refresh_active_interactable();
         if !action_locked {
             if let Some(index) = self.active_interactable {
-                if ctx.just_pressed(INTERACT_BUTTON) && self.activate_interactable(index) {
+                if ctx.just_pressed(INTERACT_BUTTON)
+                    && self.activate_interactable(index, now.as_u32())
+                {
                     self.evade_run_hold_ticks = 0;
                     self.evade_run_hold_consumed = false;
                     self.camera_turning_last_tick = false;
