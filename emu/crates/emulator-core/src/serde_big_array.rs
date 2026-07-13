@@ -79,15 +79,12 @@ pub(crate) mod array {
 pub(crate) mod boxed_array {
     use super::*;
 
-    pub fn serialize<S, T, const N: usize>(
-        arr: &Box<[T; N]>,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error>
+    pub fn serialize<S, T, const N: usize>(arr: &[T; N], serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
         T: Serialize,
     {
-        array::serialize(arr.as_ref(), serializer)
+        array::serialize(arr, serializer)
     }
 
     /// Deliberately does NOT go through [`array::deserialize`]: that

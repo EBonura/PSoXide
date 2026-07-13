@@ -8,11 +8,14 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 
 use emulator_core::{
-    fast_boot_disc_with_hle, warm_bios_for_disc_fast_boot, Bus, Cpu, EmulatorState,
-    EmulatorStateRef, DISC_FAST_BOOT_WARMUP_STEPS,
+    fast_boot_disc_with_hle, warm_bios_for_disc_fast_boot, Bus, Cpu, DISC_FAST_BOOT_WARMUP_STEPS,
 };
+#[cfg(not(target_arch = "wasm32"))]
+use emulator_core::{EmulatorState, EmulatorStateRef};
 use psoxide_settings::library::{GameKind, Region};
-use psoxide_settings::savestate::{peek_header, SaveStateV1};
+use psoxide_settings::savestate::peek_header;
+#[cfg(not(target_arch = "wasm32"))]
+use psoxide_settings::savestate::SaveStateV1;
 use psoxide_settings::{ConfigPaths, Library, LibraryEntry, Settings};
 use psx_iso::{Disc, Exe, SECTOR_BYTES};
 use psx_trace::InstructionRecord;
@@ -712,6 +715,12 @@ impl AppState {
     /// for "undo to my last save." No-op (with a status toast) if no
     /// game is currently running -- there's nothing meaningful to key
     /// the save off of.
+    #[cfg(target_arch = "wasm32")]
+    pub fn save_state(&mut self) {
+        self.status_message_set("Save states are not available in the web build");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn save_state(&mut self) {
         let Some(game_id) = self.current_game.as_ref().map(|g| g.id.clone()) else {
             self.status_message_set("Save state: no game running");
@@ -726,13 +735,9 @@ impl AppState {
             return;
         }
         let existing = self.paths.list_savestate_slots(&game_id);
-        let Some(slot) = existing
-            .last()
-            .map_or(Some(0u8), |&max| max.checked_add(1))
-        else {
+        let Some(slot) = existing.last().map_or(Some(0u8), |&max| max.checked_add(1)) else {
             self.status_message_set(
-                "Save state failed: 256 saves for this game already, delete some first"
-                    .to_string(),
+                "Save state failed: 256 saves for this game already, delete some first".to_string(),
             );
             return;
         };
@@ -788,6 +793,12 @@ impl AppState {
     /// "undo to my last save." Status-toasts "No save states yet"
     /// rather than erroring if none exist. `start_paused` is forwarded
     /// to [`AppState::load_state`].
+    #[cfg(target_arch = "wasm32")]
+    pub fn load_latest_state(&mut self, _start_paused: bool) {
+        self.status_message_set("Save states are not available in the web build");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn load_latest_state(&mut self, start_paused: bool) {
         let Some(game_id) = self.current_game.as_ref().map(|g| g.id.clone()) else {
             self.status_message_set("Load state: no game running");
@@ -839,6 +850,12 @@ impl AppState {
     /// instead of immediately resuming -- the sensible default when a
     /// human just asked to jump back in time and probably wants to
     /// look around before continuing.
+    #[cfg(target_arch = "wasm32")]
+    pub fn load_state(&mut self, _slot: u8, _start_paused: bool) {
+        self.status_message_set("Save states are not available in the web build");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn load_state(&mut self, slot: u8, start_paused: bool) {
         let Some(game) = self.current_game.clone() else {
             self.status_message_set("Load state: no game running");
