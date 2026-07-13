@@ -74,7 +74,7 @@ pub mod status_bit {
 /// via the IRQ-flag register). Only values 1..=5 are meaningful;
 /// value 0 means "no interrupt" and is what the BIOS writes to ack.
 #[repr(u8)]
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum IrqType {
     /// No interrupt -- canonical cleared state.
     None = 0,
@@ -143,7 +143,7 @@ const CDDA_SAMPLES_PER_SECTOR: usize = psx_iso::SECTOR_BYTES / CDDA_BYTES_PER_SA
 // steady-state stream; see `initial_sector_read_cycles` and
 // `sector_read_cycles`.
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct XaCoding {
     stereo: bool,
     freq: u32,
@@ -154,7 +154,7 @@ struct XaCoding {
 /// a command's long-running completion from inside the first-response
 /// interrupt handler, so the second deadline is relative to the actual
 /// first IRQ service cycle rather than the original command write.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct PendingFollowup {
     command: u8,
     delay: u64,
@@ -165,7 +165,7 @@ struct PendingFollowup {
 /// A deferred response: when `bus.cycles` passes `deadline` (an
 /// absolute bus-cycle count), the event's bytes land in the response
 /// FIFO and its IRQ type fires.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct PendingEvent {
     command: u8,
     deadline: u64,
@@ -200,7 +200,7 @@ pub struct CdRomResponseLogEntry {
     pub len: u8,
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum DriveState {
     Stopped,
     Standby,
@@ -210,6 +210,7 @@ enum DriveState {
 }
 
 /// CD-ROM controller state.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct CdRom {
     /// Index register low 2 bits -- selects the register visible at
     /// each sub-port for the next read/write.
@@ -261,29 +262,44 @@ pub struct CdRom {
     /// it latches the target and consumes it on Seek/Read/Play.
     setloc_pending: bool,
     /// Total commands dispatched since reset -- diagnostic counter.
+    /// Excluded from save states.
+    #[serde(skip)]
     commands_dispatched: u64,
     /// Diagnostic histogram of each command byte seen -- `[0x00..=0x1F]`
     /// is enough to capture every BIOS command. Exposed via
-    /// [`CdRom::command_histogram`] for `smoke_draw`.
+    /// [`CdRom::command_histogram`] for `smoke_draw`. Excluded from
+    /// save states.
+    #[serde(skip)]
     command_hist: [u32; 32],
     /// The most recently dispatched command byte. Diagnostic only
     /// -- used by the `cdrom_probe` example to log exactly which
     /// command was just issued at each `commands_dispatched` bump.
+    /// Excluded from save states.
+    #[serde(skip)]
     last_command: u8,
     /// Bounded command log. Disabled by default; probes opt in with
     /// [`CdRom::enable_command_log`] when command parameters matter.
+    /// Excluded from save states.
+    #[serde(skip)]
     command_log: Vec<CdRomCommandLogEntry>,
-    /// Max length of [`CdRom::command_log`].
+    /// Max length of [`CdRom::command_log`]. Excluded from save states
+    /// (resets to "logging off"; probes re-enable explicitly).
+    #[serde(skip)]
     command_log_cap: usize,
-    /// Bounded response-packet log for diagnostics.
+    /// Bounded response-packet log for diagnostics. Excluded from
+    /// save states.
+    #[serde(skip)]
     response_log: Vec<CdRomResponseLogEntry>,
-    /// Max length of [`CdRom::response_log`].
+    /// Max length of [`CdRom::response_log`]. Excluded from save states.
+    #[serde(skip)]
     response_log_cap: usize,
     /// Total bytes popped from the data FIFO via MMIO reads.
     /// Diagnostic. If this grows in lockstep with DataReady events
     /// the BIOS is actually consuming the sectors we delivered; if
     /// it's stuck, the BIOS's read path is blocked on something
     /// we're not signalling (BFRD / request-register / IRQ ack).
+    /// Excluded from save states.
+    #[serde(skip)]
     data_fifo_pops: u64,
     /// Bus cycle at which the currently-dispatching command was
     /// received. `queue_command` stashes the caller-supplied `now`
@@ -300,35 +316,52 @@ pub struct CdRom {
     /// Per-IrqType raise histogram -- indexed by `IrqType`
     /// discriminant (0..=5). Probes read this to tell
     /// Acknowledge/DataReady/Complete/Error counts apart when the
-    /// aggregate CDROM raise count looks suspicious.
+    /// aggregate CDROM raise count looks suspicious. Excluded from
+    /// save states.
+    #[serde(skip)]
     pub irq_type_counts: [u64; 6],
     /// Per-raise log of `(cycle_when_raised, irq_type_discriminant)`
     /// tuples. Populated only when `cdrom_irq_log_cap > 0`, capped
     /// at that length to keep memory bounded in long runs. Probes
     /// compare this sequence against Redux's silent-run CDROM-IRQ
     /// log to pinpoint which specific IRQ fires at a divergent
-    /// cycle.
+    /// cycle. Excluded from save states.
+    #[serde(skip)]
     pub cdrom_irq_log: Vec<(u64, u8)>,
     /// Max length of `cdrom_irq_log` -- 0 disables logging (the
     /// default, to avoid the per-raise allocation in production
-    /// runs). Probes set this via [`CdRom::enable_irq_log`].
+    /// runs). Probes set this via [`CdRom::enable_irq_log`]. Excluded
+    /// from save states.
+    #[serde(skip)]
     cdrom_irq_log_cap: usize,
     /// Count of `schedule_sector_event_at` calls. Diagnostic only --
     /// the BIOS should see one DataReady per sector read at the
     /// current CD speed's cadence, so this should match the sector
     /// count the game requested. A blown-out number means we're
-    /// chaining extra events somewhere.
+    /// chaining extra events somewhere. Excluded from save states.
+    #[serde(skip)]
     pub sector_events_scheduled: u64,
     /// DataReady sector events that advanced the read stream without
     /// raising a CPU-visible CDROM IRQ. Diagnostic for XA streams.
+    /// Excluded from save states.
+    #[serde(skip)]
     data_ready_suppressed: u64,
     /// OR of submode bytes across every suppressed sector. Diagnostic:
     /// reveals whether an EOF (0x80) sector was suppressed rather than
-    /// raising INT1.
+    /// raising INT1. Excluded from save states.
+    #[serde(skip)]
     dbg_suppressed_submode_or: u8,
     /// Loaded disc image, if any. When `Some`, `disc_present` is also
     /// true and GetID / ReadN follow the disc-present paths; when
     /// `None`, they fall back to the "please insert disc" path.
+    ///
+    /// Excluded from save states: a full disc image can run past
+    /// 700 MB, so embedding it would balloon every save file and pull
+    /// the whole game data through postcard on every save/load. The
+    /// frontend's load path is responsible for remounting the disc
+    /// from the game already known to be running (`AppState::current_game`)
+    /// before the restored `CdRom` is used.
+    #[serde(skip)]
     disc: Option<Disc>,
     /// Data FIFO -- 2048 bytes of sector user data, drained by MMIO
     /// reads at `0x1F80_1802` or by DMA channel 3. Filled by each
@@ -415,7 +448,9 @@ pub struct CdRom {
     attenuator_right_to_right_t: u8,
     /// Decoded stereo sample buffer -- filled by XA ADPCM decode
     /// when an audio sector arrives. Drained by the bus each tick
-    /// and pushed to the SPU's CD audio input.
+    /// and pushed to the SPU's CD audio input. Unlike the final host
+    /// output queue, these samples can still affect emulated SPU RAM,
+    /// capture-buffer IRQs, and reverb, so they must round-trip.
     cd_audio: VecDeque<(i16, i16)>,
     /// XA ADPCM decoder left-channel filter history (y0, y1).
     /// Persists across blocks within a file; reset between XA
@@ -700,6 +735,27 @@ impl CdRom {
         self.xa_first_sector = 0;
         self.xa_left.reset();
         self.xa_right.reset();
+    }
+
+    /// Splice a disc handle into `self.disc` without touching any
+    /// other register/FIFO/motor state. Save-state loads need this
+    /// instead of [`CdRom::insert_disc`]: the restored snapshot
+    /// already carries the correct motor/drive/read state for
+    /// wherever the game was mid-transfer, and `insert_disc`'s
+    /// lid-open/close-style reset (motor spin-up, FIFO clear, drive
+    /// state reseat, …) would stomp exactly the state we just
+    /// restored. This exists solely to reattach the disc bytes that
+    /// [`CdRom::disc`] deliberately excludes from serialization.
+    pub fn restore_disc_for_savestate(&mut self, disc: Option<Disc>) {
+        self.disc = disc;
+    }
+
+    /// Move the mounted disc out, leaving `None` behind. Used to hand
+    /// a disc off to a save-state-restored `CdRom` (see
+    /// [`CdRom::restore_disc_for_savestate`]) without cloning the
+    /// image, which can run past 700 MB for a full CD dump.
+    pub fn take_disc(&mut self) -> Option<Disc> {
+        self.disc.take()
     }
 
     /// `true` when `phys` is inside the CD-ROM MMIO range.

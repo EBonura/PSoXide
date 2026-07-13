@@ -22,7 +22,7 @@
 
 /// One of the three root counters. Fields are 16 bits on hardware but
 /// held as `u32` for uniform bus access -- upper bits read as 0.
-#[derive(Default, Clone, Copy)]
+#[derive(Default, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct Timer {
     /// Current counter value (bits 0..=15 meaningful).
     pub counter: u32,
@@ -72,7 +72,7 @@ const MODE_TIMER2_REDUX_JITTER_MASK: u32 = 0x02FF;
 const MODE_TIMER2_REDUX_JITTER_FLAGS: u32 = (1 << 9) | MODE_IRQ_REPEAT | MODE_RESET_AT_TARGET;
 
 /// The full three-timer bank.
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct Timers {
     /// Per-counter state. Index 0 / 1 / 2 corresponds to Timer 0 / 1 / 2.
     pub timers: [Timer; 3],
@@ -85,7 +85,9 @@ pub struct Timers {
     /// `cycleStart` and the live count is `(cycle - cycleStart) /
     /// rate` evaluated lazily.
     last_advance_cycle: u64,
-    /// Diagnostic: count of Timer 2 IRQ fires since reset.
+    /// Diagnostic: count of Timer 2 IRQ fires since reset. Excluded
+    /// from save states.
+    #[serde(skip)]
     pub dbg_timer2_fires: u64,
 }
 
