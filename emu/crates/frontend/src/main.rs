@@ -55,7 +55,7 @@ use clap::Parser;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, KeyEvent, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::keyboard::{Key, NamedKey};
+use winit::keyboard::{Key, KeyCode, NamedKey, PhysicalKey};
 use winit::window::{Window, WindowId};
 
 use crate::app::AppState;
@@ -356,10 +356,10 @@ fn press_port1_analog_button(state: &mut AppState) {
     }
 }
 
-/// Map a winit logical key to a PSX digital-pad bitmask using the
+/// Map a winit physical key to a PSX digital-pad bitmask using the
 /// persisted port-1 bindings. Returns `None` for keys that aren't
 /// bound.
-fn key_to_pad_button(key: &Key, bindings: &PortBindings) -> Option<u16> {
+fn key_to_pad_button(physical: &PhysicalKey, bindings: &PortBindings) -> Option<u16> {
     [
         (button::UP, &bindings.up),
         (button::DOWN, &bindings.down),
@@ -378,17 +378,14 @@ fn key_to_pad_button(key: &Key, bindings: &PortBindings) -> Option<u16> {
         (button::R3, &bindings.r3),
     ]
     .into_iter()
-    .find_map(|(mask, binding)| binding_matches_key(binding, key).then_some(mask))
+    .find_map(|(mask, binding)| binding_matches_key(binding, physical).then_some(mask))
 }
 
 /// `true` when the key should act as the DualShock Analog button.
-fn key_is_analog_button(key: &Key, bindings: &PortBindings) -> bool {
-    binding_matches_key(&bindings.analog, key)
+fn key_is_analog_button(physical: &PhysicalKey, bindings: &PortBindings) -> bool {
+    binding_matches_key(&bindings.analog, physical)
 }
 
-/// Update held freelook-camera key state from a keyboard event. These keys are
-/// intentionally outside the PSX pad bindings (T/F/G/H move, I/J/K/L look, U/O
-/// up-down, Shift boost), so tracking them never double-drives the guest pad.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct KeyboardStickState {
     up: bool,
@@ -398,22 +395,27 @@ struct KeyboardStickState {
 }
 
 impl KeyboardStickState {
-    fn update_key(&mut self, key: &Key, state: ElementState, bindings: &StickBindings) -> bool {
+    fn update_key(
+        &mut self,
+        physical: &PhysicalKey,
+        state: ElementState,
+        bindings: &StickBindings,
+    ) -> bool {
         let pressed = state == ElementState::Pressed;
         let mut matched = false;
-        if binding_matches_key(&bindings.up, key) {
+        if binding_matches_key(&bindings.up, physical) {
             self.up = pressed;
             matched = true;
         }
-        if binding_matches_key(&bindings.down, key) {
+        if binding_matches_key(&bindings.down, physical) {
             self.down = pressed;
             matched = true;
         }
-        if binding_matches_key(&bindings.left, key) {
+        if binding_matches_key(&bindings.left, physical) {
             self.left = pressed;
             matched = true;
         }
-        if binding_matches_key(&bindings.right, key) {
+        if binding_matches_key(&bindings.right, physical) {
             self.right = pressed;
             matched = true;
         }
@@ -451,34 +453,97 @@ fn merge_axis(gamepad: f32, keyboard: f32) -> f32 {
     }
 }
 
-fn binding_matches_key(binding: &InputBinding, key: &Key) -> bool {
-    match (binding, key) {
-        (InputBinding::Unbound, _) => false,
-        (InputBinding::Character(expected), Key::Character(actual)) => actual
-            .chars()
-            .next()
-            .is_some_and(|c| c.eq_ignore_ascii_case(expected)),
-        (InputBinding::Named(expected), Key::Named(actual)) => {
-            named_key_label(actual).is_some_and(|name| expected.eq_ignore_ascii_case(name))
-        }
-        _ => false,
+/// Match a persisted binding against the *physical* key that changed,
+/// rather than the logical `Key` winit derives from the current keyboard
+/// layout.
+///
+/// This used to match on `Key` (the layout-translated character/name).
+/// Windows re-runs its dead-key/AltGr translation on every keystroke, and
+/// on layouts that put a dead key near the default control cluster (ABNT2,
+/// International-US, ...) a still-held key can flip from `Key::Character`
+/// to `Key::Dead`/`Unidentified` the instant a *second* key goes down --
+/// which read as "holding a second button drops the first bind", exactly
+/// the multi-key symptom this was chasing. A physical key's `KeyCode`
+/// comes straight from the hardware scancode (or the DOM `code` on web),
+/// so it never depends on modifier state, layout, or what other keys are
+/// currently held.
+fn binding_matches_key(binding: &InputBinding, physical: &PhysicalKey) -> bool {
+    let PhysicalKey::Code(code) = physical else {
+        return false;
+    };
+    match binding {
+        InputBinding::Unbound => false,
+        InputBinding::Character(expected) => char_to_keycode(*expected) == Some(*code),
+        InputBinding::Named(expected) => named_key_codes(expected).contains(code),
     }
 }
 
-fn named_key_label(key: &NamedKey) -> Option<&'static str> {
-    match key {
-        NamedKey::ArrowUp => Some("ArrowUp"),
-        NamedKey::ArrowDown => Some("ArrowDown"),
-        NamedKey::ArrowLeft => Some("ArrowLeft"),
-        NamedKey::ArrowRight => Some("ArrowRight"),
-        NamedKey::Enter => Some("Enter"),
-        NamedKey::Backspace => Some("Backspace"),
-        NamedKey::Shift => Some("Shift"),
-        NamedKey::Space => Some("Space"),
-        NamedKey::Tab => Some("Tab"),
-        NamedKey::Escape => Some("Escape"),
-        NamedKey::F9 => Some("F9"),
-        _ => None,
+/// Physical-position mapping for a persisted `InputBinding::Character`.
+/// Bindings are stored as the character a US-QWERTY layout produces at a
+/// given position (the default set: q/e/z/x/c/s/r/1/3/i/j/k/l), so this is
+/// a fixed position table rather than a live layout query -- which is what
+/// keeps a binding stable regardless of the keyboard layout actually
+/// active at runtime.
+fn char_to_keycode(c: char) -> Option<KeyCode> {
+    Some(match c.to_ascii_lowercase() {
+        'a' => KeyCode::KeyA,
+        'b' => KeyCode::KeyB,
+        'c' => KeyCode::KeyC,
+        'd' => KeyCode::KeyD,
+        'e' => KeyCode::KeyE,
+        'f' => KeyCode::KeyF,
+        'g' => KeyCode::KeyG,
+        'h' => KeyCode::KeyH,
+        'i' => KeyCode::KeyI,
+        'j' => KeyCode::KeyJ,
+        'k' => KeyCode::KeyK,
+        'l' => KeyCode::KeyL,
+        'm' => KeyCode::KeyM,
+        'n' => KeyCode::KeyN,
+        'o' => KeyCode::KeyO,
+        'p' => KeyCode::KeyP,
+        'q' => KeyCode::KeyQ,
+        'r' => KeyCode::KeyR,
+        's' => KeyCode::KeyS,
+        't' => KeyCode::KeyT,
+        'u' => KeyCode::KeyU,
+        'v' => KeyCode::KeyV,
+        'w' => KeyCode::KeyW,
+        'x' => KeyCode::KeyX,
+        'y' => KeyCode::KeyY,
+        'z' => KeyCode::KeyZ,
+        '0' => KeyCode::Digit0,
+        '1' => KeyCode::Digit1,
+        '2' => KeyCode::Digit2,
+        '3' => KeyCode::Digit3,
+        '4' => KeyCode::Digit4,
+        '5' => KeyCode::Digit5,
+        '6' => KeyCode::Digit6,
+        '7' => KeyCode::Digit7,
+        '8' => KeyCode::Digit8,
+        '9' => KeyCode::Digit9,
+        _ => return None,
+    })
+}
+
+/// Physical keycode(s) a persisted `InputBinding::Named` label matches.
+/// Mirrors the label set the old logical-key lookup accepted; "Shift"
+/// matches either physical shift key since the binding format predates
+/// left/right being distinguished.
+fn named_key_codes(name: &str) -> &'static [KeyCode] {
+    match name.to_ascii_lowercase().as_str() {
+        "arrowup" => &[KeyCode::ArrowUp],
+        "arrowdown" => &[KeyCode::ArrowDown],
+        "arrowleft" => &[KeyCode::ArrowLeft],
+        "arrowright" => &[KeyCode::ArrowRight],
+        "enter" => &[KeyCode::Enter],
+        "backspace" => &[KeyCode::Backspace],
+        "shift" => &[KeyCode::ShiftLeft, KeyCode::ShiftRight],
+        "space" => &[KeyCode::Space],
+        "tab" => &[KeyCode::Tab],
+        "escape" => &[KeyCode::Escape],
+        "f9" => &[KeyCode::F9],
+        _ => &[],
     }
 }
 
@@ -589,10 +654,31 @@ impl ApplicationHandler for Shell {
                 gfx.resize(size);
                 gfx.window.request_redraw();
             }
+            // Losing OS focus (Alt-Tab, a notification stealing focus, an
+            // overlay like Discord/Game Bar, clicking a second monitor...)
+            // does not reliably deliver a `Released` for whatever's
+            // physically still held down -- on Windows in particular, the
+            // key-up can fire after focus already moved elsewhere, or not
+            // reach this window at all. Left unhandled, that bit (or
+            // analog-stick / freelook direction) gets stuck "held" until
+            // the same key happens to be pressed and released again,
+            // which reads as "I have to let go of one key to use another"
+            // once a second, genuinely-held key ORs into an already-stuck
+            // mask. Clear every host-key-derived input state on focus
+            // loss so a stuck bit can never survive past it; the pad
+            // simply reports "nothing held" until the player presses
+            // fresh keys after refocusing.
+            WindowEvent::Focused(false) => {
+                self.pad1_mask = 0;
+                self.keyboard_left_stick = KeyboardStickState::default();
+                self.keyboard_right_stick = KeyboardStickState::default();
+            }
+            WindowEvent::Focused(true) => {}
             WindowEvent::KeyboardInput {
                 event:
                     KeyEvent {
                         logical_key,
+                        physical_key,
                         state,
                         repeat,
                         ..
@@ -612,21 +698,21 @@ impl ApplicationHandler for Shell {
                 let route_keyboard_to_game = true;
                 if !repeat && route_keyboard_to_game {
                     let bindings = &self.state.settings.input.port1;
-                    if let Some(mask) = key_to_pad_button(&logical_key, bindings) {
+                    if let Some(mask) = key_to_pad_button(&physical_key, bindings) {
                         match state {
                             ElementState::Pressed => self.pad1_mask |= mask,
                             ElementState::Released => self.pad1_mask &= !mask,
                         }
                     }
                     self.keyboard_left_stick
-                        .update_key(&logical_key, state, &bindings.left_stick);
+                        .update_key(&physical_key, state, &bindings.left_stick);
                     self.keyboard_right_stick.update_key(
-                        &logical_key,
+                        &physical_key,
                         state,
                         &bindings.right_stick,
                     );
                     let press_analog = state == ElementState::Pressed
-                        && key_is_analog_button(&logical_key, bindings);
+                        && key_is_analog_button(&physical_key, bindings);
                     if press_analog {
                         press_port1_analog_button(&mut self.state);
                     }
@@ -1959,26 +2045,29 @@ mod tests {
         let bindings = PortBindings::default();
 
         assert_eq!(
-            key_to_pad_button(&Key::Character("x".into()), &bindings),
+            key_to_pad_button(&PhysicalKey::Code(KeyCode::KeyX), &bindings),
             Some(button::CROSS)
         );
         assert_eq!(
-            key_to_pad_button(&Key::Character("c".into()), &bindings),
+            key_to_pad_button(&PhysicalKey::Code(KeyCode::KeyC), &bindings),
             Some(button::CIRCLE)
         );
         assert_eq!(
-            key_to_pad_button(&Key::Character("z".into()), &bindings),
+            key_to_pad_button(&PhysicalKey::Code(KeyCode::KeyZ), &bindings),
             Some(button::SQUARE)
         );
         assert_eq!(
-            key_to_pad_button(&Key::Named(NamedKey::Backspace), &bindings),
+            key_to_pad_button(&PhysicalKey::Code(KeyCode::Backspace), &bindings),
             Some(button::SELECT)
         );
         assert_eq!(
-            key_to_pad_button(&Key::Character("r".into()), &bindings),
+            key_to_pad_button(&PhysicalKey::Code(KeyCode::KeyR), &bindings),
             Some(button::R3)
         );
-        assert!(key_is_analog_button(&Key::Named(NamedKey::F9), &bindings));
+        assert!(key_is_analog_button(
+            &PhysicalKey::Code(KeyCode::F9),
+            &bindings
+        ));
     }
 
     #[test]
@@ -1988,38 +2077,38 @@ mod tests {
         let mut right = KeyboardStickState::default();
 
         assert!(left.update_key(
-            &Key::Named(NamedKey::ArrowUp),
+            &PhysicalKey::Code(KeyCode::ArrowUp),
             ElementState::Pressed,
             &bindings.left_stick,
         ));
         assert_eq!(left.vector(), (0.0, 1.0));
         assert!(left.update_key(
-            &Key::Named(NamedKey::ArrowDown),
+            &PhysicalKey::Code(KeyCode::ArrowDown),
             ElementState::Pressed,
             &bindings.left_stick,
         ));
         assert_eq!(left.vector(), (0.0, 0.0));
         assert!(left.update_key(
-            &Key::Named(NamedKey::ArrowUp),
+            &PhysicalKey::Code(KeyCode::ArrowUp),
             ElementState::Released,
             &bindings.left_stick,
         ));
         assert_eq!(left.vector(), (0.0, -1.0));
 
         assert!(right.update_key(
-            &Key::Character("j".into()),
+            &PhysicalKey::Code(KeyCode::KeyJ),
             ElementState::Pressed,
             &bindings.right_stick,
         ));
         assert_eq!(right.vector(), (-1.0, 0.0));
         assert!(right.update_key(
-            &Key::Character("l".into()),
+            &PhysicalKey::Code(KeyCode::KeyL),
             ElementState::Pressed,
             &bindings.right_stick,
         ));
         assert_eq!(right.vector(), (0.0, 0.0));
         assert!(!right.update_key(
-            &Key::Character("x".into()),
+            &PhysicalKey::Code(KeyCode::KeyX),
             ElementState::Pressed,
             &bindings.right_stick,
         ));
@@ -2033,11 +2122,11 @@ mod tests {
         };
 
         assert_eq!(
-            key_to_pad_button(&Key::Character("j".into()), &bindings),
+            key_to_pad_button(&PhysicalKey::Code(KeyCode::KeyJ), &bindings),
             Some(button::CROSS)
         );
         assert_eq!(
-            key_to_pad_button(&Key::Character("x".into()), &bindings),
+            key_to_pad_button(&PhysicalKey::Code(KeyCode::KeyX), &bindings),
             None
         );
     }
@@ -2054,13 +2143,13 @@ mod tests {
         let mut right = KeyboardStickState::default();
 
         assert!(right.update_key(
-            &Key::Character("u".into()),
+            &PhysicalKey::Code(KeyCode::KeyU),
             ElementState::Pressed,
             &bindings.right_stick,
         ));
         assert_eq!(right.vector(), (-1.0, 0.0));
         assert!(!right.update_key(
-            &Key::Character("j".into()),
+            &PhysicalKey::Code(KeyCode::KeyJ),
             ElementState::Pressed,
             &bindings.right_stick,
         ));
