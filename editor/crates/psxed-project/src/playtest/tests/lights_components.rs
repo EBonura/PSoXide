@@ -424,8 +424,10 @@ fn interactable_component_emits_prompt_and_message_records() {
     assert!(src.contains("The signal breaks here."));
 }
 
-#[test]
-fn equipment_component_emits_weapon_and_hitbox_records() {
+/// Synthetic player-with-equipment project shared by the weapon cook
+/// tests: returns the document plus the Weapon resource id so tests
+/// can author combat fields before cooking.
+fn equipment_test_project() -> (ProjectDocument, crate::ResourceId) {
     let starter = ProjectDocument::starter();
     let mut starter_model = starter
         .resources
@@ -506,6 +508,7 @@ fn equipment_component_emits_weapon_and_hitbox_records() {
                 active_start_frame: 4,
                 active_end_frame: 9,
             }],
+            ..crate::WeaponResource::default()
         }),
     );
 
@@ -557,6 +560,13 @@ fn equipment_component_emits_weapon_and_hitbox_records() {
         },
     );
 
+    (project, weapon)
+}
+
+#[test]
+fn equipment_component_emits_weapon_and_hitbox_records() {
+    let (project, _) = equipment_test_project();
+
     let (package, report) = build_package(&project, &starter_project_root());
     assert!(report.is_ok(), "errors: {:?}", report.errors);
     let package = package.expect("cooks");
@@ -570,6 +580,12 @@ fn equipment_component_emits_weapon_and_hitbox_records() {
     assert_eq!(package.model_sockets[0].joint, 0);
     assert_eq!(package.weapons[0].model, Some(0));
     assert_eq!(package.weapons[0].grip_translation, [8, 16, 0]);
+    // Serde-default melee arc numbers cook as authored: reach 640,
+    // 60 degrees -> 682 PSX angle units, damage/poise 25.
+    assert_eq!(package.weapons[0].arc_reach, 640);
+    assert_eq!(package.weapons[0].arc_half_angle, 682);
+    assert_eq!(package.weapons[0].damage, 25);
+    assert_eq!(package.weapons[0].poise_damage, 25);
     assert_eq!(package.equipment[0].weapon, 0);
     assert_eq!(
         package.equipment[0].flags & psx_level::equipment_flags::PLAYER,
@@ -582,4 +598,62 @@ fn equipment_component_emits_weapon_and_hitbox_records() {
     assert!(src.contains("pub static WEAPONS"));
     assert!(src.contains("pub static EQUIPMENT"));
     assert!(src.contains("WeaponHitShapeRecord::Capsule"));
+    assert!(src.contains("arc_reach: 640"));
+    assert!(src.contains("arc_half_angle: 682"));
+    assert!(src.contains("damage: 25"));
+    assert!(src.contains("poise_damage: 25"));
+}
+
+#[test]
+fn weapon_melee_arc_cooks_authored_values() {
+    let (mut project, weapon) = equipment_test_project();
+    if let Some(resource) = project.resource_mut(weapon) {
+        if let ResourceData::Weapon(weapon) = &mut resource.data {
+            weapon.arc_reach = 704;
+            weapon.arc_half_angle_degrees = 90;
+            weapon.damage = 30;
+            weapon.poise_damage = 40;
+        }
+    }
+    let (package, report) = build_package(&project, &starter_project_root());
+    assert!(report.is_ok(), "errors: {:?}", report.errors);
+    let package = package.expect("cooks");
+    assert_eq!(package.weapons[0].arc_reach, 704);
+    // 90 degrees = a quarter turn = 1024 PSX angle units, exactly.
+    assert_eq!(package.weapons[0].arc_half_angle, 1024);
+    assert_eq!(package.weapons[0].damage, 30);
+    assert_eq!(package.weapons[0].poise_damage, 40);
+}
+
+#[test]
+fn weapon_melee_arc_rejects_zero_reach_zero_damage_and_degenerate_angles() {
+    let cases: [(&str, fn(&mut crate::WeaponResource)); 4] = [
+        ("arc reach 0", |weapon| weapon.arc_reach = 0),
+        ("damage 0", |weapon| weapon.damage = 0),
+        ("half-angle 0", |weapon| weapon.arc_half_angle_degrees = 0),
+        ("half-angle 171", |weapon| {
+            weapon.arc_half_angle_degrees = 171
+        }),
+    ];
+    for (label, mutate) in cases {
+        let (mut project, weapon) = equipment_test_project();
+        if let Some(resource) = project.resource_mut(weapon) {
+            if let ResourceData::Weapon(weapon) = &mut resource.data {
+                mutate(weapon);
+            }
+        }
+        let (package, report) = build_package(&project, &starter_project_root());
+        assert!(
+            package.is_none(),
+            "{label}: a combat-dead weapon must fail the cook loudly"
+        );
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("Weapon 'Practice Sword'")),
+            "{label}: expected a weapon arc error, got {:?}",
+            report.errors
+        );
+    }
 }

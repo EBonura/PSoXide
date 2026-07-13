@@ -15,6 +15,7 @@ dependencies = [
  "psx-asset",
  "psx-engine",
  "psx-font",
+ "psx-game-runtime",
  "psx-gpu",
  "psx-gte",
  "psx-io",
@@ -58,6 +59,22 @@ dependencies = [
  "psx-hw",
  "psx-io",
  "psx-math",
+ "psx-vram",
+]
+
+[[package]]
+name = "psx-game-runtime"
+version = "0.1.0"
+dependencies = [
+ "psx-asset",
+ "psx-engine",
+ "psx-font",
+ "psx-gpu",
+ "psx-hw",
+ "psx-io",
+ "psx-level",
+ "psx-math",
+ "psx-telemetry",
  "psx-vram",
 ]
 
