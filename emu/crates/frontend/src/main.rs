@@ -195,6 +195,19 @@ struct Shell {
     /// frame before running CPU steps so the guest always sees the
     /// latest state.
     pad1_mask: u16,
+    /// Most recently *pressed* button of the LEFT/RIGHT pair, for SOCD
+    /// (simultaneous opposing cardinal directions) resolution. The real
+    /// PS1 d-pad is a physical rocker -- left+right can never be down
+    /// together, so games were never written for both bits set and react
+    /// unpredictably (most just keep the old direction). A keyboard makes
+    /// the combination trivial to produce, so when both are held the mask
+    /// sent to the guest keeps only the most recent press; releasing it
+    /// re-exposes the still-held opposite. Last-input-priority matches
+    /// what a player expects from tapping the other direction without
+    /// letting go first.
+    socd_last_horiz: u16,
+    /// Same, for the UP/DOWN pair.
+    socd_last_vert: u16,
     /// Previous-frame state of the L3+R3 freelook chord, for rising-edge
     /// toggle detection.
     prev_freelook_chord: bool,
@@ -314,6 +327,8 @@ impl Shell {
             pending_input: MenuInput::default(),
             last_frame: Instant::now(),
             pad1_mask: 0,
+            socd_last_horiz: 0,
+            socd_last_vert: 0,
             prev_freelook_chord: false,
             keyboard_left_stick: KeyboardStickState::default(),
             keyboard_right_stick: KeyboardStickState::default(),
@@ -451,6 +466,25 @@ fn merge_axis(gamepad: f32, keyboard: f32) -> f32 {
     } else {
         gamepad
     }
+}
+
+/// Strip simultaneous opposing cardinal directions from the pad mask,
+/// keeping only the most recently pressed side of each pair (see
+/// `Shell::socd_last_horiz`). The real d-pad's rocker makes the
+/// combination impossible, so the guest must never see it; with no
+/// recorded recency (or a stale one no longer held) the pair resolves
+/// to neutral, which is what the rocker does mid-travel.
+fn socd_resolve(mask: u16, last_horiz: u16, last_vert: u16) -> u16 {
+    let mut out = mask;
+    const HORIZ: u16 = button::LEFT | button::RIGHT;
+    const VERT: u16 = button::UP | button::DOWN;
+    if out & HORIZ == HORIZ {
+        out = (out & !HORIZ) | (last_horiz & HORIZ);
+    }
+    if out & VERT == VERT {
+        out = (out & !VERT) | (last_vert & VERT);
+    }
+    out
 }
 
 /// Match a persisted binding against the *physical* key that changed,
@@ -700,7 +734,15 @@ impl ApplicationHandler for Shell {
                     let bindings = &self.state.settings.input.port1;
                     if let Some(mask) = key_to_pad_button(&physical_key, bindings) {
                         match state {
-                            ElementState::Pressed => self.pad1_mask |= mask,
+                            ElementState::Pressed => {
+                                self.pad1_mask |= mask;
+                                if mask & (button::LEFT | button::RIGHT) != 0 {
+                                    self.socd_last_horiz = mask;
+                                }
+                                if mask & (button::UP | button::DOWN) != 0 {
+                                    self.socd_last_vert = mask;
+                                }
+                            }
                             ElementState::Released => self.pad1_mask &= !mask,
                         }
                     }
@@ -826,7 +868,11 @@ impl ApplicationHandler for Shell {
                     merge_sticks(pad_frame.left_stick, self.keyboard_left_stick.vector());
                 let merged_right =
                     merge_sticks(pad_frame.right_stick, self.keyboard_right_stick.vector());
-                let merged_mask = self.pad1_mask | pad_frame.pad1_mask;
+                let merged_mask = socd_resolve(
+                    self.pad1_mask | pad_frame.pad1_mask,
+                    self.socd_last_horiz,
+                    self.socd_last_vert,
+                );
 
                 // Gamepad input arrives by polling, not as window events,
                 // so it cannot wake the redraw scheduler the way keyboard
@@ -2112,6 +2158,30 @@ mod tests {
             ElementState::Pressed,
             &bindings.right_stick,
         ));
+    }
+
+    #[test]
+    fn socd_resolution_keeps_most_recent_direction() {
+        // Holding LEFT, then pressing RIGHT without letting go: the guest
+        // sees only RIGHT (the recent press wins)...
+        assert_eq!(
+            socd_resolve(button::LEFT | button::RIGHT, button::RIGHT, 0),
+            button::RIGHT
+        );
+        // ...and releasing RIGHT re-exposes the still-held LEFT (the
+        // resolver never fires on a single held direction).
+        assert_eq!(socd_resolve(button::LEFT, button::RIGHT, 0), button::LEFT);
+        // No recorded recency resolves the clash to neutral.
+        assert_eq!(socd_resolve(button::UP | button::DOWN, 0, 0), 0);
+        // Pairs resolve independently; other buttons pass through.
+        assert_eq!(
+            socd_resolve(
+                button::UP | button::DOWN | button::LEFT | button::RIGHT | button::CROSS,
+                button::LEFT,
+                button::DOWN,
+            ),
+            button::LEFT | button::DOWN | button::CROSS
+        );
     }
 
     #[test]
