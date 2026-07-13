@@ -105,6 +105,7 @@ mod flag {
 /// vectors / FIFOs / accumulators in `data`-prefixed fields, matrices
 /// and translations in `ctrl`-prefixed fields. The MFC2/MTC2 paths
 /// pack and unpack these into 32-bit views.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Gte {
     // Data registers ----------------------------------------------------
     /// V0, V1, V2 -- input vertex vectors (X, Y, Z), signed 1.3.12.
@@ -155,6 +156,13 @@ pub struct Gte {
     /// between the MAC1 and MAC2 compute windows, measured on silicon in the
     /// HWB-010 live capture. Transient: cleared by
     /// [`Gte::execute_with_stale_v0x`] after the command.
+    ///
+    /// Excluded from save states: this only ever lives for the
+    /// duration of a single GTE command, so it can never be observed
+    /// set at a save-state boundary in practice, and carrying a stale
+    /// hazard across a save/load would inject a phantom one-shot bug
+    /// into the next MVMVA.
+    #[cfg_attr(feature = "serde", serde(skip))]
     stale_v0x: Option<i16>,
 
     // Control registers -------------------------------------------------
@@ -198,7 +206,19 @@ pub struct Gte {
     /// than extra bus cycles.
     profile_estimated_cycles: u64,
     /// Per-opcode diagnostic counts, indexed by the low 6 command bits.
+    /// Pure profiling data -- excluded from save states (see
+    /// [`default_opcode_counts`]).
+    #[cfg_attr(feature = "serde", serde(skip, default = "default_opcode_counts"))]
     profile_opcode_counts: [u64; 64],
+}
+
+/// `#[serde(default = ...)]` target for [`Gte::profile_opcode_counts`].
+/// A plain `#[serde(skip)]` needs `[u64; 64]: Default`, which std only
+/// provides for arrays up to length 32 -- an explicit zeroed literal
+/// sidesteps that gap.
+#[cfg(feature = "serde")]
+fn default_opcode_counts() -> [u64; 64] {
+    [0; 64]
 }
 
 /// Monotonic diagnostic counters for GTE command pressure.

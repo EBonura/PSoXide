@@ -52,28 +52,38 @@ pub enum IrqSource {
 
 /// Combined controller state. Bits beyond position 10 are hardware-
 /// reserved and ignored on both read and write.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Irq {
     stat: u32,
     mask: u32,
-    /// Per-source count of `raise()` calls since reset. Diagnostic only.
+    /// Per-source count of `raise()` calls since reset. Diagnostic only
+    /// -- excluded from save states.
+    #[serde(skip)]
     raise_counts: [u64; 11],
     /// Count of `pending()` calls that returned `true`. Diagnostic only.
+    #[serde(skip)]
     pending_true_calls: u64,
     /// Peak observed `I_STAT` value across the run. Tells us whether any
     /// pending bits have ever been set (before the BIOS ack cleared them).
+    #[serde(skip)]
     peak_stat: u32,
     /// Number of `write_mask` calls (any width). Diagnostic -- tells us
     /// whether the BIOS is reaching `I_MASK` through the IRQ controller
     /// at all, or whether its writes are landing in the io[] echo buffer.
+    #[serde(skip)]
     mask_write_count: u64,
     /// Number of `write_stat` calls. Diagnostic.
+    #[serde(skip)]
     stat_write_count: u64,
     /// First 16 values written to `I_MASK`. Diagnostic.
+    #[serde(skip)]
     mask_write_log: Vec<u32>,
     /// First 16 (cycle, value) pairs of `I_MASK` writes. Diagnostic --
     /// helps cross-check when our writes happen vs Redux's.
+    #[serde(skip)]
     mask_write_events: Vec<(u64, u32)>,
     /// First 16 (cycle, value) pairs of `I_STAT` writes. Diagnostic.
+    #[serde(skip)]
     stat_write_events: Vec<(u64, u32)>,
 }
 

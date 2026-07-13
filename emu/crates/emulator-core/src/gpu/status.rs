@@ -5,6 +5,7 @@
 /// PCSX-Redux and PSoXide-2): bits 26–28 are forced ready on every
 /// read, bit 25 (DMA request) is computed from the DMA direction
 /// bits 29:30, and bit 31 (interlace/field) toggles at VBlank.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub(super) struct GpuStatus {
     pub(super) raw: u32,
 }

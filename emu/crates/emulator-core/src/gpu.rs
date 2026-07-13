@@ -42,7 +42,16 @@ pub const GP0_ADDR: u32 = 0x1F80_1810;
 /// Physical address of the GP1 / GPUSTAT port.
 pub const GP1_ADDR: u32 = 0x1F80_1814;
 
+/// `#[serde(default = ...)]` target for the `[u32; 256]`-shaped
+/// diagnostic opcode histograms below -- `Default` only covers arrays
+/// up to length 32 on stable Rust, so a skipped 256-entry histogram
+/// needs an explicit zeroed literal instead.
+fn default_u32_256() -> [u32; 256] {
+    [0; 256]
+}
+
 /// GPU state.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Gpu {
     /// Video memory -- 1 MiB, 1024×512 at 16 bpp. The VRAM viewer in
     /// the frontend decodes this each frame.
@@ -58,7 +67,9 @@ pub struct Gpu {
     gp0_expected: usize,
     /// Total GP0 writes the GPU has received since reset -- diagnostic
     /// for `examples/smoke_draw` and the frontend HUD, tells us whether
-    /// software has actually started shipping commands.
+    /// software has actually started shipping commands. Excluded from
+    /// save states.
+    #[serde(skip)]
     gp0_write_count: u64,
     /// X offset (signed 11-bit) added to every primitive vertex --
     /// set by GP0 0xE5. Usually zero on BIOS boot, non-zero once the
@@ -106,6 +117,7 @@ pub struct Gpu {
     /// re-uploading the *same* CLUT (e.g. PICO-8 `pal()`) keeps sampling the
     /// stale cache until the clut word actually changes. `clut_cache_reg` is
     /// `u32::MAX` while invalid, forcing a reload on the next textured draw.
+    #[serde(with = "crate::serde_big_array::array")]
     clut_cache: [u16; 256],
     clut_cache_reg: u32,
     clut_cache_8bit: bool,
@@ -236,22 +248,30 @@ pub struct Gpu {
     ///
     /// Allocating is opt-in because the buffer is 2 MiB -- tiny
     /// in absolute terms but enough to want control over when it
-    /// appears in core state.
+    /// appears in core state. Debug tracer -- excluded from save
+    /// states (re-enabled explicitly by whichever probe wants it).
+    #[serde(skip)]
     pub pixel_owner: Option<Vec<u32>>,
     /// Command log -- one entry per GP0 packet executed since this
     /// tracer was enabled. Each entry captures the opcode plus
     /// the raw fifo words the packet consumed, so we can replay
-    /// the exact inputs to a single draw in isolation.
+    /// the exact inputs to a single draw in isolation. Debug tracer
+    /// -- excluded from save states.
+    #[serde(skip)]
     pub cmd_log: Vec<GpuCmdLogEntry>,
     /// Master gate for `cmd_log` pushes. Set by both
     /// `enable_pixel_tracer` and the lighter `enable_cmd_log`.
     /// Decoupled from `pixel_owner.is_some()` so the HW renderer can
     /// capture the GP0 stream without paying for the 2 MiB owner Vec
-    /// or its per-pixel stamping cost.
+    /// or its per-pixel stamping cost. Tied to the (excluded) tracer
+    /// state above -- excluded from save states, defaults back to off.
+    #[serde(skip)]
     cmd_log_enabled: bool,
     /// The index that will be written into `pixel_owner` for the
     /// NEXT pixel plotted -- i.e., the index of the currently-
     /// executing command. Bumped just before each packet dispatch.
+    /// Tracer bookkeeping -- excluded from save states.
+    #[serde(skip)]
     current_cmd_index: u32,
 
     /// Cumulative diagnostic "pseudo-busy" credit for expensive
@@ -302,19 +322,29 @@ pub struct Gpu {
 
     /// Count of executed GP0 packets by opcode byte (the high 8 bits
     /// of the header word). Diagnostic only -- lets `smoke_draw` see at
-    /// a glance which primitive types the BIOS is issuing.
+    /// a glance which primitive types the BIOS is issuing. Excluded
+    /// from save states.
+    #[serde(skip, default = "default_u32_256")]
     gp0_opcode_hist: [u32; 256],
     /// Count of GP1 writes by opcode byte. Same diagnostic role as
-    /// gp0_opcode_hist but for the display / control port.
+    /// gp0_opcode_hist but for the display / control port. Excluded
+    /// from save states.
+    #[serde(skip, default = "default_u32_256")]
     gp1_opcode_hist: [u32; 256],
     /// Distinct (x, y) pairs written to GP1 0x05 (display-start). Lets
     /// diagnostics see whether the BIOS is flipping buffers or just
-    /// repeatedly re-writing the same location.
+    /// repeatedly re-writing the same location. Excluded from save
+    /// states.
+    #[serde(skip)]
     display_start_history: std::collections::BTreeSet<(u16, u16)>,
     /// Distinct raw GP1 0x08 display-mode values seen since reset.
+    /// Excluded from save states.
+    #[serde(skip)]
     display_mode_history: std::collections::BTreeSet<u32>,
     /// Recent GP1 writes in chronological order. Diagnostic only; capped
-    /// so long FMV probes do not grow without bound.
+    /// so long FMV probes do not grow without bound. Excluded from
+    /// save states.
+    #[serde(skip)]
     gp1_write_history: Vec<u32>,
     /// Latched when GP0(1Fh) requests IRQ1. The bus consumes this and
     /// mirrors it into I_STAT bit 1.
@@ -376,7 +406,7 @@ pub fn gp0_command_word_count(opcode: u8) -> usize {
 /// written in row-major order across the destination rect. Completes
 /// when `remaining == 0`, and then the GPU goes back to accepting
 /// command packets on GP0.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
 struct VramTransfer {
     x: u16,
     y: u16,
@@ -3147,7 +3177,7 @@ fn trace_mono_rect_count() -> usize {
 /// (GP0 0x48..=0x4B or 0x58..=0x5B) and its terminator word. Each
 /// variant carries the most recently-rasterised endpoint so the
 /// next segment can chain from it.
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, serde::Serialize, serde::Deserialize)]
 enum PolylineState {
     /// Monochrome polyline -- all segments use the same color.
     Mono {
