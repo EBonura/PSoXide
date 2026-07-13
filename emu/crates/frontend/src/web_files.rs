@@ -14,6 +14,10 @@
 //! Either way only the file you launch is read, and nothing is uploaded: bytes
 //! are read locally into wasm memory on demand. Single-threaded wasm, so the
 //! thread-local queues are sound.
+//!
+//! Quick-save payloads are separate from file handles and use IndexedDB in
+//! every supported browser. They survive tab/browser restarts and are keyed by
+//! game id under the page's origin; clearing that site's data removes them.
 
 use std::cell::{Cell, RefCell};
 
@@ -39,9 +43,39 @@ struct ScannedGame {
     file: Option<web_sys::File>,
 }
 
+/// A browser file read that is ready for the frontend to apply.
+pub struct LoadedFile {
+    pub kind: Upload,
+    pub name: String,
+    /// Stable launch token for games; BIOS reads have no game id.
+    pub game_id: Option<String>,
+    pub bytes: Vec<u8>,
+}
+
+/// Completion from the browser quick-save store.
+pub enum QuickStateEvent {
+    Saved {
+        game_id: String,
+        created_at: u64,
+        cpu_tick: u64,
+        result: Result<(), String>,
+    },
+    Loaded {
+        game_id: String,
+        start_paused: bool,
+        result: Result<Option<Vec<u8>>, String>,
+    },
+    Inspected {
+        game_id: String,
+        result: Result<Option<(u64, u64)>, String>,
+    },
+}
+
 thread_local! {
     /// Bytes read and waiting for the shell to apply (BIOS load / game boot).
-    static PENDING: RefCell<Vec<(Upload, String, Vec<u8>)>> = const { RefCell::new(Vec::new()) };
+    static PENDING: RefCell<Vec<LoadedFile>> = const { RefCell::new(Vec::new()) };
+    /// IndexedDB quick-save operations completed since the last frame.
+    static QUICK_STATES: RefCell<Vec<QuickStateEvent>> = const { RefCell::new(Vec::new()) };
     /// The current game list (from a pick or a reconnect).
     static SCANNED: RefCell<Vec<ScannedGame>> = const { RefCell::new(Vec::new()) };
     /// Set true the frame a scan finishes, so the shell rebuilds the menu.
@@ -60,8 +94,15 @@ thread_local! {
 let _dir = null;
 function _idb() {
   return new Promise((res, rej) => {
-    const r = indexedDB.open('psoxide-fs', 1);
-    r.onupgradeneeded = () => r.result.createObjectStore('handles');
+    const r = indexedDB.open('psoxide-fs', 2);
+    r.onupgradeneeded = () => {
+      if (!r.result.objectStoreNames.contains('handles')) {
+        r.result.createObjectStore('handles');
+      }
+      if (!r.result.objectStoreNames.contains('savestates')) {
+        r.result.createObjectStore('savestates');
+      }
+    };
     r.onsuccess = () => res(r.result);
     r.onerror = () => rej(r.error);
   });
@@ -78,6 +119,22 @@ function _get(k) {
   return _idb().then(db => new Promise((res, rej) => {
     const t = db.transaction('handles', 'readonly');
     const q = t.objectStore('handles').get(k);
+    q.onsuccess = () => res(q.result);
+    q.onerror = () => rej(q.error);
+  }));
+}
+function _putState(k, v) {
+  return _idb().then(db => new Promise((res, rej) => {
+    const t = db.transaction('savestates', 'readwrite');
+    t.objectStore('savestates').put(v, k);
+    t.oncomplete = () => res();
+    t.onerror = () => rej(t.error);
+  }));
+}
+function _getState(k) {
+  return _idb().then(db => new Promise((res, rej) => {
+    const t = db.transaction('savestates', 'readonly');
+    const q = t.objectStore('savestates').get(k);
     q.onsuccess = () => res(q.result);
     q.onerror = () => rej(q.error);
   }));
@@ -166,6 +223,20 @@ export async function readGame(path) {
   const f = await fh.getFile();
   return new Uint8Array(await f.arrayBuffer());
 }
+export async function saveQuickState(gameId, bytes, createdAt, cpuTick) {
+  // Best effort: supporting browsers can exempt this origin from automatic
+  // storage-pressure eviction. A denial does not prevent the normal save.
+  try { if (navigator.storage?.persist) await navigator.storage.persist(); } catch (e) {}
+  await _putState('quick:' + gameId, { bytes, createdAt, cpuTick });
+}
+export async function loadQuickState(gameId) {
+  const state = await _getState('quick:' + gameId);
+  return state ? state.bytes : undefined;
+}
+export async function inspectQuickState(gameId) {
+  const state = await _getState('quick:' + gameId);
+  return state ? state.createdAt + '\n' + state.cpuTick : undefined;
+}
 "#)]
 extern "C" {
     #[wasm_bindgen(js_name = fsaSupported)]
@@ -184,6 +255,17 @@ extern "C" {
     fn fsa_reconnect_folder() -> js_sys::Promise;
     #[wasm_bindgen(js_name = readGame)]
     fn fsa_read_game(path: &str) -> js_sys::Promise;
+    #[wasm_bindgen(js_name = saveQuickState)]
+    fn idb_save_quick_state(
+        game_id: &str,
+        bytes: &js_sys::Uint8Array,
+        created_at: &str,
+        cpu_tick: &str,
+    ) -> js_sys::Promise;
+    #[wasm_bindgen(js_name = loadQuickState)]
+    fn idb_load_quick_state(game_id: &str) -> js_sys::Promise;
+    #[wasm_bindgen(js_name = inspectQuickState)]
+    fn idb_inspect_quick_state(game_id: &str) -> js_sys::Promise;
 }
 
 /// Whether the persistent (File System Access) backend is available.
@@ -215,7 +297,7 @@ pub fn check_saved() {
                 needs_gesture = true;
             } else if !v.is_undefined() && !v.is_null() {
                 // Permission still granted: the bytes came back, load them now.
-                push_bytes(Upload::Bios, "BIOS".to_string(), &v);
+                push_bytes(Upload::Bios, "BIOS".to_string(), None, &v);
             }
         }
 
@@ -234,8 +316,13 @@ pub fn check_saved() {
 }
 
 /// Drain everything read since the last call: `(kind, filename, bytes)`.
-pub fn drain() -> Vec<(Upload, String, Vec<u8>)> {
+pub fn drain() -> Vec<LoadedFile> {
     PENDING.with(|q| std::mem::take(&mut *q.borrow_mut()))
+}
+
+/// Drain completed IndexedDB quick-save operations.
+pub fn drain_quick_states() -> Vec<QuickStateEvent> {
+    QUICK_STATES.with(|q| std::mem::take(&mut *q.borrow_mut()))
 }
 
 /// `(id, title, subtitle)` for each game found, if a scan just finished.
@@ -257,7 +344,7 @@ pub fn pick_bios() {
     if supported() {
         spawn_local(async {
             if let Ok(v) = JsFuture::from(fsa_pick_bios()).await {
-                push_bytes(Upload::Bios, "BIOS".to_string(), &v);
+                push_bytes(Upload::Bios, "BIOS".to_string(), None, &v);
             }
         });
     } else {
@@ -291,7 +378,7 @@ pub fn reconnect() {
     spawn_local(async {
         if let Ok(v) = JsFuture::from(fsa_reconnect_bios()).await {
             if !v.is_null() && !v.is_undefined() {
-                push_bytes(Upload::Bios, "BIOS".to_string(), &v);
+                push_bytes(Upload::Bios, "BIOS".to_string(), None, &v);
             }
         }
     });
@@ -314,28 +401,119 @@ pub fn read_game(id: &str) {
             .and_then(|s| s.file.clone())
     });
     if let Some(file) = file {
-        read_into_pending(file, Upload::Game);
+        read_into_pending(file, Upload::Game, Some(id.to_string()));
         return;
     }
     // File System Access backend: id == "web:<relative/path>".
     if let Some(path) = id.strip_prefix("web:") {
         let path = path.to_string();
         let name = path.rsplit('/').next().unwrap_or(&path).to_string();
+        let game_id = id.to_string();
         spawn_local(async move {
             if let Ok(v) = JsFuture::from(fsa_read_game(&path)).await {
                 if !v.is_null() && !v.is_undefined() {
-                    push_bytes(Upload::Game, name, &v);
+                    push_bytes(Upload::Game, name, Some(game_id), &v);
                 }
             }
         });
     }
 }
 
+/// Persist the current game's quick-save in origin-scoped IndexedDB.
+pub fn save_quick_state(game_id: String, bytes: Vec<u8>, created_at: u64, cpu_tick: u64) {
+    let array = js_sys::Uint8Array::from(bytes.as_slice());
+    let promise = idb_save_quick_state(
+        &game_id,
+        &array,
+        &created_at.to_string(),
+        &cpu_tick.to_string(),
+    );
+    spawn_local(async move {
+        let result = JsFuture::from(promise).await.map(|_| ()).map_err(js_error);
+        QUICK_STATES.with(|q| {
+            q.borrow_mut().push(QuickStateEvent::Saved {
+                game_id,
+                created_at,
+                cpu_tick,
+                result,
+            });
+        });
+    });
+}
+
+/// Load the current game's quick-save bytes from IndexedDB.
+pub fn load_quick_state(game_id: String, start_paused: bool) {
+    let promise = idb_load_quick_state(&game_id);
+    spawn_local(async move {
+        let result = JsFuture::from(promise)
+            .await
+            .map_err(js_error)
+            .map(|value| {
+                if value.is_null() || value.is_undefined() {
+                    None
+                } else {
+                    Some(js_sys::Uint8Array::new(&value).to_vec())
+                }
+            });
+        QUICK_STATES.with(|q| {
+            q.borrow_mut().push(QuickStateEvent::Loaded {
+                game_id,
+                start_paused,
+                result,
+            });
+        });
+    });
+}
+
+/// Read just the quick-save metadata so the save-state panel can show a row
+/// after a page reload without decoding the multi-megabyte payload.
+pub fn inspect_quick_state(game_id: String) {
+    let promise = idb_inspect_quick_state(&game_id);
+    spawn_local(async move {
+        let result = JsFuture::from(promise)
+            .await
+            .map_err(js_error)
+            .and_then(|value| {
+                if value.is_null() || value.is_undefined() {
+                    return Ok(None);
+                }
+                let Some(metadata) = value.as_string() else {
+                    return Err("browser save metadata has an invalid type".to_string());
+                };
+                let Some((created_at, cpu_tick)) = metadata.split_once('\n') else {
+                    return Err("browser save metadata is malformed".to_string());
+                };
+                let created_at = created_at
+                    .parse::<u64>()
+                    .map_err(|_| "browser save creation time is invalid".to_string())?;
+                let cpu_tick = cpu_tick
+                    .parse::<u64>()
+                    .map_err(|_| "browser save CPU tick is invalid".to_string())?;
+                Ok(Some((created_at, cpu_tick)))
+            });
+        QUICK_STATES.with(|q| {
+            q.borrow_mut()
+                .push(QuickStateEvent::Inspected { game_id, result });
+        });
+    });
+}
+
 // ---- shared helpers -------------------------------------------------------
 
-fn push_bytes(kind: Upload, name: String, val: &JsValue) {
+fn push_bytes(kind: Upload, name: String, game_id: Option<String>, val: &JsValue) {
     let bytes = js_sys::Uint8Array::new(val).to_vec();
-    PENDING.with(|q| q.borrow_mut().push((kind, name, bytes)));
+    PENDING.with(|q| {
+        q.borrow_mut().push(LoadedFile {
+            kind,
+            name,
+            game_id,
+            bytes,
+        });
+    });
+}
+
+fn js_error(value: JsValue) -> String {
+    value.as_string().unwrap_or_else(|| format!("{value:?}"))
 }
 
 /// Build the scan list from newline-separated relative paths (FS Access path).
@@ -385,7 +563,7 @@ fn pick_input(kind: Upload) {
     let input_for_change = input.clone();
     let on_change = Closure::<dyn FnMut()>::new(move || {
         if let Some(file) = input_for_change.files().and_then(|f| f.get(0)) {
-            read_into_pending(file, kind);
+            read_into_pending(file, kind, None);
         }
     });
     input.set_onchange(Some(on_change.as_ref().unchecked_ref()));
@@ -442,7 +620,7 @@ fn make_file_input() -> Option<web_sys::HtmlInputElement> {
     Some(input)
 }
 
-fn read_into_pending(file: web_sys::File, kind: Upload) {
+fn read_into_pending(file: web_sys::File, kind: Upload, game_id: Option<String>) {
     let name = file.name();
     let Ok(reader) = web_sys::FileReader::new() else {
         return;
@@ -451,7 +629,14 @@ fn read_into_pending(file: web_sys::File, kind: Upload) {
     let on_load = Closure::<dyn FnMut()>::new(move || {
         if let Ok(buffer) = reader_for_load.result() {
             let bytes = js_sys::Uint8Array::new(&buffer).to_vec();
-            PENDING.with(|q| q.borrow_mut().push((kind, name.clone(), bytes)));
+            PENDING.with(|q| {
+                q.borrow_mut().push(LoadedFile {
+                    kind,
+                    name: name.clone(),
+                    game_id: game_id.clone(),
+                    bytes,
+                });
+            });
         }
     });
     reader.set_onload(Some(on_load.as_ref().unchecked_ref()));
