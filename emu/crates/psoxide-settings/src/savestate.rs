@@ -154,15 +154,24 @@ where
     /// Build a save-state around an existing payload. Fills in the
     /// header boilerplate.
     pub fn new(payload: T, game_id: impl Into<String>, cpu_tick: u64) -> Self {
+        let created_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        Self::new_at(payload, game_id, cpu_tick, created_at)
+    }
+
+    /// Build a save-state with a caller-supplied UNIX timestamp.
+    ///
+    /// Browser builds use JavaScript's clock because Rust's
+    /// `SystemTime::now` is unavailable on this wasm target.
+    pub fn new_at(payload: T, game_id: impl Into<String>, cpu_tick: u64, created_at: u64) -> Self {
         Self {
             header: SaveStateHeader {
                 magic: *SAVESTATE_MAGIC,
                 format_version: SAVESTATE_FORMAT_VERSION,
                 creator: concat!("PSoXide/", env!("CARGO_PKG_VERSION")).to_string(),
-                created_at: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0),
+                created_at,
                 game_id: game_id.into(),
                 cpu_tick,
             },
@@ -321,6 +330,20 @@ mod tests {
         assert_eq!(restored.header.game_id, "abc123");
         assert_eq!(restored.header.cpu_tick, 12345);
         assert_eq!(&restored.header.magic, SAVESTATE_MAGIC);
+    }
+
+    #[test]
+    fn caller_can_supply_creation_time() {
+        let state = SaveStateV1::new_at(
+            FakePayload {
+                cpu_pc: 0xbfc0_0000,
+                ram_hash: 0,
+            },
+            "browser-game",
+            99,
+            1_750_000_000,
+        );
+        assert_eq!(state.header.created_at, 1_750_000_000);
     }
 
     #[test]
