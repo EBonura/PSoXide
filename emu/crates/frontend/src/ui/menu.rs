@@ -11,6 +11,9 @@
 //! (Projects + Create are editor/native-only). The debug sidebar is
 //! toggled from the toolbar, not the menu.
 
+use std::collections::HashMap;
+use std::path::PathBuf;
+
 use egui::{Align2, FontId, Pos2, Rect, Vec2};
 
 use crate::icons;
@@ -51,6 +54,23 @@ pub enum MenuAction {
     /// Toggle warm SYSTEM.CNF disc fast boot. When disabled, discs
     /// boot through the full BIOS logo path.
     ToggleFastBoot,
+    /// Push a new save state for the running game (always creates a
+    /// new slot -- see [`SaveStateRow`]/[`MenuState::sync_save_states`],
+    /// saves are a history, not fixed named slots). Also pins the new
+    /// slot as the quick-load target (see [`MenuAction::PinAsTop`]).
+    SaveState,
+    /// Load the running game's state from the numbered save slot. The
+    /// `bool` is "resume paused" -- leave the emulator frozen on the
+    /// restored frame instead of immediately continuing.
+    LoadState(u8, bool),
+    /// Open the save-states panel (thumbnail list, pin-to-top,
+    /// load-with-confirmation) -- driven by the always-visible toolbar
+    /// icon as well as the System category's "Save states" row.
+    OpenSaveStates,
+    /// Pin the given slot as the save history's "top" -- the target
+    /// [`MenuAction::LoadState`] via F7/quick-load resolves to --
+    /// without touching slot numbering or any other save's position.
+    PinAsTop(u8),
     /// Launch a game by its menu launch token. Retail games use the
     /// stable library ID; authored project builds use a path-qualified
     /// token so projects sharing the same PSX volume ID remain distinct.
@@ -156,8 +176,38 @@ pub struct MenuState {
     /// Whether the top-right About card is showing. Mouse-driven; cleared
     /// whenever the menu itself closes.
     about_open: bool,
+    /// Whether the save-states panel (thumbnail list, pin-to-top,
+    /// load-with-confirmation) is showing. Unlike `about_open`, this
+    /// is reachable from the always-visible toolbar icon independent
+    /// of whether the main Menu overlay (`open`) is up, so it is not
+    /// tied to `open` the way the About card is.
+    save_states_open: bool,
+    /// Live snapshot of this game's saves, newest first, set by
+    /// [`MenuState::sync_save_states`]. The System category's row
+    /// count and the save-states panel both read from here rather
+    /// than each keeping their own copy.
+    save_rows: Vec<SaveStateRow>,
+    /// A "Load" click in the save-states panel doesn't load
+    /// immediately -- it stages the target slot here so the panel can
+    /// show a confirm-with-"resume paused" dialog first.
+    pending_load_confirm: Option<PendingLoadConfirm>,
+    /// Lazily-loaded, path-keyed cache of save-thumbnail textures.
+    /// Never invalidated: a slot's `.png` never changes after it's
+    /// written (saves are a history, not overwritten slots), so a
+    /// path is a stable cache key for the process's lifetime.
+    save_thumb_cache: HashMap<PathBuf, egui::TextureHandle>,
     pending_pointer_action: Option<MenuAction>,
     categories: Vec<Category>,
+}
+
+/// A save staged for loading, pending the user confirming (and
+/// optionally toggling) "resume paused" in the save-states panel.
+#[derive(Debug, Clone)]
+struct PendingLoadConfirm {
+    slot: u8,
+    label: String,
+    thumbnail_path: Option<PathBuf>,
+    resume_paused: bool,
 }
 
 impl Default for MenuState {
@@ -186,6 +236,29 @@ pub struct LibraryItem {
     pub burnable: bool,
     /// Whether confirming the row should launch a built artifact.
     pub launchable: bool,
+}
+
+/// One existing save state, as far as the Menu needs to know to draw
+/// a "Load state" row -- the fully-formatted display label (e.g. "2m
+/// ago -- tick 45,000,667") plus the slot number to dispatch on
+/// selection. Built by `AppState` from `psoxide_settings::savestate`
+/// data; kept as a plain string here for the same reason as
+/// [`LibraryItem`] -- the Menu module doesn't depend on the settings
+/// crate's types.
+#[derive(Debug, Clone)]
+pub struct SaveStateRow {
+    /// Slot number to pass to [`MenuAction::LoadState`].
+    pub slot: u8,
+    /// Pre-formatted row label.
+    pub label: String,
+    /// Path to this slot's screenshot thumbnail, if a readable one
+    /// exists on disk (older saves, or ones whose capture failed,
+    /// have none -- the panel draws a placeholder for those).
+    pub thumbnail_path: Option<PathBuf>,
+    /// Whether this is the save history's pinned "top" -- the one
+    /// F7/quick-load currently resolves to. Exactly one row is `true`
+    /// whenever `save_rows` is non-empty.
+    pub is_top: bool,
 }
 
 impl MenuState {
@@ -217,7 +290,7 @@ impl MenuState {
             #[cfg(target_arch = "wasm32")]
             disabled_category("Editor", icons::FOLDER),
             build_settings_category(),
-            build_system_category(running),
+            build_system_category(running, 0),
             // There is no "quit" in a browser tab, so the web build omits it.
             #[cfg(not(target_arch = "wasm32"))]
             Category {
@@ -243,6 +316,10 @@ impl MenuState {
             marquee_t: 0.0,
             marquee_key: (0, 0),
             about_open: false,
+            save_states_open: false,
+            save_rows: Vec::new(),
+            pending_load_confirm: None,
+            save_thumb_cache: HashMap::new(),
             pending_pointer_action: None,
             categories,
         }
@@ -325,6 +402,26 @@ impl MenuState {
                 item.value = Some(if enabled { "On" } else { "Off" }.into());
             }
         }
+    }
+
+    /// Rebuild the System category's save-state rows from a live save
+    /// listing. Call after a save/load completes and whenever the
+    /// running game changes (a different game has different saves).
+    /// Rebuilds the whole category (like [`build_system_category`]
+    /// does at startup) rather than patching rows in place, since the
+    /// row *count* changes as saves are added -- `running` is passed
+    /// through unchanged so this doesn't clobber the Run/Pause label.
+    pub fn sync_save_states(&mut self, running: bool, rows: &[SaveStateRow]) {
+        self.save_rows = rows.to_vec();
+        if let Some(idx) = self.categories.iter().position(|c| c.name == "System") {
+            self.categories[idx] = build_system_category(running, rows.len());
+        }
+    }
+
+    /// Open the save-states panel. Driven by the always-visible
+    /// toolbar icon and the System category's "Save states" row.
+    pub fn open_save_states(&mut self) {
+        self.save_states_open = true;
     }
 
     /// Store the menu-backdrop opacity (percent) and reflect it in the
@@ -483,6 +580,22 @@ impl MenuState {
     /// Draw the Menu overlay on a middle-layer painter. `dt` drives the
     /// slide animation.
     pub fn draw(&mut self, ctx: &egui::Context, dt: f32, warning: Option<&str>) {
+        // The save-states panel is reachable straight from the
+        // always-visible toolbar icon, independent of whether the
+        // full Menu overlay is open -- so it's drawn (and its own
+        // egui::Window handles its layering) before the `appear`-gated
+        // early-return below, unlike the About card which only makes
+        // sense as a child of the open Menu.
+        if self.save_states_open {
+            save_states_panel(
+                ctx,
+                &mut self.save_states_open,
+                &self.save_rows,
+                &mut self.pending_load_confirm,
+                &mut self.save_thumb_cache,
+                &mut self.pending_pointer_action,
+            );
+        }
         // The About card belongs to the open menu; drop it the moment the menu
         // is dismissed so it can't linger through the close dissolve.
         if !self.open {
@@ -1013,6 +1126,241 @@ fn draw_row_icon_action(
     }
 }
 
+/// The save-states panel: a "Save state" action, the pinned "top"
+/// entry (what F7/quick-load targets) shown separately above a
+/// divider, and a scrollable, newest-first list of every save for the
+/// running game. Built from plain egui widgets (`egui::Window` +
+/// `ScrollArea`), same reasoning as [`about_panel`] -- this needs
+/// real image widgets and a checkbox, which the hand-painted category
+/// list beneath it has no machinery for.
+///
+/// Button clicks feed `pending_pointer_action` -- the same channel
+/// `draw_row_icon_action` uses for pointer-driven category rows --
+/// rather than returning a value directly, so this integrates with
+/// [`MenuState::update`]'s existing "take the pending action next
+/// frame" dispatch without a second code path.
+fn save_states_panel(
+    ctx: &egui::Context,
+    open: &mut bool,
+    rows: &[SaveStateRow],
+    pending_load_confirm: &mut Option<PendingLoadConfirm>,
+    thumb_cache: &mut HashMap<PathBuf, egui::TextureHandle>,
+    pending_pointer_action: &mut Option<MenuAction>,
+) {
+    const THUMB_SIZE: Vec2 = Vec2::new(84.0, 63.0);
+
+    let mut still_open = *open;
+    egui::Window::new("Save States")
+        .open(&mut still_open)
+        .collapsible(false)
+        .resizable(false)
+        .default_width(380.0)
+        .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+        .show(ctx, |ui| {
+            if ui
+                .add(egui::Button::new(
+                    egui::RichText::new(format!("{}  Save state", icons::SAVE)).size(14.0),
+                ))
+                .on_hover_text("Push a new save (F5) and pin it as the quick-load target")
+                .clicked()
+            {
+                *pending_pointer_action = Some(MenuAction::SaveState);
+            }
+            ui.add_space(8.0);
+
+            if rows.is_empty() {
+                ui.label(
+                    egui::RichText::new("No saves yet")
+                        .color(theme::MENU_TEXT_DIM)
+                        .italics(),
+                );
+                return;
+            }
+
+            if let Some(top) = rows.iter().find(|r| r.is_top) {
+                egui::Frame::group(ui.style())
+                    .stroke(egui::Stroke::new(1.0, theme::MENU_ACCENT))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            draw_thumb(
+                                ui,
+                                ctx,
+                                thumb_cache,
+                                top.thumbnail_path.as_deref(),
+                                THUMB_SIZE,
+                            );
+                            ui.vertical(|ui| {
+                                ui.label(
+                                    egui::RichText::new("Top -- loads on F7")
+                                        .strong()
+                                        .color(theme::MENU_ACCENT)
+                                        .size(12.0),
+                                );
+                                ui.label(egui::RichText::new(&top.label).size(13.0));
+                                if ui.small_button("Load...").clicked() {
+                                    *pending_load_confirm = Some(PendingLoadConfirm {
+                                        slot: top.slot,
+                                        label: top.label.clone(),
+                                        thumbnail_path: top.thumbnail_path.clone(),
+                                        resume_paused: true,
+                                    });
+                                }
+                            });
+                        });
+                    });
+            }
+
+            ui.add_space(6.0);
+            ui.separator();
+            ui.label(
+                egui::RichText::new("All saves")
+                    .color(theme::MENU_TEXT_DIM)
+                    .size(12.0),
+            );
+            ui.add_space(4.0);
+
+            egui::ScrollArea::vertical()
+                .max_height(340.0)
+                .show(ui, |ui| {
+                    for row in rows {
+                        ui.horizontal(|ui| {
+                            draw_thumb(
+                                ui,
+                                ctx,
+                                thumb_cache,
+                                row.thumbnail_path.as_deref(),
+                                THUMB_SIZE,
+                            );
+                            ui.vertical(|ui| {
+                                ui.label(egui::RichText::new(&row.label).size(13.0));
+                                ui.horizontal(|ui| {
+                                    if ui.small_button("Load...").clicked() {
+                                        *pending_load_confirm = Some(PendingLoadConfirm {
+                                            slot: row.slot,
+                                            label: row.label.clone(),
+                                            thumbnail_path: row.thumbnail_path.clone(),
+                                            resume_paused: true,
+                                        });
+                                    }
+                                    if row.is_top {
+                                        ui.label(
+                                            egui::RichText::new("pinned")
+                                                .color(theme::MENU_TEXT_DIM)
+                                                .size(11.0),
+                                        );
+                                    } else if ui
+                                        .small_button("Pin as top")
+                                        .on_hover_text(
+                                            "Make this the save F7/quick-load targets, \
+                                             without moving it in this list",
+                                        )
+                                        .clicked()
+                                    {
+                                        *pending_pointer_action =
+                                            Some(MenuAction::PinAsTop(row.slot));
+                                    }
+                                });
+                            });
+                        });
+                        ui.add_space(4.0);
+                    }
+                });
+        });
+    *open = still_open;
+
+    // Load-confirmation sub-modal: staged by a "Load..." click above,
+    // not dispatched until the user confirms (and has had a chance to
+    // flip "resume paused").
+    if let Some(confirm) = pending_load_confirm.clone() {
+        let mut keep_confirming = true;
+        let mut resume_paused = confirm.resume_paused;
+        egui::Window::new("Load this save?")
+            .collapsible(false)
+            .resizable(false)
+            .order(egui::Order::Foreground)
+            .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    draw_thumb(
+                        ui,
+                        ctx,
+                        thumb_cache,
+                        confirm.thumbnail_path.as_deref(),
+                        THUMB_SIZE,
+                    );
+                    ui.label(&confirm.label);
+                });
+                ui.add_space(6.0);
+                ui.checkbox(&mut resume_paused, "Resume paused");
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Load").clicked() {
+                        *pending_pointer_action =
+                            Some(MenuAction::LoadState(confirm.slot, resume_paused));
+                        keep_confirming = false;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        keep_confirming = false;
+                    }
+                });
+            });
+        if keep_confirming {
+            if resume_paused != confirm.resume_paused {
+                *pending_load_confirm = Some(PendingLoadConfirm {
+                    resume_paused,
+                    ..confirm
+                });
+            }
+        } else {
+            *pending_load_confirm = None;
+        }
+    }
+}
+
+/// Paint a save's thumbnail at `size`, loading and caching the
+/// texture on first use. Draws a plain placeholder box when `path` is
+/// `None` (no capture for this save) or fails to decode.
+fn draw_thumb(
+    ui: &mut egui::Ui,
+    ctx: &egui::Context,
+    cache: &mut HashMap<PathBuf, egui::TextureHandle>,
+    path: Option<&std::path::Path>,
+    size: Vec2,
+) {
+    let placeholder = |ui: &mut egui::Ui| {
+        let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+        ui.painter()
+            .rect_filled(rect, 4.0, egui::Color32::from_gray(28));
+    };
+    let Some(path) = path else {
+        placeholder(ui);
+        return;
+    };
+    if !cache.contains_key(path) {
+        let loaded = std::fs::read(path)
+            .ok()
+            .and_then(|bytes| image::load_from_memory(&bytes).ok())
+            .map(|img| img.to_rgba8());
+        if let Some(rgba) = loaded {
+            let (w, h) = rgba.dimensions();
+            let color_image =
+                egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], rgba.as_raw());
+            let tex = ctx.load_texture(
+                format!("savethumb-{}", path.display()),
+                color_image,
+                egui::TextureOptions::LINEAR,
+            );
+            cache.insert(path.to_path_buf(), tex);
+        }
+    }
+    match cache.get(path) {
+        Some(tex) => {
+            ui.add(egui::Image::new((tex.id(), size)));
+        }
+        None => placeholder(ui),
+    }
+}
+
 /// The About card: brand mark, build info, and a few real links. Built from
 /// egui widgets (not the painter) so the links are first-class clickable
 /// `ui.link`s -- much less code than hand-rolled hit-testing. Opened from the
@@ -1384,37 +1732,56 @@ fn disabled_category(name: &'static str, icon: char) -> Category {
 /// The System category holds emulator-wide actions: run/pause,
 /// step, reset. The Games column stays focused on launchable entries,
 /// while System carries runtime controls.
-fn build_system_category(running: bool) -> Category {
+///
+/// `save_count` is how many saves currently exist for whichever game
+/// is running (0 if none, or no game running at all) -- just enough
+/// for the row's label; the actual per-save data (thumbnails,
+/// pin-to-top, load-with-confirmation) lives in the richer
+/// save-states panel opened via [`MenuAction::OpenSaveStates`] --
+/// see [`MenuState::sync_save_states`] / [`MenuState::open_save_states`].
+fn build_system_category(running: bool, save_count: usize) -> Category {
     let run_label = if running { "Pause" } else { "Run" };
+    let save_states_label = if save_count > 0 {
+        format!("Save states ({save_count})")
+    } else {
+        "Save states".to_string()
+    };
+    let items = vec![
+        MenuItem {
+            label: run_label.into(),
+            action: MenuAction::ToggleRun,
+            burn_action: None,
+            value: Some("Space".into()),
+        },
+        MenuItem {
+            label: "Step one instruction".into(),
+            action: MenuAction::StepOne,
+            burn_action: None,
+            value: None,
+        },
+        MenuItem {
+            label: "Reset".into(),
+            action: MenuAction::Reset,
+            burn_action: None,
+            value: None,
+        },
+        MenuItem {
+            label: "Fast boot discs".into(),
+            action: MenuAction::ToggleFastBoot,
+            burn_action: None,
+            value: Some("On".into()),
+        },
+        MenuItem {
+            label: save_states_label,
+            action: MenuAction::OpenSaveStates,
+            burn_action: None,
+            value: Some("F5/F7".into()),
+        },
+    ];
     Category {
         name: "System",
         icon: icons::CPU,
-        items: vec![
-            MenuItem {
-                label: run_label.into(),
-                action: MenuAction::ToggleRun,
-                burn_action: None,
-                value: Some("Space".into()),
-            },
-            MenuItem {
-                label: "Step one instruction".into(),
-                action: MenuAction::StepOne,
-                burn_action: None,
-                value: None,
-            },
-            MenuItem {
-                label: "Reset".into(),
-                action: MenuAction::Reset,
-                burn_action: None,
-                value: None,
-            },
-            MenuItem {
-                label: "Fast boot discs".into(),
-                action: MenuAction::ToggleFastBoot,
-                burn_action: None,
-                value: Some("On".into()),
-            },
-        ],
+        items,
     }
 }
 

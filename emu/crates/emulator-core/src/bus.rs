@@ -35,6 +35,52 @@ const IRQ_STAT_ADDR: u32 = 0x1F80_1070;
 /// Physical address of `I_MASK` (interrupt enable register).
 const IRQ_MASK_ADDR: u32 = 0x1F80_1074;
 
+/// `#[serde(with = "big_bytes")]` for boxed fixed-size byte buffers
+/// (`Bus::ram`, `Bus::io`). Plain `Box<[u8; N]>: Serialize` would work
+/// too (serde's array impl covers arbitrary `N` via const generics),
+/// but it walks the array element-by-element through `serialize_seq`;
+/// routing through `serde_bytes` instead hits `serialize_bytes`, which
+/// postcard encodes as a flat length-prefixed byte run instead of one
+/// varint-tagged element at a time -- worth it once `N` reaches
+/// megabytes (`Bus::ram` is 2 MiB). `N` is inferred at each call site
+/// from the field's declared array length, so one generic module
+/// covers every boxed byte-array field on `Bus`.
+mod big_bytes {
+    use serde::{Deserialize as _, Deserializer, Serializer};
+
+    pub fn serialize<S, const N: usize>(bytes: &[u8; N], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serde_bytes::serialize(bytes.as_slice(), serializer)
+    }
+
+    pub fn deserialize<'de, D, const N: usize>(deserializer: D) -> Result<Box<[u8; N]>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let buf = serde_bytes::ByteBuf::deserialize(deserializer)?;
+        buf.into_vec()
+            .into_boxed_slice()
+            .try_into()
+            .map_err(|v: Box<[u8]>| {
+                serde::de::Error::custom(format!(
+                    "save-state buffer has {} bytes, expected {N}",
+                    v.len()
+                ))
+            })
+    }
+}
+
+/// `#[serde(default = ...)]` target for the skipped [`Bus::bios`]
+/// field -- `Box<[u8; N]>` has no `Default` impl for `N` this large
+/// (std's array `Default` only goes up to 32), so a zeroed literal
+/// stands in until the frontend load path overwrites it with the real
+/// BIOS bytes.
+fn default_bios() -> Box<[u8; memory::bios::SIZE]> {
+    Box::new([0; memory::bios::SIZE])
+}
+
 /// Errors constructing a [`Bus`].
 #[derive(Error, Debug)]
 pub enum BusError {
@@ -49,14 +95,26 @@ pub enum BusError {
 }
 
 /// The PS1 system bus.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Bus {
+    #[serde(with = "big_bytes")]
     ram: Box<[u8; memory::ram::SIZE]>,
+    /// Excluded from save states: the BIOS image is load-time
+    /// configuration (whatever `.bin` the frontend pointed at), not
+    /// mutable game state, and embedding a 512 KiB copy in every save
+    /// file would be pure waste. `Default` gives an all-zero
+    /// placeholder on deserialize; the frontend load path immediately
+    /// overwrites it with the currently-running `Bus`'s real BIOS
+    /// bytes before the restored `Bus` is used for anything.
+    #[serde(skip, default = "default_bios")]
     bios: Box<[u8; memory::bios::SIZE]>,
+    #[serde(with = "big_bytes")]
     scratchpad: Box<[u8; memory::scratchpad::SIZE]>,
     /// Write-echoes-on-read buffer for the MMIO window. **Placeholder.**
     /// Individual peripherals with real semantics (IRQ below, later GPU /
     /// SPU / CD-ROM / DMA / timers) intercept their own ranges ahead of
     /// this fallback; the rest of MMIO still round-trips writes to reads.
+    #[serde(with = "big_bytes")]
     io: Box<[u8; memory::io::SIZE]>,
     /// Interrupt controller (`I_STAT` / `I_MASK`). Accessed via the MMIO
     /// dispatch below and queried by the CPU each step to update
@@ -110,10 +168,14 @@ pub struct Bus {
     pub scheduler: crate::scheduler::Scheduler,
     /// Bounded ring buffer of recent MMIO accesses. Zero-sized and
     /// no-op at every call site unless the `trace-mmio` Cargo feature
-    /// is enabled -- see `mmio_trace.rs` for the rationale.
+    /// is enabled -- see `mmio_trace.rs` for the rationale. Debug
+    /// tooling -- excluded from save states.
+    #[serde(skip)]
     pub mmio_trace: MmioTrace,
     /// Out-of-band profiler/debug telemetry emitted by instrumented
-    /// homebrew through the Expansion 2 debug port.
+    /// homebrew through the Expansion 2 debug port. Debug tooling --
+    /// excluded from save states.
+    #[serde(skip)]
     pub telemetry: GuestTelemetry,
     /// When true, the CPU replaces fetches at `0xA0` / `0xB0` / `0xC0`
     /// with a host-Rust implementation of the BIOS syscall they
@@ -124,7 +186,9 @@ pub struct Bus {
     /// BIOS's own init.
     pub hle_bios_enabled: bool,
     /// Per-(table, func) count of HLE BIOS calls. Diagnostic only.
-    /// `[table][func]` where table is 0=A, 1=B, 2=C.
+    /// `[table][func]` where table is 0=A, 1=B, 2=C. Excluded from
+    /// save states.
+    #[serde(skip, default = "default_hle_bios_calls")]
     hle_bios_calls: [[u32; 256]; 3],
     /// HSync cycles for the current video region (NTSC = 2146,
     /// PAL = 2157). Used by the timer bank's HBlank source and by
@@ -142,16 +206,29 @@ pub struct Bus {
     vblank_period: u64,
     /// Addresses we've already logged as unmapped reads. Keeps
     /// log noise bounded when a buggy game pokes a bad pointer
-    /// in a tight loop.
+    /// in a tight loop. Excluded from save states.
+    #[serde(skip)]
     unmapped_read_seen: std::collections::BTreeSet<u32>,
     /// Same, writes. Separate so read + write to the same bad
-    /// address both log at least once.
+    /// address both log at least once. Excluded from save states.
+    #[serde(skip)]
     unmapped_write_seen: std::collections::BTreeSet<u32>,
     /// Diagnostic: when true, every DMA-completion schedule pushes
     /// a record to `dma_log`. Off by default -- only the
-    /// `probe_dma_schedules` example flips it on.
+    /// `probe_dma_schedules` example flips it on. Excluded from save
+    /// states.
+    #[serde(skip)]
     dma_log_enabled: bool,
+    #[serde(skip)]
     dma_log: Vec<(String, u64, u64, u64)>,
+}
+
+/// `#[serde(default = ...)]` target for the skipped
+/// [`Bus::hle_bios_calls`] field -- the outer `[T; 3]` would satisfy
+/// `Default` on its own, but `T = [u32; 256]` doesn't, so the whole
+/// nested array needs an explicit zeroed literal.
+fn default_hle_bios_calls() -> [[u32; 256]; 3] {
+    [[0; 256]; 3]
 }
 
 impl Bus {
@@ -418,6 +495,24 @@ impl Bus {
             device = device.with_pad(p);
         }
         self.sio0.attach_port1(device);
+    }
+
+    /// Splice in the two fields a save-state load deliberately leaves
+    /// blank -- the BIOS image and the mounted disc -- from `donor`, a
+    /// `Bus` the frontend already had to freshly construct (via its
+    /// normal per-`GameKind` boot path) in order to know which BIOS
+    /// bytes and which disc image belong to this save. Neither field
+    /// is serialized (see the `#[serde(skip)]` docs on
+    /// [`Bus`]'s `bios` field and on [`crate::cdrom::CdRom`]'s `disc`
+    /// field), so a restored `Bus` is unusable until this runs.
+    ///
+    /// Takes `donor` by `&mut` to move the disc out of it rather than
+    /// clone a potentially 700+ MB image; `donor` is left with no
+    /// disc mounted afterward and should be discarded by the caller.
+    pub fn restore_excluded_from(&mut self, donor: &mut Bus) {
+        self.bios = donor.bios.clone();
+        self.cdrom
+            .restore_disc_for_savestate(donor.cdrom.take_disc());
     }
 
     /// Remove any memory card from port 1 while preserving the pad.
