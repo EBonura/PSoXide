@@ -56,8 +56,10 @@ jobs:
         env:
           # WebAssembly-2.0 SIMD baseline (all current engines). Mirrors
           # the local (gitignored) .cargo/config.toml -- CI can't read
-          # that file, so the flag lives here for the shipped build.
-          RUSTFLAGS: -C target-feature=+simd128
+          # that file, so the flag lives here for the shipped build. The
+          # larger stack keeps deep save-state encode/decode walks clear of
+          # wasm-ld's 1 MiB default.
+          RUSTFLAGS: -C target-feature=+simd128 -C link-arg=-zstack-size=16777216
         run: trunk build --release --public-url "/PSoXide/"
 
       - uses: actions/upload-pages-artifact@v3
