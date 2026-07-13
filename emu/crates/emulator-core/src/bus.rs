@@ -48,7 +48,7 @@ const IRQ_MASK_ADDR: u32 = 0x1F80_1074;
 mod big_bytes {
     use serde::{Deserialize as _, Deserializer, Serializer};
 
-    pub fn serialize<S, const N: usize>(bytes: &Box<[u8; N]>, serializer: S) -> Result<S::Ok, S::Error>
+    pub fn serialize<S, const N: usize>(bytes: &[u8; N], serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
@@ -60,12 +60,15 @@ mod big_bytes {
         D: Deserializer<'de>,
     {
         let buf = serde_bytes::ByteBuf::deserialize(deserializer)?;
-        buf.into_vec().into_boxed_slice().try_into().map_err(|v: Box<[u8]>| {
-            serde::de::Error::custom(format!(
-                "save-state buffer has {} bytes, expected {N}",
-                v.len()
-            ))
-        })
+        buf.into_vec()
+            .into_boxed_slice()
+            .try_into()
+            .map_err(|v: Box<[u8]>| {
+                serde::de::Error::custom(format!(
+                    "save-state buffer has {} bytes, expected {N}",
+                    v.len()
+                ))
+            })
     }
 }
 
@@ -508,7 +511,8 @@ impl Bus {
     /// disc mounted afterward and should be discarded by the caller.
     pub fn restore_excluded_from(&mut self, donor: &mut Bus) {
         self.bios = donor.bios.clone();
-        self.cdrom.restore_disc_for_savestate(donor.cdrom.take_disc());
+        self.cdrom
+            .restore_disc_for_savestate(donor.cdrom.take_disc());
     }
 
     /// Remove any memory card from port 1 while preserving the pad.

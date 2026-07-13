@@ -448,9 +448,9 @@ pub struct CdRom {
     attenuator_right_to_right_t: u8,
     /// Decoded stereo sample buffer -- filled by XA ADPCM decode
     /// when an audio sector arrives. Drained by the bus each tick
-    /// and pushed to the SPU's CD audio input. Transient host-audio
-    /// plumbing -- excluded from save states, reset empty on load.
-    #[serde(skip)]
+    /// and pushed to the SPU's CD audio input. Unlike the final host
+    /// output queue, these samples can still affect emulated SPU RAM,
+    /// capture-buffer IRQs, and reverb, so they must round-trip.
     cd_audio: VecDeque<(i16, i16)>,
     /// XA ADPCM decoder left-channel filter history (y0, y1).
     /// Persists across blocks within a file; reset between XA
