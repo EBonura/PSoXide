@@ -54,10 +54,9 @@ pub enum MenuAction {
     /// Toggle warm SYSTEM.CNF disc fast boot. When disabled, discs
     /// boot through the full BIOS logo path.
     ToggleFastBoot,
-    /// Push a new save state for the running game (always creates a
-    /// new slot -- see [`SaveStateRow`]/[`MenuState::sync_save_states`],
-    /// saves are a history, not fixed named slots). Also pins the new
-    /// slot as the quick-load target (see [`MenuAction::PinAsTop`]).
+    /// Save the running game. Native builds create a new history slot (see
+    /// [`SaveStateRow`]/[`MenuState::sync_save_states`]); the browser replaces
+    /// its one persistent per-game quick-save. Either becomes the F7 target.
     SaveState,
     /// Load the running game's state from the numbered save slot. The
     /// `bool` is "resume paused" -- leave the emulator frozen on the
@@ -1157,11 +1156,21 @@ fn save_states_panel(
         .default_width(380.0)
         .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
         .show(ctx, |ui| {
+            let save_label = if cfg!(target_arch = "wasm32") {
+                "Save browser quick-state"
+            } else {
+                "Save state"
+            };
+            let save_help = if cfg!(target_arch = "wasm32") {
+                "Replace this game's persistent browser quick-save (F5)"
+            } else {
+                "Push a new save (F5) and pin it as the quick-load target"
+            };
             if ui
                 .add(egui::Button::new(
-                    egui::RichText::new(format!("{}  Save state", icons::SAVE)).size(14.0),
+                    egui::RichText::new(format!("{}  {save_label}", icons::SAVE)).size(14.0),
                 ))
-                .on_hover_text("Push a new save (F5) and pin it as the quick-load target")
+                .on_hover_text(save_help)
                 .clicked()
             {
                 *pending_pointer_action = Some(MenuAction::SaveState);
