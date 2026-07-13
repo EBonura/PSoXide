@@ -2211,6 +2211,27 @@ pub(crate) fn draw_weapon_resource_editor(
             changed |= q12_rotation_editor(ui, "Rotation", &mut weapon.grip.rotation_q12);
         });
 
+    egui::CollapsingHeader::new(icons::label(icons::SCAN, "Melee Arc"))
+        .default_open(true)
+        .show(ui, |ui| {
+            ui.weak(
+                "Gameplay hit volume: a flat arc swept in front of the wielder. \
+                 Reach is engine units from the body origin; the half-angle opens \
+                 to each side of the facing. Hitbox frame windows below gate WHEN \
+                 the arc is live during the attack clip.",
+            );
+            changed |= drag_u16(ui, "Arc Reach", &mut weapon.arc_reach, 1, 8192);
+            changed |= drag_u16(
+                ui,
+                "Arc Half-Angle (deg)",
+                &mut weapon.arc_half_angle_degrees,
+                1,
+                170,
+            );
+            changed |= drag_u16(ui, "Damage", &mut weapon.damage, 1, 999);
+            changed |= drag_u16(ui, "Poise Damage", &mut weapon.poise_damage, 0, 999);
+        });
+
     egui::CollapsingHeader::new(icons::label(icons::SCAN, "Hitboxes"))
         .default_open(true)
         .show(ui, |ui| {

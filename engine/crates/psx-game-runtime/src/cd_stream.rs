@@ -1,3 +1,10 @@
+//! Polled CD-ROM streaming: the multi-room WORLD.PAK read job the
+//! streamed-room scheduler drives, blocking UI.PAK chunk readers for
+//! menu images and the sky, and the `cd-stream-benchmark` throughput
+//! probe. The register-level command/IRQ/DMA sequencing lives in the
+//! private `hw` submodule; host (non-MIPS) builds compile the same API
+//! with every read reporting unsupported.
+
 #![cfg_attr(not(target_arch = "mips"), allow(dead_code))]
 
 use psx_engine::telemetry;
@@ -60,6 +67,7 @@ const STATUS_HEADER_INVALID: u32 = 9;
 const STATUS_CHUNK_NOT_FOUND: u32 = 10;
 const STATUS_DEST_TOO_SMALL: u32 = 11;
 
+/// Status value reported by chunk reads that completed and verified.
 pub const ROOM_CHUNK_STATUS_OK: u32 = STATUS_OK;
 
 const COMMAND_ACK_POLL_LIMIT: u32 = 16_384;
@@ -74,9 +82,28 @@ const DATA_READY_BLOCKING_POLL_LIMIT: u32 = 1_000_000;
 const DMA_POLL_LIMIT: u32 = 65_536;
 const CLEANUP_POLL_LIMIT: u32 = 16_384;
 
-static mut CD_STREAM_SECTOR_BUFFER: [u32; SECTOR_WORDS] = [0; SECTOR_WORDS];
-#[cfg(target_arch = "mips")]
-static mut CD_READ_PREPARED: bool = false;
+/// Owned CD-ROM controller driver state: the one-sector DMA bounce
+/// buffer and the first-read preparation latch (formerly the module's
+/// `CD_STREAM_SECTOR_BUFFER`/`CD_READ_PREPARED` statics, retired in
+/// phase 2 per the phase-1.5 note). The game keeps one instance in its
+/// runtime arenas and threads it into every CD read entry point.
+pub struct CdController {
+    #[cfg_attr(not(target_arch = "mips"), allow(dead_code))]
+    sector_buffer: [u32; SECTOR_WORDS],
+    #[cfg_attr(not(target_arch = "mips"), allow(dead_code))]
+    read_prepared: bool,
+}
+
+impl CdController {
+    /// All-zero state (link-time `.bss`-safe); matches the old statics'
+    /// initial state exactly (zeroed buffer, not yet prepared).
+    pub const fn zeroed() -> Self {
+        Self {
+            sector_buffer: [0; SECTOR_WORDS],
+            read_prepared: false,
+        }
+    }
+}
 
 #[cfg(feature = "cd-stream-benchmark")]
 #[derive(Clone, Copy)]
@@ -98,6 +125,8 @@ struct BenchResult {
 
 #[cfg(feature = "cd-stream-benchmark")]
 impl BenchResult {
+    /// Host stub result: no CD hardware.
+    #[cfg(not(target_arch = "mips"))]
     const fn unsupported() -> Self {
         Self {
             status: STATUS_UNSUPPORTED,
@@ -117,22 +146,32 @@ impl BenchResult {
     }
 }
 
+/// Outcome of one chunk read (or one read job's aggregate).
 #[derive(Clone, Copy)]
 pub struct RoomChunkLoadResult {
+    /// [`ROOM_CHUNK_STATUS_OK`] or the first error encountered.
     pub status: u32,
+    /// Verified payload bytes delivered.
     pub bytes: usize,
+    /// CD sectors consumed (including any padding tail).
     pub sectors: u32,
 }
 
+/// One pack chunk's location and verification data, from the cooked TOC.
 #[derive(Clone, Copy)]
 pub struct WorldChunkInfo {
+    /// First sector of the chunk, relative to the pack's start LBA.
     pub sector_offset: u32,
+    /// Whole sectors the chunk occupies on disc.
     pub sector_count: u32,
+    /// Unpadded payload byte count.
     pub byte_size: usize,
+    /// Expected FNV checksum of the payload bytes.
     pub checksum: u32,
 }
 
 impl WorldChunkInfo {
+    /// Zero-sector placeholder entry.
     pub const EMPTY: Self = Self {
         sector_offset: 0,
         sector_count: 0,
@@ -149,6 +188,10 @@ enum WorldRoomSlotsReadState {
     Done,
 }
 
+/// The single in-flight multi-room CD read: up to `N` chunks resolved
+/// from the WORLD.PAK TOC, read as contiguous disc groups and committed
+/// per chunk with byte-count and checksum verification. Owned by the
+/// streamed-room scheduler; pumped incrementally by [`Self::poll_words`].
 pub struct WorldRoomSlotsReadJob<const N: usize> {
     entries: [WorldChunkInfo; N],
     slot_indices: [usize; N],
@@ -170,6 +213,37 @@ pub struct WorldRoomSlotsReadJob<const N: usize> {
 }
 
 impl<const N: usize> WorldRoomSlotsReadJob<N> {
+    /// All-zero-bytes idle placeholder (for the scheduler's `zeroed`
+    /// arena constructor); differs from [`Self::new`] only in the slot
+    /// and checksum sentinels, which `count: 0` / `state: Idle` keep
+    /// unread. `start` assigns `Self::new()` over it before any read.
+    pub(crate) const fn zeroed() -> Self {
+        Self {
+            entries: [WorldChunkInfo::EMPTY; N],
+            slot_indices: [0; N],
+            byte_counts: [0; N],
+            statuses: [STATUS_OK; N],
+            checksums: [0; N],
+            processed: [false; N],
+            group_entries: [false; N],
+            count: 0,
+            valid_count: 0,
+            processed_count: 0,
+            group_start: 0,
+            group_end: 0,
+            sector_offset: 0,
+            data_wait_polls: 0,
+            world_pack_lba: 0,
+            result: RoomChunkLoadResult {
+                status: STATUS_OK,
+                bytes: 0,
+                sectors: 0,
+            },
+            state: WorldRoomSlotsReadState::Idle,
+        }
+    }
+
+    /// Idle job with no chunks resolved.
     pub const fn new() -> Self {
         Self {
             entries: [WorldChunkInfo::EMPTY; N],
@@ -196,6 +270,9 @@ impl<const N: usize> WorldRoomSlotsReadJob<N> {
         }
     }
 
+    /// Resolve `room_ids` against `toc` and arm the read. Chunks that are
+    /// missing or exceed `SLOT_BYTES` fail immediately with a per-entry
+    /// status; the rest stream on subsequent [`Self::poll_words`] calls.
     pub fn start<const SLOT_BYTES: usize>(
         &mut self,
         world_pack_lba: u32,
@@ -260,8 +337,12 @@ impl<const N: usize> WorldRoomSlotsReadJob<N> {
         }
     }
 
+    /// Advance the armed read by up to `max_sectors` sectors, landing
+    /// each chunk's unpadded bytes in `dst[slot]` and tracking per-chunk
+    /// byte counts and running checksums.
     pub fn poll_words<const SLOT_WORDS: usize>(
         &mut self,
+        cd: &mut CdController,
         dst: &mut [[u32; SLOT_WORDS]; N],
         max_sectors: usize,
     ) -> RoomChunkLoadResult {
@@ -274,7 +355,7 @@ impl<const N: usize> WorldRoomSlotsReadJob<N> {
 
         #[cfg(not(target_arch = "mips"))]
         {
-            let _ = dst;
+            let _ = (cd, dst);
             self.fail_all(STATUS_UNSUPPORTED);
             self.state = WorldRoomSlotsReadState::Done;
             telemetry::counter(telemetry::counter::CD_ROOM_CHUNK_STATUS, self.result.status);
@@ -282,14 +363,14 @@ impl<const N: usize> WorldRoomSlotsReadJob<N> {
         }
 
         #[cfg(target_arch = "mips")]
-        unsafe {
+        {
             telemetry::stage_begin(telemetry::stage::CD_ROOM_CHUNK_LOAD);
             let before_sectors = self.result.sectors;
             let mut polls = 0;
             let mut sectors_this_poll = 0usize;
             while sectors_this_poll < max_sectors && self.state != WorldRoomSlotsReadState::Done {
                 if self.state == WorldRoomSlotsReadState::Ready {
-                    if !self.begin_next_group(&mut polls) {
+                    if !self.begin_next_group(cd, &mut polls) {
                         break;
                     }
                     if sectors_this_poll == 0 {
@@ -301,8 +382,7 @@ impl<const N: usize> WorldRoomSlotsReadJob<N> {
                     break;
                 }
 
-                let buffer = core::ptr::addr_of_mut!(CD_STREAM_SECTOR_BUFFER) as *mut u32;
-                match try_read_stream_sector(buffer, &mut polls) {
+                match try_read_stream_sector(cd, &mut polls) {
                     Ok(true) => {
                         self.data_wait_polls = 0;
                     }
@@ -310,33 +390,37 @@ impl<const N: usize> WorldRoomSlotsReadJob<N> {
                         self.data_wait_polls = self.data_wait_polls.saturating_add(1);
                         if self.data_wait_polls > DATA_READY_STALL_POLL_LIMIT {
                             self.fail_all(STATUS_DATA_TIMEOUT);
-                            cleanup_read_stream(&mut polls);
+                            cleanup_read_stream(cd, &mut polls);
                             self.state = WorldRoomSlotsReadState::Done;
                         }
                         break;
                     }
                     Err(status) => {
                         self.fail_all(status);
-                        cleanup_read_stream(&mut polls);
+                        cleanup_read_stream(cd, &mut polls);
                         self.state = WorldRoomSlotsReadState::Done;
                         break;
                     }
                 }
-                copy_window_info_sector(
-                    buffer as *const u8,
-                    self.sector_offset,
-                    &self.entries[..self.count],
-                    &self.slot_indices[..self.count],
-                    dst,
-                    &mut self.byte_counts,
-                    &mut self.checksums,
-                );
+                // SAFETY: the sector buffer holds the sector the read above
+                // just landed; SECTOR_BYTES are readable behind the pointer.
+                unsafe {
+                    copy_window_info_sector(
+                        cd.sector_buffer.as_ptr() as *const u8,
+                        self.sector_offset,
+                        &self.entries[..self.count],
+                        &self.slot_indices[..self.count],
+                        dst,
+                        &mut self.byte_counts,
+                        &mut self.checksums,
+                    );
+                }
                 self.result.sectors = self.result.sectors.saturating_add(1);
                 sectors_this_poll += 1;
                 self.sector_offset = self.sector_offset.saturating_add(1);
 
                 if self.sector_offset >= self.group_end {
-                    cleanup_read_stream(&mut polls);
+                    cleanup_read_stream(cd, &mut polls);
                     self.mark_group_processed();
                     if self.processed_count >= self.valid_count {
                         self.finish();
@@ -361,6 +445,7 @@ impl<const N: usize> WorldRoomSlotsReadJob<N> {
         }
     }
 
+    /// Whether the job still has groups armed or streaming.
     pub fn is_active(&self) -> bool {
         matches!(
             self.state,
@@ -368,29 +453,39 @@ impl<const N: usize> WorldRoomSlotsReadJob<N> {
         )
     }
 
-    pub fn abort(&mut self) {
+    /// Pause the drive if a read is in flight and reset the job to idle.
+    pub fn abort(&mut self, cd: &mut CdController) {
         if self.is_active() {
             #[cfg(target_arch = "mips")]
-            unsafe {
+            {
                 let mut polls = 0;
-                cleanup_read_stream(&mut polls);
+                cleanup_read_stream(cd, &mut polls);
             }
+            #[cfg(not(target_arch = "mips"))]
+            let _ = cd;
         }
+        #[cfg(not(target_arch = "mips"))]
+        let _ = cd;
         *self = Self::new();
     }
 
+    /// Whether the job has delivered (or failed) every armed chunk.
     pub fn is_done(&self) -> bool {
         matches!(self.state, WorldRoomSlotsReadState::Done)
     }
 
+    /// Delivered payload bytes per armed entry.
     pub fn byte_counts(&self) -> &[usize; N] {
         &self.byte_counts
     }
 
+    /// Per-entry status ([`ROOM_CHUNK_STATUS_OK`] or the first error).
     pub fn statuses(&self) -> &[u32; N] {
         &self.statuses
     }
 
+    /// Per-entry "delivered and checksum-verified" flags, computable
+    /// before the whole job finishes (early per-chunk commit).
     pub fn completed_entries(&self) -> [bool; N] {
         let mut completed = [false; N];
         let mut i = 0usize;
@@ -415,7 +510,7 @@ impl<const N: usize> WorldRoomSlotsReadJob<N> {
     }
 
     #[cfg(target_arch = "mips")]
-    unsafe fn begin_next_group(&mut self, polls: &mut u32) -> bool {
+    fn begin_next_group(&mut self, cd: &mut CdController, polls: &mut u32) -> bool {
         let Some((group_start, group_end, group_entries)) = next_world_pack_info_read_group(
             &self.entries,
             &self.statuses,
@@ -425,13 +520,13 @@ impl<const N: usize> WorldRoomSlotsReadJob<N> {
             self.finish();
             return false;
         };
-        if let Err(status) = prepare_cd_read(polls) {
+        if let Err(status) = prepare_cd_read(cd, polls) {
             self.fail_all(status);
             self.state = WorldRoomSlotsReadState::Done;
             return false;
         }
         if let Err(status) =
-            start_cd_read_at_lba(self.world_pack_lba.saturating_add(group_start), polls)
+            start_cd_read_at_lba(cd, self.world_pack_lba.saturating_add(group_start), polls)
         {
             self.fail_all(status);
             self.state = WorldRoomSlotsReadState::Done;
@@ -479,10 +574,12 @@ impl<const N: usize> WorldRoomSlotsReadJob<N> {
     }
 }
 
+/// Run the CD throughput probe (raw stream + WORLD.PAK walk) and emit
+/// its results as telemetry counters.
 #[cfg(feature = "cd-stream-benchmark")]
-pub fn run_benchmark() {
+pub fn run_benchmark(cd: &mut CdController) {
     telemetry::stage_begin(telemetry::stage::CD_STREAM_BENCH);
-    let result = run_benchmark_inner();
+    let result = run_benchmark_inner(cd);
     telemetry::counter(telemetry::counter::CD_STREAM_BENCH_BYTES, result.bytes);
     telemetry::counter(telemetry::counter::CD_STREAM_BENCH_SECTORS, result.sectors);
     telemetry::counter(telemetry::counter::CD_STREAM_BENCH_POLLS, result.polls);
@@ -524,12 +621,13 @@ pub fn run_benchmark() {
 }
 
 #[cfg(all(feature = "cd-stream-benchmark", not(target_arch = "mips")))]
-fn run_benchmark_inner() -> BenchResult {
+fn run_benchmark_inner(cd: &mut CdController) -> BenchResult {
+    let _ = cd;
     BenchResult::unsupported()
 }
 
 #[cfg(all(feature = "cd-stream-benchmark", target_arch = "mips"))]
-fn run_benchmark_inner() -> BenchResult {
+fn run_benchmark_inner(cd: &mut CdController) -> BenchResult {
     let mut result = BenchResult {
         status: STATUS_OK,
         bytes: 0,
@@ -546,18 +644,19 @@ fn run_benchmark_inner() -> BenchResult {
         world_status: STATUS_UNSUPPORTED,
     };
 
-    unsafe {
-        if let Err(status) = prepare_cd_read(&mut result.polls) {
-            result.status = status;
-            return result;
-        }
-        if let Err(status) = start_cd_read_at_lba(CD_STREAM_BENCH_LBA, &mut result.polls) {
-            result.status = status;
-            cleanup_read_stream(&mut result.polls);
-            return result;
-        }
+    if let Err(status) = prepare_cd_read(cd, &mut result.polls) {
+        result.status = status;
+        return result;
+    }
+    if let Err(status) = start_cd_read_at_lba(cd, CD_STREAM_BENCH_LBA, &mut result.polls) {
+        result.status = status;
+        cleanup_read_stream(cd, &mut result.polls);
+        return result;
+    }
 
-        let buffer = core::ptr::addr_of_mut!(CD_STREAM_SECTOR_BUFFER) as *mut u32;
+    // SAFETY: the controller-owned sector buffer is valid for
+    // whole-sector DMA writes and sector-length reads throughout.
+    unsafe {
         let mut sector = 0usize;
         let mut steady_stage_open = false;
         while sector < CD_STREAM_BENCH_SECTORS {
@@ -565,7 +664,7 @@ fn run_benchmark_inner() -> BenchResult {
                 telemetry::stage_begin(telemetry::stage::CD_STREAM_STEADY);
                 steady_stage_open = true;
             }
-            if let Err(status) = read_stream_sector(buffer, &mut result.polls) {
+            if let Err(status) = read_stream_sector(cd, &mut result.polls) {
                 if steady_stage_open {
                     telemetry::stage_end(telemetry::stage::CD_STREAM_STEADY);
                 }
@@ -573,7 +672,8 @@ fn run_benchmark_inner() -> BenchResult {
                 return result;
             }
 
-            result.checksum = checksum_sector(buffer as *const u8, result.checksum);
+            result.checksum =
+                checksum_sector(cd.sector_buffer.as_ptr() as *const u8, result.checksum);
             result.sectors = result.sectors.saturating_add(1);
             result.bytes = result.bytes.saturating_add(SECTOR_BYTES as u32);
             if steady_stage_open {
@@ -581,7 +681,7 @@ fn run_benchmark_inner() -> BenchResult {
                 result.steady_bytes = result.steady_bytes.saturating_add(SECTOR_BYTES as u32);
             }
 
-            if sector == 0 && !sector_magic_matches(buffer as *const u8) {
+            if sector == 0 && !sector_magic_matches(cd.sector_buffer.as_ptr() as *const u8) {
                 result.status = STATUS_MAGIC_MISMATCH;
                 break;
             }
@@ -592,11 +692,10 @@ fn run_benchmark_inner() -> BenchResult {
         }
 
         if result.status == STATUS_OK {
-            stream_world_pack(buffer, &mut result);
+            stream_world_pack(cd, &mut result);
         }
-
-        cleanup_read_stream(&mut result.polls);
     }
+    cleanup_read_stream(cd, &mut result.polls);
 
     if result.status == STATUS_OK && result.checksum != result.expected_checksum {
         result.status = STATUS_CHECKSUM_MISMATCH;
@@ -620,7 +719,8 @@ fn first_status_error(current: u32, next: u32) -> u32 {
 /// which load one chunk at a time into a shared staging buffer, so a
 /// blocking read is the simplest correct shape. Non-mips builds return
 /// `STATUS_UNSUPPORTED`.
-pub(super) fn read_chunk_blocking(
+pub fn read_chunk_blocking(
+    cd: &mut CdController,
     pack_lba: u32,
     toc: &[LevelWorldPackEntryRecord],
     chunk_id: u32,
@@ -645,32 +745,31 @@ pub(super) fn read_chunk_blocking(
 
     #[cfg(not(target_arch = "mips"))]
     {
-        let _ = pack_lba;
+        let _ = (cd, pack_lba);
         result.status = STATUS_UNSUPPORTED;
         result
     }
 
     #[cfg(target_arch = "mips")]
-    unsafe {
+    {
         let mut polls = 0u32;
-        if let Err(status) = prepare_cd_read(&mut polls) {
+        if let Err(status) = prepare_cd_read(cd, &mut polls) {
             result.status = status;
             return result;
         }
         if let Err(status) =
-            start_cd_read_at_lba(pack_lba.saturating_add(entry.sector_offset), &mut polls)
+            start_cd_read_at_lba(cd, pack_lba.saturating_add(entry.sector_offset), &mut polls)
         {
             result.status = status;
-            cleanup_read_stream(&mut polls);
+            cleanup_read_stream(cd, &mut polls);
             return result;
         }
 
-        let buffer = core::ptr::addr_of_mut!(CD_STREAM_SECTOR_BUFFER) as *mut u32;
         let dst_ptr = dst.as_mut_ptr().cast::<u8>();
         let mut checksum = FNV_OFFSET;
         let mut sector = 0u32;
         while sector < entry.sector_count {
-            if let Err(status) = read_one_sector_blocking(buffer, &mut polls) {
+            if let Err(status) = read_one_sector_blocking(cd, &mut polls) {
                 result.status = status;
                 break;
             }
@@ -678,18 +777,25 @@ pub(super) fn read_chunk_blocking(
             let remaining = entry.byte_size.saturating_sub(chunk_byte_offset);
             let copy_len = remaining.min(SECTOR_BYTES);
             if copy_len > 0 {
-                core::ptr::copy_nonoverlapping(
-                    buffer as *const u8,
-                    dst_ptr.add(chunk_byte_offset),
-                    copy_len,
-                );
-                checksum = checksum_bytes(buffer as *const u8, copy_len, checksum);
+                let buffer = cd.sector_buffer.as_ptr();
+                // SAFETY: the sector buffer holds `copy_len <= SECTOR_BYTES`
+                // readable bytes; the destination range stays inside `dst`
+                // (`entry.byte_size <= dst` was checked above) and cannot
+                // overlap the controller's own sector buffer.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        buffer as *const u8,
+                        dst_ptr.add(chunk_byte_offset),
+                        copy_len,
+                    );
+                    checksum = checksum_bytes(buffer as *const u8, copy_len, checksum);
+                }
                 result.bytes = result.bytes.saturating_add(copy_len);
             }
             result.sectors = result.sectors.saturating_add(1);
             sector += 1;
         }
-        cleanup_read_stream(&mut polls);
+        cleanup_read_stream(cd, &mut polls);
 
         if result.status == STATUS_OK {
             if result.bytes != entry.byte_size {
@@ -706,16 +812,22 @@ pub(super) fn read_chunk_blocking(
 /// (`sector_offset` / `sector_count` within UI.PAK) and where its unpadded
 /// bytes go in the caller's flat cache (`cache_word_start`, in u32 words).
 #[derive(Copy, Clone)]
-pub(super) struct UiChunkPlan {
-    pub(super) sector_offset: u32,
-    pub(super) sector_count: u32,
-    pub(super) byte_size: usize,
-    pub(super) checksum: u32,
-    pub(super) cache_word_start: usize,
+pub struct UiChunkPlan {
+    /// First sector of the chunk, relative to UI.PAK's start LBA.
+    pub sector_offset: u32,
+    /// Whole sectors the chunk occupies on disc.
+    pub sector_count: u32,
+    /// Unpadded payload byte count.
+    pub byte_size: usize,
+    /// Expected FNV checksum of the payload bytes.
+    pub checksum: u32,
+    /// Destination u32-word offset in the caller's flat cache.
+    pub cache_word_start: usize,
 }
 
 impl UiChunkPlan {
-    pub(super) const EMPTY: Self = Self {
+    /// Zero-sector placeholder plan.
+    pub const EMPTY: Self = Self {
         sector_offset: 0,
         sector_count: 0,
         byte_size: 0,
@@ -734,7 +846,8 @@ impl UiChunkPlan {
 /// `sector_offset` (disc) order; any gap between chunks is read and discarded
 /// so the stream stays aligned. Each chunk's status lands in `out_status[i]`.
 #[cfg(target_arch = "mips")]
-pub(super) fn read_chunks_contiguous(
+pub fn read_chunks_contiguous(
+    cd: &mut CdController,
     pack_lba: u32,
     plans: &[UiChunkPlan],
     cache: &mut [u32],
@@ -746,93 +859,98 @@ pub(super) fn read_chunks_contiguous(
     if plans.is_empty() {
         return;
     }
-    unsafe {
-        let mut polls = 0u32;
-        if let Err(status) = prepare_cd_read(&mut polls) {
-            for s in out_status.iter_mut() {
-                *s = status;
-            }
-            return;
+    let mut polls = 0u32;
+    if let Err(status) = prepare_cd_read(cd, &mut polls) {
+        for s in out_status.iter_mut() {
+            *s = status;
         }
-        let first = plans[0].sector_offset;
-        if let Err(status) = start_cd_read_at_lba(pack_lba.saturating_add(first), &mut polls) {
-            for s in out_status.iter_mut() {
-                *s = status;
-            }
-            cleanup_read_stream(&mut polls);
-            return;
+        return;
+    }
+    let first = plans[0].sector_offset;
+    if let Err(status) = start_cd_read_at_lba(cd, pack_lba.saturating_add(first), &mut polls) {
+        for s in out_status.iter_mut() {
+            *s = status;
         }
+        cleanup_read_stream(cd, &mut polls);
+        return;
+    }
 
-        let buffer = core::ptr::addr_of_mut!(CD_STREAM_SECTOR_BUFFER) as *mut u32;
-        let cache_ptr = cache.as_mut_ptr() as *mut u8;
-        let cache_bytes = cache.len().saturating_mul(4);
-        let mut cur = first;
-        let mut aborted = false;
-        let mut i = 0usize;
-        while i < plans.len() {
-            if aborted {
-                out_status[i] = STATUS_DATA_TIMEOUT;
-                i += 1;
-                continue;
+    let cache_ptr = cache.as_mut_ptr() as *mut u8;
+    let cache_bytes = cache.len().saturating_mul(4);
+    let mut cur = first;
+    let mut aborted = false;
+    let mut i = 0usize;
+    while i < plans.len() {
+        if aborted {
+            out_status[i] = STATUS_DATA_TIMEOUT;
+            i += 1;
+            continue;
+        }
+        let plan = plans[i];
+        // Read and discard any gap sectors before this chunk so the
+        // single continuous ReadN stays aligned to chunk boundaries.
+        while cur < plan.sector_offset {
+            if read_one_sector_blocking(cd, &mut polls).is_err() {
+                aborted = true;
+                break;
             }
-            let plan = plans[i];
-            // Read and discard any gap sectors before this chunk so the
-            // single continuous ReadN stays aligned to chunk boundaries.
-            while cur < plan.sector_offset {
-                if read_one_sector_blocking(buffer, &mut polls).is_err() {
-                    aborted = true;
-                    break;
-                }
-                cur = cur.saturating_add(1);
+            cur = cur.saturating_add(1);
+        }
+        if aborted {
+            out_status[i] = STATUS_DATA_TIMEOUT;
+            i += 1;
+            continue;
+        }
+        let dst_base = plan.cache_word_start.saturating_mul(4);
+        let mut checksum = FNV_OFFSET;
+        let mut bytes = 0usize;
+        let mut sector = 0u32;
+        while sector < plan.sector_count {
+            if let Err(status) = read_one_sector_blocking(cd, &mut polls) {
+                out_status[i] = status;
+                aborted = true;
+                break;
             }
-            if aborted {
-                out_status[i] = STATUS_DATA_TIMEOUT;
-                i += 1;
-                continue;
-            }
-            let dst_base = plan.cache_word_start.saturating_mul(4);
-            let mut checksum = FNV_OFFSET;
-            let mut bytes = 0usize;
-            let mut sector = 0u32;
-            while sector < plan.sector_count {
-                if let Err(status) = read_one_sector_blocking(buffer, &mut polls) {
-                    out_status[i] = status;
-                    aborted = true;
-                    break;
-                }
-                cur = cur.saturating_add(1);
-                let off = (sector as usize).saturating_mul(SECTOR_BYTES);
-                let remaining = plan.byte_size.saturating_sub(off);
-                let copy_len = remaining.min(SECTOR_BYTES);
-                let dst_off = dst_base.saturating_add(off);
-                if copy_len > 0 && dst_off.saturating_add(copy_len) <= cache_bytes {
+            cur = cur.saturating_add(1);
+            let off = (sector as usize).saturating_mul(SECTOR_BYTES);
+            let remaining = plan.byte_size.saturating_sub(off);
+            let copy_len = remaining.min(SECTOR_BYTES);
+            let dst_off = dst_base.saturating_add(off);
+            if copy_len > 0 && dst_off.saturating_add(copy_len) <= cache_bytes {
+                let buffer = cd.sector_buffer.as_ptr();
+                // SAFETY: `copy_len <= SECTOR_BYTES` readable bytes sit
+                // in the sector buffer; the destination range was bounds-
+                // checked against `cache` just above and cannot overlap
+                // the controller's own sector buffer.
+                unsafe {
                     core::ptr::copy_nonoverlapping(
                         buffer as *const u8,
                         cache_ptr.add(dst_off),
                         copy_len,
                     );
                     checksum = checksum_bytes(buffer as *const u8, copy_len, checksum);
-                    bytes = bytes.saturating_add(copy_len);
                 }
-                sector += 1;
+                bytes = bytes.saturating_add(copy_len);
             }
-            if !aborted {
-                if bytes != plan.byte_size {
-                    out_status[i] = STATUS_DATA_TIMEOUT;
-                } else if checksum != plan.checksum {
-                    out_status[i] = STATUS_CHECKSUM_MISMATCH;
-                }
-            }
-            i += 1;
+            sector += 1;
         }
-        cleanup_read_stream(&mut polls);
+        if !aborted {
+            if bytes != plan.byte_size {
+                out_status[i] = STATUS_DATA_TIMEOUT;
+            } else if checksum != plan.checksum {
+                out_status[i] = STATUS_CHECKSUM_MISMATCH;
+            }
+        }
+        i += 1;
     }
+    cleanup_read_stream(cd, &mut polls);
 }
 
 /// Host stub: no CD hardware, so streamed UI is unsupported (matches
 /// `read_chunk_blocking`).
 #[cfg(not(target_arch = "mips"))]
-pub(super) fn read_chunks_contiguous(
+pub fn read_chunks_contiguous(
+    _cd: &mut CdController,
     _pack_lba: u32,
     plans: &[UiChunkPlan],
     _cache: &mut [u32],
@@ -925,6 +1043,13 @@ fn next_world_pack_info_read_group<const N: usize>(
     Some((group_start, group_end, group_entries))
 }
 
+/// Land the freshly read sector at `sector_offset` into every armed
+/// chunk it belongs to, advancing that chunk's byte count and checksum.
+///
+/// # Safety
+/// `sector_ptr` must be readable for [`SECTOR_BYTES`] bytes. Entries'
+/// `byte_size` must fit their `dst` slot rows (`start` enforced the
+/// `SLOT_BYTES` bound when arming the job).
 #[cfg(target_arch = "mips")]
 unsafe fn copy_window_info_sector<const N: usize, const SLOT_WORDS: usize>(
     sector_ptr: *const u8,
@@ -950,12 +1075,18 @@ unsafe fn copy_window_info_sector<const N: usize, const SLOT_WORDS: usize>(
             let remaining = entry.byte_size.saturating_sub(chunk_byte_offset);
             let copy_len = remaining.min(SECTOR_BYTES);
             if copy_len > 0 {
-                let dst_ptr = dst[dst_slot]
-                    .as_mut_ptr()
-                    .cast::<u8>()
-                    .add(chunk_byte_offset);
-                core::ptr::copy_nonoverlapping(sector_ptr, dst_ptr, copy_len);
-                checksums[i] = checksum_bytes(sector_ptr, copy_len, checksums[i]);
+                // SAFETY: caller guarantees a readable sector at
+                // `sector_ptr` and that `byte_size` (hence
+                // `chunk_byte_offset + copy_len`) fits the slot row; the
+                // sector buffer and slot rows never overlap.
+                unsafe {
+                    let dst_ptr = dst[dst_slot]
+                        .as_mut_ptr()
+                        .cast::<u8>()
+                        .add(chunk_byte_offset);
+                    core::ptr::copy_nonoverlapping(sector_ptr, dst_ptr, copy_len);
+                    checksums[i] = checksum_bytes(sector_ptr, copy_len, checksums[i]);
+                }
                 byte_counts[i] = byte_counts[i].saturating_add(copy_len);
             }
         }

@@ -41,12 +41,13 @@ fn game_trace(message: &str) {
 #[cfg(not(all(target_arch = "mips", feature = "boot-trace")))]
 fn game_trace(_message: &str) {}
 
-use psx_asset::{Animation, Model, ModelPart, ModelVertex, Texture};
+use psx_asset::{Animation, ModelPart, ModelVertex};
 // Used by the vis-full-active-chunks default AND by the PVS path's
 // no-anchor fallback (a far room with no usable portal anchor draws
 // every cell through the cached path).
 #[cfg(feature = "world-grid-visible")]
 use psx_engine::draw_indexed_cached_room_vertex_lit_all_cells;
+use psx_engine::draw_room_vertex_lit;
 use psx_engine::ui::UiTextureSlot;
 #[cfg(feature = "cd-stream-bench")]
 use psx_engine::CompactCollisionRoom;
@@ -57,25 +58,18 @@ use psx_engine::GridVisibilityStats;
     not(feature = "vis-full-active-chunks")
 ))]
 use psx_engine::GridVisibleCell;
-use psx_engine::SkyDirectionProjector;
 use psx_engine::{
-    apply_model_pose_translation, button, compute_joint_world_transform, telemetry, Angle, App,
+    button, telemetry, Angle, App,
     CachedRoomCell, CachedRoomDepthMode, CachedRoomSubdivisionMode, CachedRoomSurface,
     CharacterCollision, CharacterCollisionAabb, CharacterCollisionCylinder, CharacterCollisionRoom,
     CharacterMotorAnim, CharacterMotorConfig, CharacterMotorInput, CharacterMotorState, Config,
-    Ctx, CullMode, DepthBand, DepthPolicy, DepthRange, JointViewTransform, JointWorldTransform,
-    LoadedWorldCameraGte, LocalToWorldScale, Mat3I16, MaterialTint, ModelPoseTranslation, OtFrame,
-    PointLightSample, PrimitivePacketArena, PrimitivePacketScratch, PrimitiveSink, ProjectedVertex,
-    Rgb8, RoomPoint, RoomRender, RuntimeCollisionRoom, RuntimeRoom, Scene, SceneStateRef,
-    SchedulerConfig, SimTick, TexturedModelGeometry, TexturedModelRenderFace,
-    TexturedModelRenderStats, ThirdPersonCameraConfig, ThirdPersonCameraInput,
-    ThirdPersonCameraState, ThirdPersonCameraTarget, VideoHz, VisualPacing, WorldCamera,
-    WorldProjection, WorldRenderMaterial, WorldRenderPass, WorldSurfaceLighting,
-    WorldSurfaceOptions, WorldSurfaceSample, WorldTriCommand, WorldVertex, Q12, Q8,
-};
-use psx_engine::{
-    cached_room_cells_from_level_records, cached_room_surfaces_from_level_records,
-    cached_room_vertices_from_level_records, draw_room_vertex_lit,
+    Ctx, DepthBand, DepthRange, LoadedWorldCameraGte, OtFrame,
+    PrimitivePacketArena, PrimitivePacketScratch, PrimitiveSink, ProjectedVertex, Rgb8, RoomPoint,
+    RuntimeCollisionRoom, RuntimeRoom, Scene, SceneStateRef, SchedulerConfig, SimTick,
+    TexturedModelRenderFace,
+    ThirdPersonCameraConfig, ThirdPersonCameraInput, ThirdPersonCameraState,
+    ThirdPersonCameraTarget, VideoHz, VisualPacing, WorldCamera, WorldProjection,
+    WorldRenderMaterial, WorldRenderPass, WorldSurfaceOptions, WorldTriCommand, WorldVertex, Q12,
 };
 #[cfg(all(
     feature = "world-grid-visible",
@@ -87,35 +81,24 @@ use psx_engine::{
 };
 use psx_font::FontAtlas;
 use psx_gpu::{
-    draw_line_mono, draw_tri_flat_blended,
-    material::{BlendMode, TextureMaterial, TextureWindow},
+    draw_tri_flat_blended,
+    material::{BlendMode, TextureMaterial},
     ot::OrderingTable,
-    prim::{QuadTexturedGouraud, QuadTexturedMaterial, TriTextured, TriTexturedGouraud},
+    prim::{QuadTexturedGouraud, TriTextured, TriTexturedGouraud},
     VideoMode,
 };
 use psx_level::portal_visibility::{
-    build_portal_visibility_with_room_bounds, debug_portal_clip, PortalClipDebug,
-    PortalClipDebugDecision, PortalClipDebugPlane, PortalClipDebugRect, PortalFrustum,
-    PortalRoomBounds, PortalVisibilityCamera, PortalVisibilityResult,
+    debug_portal_clip, PortalClipDebug, PortalClipDebugDecision, PortalClipDebugPlane,
+    PortalClipDebugRect, PortalFrustum, PortalRoomBounds, PortalVisibilityCamera,
+    PortalVisibilityResult,
 };
 use psx_level::{
-    box_prop_flags, character_action_flags, equipment_flags, far_vista_flags, find_asset_of_kind,
-    image_prop_flags, model_clip_flags, particle_emitter_flags, room_flags, sky_flags,
-    visibility_cell_flags, AssetId, AssetKind, CharacterAnimationAction, EntityRecord,
-    InteractableKind, InteractableRecord, LevelBoxPropRecord, LevelCameraRecord,
+    find_asset_of_kind, room_flags, AssetId, AssetKind, CharacterAnimationAction,
+    EntityRecord, InteractableKind, InteractableRecord, LevelBoxPropRecord, LevelCameraRecord,
     LevelCharacterRecord, LevelChunkRecord, LevelFarVistaRecord, LevelImagePropRecord,
-    LevelMaterialRecord, LevelMaterialSidedness, LevelModelFrameBoundsRecord, LevelModelRecord,
-    LevelModelSocketRecord, LevelRoomRecord, LevelSkyRecord, ModelClipIndex, ModelClipTableIndex,
-    ModelIndex, ModelSocketIndex, OptionalModelClipIndex, ParticleEmitterRecord, ResidencyManager,
-    RoomIndex, RuntimeDebugMask, WeaponHitShapeRecord, CHARACTER_ANIMATION_ACTION_COUNT,
+    LevelRoomRecord, LevelSkyRecord, ModelClipIndex, ParticleEmitterRecord, RoomIndex,
+    RuntimeDebugMask,
 };
-#[cfg(feature = "cd-stream-bench")]
-use psx_level::{
-    streamed_room_chunk_header, LevelCachedRoomCellRecord, LevelCachedRoomSurfaceRecord,
-    LevelCachedRoomVertexRecord, STREAMED_ROOM_CHUNK_FLAG_COLLISION_COMPACT,
-    STREAMED_ROOM_CHUNK_HEADER_BYTES, STREAMED_ROOM_CHUNK_MAGIC, STREAMED_ROOM_CHUNK_VERSION,
-};
-use psx_math::int32::mul_q12_i32;
 use psx_vram::{TexDepth, Tpage};
 
 mod active_room_cache;
@@ -123,10 +106,11 @@ mod active_room_streaming;
 mod active_room_visibility;
 mod active_rooms;
 mod box_props;
-#[cfg(feature = "cd-stream-bench")]
-mod cd_stream;
+#[cfg(feature = "cd-stream-benchmark")]
+use psx_game_runtime::cd_stream;
 mod character_runtime;
 mod debug_runtime;
+mod game_logic_runtime;
 mod image_props_runtime;
 mod input;
 mod marker_runtime;
@@ -137,20 +121,20 @@ mod playtest_runtime;
 mod playtest_scene;
 mod playtest_update;
 mod room_lighting_runtime;
+mod runtime_arenas;
 mod runtime_config;
 mod runtime_schedule;
 mod sky_runtime;
 mod visibility_runtime;
 mod visible_cell_runtime;
 mod vram_runtime;
-mod vram_upload;
-mod vram_upload_queue;
 
 use active_room_cache::*;
 use active_room_streaming::*;
 use box_props::*;
 use character_runtime::*;
 use debug_runtime::*;
+use game_logic_runtime::*;
 use image_props_runtime::*;
 use input::*;
 use marker_runtime::*;
@@ -158,6 +142,7 @@ use model_rendering::*;
 use overlay::*;
 use particle_runtime::*;
 use room_lighting_runtime::*;
+use runtime_arenas::*;
 use runtime_config::*;
 use runtime_schedule::RUNTIME_SCHEDULE;
 use sky_runtime::*;
@@ -175,9 +160,9 @@ mod generated {
 use generated::{
     ASSETS, BOX_PROPS, CACHED_ROOM_DEPTH_MODE, CACHED_ROOM_DRAW_ORDER_MODE,
     CACHED_ROOM_TEXTURE_SPLIT_MAX_EDGE, CACHED_ROOM_TEXTURE_SPLIT_MODE, CHARACTERS, ENTITIES,
-    EQUIPMENT, IMAGE_PROPS, INTERACTABLES, INTERACTABLE_MESSAGES, LIGHTS, MATERIALS, MODELS,
-    MODEL_CLIPS, MODEL_CLIP_BOUNDS, MODEL_FRAME_BOUNDS, MODEL_INSTANCES, MODEL_SOCKETS,
-    PARTICLE_EMITTERS, PLAYER_CONTROLLER, PLAYER_SPAWN, ROOMS, ROOM_CACHE_CELLS,
+    EQUIPMENT, GAME_ENTITIES, IMAGE_PROPS, INTERACTABLES, INTERACTABLE_MESSAGES, LIGHTS, LOGIC,
+    MATERIALS, MODELS, MODEL_CLIPS, MODEL_CLIP_BOUNDS, MODEL_FRAME_BOUNDS, MODEL_INSTANCES,
+    MODEL_SOCKETS, PARTICLE_EMITTERS, PLAYER_CONTROLLER, PLAYER_SPAWN, ROOMS, ROOM_CACHE_CELLS,
     ROOM_CACHE_CELL_VERTICES, ROOM_CACHE_SURFACES, ROOM_CACHE_VERTICES, ROOM_CHUNKS, ROOM_PORTALS,
     ROOM_RESIDENCY, ROOM_SURFACE_CACHES, ROOM_VISIBILITY, UI_FONTS, UI_NODES, UI_PAINTS,
     UI_SFX_CUES, UI_SFX_SAMPLES, VISIBILITY_CELLS, WEAPONS, WEAPON_HITBOXES,
@@ -195,53 +180,11 @@ use generated::{GAME_FLOW, OPTIONS, UI_SCENES};
 ))]
 use generated::{VISIBILITY_PVS, VISIBILITY_PVS_BITS};
 
-// Prebuilt room-quad pool (docs/perf-30fps.md): precompiled GP0(3Ch)
-// packets for static room surfaces. One slot per recently drawn room;
-// a packet is fully constructed the first frame its surface is drawn
-// for the owning room (per-surface validity bytes, zeroed on claim)
-// and only position/colour-patched afterwards. Lives OUTSIDE the
-// per-frame arena; the present flip's DMA drain makes in-place
-// patching safe.
-const PREBUILT_ROOM_QUAD_SLOT_EMPTY: [QuadTexturedGouraud; PREBUILT_ROOM_QUAD_CAP] =
-    [QuadTexturedGouraud::EMPTY; PREBUILT_ROOM_QUAD_CAP];
-static mut PREBUILT_ROOM_QUADS: [[QuadTexturedGouraud; PREBUILT_ROOM_QUAD_CAP];
-    PREBUILT_ROOM_QUAD_SLOTS] = [PREBUILT_ROOM_QUAD_SLOT_EMPTY; PREBUILT_ROOM_QUAD_SLOTS];
-static mut PREBUILT_ROOM_QUAD_VALID: [[u8; PREBUILT_ROOM_QUAD_CAP]; PREBUILT_ROOM_QUAD_SLOTS] =
-    [[0u8; PREBUILT_ROOM_QUAD_CAP]; PREBUILT_ROOM_QUAD_SLOTS];
-static mut PREBUILT_ROOM_QUAD_ROOMS: [RoomIndex; PREBUILT_ROOM_QUAD_SLOTS] =
-    [INVALID_ROOM_INDEX; PREBUILT_ROOM_QUAD_SLOTS];
-static mut PREBUILT_ROOM_QUAD_NEXT: u8 = 0;
-
 static mut OT: OrderingTable<OT_DEPTH> = OrderingTable::new();
 static mut PRIMITIVE_PACKETS: PrimitivePacketScratch<MAX_TEXTURED_TRIS> =
     PrimitivePacketScratch::ZERO;
 static mut WORLD_COMMANDS: [WorldTriCommand; MAX_TEXTURED_TRIS] =
     [WorldTriCommand::EMPTY; MAX_TEXTURED_TRIS];
-static mut CACHED_ROOM_PROJECTED_VERTICES: [ProjectedVertex; MAX_CACHED_ROOM_VERTICES] =
-    [ProjectedVertex::new(0, 0, 0); MAX_CACHED_ROOM_VERTICES];
-static mut CACHED_ROOM_PROJECTED_INDICES: [u16; MAX_CACHED_ROOM_VERTICES] =
-    [0; MAX_CACHED_ROOM_VERTICES];
-static mut CACHED_ROOM_PROJECTED_READY: [bool; MAX_CACHED_ROOM_VERTICES] =
-    [false; MAX_CACHED_ROOM_VERTICES];
-static mut CACHED_ROOM_PROJECTED_DEPTHS: [i32; MAX_CACHED_ROOM_VERTICES] =
-    [0; MAX_CACHED_ROOM_VERTICES];
-#[cfg(feature = "world-grid-visible")]
-static mut CACHED_ROOM_ACCEPTED_CELL_INDICES: [u16; MAX_PRECOMPUTED_VISIBLE_CELLS] =
-    [0; MAX_PRECOMPUTED_VISIBLE_CELLS];
-#[cfg(feature = "world-grid-visible")]
-static mut CACHED_ROOM_ACCEPTED_CELL_DEPTHS: [i32; MAX_PRECOMPUTED_VISIBLE_CELLS] =
-    [0; MAX_PRECOMPUTED_VISIBLE_CELLS];
-#[cfg(feature = "cd-stream-bench")]
-static mut STREAMED_ROOM_WORDS: [[u32; STREAMED_ROOM_SLOT_WORDS]; STREAMED_ROOM_SLOT_COUNT] =
-    [[0; STREAMED_ROOM_SLOT_WORDS]; STREAMED_ROOM_SLOT_COUNT];
-#[cfg(feature = "cd-stream-bench")]
-static mut ROOM_STREAM_SCHEDULER: RoomStreamScheduler<STREAMED_ROOM_SLOT_COUNT> =
-    RoomStreamScheduler::new();
-static mut MODEL_VERTICES: [ProjectedVertex; MODEL_VERTEX_CAP] =
-    [ProjectedVertex::new(0, 0, 0); MODEL_VERTEX_CAP];
-static mut JOINT_VIEW_TRANSFORMS: [JointViewTransform; JOINT_CAP] =
-    [JointViewTransform::ZERO; JOINT_CAP];
-
 fn world_camera_from_position_focus(
     projection: WorldProjection,
     position: RoomPoint,
@@ -290,7 +233,6 @@ fn yaw_q12_from_basis(sin_yaw: i32, cos_yaw: i32) -> u16 {
     (angle & 0x0fff) as u16
 }
 
-
 struct Playtest {
     /// Active room. `None` until `init` runs and only `Some`
     /// when the manifest had at least one room and its bytes
@@ -301,55 +243,25 @@ struct Playtest {
     current_collision_room: Option<RuntimeCollisionRoom<'static>>,
     /// Ambient RGB for the room containing the player.
     current_ambient_rgb: [u8; 3],
-    /// Cache-budgeted draw chunks, all expressed relative to
-    /// `room_index`.
-    active_rooms: [Option<ActiveRuntimeRoom>; MAX_ACTIVE_ROOMS],
-    /// Incremental active-room cache rebuild in progress. The old
-    /// `active_rooms` remain drawable until the staged replacement is ready.
-    active_room_job: ActiveRoomWindowJob,
-    /// Portal traversal result for the current player/camera room.
-    portal_visibility: RuntimePortalVisibility,
-    /// Runtime room used as the root for the latest portal traversal.
-    portal_visibility_root: RoomIndex,
-    /// Absolute level-space render camera used by the latest portal traversal.
-    portal_visibility_camera_global: RoomPoint,
-    /// Global chunk bounds retained for portal diagnostics and streaming.
-    portal_room_bounds: [PortalRoomBounds; MAX_PORTAL_ROOM_BOUNDS],
-    /// Cached `portal_room_bounds` length. The bounds are a pure function of the
-    /// static cooked geometry (ROOM_VISIBILITY / VISIBILITY_CELLS / ROOMS), so
-    /// they are computed once and reused; recomputing them per portal-visibility
-    /// refresh was ~74% of the portal-visibility cost.
-    portal_room_bounds_count: Option<usize>,
-    portal_visible_missing_resident: u16,
-    portal_visible_missing_mask: RuntimeDebugMask,
-    portal_visible_build_failed: u16,
-    portal_visible_build_failed_mask: RuntimeDebugMask,
+    /// Active-room window runtime state (the cache-budgeted draw
+    /// chunks, the incremental rebuild job staged against them, the
+    /// request anchor, and skip diagnostics), owned by
+    /// `psx_game_runtime::room_window` since the phase-1 carve.
+    window: RuntimeRoomWindow,
+    /// Portal-visibility runtime state (traversal result, root, bounds
+    /// cache, view keys, per-refresh diagnostics), owned by
+    /// `psx_game_runtime::room_visibility` since the phase-1 carve.
+    visibility: RuntimeRoomVisibility,
     portal_stream_priority_current: u16,
     portal_stream_priority_visible: u16,
     portal_stream_priority_frontier: u16,
+    /// Per-active-slot visible-cell caches over one shared pool, owned
+    /// by `psx_game_runtime::world_cells` since the phase-2 carve.
     #[cfg(all(
         feature = "world-grid-visible",
         not(feature = "vis-full-active-chunks")
     ))]
-    visible_cell_caches: [ActiveVisibleCellCache; MAX_ACTIVE_ROOMS],
-    #[cfg(all(
-        feature = "world-grid-visible",
-        not(feature = "vis-full-active-chunks")
-    ))]
-    visible_cell_cache_cells: [GridVisibleCell; MAX_ACTIVE_VISIBLE_CELLS],
-    #[cfg(all(
-        feature = "world-grid-visible",
-        not(feature = "vis-full-active-chunks")
-    ))]
-    visible_cell_cache_cursor: usize,
-    active_room_candidates: u16,
-    active_room_cache_skips: u16,
-    active_room_anchor: RoomPoint,
-    active_room_view_anchor: RoomPoint,
-    active_room_view_sin_key: i16,
-    active_room_view_cos_key: i16,
-    active_room_view_pitch_sin_key: i16,
-    active_room_view_pitch_cos_key: i16,
+    visible_cells: RuntimeVisibleCellSelector,
     /// Index in ROOMS the player is currently in. Used to scope
     /// model-instance + light queries.
     room_index: RoomIndex,
@@ -383,15 +295,32 @@ struct Playtest {
     /// locomotion input is ignored and the current action clip
     /// plays from start to finish.
     anim_lock_until_tick: SimTick,
-    /// Persistent runtime state for authored breakable box props.
-    box_prop_broken: [u32; BOX_PROP_BROKEN_WORDS],
-    /// Static derived box-prop data used by render, break tests, and collision.
-    box_prop_runtime: [BoxPropRuntime; MAX_BOX_PROP_STATE],
-    /// Dynamic fall state per box, parallel to `box_prop_broken`. A box
-    /// starts falling when its support is removed and breaks on landing.
-    box_prop_fall: [BoxPropFallState; MAX_BOX_PROP_STATE],
-    /// Short-lived baked face-burst events for newly broken box props.
-    box_prop_break_events: [BoxPropBreakEvent; MAX_BOX_PROP_BREAK_EVENTS],
+    /// Breakable box-prop state (broken bits, derived data, falls,
+    /// break bursts), owned by `psx_game_runtime::box_props` since the
+    /// phase-2 carve.
+    box_props: RuntimeBoxProps,
+    /// Souls-like game-entity SoA state over the cooked
+    /// `GAME_ENTITIES` records (phase 3; empty for record-free
+    /// projects and then inert).
+    game_entities: RuntimeGameEntities,
+    /// Logic-entity runtime (delay queue, master gating, fan-out)
+    /// over the cooked `LOGIC` records (phase 3).
+    logic: RuntimeLogic,
+    /// Rolling fired total already reported to telemetry, so the
+    /// LOGIC_RECORDS_FIRED counter emits per-tick deltas.
+    logic_fired_reported: u16,
+    /// Player health (phase-3 combat slice). Stamped to
+    /// `PLAYER_MAX_HEALTH` at gameplay init; entity attack
+    /// connections subtract from it; floors at 0 (death/respawn is
+    /// phase 4).
+    player_health: u16,
+    /// See [`Self::player_health`].
+    player_health_max: u16,
+    /// Entities already hit by the CURRENT player swing (bit i =
+    /// entity i): one swing connects at most once per enemy. Cleared
+    /// when an attack action starts.
+    // psx-numeric-allow-next-line: one-hit-per-swing bitmask over 64 entity records; bit ops only, two-word on R3000
+    swing_hit_mask: u64,
     /// Circle is shared by tap-evade and hold-sprint. We delay
     /// either decision for a few simulation ticks: release before
     /// the threshold becomes evade; holding past it becomes sprint.
@@ -510,130 +439,115 @@ struct Playtest {
 }
 
 impl Playtest {
-    const fn new() -> Self {
-        Self {
-            room: None,
-            current_collision_room: None,
-            current_ambient_rgb: [0x80, 0x80, 0x80],
-            active_rooms: [const { None }; MAX_ACTIVE_ROOMS],
-            active_room_job: ActiveRoomWindowJob::EMPTY,
-            portal_visibility: RuntimePortalVisibility::EMPTY,
-            portal_visibility_root: RoomIndex::ZERO,
-            portal_visibility_camera_global: RoomPoint::ZERO,
-            portal_room_bounds: [PortalRoomBounds::EMPTY; MAX_PORTAL_ROOM_BOUNDS],
-            portal_room_bounds_count: None,
-            portal_visible_missing_resident: 0,
-            portal_visible_missing_mask: RuntimeDebugMask::EMPTY,
-            portal_visible_build_failed: 0,
-            portal_visible_build_failed_mask: RuntimeDebugMask::EMPTY,
-            portal_stream_priority_current: 0,
-            portal_stream_priority_visible: 0,
-            portal_stream_priority_frontier: 0,
-            #[cfg(all(
-                feature = "world-grid-visible",
-                not(feature = "vis-full-active-chunks")
-            ))]
-            visible_cell_caches: [const { ActiveVisibleCellCache::EMPTY }; MAX_ACTIVE_ROOMS],
-            #[cfg(all(
-                feature = "world-grid-visible",
-                not(feature = "vis-full-active-chunks")
-            ))]
-            visible_cell_cache_cells: [GridVisibleCell::EMPTY; MAX_ACTIVE_VISIBLE_CELLS],
-            #[cfg(all(
-                feature = "world-grid-visible",
-                not(feature = "vis-full-active-chunks")
-            ))]
-            visible_cell_cache_cursor: 0,
-            active_room_candidates: 0,
-            active_room_cache_skips: 0,
-            active_room_anchor: RoomPoint::ZERO,
-            active_room_view_anchor: RoomPoint::ZERO,
-            active_room_view_sin_key: 0,
-            active_room_view_cos_key: 0,
-            active_room_view_pitch_sin_key: 0,
-            active_room_view_pitch_cos_key: 0,
-            room_index: RoomIndex::ZERO,
-            resident_desired: [INVALID_ROOM_INDEX; STREAMED_ROOM_SLOT_COUNT],
-            resident_desired_count: 0,
-            materials: [room_material_fallback(); MAX_ROOM_MATERIALS],
-            material_count: 0,
-            motor: CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO),
-            character: None,
-            anim_state: PlayerAnim::Idle,
-            anim_start_tick: SimTick::ZERO,
-            anim_lock_until_tick: SimTick::ZERO,
-            box_prop_broken: [0; BOX_PROP_BROKEN_WORDS],
-            box_prop_runtime: [BoxPropRuntime::EMPTY; MAX_BOX_PROP_STATE],
-            box_prop_fall: [BoxPropFallState::EMPTY; MAX_BOX_PROP_STATE],
-            box_prop_break_events: [BoxPropBreakEvent::EMPTY; MAX_BOX_PROP_BREAK_EVENTS],
-            evade_run_hold_ticks: 0,
-            evade_run_hold_consumed: false,
-            free_orbit: false,
-            orbit_yaw: CAMERA_START_YAW,
-            orbit_radius: CAMERA_START_RADIUS,
-            camera: ThirdPersonCameraState::new(CAMERA_START_YAW),
-            render_camera: WorldCamera::from_basis(
-                PROJECTION,
-                WorldVertex::ZERO,
-                Q12::ZERO,
-                Q12::ONE,
-                Q12::ZERO,
-                Q12::ONE,
-            ),
-            overlay_camera: WorldCamera::from_basis(
-                PROJECTION,
-                WorldVertex::ZERO,
-                Q12::ZERO,
-                Q12::ONE,
-                Q12::ZERO,
-                Q12::ONE,
-            ),
-            overlay_sim_tick: SimTick::ZERO,
-            gameplay_epoch: SimTick::ZERO,
-            gameplay_epoch_set: false,
-            fps_window_start: 0,
-            fps_window_frames: 0,
-            fps_last_tick: 0,
-            fps_worst_gap: 0,
-            fps_display: 0,
-            fps_display_worst: 0,
-            camera_collision_rooms: [const { CharacterCollisionRoom::EMPTY };
-                MAX_COLLISION_ROOMS],
-            camera_collision_room_count: 0,
-            camera_rooms_key: (
-                INVALID_ROOM_INDEX,
-                i32::MIN,
-                i32::MIN,
-                RuntimeDebugMask::EMPTY,
-                RuntimeDebugMask::EMPTY,
-            ),
-            player_moved_last_tick: false,
-            camera_turning_last_tick: false,
-            lock_target: None,
-            lock_switch_stick_held: false,
-            soft_lock_target: None,
-            soft_lock_suppressed: false,
-            active_interactable: None,
-            checkpoint: None,
-            message_overlay: None,
-            spawn: RoomPoint::ZERO,
-            ui_fonts: [const { None }; MAX_RUNTIME_UI_FONTS],
-            models: [const { None }; MAX_RUNTIME_MODELS],
-            model_faces: [TexturedModelRenderFace::ZERO; MAX_RUNTIME_MODEL_FACES],
-            model_face_count: 0,
-            model_parts: [ModelPart::ZERO; MAX_RUNTIME_MODEL_PARTS],
-            model_part_count: 0,
-            model_vertices: [ModelVertex::ZERO; MAX_RUNTIME_MODEL_DECODED_VERTICES],
-            model_vertex_count: 0,
-            clips: [const { None }; MAX_RUNTIME_MODEL_CLIPS],
-            shadow_material: None,
-            particle_material: None,
-            show_collision_debug: false,
-            streaming_jobs: RuntimeStreamingJobs::new(),
-            post_cross_debug_frames: 0,
-            portal_debug_log_cooldown: 0,
-            room_materials_unresolved: true,
+    /// Make the zeroed `SCENE` storage a valid `Playtest`, then stamp the
+    /// boot-time initial state (everything the old `const fn new()`
+    /// initializer stored as non-zero `.data` bytes).
+    ///
+    /// # Safety
+    ///
+    /// `scene` must point to `SCENE`'s link-time-zero storage, before any
+    /// other access to it: phase 1 below writes `None` into every
+    /// `Option` field through raw places because a niched `Option`'s
+    /// all-zero bytes can decode as `Some(<invalid payload>)`, and a
+    /// `&mut Playtest` may only be minted once every field holds a valid
+    /// value. Single-threaded boot path.
+    unsafe fn init_zeroed(scene: *mut Self) {
+        use core::ptr::addr_of_mut;
+        // Phase 1 -- validity: `None` for EVERY `Option` field, so the
+        // borrow below stays sound no matter which payload niche the
+        // compiler picked for each `None` encoding (empirically, the
+        // room/model/font/material `Option`s niche into a payload
+        // bool/enum byte, making their `None` a NON-zero byte).
+        addr_of_mut!((*scene).room).write(None);
+        addr_of_mut!((*scene).current_collision_room).write(None);
+        addr_of_mut!((*scene).character).write(None);
+        addr_of_mut!((*scene).lock_target).write(None);
+        addr_of_mut!((*scene).soft_lock_target).write(None);
+        addr_of_mut!((*scene).active_interactable).write(None);
+        addr_of_mut!((*scene).checkpoint).write(None);
+        addr_of_mut!((*scene).message_overlay).write(None);
+        addr_of_mut!((*scene).shadow_material).write(None);
+        addr_of_mut!((*scene).particle_material).write(None);
+        for slot in 0..MAX_RUNTIME_UI_FONTS {
+            addr_of_mut!((*scene).ui_fonts[slot]).write(None);
         }
+        for slot in 0..MAX_RUNTIME_MODELS {
+            addr_of_mut!((*scene).models[slot]).write(None);
+        }
+        for slot in 0..MAX_RUNTIME_MODEL_CLIPS {
+            addr_of_mut!((*scene).clips[slot]).write(None);
+        }
+        for slot in 0..MAX_ACTIVE_ROOMS {
+            addr_of_mut!((*scene).window.rooms[slot]).write(None);
+            addr_of_mut!((*scene).window.job.rooms[slot]).write(None);
+            addr_of_mut!((*scene).window.job.previous_rooms[slot]).write(None);
+        }
+        for slot in 0..MAX_COLLISION_ROOMS {
+            addr_of_mut!((*scene).camera_collision_rooms[slot].room).write(None);
+        }
+        // Phase 2 -- boot state: every field is now a valid value, so
+        // mint the exclusive borrow and stamp the non-zero initial state.
+        (*scene).init_boot_state();
+    }
+
+    /// Stamp the non-zero boot state (what the old `const fn new()`
+    /// stored in `.data`) onto the zeroed-and-made-valid scene: ambient
+    /// light, sentinel-filled pools, camera rig, fallback materials, and
+    /// the streaming-job budget. Per-element loops for the pools -- no
+    /// whole-array temporaries. Every field not stamped here boots as
+    /// all-zero bytes, which IS its old initializer value.
+    fn init_boot_state(&mut self) {
+        self.current_ambient_rgb = [0x80; 3];
+        self.visibility.init();
+        #[cfg(all(
+            feature = "world-grid-visible",
+            not(feature = "vis-full-active-chunks")
+        ))]
+        self.visible_cells.init();
+        for room in self.window.job.requested_rooms.iter_mut() {
+            *room = INVALID_ROOM_INDEX;
+        }
+        for room in self.resident_desired.iter_mut() {
+            *room = INVALID_ROOM_INDEX;
+        }
+        for material in self.materials.iter_mut() {
+            *material = room_material_fallback();
+        }
+        self.motor = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO);
+        // Zero bytes already decode as `Idle`; stamped for self-documentation.
+        self.anim_state = PlayerAnim::Idle;
+        self.box_props.init();
+        self.orbit_yaw = CAMERA_START_YAW;
+        self.orbit_radius = CAMERA_START_RADIUS;
+        self.camera = ThirdPersonCameraState::new(CAMERA_START_YAW);
+        self.render_camera = WorldCamera::from_basis(
+            PROJECTION,
+            WorldVertex::ZERO,
+            Q12::ZERO,
+            Q12::ONE,
+            Q12::ZERO,
+            Q12::ONE,
+        );
+        self.overlay_camera = WorldCamera::from_basis(
+            PROJECTION,
+            WorldVertex::ZERO,
+            Q12::ZERO,
+            Q12::ONE,
+            Q12::ZERO,
+            Q12::ONE,
+        );
+        self.camera_rooms_key = (
+            INVALID_ROOM_INDEX,
+            i32::MIN,
+            i32::MIN,
+            RuntimeDebugMask::EMPTY,
+            RuntimeDebugMask::EMPTY,
+        );
+        for vertex in self.model_vertices.iter_mut() {
+            *vertex = ModelVertex::ZERO;
+        }
+        self.streaming_jobs = RuntimeStreamingJobs::new();
+        self.room_materials_unresolved = true;
     }
 
     fn step_streaming_jobs(&mut self, ctx: &mut Ctx) {
@@ -659,8 +573,8 @@ impl Playtest {
         if background_tick {
             #[cfg(feature = "cd-stream-bench")]
             if stream_progress {
-                if self.active_room_job.active {
-                    self.active_room_job.update_streaming = true;
+                if self.window.job.active {
+                    self.window.job.update_streaming = true;
                 } else {
                     self.begin_active_room_window_job(true);
                 }
@@ -694,7 +608,7 @@ impl Playtest {
             };
             let textures_ready = self.initial_stream_ring_textures_ready();
             self.current_collision_room.is_some()
-                && !self.active_room_job.active
+                && !self.window.job.active
                 && self.portal_visible_rooms_are_active(record)
                 && self.initial_stream_ring_resident()
                 && textures_ready
@@ -724,7 +638,7 @@ impl Playtest {
         let visible_limit = self.portal_visible_room_limit(record);
         let mut visible = 0usize;
         while visible < visible_limit {
-            let room = self.portal_visibility.rooms[visible].room;
+            let room = self.visibility.result.rooms[visible].room;
             if room != INVALID_ROOM_INDEX && !streamed_room_is_resident(room) {
                 return false;
             }
@@ -756,7 +670,7 @@ impl Playtest {
         let visible_limit = self.portal_visible_room_limit(record);
         let mut visible = 0usize;
         while visible < visible_limit {
-            let room = self.portal_visibility.rooms[visible].room;
+            let room = self.visibility.result.rooms[visible].room;
             if room != INVALID_ROOM_INDEX && !room_requested(room, &self.resident_desired, count) {
                 if let Some(record) = ROOMS.get(room.to_usize()) {
                     ready &= room_material_textures_ready(record);
@@ -881,25 +795,6 @@ fn begin_world_render_pass<'a, 'ot>(
     }
 }
 
-fn ratio_q8_i32(numerator: i32, denominator: i32) -> i32 {
-    if numerator <= 0 || denominator <= 0 {
-        return 0;
-    }
-    let numerator = numerator as u32;
-    let denominator = denominator as u32;
-    let whole = numerator / denominator;
-    let remainder = numerator % denominator;
-    let scaled_whole = if whole > (i32::MAX as u32 / 256) {
-        return i32::MAX;
-    } else {
-        whole * 256
-    };
-    let scaled_remainder = remainder.saturating_mul(256) / denominator;
-    scaled_whole
-        .saturating_add(scaled_remainder)
-        .min(i32::MAX as u32) as i32
-}
-
 fn playtest_visual_pacing(video_mode: VideoMode) -> VisualPacing {
     match video_mode {
         VideoMode::Ntsc => VisualPacing::EveryNVBlanks(2),
@@ -909,21 +804,46 @@ fn playtest_visual_pacing(video_mode: VideoMode) -> VisualPacing {
     }
 }
 
-/// The `Playtest` scene is ~225 KB; keeping it as a `main` stack local
-/// pushed `$sp` down into `.bss`. Place it in static storage (`.bss`) so it
-/// no longer competes with the stack for the same region. `Playtest::new()`
-/// is `const fn`, so this is zero-initialized at link time.
-static mut SCENE: Playtest = Playtest::new();
+/// The `Playtest` scene is ~227 KB; keeping it as a `main` stack local
+/// pushed `$sp` down into `.bss`. Place it in static storage so it no
+/// longer competes with the stack for the same region.
+///
+/// Flat-binary discipline (same as `runtime_arenas`): the storage must be
+/// link-time zero so it lands in `.bss` -- NOLOAD in the PSX-EXE -- instead
+/// of storing ~227 KB of initializer bytes in the flat binary's `.data`
+/// (which the old `Playtest::new()` image did: sentinel-filled pools,
+/// fallback materials, and niched `Option` fields are non-zero bytes).
+///
+/// `MaybeUninit` storage rather than an all-zero `const Playtest` because
+/// no such value exists: several `Option` fields niche their discriminant
+/// into a payload bool/enum byte, so their `None` is a NON-zero byte and
+/// the all-zero pattern would decode as `Some(<invalid payload>)`. NOT
+/// ready for use until [`Playtest::init_zeroed`] stamps validity and the
+/// boot state at the top of `main`, before anything else touches it.
+static mut SCENE: core::mem::MaybeUninit<Playtest> = core::mem::MaybeUninit::zeroed();
 
 #[no_mangle]
 fn main() -> ! {
-    let scene: &mut Playtest = unsafe { &mut *core::ptr::addr_of_mut!(SCENE) };
+    // Stamp the scene's boot state onto its link-time-zero storage BEFORE
+    // any other use (see `SCENE` and `Playtest::init_zeroed`).
+    // SAFETY: single-threaded boot path; the raw stamping happens before
+    // this one exclusive borrow is minted (`MaybeUninit<T>` is
+    // `#[repr(transparent)]`, so the cast is layout-exact), and nothing
+    // else touches the static.
+    let scene: &mut Playtest = unsafe {
+        let scene = core::ptr::addr_of_mut!(SCENE).cast::<Playtest>();
+        Playtest::init_zeroed(scene);
+        &mut *scene
+    };
     // The scene now lives in `.bss`, not on the stack; this guard still
     // checks that the live stack frames (and the rest of static data) leave
     // headroom between `$sp` and the top of `.bss` instead of silently
     // corrupting `static` buffers at runtime.
     #[cfg(target_arch = "mips")]
     psx_rt::assert_stack_headroom();
+    // Stamp the runtime arenas' initial state onto their link-time-zero
+    // storage before anything can touch them (see `runtime_arenas`).
+    init_runtime_arenas();
     game_trace("editor-playtest: init ok");
     let video_mode = VideoMode::Ntsc;
     let config = Config {

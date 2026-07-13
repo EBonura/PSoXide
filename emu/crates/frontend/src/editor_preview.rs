@@ -2284,6 +2284,9 @@ fn entity_marker_color(kind: &NodeKind) -> Option<(u8, u8, u8)> {
         NodeKind::PointLight { .. } => None,
         NodeKind::ParticleEmitter { .. } => Some((0x98, 0xD6, 0xE6)),
         NodeKind::Portal { .. } => None,
+        // Logic nodes read through their selection bound (the
+        // trigger-extent box); a billboard marker would double up.
+        NodeKind::Logic { .. } => Some((0xC8, 0x8C, 0xE8)),
         NodeKind::ModelRenderer { .. }
         | NodeKind::Animator { .. }
         | NodeKind::Collider { .. }
