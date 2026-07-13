@@ -91,6 +91,11 @@ zip        = { version = "2", default-features = false, features = ["deflate"] }
 # losslessly; postcard for binary savestates (compact, serde-native).
 ron         = "0.8"
 postcard    = { version = "1.0", features = ["alloc"] }
+# Compact (de)serialization for large `[u8]` buffers (save-state RAM/IO
+# snapshots) -- postcard varint-encodes each element of a plain `Vec<u8>`,
+# which balloons a multi-MB RAM dump; serde_bytes forwards to
+# `serialize_bytes`/`deserialize_bytes` instead.
+serde_bytes = "0.11"
 directories = "5.0"
 clap        = { version = "4.5", features = ["derive"] }
 

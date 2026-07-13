@@ -247,7 +247,7 @@ const fn envelope_numerator_decrease(rate: usize) -> i32 {
 
 /// ADSR state-machine phase. Voices start at `Off`; KON transitions to
 /// `Attack` and resets the envelope. `Off` voices contribute silence.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum AdsrPhase {
     Off,
     Attack,
@@ -259,7 +259,7 @@ enum AdsrPhase {
 /// Decoded ADSR configuration -- parsed from the 32-bit `(adsr_lo | adsr_hi<<16)`
 /// register pair. We decode once at write time and stash the bit-fields so the
 /// hot path (envelope tick per sample) is pure arithmetic.
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 struct AdsrConfig {
     attack_rate: i32,   // 0..=127 (with mode bit folded in)
     attack_exp: bool,   // linear vs exponential slope
@@ -304,7 +304,7 @@ fn parse_adsr_hi(hi: u16, cfg: &mut AdsrConfig) {
 /// of the PSX hardware volume sweep
 /// and the per-voice volume envelope;
 /// the level is applied as `(sample * current) >> 15`.
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 struct VolumeEnvelope {
     /// The last 16-bit word written to the register. `reads` echo
     /// this so software verification paths see the exact config.
@@ -455,7 +455,7 @@ impl VolumeEnvelope {
 /// volumes, and loop pointers. Kept plain (no padding or SIMD) --
 /// 24 copies of this struct live in `Spu::voices` and mix together on
 /// each sample.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 struct Voice {
     /// Left volume envelope.
     vol_l: VolumeEnvelope,
@@ -789,7 +789,7 @@ mod reverb_reg {
 /// Runtime state for the SPU reverb work area. The coefficient and
 /// offset registers live in `Spu::reverb_cfg`; this only tracks the
 /// moving cursor and 22.05 kHz wet-output interpolation history.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 struct ReverbState {
     /// Current reverb work-address in SPU RAM halfwords. The reverb
     /// buffer spans `reverb_base_halfword..=0x3ffff` and wraps there.
@@ -827,11 +827,15 @@ impl ReverbState {
 
 /// Full SPU state. Owns SPU RAM, all 24 voices, the register bank,
 /// and the output audio buffer.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Spu {
     /// 512 KiB SPU RAM as u16 (256K halfwords). ADPCM blocks + reverb
     /// work area + decoded-buffer captures live here. DMA channel 4
     /// writes streams of u16s via [`Spu::dma_write`]; software sees
     /// round-trip consistency through the TRANSFER_FIFO register.
+    /// Boxed array is well past serde's built-in 32-element cap, so it
+    /// round-trips through [`crate::serde_big_array::boxed_array`].
+    #[serde(with = "crate::serde_big_array::boxed_array")]
     ram: Box<[u16; SPU_RAM_HALFWORDS]>,
     /// 24 voices.
     voices: [Voice; NUM_VOICES],
@@ -897,37 +901,56 @@ pub struct Spu {
     /// Diagnostic per-voice activity: key-on count and number of samples
     /// that produced nonzero output. A voice keyed but never voiced is the
     /// signature of a missing-instrument bug (ADSR/decode failure). Not on
-    /// any hot register path.
+    /// any hot register path. Excluded from save states.
+    #[serde(skip)]
     dbg_kon_count: [u32; NUM_VOICES],
+    #[serde(skip)]
     dbg_voiced_samples: [u32; NUM_VOICES],
     /// Per-voice note-end reason tally: key-off (game gate) vs sample-stop
     /// (one-shot/loop end). Distinguishes a gate/release cutoff from samples
-    /// ending early.
+    /// ending early. Excluded from save states.
+    #[serde(skip)]
     dbg_koff_count: [u32; NUM_VOICES],
+    #[serde(skip)]
     dbg_sampstop_count: [u32; NUM_VOICES],
     /// Voice config captured at the last key-on: (start_addr, adsr_lo,
     /// adsr_hi, raw_pitch, vol_l, vol_r). Reveals why a keyed voice stays
-    /// silent (bad start address, dead ADSR, zero volume).
+    /// silent (bad start address, dead ADSR, zero volume). Excluded from
+    /// save states.
+    #[serde(skip)]
     dbg_keyon_cfg: [(u32, u16, u16, u16, i16, i16); NUM_VOICES],
     /// Per-voice envelope/decode trace, snapshotted every 1024 output
     /// samples: (decoded_sample_pre_adsr, envelope_level, phase). Bisects
     /// premature note cutoff -- decoded->0 with envelope held = decode/loop
-    /// bug; envelope->0 = ADSR/key-off. Capped, diagnostic-only.
+    /// bug; envelope->0 = ADSR/key-off. Capped, diagnostic-only. Excluded
+    /// from save states.
+    #[serde(skip)]
     dbg_trace: [Vec<(i16, i32, u8)>; NUM_VOICES],
-    /// Output-sample clock that gates dbg_trace snapshots.
+    /// Output-sample clock that gates dbg_trace snapshots. Excluded from
+    /// save states.
+    #[serde(skip)]
     dbg_sample_idx: u32,
     /// Per-voice running max of |decoded sample| and envelope within the
     /// current trace window; pushed + reset at each snapshot boundary.
+    /// Excluded from save states.
+    #[serde(skip)]
     dbg_acc_smax: [i32; NUM_VOICES],
+    #[serde(skip)]
     dbg_acc_emax: [i32; NUM_VOICES],
     /// Accumulated |dry| and |wet (reverb)| output magnitude over the run.
     /// A near-zero wet/dry ratio means the reverb bus is not contributing --
     /// missing reverb tails read as dry, "cut-off" notes vs the oracle.
+    /// Excluded from save states.
+    #[serde(skip)]
     dbg_dry_energy: u64,
+    #[serde(skip)]
     dbg_wet_energy: u64,
     /// OR-accumulated pmon / noise bitmaps over the whole run -- captures
     /// any voice ever pitch-modulated or noise-mode, not just the end state.
+    /// Excluded from save states.
+    #[serde(skip)]
     dbg_pmon_ever: u32,
+    #[serde(skip)]
     dbg_noise_ever: u32,
     /// Voice pitch-modulation enable bitmap. Bit N means voice N takes
     /// its pitch from voice N-1's output sample.
@@ -947,6 +970,9 @@ pub struct Spu {
 
     /// Host-facing stereo output buffer. Frontend pulls periodically via
     /// [`Spu::drain_audio`]. Oldest-sample-dropped when cap exceeded.
+    /// Transient host-audio plumbing -- excluded from save states, reset
+    /// empty on load (there is nothing to "resume" in an audio queue).
+    #[serde(skip)]
     audio_out: std::collections::VecDeque<(i16, i16)>,
 
     /// CD audio input queue -- stereo samples fed by the CDROM
@@ -955,13 +981,17 @@ pub struct Spu {
     /// mixes it via `CD_VOL_L/R` into the main output. When the
     /// queue is empty, CD contribution is zero. Bounded at
     /// ~0.5 s to prevent runaway growth during emulator fast-
-    /// forward.
+    /// forward. This is pending emulated input rather than host
+    /// output: consuming it can mutate SPU RAM/capture state, so it
+    /// must round-trip through save states.
     cd_audio_in: std::collections::VecDeque<(i16, i16)>,
 
     /// Absolute cycle count at which we last produced an audio sample.
     /// Used to catch up when the scheduler delivers a burst of ticks.
     last_sample_cycle: u64,
     /// Total samples produced since reset -- diagnostic counter.
+    /// Excluded from save states.
+    #[serde(skip)]
     samples_produced: u64,
     /// Redux's decoded/capture-buffer IRQ cursor. When enabled, the
     /// first 0x1000 bytes of SPU RAM are treated as four 0x400-byte
