@@ -10,7 +10,12 @@ pub const VRAM_WIDTH: usize = 1024;
 pub const VRAM_HEIGHT: usize = 512;
 
 /// 1 MiB of 16bpp video memory.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Vram {
+    /// Boxed `[u16; 524288]` (1 MiB) -- past serde's built-in 0..=32
+    /// array impls, so this round-trips through
+    /// [`crate::serde_big_array::boxed_array`] instead of a bare derive.
+    #[serde(with = "crate::serde_big_array::boxed_array")]
     data: Box<[u16; VRAM_WIDTH * VRAM_HEIGHT]>,
 }
 

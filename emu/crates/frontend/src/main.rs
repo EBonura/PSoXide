@@ -660,6 +660,24 @@ impl ApplicationHandler for Shell {
                         }
                     );
                 }
+                // F5 / F7 -- quick-save (pushes a new save, and pins it
+                // as the new quick-load target) / quick-load whichever
+                // save is pinned "on top" (see `ConfigPaths::read_top_slot`),
+                // falling back to the most recent one. F7 stays running
+                // after loading (unlike the save-states panel's Load
+                // button, which defaults its "Resume paused" checkbox
+                // to on) -- it's meant as a fast, in-the-moment rewind,
+                // not a deliberate jump you'd want to stop and look
+                // around after. F9 is already the DualShock analog-mode
+                // toggle (see `key_is_analog_button`), so quick-save/-load
+                // land on F5/F7 instead of the more conventional F5/F9.
+                if state == ElementState::Pressed && !repeat {
+                    match &logical_key {
+                        Key::Named(NamedKey::F5) => self.state.save_state(),
+                        Key::Named(NamedKey::F7) => self.state.load_latest_state(false),
+                        _ => {}
+                    }
+                }
                 gfx.window.request_redraw();
             }
             WindowEvent::RedrawRequested => {

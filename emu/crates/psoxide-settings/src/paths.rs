@@ -130,10 +130,75 @@ impl ConfigPaths {
     }
 
     /// Path to a specific save-state slot. Slots are numbered from 0
-    /// upward; the convention is that slot 0 = "quick save," higher
-    /// slots = user-chosen.
+    /// upward; the frontend treats them as a history/stack rather
+    /// than fixed named slots -- each save picks the next unused
+    /// number, so a higher slot means a more recent save (see
+    /// [`ConfigPaths::list_savestate_slots`]).
     pub fn savestate_file(&self, game_id: &str, slot: u8) -> PathBuf {
         self.savestates_dir(game_id).join(format!("slot{slot}.psx"))
+    }
+
+    /// Path to a save slot's screenshot thumbnail (PNG), stored next
+    /// to the `.psx` file it previews. Not every slot has one (older
+    /// saves predate thumbnails, or the capture failed) -- callers
+    /// check [`Path::exists`] before trying to load it.
+    pub fn savestate_thumbnail_file(&self, game_id: &str, slot: u8) -> PathBuf {
+        self.savestates_dir(game_id).join(format!("slot{slot}.png"))
+    }
+
+    /// Pointer file naming which slot is "on top" of the save
+    /// history -- what F7 / quick-load targets. Deliberately separate
+    /// from slot numbering: pinning an older save as the quick-load
+    /// target must not renumber or move anything, so it's just a
+    /// one-line text file the user can repoint at will.
+    fn top_slot_file(&self, game_id: &str) -> PathBuf {
+        self.savestates_dir(game_id).join("top_slot")
+    }
+
+    /// Read the pinned "top" slot for `game_id`. `None` when there's
+    /// no pin file yet, its contents don't parse as a `u8`, or it
+    /// names a slot that no longer exists on disk -- callers treat
+    /// all three the same way: fall back to the highest existing slot
+    /// (see [`ConfigPaths::list_savestate_slots`]).
+    pub fn read_top_slot(&self, game_id: &str) -> Option<u8> {
+        let raw = std::fs::read_to_string(self.top_slot_file(game_id)).ok()?;
+        let slot: u8 = raw.trim().parse().ok()?;
+        self.list_savestate_slots(game_id)
+            .contains(&slot)
+            .then_some(slot)
+    }
+
+    /// Pin `slot` as the save history's "top" -- the next thing F7 /
+    /// quick-load will target. Touches only the pointer file; the
+    /// slot's own `.psx`/`.png` files and every other slot's ordering
+    /// are untouched.
+    pub fn write_top_slot(&self, game_id: &str, slot: u8) -> std::io::Result<()> {
+        std::fs::write(self.top_slot_file(game_id), slot.to_string())
+    }
+
+    /// Every save-state slot number that currently exists on disk for
+    /// `game_id`, ascending. Returns an empty `Vec` if the game has no
+    /// `savestates` directory yet (never saved) or it's unreadable.
+    ///
+    /// Callers build "next free slot" (`max + 1`, or `0` if empty) and
+    /// "most recent slot" (`max`) from this rather than tracking slot
+    /// allocation separately -- the filesystem is the source of truth,
+    /// same as the rest of this module.
+    pub fn list_savestate_slots(&self, game_id: &str) -> Vec<u8> {
+        let Ok(entries) = std::fs::read_dir(self.savestates_dir(game_id)) else {
+            return Vec::new();
+        };
+        let mut slots: Vec<u8> = entries
+            .filter_map(|entry| entry.ok())
+            .filter_map(|entry| {
+                let name = entry.file_name();
+                let name = name.to_str()?;
+                let digits = name.strip_prefix("slot")?.strip_suffix(".psx")?;
+                digits.parse::<u8>().ok()
+            })
+            .collect();
+        slots.sort_unstable();
+        slots
     }
 
     /// Memory-card file for the given port (1 or 2). Stored raw (128
@@ -223,5 +288,88 @@ mod tests {
             .memcard_file("g", 7)
             .to_string_lossy()
             .ends_with("memcard-2.mcd"));
+    }
+
+    #[test]
+    fn list_savestate_slots_is_empty_when_never_saved() {
+        let tmp = TempDir::new().unwrap();
+        let p = ConfigPaths::rooted(tmp.path());
+        assert_eq!(p.list_savestate_slots("nosaves"), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn list_savestate_slots_finds_and_sorts_existing_files() {
+        let tmp = TempDir::new().unwrap();
+        let p = ConfigPaths::rooted(tmp.path());
+        p.ensure_game_tree("g").unwrap();
+        // Written out of order, plus a non-matching file that must be ignored.
+        for slot in [3u8, 0, 7, 1] {
+            std::fs::write(p.savestate_file("g", slot), b"x").unwrap();
+        }
+        std::fs::write(p.savestates_dir("g").join("notes.txt"), b"ignore me").unwrap();
+        assert_eq!(p.list_savestate_slots("g"), vec![0, 1, 3, 7]);
+    }
+
+    #[test]
+    fn next_free_and_latest_slot_derive_from_the_list() {
+        let tmp = TempDir::new().unwrap();
+        let p = ConfigPaths::rooted(tmp.path());
+        p.ensure_game_tree("g").unwrap();
+        // Empty: next free is 0, no "latest" to load.
+        let slots = p.list_savestate_slots("g");
+        assert_eq!(slots.last().copied(), None);
+        let next = slots.last().map_or(0, |m| m + 1);
+        assert_eq!(next, 0);
+
+        std::fs::write(p.savestate_file("g", 0), b"x").unwrap();
+        std::fs::write(p.savestate_file("g", 1), b"x").unwrap();
+        let slots = p.list_savestate_slots("g");
+        let next = slots.last().map_or(0, |m| m + 1);
+        assert_eq!(
+            next, 2,
+            "next free slot should be one past the highest existing"
+        );
+        assert_eq!(
+            slots.last().copied(),
+            Some(1),
+            "latest save is the highest slot"
+        );
+    }
+
+    #[test]
+    fn top_slot_is_none_when_never_pinned() {
+        let tmp = TempDir::new().unwrap();
+        let p = ConfigPaths::rooted(tmp.path());
+        p.ensure_game_tree("g").unwrap();
+        assert_eq!(p.read_top_slot("g"), None);
+    }
+
+    #[test]
+    fn top_slot_round_trips() {
+        let tmp = TempDir::new().unwrap();
+        let p = ConfigPaths::rooted(tmp.path());
+        p.ensure_game_tree("g").unwrap();
+        std::fs::write(p.savestate_file("g", 0), b"x").unwrap();
+        std::fs::write(p.savestate_file("g", 1), b"x").unwrap();
+        p.write_top_slot("g", 0).unwrap();
+        assert_eq!(
+            p.read_top_slot("g"),
+            Some(0),
+            "pinning an older slot must stick"
+        );
+    }
+
+    #[test]
+    fn top_slot_falls_back_when_pinned_slot_is_gone() {
+        let tmp = TempDir::new().unwrap();
+        let p = ConfigPaths::rooted(tmp.path());
+        p.ensure_game_tree("g").unwrap();
+        std::fs::write(p.savestate_file("g", 0), b"x").unwrap();
+        p.write_top_slot("g", 5).unwrap(); // slot 5 was never created
+        assert_eq!(
+            p.read_top_slot("g"),
+            None,
+            "a pin pointing at a deleted/nonexistent slot must not be trusted"
+        );
     }
 }

@@ -149,7 +149,7 @@ pub struct SaveStateV1<T> {
 
 impl<T> SaveStateV1<T>
 where
-    T: Serialize + for<'a> Deserialize<'a>,
+    T: Serialize,
 {
     /// Build a save-state around an existing payload. Fills in the
     /// header boilerplate.
@@ -173,33 +173,6 @@ where
     /// Serialise to bytes (postcard).
     pub fn to_bytes(&self) -> Result<Vec<u8>, SaveStateError> {
         postcard::to_allocvec(self).map_err(|e| SaveStateError::Encode(e.to_string()))
-    }
-
-    /// Deserialise from bytes. Validates magic + version, returns a
-    /// typed error for each failure mode so the UI can surface
-    /// something meaningful ("wrong emulator save" vs "corrupted
-    /// file" vs "newer version, please upgrade").
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, SaveStateError> {
-        if bytes.len() < SAVESTATE_MAGIC.len() + 4 {
-            return Err(SaveStateError::Truncated {
-                path: std::path::PathBuf::new(),
-                min_bytes: SAVESTATE_MAGIC.len() + 4,
-            });
-        }
-        if &bytes[..8] != SAVESTATE_MAGIC {
-            return Err(SaveStateError::BadMagic {
-                path: std::path::PathBuf::new(),
-            });
-        }
-        let state: SaveStateV1<T> =
-            postcard::from_bytes(bytes).map_err(|e| SaveStateError::Decode(e.to_string()))?;
-        if state.header.format_version > SAVESTATE_FORMAT_VERSION {
-            return Err(SaveStateError::UnsupportedVersion {
-                found: state.header.format_version,
-                max: SAVESTATE_FORMAT_VERSION,
-            });
-        }
-        Ok(state)
     }
 
     /// Write atomically to `path`. Writes to `<path>.tmp` first,
@@ -226,6 +199,38 @@ where
             source,
         })?;
         Ok(())
+    }
+}
+
+impl<T> SaveStateV1<T>
+where
+    T: for<'a> Deserialize<'a>,
+{
+    /// Deserialise from bytes. Validates magic + version, returns a
+    /// typed error for each failure mode so the UI can surface
+    /// something meaningful ("wrong emulator save" vs "corrupted
+    /// file" vs "newer version, please upgrade").
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, SaveStateError> {
+        if bytes.len() < SAVESTATE_MAGIC.len() + 4 {
+            return Err(SaveStateError::Truncated {
+                path: std::path::PathBuf::new(),
+                min_bytes: SAVESTATE_MAGIC.len() + 4,
+            });
+        }
+        if &bytes[..8] != SAVESTATE_MAGIC {
+            return Err(SaveStateError::BadMagic {
+                path: std::path::PathBuf::new(),
+            });
+        }
+        let state: SaveStateV1<T> =
+            postcard::from_bytes(bytes).map_err(|e| SaveStateError::Decode(e.to_string()))?;
+        if state.header.format_version > SAVESTATE_FORMAT_VERSION {
+            return Err(SaveStateError::UnsupportedVersion {
+                found: state.header.format_version,
+                max: SAVESTATE_FORMAT_VERSION,
+            });
+        }
+        Ok(state)
     }
 
     /// Read and deserialise from `path`. Produces path-tagged
