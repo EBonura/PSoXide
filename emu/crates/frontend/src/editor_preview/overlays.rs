@@ -143,6 +143,7 @@ pub(super) fn entity_bound_style(
         psxed_ui::EntityBoundKind::PointLight => (0xFF, 0xD8, 0x70),
         psxed_ui::EntityBoundKind::ParticleEmitter => (0x98, 0xD6, 0xE6),
         psxed_ui::EntityBoundKind::Portal => PORTAL_SEAM_STYLE.rgb,
+        psxed_ui::EntityBoundKind::Logic => (0xC8, 0x8C, 0xE8),
     };
     FaceOutlineStyle {
         rgb,

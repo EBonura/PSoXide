@@ -1667,6 +1667,39 @@ pub(crate) fn register_weapon_for_equipment(
         return None;
     };
 
+    // Melee-arc contract (phase-3 combat): a cooked weapon must be
+    // able to connect. Serde defaults are non-zero, so only an
+    // explicitly authored zero trips these.
+    let mut arc_ok = true;
+    if weapon.arc_reach == 0 {
+        report.error(format!(
+            "Weapon '{}' has melee arc reach 0 - an equipped weapon \
+             must be able to connect (set Arc Reach > 0)",
+            resource.name
+        ));
+        arc_ok = false;
+    }
+    if weapon.arc_half_angle_degrees == 0 || weapon.arc_half_angle_degrees > 170 {
+        report.error(format!(
+            "Weapon '{}' has melee arc half-angle {} degrees - it must \
+             be 1..=170 (a zero-width arc never connects; past 170 the \
+             front-arc test degenerates)",
+            resource.name, weapon.arc_half_angle_degrees
+        ));
+        arc_ok = false;
+    }
+    if weapon.damage == 0 {
+        report.error(format!(
+            "Weapon '{}' has damage 0 - an equipped weapon must \
+             threaten something (set Damage > 0)",
+            resource.name
+        ));
+        arc_ok = false;
+    }
+    if !arc_ok {
+        return None;
+    }
+
     let model = match weapon.model {
         Some(model_resource_id) => Some(register_model_for_instance(
             project,
@@ -1708,9 +1741,20 @@ pub(crate) fn register_weapon_for_equipment(
         grip_rotation_q12: weapon.grip.rotation_q12,
         hitbox_first,
         hitbox_count,
+        arc_reach: weapon.arc_reach,
+        arc_half_angle: weapon_arc_half_angle_psx(weapon.arc_half_angle_degrees),
+        damage: weapon.damage,
+        poise_damage: weapon.poise_damage,
     });
     weapon_for_resource.insert(weapon_resource_id, weapon_index);
     Some(weapon_index)
+}
+
+/// Authored degrees -> PSX angle units (4096 per full turn). Exact
+/// for multiples of 45; the validation bound (1..=170) keeps the
+/// result well inside u16.
+pub(crate) fn weapon_arc_half_angle_psx(degrees: u16) -> u16 {
+    ((u32::from(degrees) * 4096) / 360) as u16
 }
 
 pub(crate) fn playtest_weapon_shape(shape: &crate::WeaponHitShape) -> PlaytestWeaponHitShape {

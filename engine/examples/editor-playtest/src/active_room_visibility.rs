@@ -1,70 +1,30 @@
+//! Glue over `psx_game_runtime::room_visibility`: threads the cooked
+//! manifest tables, the projection/schedule consts, and cross-module
+//! scene state (the active-room window, the player motor) into the
+//! crate-owned [`RoomVisibility`] instance held by
+//! `Playtest::visibility`. The counter emission at the bottom stays
+//! with the example's debug overlays.
+
 use super::*;
+use psx_game_runtime::{room_cache, room_visibility};
 
 impl Playtest {
     pub(super) fn chunked_level(&self) -> bool {
-        !ROOM_CHUNKS.is_empty()
+        room_visibility::chunked_level(ROOM_CHUNKS)
     }
 
     pub(super) fn active_room_selection_view(&self) -> ActiveRoomView {
         ActiveRoomView::from_camera(self.render_camera)
     }
 
-    /// Global-space visibility anchor for a portal-admitted far room: the
-    /// center of the portal that admitted it, nudged half a sector INTO
-    /// the room so the grid lookup lands on an interior doorway cell. The
-    /// cooked PVS of that cell is, by construction, what is visible of
-    /// the room from its doorway -- the user-facing contract: rooms stay
-    /// drawn N portal hops down the line as long as the connecting
-    /// portals survive the frustum-clipped portal walk.
-    ///
-    /// Returns `None` when the room has no recorded entry frustum (the
-    /// caller then draws every cell through the cached path instead).
+    /// See [`RoomVisibility::portal_entry_anchor`] for the anchor contract.
     pub(super) fn portal_entry_anchor(
         &self,
         room: RoomIndex,
         sector_size: i32,
     ) -> Option<RoomPoint> {
-        let position = self.portal_visibility.room_position(room)?;
-        let visible = self.portal_visibility.rooms.get(position)?;
-        let frustum = self
-            .portal_visibility
-            .frustums
-            .get(visible.frustum_first as usize)?;
-        if frustum.room != room {
-            return None;
-        }
-        let record = ROOM_PORTALS.get(frustum.source_portal as usize)?;
-        let center_x = (record.vertex_x[0]
-            + record.vertex_x[1]
-            + record.vertex_x[2]
-            + record.vertex_x[3])
-            / 4;
-        let center_y = (record.vertex_y[0]
-            + record.vertex_y[1]
-            + record.vertex_y[2]
-            + record.vertex_y[3])
-            / 4;
-        let center_z = (record.vertex_z[0]
-            + record.vertex_z[1]
-            + record.vertex_z[2]
-            + record.vertex_z[3])
-            / 4;
-        // The cooked normal faces the record's SOURCE room. Nudge toward
-        // whichever side `room` is on; the walk traverses records in
-        // both directions, so check rather than assume orientation.
-        let nudge = (sector_size / 2).max(1);
-        let sign = if record.destination_room == room {
-            -1
-        } else if record.source_room == room {
-            1
-        } else {
-            return None;
-        };
-        Some(RoomPoint::new(
-            center_x + sign * (record.normal_x as i32) * nudge,
-            center_y + sign * (record.normal_y as i32) * nudge,
-            center_z + sign * (record.normal_z as i32) * nudge,
-        ))
+        self.visibility
+            .portal_entry_anchor(ROOM_PORTALS, room, sector_size)
     }
 
     pub(super) fn rebuild_portal_visibility(
@@ -74,49 +34,22 @@ impl Playtest {
         view: ActiveRoomView,
         camera_global: RoomPoint,
     ) {
-        let half_fov_x_tan_q12 = ((SCREEN_CX as i32).saturating_mul(4096) / FOCAL.max(1)).max(1);
-        let half_fov_y_tan_q12 = ((SCREEN_CY as i32).saturating_mul(4096) / FOCAL.max(1)).max(1);
-        let far_z = current_record.draw_distance.clamp(NEAR_Z, FAR_Z);
-        self.portal_visibility_root = current_index;
-        self.portal_visibility_camera_global = camera_global;
-        telemetry::stage_begin(telemetry::stage::PORTAL_VISIBILITY);
-        let camera = PortalVisibilityCamera::new(
-            camera_global.x,
-            camera_global.y,
-            camera_global.z,
-            view.sin_yaw,
-            view.cos_yaw,
-            view.sin_pitch,
-            view.cos_pitch,
-            PROJECTION.near_z,
-            far_z,
-            half_fov_x_tan_q12,
-            half_fov_y_tan_q12,
-            RUNTIME_SCHEDULE.portal_min_width_q12,
-        );
-        // The room bounds are a pure function of the static cooked geometry, so
-        // collect them once and reuse the cached length on every later refresh.
-        let bounds_count = match self.portal_room_bounds_count {
-            Some(count) => count,
-            None => {
-                let count = collect_portal_room_bounds(&mut self.portal_room_bounds);
-                self.portal_room_bounds_count = Some(count);
-                count
-            }
-        };
-        build_portal_visibility_with_room_bounds(
+        let camera = self.visibility.rebuild(
             ROOMS,
             ROOM_PORTALS,
-            &self.portal_room_bounds[..bounds_count],
             current_index,
-            camera,
+            current_record,
+            view,
+            camera_global,
+            PROJECTION,
+            FAR_Z,
+            RUNTIME_SCHEDULE.portal_min_width_q12,
             RUNTIME_SCHEDULE.portal_max_depth,
-            &mut self.portal_visibility,
+            collect_portal_room_bounds,
         );
-        telemetry::stage_end(telemetry::stage::PORTAL_VISIBILITY);
         if PORTAL_VIS_DEBUG_LOGS
             && self.portal_debug_log_cooldown == 0
-            && should_debug_log_portal_visibility(current_record, &self.portal_visibility)
+            && should_debug_log_portal_visibility(current_record, &self.visibility.result)
         {
             let player_local = self.motor.position();
             let player_global = local_to_global_room_point(self.room_index, player_local);
@@ -128,7 +61,7 @@ impl Playtest {
                 player_global,
                 view,
                 camera,
-                &self.portal_visibility,
+                &self.visibility.result,
             );
             self.portal_debug_log_cooldown = PORTAL_VIS_DEBUG_LOG_COOLDOWN_TICKS;
         }
@@ -147,116 +80,66 @@ impl Playtest {
             .unwrap_or(current_record);
         let (view_sin_key, view_cos_key, view_pitch_sin_key, view_pitch_cos_key) =
             portal_visibility_view_keys(view);
-        self.active_room_view_sin_key = view_sin_key;
-        self.active_room_view_cos_key = view_cos_key;
-        self.active_room_view_pitch_sin_key = view_pitch_sin_key;
-        self.active_room_view_pitch_cos_key = view_pitch_cos_key;
-        self.active_room_view_anchor = view.position;
+        self.visibility.view_sin_key = view_sin_key;
+        self.visibility.view_cos_key = view_cos_key;
+        self.visibility.view_pitch_sin_key = view_pitch_sin_key;
+        self.visibility.view_pitch_cos_key = view_pitch_cos_key;
+        self.visibility.view_anchor = view.position;
         self.rebuild_portal_visibility(
             visibility_index,
             visibility_record,
             visibility_space.view,
             visibility_space.camera_global,
         );
-        self.active_room_candidates = self.portal_visibility.stats.portals_tested.min(u16::MAX);
-        self.portal_visible_missing_resident = 0;
-        self.portal_visible_missing_mask = RuntimeDebugMask::EMPTY;
-        self.portal_visible_build_failed = 0;
-        self.portal_visible_build_failed_mask = RuntimeDebugMask::EMPTY;
+        self.visibility.candidates = self.visibility.result.stats.portals_tested.min(u16::MAX);
+        self.visibility.visible_missing_resident = 0;
+        self.visibility.visible_missing_mask = RuntimeDebugMask::EMPTY;
+        self.visibility.visible_build_failed = 0;
+        self.visibility.visible_build_failed_mask = RuntimeDebugMask::EMPTY;
     }
 
     pub(super) fn portal_visible_room_limit(&self, current_record: &LevelRoomRecord) -> usize {
-        self.portal_visibility
-            .room_count
-            .min(room_active_chunk_limit(current_record))
-            .min(MAX_ACTIVE_ROOMS)
+        self.visibility
+            .visible_room_limit(room_active_chunk_limit(current_record))
     }
 
     pub(super) fn portal_visible_rooms_are_active(&self, current_record: &LevelRoomRecord) -> bool {
-        if !self.active_room_contains_drawable(self.room_index) {
-            return false;
-        }
-        let visible_limit = self.portal_visible_room_limit(current_record);
-        let mut i = 0usize;
-        while i < visible_limit {
-            if !self.active_room_contains_drawable(self.portal_visibility.rooms[i].room) {
-                return false;
-            }
-            i += 1;
-        }
-        true
-    }
-
-    pub(super) fn active_room_contains_drawable(&self, index: RoomIndex) -> bool {
-        let mut slot = 0usize;
-        while slot < MAX_ACTIVE_ROOMS {
-            if let Some(active) = self.active_rooms[slot] {
-                if active.index == index
-                    && (index == self.room_index
-                        || active.render_room.is_some()
-                        || active.surface_cache.ready)
-                {
-                    return true;
-                }
-            }
-            slot += 1;
-        }
-        false
+        self.window.visible_rooms_are_active(
+            &self.visibility,
+            self.room_index,
+            room_active_chunk_limit(current_record),
+        )
     }
 
     pub(super) fn active_room_mask(&self) -> RuntimeDebugMask {
-        let mut mask = RuntimeDebugMask::EMPTY;
-        let mut slot = 0usize;
-        while slot < MAX_ACTIVE_ROOMS {
-            if let Some(active) = self.active_rooms[slot] {
-                mask.insert_room(active.index);
-            }
-            slot += 1;
-        }
-        mask
+        room_cache::active_room_mask(&self.window.rooms)
     }
 
     pub(super) fn active_room_drawable_mask(&self) -> RuntimeDebugMask {
-        let mut mask = RuntimeDebugMask::EMPTY;
-        let mut slot = 0usize;
-        while slot < MAX_ACTIVE_ROOMS {
-            if let Some(active) = self.active_rooms[slot] {
-                if active.index == self.room_index
-                    || active.render_room.is_some()
-                    || active.surface_cache.ready
-                {
-                    mask.insert_room(active.index);
-                }
-            }
-            slot += 1;
-        }
-        mask
+        room_cache::active_room_drawable_mask(&self.window.rooms, self.room_index)
     }
 
-    pub(super) fn portal_visibility_draws_room(&self, _index: RoomIndex) -> bool {
-        // Reachability draw: callers pass rooms from the active camera-ring
-        // window, so every active room is drawable. The room renderer still
-        // runs projection, screen, near-plane, and backface checks per surface.
-        true
+    pub(super) fn portal_visibility_draws_room(&self, index: RoomIndex) -> bool {
+        self.visibility.draws_room(index)
     }
 
     pub(super) fn emit_portal_visibility_counters(&self) {
-        let stats = self.portal_visibility.stats;
+        let stats = self.visibility.result.stats;
         telemetry::counter(
             telemetry::counter::PORTAL_VIS_CURRENT_ROOM,
-            self.portal_visibility_root.raw() as u32,
+            self.visibility.root.raw() as u32,
         );
         telemetry::counter(
             telemetry::counter::PORTAL_VIS_VISIBLE_ROOMS,
-            self.portal_visibility.room_count as u32,
+            self.visibility.result.room_count as u32,
         );
         telemetry::counter(
             telemetry::counter::PORTAL_VIS_FRONTIER_ROOMS,
-            self.portal_visibility.frontier_count as u32,
+            self.visibility.result.frontier_count as u32,
         );
         telemetry::counter(
             telemetry::counter::PORTAL_VIS_FRUSTUMS,
-            self.portal_visibility.frustum_count as u32,
+            self.visibility.result.frustum_count as u32,
         );
         telemetry::counter(
             telemetry::counter::PORTAL_VIS_PORTALS_TESTED,
@@ -296,11 +179,11 @@ impl Playtest {
         );
         telemetry::counter(
             telemetry::counter::PORTAL_VIS_VISIBLE_MISSING_RESIDENT,
-            self.portal_visible_missing_resident as u32,
+            self.visibility.visible_missing_resident as u32,
         );
         telemetry::counter(
             telemetry::counter::PORTAL_VIS_VISIBLE_BUILD_FAILED,
-            self.portal_visible_build_failed as u32,
+            self.visibility.visible_build_failed as u32,
         );
         telemetry::counter(
             telemetry::counter::ROOM_STREAM_PRIORITY_CURRENT,
@@ -317,22 +200,22 @@ impl Playtest {
         emit_room_chunk_mask(
             telemetry::counter::PORTAL_VIS_VISIBLE_MASK_LO,
             telemetry::counter::PORTAL_VIS_VISIBLE_MASK_HI,
-            self.portal_visibility.visible_room_mask(),
+            self.visibility.result.visible_room_mask(),
         );
         emit_room_chunk_mask(
             telemetry::counter::PORTAL_VIS_FRONTIER_MASK_LO,
             telemetry::counter::PORTAL_VIS_FRONTIER_MASK_HI,
-            self.portal_visibility.frontier_room_mask(),
+            self.visibility.result.frontier_room_mask(),
         );
         emit_room_chunk_mask(
             telemetry::counter::PORTAL_VIS_MISSING_MASK_LO,
             telemetry::counter::PORTAL_VIS_MISSING_MASK_HI,
-            self.portal_visible_missing_mask,
+            self.visibility.visible_missing_mask,
         );
         emit_room_chunk_mask(
             telemetry::counter::PORTAL_VIS_BUILD_FAILED_MASK_LO,
             telemetry::counter::PORTAL_VIS_BUILD_FAILED_MASK_HI,
-            self.portal_visible_build_failed_mask,
+            self.visibility.visible_build_failed_mask,
         );
         emit_room_chunk_mask(
             telemetry::counter::PORTAL_VIS_TESTED_MASK_LO,

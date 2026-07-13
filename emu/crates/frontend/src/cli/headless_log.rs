@@ -205,6 +205,10 @@ const PROFILE_LOG_HEADER: &[&str] = &[
     "sim_solve",
     "update_actor",
     "update_window",
+    "game_logic",
+    "game_entities_thought",
+    "player_melee_hits",
+    "player_hits_taken",
     "cell_lookup",
     "cell_depth",
     "cell_collect",
@@ -457,6 +461,10 @@ impl GuestProfileLog {
         push!(stage(s::SIM_SOLVE));
         push!(stage(s::UPDATE_ACTOR));
         push!(stage(s::UPDATE_WINDOW));
+        push!(stage(s::GAME_LOGIC));
+        push!(counter_latest(c::GAME_ENTITIES_THOUGHT));
+        push!(counter_latest(c::PLAYER_MELEE_HITS));
+        push!(counter_latest(c::PLAYER_HITS_TAKEN));
         push!(stage(s::CELL_LOOKUP));
         push!(stage(s::CELL_DEPTH));
         push!(stage(s::CELL_COLLECT));

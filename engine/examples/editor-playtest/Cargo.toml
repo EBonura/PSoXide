@@ -32,8 +32,8 @@ default = [
     # (was 33k avg / 184k spike ticks on the benchmark tape).
     "vis-anchor-pvs-candidates",
 ]
-cd-stream-bench = ["dep:psx-io"]
-cd-stream-benchmark = ["cd-stream-bench"]
+cd-stream-bench = ["dep:psx-io", "psx-game-runtime/cd-stream-bench"]
+cd-stream-benchmark = ["cd-stream-bench", "psx-game-runtime/cd-stream-benchmark"]
 boot-trace = ["psx-engine/boot-trace", "psx-rt/boot-trace"]
 emulator-telemetry = ["psx-engine/emulator-telemetry"]
 hardware-boot-visual = ["psx-engine/hardware-boot-visual"]
@@ -46,12 +46,12 @@ world-order-global = []
 world-order-slot = []
 world-order-linked = []
 world-order-bucketed = []
-world-grid-visible = []
-vis-anchor-cache = []
-vis-anchor-pvs-candidates = []
-vis-broad-pvs = []
-vis-coarse-yaw = []
-vis-full-active-chunks = []
+world-grid-visible = ["psx-game-runtime/world-grid-visible"]
+vis-anchor-cache = ["psx-game-runtime/vis-anchor-cache"]
+vis-anchor-pvs-candidates = ["psx-game-runtime/vis-anchor-pvs-candidates"]
+vis-broad-pvs = ["psx-game-runtime/vis-broad-pvs"]
+vis-coarse-yaw = ["psx-game-runtime/vis-coarse-yaw"]
+vis-full-active-chunks = ["psx-game-runtime/vis-full-active-chunks"]
 vis-player-anchor = []
 room-surface-profile = ["psx-engine/room-surface-profile"]
 cell-select-profile = ["psx-engine/cell-select-profile"]
@@ -64,6 +64,7 @@ ot-2048 = []
 [dependencies]
 psx-asset  = { path = "../../../sdk/crates/psx-asset" }
 psx-engine = { path = "../../crates/psx-engine" }
+psx-game-runtime = { path = "../../crates/psx-game-runtime" }
 psx-font   = { path = "../../../sdk/crates/psx-font" }
 psx-gpu    = { path = "../../../sdk/crates/psx-gpu" }
 psx-gte    = { path = "../../../sdk/crates/psx-gte" }

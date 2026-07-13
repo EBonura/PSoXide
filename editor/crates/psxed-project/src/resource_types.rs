@@ -849,8 +849,13 @@ impl Default for WeaponHitbox {
     }
 }
 
-/// Gameplay weapon resource: model reference, grip/pivot, and
-/// authored attack hit volumes.
+/// Gameplay weapon resource: model reference, grip/pivot, authored
+/// attack hit volumes, and the melee-arc combat numbers (the phase-3
+/// combat contract: update-band hit resolution sweeps a flat arc in
+/// front of the wielder; the grip-local hitboxes stay a render/debug
+/// aid whose frame windows double as the attack's active window).
+/// The arc fields are serde-defaulted to sane sword numbers so every
+/// existing weapon RON loads (and fights) unchanged.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WeaponResource {
     /// Visual model used for the weapon. `None` is allowed during
@@ -866,6 +871,21 @@ pub struct WeaponResource {
     /// Hit volumes authored relative to [`Self::grip`].
     #[serde(default)]
     pub hitboxes: Vec<WeaponHitbox>,
+    /// Melee arc reach from the wielder's origin, engine units.
+    /// The cook rejects 0.
+    #[serde(default = "default_weapon_arc_reach")]
+    pub arc_reach: u16,
+    /// Melee arc half-width to each side of the facing, degrees.
+    /// The cook rejects 0 and anything past 170.
+    #[serde(default = "default_weapon_arc_half_angle_degrees")]
+    pub arc_half_angle_degrees: u16,
+    /// Damage one light-attack connection applies. The cook rejects 0.
+    #[serde(default = "default_weapon_damage")]
+    pub damage: u16,
+    /// Poise damage one light-attack connection applies (0 = never
+    /// staggers).
+    #[serde(default = "default_weapon_poise_damage")]
+    pub poise_damage: u16,
 }
 
 impl WeaponResource {
@@ -876,8 +896,28 @@ impl WeaponResource {
             default_character_socket: default_character_socket(),
             grip: WeaponGrip::default(),
             hitboxes: vec![WeaponHitbox::default()],
+            arc_reach: default_weapon_arc_reach(),
+            arc_half_angle_degrees: default_weapon_arc_half_angle_degrees(),
+            damage: default_weapon_damage(),
+            poise_damage: default_weapon_poise_damage(),
         }
     }
+}
+
+pub(crate) const fn default_weapon_arc_reach() -> u16 {
+    640
+}
+
+pub(crate) const fn default_weapon_arc_half_angle_degrees() -> u16 {
+    60
+}
+
+pub(crate) const fn default_weapon_damage() -> u16 {
+    25
+}
+
+pub(crate) const fn default_weapon_poise_damage() -> u16 {
+    25
 }
 
 impl Default for WeaponResource {
@@ -1175,6 +1215,92 @@ impl Default for CharacterResource {
     }
 }
 
+/// Souls-like enemy behavior authored on a non-player
+/// [`NodeKind::CharacterController`] component. `None` keeps the
+/// pre-phase-3 semantics (the controller cooks as an idle model
+/// instance only); `Some` additionally cooks a
+/// `psx_level::LevelGameEntityRecord` whose archetype tag is the
+/// interned Character resource name. Serde-defaulted so existing
+/// projects load (and round-trip) unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnemyBehaviorSettings {
+    /// XZ radius (engine units) inside which the player is noticed.
+    #[serde(default = "default_enemy_aggro_radius")]
+    pub aggro_radius: u16,
+    /// Patrol anchor offset from the spawn position, engine units.
+    /// All zero means "hold position" (no patrol).
+    #[serde(default)]
+    pub patrol_offset: [i32; 3],
+    /// 60 Hz ticks the enemy idles at a reached patrol anchor.
+    #[serde(default = "default_enemy_patrol_wait_ticks")]
+    pub patrol_wait_ticks: u16,
+    /// 60 Hz ticks of attack windup (the telegraph).
+    #[serde(default = "default_enemy_windup_ticks")]
+    pub windup_ticks: u8,
+    /// 60 Hz ticks of post-attack recovery (the punish window).
+    #[serde(default = "default_enemy_recovery_ticks")]
+    pub recovery_ticks: u8,
+    /// Poise pool; poise damage past it staggers the enemy.
+    #[serde(default = "default_enemy_poise")]
+    pub poise: u16,
+    /// Damage dealt by a connecting touch/melee attack.
+    #[serde(default = "default_enemy_touch_damage")]
+    pub touch_damage: u16,
+    /// Health pool at spawn.
+    #[serde(default = "default_enemy_max_health")]
+    pub max_health: u16,
+}
+
+impl EnemyBehaviorSettings {
+    /// Authoring defaults for a freshly enabled enemy.
+    pub const fn defaults() -> Self {
+        Self {
+            aggro_radius: default_enemy_aggro_radius(),
+            patrol_offset: [0; 3],
+            patrol_wait_ticks: default_enemy_patrol_wait_ticks(),
+            windup_ticks: default_enemy_windup_ticks(),
+            recovery_ticks: default_enemy_recovery_ticks(),
+            poise: default_enemy_poise(),
+            touch_damage: default_enemy_touch_damage(),
+            max_health: default_enemy_max_health(),
+        }
+    }
+}
+
+impl Default for EnemyBehaviorSettings {
+    fn default() -> Self {
+        Self::defaults()
+    }
+}
+
+pub(crate) const fn default_enemy_aggro_radius() -> u16 {
+    2048
+}
+
+pub(crate) const fn default_enemy_patrol_wait_ticks() -> u16 {
+    60
+}
+
+pub(crate) const fn default_enemy_windup_ticks() -> u8 {
+    20
+}
+
+pub(crate) const fn default_enemy_recovery_ticks() -> u8 {
+    24
+}
+
+pub(crate) const fn default_enemy_poise() -> u16 {
+    100
+}
+
+pub(crate) const fn default_enemy_touch_damage() -> u16 {
+    10
+}
+
+pub(crate) const fn default_enemy_max_health() -> u16 {
+    100
+}
+
 /// Tunable movement/collision settings authored on a
 /// [`NodeKind::CharacterController`] component.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1236,6 +1362,10 @@ pub struct CharacterControllerSettings {
     /// Invulnerable frames from backstep start.
     #[serde(default = "default_character_backstep_invulnerable_frames")]
     pub backstep_invulnerable_frames: u8,
+    /// Souls-like enemy behavior opt-in for non-player controllers.
+    /// See [`EnemyBehaviorSettings`].
+    #[serde(default)]
+    pub enemy: Option<EnemyBehaviorSettings>,
 }
 
 impl CharacterControllerSettings {
@@ -1260,6 +1390,7 @@ impl CharacterControllerSettings {
             backstep_active_frames: default_character_backstep_active_frames(),
             backstep_recovery_frames: default_character_backstep_recovery_frames(),
             backstep_invulnerable_frames: default_character_backstep_invulnerable_frames(),
+            enemy: None,
         }
     }
 
@@ -1284,6 +1415,7 @@ impl CharacterControllerSettings {
             backstep_active_frames: character.backstep_active_frames,
             backstep_recovery_frames: character.backstep_recovery_frames,
             backstep_invulnerable_frames: character.backstep_invulnerable_frames,
+            enemy: None,
         }
     }
 }
