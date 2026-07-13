@@ -686,6 +686,15 @@ pub fn build_package(
     let mut particle_emitters: Vec<PlaytestParticleEmitter> = Vec::new();
     let mut interactable_messages: Vec<PlaytestInteractableMessage> = Vec::new();
     let mut interactables: Vec<PlaytestInteractable> = Vec::new();
+    // Phase-3 gameplay records: interned names, the logic event graph,
+    // and placed souls-like game entities. Door links resolve against
+    // the box-prop name table after the walk (a door may name a box
+    // that cooks later in scene order).
+    let mut names = NameInterner::default();
+    let mut logic: Vec<PlaytestLogic> = Vec::new();
+    let mut game_entities: Vec<PlaytestGameEntity> = Vec::new();
+    let mut box_prop_indices_by_name: HashMap<String, Vec<u16>> = HashMap::new();
+    let mut pending_door_links: Vec<PendingDoorLink> = Vec::new();
     // ResourceId → index into `models` for instance dedup.
     let runtime_model_clips = collect_runtime_model_clip_requirements(project, scene);
     let mut model_for_resource: HashMap<ResourceId, u16> = HashMap::new();
@@ -747,6 +756,11 @@ pub fn build_package(
                 let weight_q8 = physics_body_weight_q8(scene, node);
                 let is_player_controlled =
                     character_controller.is_some_and(|controller| controller.player);
+                // Any model instance pushed while cooking THIS node (a
+                // ModelRenderer component or a non-player controller's
+                // idle instance) is the node's visual; a game entity
+                // record links it by index.
+                let model_instances_before = model_instances.len();
                 if !is_player_controlled {
                     if let Some((model_resource_id, renderer)) =
                         component_model_renderer(scene, node).and_then(|renderer| {
@@ -814,6 +828,14 @@ pub fn build_package(
                         });
                     } else if component_model_renderer(scene, node).is_none() {
                         let Some(character_id) = controller.character else {
+                            if controller.settings.enemy.is_some() {
+                                report.error(format!(
+                                    "Enemy on '{}' has no Character - the archetype \
+                                     tag is the Character resource name",
+                                    node.name
+                                ));
+                                return (None, report);
+                            }
                             report.warn(format!(
                                 "Non-player Character Controller on '{}' has no Character - skipped",
                                 node.name
@@ -841,6 +863,64 @@ pub fn build_package(
                             &mut report,
                         ) {
                             return (None, report);
+                        }
+                    }
+                }
+
+                if let Some(controller) = character_controller {
+                    if !controller.player {
+                        if let Some(enemy) = controller.settings.enemy {
+                            let Some(character_id) = controller.character else {
+                                report.error(format!(
+                                    "Enemy on '{}' has no Character - the archetype \
+                                     tag is the Character resource name",
+                                    node.name
+                                ));
+                                return (None, report);
+                            };
+                            let archetype = match project.resource(character_id) {
+                                Some(resource)
+                                    if matches!(resource.data, ResourceData::Character(_)) =>
+                                {
+                                    resource.name.clone()
+                                }
+                                Some(resource) => {
+                                    report.error(format!(
+                                        "Enemy on '{}' references resource '{}' which is \
+                                         not a Character",
+                                        node.name, resource.name
+                                    ));
+                                    return (None, report);
+                                }
+                                None => {
+                                    report.error(format!(
+                                        "Enemy on '{}' references Character #{} which \
+                                         doesn't exist",
+                                        node.name,
+                                        character_id.raw()
+                                    ));
+                                    return (None, report);
+                                }
+                            };
+                            let node_model_instance =
+                                (model_instances.len() > model_instances_before).then(|| {
+                                    u16::try_from(model_instances.len() - 1).unwrap_or(u16::MAX)
+                                });
+                            if !push_game_entity(
+                                node.name.as_str(),
+                                archetype.as_str(),
+                                room_index,
+                                pos,
+                                yaw,
+                                &controller.settings,
+                                enemy,
+                                node_model_instance,
+                                &mut names,
+                                &mut game_entities,
+                                &mut report,
+                            ) {
+                                return (None, report);
+                            }
                         }
                     }
                 }
@@ -894,8 +974,10 @@ pub fn build_package(
                         pos,
                         yaw,
                         interactable,
+                        &mut names,
                         &mut interactable_messages,
                         &mut interactables,
+                        &mut logic,
                         &mut report,
                     ) {
                         return (None, report);
@@ -1057,6 +1139,7 @@ pub fn build_package(
                 // like the editor preview's raw origin. They are NOT
                 // floor-anchored: snapping to the floor grid ignores a box
                 // stacked beneath and would collapse the stack to the floor.
+                let box_props_before = box_props.len();
                 if !push_box_prop(
                     project,
                     project_root,
@@ -1076,6 +1159,46 @@ pub fn build_package(
                     &mut texture_asset_for_path,
                     &mut assets,
                     &mut box_props,
+                    &mut report,
+                ) {
+                    return (None, report);
+                }
+                // Record the cooked index under the node name so Door
+                // logic nodes can link this box. A material-less box
+                // is skipped by the push (warned), so only a box that
+                // actually cooked registers -- a door naming a skipped
+                // box fails the link resolution loudly.
+                if box_props.len() > box_props_before {
+                    let cooked_index = box_props_before.min(u16::MAX as usize) as u16;
+                    box_prop_indices_by_name
+                        .entry(node.name.clone())
+                        .or_default()
+                        .push(cooked_index);
+                }
+            }
+            NodeKind::Logic {
+                kind,
+                target,
+                killtarget,
+                master,
+                delay_ticks,
+                wait_ticks,
+                enabled,
+            } => {
+                if !push_logic_node(
+                    node.name.as_str(),
+                    room_index,
+                    floor_pos,
+                    kind,
+                    target,
+                    killtarget,
+                    master,
+                    *delay_ticks,
+                    *wait_ticks,
+                    *enabled,
+                    &mut names,
+                    &mut logic,
+                    &mut pending_door_links,
                     &mut report,
                 ) {
                     return (None, report);
@@ -1112,6 +1235,44 @@ pub fn build_package(
             | NodeKind::PhysicsBody { .. }
             | NodeKind::Interactable { .. } => {}
         }
+    }
+
+    // Door links resolve now that every Box Prop has cooked: an
+    // unresolved or ambiguous box name is a hard cook error.
+    if !resolve_door_links(
+        &pending_door_links,
+        &box_prop_indices_by_name,
+        &mut logic,
+        &mut report,
+    ) {
+        return (None, report);
+    }
+
+    // Contract caps (psx-level is the single source, like
+    // MAX_ROOM_MATERIALS): the runtime sizes its SoA state from these,
+    // so over-cap content must fail loudly here instead of silently
+    // never spawning.
+    if game_entities.len() > psx_level::MAX_GAME_ENTITY_RECORDS {
+        report.error(format!(
+            "Project places {} game entities but the runtime contract cap \
+             is {} (psx_level::MAX_GAME_ENTITY_RECORDS)",
+            game_entities.len(),
+            psx_level::MAX_GAME_ENTITY_RECORDS,
+        ));
+        return (None, report);
+    }
+    if logic.len() > psx_level::MAX_LOGIC_RECORDS {
+        report.error(format!(
+            "Project cooks {} logic records but the runtime contract cap \
+             is {} (psx_level::MAX_LOGIC_RECORDS)",
+            logic.len(),
+            psx_level::MAX_LOGIC_RECORDS,
+        ));
+        return (None, report);
+    }
+    if names.len() >= usize::from(u16::MAX) {
+        report.error("Interned gameplay name table overflowed u16 ids");
+        return (None, report);
     }
 
     let spawn = match player_spawns.len() {
@@ -1407,6 +1568,8 @@ pub fn build_package(
             particle_emitters,
             interactable_messages,
             interactables,
+            logic,
+            game_entities,
             spawn,
             characters,
             player_controller,
