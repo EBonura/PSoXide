@@ -533,6 +533,13 @@ impl AppState {
         out.menu.sync_editor_label(out.workspace.is_editor());
         out.sync_menu_settings_paths();
         out.sync_menu_controls();
+        // Dev/preview hook in the PSOXIDE_AUTORUN tradition: open the
+        // controls panel straight away, so visual tweaks to the pad
+        // drawing can be screenshotted without clicking through the UI.
+        #[cfg(not(target_arch = "wasm32"))]
+        if env_flag("PSOXIDE_OPEN_CONTROLS") {
+            out.menu.open_controls();
+        }
         // Web: look (async) for a previously-saved BIOS/folder so the menu can
         // offer a one-click reconnect.
         #[cfg(target_arch = "wasm32")]
