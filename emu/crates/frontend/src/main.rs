@@ -1054,6 +1054,52 @@ impl ApplicationHandler for Shell {
                     self.socd_last_vert,
                 );
 
+                // Feed the controls panel its live held-target set so
+                // held keys light up on the drawing -- an in-app
+                // rollover/ghosting tester. Only while it's open; the
+                // Vec is rebuilt per frame but tops out at 25 entries.
+                if self.state.menu.controls_panel_open() {
+                    use crate::ui::menu::PadBindTarget as T;
+                    let mut held = Vec::new();
+                    for (bit, target) in [
+                        (button::UP, T::Up),
+                        (button::DOWN, T::Down),
+                        (button::LEFT, T::Left),
+                        (button::RIGHT, T::Right),
+                        (button::CROSS, T::Cross),
+                        (button::CIRCLE, T::Circle),
+                        (button::SQUARE, T::Square),
+                        (button::TRIANGLE, T::Triangle),
+                        (button::L1, T::L1),
+                        (button::L2, T::L2),
+                        (button::R1, T::R1),
+                        (button::R2, T::R2),
+                        (button::START, T::Start),
+                        (button::SELECT, T::Select),
+                        (button::L3, T::L3),
+                        (button::R3, T::R3),
+                    ] {
+                        if merged_mask & bit != 0 {
+                            held.push(target);
+                        }
+                    }
+                    for (on, target) in [
+                        (self.keyboard_left_stick.up, T::LStickUp),
+                        (self.keyboard_left_stick.down, T::LStickDown),
+                        (self.keyboard_left_stick.left, T::LStickLeft),
+                        (self.keyboard_left_stick.right, T::LStickRight),
+                        (self.keyboard_right_stick.up, T::RStickUp),
+                        (self.keyboard_right_stick.down, T::RStickDown),
+                        (self.keyboard_right_stick.left, T::RStickLeft),
+                        (self.keyboard_right_stick.right, T::RStickRight),
+                    ] {
+                        if on {
+                            held.push(target);
+                        }
+                    }
+                    self.state.menu.set_controls_live_held(held);
+                }
+
                 // Gamepad input arrives by polling, not as window events,
                 // so it cannot wake the redraw scheduler the way keyboard
                 // and mouse do. Remember when the pad was last live; the
@@ -1114,10 +1160,20 @@ impl ApplicationHandler for Shell {
                 if input.toggle_open {
                     input.toggle_open = false;
                     input.back = false;
+                    // With the controls panel up, Escape means "close
+                    // the panel", not "toggle the whole menu" -- the
+                    // nearest thing on screen should dismiss first.
+                    // (A pending key capture never reaches here: the
+                    // capture arm consumes Escape as its cancel.)
+                    let closed_controls_panel = self.state.menu.controls_panel_open() && {
+                        self.state.menu.close_controls();
+                        true
+                    };
                     // In the editor, Escape first releases an active embedded-play
                     // input capture instead of toggling the menu.
                     #[cfg(feature = "editor")]
-                    let editor_released_capture = self.state.workspace.is_editor()
+                    let editor_released_capture = !closed_controls_panel
+                        && self.state.workspace.is_editor()
                         && self.state.embedded_playtest_running()
                         && self.state.embedded_playtest_input_captured()
                         && {
@@ -1126,7 +1182,7 @@ impl ApplicationHandler for Shell {
                         };
                     #[cfg(not(feature = "editor"))]
                     let editor_released_capture = false;
-                    if editor_released_capture {
+                    if closed_controls_panel || editor_released_capture {
                         // Handled above: input capture released.
                     } else if self.state.running {
                         // Game mode → menu mode: pause and open overlay.
@@ -2271,16 +2327,20 @@ mod tests {
         let bindings = PortBindings::default();
 
         assert_eq!(
-            key_to_pad_button(&PhysicalKey::Code(KeyCode::KeyX), &bindings),
+            key_to_pad_button(&PhysicalKey::Code(KeyCode::KeyF), &bindings),
             Some(button::CROSS)
         );
         assert_eq!(
-            key_to_pad_button(&PhysicalKey::Code(KeyCode::KeyC), &bindings),
+            key_to_pad_button(&PhysicalKey::Code(KeyCode::KeyG), &bindings),
             Some(button::CIRCLE)
         );
         assert_eq!(
-            key_to_pad_button(&PhysicalKey::Code(KeyCode::KeyZ), &bindings),
+            key_to_pad_button(&PhysicalKey::Code(KeyCode::KeyH), &bindings),
             Some(button::SQUARE)
+        );
+        assert_eq!(
+            key_to_pad_button(&PhysicalKey::Code(KeyCode::KeyX), &bindings),
+            Some(button::TRIANGLE)
         );
         assert_eq!(
             key_to_pad_button(&PhysicalKey::Code(KeyCode::Backspace), &bindings),
@@ -2412,8 +2472,9 @@ mod tests {
             key_to_pad_button(&PhysicalKey::Code(KeyCode::KeyJ), &bindings),
             Some(button::CROSS)
         );
+        // Cross's default key (F) no longer maps to anything.
         assert_eq!(
-            key_to_pad_button(&PhysicalKey::Code(KeyCode::KeyX), &bindings),
+            key_to_pad_button(&PhysicalKey::Code(KeyCode::KeyF), &bindings),
             None
         );
     }
