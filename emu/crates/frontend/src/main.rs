@@ -391,6 +391,7 @@ fn key_to_pad_button(physical: &PhysicalKey, bindings: &PortBindings) -> Option<
         (button::START, &bindings.start),
         (button::SELECT, &bindings.select),
         (button::R3, &bindings.r3),
+        (button::L3, &bindings.l3),
     ]
     .into_iter()
     .find_map(|(mask, binding)| binding_matches_key(binding, physical).then_some(mask))
@@ -561,9 +562,12 @@ fn char_to_keycode(c: char) -> Option<KeyCode> {
 }
 
 /// Physical keycode(s) a persisted `InputBinding::Named` label matches.
-/// Mirrors the label set the old logical-key lookup accepted; "Shift"
-/// matches either physical shift key since the binding format predates
-/// left/right being distinguished.
+/// Covers the label set the old logical-key lookup accepted plus every
+/// label [`keycode_to_binding`] can produce for the controls panel's
+/// rebind capture (function keys, numpad -- prime real estate for
+/// dodging keyboard-matrix ghosting). "Shift" matches either physical
+/// shift key since the binding format predates left/right being
+/// distinguished.
 fn named_key_codes(name: &str) -> &'static [KeyCode] {
     match name.to_ascii_lowercase().as_str() {
         "arrowup" => &[KeyCode::ArrowUp],
@@ -576,8 +580,157 @@ fn named_key_codes(name: &str) -> &'static [KeyCode] {
         "space" => &[KeyCode::Space],
         "tab" => &[KeyCode::Tab],
         "escape" => &[KeyCode::Escape],
+        "f1" => &[KeyCode::F1],
+        "f2" => &[KeyCode::F2],
+        "f3" => &[KeyCode::F3],
+        "f4" => &[KeyCode::F4],
+        "f5" => &[KeyCode::F5],
+        "f6" => &[KeyCode::F6],
+        "f7" => &[KeyCode::F7],
+        "f8" => &[KeyCode::F8],
         "f9" => &[KeyCode::F9],
+        "f10" => &[KeyCode::F10],
+        "f11" => &[KeyCode::F11],
+        "f12" => &[KeyCode::F12],
+        "numpad0" => &[KeyCode::Numpad0],
+        "numpad1" => &[KeyCode::Numpad1],
+        "numpad2" => &[KeyCode::Numpad2],
+        "numpad3" => &[KeyCode::Numpad3],
+        "numpad4" => &[KeyCode::Numpad4],
+        "numpad5" => &[KeyCode::Numpad5],
+        "numpad6" => &[KeyCode::Numpad6],
+        "numpad7" => &[KeyCode::Numpad7],
+        "numpad8" => &[KeyCode::Numpad8],
+        "numpad9" => &[KeyCode::Numpad9],
+        "numpadadd" => &[KeyCode::NumpadAdd],
+        "numpadsubtract" => &[KeyCode::NumpadSubtract],
+        "numpadmultiply" => &[KeyCode::NumpadMultiply],
+        "numpaddivide" => &[KeyCode::NumpadDivide],
+        "numpaddecimal" => &[KeyCode::NumpadDecimal],
+        "numpadenter" => &[KeyCode::NumpadEnter],
+        "controlleft" => &[KeyCode::ControlLeft],
+        "controlright" => &[KeyCode::ControlRight],
+        "altleft" => &[KeyCode::AltLeft],
+        "altright" => &[KeyCode::AltRight],
+        "semicolon" => &[KeyCode::Semicolon],
+        "comma" => &[KeyCode::Comma],
+        "period" => &[KeyCode::Period],
+        "slash" => &[KeyCode::Slash],
+        "quote" => &[KeyCode::Quote],
+        "bracketleft" => &[KeyCode::BracketLeft],
+        "bracketright" => &[KeyCode::BracketRight],
+        "backslash" => &[KeyCode::Backslash],
+        "minus" => &[KeyCode::Minus],
+        "equal" => &[KeyCode::Equal],
+        "backquote" => &[KeyCode::Backquote],
+        "intlro" => &[KeyCode::IntlRo],
+        "intlbackslash" => &[KeyCode::IntlBackslash],
         _ => &[],
+    }
+}
+
+/// The persistable binding a captured physical key becomes -- the
+/// reverse of [`binding_matches_key`]'s lookup, used by the controls
+/// panel's press-a-key rebind flow. Letters and digits round-trip
+/// through the existing `Character` form; everything else gets a
+/// `Named` label that [`named_key_codes`] recognises. `None` means the
+/// key is not bindable: Escape stays reserved for the menu toggle, and
+/// keys outside the table have no stable label to persist.
+fn keycode_to_binding(code: KeyCode) -> Option<InputBinding> {
+    let named = |s: &str| Some(InputBinding::Named(s.to_string()));
+    let ch = |c: char| Some(InputBinding::Character(c));
+    match code {
+        KeyCode::KeyA => ch('a'),
+        KeyCode::KeyB => ch('b'),
+        KeyCode::KeyC => ch('c'),
+        KeyCode::KeyD => ch('d'),
+        KeyCode::KeyE => ch('e'),
+        KeyCode::KeyF => ch('f'),
+        KeyCode::KeyG => ch('g'),
+        KeyCode::KeyH => ch('h'),
+        KeyCode::KeyI => ch('i'),
+        KeyCode::KeyJ => ch('j'),
+        KeyCode::KeyK => ch('k'),
+        KeyCode::KeyL => ch('l'),
+        KeyCode::KeyM => ch('m'),
+        KeyCode::KeyN => ch('n'),
+        KeyCode::KeyO => ch('o'),
+        KeyCode::KeyP => ch('p'),
+        KeyCode::KeyQ => ch('q'),
+        KeyCode::KeyR => ch('r'),
+        KeyCode::KeyS => ch('s'),
+        KeyCode::KeyT => ch('t'),
+        KeyCode::KeyU => ch('u'),
+        KeyCode::KeyV => ch('v'),
+        KeyCode::KeyW => ch('w'),
+        KeyCode::KeyX => ch('x'),
+        KeyCode::KeyY => ch('y'),
+        KeyCode::KeyZ => ch('z'),
+        KeyCode::Digit0 => ch('0'),
+        KeyCode::Digit1 => ch('1'),
+        KeyCode::Digit2 => ch('2'),
+        KeyCode::Digit3 => ch('3'),
+        KeyCode::Digit4 => ch('4'),
+        KeyCode::Digit5 => ch('5'),
+        KeyCode::Digit6 => ch('6'),
+        KeyCode::Digit7 => ch('7'),
+        KeyCode::Digit8 => ch('8'),
+        KeyCode::Digit9 => ch('9'),
+        KeyCode::ArrowUp => named("ArrowUp"),
+        KeyCode::ArrowDown => named("ArrowDown"),
+        KeyCode::ArrowLeft => named("ArrowLeft"),
+        KeyCode::ArrowRight => named("ArrowRight"),
+        KeyCode::Enter => named("Enter"),
+        KeyCode::Backspace => named("Backspace"),
+        KeyCode::ShiftLeft | KeyCode::ShiftRight => named("Shift"),
+        KeyCode::Space => named("Space"),
+        KeyCode::Tab => named("Tab"),
+        KeyCode::F1 => named("F1"),
+        KeyCode::F2 => named("F2"),
+        KeyCode::F3 => named("F3"),
+        KeyCode::F4 => named("F4"),
+        KeyCode::F6 => named("F6"),
+        KeyCode::F8 => named("F8"),
+        KeyCode::F9 => named("F9"),
+        KeyCode::F10 => named("F10"),
+        KeyCode::F11 => named("F11"),
+        KeyCode::F12 => named("F12"),
+        KeyCode::Numpad0 => named("Numpad0"),
+        KeyCode::Numpad1 => named("Numpad1"),
+        KeyCode::Numpad2 => named("Numpad2"),
+        KeyCode::Numpad3 => named("Numpad3"),
+        KeyCode::Numpad4 => named("Numpad4"),
+        KeyCode::Numpad5 => named("Numpad5"),
+        KeyCode::Numpad6 => named("Numpad6"),
+        KeyCode::Numpad7 => named("Numpad7"),
+        KeyCode::Numpad8 => named("Numpad8"),
+        KeyCode::Numpad9 => named("Numpad9"),
+        KeyCode::NumpadAdd => named("NumpadAdd"),
+        KeyCode::NumpadSubtract => named("NumpadSubtract"),
+        KeyCode::NumpadMultiply => named("NumpadMultiply"),
+        KeyCode::NumpadDivide => named("NumpadDivide"),
+        KeyCode::NumpadDecimal => named("NumpadDecimal"),
+        KeyCode::NumpadEnter => named("NumpadEnter"),
+        KeyCode::ControlLeft => named("ControlLeft"),
+        KeyCode::ControlRight => named("ControlRight"),
+        KeyCode::AltLeft => named("AltLeft"),
+        KeyCode::AltRight => named("AltRight"),
+        KeyCode::Semicolon => named("Semicolon"),
+        KeyCode::Comma => named("Comma"),
+        KeyCode::Period => named("Period"),
+        KeyCode::Slash => named("Slash"),
+        KeyCode::Quote => named("Quote"),
+        KeyCode::BracketLeft => named("BracketLeft"),
+        KeyCode::BracketRight => named("BracketRight"),
+        KeyCode::Backslash => named("Backslash"),
+        KeyCode::Minus => named("Minus"),
+        KeyCode::Equal => named("Equal"),
+        KeyCode::Backquote => named("Backquote"),
+        KeyCode::IntlRo => named("IntlRo"),
+        KeyCode::IntlBackslash => named("IntlBackslash"),
+        // Escape toggles the menu, F5/F7 are quick save/load: binding a
+        // pad button on top of those would fire both meanings at once.
+        _ => None,
     }
 }
 
@@ -719,6 +872,33 @@ impl ApplicationHandler for Shell {
                     },
                 ..
             } => {
+                // A controls-panel rebind capture owns the keyboard
+                // outright: the next key press becomes the binding
+                // (Escape cancels), and nothing leaks through to the
+                // game, the menu, or the hotkeys below -- binding "g"
+                // or F5 must not also fire their global meanings.
+                if let Some(target) = self.state.menu.controls_capture() {
+                    if state == ElementState::Pressed && !repeat {
+                        if matches!(logical_key, Key::Named(NamedKey::Escape)) {
+                            self.state.menu.clear_controls_capture();
+                        } else if let PhysicalKey::Code(code) = physical_key {
+                            if let Some(binding) = keycode_to_binding(code) {
+                                self.state.apply_rebind(target, binding);
+                                self.state.menu.clear_controls_capture();
+                                // Drop held-key state: a key that was down
+                                // under its old meaning must not stay
+                                // wedged into the mask under the new one.
+                                self.pad1_mask = 0;
+                                self.keyboard_left_stick = KeyboardStickState::default();
+                                self.keyboard_right_stick = KeyboardStickState::default();
+                            } else {
+                                self.state
+                                    .status_message_set("That key can't be bound".to_string());
+                            }
+                        }
+                    }
+                    return;
+                }
                 // Pad state tracks both press AND release continuously
                 // so held buttons keep polling as "pressed". Auto-repeat
                 // events are ignored -- the key is already down, and the
@@ -2182,6 +2362,43 @@ mod tests {
             ),
             button::LEFT | button::DOWN | button::CROSS
         );
+    }
+
+    #[test]
+    fn captured_keys_round_trip_through_binding_match() {
+        // Every key the controls panel can capture must be recognised
+        // by the matcher afterwards, or a rebind would save a binding
+        // that never fires. Spot-check each table family: letters,
+        // digits, named keys, function keys, numpad.
+        for code in [
+            KeyCode::KeyA,
+            KeyCode::KeyZ,
+            KeyCode::Digit0,
+            KeyCode::Digit9,
+            KeyCode::ArrowLeft,
+            KeyCode::Enter,
+            KeyCode::Space,
+            KeyCode::ShiftLeft,
+            KeyCode::F1,
+            KeyCode::F12,
+            KeyCode::Numpad0,
+            KeyCode::Numpad9,
+            KeyCode::NumpadAdd,
+            KeyCode::NumpadEnter,
+            KeyCode::Semicolon,
+            KeyCode::Comma,
+            KeyCode::ControlLeft,
+            KeyCode::AltRight,
+        ] {
+            let binding =
+                keycode_to_binding(code).unwrap_or_else(|| panic!("{code:?} should be bindable"));
+            assert!(
+                binding_matches_key(&binding, &PhysicalKey::Code(code)),
+                "{code:?} captured as {binding:?} but does not match back"
+            );
+        }
+        // Escape is reserved for the menu toggle.
+        assert_eq!(keycode_to_binding(KeyCode::Escape), None);
     }
 
     #[test]
