@@ -239,6 +239,12 @@ pub struct PortBindings {
     /// for lock-on / target toggling.
     #[serde(default)]
     pub r3: InputBinding,
+    /// Left stick click (DualShock L3). Unbound by default -- the
+    /// stock keyboard map has no comfortable key left for it -- but
+    /// rebindable from the controls panel (the L3+R3 freelook chord
+    /// needs it without a gamepad).
+    #[serde(default)]
+    pub l3: InputBinding,
     /// DualShock Analog button. This is not part of the normal
     /// button bitmask; it toggles whether the controller reports
     /// Digital (`0x41`) or Analog (`0x73`) poll IDs.
@@ -272,6 +278,7 @@ impl Default for PortBindings {
             left_stick: default_port1_left_stick_bindings(),
             right_stick: default_port1_right_stick_bindings(),
             r3: default_port1_r3_binding(),
+            l3: InputBinding::Unbound,
             analog: default_port1_analog_binding(),
         }
     }
@@ -336,6 +343,7 @@ impl Default for InputSettings {
                 left_stick: StickBindings::unbound(),
                 right_stick: StickBindings::unbound(),
                 r3: InputBinding::Unbound,
+                l3: InputBinding::Unbound,
                 analog: InputBinding::Unbound,
             },
         }
