@@ -128,6 +128,14 @@ pub fn apply_menu_action(state: &mut AppState, action: menu::MenuAction) -> Menu
             state.menu.open_save_states();
             MenuOutcome::None
         }
+        OpenControls => {
+            state.menu.open_controls();
+            MenuOutcome::None
+        }
+        ResetControls => {
+            state.reset_controls();
+            MenuOutcome::None
+        }
         PinAsTop(slot) => {
             state.pin_save_state_as_top(slot);
             MenuOutcome::None
