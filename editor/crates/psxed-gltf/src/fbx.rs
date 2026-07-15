@@ -329,9 +329,9 @@ pub(crate) fn finish_fbx_rigid_model_scene(
     })
 }
 
-pub(crate) fn fbx_skinned_mesh<'a>(
-    scene: &'a ufbx::Scene,
-) -> Result<(&'a ufbx::Node, &'a ufbx::Mesh, &'a ufbx::SkinDeformer), Error> {
+pub(crate) fn fbx_skinned_mesh(
+    scene: &ufbx::Scene,
+) -> Result<(&ufbx::Node, &ufbx::Mesh, &ufbx::SkinDeformer), Error> {
     for node in &scene.nodes {
         let Some(mesh) = node.mesh.as_deref() else {
             continue;
@@ -346,9 +346,9 @@ pub(crate) fn fbx_skinned_mesh<'a>(
     Err(Error::MissingFbxSkinnedMesh)
 }
 
-pub(crate) fn fbx_static_mesh<'a>(
-    scene: &'a ufbx::Scene,
-) -> Result<(&'a ufbx::Node, &'a ufbx::Mesh), Error> {
+pub(crate) fn fbx_static_mesh(
+    scene: &ufbx::Scene,
+) -> Result<(&ufbx::Node, &ufbx::Mesh), Error> {
     for node in &scene.nodes {
         let Some(mesh) = node.mesh.as_deref() else {
             continue;
@@ -1216,7 +1216,7 @@ pub(crate) fn cook_fbx_base_color_texture(
             .base_color
             .texture
             .as_deref()
-            .or_else(|| material.fbx.diffuse_color.texture.as_deref());
+            .or(material.fbx.diffuse_color.texture.as_deref());
         let Some(texture) = texture else {
             continue;
         };

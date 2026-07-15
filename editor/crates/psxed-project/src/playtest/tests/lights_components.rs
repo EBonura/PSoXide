@@ -297,10 +297,7 @@ fn light_with_zero_radius_fails() {
     let scene = project.active_scene_mut();
     for id in ids {
         if let Some(node) = scene.node_mut(id) {
-            match &mut node.kind {
-                NodeKind::PointLight { radius, .. } => *radius = 0.0,
-                _ => {}
-            }
+            if let NodeKind::PointLight { radius, .. } = &mut node.kind { *radius = 0.0 }
         }
     }
     let (package, report) = build_package(&project, &starter_project_root());
@@ -319,10 +316,7 @@ fn light_with_negative_intensity_fails() {
     let scene = project.active_scene_mut();
     for id in ids {
         if let Some(node) = scene.node_mut(id) {
-            match &mut node.kind {
-                NodeKind::PointLight { intensity, .. } => *intensity = -0.5,
-                _ => {}
-            }
+            if let NodeKind::PointLight { intensity, .. } = &mut node.kind { *intensity = -0.5 }
         }
     }
     let (package, report) = build_package(&project, &starter_project_root());
@@ -352,10 +346,7 @@ fn light_radius_converts_sectors_to_world_units() {
     let scene = project.active_scene_mut();
     for id in ids {
         if let Some(node) = scene.node_mut(id) {
-            match &mut node.kind {
-                NodeKind::PointLight { radius, .. } => *radius = 4.0,
-                _ => {}
-            }
+            if let NodeKind::PointLight { radius, .. } = &mut node.kind { *radius = 4.0 }
         }
     }
     let (package, report) = build_package(&project, &starter_project_root());

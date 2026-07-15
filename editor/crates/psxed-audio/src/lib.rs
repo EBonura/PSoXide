@@ -674,7 +674,7 @@ fn quantize_block(
 }
 
 fn decode_spu_adpcm(adpcm: &[u8], sample_count: usize) -> Result<Vec<i16>, Error> {
-    if adpcm.len() % ADPCM_BLOCK_BYTES != 0 {
+    if !adpcm.len().is_multiple_of(ADPCM_BLOCK_BYTES) {
         return Err(Error::Adpcm(
             "byte length is not a multiple of 16".to_string(),
         ));
@@ -885,7 +885,7 @@ mod tests {
     #[test]
     fn cook_wav_emits_psau_header_and_preview() {
         let samples: Vec<i16> = (0..128)
-            .map(|i| (((i % 32) as i32 - 16) * 512) as i16)
+            .map(|i| (((i % 32) - 16) * 512) as i16)
             .collect();
         let wav = write_wav_mono_i16(44_100, &samples);
         let cooked = cook_wav(
@@ -939,7 +939,7 @@ mod tests {
     #[test]
     fn adpcm_encoder_is_deterministic() {
         let samples: Vec<i16> = (0..512)
-            .map(|i| (((i * 17) % 97) as i32 * 300 - 12_000) as i16)
+            .map(|i| (((i * 17) % 97) * 300 - 12_000) as i16)
             .collect();
         let a = encode_spu_adpcm(&samples);
         let b = encode_spu_adpcm(&samples);

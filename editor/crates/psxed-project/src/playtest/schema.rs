@@ -772,6 +772,7 @@ pub struct PlaytestBoxProp {
 /// is resolved to a cooked [`PlaytestUiScene::id`] at cook time, and
 /// the option/game ids are carried as compact integers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub enum PlaytestUiAction {
     /// Switch to the cooked composed scene state with this id.
     GotoState {
@@ -805,6 +806,7 @@ pub enum PlaytestUiAction {
         transition: PlaytestTransition,
     },
     /// Return to the previous menu/scene.
+    #[default]
     Back,
     /// Adjust a project option by a signed delta.
     SetOption {
@@ -856,11 +858,6 @@ pub enum PlaytestTransitionKind {
     GlitchBreak,
 }
 
-impl Default for PlaytestUiAction {
-    fn default() -> Self {
-        Self::Back
-    }
-}
 
 /// One cooked UI gradient paint. Nodes reference these by small indices
 /// when one of their color roles needs something richer than a solid fill.
