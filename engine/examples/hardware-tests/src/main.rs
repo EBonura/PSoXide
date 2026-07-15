@@ -5178,16 +5178,31 @@ fn spu_dma_read(addr: u32, out: &mut [u32]) {
 /// corrupts FIFO boundaries, so the precision capture must compare one large
 /// block with several small blocks while holding the payload constant.
 fn spu_dma_read_shape(addr: u32, out: &mut [u32], block_size: u32) {
-    use psx_io::spu::{SPUCNT, TRANSFER_ADDR, TRANSFER_CTRL};
+    use psx_io::spu::{SPUCNT, SPUSTAT, TRANSFER_ADDR, TRANSFER_CTRL};
     let words = out.len() as u32;
     debug_assert!(block_size != 0 && words % block_size == 0);
     let block_count = words / block_size;
     unsafe {
         let spucnt = psx_io::read16(SPUCNT) & !0x0030;
         psx_io::write16(SPUCNT, spucnt);
+        // SPUCNT is applied asynchronously. Starting DMA before SPUSTAT
+        // reflects Stop returns FIFO/transition garbage even when the memory
+        // control delay is configured for stable reads.
+        let mut mode_guard = 0u32;
+        while psx_io::read16(SPUSTAT) & 0x003F != spucnt & 0x003F
+            && mode_guard < 1_000_000
+        {
+            mode_guard += 1;
+        }
         psx_io::write16(TRANSFER_CTRL, 0x0004);
         psx_io::write16(TRANSFER_ADDR, (addr / 8) as u16);
         psx_io::write16(SPUCNT, spucnt | 0x0030); // transfer mode = DMA Read
+        mode_guard = 0;
+        while psx_io::read16(SPUSTAT) & 0x003F != (spucnt | 0x0030) & 0x003F
+            && mode_guard < 1_000_000
+        {
+            mode_guard += 1;
+        }
         dma::enable_channel(dma::Channel::Spu);
         dma::set_madr(dma::Channel::Spu, out.as_ptr() as u32);
         dma::set_bcr_block(dma::Channel::Spu, block_size as u16, block_count as u16);
@@ -5410,15 +5425,81 @@ fn precision_timer(values: &mut [u32; PRECISION_VALUE_COUNT], next: &mut usize) 
     timers::set_mode(timers::Timer::Timer2, 0);
 }
 
+/// Configure a projection where screen X/Y equal V0.x/y. V0 is first settled
+/// to a conspicuous old pair; the probe then writes a different pair and Z in
+/// one tightly controlled assembly block immediately before RTPS.
+fn seed_rtps_v0_commit_probe() {
+    ctc2!(31, 0);
+    ctc2!(0, 0x0000_1000); // identity R11,R12
+    ctc2!(1, 0);
+    ctc2!(2, 0x0000_1000); // identity R22,R23
+    ctc2!(3, 0);
+    ctc2!(4, 0x0000_1000); // identity R33
+    ctc2!(5, 0);
+    ctc2!(6, 0);
+    ctc2!(7, 0);
+    ctc2!(24, 0); // OFX
+    ctc2!(25, 0); // OFY
+    ctc2!(26, 160); // H; VZ=160 makes the perspective ratio exactly 1
+    ctc2!(27, 0);
+    ctc2!(28, 0);
+    mtc2!(0, pack_gte_xy(-291, -31));
+    mtc2!(1, 160);
+    gte_nops!(64);
+}
+
+/// Execute the SDK projection write schedule with an exact number of extra
+/// NOPs between VZ0 and RTPS. The MTC2 encodings use $8/$9 so the compiler
+/// cannot insert setup instructions into the measured interval.
+macro_rules! rtps_v0_commit_probe {
+    ($gap:literal) => {{
+        seed_rtps_v0_commit_probe();
+        let new_vxy = pack_gte_xy(564, 23);
+        let new_vz = 160u32;
+        #[cfg(target_arch = "mips")]
+        unsafe {
+            core::arch::asm!(
+                ".word 0x48880000", // MTC2 $8,VXY0
+                ".word 0x48890800", // MTC2 $9,VZ0
+                concat!(".rept ", stringify!($gap), "\nnop\n.endr"),
+                ".word 0x4a080001", // RTPS, sf=1
+                in("$8") new_vxy,
+                in("$9") new_vz,
+                options(nostack, nomem, preserves_flags),
+            );
+        }
+        #[cfg(not(target_arch = "mips"))]
+        {
+            mtc2!(0, new_vxy);
+            mtc2!(1, new_vz);
+            unsafe { gte_ops::rtps() };
+        }
+        gte_delay16();
+        [mfc2!(14), mfc2!(25), mfc2!(0)]
+    }};
+}
+
 /// Values 73..127: unresolved GTE state, SPU register masks, and OTC DMA
 /// completion. Already-matching MVMVA/compose paths are intentionally omitted
 /// so the fixed QR budget targets differences that can still improve PSoXide.
 fn precision_remaining(values: &mut [u32; PRECISION_VALUE_COUNT], next: &mut usize) {
-    for _ in 0..6 {
-        run_op();
-        push_precision(values, next, mfc2!(25));
-        push_precision(values, next, mfc2!(26));
-        push_precision(values, next, mfc2!(27));
+    // The SDK's single-vertex projection path now buffers VXY0/VZ0 before
+    // RTPS. Sweep that exact schedule so real hardware can establish whether
+    // RTPS shares HWB-010's MVMVA input-commit hazard and, if so, the first
+    // safe gap. Each triplet is SXY2, MAC1, then the settled VXY0 readback:
+    // together they distinguish stale-X execution from a write that never
+    // landed, while SXY2's upper half confirms that fresh Y was consumed.
+    for triplet in [
+        rtps_v0_commit_probe!(0),
+        rtps_v0_commit_probe!(1),
+        rtps_v0_commit_probe!(2),
+        rtps_v0_commit_probe!(3),
+        rtps_v0_commit_probe!(4),
+        rtps_v0_commit_probe!(8),
+    ] {
+        for value in triplet {
+            push_precision(values, next, value);
+        }
     }
     for _ in 0..2 {
         run_op_full_seed();
