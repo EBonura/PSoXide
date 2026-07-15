@@ -517,6 +517,27 @@ pub struct RigidModelConfig {
     /// clip bakes should disable it so the new `.psxanim` remains
     /// compatible with the already-cooked target model.
     pub extra_animations_affect_bounds: bool,
+    /// Case-insensitive bone-name fragments whose matching subtrees are
+    /// collapsed into their nearest retained ancestor before cooking.
+    ///
+    /// This removes detail joints that are too expensive for the PS1 target
+    /// while preserving their vertices through weight reassignment. An empty
+    /// list keeps every source bone.
+    pub collapse_bone_patterns: Vec<String>,
+}
+
+/// Default detail-bone patterns removed from imported character rigs.
+pub fn default_collapse_bone_patterns() -> Vec<String> {
+    [
+        "handindex",
+        "handthumb",
+        "handmiddle",
+        "handring",
+        "handpinky",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
 }
 
 impl Default for RigidModelConfig {
@@ -534,6 +555,7 @@ impl Default for RigidModelConfig {
             force_single_bind: false,
             double_sided: false,
             ignore_embedded_animations: false,
+            collapse_bone_patterns: default_collapse_bone_patterns(),
         }
     }
 }
@@ -790,7 +812,7 @@ fn convert_rigid_model_document_with_extra_animations(
     };
     let mesh = mesh_node.mesh().ok_or(Error::MissingSkinnedMesh)?;
     let skin = mesh_node.skin().ok_or(Error::MissingSkinnedMesh)?;
-    let joints: Vec<usize> = skin.joints().map(|joint| joint.index()).collect();
+    let mut joints: Vec<usize> = skin.joints().map(|joint| joint.index()).collect();
     if joints.is_empty() {
         return Err(Error::BadSkin("skin has no joints"));
     }
@@ -798,8 +820,7 @@ fn convert_rigid_model_document_with_extra_animations(
 
     let parents = build_parent_indices(document);
     let base_trs = collect_base_trs(document);
-    let root_joint_nodes = root_joint_nodes(&joints, &parents);
-    let inverse_bind_matrices = read_inverse_bind_matrices(&skin, buffers, joints.len());
+    let mut inverse_bind_matrices = read_inverse_bind_matrices(&skin, buffers, joints.len());
     if inverse_bind_matrices.len() != joints.len() {
         return Err(Error::BadSkin(
             "inverse bind matrix count does not match joint count",
@@ -810,6 +831,19 @@ fn convert_rigid_model_document_with_extra_animations(
     if source.faces.is_empty() {
         return Err(Error::Empty);
     }
+    let node_names: Vec<String> = document
+        .nodes()
+        .map(|node| node.name().unwrap_or("").to_string())
+        .collect();
+    collapse_bone_subtrees(
+        &mut source,
+        &mut joints,
+        &mut inverse_bind_matrices,
+        &parents,
+        &node_names,
+        &cfg.collapse_bone_patterns,
+    )?;
+    let root_joint_nodes = root_joint_nodes(&joints, &parents);
     if cfg.force_single_bind {
         collapse_to_single_bind(&mut source);
     }

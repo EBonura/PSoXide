@@ -56,11 +56,24 @@ pub(crate) fn convert_fbx_rigid_model_scene_with_extra_animations(
     }
     ensure_u16("joints", joints.len())?;
 
-    let root_joint_nodes = root_joint_nodes(&joints, &parents);
     let mut source = read_fbx_skinned_mesh(mesh, skin, joints.len())?;
     if source.faces.is_empty() {
         return Err(Error::Empty);
     }
+    let node_names: Vec<String> = scene
+        .nodes
+        .iter()
+        .map(|node| node.element.name.to_string())
+        .collect();
+    collapse_bone_subtrees(
+        &mut source,
+        &mut joints,
+        &mut inverse_bind_matrices,
+        &parents,
+        &node_names,
+        &cfg.collapse_bone_patterns,
+    )?;
+    let root_joint_nodes = root_joint_nodes(&joints, &parents);
     if cfg.force_single_bind {
         collapse_to_single_bind(&mut source);
     }
