@@ -1451,10 +1451,16 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         };
         let _ = writeln!(
             out,
-            "    LevelGameEntityRecord {{ room: RoomIndex({}), kind: {}, targetname: {}, model_instance: {model_instance}, x: {}, y: {}, z: {}, yaw: {}, radius: {}, height: {}, walk_speed: {}, run_speed: {}, patrol_x: {}, patrol_y: {}, patrol_z: {}, patrol_wait_ticks: {}, aggro_radius: {}, windup_ticks: {}, recovery_ticks: {}, poise: {}, touch_damage: {}, max_health: {}, flags: {} }},",
+            "    LevelGameEntityRecord {{ room: RoomIndex({}), kind: {}, targetname: {}, model_instance: {model_instance}, idle_clip: {}, walk_clip: {}, run_clip: {}, attack_clip: {}, stagger_clip: {}, death_clip: {}, x: {}, y: {}, z: {}, yaw: {}, radius: {}, height: {}, walk_speed: {}, run_speed: {}, patrol_x: {}, patrol_y: {}, patrol_z: {}, patrol_wait_ticks: {}, aggro_radius: {}, windup_ticks: {}, recovery_ticks: {}, poise: {}, touch_damage: {}, max_health: {}, flags: {} }},",
             entity.room,
             entity.kind,
             entity.targetname,
+            entity.idle_clip,
+            entity.walk_clip,
+            entity.run_clip,
+            entity.attack_clip,
+            entity.stagger_clip,
+            entity.death_clip,
             entity.x,
             entity.y,
             entity.z,

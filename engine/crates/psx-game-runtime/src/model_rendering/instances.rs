@@ -43,8 +43,10 @@ pub enum ModelInstanceDepthPass {
 /// Live pose override for one cooked model instance: a game entity
 /// bound to an instance renders at the entity runtime's position and
 /// facing instead of the cooked spawn transform (phase 3 of
-/// docs/game-runtime-plan.md). The owning game rebuilds the (tiny)
-/// list each frame from its `GameEntities` state.
+/// docs/game-runtime-plan.md), and plays the entity state's clip
+/// instead of the cooked instance clip when one is carried. The
+/// owning game rebuilds the (tiny) list each frame from its
+/// `GameEntities` state.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct ModelInstancePoseOverride {
     /// Index into the cooked `MODEL_INSTANCES` table.
@@ -57,6 +59,16 @@ pub struct ModelInstancePoseOverride {
     pub z: i32,
     /// Live facing yaw, PSX angle units.
     pub yaw: i16,
+    /// Model-local clip driving the instance, or
+    /// [`psx_level::OptionalModelClipIndex::NONE`] to keep the cooked
+    /// clip on the cooked clock.
+    pub clip: psx_level::OptionalModelClipIndex,
+    /// 60 Hz ticks into the override clip's playback (state-entry
+    /// relative; only read when `clip` is some).
+    pub phase_ticks: u16,
+    /// One-shot playback: clamp at the clip's final frame instead of
+    /// looping.
+    pub one_shot: bool,
 }
 
 /// Look up the pose override for instance `index`, if any (linear
@@ -303,10 +315,15 @@ pub fn draw_model_instances<
             None => (inst.x, inst.y, inst.z, inst.yaw),
         };
 
-        // Clip resolution: per-instance override → model default.
-        // The cooker validates that both end up `< clip_count`,
-        // so by the time we get here `clip_local` is in-range.
-        let clip_local = inst.clip.unwrap_or(runtime_model.default_clip);
+        // Clip resolution: live entity state → per-instance override
+        // → model default. The cooker validates the cooked paths end
+        // up `< clip_count`; a live clip that does not (a mis-cooked
+        // record) falls back to the cooked resolution rather than
+        // vanishing the instance.
+        let live_clip = live
+            .and_then(|live| live.clip.to_option())
+            .filter(|clip| clip.raw() < runtime_model.clip_count);
+        let clip_local = live_clip.unwrap_or(inst.clip.unwrap_or(runtime_model.default_clip));
         let Some(anim) = runtime_model.clip(clips, clip_local) else {
             continue;
         };
@@ -314,10 +331,25 @@ pub fn draw_model_instances<
         // frame: phase = frame << 12 lands exactly on it, with no
         // fractional interpolation. Lets posed props (e.g. corpses) sit
         // on a chosen frame instead of advancing the clip.
-        let phase = if inst.pose_frame == psx_level::MODEL_INSTANCE_POSE_ANIMATE {
-            anim.phase_at_tick_q12(elapsed_tick.as_u32(), video_hz.as_u16())
-        } else {
-            (inst.pose_frame.min(anim.frame_count().saturating_sub(1)) as u32) << 12
+        let phase = match (live, live_clip) {
+            // A live clip plays on the entity's state clock: looping
+            // states wrap, one-shots clamp at the final frame (the
+            // same frame math the player's action playback uses).
+            (Some(live), Some(_)) => animation_phase_at_tick_q12(
+                anim,
+                u32::from(live.phase_ticks),
+                video_hz,
+                !live.one_shot,
+                psx_level::CHARACTER_ACTION_SPEED_UNSCALED_Q8,
+                psx_level::CharacterActionFrameRange::FULL,
+            ),
+            _ => {
+                if inst.pose_frame == psx_level::MODEL_INSTANCE_POSE_ANIMATE {
+                    anim.phase_at_tick_q12(elapsed_tick.as_u32(), video_hz.as_u16())
+                } else {
+                    (inst.pose_frame.min(anim.frame_count().saturating_sub(1)) as u32) << 12
+                }
+            }
         };
         let bounds = model_frame_bounds(tables, runtime_model, clip_local, phase);
         let clip_anchor = model_clip_anchor(tables, runtime_model, clip_local);
