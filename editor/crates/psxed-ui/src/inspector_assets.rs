@@ -1,32 +1,26 @@
 use super::*;
 
+/// Orbit-camera state and cook settings shared by the import-preview
+/// wrapper and the animated renderer behind it.
+pub(crate) struct ModelImportPreviewContext<'a> {
+    pub(crate) preview_yaw_q12: &'a mut i32,
+    pub(crate) preview_pitch_q12: &'a mut i32,
+    pub(crate) preview_radius: &'a mut i32,
+    pub(crate) collision_radius: i32,
+    pub(crate) visual_scale_q8: i32,
+    pub(crate) default_visual_yaw_q12: i32,
+    pub(crate) show_animation_root: bool,
+    pub(crate) preview_in_place: bool,
+}
+
 pub(crate) fn draw_model_import_preview(
     ui: &mut egui::Ui,
     preview: &mut ModelImportPreview,
     selected_clip: &mut usize,
-    preview_yaw_q12: &mut i32,
-    preview_pitch_q12: &mut i32,
-    preview_radius: &mut i32,
-    collision_radius: i32,
-    visual_scale_q8: i32,
-    default_visual_yaw_q12: i32,
-    show_animation_root: bool,
-    preview_in_place: bool,
+    ctx: ModelImportPreviewContext<'_>,
 ) {
     ui.label(RichText::new("Cooked Model").strong());
-    if !draw_model_animated_import_preview(
-        ui,
-        preview,
-        *selected_clip,
-        preview_yaw_q12,
-        preview_pitch_q12,
-        preview_radius,
-        collision_radius,
-        visual_scale_q8,
-        default_visual_yaw_q12,
-        show_animation_root,
-        preview_in_place,
-    ) {
+    if !draw_model_animated_import_preview(ui, preview, *selected_clip, ctx) {
         draw_model_wireframe_preview(ui, &preview.model_bytes);
     }
 }
@@ -140,15 +134,18 @@ pub(crate) fn draw_model_animated_import_preview(
     ui: &mut egui::Ui,
     preview: &mut ModelImportPreview,
     selected_clip: usize,
-    preview_yaw_q12: &mut i32,
-    preview_pitch_q12: &mut i32,
-    preview_radius: &mut i32,
-    collision_radius: i32,
-    visual_scale_q8: i32,
-    default_visual_yaw_q12: i32,
-    show_animation_root: bool,
-    preview_in_place: bool,
+    ctx: ModelImportPreviewContext<'_>,
 ) -> bool {
+    let ModelImportPreviewContext {
+        preview_yaw_q12,
+        preview_pitch_q12,
+        preview_radius,
+        collision_radius,
+        visual_scale_q8,
+        default_visual_yaw_q12,
+        show_animation_root,
+        preview_in_place,
+    } = ctx;
     let Some(atlas) = preview.atlas_image.as_ref() else {
         return false;
     };

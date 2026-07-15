@@ -1395,33 +1395,71 @@ pub(crate) fn clamp_i32_i64(value: i64) -> i32 {
     value.clamp(i32::MIN as i64, i32::MAX as i64) as i32
 }
 
+/// Authored placement for one cooked model instance: where it sits in the
+/// room and how the visual is posed relative to the collision transform.
+#[derive(Clone, Copy)]
+pub(crate) struct ModelInstancePlacement {
+    pub(crate) clip_override: Option<u16>,
+    pub(crate) pose_frame: u16,
+    pub(crate) room_index: u16,
+    pub(crate) pos: [i32; 3],
+    pub(crate) yaw: i16,
+    pub(crate) visual_yaw: i16,
+    pub(crate) pitch: i16,
+    pub(crate) roll: i16,
+    pub(crate) visual_offset: [i16; 3],
+    pub(crate) visual_scale_q8: u16,
+}
+
+/// The shared cook accumulators a model instance registers into: the
+/// output tables, the dedupe/remap maps, and the validation report.
+pub(crate) struct ModelCookTables<'a> {
+    pub(crate) assets: &'a mut Vec<PlaytestAsset>,
+    pub(crate) models: &'a mut Vec<PlaytestModel>,
+    pub(crate) model_clips: &'a mut Vec<PlaytestModelClip>,
+    pub(crate) model_clip_bounds: &'a mut Vec<PlaytestModelClipBounds>,
+    pub(crate) model_frame_bounds: &'a mut Vec<PlaytestModelFrameBounds>,
+    pub(crate) model_sockets: &'a mut Vec<PlaytestModelSocket>,
+    pub(crate) model_instances: &'a mut Vec<PlaytestModelInstance>,
+    pub(crate) model_for_resource: &'a mut HashMap<ResourceId, u16>,
+    pub(crate) runtime_model_clips: &'a HashMap<ResourceId, BTreeSet<u16>>,
+    pub(crate) model_clip_remaps: &'a mut HashMap<ResourceId, Vec<Option<u16>>>,
+    pub(crate) report: &'a mut PlaytestValidationReport,
+}
+
 pub(crate) fn push_model_instance_for_resource(
     project: &ProjectDocument,
     project_root: &Path,
     node_name: &str,
     model_resource_id: ResourceId,
-    clip_override: Option<u16>,
-    pose_frame: u16,
-    room_index: u16,
-    pos: [i32; 3],
-    yaw: i16,
-    visual_yaw: i16,
-    pitch: i16,
-    roll: i16,
-    visual_offset: [i16; 3],
-    visual_scale_q8: u16,
-    assets: &mut Vec<PlaytestAsset>,
-    models: &mut Vec<PlaytestModel>,
-    model_clips: &mut Vec<PlaytestModelClip>,
-    model_clip_bounds: &mut Vec<PlaytestModelClipBounds>,
-    model_frame_bounds: &mut Vec<PlaytestModelFrameBounds>,
-    model_sockets: &mut Vec<PlaytestModelSocket>,
-    model_instances: &mut Vec<PlaytestModelInstance>,
-    model_for_resource: &mut HashMap<ResourceId, u16>,
-    runtime_model_clips: &HashMap<ResourceId, BTreeSet<u16>>,
-    model_clip_remaps: &mut HashMap<ResourceId, Vec<Option<u16>>>,
-    report: &mut PlaytestValidationReport,
+    placement: ModelInstancePlacement,
+    tables: ModelCookTables<'_>,
 ) -> bool {
+    let ModelInstancePlacement {
+        clip_override,
+        pose_frame,
+        room_index,
+        pos,
+        yaw,
+        visual_yaw,
+        pitch,
+        roll,
+        visual_offset,
+        visual_scale_q8,
+    } = placement;
+    let ModelCookTables {
+        assets,
+        models,
+        model_clips,
+        model_clip_bounds,
+        model_frame_bounds,
+        model_sockets,
+        model_instances,
+        model_for_resource,
+        runtime_model_clips,
+        model_clip_remaps,
+        report,
+    } = tables;
     let Some(model_index) = register_model_for_instance(
         project,
         project_root,
