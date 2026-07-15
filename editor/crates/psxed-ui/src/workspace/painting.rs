@@ -489,7 +489,7 @@ impl EditorWorkspace {
             matches!(
                 node.kind,
                 NodeKind::BoxProp { materials, .. }
-                    if materials.iter().any(|material| *material == Some(material_id))
+                    if materials.contains(&Some(material_id))
             )
         })
     }
