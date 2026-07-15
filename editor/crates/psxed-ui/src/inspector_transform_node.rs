@@ -1703,21 +1703,40 @@ pub(crate) fn character_profile_action_clip(
     project.resolved_model_animation_index(model_id, clip)
 }
 
+/// Everything the node-kind editor needs beyond the node itself: resource
+/// option lists, animator clip info, and the resize/navigation outputs.
+pub(crate) struct NodeKindEditorContext<'a> {
+    pub(crate) material_options: &'a [(ResourceId, String)],
+    pub(crate) texture_options: &'a [(ResourceId, String)],
+    pub(crate) room_options: &'a [(NodeId, String)],
+    pub(crate) model_options: &'a [(ResourceId, String, Vec<String>)],
+    pub(crate) character_options: &'a [(ResourceId, String)],
+    pub(crate) weapon_options: &'a [(ResourceId, String)],
+    pub(crate) animator_clip_context: Option<&'a AnimatorClipContext>,
+    pub(crate) inherited_sector_size: i32,
+    pub(crate) room_grid_resize: &'a mut Option<(u16, u16)>,
+    pub(crate) nav_target: &'a mut Option<ResourceId>,
+    pub(crate) camera_preview: Option<EditorCameraPreviewPresentation>,
+}
+
 pub(crate) fn draw_node_kind_editor(
     ui: &mut egui::Ui,
     kind: &mut NodeKind,
-    material_options: &[(ResourceId, String)],
-    texture_options: &[(ResourceId, String)],
-    room_options: &[(NodeId, String)],
-    model_options: &[(ResourceId, String, Vec<String>)],
-    character_options: &[(ResourceId, String)],
-    weapon_options: &[(ResourceId, String)],
-    animator_clip_context: Option<&AnimatorClipContext>,
-    inherited_sector_size: i32,
-    room_grid_resize: &mut Option<(u16, u16)>,
-    nav_target: &mut Option<ResourceId>,
-    camera_preview: Option<EditorCameraPreviewPresentation>,
+    ctx: NodeKindEditorContext<'_>,
 ) -> bool {
+    let NodeKindEditorContext {
+        material_options,
+        texture_options,
+        room_options,
+        model_options,
+        character_options,
+        weapon_options,
+        animator_clip_context,
+        inherited_sector_size,
+        room_grid_resize,
+        nav_target,
+        camera_preview,
+    } = ctx;
     let mut changed = false;
     ui.horizontal(|ui| {
         ui.label(icons::text(icons::CIRCLE_DOT, 13.0).color(STUDIO_TEXT_WEAK));
