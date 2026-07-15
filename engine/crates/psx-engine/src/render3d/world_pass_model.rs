@@ -388,33 +388,66 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             let part_end = global_index
                 .saturating_add(part.vertex_count() as usize)
                 .min(project_count);
+            // Blended vertices (joint seams) are deferred into a chunk and
+            // flushed in joint-grouped phases so the GTE matrix swaps
+            // amortize (see flush_blended_model_vertex_chunk). The
+            // vert-debug probe build keeps the per-vertex path so the
+            // explosion probe observes every intermediate stage.
+            #[cfg(not(feature = "vert-debug"))]
+            let mut blended_chunk = [0u16; BLENDED_VERTEX_CHUNK];
+            #[cfg(not(feature = "vert-debug"))]
+            let mut blended_len = 0usize;
             while global_index < part_end {
-                // Blended vertices (joint seams) take the scalar compose
-                // path one at a time.
                 if blend_vertices
                     && model_vertex_uses_cpu_blend(vertices[global_index], joint_count)
                 {
-                    let vertex = vertices[global_index];
                     stats.cpu_blended_vertices = stats.cpu_blended_vertices.wrapping_add(1);
                     probe_model_blended += 1;
-                    let projected = project_blended_textured_model_vertex(
-                        vertex,
-                        primary,
-                        joint_view_transforms,
-                        camera.projection,
-                    );
-                    all_projected_vertices_in_front &=
-                        projected_model_vertex_in_front(projected, near_z);
-                    all_projected_vertices_inside_hw_bounds &=
-                        projected_model_vertex_inside_hw_bounds(projected);
-                    track_projected_model_bounds(
-                        projected,
-                        &mut projected_min_x,
-                        &mut projected_max_x,
-                        &mut projected_min_y,
-                        &mut projected_max_y,
-                    );
-                    projected_vertices[global_index] = projected;
+                    #[cfg(feature = "vert-debug")]
+                    {
+                        let vertex = vertices[global_index];
+                        let projected = project_blended_textured_model_vertex(
+                            vertex,
+                            primary,
+                            joint_view_transforms,
+                            camera.projection,
+                        );
+                        all_projected_vertices_in_front &=
+                            projected_model_vertex_in_front(projected, near_z);
+                        all_projected_vertices_inside_hw_bounds &=
+                            projected_model_vertex_inside_hw_bounds(projected);
+                        track_projected_model_bounds(
+                            projected,
+                            &mut projected_min_x,
+                            &mut projected_max_x,
+                            &mut projected_min_y,
+                            &mut projected_max_y,
+                        );
+                        projected_vertices[global_index] = projected;
+                    }
+                    #[cfg(not(feature = "vert-debug"))]
+                    {
+                        blended_chunk[blended_len] = global_index as u16;
+                        blended_len += 1;
+                        if blended_len == BLENDED_VERTEX_CHUNK {
+                            flush_blended_model_vertex_chunk(
+                                &blended_chunk,
+                                vertices,
+                                primary,
+                                joint_view_transforms,
+                                camera.projection,
+                                near_z,
+                                projected_vertices,
+                                &mut all_projected_vertices_in_front,
+                                &mut all_projected_vertices_inside_hw_bounds,
+                                &mut projected_min_x,
+                                &mut projected_max_x,
+                                &mut projected_min_y,
+                                &mut projected_max_y,
+                            );
+                            blended_len = 0;
+                        }
+                    }
                     global_index += 1;
                     continue;
                 }
@@ -489,6 +522,24 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                     projected_vertices[global_index] = projected;
                     global_index += 1;
                 }
+            }
+            #[cfg(not(feature = "vert-debug"))]
+            if blended_len > 0 {
+                flush_blended_model_vertex_chunk(
+                    &blended_chunk[..blended_len],
+                    vertices,
+                    primary,
+                    joint_view_transforms,
+                    camera.projection,
+                    near_z,
+                    projected_vertices,
+                    &mut all_projected_vertices_in_front,
+                    &mut all_projected_vertices_inside_hw_bounds,
+                    &mut projected_min_x,
+                    &mut projected_max_x,
+                    &mut projected_min_y,
+                    &mut projected_max_y,
+                );
             }
 
             part_index += 1;
