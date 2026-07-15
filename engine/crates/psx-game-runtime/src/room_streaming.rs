@@ -249,11 +249,18 @@ impl<const N: usize, const MAX_STREAMED_ROOM_INDEX_COUNT: usize>
     /// Single residency entry point: pin the desired set and load whatever is
     /// missing. Called once per frame by the residency owner so residency is
     /// no longer requested ad-hoc from the build paths.
+    /// `active_count` is the prefix of `desired` that must be resident for
+    /// the current frame to be correct (the visible/drawn set); entries past
+    /// it are the prefetch ring and are counted as such in telemetry, keep
+    /// their loads unprotected against eviction, and may be dropped first
+    /// under slot pressure.
+    #[allow(clippy::too_many_arguments)]
     pub fn reconcile_residency<const STREAMED_ROOM_SLOT_BYTES: usize>(
         &mut self,
         cd: &mut cd_stream::CdController,
         desired: &[RoomIndex; N],
         count: usize,
+        active_count: usize,
         stream_load_batch_count: usize,
         world_pack_start_lba: u32,
         world_pack_toc: &[LevelWorldPackEntryRecord],
@@ -266,7 +273,7 @@ impl<const N: usize, const MAX_STREAMED_ROOM_INDEX_COUNT: usize>
             cd,
             desired,
             count,
-            count,
+            active_count.min(count),
             stream_load_batch_count,
             &log_plan,
         );
