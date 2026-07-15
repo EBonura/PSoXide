@@ -1143,6 +1143,21 @@ impl Bus {
         }
     }
 
+    /// CPU store stalls beyond the instruction's one-cycle issue cost.
+    ///
+    /// The physical SCPH-9902 capture resolves cached and uncached main-RAM
+    /// stores at two clocks each, while scratchpad stores remain one clock.
+    /// Keep this separate from CPU reads: the external write buffer hides
+    /// most of the read wait-state cost but still occupies one extra clock.
+    #[inline]
+    pub(crate) fn cpu_write_stalls(&self, virt: u32) -> u32 {
+        if to_physical(virt) < memory::ram::MIRROR_END {
+            1u32.saturating_add(memory_timing::dram_refresh_wait(self.cycles))
+        } else {
+            0
+        }
+    }
+
     /// Uncached instruction-fetch stall cycles.
     #[inline]
     pub(crate) fn instruction_read_stalls(&self, virt: u32) -> u32 {
@@ -1621,10 +1636,9 @@ impl Bus {
         Some(total_words)
     }
 
-    /// Execute DMA channel 4 ↔ SPU. The SPU transfer engine consumes one
-    /// halfword every 16 CPU cycles. This is independently exercised by
-    /// JaCzekanski's real-hardware `spu/memory-transfer` test and matches
-    /// DuckStation's event-driven FIFO model.
+    /// Execute DMA channel 4 ↔ SPU. The SPU FIFO cadence follows the active
+    /// memory-controller profile: 16 CPU cycles per halfword on the earlier
+    /// public COMMON0=5 profile and 32 on the captured late PAL profile.
     ///
     /// - Direction bit 0 = 1: main RAM → SPU RAM (normal -- upload sample data).
     /// - Direction bit 0 = 0: SPU RAM → main RAM (rare -- live capture).
@@ -1691,7 +1705,7 @@ impl Bus {
             }
         }
         self.service_spu_irq();
-        Some(halfword_count.saturating_mul(16))
+        Some(self.memory_control.spu_dma_cycles(word_count))
     }
 
     /// Execute DMA channel 3 → CPU. Block mode (sync=1) is the only
@@ -1811,8 +1825,9 @@ impl Bus {
     ///   cycle per word plus ten cycles per mode-1 block. Manual chopping
     ///   adds the programmed CPU window plus six arbitration cycles per DMA
     ///   window.
-    /// - **Block command traffic**: retains Redux's `7 * block_count` until
-    ///   the HWTEST v0.9 NOP-DMA page supplies a direct console capture.
+    /// - **Block command traffic**: follows the captured NOP-DMA sweep: DRAM
+    ///   hyper-page transfer (17 clocks per 16 words), ten request-arbitration
+    ///   clocks per block, and five fixed setup clocks.
     /// - **GPU→RAM download**: about 2.195 cycles per packed 32-bit word,
     ///   calibrated against the public 320×240 `gpu/bandwidth` silicon run.
     /// - **Linked list**: `total_words`, per Redux L568:
@@ -1874,12 +1889,12 @@ impl Bus {
         // shape from 1x2048 through 128x16; one word + ten arbitration
         // cycles per block, plus the calibrated fixed pipeline term, keeps
         // the whole sweep within a few percent. Command traffic keeps the
-        // Redux completion model pending the dedicated HWTEST capture.
+        // hardware-calibrated NOP command-traffic model.
         if to_device {
             if upload_active {
                 gpu_upload_block_cycles(total_words, block_count)
             } else {
-                7 * block_count
+                gpu_command_block_cycles(total_words, block_count)
             }
         } else {
             gpu_download_cycles(total_words)
@@ -1920,16 +1935,14 @@ impl Bus {
 
     fn dma_gpu_linked_list(&mut self) -> u32 {
         let mut addr = self.dma.channels[2].base & 0x001F_FFFC;
-        // Completion delay is the traversed command-list word count.
-        // Redux's helper seeds its local counter at 1, but the
-        // scheduled interrupt reaches `branchTest` one cycle earlier
-        // than our strict-slot scheduler when we include that seed.
-        // Billing only the headers + payload words keeps the BIOS DMA
-        // IRQ fold aligned for disc boots such as a commercial title.
+        // Count traversed headers and payload words, then apply the captured
+        // DRAM-burst and per-node arbitration costs to the completion delay.
         let mut total_words: u32 = 0;
+        let mut node_count: u32 = 0;
         // Bound the walk so a malformed list can't spin forever.
         for _ in 0..0x100_0000 {
             let header = read_ram_u32(&self.ram[..], addr);
+            node_count = node_count.saturating_add(1);
             let word_count = (header >> 24) & 0xFF;
             for i in 0..word_count {
                 let word_addr = addr.wrapping_add(4 + i * 4);
@@ -1945,11 +1958,11 @@ impl Bus {
             // 0x00FF_FFFF sentinel. Matches Redux's
             // `while (!(addr & 0x800000))` at gpu.cc:483.
             if (header & 0x800000) != 0 {
-                return total_words;
+                return gpu_command_linked_cycles(total_words, node_count);
             }
             addr = header & 0x00FF_FFFF;
         }
-        total_words
+        gpu_command_linked_cycles(total_words, node_count)
     }
 
     /// Non-panicking byte read. Returns `None` for addresses outside
@@ -2396,6 +2409,8 @@ impl Bus {
     /// though DMA-ready GPUSTAT.28 can remain high for CPU-fed rendering.
     pub(crate) fn cpu_write32(&mut self, virt: u32, value: u32) {
         self.data_bus_latch = value;
+        let store_stall = self.cpu_write_stalls(virt);
+        self.add_cycles(store_stall);
         if to_physical(virt) == crate::gpu::GP0_ADDR {
             let stall = self.gpu.cpu_gp0_write_stall();
             self.add_cycles(stall);
@@ -2550,6 +2565,8 @@ impl Bus {
     /// word; direct bus clients keep using [`Bus::write8`] for an actual byte.
     pub(crate) fn cpu_write8(&mut self, virt: u32, source: u32) {
         self.data_bus_latch = source;
+        let store_stall = self.cpu_write_stalls(virt);
+        self.add_cycles(store_stall);
         let phys = to_physical(virt);
         self.trace_mmio(MmioKind::W8, phys, source & 0xFF);
         if !self.cpu_write_narrow_mmio(virt, phys, source, AccessWidth::Byte) {
@@ -2561,6 +2578,8 @@ impl Bus {
     /// the complete GPR value even though RAM consumes only its low halfword.
     pub(crate) fn cpu_write16(&mut self, virt: u32, source: u32) {
         self.data_bus_latch = source;
+        let store_stall = self.cpu_write_stalls(virt);
+        self.add_cycles(store_stall);
         let phys = to_physical(virt);
         self.trace_mmio(MmioKind::W16, phys, source & 0xFFFF);
         if !self.cpu_write_narrow_mmio(virt, phys, source, AccessWidth::Half) {
@@ -2865,6 +2884,27 @@ fn dma_count_16(raw: u32) -> u32 {
         0 => 0x1_0000,
         count => count,
     }
+}
+
+/// Completion delay for block-mode GPU command traffic (as opposed to A0h
+/// image data). Main RAM DMA hyper-page mode costs about 17 clocks per 16
+/// words; each BCR block then crosses the GPU request arbiter once.
+#[inline]
+fn gpu_command_block_cycles(total_words: u32, block_count: u32) -> u32 {
+    total_words
+        .saturating_add(total_words.div_ceil(16))
+        .saturating_add(block_count.saturating_mul(10))
+        .saturating_add(5)
+}
+
+/// Linked-list command traffic pays the same DRAM burst slope, with a larger
+/// per-node header/pointer arbitration cost than contiguous BCR blocks.
+#[inline]
+fn gpu_command_linked_cycles(total_words: u32, node_count: u32) -> u32 {
+    total_words
+        .saturating_add(total_words.div_ceil(16))
+        .saturating_add(node_count.saturating_mul(15))
+        .saturating_add(5)
 }
 
 /// Completion delay for a mode-1 RAM-to-GPU A0h image upload.
@@ -3480,7 +3520,7 @@ mod tests {
     }
 
     #[test]
-    fn spu_dma_transfers_two_halfwords_per_word_at_sixteen_cycles_each() {
+    fn spu_dma_transfers_two_halfwords_per_word_at_late_pal_cadence() {
         let mut bus = Bus::new(synthetic_bios()).unwrap();
         bus.cycles = 100;
         bus.spu.write16(crate::spu::TRANSFER_ADDR, 0);
@@ -3500,8 +3540,8 @@ mod tests {
         bus.dma.channels[4].channel_control = 0x0100_0201;
         bus.run_dma_channel(4);
 
-        // 64 halfwords at 16 CPU cycles each = 1024 cycles.
-        assert_eq!(bus.scheduler.target(EventSlot::SpuDma), Some(1124));
+        // 64 halfwords at 32 clocks plus a 34-clock DRAM burst = 2082.
+        assert_eq!(bus.scheduler.target(EventSlot::SpuDma), Some(2182));
 
         // All 64 halfwords landed in SPU RAM (the bug stopped at 32).
         bus.spu.write16(crate::spu::TRANSFER_ADDR, 0);
@@ -3554,7 +3594,7 @@ mod tests {
         bus.dma.channels[4].block_control = (1 << 16) | 4;
         bus.dma.channels[4].channel_control = 0x0100_0200;
 
-        assert_eq!(bus.run_dma_spu(), Some(128));
+        assert_eq!(bus.run_dma_spu(), Some(261));
         assert_eq!(read_ram_u16(&bus.ram[..], 0x300), 0x1111);
         assert_eq!(read_ram_u16(&bus.ram[..], 0x302), 0x2222);
         assert_eq!(read_ram_u16(&bus.ram[..], 0x304), 0x3333);
