@@ -891,14 +891,16 @@ impl EditorWorkspace {
                                 ui,
                                 preview,
                                 &mut dialog.selected_clip,
-                                &mut dialog.preview_yaw_q12,
-                                &mut dialog.preview_pitch_q12,
-                                &mut dialog.preview_radius,
-                                dialog.collision_radius,
-                                dialog.visual_scale_q8,
-                                dialog.default_visual_yaw_q12,
-                                dialog.show_animation_root,
-                                dialog.preview_in_place,
+                                ModelImportPreviewContext {
+                                    preview_yaw_q12: &mut dialog.preview_yaw_q12,
+                                    preview_pitch_q12: &mut dialog.preview_pitch_q12,
+                                    preview_radius: &mut dialog.preview_radius,
+                                    collision_radius: dialog.collision_radius,
+                                    visual_scale_q8: dialog.visual_scale_q8,
+                                    default_visual_yaw_q12: dialog.default_visual_yaw_q12,
+                                    show_animation_root: dialog.show_animation_root,
+                                    preview_in_place: dialog.preview_in_place,
+                                },
                             );
                             ui.add_space(4.0);
                         } else {
