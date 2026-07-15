@@ -1,14 +1,16 @@
 //! Dense photographable transport for the complete real-console result set.
 //!
-//! The known 8x8 font is clearly readable in a phone photograph, so PX5 uses
-//! the screen for line-numbered Base64 instead of spending most of the pixels
-//! on QR geometry and forward error correction. Two photographs preserve all
+//! PX5 keeps the dense Base64 record used by the debug TTY and report parser,
+//! but transports each page visually as a QR symbol. Two scans preserve all
 //! 173 conformance observations and statuses, all 90 timing envelopes, the
-//! memory-control snapshot, and the startup scan summaries. CRC-32 detects a
-//! transcription error without reducing the visible data density.
+//! memory-control snapshot, and the startup scan summaries without manual
+//! character transcription. Page and binary CRC-32 values provide independent
+//! end-to-end validation after the QR layer has decoded the text.
 
 use psx_font::FontAtlas;
+use psx_gpu as gpu;
 use psx_rt::tty;
+use qrcodegen_no_heap::{QrCode, QrCodeEcc, Version};
 
 use crate::{hex2, hex8, section_report, Mode, ScanReport, TestResult, TimingReport};
 
@@ -16,6 +18,12 @@ pub(crate) const CAPTURE_PAGE_COUNT: usize = 2;
 const BASE64_CHARS_PER_LINE: usize = 36;
 const BASE64_LINES_PER_PAGE: usize = 23;
 const BASE64_CHARS_PER_PAGE: usize = BASE64_CHARS_PER_LINE * BASE64_LINES_PER_PAGE;
+const QR_VERSION: Version = Version::new(20);
+const QR_SIZE: usize = 97;
+const QR_BUFFER_LEN: usize = QR_VERSION.buffer_len();
+const QR_TEXT_MAX: usize = 9 + BASE64_CHARS_PER_PAGE + 3 + 8;
+const QR_SCALE: i16 = 2;
+const QR_QUIET: i16 = 4;
 
 // PX5 binary layout, little-endian:
 //   64-byte header
@@ -33,6 +41,8 @@ pub(crate) struct PhotoCapture {
     payload: [u8; BASE64_LEN],
     payload_len: u16,
     binary_crc: u32,
+    qr_modules: [u8; (QR_SIZE * QR_SIZE + 7) / 8],
+    qr_size: u8,
 }
 
 impl PhotoCapture {
@@ -41,6 +51,8 @@ impl PhotoCapture {
             payload: [0; BASE64_LEN],
             payload_len: 0,
             binary_crc: 0,
+            qr_modules: [0; (QR_SIZE * QR_SIZE + 7) / 8],
+            qr_size: 0,
         }
     }
 
@@ -114,8 +126,66 @@ impl PhotoCapture {
         assert!(encoded_len == BASE64_LEN, "PX5 Base64 layout drift");
         self.payload_len = encoded_len as u16;
         self.binary_crc = crc;
+        self.encode_qr(page);
 
         self.print_page(page);
+    }
+
+    fn encode_qr(&mut self, page: usize) {
+        let mut text = [0u8; QR_TEXT_MAX];
+        let mut len = 0usize;
+        append(&mut text, &mut len, b"PX5/");
+        append(
+            &mut text,
+            &mut len,
+            hex2((page + 1) as u8).as_str().as_bytes(),
+        );
+        append(
+            &mut text,
+            &mut len,
+            hex2(CAPTURE_PAGE_COUNT as u8).as_str().as_bytes(),
+        );
+        append(&mut text, &mut len, b"/");
+        append(&mut text, &mut len, self.page_chunk(page).as_bytes());
+        append(&mut text, &mut len, b"/C:");
+        append(
+            &mut text,
+            &mut len,
+            hex8(self.page_crc(page)).digits().as_bytes(),
+        );
+
+        let encoded = unsafe { core::str::from_utf8_unchecked(&text[..len]) };
+        let mut temp = [0u8; QR_BUFFER_LEN];
+        let mut output = [0u8; QR_BUFFER_LEN];
+        let Ok(qr) = QrCode::encode_text(
+            encoded,
+            &mut temp,
+            &mut output,
+            QrCodeEcc::Low,
+            QR_VERSION,
+            QR_VERSION,
+            None,
+            false,
+        ) else {
+            self.qr_size = 0;
+            return;
+        };
+
+        self.qr_modules.fill(0);
+        self.qr_size = qr.size() as u8;
+        for y in 0..qr.size() {
+            for x in 0..qr.size() {
+                if qr.get_module(x, y) {
+                    let bit = y as usize * QR_SIZE + x as usize;
+                    self.qr_modules[bit / 8] |= 1 << (bit & 7);
+                }
+            }
+        }
+    }
+
+    fn qr_module(&self, x: usize, y: usize) -> bool {
+        let bit = y * QR_SIZE + x;
+        self.qr_modules[bit / 8] & (1 << (bit & 7)) != 0
     }
 
     fn payload(&self) -> &str {
@@ -150,47 +220,67 @@ impl PhotoCapture {
 }
 
 pub(crate) fn draw_capture_page(font: &FontAtlas, capture: &PhotoCapture, page: usize) {
-    font.draw_text(8, 28, "PX5 BASE64 COMPLETE CAPTURE", (255, 232, 128));
-    font.draw_text(224, 28, "PAGE", (140, 160, 190));
-    font.draw_text(264, 28, hex2((page + 1) as u8).as_str(), (232, 236, 244));
-    font.draw_text(280, 28, "/", (140, 160, 190));
+    font.draw_text(0, 0, "PX5 QR COMPLETE CAPTURE", (255, 232, 128));
+    font.draw_text(208, 0, "PAGE", (140, 160, 190));
+    font.draw_text(248, 0, hex2((page + 1) as u8).as_str(), (232, 236, 244));
+    font.draw_text(264, 0, "/", (140, 160, 190));
     font.draw_text(
-        288,
-        28,
+        272,
+        0,
         hex2(CAPTURE_PAGE_COUNT as u8).as_str(),
         (232, 236, 244),
     );
-
-    let chunk = capture.page_chunk(page);
-    let mut row = 0usize;
-    while row < BASE64_LINES_PER_PAGE {
-        let first = row * BASE64_CHARS_PER_LINE;
-        if first >= chunk.len() {
-            break;
-        }
-        let end = (first + BASE64_CHARS_PER_LINE).min(chunk.len());
-        let y = 38 + row as i16 * 8;
-        font.draw_text(0, y, hex2(row as u8).as_str(), (120, 176, 255));
-        font.draw_text(16, y, " ", (140, 160, 190));
-        font.draw_text(24, y, &chunk[first..end], (232, 236, 244));
-        row += 1;
-    }
-
-    font.draw_text(0, 224, "PAGE CRC", (140, 160, 190));
+    font.draw_text(0, 10, "PAGE", (140, 160, 190));
     font.draw_text(
-        72,
-        224,
+        40,
+        10,
         hex8(capture.page_crc(page)).digits(),
         (96, 240, 128),
     );
-    font.draw_text(152, 224, "FULL CRC", (140, 160, 190));
-    font.draw_text(224, 224, hex8(capture.binary_crc).digits(), (96, 240, 128));
-    font.draw_text(
-        0,
-        232,
-        "LEFT/RIGHT PAGE  PHOTOGRAPH BOTH PAGES",
-        (150, 170, 200),
-    );
+    font.draw_text(120, 10, "FULL", (140, 160, 190));
+    font.draw_text(160, 10, hex8(capture.binary_crc).digits(), (96, 240, 128));
+    font.draw_text(240, 10, "L/R PAGE", (150, 170, 200));
+
+    if capture.qr_size as usize != QR_SIZE {
+        font.draw_text(80, 112, "QR ENCODE FAILED", (255, 96, 96));
+        return;
+    }
+
+    let total = (QR_SIZE as i16 + QR_QUIET * 2) * QR_SCALE;
+    let left = (320 - total) / 2;
+    let top = 28;
+    gpu::draw_rect_flat(left, top, total as u16, total as u16, 255, 255, 255);
+    let data_left = left + QR_QUIET * QR_SCALE;
+    let data_top = top + QR_QUIET * QR_SCALE;
+    for y in 0..QR_SIZE {
+        let mut x = 0usize;
+        while x < QR_SIZE {
+            while x < QR_SIZE && !capture.qr_module(x, y) {
+                x += 1;
+            }
+            let first = x;
+            while x < QR_SIZE && capture.qr_module(x, y) {
+                x += 1;
+            }
+            if first < x {
+                gpu::draw_rect_flat(
+                    data_left + first as i16 * QR_SCALE,
+                    data_top + y as i16 * QR_SCALE,
+                    ((x - first) as i16 * QR_SCALE) as u16,
+                    QR_SCALE as u16,
+                    0,
+                    0,
+                    0,
+                );
+            }
+        }
+    }
+}
+
+fn append(target: &mut [u8], len: &mut usize, bytes: &[u8]) {
+    let end = *len + bytes.len();
+    target[*len..end].copy_from_slice(bytes);
+    *len = end;
 }
 
 struct BinaryBuffer<'a> {
