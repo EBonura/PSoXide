@@ -1501,10 +1501,20 @@ impl Bus {
                     // one cycle per word plus one row-address setup per 16
                     // words (the same measured model used by DuckStation).
                     let otc_cycles = otc_words.saturating_add(otc_words.div_ceil(16));
-                    let target = self.cycles + otc_cycles as u64;
-                    self.log_dma_schedule("GpuOtc", otc_cycles as u64, target);
-                    self.scheduler
-                        .schedule(EventSlot::GpuOtcDma, self.cycles, otc_cycles as u64);
+                    // SCPH-9902 PX6 capture: the first CHCR read after the
+                    // CPU regains the bus still sees START|TRIGGER, and the
+                    // immediately following read sees both clear. Keep the
+                    // completion edge one cycle beyond the bus-hold window;
+                    // the first MMIO read starts in that observable slot and
+                    // advances through the scheduled clear for the next read.
+                    let completion_delay = otc_cycles.saturating_add(1);
+                    let target = self.cycles + completion_delay as u64;
+                    self.log_dma_schedule("GpuOtc", completion_delay as u64, target);
+                    self.scheduler.schedule(
+                        EventSlot::GpuOtcDma,
+                        self.cycles,
+                        completion_delay as u64,
+                    );
                     self.add_cycles(otc_cycles);
                 }
             }
@@ -3622,12 +3632,13 @@ mod tests {
 
         // 16 data cycles + one DRAM row-address setup cycle.
         assert_eq!(bus.cycles, 117);
-        assert_eq!(bus.scheduler.target(EventSlot::GpuOtcDma), Some(117));
+        assert_eq!(bus.scheduler.target(EventSlot::GpuOtcDma), Some(118));
         assert_eq!(bus.dma.channels[6].channel_control, 0x1100_0002);
 
-        // The next CPU issue tick crosses the strict completion boundary
-        // before its instruction can observe CHCR.
-        bus.tick(1);
+        // One cycle after the CPU regains the bus reaches the completion
+        // edge. A real MMIO read occupies this boundary, returning the old
+        // value before the following read observes the clear state.
+        bus.tick(2);
         assert_eq!(bus.dma.channels[6].channel_control, 0x0000_0002);
     }
 

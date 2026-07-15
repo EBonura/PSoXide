@@ -37,9 +37,9 @@ The third page is intentionally a microscope rather than a duplicate. It
 stores raw SPU DMA readback words for one-block and four-block BCR shapes plus
 forced-stable comparison hashes, repeated GPUSTAT reads after IRQ and
 DMA-direction writes, exact Timer 2 mode/counter/I_STAT snapshots, raw SPU
-voice-register masks, consecutive OTC CHCR reads, and repeated full-width GTE
-results. This extra data reveals corruption and state-transition shapes that a
-checksum or one-shot pass/fail result cannot.
+voice-register masks, consecutive OTC CHCR reads, an RTPS V0 input-commit gap
+sweep, and repeated full-width GTE results. This extra data reveals corruption
+and state-transition shapes that a checksum or one-shot pass/fail result cannot.
 
 The timing minimum is normally the least-interrupted measurement; the min/max
 gap records IRQ or hardware jitter instead of hiding it. BIOS revisions can
