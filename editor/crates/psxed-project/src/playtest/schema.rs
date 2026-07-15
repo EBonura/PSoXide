@@ -1348,6 +1348,20 @@ pub struct PlaytestGameEntity {
     /// Index into [`PlaytestPackage::model_instances`], or
     /// `psx_level::GAME_ENTITY_MODEL_INSTANCE_NONE`.
     pub model_instance: u16,
+    /// Model-local clip index for the Idle state, resolved at cook
+    /// from the Character's AnimationSet roles (like all six state
+    /// clips; missing roles already fell back at cook).
+    pub idle_clip: u16,
+    /// Patrol (walk role) clip.
+    pub walk_clip: u16,
+    /// Aggro (run role) clip.
+    pub run_clip: u16,
+    /// Windup/Attack/Recover one-shot clip.
+    pub attack_clip: u16,
+    /// Staggered (hit-react role) one-shot clip.
+    pub stagger_clip: u16,
+    /// Death one-shot clip.
+    pub death_clip: u16,
     /// Room-local spawn X.
     pub x: i32,
     /// Y.
