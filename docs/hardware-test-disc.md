@@ -1,9 +1,9 @@
 # PS1 hardware-test disc
 
 The `hardware-tests` disc is the silicon reference for PSoXide. It runs the
-same executable in PSoXide and on a real PlayStation, but real-console data is
-transported through two frozen, line-numbered Base64 pages so a TV and phone
-camera are enough.
+same executable in PSoXide and on a real PlayStation. Real-console data is
+transported through two QR pages, so a TV and phone camera are enough and no
+character-by-character transcription is required.
 
 ## Capturing timing data
 
@@ -11,18 +11,20 @@ camera are enough.
    with its matching `.cue`.
 2. Let the controller-probe page settle, then press **Start** to jump directly
    to `TIMING MAP`.
-3. Photograph page `01/02`, press Right, then photograph page `02/02`. Keep all
-   text, including the line numbers and CRC footer, visible.
+3. Scan QR page `01/02`, press Right, then scan QR page `02/02`. Save or copy
+   the complete `PX5/.../C:...` text returned by each scan.
 4. If a value looks unstable, press Cross once to run five fresh samples and
-   photograph both pages from the new run. Do not mix pages from different
+   scan both pages from the new run. Do not mix pages from different
    runs.
 
 ## Payload schema `PX5`
 
 The capture is a 1,221-byte versioned binary record encoded as exactly 1,628
-Base64 characters. Each screen carries 23 numbered rows of up to 36 characters;
-page 1 has 828 characters and page 2 has 800. A CRC-32 protects each page and a
-second CRC-32 protects the reconstructed binary record.
+Base64 characters. Page 1 carries 828 characters and page 2 carries 800. Each
+screen encodes its complete `PX5/<page>/<chunk>/C:<crc>` text in a Version-20-L
+QR symbol. A CRC-32 protects each page and a second CRC-32 protects the
+reconstructed binary record. QR level L adds its standard recovery margin for
+camera/CRT artifacts while keeping each module two display pixels square.
 
 The record preserves all 173 conformance observations and their statuses, all
 90 timing min/max pairs, CPU/GTE/SPU startup-scan summaries, the nine
