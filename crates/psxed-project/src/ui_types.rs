@@ -382,6 +382,7 @@ pub(crate) fn default_ui_transition_seed() -> u16 {
 /// dispatch is a later step; this carries the authored intent so the
 /// cook can lower it to a [`psx_level::LevelUiAction`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum UiAction {
     /// Switch to a composed screen state by stable id.
     GotoState(SceneStateId),
@@ -409,6 +410,7 @@ pub enum UiAction {
         transition: UiTransition,
     },
     /// Return to the previous menu/scene.
+    #[default]
     Back,
     /// Adjust a project option by a signed delta.
     SetOption {
@@ -421,11 +423,6 @@ pub enum UiAction {
     Game(u16),
 }
 
-impl Default for UiAction {
-    fn default() -> Self {
-        Self::Back
-    }
-}
 
 impl UiAction {
     /// Editor-facing label for the action variant.
@@ -581,8 +578,10 @@ pub struct OptionDef {
 
 /// Built-in bitmap font a text UI node draws with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum UiFontChoice {
     /// 8x8 basic ASCII font.
+    #[default]
     Basic,
     /// 8x16 basic ASCII font.
     Basic8x16,
@@ -656,11 +655,6 @@ pub enum UiFontChoice {
     Jura,
 }
 
-impl Default for UiFontChoice {
-    fn default() -> Self {
-        Self::Basic
-    }
-}
 
 impl UiFontChoice {
     /// All editor-selectable built-in UI fonts.
