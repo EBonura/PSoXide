@@ -60,6 +60,45 @@ pub(crate) fn resolve_material_texture_asset(
     Some((texture_asset_index, material.tint))
 }
 
+/// Resolve a Model Renderer's covering Material into the cooked
+/// override the instance/character record carries: the material's
+/// `.psxt` becomes a texture asset requirement (deduped by path,
+/// like world/prop materials) and the authored blend mode, tint,
+/// and face sidedness ride along.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn resolve_model_material_override(
+    project: &ProjectDocument,
+    project_root: &Path,
+    label: &str,
+    material_id: ResourceId,
+    texture_asset_for_path: &mut HashMap<String, usize>,
+    assets: &mut Vec<PlaytestAsset>,
+    report: &mut PlaytestValidationReport,
+) -> Option<PlaytestModelMaterialOverride> {
+    let (texture_asset_index, tint_rgb) = resolve_material_texture_asset(
+        project,
+        project_root,
+        label,
+        material_id,
+        texture_asset_for_path,
+        assets,
+        report,
+    )?;
+    // The texture resolver already validated the resource is a
+    // Material with a texture, so this re-read cannot fail.
+    let Some(ResourceData::Material(material)) =
+        project.resource(material_id).map(|resource| &resource.data)
+    else {
+        return None;
+    };
+    Some(PlaytestModelMaterialOverride {
+        texture_asset_index,
+        blend_mode: material.blend_mode,
+        tint_rgb,
+        face_sidedness: material.face_sidedness,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn push_image_prop(
     project: &ProjectDocument,

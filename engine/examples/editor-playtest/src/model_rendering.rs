@@ -155,6 +155,7 @@ pub(super) fn draw_player(
         camera,
         options,
         lighting,
+        &mut prop_texture_slot,
         triangles,
         world,
     )
@@ -265,6 +266,7 @@ pub(super) fn draw_model_instances(
         clips,
         pose_overrides,
         depth_pass,
+        &mut prop_texture_slot,
         triangles,
         world,
     )

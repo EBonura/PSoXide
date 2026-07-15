@@ -655,6 +655,23 @@ pub struct PlaytestModel {
     pub collision_radius: u16,
 }
 
+/// Covering-material override cooked for one placed model instance
+/// or the player character: the model draws its own UVs against the
+/// resolved material texture instead of the model's baked atlas.
+/// Mirrors [`psx_level::LevelModelMaterialOverride`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestModelMaterialOverride {
+    /// Index into [`PlaytestPackage::assets`] of the material's
+    /// `.psxt` texture.
+    pub texture_asset_index: usize,
+    /// Authored PS1 blend mode.
+    pub blend_mode: crate::PsxBlendMode,
+    /// Authored modulation tint.
+    pub tint_rgb: [u8; 3],
+    /// Authored face sidedness.
+    pub face_sidedness: crate::MaterialFaceSidedness,
+}
+
 /// One placed model instance. Coordinates are room-local
 /// engine units (the same space cooked rooms live in).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -690,6 +707,9 @@ pub struct PlaytestModelInstance {
     pub visual_offset: [i16; 3],
     /// Render-only uniform scale in Q8 fixed point (`256 = 1.0`).
     pub visual_scale_q8: u16,
+    /// Covering material replacing the model's cooked atlas, or
+    /// `None` to render the atlas (the default path).
+    pub material_override: Option<PlaytestModelMaterialOverride>,
     /// Reserved.
     pub flags: u16,
 }
@@ -1501,6 +1521,9 @@ pub struct PlaytestCharacter {
     pub camera_height: i32,
     /// Vertical offset of the camera's look-at target.
     pub camera_target_height: i32,
+    /// Covering material replacing the model's cooked atlas, or
+    /// `None` to render the atlas (the default path).
+    pub material_override: Option<PlaytestModelMaterialOverride>,
 }
 
 /// Cooked player-controller record. Always paired with a

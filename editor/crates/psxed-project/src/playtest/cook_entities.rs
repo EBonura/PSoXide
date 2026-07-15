@@ -370,6 +370,7 @@ pub(crate) fn cook_player_character(
     spawn_node: &SceneNode,
     character_id: Option<ResourceId>,
     model_override: Option<ResourceId>,
+    material_override: Option<PlaytestModelMaterialOverride>,
     visual_offset: [i16; 3],
     visual_yaw: i16,
     visual_scale_q8: u16,
@@ -688,6 +689,7 @@ pub(crate) fn cook_player_character(
         visual_offset,
         visual_yaw,
         visual_scale_q8,
+        material_override,
         weight_q8,
         radius: settings.radius,
         height: settings.height,
@@ -1409,6 +1411,8 @@ pub(crate) struct ModelInstancePlacement {
     pub(crate) roll: i16,
     pub(crate) visual_offset: [i16; 3],
     pub(crate) visual_scale_q8: u16,
+    /// Resolved covering material, or `None` for the model atlas.
+    pub(crate) material_override: Option<PlaytestModelMaterialOverride>,
 }
 
 /// The shared cook accumulators a model instance registers into: the
@@ -1446,6 +1450,7 @@ pub(crate) fn push_model_instance_for_resource(
         roll,
         visual_offset,
         visual_scale_q8,
+        material_override,
     } = placement;
     let ModelCookTables {
         assets,
@@ -1513,6 +1518,7 @@ pub(crate) fn push_model_instance_for_resource(
         roll,
         visual_offset,
         visual_scale_q8,
+        material_override,
         flags: 0,
     });
     true
@@ -1602,6 +1608,7 @@ pub(crate) fn push_character_controller_idle_instance(
         roll: 0,
         visual_offset: [0; 3],
         visual_scale_q8: crate::MODEL_SCALE_ONE_Q8,
+        material_override: None,
         flags: 0,
     });
     true
@@ -1941,6 +1948,8 @@ pub(crate) fn playtest_weapon_shape(shape: &crate::WeaponHitShape) -> PlaytestWe
 #[derive(Clone, Copy)]
 pub(crate) struct ModelRendererComponent {
     pub(crate) model: Option<ResourceId>,
+    /// Covering-material override; `None` renders the model atlas.
+    pub(crate) material: Option<ResourceId>,
     pub(crate) visual_offset: [i16; 3],
     pub(crate) visual_yaw: i16,
     pub(crate) visual_scale_q8: u16,
@@ -1992,11 +2001,12 @@ pub(crate) fn component_model_renderer(
     component_children(scene, host).find_map(|node| match &node.kind {
         NodeKind::ModelRenderer {
             model,
-            material: _,
+            material,
             visual_offset,
             visual_scale_q8,
         } => Some(ModelRendererComponent {
             model: *model,
+            material: *material,
             visual_offset: *visual_offset,
             visual_yaw: yaw_from_degrees(node.transform.rotation_degrees[1]),
             visual_scale_q8: *visual_scale_q8,

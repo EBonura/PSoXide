@@ -2208,7 +2208,7 @@ pub(crate) fn draw_node_kind_editor(
         }
         NodeKind::ModelRenderer {
             model,
-            material: _,
+            material,
             visual_offset,
             visual_scale_q8,
         } => {
@@ -2240,6 +2240,50 @@ pub(crate) fn draw_node_kind_editor(
                     Color32::from_rgb(220, 120, 100),
                     "Model resource is missing.",
                 );
+            }
+            ui.separator();
+            // Covering-texture switch: `material == None` renders the
+            // model's own cooked atlas; `Some` covers the model's UVs
+            // with the picked material (texture + blend + tint +
+            // sidedness).
+            let mut custom_texture = material.is_some();
+            ui.horizontal(|ui| {
+                ui.label("Texture");
+                egui::ComboBox::from_id_salt("model-renderer-texture-mode")
+                    .selected_text(if custom_texture {
+                        "Custom material"
+                    } else {
+                        "Model atlas"
+                    })
+                    .show_ui(ui, |ui| {
+                        if ui.selectable_label(!custom_texture, "Model atlas").clicked() {
+                            custom_texture = false;
+                        }
+                        if ui
+                            .selectable_label(custom_texture, "Custom material")
+                            .clicked()
+                        {
+                            custom_texture = true;
+                        }
+                    });
+            });
+            if custom_texture != material.is_some() {
+                *material = if custom_texture {
+                    material_options.first().map(|(id, _)| *id)
+                } else {
+                    None
+                };
+                changed = true;
+                if custom_texture && material.is_none() {
+                    ui.colored_label(
+                        Color32::from_rgb(220, 160, 80),
+                        "No Material resources exist to cover with.",
+                    );
+                }
+            }
+            if material.is_some() {
+                changed |= material_picker(ui, "Material", material, material_options, nav_target);
+                ui.weak("Covers the model's UVs with this material's texture, blend mode, tint, and sidedness.");
             }
             ui.separator();
             ui.weak("Visual calibration only. Collision, camera, and movement still use Entity and Character Controller data.");
