@@ -297,6 +297,7 @@ pub fn draw_model_instances<
     clips: &[Option<Animation<'static>>; MAX_RUNTIME_MODEL_CLIPS],
     pose_overrides: &[ModelInstancePoseOverride],
     depth_pass: ModelInstanceDepthPass,
+    resolve_override_texture: &mut impl FnMut(AssetId) -> Option<VramSlot>,
     triangles: &mut impl PrimitiveSink<TriTextured>,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) -> ModelInstanceDrawStats {
@@ -407,12 +408,12 @@ pub fn draw_model_instances<
             continue;
         }
 
-        let material = lighting.shade_model_material(origin, runtime_model.material);
-        let cull_mode = if runtime_model.double_sided {
-            CullMode::None
-        } else {
-            CullMode::Back
-        };
+        let (base_material, cull_mode) = model_material_and_cull(
+            runtime_model,
+            inst.material_override,
+            resolve_override_texture,
+        );
+        let material = lighting.shade_model_material(origin, base_material);
         let model_options = options
             .with_depth_policy(DepthPolicy::Average)
             .with_cull_mode(cull_mode)
