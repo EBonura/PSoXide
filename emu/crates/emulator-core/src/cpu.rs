@@ -35,6 +35,8 @@ const CACHE_CONTROL_TAG: u32 = 1 << 2;
 const CACHE_CONTROL_IBLKSZ_SHIFT: u32 = 8;
 const CACHE_CONTROL_IBLKSZ_MASK: u32 = 3 << CACHE_CONTROL_IBLKSZ_SHIFT;
 const CACHE_CONTROL_IS1: u32 = 1 << 11;
+/// COP0 Status.CU2: permit GTE register transfers and commands.
+const COP0_STATUS_CU2: u32 = 1 << 30;
 /// Retail BIOS state after `FlushCache` returns: scratchpad and I-cache
 /// enabled, four-word I-cache refills, and the normal bus-control bits.
 const CACHE_CONTROL_BIOS_NORMAL: u32 = 0x0001_E988;
@@ -408,6 +410,12 @@ impl Cpu {
         // bus stalls per instruction.
         self.instruction_cache.invalidate_all();
         self.cache_control = CACHE_CONTROL_BIOS_NORMAL;
+        // The retail shell enables COP2 before launching an executable, and
+        // games are known to rely on that inherited state. Direct EXE loading
+        // bypasses the shell, so reproduce its launch contract here; otherwise
+        // the first GTE transfer raises CpU and falls into an unserviceable
+        // low-RAM exception path.
+        self.cop0[12] |= COP0_STATUS_CU2;
         self.pending_pc = None;
         self.pending_load = None;
         self.committing_load = None;
@@ -2599,6 +2607,16 @@ mod tests {
         cpu.seed_from_exe(0x8000_3000, 0, None);
         assert_eq!(cpu.read_cache_control(), CACHE_CONTROL_BIOS_NORMAL);
         assert_eq!(cpu.fetch(&mut bus), 0x6666_6666);
+    }
+
+    #[test]
+    fn seed_from_exe_enables_cop2_like_the_bios_shell() {
+        let mut cpu = Cpu::new();
+        cpu.cop0[12] = 0x401;
+
+        cpu.seed_from_exe(0x8000_3000, 0, None);
+
+        assert_eq!(cpu.cop0[12], 0x4000_0401);
     }
 
     #[test]
