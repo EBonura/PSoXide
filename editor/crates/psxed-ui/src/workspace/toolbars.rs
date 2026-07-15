@@ -735,6 +735,16 @@ impl EditorWorkspace {
                 self.status = format!("Camera: {}", viewport_camera_mode_label(mode));
             }
         }
+        ui.separator();
+        ui.label("Zoom speed");
+        let mut zoom_speed = self.camera_rig.zoom_speed();
+        if ui
+            .add(egui::Slider::new(&mut zoom_speed, 0.2..=3.0).fixed_decimals(1))
+            .changed()
+        {
+            self.camera_rig.set_zoom_speed(zoom_speed);
+            self.persist_editor_camera_state();
+        }
     }
 
     pub(crate) fn draw_view_dimension_group_menu(&mut self, ui: &mut egui::Ui) {
