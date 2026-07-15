@@ -1079,3 +1079,96 @@ fn assert_close_i32(actual: i32, expected: i32, tolerance: i32) {
         "actual {actual}, expected {expected}, delta {delta}, tolerance {tolerance}"
     );
 }
+
+/// The chunked blended-vertex flush must produce exactly the same
+/// projected vertices as the per-vertex slow path it replaces: same
+/// transforms, same lerp, same RTPS wrapper, only the GTE matrix loads
+/// are amortized. Runs on the host software GTE, so equality is exact.
+#[cfg(not(feature = "vert-debug"))]
+#[test]
+fn blended_chunk_flush_matches_per_vertex_slow_path() {
+    let projection = WorldProjection::new(160, 120, 200, 40);
+    load_world_projection_gte(projection);
+    let near_z = projection.near_z;
+
+    let primary = JointViewTransform {
+        rotation: Mat3I16::IDENTITY,
+        translation: Vec3I32::new(10, -6, 900),
+    };
+    let yaw90 = Mat3I16 {
+        m: [[0, 0, 4096], [0, 4096, 0], [-4096, 0, 0]],
+    };
+    let pitch90 = Mat3I16 {
+        m: [[4096, 0, 0], [0, 0, -4096], [0, 4096, 0]],
+    };
+    let joint_view_transforms = [
+        primary,
+        JointViewTransform {
+            rotation: yaw90,
+            translation: Vec3I32::new(-24, 14, 950),
+        },
+        JointViewTransform {
+            rotation: pitch90,
+            translation: Vec3I32::new(40, 2, 800),
+        },
+    ];
+
+    // Seam vertices alternating between two secondary joints with varied
+    // weights, sized past one chunk so the mid-part flush runs too.
+    const SEAM_VERTS: usize = BLENDED_VERTEX_CHUNK + 5;
+    let vertices: [ModelVertex; SEAM_VERTS] = core::array::from_fn(|i| {
+        let s = i as i16;
+        ModelVertex {
+            position: Vec3I16::new(40 + 3 * s, -25 + 2 * s, 60 + 5 * s),
+            joint1: 1 + (i % 2) as u8,
+            blend: 16 + ((i * 13) % 240) as u8,
+        }
+    });
+
+    // Expected: the per-vertex slow path with the primary joint loaded,
+    // exactly as the model pass guarantees before each blended vertex.
+    scene::load_rotation(&primary.rotation);
+    scene::load_translation(primary.translation);
+    let expected: [ProjectedVertex; SEAM_VERTS] = core::array::from_fn(|i| {
+        project_blended_textured_model_vertex(
+            vertices[i],
+            primary,
+            &joint_view_transforms,
+            projection,
+        )
+    });
+
+    let mut actual = [ProjectedVertex::default(); SEAM_VERTS];
+    let mut all_in_front = true;
+    let mut all_inside = true;
+    let (mut min_x, mut max_x, mut min_y, mut max_y) = (i16::MAX, i16::MIN, i16::MAX, i16::MIN);
+    scene::load_rotation(&primary.rotation);
+    scene::load_translation(primary.translation);
+    let indices: [u16; SEAM_VERTS] = core::array::from_fn(|i| i as u16);
+    for chunk in indices.chunks(BLENDED_VERTEX_CHUNK) {
+        flush_blended_model_vertex_chunk(
+            chunk,
+            &vertices,
+            primary,
+            &joint_view_transforms,
+            projection,
+            near_z,
+            &mut actual,
+            &mut all_in_front,
+            &mut all_inside,
+            &mut min_x,
+            &mut max_x,
+            &mut min_y,
+            &mut max_y,
+        );
+    }
+
+    assert_eq!(actual, expected);
+    // The seam fixture sits in front of the near plane and on-screen, so
+    // the fold flags must agree with a direct per-vertex evaluation.
+    for &projected in &expected {
+        assert!(projected_model_vertex_in_front(projected, near_z));
+    }
+    assert!(all_in_front);
+    assert!(all_inside);
+}
