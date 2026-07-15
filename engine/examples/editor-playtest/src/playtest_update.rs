@@ -188,10 +188,13 @@ impl Playtest {
         self.player_health_max = PLAYER_MAX_HEALTH;
         self.swing_hit_mask = 0;
         self.sync_door_box_props();
+        // Start the camera behind the AUTHORED spawn facing so the
+        // SpawnPoint's editor rotation is honoured in Play (movement is
+        // camera-relative, so a fixed start yaw silently overrode it).
         self.camera.snap_to_player_with_yaw(
             self.camera_target(None, false),
             self.camera_config(),
-            CAMERA_START_YAW,
+            Angle::from_q12(spawn.yaw as u16),
         );
         self.render_camera = world_camera_from_position_focus(
             PROJECTION,
