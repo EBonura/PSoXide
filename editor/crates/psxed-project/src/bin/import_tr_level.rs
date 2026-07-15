@@ -82,7 +82,7 @@ fn copy_import_texture(output: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn print_report(report: &TrImportReport, output: &PathBuf) {
+fn print_report(report: &TrImportReport, output: &Path) {
     println!(
         "[import-tr-level] Rooms: {}  Portals: {}  Sectors: {}",
         report.rooms, report.portals, report.sectors

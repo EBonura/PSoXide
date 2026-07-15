@@ -33,9 +33,7 @@ impl EditorWorkspace {
         &mut self,
         modifiers: egui::Modifiers,
     ) -> Option<(Selection, Vec<Selection>)> {
-        let Some(target) = self.selection.hovered_primitive else {
-            return None;
-        };
+        let target = self.selection.hovered_primitive?;
         let already_selected = self.primitive_is_selected(target)
             || self.floor_face_sector_is_selected(target).is_some();
         if !already_selected {

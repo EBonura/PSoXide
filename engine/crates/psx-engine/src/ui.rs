@@ -1550,5 +1550,5 @@ fn font_tint(color: [u8; 3]) -> (u8, u8, u8) {
 }
 
 fn psx_texture_modulation_color(component: u8) -> u8 {
-    ((component as u16 + 1) / 2) as u8
+    (component as u16).div_ceil(2) as u8
 }

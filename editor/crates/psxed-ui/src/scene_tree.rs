@@ -1445,9 +1445,7 @@ pub(crate) fn ui_label_for_drag(row: &UiNodeRow) -> String {
 }
 
 pub(crate) fn scene_tree_kind_label(kind: &'static str) -> &'static str {
-    match kind {
-        other => other,
-    }
+    kind
 }
 
 /// Structural scene-graph entries for global "Add Child" menus.
@@ -1733,9 +1731,7 @@ pub(crate) const fn component_is_valid_for_host(
     if !component.is_component() {
         return false;
     }
-    match component {
-        _ => matches!(host_kind, NodeKind::Entity),
-    }
+    matches!(host_kind, NodeKind::Entity)
 }
 
 pub(crate) fn component_can_be_added(candidate: &NodeKind, existing: &[&NodeKind]) -> bool {

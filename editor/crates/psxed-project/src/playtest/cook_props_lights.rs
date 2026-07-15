@@ -915,29 +915,29 @@ pub(crate) fn bake_static_box_prop_lights(
             .collect();
         let ambient = room.cooked.ambient_color;
         let face_vertices = box_prop_static_face_vertices(prop);
-        for face in 0..psx_level::BOX_PROP_FACE_COUNT {
+        for (face, verts) in face_vertices.iter().enumerate() {
             let base = prop.tint_rgb[face];
             prop.baked_vertex_rgb[face] = [
                 rgb_tuple(bake_static_vertex_rgb(
-                    face_vertices[face][0],
+                    verts[0],
                     base,
                     ambient,
                     &room_lights,
                 )),
                 rgb_tuple(bake_static_vertex_rgb(
-                    face_vertices[face][1],
+                    verts[1],
                     base,
                     ambient,
                     &room_lights,
                 )),
                 rgb_tuple(bake_static_vertex_rgb(
-                    face_vertices[face][2],
+                    verts[2],
                     base,
                     ambient,
                     &room_lights,
                 )),
                 rgb_tuple(bake_static_vertex_rgb(
-                    face_vertices[face][3],
+                    verts[3],
                     base,
                     ambient,
                     &room_lights,
