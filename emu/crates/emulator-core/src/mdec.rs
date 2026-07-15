@@ -3,8 +3,8 @@
 //! Games use the MDEC to play back pre-compressed FMV (cutscenes,
 //! intros, attract-mode loops). The pipeline is:
 //!
-//! 1. CPU uploads quantization tables via DMA0 with command 0x4.
-//! 2. CPU issues a decode command (0x3) to `0x1F80_1820` with block count.
+//! 1. CPU uploads quantization tables via DMA0 with command 2.
+//! 2. CPU issues a decode command (1) to `0x1F80_1820` with block count.
 //! 3. CPU streams N×M run-length-encoded coefficient halfwords into
 //!    the MDEC via DMA0 (CPU→MDEC, channel 0).
 //! 4. MDEC dequantizes, IDCT's, and YUV→RGB converts each macroblock
@@ -54,15 +54,17 @@ pub const MDEC_CMD_DATA: u32 = 0x1F80_1820;
 pub const MDEC_CTRL_STAT: u32 = 0x1F80_1824;
 
 // Command field in `reg0`:
-//   31..28 : command code (3 = decode, 4 = load quantization, 6 = cosine table)
-//   27     : (cmd 3 only) output bpp (1 = 15-bit, 0 = 24-bit)
-//   25     : (cmd 3 only) set bit 15 on 15-bit output pixels
+//   31..29 : command code (1 = decode, 2 = load quantization, 3 = cosine table)
+//   28..27 : (decode only) output depth (4/8/24/15-bit)
+//   26     : (decode only) signed output
+//   25     : (decode only) set bit 15 on 15-bit output pixels
 //   15..0  : parameter count (words) for the command
 
-/// Command 0x3 STP flag -- sets the 15-bit mask bit (bit 15 of each RGB word).
+const MDEC0_DEPTH_SHIFT: u32 = 27;
+const MDEC0_DEPTH_MASK: u32 = 0x3;
+const MDEC0_SIGNED: u32 = 0x0400_0000;
+/// Decode-command STP flag -- sets bit 15 of each 15-bit RGB output pixel.
 const MDEC0_STP: u32 = 0x0200_0000;
-/// Command 0x3 RGB24 flag name follows Redux: set selects 15-bit, clear selects 24-bit.
-const MDEC0_RGB24: u32 = 0x0800_0000;
 
 // Status register (`reg1`) bits:
 //   31    : Data-Out FIFO Empty
@@ -113,6 +115,14 @@ const MDEC_END_OF_DATA: u16 = 0xFE00;
 const DSIZE: usize = 8;
 const DSIZE2: usize = DSIZE * DSIZE;
 const BLOCKS_PER_MACROBLOCK: usize = 6;
+
+const fn zero_u8_block() -> [u8; DSIZE2] {
+    [0; DSIZE2]
+}
+
+const fn zero_i16_block() -> [i16; DSIZE2] {
+    [0; DSIZE2]
+}
 
 // ===============================================================
 //  Scaling constants (AAN IDCT).
@@ -166,6 +176,14 @@ const ZIG_ZAG_SCAN: [usize; DSIZE2] = [
     52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63,
 ];
 
+/// Row-major form used by the fixed-point matrix IDCT. Keeping the transpose
+/// here (rather than after the two rounded passes) is observable at ±1 LSB.
+const ZIG_ZAG_MATRIX: [usize; DSIZE2] = [
+    0, 8, 1, 2, 9, 16, 24, 17, 10, 3, 4, 11, 18, 25, 32, 40, 33, 26, 19, 12, 5, 6, 13, 20, 27, 34,
+    41, 48, 56, 49, 42, 35, 28, 21, 14, 7, 15, 22, 29, 36, 43, 50, 57, 58, 51, 44, 37, 30, 23, 31,
+    38, 45, 52, 59, 60, 53, 46, 39, 47, 54, 61, 62, 55, 63,
+];
+
 /// AAN prescaled forward-DCT coefficients. Multiplied into the
 /// quantization tables during upload so the IDCT can be table-driven.
 const AAN_SCALES: [i32; DSIZE2] = [
@@ -212,19 +230,28 @@ pub struct Mdec {
     /// Chrominance quantization table.
     #[serde(with = "crate::serde_big_array::array")]
     iq_uv: [i32; DSIZE2],
+    /// Raw silicon quantization tables used by the matrix-IDCT path.
+    #[serde(default = "zero_u8_block", with = "crate::serde_big_array::array")]
+    raw_iq_y: [u8; DSIZE2],
+    #[serde(default = "zero_u8_block", with = "crate::serde_big_array::array")]
+    raw_iq_uv: [u8; DSIZE2],
+    /// Host-provided 8x8 IDCT matrix, transposed on upload as in hardware.
+    #[serde(default = "zero_i16_block", with = "crate::serde_big_array::array")]
+    scale_table: [i16; DSIZE2],
     /// Buffered RLE halfwords received via DMA0 since the decode
     /// command was issued. Drained during decode_macroblocks.
     rl_queue: std::collections::VecDeque<u16>,
-    /// Decoded pixel output queue -- ready for DMA1 to pull. Format
-    /// depends on `MDEC0_RGB24`: 16-bit halfwords for 15-bit output,
-    /// packed 8-bit bytes for 24-bit output. We always queue as
-    /// halfwords and let the read path reinterpret.
+    /// Decoded pixel output queue -- ready for DMA1 or data-port reads.
+    /// All four output depths are packed into little-endian halfwords.
     out_queue: std::collections::VecDeque<u16>,
     /// Current decode command's RLE word count (from the low 16 bits
     /// of reg0). We stop decoding when we've consumed that many
     /// parameter words.
     #[allow(dead_code)]
     expected_param_words: u32,
+    /// Parameter words already accepted for the current direct-FIFO upload.
+    #[serde(default)]
+    direct_param_words_received: u32,
     /// Diagnostic: raw command words seen since reset. Games might
     /// ship thousands; we just count so probes can tell "MDEC was
     /// spoken to" vs "MDEC was ignored". Excluded from save states.
@@ -262,9 +289,13 @@ impl Mdec {
             reg1: status_idle(),
             iq_y: [0; DSIZE2],
             iq_uv: [0; DSIZE2],
+            raw_iq_y: [0; DSIZE2],
+            raw_iq_uv: [0; DSIZE2],
+            scale_table: [0; DSIZE2],
             rl_queue: std::collections::VecDeque::new(),
             out_queue: std::collections::VecDeque::new(),
             expected_param_words: 0,
+            direct_param_words_received: 0,
             commands_seen: 0,
             params_seen: 0,
             dma_in_enabled: false,
@@ -282,7 +313,16 @@ impl Mdec {
     /// Read a 32-bit word from an MDEC register.
     pub fn read32(&mut self, phys: u32) -> u32 {
         match phys & 0x1F80_1FFF {
-            MDEC_CMD_DATA => self.reg0,
+            MDEC_CMD_DATA => {
+                if self.out_queue.len() < 2 {
+                    self.decode_until_output_words(1);
+                }
+                if self.out_queue.is_empty() {
+                    self.reg0
+                } else {
+                    self.pop_output_word()
+                }
+            }
             MDEC_CTRL_STAT => self.status_word(),
             _ => 0,
         }
@@ -305,7 +345,7 @@ impl Mdec {
         self.reg1 |= MDEC1_STP;
 
         match self.command_code() {
-            0x3 => {
+            1 => {
                 self.reg1 |= MDEC1_BUSY;
                 self.rl_queue.clear();
                 self.out_queue.clear();
@@ -313,14 +353,25 @@ impl Mdec {
                     self.rl_queue.push_back(w as u16);
                     self.rl_queue.push_back((w >> 16) as u16);
                 }
+                // Silicon exposes data-out readiness before software starts
+                // DMA1. Public ps1-tests polls bit 31 between DMA0 and DMA1.
+                self.decode_until_output_words(1);
                 if !self.can_continue_decode() {
-                    self.reg1 &= !(MDEC1_BUSY | MDEC1_STP);
+                    if self.out_queue.is_empty() {
+                        self.reg1 &= !MDEC1_BUSY;
+                    }
                 }
             }
-            0x4 => {
+            2 => {
                 self.absorb_quant_upload(words);
+                self.expected_param_words = 0;
+                self.reg1 &= !MDEC1_BUSY;
             }
-            0x6 => {}
+            3 => {
+                self.absorb_scale_upload(words);
+                self.expected_param_words = 0;
+                self.reg1 &= !MDEC1_BUSY;
+            }
             _ => {}
         }
     }
@@ -342,7 +393,8 @@ impl Mdec {
     /// `true` exactly when channel 0 may be completed alongside
     /// channel 1.
     pub fn complete_dma_out(&mut self) -> bool {
-        if self.command_code() == 0x3
+        if self.command_code() == 1
+            && self.reg1 & MDEC1_BUSY != 0
             && self.out_queue.is_empty()
             && (self.rl_queue.is_empty()
                 || self
@@ -407,7 +459,7 @@ impl Mdec {
     /// True when a decode DMA0 upload should remain busy until DMA1
     /// drains the corresponding output frame.
     pub fn decode_dma0_waits_for_output(&self) -> bool {
-        self.command_code() == 0x3 && self.reg1 & MDEC1_BUSY != 0
+        self.command_code() == 1 && self.reg1 & MDEC1_BUSY != 0
     }
 
     /// Recent raw command-register writes, newest at the end.
@@ -431,33 +483,102 @@ impl Mdec {
     // ============================================================
 
     fn status_word(&self) -> u32 {
-        self.reg1
+        let mut status = self.reg1
+            & !(MDEC1_EMPTY
+                | MDEC1_DMA_IN_REQ
+                | MDEC1_DMA_OUT_REQ
+                | MDEC1_OUTPUT_DEPTH_MASK
+                | MDEC1_OUTPUT_SIGNED
+                | MDEC1_OUTPUT_BIT15);
+
+        if self.out_queue.is_empty() {
+            status |= MDEC1_EMPTY;
+        }
+        if self.dma_in_enabled && self.reg1 & MDEC1_BUSY != 0 {
+            status |= MDEC1_DMA_IN_REQ;
+        }
+        if self.dma_out_enabled && !self.out_queue.is_empty() {
+            status |= MDEC1_DMA_OUT_REQ;
+        }
+        if self.command_code() == 1 {
+            status |= self.output_depth() << 25;
+            if self.reg0 & MDEC0_SIGNED != 0 {
+                status |= MDEC1_OUTPUT_SIGNED;
+            }
+            if self.reg0 & MDEC0_STP != 0 {
+                status |= MDEC1_OUTPUT_BIT15;
+            }
+        }
+        status
     }
 
     fn command_write(&mut self, value: u32) {
+        if self.expected_param_words != 0 {
+            self.params_seen = self.params_seen.saturating_add(1);
+            match self.command_code() {
+                1 => {
+                    self.rl_queue.push_back(value as u16);
+                    self.rl_queue.push_back((value >> 16) as u16);
+                }
+                2 => self.absorb_quant_word_at(self.direct_param_words_received, value),
+                3 => self.absorb_scale_word_at(self.direct_param_words_received, value),
+                _ => {}
+            }
+            self.direct_param_words_received += 1;
+            self.expected_param_words -= 1;
+            if self.expected_param_words == 0 {
+                if self.command_code() == 1 {
+                    self.decode_until_output_words(1);
+                    if self.out_queue.is_empty() && !self.can_continue_decode() {
+                        self.reg1 &= !MDEC1_BUSY;
+                    }
+                } else {
+                    self.reg1 &= !MDEC1_BUSY;
+                }
+            }
+            return;
+        }
+
         self.reg0 = value;
         self.commands_seen = self.commands_seen.saturating_add(1);
         if self.command_history.len() == 64 {
             self.command_history.remove(0);
         }
         self.command_history.push(value);
-
-        // Redux's MDEC write0 only latches reg0; status-format bits
-        // are not mirrored here.
+        self.direct_param_words_received = 0;
+        self.expected_param_words = match self.command_code() {
+            1 => value & 0xFFFF,
+            2 => {
+                if value & 1 != 0 {
+                    32
+                } else {
+                    16
+                }
+            }
+            3 => 32,
+            _ => 0,
+        };
+        if self.expected_param_words != 0 {
+            self.reg1 |= MDEC1_BUSY;
+            if self.command_code() == 1 {
+                self.rl_queue.clear();
+                self.out_queue.clear();
+            }
+        }
     }
 
     #[allow(dead_code)]
     fn command_write_direct_fifo_legacy(&mut self, value: u32) {
         // Detect whether this word is a new command or parameter data.
-        // Top nibble of a real command is always one of the defined
-        // codes (3, 4, 6). If we're awaiting parameter data, treat the
+        // Bits 31..29 of a real command contain one of the defined
+        // codes (1, 2, 3). If we're awaiting parameter data, treat the
         // word as two RLE halfwords instead.
         if self.reg1 & MDEC1_BUSY == 0 {
             // Not decoding -- this might be a fresh command or
             // quantization-table payload depending on the command.
-            let cmd = (value >> 28) & 0xF;
+            let cmd = (value >> 29) & 0x7;
             match cmd {
-                0x3 => {
+                1 => {
                     // Decode macroblocks. Parameter count is in the
                     // low 16 bits (number of parameter *words*).
                     self.reg0 = value;
@@ -470,14 +591,11 @@ impl Mdec {
                     } else {
                         self.reg1 &= !MDEC1_STP;
                     }
-                    if value & MDEC0_RGB24 != 0 {
-                        self.reg1 |= MDEC1_RGB24;
-                    } else {
-                        self.reg1 &= !MDEC1_RGB24;
-                    }
+                    self.reg1 = (self.reg1 & !MDEC1_OUTPUT_DEPTH_MASK)
+                        | (((value >> MDEC0_DEPTH_SHIFT) & MDEC0_DEPTH_MASK) << 25);
                     self.rl_queue.clear();
                 }
-                0x4 => {
+                2 => {
                     // Quantization table upload -- 128 bytes (64 Y + 64 UV)
                     // streamed in as 32 parameter words (4 bytes per word).
                     self.reg0 = value;
@@ -486,7 +604,7 @@ impl Mdec {
                     self.commands_seen = self.commands_seen.saturating_add(1);
                     self.rl_queue.clear();
                 }
-                0x6 => {
+                3 => {
                     // Cosine table upload -- 32 parameter words.
                     // The MDEC doesn't actually use a host-supplied
                     // cosine table; we accept the upload and discard.
@@ -509,7 +627,7 @@ impl Mdec {
         self.params_seen = self.params_seen.saturating_add(1);
         let cmd = self.command_code();
         match cmd {
-            0x3 => {
+            1 => {
                 // RLE coefficient data -- two halfwords per word.
                 self.rl_queue.push_back(value as u16);
                 self.rl_queue.push_back((value >> 16) as u16);
@@ -524,10 +642,11 @@ impl Mdec {
                     }
                 }
             }
-            0x4 => {
+            2 => {
                 // Quantization table upload -- 64 Y bytes then 64 UV bytes.
                 // 32 words × 4 bytes = 128 bytes total.
-                self.absorb_quant_word(value);
+                let total_words = if self.reg0 & 1 != 0 { 32 } else { 16 };
+                self.absorb_quant_word_at(total_words - self.expected_param_words, value);
                 if self.expected_param_words > 0 {
                     self.expected_param_words -= 1;
                     if self.expected_param_words == 0 {
@@ -535,7 +654,7 @@ impl Mdec {
                     }
                 }
             }
-            0x6 if self.expected_param_words > 0 => {
+            3 if self.expected_param_words > 0 => {
                 // Cosine table -- discard.
                 self.expected_param_words -= 1;
                 if self.expected_param_words == 0 {
@@ -556,6 +675,7 @@ impl Mdec {
             self.dma_in_enabled = false;
             self.dma_out_enabled = false;
             self.expected_param_words = 0;
+            self.direct_param_words_received = 0;
             self.rl_queue.clear();
             self.out_queue.clear();
             return;
@@ -574,21 +694,17 @@ impl Mdec {
     /// is 32 words: first 16 words (64 bytes) for iq_y, next 16 for
     /// iq_uv. We decode each byte, multiply by the AAN prescale, and
     /// slot into the iq table at the zigzag position.
-    fn absorb_quant_word(&mut self, value: u32) {
+    fn absorb_quant_word_at(&mut self, word_index: u32, value: u32) {
         let bytes = value.to_le_bytes();
-        // The byte index within the 128-byte quant upload depends on
-        // how many params we've seen so far. params_seen is just a
-        // counter; we track quant progress separately via
-        // `expected_param_words` going from 32 → 0.
-        let total_expected = self.reg0 & 0xFFFF;
-        let words_delivered = (total_expected - self.expected_param_words) as usize;
         for (byte_index, &b) in bytes.iter().enumerate() {
-            let pos = words_delivered * 4 + byte_index;
+            let pos = word_index as usize * 4 + byte_index;
             if pos < 64 {
+                self.raw_iq_y[pos] = b;
                 self.iq_y[pos] =
                     (b as i32) * scaler(AAN_SCALES[ZIG_ZAG_SCAN[pos]], AAN_PRESCALE_SCALE);
             } else if pos < 128 {
                 let uv_pos = pos - 64;
+                self.raw_iq_uv[uv_pos] = b;
                 self.iq_uv[uv_pos] =
                     (b as i32) * scaler(AAN_SCALES[ZIG_ZAG_SCAN[uv_pos]], AAN_PRESCALE_SCALE);
             }
@@ -601,10 +717,12 @@ impl Mdec {
             for (byte_index, &b) in bytes.iter().enumerate() {
                 let pos = word_index * 4 + byte_index;
                 if pos < 64 {
+                    self.raw_iq_y[pos] = b;
                     self.iq_y[pos] =
                         (b as i32) * scaler(AAN_SCALES[ZIG_ZAG_SCAN[pos]], AAN_PRESCALE_SCALE);
                 } else if pos < 128 {
                     let uv_pos = pos - 64;
+                    self.raw_iq_uv[uv_pos] = b;
                     self.iq_uv[uv_pos] =
                         (b as i32) * scaler(AAN_SCALES[ZIG_ZAG_SCAN[uv_pos]], AAN_PRESCALE_SCALE);
                 }
@@ -612,9 +730,31 @@ impl Mdec {
         }
     }
 
+    fn absorb_scale_word_at(&mut self, word_index: u32, value: u32) {
+        for (lane, sample) in [value as u16, (value >> 16) as u16].into_iter().enumerate() {
+            let source = word_index as usize * 2 + lane;
+            if source < DSIZE2 {
+                let x = source / DSIZE;
+                let y = source % DSIZE;
+                self.scale_table[y * DSIZE + x] = (sample as i16) >> 3;
+            }
+        }
+    }
+
+    fn absorb_scale_upload(&mut self, words: &[u32]) {
+        for (index, &value) in words.iter().take(32).enumerate() {
+            self.absorb_scale_word_at(index as u32, value);
+        }
+    }
+
     #[inline]
     fn command_code(&self) -> u32 {
-        (self.reg0 >> 28) & 0xF
+        (self.reg0 >> 29) & 0x7
+    }
+
+    #[inline]
+    fn output_depth(&self) -> u32 {
+        (self.reg0 >> MDEC0_DEPTH_SHIFT) & MDEC0_DEPTH_MASK
     }
 
     /// Decode enough macroblocks to make at least `min_words` 32-bit
@@ -631,12 +771,16 @@ impl Mdec {
     }
 
     fn can_continue_decode(&self) -> bool {
-        self.command_code() == 0x3 && self.reg1 & MDEC1_BUSY != 0 && !self.rl_queue.is_empty()
+        self.command_code() == 1 && self.reg1 & MDEC1_BUSY != 0 && !self.rl_queue.is_empty()
     }
 
-    /// Decode a single macroblock (6 blocks × 64 coefs → 16×16 pixels).
+    /// Decode one mono block or one six-block colour macroblock.
     /// Returns `true` on success, `false` if we ran out of data.
     fn decode_one_macroblock(&mut self) -> bool {
+        if self.output_depth() <= 1 {
+            return self.decode_one_mono_block();
+        }
+
         let mut blocks = [[0i32; DSIZE2]; BLOCKS_PER_MACROBLOCK];
         for (bi, block) in blocks.iter_mut().enumerate() {
             let iqtab = if bi < 2 { &self.iq_uv } else { &self.iq_y };
@@ -651,6 +795,50 @@ impl Mdec {
         true
     }
 
+    fn decode_one_mono_block(&mut self) -> bool {
+        let mut block = [0i16; DSIZE2];
+        if !decode_block_silicon(&mut self.rl_queue, &mut block, &self.raw_iq_y) {
+            return false;
+        }
+        idct_silicon(&self.scale_table, &mut block);
+
+        let add = if self.reg0 & MDEC0_SIGNED != 0 {
+            0
+        } else {
+            0x80
+        };
+        let mut mono = [0u8; DSIZE2];
+        for (dst, &sample) in mono.iter_mut().zip(block.iter()) {
+            // The signed modes expose the two's-complement low bits rather
+            // than saturating negative values to zero.
+            *dst = (sign_extend_9(i32::from(sample)).clamp(-128, 127) + add) as u8;
+        }
+
+        match self.output_depth() {
+            0 => {
+                for samples in mono.chunks_exact(4) {
+                    let nibble = |sample: u8| u16::from(((u16::from(sample) + 8) >> 4).min(15));
+                    self.out_queue.push_back(
+                        nibble(samples[0])
+                            | (nibble(samples[1]) << 4)
+                            | (nibble(samples[2]) << 8)
+                            | (nibble(samples[3]) << 12),
+                    );
+                }
+            }
+            1 => {
+                for samples in mono.chunks_exact(2) {
+                    self.out_queue
+                        .push_back(u16::from(samples[0]) | (u16::from(samples[1]) << 8));
+                }
+            }
+            _ => unreachable!(),
+        }
+
+        self.macroblocks_decoded = self.macroblocks_decoded.saturating_add(1);
+        true
+    }
+
     /// YUV→RGB conversion + output packing. Fills `out_queue` with
     /// either 15-bit RGB halfwords or 24-bit RGB byte triplets (still
     /// queued as halfwords for uniform storage).
@@ -660,7 +848,7 @@ impl Mdec {
         let cb = &blocks[1];
         let y_blocks: [&[i32; DSIZE2]; 4] = [&blocks[2], &blocks[3], &blocks[4], &blocks[5]];
 
-        let rgb24 = self.reg0 & MDEC0_RGB24 == 0; // 0 = 24-bit, 1 = 15-bit
+        let rgb24 = self.output_depth() == 2;
         let mask_bit_15 = self.reg0 & MDEC0_STP != 0;
 
         if rgb24 {
@@ -684,15 +872,100 @@ impl Mdec {
     }
 }
 
-/// Default MDEC status word. PCSX-Redux initializes and resets MDEC
-/// `reg1` to zero; no empty/DREQ bits are synthesized on read.
+/// Default MDEC status measured on real hardware: output FIFO empty and
+/// current-block field 4. The public I/O-width corpus observes this exact word
+/// after every control-port write that does not request a reset.
 const fn status_idle() -> u32 {
-    0
+    0x8004_0000
 }
 
 // ===============================================================
 //  Block-level decode: RLE → coefficients → IDCT.
 // ===============================================================
+
+/// Decode the fixed-point coefficient representation consumed by the PS1's
+/// uploaded IDCT matrix. This is used for mono output, where the public
+/// silicon corpus is sensitive to the hardware's intermediate rounding.
+fn decode_block_silicon(
+    rl: &mut std::collections::VecDeque<u16>,
+    block: &mut [i16; DSIZE2],
+    quant: &[u8; DSIZE2],
+) -> bool {
+    let head = loop {
+        match rl.pop_front() {
+            Some(MDEC_END_OF_DATA) => continue,
+            Some(value) => break value,
+            None => return false,
+        }
+    };
+
+    block.fill(0);
+    let q_scale = (head >> 10) & 0x3F;
+    let dc = rle_val(head);
+    let coefficient = if q_scale == 0 {
+        dc << 5
+    } else {
+        ((dc * i32::from(quant[0])) << 4)
+            + if dc < 0 {
+                8
+            } else if dc > 0 {
+                -8
+            } else {
+                0
+            }
+    };
+    block[ZIG_ZAG_MATRIX[0]] = coefficient.clamp(-0x4000, 0x3FFF) as i16;
+
+    let mut index = 0usize;
+    while index < DSIZE2 - 1 {
+        let value = match rl.pop_front() {
+            Some(value) => value,
+            None => return false,
+        };
+        index = index.saturating_add(rle_run(value) as usize + 1);
+        if index < DSIZE2 {
+            let ac = rle_val(value);
+            let scaled_quant = i32::from(q_scale) * i32::from(quant[index]);
+            let coefficient = if scaled_quant == 0 {
+                ac << 5
+            } else {
+                (((ac * scaled_quant) >> 3) << 4)
+                    + if ac < 0 {
+                        8
+                    } else if ac > 0 {
+                        -8
+                    } else {
+                        0
+                    }
+            };
+            block[ZIG_ZAG_MATRIX[index]] = coefficient.clamp(-0x4000, 0x3FFF) as i16;
+        }
+    }
+    true
+}
+
+fn idct_silicon(scale_table: &[i16; DSIZE2], block: &mut [i16; DSIZE2]) {
+    let mut temp = [0i16; DSIZE2];
+    for column in 0..DSIZE {
+        for x in 0..DSIZE {
+            let mut sum = 0i64;
+            for u in 0..DSIZE {
+                sum += i64::from(block[column * DSIZE + u]) * i64::from(scale_table[x * DSIZE + u]);
+            }
+            temp[x * DSIZE + column] = ((sum + 0x4000) >> 15) as i16;
+        }
+    }
+    for column in 0..DSIZE {
+        for x in 0..DSIZE {
+            let mut sum = 0i64;
+            for u in 0..DSIZE {
+                sum += i64::from(temp[column * DSIZE + u]) * i64::from(scale_table[x * DSIZE + u]);
+            }
+            let rounded = ((sum + 0x4000) >> 15) as i32;
+            block[column * DSIZE + x] = sign_extend_9(rounded).clamp(-128, 127) as i16;
+        }
+    }
+}
 
 /// Decode one 8×8 block's worth of RLE coefficients into `block`,
 /// applying dequantization via `iqtab` and the AAN IDCT. Returns
@@ -738,6 +1011,12 @@ fn decode_block(
         if pos > 7 {
             used_col |= 1 << (pos & 7);
         }
+        // Reaching the final zig-zag coefficient completes the block even
+        // without an FE00 marker. The public mono corpus uses this exact
+        // full-block encoding and silicon immediately exposes its output.
+        if k == DSIZE2 - 1 {
+            break;
+        }
     }
     if k == 0 {
         // Only DC coefficient -- fill the block uniformly.
@@ -761,6 +1040,11 @@ fn rle_val(v: u16) -> i32 {
     let bits = 10;
     let shift = 32 - bits;
     ((v as i32) << shift) >> shift
+}
+
+#[inline]
+fn sign_extend_9(value: i32) -> i32 {
+    (value << 23) >> 23
 }
 
 /// AAN-optimized 2D IDCT on an 8×8 block. Implements Redux's hybrid
@@ -1026,10 +1310,10 @@ mod tests {
     }
 
     #[test]
-    fn fresh_status_matches_redux_idle() {
+    fn fresh_status_matches_silicon_idle() {
         let mut m = Mdec::new();
         let stat = m.read32(MDEC_CTRL_STAT);
-        assert_eq!(stat, 0);
+        assert_eq!(stat, 0x8004_0000);
     }
 
     #[test]
@@ -1063,7 +1347,7 @@ mod tests {
     }
 
     #[test]
-    fn decode_dma_status_matches_redux_latched_bits() {
+    fn decode_dma_status_exposes_dynamic_requests_and_format() {
         let mut m = Mdec::new();
         m.write32(MDEC_CTRL_STAT, 0x6000_0000);
         m.write32(MDEC_CMD_DATA, 0x3200_0006);
@@ -1072,16 +1356,17 @@ mod tests {
         let stat = m.read32(MDEC_CTRL_STAT);
         assert_eq!(stat & MDEC1_BUSY, MDEC1_BUSY);
         assert_eq!(stat & MDEC1_STP, MDEC1_STP);
-        assert_eq!(stat & MDEC1_DMA_IN_REQ, 0);
-        assert_eq!(stat & MDEC1_DMA_OUT_REQ, 0);
-        assert_eq!(stat & MDEC1_OUTPUT_DEPTH_MASK, 0);
+        assert_eq!(stat & MDEC1_DMA_IN_REQ, MDEC1_DMA_IN_REQ);
+        assert_eq!(stat & MDEC1_DMA_OUT_REQ, MDEC1_DMA_OUT_REQ);
+        assert_eq!(stat & MDEC1_OUTPUT_DEPTH_MASK, 2 << 25);
+        assert_eq!(stat & MDEC1_EMPTY, 0);
     }
 
     #[test]
     fn data_write_tallies_commands_vs_parameters() {
         let mut m = Mdec::new();
         // Quant table upload command -- 32 param words expected.
-        m.write32(MDEC_CMD_DATA, 0x4000_0020);
+        m.write32(MDEC_CMD_DATA, 0x4000_0001);
         assert_eq!(m.commands_seen(), 1);
         // DMA0 carries the payload after the command register is latched.
         m.dma_write_in(&[0xDEAD_BEEF]);
@@ -1091,11 +1376,29 @@ mod tests {
     #[test]
     fn quant_upload_command_marks_busy_then_clears() {
         let mut m = Mdec::new();
-        // Command 4 (quant upload), 32 param words expected.
-        m.write32(MDEC_CMD_DATA, 0x4000_0020);
-        assert_eq!(m.read32(MDEC_CTRL_STAT) & MDEC1_BUSY, 0);
+        // Command 2 (colour quant upload), 32 parameter words expected.
+        m.write32(MDEC_CMD_DATA, 0x4000_0001);
+        assert_eq!(m.read32(MDEC_CTRL_STAT) & MDEC1_BUSY, MDEC1_BUSY);
         // Deliver 32 words through DMA0.
         m.dma_write_in(&[0; 32]);
+        assert_eq!(m.read32(MDEC_CTRL_STAT) & MDEC1_BUSY, 0);
+    }
+
+    #[test]
+    fn direct_fifo_quant_and_scale_uploads_complete() {
+        let mut m = Mdec::new();
+        m.write32(MDEC_CMD_DATA, 0x4000_0001);
+        for _ in 0..32 {
+            m.write32(MDEC_CMD_DATA, 0x1010_1010);
+        }
+        assert_eq!(m.read32(MDEC_CTRL_STAT) & MDEC1_BUSY, 0);
+        assert!(m.iq_y.iter().all(|&value| value != 0));
+        assert!(m.iq_uv.iter().all(|&value| value != 0));
+
+        m.write32(MDEC_CMD_DATA, 0x6000_0000);
+        for _ in 0..32 {
+            m.write32(MDEC_CMD_DATA, 0);
+        }
         assert_eq!(m.read32(MDEC_CTRL_STAT) & MDEC1_BUSY, 0);
     }
 
@@ -1104,20 +1407,21 @@ mod tests {
         let mut m = Mdec::new();
         // Upload identity quant tables so decode produces well-defined
         // (but all-zero) output.
-        m.write32(MDEC_CMD_DATA, 0x4000_0020);
+        m.write32(MDEC_CMD_DATA, 0x4000_0001);
         m.dma_write_in(&[0x01_01_01_01; 32]);
         // Issue decode command -- tiny parameter count.
         m.write32(MDEC_CMD_DATA, 0x3000_0001);
         // Feed a single word holding two END-of-data sentinels.
         let sentinel = MDEC_END_OF_DATA as u32;
         m.dma_write_in(&[sentinel | (sentinel << 16)]);
-        // Redux keeps decode DMA0 busy until DMA1 pulls/observes the
-        // output side, even for a sentinel-only stream.
-        assert_eq!(m.read32(MDEC_CTRL_STAT) & MDEC1_BUSY, MDEC1_BUSY);
+        // Padding-only input cannot produce a block, so the command
+        // returns to idle and the data-out FIFO remains empty.
+        assert_eq!(m.read32(MDEC_CTRL_STAT) & MDEC1_BUSY, 0);
+        assert_eq!(m.read32(MDEC_CTRL_STAT) & MDEC1_EMPTY, MDEC1_EMPTY);
         let mut out = [0u32; 1];
         m.dma_read_out(&mut out);
         assert_eq!(out[0], 0);
-        assert!(m.complete_dma_out());
+        assert!(!m.complete_dma_out());
         assert_eq!(m.read32(MDEC_CTRL_STAT) & MDEC1_BUSY, 0);
     }
 
@@ -1164,7 +1468,7 @@ mod tests {
     fn macroblocks_counter_increments_on_successful_decode() {
         let mut m = Mdec::new();
         // Identity quant tables.
-        m.write32(MDEC_CMD_DATA, 0x4000_0020);
+        m.write32(MDEC_CMD_DATA, 0x4000_0001);
         m.dma_write_in(&[0x01_01_01_01; 32]);
         // Six DC-only blocks make one black macroblock.
         m.write32(MDEC_CMD_DATA, 0x3000_0006);
@@ -1176,6 +1480,40 @@ mod tests {
         let mut out = [0u32; 1];
         m.dma_read_out(&mut out);
         assert_eq!(m.macroblocks_decoded(), 1);
+    }
+
+    #[test]
+    fn mono4_decode_packs_nibbles_and_announces_output_before_dma1() {
+        let mut m = Mdec::new();
+        m.write32(MDEC_CTRL_STAT, 0x6000_0000);
+        m.write32(MDEC_CMD_DATA, 0x4000_0001);
+        m.dma_write_in(&[0x0101_0101; 32]);
+
+        m.write32(MDEC_CMD_DATA, 0x2000_0001);
+        m.dma_write_in(&[0xFE00_0000]);
+
+        let status = m.read32(MDEC_CTRL_STAT);
+        assert_eq!(status & MDEC1_EMPTY, 0);
+        assert_eq!(status & MDEC1_DMA_OUT_REQ, MDEC1_DMA_OUT_REQ);
+        assert_eq!(status & MDEC1_OUTPUT_DEPTH_MASK, 0);
+        let mut output = [0u32; 8];
+        m.dma_read_out(&mut output);
+        assert_eq!(output, [0x8888_8888; 8]);
+    }
+
+    #[test]
+    fn mono8_decode_packs_bytes() {
+        let mut m = Mdec::new();
+        m.write32(MDEC_CMD_DATA, 0x4000_0001);
+        m.dma_write_in(&[0x0101_0101; 32]);
+
+        m.write32(MDEC_CMD_DATA, 0x2800_0001);
+        m.dma_write_in(&[0xFE00_0000]);
+
+        assert_eq!(m.read32(MDEC_CTRL_STAT) & MDEC1_OUTPUT_DEPTH_MASK, 1 << 25);
+        let mut output = [0u32; 16];
+        m.dma_read_out(&mut output);
+        assert_eq!(output, [0x8080_8080; 16]);
     }
 
     #[test]
@@ -1204,12 +1542,24 @@ mod tests {
     }
 
     #[test]
+    fn rle_block_completes_at_coefficient_63_without_end_marker() {
+        let mut encoded = vec![0x0400];
+        encoded.extend(std::iter::repeat_n(0u16, 63));
+        let mut rl = std::collections::VecDeque::from(encoded);
+        let mut block = [0i32; DSIZE2];
+        let iqtab = [1i32; DSIZE2];
+
+        assert!(decode_block(&mut rl, &mut block, &iqtab));
+        assert!(rl.is_empty());
+    }
+
+    #[test]
     fn state_reports_transitions() {
         let mut m = Mdec::new();
         assert_eq!(m.state(), MdecState::Idle);
         m.write32(MDEC_CMD_DATA, 0x3000_0006);
         m.dma_write_in(&[0xFE00_0000; 6]);
-        assert_eq!(m.state(), MdecState::AwaitingData);
+        assert_eq!(m.state(), MdecState::DecodeReady);
         let mut out = [0u32; 1];
         m.dma_read_out(&mut out);
         assert_eq!(m.state(), MdecState::DecodeReady);

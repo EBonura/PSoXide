@@ -10,12 +10,11 @@
 //! under GPL-2.0-or-later in part to honor this lineage; see `LICENSE`
 //! and `docs/license-audit.md`.
 
-/// One extra cycle bias applied to each instruction retirement.
+/// One issue cycle applied to each instruction retirement.
 ///
-/// Keeping this equal to Redux's `BIAS` is what makes the VBlank
-/// scheduler line up on the same instruction as Redux and preserves
-/// parity once it turns on.
-const BIAS: u32 = 2;
+/// The R3000A issues ordinary cached instructions at one cycle each. Memory
+/// and execution-unit stalls are charged separately by the CPU/bus model.
+const BIAS: u32 = 1;
 
 pub(super) fn cycle_cost(_instr: u32) -> u32 {
     BIAS

@@ -11,26 +11,27 @@
 
 // --- Video-timing constants ---
 //
-// Match Redux's `psxcounters.cc` math exactly so VBlank fires at the
-// same cycle -- and therefore at the same instruction -- on both sides.
+// Physical beam cadence, derived from PSX-SPX's measured video clocks per
+// scanline and the CPU/video-clock ratio. The old Redux-parity values divided
+// by nominal 60/50 Hz and made scanlines too short; real non-interlaced PS1
+// refresh is not exactly 60/50 Hz, which is directly visible to Timer 0/1.
 //
-//   HSync period   = psxClockSpeed / (FrameRate × HSyncTotal)
-//   NTSC: 33_868_800 / (60 × 263) = 2146 cycles/HSync,  564_398 cyc/frame
-//   PAL : 33_868_800 / (50 × 314) = 2157 cycles/HSync,  677_343 cyc/frame
+//   NTSC: about 3413 video clocks/line -> 2172 CPU clocks
+//   PAL : about 3406 video clocks/line -> 2167 CPU clocks
 //
 // `FIRST_VBLANK_CYCLE` is derived from the per-region VBlank-start
 // scanline × HSync; kept as NTSC default to preserve existing parity
 // tests. PAL builds call [`Bus::set_pal_mode`] before running, which
 // re-seeds the VBlank scheduler and updates the tick-rate knobs.
 
-pub(super) const HSYNC_CYCLES_NTSC: u64 = 2146;
+pub(super) const HSYNC_CYCLES_NTSC: u64 = 2172;
 #[allow(dead_code)]
 pub(super) const HSYNC_TOTAL_NTSC: u64 = 263;
 pub(super) const VBLANK_START_SCANLINE_NTSC: u64 = 243;
 pub(super) const FIRST_VBLANK_CYCLE_NTSC: u64 = HSYNC_CYCLES_NTSC * VBLANK_START_SCANLINE_NTSC;
 pub(super) const VBLANK_PERIOD_CYCLES_NTSC: u64 = HSYNC_CYCLES_NTSC * HSYNC_TOTAL_NTSC;
 
-pub(super) const HSYNC_CYCLES_PAL: u64 = 2157;
+pub(super) const HSYNC_CYCLES_PAL: u64 = 2167;
 #[allow(dead_code)]
 pub(super) const HSYNC_TOTAL_PAL: u64 = 314;
 pub(super) const VBLANK_START_SCANLINE_PAL: u64 = 256;

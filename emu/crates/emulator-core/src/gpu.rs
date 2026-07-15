@@ -108,6 +108,11 @@ pub struct Gpu {
     tex_page_x: u16,
     /// VRAM Y base of the current texture page (0 or 256).
     tex_page_y: u16,
+    /// GP1(09h) bit 0 gates the second texture-page Y address bit carried by
+    /// GP0(E1h)/polygon tpage bit 11. Retail consoles only populate the lower
+    /// 1 MiB, so an enabled upper-bank selection reads as absent VRAM.
+    /// Older documentation called this the "allow texture disable" latch.
+    vram_2mb_addressing_enabled: bool,
     /// Texture colour depth: 0 = 4bpp (CLUT), 1 = 8bpp (CLUT),
     /// 2 = 15bpp (direct).
     tex_depth: u8,
@@ -274,12 +279,15 @@ pub struct Gpu {
     #[serde(skip)]
     current_cmd_index: u32,
 
-    /// Cumulative diagnostic "pseudo-busy" credit for expensive
-    /// primitives. This deliberately does *not* affect GPUSTAT:
-    /// PCSX-Redux's soft GPU keeps command/DMA-ready bits set even
-    /// while software has just kicked a large copy/fill, and games
-    /// like a commercial title 2097 poll those bits during boot.
+    /// GPU execution backlog in CPU/bus cycles. Raster and VRAM
+    /// commands add silicon-calibrated work; elapsed bus cycles drain
+    /// it. While non-zero GPUSTAT's command/DMA-ready bits are clear,
+    /// so command submission is paced by the real GPU throughput.
     busy_credit: u64,
+    /// Remaining queue prefix through the most recently accepted
+    /// DMA-sourced command. CPU rendering leaves GPUSTAT.28 ready;
+    /// DMA rendering clears it until this prefix drains.
+    dma_busy_credit: u64,
 
     // --- Display area (GP1 0x05 / 0x06 / 0x07 / 0x08) ---
     /// VRAM X of the top-left pixel of the displayed framebuffer.
@@ -443,6 +451,7 @@ impl Gpu {
             vram_upload: None,
             tex_page_x: 0,
             tex_page_y: 0,
+            vram_2mb_addressing_enabled: false,
             tex_depth: 0,
             clut_cache: [0; 256],
             clut_cache_reg: u32::MAX,
@@ -472,6 +481,7 @@ impl Gpu {
             cmd_log_enabled: false,
             current_cmd_index: 0,
             busy_credit: 0,
+            dma_busy_credit: 0,
             display_start_x: 0,
             display_start_y: 0,
             display_width: 320,
@@ -843,7 +853,11 @@ impl Gpu {
     pub fn read32(&mut self, phys: u32) -> Option<u32> {
         match phys {
             GP0_ADDR => Some(self.read_gpuread()),
-            GP1_ADDR => Some(self.status.read(self.vram_download.is_some())),
+            GP1_ADDR => Some(self.status.read(
+                self.vram_download.is_some(),
+                !self.is_busy(),
+                !self.is_dma_busy(),
+            )),
             _ => None,
         }
     }
@@ -989,27 +1003,24 @@ impl Gpu {
         self.wire_pixels_prev = std::mem::take(&mut self.wire_pixels_current);
     }
 
-    /// Charge "busy credit" that clears the GPU's ready-bits until
-    /// it's spent. Called by the rasteriser after each expensive
-    /// primitive (VRAM-to-VRAM copy, full-screen fill) to expose
-    /// a realistic 0→1 transition on GPUSTAT bit 26 / 28 for games
-    /// that spin-wait on GPU idle before kicking the next DMA.
-    ///
-    /// Small primitives (triangles, lines, short rectangles) don't
-    /// charge any credit -- they're fast enough on real hardware
-    /// that software rarely polls ready between them, and charging
-    /// busy here would just add delays where none are needed.
+    /// Add CPU/bus-cycle work to the GPU execution backlog.
     pub fn charge_busy(&mut self, cost: u64) {
         self.busy_credit = self.busy_credit.saturating_add(cost);
     }
 
+    /// Add DMA-fed work and retain the queue prefix through it. Later CPU
+    /// commands can extend total busy time without extending DMA busy time.
+    fn charge_dma_busy(&mut self, cost: u64) {
+        self.busy_credit = self.busy_credit.saturating_add(cost);
+        self.dma_busy_credit = self.busy_credit;
+    }
+
     /// Drain busy credit over time. Called by the bus each tick
     /// so the busy flag settles back to "ready" as cycles advance.
-    /// One cycle of real time decays one unit of credit -- with
-    /// primitives charging in the tens of units, the ready flag
-    /// goes high again within a few hundred cycles.
+    /// One elapsed CPU/bus cycle decays one unit of credit.
     pub fn decay_busy(&mut self, cycles: u64) {
         self.busy_credit = self.busy_credit.saturating_sub(cycles);
+        self.dma_busy_credit = self.dma_busy_credit.saturating_sub(cycles);
     }
 
     /// Is the GPU currently "busy"? Used to gate GPUSTAT ready
@@ -1018,12 +1029,221 @@ impl Gpu {
         self.busy_credit > 0
     }
 
+    /// CPU stall applied when an architectural store targets GP0 while the
+    /// preceding command still occupies the input/execution path. Real MMIO
+    /// writes wait in hardware even though GPUSTAT.28 remains asserted for
+    /// CPU-sourced rendering; this is distinct from software polling bits.
+    pub(crate) fn cpu_gp0_write_stall(&self) -> u32 {
+        self.busy_credit.min(u64::from(u32::MAX)) as u32
+    }
+
+    fn is_dma_busy(&self) -> bool {
+        self.dma_busy_credit > 0
+    }
+
+    /// Estimate the command's GPU execution time in CPU/bus cycles.
+    ///
+    /// The coefficients come from the build-158 `gpu/bandwidth` silicon
+    /// capture. They are deliberately expressed as small rational numbers
+    /// rather than wall-clock milliseconds: Timer 1 observes HBlank while
+    /// the CPU polls GPUSTAT, so a cycle-domain backlog reproduces both the
+    /// benchmark and ordinary game synchronization.
+    fn gp0_packet_timing_cost(&self, op: u8) -> u64 {
+        let flat_cost = |pixels: u64, semi: bool| {
+            if semi {
+                scale_gpu_pixels(pixels, 51, 64)
+            } else {
+                scale_gpu_pixels(pixels, 135, 256)
+            }
+        };
+        let flat_poly_cost = |pixels: u64, semi: bool| {
+            if semi {
+                scale_gpu_pixels(pixels, 51, 64)
+            } else {
+                scale_gpu_pixels(pixels, 137, 256)
+            }
+        };
+        let textured_rect_cost = |pixels: u64| scale_gpu_pixels(pixels, 135, 128);
+        let textured_poly_cost = |pixels: u64| scale_gpu_pixels(pixels, 179, 64);
+
+        match op {
+            // GP0(02h) has a dedicated fast fill engine. Silicon moves a
+            // little over twelve pixels per CPU cycle for this path.
+            0x02 => {
+                let size = self.gp0_fifo[2];
+                let w = ((size & 0x3FF) + 0x0F) & !0x0F;
+                let h = (size >> 16) & 0x1FF;
+                scale_gpu_pixels(u64::from(w) * u64::from(h), 41, 512)
+            }
+            // VRAM-to-VRAM uses the slower internal read/modify/write path.
+            0x80..=0x9F => {
+                let size = self.gp0_fifo[3];
+                let raw_w = size & 0x3FF;
+                let raw_h = (size >> 16) & 0x1FF;
+                let w = if raw_w == 0 { 1024 } else { raw_w };
+                let h = if raw_h == 0 { 512 } else { raw_h };
+                scale_gpu_pixels(u64::from(w) * u64::from(h), 171, 128)
+            }
+            // Flat polygons.
+            0x20..=0x23 => {
+                let v = [
+                    self.decode_vertex(self.gp0_fifo[1]),
+                    self.decode_vertex(self.gp0_fifo[2]),
+                    self.decode_vertex(self.gp0_fifo[3]),
+                ];
+                flat_poly_cost(
+                    self.timing_polygon_pixels(&v),
+                    prim_is_semi_trans(self.gp0_fifo[0]),
+                )
+            }
+            0x28..=0x2B => {
+                let v0 = self.decode_vertex(self.gp0_fifo[1]);
+                let v1 = self.decode_vertex(self.gp0_fifo[2]);
+                let v2 = self.decode_vertex(self.gp0_fifo[3]);
+                let v3 = self.decode_vertex(self.gp0_fifo[4]);
+                let pixels = self.timing_polygon_pixels(&[v0, v1, v2])
+                    + self.timing_polygon_pixels(&[v1, v3, v2]);
+                flat_poly_cost(pixels, prim_is_semi_trans(self.gp0_fifo[0]))
+            }
+            // Gouraud polygons use the same write-side throughput as flat
+            // polygons in the current silicon corpus; interpolation setup is
+            // small compared with a large primitive.
+            0x30..=0x33 => {
+                let v = [
+                    self.decode_vertex(self.gp0_fifo[1]),
+                    self.decode_vertex(self.gp0_fifo[3]),
+                    self.decode_vertex(self.gp0_fifo[5]),
+                ];
+                flat_poly_cost(
+                    self.timing_polygon_pixels(&v),
+                    prim_is_semi_trans(self.gp0_fifo[0]),
+                )
+            }
+            0x38..=0x3B => {
+                let v0 = self.decode_vertex(self.gp0_fifo[1]);
+                let v1 = self.decode_vertex(self.gp0_fifo[3]);
+                let v2 = self.decode_vertex(self.gp0_fifo[5]);
+                let v3 = self.decode_vertex(self.gp0_fifo[7]);
+                let pixels = self.timing_polygon_pixels(&[v0, v1, v2])
+                    + self.timing_polygon_pixels(&[v1, v3, v2]);
+                flat_poly_cost(pixels, prim_is_semi_trans(self.gp0_fifo[0]))
+            }
+            // Textured flat and Gouraud polygons. Texture fetch and UV
+            // interpolation dominate, and the silicon benchmark shows the
+            // same throughput with its semi-transparency flag set.
+            0x24..=0x27 => {
+                let v = [
+                    self.decode_vertex(self.gp0_fifo[1]),
+                    self.decode_vertex(self.gp0_fifo[3]),
+                    self.decode_vertex(self.gp0_fifo[5]),
+                ];
+                textured_poly_cost(self.timing_polygon_pixels(&v))
+            }
+            0x2C..=0x2F => {
+                let v0 = self.decode_vertex(self.gp0_fifo[1]);
+                let v1 = self.decode_vertex(self.gp0_fifo[3]);
+                let v2 = self.decode_vertex(self.gp0_fifo[5]);
+                let v3 = self.decode_vertex(self.gp0_fifo[7]);
+                let pixels = self.timing_polygon_pixels(&[v0, v1, v2])
+                    + self.timing_polygon_pixels(&[v1, v3, v2]);
+                textured_poly_cost(pixels)
+            }
+            0x34..=0x37 => {
+                let v = [
+                    self.decode_vertex(self.gp0_fifo[1]),
+                    self.decode_vertex(self.gp0_fifo[4]),
+                    self.decode_vertex(self.gp0_fifo[7]),
+                ];
+                textured_poly_cost(self.timing_polygon_pixels(&v))
+            }
+            0x3C..=0x3F => {
+                let v0 = self.decode_vertex(self.gp0_fifo[1]);
+                let v1 = self.decode_vertex(self.gp0_fifo[4]);
+                let v2 = self.decode_vertex(self.gp0_fifo[7]);
+                let v3 = self.decode_vertex(self.gp0_fifo[10]);
+                let pixels = self.timing_polygon_pixels(&[v0, v1, v2])
+                    + self.timing_polygon_pixels(&[v1, v3, v2]);
+                textured_poly_cost(pixels)
+            }
+            // Flat rectangles.
+            0x60..=0x63 => {
+                let size = self.gp0_fifo[2];
+                flat_cost(
+                    self.timing_rect_pixels(
+                        self.gp0_fifo[1],
+                        (size & 0xFFFF) as i32,
+                        (size >> 16) as i32,
+                    ),
+                    prim_is_semi_trans(self.gp0_fifo[0]),
+                )
+            }
+            0x68..=0x6B => flat_cost(
+                self.timing_rect_pixels(self.gp0_fifo[1], 1, 1),
+                prim_is_semi_trans(self.gp0_fifo[0]),
+            ),
+            0x70..=0x73 => flat_cost(
+                self.timing_rect_pixels(self.gp0_fifo[1], 8, 8),
+                prim_is_semi_trans(self.gp0_fifo[0]),
+            ),
+            0x78..=0x7B => flat_cost(
+                self.timing_rect_pixels(self.gp0_fifo[1], 16, 16),
+                prim_is_semi_trans(self.gp0_fifo[0]),
+            ),
+            // Textured rectangles. Like textured polygons, the benchmark's
+            // semi flag does not change throughput when sampled texels are
+            // opaque, so the texture path owns the coefficient.
+            0x64..=0x67 => {
+                let size = self.gp0_fifo[3];
+                textured_rect_cost(self.timing_rect_pixels(
+                    self.gp0_fifo[1],
+                    (size & 0xFFFF) as i32,
+                    (size >> 16) as i32,
+                ))
+            }
+            0x6C..=0x6F => textured_rect_cost(self.timing_rect_pixels(self.gp0_fifo[1], 1, 1)),
+            0x74..=0x77 => textured_rect_cost(self.timing_rect_pixels(self.gp0_fifo[1], 8, 8)),
+            0x7C..=0x7F => textured_rect_cost(self.timing_rect_pixels(self.gp0_fifo[1], 16, 16)),
+            _ => 0,
+        }
+    }
+
+    fn timing_rect_pixels(&self, pos: u32, w: i32, h: i32) -> u64 {
+        if w <= 0 || h <= 0 {
+            return 0;
+        }
+        let x = sign_extend_11((pos & 0x7FF) as i32) + self.draw_offset_x;
+        let y = sign_extend_11(((pos >> 16) & 0x7FF) as i32) + self.draw_offset_y;
+        let left = x.max(self.draw_area_left as i32).max(0);
+        let top = y.max(self.draw_area_top as i32).max(0);
+        let right = (x + w)
+            .min(self.draw_area_right as i32 + 1)
+            .min(VRAM_WIDTH as i32);
+        let bottom = (y + h)
+            .min(self.draw_area_bottom as i32 + 1)
+            .min(VRAM_HEIGHT as i32);
+        if left >= right || top >= bottom {
+            0
+        } else {
+            (right - left) as u64 * (bottom - top) as u64
+        }
+    }
+
+    fn timing_polygon_pixels(&self, vertices: &[(i32, i32)]) -> u64 {
+        clipped_polygon_area(
+            vertices,
+            self.draw_area_left as i32,
+            self.draw_area_top as i32,
+            self.draw_area_right as i32 + 1,
+            self.draw_area_bottom as i32 + 1,
+        )
+    }
+
     /// Dispatch an MMIO write inside the GPU window. Returns `true` if
     /// the address belonged to the GPU.
     pub fn write32(&mut self, phys: u32, value: u32) -> bool {
         match phys {
             GP0_ADDR => {
-                self.gp0_write(value);
+                self.gp0_write(value, false);
                 true
             }
             GP1_ADDR => {
@@ -1148,6 +1368,17 @@ impl Gpu {
             // via the explicit GP1 0x05 / 0x06 / 0x07 commands
             // later, so reset-persisting them matches hardware.
             0x00 => {
+                self.reset_command_buffer();
+                self.busy_credit = 0;
+                self.dma_busy_credit = 0;
+                self.tex_page_x = 0;
+                self.tex_page_y = 0;
+                self.tex_depth = 0;
+                self.tex_blend_mode = BlendMode::Average;
+                self.dither_enabled = false;
+                self.tex_rect_flip_x = false;
+                self.tex_rect_flip_y = false;
+                self.vram_2mb_addressing_enabled = false;
                 self.display_start_x = 0;
                 self.display_start_y = 0;
                 self.display_width = 320;
@@ -1176,6 +1407,11 @@ impl Gpu {
                 self.drawing_offset_raw = 0;
                 self.gpuread_latch = 0x400;
             }
+            // GP1 0x01 -- Reset command buffer. This aborts a partial GP0
+            // packet, polyline, or image transfer without resetting display
+            // state. DMA/chopping conformance tests rely on it after a block
+            // shape transfers fewer pixels than the A0h rectangle requested.
+            0x01 => self.reset_command_buffer(),
             // GP1 0x05 -- display area start (top-left corner in VRAM).
             //   bits 9:0  = X (pixels)
             //   bits 18:10 = Y (pixels)
@@ -1231,8 +1467,22 @@ impl Gpu {
                 self.display_24bpp = value & (1 << 4) != 0;
                 self.display_configured = true;
             }
+            // GP1 0x09 -- gate the upper VRAM Y-address bit used by E1/tpage
+            // bit 11. The public ps1-tests corpus historically names this
+            // "allow texture disable"; later silicon research identified it
+            // as the 2 MiB VRAM address enable on v2 GPUs.
+            0x09 => self.vram_2mb_addressing_enabled = value & 1 != 0,
             _ => {}
         }
+    }
+
+    fn reset_command_buffer(&mut self) {
+        self.gp0_fifo.clear();
+        self.gp0_expected = 0;
+        self.vram_upload = None;
+        self.vram_download = None;
+        self.polyline = None;
+        self.polyline_cmd_log_index = None;
     }
 
     /// Current dot-clock divisor: system clocks per pixel-clock tick.
@@ -1278,12 +1528,26 @@ impl Gpu {
     /// channel 2 can ship words through the same path CPU-direct writes
     /// take.
     pub fn gp0_push(&mut self, word: u32) {
-        self.gp0_write(word);
+        self.gp0_write(word, false);
+    }
+
+    /// DMA-channel-2 version of [`Gpu::gp0_push`]. Packet assembly and
+    /// rendering are identical, but completed draw work also drives the
+    /// silicon-observed GPUSTAT.28 transition.
+    pub(crate) fn gp0_push_dma(&mut self, word: u32) {
+        self.gp0_write(word, true);
+    }
+
+    /// Whether GP0 is currently accepting packed pixel words for an A0h
+    /// CPU-to-VRAM transfer. DMA channel 2 uses this to distinguish image
+    /// uploads (paced by GPU DMA requests) from command-list traffic.
+    pub(crate) fn vram_upload_active(&self) -> bool {
+        self.vram_upload.is_some()
     }
 
     /// Feed one 32-bit word to the GP0 packet assembler. If this word
     /// completes a packet, the packet is executed and the FIFO clears.
-    fn gp0_write(&mut self, word: u32) {
+    fn gp0_write(&mut self, word: u32, from_dma: bool) {
         self.gp0_write_count += 1;
 
         // CPU→VRAM transfer consumes pixel words ahead of the packet
@@ -1312,7 +1576,7 @@ impl Gpu {
         }
         self.gp0_fifo.push(word);
         if self.gp0_fifo.len() == self.gp0_expected {
-            self.execute_gp0_packet();
+            self.execute_gp0_packet(from_dma);
             self.gp0_fifo.clear();
             self.gp0_expected = 0;
         }
@@ -1338,6 +1602,13 @@ impl Gpu {
             });
         }
         match op {
+            // GP0 0x01 -- Clear texture cache. Real silicon invalidates the
+            // cached CLUT as well: the next textured primitive must reload
+            // palette data even when it reuses the same CLUT word.
+            0x01 => {
+                self.clut_cache_reg = u32::MAX;
+                self.clut_cache_8bit = false;
+            }
             // GP0 0x1F -- request GPU IRQ1. Rare in games, but BIOS and
             // hardware test suites can observe both GPUSTAT.24 and I_STAT.1.
             0x1F => {
@@ -1380,7 +1651,8 @@ impl Gpu {
             //   bits 7-8: texture page colour depth
             //   bit  9:   dither 24→15
             //   bit  10:  drawing to display area
-            //   bit  11:  texture disable (requires GP1 09h unlock)
+            //   bit  11:  texture-page Y bit 1 (requires GP1 09h enable;
+            //             surfaced as GPUSTAT bit 15)
             //   bit  12:  textured rectangle X flip
             //   bit  13:  textured rectangle Y flip
             // These map 1:1 to GPUSTAT bits 0..=10 (plus rect-flip
@@ -1388,14 +1660,21 @@ impl Gpu {
             0xE1 => {
                 self.tex_page_x = ((word & 0x0F) as u16) * 64;
                 self.tex_page_y = if (word >> 4) & 1 != 0 { 256 } else { 0 };
+                let upper_y = self.vram_2mb_addressing_enabled && (word >> 11) & 1 != 0;
+                if upper_y {
+                    self.tex_page_y += 512;
+                }
                 self.tex_depth = ((word >> 7) & 0x3) as u8;
                 self.tex_blend_mode = BlendMode::from_tpage_bits(word >> 5);
                 self.dither_enabled = (word >> 9) & 1 != 0;
                 self.tex_rect_flip_x = (word >> 12) & 1 != 0;
                 self.tex_rect_flip_y = (word >> 13) & 1 != 0;
-                // GPUSTAT bits 0..=10 come from E1h bits 0..=10.
+                // GPUSTAT bits 0..=10 come from E1h bits 0..=10. E1 bit 11
+                // is exposed at GPUSTAT.15 only when GP1(09h) allows it.
                 let stat_bits = word & 0x07FF;
-                self.status.raw = (self.status.raw & !0x07FF) | stat_bits;
+                self.status.raw = (self.status.raw & !(0x07FF | 0x8000))
+                    | stat_bits
+                    | if upper_y { 0x8000 } else { 0 };
             }
             // GP0 0xE6 -- mask-bit setting.
             //   bit 0 = `mask_set_on_draw`: force bit 15 of every
@@ -1440,8 +1719,18 @@ impl Gpu {
 
     /// Execute a multi-word packet that has just been fully assembled
     /// in `gp0_fifo`. Dispatches on the opcode in word 0.
-    fn execute_gp0_packet(&mut self) {
+    fn execute_gp0_packet(&mut self, from_dma: bool) {
         let op = (self.gp0_fifo[0] >> 24) & 0xFF;
+        let pixel_cost = self.gp0_packet_timing_cost(op as u8);
+        // The raster engine also has a command-level setup latency. Across
+        // the bandwidth corpus, 400 repetitions consistently finish about
+        // 60 HBlanks early without this term (roughly 320 CPU cycles per
+        // command), independent of primitive size or texture mode.
+        let timing_cost = if pixel_cost == 0 {
+            0
+        } else {
+            pixel_cost.saturating_add(320)
+        };
         self.gp0_opcode_hist[op as usize] = self.gp0_opcode_hist[op as usize].saturating_add(1);
         // If the pixel tracer is armed, stamp this packet into the
         // command log *before* dispatching -- `plot_pixel` uses
@@ -1465,15 +1754,15 @@ impl Gpu {
             0x20..=0x23 => self.draw_monochrome_tri(),
             0x28..=0x2B => self.draw_monochrome_quad(),
             // Single monochrome line -- 3 words.
-            0x40..=0x43 => self.draw_line_mono_single(),
+            0x40..=0x47 => self.draw_line_mono_single(),
             // Polyline monochrome start -- 3 words. After this packet
             // the FIFO enters a streaming mode that accepts vertex
             // words until the 0x55555555 / 0x50005000 terminator.
-            0x48..=0x4B => self.draw_line_mono_start_polyline(),
+            0x48..=0x4F => self.draw_line_mono_start_polyline(),
             // Single shaded line -- 4 words.
-            0x50..=0x53 => self.draw_line_shaded_single(),
+            0x50..=0x57 => self.draw_line_shaded_single(),
             // Polyline shaded start -- 4 words.
-            0x58..=0x5B => self.draw_line_shaded_start_polyline(),
+            0x58..=0x5F => self.draw_line_shaded_start_polyline(),
             // Gouraud-shaded triangle / quad -- per-vertex colour
             // interpolated across the primitive via barycentrics.
             0x30..=0x33 => self.draw_shaded_tri(),
@@ -1511,6 +1800,11 @@ impl Gpu {
             // VRAM→VRAM copy -- source rect blitted to dest rect.
             0x80..=0x9F => self.vram_to_vram_copy(),
             _ => {}
+        }
+        if from_dma {
+            self.charge_dma_busy(timing_cost);
+        } else {
+            self.charge_busy(timing_cost);
         }
     }
 
@@ -1557,11 +1851,6 @@ impl Gpu {
                 self.vram.set_pixel(px, py, pixel);
             }
         }
-        // Charge busy: VRAM↔VRAM copies cost one cycle per pixel
-        // on hardware; games may poll ready right after kicking.
-        // Use ~1 cycle/pixel so bit 26 clears for the duration of
-        // the copy as software-visible time advances.
-        self.charge_busy((w as u64) * (h as u64));
     }
 
     // --- Primitive rasterization ---
@@ -1805,16 +2094,25 @@ impl Gpu {
 
         let flip_x = self.tex_rect_flip_x;
         let flip_y = self.tex_rect_flip_y;
-        let last_col = (w - 1) as u16;
-        let last_row = (h - 1) as u16;
         for py in top..=bottom {
             for px in left..=right {
                 let dx = (px - x) as u16;
                 let dy = (py - y) as u16;
-                let u_off = if flip_x { last_col - dx } else { dx };
-                let v_off = if flip_y { last_row - dy } else { dy };
-                let tex_u = u0.wrapping_add(u_off);
-                let tex_v = v0.wrapping_add(v_off);
+                // Silicon's rectangle flip bits reverse the 8-bit texture
+                // counters around the command's starting UV; they do not
+                // mirror around the far edge of the rectangle. X carries a
+                // one-texel bias (u0+1, u0, u0-1...), while Y starts at v0
+                // and decrements (v0, v0-1...).
+                let tex_u = if flip_x {
+                    u0.wrapping_add(1).wrapping_sub(dx)
+                } else {
+                    u0.wrapping_add(dx)
+                };
+                let tex_v = if flip_y {
+                    v0.wrapping_sub(dy)
+                } else {
+                    v0.wrapping_add(dy)
+                };
                 if let Some(texel) = self.sample_texture(tex_u, tex_v) {
                     let shaded = modulate_tint(texel, tint.0, tint.1, tint.2);
                     let mode = if semi_trans && (texel & 0x8000) != 0 {
@@ -1893,6 +2191,12 @@ impl Gpu {
         let u = (u & !mask_x) | (off_x & mask_x);
         let v = (v & !mask_y) | (off_y & mask_y);
 
+        // PSoXide models a retail 1 MiB VRAM. GP1(09h)+tpage bit 11 selects
+        // the unpopulated upper bank on that hardware, so texture reads do
+        // not mirror into the lower 512 lines.
+        if self.tex_page_y >= VRAM_HEIGHT as u16 {
+            return None;
+        }
         let tpy = self.tex_page_y.wrapping_add(v);
         let texel = match self.tex_depth {
             0 => {
@@ -2281,14 +2585,27 @@ impl Gpu {
             (top_b, bottom_b, top_a, bottom_a)
         };
 
-        let left_u0 = (left_top.0 as i64) << 16;
-        let left_v0 = (left_top.1 as i64) << 16;
-        let right_u0 = (right_top.0 as i64) << 16;
-        let right_v0 = (right_top.1 as i64) << 16;
-        let delta_left_u = (((left_bottom.0 as i64) << 16) - left_u0) / height as i64;
-        let delta_left_v = (((left_bottom.1 as i64) << 16) - left_v0) / height as i64;
-        let delta_right_u = (((right_bottom.0 as i64) << 16) - right_u0) / height as i64;
-        let delta_right_v = (((right_bottom.1 as i64) << 16) - right_v0) / height as i64;
+        // The PS1 attribute DDA has 12 fractional bits, truncates each
+        // per-pixel gradient to that precision, and seeds attributes at
+        // the pixel centre (+0.5). This is observable even on a 1-pixel
+        // tall quad: interpolating U=0..1 across 100 pixels changes texel
+        // at x=52 because floor(4096/100)=40 and ceil(2048/40)=52.
+        // Keeping Q16 here (or using an exact rational) produces a visibly
+        // different transition and fails the silicon uv-interpolation ROM.
+        const ATTR_SHIFT: i64 = 12;
+        const ATTR_HALF: i64 = 1 << (ATTR_SHIFT - 1);
+        let left_u0 = ((left_top.0 as i64) << ATTR_SHIFT) + ATTR_HALF;
+        let left_v0 = ((left_top.1 as i64) << ATTR_SHIFT) + ATTR_HALF;
+        let right_u0 = ((right_top.0 as i64) << ATTR_SHIFT) + ATTR_HALF;
+        let right_v0 = ((right_top.1 as i64) << ATTR_SHIFT) + ATTR_HALF;
+        let delta_left_u =
+            ((left_bottom.0 as i64 - left_top.0 as i64) << ATTR_SHIFT) / height as i64;
+        let delta_left_v =
+            ((left_bottom.1 as i64 - left_top.1 as i64) << ATTR_SHIFT) / height as i64;
+        let delta_right_u =
+            ((right_bottom.0 as i64 - right_top.0 as i64) << ATTR_SHIFT) / height as i64;
+        let delta_right_v =
+            ((right_bottom.1 as i64 - right_top.1 as i64) << ATTR_SHIFT) / height as i64;
 
         for py in y_start..=y_end {
             let row = (py - top) as i64;
@@ -2304,8 +2621,8 @@ impl Gpu {
                 pos_v += skip * delta_v;
             }
             for px in x_start..=x_end {
-                let u = (pos_u >> 16) as u16;
-                let v = (pos_v >> 16) as u16;
+                let u = (pos_u >> ATTR_SHIFT) as u16;
+                let v = (pos_v >> ATTR_SHIFT) as u16;
                 if let Some(texel) = self.sample_texture(u, v) {
                     let shaded = if dither {
                         modulate_tint_dithered(texel, tint.0, tint.1, tint.2, px, py)
@@ -2415,31 +2732,27 @@ impl Gpu {
     /// Apply the tpage bits embedded in a textured-primitive UV word
     /// (they override the draw-mode tpage for this primitive onward).
     ///
-    /// Mirrors Redux's poly-path behaviour (`gpu.cc:347/396`):
-    /// before calling `texturePage`, the drawPoly handler OR-s bit 9
-    /// of the incoming tpage with the current `m_ditherMode`. That
-    /// gives a primitive the power to *enable* dither but not to
-    /// disable it -- in effect, dither is sticky across primitives
-    /// until an explicit GP0 0xE1 turns it off. Then `texturePage`
-    /// copies bits 0..=10 of the (possibly OR-fixed) tpage into
-    /// `m_statusRet`.
+    /// The real-silicon `gpu/gp0-e1` corpus establishes that polygon tpage
+    /// attributes update draw-mode bits 0..=8 and bit 11, while bits 9..=10
+    /// (dither and draw-to-display) remain exactly as set by GP0(E1h).
     ///
     /// Missing this sync surfaced at parity step 60,041,097 as a
     /// GPUSTAT load that differed in the low byte: our GPUSTAT
     /// kept reflecting the last E1's tpage-X even after a textured
     /// polygon's embedded tpage re-pointed it.
     fn apply_primitive_tpage(&mut self, uv_word: u32) {
-        let mut tpage = (uv_word >> 16) & 0xFFFF;
-        if self.dither_enabled {
-            tpage |= 0x200;
-        }
+        let tpage = (uv_word >> 16) & 0xFFFF;
         self.tex_page_x = ((tpage & 0x0F) as u16) * 64;
         self.tex_page_y = if (tpage >> 4) & 1 != 0 { 256 } else { 0 };
+        let upper_y = self.vram_2mb_addressing_enabled && (tpage >> 11) & 1 != 0;
+        if upper_y {
+            self.tex_page_y += 512;
+        }
         self.tex_depth = ((tpage >> 7) & 0x3) as u8;
         self.tex_blend_mode = BlendMode::from_tpage_bits(tpage >> 5);
-        self.dither_enabled = (tpage >> 9) & 1 != 0;
-        let stat_bits = tpage & 0x07FF;
-        self.status.raw = (self.status.raw & !0x07FF) | stat_bits;
+        let stat_bits = tpage & 0x01FF;
+        self.status.raw =
+            (self.status.raw & !(0x01FF | 0x8000)) | stat_bits | if upper_y { 0x8000 } else { 0 };
     }
 
     /// Plot a single 15bpp pixel at `(x, y)`. When `mode == Opaque`
@@ -2621,7 +2934,7 @@ impl Gpu {
 
     // --- Lines (GP0 0x40..=0x5F) ---
 
-    /// GP0 0x40..=0x43 -- single monochrome line. Packet: `[cmd+color, v0, v1]`.
+    /// GP0 0x40..=0x47 -- single monochrome line. Packet: `[cmd+color, v0, v1]`.
     fn draw_line_mono_single(&mut self) {
         let cmd = self.gp0_fifo[0];
         let rgb24 = cmd & 0x00FF_FFFF;
@@ -2641,7 +2954,7 @@ impl Gpu {
         }
     }
 
-    /// GP0 0x50..=0x53 -- single Gouraud-shaded line. Packet:
+    /// GP0 0x50..=0x57 -- single Gouraud-shaded line. Packet:
     /// `[cmd+c0, v0, c1, v1]` -- each endpoint carries its own colour
     /// word.
     fn draw_line_shaded_single(&mut self) {
@@ -2654,7 +2967,7 @@ impl Gpu {
         self.rasterize_line_shaded(v0, v1, c0, c1, mode);
     }
 
-    /// GP0 0x48..=0x4B -- start a monochrome polyline. The initial
+    /// GP0 0x48..=0x4F -- start a monochrome polyline. The initial
     /// packet has the same shape as a single line (cmd+color, v0,
     /// v1); after executing it we switch to receive mode.
     fn draw_line_mono_start_polyline(&mut self) {
@@ -2674,6 +2987,7 @@ impl Gpu {
         // the next segment.
         self.polyline = Some(PolylineState::Mono {
             color,
+            rgb24,
             mode,
             last_vertex: v1,
         });
@@ -2684,7 +2998,7 @@ impl Gpu {
         };
     }
 
-    /// GP0 0x58..=0x5B -- start a Gouraud polyline. Initial packet
+    /// GP0 0x58..=0x5F -- start a Gouraud polyline. Initial packet
     /// is `[cmd+c0, v0, c1, v1]`; after the first segment we
     /// enter receive mode waiting for alternating (color, vertex)
     /// pairs.
@@ -2738,14 +3052,20 @@ impl Gpu {
         match self.polyline.as_mut().unwrap() {
             PolylineState::Mono {
                 color,
+                rgb24,
                 mode,
                 last_vertex,
             } => {
                 let c = *color;
+                let rgb = *rgb24;
                 let m = *mode;
                 let v0 = *last_vertex;
                 let v1 = self.decode_vertex(word);
-                self.rasterize_line(v0, v1, c, c, m, false);
+                if self.dither_enabled {
+                    self.rasterize_line_shaded(v0, v1, rgb, rgb, m);
+                } else {
+                    self.rasterize_line(v0, v1, c, c, m, false);
+                }
                 if let Some(PolylineState::Mono { last_vertex, .. }) = self.polyline.as_mut() {
                     *last_vertex = v1;
                 }
@@ -2783,10 +3103,10 @@ impl Gpu {
         }
     }
 
-    /// Rasterize a monochrome line using Redux's four-slope Bresenham
-    /// walkers. The tie-breaks matter: `hello-gte`'s wireframe cube
-    /// lands on many half-step diagonals, and the generic symmetric
-    /// Bresenham variant lights a different pixel set.
+    /// Rasterize a monochrome line with the PS1's 32.32 coordinate DDA.
+    /// Its half-pixel seed, tiny negative bias, rounded coordinate
+    /// gradients, and 11-bit position truncation are all visible in the
+    /// public silicon line corpus.
     ///
     /// `_interpolate` is reserved for future shaded mode but kept
     /// here so the signature is stable.
@@ -2799,101 +3119,9 @@ impl Gpu {
         mode: BlendMode,
         _interpolate: bool,
     ) {
-        let (mut x0, mut y0) = v0;
-        let (mut x1, mut y1) = v1;
-        let mut dx = x1 - x0;
-        let mut dy = y1 - y0;
-
-        if dx == 0 {
-            if dy == 0 {
-                return;
-            }
-            if dy < 0 {
-                std::mem::swap(&mut y0, &mut y1);
-            }
-            for y in y0..=y1 {
-                self.plot_line_pixel(x0, y, c0, mode);
-            }
-            return;
-        }
-
-        if dy == 0 {
-            if dx < 0 {
-                std::mem::swap(&mut x0, &mut x1);
-            }
-            for x in x0..=x1 {
-                self.plot_line_pixel(x, y0, c0, mode);
-            }
-            return;
-        }
-
-        if dx < 0 {
-            std::mem::swap(&mut x0, &mut x1);
-            std::mem::swap(&mut y0, &mut y1);
-            dx = x1 - x0;
-            dy = y1 - y0;
-        }
-
-        let (mut x, mut y) = (x0, y0);
-        self.plot_line_pixel(x, y, c0, mode);
-        if dy > 0 {
-            if dy > dx {
-                let mut d = 2 * dx - dy;
-                while y < y1 {
-                    if d <= 0 {
-                        d += 2 * dx;
-                        y += 1;
-                    } else {
-                        d += 2 * (dx - dy);
-                        x += 1;
-                        y += 1;
-                    }
-                    self.plot_line_pixel(x, y, c0, mode);
-                }
-            } else {
-                let mut d = 2 * dy - dx;
-                while x < x1 {
-                    if d <= 0 {
-                        d += 2 * dy;
-                        x += 1;
-                    } else {
-                        d += 2 * (dy - dx);
-                        x += 1;
-                        y += 1;
-                    }
-                    self.plot_line_pixel(x, y, c0, mode);
-                }
-            }
-        } else {
-            let ndy = -dy;
-            if ndy > dx {
-                let mut d = 2 * dx - ndy;
-                while y > y1 {
-                    if d <= 0 {
-                        d += 2 * dx;
-                        y -= 1;
-                    } else {
-                        d += 2 * (dx - ndy);
-                        x += 1;
-                        y -= 1;
-                    }
-                    self.plot_line_pixel(x, y, c0, mode);
-                }
-            } else {
-                let mut d = 2 * ndy - dx;
-                while x < x1 {
-                    if d <= 0 {
-                        d += 2 * ndy;
-                        x += 1;
-                    } else {
-                        d += 2 * (ndy - dx);
-                        x += 1;
-                        y -= 1;
-                    }
-                    self.plot_line_pixel(x, y, c0, mode);
-                }
-            }
-        }
+        for_each_line_pixel(v0, v1, |x, y, _step, _steps, _swapped| {
+            self.plot_line_pixel(x, y, c0, mode);
+        });
     }
 
     fn plot_line_pixel(&mut self, x: i32, y: i32, colour: u16, mode: BlendMode) {
@@ -2922,11 +3150,9 @@ impl Gpu {
         self.wire_pixels_current.push((x, y));
     }
 
-    /// Rasterize a Gouraud-shaded line -- interpolates RGB between
-    /// `c0` and `c1` linearly in screen space. Uses the same
-    /// Bresenham walk as the mono path; the colour parameter is
-    /// re-evaluated each step from a normalised distance-along-
-    /// line metric.
+    /// Rasterize a Gouraud-shaded line. Coordinates use the same 32.32
+    /// silicon DDA as monochrome lines; colours use a separately
+    /// truncated Q12 gradient with a +0.5 seed.
     fn rasterize_line_shaded(
         &mut self,
         v0: (i32, i32),
@@ -2935,31 +3161,20 @@ impl Gpu {
         c1: u32,
         mode: BlendMode,
     ) {
-        let (mut x, mut y) = v0;
-        let (x1, y1) = v1;
-        let dx_abs = (x1 - x).abs();
-        let dy_abs = (y1 - y).abs();
-        let steps = dx_abs.max(dy_abs).max(1);
-        let r0 = (c0 & 0xFF) as i32;
-        let g0 = ((c0 >> 8) & 0xFF) as i32;
-        let b0 = ((c0 >> 16) & 0xFF) as i32;
-        let r1 = (c1 & 0xFF) as i32;
-        let g1 = ((c1 >> 8) & 0xFF) as i32;
-        let b1 = ((c1 >> 16) & 0xFF) as i32;
-        let dx = (x1 - x).abs();
-        let dy = -(y1 - y).abs();
-        let sx: i32 = if x < x1 { 1 } else { -1 };
-        let sy: i32 = if y < y1 { 1 } else { -1 };
-        let mut err = dx + dy;
         let (min_x, max_x) = (self.draw_area_left as i32, self.draw_area_right as i32);
         let (min_y, max_y) = (self.draw_area_top as i32, self.draw_area_bottom as i32);
-        let mut step = 0i32;
-        loop {
+        for_each_line_pixel(v0, v1, |x, y, step, steps, swapped| {
             if (min_x..=max_x).contains(&x) && (min_y..=max_y).contains(&y) {
-                // Linear interpolate each channel.
-                let r = r0 + ((r1 - r0) * step) / steps;
-                let g = g0 + ((g1 - g0) * step) / steps;
-                let b = b0 + ((b1 - b0) * step) / steps;
+                let (start, end) = if swapped { (c1, c0) } else { (c0, c1) };
+                let channel = |shift: u32| {
+                    let a = ((start >> shift) & 0xFF) as i32;
+                    let b = ((end >> shift) & 0xFF) as i32;
+                    let value = (a << 12) + (1 << 11) + (((b - a) << 12) / steps) * step;
+                    value >> 12
+                };
+                let r = channel(0);
+                let g = channel(8);
+                let b = channel(16);
                 let colour = if self.dither_enabled {
                     dither_rgb(r, g, b, x, y)
                 } else {
@@ -2975,20 +3190,7 @@ impl Gpu {
                     self.plot_pixel(x as u16, y as u16, colour, mode);
                 }
             }
-            if x == x1 && y == y1 {
-                break;
-            }
-            let e2 = 2 * err;
-            if e2 >= dy {
-                err += dy;
-                x += sx;
-            }
-            if e2 <= dx {
-                err += dx;
-                y += sy;
-            }
-            step += 1;
-        }
+        });
     }
 
     // --- CPU→VRAM transfer (GP0 0xA0) ---
@@ -3134,8 +3336,165 @@ impl Gpu {
                 self.vram.set_pixel(px as u16, py as u16, color15);
             }
         }
-        // Fill rect costs ~0.5 cycles / pixel on hardware.
-        self.charge_busy(((w as u64) * (h as u64)) / 2);
+    }
+}
+
+fn scale_gpu_pixels(pixels: u64, numerator: u64, denominator: u64) -> u64 {
+    pixels
+        .saturating_mul(numerator)
+        .saturating_add(denominator - 1)
+        / denominator
+}
+
+/// Clip a convex primitive to the drawing rectangle and return its area in
+/// pixels. Coordinates are Q16.16 throughout so command timing remains fully
+/// deterministic across hosts while still handling partially off-screen
+/// triangles (the bandwidth corpus deliberately exercises 1/4 and 1/2 clips).
+fn clipped_polygon_area(
+    vertices: &[(i32, i32)],
+    left: i32,
+    top: i32,
+    right_exclusive: i32,
+    bottom_exclusive: i32,
+) -> u64 {
+    const FP: i64 = 1 << 16;
+    let left = i64::from(left.max(0)) * FP;
+    let top = i64::from(top.max(0)) * FP;
+    let right = i64::from(right_exclusive.min(VRAM_WIDTH as i32)) * FP;
+    let bottom = i64::from(bottom_exclusive.min(VRAM_HEIGHT as i32)) * FP;
+    if left >= right || top >= bottom || vertices.len() < 3 {
+        return 0;
+    }
+
+    let mut polygon: Vec<(i64, i64)> = vertices
+        .iter()
+        .map(|&(x, y)| (i64::from(x) * FP, i64::from(y) * FP))
+        .collect();
+    polygon = clip_timing_polygon(&polygon, true, left, true);
+    polygon = clip_timing_polygon(&polygon, true, right, false);
+    polygon = clip_timing_polygon(&polygon, false, top, true);
+    polygon = clip_timing_polygon(&polygon, false, bottom, false);
+    if polygon.len() < 3 {
+        return 0;
+    }
+
+    let mut twice_area = 0i128;
+    for i in 0..polygon.len() {
+        let (x0, y0) = polygon[i];
+        let (x1, y1) = polygon[(i + 1) % polygon.len()];
+        twice_area += i128::from(x0) * i128::from(y1) - i128::from(x1) * i128::from(y0);
+    }
+    // `twice_area` is Q32.32 and contains twice the geometric area.
+    // Add half a pixel before the shift so small fractional clips round
+    // instead of systematically under-billing.
+    ((twice_area.unsigned_abs() + (1u128 << 32)) >> 33) as u64
+}
+
+fn clip_timing_polygon(
+    polygon: &[(i64, i64)],
+    x_axis: bool,
+    bound: i64,
+    keep_greater: bool,
+) -> Vec<(i64, i64)> {
+    if polygon.is_empty() {
+        return Vec::new();
+    }
+    let coord = |p: (i64, i64)| if x_axis { p.0 } else { p.1 };
+    let inside = |p: (i64, i64)| {
+        if keep_greater {
+            coord(p) >= bound
+        } else {
+            coord(p) <= bound
+        }
+    };
+    let intersect = |a: (i64, i64), b: (i64, i64)| {
+        let ac = coord(a);
+        let bc = coord(b);
+        let den = bc - ac;
+        if den == 0 {
+            return a;
+        }
+        let num = bound - ac;
+        let lerp = |av: i64, bv: i64| {
+            av + ((i128::from(bv - av) * i128::from(num)) / i128::from(den)) as i64
+        };
+        if x_axis {
+            (bound, lerp(a.1, b.1))
+        } else {
+            (lerp(a.0, b.0), bound)
+        }
+    };
+
+    let mut out = Vec::with_capacity(polygon.len() + 1);
+    let mut previous = polygon[polygon.len() - 1];
+    let mut previous_inside = inside(previous);
+    for &current in polygon {
+        let current_inside = inside(current);
+        if current_inside != previous_inside {
+            out.push(intersect(previous, current));
+        }
+        if current_inside {
+            out.push(current);
+        }
+        previous = current;
+        previous_inside = current_inside;
+    }
+    out
+}
+
+/// Walk the PS1 line engine's coordinate DDA. The callback receives the
+/// silicon-truncated pixel coordinate, current step, total step count, and
+/// whether the hardware swapped endpoints to make X increase.
+fn for_each_line_pixel(
+    v0: (i32, i32),
+    v1: (i32, i32),
+    mut plot: impl FnMut(i32, i32, i32, i32, bool),
+) {
+    let truncate = |v: i32| sign_extend_11(v & 0x7FF);
+    let mut p0 = (truncate(v0.0), truncate(v0.1));
+    let mut p1 = (truncate(v1.0), truncate(v1.1));
+    let dx_abs = (p1.0 - p0.0).abs();
+    let dy_abs = (p1.1 - p0.1).abs();
+    if dx_abs >= 1024 || dy_abs >= 512 {
+        return;
+    }
+
+    let steps = dx_abs.max(dy_abs);
+    let mut swapped = false;
+    if p0.0 >= p1.0 && steps > 0 {
+        std::mem::swap(&mut p0, &mut p1);
+        swapped = true;
+    }
+
+    let divide_coord = |delta: i64| {
+        if steps == 0 {
+            return 0;
+        }
+        let rounding = if delta < 0 {
+            -i64::from(steps - 1)
+        } else if delta > 0 {
+            i64::from(steps - 1)
+        } else {
+            0
+        };
+        ((delta << 32) + rounding) / i64::from(steps)
+    };
+    let dx = divide_coord(i64::from(p1.0 - p0.0));
+    let dy = divide_coord(i64::from(p1.1 - p0.1));
+    let mut x = (i64::from(p0.0) << 32) + (1i64 << 31) - 1024;
+    let mut y = (i64::from(p0.1) << 32) + (1i64 << 31) - if dy < 0 { 1024 } else { 0 };
+
+    let color_steps = steps.max(1);
+    for step in 0..=steps {
+        plot(
+            truncate((x >> 32) as i32),
+            truncate((y >> 32) as i32),
+            step,
+            color_steps,
+            swapped,
+        );
+        x += dx;
+        y += dy;
     }
 }
 
@@ -3174,7 +3533,7 @@ fn trace_mono_rect_count() -> usize {
 }
 
 /// Transient state held between the start of a polyline primitive
-/// (GP0 0x48..=0x4B or 0x58..=0x5B) and its terminator word. Each
+/// (GP0 0x48..=0x4F or 0x58..=0x5F) and its terminator word. Each
 /// variant carries the most recently-rasterised endpoint so the
 /// next segment can chain from it.
 #[derive(Copy, Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -3182,6 +3541,9 @@ enum PolylineState {
     /// Monochrome polyline -- all segments use the same color.
     Mono {
         color: u16,
+        /// Original command colour retained because dithered continuation
+        /// segments operate on 24-bit channels, not the pre-quantized BGR15.
+        rgb24: u32,
         mode: BlendMode,
         last_vertex: (i32, i32),
     },

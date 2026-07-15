@@ -13,12 +13,14 @@
 //!
 //! ## Provenance
 //!
-//! Portions of this module are parity-matched against, and in places
-//! derived from, PCSX-Redux (<https://github.com/grumpycoders/pcsx-redux>),
-//! Copyright (C) the PCSX-Redux authors, GPL-2.0-or-later. Points of
-//! correspondence are flagged inline with `Redux` references. PSoXide is
-//! released under GPL-2.0-or-later in part to honor this lineage; see
-//! `LICENSE` and `docs/license-audit.md`.
+//! Register semantics and physical clock relationships follow nocash
+//! PSX-SPX's timer and GPU timing documentation, then are checked against
+//! JaCzekanski/ps1-tests build-158 silicon captures. Portions of the original
+//! implementation were parity-matched against, and in places derived from,
+//! PCSX-Redux (<https://github.com/grumpycoders/pcsx-redux>), Copyright (C)
+//! the PCSX-Redux authors, GPL-2.0-or-later. Points of correspondence are
+//! flagged inline. PSoXide is released under GPL-2.0-or-later in part to honor
+//! this lineage; see `LICENSE` and `docs/license-audit.md`.
 
 /// One of the three root counters. Fields are 16 bits on hardware but
 /// held as `u32` for uniform bus access -- upper bits read as 0.
@@ -41,6 +43,21 @@ pub struct Timer {
     pub last_reset_cycle: u64,
     /// Number of mode writes since reset. Diagnostic.
     pub mode_write_count: u64,
+    /// Sync-mode 3 latch: false until the first HBlank/VBlank edge after a
+    /// mode write, true once that edge releases the counter into free-run.
+    #[serde(default)]
+    sync_seen: bool,
+    /// Reset-on-target has one extra zero phase on silicon: after the target
+    /// is visible the next source tick resets to zero, and the following tick
+    /// still reads zero before counting resumes at one.
+    #[serde(default)]
+    target_reset_hold: bool,
+    /// CPU clocks for which the counter is held unchanged. Mode/current-value
+    /// writes hold it for two clocks, and a read of this counter latches it
+    /// across its own MMIO wait clocks. The hold happens before source-clock
+    /// division: it must not suppress two whole HBlank ticks or two `/8` ticks.
+    #[serde(default)]
+    counter_hold_cycles: u8,
 }
 
 // Mode-register bit layout (nocash PSX-SPX, section "Timers").
@@ -51,8 +68,7 @@ const MODE_SYNC_ENABLE: u32 = 1 << 0;
 /// - Timer 0 (HBlank-synced): 0=pause in HBlank, 1=reset at HBlank,
 ///   2=reset+pause, 3=pause until HBlank then free-run.
 /// - Timer 1 (VBlank-synced): same four modes.
-/// - Timer 2: modes 0/3 free-run, modes 1/2 stop counter.
-#[allow(dead_code)]
+/// - Timer 2: modes 0/3 stop counter, modes 1/2 free-run.
 const MODE_SYNC_MODE_MASK: u32 = 0x6;
 /// bit 3: reset counter when reaching target (0 = reset at 0xFFFF).
 const MODE_RESET_AT_TARGET: u32 = 1 << 3;
@@ -68,8 +84,10 @@ const MODE_IRQ_ACTIVE_LOW: u32 = 1 << 10;
 const MODE_REACHED_TARGET: u32 = 1 << 11;
 /// bit 12: "reached 0xFFFF" sticky flag.
 const MODE_REACHED_WRAP: u32 = 1 << 12;
-const MODE_TIMER2_REDUX_JITTER_MASK: u32 = 0x02FF;
-const MODE_TIMER2_REDUX_JITTER_FLAGS: u32 = (1 << 9) | MODE_IRQ_REPEAT | MODE_RESET_AT_TARGET;
+/// Standard NTSC/PAL active horizontal display window in GPU clocks. HBlank
+/// is the complement of this range. GPU clock = CPU clock * 11/7.
+const H_ACTIVE_START_GPU: u64 = 0x260;
+const H_ACTIVE_END_GPU: u64 = 0xC60;
 
 /// The full three-timer bank.
 #[derive(Default, serde::Serialize, serde::Deserialize)]
@@ -113,16 +131,7 @@ impl Timers {
     pub fn read32(&mut self, phys: u32) -> u32 {
         let (idx, off) = decode(phys);
         match off {
-            0x0 => {
-                let counter = self.timers[idx].counter;
-                if idx == 2 && timer2_redux_jitter_active(&self.timers[idx]) {
-                    // PCSX-Redux's PE2 root-counter compatibility path
-                    // halves Timer 2 reads for this mode pattern.
-                    counter / 2
-                } else {
-                    counter
-                }
-            }
+            0x0 => self.timers[idx].counter,
             0x4 => {
                 let mode = self.timers[idx].mode;
                 // Hardware/Redux side effect: reading the mode register
@@ -146,7 +155,11 @@ impl Timers {
         let t = &mut self.timers[idx];
         let v16 = value & 0xFFFF;
         match off {
-            0x0 => t.counter = v16,
+            0x0 => {
+                t.counter = v16;
+                t.target_reset_hold = false;
+                t.counter_hold_cycles = 2;
+            }
             0x4 => {
                 // Mode write resets counter + re-arms IRQ (bit 10 set).
                 t.mode = (value & !MODE_IRQ_ACTIVE_LOW) | MODE_IRQ_ACTIVE_LOW;
@@ -154,6 +167,9 @@ impl Timers {
                 t.accum = 0;
                 t.last_reset_cycle = now;
                 t.mode_write_count = t.mode_write_count.saturating_add(1);
+                t.sync_seen = false;
+                t.target_reset_hold = false;
+                t.counter_hold_cycles = 2;
             }
             0x8 => t.target = v16,
             _ => {}
@@ -174,7 +190,14 @@ impl Timers {
     pub fn tick(&mut self, cycles: u64, hsync_period: u64, dot_clock_divisor: u64) -> u8 {
         let mut fired: u8 = 0;
         for i in 0..3 {
-            if self.advance_timer(i, cycles, hsync_period, dot_clock_divisor) {
+            if self.advance_timer(
+                i,
+                cycles,
+                hsync_period,
+                dot_clock_divisor,
+                u64::MAX,
+                hsync_period.saturating_mul(263),
+            ) {
                 fired |= 1 << i;
             }
         }
@@ -192,13 +215,40 @@ impl Timers {
     /// write paths that observe timer state call it first so the
     /// values they see match the cycle they observe at.
     pub fn advance_to(&mut self, now: u64, hsync_period: u64, dot_clock_divisor: u64) -> u8 {
+        self.advance_to_video(
+            now,
+            hsync_period,
+            dot_clock_divisor,
+            u64::MAX,
+            hsync_period.saturating_mul(263),
+        )
+    }
+
+    /// Video-aware lazy advance used by the system bus. `next_vblank` is the
+    /// scheduler's absolute VBlank-start deadline; together with `period` it
+    /// gives Timer 1 a stable beam phase without adding a per-scanline event.
+    pub fn advance_to_video(
+        &mut self,
+        now: u64,
+        hsync_period: u64,
+        dot_clock_divisor: u64,
+        next_vblank: u64,
+        vblank_period: u64,
+    ) -> u8 {
         let delta = now.saturating_sub(self.last_advance_cycle);
         if delta == 0 {
             return 0;
         }
         let mut fired: u8 = 0;
         for i in 0..3 {
-            if self.advance_timer(i, delta, hsync_period, dot_clock_divisor) {
+            if self.advance_timer(
+                i,
+                delta,
+                hsync_period,
+                dot_clock_divisor,
+                next_vblank,
+                vblank_period,
+            ) {
                 fired |= 1 << i;
             }
         }
@@ -216,30 +266,38 @@ impl Timers {
         self.last_advance_cycle = now;
     }
 
+    /// Latch only the selected root counter for its CPU-side MMIO wait clocks.
+    /// Other root counters continue running and can therefore measure the
+    /// complete access time of this register.
+    pub fn hold_counter_for_read(&mut self, phys: u32, cycles: u32) {
+        let (idx, _) = decode(phys);
+        self.timers[idx].counter_hold_cycles = self.timers[idx]
+            .counter_hold_cycles
+            .saturating_add(cycles.min(u32::from(u8::MAX)) as u8);
+    }
+
     /// Is this timer currently paused per its sync-mode bits?
     ///
-    /// Redux does not model Timer 0/1 sync pauses; it only changes the
-    /// selected clock rate and handles Timer 1 sync-mode-1's VBlank
-    /// reset. Match that behavior for lockstep. Timer 2 modes 1/2 are
-    /// honest pauses.
+    /// Timer 0/1 beam-synchronization is handled separately while their
+    /// intervals are advanced. Timer 2 has no external beam signal: its
+    /// sync modes directly select stopped versus free-running behavior.
     fn is_timer_paused(&self, idx: usize) -> bool {
         let t = &self.timers[idx];
         if t.mode & MODE_SYNC_ENABLE == 0 {
             return false;
         }
-        let sync = (t.mode >> 1) & 3;
+        let sync = (t.mode & MODE_SYNC_MODE_MASK) >> 1;
         match (idx, sync) {
-            // Timer 2 sync-mode-1 / 2: stop counter.
-            (2, 1) | (2, 2) => true,
+            // Real silicon: Timer 2 sync-mode 0 / 3 stop; 1 / 2 free-run.
+            (2, 0) | (2, 3) => true,
             _ => false,
         }
     }
 
-    /// Pulse a VBlank event to the timer bank. Redux ignores Timer 1
-    /// VBlank sync reset semantics; mode bits only affect rate/IRQ
-    /// handling in its counter model. Keep this as a no-op so bus-level
-    /// VBlank dispatch can stay explicit without perturbing counter
-    /// phase.
+    /// VBlank phase is reconstructed by `advance_to_video` from the
+    /// scheduler's absolute deadline. The bus still calls this at the edge,
+    /// but no additional mutation is necessary here; doing both would apply
+    /// Timer 1 reset/release semantics twice.
     pub fn notify_vblank(&mut self) {}
 
     fn advance_timer(
@@ -248,7 +306,40 @@ impl Timers {
         cycles: u64,
         hsync_period: u64,
         dot_clock_divisor: u64,
+        next_vblank: u64,
+        vblank_period: u64,
     ) -> bool {
+        let held_cycles = {
+            let timer = &mut self.timers[idx];
+            let held = cycles.min(u64::from(timer.counter_hold_cycles));
+            timer.counter_hold_cycles -= held as u8;
+            held
+        };
+        let cycles = cycles - held_cycles;
+        if cycles == 0 {
+            return false;
+        }
+        let interval_start = self.last_advance_cycle.saturating_add(held_cycles);
+
+        if idx == 0 && self.timers[0].mode & MODE_SYNC_ENABLE != 0 {
+            return self.advance_timer0_synced(
+                interval_start,
+                cycles,
+                hsync_period,
+                dot_clock_divisor,
+                vblank_period,
+            );
+        }
+        if idx == 1 && self.timers[1].mode & MODE_SYNC_ENABLE != 0 {
+            return self.advance_timer1_synced(
+                interval_start,
+                cycles,
+                hsync_period,
+                next_vblank,
+                vblank_period,
+            );
+        }
+
         // Sync-mode gating -- decide whether this timer is
         // currently paused.
         let paused = self.is_timer_paused(idx);
@@ -261,27 +352,24 @@ impl Timers {
 
         // Convert `cycles` system clocks into source clocks.
         let ticks = match (idx, source) {
-            // Timer 0 source 1/3 = dot clock. `dot_clock_divisor` is the
-            // GPU *pixel* divisor (GPU clock / pixel_div = dot clock). The
-            // GPU clock runs at CPU_clock * 11/7, so one dot tick is
-            // `7 * pixel_div / 11` system cycles, not `pixel_div` -- using
-            // the pixel divisor alone made the dot clock tick 11/7 too slow
-            // (hardware reads a sys:dot ratio of ~5.09 at 320-wide, we read
-            // 8). Accumulate in 1/11-cycle units to keep the ratio exact.
-            (0, 1) | (0, 3) => {
-                t.accum += cycles * 11;
-                let divisor = 7 * dot_clock_divisor.max(1);
-                let n = t.accum / divisor;
-                t.accum %= divisor;
-                n
-            }
+            // Timer 0 source 1/3 = dot clock. Within a scanline the nominal
+            // 11/7 GPU:CPU ratio applies; at the line boundary hardware drops
+            // the fractional dot and lands on the documented integer dots per
+            // line. This matters over a frame but must not distort short
+            // 1000-cycle probes.
+            (0, 1) | (0, 3) => dot_ticks_between(
+                interval_start,
+                interval_start.saturating_add(cycles),
+                hsync_period,
+                dot_clock_divisor,
+                vblank_period,
+            ),
             // Timer 1 source 1/3 = HBlank: one tick per HSync period.
-            (1, 1) | (1, 3) => {
-                t.accum += cycles;
-                let n = t.accum / hsync_period;
-                t.accum %= hsync_period;
-                n
-            }
+            (1, 1) | (1, 3) => hblank_ticks_between(
+                interval_start,
+                interval_start.saturating_add(cycles),
+                hsync_period,
+            ),
             // Timer 2 source 2/3 = system clock / 8.
             (2, 2) | (2, 3) => {
                 t.accum += cycles;
@@ -293,75 +381,297 @@ impl Timers {
             _ => cycles,
         };
 
-        if ticks == 0 {
-            return false;
+        let fired = advance_counter(t, ticks);
+        if idx == 2 && fired {
+            self.dbg_timer2_fires += 1;
         }
+        fired
+    }
 
-        // Pre-tick position.
-        let old = t.counter;
-        let target = t.target & 0xFFFF;
-        let mut new_val = (old as u64) + ticks;
-
+    fn advance_timer1_synced(
+        &mut self,
+        start: u64,
+        cycles: u64,
+        hsync_period: u64,
+        next_vblank: u64,
+        vblank_period: u64,
+    ) -> bool {
+        let end = start.saturating_add(cycles);
+        let hsync = hsync_period.max(1);
+        let period = vblank_period.max(hsync);
+        let total_lines = period / hsync;
+        let blank_lines = match total_lines {
+            263 => 20, // NTSC: line 243 through the end of the field
+            314 => 58, // PAL: line 256 through the end of the field
+            _ => 20,
+        };
+        let blank_duration = blank_lines * hsync;
+        let mut cursor = start;
         let mut fired = false;
-        let mut reached_target = false;
-        let mut reached_wrap = false;
 
-        // Target-reset mode: when counter crosses the target, reset to 0.
-        //
-        // Redux (`psxcounters.cc:reset`) wraps at exactly `target*rate`
-        // cycles per lap -- the counter visits 0..=target-1 and a reset
-        // fires the instant it would reach `target`, snapping it back
-        // to 0. We were wrapping at `(target+1)*rate` (visiting
-        // 0..=target and wrapping on the tick after), losing one count
-        // per lap. That surfaced at parity step 79,389,318 as Timer 1
-        // reading one less than Redux a lap after reset.
-        if t.mode & MODE_RESET_AT_TARGET != 0 && target != 0 && new_val >= target as u64 {
-            reached_target = true;
-            new_val %= target as u64;
+        while cursor < end {
+            let previous_start = if next_vblank <= cursor {
+                Some(next_vblank)
+            } else if next_vblank >= period {
+                Some(next_vblank - period)
+            } else {
+                None
+            };
+            let blank_end = previous_start.map(|start| start.saturating_add(blank_duration));
+            let in_vblank = blank_end.is_some_and(|blank_end| cursor < blank_end);
+            let (boundary, enters_vblank) = if in_vblank {
+                (blank_end.expect("active VBlank has an end"), false)
+            } else {
+                (next_vblank, true)
+            };
+            let segment = (end - cursor).min(boundary.saturating_sub(cursor).max(1));
+
+            let timer = &mut self.timers[1];
+            let source = (timer.mode >> 8) & 0x3;
+            let ticks = if matches!(source, 1 | 3) {
+                hblank_ticks_between(cursor, cursor.saturating_add(segment), hsync)
+            } else {
+                segment
+            };
+            let sync = (timer.mode & MODE_SYNC_MODE_MASK) >> 1;
+            let count_enabled = match sync {
+                0 => !in_vblank,
+                1 => true,
+                2 => in_vblank,
+                3 => timer.sync_seen,
+                _ => unreachable!(),
+            };
+            if count_enabled {
+                fired |= advance_counter(timer, ticks);
+            }
+
+            cursor += segment;
+            if enters_vblank && cursor == boundary {
+                let timer = &mut self.timers[1];
+                match (timer.mode & MODE_SYNC_MODE_MASK) >> 1 {
+                    1 | 2 => {
+                        timer.counter = 0;
+                        timer.accum = 0;
+                    }
+                    3 => timer.sync_seen = true,
+                    _ => {}
+                }
+            }
         }
 
+        fired
+    }
+
+    fn advance_timer0_synced(
+        &mut self,
+        start: u64,
+        cycles: u64,
+        hsync_period: u64,
+        dot_clock_divisor: u64,
+        vblank_period: u64,
+    ) -> bool {
+        let end = start.saturating_add(cycles);
+        let hsync = hsync_period.max(1);
+        let active_start = (H_ACTIVE_START_GPU * 7 / 11).min(hsync);
+        let active_end = (H_ACTIVE_END_GPU * 7 / 11).min(hsync);
+        let mut cursor = start;
+        let mut fired = false;
+
+        while cursor < end {
+            let phase = cursor % hsync;
+            let (in_hblank, until_boundary, enters_hblank) = if phase < active_start {
+                (true, active_start - phase, false)
+            } else if phase < active_end {
+                (false, active_end - phase, true)
+            } else {
+                (true, hsync - phase, false)
+            };
+            let segment = (end - cursor).min(until_boundary.max(1));
+
+            let timer = &mut self.timers[0];
+            let source = (timer.mode >> 8) & 0x3;
+            let ticks = if matches!(source, 1 | 3) {
+                dot_ticks_between(
+                    cursor,
+                    cursor + segment,
+                    hsync,
+                    dot_clock_divisor,
+                    vblank_period,
+                )
+            } else {
+                segment
+            };
+            let sync = (timer.mode & MODE_SYNC_MODE_MASK) >> 1;
+            let count_enabled = match sync {
+                0 => !in_hblank,
+                1 => true,
+                2 => in_hblank,
+                3 => timer.sync_seen,
+                _ => unreachable!(),
+            };
+            if count_enabled {
+                fired |= advance_counter(timer, ticks);
+            }
+
+            cursor += segment;
+            if enters_hblank && cursor % hsync == active_end {
+                let timer = &mut self.timers[0];
+                match (timer.mode & MODE_SYNC_MODE_MASK) >> 1 {
+                    1 | 2 => {
+                        timer.counter = 0;
+                        timer.accum = 0;
+                    }
+                    3 => timer.sync_seen = true,
+                    _ => {}
+                }
+            }
+        }
+
+        fired
+    }
+}
+
+fn advance_counter(t: &mut Timer, ticks: u64) -> bool {
+    if ticks == 0 {
+        return false;
+    }
+    // Pre-tick position.
+    let old = t.counter;
+    let target = t.target & 0xFFFF;
+    let mut new_val = (old as u64) + ticks;
+
+    let mut fired = false;
+    let mut reached_target = false;
+    let mut reached_wrap = false;
+
+    if t.mode & MODE_RESET_AT_TARGET != 0 && target != 0 {
+        // Silicon sequence for target=10 is 0,1,...,10,0,0,1,... . The
+        // hidden phase after 10 is represented by `target_reset_hold`; the
+        // next ordinary phase is zero as well. This exactly explains the
+        // public test's 2:1 frequency for counter zero.
+        let cycle_len = target as u64 + 2;
+        let raw_old = if t.target_reset_hold {
+            target as u64 + 1
+        } else {
+            (old as u64).min(target as u64)
+        };
+        let distance_to_target = if raw_old < target as u64 {
+            target as u64 - raw_old
+        } else {
+            cycle_len - raw_old + target as u64
+        };
+        reached_target = ticks >= distance_to_target;
+        let raw_new = (raw_old + ticks) % cycle_len;
+        t.target_reset_hold = raw_new == target as u64 + 1;
+        new_val = if t.target_reset_hold { 0 } else { raw_new };
+    } else {
+        t.target_reset_hold = false;
         if new_val > 0xFFFF {
             reached_wrap = true;
             new_val &= 0xFFFF;
         }
 
         // Detect target pass for non-reset-mode too.
-        if t.mode & MODE_RESET_AT_TARGET == 0
-            && (old as u64) < (target as u64)
-            && new_val >= (target as u64)
-        {
+        if (old as u64) < (target as u64) && new_val >= (target as u64) {
             reached_target = true;
         }
-
-        if reached_target {
-            t.mode |= MODE_REACHED_TARGET;
-            if t.mode & MODE_IRQ_ON_TARGET != 0 && t.mode & MODE_IRQ_ACTIVE_LOW != 0 {
-                // Fire: clear bit 10 (active-low).
-                t.mode &= !MODE_IRQ_ACTIVE_LOW;
-                fired = true;
-                if t.mode & MODE_IRQ_REPEAT != 0 {
-                    // Re-arm for repeat mode.
-                    t.mode |= MODE_IRQ_ACTIVE_LOW;
-                }
-            }
-        }
-        if reached_wrap {
-            t.mode |= MODE_REACHED_WRAP;
-            if t.mode & MODE_IRQ_ON_WRAP != 0 && t.mode & MODE_IRQ_ACTIVE_LOW != 0 {
-                t.mode &= !MODE_IRQ_ACTIVE_LOW;
-                fired = true;
-                if t.mode & MODE_IRQ_REPEAT != 0 {
-                    t.mode |= MODE_IRQ_ACTIVE_LOW;
-                }
-            }
-        }
-
-        t.counter = new_val as u32;
-        if idx == 2 && fired {
-            self.dbg_timer2_fires += 1;
-        }
-        fired
     }
+
+    if reached_target {
+        t.mode |= MODE_REACHED_TARGET;
+        if t.mode & MODE_IRQ_ON_TARGET != 0 && t.mode & MODE_IRQ_ACTIVE_LOW != 0 {
+            // Fire: clear bit 10 (active-low).
+            t.mode &= !MODE_IRQ_ACTIVE_LOW;
+            fired = true;
+            if t.mode & MODE_IRQ_REPEAT != 0 {
+                // Re-arm for repeat mode.
+                t.mode |= MODE_IRQ_ACTIVE_LOW;
+            }
+        }
+    }
+    if reached_wrap {
+        t.mode |= MODE_REACHED_WRAP;
+        if t.mode & MODE_IRQ_ON_WRAP != 0 && t.mode & MODE_IRQ_ACTIVE_LOW != 0 {
+            t.mode &= !MODE_IRQ_ACTIVE_LOW;
+            fired = true;
+            if t.mode & MODE_IRQ_REPEAT != 0 {
+                t.mode |= MODE_IRQ_ACTIVE_LOW;
+            }
+        }
+    }
+
+    t.counter = new_val as u32;
+    fired
+}
+
+fn dot_ticks_per_scanline(hsync_period: u64, dot_clock_divisor: u64, vblank_period: u64) -> u64 {
+    // Identify the region from frame geometry, not the relative HSync period.
+    // Physical NTSC scanlines are about 2172 CPU clocks while PAL is about
+    // 2167, the opposite ordering from the old Redux-parity constants. The
+    // frame remains unambiguous at 263 versus 314 lines even while a mid-frame
+    // display-mode switch temporarily retains the previous HSync cadence.
+    let total_lines = vblank_period / hsync_period.max(1);
+    let ntsc = total_lines < (263 + 314) / 2;
+    match (ntsc, dot_clock_divisor) {
+        (true, 10) => 341,
+        (true, 8) => 426,
+        (true, 7) => 487,
+        (true, 5) => 682,
+        (true, 4) => 853,
+        (false, 10) => 340,
+        // PAL 320-wide is the documented exception that rounds 425.75 up.
+        (false, 8) => 426,
+        (false, 7) => 486,
+        (false, 5) => 681,
+        (false, 4) => 851,
+        (_, divisor) => 3413 / divisor.max(1),
+    }
+}
+
+/// Count global HBlank-start edges in `(start, end]`. Timer 1's HBlank source
+/// is beam-derived, so a mode write does not establish a new divider phase.
+/// The edge uses the same active-display end as Timer 0 synchronization.
+fn hblank_ticks_between(start: u64, end: u64, hsync_period: u64) -> u64 {
+    let hsync = hsync_period.max(1);
+    let phase = (H_ACTIVE_END_GPU * 7 / 11).min(hsync - 1);
+    let edges_through = |cycle: u64| {
+        if cycle < phase {
+            0
+        } else {
+            (cycle - phase) / hsync + 1
+        }
+    };
+    edges_through(end).saturating_sub(edges_through(start))
+}
+
+fn dot_ticks_between(
+    start: u64,
+    end: u64,
+    hsync_period: u64,
+    divisor: u64,
+    vblank_period: u64,
+) -> u64 {
+    let hsync = hsync_period.max(1);
+    let divisor = divisor.max(1);
+    let nominal_denominator = 7 * divisor;
+    let full_line_ticks = dot_ticks_per_scanline(hsync, divisor, vblank_period);
+    let mut cursor = start;
+    let mut ticks = 0;
+
+    while cursor < end {
+        let phase = cursor % hsync;
+        let segment = (end - cursor).min(hsync - phase);
+        let begin_ticks = phase * 11 / nominal_denominator;
+        let segment_end = phase + segment;
+        let end_ticks = if segment_end == hsync {
+            full_line_ticks
+        } else {
+            segment_end * 11 / nominal_denominator
+        };
+        ticks += end_ticks.saturating_sub(begin_ticks);
+        cursor += segment;
+    }
+    ticks
 }
 
 fn decode(phys: u32) -> (usize, u32) {
@@ -371,14 +681,14 @@ fn decode(phys: u32) -> (usize, u32) {
     (idx, off)
 }
 
-fn timer2_redux_jitter_active(timer: &Timer) -> bool {
-    timer.target != 0
-        && (timer.mode & MODE_TIMER2_REDUX_JITTER_MASK) == MODE_TIMER2_REDUX_JITTER_FLAGS
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const NTSC_HSYNC: u64 = 2172;
+    const NTSC_PERIOD: u64 = NTSC_HSYNC * 263;
+    const PAL_HSYNC: u64 = 2167;
+    const PAL_PERIOD: u64 = PAL_HSYNC * 314;
 
     #[test]
     fn decodes_each_timer_and_field() {
@@ -430,12 +740,14 @@ mod tests {
         t.write32(0x1F80_1104, 1 << 8, 0);
         // At 320-wide the GPU pixel divisor is 8, and the GPU clock is
         // CPU * 11/7, so a dot tick is 7*8/11 ≈ 5.09 system cycles.
-        // 80 cycles → 80*11/56 = 15 ticks (with remainder carried).
-        let fired = t.tick(80, 2146, 8);
+        // 80 cycles produce 15 dots. The mode write holds the counter for two
+        // CPU clocks before source conversion, which does not discard a dot
+        // at this phase.
+        let fired = t.tick(80, NTSC_HSYNC, 8);
         assert_eq!(fired, 0);
         assert_eq!(t.read32(0x1F80_1100) & 0xFFFF, 15);
         // Another 40 cycles → accum carries the remainder → 8 more ticks.
-        t.tick(40, 2146, 8);
+        t.tick(40, NTSC_HSYNC, 8);
         assert_eq!(t.read32(0x1F80_1100) & 0xFFFF, 23);
     }
 
@@ -444,64 +756,81 @@ mod tests {
         let mut t = Timers::new();
         t.write32(0x1F80_1104, 0, 0); // source 0 = system clock
                                       // Divisor changes shouldn't matter at system-clock source.
-        t.tick(100, 2146, 8);
-        assert_eq!(t.read32(0x1F80_1100) & 0xFFFF, 100);
+        t.tick(100, NTSC_HSYNC, 8);
+        assert_eq!(t.read32(0x1F80_1100) & 0xFFFF, 98);
     }
 
     #[test]
-    fn timer1_sync_mode_3_free_runs_like_redux() {
+    fn timer1_sync_mode_3_waits_for_vblank_then_free_runs() {
         let mut t = Timers::new();
-        // Redux ignores the Timer 1 sync-mode-3 pause and only uses
-        // the selected clock source/rate.
         t.write32(0x1F80_1114, MODE_SYNC_ENABLE | (3 << 1), 0);
-        t.tick(500, 2146, 8);
+        let period = NTSC_PERIOD;
+        t.advance_to_video(500, NTSC_HSYNC, 8, 1000, period);
+        assert_eq!(t.read32(0x1F80_1110) & 0xFFFF, 0);
+        t.advance_to_video(1000, NTSC_HSYNC, 8, 1000, period);
+        assert_eq!(t.read32(0x1F80_1110) & 0xFFFF, 0);
+        t.advance_to_video(1500, NTSC_HSYNC, 8, 1000 + period, period);
         assert_eq!(t.read32(0x1F80_1110) & 0xFFFF, 500);
-        t.notify_vblank();
-        t.tick(500, 2146, 8);
-        assert_eq!(t.read32(0x1F80_1110) & 0xFFFF, 1000);
     }
 
     #[test]
-    fn timer1_sync_mode_1_ignores_vblank_reset_like_redux() {
+    fn timer1_hblank_source_counts_global_edges_across_a_field() {
         let mut t = Timers::new();
-        // Redux does not implement Timer 1's VBlank reset gate; it
-        // keeps counting with the selected clock source.
+        t.write32(0x1F80_1114, 1 << 8, 0);
+        t.advance_to_video(NTSC_PERIOD, NTSC_HSYNC, 8, NTSC_PERIOD, NTSC_PERIOD);
+        assert_eq!(t.read32(0x1F80_1110), 263);
+    }
+
+    #[test]
+    fn counter_read_latch_holds_only_the_selected_timer() {
+        let mut t = Timers::new();
+        t.write32(0x1F80_1104, 0, 0);
+        t.write32(0x1F80_1114, 0, 0);
+        t.advance_to(4, NTSC_HSYNC, 8);
+        assert_eq!(t.read32(0x1F80_1100), 2);
+        assert_eq!(t.read32(0x1F80_1110), 2);
+
+        t.hold_counter_for_read(0x1F80_1100, 2);
+        t.advance_to(6, NTSC_HSYNC, 8);
+        assert_eq!(t.read32(0x1F80_1100), 2);
+        assert_eq!(t.read32(0x1F80_1110), 4);
+    }
+
+    #[test]
+    fn timer1_sync_mode_1_resets_at_vblank() {
+        let mut t = Timers::new();
         t.write32(0x1F80_1114, MODE_SYNC_ENABLE | (1 << 1), 0);
-        t.tick(200, 2146, 8);
-        assert_eq!(t.read32(0x1F80_1110) & 0xFFFF, 200);
-        t.notify_vblank();
-        t.tick(200, 2146, 8);
-        assert_eq!(t.read32(0x1F80_1110) & 0xFFFF, 400);
+        let period = NTSC_PERIOD;
+        t.advance_to_video(900, NTSC_HSYNC, 8, 1000, period);
+        assert_eq!(t.read32(0x1F80_1110) & 0xFFFF, 898);
+        t.advance_to_video(1000, NTSC_HSYNC, 8, 1000, period);
+        assert_eq!(t.read32(0x1F80_1110) & 0xFFFF, 0);
     }
 
     #[test]
-    fn timer2_sync_mode_1_stops_counter() {
+    fn timer1_sync_mode_2_pauses_outside_vblank() {
         let mut t = Timers::new();
-        // Sync enable + sync mode 1 on Timer 2 = stop counter.
+        t.write32(0x1F80_1114, MODE_SYNC_ENABLE | (2 << 1), 0);
+        t.advance_to_video(900, NTSC_HSYNC, 8, 1000, NTSC_PERIOD);
+        assert_eq!(t.read32(0x1F80_1110) & 0xFFFF, 0);
+    }
+
+    #[test]
+    fn timer2_sync_mode_1_free_runs() {
+        let mut t = Timers::new();
+        // Sync enable + sync mode 1 on Timer 2 = free-run.
         t.write32(0x1F80_1124, MODE_SYNC_ENABLE | (1 << 1), 0);
-        t.tick(100, 2146, 8);
-        assert_eq!(t.read32(0x1F80_1120) & 0xFFFF, 0);
+        t.tick(100, NTSC_HSYNC, 8);
+        assert_eq!(t.read32(0x1F80_1120) & 0xFFFF, 98);
     }
 
     #[test]
-    fn timer2_sync_mode_0_free_runs() {
+    fn timer2_sync_mode_0_stops() {
         let mut t = Timers::new();
-        // Sync enable + sync mode 0 on Timer 2 = free-run.
+        // Sync enable + sync mode 0 on Timer 2 = stop.
         t.write32(0x1F80_1124, MODE_SYNC_ENABLE, 0);
-        t.tick(100, 2146, 8);
-        assert_eq!(t.read32(0x1F80_1120) & 0xFFFF, 100);
-    }
-
-    #[test]
-    fn timer2_redux_jitter_mode_halves_counter_reads() {
-        let mut t = Timers::new();
-        t.write32(0x1F80_1128, 0x4000, 0);
-        t.write32(0x1F80_1124, MODE_TIMER2_REDUX_JITTER_FLAGS, 0);
-
-        t.tick(0x800, 2146, 8);
-
-        assert_eq!(t.timers[2].counter, 0x100);
-        assert_eq!(t.read32(0x1F80_1120), 0x80);
+        t.tick(100, NTSC_HSYNC, 8);
+        assert_eq!(t.read32(0x1F80_1120) & 0xFFFF, 0);
     }
 
     #[test]
@@ -518,14 +847,53 @@ mod tests {
     #[test]
     fn reset_at_target_sets_sticky_reached_target() {
         let mut t = Timers::new();
-        t.write32(0x1F80_1128, 32, 0);
+        t.write32(0x1F80_1128, 10, 0);
         t.write32(0x1F80_1120, 0, 0);
         t.write32(0x1F80_1124, MODE_RESET_AT_TARGET, 0);
 
-        t.advance_to(8192, 2146, 8);
+        t.advance_to(12, NTSC_HSYNC, 8);
 
         let mode = t.read32(0x1F80_1124);
         assert_ne!(mode & MODE_REACHED_TARGET, 0);
-        assert_eq!(t.read32(0x1F80_1120), 0);
+        assert_eq!(t.read32(0x1F80_1120), 10, "target remains visible");
+        t.advance_to(13, NTSC_HSYNC, 8);
+        assert_eq!(t.read32(0x1F80_1120), 0, "reset phase");
+        t.advance_to(14, NTSC_HSYNC, 8);
+        assert_eq!(t.read32(0x1F80_1120), 0, "ordinary zero phase");
+        t.advance_to(15, NTSC_HSYNC, 8);
+        assert_eq!(t.read32(0x1F80_1120), 1);
+    }
+
+    #[test]
+    fn dot_clock_line_totals_follow_video_region() {
+        let cases = [
+            (10, 341, 340),
+            (8, 426, 426),
+            (7, 487, 486),
+            (5, 682, 681),
+            (4, 853, 851),
+        ];
+
+        for (divisor, ntsc_ticks, pal_ticks) in cases {
+            assert_eq!(
+                dot_ticks_between(0, NTSC_HSYNC, NTSC_HSYNC, divisor, NTSC_PERIOD),
+                ntsc_ticks,
+                "NTSC divisor {divisor}"
+            );
+            assert_eq!(
+                dot_ticks_between(0, PAL_HSYNC, PAL_HSYNC, divisor, PAL_PERIOD),
+                pal_ticks,
+                "PAL divisor {divisor}"
+            );
+        }
+    }
+
+    #[test]
+    fn dot_clock_region_detection_survives_retained_hsync_cadence() {
+        // Mid-frame display-mode changes can retain the previous region's
+        // HSync cadence in the VBlank scheduler. Frame geometry must still
+        // select the new region's documented dot totals.
+        assert_eq!(dot_ticks_per_scanline(PAL_HSYNC, 4, NTSC_HSYNC * 314), 851);
+        assert_eq!(dot_ticks_per_scanline(NTSC_HSYNC, 4, PAL_HSYNC * 263), 853);
     }
 }

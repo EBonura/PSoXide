@@ -1,8 +1,8 @@
 // Axis-aligned textured quad with bilinear UV interpolation.
 //
 // Mirrors `emulator-core::Gpu::rasterize_axis_aligned_textured_quad`
-// byte-for-byte: per-row left/right UV walk in Q16.16, per-pixel
-// linear interpolation between them. The CPU dispatches this fast
+// byte-for-byte: per-row left/right UV walk in Q12 with a +0.5
+// seed, then per-pixel linear interpolation between them. The CPU dispatches this fast
 // path when a textured quad's vertices form an axis-aligned
 // rectangle; for non-affine UV layouts the bilinear math here
 // produces different pixels than triangle-split barycentric.
@@ -160,15 +160,15 @@ fn rasterize(@builtin(global_invocation_id) gid: vec3<u32>) {
     if py < draw_area.top || py > draw_area.bottom { return; }
     if px < 0 || px >= VRAM_WIDTH || py < 0 || py >= VRAM_HEIGHT { return; }
 
-    // CPU fast-path math (lines 1696..1731 of `gpu.rs`):
-    //   left_u0  = t0.u << 16
-    //   right_u0 = t1.u << 16
-    //   delta_left_u  = ((t2.u << 16) - left_u0)  / height
-    //   delta_right_u = ((t3.u << 16) - right_u0) / height
+    // CPU fast-path math uses Q12 gradients and a pixel-centre seed:
+    //   left_u0  = (t0.u << 12) + 0.5
+    //   right_u0 = (t1.u << 12) + 0.5
+    //   delta_left_u  = ((t2.u - t0.u) << 12) / height
+    //   delta_right_u = ((t3.u - t1.u) << 12) / height
     //   pos_u   = left_u0 + row * delta_left_u
     //   right_u = right_u0 + row * delta_right_u
     //   delta_col_u = (right_u - pos_u) / width
-    //   u = (pos_u + col * delta_col_u) >> 16
+    //   u = (pos_u + col * delta_col_u) >> 12
     let u0 = i32(prim.uv0 & 0xFFu);
     let vv0 = i32((prim.uv0 >> 8u) & 0xFFu);
     let u1 = i32(prim.uv1 & 0xFFu);
@@ -214,35 +214,27 @@ fn rasterize(@builtin(global_invocation_id) gid: vec3<u32>) {
         right_top_v = top_a_v; right_bottom_v = bottom_a_v;
     }
 
-    // Q16.16 = original << 16. Pack as I64: hi=0 (since values are
-    // small positive), lo = (value << 16) as u32. For negatives we
-    // sign-extend.
-    let left_u0 = i64_pack(left_top_u >> 16, u32(left_top_u) << 16u);
-    let left_v0 = i64_pack(left_top_v >> 16, u32(left_top_v) << 16u);
-    let right_u0 = i64_pack(right_top_u >> 16, u32(right_top_u) << 16u);
-    let right_v0 = i64_pack(right_top_v >> 16, u32(right_top_v) << 16u);
-    let bl_u = i64_pack(left_bottom_u >> 16, u32(left_bottom_u) << 16u);
-    let bl_v = i64_pack(left_bottom_v >> 16, u32(left_bottom_v) << 16u);
-    let br_u = i64_pack(right_bottom_u >> 16, u32(right_bottom_u) << 16u);
-    let br_v = i64_pack(right_bottom_v >> 16, u32(right_bottom_v) << 16u);
+    // These bounds fit comfortably in i32: UV is 8-bit, Q12 is
+    // about one million, and screen extents are at most 1023.
+    let attr_shift = 12i;
+    let attr_half = 1i << 11u;
+    let left_u0 = (left_top_u << u32(attr_shift)) + attr_half;
+    let left_v0 = (left_top_v << u32(attr_shift)) + attr_half;
+    let right_u0 = (right_top_u << u32(attr_shift)) + attr_half;
+    let right_v0 = (right_top_v << u32(attr_shift)) + attr_half;
+    let delta_left_u = ((left_bottom_u - left_top_u) << u32(attr_shift)) / height;
+    let delta_left_v = ((left_bottom_v - left_top_v) << u32(attr_shift)) / height;
+    let delta_right_u = ((right_bottom_u - right_top_u) << u32(attr_shift)) / height;
+    let delta_right_v = ((right_bottom_v - right_top_v) << u32(attr_shift)) / height;
 
-    let delta_left_u = i64_div_i32(i64_sub(bl_u, left_u0), height);
-    let delta_left_v = i64_div_i32(i64_sub(bl_v, left_v0), height);
-    let delta_right_u = i64_div_i32(i64_sub(br_u, right_u0), height);
-    let delta_right_v = i64_div_i32(i64_sub(br_v, right_v0), height);
-
-    let row_u_left = i64_add(left_u0, i64_mul_u32(u32(dy), delta_left_u));
-    let row_v_left = i64_add(left_v0, i64_mul_u32(u32(dy), delta_left_v));
-    let row_u_right = i64_add(right_u0, i64_mul_u32(u32(dy), delta_right_u));
-    let row_v_right = i64_add(right_v0, i64_mul_u32(u32(dy), delta_right_v));
-
-    let delta_col_u = i64_div_i32(i64_sub(row_u_right, row_u_left), width);
-    let delta_col_v = i64_div_i32(i64_sub(row_v_right, row_v_left), width);
-
-    let u_q16 = i64_add(row_u_left, i64_mul_u32(u32(dx), delta_col_u));
-    let v_q16 = i64_add(row_v_left, i64_mul_u32(u32(dx), delta_col_v));
-    let u = u32(i64_to_i32(i64_arsh16(u_q16)));
-    let v = u32(i64_to_i32(i64_arsh16(v_q16)));
+    let row_u_left = left_u0 + dy * delta_left_u;
+    let row_v_left = left_v0 + dy * delta_left_v;
+    let row_u_right = right_u0 + dy * delta_right_u;
+    let row_v_right = right_v0 + dy * delta_right_v;
+    let delta_col_u = (row_u_right - row_u_left) / width;
+    let delta_col_v = (row_v_right - row_v_left) / width;
+    let u = u32((row_u_left + dx * delta_col_u) >> u32(attr_shift));
+    let v = u32((row_v_left + dx * delta_col_v) >> u32(attr_shift));
 
     let texel = sample_texture(u, v);
     if texel == 0u { return; }

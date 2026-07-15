@@ -856,6 +856,11 @@ pub struct Spu {
     transfer_addr_raw: u16,
     /// Data transfer control (usually 0x0004). Stored for round-trip.
     transfer_ctrl: u16,
+    /// 32-halfword hardware transfer FIFO. CPU writes may fill this while
+    /// SPUCNT is stopped; switching to ManualWrite drains the queued words to
+    /// SPU RAM. Keeping the queue in architectural state is required for
+    /// save-state fidelity and for the public ps1-tests memory-transfer case.
+    transfer_fifo: std::collections::VecDeque<u16>,
 
     /// Main output volume Left.
     main_vol_l: VolumeEnvelope,
@@ -1049,6 +1054,7 @@ impl Spu {
             transfer_addr: 0,
             transfer_addr_raw: 0,
             transfer_ctrl: 0x0004,
+            transfer_fifo: std::collections::VecDeque::with_capacity(32),
             main_vol_l: VolumeEnvelope::new(),
             main_vol_r: VolumeEnvelope::new(),
             current_main_vol_l: 0,
@@ -1473,9 +1479,15 @@ impl Spu {
         if (prev & (1 << 6)) != 0 && (value & (1 << 6)) == 0 {
             self.spustat &= !(1 << 6);
         }
-        // Manual-write mode (bits 5..4 == 1) -- transfer FIFO writes
-        // go straight into SPU RAM at `transfer_addr`. Nothing to do
-        // here proactively; the FIFO write path reads SPUCNT.
+        // Real software commonly fills the 32-halfword transfer FIFO while
+        // the transfer mode is Stopped, then switches to ManualWrite. The SPU
+        // drains those queued words at 16 cycles/halfword. We commit the data
+        // here and model the elapsed transfer window in the DMA scheduler;
+        // retaining (rather than dropping) the stopped-mode writes is the
+        // architecturally important part for CPU-driven transfers.
+        if (value >> 4) & 0x3 == 1 {
+            self.drain_transfer_fifo_to_ram();
+        }
     }
 
     fn read_voice_reg(&self, v: usize, off: u32) -> u16 {
@@ -1576,22 +1588,26 @@ impl Spu {
     // ============================================================
 
     fn transfer_fifo_write(&mut self, value: u16) {
-        // A 0x1F801DA8 write only reaches SPU RAM when SPUCNT's transfer mode
-        // (bits 5..4) selects Manual Write (= 1). With the mode left at Stop (0)
-        // -- e.g. software that pokes the FIFO but forgets to arm the mode -- the
-        // write does NOT commit, so the upload silently no-ops, exactly as on
-        // real hardware. PSoXide previously committed unconditionally, which hid
-        // that whole class of bug (garbled/silent audio on console, fine in-emu).
-        if (self.spucnt >> 4) & 0x3 != 1 {
+        const FIFO_HALFWORDS: usize = 32;
+        if self.transfer_fifo.len() == FIFO_HALFWORDS {
+            // A full hardware FIFO cannot accept another halfword. CPU-side
+            // bus stalling is not yet represented, so preserve the existing
+            // contents and ignore the overflow instead of corrupting order.
             return;
         }
-        // Push to SPU RAM at the current transfer address; the address
-        // post-increments by 2 bytes each write.
-        let idx = (self.transfer_addr >> 1) as usize % SPU_RAM_HALFWORDS;
-        self.ram[idx] = value;
-        // Check IRQ address match.
-        self.check_irq_on_transfer();
-        self.transfer_addr = (self.transfer_addr + 2) & (SPU_RAM_BYTES as u32 - 1);
+        self.transfer_fifo.push_back(value);
+        if (self.spucnt >> 4) & 0x3 == 1 {
+            self.drain_transfer_fifo_to_ram();
+        }
+    }
+
+    fn drain_transfer_fifo_to_ram(&mut self) {
+        while let Some(value) = self.transfer_fifo.pop_front() {
+            let idx = (self.transfer_addr >> 1) as usize % SPU_RAM_HALFWORDS;
+            self.ram[idx] = value;
+            self.check_irq_on_transfer();
+            self.transfer_addr = (self.transfer_addr + 2) & (SPU_RAM_BYTES as u32 - 1);
+        }
         self.transfer_addr_raw = (self.transfer_addr >> 3) as u16;
     }
 

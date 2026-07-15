@@ -556,7 +556,8 @@ impl ShadedTexTri {
 /// `pos_u = left_u0 + row * delta_left_u` and
 /// `right_u = right_u0 + row * delta_right_u`; per pixel within a
 /// row, `delta_u = (right_u - pos_u) / width` and the per-pixel U
-/// is `pos_u + col * delta_u >> 16`.
+/// is `pos_u + col * delta_u >> 12`. Attributes use Q12 gradients
+/// seeded at the pixel centre (+0.5), matching silicon.
 ///
 /// The CPU dispatches this via the fast path when a textured quad's
 /// vertices form an axis-aligned rectangle (`v0.y == v1.y &&

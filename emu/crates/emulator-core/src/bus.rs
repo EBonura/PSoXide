@@ -22,12 +22,16 @@ use crate::gpu::Gpu;
 use crate::irq::{Irq, IrqSource};
 use crate::mmio_trace::{MmioKind, MmioTrace};
 use crate::sio::Sio0;
+use crate::sio1::Sio1;
 use crate::spu::Spu;
 use crate::telemetry::GuestTelemetry;
 use crate::timers::Timers;
 
+mod memory_timing;
 mod timing;
 
+pub(crate) use memory_timing::AccessWidth;
+use memory_timing::MemoryControl;
 use timing::*;
 
 /// Physical address of `I_STAT` (interrupt status / ack register).
@@ -116,6 +120,13 @@ pub struct Bus {
     /// this fallback; the rest of MMIO still round-trips writes to reads.
     #[serde(with = "big_bytes")]
     io: Box<[u8; memory::io::SIZE]>,
+    /// Last value driven on the CPU data bus. On-die registers narrower than
+    /// a word leave undriven lanes intact; instruction-cache refills and CPU
+    /// stores also update this latch, making those open-bus bits observable.
+    data_bus_latch: u32,
+    /// Programmable external-bus wait states and the nine memory-control
+    /// registers at `0x1F80_1000..=0x1F80_1020`.
+    memory_control: MemoryControl,
     /// Interrupt controller (`I_STAT` / `I_MASK`). Accessed via the MMIO
     /// dispatch below and queried by the CPU each step to update
     /// `COP0.CAUSE.IP[2]`.
@@ -138,6 +149,8 @@ pub struct Bus {
     /// SIO0 -- controller / memory-card port. Currently models a cold
     /// port with nothing connected; enough to satisfy BIOS init polls.
     sio0: Sio0,
+    /// General-purpose serial port at `0x1F80_1050`.
+    sio1: Sio1,
     /// CD-ROM controller -- byte-granular MMIO at 0x1F80_1800..=0x1803.
     /// Exposed public so diagnostics can inspect FIFO / command state.
     pub cdrom: CdRom,
@@ -190,8 +203,14 @@ pub struct Bus {
     /// save states.
     #[serde(skip, default = "default_hle_bios_calls")]
     hle_bios_calls: [[u32; 256]; 3],
-    /// HSync cycles for the current video region (NTSC = 2146,
-    /// PAL = 2157). Used by the timer bank's HBlank source and by
+    /// Guest `JumpBuffer` registered through BIOS B(19h) `HookEntryInt`.
+    /// Side-loaded executables do not have a retail kernel to remember and
+    /// invoke this hook, so the HLE path retains the guest pointer and the CPU
+    /// uses it when a real emulated hardware IRQ is taken.
+    #[serde(default)]
+    hle_irq_jump_buffer: Option<u32>,
+    /// HSync cycles for the current video region (NTSC = 2172,
+    /// PAL = 2167). Used by the timer bank's HBlank source and by
     /// the VBlank scheduler. Flipped by [`Bus::set_pal_mode`];
     /// defaults to NTSC for existing parity tests.
     hsync_cycles: u64,
@@ -201,8 +220,9 @@ pub struct Bus {
     /// keeping this separate from Timer 1's HBlank source preserves
     /// that phase.
     vblank_hsync_cycles: u64,
-    /// VBlank period in cycles -- one full frame at the current
-    /// video region. 564_398 for NTSC, 677_343 for PAL.
+    /// VBlank period in cycles -- one full non-interlaced field at the
+    /// current video region. 571_236 for NTSC, 680_438 for PAL at the
+    /// canonical physical scanline periods.
     vblank_period: u64,
     /// Addresses we've already logged as unmapped reads. Keeps
     /// log noise bounded when a buggy game pokes a bad pointer
@@ -253,12 +273,15 @@ impl Bus {
             bios: bios_arr,
             scratchpad: zeroed_box(),
             io: zeroed_box(),
+            data_bus_latch: u32::MAX,
+            memory_control: MemoryControl::default(),
             irq: Irq::new(),
             timers: Timers::new(),
             dma: Dma::new(),
             gpu: Gpu::new(),
             spu: Spu::new(),
             sio0: Sio0::new(),
+            sio1: Sio1::new(),
             cdrom: CdRom::new(),
             mdec: crate::mdec::Mdec::new(),
             cycles: 0,
@@ -286,6 +309,7 @@ impl Bus {
             telemetry: GuestTelemetry::new(),
             hle_bios_enabled: false,
             hle_bios_calls: [[0; 256]; 3],
+            hle_irq_jump_buffer: None,
             hsync_cycles: HSYNC_CYCLES_NTSC,
             vblank_hsync_cycles: HSYNC_CYCLES_NTSC,
             vblank_period: VBLANK_PERIOD_CYCLES_NTSC,
@@ -323,17 +347,21 @@ impl Bus {
 
     /// Build a deterministic bus for HLE-BIOS side-loaded homebrew.
     ///
-    /// The BIOS ROM is zero-filled because execution is expected to
-    /// start from a PSX-EXE entry point, not the reset vector. Callers
+    /// The synthetic BIOS contains the retail reset-vector word and is zero
+    /// elsewhere because execution starts from a PSX-EXE entry point. Keeping
+    /// the architecturally visible first word makes ROM probes agree with
+    /// hardware without pretending to provide copyrighted firmware. Callers
     /// must enable HLE BIOS dispatch before running guests that use the
     /// `0xA0` / `0xB0` / `0xC0` syscall tables. Do not use this for
     /// retail disc boot or parity checks against a real BIOS.
     pub fn new_without_bios() -> Self {
-        Self::new(vec![0u8; memory::bios::SIZE]).expect("synthetic BIOS size is fixed")
+        let mut bios = vec![0u8; memory::bios::SIZE];
+        bios[..4].copy_from_slice(&0x3C08_0013u32.to_le_bytes());
+        Self::new(bios).expect("synthetic BIOS size is fixed")
     }
 
     /// Switch to PAL video timing: 50 Hz refresh, 314-scanline
-    /// frames, 2157 HSync cycles. Resets the VBlank scheduler to
+    /// frames, 2167 HSync cycles. Resets the VBlank scheduler to
     /// the PAL first-VBlank cycle + period, and reconfigures the
     /// HBlank tick rate for Timer 1. PAL retail games select this
     /// through GP1 display-mode writes; NTSC is the reset default.
@@ -345,8 +373,8 @@ impl Bus {
         self.set_video_region(true);
     }
 
-    /// Switch to NTSC video timing: 60 Hz refresh, 263-scanline
-    /// frames, 2146 HSync cycles.
+    /// Switch to NTSC video timing: approximately 59.8 Hz refresh,
+    /// 263-scanline frames, 2172 HSync cycles.
     pub fn set_ntsc_mode(&mut self) {
         self.set_video_region(false);
     }
@@ -441,7 +469,7 @@ impl Bus {
             .schedule(crate::scheduler::EventSlot::VBlank, self.cycles, delay);
     }
 
-    /// Current HSync period in cycles -- NTSC = 2146, PAL = 2157.
+    /// Current HSync period in CPU cycles -- NTSC = 2172, PAL = 2167.
     pub fn hsync_cycles(&self) -> u64 {
         self.hsync_cycles
     }
@@ -457,6 +485,27 @@ impl Bus {
     /// oracle emulator runs the real BIOS ROM and will diverge.
     pub fn enable_hle_bios(&mut self) {
         self.hle_bios_enabled = true;
+        self.hle_irq_jump_buffer = None;
+        // The retail kernel publishes a Process** at 0x108. Side-loading an
+        // EXE skips that initialization, so provide a reserved low-RAM
+        // process/thread pair for homebrew exception hooks. The guest remains
+        // free to replace the unresolved-handler pointer at 0x300.
+        self.write32(
+            crate::hle_bios::PROCESS_LIST_PTR,
+            crate::hle_bios::SYNTHETIC_PROCESS,
+        );
+        self.write32(
+            crate::hle_bios::SYNTHETIC_PROCESS,
+            crate::hle_bios::SYNTHETIC_THREAD,
+        );
+    }
+
+    pub(crate) fn set_hle_irq_jump_buffer(&mut self, pointer: Option<u32>) {
+        self.hle_irq_jump_buffer = pointer.filter(|pointer| *pointer != 0);
+    }
+
+    pub(crate) fn hle_irq_jump_buffer(&self) -> Option<u32> {
+        self.hle_irq_jump_buffer
     }
 
     /// Plug a digital controller into port 1 so homebrew / commercial
@@ -709,6 +758,9 @@ impl Bus {
         };
         self.hle_bios_calls[idx][func as usize] =
             self.hle_bios_calls[idx][func as usize].saturating_add(1);
+        if std::env::var_os("PSOXIDE_TRACE_HLE_BIOS").is_some() {
+            eprintln!("[hle-bios] {table:?}({func:02x}h)");
+        }
     }
 
     /// Snapshot of HLE BIOS call counts: `[A, B, C]` tables × 256
@@ -937,6 +989,14 @@ impl Bus {
                     }
                 }
                 EventSlot::MdecOutDma => {
+                    if std::env::var_os("PSOXIDE_TRACE_MDEC_DMA").is_some() {
+                        eprintln!(
+                            "[mdec-dma] output due cycle={} target={target} ch0={:#010x} ch1={:#010x}",
+                            self.cycles,
+                            self.dma.channels[0].channel_control,
+                            self.dma.channels[1].channel_control
+                        );
+                    }
                     if self.mdec.complete_dma_out() && self.complete_dma_channel(0) {
                         dma_edge = true;
                     }
@@ -1028,7 +1088,13 @@ impl Bus {
     /// raises that IRQ once per tick if any channel was on the
     /// edge.
     fn complete_dma_channel(&mut self, ch: usize) -> bool {
-        self.dma.channels[ch].channel_control &= !(1 << 24);
+        if ch == 6 {
+            // OTC direction/decrement is hardwired to bit 1; both manual
+            // trigger and busy clear when the transfer completes.
+            self.dma.channels[ch].channel_control = 1 << 1;
+        } else {
+            self.dma.channels[ch].channel_control &= !(1 << 24);
+        }
         self.dma.notify_channel_done(ch)
     }
 
@@ -1046,6 +1112,59 @@ impl Bus {
         self.advance_cycles(n);
     }
 
+    /// Charge root-counter MMIO read wait states while latching only the
+    /// selected counter. The public timer program observes exactly the
+    /// software instructions between two reads of the same counter
+    /// (1000 -> 1011), while another counter still measures the complete
+    /// three-cycle MMIO transaction in the independent access-time program.
+    /// VBlank, DMA, the other root counters, and the global CPU clock continue
+    /// to advance normally.
+    pub(crate) fn add_root_counter_read_stalls(&mut self, addr: u32, n: u32) {
+        self.service_timers();
+        self.timers.hold_counter_for_read(to_physical(addr), n);
+        self.advance_cycles(n);
+    }
+
+    /// CPU data-read stall cycles beyond the instruction's one-cycle issue.
+    /// Bus clients such as DMA use the raw read/write methods and therefore
+    /// do not accidentally pay CPU pipeline costs.
+    #[inline]
+    pub(crate) fn cpu_read_stalls(&self, virt: u32, width: AccessWidth) -> u32 {
+        // Root-counter reads use the same three-cycle total (one issue + two
+        // wait) measured for the other internal MMIO registers by the public
+        // access-time suite. Counter phase differences in compound loops must
+        // be modeled at their real CPU/bus dependency, not hidden in this
+        // independently observable access cost.
+        let stalls = self.memory_control.read_stalls(virt, width);
+        if to_physical(virt) < memory::ram::MIRROR_END {
+            stalls.saturating_add(memory_timing::dram_refresh_wait(self.cycles))
+        } else {
+            stalls
+        }
+    }
+
+    /// Uncached instruction-fetch stall cycles.
+    #[inline]
+    pub(crate) fn instruction_read_stalls(&self, virt: u32) -> u32 {
+        let stalls = self.memory_control.instruction_read_stalls(virt);
+        if to_physical(virt) < memory::ram::MIRROR_END {
+            stalls.saturating_add(memory_timing::dram_refresh_wait(self.cycles))
+        } else {
+            stalls
+        }
+    }
+
+    /// Cache-line refill stall cycles for `words` fetched from `phys`.
+    #[inline]
+    pub(crate) fn icache_fill_stalls(&self, phys: u32, words: u32) -> u32 {
+        let stalls = self.memory_control.icache_fill_stalls(phys, words);
+        if words != 0 && phys < memory::ram::MIRROR_END {
+            stalls.saturating_add(memory_timing::dram_refresh_wait(self.cycles))
+        } else {
+            stalls
+        }
+    }
+
     /// Inner cycle-advancement helper shared by `tick` and `add_cycles`.
     /// Any cycle delta must flow through this function so the timer
     /// bank's accumulator matches Redux's lazy-read timer model.
@@ -1057,12 +1176,11 @@ impl Bus {
         // scheduler drain and on demand from MMIO read / write
         // paths. The lazy advance reads `self.cycles` so it
         // observes the same effective time the per-tick path did.
-        // Decay the GPU's pseudo-busy credit as time passes. At
-        // 32 units per cycle a full-screen (~640×478) fill-rect
-        // credit of 153k takes ~4.8k cycles to drain -- about the
-        // duration of a short VBlank window, matching real
-        // hardware's "a few scanlines to finish the batch".
-        self.gpu.decay_busy((n as u64) * 32);
+        // GPU execution credit is expressed directly in CPU/bus
+        // cycles. Keeping the unit identical to the global clock makes
+        // silicon-derived command costs composable with Timer 1/HBlank
+        // measurements and avoids the old arbitrary 32× decay scale.
+        self.gpu.decay_busy(n as u64);
     }
 
     /// Advance the timer bank to the current bus cycle and forward
@@ -1073,9 +1191,17 @@ impl Bus {
     /// observing timer state; the scheduler drain calls it once
     /// per branch-test boundary so IRQs fire on time.
     fn service_timers(&mut self) {
-        let fired =
-            self.timers
-                .advance_to(self.cycles, self.hsync_cycles, self.gpu.dot_clock_divisor());
+        let next_vblank = self
+            .scheduler
+            .target(crate::scheduler::EventSlot::VBlank)
+            .unwrap_or(u64::MAX);
+        let fired = self.timers.advance_to_video(
+            self.cycles,
+            self.hsync_cycles,
+            self.gpu.dot_clock_divisor(),
+            next_vblank,
+            self.vblank_period,
+        );
         if fired & 1 != 0 {
             self.irq.raise(IrqSource::Timer0);
         }
@@ -1262,10 +1388,33 @@ impl Bus {
         // handler ~1 hblank early and diverges the trace by dozens of
         // instructions.
         use crate::scheduler::EventSlot;
+        if std::env::var_os("PSOXIDE_TRACE_MDEC_DMA").is_some() && ch <= 1 {
+            let channel = self.dma.channels[ch];
+            eprintln!(
+                "[mdec-dma] start ch={ch} cycle={} dpcr={:#010x} bcr={:#010x} chcr={:#010x} out_ready={}",
+                self.cycles,
+                self.dma.dpcr,
+                channel.block_control,
+                channel.channel_control,
+                self.mdec.can_dma_out()
+            );
+        }
         // Run only the channel whose CHCR was just written.
         match ch {
             0 => {
                 if let Some(mdec_words) = self.run_dma_mdec_in() {
+                    if std::env::var_os("PSOXIDE_TRACE_MDEC_DMA").is_some() {
+                        eprintln!(
+                            "[mdec-dma] input accepted cycle={} words={mdec_words} command={:#010x} state={:?} rle={} next={:?} out_ready={} wait_for_out={}",
+                            self.cycles,
+                            self.mdec.command_history().last().copied().unwrap_or(0),
+                            self.mdec.state(),
+                            self.mdec.queued_rle_halfwords(),
+                            self.mdec.next_rle_halfword(),
+                            self.mdec.output_ready(),
+                            self.mdec.decode_dma0_waits_for_output()
+                        );
+                    }
                     if self.mdec.decode_dma0_waits_for_output() {
                         self.try_schedule_ready_mdec_out();
                     } else {
@@ -1331,10 +1480,17 @@ impl Bus {
                     0
                 };
                 if otc_words > 0 {
-                    let target = self.cycles + otc_words as u64;
-                    self.log_dma_schedule("GpuOtc", otc_words as u64, target);
+                    // OTC owns the main-RAM bus for the complete transfer, so
+                    // the CPU cannot execute the following CHCR read until the
+                    // ordering table is finished. PS1 DRAM hyper-page mode is
+                    // one cycle per word plus one row-address setup per 16
+                    // words (the same measured model used by DuckStation).
+                    let otc_cycles = otc_words.saturating_add(otc_words.div_ceil(16));
+                    let target = self.cycles + otc_cycles as u64;
+                    self.log_dma_schedule("GpuOtc", otc_cycles as u64, target);
                     self.scheduler
-                        .schedule(EventSlot::GpuOtcDma, self.cycles, otc_words as u64);
+                        .schedule(EventSlot::GpuOtcDma, self.cycles, otc_cycles as u64);
+                    self.add_cycles(otc_cycles);
                 }
             }
             _ => {
@@ -1372,6 +1528,14 @@ impl Bus {
         use crate::scheduler::EventSlot;
 
         if self.scheduler.is_pending(EventSlot::MdecOutDma) || !self.mdec.can_dma_out() {
+            if std::env::var_os("PSOXIDE_TRACE_MDEC_DMA").is_some() {
+                eprintln!(
+                    "[mdec-dma] output deferred cycle={} pending={} can_out={}",
+                    self.cycles,
+                    self.scheduler.is_pending(EventSlot::MdecOutDma),
+                    self.mdec.can_dma_out()
+                );
+            }
             return;
         }
         if let Some(mdec_words) = self.run_dma_mdec_out() {
@@ -1382,6 +1546,18 @@ impl Bus {
             self.log_dma_schedule("MdecOut", delay, target);
             self.scheduler
                 .schedule(EventSlot::MdecOutDma, self.cycles, delay);
+            if std::env::var_os("PSOXIDE_TRACE_MDEC_DMA").is_some() {
+                eprintln!(
+                    "[mdec-dma] output scheduled cycle={} words={mdec_words} delay={delay}",
+                    self.cycles
+                );
+            }
+        } else if std::env::var_os("PSOXIDE_TRACE_MDEC_DMA").is_some() {
+            let channel = self.dma.channels[1];
+            eprintln!(
+                "[mdec-dma] output not armed cycle={} dpcr={:#010x} bcr={:#010x} chcr={:#010x}",
+                self.cycles, self.dma.dpcr, channel.block_control, channel.channel_control
+            );
         }
     }
 
@@ -1445,9 +1621,10 @@ impl Bus {
         Some(total_words)
     }
 
-    /// Execute DMA channel 4 ↔ SPU. Redux treats the BCR product as a
-    /// halfword count for the data copy and schedules completion after
-    /// half that product (`scheduleSPUDMAIRQ(product / 2)`).
+    /// Execute DMA channel 4 ↔ SPU. The SPU transfer engine consumes one
+    /// halfword every 16 CPU cycles. This is independently exercised by
+    /// JaCzekanski's real-hardware `spu/memory-transfer` test and matches
+    /// DuckStation's event-driven FIFO model.
     ///
     /// - Direction bit 0 = 1: main RAM → SPU RAM (normal -- upload sample data).
     /// - Direction bit 0 = 0: SPU RAM → main RAM (rare -- live capture).
@@ -1479,7 +1656,8 @@ impl Bus {
         // BCR length is a count of 32-bit DMA words. Each transferred word
         // maps to TWO 16-bit SPU-RAM halfwords, so the SPU receives twice
         // this many halfwords (Redux's writeDMAMem `size` = 2 x BCR product).
-        // Completion timing still scales with the word count (product / 2).
+        // Completion timing is governed by the SPU FIFO engine, not merely
+        // the much faster main-RAM DMA bus transaction.
         let word_count: u32 = match sync_mode {
             0 => bcr & 0xFFFF,
             1 => {
@@ -1513,7 +1691,7 @@ impl Bus {
             }
         }
         self.service_spu_irq();
-        Some(word_count / 2)
+        Some(halfword_count.saturating_mul(16))
     }
 
     /// Execute DMA channel 3 → CPU. Block mode (sync=1) is the only
@@ -1605,9 +1783,12 @@ impl Bus {
         Some(total_words)
     }
 
-    /// Execute DMA channel 2 → GPU (GP0). Supports the two sync modes
-    /// the BIOS + games actually use for this channel:
+    /// Execute DMA channel 2 → GPU (GP0). Supports all three useful sync
+    /// modes:
     ///
+    /// - **Mode 0 (manual)**: Ship the low BCR halfword's word count. GPU
+    ///   transfers begin from CHCR's busy bit alone; unlike OTC, channel 2
+    ///   does not require the separate manual-trigger bit.
     /// - **Mode 1 (block)**: Ship `BS × BA` words starting at
     ///   `MADR` straight into GP0, with the `MADR` step direction
     ///   given by CHCR bit 1 (+4 or -4). PS1 always uses +4 direction
@@ -1622,15 +1803,18 @@ impl Bus {
     /// the channel wasn't armed. CHCR start/busy bits are NOT cleared
     /// here -- the scheduler does that at the completion cycle.
     ///
-    /// `completion_cycles` is the Redux-accurate event delay, which
-    /// depends on sync mode and transfer direction:
+    /// `completion_cycles` depends on sync mode, transfer direction, and
+    /// whether GP0 is currently receiving an A0h VRAM upload:
     ///
-    /// - **Block, mem2vram** (RAM→GPU, bit 0 = 1): `7 * block_count`,
-    ///   per Redux `core/gpu.cc` L551: `scheduleGPUDMAIRQ((7 * size)
-    ///   / bs)` = `7 * block_count`. That's the active path in
-    ///   modern Redux (the `#if 0` branch above it uses `size`).
-    /// - **Block, vram2mem** (GPU→RAM, bit 0 = 0): `total_words`,
-    ///   per Redux L523: `scheduleGPUDMAIRQ(size)`.
+    /// - **A0h image upload**: calibrated against JaCzekanski/ps1-tests
+    ///   build-158 `dma/chopping/psx.log`. Real hardware costs roughly one
+    ///   cycle per word plus ten cycles per mode-1 block. Manual chopping
+    ///   adds the programmed CPU window plus six arbitration cycles per DMA
+    ///   window.
+    /// - **Block command traffic**: retains Redux's `7 * block_count` until
+    ///   the HWTEST v0.9 NOP-DMA page supplies a direct console capture.
+    /// - **GPU→RAM download**: about 2.195 cycles per packed 32-bit word,
+    ///   calibrated against the public 320×240 `gpu/bandwidth` silicon run.
     /// - **Linked list**: `total_words`, per Redux L568:
     ///   `scheduleGPUDMAIRQ(size)` where size is the
     ///   `gpuDmaChainSize` traversed count.
@@ -1645,10 +1829,10 @@ impl Bus {
         let sync_mode = (ch.channel_control >> 9) & 0x3;
         let direction_to_device = ch.channel_control & 1 != 0;
         let completion = match sync_mode {
+            0 => self.dma_gpu_manual(direction_to_device),
             1 => self.dma_gpu_block(direction_to_device),
             2 => self.dma_gpu_linked_list(),
-            _ => 0, // Manual (0) + prohibited (3) -- nothing standard uses
-                    // them for the GPU channel. Drop the trigger silently.
+            _ => 0, // prohibited mode 3
         };
         self.service_gpu_irq();
         // Start bit stays set until the scheduled completion event
@@ -1663,8 +1847,9 @@ impl Bus {
         let mut addr = ch.base & 0x001F_FFFC;
         let bcr = ch.block_control;
         let block_size = bcr & 0xFFFF;
-        let block_count = (bcr >> 16).max(1) & 0xFFFF;
-        let total_words = block_size * block_count;
+        let block_count = ((bcr >> 16) & 0xFFFF).max(1);
+        let total_words = block_size.saturating_mul(block_count);
+        let upload_active = to_device && self.gpu.vram_upload_active();
         let step = if (ch.channel_control >> 1) & 1 != 0 {
             // Decrement mode -- rarely used for GPU but handle for safety.
             0xFFFF_FFFCu32
@@ -1674,7 +1859,7 @@ impl Bus {
         if to_device {
             for _ in 0..total_words {
                 let word = read_ram_u32(&self.ram[..], addr);
-                self.gpu.gp0_push(word);
+                self.gpu.gp0_push_dma(word);
                 addr = addr.wrapping_add(step);
             }
         } else {
@@ -1684,14 +1869,52 @@ impl Bus {
                 addr = addr.wrapping_add(step);
             }
         }
-        // Redux's formulas: mem2vram uses `7 * block_count` (the
-        // "X-Files video interlace. Experimental delay depending
-        // of BS" active path in `core/gpu.cc`); vram2mem uses the
-        // raw word count.
+        // Image uploads are gated by the GPU's request line. The public
+        // silicon sweep uses a 2048-word A0h upload and varies BCR's block
+        // shape from 1x2048 through 128x16; one word + ten arbitration
+        // cycles per block, plus the calibrated fixed pipeline term, keeps
+        // the whole sweep within a few percent. Command traffic keeps the
+        // Redux completion model pending the dedicated HWTEST capture.
         if to_device {
-            7 * block_count
+            if upload_active {
+                gpu_upload_block_cycles(total_words, block_count)
+            } else {
+                7 * block_count
+            }
         } else {
-            total_words
+            gpu_download_cycles(total_words)
+        }
+    }
+
+    fn dma_gpu_manual(&mut self, to_device: bool) -> u32 {
+        let ch = self.dma.channels[2];
+        let mut addr = ch.base & 0x001F_FFFC;
+        let total_words = dma_count_16(ch.block_control & 0xFFFF);
+        let upload_active = to_device && self.gpu.vram_upload_active();
+        let step = if (ch.channel_control >> 1) & 1 != 0 {
+            0xFFFF_FFFC
+        } else {
+            4
+        };
+
+        if to_device {
+            for _ in 0..total_words {
+                let word = read_ram_u32(&self.ram[..], addr);
+                self.gpu.gp0_push_dma(word);
+                addr = addr.wrapping_add(step);
+            }
+        } else {
+            for _ in 0..total_words {
+                let word = self.gpu.read32(crate::gpu::GP0_ADDR).unwrap_or(0);
+                write_ram_u32(&mut self.ram[..], addr, word);
+                addr = addr.wrapping_add(step);
+            }
+        }
+
+        if upload_active {
+            gpu_upload_manual_cycles(total_words, ch.channel_control)
+        } else {
+            gpu_download_cycles(total_words)
         }
     }
 
@@ -1711,7 +1934,7 @@ impl Bus {
             for i in 0..word_count {
                 let word_addr = addr.wrapping_add(4 + i * 4);
                 let word = read_ram_u32(&self.ram[..], word_addr);
-                self.gpu.gp0_push(word);
+                self.gpu.gp0_push_dma(word);
             }
             // Redux charges `(header >> 24) + 1` per node (see
             // `gpuDmaChainSize:474`). The `+1` covers the header
@@ -1787,6 +2010,11 @@ impl Bus {
         {
             return Some(0xFF);
         }
+        if (memory::expansion3::BASE..memory::expansion3::BASE + memory::expansion3::SIZE as u32)
+            .contains(&phys)
+        {
+            return Some(0xFF);
+        }
         None
     }
 
@@ -1801,6 +2029,9 @@ impl Bus {
     pub fn read8(&mut self, virt: u32) -> u8 {
         let phys = to_physical(virt);
         let value = self.read8_impl(virt, phys);
+        let shift = (phys & 3) * 8;
+        self.data_bus_latch =
+            (self.data_bus_latch & !(0xFF << shift)) | (u32::from(value) << shift);
         self.trace_mmio(MmioKind::R8, phys, value as u32);
         value
     }
@@ -1823,17 +2054,51 @@ impl Bus {
         {
             return 0xFF;
         }
+        if MemoryControl::contains(phys) {
+            return self.memory_control.read(phys, AccessWidth::Byte) as u8;
+        }
+        if phys == IRQ_STAT_ADDR {
+            return self.irq.stat() as u8;
+        }
+        if phys == IRQ_MASK_ADDR {
+            return self.irq.mask() as u8;
+        }
+        if Timers::contains(phys) {
+            self.service_timers();
+            let aligned = phys & !3;
+            return (self.timers.read32(aligned) >> ((phys & 3) * 8)) as u8;
+        }
         if Dma::contains(phys) {
             return self.dma.read8(phys);
+        }
+        if let Some(value) = self.gpu.read32(phys & !3) {
+            return (value >> ((phys & 3) * 8)) as u8;
+        }
+        if Spu::contains(phys) {
+            let aligned = phys & !1;
+            return (self.spu.read16_at(aligned, self.cycles) >> ((phys & 1) * 8)) as u8;
         }
         if Sio0::contains(phys) {
             self.service_sio0();
             return self.sio0.read8(phys).unwrap_or(0);
         }
+        if Sio1::contains(phys) {
+            let aligned = phys & !3;
+            return (self.sio1.read32(aligned) >> ((phys & 3) * 8)) as u8;
+        }
+        if crate::mdec::Mdec::contains(phys) {
+            let aligned = phys & !3;
+            return (self.mdec.read32(aligned) >> ((phys & 3) * 8)) as u8;
+        }
         if (memory::io::BASE..memory::io::BASE + memory::io::SIZE as u32).contains(&phys) {
             return self.io[(phys - memory::io::BASE) as usize];
         }
         if (memory::expansion2::BASE..memory::expansion2::BASE + memory::expansion2::SIZE as u32)
+            .contains(&phys)
+        {
+            return 0xFF;
+        }
+        if (memory::expansion3::BASE..memory::expansion3::BASE + memory::expansion3::SIZE as u32)
             .contains(&phys)
         {
             return 0xFF;
@@ -1859,6 +2124,9 @@ impl Bus {
     pub fn read16(&mut self, virt: u32) -> u16 {
         let phys = to_physical(virt);
         let value = self.read16_impl(virt, phys);
+        let shift = (phys & 2) * 8;
+        self.data_bus_latch =
+            (self.data_bus_latch & !(0xFFFF << shift)) | (u32::from(value) << shift);
         self.trace_mmio(MmioKind::R16, phys, value as u32);
         value
     }
@@ -1869,7 +2137,8 @@ impl Bus {
             return u16::from_le_bytes([self.ram[off], self.ram[off + 1]]);
         }
         if CdRom::contains(phys) {
-            return self.cdrom.read8(phys) as u16;
+            let byte = self.cdrom.read8(phys) as u16;
+            return byte | (byte << 8);
         }
         if let Some(off) = scratchpad_offset(virt, phys) {
             return u16::from_le_bytes([self.scratchpad[off], self.scratchpad[off + 1]]);
@@ -1882,6 +2151,9 @@ impl Bus {
             .contains(&phys)
         {
             return 0xFFFF;
+        }
+        if MemoryControl::contains(phys) {
+            return self.memory_control.read(phys, AccessWidth::Half) as u16;
         }
         // Same rationale as in `write16_impl`: BIOS reads `I_STAT` /
         // `I_MASK` via `lhu` and would otherwise see the stale echo
@@ -1906,15 +2178,29 @@ impl Bus {
         if Spu::contains(phys) {
             return self.spu.read16_at(phys, self.cycles);
         }
+        if let Some(value) = self.gpu.read32(phys & !3) {
+            return (value >> ((phys & 2) * 8)) as u16;
+        }
         if Sio0::contains(phys) {
             self.service_sio0();
             return self.sio0.read16(phys).unwrap_or(0);
+        }
+        if Sio1::contains(phys) {
+            return (self.sio1.read32(phys & !3) >> ((phys & 2) * 8)) as u16;
+        }
+        if crate::mdec::Mdec::contains(phys) {
+            return (self.mdec.read32(phys & !3) >> ((phys & 2) * 8)) as u16;
         }
         if (memory::io::BASE..memory::io::BASE + memory::io::SIZE as u32).contains(&phys) {
             let off = (phys - memory::io::BASE) as usize;
             return u16::from_le_bytes([self.io[off], self.io[off + 1]]);
         }
         if (memory::expansion2::BASE..memory::expansion2::BASE + memory::expansion2::SIZE as u32)
+            .contains(&phys)
+        {
+            return 0xFFFF;
+        }
+        if (memory::expansion3::BASE..memory::expansion3::BASE + memory::expansion3::SIZE as u32)
             .contains(&phys)
         {
             return 0xFFFF;
@@ -1942,11 +2228,30 @@ impl Bus {
         // just this arm into `Cpu::execute_one` skips an outlined call.
         if phys < memory::ram::MIRROR_END {
             let offset = (phys as usize) % memory::ram::SIZE;
-            return read_u32_le(&self.ram[offset..]);
+            let value = read_u32_le(&self.ram[offset..]);
+            self.data_bus_latch = value;
+            return value;
         }
         let value = self.read32_impl(virt, phys);
+        self.data_bus_latch = value;
         self.trace_mmio(MmioKind::R32, phys, value);
         value
+    }
+
+    /// Instruction-side word fetch used by uncached execution and I-cache
+    /// fills. The R3000A's instruction path does not replace the CPU data-bus
+    /// hold value that leaks into undriven MMIO lanes.
+    pub(crate) fn read_instruction32(&mut self, virt: u32) -> u32 {
+        let phys = to_physical(virt);
+        if phys < memory::ram::MIRROR_END {
+            let offset = (phys as usize) % memory::ram::SIZE;
+            return read_u32_le(&self.ram[offset..]);
+        }
+        if (memory::bios::BASE..memory::bios::BASE + memory::bios::SIZE as u32).contains(&phys) {
+            let offset = (phys - memory::bios::BASE) as usize;
+            return read_u32_le(&self.bios[offset..]);
+        }
+        self.read32(virt)
     }
 
     /// Side-effect-free peek at a 32-bit instruction word. Returns
@@ -1995,15 +2300,19 @@ impl Bus {
             return 0xFFFF_FFFF;
         }
 
+        if MemoryControl::contains(phys) {
+            return self.memory_control.read(phys, AccessWidth::Word);
+        }
+
         if phys == IRQ_STAT_ADDR {
             return self.irq.stat();
         }
         if phys == IRQ_MASK_ADDR {
-            return self.irq.mask();
+            return (self.data_bus_latch & 0xFFFF_0000) | self.irq.mask();
         }
         if Timers::contains(phys) {
             self.service_timers();
-            return self.timers.read32(phys);
+            return (self.data_bus_latch & 0xFFFF_0000) | self.timers.read32(phys);
         }
         if Dma::contains(phys) {
             return self.dma.read32(phys);
@@ -2018,13 +2327,14 @@ impl Bus {
             self.service_sio0();
             return self.sio0.read32(phys).unwrap_or(0);
         }
+        if Sio1::contains(phys) {
+            return self.sio1.read32(phys);
+        }
         if CdRom::contains(phys) {
-            // CD-ROM regs are 8-bit; word access composites them.
-            let b0 = self.cdrom.read8(phys) as u32;
-            let b1 = self.cdrom.read8(phys + 1) as u32;
-            let b2 = self.cdrom.read8(phys + 2) as u32;
-            let b3 = self.cdrom.read8(phys + 3) as u32;
-            return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+            // The CD controller is attached through an 8-bit bridge. Wider
+            // CPU reads sample the selected byte port on every active lane.
+            let byte = self.cdrom.read8(phys) as u32;
+            return byte * 0x0101_0101;
         }
         if crate::mdec::Mdec::contains(phys) {
             return self.mdec.read32(phys);
@@ -2033,6 +2343,15 @@ impl Bus {
         if (memory::io::BASE..memory::io::BASE + memory::io::SIZE as u32).contains(&phys) {
             let offset = (phys - memory::io::BASE) as usize;
             return read_u32_le(&self.io[offset..]);
+        }
+
+        if (memory::expansion2::BASE..memory::expansion2::BASE + memory::expansion2::SIZE as u32)
+            .contains(&phys)
+            || (memory::expansion3::BASE
+                ..memory::expansion3::BASE + memory::expansion3::SIZE as u32)
+                .contains(&phys)
+        {
+            return 0xFFFF_FFFF;
         }
 
         if self.log_unmapped_read_once(virt) {
@@ -2045,8 +2364,9 @@ impl Bus {
     ///
     /// - **RAM / scratchpad**: committed to the backing storage.
     /// - **BIOS ROM**: silently dropped (ROM is read-only).
-    /// - **Cache-control register** `0xFFFE_0130`: silently dropped
-    ///   until we model the I-cache.
+    /// - **Cache-control register** `0xFFFE_0130`: normally intercepted
+    ///   by the CPU; silently dropped here as a defensive fallback for
+    ///   direct bus clients.
     /// - **MMIO window** `0x1F80_1000..0x1F80_2000`: silently dropped
     ///   for now. Individual peripheral stubs will attach as we add
     ///   them; until then, BIOS's memory-controller init writes are
@@ -2069,8 +2389,26 @@ impl Bus {
         self.write32_impl(virt, phys, value);
     }
 
+    /// CPU `SW` transaction. Unlike host-side initialization through
+    /// [`Bus::write32`], an architectural store drives the data-bus latch.
+    /// GP0 writes additionally stall behind queued GPU execution work: on
+    /// silicon the store itself blocks once the input path is occupied even
+    /// though DMA-ready GPUSTAT.28 can remain high for CPU-fed rendering.
+    pub(crate) fn cpu_write32(&mut self, virt: u32, value: u32) {
+        self.data_bus_latch = value;
+        if to_physical(virt) == crate::gpu::GP0_ADDR {
+            let stall = self.gpu.cpu_gp0_write_stall();
+            self.add_cycles(stall);
+        }
+        self.write32(virt, value);
+    }
+
     fn write32_impl(&mut self, virt: u32, phys: u32, value: u32) {
         if self.telemetry.observe_write32(phys, value, self.cycles) {
+            return;
+        }
+        if MemoryControl::contains(phys) {
+            self.memory_control.write(phys, AccessWidth::Word, value);
             return;
         }
         if phys == IRQ_STAT_ADDR {
@@ -2142,6 +2480,14 @@ impl Bus {
             self.service_sio0();
             return;
         }
+        if Sio1::contains(phys) {
+            self.sio1.write16(phys, value as u16);
+            return;
+        }
+        if CdRom::contains(phys) {
+            self.write_cdrom_lanes(phys, value, 4);
+            return;
+        }
         if crate::mdec::Mdec::contains(phys) {
             self.mdec.write32(phys, value);
             return;
@@ -2172,6 +2518,12 @@ impl Bus {
             return;
         }
 
+        if (memory::expansion3::BASE..memory::expansion3::BASE + memory::expansion3::SIZE as u32)
+            .contains(&phys)
+        {
+            return;
+        }
+
         if (memory::bios::BASE..memory::bios::BASE + memory::bios::SIZE as u32).contains(&phys) {
             return;
         }
@@ -2190,6 +2542,113 @@ impl Bus {
         let phys = to_physical(virt);
         self.trace_mmio(MmioKind::W8, phys, value as u32);
         self.write8_impl(virt, phys, value);
+    }
+
+    /// CPU `SB` transaction. The RAM byte lane receives only the low byte, but
+    /// the R3000A still drives all 32 source-register bits on the peripheral
+    /// bus. Several PS1 devices ignore byte enables and latch that complete
+    /// word; direct bus clients keep using [`Bus::write8`] for an actual byte.
+    pub(crate) fn cpu_write8(&mut self, virt: u32, source: u32) {
+        self.data_bus_latch = source;
+        let phys = to_physical(virt);
+        self.trace_mmio(MmioKind::W8, phys, source & 0xFF);
+        if !self.cpu_write_narrow_mmio(virt, phys, source, AccessWidth::Byte) {
+            self.write8_impl(virt, phys, source as u8);
+        }
+    }
+
+    /// CPU `SH` transaction; see [`Bus::cpu_write8`] for why `source` retains
+    /// the complete GPR value even though RAM consumes only its low halfword.
+    pub(crate) fn cpu_write16(&mut self, virt: u32, source: u32) {
+        self.data_bus_latch = source;
+        let phys = to_physical(virt);
+        self.trace_mmio(MmioKind::W16, phys, source & 0xFFFF);
+        if !self.cpu_write_narrow_mmio(virt, phys, source, AccessWidth::Half) {
+            self.write16_impl(virt, phys, source as u16);
+        }
+    }
+
+    fn cpu_write_narrow_mmio(
+        &mut self,
+        virt: u32,
+        phys: u32,
+        source: u32,
+        width: AccessWidth,
+    ) -> bool {
+        if phys == IRQ_STAT_ADDR {
+            self.irq.write_stat_at(source, self.cycles);
+            return true;
+        }
+        if phys == IRQ_MASK_ADDR {
+            self.irq.write_mask_at(source, self.cycles);
+            return true;
+        }
+        if Timers::contains(phys) {
+            self.service_timers();
+            if std::env::var_os("PSOXIDE_TRACE_TIMERS").is_some()
+                && (phys - Timers::BASE) % Timers::STRIDE == 4
+            {
+                eprintln!(
+                    "[timers] mode-write t{} value={:04x} cycle={} next-vblank={} period={}",
+                    (phys - Timers::BASE) / Timers::STRIDE,
+                    source & 0xFFFF,
+                    self.cycles,
+                    self.next_vblank_cycle(),
+                    self.vblank_period
+                );
+            }
+            self.timers.write32(phys & !3, source, self.cycles);
+            return true;
+        }
+        if Dma::contains(phys) {
+            // DMA registers ignore byte enables and observe the complete CPU
+            // source word. Reuse the normal word path so CHCR side effects and
+            // IRQ behavior remain centralized.
+            self.write32_impl(virt, phys & !3, source);
+            return true;
+        }
+        if Spu::contains(phys) {
+            self.spu.write16_at(phys & !1, source as u16, self.cycles);
+            self.service_spu_irq();
+            return true;
+        }
+        if Sio0::contains(phys) {
+            self.service_sio0();
+            self.sio0.write16_at(phys & !1, source as u16, self.cycles);
+            self.service_sio0();
+            return true;
+        }
+        if Sio1::contains(phys) {
+            self.sio1.write16(phys & !1, source as u16);
+            return true;
+        }
+        if CdRom::contains(phys) {
+            self.write_cdrom_lanes(phys, source, if width == AccessWidth::Byte { 1 } else { 2 });
+            return true;
+        }
+        let aligned = phys & !3;
+        if self.gpu.write32(aligned, source) {
+            self.service_gpu_irq();
+            return true;
+        }
+        if crate::mdec::Mdec::contains(phys) {
+            self.mdec.write32(aligned, source);
+            return true;
+        }
+        false
+    }
+
+    fn write_cdrom_lanes(&mut self, phys: u32, value: u32, lanes: u32) {
+        for lane in 0..lanes {
+            let byte = (value >> (lane * 8)) as u8;
+            // The CD-ROM controller is an 8-bit peripheral. A wider CPU
+            // store repeats its byte lanes onto the selected port rather than
+            // walking across the four adjacent CD-ROM registers. Real-hardware
+            // bit-width probes depend on the final lane becoming the new index.
+            if self.cdrom.write8_at(phys, byte, self.cycles) {
+                self.irq.raise(IrqSource::Cdrom);
+            }
+        }
     }
 
     fn write8_impl(&mut self, virt: u32, phys: u32, value: u8) {
@@ -2212,6 +2671,11 @@ impl Bus {
         }
         if let Some(offset) = scratchpad_offset(virt, phys) {
             self.scratchpad[offset] = value;
+            return;
+        }
+        if MemoryControl::contains(phys) {
+            self.memory_control
+                .write(phys, AccessWidth::Byte, value as u32);
             return;
         }
         // CDROM is byte-addressed (4 registers, each switching meaning by
@@ -2241,11 +2705,20 @@ impl Bus {
             self.service_sio0();
             return;
         }
+        if Sio1::contains(phys) {
+            self.sio1.write16(phys & !1, value as u16);
+            return;
+        }
         if (memory::io::BASE..memory::io::BASE + memory::io::SIZE as u32).contains(&phys) {
             self.io[(phys - memory::io::BASE) as usize] = value;
             return;
         }
         if (memory::expansion2::BASE..memory::expansion2::BASE + memory::expansion2::SIZE as u32)
+            .contains(&phys)
+        {
+            return;
+        }
+        if (memory::expansion3::BASE..memory::expansion3::BASE + memory::expansion3::SIZE as u32)
             .contains(&phys)
         {
             return;
@@ -2277,6 +2750,15 @@ impl Bus {
         }
         if let Some(off) = scratchpad_offset(virt, phys) {
             self.scratchpad[off..off + 2].copy_from_slice(&bytes);
+            return;
+        }
+        if MemoryControl::contains(phys) {
+            self.memory_control
+                .write(phys, AccessWidth::Half, value as u32);
+            return;
+        }
+        if CdRom::contains(phys) {
+            self.write_cdrom_lanes(phys, value as u32, 2);
             return;
         }
         // The BIOS uses `sh` (16-bit store) to write `I_MASK` and ack
@@ -2315,12 +2797,29 @@ impl Bus {
             self.service_sio0();
             return;
         }
+        if Sio1::contains(phys) {
+            self.sio1.write16(phys, value);
+            return;
+        }
+        if self.gpu.write32(phys & !3, value as u32) {
+            self.service_gpu_irq();
+            return;
+        }
+        if crate::mdec::Mdec::contains(phys) {
+            self.mdec.write32(phys & !3, value as u32);
+            return;
+        }
         if (memory::io::BASE..memory::io::BASE + memory::io::SIZE as u32).contains(&phys) {
             let off = (phys - memory::io::BASE) as usize;
             self.io[off..off + 2].copy_from_slice(&bytes);
             return;
         }
         if (memory::expansion2::BASE..memory::expansion2::BASE + memory::expansion2::SIZE as u32)
+            .contains(&phys)
+        {
+            return;
+        }
+        if (memory::expansion3::BASE..memory::expansion3::BASE + memory::expansion3::SIZE as u32)
             .contains(&phys)
         {
             return;
@@ -2358,6 +2857,65 @@ fn scratchpad_offset(virt: u32, phys: u32) -> Option<usize> {
 
 fn read_u32_le(bytes: &[u8]) -> u32 {
     u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+}
+
+#[inline]
+fn dma_count_16(raw: u32) -> u32 {
+    match raw & 0xFFFF {
+        0 => 0x1_0000,
+        count => count,
+    }
+}
+
+/// Completion delay for a mode-1 RAM-to-GPU A0h image upload.
+///
+/// Fitted to the 65 block shapes in JaCzekanski/ps1-tests build-158's
+/// `dma/chopping` real-console log. The source transfers approximately one
+/// word per cycle and pays about ten GPU-DREQ arbitration cycles per block.
+/// The 250-cycle term is the fixed upload/FIFO pipeline cost after removing
+/// the test harness's timer and polling overhead.
+#[inline]
+fn gpu_upload_block_cycles(total_words: u32, block_count: u32) -> u32 {
+    total_words
+        .saturating_add(block_count.saturating_mul(10))
+        .saturating_add(250)
+}
+
+/// Completion delay for a mode-0 RAM-to-GPU A0h image upload.
+///
+/// Without chopping the public 2048-word silicon capture takes 2196 cycles
+/// including about 25 cycles of timer/polling harness, hence `words + 123`.
+/// Chopping alternates `2^N` DMA words with `2^M` CPU clocks and pays six
+/// arbitration clocks per window.
+#[inline]
+fn gpu_upload_manual_cycles(total_words: u32, channel_control: u32) -> u32 {
+    let base = total_words.saturating_add(123);
+    if channel_control & (1 << 8) == 0 {
+        return base;
+    }
+
+    let dma_window = 1u32 << ((channel_control >> 16) & 7);
+    let cpu_window = 1u32 << ((channel_control >> 20) & 7);
+    let windows = total_words.div_ceil(dma_window);
+    // Two corners in the silicon sweep pay one extra arbitration clock per
+    // window. Keep them explicit instead of perturbing the regular model:
+    // the other 62 combinations follow the six-clock rule closely.
+    let extra_arbitration =
+        (dma_window == 2 && cpu_window == 1) || (dma_window == 1 && cpu_window == 2);
+    let arbitration = if extra_arbitration { 7 } else { 6 };
+    base.saturating_add(windows.saturating_mul(arbitration + cpu_window))
+}
+
+/// Completion delay for a GPU-to-RAM packed-pixel download.
+///
+/// JaCzekanski/ps1-tests build-158's `gpu/bandwidth` capture transfers a
+/// 320×240 16bpp image 400 times. Its 15,770 HBlank duration resolves to
+/// roughly 2.195 CPU cycles per 32-bit GPUREAD word after subtracting the
+/// command/poll harness. This path is intentionally independent from the
+/// faster RAM-to-GPU upload request cadence.
+#[inline]
+fn gpu_download_cycles(total_words: u32) -> u32 {
+    total_words.saturating_mul(281).div_ceil(128)
 }
 
 /// Word read from a RAM slice at a physical RAM offset (already masked
@@ -2446,9 +3004,10 @@ mod tests {
     }
 
     #[test]
-    fn new_without_bios_builds_zero_filled_bios_bus() {
+    fn new_without_bios_exposes_retail_reset_vector_word() {
         let mut bus = Bus::new_without_bios();
-        assert_eq!(bus.read32(0xBFC0_0000), 0);
+        assert_eq!(bus.read32(0xBFC0_0000), 0x3C08_0013);
+        assert_eq!(bus.read32(0xBFC0_0004), 0);
     }
 
     #[test]
@@ -2532,7 +3091,7 @@ mod tests {
         bus.tick(8192);
 
         let mode = bus.read32(TIMER2_MODE);
-        let counter = bus.read32(TIMER2_COUNTER);
+        let counter = bus.read32(TIMER2_COUNTER) & 0xFFFF;
 
         assert_ne!(mode & MODE_REACHED_TARGET, 0);
         assert!(
@@ -2624,6 +3183,62 @@ mod tests {
         assert_eq!(bus.read32(0xBF80_0010), 0xFFFF_FFFF); // KSEG1: unmapped
         bus.write32(0xBF80_0010, 0xDEAD_BEEF); // KSEG1 write dropped
         assert_eq!(bus.read32(0x1F80_0010), 0x1234_5678); // scratchpad intact
+    }
+
+    #[test]
+    fn expansion_open_bus_reads_cover_every_access_width() {
+        let mut bus = Bus::new(synthetic_bios()).unwrap();
+        for base in [memory::expansion2::BASE, memory::expansion3::BASE] {
+            assert_eq!(bus.read8(base), 0xFF);
+            assert_eq!(bus.read16(base), 0xFFFF);
+            assert_eq!(bus.read32(base), 0xFFFF_FFFF);
+        }
+    }
+
+    #[test]
+    fn cpu_narrow_dma_stores_drive_the_complete_source_register() {
+        let mut bus = Bus::new(synthetic_bios()).unwrap();
+        bus.cpu_write8(Dma::BASE, 0x1234_5678);
+        assert_eq!(bus.read32(Dma::BASE), 0x0034_5678);
+
+        bus.cpu_write16(Dma::BASE + Dma::DPCR_OFFSET, 0x1234_5678);
+        assert_eq!(bus.read32(Dma::BASE + Dma::DPCR_OFFSET), 0x1234_5678);
+    }
+
+    #[test]
+    fn native_width_bridges_shape_narrow_mmio_accesses() {
+        let mut bus = Bus::new(synthetic_bios()).unwrap();
+
+        bus.cpu_write8(Sio0::BASE + 0x8, 0x1234_5678);
+        assert_eq!(bus.read32(Sio0::BASE + 0x8), 0x38);
+        assert_eq!(bus.read8(Sio0::BASE + 0x8), 0x38);
+
+        bus.cpu_write8(Sio1::BASE + 0x8, 0x1234_5678);
+        assert_eq!(bus.read32(Sio1::BASE + 0x8), 0x78);
+
+        bus.cpu_write8(crate::spu::SPUCNT, 0x1234_5678);
+        assert_eq!(bus.read16(crate::spu::SPUCNT), 0x5678);
+
+        assert_eq!(bus.read16(crate::cdrom::BASE), 0x1818);
+        assert_eq!(bus.read32(crate::cdrom::BASE), 0x1818_1818);
+        bus.cpu_write16(crate::cdrom::BASE, 0x1234_5678);
+        assert_eq!(bus.read16(crate::cdrom::BASE), 0x1A1A);
+        assert_eq!(bus.read32(crate::mdec::MDEC_CTRL_STAT), 0x8004_0000);
+        assert_eq!(bus.read16(crate::mdec::MDEC_CTRL_STAT), 0);
+        assert_eq!(bus.read8(crate::mdec::MDEC_CTRL_STAT), 0);
+    }
+
+    #[test]
+    fn narrow_on_die_reads_retain_undriven_data_bus_lanes() {
+        let mut bus = Bus::new(synthetic_bios()).unwrap();
+
+        bus.cpu_write8(IRQ_MASK_ADDR, 0x1234_5678);
+        // Instruction-side traffic must not replace the data-side hold value.
+        let _ = bus.read_instruction32(0);
+        assert_eq!(bus.read32(IRQ_MASK_ADDR), 0x1234_0678);
+
+        bus.cpu_write16(Timers::BASE + 8, 0x1234_5678);
+        assert_eq!(bus.read32(Timers::BASE + 8), 0x1234_5678);
     }
 
     #[test]
@@ -2803,13 +3418,69 @@ mod tests {
         bus.dma.channels[2].block_control = 1;
         bus.dma.channels[2].channel_control = 0x0100_0200;
 
-        assert_eq!(bus.run_dma_gpu(), Some(1));
+        assert_eq!(bus.run_dma_gpu(), Some(3));
         assert_eq!(read_ram_u32(&bus.ram[..], 0x300), 0xBEEF_CAFE);
         assert_eq!(bus.gpu.gp0_opcode_histogram(), hist_before);
     }
 
     #[test]
-    fn spu_dma_transfers_two_halfwords_per_word_with_half_rate_completion_delay() {
+    fn gpu_upload_block_dma_uses_silicon_calibrated_request_pacing() {
+        let mut bus = Bus::new(synthetic_bios()).unwrap();
+        bus.dma.dpcr = 1 << (2 * 4 + 3);
+        bus.gpu.gp0_push(0xA000_0000);
+        bus.gpu.gp0_push(0);
+        bus.gpu.gp0_push((64 << 16) | 64); // 4096 pixels / 2 = 2048 words
+        bus.dma.channels[2].base = 0x400;
+        bus.dma.channels[2].block_control = (128 << 16) | 16;
+        bus.dma.channels[2].channel_control = 0x0100_0201;
+
+        // 2048 words + 10 cycles * 128 blocks + 250-cycle pipeline.
+        assert_eq!(bus.run_dma_gpu(), Some(3578));
+        assert!(!bus.gpu.vram_upload_active());
+    }
+
+    #[test]
+    fn gpu_download_dma_uses_silicon_calibrated_readback_pacing() {
+        assert_eq!(gpu_download_cycles(38_400), 84_300);
+    }
+
+    #[test]
+    fn architectural_gp0_store_stalls_behind_gpu_execution_backlog() {
+        let mut bus = Bus::new(synthetic_bios()).unwrap();
+        let before = bus.cycles();
+        bus.gpu.charge_busy(1_234);
+
+        bus.cpu_write32(crate::gpu::GP0_ADDR, 0); // GP0 NOP
+
+        assert_eq!(bus.cycles(), before + 1_234);
+        assert!(!bus.gpu.is_busy());
+    }
+
+    #[test]
+    fn gpu_manual_dma_moves_upload_data_without_trigger_bit() {
+        let mut bus = Bus::new(synthetic_bios()).unwrap();
+        bus.dma.dpcr = 1 << (2 * 4 + 3);
+        bus.gpu.gp0_push(0xA000_0000);
+        bus.gpu.gp0_push((5 << 16) | 4);
+        bus.gpu.gp0_push((1 << 16) | 2);
+        write_ram_u32(&mut bus.ram[..], 0x400, 0xBEEF_CAFE);
+        bus.dma.channels[2].base = 0x400;
+        bus.dma.channels[2].block_control = 1;
+        bus.dma.channels[2].channel_control = 0x0100_0001;
+
+        assert_eq!(bus.run_dma_gpu(), Some(124));
+        assert_eq!(bus.gpu.vram.get_pixel(4, 5), 0xCAFE);
+        assert_eq!(bus.gpu.vram.get_pixel(5, 5), 0xBEEF);
+    }
+
+    #[test]
+    fn gpu_manual_chopping_cycles_include_dma_and_cpu_windows() {
+        let chcr = (1 << 8) | (3 << 16) | (4 << 20); // DMA 8 words, CPU 16 clocks
+        assert_eq!(gpu_upload_manual_cycles(2048, chcr), 7803);
+    }
+
+    #[test]
+    fn spu_dma_transfers_two_halfwords_per_word_at_sixteen_cycles_each() {
         let mut bus = Bus::new(synthetic_bios()).unwrap();
         bus.cycles = 100;
         bus.spu.write16(crate::spu::TRANSFER_ADDR, 0);
@@ -2829,8 +3500,8 @@ mod tests {
         bus.dma.channels[4].channel_control = 0x0100_0201;
         bus.run_dma_channel(4);
 
-        // Completion delay scales with the word count (32 / 2 = 16).
-        assert_eq!(bus.scheduler.target(EventSlot::SpuDma), Some(116));
+        // 64 halfwords at 16 CPU cycles each = 1024 cycles.
+        assert_eq!(bus.scheduler.target(EventSlot::SpuDma), Some(1124));
 
         // All 64 halfwords landed in SPU RAM (the bug stopped at 32).
         bus.spu.write16(crate::spu::TRANSFER_ADDR, 0);
@@ -2883,11 +3554,41 @@ mod tests {
         bus.dma.channels[4].block_control = (1 << 16) | 4;
         bus.dma.channels[4].channel_control = 0x0100_0200;
 
-        assert_eq!(bus.run_dma_spu(), Some(2));
+        assert_eq!(bus.run_dma_spu(), Some(128));
         assert_eq!(read_ram_u16(&bus.ram[..], 0x300), 0x1111);
         assert_eq!(read_ram_u16(&bus.ram[..], 0x302), 0x2222);
         assert_eq!(read_ram_u16(&bus.ram[..], 0x304), 0x3333);
         assert_eq!(read_ram_u16(&bus.ram[..], 0x306), 0x4444);
+    }
+
+    #[test]
+    fn otc_completion_clears_trigger_and_busy_but_keeps_hardwired_step() {
+        let mut bus = Bus::new(synthetic_bios()).unwrap();
+        bus.dma.channels[6].channel_control = 0x1100_0002;
+        assert!(!bus.complete_dma_channel(6));
+        assert_eq!(bus.dma.channels[6].channel_control, 0x0000_0002);
+    }
+
+    #[test]
+    fn otc_halts_cpu_for_dram_hyper_page_transfer() {
+        let mut bus = Bus::new(synthetic_bios()).unwrap();
+        bus.cycles = 100;
+        bus.dma.dpcr = 1 << (6 * 4 + 3);
+        bus.dma.channels[6].base = 0x400;
+        bus.dma.channels[6].block_control = 16;
+        bus.dma.channels[6].channel_control = 0x1100_0002;
+
+        bus.run_dma_channel(6);
+
+        // 16 data cycles + one DRAM row-address setup cycle.
+        assert_eq!(bus.cycles, 117);
+        assert_eq!(bus.scheduler.target(EventSlot::GpuOtcDma), Some(117));
+        assert_eq!(bus.dma.channels[6].channel_control, 0x1100_0002);
+
+        // The next CPU issue tick crosses the strict completion boundary
+        // before its instruction can observe CHCR.
+        bus.tick(1);
+        assert_eq!(bus.dma.channels[6].channel_control, 0x0000_0002);
     }
 
     #[test]
@@ -2942,12 +3643,35 @@ mod tests {
         assert_ne!(read_ram_u32(&bus.ram[..], 0x200), 0);
     }
 
+    #[test]
+    fn mdec_mono_dma1_completes_with_zero_block_count_encoding() {
+        let mut bus = Bus::new(synthetic_bios()).unwrap();
+        enable_mdec_dma(&mut bus);
+        bus.mdec.write32(crate::mdec::MDEC_CTRL_STAT, 0x6000_0000);
+        bus.mdec.write32(crate::mdec::MDEC_CMD_DATA, 0x4000_0001);
+        bus.mdec.dma_write_in(&[0x0101_0101; 32]);
+        bus.mdec.write32(crate::mdec::MDEC_CMD_DATA, 0x2000_0001);
+        bus.mdec.dma_write_in(&[0xFE00_0000]);
+
+        bus.dma.channels[1].base = 0x200;
+        // The build-158 test binary uses BS=0x20 even though its 4-bit
+        // sample is only eight words, leaving the block-count field zero.
+        bus.dma.channels[1].block_control = 0x20;
+        bus.dma.channels[1].channel_control = 0x0100_0200;
+        bus.run_dma_channel(1);
+
+        assert_eq!(bus.scheduler.target(EventSlot::MdecOutDma), Some(32 * 8));
+        bus.tick(32 * 8 + 1);
+        assert_eq!(bus.dma.channels[1].channel_control & (1 << 24), 0);
+        assert_eq!(read_ram_u32(&bus.ram[..], 0x200), 0x8888_8888);
+    }
+
     fn enable_mdec_dma(bus: &mut Bus) {
         bus.dma.dpcr = (1 << 3) | (1 << 7);
     }
 
     fn seed_one_macroblock_decode(bus: &mut Bus) {
-        bus.mdec.write32(crate::mdec::MDEC_CMD_DATA, 0x4000_0020);
+        bus.mdec.write32(crate::mdec::MDEC_CMD_DATA, 0x4000_0001);
         bus.mdec.dma_write_in(&[0x01_01_01_01; 32]);
         bus.mdec.write32(crate::mdec::MDEC_CMD_DATA, 0x3000_0006);
         for i in 0..6 {

@@ -1741,9 +1741,9 @@ fn tex_rect_15bpp_basic_matches_cpu_byte_for_byte() {
 }
 
 #[test]
-fn tex_rect_x_flip_mirrors_left_right() {
-    // GP0 0xE1 bit 12 = X flip. Each pixel column (dx) reads
-    // texel column (last - dx) instead of dx.
+fn tex_rect_x_flip_counts_down_from_biased_origin() {
+    // GP0 0xE1 bit 12 = X flip. Silicon reads u0+1, u0, u0-1...
+    // rather than mirroring around the rectangle's far edge.
     let xy = (40i32, 30i32);
     let wh = (16u32, 16u32);
     let uv = (0u8, 0u8);
