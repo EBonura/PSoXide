@@ -5159,7 +5159,6 @@ fn fnv16_halfwords(hws: &[u16]) -> u32 {
 /// mode (bits 5..4 = 11) around the transfer, the read-side mirror of the
 /// SDK's DMA upload.
 fn spu_dma_read(addr: u32, out: &mut [u32]) {
-    use psx_io::spu::{SPUCNT, TRANSFER_ADDR, TRANSFER_CTRL};
     let words = out.len() as u32;
     let block_size: u32 = if words % 16 == 0 {
         16
@@ -5172,6 +5171,16 @@ fn spu_dma_read(addr: u32, out: &mut [u32]) {
     } else {
         1
     };
+    spu_dma_read_shape(addr, out, block_size);
+}
+
+/// SPU->RAM DMA with an explicit BCR shape. Hardware's unstable read mode
+/// corrupts FIFO boundaries, so the precision capture must compare one large
+/// block with several small blocks while holding the payload constant.
+fn spu_dma_read_shape(addr: u32, out: &mut [u32], block_size: u32) {
+    use psx_io::spu::{SPUCNT, TRANSFER_ADDR, TRANSFER_CTRL};
+    let words = out.len() as u32;
+    debug_assert!(block_size != 0 && words % block_size == 0);
     let block_count = words / block_size;
     unsafe {
         let spucnt = psx_io::read16(SPUCNT) & !0x0030;
@@ -5267,7 +5276,7 @@ fn run_precision_scan() -> [u32; PRECISION_VALUE_COUNT] {
     precision_spu(&mut values, &mut next);
     precision_gpu(&mut values, &mut next);
     precision_timer(&mut values, &mut next);
-    precision_gte(&mut values, &mut next);
+    precision_remaining(&mut values, &mut next);
 
     debug_assert_eq!(next, PRECISION_VALUE_COUNT);
     values
@@ -5300,27 +5309,33 @@ fn precision_spu(values: &mut [u32; PRECISION_VALUE_COUNT], next: &mut usize) {
     let bytes = unsafe { core::slice::from_raw_parts(src.as_ptr() as *const u8, 64) };
     psx_spu::upload_adpcm(SpuAddr::new(dest), bytes);
 
-    let mut boot_read = [0u32; 16];
-    spu_dma_read(dest, &mut boot_read);
-    for word in boot_read {
+    let mut boot_single = [0u32; 16];
+    spu_dma_read_shape(dest, &mut boot_single, 16);
+    for word in boot_single {
+        push_precision(values, next, word);
+    }
+    push_precision(values, next, packed_status());
+
+    let mut boot_four = [0u32; 16];
+    spu_dma_read_shape(dest, &mut boot_four, 4);
+    for word in boot_four {
         push_precision(values, next, word);
     }
     push_precision(values, next, packed_status());
 
     // Preserve all BIOS-programmed wait fields and only make the documented
-    // nonzero nibble explicit for the stable comparison.
+    // nonzero nibble explicit for the stable comparison. Hashes are enough
+    // here: the two boot-mode arrays above retain the exact corruption shape.
     let stable_delay = original_delay | 0x0200_0000;
     unsafe { psx_io::write32(SPU_DELAY, stable_delay) };
     spin(64);
     push_precision(values, next, unsafe { psx_io::read32(SPU_DELAY) });
-    push_precision(values, next, packed_status());
-
-    let mut stable_read = [0u32; 16];
-    spu_dma_read(dest, &mut stable_read);
-    for word in stable_read {
-        push_precision(values, next, word);
-    }
-    push_precision(values, next, packed_status());
+    let mut stable_single = [0u32; 16];
+    spu_dma_read_shape(dest, &mut stable_single, 16);
+    push_precision(values, next, fnv32_words(&stable_single));
+    let mut stable_four = [0u32; 16];
+    spu_dma_read_shape(dest, &mut stable_four, 4);
+    push_precision(values, next, fnv32_words(&stable_four));
 
     let fifo_dest = 0x3C00;
     unsafe {
@@ -5339,8 +5354,6 @@ fn precision_spu(values: &mut [u32; PRECISION_VALUE_COUNT], next: &mut usize) {
     for word in fifo_read {
         push_precision(values, next, word);
     }
-    push_precision(values, next, packed_status());
-
     unsafe { psx_io::write32(SPU_DELAY, original_delay) };
 }
 
@@ -5397,10 +5410,10 @@ fn precision_timer(values: &mut [u32; PRECISION_VALUE_COUNT], next: &mut usize) 
     timers::set_mode(timers::Timer::Timer2, 0);
 }
 
-/// Values 73..127: repeated raw GTE outputs. This separates deterministic
-/// arithmetic from state carried by incompletely seeded control registers and
-/// keeps full MAC components where the old conformance digest was ambiguous.
-fn precision_gte(values: &mut [u32; PRECISION_VALUE_COUNT], next: &mut usize) {
+/// Values 73..127: unresolved GTE state, SPU register masks, and OTC DMA
+/// completion. Already-matching MVMVA/compose paths are intentionally omitted
+/// so the fixed QR budget targets differences that can still improve PSoXide.
+fn precision_remaining(values: &mut [u32; PRECISION_VALUE_COUNT], next: &mut usize) {
     for _ in 0..6 {
         run_op();
         push_precision(values, next, mfc2!(25));
@@ -5414,26 +5427,52 @@ fn precision_gte(values: &mut [u32; PRECISION_VALUE_COUNT], next: &mut usize) {
         push_precision(values, next, mfc2!(27));
     }
 
-    let mvmva_inputs = [
-        (0x2040_0340, 0x0000_09c0),
-        (0x2040_0340, 0x0000_16c0),
-        (0x0b00_0340, 0x0000_23c0),
-        (0x2040_09c0, 0x0000_09c0),
-    ];
-    for (vxy, vz) in mvmva_inputs {
-        seed_scene_xform();
-        mtc2!(0, vxy);
-        mtc2!(1, vz);
-        unsafe { gte_ops::mvmva_rt_v0_tr_sf1() };
-        push_precision(values, next, mfc2!(25));
-        push_precision(values, next, mfc2!(26));
-        push_precision(values, next, mfc2!(27));
+    // Voice 0 raw masks: case 164 says which offsets differ, but not what the
+    // masked values are. Preserve all eight readbacks after writing FFFF.
+    let voice0 = psx_io::spu::SPU_BASE;
+    unsafe {
+        for index in 0..8u32 {
+            let addr = voice0 + index * 2;
+            let old = psx_io::read16(addr);
+            psx_io::write16(addr, 0xFFFF);
+            push_precision(values, next, psx_io::read16(addr) as u32);
+            psx_io::write16(addr, old);
+        }
     }
 
-    for _ in 0..2 {
-        for mode in 0..4 {
-            push_precision(values, next, compose_chain(mode));
+    // OTC case 40 differs by a single busy poll. Consecutive CHCR reads show
+    // exactly when START/TRIGGER clear; final registers and chain endpoints
+    // distinguish status latency from transfer completion or pointer updates.
+    static mut PRECISION_OT: [u32; 16] = [0; 16];
+    unsafe {
+        let ptr = (&raw mut PRECISION_OT) as *mut u32;
+        for index in 0..16 {
+            ptr::write_volatile(ptr.add(index), 0);
         }
+        dma::enable_channel(dma::Channel::Otc);
+        dma::set_madr(dma::Channel::Otc, ptr.add(15) as u32);
+        dma::set_bcr_manual(dma::Channel::Otc, 16);
+        push_precision(values, next, dma::chcr(dma::Channel::Otc));
+        dma::set_chcr(
+            dma::Channel::Otc,
+            dma::CHCR_STEP_BACKWARD | dma::CHCR_SYNC_MANUAL | dma::CHCR_START | dma::CHCR_TRIGGER,
+        );
+        for _ in 0..6 {
+            push_precision(values, next, dma::chcr(dma::Channel::Otc));
+        }
+        let mut guard = 0u32;
+        while dma::is_busy(dma::Channel::Otc) && guard < 0xFFFF {
+            guard += 1;
+        }
+        push_precision(values, next, dma::madr(dma::Channel::Otc));
+        push_precision(
+            values,
+            next,
+            psx_io::read32(dma::Channel::Otc.base() + 4),
+        );
+        push_precision(values, next, guard);
+        push_precision(values, next, ptr::read_volatile(ptr));
+        push_precision(values, next, ptr::read_volatile(ptr.add(15)));
     }
 
     push_precision(
