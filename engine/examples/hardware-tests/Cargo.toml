@@ -25,3 +25,4 @@ psx-pad    = { path = "../../../sdk/crates/psx-pad" }
 psx-rt     = { path = "../../../sdk/crates/psx-rt" }
 psx-spu    = { path = "../../../sdk/crates/psx-spu" }
 psx-vram   = { path = "../../../sdk/crates/psx-vram" }
+qrcodegen-no-heap = "1.8.1"

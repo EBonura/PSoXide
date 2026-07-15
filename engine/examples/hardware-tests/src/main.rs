@@ -80,7 +80,7 @@ unsafe extern "C" {
     fn __hwtest_icache_entry_w2();
 }
 
-const SUITE_VERSION: &str = "HWTEST v0.12";
+const SUITE_VERSION: &str = "HWTEST v0.13";
 const SCREEN_W: i16 = 320;
 const SCREEN_H: i16 = 240;
 const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
@@ -1646,7 +1646,9 @@ impl Scene for HardwareTests {
             return;
         };
 
-        draw_mode_menu(font, self);
+        if !matches!(self.mode, Mode::TimingScan) {
+            draw_mode_menu(font, self);
+        }
 
         if self.mode.is_check_section() {
             draw_summary(font, self);
