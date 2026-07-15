@@ -9,15 +9,12 @@
 //! GPL-2.0-or-later in part to honor this derivation; see `LICENSE` and
 //! `docs/license-audit.md`.
 
-/// Canonical cycle delays for command responses, transcribed from
-/// Redux's `core/cdrom.cc`. Exact match is the difference between
-/// our CDROM events landing on the same instructions as Redux's
-/// and silently scheduling them thousands of cycles apart.
+/// Canonical cycle delays for command responses. The long-operation values
+/// below retain their Redux provenance, while first-response acknowledgement
+/// timing is calibrated from real controller measurements.
 ///
 /// Redux cross-references (line numbers from the upstream file):
 ///
-/// - `AddIrqQueue(m_cmd, 0x800)` -- universal first-response delay
-///   (L1284). Every command's ack fires 2048 cycles after issue.
 /// - `AddIrqQueue(CdlID + 0x100, 20480)` -- GetID second response,
 ///   ~4.4 µs, observed across boot roms (L900). `CdlInit` (`0x1C`)
 ///   uses the separate lid/rescan path instead of a second CDROM IRQ.
@@ -30,7 +27,21 @@
 /// - `scheduleCDPlayIRQ(SEEK_DONE ? 0x800 : cdReadTime * 4)` --
 ///   SeekL / SeekP second response (L875). If the target is already
 ///   seeked, quick ack; otherwise a full seek-time equivalent.
-pub(super) const FIRST_RESPONSE_CYCLES: u64 = 0x800; // 2048
+/// Typical command acknowledgement with no readable media. The CD controller
+/// sub-CPU services commands from its firmware loop rather than responding in
+/// the old fixed 0x800-cycle shortcut. Current hardware-oriented emulators use
+/// roughly 15,000 cycles for the no-media path.
+pub(super) const FIRST_RESPONSE_CYCLES: u64 = 15_000;
+
+/// Typical acknowledgement with a disc present. The PAL PSone capture measured
+/// GetStat at 29,771 cycles minimum including 256 cycles of MMIO/poll overhead,
+/// yielding a 29,515-cycle controller delay. Its 42,661-cycle maximum confirms
+/// the documented firmware-loop jitter; this deterministic core models the
+/// measured floor and leaves maintenance-loop variation for a later sweep.
+pub(super) const FIRST_RESPONSE_WITH_MEDIA_CYCLES: u64 = 29_515;
+
+/// Short chained response used by the legacy GetID error path.
+pub(super) const QUICK_SECOND_RESPONSE_CYCLES: u64 = 0x800;
 pub(super) const IRQ_RESCHEDULE_CYCLES: u64 = 0x100;
 pub(super) const GETID_SECOND_RESPONSE_CYCLES: u64 = 20_480;
 pub(super) const RESET_SECOND_RESPONSE_CYCLES: u64 = 4_100_000;
@@ -46,7 +57,7 @@ pub(super) const LID_PREPARE_SEEK_CYCLES: u64 = CD_READ_TIME * 26;
 pub(super) const CD_READ_TIME: u64 = 451_584;
 
 /// Extra first-response latency for a command issued *while CD-DA audio is
-/// playing*, added on top of [`FIRST_RESPONSE_CYCLES`].
+/// playing*, added on top of the applicable first-response delay.
 ///
 /// Unlike the rest of this module, this is NOT transcribed from Redux: it is a
 /// PSoXide faithfulness model. On real hardware the CD sub-CPU is a single
