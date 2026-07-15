@@ -858,6 +858,10 @@ pub struct Spu {
     /// transferring, not merely because SPUCNT selects a DMA mode.
     #[serde(default)]
     dma_active: bool,
+    /// Most recent non-Stop RAM transfer mode. SCPH-9902 returns to Stop a
+    /// little sooner after DMA Read than after the write/manual paths.
+    #[serde(default)]
+    last_active_transfer_mode: u8,
     /// IRQ address (byte addr into SPU RAM). Written as halfword value
     /// which is scaled by 8.
     irq_addr: u32,
@@ -1061,10 +1065,12 @@ impl Spu {
             ram,
             voices: std::array::from_fn(|_| Voice::default()),
             spucnt: 0,
-            spustat: 0,
+            // SCPH-9902 reports the initial (first) capture-ring half high.
+            spustat: 1 << 11,
             spustat_control: 0,
             spustat_control_pending: None,
             dma_active: false,
+            last_active_transfer_mode: 0,
             irq_addr: 0,
             transfer_addr: 0,
             transfer_addr_raw: 0,
@@ -1262,6 +1268,11 @@ impl Spu {
         self.samples_produced
     }
 
+    /// Raw SPU RAM for deterministic headless diagnostics and save tooling.
+    pub fn ram_halfwords(&self) -> &[u16] {
+        &self.ram[..]
+    }
+
     /// Diagnostic SPU IRQ state: (irq_addr, spucnt, spustat, decode cursor,
     /// cd-audio queue len). For tracing games that sync on the SPU IRQ.
     pub fn debug_irq_state(&self) -> (u32, u16, u16, u32, usize) {
@@ -1335,6 +1346,13 @@ impl Spu {
         // SPUCNT bits 5..4 = 2 (DMA write) or 3 (DMA read) means RAM
         // transfer is DMA-driven.
         matches!((self.spucnt >> 4) & 3, 2 | 3)
+    }
+
+    /// Whether DMA-write mode has crossed into the SPU sample-clock domain.
+    /// The SPUCNT latch changes immediately, but the transfer engine cannot
+    /// accept RAM data until the corresponding SPUSTAT mirror is applied.
+    pub fn dma_write_ready_at(&self, now: u64) -> bool {
+        (self.spustat_at(now) >> 4) & 3 == 2
     }
 
     /// Diagnostic: current SPU-RAM transfer (write/read) cursor.
@@ -1469,7 +1487,7 @@ impl Spu {
                 self.transfer_addr_raw = value;
                 self.transfer_addr = (value as u32) << 3;
             }
-            TRANSFER_FIFO => self.transfer_fifo_write(value),
+            TRANSFER_FIFO => self.transfer_fifo_write(value, now),
             SPUCNT => self.write_spucnt(value, now),
             TRANSFER_CTRL => self.transfer_ctrl = value,
             SPUSTAT => { /* read-only -- writes dropped */ }
@@ -1529,25 +1547,28 @@ impl Spu {
         // DMA-read mode does not become the current SPUSTAT mode merely from
         // the control write: SCPH-9902 stayed in Stop for all 65,535 polls
         // before channel 4 was armed. Other modes cross at the next sample.
-        if (value >> 4) & 3 != 3 {
-            let next_sample = now
-                .saturating_div(SAMPLE_CYCLES)
-                .saturating_add(1)
-                .saturating_mul(SAMPLE_CYCLES);
+        let transfer_mode = (value >> 4) & 3;
+        if transfer_mode != 0 {
+            self.last_active_transfer_mode = transfer_mode as u8;
+        }
+        if transfer_mode != 3 {
+            let next_sample = if transfer_mode == 0 {
+                let settle_cycles = if self.last_active_transfer_mode == 3 {
+                    832
+                } else {
+                    928
+                };
+                now.saturating_add(settle_cycles)
+            } else {
+                now.saturating_div(SAMPLE_CYCLES)
+                    .saturating_add(1)
+                    .saturating_mul(SAMPLE_CYCLES)
+            };
             self.spustat_control_pending = Some((value & 0x3F, next_sample));
         }
         // SPU IRQ enable transitioned to 0 → clear status latch (ack).
         if (prev & (1 << 6)) != 0 && (value & (1 << 6)) == 0 {
             self.spustat &= !(1 << 6);
-        }
-        // Real software commonly fills the 32-halfword transfer FIFO while
-        // the transfer mode is Stopped, then switches to ManualWrite. The SPU
-        // drains those queued words at 16 cycles/halfword. We commit the data
-        // here and model the elapsed transfer window in the DMA scheduler;
-        // retaining (rather than dropping) the stopped-mode writes is the
-        // architecturally important part for CPU-driven transfers.
-        if (value >> 4) & 0x3 == 1 {
-            self.drain_transfer_fifo_to_ram();
         }
     }
 
@@ -1652,7 +1673,7 @@ impl Spu {
     //  Data transfer FIFO -- software-driven SPU RAM access.
     // ============================================================
 
-    fn transfer_fifo_write(&mut self, value: u16) {
+    fn transfer_fifo_write(&mut self, value: u16, now: u64) {
         const FIFO_HALFWORDS: usize = 32;
         if self.transfer_fifo.len() == FIFO_HALFWORDS {
             // A full hardware FIFO cannot accept another halfword. CPU-side
@@ -1661,7 +1682,7 @@ impl Spu {
             return;
         }
         self.transfer_fifo.push_back(value);
-        if (self.spucnt >> 4) & 0x3 == 1 {
+        if (self.spustat_at(now) >> 4) & 0x3 == 1 {
             self.drain_transfer_fifo_to_ram();
         }
     }
@@ -1753,6 +1774,36 @@ impl Spu {
         for w in words {
             let idx = (self.transfer_addr >> 1) as usize % SPU_RAM_HALFWORDS;
             *w = self.ram[idx];
+            self.check_irq_on_transfer();
+            self.transfer_addr = (self.transfer_addr + 2) & (SPU_RAM_BYTES as u32 - 1);
+        }
+        self.transfer_addr_raw = (self.transfer_addr >> 3) as u16;
+    }
+
+    /// Stream SPU RAM through the block-shaped read FIFO. When the memory
+    /// controller's DMA timing override is disabled, silicon inserts `FFFF`
+    /// as the first halfword of every block and drops the block's last source
+    /// halfword. This is the documented unstable SPU-read mode; callers that
+    /// set bits 24..27 of the SPU delay register use the ordinary stable path.
+    pub fn dma_read_blocks(&mut self, words: &mut [u16], block_halfwords: usize, stable: bool) {
+        if stable || block_halfwords == 0 {
+            self.dma_read(words);
+            return;
+        }
+
+        for block in words.chunks_mut(block_halfwords) {
+            if block.is_empty() {
+                continue;
+            }
+            block[0] = 0xFFFF;
+            for output in &mut block[1..] {
+                let idx = (self.transfer_addr >> 1) as usize % SPU_RAM_HALFWORDS;
+                *output = self.ram[idx];
+                self.check_irq_on_transfer();
+                self.transfer_addr = (self.transfer_addr + 2) & (SPU_RAM_BYTES as u32 - 1);
+            }
+            // The FIFO-boundary insertion consumes the final source slot even
+            // though that halfword is not delivered to main RAM.
             self.check_irq_on_transfer();
             self.transfer_addr = (self.transfer_addr + 2) & (SPU_RAM_BYTES as u32 - 1);
         }
@@ -1999,6 +2050,9 @@ impl Spu {
             if deadline <= now {
                 self.spustat_control = pending;
                 self.spustat_control_pending = None;
+                if (pending >> 4) & 3 == 1 {
+                    self.drain_transfer_fifo_to_ram();
+                }
             }
         }
         // KON / KOFF are applied at the END of this tick (after the
@@ -2105,9 +2159,9 @@ impl Spu {
         self.write_to_capture(2, self.voices[1].last_sample as u16);
         self.write_to_capture(3, self.voices[3].last_sample as u16);
         self.capture_buffer_pos = (self.capture_buffer_pos + 2) & 0x3FF;
-        // SPUSTAT bit 11 = which half of each 0x400 capture ring is being
-        // written (0 = first half, 1 = second), per the PSX-SPX spec.
-        if self.capture_buffer_pos >= 0x200 {
+        // SCPH-9902 reports bit 11 high while the first half of the capture
+        // ring is active and low for the second half.
+        if self.capture_buffer_pos < 0x200 {
             self.spustat |= 1 << 11;
         } else {
             self.spustat &= !(1 << 11);

@@ -46,6 +46,8 @@ pub const GP1_ADDR: u32 = 0x1F80_1814;
 /// following GPUSTAT read but before the second. The captured SCPH-9902
 /// transition lands twelve CPU clock cycles after the command write.
 pub(crate) const GP1_STATUS_LATCH_CYCLES: u64 = 12;
+const GPU_DMA_DIRECTION_LATCH_CYCLES: u64 = 12;
+const GPU_DMA_DIRECTION_FAST_LATCH_CYCLES: u64 = 5;
 
 /// `#[serde(default = ...)]` target for the `[u32; 256]`-shaped
 /// diagnostic opcode histograms below -- `Default` only covers arrays
@@ -370,6 +372,22 @@ pub struct Gpu {
     /// status bits and IRQ acknowledge are delayed.
     #[serde(default)]
     pending_gp1_status: std::collections::VecDeque<(u64, u32)>,
+    /// A GP1 acknowledge that cancels a not-yet-visible IRQ command leaves
+    /// the input path primed; the next IRQ command reaches the status latch
+    /// without the usual posted-read delay.
+    #[serde(default)]
+    irq_after_canceled_set_is_immediate: bool,
+    /// GP1(04h) DMA-direction writes share a small control-port latch. A
+    /// direction-3 write primes the even-direction path until the next real
+    /// GPU DMA transfer consumes it. This is visible on silicon as a
+    /// one-GPUSTAT-read difference between otherwise identical direction
+    /// sweeps.
+    #[serde(default)]
+    dma_direction_seen_three: bool,
+    /// Once a primed direction latch has been consumed by GPU DMA, subsequent
+    /// direction writes take the full posted-control delay until reset.
+    #[serde(default)]
+    dma_direction_full_delay: bool,
 }
 
 /// Public snapshot of the GPU's display configuration, read by the
@@ -526,6 +544,17 @@ impl Gpu {
             irq_requested: false,
             irq_acknowledged: false,
             pending_gp1_status: std::collections::VecDeque::new(),
+            irq_after_canceled_set_is_immediate: false,
+            dma_direction_seen_three: false,
+            dma_direction_full_delay: false,
+        }
+    }
+
+    /// Consume the GP1(04h) control-port history when channel 2 starts a real
+    /// transfer. OTC (channel 6) deliberately does not touch this state.
+    pub(crate) fn note_dma_transfer_started(&mut self) {
+        if self.dma_direction_seen_three {
+            self.dma_direction_full_delay = true;
         }
     }
 
@@ -1302,10 +1331,23 @@ impl Gpu {
     }
 
     fn write32_inner(&mut self, phys: u32, value: u32, now: Option<u64>) -> bool {
+        if phys == GP1_ADDR && (value >> 24) == 0x04 {
+            if let Some(now) = now {
+                // Posted control writes continue through the latch even when
+                // software follows them with another write instead of a
+                // status read. Apply anything that matured before accepting
+                // the new command so the queue reflects real elapsed time.
+                self.apply_pending_gp1_status(now);
+            }
+        }
         match phys {
             GP0_ADDR => {
+                let fast_irq = value >> 24 == 0x1f && self.irq_after_canceled_set_is_immediate;
+                if fast_irq {
+                    self.irq_after_canceled_set_is_immediate = false;
+                }
                 let irq_deadline = now
-                    .filter(|_| value >> 24 == 0x1f)
+                    .filter(|_| value >> 24 == 0x1f && !fast_irq)
                     .map(|now| now.saturating_add(GP1_STATUS_LATCH_CYCLES));
                 let old_irq_bit = self.status.raw & (1 << 24);
                 let old_irq_requested = self.irq_requested;
@@ -1326,7 +1368,33 @@ impl Gpu {
                 self.gp1_write_history.push(value);
                 self.apply_gp1_display(value);
                 if let Some(now) = now.filter(|_| matches!(op, 0x02 | 0x04)) {
-                    let deadline = now.saturating_add(GP1_STATUS_LATCH_CYCLES);
+                    if op == 0x02 && self.status.raw & (1 << 24) == 0 {
+                        // An acknowledge that reaches the control port before
+                        // a queued GP0(1Fh) has asserted IRQ1 cancels that
+                        // request; it must not surface after the clear.
+                        let before = self.pending_gp1_status.len();
+                        self.pending_gp1_status
+                            .retain(|(_, command)| command >> 24 != 0x1F);
+                        self.irq_after_canceled_set_is_immediate |=
+                            self.pending_gp1_status.len() != before;
+                    }
+                    let delay = if op == 0x04 {
+                        let direction = value & 0x3;
+                        let fast = !self.dma_direction_full_delay
+                            && (direction == 2
+                                || (direction == 0 && self.dma_direction_seen_three));
+                        if direction == 3 {
+                            self.dma_direction_seen_three = true;
+                        }
+                        if fast {
+                            GPU_DMA_DIRECTION_FAST_LATCH_CYCLES
+                        } else {
+                            GPU_DMA_DIRECTION_LATCH_CYCLES
+                        }
+                    } else {
+                        GP1_STATUS_LATCH_CYCLES
+                    };
+                    let deadline = now.saturating_add(delay);
                     self.pending_gp1_status.push_back((deadline, value));
                 } else {
                     self.apply_gp1_status(value);
