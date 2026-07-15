@@ -6,8 +6,9 @@
 
 use psx_engine::{Angle, CharacterMotorConfig};
 use psx_level::{
-    character_action_flags, CharacterAnimationAction, LevelCharacterRecord, ModelClipIndex,
-    ModelIndex, OptionalModelClipIndex, CHARACTER_ANIMATION_ACTION_COUNT,
+    character_action_flags, CharacterAnimationAction, LevelCharacterRecord,
+    LevelModelMaterialOverride, ModelClipIndex, ModelIndex, OptionalModelClipIndex,
+    CHARACTER_ANIMATION_ACTION_COUNT,
 };
 
 /// Animation state machine for the player: idle with no movement,
@@ -67,6 +68,8 @@ pub struct RuntimeCharacter {
     pub visual_offset: [i16; 3],
     pub visual_yaw: i16,
     pub visual_scale_q8: u16,
+    /// Covering material replacing the model's cooked atlas.
+    pub material_override: Option<LevelModelMaterialOverride>,
     pub weight_q8: u16,
     /// Coarse collision cylinder radius. Engine units.
     pub radius: i32,
@@ -120,6 +123,7 @@ impl RuntimeCharacter {
             visual_offset: c.visual_offset,
             visual_yaw: c.visual_yaw,
             visual_scale_q8: c.visual_scale_q8,
+            material_override: c.material_override,
             weight_q8: c.weight_q8,
             radius: c.radius as i32,
             height: c.height as i32,
