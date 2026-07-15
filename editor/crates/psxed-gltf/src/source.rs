@@ -717,6 +717,169 @@ pub(crate) fn read_inverse_bind_matrices(
         .unwrap_or_else(|| vec![identity_matrix(); joint_count])
 }
 
+/// Collapse matched bone subtrees into their nearest retained joint.
+///
+/// Joint order is otherwise preserved, so compatible rigs produce the same
+/// cooked parent contract after removing the same detail chains.
+pub(crate) fn collapse_bone_subtrees(
+    source: &mut SkinnedSourceMesh,
+    joints: &mut Vec<usize>,
+    inverse_bind_matrices: &mut Vec<[[f32; 4]; 4]>,
+    parents: &[Option<usize>],
+    node_names: &[String],
+    patterns: &[String],
+) -> Result<usize, Error> {
+    let patterns: Vec<String> = patterns
+        .iter()
+        .map(|pattern| pattern.trim().to_ascii_lowercase())
+        .filter(|pattern| !pattern.is_empty())
+        .collect();
+    if patterns.is_empty() {
+        return Ok(0);
+    }
+    if joints.len() != inverse_bind_matrices.len() {
+        return Err(Error::BadSkin(
+            "inverse bind matrix count does not match joint count",
+        ));
+    }
+
+    let mut node_to_joint = vec![None; parents.len()];
+    for (joint_index, node_index) in joints.iter().copied().enumerate() {
+        let Some(slot) = node_to_joint.get_mut(node_index) else {
+            return Err(Error::BadSkin("skin joint is outside the node table"));
+        };
+        *slot = Some(joint_index);
+    }
+
+    let matching_nodes: Vec<bool> = (0..parents.len())
+        .map(|node_index| {
+            let name = node_names
+                .get(node_index)
+                .map(|name| name.to_ascii_lowercase())
+                .unwrap_or_default();
+            patterns.iter().any(|pattern| name.contains(pattern))
+        })
+        .collect();
+    let mut keep: Vec<bool> = joints
+        .iter()
+        .copied()
+        .map(|node_index| {
+            let mut cursor = Some(node_index);
+            while let Some(node) = cursor {
+                if matching_nodes.get(node).copied().unwrap_or(false) {
+                    return false;
+                }
+                cursor = parents.get(node).copied().flatten();
+            }
+            true
+        })
+        .collect();
+
+    // A selected root has nowhere valid to collapse. Retain only the
+    // top-most selected joint while still allowing selected descendants to
+    // collapse into it. This must not depend on source joint-table order.
+    for old_joint in 0..joints.len() {
+        if keep[old_joint] {
+            continue;
+        }
+        let mut cursor = parents.get(joints[old_joint]).copied().flatten();
+        let mut has_joint_ancestor = false;
+        while let Some(node) = cursor {
+            if node_to_joint[node].is_some() {
+                has_joint_ancestor = true;
+            }
+            cursor = parents[node];
+        }
+        if !has_joint_ancestor {
+            keep[old_joint] = true;
+        }
+    }
+
+    let removed = keep.iter().filter(|keep| !**keep).count();
+    if removed == 0 {
+        return Ok(0);
+    }
+
+    let mut retained_new_index = vec![None; joints.len()];
+    let mut next_index = 0u16;
+    for (old_joint, retained) in keep.iter().copied().enumerate() {
+        if retained {
+            retained_new_index[old_joint] = Some(next_index);
+            next_index = next_index
+                .checked_add(1)
+                .ok_or(Error::BadSkin("collapsed joint table exceeds u16"))?;
+        }
+    }
+    let mut old_to_new = vec![0u16; joints.len()];
+    for old_joint in 0..joints.len() {
+        if let Some(new_joint) = retained_new_index[old_joint] {
+            old_to_new[old_joint] = new_joint;
+            continue;
+        }
+        let mut cursor = parents.get(joints[old_joint]).copied().flatten();
+        let target = loop {
+            let Some(node) = cursor else {
+                return Err(Error::BadSkin("collapsed joint has no retained ancestor"));
+            };
+            if let Some(old_ancestor) = node_to_joint[node] {
+                if let Some(new_ancestor) = retained_new_index[old_ancestor] {
+                    break new_ancestor;
+                }
+            }
+            cursor = parents[node];
+        };
+        old_to_new[old_joint] = target;
+    }
+
+    for vertex in &mut source.vertices {
+        let mut merged: Vec<(u16, f32)> = Vec::with_capacity(4);
+        for slot in 0..4 {
+            let weight = vertex.weights[slot];
+            if weight <= 0.0 {
+                continue;
+            }
+            let old_joint = vertex.joints[slot] as usize;
+            let Some(new_joint) = old_to_new.get(old_joint).copied() else {
+                return Err(Error::BadSkin("vertex references an unknown joint"));
+            };
+            if let Some((_, total)) = merged.iter_mut().find(|(joint, _)| *joint == new_joint) {
+                *total += weight;
+            } else {
+                merged.push((new_joint, weight));
+            }
+        }
+        merged.sort_by(|a, b| b.1.total_cmp(&a.1));
+        vertex.joints = [0; 4];
+        vertex.weights = [0.0; 4];
+        let total: f32 = merged.iter().take(4).map(|(_, weight)| *weight).sum();
+        if total > 0.0 {
+            for (slot, (joint, weight)) in merged.into_iter().take(4).enumerate() {
+                vertex.joints[slot] = joint;
+                vertex.weights[slot] = weight / total;
+            }
+        } else {
+            vertex.weights[0] = 1.0;
+        }
+        vertex.dominant_joint = dominant_vertex_joint(vertex.joints, vertex.weights);
+    }
+
+    let retained_joints: Vec<usize> = joints
+        .iter()
+        .copied()
+        .zip(keep.iter().copied())
+        .filter_map(|(joint, keep)| keep.then_some(joint))
+        .collect();
+    let retained_inverse_binds: Vec<[[f32; 4]; 4]> = inverse_bind_matrices
+        .iter()
+        .copied()
+        .zip(keep)
+        .filter_map(|(matrix, keep)| keep.then_some(matrix))
+        .collect();
+    *joints = retained_joints;
+    *inverse_bind_matrices = retained_inverse_binds;
+    Ok(removed)
+}
+
 pub(crate) fn build_parent_indices(document: &gltf::Document) -> Vec<Option<usize>> {
     let mut parents = vec![None; document.nodes().count()];
     for node in document.nodes() {
