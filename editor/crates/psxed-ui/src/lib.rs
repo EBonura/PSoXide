@@ -1586,6 +1586,8 @@ struct CameraRig {
     free_position: [i32; 3],
     /// Whether the free camera has been seeded from the orbit camera yet.
     free_initialized: bool,
+    /// Scroll-wheel dolly speed multiplier (persisted per project).
+    zoom_speed: f32,
 }
 
 impl CameraRig {
@@ -1644,18 +1646,30 @@ impl CameraRig {
         }
     }
 
+    fn zoom_speed(&self) -> f32 {
+        self.zoom_speed
+    }
+
+    fn set_zoom_speed(&mut self, speed: f32) {
+        self.zoom_speed = speed.clamp(0.2, 3.0);
+    }
+
     /// Mouse-wheel: dolly the orbit radius, or fly the free camera forward.
     fn scroll(&mut self, scroll: f32) {
+        let speed = self.zoom_speed.clamp(0.2, 3.0);
         match self.mode {
             ViewportCameraMode::Orbit => {
-                // Scroll = dolly. +/-8% of current radius per wheel notch,
-                // clamped so the camera can't pass through the target or
-                // escape the world entirely.
-                let factor = if scroll > 0.0 { 0.92 } else { 1.08 };
+                // Scroll = dolly, proportional to the actual scroll
+                // magnitude so trackpad momentum glides instead of
+                // stepping in fixed 8% notches: ~8% per 50px at speed
+                // 1.0, clamped so one event can't teleport the camera
+                // or pass it through the target.
+                let notches = (scroll / 50.0).clamp(-4.0, 4.0);
+                let factor = 1.08f32.powf(-notches * speed);
                 self.radius = ((self.radius as f32) * factor).clamp(512.0, 262_144.0) as i32;
             }
             ViewportCameraMode::Free => {
-                let amount = (scroll * 8.0).clamp(-4096.0, 4096.0);
+                let amount = (scroll * 8.0 * speed).clamp(-4096.0, 4096.0);
                 self.move_free_local(amount, 0.0, 0.0);
             }
         }
@@ -2267,6 +2281,7 @@ impl EditorWorkspace {
                 free_pitch: editor_camera.free_pitch_q12,
                 free_position,
                 free_initialized,
+                zoom_speed: editor_camera.zoom_speed,
             },
             texture_thumbs: HashMap::new(),
             psoxide_logo_texture: None,
@@ -2301,6 +2316,7 @@ impl EditorWorkspace {
                 [0, 0, 0]
             },
             free_initialized: self.camera_rig.free_initialized,
+            zoom_speed: self.camera_rig.zoom_speed,
         }
     }
 
@@ -2338,6 +2354,7 @@ impl EditorWorkspace {
         };
         self.camera_rig.free_initialized =
             editor_camera.free_initialized || editor_camera.mode == EditorCameraMode::Free;
+        self.camera_rig.zoom_speed = editor_camera.zoom_speed;
     }
 
     fn current_editor_visibility_state(&self) -> EditorVisibilityState {
