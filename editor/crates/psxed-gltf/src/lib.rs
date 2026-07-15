@@ -534,6 +534,8 @@ pub fn default_collapse_bone_patterns() -> Vec<String> {
         "handmiddle",
         "handring",
         "handpinky",
+        "headtop_end",
+        "toe_end",
     ]
     .into_iter()
     .map(str::to_string)
