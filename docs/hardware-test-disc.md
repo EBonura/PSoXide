@@ -2,7 +2,7 @@
 
 The `hardware-tests` disc is the silicon reference for PSoXide. It runs the
 same executable in PSoXide and on a real PlayStation. Real-console data is
-transported through two QR pages, so a TV and phone camera are enough and no
+transported through three QR pages, so a TV and phone camera are enough and no
 character-by-character transcription is required.
 
 ## Capturing timing data
@@ -11,27 +11,34 @@ character-by-character transcription is required.
    with its matching `.cue`.
 2. Let the controller-probe page settle, then press **Start** to jump directly
    to `TIMING MAP`.
-3. Scan QR page `01/02`, press Right, then scan QR page `02/02`. Save or copy
-   the complete `PX5/.../C:...` text returned by each scan.
+3. Scan QR page `01/03`, press Right for `02/03`, then once more for `03/03`.
+   Save or copy the complete `PX6/.../C:...` text returned by each scan.
 4. If a value looks unstable, press Cross once to run five fresh samples and
-   scan both pages from the new run. Do not mix pages from different
+   scan all three pages from the new run. Do not mix pages from different
    runs.
 
-## Payload schema `PX5`
+## Payload schema `PX6`
 
-The capture is a 1,221-byte versioned binary record encoded as exactly 1,628
-Base64 characters. Page 1 carries 828 characters and page 2 carries 800. Each
-screen encodes its complete `PX5/<page>/<chunk>/C:<crc>` text in a Version-20-L
-QR symbol. A CRC-32 protects each page and a second CRC-32 protects the
-reconstructed binary record. QR level L adds its standard recovery margin for
-camera/CRT artifacts while keeping each module two display pixels square.
+The capture is a 1,733-byte versioned binary record encoded as exactly 2,312
+Base64 characters. Its three pages carry 828, 828, and 656 characters. Each
+screen encodes its complete `PX6/<page>/<chunk>/C:<crc>` text in the proven
+Version-20-L QR geometry. A CRC-32 protects each page and a second CRC-32
+protects the reconstructed binary record.
 
 The record preserves all 173 conformance observations and their statuses, all
 90 timing min/max pairs, CPU/GTE/SPU startup-scan summaries, the nine
-memory-control registers, run IDs, and section digests. Fixed schema ordering
-avoids repeating labels and IDs on screen. `tools/hwtest-report.py` accepts
-the two `PX5/0102/...` and `PX5/0202/...` strings mirrored to the debug TTY and
-reconstructs the complete report.
+memory-control registers, run IDs, section digests, and 128 raw precision
+values. Fixed schema ordering avoids repeating labels and IDs on screen.
+`tools/hwtest-report.py` accepts all three strings mirrored to the debug TTY
+and reconstructs the complete report. It remains backward-compatible with
+two-page PX5 captures.
+
+The third page is intentionally a microscope rather than a duplicate. It
+stores raw SPU DMA readback words under both boot-time and forced-stable memory
+control, repeated GPUSTAT reads after IRQ and DMA-direction writes, exact Timer
+2 mode/counter/I_STAT snapshots, and repeated full-width GTE results. This
+extra data is useful because it reveals corruption and state-transition shapes
+that a checksum or one-shot pass/fail result cannot.
 
 The timing minimum is normally the least-interrupted measurement; the min/max
 gap records IRQ or hardware jitter instead of hiding it. BIOS revisions can
@@ -119,7 +126,7 @@ itself disturb the cadence. `70` reports the interval between refresh slots;
 `71` reports the largest extra wait above the uncontended read floor. These
 two records occupy the previously unused cells on timing page 15.
 
-PX5 includes the observed values from conformance cases 116–137 in fixed order,
+PX6 includes the observed values from conformance cases 116–137 in fixed order,
 preserving the exact partial or stale values needed to infer silicon latency.
 
 ## Headless validation
@@ -136,25 +143,26 @@ PSoXide can render a deterministic timing page without opening the GUI:
 ```sh
 cargo run -p frontend --release -- launch \
   --path build/examples/mipsel-sony-psx/release/hardware-tests.exe \
-  --steps 160000000 --pad-pulses '0x08@300+3,0x20@310+3' \
+  --steps 160000000 --pad-pulses '0x08@300+3,0x20@310+3,0x20@320+3' \
   --guest-debug-log --dump-display /tmp/hardware-tests.ppm --dump-hash \
   > /tmp/hardware-tests.log 2>&1
 ```
 
-The same release run reports `147 pass, 0 fail, 26 info` for the 173-case
-conformance section. Functional NCLIP and LZCR checks read settled results;
-their real-silicon stale-read windows remain covered by separate delay-sweep
-probes instead of being mislabeled as functional failures.
+The current release run reports `129 pass, 18 fail, 26 info` for the 173-case
+conformance section. The remaining failures are deliberately retained GTE
+fidelity targets: the LZCR/NCLIP transition probes and the state-dependent
+in-situ NCLIP sequence. Their full observed words are preserved in PX6 rather
+than being hidden behind a green aggregate.
 
 The active-high pad mask `0x08` is Start and `0x20` is Right. Multi-route-tick
 pulses are used in automation so they cannot fall entirely between guest
-frames. The release regression captures both pages, reconstructs the binary,
+frames. The release regression captures all three pages, reconstructs the binary,
 and validates its per-page and full-record CRCs. All 173 conformance results,
-90 timing records, three scan summaries, nine memory-control registers, and 22
-full-width GTE observations must be present.
+90 timing records, three scan summaries, nine memory-control registers, 128
+precision values, and 22 full-width GTE observations must be present.
 
 Completed pages are also mirrored verbatim to the debug TTY with the prefix
-`hardware-tests: px5 `. This lets the headless release gate feed the exact same
+`hardware-tests: px6 `. This lets the headless release gate feed the exact same
 payload to `hwtest-report.py` without host-side image recognition.
 
 `mkisopsx` currently warns that it does not supply a licensed PS1 system area.
