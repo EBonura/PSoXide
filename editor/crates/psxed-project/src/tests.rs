@@ -1285,86 +1285,37 @@ fn starter_project_has_scene_tree_and_resources() {
 
 #[test]
 fn project_missing_point_light_color_and_room_ambient_uses_defaults() {
-    let starter = ProjectDocument::from_ron_str(DEFAULT_PROJECT_RON).unwrap();
-    let light = starter
-        .active_scene()
-        .nodes()
-        .iter()
-        .find_map(|node| match &node.kind {
-            NodeKind::PointLight {
-                color,
-                intensity,
-                radius,
-            } => Some((*color, *intensity, *radius)),
-            _ => None,
-        })
-        .expect("starter has a light");
-    let room = starter
-        .active_scene()
-        .nodes()
-        .iter()
-        .find_map(|node| match &node.kind {
-            NodeKind::Room { grid } => Some(grid),
-            _ => None,
-        })
-        .expect("starter has a room");
-    let source = DEFAULT_PROJECT_RON
-        .replace(
-            &format!(
-                "kind: PointLight(color: ({}, {}, {}), intensity: {}, radius: {})",
-                light.0[0], light.0[1], light.0[2], light.1, light.2
-            ),
-            &format!(
-                "kind: PointLight(intensity: {}, radius: {})",
-                light.1, light.2
-            ),
-        )
-        .replace(
-            &format!(
-                ", ambient_color: ({}, {}, {})",
-                room.ambient_color[0], room.ambient_color[1], room.ambient_color[2]
-            ),
-            "",
-        )
-        .replace(
-            &format!(", fog_near: {}, fog_far: {}", room.fog_near, room.fog_far),
-            "",
-        );
+    // Serde defaults contract, tested at the field level: a PointLight
+    // authored without a color, and a room grid authored without
+    // ambient/fog fields, deserialize to the documented defaults. The
+    // minimal starter ships neither, so the fields are exercised on
+    // round-tripped values with the lines stripped rather than on the
+    // starter document.
+    let light: NodeKind =
+        ron::from_str("PointLight(intensity: 1.25, radius: 3.0)").expect("light parses");
+    let NodeKind::PointLight { color, .. } = light else {
+        panic!("parsed kind is a light");
+    };
+    assert_eq!(color, default_light_color());
 
-    let project = ProjectDocument::from_ron_str(&source).unwrap();
-    let light_color = project
-        .active_scene()
-        .nodes()
-        .iter()
-        .find_map(|node| match &node.kind {
-            NodeKind::PointLight { color, .. } => Some(*color),
-            _ => None,
+    let grid = WorldGrid::empty(1, 1, DEFAULT_WORLD_SECTOR_SIZE);
+    let source = ron::ser::to_string_pretty(&grid, ron::ser::PrettyConfig::default())
+        .expect("grid serializes");
+    let stripped: String = source
+        .lines()
+        .filter(|line| {
+            let t = line.trim_start();
+            !(t.starts_with("ambient_color:")
+                || t.starts_with("fog_color:")
+                || t.starts_with("fog_near:")
+                || t.starts_with("fog_far:"))
         })
-        .expect("starter has a light");
-    assert_eq!(light_color, default_light_color());
-
-    let ambient = project
-        .active_scene()
-        .nodes()
-        .iter()
-        .find_map(|node| match &node.kind {
-            NodeKind::Room { grid } => Some(grid.ambient_color),
-            _ => None,
-        })
-        .expect("starter has a room");
-    assert_eq!(ambient, default_ambient_color());
-
-    let fog = project
-        .active_scene()
-        .nodes()
-        .iter()
-        .find_map(|node| match &node.kind {
-            NodeKind::Room { grid } => Some((grid.fog_color, grid.fog_near, grid.fog_far)),
-            _ => None,
-        })
-        .expect("starter has a room");
+        .collect::<Vec<_>>()
+        .join("\n");
+    let grid: WorldGrid = ron::from_str(&stripped).expect("stripped grid parses");
+    assert_eq!(grid.ambient_color, default_ambient_color());
     assert_eq!(
-        fog,
+        (grid.fog_color, grid.fog_near, grid.fog_far),
         (default_fog_color(), default_fog_near(), default_fog_far())
     );
 }
