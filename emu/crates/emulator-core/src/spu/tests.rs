@@ -189,6 +189,7 @@ fn kon_clears_endx_for_started_voices() {
 fn transfer_fifo_writes_into_spu_ram_and_advances() {
     let mut s = Spu::new();
     s.write16(SPUCNT, 1 << 4); // arm Manual-Write transfer mode
+    s.tick_sample(SAMPLE_CYCLES);
     s.write16(TRANSFER_ADDR, 0x0010); // 0x10 * 8 = 0x80 bytes
     s.write16(TRANSFER_FIFO, 0xBEEF);
     s.write16(TRANSFER_FIFO, 0xCAFE);
@@ -213,6 +214,7 @@ fn stopped_mode_fifo_write_waits_for_manual_transfer() {
         "Stop-mode FIFO data must wait for a transfer mode"
     );
     s.write16(SPUCNT, 1 << 4);
+    s.tick_sample(SAMPLE_CYCLES);
     assert_eq!(s.ram[0x80 >> 1], 0xBEEF);
     assert_eq!(s.ram[(0x80 >> 1) + 1], 0xCAFE);
     assert_eq!(s.transfer_addr, 0x84);
@@ -221,15 +223,16 @@ fn stopped_mode_fifo_write_waits_for_manual_transfer() {
 #[test]
 fn stopped_mode_transfer_fifo_is_bounded_to_32_halfwords() {
     let mut s = Spu::new();
-    s.write16(TRANSFER_ADDR, 0);
+    s.write16(TRANSFER_ADDR, 0x0010);
     for value in 0..40u16 {
         s.write16(TRANSFER_FIFO, 0x4000 + value);
     }
     s.write16(SPUCNT, 1 << 4);
+    s.tick_sample(SAMPLE_CYCLES);
     for i in 0..32usize {
-        assert_eq!(s.ram[i], 0x4000 + i as u16);
+        assert_eq!(s.ram[(0x80 >> 1) + i], 0x4000 + i as u16);
     }
-    assert_eq!(s.ram[32], 0);
+    assert_eq!(s.ram[(0x80 >> 1) + 32], 0);
 }
 
 #[test]
@@ -249,6 +252,7 @@ fn dma_write_fills_spu_ram_contiguously() {
 fn irq_fires_when_transfer_hits_irq_addr_with_enable() {
     let mut s = Spu::new();
     s.write16(SPUCNT, (1 << 6) | (1 << 4)); // IRQ enable + Manual-Write transfer mode
+    s.tick_sample(SAMPLE_CYCLES);
     s.write16(IRQ_ADDR, 0x0010); // 0x10 * 8 = 0x80 bytes
     s.write16(TRANSFER_ADDR, 0x0010);
     s.write16(TRANSFER_FIFO, 0xAAAA);
@@ -300,6 +304,7 @@ fn decoded_buffer_irq_fires_at_zero_irq_address() {
 fn clearing_spucnt_irq_enable_acks_status_bit() {
     let mut s = Spu::new();
     s.write16(SPUCNT, (1 << 6) | (1 << 4)); // IRQ enable + Manual-Write transfer mode
+    s.tick_sample(SAMPLE_CYCLES);
     s.write16(IRQ_ADDR, 0x0010);
     s.write16(TRANSFER_ADDR, 0x0010);
     s.write16(TRANSFER_FIFO, 0x1234);
@@ -1734,8 +1739,9 @@ fn spu_irq_does_not_relatch_until_acknowledged() {
     // nocash PSX-SPX sticky-IRQ9 semantics.
     let mut s = Spu::new();
     s.write16(SPUCNT, (1 << 6) | (1 << 4)); // IRQ enable + Manual-Write transfer mode
-    s.write16(IRQ_ADDR, 0x0000); // byte addr 0
-    s.write16(TRANSFER_ADDR, 0x0000); // start the transfer pointer at byte 0
+    s.tick_sample(SAMPLE_CYCLES);
+    s.write16(IRQ_ADDR, 0x0010); // byte addr 0x80
+    s.write16(TRANSFER_ADDR, 0x0010); // start the transfer pointer at byte 0x80
 
     // First halfword write hits the IRQ address: latch fires once.
     s.write16(TRANSFER_FIFO, 0x1111);
@@ -1761,9 +1767,10 @@ fn spu_irq_does_not_relatch_until_acknowledged() {
     s.write16(SPUCNT, 0);
     assert_eq!(s.spustat() & (1 << 6), 0, "clearing SPUCNT.6 acks the flag");
     s.write16(SPUCNT, (1 << 6) | (1 << 4)); // re-enable IRQ + Manual-Write mode
+    s.tick_sample(SAMPLE_CYCLES * 2);
 
     // A fresh match after acknowledge latches again.
-    s.write16(TRANSFER_ADDR, 0x0000);
+    s.write16(TRANSFER_ADDR, 0x0010);
     s.write16(TRANSFER_FIFO, 0x4444);
     assert!(
         s.take_irq_pending(),
@@ -2138,16 +2145,56 @@ fn dma_read_control_mirror_waits_for_channel_arm() {
 }
 
 #[test]
+fn dma_write_waits_for_sample_domain_mode_apply() {
+    let mut s = Spu::new();
+    s.write16_at(SPUCNT, 0x0020, 100);
+    assert!(!s.dma_write_ready_at(767));
+    assert!(s.dma_write_ready_at(768));
+}
+
+#[test]
+fn cancelled_manual_mode_leaves_queued_fifo_data_uncommitted() {
+    let mut s = Spu::new();
+    s.write16_at(TRANSFER_ADDR, 0, 100);
+    s.write16_at(SPUCNT, 0x0010, 100);
+    s.write16_at(TRANSFER_FIFO, 0xCAFE, 110);
+    s.write16_at(SPUCNT, 0, 120);
+    s.tick_sample(768);
+
+    s.write16(TRANSFER_ADDR, 0);
+    let mut readback = [0u16; 1];
+    s.dma_read(&mut readback);
+    assert_eq!(readback, [0]);
+}
+
+#[test]
+fn unstable_dma_read_inserts_ffff_and_drops_each_block_tail() {
+    let mut s = Spu::new();
+    s.write16(TRANSFER_ADDR, 0);
+    s.dma_write(&[0, 1, 2, 3, 4, 5, 6, 7]);
+
+    s.write16(TRANSFER_ADDR, 0);
+    let mut unstable = [0u16; 8];
+    s.dma_read_blocks(&mut unstable, 4, false);
+    assert_eq!(unstable, [0xFFFF, 0, 1, 2, 0xFFFF, 4, 5, 6]);
+
+    s.write16(TRANSFER_ADDR, 0);
+    let mut stable = [0u16; 8];
+    s.dma_read_blocks(&mut stable, 4, true);
+    assert_eq!(stable, [0, 1, 2, 3, 4, 5, 6, 7]);
+}
+
+#[test]
 fn spustat_capture_half_flag_toggles_at_ring_midpoint() {
     // PSX-SPX SPUSTAT bit 11 = which half of each 0x400 capture ring is
     // being written. From reset the ring index starts at 0 and advances 2
     // bytes per tick, wrapping at 0x400; the flag is updated after each
-    // advance (0 for pos < 0x200, 1 for pos >= 0x200).
+    // advance (1 for pos < 0x200, 0 for pos >= 0x200) on SCPH-9902.
     let mut s = Spu::new();
     for tick in 1..=512u32 {
         s.tick_sample(tick as u64 * SAMPLE_CYCLES);
         let pos = (tick * 2) % 0x400;
-        let want = if pos >= 0x200 { 0x800 } else { 0 };
+        let want = if pos < 0x200 { 0x800 } else { 0 };
         assert_eq!(
             s.read16(SPUSTAT) & 0x800,
             want,
