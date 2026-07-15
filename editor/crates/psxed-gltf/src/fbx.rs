@@ -39,7 +39,7 @@ pub(crate) fn convert_fbx_rigid_model_scene_with_extra_animations(
     };
     let node_indices = fbx_node_indices(scene);
     let parents = fbx_parent_indices(scene, &node_indices);
-    let base_trs = fbx_base_trs(scene);
+    let scene_base_trs = fbx_base_trs(scene);
 
     let mut joints = Vec::new();
     let mut inverse_bind_matrices = Vec::new();
@@ -55,6 +55,13 @@ pub(crate) fn convert_fbx_rigid_model_scene_with_extra_animations(
         return Err(Error::BadSkin("FBX skin has no joints"));
     }
     ensure_u16("joints", joints.len())?;
+    // FBX files may store a node rest transform that differs from the skin
+    // cluster's bind pose. Retargeting against the former moves vertices away
+    // from the pivots used by `geometry_to_bone` (most visibly as stretched
+    // limbs). The cluster bind matrices are the authoritative rest pose for
+    // skinned animation, so rebuild the joint locals from them while retaining
+    // ordinary scene locals for non-joint nodes.
+    let base_trs = fbx_skin_bind_trs(scene, skin, &node_indices, &parents, &scene_base_trs)?;
 
     let mut source = read_fbx_skinned_mesh(mesh, skin, joints.len())?;
     if source.faces.is_empty() {
@@ -412,6 +419,46 @@ pub(crate) fn fbx_base_trs(scene: &ufbx::Scene) -> Vec<Trs> {
         .iter()
         .map(|node| fbx_transform_to_trs(node.local_transform))
         .collect()
+}
+
+pub(crate) fn fbx_skin_bind_trs(
+    scene: &ufbx::Scene,
+    skin: &ufbx::SkinDeformer,
+    node_indices: &HashMap<usize, usize>,
+    parents: &[Option<usize>],
+    scene_base_trs: &[Trs],
+) -> Result<Vec<Trs>, Error> {
+    let mut bind_globals = vec![None; scene.nodes.len()];
+    for cluster in &skin.clusters {
+        let Some(bone_node) = cluster.bone_node.as_deref() else {
+            return Err(Error::BadSkin("FBX skin cluster has no bone node"));
+        };
+        let node_index = fbx_node_index(node_indices, bone_node)?;
+        // Cooked model vertices stay in geometry-local space and the runtime
+        // bind pose is the identity skin matrix. Therefore the authoritative
+        // joint global is the inverse of `geometry_to_bone`, not FBX's
+        // world-space `bind_to_world` (which may include a mesh-node transform).
+        bind_globals[node_index] = Some(ufbx::matrix_invert(&cluster.geometry_to_bone));
+    }
+
+    let mut out = scene_base_trs.to_vec();
+    for cluster in &skin.clusters {
+        let Some(bone_node) = cluster.bone_node.as_deref() else {
+            continue;
+        };
+        let node_index = fbx_node_index(node_indices, bone_node)?;
+        let bone_global = ufbx::matrix_invert(&cluster.geometry_to_bone);
+        let local = if let Some(parent_index) = parents.get(node_index).copied().flatten() {
+            let parent_global = bind_globals[parent_index]
+                .unwrap_or(scene.nodes[parent_index].node_to_world);
+            let world_to_parent = ufbx::matrix_invert(&parent_global);
+            ufbx::matrix_mul(&world_to_parent, &bone_global)
+        } else {
+            bone_global
+        };
+        out[node_index] = fbx_transform_to_trs(ufbx::matrix_to_transform(&local));
+    }
+    Ok(out)
 }
 
 pub(crate) fn fbx_transform_to_trs(transform: ufbx::Transform) -> Trs {
@@ -799,42 +846,134 @@ pub(crate) fn evaluate_mapped_gltf_frame_trs(
 }
 
 pub(crate) fn retarget_mapped_frame_trs(
-    _target_parents: &[Option<usize>],
+    target_parents: &[Option<usize>],
     target_base_trs: &[Trs],
-    _source_parents: &[Option<usize>],
+    source_parents: &[Option<usize>],
     source_base_trs: &[Trs],
     source_pose_trs: &[Trs],
     mapping: &[Option<usize>],
 ) -> Vec<Trs> {
-    // Parent-relative (local) joint-angle retarget: each mapped target bone
-    // takes the source bone's LOCAL rotation delta from its own bind, re-based
-    // onto the target bone's bind. The bone keeps the TARGET's translation and
-    // scale (its own proportions); only the joint angle is borrowed.
-    //
-    // Working in local (parent-relative) space is what makes this correct
-    // through a hierarchy: any two same-axis rigs (e.g. two Mixamo skeletons)
-    // reproduce the motion exactly, and a matching bind collapses to a direct
-    // local copy. The previous implementation took the delta in GLOBAL bind
-    // frames, which distorted every child bone whenever the source and target
-    // rest poses differed (arms arched backward, mangled feet). The single-root
-    // retarget tests passed because for a root node local == global; the bug
-    // only surfaced on real multi-bone skeletons.
-    let mut out = target_base_trs.to_vec();
+    // Rebase each source GLOBAL pose delta onto the target's global bind, then
+    // reconstruct target-local rotations through the animated target parent.
+    // This handles rigs whose corresponding bones use different local axes or
+    // rest orientations (for example a Mixamo A-pose model driven by a T-pose
+    // animation). Translations and scale stay target-native, preserving the
+    // target model's proportions.
+    let source_bind_globals = global_trs_rotations(source_parents, source_base_trs);
+    let source_pose_globals = global_trs_rotations(source_parents, source_pose_trs);
+    let target_bind_globals = global_trs_rotations(target_parents, target_base_trs);
+    let mut target_pose_globals = target_bind_globals.clone();
+    let mut target_pose_done = vec![false; target_base_trs.len()];
     for (target_index, source_index) in mapping.iter().copied().enumerate() {
         let Some(source_index) = source_index else {
             continue;
         };
-        let (Some(source_bind), Some(source_pose), Some(target)) = (
-            source_base_trs.get(source_index),
-            source_pose_trs.get(source_index),
-            out.get_mut(target_index),
+        let (Some(source_bind), Some(source_pose), Some(target_bind), Some(target_pose)) = (
+            source_bind_globals.get(source_index),
+            source_pose_globals.get(source_index),
+            target_bind_globals.get(target_index),
+            target_pose_globals.get_mut(target_index),
         ) else {
             continue;
         };
-        let joint_delta = quat_mul(quat_inverse(source_bind.rotation), source_pose.rotation);
-        target.rotation = quat_mul(target.rotation, joint_delta);
+        let global_delta = quat_mul(quat_inverse(*source_bind), *source_pose);
+        *target_pose = quat_mul(*target_bind, global_delta);
+        target_pose_done[target_index] = true;
+    }
+
+    // Unmapped intermediary nodes keep their bind-local rotation and inherit
+    // any mapped ancestor motion. This matters for rigs that insert helper
+    // nodes between otherwise corresponding bones.
+    fn resolve_unmapped_target_global(
+        index: usize,
+        parents: &[Option<usize>],
+        base_trs: &[Trs],
+        globals: &mut [[f32; 4]],
+        done: &mut [bool],
+    ) -> [f32; 4] {
+        if done[index] {
+            return globals[index];
+        }
+        let local = base_trs[index].rotation;
+        let global = parents
+            .get(index)
+            .copied()
+            .flatten()
+            .filter(|parent| *parent < base_trs.len())
+            .map_or(local, |parent| {
+                quat_mul(
+                    resolve_unmapped_target_global(parent, parents, base_trs, globals, done),
+                    local,
+                )
+            });
+        globals[index] = global;
+        done[index] = true;
+        global
+    }
+    for index in 0..target_base_trs.len() {
+        resolve_unmapped_target_global(
+            index,
+            target_parents,
+            target_base_trs,
+            &mut target_pose_globals,
+            &mut target_pose_done,
+        );
+    }
+
+    let mut out = target_base_trs.to_vec();
+    for (target_index, source_index) in mapping.iter().copied().enumerate() {
+        if source_index.is_none() {
+            continue;
+        }
+        let Some(target_global) = target_pose_globals.get(target_index).copied() else {
+            continue;
+        };
+        let local_rotation = target_parents
+            .get(target_index)
+            .copied()
+            .flatten()
+            .and_then(|parent| target_pose_globals.get(parent).copied())
+            .map_or(target_global, |parent_global| {
+                quat_mul(quat_inverse(parent_global), target_global)
+            });
+        if let Some(target) = out.get_mut(target_index) {
+            target.rotation = local_rotation;
+        }
     }
     out
+}
+
+fn global_trs_rotations(parents: &[Option<usize>], trs: &[Trs]) -> Vec<[f32; 4]> {
+    fn resolve(
+        index: usize,
+        parents: &[Option<usize>],
+        trs: &[Trs],
+        globals: &mut [[f32; 4]],
+        done: &mut [bool],
+    ) -> [f32; 4] {
+        if done[index] {
+            return globals[index];
+        }
+        let local = trs[index].rotation;
+        let global = parents
+            .get(index)
+            .copied()
+            .flatten()
+            .filter(|parent| *parent < trs.len())
+            .map_or(local, |parent| {
+                quat_mul(resolve(parent, parents, trs, globals, done), local)
+            });
+        globals[index] = global;
+        done[index] = true;
+        global
+    }
+
+    let mut globals = vec![identity_quat(); trs.len()];
+    let mut done = vec![false; trs.len()];
+    for index in 0..trs.len() {
+        resolve(index, parents, trs, &mut globals, &mut done);
+    }
+    globals
 }
 
 pub(crate) fn fbx_animation_node_mapping(

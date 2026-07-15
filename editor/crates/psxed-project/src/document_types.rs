@@ -724,28 +724,35 @@ impl ProjectDocument {
             return Vec::new();
         };
 
-        // Animations are skeleton-scoped: every AnimationClip on the
-        // model's skeleton is available to it.
+        // Animations must match the skeleton and, when the bake records a
+        // target, the model bind pose and quantization bounds as well.
         let Some(skeleton) = model.skeleton else {
             return Vec::new();
         };
         let mut out = Vec::new();
         let mut seen_paths = HashSet::new();
-        for resource in &self.resources {
-            let ResourceData::AnimationClip(clip) = &resource.data else {
-                continue;
-            };
-            if clip.skeleton != Some(skeleton) {
-                continue;
-            }
-            if seen_paths.insert(clip.psxanim_path.clone()) {
-                out.push(ResolvedModelAnimationClip {
-                    name: resource.name.clone(),
-                    psxanim_path: clip.psxanim_path.clone(),
-                    animation_resource: Some(resource.id),
-                    model_clip_index: None,
-                    calibration: clip.calibration,
-                });
+        for target_specific in [true, false] {
+            for resource in &self.resources {
+                let ResourceData::AnimationClip(clip) = &resource.data else {
+                    continue;
+                };
+                if clip.skeleton != Some(skeleton)
+                    || (clip.target_model == Some(model_id)) != target_specific
+                {
+                    continue;
+                }
+                if !target_specific && clip.target_model.is_some() {
+                    continue;
+                }
+                if seen_paths.insert(clip.psxanim_path.clone()) {
+                    out.push(ResolvedModelAnimationClip {
+                        name: resource.name.clone(),
+                        psxanim_path: clip.psxanim_path.clone(),
+                        animation_resource: Some(resource.id),
+                        model_clip_index: None,
+                        calibration: clip.calibration,
+                    });
+                }
             }
         }
         out
@@ -767,12 +774,18 @@ impl ProjectDocument {
             return u16::try_from(index).ok();
         }
 
-        let animation_path =
-            self.resource(animation_id)
-                .and_then(|resource| match &resource.data {
-                    ResourceData::AnimationClip(clip) => Some(clip.psxanim_path.as_str()),
-                    _ => None,
-                })?;
+        let animation_path = self
+            .resource(animation_id)
+            .and_then(|resource| match &resource.data {
+                ResourceData::AnimationClip(clip)
+                    if clip
+                        .target_model
+                        .is_none_or(|target_model| target_model == model_id) =>
+                {
+                    Some(clip.psxanim_path.as_str())
+                }
+                _ => None,
+            })?;
         resolved
             .iter()
             .position(|clip| clip.psxanim_path == animation_path)
@@ -1259,6 +1272,7 @@ pub(crate) fn resource_data_reference_count(data: &ResourceData, id: ResourceId)
         }
         ResourceData::AnimationClip(clip) => {
             option_resource_reference_count(clip.skeleton, id)
+                + option_resource_reference_count(clip.target_model, id)
                 + option_resource_reference_count(clip.source, id)
         }
         ResourceData::AnimationSet(set) => {
@@ -1299,7 +1313,14 @@ pub(crate) fn clear_resource_data_references(data: &mut ResourceData, id: Resour
                 + clear_option_resource(&mut source.target_model, id)
         }
         ResourceData::AnimationClip(clip) => {
+            let cleared_target = clear_option_resource(&mut clip.target_model, id);
+            if cleared_target > 0 {
+                // A model-specific bake must not silently become a generic
+                // skeleton clip when its target model is removed.
+                clip.skeleton = None;
+            }
             clear_option_resource(&mut clip.skeleton, id)
+                + cleared_target
                 + clear_option_resource(&mut clip.source, id)
         }
         ResourceData::AnimationSet(set) => {

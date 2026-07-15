@@ -576,6 +576,10 @@ pub struct AnimationClipResource {
     /// Skeleton this clip targets.
     #[serde(default)]
     pub skeleton: Option<ResourceId>,
+    /// Model whose bind pose and quantization bounds this clip was baked
+    /// against. `None` is reserved for genuinely skeleton-shared clips.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_model: Option<ResourceId>,
     /// Optional authoring source this cooked clip was baked from.
     #[serde(default)]
     pub source: Option<ResourceId>,
