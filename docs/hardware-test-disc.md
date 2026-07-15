@@ -35,11 +35,12 @@ two-page PX5 captures.
 
 The third page is intentionally a microscope rather than a duplicate. It
 stores raw SPU DMA readback words for one-block and four-block BCR shapes plus
-forced-stable comparison hashes, repeated GPUSTAT reads after IRQ and
-DMA-direction writes, exact Timer 2 mode/counter/I_STAT snapshots, raw SPU
-voice-register masks, consecutive OTC CHCR reads, an RTPS V0 input-commit gap
-sweep, and repeated full-width GTE results. This extra data reveals corruption
-and state-transition shapes that a checksum or one-shot pass/fail result cannot.
+Stop/DMA-read mode poll counts and forced-stable comparison hashes, repeated
+GPUSTAT reads after IRQ and DMA-direction writes, isolated Timer 2
+mode/counter/I_STAT snapshots, raw SPU voice-register masks, consecutive OTC
+CHCR reads, an exact NCLIP scene-A settle sweep from 47 through 64 NOPs, and an
+immediate-versus-settled OP comparison. This extra data reveals corruption and
+state-transition shapes that a checksum or one-shot pass/fail result cannot.
 
 The timing minimum is normally the least-interrupted measurement; the min/max
 gap records IRQ or hardware jitter instead of hiding it. BIOS revisions can
@@ -129,6 +130,31 @@ two records occupy the previously unused cells on timing page 15.
 
 PX6 includes the observed values from conformance cases 116–137 in fixed order,
 preserving the exact partial or stale values needed to infer silicon latency.
+
+## SCPH-9902 calibration (PX6 `B2761BE1`)
+
+The final PAL hardware capture established these constraints:
+
+- NCLIP's scene-A MAC0 stayed at `0x00000874` for every read gap from 47
+  through 64 NOPs. Other predecessor sequences produced `0x00002764`,
+  `0xFFFFB964`, and `0x00007674` for the same scene. This is internal
+  state/history-dependent accumulation, not a fixed command-result latency.
+- OP produced MAC1/MAC2/MAC3 = `-768`, `1536`, `0` when issued immediately
+  after its CTC2/MTC2 seed, and `-768`, `1536`, `-768` after 64 NOPs. The
+  arithmetic is correct; the discrepancy belongs to input/control-write
+  commitment.
+- GP1 IRQ acknowledgement and DMA-direction changes become visible in
+  GPUSTAT one read after the write.
+- Timer reached-target/reached-wrap bits survive a mode write and clear on a
+  mode-register read. Both Timer 2 interrupt probes raised I_STAT bit 6.
+- SPUCNT's low-six-bit SPUSTAT mirror took 24-27 status polls to settle.
+  SPUSTAT DMA-request bits did not assert before the DMA channel was armed, so
+  they must not be used as a pre-start readiness condition. The captured SPU
+  readback words are therefore diagnostic only, not RAM-content calibration.
+
+These are behavioral constraints, not permission to reproduce them with
+read-triggered special cases. GPU, GTE, and SPU timing should be scheduled in
+bus/SPU/GTE time so unrelated instruction sequences observe the same effects.
 
 ## Headless validation
 
