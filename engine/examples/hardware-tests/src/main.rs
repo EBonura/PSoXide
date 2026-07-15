@@ -80,7 +80,7 @@ unsafe extern "C" {
     fn __hwtest_icache_entry_w2();
 }
 
-const SUITE_VERSION: &str = "HWTEST v0.13";
+const SUITE_VERSION: &str = "HWTEST v0.14";
 const SCREEN_W: i16 = 320;
 const SCREEN_H: i16 = 240;
 const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
@@ -445,6 +445,7 @@ struct ScanReport {
 
 const TIMING_RECORD_COUNT: usize = 90;
 const MEMORY_CONTROL_REGISTER_COUNT: usize = 9;
+const PRECISION_VALUE_COUNT: usize = 128;
 
 #[derive(Copy, Clone)]
 struct TimingRecord {
@@ -470,6 +471,7 @@ struct TimingReport {
     summary: ScanReport,
     records: [TimingRecord; TIMING_RECORD_COUNT],
     memory_control: [u32; MEMORY_CONTROL_REGISTER_COUNT],
+    precision: [u32; PRECISION_VALUE_COUNT],
 }
 
 impl TimingReport {
@@ -478,6 +480,7 @@ impl TimingReport {
             summary: ScanReport::pending("press x to sample"),
             records: [TimingRecord::pending(); TIMING_RECORD_COUNT],
             memory_control: [0; MEMORY_CONTROL_REGISTER_COUNT],
+            precision: [0; PRECISION_VALUE_COUNT],
         }
     }
 
@@ -1494,6 +1497,14 @@ impl HardwareTests {
             [self.cpu_scan, self.gte_scan, self.spu_scan],
             page,
         );
+        // Mirror a complete, internally consistent page set on every encode.
+        // Headless validation must not depend on controller pulse timing, and
+        // keeping the latest occurrence of each page must never mix captures.
+        for other in 0..photo::CAPTURE_PAGE_COUNT {
+            if other != page {
+                self.timing_capture.print_page(other);
+            }
+        }
     }
 
     fn run_section(&mut self, mode: Mode) {
@@ -2968,6 +2979,11 @@ fn run_timing_scan() -> TimingReport {
         hash = mix32(hash, 0x4D43_0000 | index as u32);
         hash = mix32(hash, value);
     }
+    let precision = run_precision_scan();
+    for (index, value) in precision.iter().copied().enumerate() {
+        hash = mix32(hash, 0x5052_0000 | index as u32);
+        hash = mix32(hash, value);
+    }
     TimingReport {
         summary: ScanReport::info(
             TIMING_RECORD_COUNT as u16,
@@ -2977,6 +2993,7 @@ fn run_timing_scan() -> TimingReport {
         ),
         records,
         memory_control,
+        precision,
     }
 }
 
@@ -5142,7 +5159,6 @@ fn fnv16_halfwords(hws: &[u16]) -> u32 {
 /// mode (bits 5..4 = 11) around the transfer, the read-side mirror of the
 /// SDK's DMA upload.
 fn spu_dma_read(addr: u32, out: &mut [u32]) {
-    use psx_io::spu::{SPUCNT, TRANSFER_ADDR, TRANSFER_CTRL};
     let words = out.len() as u32;
     let block_size: u32 = if words % 16 == 0 {
         16
@@ -5155,13 +5171,38 @@ fn spu_dma_read(addr: u32, out: &mut [u32]) {
     } else {
         1
     };
+    spu_dma_read_shape(addr, out, block_size);
+}
+
+/// SPU->RAM DMA with an explicit BCR shape. Hardware's unstable read mode
+/// corrupts FIFO boundaries, so the precision capture must compare one large
+/// block with several small blocks while holding the payload constant.
+fn spu_dma_read_shape(addr: u32, out: &mut [u32], block_size: u32) {
+    use psx_io::spu::{SPUCNT, SPUSTAT, TRANSFER_ADDR, TRANSFER_CTRL};
+    let words = out.len() as u32;
+    debug_assert!(block_size != 0 && words % block_size == 0);
     let block_count = words / block_size;
     unsafe {
         let spucnt = psx_io::read16(SPUCNT) & !0x0030;
         psx_io::write16(SPUCNT, spucnt);
+        // SPUCNT is applied asynchronously. Starting DMA before SPUSTAT
+        // reflects Stop returns FIFO/transition garbage even when the memory
+        // control delay is configured for stable reads.
+        let mut mode_guard = 0u32;
+        while psx_io::read16(SPUSTAT) & 0x003F != spucnt & 0x003F
+            && mode_guard < 1_000_000
+        {
+            mode_guard += 1;
+        }
         psx_io::write16(TRANSFER_CTRL, 0x0004);
         psx_io::write16(TRANSFER_ADDR, (addr / 8) as u16);
         psx_io::write16(SPUCNT, spucnt | 0x0030); // transfer mode = DMA Read
+        mode_guard = 0;
+        while psx_io::read16(SPUSTAT) & 0x003F != (spucnt | 0x0030) & 0x003F
+            && mode_guard < 1_000_000
+        {
+            mode_guard += 1;
+        }
         dma::enable_channel(dma::Channel::Spu);
         dma::set_madr(dma::Channel::Spu, out.as_ptr() as u32);
         dma::set_bcr_block(dma::Channel::Spu, block_size as u16, block_count as u16);
@@ -5237,6 +5278,334 @@ fn test_spu_ram_manual_fifo_roundtrip() -> TestResult {
         fnv16_halfwords(&got),
         "spu fifo upload",
     )
+}
+
+/// PX6's third QR is a fixed-order microscope for unresolved silicon
+/// differences. It intentionally stores raw words rather than more hashes:
+/// the host report can then distinguish transfer corruption, delayed status
+/// latches, sticky-bit read semantics, and deterministic GTE state hazards.
+fn run_precision_scan() -> [u32; PRECISION_VALUE_COUNT] {
+    let mut values = [0u32; PRECISION_VALUE_COUNT];
+    let mut next = 0usize;
+
+    precision_spu(&mut values, &mut next);
+    precision_gpu(&mut values, &mut next);
+    precision_timer(&mut values, &mut next);
+    precision_remaining(&mut values, &mut next);
+
+    debug_assert_eq!(next, PRECISION_VALUE_COUNT);
+    values
+}
+
+fn push_precision(values: &mut [u32; PRECISION_VALUE_COUNT], next: &mut usize, value: u32) {
+    values[*next] = value;
+    *next += 1;
+}
+
+/// Values 0..42: compare SPU RAM DMA-read corruption under the boot-time
+/// memory-control setting against the documented stable-read setting. PSX-SPX
+/// notes that 1F801014h bits 24..27 select whether the first FIFO halfword of
+/// each block is dirty. Capturing every returned word reveals the exact shape.
+fn precision_spu(values: &mut [u32; PRECISION_VALUE_COUNT], next: &mut usize) {
+    use psx_io::spu::{SPUCNT, SPUSTAT, TRANSFER_ADDR, TRANSFER_CTRL, TRANSFER_DATA};
+
+    const SPU_DELAY: u32 = 0x1F80_1014;
+    let original_delay = unsafe { psx_io::read32(SPU_DELAY) };
+    let packed_status =
+        || unsafe { ((psx_io::read16(SPUCNT) as u32) << 16) | psx_io::read16(SPUSTAT) as u32 };
+    push_precision(values, next, original_delay);
+    push_precision(values, next, packed_status());
+
+    let mut src = [0u32; 16];
+    for (index, word) in src.iter_mut().enumerate() {
+        *word = 0xC0DE_0000u32.wrapping_add(index as u32 * 0x111);
+    }
+    let dest = 0x3800;
+    let bytes = unsafe { core::slice::from_raw_parts(src.as_ptr() as *const u8, 64) };
+    psx_spu::upload_adpcm(SpuAddr::new(dest), bytes);
+
+    let mut boot_single = [0u32; 16];
+    spu_dma_read_shape(dest, &mut boot_single, 16);
+    for word in boot_single {
+        push_precision(values, next, word);
+    }
+    push_precision(values, next, packed_status());
+
+    let mut boot_four = [0u32; 16];
+    spu_dma_read_shape(dest, &mut boot_four, 4);
+    for word in boot_four {
+        push_precision(values, next, word);
+    }
+    push_precision(values, next, packed_status());
+
+    // Preserve all BIOS-programmed wait fields and only make the documented
+    // nonzero nibble explicit for the stable comparison. Hashes are enough
+    // here: the two boot-mode arrays above retain the exact corruption shape.
+    let stable_delay = original_delay | 0x0200_0000;
+    unsafe { psx_io::write32(SPU_DELAY, stable_delay) };
+    spin(64);
+    push_precision(values, next, unsafe { psx_io::read32(SPU_DELAY) });
+    let mut stable_single = [0u32; 16];
+    spu_dma_read_shape(dest, &mut stable_single, 16);
+    push_precision(values, next, fnv32_words(&stable_single));
+    let mut stable_four = [0u32; 16];
+    spu_dma_read_shape(dest, &mut stable_four, 4);
+    push_precision(values, next, fnv32_words(&stable_four));
+
+    let fifo_dest = 0x3C00;
+    unsafe {
+        psx_io::write16(TRANSFER_CTRL, 0x0004);
+        psx_io::write16(TRANSFER_ADDR, (fifo_dest / 8) as u16);
+        let stopped = psx_io::read16(SPUCNT) & !0x0030;
+        psx_io::write16(SPUCNT, stopped | 0x0010);
+        for index in 0..8u16 {
+            psx_io::write16(TRANSFER_DATA, 0xBEEFu16.wrapping_add(index * 0x101));
+        }
+        psx_io::write16(SPUCNT, stopped);
+    }
+    spin(4000);
+    let mut fifo_read = [0u32; 4];
+    spu_dma_read(fifo_dest, &mut fifo_read);
+    for word in fifo_read {
+        push_precision(values, next, word);
+    }
+    unsafe { psx_io::write32(SPU_DELAY, original_delay) };
+}
+
+/// Values 43..60: raw GPUSTAT transitions. Three reads after each GP1 DMA
+/// direction write expose whether the D0-vs-E4 result is a delayed latch;
+/// the IRQ reads retain the command-FIFO set/ack transition shape.
+fn precision_gpu(values: &mut [u32; PRECISION_VALUE_COUNT], next: &mut usize) {
+    gpu_io::write_gp1(0x0200_0000);
+    push_precision(values, next, gpu_io::gpustat().bits());
+    gpu_io::write_gp0(0x1F00_0000);
+    for _ in 0..3 {
+        push_precision(values, next, gpu_io::gpustat().bits());
+    }
+    gpu_io::write_gp1(0x0200_0000);
+    for _ in 0..2 {
+        push_precision(values, next, gpu_io::gpustat().bits());
+    }
+    for dir in 0..4u32 {
+        gpu_io::write_gp1(0x0400_0000 | dir);
+        for _ in 0..3 {
+            push_precision(values, next, gpu_io::gpustat().bits());
+        }
+    }
+    gpu_io::write_gp1(0x0400_0002);
+}
+
+/// Values 61..72: exact Timer 2 state before and after target/FFFF events.
+/// The two consecutive mode reads expose the read-to-clear flags, while the
+/// complete I_STAT word distinguishes a short IRQ pulse from a missing edge.
+fn precision_timer(values: &mut [u32; PRECISION_VALUE_COUNT], next: &mut usize) {
+    timers::set_target(timers::Timer::Timer2, 32);
+    timers::set_mode(
+        timers::Timer::Timer2,
+        TIMER_MODE_RESET_AT_TARGET | TIMER_MODE_IRQ_ON_TARGET,
+    );
+    timers::set_counter(timers::Timer::Timer2, 0);
+    push_precision(values, next, timers::mode(timers::Timer::Timer2) as u32);
+    push_precision(values, next, timers::counter(timers::Timer::Timer2) as u32);
+    spin(8192);
+    push_precision(values, next, timers::counter(timers::Timer::Timer2) as u32);
+    push_precision(values, next, timers::mode(timers::Timer::Timer2) as u32);
+    push_precision(values, next, timers::mode(timers::Timer::Timer2) as u32);
+    push_precision(values, next, irq::stat());
+
+    timers::set_mode(timers::Timer::Timer2, TIMER_MODE_IRQ_ON_WRAP);
+    timers::set_counter(timers::Timer::Timer2, 0xFFF0);
+    push_precision(values, next, timers::mode(timers::Timer::Timer2) as u32);
+    push_precision(values, next, timers::counter(timers::Timer::Timer2) as u32);
+    spin(8192);
+    push_precision(values, next, timers::counter(timers::Timer::Timer2) as u32);
+    push_precision(values, next, timers::mode(timers::Timer::Timer2) as u32);
+    push_precision(values, next, timers::mode(timers::Timer::Timer2) as u32);
+    push_precision(values, next, irq::stat());
+    timers::set_mode(timers::Timer::Timer2, 0);
+}
+
+/// Configure a projection where screen X/Y equal V0.x/y. V0 is first settled
+/// to a conspicuous old pair; the probe then writes a different pair and Z in
+/// one tightly controlled assembly block immediately before RTPS.
+fn seed_rtps_v0_commit_probe() {
+    ctc2!(31, 0);
+    ctc2!(0, 0x0000_1000); // identity R11,R12
+    ctc2!(1, 0);
+    ctc2!(2, 0x0000_1000); // identity R22,R23
+    ctc2!(3, 0);
+    ctc2!(4, 0x0000_1000); // identity R33
+    ctc2!(5, 0);
+    ctc2!(6, 0);
+    ctc2!(7, 0);
+    ctc2!(24, 0); // OFX
+    ctc2!(25, 0); // OFY
+    ctc2!(26, 160); // H; VZ=160 makes the perspective ratio exactly 1
+    ctc2!(27, 0);
+    ctc2!(28, 0);
+    mtc2!(0, pack_gte_xy(-291, -31));
+    mtc2!(1, 160);
+    gte_nops!(64);
+}
+
+/// Execute the SDK projection write schedule with an exact number of extra
+/// NOPs between VZ0 and RTPS. The MTC2 encodings use $8/$9 so the compiler
+/// cannot insert setup instructions into the measured interval.
+macro_rules! rtps_v0_commit_probe {
+    ($gap:literal) => {{
+        seed_rtps_v0_commit_probe();
+        let new_vxy = pack_gte_xy(564, 23);
+        let new_vz = 160u32;
+        #[cfg(target_arch = "mips")]
+        unsafe {
+            core::arch::asm!(
+                ".word 0x48880000", // MTC2 $8,VXY0
+                ".word 0x48890800", // MTC2 $9,VZ0
+                concat!(".rept ", stringify!($gap), "\nnop\n.endr"),
+                ".word 0x4a080001", // RTPS, sf=1
+                in("$8") new_vxy,
+                in("$9") new_vz,
+                options(nostack, nomem, preserves_flags),
+            );
+        }
+        #[cfg(not(target_arch = "mips"))]
+        {
+            mtc2!(0, new_vxy);
+            mtc2!(1, new_vz);
+            unsafe { gte_ops::rtps() };
+        }
+        gte_delay16();
+        [mfc2!(14), mfc2!(25), mfc2!(0)]
+    }};
+}
+
+/// Values 73..127: unresolved GTE state, SPU register masks, and OTC DMA
+/// completion. Already-matching MVMVA/compose paths are intentionally omitted
+/// so the fixed QR budget targets differences that can still improve PSoXide.
+fn precision_remaining(values: &mut [u32; PRECISION_VALUE_COUNT], next: &mut usize) {
+    // The SDK's single-vertex projection path now buffers VXY0/VZ0 before
+    // RTPS. Sweep that exact schedule so real hardware can establish whether
+    // RTPS shares HWB-010's MVMVA input-commit hazard and, if so, the first
+    // safe gap. Each triplet is SXY2, MAC1, then the settled VXY0 readback:
+    // together they distinguish stale-X execution from a write that never
+    // landed, while SXY2's upper half confirms that fresh Y was consumed.
+    for triplet in [
+        rtps_v0_commit_probe!(0),
+        rtps_v0_commit_probe!(1),
+        rtps_v0_commit_probe!(2),
+        rtps_v0_commit_probe!(3),
+        rtps_v0_commit_probe!(4),
+        rtps_v0_commit_probe!(8),
+    ] {
+        for value in triplet {
+            push_precision(values, next, value);
+        }
+    }
+    for _ in 0..2 {
+        run_op_full_seed();
+        push_precision(values, next, mfc2!(25));
+        push_precision(values, next, mfc2!(26));
+        push_precision(values, next, mfc2!(27));
+    }
+
+    // Voice 0 raw masks: case 164 says which offsets differ, but not what the
+    // masked values are. Preserve all eight readbacks after writing FFFF.
+    let voice0 = psx_io::spu::SPU_BASE;
+    unsafe {
+        for index in 0..8u32 {
+            let addr = voice0 + index * 2;
+            let old = psx_io::read16(addr);
+            psx_io::write16(addr, 0xFFFF);
+            push_precision(values, next, psx_io::read16(addr) as u32);
+            psx_io::write16(addr, old);
+        }
+    }
+
+    // OTC case 40 differs by a single busy poll. Consecutive CHCR reads show
+    // exactly when START/TRIGGER clear; final registers and chain endpoints
+    // distinguish status latency from transfer completion or pointer updates.
+    static mut PRECISION_OT: [u32; 16] = [0; 16];
+    unsafe {
+        let ptr = (&raw mut PRECISION_OT) as *mut u32;
+        for index in 0..16 {
+            ptr::write_volatile(ptr.add(index), 0);
+        }
+        dma::enable_channel(dma::Channel::Otc);
+        dma::set_madr(dma::Channel::Otc, ptr.add(15) as u32);
+        dma::set_bcr_manual(dma::Channel::Otc, 16);
+        push_precision(values, next, dma::chcr(dma::Channel::Otc));
+        dma::set_chcr(
+            dma::Channel::Otc,
+            dma::CHCR_STEP_BACKWARD | dma::CHCR_SYNC_MANUAL | dma::CHCR_START | dma::CHCR_TRIGGER,
+        );
+        for _ in 0..6 {
+            push_precision(values, next, dma::chcr(dma::Channel::Otc));
+        }
+        let mut guard = 0u32;
+        while dma::is_busy(dma::Channel::Otc) && guard < 0xFFFF {
+            guard += 1;
+        }
+        push_precision(values, next, dma::madr(dma::Channel::Otc));
+        push_precision(
+            values,
+            next,
+            psx_io::read32(dma::Channel::Otc.base() + 4),
+        );
+        push_precision(values, next, guard);
+        push_precision(values, next, ptr::read_volatile(ptr));
+        push_precision(values, next, ptr::read_volatile(ptr.add(15)));
+    }
+
+    push_precision(
+        values,
+        next,
+        scene_nclip_mac0(0x006e_0095, 0xffe2_0094, 0xffde_00dc),
+    );
+    push_precision(
+        values,
+        next,
+        scene_nclip_mac0(0x0073_00d5, 0xffde_00dc, 0xffd8_0130),
+    );
+    push_precision(
+        values,
+        next,
+        scene_nclip_mac0(0x0079_011f, 0xffd8_0130, 0xffd2_0194),
+    );
+
+    // Cases 80..82 only diverge on silicon after the exact case-79 RTPT
+    // predecessor; controlled NCLIP reproductions already match. Repeat that
+    // boundary, then retain a sequential A/B/C run to reveal carried state.
+    for _ in 0..4 {
+        scene_rtpt(RTPT_E);
+        let _ = mfc2!(19);
+        push_precision(
+            values,
+            next,
+            scene_nclip_mac0(0x006e_0095, 0xffe2_0094, 0xffde_00dc),
+        );
+    }
+    scene_rtpt(RTPT_E);
+    let _ = mfc2!(19);
+    push_precision(
+        values,
+        next,
+        scene_nclip_mac0(0x006e_0095, 0xffe2_0094, 0xffde_00dc),
+    );
+    push_precision(
+        values,
+        next,
+        scene_nclip_mac0(0x0073_00d5, 0xffde_00dc, 0xffd8_0130),
+    );
+    push_precision(
+        values,
+        next,
+        scene_nclip_mac0(0x0079_011f, 0xffd8_0130, 0xffd2_0194),
+    );
+    push_precision(
+        values,
+        next,
+        scene_nclip_mac0(0x006e_0095, 0xffe2_0094, 0xffde_00dc),
+    );
 }
 
 /// Read one 32-bit VRAM word (two 15bpp pixels) at `(vx, vy)` via GP0 0xC0
