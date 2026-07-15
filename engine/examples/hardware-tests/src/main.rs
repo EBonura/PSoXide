@@ -5231,11 +5231,11 @@ fn spu_dma_read_shape(addr: u32, out: &mut [u32], block_size: u32) -> u32 {
             guard += 1;
         }
         psx_io::write16(SPUCNT, spucnt); // back to Stop
-        if stop_guard == 0xFFFF || mode_guard == 0xFFFF {
-            0xFFFF_FFFF
-        } else {
-            (stop_guard << 16) | mode_guard
-        }
+        // Preserve both bounded counters independently. A DMA-read mode that
+        // intentionally remains gated until channel arm reports `FFFF` in the
+        // low half while the preceding Stop transition still retains its
+        // useful sample-boundary count in the high half.
+        (stop_guard << 16) | mode_guard
     }
 }
 
