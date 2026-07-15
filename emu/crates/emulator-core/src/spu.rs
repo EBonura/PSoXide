@@ -630,10 +630,11 @@ impl Voice {
     /// envelope level after the step (0..=0x7FFF, Q15).
     fn step_envelope(&mut self) -> i32 {
         match self.phase {
-            AdsrPhase::Off => {
-                self.envelope = 0;
-                0
-            }
+            // An inactive generator leaves a software-written ENVX value
+            // latched. KON explicitly resets it to zero, and Release writes
+            // zero when it transitions to Off. Resetting on every sample
+            // erased manual negative values before the CPU could read them.
+            AdsrPhase::Off => self.envelope,
             AdsrPhase::Attack => self.step_attack(),
             AdsrPhase::Decay => self.step_decay(),
             AdsrPhase::Sustain => self.step_sustain(),
@@ -1500,17 +1501,21 @@ impl Spu {
             voice_offset::ADSR_LO => voice.adsr_lo,
             voice_offset::ADSR_HI => voice.adsr_hi,
             voice_offset::ADSR_CURRENT => {
-                // Current ADSR volume (ENVX), 15-bit. Hardware exposes the
-                // live envelope level, and games poll it: a commercial title
-                // spins until every voice's ENVX reaches 0 before advancing
-                // past its intro, so a pinned non-zero value hangs it forever.
+                // Current ADSR volume (ENVX), signed 16-bit when written by
+                // software. The automatic generator normally occupies
+                // 0..=7FFF, but SCPH-9902 reads back manual FFFF writes
+                // verbatim, matching PSX-SPX's documented -8000..+7FFF
+                // manual range. Games also poll the live generated value:
+                // a commercial title waits for every voice to reach zero.
                 //
                 // This deliberately diverges from the Redux parity trace --
                 // Redux's SPU runs on an unpumped background thread during an
                 // oracle trace, so its `readRegister` case 12 returns a stale
                 // 1 -- but per the hardware > Redux oracle priority the live
                 // envelope is the correct, hardware-accurate value.
-                self.voices[v].envelope.clamp(0, 0x7FFF) as u16
+                self.voices[v]
+                    .envelope
+                    .clamp(i16::MIN as i32, i16::MAX as i32) as i16 as u16
             }
             voice_offset::REPEAT_ADDR => voice.loop_addr_raw,
             _ => 0,
@@ -1538,9 +1543,9 @@ impl Spu {
                 parse_adsr_hi(value, &mut voice.adsr);
             }
             voice_offset::ADSR_CURRENT => {
-                // Software can write the current envelope level; clamp
-                // to i15.
-                voice.envelope = (value as i16) as i32 & 0x7FFF;
+                // Manual writes are signed 16-bit. The ADSR generator will
+                // overwrite/step this value on its next active envelope tick.
+                voice.envelope = value as i16 as i32;
             }
             voice_offset::REPEAT_ADDR => {
                 // A software REPEAT_ADDR write stores the loop address and
