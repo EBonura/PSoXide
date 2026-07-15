@@ -185,9 +185,10 @@ pub struct Cpu {
     /// to resume a hazard-repro session).
     #[serde(skip)]
     gte_read_latency_bypass: bool,
-    /// HWB-010 hazard model: an MVMVA issued within `gte_v0x_window`
-    /// ticks of an MTC2 VXY0 write computes its MAC1 phase with the
-    /// PREVIOUS V0.x (the GTE's sequential row pipeline runs MAC1 first;
+    /// HWB-010 hazard model: a V0 MVMVA or RTPS issued within
+    /// `gte_v0x_window` ticks of an MTC2 VXY0 write computes its first
+    /// transform row with the PREVIOUS V0.x (the GTE's sequential row
+    /// pipeline runs MAC1 first;
     /// the write commits between the MAC1 and MAC2 windows). Measured on
     /// silicon with six exact arithmetic confirmations across two live
     /// hardware captures, HWB-009 and HWB-010. On hardware
@@ -1130,12 +1131,13 @@ impl Cpu {
             // transform for RTPS/RTPT only; restored right after the op.
             let fl = self.freelook;
             let freelook_saved = freelook::apply_for_op(&mut self.cop2, &fl, instr);
-            // HWB-010 hazard: an MVMVA reading V0 issued within the MTC2
-            // VXY0 commit window computes its MAC1 phase with the previous
-            // V0.x (see the gte_v0x_hazard field docs).
+            // HWB-010 hazard: a transform reading V0 inside the MTC2 VXY0
+            // commit window computes its first row with the previous V0.x.
+            // MVMVA is console-confirmed; RTPS is included in this env-gated
+            // diagnostic path to reproduce the SDK projection schedule.
+            let opcode = instr & 0x3F;
             if self.gte_v0x_hazard
-                && (instr & 0x3F) == 0x12
-                && (instr >> 15) & 3 == 0
+                && (opcode == 0x01 || (opcode == 0x12 && (instr >> 15) & 3 == 0))
                 && self.tick.wrapping_sub(self.gte_v0xy_write_tick) <= self.gte_v0x_window
             {
                 self.cop2.execute_with_stale_v0x(instr, self.gte_prev_v0x);
