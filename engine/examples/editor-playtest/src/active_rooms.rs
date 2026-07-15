@@ -95,29 +95,51 @@ impl Playtest {
         let view = self.active_room_selection_view();
         self.refresh_portal_visibility_for_view(current_index, current_record, view);
 
-        // Reachability draw: the active/drawn set is the unpruned portal-graph
-        // ring around the camera's room (the visibility root), not the
-        // frustum-clipped visible set. Side and behind-the-player rooms stay
-        // drawn (no pop-in when a portal goes edge-on); per-polygon backface +
-        // screen culling still removes the off-screen geometry cheaply.
         let mut requested_rooms = [INVALID_ROOM_INDEX; MAX_ACTIVE_ROOMS];
         requested_rooms[0] = current_index;
         let mut requested_count = 1usize;
-        let mut ring = [INVALID_ROOM_INDEX; MAX_ACTIVE_ROOMS];
-        let ring_count = room_graph_ring(
-            self.visibility.root,
-            RESIDENT_DRAW_DEPTH,
-            &mut ring,
-            MAX_ACTIVE_ROOMS,
-        );
-        let mut i = 0usize;
-        while i < ring_count && requested_count < MAX_ACTIVE_ROOMS {
-            let room = ring[i];
-            if room != current_index && room != INVALID_ROOM_INDEX {
-                requested_rooms[requested_count] = room;
-                requested_count += 1;
+        // Pruned draw: the drawn set is the frustum-clipped portal traversal
+        // (visibility.result, refreshed just above), which honours the
+        // per-room draw_distance far clamp and portal narrowing. Bounded by
+        // what the camera can actually see, so long open sightlines cost
+        // rooms-in-view, not the whole reachability ring.
+        #[cfg(feature = "vis-draw-pruned")]
+        {
+            let visible = self.visibility.result.room_count.min(MAX_ACTIVE_ROOMS);
+            let mut i = 0usize;
+            while i < visible && requested_count < MAX_ACTIVE_ROOMS {
+                let room = self.visibility.result.rooms[i].room;
+                if room != current_index && room != INVALID_ROOM_INDEX {
+                    requested_rooms[requested_count] = room;
+                    requested_count += 1;
+                }
+                i += 1;
             }
-            i += 1;
+        }
+        // Reachability draw (default): the active/drawn set is the unpruned
+        // portal-graph ring around the camera's room (the visibility root),
+        // not the frustum-clipped visible set. Side and behind-the-player
+        // rooms stay drawn (no pop-in when a portal goes edge-on); per-polygon
+        // backface + screen culling still removes the off-screen geometry
+        // cheaply.
+        #[cfg(not(feature = "vis-draw-pruned"))]
+        {
+            let mut ring = [INVALID_ROOM_INDEX; MAX_ACTIVE_ROOMS];
+            let ring_count = room_graph_ring(
+                self.visibility.root,
+                RESIDENT_DRAW_DEPTH,
+                &mut ring,
+                MAX_ACTIVE_ROOMS,
+            );
+            let mut i = 0usize;
+            while i < ring_count && requested_count < MAX_ACTIVE_ROOMS {
+                let room = ring[i];
+                if room != current_index && room != INVALID_ROOM_INDEX {
+                    requested_rooms[requested_count] = room;
+                    requested_count += 1;
+                }
+                i += 1;
+            }
         }
 
         self.window.begin_job(
