@@ -1015,6 +1015,7 @@ impl Bus {
                     }
                 }
                 EventSlot::SpuDma => {
+                    self.spu.end_dma();
                     if self.complete_dma_channel(4) {
                         dma_edge = true;
                     }
@@ -1675,6 +1676,7 @@ impl Bus {
             // hangs forever.
             return Some(0);
         }
+        self.spu.begin_dma(self.cycles);
         let sync_mode = (ch.channel_control >> 9) & 0x3;
         let bcr = ch.block_control;
         // BCR length is a count of 32-bit DMA words. Each transferred word
@@ -1889,7 +1891,10 @@ impl Bus {
             }
         } else {
             for _ in 0..total_words {
-                let word = self.gpu.read32(crate::gpu::GP0_ADDR).unwrap_or(0);
+                let word = self
+                    .gpu
+                    .read32_at(crate::gpu::GP0_ADDR, self.cycles)
+                    .unwrap_or(0);
                 write_ram_u32(&mut self.ram[..], addr, word);
                 addr = addr.wrapping_add(step);
             }
@@ -1930,7 +1935,10 @@ impl Bus {
             }
         } else {
             for _ in 0..total_words {
-                let word = self.gpu.read32(crate::gpu::GP0_ADDR).unwrap_or(0);
+                let word = self
+                    .gpu
+                    .read32_at(crate::gpu::GP0_ADDR, self.cycles)
+                    .unwrap_or(0);
                 write_ram_u32(&mut self.ram[..], addr, word);
                 addr = addr.wrapping_add(step);
             }
@@ -2094,7 +2102,8 @@ impl Bus {
         if Dma::contains(phys) {
             return self.dma.read8(phys);
         }
-        if let Some(value) = self.gpu.read32(phys & !3) {
+        if let Some(value) = self.gpu.read32_at(phys & !3, self.cycles) {
+            self.service_gpu_irq();
             return (value >> ((phys & 3) * 8)) as u8;
         }
         if Spu::contains(phys) {
@@ -2201,7 +2210,8 @@ impl Bus {
         if Spu::contains(phys) {
             return self.spu.read16_at(phys, self.cycles);
         }
-        if let Some(value) = self.gpu.read32(phys & !3) {
+        if let Some(value) = self.gpu.read32_at(phys & !3, self.cycles) {
+            self.service_gpu_irq();
             return (value >> ((phys & 2) * 8)) as u16;
         }
         if Sio0::contains(phys) {
@@ -2340,7 +2350,8 @@ impl Bus {
         if Dma::contains(phys) {
             return self.dma.read32(phys);
         }
-        if let Some(v) = self.gpu.read32(phys) {
+        if let Some(v) = self.gpu.read32_at(phys, self.cycles) {
+            self.service_gpu_irq();
             return v;
         }
         if Spu::contains(phys) {
@@ -2483,7 +2494,7 @@ impl Bus {
             }
             return;
         }
-        if self.gpu.write32(phys, value) {
+        if self.gpu.write32_at(phys, value, self.cycles) {
             self.service_gpu_irq();
             if phys == crate::gpu::GP1_ADDR && (value >> 24) == 0x08 {
                 if value & (1 << 3) != 0 {
@@ -2656,7 +2667,7 @@ impl Bus {
             return true;
         }
         let aligned = phys & !3;
-        if self.gpu.write32(aligned, source) {
+        if self.gpu.write32_at(aligned, source, self.cycles) {
             self.service_gpu_irq();
             return true;
         }
@@ -2830,7 +2841,7 @@ impl Bus {
             self.sio1.write16(phys, value);
             return;
         }
-        if self.gpu.write32(phys & !3, value as u32) {
+        if self.gpu.write32_at(phys & !3, value as u32, self.cycles) {
             self.service_gpu_irq();
             return;
         }
@@ -3111,6 +3122,8 @@ mod tests {
         let mut bus = Bus::new(synthetic_bios()).unwrap();
 
         bus.write32(crate::gpu::GP0_ADDR, 0x1F00_0000);
+        assert_eq!(bus.read32(crate::gpu::GP1_ADDR) & (1 << 24), 0);
+        bus.add_cycles(crate::gpu::GP1_STATUS_LATCH_CYCLES as u32);
         assert_ne!(bus.read32(crate::gpu::GP1_ADDR) & (1 << 24), 0);
         assert_ne!(
             bus.read32(IRQ_STAT_ADDR) & (1 << (IrqSource::Gpu as u32)),
@@ -3118,6 +3131,8 @@ mod tests {
         );
 
         bus.write32(crate::gpu::GP1_ADDR, 0x0200_0000);
+        assert_ne!(bus.read32(crate::gpu::GP1_ADDR) & (1 << 24), 0);
+        bus.add_cycles(crate::gpu::GP1_STATUS_LATCH_CYCLES as u32);
         assert_eq!(bus.read32(crate::gpu::GP1_ADDR) & (1 << 24), 0);
         assert_eq!(
             bus.read32(IRQ_STAT_ADDR) & (1 << (IrqSource::Gpu as u32)),

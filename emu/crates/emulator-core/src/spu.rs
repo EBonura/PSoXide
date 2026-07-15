@@ -847,6 +847,17 @@ pub struct Spu {
     /// SPU status register (0x1F80_1DAE). Lower 6 bits mirror SPUCNT.
     /// Bit 6 = IRQ-triggered latch (cleared by SPUCNT write with bit 6 clear).
     spustat: u16,
+    /// Applied and pending copies of SPUSTAT's low-six-bit SPUCNT mirror.
+    /// Silicon updates this mirror on the next 44.1 kHz sample boundary,
+    /// independently from the immediately-readable SPUCNT write latch.
+    #[serde(default)]
+    spustat_control: u16,
+    #[serde(default)]
+    spustat_control_pending: Option<(u16, u64)>,
+    /// DMA request bits 7..9 are asserted only while channel 4 is actively
+    /// transferring, not merely because SPUCNT selects a DMA mode.
+    #[serde(default)]
+    dma_active: bool,
     /// IRQ address (byte addr into SPU RAM). Written as halfword value
     /// which is scaled by 8.
     irq_addr: u32,
@@ -1051,6 +1062,9 @@ impl Spu {
             voices: std::array::from_fn(|_| Voice::default()),
             spucnt: 0,
             spustat: 0,
+            spustat_control: 0,
+            spustat_control_pending: None,
+            dma_active: false,
             irq_addr: 0,
             transfer_addr: 0,
             transfer_addr_raw: 0,
@@ -1197,19 +1211,49 @@ impl Spu {
     /// DMA-request bits synthesised from the SPUCNT transfer mode, and
     /// bit 11 (capture-buffer half) is held in `self.spustat`.
     pub fn spustat(&self) -> u16 {
+        self.spustat_at(u64::MAX)
+    }
+
+    /// SPUSTAT sampled at a CPU cycle. The low control mirror crosses into
+    /// the status domain at the next SPU sample edge.
+    pub fn spustat_at(&self, now: u64) -> u16 {
         // Bits 0..5 mirror SPUCNT; bits 6/10/11 are held in self.spustat
         // (IRQ latch / transfer-busy / capture-buffer half).
-        let mut s = (self.spustat & !0x3F) | (self.spucnt & 0x3F);
+        let control = match self.spustat_control_pending {
+            Some((value, deadline)) if deadline <= now => value,
+            _ => self.spustat_control,
+        };
+        let mut s = (self.spustat & !0x3F) | control;
         // DMA-request status bits (PSX-SPX SPUSTAT): bit 7 = DMA
         // read/write request (mirrors SPUCNT bit 5, i.e. set for both
         // DMA transfer modes), bit 8 = DMA write request (transfer
         // mode 2), bit 9 = DMA read request (transfer mode 3).
-        match (self.spucnt >> 4) & 3 {
-            2 => s |= (1 << 7) | (1 << 8),
-            3 => s |= (1 << 7) | (1 << 9),
+        match ((self.spucnt >> 4) & 3, self.dma_active) {
+            (2, true) => s |= (1 << 7) | (1 << 8),
+            (3, true) => s |= (1 << 7) | (1 << 9),
             _ => {}
         }
         s
+    }
+
+    /// Mark DMA channel 4 as owning the SPU transfer engine.
+    pub fn begin_dma(&mut self, now: u64) {
+        self.dma_active = true;
+        // DMA-read mode's control mirror is gated by ownership of the
+        // transfer engine on SCPH-9902. Once channel 4 is armed it crosses at
+        // the normal sample boundary, just like the other control modes.
+        if (self.spucnt >> 4) & 3 == 3 {
+            let next_sample = now
+                .saturating_div(SAMPLE_CYCLES)
+                .saturating_add(1)
+                .saturating_mul(SAMPLE_CYCLES);
+            self.spustat_control_pending = Some((self.spucnt & 0x3F, next_sample));
+        }
+    }
+
+    /// Release the SPU transfer engine when the scheduled DMA completes.
+    pub fn end_dma(&mut self) {
+        self.dma_active = false;
     }
 
     /// Diagnostic: total samples produced since reset. One sample pair
@@ -1345,7 +1389,7 @@ impl Spu {
     }
 
     /// 16-bit read with cycle context.
-    pub fn read16_at(&self, phys: u32, _now: u64) -> u16 {
+    pub fn read16_at(&self, phys: u32, now: u64) -> u16 {
         let phys = phys & !1;
         if let Some((v, off)) = decode_voice(phys) {
             return self.read_voice_reg(v, off);
@@ -1375,7 +1419,7 @@ impl Spu {
             TRANSFER_FIFO => self.transfer_fifo_read(),
             SPUCNT => self.spucnt,
             TRANSFER_CTRL => self.transfer_ctrl,
-            SPUSTAT => self.spustat(),
+            SPUSTAT => self.spustat_at(now),
             CD_VOL_L => self.cd_vol_l.reg_read(),
             CD_VOL_R => self.cd_vol_r.reg_read(),
             EXT_VOL_L => self.ext_vol_l.reg_read(),
@@ -1394,7 +1438,7 @@ impl Spu {
     }
 
     /// 16-bit write with cycle context.
-    pub fn write16_at(&mut self, phys: u32, value: u16, _now: u64) {
+    pub fn write16_at(&mut self, phys: u32, value: u16, now: u64) {
         let phys = phys & !1;
         if let Some((v, off)) = decode_voice(phys) {
             self.write_voice_reg(v, off, value);
@@ -1426,7 +1470,7 @@ impl Spu {
                 self.transfer_addr = (value as u32) << 3;
             }
             TRANSFER_FIFO => self.transfer_fifo_write(value),
-            SPUCNT => self.write_spucnt(value),
+            SPUCNT => self.write_spucnt(value, now),
             TRANSFER_CTRL => self.transfer_ctrl = value,
             SPUSTAT => { /* read-only -- writes dropped */ }
             CD_VOL_L => self.cd_vol_l.write_signed_q15(value),
@@ -1473,9 +1517,25 @@ impl Spu {
         }
     }
 
-    fn write_spucnt(&mut self, value: u16) {
+    fn write_spucnt(&mut self, value: u16, now: u64) {
         let prev = self.spucnt;
+        if let Some((pending, deadline)) = self.spustat_control_pending {
+            if deadline <= now {
+                self.spustat_control = pending;
+                self.spustat_control_pending = None;
+            }
+        }
         self.spucnt = value;
+        // DMA-read mode does not become the current SPUSTAT mode merely from
+        // the control write: SCPH-9902 stayed in Stop for all 65,535 polls
+        // before channel 4 was armed. Other modes cross at the next sample.
+        if (value >> 4) & 3 != 3 {
+            let next_sample = now
+                .saturating_div(SAMPLE_CYCLES)
+                .saturating_add(1)
+                .saturating_mul(SAMPLE_CYCLES);
+            self.spustat_control_pending = Some((value & 0x3F, next_sample));
+        }
         // SPU IRQ enable transitioned to 0 → clear status latch (ack).
         if (prev & (1 << 6)) != 0 && (value & (1 << 6)) == 0 {
             self.spustat &= !(1 << 6);
@@ -1935,6 +1995,12 @@ impl Spu {
     /// amortise voice-state fetches across several samples).
     pub fn tick_sample(&mut self, now: u64) -> usize {
         self.last_sample_cycle = now;
+        if let Some((pending, deadline)) = self.spustat_control_pending {
+            if deadline <= now {
+                self.spustat_control = pending;
+                self.spustat_control_pending = None;
+            }
+        }
         // KON / KOFF are applied at the END of this tick (after the
         // sample is emitted), not here -- see the apply_kon_koff() call
         // below. PSX-SPX runs update_keystatus() after push_sample

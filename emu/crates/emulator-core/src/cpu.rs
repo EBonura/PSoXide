@@ -45,17 +45,11 @@ const CACHE_CONTROL_BIOS_NORMAL: u32 = 0x0001_E988;
 /// (data reg 31) is readable. A read inside this window returns the prior
 /// count -- the off-by-one observed on real hardware for a back-to-back
 /// `mtc2 lzcs; mfc2 lzcr`.
-/// Measured on a PAL SCPH-9902 (settle sweep, 2026-07-15): LZCR is still
-/// stale with one intervening instruction and becomes visible with two.
-const LZCR_RESULT_LATENCY: u64 = 3;
-/// Short fallback window for commands other than NCLIP. NCLIP has a distinct
-/// measured accumulation phase and sets its own ready point below.
+/// Final burned-EXE capture on a PAL SCPH-9902 (2026-07-15): one intervening
+/// instruction is sufficient; only the truly back-to-back read is stale.
+const LZCR_RESULT_LATENCY: u64 = 2;
+/// Short result window for commands that write MAC0.
 const MAC0_RESULT_LATENCY: u64 = 2;
-/// A PAL SCPH-9902 returns NCLIP's partially accumulated MAC0 through the
-/// +48-nop probe and the final value at +64. The partial value is the four
-/// terms that do not involve SY0; this held exactly across the winding and
-/// quarter/half/double-magnitude captures.
-const NCLIP_MAC0_RESULT_LATENCY: u64 = 64;
 
 /// Errors raised during instruction execution.
 #[derive(Error, Debug, PartialEq, Eq)]
@@ -161,21 +155,44 @@ pub struct Cpu {
     /// Hardware GTE result-read latency. Unlike MAC1-3/SXY/SZ, MAC0 (data
     /// reg 24) and LZCR (data reg 31) are not always readable the instant
     /// their producing operation issues. The eager GTE core computes the
-    /// final values immediately, so these fields preserve what silicon
-    /// exposes during the settling window. For NCLIP that is a measured
-    /// partial accumulator value, not simply the preceding MAC0.
-    ///
-    /// Confirmed on PAL SCPH-9902 hardware (2026-07-15): LZCR remains stale
-    /// through one intervening instruction; NCLIP exposes its four non-SY0
-    /// terms from +1 through +48 nops and its completed MAC0 at +64.
+    /// result immediately, so these fields preserve what silicon exposes
+    /// during the short settling window.
     gte_mac0_ready_at: u64,
     gte_mac0_stale: u32,
     gte_lzcr_ready_at: u64,
     gte_lzcr_stale: u32,
-    /// Tick of the most recent MTC2/CTC2. A freshly loaded input pipeline is
-    /// what triggers the captured MAC0 settling behaviour; commands issued
-    /// clear of COP2 writes continue to serve their eager result immediately.
+    /// Tick of the most recent MTC2/CTC2.
     gte_last_write_tick: u64,
+    /// NCLIP samples SXY2 in two different pipeline phases. When MTC2 SXY2
+    /// immediately precedes NCLIP, the early `+SX1*SY2 + SX2*SY0` products
+    /// can see the previous SXY2 while the later negative products see the
+    /// current register. Packed SXY writes forward the new Y into that early
+    /// phase; spaced writes do not. This history/cadence rule reproduces both
+    /// burned-EXE instruction shapes measured on the SCPH-9902 without a
+    /// fabricated magnitude-dependent 64-cycle latency.
+    gte_sxy2_write_tick: u64,
+    gte_prev_sxy2_x: i16,
+    gte_prev_sxy2_y: i16,
+    gte_sxy_write_tick: [u64; 3],
+    /// RTPT leaves the SXY result pipeline active across following NCLIPs.
+    /// In that state, a non-packed full SXY rewrite cannot forward SXY2.y to
+    /// NCLIP's first product. Consecutive NCLIPs retain the state; any other
+    /// GTE command drains/replaces it.
+    gte_nclip_rtpt_history: bool,
+    /// OP's first MAC row can consume the previous IR3 when the command
+    /// immediately follows MTC2 IR3. The burned test's predecessor left
+    /// IR3=0x0567, producing MAC1=-1074 exactly; the later rows see the new
+    /// IR3=0x0600.
+    gte_ir3_write_tick: u64,
+    gte_prev_ir3: u32,
+    gte_last_mtc2_ir3: u32,
+    /// Most recent CPU write to MAC0..MAC3. An immediately following GTE
+    /// command can reach the same result write port while MTC2 still owns it;
+    /// the CPU write wins that one component (observed as OP MAC3 remaining
+    /// zero while MAC1/MAC2 complete normally).
+    gte_mac_write_tick: u64,
+    gte_mac_write_reg: u8,
+    gte_mac_write_value: u32,
     /// Diagnostic: bypass the MAC0/LZCR stale-read model entirely.
     /// Seeded from an env var at [`Cpu::new`] -- excluded from save
     /// states (loading doesn't re-run `Cpu::new`, so this and its two
@@ -292,6 +309,17 @@ impl Cpu {
             gte_lzcr_ready_at: 0,
             gte_lzcr_stale: 0,
             gte_last_write_tick: 0,
+            gte_sxy2_write_tick: 0,
+            gte_prev_sxy2_x: 0,
+            gte_prev_sxy2_y: 0,
+            gte_sxy_write_tick: [0; 3],
+            gte_nclip_rtpt_history: false,
+            gte_ir3_write_tick: 0,
+            gte_prev_ir3: 0,
+            gte_last_mtc2_ir3: 0,
+            gte_mac_write_tick: 0,
+            gte_mac_write_reg: u8::MAX,
+            gte_mac_write_value: 0,
             // Default ON with the SILICON-MEASURED window (settle sweeps,
             // 2026-06-10): MAC0/LZCR are stale only for the immediately-next
             // instruction; one intervening instruction settles them. The
@@ -408,6 +436,17 @@ impl Cpu {
         self.gte_mac0_stale = 0;
         self.gte_lzcr_ready_at = 0;
         self.gte_lzcr_stale = 0;
+        self.gte_sxy2_write_tick = 0;
+        self.gte_prev_sxy2_x = 0;
+        self.gte_prev_sxy2_y = 0;
+        self.gte_sxy_write_tick = [0; 3];
+        self.gte_nclip_rtpt_history = false;
+        self.gte_ir3_write_tick = 0;
+        self.gte_prev_ir3 = 0;
+        self.gte_last_mtc2_ir3 = 0;
+        self.gte_mac_write_tick = 0;
+        self.gte_mac_write_reg = u8::MAX;
+        self.gte_mac_write_value = 0;
         self.hilo_busy_until = 0;
         self.pending_exception_pc = None;
         self.hle_exception_active = false;
@@ -1139,6 +1178,10 @@ impl Cpu {
                 && self.tick.wrapping_sub(self.gte_v0xy_write_tick) <= self.gte_v0x_window
             {
                 self.cop2.execute_with_stale_v0x(instr, self.gte_prev_v0x);
+            } else if (instr & 0x3F) == 0x0C && self.tick.wrapping_sub(self.gte_ir3_write_tick) <= 1
+            {
+                self.cop2
+                    .execute_op_with_stale_ir3(instr, self.gte_prev_ir3 as i16);
             } else {
                 self.cop2.execute(instr);
             }
@@ -1151,25 +1194,52 @@ impl Cpu {
             // than a deadline ending on the final internal cycle.
             self.gte_busy_until = bus.cycles() + Gte::command_cycles(instr) as u64 + 1;
             let recent_cop2_write = self.tick.wrapping_sub(self.gte_last_write_tick) <= 2;
-            if (instr & 0x3F) == 0x06 && recent_cop2_write {
-                // NCLIP evaluates
-                //   x0*y1 + x1*y2 + x2*y0 - x0*y2 - x1*y0 - x2*y1.
-                // Silicon exposes the four non-SY0 terms while its final
-                // accumulation phase is pending.
+            if (instr & 0x3F) == 0x06 && self.tick.wrapping_sub(self.gte_sxy2_write_tick) <= 2 {
+                // NCLIP's two positive SXY2 products are its early phase.
+                // SXY2.x is not forwarded from the immediately preceding
+                // MTC2. SXY2.y is forwarded only by the packed (two-cycle)
+                // SXY0/SXY1/SXY2 write cadence emitted by the hot path.
                 let sxy0 = self.cop2.read_data(12);
                 let sxy1 = self.cop2.read_data(13);
                 let sxy2 = self.cop2.read_data(14);
                 let x0 = sxy0 as u16 as i16 as i64;
+                let y0 = (sxy0 >> 16) as u16 as i16 as i64;
                 let y1 = (sxy1 >> 16) as u16 as i16 as i64;
                 let x1 = sxy1 as u16 as i16 as i64;
                 let y2 = (sxy2 >> 16) as u16 as i16 as i64;
                 let x2 = sxy2 as u16 as i16 as i64;
-                self.gte_mac0_stale = (x0 * y1 + x1 * y2 - x0 * y2 - x2 * y1) as u32;
-                self.gte_mac0_ready_at = self.tick + NCLIP_MAC0_RESULT_LATENCY;
+                let old_x2 = self.gte_prev_sxy2_x as i64;
+                let sxy01_gap = self.gte_sxy_write_tick[1].wrapping_sub(self.gte_sxy_write_tick[0]);
+                let sxy12_gap = self.gte_sxy_write_tick[2].wrapping_sub(self.gte_sxy_write_tick[1]);
+                let spaced_sxy_triplet =
+                    self.gte_nclip_rtpt_history && sxy01_gap == 3 && sxy12_gap == 3;
+                let early_y2 = if spaced_sxy_triplet {
+                    self.gte_prev_sxy2_y as i64
+                } else {
+                    y2
+                };
+                let mac0 = x0 * y1 + x1 * early_y2 + old_x2 * y0 - x0 * y2 - x1 * y0 - x2 * y1;
+                self.cop2.write_data(24, mac0 as u32);
+                self.gte_mac0_stale = mac0 as u32;
+                self.gte_mac0_ready_at = self.tick + MAC0_RESULT_LATENCY;
             } else if recent_cop2_write {
                 self.gte_mac0_ready_at = self.tick + MAC0_RESULT_LATENCY;
             } else {
                 self.gte_mac0_ready_at = self.tick; // result is immediately readable
+            }
+            if (24..=27).contains(&self.gte_mac_write_reg)
+                && self.tick.wrapping_sub(self.gte_mac_write_tick) <= 1
+            {
+                self.cop2
+                    .write_data(self.gte_mac_write_reg, self.gte_mac_write_value);
+                if self.gte_mac_write_reg == 24 {
+                    self.gte_mac0_stale = self.gte_mac_write_value;
+                }
+            }
+            match instr & 0x3F {
+                0x30 => self.gte_nclip_rtpt_history = true,
+                0x06 => {}
+                _ => self.gte_nclip_rtpt_history = false,
             }
             return Ok(());
         }
@@ -1285,6 +1355,29 @@ impl Cpu {
             // phase with this stale value (HWB-010 hazard model).
             self.gte_prev_v0x = self.cop2.read_data(0) as u16 as i16;
             self.gte_v0xy_write_tick = self.tick;
+        }
+        if (12..=14).contains(&rd) {
+            self.gte_sxy_write_tick[(rd - 12) as usize] = self.tick;
+        }
+        if rd == 14 {
+            let previous = self.cop2.read_data(14);
+            self.gte_prev_sxy2_x = previous as u16 as i16;
+            self.gte_prev_sxy2_y = (previous >> 16) as u16 as i16;
+            self.gte_sxy2_write_tick = self.tick;
+        }
+        if rd == 11 {
+            // The forwarding latch retains the previous CPU-supplied IR3,
+            // not an intervening command's architectural IR3 result. In the
+            // burned sequence SQR changes visible IR3 to 466, but OP's first
+            // row still consumes the earlier MTC2 value 0x0567.
+            self.gte_prev_ir3 = self.gte_last_mtc2_ir3;
+            self.gte_last_mtc2_ir3 = self.gpr(rt);
+            self.gte_ir3_write_tick = self.tick;
+        }
+        if (24..=27).contains(&rd) {
+            self.gte_mac_write_tick = self.tick;
+            self.gte_mac_write_reg = rd;
+            self.gte_mac_write_value = self.gpr(rt);
         }
         self.cop2.write_data(rd, self.gpr(rt));
         Ok(())
@@ -2621,6 +2714,121 @@ mod tests {
         cpu.seed_from_exe(0x8000_3000, 0, None);
 
         assert_eq!(cpu.cop0[12], 0x4000_0401);
+    }
+
+    #[test]
+    fn nclip_uses_previous_sxy2_x_in_early_pipeline_stage() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(synthetic_bios_with_first_word(0)).unwrap();
+        // Scene A, immediately following scene C. Hardware returned 0x7674:
+        // current terms plus SY0 * (previous SX2 - current SX1).
+        cpu.cop2.write_data(12, 0x006e_0095);
+        cpu.cop2.write_data(13, 0xffe2_0094);
+        cpu.cop2.write_data(14, 0xffd2_0194); // previous scene-C SXY2
+        cpu.gte_sxy_write_tick[0] = 6;
+        cpu.gte_sxy_write_tick[1] = 8;
+        cpu.gprs[8] = 0xffde_00dc; // new scene-A SXY2
+        cpu.tick = 10;
+        cpu.op_mtc2(0x4888_7000, &bus).unwrap();
+        cpu.tick = 12;
+
+        cpu.dispatch_cop2(0x4a00_0006, &mut bus).unwrap();
+
+        assert_eq!(cpu.cop2.read_data(24), 0x0000_7674);
+    }
+
+    #[test]
+    fn nclip_sxy_write_cadence_controls_early_y_forwarding() {
+        let run = |write_gap: u64| {
+            let mut cpu = Cpu::new();
+            let mut bus = Bus::new(synthetic_bios_with_first_word(0)).unwrap();
+            // RTPT-E's settled SXY2 is (-36, -152). Scene A overwrites all
+            // three SXY registers before NCLIP using either of the two exact
+            // instruction cadences found in the burned executable.
+            cpu.cop2.write_data(14, 0xff68_ffdc);
+            cpu.gte_nclip_rtpt_history = true;
+            for (index, (rd, value)) in [
+                (12u8, 0x006e_0095),
+                (13u8, 0xffe2_0094),
+                (14u8, 0xffde_00dc),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                cpu.gprs[8] = value;
+                cpu.tick = 10 + index as u64 * write_gap;
+                cpu.op_mtc2(0x4888_0000 | (u32::from(rd) << 11), &bus)
+                    .unwrap();
+            }
+            cpu.tick += 1;
+            cpu.dispatch_cop2(0x4a00_0006, &mut bus).unwrap();
+            cpu.cop2.read_data(24)
+        };
+
+        // Packed writes forward the new Y but not X; spaced writes retain
+        // both components for the early positive products.
+        assert_eq!(run(2), 0xffff_b964);
+        assert_eq!(run(3), 0xffff_752c);
+    }
+
+    #[test]
+    fn lzcr_is_stale_only_for_back_to_back_read() {
+        let mut cpu = Cpu::new();
+        let bus = Bus::new(synthetic_bios_with_first_word(0)).unwrap();
+        cpu.cop2.write_data(30, 0x00ff_ffff); // old LZCR = 8
+        cpu.gprs[8] = 1; // new LZCR = 31
+        cpu.tick = 10;
+        cpu.op_mtc2(0x4888_f000, &bus).unwrap();
+
+        cpu.tick = 11;
+        assert_eq!(cpu.gte_read_data_latency(&bus, 31), 8);
+        cpu.tick = 12;
+        assert_eq!(cpu.gte_read_data_latency(&bus, 31), 31);
+    }
+
+    #[test]
+    fn immediate_mtc2_mac_write_wins_same_component_command_writeback() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(synthetic_bios_with_first_word(0)).unwrap();
+        cpu.cop2.write_control(0, 0x1000);
+        cpu.cop2.write_control(2, 0x2000);
+        cpu.cop2.write_control(4, 0x3000);
+        cpu.cop2.write_data(9, 0x0400);
+        cpu.cop2.write_data(10, 0x0500);
+        cpu.cop2.write_data(11, 0x0600);
+        cpu.gprs[8] = 0;
+        cpu.tick = 10;
+        cpu.op_mtc2(0x4888_d800, &bus).unwrap(); // MTC2 $t0, MAC3
+        cpu.tick = 11;
+
+        cpu.dispatch_cop2(0x4a08_000c, &mut bus).unwrap(); // OP sf=1
+
+        assert_eq!(cpu.cop2.read_data(25), 0xffff_fd00);
+        assert_eq!(cpu.cop2.read_data(26), 0x0000_0600);
+        assert_eq!(cpu.cop2.read_data(27), 0x0000_0000);
+    }
+
+    #[test]
+    fn immediate_mtc2_ir3_reaches_op_after_first_mac_row() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(synthetic_bios_with_first_word(0)).unwrap();
+        cpu.cop2.write_control(0, 0x1000);
+        cpu.cop2.write_control(2, 0x2000);
+        cpu.cop2.write_control(4, 0x3000);
+        cpu.cop2.write_data(9, 0x0400);
+        cpu.cop2.write_data(10, 0x0500);
+        cpu.cop2.write_data(11, 0x01d2); // architectural SQR result = 466
+        cpu.gte_last_mtc2_ir3 = 0x0567; // prior CPU-written SQR input
+        cpu.gprs[8] = 0x0600;
+        cpu.tick = 10;
+        cpu.op_mtc2(0x4888_5800, &bus).unwrap(); // MTC2 $t0, IR3
+        cpu.tick = 11;
+
+        cpu.dispatch_cop2(0x4a08_000c, &mut bus).unwrap();
+
+        assert_eq!(cpu.cop2.read_data(25), 0xffff_fbce);
+        assert_eq!(cpu.cop2.read_data(26), 0x0000_0600);
+        assert_eq!(cpu.cop2.read_data(27), 0xffff_fd00);
     }
 
     #[test]
