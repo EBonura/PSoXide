@@ -15,11 +15,15 @@ use psx_engine::{
     TexturedModelGeometry, TexturedModelRenderFace, TexturedModelRenderStats, VideoHz, WorldCamera,
     WorldRenderPass, WorldSurfaceOptions, WorldVertex,
 };
-use psx_gpu::{material::TextureMaterial, prim::TriTextured};
+use psx_gpu::{
+    material::{BlendMode, TextureMaterial},
+    prim::TriTextured,
+};
 use psx_level::{
-    find_asset_of_kind, model_clip_flags, AssetId, AssetKind, CharacterAnimationAction,
-    EntityRecord, EquipmentRecord, LevelModelClipBoundsRecord, LevelModelClipRecord,
-    LevelModelFrameBoundsRecord, LevelModelInstanceRecord, LevelModelRecord,
+    find_asset_of_kind, model_clip_flags, model_override_blend, AssetId, AssetKind,
+    CharacterAnimationAction, EntityRecord, EquipmentRecord, LevelMaterialSidedness,
+    LevelModelClipBoundsRecord, LevelModelClipRecord, LevelModelFrameBoundsRecord,
+    LevelModelInstanceRecord, LevelModelMaterialOverride, LevelModelRecord,
     LevelModelSocketRecord, LevelWeaponRecord, ModelClipIndex, ModelClipTableIndex, ModelIndex,
     ModelSocketIndex, RoomIndex, WeaponHitboxRecord,
 };
@@ -227,6 +231,74 @@ impl RuntimeModelAsset {
         Some(ModelClipTableIndex(
             self.clip_first.raw().saturating_add(local_clip.raw()),
         ))
+    }
+}
+
+/// Decode a cooked [`model_override_blend`] code into the SDK blend
+/// mode. Unknown codes render opaque.
+pub const fn model_override_blend_mode(code: u8) -> BlendMode {
+    match code {
+        model_override_blend::AVERAGE => BlendMode::Average,
+        model_override_blend::ADD => BlendMode::Add,
+        model_override_blend::SUBTRACT => BlendMode::Subtract,
+        model_override_blend::ADD_QUARTER => BlendMode::AddQuarter,
+        _ => BlendMode::Opaque,
+    }
+}
+
+/// Covering material for a model override resolved to a VRAM slot:
+/// the slot's tpage/CLUT/texture-window with the authored blend mode
+/// and tint. Model UVs address the override texture directly; the
+/// slot texture window wraps them for packed power-of-two textures.
+pub fn model_override_material(
+    slot: VramSlot,
+    material_override: LevelModelMaterialOverride,
+) -> TextureMaterial {
+    let [r, g, b] = material_override.tint_rgb;
+    TextureMaterial::blended(
+        slot.clut_word,
+        slot.tpage_word,
+        (r, g, b),
+        model_override_blend_mode(material_override.blend_mode),
+    )
+    .with_texture_window(slot.texture_window)
+}
+
+/// Winding cull for a model override's authored face sidedness.
+pub const fn model_override_cull_mode(material_override: LevelModelMaterialOverride) -> CullMode {
+    match material_override.sidedness() {
+        LevelMaterialSidedness::Front => CullMode::Back,
+        LevelMaterialSidedness::Back => CullMode::Front,
+        LevelMaterialSidedness::Both => CullMode::None,
+    }
+}
+
+/// Resolve the material + cull mode one model draw uses: the covering
+/// override when authored and VRAM-resident, else the model's own
+/// atlas. The no-override path stays a single `match` on the record.
+#[inline]
+fn model_material_and_cull(
+    runtime_model: RuntimeModelAsset,
+    material_override: Option<LevelModelMaterialOverride>,
+    resolve_override_texture: &mut impl FnMut(AssetId) -> Option<VramSlot>,
+) -> (TextureMaterial, CullMode) {
+    let base_cull = if runtime_model.double_sided {
+        CullMode::None
+    } else {
+        CullMode::Back
+    };
+    match material_override {
+        Some(material_override) => match resolve_override_texture(material_override.texture_asset)
+        {
+            Some(slot) => (
+                model_override_material(slot, material_override),
+                model_override_cull_mode(material_override),
+            ),
+            // Override texture not resident (yet): fall back to the
+            // atlas rather than dropping the draw.
+            None => (runtime_model.material, base_cull),
+        },
+        None => (runtime_model.material, base_cull),
     }
 }
 
@@ -587,6 +659,7 @@ pub fn draw_player<
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
     lighting: &RuntimeRoomLighting,
+    resolve_override_texture: &mut impl FnMut(AssetId) -> Option<VramSlot>,
     triangles: &mut impl PrimitiveSink<TriTextured>,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) -> PlayerModelDrawStats {
@@ -654,12 +727,12 @@ pub fn draw_player<
         };
     }
 
-    let material = lighting.shade_model_material(origin, runtime_model.material);
-    let cull_mode = if runtime_model.double_sided {
-        CullMode::None
-    } else {
-        CullMode::Back
-    };
+    let (base_material, cull_mode) = model_material_and_cull(
+        runtime_model,
+        character.material_override,
+        resolve_override_texture,
+    );
+    let material = lighting.shade_model_material(origin, base_material);
     let model_options = options
         .with_depth_policy(DepthPolicy::Average)
         .with_cull_mode(cull_mode)
@@ -1311,4 +1384,101 @@ pub fn distance_xz_sq(a: RoomPoint, b: RoomPoint) -> i32 {
     let dx = a.x.saturating_sub(b.x);
     let dz = a.z.saturating_sub(b.z);
     square_i32_saturating(dx).saturating_add(square_i32_saturating(dz))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vram::VramSlotClutMode;
+    use psx_gpu::material::TextureWindow;
+    use psx_vram::VramHandle;
+
+    fn slot(texture_window: TextureWindow) -> VramSlot {
+        VramSlot {
+            asset: AssetId(7),
+            clut_mode: VramSlotClutMode::TransparentZero,
+            ready: true,
+            clut_word: 0x1234,
+            tpage_word: 0x018F,
+            texture_window,
+            texture_width: 64,
+            texture_height: 64,
+            region: VramHandle::Empty,
+            clut_region: VramHandle::Empty,
+        }
+    }
+
+    fn override_record(blend_mode: u8, flags: u16) -> LevelModelMaterialOverride {
+        LevelModelMaterialOverride {
+            texture_asset: AssetId(7),
+            blend_mode,
+            tint_rgb: [96, 128, 160],
+            flags,
+        }
+    }
+
+    #[test]
+    fn override_blend_codes_decode_to_sdk_modes() {
+        assert_eq!(
+            model_override_blend_mode(model_override_blend::OPAQUE),
+            BlendMode::Opaque
+        );
+        assert_eq!(
+            model_override_blend_mode(model_override_blend::AVERAGE),
+            BlendMode::Average
+        );
+        assert_eq!(
+            model_override_blend_mode(model_override_blend::ADD),
+            BlendMode::Add
+        );
+        assert_eq!(
+            model_override_blend_mode(model_override_blend::SUBTRACT),
+            BlendMode::Subtract
+        );
+        assert_eq!(
+            model_override_blend_mode(model_override_blend::ADD_QUARTER),
+            BlendMode::AddQuarter
+        );
+        assert_eq!(model_override_blend_mode(0xFF), BlendMode::Opaque);
+    }
+
+    #[test]
+    fn override_material_encodes_slot_blend_tint_and_window() {
+        let window = TextureWindow::power_of_two_tile(64, 64, 64, 64);
+        let material = model_override_material(
+            slot(window),
+            override_record(model_override_blend::ADD_QUARTER, 0),
+        );
+        assert_eq!(material.clut_word(), 0x1234);
+        // Slot tpage address/depth bits preserved, blend bits rewritten.
+        assert_eq!(material.tpage_word() & !(0x0060 | 0x0200), 0x018F & !0x0060);
+        assert_eq!((material.tpage_word() >> 5) & 0x3, 3);
+        assert_eq!(material.tint(), (96, 128, 160));
+        assert_eq!(material.texture_window_word(), window.word());
+        // Semi-transparent command bit set for translucent modes...
+        assert!(material.textured_packet_material().is_translucent());
+        // ...and clear for an opaque covering material.
+        let opaque = model_override_material(
+            slot(TextureWindow::NONE),
+            override_record(model_override_blend::OPAQUE, 0),
+        );
+        assert!(!opaque.textured_packet_material().is_translucent());
+    }
+
+    #[test]
+    fn override_sidedness_selects_cull_mode() {
+        use psx_level::material_flags;
+        assert_eq!(
+            model_override_cull_mode(override_record(0, material_flags::FACE_FRONT)),
+            CullMode::Back
+        );
+        assert_eq!(
+            model_override_cull_mode(override_record(0, material_flags::FACE_BACK)),
+            CullMode::Front
+        );
+        assert_eq!(
+            model_override_cull_mode(override_record(0, material_flags::FACE_BOTH)),
+            CullMode::None
+        );
+    }
 }
