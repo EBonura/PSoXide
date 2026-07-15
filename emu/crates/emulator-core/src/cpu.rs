@@ -45,28 +45,17 @@ const CACHE_CONTROL_BIOS_NORMAL: u32 = 0x0001_E988;
 /// (data reg 31) is readable. A read inside this window returns the prior
 /// count -- the off-by-one observed on real hardware for a back-to-back
 /// `mtc2 lzcs; mfc2 lzcr`.
-/// Measured on silicon (settle sweeps, 2026-06-10): LZCR reads are stale
-/// ONLY for the immediately-next instruction; one intervening instruction
-/// settles them. Same window as MAC0.
-const LZCR_RESULT_LATENCY: u64 = 2;
-/// MAC0 settle latency in cycles from command ISSUE. The hardware-tests disc
-/// measured the endpoints only: back-to-back read = stale, +8 nops = settled.
-/// Modeling the window as the FULL command latency broke commercial 3D
-/// culling (libgte reads NCLIP MAC0 a few cycles after the op; real silicon
-/// has it settled, the over-long model returned stale and culled their
-/// polygons -- Crash menu logo + model vanished). 3 cycles keeps a true
-/// back-to-back read stale (cortex walls fix intact) while +2-instruction
-/// reads see the settled value. The exact silicon threshold is a pending
-/// test-CD nop-sweep (+1..+7) measurement.
-/// MAC0 settle window in INSTRUCTIONS retired since command issue. Cycle
-/// granularity cannot separate the two regimes in our accounting (the disc's
-/// stale back-to-back read and libgte's settled read land in the same cycle
-/// bucket), but instruction distance does: the hardware-tests cases that
-/// fail on silicon read MAC0 as the VERY NEXT instruction; commercial
-/// culling macros read it two or more instructions later and silicon has it
-/// settled. Window 2 = only the immediately-following instruction sees the
-/// stale value. Exact silicon threshold pending the test-CD nop sweep.
+/// Measured on a PAL SCPH-9902 (settle sweep, 2026-07-15): LZCR is still
+/// stale with one intervening instruction and becomes visible with two.
+const LZCR_RESULT_LATENCY: u64 = 3;
+/// Short fallback window for commands other than NCLIP. NCLIP has a distinct
+/// measured accumulation phase and sets its own ready point below.
 const MAC0_RESULT_LATENCY: u64 = 2;
+/// A PAL SCPH-9902 returns NCLIP's partially accumulated MAC0 through the
+/// +48-nop probe and the final value at +64. The partial value is the four
+/// terms that do not involve SY0; this held exactly across the winding and
+/// quarter/half/double-magnitude captures.
+const NCLIP_MAC0_RESULT_LATENCY: u64 = 64;
 
 /// Errors raised during instruction execution.
 #[derive(Error, Debug, PartialEq, Eq)]
@@ -169,28 +158,23 @@ pub struct Cpu {
     /// between an op and its result read hides the latency. The emulator
     /// computes GTE results eagerly, so this models timing only.
     gte_busy_until: u64,
-    /// Hardware GTE result-read latency. Unlike MAC1-3/SXY/SZ (which read
-    /// back-to-back fine), MAC0 (data reg 24) and LZCR (data reg 31) are
-    /// NOT readable the instant their producing op issues -- real silicon
-    /// returns the PRIOR value until the result settles. Reading them
-    /// before the ready cycle returns the stale snapshot. This reproduces
-    /// the cortex_ignition_v1 dropped-wall bug (the engine reads NCLIP's
-    /// MAC0 for backface culling one instruction too soon, so on hardware
-    /// it culls against the stale RTPT depth-cue MAC0 and drops faces) --
-    /// a bug every other emulator hides by computing the GTE instantly.
-    /// Confirmed on real hardware (cortex GTE conformance disc 2026-06-09:
-    /// MAC0 read +8 nops = correct, back-to-back = stale; LZCR off-by-one).
+    /// Hardware GTE result-read latency. Unlike MAC1-3/SXY/SZ, MAC0 (data
+    /// reg 24) and LZCR (data reg 31) are not always readable the instant
+    /// their producing operation issues. The eager GTE core computes the
+    /// final values immediately, so these fields preserve what silicon
+    /// exposes during the settling window. For NCLIP that is a measured
+    /// partial accumulator value, not simply the preceding MAC0.
+    ///
+    /// Confirmed on PAL SCPH-9902 hardware (2026-07-15): LZCR remains stale
+    /// through one intervening instruction; NCLIP exposes its four non-SY0
+    /// terms from +1 through +48 nops and its completed MAC0 at +64.
     gte_mac0_ready_at: u64,
     gte_mac0_stale: u32,
     gte_lzcr_ready_at: u64,
     gte_lzcr_stale: u32,
-    /// Tick of the most recent MTC2/CTC2. Silicon evidence (2026-06-10):
-    /// a result read in the very next instruction after a GTE op is stale
-    /// ONLY when COP2 writes immediately preceded the op (the disc's
-    /// winding case: mtc2 burst, nclip, mfc2 = stale; Crash's culling
-    /// loop: rtpt, nclip, mfc2 back-to-back = fresh on hardware). Model:
-    /// preceding writes delay the op's completion by the next-instruction
-    /// window; an op issued clear of writes serves its result instantly.
+    /// Tick of the most recent MTC2/CTC2. A freshly loaded input pipeline is
+    /// what triggers the captured MAC0 settling behaviour; commands issued
+    /// clear of COP2 writes continue to serve their eager result immediately.
     gte_last_write_tick: u64,
     /// Diagnostic: bypass the MAC0/LZCR stale-read model entirely.
     /// Seeded from an env var at [`Cpu::new`] -- excluded from save
@@ -1161,12 +1145,32 @@ impl Cpu {
             if let Some(saved) = freelook_saved {
                 freelook::restore(&mut self.cop2, &saved);
             }
-            self.gte_busy_until = bus.cycles() + Gte::command_cycles(instr) as u64;
-            self.gte_mac0_ready_at = if self.tick.wrapping_sub(self.gte_last_write_tick) <= 2 {
-                self.tick + MAC0_RESULT_LATENCY
+            // `command_cycles` is the documented internal execution time.
+            // The result becomes available on the following CPU cycle: the
+            // PAL command-throughput sweep is one cycle per interlock slower
+            // than a deadline ending on the final internal cycle.
+            self.gte_busy_until = bus.cycles() + Gte::command_cycles(instr) as u64 + 1;
+            let recent_cop2_write = self.tick.wrapping_sub(self.gte_last_write_tick) <= 2;
+            if (instr & 0x3F) == 0x06 && recent_cop2_write {
+                // NCLIP evaluates
+                //   x0*y1 + x1*y2 + x2*y0 - x0*y2 - x1*y0 - x2*y1.
+                // Silicon exposes the four non-SY0 terms while its final
+                // accumulation phase is pending.
+                let sxy0 = self.cop2.read_data(12);
+                let sxy1 = self.cop2.read_data(13);
+                let sxy2 = self.cop2.read_data(14);
+                let x0 = sxy0 as u16 as i16 as i64;
+                let y1 = (sxy1 >> 16) as u16 as i16 as i64;
+                let x1 = sxy1 as u16 as i16 as i64;
+                let y2 = (sxy2 >> 16) as u16 as i16 as i64;
+                let x2 = sxy2 as u16 as i16 as i64;
+                self.gte_mac0_stale = (x0 * y1 + x1 * y2 - x0 * y2 - x2 * y1) as u32;
+                self.gte_mac0_ready_at = self.tick + NCLIP_MAC0_RESULT_LATENCY;
+            } else if recent_cop2_write {
+                self.gte_mac0_ready_at = self.tick + MAC0_RESULT_LATENCY;
             } else {
-                self.tick // op clear of writes: result reads fresh immediately
-            };
+                self.gte_mac0_ready_at = self.tick; // result is immediately readable
+            }
             return Ok(());
         }
         let cop_op = ((instr >> 21) & 0x1F) as u8;
@@ -1403,23 +1407,23 @@ impl Cpu {
             0x18 => {
                 let cycles = mult_cycles(self.gpr(((instr >> 21) & 0x1F) as u8), true);
                 let r = self.op_mult(instr);
-                self.hilo_busy_until = bus.cycles() + cycles as u64;
+                self.hilo_busy_until = bus.cycles() + cycles as u64 + 1;
                 r
             }
             0x19 => {
                 let cycles = mult_cycles(self.gpr(((instr >> 21) & 0x1F) as u8), false);
                 let r = self.op_multu(instr);
-                self.hilo_busy_until = bus.cycles() + cycles as u64;
+                self.hilo_busy_until = bus.cycles() + cycles as u64 + 1;
                 r
             }
             0x1A => {
                 let r = self.op_div(instr);
-                self.hilo_busy_until = bus.cycles() + DIV_CYCLES as u64;
+                self.hilo_busy_until = bus.cycles() + DIV_CYCLES as u64 + 1;
                 r
             }
             0x1B => {
                 let r = self.op_divu(instr);
-                self.hilo_busy_until = bus.cycles() + DIV_CYCLES as u64;
+                self.hilo_busy_until = bus.cycles() + DIV_CYCLES as u64 + 1;
                 r
             }
             0x20 => self.op_add(instr),
@@ -2648,9 +2652,9 @@ mod tests {
         assert_eq!(record.pc, 0xBFC0_0000);
         assert_eq!(record.instr, 0x3C08_0013);
         assert_eq!(record.gprs[8], 0x0013_0000); // $t0
-                                                 // Reset-vector execution is uncached: 24 BIOS word stalls plus
+                                                 // Reset-vector execution is uncached: 32 BIOS word stalls plus
                                                  // the instruction's one issue cycle.
-        assert_eq!(record.tick, 25);
+        assert_eq!(record.tick, 33);
         assert_eq!(cpu.pc(), 0xBFC0_0004);
     }
 
@@ -3028,15 +3032,15 @@ mod tests {
 
         let start = bus.cycles();
         assert_eq!(cpu.read_lwl_lanes(0x1001, &mut bus), 0x0000_5678);
-        assert_eq!(bus.cycles() - start, 5); // four RAM stalls + lane steering
+        assert_eq!(bus.cycles() - start, 7); // six RAM stalls + lane steering
 
         let start = bus.cycles();
         assert_eq!(cpu.read_lwr_lanes(0x1002, &mut bus), 0x1234_0000);
-        assert_eq!(bus.cycles() - start, 6); // right merge steers for two cycles
+        assert_eq!(bus.cycles() - start, 8); // right merge steers for two cycles
 
         let start = bus.cycles();
         assert_eq!(cpu.read_lwl_lanes(0x1003, &mut bus), 0x1234_5678);
-        assert_eq!(bus.cycles() - start, 4); // full-word form has no lane penalty
+        assert_eq!(bus.cycles() - start, 6); // full-word form has no lane penalty
     }
 
     #[test]
@@ -3257,6 +3261,6 @@ mod tests {
         // issue cycle, but no data-read stalls because alignment is checked
         // before the memory transaction.
         let (_cpu, bus) = step_one_load_store(0x8C89_0001, 0xBFC0_0000);
-        assert_eq!(bus.cycles(), 24 + cycle_cost(0) as u64);
+        assert_eq!(bus.cycles(), 32 + cycle_cost(0) as u64);
     }
 }
