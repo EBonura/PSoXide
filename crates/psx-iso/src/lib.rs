@@ -354,6 +354,7 @@ fn write_le_u32_at(dst: &mut [u8], offset: usize, value: u32) {
 
 /// A loaded disc image. Holds the raw sector data plus enough TOC
 /// metadata to answer track and SubQ-style position queries.
+#[derive(Clone)]
 pub struct Disc {
     tracks: Vec<Track>,
 }
