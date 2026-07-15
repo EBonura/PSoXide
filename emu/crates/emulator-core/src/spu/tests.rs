@@ -2059,6 +2059,8 @@ fn spustat_exposes_dma_request_bits_from_transfer_mode() {
     let mut s = Spu::new();
 
     s.write16(SPUCNT, 2 << 4); // DMA write mode
+    assert_eq!(s.spustat() & 0x0380, 0, "mode alone does not request DMA");
+    s.begin_dma(0);
     assert_ne!(
         s.spustat() & (1 << 7),
         0,
@@ -2104,6 +2106,35 @@ fn spustat_exposes_dma_request_bits_from_transfer_mode() {
         0,
         "Manual-Write mode sets no DMA request bits"
     );
+    s.end_dma();
+}
+
+#[test]
+fn spustat_control_mirror_updates_on_next_sample_boundary() {
+    let mut s = Spu::new();
+    s.write16_at(SPUCNT, 0x002f, 100);
+
+    assert_eq!(s.spucnt(), 0x002f, "SPUCNT write latch is immediate");
+    assert_eq!(
+        s.spustat_at(767) & 0x3f,
+        0,
+        "mirror remains old before edge"
+    );
+    assert_eq!(s.spustat_at(768) & 0x3f, 0x2f, "mirror lands at edge");
+
+    s.tick_sample(768);
+    assert_eq!(s.spustat_control, 0x2f);
+}
+
+#[test]
+fn dma_read_control_mirror_waits_for_channel_arm() {
+    let mut s = Spu::new();
+    s.write16_at(SPUCNT, 0x0030, 100);
+    assert_eq!(s.spustat_at(10_000) & 0x3f, 0);
+
+    s.begin_dma(10_000);
+    assert_eq!(s.spustat_at(10_751) & 0x3f, 0);
+    assert_eq!(s.spustat_at(10_752) & 0x3f, 0x30);
 }
 
 #[test]
