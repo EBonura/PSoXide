@@ -263,9 +263,9 @@ pub fn apply_texel_color_key_transparency(
     let picked_rgb = rgb555_to_rgb888(target_rgb555);
     let mut keyed = [false; 256];
     let mut keyed_indices = 0_u16;
-    for index in 0..usize::from(clut_entries) {
+    for (index, slot) in keyed.iter_mut().enumerate().take(usize::from(clut_entries)) {
         if palette_rgb555(bytes, pixel_end, index as u8) == Some(target_rgb555) {
-            keyed[index] = true;
+            *slot = true;
             keyed_indices += 1;
         }
     }

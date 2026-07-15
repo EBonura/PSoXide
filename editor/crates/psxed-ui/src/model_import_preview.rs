@@ -132,12 +132,11 @@ pub fn render_import_model_preview_with_options(
         let end = start
             .saturating_add(part.vertex_count() as usize)
             .min(projected.len());
-        for vertex_index in start..end {
+        for (vertex_index, slot) in projected.iter_mut().enumerate().take(end).skip(start) {
             let Some(vertex) = model.vertex(vertex_index as u16) else {
                 continue;
             };
-            projected[vertex_index] =
-                project_import_model_vertex(vertex, primary, &joint_transforms, camera);
+            *slot = project_import_model_vertex(vertex, primary, &joint_transforms, camera);
         }
     }
 

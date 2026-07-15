@@ -87,7 +87,6 @@ pub(crate) fn add_runtime_texture_vram(
 ///
 /// Renders a CollapsingHeader with floor/ceiling toggles, a single
 /// flat height per face (corner authoring lands later), a material
-
 /// dropdown for each face, and a row of toggles for the four
 /// cardinal walls. Returns `true` if any field changed so the
 /// workspace can mark the project dirty in one place.

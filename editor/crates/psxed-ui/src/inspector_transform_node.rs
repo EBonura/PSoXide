@@ -822,7 +822,7 @@ pub(crate) fn draw_gameplay_camera_render_preview(
     ui: &mut egui::Ui,
     preview: Option<EditorCameraPreviewPresentation>,
 ) {
-    let width = ui.available_width().min(360.0).max(1.0);
+    let width = ui.available_width().clamp(1.0, 360.0);
     let height = width * 0.75;
     let size = Vec2::new(width, height);
     if let Some(preview) = preview {
@@ -855,7 +855,7 @@ pub(crate) fn draw_gameplay_camera_render_preview(
 }
 
 pub(crate) fn draw_gameplay_camera_start_preview(ui: &mut egui::Ui, camera: WorldCameraSettings) {
-    let width = ui.available_width().min(360.0).max(1.0);
+    let width = ui.available_width().clamp(1.0, 360.0);
     let height = 150.0;
     let (rect, _) = ui.allocate_exact_size(Vec2::new(width, height), egui::Sense::hover());
     let painter = ui.painter_at(rect);
@@ -2062,14 +2062,11 @@ pub(crate) fn draw_node_kind_editor(
                     }
                 }
             });
-            for face in 0..psxed_project::BOX_PROP_FACE_COUNT {
-                changed |= material_picker(
-                    ui,
-                    psxed_project::BOX_PROP_FACE_NAMES[face],
-                    &mut materials[face],
-                    material_options,
-                    nav_target,
-                );
+            for (name, slot) in psxed_project::BOX_PROP_FACE_NAMES
+                .iter()
+                .zip(materials.iter_mut())
+            {
+                changed |= material_picker(ui, name, slot, material_options, nav_target);
             }
             ui.separator();
             changed |= ui.checkbox(collision_enabled, "Collision").changed();
@@ -2099,14 +2096,13 @@ pub(crate) fn draw_node_kind_editor(
             egui::CollapsingHeader::new("Move Faces")
                 .default_open(false)
                 .show(ui, |ui| {
-                    for face in 0..psxed_project::BOX_PROP_FACE_COUNT {
+                    for (name, indices) in psxed_project::BOX_PROP_FACE_NAMES
+                        .iter()
+                        .zip(BOX_PROP_FACE_VERTEX_INDICES.iter())
+                    {
                         ui.horizontal(|ui| {
-                            ui.label(psxed_project::BOX_PROP_FACE_NAMES[face]);
-                            changed |= draw_box_prop_nudge_buttons(
-                                ui,
-                                vertices,
-                                &BOX_PROP_FACE_VERTEX_INDICES[face],
-                            );
+                            ui.label(*name);
+                            changed |= draw_box_prop_nudge_buttons(ui, vertices, indices);
                         });
                     }
                 });
@@ -2459,32 +2455,30 @@ pub(crate) fn draw_node_kind_editor(
                     .show_ui(ui, |ui| {
                         let is_message =
                             matches!(interactable_kind, InteractableKind::Message { .. });
-                        if ui.selectable_label(is_message, "Message").clicked() {
-                            if !is_message {
-                                *interactable_kind = InteractableKind::Message {
-                                    title: "ECHO REMNANT".to_string(),
-                                    body: String::new(),
-                                };
-                                if prompt.trim().is_empty() || prompt == "SYNCHRONIZE" {
-                                    *prompt = "READ ECHO".to_string();
-                                }
-                                changed = true;
+                        if ui.selectable_label(is_message, "Message").clicked() && !is_message {
+                            *interactable_kind = InteractableKind::Message {
+                                title: "ECHO REMNANT".to_string(),
+                                body: String::new(),
+                            };
+                            if prompt.trim().is_empty() || prompt == "SYNCHRONIZE" {
+                                *prompt = "READ ECHO".to_string();
                             }
+                            changed = true;
                         }
                         let is_checkpoint =
                             matches!(interactable_kind, InteractableKind::Checkpoint { .. });
-                        if ui.selectable_label(is_checkpoint, "Checkpoint").clicked() {
-                            if !is_checkpoint {
-                                *interactable_kind = InteractableKind::Checkpoint {
-                                    checkpoint_id: String::new(),
-                                    title: "SYNC RELAY".to_string(),
-                                    body: "Relay synchronized.".to_string(),
-                                };
-                                if prompt.trim().is_empty() || prompt == "READ ECHO" {
-                                    *prompt = "SYNCHRONIZE".to_string();
-                                }
-                                changed = true;
+                        if ui.selectable_label(is_checkpoint, "Checkpoint").clicked()
+                            && !is_checkpoint
+                        {
+                            *interactable_kind = InteractableKind::Checkpoint {
+                                checkpoint_id: String::new(),
+                                title: "SYNC RELAY".to_string(),
+                                body: "Relay synchronized.".to_string(),
+                            };
+                            if prompt.trim().is_empty() || prompt == "READ ECHO" {
+                                *prompt = "SYNCHRONIZE".to_string();
                             }
+                            changed = true;
                         }
                     });
             });
@@ -2623,7 +2617,7 @@ pub(crate) fn draw_node_kind_editor(
                             }
                         }
                     });
-                    if size.iter().any(|axis| *axis == 0) {
+                    if size.contains(&0) {
                         ui.colored_label(
                             Color32::from_rgb(220, 120, 100),
                             "Extent must be > 0 on every axis (cook will fail)",
