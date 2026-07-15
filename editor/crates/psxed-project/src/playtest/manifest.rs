@@ -72,6 +72,22 @@ pub fn write_package(package: &PlaytestPackage, generated_dir: &Path) -> std::io
     for room_index in 0..package.rooms.len().min(u16::MAX as usize + 1) {
         let payload = streamed_room_chunk_payload(package, room_index as u16)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        // Cook/runtime streaming contract: the runtime's per-room CD slot
+        // is sized from this constant; an oversized chunk would fail every
+        // runtime load silently and the room would never appear. Refuse to
+        // ship it.
+        if payload.len() > psx_level::MAX_STREAMED_ROOM_CHUNK_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "room {room_index} stream chunk is {} bytes; the runtime room slot \
+                     is {} bytes (psx_level::MAX_STREAMED_ROOM_CHUNK_BYTES) -- split the \
+                     room with more portal seams or reduce its geometry",
+                    payload.len(),
+                    psx_level::MAX_STREAMED_ROOM_CHUNK_BYTES,
+                ),
+            ));
+        }
         std::fs::write(
             stream_chunks_dir.join(streamed_room_chunk_filename(room_index as u16)),
             payload,

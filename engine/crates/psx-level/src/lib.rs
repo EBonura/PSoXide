@@ -843,6 +843,19 @@ pub const STREAMED_ROOM_CHUNK_VERSION: u32 = 3;
 /// Byte length of the streamed room chunk header.
 pub const STREAMED_ROOM_CHUNK_HEADER_BYTES: usize = 64;
 
+/// Maximum streamed room chunk payload the RUNTIME can load.
+///
+/// This is the cook/runtime streaming contract: the runtime sizes its
+/// per-room CD slot from this constant (see the playtest's
+/// `MAX_STREAMED_ROOM_SLOT_BYTES`), and the cooker must refuse to emit
+/// any chunk larger than it. A chunk past this limit does not fail at
+/// cook or boot on its own -- the runtime's loader rejects it on every
+/// request with silent exponential backoff and the room simply never
+/// appears (observed 2026-07-15 with ~94KB rooms: an empty world
+/// rendering sky at a fake-perfect 30fps). Keep the two sides tied to
+/// this one constant so that failure mode stays impossible.
+pub const MAX_STREAMED_ROOM_CHUNK_BYTES: usize = 32 * 1024;
+
 /// Header offsets for a streamed room chunk payload.
 ///
 /// The render path consumes the cache table ranges directly; the
