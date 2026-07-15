@@ -42,6 +42,11 @@ pub const GP0_ADDR: u32 = 0x1F80_1810;
 /// Physical address of the GP1 / GPUSTAT port.
 pub const GP1_ADDR: u32 = 0x1F80_1814;
 
+/// GP1 status latches become CPU-visible after the first immediately
+/// following GPUSTAT read but before the second. The captured SCPH-9902
+/// transition lands twelve CPU clock cycles after the command write.
+pub(crate) const GP1_STATUS_LATCH_CYCLES: u64 = 12;
+
 /// `#[serde(default = ...)]` target for the `[u32; 256]`-shaped
 /// diagnostic opcode histograms below -- `Default` only covers arrays
 /// up to length 32 on stable Rust, so a skipped 256-entry histogram
@@ -360,6 +365,11 @@ pub struct Gpu {
     /// Latched when GP1(00h/02h) acknowledges IRQ1. The bus consumes
     /// this and clears I_STAT bit 1.
     irq_acknowledged: bool,
+    /// Posted GP1 commands whose GPUSTAT-visible effect has not reached the
+    /// status latch yet. Display geometry is updated at write time; only the
+    /// status bits and IRQ acknowledge are delayed.
+    #[serde(default)]
+    pending_gp1_status: std::collections::VecDeque<(u64, u32)>,
 }
 
 /// Public snapshot of the GPU's display configuration, read by the
@@ -515,6 +525,7 @@ impl Gpu {
             gp1_write_history: Vec::new(),
             irq_requested: false,
             irq_acknowledged: false,
+            pending_gp1_status: std::collections::VecDeque::new(),
         }
     }
 
@@ -851,13 +862,34 @@ impl Gpu {
     /// VRAM→CPU transfer one word at a time; the GP1 (GPUSTAT) port
     /// stays side-effect-free.
     pub fn read32(&mut self, phys: u32) -> Option<u32> {
+        self.read32_at(phys, u64::MAX)
+    }
+
+    /// MMIO read with CPU-cycle context so posted GP1 status writes can
+    /// mature between two consecutive GPUSTAT reads.
+    pub fn read32_at(&mut self, phys: u32, now: u64) -> Option<u32> {
+        self.apply_pending_gp1_status(now);
         match phys {
             GP0_ADDR => Some(self.read_gpuread()),
-            GP1_ADDR => Some(self.status.read(
-                self.vram_download.is_some(),
-                !self.is_busy(),
-                !self.is_dma_busy(),
-            )),
+            GP1_ADDR => {
+                let mut value = self.status.read(
+                    self.vram_download.is_some(),
+                    !self.is_busy(),
+                    !self.is_dma_busy(),
+                );
+                // IRQ1 first deasserts the two ready signals. The DMA-request
+                // output is a separate latch and retains its pre-command
+                // value until the IRQ/status event lands (C202 -> D702 on the
+                // measured direction-2 path, rather than C002 -> D702).
+                if self
+                    .pending_gp1_status
+                    .iter()
+                    .any(|(_, command)| command >> 24 == 0x1F)
+                {
+                    value |= 1 << 25;
+                }
+                Some(value)
+            }
             _ => None,
         }
     }
@@ -1067,6 +1099,11 @@ impl Gpu {
         let textured_poly_cost = |pixels: u64| scale_gpu_pixels(pixels, 179, 64);
 
         match op {
+            // GP0(1Fh) traverses the command input path before IRQ1 and the
+            // ready flags reach GPUSTAT. On SCPH-9902 the first immediately
+            // following read has bits 26/28 clear and the second has them
+            // set, the same edge measured for the IRQ status latch itself.
+            0x1F => GP1_STATUS_LATCH_CYCLES,
             // GP0(02h) has a dedicated fast fill engine. Silicon moves a
             // little over twelve pixels per CPU cycle for this path.
             0x02 => {
@@ -1254,9 +1291,30 @@ impl Gpu {
     /// Dispatch an MMIO write inside the GPU window. Returns `true` if
     /// the address belonged to the GPU.
     pub fn write32(&mut self, phys: u32, value: u32) -> bool {
+        self.write32_inner(phys, value, None)
+    }
+
+    /// MMIO write with CPU-cycle context. GP1(02h) IRQ acknowledge and
+    /// GP1(04h) DMA-direction changes are posted to GPUSTAT; direct host-side
+    /// callers retain the immediate legacy behaviour through [`Gpu::write32`].
+    pub fn write32_at(&mut self, phys: u32, value: u32, now: u64) -> bool {
+        self.write32_inner(phys, value, Some(now))
+    }
+
+    fn write32_inner(&mut self, phys: u32, value: u32, now: Option<u64>) -> bool {
         match phys {
             GP0_ADDR => {
+                let irq_deadline = now
+                    .filter(|_| value >> 24 == 0x1f)
+                    .map(|now| now.saturating_add(GP1_STATUS_LATCH_CYCLES));
+                let old_irq_bit = self.status.raw & (1 << 24);
+                let old_irq_requested = self.irq_requested;
                 self.gp0_write(value, false);
+                if let Some(deadline) = irq_deadline {
+                    self.status.raw = (self.status.raw & !(1 << 24)) | old_irq_bit;
+                    self.irq_requested = old_irq_requested;
+                    self.pending_gp1_status.push_back((deadline, 0x1f00_0000));
+                }
                 true
             }
             GP1_ADDR => {
@@ -1266,14 +1324,42 @@ impl Gpu {
                     self.gp1_write_history.remove(0);
                 }
                 self.gp1_write_history.push(value);
-                if matches!(op, 0x00 | 0x02) {
-                    self.irq_acknowledged = true;
-                }
                 self.apply_gp1_display(value);
-                self.status.gp1_write(value);
+                if let Some(now) = now.filter(|_| matches!(op, 0x02 | 0x04)) {
+                    let deadline = now.saturating_add(GP1_STATUS_LATCH_CYCLES);
+                    self.pending_gp1_status.push_back((deadline, value));
+                } else {
+                    self.apply_gp1_status(value);
+                }
                 true
             }
             _ => false,
+        }
+    }
+
+    fn apply_gp1_status(&mut self, value: u32) {
+        if value >> 24 == 0x1f {
+            self.status.raw |= 1 << 24;
+            self.irq_requested = true;
+            return;
+        }
+        if matches!((value >> 24) & 0xFF, 0x00 | 0x02) {
+            self.irq_acknowledged = true;
+        }
+        self.status.gp1_write(value);
+    }
+
+    fn apply_pending_gp1_status(&mut self, now: u64) {
+        while self
+            .pending_gp1_status
+            .front()
+            .is_some_and(|(deadline, _)| *deadline <= now)
+        {
+            let (_, value) = self
+                .pending_gp1_status
+                .pop_front()
+                .expect("front was present");
+            self.apply_gp1_status(value);
         }
     }
 
@@ -1600,6 +1686,7 @@ impl Gpu {
     /// and drawing-offset because the rasterizer needs them.
     fn execute_gp0_single(&mut self, word: u32) {
         let op = (word >> 24) & 0xFF;
+        let timing_cost = self.gp0_packet_timing_cost(op as u8);
         // Pixel tracer also wants to see state-modifying single-word
         // packets (0xE1..=0xE6 draw-mode / tex-window / draw-area /
         // draw-offset / mask). These don't plot pixels but they shift
@@ -1727,6 +1814,13 @@ impl Gpu {
                 self.tex_window_offset_y = (((word >> 15) & 0x1F) as u8) << 3;
             }
             _ => {}
+        }
+        if op == 0x1F {
+            // IRQ1 occupies the shared GP0 input path, so GPUSTAT.28 drops
+            // with command-ready even when the command came from the CPU.
+            self.charge_dma_busy(timing_cost);
+        } else {
+            self.charge_busy(timing_cost);
         }
     }
 

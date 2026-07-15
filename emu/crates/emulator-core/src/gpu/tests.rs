@@ -111,6 +111,32 @@ fn gp0_irq_request_and_gp1_ack_toggle_gpustat_bit() {
 }
 
 #[test]
+fn gp1_status_changes_land_between_first_and_second_reads() {
+    let mut gpu = Gpu::new();
+    gpu.write32_at(GP1_ADDR, 0x0400_0001, 100);
+    assert_eq!((gpu.read32_at(GP1_ADDR, 106).unwrap() >> 29) & 3, 0);
+    assert_eq!((gpu.read32_at(GP1_ADDR, 112).unwrap() >> 29) & 3, 1);
+
+    gpu.write32(GP0_ADDR, 0x1f00_0000);
+    gpu.write32_at(GP1_ADDR, 0x0200_0000, 200);
+    assert_ne!(gpu.read32_at(GP1_ADDR, 206).unwrap() & (1 << 24), 0);
+    assert_eq!(gpu.read32_at(GP1_ADDR, 212).unwrap() & (1 << 24), 0);
+    assert!(gpu.take_irq_acknowledged());
+    gpu.decay_busy(u64::MAX);
+
+    gpu.write32_at(GP0_ADDR, 0x1f00_0000, 300);
+    let first = gpu.read32_at(GP1_ADDR, 306).unwrap();
+    assert_eq!(first & (1 << 24), 0);
+    assert_eq!(first & ((1 << 26) | (1 << 28)), 0);
+    assert_ne!(first & (1 << 25), 0);
+    gpu.decay_busy(GP1_STATUS_LATCH_CYCLES);
+    let second = gpu.read32_at(GP1_ADDR, 312).unwrap();
+    assert_ne!(second & (1 << 24), 0);
+    assert_eq!(second & ((1 << 26) | (1 << 28)), (1 << 26) | (1 << 28));
+    assert!(gpu.take_irq_requested());
+}
+
+#[test]
 fn gp1_display_disable_toggles_bit_23() {
     let mut gpu = Gpu::new();
     // Start disabled (reset state has bit 23 set).
