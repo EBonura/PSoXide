@@ -42,6 +42,11 @@
 /// Number of DMA channels.
 pub const NUM_CHANNELS: usize = 7;
 
+/// OTC CHCR exposes only the start/busy and manual-trigger bits; direction
+/// and decrement are hardwired, and all other software writes read back zero.
+const OTC_CHCR_WRITABLE: u32 = (1 << 24) | (1 << 28) | (1 << 30);
+const OTC_CHCR_FIXED: u32 = 1 << 1;
+
 /// Per-channel register state.
 #[derive(Default, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct DmaChannel {
@@ -189,7 +194,11 @@ impl Dma {
                     0x0 => c.base = value & 0x00FF_FFFF,
                     0x4 => c.block_control = value,
                     0x8 => {
-                        c.channel_control = value;
+                        c.channel_control = if ch == 6 {
+                            (value & OTC_CHCR_WRITABLE) | OTC_CHCR_FIXED
+                        } else {
+                            value
+                        };
                         if (value >> 24) & 1 != 0 {
                             self.start_trigger_counts[ch] += 1;
                             self.chcr_write_count[ch] = self.chcr_write_count[ch].saturating_add(1);
@@ -239,7 +248,13 @@ impl Dma {
                 match field {
                     0x0 => c.base = value & 0x00FF_FFFF,
                     0x4 => c.block_control = value,
-                    0x8 => c.channel_control = value,
+                    0x8 => {
+                        c.channel_control = if ch == 6 {
+                            (value & OTC_CHCR_WRITABLE) | OTC_CHCR_FIXED
+                        } else {
+                            value
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -354,7 +369,9 @@ impl Dma {
     /// Called by [`crate::Bus`] after every CHCR write.
     pub fn run_otc(&mut self, ram: &mut [u8]) -> u32 {
         let ch = &self.channels[6];
-        if (ch.channel_control >> 24) & 1 == 0 {
+        // Manual OTC requires BOTH Start/Busy (24) and Trigger (28).
+        // A start bit without the manual trigger must leave RAM untouched.
+        if ch.channel_control & 0x1100_0000 != 0x1100_0000 {
             return 0;
         }
 
@@ -523,6 +540,17 @@ mod tests {
         }
     }
 
+    #[test]
+    fn otc_chcr_masks_unused_bits_and_hardwires_decrement() {
+        let mut dma = Dma::new();
+        dma.write32(0x1F80_10E8, 0x7077_0703);
+        assert_eq!(dma.read32(0x1F80_10E8), 0x5000_0002);
+        dma.write32(0x1F80_10E8, 0);
+        assert_eq!(dma.read32(0x1F80_10E8), 0x0000_0002);
+        dma.write32(0x1F80_10E8, 0x8E88_F8FC);
+        assert_eq!(dma.read32(0x1F80_10E8), 0x0000_0002);
+    }
+
     fn set_otc(dma: &mut Dma, base: u32, count: u32) {
         // CH6: base, block count, start (bit 24) + busy (bit 28)
         dma.write32(0x1F80_10E0, base);
@@ -583,6 +611,17 @@ mod tests {
         // Write base/count but not start bit.
         dma.write32(0x1F80_10E0, 0x0000_0100);
         dma.write32(0x1F80_10E4, 1);
+        assert_eq!(dma.run_otc(&mut ram), 0);
+        assert_eq!(read_u32(&ram, 0x100), 0);
+    }
+
+    #[test]
+    fn otc_is_noop_without_manual_trigger_bit() {
+        let mut dma = Dma::new();
+        let mut ram = vec![0u8; 2 * 1024 * 1024];
+        dma.write32(0x1F80_10E0, 0x0000_0100);
+        dma.write32(0x1F80_10E4, 1);
+        dma.write32(0x1F80_10E8, 1 << 24);
         assert_eq!(dma.run_otc(&mut ram), 0);
         assert_eq!(read_u32(&ram, 0x100), 0);
     }

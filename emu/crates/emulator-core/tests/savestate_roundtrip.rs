@@ -113,3 +113,50 @@ fn save_state_round_trips_cpu_and_bus_state() {
     assert_eq!(restored_cpu.tick(), cpu.tick());
     assert_eq!(restored_bus.read32(0), bus.read32(0));
 }
+
+#[test]
+fn save_state_preserves_stale_instruction_cache_contents() {
+    let mut cpu = Cpu::new();
+    let mut bus = Bus::new(synthetic_bios()).expect("bios is exactly BIOS::SIZE bytes");
+    let base = 0x0000_1000;
+    let program = [
+        0x3C08_FFFE, // lui   $t0, 0xFFFE
+        0x3409_0800, // ori   $t1, $zero, IS1
+        0xAD09_0130, // sw    $t1, 0x130($t0) -- enable I-cache
+        0x254A_0001, // addiu $t2, $t2, 1
+        0x0800_0403, // j     0x8000100C
+        0x0000_0000, // nop (delay slot)
+    ];
+    for (index, word) in program.into_iter().enumerate() {
+        bus.write32(base + index as u32 * 4, word);
+    }
+    cpu.seed_from_exe(0x8000_1000, 0, None);
+
+    // Enable the cache, execute the increment once, and loop back to it.
+    step_n(&mut cpu, &mut bus, 6);
+    assert_eq!(cpu.pc(), 0x8000_100C);
+    assert_eq!(cpu.gpr(10), 1);
+
+    // Change backing RAM through KSEG1. Real hardware keeps executing the
+    // stale cached +1 instruction until software flushes the I-cache.
+    bus.write32(0xA000_100C, 0x254A_0002); // addiu $t2, $t2, 2
+
+    let snapshot = EmulatorStateRef {
+        cpu: &cpu,
+        bus: &bus,
+    };
+    let bytes = SaveStateV1::new(snapshot, "icache-test", cpu.tick())
+        .to_bytes()
+        .expect("cache-bearing state must encode");
+    let loaded: SaveStateV1<EmulatorState> =
+        SaveStateV1::from_bytes(&bytes).expect("cache-bearing state must decode");
+    let mut restored_cpu = loaded.payload.cpu;
+    let mut restored_bus = loaded.payload.bus;
+
+    restored_cpu.step(&mut restored_bus).unwrap();
+    assert_eq!(
+        restored_cpu.gpr(10),
+        2,
+        "restored CPU must execute the cached +1, not RAM's replacement +2"
+    );
+}

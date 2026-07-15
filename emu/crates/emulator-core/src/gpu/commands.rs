@@ -28,13 +28,13 @@ pub(super) fn gp0_packet_size(op: u8) -> usize {
         0x3C..=0x3F => 12,
         // Single lines: 3 words (color + 2 vertices) for monochrome,
         // 4 words for shaded.
-        0x40..=0x43 => 3,
-        0x50..=0x53 => 4,
+        0x40..=0x47 => 3,
+        0x50..=0x57 => 4,
         // Polyline starts: same initial shape, but after the first
         // endpoint the FIFO enters a streaming receive mode until
         // the terminator sentinel is seen.
-        0x48..=0x4B => 3,
-        0x58..=0x5B => 4,
+        0x48..=0x4F => 3,
+        0x58..=0x5F => 4,
         // Monochrome rectangles: variable (3), 1×1 (2), 8×8 (2), 16×16 (2).
         0x60..=0x63 => 3,
         0x64..=0x67 => 4, // variable + textured

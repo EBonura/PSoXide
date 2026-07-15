@@ -913,6 +913,16 @@ fn run_headless_launch(
                 None => String::new(),
             }
         );
+        if std::env::var_os("PSOXIDE_TRACE_HLE_BIOS").is_some() {
+            eprintln!(
+                "[hle-bios] sr={:08x} istat={:03x} imask={:03x} irq-high-steps={} irq-taken={}",
+                cpu.cop0()[12],
+                bus.irq().stat(),
+                bus.irq().mask(),
+                cpu.irq_line_high_steps(),
+                cpu.should_take_interrupt_steps()
+            );
+        }
     }
     let gte_profile_after = cpu.cop2().profile_snapshot();
 

@@ -25,6 +25,7 @@ pub mod pad;
 pub mod scheduler;
 pub(crate) mod serde_big_array;
 pub mod sio;
+mod sio1;
 pub mod snapshot;
 pub mod spu;
 pub mod telemetry;
