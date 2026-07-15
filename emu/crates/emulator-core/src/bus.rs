@@ -85,6 +85,10 @@ fn default_bios() -> Box<[u8; memory::bios::SIZE]> {
     Box::new([0; memory::bios::SIZE])
 }
 
+fn default_dram_refresh_deadline() -> u64 {
+    memory_timing::DRAM_REFRESH_PERIOD_CYCLES
+}
+
 /// Errors constructing a [`Bus`].
 #[derive(Error, Debug)]
 pub enum BusError {
@@ -164,6 +168,22 @@ pub struct Bus {
     /// (VBlank, timer ticks, DMA completion). Phase 4a just counts;
     /// Phase 4b starts firing IRQs off it.
     cycles: u64,
+    /// Absolute CPU-cycle edge of the next 44.1 kHz SPU sample. Keeping this
+    /// phase on the emulated bus avoids losing the fractional remainder when
+    /// BIOS warmup hands execution to a frontend or fast-booted executable.
+    #[serde(default = "default_spu_sample_deadline")]
+    spu_sample_deadline: u64,
+    /// Completion point of the single-entry CPU main-RAM write buffer.
+    #[serde(default)]
+    ram_write_buffer_ready_cycle: u64,
+    /// Absolute divider deadline for the next DRAM refresh request.
+    #[serde(default = "default_dram_refresh_deadline")]
+    dram_refresh_deadline: u64,
+    /// Issue cycle of the previous CPU main-RAM access. Refresh arbitration
+    /// distinguishes the eight- and nine-clock load streams measured on
+    /// silicon.
+    #[serde(default)]
+    last_cpu_ram_access_cycle: u64,
     // VBlank scheduling lives in `scheduler` under
     // [`EventSlot::VBlank`]. Seeded at `FIRST_VBLANK_CYCLE` by
     // `Bus::new`; every VBlank handler invocation re-schedules the
@@ -251,6 +271,10 @@ fn default_hle_bios_calls() -> [[u32; 256]; 3] {
     [[0; 256]; 3]
 }
 
+fn default_spu_sample_deadline() -> u64 {
+    crate::spu::SAMPLE_CYCLES
+}
+
 impl Bus {
     /// Build a bus with the given BIOS image. RAM and scratchpad are
     /// zero-initialised; hardware leaves them in an undefined state, but
@@ -285,6 +309,10 @@ impl Bus {
             cdrom: CdRom::new(),
             mdec: crate::mdec::Mdec::new(),
             cycles: 0,
+            spu_sample_deadline: default_spu_sample_deadline(),
+            ram_write_buffer_ready_cycle: 0,
+            dram_refresh_deadline: default_dram_refresh_deadline(),
+            last_cpu_ram_access_cycle: 0,
             scheduler: {
                 let mut s = crate::scheduler::Scheduler::new();
                 // Seed the first VBlank at scanline 243. Every fire
@@ -430,7 +458,8 @@ impl Bus {
                         old.total_scanlines,
                     )
                 })
-                .unwrap_or(0);
+                .unwrap_or(0)
+                % total_scanlines;
             let line_phase = old
                 .and_then(|old| {
                     self.scheduler
@@ -474,6 +503,17 @@ impl Bus {
         self.hsync_cycles
     }
 
+    /// Select the late PAL PSone memory-controller profile measured on an
+    /// SCPH-9902. This is applied after a substitute earlier PAL BIOS warmup,
+    /// whose own register programming reflects different motherboard timing.
+    pub fn apply_scph_9902_profile(&mut self) {
+        self.memory_control = MemoryControl::default();
+        self.timers.set_vblank_sync_offset_lines(29);
+        self.timers.set_counter_read_extra_hold(0, 8);
+        self.timers.set_timer0_dot_read_extra_hold(5);
+        self.timers.set_counter_read_extra_hold(2, 5);
+    }
+
     /// Current VBlank period -- one frame in cycles.
     pub fn vblank_period(&self) -> u64 {
         self.vblank_period
@@ -515,6 +555,20 @@ impl Bus {
         let old = std::mem::take(self.sio0.port1_mut());
         let memcard = old.into_memcard();
         let mut device = crate::pad::PortDevice::empty().with_pad(crate::pad::DigitalPad::new());
+        if let Some(card) = memcard {
+            device = device.with_memcard(card);
+        }
+        self.sio0.attach_port1(device);
+    }
+
+    /// Plug an original digital-only controller into port 1. Unlike the
+    /// default DualShock-compatible pad, this device ignores analog-mode
+    /// negotiation and always reports ID 0x41.
+    pub fn attach_original_digital_pad_port1(&mut self) {
+        let old = std::mem::take(self.sio0.port1_mut());
+        let memcard = old.into_memcard();
+        let mut device =
+            crate::pad::PortDevice::empty().with_pad(crate::pad::DigitalPad::new_digital_only());
         if let Some(card) = memcard {
             device = device.with_memcard(card);
         }
@@ -937,6 +991,16 @@ impl Bus {
         // before walking the strict interrupt-slot queue. VBlank is
         // our root-counter-style event, so handle it inclusively here
         // instead of via `take_due`'s generic `target < now` rule.
+        // Advance the lazy timer bank while the old VBlank target is still
+        // installed. Timer 1 sync modes must cross/reset at that edge; doing
+        // this after rescheduling loses the boundary entirely.
+        if self
+            .scheduler
+            .target(EventSlot::VBlank)
+            .is_some_and(|target| target <= now)
+        {
+            self.service_timers();
+        }
         while let Some(target) = self
             .scheduler
             .take_slot_due_inclusive(EventSlot::VBlank, now)
@@ -1130,15 +1194,48 @@ impl Bus {
     /// Bus clients such as DMA use the raw read/write methods and therefore
     /// do not accidentally pay CPU pipeline costs.
     #[inline]
-    pub(crate) fn cpu_read_stalls(&self, virt: u32, width: AccessWidth) -> u32 {
+    pub(crate) fn cpu_read_stalls(&mut self, virt: u32, width: AccessWidth) -> u32 {
         // Root-counter reads use the same three-cycle total (one issue + two
         // wait) measured for the other internal MMIO registers by the public
         // access-time suite. Counter phase differences in compound loops must
         // be modeled at their real CPU/bus dependency, not hidden in this
         // independently observable access cost.
         let stalls = self.memory_control.read_stalls(virt, width);
-        if to_physical(virt) < memory::ram::MIRROR_END {
-            stalls.saturating_add(memory_timing::dram_refresh_wait(self.cycles))
+        let phys = to_physical(virt);
+        let external_counter_overlap = (memory::expansion1::BASE
+            ..memory::expansion1::BASE + memory::expansion1::SIZE as u32)
+            .contains(&phys)
+            || (memory::expansion2::BASE
+                ..memory::expansion2::BASE + memory::expansion2::SIZE as u32)
+                .contains(&phys)
+            || (memory::expansion3::BASE
+                ..memory::expansion3::BASE + memory::expansion3::SIZE as u32)
+                .contains(&phys)
+            || (0x1F80_1800..0x1F80_1804).contains(&phys)
+            || (0x1F80_1C00..0x1F80_2000).contains(&phys);
+        if external_counter_overlap {
+            self.timers
+                .overlap_counter_write_with_external_read(self.cycles, stalls);
+        }
+        if phys < memory::ram::MIRROR_END {
+            let access_gap = self.cycles.saturating_sub(self.last_cpu_ram_access_cycle);
+            self.last_cpu_ram_access_cycle = self.cycles;
+            let refresh_stall = if (0xA000_0000..0xC000_0000).contains(&virt) {
+                if access_gap <= 16 {
+                    6
+                } else {
+                    memory_timing::DRAM_REFRESH_UNCACHED_STALL_CYCLES
+                }
+            } else if access_gap == 8 {
+                2
+            } else {
+                memory_timing::DRAM_REFRESH_CACHED_STALL_CYCLES
+            };
+            stalls.saturating_add(memory_timing::dram_refresh_wait(
+                self.cycles,
+                &mut self.dram_refresh_deadline,
+                refresh_stall,
+            ))
         } else {
             stalls
         }
@@ -1151,9 +1248,19 @@ impl Bus {
     /// Keep this separate from CPU reads: the external write buffer hides
     /// most of the read wait-state cost but still occupies one extra clock.
     #[inline]
-    pub(crate) fn cpu_write_stalls(&self, virt: u32) -> u32 {
+    pub(crate) fn cpu_write_stalls(&mut self, virt: u32) -> u32 {
         if to_physical(virt) < memory::ram::MIRROR_END {
-            1u32.saturating_add(memory_timing::dram_refresh_wait(self.cycles))
+            self.last_cpu_ram_access_cycle = self.cycles;
+            let refresh_stall = if (0xA000_0000..0xC000_0000).contains(&virt) {
+                memory_timing::DRAM_REFRESH_UNCACHED_STALL_CYCLES
+            } else {
+                memory_timing::DRAM_REFRESH_CACHED_STALL_CYCLES
+            };
+            1u32.saturating_add(memory_timing::dram_refresh_wait(
+                self.cycles,
+                &mut self.dram_refresh_deadline,
+                refresh_stall,
+            ))
         } else {
             0
         }
@@ -1161,10 +1268,14 @@ impl Bus {
 
     /// Uncached instruction-fetch stall cycles.
     #[inline]
-    pub(crate) fn instruction_read_stalls(&self, virt: u32) -> u32 {
+    pub(crate) fn instruction_read_stalls(&mut self, virt: u32) -> u32 {
         let stalls = self.memory_control.instruction_read_stalls(virt);
         if to_physical(virt) < memory::ram::MIRROR_END {
-            stalls.saturating_add(memory_timing::dram_refresh_wait(self.cycles))
+            stalls.saturating_add(memory_timing::dram_refresh_wait(
+                self.cycles,
+                &mut self.dram_refresh_deadline,
+                memory_timing::DRAM_REFRESH_UNCACHED_STALL_CYCLES,
+            ))
         } else {
             stalls
         }
@@ -1172,10 +1283,14 @@ impl Bus {
 
     /// Cache-line refill stall cycles for `words` fetched from `phys`.
     #[inline]
-    pub(crate) fn icache_fill_stalls(&self, phys: u32, words: u32) -> u32 {
+    pub(crate) fn icache_fill_stalls(&mut self, phys: u32, words: u32) -> u32 {
         let stalls = self.memory_control.icache_fill_stalls(phys, words);
         if words != 0 && phys < memory::ram::MIRROR_END {
-            stalls.saturating_add(memory_timing::dram_refresh_wait(self.cycles))
+            stalls.saturating_add(memory_timing::dram_refresh_wait(
+                self.cycles,
+                &mut self.dram_refresh_deadline,
+                memory_timing::DRAM_REFRESH_CACHED_STALL_CYCLES,
+            ))
         } else {
             stalls
         }
@@ -1276,16 +1391,7 @@ impl Bus {
         self.drain_scheduler_events();
     }
 
-    /// Pump the SPU forward by `n` samples. Called by the frontend
-    /// once per displayed frame (or when the audio callback drains
-    /// the output ring), producing stereo output for playback.
-    ///
-    /// We decouple SPU timing from the CPU's cycle counter to stay
-    /// bit-exact with the Redux parity oracle: Redux's SPU runs in
-    /// a background thread that doesn't tick during the trace, so
-    /// ticking on every 768th cycle diverges. Callers supply a
-    /// sample count that matches their display refresh cadence
-    /// (e.g. 735 samples per NTSC frame at 44.1 kHz).
+    /// Pump the SPU forward by `n` samples on exact 768-cycle edges.
     ///
     /// Also forwards any CD audio samples the CDROM has decoded
     /// (CD-DA / XA ADPCM) into the SPU's CD input mix -- one
@@ -1299,9 +1405,26 @@ impl Bus {
             self.spu.feed_cd_audio(&cd_samples);
         }
         for _ in 0..n {
-            self.spu.tick_sample(self.cycles);
+            let sample_cycle = self.spu_sample_deadline;
+            self.spu_sample_deadline = self
+                .spu_sample_deadline
+                .saturating_add(crate::spu::SAMPLE_CYCLES);
+            self.spu.tick_sample(sample_cycle);
             self.service_spu_irq();
         }
+    }
+
+    /// Produce every SPU sample whose exact clock edge has elapsed. The phase
+    /// belongs to the emulated machine, so BIOS warmup and frontend handoffs
+    /// cannot discard a partial sample period.
+    pub fn run_spu_to_current_cycle(&mut self) -> usize {
+        if self.spu_sample_deadline > self.cycles {
+            return 0;
+        }
+        let elapsed = self.cycles - self.spu_sample_deadline;
+        let due = (elapsed / crate::spu::SAMPLE_CYCLES + 1) as usize;
+        self.run_spu_samples(due);
+        due
     }
 
     /// Borrow the interrupt controller -- caller can `.raise()` sources
@@ -1508,7 +1631,7 @@ impl Bus {
                     // completion edge one cycle beyond the bus-hold window;
                     // the first MMIO read starts in that observable slot and
                     // advances through the scheduled clear for the next read.
-                    let completion_delay = otc_cycles.saturating_add(1);
+                    let completion_delay = otc_cycles.saturating_add(2);
                     let target = self.cycles + completion_delay as u64;
                     self.log_dma_schedule("GpuOtc", completion_delay as u64, target);
                     self.scheduler.schedule(
@@ -1684,14 +1807,17 @@ impl Bus {
         // this many halfwords (Redux's writeDMAMem `size` = 2 x BCR product).
         // Completion timing is governed by the SPU FIFO engine, not merely
         // the much faster main-RAM DMA bus transaction.
-        let word_count: u32 = match sync_mode {
-            0 => bcr & 0xFFFF,
+        let (word_count, block_words): (u32, u32) = match sync_mode {
+            0 => {
+                let words = bcr & 0xFFFF;
+                (words, words)
+            }
             1 => {
                 let block_size = bcr & 0xFFFF;
                 let block_count = (bcr >> 16) & 0xFFFF;
-                block_size * block_count
+                (block_size * block_count, block_size)
             }
-            _ => 0, // Linked list + reserved -- not used for SPU.
+            _ => (0, 0), // Linked list + reserved -- not used for SPU.
         };
         let halfword_count = word_count.saturating_mul(2);
         let to_spu = ch.channel_control & 1 != 0;
@@ -1707,10 +1833,23 @@ impl Bus {
                 words.push(read_ram_u16(&self.ram[..], addr));
                 addr = addr.wrapping_add(step);
             }
-            self.spu.dma_write(&words);
+            if self.spu.dma_write_ready_at(self.cycles) {
+                self.spu.dma_write(&words);
+            } else {
+                // SCPH-9902 accepts the first 32-bit DMA word while the
+                // freshly-written SPUCNT mode is still crossing into the
+                // sample-clock domain, then stops accepting the burst.
+                // Preserve that single-word aperture instead of treating
+                // an early kick as either a full transfer or a total drop.
+                self.spu.dma_write(&words[..words.len().min(2)]);
+            }
         } else {
             let mut words = vec![0u16; halfword_count as usize];
-            self.spu.dma_read(&mut words);
+            self.spu.dma_read_blocks(
+                &mut words,
+                block_words.saturating_mul(2) as usize,
+                self.memory_control.spu_dma_read_is_stable(),
+            );
             for word in words {
                 write_ram_u16(&mut self.ram[..], addr, word);
                 addr = addr.wrapping_add(step);
@@ -1855,6 +1994,7 @@ impl Bus {
         }
         let sync_mode = (ch.channel_control >> 9) & 0x3;
         let direction_to_device = ch.channel_control & 1 != 0;
+        self.gpu.note_dma_transfer_started();
         let completion = match sync_mode {
             0 => self.dma_gpu_manual(direction_to_device),
             1 => self.dma_gpu_block(direction_to_device),
@@ -2344,6 +2484,10 @@ impl Bus {
             return (self.data_bus_latch & 0xFFFF_0000) | self.irq.mask();
         }
         if Timers::contains(phys) {
+            if self.ram_write_buffer_ready_cycle > self.cycles {
+                self.advance_cycles((self.ram_write_buffer_ready_cycle - self.cycles) as u32);
+            }
+            self.ram_write_buffer_ready_cycle = self.cycles;
             self.service_timers();
             return (self.data_bus_latch & 0xFFFF_0000) | self.timers.read32(phys);
         }
@@ -2432,6 +2576,9 @@ impl Bus {
         self.data_bus_latch = value;
         let store_stall = self.cpu_write_stalls(virt);
         self.add_cycles(store_stall);
+        if to_physical(virt) < memory::ram::MIRROR_END {
+            self.ram_write_buffer_ready_cycle = self.cycles.saturating_add(8);
+        }
         if to_physical(virt) == crate::gpu::GP0_ADDR {
             let stall = self.gpu.cpu_gp0_write_stall();
             self.add_cycles(stall);
@@ -2589,6 +2736,9 @@ impl Bus {
         let store_stall = self.cpu_write_stalls(virt);
         self.add_cycles(store_stall);
         let phys = to_physical(virt);
+        if phys < memory::ram::MIRROR_END {
+            self.ram_write_buffer_ready_cycle = self.cycles.saturating_add(8);
+        }
         self.trace_mmio(MmioKind::W8, phys, source & 0xFF);
         if !self.cpu_write_narrow_mmio(virt, phys, source, AccessWidth::Byte) {
             self.write8_impl(virt, phys, source as u8);
@@ -2602,6 +2752,9 @@ impl Bus {
         let store_stall = self.cpu_write_stalls(virt);
         self.add_cycles(store_stall);
         let phys = to_physical(virt);
+        if phys < memory::ram::MIRROR_END {
+            self.ram_write_buffer_ready_cycle = self.cycles.saturating_add(8);
+        }
         self.trace_mmio(MmioKind::W16, phys, source & 0xFFFF);
         if !self.cpu_write_narrow_mmio(virt, phys, source, AccessWidth::Half) {
             self.write16_impl(virt, phys, source as u16);
@@ -3191,6 +3344,28 @@ mod tests {
     }
 
     #[test]
+    fn pal_to_ntsc_switch_wraps_scanlines_beyond_ntsc_frame() {
+        let mut bus = Bus::new(synthetic_bios()).unwrap();
+        bus.set_pal_mode();
+        bus.cycles = FIRST_VBLANK_CYCLE_PAL + 280 * HSYNC_CYCLES_PAL + 500;
+        bus.scheduler.cancel(crate::scheduler::EventSlot::VBlank);
+        bus.scheduler.schedule(
+            crate::scheduler::EventSlot::VBlank,
+            0,
+            FIRST_VBLANK_CYCLE_PAL + VBLANK_PERIOD_CYCLES_PAL,
+        );
+
+        bus.write32(crate::gpu::GP1_ADDR, 0x0800_0000);
+
+        assert!(
+            bus.scheduler
+                .target(crate::scheduler::EventSlot::VBlank)
+                .unwrap()
+                > bus.cycles
+        );
+    }
+
+    #[test]
     fn reads_first_bios_word_via_kseg1_reset_vector() {
         let mut bus = Bus::new(synthetic_bios()).unwrap();
         assert_eq!(bus.read32(memory::bios::RESET_VECTOR), 0xDEAD_BEEF);
@@ -3547,7 +3722,7 @@ mod tests {
     #[test]
     fn spu_dma_transfers_two_halfwords_per_word_at_late_pal_cadence() {
         let mut bus = Bus::new(synthetic_bios()).unwrap();
-        bus.cycles = 100;
+        bus.cycles = crate::spu::SAMPLE_CYCLES;
         bus.spu.write16(crate::spu::TRANSFER_ADDR, 0);
         bus.spu.write16(crate::spu::SPUCNT, 2 << 4);
         bus.dma.dpcr = 1 << (4 * 4 + 3);
@@ -3566,7 +3741,7 @@ mod tests {
         bus.run_dma_channel(4);
 
         // 64 halfwords at 32 clocks plus a 34-clock DRAM burst = 2082.
-        assert_eq!(bus.scheduler.target(EventSlot::SpuDma), Some(2182));
+        assert_eq!(bus.scheduler.target(EventSlot::SpuDma), Some(2850));
 
         // All 64 halfwords landed in SPU RAM (the bug stopped at 32).
         bus.spu.write16(crate::spu::TRANSFER_ADDR, 0);
@@ -3578,8 +3753,30 @@ mod tests {
     }
 
     #[test]
+    fn early_spu_dma_write_accepts_only_the_first_32_bit_word() {
+        let mut bus = Bus::new(synthetic_bios()).unwrap();
+        bus.spu.write16(crate::spu::TRANSFER_ADDR, 0);
+        bus.spu.write16(crate::spu::SPUCNT, 2 << 4);
+        bus.dma.dpcr = 1 << (4 * 4 + 3);
+        for (i, value) in [0x1111, 0x2222, 0x3333, 0x4444].into_iter().enumerate() {
+            write_ram_u16(&mut bus.ram[..], 0x100 + i as u32 * 2, value);
+        }
+        bus.dma.channels[4].base = 0x100;
+        bus.dma.channels[4].block_control = (1 << 16) | 2;
+        bus.dma.channels[4].channel_control = 0x0100_0201;
+
+        assert!(bus.run_dma_spu().is_some());
+
+        bus.spu.write16(crate::spu::TRANSFER_ADDR, 0);
+        let mut copied = [0u16; 4];
+        bus.spu.dma_read(&mut copied);
+        assert_eq!(copied, [0x1111, 0x2222, 0, 0]);
+    }
+
+    #[test]
     fn spu_dma_irq_addr_match_raises_irq9_immediately() {
         let mut bus = Bus::new(synthetic_bios()).unwrap();
+        bus.cycles = crate::spu::SAMPLE_CYCLES;
         bus.spu.write16(crate::spu::TRANSFER_ADDR, 0);
         bus.spu.write16(crate::spu::IRQ_ADDR, 0);
         bus.spu.write16(crate::spu::SPUCNT, (2 << 4) | (1 << 6));
@@ -3608,6 +3805,12 @@ mod tests {
     #[test]
     fn spu_read_dma_writes_halfwords_back_to_ram() {
         let mut bus = Bus::new(synthetic_bios()).unwrap();
+        // Non-zero SPU delay bits make SPU->RAM DMA reads stable.
+        bus.memory_control.write(
+            0x1F80_1014,
+            crate::bus::memory_timing::AccessWidth::Word,
+            0x2209_31E1,
+        );
         bus.spu.write16(crate::spu::TRANSFER_ADDR, 0);
         bus.spu.write16(crate::spu::SPUCNT, 3 << 4);
         bus.dma.dpcr = 1 << (4 * 4 + 3);
@@ -3647,13 +3850,13 @@ mod tests {
 
         // 16 data cycles + one DRAM row-address setup cycle.
         assert_eq!(bus.cycles, 117);
-        assert_eq!(bus.scheduler.target(EventSlot::GpuOtcDma), Some(118));
+        assert_eq!(bus.scheduler.target(EventSlot::GpuOtcDma), Some(119));
         assert_eq!(bus.dma.channels[6].channel_control, 0x1100_0002);
 
-        // One cycle after the CPU regains the bus reaches the completion
+        // Two cycles after the CPU regains the bus reaches the completion
         // edge. A real MMIO read occupies this boundary, returning the old
         // value before the following read observes the clear state.
-        bus.tick(2);
+        bus.tick(3);
         assert_eq!(bus.dma.channels[6].channel_control, 0x0000_0002);
     }
 

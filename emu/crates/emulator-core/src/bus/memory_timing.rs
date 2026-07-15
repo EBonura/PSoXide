@@ -18,24 +18,47 @@ pub(super) const END: u32 = BASE + 9 * 4;
 const MEM_DELAY_WRITE_MASK: u32 = 0xAF1F_FFFF;
 const COMMON_DELAY_WRITE_MASK: u32 = 0x0003_FFFF;
 
-// The 512Kx8 EDO DRAMs used for main RAM require 1024 refresh cycles per
-// 16 ms. At the 33.8688 MHz CPU clock that is 529.2 clocks between refreshes.
-// A refresh occupies roughly one 110 ns DRAM cycle, rounded to four CPU
-// clocks. Keep the deterministic integer cadence here; the physical test
-// suite observes the resulting occasional extra RAM-read latency and relies
-// on it to avoid phase-locking tight timer-sampling loops.
-const DRAM_REFRESH_PERIOD_CYCLES: u64 = 529;
-const DRAM_REFRESH_BUSY_CYCLES: u64 = 4;
+// The late PAL CXD8606CQ capture exposes an ordinary 515-clock row cadence.
+// The probe observes one clock less (514) because it timestamps after the
+// contended load. The complete refresh transaction spans row close, refresh,
+// and reopen phases; individual accesses only expose the remaining portion.
+pub(super) const DRAM_REFRESH_PERIOD_CYCLES: u64 = 515;
+pub(super) const DRAM_REFRESH_CACHED_STALL_CYCLES: u32 = 8;
+pub(super) const DRAM_REFRESH_UNCACHED_STALL_CYCLES: u32 = 4;
 
-/// Remaining CPU clocks in the current main-RAM refresh slot. A request that
-/// arrives outside the four-clock slot proceeds with the ordinary wait-state
-/// cost; one that arrives during it waits until DRAM is available again.
-pub(super) fn dram_refresh_wait(now: u64) -> u32 {
-    let phase = now % DRAM_REFRESH_PERIOD_CYCLES;
-    if phase < DRAM_REFRESH_BUSY_CYCLES {
-        (DRAM_REFRESH_BUSY_CYCLES - phase) as u32
+/// Arbitrate a pending main-RAM refresh request at the next CPU RAM access.
+pub(super) fn dram_refresh_wait(now: u64, next_deadline: &mut u64, stall_cycles: u32) -> u32 {
+    if now < *next_deadline {
+        return 0;
+    }
+
+    // Refresh requests are generated from an autonomous 515-clock divider,
+    // but the memory controller arbitrates the transaction at a CPU RAM
+    // access. Advance from the original divider phase so a late request never
+    // shifts every subsequent refresh.
+    let elapsed = now - *next_deadline;
+    let skipped_requests = elapsed / DRAM_REFRESH_PERIOD_CYCLES;
+    let request_index = *next_deadline / DRAM_REFRESH_PERIOD_CYCLES + skipped_requests;
+    let request_lateness = elapsed % DRAM_REFRESH_PERIOD_CYCLES;
+    *next_deadline += (skipped_requests + 1) * DRAM_REFRESH_PERIOD_CYCLES;
+    // If the CPU left main RAM idle long enough, the controller completed the
+    // refresh autonomously and this later access has nothing to arbitrate.
+    // Tight load streams reach the request inside this ten-clock transaction
+    // window and pay the complete access-side replay cost.
+    if request_lateness > 10 {
+        return 0;
+    }
+    if request_index % 8 == 0 {
+        stall_cycles
+            + if stall_cycles == DRAM_REFRESH_CACHED_STALL_CYCLES {
+                1
+            } else if stall_cycles == DRAM_REFRESH_UNCACHED_STALL_CYCLES {
+                2
+            } else {
+                0
+            }
     } else {
-        0
+        stall_cycles
     }
 }
 
@@ -213,7 +236,10 @@ impl MemoryControl {
             return 0;
         }
         if phys < memory::ram::MIRROR_END {
-            words
+            // Main RAM bursts one word per clock after a one-clock line-fill
+            // setup. The 4 KiB cold-cache sweep resolves exactly one setup
+            // clock for each of its 256 four-word lines.
+            words.saturating_add(1)
         } else if (memory::bios::BASE..memory::bios::BASE + memory::bios::SIZE as u32)
             .contains(&phys)
         {
@@ -249,6 +275,13 @@ impl MemoryControl {
                 .saturating_add(word_count)
                 .saturating_add(word_count.div_ceil(16))
         }
+    }
+
+    /// SPU RAM reads are stable only when the delay register's DMA timing
+    /// override nibble is non-zero. With the BIOS value (`0x200931E1`) the
+    /// controller inserts a dirty halfword at each DMA block boundary.
+    pub(super) fn spu_dma_read_is_stable(&self) -> bool {
+        (self.regs[5] >> 24) & 0xF != 0
     }
 
     fn recalculate(&mut self) {
@@ -294,7 +327,13 @@ impl MemoryControl {
                 exp2[2].saturating_sub(1),
             ]
         } else {
-            exp2
+            // Late PAL Expansion 2 keeps one additional sequential clock per
+            // halfword; a 32-bit access contains three such boundaries.
+            [
+                exp2[0],
+                exp2[1].saturating_add(1),
+                exp2[2].saturating_add(3),
+            ]
         };
     }
 }
@@ -371,13 +410,21 @@ mod tests {
     }
 
     #[test]
-    fn dram_refresh_blocks_only_the_four_clock_refresh_slot() {
-        assert_eq!(dram_refresh_wait(0), 4);
-        assert_eq!(dram_refresh_wait(1), 3);
-        assert_eq!(dram_refresh_wait(3), 1);
-        assert_eq!(dram_refresh_wait(4), 0);
-        assert_eq!(dram_refresh_wait(DRAM_REFRESH_PERIOD_CYCLES - 1), 0);
-        assert_eq!(dram_refresh_wait(DRAM_REFRESH_PERIOD_CYCLES), 4);
+    fn dram_refresh_request_keeps_its_divider_phase() {
+        let mut deadline = DRAM_REFRESH_PERIOD_CYCLES;
+        assert_eq!(dram_refresh_wait(deadline - 1, &mut deadline, 8), 0);
+        assert_eq!(dram_refresh_wait(deadline, &mut deadline, 8), 8);
+        assert_eq!(deadline, 2 * DRAM_REFRESH_PERIOD_CYCLES);
+        assert_eq!(
+            dram_refresh_wait(
+                deadline + 2 * DRAM_REFRESH_PERIOD_CYCLES + 7,
+                &mut deadline,
+                4
+            ),
+            4
+        );
+        assert_eq!(deadline, 5 * DRAM_REFRESH_PERIOD_CYCLES);
+        assert_eq!(dram_refresh_wait(deadline + 11, &mut deadline, 8), 0);
     }
 
     #[test]
@@ -408,7 +455,7 @@ mod tests {
     #[test]
     fn cache_refill_distinguishes_ram_burst_from_bios_rom() {
         let control = MemoryControl::default();
-        assert_eq!(control.icache_fill_stalls(0x0001_0000, 4), 4);
+        assert_eq!(control.icache_fill_stalls(0x0001_0000, 4), 5);
         assert_eq!(control.icache_fill_stalls(memory::bios::BASE, 4), 128);
     }
 
@@ -417,7 +464,7 @@ mod tests {
         let control = MemoryControl::default();
         assert_eq!(control.cdrom_stalls, [16, 33, 67]);
         assert_eq!(control.spu_stalls, [26, 26, 53]);
-        assert_eq!(control.exp2_stalls, [22, 45, 91]);
+        assert_eq!(control.exp2_stalls, [22, 46, 94]);
         assert_eq!(control.exp3_stalls, [7, 7, 11]);
         for width in [AccessWidth::Byte, AccessWidth::Half, AccessWidth::Word] {
             assert_eq!(control.read_stalls(memory::cache_control::ADDR, width), 0);
