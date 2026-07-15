@@ -672,6 +672,7 @@ pub fn import_animation_library(
             ResourceData::AnimationClip(AnimationClipResource {
                 psxanim_path: relativise(&path, Some(project_root)),
                 skeleton: Some(skeleton_id),
+                target_model: None,
                 source: None,
                 bake: AnimationClipBakeKind::LegacyShared,
                 role,
@@ -750,7 +751,9 @@ pub fn bake_animation_source_for_model(
         let ResourceData::AnimationClip(clip) = &resource.data else {
             return None;
         };
-        (clip.source == Some(source_id) && clip.skeleton == skeleton)
+        (clip.source == Some(source_id)
+            && clip.skeleton == skeleton
+            && clip.target_model == Some(model_id))
             .then(|| (resource.id, clip.psxanim_path.clone()))
     });
 
@@ -836,6 +839,7 @@ pub fn bake_animation_source_for_model(
     let clip_resource = AnimationClipResource {
         psxanim_path: stored_path,
         skeleton,
+        target_model: Some(model_id),
         source: Some(source_id),
         bake: AnimationClipBakeKind::Retargeted,
         role,

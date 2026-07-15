@@ -146,7 +146,7 @@ GLB-MODEL SUBCOMMAND:
                           [--world-height N]       (default 1024)
                           [--center-animation-root]
                           [--animation <anim.fbx>] (repeatable)
-                          [--keep-bones]
+                          [--keep-bones]            (disable default finger/end-bone collapse)
                           [--collapse-bones name,name,...]
                           [--prune-detached-islands N] (default 4)
 

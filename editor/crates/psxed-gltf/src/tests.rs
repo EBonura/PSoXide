@@ -177,6 +177,74 @@ fn retarget_mapped_frame_trs_applies_delta_in_source_rest_basis() {
 }
 
 #[test]
+fn retarget_mapped_frame_trs_reconstructs_child_from_global_bind_delta() {
+    let parents = vec![None, Some(0)];
+    let target_base = vec![
+        Trs {
+            translation: [1.0, 2.0, 3.0],
+            rotation: quat_y_degrees(70.0),
+            scale: [1.0, 1.0, 1.0],
+        },
+        Trs {
+            translation: [4.0, 5.0, 6.0],
+            rotation: quat_x_degrees(25.0),
+            scale: [1.0, 1.0, 1.0],
+        },
+    ];
+    let source_base = vec![
+        Trs {
+            translation: [100.0, 200.0, 300.0],
+            rotation: quat_x_degrees(90.0),
+            scale: [2.0, 2.0, 2.0],
+        },
+        Trs {
+            translation: [400.0, 500.0, 600.0],
+            rotation: quat_z_degrees(15.0),
+            scale: [3.0, 3.0, 3.0],
+        },
+    ];
+    let source_pose = vec![
+        Trs {
+            rotation: quat_mul(source_base[0].rotation, quat_z_degrees(30.0)),
+            ..source_base[0]
+        },
+        Trs {
+            rotation: quat_mul(source_base[1].rotation, quat_y_degrees(35.0)),
+            ..source_base[1]
+        },
+    ];
+
+    let retargeted = retarget_mapped_frame_trs(
+        &parents,
+        &target_base,
+        &parents,
+        &source_base,
+        &source_pose,
+        &[Some(0), Some(1)],
+    );
+
+    let source_bind_child_global =
+        quat_mul(source_base[0].rotation, source_base[1].rotation);
+    let source_pose_child_global =
+        quat_mul(source_pose[0].rotation, source_pose[1].rotation);
+    let target_bind_child_global =
+        quat_mul(target_base[0].rotation, target_base[1].rotation);
+    let expected_child_global = quat_mul(
+        target_bind_child_global,
+        quat_mul(
+            quat_inverse(source_bind_child_global),
+            source_pose_child_global,
+        ),
+    );
+    let actual_child_global = quat_mul(retargeted[0].rotation, retargeted[1].rotation);
+    assert_quat_close(actual_child_global, expected_child_global);
+    assert_eq!(retargeted[0].translation, target_base[0].translation);
+    assert_eq!(retargeted[1].translation, target_base[1].translation);
+    assert_eq!(retargeted[0].scale, target_base[0].scale);
+    assert_eq!(retargeted[1].scale, target_base[1].scale);
+}
+
+#[test]
 fn imports_minimal_glb_triangle() {
     let glb = minimal_triangle_glb();
     let psxm = convert_slice(&glb, &Config::default()).unwrap();
@@ -664,6 +732,46 @@ fn bone_collapse_root_selection_is_independent_of_joint_order() {
     assert_eq!(joints, vec![0]);
     assert_eq!(source.vertices[0].joints, [0, 0, 0, 0]);
     assert_eq!(source.vertices[0].weights, [1.0, 0.0, 0.0, 0.0]);
+}
+
+#[test]
+fn default_bone_collapse_removes_mixamo_terminal_bones() {
+    let parents = vec![None, Some(0), Some(1), Some(0), Some(3)];
+    let node_names = vec![
+        "mixamorig:Hips".to_string(),
+        "mixamorig:RightToeBase".to_string(),
+        "mixamorig:RightToe_End".to_string(),
+        "mixamorig:Head".to_string(),
+        "mixamorig:HeadTop_End".to_string(),
+    ];
+    let mut joints = vec![0, 1, 2, 3, 4];
+    let mut inverse_bind_matrices = vec![identity_matrix(); 5];
+    let mut source = SkinnedSourceMesh {
+        vertices: vec![SourceVertex {
+            position: [0.0; 3],
+            normal: [0.0, 1.0, 0.0],
+            uv: [0.0; 2],
+            joints: [2, 4, 0, 0],
+            weights: [0.6, 0.4, 0.0, 0.0],
+            dominant_joint: 2,
+        }],
+        faces: Vec::new(),
+    };
+
+    let removed = collapse_bone_subtrees(
+        &mut source,
+        &mut joints,
+        &mut inverse_bind_matrices,
+        &parents,
+        &node_names,
+        &default_collapse_bone_patterns(),
+    )
+    .unwrap();
+
+    assert_eq!(removed, 2);
+    assert_eq!(joints, vec![0, 1, 3]);
+    assert_eq!(source.vertices[0].joints, [1, 2, 0, 0]);
+    assert_eq!(source.vertices[0].weights, [0.6, 0.4, 0.0, 0.0]);
 }
 
 fn minimal_triangle_glb() -> Vec<u8> {
