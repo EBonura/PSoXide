@@ -529,7 +529,9 @@ def precision_label(index: int) -> str:
         return f"gpu_dma_dir_{offset // 3}_read{offset % 3}"
     if 73 <= index <= 90:
         offset = index - 73
-        return f"gte_op_partial_run{offset // 3}_mac{offset % 3 + 1}"
+        gaps = (0, 1, 2, 3, 4, 8)
+        fields = ("sxy2", "mac1", "vxy0_after")
+        return f"gte_rtps_v0_gap{gaps[offset // 3]}_{fields[offset % 3]}"
     if 91 <= index <= 96:
         offset = index - 91
         return f"gte_op_full_run{offset // 3}_mac{offset % 3 + 1}"
