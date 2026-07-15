@@ -109,14 +109,16 @@ impl EditorWorkspace {
                             &painter,
                             transform,
                             &self.project,
-                            &self.hidden_scene_nodes,
-                            self.selection.selected_node,
-                            &self.selection.selected_nodes,
-                            &self.selection.selected_sectors,
-                            &self.validation_issue_primitives,
-                            &self.validation_issue_rooms,
-                            self.show_portals,
-                            self.show_lights,
+                            SceneViewportContext {
+                                hidden_scene_nodes: &self.hidden_scene_nodes,
+                                selected: self.selection.selected_node,
+                                selected_nodes: &self.selection.selected_nodes,
+                                selected_sectors: &self.selection.selected_sectors,
+                                validation_issue_primitives: &self.validation_issue_primitives,
+                                validation_issue_rooms: &self.validation_issue_rooms,
+                                show_portals: self.show_portals,
+                                show_lights: self.show_lights,
+                            },
                         );
 
                         let pointer_world = response

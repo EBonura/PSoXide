@@ -244,18 +244,20 @@ impl EditorWorkspace {
         let scene_painter = ui.painter_at(canvas_rect);
         draw_ui_scene_preview(
             &scene_painter,
-            &self.project,
-            &self.texture_thumbs,
-            &ui_fonts,
             &preview_scene,
-            display_canvas,
-            canvas_size,
-            &hidden_ui_nodes,
-            self.selection.selected_ui_node,
-            hovered_resize_target.and_then(|(node, handle)| {
-                (node == self.selection.selected_ui_node).then_some(handle)
-            }),
-            ui_preview_frame,
+            UiScenePreviewContext {
+                project: &self.project,
+                texture_thumbs: &self.texture_thumbs,
+                font_textures: &ui_fonts,
+                canvas: display_canvas,
+                canvas_size,
+                hidden_ui_nodes: &hidden_ui_nodes,
+                selected: self.selection.selected_ui_node,
+                hovered_handle: hovered_resize_target.and_then(|(node, handle)| {
+                    (node == self.selection.selected_ui_node).then_some(handle)
+                }),
+                frame: ui_preview_frame,
+            },
         );
         draw_ui_center_snap_guides(
             &scene_painter,

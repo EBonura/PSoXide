@@ -185,19 +185,36 @@ pub(crate) fn ui_anchor_factors(anchor: UiAnchor) -> (i32, i32) {
     }
 }
 
+/// Project resources, canvas placement, and selection state shared by every
+/// node drawn in one UI-scene preview pass.
+pub(crate) struct UiScenePreviewContext<'a> {
+    pub(crate) project: &'a ProjectDocument,
+    pub(crate) texture_thumbs: &'a HashMap<ResourceId, ThumbnailEntry>,
+    pub(crate) font_textures: &'a [egui::TextureHandle],
+    pub(crate) canvas: Rect,
+    pub(crate) canvas_size: [u16; 2],
+    pub(crate) hidden_ui_nodes: &'a HashSet<(UiSceneId, UiNodeId)>,
+    pub(crate) selected: UiNodeId,
+    pub(crate) hovered_handle: Option<UiResizeHandle>,
+    pub(crate) frame: u16,
+}
+
 pub(crate) fn draw_ui_scene_preview(
     painter: &egui::Painter,
-    project: &ProjectDocument,
-    texture_thumbs: &HashMap<ResourceId, ThumbnailEntry>,
-    font_textures: &[egui::TextureHandle],
     scene: &psxed_project::UiScene,
-    canvas: Rect,
-    canvas_size: [u16; 2],
-    hidden_ui_nodes: &HashSet<(UiSceneId, UiNodeId)>,
-    selected: UiNodeId,
-    hovered_handle: Option<UiResizeHandle>,
-    frame: u16,
+    ctx: UiScenePreviewContext<'_>,
 ) {
+    let UiScenePreviewContext {
+        project,
+        texture_thumbs,
+        font_textures,
+        canvas,
+        canvas_size,
+        hidden_ui_nodes,
+        selected,
+        hovered_handle,
+        frame,
+    } = ctx;
     for id in scene.hierarchy_node_ids() {
         if ui_node_hidden(scene, hidden_ui_nodes, id) {
             continue;
