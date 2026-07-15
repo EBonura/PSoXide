@@ -1814,6 +1814,7 @@ fn editor_camera_roundtrips_through_ron_string() {
         free_pitch_q12: 128,
         free_position: [-300, 700, 900],
         free_initialized: true,
+        zoom_speed: 1.6,
     };
     let ron = project.to_ron_string().unwrap();
 

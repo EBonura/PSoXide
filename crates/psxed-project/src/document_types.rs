@@ -38,7 +38,7 @@ pub(crate) fn default_editor_camera_free_pitch_q12() -> u16 {
 ///
 /// This is intentionally authoring metadata: cook/playtest paths
 /// should not use it for runtime camera behavior.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct EditorCameraState {
     #[serde(default)]
     pub mode: EditorCameraMode,
@@ -58,6 +58,13 @@ pub struct EditorCameraState {
     pub free_position: [i32; 3],
     #[serde(default)]
     pub free_initialized: bool,
+    /// Scroll-wheel dolly speed multiplier for the 3D viewport.
+    #[serde(default = "default_editor_camera_zoom_speed")]
+    pub zoom_speed: f32,
+}
+
+pub(crate) fn default_editor_camera_zoom_speed() -> f32 {
+    1.0
 }
 
 impl Default for EditorCameraState {
@@ -72,6 +79,7 @@ impl Default for EditorCameraState {
             free_pitch_q12: default_editor_camera_free_pitch_q12(),
             free_position: [0, 0, 0],
             free_initialized: false,
+            zoom_speed: default_editor_camera_zoom_speed(),
         }
     }
 }
@@ -81,6 +89,11 @@ impl EditorCameraState {
         self.orbit_pitch_q12 = clamp_q12_pitch(self.orbit_pitch_q12);
         self.free_pitch_q12 = clamp_q12_pitch(self.free_pitch_q12);
         self.orbit_radius = self.orbit_radius.clamp(512, 262_144);
+        self.zoom_speed = if self.zoom_speed.is_finite() {
+            self.zoom_speed.clamp(0.2, 3.0)
+        } else {
+            default_editor_camera_zoom_speed()
+        };
     }
 }
 
