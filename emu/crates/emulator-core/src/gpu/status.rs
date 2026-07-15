@@ -18,14 +18,13 @@ impl GpuStatus {
         //   bit 23 (DISPLAY_DISABLE) = 1
         //   bit 21 = 1 (reserved, Redux sets on reset)
         //   bit 13 (INTERLACE_FIELD) = 1
-        //   bit 31 (DRAWING_ODD) = 0 at power-on; first VBlank XORs it
-        //          to 1, second back to 0, etc. Earlier we initialised
-        //          this to 1 (matching the "odd field looks ready"
-        //          intuition), but parity divergence at step 19259778
-        //          showed Redux is the authority and starts at 0.
+        //   bit 31 (DRAWING_ODD) = 1 on the captured SCPH-9902 field;
+        //          VBlank XORs it for each following field. This intentionally
+        //          follows the physical console rather than Redux's zeroed
+        //          software-GPU default.
         // Ready bits 26/28 are filled in by `read`; VRAM-ready (27) is
         // gated on an active VRAM→CPU transfer.
-        Self { raw: 0x1480_2000 }
+        Self { raw: 0x9480_2000 }
     }
 
     /// Compose the observable GPUSTAT word. `vram_send_ready` is the

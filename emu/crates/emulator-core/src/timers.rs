@@ -53,11 +53,17 @@ pub struct Timer {
     #[serde(default)]
     target_reset_hold: bool,
     /// CPU clocks for which the counter is held unchanged. Mode/current-value
-    /// writes hold it for two clocks, and a read of this counter latches it
+    /// writes hold it briefly, and a read of this counter latches it
     /// across its own MMIO wait clocks. The hold happens before source-clock
     /// division: it must not suppress two whole HBlank ticks or two `/8` ticks.
     #[serde(default)]
     counter_hold_cycles: u8,
+    /// A current-value write can overlap the setup wait of the immediately
+    /// following external-bus read.
+    #[serde(default)]
+    counter_bus_overlap_pending: bool,
+    #[serde(default)]
+    counter_write_cycle: u64,
     /// One-shot IRQs stop producing edges after their first event, but this is
     /// independent of observable mode bit 10. In pulse mode the bit returns
     /// high immediately after the short low pulse on real hardware.
@@ -110,6 +116,18 @@ pub struct Timers {
     /// `cycleStart` and the live count is `(cycle - cycleStart) /
     /// rate` evaluated lazily.
     last_advance_cycle: u64,
+    /// Offset between the scheduled VBlank IRQ edge and the GPU blanking
+    /// signal seen by Timer 1 sync modes, measured in scanlines. Late PSone
+    /// silicon exposes these as distinct phases.
+    #[serde(default)]
+    vblank_sync_offset_lines: u8,
+    /// Profile-specific counter-side hold beyond the common CPU MMIO wait.
+    #[serde(default)]
+    counter_read_extra_hold: [u8; 3],
+    /// Timer 0's dot-clock path has a shorter counter-side MMIO hold than its
+    /// system-clock path on the measured late PSone.
+    #[serde(default)]
+    timer0_dot_read_extra_hold: u8,
     /// Diagnostic: count of Timer 2 IRQ fires since reset. Excluded
     /// from save states.
     #[serde(skip)]
@@ -129,6 +147,19 @@ impl Timers {
         Self::default()
     }
 
+    /// Select the Timer 1 vertical-blank sync phase for a hardware profile.
+    pub(crate) fn set_vblank_sync_offset_lines(&mut self, lines: u8) {
+        self.vblank_sync_offset_lines = lines;
+    }
+
+    pub(crate) fn set_counter_read_extra_hold(&mut self, index: usize, cycles: u8) {
+        self.counter_read_extra_hold[index] = cycles;
+    }
+
+    pub(crate) fn set_timer0_dot_read_extra_hold(&mut self, cycles: u8) {
+        self.timer0_dot_read_extra_hold = cycles;
+    }
+
     /// `true` when `phys` falls inside `0x1F80_1100..0x1F80_1130`.
     pub fn contains(phys: u32) -> bool {
         (Self::BASE..Self::BASE + Self::SIZE).contains(&phys)
@@ -141,11 +172,9 @@ impl Timers {
             0x0 => self.timers[idx].counter,
             0x4 => {
                 let mode = self.timers[idx].mode;
-                // Hardware/Redux side effect: reading the mode register
-                // clears the sticky "reached target" / "reached 0xFFFF"
-                // bits (11 and 12). Leaving them latched forever makes
-                // timer-polling code think a wrap/target event is still
-                // pending long after software consumed it.
+                // Reading mode acknowledges both sticky reached flags. If the
+                // counter is still at its terminal condition, hardware may
+                // latch the target flag again on a later timer clock.
                 self.timers[idx].mode &= !(MODE_REACHED_TARGET | MODE_REACHED_WRAP);
                 mode
             }
@@ -165,7 +194,16 @@ impl Timers {
             0x0 => {
                 t.counter = v16;
                 t.target_reset_hold = false;
-                t.counter_hold_cycles = 2;
+                // Reset-at-target releases one clock earlier; all other
+                // current-value writes occupy the root counter for the full
+                // three-clock CPU transaction.
+                t.counter_hold_cycles = if t.mode & MODE_RESET_AT_TARGET != 0 {
+                    2
+                } else {
+                    3
+                };
+                t.counter_bus_overlap_pending = true;
+                t.counter_write_cycle = now;
             }
             0x4 => {
                 // Mode writes reset the counter and re-arm the IRQ request,
@@ -183,6 +221,7 @@ impl Timers {
                 t.sync_seen = false;
                 t.target_reset_hold = false;
                 t.counter_hold_cycles = 2;
+                t.counter_bus_overlap_pending = false;
                 t.irq_fired_once = false;
             }
             0x8 => t.target = v16,
@@ -253,6 +292,23 @@ impl Timers {
         if delta == 0 {
             return 0;
         }
+        let next_timer1_vblank = if self.vblank_sync_offset_lines == 0 || next_vblank == u64::MAX {
+            next_vblank
+        } else {
+            let offset = hsync_period.saturating_mul(self.vblank_sync_offset_lines as u64);
+            if next_vblank <= now {
+                next_vblank.saturating_add(offset)
+            } else {
+                let previous_shifted = next_vblank
+                    .saturating_sub(vblank_period)
+                    .saturating_add(offset);
+                if previous_shifted > self.last_advance_cycle {
+                    previous_shifted
+                } else {
+                    next_vblank.saturating_add(offset)
+                }
+            }
+        };
         let mut fired: u8 = 0;
         for i in 0..3 {
             if self.advance_timer(
@@ -260,7 +316,7 @@ impl Timers {
                 delta,
                 hsync_period,
                 dot_clock_divisor,
-                next_vblank,
+                next_timer1_vblank,
                 vblank_period,
             ) {
                 fired |= 1 << i;
@@ -284,10 +340,54 @@ impl Timers {
     /// Other root counters continue running and can therefore measure the
     /// complete access time of this register.
     pub fn hold_counter_for_read(&mut self, phys: u32, cycles: u32) {
-        let (idx, _) = decode(phys);
+        let (idx, off) = decode(phys);
+        let mode = self.timers[idx].mode;
+        let configured_extra = if idx == 2
+            && mode & (MODE_IRQ_ON_TARGET | MODE_IRQ_ON_WRAP) != 0
+        {
+            0
+        } else if mode & MODE_RESET_AT_TARGET != 0 {
+            0
+        } else if idx == 0 && matches!((mode >> 8) & 3, 1 | 3) {
+            self.timer0_dot_read_extra_hold
+        } else {
+            self.counter_read_extra_hold[idx]
+        };
+        let profile_extra = u32::from(configured_extra);
+        let cycles = match off {
+            0 => cycles.saturating_add(profile_extra),
+            // The plain reset-at-target comparator holds the counter through
+            // the complete five-cycle read transaction. Enabling either IRQ
+            // path bypasses that comparator hold; consecutive reads then
+            // leave two wait clocks on the selected counter. The distinction
+            // is directly visible when target=24 clears between reads while
+            // target+IRQ=32 relatches over the longer caller gap.
+            4 if self.timers[idx].mode & (MODE_IRQ_ON_TARGET | MODE_IRQ_ON_WRAP) == 0 => {
+                cycles.min(2).saturating_add(3)
+            }
+            4 => cycles.min(2),
+            _ => return,
+        };
         self.timers[idx].counter_hold_cycles = self.timers[idx]
             .counter_hold_cycles
             .saturating_add(cycles.min(u32::from(u8::MAX)) as u8);
+    }
+
+    /// Overlap the first external memory-controller wait with a just-written
+    /// root counter. Silicon timing sweeps expose this as one missing setup
+    /// wait on the first of 64 otherwise-identical accesses.
+    pub(crate) fn overlap_counter_write_with_external_read(&mut self, now: u64, stalls: u32) {
+        for timer in &mut self.timers {
+            if !timer.counter_bus_overlap_pending {
+                continue;
+            }
+            timer.counter_bus_overlap_pending = false;
+            if now.saturating_sub(timer.counter_write_cycle) <= 16 {
+                timer.counter_hold_cycles = timer
+                    .counter_hold_cycles
+                    .saturating_add(stalls.saturating_sub(2).min(u32::from(u8::MAX)) as u8);
+            }
+        }
     }
 
     /// Is this timer currently paused per its sync-mode bits?
@@ -900,6 +1000,7 @@ mod tests {
 
         let mode = t.read32(0x1F80_1124);
         assert_ne!(mode & MODE_REACHED_TARGET, 0);
+        assert_eq!(t.read32(0x1F80_1124) & MODE_REACHED_TARGET, 0);
         assert_eq!(t.read32(0x1F80_1120), 10, "target remains visible");
         t.advance_to(13, NTSC_HSYNC, 8);
         assert_eq!(t.read32(0x1F80_1120), 0, "reset phase");

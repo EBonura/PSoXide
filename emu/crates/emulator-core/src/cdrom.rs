@@ -261,6 +261,10 @@ pub struct CdRom {
     /// live read/play head. Redux doesn't move immediately on SetLoc;
     /// it latches the target and consumes it on Seek/Read/Play.
     setloc_pending: bool,
+    /// Controller-firmware GetStat service phase. Every fifth mounted-media
+    /// status request crosses the maintenance pass measured on SCPH-9902.
+    #[serde(default)]
+    getstat_commands: u64,
     /// Total commands dispatched since reset -- diagnostic counter.
     /// Excluded from save states.
     #[serde(skip)]
@@ -494,6 +498,7 @@ impl CdRom {
             disc_present: false,
             setloc_msf: (0, 0, 0),
             setloc_pending: false,
+            getstat_commands: 0,
             commands_dispatched: 0,
             command_hist: [0; 32],
             last_command: 0,
@@ -1023,9 +1028,13 @@ impl CdRom {
 
     /// Schedule a first-response IRQ at [`Self::first_response_deadline`].
     fn schedule_first_response(&mut self, bytes: Vec<u8>) {
+        self.schedule_first_response_after(bytes, 0);
+    }
+
+    fn schedule_first_response_after(&mut self, bytes: Vec<u8>, extra_delay: u64) {
         self.insert_pending_event(PendingEvent {
             command: self.last_command,
-            deadline: self.first_response_deadline(),
+            deadline: self.first_response_deadline().saturating_add(extra_delay),
             irq: IrqType::Acknowledge,
             bytes,
             followup: None,
@@ -1193,7 +1202,13 @@ impl CdRom {
 
     fn cmd_getstat(&mut self) {
         let stat = self.stat_byte();
-        self.schedule_first_response(vec![stat]);
+        self.getstat_commands = self.getstat_commands.wrapping_add(1);
+        let maintenance_delay = if self.disc_present && self.getstat_commands.is_multiple_of(5) {
+            GETSTAT_MAINTENANCE_CYCLES
+        } else {
+            0
+        };
+        self.schedule_first_response_after(vec![stat], maintenance_delay);
         // Redux keeps STATUS_SHELLOPEN sticky until GetStat observes
         // it, then clears the latched bit after producing the reply
         // unless the lid is genuinely still open.
