@@ -164,6 +164,11 @@ pub struct Gte {
     /// into the next MVMVA.
     #[cfg_attr(feature = "serde", serde(skip))]
     stale_v0x: Option<i16>,
+    /// OP counterpart to `stale_v0x`: only its first MAC row sees the IR3
+    /// value that preceded an immediately adjacent MTC2 IR3. Later rows see
+    /// the committed value. Transient and one-shot for the same reason.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    stale_op_ir3: Option<i16>,
 
     // Control registers -------------------------------------------------
     /// Rotation matrix RT, signed 1.3.12.
@@ -292,6 +297,7 @@ impl Gte {
             lzcs: 0,
             lzcr: 0,
             stale_v0x: None,
+            stale_op_ir3: None,
             rotation: [[0; 3]; 3],
             translation: [0; 3],
             light: [[0; 3]; 3],
@@ -578,6 +584,14 @@ impl Gte {
         self.stale_v0x = None;
     }
 
+    /// Execute OP with an MTC2 IR3 value still committing during its first
+    /// sequential MAC row. MAC1 sees `stale_ir3`; MAC2/MAC3 see current IR3.
+    pub fn execute_op_with_stale_ir3(&mut self, instr: u32, stale_ir3: i16) {
+        self.stale_op_ir3 = Some(stale_ir3);
+        self.execute(instr);
+        self.stale_op_ir3 = None;
+    }
+
     /// Execute one COP2 function. `instr` is the full 32-bit
     /// instruction word so we can pull `sf`/`lm`/`mx`/`vx`/`cv`.
     /// Unrecognised commands return without updating state -- real
@@ -730,7 +744,8 @@ impl Gte {
         let ir1 = self.ir[0] as i64;
         let ir2 = self.ir[1] as i64;
         let ir3 = self.ir[2] as i64;
-        let mac1 = self.check_mac(1, (ir3 * d2) - (ir2 * d3)) >> sf;
+        let ir3_mac1 = i64::from(self.stale_op_ir3.unwrap_or(self.ir[2]));
+        let mac1 = self.check_mac(1, (ir3_mac1 * d2) - (ir2 * d3)) >> sf;
         let mac2 = self.check_mac(2, (ir1 * d3) - (ir3 * d1)) >> sf;
         let mac3 = self.check_mac(3, (ir2 * d1) - (ir1 * d2)) >> sf;
         self.mac[0] = mac1 as i32;
