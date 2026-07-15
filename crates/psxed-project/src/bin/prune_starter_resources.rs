@@ -76,6 +76,7 @@ fn main() {
                 }
                 ResourceData::AnimationClip(c) => {
                     keep_id(&mut keep, c.skeleton);
+                    keep_id(&mut keep, c.target_model);
                     keep_id(&mut keep, c.source);
                 }
                 ResourceData::AnimationSet(s) => {
