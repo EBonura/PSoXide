@@ -7,10 +7,9 @@
 //!   hand-edits save states.
 //! - **Explicit file header** with a 8-byte magic (`PSOX001\0`), a
 //!   format version, and a human-readable creator tag.
-//! - **Versioned payload** via [`SaveStateV1`]. When the schema
-//!   evolves, we add `V2`, read the header version, dispatch to
-//!   the right deserializer, and (typically) convert older
-//!   payloads forward in memory.
+//! - **Versioned payload** via the header carried by [`SaveStateV1`].
+//!   The public type retains its original name for API compatibility;
+//!   `format_version` is the authority for the on-disk schema.
 //!
 //! ## Not cross-emulator
 //!
@@ -46,7 +45,15 @@ pub const SAVESTATE_MAGIC: &[u8; 8] = b"PSOX001\0";
 /// On-disk format version, independent of the PSoXide crate
 /// version. Bumped when the payload layout changes in a way that
 /// can't round-trip through the current deserializer.
-pub const SAVESTATE_FORMAT_VERSION: u32 = 1;
+pub const SAVESTATE_FORMAT_VERSION: u32 = 6;
+/// Oldest payload schema this build can deserialize. Version 2 added
+/// architectural instruction-cache state; version 3 adds the SPU transfer
+/// FIFO; version 4 adds the CPU data-bus hold latch and HLE exception-return
+/// state; version 5 adds the source-sensitive GPU command/DMA execution
+/// backlog; version 6 adds the GPU's GP1(09h) upper-VRAM-addressing latch.
+/// Older states cannot resume faithfully because one of those pieces of
+/// in-flight hardware state was never serialized.
+pub const SAVESTATE_MIN_SUPPORTED_VERSION: u32 = 6;
 
 /// Errors from save-state load / save.
 #[derive(Debug, Error)]
@@ -79,10 +86,12 @@ pub enum SaveStateError {
     /// Header decoded but version isn't one we can load. The
     /// message includes both the on-disk version and the current
     /// `SAVESTATE_FORMAT_VERSION` so users know what to do.
-    #[error("save-state version {found} not supported (expected ≤ {max})")]
+    #[error("save-state version {found} not supported (expected {min}..={max})")]
     UnsupportedVersion {
         /// Version the file claims.
         found: u32,
+        /// Oldest version this build can load.
+        min: u32,
         /// Highest version this crate can load.
         max: u32,
     },
@@ -231,14 +240,27 @@ where
                 path: std::path::PathBuf::new(),
             });
         }
-        let state: SaveStateV1<T> =
-            postcard::from_bytes(bytes).map_err(|e| SaveStateError::Decode(e.to_string()))?;
-        if state.header.format_version > SAVESTATE_FORMAT_VERSION {
+        // Validate the small, schema-stable header before asking serde to
+        // interpret the payload. Without this, an old positional postcard
+        // payload can fail halfway through the newly-added CPU fields and be
+        // mislabeled as corruption rather than an incompatible save.
+        #[derive(Deserialize)]
+        struct HeaderOnly {
+            header: SaveStateHeader,
+        }
+        let (header_only, _): (HeaderOnly, &[u8]) =
+            postcard::take_from_bytes(bytes).map_err(|e| SaveStateError::Decode(e.to_string()))?;
+        if !(SAVESTATE_MIN_SUPPORTED_VERSION..=SAVESTATE_FORMAT_VERSION)
+            .contains(&header_only.header.format_version)
+        {
             return Err(SaveStateError::UnsupportedVersion {
-                found: state.header.format_version,
+                found: header_only.header.format_version,
+                min: SAVESTATE_MIN_SUPPORTED_VERSION,
                 max: SAVESTATE_FORMAT_VERSION,
             });
         }
+        let state: SaveStateV1<T> =
+            postcard::from_bytes(bytes).map_err(|e| SaveStateError::Decode(e.to_string()))?;
         Ok(state)
     }
 
@@ -400,6 +422,27 @@ mod tests {
         let bytes = state.to_bytes().unwrap();
         let err = SaveStateV1::<FakePayload>::from_bytes(&bytes).unwrap_err();
         assert!(matches!(err, SaveStateError::UnsupportedVersion { .. }));
+    }
+
+    #[test]
+    fn incomplete_hardware_state_versions_are_rejected_before_payload_decode() {
+        for version in 1..SAVESTATE_MIN_SUPPORTED_VERSION {
+            let mut state = SaveStateV1::new(
+                FakePayload {
+                    cpu_pc: 0,
+                    ram_hash: 0,
+                },
+                "g",
+                0,
+            );
+            state.header.format_version = version;
+            let bytes = state.to_bytes().unwrap();
+            let err = SaveStateV1::<FakePayload>::from_bytes(&bytes).unwrap_err();
+            assert!(matches!(
+                err,
+                SaveStateError::UnsupportedVersion { found, .. } if found == version
+            ));
+        }
     }
 
     #[test]

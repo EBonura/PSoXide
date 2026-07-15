@@ -1,10 +1,10 @@
 /// GPUSTAT -- the status register the CPU polls to check whether the
 /// GPU is ready for commands, ready to upload VRAM, etc.
 ///
-/// Value model matches a "always-idle soft GPU" (same convention as
-/// PCSX-Redux and PSoXide-2): bits 26–28 are forced ready on every
-/// read, bit 25 (DMA request) is computed from the DMA direction
-/// bits 29:30, and bit 31 (interlace/field) toggles at VBlank.
+/// Bits 26 and 28 reflect whether the emulated command pipeline has
+/// room for more work. Bit 27 is driven separately by the active
+/// VRAM-to-CPU transfer, bit 25 (DMA request) is computed from the DMA
+/// direction bits 29:30, and bit 31 toggles at VBlank.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub(super) struct GpuStatus {
     pub(super) raw: u32,
@@ -31,32 +31,50 @@ impl GpuStatus {
     /// Compose the observable GPUSTAT word. `vram_send_ready` is the
     /// live "is a VRAM→CPU transfer in progress and has pixels
     /// waiting" flag owned by the GPU proper.
-    pub(super) fn read(&self, vram_send_ready: bool) -> u32 {
+    pub(super) fn read(
+        &self,
+        vram_send_ready: bool,
+        command_ready: bool,
+        dma_block_ready: bool,
+    ) -> u32 {
         let mut ret = self.raw;
 
         // Ready bits: 26 (cmd FIFO ready) + 28 (DMA block ready).
-        // Redux's soft GPU keeps both set on every status read.
+        // The earlier always-ready soft-GPU model made every rendering
+        // command appear instantaneous to code using DrawPrim/DrawSync.
+        // Real silicon deasserts these once queued work fills the input
+        // path, which is what makes CPU command submission settle at the
+        // GPU's actual raster/VRAM bandwidth.
         // Bit 27 (VRAM→CPU ready) is only set while software is
         // actually pulling pixels from GPUREAD; Redux's default is
         // 0 and BIOS/game code polls this bit to detect transfer
         // completion.
-        ret |= 0x1400_0000;
+        if command_ready {
+            ret |= 0x0400_0000;
+        } else {
+            ret &= !0x0400_0000;
+        }
+        if dma_block_ready {
+            ret |= 0x1000_0000;
+        } else {
+            ret &= !0x1000_0000;
+        }
         if vram_send_ready {
             ret |= 0x0800_0000;
         } else {
             ret &= !0x0800_0000;
         }
 
-        // Bit 25 (DMA data request) -- Redux-observed semantics, not
-        // PSX-SPX's. PSX-SPX says dir=2 copies bit 28 and dir=3 copies
-        // bit 27; Redux only sets bit 25 when direction == 1 (FIFO)
-        // and leaves it clear otherwise. Parity at step 19,474,030
-        // pinned this: the BIOS polls GPUSTAT during its post-Sony
-        // intro init with DMA direction 2 and expects bit 25 = 0.
-        // See `pcsx-redux/src/core/gpu.cc::readStatus`.
+        // Bit 25 (DMA data request), from the public real-silicon GPUSTAT
+        // suite: direction 0 clears it, FIFO direction 1 asserts it,
+        // CPU-to-GP0 direction 2 mirrors bit 28, and GPUREAD-to-CPU
+        // direction 3 mirrors bit 27.
         ret &= !0x0200_0000;
-        if (ret & 0x6000_0000) == 0x2000_0000 {
-            ret |= 0x0200_0000;
+        match (ret >> 29) & 3 {
+            1 => ret |= 0x0200_0000,
+            2 if ret & 0x1000_0000 != 0 => ret |= 0x0200_0000,
+            3 if ret & 0x0800_0000 != 0 => ret |= 0x0200_0000,
+            _ => {}
         }
         ret
     }

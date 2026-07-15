@@ -181,28 +181,37 @@ fn transfer_fifo_writes_into_spu_ram_and_advances() {
 }
 
 #[test]
-fn transfer_fifo_write_without_manual_mode_does_not_commit() {
-    // The transfer FIFO (0x1F801DA8) only reaches SPU RAM when SPUCNT's
-    // transfer mode (bits 5..4) is Manual-Write. With the mode left at Stop --
-    // an upload that pokes the FIFO but forgets to arm the mode -- the write
-    // must NOT land, so the upload silently no-ops exactly as on real hardware
-    // (garbled/silent audio on console, but fine if the emulator is lenient).
+fn stopped_mode_fifo_write_waits_for_manual_transfer() {
+    // JaCzekanski's public real-hardware memory-transfer test fills the FIFO
+    // first and only then selects ManualWrite. The data must remain queued
+    // while stopped and drain in order when mode 1 is selected.
     let mut s = Spu::new();
     s.write16(TRANSFER_ADDR, 0x0010); // 0x80 bytes; mode still Stop (0)
     s.write16(TRANSFER_FIFO, 0xBEEF);
+    s.write16(TRANSFER_FIFO, 0xCAFE);
     assert_eq!(
         s.ram[0x80 >> 1],
         0,
-        "Stop-mode FIFO write must not commit to SPU RAM"
+        "Stop-mode FIFO data must wait for a transfer mode"
     );
-    // Arm Manual-Write mode -> the same write now commits.
     s.write16(SPUCNT, 1 << 4);
-    s.write16(TRANSFER_FIFO, 0xBEEF);
-    assert_eq!(
-        s.ram[0x80 >> 1],
-        0xBEEF,
-        "Manual-Write mode commits the FIFO to SPU RAM"
-    );
+    assert_eq!(s.ram[0x80 >> 1], 0xBEEF);
+    assert_eq!(s.ram[(0x80 >> 1) + 1], 0xCAFE);
+    assert_eq!(s.transfer_addr, 0x84);
+}
+
+#[test]
+fn stopped_mode_transfer_fifo_is_bounded_to_32_halfwords() {
+    let mut s = Spu::new();
+    s.write16(TRANSFER_ADDR, 0);
+    for value in 0..40u16 {
+        s.write16(TRANSFER_FIFO, 0x4000 + value);
+    }
+    s.write16(SPUCNT, 1 << 4);
+    for i in 0..32usize {
+        assert_eq!(s.ram[i], 0x4000 + i as u16);
+    }
+    assert_eq!(s.ram[32], 0);
 }
 
 #[test]

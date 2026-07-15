@@ -107,13 +107,13 @@ pub enum GpuEvent {
         w: u32,
         h: u32,
     },
-    /// GP0 0x40..=0x43 single / 0x48..=0x4B polyline, monochrome.
+    /// GP0 0x40..=0x47 single / 0x48..=0x4F polyline, monochrome.
     /// `points` holds the decoded vertices in draw order: the two
     /// start-packet vertices plus any polyline continuation words the
     /// CPU GPU appended to the entry's fifo (terminator excluded).
     /// One segment per consecutive pair.
     MonoLine { cmd: u32, points: Vec<(i32, i32)> },
-    /// GP0 0x50..=0x53 single / 0x58..=0x5B polyline, Gouraud.
+    /// GP0 0x50..=0x57 single / 0x58..=0x5F polyline, Gouraud.
     /// `colors[i]` pairs with `points[i]`; `colors[0]` is the command
     /// word itself (low 24 bits significant, like the tri events).
     ShadedLine {
@@ -131,9 +131,7 @@ pub enum GpuEvent {
         w: u32,
         h: u32,
     },
-    /// Anything not yet lowered (unknown ops; also the line-family
-    /// mirror opcodes 0x44..=0x47 / 0x4C..=0x4F / 0x54..=0x57 /
-    /// 0x5C..=0x5F, which the CPU GPU treats as single-word no-ops).
+    /// Anything not yet lowered (unknown opcodes).
     Unhandled { opcode: u8 },
 }
 
@@ -202,11 +200,8 @@ impl Interpreter {
             0x3C..=0x3F => self.decode_shaded_tex_quad(fifo),
 
             // ---------- Lines / polylines ----------
-            // Only the sub-ranges the CPU GPU dispatches; the mirror
-            // opcodes (0x44.., 0x4C.., 0x54.., 0x5C..) fall through
-            // to `Unhandled` like the CPU's single-word no-op.
-            0x40..=0x43 | 0x48..=0x4B => self.decode_mono_line(fifo),
-            0x50..=0x53 | 0x58..=0x5B => self.decode_shaded_line(fifo),
+            0x40..=0x47 | 0x48..=0x4F => self.decode_mono_line(fifo),
+            0x50..=0x57 | 0x58..=0x5F => self.decode_shaded_line(fifo),
 
             // ---------- Rectangles ----------
             0x60..=0x63 => self.decode_mono_rect_variable(fifo),
@@ -453,7 +448,7 @@ impl Interpreter {
         })
     }
 
-    /// GP0 0x40..=0x43 / 0x48..=0x4B. Packet: `[cmd+color, v0, v1]`;
+    /// GP0 0x40..=0x47 / 0x48..=0x4F. Packet: `[cmd+color, v0, v1]`;
     /// polyline entries carry extra vertex words appended by the CPU
     /// GPU's cmd_log capture. The capture never logs the terminator,
     /// but the per-word sentinel check is kept for hand-built logs so
@@ -478,7 +473,7 @@ impl Interpreter {
         })
     }
 
-    /// GP0 0x50..=0x53 / 0x58..=0x5B. Packet: `[cmd+c0, v0, c1, v1]`;
+    /// GP0 0x50..=0x57 / 0x58..=0x5F. Packet: `[cmd+c0, v0, c1, v1]`;
     /// polyline continuations alternate (colour, vertex) words. The
     /// terminator check applies to EVERY word (colour slots included),
     /// mirroring the CPU; a trailing colour without its vertex is
@@ -783,11 +778,19 @@ mod tests {
     }
 
     #[test]
-    fn line_mirror_opcodes_stay_unhandled_like_cpu_no_ops() {
+    fn line_alias_opcodes_decode_like_their_base_families() {
         let mut it = Interpreter::new();
-        for op in [0x44u8, 0x4C, 0x54, 0x5C] {
-            let ev = it.interpret(&entry(op, vec![(op as u32) << 24]));
-            assert_eq!(ev, Some(GpuEvent::Unhandled { opcode: op }), "op {op:#04x}");
+        for op in [0x44u8, 0x4C] {
+            assert!(matches!(
+                it.interpret(&entry(op, vec![(op as u32) << 24, 0, 1])),
+                Some(GpuEvent::MonoLine { .. })
+            ));
+        }
+        for op in [0x54u8, 0x5C] {
+            assert!(matches!(
+                it.interpret(&entry(op, vec![(op as u32) << 24, 0, 0, 1])),
+                Some(GpuEvent::ShadedLine { .. })
+            ));
         }
     }
 }

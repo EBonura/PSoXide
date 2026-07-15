@@ -28,6 +28,22 @@
 use crate::Bus;
 use psx_hw::memory::to_physical;
 
+/// Minimal low-RAM kernel objects used by side-loaded EXEs. Retail BIOS owns
+/// this area; keeping the synthetic objects here lets homebrew that hooks the
+/// unresolved-exception callback use the documented process/thread pointers.
+pub(crate) const PROCESS_LIST_PTR: u32 = 0x0000_0108;
+pub(crate) const UNRESOLVED_HANDLER_PTR: u32 = 0x0000_0300;
+pub(crate) const SYNTHETIC_PROCESS: u32 = 0x8000_0400;
+pub(crate) const SYNTHETIC_THREAD: u32 = 0x8000_0500;
+pub(crate) const EXCEPTION_RETURN_STUB: u32 = 0x8000_00D0;
+
+pub(crate) const THREAD_REGISTERS: u32 = SYNTHETIC_THREAD + 8;
+pub(crate) const THREAD_RETURN_PC: u32 = THREAD_REGISTERS + 32 * 4;
+pub(crate) const THREAD_HI: u32 = THREAD_RETURN_PC + 4;
+pub(crate) const THREAD_LO: u32 = THREAD_HI + 4;
+pub(crate) const THREAD_SR: u32 = THREAD_LO + 4;
+pub(crate) const THREAD_CAUSE: u32 = THREAD_SR + 4;
+
 /// One of the three BIOS dispatcher tables.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Table {
@@ -73,17 +89,18 @@ pub fn dispatch(
     cpu_pc: u32,
     bus: &mut Bus,
     args: [u32; 4],
+    sp: u32,
     t1_func_num: u32,
     ra: u32,
 ) -> Option<Hle> {
     let phys = to_physical(cpu_pc);
     let table = Table::from_phys(phys)?;
     let func = (t1_func_num & 0xFF) as u8;
-    let v0 = run(table, func, bus, args);
+    let v0 = run(table, func, bus, args, sp);
     Some(Hle { v0, next_pc: ra })
 }
 
-fn run(table: Table, func: u8, bus: &mut Bus, args: [u32; 4]) -> u32 {
+fn run(table: Table, func: u8, bus: &mut Bus, args: [u32; 4], sp: u32) -> u32 {
     bus.hle_bios_log_call(table, func);
     match (table, func) {
         // --- A-table ---
@@ -115,15 +132,16 @@ fn run(table: Table, func: u8, bus: &mut Bus, args: [u32; 4]) -> u32 {
             0
         }
         (Table::A, 0x3F) => {
-            // printf with register varargs (a1-a3). The MIPS o32 ABI
-            // passes the first three varargs in registers, which covers
-            // the public test suites' debug output (ps1-tests, amidog);
-            // formats needing stack varargs print their tail verbatim.
-            hle_printf(bus, args[0], &[args[1], args[2], args[3]]);
+            // printf varargs follow the MIPS o32 ABI: a1-a3 first, then the
+            // caller's reserved argument area beginning at sp+16. Reading
+            // both sources lets public hardware suites print complete rows
+            // instead of losing their fourth and later values.
+            hle_printf(bus, args[0], &[args[1], args[2], args[3]], sp);
             0
         }
 
-        // A(0x44) FlushCache -- no I-cache model yet, so no-op.
+        // A(0x44) FlushCache -- the CPU intercept invalidates its
+        // instruction cache before this HLE handler returns.
         (Table::A, 0x44) => 0,
 
         // A(0x70) _bu_init (memcard filesystem init) -- accept.
@@ -172,14 +190,23 @@ fn run(table: Table, func: u8, bus: &mut Bus, args: [u32; 4]) -> u32 {
         // B(0x13) StartPad, B(0x14) StopPad -- accept.
         (Table::B, 0x13) | (Table::B, 0x14) => 1,
 
-        // B(0x17) ReturnFromException -- tricky: real impl restores
-        // SR from K0 and jumps to EPC. For HLE we punt: games that
-        // depend on this usually also install their own exception
-        // vectors, in which case our intercept never fires for them.
+        // B(0x17) ReturnFromException is completed by Cpu::execute_one:
+        // when a side-loaded guest IRQ hook is active it restores the
+        // interrupted CPU frame instead of returning to this call's `$ra`.
         (Table::B, 0x17) => 0,
 
-        // B(0x18) SetDefaultExceptionHandler -- accept.
-        (Table::B, 0x18) => 0,
+        // B(0x18) ResetEntryInt / B(0x19) HookEntryInt. The latter receives
+        // a BIOS-compatible JumpBuffer pointer (ra, sp, fp, s0..s7, gp).
+        // Retaining it lets side-loaded EXEs use their real guest ISR rather
+        // than relying on a synthetic VBlank callback.
+        (Table::B, 0x18) => {
+            bus.set_hle_irq_jump_buffer(None);
+            0
+        }
+        (Table::B, 0x19) => {
+            bus.set_hle_irq_jump_buffer(Some(args[0]));
+            0
+        }
 
         // B(0x3D) std_out_putchar -- same as A(0x3C).
         (Table::B, 0x3D) => {
@@ -228,17 +255,12 @@ fn write_cstring_to_stdout(bus: &mut Bus, addr: u32) {
     }
 }
 
-/// Minimal printf for A(0x3F): %% %c %s %d %i %u %x %X with optional
-/// zero-pad width (e.g. %08x). Consumes up to three register varargs;
-/// conversions past that print verbatim (stack varargs not modeled).
-fn hle_printf(bus: &mut Bus, fmt_addr: u32, varargs: &[u32; 3]) {
+/// Minimal printf for A(0x3F): %% %c %s %d %i %u %x %X with field width,
+/// left alignment, zero padding, and alternate hexadecimal form (for example
+/// `%-10s`, `%08x`, and `%#10x`). Register and stack varargs follow o32.
+fn hle_printf(bus: &mut Bus, fmt_addr: u32, varargs: &[u32; 3], sp: u32) {
     let mut out: Vec<u8> = Vec::with_capacity(128);
     let mut next_arg = 0usize;
-    let take = |next: &mut usize| -> Option<u32> {
-        let v = varargs.get(*next).copied();
-        *next += 1;
-        v
-    };
     let mut p = fmt_addr;
     let mut budget = 4096;
     while budget > 0 {
@@ -252,14 +274,20 @@ fn hle_printf(bus: &mut Bus, fmt_addr: u32, varargs: &[u32; 3]) {
             out.push(b);
             continue;
         }
-        // Parse [0][width]conv -- enough for debug output in practice.
+        // Accept flags on either side of the width. The latter is unusual,
+        // but JaCzekanski's public access-time test uses `%2-d` and the real
+        // BIOS accepts it.
         let mut zero_pad = false;
+        let mut left_align = false;
+        let mut alternate = false;
         let mut width = 0usize;
         let conv;
         loop {
             let c = bus.try_read8(p).unwrap_or(0);
             p = p.wrapping_add(1);
             match c {
+                b'-' => left_align = true,
+                b'#' => alternate = true,
                 b'0' if width == 0 && !zero_pad => zero_pad = true,
                 b'0'..=b'9' => width = width * 10 + (c - b'0') as usize,
                 b'l' => {} // longs are 32-bit here; ignore the modifier
@@ -272,12 +300,13 @@ fn hle_printf(bus: &mut Bus, fmt_addr: u32, varargs: &[u32; 3]) {
         match conv {
             b'%' => out.push(b'%'),
             b'c' => {
-                if let Some(v) = take(&mut next_arg) {
-                    out.push(v as u8);
+                if let Some(v) = next_printf_arg(bus, varargs, sp, &mut next_arg) {
+                    append_padded(&mut out, &[v as u8], width, b' ', left_align);
                 }
             }
             b's' => {
-                if let Some(v) = take(&mut next_arg) {
+                if let Some(v) = next_printf_arg(bus, varargs, sp, &mut next_arg) {
+                    let start = out.len();
                     let mut sp = v;
                     for _ in 0..4096 {
                         let sb = bus.try_read8(sp).unwrap_or(0);
@@ -287,29 +316,52 @@ fn hle_printf(bus: &mut Bus, fmt_addr: u32, varargs: &[u32; 3]) {
                         out.push(sb);
                         sp = sp.wrapping_add(1);
                     }
+                    pad_existing_field(&mut out, start, width, b' ', left_align);
                 }
             }
             b'd' | b'i' => {
-                if let Some(v) = take(&mut next_arg) {
-                    out.extend_from_slice(format!("{}", v as i32).as_bytes());
+                if let Some(v) = next_printf_arg(bus, varargs, sp, &mut next_arg) {
+                    let field = format!("{}", v as i32);
+                    append_padded(
+                        &mut out,
+                        field.as_bytes(),
+                        width,
+                        if zero_pad { b'0' } else { b' ' },
+                        left_align,
+                    );
                 }
             }
             b'u' => {
-                if let Some(v) = take(&mut next_arg) {
-                    out.extend_from_slice(format!("{v}").as_bytes());
+                if let Some(v) = next_printf_arg(bus, varargs, sp, &mut next_arg) {
+                    let field = format!("{v}");
+                    append_padded(
+                        &mut out,
+                        field.as_bytes(),
+                        width,
+                        if zero_pad { b'0' } else { b' ' },
+                        left_align,
+                    );
                 }
             }
             b'x' | b'X' => {
-                if let Some(v) = take(&mut next_arg) {
-                    let s = if conv == b'x' {
+                if let Some(v) = next_printf_arg(bus, varargs, sp, &mut next_arg) {
+                    let digits = if conv == b'x' {
                         format!("{v:x}")
                     } else {
                         format!("{v:X}")
                     };
-                    if zero_pad && width > s.len() {
-                        out.extend(std::iter::repeat_n(b'0', width - s.len()));
-                    }
-                    out.extend_from_slice(s.as_bytes());
+                    let s = if alternate && v != 0 {
+                        format!("{}{}", if conv == b'x' { "0x" } else { "0X" }, digits)
+                    } else {
+                        digits
+                    };
+                    append_padded(
+                        &mut out,
+                        s.as_bytes(),
+                        width,
+                        if zero_pad { b'0' } else { b' ' },
+                        left_align,
+                    );
                 }
             }
             // Unknown / out-of-register conversion: emit verbatim so the
@@ -318,6 +370,12 @@ fn hle_printf(bus: &mut Bus, fmt_addr: u32, varargs: &[u32; 3]) {
                 out.push(b'%');
                 if zero_pad {
                     out.push(b'0');
+                }
+                if left_align {
+                    out.push(b'-');
+                }
+                if alternate {
+                    out.push(b'#');
                 }
                 if width > 0 {
                     out.extend_from_slice(format!("{width}").as_bytes());
@@ -330,4 +388,77 @@ fn hle_printf(bus: &mut Bus, fmt_addr: u32, varargs: &[u32; 3]) {
     let mut stdout = std::io::stdout().lock();
     let _ = stdout.write_all(&out);
     let _ = stdout.flush();
+}
+
+fn next_printf_arg(bus: &Bus, registers: &[u32; 3], sp: u32, next: &mut usize) -> Option<u32> {
+    let index = *next;
+    *next += 1;
+    if let Some(value) = registers.get(index) {
+        return Some(*value);
+    }
+    // o32 reserves four argument words at the caller's stack pointer. The
+    // fixed format pointer occupies slot 0; a1-a3 occupy slots 1-3, and the
+    // fourth vararg begins at slot 4 (sp+16).
+    let addr = sp.wrapping_add(16 + ((index - registers.len()) as u32) * 4);
+    let bytes = [
+        bus.try_read8(addr)?,
+        bus.try_read8(addr.wrapping_add(1))?,
+        bus.try_read8(addr.wrapping_add(2))?,
+        bus.try_read8(addr.wrapping_add(3))?,
+    ];
+    Some(u32::from_le_bytes(bytes))
+}
+
+fn append_padded(out: &mut Vec<u8>, field: &[u8], width: usize, pad: u8, left_align: bool) {
+    let padding = width.saturating_sub(field.len());
+    if !left_align {
+        out.extend(std::iter::repeat_n(pad, padding));
+    }
+    out.extend_from_slice(field);
+    if left_align {
+        out.extend(std::iter::repeat_n(pad, padding));
+    }
+}
+
+fn pad_existing_field(out: &mut Vec<u8>, start: usize, width: usize, pad: u8, left_align: bool) {
+    let field_len = out.len().saturating_sub(start);
+    let padding = width.saturating_sub(field_len);
+    if left_align {
+        out.extend(std::iter::repeat_n(pad, padding));
+    } else if padding != 0 {
+        out.splice(start..start, std::iter::repeat_n(pad, padding));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{append_padded, dispatch, pad_existing_field};
+    use crate::Bus;
+
+    #[test]
+    fn printf_field_padding_handles_both_alignments() {
+        let mut out = Vec::new();
+        append_padded(&mut out, b"RAM", 5, b' ', true);
+        append_padded(&mut out, b"7", 3, b'0', false);
+        assert_eq!(out, b"RAM  007");
+
+        let start = out.len();
+        out.extend_from_slice(b"BIOS");
+        pad_existing_field(&mut out, start, 6, b' ', false);
+        assert_eq!(&out[start..], b"  BIOS");
+    }
+
+    #[test]
+    fn hook_entry_int_tracks_and_resets_guest_jump_buffer() {
+        let mut bus = Bus::new_without_bios();
+        let hook = 0x8001_4000;
+
+        let installed =
+            dispatch(0xB0, &mut bus, [hook, 0, 0, 0], 0, 0x19, 0x8001_0100).expect("B0 dispatch");
+        assert_eq!(installed.next_pc, 0x8001_0100);
+        assert_eq!(bus.hle_irq_jump_buffer(), Some(hook));
+
+        dispatch(0xB0, &mut bus, [0; 4], 0, 0x18, 0x8001_0200).expect("B0 dispatch");
+        assert_eq!(bus.hle_irq_jump_buffer(), None);
+    }
 }
