@@ -157,12 +157,14 @@ pub struct EditorWorkspaceState {
 /// preview remains the reference view, but the PS1 path needs explicit
 /// tradeoffs between stable ordering and per-triangle work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum RuntimeDepthSortMode {
     /// Use the legacy fixed cell depth key for every cached surface.
     FixedCell,
     /// Use per-triangle depth for sloped/high-span horizontal surfaces.
     Hybrid,
     /// Like hybrid, but also sorts high-depth-span walls per triangle.
+    #[default]
     HybridWalls,
     /// Use per-triangle projected depth for every cached surface.
     PerTriangle,
@@ -206,11 +208,6 @@ impl RuntimeDepthSortMode {
     }
 }
 
-impl Default for RuntimeDepthSortMode {
-    fn default() -> Self {
-        Self::HybridWalls
-    }
-}
 
 /// Default projected edge threshold for runtime room subdivision.
 ///
@@ -224,8 +221,10 @@ pub(crate) const fn default_runtime_texture_split_max_edge() -> u16 {
 
 /// Scope for runtime room triangle subdivision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum RuntimeTextureSplitMode {
     /// Apply the edge threshold to every cached room surface.
+    #[default]
     All,
     /// Apply the edge threshold only to surfaces using per-triangle depth.
     DepthSorted,
@@ -261,16 +260,13 @@ impl RuntimeTextureSplitMode {
     }
 }
 
-impl Default for RuntimeTextureSplitMode {
-    fn default() -> Self {
-        Self::All
-    }
-}
 
 /// Runtime draw ordering for active room chunks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum RuntimeRoomDrawOrderMode {
     /// Sort active visible rooms by their camera-space center depth.
+    #[default]
     Distance,
     /// Draw rooms in portal traversal order.
     Portal,
@@ -308,11 +304,6 @@ impl RuntimeRoomDrawOrderMode {
     }
 }
 
-impl Default for RuntimeRoomDrawOrderMode {
-    fn default() -> Self {
-        Self::Distance
-    }
-}
 
 /// One editor project document.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

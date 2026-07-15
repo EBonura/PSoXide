@@ -287,10 +287,7 @@ pub(crate) fn blend_slot_for_vertex(vertex: SourceVertex, primary_joint: u16) ->
             weight0 += w;
         } else if Some(j) == joint1 {
             weight1 += w;
-        } else if joint1.is_none() {
-            joint1 = Some(j);
-            weight1 = w;
-        } else if w > weight1 && Some(j) != joint1 {
+        } else if joint1.is_none() || w > weight1 {
             joint1 = Some(j);
             weight1 = w;
         }
@@ -394,13 +391,13 @@ pub(crate) fn checker_skin_bmp(width: u32, height: u32) -> Vec<u8> {
     let pad = (row_stride - width * 3) as usize;
     for y in 0..height {
         for x in 0..width {
-            let on = ((x / cell) + (y / cell)) % 2 == 0;
+            let on = ((x / cell) + (y / cell)).is_multiple_of(2);
             let g = if on { 190u8 } else { 110u8 };
             out.push(g);
             out.push(g);
             out.push(g);
         }
-        out.extend(std::iter::repeat(0u8).take(pad));
+        out.extend(std::iter::repeat_n(0u8, pad));
     }
     out
 }

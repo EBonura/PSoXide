@@ -352,7 +352,7 @@ impl NodeKind {
     /// True for behaviour/component nodes that are intended to be
     /// children of an [`Entity`](Self::Entity) host rather than
     /// independent placed objects.
-    pub const fn is_component(self: &Self) -> bool {
+    pub const fn is_component(&self) -> bool {
         matches!(
             self,
             Self::ModelRenderer { .. }
