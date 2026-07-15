@@ -21,6 +21,7 @@ fn orbit_rig() -> CameraRig {
         free_pitch: 0,
         free_position: [0, 0, 0],
         free_initialized: false,
+        zoom_speed: 1.0,
     }
 }
 
@@ -39,11 +40,27 @@ fn camera_rig_orbit_rotate_wraps_yaw_and_clamps_pitch() {
 #[test]
 fn camera_rig_orbit_scroll_dollies_and_clamps_radius() {
     let mut rig = orbit_rig();
+    // Magnitude-proportional dolly: one 50px notch at speed 1.0 is
+    // 1.08^-1, and a tiny 5px trackpad tick moves a tenth of that.
     rig.radius = 4096;
-    rig.scroll(1.0); // zoom in: radius *= 0.92
-    assert_eq!(rig.radius, (4096.0_f32 * 0.92) as i32);
+    rig.scroll(50.0);
+    assert_eq!(rig.radius, (4096.0_f32 * 1.08_f32.powf(-1.0)) as i32);
+    rig.radius = 4096;
+    rig.scroll(5.0);
+    assert_eq!(rig.radius, (4096.0_f32 * 1.08_f32.powf(-0.1)) as i32);
+    // The zoom-speed setting scales the exponent.
+    rig.radius = 4096;
+    rig.set_zoom_speed(2.0);
+    rig.scroll(50.0);
+    assert_eq!(rig.radius, (4096.0_f32 * 1.08_f32.powf(-2.0)) as i32);
+    rig.set_zoom_speed(1.0);
+    // One event is clamped to 4 notches, so momentum cannot teleport.
+    rig.radius = 4096;
+    rig.scroll(100_000.0);
+    assert_eq!(rig.radius, (4096.0_f32 * 1.08_f32.powf(-4.0)) as i32);
+    // Radius floor holds.
     rig.radius = 512;
-    rig.scroll(1.0); // 512 * 0.92 = 471, clamped back up to the 512 floor
+    rig.scroll(50.0);
     assert_eq!(rig.radius, 512);
 }
 
