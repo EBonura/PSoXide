@@ -372,6 +372,12 @@ fn project_vertex_mips(v: Vec3I16) -> Projected {
             // MTC2 $8,VXY0 and $9,VZ0.
             ".word 0x48880000",
             ".word 0x48890800",
+            // HWB-010/011 input-commit gap. The single-vertex path used to
+            // issue RTPS immediately here, leaving VXY0 at the same two-tick
+            // distance as the console-confirmed MVMVA vertex-explosion case.
+            // Two NOPs move it to the known-safe four-instruction distance.
+            ".word 0",
+            ".word 0",
             // RTPS.
             ".word 0x4a080001",
             // Read SXY2 and SZ3. Two MFC2s can share one final
