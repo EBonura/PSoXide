@@ -492,8 +492,8 @@ def precision_label(index: int) -> str:
     fixed = {
         0: "spu_delay_boot",
         1: "spu_ctrl_stat_boot",
-        18: "spu_ctrl_stat_after_single_block",
-        35: "spu_ctrl_stat_after_four_blocks",
+        18: "spu_single_stop_mode_polls",
+        35: "spu_four_stop_mode_polls",
         36: "spu_delay_forced_stable",
         37: "spu_stable_single_block_hash",
         38: "spu_stable_four_block_hash",
@@ -528,13 +528,11 @@ def precision_label(index: int) -> str:
         offset = index - 49
         return f"gpu_dma_dir_{offset // 3}_read{offset % 3}"
     if 73 <= index <= 90:
-        offset = index - 73
-        gaps = (0, 1, 2, 3, 4, 8)
-        fields = ("sxy2", "mac1", "vxy0_after")
-        return f"gte_rtps_v0_gap{gaps[offset // 3]}_{fields[offset % 3]}"
+        return f"gte_nclip_scene_a_settle_gap{index - 26}_mac0"
     if 91 <= index <= 96:
         offset = index - 91
-        return f"gte_op_full_run{offset // 3}_mac{offset % 3 + 1}"
+        mode = "immediate" if offset < 3 else "settled"
+        return f"gte_op_full_{mode}_mac{offset % 3 + 1}"
     if 97 <= index <= 104:
         return f"spu_voice0_offset_{(index - 97) * 2:02X}_write_ffff"
     if index == 105:
