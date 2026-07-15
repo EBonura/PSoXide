@@ -387,7 +387,17 @@ pub(super) const fn streamed_room_slot_count_for_budget_units(raw_units: usize) 
     } else {
         units * STREAMED_ROOM_RESIDENT_BUDGET_UNIT_BYTES
     };
-    clamp_streamed_room_slot_count(budget_bytes / STREAMED_ROOM_SLOT_BYTES)
+    // Never allocate more slots than the world has streamed rooms: a
+    // tiny-chunk map would otherwise convert the byte budget into ~100
+    // slots and the slot-count-keyed pools (materials, collision) would
+    // overflow RAM for a map that needs a handful.
+    let by_budget = budget_bytes / STREAMED_ROOM_SLOT_BYTES;
+    let by_rooms = WORLD_PACK_TOC.len();
+    clamp_streamed_room_slot_count(if by_budget > by_rooms {
+        by_rooms
+    } else {
+        by_budget
+    })
 }
 
 #[cfg(feature = "cd-stream-bench")]
