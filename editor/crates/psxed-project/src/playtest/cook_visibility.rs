@@ -246,7 +246,7 @@ pub(crate) fn cache_materials_for_room(
 }
 
 pub(crate) fn room_cache_texture_size(size: u16) -> u8 {
-    if size < 8 || size > 64 || !size.is_power_of_two() || size % 8 != 0 {
+    if !(8..=64).contains(&size) || !size.is_power_of_two() || !size.is_multiple_of(8) {
         64
     } else {
         size as u8

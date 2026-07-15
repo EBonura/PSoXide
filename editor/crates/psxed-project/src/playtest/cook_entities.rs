@@ -149,14 +149,13 @@ pub(crate) fn collect_runtime_model_clip_requirements(
                 mesh: Some(model),
                 animation_clip,
                 ..
-            } => {
+            }
                 if project
                     .resource(*model)
                     .is_some_and(|r| matches!(r.data, ResourceData::Model(_)))
-                {
+                => {
                     add_model_clip_requirement(project, &mut out, *model, *animation_clip);
                 }
-            }
             NodeKind::SpawnPoint {
                 character: Some(character_id),
                 ..
@@ -1022,9 +1021,7 @@ pub(crate) fn register_model_for_instance(
             ));
             return None;
         }
-        if seen_sockets
-            .iter()
-            .any(|name| *name == socket.name.as_str())
+        if seen_sockets.contains(&socket.name.as_str())
         {
             report.error(format!(
                 "Model '{}' has duplicate attachment socket '{}'",
@@ -1363,7 +1360,7 @@ pub(crate) fn aabb_radius(min: [i32; 3], max: [i32; 3]) -> i32 {
 
 pub(crate) fn half_extent_u128(min: i32, max: i32) -> u128 {
     let extent = (max as i64).saturating_sub(min as i64).unsigned_abs() as u128;
-    (extent + 1) / 2
+    extent.div_ceil(2)
 }
 
 pub(crate) fn ceil_sqrt_u128(value: u128) -> u128 {

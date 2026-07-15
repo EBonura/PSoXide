@@ -1316,7 +1316,7 @@ impl GridVerticalFace {
         }
         let sector_size = sector_size.max(1) as usize;
         let max_span = self.max_vertical_span().max(0) as usize;
-        ((max_span + sector_size - 1) / sector_size).max(1)
+        max_span.div_ceil(sector_size).max(1)
     }
 
     /// Split this wall into sector-height stack entries and retile
