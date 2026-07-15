@@ -216,6 +216,70 @@ fn enemy_controller_cooks_game_entity_with_interned_archetype() {
     assert_ne!(a.model_instance, psx_level::GAME_ENTITY_MODEL_INSTANCE_NONE);
     assert!(usize::from(a.model_instance) < package.model_instances.len());
     assert_ne!(a.model_instance, b.model_instance);
+    // State clips resolved from the Character's AnimationSet roles:
+    // every one indexes inside the instance model's clip slice, the
+    // starter set authors distinct idle/walk/run, and the idle clip
+    // matches the cooked idle instance's clip.
+    let instance = &package.model_instances[usize::from(a.model_instance)];
+    let clip_count = package.models[usize::from(instance.model)].clip_count;
+    for clip in [
+        a.idle_clip,
+        a.walk_clip,
+        a.run_clip,
+        a.attack_clip,
+        a.stagger_clip,
+        a.death_clip,
+    ] {
+        assert!(clip < clip_count, "state clip {clip} out of {clip_count}");
+    }
+    assert_eq!(a.idle_clip, instance.clip);
+    assert_ne!(a.walk_clip, a.idle_clip);
+    assert_ne!(a.run_clip, a.walk_clip);
+    assert_eq!(
+        (a.idle_clip, a.walk_clip, a.run_clip),
+        (b.idle_clip, b.walk_clip, b.run_clip),
+        "same archetype resolves the same clips"
+    );
+}
+
+#[test]
+fn game_entity_state_clips_fall_back_down_the_chain() {
+    // Strip the character's AnimationSet to idle + walk only: run
+    // must fall back to walk, and attack/stagger/death to idle. The
+    // player resolves its own actions from the Animator overrides,
+    // so thinning the set only affects the enemy path.
+    let mut project = project_with_one_room();
+    let character = player_character_resource_id(&project);
+    let set_id = match &project.resource(character).expect("character").data {
+        ResourceData::Character(character) => character.animation_set.expect("starter set"),
+        _ => unreachable!(),
+    };
+    match &mut project.resource_mut(set_id).expect("set").data {
+        ResourceData::AnimationSet(set) => {
+            set.run_clip = None;
+            set.turn_clip = None;
+            set.roll_clip = None;
+            set.backstep_clip = None;
+            set.action_clips.clear();
+            set.clips.clear();
+        }
+        _ => unreachable!(),
+    }
+    add_enemy_entity(
+        &mut project,
+        "Grunt",
+        Some(character),
+        EnemyBehaviorSettings::defaults(),
+    );
+    let (package, report) = build_package(&project, &starter_project_root());
+    assert!(report.is_ok(), "errors: {:?}", report.errors);
+    let package = package.expect("cooks");
+    let entity = &package.game_entities[0];
+    assert_ne!(entity.walk_clip, entity.idle_clip, "walk stays authored");
+    assert_eq!(entity.run_clip, entity.walk_clip, "run falls back to walk");
+    assert_eq!(entity.attack_clip, entity.idle_clip);
+    assert_eq!(entity.stagger_clip, entity.idle_clip);
+    assert_eq!(entity.death_clip, entity.idle_clip);
 }
 
 #[test]

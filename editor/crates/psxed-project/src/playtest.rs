@@ -882,20 +882,21 @@ pub fn build_package(
                                 ));
                                 return (None, report);
                             };
-                            let archetype = match project.resource(character_id) {
-                                Some(resource)
-                                    if matches!(resource.data, ResourceData::Character(_)) =>
-                                {
-                                    resource.name.clone()
-                                }
-                                Some(resource) => {
-                                    report.error(format!(
-                                        "Enemy on '{}' references resource '{}' which is \
-                                         not a Character",
-                                        node.name, resource.name
-                                    ));
-                                    return (None, report);
-                                }
+                            let (archetype, enemy_character) = match project.resource(character_id)
+                            {
+                                Some(resource) => match &resource.data {
+                                    ResourceData::Character(character) => {
+                                        (resource.name.clone(), character)
+                                    }
+                                    _ => {
+                                        report.error(format!(
+                                            "Enemy on '{}' references resource '{}' which is \
+                                             not a Character",
+                                            node.name, resource.name
+                                        ));
+                                        return (None, report);
+                                    }
+                                },
                                 None => {
                                     report.error(format!(
                                         "Enemy on '{}' references Character #{} which \
@@ -910,6 +911,19 @@ pub fn build_package(
                                 (model_instances.len() > model_instances_before).then(|| {
                                     u16::try_from(model_instances.len() - 1).unwrap_or(u16::MAX)
                                 });
+                            let Some(state_clips) = game_entity_state_clips(
+                                project,
+                                archetype.as_str(),
+                                enemy_character,
+                                node_model_instance,
+                                &model_instances,
+                                &models,
+                                &model_for_resource,
+                                &model_clip_remaps,
+                                &mut report,
+                            ) else {
+                                return (None, report);
+                            };
                             if !push_game_entity(
                                 node.name.as_str(),
                                 archetype.as_str(),
@@ -919,6 +933,7 @@ pub fn build_package(
                                 &controller.settings,
                                 enemy,
                                 node_model_instance,
+                                state_clips,
                                 &mut names,
                                 &mut game_entities,
                                 &mut report,

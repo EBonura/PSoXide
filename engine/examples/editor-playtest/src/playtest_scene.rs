@@ -305,6 +305,9 @@ impl Scene for Playtest {
                 y: 0,
                 z: 0,
                 yaw: 0,
+                clip: psx_level::OptionalModelClipIndex::NONE,
+                phase_ticks: 0,
+                one_shot: false,
             }; MAX_GAME_ENTITIES];
             let entity_pose_count = self.game_entity_pose_overrides(&mut entity_poses);
             let entity_poses = &entity_poses[..entity_pose_count];
