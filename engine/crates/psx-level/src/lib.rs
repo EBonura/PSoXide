@@ -1516,6 +1516,23 @@ pub struct LevelGameEntityRecord {
     /// Index of this entity's cooked visual in `MODEL_INSTANCES`, or
     /// [`GAME_ENTITY_MODEL_INSTANCE_NONE`].
     pub model_instance: u16,
+    /// Model-local clip index played while Idle. All six state clips
+    /// are resolved AT COOK TIME from the entity Character's
+    /// AnimationSet roles; a missing role falls back at cook (attack/
+    /// stagger/death to idle, walk to idle, run to walk), so runtime
+    /// never re-resolves.
+    pub idle_clip: u16,
+    /// Clip while Patrol (walk role).
+    pub walk_clip: u16,
+    /// Clip while Aggro (run role).
+    pub run_clip: u16,
+    /// One-shot clip spanning Windup + Attack + Recover.
+    pub attack_clip: u16,
+    /// One-shot clip while Staggered (hit-react role).
+    pub stagger_clip: u16,
+    /// One-shot clip on death; holds its final frame as the corpse
+    /// pose.
+    pub death_clip: u16,
     /// Room-local spawn X.
     pub x: i32,
     /// Y.

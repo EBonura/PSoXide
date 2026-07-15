@@ -240,7 +240,8 @@ impl Playtest {
 
     /// Build the per-frame pose-override list: every live (visible)
     /// entity with a cooked visual renders at its runtime position and
-    /// facing. Returns the filled count.
+    /// facing, playing its AI state's cooked clip on the state clock.
+    /// Returns the filled count.
     pub(super) fn game_entity_pose_overrides(
         &self,
         out: &mut [ModelInstancePoseOverride; MAX_GAME_ENTITIES],
@@ -253,12 +254,16 @@ impl Playtest {
                 continue;
             }
             let position = self.game_entities.position(index);
+            let clip = self.game_entities.clip_for_state(GAME_ENTITIES, index);
             out[count] = ModelInstancePoseOverride {
                 instance: record.model_instance,
                 x: position[0],
                 y: position[1],
                 z: position[2],
                 yaw: self.game_entities.yaw(index),
+                clip: psx_level::OptionalModelClipIndex::some(psx_level::ModelClipIndex(clip.clip)),
+                phase_ticks: clip.phase_ticks,
+                one_shot: clip.one_shot,
             };
             count += 1;
         }
