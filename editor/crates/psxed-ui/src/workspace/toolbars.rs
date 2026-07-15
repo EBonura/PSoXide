@@ -556,12 +556,11 @@ impl EditorWorkspace {
                 ui,
                 icons::label(view.icon(), view.label()),
                 self.active_workspace == view,
-            ) {
-                if self.active_workspace != view {
-                    self.active_workspace = view;
-                    self.status = format!("Workspace: {}", view.label());
-                    self.mark_shortcut_group_changed(ShortcutGroup::Workspace);
-                }
+            ) && self.active_workspace != view
+            {
+                self.active_workspace = view;
+                self.status = format!("Workspace: {}", view.label());
+                self.mark_shortcut_group_changed(ShortcutGroup::Workspace);
             }
         }
     }
@@ -738,19 +737,16 @@ impl EditorWorkspace {
 
     pub(crate) fn draw_view_dimension_group_menu(&mut self, ui: &mut egui::Ui) {
         ui.set_min_width(120.0);
-        if toolbar_menu_choice(ui, icons::label(icons::SQUARE, "2D"), self.view_2d) {
-            if !self.view_2d {
-                self.view_2d = true;
-                self.status = "Viewport: 2D".to_string();
-                self.mark_shortcut_group_changed(ShortcutGroup::Viewport);
-            }
+        if toolbar_menu_choice(ui, icons::label(icons::SQUARE, "2D"), self.view_2d) && !self.view_2d
+        {
+            self.view_2d = true;
+            self.status = "Viewport: 2D".to_string();
+            self.mark_shortcut_group_changed(ShortcutGroup::Viewport);
         }
-        if toolbar_menu_choice(ui, icons::label(icons::BOX, "3D"), !self.view_2d) {
-            if self.view_2d {
-                self.view_2d = false;
-                self.status = "Viewport: 3D".to_string();
-                self.mark_shortcut_group_changed(ShortcutGroup::Viewport);
-            }
+        if toolbar_menu_choice(ui, icons::label(icons::BOX, "3D"), !self.view_2d) && self.view_2d {
+            self.view_2d = false;
+            self.status = "Viewport: 3D".to_string();
+            self.mark_shortcut_group_changed(ShortcutGroup::Viewport);
         }
     }
 
@@ -831,11 +827,11 @@ impl EditorWorkspace {
             WallPaintShape::NorthWestSouthEast,
             WallPaintShape::NorthEastSouthWest,
         ] {
-            if toolbar_menu_choice(ui, shape.label(), self.wall_paint_shape == shape) {
-                if self.wall_paint_shape != shape {
-                    self.wall_paint_shape = shape;
-                    self.mark_shortcut_group_changed(ShortcutGroup::Tool);
-                }
+            if toolbar_menu_choice(ui, shape.label(), self.wall_paint_shape == shape)
+                && self.wall_paint_shape != shape
+            {
+                self.wall_paint_shape = shape;
+                self.mark_shortcut_group_changed(ShortcutGroup::Tool);
             }
         }
     }

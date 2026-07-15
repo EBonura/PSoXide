@@ -47,13 +47,12 @@ impl EditorWorkspace {
             return;
         }
 
-        if matches!(self.active_tool, ViewTool::Select)
+        if (matches!(self.active_tool, ViewTool::Select)
             || self.selection.selected_primitive.is_some()
-            || !self.selection.selected_primitives.is_empty()
+            || !self.selection.selected_primitives.is_empty())
+            && self.select_all_primitives_in_active_room()
         {
-            if self.select_all_primitives_in_active_room() {
-                return;
-            }
+            return;
         }
 
         self.select_all_scene_nodes();

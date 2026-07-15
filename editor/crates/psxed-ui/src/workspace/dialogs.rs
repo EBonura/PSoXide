@@ -383,15 +383,13 @@ impl EditorWorkspace {
         }
 
         match action {
-            Some(Action::BrowseSource) => {
-                if self.choose_texture_import_source() {
-                    self.run_texture_import_preview(ctx);
-                }
+            Some(Action::BrowseSource) if self.choose_texture_import_source() => {
+                self.run_texture_import_preview(ctx);
             }
             Some(Action::AutoPreview) => self.run_texture_import_preview(ctx),
             Some(Action::Import) => self.commit_texture_import(),
             Some(Action::Close) => self.close_texture_import_dialog(),
-            None => {}
+            _ => {}
         }
     }
 
@@ -945,15 +943,11 @@ impl EditorWorkspace {
             });
 
         match action {
-            Some(Action::BrowseSource) => {
-                if self.choose_model_import_source() {
-                    self.run_model_import_preview(ctx);
-                }
+            Some(Action::BrowseSource) if self.choose_model_import_source() => {
+                self.run_model_import_preview(ctx);
             }
-            Some(Action::BrowseAnimations) => {
-                if self.choose_model_import_animation_sources() {
-                    self.run_model_import_preview(ctx);
-                }
+            Some(Action::BrowseAnimations) if self.choose_model_import_animation_sources() => {
+                self.run_model_import_preview(ctx);
             }
             Some(Action::ClearAnimations) => {
                 self.model_import_dialog.animation_paths.clear();
@@ -965,7 +959,7 @@ impl EditorWorkspace {
             Some(Action::Preview) => self.run_model_import_preview(ctx),
             Some(Action::Import) => self.commit_model_import(),
             Some(Action::Close) => self.close_model_import_dialog(),
-            None => {}
+            _ => {}
         }
     }
 

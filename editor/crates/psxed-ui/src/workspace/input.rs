@@ -2005,14 +2005,16 @@ impl EditorWorkspace {
         if let Some(room_index) = current_room {
             self.append_runtime_room_debug_snapshot(out, &map, metrics, room_index, "current_room");
         }
-        if player_room.is_some() && player_room != current_room {
-            self.append_runtime_room_debug_snapshot(
-                out,
-                &map,
-                metrics,
-                player_room.unwrap(),
-                "player_room",
-            );
+        if let Some(player_room) = player_room {
+            if Some(player_room) != current_room {
+                self.append_runtime_room_debug_snapshot(
+                    out,
+                    &map,
+                    metrics,
+                    player_room,
+                    "player_room",
+                );
+            }
         }
         let connected: Vec<_> = map
             .portals

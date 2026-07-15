@@ -805,8 +805,8 @@ pub(crate) fn sky_quant_box_average(colors: &[SkyQuantColor]) -> [u8; 3] {
     let mut sums = [0u64; 3];
     for color in colors {
         let count = u64::from(color.count);
-        for channel in 0..3 {
-            sums[channel] += u64::from(color.rgb[channel]) * count;
+        for (sum, component) in sums.iter_mut().zip(color.rgb) {
+            *sum += u64::from(component) * count;
         }
     }
     [

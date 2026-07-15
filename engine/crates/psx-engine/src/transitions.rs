@@ -145,7 +145,7 @@ fn render_transition_glitch(transition: FlowTransition) {
         let y = (n % 240) as i16;
         let h = 1 + ((n >> 8) % 5);
         let color = glitch_color(n, base, progress);
-        draw_rect(0, y, 320, h as u16, color);
+        draw_rect(0, y, 320, h, color);
         i += 1;
     }
 

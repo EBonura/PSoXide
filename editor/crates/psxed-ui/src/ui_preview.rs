@@ -776,10 +776,10 @@ pub(crate) fn ui_preview_font_source(font: UiFontChoice) -> &'static psx_font::B
     }
 }
 
-pub(crate) fn ui_preview_font_texture<'a>(
-    font_textures: &'a [egui::TextureHandle],
+pub(crate) fn ui_preview_font_texture(
+    font_textures: &[egui::TextureHandle],
     font: UiFontChoice,
-) -> &'a egui::TextureHandle {
+) -> &egui::TextureHandle {
     let spec = ui_preview_font_spec(font);
     &font_textures[spec
         .texture_index
