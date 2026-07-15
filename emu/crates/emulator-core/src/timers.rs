@@ -58,6 +58,11 @@ pub struct Timer {
     /// division: it must not suppress two whole HBlank ticks or two `/8` ticks.
     #[serde(default)]
     counter_hold_cycles: u8,
+    /// One-shot IRQs stop producing edges after their first event, but this is
+    /// independent of observable mode bit 10. In pulse mode the bit returns
+    /// high immediately after the short low pulse on real hardware.
+    #[serde(default)]
+    irq_fired_once: bool,
 }
 
 // Mode-register bit layout (nocash PSX-SPX, section "Timers").
@@ -78,7 +83,9 @@ const MODE_IRQ_ON_TARGET: u32 = 1 << 4;
 const MODE_IRQ_ON_WRAP: u32 = 1 << 5;
 /// bit 6: IRQ repeat mode (0 = one-shot until mode-write).
 const MODE_IRQ_REPEAT: u32 = 1 << 6;
-/// bit 10: IRQ status -- active-low flag; cleared on fire.
+/// bit 7: pulse (0) versus toggle (1) behavior for the active-low request.
+const MODE_IRQ_TOGGLE: u32 = 1 << 7;
+/// bit 10: IRQ status -- active-low request line.
 const MODE_IRQ_ACTIVE_LOW: u32 = 1 << 10;
 /// bit 11: "reached target" sticky flag.
 const MODE_REACHED_TARGET: u32 = 1 << 11;
@@ -170,6 +177,7 @@ impl Timers {
                 t.sync_seen = false;
                 t.target_reset_hold = false;
                 t.counter_hold_cycles = 2;
+                t.irq_fired_once = false;
             }
             0x8 => t.target = v16,
             _ => {}
@@ -579,29 +587,43 @@ fn advance_counter(t: &mut Timer, ticks: u64) -> bool {
 
     if reached_target {
         t.mode |= MODE_REACHED_TARGET;
-        if t.mode & MODE_IRQ_ON_TARGET != 0 && t.mode & MODE_IRQ_ACTIVE_LOW != 0 {
-            // Fire: clear bit 10 (active-low).
-            t.mode &= !MODE_IRQ_ACTIVE_LOW;
-            fired = true;
-            if t.mode & MODE_IRQ_REPEAT != 0 {
-                // Re-arm for repeat mode.
-                t.mode |= MODE_IRQ_ACTIVE_LOW;
-            }
+        if t.mode & MODE_IRQ_ON_TARGET != 0 {
+            fired |= fire_irq(t);
         }
     }
     if reached_wrap {
         t.mode |= MODE_REACHED_WRAP;
-        if t.mode & MODE_IRQ_ON_WRAP != 0 && t.mode & MODE_IRQ_ACTIVE_LOW != 0 {
-            t.mode &= !MODE_IRQ_ACTIVE_LOW;
-            fired = true;
-            if t.mode & MODE_IRQ_REPEAT != 0 {
-                t.mode |= MODE_IRQ_ACTIVE_LOW;
-            }
+        if t.mode & MODE_IRQ_ON_WRAP != 0 {
+            fired |= fire_irq(t);
         }
     }
 
     t.counter = new_val as u32;
     fired
+}
+
+fn fire_irq(t: &mut Timer) -> bool {
+    let repeat = t.mode & MODE_IRQ_REPEAT != 0;
+    if t.irq_fired_once && !repeat {
+        return false;
+    }
+    if !repeat {
+        t.irq_fired_once = true;
+    }
+
+    if t.mode & MODE_IRQ_TOGGLE != 0 {
+        // Toggle mode holds the request level until the next eligible event;
+        // only the high-to-low transition raises the edge-triggered I_STAT.
+        t.mode ^= MODE_IRQ_ACTIVE_LOW;
+        t.mode & MODE_IRQ_ACTIVE_LOW == 0
+    } else {
+        // Pulse mode briefly drives bit 10 low and then returns it high. Lazy
+        // counter advancement observes the resulting IRQ edge, while an MMIO
+        // read after the event sees the inactive high level (SCPH-9902 PX5
+        // cases 36/37).
+        t.mode |= MODE_IRQ_ACTIVE_LOW;
+        true
+    }
 }
 
 fn dot_ticks_per_scanline(hsync_period: u64, dot_clock_divisor: u64, vblank_period: u64) -> u64 {
@@ -862,6 +884,30 @@ mod tests {
         assert_eq!(t.read32(0x1F80_1120), 0, "ordinary zero phase");
         t.advance_to(15, NTSC_HSYNC, 8);
         assert_eq!(t.read32(0x1F80_1120), 1);
+    }
+
+    #[test]
+    fn one_shot_pulse_irq_releases_mode_bit_without_rearming() {
+        let mut t = Timers::new();
+        t.write32(0x1F80_1128, 10, 0);
+        t.write32(0x1F80_1124, MODE_RESET_AT_TARGET | MODE_IRQ_ON_TARGET, 0);
+
+        assert_eq!(t.advance_to(12, NTSC_HSYNC, 8), 1 << 2);
+        let mode = t.read32(0x1F80_1124);
+        assert_ne!(mode & MODE_REACHED_TARGET, 0);
+        assert_ne!(
+            mode & MODE_IRQ_ACTIVE_LOW,
+            0,
+            "the short active-low pulse is over before software reads mode"
+        );
+
+        assert_eq!(
+            t.advance_to(36, NTSC_HSYNC, 8),
+            0,
+            "one-shot mode suppresses later target edges"
+        );
+        t.write32(0x1F80_1124, MODE_RESET_AT_TARGET | MODE_IRQ_ON_TARGET, 36);
+        assert_eq!(t.advance_to(48, NTSC_HSYNC, 8), 1 << 2);
     }
 
     #[test]

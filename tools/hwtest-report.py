@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Validate and assemble PSoXide hardware-test photo payloads.
 
-PX5 is the dense two-page Base64 format and includes every conformance
-observation/status, timing envelope, memory-control register, and startup scan
-summary.
+PX5 is the original dense two-page capture. PX6 adds a third page containing
+128 fixed-order raw precision values while retaining every PX5 field.
 """
 
 from __future__ import annotations
@@ -168,7 +167,8 @@ class Record:
 
 
 @dataclass(frozen=True)
-class Px5Page:
+class CapturePage:
+    schema: str
     number: int
     total: int
     chunk: str
@@ -185,7 +185,8 @@ class ScanSummary:
 
 
 @dataclass(frozen=True)
-class Px5Capture:
+class Capture:
+    schema: str
     version: int
     conformance_run: int
     timing_run: int
@@ -198,6 +199,7 @@ class Px5Capture:
     statuses: tuple[int, ...]
     records: tuple[Record, ...]
     memory_control: tuple[int, ...]
+    precision: tuple[int, ...]
     binary_crc: int
 
 
@@ -206,27 +208,31 @@ PX5_SCAN_COUNT = 3
 PX5_STATUS_BITS = 3
 PX5_BINARY_LEN = 1_221
 PX5_PAGE_COUNT = 2
+PX6_PRECISION_COUNT = 128
+PX6_BINARY_LEN = 1_733
+PX6_PAGE_COUNT = 3
 STATUS_LABELS = {0: "PENDING", 1: "PASS", 2: "FAIL", 3: "WARN", 4: "INFO"}
 
 
-def parse_px5_page(payload: str) -> Px5Page:
+def parse_capture_page(payload: str) -> CapturePage:
     payload = payload.strip()
-    if not payload.startswith("PX5/"):
-        raise ValueError("not a PX5 hardware payload")
+    if not payload.startswith(("PX5/", "PX6/")):
+        raise ValueError("not a PX5/PX6 hardware payload")
     try:
         body, claimed_crc = payload.rsplit("/C:", 1)
         marker, page_field, chunk = body.split("/", 2)
     except ValueError as exc:
-        raise ValueError("malformed PX5 page") from exc
-    if marker != "PX5" or len(page_field) != 4 or not chunk:
-        raise ValueError("malformed PX5 page header")
+        raise ValueError("malformed capture page") from exc
+    if marker not in ("PX5", "PX6") or len(page_field) != 4 or not chunk:
+        raise ValueError("malformed capture page header")
     actual_crc = binascii.crc32(chunk.encode("ascii")) & 0xFFFF_FFFF
     if int(claimed_crc, 16) != actual_crc:
         raise ValueError(
-            f"PX5 page CRC mismatch: payload says {claimed_crc}, "
+            f"{marker} page CRC mismatch: payload says {claimed_crc}, "
             f"calculated {actual_crc:08X}"
         )
-    return Px5Page(
+    return CapturePage(
+        marker,
         int(page_field[:2], 16),
         int(page_field[2:], 16),
         chunk,
@@ -234,43 +240,48 @@ def parse_px5_page(payload: str) -> Px5Page:
     )
 
 
-def parse_px5_capture(payloads: list[str]) -> Px5Capture:
-    pages = [parse_px5_page(payload) for payload in payloads]
+def parse_capture(payloads: list[str]) -> Capture:
+    pages = [parse_capture_page(payload) for payload in payloads]
     if not pages:
-        raise ValueError("no PX5 payloads found")
+        raise ValueError("no PX5/PX6 payloads found")
+    schemas = {page.schema for page in pages}
+    if len(schemas) != 1:
+        raise ValueError("capture mixes PX5 and PX6 pages")
+    schema = schemas.pop()
+    page_count = PX5_PAGE_COUNT if schema == "PX5" else PX6_PAGE_COUNT
+    binary_len = PX5_BINARY_LEN if schema == "PX5" else PX6_BINARY_LEN
     totals = {page.total for page in pages}
-    if totals != {PX5_PAGE_COUNT}:
-        raise ValueError(f"PX5 must declare exactly {PX5_PAGE_COUNT} pages")
+    if totals != {page_count}:
+        raise ValueError(f"{schema} must declare exactly {page_count} pages")
     # The log can contain an early boot page followed by a freshly encoded
     # page after the pad state settles. Keep the last occurrence, matching the
     # state that is ultimately photographed.
     by_number = {page.number: page for page in pages}
-    missing = sorted(set(range(1, PX5_PAGE_COUNT + 1)) - set(by_number))
+    missing = sorted(set(range(1, page_count + 1)) - set(by_number))
     if missing:
-        raise ValueError("missing PX5 page(s): " + ", ".join(map(str, missing)))
+        raise ValueError(f"missing {schema} page(s): " + ", ".join(map(str, missing)))
 
-    encoded = "".join(by_number[number].chunk for number in range(1, PX5_PAGE_COUNT + 1))
+    encoded = "".join(by_number[number].chunk for number in range(1, page_count + 1))
     try:
         binary = base64.b64decode(encoded, validate=True)
     except binascii.Error as exc:
-        raise ValueError(f"invalid PX5 Base64: {exc}") from exc
-    if len(binary) != PX5_BINARY_LEN:
-        raise ValueError(
-            f"PX5 binary length is {len(binary)}, expected {PX5_BINARY_LEN}"
-        )
+        raise ValueError(f"invalid {schema} Base64: {exc}") from exc
+    if len(binary) != binary_len:
+        raise ValueError(f"{schema} binary length is {len(binary)}, expected {binary_len}")
     claimed_binary_crc = struct.unpack_from("<I", binary, len(binary) - 4)[0]
     actual_binary_crc = binascii.crc32(binary[:-4]) & 0xFFFF_FFFF
     if claimed_binary_crc != actual_binary_crc:
         raise ValueError(
-            f"PX5 binary CRC mismatch: payload says {claimed_binary_crc:08X}, "
+            f"{schema} binary CRC mismatch: payload says {claimed_binary_crc:08X}, "
             f"calculated {actual_binary_crc:08X}"
         )
 
-    if binary[:4] != b"PX5B":
-        raise ValueError("PX5 binary magic mismatch")
+    if binary[:4] != f"{schema}B".encode("ascii"):
+        raise ValueError(f"{schema} binary magic mismatch")
     version = binary[4]
-    if version != 1:
-        raise ValueError(f"unsupported PX5 binary version {version}")
+    expected_version = 1 if schema == "PX5" else 2
+    if version != expected_version:
+        raise ValueError(f"unsupported {schema} binary version {version}")
     conformance_run = binary[5]
     timing_run = binary[6]
     test_count = binary[7]
@@ -286,7 +297,7 @@ def parse_px5_capture(payloads: list[str]) -> Px5Capture:
         PX5_SCAN_COUNT,
     )
     if (test_count, timing_count, memory_count, status_bits, scan_count) != expected_shape:
-        raise ValueError("PX5 binary shape does not match schema version 1")
+        raise ValueError(f"{schema} binary shape does not match schema version {version}")
 
     conformance_digest, gte_digest, timing_digest, timing_aux = struct.unpack_from(
         "<IIII", binary, 12
@@ -312,7 +323,7 @@ def parse_px5_capture(payloads: list[str]) -> Px5Capture:
             window |= packed_statuses[bit // 8 + 1] << 8
         status = (window >> (bit % 8)) & 0x7
         if status > 4:
-            raise ValueError(f"invalid PX5 status {status} for case {index}")
+            raise ValueError(f"invalid {schema} status {status} for case {index}")
         statuses.append(status)
 
     records: list[Record] = []
@@ -322,10 +333,15 @@ def parse_px5_capture(payloads: list[str]) -> Px5Capture:
         records.append(Record(record_id, WORK_BY_ID[record_id], minimum, maximum))
     memory_control = struct.unpack_from(f"<{memory_count}I", binary, offset)
     offset += memory_count * 4
+    precision: tuple[int, ...] = ()
+    if schema == "PX6":
+        precision = struct.unpack_from(f"<{PX6_PRECISION_COUNT}I", binary, offset)
+        offset += PX6_PRECISION_COUNT * 4
     if offset != len(binary) - 4:
-        raise ValueError("PX5 binary parser did not consume the complete payload")
+        raise ValueError(f"{schema} binary parser did not consume the complete payload")
 
-    return Px5Capture(
+    return Capture(
+        schema,
         version,
         conformance_run,
         timing_run,
@@ -338,24 +354,23 @@ def parse_px5_capture(payloads: list[str]) -> Px5Capture:
         tuple(statuses),
         tuple(records),
         tuple(memory_control),
+        tuple(precision),
         claimed_binary_crc,
     )
 
 
 def payloads_from_paths(paths: list[str]) -> list[str]:
-    prefix = "PX5/"
-
     def from_text(text: str) -> list[str]:
         found: list[str] = []
         for line in text.splitlines():
-            position = line.find(prefix)
-            if position >= 0:
-                found.append(line[position:].split()[0])
+            positions = [p for p in (line.find("PX5/"), line.find("PX6/")) if p >= 0]
+            if positions:
+                found.append(line[min(positions):].split()[0])
         return found
 
     payloads: list[str] = []
     for value in paths:
-        if value.startswith(prefix):
+        if value.startswith(("PX5/", "PX6/")):
             payloads.append(value)
             continue
         text = pathlib.Path(value).read_text(encoding="utf-8")
@@ -365,9 +380,10 @@ def payloads_from_paths(paths: list[str]) -> list[str]:
     return payloads
 
 
-def print_px5_report(capture: Px5Capture, baseline: Px5Capture | None) -> int:
+def print_report(capture: Capture, baseline: Capture | None) -> int:
+    page_count = PX5_PAGE_COUNT if capture.schema == "PX5" else PX6_PAGE_COUNT
     print(
-        f"# schema=PX5 pages={PX5_PAGE_COUNT} run={capture.timing_run:02X} "
+        f"# schema={capture.schema} pages={page_count} run={capture.timing_run:02X} "
         f"digest={capture.timing_digest:08X} records={len(capture.records)} "
         f"binary_crc={capture.binary_crc:08X}"
     )
@@ -434,6 +450,16 @@ def print_px5_report(capture: Px5Capture, baseline: Px5Capture | None) -> int:
             for name, value in zip(names, capture.memory_control)
         )
     )
+    if capture.precision:
+        baseline_precision = baseline.precision if baseline is not None else ()
+        print("precision,label,value" + (",baseline_value,changed" if baseline_precision else ""))
+        for index, value in enumerate(capture.precision):
+            label = precision_label(index)
+            row = f"{index:03d},{label},0x{value:08X}"
+            if baseline_precision:
+                prior = baseline_precision[index]
+                row += f",0x{prior:08X},{int(prior != value)}"
+            print(row)
     settle = capture.observations[
         GTE_SETTLE_FIRST_CASE : GTE_SETTLE_FIRST_CASE + GTE_SETTLE_CASE_COUNT
     ]
@@ -462,22 +488,102 @@ def print_px5_report(capture: Px5Capture, baseline: Px5Capture | None) -> int:
     return 0
 
 
+def precision_label(index: int) -> str:
+    fixed = {
+        0: "spu_delay_boot",
+        1: "spu_ctrl_stat_boot",
+        18: "spu_ctrl_stat_after_single_block",
+        35: "spu_ctrl_stat_after_four_blocks",
+        36: "spu_delay_forced_stable",
+        37: "spu_stable_single_block_hash",
+        38: "spu_stable_four_block_hash",
+        43: "gpu_after_irq_clear",
+        44: "gpu_irq_set_read0",
+        45: "gpu_irq_set_read1",
+        46: "gpu_irq_set_read2",
+        47: "gpu_irq_clear_read0",
+        48: "gpu_irq_clear_read1",
+        61: "timer_target_mode_initial",
+        62: "timer_target_counter_initial",
+        63: "timer_target_counter_after",
+        64: "timer_target_mode_read0",
+        65: "timer_target_mode_read1",
+        66: "timer_target_istat",
+        67: "timer_wrap_mode_initial",
+        68: "timer_wrap_counter_initial",
+        69: "timer_wrap_counter_after",
+        70: "timer_wrap_mode_read0",
+        71: "timer_wrap_mode_read1",
+        72: "timer_wrap_istat",
+    }
+    if index in fixed:
+        return fixed[index]
+    if 2 <= index <= 17:
+        return f"spu_boot_single_block_word_{index - 2:02d}"
+    if 19 <= index <= 34:
+        return f"spu_boot_four_block_word_{index - 19:02d}"
+    if 39 <= index <= 42:
+        return f"spu_fifo_read_word_{index - 39:02d}"
+    if 49 <= index <= 60:
+        offset = index - 49
+        return f"gpu_dma_dir_{offset // 3}_read{offset % 3}"
+    if 73 <= index <= 90:
+        offset = index - 73
+        gaps = (0, 1, 2, 3, 4, 8)
+        fields = ("sxy2", "mac1", "vxy0_after")
+        return f"gte_rtps_v0_gap{gaps[offset // 3]}_{fields[offset % 3]}"
+    if 91 <= index <= 96:
+        offset = index - 91
+        return f"gte_op_full_run{offset // 3}_mac{offset % 3 + 1}"
+    if 97 <= index <= 104:
+        return f"spu_voice0_offset_{(index - 97) * 2:02X}_write_ffff"
+    if index == 105:
+        return "otc_chcr_before_start"
+    if 106 <= index <= 111:
+        return f"otc_chcr_read{index - 106}"
+    if index == 112:
+        return "otc_madr_after"
+    if index == 113:
+        return "otc_bcr_after"
+    if index == 114:
+        return "otc_remaining_busy_polls"
+    if index == 115:
+        return "otc_first_word"
+    if index == 116:
+        return "otc_last_word"
+    if 117 <= index <= 119:
+        return f"gte_nclip_scene_{index - 117}_mac0"
+    if 120 <= index <= 123:
+        return f"gte_rtpt_e_then_nclip_a_run{index - 120}"
+    if index == 124:
+        return "gte_rtpt_e_then_nclip_a_sequence"
+    if index == 125:
+        return "gte_rtpt_e_then_nclip_b_sequence"
+    if index == 126:
+        return "gte_rtpt_e_then_nclip_c_sequence"
+    if index == 127:
+        return "gte_nclip_a_after_c_sequence"
+    raise ValueError(f"unknown PX6 precision index {index}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--baseline",
-        help="optional PX5 payload file to compare against",
+        help="optional PX5/PX6 payload file to compare against",
     )
     parser.add_argument("payload_or_file", nargs="*")
     args = parser.parse_args()
     try:
-        capture = parse_px5_capture(payloads_from_paths(args.payload_or_file))
+        capture = parse_capture(payloads_from_paths(args.payload_or_file))
         baseline = (
-            parse_px5_capture(payloads_from_paths([args.baseline]))
+            parse_capture(payloads_from_paths([args.baseline]))
             if args.baseline
             else None
         )
-        return print_px5_report(capture, baseline)
+        if baseline is not None and baseline.schema != capture.schema:
+            raise ValueError("baseline and capture schemas differ")
+        return print_report(capture, baseline)
     except (OSError, UnicodeError, ValueError) as exc:
         print(f"hwtest-report: {exc}", file=sys.stderr)
         return 2
