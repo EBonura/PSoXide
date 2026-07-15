@@ -451,6 +451,7 @@ fn equipment_test_project() -> (ProjectDocument, crate::ResourceId) {
             psxanim_path: "assets/models/obsidian_wraith/obsidian_wraith_unsteady_walk.psxanim"
                 .to_string(),
             skeleton: Some(skeleton),
+            target_model: None,
             source: None,
             bake: crate::AnimationClipBakeKind::LegacyShared,
             role: crate::AnimationRole::Idle,

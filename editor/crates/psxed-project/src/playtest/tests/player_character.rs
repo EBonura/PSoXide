@@ -54,6 +54,7 @@ fn animation_set_infers_evade_roles_from_extra_clip_names() {
         ResourceData::AnimationClip(crate::AnimationClipResource {
             psxanim_path: "roll.psxanim".to_string(),
             skeleton: Some(skeleton),
+            target_model: None,
             source: None,
             bake: crate::AnimationClipBakeKind::ModelNative,
             role: AnimationRole::Generic,
@@ -67,6 +68,7 @@ fn animation_set_infers_evade_roles_from_extra_clip_names() {
         ResourceData::AnimationClip(crate::AnimationClipResource {
             psxanim_path: "backstep.psxanim".to_string(),
             skeleton: Some(skeleton),
+            target_model: None,
             source: None,
             bake: crate::AnimationClipBakeKind::ModelNative,
             role: AnimationRole::Generic,
@@ -80,6 +82,7 @@ fn animation_set_infers_evade_roles_from_extra_clip_names() {
         ResourceData::AnimationClip(crate::AnimationClipResource {
             psxanim_path: "attack.psxanim".to_string(),
             skeleton: Some(skeleton),
+            target_model: None,
             source: None,
             bake: crate::AnimationClipBakeKind::ModelNative,
             role: AnimationRole::Attack,
@@ -93,6 +96,7 @@ fn animation_set_infers_evade_roles_from_extra_clip_names() {
         ResourceData::AnimationClip(crate::AnimationClipResource {
             psxanim_path: "heavy.psxanim".to_string(),
             skeleton: Some(skeleton),
+            target_model: None,
             source: None,
             bake: crate::AnimationClipBakeKind::ModelNative,
             role: AnimationRole::Generic,
