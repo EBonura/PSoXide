@@ -41,14 +41,34 @@ pub(super) fn setup_gte_for_camera(camera: ViewportCameraState) -> psx_engine::W
     // = view·(-cam_local) where cam_local lives entirely within
     // a small local range. Orbit anchors on its target; Free anchors
     // on its position, which keeps large authored rooms camera-local.
-    let cam_local = [cam_x - anchor[0], cam_y - anchor[1], cam_z - anchor[2]];
+    // Zoom-out depth guard: projected depth lives in the GTE's 16-bit
+    // SZ range, so a large orbit radius saturates it long before the
+    // radius clamp and the view distorts instead of receding. A
+    // perspective image is invariant under uniformly scaling the scene
+    // and the camera offset together, so once the radius leaves the
+    // safe band, shift BOTH the anchor-relative vertices
+    // (`world_to_view`) and the camera offset down by 2^k. Keeps
+    // radius>>k <= 24576; with anchor-relative geometry <= 32767 the
+    // worst-case depth stays inside 65535 for any k.
+    let mut view_shift = 0u32;
+    if camera.mode == psxed_ui::ViewportCameraMode::Orbit {
+        while (camera.radius >> view_shift) > 24_576 {
+            view_shift += 1;
+        }
+    }
+
+    let cam_local = [
+        (cam_x - anchor[0]) >> view_shift,
+        (cam_y - anchor[1]) >> view_shift,
+        (cam_z - anchor[2]) >> view_shift,
+    ];
     let tr = Vec3I32::new(
         -dot_view_world(view.m[0], cam_local),
         -dot_view_world(view.m[1], cam_local),
         -dot_view_world(view.m[2], cam_local),
     );
 
-    set_view_anchor(anchor);
+    set_view_anchor(anchor, view_shift);
     gte_scene::load_rotation(&view);
     gte_scene::load_translation(tr);
     gte_scene::set_screen_offset(SCREEN_CX << 16, SCREEN_CY << 16);
@@ -68,21 +88,22 @@ pub(super) fn setup_gte_for_camera(camera: ViewportCameraState) -> psx_engine::W
 }
 
 /// Shared anchor that `world_to_view` subtracts from each vertex
-/// before squashing to `i16`. Set per-frame by
-/// `setup_gte_for_camera` to the camera anchor so the emitted
-/// vertices stay anchor-relative -- the GTE absorbs the offset via
-/// its translation register. Without this, a single 32-sector
-/// room (32 × 1024 = 32 768) sits exactly on the i16 cliff.
-static VIEW_ANCHOR: std::sync::Mutex<[i32; 3]> = std::sync::Mutex::new([0, 0, 0]);
+/// before squashing to `i16`, plus the zoom-out shift applied to both
+/// the vertices and the camera offset (see `setup_gte_for_camera`).
+/// Set per-frame to the camera anchor so the emitted vertices stay
+/// anchor-relative -- the GTE absorbs the offset via its translation
+/// register. Without this, a single 32-sector room
+/// (32 × 1024 = 32 768) sits exactly on the i16 cliff.
+static VIEW_ANCHOR: std::sync::Mutex<([i32; 3], u32)> = std::sync::Mutex::new(([0, 0, 0], 0));
 
-pub(super) fn set_view_anchor(anchor: [i32; 3]) {
+pub(super) fn set_view_anchor(anchor: [i32; 3], shift: u32) {
     if let Ok(mut a) = VIEW_ANCHOR.lock() {
-        *a = anchor;
+        *a = (anchor, shift);
     }
 }
 
-pub(super) fn view_anchor() -> [i32; 3] {
-    VIEW_ANCHOR.lock().map(|a| *a).unwrap_or([0, 0, 0])
+pub(super) fn view_anchor() -> ([i32; 3], u32) {
+    VIEW_ANCHOR.lock().map(|a| *a).unwrap_or(([0, 0, 0], 0))
 }
 
 /// `view_row · world_pos` with the >>12 the GTE does internally for
@@ -124,9 +145,9 @@ pub(super) fn cos_q12_turn(angle_q12: u16) -> i32 {
 /// local, but the editor can inspect imported TR levels whose full
 /// world coordinates are much larger than a single GTE input range.
 pub(super) fn world_to_view(world: [i32; 3]) -> Vec3I16 {
-    let a = view_anchor();
-    let lx = world[0] - a[0];
-    let ly = world[1] - a[1];
-    let lz = world[2] - a[2];
+    let (a, shift) = view_anchor();
+    let lx = (world[0] - a[0]) >> shift;
+    let ly = (world[1] - a[1]) >> shift;
+    let lz = (world[2] - a[2]) >> shift;
     Vec3I16::new(clamp_i16(lx), clamp_i16(ly), clamp_i16(lz))
 }
