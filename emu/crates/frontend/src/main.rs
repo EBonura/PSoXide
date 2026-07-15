@@ -66,7 +66,7 @@ use crate::playtest_input::Port1PadSample;
 use crate::ui::profiler::FrameProfileSample;
 use crate::ui::{menu::MenuInput, MenuOutcome};
 
-use emulator_core::{button, pad::PadMode, spu::SAMPLE_CYCLES};
+use emulator_core::{button, pad::PadMode};
 // `counter` / `task` telemetry IDs feed the editor's Play metrics overlay only.
 #[cfg(feature = "editor")]
 use emulator_core::telemetry::{counter, task};
@@ -223,12 +223,6 @@ struct Shell {
     /// massively overfills the audio queue and produces crackle
     /// from dropped samples.
     emu_frame_accum: f32,
-    /// Residual emulated CPU cycles that haven't yet been converted
-    /// into SPU sample ticks. Redux clocks the SPU at 44.1 kHz from
-    /// the PSX master clock (768 cycles/sample); tying audio to host
-    /// redraws instead produces under/over-runs on anything that
-    /// isn't an exact 60 Hz render loop.
-    audio_cycle_accum: u64,
     /// Phase C -- when `Some`, the experimental compute-shader
     /// rasterizer is shadowing the CPU rasterizer: each frame the
     /// CPU's `cmd_log` is drained and replayed onto the GPU compute
@@ -321,7 +315,6 @@ impl Shell {
             audio,
             input,
             emu_frame_accum: 0.0,
-            audio_cycle_accum: 0,
             compute_backend,
             display_gpu_compute: gpu_compute,
             hw_seen_gpu_resync_generation: 0,
@@ -929,8 +922,6 @@ impl ApplicationHandler for Shell {
                         if let Some(bus) = self.state.bus.as_mut() {
                             pad_sample.apply_to_bus(bus);
                         }
-                        let cycles_before =
-                            self.state.bus.as_ref().map(|bus| bus.cycles()).unwrap_or(0);
                         let draw_log_start = self
                             .state
                             .bus
@@ -965,37 +956,28 @@ impl ApplicationHandler for Shell {
                         // timing model.
                         let audio_start = Instant::now();
                         let effective_audio_volume = self.state.effective_audio_volume();
-                        let (guest_events, guest_debug_logs) = if let Some(bus) =
-                            self.state.bus.as_mut()
-                        {
-                            let cycles_after = bus.cycles();
-                            self.audio_cycle_accum = self
-                                .audio_cycle_accum
-                                .saturating_add(cycles_after.saturating_sub(cycles_before));
-                            let sample_count = (self.audio_cycle_accum / SAMPLE_CYCLES) as usize;
-                            self.audio_cycle_accum %= SAMPLE_CYCLES;
-                            if sample_count > 0 {
-                                bus.run_spu_samples(sample_count);
-                            }
-                            if let Some(audio) = self.audio.as_ref() {
-                                audio.set_volume(effective_audio_volume);
-                                let samples = bus.spu.drain_audio();
-                                if !samples.is_empty() {
-                                    audio.push_samples(&samples);
+                        let (guest_events, guest_debug_logs) =
+                            if let Some(bus) = self.state.bus.as_mut() {
+                                bus.run_spu_to_current_cycle();
+                                if let Some(audio) = self.audio.as_ref() {
+                                    audio.set_volume(effective_audio_volume);
+                                    let samples = bus.spu.drain_audio();
+                                    if !samples.is_empty() {
+                                        audio.push_samples(&samples);
+                                    }
+                                    // Surface the cpal ring depth in the HUD.
+                                    self.state.hud.set_audio_queue_len(audio.queue_len());
+                                } else {
+                                    // No output device -- drain and discard so the
+                                    // SPU's internal queue doesn't grow unbounded.
+                                    let _ = bus.spu.drain_audio();
                                 }
-                                // Surface the cpal ring depth in the HUD.
-                                self.state.hud.set_audio_queue_len(audio.queue_len());
+                                let events = bus.telemetry.drain_events();
+                                let logs = bus.telemetry.drain_debug_logs();
+                                (events, logs)
                             } else {
-                                // No output device -- drain and discard so the
-                                // SPU's internal queue doesn't grow unbounded.
-                                let _ = bus.spu.drain_audio();
-                            }
-                            let events = bus.telemetry.drain_events();
-                            let logs = bus.telemetry.drain_debug_logs();
-                            (events, logs)
-                        } else {
-                            (Vec::new(), Vec::new())
-                        };
+                                (Vec::new(), Vec::new())
+                            };
                         let guest_profile = self.state.profiler.consume_guest_events(&guest_events);
                         if !guest_debug_logs.is_empty() {
                             // Surface guest debug logs to the host console. The
@@ -1013,10 +995,6 @@ impl ApplicationHandler for Shell {
                     self.emu_frame_accum -= (frames_to_run as f32) * TARGET_FRAME_DT;
                 } else {
                     self.emu_frame_accum = 0.0;
-                    // Throw away any fractional carry when emulation is
-                    // paused or no game is running so a later launch or
-                    // resume doesn't inherit cycles from an older run.
-                    self.audio_cycle_accum = 0;
                 }
                 profile.cpu_ticks = self.state.cpu.tick().saturating_sub(cpu_tick_before) as f32;
                 profile.bus_cycles = self

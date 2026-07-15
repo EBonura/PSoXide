@@ -275,6 +275,28 @@ fn getstat_reports_then_clears_shell_open_sticky_bit() {
 }
 
 #[test]
+fn mounted_getstat_fifth_request_crosses_maintenance_sweep() {
+    let mut cd = CdRom::new();
+    cd.insert_disc(Some(Disc::from_bin(vec![0; psx_iso::SECTOR_BYTES])));
+
+    for request in 1..=5 {
+        cd.pending.clear();
+        cd.scheduling_cycle = request * 100_000;
+        cd.cmd_getstat();
+        let deadline = cd.pending.front().expect("GetStat response").deadline;
+        let extra = if request == 5 {
+            GETSTAT_MAINTENANCE_CYCLES
+        } else {
+            0
+        };
+        assert_eq!(
+            deadline,
+            request * 100_000 + FIRST_RESPONSE_WITH_MEDIA_CYCLES + extra
+        );
+    }
+}
+
+#[test]
 fn getlocl_without_disc_returns_error() {
     let mut cd = CdRom::new();
     // No disc.

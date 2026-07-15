@@ -160,6 +160,10 @@ fn default_u32_256() -> [u32; 256] {
     [0; 256]
 }
 
+fn default_true() -> bool {
+    true
+}
+
 /// Which of the two sub-devices is active in the current SIO
 /// transaction.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -489,6 +493,11 @@ pub enum PadMode {
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct DigitalPad {
     buttons: ButtonState,
+    /// Whether this device implements the DualShock configuration protocol.
+    /// `false` models an original SCPH-1080-class digital controller, which
+    /// remains ID 0x41 when games attempt the analog-mode handshake.
+    #[serde(default = "default_true")]
+    analog_capable: bool,
     /// Right-stick horizontal axis, 0..=255 (centre `0x80`).
     right_x: u8,
     /// Right-stick vertical axis.
@@ -590,6 +599,7 @@ impl DigitalPad {
     pub fn new() -> Self {
         Self {
             buttons: ButtonState::NONE,
+            analog_capable: true,
             right_x: STICK_CENTER,
             right_y: STICK_CENTER,
             left_x: STICK_CENTER,
@@ -614,6 +624,16 @@ impl DigitalPad {
             recent_polls: [PollSnapshot::default(); 8],
             recent_poll_head: 0,
             recent_poll_len: 0,
+        }
+    }
+
+    /// Build an original digital-only controller. It uses the same button
+    /// packet as a DualShock in digital mode but does not implement config,
+    /// analog axes, locking, or rumble.
+    pub fn new_digital_only() -> Self {
+        Self {
+            analog_capable: false,
+            ..Self::new()
         }
     }
 
@@ -690,7 +710,7 @@ impl DigitalPad {
     ///
     /// Returns `true` when the visible poll mode changed.
     pub fn press_analog_button(&mut self) -> bool {
-        if self.analog_locked || self.mode == PadMode::Config {
+        if !self.analog_capable || self.analog_locked || self.mode == PadMode::Config {
             return false;
         }
         self.mode = match self.mode {
@@ -705,7 +725,11 @@ impl DigitalPad {
     /// Digital if it is already Analog. Returns `true` when the mode
     /// changed.
     pub fn force_analog_mode(&mut self) -> bool {
-        if self.analog_locked || self.mode == PadMode::Config || self.mode == PadMode::Analog {
+        if !self.analog_capable
+            || self.analog_locked
+            || self.mode == PadMode::Config
+            || self.mode == PadMode::Analog
+        {
             return false;
         }
         self.mode = PadMode::Analog;
@@ -807,6 +831,9 @@ impl DigitalPad {
                 PadMode::Digital => DIGITAL_POLL_LAST,
                 PadMode::Analog | PadMode::Config => ANALOG_POLL_LAST,
             },
+            0x43 | 0x44 | 0x45 | 0x46 | 0x47 | 0x4C | 0x4D if !self.analog_capable => {
+                DIGITAL_POLL_LAST
+            }
             0x43 | 0x44 | 0x45 | 0x46 | 0x47 | 0x4C | 0x4D => ANALOG_POLL_LAST,
             // Unknown command -- abort after the ID bytes (steps
             // 0 + 1) have been exchanged.
@@ -818,6 +845,9 @@ impl DigitalPad {
     /// step's TX has been observed, BEFORE `self.step` advances.
     /// Dispatches on `self.cmd`.
     fn payload_byte(&mut self, tx: u8) -> u8 {
+        if !self.analog_capable && self.cmd != 0x42 {
+            return self.poll_byte(self.step);
+        }
         match self.cmd {
             // 0x42 -- standard button poll. 4 payload bytes in
             // Digital, 8 in Analog. `self.step` currently points at
@@ -1724,6 +1754,27 @@ mod tests {
             let _ = pad.exchange(0x00);
         }
         assert_eq!(pad.mode(), PadMode::Analog);
+    }
+
+    #[test]
+    fn original_digital_pad_ignores_dualshock_config_sequence() {
+        let mut pad = DigitalPad::new_digital_only();
+        assert_eq!(pad.mode(), PadMode::Digital);
+
+        // A digital-only controller answers with its ordinary short packet
+        // and drops ACK after the two button bytes. It never enters config.
+        assert_eq!(pad.exchange(0x43), (0x41, true));
+        assert_eq!(pad.exchange(0x00), (0x5A, true));
+        assert_eq!(pad.exchange(0x01), (0xFF, true));
+        assert_eq!(pad.exchange(0x00), (0xFF, false));
+        assert_eq!(pad.mode(), PadMode::Digital);
+        assert!(!pad.force_analog_mode());
+        assert!(!pad.press_analog_button());
+
+        assert_eq!(pad.exchange(0x42), (0x41, true));
+        assert_eq!(pad.exchange(0x00), (0x5A, true));
+        assert_eq!(pad.exchange(0x00), (0xFF, true));
+        assert_eq!(pad.exchange(0x00), (0xFF, false));
     }
 
     #[test]
