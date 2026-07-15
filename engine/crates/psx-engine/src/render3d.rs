@@ -2787,6 +2787,19 @@ fn cpu_project_gte_view(view: ViewVertex, projection: WorldProjection) -> Option
 /// i16, so a rare oversized view vertex (far off-screen) falls back to the CPU
 /// path. Leaves the GTE rotation clobbered; the caller restores its own state.
 fn project_gte_view_vertex(view: ViewVertex, projection: WorldProjection) -> ProjectedVertex {
+    scene::load_rotation(&Mat3I16::IDENTITY);
+    scene::load_translation(Vec3I32::ZERO);
+    project_gte_view_vertex_identity_loaded(view, projection)
+}
+
+/// [`project_gte_view_vertex`] minus the identity/zero load: the caller
+/// has already put the identity rotation and zero translation in the GTE,
+/// so a batch of view-space vertices pays for that load once (see the
+/// blended-chunk flush in `world_pass_model.rs`).
+fn project_gte_view_vertex_identity_loaded(
+    view: ViewVertex,
+    projection: WorldProjection,
+) -> ProjectedVertex {
     let (Ok(x), Ok(y), Ok(z)) = (
         i16::try_from(view.x),
         i16::try_from(view.y),
@@ -2795,8 +2808,6 @@ fn project_gte_view_vertex(view: ViewVertex, projection: WorldProjection) -> Pro
         return cpu_project_gte_view(view, projection)
             .unwrap_or_else(|| ProjectedVertex::new(0, 0, projection.near_z - 1));
     };
-    scene::load_rotation(&Mat3I16::IDENTITY);
-    scene::load_translation(Vec3I32::ZERO);
     // Scheduled RTPS wrapper: same op, shared load-delay slots. The
     // compact macro wrapper measured substantially slower on the
     // 161-blended-vertex player path (see docs/perf-30fps.md).
@@ -2806,6 +2817,86 @@ fn project_gte_view_vertex(view: ViewVertex, projection: WorldProjection) -> Pro
     } else {
         ProjectedVertex::new(0, 0, projection.near_z - 1)
     }
+}
+
+/// Number of deferred CPU-blend vertices flushed per batch by
+/// [`flush_blended_model_vertex_chunk`]. Sized so the stack scratch stays
+/// small while still amortizing GTE matrix reloads across a seam cluster.
+#[cfg(not(feature = "vert-debug"))]
+const BLENDED_VERTEX_CHUNK: usize = 32;
+
+/// Project a chunk of deferred CPU-blend model vertices in joint-grouped
+/// phases.
+///
+/// The per-vertex slow path ([`project_blended_textured_model_vertex`])
+/// swaps the GTE rotation/translation three times per vertex: secondary
+/// joint, identity for the RTPS wrapper, primary restore. Blended
+/// vertices cluster at joint seams, so deferring them into a chunk
+/// amortizes those control-register loads: phase 1 transforms every
+/// chunk vertex while the caller's primary joint is still loaded, phase
+/// 2 reloads a secondary joint only when the seam's `joint1` changes and
+/// lerps in place, phase 3 projects the whole chunk under one
+/// identity/zero load, and phase 4 restores the caller's primary state.
+/// The per-vertex arithmetic is identical to the slow path, so frames
+/// stay bit-exact.
+///
+/// Caller guarantees every index in `chunk` is in range for `vertices`
+/// and `projected_vertices`, belongs to the part whose joint is
+/// `primary`, and passed [`model_vertex_uses_cpu_blend`].
+#[cfg(not(feature = "vert-debug"))]
+#[allow(clippy::too_many_arguments)]
+fn flush_blended_model_vertex_chunk(
+    chunk: &[u16],
+    vertices: &[ModelVertex],
+    primary: JointViewTransform,
+    joint_view_transforms: &[JointViewTransform],
+    projection: WorldProjection,
+    near_z: i32,
+    projected_vertices: &mut [ProjectedVertex],
+    all_in_front: &mut bool,
+    all_inside_hw_bounds: &mut bool,
+    min_x: &mut i16,
+    max_x: &mut i16,
+    min_y: &mut i16,
+    max_y: &mut i16,
+) {
+    let chunk = &chunk[..chunk.len().min(BLENDED_VERTEX_CHUNK)];
+    let mut view_blend = [ViewVertex::ZERO; BLENDED_VERTEX_CHUNK];
+    // Phase 1: primary-joint transforms while the caller's state is live.
+    for (slot, &vertex_index) in chunk.iter().enumerate() {
+        let a = scene::transform_vertex_scheduled(vertices[vertex_index as usize].position);
+        view_blend[slot] = ViewVertex::new(a.x, a.y, a.z);
+    }
+    // Phase 2: secondary transforms, reloading only on joint1 change.
+    let mut loaded_joint1 = u16::MAX;
+    for (slot, &vertex_index) in chunk.iter().enumerate() {
+        let vertex = vertices[vertex_index as usize];
+        if u16::from(vertex.joint1) != loaded_joint1 {
+            let secondary = joint_view_transforms[vertex.joint1 as usize];
+            scene::load_rotation(&secondary.rotation);
+            scene::load_translation(secondary.translation);
+            loaded_joint1 = u16::from(vertex.joint1);
+        }
+        let b = scene::transform_vertex_scheduled(vertex.position);
+        view_blend[slot] = lerp_view_vertex(
+            view_blend[slot],
+            ViewVertex::new(b.x, b.y, b.z),
+            vertex.blend,
+        );
+    }
+    // Phase 3: one identity/zero load projects the whole chunk.
+    scene::load_rotation(&Mat3I16::IDENTITY);
+    scene::load_translation(Vec3I32::ZERO);
+    for (slot, &vertex_index) in chunk.iter().enumerate() {
+        let projected = project_gte_view_vertex_identity_loaded(view_blend[slot], projection);
+        *all_in_front &= projected_model_vertex_in_front(projected, near_z);
+        *all_inside_hw_bounds &= projected_model_vertex_inside_hw_bounds(projected);
+        track_projected_model_bounds(projected, min_x, max_x, min_y, max_y);
+        projected_vertices[vertex_index as usize] = projected;
+    }
+    // Phase 4: restore the caller's primary joint state.
+    scene::load_rotation(&primary.rotation);
+    scene::load_translation(primary.translation);
 }
 
 /// 256-step linear blend between two view-space positions.
