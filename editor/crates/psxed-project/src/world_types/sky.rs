@@ -2,19 +2,16 @@ use super::*;
 
 /// World sky rendering mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum SkyMode {
     /// Disable authored sky rendering. The renderer clears to
     /// [`SkySettings::lower_color`] only.
     Off,
     /// Draw a cooked cyclorama before world geometry.
+    #[default]
     Gradient,
 }
 
-impl Default for SkyMode {
-    fn default() -> Self {
-        Self::Gradient
-    }
-}
 
 /// World-level sky configuration shared by descendant Rooms.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

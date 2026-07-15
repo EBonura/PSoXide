@@ -62,27 +62,7 @@ pub(super) fn expect_room_material_depth(label: &str, bytes: &[u8]) -> Result<()
 }
 
 fn is_supported_room_material_dimension(size: u16) -> bool {
-    size >= 8 && size <= 64 && size.is_power_of_two() && size % 8 == 0
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn room_material_rejects_non_texture_window_dimensions() {
-        let mut bytes = std::fs::read(
-            crate::default_project_dir().join("assets/textures/delven_01_slateflr1a_q2.psxt"),
-        )
-        .expect("starter Delven texture exists");
-        // AssetHeader is 12 bytes; TextureHeader width/height live at
-        // payload offsets 2/4. Mutating only the dimensions is enough
-        // to exercise the room-material contract.
-        bytes[14..16].copy_from_slice(&48u16.to_le_bytes());
-
-        let error = expect_room_material_depth("Odd Tile", &bytes).expect_err("48-wide rejected");
-        assert!(error.contains("power-of-two room material"));
-    }
+    (8..=64).contains(&size) && size.is_power_of_two() && size.is_multiple_of(8)
 }
 
 /// The `.psxt` path carried by a material resource, or `None` for
@@ -118,4 +98,24 @@ pub(super) fn load_psxt_bytes(
             path.display()
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn room_material_rejects_non_texture_window_dimensions() {
+        let mut bytes = std::fs::read(
+            crate::default_project_dir().join("assets/textures/delven_01_slateflr1a_q2.psxt"),
+        )
+        .expect("starter Delven texture exists");
+        // AssetHeader is 12 bytes; TextureHeader width/height live at
+        // payload offsets 2/4. Mutating only the dimensions is enough
+        // to exercise the room-material contract.
+        bytes[14..16].copy_from_slice(&48u16.to_le_bytes());
+
+        let error = expect_room_material_depth("Odd Tile", &bytes).expect_err("48-wide rejected");
+        assert!(error.contains("power-of-two room material"));
+    }
 }
