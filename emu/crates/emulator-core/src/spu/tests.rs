@@ -72,6 +72,24 @@ fn voice_adsr_current_reads_live_envelope() {
 }
 
 #[test]
+fn voice_adsr_current_manual_write_preserves_signed_16_bit_value() {
+    let mut s = Spu::new();
+    let envx = VOICE_BASE + voice_offset::ADSR_CURRENT;
+
+    s.write16(envx, 0xFFFF);
+    assert_eq!(s.read16(envx), 0xFFFF);
+    assert_eq!(s.voices[0].envelope, -1);
+
+    s.write16(envx, 0x8000);
+    assert_eq!(s.read16(envx), 0x8000);
+    assert_eq!(s.voices[0].envelope, i16::MIN as i32);
+
+    // An inactive ADSR generator does not erase a manual ENVX write.
+    s.voices[0].step_envelope();
+    assert_eq!(s.read16(envx), 0x8000);
+}
+
+#[test]
 fn current_main_volume_regs_do_not_mirror_main_volume() {
     let mut s = Spu::new();
     s.write16(MAIN_VOL_L, 0x3FFF);
