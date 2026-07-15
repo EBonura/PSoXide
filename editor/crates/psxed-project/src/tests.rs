@@ -1886,6 +1886,7 @@ fn animation_library_resources_roundtrip_and_resolve_by_path() {
         ResourceData::AnimationClip(AnimationClipResource {
             psxanim_path: "assets/animations/idle.psxanim".to_string(),
             skeleton: Some(skeleton),
+            target_model: None,
             source: None,
             bake: AnimationClipBakeKind::LegacyShared,
             role: AnimationRole::Idle,
@@ -1937,6 +1938,105 @@ fn animation_library_resources_roundtrip_and_resolve_by_path() {
         restored.resolved_model_animation_index(model, idle_animation),
         Some(0),
         "standalone clips matching legacy model-local paths resolve to the stable legacy index",
+    );
+}
+
+#[test]
+fn model_targeted_animation_clips_do_not_leak_across_shared_skeletons() {
+    let mut project = ProjectDocument::new("Targeted Animation Test");
+    let skeleton = project.add_resource(
+        "Humanoid Skeleton",
+        ResourceData::Skeleton(SkeletonResource {
+            joint_count: 1,
+            parents: vec![None],
+            signature: "psx-parent-v1:1:root".to_string(),
+            note: String::new(),
+        }),
+    );
+    let make_model = |path: &str| ModelResource {
+        model_path: path.to_string(),
+        source_path: None,
+        texture_path: None,
+        skeleton: Some(skeleton),
+        world_height: 1024,
+        collision_radius: default_model_collision_radius_for_height(1024),
+        scale_q8: [MODEL_SCALE_ONE_Q8; 3],
+        default_visual_yaw_q12: 0,
+        attachments: Vec::new(),
+    };
+    let model_a = project.add_resource(
+        "Model A",
+        ResourceData::Model(make_model("assets/models/a.psxmdl")),
+    );
+    let model_b = project.add_resource(
+        "Model B",
+        ResourceData::Model(make_model("assets/models/b.psxmdl")),
+    );
+    let make_clip = |path: &str, target_model| AnimationClipResource {
+        psxanim_path: path.to_string(),
+        skeleton: Some(skeleton),
+        target_model,
+        source: None,
+        bake: if target_model.is_some() {
+            AnimationClipBakeKind::Retargeted
+        } else {
+            AnimationClipBakeKind::LegacyShared
+        },
+        role: AnimationRole::Idle,
+        looping: true,
+        tags: Vec::new(),
+        calibration: Default::default(),
+    };
+    let shared = project.add_resource(
+        "Shared",
+        ResourceData::AnimationClip(make_clip("assets/animations/shared.psxanim", None)),
+    );
+    let clip_a = project.add_resource(
+        "A Idle",
+        ResourceData::AnimationClip(make_clip("assets/animations/a_idle.psxanim", Some(model_a))),
+    );
+    let clip_b = project.add_resource(
+        "B Idle",
+        ResourceData::AnimationClip(make_clip("assets/animations/b_idle.psxanim", Some(model_b))),
+    );
+
+    let resolved_a = project.resolved_model_animation_clips(model_a);
+    assert_eq!(
+        resolved_a
+            .iter()
+            .filter_map(|clip| clip.animation_resource)
+            .collect::<Vec<_>>(),
+        vec![clip_a, shared],
+    );
+    assert_eq!(project.resolved_model_animation_index(model_a, clip_b), None);
+
+    let resolved_b = project.resolved_model_animation_clips(model_b);
+    assert_eq!(
+        resolved_b
+            .iter()
+            .filter_map(|clip| clip.animation_resource)
+            .collect::<Vec<_>>(),
+        vec![clip_b, shared],
+    );
+    assert_eq!(project.resolved_model_animation_index(model_b, clip_a), None);
+
+    let restored = ProjectDocument::from_ron_str(&project.to_ron_string().unwrap()).unwrap();
+    assert_eq!(restored, project);
+
+    let mut deleted = restored;
+    deleted.delete_resource(model_a).unwrap();
+    let ResourceData::AnimationClip(orphaned) = &deleted.resource(clip_a).unwrap().data else {
+        unreachable!();
+    };
+    assert_eq!(orphaned.target_model, None);
+    assert_eq!(orphaned.skeleton, None);
+    assert_eq!(
+        deleted
+            .resolved_model_animation_clips(model_b)
+            .iter()
+            .filter_map(|clip| clip.animation_resource)
+            .collect::<Vec<_>>(),
+        vec![clip_b, shared],
     );
 }
 

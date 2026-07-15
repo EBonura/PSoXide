@@ -815,11 +815,11 @@ impl EditorWorkspace {
                             "Collapse every vertex to its dominant bone, dropping secondary skin weights. Keeps the model on the GTE single-bone fast path with no CPU-blend vertices -- the PS1-preferred rigid skinning.",
                         );
                         ui.checkbox(
-                            &mut dialog.collapse_finger_bones,
-                            "Collapse finger bones",
+                            &mut dialog.collapse_detail_bones,
+                            "Collapse detail bones",
                         )
                         .on_hover_text(
-                            "Reweights finger chains into the hand joints so humanoid rigs share the smaller PS1 skeleton contract.",
+                            "Reweights finger chains and Mixamo terminal bones into their nearest retained joints so humanoid rigs share the smaller PS1 skeleton contract.",
                         );
                         ui.label(
                             RichText::new("Texture depth: 8bpp indexed")
@@ -1199,7 +1199,7 @@ impl EditorWorkspace {
             // Double-sided models are imported via the dedicated tooling.
             double_sided: false,
             ignore_embedded_animations: false,
-            collapse_bone_patterns: if self.model_import_dialog.collapse_finger_bones {
+            collapse_bone_patterns: if self.model_import_dialog.collapse_detail_bones {
                 psxed_project::model_import::default_collapse_bone_patterns()
             } else {
                 Vec::new()
