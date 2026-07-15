@@ -53,6 +53,10 @@ vis-broad-pvs = ["psx-game-runtime/vis-broad-pvs"]
 vis-coarse-yaw = ["psx-game-runtime/vis-coarse-yaw"]
 vis-full-active-chunks = ["psx-game-runtime/vis-full-active-chunks"]
 vis-player-anchor = []
+# Drawn set = the frustum-clipped portal traversal (per-room draw_distance
+# far clamp + portal narrowing) instead of the unpruned reachability ring.
+# Opt-in until the pop-in behaviour passes an eyes-on gate.
+vis-draw-pruned = []
 room-surface-profile = ["psx-engine/room-surface-profile"]
 cell-select-profile = ["psx-engine/cell-select-profile"]
 # On-screen presented-fps + worst-frame-gap counter for hardware
