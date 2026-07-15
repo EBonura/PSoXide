@@ -28,9 +28,59 @@ use psx_spu::SpuAddr;
 use psx_vram::{Clut, TexDepth, Tpage};
 
 mod cpu_tests;
+mod photo;
 use cpu_tests::*;
+use photo::PhotoCapture;
 
-const SUITE_VERSION: &str = "HWTEST v0.2";
+// A complete 4 KiB direct-mapped PS1 I-cache footprint. The custom return
+// register lets inline timing assembly call it without clobbering Rust's $ra.
+core::arch::global_asm!(
+    ".set noreorder",
+    ".section .text.hwtest_icache",
+    ".balign 4096",
+    ".globl __hwtest_icache_block",
+    "__hwtest_icache_block:",
+    ".rept 1022",
+    "nop",
+    ".endr",
+    "jr $10",
+    "nop",
+    // Three one-line return targets whose entry points occupy words 0, 1,
+    // and 2 of separate 16-byte cache lines. The non-executed SLL-to-zero
+    // markers make their final linked layouts machine-verifiable.
+    ".section .text.hwtest_icache_entries",
+    ".balign 4096",
+    ".globl __hwtest_icache_entry_w0",
+    "__hwtest_icache_entry_w0:",
+    "jr $10",
+    "nop",
+    ".word 0x00000500",
+    ".word 0x00000540",
+    ".balign 16",
+    ".word 0x00000580",
+    ".globl __hwtest_icache_entry_w1",
+    "__hwtest_icache_entry_w1:",
+    "jr $10",
+    "nop",
+    ".word 0x000005C0",
+    ".balign 16",
+    ".word 0x00000600",
+    ".word 0x00000640",
+    ".globl __hwtest_icache_entry_w2",
+    "__hwtest_icache_entry_w2:",
+    "jr $10",
+    "nop",
+    ".set reorder",
+);
+
+unsafe extern "C" {
+    fn __hwtest_icache_block();
+    fn __hwtest_icache_entry_w0();
+    fn __hwtest_icache_entry_w1();
+    fn __hwtest_icache_entry_w2();
+}
+
+const SUITE_VERSION: &str = "HWTEST v0.12";
 const SCREEN_W: i16 = 320;
 const SCREEN_H: i16 = 240;
 const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
@@ -80,6 +130,7 @@ const TIMER_MODE_REACHED_TARGET: u16 = 1 << 11;
 const TIMER_MODE_REACHED_WRAP: u16 = 1 << 12;
 
 static SPIN_SINK: u32 = 0;
+static mut TIMING_WORD: u32 = 0;
 
 const fn mips_r(rs: u32, rt: u32, rd: u32, shamt: u32, funct: u32) -> u32 {
     (rs << 21) | (rt << 16) | (rd << 11) | (shamt << 6) | funct
@@ -157,7 +208,7 @@ impl Mode {
             Self::CpuScan => "X FINGERPRINT SAFE MIPS-I FORMS",
             Self::GteScan => "X FINGERPRINT COP2 COMMAND MATRIX",
             Self::SpuScan => "X MAP SPU VOICE REG READBACK",
-            Self::TimingScan => "X SAMPLE TIMER DMA GTE COSTS",
+            Self::TimingScan => "L/R CAPTURE PAGE  X RESAMPLE TIMING",
         }
     }
 
@@ -199,7 +250,7 @@ impl Mode {
             Self::CpuScan => "EXTRA",
             Self::GteScan => "FLAG HITS",
             Self::SpuScan => "CHANGED",
-            Self::TimingScan => "TIMER SUM",
+            Self::TimingScan => "JITTER",
         }
     }
 
@@ -390,6 +441,54 @@ struct ScanReport {
     aux: u32,
     note: &'static str,
     runs: u8,
+}
+
+const TIMING_RECORD_COUNT: usize = 90;
+const MEMORY_CONTROL_REGISTER_COUNT: usize = 9;
+
+#[derive(Copy, Clone)]
+struct TimingRecord {
+    id: u8,
+    work: u16,
+    min: u16,
+    max: u16,
+}
+
+impl TimingRecord {
+    const fn pending() -> Self {
+        Self {
+            id: 0,
+            work: 0,
+            min: 0,
+            max: 0,
+        }
+    }
+}
+
+#[derive(Copy, Clone)]
+struct TimingReport {
+    summary: ScanReport,
+    records: [TimingRecord; TIMING_RECORD_COUNT],
+    memory_control: [u32; MEMORY_CONTROL_REGISTER_COUNT],
+}
+
+impl TimingReport {
+    const fn pending() -> Self {
+        Self {
+            summary: ScanReport::pending("press x to sample"),
+            records: [TimingRecord::pending(); TIMING_RECORD_COUNT],
+            memory_control: [0; MEMORY_CONTROL_REGISTER_COUNT],
+        }
+    }
+
+    fn with_run(mut self, previous: Self) -> Self {
+        self.summary.runs = previous.summary.runs.wrapping_add(1);
+        self
+    }
+}
+
+const fn timing_page_count() -> usize {
+    photo::CAPTURE_PAGE_COUNT
 }
 
 impl ScanReport {
@@ -1307,7 +1406,8 @@ struct HardwareTests {
     cpu_scan: ScanReport,
     gte_scan: ScanReport,
     spu_scan: ScanReport,
-    timing_scan: ScanReport,
+    timing_scan: TimingReport,
+    timing_capture: PhotoCapture,
     pass_count: u8,
     fail_count: u8,
     warn_count: u8,
@@ -1351,7 +1451,8 @@ impl HardwareTests {
             cpu_scan: ScanReport::pending("press x to sweep"),
             gte_scan: ScanReport::pending("press x to sweep"),
             spu_scan: ScanReport::pending("press x to map"),
-            timing_scan: ScanReport::pending("press x to sample"),
+            timing_scan: TimingReport::pending(),
+            timing_capture: PhotoCapture::new(),
             pass_count: 0,
             fail_count: 0,
             warn_count: 0,
@@ -1381,7 +1482,18 @@ impl HardwareTests {
         self.spu_scan = run_spu_scan();
         print_scan_report(Mode::SpuScan, self.spu_scan);
         self.timing_scan = run_timing_scan();
-        print_scan_report(Mode::TimingScan, self.timing_scan);
+        self.encode_capture(0);
+        print_scan_report(Mode::TimingScan, self.timing_scan.summary);
+    }
+
+    fn encode_capture(&mut self, page: usize) {
+        self.timing_capture.encode(
+            &self.timing_scan,
+            &self.results,
+            self.rerun_count,
+            [self.cpu_scan, self.gte_scan, self.spu_scan],
+            page,
+        );
     }
 
     fn run_section(&mut self, mode: Mode) {
@@ -1414,7 +1526,8 @@ impl HardwareTests {
             }
             Mode::TimingScan => {
                 self.timing_scan = run_timing_scan().with_run(self.timing_scan);
-                print_scan_report(self.mode, self.timing_scan);
+                self.encode_capture(self.page);
+                print_scan_report(self.mode, self.timing_scan.summary);
             }
             _ => self.run_section(self.mode),
         }
@@ -1474,24 +1587,47 @@ impl Scene for HardwareTests {
             }
         }
 
-        if ctx.just_pressed(button::UP) {
+        if ctx.just_pressed(button::START) {
+            self.mode = Mode::TimingScan;
+            self.page = 0;
+            self.encode_capture(0);
+        } else if ctx.just_pressed(button::UP) {
             self.mode = self.mode.previous();
             self.page = 0;
-        }
-        if ctx.just_pressed(button::DOWN) {
+        } else if ctx.just_pressed(button::DOWN) {
             self.mode = self.mode.next();
             self.page = 0;
         }
 
-        if self.mode.is_check_section() && ctx.just_pressed(button::LEFT) {
+        if (self.mode.is_check_section() || matches!(self.mode, Mode::TimingScan))
+            && ctx.just_pressed(button::LEFT)
+        {
+            let pages = if matches!(self.mode, Mode::TimingScan) {
+                timing_page_count()
+            } else {
+                page_count_for_mode(self.mode)
+            };
             self.page = if self.page == 0 {
-                page_count_for_mode(self.mode) - 1
+                pages - 1
             } else {
                 self.page - 1
             };
+            if matches!(self.mode, Mode::TimingScan) {
+                self.encode_capture(self.page);
+            }
         }
-        if self.mode.is_check_section() && ctx.just_pressed(button::RIGHT) {
-            self.page = (self.page + 1) % page_count_for_mode(self.mode);
+        if (self.mode.is_check_section() || matches!(self.mode, Mode::TimingScan))
+            && ctx.just_pressed(button::RIGHT)
+        {
+            let pages = if matches!(self.mode, Mode::TimingScan) {
+                timing_page_count()
+            } else {
+                page_count_for_mode(self.mode)
+            };
+            self.page = (self.page + 1) % pages;
+            if matches!(self.mode, Mode::TimingScan) {
+                self.encode_capture(self.page);
+            }
         }
         if ctx.just_pressed(button::CROSS) {
             self.run_active();
@@ -1522,7 +1658,7 @@ impl Scene for HardwareTests {
                 Mode::CpuScan => draw_scan_report(font, self.mode, self.cpu_scan),
                 Mode::GteScan => draw_scan_report(font, self.mode, self.gte_scan),
                 Mode::SpuScan => draw_scan_report(font, self.mode, self.spu_scan),
-                Mode::TimingScan => draw_scan_report(font, self.mode, self.timing_scan),
+                Mode::TimingScan => photo::draw_capture_page(font, &self.timing_capture, self.page),
                 _ => {}
             }
         }
@@ -1603,7 +1739,7 @@ fn draw_mode_menu(font: &FontAtlas, suite: &HardwareTests) {
     font.draw_text(8, 18, "SECTION", (140, 160, 190));
     font.draw_text(72, 18, suite.mode.label(), (255, 232, 128));
     font.draw_text(184, 18, "UP/DN NEXT", (140, 160, 190));
-    font.draw_text(272, 18, "X RUN", (140, 160, 190));
+    font.draw_text(232, 18, "START CAPTURE", (140, 160, 190));
 }
 
 fn draw_rows(font: &FontAtlas, suite: &HardwareTests, mode: Mode) {
@@ -1777,7 +1913,12 @@ fn draw_case_diagnostic_pass(
 /// they agree.
 fn draw_controller_probe(font: &FontAtlas, suite: &HardwareTests) {
     font.draw_text(8, 30, "PORT 1 SETUP-DELAY SWEEP", (232, 236, 244));
-    font.draw_text(8, 42, "MIN SELECT SETUP THE PAD NEEDS (FIX=2K)", (150, 170, 200));
+    font.draw_text(
+        8,
+        42,
+        "MIN SELECT SETUP THE PAD NEEDS (FIX=2K)",
+        (150, 170, 200),
+    );
 
     let hdr = (140, 160, 190);
     font.draw_text(8, 58, "VARIANT", hdr);
@@ -1843,22 +1984,30 @@ fn draw_controller_probe(font: &FontAtlas, suite: &HardwareTests) {
         font.draw_text(8, 180, "OFFICIAL PAD NEEDS:", Status::Pass.color());
         font.draw_text(160, 180, label, Status::Pass.color());
     } else if base_ok {
-        font.draw_text(8, 180, "PAD WORKS AT BASE TIMING (CLONE)", Status::Pass.color());
+        font.draw_text(
+            8,
+            180,
+            "PAD WORKS AT BASE TIMING (CLONE)",
+            Status::Pass.color(),
+        );
     } else if any_present {
         font.draw_text(8, 180, "ANSWERS BUT NO VARIANT CLEAN", Status::Warn.color());
     } else {
         font.draw_text(8, 180, "NO PAD - ALL VARIANTS DEAD", Status::Warn.color());
     }
     font.draw_text(8, 200, "BASE = OLD NO-WAIT. RERUNS LIVE.", (112, 136, 170));
-    font.draw_text(8, 212, "DOWN = TEST DASHBOARD", (150, 170, 200));
+    font.draw_text(
+        8,
+        212,
+        "DOWN = TESTS   START = TIMING CAPTURE",
+        (150, 170, 200),
+    );
 }
 
 /// A poll is clean when something answered with a valid 0x5A magic and a
 /// classified mode (not the `Unknown` desync bucket).
 fn probe_column_ok(raw: psx_pad::RawPoll) -> bool {
-    raw.mode.is_connected()
-        && !matches!(raw.mode, psx_pad::PadMode::Unknown)
-        && raw.id_high == 0x5A
+    raw.mode.is_connected() && !matches!(raw.mode, psx_pad::PadMode::Unknown) && raw.id_high == 0x5A
 }
 
 const fn mode_short(mode: psx_pad::PadMode) -> &'static str {
@@ -2350,44 +2499,555 @@ fn run_spu_scan() -> ScanReport {
     ScanReport::info(items, hash, changed, "spu voice regs")
 }
 
-fn run_timing_scan() -> ScanReport {
-    const SPINS: [u32; 4] = [256, 1024, 4096, 16384];
+fn run_timing_scan() -> TimingReport {
+    // Stay below the 16-bit root-counter wrap even when silicon RAM/MMIO is
+    // slower than the emulator. Geometric points let the host fit a slope and
+    // intercept instead of treating harness overhead as per-iteration cost.
+    const SPINS: [u32; 4] = [64, 256, 1024, 4096];
+    let mut records = [TimingRecord::pending(); TIMING_RECORD_COUNT];
+    let mut next = 0usize;
 
-    let mut hash = 0x5449_4D31;
-    let mut items = 0u16;
-    let mut aux = 0u32;
+    push_timing_record(&mut records, &mut next, sample_timing(0x00, 0, timed_empty));
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x01, 128, timed_nops),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x02, 128, timed_dependent_alu),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x03, 64, timed_load_hazards),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x04, 64, timed_taken_branches),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x05, 16, || timed_multu_mflo(0x0000_07FF)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x06, 16, || timed_multu_mflo(0x000F_FFFF)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x07, 16, || timed_multu_mflo(0x1357_2468)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x08, 8, timed_divu_mflo),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x09, 64, || timed_load_hazards_at(0x1F80_0000)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x0A, 64, || {
+            let cached = (&raw const TIMING_WORD) as u32;
+            timed_load_hazards_at(0xA000_0000 | (cached & 0x001F_FFFF))
+        }),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x0B, 64, || {
+            timed_stores_at((&raw const TIMING_WORD) as u32)
+        }),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x0C, 64, || timed_stores_at(0x1F80_0000)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x0D, 64, || {
+            let cached = (&raw const TIMING_WORD) as u32;
+            timed_stores_at(0xA000_0000 | (cached & 0x001F_FFFF))
+        }),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x0E, 64, || timed_load_hazards_at(0x1F80_1814)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x0F, 64, || timed_load_hazards_at(irq::I_STAT)),
+    );
 
-    for spin_count in SPINS {
-        let sys = timer_delta(timers::Timer::Timer2, 0, spin_count);
-        let div8 = timer_delta(timers::Timer::Timer2, TIMER_MODE_CLOCK_SOURCE_2, spin_count);
-        let dot = timer_delta(timers::Timer::Timer0, TIMER_MODE_CLOCK_SOURCE_1, spin_count);
-        hash = mix32(hash, spin_count);
-        hash = mix32(hash, sys as u32);
-        hash = mix32(hash, div8 as u32);
-        hash = mix32(hash, dot as u32);
-        aux = aux.wrapping_add(sys as u32);
-        items = items.wrapping_add(3);
+    for (set, spin_count) in SPINS.into_iter().enumerate() {
+        let base = 0x10 + set as u8 * 3;
+        push_timing_record(
+            &mut records,
+            &mut next,
+            sample_timing(base, spin_count as u16, || {
+                timer_delta(timers::Timer::Timer2, 0, spin_count)
+            }),
+        );
+        push_timing_record(
+            &mut records,
+            &mut next,
+            sample_timing(base + 1, spin_count as u16, || {
+                timer_delta(timers::Timer::Timer2, TIMER_MODE_CLOCK_SOURCE_2, spin_count)
+            }),
+        );
+        push_timing_record(
+            &mut records,
+            &mut next,
+            sample_timing(base + 2, spin_count as u16, || {
+                timer_delta(timers::Timer::Timer0, TIMER_MODE_CLOCK_SOURCE_1, spin_count)
+            }),
+        );
     }
 
-    let hblank = timer_delta(timers::Timer::Timer1, TIMER_MODE_CLOCK_SOURCE_1, 0x20000);
-    hash = mix32(hash, hblank as u32);
-    aux = aux.wrapping_add((hblank as u32) << 16);
-    items = items.wrapping_add(1);
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x1C, 1024, || call_uncached_timing(timed_icache_cold)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x1D, 1024, || call_uncached_timing(timed_icache_warm)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x20, 0xFFFF, || {
+            timer_delta(timers::Timer::Timer1, TIMER_MODE_CLOCK_SOURCE_1, 0x20000)
+        }),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x21, 16, timed_gte_rtps_commands),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x22, 8, timed_gte_rtpt_commands),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x23, 16, timed_gte_nclip_commands),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x24, 16, timed_gte_mvmva_commands),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x25, 4, timed_gte_ncdt_commands),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x26, 4, timed_gte_ncct_commands),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x30, 16, || timed_otc_dma_cycles(16)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x31, 64, || timed_otc_dma_cycles(64)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x32, 256, || timed_otc_dma_cycles(256)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x40, 1, timed_cdrom_getstat),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x41, 1, timed_gpu_irq_settle),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x42, 1, || {
+            call_uncached_entry_timing(timed_icache_entry_cold, __hwtest_icache_entry_w0)
+        }),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x43, 1, || {
+            call_uncached_entry_timing(timed_icache_entry_cold, __hwtest_icache_entry_w1)
+        }),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x44, 1, || {
+            call_uncached_entry_timing(timed_icache_entry_cold, __hwtest_icache_entry_w2)
+        }),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x45, 1, || {
+            call_uncached_entry_timing(timed_icache_entry_warm, __hwtest_icache_entry_w0)
+        }),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x46, 64, timed_untaken_branches),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x47, 64, || {
+            timed_byte_load_hazards_at((&raw const TIMING_WORD) as u32)
+        }),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x48, 64, || {
+            timed_half_load_hazards_at((&raw const TIMING_WORD) as u32)
+        }),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x49, 64, || {
+            let cached = (&raw const TIMING_WORD) as u32;
+            timed_byte_load_hazards_at(0xA000_0000 | (cached & 0x001F_FFFF))
+        }),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x4A, 64, || {
+            let cached = (&raw const TIMING_WORD) as u32;
+            timed_half_load_hazards_at(0xA000_0000 | (cached & 0x001F_FFFF))
+        }),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x4B, 64, || timed_load_hazards_at(0xBFC0_0000)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x4C, 64, || timed_half_load_hazards_at(0xBFC0_0000)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x4D, 64, || timed_byte_load_hazards_at(0xBFC0_0000)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x4E, 64, || timed_half_load_hazards_at(0x1F80_1DAE)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x4F, 64, || timed_load_hazards_at(0x1F80_1044)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x50, 64, || {
+            timed_byte_stores_at((&raw const TIMING_WORD) as u32)
+        }),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x51, 64, || {
+            timed_half_stores_at((&raw const TIMING_WORD) as u32)
+        }),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x52, 64, || timed_byte_load_hazards_at(0x1F80_1800)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x53, 64, || timed_half_load_hazards_at(0x1F80_1800)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x54, 64, || timed_load_hazards_at(0x1F80_1800)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x55, 64, || timed_byte_load_hazards_at(0x1F00_0000)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x56, 64, || timed_half_load_hazards_at(0x1F00_0000)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x57, 64, || timed_load_hazards_at(0x1F00_0000)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x58, 64, || timed_byte_load_hazards_at(0x1F80_2000)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x59, 64, || timed_half_load_hazards_at(0x1F80_2000)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x5A, 64, || timed_load_hazards_at(0x1F80_2000)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x5B, 64, || timed_byte_load_hazards_at(0x1FA0_0000)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x5C, 64, || timed_half_load_hazards_at(0x1FA0_0000)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x5D, 64, || timed_load_hazards_at(0x1FA0_0000)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x5E, 64, || timed_byte_load_hazards_at(0x1F80_1DAE)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x5F, 64, || timed_load_hazards_at(0x1F80_1DAC)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x60, 64, || timed_byte_load_hazards_at(0xFFFE_0130)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x61, 64, || timed_half_load_hazards_at(0xFFFE_0130)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x62, 64, || timed_load_hazards_at(0xFFFE_0130)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x63, 64, || timed_load_hazards_at(0x1F80_1010)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x64, 64, || timed_unaligned_word_loads_at(0x1F80_1DAA)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x65, 512, timed_spu_dma_write_512_halfwords),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x66, 16, || timed_gpu_dma_block(16, 1)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x67, 64, || timed_gpu_dma_block(16, 4)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x68, 256, || timed_gpu_dma_block(16, 16)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x69, 256, || timed_gpu_dma_block(64, 4)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x6A, 256, || timed_gpu_dma_block(256, 1)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x6B, 258, timed_gpu_dma_linked_2x128),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x6C, 272, || timed_gpu_line_batch(false, 16, 16)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x6D, 2056, || timed_gpu_line_batch(false, 256, 8)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x6E, 272, || timed_gpu_line_batch(true, 16, 16)),
+    );
+    push_timing_record(
+        &mut records,
+        &mut next,
+        sample_timing(0x6F, 2056, || timed_gpu_line_batch(true, 256, 8)),
+    );
+    let (refresh_period, refresh_stall) = sample_dram_refresh();
+    push_timing_record(&mut records, &mut next, refresh_period);
+    push_timing_record(&mut records, &mut next, refresh_stall);
+    debug_assert_eq!(next, TIMING_RECORD_COUNT);
 
-    let cpu_mix = timed_cpu_mix(256);
-    hash = mix32(hash, cpu_mix);
-    items = items.wrapping_add(1);
+    let mut memory_control = [0u32; MEMORY_CONTROL_REGISTER_COUNT];
+    let mut register = 0usize;
+    while register < memory_control.len() {
+        memory_control[register] = unsafe { psx_io::read32(0x1F80_1000 + register as u32 * 4) };
+        register += 1;
+    }
 
-    let gte_rtps = timed_gte_rtps(64);
-    hash = mix32(hash, gte_rtps as u32);
-    items = items.wrapping_add(1);
+    let mut hash = 0x5449_4D33;
+    let mut jitter = 0u32;
+    for record in records {
+        hash = mix32(hash, record.id as u32);
+        hash = mix32(hash, record.work as u32);
+        hash = mix32(hash, record.min as u32);
+        hash = mix32(hash, record.max as u32);
+        jitter = jitter.wrapping_add(record.max.wrapping_sub(record.min) as u32);
+    }
+    for (index, value) in memory_control.iter().copied().enumerate() {
+        hash = mix32(hash, 0x4D43_0000 | index as u32);
+        hash = mix32(hash, value);
+    }
+    TimingReport {
+        summary: ScanReport::info(
+            TIMING_RECORD_COUNT as u16,
+            hash,
+            jitter,
+            "qr min max cycles",
+        ),
+        records,
+        memory_control,
+    }
+}
 
-    let otc_wait = timed_otc_dma_wait();
-    hash = mix32(hash, otc_wait as u32);
-    aux ^= (otc_wait as u32) << 24;
-    items = items.wrapping_add(1);
+fn push_timing_record(
+    records: &mut [TimingRecord; TIMING_RECORD_COUNT],
+    next: &mut usize,
+    record: TimingRecord,
+) {
+    records[*next] = record;
+    *next += 1;
+}
 
-    ScanReport::info(items, hash, aux, "timer dma gte costs")
+/// Five repeats expose jitter while the minimum rejects interrupt interference.
+fn sample_timing<F>(id: u8, work: u16, mut probe: F) -> TimingRecord
+where
+    F: FnMut() -> u16,
+{
+    let mut min = u16::MAX;
+    let mut max = 0u16;
+    let mut run = 0;
+    while run < 5 {
+        let value = probe();
+        min = min.min(value);
+        max = max.max(value);
+        run += 1;
+    }
+    TimingRecord { id, work, min, max }
+}
+
+/// Recover the main-RAM refresh cadence and the extra wait imposed by a
+/// refresh slot. Both metrics come from the same five scans so the final two
+/// Capture records remain correlated without consuming another photo page.
+fn sample_dram_refresh() -> (TimingRecord, TimingRecord) {
+    let mut period_min = u16::MAX;
+    let mut period_max = 0u16;
+    let mut stall_min = u16::MAX;
+    let mut stall_max = 0u16;
+    let mut run = 0;
+    while run < 5 {
+        let (period, stall) = measure_dram_refresh();
+        // A scan can legitimately miss two adjacent refresh events and return
+        // zero. Preserve successful measurements instead of letting one miss
+        // masquerade as a zero-cycle refresh period.
+        if period != 0 {
+            period_min = period_min.min(period);
+            period_max = period_max.max(period);
+        }
+        if stall != 0 {
+            stall_min = stall_min.min(stall);
+            stall_max = stall_max.max(stall);
+        }
+        run += 1;
+    }
+    if period_min == u16::MAX {
+        period_min = 0;
+    }
+    if stall_min == u16::MAX {
+        stall_min = 0;
+    }
+    (
+        TimingRecord {
+            id: 0x70,
+            work: 4096,
+            min: period_min,
+            max: period_max,
+        },
+        TimingRecord {
+            id: 0x71,
+            work: 4096,
+            min: stall_min,
+            max: stall_max,
+        },
+    )
 }
 
 fn gte_snapshot_hash() -> u32 {
@@ -2843,6 +3503,21 @@ fn test_gte_all_ops_digest() -> TestResult {
     expect_eq(0x003F_FFFF, observed, "gte ops")
 }
 
+/// Burn ~N cycles (literal NOP slide) for functional GTE settling and the
+/// dedicated hazard sweeps below.
+macro_rules! gte_nops {
+    (0) => {};
+    ($n:literal) => {
+        #[cfg(target_arch = "mips")]
+        unsafe {
+            core::arch::asm!(
+                concat!(".rept ", $n, "\nnop\n.endr"),
+                options(nostack, nomem, preserves_flags)
+            );
+        }
+    };
+}
+
 /// Seed the positive-winding NCLIP triangle: SXY0=(0,0), SXY1=(10,0),
 /// SXY2=(0,10). The cross product is +100, so a faithful GTE leaves
 /// MAC0 = 0x64. Shared by every NCLIP MAC0 probe below.
@@ -2874,12 +3549,24 @@ macro_rules! nclip_mac0_delay_test {
         }
     };
 }
-nclip_mac0_delay_test!(test_gte_nclip_mac0_nop8, ".rept 8\nnop\n.endr", "nclip mac0 +8nop");
-nclip_mac0_delay_test!(test_gte_nclip_mac0_nop16, ".rept 16\nnop\n.endr", "nclip mac0 +16nop");
+nclip_mac0_delay_test!(
+    test_gte_nclip_mac0_nop8,
+    ".rept 8\nnop\n.endr",
+    "nclip mac0 +8nop"
+);
+nclip_mac0_delay_test!(
+    test_gte_nclip_mac0_nop16,
+    ".rept 16\nnop\n.endr",
+    "nclip mac0 +16nop"
+);
 
 fn test_gte_nclip_mac0() -> TestResult {
     seed_nclip_pos_triangle();
     unsafe { gte_ops::nclip() };
+    // This is the functional arithmetic check, not the result-latency
+    // probe. Let MAC0 settle so real silicon's immediately-next-read hazard
+    // does not turn correct NCLIP arithmetic into a headline failure.
+    gte_nops!(64);
     let positive = mfc2!(24) as i32;
     let positive_flag_clear = gte_flag_master_clear();
 
@@ -2888,6 +3575,7 @@ fn test_gte_nclip_mac0() -> TestResult {
     mtc2!(13, pack_gte_xy(0, 10));
     mtc2!(14, pack_gte_xy(10, 0));
     unsafe { gte_ops::nclip() };
+    gte_nops!(64);
     let negative = mfc2!(24) as i32;
     let negative_flag_clear = gte_flag_master_clear();
 
@@ -3067,26 +3755,84 @@ fn scene_mvmva_digest(vxy0: u32, vz0: u32) -> u32 {
     gte_tri_digest(mfc2!(25), mfc2!(26), mfc2!(27))
 }
 fn test_gte_scene_mvmva_a() -> TestResult {
-    expect_eq(0xca74_6d65, scene_mvmva_digest(0x2040_0340, 0x0000_09c0), "scene mvmva A")
+    expect_eq(
+        0xca74_6d65,
+        scene_mvmva_digest(0x2040_0340, 0x0000_09c0),
+        "scene mvmva A",
+    )
 }
 fn test_gte_scene_mvmva_b() -> TestResult {
-    expect_eq(0xd65a_09bf, scene_mvmva_digest(0x2040_0340, 0x0000_16c0), "scene mvmva B")
+    expect_eq(
+        0xd65a_09bf,
+        scene_mvmva_digest(0x2040_0340, 0x0000_16c0),
+        "scene mvmva B",
+    )
 }
 fn test_gte_scene_mvmva_c() -> TestResult {
-    expect_eq(0x511b_ee0c, scene_mvmva_digest(0x0b00_0340, 0x0000_23c0), "scene mvmva C")
+    expect_eq(
+        0x511b_ee0c,
+        scene_mvmva_digest(0x0b00_0340, 0x0000_23c0),
+        "scene mvmva C",
+    )
 }
 fn test_gte_scene_mvmva_d() -> TestResult {
-    expect_eq(0x46ef_d743, scene_mvmva_digest(0x2040_09c0, 0x0000_09c0), "scene mvmva D")
+    expect_eq(
+        0x46ef_d743,
+        scene_mvmva_digest(0x2040_09c0, 0x0000_09c0),
+        "scene mvmva D",
+    )
 }
 
 // Scene RTPT: projects 3 verts; divide-overflow cases clamp SXY to the
 // screen-coord limits -- the exact regime behind missing/exploded triangles.
-const RTPT_A: [u32; 6] = [0x0480_2d80, 0x0000_2700, 0x0480_2080, 0x0000_2d80, 0x0480_1a00, 0x0000_2d80];
-const RTPT_B: [u32; 6] = [0x0480_2700, 0x0000_2d80, 0x0480_2d80, 0x0000_2d80, 0x0480_2080, 0x0000_3400];
-const RTPT_C: [u32; 6] = [0x0480_1a00, 0x0000_3400, 0x0480_2700, 0x0000_3400, 0x0480_2d80, 0x0000_3400];
-const RTPT_D: [u32; 6] = [0x0680_3400, 0x0000_2d80, 0x0480_3400, 0x0000_3400, 0x0680_3a80, 0x0000_2700];
-const RTPT_E: [u32; 6] = [0x10c0_0000, 0x0000_0d00, 0x10c0_0680, 0x0000_0d00, 0x1dc0_0680, 0x0000_0d00];
-const RTPT_F: [u32; 6] = [0x1dc0_0000, 0x0000_0d00, 0x10c0_0680, 0x0000_1380, 0x10c0_0000, 0x0000_1380];
+const RTPT_A: [u32; 6] = [
+    0x0480_2d80,
+    0x0000_2700,
+    0x0480_2080,
+    0x0000_2d80,
+    0x0480_1a00,
+    0x0000_2d80,
+];
+const RTPT_B: [u32; 6] = [
+    0x0480_2700,
+    0x0000_2d80,
+    0x0480_2d80,
+    0x0000_2d80,
+    0x0480_2080,
+    0x0000_3400,
+];
+const RTPT_C: [u32; 6] = [
+    0x0480_1a00,
+    0x0000_3400,
+    0x0480_2700,
+    0x0000_3400,
+    0x0480_2d80,
+    0x0000_3400,
+];
+const RTPT_D: [u32; 6] = [
+    0x0680_3400,
+    0x0000_2d80,
+    0x0480_3400,
+    0x0000_3400,
+    0x0680_3a80,
+    0x0000_2700,
+];
+const RTPT_E: [u32; 6] = [
+    0x10c0_0000,
+    0x0000_0d00,
+    0x10c0_0680,
+    0x0000_0d00,
+    0x1dc0_0680,
+    0x0000_0d00,
+];
+const RTPT_F: [u32; 6] = [
+    0x1dc0_0000,
+    0x0000_0d00,
+    0x10c0_0680,
+    0x0000_1380,
+    0x10c0_0000,
+    0x0000_1380,
+];
 fn scene_rtpt(v: [u32; 6]) {
     seed_scene_xform();
     mtc2!(0, v[0]);
@@ -3101,16 +3847,40 @@ fn rtpt_sxy_digest(v: [u32; 6]) -> u32 {
     scene_rtpt(v);
     gte_tri_digest(mfc2!(12), mfc2!(13), mfc2!(14))
 }
-fn test_gte_scene_rtpt_a_sxy() -> TestResult { expect_eq(0xfc1f_e61f, rtpt_sxy_digest(RTPT_A), "rtpt A sxy") }
-fn test_gte_scene_rtpt_b_sxy() -> TestResult { expect_eq(0xfbe0_066f, rtpt_sxy_digest(RTPT_B), "rtpt B sxy") }
-fn test_gte_scene_rtpt_c_sxy() -> TestResult { expect_eq(0x03d5_13df, rtpt_sxy_digest(RTPT_C), "rtpt C sxy") }
-fn test_gte_scene_rtpt_d_sxy() -> TestResult { expect_eq(0x0420_0420, rtpt_sxy_digest(RTPT_D), "rtpt D sxy") }
-fn test_gte_scene_rtpt_e_sxy() -> TestResult { expect_eq(0xaf36_5a05, rtpt_sxy_digest(RTPT_E), "rtpt E sxy") }
-fn test_gte_scene_rtpt_f_sxy() -> TestResult { expect_eq(0x7931_abae, rtpt_sxy_digest(RTPT_F), "rtpt F sxy") }
-fn test_gte_scene_rtpt_a_flag() -> TestResult { scene_rtpt(RTPT_A); expect_eq(0x8000_6000, cfc2!(31), "rtpt A FLAG") }
-fn test_gte_scene_rtpt_b_flag() -> TestResult { scene_rtpt(RTPT_B); expect_eq(0x8006_6000, cfc2!(31), "rtpt B FLAG") }
-fn test_gte_scene_rtpt_a_sz3() -> TestResult { scene_rtpt(RTPT_A); expect_eq(0x0000_02e9, mfc2!(19), "rtpt A SZ3") }
-fn test_gte_scene_rtpt_e_sz3() -> TestResult { scene_rtpt(RTPT_E); expect_eq(0x0000_1fd9, mfc2!(19), "rtpt E SZ3") }
+fn test_gte_scene_rtpt_a_sxy() -> TestResult {
+    expect_eq(0xfc1f_e61f, rtpt_sxy_digest(RTPT_A), "rtpt A sxy")
+}
+fn test_gte_scene_rtpt_b_sxy() -> TestResult {
+    expect_eq(0xfbe0_066f, rtpt_sxy_digest(RTPT_B), "rtpt B sxy")
+}
+fn test_gte_scene_rtpt_c_sxy() -> TestResult {
+    expect_eq(0x03d5_13df, rtpt_sxy_digest(RTPT_C), "rtpt C sxy")
+}
+fn test_gte_scene_rtpt_d_sxy() -> TestResult {
+    expect_eq(0x0420_0420, rtpt_sxy_digest(RTPT_D), "rtpt D sxy")
+}
+fn test_gte_scene_rtpt_e_sxy() -> TestResult {
+    expect_eq(0xaf36_5a05, rtpt_sxy_digest(RTPT_E), "rtpt E sxy")
+}
+fn test_gte_scene_rtpt_f_sxy() -> TestResult {
+    expect_eq(0x7931_abae, rtpt_sxy_digest(RTPT_F), "rtpt F sxy")
+}
+fn test_gte_scene_rtpt_a_flag() -> TestResult {
+    scene_rtpt(RTPT_A);
+    expect_eq(0x8000_6000, cfc2!(31), "rtpt A FLAG")
+}
+fn test_gte_scene_rtpt_b_flag() -> TestResult {
+    scene_rtpt(RTPT_B);
+    expect_eq(0x8006_6000, cfc2!(31), "rtpt B FLAG")
+}
+fn test_gte_scene_rtpt_a_sz3() -> TestResult {
+    scene_rtpt(RTPT_A);
+    expect_eq(0x0000_02e9, mfc2!(19), "rtpt A SZ3")
+}
+fn test_gte_scene_rtpt_e_sz3() -> TestResult {
+    scene_rtpt(RTPT_E);
+    expect_eq(0x0000_1fd9, mfc2!(19), "rtpt E SZ3")
+}
 
 // Scene NCLIP: the REAL backface cross products the scene runs (large
 // projected screen coords), unlike the synthetic (0,0)/(10,0)/(0,10). MAC0
@@ -3124,26 +3894,50 @@ fn scene_nclip_mac0(s0: u32, s1: u32, s2: u32) -> u32 {
     mfc2!(24)
 }
 fn test_gte_scene_nclip_a() -> TestResult {
-    expect_eq(0x0000_2764, scene_nclip_mac0(0x006e_0095, 0xffe2_0094, 0xffde_00dc), "scene nclip A")
+    expect_eq(
+        0x0000_2764,
+        scene_nclip_mac0(0x006e_0095, 0xffe2_0094, 0xffde_00dc),
+        "scene nclip A",
+    )
 }
 fn test_gte_scene_nclip_b() -> TestResult {
-    expect_eq(0x0000_30ba, scene_nclip_mac0(0x0073_00d5, 0xffde_00dc, 0xffd8_0130), "scene nclip B")
+    expect_eq(
+        0x0000_30ba,
+        scene_nclip_mac0(0x0073_00d5, 0xffde_00dc, 0xffd8_0130),
+        "scene nclip B",
+    )
 }
 fn test_gte_scene_nclip_c() -> TestResult {
-    expect_eq(0x0000_3e7e, scene_nclip_mac0(0x0079_011f, 0xffd8_0130, 0xffd2_0194), "scene nclip C")
+    expect_eq(
+        0x0000_3e7e,
+        scene_nclip_mac0(0x0079_011f, 0xffd8_0130, 0xffd2_0194),
+        "scene nclip C",
+    )
 }
 
-// LZCS/LZCR: leading-bit count (bits equal to bit 31). A classic emulator-
-// vs-silicon divergence; writing LZCS (data reg 30) updates LZCR (reg 31).
+// LZCS/LZCR: leading-bit count (bits equal to bit 31). These functional
+// checks deliberately read a settled result; the dedicated +1..+6 cases
+// below measure the silicon stale-read window independently.
 fn lzcr(value: u32) -> u32 {
     mtc2!(30, value);
+    gte_nops!(64);
     mfc2!(31)
 }
-fn test_gte_lzcr_zeros() -> TestResult { expect_eq(8, lzcr(0x00ff_ffff), "lzcr 00ffffff") }
-fn test_gte_lzcr_half() -> TestResult { expect_eq(16, lzcr(0xffff_0000), "lzcr ffff0000") }
-fn test_gte_lzcr_one() -> TestResult { expect_eq(31, lzcr(0x0000_0001), "lzcr 00000001") }
-fn test_gte_lzcr_posmax() -> TestResult { expect_eq(1, lzcr(0x7fff_ffff), "lzcr 7fffffff") }
-fn test_gte_lzcr_negmin() -> TestResult { expect_eq(1, lzcr(0x8000_0000), "lzcr 80000000") }
+fn test_gte_lzcr_zeros() -> TestResult {
+    expect_eq(8, lzcr(0x00ff_ffff), "lzcr 00ffffff")
+}
+fn test_gte_lzcr_half() -> TestResult {
+    expect_eq(16, lzcr(0xffff_0000), "lzcr ffff0000")
+}
+fn test_gte_lzcr_one() -> TestResult {
+    expect_eq(31, lzcr(0x0000_0001), "lzcr 00000001")
+}
+fn test_gte_lzcr_posmax() -> TestResult {
+    expect_eq(1, lzcr(0x7fff_ffff), "lzcr 7fffffff")
+}
+fn test_gte_lzcr_negmin() -> TestResult {
+    expect_eq(1, lzcr(0x8000_0000), "lzcr 80000000")
+}
 
 // Corner ops: the famous bugged MVMVA far-color mode, plus SQR / OP / AVSZ3
 // to widen op coverage. Expecteds from psx-gte-core (gte_expected_values).
@@ -3161,16 +3955,29 @@ fn run_mvmva_fc() {
     mtc2!(1, 0x0000_09c0);
     unsafe { gte_ops::mvmva_rt_v0_fc_sf1() };
 }
-fn test_gte_mvmva_fc_mac1() -> TestResult { run_mvmva_fc(); expect_eq(0xffff_fcc5, mfc2!(25), "mvmva FC MAC1") }
-fn test_gte_mvmva_fc_mac2() -> TestResult { run_mvmva_fc(); expect_eq(0xffff_e36c, mfc2!(26), "mvmva FC MAC2") }
-fn test_gte_mvmva_fc_mac3() -> TestResult { run_mvmva_fc(); expect_eq(0xffff_ee75, mfc2!(27), "mvmva FC MAC3") }
+fn test_gte_mvmva_fc_mac1() -> TestResult {
+    run_mvmva_fc();
+    expect_eq(0xffff_fcc5, mfc2!(25), "mvmva FC MAC1")
+}
+fn test_gte_mvmva_fc_mac2() -> TestResult {
+    run_mvmva_fc();
+    expect_eq(0xffff_e36c, mfc2!(26), "mvmva FC MAC2")
+}
+fn test_gte_mvmva_fc_mac3() -> TestResult {
+    run_mvmva_fc();
+    expect_eq(0xffff_ee75, mfc2!(27), "mvmva FC MAC3")
+}
 fn test_gte_sqr() -> TestResult {
     ctc2!(31, 0);
     mtc2!(9, 0x0000_1234);
     mtc2!(10, 0x0000_f8ee);
     mtc2!(11, 0x0000_0567);
     unsafe { gte_ops::sqr() };
-    expect_eq(0x7498_ecb5, gte_tri_digest(mfc2!(25), mfc2!(26), mfc2!(27)), "sqr")
+    expect_eq(
+        0x7498_ecb5,
+        gte_tri_digest(mfc2!(25), mfc2!(26), mfc2!(27)),
+        "sqr",
+    )
 }
 // OP cross product. The formula here matches PSX-SPX exactly and MVMVA/SQR
 // read MAC1-3 immediately and pass, yet OP diverged on hardware
@@ -3189,9 +3996,18 @@ fn run_op() {
     mtc2!(11, 0x0000_0600); // IR3
     unsafe { gte_ops::op_sf1() };
 }
-fn test_gte_op_mac1() -> TestResult { run_op(); expect_eq(0xffff_fd00, mfc2!(25), "op MAC1") }
-fn test_gte_op_mac2() -> TestResult { run_op(); expect_eq(0x0000_0600, mfc2!(26), "op MAC2") }
-fn test_gte_op_mac3() -> TestResult { run_op(); expect_eq(0xffff_fd00, mfc2!(27), "op MAC3") }
+fn test_gte_op_mac1() -> TestResult {
+    run_op();
+    expect_eq(0xffff_fd00, mfc2!(25), "op MAC1")
+}
+fn test_gte_op_mac2() -> TestResult {
+    run_op();
+    expect_eq(0x0000_0600, mfc2!(26), "op MAC2")
+}
+fn test_gte_op_mac3() -> TestResult {
+    run_op();
+    expect_eq(0xffff_fd00, mfc2!(27), "op MAC3")
+}
 
 // OP full-seed variant: identical diagonal + IR inputs to `run_op`, but with
 // EVERY rotation control reg (0..=4, including the off-diagonal pairs 1 and 3)
@@ -3217,9 +4033,18 @@ fn run_op_full_seed() {
     mtc2!(27, 0); // MAC3
     unsafe { gte_ops::op_sf1() };
 }
-fn test_gte_op_full_seed_mac1() -> TestResult { run_op_full_seed(); expect_eq(0xffff_fd00, mfc2!(25), "op fs MAC1") }
-fn test_gte_op_full_seed_mac2() -> TestResult { run_op_full_seed(); expect_eq(0x0000_0600, mfc2!(26), "op fs MAC2") }
-fn test_gte_op_full_seed_mac3() -> TestResult { run_op_full_seed(); expect_eq(0xffff_fd00, mfc2!(27), "op fs MAC3") }
+fn test_gte_op_full_seed_mac1() -> TestResult {
+    run_op_full_seed();
+    expect_eq(0xffff_fd00, mfc2!(25), "op fs MAC1")
+}
+fn test_gte_op_full_seed_mac2() -> TestResult {
+    run_op_full_seed();
+    expect_eq(0x0000_0600, mfc2!(26), "op fs MAC2")
+}
+fn test_gte_op_full_seed_mac3() -> TestResult {
+    run_op_full_seed();
+    expect_eq(0xffff_fd00, mfc2!(27), "op fs MAC3")
+}
 fn test_gte_avsz3() -> TestResult {
     ctc2!(31, 0);
     ctc2!(29, 0x0000_0155); // ZSF3
@@ -3277,22 +4102,11 @@ fn rtps_lat(vxy0: u32, vz0: u32) {
 fn gte_delay16() {
     #[cfg(target_arch = "mips")]
     unsafe {
-        core::arch::asm!(".rept 16\nnop\n.endr", options(nostack, nomem, preserves_flags));
+        core::arch::asm!(
+            ".rept 16\nnop\n.endr",
+            options(nostack, nomem, preserves_flags)
+        );
     }
-}
-
-/// Burn ~N cycles (literal NOP slide) for the GTE hazard sweeps.
-macro_rules! gte_nops {
-    (0) => {};
-    ($n:literal) => {
-        #[cfg(target_arch = "mips")]
-        unsafe {
-            core::arch::asm!(
-                concat!(".rept ", $n, "\nnop\n.endr"),
-                options(nostack, nomem, preserves_flags)
-            );
-        }
-    };
 }
 
 // --- CTC2 matrix-load hazard sweeps ----------------------------------
@@ -3449,10 +4263,18 @@ fn test_compose_chain_hot() -> TestResult {
     expect_eq(compose_chain(1), compose_chain(0), "compose chain hot")
 }
 fn test_compose_chain_v0_settled() -> TestResult {
-    expect_eq(compose_chain(1), compose_chain(2), "compose chain v0-settled")
+    expect_eq(
+        compose_chain(1),
+        compose_chain(2),
+        "compose chain v0-settled",
+    )
 }
 fn test_compose_chain_load_settled() -> TestResult {
-    expect_eq(compose_chain(1), compose_chain(3), "compose chain load-settled")
+    expect_eq(
+        compose_chain(1),
+        compose_chain(3),
+        "compose chain load-settled",
+    )
 }
 
 // --- Result-read settle sweeps (MAC0 / LZCR) ----------------------------
@@ -3586,15 +4408,57 @@ macro_rules! mac0_ctrl_case {
     };
 }
 // Gap bisect with the scene-A coordinates (0x874 regime).
-mac0_ctrl_case!(test_mac0_big_gap12, 12, 0x006e_0095, 0xffe2_0094, 0xffde_00dc);
-mac0_ctrl_case!(test_mac0_big_gap16, 16, 0x006e_0095, 0xffe2_0094, 0xffde_00dc);
-mac0_ctrl_case!(test_mac0_big_gap24, 24, 0x006e_0095, 0xffe2_0094, 0xffde_00dc);
-mac0_ctrl_case!(test_mac0_big_gap32, 32, 0x006e_0095, 0xffe2_0094, 0xffde_00dc);
-mac0_ctrl_case!(test_mac0_big_gap48, 48, 0x006e_0095, 0xffe2_0094, 0xffde_00dc);
+mac0_ctrl_case!(
+    test_mac0_big_gap12,
+    12,
+    0x006e_0095,
+    0xffe2_0094,
+    0xffde_00dc
+);
+mac0_ctrl_case!(
+    test_mac0_big_gap16,
+    16,
+    0x006e_0095,
+    0xffe2_0094,
+    0xffde_00dc
+);
+mac0_ctrl_case!(
+    test_mac0_big_gap24,
+    24,
+    0x006e_0095,
+    0xffe2_0094,
+    0xffde_00dc
+);
+mac0_ctrl_case!(
+    test_mac0_big_gap32,
+    32,
+    0x006e_0095,
+    0xffe2_0094,
+    0xffde_00dc
+);
+mac0_ctrl_case!(
+    test_mac0_big_gap48,
+    48,
+    0x006e_0095,
+    0xffe2_0094,
+    0xffde_00dc
+);
 // Magnitude ladder at +4: quarter / half / double scale of scene-A.
-mac0_ctrl_case!(test_mac0_mag_quarter, 4, 0x001c_0025, 0xfff8_0025, 0xfff7_0037);
+mac0_ctrl_case!(
+    test_mac0_mag_quarter,
+    4,
+    0x001c_0025,
+    0xfff8_0025,
+    0xfff7_0037
+);
 mac0_ctrl_case!(test_mac0_mag_half, 4, 0x0037_004a, 0xfff1_004a, 0xffef_006e);
-mac0_ctrl_case!(test_mac0_mag_double, 4, 0x00dc_012a, 0xffc4_0128, 0xffbc_01b8);
+mac0_ctrl_case!(
+    test_mac0_mag_double,
+    4,
+    0x00dc_012a,
+    0xffc4_0128,
+    0xffbc_01b8
+);
 // Controlled-prestate replicas of scene B and C at the in-situ +2 distance.
 mac0_ctrl_case!(test_mac0_ctrl_b, 2, 0x0073_00d5, 0xffde_00dc, 0xffd8_0130);
 mac0_ctrl_case!(test_mac0_ctrl_c, 2, 0x0079_011f, 0xffd8_0130, 0xffd2_0194);
@@ -3634,13 +4498,55 @@ macro_rules! sxy_dump_case {
     };
 }
 // A coordinates (the y0-drop regime on silicon).
-sxy_dump_case!(test_sxy_dump_a_12, 12, 0x006e_0095, 0x006e_0095, 0xffe2_0094, 0xffde_00dc);
-sxy_dump_case!(test_sxy_dump_a_13, 13, 0xffe2_0094, 0x006e_0095, 0xffe2_0094, 0xffde_00dc);
-sxy_dump_case!(test_sxy_dump_a_14, 14, 0xffde_00dc, 0x006e_0095, 0xffe2_0094, 0xffde_00dc);
+sxy_dump_case!(
+    test_sxy_dump_a_12,
+    12,
+    0x006e_0095,
+    0x006e_0095,
+    0xffe2_0094,
+    0xffde_00dc
+);
+sxy_dump_case!(
+    test_sxy_dump_a_13,
+    13,
+    0xffe2_0094,
+    0x006e_0095,
+    0xffe2_0094,
+    0xffde_00dc
+);
+sxy_dump_case!(
+    test_sxy_dump_a_14,
+    14,
+    0xffde_00dc,
+    0x006e_0095,
+    0xffe2_0094,
+    0xffde_00dc
+);
 // C coordinates (the passing set).
-sxy_dump_case!(test_sxy_dump_c_12, 12, 0x0079_011f, 0x0079_011f, 0xffd8_0130, 0xffd2_0194);
-sxy_dump_case!(test_sxy_dump_c_13, 13, 0xffd8_0130, 0x0079_011f, 0xffd8_0130, 0xffd2_0194);
-sxy_dump_case!(test_sxy_dump_c_14, 14, 0xffd2_0194, 0x0079_011f, 0xffd8_0130, 0xffd2_0194);
+sxy_dump_case!(
+    test_sxy_dump_c_12,
+    12,
+    0x0079_011f,
+    0x0079_011f,
+    0xffd8_0130,
+    0xffd2_0194
+);
+sxy_dump_case!(
+    test_sxy_dump_c_13,
+    13,
+    0xffd8_0130,
+    0x0079_011f,
+    0xffd8_0130,
+    0xffd2_0194
+);
+sxy_dump_case!(
+    test_sxy_dump_c_14,
+    14,
+    0xffd2_0194,
+    0x0079_011f,
+    0xffd8_0130,
+    0xffd2_0194
+);
 // And the probe-NCLIP variant: same sequence WITH the probe nclip, then a
 // long settle, then dump SXY0 -- does the op itself disturb the registers?
 macro_rules! sxy_dump_post_nclip {
@@ -3666,8 +4572,20 @@ macro_rules! sxy_dump_post_nclip {
         }
     };
 }
-sxy_dump_post_nclip!(test_sxy_post_a, 0x006e_0095, 0x006e_0095, 0xffe2_0094, 0xffde_00dc);
-sxy_dump_post_nclip!(test_sxy_post_c, 0x0079_011f, 0x0079_011f, 0xffd8_0130, 0xffd2_0194);
+sxy_dump_post_nclip!(
+    test_sxy_post_a,
+    0x006e_0095,
+    0x006e_0095,
+    0xffe2_0094,
+    0xffde_00dc
+);
+sxy_dump_post_nclip!(
+    test_sxy_post_c,
+    0x0079_011f,
+    0x0079_011f,
+    0xffd8_0130,
+    0xffd2_0194
+);
 
 macro_rules! gte_result_latency_test {
     ($name:ident, $reg:literal, $label:literal) => {
@@ -3773,41 +4691,69 @@ fn test_gpu_vram_roundtrip() -> TestResult {
 }
 fn test_gpu_draw_flat_tri() -> TestResult {
     let tri = prim::TriFlat::new([(8, 8), (88, 16), (40, 88)], 0xc0, 0x40, 0x80);
-    expect_eq(0x0412_1005, gpu_draw_and_hash(&tri, prim::TriFlat::WORDS), "gpu flat tri")
+    expect_eq(
+        0x0412_1005,
+        gpu_draw_and_hash(&tri, prim::TriFlat::WORDS),
+        "gpu flat tri",
+    )
 }
 fn test_gpu_draw_gouraud_tri() -> TestResult {
     let tri = prim::TriGouraud::new(
         [(8, 8), (88, 16), (40, 88)],
         [(0xf0, 0x00, 0x00), (0x00, 0xf0, 0x00), (0x00, 0x00, 0xf0)],
     );
-    expect_eq(0x285a_c609, gpu_draw_and_hash(&tri, prim::TriGouraud::WORDS), "gpu gouraud tri")
+    expect_eq(
+        0x285a_c609,
+        gpu_draw_and_hash(&tri, prim::TriGouraud::WORDS),
+        "gpu gouraud tri",
+    )
 }
 fn test_gpu_draw_flat_quad() -> TestResult {
     let q = prim::QuadFlat::new([(8, 8), (88, 8), (8, 88), (88, 88)], 0x30, 0xc0, 0x60);
-    expect_eq(0x79e5_3dc5, gpu_draw_and_hash(&q, prim::QuadFlat::WORDS), "gpu flat quad")
+    expect_eq(
+        0x79e5_3dc5,
+        gpu_draw_and_hash(&q, prim::QuadFlat::WORDS),
+        "gpu flat quad",
+    )
 }
 fn test_gpu_draw_gouraud_quad() -> TestResult {
     let q = prim::QuadGouraud::new(
         [(8, 8), (88, 8), (8, 88), (88, 88)],
         [(0xf0, 0, 0), (0, 0xf0, 0), (0, 0, 0xf0), (0xf0, 0xf0, 0)],
     );
-    expect_eq(0x22b3_d6c3, gpu_draw_and_hash(&q, prim::QuadGouraud::WORDS), "gpu gouraud quad")
+    expect_eq(
+        0x22b3_d6c3,
+        gpu_draw_and_hash(&q, prim::QuadGouraud::WORDS),
+        "gpu gouraud quad",
+    )
 }
 // Edge-coordinate / large-span triangles -- the direct stretch suspects: how
 // the GPU rasterizes a triangle whose vertex lands far outside the draw area,
 // goes negative, or exceeds the 11-bit coordinate range (where it wraps).
 fn test_gpu_tri_past_right_edge() -> TestResult {
     let tri = prim::TriFlat::new([(8, 8), (88, 8), (300, 88)], 0xff, 0x80, 0x20);
-    expect_eq(0x69fc_0e38, gpu_draw_and_hash(&tri, prim::TriFlat::WORDS), "gpu tri past edge")
+    expect_eq(
+        0x69fc_0e38,
+        gpu_draw_and_hash(&tri, prim::TriFlat::WORDS),
+        "gpu tri past edge",
+    )
 }
 fn test_gpu_tri_negative_coord() -> TestResult {
     let tri = prim::TriFlat::new([(8, 8), (-200, 40), (88, 88)], 0x20, 0xff, 0x80);
-    expect_eq(0xa3a1_6bf5, gpu_draw_and_hash(&tri, prim::TriFlat::WORDS), "gpu tri neg coord")
+    expect_eq(
+        0xa3a1_6bf5,
+        gpu_draw_and_hash(&tri, prim::TriFlat::WORDS),
+        "gpu tri neg coord",
+    )
 }
 fn test_gpu_tri_coord_wrap() -> TestResult {
     // x=1500 exceeds the 11-bit signed range (max 1023) -> wraps on silicon.
     let tri = prim::TriFlat::new([(8, 48), (1500, 8), (48, 88)], 0x80, 0x20, 0xff);
-    expect_eq(0x3df1_7315, gpu_draw_and_hash(&tri, prim::TriFlat::WORDS), "gpu tri coord wrap")
+    expect_eq(
+        0x3df1_7315,
+        gpu_draw_and_hash(&tri, prim::TriFlat::WORDS),
+        "gpu tri coord wrap",
+    )
 }
 // The player's EXACT primitive: a textured Gouraud triangle sampling a real
 // VRAM texture (cortex's player is TriTexturedGouraud via OT/DMA). Upload a
@@ -3828,7 +4774,11 @@ fn test_gpu_textured_gouraud_tri() -> TestResult {
         0, // clut unused for 15bpp
         tpage,
     );
-    expect_eq(0x0200_a836, gpu_draw_and_hash(&tri, prim::TriTexturedGouraud::WORDS), "gpu tex gouraud tri")
+    expect_eq(
+        0x0200_a836,
+        gpu_draw_and_hash(&tri, prim::TriTexturedGouraud::WORDS),
+        "gpu tex gouraud tri",
+    )
 }
 // The player's submit PATH: build an ordering table, DMA it to the GPU
 // (linked-list mode), then read back -- exercises the OT + DMA stage.
@@ -4280,7 +5230,11 @@ fn test_spu_ram_manual_fifo_roundtrip() -> TestResult {
         got[j * 2 + 1] = (back[j] >> 16) as u16;
         j += 1;
     }
-    expect_eq(fnv16_halfwords(&src), fnv16_halfwords(&got), "spu fifo upload")
+    expect_eq(
+        fnv16_halfwords(&src),
+        fnv16_halfwords(&got),
+        "spu fifo upload",
+    )
 }
 
 /// Read one 32-bit VRAM word (two 15bpp pixels) at `(vx, vy)` via GP0 0xC0
@@ -4416,9 +5370,8 @@ fn test_pad_analog_handshake() -> TestResult {
     }
     let became_analog = psx_pad::enable_analog_port1();
     let raw = psx_pad::poll_port1_diag(psx_pad::DEFAULT_SETUP_SPINS, 0);
-    let observed = ((raw.id_low as u32) << 16)
-        | ((raw.sticks.left_x as u32) << 8)
-        | raw.sticks.left_y as u32;
+    let observed =
+        ((raw.id_low as u32) << 16) | ((raw.sticks.left_x as u32) << 8) | raw.sticks.left_y as u32;
     if became_analog && raw.id_low == 0x73 {
         TestResult::pass(0x73, observed, "analog")
     } else if raw.mode.is_connected() {
@@ -4537,7 +5490,10 @@ fn test_timer2_target_sticky() -> TestResult {
     let target_hit = mode & TIMER_MODE_REACHED_TARGET != 0;
     let counter = timers::counter(timers::Timer::Timer2);
     timers::set_mode(timers::Timer::Timer2, 0x0000);
-    let observed = (target_hit as u32) | ((((counter as u32) < 32) as u32) << 1);
+    // The target itself is visible for one source tick before reset. Values
+    // 0..=32 therefore prove the counter stayed in the target-reset cycle;
+    // only a value above target indicates that reset-at-target failed.
+    let observed = (target_hit as u32) | ((((counter as u32) <= 32) as u32) << 1);
     expect_eq(0x3, observed, "target")
 }
 
@@ -4800,29 +5756,989 @@ fn timer_delta(timer: timers::Timer, mode: u16, spin_count: u32) -> u16 {
     end.wrapping_sub(start)
 }
 
-fn timed_cpu_mix(iterations: u16) -> u32 {
-    timers::set_mode(timers::Timer::Timer2, 0);
-    timers::set_counter(timers::Timer::Timer2, 0);
-    let mut acc = 0x1234_5678u32;
-    for i in 0..iterations {
-        acc = acc.rotate_left(3) ^ (i as u32).wrapping_mul(0x45D9_F3B);
-        acc = acc.wrapping_add(0x9E37_79B9);
+/// Scan single uncached-RAM reads until their occasional extra wait exposes
+/// the DRAM refresh slot. Timer 0 timestamps only the slow samples: reading a
+/// root counter latches that counter for two bus clocks, so sampling every
+/// iteration would perturb the cadence we are trying to recover.
+fn measure_dram_refresh() -> (u16, u16) {
+    const SCAN_SAMPLES: u32 = 4096;
+    const COUNTER_READ_HOLD: u16 = 2;
+
+    let status: u32;
+    unsafe {
+        core::arch::asm!("mfc0 $8, $12", "nop", lateout("$8") status);
+        core::arch::asm!(
+            "mtc0 $8, $12",
+            "nop",
+            "nop",
+            "nop",
+            in("$8") status & !1,
+            options(nostack, nomem),
+        );
     }
-    let delta = timers::counter(timers::Timer::Timer2) as u32;
-    timers::set_mode(timers::Timer::Timer2, 0);
-    mix32(delta, acc)
+
+    let cached = (&raw const TIMING_WORD) as u32;
+    let uncached = 0xA000_0000 | (cached & 0x001F_FFFF);
+
+    // Warm the detector itself, then establish the uncontended floor. A
+    // refresh can only raise a sample, so the minimum is the stable baseline.
+    let mut warm = 0;
+    while warm < 64 {
+        let _ = timed_uncached_ram_read_once(uncached);
+        warm += 1;
+    }
+    let mut baseline = u16::MAX;
+    let mut sample = 0;
+    while sample < 256 {
+        baseline = baseline.min(timed_uncached_ram_read_once(uncached));
+        sample += 1;
+    }
+
+    timers::set_mode(timers::Timer::Timer0, 0);
+    timers::set_counter(timers::Timer::Timer0, 0);
+
+    let mut max_stall = 0u16;
+    let mut best_period = 0u16;
+    let mut previous_slow = 0u16;
+    let mut have_previous = false;
+    sample = 0;
+    while sample < SCAN_SAMPLES {
+        let elapsed = timed_uncached_ram_read_once(uncached);
+        if elapsed > baseline {
+            max_stall = max_stall.max(elapsed - baseline);
+            let timestamp = timers::counter(timers::Timer::Timer0);
+            if have_previous {
+                // The preceding timestamp read held Timer 0 for two clocks.
+                let period = timestamp
+                    .wrapping_sub(previous_slow)
+                    .wrapping_add(COUNTER_READ_HOLD);
+                // Reject skipped refreshes and unrelated outliers while still
+                // leaving ample room for an unknown retail DRAM cadence.
+                if (384..=768).contains(&period) && period > best_period {
+                    // An unrelated slow sample can split one real refresh
+                    // interval into shorter pieces. Keep the largest
+                    // single-period candidate; skipped refresh multiples are
+                    // already excluded by the upper bound.
+                    best_period = period;
+                }
+            }
+            previous_slow = timestamp;
+            have_previous = true;
+        }
+        sample += 1;
+    }
+
+    unsafe {
+        core::arch::asm!(
+            "mtc0 $8, $12",
+            "nop",
+            "nop",
+            "nop",
+            in("$8") status,
+            options(nostack, nomem),
+        );
+    }
+    (best_period, max_stall)
 }
 
-fn timed_gte_rtps(iterations: u16) -> u16 {
+// Keep every microbenchmark in one non-inlined assembly block. Besides avoiding
+// five optimizer-dependent copies, this guarantees that register setup happens
+// before the Timer 2 counter is cleared. The harmless SLL-to-zero words bracket
+// each block so tools/verify-hwtest-machine-code.py can audit the final PS-X EXE.
+#[inline(never)]
+fn timed_empty() -> u16 {
+    let elapsed: u32;
+    unsafe {
+        core::arch::asm!(
+            ".set noreorder",
+            ".word 0x00000040", // probe 01 start marker
+            "lui $11, 0x1F80",
+            "ori $11, $11, 0x1120",
+            "sw $zero, 4($11)",
+            "sw $zero, 0($11)", // timing starts after this counter reset
+            "lw $12, 0($11)",
+            "nop", // resolve the R3000A load delay before exposing the result
+            ".word 0x00000440", // probe 01 end marker
+            ".set reorder",
+            lateout("$11") _,
+            lateout("$12") elapsed,
+            options(nostack)
+        );
+    }
+    elapsed as u16
+}
+
+#[inline(never)]
+fn timed_uncached_ram_read_once(address: u32) -> u16 {
+    let elapsed: u32;
+    unsafe {
+        core::arch::asm!(
+            ".set noreorder",
+            ".word 0x00000640", // probe 25 start marker
+            "lui $11, 0x1F80",
+            "ori $11, $11, 0x1120",
+            "sw $zero, 4($11)",
+            "sw $zero, 0($11)",
+            "lw $9, 0($8)",
+            "nop",
+            "lw $12, 0($11)",
+            "nop",
+            ".word 0x00000A40", // probe 25 end marker
+            ".set reorder",
+            in("$8") address,
+            lateout("$9") _,
+            lateout("$11") _,
+            lateout("$12") elapsed,
+            options(nostack)
+        );
+    }
+    elapsed as u16
+}
+
+#[inline(never)]
+fn timed_nops() -> u16 {
+    let elapsed: u32;
+    unsafe {
+        core::arch::asm!(
+            ".set noreorder",
+            ".word 0x00000080", // probe 02 start marker
+            "lui $11, 0x1F80",
+            "ori $11, $11, 0x1120",
+            "sw $zero, 4($11)",
+            "sw $zero, 0($11)",
+            ".rept 128",
+            "nop",
+            ".endr",
+            "lw $12, 0($11)",
+            "nop",
+            ".word 0x00000480", // probe 02 end marker
+            ".set reorder",
+            lateout("$11") _,
+            lateout("$12") elapsed,
+            options(nostack)
+        );
+    }
+    elapsed as u16
+}
+
+#[inline(never)]
+fn timed_dependent_alu() -> u16 {
+    let elapsed: u32;
+    unsafe {
+        core::arch::asm!(
+            ".set noreorder",
+            ".word 0x000000C0", // probe 03 start marker
+            "lui $11, 0x1F80",
+            "ori $11, $11, 0x1120",
+            "sw $zero, 4($11)",
+            "sw $zero, 0($11)",
+            ".rept 128",
+            "addiu $8, $8, 1",
+            ".endr",
+            "lw $12, 0($11)",
+            "nop",
+            ".word 0x000004C0", // probe 03 end marker
+            ".set reorder",
+            lateout("$8") _,
+            lateout("$11") _,
+            lateout("$12") elapsed,
+            options(nostack)
+        );
+    }
+    elapsed as u16
+}
+
+fn timed_load_hazards() -> u16 {
+    timed_load_hazards_at((&raw const SPIN_SINK) as u32)
+}
+
+#[inline(never)]
+fn timed_load_hazards_at(address: u32) -> u16 {
+    let elapsed: u32;
+    unsafe {
+        core::arch::asm!(
+            ".set noreorder",
+            ".word 0x00000100", // probe 04 start marker
+            "lui $11, 0x1F80",
+            "ori $11, $11, 0x1120",
+            "sw $zero, 4($11)",
+            "sw $zero, 0($11)",
+            ".rept 64",
+            "lw $9, 0($8)",
+            "nop",
+            ".endr",
+            "lw $12, 0($11)",
+            "nop",
+            ".word 0x00000500", // probe 04 end marker
+            ".set reorder",
+            in("$8") address,
+            lateout("$9") _,
+            lateout("$11") _,
+            lateout("$12") elapsed,
+            options(nostack)
+        );
+    }
+    elapsed as u16
+}
+
+#[inline(never)]
+fn timed_byte_load_hazards_at(address: u32) -> u16 {
+    let elapsed: u32;
+    unsafe {
+        core::arch::asm!(
+            ".set noreorder",
+            ".word 0x00000500", // probe 20 start marker
+            "lui $11, 0x1F80",
+            "ori $11, $11, 0x1120",
+            "sw $zero, 4($11)",
+            "sw $zero, 0($11)",
+            ".rept 64",
+            ".word 0x81090000", // lb $9,0($8)
+            "nop",
+            ".endr",
+            "lw $12, 0($11)",
+            "nop",
+            ".word 0x00000900", // probe 20 end marker
+            ".set reorder",
+            in("$8") address,
+            lateout("$9") _,
+            lateout("$11") _,
+            lateout("$12") elapsed,
+            options(nostack)
+        );
+    }
+    elapsed as u16
+}
+
+#[inline(never)]
+fn timed_half_load_hazards_at(address: u32) -> u16 {
+    let elapsed: u32;
+    unsafe {
+        core::arch::asm!(
+            ".set noreorder",
+            ".word 0x00000540", // probe 21 start marker
+            "lui $11, 0x1F80",
+            "ori $11, $11, 0x1120",
+            "sw $zero, 4($11)",
+            "sw $zero, 0($11)",
+            ".rept 64",
+            ".word 0x85090000", // lh $9,0($8)
+            "nop",
+            ".endr",
+            "lw $12, 0($11)",
+            "nop",
+            ".word 0x00000940", // probe 21 end marker
+            ".set reorder",
+            in("$8") address,
+            lateout("$9") _,
+            lateout("$11") _,
+            lateout("$12") elapsed,
+            options(nostack)
+        );
+    }
+    elapsed as u16
+}
+
+#[inline(never)]
+fn timed_unaligned_word_loads_at(address: u32) -> u16 {
+    let elapsed: u32;
+    unsafe {
+        core::arch::asm!(
+            ".set noreorder",
+            ".word 0x00000600", // probe 24 start marker
+            "lui $11, 0x1F80",
+            "ori $11, $11, 0x1120",
+            "sw $zero, 4($11)",
+            "sw $zero, 0($11)",
+            ".rept 64",
+            ".word 0x89090003", // lwl $9,3($8)
+            ".word 0x99090000", // lwr $9,0($8), interlocked merge
+            "nop",
+            ".endr",
+            "lw $12, 0($11)",
+            "nop",
+            ".word 0x00000A00", // probe 24 end marker
+            ".set reorder",
+            in("$8") address,
+            lateout("$9") _,
+            lateout("$11") _,
+            lateout("$12") elapsed,
+            options(nostack)
+        );
+    }
+    elapsed as u16
+}
+
+#[inline(never)]
+fn timed_stores_at(address: u32) -> u16 {
+    let elapsed: u32;
+    unsafe {
+        core::arch::asm!(
+            ".set noreorder",
+            ".word 0x00000140", // probe 05 start marker
+            "lui $11, 0x1F80",
+            "ori $11, $11, 0x1120",
+            "sw $zero, 4($11)",
+            "sw $zero, 0($11)",
+            ".rept 64",
+            "sw $zero, 0($8)",
+            ".endr",
+            "lw $12, 0($11)",
+            "nop",
+            ".word 0x00000540", // probe 05 end marker
+            ".set reorder",
+            in("$8") address,
+            lateout("$11") _,
+            lateout("$12") elapsed,
+            options(nostack)
+        );
+    }
+    elapsed as u16
+}
+
+#[inline(never)]
+fn timed_byte_stores_at(address: u32) -> u16 {
+    let elapsed: u32;
+    unsafe {
+        core::arch::asm!(
+            ".set noreorder",
+            ".word 0x00000580", // probe 22 start marker
+            "lui $11, 0x1F80",
+            "ori $11, $11, 0x1120",
+            "sw $zero, 4($11)",
+            "sw $zero, 0($11)",
+            ".rept 64",
+            ".word 0xA1000000", // sb $zero,0($8)
+            ".endr",
+            "lw $12, 0($11)",
+            "nop",
+            ".word 0x00000980", // probe 22 end marker
+            ".set reorder",
+            in("$8") address,
+            lateout("$11") _,
+            lateout("$12") elapsed,
+            options(nostack)
+        );
+    }
+    elapsed as u16
+}
+
+#[inline(never)]
+fn timed_half_stores_at(address: u32) -> u16 {
+    let elapsed: u32;
+    unsafe {
+        core::arch::asm!(
+            ".set noreorder",
+            ".word 0x000005C0", // probe 23 start marker
+            "lui $11, 0x1F80",
+            "ori $11, $11, 0x1120",
+            "sw $zero, 4($11)",
+            "sw $zero, 0($11)",
+            ".rept 64",
+            ".word 0xA5000000", // sh $zero,0($8)
+            ".endr",
+            "lw $12, 0($11)",
+            "nop",
+            ".word 0x000009C0", // probe 23 end marker
+            ".set reorder",
+            in("$8") address,
+            lateout("$11") _,
+            lateout("$12") elapsed,
+            options(nostack)
+        );
+    }
+    elapsed as u16
+}
+
+#[inline(never)]
+fn timed_taken_branches() -> u16 {
+    let elapsed: u32;
+    unsafe {
+        core::arch::asm!(
+            ".set noreorder",
+            ".word 0x00000180", // probe 06 start marker
+            "lui $11, 0x1F80",
+            "ori $11, $11, 0x1120",
+            "sw $zero, 4($11)",
+            "sw $zero, 0($11)",
+            ".rept 64",
+            "beq $zero, $zero, 1f",
+            "nop",
+            "1:",
+            ".endr",
+            "lw $12, 0($11)",
+            "nop",
+            ".word 0x00000580", // probe 06 end marker
+            ".set reorder",
+            lateout("$11") _,
+            lateout("$12") elapsed,
+            options(nostack)
+        );
+    }
+    elapsed as u16
+}
+
+#[inline(never)]
+fn timed_untaken_branches() -> u16 {
+    let elapsed: u32;
+    unsafe {
+        core::arch::asm!(
+            ".set noreorder",
+            ".word 0x000004C0", // probe 19 start marker
+            "lui $11, 0x1F80",
+            "ori $11, $11, 0x1120",
+            "sw $zero, 4($11)",
+            "sw $zero, 0($11)",
+            ".rept 64",
+            ".word 0x14000001", // bne $zero,$zero,+1 (never taken)
+            "nop",
+            ".endr",
+            "lw $12, 0($11)",
+            "nop",
+            ".word 0x000008C0", // probe 19 end marker
+            ".set reorder",
+            lateout("$11") _,
+            lateout("$12") elapsed,
+            options(nostack)
+        );
+    }
+    elapsed as u16
+}
+
+#[inline(never)]
+fn timed_multu_mflo(lhs: u32) -> u16 {
+    let elapsed: u32;
+    unsafe {
+        core::arch::asm!(
+            ".set noreorder",
+            ".word 0x000001C0", // probe 07 start marker
+            "lui $11, 0x1F80",
+            "ori $11, $11, 0x1120",
+            "sw $zero, 4($11)",
+            "sw $zero, 0($11)",
+            ".rept 16",
+            ".word 0x01090019", // multu $8,$9
+            ".word 0x00005012", // mflo $10; keep rs magnitude fixed
+            ".endr",
+            "lw $12, 0($11)",
+            "nop",
+            ".word 0x000005C0", // probe 07 end marker
+            ".set reorder",
+            in("$8") lhs,
+            in("$9") 0x0001_0041u32,
+            lateout("$10") _,
+            lateout("$11") _,
+            lateout("$12") elapsed,
+            options(nostack)
+        );
+    }
+    elapsed as u16
+}
+
+#[inline(never)]
+fn timed_divu_mflo() -> u16 {
+    let elapsed: u32;
+    unsafe {
+        core::arch::asm!(
+            ".set noreorder",
+            ".word 0x00000200", // probe 08 start marker
+            "lui $11, 0x1F80",
+            "ori $11, $11, 0x1120",
+            "sw $zero, 4($11)",
+            "sw $zero, 0($11)",
+            ".rept 8",
+            ".word 0x0109001B", // divu $8,$9
+            ".word 0x00005012", // mflo $10; keep numerator fixed
+            ".endr",
+            "lw $12, 0($11)",
+            "nop",
+            ".word 0x00000600", // probe 08 end marker
+            ".set reorder",
+            in("$8") 0x7ABC_DEF1u32,
+            in("$9") 0x0000_0101u32,
+            lateout("$10") _,
+            lateout("$11") _,
+            lateout("$12") elapsed,
+            options(nostack)
+        );
+    }
+    elapsed as u16
+}
+
+fn flush_icache_without_irq() {
+    let status: u32;
+    unsafe {
+        core::arch::asm!("mfc0 $8, $12", "nop", lateout("$8") status);
+        core::arch::asm!(
+            "mtc0 $8, $12",
+            "nop",
+            "nop",
+            "nop",
+            in("$8") status & !1,
+            options(nostack, nomem),
+        );
+        psx_rt::bios::bios_flush_cache();
+        core::arch::asm!(
+            "mtc0 $8, $12",
+            "nop",
+            "nop",
+            "nop",
+            in("$8") status,
+            options(nostack, nomem),
+        );
+    }
+}
+
+/// Execute a timing wrapper through its KSEG1 alias. Cache probes must not run
+/// their own setup from KSEG0: a 4 KiB target occupies every direct-map index,
+/// so even a few cached wrapper instructions would evict part of the warmed
+/// target before the timer starts.
+#[inline(never)]
+fn call_uncached_timing(wrapper: fn() -> u16) -> u16 {
+    let address = (wrapper as usize & 0x1FFF_FFFF) | 0xA000_0000;
+    let uncached: fn() -> u16 = unsafe { core::mem::transmute(address) };
+    uncached()
+}
+
+#[inline(never)]
+fn call_uncached_entry_timing(
+    wrapper: fn(unsafe extern "C" fn()) -> u16,
+    target: unsafe extern "C" fn(),
+) -> u16 {
+    let address = (wrapper as usize & 0x1FFF_FFFF) | 0xA000_0000;
+    let uncached: fn(unsafe extern "C" fn()) -> u16 = unsafe { core::mem::transmute(address) };
+    uncached(target)
+}
+
+#[inline(never)]
+fn timed_icache_cold() -> u16 {
+    flush_icache_without_irq();
+    let elapsed: u32;
+    unsafe {
+        core::arch::asm!(
+            ".set noreorder",
+            ".word 0x000003C0", // probe 15 start marker
+            "lui $11, 0x1F80",
+            "ori $11, $11, 0x1120",
+            "sw $zero, 4($11)",
+            "sw $zero, 0($11)",
+            "jalr $10, $8",
+            "nop",
+            "lw $12, 0($11)",
+            "nop",
+            ".word 0x000007C0", // probe 15 end marker
+            ".set reorder",
+            in("$8") __hwtest_icache_block as *const () as usize,
+            lateout("$10") _,
+            lateout("$11") _,
+            lateout("$12") elapsed,
+            options(nostack)
+        );
+    }
+    elapsed as u16
+}
+
+#[inline(never)]
+fn timed_icache_warm() -> u16 {
+    let elapsed: u32;
+    unsafe {
+        core::arch::asm!(
+            ".set noreorder",
+            ".word 0x00000400", // probe 16 start marker
+            "jalr $10, $8", // untimed first pass fills the whole I-cache
+            "nop",
+            "lui $11, 0x1F80",
+            "ori $11, $11, 0x1120",
+            "sw $zero, 4($11)",
+            "sw $zero, 0($11)",
+            "jalr $10, $8",
+            "nop",
+            "lw $12, 0($11)",
+            "nop",
+            ".word 0x00000021", // addu $zero,$zero,$zero end marker
+            ".set reorder",
+            in("$8") __hwtest_icache_block as *const () as usize,
+            lateout("$10") _,
+            lateout("$11") _,
+            lateout("$12") elapsed,
+            options(nostack)
+        );
+    }
+    elapsed as u16
+}
+
+/// Time a single cache-line entry after a BIOS tag flush. Keeping the target
+/// pointer dynamic gives all three word-position cases one identical wrapper;
+/// the final EXE verifier checks both this wrapper and each linked target.
+#[inline(never)]
+fn timed_icache_entry_cold(target: unsafe extern "C" fn()) -> u16 {
+    flush_icache_without_irq();
+    let elapsed: u32;
+    unsafe {
+        core::arch::asm!(
+            ".set noreorder",
+            ".word 0x00000440", // probe 17 start marker
+            "lui $11, 0x1F80",
+            "ori $11, $11, 0x1120",
+            "sw $zero, 4($11)",
+            "sw $zero, 0($11)",
+            "jalr $10, $8",
+            "nop",
+            "lw $12, 0($11)",
+            "nop",
+            ".word 0x00000840", // probe 17 end marker
+            ".set reorder",
+            in("$8") target as usize,
+            lateout("$10") _,
+            lateout("$11") _,
+            lateout("$12") elapsed,
+            options(nostack)
+        );
+    }
+    elapsed as u16
+}
+
+/// Time the same minimal target after an untimed pass has made both of its
+/// executed words valid. This separates call/return overhead from refill cost.
+#[inline(never)]
+fn timed_icache_entry_warm(target: unsafe extern "C" fn()) -> u16 {
+    flush_icache_without_irq();
+    let elapsed: u32;
+    unsafe {
+        core::arch::asm!(
+            ".set noreorder",
+            ".word 0x00000480", // probe 18 start marker
+            "jalr $10, $8",
+            "nop",
+            "lui $11, 0x1F80",
+            "ori $11, $11, 0x1120",
+            "sw $zero, 4($11)",
+            "sw $zero, 0($11)",
+            "jalr $10, $8",
+            "nop",
+            "lw $12, 0($11)",
+            "nop",
+            ".word 0x00000880", // probe 18 end marker
+            ".set reorder",
+            in("$8") target as usize,
+            lateout("$10") _,
+            lateout("$11") _,
+            lateout("$12") elapsed,
+            options(nostack)
+        );
+    }
+    elapsed as u16
+}
+
+macro_rules! timed_gte_commands {
+    ($name:ident, $count:literal, $instruction:literal, $start:literal, $end:literal) => {
+        #[inline(never)]
+        fn $name() -> u16 {
+            seed_gte_state();
+            let elapsed: u32;
+            unsafe {
+                core::arch::asm!(
+                    concat!(
+                        ".set noreorder\n",
+                        ".word ", stringify!($start), "\n",
+                        "lui $11, 0x1F80\n",
+                        "ori $11, $11, 0x1120\n",
+                        "sw $zero, 4($11)\n",
+                        "sw $zero, 0($11)\n",
+                        ".rept ", stringify!($count), "\n",
+                        ".word ", stringify!($instruction), "\n",
+                        ".endr\n",
+                        "lw $12, 0($11)\n",
+                        "nop\n",
+                        ".word ", stringify!($end), "\n",
+                        ".set reorder"
+                    ),
+                    lateout("$11") _,
+                    lateout("$12") elapsed,
+                    options(nostack)
+                );
+            }
+            elapsed as u16
+        }
+    };
+}
+
+timed_gte_commands!(
+    timed_gte_rtps_commands,
+    16,
+    0x4A080001,
+    0x00000240,
+    0x00000640
+);
+timed_gte_commands!(
+    timed_gte_rtpt_commands,
+    8,
+    0x4A080030,
+    0x00000280,
+    0x00000680
+);
+timed_gte_commands!(
+    timed_gte_nclip_commands,
+    16,
+    0x4A000006,
+    0x000002C0,
+    0x000006C0
+);
+timed_gte_commands!(
+    timed_gte_mvmva_commands,
+    16,
+    0x4A080012,
+    0x00000300,
+    0x00000700
+);
+timed_gte_commands!(
+    timed_gte_ncdt_commands,
+    4,
+    0x4A080016,
+    0x00000340,
+    0x00000740
+);
+timed_gte_commands!(
+    timed_gte_ncct_commands,
+    4,
+    0x4A08003F,
+    0x00000380,
+    0x00000780
+);
+
+fn timed_otc_dma_cycles(words: u16) -> u16 {
+    static mut OT: [u32; 256] = [0; 256];
+    unsafe {
+        let ptr = (&raw mut OT) as *mut u32;
+        for i in 0..words as usize {
+            ptr::write_volatile(ptr.add(i), 0);
+        }
+        dma::enable_channel(dma::Channel::Otc);
+        dma::set_madr(dma::Channel::Otc, ptr.add(words as usize - 1) as u32);
+        dma::set_bcr_manual(dma::Channel::Otc, words);
+        timers::set_mode(timers::Timer::Timer2, 0);
+        timers::set_counter(timers::Timer::Timer2, 0);
+        dma::set_chcr(
+            dma::Channel::Otc,
+            dma::CHCR_STEP_BACKWARD | dma::CHCR_SYNC_MANUAL | dma::CHCR_START | dma::CHCR_TRIGGER,
+        );
+        let mut polls = 0u16;
+        while dma::is_busy(dma::Channel::Otc) && polls != 0xFFFF {
+            polls = polls.wrapping_add(1);
+        }
+        let elapsed = timers::counter(timers::Timer::Timer2);
+        if polls != 0xFFFF && ptr::read_volatile(ptr) == 0x00FF_FFFF {
+            elapsed
+        } else {
+            0xFFFF
+        }
+    }
+}
+
+/// Time a 1 KiB main-RAM to SPU-RAM DMA transfer. The payload is 256 DMA
+/// words / 512 SPU halfwords, large enough that the 16-cycle-per-halfword SPU
+/// transfer slope dominates fixed register and polling overhead while staying
+/// well below Timer 2's 16-bit wrap.
+fn timed_spu_dma_write_512_halfwords() -> u16 {
+    use psx_io::spu::{SPUCNT, TRANSFER_ADDR, TRANSFER_CTRL};
+    static mut SOURCE: [u32; 256] = [0; 256];
+
+    unsafe {
+        let source = &raw mut SOURCE as *mut u32;
+        let mut index = 0usize;
+        while index < 256 {
+            ptr::write_volatile(source.add(index), 0x5A00_0000 | index as u32);
+            index += 1;
+        }
+
+        let old_spucnt = psx_io::read16(SPUCNT);
+        let stopped = old_spucnt & !0x0030;
+        psx_io::write16(SPUCNT, stopped);
+        psx_io::write16(TRANSFER_CTRL, 0x0004);
+        psx_io::write16(TRANSFER_ADDR, 0x0800); // SPU RAM byte address 0x4000
+        psx_io::write16(SPUCNT, stopped | 0x0020); // DMA Write
+
+        dma::enable_channel(dma::Channel::Spu);
+        dma::set_madr(dma::Channel::Spu, source as u32);
+        dma::set_bcr_block(dma::Channel::Spu, 16, 16);
+
+        timers::set_mode(timers::Timer::Timer2, 0);
+        timers::set_counter(timers::Timer::Timer2, 0);
+        dma::set_chcr(
+            dma::Channel::Spu,
+            dma::CHCR_TO_DEVICE | dma::CHCR_SYNC_BLOCK | dma::CHCR_START,
+        );
+
+        let mut polls = 0u32;
+        while dma::is_busy(dma::Channel::Spu) && polls < 1_000_000 {
+            polls += 1;
+        }
+        let elapsed = timers::counter(timers::Timer::Timer2);
+        psx_io::write16(SPUCNT, old_spucnt);
+        if polls == 1_000_000 {
+            0xFFFF
+        } else {
+            elapsed
+        }
+    }
+}
+
+/// Time a RAM-to-GP0 block DMA consisting entirely of GP0 NOP commands.
+///
+/// Varying `block_size` and `block_count` independently lets the silicon
+/// capture distinguish a true per-word transfer cost from completion models
+/// that depend only on BCR's block-count field. Because every payload word is
+/// a NOP, the probe neither changes VRAM nor disturbs the photographed page.
+fn timed_gpu_dma_block(block_size: u16, block_count: u16) -> u16 {
+    static SOURCE: [u32; 256] = [0; 256];
+    let words = block_size as u32 * block_count as u32;
+    if words == 0 || words > SOURCE.len() as u32 {
+        return 0xFFFF;
+    }
+
+    let old_direction = (gpu_io::gpustat().bits() >> 29) & 3;
+    gpu_io::write_gp1(0x0400_0002); // DMA CPU -> GP0
+    dma::enable_channel(dma::Channel::Gpu);
+    dma::set_madr(dma::Channel::Gpu, SOURCE.as_ptr() as u32);
+    dma::set_bcr_block(dma::Channel::Gpu, block_size, block_count);
+
     timers::set_mode(timers::Timer::Timer2, 0);
     timers::set_counter(timers::Timer::Timer2, 0);
-    for _ in 0..iterations {
-        seed_gte_state();
-        unsafe { gte_ops::rtps() };
+    dma::set_chcr(
+        dma::Channel::Gpu,
+        dma::CHCR_TO_DEVICE | dma::CHCR_SYNC_BLOCK | dma::CHCR_START,
+    );
+
+    let mut polls = 0u32;
+    while dma::is_busy(dma::Channel::Gpu) && polls < 1_000_000 {
+        polls += 1;
     }
-    let delta = timers::counter(timers::Timer::Timer2);
+    let elapsed = timers::counter(timers::Timer::Timer2);
+    gpu_io::write_gp1(0x0400_0000 | old_direction);
+    if polls == 1_000_000 {
+        0xFFFF
+    } else {
+        elapsed
+    }
+}
+
+/// Time a 2-node linked-list GPU DMA with 128 GP0 NOPs in each node.
+/// The work count is 258 DMA words: two headers plus 256 payload words.
+fn timed_gpu_dma_linked_2x128() -> u16 {
+    static mut LIST: [u32; 258] = [0; 258];
+
+    unsafe {
+        let list = &raw mut LIST as *mut u32;
+        let second = list.add(129);
+        ptr::write_volatile(list, (128u32 << 24) | (second as u32 & 0x00FF_FFFF));
+        ptr::write_volatile(second, (128u32 << 24) | 0x00FF_FFFF);
+        let mut index = 1usize;
+        while index < 129 {
+            ptr::write_volatile(list.add(index), 0); // GP0 NOP
+            ptr::write_volatile(second.add(index), 0); // GP0 NOP
+            index += 1;
+        }
+
+        let old_direction = (gpu_io::gpustat().bits() >> 29) & 3;
+        gpu_io::write_gp1(0x0400_0002); // DMA CPU -> GP0
+        dma::enable_channel(dma::Channel::Gpu);
+        dma::set_madr(dma::Channel::Gpu, list as u32);
+        dma::set_bcr_manual(dma::Channel::Gpu, 0);
+
+        timers::set_mode(timers::Timer::Timer2, 0);
+        timers::set_counter(timers::Timer::Timer2, 0);
+        dma::set_chcr(
+            dma::Channel::Gpu,
+            dma::CHCR_TO_DEVICE | dma::CHCR_SYNC_LINKED | dma::CHCR_START,
+        );
+
+        let mut polls = 0u32;
+        while dma::is_busy(dma::Channel::Gpu) && polls < 1_000_000 {
+            polls += 1;
+        }
+        let elapsed = timers::counter(timers::Timer::Timer2);
+        gpu_io::write_gp1(0x0400_0000 | old_direction);
+        if polls == 1_000_000 {
+            0xFFFF
+        } else {
+            elapsed
+        }
+    }
+}
+
+/// Time CPU-submitted line rendering from the first command word through the
+/// final GPU command-ready transition. Short and long batches separate packet
+/// setup from per-pixel execution; monochrome and Gouraud batches expose the
+/// color-interpolation cost. The lines land in off-screen VRAM so the photo UI
+/// remains readable.
+fn timed_gpu_line_batch(shaded: bool, length: u16, count: u16) -> u16 {
+    gpu_io::wait_cmd_ready();
+    gpu_io::write_gp0(0xE300_0000); // draw area top-left = (0, 0)
+    gpu_io::write_gp0(0xE400_0000 | 1023 | (511 << 10));
+    gpu_io::write_gp0(0xE500_0000); // draw offset = (0, 0)
+    gpu_io::write_gp0(0xE100_0000); // dither off
+    gpu_io::wait_cmd_ready();
+
     timers::set_mode(timers::Timer::Timer2, 0);
-    delta
+    timers::set_counter(timers::Timer::Timer2, 0);
+    let mut index = 0u16;
+    while index < count {
+        let y = 384u32 + u32::from(index & 63);
+        let x0 = 640u32;
+        let x1 = x0 + u32::from(length);
+        if shaded {
+            gpu_io::write_gp0(0x5000_00FF); // red endpoint
+            gpu_io::write_gp0((y << 16) | x0);
+            gpu_io::write_gp0(0x00FF_0000); // blue endpoint
+            gpu_io::write_gp0((y << 16) | x1);
+        } else {
+            gpu_io::write_gp0(0x4000_FFFF);
+            gpu_io::write_gp0((y << 16) | x0);
+            gpu_io::write_gp0((y << 16) | x1);
+        }
+        index += 1;
+    }
+
+    let mut guard = 0u32;
+    while gpu_io::gpustat().bits() & (1 << 26) == 0 && guard < 1_000_000 {
+        guard += 1;
+    }
+    let elapsed = timers::counter(timers::Timer::Timer2);
+    if guard == 1_000_000 {
+        0xFFFF
+    } else {
+        elapsed
+    }
+}
+
+fn timed_cdrom_getstat() -> u16 {
+    timers::set_mode(timers::Timer::Timer2, 0);
+    timers::set_counter(timers::Timer::Timer2, 0);
+    let response = cdrom::try_get_stat(200_000);
+    let elapsed = timers::counter(timers::Timer::Timer2);
+    if response.is_some_and(|value| !value.is_empty()) {
+        elapsed
+    } else {
+        0xFFFF
+    }
+}
+
+fn timed_gpu_irq_settle() -> u16 {
+    gpu_io::write_gp1(0x0200_0000);
+    timers::set_mode(timers::Timer::Timer2, 0);
+    timers::set_counter(timers::Timer::Timer2, 0);
+    gpu_io::write_gp0(0x1F00_0000);
+    let mut guard = 0u16;
+    while gpu_io::gpustat().bits() & (1 << 24) == 0 && guard != 0xFFFF {
+        guard = guard.wrapping_add(1);
+    }
+    let elapsed = timers::counter(timers::Timer::Timer2);
+    gpu_io::write_gp1(0x0200_0000);
+    if guard == 0xFFFF {
+        0xFFFF
+    } else {
+        elapsed
+    }
 }
 
 fn timed_otc_dma_wait() -> u16 {
