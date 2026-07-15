@@ -236,6 +236,11 @@ pub struct LaunchArgs {
     /// 44.1 kHz WAV, for A/B comparison against a reference emulator.
     #[arg(long)]
     pub dump_audio: Option<PathBuf>,
+    /// Optional path to dump every guest CD-ROM command as CSV. This is
+    /// recorded entirely by the emulator, so shipping guests can be traced
+    /// without linking emulator-only telemetry into PS1 RAM.
+    #[arg(long)]
+    pub cd_command_log: Option<PathBuf>,
     /// Print a guest-runtime telemetry summary captured out-of-band.
     #[arg(long)]
     pub dump_guest_profile: bool,
@@ -701,6 +706,10 @@ fn run_headless_launch(
         }
     };
 
+    if args.cd_command_log.is_some() {
+        bus.cdrom.enable_command_log(65_536);
+    }
+
     if args.wireframe {
         bus.gpu.wireframe_enabled = true;
     }
@@ -964,6 +973,17 @@ fn run_headless_launch(
         }
     }
 
+    if let Some(path) = args.cd_command_log.as_ref() {
+        write_cd_command_log(path, bus.cdrom.command_log())?;
+        if emit_summary {
+            eprintln!(
+                "[cli] CD command log → {} ({} commands)",
+                path.display(),
+                bus.cdrom.command_log().len()
+            );
+        }
+    }
+
     if let Some(path) = args.dump_hw {
         let fallback = dump_hw_ppm(&bus, &path, parse_texture_filter(&args.texture_filter))?;
         if emit_summary {
@@ -1114,6 +1134,29 @@ fn write_wav_s16_stereo(
         out.extend_from_slice(&r.to_le_bytes());
     }
     std::fs::write(path, out).map_err(|e| format!("write wav {}: {e}", path.display()))
+}
+
+/// Write a stable command-level CD-ROM trace without requiring guest-side
+/// telemetry. Parameters are kept in issue order and encoded as space-separated
+/// uppercase bytes so the CSV stays directly diffable across emulator runs.
+fn write_cd_command_log(
+    path: &std::path::Path,
+    entries: &[emulator_core::cdrom::CdRomCommandLogEntry],
+) -> Result<(), String> {
+    let mut out = String::from("cycle,command,param_len,params\n");
+    for entry in entries {
+        let params = entry.params[..entry.param_len as usize]
+            .iter()
+            .map(|byte| format!("{byte:02X}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        out.push_str(&format!(
+            "{},0x{:02X},{},{}\n",
+            entry.cycle, entry.command, entry.param_len, params
+        ));
+    }
+    std::fs::write(path, out)
+        .map_err(|error| format!("write CD command log {}: {error}", path.display()))
 }
 
 #[cfg(feature = "editor")]
@@ -1555,6 +1598,7 @@ fn validation_launch_args(
         dump_hw: None,
         dump_display: None,
         dump_audio: None,
+        cd_command_log: None,
         dump_guest_profile: false,
         hold_forward: checkpoint.hold_forward,
         hold_run: checkpoint.hold_run,
