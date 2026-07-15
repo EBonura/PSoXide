@@ -454,6 +454,9 @@ impl Playtest {
             }
             i += 1;
         }
+        // Everything past the visible prefix is the prefetch ring; the
+        // scheduler counts and protects the two classes differently.
+        let active_count = count;
         // Prefetch ring rooted at the camera's room (the visibility root), not
         // the player's. Breadth-first, so the closest hops fill the rest of the
         // budget. Radius = traversal depth + a small margin that also absorbs the
@@ -481,6 +484,7 @@ impl Playtest {
             cd_arena(),
             &desired,
             count,
+            active_count,
             RUNTIME_SCHEDULE.stream_load_batch_count,
             WORLD_PACK_START_LBA,
             WORLD_PACK_TOC,
