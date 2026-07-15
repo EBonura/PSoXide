@@ -186,6 +186,17 @@ pub struct UiImageCache<const STAGE_WORDS: usize, const SLOTS: usize> {
 
 #[cfg(feature = "cd-stream-bench")]
 impl<const STAGE_WORDS: usize, const SLOTS: usize> UiImageCache<STAGE_WORDS, SLOTS> {
+    /// Drop every cached image and mark the cache not ready, so the
+    /// next menu-scene service pass re-preloads from CD. Called when
+    /// gameplay takes over the cache's RAM (the menu/gameplay arena
+    /// overlay); the bytes are about to be overwritten by room draws.
+    pub fn invalidate(&mut self) {
+        self.entries = [UiImageCacheEntry::EMPTY; SLOTS];
+        self.count = 0;
+        self.ready = false;
+        self.defer_frames = 0;
+    }
+
     /// Zero-initialized cache; `const` so the game's static instance
     /// stays in `.bss`.
     pub const fn new() -> Self {
