@@ -584,6 +584,88 @@ fn root_joint_nodes_skips_children_of_other_skin_joints() {
     assert_eq!(root_joint_nodes(&[1, 2, 3], &parents), vec![1, 3]);
 }
 
+#[test]
+fn bone_collapse_reweights_subtree_and_rebuilds_joint_table() {
+    let parents = vec![None, Some(0), Some(1), Some(0)];
+    let node_names = vec![
+        "mixamorig:LeftHand".to_string(),
+        "mixamorig:LeftHandIndex1".to_string(),
+        "FingerTip".to_string(),
+        "ArmDecoration".to_string(),
+    ];
+    let mut joints = vec![0, 1, 2, 3];
+    let mut inverse_bind_matrices = vec![identity_matrix(); 4];
+    inverse_bind_matrices[3][3][0] = 3.0;
+    let mut source = SkinnedSourceMesh {
+        vertices: vec![SourceVertex {
+            position: [0.0; 3],
+            normal: [0.0, 1.0, 0.0],
+            uv: [0.0; 2],
+            joints: [2, 3, 1, 0],
+            weights: [0.5, 0.3, 0.2, 0.0],
+            dominant_joint: 2,
+        }],
+        faces: Vec::new(),
+    };
+
+    let removed = collapse_bone_subtrees(
+        &mut source,
+        &mut joints,
+        &mut inverse_bind_matrices,
+        &parents,
+        &node_names,
+        &["HANDINDEX".to_string()],
+    )
+    .unwrap();
+
+    assert_eq!(removed, 2);
+    assert_eq!(joints, vec![0, 3]);
+    assert_eq!(inverse_bind_matrices.len(), 2);
+    assert_eq!(inverse_bind_matrices[1][3][0], 3.0);
+    assert_eq!(source.vertices[0].joints, [0, 1, 0, 0]);
+    assert!((source.vertices[0].weights[0] - 0.7).abs() < 0.0001);
+    assert!((source.vertices[0].weights[1] - 0.3).abs() < 0.0001);
+    assert_eq!(source.vertices[0].dominant_joint, 0);
+}
+
+#[test]
+fn bone_collapse_root_selection_is_independent_of_joint_order() {
+    let parents = vec![None, Some(0), Some(1)];
+    let node_names = vec![
+        "HandIndexRoot".to_string(),
+        "HandIndexChild".to_string(),
+        "HandIndexTip".to_string(),
+    ];
+    let mut joints = vec![2, 0, 1];
+    let mut inverse_bind_matrices = vec![identity_matrix(); 3];
+    let mut source = SkinnedSourceMesh {
+        vertices: vec![SourceVertex {
+            position: [0.0; 3],
+            normal: [0.0, 1.0, 0.0],
+            uv: [0.0; 2],
+            joints: [0, 2, 0, 0],
+            weights: [0.5, 0.5, 0.0, 0.0],
+            dominant_joint: 0,
+        }],
+        faces: Vec::new(),
+    };
+
+    let removed = collapse_bone_subtrees(
+        &mut source,
+        &mut joints,
+        &mut inverse_bind_matrices,
+        &parents,
+        &node_names,
+        &["handindex".to_string()],
+    )
+    .unwrap();
+
+    assert_eq!(removed, 2);
+    assert_eq!(joints, vec![0]);
+    assert_eq!(source.vertices[0].joints, [0, 0, 0, 0]);
+    assert_eq!(source.vertices[0].weights, [1.0, 0.0, 0.0, 0.0]);
+}
+
 fn minimal_triangle_glb() -> Vec<u8> {
     let mut bin = Vec::new();
     for f in [
