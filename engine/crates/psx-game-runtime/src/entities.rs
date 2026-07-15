@@ -219,6 +219,20 @@ impl GameEntityHitOutcome {
     };
 }
 
+/// Animation selection for one entity this tick (the AI-state ->
+/// animation-clip seam): which cooked model-local clip its bound
+/// instance should play and where in the clip playback is.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GameEntityClip {
+    /// Model-local clip index from the cooked record.
+    pub clip: u16,
+    /// 60 Hz ticks into the clip's playback.
+    pub phase_ticks: u16,
+    /// One-shot playback: clamp at the clip's final frame instead of
+    /// looping.
+    pub one_shot: bool,
+}
+
 /// Aggregate outcome of one [`GameEntities::apply_melee_arc`] sweep.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct MeleeArcStats {
@@ -353,6 +367,54 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         }
     }
 
+    /// Clip selection for entity `index`'s current state. Locomotion
+    /// states loop from their state-entry tick; the attack grammar
+    /// plays the attack clip as ONE one-shot whose phase spans Windup
+    /// + Attack + Recover (the telegraph/commit/punish the player
+    /// reads is the same clip the AI windows run on). Stagger and
+    /// Death are one-shots from state entry; Dead keeps counting
+    /// ticks (see [`Self::tick`]) so the death clip finishes and
+    /// holds its final frame as the corpse pose.
+    pub fn clip_for_state(
+        &self,
+        records: &'static [LevelGameEntityRecord],
+        index: usize,
+    ) -> GameEntityClip {
+        if index >= self.count() || index >= records.len() {
+            return GameEntityClip::default();
+        }
+        let record = &records[index];
+        let ticks = self.state_ticks[index];
+        let looping = |clip: u16| GameEntityClip {
+            clip,
+            phase_ticks: ticks,
+            one_shot: false,
+        };
+        let one_shot = |clip: u16, phase_ticks: u16| GameEntityClip {
+            clip,
+            phase_ticks,
+            one_shot: true,
+        };
+        match self.state(index) {
+            GameEntityState::Idle => looping(record.idle_clip),
+            GameEntityState::Patrol => looping(record.walk_clip),
+            GameEntityState::Aggro => looping(record.run_clip),
+            GameEntityState::Windup => one_shot(record.attack_clip, ticks),
+            GameEntityState::Attack => one_shot(
+                record.attack_clip,
+                u16::from(record.windup_ticks).saturating_add(ticks),
+            ),
+            GameEntityState::Recover => one_shot(
+                record.attack_clip,
+                u16::from(record.windup_ticks)
+                    .saturating_add(GAME_ENTITY_ATTACK_ACTIVE_TICKS)
+                    .saturating_add(ticks),
+            ),
+            GameEntityState::Staggered => one_shot(record.stagger_clip, ticks),
+            GameEntityState::Dead => one_shot(record.death_clip, ticks),
+        }
+    }
+
     /// Apply a hit to entity `index`: health damage plus poise
     /// damage. Health reaching zero kills; accumulated poise damage
     /// past the record's pool staggers (and the accumulator resets).
@@ -467,6 +529,10 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
             let record = &records[index];
             let state = GameEntityState::from_raw(self.state[index]);
             if state == GameEntityState::Dead {
+                // Dead entities stop thinking but keep counting so
+                // the death one-shot plays out and then holds its
+                // final frame (see clip_for_state).
+                self.state_ticks[index] = self.state_ticks[index].saturating_add(1);
                 index += 1;
                 continue;
             }
@@ -773,6 +839,12 @@ mod tests {
             kind: 1,
             targetname: 0,
             model_instance: psx_level::GAME_ENTITY_MODEL_INSTANCE_NONE,
+            idle_clip: 0,
+            walk_clip: 1,
+            run_clip: 2,
+            attack_clip: 3,
+            stagger_clip: 4,
+            death_clip: 5,
             x,
             y: 0,
             z,
@@ -920,6 +992,110 @@ mod tests {
             entities.tick(&IDLE_ENEMY, near_input(&ACTIVE), &mut NoClipMover);
         }
         assert_eq!(entities.state(0), GameEntityState::Aggro);
+    }
+
+    #[test]
+    fn clip_for_state_maps_states_and_spans_the_attack_one_shot() {
+        let mut entities = GameEntities::<8>::EMPTY;
+        entities.spawn_from_records(&IDLE_ENEMY);
+        // Idle loops the idle clip from the state-entry tick.
+        assert_eq!(
+            entities.clip_for_state(&IDLE_ENEMY, 0),
+            GameEntityClip {
+                clip: 0,
+                phase_ticks: 0,
+                one_shot: false
+            }
+        );
+        entities.tick(&IDLE_ENEMY, far_input(&ACTIVE), &mut NoClipMover);
+        assert_eq!(
+            entities.clip_for_state(&IDLE_ENEMY, 0),
+            GameEntityClip {
+                clip: 0,
+                phase_ticks: 1,
+                one_shot: false
+            }
+        );
+        // Aggro loops the run clip from its own entry tick.
+        entities.tick(&IDLE_ENEMY, near_input(&ACTIVE), &mut NoClipMover);
+        assert_eq!(entities.state(0), GameEntityState::Aggro);
+        assert_eq!(
+            entities.clip_for_state(&IDLE_ENEMY, 0),
+            GameEntityClip {
+                clip: 2,
+                phase_ticks: 0,
+                one_shot: false
+            }
+        );
+        // Windup entered next tick; from there the attack clip is ONE
+        // one-shot whose phase walks 1..=12 across Windup (3 ticks),
+        // Attack (6 ticks), and Recover without resetting on the
+        // state hops.
+        entities.tick(&IDLE_ENEMY, near_input(&ACTIVE), &mut NoClipMover);
+        assert_eq!(entities.state(0), GameEntityState::Windup);
+        assert_eq!(
+            entities.clip_for_state(&IDLE_ENEMY, 0),
+            GameEntityClip {
+                clip: 3,
+                phase_ticks: 0,
+                one_shot: true
+            }
+        );
+        for expected in 1..=12u16 {
+            entities.tick(&IDLE_ENEMY, near_input(&ACTIVE), &mut NoClipMover);
+            assert_eq!(
+                entities.clip_for_state(&IDLE_ENEMY, 0),
+                GameEntityClip {
+                    clip: 3,
+                    phase_ticks: expected,
+                    one_shot: true
+                }
+            );
+        }
+        assert_eq!(entities.state(0), GameEntityState::Recover);
+        // Stagger restarts as its own one-shot.
+        entities.apply_hit(&IDLE_ENEMY, 0, 10, 60);
+        assert_eq!(entities.state(0), GameEntityState::Staggered);
+        assert_eq!(
+            entities.clip_for_state(&IDLE_ENEMY, 0),
+            GameEntityClip {
+                clip: 4,
+                phase_ticks: 0,
+                one_shot: true
+            }
+        );
+        entities.tick(&IDLE_ENEMY, far_input(&ACTIVE), &mut NoClipMover);
+        assert_eq!(entities.clip_for_state(&IDLE_ENEMY, 0).phase_ticks, 1);
+        // Death is a one-shot that keeps counting while Dead (the
+        // clip finishes and holds its final frame), without waking
+        // the state machine back up.
+        entities.apply_hit(&IDLE_ENEMY, 0, 200, 0);
+        assert_eq!(entities.state(0), GameEntityState::Dead);
+        assert_eq!(
+            entities.clip_for_state(&IDLE_ENEMY, 0),
+            GameEntityClip {
+                clip: 5,
+                phase_ticks: 0,
+                one_shot: true
+            }
+        );
+        for _ in 0..3 {
+            let stats = entities.tick(&IDLE_ENEMY, near_input(&ACTIVE), &mut NoClipMover);
+            assert_eq!(stats.thought, 0);
+        }
+        assert_eq!(
+            entities.clip_for_state(&IDLE_ENEMY, 0),
+            GameEntityClip {
+                clip: 5,
+                phase_ticks: 3,
+                one_shot: true
+            }
+        );
+        // Out-of-range indices read inert.
+        assert_eq!(
+            entities.clip_for_state(&IDLE_ENEMY, 7),
+            GameEntityClip::default()
+        );
     }
 
     #[test]

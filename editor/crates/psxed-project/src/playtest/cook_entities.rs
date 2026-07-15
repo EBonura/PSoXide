@@ -1665,6 +1665,135 @@ pub(crate) fn character_idle_clip_for_model_instance(
     Some(model.default_clip)
 }
 
+/// Per-state model-local clip indices for one cooked game entity,
+/// resolved from the entity Character's AnimationSet roles. Missing
+/// roles fall back at cook time (walk -> idle, run -> walk, attack/
+/// stagger/death -> idle) so the runtime record always carries a
+/// playable clip per state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct GameEntityStateClips {
+    pub idle: u16,
+    pub walk: u16,
+    pub run: u16,
+    pub attack: u16,
+    pub stagger: u16,
+    pub death: u16,
+}
+
+impl GameEntityStateClips {
+    /// Every state on one clip (also the "entity has no cooked
+    /// visual" placeholder -- the runtime never reads it then).
+    pub(crate) const fn all(clip: u16) -> Self {
+        Self {
+            idle: clip,
+            walk: clip,
+            run: clip,
+            attack: clip,
+            stagger: clip,
+            death: clip,
+        }
+    }
+}
+
+/// Resolve a game entity's per-state clips against the model backing
+/// its cooked instance. Hard-fails (like the idle-instance cook) only
+/// when an AUTHORED idle clip cannot resolve; unauthored roles walk
+/// the fallback chain instead.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn game_entity_state_clips(
+    project: &ProjectDocument,
+    character_name: &str,
+    character: &crate::CharacterResource,
+    model_instance: Option<u16>,
+    model_instances: &[PlaytestModelInstance],
+    models: &[PlaytestModel],
+    model_for_resource: &HashMap<ResourceId, u16>,
+    model_clip_remaps: &HashMap<ResourceId, Vec<Option<u16>>>,
+    report: &mut PlaytestValidationReport,
+) -> Option<GameEntityStateClips> {
+    let instance = model_instance
+        .and_then(|index| model_instances.get(usize::from(index)))
+        .and_then(|inst| {
+            models
+                .get(usize::from(inst.model))
+                .map(|model| (inst, model))
+        });
+    // No cooked visual: the runtime never reads the state clips.
+    let Some((instance, model)) = instance else {
+        return Some(GameEntityStateClips::all(0));
+    };
+    let instance_clip = if instance.clip == MODEL_CLIP_INHERIT {
+        model.default_clip
+    } else {
+        instance.clip
+    };
+    // Clip indices are local to the INSTANCE's model. When the
+    // entity's visual is not the Character's own model (a Model
+    // Renderer override), role indices would alias another model's
+    // clip table, so every state keeps the instance clip.
+    let character_model = character
+        .model
+        .filter(|resource| model_for_resource.get(resource).copied() == Some(instance.model));
+    let Some(model_resource_id) = character_model else {
+        report.warn(format!(
+            "Enemy Character '{character_name}' renders a model other than its own - \
+             state clips fall back to the instance clip"
+        ));
+        return Some(GameEntityStateClips::all(instance_clip));
+    };
+    let idle = character_idle_clip_for_model_instance(
+        project,
+        character_name,
+        character,
+        model_resource_id,
+        model,
+        model_clip_remaps,
+        report,
+    )?;
+    let optional = |action: CharacterAnimationAction| {
+        character_optional_action_clip(
+            project,
+            character,
+            model_resource_id,
+            action,
+            model_clip_remaps,
+        )
+    };
+    let walk = optional(CharacterAnimationAction::Walk).unwrap_or(idle);
+    let run = optional(CharacterAnimationAction::Run).unwrap_or(walk);
+    Some(GameEntityStateClips {
+        idle,
+        walk,
+        run,
+        attack: optional(CharacterAnimationAction::LightAttack).unwrap_or(idle),
+        stagger: optional(CharacterAnimationAction::HitReact).unwrap_or(idle),
+        death: optional(CharacterAnimationAction::Death).unwrap_or(idle),
+    })
+}
+
+/// One optional AnimationSet action clip, remapped to the runtime's
+/// model-local index. `None` for unauthored or unresolvable roles
+/// (the caller falls back down the state-clip chain).
+fn character_optional_action_clip(
+    project: &ProjectDocument,
+    character: &crate::CharacterResource,
+    model_resource_id: ResourceId,
+    action: CharacterAnimationAction,
+    model_clip_remaps: &HashMap<ResourceId, Vec<Option<u16>>>,
+) -> Option<u16> {
+    let set = character.animation_set.and_then(|id| {
+        project
+            .resource(id)
+            .and_then(|resource| match &resource.data {
+                ResourceData::AnimationSet(set) => Some(set),
+                _ => None,
+            })
+    })?;
+    let animation_id = animation_set_action_clip(project, set, action)?;
+    let index = project.resolved_model_animation_index(model_resource_id, animation_id)?;
+    remap_runtime_model_clip(model_clip_remaps, model_resource_id, index)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn register_weapon_for_equipment(
     project: &ProjectDocument,
