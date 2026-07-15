@@ -32,7 +32,9 @@ use crate::{
 };
 
 pub use psxed_format::texture::Depth as TextureDepth;
-pub use psxed_gltf::{RigidModelConfig, RigidModelPackage, RigidModelReport};
+pub use psxed_gltf::{
+    default_collapse_bone_patterns, RigidModelConfig, RigidModelPackage, RigidModelReport,
+};
 
 /// Header-derived statistics about a `.psxmdl` blob, suitable
 /// for editor inspector display. Computed by walking the model
