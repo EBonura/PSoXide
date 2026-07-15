@@ -253,6 +253,18 @@ impl HwRenderer {
     }
 
     fn render_draw_segment(&mut self, cmd_log: &[GpuCmdLogEntry], wireframe: bool) {
+        // Headless full-run replays can hand this a single giant segment
+        // (millions of logged draws); translating it in one piece would
+        // size the vertex buffer past wgpu's max-buffer limit. Segments
+        // draw sequentially into the persistent target, so splitting
+        // preserves order.
+        const MAX_SEGMENT_ENTRIES: usize = 1 << 18;
+        if cmd_log.len() > MAX_SEGMENT_ENTRIES {
+            for chunk in cmd_log.chunks(MAX_SEGMENT_ENTRIES) {
+                self.render_draw_segment(chunk, wireframe);
+            }
+            return;
+        }
         if cmd_log.is_empty() {
             return;
         }
