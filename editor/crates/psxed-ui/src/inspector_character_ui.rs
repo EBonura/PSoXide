@@ -1384,7 +1384,7 @@ pub(crate) fn draw_ui_action_editor(
                     .clicked()
                     && !ui_action_same_variant(action, candidate)
                 {
-                    *action = candidate.clone();
+                    *action = *candidate;
                     changed = true;
                 }
             }

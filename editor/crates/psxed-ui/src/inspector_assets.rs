@@ -255,7 +255,7 @@ pub(crate) fn stat_cell(ui: &mut egui::Ui, label: &str, value: usize) {
 }
 
 pub(crate) fn draw_model_wireframe_preview(ui: &mut egui::Ui, model_bytes: &[u8]) {
-    let width = ui.available_width().min(520.0).max(280.0);
+    let width = ui.available_width().clamp(280.0, 520.0);
     let (rect, _) = ui.allocate_exact_size(Vec2::new(width, 280.0), Sense::hover());
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 4.0, STUDIO_PANEL);
