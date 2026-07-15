@@ -1165,6 +1165,19 @@ impl Gpu {
                     + self.timing_polygon_pixels(&[v1, v3, v2]);
                 textured_poly_cost(pixels)
             }
+            // Line setup/throughput from the PAL short/long batch pairs.
+            // Monochrome is about 0.90 clocks/pixel plus six setup clocks;
+            // Gouraud interpolation raises that to 1.03 plus thirteen.
+            0x40..=0x4F => {
+                let v0 = self.decode_vertex(self.gp0_fifo[1]);
+                let v1 = self.decode_vertex(self.gp0_fifo[2]);
+                7 + scale_gpu_pixels(timing_line_steps(v0, v1), 29, 32)
+            }
+            0x50..=0x5F => {
+                let v0 = self.decode_vertex(self.gp0_fifo[1]);
+                let v1 = self.decode_vertex(self.gp0_fifo[3]);
+                16 + scale_gpu_pixels(timing_line_steps(v0, v1), 263, 256)
+            }
             // Flat rectangles.
             0x60..=0x63 => {
                 let size = self.gp0_fifo[2];
@@ -1726,7 +1739,12 @@ impl Gpu {
         // the bandwidth corpus, 400 repetitions consistently finish about
         // 60 HBlanks early without this term (roughly 320 CPU cycles per
         // command), independent of primitive size or texture mode.
-        let timing_cost = if pixel_cost == 0 {
+        let timing_cost = if matches!(op, 0x40..=0x5F) {
+            // Lines have their own much smaller setup pipeline; the returned
+            // cost already includes it and must not inherit the 320-cycle
+            // polygon/rectangle setup term.
+            pixel_cost
+        } else if pixel_cost == 0 {
             0
         } else {
             pixel_cost.saturating_add(320)
@@ -3344,6 +3362,19 @@ fn scale_gpu_pixels(pixels: u64, numerator: u64, denominator: u64) -> u64 {
         .saturating_mul(numerator)
         .saturating_add(denominator - 1)
         / denominator
+}
+
+/// Dominant-axis steps used by the GPU line engine, after its signed 11-bit
+/// coordinate truncation and oversized-line rejection.
+fn timing_line_steps(v0: (i32, i32), v1: (i32, i32)) -> u64 {
+    let truncate = |v: i32| sign_extend_11(v & 0x7FF);
+    let dx = (truncate(v1.0) - truncate(v0.0)).unsigned_abs();
+    let dy = (truncate(v1.1) - truncate(v0.1)).unsigned_abs();
+    if dx >= 1024 || dy >= 512 {
+        0
+    } else {
+        u64::from(dx.max(dy))
+    }
 }
 
 /// Clip a convex primitive to the drawing rectangle and return its area in
