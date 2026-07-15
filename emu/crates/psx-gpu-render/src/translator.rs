@@ -315,11 +315,10 @@ impl Translator {
 
     // ----- GP0 lines (0x40..=0x5F) -----
 
-    /// `0x40..=0x43` / `0x48..=0x4B` -- monochrome line / polyline.
+    /// `0x40..=0x47` / `0x48..=0x4F` -- monochrome line / polyline.
     /// One quad band per consecutive point pair. Zero-length
-    /// segments draw nothing: the CPU's mono Bresenham walker
-    /// early-outs on `dx == 0 && dy == 0` (unlike the shaded walker,
-    /// which plots one pixel -- see [`Translator::emit_shaded_line`]).
+    /// segments plot one pixel, matching the silicon-coordinate DDA
+    /// used by the CPU rasterizer.
     /// The CPU routes dithered mono lines through its shaded walker;
     /// this backend has no dither anywhere, so the colours already
     /// match and only the (absent) dither pattern differs.
@@ -329,13 +328,14 @@ impl Translator {
         for pair in points.windows(2) {
             let (v0, v1) = (pair[0], pair[1]);
             if v0 == v1 {
+                self.push_pixel_quad(v0, color, kind);
                 continue;
             }
             self.push_gp0_line_segment(v0, color, v1, color, kind);
         }
     }
 
-    /// `0x50..=0x53` / `0x58..=0x5B` -- Gouraud line / polyline.
+    /// `0x50..=0x57` / `0x58..=0x5F` -- Gouraud line / polyline.
     /// Host interpolation replaces the CPU's per-step colour walk;
     /// endpoint colours land exactly, mid-segment colours carry the
     /// same f32-vs-integer tolerance as shaded triangles.
@@ -879,7 +879,7 @@ impl Translator {
         let flip_y = self.interp.state.flip_y;
         let mut dy = 0;
         while dy < h {
-            let src_y = if flip_y { v0 + h - 1 - dy } else { v0 + dy };
+            let src_y = if flip_y { v0 - dy } else { v0 + dy };
             let y_phase = src_y & 0xFF;
             let chunk_h = (h - dy).min(if flip_y { y_phase + 1 } else { 256 - y_phase });
             let (uv_top_v, uv_bottom_v) = if flip_y {
@@ -890,7 +890,7 @@ impl Translator {
 
             let mut dx = 0;
             while dx < w {
-                let src_x = if flip_x { u0 + w - 1 - dx } else { u0 + dx };
+                let src_x = if flip_x { u0 + 1 - dx } else { u0 + dx };
                 let x_phase = src_x & 0xFF;
                 let chunk_w = (w - dx).min(if flip_x { x_phase + 1 } else { 256 - x_phase });
                 let (uv_left_u, uv_right_u) = if flip_x {
@@ -1115,18 +1115,26 @@ mod tests {
         let mut translator = Translator::new();
         let frame = translator.translate(&log);
 
-        assert_eq!(frame.total(), 6);
+        // Silicon starts at u0+1 then counts down. Starting at zero
+        // therefore wraps after two pixels and needs two host quads.
+        assert_eq!(frame.total(), 12);
         let actual: Vec<([i16; 2], [u16; 2])> =
             frame.vertices.iter().map(|v| (v.pos, v.uv)).collect();
         assert_eq!(
             actual,
             vec![
-                ([10, 20], [20, 0]),
-                ([30, 20], [0, 0]),
-                ([10, 21], [20, 1]),
-                ([30, 20], [0, 0]),
-                ([30, 21], [0, 1]),
-                ([10, 21], [20, 1]),
+                ([10, 20], [2, 0]),
+                ([12, 20], [0, 0]),
+                ([10, 21], [2, 1]),
+                ([12, 20], [0, 0]),
+                ([12, 21], [0, 1]),
+                ([10, 21], [2, 1]),
+                ([12, 20], [256, 0]),
+                ([30, 20], [238, 0]),
+                ([12, 21], [256, 1]),
+                ([30, 20], [238, 0]),
+                ([30, 21], [238, 1]),
+                ([12, 21], [256, 1]),
             ]
         );
     }
@@ -1307,12 +1315,17 @@ mod tests {
     }
 
     #[test]
-    fn zero_length_mono_line_draws_nothing() {
-        // CPU mono Bresenham early-outs on dx == 0 && dy == 0.
+    fn zero_length_mono_line_plots_one_pixel() {
         let log = [entry(0x40, vec![0x40FF_FFFF, xy(10, 10), xy(10, 10)])];
         let mut translator = Translator::new();
         let frame = translator.translate(&log);
-        assert_eq!(frame.total(), 0);
+
+        assert_eq!(frame.total(), 6);
+        let pos: Vec<[i16; 2]> = frame.vertices.iter().map(|v| v.pos).collect();
+        assert_eq!(
+            pos,
+            vec![[10, 10], [11, 10], [10, 11], [11, 10], [11, 11], [10, 11]]
+        );
     }
 
     #[test]

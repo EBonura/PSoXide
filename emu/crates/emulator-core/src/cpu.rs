@@ -19,15 +19,25 @@ use psx_hw::memory;
 use psx_trace::InstructionRecord;
 use thiserror::Error;
 
-use crate::bus::Bus;
+use crate::bus::{AccessWidth, Bus};
 use crate::freelook::{self, FreelookState};
 use psx_gte_core::Gte;
 
 mod branch;
+mod icache;
 mod timing;
 
 use branch::branch_target;
+use icache::InstructionCache;
 use timing::cycle_cost;
+
+const CACHE_CONTROL_TAG: u32 = 1 << 2;
+const CACHE_CONTROL_IBLKSZ_SHIFT: u32 = 8;
+const CACHE_CONTROL_IBLKSZ_MASK: u32 = 3 << CACHE_CONTROL_IBLKSZ_SHIFT;
+const CACHE_CONTROL_IS1: u32 = 1 << 11;
+/// Retail BIOS state after `FlushCache` returns: scratchpad and I-cache
+/// enabled, four-word I-cache refills, and the normal bus-control bits.
+const CACHE_CONTROL_BIOS_NORMAL: u32 = 0x0001_E988;
 
 /// Cycles after `MTC2` to LZCS (data reg 30) before the recomputed LZCR
 /// (data reg 31) is readable. A read inside this window returns the prior
@@ -94,6 +104,24 @@ struct ExecutedInstruction {
     record_instr: u32,
 }
 
+/// Architectural state hidden by the retail BIOS while a custom
+/// `HookEntryInt` handler runs. The HLE path needs the same preservation so
+/// the guest ISR may freely clobber caller-saved registers before invoking
+/// B(17h) `ReturnFromException`.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct HleIrqFrame {
+    pc: u32,
+    gprs: [u32; 32],
+    cop0: [u32; 32],
+    hi: u32,
+    lo: u32,
+    pending_pc: Option<u32>,
+    pending_load: Option<(u8, u32)>,
+    committing_load: Option<(u8, u32)>,
+    isr_depth: u32,
+    clean_irq_entry: bool,
+}
+
 /// MIPS R3000A CPU state.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Cpu {
@@ -104,6 +132,14 @@ pub struct Cpu {
     /// one early on is `SR` (index 12) which gates interrupts and
     /// cache isolation.
     cop0: [u32; 32],
+    /// CPU-internal cache-control register at `0xFFFE_0130` (BCC).
+    /// It lives here rather than on [`Bus`] because isolated cache
+    /// operations and instruction fetch both terminate inside the CPU.
+    cache_control: u32,
+    /// 4 KiB direct-mapped instruction cache, including tag RAM,
+    /// per-word valid bits, and code RAM. This is architectural state:
+    /// stale cached code must survive save/load just as it does execution.
+    instruction_cache: InstructionCache,
     /// Monotonically increasing step counter. We use "instructions
     /// retired" as our tick metric; cycle-accurate timing lands when
     /// the scheduler does.
@@ -196,6 +232,14 @@ pub struct Cpu {
     /// is the exception vector (0x8000_0080 or 0xBFC0_0180 depending on
     /// the BEV bit in SR).
     pending_exception_pc: Option<u32>,
+    /// A side-loaded EXE entered its guest-installed unresolved-exception
+    /// callback through the synthetic HLE kernel frame.
+    hle_exception_active: bool,
+    /// Interrupted frame for a side-loaded guest's `HookEntryInt` handler.
+    /// `Some` only between hardware IRQ entry and B(17h)
+    /// `ReturnFromException`.
+    #[serde(default)]
+    hle_irq_frame: Option<Box<HleIrqFrame>>,
     /// Per-ExcCode (0..=31) count of exception entries. Diagnostic only.
     /// Excluded from save states.
     #[serde(skip)]
@@ -250,6 +294,8 @@ impl Cpu {
             pc: memory::bios::RESET_VECTOR,
             gprs: [0; 32],
             cop0: [0; 32],
+            cache_control: 0,
+            instruction_cache: InstructionCache::default(),
             tick: 0,
             pending_pc: None,
             pending_load: None,
@@ -282,6 +328,8 @@ impl Cpu {
             hi: 0,
             lo: 0,
             pending_exception_pc: None,
+            hle_exception_active: false,
+            hle_irq_frame: None,
             exception_counts: [0; 32],
             irq_line_high_steps: 0,
             should_take_interrupt_steps: 0,
@@ -352,6 +400,14 @@ impl Cpu {
     /// RAM by [`crate::Bus::load_exe_payload`].
     pub fn seed_from_exe(&mut self, initial_pc: u32, initial_gp: u32, initial_sp: Option<u32>) {
         self.pc = initial_pc;
+        // The real BIOS Exec path flushes the I-cache before entering a
+        // newly loaded executable and leaves BIU_CONFIG in its normal
+        // 0x0001_E988 state. Direct side-loading bypasses that code, so
+        // reproduce both observable effects here. Leaving the reset value
+        // of zero would run every KSEG0 instruction uncached and add six RAM
+        // bus stalls per instruction.
+        self.instruction_cache.invalidate_all();
+        self.cache_control = CACHE_CONTROL_BIOS_NORMAL;
         self.pending_pc = None;
         self.pending_load = None;
         self.committing_load = None;
@@ -362,6 +418,8 @@ impl Cpu {
         self.gte_lzcr_stale = 0;
         self.hilo_busy_until = 0;
         self.pending_exception_pc = None;
+        self.hle_exception_active = false;
+        self.hle_irq_frame = None;
         self.set_gpr(28, initial_gp);
         // PSX-EXEs with a zero SP header (common in test homebrew like
         // ps1-tests/amidog) expect the BIOS-default stack; a fresh CPU's
@@ -462,8 +520,198 @@ impl Cpu {
     /// advancing it. Exposed for diagnostic tools; `step` uses it
     /// internally too. `&mut Bus` because some peripheral reads
     /// (CD-ROM, future DMA) mutate.
-    pub fn fetch(&self, bus: &mut Bus) -> u32 {
-        bus.read32(self.pc)
+    pub fn fetch(&mut self, bus: &mut Bus) -> u32 {
+        self.fetch_instruction(self.pc, bus)
+    }
+
+    #[inline]
+    fn instruction_cache_enabled_at(&self, addr: u32) -> bool {
+        // KUSEG (0x0000_0000..0x7FFF_FFFF) and KSEG0
+        // (0x8000_0000..0x9FFF_FFFF) are cacheable. KSEG1 is the
+        // explicit uncached alias and KSEG2 contains CPU control space.
+        addr < 0xA000_0000 && self.cache_control & CACHE_CONTROL_IS1 != 0
+    }
+
+    #[inline]
+    fn fetch_instruction(&mut self, addr: u32, bus: &mut Bus) -> u32 {
+        if !self.instruction_cache_enabled_at(addr) {
+            bus.add_cycles(bus.instruction_read_stalls(addr));
+            return bus.read_instruction32(addr);
+        }
+        let phys = memory::to_physical(addr);
+        let iblksz =
+            ((self.cache_control & CACHE_CONTROL_IBLKSZ_MASK) >> CACHE_CONTROL_IBLKSZ_SHIFT) as u8;
+        let (instruction, filled_words) = self.instruction_cache.fetch(phys, iblksz, bus);
+        bus.add_cycles(bus.icache_fill_stalls(phys, filled_words));
+        instruction
+    }
+
+    #[inline]
+    fn read_cache_control(&self) -> u32 {
+        // Bits 6 and 10 are hardwired zero on retail hardware.
+        self.cache_control & !((1 << 6) | (1 << 10))
+    }
+
+    #[inline]
+    fn write_cache_control(&mut self, value: u32) {
+        self.cache_control = value & !((1 << 6) | (1 << 10));
+    }
+
+    #[inline]
+    fn cache_control_lane(addr: u32) -> Option<u32> {
+        addr.checked_sub(memory::cache_control::ADDR)
+            .filter(|offset| *offset < 4)
+    }
+
+    #[inline]
+    fn read_byte(&self, addr: u32, bus: &mut Bus) -> u8 {
+        if let Some(offset) = Self::cache_control_lane(addr) {
+            return (self.read_cache_control() >> (offset * 8)) as u8;
+        }
+        bus.read8(addr)
+    }
+
+    #[inline]
+    fn read_half(&self, addr: u32, bus: &mut Bus) -> u16 {
+        if let Some(offset) = Self::cache_control_lane(addr) {
+            return (self.read_cache_control() >> (offset * 8)) as u16;
+        }
+        bus.read16(addr)
+    }
+
+    #[inline]
+    fn read_word(&self, addr: u32, bus: &mut Bus) -> u32 {
+        if addr == memory::cache_control::ADDR {
+            return self.read_cache_control();
+        }
+        if self.cache_isolated() && self.cache_control & CACHE_CONTROL_IS1 != 0 {
+            return if self.cache_control & CACHE_CONTROL_TAG != 0 {
+                self.instruction_cache.read_tag(memory::to_physical(addr))
+            } else {
+                self.instruction_cache.read_data(memory::to_physical(addr))
+            };
+        }
+        bus.read32(addr)
+    }
+
+    #[inline]
+    fn write_word(&mut self, addr: u32, value: u32, bus: &mut Bus) {
+        if addr == memory::cache_control::ADDR {
+            self.write_cache_control(value);
+            return;
+        }
+        if self.cache_isolated() {
+            if self.cache_control & CACHE_CONTROL_IS1 != 0 {
+                if self.cache_control & CACHE_CONTROL_TAG != 0 {
+                    self.instruction_cache
+                        .write_tag(memory::to_physical(addr), value);
+                } else {
+                    self.instruction_cache
+                        .write_data(memory::to_physical(addr), value);
+                }
+            }
+            return;
+        }
+        bus.cpu_write32(addr, value);
+    }
+
+    #[inline]
+    fn write_byte(&mut self, addr: u32, value: u32, bus: &mut Bus) {
+        if let Some(offset) = Self::cache_control_lane(addr) {
+            let shift = offset * 8;
+            let merged = (self.read_cache_control() & !(0xFF << shift)) | ((value & 0xFF) << shift);
+            self.write_cache_control(merged);
+            return;
+        }
+        if !self.cache_isolated() {
+            bus.cpu_write8(addr, value);
+        }
+    }
+
+    #[inline]
+    fn write_half(&mut self, addr: u32, value: u32, bus: &mut Bus) {
+        if let Some(offset) = Self::cache_control_lane(addr) {
+            let shift = offset * 8;
+            let merged =
+                (self.read_cache_control() & !(0xFFFF << shift)) | ((value & 0xFFFF) << shift);
+            self.write_cache_control(merged);
+            return;
+        }
+        if !self.cache_isolated() {
+            bus.cpu_write16(addr, value);
+        }
+    }
+
+    #[inline]
+    fn charge_read(&self, bus: &mut Bus, addr: u32, width: AccessWidth) {
+        if !self.cache_isolated() || Self::cache_control_lane(addr).is_some() {
+            let stalls = bus.cpu_read_stalls(addr, width);
+            if crate::timers::Timers::contains(memory::to_physical(addr)) {
+                bus.add_root_counter_read_stalls(addr, stalls);
+            } else {
+                bus.add_cycles(stalls);
+            }
+        }
+    }
+
+    /// Read only the byte lanes consumed by LWL. The external bus does not
+    /// blindly perform a 32-bit transaction for a partial-word opcode: this
+    /// is observable on the SPU's 16-bit register bus. Partial forms have one
+    /// extra lane-steering cycle beyond the selected byte/half/word access.
+    fn read_lwl_lanes(&self, addr: u32, bus: &mut Bus) -> u32 {
+        let aligned = addr & !3;
+        match addr & 3 {
+            0 => {
+                self.charge_read(bus, aligned, AccessWidth::Byte);
+                bus.add_cycles(1);
+                bus.read8(aligned) as u32
+            }
+            1 => {
+                self.charge_read(bus, aligned, AccessWidth::Half);
+                bus.add_cycles(1);
+                bus.read16(aligned) as u32
+            }
+            2 => {
+                self.charge_read(bus, aligned, AccessWidth::Word);
+                bus.add_cycles(1);
+                bus.read16(aligned) as u32 | ((bus.read8(aligned + 2) as u32) << 16)
+            }
+            _ => {
+                self.charge_read(bus, aligned, AccessWidth::Word);
+                bus.read32(aligned)
+            }
+        }
+    }
+
+    /// Mirror of [`Self::read_lwl_lanes`] for LWR. Returned bytes retain
+    /// their aligned-word bit positions so the architectural merge formula
+    /// below remains identical to the R3000 truth table.
+    fn read_lwr_lanes(&self, addr: u32, bus: &mut Bus) -> u32 {
+        let aligned = addr & !3;
+        match addr & 3 {
+            0 => {
+                self.charge_read(bus, aligned, AccessWidth::Word);
+                bus.read32(aligned)
+            }
+            1 => {
+                self.charge_read(bus, aligned, AccessWidth::Word);
+                // The R3000's right-merge path has a two-cycle lane-steering
+                // penalty. Together with LWL's one cycle this reproduces the
+                // 38.94-cycle unaligned SPU word measured on silicon.
+                bus.add_cycles(2);
+                ((bus.read8(aligned + 1) as u32) << 8) | ((bus.read16(aligned + 2) as u32) << 16)
+            }
+            2 => {
+                self.charge_read(bus, aligned + 2, AccessWidth::Half);
+                bus.add_cycles(2);
+                (bus.read16(aligned + 2) as u32) << 16
+            }
+            _ => {
+                self.charge_read(bus, aligned + 3, AccessWidth::Byte);
+                bus.add_cycles(2);
+                (bus.read8(aligned + 3) as u32) << 24
+            }
+        }
     }
 
     /// Execute one instruction. Production hot path -- does NOT
@@ -520,12 +768,39 @@ impl Cpu {
         // already loaded `$t1` with the function number and parked
         // the return address in `$ra`.
         if bus.hle_bios_enabled {
+            if self.hle_exception_active
+                && memory::to_physical(self.pc)
+                    == memory::to_physical(crate::hle_bios::EXCEPTION_RETURN_STUB)
+            {
+                let record_pc = self.pc;
+                self.finish_hle_exception(bus);
+                bus.tick(2);
+                self.tick += 1;
+                return Ok(ExecutedInstruction {
+                    record_pc,
+                    record_instr: 0,
+                });
+            }
             let args = [self.gpr(4), self.gpr(5), self.gpr(6), self.gpr(7)];
+            let sp = self.gpr(29);
             let t1 = self.gpr(9);
             let ra = self.gpr(31);
-            if let Some(out) = crate::hle_bios::dispatch(self.pc, bus, args, t1, ra) {
-                self.set_gpr(2, out.v0);
-                self.pc = out.next_pc;
+            if let Some(out) = crate::hle_bios::dispatch(self.pc, bus, args, sp, t1, ra) {
+                // A(44h) FlushCache normally executes the BIOS's isolated
+                // tag-clear loop. HLE skips that code, so preserve the
+                // observable architectural result here.
+                if memory::to_physical(self.pc) == 0xA0 && t1 & 0xFF == 0x44 {
+                    self.instruction_cache.invalidate_all();
+                }
+                let returning_from_hle_irq = memory::to_physical(self.pc) == 0xB0
+                    && t1 & 0xFF == 0x17
+                    && self.hle_irq_frame.is_some();
+                if returning_from_hle_irq {
+                    self.finish_hle_irq();
+                } else {
+                    self.set_gpr(2, out.v0);
+                    self.pc = out.next_pc;
+                }
                 self.pending_pc = None;
                 self.pending_load = None;
                 self.committing_load = None;
@@ -539,7 +814,7 @@ impl Cpu {
         }
 
         let pc_before = self.pc;
-        let instr = bus.read32(pc_before);
+        let instr = self.fetch_instruction(pc_before, bus);
 
         // BIAS charged BEFORE the opcode runs -- matches Redux's
         // `m_regs.cycle += BIAS` at psxinterpreter.cc:1631, which is
@@ -613,11 +888,23 @@ impl Cpu {
             // Redux passes `bd=0` to `exception(0x400, 0)`: the IRQ
             // is taken cleanly between instructions, not in a delay
             // slot of its own.
-            self.enter_exception(ExceptionCode::Interrupt, self.pc, false);
-            self.pc = self
-                .pending_exception_pc
-                .take()
-                .expect("enter_exception staged a vector");
+            if bus.hle_bios_enabled && self.hle_irq_frame.is_none() {
+                if let Some(jump_buffer) = bus.hle_irq_jump_buffer() {
+                    self.enter_hle_irq(bus, jump_buffer);
+                } else {
+                    self.enter_exception(ExceptionCode::Interrupt, self.pc, false);
+                    self.pc = self
+                        .pending_exception_pc
+                        .take()
+                        .expect("enter_exception staged a vector");
+                }
+            } else {
+                self.enter_exception(ExceptionCode::Interrupt, self.pc, false);
+                self.pc = self
+                    .pending_exception_pc
+                    .take()
+                    .expect("enter_exception staged a vector");
+            }
         }
 
         self.tick += 1;
@@ -700,8 +987,22 @@ impl Cpu {
             0x0D => self.op_ori(instr),
             0x0E => self.op_xori(instr),
             0x0F => self.op_lui(instr),
-            0x10 => self.dispatch_cop0(instr, pc),
-            0x12 => self.dispatch_cop2(instr, pc, bus),
+            0x10 => {
+                if self.cop_instruction_usable(0) {
+                    self.dispatch_cop0(instr)
+                } else {
+                    self.raise_coprocessor_unusable(0, pc, in_delay_slot, bus)
+                }
+            }
+            0x11 => self.dispatch_absent_coprocessor(1, pc, in_delay_slot, bus),
+            0x12 => {
+                if self.cop_instruction_usable(2) {
+                    self.dispatch_cop2(instr, bus)
+                } else {
+                    self.raise_coprocessor_unusable(2, pc, in_delay_slot, bus)
+                }
+            }
+            0x13 => self.dispatch_absent_coprocessor(3, pc, in_delay_slot, bus),
             0x20 => self.op_lb(instr, bus),
             0x21 => self.op_lh(instr, bus),
             0x22 => self.op_lwl(instr, bus),
@@ -714,25 +1015,110 @@ impl Cpu {
             0x2A => self.op_swl(instr, bus),
             0x2B => self.op_sw(instr, bus),
             0x2E => self.op_swr(instr, bus),
-            0x32 => self.op_lwc2(instr, bus),
-            0x3A => self.op_swc2(instr, bus),
+            0x30 => self.dispatch_absent_cop_memory(0, pc, in_delay_slot, bus),
+            0x31 => self.dispatch_absent_cop_memory(1, pc, in_delay_slot, bus),
+            0x32 => {
+                if self.cop_memory_usable(2) {
+                    self.op_lwc2(instr, bus)
+                } else {
+                    self.raise_coprocessor_unusable(2, pc, in_delay_slot, bus)
+                }
+            }
+            0x33 => self.dispatch_absent_cop_memory(3, pc, in_delay_slot, bus),
+            0x38 => self.dispatch_absent_cop_memory(0, pc, in_delay_slot, bus),
+            0x39 => self.dispatch_absent_cop_memory(1, pc, in_delay_slot, bus),
+            0x3A => {
+                if self.cop_memory_usable(2) {
+                    self.op_swc2(instr, bus)
+                } else {
+                    self.raise_coprocessor_unusable(2, pc, in_delay_slot, bus)
+                }
+            }
+            0x3B => self.dispatch_absent_cop_memory(3, pc, in_delay_slot, bus),
             _ => Err(ExecutionError::Unimplemented { opcode, pc, instr }),
         }
     }
 
+    /// COP0 instructions remain available in kernel mode even when SR.CU0 is
+    /// clear. COP1/2/3 instructions are gated directly by their CU bit.
+    #[inline]
+    fn cop_instruction_usable(&self, cop: u8) -> bool {
+        let cu = self.cop0[12] & (1 << (28 + cop as u32)) != 0;
+        if cop == 0 {
+            let user_mode = self.cop0[12] & (1 << 1) != 0;
+            !user_mode || cu
+        } else {
+            cu
+        }
+    }
+
+    /// The LWCz/SWCz primary opcodes use SR.CUz even for COP0 while the CPU
+    /// is in kernel mode. This distinction is covered by the public
+    /// `cpu/cop` silicon suite (`MFC0` works with CU0 clear; `SWC0` traps).
+    #[inline]
+    fn cop_memory_usable(&self, cop: u8) -> bool {
+        self.cop0[12] & (1 << (28 + cop as u32)) != 0
+    }
+
+    /// The PS1 has no COP1 or COP3. With the corresponding CU bit enabled,
+    /// their instruction encodings are accepted as inert operations rather
+    /// than Reserved Instruction traps. With CU clear they raise CpU and
+    /// report the selected coprocessor in CAUSE.CE.
+    fn dispatch_absent_coprocessor(
+        &mut self,
+        cop: u8,
+        pc: u32,
+        in_delay_slot: bool,
+        bus: &mut Bus,
+    ) -> Result<(), ExecutionError> {
+        if self.cop_instruction_usable(cop) {
+            Ok(())
+        } else {
+            self.raise_coprocessor_unusable(cop, pc, in_delay_slot, bus)
+        }
+    }
+
+    /// LWC/SWC for an absent coprocessor has no data-path side effect when
+    /// enabled, but still obeys the CU gate. COP0 uses this same behavior for
+    /// the otherwise unsupported LWC0/SWC0 encodings.
+    fn dispatch_absent_cop_memory(
+        &mut self,
+        cop: u8,
+        pc: u32,
+        in_delay_slot: bool,
+        bus: &mut Bus,
+    ) -> Result<(), ExecutionError> {
+        if self.cop_memory_usable(cop) {
+            Ok(())
+        } else {
+            self.raise_coprocessor_unusable(cop, pc, in_delay_slot, bus)
+        }
+    }
+
+    fn raise_coprocessor_unusable(
+        &mut self,
+        cop: u8,
+        pc: u32,
+        in_delay_slot: bool,
+        bus: &mut Bus,
+    ) -> Result<(), ExecutionError> {
+        self.enter_exception(ExceptionCode::CoprocessorUnusable, pc, in_delay_slot);
+        self.cop0[13] |= ((cop as u32) & 3) << 28;
+        self.stage_hle_unresolved_exception(bus);
+        Ok(())
+    }
+
     /// Dispatch table for COP0 instructions (primary opcode `0x10`).
     /// The sub-operation lives in bits 25..=21.
-    fn dispatch_cop0(&mut self, instr: u32, pc: u32) -> Result<(), ExecutionError> {
+    fn dispatch_cop0(&mut self, instr: u32) -> Result<(), ExecutionError> {
         let cop_op = ((instr >> 21) & 0x1F) as u8;
         match cop_op {
             0x00 => self.op_mfc0(instr),
             0x04 => self.op_mtc0(instr),
             0x10 => self.op_rfe(),
-            _ => Err(ExecutionError::Unimplemented {
-                opcode: 0x10,
-                pc,
-                instr,
-            }),
+            // The R3000A accepts the unused COP0 operation fields as inert
+            // encodings. `cpu/cop::testCop0InvalidOpcode` observes no trap.
+            _ => Ok(()),
         }
     }
 
@@ -740,7 +1126,7 @@ impl Cpu {
     /// `0x12`). Bit 25 selects: when clear, the upper 5 bits of bits
     /// 25..=21 pick MFC2/CFC2/MTC2/CTC2; when set, the bottom 25 bits
     /// encode a GTE function (RTPS, NCLIP, MVMVA, …).
-    fn dispatch_cop2(&mut self, instr: u32, pc: u32, bus: &mut Bus) -> Result<(), ExecutionError> {
+    fn dispatch_cop2(&mut self, instr: u32, bus: &mut Bus) -> Result<(), ExecutionError> {
         if instr & (1 << 25) != 0 {
             // The GTE is not pipelined: issuing a command while a previous one
             // is still in flight stalls until it completes.
@@ -784,11 +1170,8 @@ impl Cpu {
             0x02 => self.op_cfc2(instr, bus),
             0x04 => self.op_mtc2(instr, bus),
             0x06 => self.op_ctc2(instr, bus),
-            _ => Err(ExecutionError::Unimplemented {
-                opcode: 0x12,
-                pc,
-                instr,
-            }),
+            // Unassigned COP2 move/control fields are inert on silicon.
+            _ => Ok(()),
         }
     }
 
@@ -910,27 +1293,18 @@ impl Cpu {
     /// `LWC2 rt, offset(rs)` -- load 32-bit word from memory into COP2
     /// data register `rt`. No GPR is touched, so no load-delay slot.
     fn op_lwc2(&mut self, instr: u32, bus: &mut Bus) -> Result<(), ExecutionError> {
-        // Charge the memory-access cycle BEFORE the read so cycle-
-        // sensitive MMIO (timer counters, GPU fields, SPU status)
-        // sees the post-increment cycle -- matching Redux's
-        // `psxmem.cc:read32`, which does `m_regs.cycle += 1` on
-        // entry.
-        bus.add_cycles(1);
         let rs = ((instr >> 21) & 0x1F) as u8;
         let rt = ((instr >> 16) & 0x1F) as u8;
         let offset = (instr as i16) as i32 as u32;
         let addr = self.gpr(rs).wrapping_add(offset);
-        let value = bus.read32(addr);
+        self.charge_read(bus, addr, AccessWidth::Word);
+        let value = self.read_word(addr, bus);
         self.cop2.write_data(rt, value);
         Ok(())
     }
 
     /// `SWC2 rt, offset(rs)` -- store COP2 data register `rt` to memory.
     fn op_swc2(&mut self, instr: u32, bus: &mut Bus) -> Result<(), ExecutionError> {
-        // Redux's psxSWC2 unconditionally calls write32, which always
-        // charges +1 cycle in psxmem.cc. Even cache-isolated stores
-        // pay the bus cycle, so charge before the bypass.
-        bus.add_cycles(1);
         if self.cache_isolated() {
             return Ok(());
         }
@@ -941,7 +1315,7 @@ impl Cpu {
         // SWC2 stores a GTE register, so it reads a result -- subject to the
         // same MAC0/LZCR read latency as MFC2 (no stall on real hardware).
         let value = self.gte_read_data_latency(bus, rt);
-        bus.write32(addr, value);
+        bus.cpu_write32(addr, value);
         Ok(())
     }
 
@@ -1002,7 +1376,7 @@ impl Cpu {
             0x07 => self.op_srav(instr),
             0x08 => self.op_jr(instr, pc),
             0x09 => self.op_jalr(instr, pc),
-            0x0C => self.op_syscall(pc, in_delay_slot),
+            0x0C => self.op_syscall(pc, in_delay_slot, bus),
             0x0D => self.op_break(pc, in_delay_slot),
             // MFHI/MFLO read the multiply/divide unit; stall until an
             // in-flight MULT/DIV has retired (the R3000A HI/LO interlock).
@@ -1211,19 +1585,13 @@ impl Cpu {
         let rt = ((instr >> 16) & 0x1F) as u8;
         let offset = (instr as i16) as i32 as u32;
         let addr = self.gpr(rs).wrapping_add(offset);
-        // Word-aligned check first; Redux only charges the memory
-        // cycle if the access actually proceeds (`psxmem.cc:read32`
-        // increments after the alignment check in `psxLW` early-
-        // returns). The post-alignment cycle still lands BEFORE the
-        // bus read so cycle-sensitive MMIO sees the post-increment
-        // cycle -- fix from the Timer 1 lag caught at parity step
-        // 79,389,318.
+        // Alignment traps happen before the memory transaction.
         if addr & 3 != 0 {
-            self.raise_address_error(ExceptionCode::AddressErrorLoad, addr);
+            self.raise_address_error(ExceptionCode::AddressErrorLoad, addr, bus);
             return Ok(());
         }
-        bus.add_cycles(1);
-        let value = bus.read32(addr);
+        self.charge_read(bus, addr, AccessWidth::Word);
+        let value = self.read_word(addr, bus);
         // Loads to $zero are no-ops; never queue a commit to it.
         if rt != 0 {
             self.pending_load = Some((rt, value));
@@ -1234,28 +1602,20 @@ impl Cpu {
     /// `SW rt, offset(rs)` -- store word: `mem[rs + sign_ext(offset)] = rt`.
     ///
     /// If COP0 Status Register bit 16 (IsC -- isolate cache) is set, the
-    /// store is redirected away from main memory. The BIOS uses this
-    /// during init to scrub the data cache without touching RAM. We
-    /// model the side effect by simply dropping the write -- matching
-    /// PS1 hardware, which has no separate D-cache for us to populate.
+    /// store is redirected to instruction-cache tag or code RAM according
+    /// to BCC.TAG. The BIOS uses word stores in this mode to invalidate all
+    /// tags and then clear the cache's code RAM without touching main RAM.
     fn op_sw(&mut self, instr: u32, bus: &mut Bus) -> Result<(), ExecutionError> {
         let rs = ((instr >> 21) & 0x1F) as u8;
         let rt = ((instr >> 16) & 0x1F) as u8;
         let offset = (instr as i16) as i32 as u32;
         let addr = self.gpr(rs).wrapping_add(offset);
-        // Alignment trap before any cycle accounting -- Redux's
-        // `psxSW` checks `_oB_ & 3` ahead of `m_mem->write32`, and
-        // the cycle is charged inside the bus write itself. A
-        // misaligned store costs zero cycles on this side.
+        // Alignment trap before the store reaches memory.
         if addr & 3 != 0 {
-            self.raise_address_error(ExceptionCode::AddressErrorStore, addr);
+            self.raise_address_error(ExceptionCode::AddressErrorStore, addr, bus);
             return Ok(());
         }
-        bus.add_cycles(1);
-        if self.cache_isolated() {
-            return Ok(());
-        }
-        bus.write32(addr, self.gpr(rt));
+        self.write_word(addr, self.gpr(rt), bus);
         Ok(())
     }
 
@@ -1395,12 +1755,12 @@ impl Cpu {
     }
 
     fn op_lb(&mut self, instr: u32, bus: &mut Bus) -> Result<(), ExecutionError> {
-        bus.add_cycles(1);
         let rs = ((instr >> 21) & 0x1F) as u8;
         let rt = ((instr >> 16) & 0x1F) as u8;
         let offset = (instr as i16) as i32 as u32;
         let addr = self.gpr(rs).wrapping_add(offset);
-        let value = bus.read8(addr) as i8 as i32 as u32;
+        self.charge_read(bus, addr, AccessWidth::Byte);
+        let value = self.read_byte(addr, bus) as i8 as i32 as u32;
         if rt != 0 {
             self.pending_load = Some((rt, value));
         }
@@ -1408,12 +1768,12 @@ impl Cpu {
     }
 
     fn op_lbu(&mut self, instr: u32, bus: &mut Bus) -> Result<(), ExecutionError> {
-        bus.add_cycles(1);
         let rs = ((instr >> 21) & 0x1F) as u8;
         let rt = ((instr >> 16) & 0x1F) as u8;
         let offset = (instr as i16) as i32 as u32;
         let addr = self.gpr(rs).wrapping_add(offset);
-        let value = bus.read8(addr) as u32;
+        self.charge_read(bus, addr, AccessWidth::Byte);
+        let value = self.read_byte(addr, bus) as u32;
         if rt != 0 {
             self.pending_load = Some((rt, value));
         }
@@ -1426,11 +1786,11 @@ impl Cpu {
         let offset = (instr as i16) as i32 as u32;
         let addr = self.gpr(rs).wrapping_add(offset);
         if addr & 1 != 0 {
-            self.raise_address_error(ExceptionCode::AddressErrorLoad, addr);
+            self.raise_address_error(ExceptionCode::AddressErrorLoad, addr, bus);
             return Ok(());
         }
-        bus.add_cycles(1);
-        let value = bus.read16(addr) as i16 as i32 as u32;
+        self.charge_read(bus, addr, AccessWidth::Half);
+        let value = self.read_half(addr, bus) as i16 as i32 as u32;
         if rt != 0 {
             self.pending_load = Some((rt, value));
         }
@@ -1443,11 +1803,11 @@ impl Cpu {
         let offset = (instr as i16) as i32 as u32;
         let addr = self.gpr(rs).wrapping_add(offset);
         if addr & 1 != 0 {
-            self.raise_address_error(ExceptionCode::AddressErrorLoad, addr);
+            self.raise_address_error(ExceptionCode::AddressErrorLoad, addr, bus);
             return Ok(());
         }
-        bus.add_cycles(1);
-        let value = bus.read16(addr) as u32;
+        self.charge_read(bus, addr, AccessWidth::Half);
+        let value = self.read_half(addr, bus) as u32;
         if rt != 0 {
             self.pending_load = Some((rt, value));
         }
@@ -1455,15 +1815,11 @@ impl Cpu {
     }
 
     fn op_sb(&mut self, instr: u32, bus: &mut Bus) -> Result<(), ExecutionError> {
-        bus.add_cycles(1);
-        if self.cache_isolated() {
-            return Ok(());
-        }
         let rs = ((instr >> 21) & 0x1F) as u8;
         let rt = ((instr >> 16) & 0x1F) as u8;
         let offset = (instr as i16) as i32 as u32;
         let addr = self.gpr(rs).wrapping_add(offset);
-        bus.write8(addr, self.gpr(rt) as u8);
+        self.write_byte(addr, self.gpr(rt), bus);
         Ok(())
     }
 
@@ -1473,14 +1829,10 @@ impl Cpu {
         let offset = (instr as i16) as i32 as u32;
         let addr = self.gpr(rs).wrapping_add(offset);
         if addr & 1 != 0 {
-            self.raise_address_error(ExceptionCode::AddressErrorStore, addr);
+            self.raise_address_error(ExceptionCode::AddressErrorStore, addr, bus);
             return Ok(());
         }
-        bus.add_cycles(1);
-        if self.cache_isolated() {
-            return Ok(());
-        }
-        bus.write16(addr, self.gpr(rt) as u16);
+        self.write_half(addr, self.gpr(rt), bus);
         Ok(())
     }
 
@@ -1498,13 +1850,11 @@ impl Cpu {
     /// squashed (the opposite of non-load writes). Redux's model
     /// peeks at the staged `rt` via the pending-load slot.
     fn op_lwl(&mut self, instr: u32, bus: &mut Bus) -> Result<(), ExecutionError> {
-        bus.add_cycles(1);
         let rs = ((instr >> 21) & 0x1F) as u8;
         let rt = ((instr >> 16) & 0x1F) as u8;
         let offset = (instr as i16) as i32 as u32;
         let addr = self.gpr(rs).wrapping_add(offset);
-        let aligned = addr & !3;
-        let word = bus.read32(aligned);
+        let word = self.read_lwl_lanes(addr, bus);
         // If there's a pending-commit load for the same register, see
         // its staged value instead of the current register file --
         // that's what matches hardware's LWL-LWR-merge convention.
@@ -1531,13 +1881,21 @@ impl Cpu {
     /// `LWR rt, offset(rs)` -- Load Word Right. Mirror of LWL; merges
     /// the low-order bytes of the word containing `addr` into `rt`.
     fn op_lwr(&mut self, instr: u32, bus: &mut Bus) -> Result<(), ExecutionError> {
-        bus.add_cycles(1);
         let rs = ((instr >> 21) & 0x1F) as u8;
         let rt = ((instr >> 16) & 0x1F) as u8;
         let offset = (instr as i16) as i32 as u32;
         let addr = self.gpr(rs).wrapping_add(offset);
-        let aligned = addr & !3;
-        let word = bus.read32(aligned);
+        // LWL/LWR targeting the same register are architecturally
+        // interlocked: LWR sees the staged LWL result and the pair pays one
+        // merge cycle. This is why the public SPU unaligned-word probe lands
+        // at ~39 cycles rather than two independent full-word transactions.
+        if self
+            .committing_load
+            .is_some_and(|(pending_reg, _)| pending_reg == rt)
+        {
+            bus.add_cycles(1);
+        }
+        let word = self.read_lwr_lanes(addr, bus);
         let current = self.staged_gpr(rt);
         let shift = (addr & 3) * 8;
         let mask = 0xFFFF_FFFFu32 >> (24 - shift);
@@ -1553,14 +1911,7 @@ impl Cpu {
     /// store side. Writes `rt`'s high bytes into the word containing
     /// `addr`, preserving the lower bytes of the memory word.
     fn op_swl(&mut self, instr: u32, bus: &mut Bus) -> Result<(), ExecutionError> {
-        // Redux's psxSWL calls `memRead32` then `memWrite32`, each
-        // of which bumps the cycle counter by 1 at entry (matching
-        // `psxmem.cc`). Interleaving the +1 charges around the
-        // actual memory ops keeps the read and write at the exact
-        // cycles Redux sees (cycle+1 and cycle+2).
-        bus.add_cycles(1);
         if self.cache_isolated() {
-            bus.add_cycles(1); // account for the would-be write
             return Ok(());
         }
         let rs = ((instr >> 21) & 0x1F) as u8;
@@ -1568,11 +1919,11 @@ impl Cpu {
         let offset = (instr as i16) as i32 as u32;
         let addr = self.gpr(rs).wrapping_add(offset);
         let aligned = addr & !3;
+        self.charge_read(bus, aligned, AccessWidth::Word);
         let mem = bus.read32(aligned);
         let reg = self.gpr(rt);
         let shift = (addr & 3) * 8;
         let merged = (mem & !(0xFFFF_FFFFu32 >> (24 - shift))) | (reg >> (24 - shift));
-        bus.add_cycles(1);
         bus.write32(aligned, merged);
         Ok(())
     }
@@ -1580,9 +1931,7 @@ impl Cpu {
     /// `SWR rt, offset(rs)` -- Store Word Right. Mirror of LWR on the
     /// store side.
     fn op_swr(&mut self, instr: u32, bus: &mut Bus) -> Result<(), ExecutionError> {
-        bus.add_cycles(1);
         if self.cache_isolated() {
-            bus.add_cycles(1);
             return Ok(());
         }
         let rs = ((instr >> 21) & 0x1F) as u8;
@@ -1590,11 +1939,11 @@ impl Cpu {
         let offset = (instr as i16) as i32 as u32;
         let addr = self.gpr(rs).wrapping_add(offset);
         let aligned = addr & !3;
+        self.charge_read(bus, aligned, AccessWidth::Word);
         let mem = bus.read32(aligned);
         let reg = self.gpr(rt);
         let shift = (addr & 3) * 8;
         let merged = (mem & !(0xFFFF_FFFFu32 << shift)) | (reg << shift);
-        bus.add_cycles(1);
         bus.write32(aligned, merged);
         Ok(())
     }
@@ -1850,7 +2199,32 @@ impl Cpu {
     /// `SYSCALL` -- raise a syscall exception (CAUSE.ExcCode = 8). The
     /// BIOS uses this for every kernel-mode thunk: A/B/C-table calls,
     /// memcpy, printf, event handling, etc.
-    fn op_syscall(&mut self, pc: u32, in_delay_slot: bool) -> Result<(), ExecutionError> {
+    fn op_syscall(
+        &mut self,
+        pc: u32,
+        in_delay_slot: bool,
+        bus: &mut Bus,
+    ) -> Result<(), ExecutionError> {
+        // BIOS syscalls 1/2 are the interrupt critical-section primitives.
+        // A side-loaded EXE has no kernel exception vector to service them,
+        // but their architectural effect is small and exact: disable or
+        // enable IEc+IM2. Handling them here avoids falling through the empty
+        // low-RAM vector and, crucially, lets guest HookEntryInt handlers run.
+        if bus.hle_bios_enabled {
+            match self.gpr(4) {
+                0x01 => {
+                    let was_enabled = (self.cop0[12] & 0x401) == 0x401;
+                    self.cop0[12] &= !0x401;
+                    self.set_gpr(2, was_enabled as u32);
+                    return Ok(());
+                }
+                0x02 => {
+                    self.cop0[12] |= 0x401;
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
         self.enter_exception(ExceptionCode::Syscall, pc, in_delay_slot);
         Ok(())
     }
@@ -1940,10 +2314,116 @@ impl Cpu {
     /// same way `op_addi` does for overflow -- every load/store
     /// reaches this helper from inside `execute()` where that
     /// invariant holds.
-    fn raise_address_error(&mut self, code: ExceptionCode, addr: u32) {
+    fn raise_address_error(&mut self, code: ExceptionCode, addr: u32, bus: &mut Bus) {
         let in_delay_slot = self.pending_pc.is_some();
         self.cop0[8] = addr;
         self.enter_exception(code, self.pc, in_delay_slot);
+        self.stage_hle_unresolved_exception(bus);
+    }
+
+    /// Route a side-loaded EXE's address error through the unresolved-handler
+    /// pointer that the retail kernel exposes at low RAM 0x300. The frame
+    /// layout matches psn00bsdk's `Thread::registers`, so existing homebrew
+    /// handlers can inspect CAUSE, change the saved return PC, and return.
+    fn stage_hle_unresolved_exception(&mut self, bus: &mut Bus) {
+        if !bus.hle_bios_enabled || self.hle_exception_active {
+            return;
+        }
+        let handler = bus.read32(crate::hle_bios::UNRESOLVED_HANDLER_PTR);
+        if handler == 0 {
+            return;
+        }
+
+        for (index, value) in self.gprs.iter().copied().enumerate() {
+            bus.write32(crate::hle_bios::THREAD_REGISTERS + index as u32 * 4, value);
+        }
+        bus.write32(crate::hle_bios::THREAD_RETURN_PC, self.cop0[14]);
+        bus.write32(crate::hle_bios::THREAD_HI, self.hi);
+        bus.write32(crate::hle_bios::THREAD_LO, self.lo);
+        bus.write32(crate::hle_bios::THREAD_SR, self.cop0[12]);
+        bus.write32(crate::hle_bios::THREAD_CAUSE, self.cop0[13]);
+
+        self.gprs[31] = crate::hle_bios::EXCEPTION_RETURN_STUB;
+        self.pending_exception_pc = Some(handler);
+        self.pending_pc = None;
+        self.pending_load = None;
+        self.hle_exception_active = true;
+    }
+
+    fn finish_hle_exception(&mut self, bus: &mut Bus) {
+        for index in 0..32 {
+            self.gprs[index] = bus.read32(crate::hle_bios::THREAD_REGISTERS + index as u32 * 4);
+        }
+        self.gprs[0] = 0;
+        self.hi = bus.read32(crate::hle_bios::THREAD_HI);
+        self.lo = bus.read32(crate::hle_bios::THREAD_LO);
+        self.cop0[13] = bus.read32(crate::hle_bios::THREAD_CAUSE);
+        let saved_sr = bus.read32(crate::hle_bios::THREAD_SR);
+        self.cop0[12] = (saved_sr & !0x0F) | ((saved_sr >> 2) & 0x0F);
+        self.pc = bus.read32(crate::hle_bios::THREAD_RETURN_PC);
+        self.pending_pc = None;
+        self.pending_load = None;
+        self.committing_load = None;
+        self.pending_exception_pc = None;
+        self.hle_exception_active = false;
+        self.isr_depth = self.isr_depth.saturating_sub(1);
+        if self.isr_depth == 0 {
+            self.clean_irq_entry = false;
+        }
+    }
+
+    /// Enter the BIOS-compatible guest ISR installed by B(19h)
+    /// `HookEntryInt`. The jump-buffer layout is the twelve-word PsyQ /
+    /// PSn00bSDK ABI: `ra, sp, fp, s0..s7, gp`.
+    fn enter_hle_irq(&mut self, bus: &mut Bus, jump_buffer: u32) {
+        let frame = HleIrqFrame {
+            pc: self.pc,
+            gprs: self.gprs,
+            cop0: self.cop0,
+            hi: self.hi,
+            lo: self.lo,
+            pending_pc: self.pending_pc,
+            pending_load: self.pending_load,
+            committing_load: self.committing_load,
+            isr_depth: self.isr_depth,
+            clean_irq_entry: self.clean_irq_entry,
+        };
+
+        self.enter_exception(ExceptionCode::Interrupt, self.pc, false);
+        self.pending_exception_pc = None;
+        self.pending_pc = None;
+        self.pending_load = None;
+        self.committing_load = None;
+
+        let ra = bus.read32(jump_buffer);
+        self.gprs[31] = ra;
+        self.gprs[29] = bus.read32(jump_buffer.wrapping_add(4));
+        self.gprs[30] = bus.read32(jump_buffer.wrapping_add(8));
+        for register in 16..=23 {
+            let offset = 12 + (register - 16) * 4;
+            self.gprs[register as usize] = bus.read32(jump_buffer.wrapping_add(offset));
+        }
+        self.gprs[28] = bus.read32(jump_buffer.wrapping_add(44));
+        self.pc = ra;
+        self.hle_irq_frame = Some(Box::new(frame));
+    }
+
+    fn finish_hle_irq(&mut self) {
+        let frame = *self
+            .hle_irq_frame
+            .take()
+            .expect("HLE IRQ return requires an interrupted frame");
+        self.pc = frame.pc;
+        self.gprs = frame.gprs;
+        self.cop0 = frame.cop0;
+        self.hi = frame.hi;
+        self.lo = frame.lo;
+        self.pending_pc = frame.pending_pc;
+        self.pending_load = frame.pending_load;
+        self.committing_load = frame.committing_load;
+        self.pending_exception_pc = None;
+        self.isr_depth = frame.isr_depth;
+        self.clean_irq_entry = frame.clean_irq_entry;
     }
 }
 
@@ -2004,6 +2484,9 @@ enum ExceptionCode {
     AddressErrorStore = 5,
     Syscall = 8,
     Break = 9,
+    /// CpU -- selected coprocessor is unavailable. CAUSE.CE is filled by
+    /// [`Cpu::raise_coprocessor_unusable`] after the common entry sequence.
+    CoprocessorUnusable = 11,
     /// Integer arithmetic overflow -- raised by `ADD`, `ADDI`, and
     /// `SUB` when the signed result doesn't fit in 32 bits. `ADDU`,
     /// `ADDIU`, and `SUBU` are the silently-wrapping variants.
@@ -2052,8 +2535,89 @@ mod tests {
         // Real stock BIOSes (SCPH1001 / 5500 / 5501 / 5502) all begin with
         // `lui $t0, 0x0013` = 0x3C08_0013 as part of cache-control init.
         let mut bus = Bus::new(synthetic_bios_with_first_word(0x3C08_0013)).unwrap();
-        let cpu = Cpu::new();
+        let mut cpu = Cpu::new();
         assert_eq!(cpu.fetch(&mut bus), 0x3C08_0013);
+    }
+
+    #[test]
+    fn cached_aliases_share_stale_code_while_kseg1_bypasses() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(synthetic_bios_with_first_word(0)).unwrap();
+        bus.write32(0x0000_1000, 0x1111_1111);
+        cpu.cache_control = CACHE_CONTROL_IS1 | (3 << CACHE_CONTROL_IBLKSZ_SHIFT);
+
+        cpu.pc = 0x8000_1000;
+        assert_eq!(cpu.fetch(&mut bus), 0x1111_1111);
+        bus.write32(0xA000_1000, 0x2222_2222);
+
+        cpu.pc = 0x0000_1000;
+        assert_eq!(cpu.fetch(&mut bus), 0x1111_1111);
+        cpu.pc = 0xA000_1000;
+        assert_eq!(cpu.fetch(&mut bus), 0x2222_2222);
+    }
+
+    #[test]
+    fn isolated_tag_clear_invalidates_a_cached_line() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(synthetic_bios_with_first_word(0)).unwrap();
+        bus.write32(0x0000_2000, 0x3333_3333);
+        cpu.cache_control = CACHE_CONTROL_IS1 | (3 << CACHE_CONTROL_IBLKSZ_SHIFT);
+        cpu.pc = 0x8000_2000;
+        assert_eq!(cpu.fetch(&mut bus), 0x3333_3333);
+
+        bus.write32(0xA000_2000, 0x4444_4444);
+        cpu.cop0[12] |= 1 << 16;
+        cpu.cache_control |= CACHE_CONTROL_TAG;
+        cpu.write_word(0x8000_2000, 0, &mut bus);
+        cpu.cop0[12] &= !(1 << 16);
+        cpu.cache_control &= !CACHE_CONTROL_TAG;
+
+        assert_eq!(cpu.fetch(&mut bus), 0x4444_4444);
+    }
+
+    #[test]
+    fn cache_control_word_access_latches_and_reads_hardwired_bits() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(synthetic_bios_with_first_word(0)).unwrap();
+        cpu.write_word(memory::cache_control::ADDR, u32::MAX, &mut bus);
+        assert_eq!(
+            cpu.read_word(memory::cache_control::ADDR, &mut bus),
+            u32::MAX & !((1 << 6) | (1 << 10))
+        );
+    }
+
+    #[test]
+    fn seed_from_exe_invalidates_stale_instruction_cache() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(synthetic_bios_with_first_word(0)).unwrap();
+        bus.write32(0x3000, 0x5555_5555);
+        cpu.cache_control = CACHE_CONTROL_IS1 | (3 << CACHE_CONTROL_IBLKSZ_SHIFT);
+        cpu.pc = 0x8000_3000;
+        assert_eq!(cpu.fetch(&mut bus), 0x5555_5555);
+        bus.write32(0xA000_3000, 0x6666_6666);
+
+        cpu.seed_from_exe(0x8000_3000, 0, None);
+        assert_eq!(cpu.read_cache_control(), CACHE_CONTROL_BIOS_NORMAL);
+        assert_eq!(cpu.fetch(&mut bus), 0x6666_6666);
+    }
+
+    #[test]
+    fn hle_flush_cache_invalidates_stale_code() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(synthetic_bios_with_first_word(0)).unwrap();
+        bus.hle_bios_enabled = true;
+        bus.write32(0x4000, 0x7777_7777);
+        cpu.cache_control = CACHE_CONTROL_IS1 | (3 << CACHE_CONTROL_IBLKSZ_SHIFT);
+        cpu.pc = 0x8000_4000;
+        assert_eq!(cpu.fetch(&mut bus), 0x7777_7777);
+        bus.write32(0xA000_4000, 0x8888_8888);
+
+        cpu.pc = 0xA0;
+        cpu.gprs[9] = 0x44;
+        cpu.gprs[31] = 0x8000_4000;
+        cpu.step(&mut bus).unwrap();
+        assert_eq!(cpu.pc(), 0x8000_4000);
+        assert_eq!(cpu.fetch(&mut bus), 0x8888_8888);
     }
 
     #[test]
@@ -2066,9 +2630,9 @@ mod tests {
         assert_eq!(record.pc, 0xBFC0_0000);
         assert_eq!(record.instr, 0x3C08_0013);
         assert_eq!(record.gprs[8], 0x0013_0000); // $t0
-                                                 // tick = bus.cycles() = BIAS=2 for the single retired lui.
-                                                 // (Lui is not a load/store so no +1 extra.)
-        assert_eq!(record.tick, 2);
+                                                 // Reset-vector execution is uncached: 24 BIOS word stalls plus
+                                                 // the instruction's one issue cycle.
+        assert_eq!(record.tick, 25);
         assert_eq!(cpu.pc(), 0xBFC0_0004);
     }
 
@@ -2083,17 +2647,64 @@ mod tests {
     }
 
     #[test]
-    fn unimplemented_opcode_returns_structured_error() {
-        // opcode 0x11 = COP1 (FPU); the PS1 has no FPU and the BIOS
-        // never issues this, so we leave it unimplemented as a
-        // sentinel. Encoding: 0x44000000 = (0x11 << 26) | 0.
+    fn disabled_cop1_raises_coprocessor_unusable_with_ce() {
+        // COP1 is absent and SR.CU1 starts clear.
         let mut bus = Bus::new(synthetic_bios_with_first_word(0x4400_0000)).unwrap();
         let mut cpu = Cpu::new();
-        let err = cpu.step(&mut bus).unwrap_err();
-        assert!(matches!(
-            err,
-            ExecutionError::Unimplemented { opcode: 0x11, .. }
-        ));
+        cpu.step(&mut bus)
+            .expect("CpU is an architectural exception");
+        assert_eq!((cpu.cop0[13] >> 2) & 0x1F, 11);
+        assert_eq!((cpu.cop0[13] >> 28) & 3, 1);
+        assert_eq!(cpu.cop0[14], 0xBFC0_0000);
+        assert_eq!(cpu.pc(), 0x8000_0080);
+    }
+
+    #[test]
+    fn enabled_absent_coprocessors_and_invalid_fields_are_inert() {
+        for (word, cu_bit) in [
+            (0x4400_0000, 29), // COP1 valid-looking operation
+            (0x4BE0_0000, 30), // COP2 operation field 0x1f
+            (0x4C00_0000, 31), // COP3 valid-looking operation
+        ] {
+            let mut bus = Bus::new(synthetic_bios_with_first_word(word)).unwrap();
+            let mut cpu = Cpu::new();
+            cpu.cop0[12] |= 1 << cu_bit;
+            cpu.step(&mut bus).expect("enabled encoding is inert");
+            assert_eq!(cpu.pc(), 0xBFC0_0004);
+            assert_eq!((cpu.cop0[13] >> 2) & 0x1F, 0);
+        }
+
+        // COP0 is usable in kernel mode even with CU0 clear, including its
+        // otherwise unassigned operation fields.
+        let mut bus = Bus::new(synthetic_bios_with_first_word(0x43E0_0000)).unwrap();
+        let mut cpu = Cpu::new();
+        cpu.step(&mut bus)
+            .expect("kernel COP0 invalid field is inert");
+        assert_eq!(cpu.pc(), 0xBFC0_0004);
+    }
+
+    #[test]
+    fn coprocessor_memory_opcodes_obey_cu_bits() {
+        // SWC0 $1,0($zero) traps with CU0 clear even in kernel mode.
+        let mut bus = Bus::new(synthetic_bios_with_first_word(0xE001_0000)).unwrap();
+        let mut cpu = Cpu::new();
+        cpu.step(&mut bus).expect("disabled SWC0 raises CpU");
+        assert_eq!((cpu.cop0[13] >> 2) & 0x1F, 11);
+        assert_eq!((cpu.cop0[13] >> 28) & 3, 0);
+
+        // Enabling CU0 accepts the same unsupported data-path operation.
+        let mut bus = Bus::new(synthetic_bios_with_first_word(0xE001_0000)).unwrap();
+        let mut cpu = Cpu::new();
+        cpu.cop0[12] |= 1 << 28;
+        cpu.step(&mut bus).expect("enabled SWC0 is inert");
+        assert_eq!(cpu.pc(), 0xBFC0_0004);
+
+        // SWC3 reports CE=3 when CU3 is clear.
+        let mut bus = Bus::new(synthetic_bios_with_first_word(0xEC01_0000)).unwrap();
+        let mut cpu = Cpu::new();
+        cpu.step(&mut bus).expect("disabled SWC3 raises CpU");
+        assert_eq!((cpu.cop0[13] >> 2) & 0x1F, 11);
+        assert_eq!((cpu.cop0[13] >> 28) & 3, 3);
     }
 
     #[test]
@@ -2388,6 +2999,29 @@ mod tests {
     }
 
     #[test]
+    fn partial_word_bus_reads_select_lanes_and_charge_lane_steering() {
+        let cpu = Cpu::new();
+        let mut bus = Bus::new(synthetic_bios_with_first_word(0)).unwrap();
+        bus.write32(0x1000, 0x1234_5678);
+
+        // Keep this lane-steering test away from the DRAM refresh slot at
+        // cycle zero. Refresh contention has its own bus-timing coverage.
+        bus.add_cycles(4);
+
+        let start = bus.cycles();
+        assert_eq!(cpu.read_lwl_lanes(0x1001, &mut bus), 0x0000_5678);
+        assert_eq!(bus.cycles() - start, 5); // four RAM stalls + lane steering
+
+        let start = bus.cycles();
+        assert_eq!(cpu.read_lwr_lanes(0x1002, &mut bus), 0x1234_0000);
+        assert_eq!(bus.cycles() - start, 6); // right merge steers for two cycles
+
+        let start = bus.cycles();
+        assert_eq!(cpu.read_lwl_lanes(0x1003, &mut bus), 0x1234_5678);
+        assert_eq!(bus.cycles() - start, 4); // full-word form has no lane penalty
+    }
+
+    #[test]
     fn swl_truth_table_matches_redux() {
         // SWL_MASK  = {0xFFFFFF00, 0xFFFF0000, 0xFF000000, 0x00000000}
         // SWL_SHIFT = {24, 16, 8, 0}  (applied as reg >> shift)
@@ -2504,6 +3138,93 @@ mod tests {
     }
 
     #[test]
+    fn hle_unresolved_exception_uses_guest_thread_frame_and_resumes() {
+        let mut bus = Bus::new_without_bios();
+        bus.enable_hle_bios();
+        bus.write32(crate::hle_bios::UNRESOLVED_HANDLER_PTR, 0x8001_2340);
+        let mut cpu = Cpu::new();
+        cpu.pc = 0x8001_0000;
+        cpu.gprs[5] = 0xCAFE_BABE;
+
+        cpu.raise_address_error(ExceptionCode::AddressErrorStore, 0x1F80_104A, &mut bus);
+        assert_eq!(cpu.pending_exception_pc, Some(0x8001_2340));
+        assert!(cpu.hle_exception_active);
+        assert_eq!(
+            bus.read32(crate::hle_bios::THREAD_REGISTERS + 5 * 4),
+            0xCAFE_BABE
+        );
+        assert_eq!(bus.read32(crate::hle_bios::THREAD_RETURN_PC), 0x8001_0000);
+        assert_eq!(
+            (bus.read32(crate::hle_bios::THREAD_CAUSE) >> 2) & 0x1F,
+            ExceptionCode::AddressErrorStore as u32
+        );
+
+        // The guest handler skips the faulting instruction before returning.
+        bus.write32(crate::hle_bios::THREAD_RETURN_PC, 0x8001_0004);
+        cpu.gprs[5] = 0;
+        cpu.finish_hle_exception(&mut bus);
+        assert_eq!(cpu.pc, 0x8001_0004);
+        assert_eq!(cpu.gprs[5], 0xCAFE_BABE);
+        assert!(!cpu.hle_exception_active);
+        assert_eq!(cpu.isr_depth, 0);
+    }
+
+    #[test]
+    fn hle_critical_section_syscalls_gate_hardware_irqs() {
+        let mut bus = Bus::new_without_bios();
+        bus.enable_hle_bios();
+        let mut cpu = Cpu::new();
+        cpu.cop0[12] = 0x401;
+
+        cpu.gprs[4] = 1;
+        cpu.op_syscall(0x8001_0000, false, &mut bus).unwrap();
+        assert_eq!(cpu.cop0[12] & 0x401, 0);
+        assert_eq!(cpu.gprs[2], 1, "enter reports that IRQs were enabled");
+        assert_eq!(cpu.exception_counts()[ExceptionCode::Syscall as usize], 0);
+
+        cpu.gprs[4] = 2;
+        cpu.op_syscall(0x8001_0004, false, &mut bus).unwrap();
+        assert_eq!(cpu.cop0[12] & 0x401, 0x401);
+        assert_eq!(cpu.exception_counts()[ExceptionCode::Syscall as usize], 0);
+    }
+
+    #[test]
+    fn hle_hook_entry_int_loads_jump_buffer_and_restores_interrupted_frame() {
+        let mut bus = Bus::new_without_bios();
+        bus.enable_hle_bios();
+        let jump_buffer = 0x8001_4000;
+        let handler = 0x8001_5000;
+        bus.write32(jump_buffer, handler);
+        bus.write32(jump_buffer + 4, 0x801F_E000);
+        bus.write32(jump_buffer + 8, 0x801F_D000);
+        for index in 0..8 {
+            bus.write32(jump_buffer + 12 + index * 4, 0x5100_0000 + index);
+        }
+        bus.write32(jump_buffer + 44, 0x8001_8000);
+
+        let mut cpu = Cpu::new();
+        cpu.pc = 0x8001_1234;
+        cpu.gprs[5] = 0xCAFE_BABE;
+        cpu.cop0[12] = 0x401;
+        cpu.enter_hle_irq(&mut bus, jump_buffer);
+
+        assert_eq!(cpu.pc, handler);
+        assert_eq!(cpu.gprs[29], 0x801F_E000);
+        assert_eq!(cpu.gprs[30], 0x801F_D000);
+        assert_eq!(cpu.gprs[16], 0x5100_0000);
+        assert_eq!(cpu.gprs[23], 0x5100_0007);
+        assert_eq!(cpu.gprs[28], 0x8001_8000);
+        assert!(cpu.hle_irq_frame.is_some());
+
+        cpu.gprs[5] = 0;
+        cpu.finish_hle_irq();
+        assert_eq!(cpu.pc, 0x8001_1234);
+        assert_eq!(cpu.gprs[5], 0xCAFE_BABE);
+        assert_eq!(cpu.cop0[12], 0x401);
+        assert!(cpu.hle_irq_frame.is_none());
+    }
+
+    #[test]
     fn aligned_lw_does_not_raise() {
         // Sanity: aligned access leaves COP0 untouched.
         let (cpu, _bus) = step_one_load_store(0x8C89_0000, 0xBFC0_0000);
@@ -2514,12 +3235,10 @@ mod tests {
 
     #[test]
     fn misaligned_lw_does_not_charge_memory_cycle() {
-        // Redux's `psxLW` early-returns BEFORE `m_mem->read32` runs,
-        // and the +1 memory cycle lives inside `psxmem.cc:read32`.
-        // Our op_lw matches this by gating `add_cycles(1)` behind
-        // the alignment check, so a trapping LW should bill only
-        // the BIAS cycle for the instruction itself (= 2).
+        // A trapping LW bills the uncached BIOS instruction fetch and its
+        // issue cycle, but no data-read stalls because alignment is checked
+        // before the memory transaction.
         let (_cpu, bus) = step_one_load_store(0x8C89_0001, 0xBFC0_0000);
-        assert_eq!(bus.cycles(), cycle_cost(0) as u64);
+        assert_eq!(bus.cycles(), 24 + cycle_cost(0) as u64);
     }
 }

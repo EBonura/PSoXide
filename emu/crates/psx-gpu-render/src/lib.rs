@@ -1663,9 +1663,8 @@ mod tests {
         );
     }
 
-    /// Zero-length segments mirror the CPU walkers: the mono
-    /// Bresenham early-outs and draws NOTHING, the shaded walker
-    /// plots exactly one pixel.
+    /// Both mono and shaded zero-length segments plot one pixel,
+    /// matching the CPU's silicon-coordinate DDA.
     #[test]
     fn gp0_zero_length_lines_match_cpu_walkers() {
         let mut words = line_env();
@@ -1674,15 +1673,15 @@ mod tests {
             eprintln!("skipping: no headless wgpu adapter");
             return;
         };
-        assert!(cpu.is_empty(), "CPU mono zero-length must draw nothing");
-        assert!(hw.is_empty(), "HW mono zero-length must draw nothing");
+        let expected: BTreeSet<(u16, u16)> = [(15u16, 15u16)].into_iter().collect();
+        assert_eq!(cpu, expected, "CPU mono zero-length plots one pixel");
+        assert_eq!(hw, expected, "HW mono zero-length plots one pixel");
 
         let mut words = line_env();
         words.extend([0x5000_00FF, xyw(15, 15), 0x0000_FF00, xyw(15, 15)]);
         let Some((_gpu, cpu, hw, _renderer)) = line_case(&words, 0) else {
             return;
         };
-        let expected: BTreeSet<(u16, u16)> = [(15u16, 15u16)].into_iter().collect();
         assert_eq!(cpu, expected, "CPU shaded zero-length plots one pixel");
         assert_eq!(hw, expected, "HW shaded zero-length plots one pixel");
     }

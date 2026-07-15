@@ -91,17 +91,14 @@ fn rasterize(@builtin(global_invocation_id) gid: vec3<u32>) {
     if py < draw_area.top || py > draw_area.bottom { return; }
     if px < 0 || px >= VRAM_WIDTH || py < 0 || py >= VRAM_HEIGHT { return; }
 
-    // Linear UV stepping. Texture-rect flip in GP0 0xE1 bits 12/13:
-    // when set, the U or V offset COUNTS DOWN from `(w-1)` instead
-    // of up from 0. Matches `paint_textured_rect` in emulator-core.
-    let last_col = prim.wh.x - 1u;
-    let last_row = prim.wh.y - 1u;
-    let u_off = select(dx, last_col - dx, (prim.flags & FLAG_FLIP_X) != 0u);
-    let v_off = select(dy, last_row - dy, (prim.flags & FLAG_FLIP_Y) != 0u);
+    // Silicon reverses the 8-bit counters around the command UV,
+    // not the far edge: X is u0+1,u0,u0-1... and Y is v0,v0-1...
     let u_base = prim.uv & 0xFFu;
     let v_base = (prim.uv >> 8u) & 0xFFu;
-    let u = u_base + u_off;
-    let v = v_base + v_off;
+    let u = select(u_base + dx, u_base + 1u - dx,
+                   (prim.flags & FLAG_FLIP_X) != 0u);
+    let v = select(v_base + dy, v_base - dy,
+                   (prim.flags & FLAG_FLIP_Y) != 0u);
 
     let texel = sample_texture(u, v);
     if texel == 0u { return; }

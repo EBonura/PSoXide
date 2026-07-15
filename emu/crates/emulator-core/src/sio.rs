@@ -62,6 +62,11 @@ mod offset {
     pub const BAUD: u32 = 0xE;
 }
 
+/// SIO0 MODE exposes only its framing/baud configuration bits. Reserved bits
+/// read back zero; this is visible even when software uses byte stores because
+/// the R3000A still drives the complete source register on the peripheral bus.
+const MODE_WRITE_MASK: u16 = 0x013F;
+
 /// Serial-transfer time for one byte when BAUD is zero. Matches the
 /// BIOS's common `0x88 * 8 = 1088`-cycle setup.
 const DEFAULT_TRANSFER_TICKS: u64 = 1088;
@@ -468,6 +473,9 @@ impl Sio0 {
         match phys - Self::BASE {
             offset::DATA => Some(self.pop_rx()),
             offset::STAT => Some(self.stat() as u8),
+            offset::MODE => Some(self.mode as u8),
+            offset::CTRL => Some(self.ctrl as u8),
+            offset::BAUD => Some(self.baud as u8),
             _ => Some(0),
         }
     }
@@ -631,7 +639,7 @@ impl Sio0 {
         match phys - Self::BASE {
             offset::DATA => self.write_data_at(value as u8, now),
             offset::STAT => {}
-            offset::MODE => self.mode = value,
+            offset::MODE => self.mode = value & MODE_WRITE_MASK,
             offset::CTRL => self.write_ctrl(value),
             offset::BAUD => self.baud = value,
             _ => return false,
@@ -712,7 +720,7 @@ mod tests {
         let mut sio = Sio0::new();
         sio.write16(Sio0::BASE + 0x8, 0x1234);
         sio.write16(Sio0::BASE + 0xE, 0x5678);
-        assert_eq!(sio.read16(Sio0::BASE + 0x8).unwrap(), 0x1234);
+        assert_eq!(sio.read16(Sio0::BASE + 0x8).unwrap(), 0x0034);
         assert_eq!(sio.read16(Sio0::BASE + 0xE).unwrap(), 0x5678);
     }
 
@@ -1199,7 +1207,7 @@ mod tests {
         // (transfer_ticks = 0x88 * 8 = 1088) before clocking the next byte.
         let gap = 0x88u64 * 8 + 16;
         let mut now = 100u64;
-        let mut ex = |sio: &mut Sio0, now: &mut u64, tx: u8| -> u8 {
+        let ex = |sio: &mut Sio0, now: &mut u64, tx: u8| -> u8 {
             sio.write8_at(Sio0::BASE, tx, *now);
             sio.tick(*now);
             let rx = sio.read8(Sio0::BASE).unwrap();
