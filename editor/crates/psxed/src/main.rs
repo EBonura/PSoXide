@@ -146,6 +146,8 @@ GLB-MODEL SUBCOMMAND:
                           [--world-height N]       (default 1024)
                           [--center-animation-root]
                           [--animation <anim.fbx>] (repeatable)
+                          [--keep-bones]
+                          [--collapse-bones name,name,...]
                           [--prune-detached-islands N] (default 4)
 
 TEX SUBCOMMAND:
@@ -330,6 +332,7 @@ fn run_glb_model(args: &[String]) -> Result<(), String> {
     let mut force_single_bind = false;
     let mut double_sided = false;
     let mut animation_paths: Vec<PathBuf> = Vec::new();
+    let mut collapse_bone_patterns = psxed_gltf::default_collapse_bone_patterns();
     let mut prune_detached_face_islands =
         psxed_gltf::RigidModelConfig::default().prune_detached_face_islands;
 
@@ -402,6 +405,21 @@ fn run_glb_model(args: &[String]) -> Result<(), String> {
                         "expected path after --animation".to_string()
                     })?));
             }
+            "--keep-bones" => {
+                collapse_bone_patterns.clear();
+            }
+            "--collapse-bones" => {
+                i += 1;
+                let value = args.get(i).ok_or_else(|| {
+                    "expected comma-separated names after --collapse-bones".to_string()
+                })?;
+                collapse_bone_patterns = value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())
+                    .map(str::to_string)
+                    .collect();
+            }
             "--prune-detached-islands" => {
                 i += 1;
                 let val = args
@@ -444,6 +462,7 @@ fn run_glb_model(args: &[String]) -> Result<(), String> {
         force_single_bind,
         double_sided,
         ignore_embedded_animations: false,
+        collapse_bone_patterns,
     };
     let package = convert_rigid_model_source(&input, &animation_paths, &cfg)
         .map_err(|e| format!("convert: {e}"))?;
