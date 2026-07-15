@@ -156,7 +156,17 @@ impl Scene for Playtest {
     /// stream during loading.
     fn prepare_loading_assets(&mut self, scene: u16) {
         #[cfg(feature = "cd-stream-bench")]
-        load_ui_images_for_scene(scene);
+        {
+            load_ui_images_for_scene(scene);
+            // The loading images are now in VRAM; this is the overlay
+            // handoff point (`MenuGameplayOverlay`): gameplay room draws
+            // own the cache's RAM from here. Claims are reset so any
+            // rooms built before the handoff (menu-time bootstrap)
+            // refill their quads instead of trusting bytes the menu
+            // preload may have overwritten.
+            retire_menu_ui_cache();
+            prebuilt_quads_arena().reset_claims();
+        }
         #[cfg(not(feature = "cd-stream-bench"))]
         let _ = scene;
     }
