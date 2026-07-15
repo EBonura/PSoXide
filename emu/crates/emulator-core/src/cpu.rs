@@ -166,19 +166,30 @@ pub struct Cpu {
     /// NCLIP samples SXY2 in two different pipeline phases. When MTC2 SXY2
     /// immediately precedes NCLIP, the early `+SX1*SY2 + SX2*SY0` products
     /// can see the previous SXY2 while the later negative products see the
-    /// current register. Packed SXY writes forward the new Y into that early
-    /// phase; spaced writes do not. This history/cadence rule reproduces both
-    /// burned-EXE instruction shapes measured on the SCPH-9902 without a
-    /// fabricated magnitude-dependent 64-cycle latency.
+    /// current register. An active RTPT result pipeline lets packed SXY writes
+    /// forward the new Y into that early phase; without it (or with spaced
+    /// writes), the previous Y remains visible. This history/cadence rule
+    /// reproduces the burned-EXE instruction shapes measured on SCPH-9902.
     gte_sxy2_write_tick: u64,
     gte_prev_sxy2_x: i16,
     gte_prev_sxy2_y: i16,
+    /// Provenance of the live and just-overwritten SXY2 latches. RTPS/RTPT
+    /// output can forward through an immediate CPU SXY2 overwrite into
+    /// NCLIP's early product; a prior CPU-written SXY2 cannot.
+    #[serde(default)]
+    gte_sxy2_from_transform: bool,
+    #[serde(default)]
+    gte_prev_sxy2_from_transform: bool,
     gte_sxy_write_tick: [u64; 3],
     /// RTPT leaves the SXY result pipeline active across following NCLIPs.
     /// In that state, a non-packed full SXY rewrite cannot forward SXY2.y to
     /// NCLIP's first product. Consecutive NCLIPs retain the state; any other
     /// GTE command drains/replaces it.
     gte_nclip_rtpt_history: bool,
+    /// CPU tick of the NCLIP/RTPT operation that most recently fed that
+    /// result pipeline. The latch survives tight command sequences but not
+    /// unrelated game/test work thousands of instructions later.
+    gte_nclip_history_tick: u64,
     /// OP's first MAC row can consume the previous IR3 when the command
     /// immediately follows MTC2 IR3. The burned test's predecessor left
     /// IR3=0x0567, producing MAC1=-1074 exactly; the later rows see the new
@@ -313,8 +324,11 @@ impl Cpu {
             gte_sxy2_write_tick: 0,
             gte_prev_sxy2_x: 0,
             gte_prev_sxy2_y: 0,
+            gte_sxy2_from_transform: false,
+            gte_prev_sxy2_from_transform: false,
             gte_sxy_write_tick: [0; 3],
             gte_nclip_rtpt_history: false,
+            gte_nclip_history_tick: 0,
             gte_ir3_write_tick: 0,
             gte_prev_ir3: 0,
             gte_last_mtc2_ir3: 0,
@@ -440,8 +454,11 @@ impl Cpu {
         self.gte_sxy2_write_tick = 0;
         self.gte_prev_sxy2_x = 0;
         self.gte_prev_sxy2_y = 0;
+        self.gte_sxy2_from_transform = false;
+        self.gte_prev_sxy2_from_transform = false;
         self.gte_sxy_write_tick = [0; 3];
         self.gte_nclip_rtpt_history = false;
+        self.gte_nclip_history_tick = 0;
         self.gte_ir3_write_tick = 0;
         self.gte_prev_ir3 = 0;
         self.gte_last_mtc2_ir3 = 0;
@@ -567,14 +584,16 @@ impl Cpu {
     #[inline]
     fn fetch_instruction(&mut self, addr: u32, bus: &mut Bus) -> u32 {
         if !self.instruction_cache_enabled_at(addr) {
-            bus.add_cycles(bus.instruction_read_stalls(addr));
+            let stalls = bus.instruction_read_stalls(addr);
+            bus.add_cycles(stalls);
             return bus.read_instruction32(addr);
         }
         let phys = memory::to_physical(addr);
         let iblksz =
             ((self.cache_control & CACHE_CONTROL_IBLKSZ_MASK) >> CACHE_CONTROL_IBLKSZ_SHIFT) as u8;
         let (instruction, filled_words) = self.instruction_cache.fetch(phys, iblksz, bus);
-        bus.add_cycles(bus.icache_fill_stalls(phys, filled_words));
+        let stalls = bus.icache_fill_stalls(phys, filled_words);
+        bus.add_cycles(stalls);
         instruction
     }
 
@@ -1200,7 +1219,8 @@ impl Cpu {
                 // NCLIP's two positive SXY2 products are its early phase.
                 // SXY2.x is not forwarded from the immediately preceding
                 // MTC2. SXY2.y is forwarded only by the packed (two-cycle)
-                // SXY0/SXY1/SXY2 write cadence emitted by the hot path.
+                // SXY0/SXY1/SXY2 write cadence emitted by the hot path, and
+                // only while an RTPT result pipeline remains active.
                 let sxy0 = self.cop2.read_data(12);
                 let sxy1 = self.cop2.read_data(13);
                 let sxy2 = self.cop2.read_data(14);
@@ -1213,9 +1233,12 @@ impl Cpu {
                 let old_x2 = self.gte_prev_sxy2_x as i64;
                 let sxy01_gap = self.gte_sxy_write_tick[1].wrapping_sub(self.gte_sxy_write_tick[0]);
                 let sxy12_gap = self.gte_sxy_write_tick[2].wrapping_sub(self.gte_sxy_write_tick[1]);
-                let spaced_sxy_triplet =
-                    self.gte_nclip_rtpt_history && sxy01_gap == 3 && sxy12_gap == 3;
-                let early_y2 = if spaced_sxy_triplet {
+                let history_active = self.gte_nclip_rtpt_history
+                    && self.tick.wrapping_sub(self.gte_nclip_history_tick) <= 4096;
+                let spaced_sxy_triplet = history_active && sxy01_gap == 3 && sxy12_gap == 3;
+                let early_y2 = if spaced_sxy_triplet
+                    || (!history_active && !self.gte_prev_sxy2_from_transform)
+                {
                     self.gte_prev_sxy2_y as i64
                 } else {
                     y2
@@ -1239,9 +1262,14 @@ impl Cpu {
                 }
             }
             match instr & 0x3F {
-                0x30 => self.gte_nclip_rtpt_history = true,
-                0x06 => {}
+                0x30 | 0x06 => {
+                    self.gte_nclip_rtpt_history = true;
+                    self.gte_nclip_history_tick = self.tick;
+                }
                 _ => self.gte_nclip_rtpt_history = false,
+            }
+            if matches!(instr & 0x3F, 0x01 | 0x30) {
+                self.gte_sxy2_from_transform = true;
             }
             return Ok(());
         }
@@ -1365,6 +1393,8 @@ impl Cpu {
             let previous = self.cop2.read_data(14);
             self.gte_prev_sxy2_x = previous as u16 as i16;
             self.gte_prev_sxy2_y = (previous >> 16) as u16 as i16;
+            self.gte_prev_sxy2_from_transform = self.gte_sxy2_from_transform;
+            self.gte_sxy2_from_transform = false;
             self.gte_sxy2_write_tick = self.tick;
         }
         if rd == 11 {
@@ -2727,6 +2757,8 @@ mod tests {
         cpu.cop2.write_data(12, 0x006e_0095);
         cpu.cop2.write_data(13, 0xffe2_0094);
         cpu.cop2.write_data(14, 0xffd2_0194); // previous scene-C SXY2
+        cpu.gte_nclip_rtpt_history = true;
+        cpu.gte_nclip_history_tick = 0;
         cpu.gte_sxy_write_tick[0] = 6;
         cpu.gte_sxy_write_tick[1] = 8;
         cpu.gprs[8] = 0xffde_00dc; // new scene-A SXY2
@@ -2771,6 +2803,55 @@ mod tests {
         // both components for the early positive products.
         assert_eq!(run(2), 0xffff_b964);
         assert_eq!(run(3), 0xffff_752c);
+    }
+
+    #[test]
+    fn nclip_without_rtpt_history_uses_previous_sxy2_y() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(synthetic_bios_with_first_word(0)).unwrap();
+        cpu.cop2.write_data(14, 0); // previous SXY2.y
+        for (index, (rd, value)) in [
+            (12u8, 0x0000_0000),
+            (13u8, 0x0000_000a),
+            (14u8, 0x000a_0000),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            cpu.gprs[8] = value;
+            cpu.tick = 10 + index as u64 * 2;
+            cpu.op_mtc2(0x4888_0000 | (u32::from(rd) << 11), &bus)
+                .unwrap();
+        }
+        cpu.tick += 1;
+        cpu.dispatch_cop2(0x4a00_0006, &mut bus).unwrap();
+
+        assert_eq!(cpu.cop2.read_data(24), 0);
+    }
+
+    #[test]
+    fn nclip_forwards_y_from_overwritten_transform_sxy2() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new(synthetic_bios_with_first_word(0)).unwrap();
+        cpu.cop2.write_data(14, 0x007c_001a);
+        cpu.gte_sxy2_from_transform = true;
+        for (index, (rd, value)) in [
+            (12u8, 0x0000_0000),
+            (13u8, 0x0000_000a),
+            (14u8, 0x000a_0000),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            cpu.gprs[8] = value;
+            cpu.tick = 10 + index as u64 * 2;
+            cpu.op_mtc2(0x4888_0000 | (u32::from(rd) << 11), &bus)
+                .unwrap();
+        }
+        cpu.tick += 1;
+        cpu.dispatch_cop2(0x4a00_0006, &mut bus).unwrap();
+
+        assert_eq!(cpu.cop2.read_data(24), 100);
     }
 
     #[test]
@@ -3238,7 +3319,8 @@ mod tests {
 
         // Keep this lane-steering test away from the DRAM refresh slot at
         // cycle zero. Refresh contention has its own bus-timing coverage.
-        bus.add_cycles(4);
+        let settle = (100 - bus.cycles()) as u32;
+        bus.add_cycles(settle);
 
         let start = bus.cycles();
         assert_eq!(cpu.read_lwl_lanes(0x1001, &mut bus), 0x0000_5678);
