@@ -28,7 +28,7 @@ opcodes cover display configuration and DMA direction.
 | 12 | Draw pixels with mask bit set |
 | 13 | Interlace field |
 | 14 | "Reverseflag" |
-| 15 | Texture disable |
+| 15 | Upper texture-page Y bit (gated by GP1(09h) 2 MiB addressing) |
 | 16 | Horizontal resolution (320..=640) second half |
 | 18:17 | Horizontal resolution (256/320/512/640) first half |
 | 19 | Vertical resolution (240/480 interlaced) |
@@ -45,9 +45,9 @@ opcodes cover display configuration and DMA direction.
 | 31 | Interlace / even-odd line flag (toggles at VBlank) |
 
 Bits 26/27/28 are the "ready" flags BIOS + games spin on before
-sending commands. A "soft GPU" (non-cycle-accurate) keeps them
-permanently set -- PCSX-Redux and PSoXide-2 both do this, and our
-Phase 2h impl follows suit.
+sending commands. PSoXide drives them from its source-sensitive GPU
+execution backlog; CPU stores also receive the silicon-measured stall
+without incorrectly clearing DMA-block-ready bit 28.
 
 Bit 25 is **computed per read** from the DMA-direction bits:
 - Off: 0
@@ -95,11 +95,8 @@ when we need to render.
 | `0x06` | Horizontal display range |
 | `0x07` | Vertical display range |
 | `0x08` | Display mode (resolution, refresh rate, colour depth) |
-| `0x09` | New texture disable |
+| `0x09` | Allow 2 MiB VRAM addressing / upper texture-page Y bit |
 | `0x10` | Get GPU info (various sub-opcodes) |
-
-Phase 2h implements 0x00 (reset), 0x03 (display enable), 0x04
-(DMA direction). The rest land as the display pipeline does.
 
 ## Rust shape
 

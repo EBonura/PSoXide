@@ -1,15 +1,74 @@
 use super::*;
 
 #[test]
-fn read_status_has_always_ready_bits() {
+fn read_status_ready_bits_follow_command_pipeline() {
     let mut gpu = Gpu::new();
+    let idle = gpu.read32(GP1_ADDR).unwrap();
+    assert_eq!(idle & 0x1400_0000, 0x1400_0000);
+
     gpu.charge_busy(10_000);
-    let stat = gpu.read32(GP1_ADDR).unwrap();
-    // Bits 26 (cmd ready) + 28 (DMA block ready) are always set.
+    let busy = gpu.read32(GP1_ADDR).unwrap();
+    // CPU-sourced rendering clears bit 26 (command ready) but leaves
+    // bit 28 (DMA block ready) asserted on silicon.
     // Bit 27 (VRAM→CPU ready) is gated on an active transfer;
     // we don't have one here, so it's clear.
-    assert_eq!(stat & 0x1400_0000, 0x1400_0000);
-    assert_eq!(stat & 0x0800_0000, 0, "VRAM-send ready clear when idle");
+    assert_eq!(busy & 0x1400_0000, 0x1000_0000);
+    assert_eq!(busy & 0x0800_0000, 0, "VRAM-send ready clear when idle");
+
+    gpu.decay_busy(10_000);
+    let settled = gpu.read32(GP1_ADDR).unwrap();
+    assert_eq!(settled & 0x1400_0000, 0x1400_0000);
+
+    gpu.charge_dma_busy(10_000);
+    let dma_busy = gpu.read32(GP1_ADDR).unwrap();
+    assert_eq!(dma_busy & 0x1400_0000, 0);
+}
+
+#[test]
+fn dma_request_bit_follows_silicon_direction_rules() {
+    let mut gpu = Gpu::new();
+
+    gpu.write32(GP1_ADDR, 0x0400_0001); // FIFO direction
+    assert_ne!(gpu.read32(GP1_ADDR).unwrap() & (1 << 25), 0);
+    gpu.charge_dma_busy(10_000);
+    assert_ne!(gpu.read32(GP1_ADDR).unwrap() & (1 << 25), 0);
+
+    gpu.write32(GP1_ADDR, 0x0400_0002); // CPU -> GP0 mirrors bit 28
+    assert_eq!(gpu.read32(GP1_ADDR).unwrap() & (1 << 25), 0);
+    gpu.decay_busy(10_000);
+    assert_ne!(gpu.read32(GP1_ADDR).unwrap() & (1 << 25), 0);
+
+    gpu.write32(GP1_ADDR, 0x0400_0003); // GPUREAD -> CPU mirrors bit 27
+    assert_eq!(gpu.read32(GP1_ADDR).unwrap() & (1 << 25), 0);
+    gpu.write32(GP0_ADDR, 0xC000_0000);
+    gpu.write32(GP0_ADDR, 0);
+    gpu.write32(GP0_ADDR, 0x0001_0001);
+    assert_ne!(gpu.read32(GP1_ADDR).unwrap() & (1 << 25), 0);
+}
+
+#[test]
+fn command_timing_geometry_clips_partial_quads_deterministically() {
+    let gpu = Gpu::new();
+    let full = [(0, 0), (320, 0), (0, 240)];
+    let full_other = [(320, 0), (320, 240), (0, 240)];
+    assert_eq!(
+        gpu.timing_polygon_pixels(&full) + gpu.timing_polygon_pixels(&full_other),
+        320 * 240
+    );
+
+    let quarter_off = [(-80, 0), (240, 0), (-80, 240)];
+    let quarter_other = [(240, 0), (240, 240), (-80, 240)];
+    assert_eq!(
+        gpu.timing_polygon_pixels(&quarter_off) + gpu.timing_polygon_pixels(&quarter_other),
+        240 * 240
+    );
+}
+
+#[test]
+fn full_screen_command_costs_match_silicon_rational_model() {
+    assert_eq!(scale_gpu_pixels(320 * 240, 41, 512), 6_150);
+    assert_eq!(scale_gpu_pixels(320 * 240, 135, 256), 40_500);
+    assert_eq!(scale_gpu_pixels(320 * 240, 179, 64), 214_800);
 }
 
 #[test]
@@ -299,6 +358,61 @@ fn draw_mode_e1_extracts_blend_mode() {
 }
 
 #[test]
+fn gp1_09_gates_e1_upper_texture_page_status_bit() {
+    let mut gpu = Gpu::new();
+
+    // With GP1(09h) disabled, E1 bit 11 is ignored and GPUSTAT.15 clears.
+    gpu.write32(GP0_ADDR, 0xE100_0FFF);
+    assert_eq!(gpu.read32(GP1_ADDR).unwrap() & 0x87FF, 0x07FF);
+
+    // Enabling the upper address bit makes E1.11 visible as GPUSTAT.15.
+    gpu.write32(GP1_ADDR, 0x0900_0001);
+    gpu.write32(GP0_ADDR, 0xE100_0FFF);
+    assert_eq!(gpu.read32(GP1_ADDR).unwrap() & 0x87FF, 0x87FF);
+
+    // Disabling GP1(09h) alone preserves the already-latched draw mode;
+    // the next E1 write clears bit 15 because bit 11 is no longer accepted.
+    gpu.write32(GP1_ADDR, 0x0900_0000);
+    assert_eq!(gpu.read32(GP1_ADDR).unwrap() & 0x8000, 0x8000);
+    gpu.write32(GP0_ADDR, 0xE100_0000);
+    assert_eq!(gpu.read32(GP1_ADDR).unwrap() & 0x8000, 0);
+}
+
+#[test]
+fn polygon_tpage_updates_bits_0_to_8_and_11_only() {
+    let mut gpu = Gpu::new();
+    gpu.write32(GP1_ADDR, 0x0900_0001);
+
+    // Seed every E1-visible bit, then a zero tpage must preserve only E1's
+    // dither/draw-to-display bits 9 and 10.
+    gpu.write32(GP0_ADDR, 0xE100_0FFF);
+    gpu.apply_primitive_tpage(0x0000_0000);
+    assert_eq!(gpu.read32(GP1_ADDR).unwrap() & 0x87FF, 0x0600);
+
+    // Conversely, an all-ones tpage may set bits 0..8 and GPUSTAT.15 but
+    // cannot turn on bits 9..10.
+    gpu.write32(GP0_ADDR, 0xE100_0000);
+    gpu.apply_primitive_tpage(0xFFFF_0000);
+    assert_eq!(gpu.read32(GP1_ADDR).unwrap() & 0x87FF, 0x81FF);
+}
+
+#[test]
+fn upper_texture_page_reads_absent_retail_vram_bank() {
+    let mut gpu = Gpu::new();
+    gpu.vram.set_pixel(0, 0, 0x1234);
+    gpu.write32(GP1_ADDR, 0x0900_0001);
+    gpu.write32(GP0_ADDR, 0xE100_0900); // 15bpp plus upper Y-address bit
+    assert_eq!(gpu.tex_page_y, 512);
+    assert_eq!(gpu.sample_texture(0, 0), None);
+
+    // With GP1(09h) disabled the same E1 value addresses the lower bank.
+    gpu.write32(GP1_ADDR, 0x0900_0000);
+    gpu.write32(GP0_ADDR, 0xE100_0900);
+    assert_eq!(gpu.tex_page_y, 0);
+    assert_eq!(gpu.sample_texture(0, 0), Some(0x1234));
+}
+
+#[test]
 fn modulate_tint_identity_at_0x80() {
     // tint 0x80 per channel = identity. Any texel passes unchanged.
     let texel = 0x1234; // arbitrary 15bpp
@@ -550,24 +664,24 @@ fn dither_rgb_saturates_at_255() {
 
 #[test]
 fn mono_line_packet_size_is_three() {
-    for op in 0x40..=0x43 {
+    for op in 0x40..=0x47 {
         assert_eq!(gp0_packet_size(op), 3, "opcode 0x{op:02X}");
     }
 }
 
 #[test]
 fn shaded_line_packet_size_is_four() {
-    for op in 0x50..=0x53 {
+    for op in 0x50..=0x57 {
         assert_eq!(gp0_packet_size(op), 4, "opcode 0x{op:02X}");
     }
 }
 
 #[test]
 fn polyline_start_packet_sizes_match_single() {
-    for op in 0x48..=0x4B {
+    for op in 0x48..=0x4F {
         assert_eq!(gp0_packet_size(op), 3);
     }
-    for op in 0x58..=0x5B {
+    for op in 0x58..=0x5F {
         assert_eq!(gp0_packet_size(op), 4);
     }
 }
@@ -598,6 +712,24 @@ fn cmd_log_captures_cpu_vram_upload_payload() {
     assert_eq!(gpu.vram.get_pixel(0, 0), 0x1111);
     assert_eq!(gpu.vram.get_pixel(1, 0), 0x2222);
     assert_eq!(gpu.vram.get_pixel(2, 0), 0x3333);
+}
+
+#[test]
+fn gp1_command_buffer_reset_aborts_partial_vram_upload() {
+    let mut gpu = Gpu::new();
+    gpu.gp0_push(0xA0_00_00_00);
+    gpu.gp0_push(0x0000_0000);
+    gpu.gp0_push(0x0001_0004); // two payload words
+    gpu.gp0_push(0x2222_1111); // leave one pending
+    assert!(gpu.vram_upload_active());
+
+    gpu.write32(GP1_ADDR, 0x0100_0000);
+    assert!(!gpu.vram_upload_active());
+
+    // The next word is a fresh GP0 NOP, not stale upload data.
+    gpu.gp0_push(0);
+    assert_eq!(gpu.vram.get_pixel(2, 0), 0);
+    assert_eq!(gpu.vram.get_pixel(3, 0), 0);
 }
 
 #[test]
@@ -827,7 +959,7 @@ fn mono_line_horizontal_plots_one_row() {
 }
 
 #[test]
-fn mono_line_shallow_diagonal_matches_redux_tie_break() {
+fn mono_line_shallow_diagonal_matches_silicon_half_pixel_tie_break() {
     let mut gpu = Gpu::new();
     gpu.write32(GP0_ADDR, 0xE3_00_00_00);
     gpu.write32(GP0_ADDR, 0xE4_00_0A_0A);
@@ -835,10 +967,14 @@ fn mono_line_shallow_diagonal_matches_redux_tie_break() {
     gpu.write32(GP0_ADDR, 0x0000_0000);
     gpu.write32(GP0_ADDR, 0x0002_0004);
 
-    for (x, y) in [(0, 0), (1, 0), (2, 1), (3, 1), (4, 2)] {
+    for (x, y) in [(0, 0), (1, 1), (2, 1), (3, 2), (4, 2)] {
         assert_ne!(gpu.vram.get_pixel(x, y), 0, "pixel ({x}, {y})");
     }
-    assert_eq!(gpu.vram.get_pixel(1, 1), 0, "Redux chooses E on d == 0");
+    assert_eq!(
+        gpu.vram.get_pixel(1, 0),
+        0,
+        "silicon's half-pixel DDA rounds the exact tie downward in screen space",
+    );
 }
 
 #[test]
@@ -1418,6 +1554,62 @@ fn clut_cache_serves_stale_palette_until_clut_word_changes() {
 }
 
 #[test]
+fn gp0_clear_texture_cache_reloads_same_clut_word() {
+    let mut gpu = Gpu::new();
+    gpu.tex_depth = 0;
+    gpu.vram.set_pixel(0, 0, 0x0001);
+    gpu.vram.set_pixel(0x100 + 1, 0, 0x001F);
+    gpu.update_clut_if_needed(0x10);
+    assert_eq!(gpu.sample_texture(0, 0), Some(0x001F));
+
+    gpu.vram.set_pixel(0x100 + 1, 0, 0x7C00);
+    gpu.update_clut_if_needed(0x10);
+    assert_eq!(gpu.sample_texture(0, 0), Some(0x001F));
+
+    gpu.execute_gp0_single(0x0100_0000);
+    gpu.update_clut_if_needed(0x10);
+    assert_eq!(gpu.sample_texture(0, 0), Some(0x7C00));
+}
+
+#[test]
+fn textured_rectangle_flip_uses_silicon_counter_origins() {
+    let mut gpu = Gpu::new();
+    gpu.tex_depth = 2;
+    gpu.tex_rect_flip_x = true;
+    gpu.tex_rect_flip_y = true;
+
+    // X flip walks u0+1, u0, u0-1, u0-2. Y flip starts at v0 and
+    // walks v0-1 on the next destination row (all arithmetic is 8-bit
+    // after texture-window application in sample_texture).
+    for (x, color) in [(1, 0x001F), (0, 0x03E0), (255, 0x7C00), (254, 0x7FFF)] {
+        gpu.vram.set_pixel(x, 0, color);
+    }
+    for (x, color) in [(1, 0x4210), (0, 0x5294), (255, 0x6318), (254, 0x739C)] {
+        gpu.vram.set_pixel(x, 255, color);
+    }
+
+    gpu.paint_textured_rect(10, 10, 4, 2, 0, 0, 0, false, (128, 128, 128));
+    assert_eq!(
+        [
+            gpu.vram.get_pixel(10, 10),
+            gpu.vram.get_pixel(11, 10),
+            gpu.vram.get_pixel(12, 10),
+            gpu.vram.get_pixel(13, 10),
+        ],
+        [0x001F, 0x03E0, 0x7C00, 0x7FFF]
+    );
+    assert_eq!(
+        [
+            gpu.vram.get_pixel(10, 11),
+            gpu.vram.get_pixel(11, 11),
+            gpu.vram.get_pixel(12, 11),
+            gpu.vram.get_pixel(13, 11),
+        ],
+        [0x4210, 0x5294, 0x6318, 0x739C]
+    );
+}
+
+#[test]
 fn sample_texture_uv_wrap_at_256_per_psx_spx() {
     // Regression: the PS1's GPU walks U/V through an 8-bit counter,
     // so a tpage wraps every 256 texels horizontally and vertically.
@@ -1643,6 +1835,35 @@ fn axis_aligned_textured_quad_draws_bottom_to_top_order() {
     assert_eq!(gpu.vram.get_pixel(1, 0), 0x1001);
     assert_eq!(gpu.vram.get_pixel(0, 3), 0x1030);
     assert_eq!(gpu.vram.get_pixel(1, 3), 0x1031);
+}
+
+#[test]
+fn axis_aligned_textured_quad_uses_silicon_q12_uv_gradient() {
+    let mut gpu = Gpu::new();
+    gpu.tex_depth = 2;
+    gpu.tex_page_y = 256;
+    gpu.vram.set_pixel(0, 256, 0x001F);
+    gpu.vram.set_pixel(1, 256, 0x03E0);
+
+    assert!(gpu.rasterize_axis_aligned_textured_quad(
+        (0, 0),
+        (100, 0),
+        (0, 1),
+        (100, 1),
+        (0, 0),
+        (1, 0),
+        (0, 0),
+        (1, 0),
+        0,
+        false,
+        RAW_TEXTURE_TINT,
+    ));
+
+    // floor(4096 / 100) = 40 Q12 units per pixel. Starting from
+    // 0.5 means U reaches 1 at ceil(2048 / 40) = x52.
+    assert_eq!(gpu.vram.get_pixel(51, 0), 0x001F);
+    assert_eq!(gpu.vram.get_pixel(52, 0), 0x03E0);
+    assert_eq!(gpu.vram.get_pixel(99, 0), 0x03E0);
 }
 
 #[test]
