@@ -293,6 +293,7 @@ fn billboard_image_props_bake_vertical_static_lighting() {
 #[test]
 fn light_with_zero_radius_fails() {
     let mut project = ProjectDocument::starter();
+    insert_preview_light(&mut project);
     let ids = starter_light_ids(&project);
     let scene = project.active_scene_mut();
     for id in ids {
@@ -312,6 +313,7 @@ fn light_with_zero_radius_fails() {
 #[test]
 fn light_with_negative_intensity_fails() {
     let mut project = ProjectDocument::starter();
+    insert_preview_light(&mut project);
     let ids = starter_light_ids(&project);
     let scene = project.active_scene_mut();
     for id in ids {
@@ -333,6 +335,7 @@ fn light_radius_converts_sectors_to_world_units() {
     // Author a 4-sector radius; cook stores world units using
     // the room's current sector size.
     let mut project = ProjectDocument::starter();
+    insert_preview_light(&mut project);
     let sector_size = project
         .active_scene()
         .nodes()
@@ -357,7 +360,8 @@ fn light_radius_converts_sectors_to_world_units() {
 
 #[test]
 fn rendered_manifest_emits_lights_block() {
-    let project = ProjectDocument::starter();
+    let mut project = ProjectDocument::starter();
+    insert_preview_light(&mut project);
     let (package, _) = build_package(&project, &starter_project_root());
     let package = package.expect("cooks");
     let color = package.lights[0].color;
