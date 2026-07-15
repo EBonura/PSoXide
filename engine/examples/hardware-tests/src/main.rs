@@ -4037,7 +4037,8 @@ fn test_gte_op_mac3() -> TestResult {
 // -768). Differential on one burn: full-seed PASS + original FAIL = hardware
 // OP reads stale off-diagonal state (write-semantics family, same hunt as the
 // SY0-drop battery); BOTH fail identically = input-independent OP quirk.
-fn run_op_full_seed() {
+#[inline(always)]
+fn seed_op_full() {
     ctc2!(31, 0);
     ctc2!(0, 0x0000_1000); // R11=D1, R12=0
     ctc2!(1, 0x0000_0000); // R13=0, R21=0
@@ -4050,6 +4051,20 @@ fn run_op_full_seed() {
     mtc2!(25, 0); // MAC1
     mtc2!(26, 0); // MAC2
     mtc2!(27, 0); // MAC3
+}
+
+fn run_op_full_seed() {
+    seed_op_full();
+    unsafe { gte_ops::op_sf1() };
+}
+
+/// The prior console run produced the documented MAC1/MAC2 values but zero in
+/// MAC3 even with every input explicitly seeded. A long control/input settle
+/// before the identical OP distinguishes a CTC2/MTC2 commit hazard from an OP
+/// arithmetic quirk without changing any operands.
+fn run_op_full_seed_settled() {
+    seed_op_full();
+    gte_nops!(64);
     unsafe { gte_ops::op_sf1() };
 }
 fn test_gte_op_full_seed_mac1() -> TestResult {
@@ -5171,13 +5186,13 @@ fn spu_dma_read(addr: u32, out: &mut [u32]) {
     } else {
         1
     };
-    spu_dma_read_shape(addr, out, block_size);
+    let _ = spu_dma_read_shape(addr, out, block_size);
 }
 
 /// SPU->RAM DMA with an explicit BCR shape. Hardware's unstable read mode
 /// corrupts FIFO boundaries, so the precision capture must compare one large
 /// block with several small blocks while holding the payload constant.
-fn spu_dma_read_shape(addr: u32, out: &mut [u32], block_size: u32) {
+fn spu_dma_read_shape(addr: u32, out: &mut [u32], block_size: u32) -> u32 {
     use psx_io::spu::{SPUCNT, SPUSTAT, TRANSFER_ADDR, TRANSFER_CTRL};
     let words = out.len() as u32;
     debug_assert!(block_size != 0 && words % block_size == 0);
@@ -5188,21 +5203,21 @@ fn spu_dma_read_shape(addr: u32, out: &mut [u32], block_size: u32) {
         // SPUCNT is applied asynchronously. Starting DMA before SPUSTAT
         // reflects Stop returns FIFO/transition garbage even when the memory
         // control delay is configured for stable reads.
-        let mut mode_guard = 0u32;
-        while psx_io::read16(SPUSTAT) & 0x003F != spucnt & 0x003F
-            && mode_guard < 1_000_000
-        {
-            mode_guard += 1;
+        let mut stop_guard = 0u32;
+        while psx_io::read16(SPUSTAT) & 0x003F != spucnt & 0x003F && stop_guard < 0xFFFF {
+            stop_guard += 1;
         }
         psx_io::write16(TRANSFER_CTRL, 0x0004);
         psx_io::write16(TRANSFER_ADDR, (addr / 8) as u16);
         psx_io::write16(SPUCNT, spucnt | 0x0030); // transfer mode = DMA Read
-        mode_guard = 0;
-        while psx_io::read16(SPUSTAT) & 0x003F != (spucnt | 0x0030) & 0x003F
-            && mode_guard < 1_000_000
+        let mut mode_guard = 0u32;
+        while psx_io::read16(SPUSTAT) & 0x003F != (spucnt | 0x0030) & 0x003F && mode_guard < 0xFFFF
         {
             mode_guard += 1;
         }
+        // Do not wait for SPUSTAT's DMA-request bits before arming DMA. The
+        // SCPH-9902 capture showed that the low-six mode mirror settles after
+        // 24-27 polls, while bits 9/7 remain clear until the DMA side is armed.
         dma::enable_channel(dma::Channel::Spu);
         dma::set_madr(dma::Channel::Spu, out.as_ptr() as u32);
         dma::set_bcr_block(dma::Channel::Spu, block_size as u16, block_count as u16);
@@ -5216,6 +5231,11 @@ fn spu_dma_read_shape(addr: u32, out: &mut [u32], block_size: u32) {
             guard += 1;
         }
         psx_io::write16(SPUCNT, spucnt); // back to Stop
+        if stop_guard == 0xFFFF || mode_guard == 0xFFFF {
+            0xFFFF_FFFF
+        } else {
+            (stop_guard << 16) | mode_guard
+        }
     }
 }
 
@@ -5325,18 +5345,18 @@ fn precision_spu(values: &mut [u32; PRECISION_VALUE_COUNT], next: &mut usize) {
     psx_spu::upload_adpcm(SpuAddr::new(dest), bytes);
 
     let mut boot_single = [0u32; 16];
-    spu_dma_read_shape(dest, &mut boot_single, 16);
+    let boot_single_waits = spu_dma_read_shape(dest, &mut boot_single, 16);
     for word in boot_single {
         push_precision(values, next, word);
     }
-    push_precision(values, next, packed_status());
+    push_precision(values, next, boot_single_waits);
 
     let mut boot_four = [0u32; 16];
-    spu_dma_read_shape(dest, &mut boot_four, 4);
+    let boot_four_waits = spu_dma_read_shape(dest, &mut boot_four, 4);
     for word in boot_four {
         push_precision(values, next, word);
     }
-    push_precision(values, next, packed_status());
+    push_precision(values, next, boot_four_waits);
 
     // Preserve all BIOS-programmed wait fields and only make the documented
     // nonzero nibble explicit for the stable comparison. Hashes are enough
@@ -5346,10 +5366,10 @@ fn precision_spu(values: &mut [u32; PRECISION_VALUE_COUNT], next: &mut usize) {
     spin(64);
     push_precision(values, next, unsafe { psx_io::read32(SPU_DELAY) });
     let mut stable_single = [0u32; 16];
-    spu_dma_read_shape(dest, &mut stable_single, 16);
+    let _ = spu_dma_read_shape(dest, &mut stable_single, 16);
     push_precision(values, next, fnv32_words(&stable_single));
     let mut stable_four = [0u32; 16];
-    spu_dma_read_shape(dest, &mut stable_four, 4);
+    let _ = spu_dma_read_shape(dest, &mut stable_four, 4);
     push_precision(values, next, fnv32_words(&stable_four));
 
     let fifo_dest = 0x3C00;
@@ -5396,9 +5416,12 @@ fn precision_gpu(values: &mut [u32; PRECISION_VALUE_COUNT], next: &mut usize) {
 }
 
 /// Values 61..72: exact Timer 2 state before and after target/FFFF events.
-/// The two consecutive mode reads expose the read-to-clear flags, while the
-/// complete I_STAT word distinguishes a short IRQ pulse from a missing edge.
+/// The two consecutive mode reads expose the read-to-clear flags. I_STAT is
+/// cleared before each half and masked to its eleven implemented source bits,
+/// avoiding a stale GPU IRQ and the open-bus upper half seen in the prior run.
 fn precision_timer(values: &mut [u32; PRECISION_VALUE_COUNT], next: &mut usize) {
+    const IRQ_SOURCE_MASK: u32 = 0x07FF;
+    irq::ack(IRQ_SOURCE_MASK);
     timers::set_target(timers::Timer::Timer2, 32);
     timers::set_mode(
         timers::Timer::Timer2,
@@ -5411,8 +5434,9 @@ fn precision_timer(values: &mut [u32; PRECISION_VALUE_COUNT], next: &mut usize) 
     push_precision(values, next, timers::counter(timers::Timer::Timer2) as u32);
     push_precision(values, next, timers::mode(timers::Timer::Timer2) as u32);
     push_precision(values, next, timers::mode(timers::Timer::Timer2) as u32);
-    push_precision(values, next, irq::stat());
+    push_precision(values, next, irq::stat() & IRQ_SOURCE_MASK);
 
+    irq::ack(IRQ_SOURCE_MASK);
     timers::set_mode(timers::Timer::Timer2, TIMER_MODE_IRQ_ON_WRAP);
     timers::set_counter(timers::Timer::Timer2, 0xFFF0);
     push_precision(values, next, timers::mode(timers::Timer::Timer2) as u32);
@@ -5421,61 +5445,40 @@ fn precision_timer(values: &mut [u32; PRECISION_VALUE_COUNT], next: &mut usize) 
     push_precision(values, next, timers::counter(timers::Timer::Timer2) as u32);
     push_precision(values, next, timers::mode(timers::Timer::Timer2) as u32);
     push_precision(values, next, timers::mode(timers::Timer::Timer2) as u32);
-    push_precision(values, next, irq::stat());
+    push_precision(values, next, irq::stat() & IRQ_SOURCE_MASK);
     timers::set_mode(timers::Timer::Timer2, 0);
 }
 
-/// Configure a projection where screen X/Y equal V0.x/y. V0 is first settled
-/// to a conspicuous old pair; the probe then writes a different pair and Z in
-/// one tightly controlled assembly block immediately before RTPS.
-fn seed_rtps_v0_commit_probe() {
-    ctc2!(31, 0);
-    ctc2!(0, 0x0000_1000); // identity R11,R12
-    ctc2!(1, 0);
-    ctc2!(2, 0x0000_1000); // identity R22,R23
-    ctc2!(3, 0);
-    ctc2!(4, 0x0000_1000); // identity R33
-    ctc2!(5, 0);
-    ctc2!(6, 0);
-    ctc2!(7, 0);
-    ctc2!(24, 0); // OFX
-    ctc2!(25, 0); // OFY
-    ctc2!(26, 160); // H; VZ=160 makes the perspective ratio exactly 1
-    ctc2!(27, 0);
-    ctc2!(28, 0);
-    mtc2!(0, pack_gte_xy(-291, -31));
-    mtc2!(1, 160);
-    gte_nops!(64);
-}
-
-/// Execute the SDK projection write schedule with an exact number of extra
-/// NOPs between VZ0 and RTPS. The MTC2 encodings use $8/$9 so the compiler
-/// cannot insert setup instructions into the measured interval.
-macro_rules! rtps_v0_commit_probe {
+/// Reproduce the controlled scene-A NCLIP sequence and return MAC0 after an
+/// exact result-read gap. The prior run proved that SXY0/1/2 read back intact
+/// while MAC0 remains at the same partial accumulation through 48 NOPs; the
+/// settled reference uses 64. Sweeping every gap from 47 through 64 identifies
+/// the precise silicon completion edge without spending another QR page.
+macro_rules! nclip_scene_a_settle_probe {
     ($gap:literal) => {{
-        seed_rtps_v0_commit_probe();
-        let new_vxy = pack_gte_xy(564, 23);
-        let new_vz = 160u32;
-        #[cfg(target_arch = "mips")]
-        unsafe {
-            core::arch::asm!(
-                ".word 0x48880000", // MTC2 $8,VXY0
-                ".word 0x48890800", // MTC2 $9,VZ0
-                concat!(".rept ", stringify!($gap), "\nnop\n.endr"),
-                ".word 0x4a080001", // RTPS, sf=1
-                in("$8") new_vxy,
-                in("$9") new_vz,
-                options(nostack, nomem, preserves_flags),
-            );
-        }
-        #[cfg(not(target_arch = "mips"))]
-        {
-            mtc2!(0, new_vxy);
-            mtc2!(1, new_vz);
-            unsafe { gte_ops::rtps() };
-        }
-        gte_delay16();
-        [mfc2!(14), mfc2!(25), mfc2!(0)]
+        const S0: u32 = 0x006E_0095;
+        const S1: u32 = 0xFFE2_0094;
+        const S2: u32 = 0xFFDE_00DC;
+
+        ctc2!(31, 0);
+        mtc2!(12, S0);
+        mtc2!(13, S1);
+        mtc2!(14, S2);
+        unsafe { gte_ops::nclip() };
+        gte_nops!(64);
+        let _ = mfc2!(24);
+
+        // Poison MAC0 with the reverse winding, then restore scene A using
+        // the exact controlled-prestate sequence from cases 126..134.
+        mtc2!(13, S2);
+        mtc2!(14, S1);
+        unsafe { gte_ops::nclip() };
+        gte_nops!(64);
+        mtc2!(13, S1);
+        mtc2!(14, S2);
+        unsafe { gte_ops::nclip() };
+        gte_nops!($gap);
+        mfc2!(24)
     }};
 }
 
@@ -5483,30 +5486,38 @@ macro_rules! rtps_v0_commit_probe {
 /// completion. Already-matching MVMVA/compose paths are intentionally omitted
 /// so the fixed QR budget targets differences that can still improve PSoXide.
 fn precision_remaining(values: &mut [u32; PRECISION_VALUE_COUNT], next: &mut usize) {
-    // The SDK's single-vertex projection path now buffers VXY0/VZ0 before
-    // RTPS. Sweep that exact schedule so real hardware can establish whether
-    // RTPS shares HWB-010's MVMVA input-commit hazard and, if so, the first
-    // safe gap. Each triplet is SXY2, MAC1, then the settled VXY0 readback:
-    // together they distinguish stale-X execution from a write that never
-    // landed, while SXY2's upper half confirms that fresh Y was consumed.
-    for triplet in [
-        rtps_v0_commit_probe!(0),
-        rtps_v0_commit_probe!(1),
-        rtps_v0_commit_probe!(2),
-        rtps_v0_commit_probe!(3),
-        rtps_v0_commit_probe!(4),
-        rtps_v0_commit_probe!(8),
+    // RTPS consumed fresh V0 at every tested gap, including zero. Reuse those
+    // resolved 18 words to locate the scene-A NCLIP completion edge exactly.
+    for mac0 in [
+        nclip_scene_a_settle_probe!(47),
+        nclip_scene_a_settle_probe!(48),
+        nclip_scene_a_settle_probe!(49),
+        nclip_scene_a_settle_probe!(50),
+        nclip_scene_a_settle_probe!(51),
+        nclip_scene_a_settle_probe!(52),
+        nclip_scene_a_settle_probe!(53),
+        nclip_scene_a_settle_probe!(54),
+        nclip_scene_a_settle_probe!(55),
+        nclip_scene_a_settle_probe!(56),
+        nclip_scene_a_settle_probe!(57),
+        nclip_scene_a_settle_probe!(58),
+        nclip_scene_a_settle_probe!(59),
+        nclip_scene_a_settle_probe!(60),
+        nclip_scene_a_settle_probe!(61),
+        nclip_scene_a_settle_probe!(62),
+        nclip_scene_a_settle_probe!(63),
+        nclip_scene_a_settle_probe!(64),
     ] {
-        for value in triplet {
-            push_precision(values, next, value);
-        }
+        push_precision(values, next, mac0);
     }
-    for _ in 0..2 {
-        run_op_full_seed();
-        push_precision(values, next, mfc2!(25));
-        push_precision(values, next, mfc2!(26));
-        push_precision(values, next, mfc2!(27));
-    }
+    run_op_full_seed();
+    push_precision(values, next, mfc2!(25));
+    push_precision(values, next, mfc2!(26));
+    push_precision(values, next, mfc2!(27));
+    run_op_full_seed_settled();
+    push_precision(values, next, mfc2!(25));
+    push_precision(values, next, mfc2!(26));
+    push_precision(values, next, mfc2!(27));
 
     // Voice 0 raw masks: case 164 says which offsets differ, but not what the
     // masked values are. Preserve all eight readbacks after writing FFFF.
@@ -5546,11 +5557,7 @@ fn precision_remaining(values: &mut [u32; PRECISION_VALUE_COUNT], next: &mut usi
             guard += 1;
         }
         push_precision(values, next, dma::madr(dma::Channel::Otc));
-        push_precision(
-            values,
-            next,
-            psx_io::read32(dma::Channel::Otc.base() + 4),
-        );
+        push_precision(values, next, psx_io::read32(dma::Channel::Otc.base() + 4));
         push_precision(values, next, guard);
         push_precision(values, next, ptr::read_volatile(ptr));
         push_precision(values, next, ptr::read_volatile(ptr.add(15)));

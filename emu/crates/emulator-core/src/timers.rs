@@ -168,8 +168,14 @@ impl Timers {
                 t.counter_hold_cycles = 2;
             }
             0x4 => {
-                // Mode write resets counter + re-arms IRQ (bit 10 set).
-                t.mode = (value & !MODE_IRQ_ACTIVE_LOW) | MODE_IRQ_ACTIVE_LOW;
+                // Mode writes reset the counter and re-arm the IRQ request,
+                // but do not acknowledge the read-only reached flags. Real
+                // SCPH-9902 captures preserve bits 11/12 across a mode write;
+                // only reading the mode register clears them.
+                let reached = t.mode & (MODE_REACHED_TARGET | MODE_REACHED_WRAP);
+                t.mode = (value & !(MODE_IRQ_ACTIVE_LOW | MODE_REACHED_TARGET | MODE_REACHED_WRAP))
+                    | MODE_IRQ_ACTIVE_LOW
+                    | reached;
                 t.counter = 0;
                 t.accum = 0;
                 t.last_reset_cycle = now;
@@ -864,6 +870,23 @@ mod tests {
             MODE_REACHED_TARGET | MODE_REACHED_WRAP | MODE_IRQ_ACTIVE_LOW
         );
         assert_eq!(t.timers[1].mode, MODE_IRQ_ACTIVE_LOW);
+    }
+
+    #[test]
+    fn mode_write_preserves_reached_flags_until_read() {
+        let mut t = Timers::new();
+        t.timers[2].mode = MODE_REACHED_TARGET | MODE_REACHED_WRAP;
+
+        t.write32(0x1F80_1124, MODE_IRQ_ON_WRAP, 100);
+
+        assert_eq!(
+            t.read32(0x1F80_1124),
+            MODE_IRQ_ON_WRAP | MODE_IRQ_ACTIVE_LOW | MODE_REACHED_TARGET | MODE_REACHED_WRAP
+        );
+        assert_eq!(
+            t.read32(0x1F80_1124),
+            MODE_IRQ_ON_WRAP | MODE_IRQ_ACTIVE_LOW
+        );
     }
 
     #[test]
