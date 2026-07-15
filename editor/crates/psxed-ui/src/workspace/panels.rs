@@ -1537,17 +1537,20 @@ impl EditorWorkspace {
                                         changed |= draw_node_kind_editor(
                                             ui,
                                             &mut node.kind,
-                                            &material_options,
-                                            &texture_options,
-                                            &room_options,
-                                            &model_options,
-                                            &character_options,
-                                            &weapon_options,
-                                            animator_clip_context.as_ref(),
-                                            inherited_sector_size,
-                                            &mut room_grid_resize,
-                                            &mut nav_target,
-                                            camera_preview,
+                                            NodeKindEditorContext {
+                                                material_options: &material_options,
+                                                texture_options: &texture_options,
+                                                room_options: &room_options,
+                                                model_options: &model_options,
+                                                character_options: &character_options,
+                                                weapon_options: &weapon_options,
+                                                animator_clip_context: animator_clip_context
+                                                    .as_ref(),
+                                                inherited_sector_size,
+                                                room_grid_resize: &mut room_grid_resize,
+                                                nav_target: &mut nav_target,
+                                                camera_preview,
+                                            },
                                         );
                                     });
                                 }

@@ -245,19 +245,34 @@ pub(crate) fn draw_world_grid(painter: &egui::Painter, transform: ViewportTransf
     }
 }
 
+// Selection, validation, and visibility state for one 2D scene-viewport pass.
+pub(crate) struct SceneViewportContext<'a> {
+    pub(crate) hidden_scene_nodes: &'a HashSet<NodeId>,
+    pub(crate) selected: NodeId,
+    pub(crate) selected_nodes: &'a HashSet<NodeId>,
+    pub(crate) selected_sectors: &'a HashSet<SectorSelection>,
+    pub(crate) validation_issue_primitives: &'a [Selection],
+    pub(crate) validation_issue_rooms: &'a HashSet<NodeId>,
+    pub(crate) show_portals: bool,
+    pub(crate) show_lights: bool,
+}
+
 pub(crate) fn draw_scene_viewport(
     painter: &egui::Painter,
     transform: ViewportTransform,
     project: &ProjectDocument,
-    hidden_scene_nodes: &HashSet<NodeId>,
-    selected: NodeId,
-    selected_nodes: &HashSet<NodeId>,
-    selected_sectors: &HashSet<SectorSelection>,
-    validation_issue_primitives: &[Selection],
-    validation_issue_rooms: &HashSet<NodeId>,
-    show_portals: bool,
-    show_lights: bool,
+    ctx: SceneViewportContext<'_>,
 ) -> Vec<ViewportHit> {
+    let SceneViewportContext {
+        hidden_scene_nodes,
+        selected,
+        selected_nodes,
+        selected_sectors,
+        validation_issue_primitives,
+        validation_issue_rooms,
+        show_portals,
+        show_lights,
+    } = ctx;
     let scene = project.active_scene();
     let mut hits = Vec::new();
 
