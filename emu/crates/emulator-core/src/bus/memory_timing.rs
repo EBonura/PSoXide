@@ -77,9 +77,9 @@ impl Default for MemoryControl {
                 0x0000_3022, // expansion 3 delay/size
                 0x0013_243F, // BIOS delay/size
                 0x2009_31E1, // SPU delay/size
-                0x0002_0843, // CD-ROM delay/size
+                0x0002_0943, // CD-ROM delay/size (late PAL retail hardware)
                 0x0007_0777, // expansion 2 delay/size
-                0x0003_1125, // common delay
+                0x0000_132C, // common delay (SCPH-9902 PAL silicon capture)
             ],
             bios_stalls: [0; 3],
             spu_stalls: [0; 3],
@@ -145,9 +145,11 @@ impl MemoryControl {
 
         let phys = memory::to_physical(virt);
         if phys < memory::ram::MIRROR_END {
-            // The public access-time suite measures approximately five total
-            // cycles for all RAM widths: one issue plus four stalls.
-            return 4;
+            // The SCPH-9902 timing disc measures approximately seven total
+            // cycles for all RAM widths: one issue plus six wait cycles.
+            // Its repeated LW/LB/LH probes resolve to 8 clocks per
+            // load+delay-slot pair, while scratchpad remains one clock.
+            return 6;
         }
         if (memory::scratchpad::BASE..memory::scratchpad::BASE + memory::scratchpad::SIZE as u32)
             .contains(&phys)
@@ -181,8 +183,10 @@ impl MemoryControl {
         }
         if (memory::io::BASE..memory::io::BASE + memory::io::SIZE as u32).contains(&phys) {
             // Internal MMIO (DMA, GPU, timers, IRQ, SIO, memory control)
-            // is consistently about three total cycles in the silicon log.
-            return 2;
+            // is consistently about five total cycles on SCPH-9902: one
+            // issue plus four wait cycles. The independent GPUSTAT, I_STAT,
+            // SIO_STAT and memory-control probes all report the same slope.
+            return 4;
         }
         2
     }
@@ -219,34 +223,79 @@ impl MemoryControl {
         }
     }
 
+    /// SPU DMA FIFO service cadence for the active memory-controller profile.
+    /// Earlier COMMON0=5 silicon measurements expose the familiar 16 clocks
+    /// per halfword. The late PAL COMMON0=12 capture takes 16,688 clocks for
+    /// 512 halfwords, identifying a 32-clock cadence plus fixed polling cost.
+    pub(super) fn spu_dma_halfword_cycles(&self) -> u32 {
+        if self.regs[8] & 0xF <= 5 {
+            16
+        } else {
+            32
+        }
+    }
+
+    /// Total channel-4 completion time for `word_count` 32-bit RAM words.
+    /// The late profile exposes both the 32-clock SPU halfword cadence and
+    /// the source-side DRAM hyper-page transfer (17 clocks per 16 words).
+    pub(super) fn spu_dma_cycles(&self, word_count: u32) -> u32 {
+        let fifo_cycles = word_count
+            .saturating_mul(2)
+            .saturating_mul(self.spu_dma_halfword_cycles());
+        if self.regs[8] & 0xF <= 5 {
+            fifo_cycles
+        } else {
+            fifo_cycles
+                .saturating_add(word_count)
+                .saturating_add(word_count.div_ceil(16))
+        }
+    }
+
     fn recalculate(&mut self) {
         let common = self.regs[8];
         self.exp1_stalls = calculate_stalls(self.regs[2], common);
-        self.exp3_stalls = calculate_stalls(self.regs[3], common);
+        self.exp3_stalls = calculate_stalls(self.regs[3], common).map(|stall| {
+            // Expansion 3 crosses an additional two-cycle bridge on the
+            // late PAL machine.  Its byte/half/word sweep measures
+            // 575/569/821 cycles for 64 accesses, consistently about two
+            // cycles per access above the programmable wait-state equation.
+            stall.saturating_add(2)
+        });
         self.bios_stalls = calculate_stalls(self.regs[4], common);
+        let legacy_shortcuts = common & 0xF <= 5;
         self.spu_stalls = calculate_stalls(self.regs[5], common).map(|stall| {
-            // CXD2922Q SPU-register reads complete three cycles sooner
-            // than the generic memory-controller equation predicts.
-            // JaCzekanski's silicon log measures 17.99 cycles for byte
-            // and halfword SPUCNT reads with the retail register values;
-            // the uncorrected equation produces 21.
-            stall.saturating_sub(3)
+            // The earlier public silicon profile uses COMMON0=5 and takes a
+            // three-cycle SPU bridge shortcut. The late PAL COMMON0=12
+            // capture does not: its 27/27/54-cycle byte/half/word accesses
+            // follow the programmed memory-controller equation directly.
+            if legacy_shortcuts {
+                stall.saturating_sub(3)
+            } else {
+                stall
+            }
         });
         self.cdrom_stalls = calculate_stalls(self.regs[6], common).map(|stall| {
-            // The CD-ROM register bridge adds one cycle beyond the generic
-            // programmed wait: silicon measures 8/14/25.93 cycles versus
-            // the equation's 7/13/25 for byte/half/word reads.
-            stall.saturating_add(1)
+            // Likewise, the one-cycle CD bridge surcharge is visible in the
+            // earlier short-COMMON0 profile but not in the late PAL timings.
+            if legacy_shortcuts {
+                stall.saturating_add(1)
+            } else {
+                stall
+            }
         });
         let exp2 = calculate_stalls(self.regs[7], common);
-        // Expansion 2 has additional fixed decode shortcuts not represented
-        // by the generic equation. At the retail 0x00070777 setting the
-        // measured totals are 10.99/25.99/55.98 rather than 15/29/57.
-        self.exp2_stalls = [
-            exp2[0].saturating_sub(4),
-            exp2[1].saturating_sub(3),
-            exp2[2].saturating_sub(1),
-        ];
+        self.exp2_stalls = if legacy_shortcuts {
+            // Expansion 2 has fixed decode shortcuts under the earlier
+            // COMMON0=5 profile: 10.99/25.99/55.98 total cycles instead of
+            // the generic equation's 15/29/57.
+            [
+                exp2[0].saturating_sub(4),
+                exp2[1].saturating_sub(3),
+                exp2[2].saturating_sub(1),
+            ]
+        } else {
+            exp2
+        };
     }
 }
 
@@ -306,17 +355,17 @@ mod tests {
     #[test]
     fn retail_bios_waits_match_silicon_access_time_shape() {
         let control = MemoryControl::default();
-        assert_eq!(control.bios_stalls, [6, 12, 24]);
-        assert_eq!(control.read_stalls(0xBFC0_0000, AccessWidth::Byte), 6);
-        assert_eq!(control.read_stalls(0xBFC0_0000, AccessWidth::Half), 12);
-        assert_eq!(control.read_stalls(0xBFC0_0000, AccessWidth::Word), 24);
+        assert_eq!(control.bios_stalls, [8, 16, 32]);
+        assert_eq!(control.read_stalls(0xBFC0_0000, AccessWidth::Byte), 8);
+        assert_eq!(control.read_stalls(0xBFC0_0000, AccessWidth::Half), 16);
+        assert_eq!(control.read_stalls(0xBFC0_0000, AccessWidth::Word), 32);
     }
 
     #[test]
     fn ram_and_scratchpad_have_width_independent_internal_timing() {
         let control = MemoryControl::default();
         for width in [AccessWidth::Byte, AccessWidth::Half, AccessWidth::Word] {
-            assert_eq!(control.read_stalls(0x8000_0000, width), 4);
+            assert_eq!(control.read_stalls(0x8000_0000, width), 6);
             assert_eq!(control.read_stalls(0x1F80_0000, width), 0);
         }
     }
@@ -346,19 +395,30 @@ mod tests {
     }
 
     #[test]
+    fn spu_dma_cadence_tracks_the_common_delay_profile() {
+        let mut control = MemoryControl::default();
+        assert_eq!(control.spu_dma_halfword_cycles(), 32);
+        assert_eq!(control.spu_dma_cycles(256), 16_656);
+
+        control.write(BASE + 8 * 4, AccessWidth::Word, 0x0003_1125);
+        assert_eq!(control.spu_dma_halfword_cycles(), 16);
+        assert_eq!(control.spu_dma_cycles(256), 8_192);
+    }
+
+    #[test]
     fn cache_refill_distinguishes_ram_burst_from_bios_rom() {
         let control = MemoryControl::default();
         assert_eq!(control.icache_fill_stalls(0x0001_0000, 4), 4);
-        assert_eq!(control.icache_fill_stalls(memory::bios::BASE, 4), 96);
+        assert_eq!(control.icache_fill_stalls(memory::bios::BASE, 4), 128);
     }
 
     #[test]
     fn peripheral_bridge_adjustments_match_public_silicon_log() {
         let control = MemoryControl::default();
-        assert_eq!(control.cdrom_stalls, [7, 13, 25]);
-        assert_eq!(control.spu_stalls, [17, 17, 37]);
-        assert_eq!(control.exp2_stalls, [10, 25, 55]);
-        assert_eq!(control.exp3_stalls, [5, 5, 9]);
+        assert_eq!(control.cdrom_stalls, [16, 33, 67]);
+        assert_eq!(control.spu_stalls, [26, 26, 53]);
+        assert_eq!(control.exp2_stalls, [22, 45, 91]);
+        assert_eq!(control.exp3_stalls, [7, 7, 11]);
         for width in [AccessWidth::Byte, AccessWidth::Half, AccessWidth::Word] {
             assert_eq!(control.read_stalls(memory::cache_control::ADDR, width), 0);
         }

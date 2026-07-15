@@ -232,7 +232,7 @@ fn init_ack_bootstraps_lid_rescan_state_machine() {
     assert!(cd.lid_bootstrap_pending);
     assert_eq!(cd.drive_state, DriveState::RescanCd);
 
-    let ack_cycle = 1_000 + FIRST_RESPONSE_CYCLES + 1;
+    let ack_cycle = 1_000 + FIRST_RESPONSE_WITH_MEDIA_CYCLES + 1;
     assert!(cd.tick(ack_cycle));
     assert!(!cd.lid_bootstrap_pending);
     assert_eq!(cd.lid_deadline, Some(ack_cycle + LID_BOOTSTRAP_CYCLES));
@@ -265,7 +265,7 @@ fn getstat_reports_then_clears_shell_open_sticky_bit() {
     cd.cmd_getstat();
 
     assert_eq!(cd.drive_status & drive_status_bit::SHELL_OPEN, 0);
-    assert!(cd.tick(1_000 + FIRST_RESPONSE_CYCLES + 1));
+    assert!(cd.tick(1_000 + FIRST_RESPONSE_WITH_MEDIA_CYCLES + 1));
     let stat = cd.read8(BASE + 1);
     assert_eq!(
         stat & drive_status_bit::SHELL_OPEN,
@@ -438,7 +438,7 @@ fn read_command_uses_initial_delay_then_steady_stream_delay() {
         Some(IrqType::Acknowledge)
     );
 
-    assert!(cd.tick(1_000 + FIRST_RESPONSE_CYCLES + 1));
+    assert!(cd.tick(1_000 + FIRST_RESPONSE_WITH_MEDIA_CYCLES + 1));
     let first_data_ready = cd
         .pending
         .iter()
@@ -446,12 +446,12 @@ fn read_command_uses_initial_delay_then_steady_stream_delay() {
         .expect("first DataReady scheduled from ACK fire time");
     assert_eq!(
         first_data_ready.deadline,
-        1_000 + FIRST_RESPONSE_CYCLES + 1 + CD_READ_TIME
+        1_000 + FIRST_RESPONSE_WITH_MEDIA_CYCLES + 1 + CD_READ_TIME
     );
     cd.irq_flag = 0;
     cd.responses.clear();
 
-    assert!(cd.tick(1_000 + FIRST_RESPONSE_CYCLES + 1 + CD_READ_TIME + 1));
+    assert!(cd.tick(1_000 + FIRST_RESPONSE_WITH_MEDIA_CYCLES + 1 + CD_READ_TIME + 1));
     let next_data_ready = cd
         .pending
         .iter()
@@ -459,7 +459,7 @@ fn read_command_uses_initial_delay_then_steady_stream_delay() {
         .expect("steady DataReady scheduled");
     assert_eq!(
         next_data_ready.deadline,
-        1_000 + FIRST_RESPONSE_CYCLES + 1 + CD_READ_TIME + 1 + CD_READ_TIME / 2
+        1_000 + FIRST_RESPONSE_WITH_MEDIA_CYCLES + 1 + CD_READ_TIME + 1 + CD_READ_TIME / 2
     );
 }
 
@@ -470,7 +470,7 @@ fn dataready_waits_once_when_cpu_cdrom_irq_is_still_pending() {
     cd.scheduling_cycle = 1_000;
 
     cd.cmd_read();
-    let ack_cycle = 1_000 + FIRST_RESPONSE_CYCLES + 1;
+    let ack_cycle = 1_000 + FIRST_RESPONSE_WITH_MEDIA_CYCLES + 1;
     assert!(cd.tick(ack_cycle));
     cd.irq_flag = 0;
     cd.responses.clear();
@@ -502,12 +502,12 @@ fn xa_audio_sector_suppresses_dataready_irq_but_keeps_streaming() {
     cd.scheduling_cycle = 1_000;
 
     cd.cmd_read();
-    assert!(cd.tick(1_000 + FIRST_RESPONSE_CYCLES + 1));
+    assert!(cd.tick(1_000 + FIRST_RESPONSE_WITH_MEDIA_CYCLES + 1));
     cd.irq_flag = 0;
     cd.responses.clear();
 
     assert!(
-        !cd.tick(1_000 + FIRST_RESPONSE_CYCLES + 1 + CD_READ_TIME + 1),
+        !cd.tick(1_000 + FIRST_RESPONSE_WITH_MEDIA_CYCLES + 1 + CD_READ_TIME + 1),
         "Redux suppresses DataReady IRQs for STRSND XA audio sectors"
     );
     assert_eq!(cd.irq_flag, 0);
@@ -524,7 +524,7 @@ fn xa_audio_sector_suppresses_dataready_irq_but_keeps_streaming() {
         .expect("suppressed audio sector should still chain the read stream");
     assert_eq!(
         next_data_ready.deadline,
-        1_000 + FIRST_RESPONSE_CYCLES + 1 + CD_READ_TIME + 1 + CD_READ_TIME / 2
+        1_000 + FIRST_RESPONSE_WITH_MEDIA_CYCLES + 1 + CD_READ_TIME + 1 + CD_READ_TIME / 2
     );
 }
 
@@ -549,7 +549,7 @@ fn pause_on_spun_up_drive_uses_short_followup_delay() {
         "Pause should cancel the in-flight read chain"
     );
 
-    let ack_deadline = 1_000 + FIRST_RESPONSE_CYCLES;
+    let ack_deadline = 1_000 + FIRST_RESPONSE_WITH_MEDIA_CYCLES;
     assert!(cd.tick(ack_deadline + 1));
     assert_eq!(
         cd.read8(BASE + 1),
@@ -646,7 +646,7 @@ fn relocated_read_stretches_second_sector_gap() {
 
     cd.cmd_read();
 
-    let ack_deadline = 1_000 + FIRST_RESPONSE_CYCLES;
+    let ack_deadline = 1_000 + FIRST_RESPONSE_WITH_MEDIA_CYCLES;
     assert!(cd.tick(ack_deadline + 1));
     cd.irq_flag = 0;
 
@@ -843,7 +843,7 @@ fn command_during_cdda_playback_acks_later_than_when_idle() {
         .iter()
         .find(|ev| ev.command == 0x01 && ev.irq == IrqType::Acknowledge)
         .expect("idle GetStat ack pending");
-    assert_eq!(idle_ack.deadline, 1_000 + FIRST_RESPONSE_CYCLES);
+    assert_eq!(idle_ack.deadline, 1_000 + FIRST_RESPONSE_WITH_MEDIA_CYCLES);
 
     // During CD-DA playback the same GetStat acks CDDA_BUSY_RESPONSE_CYCLES
     // later -- the busy single controller modelled. This is the latency that
@@ -861,7 +861,7 @@ fn command_during_cdda_playback_acks_later_than_when_idle() {
         .iter()
         .find(|ev| ev.command == 0x03 && ev.irq == IrqType::Acknowledge)
         .expect("play ack pending");
-    assert_eq!(play_ack.deadline, 2_000 + FIRST_RESPONSE_CYCLES);
+    assert_eq!(play_ack.deadline, 2_000 + FIRST_RESPONSE_WITH_MEDIA_CYCLES);
 
     playing.queue_command(0x01, 3_000); // GetStat while playing
     let busy_ack = playing
@@ -871,7 +871,7 @@ fn command_during_cdda_playback_acks_later_than_when_idle() {
         .expect("playing GetStat ack pending");
     assert_eq!(
         busy_ack.deadline,
-        3_000 + FIRST_RESPONSE_CYCLES + CDDA_BUSY_RESPONSE_CYCLES
+        3_000 + FIRST_RESPONSE_WITH_MEDIA_CYCLES + CDDA_BUSY_RESPONSE_CYCLES
     );
 }
 
@@ -894,7 +894,7 @@ fn getstat_after_cdda_track_end_is_prompt_and_reports_stopped() {
         .iter()
         .find(|ev| ev.command == 0x01 && ev.irq == IrqType::Acknowledge)
         .expect("post-end GetStat ack pending");
-    assert_eq!(ack.deadline, 2_000 + FIRST_RESPONSE_CYCLES);
+    assert_eq!(ack.deadline, 2_000 + FIRST_RESPONSE_WITH_MEDIA_CYCLES);
     assert_eq!(ack.bytes[0] & drive_status_bit::PLAYING, 0);
 }
 

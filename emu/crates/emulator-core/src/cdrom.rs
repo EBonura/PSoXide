@@ -1005,12 +1005,16 @@ impl CdRom {
     // --- Command handlers ---
 
     /// Absolute deadline for a command's first (acknowledge) response.
-    /// `scheduling_cycle + FIRST_RESPONSE_CYCLES`, anchored like Redux's
-    /// `AddIrqQueue` on the cmd-port write, PLUS [`CDDA_BUSY_RESPONSE_CYCLES`]
-    /// when the command was issued while CD-DA was playing (the busy single
-    /// controller is slow to acknowledge mid-playback).
+    /// The controller sub-CPU responds from its firmware loop. A mounted disc
+    /// makes that loop materially busier, so media and no-media commands have
+    /// distinct hardware-calibrated acknowledgement floors. CD-DA playback
+    /// adds the existing streaming-controller penalty on top.
     fn first_response_deadline(&self) -> u64 {
-        let mut delay = FIRST_RESPONSE_CYCLES;
+        let mut delay = if self.disc_present {
+            FIRST_RESPONSE_WITH_MEDIA_CYCLES
+        } else {
+            FIRST_RESPONSE_CYCLES
+        };
         if self.cmd_issued_during_cdda {
             delay = delay.saturating_add(CDDA_BUSY_RESPONSE_CYCLES);
         }
@@ -1462,7 +1466,7 @@ impl CdRom {
             // command-state machine which expects the ack first.
             self.schedule_first_response(vec![self.stat_byte()]);
             let stat = self.stat_byte() | drive_status_bit::ERROR;
-            self.schedule_second_error(vec![stat, 0x80], FIRST_RESPONSE_CYCLES);
+            self.schedule_second_error(vec![stat, 0x80], QUICK_SECOND_RESPONSE_CYCLES);
             return;
         }
         self.cancel_pending_data_ready_events();
