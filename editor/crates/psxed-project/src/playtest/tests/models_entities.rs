@@ -32,9 +32,7 @@ fn playtest_packages_only_runtime_required_player_clips() {
         .expect("player character is packaged");
     for action in CharacterAnimationAction::ALL {
         let clip = character.action_clips[action.to_index()];
-        if action.required_for_player() {
-            assert!(clip < model.clip_count);
-        } else if clip != CHARACTER_CLIP_NONE {
+        if action.required_for_player() || clip != CHARACTER_CLIP_NONE {
             assert!(clip < model.clip_count);
         }
     }
