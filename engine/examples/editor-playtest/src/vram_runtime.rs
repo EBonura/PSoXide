@@ -115,6 +115,14 @@ pub(super) fn load_ui_images_for_scene(scene_id: u16) {
     );
 }
 
+/// Hand the menu UI-image cache's RAM over to gameplay: drop the cache
+/// contents so room draws may overwrite the bytes (`MenuGameplayOverlay`),
+/// and so the next menu entry re-preloads from CD.
+#[cfg(feature = "cd-stream-bench")]
+pub(super) fn retire_menu_ui_cache() {
+    ui_images_arena_mut().invalidate();
+}
+
 /// Free every streamed UI image VRAM slot created by `load_ui_images_for_scene`.
 /// Called on gameplay entry so the room textures reclaim that VRAM. Fonts are
 /// shared and are NOT released here.
