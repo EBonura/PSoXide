@@ -209,11 +209,23 @@ fn project_with_one_room() -> ProjectDocument {
                 Some((child.name.clone(), child.kind.clone(), child.transform))
             })
             .collect();
+        // The minimal starter ships no lights, so synthesize the test
+        // fixture light the light-cook tests build on when absent.
         let light = scene
             .nodes()
             .iter()
             .find(|node| matches!(node.kind, NodeKind::PointLight { .. }))
-            .map(|node| (node.name.clone(), node.kind.clone()));
+            .map(|node| (node.name.clone(), node.kind.clone()))
+            .or_else(|| {
+                Some((
+                    "Preview Light".to_string(),
+                    NodeKind::PointLight {
+                        color: [255, 244, 214],
+                        intensity: 1.25,
+                        radius: 3.0,
+                    },
+                ))
+            });
         (
             world.kind.clone(),
             grid.clone(),
@@ -400,6 +412,40 @@ fn starter_light_intensity_q8(project: &ProjectDocument) -> u16 {
         })
         .expect("starter contains one light");
     (intensity * 256.0).clamp(0.0, u16::MAX as f32) as u16
+}
+
+/// Insert the fixture preview light the light-cook tests exercise; the
+/// minimal starter ships without lights.
+fn insert_preview_light(project: &mut ProjectDocument) -> NodeId {
+    let (room_id, over_middle_tile) = project
+        .active_scene()
+        .nodes()
+        .iter()
+        .find_map(|n| match &n.kind {
+            NodeKind::Room { grid } => {
+                let e = grid.world_cells_to_editor([
+                    grid.width as f32 / 2.0,
+                    grid.depth as f32 / 2.0,
+                ]);
+                Some((n.id, [e[0], 1.5, e[1]]))
+            }
+            _ => None,
+        })
+        .expect("starter has a room");
+    let scene = project.active_scene_mut();
+    let id = scene.add_node(
+        room_id,
+        "Preview Light",
+        NodeKind::PointLight {
+            color: [255, 244, 214],
+            intensity: 1.25,
+            radius: 3.0,
+        },
+    );
+    if let Some(light) = scene.node_mut(id) {
+        light.transform.translation = over_middle_tile;
+    }
+    id
 }
 
 fn starter_light_ids(project: &ProjectDocument) -> Vec<NodeId> {
