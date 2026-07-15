@@ -149,12 +149,13 @@ pub struct Gte {
     lzcs: u32,
     lzcr: u32,
 
-    /// HWB-010 hazard injection: when set, the NEXT MVMVA computes its
-    /// MAC1 phase (executed first in the GTE's sequential row pipeline)
-    /// with this value as V0.x, while MAC2/MAC3 (executed later) see
-    /// the fresh register. Models the MTC2 VXY0 write committing
-    /// between the MAC1 and MAC2 compute windows, measured on silicon in the
-    /// HWB-010 live capture. Transient: cleared by
+    /// HWB-010 hazard injection: when set, the NEXT V0 transform computes
+    /// its first row with this value as V0.x, while later rows see the fresh
+    /// register. Models the MTC2 VXY0 write committing between sequential
+    /// GTE compute windows, measured on silicon in the HWB-010 live capture.
+    /// The captured operation was MVMVA; RTPS support is retained as a
+    /// diagnostic reproduction mode for the identical unpadded input schedule.
+    /// Transient: cleared by
     /// [`Gte::execute_with_stale_v0x`] after the command.
     ///
     /// Excluded from save states: this only ever lives for the
@@ -567,9 +568,9 @@ impl Gte {
     }
 
     /// Execute one COP2 function with the HWB-010 MTC2-commit hazard
-    /// injected: the MAC1 phase of an MVMVA reading V0 sees `stale_x`
-    /// as V0.x (the value the register held before the in-flight MTC2
-    /// VXY0 write), while the MAC2/MAC3 phases see the fresh register.
+    /// injected: the first transform row reading V0 sees `stale_x` as V0.x
+    /// (the value held before the in-flight MTC2 VXY0 write), while later
+    /// rows see the fresh register.
     /// Silicon-measured: six exact arithmetic confirmations across two live
     /// hardware captures, HWB-009 and HWB-010.
     pub fn execute_with_stale_v0x(&mut self, instr: u32, stale_x: i16) {
@@ -635,7 +636,16 @@ impl Gte {
     /// true, also updates IR0/MAC0 from DQA/DQB (so `RTPT` can call
     /// this for the first two vertices with `last=false`).
     fn op_rtps(&mut self, cmd: Cmd, idx: usize, last: bool) {
-        let v = self.v[idx];
+        let mut v = self.v[idx];
+        // Diagnostic extension of the console-measured MVMVA input hazard:
+        // the SDK's single-vertex projection helper uses the same adjacent
+        // MTC2 VXY0/MTC2 VZ0/RTPS schedule. Let the emulator reproduce that
+        // schedule with the previous X while preserving the fresh Y/Z values.
+        if idx == 0 {
+            if let Some(stale_x) = self.stale_v0x {
+                v[0] = stale_x;
+            }
+        }
         let sf = cmd.shift();
 
         // [MAC1,MAC2,MAC3] = (TR << 12 + RT * V) >> sf
@@ -1488,6 +1498,31 @@ mod tests {
         // The injection is one-shot: a following clean execute is clean.
         g.execute(MVMVA_RT_V0_TR_SF1);
         assert_eq!(g.read_data(25), 0xFFFF_FFE3);
+    }
+
+    #[test]
+    fn rtps_stale_v0x_reproduces_unpadded_projection_hazard() {
+        let seed = |g: &mut Gte| {
+            // Identity rotation, H=160, V0=(10, 0, 160). With H/Z=1 the
+            // projected X is the input X, making stale/fresh selection exact.
+            g.write_control(0, 0x0000_1000);
+            g.write_control(2, 0x0000_1000);
+            g.write_control(4, 0x0000_1000);
+            g.write_control(26, 160);
+            g.write_data(0, 10);
+            g.write_data(1, 160);
+        };
+        const RTPS_SF1: u32 = 0x4A08_0001;
+
+        let mut clean = Gte::new();
+        seed(&mut clean);
+        clean.execute(RTPS_SF1);
+        assert_eq!(clean.read_data(14) as u16 as i16, 10);
+
+        let mut hazarded = Gte::new();
+        seed(&mut hazarded);
+        hazarded.execute_with_stale_v0x(RTPS_SF1, -10);
+        assert_eq!(hazarded.read_data(14) as u16 as i16, -10);
     }
 
     #[test]

@@ -50,9 +50,9 @@
 //! - **Atlas layout**: the uploader picks `glyphs_per_row` so the
 //!   atlas fits within its tpage.
 //! - **Upload buffer**: the stack-only scratch buffer inside
-//!   [`FontAtlas::upload`] is sized for a full 256×256 4bpp atlas,
-//!   enough for 128 glyphs up to 32×16. Larger fonts panic today;
-//!   add a bigger/const-generic buffer before importing them.
+//!   [`FontAtlas::upload`] is 16 KiB, enough for 128 glyphs at 16×16
+//!   or 64 glyphs at 32×16. Larger atlases panic today; use
+//!   [`upload_fonts`] with caller-owned scratch for them.
 //!
 //! ## Why 4bpp and not 15bpp direct
 //!
@@ -485,22 +485,21 @@ impl FontAtlas {
     /// in 4bpp mode the effective horizontal texel range per page
     /// maps onto 64 VRAM halfwords = 64 × 4 = 256 texels).
     const MAX_ATLAS_W_TEXELS: u16 = 256;
-    /// Stack buffer for the packed 4bpp atlas. 16384 halfwords =
-    /// 32 KiB covers the full 256×256 4bpp atlas footprint, which
-    /// fits:
+    /// Stack buffer for the packed 4bpp atlas. 8192 halfwords =
+    /// 16 KiB leaves real call-frame headroom inside the SDK's 32 KiB
+    /// minimum stack reserve while covering the common cases:
     /// - 128 glyphs at 8×8   (2048 hw)
     /// - 128 glyphs at 8×16  (4096 hw)
     /// - 64 glyphs  at 16×16 (4096 hw)
     /// - 128 glyphs at 12×16 (5040 hw)
     /// - 128 glyphs at 16×16 (8192 hw)
-    /// - 128 glyphs at 32×16 (16384 hw) -- the largest supported
+    /// - 64 glyphs  at 32×16 (8192 hw) -- the largest supported
     ///
-    /// 32 KiB transient stack usage at boot is fine on a 2 MiB
-    /// PS1 (typical stack budget is 32-64 KiB, and `upload` is
-    /// called once before the main loop). Fonts larger than 32×16
-    /// would need a bump -- open an issue, we'll add a
-    /// const-generic variant.
-    const MAX_PACK_HALFWORDS: usize = 16384;
+    /// A full 32 KiB local is not safe: the linker guarantees 32 KiB for the
+    /// *whole* call stack, so the uploader's caller/interrupt frames would
+    /// cross into static RAM. Larger imports should use [`upload_fonts`] and
+    /// provide scratch storage with an explicitly audited lifetime.
+    const MAX_PACK_HALFWORDS: usize = 8192;
 
     /// Upload `font` as a 4bpp CLUT texture at `tpage`, with a
     /// 2-entry CLUT (transparent, white) at `clut`.
