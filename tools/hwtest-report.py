@@ -492,11 +492,11 @@ def precision_label(index: int) -> str:
     fixed = {
         0: "spu_delay_boot",
         1: "spu_ctrl_stat_boot",
-        18: "spu_ctrl_stat_after_boot_read",
-        19: "spu_delay_forced_stable",
-        20: "spu_ctrl_stat_before_stable_read",
-        37: "spu_ctrl_stat_after_stable_read",
-        42: "spu_ctrl_stat_after_fifo_read",
+        18: "spu_ctrl_stat_after_single_block",
+        35: "spu_ctrl_stat_after_four_blocks",
+        36: "spu_delay_forced_stable",
+        37: "spu_stable_single_block_hash",
+        38: "spu_stable_four_block_hash",
         43: "gpu_after_irq_clear",
         44: "gpu_irq_set_read0",
         45: "gpu_irq_set_read1",
@@ -519,11 +519,11 @@ def precision_label(index: int) -> str:
     if index in fixed:
         return fixed[index]
     if 2 <= index <= 17:
-        return f"spu_boot_read_word_{index - 2:02d}"
-    if 21 <= index <= 36:
-        return f"spu_stable_read_word_{index - 21:02d}"
-    if 38 <= index <= 41:
-        return f"spu_fifo_read_word_{index - 38:02d}"
+        return f"spu_boot_single_block_word_{index - 2:02d}"
+    if 19 <= index <= 34:
+        return f"spu_boot_four_block_word_{index - 19:02d}"
+    if 39 <= index <= 42:
+        return f"spu_fifo_read_word_{index - 39:02d}"
     if 49 <= index <= 60:
         offset = index - 49
         return f"gpu_dma_dir_{offset // 3}_read{offset % 3}"
@@ -533,12 +533,22 @@ def precision_label(index: int) -> str:
     if 91 <= index <= 96:
         offset = index - 91
         return f"gte_op_full_run{offset // 3}_mac{offset % 3 + 1}"
-    if 97 <= index <= 108:
-        offset = index - 97
-        return f"gte_mvmva_scene_{offset // 3}_mac{offset % 3 + 1}"
-    if 109 <= index <= 116:
-        offset = index - 109
-        return f"gte_compose_run{offset // 4}_mode{offset % 4}"
+    if 97 <= index <= 104:
+        return f"spu_voice0_offset_{(index - 97) * 2:02X}_write_ffff"
+    if index == 105:
+        return "otc_chcr_before_start"
+    if 106 <= index <= 111:
+        return f"otc_chcr_read{index - 106}"
+    if index == 112:
+        return "otc_madr_after"
+    if index == 113:
+        return "otc_bcr_after"
+    if index == 114:
+        return "otc_remaining_busy_polls"
+    if index == 115:
+        return "otc_first_word"
+    if index == 116:
+        return "otc_last_word"
     if 117 <= index <= 119:
         return f"gte_nclip_scene_{index - 117}_mac0"
     if 120 <= index <= 123:
