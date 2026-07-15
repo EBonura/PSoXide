@@ -1683,6 +1683,51 @@ pub struct LevelModelSocketRecord {
     pub flags: u16,
 }
 
+/// Blend-mode codes carried by
+/// [`LevelModelMaterialOverride::blend_mode`]. Unlike raw tpage
+/// bits these encode "opaque" explicitly, so a covering material
+/// can also be an opaque re-skin.
+pub mod model_override_blend {
+    /// Overwrite destination pixels.
+    pub const OPAQUE: u8 = 0;
+    /// `(background + foreground) / 2`.
+    pub const AVERAGE: u8 = 1;
+    /// `background + foreground`.
+    pub const ADD: u8 = 2;
+    /// `background - foreground`.
+    pub const SUBTRACT: u8 = 3;
+    /// `background + foreground / 4`.
+    pub const ADD_QUARTER: u8 = 4;
+}
+
+/// Covering-material override for one placed model instance or
+/// character visual: the model renders its own cooked UVs against
+/// `texture_asset` instead of the model's baked atlas, with the
+/// authored material's blend mode, tint, and face sidedness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelModelMaterialOverride {
+    /// Texture asset drawn instead of the model's cooked atlas.
+    pub texture_asset: AssetId,
+    /// Blend-mode code from [`model_override_blend`].
+    pub blend_mode: u8,
+    /// Per-material modulation tint (0x80 neutral).
+    pub tint_rgb: [u8; 3],
+    /// Face-sidedness bits in the [`material_flags::FACE_*`]
+    /// encoding (low two bits; the rest reserved).
+    pub flags: u16,
+}
+
+impl LevelModelMaterialOverride {
+    /// Decode the override's face-sidedness flags.
+    pub const fn sidedness(self) -> LevelMaterialSidedness {
+        match self.flags & material_flags::FACE_MASK {
+            material_flags::FACE_BACK => LevelMaterialSidedness::Back,
+            material_flags::FACE_BOTH => LevelMaterialSidedness::Both,
+            _ => LevelMaterialSidedness::Front,
+        }
+    }
+}
+
 /// One placed model instance. Coordinates are room-local
 /// engine units. `clip` is an index into the owning model's
 /// clip slice; `0xFFFF` means "use the model's `default_clip`".
@@ -1721,6 +1766,9 @@ pub struct LevelModelInstanceRecord {
     pub visual_offset: [i16; 3],
     /// Render-only uniform scale in Q8 fixed point (`256 = 1.0`).
     pub visual_scale_q8: u16,
+    /// Covering material replacing the model's cooked atlas, or
+    /// `None` to render the atlas (the default path).
+    pub material_override: Option<LevelModelMaterialOverride>,
     /// Reserved.
     pub flags: u16,
 }
@@ -2782,6 +2830,9 @@ pub struct LevelCharacterRecord {
     /// Vertical offset of the camera's look-at target above
     /// the character origin.
     pub camera_target_height: i32,
+    /// Covering material replacing the model's cooked atlas, or
+    /// `None` to render the atlas (the default path).
+    pub material_override: Option<LevelModelMaterialOverride>,
     /// Reserved.
     pub flags: u16,
 }

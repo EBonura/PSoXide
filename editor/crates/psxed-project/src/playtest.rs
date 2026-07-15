@@ -781,6 +781,17 @@ pub fn build_package(
                             Some(anim) if !anim.autoplay => anim.pose_frame,
                             _ => MODEL_INSTANCE_POSE_ANIMATE,
                         };
+                        let material_override = renderer.material.and_then(|material_id| {
+                            resolve_model_material_override(
+                                project,
+                                project_root,
+                                &format!("Model Renderer '{}'", node.name),
+                                material_id,
+                                &mut texture_asset_for_path,
+                                &mut assets,
+                                &mut report,
+                            )
+                        });
                         if !push_model_instance_for_resource(
                             project,
                             project_root,
@@ -797,6 +808,7 @@ pub fn build_package(
                                 roll,
                                 visual_offset: renderer.visual_offset,
                                 visual_scale_q8: renderer.visual_scale_q8,
+                                material_override,
                             },
                             ModelCookTables {
                                 assets: &mut assets,
@@ -1071,6 +1083,7 @@ pub fn build_package(
                             roll,
                             visual_offset: [0; 3],
                             visual_scale_q8: crate::MODEL_SCALE_ONE_Q8,
+                            material_override: None,
                         },
                         ModelCookTables {
                             assets: &mut assets,
@@ -1409,12 +1422,27 @@ pub fn build_package(
                     }
                 }
             };
+            let renderer_material_override = candidate
+                .renderer
+                .and_then(|renderer| renderer.material)
+                .and_then(|material_id| {
+                    resolve_model_material_override(
+                        project,
+                        project_root,
+                        &format!("Model Renderer '{}'", spawn_node.name),
+                        material_id,
+                        &mut texture_asset_for_path,
+                        &mut assets,
+                        &mut report,
+                    )
+                });
             cook_player_character(
                 project,
                 project_root,
                 spawn_node,
                 resolved,
                 renderer_model,
+                renderer_material_override,
                 candidate
                     .renderer
                     .map(|renderer| renderer.visual_offset)

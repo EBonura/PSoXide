@@ -973,7 +973,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         };
         let _ = writeln!(
             out,
-            "    LevelModelInstanceRecord {{ room: RoomIndex({}), model: ModelIndex({}), clip: {clip}, pose_frame: {}, x: {}, y: {}, z: {}, yaw: {}, visual_yaw: {}, pitch: {}, roll: {}, visual_offset: [{}, {}, {}], visual_scale_q8: {}, flags: {} }},",
+            "    LevelModelInstanceRecord {{ room: RoomIndex({}), model: ModelIndex({}), clip: {clip}, pose_frame: {}, x: {}, y: {}, z: {}, yaw: {}, visual_yaw: {}, pitch: {}, roll: {}, visual_offset: [{}, {}, {}], visual_scale_q8: {}, material_override: {}, flags: {} }},",
             inst.room,
             inst.model,
             inst.pose_frame,
@@ -988,6 +988,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             inst.visual_offset[1],
             inst.visual_offset[2],
             inst.visual_scale_q8,
+            model_material_override_literal(&inst.material_override),
             inst.flags,
         );
     }
@@ -1536,7 +1537,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             .join(", ");
         let _ = writeln!(
             out,
-            "    LevelCharacterRecord {{ model: ModelIndex({}), action_clips: [{}], action_flags: [{}], action_speeds: [{}], action_frame_ranges: [{}], action_pushes: [{}], visual_offset: [{}, {}, {}], visual_yaw: {}, visual_scale_q8: {}, weight_q8: {}, radius: {}, height: {}, walk_speed: {}, run_speed: {}, turn_speed_degrees_per_second: {}, stamina_max_q12: {}, sprint_min_q12: {}, sprint_drain_q12: {}, stamina_recover_q12: {}, roll_cost_q12: {}, roll_speed: {}, roll_active_frames: {}, roll_recovery_frames: {}, roll_invulnerable_frames: {}, backstep_cost_q12: {}, backstep_speed: {}, backstep_active_frames: {}, backstep_recovery_frames: {}, backstep_invulnerable_frames: {}, camera_distance: {}, camera_height: {}, camera_target_height: {}, flags: 0 }},",
+            "    LevelCharacterRecord {{ model: ModelIndex({}), action_clips: [{}], action_flags: [{}], action_speeds: [{}], action_frame_ranges: [{}], action_pushes: [{}], visual_offset: [{}, {}, {}], visual_yaw: {}, visual_scale_q8: {}, weight_q8: {}, radius: {}, height: {}, walk_speed: {}, run_speed: {}, turn_speed_degrees_per_second: {}, stamina_max_q12: {}, sprint_min_q12: {}, sprint_drain_q12: {}, stamina_recover_q12: {}, roll_cost_q12: {}, roll_speed: {}, roll_active_frames: {}, roll_recovery_frames: {}, roll_invulnerable_frames: {}, backstep_cost_q12: {}, backstep_speed: {}, backstep_active_frames: {}, backstep_recovery_frames: {}, backstep_invulnerable_frames: {}, camera_distance: {}, camera_height: {}, camera_target_height: {}, material_override: {}, flags: 0 }},",
             character.model,
             action_clips,
             action_flags,
@@ -1571,6 +1572,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             character.camera_distance,
             character.camera_height,
             character.camera_target_height,
+            model_material_override_literal(&character.material_override),
         );
     }
     out.push_str("];\n\n");
@@ -2939,6 +2941,37 @@ const fn material_flags_for_sidedness(sidedness: crate::MaterialFaceSidedness) -
     }
 }
 
+/// Numeric `psx_level::model_override_blend` code for an authored
+/// blend mode.
+pub(crate) const fn model_override_blend_code(blend_mode: crate::PsxBlendMode) -> u8 {
+    match blend_mode {
+        crate::PsxBlendMode::Opaque => 0,
+        crate::PsxBlendMode::Average => 1,
+        crate::PsxBlendMode::Add => 2,
+        crate::PsxBlendMode::Subtract => 3,
+        crate::PsxBlendMode::AddQuarter => 4,
+    }
+}
+
+/// `Option<LevelModelMaterialOverride>` literal for the instance and
+/// character writers.
+fn model_material_override_literal(
+    material_override: &Option<PlaytestModelMaterialOverride>,
+) -> String {
+    match material_override {
+        Some(o) => format!(
+            "Some(LevelModelMaterialOverride {{ texture_asset: AssetId({}), blend_mode: {}, tint_rgb: [{}, {}, {}], flags: {} }})",
+            o.texture_asset_index,
+            model_override_blend_code(o.blend_mode),
+            o.tint_rgb[0],
+            o.tint_rgb[1],
+            o.tint_rgb[2],
+            material_flags_for_sidedness(o.face_sidedness),
+        ),
+        None => "None".to_string(),
+    }
+}
+
 /// Default destination for the playtest example's generated
 /// directory. Anchored at the editor crate's manifest dir so the
 /// dev workflow finds it regardless of cwd.
@@ -3008,15 +3041,30 @@ fn room_required_assets(
     let room_index = room_index as u16;
     let mut seen_models: Vec<u16> = Vec::new();
     for inst in &package.model_instances {
-        if inst.room != room_index || seen_models.contains(&inst.model) {
+        if inst.room != room_index {
+            continue;
+        }
+        // Covering textures upload per instance (not per model), so
+        // they ride outside the seen_models dedupe.
+        if let Some(material_override) = inst.material_override {
+            push_unique(&mut required_vram, material_override.texture_asset_index);
+        }
+        if seen_models.contains(&inst.model) {
             continue;
         }
         seen_models.push(inst.model);
         include_model_in_residency(package, inst.model, &mut required_ram, &mut required_vram);
     }
     if let Some(pc) = package.player_controller {
+        let character = &package.characters[pc.character as usize];
+        // The player renders in every room, so its covering texture
+        // is required everywhere (unlike the session-persistent model
+        // atlas, prop-mode texture slots are evictable).
+        if let Some(material_override) = character.material_override {
+            push_unique(&mut required_vram, material_override.texture_asset_index);
+        }
         if pc.spawn.room == room_index {
-            let model = package.characters[pc.character as usize].model;
+            let model = character.model;
             if !seen_models.contains(&model) {
                 seen_models.push(model);
                 include_model_in_residency(package, model, &mut required_ram, &mut required_vram);
@@ -3289,6 +3337,7 @@ use psx_level::{
     LevelModelClipRecord,
     LevelModelFrameBoundsRecord,
     LevelModelInstanceRecord,
+    LevelModelMaterialOverride,
     LevelModelRecord,
     LevelModelSocketRecord,
     LevelOptionDef,

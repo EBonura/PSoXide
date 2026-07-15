@@ -672,3 +672,122 @@ fn empty_package_renders_a_valid_skeleton() {
     assert!(src.contains("pub static ENTITIES: &[EntityRecord] = &[\n];"));
     assert!(src.contains("pub static PLAYER_SPAWN"));
 }
+
+#[test]
+fn model_renderer_material_override_cooks_onto_instance() {
+    let mut project = ProjectDocument::starter();
+    let model_id = player_model_resource_id(&project);
+    let material_id = project
+        .resources
+        .iter()
+        .find(|resource| {
+            matches!(&resource.data, ResourceData::Material(material) if material.psxt_path.is_some())
+        })
+        .expect("starter has a textured material")
+        .id;
+    // Author the covering material's blend/tint/sidedness.
+    let ResourceData::Material(material) = &mut project
+        .resources
+        .iter_mut()
+        .find(|resource| resource.id == material_id)
+        .unwrap()
+        .data
+    else {
+        unreachable!();
+    };
+    material.blend_mode = crate::PsxBlendMode::Average;
+    material.tint = [96, 128, 160];
+    material.face_sidedness = crate::MaterialFaceSidedness::Both;
+
+    let scene = project.active_scene_mut();
+    let room_id = scene
+        .nodes()
+        .iter()
+        .find(|n| matches!(n.kind, NodeKind::Room { .. }))
+        .map(|n| n.id)
+        .unwrap();
+    let entity = scene.add_node(room_id, "Covered Prop", NodeKind::Entity);
+    scene.add_node(
+        entity,
+        "Model Renderer",
+        NodeKind::ModelRenderer {
+            model: Some(model_id),
+            material: Some(material_id),
+            visual_offset: [0; 3],
+            visual_scale_q8: crate::MODEL_SCALE_ONE_Q8,
+        },
+    );
+
+    let (package, report) = build_package(&project, &starter_project_root());
+    assert!(report.is_ok(), "errors: {:?}", report.errors);
+    let package = package.expect("cooks");
+    let inst = package
+        .model_instances
+        .iter()
+        .find(|inst| inst.material_override.is_some())
+        .expect("covered instance cooks");
+    let material_override = inst.material_override.unwrap();
+    assert_eq!(material_override.blend_mode, crate::PsxBlendMode::Average);
+    assert_eq!(material_override.tint_rgb, [96, 128, 160]);
+    assert_eq!(
+        material_override.face_sidedness,
+        crate::MaterialFaceSidedness::Both
+    );
+    // The material's psxt became a cooked texture asset requirement.
+    let asset = &package.assets[material_override.texture_asset_index];
+    assert_eq!(asset.kind, PlaytestAssetKind::Texture);
+
+    // Manifest side: the instance literal carries the override and the
+    // owning room's residency lists the covering texture.
+    let src = render_manifest_source(&package);
+    assert!(
+        src.contains(&format!(
+            "material_override: Some(LevelModelMaterialOverride {{ texture_asset: AssetId({}), blend_mode: 1, tint_rgb: [96, 128, 160], flags: 2 }})",
+            material_override.texture_asset_index
+        )),
+        "manifest instance literal missing override: {src}"
+    );
+}
+
+#[test]
+fn player_model_renderer_material_override_cooks_onto_character() {
+    let mut project = project_with_one_room();
+    let material_id = project
+        .resources
+        .iter()
+        .find(|resource| {
+            matches!(&resource.data, ResourceData::Material(material) if material.psxt_path.is_some())
+        })
+        .expect("starter has a textured material")
+        .id;
+    let spawn_id = player_spawn_node_id(&project);
+    let scene = project.active_scene_mut();
+    let renderer_id = scene
+        .node(spawn_id)
+        .and_then(|node| {
+            node.children.iter().find_map(|child| {
+                scene.node(*child).and_then(|node| {
+                    matches!(node.kind, NodeKind::ModelRenderer { .. }).then_some(node.id)
+                })
+            })
+        })
+        .expect("starter player has a model renderer");
+    let NodeKind::ModelRenderer { material, .. } =
+        &mut scene.node_mut(renderer_id).unwrap().kind
+    else {
+        panic!("expected model renderer");
+    };
+    *material = Some(material_id);
+
+    let (package, report) = build_package(&project, &starter_project_root());
+    assert!(report.is_ok(), "errors: {:?}", report.errors);
+    let package = package.expect("cooks");
+    let character = &package.characters[0];
+    let material_override = character
+        .material_override
+        .expect("player character carries the covering material");
+    let asset = &package.assets[material_override.texture_asset_index];
+    assert_eq!(asset.kind, PlaytestAssetKind::Texture);
+    // No extra static instance appears for the player's renderer.
+    assert!(package.model_instances.is_empty());
+}

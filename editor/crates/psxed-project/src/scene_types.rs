@@ -121,9 +121,10 @@ pub enum NodeKind {
     ModelRenderer {
         /// Model resource.
         model: Option<ResourceId>,
-        /// Optional material override for legacy/static paths.
-        /// Cooked PSX models currently carry their own atlas and
-        /// ignore this field.
+        /// Covering-material override. `None` renders the model's
+        /// own cooked atlas; `Some` draws the model's UVs against
+        /// the material's texture with the material's blend mode,
+        /// tint, and face sidedness.
         #[serde(default)]
         material: Option<ResourceId>,
         /// Render-only offset from the owning Entity root to the
