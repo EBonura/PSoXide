@@ -97,6 +97,9 @@ pub fn warm_bios_for_disc_fast_boot(
 ) -> Result<(), ExecutionError> {
     for _ in 0..steps {
         cpu.step(bus)?;
+        if bus.run_spu_to_current_cycle() != 0 {
+            let _ = bus.spu.drain_audio();
+        }
     }
     Ok(())
 }

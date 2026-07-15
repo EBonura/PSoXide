@@ -28,8 +28,8 @@ use std::path::{Path, PathBuf};
 
 use clap::{Args, Parser, Subcommand};
 use emulator_core::{
-    button, fast_boot_disc_with_hle, spu::SAMPLE_CYCLES, telemetry, warm_bios_for_disc_fast_boot,
-    Bus, ButtonState, Cpu, DISC_FAST_BOOT_WARMUP_STEPS,
+    button, fast_boot_disc_with_hle, telemetry, warm_bios_for_disc_fast_boot, Bus, ButtonState,
+    Cpu, DISC_FAST_BOOT_WARMUP_STEPS,
 };
 // `Gpu` is only constructed for the editor 3D preview dump.
 #[cfg(feature = "editor")]
@@ -144,6 +144,14 @@ pub struct LaunchArgs {
     /// by its stable ID (16-hex-char fingerprint).
     #[arg(long)]
     pub game_id: Option<String>,
+    /// Override the configured BIOS for this headless launch.
+    #[arg(long)]
+    pub bios: Option<PathBuf>,
+    /// Mount a disc alongside a side-loaded executable without booting from
+    /// that disc. This is useful for hardware probes and homebrew that use
+    /// the HLE BIOS entry path but still exercise the CD-ROM controller.
+    #[arg(long)]
+    pub disc: Option<PathBuf>,
     /// Number of CPU instructions to retire before stopping.
     #[arg(long, default_value_t = 100_000_000)]
     pub steps: u64,
@@ -165,6 +173,11 @@ pub struct LaunchArgs {
     /// `0x4000@45+12,0x4000@80+16`.
     #[arg(long)]
     pub pad_pulses: Option<String>,
+    /// Keep port 1 in digital-pad mode instead of forcing the default
+    /// DualShock-compatible analog mode. This reproduces captures made with
+    /// an original digital controller, whose poll ID is 0x41.
+    #[arg(long)]
+    pub digital_pad: bool,
     /// Treat an authored disc as an embedded editor Play disc and boot it
     /// through the same no-BIOS HLE path used by the editor viewport.
     #[arg(long)]
@@ -173,6 +186,14 @@ pub struct LaunchArgs {
     /// SYSTEM.CNF fast boot.
     #[arg(long)]
     pub bios_boot: bool,
+    /// Override how many real-BIOS instructions run before warm disc fast
+    /// boot. Longer warmups retain later BIOS-initialised peripheral state.
+    #[arg(long)]
+    pub bios_warmup_steps: Option<u64>,
+    /// Apply the late PAL PSone SCPH-9902 memory-controller profile after
+    /// BIOS warmup. Useful with an earlier PAL BIOS used as a substitute ROM.
+    #[arg(long)]
+    pub scph_9902: bool,
     /// Print an FNV-1a-64 VRAM hash at the end. Same algorithm the
     /// milestone regression tests use, so a CLI run + a unit test
     /// should produce identical numbers.
@@ -219,6 +240,10 @@ pub struct LaunchArgs {
     /// blob, for offline diffing of guest state across two runs.
     #[arg(long)]
     pub dump_ram: Option<PathBuf>,
+    /// Optional path to dump the final 512 KiB SPU RAM as little-endian
+    /// halfwords, for transfer and BIOS-initialisation diagnostics.
+    #[arg(long)]
+    pub dump_spu_ram: Option<PathBuf>,
     /// Optional path to dump the HW renderer's output as a PPM. Spins
     /// up a headless wgpu device, replays the cumulative `cmd_log`
     /// through the same pipeline the live GUI uses, and writes the
@@ -531,7 +556,10 @@ fn run_headless_launch(
     args: LaunchArgs,
     emit_summary: bool,
 ) -> Result<HeadlessLaunchResult, String> {
-    let settings = Settings::load(&paths.settings_file()).unwrap_or_default();
+    let mut settings = Settings::load(&paths.settings_file()).unwrap_or_default();
+    if let Some(bios) = args.bios.as_ref() {
+        settings.paths.bios = bios.to_string_lossy().into_owned();
+    }
     let pad_pulses = args
         .pad_pulses
         .as_deref()
@@ -610,7 +638,7 @@ fn run_headless_launch(
             // starts in the homebrew payload and BIOS table calls are
             // intercepted by HLE dispatch.
             bus.enable_hle_bios();
-            attach_headless_playtest_pad(&mut bus);
+            attach_headless_playtest_pad(&mut bus, args.digital_pad);
             if emit_summary {
                 eprintln!(
                     "[cli] side-loaded {} - entry=0x{:08x} payload={}B",
@@ -641,10 +669,12 @@ fn run_headless_launch(
                     &disc,
                     &game_path,
                     settings.emulator.fast_boot_disc && !args.bios_boot,
+                    args.bios_warmup_steps
+                        .unwrap_or(DISC_FAST_BOOT_WARMUP_STEPS),
                 );
             }
             bus.cdrom.insert_disc(Some(disc));
-            attach_headless_playtest_pad(&mut bus);
+            attach_headless_playtest_pad(&mut bus, args.digital_pad);
             if emit_summary {
                 eprintln!("[cli] mounted disc {}", game_path.display());
             }
@@ -669,10 +699,12 @@ fn run_headless_launch(
                     &disc,
                     &game_path,
                     settings.emulator.fast_boot_disc && !args.bios_boot,
+                    args.bios_warmup_steps
+                        .unwrap_or(DISC_FAST_BOOT_WARMUP_STEPS),
                 );
             }
             bus.cdrom.insert_disc(Some(disc));
-            attach_headless_playtest_pad(&mut bus);
+            attach_headless_playtest_pad(&mut bus, args.digital_pad);
             if emit_summary {
                 eprintln!("[cli] mounted cue-backed disc {}", game_path.display());
             }
@@ -693,9 +725,11 @@ fn run_headless_launch(
                 &disc,
                 &game_path,
                 settings.emulator.fast_boot_disc && !args.bios_boot,
+                args.bios_warmup_steps
+                    .unwrap_or(DISC_FAST_BOOT_WARMUP_STEPS),
             );
             bus.cdrom.insert_disc(Some(disc));
-            attach_headless_playtest_pad(&mut bus);
+            attach_headless_playtest_pad(&mut bus, args.digital_pad);
             if emit_summary {
                 eprintln!("[cli] mounted ccd-backed disc {}", game_path.display());
             }
@@ -705,6 +739,21 @@ fn run_headless_launch(
             return Err(format!("unsupported file extension: .{other}"));
         }
     };
+
+    if args.scph_9902 {
+        bus.apply_scph_9902_profile();
+    }
+
+    if let Some(disc_path) = args.disc.as_ref() {
+        if ext != "exe" {
+            return Err("--disc can only be combined with an .exe launch path".to_string());
+        }
+        let disc = load_headless_disc(disc_path)?;
+        bus.cdrom.insert_disc(Some(disc));
+        if emit_summary {
+            eprintln!("[cli] mounted auxiliary disc {}", disc_path.display());
+        }
+    }
 
     if args.cd_command_log.is_some() {
         bus.cdrom.enable_command_log(65_536);
@@ -776,11 +825,9 @@ fn run_headless_launch(
     // Step the CPU. Report early on opcode errors -- they're usually
     // "we hit an unimplemented instruction" and worth surfacing.
     let mut stopped_at: Option<u64> = None;
-    let mut audio_cycle_accum = 0u64;
     let mut audio_capture: Vec<(i16, i16)> = Vec::new();
     let gte_profile_before = cpu.cop2().profile_snapshot();
     for i in 0..args.steps {
-        let cycles_before = bus.cycles();
         if let Err(e) = cpu.step(&mut bus) {
             eprintln!("[cli] step {i} failed: {e:?}");
             eprintln!(
@@ -791,12 +838,7 @@ fn run_headless_launch(
             stopped_at = Some(i);
             break;
         }
-        audio_cycle_accum =
-            audio_cycle_accum.saturating_add(bus.cycles().saturating_sub(cycles_before));
-        let sample_count = (audio_cycle_accum / SAMPLE_CYCLES) as usize;
-        audio_cycle_accum %= SAMPLE_CYCLES;
-        if sample_count > 0 {
-            bus.run_spu_samples(sample_count);
+        if bus.run_spu_to_current_cycle() != 0 {
             let drained = bus.spu.drain_audio();
             if args.dump_audio.is_some() {
                 audio_capture.extend(drained);
@@ -1081,6 +1123,18 @@ fn run_headless_launch(
                 path.display(),
                 bus.ram().len()
             );
+        }
+    }
+
+    if let Some(path) = args.dump_spu_ram {
+        let mut bytes = Vec::with_capacity(bus.spu.ram_halfwords().len() * 2);
+        for &halfword in bus.spu.ram_halfwords() {
+            bytes.extend_from_slice(&halfword.to_le_bytes());
+        }
+        std::fs::write(&path, bytes)
+            .map_err(|error| format!("write SPU RAM {}: {error}", path.display()))?;
+        if emit_summary {
+            eprintln!("[cli] SPU RAM → {}", path.display());
         }
     }
 
@@ -1578,13 +1632,18 @@ fn validation_launch_args(
     LaunchArgs {
         path: Some(artifact.path.clone()),
         game_id: None,
+        bios: None,
+        disc: None,
         steps: checkpoint.stop.steps,
         guest_frames: checkpoint.stop.guest_frames,
         guest_visual_frames: checkpoint.stop.guest_visual_frames,
         input_tape,
         pad_pulses: checkpoint.pad_pulses.clone(),
+        digital_pad: false,
         embedded_playtest: artifact.embedded_playtest,
         bios_boot: artifact.bios_boot,
+        bios_warmup_steps: None,
+        scph_9902: false,
         dump_hash: false,
         guest_debug_log: false,
         visual_hash_log: None,
@@ -1595,6 +1654,7 @@ fn validation_launch_args(
         profile_log: None,
         dump_vram: None,
         dump_ram: None,
+        dump_spu_ram: None,
         dump_hw: None,
         dump_display: None,
         dump_audio: None,
@@ -1653,9 +1713,29 @@ fn cli_repo_root() -> PathBuf {
         .join("..")
 }
 
-fn attach_headless_playtest_pad(bus: &mut Bus) {
-    bus.attach_digital_pad_port1();
-    let _ = bus.force_port1_analog_mode();
+fn attach_headless_playtest_pad(bus: &mut Bus, digital_only: bool) {
+    if digital_only {
+        bus.attach_original_digital_pad_port1();
+    } else {
+        bus.attach_digital_pad_port1();
+        let _ = bus.force_port1_analog_mode();
+    }
+}
+
+fn load_headless_disc(path: &Path) -> Result<Disc, String> {
+    let ext = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+    match ext.as_str() {
+        "bin" | "iso" => std::fs::read(path)
+            .map(Disc::from_bin)
+            .map_err(|error| error.to_string()),
+        "cue" => psoxide_settings::library::load_disc_from_cue(path),
+        "ccd" => psoxide_settings::library::load_disc_from_ccd(path),
+        other => Err(format!("unsupported auxiliary disc extension: .{other}")),
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -1852,11 +1932,17 @@ fn maybe_fast_boot_disc(
     disc: &Disc,
     path: &std::path::Path,
     enabled: bool,
+    warmup_steps: u64,
 ) {
     if !enabled {
         return;
     }
-    if let Err(e) = warm_bios_for_disc_fast_boot(bus, cpu, DISC_FAST_BOOT_WARMUP_STEPS) {
+    // Warm the firmware with the tray closed and the target disc already
+    // present. Retail BIOS startup configures the CD path and uploads its
+    // shell audio banks before Exec; warming an empty drive loses that
+    // observable peripheral state even if the executable is loaded later.
+    bus.cdrom.insert_disc(Some(disc.clone()));
+    if let Err(e) = warm_bios_for_disc_fast_boot(bus, cpu, warmup_steps) {
         eprintln!(
             "[cli] BIOS warmup failed for {} ({e:?}); leaving BIOS boot fallback in place",
             path.display()

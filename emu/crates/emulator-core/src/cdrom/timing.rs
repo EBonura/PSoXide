@@ -34,11 +34,18 @@
 pub(super) const FIRST_RESPONSE_CYCLES: u64 = 15_000;
 
 /// Typical acknowledgement with a disc present. The PAL PSone capture measured
-/// GetStat at 29,771 cycles minimum including 256 cycles of MMIO/poll overhead,
-/// yielding a 29,515-cycle controller delay. Its 42,661-cycle maximum confirms
-/// the documented firmware-loop jitter; this deterministic core models the
-/// measured floor and leaves maintenance-loop variation for a later sweep.
-pub(super) const FIRST_RESPONSE_WITH_MEDIA_CYCLES: u64 = 29_515;
+/// GetStat at 30,286 cycles minimum including 257 cycles of MMIO/poll overhead,
+/// yielding a 30,029-cycle controller delay. Its 48,590-cycle maximum confirms
+/// the documented firmware-loop jitter; the floor is independently visible in
+/// every command, while the maintenance-loop phase is modelled by the command
+/// scheduler.
+pub(super) const FIRST_RESPONSE_WITH_MEDIA_CYCLES: u64 = 30_029;
+
+/// The drive firmware periodically performs a media-maintenance sweep before
+/// servicing GetStat. The SCPH-9902 envelope exposes an 18,304-cycle outlier
+/// once in a five-command status-poll window, while the other acknowledgements
+/// stay on the ordinary floor.
+pub(super) const GETSTAT_MAINTENANCE_CYCLES: u64 = 18_320;
 
 /// Short chained response used by the legacy GetID error path.
 pub(super) const QUICK_SECOND_RESPONSE_CYCLES: u64 = 0x800;
