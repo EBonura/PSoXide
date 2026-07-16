@@ -72,9 +72,8 @@ fn bucketed_world_pass_keeps_commands_for_reverse_flush() {
     assert_eq!(pass.command_len, 3);
     assert!(!pass.ordering.uses_slot_heads());
     assert!(!pass.ordering.uses_slot_tails());
-    assert_eq!(pass.commands[0].next, WORLD_COMMAND_NONE);
-    assert_eq!(pass.commands[1].next, WORLD_COMMAND_NONE);
-    assert_eq!(pass.commands[2].next, WORLD_COMMAND_NONE);
+    assert!(pass.commands.iter().all(|command| command.slot == 4));
+    assert!(pass.commands.iter().all(|command| command.words == 0));
 }
 
 #[test]

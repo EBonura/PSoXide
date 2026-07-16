@@ -32,44 +32,52 @@ impl Playtest {
             None => (0, 0),
         };
         let now = ctx.sim_tick.as_u32();
-        let mut entity_positions = [[0i32; 3]; MAX_GAME_ENTITIES];
-        let mut entity_dead = [false; MAX_GAME_ENTITIES];
-        for (index, slot) in entity_positions
-            .iter_mut()
-            .enumerate()
-            .take(self.game_entities.count())
-        {
-            *slot = self.game_entities.position(index);
-            entity_dead[index] = self.game_entities.state(index)
-                == psx_game_runtime::entities::GameEntityState::Dead;
-        }
-        let mut mover = SceneEntityMover {
-            window: &self.window,
-            box_props: &self.box_props,
-            models: &self.models,
-            entity_positions,
-            entity_dead,
-            player,
-            player_room: self.room_index,
-            player_radius,
-            player_height,
-        };
-        // Souls i-frames: the motor's roll/backstep invulnerability
-        // window makes entity attacks whiff. Queried BEFORE this
-        // tick's motor update, so it matches the frames the motor
-        // will report.
-        let player_invulnerable = self.motor.is_action_invulnerable(self.motor_config());
-        let entity_stats = self.game_entities.tick(
-            GAME_ENTITIES,
-            psx_game_runtime::entities::GameEntityTickInput {
-                player: player_pos,
+        // NPC state and collision run at the authored 30 Hz visual cadence.
+        // State clocks and movement consume a two-tick delta, preserving exact
+        // 60 Hz-authored speeds/durations while avoiding two identical,
+        // collision-heavy decisions per displayed frame. Player control,
+        // combat arcs, and the logic graph remain 60 Hz below.
+        let entity_stats = if ctx.sim_tick.as_u32().is_multiple_of(2) {
+            let mut entity_positions = [[0i32; 3]; MAX_GAME_ENTITIES];
+            let mut entity_dead = [false; MAX_GAME_ENTITIES];
+            for (index, slot) in entity_positions
+                .iter_mut()
+                .enumerate()
+                .take(self.game_entities.count())
+            {
+                *slot = self.game_entities.position(index);
+                entity_dead[index] = self.game_entities.state(index)
+                    == psx_game_runtime::entities::GameEntityState::Dead;
+            }
+            let mut mover = SceneEntityMover {
+                window: &self.window,
+                box_props: &self.box_props,
+                models: &self.models,
+                entity_positions,
+                entity_dead,
+                player,
                 player_room: self.room_index,
                 player_radius,
-                player_invulnerable,
-                active_rooms: &active_rooms[..active_count],
-            },
-            &mut mover,
-        );
+                player_height,
+            };
+            // Souls i-frames: query before this tick's player motor update so
+            // attack contact matches the frames the motor reports.
+            let player_invulnerable = self.motor.is_action_invulnerable(self.motor_config());
+            self.game_entities.tick_delta(
+                GAME_ENTITIES,
+                psx_game_runtime::entities::GameEntityTickInput {
+                    player: player_pos,
+                    player_room: self.room_index,
+                    player_radius,
+                    player_invulnerable,
+                    active_rooms: &active_rooms[..active_count],
+                },
+                &mut mover,
+                2,
+            )
+        } else {
+            psx_game_runtime::entities::GameEntityTickStats::default()
+        };
         // Entity attack connections damage the player (floors at 0;
         // death/respawn handling is phase 4).
         if entity_stats.player_damage > 0 {
