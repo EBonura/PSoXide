@@ -1284,7 +1284,6 @@ fn prebuilt_static_room_quad_only_patches_positions_after_first_draw() {
     let mut packet = QuadTexturedGouraud::EMPTY;
     let mut valid = 0;
     let first_colors = [(10, 20, 30), (40, 50, 60), (70, 80, 90), (100, 110, 120)];
-    let second_colors = [(1, 2, 3); 4];
 
     let _ = pass.submit_prebuilt_textured_gouraud_quad(
         &mut packet,
@@ -1304,19 +1303,17 @@ fn prebuilt_static_room_quad_only_patches_positions_after_first_draw() {
         packet.color3,
     );
     let first_v0 = packet.v0;
-    let _ = pass.submit_prebuilt_textured_gouraud_quad(
+    let warmed = pass.try_submit_warmed_textured_gouraud_quad(
         &mut packet,
-        &mut valid,
-        true,
         second,
-        [0, 1, 2, 3],
-        second_colors,
+        false,
         material.textured_gouraud_packet_material(),
         options,
         prepared,
     );
 
     assert_eq!(valid, 1);
+    assert!(warmed.is_some());
     assert_ne!(packet.v0, first_v0);
     assert_eq!(
         (

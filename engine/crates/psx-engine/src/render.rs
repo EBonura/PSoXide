@@ -347,6 +347,25 @@ impl<'a, const DEPTH: usize> OtFrame<'a, DEPTH> {
         unsafe { self.ot.insert_unchecked(slot, packet_ptr, words) };
     }
 
+    /// Insert a raw primitive whose packet length is already in GPU-tag form
+    /// at an already-clamped raw OT slot.
+    ///
+    /// # Safety
+    /// Same requirements as [`add_raw_unchecked`](Self::add_raw_unchecked).
+    /// The low 24 bits of `tag_high` must be zero.
+    #[inline(always)]
+    pub unsafe fn add_raw_tag_unchecked(
+        &mut self,
+        slot: usize,
+        packet_ptr: *mut u32,
+        tag_high: u32,
+    ) {
+        unsafe {
+            self.ot
+                .insert_unchecked_tag_high(slot, packet_ptr, tag_high)
+        };
+    }
+
     /// Insert a known SDK GPU packet at a raw OT slot.
     pub fn add_packet<T: GpuPacket>(&mut self, slot: usize, prim: &mut T) {
         self.add(slot, prim, T::WORDS);

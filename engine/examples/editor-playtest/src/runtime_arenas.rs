@@ -148,7 +148,9 @@ impl RuntimeArenas {
         self.vram = RuntimeVram::new(VRAM_LAYOUT);
         #[cfg(feature = "cd-stream-bench")]
         {
-            self.persistent_assets = RuntimePersistentAssetStreamer::new();
+            // `persistent_assets` deliberately remains in its all-zero idle
+            // state. `begin` stamps its metadata in place; assigning `new()`
+            // here would put the entire sector-page store on the PS1 stack.
             self.room_streams = RuntimeRoomStreamScheduler::new();
             self.room_materials.init(room_material_fallback());
         }

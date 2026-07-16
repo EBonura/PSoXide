@@ -48,6 +48,7 @@ const SHADOW_TUNING: mr::ShadowTuning = mr::ShadowTuning {
 
 impl Playtest {
     #[cfg(feature = "cd-stream-bench")]
+    #[inline(never)]
     pub(super) fn step_persistent_model_assets(&mut self) -> bool {
         {
             let assets = persistent_assets_arena_mut();
@@ -101,6 +102,7 @@ impl Playtest {
         )
     }
 
+    #[inline(never)]
     pub(super) fn load_runtime_models(&mut self) {
         mr::load_runtime_models(
             MODELS,

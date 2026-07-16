@@ -1123,7 +1123,7 @@ impl BucketedWorldCommand {
     fn new(packet_ptr: *mut u32, slot: usize, words: u8) -> Self {
         Self {
             packet_ptr,
-            slot_words: (slot.min(u16::MAX as usize) as u32) | ((words as u32) << 16),
+            slot_words: (slot.min(u16::MAX as usize) as u32) | ((words as u32) << 24),
         }
     }
 
@@ -1133,8 +1133,14 @@ impl BucketedWorldCommand {
     }
 
     #[inline(always)]
+    #[cfg(test)]
     const fn words(self) -> u8 {
-        (self.slot_words >> 16) as u8
+        (self.slot_words >> 24) as u8
+    }
+
+    #[inline(always)]
+    const fn tag_high(self) -> u32 {
+        self.slot_words & 0xFF00_0000
     }
 }
 
@@ -2203,13 +2209,15 @@ impl SkyDirectionProjector {
 }
 
 fn scaled_pose_matrix(pose: JointPose, local_to_world: LocalToWorldScale) -> Mat3I16 {
-    let scale = local_to_world.scale();
+    let scale = local_to_world.scale().raw();
     let mut out = [[0i16; 3]; 3];
     let mut row = 0;
     while row < 3 {
         let mut col = 0;
         while col < 3 {
-            out[row][col] = clamp_i16(scale.mul_i32(pose.matrix[col][row] as i32));
+            // i16 x u16 always fits in i32, so the generic Q12 saturating
+            // multiply's overflow checks are unnecessary for pose matrices.
+            out[row][col] = clamp_i16(((pose.matrix[col][row] as i32) * scale) >> 12);
             col += 1;
         }
         row += 1;
@@ -2810,7 +2818,12 @@ fn track_projected_model_bounds(
 }
 
 #[inline]
-fn projected_model_bounds_hw_extent_safe(min_x: i16, max_x: i16, min_y: i16, max_y: i16) -> bool {
+pub(crate) fn projected_model_bounds_hw_extent_safe(
+    min_x: i16,
+    max_x: i16,
+    min_y: i16,
+    max_y: i16,
+) -> bool {
     min_x <= max_x
         && min_y <= max_y
         && ((max_x as i32) - (min_x as i32)) <= PSX_TRI_MAX_DX
@@ -3098,6 +3111,35 @@ fn projected_triangle_can_skip_split(
     options.split_textured_triangles
         && projected_triangle_hw_safe(verts)
         && !projected_vertices_exceed_quality_extent(verts, options.textured_split_max_edge)
+}
+
+#[inline(always)]
+fn projected_quad_bounds_hw_extent_safe(verts: [ProjectedVertex; 4]) -> bool {
+    let min_x = verts[0]
+        .sx
+        .min(verts[1].sx)
+        .min(verts[2].sx)
+        .min(verts[3].sx);
+    let max_x = verts[0]
+        .sx
+        .max(verts[1].sx)
+        .max(verts[2].sx)
+        .max(verts[3].sx);
+    let min_y = verts[0]
+        .sy
+        .min(verts[1].sy)
+        .min(verts[2].sy)
+        .min(verts[3].sy);
+    let max_y = verts[0]
+        .sy
+        .max(verts[1].sy)
+        .max(verts[2].sy)
+        .max(verts[3].sy);
+    min_x >= PSX_VERTEX_MIN
+        && max_x <= PSX_VERTEX_MAX
+        && min_y >= PSX_VERTEX_MIN
+        && max_y <= PSX_VERTEX_MAX
+        && projected_model_bounds_hw_extent_safe(min_x, max_x, min_y, max_y)
 }
 
 fn projected_vertices_exceed_quality_extent(verts: [ProjectedVertex; 3], max_edge: u16) -> bool {
