@@ -522,6 +522,21 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         input: GameEntityTickInput<'_>,
         mover: &mut impl GameEntityMover,
     ) -> GameEntityTickStats {
+        self.tick_delta(records, input, mover, 1)
+    }
+
+    /// Advance entity behaviour by `delta_ticks` 60 Hz ticks in one pass.
+    /// Movement and state clocks scale by the same delta, allowing games that
+    /// render at 30 Hz to run collision-heavy NPC thinking at visual cadence
+    /// without halving movement speed or animation phase.
+    pub fn tick_delta(
+        &mut self,
+        records: &'static [LevelGameEntityRecord],
+        input: GameEntityTickInput<'_>,
+        mover: &mut impl GameEntityMover,
+        delta_ticks: u16,
+    ) -> GameEntityTickStats {
+        let delta_ticks = delta_ticks.max(1);
         let mut stats = GameEntityTickStats::default();
         let count = self.count().min(records.len());
         let mut index = 0usize;
@@ -532,7 +547,7 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
                 // Dead entities stop thinking but keep counting so
                 // the death one-shot plays out and then holds its
                 // final frame (see clip_for_state).
-                self.state_ticks[index] = self.state_ticks[index].saturating_add(1);
+                self.state_ticks[index] = self.state_ticks[index].saturating_add(delta_ticks);
                 index += 1;
                 continue;
             }
@@ -543,13 +558,15 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
                 continue;
             }
             stats.thought += 1;
-            self.state_ticks[index] = self.state_ticks[index].saturating_add(1);
+            self.state_ticks[index] = self.state_ticks[index].saturating_add(delta_ticks);
             match state {
                 GameEntityState::Idle => self.tick_idle(record, index, input, &mut stats),
                 GameEntityState::Patrol => {
-                    self.tick_patrol(record, index, input, mover, &mut stats)
+                    self.tick_patrol(record, index, input, mover, delta_ticks, &mut stats)
                 }
-                GameEntityState::Aggro => self.tick_aggro(record, index, input, mover, &mut stats),
+                GameEntityState::Aggro => {
+                    self.tick_aggro(record, index, input, mover, delta_ticks, &mut stats)
+                }
                 GameEntityState::Windup => {
                     if self.state_ticks[index] >= u16::from(record.windup_ticks) {
                         self.enter_state(index, GameEntityState::Attack, &mut stats);
@@ -693,6 +710,7 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         index: usize,
         input: GameEntityTickInput<'_>,
         mover: &mut impl GameEntityMover,
+        delta_ticks: u16,
         stats: &mut GameEntityTickStats,
     ) {
         if self.player_noticed(record, index, input) {
@@ -704,7 +722,8 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         } else {
             [record.x, record.y, record.z]
         };
-        if self.step_toward(record, index, goal, record.walk_speed, mover) {
+        let speed = record.walk_speed.saturating_mul(i32::from(delta_ticks));
+        if self.step_toward(record, index, goal, speed, mover) {
             self.patrol_leg[index] ^= 1;
             self.enter_state(index, GameEntityState::Idle, stats);
         }
@@ -716,6 +735,7 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
         index: usize,
         input: GameEntityTickInput<'_>,
         mover: &mut impl GameEntityMover,
+        delta_ticks: u16,
         stats: &mut GameEntityTickStats,
     ) {
         let leash = i32::from(record.aggro_radius).saturating_mul(GAME_ENTITY_LEASH_FACTOR);
@@ -730,7 +750,13 @@ impl<const MAX_ENTITIES: usize> GameEntities<MAX_ENTITIES> {
             self.enter_state(index, GameEntityState::Windup, stats);
             return;
         }
-        self.step_toward(record, index, input.player, record.run_speed, mover);
+        self.step_toward(
+            record,
+            index,
+            input.player,
+            record.run_speed.saturating_mul(i32::from(delta_ticks)),
+            mover,
+        );
     }
 
     /// One motor-checked step toward `goal` in XZ at `speed` engine
@@ -1340,6 +1366,24 @@ mod tests {
         }
         assert_eq!(damage, 0);
         assert_eq!(entities.state(0), GameEntityState::Recover);
+    }
+
+    #[test]
+    fn two_tick_delta_preserves_patrol_speed_and_state_clock() {
+        let mut stepped = GameEntities::<8>::EMPTY;
+        let mut batched = GameEntities::<8>::EMPTY;
+        stepped.spawn_from_records(&PATROL_ENEMY);
+        batched.spawn_from_records(&PATROL_ENEMY);
+        stepped.state[0] = GameEntityState::Patrol as u8;
+        batched.state[0] = GameEntityState::Patrol as u8;
+
+        stepped.tick(&PATROL_ENEMY, far_input(&ACTIVE), &mut NoClipMover);
+        stepped.tick(&PATROL_ENEMY, far_input(&ACTIVE), &mut NoClipMover);
+        batched.tick_delta(&PATROL_ENEMY, far_input(&ACTIVE), &mut NoClipMover, 2);
+
+        assert_eq!(batched.position(0), stepped.position(0));
+        assert_eq!(batched.yaw(0), stepped.yaw(0));
+        assert_eq!(batched.state_ticks[0], stepped.state_ticks[0]);
     }
 
     #[test]
