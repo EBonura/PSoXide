@@ -458,8 +458,9 @@ pub enum AssetKind {
     ModelAnimation,
 }
 
-/// One asset in the master table. The byte slice is the live
-/// payload -- `include_bytes!` today, a stream-pack offset later.
+/// One asset in the master table. The byte slice is the baked payload;
+/// it is empty for CD-backed assets whose live bytes are resolved from
+/// their runtime cache using [`LevelAssetRecord::flags`].
 /// `ram_bytes` and `vram_bytes` are budget hints the residency
 /// manager can use to refuse oversize bind sets without parsing
 /// the payload.
@@ -469,19 +470,27 @@ pub struct LevelAssetRecord {
     pub id: AssetId,
     /// Asset class -- picks the loader.
     pub kind: AssetKind,
-    /// Backing payload. For `include_bytes!`-baked assets this
-    /// points into the EXE; for future stream packs this will be
-    /// the live in-memory slice once the pack is paged in.
+    /// Backing payload. For `include_bytes!`-baked assets this points
+    /// into the EXE; CD-backed records leave it empty.
     pub bytes: &'static [u8],
-    /// RAM cost in bytes. For embedded assets this equals
-    /// `bytes.len()`; a stream pack would report the asset's
-    /// in-RAM size after decompression.
+    /// RAM cost in bytes. For embedded assets this equals `bytes.len()`;
+    /// streamed records retain the real destination size here.
     pub ram_bytes: u32,
     /// VRAM cost in bytes if this asset uploads to VRAM
     /// (textures). `0` for RAM-only assets (room worlds).
     pub vram_bytes: u32,
-    /// Reserved.
+    /// Lifetime and streaming class from [`asset_flags`].
     pub flags: u16,
+}
+
+/// [`LevelAssetRecord::flags`] bits describing CD-backed payload lifetime.
+pub mod asset_flags {
+    /// Front-end image cached while menu scenes are active.
+    pub const STREAMED_UI: u16 = 1 << 0;
+    /// Gameplay payload loaded into transient staging (for example the sky).
+    pub const STREAMED_GAMEPLAY_TRANSIENT: u16 = 1 << 1;
+    /// Gameplay payload loaded during initial loading and retained thereafter.
+    pub const STREAMED_GAMEPLAY_PERSISTENT: u16 = 1 << 2;
 }
 
 /// One cooked cyclorama backdrop quad.

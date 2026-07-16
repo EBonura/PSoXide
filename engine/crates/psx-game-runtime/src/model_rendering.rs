@@ -20,12 +20,12 @@ use psx_gpu::{
     prim::TriTextured,
 };
 use psx_level::{
-    find_asset_of_kind, model_clip_flags, model_override_blend, AssetId, AssetKind,
-    CharacterAnimationAction, EntityRecord, EquipmentRecord, LevelMaterialSidedness,
-    LevelModelClipBoundsRecord, LevelModelClipRecord, LevelModelFrameBoundsRecord,
-    LevelModelInstanceRecord, LevelModelMaterialOverride, LevelModelRecord,
-    LevelModelSecondaryLayer, LevelModelSocketRecord, LevelWeaponRecord, ModelClipIndex,
-    ModelClipTableIndex, ModelIndex, ModelSocketIndex, RoomIndex, WeaponHitboxRecord,
+    model_clip_flags, model_override_blend, AssetId, AssetKind, CharacterAnimationAction,
+    EntityRecord, EquipmentRecord, LevelMaterialSidedness, LevelModelClipBoundsRecord,
+    LevelModelClipRecord, LevelModelFrameBoundsRecord, LevelModelInstanceRecord,
+    LevelModelMaterialOverride, LevelModelRecord, LevelModelSecondaryLayer, LevelModelSocketRecord,
+    LevelWeaponRecord, ModelClipIndex, ModelClipTableIndex, ModelIndex, ModelSocketIndex,
+    RoomIndex, WeaponHitboxRecord,
 };
 use psx_math::int32::{clamp_i16, square_i32_saturating};
 
@@ -152,20 +152,20 @@ impl RuntimeModelAsset {
     fn from_record(
         index: ModelIndex,
         record: &LevelModelRecord,
-        assets: &'static [psx_level::LevelAssetRecord],
         face_pool: &mut [TexturedModelRenderFace],
         face_cursor: &mut usize,
         part_pool: &mut [ModelPart],
         part_cursor: &mut usize,
         vertex_pool: &mut [ModelVertex],
         vertex_cursor: &mut usize,
+        resolve_asset_bytes: &mut impl FnMut(AssetId, AssetKind) -> Option<&'static [u8]>,
         ensure_model_atlas_uploaded: &mut impl FnMut(AssetId, &[u8]) -> Option<VramSlot>,
     ) -> Option<Self> {
-        let mesh_asset = find_asset_of_kind(assets, record.mesh_asset, AssetKind::ModelMesh)?;
-        let model = Model::from_bytes(mesh_asset.bytes).ok()?;
+        let mesh_bytes = resolve_asset_bytes(record.mesh_asset, AssetKind::ModelMesh)?;
+        let model = Model::from_bytes(mesh_bytes).ok()?;
         let texture_asset = record.texture_asset?;
-        let atlas_asset = find_asset_of_kind(assets, texture_asset, AssetKind::Texture)?;
-        let atlas_slot = ensure_model_atlas_uploaded(atlas_asset.id, atlas_asset.bytes)?;
+        let atlas_bytes = resolve_asset_bytes(texture_asset, AssetKind::Texture)?;
+        let atlas_slot = ensure_model_atlas_uploaded(texture_asset, atlas_bytes)?;
         let mut next_face_cursor = *face_cursor;
         let face_first = next_face_cursor;
         let face_count = decode_model_render_faces(
@@ -545,7 +545,6 @@ pub fn load_runtime_models<
     const MAX_RUNTIME_MODELS: usize,
     const MAX_RUNTIME_MODEL_CLIPS: usize,
 >(
-    assets: &'static [psx_level::LevelAssetRecord],
     model_records: &'static [LevelModelRecord],
     model_clip_records: &'static [LevelModelClipRecord],
     models: &mut [Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
@@ -556,6 +555,7 @@ pub fn load_runtime_models<
     model_part_count: &mut usize,
     model_vertices: &mut [ModelVertex],
     model_vertex_count: &mut usize,
+    mut resolve_asset_bytes: impl FnMut(AssetId, AssetKind) -> Option<&'static [u8]>,
     mut ensure_model_atlas_uploaded: impl FnMut(AssetId, &[u8]) -> Option<VramSlot>,
 ) {
     let mut i = 0;
@@ -577,12 +577,11 @@ pub fn load_runtime_models<
         if index >= MAX_RUNTIME_MODEL_CLIPS {
             break;
         }
-        let Some(asset) =
-            find_asset_of_kind(assets, clip.animation_asset, AssetKind::ModelAnimation)
+        let Some(bytes) = resolve_asset_bytes(clip.animation_asset, AssetKind::ModelAnimation)
         else {
             continue;
         };
-        clips[index] = Animation::from_bytes(asset.bytes).ok();
+        clips[index] = Animation::from_bytes(bytes).ok();
     }
 
     for (index, record) in model_records.iter().enumerate() {
@@ -592,13 +591,13 @@ pub fn load_runtime_models<
         models[index] = RuntimeModelAsset::from_record(
             ModelIndex(index as u16),
             record,
-            assets,
             model_faces,
             model_face_count,
             model_parts,
             model_part_count,
             model_vertices,
             model_vertex_count,
+            &mut resolve_asset_bytes,
             &mut ensure_model_atlas_uploaded,
         );
     }
