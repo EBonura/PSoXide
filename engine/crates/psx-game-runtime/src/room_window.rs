@@ -59,6 +59,8 @@ pub struct RoomWindow<const MAX_ACTIVE_ROOMS: usize> {
     pub anchor: RoomPoint,
     /// Rooms whose staged build was skipped as not yet drawable.
     pub cache_skips: u16,
+    /// Full-width identity for caches derived from the live room window.
+    generation: u32,
 }
 
 impl<const MAX_ACTIVE_ROOMS: usize> RoomWindow<MAX_ACTIVE_ROOMS> {
@@ -72,7 +74,17 @@ impl<const MAX_ACTIVE_ROOMS: usize> RoomWindow<MAX_ACTIVE_ROOMS> {
         job: ActiveRoomWindowJob::EMPTY,
         anchor: RoomPoint::ZERO,
         cache_skips: 0,
+        generation: 1,
     };
+
+    /// Identity that changes whenever live window contents may change.
+    pub const fn generation(&self) -> u32 {
+        self.generation
+    }
+
+    fn bump_generation(&mut self) {
+        self.generation = self.generation.wrapping_add(1).max(1);
+    }
 
     /// Whether the window holds `index` in any slot.
     pub fn contains(&self, index: RoomIndex) -> bool {
@@ -95,6 +107,7 @@ impl<const MAX_ACTIVE_ROOMS: usize> RoomWindow<MAX_ACTIVE_ROOMS> {
         current_record: &LevelRoomRecord,
         stream_slot_for: impl Fn(RoomIndex) -> u16,
     ) {
+        self.bump_generation();
         let mut slot = 0usize;
         while slot < MAX_ACTIVE_ROOMS {
             let Some(active) = self.rooms[slot] else {
@@ -129,6 +142,7 @@ impl<const MAX_ACTIVE_ROOMS: usize> RoomWindow<MAX_ACTIVE_ROOMS> {
         next_slot: &mut usize,
         stream_slot_for: impl Fn(RoomIndex) -> u16,
     ) {
+        self.bump_generation();
         let retained_limit = next_slot
             .saturating_add(retained_inactive_rooms)
             .min(active_limit)
@@ -329,6 +343,7 @@ impl<const MAX_ACTIVE_ROOMS: usize> RoomWindow<MAX_ACTIVE_ROOMS> {
         ) -> Option<ActiveRuntimeRoom>,
         mut mark_unbuilt: impl FnMut(RoomIndex),
     ) -> RoomWindowRebuild {
+        self.bump_generation();
         self.rooms = [const { None }; MAX_ACTIVE_ROOMS];
         self.cache_skips = 0;
         self.anchor = anchor;
@@ -381,6 +396,7 @@ impl<const MAX_ACTIVE_ROOMS: usize> RoomWindow<MAX_ACTIVE_ROOMS> {
         ) -> Option<ActiveRuntimeRoom>,
         mut mark_unbuilt: impl FnMut(RoomIndex),
     ) -> usize {
+        self.bump_generation();
         self.rooms = [const { None }; MAX_ACTIVE_ROOMS];
         let active_limit = active_limit.min(MAX_ACTIVE_ROOMS);
         let mut next_slot = 0usize;
@@ -423,6 +439,7 @@ impl<const MAX_ACTIVE_ROOMS: usize> RoomWindow<MAX_ACTIVE_ROOMS> {
             return false;
         }
         self.rooms = self.job.rooms;
+        self.bump_generation();
         let previous_rooms = self.job.previous_rooms;
         let mut next_slot = self.job.next_slot;
         self.retain_previous_rooms(

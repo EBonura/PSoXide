@@ -457,7 +457,7 @@ impl Playtest {
             // quantum, keeping the set a superset of "rooms within camera
             // reach" anywhere inside the key cell -- the solve result is
             // identical because out-of-reach rooms cannot block the sweep.
-            // The streaming RESIDENT mask is part of the key because the
+            // The full-width streaming generation is part of the key because the
             // cached CharacterCollisionRooms hold parses of streamed slot
             // bytes: the active mask lags the pin set while the window job
             // catches up, so residency turnover must force a re-gather
@@ -465,15 +465,15 @@ impl Playtest {
             // 'static slice contract).
             const CAMERA_ROOM_CACHE_QUANTUM: i32 = 512;
             #[cfg(feature = "cd-stream-bench")]
-            let resident_mask = room_streams_arena().resident_room_mask();
+            let resident_generation = room_streams_arena().residency_generation();
             #[cfg(not(feature = "cd-stream-bench"))]
-            let resident_mask = RuntimeDebugMask::EMPTY;
+            let resident_generation = 0u32;
             let key = (
                 self.room_index,
                 target.player.x.div_euclid(CAMERA_ROOM_CACHE_QUANTUM),
                 target.player.z.div_euclid(CAMERA_ROOM_CACHE_QUANTUM),
-                self.active_room_mask(),
-                resident_mask,
+                self.window.generation(),
+                resident_generation,
             );
             if key != self.camera_rooms_key {
                 let mut collision_rooms =
