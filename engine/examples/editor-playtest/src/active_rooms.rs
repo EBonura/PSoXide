@@ -444,7 +444,7 @@ impl Playtest {
     pub(super) fn pump_room_stream(&mut self, max_sectors: usize) -> bool {
         room_streams_arena().pump(
             cd_arena(),
-            streamed_slots_arena_mut().words_mut(),
+            streamed_slots_arena_mut(),
             max_sectors,
             debug_log_stream_entry,
         )
@@ -479,6 +479,24 @@ impl Playtest {
         // Everything past the visible prefix is the prefetch ring; the
         // scheduler counts and protects the two classes differently.
         let active_count = count;
+        // First look-ahead tier: rooms just beyond the accepted portal walk.
+        // These portals already survived camera-facing and clipped-frustum
+        // tests, so they are a stronger prediction of where the player/view is
+        // heading than an undirected graph neighbour.
+        let frontier_count = self
+            .visibility
+            .result
+            .frontier_count
+            .min(MAX_PORTAL_FRONTIER_ROOMS);
+        let mut frontier_index = 0usize;
+        while frontier_index < frontier_count && count < STREAMED_ROOM_SLOT_COUNT {
+            let room = self.visibility.result.frontier_rooms[frontier_index].room;
+            if room != INVALID_ROOM_INDEX && !room_requested(room, &desired, count) {
+                desired[count] = room;
+                count += 1;
+            }
+            frontier_index += 1;
+        }
         // Prefetch ring rooted at the camera's room (the visibility root), not
         // the player's. Breadth-first, so the closest hops fill the rest of the
         // budget. Radius = traversal depth + a small margin that also absorbs the
@@ -502,8 +520,9 @@ impl Playtest {
         }
         self.resident_desired = desired;
         self.resident_desired_count = count;
-        room_streams_arena().reconcile_residency::<STREAMED_ROOM_SLOT_BYTES>(
+        room_streams_arena().reconcile_residency(
             cd_arena(),
+            streamed_slots_arena_mut(),
             &desired,
             count,
             active_count,

@@ -4,10 +4,9 @@
 //! room-to-slot residency map, the pin-and-load reconcile, and the
 //! retry-backoff policy over the crate's `cd_stream` read job; cooked
 //! pack tables arrive as psx-level record params, capacities as
-//! `const N` generic parameters, the game's slot word buffers as `&mut`
-//! parameters, and its debug logging as closures. Since the
-//! vram_runtime slice, the slot byte buffers live here too as
-//! [`StreamedRoomSlots`], whose resolvers replace the game's unsafe
+//! `const N` generic parameters, the game's sector-page pool as `&mut`
+//! parameter, and its debug logging as closures. The streamed bytes live
+//! here too as [`StreamedRoomPages`], whose resolvers replace the game's unsafe
 //! `&'static`-lying readers with borrows tied to the buffer.
 
 #[cfg(feature = "cd-stream-bench")]
@@ -126,7 +125,7 @@ impl<const N: usize> RoomStreamLoadPlan<N> {
     };
 }
 
-/// Streamed-room residency scheduler over `N` slot buffers: maps rooms
+/// Streamed-room residency scheduler over `N` logical cache slots: maps rooms
 /// to slots, pins the residency owner's desired set, batches CD loads
 /// through the single `cd_stream` job with per-room failure backoff,
 /// and evicts unpinned residents by LRU.
@@ -148,6 +147,9 @@ pub struct RoomStreamScheduler<const N: usize, const MAX_STREAMED_ROOM_INDEX_COU
     job_plan: RoomStreamLoadPlan<N>,
     slot_limit: usize,
     epoch: u32,
+    /// Monotonic cache identity for the complete room-to-slot map. Unlike the
+    /// 64-bit telemetry masks, this remains correct for all 256 room indices.
+    residency_generation: u32,
     /// Consecutive failed loads per room index, saturating; reset by a
     /// successful load. Drives the retry backoff so a permanently bad
     /// chunk (TOC mismatch, unreadable sector) cannot churn the CD and
@@ -187,6 +189,7 @@ impl<const N: usize, const MAX_STREAMED_ROOM_INDEX_COUNT: usize>
             job_plan: RoomStreamLoadPlan::ZEROED,
             slot_limit: 0,
             epoch: 0,
+            residency_generation: 0,
             failure_counts: [0; MAX_STREAMED_ROOM_INDEX_COUNT],
             failure_hold_until: [0; MAX_STREAMED_ROOM_INDEX_COUNT],
             window_requests: 0,
@@ -210,6 +213,7 @@ impl<const N: usize, const MAX_STREAMED_ROOM_INDEX_COUNT: usize>
             job_plan: RoomStreamLoadPlan::EMPTY,
             slot_limit: N,
             epoch: 0,
+            residency_generation: 1,
             failure_counts: [0; MAX_STREAMED_ROOM_INDEX_COUNT],
             failure_hold_until: [0; MAX_STREAMED_ROOM_INDEX_COUNT],
             window_requests: 0,
@@ -255,9 +259,10 @@ impl<const N: usize, const MAX_STREAMED_ROOM_INDEX_COUNT: usize>
     /// their loads unprotected against eviction, and may be dropped first
     /// under slot pressure.
     #[allow(clippy::too_many_arguments)]
-    pub fn reconcile_residency<const STREAMED_ROOM_SLOT_BYTES: usize>(
+    pub fn reconcile_residency<const PAGES: usize>(
         &mut self,
         cd: &mut cd_stream::CdController,
+        storage: &mut StreamedRoomPages<PAGES, N>,
         desired: &[RoomIndex; N],
         count: usize,
         active_count: usize,
@@ -268,17 +273,22 @@ impl<const N: usize, const MAX_STREAMED_ROOM_INDEX_COUNT: usize>
         log_entry: impl Fn(&str, RoomIndex, usize, usize, u32),
     ) {
         self.begin_window();
-        self.set_resident_window(desired, count);
+        // Only correctness-critical visible rooms are pinned. Look-ahead
+        // entries remain best-effort and are the first eviction candidates.
+        self.set_resident_window(desired, active_count.min(count));
         let plan = self.plan_window_loads(
             cd,
+            storage,
             desired,
             count,
             active_count.min(count),
             stream_load_batch_count,
+            world_pack_toc,
             &log_plan,
         );
-        self.start_load_plan::<STREAMED_ROOM_SLOT_BYTES>(
+        self.start_load_plan(
             plan,
+            storage,
             world_pack_start_lba,
             world_pack_toc,
             log_plan,
@@ -396,7 +406,8 @@ impl<const N: usize, const MAX_STREAMED_ROOM_INDEX_COUNT: usize>
         if slot >= N {
             return;
         }
-        let old_room = self.slots[slot].room.to_usize();
+        let old = self.slots[slot];
+        let old_room = old.room.to_usize();
         if old_room < MAX_STREAMED_ROOM_INDEX_COUNT && self.room_slots[old_room] as usize == slot {
             self.room_slots[old_room] = STREAMED_ROOM_SLOT_NONE;
         }
@@ -405,20 +416,30 @@ impl<const N: usize, const MAX_STREAMED_ROOM_INDEX_COUNT: usize>
         if meta.state != RoomStreamSlotState::Empty && new_room < MAX_STREAMED_ROOM_INDEX_COUNT {
             self.room_slots[new_room] = slot as u16;
         }
+        if old.room != meta.room || old.state != meta.state || old.byte_count != meta.byte_count {
+            self.residency_generation = self.residency_generation.wrapping_add(1).max(1);
+        }
     }
 
-    fn plan_window_loads(
+    /// Full-width identity for caches that depend on residency content.
+    pub const fn residency_generation(&self) -> u32 {
+        self.residency_generation
+    }
+
+    fn plan_window_loads<const PAGES: usize>(
         &mut self,
         cd: &mut cd_stream::CdController,
+        storage: &mut StreamedRoomPages<PAGES, N>,
         requested_rooms: &[RoomIndex; N],
         requested_count: usize,
         active_count: usize,
         stream_load_batch_count: usize,
+        world_pack_toc: &[LevelWorldPackEntryRecord],
         log_plan: impl Fn(&str, &RoomStreamLoadPlan<N>),
     ) -> RoomStreamLoadPlan<N> {
         let mut plan = RoomStreamLoadPlan::EMPTY;
         if requested_count > 0 && !self.current_room_request_can_wait(requested_rooms[0]) {
-            self.abort_active_load(cd, log_plan);
+            self.abort_active_load(cd, storage, log_plan);
         }
         let can_schedule_new_loads = !self.job.is_active();
         let protected_count = active_count
@@ -461,8 +482,14 @@ impl<const N: usize, const MAX_STREAMED_ROOM_INDEX_COUNT: usize>
                 i += 1;
                 continue;
             }
+            let required_bytes = world_pack_toc
+                .iter()
+                .find(|entry| entry.room == room)
+                .map_or(0, |entry| entry.byte_size as usize);
             let allow_eviction = i < protected_count;
             let Some(target) = self.choose_slot(
+                storage,
+                required_bytes,
                 requested_rooms,
                 protected_count,
                 &plan.slots,
@@ -473,6 +500,11 @@ impl<const N: usize, const MAX_STREAMED_ROOM_INDEX_COUNT: usize>
                 i += 1;
                 continue;
             };
+            if storage.prepare_slot(target, required_bytes).is_none() {
+                self.window_protected_full = self.window_protected_full.saturating_add(1);
+                i += 1;
+                continue;
+            }
             if self.slots[target].state == RoomStreamSlotState::Resident {
                 self.window_evictions = self.window_evictions.saturating_add(1);
             }
@@ -501,9 +533,10 @@ impl<const N: usize, const MAX_STREAMED_ROOM_INDEX_COUNT: usize>
             || !self.job.is_active()
     }
 
-    fn abort_active_load(
+    fn abort_active_load<const PAGES: usize>(
         &mut self,
         cd: &mut cd_stream::CdController,
+        storage: &mut StreamedRoomPages<PAGES, N>,
         log_plan: impl Fn(&str, &RoomStreamLoadPlan<N>),
     ) {
         if !self.job.is_active() {
@@ -519,6 +552,7 @@ impl<const N: usize, const MAX_STREAMED_ROOM_INDEX_COUNT: usize>
                 && self.slots[slot].state == RoomStreamSlotState::Loading
                 && self.slots[slot].room == plan.rooms[i]
             {
+                storage.release_slot(slot);
                 self.set_slot(slot, StreamedRoomSlot::EMPTY);
             }
             i += 1;
@@ -526,9 +560,10 @@ impl<const N: usize, const MAX_STREAMED_ROOM_INDEX_COUNT: usize>
         self.job_plan = RoomStreamLoadPlan::EMPTY;
     }
 
-    fn start_load_plan<const STREAMED_ROOM_SLOT_BYTES: usize>(
+    fn start_load_plan<const PAGES: usize>(
         &mut self,
         plan: RoomStreamLoadPlan<N>,
+        storage: &mut StreamedRoomPages<PAGES, N>,
         world_pack_start_lba: u32,
         world_pack_toc: &[LevelWorldPackEntryRecord],
         log_plan: impl Fn(&str, &RoomStreamLoadPlan<N>),
@@ -539,41 +574,43 @@ impl<const N: usize, const MAX_STREAMED_ROOM_INDEX_COUNT: usize>
         }
         log_plan("stream start", &plan);
         let mut room_ids = [u16::MAX; N];
+        let mut slot_capacities = [0usize; N];
         let mut i = 0usize;
         while i < plan.count.min(N) {
             room_ids[i] = plan.rooms[i].raw();
+            slot_capacities[i] = storage.slot_capacity_bytes(plan.slots[i]);
             i += 1;
         }
-        self.job.start::<STREAMED_ROOM_SLOT_BYTES>(
+        self.job.start(
             world_pack_start_lba,
             world_pack_toc,
             &room_ids[..plan.count],
             &plan.slots[..plan.count],
+            &slot_capacities[..plan.count],
         );
         self.job_plan = plan;
         if self.job.is_done() {
-            self.commit_completed_job(log_entry);
+            self.commit_completed_job(storage, log_entry);
         }
     }
 
-    /// Advance the in-flight load by up to `max_sectors` CD sectors into
-    /// the game's slot word buffers, committing rooms as they complete.
+    /// Advance the in-flight load by up to `max_sectors` CD sectors directly
+    /// into the game's sector-page pool, committing rooms as they complete.
     /// Returns whether any room became resident this call.
-    pub fn pump<const STREAMED_ROOM_SLOT_WORDS: usize>(
+    pub fn pump<const PAGES: usize>(
         &mut self,
         cd: &mut cd_stream::CdController,
-        dst: &mut [[u32; STREAMED_ROOM_SLOT_WORDS]; N],
+        dst: &mut StreamedRoomPages<PAGES, N>,
         max_sectors: usize,
         log_entry: impl Fn(&str, RoomIndex, usize, usize, u32),
     ) -> bool {
         if !self.job.is_active() {
             return false;
         }
-        self.job
-            .poll_words::<STREAMED_ROOM_SLOT_WORDS>(cd, dst, max_sectors);
+        self.job.poll_into(cd, dst, max_sectors);
         let committed = self.commit_ready_job_entries();
         if self.job.is_done() {
-            self.commit_completed_job(log_entry);
+            self.commit_completed_job(dst, log_entry);
             true
         } else {
             committed
@@ -612,17 +649,22 @@ impl<const N: usize, const MAX_STREAMED_ROOM_INDEX_COUNT: usize>
         committed
     }
 
-    fn commit_completed_job(&mut self, log_entry: impl Fn(&str, RoomIndex, usize, usize, u32)) {
+    fn commit_completed_job<const PAGES: usize>(
+        &mut self,
+        storage: &mut StreamedRoomPages<PAGES, N>,
+        log_entry: impl Fn(&str, RoomIndex, usize, usize, u32),
+    ) {
         let byte_counts = *self.job.byte_counts();
         let statuses = *self.job.statuses();
         let plan = self.job_plan;
-        self.commit_window_loads(&plan, &byte_counts, &statuses, log_entry);
+        self.commit_window_loads(storage, &plan, &byte_counts, &statuses, log_entry);
         self.job = cd_stream::WorldRoomSlotsReadJob::new();
         self.job_plan = RoomStreamLoadPlan::EMPTY;
     }
 
-    fn commit_window_loads(
+    fn commit_window_loads<const PAGES: usize>(
         &mut self,
+        storage: &mut StreamedRoomPages<PAGES, N>,
         plan: &RoomStreamLoadPlan<N>,
         byte_counts: &[usize; N],
         statuses: &[u32; N],
@@ -671,6 +713,7 @@ impl<const N: usize, const MAX_STREAMED_ROOM_INDEX_COUNT: usize>
                     statuses[loaded],
                 );
             } else {
+                storage.release_slot(target);
                 self.set_slot(
                     target,
                     StreamedRoomSlot {
@@ -787,8 +830,10 @@ impl<const N: usize, const MAX_STREAMED_ROOM_INDEX_COUNT: usize>
         mask
     }
 
-    fn choose_slot(
+    fn choose_slot<const PAGES: usize>(
         &self,
+        storage: &StreamedRoomPages<PAGES, N>,
+        required_bytes: usize,
         requested_rooms: &[RoomIndex; N],
         requested_count: usize,
         reserved_slots: &[usize; N],
@@ -801,6 +846,7 @@ impl<const N: usize, const MAX_STREAMED_ROOM_INDEX_COUNT: usize>
             let state = self.slots[slot].state;
             if (state == RoomStreamSlotState::Empty || state == RoomStreamSlotState::Failed)
                 && !streamed_slot_reserved(slot, reserved_slots, reserved_count)
+                && storage.can_prepare_slot(slot, required_bytes)
             {
                 return Some(slot);
             }
@@ -819,6 +865,7 @@ impl<const N: usize, const MAX_STREAMED_ROOM_INDEX_COUNT: usize>
                 || streamed_slot_reserved(candidate, reserved_slots, reserved_count)
                 || room_requested(meta.room, requested_rooms, requested_count)
                 || self.is_room_pinned(meta.room)
+                || !storage.can_prepare_slot(candidate, required_bytes)
             {
                 candidate += 1;
                 continue;
@@ -972,12 +1019,46 @@ pub fn streamed_chunk_range_valid<T>(total_bytes: usize, offset: usize, count: u
         .is_some_and(|end| end <= total_bytes)
 }
 
-/// Streamed-room slot word buffers: the RAM the scheduler loads CD
-/// chunks into, owned as one struct over the game's `(SLOT_WORDS, N)`
-/// budget (replacing the example's `STREAMED_ROOM_WORDS` static).
-/// Zero-initialized `const` construction keeps the game's static
-/// instance in `.bss` (NOLOAD) instead of storing ~200 KB of zeros in
-/// the flat PSX-EXE image.
+/// One allocation in the sector-page room cache.
+#[cfg(feature = "cd-stream-bench")]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+struct StreamedRoomPageRun {
+    first_page: u16,
+    page_count: u16,
+    generation: u16,
+}
+
+#[cfg(feature = "cd-stream-bench")]
+impl StreamedRoomPageRun {
+    const EMPTY: Self = Self {
+        first_page: 0,
+        page_count: 0,
+        generation: 0,
+    };
+}
+
+/// Generation-safe identity of one logical room-cache slot allocation.
+/// A handle stops resolving as soon as its slot is released or reused.
+#[cfg(feature = "cd-stream-bench")]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct ResidentRoomHandle {
+    /// Logical scheduler slot.
+    pub slot: u16,
+    /// Allocation generation in that slot.
+    pub generation: u16,
+}
+
+/// Streamed-room RAM as contiguous runs of 2 KiB CD-sector pages.
+///
+/// Fixed max-room rows waste `largest_room * slot_count` bytes. This pool
+/// instead pays `ceil(actual_room_bytes / 2048)` per resident room while
+/// preserving contiguous byte slices for the existing zero-copy parsers.
+/// CD sectors therefore land directly in their final RAM address with no
+/// assembly buffer and less than one sector of internal waste per room.
+///
+/// `SLOTS` remains the scheduler's logical-room capacity; `PAGES` is the
+/// independently generated RAM budget. Both arrays are all-zero valid so the
+/// owning static remains in `.bss`.
 ///
 /// The resolvers are lifetime-honest: every returned slice borrows
 /// `self`, so it cannot outlive the buffer it points into. The
@@ -987,42 +1068,182 @@ pub fn streamed_chunk_range_valid<T>(total_bytes: usize, offset: usize, count: u
 /// overwrites that slot, so re-resolve per use; holding one longer is
 /// sound only for ACTIVE-WINDOW rooms, which are pinned against
 /// eviction (the camera/motor collision caches rely on exactly that,
-/// plus cache keys that include the active-room mask so a room leaving
-/// the window forces a re-gather before its slot can be reused).
+/// plus full-width window/residency generations so a room leaving the
+/// window forces a re-gather before its pages can be reused).
 #[cfg(feature = "cd-stream-bench")]
-pub struct StreamedRoomSlots<const WORDS: usize, const N: usize> {
-    words: [[u32; WORDS]; N],
+pub struct StreamedRoomPages<const PAGES: usize, const SLOTS: usize> {
+    pages: [[u32; cd_stream::SECTOR_BYTES / 4]; PAGES],
+    runs: [StreamedRoomPageRun; SLOTS],
 }
 
 #[cfg(feature = "cd-stream-bench")]
-impl<const WORDS: usize, const N: usize> StreamedRoomSlots<WORDS, N> {
-    /// Zero-initialized slot buffers; `const` so the game's static
+impl<const PAGES: usize, const SLOTS: usize> StreamedRoomPages<PAGES, SLOTS> {
+    /// Zero-initialized page pool; `const` so the game's static
     /// instance stays in `.bss`.
     pub const fn new() -> Self {
         Self {
-            words: [[0; WORDS]; N],
+            pages: [[0; cd_stream::SECTOR_BYTES / 4]; PAGES],
+            runs: [StreamedRoomPageRun::EMPTY; SLOTS],
         }
     }
 
-    /// Raw per-slot word buffers for [`RoomStreamScheduler::pump`].
-    pub fn words_mut(&mut self) -> &mut [[u32; WORDS]; N] {
-        &mut self.words
+    const fn pages_for_bytes(byte_count: usize) -> usize {
+        byte_count.div_ceil(cd_stream::SECTOR_BYTES)
+    }
+
+    fn page_used_except(&self, page: usize, excluded_slot: usize) -> bool {
+        let mut slot = 0usize;
+        while slot < SLOTS {
+            if slot != excluded_slot {
+                let run = self.runs[slot];
+                let first = run.first_page as usize;
+                let end = first.saturating_add(run.page_count as usize);
+                if run.page_count > 0 && page >= first && page < end {
+                    return true;
+                }
+            }
+            slot += 1;
+        }
+        false
+    }
+
+    fn find_contiguous_run(&self, pages: usize, excluded_slot: usize) -> Option<usize> {
+        if pages == 0 || pages > PAGES {
+            return None;
+        }
+        let mut first = 0usize;
+        while first.saturating_add(pages) <= PAGES {
+            let mut offset = 0usize;
+            while offset < pages && !self.page_used_except(first + offset, excluded_slot) {
+                offset += 1;
+            }
+            if offset == pages {
+                return Some(first);
+            }
+            first = first.saturating_add(offset).saturating_add(1);
+        }
+        None
+    }
+
+    /// Reserve enough contiguous sector pages for a new payload in `slot`.
+    /// Existing bytes in that logical slot are invalidated atomically by a
+    /// generation bump. Returns `None` without changing the slot when the page
+    /// budget has no sufficiently large run.
+    pub fn prepare_slot(&mut self, slot: usize, byte_count: usize) -> Option<ResidentRoomHandle> {
+        if slot >= SLOTS || byte_count == 0 {
+            return None;
+        }
+        let page_count = Self::pages_for_bytes(byte_count);
+        // Never relocate another live run: parsed collision views can be held
+        // by the active-window cache until its generation changes. A failed
+        // contiguous reservation is therefore reported cleanly and retried
+        // after normal LRU eviction rather than silently invalidating pointers.
+        let first_page = self.find_contiguous_run(page_count, slot)?;
+        let generation = self.runs[slot].generation.wrapping_add(1).max(1);
+        self.runs[slot] = StreamedRoomPageRun {
+            first_page: u16::try_from(first_page).ok()?,
+            page_count: u16::try_from(page_count).ok()?,
+            generation,
+        };
+        Some(ResidentRoomHandle {
+            slot: slot as u16,
+            generation,
+        })
+    }
+
+    /// Whether `slot` can be replaced by a payload of `byte_count` without
+    /// relocating any other live room.
+    pub fn can_prepare_slot(&self, slot: usize, byte_count: usize) -> bool {
+        slot < SLOTS
+            && byte_count > 0
+            && self
+                .find_contiguous_run(Self::pages_for_bytes(byte_count), slot)
+                .is_some()
+    }
+
+    /// Release one logical slot and invalidate every handle to its old pages.
+    pub fn release_slot(&mut self, slot: usize) {
+        if slot >= SLOTS {
+            return;
+        }
+        let generation = self.runs[slot].generation.wrapping_add(1).max(1);
+        self.runs[slot] = StreamedRoomPageRun {
+            generation,
+            ..StreamedRoomPageRun::EMPTY
+        };
+    }
+
+    /// Current allocation handle for `slot`.
+    pub fn slot_handle(&self, slot: usize) -> Option<ResidentRoomHandle> {
+        let run = *self.runs.get(slot)?;
+        (run.page_count > 0).then_some(ResidentRoomHandle {
+            slot: slot as u16,
+            generation: run.generation,
+        })
+    }
+
+    /// Writable capacity of `slot` rounded to whole CD sectors.
+    pub fn slot_capacity_bytes(&self, slot: usize) -> usize {
+        self.runs
+            .get(slot)
+            .map_or(0, |run| run.page_count as usize * cd_stream::SECTOR_BYTES)
+    }
+
+    /// Number of unallocated sector pages.
+    pub fn free_page_count(&self) -> usize {
+        let mut used = 0usize;
+        let mut slot = 0usize;
+        while slot < SLOTS {
+            used = used.saturating_add(self.runs[slot].page_count as usize);
+            slot += 1;
+        }
+        PAGES.saturating_sub(used)
+    }
+
+    fn write_slot_bytes(&mut self, slot: usize, offset: usize, bytes: &[u8]) -> bool {
+        let Some(run) = self.runs.get(slot).copied() else {
+            return false;
+        };
+        let capacity = run.page_count as usize * cd_stream::SECTOR_BYTES;
+        let Some(end) = offset.checked_add(bytes.len()) else {
+            return false;
+        };
+        if run.page_count == 0 || end > capacity {
+            return false;
+        }
+        let base = self.pages[run.first_page as usize]
+            .as_mut_ptr()
+            .cast::<u8>();
+        // SAFETY: the page run is contiguous inside `pages`; `end` was checked
+        // against its allocation capacity and the source cannot overlap it.
+        unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), base.add(offset), bytes.len()) };
+        true
     }
 
     /// Byte view of `slot`'s first `byte_count` bytes.
     #[inline]
     pub fn slot_bytes(&self, slot: usize, byte_count: usize) -> Option<&[u8]> {
-        if slot >= N || byte_count > WORDS * 4 {
+        let run = *self.runs.get(slot)?;
+        if run.page_count == 0 || byte_count > self.slot_capacity_bytes(slot) {
             return None;
         }
-        // SAFETY: in-bounds u32 -> u8 reinterpretation of one slot row
-        // (plain old data, alignment only loosens). Moved from the
-        // example's `streamed_room_slot_bytes`, which returned the same
-        // view with a lied `'static` lifetime; the borrow of `self` now
-        // carries the real one.
-        Some(unsafe {
-            core::slice::from_raw_parts(self.words[slot].as_ptr().cast::<u8>(), byte_count)
-        })
+        let base = self.pages[run.first_page as usize].as_ptr().cast::<u8>();
+        // SAFETY: `prepare_slot` only records runs fully inside `pages`; nested
+        // arrays are contiguous and `byte_count` fits the run capacity.
+        Some(unsafe { core::slice::from_raw_parts(base, byte_count) })
+    }
+
+    /// Resolve bytes only if `handle` still names the current allocation.
+    pub fn slot_bytes_for_handle(
+        &self,
+        handle: ResidentRoomHandle,
+        byte_count: usize,
+    ) -> Option<&[u8]> {
+        let run = *self.runs.get(handle.slot as usize)?;
+        if run.generation != handle.generation {
+            return None;
+        }
+        self.slot_bytes(handle.slot as usize, byte_count)
     }
 
     /// Resident chunk bytes for `index`, re-validating residency (and
@@ -1030,7 +1251,7 @@ impl<const WORDS: usize, const N: usize> StreamedRoomSlots<WORDS, N> {
     #[inline]
     pub fn resident_chunk_bytes<const M: usize>(
         &self,
-        scheduler: &mut RoomStreamScheduler<N, M>,
+        scheduler: &mut RoomStreamScheduler<SLOTS, M>,
         index: RoomIndex,
     ) -> Option<&[u8]> {
         let resident_slot = scheduler.resident_slot_for(index)?;
@@ -1045,7 +1266,7 @@ impl<const WORDS: usize, const N: usize> StreamedRoomSlots<WORDS, N> {
     #[inline]
     pub fn compact_collision_room<const M: usize>(
         &self,
-        scheduler: &mut RoomStreamScheduler<N, M>,
+        scheduler: &mut RoomStreamScheduler<SLOTS, M>,
         index: RoomIndex,
     ) -> Option<CompactCollisionRoom<'_>> {
         let bytes = self.resident_chunk_bytes(scheduler, index)?;
@@ -1064,7 +1285,7 @@ impl<const WORDS: usize, const N: usize> StreamedRoomSlots<WORDS, N> {
     #[inline]
     pub fn surface_cache_for<const MAX_VERTICES: usize, const M: usize>(
         &self,
-        scheduler: &mut RoomStreamScheduler<N, M>,
+        scheduler: &mut RoomStreamScheduler<SLOTS, M>,
         index: RoomIndex,
     ) -> Option<ActiveRoomSurfaceCache> {
         let bytes = self.resident_chunk_bytes(scheduler, index)?;
@@ -1105,7 +1326,7 @@ impl<const WORDS: usize, const N: usize> StreamedRoomSlots<WORDS, N> {
     #[inline]
     pub fn surface_cache_slices<const MAX_VERTICES: usize, const M: usize>(
         &self,
-        scheduler: &mut RoomStreamScheduler<N, M>,
+        scheduler: &mut RoomStreamScheduler<SLOTS, M>,
         index: RoomIndex,
         cache: ActiveRoomSurfaceCache,
     ) -> Option<(
@@ -1160,6 +1381,19 @@ impl<const WORDS: usize, const N: usize> StreamedRoomSlots<WORDS, N> {
             cached_room_vertices_from_level_records(vertices),
             cached_room_surfaces_from_level_records(surfaces),
         ))
+    }
+}
+
+#[cfg(feature = "cd-stream-bench")]
+impl<const PAGES: usize, const SLOTS: usize> cd_stream::WorldChunkDestination
+    for StreamedRoomPages<PAGES, SLOTS>
+{
+    fn slot_capacity_bytes(&self, slot: usize) -> usize {
+        Self::slot_capacity_bytes(self, slot)
+    }
+
+    fn write_chunk_bytes(&mut self, slot: usize, offset: usize, bytes: &[u8]) -> bool {
+        self.write_slot_bytes(slot, offset, bytes)
     }
 }
 
@@ -1301,4 +1535,57 @@ pub fn room_requested<const N: usize>(
         i += 1;
     }
     false
+}
+
+#[cfg(all(test, feature = "cd-stream-bench"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn page_pool_charges_exact_sector_count() {
+        let mut pool = StreamedRoomPages::<8, 3>::new();
+        pool.prepare_slot(0, 1).unwrap();
+        pool.prepare_slot(1, cd_stream::SECTOR_BYTES + 1).unwrap();
+        assert_eq!(pool.slot_capacity_bytes(0), cd_stream::SECTOR_BYTES);
+        assert_eq!(pool.slot_capacity_bytes(1), cd_stream::SECTOR_BYTES * 2);
+        assert_eq!(pool.free_page_count(), 5);
+    }
+
+    #[test]
+    fn released_or_reused_slot_invalidates_old_handle() {
+        let mut pool = StreamedRoomPages::<4, 1>::new();
+        let first = pool.prepare_slot(0, 16).unwrap();
+        assert!(pool.slot_bytes_for_handle(first, 16).is_some());
+        pool.release_slot(0);
+        assert!(pool.slot_bytes_for_handle(first, 16).is_none());
+        let second = pool.prepare_slot(0, 16).unwrap();
+        assert_ne!(first.generation, second.generation);
+    }
+
+    #[test]
+    fn fragmented_pool_fails_without_moving_live_rooms() {
+        let mut pool = StreamedRoomPages::<8, 4>::new();
+        pool.prepare_slot(0, cd_stream::SECTOR_BYTES * 2).unwrap();
+        pool.prepare_slot(1, cd_stream::SECTOR_BYTES * 2).unwrap();
+        pool.prepare_slot(2, cd_stream::SECTOR_BYTES * 2).unwrap();
+        pool.release_slot(1);
+        let first = pool.slot_handle(0).unwrap();
+        let third = pool.slot_handle(2).unwrap();
+        assert!(pool.prepare_slot(3, cd_stream::SECTOR_BYTES * 3).is_none());
+        assert_eq!(pool.slot_handle(0), Some(first));
+        assert_eq!(pool.slot_handle(2), Some(third));
+        assert_eq!(pool.free_page_count(), 4);
+    }
+
+    #[test]
+    fn writes_and_reads_across_page_boundary_without_staging() {
+        let mut pool = StreamedRoomPages::<3, 1>::new();
+        let handle = pool.prepare_slot(0, cd_stream::SECTOR_BYTES + 8).unwrap();
+        let payload = [1u8, 2, 3, 4, 5, 6, 7, 8];
+        assert!(pool.write_slot_bytes(0, cd_stream::SECTOR_BYTES - 4, &payload));
+        let bytes = pool
+            .slot_bytes_for_handle(handle, cd_stream::SECTOR_BYTES + 4)
+            .unwrap();
+        assert_eq!(&bytes[cd_stream::SECTOR_BYTES - 4..], &payload);
+    }
 }

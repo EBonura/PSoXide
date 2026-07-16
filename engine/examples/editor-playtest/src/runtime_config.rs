@@ -1,6 +1,6 @@
 use super::*;
 #[cfg(feature = "cd-stream-bench")]
-use psx_game_runtime::room_streaming::{RoomStreamScheduler, StreamedRoomSlots};
+use psx_game_runtime::room_streaming::{RoomStreamScheduler, StreamedRoomPages};
 #[cfg(feature = "cd-stream-bench")]
 use psx_game_runtime::vram::UiImageCache;
 use psx_game_runtime::vram::{FontPackScratch, VramRuntime, FONT_ATLAS_MAX_ROWS};
@@ -255,11 +255,9 @@ pub(super) fn current_room_surface_options(room_index: RoomIndex) -> WorldSurfac
         .unwrap_or_else(fallback_surface_options)
 }
 
-
 #[cfg(feature = "cd-stream-bench")]
 pub(super) fn room_resident_chunk_limit(record: &LevelRoomRecord) -> usize {
-    streamed_room_slot_count_for_budget_units(record.resident_chunk_limit as usize)
-        .min(MAX_RUNTIME_RESIDENT_CHUNKS)
+    usize::from(record.resident_chunk_limit.max(1)).min(MAX_RUNTIME_RESIDENT_CHUNKS)
 }
 
 #[cfg(feature = "cd-stream-bench")]
@@ -333,22 +331,10 @@ pub(super) const PORTAL_ROOM_BOUNDS_MIN_Y: i32 = -4096;
 pub(super) const PORTAL_ROOM_BOUNDS_MAX_Y: i32 = 8192;
 pub(super) type RuntimePortalVisibility =
     PortalVisibilityResult<MAX_ACTIVE_ROOMS, MAX_PORTAL_FRUSTUMS, MAX_PORTAL_FRONTIER_ROOMS>;
-/// Streamed room slot budget. A slot stores one runtime room payload:
-/// the room `.psxw` plus the room-local render cache records carried by
-/// the `.psxc` payload. Slots are sized to the largest payload in the cooked
-/// WORLD.PAK, while the slot count is derived from a fixed byte budget so
-/// smaller rooms can stay resident in larger numbers.
-#[cfg(feature = "cd-stream-bench")]
-pub(super) const MIN_STREAMED_ROOM_SLOT_BYTES: usize = 2048;
-#[cfg(feature = "cd-stream-bench")]
-pub(super) const MAX_STREAMED_ROOM_SLOT_BYTES: usize = psx_level::MAX_STREAMED_ROOM_CHUNK_BYTES;
-#[cfg(feature = "cd-stream-bench")]
-pub(super) const STREAMED_ROOM_RESIDENT_BUDGET_UNIT_BYTES: usize = MAX_STREAMED_ROOM_SLOT_BYTES;
-#[cfg(feature = "cd-stream-bench")]
-pub(super) const STREAMED_ROOM_SLOT_BYTES: usize =
-    clamp_streamed_room_slot_bytes(WORLD_PACK_MAX_CHUNK_BYTES);
-#[cfg(feature = "cd-stream-bench")]
-pub(super) const STREAMED_ROOM_SLOT_WORDS: usize = STREAMED_ROOM_SLOT_BYTES / 4;
+/// Logical room handles and physical 2 KiB sector pages are budgeted
+/// independently by the cooker. The page count covers the worst possible
+/// combination of `STREAMED_ROOM_SLOT_COUNT` chunks, so no runtime selection
+/// can overcommit RAM and small rooms do not pay for the largest room.
 #[cfg(feature = "cd-stream-bench")]
 pub(super) const MAX_STREAMED_ROOM_SLOT_COUNT: usize = 256;
 #[cfg(feature = "cd-stream-bench")]
@@ -359,7 +345,25 @@ pub(super) const MAX_STREAMED_ROOM_INDEX_COUNT: usize = 256;
 /// while allowing smaller chunks to keep more neighbors resident.
 #[cfg(feature = "cd-stream-bench")]
 pub(super) const STREAMED_ROOM_SLOT_COUNT: usize =
-    streamed_room_slot_count_for_budget_units(WORLD_RESIDENT_CHUNK_LIMIT);
+    clamp_streamed_room_slot_count(WORLD_STREAM_SLOT_COUNT);
+#[cfg(feature = "cd-stream-bench")]
+pub(super) const STREAMED_ROOM_PAGE_COUNT: usize = WORLD_RESIDENT_PAGE_COUNT;
+#[cfg(feature = "cd-stream-bench")]
+const _: () = assert!(
+    STREAMED_ROOM_PAGE_COUNT * psx_game_runtime::cd_stream::SECTOR_BYTES
+        >= WORLD_PACK_MAX_CHUNK_BYTES,
+    "streaming page pool cannot hold the largest cooked room"
+);
+#[cfg(feature = "cd-stream-bench")]
+const _: () = assert!(
+    STREAMED_ROOM_SLOT_COUNT
+        >= if WORLD_RESIDENT_CHUNK_LIMIT < WORLD_PACK_TOC.len() {
+            WORLD_RESIDENT_CHUNK_LIMIT
+        } else {
+            WORLD_PACK_TOC.len()
+        },
+    "streaming slot count is smaller than the authored resident window"
+);
 #[cfg(feature = "cd-stream-bench")]
 pub(super) const MAX_RUNTIME_RESIDENT_CHUNKS: usize = STREAMED_ROOM_SLOT_COUNT;
 #[cfg(feature = "cd-stream-bench")]
@@ -378,38 +382,6 @@ pub(super) const fn clamp_streamed_room_slot_count(raw: usize) -> usize {
     }
 }
 
-#[cfg(feature = "cd-stream-bench")]
-pub(super) const fn streamed_room_slot_count_for_budget_units(raw_units: usize) -> usize {
-    let units = if raw_units < 1 { 1 } else { raw_units };
-    let budget_bytes = if units > usize::MAX / STREAMED_ROOM_RESIDENT_BUDGET_UNIT_BYTES {
-        usize::MAX
-    } else {
-        units * STREAMED_ROOM_RESIDENT_BUDGET_UNIT_BYTES
-    };
-    // Never allocate more slots than the world has streamed rooms: a
-    // tiny-chunk map would otherwise convert the byte budget into ~100
-    // slots and the slot-count-keyed pools (materials, collision) would
-    // overflow RAM for a map that needs a handful.
-    let by_budget = budget_bytes / STREAMED_ROOM_SLOT_BYTES;
-    let by_rooms = WORLD_PACK_TOC.len();
-    clamp_streamed_room_slot_count(if by_budget > by_rooms {
-        by_rooms
-    } else {
-        by_budget
-    })
-}
-
-#[cfg(feature = "cd-stream-bench")]
-pub(super) const fn clamp_streamed_room_slot_bytes(raw: usize) -> usize {
-    let clamped = if raw < MIN_STREAMED_ROOM_SLOT_BYTES {
-        MIN_STREAMED_ROOM_SLOT_BYTES
-    } else if raw > MAX_STREAMED_ROOM_SLOT_BYTES {
-        MAX_STREAMED_ROOM_SLOT_BYTES
-    } else {
-        raw
-    };
-    (clamped + 3) & !3
-}
 pub(super) use psx_game_runtime::room_cache::INVALID_ROOM_INDEX;
 
 /// Per-frame projected-vertex scratch for the model renderer.
@@ -520,11 +492,10 @@ pub(super) const UI_STAGE_WORDS: usize = (UI_PACK_MAX_CHUNK_BYTES + 3) / 4;
 #[cfg(feature = "cd-stream-bench")]
 pub(super) type RuntimeUiImageCache = UiImageCache<UI_STAGE_WORDS, UI_PACK_IMAGE_CACHE_SLOTS>;
 
-/// The crate streamed-room slot buffers instantiated with this example's
-/// slot width and count (see `STREAMED_ROOM_SLOT_*` above).
+/// Sector-page room cache instantiated with the cook-time proven page budget.
 #[cfg(feature = "cd-stream-bench")]
 pub(super) type RuntimeStreamedRoomSlots =
-    StreamedRoomSlots<STREAMED_ROOM_SLOT_WORDS, STREAMED_ROOM_SLOT_COUNT>;
+    StreamedRoomPages<STREAMED_ROOM_PAGE_COUNT, STREAMED_ROOM_SLOT_COUNT>;
 
 /// The crate streamed-room scheduler instantiated with this example's slot
 /// count and room-index capacity.
