@@ -884,9 +884,7 @@ mod tests {
 
     #[test]
     fn cook_wav_emits_psau_header_and_preview() {
-        let samples: Vec<i16> = (0..128)
-            .map(|i| (((i % 32) - 16) * 512) as i16)
-            .collect();
+        let samples: Vec<i16> = (0..128).map(|i| (((i % 32) - 16) * 512) as i16).collect();
         let wav = write_wav_mono_i16(44_100, &samples);
         let cooked = cook_wav(
             &wav,
