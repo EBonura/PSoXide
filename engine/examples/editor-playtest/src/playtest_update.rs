@@ -162,7 +162,15 @@ impl Playtest {
         if ROOMS.get(spawn.room.to_usize()).is_none() {
             return;
         };
-        self.load_runtime_models();
+        #[cfg(not(feature = "cd-stream-bench"))]
+        {
+            self.load_runtime_models();
+            self.runtime_models_loaded = true;
+        }
+        #[cfg(feature = "cd-stream-bench")]
+        {
+            self.runtime_models_loaded = false;
+        }
         self.rebuild_box_prop_runtime();
         self.spawn = RoomPoint::new(spawn.x, spawn.y, spawn.z);
         self.character = character;
@@ -201,8 +209,6 @@ impl Playtest {
             self.camera.position(),
             self.camera.focus(),
         );
-        #[cfg(feature = "cd-stream-bench")]
-        self.bootstrap_streamed_room_window();
         #[cfg(not(feature = "cd-stream-bench"))]
         self.load_active_room_window();
         #[cfg(feature = "cd-stream-benchmark")]

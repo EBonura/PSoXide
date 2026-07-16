@@ -168,9 +168,10 @@ use generated::{
 };
 #[cfg(feature = "cd-stream-bench")]
 use generated::{
-    GAMEPLAY_PACK_MAX_CHUNK_BYTES, UI_PACK_IMAGE_CACHE_SLOTS, UI_PACK_MAX_CHUNK_BYTES,
-    UI_PACK_START_LBA, UI_PACK_TOC, WORLD_PACK_MAX_CHUNK_BYTES, WORLD_PACK_START_LBA,
-    WORLD_PACK_TOC, WORLD_RESIDENT_CHUNK_LIMIT, WORLD_RESIDENT_PAGE_COUNT, WORLD_STREAM_SLOT_COUNT,
+    GAMEPLAY_PACK_MAX_CHUNK_BYTES, PERSISTENT_ASSET_PAGE_COUNT, PERSISTENT_ASSET_SLOT_COUNT,
+    UI_PACK_IMAGE_CACHE_SLOTS, UI_PACK_MAX_CHUNK_BYTES, UI_PACK_START_LBA, UI_PACK_TOC,
+    WORLD_PACK_MAX_CHUNK_BYTES, WORLD_PACK_START_LBA, WORLD_PACK_TOC,
+    WORLD_RESIDENT_CHUNK_LIMIT, WORLD_RESIDENT_PAGE_COUNT, WORLD_STREAM_SLOT_COUNT,
 };
 use generated::{GAME_FLOW, OPTIONS, UI_SCENES};
 #[cfg(all(
@@ -402,6 +403,8 @@ struct Playtest {
     ui_fonts: [Option<FontAtlas>; MAX_RUNTIME_UI_FONTS],
     /// Parsed models/materials, built once at init.
     models: [Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
+    /// Persistent model bytes are resident and the parsed runtime tables are valid.
+    runtime_models_loaded: bool,
     /// Predecoded model face records, shared by `models`.
     model_faces: [TexturedModelRenderFace; MAX_RUNTIME_MODEL_FACES],
     model_face_count: usize,
@@ -546,6 +549,12 @@ impl Playtest {
     fn step_streaming_jobs(&mut self, ctx: &mut Ctx) {
         let background_tick = self.streaming_jobs.background_tick(ctx);
         #[cfg(feature = "cd-stream-bench")]
+        if background_tick && !self.step_persistent_model_assets() {
+            // The model pack and WORLD.PAK share one physical CD controller.
+            // Finish the session-lifetime read before room residency can seek.
+            return;
+        }
+        #[cfg(feature = "cd-stream-bench")]
         if background_tick {
             // Residency owner: the single per-frame declaration of which rooms
             // must be resident (pin + load), so the build paths no longer have
@@ -593,6 +602,9 @@ impl Playtest {
         }
         #[cfg(feature = "cd-stream-bench")]
         {
+            if !self.runtime_models_loaded {
+                return false;
+            }
             if !self.chunked_level() {
                 return true;
             }

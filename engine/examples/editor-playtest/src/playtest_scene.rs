@@ -130,9 +130,12 @@ impl Scene for Playtest {
         }
         #[cfg(feature = "cd-stream-bench")]
         {
+            if !self.runtime_models_loaded {
+                return persistent_assets_arena().progress_q12().saturating_mul(3) / 8;
+            }
             let count = self.resident_desired_count.min(STREAMED_ROOM_SLOT_COUNT);
             if count == 0 {
-                return 0;
+                return 1536;
             }
             let mut resident = 0usize;
             let mut i = 0usize;
@@ -143,10 +146,11 @@ impl Scene for Playtest {
                 }
                 i += 1;
             }
-            // Rooms span 0..3840; the texture/upload tail is the last
+            // Persistent assets span 0..1536, rooms span 1536..3840;
+            // the texture/upload tail is the last
             // stretch, pinned to 4096 by the engine once
             // `loading_update` reports fully ready.
-            ((resident as i32).saturating_mul(3840) / count as i32).min(4096)
+            (1536 + (resident as i32).saturating_mul(2304) / count as i32).min(4096)
         }
     }
 
