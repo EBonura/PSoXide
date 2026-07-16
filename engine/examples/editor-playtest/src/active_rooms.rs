@@ -520,7 +520,7 @@ impl Playtest {
         }
         self.resident_desired = desired;
         self.resident_desired_count = count;
-        room_streams_arena().reconcile_residency(
+        let storage_relocated = room_streams_arena().reconcile_residency(
             cd_arena(),
             streamed_slots_arena_mut(),
             &desired,
@@ -532,6 +532,19 @@ impl Playtest {
             debug_log_stream_plan,
             debug_log_stream_entry,
         );
+        if storage_relocated {
+            // The page allocator only compacts during this residency phase.
+            // Drop every parsed view containing direct pointers before any
+            // gameplay/camera work resumes, then synchronously rebuild the
+            // current collision room from its new address.
+            self.window.rooms = [const { None }; MAX_ACTIVE_ROOMS];
+            self.window.job = ActiveRoomWindowJob::EMPTY;
+            self.room = None;
+            self.current_collision_room = None;
+            self.camera_collision_room_count = 0;
+            self.camera_rooms_key = (INVALID_ROOM_INDEX, i32::MIN, i32::MIN, 0, 0);
+            self.load_active_room_window();
+        }
         // The ring only moves when the camera changes room, so the desired set is
         // stable between crossings; debounce eviction on the camera room (not the
         // player) and let the scheduler LRU absorb visible-set jitter.
