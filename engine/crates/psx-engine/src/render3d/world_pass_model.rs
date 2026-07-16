@@ -669,8 +669,50 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 projected_min_y,
                 projected_max_y,
             );
+        // The bucketed renderer is the shipping/editor-play default. A layered
+        // model used to traverse, validate, cull, and depth every face twice.
+        // When the complete model bounds prove the direct packet path safe,
+        // submit both materials in one traversal while retaining the original
+        // command order (all base packets followed by all overlay packets).
+        let layered_packet_capacity = faces.len().checked_mul(2);
+        let fused_secondary_material = secondary_material.filter(|_| {
+            packed_average_unclamped_extent_safe_faces
+                && matches!(self.ordering, WorldCommandOrdering::Bucketed)
+                && layered_packet_capacity.is_some_and(|required| {
+                    required <= triangles.remaining()
+                        && required <= self.commands.len().saturating_sub(self.command_len)
+                })
+        });
         crate::telemetry::stage_begin(crate::telemetry::stage::TEXTURED_MODEL_FACES);
-        if packed_average_unclamped_faces {
+        if let Some(secondary_material) = fused_secondary_material {
+            let projected_vertices = &projected_vertices[..project_count];
+            let secondary_options = options.with_material_layer(secondary_material);
+            if options.cull_mode == CullMode::Back {
+                self.submit_predecoded_model_faces_layered_bucketed_average_unclamped_extent_safe_batch::<true>(
+                    triangles,
+                    projected_vertices,
+                    faces,
+                    packet_material,
+                    secondary_material.textured_packet_material(),
+                    options,
+                    secondary_options,
+                    &mut stats,
+                    &mut faces_considered,
+                );
+            } else {
+                self.submit_predecoded_model_faces_layered_bucketed_average_unclamped_extent_safe_batch::<false>(
+                    triangles,
+                    projected_vertices,
+                    faces,
+                    packet_material,
+                    secondary_material.textured_packet_material(),
+                    options,
+                    secondary_options,
+                    &mut stats,
+                    &mut faces_considered,
+                );
+            }
+        } else if packed_average_unclamped_faces {
             let projected_vertices = &projected_vertices[..project_count];
             let overflow = if packed_average_unclamped_extent_safe_faces {
                 if options.cull_mode == CullMode::Back {
@@ -807,133 +849,135 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 face_index += 1;
             }
         }
-        if let Some(material) = secondary_material {
-            let options = options.with_material_layer(material);
-            let packet_material = material.textured_packet_material();
-            let overflow = if packed_average_unclamped_faces {
-                let projected_vertices = &projected_vertices[..project_count];
-                if packed_average_unclamped_extent_safe_faces {
-                    if options.cull_mode == CullMode::Back {
-                        self.submit_predecoded_model_faces_packed_average_unclamped_extent_safe_batch::<true>(
+        if fused_secondary_material.is_none() {
+            if let Some(material) = secondary_material {
+                let options = options.with_material_layer(material);
+                let packet_material = material.textured_packet_material();
+                let overflow = if packed_average_unclamped_faces {
+                    let projected_vertices = &projected_vertices[..project_count];
+                    if packed_average_unclamped_extent_safe_faces {
+                        if options.cull_mode == CullMode::Back {
+                            self.submit_predecoded_model_faces_packed_average_unclamped_extent_safe_batch::<true>(
                             triangles,
                             projected_vertices,
                             faces,
                             packet_material,
+                            options,
+                            &mut stats,
+                            &mut faces_considered,
+                        )
+                        } else {
+                            self.submit_predecoded_model_faces_packed_average_unclamped_extent_safe_batch::<false>(
+                            triangles,
+                            projected_vertices,
+                            faces,
+                            packet_material,
+                            options,
+                            &mut stats,
+                            &mut faces_considered,
+                        )
+                        }
+                    } else if options.cull_mode == CullMode::Back {
+                        self.submit_predecoded_model_faces_packed_average_unclamped_batch::<true>(
+                            triangles,
+                            projected_vertices,
+                            faces,
+                            packet_material,
+                            material,
                             options,
                             &mut stats,
                             &mut faces_considered,
                         )
                     } else {
-                        self.submit_predecoded_model_faces_packed_average_unclamped_extent_safe_batch::<false>(
+                        self.submit_predecoded_model_faces_packed_average_unclamped_batch::<false>(
                             triangles,
                             projected_vertices,
                             faces,
                             packet_material,
+                            material,
                             options,
                             &mut stats,
                             &mut faces_considered,
                         )
                     }
-                } else if options.cull_mode == CullMode::Back {
-                    self.submit_predecoded_model_faces_packed_average_unclamped_batch::<true>(
-                        triangles,
-                        projected_vertices,
-                        faces,
-                        packet_material,
-                        material,
-                        options,
-                        &mut stats,
-                        &mut faces_considered,
-                    )
                 } else {
-                    self.submit_predecoded_model_faces_packed_average_unclamped_batch::<false>(
-                        triangles,
-                        projected_vertices,
-                        faces,
-                        packet_material,
-                        material,
-                        options,
-                        &mut stats,
-                        &mut faces_considered,
-                    )
-                }
-            } else {
-                let mut overflow = false;
-                let mut face_index = 0usize;
-                while face_index < faces.len() {
-                    faces_considered = faces_considered.wrapping_add(1);
-                    overflow = if packed_back_average_in_front_faces {
-                        self.submit_predecoded_model_face_packed_back_average_in_front_fast(
-                            triangles,
-                            projected_vertices,
-                            project_count,
-                            faces[face_index],
-                            packet_material,
-                            material,
-                            options,
-                            &mut stats,
-                        )
-                    } else if packed_back_in_front_faces {
-                        self.submit_predecoded_model_face_packed_back_in_front_fast(
-                            triangles,
-                            projected_vertices,
-                            project_count,
-                            faces[face_index],
-                            packet_material,
-                            material,
-                            options,
-                            &mut stats,
-                        )
-                    } else if packed_fast_faces {
-                        self.submit_predecoded_model_face_packed_fast(
-                            triangles,
-                            projected_vertices,
-                            project_count,
-                            faces[face_index],
-                            all_projected_vertices_in_front,
-                            near_z,
-                            packet_material,
-                            material,
-                            options,
-                            &mut stats,
-                        )
-                    } else {
-                        self.submit_predecoded_model_face(
-                            triangles,
-                            projected_vertices,
-                            project_count,
-                            faces[face_index],
-                            all_projected_vertices_in_front,
-                            near_z,
-                            packet_material,
-                            material,
-                            options,
-                            &mut stats,
-                        )
-                    };
-                    if overflow {
-                        break;
+                    let mut overflow = false;
+                    let mut face_index = 0usize;
+                    while face_index < faces.len() {
+                        faces_considered = faces_considered.wrapping_add(1);
+                        overflow = if packed_back_average_in_front_faces {
+                            self.submit_predecoded_model_face_packed_back_average_in_front_fast(
+                                triangles,
+                                projected_vertices,
+                                project_count,
+                                faces[face_index],
+                                packet_material,
+                                material,
+                                options,
+                                &mut stats,
+                            )
+                        } else if packed_back_in_front_faces {
+                            self.submit_predecoded_model_face_packed_back_in_front_fast(
+                                triangles,
+                                projected_vertices,
+                                project_count,
+                                faces[face_index],
+                                packet_material,
+                                material,
+                                options,
+                                &mut stats,
+                            )
+                        } else if packed_fast_faces {
+                            self.submit_predecoded_model_face_packed_fast(
+                                triangles,
+                                projected_vertices,
+                                project_count,
+                                faces[face_index],
+                                all_projected_vertices_in_front,
+                                near_z,
+                                packet_material,
+                                material,
+                                options,
+                                &mut stats,
+                            )
+                        } else {
+                            self.submit_predecoded_model_face(
+                                triangles,
+                                projected_vertices,
+                                project_count,
+                                faces[face_index],
+                                all_projected_vertices_in_front,
+                                near_z,
+                                packet_material,
+                                material,
+                                options,
+                                &mut stats,
+                            )
+                        };
+                        if overflow {
+                            break;
+                        }
+                        face_index += 1;
                     }
-                    face_index += 1;
+                    overflow
+                };
+                if overflow {
+                    crate::telemetry::stage_end(crate::telemetry::stage::TEXTURED_MODEL_FACES);
+                    emit_textured_model_detail_counters(
+                        joint_count,
+                        model.part_count(),
+                        project_count,
+                        faces_considered,
+                        blend_vertices,
+                        all_projected_vertices_in_front,
+                        all_projected_vertices_inside_hw_bounds,
+                        packed_average_unclamped_faces,
+                        packed_back_in_front_faces,
+                        packed_fast_faces,
+                        &stats,
+                    );
+                    return stats;
                 }
-                overflow
-            };
-            if overflow {
-                crate::telemetry::stage_end(crate::telemetry::stage::TEXTURED_MODEL_FACES);
-                emit_textured_model_detail_counters(
-                    joint_count,
-                    model.part_count(),
-                    project_count,
-                    faces_considered,
-                    blend_vertices,
-                    all_projected_vertices_in_front,
-                    all_projected_vertices_inside_hw_bounds,
-                    packed_average_unclamped_faces,
-                    packed_back_in_front_faces,
-                    packed_fast_faces,
-                    &stats,
-                );
-                return stats;
             }
         }
         crate::telemetry::stage_end(crate::telemetry::stage::TEXTURED_MODEL_FACES);
@@ -956,6 +1000,139 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
 
     #[allow(clippy::too_many_arguments)]
     #[inline(always)]
+    pub(super) fn submit_predecoded_model_faces_layered_bucketed_average_unclamped_extent_safe_batch<
+        const CULL_BACK: bool,
+    >(
+        &mut self,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
+        projected_vertices: &[ProjectedVertex],
+        faces: &[TexturedModelRenderFace],
+        base_material: TexturedPacketMaterial,
+        secondary_material: TexturedPacketMaterial,
+        base_options: WorldSurfaceOptions,
+        secondary_options: WorldSurfaceOptions,
+        stats: &mut TexturedModelRenderStats,
+        faces_considered: &mut u32,
+    ) {
+        debug_assert!(matches!(self.ordering, WorldCommandOrdering::Bucketed));
+        debug_assert!(
+            faces.len().saturating_mul(2) <= self.commands.len().saturating_sub(self.command_len)
+        );
+        debug_assert!(faces.len().saturating_mul(2) <= triangles.remaining());
+
+        let base_command_start = self.command_len;
+        let secondary_command_start = base_command_start + faces.len();
+        let compact_commands = self.commands.as_mut_ptr().cast::<BucketedWorldCommand>();
+        debug_assert_eq!(base_options.depth_band, secondary_options.depth_band);
+        debug_assert_eq!(base_options.depth_range, secondary_options.depth_range);
+        debug_assert_eq!(base_options.depth_bias, secondary_options.depth_bias);
+        let mut culled_triangles = 0u16;
+        let mut submitted_triangles = 0usize;
+
+        let mut face_index = 0usize;
+        while face_index < faces.len() {
+            let face = faces[face_index];
+            let ia = face.vertex_indices[0] as usize;
+            let ib = face.vertex_indices[1] as usize;
+            let ic = face.vertex_indices[2] as usize;
+            let projected = unsafe {
+                // SAFETY: model faces are validated against the model vertex
+                // count during decode, and this path is entered only after the
+                // complete vertex set was projected.
+                [
+                    *projected_vertices.get_unchecked(ia),
+                    *projected_vertices.get_unchecked(ib),
+                    *projected_vertices.get_unchecked(ic),
+                ]
+            };
+
+            if CULL_BACK && projected_back_facing(projected) {
+                culled_triangles = culled_triangles.wrapping_add(1);
+                face_index += 1;
+                continue;
+            }
+
+            let positions = [
+                (projected[0].sx, projected[0].sy),
+                (projected[1].sx, projected[1].sy),
+                (projected[2].sx, projected[2].sy),
+            ];
+            let base_triangle = unsafe {
+                triangles.push_unchecked(TriTextured::with_packet_material_packed_uv_words(
+                    positions,
+                    face.uv_words,
+                    base_material,
+                ))
+            };
+            let base_triangle = base_triangle as *mut TriTextured as *mut u32;
+            let secondary_triangle = unsafe {
+                triangles.push_unchecked(TriTextured::with_packet_material_packed_uv_words(
+                    positions,
+                    face.uv_words,
+                    secondary_material,
+                ))
+            };
+            let secondary_triangle = secondary_triangle as *mut TriTextured as *mut u32;
+
+            let depth = CameraDepth::new(
+                ((projected[0].sz + projected[1].sz + projected[2].sz) / 3)
+                    .saturating_add(base_options.depth_bias),
+            );
+            let base_slot = base_options
+                .depth_band
+                .slot_depth::<OT_DEPTH>(base_options.depth_range, depth);
+            unsafe {
+                // SAFETY: the capacity preflight reserves two command slots per
+                // input face. Base and secondary regions are disjoint until the
+                // secondary region is compacted after the traversal.
+                compact_commands
+                    .add(base_command_start + submitted_triangles)
+                    .write(BucketedWorldCommand::new(
+                        base_triangle,
+                        base_slot.index(),
+                        TriTextured::WORDS,
+                    ));
+                compact_commands
+                    .add(secondary_command_start + submitted_triangles)
+                    .write(BucketedWorldCommand::new(
+                        secondary_triangle,
+                        base_slot.index(),
+                        TriTextured::WORDS,
+                    ));
+            }
+            submitted_triangles += 1;
+            face_index += 1;
+        }
+
+        unsafe {
+            // SAFETY: both ranges contain `submitted_triangles` initialized
+            // compact commands. `copy` permits overlap when culled faces leave
+            // a gap between the base and secondary regions.
+            core::ptr::copy(
+                compact_commands.add(secondary_command_start),
+                compact_commands.add(base_command_start + submitted_triangles),
+                submitted_triangles,
+            );
+        }
+        self.command_len = base_command_start + submitted_triangles.saturating_mul(2);
+
+        let processed = faces.len().min(u16::MAX as usize) as u16;
+        let submitted = submitted_triangles.min(u16::MAX as usize) as u16;
+        *faces_considered = faces_considered.wrapping_add(u32::from(processed).wrapping_mul(2));
+        flush_packed_unclamped_model_batch_stats(
+            stats,
+            0,
+            processed.wrapping_mul(2),
+            processed.wrapping_mul(2),
+            culled_triangles.wrapping_mul(2),
+            submitted.wrapping_mul(2),
+            submitted.wrapping_mul(2),
+            0,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[inline(always)]
     pub(super) fn submit_predecoded_model_faces_packed_average_unclamped_extent_safe_batch<
         const CULL_BACK: bool,
     >(
@@ -968,6 +1145,24 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         stats: &mut TexturedModelRenderStats,
         faces_considered: &mut u32,
     ) -> bool {
+        if matches!(self.ordering, WorldCommandOrdering::Bucketed)
+            && faces.len() <= triangles.remaining()
+            && faces.len() <= self.commands.len().saturating_sub(self.command_len)
+        {
+            self.submit_predecoded_model_faces_bucketed_average_unclamped_extent_safe_batch::<
+                CULL_BACK,
+            >(
+                triangles,
+                projected_vertices,
+                faces,
+                packet_material,
+                options,
+                stats,
+                faces_considered,
+            );
+            return false;
+        }
+
         let mut culled_triangles = 0u16;
         let mut submitted_triangles = 0u16;
         let mut fast_submitted_triangles = 0u16;
@@ -1055,6 +1250,100 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             0,
         );
         false
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[inline(always)]
+    fn submit_predecoded_model_faces_bucketed_average_unclamped_extent_safe_batch<
+        const CULL_BACK: bool,
+    >(
+        &mut self,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
+        projected_vertices: &[ProjectedVertex],
+        faces: &[TexturedModelRenderFace],
+        packet_material: TexturedPacketMaterial,
+        options: WorldSurfaceOptions,
+        stats: &mut TexturedModelRenderStats,
+        faces_considered: &mut u32,
+    ) {
+        debug_assert!(matches!(self.ordering, WorldCommandOrdering::Bucketed));
+        debug_assert!(faces.len() <= triangles.remaining());
+        debug_assert!(faces.len() <= self.commands.len().saturating_sub(self.command_len));
+
+        let command_start = self.command_len;
+        let compact_commands = self.commands.as_mut_ptr().cast::<BucketedWorldCommand>();
+        let mut culled_triangles = 0u16;
+        let mut submitted_triangles = 0usize;
+        let mut face_index = 0usize;
+        while face_index < faces.len() {
+            let face = faces[face_index];
+            let ia = face.vertex_indices[0] as usize;
+            let ib = face.vertex_indices[1] as usize;
+            let ic = face.vertex_indices[2] as usize;
+            let projected = unsafe {
+                // SAFETY: decoded faces were validated against the completely
+                // projected model vertex slice before entering this batch.
+                [
+                    *projected_vertices.get_unchecked(ia),
+                    *projected_vertices.get_unchecked(ib),
+                    *projected_vertices.get_unchecked(ic),
+                ]
+            };
+            if CULL_BACK && projected_back_facing(projected) {
+                culled_triangles = culled_triangles.wrapping_add(1);
+                face_index += 1;
+                continue;
+            }
+
+            let triangle = unsafe {
+                // SAFETY: the caller preflighted one slot for every input face,
+                // which is a conservative bound after backface culling.
+                triangles.push_unchecked(TriTextured::with_packet_material_packed_uv_words(
+                    [
+                        (projected[0].sx, projected[0].sy),
+                        (projected[1].sx, projected[1].sy),
+                        (projected[2].sx, projected[2].sy),
+                    ],
+                    face.uv_words,
+                    packet_material,
+                ))
+            } as *mut TriTextured as *mut u32;
+            let depth = CameraDepth::new(
+                ((projected[0].sz + projected[1].sz + projected[2].sz) / 3)
+                    .saturating_add(options.depth_bias),
+            );
+            let slot = options
+                .depth_band
+                .slot_depth::<OT_DEPTH>(options.depth_range, depth);
+            unsafe {
+                // SAFETY: the command preflight reserves one slot per input
+                // face and `submitted_triangles <= face_index`.
+                compact_commands
+                    .add(command_start + submitted_triangles)
+                    .write(BucketedWorldCommand::new(
+                        triangle,
+                        slot.index(),
+                        TriTextured::WORDS,
+                    ));
+            }
+            submitted_triangles += 1;
+            face_index += 1;
+        }
+        self.command_len = command_start + submitted_triangles;
+
+        let processed = faces.len().min(u16::MAX as usize) as u16;
+        let submitted = submitted_triangles.min(u16::MAX as usize) as u16;
+        *faces_considered = faces_considered.wrapping_add(u32::from(processed));
+        flush_packed_unclamped_model_batch_stats(
+            stats,
+            0,
+            processed,
+            processed,
+            culled_triangles,
+            submitted,
+            submitted,
+            0,
+        );
     }
 
     #[allow(clippy::too_many_arguments)]

@@ -2441,7 +2441,7 @@ pub(crate) fn draw_node_kind_editor(
                 .color(STUDIO_TEXT_WEAK)
                 .small(),
             );
-            changed |= draw_character_controller_settings(ui, settings);
+            changed |= draw_character_controller_settings(ui, settings, *player);
         }
         NodeKind::Camera { settings } => {
             ui.weak("Component: third-person gameplay camera for the player Entity. The Entity transform supplies the start position and yaw.");
