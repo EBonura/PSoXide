@@ -668,8 +668,11 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 // arena push succeeds, and depth slots are produced by this
                 // pass' OT-depth-aware depth-band mapping.
                 unsafe {
-                    self.ot
-                        .add_raw_unchecked(command.slot(), command.packet_ptr, command.words())
+                    self.ot.add_raw_tag_unchecked(
+                        command.slot(),
+                        command.packet_ptr,
+                        command.tag_high(),
+                    )
                 };
             }
             return;
