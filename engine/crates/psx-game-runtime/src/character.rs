@@ -18,6 +18,9 @@ use psx_level::{
 pub enum PlayerAnim {
     Idle,
     Walk,
+    WalkBackward,
+    StrafeLeft,
+    StrafeRight,
     Run,
     Roll,
     Backstep,
@@ -31,6 +34,9 @@ impl PlayerAnim {
         match self {
             Self::Idle => CharacterAnimationAction::Idle,
             Self::Walk => CharacterAnimationAction::Walk,
+            Self::WalkBackward => CharacterAnimationAction::WalkBackward,
+            Self::StrafeLeft => CharacterAnimationAction::StrafeLeft,
+            Self::StrafeRight => CharacterAnimationAction::StrafeRight,
             Self::Run => CharacterAnimationAction::Run,
             Self::Roll => CharacterAnimationAction::Roll,
             Self::Backstep => CharacterAnimationAction::Backstep,
@@ -218,6 +224,15 @@ impl RuntimeCharacter {
         match anim.action() {
             CharacterAnimationAction::Idle => idle,
             CharacterAnimationAction::Walk => walk,
+            CharacterAnimationAction::WalkBackward => self
+                .action_clip(CharacterAnimationAction::WalkBackward)
+                .unwrap_or(walk),
+            CharacterAnimationAction::StrafeLeft => self
+                .action_clip(CharacterAnimationAction::StrafeLeft)
+                .unwrap_or(walk),
+            CharacterAnimationAction::StrafeRight => self
+                .action_clip(CharacterAnimationAction::StrafeRight)
+                .unwrap_or(walk),
             CharacterAnimationAction::Run => self
                 .action_clip(CharacterAnimationAction::Run)
                 .unwrap_or(walk),

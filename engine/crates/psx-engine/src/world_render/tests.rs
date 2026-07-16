@@ -411,6 +411,47 @@ fn generated_cache_records_reconstruct_cached_samples() {
 }
 
 #[test]
+fn cached_cell_visibility_sphere_tightly_and_conservatively_bounds_cell_aabb() {
+    let (flat_center, flat_radius) = cell_visibility_bounds(0, 0, 1664, 1152, 1152);
+    assert_eq!(flat_center, WorldVertex::new(832, 1152, 832));
+    assert_eq!(flat_radius, 1177);
+    assert!(
+        flat_radius < 2496,
+        "old loose radius should stay eliminated"
+    );
+    assert!(flat_radius.saturating_mul(flat_radius) >= 832 * 832 * 2);
+
+    let (odd_center, odd_radius) = cell_visibility_bounds(0, 0, 5, -5, 0);
+    assert_eq!(odd_center, WorldVertex::new(2, -2, 2));
+    // Integer midpoint truncation makes the far corner delta (3, 3, 3).
+    assert!(odd_radius.saturating_mul(odd_radius) >= 3 * 3 * 3);
+    assert_eq!(odd_radius, 6);
+}
+
+#[test]
+fn cell_frustum_sphere_test_includes_plane_normal_support() {
+    let camera = WorldCamera::from_basis(
+        WorldProjection::new(160, 120, 200, 40),
+        WorldVertex::new(0, 0, 0),
+        Q12::ZERO,
+        Q12::ONE,
+        Q12::ZERO,
+        Q12::ONE,
+    );
+    let options = WorldSurfaceOptions::new(
+        crate::DepthBand::whole(),
+        crate::DepthRange::new(40, 10_000),
+    );
+    let frustum = CellFrustum::new(&camera, options, 0);
+
+    // At z=1000 the right edge is x=800. A radius-100 sphere centered at
+    // x=900 still intersects the side plane; `radius*focal` alone incorrectly
+    // rejected it, while the full plane-normal support must retain it.
+    assert!(frustum.sphere_visible(ViewVertex::new(900, 0, 1000), 100));
+    assert!(!frustum.sphere_visible(ViewVertex::new(1100, 0, 1000), 100));
+}
+
+#[test]
 fn floor_depth_uses_farthest_projected_depth() {
     const ZERO: TriTextured = TriTextured::new(
         [(0, 0), (0, 0), (0, 0)],

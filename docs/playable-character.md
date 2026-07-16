@@ -129,8 +129,17 @@ Per-frame update:
 - Left stick, or D-pad as fallback: camera-relative movement.
 - No movement: `Idle` animation.
 - Normal movement: `Walk` animation at `walk_speed`.
+- While hard-locked, the motor preserves target-facing and selects
+  `WalkBackward`, `StrafeLeft`, or `StrafeRight` from the movement
+  direction instead of rotating the model into a forward walk.
+- Hard-lock facing, camera focus, switching, range checks, and the target
+  marker follow a game entity's live runtime transform rather than its
+  authored spawn transform.
 - CIRCLE held while moving: `Run` animation at `run_speed`. If the
   character has no run clip, the walk animation plays at run speed.
+  Locked lateral/backward movement stays at the authored walk cadence.
+- CIRCLE tapped while locked and moving backward starts `Backstep`;
+  other movement directions start `Roll`.
 - SELECT: toggle a free-orbit debug camera.
 - Right stick: manual third-person camera orbit when the pad is in
   analog mode.
@@ -151,9 +160,11 @@ floor -- coarse but enough to keep the player inside the room until
 proper capsule sliding lands. The committed Y position follows the
 sampled floor height under the player's root.
 
-Animation state for editor-playtest is currently `Idle` / `Walk` / `Run`.
-State changes reset the animation phase so transitions don't pop
-into the middle of a clip.
+Animation state for editor-playtest includes free locomotion, directional
+lock-on locomotion, roll/backstep, and light/heavy attacks. Optional
+directional clips fall back to `Walk`; missing evade and attack clips retain
+their established deterministic fallbacks. State changes reset the animation
+phase so transitions don't pop into the middle of a clip.
 
 Camera: `psx_engine::ThirdPersonCameraState` owns the follow rig.
 It starts from the Character camera defaults, placing the focus and
@@ -208,7 +219,7 @@ Warnings:
   applies to room surfaces only).
 - Capsule wall sliding and step-height limits.
 - Wall-slide collision response.
-- Jump / crouch / strafe actions.
+- Jump and crouch actions.
 - Portal / room-to-room transitions.
 - Streaming or async asset baking.
 
