@@ -968,34 +968,20 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         stats: &mut TexturedModelRenderStats,
         faces_considered: &mut u32,
     ) -> bool {
-        let mut skipped_triangles = 0u16;
-        let mut packed_face_calls = 0u16;
-        let mut packed_unclamped_face_calls = 0u16;
         let mut culled_triangles = 0u16;
         let mut submitted_triangles = 0u16;
         let mut fast_submitted_triangles = 0u16;
 
         let mut face_index = 0usize;
         while face_index < faces.len() {
-            *faces_considered = faces_considered.wrapping_add(1);
             let face = faces[face_index];
             let ia = face.vertex_indices[0] as usize;
             let ib = face.vertex_indices[1] as usize;
             let ic = face.vertex_indices[2] as usize;
-            if ia >= projected_vertices.len()
-                || ib >= projected_vertices.len()
-                || ic >= projected_vertices.len()
-            {
-                skipped_triangles = skipped_triangles.wrapping_add(1);
-                face_index += 1;
-                continue;
-            }
-
-            packed_face_calls = packed_face_calls.wrapping_add(1);
-            packed_unclamped_face_calls = packed_unclamped_face_calls.wrapping_add(1);
             let projected = unsafe {
-                // SAFETY: each index was checked against `projected_vertices.len()`
-                // immediately above. The slice is pretrimmed to `project_count`.
+                // SAFETY: model faces are validated against the model vertex count
+                // once while decoding. This extent-safe batch is reachable only
+                // when the complete model vertex set was projected.
                 [
                     *projected_vertices.get_unchecked(ia),
                     *projected_vertices.get_unchecked(ib),
@@ -1021,11 +1007,13 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                     fast_submitted_triangles = fast_submitted_triangles.wrapping_add(1);
                 }
                 ModelTrianglePacketResult::CommandOverflow => {
+                    let processed = (face_index + 1).min(u16::MAX as usize) as u16;
+                    *faces_considered = faces_considered.wrapping_add(u32::from(processed));
                     flush_packed_unclamped_model_batch_stats(
                         stats,
-                        skipped_triangles,
-                        packed_face_calls,
-                        packed_unclamped_face_calls,
+                        0,
+                        processed,
+                        processed,
                         culled_triangles,
                         submitted_triangles,
                         fast_submitted_triangles,
@@ -1035,11 +1023,13 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                     return true;
                 }
                 ModelTrianglePacketResult::PrimitiveOverflow => {
+                    let processed = (face_index + 1).min(u16::MAX as usize) as u16;
+                    *faces_considered = faces_considered.wrapping_add(u32::from(processed));
                     flush_packed_unclamped_model_batch_stats(
                         stats,
-                        skipped_triangles,
-                        packed_face_calls,
-                        packed_unclamped_face_calls,
+                        0,
+                        processed,
+                        processed,
                         culled_triangles,
                         submitted_triangles,
                         fast_submitted_triangles,
@@ -1052,11 +1042,13 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             face_index += 1;
         }
 
+        let processed = faces.len().min(u16::MAX as usize) as u16;
+        *faces_considered = faces_considered.wrapping_add(u32::from(processed));
         flush_packed_unclamped_model_batch_stats(
             stats,
-            skipped_triangles,
-            packed_face_calls,
-            packed_unclamped_face_calls,
+            0,
+            processed,
+            processed,
             culled_triangles,
             submitted_triangles,
             fast_submitted_triangles,
