@@ -1667,7 +1667,11 @@ impl CameraRig {
 
         let q12_signed = |v: u16| -> i32 {
             let raw = (v & 0x0fff) as i32;
-            if raw >= 2048 { raw - 4096 } else { raw }
+            if raw >= 2048 {
+                raw - 4096
+            } else {
+                raw
+            }
         };
         let to_rad = std::f32::consts::TAU / 4096.0;
         let dy = yaw_delta as f32 * to_rad;

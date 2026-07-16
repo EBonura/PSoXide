@@ -156,6 +156,7 @@ pub(super) fn draw_player_equipment<
                         weapon_model.local_to_world,
                         ModelPoseTranslation::ZERO,
                         material,
+                        None,
                         model_options,
                         faces,
                         model_parts,

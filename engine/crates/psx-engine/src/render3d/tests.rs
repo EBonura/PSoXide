@@ -35,6 +35,8 @@ const fn world_command_layer(
 #[test]
 fn projected_vertex_invalid_sentinel_is_not_renderable() {
     assert!(!ProjectedVertex::INVALID.is_valid());
+    assert!(!ProjectedVertex::default().is_valid());
+    assert!(!ProjectedVertex::new(0, 0, -1).is_valid());
     assert!(ProjectedVertex::new(0, 0, 16).is_valid());
 }
 
@@ -411,6 +413,44 @@ fn textured_near_clip_keeps_visible_polygon() {
     assert_eq!(out[0].position.z, 40);
     assert_eq!(out[1].position.z, 40);
     assert!(out[..count].iter().all(|v| v.position.z >= 40));
+}
+
+#[test]
+fn gouraud_room_triangle_clips_at_near_plane_without_full_view_arena() {
+    const ZERO: TriTexturedGouraud = TriTexturedGouraud::new(
+        [(0, 0), (0, 0), (0, 0)],
+        [(0, 0), (0, 0), (0, 0)],
+        [(0, 0, 0), (0, 0, 0), (0, 0, 0)],
+        0,
+        0,
+    );
+    let mut ot_storage = OrderingTable::<8>::new();
+    let mut ot = OtFrame::begin(&mut ot_storage);
+    let mut triangle_storage = [const { ZERO }; 8];
+    let mut triangles = PrimitiveArena::new(&mut triangle_storage);
+    let mut commands = [WorldTriCommand::EMPTY; 8];
+    let mut pass = WorldRenderPass::new(&mut ot, &mut commands);
+    let projection = WorldProjection::new(160, 120, 200, 40);
+
+    let stats = pass.submit_textured_gouraud_view_triangle_uv_words(
+        &mut triangles,
+        [
+            ViewVertex::new(-20, 0, 20),
+            ViewVertex::new(20, 0, 80),
+            ViewVertex::new(-20, 40, 80),
+        ],
+        [0, 63, 63 << 8],
+        [(64, 96, 128), (128, 160, 192), (192, 224, 255)],
+        projection,
+        TextureMaterial::opaque(0, 0, (128, 128, 128)),
+        WorldSurfaceOptions::new(DepthBand::whole(), DepthRange::new(0, 1000))
+            .with_cull_mode(CullMode::None),
+    );
+
+    assert_eq!(stats.clipped_triangles, 1);
+    assert_eq!(stats.dropped_triangles, 0);
+    assert!(stats.submitted_triangles >= 2);
+    assert!(pass.command_len() >= 2);
 }
 
 #[test]
@@ -1039,6 +1079,52 @@ fn prepared_depth_gouraud_submit_matches_fixed_depth_leaf() {
         prepared_commands[0].render_layer
     );
     assert_eq!(regular_commands[0].words, prepared_commands[0].words);
+}
+
+#[test]
+fn prepared_depth_quad_splits_before_ps1_extent_rejection() {
+    let material = TextureMaterial::opaque(2, 4, (128, 128, 128));
+    // Every coordinate fits the PS1 packet field, but each GP0(3Ch)
+    // triangle exceeds the real GPU's 1023x511 delta limits.
+    let verts = [
+        ProjectedVertex::new(-900, -400, 100),
+        ProjectedVertex::new(900, -400, 120),
+        ProjectedVertex::new(-900, 400, 140),
+        ProjectedVertex::new(900, 400, 160),
+    ];
+    let uv_words = [
+        model_uv_word((0, 0)),
+        model_uv_word((63, 0)),
+        model_uv_word((0, 63)),
+        model_uv_word((63, 63)),
+    ];
+    let colors = [(128, 96, 64), (80, 120, 160), (32, 48, 96), (160, 128, 96)];
+    let options = WorldSurfaceOptions::new(DepthBand::new(1, 6), DepthRange::new(0, 1000))
+        .with_depth_policy(DepthPolicy::Fixed(320))
+        .with_cull_mode(CullMode::None);
+    let prepared = PreparedTriangleDepth::from_fixed_options::<8>(options).unwrap();
+
+    let mut ot_storage = OrderingTable::<8>::new();
+    let mut ot = OtFrame::begin(&mut ot_storage);
+    let mut packet_scratch = crate::PrimitivePacketScratch::<16>::ZERO;
+    let mut packets = crate::PrimitivePacketArena::new(&mut packet_scratch);
+    let mut commands = [WorldTriCommand::EMPTY; 16];
+    let mut pass = WorldRenderPass::new(&mut ot, &mut commands);
+
+    let stats = pass.submit_textured_gouraud_quad_prescreened_uv_words_prepared_depth(
+        &mut packets,
+        None,
+        verts,
+        uv_words,
+        colors,
+        material,
+        options,
+        prepared,
+    );
+
+    assert!(stats.split_triangles > 0);
+    assert!(stats.submitted_triangles > 2);
+    assert_eq!(packets.len(), stats.submitted_triangles as usize);
 }
 
 #[test]

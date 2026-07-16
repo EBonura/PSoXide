@@ -410,13 +410,7 @@ impl EditorTextures {
                 // PSXT files that explicitly opt into transparent
                 // zero must keep raw CLUT 0 so the preview matches
                 // the runtime cutout path.
-                let marked = if transparent_index_zero && i == 0 && raw == 0 {
-                    0
-                } else if force_zero_opaque {
-                    opaque_room_clut_entry(raw)
-                } else {
-                    raw
-                };
+                let marked = preview_clut_entry(i, raw, transparent_index_zero, force_zero_opaque);
                 let vram_idx = (clut_y as usize) * VRAM_WIDTH as usize + clut_x as usize + i;
                 self.vram[vram_idx] = marked;
             }
@@ -1240,6 +1234,22 @@ fn opaque_room_clut_entry(raw: u16) -> u16 {
     raw | 0x8000
 }
 
+/// Match the runtime's PS1 CLUT policy in the editor preview. Visible indexed
+/// texels need STP for a semi-transparent textured primitive to blend; only an
+/// explicitly transparent palette-zero entry remains clear.
+fn preview_clut_entry(
+    index: usize,
+    raw: u16,
+    transparent_index_zero: bool,
+    force_zero_opaque: bool,
+) -> u16 {
+    if transparent_index_zero && !force_zero_opaque && index == 0 && raw == 0 {
+        0
+    } else {
+        opaque_room_clut_entry(raw)
+    }
+}
+
 fn model_atlas_clut_entry(index: usize, raw: u16, transparent_index_zero: bool) -> u16 {
     if transparent_index_zero && index == 0 && raw == 0 {
         0
@@ -1299,8 +1309,9 @@ fn align_up_to(value: u16, boundary: u16) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::{
-        align_up_to, model_atlas_clut_entry, opaque_room_clut_entry, preview_texture_upload_plan,
-        EditorTextures, SHADOW_CLUT_X, SHADOW_CLUT_Y, SHADOW_TPAGE_X, SHADOW_TPAGE_Y,
+        align_up_to, model_atlas_clut_entry, opaque_room_clut_entry, preview_clut_entry,
+        preview_texture_upload_plan, EditorTextures, SHADOW_CLUT_X, SHADOW_CLUT_Y, SHADOW_TPAGE_X,
+        SHADOW_TPAGE_Y,
     };
     use psx_gpu::material::TextureWindow;
     use psx_gpu_render::VRAM_WIDTH;
@@ -1408,8 +1419,7 @@ mod tests {
         let mut project = ProjectDocument::new("secondary layer preview");
         let mut material = MaterialResource::opaque(None);
         material.secondary_layer = Some(ModelSecondaryLayer::default());
-        let material_id =
-            project.add_resource("Crystal", ResourceData::Material(material));
+        let material_id = project.add_resource("Crystal", ResourceData::Material(material));
 
         let mut textures = EditorTextures::new();
         textures.refresh(&project, Path::new("."));
@@ -1438,6 +1448,14 @@ mod tests {
         assert_eq!(model_atlas_clut_entry(2, 0x0001, true), 0x8001);
         assert_eq!(model_atlas_clut_entry(3, 0x001F, true), 0x801F);
         assert_eq!(model_atlas_clut_entry(4, 0x0421, true), 0x8421);
+    }
+
+    #[test]
+    fn preview_clut_marks_visible_entries_for_textured_blending() {
+        assert_eq!(preview_clut_entry(0, 0, true, false), 0);
+        assert_eq!(preview_clut_entry(0, 0, true, true), 0x8000);
+        assert_eq!(preview_clut_entry(1, 0, true, false), 0x8000);
+        assert_eq!(preview_clut_entry(2, 0x1234, true, false), 0x9234);
     }
 
     #[test]

@@ -1,8 +1,7 @@
 use super::*;
 
 /// World sky rendering mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum SkyMode {
     /// Disable authored sky rendering. The renderer clears to
     /// [`SkySettings::lower_color`] only.
@@ -11,7 +10,6 @@ pub enum SkyMode {
     #[default]
     Gradient,
 }
-
 
 /// World-level sky configuration shared by descendant Rooms.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -435,8 +435,7 @@ fn floor_depth_uses_farthest_projected_depth() {
         Angle::ZERO,
     );
     let options =
-        WorldSurfaceOptions::new(crate::DepthBand::whole(), crate::DepthRange::new(0, 4096))
-            .with_textured_triangle_splitting(false);
+        WorldSurfaceOptions::new(crate::DepthBand::whole(), crate::DepthRange::new(0, 4096));
     emit_floor(
         0,
         0,
@@ -515,8 +514,10 @@ fn cached_full_ceiling_faces_playable_interior() {
     let cell_vertices = [0u16, 1, 2, 3];
     let mut projected_indices = [0u16; 4];
     let mut projected = [ProjectedVertex::new(0, 0, 0); 4];
-    let mut projected_ready = [false; 4];
-    let mut projected_depths = [0; 4];
+    // Simulate arbitrary bytes left by the menu/gameplay RAM overlay. The
+    // renderer must initialize only its tiny seen-bit prefix and never trust
+    // persistent per-vertex readiness state.
+    let mut projected_depths = [i32::MAX; 4];
     let mut accepted_cell_indices = [0u16; 1];
     let mut accepted_cell_depths = [0; 1];
 
@@ -527,7 +528,6 @@ fn cached_full_ceiling_faces_playable_interior() {
         &surfaces,
         &mut projected_indices,
         &mut projected,
-        &mut projected_ready,
         &mut projected_depths,
         &mut accepted_cell_indices,
         &mut accepted_cell_depths,
@@ -550,16 +550,93 @@ fn cached_full_ceiling_faces_playable_interior() {
         &mut pass,
     );
     assert_eq!(stats.surfaces_considered, 1);
-    assert_eq!(projected_ready, [false; 4]);
-    // A whole-quad surface with prepared (fixed-cell) depth now emits
-    // a single GP0(3Ch) quad packet instead of two triangle leaves;
-    // the rendered pixels are bit-identical (proved in the emulator
-    // GPU tests).
+    assert_eq!(projected_indices, [0, 1, 2, 3]);
+    assert!(projected_depths.iter().all(|&depth| depth != i32::MAX));
+    // A hardware-safe ceiling keeps the compact GP0(3Ch) quad path.
     assert_eq!(pass.command_len(), 1);
     drop(pass);
 
     let expected_depth = tile_camera_depth(&camera, visible_cells[0], 1024) + HORIZONTAL_DEPTH_BIAS;
     assert_eq!(commands[0].depth_raw(), expected_depth);
+}
+
+#[test]
+fn cached_surface_crossing_near_plane_keeps_visible_half() {
+    let mut ot_storage = psx_gpu::ot::OrderingTable::<8>::new();
+    let mut ot = crate::OtFrame::begin(&mut ot_storage);
+    let mut packet_scratch = crate::PrimitivePacketScratch::<16>::ZERO;
+    let mut triangles = crate::PrimitivePacketArena::new(&mut packet_scratch);
+    let mut commands = [crate::WorldTriCommand::EMPTY; 16];
+    let mut pass = WorldRenderPass::new(&mut ot, &mut commands);
+    let projection = WorldProjection::new(160, 120, 200, 40);
+    let camera = WorldCamera::from_basis(
+        projection,
+        WorldVertex::new(0, 0, 0),
+        crate::Q12::ZERO,
+        crate::Q12::ONE,
+        crate::Q12::ZERO,
+        crate::Q12::ONE,
+    );
+    let vertices = [
+        WorldVertex::new(-50, 0, 10),
+        WorldVertex::new(50, 0, 10),
+        WorldVertex::new(50, 0, -100),
+        WorldVertex::new(-50, 0, -100),
+    ];
+    let cells = [CachedRoomCell::new(0, 0, 0, 0, 128, 0, 1, 0, 4)];
+    let surface = CachedRoomSurface::new(
+        0,
+        [0, 1, 2, 3],
+        [(0, 0), (TILE_UV, 0), (TILE_UV, TILE_UV), (0, TILE_UV)],
+        WorldSurfaceSample {
+            kind: WorldSurfaceKind::Floor,
+            sx: 0,
+            sz: 0,
+            center: RoomPoint::new(0, 0, -45),
+            baked_vertex_rgb: None,
+            ordinal: 0,
+        },
+        SPLIT_NW_SE,
+        WHOLE_QUAD_TRIANGLE_INDEX,
+    );
+    let mut projected_indices = [0u16; 4];
+    let mut projected = [ProjectedVertex::default(); 4];
+    let mut projected_depths = [0; 4];
+    let mut accepted_cell_indices = [0u16; 1];
+    let mut accepted_cell_depths = [0; 1];
+
+    let stats = draw_indexed_cached_room_vertex_lit_visible_cells(
+        &cells,
+        &[0, 1, 2, 3],
+        &vertices,
+        &[surface],
+        &mut projected_indices,
+        &mut projected,
+        &mut projected_depths,
+        &mut accepted_cell_indices,
+        &mut accepted_cell_depths,
+        1,
+        1024,
+        &[WorldRenderMaterial::both(TextureMaterial::opaque(
+            0,
+            0,
+            (128, 128, 128),
+        ))],
+        &NoWorldSurfaceLighting,
+        &camera,
+        WorldSurfaceOptions::new(crate::DepthBand::whole(), crate::DepthRange::new(0, 4096)),
+        CachedRoomDepthMode::PerTriangle,
+        CachedRoomSubdivisionMode::All,
+        &[GridVisibleCell::new(0, 0, 0, 128)],
+        0,
+        None,
+        &mut triangles,
+        &mut pass,
+    );
+
+    assert_eq!(stats.surfaces_considered, 1);
+    assert!(projected.iter().any(|vertex| !vertex.is_valid()));
+    assert!(pass.command_len() > 0);
 }
 
 #[test]
