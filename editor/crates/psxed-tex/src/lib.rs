@@ -428,6 +428,22 @@ fn median_cut_quantize_with_transparent_zero(
     (palette, indices)
 }
 
+/// Quantise RGBA pixels into an indexed palette while reserving index zero
+/// for transparent pixels.
+///
+/// This is the in-memory counterpart of the indexed image conversion path.
+/// Procedural/cook-time texture combiners can use it without encoding an
+/// intermediate PNG merely to reuse the deterministic median-cut quantiser.
+pub fn quantize_rgba_with_transparent_zero(
+    pixels: &[[u8; 4]],
+    n_entries: usize,
+) -> Result<(Vec<[u8; 3]>, Vec<u8>), Error> {
+    if !(2..=256).contains(&n_entries) {
+        return Err(Error::InvalidIndexedInput);
+    }
+    Ok(median_cut_quantize_with_transparent_zero(pixels, n_entries))
+}
+
 /// Median-cut colour quantisation. Input: per-pixel RGB. Output:
 /// (palette, indices) where each index is `< n_entries`.
 ///
@@ -810,5 +826,22 @@ mod tests {
         assert_eq!(left, 0);
         assert_ne!(right, 0);
         assert_eq!(u16::from_le_bytes([psxt[30], psxt[31]]), 0);
+    }
+
+    #[test]
+    fn in_memory_transparent_quantizer_reserves_zero() {
+        let pixels = [[255, 0, 0, 0], [0, 0, 255, 255], [0, 255, 0, 255]];
+        let (palette, indices) = quantize_rgba_with_transparent_zero(&pixels, 16).unwrap();
+        assert_eq!(palette[0], [0, 0, 0]);
+        assert_eq!(indices[0], 0);
+        assert_ne!(indices[1], 0);
+        assert_ne!(indices[2], 0);
+    }
+
+    #[test]
+    fn in_memory_quantizer_rejects_invalid_palette_sizes() {
+        let pixels = [[0, 0, 0, 255]];
+        assert!(quantize_rgba_with_transparent_zero(&pixels, 1).is_err());
+        assert!(quantize_rgba_with_transparent_zero(&pixels, 257).is_err());
     }
 }

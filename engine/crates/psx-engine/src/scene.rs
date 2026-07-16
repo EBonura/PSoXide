@@ -20,6 +20,18 @@ use psx_pad::{button, PadState};
 use crate::frames::{SimTick, VideoHz, VisualFrame};
 use crate::ui::UiTextureSlot;
 
+/// How a scene hands its prepared 3D frame to the GPU.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum RenderSubmission {
+    /// [`Scene::render`] performs any ordering-table submission itself.
+    Immediate,
+    /// [`Scene::render`] only builds CPU-side packets; the runner calls
+    /// [`Scene::submit_render`] after the previous frame is presented.
+    /// This overlaps frame N GPU rasterisation with frame N+1 CPU work
+    /// without requiring a second packet arena.
+    Queued,
+}
+
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct RuntimeRequests {
     timing_realign: bool,
@@ -45,8 +57,9 @@ pub struct Ctx {
     /// to distinguish "newly pressed this frame" from "held across
     /// multiple frames".
     pub pad_prev: PadState,
-    /// Frame buffer the scene draws into. The engine clears it
-    /// before [`Scene::render`] runs, and swaps it after.
+    /// Frame buffer the scene draws into. Immediate scenes receive it cleared
+    /// before [`Scene::render`]; queued scenes prepare CPU packets first and
+    /// receive the clear immediately before [`Scene::submit_render`].
     pub fb: FrameBuffer,
     runtime_requests: RuntimeRequests,
 }
@@ -169,6 +182,13 @@ impl SceneStateRef {
 /// inline (no globals needed). All methods take `&mut Ctx` so the
 /// scene can read pad state and draw into the framebuffer.
 pub trait Scene {
+    /// Select the rendering hand-off contract. Existing scenes use immediate
+    /// submission unless they explicitly opt into queued preparation.
+    #[inline]
+    fn render_submission(&self) -> RenderSubmission {
+        RenderSubmission::Immediate
+    }
+
     /// Called once at boot, before any flow state is entered, for assets
     /// the front-end UI shares with gameplay -- chiefly the [`ui_font`] atlas
     /// menus draw their text with. It runs even when the game boots into a
@@ -244,9 +264,10 @@ pub trait Scene {
     #[inline]
     fn prepare_loading_assets(&mut self, _scene: u16) {}
 
-    /// Draw the current frame. Called after [`update`] and after
-    /// `ctx.fb` has been cleared. The engine submits the final
-    /// swap after this returns.
+    /// Draw or prepare the current frame after [`update`]. Immediate scenes
+    /// are called after `ctx.fb` has been cleared. Queued scenes must only
+    /// build CPU-side packets here; the runner clears the next back buffer and
+    /// calls [`submit_render`](Scene::submit_render) afterwards.
     ///
     /// A scene that kicks its ordering table asynchronously (via
     /// [`OtFrame::submit_async`](crate::OtFrame::submit_async) +
@@ -257,6 +278,13 @@ pub trait Scene {
     ///
     /// [`update`]: Scene::update
     fn render(&mut self, ctx: &mut Ctx);
+
+    /// Submit packets prepared by [`Scene::render`] when
+    /// [`Scene::render_submission`] returns [`RenderSubmission::Queued`].
+    /// Queued scenes must not issue GPU commands from `render`; this hook runs
+    /// after the prior frame has finished and the next back buffer is ready.
+    #[allow(unused_variables)]
+    fn submit_render(&mut self, ctx: &mut Ctx) {}
 
     /// Draw the 2D overlay layer (HUD, prompts, debug readouts) on top
     /// of the frame built by the last [`render`](Scene::render) call.
