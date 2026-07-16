@@ -94,7 +94,11 @@ fn camera_rig_rotate_about_pivot_is_rigid() {
         (dx * dx + dy * dy + dz * dz).sqrt()
     };
     let before = dist(cam0, pivot);
-    for delta in [Vec2::new(64.0, 0.0), Vec2::new(-31.0, 22.0), Vec2::new(5.0, -90.0)] {
+    for delta in [
+        Vec2::new(64.0, 0.0),
+        Vec2::new(-31.0, 22.0),
+        Vec2::new(5.0, -90.0),
+    ] {
         rig.rotate_about(delta, pivot);
         let cam = orbit_camera_position_i32(rig.yaw, rig.pitch, rig.radius, rig.target);
         let after = dist(cam, pivot);
@@ -114,7 +118,11 @@ fn camera_rig_rotate_about_pivot_is_rigid() {
     assert_eq!(rig.yaw, 1024);
     assert!(rig.target[0].abs() <= 1, "target x: {}", rig.target[0]);
     assert_eq!(rig.target[1], 0);
-    assert!((rig.target[2] + 1000).abs() <= 1, "target z: {}", rig.target[2]);
+    assert!(
+        (rig.target[2] + 1000).abs() <= 1,
+        "target z: {}",
+        rig.target[2]
+    );
 }
 
 #[test]

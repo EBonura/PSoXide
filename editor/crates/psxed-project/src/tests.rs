@@ -2008,7 +2008,10 @@ fn model_targeted_animation_clips_do_not_leak_across_shared_skeletons() {
             .collect::<Vec<_>>(),
         vec![clip_a, shared],
     );
-    assert_eq!(project.resolved_model_animation_index(model_a, clip_b), None);
+    assert_eq!(
+        project.resolved_model_animation_index(model_a, clip_b),
+        None
+    );
 
     let resolved_b = project.resolved_model_animation_clips(model_b);
     assert_eq!(
@@ -2018,7 +2021,10 @@ fn model_targeted_animation_clips_do_not_leak_across_shared_skeletons() {
             .collect::<Vec<_>>(),
         vec![clip_b, shared],
     );
-    assert_eq!(project.resolved_model_animation_index(model_b, clip_a), None);
+    assert_eq!(
+        project.resolved_model_animation_index(model_b, clip_a),
+        None
+    );
 
     let restored = ProjectDocument::from_ron_str(&project.to_ron_string().unwrap()).unwrap();
     assert_eq!(restored, project);

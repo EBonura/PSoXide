@@ -382,7 +382,6 @@ impl Scene for Playtest {
                                     &mut room_projection.indices[..vertex_count];
                                 let projected_vertices =
                                     &mut room_projection.vertices[..vertex_count];
-                                let projected_ready = &mut room_projection.ready[..vertex_count];
                                 let projected_depths = &mut room_projection.depths[..vertex_count];
                                 let cell_scratch = cell_scratch_arena();
                                 let accepted_cell_indices = &mut cell_scratch.indices[..];
@@ -394,7 +393,6 @@ impl Scene for Playtest {
                                     cached_surfaces,
                                     projected_indices,
                                     projected_vertices,
-                                    projected_ready,
                                     projected_depths,
                                     accepted_cell_indices,
                                     accepted_cell_depths,
@@ -518,8 +516,6 @@ impl Scene for Playtest {
                                         &mut room_projection.indices[..vertex_count];
                                     let projected_vertices =
                                         &mut room_projection.vertices[..vertex_count];
-                                    let projected_ready =
-                                        &mut room_projection.ready[..vertex_count];
                                     let projected_depths =
                                         &mut room_projection.depths[..vertex_count];
                                     let cell_scratch = cell_scratch_arena();
@@ -532,7 +528,6 @@ impl Scene for Playtest {
                                         cached_surfaces,
                                         projected_indices,
                                         projected_vertices,
-                                        projected_ready,
                                         projected_depths,
                                         accepted_cell_indices,
                                         accepted_cell_depths,
@@ -615,8 +610,6 @@ impl Scene for Playtest {
                                         &mut room_projection.indices[..vertex_count];
                                     let projected_vertices =
                                         &mut room_projection.vertices[..vertex_count];
-                                    let projected_ready =
-                                        &mut room_projection.ready[..vertex_count];
                                     let projected_depths =
                                         &mut room_projection.depths[..vertex_count];
                                     let cell_scratch = cell_scratch_arena();
@@ -629,7 +622,6 @@ impl Scene for Playtest {
                                         cached_surfaces,
                                         projected_indices,
                                         projected_vertices,
-                                        projected_ready,
                                         projected_depths,
                                         accepted_cell_indices,
                                         accepted_cell_depths,

@@ -251,7 +251,11 @@ impl ProjectedVertex {
     /// Return whether this projection can be consumed by a textured
     /// primitive.
     pub const fn is_valid(self) -> bool {
-        self.sz != i32::MIN
+        // Projection outputs always have positive camera-space depth. Treat
+        // the zero-filled scratch default as invalid too: otherwise a missed
+        // cache projection silently becomes a real corner at screen (0, 0),
+        // stretching an off-screen room surface across the whole display.
+        self.sz > 0
     }
 }
 
@@ -370,6 +374,32 @@ struct ProjectedTexturedGouraudVertex {
     u: i32,
     v: i32,
     color: (u8, u8, u8),
+}
+
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+struct TexturedGouraudViewVertex {
+    position: ViewVertex,
+    u: i32,
+    v: i32,
+    color: (u8, u8, u8),
+}
+
+impl TexturedGouraudViewVertex {
+    const ZERO: Self = Self {
+        position: ViewVertex::ZERO,
+        u: 0,
+        v: 0,
+        color: (0, 0, 0),
+    };
+
+    const fn new(position: ViewVertex, uv_word: u16, color: (u8, u8, u8)) -> Self {
+        Self {
+            position,
+            u: (uv_word & 0xff) as i32,
+            v: (uv_word >> 8) as i32,
+            color,
+        }
+    }
 }
 
 impl ProjectedTexturedGouraudVertex {
@@ -3180,6 +3210,62 @@ fn clip_textured_triangle_to_near(
     count
 }
 
+fn clip_textured_gouraud_triangle_to_near(
+    verts: [TexturedGouraudViewVertex; 3],
+    near_z: i32,
+    out: &mut [TexturedGouraudViewVertex; 4],
+) -> usize {
+    let mut count = 0;
+    let mut prev = verts[2];
+    let mut prev_inside = prev.position.z >= near_z;
+    let mut i = 0;
+    while i < verts.len() {
+        let current = verts[i];
+        let current_inside = current.position.z >= near_z;
+        if current_inside != prev_inside {
+            out[count] = intersect_textured_gouraud_near(prev, current, near_z);
+            count += 1;
+        }
+        if current_inside {
+            out[count] = current;
+            count += 1;
+        }
+        prev = current;
+        prev_inside = current_inside;
+        i += 1;
+    }
+    count
+}
+
+fn intersect_textured_gouraud_near(
+    a: TexturedGouraudViewVertex,
+    b: TexturedGouraudViewVertex,
+    near_z: i32,
+) -> TexturedGouraudViewVertex {
+    let dz = b.position.z - a.position.z;
+    if dz == 0 {
+        return TexturedGouraudViewVertex {
+            position: ViewVertex::new(a.position.x, a.position.y, near_z),
+            ..a
+        };
+    }
+    let num = near_z - a.position.z;
+    TexturedGouraudViewVertex {
+        position: ViewVertex::new(
+            lerp_i32(a.position.x, b.position.x, num, dz),
+            lerp_i32(a.position.y, b.position.y, num, dz),
+            near_z,
+        ),
+        u: lerp_i32(a.u, b.u, num, dz),
+        v: lerp_i32(a.v, b.v, num, dz),
+        color: (
+            lerp_u8(a.color.0, b.color.0, num, dz),
+            lerp_u8(a.color.1, b.color.1, num, dz),
+            lerp_u8(a.color.2, b.color.2, num, dz),
+        ),
+    }
+}
+
 fn intersect_textured_near(
     a: TexturedViewVertex,
     b: TexturedViewVertex,
@@ -3211,6 +3297,10 @@ fn lerp_i32(a: i32, b: i32, numerator: i32, denominator: i32) -> i32 {
         return a;
     }
     a.saturating_add(b.saturating_sub(a).saturating_mul(numerator) / denominator)
+}
+
+fn lerp_u8(a: u8, b: u8, numerator: i32, denominator: i32) -> u8 {
+    lerp_i32(a as i32, b as i32, numerator, denominator).clamp(0, 255) as u8
 }
 
 fn merge_world_stats(stats: &mut WorldRenderStats, next: WorldRenderStats) {
