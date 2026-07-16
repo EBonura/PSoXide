@@ -239,6 +239,12 @@ pub struct PortBindings {
     /// for lock-on / target toggling.
     #[serde(default)]
     pub r3: InputBinding,
+    /// Left stick click (DualShock L3). Unbound by default -- the
+    /// stock keyboard map has no comfortable key left for it -- but
+    /// rebindable from the controls panel (the L3+R3 freelook chord
+    /// needs it without a gamepad).
+    #[serde(default)]
+    pub l3: InputBinding,
     /// DualShock Analog button. This is not part of the normal
     /// button bitmask; it toggles whether the controller reports
     /// Digital (`0x41`) or Analog (`0x73`) poll IDs.
@@ -247,22 +253,27 @@ pub struct PortBindings {
 }
 
 impl Default for PortBindings {
-    /// Default keyboard mapping. Chosen so a right-hander can hold
-    /// the d-pad on the left hand (arrow keys) and the action
-    /// cluster on the right (X / C / V / D forms a rough diamond).
+    /// Default keyboard mapping: arrows on the left hand, the face
+    /// cluster on the right hand's home row (F/G/H + X above).
     ///
-    /// Not claiming this is optimal -- users will want to rebind.
-    /// It's just "works immediately on a fresh install."
+    /// The face buttons deliberately avoid the classic Z/X/C bottom-row
+    /// cluster: on common 2-key-rollover membrane keyboards those sit
+    /// on shared matrix lines with the arrow keys, so a third
+    /// simultaneous press (hold a direction + jump + dash) is silently
+    /// dropped by the keyboard itself before the OS ever sees it.
+    /// Arrows + F/G/H/X was verified to register three-plus
+    /// simultaneous keys on boards where arrows + Z/X/C ghosts.
+    /// Users can still rebind everything from the controls panel.
     fn default() -> Self {
         Self {
             up: InputBinding::named("ArrowUp"),
             down: InputBinding::named("ArrowDown"),
             left: InputBinding::named("ArrowLeft"),
             right: InputBinding::named("ArrowRight"),
-            cross: InputBinding::Character('x'),
-            circle: InputBinding::Character('c'),
-            square: InputBinding::Character('z'),
-            triangle: InputBinding::Character('s'),
+            cross: InputBinding::Character('f'),
+            circle: InputBinding::Character('g'),
+            square: InputBinding::Character('h'),
+            triangle: InputBinding::Character('x'),
             l1: InputBinding::Character('q'),
             r1: InputBinding::Character('e'),
             l2: InputBinding::Character('1'),
@@ -272,6 +283,7 @@ impl Default for PortBindings {
             left_stick: default_port1_left_stick_bindings(),
             right_stick: default_port1_right_stick_bindings(),
             r3: default_port1_r3_binding(),
+            l3: InputBinding::Unbound,
             analog: default_port1_analog_binding(),
         }
     }
@@ -336,6 +348,7 @@ impl Default for InputSettings {
                 left_stick: StickBindings::unbound(),
                 right_stick: StickBindings::unbound(),
                 r3: InputBinding::Unbound,
+                l3: InputBinding::Unbound,
                 analog: InputBinding::Unbound,
             },
         }
