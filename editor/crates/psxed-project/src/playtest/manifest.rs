@@ -167,6 +167,25 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             crate::MIN_WORLD_STREAMING_RESIDENT_CHUNKS as usize,
             crate::MAX_WORLD_STREAMING_RESIDENT_CHUNKS as usize,
         );
+    // Keep two independently evictable look-ahead rooms beyond the authored
+    // protected window. RAM is budgeted in exact 2 KiB disc pages, using the
+    // largest possible combination of simultaneously resident chunks; this is
+    // a cook-time proof that any runtime choice of this many rooms fits.
+    let world_stream_slot_count = resident_chunk_limit
+        .saturating_add(2)
+        .min(world_pack_toc.len())
+        .max(1);
+    let mut world_chunk_sector_counts = world_pack_toc
+        .iter()
+        .map(|entry| entry.sector_count as usize)
+        .collect::<Vec<_>>();
+    world_chunk_sector_counts.sort_unstable_by(|a, b| b.cmp(a));
+    let world_resident_page_count = world_chunk_sector_counts
+        .iter()
+        .take(world_stream_slot_count)
+        .copied()
+        .sum::<usize>()
+        .max(1);
     let _ = writeln!(
         out,
         "pub const WORLD_RESIDENT_CHUNK_LIMIT: usize = {resident_chunk_limit};\n",
@@ -174,6 +193,14 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     let _ = writeln!(
         out,
         "pub const WORLD_PACK_MAX_CHUNK_BYTES: usize = {world_pack_max_chunk_bytes};\n",
+    );
+    let _ = writeln!(
+        out,
+        "pub const WORLD_STREAM_SLOT_COUNT: usize = {world_stream_slot_count};\n",
+    );
+    let _ = writeln!(
+        out,
+        "pub const WORLD_RESIDENT_PAGE_COUNT: usize = {world_resident_page_count};\n",
     );
     let runtime_depth_sort_mode = package.runtime_depth_sort_mode.manifest_value();
     let _ = writeln!(
