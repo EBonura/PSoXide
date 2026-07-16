@@ -121,10 +121,10 @@ pub enum NodeKind {
     ModelRenderer {
         /// Model resource.
         model: Option<ResourceId>,
-        /// Covering-material override. `None` renders the model's
-        /// own cooked atlas; `Some` draws the model's UVs against
-        /// the material's texture with the material's blend mode,
-        /// tint, and face sidedness.
+        /// Material override. `None` renders the model's own cooked
+        /// atlas unchanged. A Material without a texture keeps that
+        /// atlas and changes blend/tint/sidedness; a textured
+        /// Material also replaces the atlas image.
         #[serde(default)]
         material: Option<ResourceId>,
         /// Render-only offset from the owning Entity root to the

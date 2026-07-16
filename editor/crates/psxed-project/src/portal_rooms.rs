@@ -947,6 +947,7 @@ mod tests {
                 legacy_texture: None,
                 blend_mode: PsxBlendMode::Opaque,
                 tint: [128, 128, 128],
+                secondary_layer: None,
                 face_sidedness: crate::MaterialFaceSidedness::Both,
                 double_sided: true,
             }),

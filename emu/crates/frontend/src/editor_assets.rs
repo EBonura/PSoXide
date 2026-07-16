@@ -340,6 +340,7 @@ mod tests {
         project.add_resource(
             "Clip A",
             ResourceData::AnimationClip(AnimationClipResource {
+                target_model: None,
                 psxanim_path: clip_a_rel,
                 skeleton: Some(skeleton_id),
                 source: None,
@@ -353,6 +354,7 @@ mod tests {
         project.add_resource(
             "Clip B",
             ResourceData::AnimationClip(AnimationClipResource {
+                target_model: None,
                 psxanim_path: clip_b_rel,
                 skeleton: Some(skeleton_id),
                 source: None,

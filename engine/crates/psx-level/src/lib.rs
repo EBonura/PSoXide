@@ -1700,21 +1700,36 @@ pub mod model_override_blend {
     pub const ADD_QUARTER: u8 = 4;
 }
 
-/// Covering-material override for one placed model instance or
-/// character visual: the model renders its own cooked UVs against
-/// `texture_asset` instead of the model's baked atlas, with the
-/// authored material's blend mode, tint, and face sidedness.
+/// Material override for one placed model instance or character
+/// visual. `texture_asset = None` keeps the model's baked atlas and
+/// only changes blend mode, tint, and face sidedness. `Some` draws
+/// the model's cooked UVs against a covering texture instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LevelModelMaterialOverride {
-    /// Texture asset drawn instead of the model's cooked atlas.
-    pub texture_asset: AssetId,
+    /// Texture asset drawn instead of the model's cooked atlas, or
+    /// `None` to retain the atlas.
+    pub texture_asset: Option<AssetId>,
     /// Blend-mode code from [`model_override_blend`].
     pub blend_mode: u8,
     /// Per-material modulation tint (0x80 neutral).
     pub tint_rgb: [u8; 3],
+    /// Optional independently blended second texture pass.
+    pub secondary_layer: Option<LevelModelSecondaryLayer>,
     /// Face-sidedness bits in the [`material_flags::FACE_*`]
     /// encoding (low two bits; the rest reserved).
     pub flags: u16,
+}
+
+/// One additional model texture pass. The texture is always a separately
+/// resident 4bpp asset and reuses the model's authored UVs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelModelSecondaryLayer {
+    /// Texture asset sampled by the pass.
+    pub texture_asset: AssetId,
+    /// Blend-mode code from [`model_override_blend`].
+    pub blend_mode: u8,
+    /// Independent per-pass modulation tint.
+    pub tint_rgb: [u8; 3],
 }
 
 impl LevelModelMaterialOverride {

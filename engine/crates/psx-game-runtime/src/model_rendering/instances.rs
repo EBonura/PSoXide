@@ -423,7 +423,7 @@ pub fn draw_model_instances<
 
         telemetry::stage_begin(telemetry::stage::MODEL_DRAW);
         let faces = runtime_model_faces(runtime_model, model_faces);
-        let stats = submit_runtime_model_predecoded(
+        let mut stats = submit_runtime_model_predecoded(
             world,
             triangles,
             runtime_model,
@@ -442,6 +442,39 @@ pub fn draw_model_instances<
             PROFILE,
             scratch,
         );
+        if !stats.primitive_overflow && !stats.command_overflow {
+            if let Some(layer) = inst
+                .material_override
+                .and_then(|material| material.secondary_layer)
+            {
+                if let Some(layer_material) =
+                    model_secondary_material(layer, resolve_override_texture)
+                {
+                    let layer_material = lighting.shade_model_material(origin, layer_material);
+                    let layer_options = model_options.with_material_layer(layer_material);
+                    let layer_stats = submit_runtime_model_predecoded(
+                        world,
+                        triangles,
+                        runtime_model,
+                        anim,
+                        phase,
+                        *camera,
+                        origin,
+                        model_rotation,
+                        local_to_world,
+                        pose_translation,
+                        layer_material,
+                        layer_options,
+                        faces,
+                        model_parts,
+                        model_vertices,
+                        PROFILE,
+                        scratch,
+                    );
+                    accumulate_model_stats(&mut stats, layer_stats);
+                }
+            }
+        }
         telemetry::stage_end(telemetry::stage::MODEL_DRAW);
         accumulate_model_stats(&mut out.stats, stats);
         if stats.primitive_overflow || stats.command_overflow {
