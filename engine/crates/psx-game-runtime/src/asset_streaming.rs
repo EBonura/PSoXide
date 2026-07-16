@@ -137,7 +137,13 @@ impl<const PAGES: usize, const ASSETS: usize> PersistentAssetStreamer<PAGES, ASS
         if self.started || self.ready {
             return;
         }
-        *self = Self::new();
+        // `begin` is a one-shot transition from the zeroed/new idle state.
+        // Replacing the complete streamer here materialised its sector-page
+        // storage as a ~290 KiB stack temporary on MIPS, even on later calls
+        // that returned through the guard above. Besides wasting cycles, that
+        // left normal builds with only a few KiB between the live stack and
+        // `.bss`. The fields below and `job.start` initialise every piece of
+        // live metadata without ever copying the page arena itself.
 
         let mut count = 0usize;
         for asset in assets {
@@ -272,5 +278,19 @@ mod tests {
         assert!(storage.prepare_slot(0, SECTOR_BYTES - 3));
         assert!(!storage.prepare_slot(1, 4));
         assert_eq!(storage.slot_capacity_bytes(1), 0);
+    }
+
+    #[test]
+    fn zeroed_streamer_begins_in_place_and_is_idempotent() {
+        let mut streamer = PersistentAssetStreamer::<1, 2>::zeroed();
+        streamer.begin(0, &[], &[]);
+        assert!(streamer.ready());
+        assert!(!streamer.failed());
+        assert_eq!(streamer.progress_q12(), 4096);
+
+        // The one-shot guard must leave the completed state untouched.
+        streamer.begin(99, &[], &[]);
+        assert!(streamer.ready());
+        assert!(!streamer.failed());
     }
 }

@@ -101,6 +101,27 @@ impl<const N: usize> OrderingTable<N> {
         self.entries[z] = pkt_addr;
     }
 
+    /// Prepend a primitive whose packet-word count is already stored in the
+    /// high byte of `tag_high` into an already-clamped depth slot.
+    ///
+    /// # Safety
+    /// Same requirements as [`insert_unchecked`](Self::insert_unchecked).
+    /// The low 24 bits of `tag_high` must be zero.
+    #[inline(always)]
+    pub unsafe fn insert_unchecked_tag_high(
+        &mut self,
+        z: usize,
+        packet_ptr: *mut u32,
+        tag_high: u32,
+    ) {
+        debug_assert!(z < N);
+        debug_assert_eq!(tag_high & OT_ADDR_MASK, 0);
+        let old_head = self.entries[z] & OT_ADDR_MASK;
+        unsafe { ptr::write_volatile(packet_ptr, tag_high | old_head) };
+        let pkt_addr = packet_ptr as u32 & OT_ADDR_MASK;
+        self.entries[z] = pkt_addr;
+    }
+
     /// Insert a primitive struct. The struct must be `#[repr(C)]`
     /// with its first field being the tag `u32`. `words` is the
     /// number of data words that follow the tag.

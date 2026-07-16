@@ -212,7 +212,6 @@ pub fn draw_box_props<
         };
         draw_box_prop_faces(
             prop,
-            &box_runtime.vertices,
             &box_runtime.faces,
             fall_y,
             loaded_projector,
@@ -607,7 +606,6 @@ fn box_prop_apply_fog_weight(
 #[allow(clippy::too_many_arguments)]
 fn draw_box_prop_faces<T, const OT_DEPTH: usize>(
     prop: &LevelBoxPropRecord,
-    vertices: &[WorldVertex; psx_level::BOX_PROP_VERTEX_COUNT],
     faces: &[BoxPropFaceRuntime; psx_level::BOX_PROP_FACE_COUNT],
     fall_y: i32,
     projector: LoadedWorldCameraGte,
@@ -623,11 +621,6 @@ fn draw_box_prop_faces<T, const OT_DEPTH: usize>(
         + PrimitiveSink<TriTexturedGouraud>
         + PrimitiveSink<QuadTexturedGouraud>,
 {
-    let mut shifted_vertices = *vertices;
-    for vertex in &mut shifted_vertices {
-        vertex.y = vertex.y.saturating_add(fall_y);
-    }
-    let projected_vertices = projector.project_world_vertices8(shifted_vertices);
     for face in 0..psx_level::BOX_PROP_FACE_COUNT {
         let face_runtime = faces[face];
         if !box_prop_face_front_facing(camera, face_runtime) {
@@ -635,19 +628,7 @@ fn draw_box_prop_faces<T, const OT_DEPTH: usize>(
         }
         // A uniform Y shift while the box falls; facing is unchanged so the
         // front-facing test above still uses the resting normal/center.
-        let ids = BOX_PROP_FACE_VERTEX_INDICES[face];
-        let face_vertices = [
-            shifted_vertices[ids[0]],
-            shifted_vertices[ids[1]],
-            shifted_vertices[ids[2]],
-            shifted_vertices[ids[3]],
-        ];
-        let projected = [
-            projected_vertices[ids[0]],
-            projected_vertices[ids[1]],
-            projected_vertices[ids[2]],
-            projected_vertices[ids[3]],
-        ];
+        let face_vertices = box_prop_offset_quad_y(face_runtime.vertices, fall_y);
         let Some(texture_asset) = prop.texture_assets[face] else {
             continue;
         };
@@ -681,7 +662,7 @@ fn draw_box_prop_faces<T, const OT_DEPTH: usize>(
             .with_material_layer(material)
             .with_textured_triangle_splitting(true)
             .with_textured_triangle_max_edge(0);
-        if projected.iter().all(|vertex| vertex.is_valid()) {
+        if let Some(projected) = projector.project_world_quad(face_vertices) {
             // Projection already produced the four view depths. Reusing them
             // for fog avoids transforming every visible box-face vertex a
             // second time on the CPU (the normal path projects through GTE).
