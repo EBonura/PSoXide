@@ -31,7 +31,10 @@ use psx_gpu::material::TextureWindow;
 use psx_gpu_render::{VRAM_HEIGHT, VRAM_WIDTH};
 use psx_vram::TextureWindowAtlas;
 use psxed_project::streaming::collect_scene_resource_use;
-use psxed_project::{MaterialResource, NodeKind, ProjectDocument, ResourceData, ResourceId};
+use psxed_project::{
+    generate_model_noise_psxt, MaterialResource, ModelSecondaryTexture, NodeKind, ProjectDocument,
+    ResourceData, ResourceId,
+};
 
 const ROOM_TPAGE_HALFWORDS: usize = 64;
 const ROOM_TPAGE_TEXEL_HEIGHT: usize = 256;
@@ -87,7 +90,7 @@ struct CacheEntry {
 /// * `y = 0`,  tpages 0..4   -- framebuffer (editor paints x=0..320).
 /// * `y = 0`,  tpages 5..15  -- 4bpp room material textures,
 ///   packed on an 8-texel texture-window grid.
-/// * `y = 256`, tpage row 1   -- 8bpp model atlases, packed
+/// * `y = 256`, tpage row 1   -- 4bpp/8bpp model atlases, packed
 ///   left-to-right by halfwords. Disjoint from the room region.
 /// * `y = 480`                -- 4bpp CLUTs, 16 halfwords each.
 /// * `y = 481..`              -- 8bpp CLUTs, 256 halfwords each.
@@ -99,6 +102,7 @@ struct CacheEntry {
 pub struct EditorTextures {
     vram: Box<[u16]>,
     cache: HashMap<ResourceId, CacheEntry>,
+    secondary_cache: HashMap<ResourceId, CacheEntry>,
     model_cache: HashMap<ResourceId, ModelAtlasCacheEntry>,
     shadow_slot: MaterialSlot,
     particle_slot: MaterialSlot,
@@ -112,12 +116,12 @@ pub struct EditorTextures {
     /// Halfword X-coord of the next free 4bpp CLUT slot. Each
     /// 4bpp CLUT is 16 halfwords wide.
     next_clut_x: u16,
-    /// Halfword X-coord cursor inside the 8bpp model atlas tpage
+    /// Halfword X-coord cursor inside the indexed model-atlas tpage
     /// row at y=256. Each atlas advances this by its halfword
     /// stride.
     next_model_tpage_x: u16,
-    /// Y-coord of the next free 8bpp CLUT row. Steps down by 1
-    /// per uploaded atlas (256-entry CLUTs are one row each).
+    /// Y-coord of the next free model CLUT row. Steps down by 1
+    /// per uploaded atlas; 4bpp palettes intentionally get their own row too.
     next_model_clut_y: u16,
 }
 
@@ -141,6 +145,7 @@ struct PreviewTextureSignature {
     name: String,
     force_zero_opaque: bool,
     allow_procedural_fallback: bool,
+    secondary_signature: String,
 }
 
 impl EditorTextures {
@@ -162,6 +167,7 @@ impl EditorTextures {
         let mut textures = Self {
             vram: vec![0u16; (VRAM_WIDTH * VRAM_HEIGHT) as usize].into_boxed_slice(),
             cache: HashMap::new(),
+            secondary_cache: HashMap::new(),
             model_cache: HashMap::new(),
             shadow_slot,
             particle_slot,
@@ -171,7 +177,7 @@ impl EditorTextures {
             // Model atlases live at the tpage row at y=256.
             // Cursor advances by halfword stride per atlas.
             next_model_tpage_x: 0,
-            // 8bpp CLUTs sit just below the 4bpp band.
+            // Model CLUTs sit just below the room-material CLUT band.
             next_model_clut_y: 481,
         };
         textures.upload_shadow_texture();
@@ -189,6 +195,11 @@ impl EditorTextures {
     /// shading in that case).
     pub fn slot(&self, id: ResourceId) -> Option<MaterialSlot> {
         self.cache.get(&id).map(|e| e.slot)
+    }
+
+    /// Look up the optional second texture pass assigned to a model material.
+    pub fn secondary_slot(&self, id: ResourceId) -> Option<MaterialSlot> {
+        self.secondary_cache.get(&id).map(|entry| entry.slot)
     }
 
     /// Look up a Model resource's atlas slot, or `None` if no
@@ -239,6 +250,7 @@ impl EditorTextures {
                 name: item.name.clone(),
                 force_zero_opaque: item.force_zero_opaque,
                 allow_procedural_fallback: item.allow_procedural_fallback,
+                secondary_signature: item.secondary_signature.clone(),
             })
             .collect();
         if self.room_signature == room_signature {
@@ -268,6 +280,19 @@ impl EditorTextures {
                 break;
             };
             self.cache.insert(item.id, CacheEntry { slot });
+            let secondary_slot = match item.secondary.as_ref() {
+                Some(ModelSecondaryTexture::Texture(path)) => {
+                    self.upload_real_psxt_with_clut_mode(path, project_root, false)
+                }
+                Some(ModelSecondaryTexture::ProceduralNoise(settings)) => {
+                    let bytes = generate_model_noise_psxt(*settings);
+                    self.upload_psxt_bytes_with_clut_mode(&bytes, false)
+                }
+                None => None,
+            };
+            if let Some(slot) = secondary_slot {
+                self.secondary_cache.insert(item.id, CacheEntry { slot });
+            }
         }
     }
 
@@ -277,6 +302,7 @@ impl EditorTextures {
 
     fn clear_room_materials(&mut self) {
         self.cache.clear();
+        self.secondary_cache.clear();
         self.room_allocator.clear();
         self.next_clut_x = 0;
 
@@ -312,6 +338,14 @@ impl EditorTextures {
             project_root.join(path)
         };
         let bytes = std::fs::read(&abs).ok()?;
+        self.upload_psxt_bytes_with_clut_mode(&bytes, force_zero_opaque)
+    }
+
+    fn upload_psxt_bytes_with_clut_mode(
+        &mut self,
+        bytes: &[u8],
+        force_zero_opaque: bool,
+    ) -> Option<MaterialSlot> {
         let texture = Texture::from_bytes(&bytes).ok()?;
         // PSX UVs are 8-bit so anything >256 wouldn't be addressable
         // from a single primitive anyway; reject taller-than-256
@@ -555,7 +589,7 @@ impl EditorTextures {
     }
 
     /// Walk every Model resource and ensure its atlas (if any)
-    /// is uploaded into the dedicated 8bpp model atlas region.
+    /// is uploaded into the dedicated indexed model-atlas region.
     /// Models without `texture_path` get an empty cache entry so
     /// the walk doesn't repeatedly try to resolve them.
     pub fn refresh_models(&mut self, project: &ProjectDocument, project_root: &Path) {
@@ -591,19 +625,18 @@ impl EditorTextures {
         }
     }
 
-    /// Read an 8bpp `.psxt` atlas and upload pixels + 256-entry
-    /// CLUT into the dedicated model VRAM region. Returns `None`
-    /// on missing file, parse failure, unsupported depth (only
-    /// 8bpp is allowed), or VRAM exhaustion.
+    /// Read a 4bpp or 8bpp `.psxt` atlas and upload pixels plus its
+    /// depth-sized CLUT into the dedicated model VRAM region. Returns
+    /// `None` on missing file, parse failure, unsupported depth, or VRAM
+    /// exhaustion.
     fn upload_model_atlas_psxt(&mut self, abs: &Path) -> Option<MaterialSlot> {
         let bytes = std::fs::read(abs).ok()?;
         let texture = Texture::from_bytes(&bytes).ok()?;
-        if texture.clut_entries() != 256 {
-            // Only 8bpp atlases supported in this region -- 4bpp
-            // model atlases would belong in the room-material
-            // path which we leave alone here.
-            return None;
-        }
+        let depth_bits = match texture.clut_entries() {
+            16 => 0u16,  // GP0 tpage depth code: 4bpp
+            256 => 1u16, // GP0 tpage depth code: 8bpp
+            _ => return None,
+        };
         let halfwords_per_row = texture.halfwords_per_row();
         let height_px = texture.height();
         let pixel_bytes = texture.pixel_bytes();
@@ -613,8 +646,8 @@ impl EditorTextures {
         // by `tpage_index = base_x / 64`. There's no per-atlas
         // base-X offset inside a page, so an atlas placed at a
         // non-64-halfword boundary would sample from the wrong
-        // page. 8bpp UVs can address 256 texels horizontally,
-        // which occupies 128 VRAM halfwords; smaller atlases still
+        // page. Indexed UVs can address 256 texels horizontally,
+        // occupying 64 halfwords at 4bpp or 128 at 8bpp; smaller atlases still
         // reserve one 64-halfword base column to keep their UVs local.
         const MODEL_TPAGE_ALIGNMENT_HALFWORDS: u16 = 64;
         const MODEL_TPAGE_MAX_HALFWORDS: u16 = 128;
@@ -668,16 +701,18 @@ impl EditorTextures {
             }
         }
 
-        // CLUT: 256 halfwords on a single row. Alpha-aware model
+        // CLUT: 16 or 256 halfwords on a single row. Alpha-aware model
         // atlases keep palette index 0 transparent; legacy atlases
         // stay fully opaque so existing cooked dark textures do not
         // gain holes.
         let clut_bytes = texture.clut_bytes();
-        if clut_bytes.len() < 512 {
+        let clut_entries = texture.clut_entries() as usize;
+        let expected_clut_bytes = clut_entries.saturating_mul(2);
+        if clut_bytes.len() != expected_clut_bytes {
             return None;
         }
         let transparent_index_zero = texture.index_zero_transparent();
-        for i in 0..256 {
+        for i in 0..clut_entries {
             let off = i * 2;
             let raw = u16::from_le_bytes([clut_bytes[off], clut_bytes[off + 1]]);
             let marked = model_atlas_clut_entry(i, raw, transparent_index_zero);
@@ -687,18 +722,18 @@ impl EditorTextures {
 
         // Tpage word: tpage row at y=256 → tpage_y_block = 1.
         // Tpage X is `tpage_x / 64` (always 0..15 within a row).
-        // 8bpp depth bit pattern is `1` (4bpp = 0).
+        // The depth field is 0 for 4bpp and 1 for 8bpp.
         let tpage_index = tpage_x / MODEL_TPAGE_ALIGNMENT_HALFWORDS;
         let slot = MaterialSlot {
-            tpage_word: pack_8bpp_tpage_word(tpage_index, 1),
+            tpage_word: pack_indexed_tpage_word(tpage_index, 1, depth_bits),
             clut_word: pack_clut_word(0, clut_y),
             texture_window: TextureWindow::NONE,
             texture_width: texture.width().min(u16::from(u8::MAX)) as u8,
             texture_height: texture.height().min(u16::from(u8::MAX)) as u8,
         };
 
-        // Advance to the next aligned slot. 128-texel 8bpp atlases
-        // consume one base column; 256-texel atlases consume two.
+        // Advance to the next aligned slot. Physical halfword width decides
+        // whether the atlas consumes one or two base columns.
         self.next_model_tpage_x = aligned_tpage_x.saturating_add(slot_halfwords);
         self.next_model_clut_y = self.next_model_clut_y.saturating_add(1);
         Some(slot)
@@ -713,6 +748,8 @@ struct PreviewTextureUploadPlan {
     cache_signature: String,
     force_zero_opaque: bool,
     allow_procedural_fallback: bool,
+    secondary: Option<ModelSecondaryTexture>,
+    secondary_signature: String,
 }
 
 fn preview_texture_upload_plan(
@@ -756,6 +793,20 @@ fn push_material_resource_upload(
     };
     let signature = texture_path(project, material).unwrap_or_default();
     let cache_signature = texture_cache_signature(project_root, &signature);
+    let secondary = material
+        .secondary_layer
+        .as_ref()
+        .map(|layer| layer.texture.clone());
+    let secondary_signature = match secondary.as_ref() {
+        Some(ModelSecondaryTexture::Texture(path)) => {
+            format!("texture:{}", texture_cache_signature(project_root, path))
+        }
+        Some(ModelSecondaryTexture::ProceduralNoise(settings)) => format!(
+            "noise:{:08x}:{}:{}:{}",
+            settings.seed, settings.feature_size, settings.octaves, settings.contrast
+        ),
+        None => "none".to_string(),
+    };
     plan.push(PreviewTextureUploadPlan {
         id,
         name: resource.name.clone(),
@@ -763,6 +814,8 @@ fn push_material_resource_upload(
         cache_signature,
         force_zero_opaque,
         allow_procedural_fallback: true,
+        secondary,
+        secondary_signature,
     });
 }
 
@@ -836,6 +889,8 @@ fn push_texture_resource_upload(
         cache_signature,
         force_zero_opaque: false,
         allow_procedural_fallback: false,
+        secondary: None,
+        secondary_signature: "none".to_string(),
     });
 }
 
@@ -1202,11 +1257,10 @@ fn pack_tpage_word(tpage_index: u16, tpage_y_block: u16) -> u16 {
     (tpage_index & 0xF) | (tpage_y_block << 4) | (semi_trans << 5) | (depth << 7)
 }
 
-/// Same as `pack_tpage_word` but with the 8bpp depth bit set --
-/// used for model atlas slots which always live in the 8bpp
-/// model VRAM region.
-fn pack_8bpp_tpage_word(tpage_index: u16, tpage_y_block: u16) -> u16 {
-    let depth = 1u16; // 8bpp
+/// Pack an indexed model-atlas tpage using the GPU depth code (0 = 4bpp,
+/// 1 = 8bpp).
+fn pack_indexed_tpage_word(tpage_index: u16, tpage_y_block: u16, depth: u16) -> u16 {
+    debug_assert!(depth <= 1);
     let semi_trans = 0u16;
     (tpage_index & 0xF) | (tpage_y_block << 4) | (semi_trans << 5) | (depth << 7)
 }
@@ -1251,7 +1305,8 @@ mod tests {
     use psx_gpu::material::TextureWindow;
     use psx_gpu_render::VRAM_WIDTH;
     use psxed_project::{
-        FarVistaSettings, MaterialResource, NodeKind, ProjectDocument, ResourceData, WorldGrid,
+        FarVistaSettings, MaterialResource, ModelSecondaryLayer, NodeKind, ProjectDocument,
+        ResourceData, WorldGrid,
     };
     use std::path::{Path, PathBuf};
 
@@ -1262,10 +1317,15 @@ mod tests {
         project.add_resource(name, ResourceData::Material(MaterialResource::opaque(None)))
     }
 
-    fn write_test_8bpp_psxt(width: u16, height: u16) -> PathBuf {
-        let halfwords_per_row = width.div_ceil(2);
+    fn write_test_indexed_psxt(width: u16, height: u16, depth: u8) -> PathBuf {
+        let (texels_per_halfword, clut_entries) = match depth {
+            4 => (4u16, 16u16),
+            8 => (2u16, 256u16),
+            _ => panic!("unsupported test depth"),
+        };
+        let halfwords_per_row = width.div_ceil(texels_per_halfword);
         let pixel_bytes = u32::from(halfwords_per_row) * u32::from(height) * 2;
-        let clut_bytes = 256u32 * 2;
+        let clut_bytes = u32::from(clut_entries) * 2;
         let payload_len = 16 + pixel_bytes + clut_bytes;
 
         let mut bytes = Vec::new();
@@ -1273,23 +1333,23 @@ mod tests {
         bytes.extend_from_slice(&1u16.to_le_bytes());
         bytes.extend_from_slice(&0u16.to_le_bytes());
         bytes.extend_from_slice(&payload_len.to_le_bytes());
-        bytes.push(8);
+        bytes.push(depth);
         bytes.push(0);
         bytes.extend_from_slice(&width.to_le_bytes());
         bytes.extend_from_slice(&height.to_le_bytes());
-        bytes.extend_from_slice(&256u16.to_le_bytes());
+        bytes.extend_from_slice(&clut_entries.to_le_bytes());
         bytes.extend_from_slice(&pixel_bytes.to_le_bytes());
         bytes.extend_from_slice(&clut_bytes.to_le_bytes());
         for _ in 0..(pixel_bytes / 2) {
             bytes.extend_from_slice(&0x3412u16.to_le_bytes());
         }
-        for index in 0..256u16 {
+        for index in 0..clut_entries {
             bytes.extend_from_slice(&(0x8000 | index).to_le_bytes());
         }
 
         let path = std::env::temp_dir().join(format!(
-            "psoxide-editor-model-atlas-{}-{width}x{height}.psxt",
-            std::process::id()
+            "psoxide-editor-model-atlas-{}-{width}x{height}-{depth}bpp.psxt",
+            std::process::id(),
         ));
         std::fs::write(&path, bytes).expect("write temporary PSXT");
         path
@@ -1344,6 +1404,27 @@ mod tests {
     }
 
     #[test]
+    fn generated_model_secondary_layer_uploads_to_its_own_slot() {
+        let mut project = ProjectDocument::new("secondary layer preview");
+        let mut material = MaterialResource::opaque(None);
+        material.secondary_layer = Some(ModelSecondaryLayer::default());
+        let material_id =
+            project.add_resource("Crystal", ResourceData::Material(material));
+
+        let mut textures = EditorTextures::new();
+        textures.refresh(&project, Path::new("."));
+
+        let base = textures.slot(material_id).expect("base preview fallback");
+        let layer = textures
+            .secondary_slot(material_id)
+            .expect("generated secondary texture slot");
+        assert_ne!(base.clut_word, layer.clut_word);
+        assert_eq!(layer.texture_width, 64);
+        assert_eq!(layer.texture_height, 64);
+        assert_ne!(layer.texture_window, TextureWindow::NONE);
+    }
+
+    #[test]
     fn imported_room_clut_keeps_palette_zero_opaque() {
         assert_eq!(opaque_room_clut_entry(0), 0x8000);
         assert_eq!(opaque_room_clut_entry(0x1234), 0x9234);
@@ -1361,7 +1442,7 @@ mod tests {
 
     #[test]
     fn model_atlas_upload_accepts_full_8bpp_page_width() {
-        let path = write_test_8bpp_psxt(256, 16);
+        let path = write_test_indexed_psxt(256, 16, 8);
         let mut textures = EditorTextures::new();
 
         let slot = textures
@@ -1375,6 +1456,27 @@ mod tests {
         assert_eq!(textures.next_model_tpage_x, 128);
         let last_uploaded_word = (256usize + 15) * VRAM_WIDTH as usize + 127;
         assert_eq!(textures.vram[last_uploaded_word], 0x3412);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn model_atlas_upload_accepts_4bpp_and_emits_4bpp_tpage() {
+        let path = write_test_indexed_psxt(128, 128, 4);
+        let mut textures = EditorTextures::new();
+
+        let slot = textures
+            .upload_model_atlas_psxt(&path)
+            .expect("128x128 4bpp model atlas fits in one PSX texture page");
+
+        assert_eq!((slot.tpage_word >> 7) & 0x03, 0);
+        assert_eq!(slot.texture_width, 128);
+        assert_eq!(slot.texture_height, 128);
+        assert_eq!(textures.next_model_tpage_x, 64);
+        assert_eq!(textures.next_model_clut_y, 482);
+        let last_uploaded_word = (256usize + 127) * VRAM_WIDTH as usize + 31;
+        assert_eq!(textures.vram[last_uploaded_word], 0x3412);
+        assert_eq!(textures.vram[481 * VRAM_WIDTH as usize + 15], 0x800F);
 
         let _ = std::fs::remove_file(path);
     }

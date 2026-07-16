@@ -24,8 +24,8 @@ use psx_level::{
     CharacterAnimationAction, EntityRecord, EquipmentRecord, LevelMaterialSidedness,
     LevelModelClipBoundsRecord, LevelModelClipRecord, LevelModelFrameBoundsRecord,
     LevelModelInstanceRecord, LevelModelMaterialOverride, LevelModelRecord,
-    LevelModelSocketRecord, LevelWeaponRecord, ModelClipIndex, ModelClipTableIndex, ModelIndex,
-    ModelSocketIndex, RoomIndex, WeaponHitboxRecord,
+    LevelModelSecondaryLayer, LevelModelSocketRecord, LevelWeaponRecord, ModelClipIndex,
+    ModelClipTableIndex, ModelIndex, ModelSocketIndex, RoomIndex, WeaponHitboxRecord,
 };
 use psx_math::int32::{clamp_i16, square_i32_saturating};
 
@@ -264,6 +264,38 @@ pub fn model_override_material(
     .with_texture_window(slot.texture_window)
 }
 
+/// Resolve one cooked secondary model layer to its independently tinted and
+/// blended VRAM material. A non-resident layer is skipped rather than
+/// disturbing the base model draw.
+fn model_secondary_material(
+    layer: LevelModelSecondaryLayer,
+    resolve_override_texture: &mut impl FnMut(AssetId) -> Option<VramSlot>,
+) -> Option<TextureMaterial> {
+    let slot = resolve_override_texture(layer.texture_asset)?;
+    let [r, g, b] = layer.tint_rgb;
+    Some(
+        TextureMaterial::blended(
+            slot.clut_word,
+            slot.tpage_word,
+            (r, g, b),
+            model_override_blend_mode(layer.blend_mode),
+        )
+        .with_texture_window(slot.texture_window),
+    )
+}
+
+/// Apply an override's blend and tint to the model's own baked
+/// atlas. CLUT, tpage address/depth, and texture window stay intact.
+pub const fn model_override_atlas_material(
+    atlas: TextureMaterial,
+    material_override: LevelModelMaterialOverride,
+) -> TextureMaterial {
+    let [r, g, b] = material_override.tint_rgb;
+    atlas
+        .with_blend_mode(model_override_blend_mode(material_override.blend_mode))
+        .with_tint((r, g, b))
+}
+
 /// Winding cull for a model override's authored face sidedness.
 pub const fn model_override_cull_mode(material_override: LevelModelMaterialOverride) -> CullMode {
     match material_override.sidedness() {
@@ -288,16 +320,18 @@ fn model_material_and_cull(
         CullMode::Back
     };
     match material_override {
-        Some(material_override) => match resolve_override_texture(material_override.texture_asset)
-        {
-            Some(slot) => (
-                model_override_material(slot, material_override),
-                model_override_cull_mode(material_override),
-            ),
-            // Override texture not resident (yet): fall back to the
-            // atlas rather than dropping the draw.
-            None => (runtime_model.material, base_cull),
-        },
+        Some(material_override) => {
+            let atlas = model_override_atlas_material(runtime_model.material, material_override);
+            let material = match material_override.texture_asset {
+                Some(texture_asset) => resolve_override_texture(texture_asset)
+                    .map(|slot| model_override_material(slot, material_override))
+                    // Missing covering texture: retain the authored
+                    // optical properties on the native atlas.
+                    .unwrap_or(atlas),
+                None => atlas,
+            };
+            (material, model_override_cull_mode(material_override))
+        }
         None => (runtime_model.material, base_cull),
     }
 }
@@ -742,7 +776,7 @@ pub fn draw_player<
 
     telemetry::stage_begin(telemetry::stage::PLAYER_DRAW);
     let faces = runtime_model_faces(runtime_model, model_faces);
-    let stats = submit_runtime_model_predecoded(
+    let mut stats = submit_runtime_model_predecoded(
         world,
         triangles,
         runtime_model,
@@ -761,6 +795,38 @@ pub fn draw_player<
         PROFILE,
         scratch,
     );
+    if !stats.primitive_overflow && !stats.command_overflow {
+        if let Some(layer) = character
+            .material_override
+            .and_then(|material| material.secondary_layer)
+        {
+            if let Some(layer_material) = model_secondary_material(layer, resolve_override_texture)
+            {
+                let layer_material = lighting.shade_model_material(origin, layer_material);
+                let layer_options = model_options.with_material_layer(layer_material);
+                let layer_stats = submit_runtime_model_predecoded(
+                    world,
+                    triangles,
+                    runtime_model,
+                    anim,
+                    phase,
+                    *camera,
+                    origin,
+                    model_rotation,
+                    local_to_world,
+                    pose_translation,
+                    layer_material,
+                    layer_options,
+                    faces,
+                    model_parts,
+                    model_vertices,
+                    PROFILE,
+                    scratch,
+                );
+                accumulate_model_stats(&mut stats, layer_stats);
+            }
+        }
+    }
     telemetry::stage_end(telemetry::stage::PLAYER_DRAW);
     PlayerModelDrawStats {
         stats,
@@ -1410,9 +1476,10 @@ mod tests {
 
     fn override_record(blend_mode: u8, flags: u16) -> LevelModelMaterialOverride {
         LevelModelMaterialOverride {
-            texture_asset: AssetId(7),
+            texture_asset: Some(AssetId(7)),
             blend_mode,
             tint_rgb: [96, 128, 160],
+            secondary_layer: None,
             flags,
         }
     }
@@ -1463,6 +1530,20 @@ mod tests {
             override_record(model_override_blend::OPAQUE, 0),
         );
         assert!(!opaque.textured_packet_material().is_translucent());
+    }
+
+    #[test]
+    fn atlas_override_preserves_texture_binding_and_changes_optics() {
+        let atlas = TextureMaterial::opaque(0x4321, 0x018F, (128, 128, 128))
+            .with_texture_window(TextureWindow::power_of_two_tile(64, 32, 128, 128));
+        let mut override_record = override_record(model_override_blend::AVERAGE, 0);
+        override_record.texture_asset = None;
+        let material = model_override_atlas_material(atlas, override_record);
+        assert_eq!(material.clut_word(), atlas.clut_word());
+        assert_eq!(material.texture_window_word(), atlas.texture_window_word());
+        assert_eq!(material.tint(), (96, 128, 160));
+        assert_eq!(material.blend_mode(), BlendMode::Average);
+        assert!(material.textured_packet_material().is_translucent());
     }
 
     #[test]

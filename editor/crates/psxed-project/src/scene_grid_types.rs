@@ -186,6 +186,70 @@ pub enum MaterialFaceSidedness {
     Both,
 }
 
+/// Deterministic host-baked noise used by a model material's second pass.
+///
+/// The editor and cooker turn this into a regular 64x64 4bpp PSXT. The PS1
+/// never evaluates noise at runtime; it only samples the cooked texture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProceduralNoiseTexture {
+    /// Stable noise seed.
+    pub seed: u32,
+    /// Approximate size of the broadest features, in texels.
+    pub feature_size: u8,
+    /// Number of summed detail layers (1..=5).
+    pub octaves: u8,
+    /// Contrast around the midpoint. 128 is neutral.
+    pub contrast: u8,
+}
+
+impl Default for ProceduralNoiseTexture {
+    fn default() -> Self {
+        Self {
+            seed: 1,
+            feature_size: 24,
+            octaves: 3,
+            contrast: 176,
+        }
+    }
+}
+
+/// Image source for a model material's optional second texture pass.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ModelSecondaryTexture {
+    /// A separately authored 4bpp PSXT.
+    Texture(String),
+    /// A deterministic 64x64 4bpp value-noise texture generated on the host.
+    ProceduralNoise(ProceduralNoiseTexture),
+}
+
+impl Default for ModelSecondaryTexture {
+    fn default() -> Self {
+        Self::ProceduralNoise(ProceduralNoiseTexture::default())
+    }
+}
+
+/// Optional second model-material pass, rendered over the base atlas or
+/// replacement texture with its own PS1 blend mode and tint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelSecondaryLayer {
+    /// Imported or generated image sampled with the model's authored UVs.
+    pub texture: ModelSecondaryTexture,
+    /// Optical equation used by the second pass.
+    pub blend_mode: PsxBlendMode,
+    /// Independent modulation tint; 0x80 is neutral.
+    pub tint: [u8; 3],
+}
+
+impl Default for ModelSecondaryLayer {
+    fn default() -> Self {
+        Self {
+            texture: ModelSecondaryTexture::default(),
+            blend_mode: PsxBlendMode::AddQuarter,
+            tint: [0x70, 0x78, 0x80],
+        }
+    }
+}
+
 impl MaterialFaceSidedness {
     /// User-facing label.
     pub const fn label(self) -> &'static str {
@@ -225,6 +289,10 @@ pub struct MaterialResource {
     pub blend_mode: PsxBlendMode,
     /// Texture modulation tint. `0x80` is neutral for PS1 textured polys.
     pub tint: [u8; 3],
+    /// Optional independently blended second texture pass for model renderers.
+    /// Room geometry continues to use the base material only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secondary_layer: Option<ModelSecondaryLayer>,
     /// Which side(s) of faces using this material should render.
     #[serde(default)]
     pub face_sidedness: MaterialFaceSidedness,
@@ -301,6 +369,7 @@ impl MaterialResource {
             psxt_path,
             blend_mode: PsxBlendMode::Opaque,
             tint: [0x80, 0x80, 0x80],
+            secondary_layer: None,
             face_sidedness: MaterialFaceSidedness::Both,
             legacy_texture: None,
             double_sided: true,
@@ -313,6 +382,7 @@ impl MaterialResource {
             psxt_path,
             blend_mode,
             tint: [0x80, 0x80, 0x80],
+            secondary_layer: None,
             face_sidedness: MaterialFaceSidedness::Both,
             legacy_texture: None,
             double_sided: true,
