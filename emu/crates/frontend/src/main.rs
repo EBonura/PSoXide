@@ -694,7 +694,6 @@ fn keycode_to_binding(code: KeyCode) -> Option<InputBinding> {
         KeyCode::F9 => named("F9"),
         KeyCode::F10 => named("F10"),
         KeyCode::F11 => named("F11"),
-        KeyCode::F12 => named("F12"),
         KeyCode::Numpad0 => named("Numpad0"),
         KeyCode::Numpad1 => named("Numpad1"),
         KeyCode::Numpad2 => named("Numpad2"),
@@ -728,8 +727,9 @@ fn keycode_to_binding(code: KeyCode) -> Option<InputBinding> {
         KeyCode::Backquote => named("Backquote"),
         KeyCode::IntlRo => named("IntlRo"),
         KeyCode::IntlBackslash => named("IntlBackslash"),
-        // Escape toggles the menu, F5/F7 are quick save/load: binding a
-        // pad button on top of those would fire both meanings at once.
+        // Escape toggles the menu, F5/F7 are quick save/load, and F12
+        // toggles the renderer display source. Keeping host commands out
+        // of pad bindings prevents one key press from firing both actions.
         _ => None,
     }
 }
@@ -875,8 +875,7 @@ impl ApplicationHandler for Shell {
                 // A controls-panel rebind capture owns the keyboard
                 // outright: the next key press becomes the binding
                 // (Escape cancels), and nothing leaks through to the
-                // game, the menu, or the hotkeys below -- binding "g"
-                // or F5 must not also fire their global meanings.
+                // game, the menu, or the host shortcuts below.
                 if let Some(target) = self.state.menu.controls_capture() {
                     if state == ElementState::Pressed && !repeat {
                         if matches!(logical_key, Key::Named(NamedKey::Escape)) {
@@ -947,16 +946,13 @@ impl ApplicationHandler for Shell {
                 if state == ElementState::Pressed {
                     self.pending_input = merge_key(self.pending_input, &logical_key);
                 }
-                // `g` -- toggle the display source between the CPU
+                // F12 -- toggle the display source between the CPU
                 // rasterizer's VRAM and the compute backend's. Only
                 // meaningful when the compute backend is active
                 // (i.e. `--gpu-compute` was passed). No-op otherwise.
-                // (Was F12; rebound to `g` so it needs no Fn on macOS.
-                // `g` is not a pad binding, so it never collides with play
-                // input.)
                 if state == ElementState::Pressed
                     && !repeat
-                    && matches!(&logical_key, Key::Character(c) if c.eq_ignore_ascii_case("g"))
+                    && matches!(&logical_key, Key::Named(NamedKey::F12))
                 {
                     self.display_gpu_compute = !self.display_gpu_compute;
                     eprintln!(
@@ -2440,7 +2436,7 @@ mod tests {
             KeyCode::Space,
             KeyCode::ShiftLeft,
             KeyCode::F1,
-            KeyCode::F12,
+            KeyCode::F11,
             KeyCode::Numpad0,
             KeyCode::Numpad9,
             KeyCode::NumpadAdd,
@@ -2457,8 +2453,16 @@ mod tests {
                 "{code:?} captured as {binding:?} but does not match back"
             );
         }
-        // Escape is reserved for the menu toggle.
-        assert_eq!(keycode_to_binding(KeyCode::Escape), None);
+        // Host commands are deliberately unavailable as pad bindings.
+        for code in [KeyCode::Escape, KeyCode::F5, KeyCode::F7, KeyCode::F12] {
+            assert_eq!(keycode_to_binding(code), None);
+        }
+        // The default Circle key must remain ordinary pad input rather than
+        // also toggling the renderer display source.
+        assert_eq!(
+            keycode_to_binding(KeyCode::KeyG),
+            Some(InputBinding::Character('g'))
+        );
     }
 
     #[test]
