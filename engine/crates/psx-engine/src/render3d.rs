@@ -3359,7 +3359,7 @@ fn emit_textured_model_detail_counters(
     blend_vertices: bool,
     all_projected_vertices_in_front: bool,
     all_projected_vertices_inside_hw_bounds: bool,
-    packed_back_average_unclamped_faces: bool,
+    packed_average_unclamped_faces: bool,
     packed_back_in_front_faces: bool,
     packed_fast_faces: bool,
     stats: &TexturedModelRenderStats,
@@ -3446,15 +3446,15 @@ fn emit_textured_model_detail_counters(
     );
     emit_bool_counter(
         crate::telemetry::counter::TEXTURED_MODEL_PACKED_UNCLAMPED_ELIGIBLE_SUBMITS,
-        packed_back_average_unclamped_faces,
+        packed_average_unclamped_faces,
     );
     emit_bool_counter(
         crate::telemetry::counter::TEXTURED_MODEL_PACKED_CLAMPED_ELIGIBLE_SUBMITS,
-        packed_back_in_front_faces && !packed_back_average_unclamped_faces,
+        packed_back_in_front_faces && !packed_average_unclamped_faces,
     );
     emit_bool_counter(
         crate::telemetry::counter::TEXTURED_MODEL_PACKED_GENERAL_ELIGIBLE_SUBMITS,
-        packed_fast_faces && !packed_back_in_front_faces,
+        packed_fast_faces && !packed_back_in_front_faces && !packed_average_unclamped_faces,
     );
     emit_bool_counter(
         crate::telemetry::counter::TEXTURED_MODEL_VERTEX_OVERFLOW_SUBMITS,
