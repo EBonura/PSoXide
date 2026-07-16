@@ -729,6 +729,23 @@ impl EditorWorkspace {
                             );
                         });
                         ui.horizontal(|ui| {
+                            ui.label("Atlas depth");
+                            egui::ComboBox::from_id_salt("model_import_texture_depth")
+                                .selected_text(format!("{}bpp indexed", dialog.texture_depth_bits))
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(
+                                        &mut dialog.texture_depth_bits,
+                                        4,
+                                        "4bpp indexed (16 colours)",
+                                    );
+                                    ui.selectable_value(
+                                        &mut dialog.texture_depth_bits,
+                                        8,
+                                        "8bpp indexed (256 colours)",
+                                    );
+                                });
+                        });
+                        ui.horizontal(|ui| {
                             ui.label("Anim Hz");
                             ui.add(
                                 egui::DragValue::new(&mut dialog.animation_fps)
@@ -822,9 +839,12 @@ impl EditorWorkspace {
                             "Reweights finger chains and Mixamo terminal bones into their nearest retained joints so humanoid rigs share the smaller PS1 skeleton contract.",
                         );
                         ui.label(
-                            RichText::new("Texture depth: 8bpp indexed")
-                                .color(STUDIO_TEXT_WEAK)
-                                .small(),
+                            RichText::new(format!(
+                                "Texture depth: {}bpp indexed",
+                                dialog.texture_depth_bits
+                            ))
+                            .color(STUDIO_TEXT_WEAK)
+                            .small(),
                         );
 
                         ui.separator();
@@ -1186,7 +1206,11 @@ impl EditorWorkspace {
         psxed_project::model_import::RigidModelConfig {
             texture_width: self.model_import_dialog.texture_width.clamp(16, 512) as u16,
             texture_height: self.model_import_dialog.texture_height.clamp(16, 512) as u16,
-            texture_depth: psxed_project::model_import::TextureDepth::Bit8,
+            texture_depth: if self.model_import_dialog.texture_depth_bits == 8 {
+                psxed_project::model_import::TextureDepth::Bit8
+            } else {
+                psxed_project::model_import::TextureDepth::Bit4
+            },
             animation_fps: self.model_import_dialog.animation_fps.clamp(1, 60) as u16,
             world_height: self.model_import_dialog.world_height.clamp(128, 8192) as u16,
             normalize_root_translation: self.model_import_dialog.normalize_root_translation,

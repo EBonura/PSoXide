@@ -184,7 +184,7 @@ impl EditorWorkspace {
                         }
                         ui.label(
                             RichText::new(
-                                "Cooked .psxt this material draws with; empty renders flat tint.",
+                                "Cooked .psxt this material draws with. Empty inherits a Model Renderer's atlas and renders flat tint on untextured surfaces.",
                             )
                             .color(STUDIO_TEXT_WEAK)
                             .small(),

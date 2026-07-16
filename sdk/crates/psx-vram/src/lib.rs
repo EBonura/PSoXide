@@ -835,14 +835,25 @@ impl<const ROOM_PAGES: usize, const CLUT_ROWS: usize> VramAllocator<ROOM_PAGES, 
         ))
     }
 
-    /// Allocate an 8bpp model-atlas strip `halfwords_per_row` wide (rounded up
-    /// to whole 64-px pages) at page row 256.
-    pub fn alloc_model_slot(&mut self, halfwords_per_row: u16) -> Option<(Tpage, VramHandle)> {
+    /// Allocate an indexed model-atlas strip `halfwords_per_row` wide (rounded
+    /// up to whole 64-halfword tpage bases) at page row 256.
+    ///
+    /// Placement is measured in physical VRAM halfwords, so the same allocator
+    /// works for 4bpp and 8bpp atlases. `depth` controls how the GPU interprets
+    /// those halfwords when the returned tpage word is emitted.
+    pub fn alloc_model_slot(
+        &mut self,
+        halfwords_per_row: u16,
+        depth: TexDepth,
+    ) -> Option<(Tpage, VramHandle)> {
+        if !matches!(depth, TexDepth::Bit4 | TexDepth::Bit8) {
+            return None;
+        }
         let pages = halfwords_per_row.div_ceil(ALLOC_COL_W).max(1);
         let x = self.find_page_run(pages, 256)?;
         self.set_rect(x, 256, pages * ALLOC_COL_W, TEXTURE_PAGE_TEXELS, true);
         Some((
-            Tpage::new(x, 256, TexDepth::Bit8),
+            Tpage::new(x, 256, depth),
             VramHandle::Rect(VramRect::new(
                 x,
                 256,
@@ -1242,6 +1253,18 @@ mod tests {
         let (tp, pl, _h) = a.alloc_window(32, 32).expect("window fits");
         assert_eq!(tp.x(), 640, "first window is at room band base");
         assert_eq!((pl.origin_u(), pl.origin_v()), (0, 0));
+    }
+
+    #[test]
+    fn model_slots_preserve_indexed_texture_depth() {
+        let mut a = VramAllocator::<2, 16>::new(480);
+        let (bit4, _h4) = a.alloc_model_slot(32, TexDepth::Bit4).unwrap();
+        let (bit8, _h8) = a.alloc_model_slot(64, TexDepth::Bit8).unwrap();
+
+        assert_eq!(bit4.depth(), TexDepth::Bit4);
+        assert_eq!(bit8.depth(), TexDepth::Bit8);
+        assert_ne!(bit4.x(), bit8.x());
+        assert!(a.alloc_model_slot(64, TexDepth::Bit15).is_none());
     }
 
     #[test]

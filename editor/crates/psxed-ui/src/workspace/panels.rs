@@ -1574,6 +1574,51 @@ impl EditorWorkspace {
                                         changed = true;
                                     }
                                 }
+
+                                // A ModelRenderer's selected Material is
+                                // editable in place. The picker above still
+                                // owns selection/navigation; this panel edits
+                                // the canonical resource after the scene-node
+                                // borrow has been released.
+                                let inline_model_material = self
+                                    .project
+                                    .active_scene()
+                                    .node(selected)
+                                    .and_then(|node| match node.kind {
+                                        NodeKind::ModelRenderer {
+                                            material: Some(material),
+                                            ..
+                                        } => Some(material),
+                                        _ => None,
+                                    });
+                                if let Some(material_id) = inline_model_material {
+                                    egui::CollapsingHeader::new(icons::label(
+                                        icons::BLEND,
+                                        "Material Override",
+                                    ))
+                                    .default_open(true)
+                                    .show(ui, |ui| {
+                                        let Some(resource) =
+                                            self.project.resource_mut(material_id)
+                                        else {
+                                            ui.colored_label(
+                                                Color32::from_rgb(220, 120, 100),
+                                                "Material resource is missing.",
+                                            );
+                                            return;
+                                        };
+                                        let ResourceData::Material(material) =
+                                            &mut resource.data
+                                        else {
+                                            ui.colored_label(
+                                                Color32::from_rgb(220, 120, 100),
+                                                "Selected resource is not a Material.",
+                                            );
+                                            return;
+                                        };
+                                        changed |= draw_model_material_override_editor(ui, material);
+                                    });
+                                }
                                 if changed && self.selected_node_is_player_source() {
                                     self.demote_player_sources_except(Some(selected));
                                 }

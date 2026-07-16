@@ -2959,15 +2959,33 @@ fn model_material_override_literal(
     material_override: &Option<PlaytestModelMaterialOverride>,
 ) -> String {
     match material_override {
-        Some(o) => format!(
-            "Some(LevelModelMaterialOverride {{ texture_asset: AssetId({}), blend_mode: {}, tint_rgb: [{}, {}, {}], flags: {} }})",
-            o.texture_asset_index,
-            model_override_blend_code(o.blend_mode),
-            o.tint_rgb[0],
-            o.tint_rgb[1],
-            o.tint_rgb[2],
-            material_flags_for_sidedness(o.face_sidedness),
-        ),
+        Some(o) => {
+            let texture_asset = o
+                .texture_asset_index
+                .map(|index| format!("Some(AssetId({index}))"))
+                .unwrap_or_else(|| "None".to_string());
+            let secondary_layer = o.secondary_layer.map_or_else(
+                || "None".to_string(),
+                |layer| {
+                    format!(
+                        "Some(LevelModelSecondaryLayer {{ texture_asset: AssetId({}), blend_mode: {}, tint_rgb: [{}, {}, {}] }})",
+                        layer.texture_asset_index,
+                        model_override_blend_code(layer.blend_mode),
+                        layer.tint_rgb[0],
+                        layer.tint_rgb[1],
+                        layer.tint_rgb[2],
+                    )
+                },
+            );
+            format!(
+                "Some(LevelModelMaterialOverride {{ texture_asset: {texture_asset}, blend_mode: {}, tint_rgb: [{}, {}, {}], secondary_layer: {secondary_layer}, flags: {} }})",
+                model_override_blend_code(o.blend_mode),
+                o.tint_rgb[0],
+                o.tint_rgb[1],
+                o.tint_rgb[2],
+                material_flags_for_sidedness(o.face_sidedness),
+            )
+        }
         None => "None".to_string(),
     }
 }
@@ -3047,7 +3065,12 @@ fn room_required_assets(
         // Covering textures upload per instance (not per model), so
         // they ride outside the seen_models dedupe.
         if let Some(material_override) = inst.material_override {
-            push_unique(&mut required_vram, material_override.texture_asset_index);
+            if let Some(asset_index) = material_override.texture_asset_index {
+                push_unique(&mut required_vram, asset_index);
+            }
+            if let Some(layer) = material_override.secondary_layer {
+                push_unique(&mut required_vram, layer.texture_asset_index);
+            }
         }
         if seen_models.contains(&inst.model) {
             continue;
@@ -3061,7 +3084,12 @@ fn room_required_assets(
         // is required everywhere (unlike the session-persistent model
         // atlas, prop-mode texture slots are evictable).
         if let Some(material_override) = character.material_override {
-            push_unique(&mut required_vram, material_override.texture_asset_index);
+            if let Some(asset_index) = material_override.texture_asset_index {
+                push_unique(&mut required_vram, asset_index);
+            }
+            if let Some(layer) = material_override.secondary_layer {
+                push_unique(&mut required_vram, layer.texture_asset_index);
+            }
         }
         if pc.spawn.room == room_index {
             let model = character.model;
@@ -3339,6 +3367,7 @@ use psx_level::{
     LevelModelInstanceRecord,
     LevelModelMaterialOverride,
     LevelModelRecord,
+    LevelModelSecondaryLayer,
     LevelModelSocketRecord,
     LevelOptionDef,
     LevelRoomPortalRecord,
