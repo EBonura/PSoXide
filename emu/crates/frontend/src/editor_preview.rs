@@ -1660,11 +1660,8 @@ fn walk_model_instances(
             meta.visual_scale_q8,
             meta.model_rotation,
         );
-        let material_override = preview_model_material_override(
-            project,
-            textures,
-            meta.material_override,
-        );
+        let material_override =
+            preview_model_material_override(project, textures, meta.material_override);
         let texture = material_override
             .and_then(|material| material.texture)
             .unwrap_or(meta.atlas);
@@ -1684,14 +1681,8 @@ fn walk_model_instances(
                 .unwrap_or(BlendMode::Opaque),
             secondary_layer: material_override.and_then(|material| {
                 material.secondary_layer.map(|mut layer| {
-                    layer.tint = shade_model_tint(
-                        origin,
-                        *camera,
-                        fog,
-                        &lights,
-                        ambient,
-                        layer.tint,
-                    );
+                    layer.tint =
+                        shade_model_tint(origin, *camera, fog, &lights, ambient, layer.tint);
                     layer
                 })
             }),
@@ -2224,7 +2215,8 @@ fn submit_preview_model_instance(
                 layer.blend_mode,
             )
             .with_texture_window(layer.texture.texture_window);
-            let layer_options = preview_model_surface_options(layer_material, instance.face_sidedness);
+            let layer_options =
+                preview_model_surface_options(layer_material, instance.face_sidedness);
             let layer_stats = world.submit_textured_model_predecoded_geometry_faces(
                 triangles,
                 instance.model,

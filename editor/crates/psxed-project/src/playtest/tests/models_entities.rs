@@ -784,8 +784,7 @@ fn player_model_renderer_material_override_cooks_onto_character() {
             })
         })
         .expect("starter player has a model renderer");
-    let NodeKind::ModelRenderer { material, .. } =
-        &mut scene.node_mut(renderer_id).unwrap().kind
+    let NodeKind::ModelRenderer { material, .. } = &mut scene.node_mut(renderer_id).unwrap().kind
     else {
         panic!("expected model renderer");
     };
@@ -828,8 +827,11 @@ fn player_model_renderer_material_without_texture_keeps_model_atlas() {
             })
         })
         .expect("starter player has a model renderer");
-    let NodeKind::ModelRenderer { material, .. } =
-        &mut project.active_scene_mut().node_mut(renderer_id).unwrap().kind
+    let NodeKind::ModelRenderer { material, .. } = &mut project
+        .active_scene_mut()
+        .node_mut(renderer_id)
+        .unwrap()
+        .kind
     else {
         panic!("expected model renderer");
     };
