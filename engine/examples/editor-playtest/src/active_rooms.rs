@@ -246,6 +246,7 @@ impl Playtest {
     /// drained. Returns `true` while any active room still has an unresolved
     /// (pending or dropped) texture, so the caller keeps pumping until all
     /// resolve instead of stalling once in-flight uploads finish.
+    #[inline(never)]
     pub(super) fn refresh_active_room_materials(&mut self) -> bool {
         let mut unresolved = false;
         let mut slot = 0usize;
@@ -441,6 +442,7 @@ impl Playtest {
     }
 
     #[cfg(feature = "cd-stream-bench")]
+    #[inline(never)]
     pub(super) fn pump_room_stream(&mut self, max_sectors: usize) -> bool {
         room_streams_arena().pump(
             cd_arena(),
@@ -456,6 +458,7 @@ impl Playtest {
     /// This is the one place residency is declared; the build paths read
     /// residency from what this makes resident.
     #[cfg(feature = "cd-stream-bench")]
+    #[inline(never)]
     pub(super) fn update_room_residency(&mut self) {
         // One source of truth: the camera-rooted portal traversal. The resident
         // desired-set is its frustum-visible rooms first (correctness -- anything
