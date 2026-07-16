@@ -271,7 +271,8 @@ impl<const N: usize, const MAX_STREAMED_ROOM_INDEX_COUNT: usize>
         world_pack_toc: &[LevelWorldPackEntryRecord],
         log_plan: impl Fn(&str, &RoomStreamLoadPlan<N>),
         log_entry: impl Fn(&str, RoomIndex, usize, usize, u32),
-    ) {
+    ) -> bool {
+        let layout_generation = storage.layout_generation();
         self.begin_window();
         // Only correctness-critical visible rooms are pinned. Look-ahead
         // entries remain best-effort and are the first eviction candidates.
@@ -295,6 +296,7 @@ impl<const N: usize, const MAX_STREAMED_ROOM_INDEX_COUNT: usize>
             log_entry,
         );
         self.emit_counters();
+        storage.layout_generation() != layout_generation
     }
 
     fn begin_window(&mut self) {
@@ -1074,6 +1076,7 @@ pub struct ResidentRoomHandle {
 pub struct StreamedRoomPages<const PAGES: usize, const SLOTS: usize> {
     pages: [[u32; cd_stream::SECTOR_BYTES / 4]; PAGES],
     runs: [StreamedRoomPageRun; SLOTS],
+    layout_generation: u32,
 }
 
 #[cfg(feature = "cd-stream-bench")]
@@ -1084,6 +1087,9 @@ impl<const PAGES: usize, const SLOTS: usize> StreamedRoomPages<PAGES, SLOTS> {
         Self {
             pages: [[0; cd_stream::SECTOR_BYTES / 4]; PAGES],
             runs: [StreamedRoomPageRun::EMPTY; SLOTS],
+            // Keep the whole pool all-zero valid so arena statics remain in
+            // `.bss` instead of duplicating tens of kilobytes into PSX-EXE.
+            layout_generation: 0,
         }
     }
 
@@ -1125,6 +1131,49 @@ impl<const PAGES: usize, const SLOTS: usize> StreamedRoomPages<PAGES, SLOTS> {
         None
     }
 
+    /// Pack all allocations except the slot being replaced toward page zero.
+    /// Returns whether any live allocation moved. Callers must invalidate and
+    /// rebuild pointer-bearing parsed views when `layout_generation` changes.
+    fn compact_except(&mut self, excluded_slot: usize) -> bool {
+        let mut cursor = 0usize;
+        let mut packed = [false; SLOTS];
+        let mut changed = false;
+        loop {
+            let mut next_slot = None;
+            let mut next_page = usize::MAX;
+            let mut slot = 0usize;
+            while slot < SLOTS {
+                let run = self.runs[slot];
+                let first = run.first_page as usize;
+                if slot != excluded_slot && !packed[slot] && run.page_count > 0 && first < next_page
+                {
+                    next_slot = Some(slot);
+                    next_page = first;
+                }
+                slot += 1;
+            }
+            let Some(slot) = next_slot else {
+                break;
+            };
+            packed[slot] = true;
+            let count = self.runs[slot].page_count as usize;
+            if next_page != cursor {
+                let src = self.pages.as_ptr().wrapping_add(next_page);
+                let dst = self.pages.as_mut_ptr().wrapping_add(cursor);
+                // SAFETY: both ranges are within `pages`; `ptr::copy` permits
+                // overlap while packing toward lower addresses.
+                unsafe { core::ptr::copy(src, dst, count) };
+                self.runs[slot].first_page = cursor as u16;
+                changed = true;
+            }
+            cursor += count;
+        }
+        if changed {
+            self.layout_generation = self.layout_generation.wrapping_add(1).max(1);
+        }
+        changed
+    }
+
     /// Reserve enough contiguous sector pages for a new payload in `slot`.
     /// Existing bytes in that logical slot are invalidated atomically by a
     /// generation bump. Returns `None` without changing the slot when the page
@@ -1134,11 +1183,19 @@ impl<const PAGES: usize, const SLOTS: usize> StreamedRoomPages<PAGES, SLOTS> {
             return None;
         }
         let page_count = Self::pages_for_bytes(byte_count);
-        // Never relocate another live run: parsed collision views can be held
-        // by the active-window cache until its generation changes. A failed
-        // contiguous reservation is therefore reported cleanly and retried
-        // after normal LRU eviction rather than silently invalidating pointers.
-        let first_page = self.find_contiguous_run(page_count, slot)?;
+        let first_page = match self.find_contiguous_run(page_count, slot) {
+            Some(first) => first,
+            None => {
+                let available = self
+                    .free_page_count()
+                    .saturating_add(self.runs[slot].page_count as usize);
+                if available < page_count {
+                    return None;
+                }
+                self.compact_except(slot);
+                self.find_contiguous_run(page_count, slot)?
+            }
+        };
         let generation = self.runs[slot].generation.wrapping_add(1).max(1);
         self.runs[slot] = StreamedRoomPageRun {
             first_page: u16::try_from(first_page).ok()?,
@@ -1151,14 +1208,24 @@ impl<const PAGES: usize, const SLOTS: usize> StreamedRoomPages<PAGES, SLOTS> {
         })
     }
 
-    /// Whether `slot` can be replaced by a payload of `byte_count` without
-    /// relocating any other live room.
+    /// Whether `slot` can be replaced by a payload of `byte_count`, either in
+    /// an existing contiguous run or after a capacity-sufficient compaction.
     pub fn can_prepare_slot(&self, slot: usize, byte_count: usize) -> bool {
-        slot < SLOTS
-            && byte_count > 0
-            && self
-                .find_contiguous_run(Self::pages_for_bytes(byte_count), slot)
-                .is_some()
+        if slot >= SLOTS || byte_count == 0 {
+            return false;
+        }
+        let pages = Self::pages_for_bytes(byte_count);
+        self.find_contiguous_run(pages, slot).is_some()
+            || self
+                .free_page_count()
+                .saturating_add(self.runs[slot].page_count as usize)
+                >= pages
+    }
+
+    /// Identity of the physical page layout. A change requires parsed views
+    /// that contain direct pointers into the pool to be rebuilt.
+    pub const fn layout_generation(&self) -> u32 {
+        self.layout_generation
     }
 
     /// Release one logical slot and invalidate every handle to its old pages.
@@ -1563,18 +1630,23 @@ mod tests {
     }
 
     #[test]
-    fn fragmented_pool_fails_without_moving_live_rooms() {
+    fn fragmented_pool_compacts_and_preserves_live_bytes() {
         let mut pool = StreamedRoomPages::<8, 4>::new();
         pool.prepare_slot(0, cd_stream::SECTOR_BYTES * 2).unwrap();
         pool.prepare_slot(1, cd_stream::SECTOR_BYTES * 2).unwrap();
         pool.prepare_slot(2, cd_stream::SECTOR_BYTES * 2).unwrap();
+        assert!(pool.write_slot_bytes(2, 0, &[0x5a, 0xa5]));
         pool.release_slot(1);
-        let first = pool.slot_handle(0).unwrap();
         let third = pool.slot_handle(2).unwrap();
-        assert!(pool.prepare_slot(3, cd_stream::SECTOR_BYTES * 3).is_none());
-        assert_eq!(pool.slot_handle(0), Some(first));
+        let before = pool.layout_generation();
+        assert!(pool.prepare_slot(3, cd_stream::SECTOR_BYTES * 3).is_some());
+        assert_ne!(pool.layout_generation(), before);
         assert_eq!(pool.slot_handle(2), Some(third));
-        assert_eq!(pool.free_page_count(), 4);
+        assert_eq!(
+            &pool.slot_bytes_for_handle(third, 2).unwrap()[..2],
+            &[0x5a, 0xa5]
+        );
+        assert_eq!(pool.free_page_count(), 1);
     }
 
     #[test]
