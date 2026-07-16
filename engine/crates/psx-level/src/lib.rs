@@ -1570,6 +1570,22 @@ pub struct LevelGameEntityRecord {
     pub patrol_wait_ticks: u16,
     /// XZ radius (engine units) inside which the player is noticed.
     pub aggro_radius: u16,
+    /// 60 Hz ticks spent observing the player before combat movement begins.
+    pub reaction_ticks: u8,
+    /// Desired XZ distance while this entity does not own the attack slot.
+    pub preferred_distance: u16,
+    /// Half-width of the desired-distance band, in engine units.
+    pub spacing_tolerance: u16,
+    /// 60 Hz ticks between hold/circle intent re-evaluations.
+    pub decision_interval_ticks: u8,
+    /// Percentage of in-band decisions that choose circling.
+    pub circle_chance: u8,
+    /// Relative score bonus when the combat director selects an attacker.
+    pub attack_priority: u8,
+    /// 60 Hz ticks this entity waits after completing an attack.
+    pub attack_cooldown_ticks: u8,
+    /// 60 Hz ticks before the combat director may grant another attack.
+    pub group_attack_delay_ticks: u8,
     /// 60 Hz ticks of attack windup (the souls-like telegraph).
     pub windup_ticks: u8,
     /// 60 Hz ticks of post-attack recovery (the punish window).
@@ -2679,7 +2695,7 @@ pub struct ParticleEmitterRecord {
 pub const CHARACTER_CLIP_NONE: OptionalModelClipIndex = OptionalModelClipIndex::NONE;
 
 /// Fixed action slots used by [`LevelCharacterRecord::action_clips`].
-pub const CHARACTER_ANIMATION_ACTION_COUNT: usize = 12;
+pub const CHARACTER_ANIMATION_ACTION_COUNT: usize = 15;
 
 /// Runtime animation action slot.
 ///
@@ -2713,6 +2729,12 @@ pub enum CharacterAnimationAction {
     HitReact = 10,
     /// Death / collapse.
     Death = 11,
+    /// Locked-on backward locomotion while preserving facing.
+    WalkBackward = 12,
+    /// Locked-on left strafe while preserving facing.
+    StrafeLeft = 13,
+    /// Locked-on right strafe while preserving facing.
+    StrafeRight = 14,
 }
 
 impl CharacterAnimationAction {
@@ -2730,6 +2752,9 @@ impl CharacterAnimationAction {
         Self::Block,
         Self::HitReact,
         Self::Death,
+        Self::WalkBackward,
+        Self::StrafeLeft,
+        Self::StrafeRight,
     ];
 
     /// Convert to the cooked action slot index.
