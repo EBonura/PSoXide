@@ -2,7 +2,7 @@
 //! vocabulary, threads the cooked manifest tables into the crate, and
 //! keeps the build orchestration (residency, streaming, lighting)
 //! whose inputs span the runtime arenas. Streamed-slot resolution
-//! lives on `StreamedRoomSlots` since the vram_runtime carve; the
+//! lives on `StreamedRoomPages` since the vram_runtime carve; the
 //! crate pool structs are arena-owned since phase 1.5 (see
 //! `runtime_arenas`).
 
@@ -260,7 +260,7 @@ pub(super) fn room_surface_cache_slices(
 /// slot byte buffer, re-validating residency and every chunk-view
 /// offset against the cache snapshot first. The `'static` on the
 /// result comes from borrowing the arena-owned slot-buffer instance
-/// (the `StreamedRoomSlots` staleness contract): consume it within the
+/// (the `StreamedRoomPages` staleness contract): consume it within the
 /// current render/update step and re-resolve next time; never store
 /// the slices.
 #[cfg(feature = "cd-stream-bench")]
