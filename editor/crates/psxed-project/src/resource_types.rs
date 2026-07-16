@@ -220,6 +220,9 @@ pub enum CharacterAnimationAction {
     Block,
     HitReact,
     Death,
+    WalkBackward,
+    StrafeLeft,
+    StrafeRight,
 }
 
 impl CharacterAnimationAction {
@@ -236,6 +239,9 @@ impl CharacterAnimationAction {
         Self::Block,
         Self::HitReact,
         Self::Death,
+        Self::WalkBackward,
+        Self::StrafeLeft,
+        Self::StrafeRight,
     ];
 
     pub const fn label(self) -> &'static str {
@@ -252,6 +258,9 @@ impl CharacterAnimationAction {
             Self::Block => "Block",
             Self::HitReact => "Hit React",
             Self::Death => "Death",
+            Self::WalkBackward => "Walk Backward",
+            Self::StrafeLeft => "Strafe Left",
+            Self::StrafeRight => "Strafe Right",
         }
     }
 
@@ -269,6 +278,9 @@ impl CharacterAnimationAction {
             Self::Block => 9,
             Self::HitReact => 10,
             Self::Death => 11,
+            Self::WalkBackward => 12,
+            Self::StrafeLeft => 13,
+            Self::StrafeRight => 14,
         }
     }
 
@@ -285,6 +297,7 @@ impl CharacterAnimationAction {
             }
             Self::HitReact => Some(AnimationRole::Hit),
             Self::Death => Some(AnimationRole::Death),
+            Self::WalkBackward | Self::StrafeLeft | Self::StrafeRight => None,
         }
     }
 
@@ -295,13 +308,31 @@ impl CharacterAnimationAction {
     pub const fn loops_by_default(self) -> bool {
         matches!(
             self,
-            Self::Idle | Self::Walk | Self::Run | Self::Turn | Self::Block
+            Self::Idle
+                | Self::Walk
+                | Self::Run
+                | Self::Turn
+                | Self::Block
+                | Self::WalkBackward
+                | Self::StrafeLeft
+                | Self::StrafeRight
         )
     }
 
     pub fn guess_from_name(name: &str) -> Option<Self> {
         let name = name.to_ascii_lowercase();
-        if name.contains("idle") {
+        if name.contains("strafe") && name.contains("left") {
+            Some(Self::StrafeLeft)
+        } else if name.contains("strafe") && name.contains("right") {
+            Some(Self::StrafeRight)
+        } else if name.contains("walk_back")
+            || name.contains("walk back")
+            || name.contains("walking_back")
+            || name.contains("walking back")
+            || name.contains("backward walk")
+        {
+            Some(Self::WalkBackward)
+        } else if name.contains("idle") {
             Some(Self::Idle)
         } else if name.contains("run") {
             Some(Self::Run)
@@ -1238,6 +1269,30 @@ pub struct EnemyBehaviorSettings {
     /// 60 Hz ticks the enemy idles at a reached patrol anchor.
     #[serde(default = "default_enemy_patrol_wait_ticks")]
     pub patrol_wait_ticks: u16,
+    /// 60 Hz ticks spent observing the player before the first combat decision.
+    #[serde(default = "default_enemy_reaction_ticks")]
+    pub reaction_ticks: u8,
+    /// Distance the enemy tries to maintain while it does not own the attack slot.
+    #[serde(default = "default_enemy_preferred_distance")]
+    pub preferred_distance: u16,
+    /// Half-width of the preferred-distance band, in engine units.
+    #[serde(default = "default_enemy_spacing_tolerance")]
+    pub spacing_tolerance: u16,
+    /// 60 Hz ticks between hold/circle intent re-evaluations.
+    #[serde(default = "default_enemy_decision_interval_ticks")]
+    pub decision_interval_ticks: u8,
+    /// Percentage of in-band decisions that circle instead of holding position.
+    #[serde(default = "default_enemy_circle_chance")]
+    pub circle_chance: u8,
+    /// Director priority added when this enemy requests the shared attack slot.
+    #[serde(default = "default_enemy_attack_priority")]
+    pub attack_priority: u8,
+    /// 60 Hz ticks this enemy must wait after completing an attack.
+    #[serde(default = "default_enemy_attack_cooldown_ticks")]
+    pub attack_cooldown_ticks: u8,
+    /// 60 Hz ticks the director waits before granting the next attack slot.
+    #[serde(default = "default_enemy_group_attack_delay_ticks")]
+    pub group_attack_delay_ticks: u8,
     /// 60 Hz ticks of attack windup (the telegraph).
     #[serde(default = "default_enemy_windup_ticks")]
     pub windup_ticks: u8,
@@ -1262,6 +1317,14 @@ impl EnemyBehaviorSettings {
             aggro_radius: default_enemy_aggro_radius(),
             patrol_offset: [0; 3],
             patrol_wait_ticks: default_enemy_patrol_wait_ticks(),
+            reaction_ticks: default_enemy_reaction_ticks(),
+            preferred_distance: default_enemy_preferred_distance(),
+            spacing_tolerance: default_enemy_spacing_tolerance(),
+            decision_interval_ticks: default_enemy_decision_interval_ticks(),
+            circle_chance: default_enemy_circle_chance(),
+            attack_priority: default_enemy_attack_priority(),
+            attack_cooldown_ticks: default_enemy_attack_cooldown_ticks(),
+            group_attack_delay_ticks: default_enemy_group_attack_delay_ticks(),
             windup_ticks: default_enemy_windup_ticks(),
             recovery_ticks: default_enemy_recovery_ticks(),
             poise: default_enemy_poise(),
@@ -1283,6 +1346,38 @@ pub(crate) const fn default_enemy_aggro_radius() -> u16 {
 
 pub(crate) const fn default_enemy_patrol_wait_ticks() -> u16 {
     60
+}
+
+pub(crate) const fn default_enemy_reaction_ticks() -> u8 {
+    18
+}
+
+pub(crate) const fn default_enemy_preferred_distance() -> u16 {
+    768
+}
+
+pub(crate) const fn default_enemy_spacing_tolerance() -> u16 {
+    128
+}
+
+pub(crate) const fn default_enemy_decision_interval_ticks() -> u8 {
+    12
+}
+
+pub(crate) const fn default_enemy_circle_chance() -> u8 {
+    65
+}
+
+pub(crate) const fn default_enemy_attack_priority() -> u8 {
+    4
+}
+
+pub(crate) const fn default_enemy_attack_cooldown_ticks() -> u8 {
+    45
+}
+
+pub(crate) const fn default_enemy_group_attack_delay_ticks() -> u8 {
+    18
 }
 
 pub(crate) const fn default_enemy_windup_ticks() -> u8 {

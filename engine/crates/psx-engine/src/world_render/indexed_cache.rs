@@ -913,6 +913,15 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
     };
     let material = cached_uv_material(material);
     profile.add_material(RoomSurfaceMicroProfile::elapsed(material_start));
+    // A valid prebuilt packet already owns the immutable baked colours. Once
+    // its first frame has populated them, avoid reconstructing and shuffling
+    // the same four RGB triples on every subsequent draw. Positions and OT
+    // depth remain frame-dependent and are still patched below.
+    let prebuilt_static_colors_ready = use_direct_baked_rgb
+        && surface.has_baked_rgb()
+        && prebuilt
+            .as_ref()
+            .is_some_and(|entry| *entry.1 != 0);
     match kind {
         WorldSurfaceKind::Floor | WorldSurfaceKind::Ceiling => {
             let is_ceiling = matches!(kind, WorldSurfaceKind::Ceiling);
@@ -997,18 +1006,23 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                     return 1;
                 }
                 let lighting_start = RoomSurfaceMicroProfile::cycle();
-                let Some(colors) = indexed_vertex_lighting_colors(
-                    lighting,
-                    surface,
-                    material,
-                    cached_vertices,
-                    ids,
-                    vertex_depths,
-                    use_direct_baked_rgb,
-                ) else {
-                    profile.add_lighting(RoomSurfaceMicroProfile::elapsed(lighting_start));
-                    profile.count_lighting_reject();
-                    return 0;
+                let colors = if prebuilt_static_colors_ready {
+                    [(0, 0, 0); 4]
+                } else {
+                    let Some(colors) = indexed_vertex_lighting_colors(
+                        lighting,
+                        surface,
+                        material,
+                        cached_vertices,
+                        ids,
+                        vertex_depths,
+                        use_direct_baked_rgb,
+                    ) else {
+                        profile.add_lighting(RoomSurfaceMicroProfile::elapsed(lighting_start));
+                        profile.count_lighting_reject();
+                        return 0;
+                    };
+                    colors
                 };
                 profile.add_lighting(RoomSurfaceMicroProfile::elapsed(lighting_start));
                 let (projected, uv_words, colors) = if is_ceiling {
@@ -1029,6 +1043,7 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                 let prepared_depth = Some(prepared_depth.unwrap_or_else(|| {
                     PreparedTriangleDepth::from_quad_average::<OT>(surface_options, projected)
                 }));
+                let prebuilt_colors_static = use_direct_baked_rgb && surface.has_baked_rgb();
                 submit_sided_projected_gouraud_quad_cached_uv_words(
                     world,
                     triangles,
@@ -1041,6 +1056,7 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                     CullMode::Back,
                     surface.split,
                     prebuilt,
+                    prebuilt_colors_static,
                     profile,
                 );
                 profile.add_submit(RoomSurfaceMicroProfile::elapsed(submit_start));
@@ -1124,18 +1140,23 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                     return 1;
                 }
                 let lighting_start = RoomSurfaceMicroProfile::cycle();
-                let Some(colors) = indexed_vertex_lighting_colors(
-                    lighting,
-                    surface,
-                    material,
-                    cached_vertices,
-                    ids,
-                    vertex_depths,
-                    use_direct_baked_rgb,
-                ) else {
-                    profile.add_lighting(RoomSurfaceMicroProfile::elapsed(lighting_start));
-                    profile.count_lighting_reject();
-                    return 0;
+                let colors = if prebuilt_static_colors_ready {
+                    [(0, 0, 0); 4]
+                } else {
+                    let Some(colors) = indexed_vertex_lighting_colors(
+                        lighting,
+                        surface,
+                        material,
+                        cached_vertices,
+                        ids,
+                        vertex_depths,
+                        use_direct_baked_rgb,
+                    ) else {
+                        profile.add_lighting(RoomSurfaceMicroProfile::elapsed(lighting_start));
+                        profile.count_lighting_reject();
+                        return 0;
+                    };
+                    colors
                 };
                 profile.add_lighting(RoomSurfaceMicroProfile::elapsed(lighting_start));
                 let submit_start = RoomSurfaceMicroProfile::cycle();
@@ -1143,6 +1164,7 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                 let prepared_depth = Some(prepared_depth.unwrap_or_else(|| {
                     PreparedTriangleDepth::from_quad_average::<OT>(surface_options, projected)
                 }));
+                let prebuilt_colors_static = use_direct_baked_rgb && surface.has_baked_rgb();
                 submit_sided_projected_gouraud_quad_cached_uv_words(
                     world,
                     triangles,
@@ -1155,6 +1177,7 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                     CullMode::Back,
                     SPLIT_NW_SE,
                     prebuilt,
+                    prebuilt_colors_static,
                     profile,
                 );
                 profile.add_submit(RoomSurfaceMicroProfile::elapsed(submit_start));

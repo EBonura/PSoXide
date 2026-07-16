@@ -320,6 +320,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         &mut self,
         primitives: &mut P,
         prebuilt: Option<(&mut QuadTexturedGouraud, &mut u8)>,
+        prebuilt_colors_static: bool,
         verts: [ProjectedVertex; 4],
         uv_words: [u16; 4],
         colors: [(u8, u8, u8); 4],
@@ -367,6 +368,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             return self.submit_prebuilt_textured_gouraud_quad(
                 quad,
                 valid,
+                prebuilt_colors_static,
                 verts,
                 uv_words,
                 colors,
@@ -1077,6 +1079,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         &mut self,
         quad: &mut QuadTexturedGouraud,
         valid: &mut u8,
+        colors_static: bool,
         verts: [ProjectedVertex; 4],
         uv_words: [u16; 4],
         colors: [(u8, u8, u8); 4],
@@ -1102,7 +1105,9 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             *valid = 1;
         } else {
             quad.set_positions(xy);
-            quad.set_colors(colors);
+            if !colors_static {
+                quad.set_colors(colors);
+            }
         }
         self.push_command(
             prepared_depth.slot,

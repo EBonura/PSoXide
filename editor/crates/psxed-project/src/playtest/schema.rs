@@ -1417,6 +1417,22 @@ pub struct PlaytestGameEntity {
     pub patrol_wait_ticks: u16,
     /// XZ aggro radius in engine units.
     pub aggro_radius: u16,
+    /// Initial combat reaction delay in 60 Hz ticks.
+    pub reaction_ticks: u8,
+    /// Desired non-attacker distance in engine units.
+    pub preferred_distance: u16,
+    /// Half-width of the desired-distance band.
+    pub spacing_tolerance: u16,
+    /// Hold/circle decision cadence in 60 Hz ticks.
+    pub decision_interval_ticks: u8,
+    /// Percent chance that an in-band decision circles.
+    pub circle_chance: u8,
+    /// Relative combat-director attack priority.
+    pub attack_priority: u8,
+    /// Local post-attack cooldown in 60 Hz ticks.
+    pub attack_cooldown_ticks: u8,
+    /// Shared director delay after this entity attacks.
+    pub group_attack_delay_ticks: u8,
     /// Attack windup ticks.
     pub windup_ticks: u8,
     /// Post-attack recovery ticks.

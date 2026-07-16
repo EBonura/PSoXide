@@ -13,11 +13,30 @@ fn decode_atlas(bytes: &[u8]) -> ColorImage {
     let (w, h) = (t.width() as usize, t.height() as usize);
     let pix = t.pixel_bytes();
     let clut = t.clut_bytes();
+    let row_bytes = usize::from(t.halfwords_per_row()) * 2;
     let mut pixels = vec![Color32::BLACK; w * h];
     for y in 0..h {
         for x in 0..w {
-            let idx = pix[y * w + x] as usize;
-            let v = u16::from_le_bytes([clut[idx * 2], clut[idx * 2 + 1]]);
+            let v = match t.depth() as u8 {
+                4 => {
+                    let packed = pix[y * row_bytes + x / 2];
+                    let idx = (if x & 1 == 0 {
+                        packed & 0x0f
+                    } else {
+                        packed >> 4
+                    }) as usize;
+                    u16::from_le_bytes([clut[idx * 2], clut[idx * 2 + 1]])
+                }
+                8 => {
+                    let idx = pix[y * row_bytes + x] as usize;
+                    u16::from_le_bytes([clut[idx * 2], clut[idx * 2 + 1]])
+                }
+                15 => {
+                    let offset = y * row_bytes + x * 2;
+                    u16::from_le_bytes([pix[offset], pix[offset + 1]])
+                }
+                _ => unreachable!("Texture parser rejects unsupported depths"),
+            };
             let r = ((v & 31) * 255 / 31) as u8;
             let g = (((v >> 5) & 31) * 255 / 31) as u8;
             let b = (((v >> 10) & 31) * 255 / 31) as u8;
@@ -46,6 +65,7 @@ fn main() {
     let model = std::fs::read(a.next().unwrap()).unwrap();
     let clip = std::fs::read(a.next().unwrap()).unwrap();
     let atlas = decode_atlas(&std::fs::read(a.next().unwrap()).unwrap());
+    let time_seconds = a.next().and_then(|value| value.parse().ok()).unwrap_or(0.5);
 
     for (yi, &yaw) in [0u16, 1024, 2048, 3072].iter().enumerate() {
         let opts = ImportPreviewOptions {
@@ -53,7 +73,7 @@ fn main() {
             visual_scale_q8: 256,
             visual_yaw_q12: 0,
             collision_radius: 200,
-            time_seconds: 0.5,
+            time_seconds,
             yaw_q12: yaw,
             pitch_q12: 200,
             radius: 0,

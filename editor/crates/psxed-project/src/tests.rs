@@ -117,6 +117,71 @@ fn character_resource_deserializes_without_new_motor_tuning_fields() {
 }
 
 #[test]
+fn enemy_behavior_deserializes_without_combat_director_tuning_fields() {
+    let ron = r#"(
+        aggro_radius: 2048,
+        patrol_offset: (0, 0, 0),
+        patrol_wait_ticks: 60,
+        windup_ticks: 20,
+        recovery_ticks: 24,
+        poise: 100,
+        touch_damage: 10,
+        max_health: 100,
+    )"#;
+    let enemy: EnemyBehaviorSettings =
+        ron::from_str(ron).expect("legacy enemy behavior deserializes");
+    let defaults = EnemyBehaviorSettings::defaults();
+
+    assert_eq!(enemy.reaction_ticks, defaults.reaction_ticks);
+    assert_eq!(enemy.preferred_distance, defaults.preferred_distance);
+    assert_eq!(enemy.spacing_tolerance, defaults.spacing_tolerance);
+    assert_eq!(
+        enemy.decision_interval_ticks,
+        defaults.decision_interval_ticks
+    );
+    assert_eq!(enemy.circle_chance, defaults.circle_chance);
+    assert_eq!(enemy.attack_priority, defaults.attack_priority);
+    assert_eq!(enemy.attack_cooldown_ticks, defaults.attack_cooldown_ticks);
+    assert_eq!(
+        enemy.group_attack_delay_ticks,
+        defaults.group_attack_delay_ticks
+    );
+}
+
+#[test]
+fn cortex_project_deserializes_authored_enemy_combat_profile() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../projects/cortex_ignition_v1/project.ron");
+    let text = std::fs::read_to_string(&path).expect("tracked Cortex project is readable");
+    let project = ProjectDocument::from_ron_str(&text).expect("tracked Cortex project parses");
+    let enemy = project
+        .active_scene()
+        .nodes()
+        .iter()
+        .find_map(|node| match &node.kind {
+            NodeKind::CharacterController {
+                settings:
+                    CharacterControllerSettings {
+                        enemy: Some(enemy), ..
+                    },
+                player: false,
+                ..
+            } => Some(*enemy),
+            _ => None,
+        })
+        .expect("Cortex scene contains an enemy controller");
+
+    assert_eq!(enemy.reaction_ticks, 18);
+    assert_eq!(enemy.preferred_distance, 768);
+    assert_eq!(enemy.spacing_tolerance, 128);
+    assert_eq!(enemy.decision_interval_ticks, 12);
+    assert_eq!(enemy.circle_chance, 65);
+    assert_eq!(enemy.attack_priority, 4);
+    assert_eq!(enemy.attack_cooldown_ticks, 45);
+    assert_eq!(enemy.group_attack_delay_ticks, 18);
+}
+
+#[test]
 fn camera_node_kind_serializes_roundtrip() {
     let kind = NodeKind::Camera {
         settings: WorldCameraSettings {
