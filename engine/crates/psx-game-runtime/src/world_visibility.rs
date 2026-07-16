@@ -228,22 +228,18 @@ fn portal_visibility_result_draws_room<
     const MAX_PORTAL_FRUSTUMS: usize,
     const MAX_PORTAL_FRONTIER_ROOMS: usize,
 >(
-    _visibility: &PortalVisibilityResult<
+    visibility: &PortalVisibilityResult<
         MAX_ACTIVE_ROOMS,
         MAX_PORTAL_FRUSTUMS,
         MAX_PORTAL_FRONTIER_ROOMS,
     >,
-    _current_room: RoomIndex,
-    _index: RoomIndex,
+    current_room: RoomIndex,
+    index: RoomIndex,
 ) -> bool {
-    // Reachability draw: the draw-order builders only pass rooms from the active
-    // window (the camera ring), so every one is drawn -- no frustum/far-distance
-    // cull gates room drawing here. Per-cell frustum + per-polygon backface and
-    // screen culling still trim the off-screen geometry. This is the draw-order
-    // twin of `portal_visibility_draws_room`; the reachability-draw rework
-    // flipped that one but missed this, so a reachable-but-not-frustum-visible
-    // room (e.g. the room behind the player) was dropped from the draw order.
-    true
+    // Keep streamed residency broad but make the draw list match the latest
+    // portal traversal. The current room remains a conservative fail-safe if a
+    // visibility refresh has not populated its result yet.
+    index == current_room || visibility.contains_room(index)
 }
 
 fn active_room_sort_depth(active: ActiveRuntimeRoom, camera: WorldCamera) -> i32 {
