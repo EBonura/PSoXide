@@ -1,6 +1,10 @@
 use super::*;
 
 impl Scene for Playtest {
+    fn render_submission(&self) -> RenderSubmission {
+        RenderSubmission::Queued
+    }
+
     /// Lend the uploaded HUD font to the flow driver so front-end UI
     /// scenes (the cooked Main Menu) draw their labels and buttons with
     /// the same glyphs the in-game HUD uses.
@@ -194,26 +198,22 @@ impl Scene for Playtest {
     }
 
     fn render(&mut self, ctx: &mut Ctx) {
+        let camera = self.render_camera;
+        self.prepared_overlay_camera = camera;
+        self.prepared_overlay_sim_tick = self.gameplay_tick(ctx.sim_tick);
+        self.prepared_overlay_analog = ctx.pad.is_analog();
         if !ctx.pad.is_analog() {
-            if let Some(font) = self.ui_fonts[0].as_ref() {
-                draw_analog_required_prompt(font);
-            }
+            // Keep a valid empty list queued; the prompt is an immediate
+            // overlay draw after this list has drained.
+            let _ = unsafe { OtFrame::begin(&mut OT) };
             return;
         }
 
-        let camera = self.render_camera;
-        // Snapshot for the deferred overlay pass: render_overlay runs at
-        // the flip, after the next fixed update has already moved
-        // render_camera, and must match the frame built here. The tick
-        // snapshot keeps time-animated overlay elements on this frame's
-        // clock; the flip-time tick varies with deadline-miss cadence.
-        self.overlay_camera = camera;
-        self.overlay_sim_tick = self.gameplay_tick(ctx.sim_tick);
         #[cfg(feature = "fps-overlay")]
         {
             // One presented frame per render() call; measure against the
             // gameplay-anchored tick so the readout is cadence-true.
-            let now = self.overlay_sim_tick.as_u32();
+            let now = self.prepared_overlay_sim_tick.as_u32();
             let gap = now.wrapping_sub(self.fps_last_tick).min(255) as u8;
             if self.fps_window_frames > 0 {
                 self.fps_worst_gap = self.fps_worst_gap.max(gap);
@@ -1140,22 +1140,27 @@ impl Scene for Playtest {
             primitive_packets.remaining() as u32,
         );
         telemetry::counter(telemetry::counter::WORLD_COMMANDS, world_command_len as u32);
-        // Kick the ordering-table DMA and hand the wait to the app
-        // runner's presentation flip: the GPU walks the table while the
-        // next fixed update runs on the CPU. Everything that composites
-        // over the 3D frame lives in render_overlay below, which the
-        // runner calls after draining the walker. Nothing after this
-        // kick may touch GP0 or the OT/primitive storage.
+        // Submission is deliberately split from packet preparation. The app
+        // runner first presents the previous queued frame and clears the new
+        // back buffer, then calls submit_render below.
+        let _ = ot;
+    }
+
+    fn submit_render(&mut self, _ctx: &mut Ctx) {
+        self.overlay_camera = self.prepared_overlay_camera;
+        self.overlay_sim_tick = self.prepared_overlay_sim_tick;
+        self.overlay_analog = self.prepared_overlay_analog;
         telemetry::stage_begin(telemetry::stage::OT_SUBMIT);
-        let ot_in_flight = ot.submit_async();
+        let ot_in_flight = unsafe { OtFrame::resume(&mut OT) }.submit_async();
         telemetry::stage_end(telemetry::stage::OT_SUBMIT);
         ot_in_flight.detach();
     }
 
-    fn render_overlay(&mut self, ctx: &mut Ctx) {
-        // Mirror render()'s analog-prompt early-out: those frames draw
-        // only the prompt, no world frame and no overlay layer.
-        if !ctx.pad.is_analog() {
+    fn render_overlay(&mut self, _ctx: &mut Ctx) {
+        if !self.overlay_analog {
+            if let Some(font) = self.ui_fonts[0].as_ref() {
+                draw_analog_required_prompt(font);
+            }
             return;
         }
         let camera = self.overlay_camera;
