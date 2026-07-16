@@ -2447,31 +2447,13 @@ fn submit_sided_projected_gouraud_quad_cached_uv_words<const OT: usize>(
                 [colors[1], colors[0], colors[2], colors[3]],
             )
         };
-        // Prebuilt-pool path: the packet lives in a static pool; the
-        // surface's validity byte decides full construction (first
-        // visible frame for the owning room) vs the position/colour
-        // patch. Built and pushed in the same call by construction.
-        if let Some((quad, valid)) = prebuilt {
-            let _ = world.submit_prebuilt_textured_gouraud_quad(
-                quad,
-                valid,
-                quad_verts,
-                quad_uv_words,
-                quad_colors,
-                material.gouraud_packet,
-                opts,
-                prepared_depth,
-            );
-            #[cfg(not(feature = "room-surface-profile"))]
-            let _ = profile;
-            return;
-        }
-        let _ = world.submit_textured_gouraud_quad_leaf_uv_words_prepared_depth(
+        let _ = world.submit_textured_gouraud_quad_prescreened_uv_words_prepared_depth(
             triangles,
+            prebuilt,
             quad_verts,
             quad_uv_words,
             quad_colors,
-            material.gouraud_packet,
+            material.texture,
             opts,
             prepared_depth,
         );

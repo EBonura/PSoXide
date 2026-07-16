@@ -171,6 +171,50 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             projected_vertices,
             joint_view_transforms,
             material,
+            None,
+            options,
+            faces,
+            geometry,
+            true,
+        )
+    }
+
+    /// Submit an animated textured model with a second material pass while
+    /// reusing the sampled joints and projected vertices from the first pass.
+    #[allow(clippy::too_many_arguments)]
+    pub fn submit_textured_model_predecoded_geometry_faces_layered(
+        &mut self,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
+        model: Model<'_>,
+        animation: Animation<'_>,
+        frame_q12: u32,
+        camera: WorldCamera,
+        origin: WorldVertex,
+        instance_rotation: Mat3I16,
+        local_to_world: LocalToWorldScale,
+        pose_translation: ModelPoseTranslation,
+        projected_vertices: &mut [ProjectedVertex],
+        joint_view_transforms: &mut [JointViewTransform],
+        material: TextureMaterial,
+        secondary_material: Option<TextureMaterial>,
+        options: WorldSurfaceOptions,
+        faces: &[TexturedModelRenderFace],
+        geometry: TexturedModelGeometry<'_>,
+    ) -> TexturedModelRenderStats {
+        self.submit_textured_model_geometry_impl(
+            triangles,
+            model,
+            animation,
+            frame_q12,
+            camera,
+            origin,
+            instance_rotation,
+            local_to_world,
+            pose_translation,
+            projected_vertices,
+            joint_view_transforms,
+            material,
+            secondary_material,
             options,
             faces,
             geometry,
@@ -215,6 +259,50 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             projected_vertices,
             joint_view_transforms,
             material,
+            None,
+            options,
+            faces,
+            geometry,
+            false,
+        )
+    }
+
+    /// Primary-joint counterpart of
+    /// [`Self::submit_textured_model_predecoded_geometry_faces_layered`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn submit_textured_model_primary_joints_predecoded_geometry_faces_layered(
+        &mut self,
+        triangles: &mut impl PrimitiveSink<TriTextured>,
+        model: Model<'_>,
+        animation: Animation<'_>,
+        frame_q12: u32,
+        camera: WorldCamera,
+        origin: WorldVertex,
+        instance_rotation: Mat3I16,
+        local_to_world: LocalToWorldScale,
+        pose_translation: ModelPoseTranslation,
+        projected_vertices: &mut [ProjectedVertex],
+        joint_view_transforms: &mut [JointViewTransform],
+        material: TextureMaterial,
+        secondary_material: Option<TextureMaterial>,
+        options: WorldSurfaceOptions,
+        faces: &[TexturedModelRenderFace],
+        geometry: TexturedModelGeometry<'_>,
+    ) -> TexturedModelRenderStats {
+        self.submit_textured_model_geometry_impl(
+            triangles,
+            model,
+            animation,
+            frame_q12,
+            camera,
+            origin,
+            instance_rotation,
+            local_to_world,
+            pose_translation,
+            projected_vertices,
+            joint_view_transforms,
+            material,
+            secondary_material,
             options,
             faces,
             geometry,
@@ -237,6 +325,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         projected_vertices: &mut [ProjectedVertex],
         joint_view_transforms: &mut [JointViewTransform],
         material: TextureMaterial,
+        secondary_material: Option<TextureMaterial>,
         options: WorldSurfaceOptions,
         faces: &[TexturedModelRenderFace],
         geometry: TexturedModelGeometry<'_>,
@@ -683,6 +772,112 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                     return stats;
                 }
                 face_index += 1;
+            }
+        }
+        if let Some(material) = secondary_material {
+            let options = options.with_material_layer(material);
+            let packet_material = material.textured_packet_material();
+            let overflow = if packed_back_average_unclamped_faces {
+                let projected_vertices = &projected_vertices[..project_count];
+                if packed_back_average_unclamped_extent_safe_faces {
+                    self.submit_predecoded_model_faces_packed_back_average_unclamped_extent_safe_batch(
+                        triangles,
+                        projected_vertices,
+                        faces,
+                        packet_material,
+                        options,
+                        &mut stats,
+                        &mut faces_considered,
+                    )
+                } else {
+                    self.submit_predecoded_model_faces_packed_back_average_unclamped_batch(
+                        triangles,
+                        projected_vertices,
+                        faces,
+                        packet_material,
+                        material,
+                        options,
+                        &mut stats,
+                        &mut faces_considered,
+                    )
+                }
+            } else {
+                let mut overflow = false;
+                let mut face_index = 0usize;
+                while face_index < faces.len() {
+                    faces_considered = faces_considered.wrapping_add(1);
+                    overflow = if packed_back_average_in_front_faces {
+                        self.submit_predecoded_model_face_packed_back_average_in_front_fast(
+                            triangles,
+                            projected_vertices,
+                            project_count,
+                            faces[face_index],
+                            packet_material,
+                            material,
+                            options,
+                            &mut stats,
+                        )
+                    } else if packed_back_in_front_faces {
+                        self.submit_predecoded_model_face_packed_back_in_front_fast(
+                            triangles,
+                            projected_vertices,
+                            project_count,
+                            faces[face_index],
+                            packet_material,
+                            material,
+                            options,
+                            &mut stats,
+                        )
+                    } else if packed_fast_faces {
+                        self.submit_predecoded_model_face_packed_fast(
+                            triangles,
+                            projected_vertices,
+                            project_count,
+                            faces[face_index],
+                            all_projected_vertices_in_front,
+                            near_z,
+                            packet_material,
+                            material,
+                            options,
+                            &mut stats,
+                        )
+                    } else {
+                        self.submit_predecoded_model_face(
+                            triangles,
+                            projected_vertices,
+                            project_count,
+                            faces[face_index],
+                            all_projected_vertices_in_front,
+                            near_z,
+                            packet_material,
+                            material,
+                            options,
+                            &mut stats,
+                        )
+                    };
+                    if overflow {
+                        break;
+                    }
+                    face_index += 1;
+                }
+                overflow
+            };
+            if overflow {
+                crate::telemetry::stage_end(crate::telemetry::stage::TEXTURED_MODEL_FACES);
+                emit_textured_model_detail_counters(
+                    joint_count,
+                    model.part_count(),
+                    project_count,
+                    faces_considered,
+                    blend_vertices,
+                    all_projected_vertices_in_front,
+                    all_projected_vertices_inside_hw_bounds,
+                    packed_back_average_unclamped_faces,
+                    packed_back_in_front_faces,
+                    packed_fast_faces,
+                    &stats,
+                );
+                return stats;
             }
         }
         crate::telemetry::stage_end(crate::telemetry::stage::TEXTURED_MODEL_FACES);

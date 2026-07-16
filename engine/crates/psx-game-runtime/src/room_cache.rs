@@ -559,16 +559,16 @@ pub fn active_room_drawable_mask<const MAX_ACTIVE_ROOMS: usize>(
 
 /// Per-frame projected-vertex scratch for the indexed cached-room draw
 /// paths (formerly the example's `CACHED_ROOM_PROJECTED_*` statics).
-/// One set is enough: rooms are drawn one at a time and every use
-/// resets its prefix before reading.
+/// One set is enough: rooms are drawn one at a time. The renderer uses
+/// the depth array's small prefix as a temporary vertex-seen bitset while
+/// collecting indices, then overwrites every depth it will read.
 pub struct CachedRoomProjection<const MAX_CACHED_ROOM_VERTICES: usize> {
     /// Projected-vertex slot indices.
     pub indices: [u16; MAX_CACHED_ROOM_VERTICES],
     /// Projected vertices.
     pub vertices: [ProjectedVertex; MAX_CACHED_ROOM_VERTICES],
-    /// Per-vertex "already projected this frame" flags.
-    pub ready: [bool; MAX_CACHED_ROOM_VERTICES],
-    /// Per-vertex camera depths.
+    /// Per-vertex camera depths. Its first `ceil(vertex_count / 32)` words
+    /// are reused as transient deduplication bits before projection.
     pub depths: [i32; MAX_CACHED_ROOM_VERTICES],
 }
 
@@ -579,7 +579,6 @@ impl<const MAX_CACHED_ROOM_VERTICES: usize> CachedRoomProjection<MAX_CACHED_ROOM
         Self {
             indices: [0; MAX_CACHED_ROOM_VERTICES],
             vertices: [ProjectedVertex::new(0, 0, 0); MAX_CACHED_ROOM_VERTICES],
-            ready: [false; MAX_CACHED_ROOM_VERTICES],
             depths: [0; MAX_CACHED_ROOM_VERTICES],
         }
     }
