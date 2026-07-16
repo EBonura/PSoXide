@@ -842,13 +842,11 @@ pub(crate) fn register_model_for_instance(
                 return None;
             }
         };
-        // Model atlases must be 8bpp (256-entry CLUT) -- the
-        // runtime model atlas region uses an 8bpp tpage and a
-        // 256-entry CLUT row per atlas. Other depths render with
-        // wrong colours, so reject loud at cook time.
-        if parsed_atlas.clut_entries() != 256 {
+        // The runtime model-atlas region accepts both native indexed formats.
+        // Reject direct-colour or malformed palettes loudly at cook time.
+        if !matches!(parsed_atlas.clut_entries(), 16 | 256) {
             report.error(format!(
-                "Model '{}' atlas must be 8bpp (256-entry CLUT); found {} entries",
+                "Model '{}' atlas must be 4bpp (16-entry CLUT) or 8bpp (256-entry CLUT); found {} entries",
                 resource.name,
                 parsed_atlas.clut_entries(),
             ));
