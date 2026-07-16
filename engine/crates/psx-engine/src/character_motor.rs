@@ -867,6 +867,14 @@ impl CharacterMotorState {
             return (position.x != start.x || position.z != start.z, true);
         }
 
+        // `apply_vertical` validated and anchored this exact X/Z at the start
+        // of the tick. When every candidate is blocked, keep that known-good
+        // grounded position instead of repeating two full floor/wall scans.
+        // The recovery probes below remain for airborne/no-floor edge cases.
+        if self.grounded {
+            return (false, true);
+        }
+
         if body_stand_position(collision, start, radius, height).is_some() {
             return (false, true);
         }
@@ -1686,6 +1694,17 @@ fn circle_overlaps_segment(
     bx: i32,
     bz: i32,
 ) -> bool {
+    // Most walls in the small sector neighbourhood are nowhere near the body.
+    // Reject them before the closest-point projection, whose Q12 divide is
+    // comparatively expensive on the R3000.
+    let radius = radius.max(0);
+    if cx < ax.min(bx).saturating_sub(radius)
+        || cx > ax.max(bx).saturating_add(radius)
+        || cz < az.min(bz).saturating_sub(radius)
+        || cz > az.max(bz).saturating_add(radius)
+    {
+        return false;
+    }
     let vx = bx.saturating_sub(ax);
     let vz = bz.saturating_sub(az);
     let wx = cx.saturating_sub(ax);
