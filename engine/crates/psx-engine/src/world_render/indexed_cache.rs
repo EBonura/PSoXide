@@ -739,10 +739,18 @@ fn sort_cached_room_cell_indices_by_depth(
     if len < 2 {
         return;
     }
-    let (bucket_count, bucket_shift) = if bucket_scratch.len() >= 128 {
-        (128usize, 8u32)
-    } else if bucket_scratch.len() >= 64 {
+    // Tiny room lists are cheaper in-place; larger lists use only enough
+    // coarse buckets to keep the per-bucket insertion tails short. Avoid
+    // clearing the old fixed 128 counters for every small active room.
+    let (bucket_count, bucket_shift) = if len < 24 {
+        sort_cached_room_cell_indices_by_depth_shell(indices, depths);
+        return;
+    } else if len < 48 && bucket_scratch.len() >= 32 {
+        (32usize, 10u32)
+    } else if len < 96 && bucket_scratch.len() >= 64 {
         (64usize, 9u32)
+    } else if bucket_scratch.len() >= 128 {
+        (128usize, 8u32)
     } else {
         sort_cached_room_cell_indices_by_depth_shell(indices, depths);
         return;
