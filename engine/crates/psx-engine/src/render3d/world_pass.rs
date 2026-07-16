@@ -65,6 +65,13 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         ot: &'a mut OtFrame<'ot, OT_DEPTH>,
         commands: &'a mut [WorldTriCommand],
     ) -> Self {
+        debug_assert!(
+            core::mem::size_of::<BucketedWorldCommand>() <= core::mem::size_of::<WorldTriCommand>()
+        );
+        debug_assert!(
+            core::mem::align_of::<BucketedWorldCommand>()
+                <= core::mem::align_of::<WorldTriCommand>()
+        );
         Self {
             ot,
             commands,
@@ -450,31 +457,37 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         let command_index = self.command_len;
         debug_assert!(command_index < WORLD_COMMAND_NONE as usize);
         if self.ordering == WorldCommandOrdering::Bucketed {
-            // The bucketed flush consumes only these three fields. Avoid
-            // rewriting sort/link metadata for every triangle on the fastest
-            // path; the static scratch already owns valid storage.
-            let command = &mut self.commands[command_index];
-            command.packet_ptr = packet_ptr;
-            command.slot = slot.index().min(u16::MAX as usize) as u16;
-            command.words = words;
-        } else {
-            self.commands[command_index] = WorldTriCommand {
-                packet_ptr,
-                depth,
-                slot: slot.index().min(u16::MAX as usize) as u16,
-                order: self.next_order,
-                next: WORLD_COMMAND_NONE,
-                render_layer: world_render_layer_code(render_layer),
-                words,
-            };
+            // SAFETY: new_bucketed verifies layout/alignment and this index is
+            // bounded by the WorldTriCommand slice length, whose elements are
+            // at least as large as BucketedWorldCommand. Bucketed mode never
+            // reads the same storage through WorldTriCommand.
+            unsafe {
+                self.commands
+                    .as_mut_ptr()
+                    .cast::<BucketedWorldCommand>()
+                    .add(command_index)
+                    .write(BucketedWorldCommand::new(packet_ptr, slot.index(), words));
+            }
+            self.command_len += 1;
+            return;
         }
+
+        self.commands[command_index] = WorldTriCommand {
+            packet_ptr,
+            depth,
+            slot: slot.index().min(u16::MAX as usize) as u16,
+            order: self.next_order,
+            next: WORLD_COMMAND_NONE,
+            render_layer: world_render_layer_code(render_layer),
+            words,
+        };
         self.command_len += 1;
         self.next_order = self.next_order.wrapping_add(1);
         match self.ordering {
             WorldCommandOrdering::LinkedSorted => self.insert_command_in_slot(command_index),
             WorldCommandOrdering::DeferredSorted => {}
             WorldCommandOrdering::DeferredSlotSorted => self.append_command_in_slot(command_index),
-            WorldCommandOrdering::Bucketed => {}
+            WorldCommandOrdering::Bucketed => unreachable!(),
         }
     }
 
@@ -645,18 +658,18 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             // commands backwards preserves same-slot submission order without
             // building/reversing per-slot linked lists.
             let mut command_index = self.command_len;
+            let commands = self.commands.as_ptr().cast::<BucketedWorldCommand>();
             while command_index != 0 {
                 command_index -= 1;
-                let command = &self.commands[command_index];
+                // SAFETY: Bucketed push_command initialised every compact
+                // entry below command_len in this same scratch allocation.
+                let command = unsafe { *commands.add(command_index) };
                 // SAFETY: Bucketed commands are appended only after a packet
                 // arena push succeeds, and depth slots are produced by this
                 // pass' OT-depth-aware depth-band mapping.
                 unsafe {
-                    self.ot.add_raw_unchecked(
-                        command.slot as usize,
-                        command.packet_ptr,
-                        command.words,
-                    )
+                    self.ot
+                        .add_raw_unchecked(command.slot(), command.packet_ptr, command.words())
                 };
             }
             return;
