@@ -1365,6 +1365,23 @@ fn assert_close_i32(actual: i32, expected: i32, tolerance: i32) {
     );
 }
 
+#[test]
+fn compact_view_vertex_lerp_matches_weighted_form() {
+    let values = [-32_768, -10_000, -1, 0, 1, 10_000, 32_767];
+    let weights = [0, 1, 63, 127, 128, 129, 254, 255];
+    for &a in &values {
+        for &b in &values {
+            for &weight in &weights {
+                let t = i32::from(weight);
+                let expected = ((a * (256 - t)) + (b * t)) >> 8;
+                let actual =
+                    lerp_view_vertex(ViewVertex::new(a, a, a), ViewVertex::new(b, b, b), weight);
+                assert_eq!(actual, ViewVertex::new(expected, expected, expected));
+            }
+        }
+    }
+}
+
 /// The chunked blended-vertex flush must produce exactly the same
 /// projected vertices as the per-vertex slow path it replaces: same
 /// transforms, same lerp, same RTPS wrapper, only the GTE matrix loads
