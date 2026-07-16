@@ -1653,6 +1653,7 @@ pub(crate) struct CellFrustum {
     half_h: i32,
     sphere_x_support: i32,
     sphere_y_support: i32,
+    lateral_i32_limit: u32,
     view_abs: [[i32; 3]; 3],
 }
 
@@ -1664,6 +1665,39 @@ fn conservative_plane_sphere_support(a: i32, b: i32) -> i32 {
     // `sqrt(larger^2 + smaller^2)` when `smaller <= larger`. Round the half
     // upward so integer truncation cannot turn the bound into an underestimate.
     larger.saturating_add(smaller.saturating_add(1) >> 1)
+}
+
+#[cold]
+#[inline(never)]
+fn cell_aabb_extent_wide(row: [i32; 3], half_x: i32, half_y: i32, half_z: i32) -> i32 {
+    let q12 = (row[0] as i64 * half_x as i64)
+        .saturating_add(row[1] as i64 * half_y as i64)
+        .saturating_add(row[2] as i64 * half_z as i64)
+        .saturating_add(4095)
+        >> 12;
+    (q12.min(i32::MAX as i64) as i32).saturating_add(2)
+}
+
+#[cold]
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn cell_aabb_lateral_visible_wide(
+    view: ViewVertex,
+    z: i32,
+    extent_x: i32,
+    extent_y: i32,
+    extent_z: i32,
+    focal: i32,
+    half_w: i32,
+    half_h: i32,
+) -> bool {
+    let px = view.x.abs() as i64 * focal as i64;
+    let py = view.y.abs() as i64 * focal as i64;
+    let x_limit =
+        half_w as i64 * z as i64 + focal as i64 * extent_x as i64 + half_w as i64 * extent_z as i64;
+    let y_limit =
+        half_h as i64 * z as i64 + focal as i64 * extent_y as i64 + half_h as i64 * extent_z as i64;
+    px <= x_limit && py <= y_limit
 }
 
 impl CellFrustum {
@@ -1685,6 +1719,7 @@ impl CellFrustum {
         let cy_sp = camera.cos_yaw.mul_q12(camera.sin_pitch).raw();
         let sy_cp = camera.sin_yaw.mul_q12(camera.cos_pitch).raw();
         let cy_cp = camera.cos_yaw.mul_q12(camera.cos_pitch).raw();
+        let lateral_max_coefficient = focal.max(half_w).max(half_h) as u32;
         Self {
             near,
             far: options.depth_range.far().max(near),
@@ -1699,6 +1734,11 @@ impl CellFrustum {
             // safe because cell radii were themselves heavily inflated.
             sphere_x_support: conservative_plane_sphere_support(focal, half_w),
             sphere_y_support: conservative_plane_sphere_support(focal, half_h),
+            // Three non-negative products are summed for each lateral AABB
+            // plane. Keeping every input below this limit proves that both
+            // plane sums fit in i32, while unusual authored coordinates fall
+            // back to the exact widened implementation.
+            lateral_i32_limit: (i32::MAX as u32 / 3) / lateral_max_coefficient,
             view_abs: [
                 [camera.cos_yaw.raw().abs(), 0, camera.sin_yaw.raw().abs()],
                 [sy_sp.abs(), camera.cos_pitch.raw().abs(), cy_sp.abs()],
@@ -1739,32 +1779,63 @@ impl CellFrustum {
         half_y: i32,
         half_z: i32,
     ) -> bool {
-        let extent = |row: [i32; 3]| {
-            let q12 = (row[0] as i64 * half_x.max(0) as i64)
-                .saturating_add(row[1] as i64 * half_y.max(0) as i64)
-                .saturating_add(row[2] as i64 * half_z.max(0) as i64)
-                .saturating_add(4095)
-                >> 12;
-            (q12.min(i32::MAX as i64) as i32).saturating_add(2)
+        let half_x = half_x.max(0);
+        let half_y = half_y.max(0);
+        let half_z = half_z.max(0);
+        // Each absolute Q12 basis coefficient is <= 4096. With all three
+        // half-extents <= 174,000, their worst-case sum plus rounding is below
+        // i32::MAX, so the common PS1-sized cell can avoid widened saturating
+        // arithmetic. Unusually large authored cells retain the old path.
+        let extent_fast = half_x <= 174_000 && half_y <= 174_000 && half_z <= 174_000;
+        let [extent_x, extent_y, extent_z] = if extent_fast {
+            let extent = |row: [i32; 3]| {
+                ((row[0] * half_x + row[1] * half_y + row[2] * half_z + 4095) >> 12)
+                    .saturating_add(2)
+            };
+            [
+                extent(self.view_abs[0]),
+                extent(self.view_abs[1]),
+                extent(self.view_abs[2]),
+            ]
+        } else {
+            [
+                cell_aabb_extent_wide(self.view_abs[0], half_x, half_y, half_z),
+                cell_aabb_extent_wide(self.view_abs[1], half_x, half_y, half_z),
+                cell_aabb_extent_wide(self.view_abs[2], half_x, half_y, half_z),
+            ]
         };
-        let extent_x = extent(self.view_abs[0]);
-        let extent_y = extent(self.view_abs[1]);
-        let extent_z = extent(self.view_abs[2]);
         if view.z < self.near.saturating_sub(extent_z) || view.z > self.far.saturating_add(extent_z)
         {
             return false;
         }
 
         let z = view.z.max(self.near);
-        let px = view.x.abs() as i64 * self.focal as i64;
-        let py = view.y.abs() as i64 * self.focal as i64;
-        let x_limit = self.half_w as i64 * z as i64
-            + self.focal as i64 * extent_x as i64
-            + self.half_w as i64 * extent_z as i64;
-        let y_limit = self.half_h as i64 * z as i64
-            + self.focal as i64 * extent_y as i64
-            + self.half_h as i64 * extent_z as i64;
-        px <= x_limit && py <= y_limit
+        let lateral_max_value = view
+            .x
+            .unsigned_abs()
+            .max(view.y.unsigned_abs())
+            .max(z as u32)
+            .max(extent_x as u32)
+            .max(extent_y as u32)
+            .max(extent_z as u32);
+        if lateral_max_value <= self.lateral_i32_limit {
+            let px = view.x.abs() * self.focal;
+            let py = view.y.abs() * self.focal;
+            let x_limit = self.half_w * z + self.focal * extent_x + self.half_w * extent_z;
+            let y_limit = self.half_h * z + self.focal * extent_y + self.half_h * extent_z;
+            px <= x_limit && py <= y_limit
+        } else {
+            cell_aabb_lateral_visible_wide(
+                view,
+                z,
+                extent_x,
+                extent_y,
+                extent_z,
+                self.focal,
+                self.half_w,
+                self.half_h,
+            )
+        }
     }
 
     #[inline(always)]
@@ -1816,6 +1887,7 @@ fn cell_visibility_view_in_lateral_frustum(
                 .saturating_add(screen_margin)
                 .max(1),
         ),
+        lateral_i32_limit: 0,
         view_abs: [[0; 3]; 3],
     };
     lateral.sphere_visible_no_far(view, radius)
