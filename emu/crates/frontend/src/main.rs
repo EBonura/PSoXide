@@ -190,31 +190,15 @@ struct Shell {
     state: AppState,
     pending_input: MenuInput,
     last_frame: Instant,
-    /// Live port-1 pad mask. Key press/release events toggle bits
-    /// here; the shell flushes it into `bus.set_port1_buttons` each
-    /// frame before running CPU steps so the guest always sees the
-    /// latest state.
-    pad1_mask: u16,
-    /// Most recently *pressed* button of the LEFT/RIGHT pair, for SOCD
-    /// (simultaneous opposing cardinal directions) resolution. The real
-    /// PS1 d-pad is a physical rocker -- left+right can never be down
-    /// together, so games were never written for both bits set and react
-    /// unpredictably (most just keep the old direction). A keyboard makes
-    /// the combination trivial to produce, so when both are held the mask
-    /// sent to the guest keeps only the most recent press; releasing it
-    /// re-exposes the still-held opposite. Last-input-priority matches
-    /// what a player expects from tapping the other direction without
-    /// letting go first.
-    socd_last_horiz: u16,
-    /// Same, for the UP/DOWN pair.
-    socd_last_vert: u16,
+    /// Every piece of pad state the shell derives from keyboard events
+    /// (button mask, emulated sticks, SOCD recency). One struct so the
+    /// paths that must invalidate it wholesale -- focus loss, a rebind
+    /// capture consuming events, Reset Controls -- clear one thing and
+    /// can't miss a field.
+    host_input: HostKeyboardInput,
     /// Previous-frame state of the L3+R3 freelook chord, for rising-edge
     /// toggle detection.
     prev_freelook_chord: bool,
-    /// Keyboard-emulated left analog stick state.
-    keyboard_left_stick: KeyboardStickState,
-    /// Keyboard-emulated right analog stick state.
-    keyboard_right_stick: KeyboardStickState,
     /// Whether to open the window in borderless-fullscreen mode.
     /// Decision is made at startup via CLI flag and then captured
     /// here; changing it at runtime would need a window recreation.
@@ -326,12 +310,8 @@ impl Shell {
             state: AppState::with_config_dir(config_dir),
             pending_input: MenuInput::default(),
             last_frame: Instant::now(),
-            pad1_mask: 0,
-            socd_last_horiz: 0,
-            socd_last_vert: 0,
+            host_input: HostKeyboardInput::default(),
             prev_freelook_chord: false,
-            keyboard_left_stick: KeyboardStickState::default(),
-            keyboard_right_stick: KeyboardStickState::default(),
             fullscreen,
             audio,
             input,
@@ -471,7 +451,7 @@ fn merge_axis(gamepad: f32, keyboard: f32) -> f32 {
 
 /// Strip simultaneous opposing cardinal directions from the pad mask,
 /// keeping only the most recently pressed side of each pair (see
-/// `Shell::socd_last_horiz`). The real d-pad's rocker makes the
+/// [`HostKeyboardInput`]). The real d-pad's rocker makes the
 /// combination impossible, so the guest must never see it; with no
 /// recorded recency (or a stale one no longer held) the pair resolves
 /// to neutral, which is what the rocker does mid-travel.
@@ -486,6 +466,119 @@ fn socd_resolve(mask: u16, last_horiz: u16, last_vert: u16) -> u16 {
         out = (out & !VERT) | (last_vert & VERT);
     }
     out
+}
+
+/// Fold a set of rising-edge presses into the SOCD recency trackers.
+/// Shared by the keyboard press path (one button bit per event) and
+/// the gamepad path (a whole poll's edges at once) so both devices
+/// compete on equal terms -- a newer gamepad direction must beat an
+/// older keyboard one and vice versa. Opposite edges arriving in the
+/// same gamepad poll carry no ordering information, so the pair's
+/// recency resets and [`socd_resolve`] yields neutral.
+fn update_socd_recency(last_horiz: &mut u16, last_vert: &mut u16, pressed: u16) {
+    const HORIZ: u16 = button::LEFT | button::RIGHT;
+    const VERT: u16 = button::UP | button::DOWN;
+    match pressed & HORIZ {
+        button::LEFT => *last_horiz = button::LEFT,
+        button::RIGHT => *last_horiz = button::RIGHT,
+        HORIZ => *last_horiz = 0,
+        _ => {}
+    }
+    match pressed & VERT {
+        button::UP => *last_vert = button::UP,
+        button::DOWN => *last_vert = button::DOWN,
+        VERT => *last_vert = 0,
+        _ => {}
+    }
+}
+
+/// Every piece of pad state derived from host keyboard events: the
+/// port-1 button mask, both keyboard-emulated sticks, and the SOCD
+/// recency trackers.
+///
+/// Grouped so the paths that must throw the whole cache away clear one
+/// struct and can't miss a field. That matters because this state is
+/// only correct while every key release is observed and the bindings
+/// that produced it are still live; three paths break that assumption:
+///
+/// - **focus loss** -- the OS doesn't reliably deliver `Released` for
+///   keys still held during Alt-Tab;
+/// - **a rebind capture consuming events** -- capture owns the
+///   keyboard outright, including releases whose normal processing
+///   would have cleared held bits;
+/// - **Reset Controls** -- bits set under the old bindings can never
+///   be cleared by releases matched against the new ones.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct HostKeyboardInput {
+    /// Live port-1 pad mask. Key press/release events toggle bits
+    /// here; the shell merges it with the gamepad mask each frame.
+    pad1_mask: u16,
+    /// Keyboard-emulated left analog stick state.
+    left_stick: KeyboardStickState,
+    /// Keyboard-emulated right analog stick state.
+    right_stick: KeyboardStickState,
+    /// Most recently pressed button of the LEFT/RIGHT pair, for SOCD
+    /// (simultaneous opposing cardinal directions) resolution: when
+    /// both are held the guest sees only the most recent press, and
+    /// releasing it re-exposes the still-held opposite. Last-input
+    /// priority matches what a player expects from tapping the other
+    /// direction without letting go first.
+    socd_last_horiz: u16,
+    /// Same, for the UP/DOWN pair.
+    socd_last_vert: u16,
+}
+
+impl HostKeyboardInput {
+    /// Drop everything: mask, sticks, and SOCD recency. The pad
+    /// simply reports "nothing held" until fresh key events arrive.
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    /// Apply one keyboard press/release to the cached pad state:
+    /// button mask (with SOCD recency on presses) and both emulated
+    /// sticks.
+    fn apply_key_event(
+        &mut self,
+        physical: &PhysicalKey,
+        state: ElementState,
+        bindings: &PortBindings,
+    ) {
+        if let Some(mask) = key_to_pad_button(physical, bindings) {
+            match state {
+                ElementState::Pressed => {
+                    self.pad1_mask |= mask;
+                    update_socd_recency(&mut self.socd_last_horiz, &mut self.socd_last_vert, mask);
+                }
+                ElementState::Released => self.pad1_mask &= !mask,
+            }
+        }
+        self.left_stick
+            .update_key(physical, state, &bindings.left_stick);
+        self.right_stick
+            .update_key(physical, state, &bindings.right_stick);
+    }
+
+    /// Fold the gamepad's rising-edge presses from this poll into the
+    /// SOCD recency, so a newer pad direction beats an older keyboard
+    /// one. Call before [`Self::resolved_mask`] each frame.
+    fn note_gamepad_edges(&mut self, pressed_mask: u16) {
+        update_socd_recency(
+            &mut self.socd_last_horiz,
+            &mut self.socd_last_vert,
+            pressed_mask,
+        );
+    }
+
+    /// The SOCD-clean guest mask: keyboard bits merged with the
+    /// gamepad's, opposing cardinals resolved by recency.
+    fn resolved_mask(&self, gamepad_mask: u16) -> u16 {
+        socd_resolve(
+            self.pad1_mask | gamepad_mask,
+            self.socd_last_horiz,
+            self.socd_last_vert,
+        )
+    }
 }
 
 /// Match a persisted binding against the *physical* key that changed,
@@ -856,9 +949,7 @@ impl ApplicationHandler for Shell {
             // simply reports "nothing held" until the player presses
             // fresh keys after refocusing.
             WindowEvent::Focused(false) => {
-                self.pad1_mask = 0;
-                self.keyboard_left_stick = KeyboardStickState::default();
-                self.keyboard_right_stick = KeyboardStickState::default();
+                self.host_input.clear();
             }
             WindowEvent::Focused(true) => {}
             WindowEvent::KeyboardInput {
@@ -877,6 +968,13 @@ impl ApplicationHandler for Shell {
                 // (Escape cancels), and nothing leaks through to the
                 // game, the menu, or the host shortcuts below.
                 if let Some(target) = self.state.menu.controls_capture() {
+                    // Capture consumes this event unconditionally --
+                    // including releases, whose normal processing is
+                    // what clears held bits. Drop the cached keyboard
+                    // state up front so no exit from capture (bind,
+                    // Escape, closing the panel) can leave a swallowed
+                    // release's button wedged into the mask.
+                    self.host_input.clear();
                     if state == ElementState::Pressed && !repeat {
                         if matches!(logical_key, Key::Named(NamedKey::Escape)) {
                             self.state.menu.clear_controls_capture();
@@ -884,12 +982,6 @@ impl ApplicationHandler for Shell {
                             if let Some(binding) = keycode_to_binding(code) {
                                 self.state.apply_rebind(target, binding);
                                 self.state.menu.clear_controls_capture();
-                                // Drop held-key state: a key that was down
-                                // under its old meaning must not stay
-                                // wedged into the mask under the new one.
-                                self.pad1_mask = 0;
-                                self.keyboard_left_stick = KeyboardStickState::default();
-                                self.keyboard_right_stick = KeyboardStickState::default();
                             } else {
                                 self.state
                                     .status_message_set("That key can't be bound".to_string());
@@ -911,27 +1003,8 @@ impl ApplicationHandler for Shell {
                 let route_keyboard_to_game = true;
                 if !repeat && route_keyboard_to_game {
                     let bindings = &self.state.settings.input.port1;
-                    if let Some(mask) = key_to_pad_button(&physical_key, bindings) {
-                        match state {
-                            ElementState::Pressed => {
-                                self.pad1_mask |= mask;
-                                if mask & (button::LEFT | button::RIGHT) != 0 {
-                                    self.socd_last_horiz = mask;
-                                }
-                                if mask & (button::UP | button::DOWN) != 0 {
-                                    self.socd_last_vert = mask;
-                                }
-                            }
-                            ElementState::Released => self.pad1_mask &= !mask,
-                        }
-                    }
-                    self.keyboard_left_stick
-                        .update_key(&physical_key, state, &bindings.left_stick);
-                    self.keyboard_right_stick.update_key(
-                        &physical_key,
-                        state,
-                        &bindings.right_stick,
-                    );
+                    self.host_input
+                        .apply_key_event(&physical_key, state, bindings);
                     let press_analog = state == ElementState::Pressed
                         && key_is_analog_button(&physical_key, bindings);
                     if press_analog {
@@ -1039,16 +1112,18 @@ impl ApplicationHandler for Shell {
 
                 // Merge keyboard-emulated and real-pad sticks once; used both
                 // to drive the freelook camera and (unless freelook steals
-                // them) to feed the guest pad below.
-                let merged_left =
-                    merge_sticks(pad_frame.left_stick, self.keyboard_left_stick.vector());
-                let merged_right =
-                    merge_sticks(pad_frame.right_stick, self.keyboard_right_stick.vector());
-                let merged_mask = socd_resolve(
-                    self.pad1_mask | pad_frame.pad1_mask,
-                    self.socd_last_horiz,
-                    self.socd_last_vert,
-                );
+                // them) to feed the guest pad below. The gamepad's press
+                // edges fold into SOCD recency *before* resolving, so a
+                // newer pad direction beats an older keyboard one. All
+                // three are `mut`: a menu action that invalidates cached
+                // keyboard input (Reset Controls) rebuilds them below so
+                // the reset frame can't ship stale keyboard state.
+                self.host_input.note_gamepad_edges(pad_frame.pressed_mask);
+                let mut merged_left =
+                    merge_sticks(pad_frame.left_stick, self.host_input.left_stick.vector());
+                let mut merged_right =
+                    merge_sticks(pad_frame.right_stick, self.host_input.right_stick.vector());
+                let mut merged_mask = self.host_input.resolved_mask(pad_frame.pad1_mask);
 
                 // Feed the controls panel its live held-target set so
                 // held keys light up on the drawing -- an in-app
@@ -1080,14 +1155,14 @@ impl ApplicationHandler for Shell {
                         }
                     }
                     for (on, target) in [
-                        (self.keyboard_left_stick.up, T::LStickUp),
-                        (self.keyboard_left_stick.down, T::LStickDown),
-                        (self.keyboard_left_stick.left, T::LStickLeft),
-                        (self.keyboard_left_stick.right, T::LStickRight),
-                        (self.keyboard_right_stick.up, T::RStickUp),
-                        (self.keyboard_right_stick.down, T::RStickDown),
-                        (self.keyboard_right_stick.left, T::RStickLeft),
-                        (self.keyboard_right_stick.right, T::RStickRight),
+                        (self.host_input.left_stick.up, T::LStickUp),
+                        (self.host_input.left_stick.down, T::LStickDown),
+                        (self.host_input.left_stick.left, T::LStickLeft),
+                        (self.host_input.left_stick.right, T::LStickRight),
+                        (self.host_input.right_stick.up, T::RStickUp),
+                        (self.host_input.right_stick.down, T::RStickDown),
+                        (self.host_input.right_stick.left, T::RStickLeft),
+                        (self.host_input.right_stick.right, T::RStickRight),
                     ] {
                         if on {
                             held.push(target);
@@ -1208,22 +1283,38 @@ impl ApplicationHandler for Shell {
                 }
 
                 if let Some(action) = self.state.menu.update(&input) {
-                    if ui::apply_menu_action(&mut self.state, action) == MenuOutcome::Quit {
-                        #[cfg(feature = "editor")]
-                        self.state.stop_embedded_playtest();
-                        self.state.stop_examples_build();
-                        if let Err(e) = self.state.flush_memcard_port1() {
-                            eprintln!("[frontend] memcard flush on quit: {e}");
+                    match ui::apply_menu_action(&mut self.state, action) {
+                        MenuOutcome::None => {}
+                        MenuOutcome::ClearHostKeyboardInput => {
+                            // The action (Reset Controls) replaced the
+                            // bindings, so every cached keyboard bit was
+                            // set under a mapping that no longer exists
+                            // -- a later release can't clear it. Drop
+                            // the cache and rebuild this frame's merged
+                            // sample from the gamepad alone, so not even
+                            // one stale keyboard frame reaches the guest.
+                            self.host_input.clear();
+                            merged_mask = self.host_input.resolved_mask(pad_frame.pad1_mask);
+                            merged_left = pad_frame.left_stick;
+                            merged_right = pad_frame.right_stick;
                         }
-                        #[cfg(feature = "editor")]
-                        if let Err(e) = self.state.save_editor_project() {
-                            eprintln!("[frontend] editor save on quit: {e}");
+                        MenuOutcome::Quit => {
+                            #[cfg(feature = "editor")]
+                            self.state.stop_embedded_playtest();
+                            self.state.stop_examples_build();
+                            if let Err(e) = self.state.flush_memcard_port1() {
+                                eprintln!("[frontend] memcard flush on quit: {e}");
+                            }
+                            #[cfg(feature = "editor")]
+                            if let Err(e) = self.state.save_editor_project() {
+                                eprintln!("[frontend] editor save on quit: {e}");
+                            }
+                            if let Err(e) = self.state.save_settings() {
+                                eprintln!("[frontend] settings save on quit: {e}");
+                            }
+                            event_loop.exit();
+                            return;
                         }
-                        if let Err(e) = self.state.save_settings() {
-                            eprintln!("[frontend] settings save on quit: {e}");
-                        }
-                        event_loop.exit();
-                        return;
                     }
                 }
                 #[cfg(feature = "editor")]
@@ -2417,6 +2508,137 @@ mod tests {
                 button::DOWN,
             ),
             button::LEFT | button::DOWN | button::CROSS
+        );
+    }
+
+    /// One keyboard press applied through the full event path.
+    fn press(host: &mut HostKeyboardInput, code: KeyCode, bindings: &PortBindings) {
+        host.apply_key_event(&PhysicalKey::Code(code), ElementState::Pressed, bindings);
+    }
+
+    /// One keyboard release applied through the full event path.
+    fn release(host: &mut HostKeyboardInput, code: KeyCode, bindings: &PortBindings) {
+        host.apply_key_event(&PhysicalKey::Code(code), ElementState::Released, bindings);
+    }
+
+    #[test]
+    fn capture_swallowed_release_cannot_wedge_pad_state() {
+        // Regression for: hold a bound key while the game runs, arm a
+        // rebind capture, release the key while capture owns the
+        // keyboard, then cancel with Escape (or close the panel). The
+        // release is consumed by the capture branch, so its normal
+        // processing never clears the bit -- the capture branch must
+        // clear the whole cache on every event it consumes instead.
+        let bindings = PortBindings::default();
+        let mut host = HostKeyboardInput::default();
+
+        // Hold Cross (default F) -- its bit and stick state are live.
+        press(&mut host, KeyCode::KeyF, &bindings);
+        assert_eq!(host.resolved_mask(0), button::CROSS);
+
+        // A capture armed now consumes every event, starting with the
+        // release of F. The shell clears the cache for each consumed
+        // event; the swallowed release therefore cannot strand its bit,
+        // regardless of how capture ends (bind / Escape / panel close).
+        host.clear();
+        assert_eq!(host, HostKeyboardInput::default());
+        assert_eq!(host.resolved_mask(0), 0);
+
+        // A stray release arriving after capture ends (key already up)
+        // stays a no-op.
+        release(&mut host, KeyCode::KeyF, &bindings);
+        assert_eq!(host.resolved_mask(0), 0);
+
+        // Focus loss and a successful rebind route through the same
+        // clear() -- the invariant is identical: everything neutral,
+        // including SOCD recency.
+        press(&mut host, KeyCode::ArrowLeft, &bindings);
+        assert_ne!(host.socd_last_horiz, 0);
+        host.clear();
+        assert_eq!(host.socd_last_horiz, 0);
+        assert_eq!(host.resolved_mask(0), 0);
+    }
+
+    #[test]
+    fn reset_controls_invalidates_bits_from_the_old_bindings() {
+        // Regression for: bind Circle to J, hold J, click Reset
+        // Controls, release J. After the reset J no longer matches
+        // Circle, so its release can't clear the stale bit -- the
+        // reset path must drop the cache outright, while gamepad
+        // input (merged separately) is preserved.
+        let custom = PortBindings {
+            circle: InputBinding::Character('j'),
+            ..PortBindings::default()
+        };
+        let mut host = HostKeyboardInput::default();
+
+        press(&mut host, KeyCode::KeyJ, &custom);
+        assert_eq!(host.resolved_mask(0), button::CIRCLE);
+
+        // Reset Controls: MenuOutcome::ClearHostKeyboardInput makes the
+        // shell clear the cache and rebuild the frame's merged sample
+        // from the gamepad alone.
+        let defaults = PortBindings::default();
+        host.clear();
+        let gamepad_mask = button::L1;
+        assert_eq!(host.resolved_mask(gamepad_mask), button::L1);
+
+        // The release under the *new* bindings no longer maps to
+        // Circle (J is a right-stick direction in the defaults) and
+        // must not resurrect anything.
+        release(&mut host, KeyCode::KeyJ, &defaults);
+        assert_eq!(host.resolved_mask(gamepad_mask), button::L1);
+    }
+
+    #[test]
+    fn socd_recency_lets_the_newer_device_win() {
+        let bindings = PortBindings::default();
+
+        // Keyboard Left held, then gamepad Right pressed: the gamepad
+        // edge updates recency, so Right wins the merged clash.
+        let mut host = HostKeyboardInput::default();
+        press(&mut host, KeyCode::ArrowLeft, &bindings);
+        host.note_gamepad_edges(button::RIGHT);
+        assert_eq!(
+            host.resolved_mask(button::RIGHT) & (button::LEFT | button::RIGHT),
+            button::RIGHT
+        );
+
+        // Gamepad Left held (edge noted earlier), then keyboard Right
+        // pressed: the keyboard press updates recency, Right wins.
+        let mut host = HostKeyboardInput::default();
+        host.note_gamepad_edges(button::LEFT);
+        press(&mut host, KeyCode::ArrowRight, &bindings);
+        assert_eq!(
+            host.resolved_mask(button::LEFT) & (button::LEFT | button::RIGHT),
+            button::RIGHT
+        );
+
+        // Releasing the winner re-exposes the still-held opposite: the
+        // resolver only intervenes while both bits are actually down.
+        release(&mut host, KeyCode::ArrowRight, &bindings);
+        assert_eq!(
+            host.resolved_mask(button::LEFT) & (button::LEFT | button::RIGHT),
+            button::LEFT
+        );
+
+        // Opposite edges in the same gamepad poll carry no ordering
+        // information: recency resets and the pair resolves neutral.
+        let mut host = HostKeyboardInput::default();
+        press(&mut host, KeyCode::ArrowLeft, &bindings);
+        host.note_gamepad_edges(button::LEFT | button::RIGHT);
+        assert_eq!(
+            host.resolved_mask(button::LEFT | button::RIGHT) & (button::LEFT | button::RIGHT),
+            0
+        );
+
+        // The vertical pair tracks independently through the same path.
+        let mut host = HostKeyboardInput::default();
+        press(&mut host, KeyCode::ArrowUp, &bindings);
+        host.note_gamepad_edges(button::DOWN);
+        assert_eq!(
+            host.resolved_mask(button::DOWN) & (button::UP | button::DOWN),
+            button::DOWN
         );
     }
 
