@@ -366,9 +366,7 @@ pub(crate) fn fbx_skinned_mesh(
     Err(Error::MissingFbxSkinnedMesh)
 }
 
-pub(crate) fn fbx_static_mesh(
-    scene: &ufbx::Scene,
-) -> Result<(&ufbx::Node, &ufbx::Mesh), Error> {
+pub(crate) fn fbx_static_mesh(scene: &ufbx::Scene) -> Result<(&ufbx::Node, &ufbx::Mesh), Error> {
     for node in &scene.nodes {
         let Some(mesh) = node.mesh.as_deref() else {
             continue;
@@ -449,8 +447,8 @@ pub(crate) fn fbx_skin_bind_trs(
         let node_index = fbx_node_index(node_indices, bone_node)?;
         let bone_global = ufbx::matrix_invert(&cluster.geometry_to_bone);
         let local = if let Some(parent_index) = parents.get(node_index).copied().flatten() {
-            let parent_global = bind_globals[parent_index]
-                .unwrap_or(scene.nodes[parent_index].node_to_world);
+            let parent_global =
+                bind_globals[parent_index].unwrap_or(scene.nodes[parent_index].node_to_world);
             let world_to_parent = ufbx::matrix_invert(&parent_global);
             ufbx::matrix_mul(&world_to_parent, &bone_global)
         } else {
@@ -1363,12 +1361,11 @@ pub(crate) fn cook_fbx_base_color_texture(
         transparent_index_zero: true,
     };
     for material in &mesh.materials {
-        let texture = material
-            .pbr
-            .base_color
+        let texture = material.pbr.base_color.texture.as_deref().or(material
+            .fbx
+            .diffuse_color
             .texture
-            .as_deref()
-            .or(material.fbx.diffuse_color.texture.as_deref());
+            .as_deref());
         let Some(texture) = texture else {
             continue;
         };

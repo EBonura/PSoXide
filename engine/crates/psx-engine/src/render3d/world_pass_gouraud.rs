@@ -1,6 +1,85 @@
 use super::*;
 
 impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
+    /// Clip one textured, vertex-lit camera-space triangle at the near plane.
+    /// Cached rooms use this only for the uncommon surface that straddles the
+    /// camera; the ordinary projected-cache path stays allocation-free and
+    /// avoids carrying a full second view-space arena.
+    pub(crate) fn submit_textured_gouraud_view_triangle_uv_words(
+        &mut self,
+        triangles: &mut impl PrimitiveSink<TriTexturedGouraud>,
+        positions: [ViewVertex; 3],
+        uv_words: [u16; 3],
+        colors: [(u8, u8, u8); 3],
+        projection: WorldProjection,
+        material: TextureMaterial,
+        options: WorldSurfaceOptions,
+    ) -> WorldRenderStats {
+        let input = [
+            TexturedGouraudViewVertex::new(positions[0], uv_words[0], colors[0]),
+            TexturedGouraudViewVertex::new(positions[1], uv_words[1], colors[1]),
+            TexturedGouraudViewVertex::new(positions[2], uv_words[2], colors[2]),
+        ];
+        let mut clipped = [TexturedGouraudViewVertex::ZERO; 4];
+        let count = clip_textured_gouraud_triangle_to_near(input, projection.near_z, &mut clipped);
+        let mut stats = WorldRenderStats::default();
+        if count < 3 {
+            stats.dropped_triangles = 1;
+            return stats;
+        }
+        if count != 3
+            || positions
+                .iter()
+                .any(|position| position.z < projection.near_z)
+        {
+            stats.clipped_triangles = 1;
+        }
+
+        let mut submit = |pass: &mut Self,
+                          triangle: [TexturedGouraudViewVertex; 3],
+                          stats: &mut WorldRenderStats| {
+            let Some(a) = projection.project_view(triangle[0].position) else {
+                stats.dropped_triangles = stats.dropped_triangles.wrapping_add(1);
+                return;
+            };
+            let Some(b) = projection.project_view(triangle[1].position) else {
+                stats.dropped_triangles = stats.dropped_triangles.wrapping_add(1);
+                return;
+            };
+            let Some(c) = projection.project_view(triangle[2].position) else {
+                stats.dropped_triangles = stats.dropped_triangles.wrapping_add(1);
+                return;
+            };
+            let next = pass.submit_textured_gouraud_triangle(
+                triangles,
+                [a, b, c],
+                [
+                    (
+                        triangle[0].u.clamp(0, 255) as u8,
+                        triangle[0].v.clamp(0, 255) as u8,
+                    ),
+                    (
+                        triangle[1].u.clamp(0, 255) as u8,
+                        triangle[1].v.clamp(0, 255) as u8,
+                    ),
+                    (
+                        triangle[2].u.clamp(0, 255) as u8,
+                        triangle[2].v.clamp(0, 255) as u8,
+                    ),
+                ],
+                [triangle[0].color, triangle[1].color, triangle[2].color],
+                material,
+                options,
+            );
+            merge_world_stats(stats, next);
+        };
+        submit(self, [clipped[0], clipped[1], clipped[2]], &mut stats);
+        if !stats.primitive_overflow && !stats.command_overflow && count == 4 {
+            submit(self, [clipped[0], clipped[2], clipped[3]], &mut stats);
+        }
+        stats
+    }
+
     /// Submit a projected textured Gouraud triangle.
     ///
     /// This is the room/static-light path: callers CPU-project the
@@ -136,8 +215,12 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
     {
         let first = [verts[0], verts[1], verts[2]];
         let second = [verts[0], verts[2], verts[3]];
-        if !projected_triangle_can_skip_split(first, options)
-            || !projected_triangle_can_skip_split(second, options)
+        // The GPU extent check is a hardware invariant, not an optional
+        // quality knob. Force the splitter on for this decision even when a
+        // caller disabled discretionary subdivision.
+        let split_options = options.with_textured_triangle_splitting(true);
+        if !projected_triangle_can_skip_split(first, split_options)
+            || !projected_triangle_can_skip_split(second, split_options)
         {
             let mut stats = self.submit_textured_gouraud_triangle_prescreened_u8(
                 primitives,
@@ -145,7 +228,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 [uvs[0], uvs[1], uvs[2]],
                 [colors[0], colors[1], colors[2]],
                 material,
-                options,
+                split_options,
             );
             if stats.primitive_overflow || stats.command_overflow {
                 return stats;
@@ -156,7 +239,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 [uvs[0], uvs[2], uvs[3]],
                 [colors[0], colors[2], colors[3]],
                 material,
-                options,
+                split_options,
             );
             merge_world_stats(&mut stats, second_stats);
             return stats;
@@ -226,6 +309,81 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         );
         stats.submitted_triangles = 2;
         stats
+    }
+
+    /// Submit a fixed-depth cached-room quad as one GP0(3Ch) packet when
+    /// both hardware triangles are safe. Oversized packets are split through
+    /// the normal triangle path so the real PS1 GPU cannot discard visible
+    /// room geometry for exceeding its 1023x511 coordinate-delta limits.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn submit_textured_gouraud_quad_prescreened_uv_words_prepared_depth<P>(
+        &mut self,
+        primitives: &mut P,
+        prebuilt: Option<(&mut QuadTexturedGouraud, &mut u8)>,
+        verts: [ProjectedVertex; 4],
+        uv_words: [u16; 4],
+        colors: [(u8, u8, u8); 4],
+        material: TextureMaterial,
+        options: WorldSurfaceOptions,
+        prepared_depth: PreparedTriangleDepth,
+    ) -> WorldRenderStats
+    where
+        P: PrimitiveSink<QuadTexturedGouraud> + PrimitiveSink<TriTexturedGouraud>,
+    {
+        // GP0(3Ch) uses tri(0,1,2) + tri(1,2,3). The caller has already
+        // reordered the quad so that packet diagonal matches the authored
+        // surface split.
+        let first = [verts[0], verts[1], verts[2]];
+        let second = [verts[1], verts[2], verts[3]];
+        let split_options = options.with_textured_triangle_splitting(true);
+        if !projected_triangle_can_skip_split(first, split_options)
+            || !projected_triangle_can_skip_split(second, split_options)
+        {
+            let mut stats = self.submit_textured_gouraud_triangle_prescreened_uv_words(
+                primitives,
+                first,
+                [uv_words[0], uv_words[1], uv_words[2]],
+                [colors[0], colors[1], colors[2]],
+                material,
+                split_options,
+            );
+            if stats.primitive_overflow || stats.command_overflow {
+                return stats;
+            }
+            let second_stats = self.submit_textured_gouraud_triangle_prescreened_uv_words(
+                primitives,
+                second,
+                [uv_words[1], uv_words[2], uv_words[3]],
+                [colors[1], colors[2], colors[3]],
+                material,
+                split_options,
+            );
+            merge_world_stats(&mut stats, second_stats);
+            return stats;
+        }
+
+        let packet_material = material.textured_gouraud_packet_material();
+        if let Some((quad, valid)) = prebuilt {
+            return self.submit_prebuilt_textured_gouraud_quad(
+                quad,
+                valid,
+                verts,
+                uv_words,
+                colors,
+                packet_material,
+                options,
+                prepared_depth,
+            );
+        }
+        self.submit_textured_gouraud_quad_leaf_uv_words_prepared_depth(
+            primitives,
+            verts,
+            uv_words,
+            colors,
+            packet_material,
+            options,
+            prepared_depth,
+        )
     }
 
     /// Submit a projected textured Gouraud triangle with fixed depth already

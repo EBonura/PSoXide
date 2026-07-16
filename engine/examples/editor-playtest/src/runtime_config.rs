@@ -297,13 +297,12 @@ pub(super) const MAX_CACHED_ROOM_VERTICES: usize = 4096;
 pub(super) const PREBUILT_ROOM_QUAD_SLOTS: usize = 8;
 pub(super) const PREBUILT_ROOM_QUAD_CAP: usize = 256;
 
-/// Per-frame triangle budget sizing the primitive packet arena and the
-/// world command list. Right-sized from measured data (2026-06-11): the
-/// real-gameplay benchmark tape peaks at 511 tri primitives per vblank
-/// (avg ~340), so 1024 is 2x the observed worst case. The old 3328
-/// figure cost ~166 KB of RAM for headroom no scene used; overflow
-/// degrades gracefully (commands stop accepting, counters flag it).
-pub(super) const MAX_TEXTURED_TRIS: usize = 1024;
+/// Per-frame packet budget sizing the primitive arena and world command list.
+/// The earlier 1,024 cap covered the room benchmark but not a 529-face player
+/// drawn in two material passes: Cortex reaches about 1,080 commands with the
+/// room present. 1,536 keeps useful headroom without restoring the old 3,328
+/// allocation; overflow still degrades safely and is reported by telemetry.
+pub(super) const MAX_TEXTURED_TRIS: usize = 1536;
 
 /// Cap on the per-room material slot count. Single source of truth is
 /// `psx_level::MAX_ROOM_MATERIALS` (the cook<->runtime contract): the cook now
@@ -417,11 +416,12 @@ pub(super) use psx_game_runtime::room_cache::INVALID_ROOM_INDEX;
 /// Sized to the largest part vertex count we expect; instances
 /// over this cap drop their over-budget triangles graceful.
 pub(super) const MODEL_VERTEX_CAP: usize = 1024;
-/// Predecoded face records shared by runtime model assets. Right-sized from
-/// 4096: a single PS1 character mesh is on the order of ~100-200 faces, so the
-/// shared decode pool only needs to hold the loaded models' faces (the decode
-/// returns `None` and skips a model that would overflow it -- no corruption).
-pub(super) const MAX_RUNTIME_MODEL_FACES: usize = 1024;
+/// Predecoded face records shared by runtime model assets. The pool must hold
+/// every simultaneously loaded model, not merely the largest one: Cortex's
+/// 530-face enemy plus 529-face player already require 1,059 records. Keep
+/// enough headroom for equipment or another compact NPC without silently
+/// dropping a later model during boot-time decoding.
+pub(super) const MAX_RUNTIME_MODEL_FACES: usize = 1536;
 /// Predecoded part records shared by runtime model assets.
 pub(super) const MAX_RUNTIME_MODEL_PARTS: usize = 128;
 /// Predecoded vertex records shared by runtime model assets.
