@@ -6,6 +6,7 @@ use super::*;
 use crate::{UiFontChoice, UiGradientDirection, UiImageEffect, UiNodeKind, UiValueBinding};
 
 const STREAMED_ROOM_SLOT_BYTES: usize = 32 * 1024;
+const CD_SECTOR_BYTES: usize = 2048;
 
 pub fn write_package(package: &PlaytestPackage, generated_dir: &Path) -> std::io::Result<()> {
     let rooms_dir = generated_dir.join(ROOMS_DIRNAME);
@@ -157,6 +158,15 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     let ui_pack_image_cache_slots = streamed_class_chunk_count(package, StreamedClass::UiImage);
     let gameplay_pack_max_chunk_bytes =
         streamed_class_max_chunk_bytes(package, StreamedClass::Gameplay);
+    let persistent_asset_slot_count = package.assets.len().max(1);
+    let persistent_asset_page_count = package
+        .assets
+        .iter()
+        .filter(|asset| asset.streamed_class == StreamedClass::PersistentGameplay)
+        .map(|asset| asset.bytes.len().next_multiple_of(4))
+        .sum::<usize>()
+        .div_ceil(CD_SECTOR_BYTES)
+        .max(1);
     let resident_chunk_limit = package
         .rooms
         .iter()
@@ -201,6 +211,14 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     let _ = writeln!(
         out,
         "pub const WORLD_RESIDENT_PAGE_COUNT: usize = {world_resident_page_count};\n",
+    );
+    let _ = writeln!(
+        out,
+        "pub const PERSISTENT_ASSET_SLOT_COUNT: usize = {persistent_asset_slot_count};\n",
+    );
+    let _ = writeln!(
+        out,
+        "pub const PERSISTENT_ASSET_PAGE_COUNT: usize = {persistent_asset_page_count};\n",
     );
     let runtime_depth_sort_mode = package.runtime_depth_sort_mode.manifest_value();
     let _ = writeln!(
@@ -291,9 +309,16 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         };
         let static_name = asset_static_name(asset, i);
         let vram_bytes = asset_vram_bytes(asset);
+        let ram_bytes = asset.bytes.len();
+        let flags = match asset.streamed_class {
+            StreamedClass::None => "0",
+            StreamedClass::UiImage => "asset_flags::STREAMED_UI",
+            StreamedClass::Gameplay => "asset_flags::STREAMED_GAMEPLAY_TRANSIENT",
+            StreamedClass::PersistentGameplay => "asset_flags::STREAMED_GAMEPLAY_PERSISTENT",
+        };
         let _ = writeln!(
             out,
-            "    LevelAssetRecord {{ id: AssetId({i}), kind: {kind}, bytes: {static_name}, ram_bytes: {static_name}.len() as u32, vram_bytes: {vram_bytes}, flags: 0 }},"
+            "    LevelAssetRecord {{ id: AssetId({i}), kind: {kind}, bytes: {static_name}, ram_bytes: {ram_bytes}, vram_bytes: {vram_bytes}, flags: {flags} }},"
         );
     }
     out.push_str("];\n\n");
@@ -3358,6 +3383,7 @@ const MANIFEST_HEADER: &str = "\
 // Play action or the `cook-playtest` CLI.
 
 use psx_level::{
+    asset_flags,
     AssetId,
     AssetKind,
     CHARACTER_CLIP_NONE,

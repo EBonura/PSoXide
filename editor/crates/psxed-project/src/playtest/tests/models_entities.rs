@@ -471,7 +471,24 @@ fn entity_model_instance_y_snaps_to_floor_under_authored_xz() {
 fn rendered_manifest_emits_model_records() {
     let project = ProjectDocument::starter();
     let (package, _) = build_package(&project, &starter_project_root());
-    let src = render_manifest_source(&package.expect("cooks"));
+    let package = package.expect("cooks");
+    for model in &package.models {
+        assert_eq!(
+            package.assets[model.mesh_asset_index].streamed_class,
+            StreamedClass::PersistentGameplay
+        );
+        assert_eq!(
+            package.assets[model.texture_asset_index.expect("atlas")].streamed_class,
+            StreamedClass::PersistentGameplay
+        );
+    }
+    for clip in &package.model_clips {
+        assert_eq!(
+            package.assets[clip.animation_asset_index].streamed_class,
+            StreamedClass::PersistentGameplay
+        );
+    }
+    let src = render_manifest_source(&package);
     assert!(src.contains("LevelModelRecord"));
     assert!(src.contains("collision_radius:"));
     assert!(src.contains("LevelModelInstanceRecord"));
@@ -486,6 +503,9 @@ fn rendered_manifest_emits_model_records() {
     assert!(src.contains("MODEL_FRAME_BOUNDS"));
     assert!(src.contains("AssetKind::ModelMesh"));
     assert!(src.contains("AssetKind::ModelAnimation"));
+    assert!(src.contains("flags: asset_flags::STREAMED_GAMEPLAY_PERSISTENT"));
+    assert!(src.contains("pub const PERSISTENT_ASSET_PAGE_COUNT: usize ="));
+    assert!(src.contains("#[cfg(feature = \"cd-stream-bench\")]\npub static ASSET_"));
 }
 
 /// Helper: starter project with the player spawn moved to
