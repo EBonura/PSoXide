@@ -176,6 +176,7 @@ fn draw_toolbar_controls(ui: &mut egui::Ui, state: &mut AppState) {
     draw_buttons(ui, state);
     ui.add_space(TOOLBAR_CLUSTER_GAP);
     draw_save_states_button(ui, state);
+    draw_controls_button(ui, state);
     ui.add_space(TOOLBAR_CLUSTER_GAP);
     draw_audio_controls(ui, state);
     ui.add_space(TOOLBAR_CLUSTER_GAP);
@@ -196,6 +197,20 @@ fn draw_save_states_button(ui: &mut egui::Ui, state: &mut AppState) {
         .clicked()
     {
         state.menu.open_save_states();
+    }
+}
+
+/// Always-visible entry point into the controls panel -- rebinding
+/// mid-game (running or paused) is the point of the panel, so it must
+/// not require opening the full Menu overlay first.
+fn draw_controls_button(ui: &mut egui::Ui, state: &mut AppState) {
+    let btn = icon_button(icons::GAMEPAD_2);
+    if ui
+        .add(btn)
+        .on_hover_text("Controls (rebind keyboard keys)")
+        .clicked()
+    {
+        state.menu.open_controls();
     }
 }
 

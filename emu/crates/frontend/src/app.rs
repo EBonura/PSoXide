@@ -35,7 +35,7 @@ use crate::playtest_input::{PlaytestInputEvent, PlaytestInputTape, Port1PadSampl
 use crate::ui;
 use crate::ui::hud::HudState;
 use crate::ui::memory::MemoryView;
-use crate::ui::menu::{LibraryItem as MenuLibraryItem, MenuState, SaveStateRow};
+use crate::ui::menu::{LibraryItem as MenuLibraryItem, MenuState, PadBindTarget, SaveStateRow};
 use crate::{paths_equivalent, repo_root_dir};
 
 /// Ring-buffer capacity for the execution-history panel. 16 rows is
@@ -532,6 +532,14 @@ impl AppState {
         #[cfg(feature = "editor")]
         out.menu.sync_editor_label(out.workspace.is_editor());
         out.sync_menu_settings_paths();
+        out.sync_menu_controls();
+        // Dev/preview hook in the PSOXIDE_AUTORUN tradition: open the
+        // controls panel straight away, so visual tweaks to the pad
+        // drawing can be screenshotted without clicking through the UI.
+        #[cfg(not(target_arch = "wasm32"))]
+        if env_flag("PSOXIDE_OPEN_CONTROLS") {
+            out.menu.open_controls();
+        }
         // Web: look (async) for a previously-saved BIOS/folder so the menu can
         // offer a one-click reconnect.
         #[cfg(target_arch = "wasm32")]
@@ -1857,6 +1865,53 @@ impl AppState {
             .sync_settings_paths(self.bios_path_label(), self.games_path_label());
     }
 
+    /// Current display label for every rebindable port-1 target, for
+    /// the controls panel.
+    fn controls_labels(&self) -> Vec<(PadBindTarget, String)> {
+        PadBindTarget::ALL
+            .into_iter()
+            .map(|t| (t, binding_for_target(&self.settings.input.port1, t).label()))
+            .collect()
+    }
+
+    /// Push the current binding labels into the Menu's controls panel.
+    pub fn sync_menu_controls(&mut self) {
+        let labels = self.controls_labels();
+        self.menu.sync_controls(labels);
+    }
+
+    /// Bind `target` to `binding`, stealing it from any other target
+    /// that currently uses the same key -- one physical key silently
+    /// driving two pad inputs is never what the user meant. Persists
+    /// immediately and refreshes the panel labels; key events read the
+    /// bindings live, so the change applies to the running game on the
+    /// very next press.
+    pub fn apply_rebind(&mut self, target: PadBindTarget, binding: psoxide_settings::InputBinding) {
+        for other in PadBindTarget::ALL {
+            if other != target && *binding_for_target(&self.settings.input.port1, other) == binding
+            {
+                *binding_for_target_mut(&mut self.settings.input.port1, other) =
+                    psoxide_settings::InputBinding::Unbound;
+            }
+        }
+        *binding_for_target_mut(&mut self.settings.input.port1, target) = binding.clone();
+        if let Err(e) = self.save_settings() {
+            eprintln!("[frontend] settings save after rebind: {e}");
+        }
+        self.sync_menu_controls();
+        self.status_message_set(format!("{} bound to {}", target.label(), binding.label()));
+    }
+
+    /// Restore every port-1 binding to the built-in defaults.
+    pub fn reset_controls(&mut self) {
+        self.settings.input.port1 = psoxide_settings::settings::PortBindings::default();
+        if let Err(e) = self.save_settings() {
+            eprintln!("[frontend] settings save after controls reset: {e}");
+        }
+        self.sync_menu_controls();
+        self.status_message_set("Controls reset to defaults".to_string());
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     fn bios_path_label(&self) -> String {
         let configured = self.settings.paths.bios.trim();
@@ -3019,6 +3074,76 @@ fn maybe_fast_boot_disc(
     enabled: bool,
 ) -> &'static str {
     maybe_fast_boot_disc_path(bus, cpu, disc, &entry.path, enabled)
+}
+
+/// The settings field a rebind target reads from. Kept as a pair of
+/// free functions (rather than one `&mut` accessor used for reads too)
+/// so label-building can borrow the settings immutably.
+fn binding_for_target(
+    b: &psoxide_settings::settings::PortBindings,
+    target: PadBindTarget,
+) -> &psoxide_settings::InputBinding {
+    match target {
+        PadBindTarget::Up => &b.up,
+        PadBindTarget::Down => &b.down,
+        PadBindTarget::Left => &b.left,
+        PadBindTarget::Right => &b.right,
+        PadBindTarget::Cross => &b.cross,
+        PadBindTarget::Circle => &b.circle,
+        PadBindTarget::Square => &b.square,
+        PadBindTarget::Triangle => &b.triangle,
+        PadBindTarget::L1 => &b.l1,
+        PadBindTarget::L2 => &b.l2,
+        PadBindTarget::R1 => &b.r1,
+        PadBindTarget::R2 => &b.r2,
+        PadBindTarget::Start => &b.start,
+        PadBindTarget::Select => &b.select,
+        PadBindTarget::L3 => &b.l3,
+        PadBindTarget::R3 => &b.r3,
+        PadBindTarget::Analog => &b.analog,
+        PadBindTarget::LStickUp => &b.left_stick.up,
+        PadBindTarget::LStickDown => &b.left_stick.down,
+        PadBindTarget::LStickLeft => &b.left_stick.left,
+        PadBindTarget::LStickRight => &b.left_stick.right,
+        PadBindTarget::RStickUp => &b.right_stick.up,
+        PadBindTarget::RStickDown => &b.right_stick.down,
+        PadBindTarget::RStickLeft => &b.right_stick.left,
+        PadBindTarget::RStickRight => &b.right_stick.right,
+    }
+}
+
+/// Mutable twin of [`binding_for_target`], for rebind writes.
+fn binding_for_target_mut(
+    b: &mut psoxide_settings::settings::PortBindings,
+    target: PadBindTarget,
+) -> &mut psoxide_settings::InputBinding {
+    match target {
+        PadBindTarget::Up => &mut b.up,
+        PadBindTarget::Down => &mut b.down,
+        PadBindTarget::Left => &mut b.left,
+        PadBindTarget::Right => &mut b.right,
+        PadBindTarget::Cross => &mut b.cross,
+        PadBindTarget::Circle => &mut b.circle,
+        PadBindTarget::Square => &mut b.square,
+        PadBindTarget::Triangle => &mut b.triangle,
+        PadBindTarget::L1 => &mut b.l1,
+        PadBindTarget::L2 => &mut b.l2,
+        PadBindTarget::R1 => &mut b.r1,
+        PadBindTarget::R2 => &mut b.r2,
+        PadBindTarget::Start => &mut b.start,
+        PadBindTarget::Select => &mut b.select,
+        PadBindTarget::L3 => &mut b.l3,
+        PadBindTarget::R3 => &mut b.r3,
+        PadBindTarget::Analog => &mut b.analog,
+        PadBindTarget::LStickUp => &mut b.left_stick.up,
+        PadBindTarget::LStickDown => &mut b.left_stick.down,
+        PadBindTarget::LStickLeft => &mut b.left_stick.left,
+        PadBindTarget::LStickRight => &mut b.left_stick.right,
+        PadBindTarget::RStickUp => &mut b.right_stick.up,
+        PadBindTarget::RStickDown => &mut b.right_stick.down,
+        PadBindTarget::RStickLeft => &mut b.right_stick.left,
+        PadBindTarget::RStickRight => &mut b.right_stick.right,
+    }
 }
 
 fn maybe_fast_boot_disc_path(

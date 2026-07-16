@@ -55,7 +55,7 @@ use clap::Parser;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, KeyEvent, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::keyboard::{Key, NamedKey};
+use winit::keyboard::{Key, KeyCode, NamedKey, PhysicalKey};
 use winit::window::{Window, WindowId};
 
 use crate::app::AppState;
@@ -190,18 +190,15 @@ struct Shell {
     state: AppState,
     pending_input: MenuInput,
     last_frame: Instant,
-    /// Live port-1 pad mask. Key press/release events toggle bits
-    /// here; the shell flushes it into `bus.set_port1_buttons` each
-    /// frame before running CPU steps so the guest always sees the
-    /// latest state.
-    pad1_mask: u16,
+    /// Every piece of pad state the shell derives from keyboard events
+    /// (button mask, emulated sticks, SOCD recency). One struct so the
+    /// paths that must invalidate it wholesale -- focus loss, a rebind
+    /// capture consuming events, Reset Controls -- clear one thing and
+    /// can't miss a field.
+    host_input: HostKeyboardInput,
     /// Previous-frame state of the L3+R3 freelook chord, for rising-edge
     /// toggle detection.
     prev_freelook_chord: bool,
-    /// Keyboard-emulated left analog stick state.
-    keyboard_left_stick: KeyboardStickState,
-    /// Keyboard-emulated right analog stick state.
-    keyboard_right_stick: KeyboardStickState,
     /// Whether to open the window in borderless-fullscreen mode.
     /// Decision is made at startup via CLI flag and then captured
     /// here; changing it at runtime would need a window recreation.
@@ -307,10 +304,8 @@ impl Shell {
             state: AppState::with_config_dir(config_dir),
             pending_input: MenuInput::default(),
             last_frame: Instant::now(),
-            pad1_mask: 0,
+            host_input: HostKeyboardInput::default(),
             prev_freelook_chord: false,
-            keyboard_left_stick: KeyboardStickState::default(),
-            keyboard_right_stick: KeyboardStickState::default(),
             fullscreen,
             audio,
             input,
@@ -349,10 +344,10 @@ fn press_port1_analog_button(state: &mut AppState) {
     }
 }
 
-/// Map a winit logical key to a PSX digital-pad bitmask using the
+/// Map a winit physical key to a PSX digital-pad bitmask using the
 /// persisted port-1 bindings. Returns `None` for keys that aren't
 /// bound.
-fn key_to_pad_button(key: &Key, bindings: &PortBindings) -> Option<u16> {
+fn key_to_pad_button(physical: &PhysicalKey, bindings: &PortBindings) -> Option<u16> {
     [
         (button::UP, &bindings.up),
         (button::DOWN, &bindings.down),
@@ -369,19 +364,17 @@ fn key_to_pad_button(key: &Key, bindings: &PortBindings) -> Option<u16> {
         (button::START, &bindings.start),
         (button::SELECT, &bindings.select),
         (button::R3, &bindings.r3),
+        (button::L3, &bindings.l3),
     ]
     .into_iter()
-    .find_map(|(mask, binding)| binding_matches_key(binding, key).then_some(mask))
+    .find_map(|(mask, binding)| binding_matches_key(binding, physical).then_some(mask))
 }
 
 /// `true` when the key should act as the DualShock Analog button.
-fn key_is_analog_button(key: &Key, bindings: &PortBindings) -> bool {
-    binding_matches_key(&bindings.analog, key)
+fn key_is_analog_button(physical: &PhysicalKey, bindings: &PortBindings) -> bool {
+    binding_matches_key(&bindings.analog, physical)
 }
 
-/// Update held freelook-camera key state from a keyboard event. These keys are
-/// intentionally outside the PSX pad bindings (T/F/G/H move, I/J/K/L look, U/O
-/// up-down, Shift boost), so tracking them never double-drives the guest pad.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct KeyboardStickState {
     up: bool,
@@ -391,22 +384,27 @@ struct KeyboardStickState {
 }
 
 impl KeyboardStickState {
-    fn update_key(&mut self, key: &Key, state: ElementState, bindings: &StickBindings) -> bool {
+    fn update_key(
+        &mut self,
+        physical: &PhysicalKey,
+        state: ElementState,
+        bindings: &StickBindings,
+    ) -> bool {
         let pressed = state == ElementState::Pressed;
         let mut matched = false;
-        if binding_matches_key(&bindings.up, key) {
+        if binding_matches_key(&bindings.up, physical) {
             self.up = pressed;
             matched = true;
         }
-        if binding_matches_key(&bindings.down, key) {
+        if binding_matches_key(&bindings.down, physical) {
             self.down = pressed;
             matched = true;
         }
-        if binding_matches_key(&bindings.left, key) {
+        if binding_matches_key(&bindings.left, physical) {
             self.left = pressed;
             matched = true;
         }
-        if binding_matches_key(&bindings.right, key) {
+        if binding_matches_key(&bindings.right, physical) {
             self.right = pressed;
             matched = true;
         }
@@ -444,33 +442,380 @@ fn merge_axis(gamepad: f32, keyboard: f32) -> f32 {
     }
 }
 
-fn binding_matches_key(binding: &InputBinding, key: &Key) -> bool {
-    match (binding, key) {
-        (InputBinding::Unbound, _) => false,
-        (InputBinding::Character(expected), Key::Character(actual)) => actual
-            .chars()
-            .next()
-            .is_some_and(|c| c.eq_ignore_ascii_case(expected)),
-        (InputBinding::Named(expected), Key::Named(actual)) => {
-            named_key_label(actual).is_some_and(|name| expected.eq_ignore_ascii_case(name))
-        }
-        _ => false,
+/// Strip simultaneous opposing cardinal directions from the pad mask,
+/// keeping only the most recently pressed side of each pair (see
+/// [`HostKeyboardInput`]). The real d-pad's rocker makes the
+/// combination impossible, so the guest must never see it; with no
+/// recorded recency (or a stale one no longer held) the pair resolves
+/// to neutral, which is what the rocker does mid-travel.
+fn socd_resolve(mask: u16, last_horiz: u16, last_vert: u16) -> u16 {
+    let mut out = mask;
+    const HORIZ: u16 = button::LEFT | button::RIGHT;
+    const VERT: u16 = button::UP | button::DOWN;
+    if out & HORIZ == HORIZ {
+        out = (out & !HORIZ) | (last_horiz & HORIZ);
+    }
+    if out & VERT == VERT {
+        out = (out & !VERT) | (last_vert & VERT);
+    }
+    out
+}
+
+/// Fold a set of rising-edge presses into the SOCD recency trackers.
+/// Shared by the keyboard press path (one button bit per event) and
+/// the gamepad path (a whole poll's edges at once) so both devices
+/// compete on equal terms -- a newer gamepad direction must beat an
+/// older keyboard one and vice versa. Opposite edges arriving in the
+/// same gamepad poll carry no ordering information, so the pair's
+/// recency resets and [`socd_resolve`] yields neutral.
+fn update_socd_recency(last_horiz: &mut u16, last_vert: &mut u16, pressed: u16) {
+    const HORIZ: u16 = button::LEFT | button::RIGHT;
+    const VERT: u16 = button::UP | button::DOWN;
+    match pressed & HORIZ {
+        button::LEFT => *last_horiz = button::LEFT,
+        button::RIGHT => *last_horiz = button::RIGHT,
+        HORIZ => *last_horiz = 0,
+        _ => {}
+    }
+    match pressed & VERT {
+        button::UP => *last_vert = button::UP,
+        button::DOWN => *last_vert = button::DOWN,
+        VERT => *last_vert = 0,
+        _ => {}
     }
 }
 
-fn named_key_label(key: &NamedKey) -> Option<&'static str> {
-    match key {
-        NamedKey::ArrowUp => Some("ArrowUp"),
-        NamedKey::ArrowDown => Some("ArrowDown"),
-        NamedKey::ArrowLeft => Some("ArrowLeft"),
-        NamedKey::ArrowRight => Some("ArrowRight"),
-        NamedKey::Enter => Some("Enter"),
-        NamedKey::Backspace => Some("Backspace"),
-        NamedKey::Shift => Some("Shift"),
-        NamedKey::Space => Some("Space"),
-        NamedKey::Tab => Some("Tab"),
-        NamedKey::Escape => Some("Escape"),
-        NamedKey::F9 => Some("F9"),
+/// Every piece of pad state derived from host keyboard events: the
+/// port-1 button mask, both keyboard-emulated sticks, and the SOCD
+/// recency trackers.
+///
+/// Grouped so the paths that must throw the whole cache away clear one
+/// struct and can't miss a field. That matters because this state is
+/// only correct while every key release is observed and the bindings
+/// that produced it are still live; three paths break that assumption:
+///
+/// - **focus loss** -- the OS doesn't reliably deliver `Released` for
+///   keys still held during Alt-Tab;
+/// - **a rebind capture consuming events** -- capture owns the
+///   keyboard outright, including releases whose normal processing
+///   would have cleared held bits;
+/// - **Reset Controls** -- bits set under the old bindings can never
+///   be cleared by releases matched against the new ones.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct HostKeyboardInput {
+    /// Live port-1 pad mask. Key press/release events toggle bits
+    /// here; the shell merges it with the gamepad mask each frame.
+    pad1_mask: u16,
+    /// Keyboard-emulated left analog stick state.
+    left_stick: KeyboardStickState,
+    /// Keyboard-emulated right analog stick state.
+    right_stick: KeyboardStickState,
+    /// Most recently pressed button of the LEFT/RIGHT pair, for SOCD
+    /// (simultaneous opposing cardinal directions) resolution: when
+    /// both are held the guest sees only the most recent press, and
+    /// releasing it re-exposes the still-held opposite. Last-input
+    /// priority matches what a player expects from tapping the other
+    /// direction without letting go first.
+    socd_last_horiz: u16,
+    /// Same, for the UP/DOWN pair.
+    socd_last_vert: u16,
+}
+
+impl HostKeyboardInput {
+    /// Drop everything: mask, sticks, and SOCD recency. The pad
+    /// simply reports "nothing held" until fresh key events arrive.
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    /// Apply one keyboard press/release to the cached pad state:
+    /// button mask (with SOCD recency on presses) and both emulated
+    /// sticks.
+    fn apply_key_event(
+        &mut self,
+        physical: &PhysicalKey,
+        state: ElementState,
+        bindings: &PortBindings,
+    ) {
+        if let Some(mask) = key_to_pad_button(physical, bindings) {
+            match state {
+                ElementState::Pressed => {
+                    self.pad1_mask |= mask;
+                    update_socd_recency(&mut self.socd_last_horiz, &mut self.socd_last_vert, mask);
+                }
+                ElementState::Released => self.pad1_mask &= !mask,
+            }
+        }
+        self.left_stick
+            .update_key(physical, state, &bindings.left_stick);
+        self.right_stick
+            .update_key(physical, state, &bindings.right_stick);
+    }
+
+    /// Fold the gamepad's rising-edge presses from this poll into the
+    /// SOCD recency, so a newer pad direction beats an older keyboard
+    /// one. Call before [`Self::resolved_mask`] each frame.
+    fn note_gamepad_edges(&mut self, pressed_mask: u16) {
+        update_socd_recency(
+            &mut self.socd_last_horiz,
+            &mut self.socd_last_vert,
+            pressed_mask,
+        );
+    }
+
+    /// The SOCD-clean guest mask: keyboard bits merged with the
+    /// gamepad's, opposing cardinals resolved by recency.
+    fn resolved_mask(&self, gamepad_mask: u16) -> u16 {
+        socd_resolve(
+            self.pad1_mask | gamepad_mask,
+            self.socd_last_horiz,
+            self.socd_last_vert,
+        )
+    }
+}
+
+/// Match a persisted binding against the *physical* key that changed,
+/// rather than the logical `Key` winit derives from the current keyboard
+/// layout.
+///
+/// This used to match on `Key` (the layout-translated character/name).
+/// Windows re-runs its dead-key/AltGr translation on every keystroke, and
+/// on layouts that put a dead key near the default control cluster (ABNT2,
+/// International-US, ...) a still-held key can flip from `Key::Character`
+/// to `Key::Dead`/`Unidentified` the instant a *second* key goes down --
+/// which read as "holding a second button drops the first bind", exactly
+/// the multi-key symptom this was chasing. A physical key's `KeyCode`
+/// comes straight from the hardware scancode (or the DOM `code` on web),
+/// so it never depends on modifier state, layout, or what other keys are
+/// currently held.
+fn binding_matches_key(binding: &InputBinding, physical: &PhysicalKey) -> bool {
+    let PhysicalKey::Code(code) = physical else {
+        return false;
+    };
+    match binding {
+        InputBinding::Unbound => false,
+        InputBinding::Character(expected) => char_to_keycode(*expected) == Some(*code),
+        InputBinding::Named(expected) => named_key_codes(expected).contains(code),
+    }
+}
+
+/// Physical-position mapping for a persisted `InputBinding::Character`.
+/// Bindings are stored as the character a US-QWERTY layout produces at a
+/// given position (the default set: q/e/z/x/c/s/r/1/3/i/j/k/l), so this is
+/// a fixed position table rather than a live layout query -- which is what
+/// keeps a binding stable regardless of the keyboard layout actually
+/// active at runtime.
+fn char_to_keycode(c: char) -> Option<KeyCode> {
+    Some(match c.to_ascii_lowercase() {
+        'a' => KeyCode::KeyA,
+        'b' => KeyCode::KeyB,
+        'c' => KeyCode::KeyC,
+        'd' => KeyCode::KeyD,
+        'e' => KeyCode::KeyE,
+        'f' => KeyCode::KeyF,
+        'g' => KeyCode::KeyG,
+        'h' => KeyCode::KeyH,
+        'i' => KeyCode::KeyI,
+        'j' => KeyCode::KeyJ,
+        'k' => KeyCode::KeyK,
+        'l' => KeyCode::KeyL,
+        'm' => KeyCode::KeyM,
+        'n' => KeyCode::KeyN,
+        'o' => KeyCode::KeyO,
+        'p' => KeyCode::KeyP,
+        'q' => KeyCode::KeyQ,
+        'r' => KeyCode::KeyR,
+        's' => KeyCode::KeyS,
+        't' => KeyCode::KeyT,
+        'u' => KeyCode::KeyU,
+        'v' => KeyCode::KeyV,
+        'w' => KeyCode::KeyW,
+        'x' => KeyCode::KeyX,
+        'y' => KeyCode::KeyY,
+        'z' => KeyCode::KeyZ,
+        '0' => KeyCode::Digit0,
+        '1' => KeyCode::Digit1,
+        '2' => KeyCode::Digit2,
+        '3' => KeyCode::Digit3,
+        '4' => KeyCode::Digit4,
+        '5' => KeyCode::Digit5,
+        '6' => KeyCode::Digit6,
+        '7' => KeyCode::Digit7,
+        '8' => KeyCode::Digit8,
+        '9' => KeyCode::Digit9,
+        _ => return None,
+    })
+}
+
+/// Physical keycode(s) a persisted `InputBinding::Named` label matches.
+/// Covers the label set the old logical-key lookup accepted plus every
+/// label [`keycode_to_binding`] can produce for the controls panel's
+/// rebind capture (function keys, numpad -- prime real estate for
+/// dodging keyboard-matrix ghosting). "Shift" matches either physical
+/// shift key since the binding format predates left/right being
+/// distinguished.
+fn named_key_codes(name: &str) -> &'static [KeyCode] {
+    match name.to_ascii_lowercase().as_str() {
+        "arrowup" => &[KeyCode::ArrowUp],
+        "arrowdown" => &[KeyCode::ArrowDown],
+        "arrowleft" => &[KeyCode::ArrowLeft],
+        "arrowright" => &[KeyCode::ArrowRight],
+        "enter" => &[KeyCode::Enter],
+        "backspace" => &[KeyCode::Backspace],
+        "shift" => &[KeyCode::ShiftLeft, KeyCode::ShiftRight],
+        "space" => &[KeyCode::Space],
+        "tab" => &[KeyCode::Tab],
+        "escape" => &[KeyCode::Escape],
+        "f1" => &[KeyCode::F1],
+        "f2" => &[KeyCode::F2],
+        "f3" => &[KeyCode::F3],
+        "f4" => &[KeyCode::F4],
+        "f5" => &[KeyCode::F5],
+        "f6" => &[KeyCode::F6],
+        "f7" => &[KeyCode::F7],
+        "f8" => &[KeyCode::F8],
+        "f9" => &[KeyCode::F9],
+        "f10" => &[KeyCode::F10],
+        "f11" => &[KeyCode::F11],
+        "f12" => &[KeyCode::F12],
+        "numpad0" => &[KeyCode::Numpad0],
+        "numpad1" => &[KeyCode::Numpad1],
+        "numpad2" => &[KeyCode::Numpad2],
+        "numpad3" => &[KeyCode::Numpad3],
+        "numpad4" => &[KeyCode::Numpad4],
+        "numpad5" => &[KeyCode::Numpad5],
+        "numpad6" => &[KeyCode::Numpad6],
+        "numpad7" => &[KeyCode::Numpad7],
+        "numpad8" => &[KeyCode::Numpad8],
+        "numpad9" => &[KeyCode::Numpad9],
+        "numpadadd" => &[KeyCode::NumpadAdd],
+        "numpadsubtract" => &[KeyCode::NumpadSubtract],
+        "numpadmultiply" => &[KeyCode::NumpadMultiply],
+        "numpaddivide" => &[KeyCode::NumpadDivide],
+        "numpaddecimal" => &[KeyCode::NumpadDecimal],
+        "numpadenter" => &[KeyCode::NumpadEnter],
+        "controlleft" => &[KeyCode::ControlLeft],
+        "controlright" => &[KeyCode::ControlRight],
+        "altleft" => &[KeyCode::AltLeft],
+        "altright" => &[KeyCode::AltRight],
+        "semicolon" => &[KeyCode::Semicolon],
+        "comma" => &[KeyCode::Comma],
+        "period" => &[KeyCode::Period],
+        "slash" => &[KeyCode::Slash],
+        "quote" => &[KeyCode::Quote],
+        "bracketleft" => &[KeyCode::BracketLeft],
+        "bracketright" => &[KeyCode::BracketRight],
+        "backslash" => &[KeyCode::Backslash],
+        "minus" => &[KeyCode::Minus],
+        "equal" => &[KeyCode::Equal],
+        "backquote" => &[KeyCode::Backquote],
+        "intlro" => &[KeyCode::IntlRo],
+        "intlbackslash" => &[KeyCode::IntlBackslash],
+        _ => &[],
+    }
+}
+
+/// The persistable binding a captured physical key becomes -- the
+/// reverse of [`binding_matches_key`]'s lookup, used by the controls
+/// panel's press-a-key rebind flow. Letters and digits round-trip
+/// through the existing `Character` form; everything else gets a
+/// `Named` label that [`named_key_codes`] recognises. `None` means the
+/// key is not bindable: Escape stays reserved for the menu toggle, and
+/// keys outside the table have no stable label to persist.
+fn keycode_to_binding(code: KeyCode) -> Option<InputBinding> {
+    let named = |s: &str| Some(InputBinding::Named(s.to_string()));
+    let ch = |c: char| Some(InputBinding::Character(c));
+    match code {
+        KeyCode::KeyA => ch('a'),
+        KeyCode::KeyB => ch('b'),
+        KeyCode::KeyC => ch('c'),
+        KeyCode::KeyD => ch('d'),
+        KeyCode::KeyE => ch('e'),
+        KeyCode::KeyF => ch('f'),
+        KeyCode::KeyG => ch('g'),
+        KeyCode::KeyH => ch('h'),
+        KeyCode::KeyI => ch('i'),
+        KeyCode::KeyJ => ch('j'),
+        KeyCode::KeyK => ch('k'),
+        KeyCode::KeyL => ch('l'),
+        KeyCode::KeyM => ch('m'),
+        KeyCode::KeyN => ch('n'),
+        KeyCode::KeyO => ch('o'),
+        KeyCode::KeyP => ch('p'),
+        KeyCode::KeyQ => ch('q'),
+        KeyCode::KeyR => ch('r'),
+        KeyCode::KeyS => ch('s'),
+        KeyCode::KeyT => ch('t'),
+        KeyCode::KeyU => ch('u'),
+        KeyCode::KeyV => ch('v'),
+        KeyCode::KeyW => ch('w'),
+        KeyCode::KeyX => ch('x'),
+        KeyCode::KeyY => ch('y'),
+        KeyCode::KeyZ => ch('z'),
+        KeyCode::Digit0 => ch('0'),
+        KeyCode::Digit1 => ch('1'),
+        KeyCode::Digit2 => ch('2'),
+        KeyCode::Digit3 => ch('3'),
+        KeyCode::Digit4 => ch('4'),
+        KeyCode::Digit5 => ch('5'),
+        KeyCode::Digit6 => ch('6'),
+        KeyCode::Digit7 => ch('7'),
+        KeyCode::Digit8 => ch('8'),
+        KeyCode::Digit9 => ch('9'),
+        KeyCode::ArrowUp => named("ArrowUp"),
+        KeyCode::ArrowDown => named("ArrowDown"),
+        KeyCode::ArrowLeft => named("ArrowLeft"),
+        KeyCode::ArrowRight => named("ArrowRight"),
+        KeyCode::Enter => named("Enter"),
+        KeyCode::Backspace => named("Backspace"),
+        KeyCode::ShiftLeft | KeyCode::ShiftRight => named("Shift"),
+        KeyCode::Space => named("Space"),
+        KeyCode::Tab => named("Tab"),
+        KeyCode::F1 => named("F1"),
+        KeyCode::F2 => named("F2"),
+        KeyCode::F3 => named("F3"),
+        KeyCode::F4 => named("F4"),
+        KeyCode::F6 => named("F6"),
+        KeyCode::F8 => named("F8"),
+        KeyCode::F9 => named("F9"),
+        KeyCode::F10 => named("F10"),
+        KeyCode::F11 => named("F11"),
+        KeyCode::Numpad0 => named("Numpad0"),
+        KeyCode::Numpad1 => named("Numpad1"),
+        KeyCode::Numpad2 => named("Numpad2"),
+        KeyCode::Numpad3 => named("Numpad3"),
+        KeyCode::Numpad4 => named("Numpad4"),
+        KeyCode::Numpad5 => named("Numpad5"),
+        KeyCode::Numpad6 => named("Numpad6"),
+        KeyCode::Numpad7 => named("Numpad7"),
+        KeyCode::Numpad8 => named("Numpad8"),
+        KeyCode::Numpad9 => named("Numpad9"),
+        KeyCode::NumpadAdd => named("NumpadAdd"),
+        KeyCode::NumpadSubtract => named("NumpadSubtract"),
+        KeyCode::NumpadMultiply => named("NumpadMultiply"),
+        KeyCode::NumpadDivide => named("NumpadDivide"),
+        KeyCode::NumpadDecimal => named("NumpadDecimal"),
+        KeyCode::NumpadEnter => named("NumpadEnter"),
+        KeyCode::ControlLeft => named("ControlLeft"),
+        KeyCode::ControlRight => named("ControlRight"),
+        KeyCode::AltLeft => named("AltLeft"),
+        KeyCode::AltRight => named("AltRight"),
+        KeyCode::Semicolon => named("Semicolon"),
+        KeyCode::Comma => named("Comma"),
+        KeyCode::Period => named("Period"),
+        KeyCode::Slash => named("Slash"),
+        KeyCode::Quote => named("Quote"),
+        KeyCode::BracketLeft => named("BracketLeft"),
+        KeyCode::BracketRight => named("BracketRight"),
+        KeyCode::Backslash => named("Backslash"),
+        KeyCode::Minus => named("Minus"),
+        KeyCode::Equal => named("Equal"),
+        KeyCode::Backquote => named("Backquote"),
+        KeyCode::IntlRo => named("IntlRo"),
+        KeyCode::IntlBackslash => named("IntlBackslash"),
+        // Escape toggles the menu, F5/F7 are quick save/load, and F12
+        // toggles the renderer display source. Keeping host commands out
+        // of pad bindings prevents one key press from firing both actions.
         _ => None,
     }
 }
@@ -582,16 +927,62 @@ impl ApplicationHandler for Shell {
                 gfx.resize(size);
                 gfx.window.request_redraw();
             }
+            // Losing OS focus (Alt-Tab, a notification stealing focus, an
+            // overlay like Discord/Game Bar, clicking a second monitor...)
+            // does not reliably deliver a `Released` for whatever's
+            // physically still held down -- on Windows in particular, the
+            // key-up can fire after focus already moved elsewhere, or not
+            // reach this window at all. Left unhandled, that bit (or
+            // analog-stick / freelook direction) gets stuck "held" until
+            // the same key happens to be pressed and released again,
+            // which reads as "I have to let go of one key to use another"
+            // once a second, genuinely-held key ORs into an already-stuck
+            // mask. Clear every host-key-derived input state on focus
+            // loss so a stuck bit can never survive past it; the pad
+            // simply reports "nothing held" until the player presses
+            // fresh keys after refocusing.
+            WindowEvent::Focused(false) => {
+                self.host_input.clear();
+            }
+            WindowEvent::Focused(true) => {}
             WindowEvent::KeyboardInput {
                 event:
                     KeyEvent {
                         logical_key,
+                        physical_key,
                         state,
                         repeat,
                         ..
                     },
                 ..
             } => {
+                // A controls-panel rebind capture owns the keyboard
+                // outright: the next key press becomes the binding
+                // (Escape cancels), and nothing leaks through to the
+                // game, the menu, or the host shortcuts below.
+                if let Some(target) = self.state.menu.controls_capture() {
+                    // Capture consumes this event unconditionally --
+                    // including releases, whose normal processing is
+                    // what clears held bits. Drop the cached keyboard
+                    // state up front so no exit from capture (bind,
+                    // Escape, closing the panel) can leave a swallowed
+                    // release's button wedged into the mask.
+                    self.host_input.clear();
+                    if state == ElementState::Pressed && !repeat {
+                        if matches!(logical_key, Key::Named(NamedKey::Escape)) {
+                            self.state.menu.clear_controls_capture();
+                        } else if let PhysicalKey::Code(code) = physical_key {
+                            if let Some(binding) = keycode_to_binding(code) {
+                                self.state.apply_rebind(target, binding);
+                                self.state.menu.clear_controls_capture();
+                            } else {
+                                self.state
+                                    .status_message_set("That key can't be bound".to_string());
+                            }
+                        }
+                    }
+                    return;
+                }
                 // Pad state tracks both press AND release continuously
                 // so held buttons keep polling as "pressed". Auto-repeat
                 // events are ignored -- the key is already down, and the
@@ -605,21 +996,10 @@ impl ApplicationHandler for Shell {
                 let route_keyboard_to_game = true;
                 if !repeat && route_keyboard_to_game {
                     let bindings = &self.state.settings.input.port1;
-                    if let Some(mask) = key_to_pad_button(&logical_key, bindings) {
-                        match state {
-                            ElementState::Pressed => self.pad1_mask |= mask,
-                            ElementState::Released => self.pad1_mask &= !mask,
-                        }
-                    }
-                    self.keyboard_left_stick
-                        .update_key(&logical_key, state, &bindings.left_stick);
-                    self.keyboard_right_stick.update_key(
-                        &logical_key,
-                        state,
-                        &bindings.right_stick,
-                    );
+                    self.host_input
+                        .apply_key_event(&physical_key, state, bindings);
                     let press_analog = state == ElementState::Pressed
-                        && key_is_analog_button(&logical_key, bindings);
+                        && key_is_analog_button(&physical_key, bindings);
                     if press_analog {
                         press_port1_analog_button(&mut self.state);
                     }
@@ -632,16 +1012,13 @@ impl ApplicationHandler for Shell {
                 if state == ElementState::Pressed {
                     self.pending_input = merge_key(self.pending_input, &logical_key);
                 }
-                // `g` -- toggle the display source between the CPU
+                // F12 -- toggle the display source between the CPU
                 // rasterizer's VRAM and the compute backend's. Only
                 // meaningful when the compute backend is active
                 // (i.e. `--gpu-compute` was passed). No-op otherwise.
-                // (Was F12; rebound to `g` so it needs no Fn on macOS.
-                // `g` is not a pad binding, so it never collides with play
-                // input.)
                 if state == ElementState::Pressed
                     && !repeat
-                    && matches!(&logical_key, Key::Character(c) if c.eq_ignore_ascii_case("g"))
+                    && matches!(&logical_key, Key::Named(NamedKey::F12))
                 {
                     self.display_gpu_compute = !self.display_gpu_compute;
                     eprintln!(
@@ -728,12 +1105,64 @@ impl ApplicationHandler for Shell {
 
                 // Merge keyboard-emulated and real-pad sticks once; used both
                 // to drive the freelook camera and (unless freelook steals
-                // them) to feed the guest pad below.
-                let merged_left =
-                    merge_sticks(pad_frame.left_stick, self.keyboard_left_stick.vector());
-                let merged_right =
-                    merge_sticks(pad_frame.right_stick, self.keyboard_right_stick.vector());
-                let merged_mask = self.pad1_mask | pad_frame.pad1_mask;
+                // them) to feed the guest pad below. The gamepad's press
+                // edges fold into SOCD recency *before* resolving, so a
+                // newer pad direction beats an older keyboard one. All
+                // three are `mut`: a menu action that invalidates cached
+                // keyboard input (Reset Controls) rebuilds them below so
+                // the reset frame can't ship stale keyboard state.
+                self.host_input.note_gamepad_edges(pad_frame.pressed_mask);
+                let mut merged_left =
+                    merge_sticks(pad_frame.left_stick, self.host_input.left_stick.vector());
+                let mut merged_right =
+                    merge_sticks(pad_frame.right_stick, self.host_input.right_stick.vector());
+                let mut merged_mask = self.host_input.resolved_mask(pad_frame.pad1_mask);
+
+                // Feed the controls panel its live held-target set so
+                // held keys light up on the drawing -- an in-app
+                // rollover/ghosting tester. Only while it's open; the
+                // Vec is rebuilt per frame but tops out at 25 entries.
+                if self.state.menu.controls_panel_open() {
+                    use crate::ui::menu::PadBindTarget as T;
+                    let mut held = Vec::new();
+                    for (bit, target) in [
+                        (button::UP, T::Up),
+                        (button::DOWN, T::Down),
+                        (button::LEFT, T::Left),
+                        (button::RIGHT, T::Right),
+                        (button::CROSS, T::Cross),
+                        (button::CIRCLE, T::Circle),
+                        (button::SQUARE, T::Square),
+                        (button::TRIANGLE, T::Triangle),
+                        (button::L1, T::L1),
+                        (button::L2, T::L2),
+                        (button::R1, T::R1),
+                        (button::R2, T::R2),
+                        (button::START, T::Start),
+                        (button::SELECT, T::Select),
+                        (button::L3, T::L3),
+                        (button::R3, T::R3),
+                    ] {
+                        if merged_mask & bit != 0 {
+                            held.push(target);
+                        }
+                    }
+                    for (on, target) in [
+                        (self.host_input.left_stick.up, T::LStickUp),
+                        (self.host_input.left_stick.down, T::LStickDown),
+                        (self.host_input.left_stick.left, T::LStickLeft),
+                        (self.host_input.left_stick.right, T::LStickRight),
+                        (self.host_input.right_stick.up, T::RStickUp),
+                        (self.host_input.right_stick.down, T::RStickDown),
+                        (self.host_input.right_stick.left, T::RStickLeft),
+                        (self.host_input.right_stick.right, T::RStickRight),
+                    ] {
+                        if on {
+                            held.push(target);
+                        }
+                    }
+                    self.state.menu.set_controls_live_held(held);
+                }
 
                 // Gamepad input arrives by polling, not as window events,
                 // so it cannot wake the redraw scheduler the way keyboard
@@ -795,10 +1224,20 @@ impl ApplicationHandler for Shell {
                 if input.toggle_open {
                     input.toggle_open = false;
                     input.back = false;
+                    // With the controls panel up, Escape means "close
+                    // the panel", not "toggle the whole menu" -- the
+                    // nearest thing on screen should dismiss first.
+                    // (A pending key capture never reaches here: the
+                    // capture arm consumes Escape as its cancel.)
+                    let closed_controls_panel = self.state.menu.controls_panel_open() && {
+                        self.state.menu.close_controls();
+                        true
+                    };
                     // In the editor, Escape first releases an active embedded-play
                     // input capture instead of toggling the menu.
                     #[cfg(feature = "editor")]
-                    let editor_released_capture = self.state.workspace.is_editor()
+                    let editor_released_capture = !closed_controls_panel
+                        && self.state.workspace.is_editor()
                         && self.state.embedded_playtest_running()
                         && self.state.embedded_playtest_input_captured()
                         && {
@@ -807,7 +1246,7 @@ impl ApplicationHandler for Shell {
                         };
                     #[cfg(not(feature = "editor"))]
                     let editor_released_capture = false;
-                    if editor_released_capture {
+                    if closed_controls_panel || editor_released_capture {
                         // Handled above: input capture released.
                     } else if self.state.running {
                         // Game mode → menu mode: pause and open overlay.
@@ -837,22 +1276,38 @@ impl ApplicationHandler for Shell {
                 }
 
                 if let Some(action) = self.state.menu.update(&input) {
-                    if ui::apply_menu_action(&mut self.state, action) == MenuOutcome::Quit {
-                        #[cfg(feature = "editor")]
-                        self.state.stop_embedded_playtest();
-                        self.state.stop_examples_build();
-                        if let Err(e) = self.state.flush_memcard_port1() {
-                            eprintln!("[frontend] memcard flush on quit: {e}");
+                    match ui::apply_menu_action(&mut self.state, action) {
+                        MenuOutcome::None => {}
+                        MenuOutcome::ClearHostKeyboardInput => {
+                            // The action (Reset Controls) replaced the
+                            // bindings, so every cached keyboard bit was
+                            // set under a mapping that no longer exists
+                            // -- a later release can't clear it. Drop
+                            // the cache and rebuild this frame's merged
+                            // sample from the gamepad alone, so not even
+                            // one stale keyboard frame reaches the guest.
+                            self.host_input.clear();
+                            merged_mask = self.host_input.resolved_mask(pad_frame.pad1_mask);
+                            merged_left = pad_frame.left_stick;
+                            merged_right = pad_frame.right_stick;
                         }
-                        #[cfg(feature = "editor")]
-                        if let Err(e) = self.state.save_editor_project() {
-                            eprintln!("[frontend] editor save on quit: {e}");
+                        MenuOutcome::Quit => {
+                            #[cfg(feature = "editor")]
+                            self.state.stop_embedded_playtest();
+                            self.state.stop_examples_build();
+                            if let Err(e) = self.state.flush_memcard_port1() {
+                                eprintln!("[frontend] memcard flush on quit: {e}");
+                            }
+                            #[cfg(feature = "editor")]
+                            if let Err(e) = self.state.save_editor_project() {
+                                eprintln!("[frontend] editor save on quit: {e}");
+                            }
+                            if let Err(e) = self.state.save_settings() {
+                                eprintln!("[frontend] settings save on quit: {e}");
+                            }
+                            event_loop.exit();
+                            return;
                         }
-                        if let Err(e) = self.state.save_settings() {
-                            eprintln!("[frontend] settings save on quit: {e}");
-                        }
-                        event_loop.exit();
-                        return;
                     }
                 }
                 #[cfg(feature = "editor")]
@@ -1937,26 +2392,33 @@ mod tests {
         let bindings = PortBindings::default();
 
         assert_eq!(
-            key_to_pad_button(&Key::Character("x".into()), &bindings),
+            key_to_pad_button(&PhysicalKey::Code(KeyCode::KeyF), &bindings),
             Some(button::CROSS)
         );
         assert_eq!(
-            key_to_pad_button(&Key::Character("c".into()), &bindings),
+            key_to_pad_button(&PhysicalKey::Code(KeyCode::KeyG), &bindings),
             Some(button::CIRCLE)
         );
         assert_eq!(
-            key_to_pad_button(&Key::Character("z".into()), &bindings),
+            key_to_pad_button(&PhysicalKey::Code(KeyCode::KeyH), &bindings),
             Some(button::SQUARE)
         );
         assert_eq!(
-            key_to_pad_button(&Key::Named(NamedKey::Backspace), &bindings),
+            key_to_pad_button(&PhysicalKey::Code(KeyCode::KeyX), &bindings),
+            Some(button::TRIANGLE)
+        );
+        assert_eq!(
+            key_to_pad_button(&PhysicalKey::Code(KeyCode::Backspace), &bindings),
             Some(button::SELECT)
         );
         assert_eq!(
-            key_to_pad_button(&Key::Character("r".into()), &bindings),
+            key_to_pad_button(&PhysicalKey::Code(KeyCode::KeyR), &bindings),
             Some(button::R3)
         );
-        assert!(key_is_analog_button(&Key::Named(NamedKey::F9), &bindings));
+        assert!(key_is_analog_button(
+            &PhysicalKey::Code(KeyCode::F9),
+            &bindings
+        ));
     }
 
     #[test]
@@ -1966,41 +2428,241 @@ mod tests {
         let mut right = KeyboardStickState::default();
 
         assert!(left.update_key(
-            &Key::Named(NamedKey::ArrowUp),
+            &PhysicalKey::Code(KeyCode::ArrowUp),
             ElementState::Pressed,
             &bindings.left_stick,
         ));
         assert_eq!(left.vector(), (0.0, 1.0));
         assert!(left.update_key(
-            &Key::Named(NamedKey::ArrowDown),
+            &PhysicalKey::Code(KeyCode::ArrowDown),
             ElementState::Pressed,
             &bindings.left_stick,
         ));
         assert_eq!(left.vector(), (0.0, 0.0));
         assert!(left.update_key(
-            &Key::Named(NamedKey::ArrowUp),
+            &PhysicalKey::Code(KeyCode::ArrowUp),
             ElementState::Released,
             &bindings.left_stick,
         ));
         assert_eq!(left.vector(), (0.0, -1.0));
 
         assert!(right.update_key(
-            &Key::Character("j".into()),
+            &PhysicalKey::Code(KeyCode::KeyJ),
             ElementState::Pressed,
             &bindings.right_stick,
         ));
         assert_eq!(right.vector(), (-1.0, 0.0));
         assert!(right.update_key(
-            &Key::Character("l".into()),
+            &PhysicalKey::Code(KeyCode::KeyL),
             ElementState::Pressed,
             &bindings.right_stick,
         ));
         assert_eq!(right.vector(), (0.0, 0.0));
         assert!(!right.update_key(
-            &Key::Character("x".into()),
+            &PhysicalKey::Code(KeyCode::KeyX),
             ElementState::Pressed,
             &bindings.right_stick,
         ));
+    }
+
+    #[test]
+    fn socd_resolution_keeps_most_recent_direction() {
+        // Holding LEFT, then pressing RIGHT without letting go: the guest
+        // sees only RIGHT (the recent press wins)...
+        assert_eq!(
+            socd_resolve(button::LEFT | button::RIGHT, button::RIGHT, 0),
+            button::RIGHT
+        );
+        // ...and releasing RIGHT re-exposes the still-held LEFT (the
+        // resolver never fires on a single held direction).
+        assert_eq!(socd_resolve(button::LEFT, button::RIGHT, 0), button::LEFT);
+        // No recorded recency resolves the clash to neutral.
+        assert_eq!(socd_resolve(button::UP | button::DOWN, 0, 0), 0);
+        // Pairs resolve independently; other buttons pass through.
+        assert_eq!(
+            socd_resolve(
+                button::UP | button::DOWN | button::LEFT | button::RIGHT | button::CROSS,
+                button::LEFT,
+                button::DOWN,
+            ),
+            button::LEFT | button::DOWN | button::CROSS
+        );
+    }
+
+    /// One keyboard press applied through the full event path.
+    fn press(host: &mut HostKeyboardInput, code: KeyCode, bindings: &PortBindings) {
+        host.apply_key_event(&PhysicalKey::Code(code), ElementState::Pressed, bindings);
+    }
+
+    /// One keyboard release applied through the full event path.
+    fn release(host: &mut HostKeyboardInput, code: KeyCode, bindings: &PortBindings) {
+        host.apply_key_event(&PhysicalKey::Code(code), ElementState::Released, bindings);
+    }
+
+    #[test]
+    fn capture_swallowed_release_cannot_wedge_pad_state() {
+        // Regression for: hold a bound key while the game runs, arm a
+        // rebind capture, release the key while capture owns the
+        // keyboard, then cancel with Escape (or close the panel). The
+        // release is consumed by the capture branch, so its normal
+        // processing never clears the bit -- the capture branch must
+        // clear the whole cache on every event it consumes instead.
+        let bindings = PortBindings::default();
+        let mut host = HostKeyboardInput::default();
+
+        // Hold Cross (default F) -- its bit and stick state are live.
+        press(&mut host, KeyCode::KeyF, &bindings);
+        assert_eq!(host.resolved_mask(0), button::CROSS);
+
+        // A capture armed now consumes every event, starting with the
+        // release of F. The shell clears the cache for each consumed
+        // event; the swallowed release therefore cannot strand its bit,
+        // regardless of how capture ends (bind / Escape / panel close).
+        host.clear();
+        assert_eq!(host, HostKeyboardInput::default());
+        assert_eq!(host.resolved_mask(0), 0);
+
+        // A stray release arriving after capture ends (key already up)
+        // stays a no-op.
+        release(&mut host, KeyCode::KeyF, &bindings);
+        assert_eq!(host.resolved_mask(0), 0);
+
+        // Focus loss and a successful rebind route through the same
+        // clear() -- the invariant is identical: everything neutral,
+        // including SOCD recency.
+        press(&mut host, KeyCode::ArrowLeft, &bindings);
+        assert_ne!(host.socd_last_horiz, 0);
+        host.clear();
+        assert_eq!(host.socd_last_horiz, 0);
+        assert_eq!(host.resolved_mask(0), 0);
+    }
+
+    #[test]
+    fn reset_controls_invalidates_bits_from_the_old_bindings() {
+        // Regression for: bind Circle to J, hold J, click Reset
+        // Controls, release J. After the reset J no longer matches
+        // Circle, so its release can't clear the stale bit -- the
+        // reset path must drop the cache outright, while gamepad
+        // input (merged separately) is preserved.
+        let custom = PortBindings {
+            circle: InputBinding::Character('j'),
+            ..PortBindings::default()
+        };
+        let mut host = HostKeyboardInput::default();
+
+        press(&mut host, KeyCode::KeyJ, &custom);
+        assert_eq!(host.resolved_mask(0), button::CIRCLE);
+
+        // Reset Controls: MenuOutcome::ClearHostKeyboardInput makes the
+        // shell clear the cache and rebuild the frame's merged sample
+        // from the gamepad alone.
+        let defaults = PortBindings::default();
+        host.clear();
+        let gamepad_mask = button::L1;
+        assert_eq!(host.resolved_mask(gamepad_mask), button::L1);
+
+        // The release under the *new* bindings no longer maps to
+        // Circle (J is a right-stick direction in the defaults) and
+        // must not resurrect anything.
+        release(&mut host, KeyCode::KeyJ, &defaults);
+        assert_eq!(host.resolved_mask(gamepad_mask), button::L1);
+    }
+
+    #[test]
+    fn socd_recency_lets_the_newer_device_win() {
+        let bindings = PortBindings::default();
+
+        // Keyboard Left held, then gamepad Right pressed: the gamepad
+        // edge updates recency, so Right wins the merged clash.
+        let mut host = HostKeyboardInput::default();
+        press(&mut host, KeyCode::ArrowLeft, &bindings);
+        host.note_gamepad_edges(button::RIGHT);
+        assert_eq!(
+            host.resolved_mask(button::RIGHT) & (button::LEFT | button::RIGHT),
+            button::RIGHT
+        );
+
+        // Gamepad Left held (edge noted earlier), then keyboard Right
+        // pressed: the keyboard press updates recency, Right wins.
+        let mut host = HostKeyboardInput::default();
+        host.note_gamepad_edges(button::LEFT);
+        press(&mut host, KeyCode::ArrowRight, &bindings);
+        assert_eq!(
+            host.resolved_mask(button::LEFT) & (button::LEFT | button::RIGHT),
+            button::RIGHT
+        );
+
+        // Releasing the winner re-exposes the still-held opposite: the
+        // resolver only intervenes while both bits are actually down.
+        release(&mut host, KeyCode::ArrowRight, &bindings);
+        assert_eq!(
+            host.resolved_mask(button::LEFT) & (button::LEFT | button::RIGHT),
+            button::LEFT
+        );
+
+        // Opposite edges in the same gamepad poll carry no ordering
+        // information: recency resets and the pair resolves neutral.
+        let mut host = HostKeyboardInput::default();
+        press(&mut host, KeyCode::ArrowLeft, &bindings);
+        host.note_gamepad_edges(button::LEFT | button::RIGHT);
+        assert_eq!(
+            host.resolved_mask(button::LEFT | button::RIGHT) & (button::LEFT | button::RIGHT),
+            0
+        );
+
+        // The vertical pair tracks independently through the same path.
+        let mut host = HostKeyboardInput::default();
+        press(&mut host, KeyCode::ArrowUp, &bindings);
+        host.note_gamepad_edges(button::DOWN);
+        assert_eq!(
+            host.resolved_mask(button::DOWN) & (button::UP | button::DOWN),
+            button::DOWN
+        );
+    }
+
+    #[test]
+    fn captured_keys_round_trip_through_binding_match() {
+        // Every key the controls panel can capture must be recognised
+        // by the matcher afterwards, or a rebind would save a binding
+        // that never fires. Spot-check each table family: letters,
+        // digits, named keys, function keys, numpad.
+        for code in [
+            KeyCode::KeyA,
+            KeyCode::KeyZ,
+            KeyCode::Digit0,
+            KeyCode::Digit9,
+            KeyCode::ArrowLeft,
+            KeyCode::Enter,
+            KeyCode::Space,
+            KeyCode::ShiftLeft,
+            KeyCode::F1,
+            KeyCode::F11,
+            KeyCode::Numpad0,
+            KeyCode::Numpad9,
+            KeyCode::NumpadAdd,
+            KeyCode::NumpadEnter,
+            KeyCode::Semicolon,
+            KeyCode::Comma,
+            KeyCode::ControlLeft,
+            KeyCode::AltRight,
+        ] {
+            let binding =
+                keycode_to_binding(code).unwrap_or_else(|| panic!("{code:?} should be bindable"));
+            assert!(
+                binding_matches_key(&binding, &PhysicalKey::Code(code)),
+                "{code:?} captured as {binding:?} but does not match back"
+            );
+        }
+        // Host commands are deliberately unavailable as pad bindings.
+        for code in [KeyCode::Escape, KeyCode::F5, KeyCode::F7, KeyCode::F12] {
+            assert_eq!(keycode_to_binding(code), None);
+        }
+        // The default Circle key must remain ordinary pad input rather than
+        // also toggling the renderer display source.
+        assert_eq!(
+            keycode_to_binding(KeyCode::KeyG),
+            Some(InputBinding::Character('g'))
+        );
     }
 
     #[test]
@@ -2011,11 +2673,12 @@ mod tests {
         };
 
         assert_eq!(
-            key_to_pad_button(&Key::Character("j".into()), &bindings),
+            key_to_pad_button(&PhysicalKey::Code(KeyCode::KeyJ), &bindings),
             Some(button::CROSS)
         );
+        // Cross's default key (F) no longer maps to anything.
         assert_eq!(
-            key_to_pad_button(&Key::Character("x".into()), &bindings),
+            key_to_pad_button(&PhysicalKey::Code(KeyCode::KeyF), &bindings),
             None
         );
     }
@@ -2032,13 +2695,13 @@ mod tests {
         let mut right = KeyboardStickState::default();
 
         assert!(right.update_key(
-            &Key::Character("u".into()),
+            &PhysicalKey::Code(KeyCode::KeyU),
             ElementState::Pressed,
             &bindings.right_stick,
         ));
         assert_eq!(right.vector(), (-1.0, 0.0));
         assert!(!right.update_key(
-            &Key::Character("j".into()),
+            &PhysicalKey::Code(KeyCode::KeyJ),
             ElementState::Pressed,
             &bindings.right_stick,
         ));

@@ -66,6 +66,13 @@ pub enum MenuAction {
     /// load-with-confirmation) -- driven by the always-visible toolbar
     /// icon as well as the System category's "Save states" row.
     OpenSaveStates,
+    /// Open the controls panel (clickable PS1 controller drawing,
+    /// press-a-key rebinding, reset to defaults) -- driven by the
+    /// always-visible toolbar icon as well as the System category's
+    /// "Controls" row.
+    OpenControls,
+    /// Restore every port-1 binding to the built-in defaults.
+    ResetControls,
     /// Pin the given slot as the save history's "top" -- the target
     /// [`MenuAction::LoadState`] via F7/quick-load resolves to --
     /// without touching slot numbering or any other save's position.
@@ -103,6 +110,103 @@ pub enum MenuAction {
     Noop,
     /// Quit the application.
     Quit,
+}
+
+/// Every rebindable port-1 input the controls panel exposes -- the
+/// full PS1 pad (d-pad, face, shoulders, Start/Select, stick clicks,
+/// the DualShock Analog toggle) plus the keyboard-emulated analog
+/// stick directions. The app layer maps each target onto its
+/// `psoxide_settings` binding field; the Menu module stays decoupled
+/// from the settings crate's types, same as [`LibraryItem`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PadBindTarget {
+    Up,
+    Down,
+    Left,
+    Right,
+    Cross,
+    Circle,
+    Square,
+    Triangle,
+    L1,
+    L2,
+    R1,
+    R2,
+    Start,
+    Select,
+    L3,
+    R3,
+    Analog,
+    LStickUp,
+    LStickDown,
+    LStickLeft,
+    LStickRight,
+    RStickUp,
+    RStickDown,
+    RStickLeft,
+    RStickRight,
+}
+
+impl PadBindTarget {
+    /// Every target, in the order the panel's fallback list renders.
+    pub const ALL: [PadBindTarget; 25] = [
+        PadBindTarget::Up,
+        PadBindTarget::Down,
+        PadBindTarget::Left,
+        PadBindTarget::Right,
+        PadBindTarget::Cross,
+        PadBindTarget::Circle,
+        PadBindTarget::Square,
+        PadBindTarget::Triangle,
+        PadBindTarget::L1,
+        PadBindTarget::L2,
+        PadBindTarget::R1,
+        PadBindTarget::R2,
+        PadBindTarget::Start,
+        PadBindTarget::Select,
+        PadBindTarget::L3,
+        PadBindTarget::R3,
+        PadBindTarget::Analog,
+        PadBindTarget::LStickUp,
+        PadBindTarget::LStickDown,
+        PadBindTarget::LStickLeft,
+        PadBindTarget::LStickRight,
+        PadBindTarget::RStickUp,
+        PadBindTarget::RStickDown,
+        PadBindTarget::RStickLeft,
+        PadBindTarget::RStickRight,
+    ];
+
+    /// Short display name drawn on/next to the hotspot.
+    pub fn label(self) -> &'static str {
+        match self {
+            PadBindTarget::Up => "D-Pad Up",
+            PadBindTarget::Down => "D-Pad Down",
+            PadBindTarget::Left => "D-Pad Left",
+            PadBindTarget::Right => "D-Pad Right",
+            PadBindTarget::Cross => "Cross",
+            PadBindTarget::Circle => "Circle",
+            PadBindTarget::Square => "Square",
+            PadBindTarget::Triangle => "Triangle",
+            PadBindTarget::L1 => "L1",
+            PadBindTarget::L2 => "L2",
+            PadBindTarget::R1 => "R1",
+            PadBindTarget::R2 => "R2",
+            PadBindTarget::Start => "Start",
+            PadBindTarget::Select => "Select",
+            PadBindTarget::L3 => "L3",
+            PadBindTarget::R3 => "R3",
+            PadBindTarget::Analog => "Analog",
+            PadBindTarget::LStickUp => "L-Stick Up",
+            PadBindTarget::LStickDown => "L-Stick Down",
+            PadBindTarget::LStickLeft => "L-Stick Left",
+            PadBindTarget::LStickRight => "L-Stick Right",
+            PadBindTarget::RStickUp => "R-Stick Up",
+            PadBindTarget::RStickDown => "R-Stick Down",
+            PadBindTarget::RStickLeft => "R-Stick Left",
+            PadBindTarget::RStickRight => "R-Stick Right",
+        }
+    }
 }
 
 /// Per-frame input snapshot the shell assembles from keyboard events.
@@ -195,6 +299,22 @@ pub struct MenuState {
     /// written (saves are a history, not overwritten slots), so a
     /// path is a stable cache key for the process's lifetime.
     save_thumb_cache: HashMap<PathBuf, egui::TextureHandle>,
+    /// Whether the controls panel (PS1 controller drawing + rebinds)
+    /// is showing. Like `save_states_open`, reachable from the
+    /// always-visible toolbar icon independent of the Menu overlay.
+    controls_open: bool,
+    /// The target currently waiting for a key press, if the user
+    /// clicked a hotspot. The shell's keyboard handler consumes the
+    /// next physical key into this instead of routing it anywhere
+    /// else (Escape cancels).
+    controls_capture: Option<PadBindTarget>,
+    /// Current binding label per target, synced from the app layer via
+    /// [`MenuState::sync_controls`] whenever a binding changes.
+    controls_labels: HashMap<PadBindTarget, String>,
+    /// Targets whose key is physically held right now, synced by the
+    /// shell each frame while the panel is open. Drives the panel's
+    /// green held-highlights (a live rollover/ghosting tester).
+    controls_live_held: Vec<PadBindTarget>,
     pending_pointer_action: Option<MenuAction>,
     categories: Vec<Category>,
 }
@@ -319,6 +439,10 @@ impl MenuState {
             save_rows: Vec::new(),
             pending_load_confirm: None,
             save_thumb_cache: HashMap::new(),
+            controls_open: false,
+            controls_capture: None,
+            controls_labels: HashMap::new(),
+            controls_live_held: Vec::new(),
             pending_pointer_action: None,
             categories,
         }
@@ -421,6 +545,51 @@ impl MenuState {
     /// toolbar icon and the System category's "Save states" row.
     pub fn open_save_states(&mut self) {
         self.save_states_open = true;
+    }
+
+    /// Open the controls panel. Driven by the always-visible toolbar
+    /// icon and the System category's "Controls" row.
+    pub fn open_controls(&mut self) {
+        self.controls_open = true;
+    }
+
+    /// Replace the per-target binding labels the controls panel shows.
+    /// The app layer calls this at startup and after every rebind /
+    /// reset, so the panel always reflects what the settings actually
+    /// persist.
+    pub fn sync_controls(&mut self, labels: impl IntoIterator<Item = (PadBindTarget, String)>) {
+        self.controls_labels = labels.into_iter().collect();
+    }
+
+    /// The target currently waiting for a key press, if any. The
+    /// shell's keyboard handler checks this every key event: while a
+    /// capture is armed, keys feed the rebind instead of the game.
+    pub fn controls_capture(&self) -> Option<PadBindTarget> {
+        self.controls_capture
+    }
+
+    /// Disarm the pending capture (key consumed or Escape pressed).
+    pub fn clear_controls_capture(&mut self) {
+        self.controls_capture = None;
+    }
+
+    /// Whether the controls panel is currently showing -- the shell
+    /// checks this to route Escape to "close panel" instead of the
+    /// menu toggle, and to skip the live-held sync when it's not up.
+    pub fn controls_panel_open(&self) -> bool {
+        self.controls_open
+    }
+
+    /// Close the controls panel, disarming any pending capture.
+    pub fn close_controls(&mut self) {
+        self.controls_open = false;
+        self.controls_capture = None;
+    }
+
+    /// Replace the live held-target set the panel highlights. Synced
+    /// by the shell each frame while the panel is open.
+    pub fn set_controls_live_held(&mut self, held: Vec<PadBindTarget>) {
+        self.controls_live_held = held;
     }
 
     /// Store the menu-backdrop opacity (percent) and reflect it in the
@@ -594,6 +763,22 @@ impl MenuState {
                 &mut self.save_thumb_cache,
                 &mut self.pending_pointer_action,
             );
+        }
+        // The controls panel is likewise toolbar-reachable and lives
+        // outside the appear-gate so rebinding works mid-game. Closing
+        // the panel disarms any pending key capture with it.
+        if self.controls_open {
+            controls_panel(
+                ctx,
+                &mut self.controls_open,
+                &self.controls_labels,
+                &self.controls_live_held,
+                &mut self.controls_capture,
+                &mut self.pending_pointer_action,
+            );
+            if !self.controls_open {
+                self.controls_capture = None;
+            }
         }
         // The About card belongs to the open menu; drop it the moment the menu
         // is dismissed so it can't linger through the close dissolve.
@@ -1326,6 +1511,615 @@ fn save_states_panel(
     }
 }
 
+/// The controls panel: a painter-drawn PS1 controller whose parts are
+/// clickable rebind hotspots -- each showing its current key right on
+/// the drawing -- plus a grouped clickable list of every target below
+/// it, a live capture banner, and a reset-to-defaults button.
+///
+/// Controls light up green while their key is physically held, which
+/// doubles as an in-app rollover/ghosting tester: hold three keys and
+/// see exactly which ones the keyboard actually delivered.
+///
+/// The silhouette is drawn from the PS1 pad's real construction: two
+/// circular pods carrying the d-pad and face cluster, a narrower
+/// bridge between them, and capsule grips flaring down-outward.
+/// Everything routes through one scale constant so the whole drawing
+/// (and its text) can be resized in one place.
+///
+/// Rebinds don't go through [`MenuAction`]: clicking a hotspot arms
+/// `capture`, and the shell's keyboard handler consumes the next
+/// physical key into the binding (Escape cancels). Reset does dispatch
+/// via `pending_pointer_action`, like every other pointer-driven
+/// action.
+fn controls_panel(
+    ctx: &egui::Context,
+    open: &mut bool,
+    labels: &HashMap<PadBindTarget, String>,
+    held: &[PadBindTarget],
+    capture: &mut Option<PadBindTarget>,
+    pending_pointer_action: &mut Option<MenuAction>,
+) {
+    use egui::{Color32, CornerRadius, Sense, Stroke};
+
+    /// One knob for the whole drawing: positions, sizes, and font
+    /// sizes below are in a 470x300 design space multiplied by this.
+    const S: f32 = 1.35;
+    const CANVAS: Vec2 = Vec2::new(470.0 * S, 300.0 * S);
+
+    let bind_of =
+        |t: PadBindTarget| -> String { labels.get(&t).cloned().unwrap_or_else(|| "-".to_string()) };
+    // Space on the drawing is tight: well-known names compact to
+    // glyphs/abbreviations, anything still too long elides. The list
+    // and hover text always carry the full name.
+    let short_bind = |t: PadBindTarget| -> String {
+        let full = bind_of(t);
+        // ASCII stand-ins for the arrows: the menu font has no
+        // U+2190..2193 glyphs (they render as .notdef boxes).
+        let compact = match full.as_str() {
+            "ArrowUp" => "^".to_string(),
+            "ArrowDown" => "v".to_string(),
+            "ArrowLeft" => "<".to_string(),
+            "ArrowRight" => ">".to_string(),
+            "Backspace" => "Bksp".to_string(),
+            "Space" => "Spc".to_string(),
+            other => other.replace("Numpad", "Num"),
+        };
+        if compact.chars().count() > 7 {
+            let head: String = compact.chars().take(6).collect();
+            format!("{head}\u{2026}")
+        } else {
+            compact
+        }
+    };
+
+    // Keep frames coming while the panel is up: the capture pulse
+    // animates, and the held-key highlights must track key releases
+    // even when the paused game isn't producing new frames itself.
+    if capture.is_some() {
+        ctx.request_repaint_after(std::time::Duration::from_millis(50));
+    } else {
+        ctx.request_repaint_after(std::time::Duration::from_millis(120));
+    }
+
+    let mut still_open = *open;
+    egui::Window::new("Controls")
+        .open(&mut still_open)
+        .collapsible(false)
+        .resizable(false)
+        // Foreground: the Menu overlay paints on a mid-layer painter
+        // above ordinary windows, so without this the category list
+        // draws straight over the panel when both are up.
+        .order(egui::Order::Foreground)
+        .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+        .show(ctx, |ui| {
+            // Capture banner / hint line above the drawing.
+            match *capture {
+                Some(target) => {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{}  Press a key for {} ... (Esc cancels)",
+                            icons::GAMEPAD_2,
+                            target.label()
+                        ))
+                        .color(theme::MENU_ACCENT)
+                        .strong()
+                        .size(14.0),
+                    );
+                }
+                None => {
+                    ui.label(
+                        egui::RichText::new(
+                            "Click a control, then press the key to bind it. Changes apply \
+                             immediately and are saved. Held keys light up green.",
+                        )
+                        .color(theme::MENU_TEXT_DIM)
+                        .size(13.0),
+                    );
+                }
+            }
+            ui.add_space(4.0);
+
+            let (resp, painter) = ui.allocate_painter(CANVAS, Sense::hover());
+            let origin = resp.rect.min;
+            let at = |x: f32, y: f32| Pos2::new(origin.x + x * S, origin.y + y * S);
+            let sz = |w: f32, h: f32| Vec2::new(w * S, h * S);
+            let sc = |v: f32| v * S;
+            // Pulse for the armed hotspot: 2 Hz sine on the ui clock.
+            let pulse = ((ui.input(|i| i.time) * std::f64::consts::TAU).sin() * 0.5 + 0.5) as f32;
+
+            let body_fill = Color32::from_rgb(58, 62, 71);
+            let body_shade = Color32::from_rgb(48, 52, 60);
+            let btn_fill = Color32::from_rgb(30, 33, 39);
+            let held_fill = Color32::from_rgba_unmultiplied(70, 190, 110, 70);
+            let held_ring = Stroke::new(2.0, Color32::from_rgb(80, 210, 120));
+            let bind_text = Color32::from_rgb(150, 200, 235);
+
+            // One clickable region. Paints a held/hover/armed ring,
+            // shows the current bind as hover text, and arms the
+            // capture on click.
+            let mut hotspot = |ui: &mut egui::Ui, rect: Rect, target: PadBindTarget| {
+                let id = resp.id.with(target.label());
+                let r = ui.interact(rect, id, Sense::click());
+                let armed = *capture == Some(target);
+                if held.contains(&target) {
+                    ui.painter().rect_filled(rect, 4.0, held_fill);
+                    ui.painter().rect_stroke(
+                        rect.expand(1.0),
+                        4.0,
+                        held_ring,
+                        egui::StrokeKind::Outside,
+                    );
+                }
+                if armed {
+                    let ring = Color32::from_rgb(
+                        60 + (170.0 * pulse) as u8,
+                        180,
+                        230 - (80.0 * pulse) as u8,
+                    );
+                    ui.painter().rect_stroke(
+                        rect.expand(2.0),
+                        4.0,
+                        Stroke::new(2.0, ring),
+                        egui::StrokeKind::Outside,
+                    );
+                } else if r.hovered() {
+                    ui.painter().rect_stroke(
+                        rect.expand(2.0),
+                        4.0,
+                        Stroke::new(1.5, theme::MENU_ACCENT),
+                        egui::StrokeKind::Outside,
+                    );
+                }
+                let r = r.on_hover_text(format!(
+                    "{} - current: {} (click to rebind)",
+                    target.label(),
+                    bind_of(target)
+                ));
+                if r.clicked() {
+                    *capture = Some(target);
+                }
+            };
+
+            // Capsule polygon spanning `a`..`b` with radius `r` --
+            // used for the grips. Convex by construction.
+            let capsule = |a: Pos2, b: Pos2, r: f32| -> Vec<Pos2> {
+                let theta = (b - a).angle();
+                let mut pts = Vec::with_capacity(26);
+                for i in 0..=12 {
+                    let phi = theta - std::f32::consts::FRAC_PI_2
+                        + std::f32::consts::PI * (i as f32 / 12.0);
+                    pts.push(b + r * Vec2::angled(phi));
+                }
+                for i in 0..=12 {
+                    let phi = theta
+                        + std::f32::consts::FRAC_PI_2
+                        + std::f32::consts::PI * (i as f32 / 12.0);
+                    pts.push(a + r * Vec2::angled(phi));
+                }
+                pts
+            };
+
+            // --- Body: grips first (they sit behind), then the two
+            // circular pods, then the narrower bridge that joins them.
+            painter.add(egui::Shape::convex_polygon(
+                capsule(at(96.0, 160.0), at(62.0, 272.0), sc(31.0)),
+                body_shade,
+                Stroke::NONE,
+            ));
+            painter.add(egui::Shape::convex_polygon(
+                capsule(at(374.0, 160.0), at(408.0, 272.0), sc(31.0)),
+                body_shade,
+                Stroke::NONE,
+            ));
+            painter.circle_filled(at(105.0, 128.0), sc(66.0), body_fill);
+            painter.circle_filled(at(365.0, 128.0), sc(66.0), body_fill);
+            painter.rect_filled(
+                Rect::from_min_max(at(105.0, 84.0), at(365.0, 172.0)),
+                CornerRadius::same(10),
+                body_fill,
+            );
+
+            // Shoulder buttons floating above the pods' top edge;
+            // bind keys drawn right in the button.
+            let shoulder = |painter: &egui::Painter, rect: Rect, name: &str, key: &str| {
+                painter.rect_filled(rect, CornerRadius::same(6), btn_fill);
+                painter.text(
+                    Pos2::new(rect.center().x, rect.center().y - sc(5.0)),
+                    Align2::CENTER_CENTER,
+                    name,
+                    FontId::proportional(sc(9.0)),
+                    Color32::from_rgb(200, 205, 215),
+                );
+                painter.text(
+                    Pos2::new(rect.center().x, rect.center().y + sc(6.0)),
+                    Align2::CENTER_CENTER,
+                    key,
+                    FontId::proportional(sc(7.5)),
+                    bind_text,
+                );
+            };
+            let l2 = Rect::from_min_max(at(56.0, 8.0), at(120.0, 32.0));
+            let l1 = Rect::from_min_max(at(56.0, 38.0), at(120.0, 62.0));
+            let r2 = Rect::from_min_max(at(350.0, 8.0), at(414.0, 32.0));
+            let r1 = Rect::from_min_max(at(350.0, 38.0), at(414.0, 62.0));
+            shoulder(&painter, l2, "L2", &short_bind(PadBindTarget::L2));
+            shoulder(&painter, l1, "L1", &short_bind(PadBindTarget::L1));
+            shoulder(&painter, r2, "R2", &short_bind(PadBindTarget::R2));
+            shoulder(&painter, r1, "R1", &short_bind(PadBindTarget::R1));
+            hotspot(ui, l2, PadBindTarget::L2);
+            hotspot(ui, l1, PadBindTarget::L1);
+            hotspot(ui, r2, PadBindTarget::R2);
+            hotspot(ui, r1, PadBindTarget::R1);
+
+            // D-pad on the left pod: cross of two bars, each arm
+            // carrying its bind key.
+            let dpad_c = at(105.0, 128.0);
+            painter.rect_filled(
+                Rect::from_center_size(dpad_c, sz(30.0, 92.0)),
+                CornerRadius::same(5),
+                btn_fill,
+            );
+            painter.rect_filled(
+                Rect::from_center_size(dpad_c, sz(92.0, 30.0)),
+                CornerRadius::same(5),
+                btn_fill,
+            );
+            let dpad_arm = |off: Vec2, target: PadBindTarget| {
+                let rect = Rect::from_center_size(dpad_c + off * S, sz(30.0, 30.0));
+                painter.text(
+                    rect.center(),
+                    Align2::CENTER_CENTER,
+                    short_bind(target),
+                    FontId::proportional(sc(7.0)),
+                    bind_text,
+                );
+                rect
+            };
+            let up_r = dpad_arm(Vec2::new(0.0, -31.0), PadBindTarget::Up);
+            let down_r = dpad_arm(Vec2::new(0.0, 31.0), PadBindTarget::Down);
+            let left_r = dpad_arm(Vec2::new(-31.0, 0.0), PadBindTarget::Left);
+            let right_r = dpad_arm(Vec2::new(31.0, 0.0), PadBindTarget::Right);
+            hotspot(ui, up_r, PadBindTarget::Up);
+            hotspot(ui, down_r, PadBindTarget::Down);
+            hotspot(ui, left_r, PadBindTarget::Left);
+            hotspot(ui, right_r, PadBindTarget::Right);
+
+            // Face buttons on the right pod: PS1 symbol colours, bind
+            // key under each.
+            let face_c = at(365.0, 128.0);
+            let face = |painter: &egui::Painter, c: Pos2, sym: PadBindTarget| {
+                painter.circle_filled(c, sc(16.0), btn_fill);
+                let s = sc(6.5);
+                match sym {
+                    PadBindTarget::Triangle => {
+                        let col = Color32::from_rgb(64, 190, 130);
+                        let pts = [
+                            Pos2::new(c.x, c.y - s),
+                            Pos2::new(c.x - s, c.y + s * 0.8),
+                            Pos2::new(c.x + s, c.y + s * 0.8),
+                        ];
+                        painter.line_segment([pts[0], pts[1]], Stroke::new(2.0, col));
+                        painter.line_segment([pts[1], pts[2]], Stroke::new(2.0, col));
+                        painter.line_segment([pts[2], pts[0]], Stroke::new(2.0, col));
+                    }
+                    PadBindTarget::Circle => {
+                        painter.circle_stroke(
+                            c,
+                            s,
+                            Stroke::new(2.0, Color32::from_rgb(235, 90, 90)),
+                        );
+                    }
+                    PadBindTarget::Cross => {
+                        let col = Color32::from_rgb(120, 150, 235);
+                        painter.line_segment(
+                            [Pos2::new(c.x - s, c.y - s), Pos2::new(c.x + s, c.y + s)],
+                            Stroke::new(2.0, col),
+                        );
+                        painter.line_segment(
+                            [Pos2::new(c.x - s, c.y + s), Pos2::new(c.x + s, c.y - s)],
+                            Stroke::new(2.0, col),
+                        );
+                    }
+                    PadBindTarget::Square => {
+                        painter.rect_stroke(
+                            Rect::from_center_size(c, Vec2::splat(s * 1.7)),
+                            CornerRadius::ZERO,
+                            Stroke::new(2.0, Color32::from_rgb(230, 130, 200)),
+                            egui::StrokeKind::Middle,
+                        );
+                    }
+                    _ => {}
+                }
+                painter.text(
+                    c + Vec2::new(0.0, sc(25.0)),
+                    Align2::CENTER_CENTER,
+                    short_bind(sym),
+                    FontId::proportional(sc(8.0)),
+                    bind_text,
+                );
+            };
+            let tri_c = face_c - Vec2::new(0.0, sc(36.0));
+            let cross_c = face_c + Vec2::new(0.0, sc(36.0));
+            let sq_c = face_c - Vec2::new(sc(36.0), 0.0);
+            let cir_c = face_c + Vec2::new(sc(36.0), 0.0);
+            face(&painter, tri_c, PadBindTarget::Triangle);
+            face(&painter, cross_c, PadBindTarget::Cross);
+            face(&painter, sq_c, PadBindTarget::Square);
+            face(&painter, cir_c, PadBindTarget::Circle);
+            let face_hit = Vec2::splat(sc(32.0));
+            hotspot(
+                ui,
+                Rect::from_center_size(tri_c, face_hit),
+                PadBindTarget::Triangle,
+            );
+            hotspot(
+                ui,
+                Rect::from_center_size(cross_c, face_hit),
+                PadBindTarget::Cross,
+            );
+            hotspot(
+                ui,
+                Rect::from_center_size(sq_c, face_hit),
+                PadBindTarget::Square,
+            );
+            hotspot(
+                ui,
+                Rect::from_center_size(cir_c, face_hit),
+                PadBindTarget::Circle,
+            );
+
+            // Select / Start / Analog cluster on the bridge, each with
+            // its bind key beneath.
+            let mid_btn = |painter: &egui::Painter, rect: Rect, name: &str, key: &str| {
+                painter.rect_filled(rect, CornerRadius::same(3), btn_fill);
+                painter.text(
+                    Pos2::new(rect.center().x, rect.top() - sc(6.0)),
+                    Align2::CENTER_CENTER,
+                    name,
+                    FontId::proportional(sc(7.0)),
+                    theme::MENU_TEXT_DIM,
+                );
+                painter.text(
+                    Pos2::new(rect.center().x, rect.bottom() + sc(7.0)),
+                    Align2::CENTER_CENTER,
+                    key,
+                    FontId::proportional(sc(7.5)),
+                    bind_text,
+                );
+            };
+            let select_r = Rect::from_min_max(at(194.0, 100.0), at(228.0, 113.0));
+            let start_r = Rect::from_min_max(at(242.0, 100.0), at(276.0, 113.0));
+            mid_btn(
+                &painter,
+                select_r,
+                "SELECT",
+                &short_bind(PadBindTarget::Select),
+            );
+            mid_btn(
+                &painter,
+                start_r,
+                "START",
+                &short_bind(PadBindTarget::Start),
+            );
+            hotspot(ui, select_r, PadBindTarget::Select);
+            hotspot(ui, start_r, PadBindTarget::Start);
+
+            let analog_r = Rect::from_min_max(at(217.0, 136.0), at(253.0, 149.0));
+            painter.rect_filled(analog_r, CornerRadius::same(3), btn_fill);
+            painter.text(
+                analog_r.center(),
+                Align2::CENTER_CENTER,
+                "ANALOG",
+                FontId::proportional(sc(6.0)),
+                Color32::from_rgb(200, 80, 80),
+            );
+            painter.text(
+                Pos2::new(analog_r.center().x, analog_r.bottom() + sc(7.0)),
+                Align2::CENTER_CENTER,
+                short_bind(PadBindTarget::Analog),
+                FontId::proportional(sc(7.5)),
+                bind_text,
+            );
+            hotspot(ui, analog_r, PadBindTarget::Analog);
+
+            // Analog sticks between the grips, DualShock-style: the
+            // circle is the stick click (L3/R3, bind key inside), the
+            // four chips around it are the keyboard-emulated stick
+            // directions.
+            let stick = |ui: &mut egui::Ui,
+                         painter: &egui::Painter,
+                         hotspot: &mut dyn FnMut(&mut egui::Ui, Rect, PadBindTarget),
+                         c: Pos2,
+                         click: PadBindTarget,
+                         dirs: [PadBindTarget; 4]| {
+                painter.circle_filled(c, sc(22.0), btn_fill);
+                painter.circle_filled(c, sc(14.0), body_shade);
+                painter.text(
+                    c - Vec2::new(0.0, sc(5.0)),
+                    Align2::CENTER_CENTER,
+                    match click {
+                        PadBindTarget::L3 => "L3",
+                        _ => "R3",
+                    },
+                    FontId::proportional(sc(8.0)),
+                    Color32::from_rgb(200, 205, 215),
+                );
+                painter.text(
+                    c + Vec2::new(0.0, sc(5.0)),
+                    Align2::CENTER_CENTER,
+                    short_bind(click),
+                    FontId::proportional(sc(6.5)),
+                    bind_text,
+                );
+                hotspot(ui, Rect::from_center_size(c, Vec2::splat(sc(30.0))), click);
+                let chip = sc(15.0);
+                let offs = sc(34.0);
+                let dirs_off = [
+                    Vec2::new(0.0, -offs),
+                    Vec2::new(0.0, offs),
+                    Vec2::new(-offs, 0.0),
+                    Vec2::new(offs, 0.0),
+                ];
+                let glyphs = ["^", "v", "<", ">"];
+                for ((target, off), glyph) in dirs.iter().zip(dirs_off).zip(glyphs) {
+                    let r = Rect::from_center_size(c + off, Vec2::splat(chip));
+                    painter.rect_filled(r, CornerRadius::same(3), btn_fill);
+                    painter.text(
+                        r.center(),
+                        Align2::CENTER_CENTER,
+                        glyph,
+                        FontId::proportional(sc(9.0)),
+                        theme::MENU_TEXT_DIM,
+                    );
+                    hotspot(ui, r, *target);
+                }
+            };
+            stick(
+                ui,
+                &painter,
+                &mut hotspot,
+                at(184.0, 218.0),
+                PadBindTarget::L3,
+                [
+                    PadBindTarget::LStickUp,
+                    PadBindTarget::LStickDown,
+                    PadBindTarget::LStickLeft,
+                    PadBindTarget::LStickRight,
+                ],
+            );
+            stick(
+                ui,
+                &painter,
+                &mut hotspot,
+                at(286.0, 218.0),
+                PadBindTarget::R3,
+                [
+                    PadBindTarget::RStickUp,
+                    PadBindTarget::RStickDown,
+                    PadBindTarget::RStickLeft,
+                    PadBindTarget::RStickRight,
+                ],
+            );
+
+            ui.add_space(2.0);
+            ui.separator();
+
+            // Grouped clickable list -- same capture flow as the
+            // drawing, guaranteed to cover every target, with full
+            // (unelided) key names.
+            const GROUPS: [(&str, &[PadBindTarget]); 6] = [
+                (
+                    "D-Pad",
+                    &[
+                        PadBindTarget::Up,
+                        PadBindTarget::Down,
+                        PadBindTarget::Left,
+                        PadBindTarget::Right,
+                    ],
+                ),
+                (
+                    "Face buttons",
+                    &[
+                        PadBindTarget::Cross,
+                        PadBindTarget::Circle,
+                        PadBindTarget::Square,
+                        PadBindTarget::Triangle,
+                    ],
+                ),
+                (
+                    "Shoulders",
+                    &[
+                        PadBindTarget::L1,
+                        PadBindTarget::L2,
+                        PadBindTarget::R1,
+                        PadBindTarget::R2,
+                    ],
+                ),
+                (
+                    "Start / Select",
+                    &[PadBindTarget::Start, PadBindTarget::Select],
+                ),
+                (
+                    "Left stick",
+                    &[
+                        PadBindTarget::L3,
+                        PadBindTarget::LStickUp,
+                        PadBindTarget::LStickDown,
+                        PadBindTarget::LStickLeft,
+                        PadBindTarget::LStickRight,
+                    ],
+                ),
+                (
+                    "Right stick + DualShock",
+                    &[
+                        PadBindTarget::R3,
+                        PadBindTarget::RStickUp,
+                        PadBindTarget::RStickDown,
+                        PadBindTarget::RStickLeft,
+                        PadBindTarget::RStickRight,
+                        PadBindTarget::Analog,
+                    ],
+                ),
+            ];
+            egui::ScrollArea::vertical()
+                .max_height(170.0)
+                .show(ui, |ui| {
+                    for (group, targets) in GROUPS {
+                        ui.add_space(3.0);
+                        ui.label(
+                            egui::RichText::new(group)
+                                .color(theme::MENU_ACCENT)
+                                .size(12.0)
+                                .strong(),
+                        );
+                        egui::Grid::new(group)
+                            .num_columns(2)
+                            .striped(true)
+                            .min_col_width(190.0)
+                            .show(ui, |ui| {
+                                for &target in targets {
+                                    ui.label(egui::RichText::new(target.label()).size(13.0));
+                                    let armed = *capture == Some(target);
+                                    let text = if armed {
+                                        "press a key...".to_string()
+                                    } else {
+                                        bind_of(target)
+                                    };
+                                    let btn = egui::Button::new(
+                                        egui::RichText::new(text).size(13.0).color(if armed {
+                                            theme::MENU_ACCENT
+                                        } else {
+                                            Color32::from_rgb(220, 224, 232)
+                                        }),
+                                    )
+                                    .min_size(Vec2::new(150.0, 20.0));
+                                    if ui.add(btn).clicked() {
+                                        *capture = Some(target);
+                                    }
+                                    ui.end_row();
+                                }
+                            });
+                    }
+                });
+
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if ui
+                    .button(format!("{}  Reset to defaults", icons::ROTATE_CCW))
+                    .clicked()
+                {
+                    *pending_pointer_action = Some(MenuAction::ResetControls);
+                    *capture = None;
+                }
+                ui.label(
+                    egui::RichText::new("Binding a key already in use unbinds its old control.")
+                        .color(theme::MENU_TEXT_DIM)
+                        .size(11.0),
+                );
+            });
+        });
+    *open = still_open;
+}
 /// Paint a save's thumbnail at `size`, loading and caching the
 /// texture on first use. Draws a plain placeholder box when `path` is
 /// `None` (no capture for this save) or fails to decode.
@@ -1785,6 +2579,12 @@ fn build_system_category(running: bool, save_count: usize) -> Category {
             action: MenuAction::OpenSaveStates,
             burn_action: None,
             value: Some("F5/F7".into()),
+        },
+        MenuItem {
+            label: "Controls".into(),
+            action: MenuAction::OpenControls,
+            burn_action: None,
+            value: None,
         },
     ];
     Category {

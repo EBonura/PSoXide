@@ -128,6 +128,17 @@ pub fn apply_menu_action(state: &mut AppState, action: menu::MenuAction) -> Menu
             state.menu.open_save_states();
             MenuOutcome::None
         }
+        OpenControls => {
+            state.menu.open_controls();
+            MenuOutcome::None
+        }
+        ResetControls => {
+            state.reset_controls();
+            // The shell caches pad state keyed by the just-replaced
+            // bindings; it must throw that cache away or bits set
+            // under the old mapping can never be released.
+            MenuOutcome::ClearHostKeyboardInput
+        }
         PinAsTop(slot) => {
             state.pin_save_state_as_top(slot);
             MenuOutcome::None
@@ -212,6 +223,11 @@ pub fn apply_menu_action(state: &mut AppState, action: menu::MenuAction) -> Menu
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MenuOutcome {
     None,
+    /// The action invalidated the bindings the shell's cached keyboard
+    /// pad state was built under (Reset Controls). The shell must drop
+    /// that cache and rebuild the current frame's merged input from
+    /// the gamepad alone.
+    ClearHostKeyboardInput,
     Quit,
 }
 
