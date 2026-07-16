@@ -1504,7 +1504,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         };
         let _ = writeln!(
             out,
-            "    LevelGameEntityRecord {{ room: RoomIndex({}), kind: {}, targetname: {}, model_instance: {model_instance}, idle_clip: {}, walk_clip: {}, run_clip: {}, attack_clip: {}, stagger_clip: {}, death_clip: {}, x: {}, y: {}, z: {}, yaw: {}, radius: {}, height: {}, walk_speed: {}, run_speed: {}, patrol_x: {}, patrol_y: {}, patrol_z: {}, patrol_wait_ticks: {}, aggro_radius: {}, windup_ticks: {}, recovery_ticks: {}, poise: {}, touch_damage: {}, max_health: {}, flags: {} }},",
+            "    LevelGameEntityRecord {{ room: RoomIndex({}), kind: {}, targetname: {}, model_instance: {model_instance}, idle_clip: {}, walk_clip: {}, run_clip: {}, attack_clip: {}, stagger_clip: {}, death_clip: {}, x: {}, y: {}, z: {}, yaw: {}, radius: {}, height: {}, walk_speed: {}, run_speed: {}, patrol_x: {}, patrol_y: {}, patrol_z: {}, patrol_wait_ticks: {}, aggro_radius: {}, reaction_ticks: {}, preferred_distance: {}, spacing_tolerance: {}, decision_interval_ticks: {}, circle_chance: {}, attack_priority: {}, attack_cooldown_ticks: {}, group_attack_delay_ticks: {}, windup_ticks: {}, recovery_ticks: {}, poise: {}, touch_damage: {}, max_health: {}, flags: {} }},",
             entity.room,
             entity.kind,
             entity.targetname,
@@ -1527,6 +1527,14 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             entity.patrol[2],
             entity.patrol_wait_ticks,
             entity.aggro_radius,
+            entity.reaction_ticks,
+            entity.preferred_distance,
+            entity.spacing_tolerance,
+            entity.decision_interval_ticks,
+            entity.circle_chance,
+            entity.attack_priority,
+            entity.attack_cooldown_ticks,
+            entity.group_attack_delay_ticks,
             entity.windup_ticks,
             entity.recovery_ticks,
             entity.poise,

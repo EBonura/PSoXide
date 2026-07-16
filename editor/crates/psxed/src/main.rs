@@ -391,6 +391,7 @@ GLB-MODEL SUBCOMMAND:
                           [--anim-fps N]           (default 15)
                           [--world-height N]       (default 1024)
                           [--center-animation-root]
+                          [--fixed-model-bounds]   (extra clips do not change model quantization bounds)
                           [--animation <anim.fbx>] (repeatable)
                           [--keep-bones]            (disable default finger/end-bone collapse)
                           [--collapse-bones name,name,...]
@@ -580,6 +581,7 @@ fn run_glb_model(args: &[String]) -> Result<(), String> {
     let mut normalize_root_translation = false;
     let mut force_single_bind = false;
     let mut double_sided = false;
+    let mut extra_animations_affect_bounds = true;
     let mut animation_paths: Vec<PathBuf> = Vec::new();
     let mut collapse_bone_patterns = psxed_gltf::default_collapse_bone_patterns();
     let mut prune_detached_face_islands =
@@ -647,6 +649,9 @@ fn run_glb_model(args: &[String]) -> Result<(), String> {
             "--double-sided" => {
                 double_sided = true;
             }
+            "--fixed-model-bounds" => {
+                extra_animations_affect_bounds = false;
+            }
             "--animation" | "--anim" => {
                 i += 1;
                 animation_paths
@@ -707,7 +712,7 @@ fn run_glb_model(args: &[String]) -> Result<(), String> {
         normalize_root_translation,
         strip_animation_scale: true,
         prune_detached_face_islands,
-        extra_animations_affect_bounds: true,
+        extra_animations_affect_bounds,
         force_single_bind,
         double_sided,
         ignore_embedded_animations: false,

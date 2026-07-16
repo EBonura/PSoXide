@@ -157,6 +157,7 @@ pub(crate) fn draw_character_resource_editor(
 pub(crate) fn draw_character_controller_settings(
     ui: &mut egui::Ui,
     settings: &mut CharacterControllerSettings,
+    player_controlled: bool,
 ) -> bool {
     let mut changed = false;
 
@@ -244,6 +245,99 @@ pub(crate) fn draw_character_controller_settings(
                 0,
                 120,
             );
+        });
+
+    egui::CollapsingHeader::new(icons::label(icons::FOCUS, "Enemy AI"))
+        .default_open(settings.enemy.is_some())
+        .show(ui, |ui| {
+            let mut enabled = settings.enemy.is_some();
+            if ui.checkbox(&mut enabled, "Enabled").changed() {
+                settings.enemy = enabled.then(psxed_project::EnemyBehaviorSettings::defaults);
+                changed = true;
+            }
+            if player_controlled {
+                ui.label(
+                    RichText::new(
+                        "Enemy AI is ignored while this controller is player controlled.",
+                    )
+                    .color(STUDIO_TEXT_WEAK)
+                    .small(),
+                );
+            }
+            let Some(enemy) = settings.enemy.as_mut() else {
+                return;
+            };
+
+            ui.separator();
+            ui.label(RichText::new("Awareness & patrol").strong());
+            changed |= drag_u16(ui, "Aggro radius", &mut enemy.aggro_radius, 1, 32767);
+            changed |= drag_u8(ui, "Reaction ticks", &mut enemy.reaction_ticks, 0, 255);
+            changed |= drag_u16(
+                ui,
+                "Patrol wait ticks",
+                &mut enemy.patrol_wait_ticks,
+                0,
+                32767,
+            );
+            ui.label(
+                RichText::new("Patrol offset")
+                    .color(STUDIO_TEXT_WEAK)
+                    .small(),
+            );
+            changed |= drag_i32(ui, "X", &mut enemy.patrol_offset[0], -32767, 32767);
+            changed |= drag_i32(ui, "Y", &mut enemy.patrol_offset[1], -32767, 32767);
+            changed |= drag_i32(ui, "Z", &mut enemy.patrol_offset[2], -32767, 32767);
+
+            ui.separator();
+            ui.label(RichText::new("Spacing & intent").strong());
+            changed |= drag_u16(
+                ui,
+                "Preferred distance",
+                &mut enemy.preferred_distance,
+                1,
+                32767,
+            );
+            changed |= drag_u16(
+                ui,
+                "Spacing tolerance",
+                &mut enemy.spacing_tolerance,
+                0,
+                32767,
+            );
+            changed |= drag_u8(
+                ui,
+                "Decision interval",
+                &mut enemy.decision_interval_ticks,
+                1,
+                255,
+            );
+            changed |= drag_u8(ui, "Circle chance (%)", &mut enemy.circle_chance, 0, 100);
+
+            ui.separator();
+            ui.label(RichText::new("Attack pacing").strong());
+            changed |= drag_u8(ui, "Director priority", &mut enemy.attack_priority, 0, 255);
+            changed |= drag_u8(
+                ui,
+                "Attack cooldown ticks",
+                &mut enemy.attack_cooldown_ticks,
+                0,
+                255,
+            );
+            changed |= drag_u8(
+                ui,
+                "Group attack delay",
+                &mut enemy.group_attack_delay_ticks,
+                0,
+                255,
+            );
+            changed |= drag_u8(ui, "Windup ticks", &mut enemy.windup_ticks, 1, 255);
+            changed |= drag_u8(ui, "Recovery ticks", &mut enemy.recovery_ticks, 0, 255);
+
+            ui.separator();
+            ui.label(RichText::new("Combat stats").strong());
+            changed |= drag_u16(ui, "Health", &mut enemy.max_health, 1, u16::MAX);
+            changed |= drag_u16(ui, "Poise", &mut enemy.poise, 0, u16::MAX);
+            changed |= drag_u16(ui, "Touch damage", &mut enemy.touch_damage, 0, u16::MAX);
         });
 
     changed

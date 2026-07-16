@@ -761,6 +761,31 @@ pub(crate) fn push_game_entity(
         ));
         return false;
     }
+    if enemy.preferred_distance == 0 {
+        report.error(format!(
+            "Enemy on '{node_name}' has preferred distance 0 (must be > 0)"
+        ));
+        return false;
+    }
+    if enemy.spacing_tolerance > enemy.preferred_distance {
+        report.error(format!(
+            "Enemy on '{node_name}' has spacing tolerance larger than its preferred distance"
+        ));
+        return false;
+    }
+    if enemy.decision_interval_ticks == 0 {
+        report.error(format!(
+            "Enemy on '{node_name}' has decision interval 0 ticks (must be > 0)"
+        ));
+        return false;
+    }
+    if enemy.circle_chance > 100 {
+        report.error(format!(
+            "Enemy on '{node_name}' has circle chance {} (must be 0..=100)",
+            enemy.circle_chance
+        ));
+        return false;
+    }
     if enemy.max_health == 0 {
         report.error(format!(
             "Enemy on '{node_name}' has max health 0 (must be > 0)"
@@ -809,6 +834,14 @@ pub(crate) fn push_game_entity(
         ],
         patrol_wait_ticks: enemy.patrol_wait_ticks,
         aggro_radius: enemy.aggro_radius,
+        reaction_ticks: enemy.reaction_ticks,
+        preferred_distance: enemy.preferred_distance,
+        spacing_tolerance: enemy.spacing_tolerance,
+        decision_interval_ticks: enemy.decision_interval_ticks,
+        circle_chance: enemy.circle_chance,
+        attack_priority: enemy.attack_priority,
+        attack_cooldown_ticks: enemy.attack_cooldown_ticks,
+        group_attack_delay_ticks: enemy.group_attack_delay_ticks,
         windup_ticks: enemy.windup_ticks,
         recovery_ticks: enemy.recovery_ticks,
         poise: enemy.poise,
