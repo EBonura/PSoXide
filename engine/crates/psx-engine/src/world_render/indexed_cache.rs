@@ -536,6 +536,7 @@ pub fn draw_indexed_cached_room_vertex_lit_all_cells<const OT: usize, L: WorldSu
     depth_mode: CachedRoomDepthMode,
     subdivision_mode: CachedRoomSubdivisionMode,
     screen_margin: i32,
+    sector_size: i32,
     cull_cells_laterally: bool,
     mut prebuilt_pool: Option<(&mut [QuadTexturedGouraud], &mut [u8])>,
     triangles: &mut impl RoomSurfaceSink,
@@ -565,7 +566,11 @@ pub fn draw_indexed_cached_room_vertex_lit_all_cells<const OT: usize, L: WorldSu
     let mut accepted_cell_count = 0usize;
     let loaded_camera = LoadedWorldCameraGte::load(*camera);
 
-    let cell_frustum = CellFrustum::new(camera, options, screen_margin);
+    let mut cell_frustum = CellFrustum::new(camera, options, screen_margin);
+    // The all-cells fallback intentionally has no far-plane cull. Keep that
+    // policy while using the tighter cached-cell AABB for lateral rejection.
+    cell_frustum.far = i32::MAX;
+    let cell_half_xz = sector_size.max(1).saturating_add(1) >> 1;
     cell_stage_begin(crate::telemetry::stage::CELL_DEPTH);
     // Cap the scan slice up front instead of testing `cell_index >
     // u16::MAX` on every iteration (everything past the cap would be
@@ -582,11 +587,20 @@ pub fn draw_indexed_cached_room_vertex_lit_all_cells<const OT: usize, L: WorldSu
             cell.visibility_center[2],
         );
         let visibility_view = loaded_camera.view_vertex(visibility_center);
-        if cull_cells_laterally
-            && !cell_frustum.sphere_visible_no_far(visibility_view, cell.visibility_radius)
-        {
-            stats.cells_frustum_culled = stats.cells_frustum_culled.wrapping_add(1);
-            continue;
+        if cull_cells_laterally {
+            let half_y = cell.visibility_center[1]
+                .saturating_sub(cell.min_y)
+                .abs()
+                .max(cell.max_y.saturating_sub(cell.visibility_center[1]).abs());
+            if !cell_frustum.cell_aabb_visible(
+                visibility_view,
+                cell_half_xz,
+                half_y,
+                cell_half_xz,
+            ) {
+                stats.cells_frustum_culled = stats.cells_frustum_culled.wrapping_add(1);
+                continue;
+            }
         }
         stats.cells_drawn = stats.cells_drawn.wrapping_add(1);
         // SAFETY: both accepted arrays were validated to hold at least
