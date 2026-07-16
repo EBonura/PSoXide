@@ -39,6 +39,9 @@ pub(super) struct RuntimeArenas {
     /// Streamed-room sector pages the CD loads land in directly.
     #[cfg(feature = "cd-stream-bench")]
     pub(super) streamed_slots: RuntimeStreamedRoomSlots,
+    /// Stable session-lifetime storage for streamed models and animations.
+    #[cfg(feature = "cd-stream-bench")]
+    pub(super) persistent_assets: RuntimePersistentAssetStreamer,
     /// Streamed-room residency scheduler over `streamed_slots`.
     #[cfg(feature = "cd-stream-bench")]
     pub(super) room_streams: RuntimeRoomStreamScheduler,
@@ -119,6 +122,8 @@ impl RuntimeArenas {
         #[cfg(feature = "cd-stream-bench")]
         streamed_slots: RuntimeStreamedRoomSlots::new(),
         #[cfg(feature = "cd-stream-bench")]
+        persistent_assets: RuntimePersistentAssetStreamer::zeroed(),
+        #[cfg(feature = "cd-stream-bench")]
         room_streams: RuntimeRoomStreamScheduler::zeroed(),
         #[cfg(feature = "cd-stream-bench")]
         room_materials: RuntimeRoomMaterialPool::zeroed(),
@@ -143,6 +148,7 @@ impl RuntimeArenas {
         self.vram = RuntimeVram::new(VRAM_LAYOUT);
         #[cfg(feature = "cd-stream-bench")]
         {
+            self.persistent_assets = RuntimePersistentAssetStreamer::new();
             self.room_streams = RuntimeRoomStreamScheduler::new();
             self.room_materials.init(room_material_fallback());
         }
@@ -226,6 +232,20 @@ pub(super) fn streamed_slots_arena() -> &'static RuntimeStreamedRoomSlots {
 pub(super) fn streamed_slots_arena_mut() -> &'static mut RuntimeStreamedRoomSlots {
     // SAFETY: see `vram_arena`.
     unsafe { &mut (*arenas_ptr()).streamed_slots }
+}
+
+/// Shared borrow of stable persistent gameplay asset storage.
+#[cfg(feature = "cd-stream-bench")]
+pub(super) fn persistent_assets_arena() -> &'static RuntimePersistentAssetStreamer {
+    // SAFETY: see `vram_arena`.
+    unsafe { &(*arenas_ptr()).persistent_assets }
+}
+
+/// Exclusive borrow of the persistent gameplay asset loader and storage.
+#[cfg(feature = "cd-stream-bench")]
+pub(super) fn persistent_assets_arena_mut() -> &'static mut RuntimePersistentAssetStreamer {
+    // SAFETY: see `vram_arena`.
+    unsafe { &mut (*arenas_ptr()).persistent_assets }
 }
 
 /// Exclusive borrow of the streamed-room scheduler, same discipline as

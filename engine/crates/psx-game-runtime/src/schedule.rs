@@ -25,8 +25,6 @@ pub struct RuntimeScheduleConfig {
     pub stream_load_batch_count: usize,
     /// CD sectors pumped per background streaming tick.
     pub stream_pump_sectors_per_tick: usize,
-    /// Pump-step cap for the boot-time streamed-window bootstrap.
-    pub stream_bootstrap_pump_limit: usize,
     /// Scheduler cap on fixed sim ticks before a visual frame (0 = uncapped).
     pub max_fixed_ticks_before_visual: u16,
 }
