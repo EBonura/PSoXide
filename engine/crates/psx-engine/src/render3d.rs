@@ -1094,6 +1094,7 @@ impl PreparedTriangleDepth {
 /// Commands hold raw packet pointers so one pass can sort and submit
 /// several packet kinds. The pointed-to packets must live until
 /// [`WorldRenderPass::flush`] has inserted them into the OT.
+#[repr(C)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct WorldTriCommand {
     packet_ptr: *mut u32,
@@ -1103,6 +1104,38 @@ pub struct WorldTriCommand {
     next: u16,
     render_layer: u8,
     words: u8,
+}
+
+/// Compact storage used by the comparison-free bucketed path.
+///
+/// On PS1 this is eight bytes versus sixteen for [`WorldTriCommand`]. The
+/// bucketed pass aliases the beginning of its caller-provided command scratch
+/// as this type because it needs only a packet pointer, slot and word count.
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct BucketedWorldCommand {
+    packet_ptr: *mut u32,
+    slot_words: u32,
+}
+
+impl BucketedWorldCommand {
+    #[inline(always)]
+    fn new(packet_ptr: *mut u32, slot: usize, words: u8) -> Self {
+        Self {
+            packet_ptr,
+            slot_words: (slot.min(u16::MAX as usize) as u32) | ((words as u32) << 16),
+        }
+    }
+
+    #[inline(always)]
+    const fn slot(self) -> usize {
+        (self.slot_words & u16::MAX as u32) as usize
+    }
+
+    #[inline(always)]
+    const fn words(self) -> u8 {
+        (self.slot_words >> 16) as u8
+    }
 }
 
 impl WorldTriCommand {
