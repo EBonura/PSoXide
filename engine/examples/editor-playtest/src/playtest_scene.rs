@@ -407,6 +407,7 @@ impl Scene for Playtest {
                                     cached_room_depth_mode(),
                                     cached_room_subdivision_mode(),
                                     ROOM_VISIBLE_CELL_SCREEN_MARGIN,
+                                    active.sector_size,
                                     active.index == self.visibility.root,
                                     Some(prebuilt_room_quads_for(active.index)),
                                     &mut primitive_packets,
@@ -636,11 +637,12 @@ impl Scene for Playtest {
                                         cached_room_depth_mode(),
                                         cached_room_subdivision_mode(),
                                         ROOM_VISIBLE_CELL_SCREEN_MARGIN,
+                                        active.sector_size,
                                         // Lateral-cull cells in EVERY no-anchor
                                         // fallback room, not just the root: the
-                                        // sphere test is the same conservative
-                                        // radius+margin bound the root room
-                                        // already trusts, and 3-4 of ~5 drawn
+                                        // AABB test is the same conservative
+                                        // margin bound the root room already
+                                        // trusts, and 3-4 of ~5 drawn
                                         // rooms take this path per frame. Cells
                                         // it rejects are off-screen, so output
                                         // pixels are unchanged; only the
