@@ -72,8 +72,13 @@ fn bucketed_world_pass_keeps_commands_for_reverse_flush() {
     assert_eq!(pass.command_len, 3);
     assert!(!pass.ordering.uses_slot_heads());
     assert!(!pass.ordering.uses_slot_tails());
-    assert!(pass.commands.iter().all(|command| command.slot == 4));
-    assert!(pass.commands.iter().all(|command| command.words == 0));
+    let compact = pass.commands.as_ptr().cast::<BucketedWorldCommand>();
+    for index in 0..3 {
+        // SAFETY: the three push_command calls above initialised these entries.
+        let command = unsafe { *compact.add(index) };
+        assert_eq!(command.slot(), 4);
+        assert_eq!(command.words(), 0);
+    }
 }
 
 #[test]
