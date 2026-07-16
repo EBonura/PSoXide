@@ -130,6 +130,13 @@ pub struct InputFrame {
     /// phantom combo when the user is actually opening the menu.
     pub pad1_mask: u16,
 
+    /// Buttons that transitioned from up to down during this poll
+    /// (rising edges of the merged mask). The shell folds the
+    /// directional bits into SOCD recency so a fresh gamepad press
+    /// competes fairly with held keyboard directions; consumers
+    /// filter for the bits they care about.
+    pub pressed_mask: u16,
+
     /// Rising-edge of Select+Start on any pad -- goes `true` for
     /// exactly one frame after both become held. The shell wires
     /// this into `MenuInput.toggle_open`, reusing the same path
@@ -162,6 +169,14 @@ pub struct InputFrame {
     pub left_stick: (f32, f32),
     /// Right stick on the first currently-connected pad.
     pub right_stick: (f32, f32),
+}
+
+/// Buttons that transitioned from up to down between two polls.
+/// Shared by the native and web routers so `InputFrame::pressed_mask`
+/// carries identical semantics on both -- the SOCD recency fed from it
+/// must not behave differently per platform.
+fn rising_edges(prev: u16, now: u16) -> u16 {
+    now & !prev
 }
 
 /// One tracked pad. Name is captured at connect time so we can
@@ -329,7 +344,7 @@ impl InputRouter {
         //    the chord, so `menu_confirm` / `menu_back` pick up on
         //    Cross / Circle normally, but the chord logic sees
         //    the raw combination too.
-        let edge = mask & !self.prev_mask;
+        let edge = rising_edges(self.prev_mask, mask);
         let chord_active = (mask & CHORD_MASK) == CHORD_MASK;
         let chord_was_active = (self.prev_mask & CHORD_MASK) == CHORD_MASK;
         let toggle_menu = chord_active && !chord_was_active;
@@ -350,6 +365,7 @@ impl InputRouter {
             } else {
                 mask
             },
+            pressed_mask: edge,
             toggle_menu,
             analog_button,
             menu_up: (edge & button::UP) != 0,
@@ -635,7 +651,10 @@ impl InputRouter {
         frame.analog_button = analog && !self.prev_analog;
         self.prev_analog = analog;
 
-        // Menu-nav rising edges off the D-pad and face buttons.
+        // Menu-nav rising edges off the D-pad and face buttons, plus
+        // the raw edge mask the shell folds into SOCD recency --
+        // the same `rising_edges` the native router uses.
+        frame.pressed_mask = rising_edges(self.prev_mask, mask);
         let edge = |bit: u16| (mask & bit != 0) && (self.prev_mask & bit == 0);
         frame.menu_up = edge(button::UP);
         frame.menu_down = edge(button::DOWN);
@@ -679,4 +698,29 @@ fn first_connected_gamepad() -> Option<web_sys::Gamepad> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rising_edges;
+
+    #[test]
+    fn rising_edges_reports_only_new_presses() {
+        use emulator_core::button;
+        // Nothing held before: every held bit is an edge.
+        assert_eq!(
+            rising_edges(0, button::LEFT | button::CROSS),
+            button::LEFT | button::CROSS
+        );
+        // Still-held bits stop being edges; releases contribute nothing.
+        assert_eq!(rising_edges(button::LEFT, button::LEFT), 0);
+        assert_eq!(rising_edges(button::LEFT, 0), 0);
+        // A new press alongside a held one reports only the new press --
+        // the property SOCD recency depends on: the frame gamepad RIGHT
+        // lands while LEFT is held must expose exactly RIGHT.
+        assert_eq!(
+            rising_edges(button::LEFT, button::LEFT | button::RIGHT),
+            button::RIGHT
+        );
+    }
 }
