@@ -249,6 +249,59 @@ fn model_face_packed_uv_words_match_packet_texcoords() {
 }
 
 #[test]
+fn model_no_cull_unclamped_batch_keeps_both_windings() {
+    const ZERO: TriTextured = TriTextured::new(
+        [(0, 0), (0, 0), (0, 0)],
+        [(0, 0), (0, 0), (0, 0)],
+        0,
+        0,
+        (0, 0, 0),
+    );
+    let projected = [
+        ProjectedVertex::new(10, 10, 100),
+        ProjectedVertex::new(30, 10, 120),
+        ProjectedVertex::new(10, 30, 140),
+    ];
+    let faces = [
+        TexturedModelRenderFace::new([0, 1, 2], [(0, 0), (15, 0), (0, 15)]),
+        TexturedModelRenderFace::new([0, 2, 1], [(0, 0), (0, 15), (15, 0)]),
+    ];
+    let material = TextureMaterial::blended(0, 0, (128, 128, 128), BlendMode::Average);
+    let options = WorldSurfaceOptions::new(DepthBand::whole(), DepthRange::new(0, 1000))
+        .with_cull_mode(CullMode::None)
+        .with_material_layer(material)
+        .with_textured_triangle_splitting(true);
+
+    let mut ot_storage = OrderingTable::<8>::new();
+    let mut ot = OtFrame::begin(&mut ot_storage);
+    let mut triangle_storage = [const { ZERO }; 2];
+    let mut triangles = PrimitiveArena::new(&mut triangle_storage);
+    let mut commands = [WorldTriCommand::EMPTY; 2];
+    let mut stats = TexturedModelRenderStats::default();
+    let mut faces_considered = 0;
+    let overflow = {
+        let mut pass = WorldRenderPass::new(&mut ot, &mut commands);
+        pass.submit_predecoded_model_faces_packed_average_unclamped_extent_safe_batch::<false>(
+            &mut triangles,
+            &projected,
+            &faces,
+            material.textured_packet_material(),
+            options,
+            &mut stats,
+            &mut faces_considered,
+        )
+    };
+
+    assert!(!overflow);
+    assert_eq!(faces_considered, 2);
+    assert_eq!(stats.packed_face_calls, 2);
+    assert_eq!(stats.packed_unclamped_face_calls, 2);
+    assert_eq!(stats.culled_triangles, 0);
+    assert_eq!(stats.submitted_triangles, 2);
+    assert_eq!(stats.fast_submitted_triangles, 2);
+}
+
+#[test]
 fn gouraud_packed_uv_words_match_packet_texcoords() {
     let material = TextureMaterial::opaque(0x1234, 0x0160, (96, 128, 160));
     let verts = [(12, 34), (56, 78), (90, 123)];
