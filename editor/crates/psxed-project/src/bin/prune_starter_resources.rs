@@ -11,7 +11,13 @@ fn seed_ids_from_ron(ron: &str, out: &mut HashSet<u64>) {
     // Covers every NodeKind variant, grid faces, wall segments and
     // triangle overrides without enumerating them.
     let fields = [
-        "mesh", "material", "model", "character", "weapon", "texture",
+        "mesh",
+        "material",
+        "materials",
+        "model",
+        "character",
+        "weapon",
+        "texture",
     ];
     for field in fields {
         let needle = format!("{field}: Some(");
@@ -31,6 +37,22 @@ fn seed_ids_from_ron(ron: &str, out: &mut HashSet<u64>) {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::seed_ids_from_ron;
+    use std::collections::HashSet;
+
+    #[test]
+    fn box_prop_material_array_seeds_its_resources() {
+        let ron = "BoxProp(materials: (Some((983)), Some((983)), Some((1316))))";
+        let mut ids = HashSet::new();
+
+        seed_ids_from_ron(ron, &mut ids);
+
+        assert_eq!(ids, HashSet::from([983, 1316]));
+    }
+}
+
 fn keep_id(keep: &mut HashSet<u64>, id: Option<ResourceId>) {
     if let Some(id) = id {
         keep.insert(id.raw());
@@ -43,10 +65,9 @@ fn main() {
         .skip_while(|a| a != "--project")
         .nth(1)
         .unwrap_or_else(|| "projects/default".to_string());
-    let mut project = ProjectDocument::load_from_path(
-        std::path::Path::new(&project_dir).join("project.ron"),
-    )
-    .expect("load project");
+    let mut project =
+        ProjectDocument::load_from_path(std::path::Path::new(&project_dir).join("project.ron"))
+            .expect("load project");
     project.normalize_loaded();
 
     let mut keep: HashSet<u64> = HashSet::new();

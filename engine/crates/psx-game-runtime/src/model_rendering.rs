@@ -776,7 +776,12 @@ pub fn draw_player<
 
     telemetry::stage_begin(telemetry::stage::PLAYER_DRAW);
     let faces = runtime_model_faces(runtime_model, model_faces);
-    let mut stats = submit_runtime_model_predecoded(
+    let secondary_material = character
+        .material_override
+        .and_then(|material| material.secondary_layer)
+        .and_then(|layer| model_secondary_material(layer, resolve_override_texture))
+        .map(|material| lighting.shade_model_material(origin, material));
+    let stats = submit_runtime_model_predecoded(
         world,
         triangles,
         runtime_model,
@@ -788,6 +793,7 @@ pub fn draw_player<
         local_to_world,
         pose_translation,
         material,
+        secondary_material,
         model_options,
         faces,
         model_parts,
@@ -795,38 +801,6 @@ pub fn draw_player<
         PROFILE,
         scratch,
     );
-    if !stats.primitive_overflow && !stats.command_overflow {
-        if let Some(layer) = character
-            .material_override
-            .and_then(|material| material.secondary_layer)
-        {
-            if let Some(layer_material) = model_secondary_material(layer, resolve_override_texture)
-            {
-                let layer_material = lighting.shade_model_material(origin, layer_material);
-                let layer_options = model_options.with_material_layer(layer_material);
-                let layer_stats = submit_runtime_model_predecoded(
-                    world,
-                    triangles,
-                    runtime_model,
-                    anim,
-                    phase,
-                    *camera,
-                    origin,
-                    model_rotation,
-                    local_to_world,
-                    pose_translation,
-                    layer_material,
-                    layer_options,
-                    faces,
-                    model_parts,
-                    model_vertices,
-                    PROFILE,
-                    scratch,
-                );
-                accumulate_model_stats(&mut stats, layer_stats);
-            }
-        }
-    }
     telemetry::stage_end(telemetry::stage::PLAYER_DRAW);
     PlayerModelDrawStats {
         stats,
@@ -853,6 +827,7 @@ fn submit_runtime_model_predecoded<
     local_to_world: LocalToWorldScale,
     pose_translation: ModelPoseTranslation,
     material: TextureMaterial,
+    secondary_material: Option<TextureMaterial>,
     options: WorldSurfaceOptions,
     faces: &[TexturedModelRenderFace],
     model_parts: &[ModelPart],
@@ -871,7 +846,7 @@ fn submit_runtime_model_predecoded<
         return stats;
     };
     let stats = if runtime_model.requires_cpu_blend {
-        world.submit_textured_model_predecoded_geometry_faces(
+        world.submit_textured_model_predecoded_geometry_faces_layered(
             triangles,
             runtime_model.model,
             anim,
@@ -884,12 +859,13 @@ fn submit_runtime_model_predecoded<
             &mut scratch.vertices,
             &mut scratch.joints,
             material,
+            secondary_material,
             options,
             faces,
             geometry,
         )
     } else {
-        world.submit_textured_model_primary_joints_predecoded_geometry_faces(
+        world.submit_textured_model_primary_joints_predecoded_geometry_faces_layered(
             triangles,
             runtime_model.model,
             anim,
@@ -902,6 +878,7 @@ fn submit_runtime_model_predecoded<
             &mut scratch.vertices,
             &mut scratch.joints,
             material,
+            secondary_material,
             options,
             faces,
             geometry,

@@ -223,12 +223,9 @@ fn retarget_mapped_frame_trs_reconstructs_child_from_global_bind_delta() {
         &[Some(0), Some(1)],
     );
 
-    let source_bind_child_global =
-        quat_mul(source_base[0].rotation, source_base[1].rotation);
-    let source_pose_child_global =
-        quat_mul(source_pose[0].rotation, source_pose[1].rotation);
-    let target_bind_child_global =
-        quat_mul(target_base[0].rotation, target_base[1].rotation);
+    let source_bind_child_global = quat_mul(source_base[0].rotation, source_base[1].rotation);
+    let source_pose_child_global = quat_mul(source_pose[0].rotation, source_pose[1].rotation);
+    let target_bind_child_global = quat_mul(target_base[0].rotation, target_base[1].rotation);
     let expected_child_global = quat_mul(
         target_bind_child_global,
         quat_mul(
