@@ -1,4 +1,5 @@
 use super::*;
+use crate::{generate_model_noise_psxt, ModelSecondaryTexture};
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn resolve_material_texture_asset(
@@ -60,11 +61,11 @@ pub(crate) fn resolve_material_texture_asset(
     Some((texture_asset_index, material.tint))
 }
 
-/// Resolve a Model Renderer's covering Material into the cooked
-/// override the instance/character record carries: the material's
-/// `.psxt` becomes a texture asset requirement (deduped by path,
-/// like world/prop materials) and the authored blend mode, tint,
-/// and face sidedness ride along.
+/// Resolve a Model Renderer's Material into the cooked override the
+/// instance/character record carries. A Material without a `.psxt`
+/// keeps the model atlas; a textured Material becomes a covering
+/// texture requirement. Blend mode, tint, and sidedness apply in
+/// either case.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn resolve_model_material_override(
     project: &ProjectDocument,
@@ -75,28 +76,132 @@ pub(crate) fn resolve_model_material_override(
     assets: &mut Vec<PlaytestAsset>,
     report: &mut PlaytestValidationReport,
 ) -> Option<PlaytestModelMaterialOverride> {
-    let (texture_asset_index, tint_rgb) = resolve_material_texture_asset(
-        project,
-        project_root,
-        label,
-        material_id,
-        texture_asset_for_path,
-        assets,
-        report,
-    )?;
-    // The texture resolver already validated the resource is a
-    // Material with a texture, so this re-read cannot fail.
-    let Some(ResourceData::Material(material)) =
-        project.resource(material_id).map(|resource| &resource.data)
-    else {
+    let Some(material_resource) = project.resource(material_id) else {
+        report.warn(format!(
+            "{label} references missing Material #{} - skipped",
+            material_id.raw()
+        ));
         return None;
     };
+    let ResourceData::Material(material) = &material_resource.data else {
+        report.warn(format!(
+            "{label} references '{}' but it is not a Material - skipped",
+            material_resource.name
+        ));
+        return None;
+    };
+    let texture_asset_index = if material
+        .psxt_path
+        .as_deref()
+        .is_some_and(|path| !path.trim().is_empty())
+    {
+        Some(
+            resolve_material_texture_asset(
+                project,
+                project_root,
+                label,
+                material_id,
+                texture_asset_for_path,
+                assets,
+                report,
+            )?
+            .0,
+        )
+    } else {
+        None
+    };
+    let secondary_layer = material.secondary_layer.as_ref().and_then(|layer| {
+        let texture_asset_index = resolve_model_secondary_texture_asset(
+            project_root,
+            &material_resource.name,
+            &layer.texture,
+            texture_asset_for_path,
+            assets,
+            report,
+        )?;
+        Some(PlaytestModelSecondaryLayer {
+            texture_asset_index,
+            blend_mode: layer.blend_mode,
+            tint_rgb: layer.tint,
+        })
+    });
     Some(PlaytestModelMaterialOverride {
         texture_asset_index,
         blend_mode: material.blend_mode,
-        tint_rgb,
-        face_sidedness: material.face_sidedness,
+        tint_rgb: material.tint,
+        secondary_layer,
+        face_sidedness: material.sidedness(),
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_model_secondary_texture_asset(
+    project_root: &Path,
+    material_name: &str,
+    source: &ModelSecondaryTexture,
+    texture_asset_for_path: &mut HashMap<String, usize>,
+    assets: &mut Vec<PlaytestAsset>,
+    report: &mut PlaytestValidationReport,
+) -> Option<usize> {
+    let (cache_key, source_label, bytes) = match source {
+        ModelSecondaryTexture::Texture(path) => {
+            let path = path.trim();
+            if path.is_empty() {
+                report.warn(format!(
+                    "Material '{material_name}' has an empty secondary texture path - layer skipped"
+                ));
+                return None;
+            }
+            if let Some(&existing) = texture_asset_for_path.get(path) {
+                return Some(existing);
+            }
+            let bytes = match load_psxt_bytes(material_name, path, project_root) {
+                Ok(bytes) => bytes,
+                Err(msg) => {
+                    report.warn(format!(
+                        "Material '{material_name}' secondary layer: {msg} - skipped"
+                    ));
+                    return None;
+                }
+            };
+            (
+                path.to_string(),
+                format!("{material_name} secondary"),
+                bytes,
+            )
+        }
+        ModelSecondaryTexture::ProceduralNoise(settings) => {
+            let cache_key = format!(
+                "@model-noise:{:08x}:{}:{}:{}",
+                settings.seed, settings.feature_size, settings.octaves, settings.contrast
+            );
+            if let Some(&existing) = texture_asset_for_path.get(&cache_key) {
+                return Some(existing);
+            }
+            (
+                cache_key,
+                format!("{material_name} generated noise"),
+                generate_model_noise_psxt(*settings),
+            )
+        }
+    };
+    if let Err(msg) = expect_room_material_depth(&source_label, &bytes) {
+        report.warn(format!(
+            "Material '{material_name}' secondary layer: {msg} - skipped"
+        ));
+        return None;
+    }
+    let texture_index = texture_asset_for_path.len();
+    let asset_index = assets.len();
+    assets.push(PlaytestAsset {
+        kind: PlaytestAssetKind::Texture,
+        bytes,
+        filename: format!("texture_{texture_index:03}.psxt"),
+        source_label,
+        streamed_class: StreamedClass::None,
+    });
+    texture_asset_for_path.insert(cache_key, asset_index);
+    Some(asset_index)
 }
 
 #[allow(clippy::too_many_arguments)]

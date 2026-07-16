@@ -87,9 +87,9 @@ pub struct VramLayout {
     pub room_tpage_stride_hw: u16,
     /// Largest square room texture edge in texels.
     pub room_tile_texels: u16,
-    /// Model-atlas 8bpp region origin page.
+    /// Model-atlas indexed-texture region origin page.
     pub model_tpage: Tpage,
-    /// Maximum halfword width addressable by one 8bpp texture page.
+    /// Maximum physical halfword width reserved for one model atlas.
     pub model_tpage_max_halfwords: u16,
     /// First VRAM row of the managed CLUT band.
     pub clut_base_y: u16,
@@ -436,7 +436,7 @@ pub enum VramSlotClutMode {
     OpaqueZero,
     /// Palette entry 0 left transparent (props, UI with alpha).
     TransparentZero,
-    /// 8bpp model atlas palette.
+    /// Indexed model atlas palette (4bpp or 8bpp).
     ModelAtlas,
     /// Streamed sky panorama band palettes.
     SkyPanorama,
@@ -1534,14 +1534,12 @@ impl<
         telemetry::counter(telemetry::counter::VRAM_SLOTS_FREED, 1);
     }
 
-    /// Upload an 8bpp model atlas to the dedicated model VRAM
-    /// region. Returns a `VramSlot` carrying the 8bpp tpage word
+    /// Upload a 4bpp or 8bpp model atlas to the dedicated model VRAM
+    /// region. Returns a `VramSlot` carrying the depth-correct tpage word
     /// and the atlas's CLUT word. Reuses an existing slot when the
     /// asset's already resident.
     ///
-    /// Caller is responsible for confirming `asset_bytes` parses as
-    /// a `Texture` whose CLUT carries 256 entries (8bpp). Anything
-    /// else returns `None`.
+    /// Direct-colour atlases and malformed indexed palettes return `None`.
     pub fn ensure_model_atlas_uploaded(
         &mut self,
         layout: VramLayout,
@@ -1554,11 +1552,11 @@ impl<
             return Some(slot);
         }
         let texture = Texture::from_bytes(asset_bytes).ok()?;
-        if texture.clut_entries() != 256 {
-            // Only 8bpp atlases supported -- 4bpp model atlases
-            // would round-trip through `ensure_texture_uploaded`.
-            return None;
-        }
+        let texture_depth = match texture.clut_entries() {
+            16 => TexDepth::Bit4,
+            256 => TexDepth::Bit8,
+            _ => return None,
+        };
 
         let idx = self.next_vram_slot()?;
         let texture_width = texture.width();
@@ -1579,9 +1577,11 @@ impl<
             return None;
         }
 
-        // Placement comes only from the unified allocator: an 8bpp page run at row 256
-        // plus a 256-entry CLUT (16 contiguous 16-px slots in the managed band).
-        let (tpage, region) = self.allocator.alloc_model_slot(texture_halfwords_per_row)?;
+        // Placement comes only from the unified allocator: an indexed page run
+        // at row 256 plus a depth-sized CLUT in the managed band.
+        let (tpage, region) = self
+            .allocator
+            .alloc_model_slot(texture_halfwords_per_row, texture_depth)?;
         let (clut, clut_region) = self.allocator.alloc_clut(texture.clut_entries())?;
         telemetry::stage_begin(telemetry::stage::VRAM_UPLOAD);
         telemetry::counter(telemetry::counter::MODEL_ATLAS_UPLOADS, 1);
@@ -1748,7 +1748,7 @@ pub(crate) fn upload_opaque_clut(rect: VramRect, bytes: &[u8]) {
     upload_clut_with_mode(rect, bytes, true);
 }
 
-/// Upload a CLUT for 8bpp model atlases. New alpha-aware atlases can
+/// Upload a CLUT for indexed model atlases. New alpha-aware atlases can
 /// reserve palette index 0 for transparent gutter texels; legacy
 /// atlases keep their old fully-opaque behaviour.
 pub(crate) fn upload_model_clut(rect: VramRect, bytes: &[u8], transparent_index_zero: bool) {
@@ -1770,7 +1770,7 @@ pub(crate) fn upload_model_clut(rect: VramRect, bytes: &[u8], transparent_index_
     upload_bytes(rect, &marked[..bytes.len()]);
 }
 
-/// CLUT entry stamping rule for 8bpp model atlases (see [`upload_model_clut`]).
+/// CLUT entry stamping rule for indexed model atlases (see [`upload_model_clut`]).
 pub const fn model_clut_entry_for_upload(
     index: usize,
     raw: u16,

@@ -655,21 +655,34 @@ pub struct PlaytestModel {
     pub collision_radius: u16,
 }
 
-/// Covering-material override cooked for one placed model instance
-/// or the player character: the model draws its own UVs against the
-/// resolved material texture instead of the model's baked atlas.
+/// Material override cooked for one placed model instance or the
+/// player character. A missing texture keeps the model's baked atlas
+/// while still applying blend mode, tint, and face sidedness.
 /// Mirrors [`psx_level::LevelModelMaterialOverride`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlaytestModelMaterialOverride {
-    /// Index into [`PlaytestPackage::assets`] of the material's
-    /// `.psxt` texture.
-    pub texture_asset_index: usize,
+    /// Index into [`PlaytestPackage::assets`] of an optional covering
+    /// `.psxt` texture. `None` keeps the model atlas.
+    pub texture_asset_index: Option<usize>,
     /// Authored PS1 blend mode.
     pub blend_mode: crate::PsxBlendMode,
     /// Authored modulation tint.
     pub tint_rgb: [u8; 3],
+    /// Optional independently blended second texture pass.
+    pub secondary_layer: Option<PlaytestModelSecondaryLayer>,
     /// Authored face sidedness.
     pub face_sidedness: crate::MaterialFaceSidedness,
+}
+
+/// Cooked host-side description of a model material's second pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestModelSecondaryLayer {
+    /// Index into [`PlaytestPackage::assets`] of the 4bpp layer texture.
+    pub texture_asset_index: usize,
+    /// Independent authored PS1 blend mode.
+    pub blend_mode: crate::PsxBlendMode,
+    /// Independent modulation tint.
+    pub tint_rgb: [u8; 3],
 }
 
 /// One placed model instance. Coordinates are room-local
