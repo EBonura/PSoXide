@@ -1046,12 +1046,17 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 ]
             };
 
-            if CULL_BACK && projected_back_facing(projected) {
+            if CULL_BACK
+                && psx_gte::scene::screen_area_mac0_scheduled([
+                    (projected[0].sx, projected[0].sy),
+                    (projected[1].sx, projected[1].sy),
+                    (projected[2].sx, projected[2].sy),
+                ]) <= 0
+            {
                 culled_triangles = culled_triangles.wrapping_add(1);
                 face_index += 1;
                 continue;
             }
-
             let positions = [
                 (projected[0].sx, projected[0].sy),
                 (projected[1].sx, projected[1].sy),
@@ -1289,12 +1294,17 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                     *projected_vertices.get_unchecked(ic),
                 ]
             };
-            if CULL_BACK && projected_back_facing(projected) {
+            if CULL_BACK
+                && psx_gte::scene::screen_area_mac0_scheduled([
+                    (projected[0].sx, projected[0].sy),
+                    (projected[1].sx, projected[1].sy),
+                    (projected[2].sx, projected[2].sy),
+                ]) <= 0
+            {
                 culled_triangles = culled_triangles.wrapping_add(1);
                 face_index += 1;
                 continue;
             }
-
             let triangle = unsafe {
                 // SAFETY: the caller preflighted one slot for every input face,
                 // which is a conservative bound after backface culling.

@@ -1653,6 +1653,7 @@ pub(crate) struct CellFrustum {
     half_h: i32,
     sphere_x_support: i32,
     sphere_y_support: i32,
+    view_abs: [[i32; 3]; 3],
 }
 
 #[inline(always)]
@@ -1680,6 +1681,10 @@ impl CellFrustum {
         let half_h = (camera.projection.screen_y as i32)
             .saturating_add(screen_margin)
             .max(1);
+        let sy_sp = camera.sin_yaw.mul_q12(camera.sin_pitch).raw();
+        let cy_sp = camera.cos_yaw.mul_q12(camera.sin_pitch).raw();
+        let sy_cp = camera.sin_yaw.mul_q12(camera.cos_pitch).raw();
+        let cy_cp = camera.cos_yaw.mul_q12(camera.cos_pitch).raw();
         Self {
             near,
             far: options.depth_range.far().max(near),
@@ -1694,6 +1699,11 @@ impl CellFrustum {
             // safe because cell radii were themselves heavily inflated.
             sphere_x_support: conservative_plane_sphere_support(focal, half_w),
             sphere_y_support: conservative_plane_sphere_support(focal, half_h),
+            view_abs: [
+                [camera.cos_yaw.raw().abs(), 0, camera.sin_yaw.raw().abs()],
+                [sy_sp.abs(), camera.cos_pitch.raw().abs(), cy_sp.abs()],
+                [sy_cp.abs(), camera.sin_pitch.raw().abs(), cy_cp.abs()],
+            ],
         }
     }
 
@@ -1716,6 +1726,47 @@ impl CellFrustum {
         self.sphere_lateral(view, radius)
     }
 
+    /// Near/far and lateral test for a world-axis-aligned cell box.
+    ///
+    /// The box is converted to a conservative view-space AABB. Two units of
+    /// slack cover the separate Q12 truncations used for the transformed
+    /// centre and corners, so this remains a broad-phase rejection only.
+    #[inline(always)]
+    pub(crate) fn cell_aabb_visible(
+        self,
+        view: ViewVertex,
+        half_x: i32,
+        half_y: i32,
+        half_z: i32,
+    ) -> bool {
+        let extent = |row: [i32; 3]| {
+            let q12 = (row[0] as i64 * half_x.max(0) as i64)
+                .saturating_add(row[1] as i64 * half_y.max(0) as i64)
+                .saturating_add(row[2] as i64 * half_z.max(0) as i64)
+                .saturating_add(4095)
+                >> 12;
+            (q12.min(i32::MAX as i64) as i32).saturating_add(2)
+        };
+        let extent_x = extent(self.view_abs[0]);
+        let extent_y = extent(self.view_abs[1]);
+        let extent_z = extent(self.view_abs[2]);
+        if view.z < self.near.saturating_sub(extent_z) || view.z > self.far.saturating_add(extent_z)
+        {
+            return false;
+        }
+
+        let z = view.z.max(self.near);
+        let px = view.x.abs() as i64 * self.focal as i64;
+        let py = view.y.abs() as i64 * self.focal as i64;
+        let x_limit = self.half_w as i64 * z as i64
+            + self.focal as i64 * extent_x as i64
+            + self.half_w as i64 * extent_z as i64;
+        let y_limit = self.half_h as i64 * z as i64
+            + self.focal as i64 * extent_y as i64
+            + self.half_h as i64 * extent_z as i64;
+        px <= x_limit && py <= y_limit
+    }
+
     #[inline(always)]
     fn sphere_lateral(self, view: ViewVertex, radius: i32) -> bool {
         let z = view.z.max(self.near);
@@ -1730,7 +1781,6 @@ impl CellFrustum {
         let y_limit = self.half_h as i64 * z as i64 + radius as i64 * self.sphere_y_support as i64;
         px <= x_limit && py <= y_limit
     }
-
 }
 
 /// Lateral + near frustum test for a cell visibility sphere, with NO far plane.
@@ -1766,6 +1816,7 @@ fn cell_visibility_view_in_lateral_frustum(
                 .saturating_add(screen_margin)
                 .max(1),
         ),
+        view_abs: [[0; 3]; 3],
     };
     lateral.sphere_visible_no_far(view, radius)
 }
