@@ -650,9 +650,19 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             && options.cull_mode == CullMode::Back;
         let packed_back_average_in_front_faces =
             packed_back_in_front_faces && options.depth_policy == DepthPolicy::Average;
-        let packed_back_average_unclamped_faces =
-            packed_back_average_in_front_faces && all_projected_vertices_inside_hw_bounds;
-        let packed_back_average_unclamped_extent_safe_faces = packed_back_average_unclamped_faces
+        // Back-culled and double-sided models can share the unclamped batch.
+        // CullMode::None previously fell through to the general per-face path,
+        // even when the projection pass had proved every near-plane and clamp
+        // verdict for the whole model. Global bounds can also prove every face's
+        // extent; otherwise the batch retains its per-face extent fallback.
+        // CULL_BACK keeps the one semantic difference compile-time so the
+        // double-sided loop has no winding test.
+        let packed_average_unclamped_faces = packed_fast_faces
+            && all_projected_vertices_in_front
+            && options.depth_policy == DepthPolicy::Average
+            && all_projected_vertices_inside_hw_bounds
+            && (options.cull_mode == CullMode::Back || options.cull_mode == CullMode::None);
+        let packed_average_unclamped_extent_safe_faces = packed_average_unclamped_faces
             && projected_model_bounds_hw_extent_safe(
                 projected_min_x,
                 projected_max_x,
@@ -660,20 +670,43 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 projected_max_y,
             );
         crate::telemetry::stage_begin(crate::telemetry::stage::TEXTURED_MODEL_FACES);
-        if packed_back_average_unclamped_faces {
+        if packed_average_unclamped_faces {
             let projected_vertices = &projected_vertices[..project_count];
-            let overflow = if packed_back_average_unclamped_extent_safe_faces {
-                self.submit_predecoded_model_faces_packed_back_average_unclamped_extent_safe_batch(
+            let overflow = if packed_average_unclamped_extent_safe_faces {
+                if options.cull_mode == CullMode::Back {
+                    self.submit_predecoded_model_faces_packed_average_unclamped_extent_safe_batch::<true>(
+                        triangles,
+                        projected_vertices,
+                        faces,
+                        packet_material,
+                        options,
+                        &mut stats,
+                        &mut faces_considered,
+                    )
+                } else {
+                    self.submit_predecoded_model_faces_packed_average_unclamped_extent_safe_batch::<false>(
+                        triangles,
+                        projected_vertices,
+                        faces,
+                        packet_material,
+                        options,
+                        &mut stats,
+                        &mut faces_considered,
+                    )
+                }
+            } else if options.cull_mode == CullMode::Back {
+                self.submit_predecoded_model_faces_packed_average_unclamped_batch::<true>(
                     triangles,
                     projected_vertices,
                     faces,
                     packet_material,
+                    material,
                     options,
                     &mut stats,
                     &mut faces_considered,
                 )
             } else {
-                self.submit_predecoded_model_faces_packed_back_average_unclamped_batch(
+                self.submit_predecoded_model_faces_packed_average_unclamped_batch::<false>(
                     triangles,
                     projected_vertices,
                     faces,
@@ -694,7 +727,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                     blend_vertices,
                     all_projected_vertices_in_front,
                     all_projected_vertices_inside_hw_bounds,
-                    packed_back_average_unclamped_faces,
+                    packed_average_unclamped_faces,
                     packed_back_in_front_faces,
                     packed_fast_faces,
                     &stats,
@@ -764,7 +797,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                         blend_vertices,
                         all_projected_vertices_in_front,
                         all_projected_vertices_inside_hw_bounds,
-                        packed_back_average_unclamped_faces,
+                        packed_average_unclamped_faces,
                         packed_back_in_front_faces,
                         packed_fast_faces,
                         &stats,
@@ -777,20 +810,43 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         if let Some(material) = secondary_material {
             let options = options.with_material_layer(material);
             let packet_material = material.textured_packet_material();
-            let overflow = if packed_back_average_unclamped_faces {
+            let overflow = if packed_average_unclamped_faces {
                 let projected_vertices = &projected_vertices[..project_count];
-                if packed_back_average_unclamped_extent_safe_faces {
-                    self.submit_predecoded_model_faces_packed_back_average_unclamped_extent_safe_batch(
+                if packed_average_unclamped_extent_safe_faces {
+                    if options.cull_mode == CullMode::Back {
+                        self.submit_predecoded_model_faces_packed_average_unclamped_extent_safe_batch::<true>(
+                            triangles,
+                            projected_vertices,
+                            faces,
+                            packet_material,
+                            options,
+                            &mut stats,
+                            &mut faces_considered,
+                        )
+                    } else {
+                        self.submit_predecoded_model_faces_packed_average_unclamped_extent_safe_batch::<false>(
+                            triangles,
+                            projected_vertices,
+                            faces,
+                            packet_material,
+                            options,
+                            &mut stats,
+                            &mut faces_considered,
+                        )
+                    }
+                } else if options.cull_mode == CullMode::Back {
+                    self.submit_predecoded_model_faces_packed_average_unclamped_batch::<true>(
                         triangles,
                         projected_vertices,
                         faces,
                         packet_material,
+                        material,
                         options,
                         &mut stats,
                         &mut faces_considered,
                     )
                 } else {
-                    self.submit_predecoded_model_faces_packed_back_average_unclamped_batch(
+                    self.submit_predecoded_model_faces_packed_average_unclamped_batch::<false>(
                         triangles,
                         projected_vertices,
                         faces,
@@ -872,7 +928,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                     blend_vertices,
                     all_projected_vertices_in_front,
                     all_projected_vertices_inside_hw_bounds,
-                    packed_back_average_unclamped_faces,
+                    packed_average_unclamped_faces,
                     packed_back_in_front_faces,
                     packed_fast_faces,
                     &stats,
@@ -889,7 +945,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             blend_vertices,
             all_projected_vertices_in_front,
             all_projected_vertices_inside_hw_bounds,
-            packed_back_average_unclamped_faces,
+            packed_average_unclamped_faces,
             packed_back_in_front_faces,
             packed_fast_faces,
             &stats,
@@ -900,7 +956,9 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
 
     #[allow(clippy::too_many_arguments)]
     #[inline(always)]
-    fn submit_predecoded_model_faces_packed_back_average_unclamped_extent_safe_batch(
+    pub(super) fn submit_predecoded_model_faces_packed_average_unclamped_extent_safe_batch<
+        const CULL_BACK: bool,
+    >(
         &mut self,
         triangles: &mut impl PrimitiveSink<TriTextured>,
         projected_vertices: &[ProjectedVertex],
@@ -945,7 +1003,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 ]
             };
 
-            if projected_back_facing(projected) {
+            if CULL_BACK && projected_back_facing(projected) {
                 culled_triangles = culled_triangles.wrapping_add(1);
                 face_index += 1;
                 continue;
@@ -1009,7 +1067,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
 
     #[allow(clippy::too_many_arguments)]
     #[inline(always)]
-    fn submit_predecoded_model_faces_packed_back_average_unclamped_batch(
+    fn submit_predecoded_model_faces_packed_average_unclamped_batch<const CULL_BACK: bool>(
         &mut self,
         triangles: &mut impl PrimitiveSink<TriTextured>,
         projected_vertices: &[ProjectedVertex],
@@ -1056,7 +1114,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 ]
             };
 
-            if projected_back_facing(projected) {
+            if CULL_BACK && projected_back_facing(projected) {
                 culled_triangles = culled_triangles.wrapping_add(1);
                 face_index += 1;
                 continue;
