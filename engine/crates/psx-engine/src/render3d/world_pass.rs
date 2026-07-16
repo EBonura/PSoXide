@@ -449,15 +449,25 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
     ) {
         let command_index = self.command_len;
         debug_assert!(command_index < WORLD_COMMAND_NONE as usize);
-        self.commands[command_index] = WorldTriCommand {
-            packet_ptr,
-            depth,
-            slot: slot.index().min(u16::MAX as usize) as u16,
-            order: self.next_order,
-            next: WORLD_COMMAND_NONE,
-            render_layer: world_render_layer_code(render_layer),
-            words,
-        };
+        if self.ordering == WorldCommandOrdering::Bucketed {
+            // The bucketed flush consumes only these three fields. Avoid
+            // rewriting sort/link metadata for every triangle on the fastest
+            // path; the static scratch already owns valid storage.
+            let command = &mut self.commands[command_index];
+            command.packet_ptr = packet_ptr;
+            command.slot = slot.index().min(u16::MAX as usize) as u16;
+            command.words = words;
+        } else {
+            self.commands[command_index] = WorldTriCommand {
+                packet_ptr,
+                depth,
+                slot: slot.index().min(u16::MAX as usize) as u16,
+                order: self.next_order,
+                next: WORLD_COMMAND_NONE,
+                render_layer: world_render_layer_code(render_layer),
+                words,
+            };
+        }
         self.command_len += 1;
         self.next_order = self.next_order.wrapping_add(1);
         match self.ordering {
@@ -612,7 +622,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             sort_world_for_ot_insert(&mut self.commands[..self.command_len]);
             let mut command_index = 0;
             while command_index < self.command_len {
-                let command = self.commands[command_index];
+                let command = &self.commands[command_index];
                 if !command.packet_ptr.is_null() {
                     // SAFETY: Commands are created only from primitive
                     // arenas borrowed by submit methods. Those packets live
@@ -637,7 +647,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             let mut command_index = self.command_len;
             while command_index != 0 {
                 command_index -= 1;
-                let command = self.commands[command_index];
+                let command = &self.commands[command_index];
                 // SAFETY: Bucketed commands are appended only after a packet
                 // arena push succeeds, and depth slots are produced by this
                 // pass' OT-depth-aware depth-band mapping.
