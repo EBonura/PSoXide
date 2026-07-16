@@ -377,7 +377,7 @@ fn draw_box_prop_floor_debris_chip<T, const GTE_PROJECT: bool, const OT_DEPTH: u
                 ),
             ];
             submit_projected_textured_gouraud_quad_u8(
-                world, triangles, projected, uvs, colors, material, opts,
+                world, triangles, &projected, &uvs, &colors, material, opts,
             );
             return;
         }
@@ -390,7 +390,7 @@ fn draw_box_prop_floor_debris_chip<T, const GTE_PROJECT: bool, const OT_DEPTH: u
     ];
     if let Some(projected) = camera.project_world_quad(quad) {
         submit_projected_textured_gouraud_quad_u8(
-            world, triangles, projected, uvs, colors, material, opts,
+            world, triangles, &projected, &uvs, &colors, material, opts,
         );
     } else {
         let tint = average_vertex_rgb(colors);
@@ -553,7 +553,7 @@ fn draw_box_prop_break_shard<T, const GTE_PROJECT: bool, const OT_DEPTH: usize>(
             ));
             let colors = box_prop_apply_fog_weight(lighting, shard_runtime.colors, fog_weight);
             submit_projected_textured_gouraud_quad_u8(
-                world, triangles, projected, uvs, colors, material, opts,
+                world, triangles, &projected, &uvs, &colors, material, opts,
             );
             return;
         }
@@ -563,7 +563,7 @@ fn draw_box_prop_break_shard<T, const GTE_PROJECT: bool, const OT_DEPTH: usize>(
     let colors = box_prop_apply_fog_weight(lighting, shard_runtime.colors, fog_weight);
     if let Some(projected) = camera.project_world_quad(quad) {
         submit_projected_textured_gouraud_quad_u8(
-            world, triangles, projected, uvs, colors, material, opts,
+            world, triangles, &projected, &uvs, &colors, material, opts,
         );
     } else {
         let tint = average_vertex_rgb(colors);
@@ -577,9 +577,9 @@ fn draw_box_prop_break_shard<T, const GTE_PROJECT: bool, const OT_DEPTH: usize>(
 fn submit_projected_textured_gouraud_quad_u8<T, const OT_DEPTH: usize>(
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
     triangles: &mut T,
-    projected: [ProjectedVertex; 4],
-    uvs: [(u8, u8); 4],
-    colors: [(u8, u8, u8); 4],
+    projected: &[ProjectedVertex; 4],
+    uvs: &[(u8, u8); 4],
+    colors: &[(u8, u8, u8); 4],
     material: TextureMaterial,
     options: WorldSurfaceOptions,
 ) where
@@ -673,7 +673,7 @@ fn draw_box_prop_faces<T, const OT_DEPTH: usize>(
                 lighting.apply_fog_at_depth(prop.baked_vertex_rgb[face][3], projected[3].sz),
             ];
             submit_projected_textured_gouraud_quad_u8(
-                world, triangles, projected, uvs, colors, material, opts,
+                world, triangles, &projected, &uvs, &colors, material, opts,
             );
         } else {
             let colors = [
