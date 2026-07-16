@@ -64,7 +64,7 @@ use psx_engine::{
     CharacterCollisionRoom, CharacterMotorAnim, CharacterMotorConfig, CharacterMotorInput,
     CharacterMotorState, Config, Ctx, DepthBand, DepthRange, LoadedWorldCameraGte, OtFrame,
     PrimitivePacketArena, PrimitivePacketScratch, PrimitiveSink, ProjectedVertex, Rgb8, RoomPoint,
-    RuntimeCollisionRoom, RuntimeRoom, Scene, SceneStateRef, SchedulerConfig, SimTick,
+    RenderSubmission, RuntimeCollisionRoom, RuntimeRoom, Scene, SceneStateRef, SchedulerConfig, SimTick,
     TexturedModelRenderFace, ThirdPersonCameraConfig, ThirdPersonCameraInput,
     ThirdPersonCameraState, ThirdPersonCameraTarget, VideoHz, VisualPacing, WorldCamera,
     WorldProjection, WorldRenderMaterial, WorldRenderPass, WorldSurfaceOptions, WorldTriCommand,
@@ -348,6 +348,13 @@ struct Playtest {
     /// sampling it made the overlay's animation phase nondeterministic
     /// across builds (the 3-pixel corridor LSB instability).
     overlay_sim_tick: SimTick,
+    /// Overlay state for the frame currently being prepared on the CPU. It is
+    /// promoted to `overlay_*` only when that frame is submitted, after the
+    /// previous queued frame has used its own snapshot.
+    prepared_overlay_camera: WorldCamera,
+    prepared_overlay_sim_tick: SimTick,
+    prepared_overlay_analog: bool,
+    overlay_analog: bool,
     /// Tick of the first gameplay update after loading completed. The
     /// engine clock origin is set at app init, BEFORE CD loading, so
     /// raw `ctx.sim_tick` VALUES carry the build- and disc-dependent
@@ -538,6 +545,7 @@ impl Playtest {
             Q12::ZERO,
             Q12::ONE,
         );
+        self.prepared_overlay_camera = self.overlay_camera;
         self.camera_rooms_key = (INVALID_ROOM_INDEX, i32::MIN, i32::MIN, 0, 0);
         for vertex in self.model_vertices.iter_mut() {
             *vertex = ModelVertex::ZERO;
