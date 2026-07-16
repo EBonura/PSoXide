@@ -526,6 +526,13 @@ impl Playtest {
         if target.room != self.room_index {
             return None;
         }
+        let instance = u16::try_from(index).ok()?;
+        if game_entity_for_instance(instance).is_some() {
+            let live = self
+                .game_entities
+                .live_position_for_model_instance(GAME_ENTITIES, instance)?;
+            return Some(RoomPoint::new(live[0], live[1], live[2]));
+        }
         Some(RoomPoint::new(target.x, target.y, target.z))
     }
 
@@ -611,17 +618,15 @@ impl Playtest {
 
     pub(super) fn target_indicator_position(&self, index: usize) -> Option<RoomPoint> {
         let target = MODEL_INSTANCES.get(index)?;
-        if target.room != self.room_index {
-            return None;
-        }
+        let position = self.target_position(index)?;
         let height = MODELS
             .get(target.model.to_usize())
             .map(|model| model.world_height as i32)
             .unwrap_or(1024);
         Some(RoomPoint::new(
-            target.x,
-            target.y.saturating_add(height >> 1),
-            target.z,
+            position.x,
+            position.y.saturating_add(height >> 1),
+            position.z,
         ))
     }
 
@@ -644,11 +649,10 @@ impl Playtest {
         let cos_yaw = view_yaw.cos();
         let range_sq = square_i32_saturating(range);
         let mut best: Option<(usize, i32)> = None;
-        for (index, target) in MODEL_INSTANCES.iter().enumerate() {
-            if target.room != self.room_index {
+        for (index, _) in MODEL_INSTANCES.iter().enumerate() {
+            let Some(point) = self.target_position(index) else {
                 continue;
-            }
-            let point = RoomPoint::new(target.x, target.y, target.z);
+            };
             let dx = point.x.saturating_sub(player.x);
             let dz = point.z.saturating_sub(player.z);
             let dist_sq = square_i32_saturating(dx).saturating_add(square_i32_saturating(dz));
@@ -713,7 +717,7 @@ impl Playtest {
         let Some(current_index) = self.lock_target else {
             return;
         };
-        let Some(current) = MODEL_INSTANCES.get(current_index) else {
+        let Some(current) = self.target_position(current_index) else {
             self.lock_target = None;
             return;
         };
@@ -725,10 +729,13 @@ impl Playtest {
         }
         let range_sq = square_i32_saturating(LOCK_RANGE);
         let mut best: Option<(usize, i32)> = None;
-        for (index, target) in MODEL_INSTANCES.iter().enumerate() {
-            if index == current_index || target.room != self.room_index {
+        for (index, _) in MODEL_INSTANCES.iter().enumerate() {
+            if index == current_index {
                 continue;
             }
+            let Some(target) = self.target_position(index) else {
+                continue;
+            };
             let dx = target.x.saturating_sub(player.x);
             let dz = target.z.saturating_sub(player.z);
             let dist_sq = square_i32_saturating(dx).saturating_add(square_i32_saturating(dz));

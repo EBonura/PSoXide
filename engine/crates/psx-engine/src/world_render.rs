@@ -1587,8 +1587,28 @@ fn cell_visibility_bounds(
 ) -> (WorldVertex, i32) {
     let (x0, x1, z0, z1) = cell_bounds(sx, sz, sector_size);
     let center = WorldVertex::new((x0 + x1) / 2, (min_y + max_y) / 2, (z0 + z1) / 2);
-    let half_height = ((max_y - min_y).abs() >> 1).max(sector_size >> 1);
-    let radius = sector_size.saturating_add(half_height);
+    // Use the tight conservative sphere around the cell AABB. The previous
+    // `sector_size + half_height` L1 bound was much larger than the geometry:
+    // a flat square cell used 1.5x the sector size instead of sqrt(0.5) times
+    // it. That admitted large runs of fully off-screen cells, only to reject
+    // their surfaces later in the hottest room-rendering loop.
+    //
+    // Ceil each half extent because integer midpoint truncation can leave the
+    // farther edge one unit away for odd/negative ranges, then ceil the square
+    // root so the replacement never under-bounds a corner.
+    let half_x = (x1.saturating_sub(x0).abs().saturating_add(1) >> 1) as u64;
+    let half_y = (max_y.saturating_sub(min_y).abs().saturating_add(1) >> 1) as u64;
+    let half_z = (z1.saturating_sub(z0).abs().saturating_add(1) >> 1) as u64;
+    let radius_squared = half_x
+        .saturating_mul(half_x)
+        .saturating_add(half_y.saturating_mul(half_y))
+        .saturating_add(half_z.saturating_mul(half_z));
+    let radius_floor = radius_squared.isqrt();
+    let radius = radius_floor
+        .saturating_add(u64::from(
+            radius_floor.saturating_mul(radius_floor) != radius_squared,
+        ))
+        .min(i32::MAX as u64) as i32;
     (center, radius)
 }
 
@@ -1631,6 +1651,18 @@ pub(crate) struct CellFrustum {
     focal: i32,
     half_w: i32,
     half_h: i32,
+    sphere_x_support: i32,
+    sphere_y_support: i32,
+}
+
+#[inline(always)]
+fn conservative_plane_sphere_support(a: i32, b: i32) -> i32 {
+    let larger = a.max(b).max(0);
+    let smaller = a.min(b).max(0);
+    // `larger + smaller / 2` is an upper bound for
+    // `sqrt(larger^2 + smaller^2)` when `smaller <= larger`. Round the half
+    // upward so integer truncation cannot turn the bound into an underestimate.
+    larger.saturating_add(smaller.saturating_add(1) >> 1)
 }
 
 impl CellFrustum {
@@ -1641,16 +1673,27 @@ impl CellFrustum {
         screen_margin: i32,
     ) -> Self {
         let near = camera.projection.near_z.max(1);
+        let focal = camera.projection.focal_length.max(1);
+        let half_w = (camera.projection.screen_x as i32)
+            .saturating_add(screen_margin)
+            .max(1);
+        let half_h = (camera.projection.screen_y as i32)
+            .saturating_add(screen_margin)
+            .max(1);
         Self {
             near,
             far: options.depth_range.far().max(near),
-            focal: camera.projection.focal_length.max(1),
-            half_w: (camera.projection.screen_x as i32)
-                .saturating_add(screen_margin)
-                .max(1),
-            half_h: (camera.projection.screen_y as i32)
-                .saturating_add(screen_margin)
-                .max(1),
+            focal,
+            half_w,
+            half_h,
+            // For side plane `focal*x - half_w*z = 0`, a sphere extends
+            // `radius * sqrt(focal^2 + half_w^2)` along the plane normal.
+            // A tight integer upper bound for the plane-normal length is
+            // evaluated once per draw. The old `radius * focal` term
+            // under-bounded spheres near the screen edge and only appeared
+            // safe because cell radii were themselves heavily inflated.
+            sphere_x_support: conservative_plane_sphere_support(focal, half_w),
+            sphere_y_support: conservative_plane_sphere_support(focal, half_h),
         }
     }
 
@@ -1676,13 +1719,18 @@ impl CellFrustum {
     #[inline(always)]
     fn sphere_lateral(self, view: ViewVertex, radius: i32) -> bool {
         let z = view.z.max(self.near);
-        // psx-numeric-allow-next-line: projected-extent product widens to i64; native mult result
-        let px = view.x.abs().saturating_sub(radius) as i64 * self.focal as i64;
-        // psx-numeric-allow-next-line: projected-extent product widens to i64; native mult result
-        let py = view.y.abs().saturating_sub(radius) as i64 * self.focal as i64;
-        // psx-numeric-allow-next-line: frustum compare of two 64-bit products; native mult results
-        px <= self.half_w as i64 * z as i64 && py <= self.half_h as i64 * z as i64
+        let radius = radius.max(0);
+        // psx-numeric-allow-next-line: frustum plane products widen to the native MULT result
+        let px = view.x.abs() as i64 * self.focal as i64;
+        // psx-numeric-allow-next-line: frustum plane products widen to the native MULT result
+        let py = view.y.abs() as i64 * self.focal as i64;
+        // psx-numeric-allow-next-line: screen and conservative sphere-support products share a widened sum
+        let x_limit = self.half_w as i64 * z as i64 + radius as i64 * self.sphere_x_support as i64;
+        // psx-numeric-allow-next-line: screen and conservative sphere-support products share a widened sum
+        let y_limit = self.half_h as i64 * z as i64 + radius as i64 * self.sphere_y_support as i64;
+        px <= x_limit && py <= y_limit
     }
+
 }
 
 /// Lateral + near frustum test for a cell visibility sphere, with NO far plane.
@@ -1706,6 +1754,18 @@ fn cell_visibility_view_in_lateral_frustum(
         half_h: (camera.projection.screen_y as i32)
             .saturating_add(screen_margin)
             .max(1),
+        sphere_x_support: conservative_plane_sphere_support(
+            camera.projection.focal_length.max(1),
+            (camera.projection.screen_x as i32)
+                .saturating_add(screen_margin)
+                .max(1),
+        ),
+        sphere_y_support: conservative_plane_sphere_support(
+            camera.projection.focal_length.max(1),
+            (camera.projection.screen_y as i32)
+                .saturating_add(screen_margin)
+                .max(1),
+        ),
     };
     lateral.sphere_visible_no_far(view, radius)
 }
@@ -2416,6 +2476,7 @@ fn submit_sided_projected_gouraud_quad_cached_uv_words<const OT: usize>(
     _base_cull: CullMode,
     split: u8,
     prebuilt: Option<(&mut QuadTexturedGouraud, &mut u8)>,
+    prebuilt_colors_static: bool,
     profile: &mut RoomSurfaceMicroProfile,
 ) {
     let (verts, uv_words, colors) = match material.sidedness {
@@ -2450,6 +2511,7 @@ fn submit_sided_projected_gouraud_quad_cached_uv_words<const OT: usize>(
         let _ = world.submit_textured_gouraud_quad_prescreened_uv_words_prepared_depth(
             triangles,
             prebuilt,
+            prebuilt_colors_static,
             quad_verts,
             quad_uv_words,
             quad_colors,

@@ -469,6 +469,17 @@ pub trait PrimitiveSink<T> {
     /// for ordering-table insertion.
     fn push(&mut self, prim: T) -> Option<&mut T>;
 
+    /// Write without checking capacity.
+    ///
+    /// # Safety
+    ///
+    /// The caller must prove [`Self::remaining`] is at least one before
+    /// every call and must not retain another reference into this sink.
+    unsafe fn push_unchecked(&mut self, prim: T) -> &mut T {
+        // SAFETY: delegated to the caller's capacity proof.
+        unsafe { self.push(prim).unwrap_unchecked() }
+    }
+
     /// True if no primitives have been written.
     fn is_empty(&self) -> bool {
         self.len() == 0
@@ -570,6 +581,15 @@ impl<T> PrimitiveSink<T> for PrimitiveArena<'_, T> {
 
     fn push(&mut self, prim: T) -> Option<&mut T> {
         PrimitiveArena::push(self, prim)
+    }
+
+    unsafe fn push_unchecked(&mut self, prim: T) -> &mut T {
+        let index = self.len;
+        self.len += 1;
+        // SAFETY: the trait contract requires the caller to preflight capacity.
+        let slot = unsafe { self.storage.get_unchecked_mut(index) };
+        *slot = prim;
+        slot
     }
 }
 
@@ -684,6 +704,24 @@ impl<T> PrimitiveSink<T> for PrimitivePacketArena<'_> {
 
     fn push(&mut self, prim: T) -> Option<&mut T> {
         self.push_packet(prim)
+    }
+
+    unsafe fn push_unchecked(&mut self, prim: T) -> &mut T {
+        debug_assert!(core::mem::size_of::<T>() > 0);
+        debug_assert!(core::mem::size_of::<T>() <= core::mem::size_of::<PrimitivePacketSlot>());
+        debug_assert!(core::mem::align_of::<T>() <= core::mem::align_of::<PrimitivePacketSlot>());
+        let index = self.len;
+        self.len += 1;
+        // SAFETY: the trait contract proves `index` is in range; the slot
+        // alignment/size assertions are compile-time properties of `T`.
+        let ptr = unsafe { self.storage.get_unchecked_mut(index) }
+            .words
+            .as_mut_ptr()
+            .cast::<T>();
+        unsafe {
+            ptr.write(prim);
+            &mut *ptr
+        }
     }
 }
 

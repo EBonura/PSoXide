@@ -92,8 +92,8 @@ pub use lighting::{
     PointLightSample, Rgb8, LIGHTING_MAX, LIGHTING_NEUTRAL,
 };
 pub use movement::{
-    camera_relative_move, camera_relative_move_axes, camera_relative_move_q12, CameraRelativeMove,
-    InputAxis, InputAxisProfile, InputVector,
+    camera_relative_move, camera_relative_move_axes, camera_relative_move_q12, yaw_to_point,
+    CameraRelativeMove, InputAxis, InputAxisProfile, InputVector,
 };
 pub use render::{
     CameraDepth, DepthBand, DepthRange, DepthSlot, GpuPacket, OtDepth, OtFrame, OtSubmitInFlight,

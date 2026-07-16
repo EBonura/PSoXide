@@ -306,6 +306,81 @@ fn model_no_cull_unclamped_batch_keeps_both_windings() {
 }
 
 #[test]
+fn layered_bucketed_model_batch_culls_once_and_keeps_material_passes_contiguous() {
+    const ZERO: TriTextured = TriTextured::new(
+        [(0, 0), (0, 0), (0, 0)],
+        [(0, 0), (0, 0), (0, 0)],
+        0,
+        0,
+        (0, 0, 0),
+    );
+    let projected = [
+        ProjectedVertex::new(10, 10, 100),
+        ProjectedVertex::new(30, 10, 120),
+        ProjectedVertex::new(10, 30, 140),
+    ];
+    let faces = [
+        TexturedModelRenderFace::new([0, 1, 2], [(0, 0), (15, 0), (0, 15)]),
+        TexturedModelRenderFace::new([0, 2, 1], [(0, 0), (0, 15), (15, 0)]),
+        TexturedModelRenderFace::new([0, 1, 2], [(16, 0), (31, 0), (16, 15)]),
+    ];
+    let base_material = TextureMaterial::opaque(1, 2, (128, 128, 128));
+    let secondary_material = TextureMaterial::blended(3, 4, (96, 112, 128), BlendMode::AddQuarter);
+    let base_options = WorldSurfaceOptions::new(DepthBand::whole(), DepthRange::new(0, 1000));
+    let secondary_options = base_options.with_material_layer(secondary_material);
+
+    let mut ot_storage = OrderingTable::<8>::new();
+    let mut ot = OtFrame::begin(&mut ot_storage);
+    let mut triangle_storage = [const { ZERO }; 6];
+    let triangle_start = triangle_storage.as_ptr();
+    let mut triangles = PrimitiveArena::new(&mut triangle_storage);
+    let mut commands = [WorldTriCommand::EMPTY; 6];
+    let mut stats = TexturedModelRenderStats::default();
+    let mut faces_considered = 0;
+    {
+        let mut pass = WorldRenderPass::new_bucketed(&mut ot, &mut commands);
+        pass.submit_predecoded_model_faces_layered_bucketed_average_unclamped_extent_safe_batch::<
+            true,
+        >(
+            &mut triangles,
+            &projected,
+            &faces,
+            base_material.textured_packet_material(),
+            secondary_material.textured_packet_material(),
+            base_options,
+            secondary_options,
+            &mut stats,
+            &mut faces_considered,
+        );
+
+        assert_eq!(pass.command_len(), 4);
+        let compact = pass.commands.as_ptr().cast::<BucketedWorldCommand>();
+        let command_ptr = |index| unsafe { (*compact.add(index)).packet_ptr };
+        // Packets are allocated face-by-face, but commands must preserve the
+        // old all-base-then-all-secondary material-pass order.
+        assert_eq!(command_ptr(0), triangle_start.cast_mut().cast::<u32>());
+        assert_eq!(command_ptr(1), unsafe {
+            triangle_start.add(2).cast_mut().cast::<u32>()
+        });
+        assert_eq!(command_ptr(2), unsafe {
+            triangle_start.add(1).cast_mut().cast::<u32>()
+        });
+        assert_eq!(command_ptr(3), unsafe {
+            triangle_start.add(3).cast_mut().cast::<u32>()
+        });
+    }
+
+    assert_eq!(faces_considered, 6);
+    assert_eq!(stats.packed_face_calls, 6);
+    assert_eq!(stats.packed_unclamped_face_calls, 6);
+    assert_eq!(stats.culled_triangles, 2);
+    assert_eq!(stats.submitted_triangles, 4);
+    assert_eq!(stats.fast_submitted_triangles, 4);
+    assert!(!stats.primitive_overflow);
+    assert!(!stats.command_overflow);
+}
+
+#[test]
 fn gouraud_packed_uv_words_match_packet_texcoords() {
     let material = TextureMaterial::opaque(0x1234, 0x0160, (96, 128, 160));
     let verts = [(12, 34), (56, 78), (90, 123)];
@@ -1171,6 +1246,7 @@ fn prepared_depth_quad_splits_before_ps1_extent_rejection() {
     let stats = pass.submit_textured_gouraud_quad_prescreened_uv_words_prepared_depth(
         &mut packets,
         None,
+        false,
         verts,
         uv_words,
         colors,
@@ -1182,6 +1258,75 @@ fn prepared_depth_quad_splits_before_ps1_extent_rejection() {
     assert!(stats.split_triangles > 0);
     assert!(stats.submitted_triangles > 2);
     assert_eq!(packets.len(), stats.submitted_triangles as usize);
+}
+
+#[test]
+fn prebuilt_static_room_quad_only_patches_positions_after_first_draw() {
+    let first = [
+        ProjectedVertex::new(10, 10, 200),
+        ProjectedVertex::new(30, 10, 200),
+        ProjectedVertex::new(30, 30, 200),
+        ProjectedVertex::new(10, 30, 200),
+    ];
+    let second = [
+        ProjectedVertex::new(11, 12, 200),
+        ProjectedVertex::new(31, 12, 200),
+        ProjectedVertex::new(31, 32, 200),
+        ProjectedVertex::new(11, 32, 200),
+    ];
+    let material = TextureMaterial::opaque(3, 4, (128, 128, 128));
+    let options = WorldSurfaceOptions::new(DepthBand::whole(), DepthRange::new(0, 1000));
+    let prepared = PreparedTriangleDepth::from_quad_average::<8>(options, first);
+    let mut ot_storage = OrderingTable::<8>::new();
+    let mut ot = OtFrame::begin(&mut ot_storage);
+    let mut commands = [WorldTriCommand::EMPTY; 2];
+    let mut pass = WorldRenderPass::new_bucketed(&mut ot, &mut commands);
+    let mut packet = QuadTexturedGouraud::EMPTY;
+    let mut valid = 0;
+    let first_colors = [(10, 20, 30), (40, 50, 60), (70, 80, 90), (100, 110, 120)];
+    let second_colors = [(1, 2, 3); 4];
+
+    let _ = pass.submit_prebuilt_textured_gouraud_quad(
+        &mut packet,
+        &mut valid,
+        true,
+        first,
+        [0, 1, 2, 3],
+        first_colors,
+        material.textured_gouraud_packet_material(),
+        options,
+        prepared,
+    );
+    let packed_colors = (
+        packet.color0_cmd,
+        packet.color1,
+        packet.color2,
+        packet.color3,
+    );
+    let first_v0 = packet.v0;
+    let _ = pass.submit_prebuilt_textured_gouraud_quad(
+        &mut packet,
+        &mut valid,
+        true,
+        second,
+        [0, 1, 2, 3],
+        second_colors,
+        material.textured_gouraud_packet_material(),
+        options,
+        prepared,
+    );
+
+    assert_eq!(valid, 1);
+    assert_ne!(packet.v0, first_v0);
+    assert_eq!(
+        (
+            packet.color0_cmd,
+            packet.color1,
+            packet.color2,
+            packet.color3
+        ),
+        packed_colors
+    );
 }
 
 #[test]

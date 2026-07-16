@@ -348,10 +348,19 @@ impl Playtest {
             }
         }
         let circle = self.update_evade_run_button(ctx, delta_vblanks);
+        let lock_facing_yaw = self
+            .lock_target_position()
+            .and_then(|target| psx_engine::yaw_to_point(self.motor.position(), target));
         let mut input = if action_locked {
             CharacterMotorInput::default()
         } else {
-            motor_input(ctx, self.camera.yaw(), circle.sprint, circle.evade)
+            motor_input(
+                ctx,
+                self.camera.yaw(),
+                circle.sprint,
+                circle.evade,
+                lock_facing_yaw,
+            )
         };
         if !action_locked && self.motor.action().is_idle() {
             let started = if ctx.just_pressed(LIGHT_ATTACK_BUTTON) {
