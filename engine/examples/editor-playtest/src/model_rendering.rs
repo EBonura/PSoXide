@@ -47,6 +47,24 @@ const SHADOW_TUNING: mr::ShadowTuning = mr::ShadowTuning {
 };
 
 impl Playtest {
+    #[cfg(feature = "cd-stream-bench")]
+    pub(super) fn step_persistent_model_assets(&mut self) -> bool {
+        {
+            let assets = persistent_assets_arena_mut();
+            assets.begin(UI_PACK_START_LBA, UI_PACK_TOC, ASSETS);
+            assets.pump(cd_arena(), RUNTIME_SCHEDULE.stream_pump_sectors_per_tick);
+        }
+        if persistent_assets_arena().ready() && !self.runtime_models_loaded {
+            self.load_runtime_models();
+            self.runtime_models_loaded = true;
+            // Model parsing owns the CD first. Only now seed portal visibility
+            // and the incremental room-window job; the same tick can reconcile
+            // and pump WORLD.PAK without two readers sharing the controller.
+            self.load_active_room_window();
+        }
+        self.runtime_models_loaded
+    }
+
     pub(super) fn player_clip_duration_vblanks(
         &self,
         character: RuntimeCharacter,
@@ -85,7 +103,6 @@ impl Playtest {
 
     pub(super) fn load_runtime_models(&mut self) {
         mr::load_runtime_models(
-            ASSETS,
             MODELS,
             MODEL_CLIPS,
             &mut self.models,
@@ -96,8 +113,24 @@ impl Playtest {
             &mut self.model_part_count,
             &mut self.model_vertices,
             &mut self.model_vertex_count,
+            runtime_model_asset_bytes,
             ensure_model_atlas_uploaded,
         );
+    }
+}
+
+fn runtime_model_asset_bytes(asset_id: AssetId, kind: AssetKind) -> Option<&'static [u8]> {
+    let asset = find_asset_of_kind(ASSETS, asset_id, kind)?;
+    if !asset.bytes.is_empty() {
+        return Some(asset.bytes);
+    }
+    #[cfg(feature = "cd-stream-bench")]
+    {
+        persistent_assets_arena().bytes_for(asset)
+    }
+    #[cfg(not(feature = "cd-stream-bench"))]
+    {
+        None
     }
 }
 

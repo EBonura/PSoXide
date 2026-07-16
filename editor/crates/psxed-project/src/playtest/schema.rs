@@ -113,8 +113,8 @@ pub enum PlaytestAssetKind {
 /// payload is packed into the parallel UI.PAK that the runtime loads
 /// on demand, keeping it out of the guest's baked `.data`. The class
 /// distinguishes which transient staging buffer the runtime loads
-/// through so each buffer stays right-sized: small for menu UI images,
-/// larger for gameplay-scoped textures like the sky panorama.
+/// through, or whether the payload receives stable session-lifetime
+/// storage for parsed models and animations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StreamedClass {
     /// Baked into the guest `.data` via `include_bytes!`; never streamed.
@@ -126,6 +126,9 @@ pub enum StreamedClass {
     /// UI.PAK and staged through a larger transient buffer, loaded on
     /// gameplay entry and freed on gameplay exit.
     Gameplay,
+    /// Model mesh, atlas, or animation loaded during the initial loading
+    /// screen and kept in stable RAM for the complete gameplay session.
+    PersistentGameplay,
 }
 
 impl StreamedClass {
@@ -155,13 +158,12 @@ pub struct PlaytestAsset {
     /// CD-streaming class. [`StreamedClass::None`] bakes the payload
     /// into the guest `.data`; the other variants route the payload to
     /// UI.PAK keyed by asset index, with the variant selecting the
-    /// runtime staging buffer (small for UI images, larger for
-    /// gameplay-scoped textures like the sky panorama).
+    /// runtime lifetime and destination arena.
     pub streamed_class: StreamedClass,
 }
 
 impl PlaytestAsset {
-    /// `true` when this asset's payload is CD-streamed off UI.PAK.
+    /// `true` when this asset's payload is CD-streamed off the asset pack.
     pub fn is_streamed(&self) -> bool {
         self.streamed_class.is_streamed()
     }

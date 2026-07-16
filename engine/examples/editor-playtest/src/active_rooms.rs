@@ -551,45 +551,6 @@ impl Playtest {
         evict_unreferenced_vram(self.visibility.root, &desired, count);
     }
 
-    #[cfg(feature = "cd-stream-bench")]
-    pub(super) fn bootstrap_streamed_room_window(&mut self) {
-        self.update_room_residency();
-        self.load_active_room_window();
-
-        let mut steps = 0usize;
-        while steps < RUNTIME_SCHEDULE.stream_bootstrap_pump_limit {
-            let stream_progress = if streamed_room_stream_active() {
-                self.pump_room_stream(RUNTIME_SCHEDULE.stream_pump_sectors_per_tick)
-            } else {
-                false
-            };
-
-            if stream_progress {
-                if self.window.job.active {
-                    self.window.job.update_streaming = true;
-                } else {
-                    self.begin_active_room_window_job(true);
-                }
-            }
-
-            self.step_active_room_window_job();
-
-            if self.current_collision_room.is_some() && !self.window.job.active {
-                break;
-            }
-
-            if !streamed_room_stream_active() {
-                self.update_room_residency();
-            }
-
-            steps += 1;
-        }
-
-        if self.current_collision_room.is_none() {
-            self.load_active_room_window();
-        }
-    }
-
     pub(super) fn current_floor_link_sector(&self) -> Option<psx_engine::SectorCollision> {
         let room = self.current_collision_room.as_ref()?.collision();
         let sector_size = room.sector_size();

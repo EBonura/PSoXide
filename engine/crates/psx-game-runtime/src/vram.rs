@@ -23,14 +23,14 @@ use psx_asset::Texture;
 use psx_engine::telemetry;
 use psx_font::{upload_fonts, BitmapFont, FontAtlas};
 use psx_gpu::material::{BlendMode, TextureMaterial, TextureWindow};
+#[cfg(feature = "cd-stream-bench")]
+use psx_level::{
+    asset_flags, LevelBoxPropRecord, LevelImagePropRecord, LevelUiNodeKind, LevelUiNodeRecord,
+    LevelUiScene, LevelWorldPackEntryRecord, BOX_PROP_FACE_COUNT, UI_SCENE_NONE,
+};
 use psx_level::{
     find_asset_of_kind, sky_flags, AssetId, AssetKind, LevelAssetRecord, LevelRoomRecord,
     ResidencyChangeSet, ResidencyManager, RoomIndex, RoomResidencyRecord,
-};
-#[cfg(feature = "cd-stream-bench")]
-use psx_level::{
-    LevelBoxPropRecord, LevelImagePropRecord, LevelUiNodeKind, LevelUiNodeRecord, LevelUiScene,
-    LevelWorldPackEntryRecord, BOX_PROP_FACE_COUNT, UI_SCENE_NONE,
 };
 use psx_vram::{
     upload_bytes, Clut, TexDepth, Tpage, VramAllocator, VramHandle, VramRect, VramRegionSource,
@@ -259,8 +259,9 @@ impl<const STAGE_WORDS: usize, const SLOTS: usize> UiImageCache<STAGE_WORDS, SLO
             return;
         }
 
-        // Build the read plan from UI.PAK's TOC: every streamed (empty baked
-        // bytes) non-sky texture is a front-end UI image. The TOC is in disc
+        // Build the read plan from UI.PAK's TOC: only assets explicitly cooked
+        // as front-end UI images belong in this cache. The same pack also holds
+        // persistent model atlases and transient gameplay textures. The TOC is in disc
         // (ascending sector) order, exactly what the contiguous read requires.
         // Slot k holds chunk k, so its bytes land at the cache word
         // `k * STAGE_WORDS` that `image_bytes(k, ..)` reads back.
@@ -275,7 +276,10 @@ impl<const STAGE_WORDS: usize, const SLOTS: usize> UiImageCache<STAGE_WORDS, SLO
             let Some(asset) = find_asset_of_kind(assets, asset_id, AssetKind::Texture) else {
                 continue;
             };
-            if !asset.bytes.is_empty() || is_sky_panorama_asset(rooms, asset_id) {
+            if asset.flags & asset_flags::STREAMED_UI == 0
+                || !asset.bytes.is_empty()
+                || is_sky_panorama_asset(rooms, asset_id)
+            {
                 continue;
             }
             plans[n] = cd_stream::UiChunkPlan {

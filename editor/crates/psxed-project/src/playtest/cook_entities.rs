@@ -814,7 +814,7 @@ pub(crate) fn register_model_for_instance(
         bytes: mesh_bytes.clone(),
         filename: format!("{folder}/mesh.psxmdl"),
         source_label: resource.name.clone(),
-        streamed_class: StreamedClass::None,
+        streamed_class: StreamedClass::PersistentGameplay,
     });
 
     // Atlas asset (optional).
@@ -857,7 +857,7 @@ pub(crate) fn register_model_for_instance(
             bytes,
             filename: format!("{folder}/atlas.psxt"),
             source_label: format!("{} atlas", resource.name),
-            streamed_class: StreamedClass::None,
+            streamed_class: StreamedClass::PersistentGameplay,
         });
         Some(idx)
     } else {
@@ -973,7 +973,7 @@ pub(crate) fn register_model_for_instance(
             bytes: animation_bytes,
             filename: format!("{folder}/clip_{:02}_{safe_clip}.psxanim", local_i),
             source_label: format!("{} / {}", resource.name, clip.name),
-            streamed_class: StreamedClass::None,
+            streamed_class: StreamedClass::PersistentGameplay,
         });
         clip_remap[resolved_i as usize] = u16::try_from(local_i).ok();
         model_clips.push(PlaytestModelClip {
