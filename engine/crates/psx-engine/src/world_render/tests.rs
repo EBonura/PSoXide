@@ -452,6 +452,71 @@ fn cell_frustum_sphere_test_includes_plane_normal_support() {
 }
 
 #[test]
+fn cell_frustum_aabb_fast_paths_match_widened_reference() {
+    let camera = WorldCamera::from_basis(
+        WorldProjection::new(160, 120, 320, 40),
+        WorldVertex::ZERO,
+        Q12::from_raw(2896),
+        Q12::from_raw(2896),
+        Q12::from_raw(-1567),
+        Q12::from_raw(3785),
+    );
+    let options = WorldSurfaceOptions::new(
+        crate::DepthBand::whole(),
+        crate::DepthRange::new(40, 1_000_000),
+    );
+    let frustum = CellFrustum::new(&camera, options, 96);
+    let reference = |view: ViewVertex, half_x: i32, half_y: i32, half_z: i32| {
+        let half_x = half_x.max(0);
+        let half_y = half_y.max(0);
+        let half_z = half_z.max(0);
+        let extent_x = cell_aabb_extent_wide(frustum.view_abs[0], half_x, half_y, half_z);
+        let extent_y = cell_aabb_extent_wide(frustum.view_abs[1], half_x, half_y, half_z);
+        let extent_z = cell_aabb_extent_wide(frustum.view_abs[2], half_x, half_y, half_z);
+        if view.z < frustum.near.saturating_sub(extent_z)
+            || view.z > frustum.far.saturating_add(extent_z)
+        {
+            return false;
+        }
+        cell_aabb_lateral_visible_wide(
+            view,
+            view.z.max(frustum.near),
+            extent_x,
+            extent_y,
+            extent_z,
+            frustum.focal,
+            frustum.half_w,
+            frustum.half_h,
+        )
+    };
+
+    let views = [
+        ViewVertex::new(0, 0, 40),
+        ViewVertex::new(900, -300, 1_000),
+        ViewVertex::new(174_000, 174_000, 174_000),
+        ViewVertex::new(174_001, -174_001, 174_001),
+        ViewVertex::new(2_000_000, 500_000, 900_000),
+    ];
+    let half_extents = [
+        (0, 0, 0),
+        (832, 576, 832),
+        (174_000, 174_000, 174_000),
+        (174_001, 174_001, 174_001),
+        (i32::MAX, 2_000_000, 1_000_000),
+        (-1, -20, -300),
+    ];
+    for view in views {
+        for (half_x, half_y, half_z) in half_extents {
+            assert_eq!(
+                frustum.cell_aabb_visible(view, half_x, half_y, half_z),
+                reference(view, half_x, half_y, half_z),
+                "view={view:?}, half=({half_x},{half_y},{half_z})"
+            );
+        }
+    }
+}
+
+#[test]
 fn floor_depth_uses_farthest_projected_depth() {
     const ZERO: TriTextured = TriTextured::new(
         [(0, 0), (0, 0), (0, 0)],

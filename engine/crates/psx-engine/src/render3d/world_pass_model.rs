@@ -1,5 +1,119 @@
 use super::*;
 
+#[derive(Copy, Clone)]
+struct PreparedModelDepthSlots {
+    front: usize,
+    back: usize,
+    near: i32,
+    far: i32,
+    span: i32,
+    band_slots: i32,
+    exact_power_of_two_shift: u8,
+}
+
+impl PreparedModelDepthSlots {
+    #[inline(never)]
+    fn new<const OT_DEPTH: usize>(options: WorldSurfaceOptions) -> Self {
+        let max_slot = OT_DEPTH.saturating_sub(1);
+        let front = options.depth_band.front().min(max_slot);
+        let back = options.depth_band.back().min(max_slot);
+        let near = options.depth_range.near();
+        let far = options.depth_range.far();
+        let span = if far > near { far - near } else { 0 };
+        let band_slots = back.saturating_sub(front) as i32;
+        let exact_power_of_two_shift = if back > front && far > near && band_slots > 0 {
+            let quantum = span / band_slots;
+            if span % band_slots == 0 && quantum > 0 && quantum & (quantum - 1) == 0 {
+                (quantum as u32).trailing_zeros() as u8
+            } else {
+                u8::MAX
+            }
+        } else {
+            u8::MAX
+        };
+        Self {
+            front,
+            back,
+            near,
+            far,
+            span,
+            band_slots,
+            exact_power_of_two_shift,
+        }
+    }
+
+    #[inline(always)]
+    fn slot(self, depth: i32) -> usize {
+        if self.back <= self.front || self.far <= self.near || depth <= self.near {
+            return self.front;
+        }
+        if depth >= self.far {
+            return self.back;
+        }
+        let offset = depth - self.near;
+        if self.exact_power_of_two_shift != u8::MAX {
+            return self.front + ((offset as usize) >> self.exact_power_of_two_shift);
+        }
+        self.front + ((offset.saturating_mul(self.band_slots)) / self.span) as usize
+    }
+}
+
+#[cfg(test)]
+mod prepared_model_depth_tests {
+    use super::*;
+
+    fn assert_matches_generic<const OT_DEPTH: usize>(
+        band: DepthBand,
+        range: DepthRange,
+        depths: &[i32],
+    ) {
+        let options = WorldSurfaceOptions::new(band, range);
+        let prepared = PreparedModelDepthSlots::new::<OT_DEPTH>(options);
+        for &depth in depths {
+            assert_eq!(
+                prepared.slot(depth),
+                band.slot_depth::<OT_DEPTH>(range, CameraDepth::new(depth))
+                    .index(),
+                "OT={OT_DEPTH}, band={band:?}, range={range:?}, depth={depth}"
+            );
+        }
+    }
+
+    #[test]
+    fn prepared_depth_slots_match_generic_mapping() {
+        let depths = [
+            i32::MIN,
+            -1,
+            0,
+            40,
+            63,
+            64,
+            65,
+            95,
+            96,
+            8_192,
+            16_383,
+            16_384,
+            16_385,
+            i32::MAX,
+        ];
+        // Shipping playtest mapping: 16,320 depth units over 510 slots,
+        // exactly 32 units per slot (the shift fast path).
+        assert_matches_generic::<512>(DepthBand::new(0, 510), DepthRange::new(64, 16_384), &depths);
+        // Non-power-of-two quantum and non-divisible spans retain the exact
+        // generic multiply/divide mapping.
+        assert_matches_generic::<512>(DepthBand::new(7, 403), DepthRange::new(40, 12_345), &depths);
+        assert_matches_generic::<32>(
+            DepthBand::new(3, usize::MAX),
+            DepthRange::new(-200, 997),
+            &depths,
+        );
+        // Degenerate tables/ranges keep the conservative front slot.
+        assert_matches_generic::<0>(DepthBand::whole(), DepthRange::new(10, 1_000), &depths);
+        assert_matches_generic::<64>(DepthBand::new(20, 10), DepthRange::new(500, 500), &depths);
+    }
+}
+
 impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
     /// Submit a textured triangle in camera space.
     ///
@@ -1023,6 +1137,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         let base_command_start = self.command_len;
         let secondary_command_start = base_command_start + faces.len();
         let compact_commands = self.commands.as_mut_ptr().cast::<BucketedWorldCommand>();
+        let depth_slots = PreparedModelDepthSlots::new::<OT_DEPTH>(base_options);
         debug_assert_eq!(base_options.depth_band, secondary_options.depth_band);
         debug_assert_eq!(base_options.depth_range, secondary_options.depth_range);
         debug_assert_eq!(base_options.depth_bias, secondary_options.depth_bias);
@@ -1079,13 +1194,9 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             };
             let secondary_triangle = secondary_triangle as *mut TriTextured as *mut u32;
 
-            let depth = CameraDepth::new(
-                ((projected[0].sz + projected[1].sz + projected[2].sz) / 3)
-                    .saturating_add(base_options.depth_bias),
-            );
-            let base_slot = base_options
-                .depth_band
-                .slot_depth::<OT_DEPTH>(base_options.depth_range, depth);
+            let depth = ((projected[0].sz + projected[1].sz + projected[2].sz) / 3)
+                .saturating_add(base_options.depth_bias);
+            let base_slot = depth_slots.slot(depth);
             unsafe {
                 // SAFETY: the capacity preflight reserves two command slots per
                 // input face. Base and secondary regions are disjoint until the
@@ -1094,14 +1205,14 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                     .add(base_command_start + submitted_triangles)
                     .write(BucketedWorldCommand::new(
                         base_triangle,
-                        base_slot.index(),
+                        base_slot,
                         TriTextured::WORDS,
                     ));
                 compact_commands
                     .add(secondary_command_start + submitted_triangles)
                     .write(BucketedWorldCommand::new(
                         secondary_triangle,
-                        base_slot.index(),
+                        base_slot,
                         TriTextured::WORDS,
                     ));
             }
@@ -1277,6 +1388,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
 
         let command_start = self.command_len;
         let compact_commands = self.commands.as_mut_ptr().cast::<BucketedWorldCommand>();
+        let depth_slots = PreparedModelDepthSlots::new::<OT_DEPTH>(options);
         let mut culled_triangles = 0u16;
         let mut submitted_triangles = 0usize;
         let mut face_index = 0usize;
@@ -1318,13 +1430,9 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                     packet_material,
                 ))
             } as *mut TriTextured as *mut u32;
-            let depth = CameraDepth::new(
-                ((projected[0].sz + projected[1].sz + projected[2].sz) / 3)
-                    .saturating_add(options.depth_bias),
-            );
-            let slot = options
-                .depth_band
-                .slot_depth::<OT_DEPTH>(options.depth_range, depth);
+            let depth = ((projected[0].sz + projected[1].sz + projected[2].sz) / 3)
+                .saturating_add(options.depth_bias);
+            let slot = depth_slots.slot(depth);
             unsafe {
                 // SAFETY: the command preflight reserves one slot per input
                 // face and `submitted_triangles <= face_index`.
@@ -1332,7 +1440,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                     .add(command_start + submitted_triangles)
                     .write(BucketedWorldCommand::new(
                         triangle,
-                        slot.index(),
+                        slot,
                         TriTextured::WORDS,
                     ));
             }

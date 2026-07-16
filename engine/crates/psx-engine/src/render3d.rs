@@ -2939,36 +2939,55 @@ fn flush_blended_model_vertex_chunk(
     let chunk = &chunk[..chunk.len().min(BLENDED_VERTEX_CHUNK)];
     let mut view_blend = [ViewVertex::ZERO; BLENDED_VERTEX_CHUNK];
     // Phase 1: primary-joint transforms while the caller's state is live.
-    for (slot, &vertex_index) in chunk.iter().enumerate() {
-        let a = scene::transform_vertex_scheduled(vertices[vertex_index as usize].position);
-        view_blend[slot] = ViewVertex::new(a.x, a.y, a.z);
+    let mut slot = 0usize;
+    while slot < chunk.len() {
+        // SAFETY: the caller guarantees every chunk index is valid for the
+        // model vertex and projected-vertex slices; `slot < chunk.len()` and
+        // the local array is capped to `BLENDED_VERTEX_CHUNK` above.
+        let vertex_index = unsafe { *chunk.get_unchecked(slot) as usize };
+        let vertex = unsafe { *vertices.get_unchecked(vertex_index) };
+        let a = scene::transform_vertex_scheduled(vertex.position);
+        unsafe {
+            *view_blend.get_unchecked_mut(slot) = ViewVertex::new(a.x, a.y, a.z);
+        }
+        slot += 1;
     }
     // Phase 2: secondary transforms, reloading only on joint1 change.
     let mut loaded_joint1 = u16::MAX;
-    for (slot, &vertex_index) in chunk.iter().enumerate() {
-        let vertex = vertices[vertex_index as usize];
+    slot = 0;
+    while slot < chunk.len() {
+        let vertex_index = unsafe { *chunk.get_unchecked(slot) as usize };
+        let vertex = unsafe { *vertices.get_unchecked(vertex_index) };
         if u16::from(vertex.joint1) != loaded_joint1 {
-            let secondary = joint_view_transforms[vertex.joint1 as usize];
+            let secondary = unsafe { *joint_view_transforms.get_unchecked(vertex.joint1 as usize) };
             scene::load_rotation(&secondary.rotation);
             scene::load_translation(secondary.translation);
             loaded_joint1 = u16::from(vertex.joint1);
         }
         let b = scene::transform_vertex_scheduled(vertex.position);
-        view_blend[slot] = lerp_view_vertex(
-            view_blend[slot],
-            ViewVertex::new(b.x, b.y, b.z),
-            vertex.blend,
-        );
+        unsafe {
+            let blend = view_blend.get_unchecked_mut(slot);
+            *blend = lerp_view_vertex(*blend, ViewVertex::new(b.x, b.y, b.z), vertex.blend);
+        }
+        slot += 1;
     }
     // Phase 3: one identity/zero load projects the whole chunk.
     scene::load_rotation(&Mat3I16::IDENTITY);
     scene::load_translation(Vec3I32::ZERO);
-    for (slot, &vertex_index) in chunk.iter().enumerate() {
-        let projected = project_gte_view_vertex_identity_loaded(view_blend[slot], projection);
+    slot = 0;
+    while slot < chunk.len() {
+        let vertex_index = unsafe { *chunk.get_unchecked(slot) as usize };
+        let projected = project_gte_view_vertex_identity_loaded(
+            unsafe { *view_blend.get_unchecked(slot) },
+            projection,
+        );
         *all_in_front &= projected_model_vertex_in_front(projected, near_z);
         *all_inside_hw_bounds &= projected_model_vertex_inside_hw_bounds(projected);
         track_projected_model_bounds(projected, min_x, max_x, min_y, max_y);
-        projected_vertices[vertex_index as usize] = projected;
+        unsafe {
+            *projected_vertices.get_unchecked_mut(vertex_index) = projected;
+        }
+        slot += 1;
     }
     // Phase 4: restore the caller's primary joint state.
     scene::load_rotation(&primary.rotation);
@@ -2983,11 +3002,10 @@ fn flush_blended_model_vertex_chunk(
 #[inline]
 fn lerp_view_vertex(a: ViewVertex, b: ViewVertex, t: u8) -> ViewVertex {
     let t = t as i32;
-    let inv = 256 - t;
     ViewVertex::new(
-        ((a.x * inv) + (b.x * t)) >> 8,
-        ((a.y * inv) + (b.y * t)) >> 8,
-        ((a.z * inv) + (b.z * t)) >> 8,
+        a.x + (((b.x - a.x) * t) >> 8),
+        a.y + (((b.y - a.y) * t) >> 8),
+        a.z + (((b.z - a.z) * t) >> 8),
     )
 }
 
@@ -3114,7 +3132,7 @@ fn projected_triangle_can_skip_split(
 }
 
 #[inline(always)]
-fn projected_quad_bounds_hw_extent_safe(verts: [ProjectedVertex; 4]) -> bool {
+fn projected_quad_bounds_hw_extent_safe(verts: &[ProjectedVertex; 4]) -> bool {
     let min_x = verts[0]
         .sx
         .min(verts[1].sx)

@@ -204,9 +204,9 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
     pub fn submit_textured_gouraud_quad_prescreened_u8<P>(
         &mut self,
         primitives: &mut P,
-        verts: [ProjectedVertex; 4],
-        uvs: [(u8, u8); 4],
-        colors: [(u8, u8, u8); 4],
+        verts: &[ProjectedVertex; 4],
+        uvs: &[(u8, u8); 4],
+        colors: &[(u8, u8, u8); 4],
         material: TextureMaterial,
         options: WorldSurfaceOptions,
     ) -> WorldRenderStats
