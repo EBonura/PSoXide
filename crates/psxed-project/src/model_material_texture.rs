@@ -2,6 +2,8 @@
 
 use crate::ProceduralNoiseTexture;
 
+const MATERIAL_NEUTRAL_TINT: u8 = 128;
+
 /// Fixed texture size for the generated secondary model layer.
 pub const MODEL_NOISE_TEXTURE_SIZE: u16 = 64;
 
@@ -62,6 +64,127 @@ pub fn generate_model_noise_indices(settings: ProceduralNoiseTexture) -> Vec<u8>
         }
     }
     pixels
+}
+
+/// Collapse an `Average` primary pass followed by an `AddQuarter` secondary
+/// pass into one 4bpp texture for an `Average` draw.
+///
+/// The PS1 blend equation is preserved for pixels covered by both layers:
+/// `background / 2 + primary / 2 + secondary / 4` becomes
+/// `background / 2 + (primary + secondary / 2) / 2`. The authored tints are
+/// baked into the fused palette, so the runtime material must use neutral
+/// `[128, 128, 128]` modulation afterwards.
+pub fn fuse_average_add_quarter_psxt(
+    primary_bytes: &[u8],
+    primary_tint: [u8; 3],
+    secondary_bytes: &[u8],
+    secondary_tint: [u8; 3],
+) -> Result<Vec<u8>, String> {
+    let primary = psx_asset::Texture::from_bytes(primary_bytes)
+        .map_err(|error| format!("primary texture is not a valid PSXT: {error:?}"))?;
+    let secondary = psx_asset::Texture::from_bytes(secondary_bytes)
+        .map_err(|error| format!("secondary texture is not a valid PSXT: {error:?}"))?;
+    validate_fusion_texture("primary", primary)?;
+    validate_fusion_texture("secondary", secondary)?;
+
+    let width = primary.width();
+    let height = primary.height();
+    let mut rgba = Vec::with_capacity(usize::from(width) * usize::from(height));
+    for y in 0..height {
+        for x in 0..width {
+            let primary_index = texture_4bpp_index(primary, x, y);
+            let secondary_index =
+                texture_4bpp_index(secondary, x % secondary.width(), y % secondary.height());
+            let primary_visible = !(primary.index_zero_transparent() && primary_index == 0);
+            let secondary_visible = !(secondary.index_zero_transparent() && secondary_index == 0);
+            if !primary_visible && !secondary_visible {
+                rgba.push([0, 0, 0, 0]);
+                continue;
+            }
+
+            let primary_rgb = if primary_visible {
+                tinted_clut_rgb(primary, primary_index, primary_tint)
+            } else {
+                [0; 3]
+            };
+            let secondary_rgb = if secondary_visible {
+                tinted_clut_rgb(secondary, secondary_index, secondary_tint)
+            } else {
+                [0; 3]
+            };
+            rgba.push([
+                primary_rgb[0].saturating_add(secondary_rgb[0] / 2),
+                primary_rgb[1].saturating_add(secondary_rgb[1] / 2),
+                primary_rgb[2].saturating_add(secondary_rgb[2] / 2),
+                255,
+            ]);
+        }
+    }
+
+    let (palette, indices) = psxed_tex::quantize_rgba_with_transparent_zero(&rgba, 16)
+        .map_err(|error| format!("could not quantise fused material: {error}"))?;
+    psxed_tex::encode_indexed_psxt(
+        width,
+        height,
+        psxed_tex::PsxtDepth::Bit4,
+        &indices,
+        &palette,
+        true,
+    )
+    .map_err(|error| format!("could not encode fused material: {error}"))
+}
+
+/// Modulation value the runtime should use after
+/// [`fuse_average_add_quarter_psxt`] bakes both layer tints.
+pub const fn fused_material_neutral_tint() -> [u8; 3] {
+    [MATERIAL_NEUTRAL_TINT; 3]
+}
+
+fn validate_fusion_texture(label: &str, texture: psx_asset::Texture<'_>) -> Result<(), String> {
+    if texture.depth() != psxed_format::texture::Depth::Bit4 || texture.clut_entries() != 16 {
+        return Err(format!("{label} texture must be a single-CLUT 4bpp PSXT"));
+    }
+    if texture.width() == 0 || texture.height() == 0 {
+        return Err(format!("{label} texture has zero dimensions"));
+    }
+    Ok(())
+}
+
+fn texture_4bpp_index(texture: psx_asset::Texture<'_>, x: u16, y: u16) -> u8 {
+    let halfword = usize::from(y) * usize::from(texture.halfwords_per_row()) + usize::from(x / 4);
+    let offset = halfword * 2;
+    let packed = u16::from_le_bytes([
+        texture.pixel_bytes()[offset],
+        texture.pixel_bytes()[offset + 1],
+    ]);
+    ((packed >> ((x & 3) * 4)) & 0x0f) as u8
+}
+
+fn tinted_clut_rgb(texture: psx_asset::Texture<'_>, index: u8, tint: [u8; 3]) -> [u8; 3] {
+    let offset = usize::from(index) * 2;
+    let raw = u16::from_le_bytes([
+        texture.clut_bytes()[offset],
+        texture.clut_bytes()[offset + 1],
+    ]);
+    let rgb = [
+        expand_5bit((raw & 0x1f) as u8),
+        expand_5bit(((raw >> 5) & 0x1f) as u8),
+        expand_5bit(((raw >> 10) & 0x1f) as u8),
+    ];
+    [
+        modulate(rgb[0], tint[0]),
+        modulate(rgb[1], tint[1]),
+        modulate(rgb[2], tint[2]),
+    ]
+}
+
+const fn expand_5bit(value: u8) -> u8 {
+    (value << 3) | (value >> 2)
+}
+
+fn modulate(value: u8, tint: u8) -> u8 {
+    let product = value as u16 * tint as u16;
+    ((product + 64) / 128).min(255) as u8
 }
 
 fn value_noise_2d(seed: u32, x: u32, y: u32, period: u32) -> u32 {
@@ -135,5 +258,56 @@ mod tests {
         assert_eq!(texture.height(), MODEL_NOISE_TEXTURE_SIZE);
         assert_eq!(texture.clut_entries(), 16);
         assert!(texture.index_zero_transparent());
+    }
+
+    #[test]
+    fn compatible_layers_fuse_to_repeating_4bpp_texture() {
+        let primary = psxed_tex::encode_indexed_psxt(
+            4,
+            2,
+            psxed_tex::PsxtDepth::Bit4,
+            &[0, 1, 1, 1, 1, 1, 1, 1],
+            &[[0, 0, 0], [128, 64, 32]],
+            true,
+        )
+        .unwrap();
+        let secondary = psxed_tex::encode_indexed_psxt(
+            2,
+            1,
+            psxed_tex::PsxtDepth::Bit4,
+            &[0, 1],
+            &[[0, 0, 0], [64, 128, 192]],
+            true,
+        )
+        .unwrap();
+
+        let fused =
+            fuse_average_add_quarter_psxt(&primary, [128, 128, 128], &secondary, [128, 128, 128])
+                .unwrap();
+        let texture = psx_asset::Texture::from_bytes(&fused).unwrap();
+        assert_eq!((texture.width(), texture.height()), (4, 2));
+        assert_eq!(texture.depth(), psxed_format::texture::Depth::Bit4);
+        assert_eq!(texture.clut_entries(), 16);
+        assert!(texture.index_zero_transparent());
+        assert_eq!(texture_4bpp_index(texture, 0, 0), 0);
+        assert_ne!(texture_4bpp_index(texture, 1, 0), 0);
+        assert_ne!(texture_4bpp_index(texture, 2, 0), 0);
+    }
+
+    #[test]
+    fn fusion_rejects_non_4bpp_input() {
+        let indexed_8bpp = psxed_tex::encode_indexed_psxt(
+            2,
+            1,
+            psxed_tex::PsxtDepth::Bit8,
+            &[1, 1],
+            &[[0, 0, 0], [255, 255, 255]],
+            true,
+        )
+        .unwrap();
+        let secondary = generate_model_noise_psxt(ProceduralNoiseTexture::default());
+        assert!(
+            fuse_average_add_quarter_psxt(&indexed_8bpp, [128; 3], &secondary, [128; 3]).is_err()
+        );
     }
 }

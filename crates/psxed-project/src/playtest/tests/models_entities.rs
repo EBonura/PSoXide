@@ -871,3 +871,73 @@ fn player_model_renderer_material_without_texture_keeps_model_atlas() {
         "material_override: Some(LevelModelMaterialOverride { texture_asset: None, blend_mode: 1, tint_rgb: [128, 128, 128], secondary_layer: None, flags: 2 })"
     ));
 }
+
+#[test]
+fn exclusive_player_average_noise_material_collapses_to_one_atlas_pass() {
+    let mut project = project_with_one_room();
+    let spawn_id = player_spawn_node_id(&project);
+    let renderer_id = project
+        .active_scene()
+        .node(spawn_id)
+        .and_then(|node| {
+            node.children.iter().find_map(|child| {
+                project.active_scene().node(*child).and_then(|node| {
+                    matches!(node.kind, NodeKind::ModelRenderer { .. }).then_some(node.id)
+                })
+            })
+        })
+        .expect("starter player has a model renderer");
+    let renderer_model = match project.active_scene().node(renderer_id).unwrap().kind {
+        NodeKind::ModelRenderer {
+            model: Some(model), ..
+        } => model,
+        _ => panic!("starter renderer has a model"),
+    };
+    // The starter model fixture uses an 8bpp atlas; point it at the starter's
+    // existing 4bpp material texture so this exercises the compatible path
+    // used by the Cortex player without introducing another binary fixture.
+    let four_bpp_atlas = project
+        .resources
+        .iter()
+        .find_map(|resource| match &resource.data {
+            ResourceData::Material(material) => material.psxt_path.clone(),
+            _ => None,
+        })
+        .expect("starter has a 4bpp material texture");
+    let model = match &mut project.resource_mut(renderer_model).unwrap().data {
+        ResourceData::Model(model) => model,
+        _ => panic!("renderer references a model resource"),
+    };
+    model.texture_path = Some(four_bpp_atlas);
+    let mut material = crate::MaterialResource::translucent(None, crate::PsxBlendMode::Average);
+    material.tint = [160, 176, 192];
+    material.secondary_layer = Some(crate::ModelSecondaryLayer::default());
+    let material_id = project.add_resource("Player Crystal", ResourceData::Material(material));
+    let NodeKind::ModelRenderer { material, .. } = &mut project
+        .active_scene_mut()
+        .node_mut(renderer_id)
+        .unwrap()
+        .kind
+    else {
+        panic!("expected model renderer");
+    };
+    *material = Some(material_id);
+
+    let (package, report) = build_package(&project, &starter_project_root());
+    assert!(report.is_ok(), "errors: {:?}", report.errors);
+    let package = package.expect("cooks");
+    let character = &package.characters[0];
+    let material = character.material_override.expect("player material cooks");
+    assert_eq!(material.blend_mode, crate::PsxBlendMode::Average);
+    assert_eq!(material.tint_rgb, [128; 3]);
+    assert_eq!(material.secondary_layer, None);
+    assert_eq!(material.texture_asset_index, None);
+
+    let model = &package.models[usize::from(character.model)];
+    let atlas = &package.assets[model.texture_asset_index.expect("model atlas")];
+    assert!(atlas.source_label.contains("fused player material"));
+    let texture = psx_asset::Texture::from_bytes(&atlas.bytes).expect("fused atlas parses");
+    assert_eq!(texture.depth(), psxed_format::texture::Depth::Bit4);
+    assert_eq!(texture.clut_entries(), 16);
+    assert!(texture.index_zero_transparent());
+}
