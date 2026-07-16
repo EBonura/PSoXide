@@ -908,35 +908,81 @@ impl<'a> Animation<'a> {
             return None;
         }
         let base = frame_index as usize * self.joint_count as usize * self.pose_record_size;
-        self.pose_at_frame_offset(base, joint_index)
+        // SAFETY: both indices were checked above. `from_bytes` validates
+        // the complete frame/joint table before constructing `Animation`.
+        Some(unsafe { self.pose_at_frame_offset_unchecked(base, joint_index) })
     }
 
     #[inline]
-    fn pose_at_frame_offset(&self, frame_offset: usize, joint_index: u16) -> Option<JointPose> {
-        if joint_index >= self.joint_count {
-            return None;
+    unsafe fn pose_at_frame_offset_unchecked(
+        &self,
+        frame_offset: usize,
+        joint_index: u16,
+    ) -> JointPose {
+        let base = frame_offset + joint_index as usize * self.pose_record_size;
+        if self.poses.as_ptr() as usize & 1 != 0 {
+            return unsafe { self.pose_at_byte_offset_unaligned(base) };
         }
-        let base = frame_offset.checked_add(joint_index as usize * self.pose_record_size)?;
-        let bytes = self.poses.get(base..base + self.pose_record_size)?;
-        let matrix = read_pose_matrix(bytes);
+        let matrix = unsafe { read_pose_matrix_aligned_unchecked(self.poses, base) };
         let off = 18;
         let translation = if self.pose_record_size == psxed_format::animation::POSE_RECORD_SIZE {
             Vec3I32::new(
-                decode_packed_translation(read_i16(bytes, off), self.translation_shift),
-                decode_packed_translation(read_i16(bytes, off + 2), self.translation_shift),
-                decode_packed_translation(read_i16(bytes, off + 4), self.translation_shift),
+                decode_packed_translation(
+                    unsafe { read_i16_aligned_unchecked(self.poses, base + off) },
+                    self.translation_shift,
+                ),
+                decode_packed_translation(
+                    unsafe { read_i16_aligned_unchecked(self.poses, base + off + 2) },
+                    self.translation_shift,
+                ),
+                decode_packed_translation(
+                    unsafe { read_i16_aligned_unchecked(self.poses, base + off + 4) },
+                    self.translation_shift,
+                ),
             )
         } else {
             Vec3I32::new(
-                read_i32(bytes, off),
-                read_i32(bytes, off + 4),
-                read_i32(bytes, off + 8),
+                unsafe { read_i32_unchecked(self.poses, base + off) },
+                unsafe { read_i32_unchecked(self.poses, base + off + 4) },
+                unsafe { read_i32_unchecked(self.poses, base + off + 8) },
             )
         };
-        Some(JointPose {
+        JointPose {
             matrix,
             translation,
-        })
+        }
+    }
+
+    #[inline(never)]
+    unsafe fn pose_at_byte_offset_unaligned(&self, base: usize) -> JointPose {
+        let matrix = unsafe { read_pose_matrix_unchecked(self.poses, base) };
+        let off = 18;
+        let translation = if self.pose_record_size == psxed_format::animation::POSE_RECORD_SIZE {
+            Vec3I32::new(
+                decode_packed_translation(
+                    unsafe { read_i16_unchecked(self.poses, base + off) },
+                    self.translation_shift,
+                ),
+                decode_packed_translation(
+                    unsafe { read_i16_unchecked(self.poses, base + off + 2) },
+                    self.translation_shift,
+                ),
+                decode_packed_translation(
+                    unsafe { read_i16_unchecked(self.poses, base + off + 4) },
+                    self.translation_shift,
+                ),
+            )
+        } else {
+            Vec3I32::new(
+                unsafe { read_i32_unchecked(self.poses, base + off) },
+                unsafe { read_i32_unchecked(self.poses, base + off + 4) },
+                unsafe { read_i32_unchecked(self.poses, base + off + 8) },
+            )
+        };
+        JointPose {
+            matrix,
+            translation,
+        }
     }
 
     #[inline]
@@ -1023,18 +1069,28 @@ impl AnimationPoseSample<'_> {
     /// Joint pose at this sample's precomputed looping phase.
     #[inline]
     pub fn pose(&self, joint_index: u16) -> Option<JointPose> {
+        if joint_index >= self.animation.joint_count {
+            return None;
+        }
         if self.alpha_q12 == 0 || self.base_frame == self.next_frame {
-            return self
-                .animation
-                .pose_at_frame_offset(self.base_frame_offset, joint_index);
+            // SAFETY: the joint index was checked above and the frame offset
+            // was computed from a validated animation frame.
+            return Some(unsafe {
+                self.animation
+                    .pose_at_frame_offset_unchecked(self.base_frame_offset, joint_index)
+            });
         }
 
-        let a = self
-            .animation
-            .pose_at_frame_offset(self.base_frame_offset, joint_index)?;
-        let b = self
-            .animation
-            .pose_at_frame_offset(self.next_frame_offset, joint_index)?;
+        // SAFETY: the joint index was checked above and both frame offsets
+        // were computed from validated animation frames.
+        let a = unsafe {
+            self.animation
+                .pose_at_frame_offset_unchecked(self.base_frame_offset, joint_index)
+        };
+        let b = unsafe {
+            self.animation
+                .pose_at_frame_offset_unchecked(self.next_frame_offset, joint_index)
+        };
         Some(lerp_pose_q12(a, b, self.alpha_q12))
     }
 
@@ -1269,14 +1325,58 @@ fn read_pose_matrix(bytes: &[u8]) -> [[i16; 3]; 3] {
 }
 
 #[inline]
+unsafe fn read_pose_matrix_unchecked(bytes: &[u8], offset: usize) -> [[i16; 3]; 3] {
+    [
+        [
+            unsafe { read_i16_unchecked(bytes, offset) },
+            unsafe { read_i16_unchecked(bytes, offset + 2) },
+            unsafe { read_i16_unchecked(bytes, offset + 4) },
+        ],
+        [
+            unsafe { read_i16_unchecked(bytes, offset + 6) },
+            unsafe { read_i16_unchecked(bytes, offset + 8) },
+            unsafe { read_i16_unchecked(bytes, offset + 10) },
+        ],
+        [
+            unsafe { read_i16_unchecked(bytes, offset + 12) },
+            unsafe { read_i16_unchecked(bytes, offset + 14) },
+            unsafe { read_i16_unchecked(bytes, offset + 16) },
+        ],
+    ]
+}
+
+#[inline]
+unsafe fn read_pose_matrix_aligned_unchecked(bytes: &[u8], offset: usize) -> [[i16; 3]; 3] {
+    [
+        [
+            unsafe { read_i16_aligned_unchecked(bytes, offset) },
+            unsafe { read_i16_aligned_unchecked(bytes, offset + 2) },
+            unsafe { read_i16_aligned_unchecked(bytes, offset + 4) },
+        ],
+        [
+            unsafe { read_i16_aligned_unchecked(bytes, offset + 6) },
+            unsafe { read_i16_aligned_unchecked(bytes, offset + 8) },
+            unsafe { read_i16_aligned_unchecked(bytes, offset + 10) },
+        ],
+        [
+            unsafe { read_i16_aligned_unchecked(bytes, offset + 12) },
+            unsafe { read_i16_aligned_unchecked(bytes, offset + 14) },
+            unsafe { read_i16_aligned_unchecked(bytes, offset + 16) },
+        ],
+    ]
+}
+
+#[inline]
 fn decode_packed_translation(value: i16, shift: u8) -> i32 {
-    (value as i32).saturating_mul(1i32 << shift)
+    debug_assert!(shift <= 15);
+    (value as i32) * (1i32 << shift)
 }
 
 #[inline]
 fn lerp_i16_q12(a: i16, b: i16, alpha_q12: u16) -> i16 {
+    debug_assert!(alpha_q12 < 4096);
     let value = a as i32 + (((b as i32 - a as i32) * alpha_q12 as i32) >> 12);
-    clamp_i32_to_i16(value)
+    value as i16
 }
 
 #[inline]
@@ -1290,16 +1390,6 @@ fn scale_i32_q12(value: i32, scale_q12: i32) -> i32 {
     let whole = value >> 12;
     let frac = value - (whole << 12);
     whole.saturating_mul(scale_q12) + ((frac * scale_q12) >> 12)
-}
-
-fn clamp_i32_to_i16(value: i32) -> i16 {
-    if value < i16::MIN as i32 {
-        i16::MIN
-    } else if value > i16::MAX as i32 {
-        i16::MAX
-    } else {
-        value as i16
-    }
 }
 
 /// A parsed 2D texture backed by slices into the caller's cooked
@@ -2441,12 +2531,35 @@ fn read_i16(bytes: &[u8], offset: usize) -> i16 {
 }
 
 #[inline]
+unsafe fn read_i16_unchecked(bytes: &[u8], offset: usize) -> i16 {
+    i16::from_le_bytes([unsafe { *bytes.get_unchecked(offset) }, unsafe {
+        *bytes.get_unchecked(offset + 1)
+    }])
+}
+
+#[inline]
+unsafe fn read_i16_aligned_unchecked(bytes: &[u8], offset: usize) -> i16 {
+    debug_assert_eq!((unsafe { bytes.as_ptr().add(offset) } as usize) & 1, 0);
+    i16::from_le(unsafe { bytes.as_ptr().add(offset).cast::<i16>().read() })
+}
+
+#[inline]
 fn read_i32(bytes: &[u8], offset: usize) -> i32 {
     i32::from_le_bytes([
         bytes[offset],
         bytes[offset + 1],
         bytes[offset + 2],
         bytes[offset + 3],
+    ])
+}
+
+#[inline]
+unsafe fn read_i32_unchecked(bytes: &[u8], offset: usize) -> i32 {
+    i32::from_le_bytes([
+        unsafe { *bytes.get_unchecked(offset) },
+        unsafe { *bytes.get_unchecked(offset + 1) },
+        unsafe { *bytes.get_unchecked(offset + 2) },
+        unsafe { *bytes.get_unchecked(offset + 3) },
     ])
 }
 

@@ -302,6 +302,20 @@ fn animation_round_trip_pose_table() {
     let gte_pose = sample.gte_pose(0).unwrap();
     assert_eq!(gte_pose.translation, Vec3I16::new(0, 0, 0));
     assert_eq!(gte_pose.translation_shift, 0);
+
+    let mut unaligned = std::vec![0u8];
+    unaligned.extend_from_slice(&buf);
+    let unaligned_bytes = &unaligned[1..];
+    assert_eq!(unaligned_bytes.as_ptr() as usize & 1, 1);
+    let unaligned_animation = Animation::from_bytes(unaligned_bytes).expect("parse unaligned");
+    assert_eq!(unaligned_animation.pose(1, 0), Some(pose));
+
+    let mut halfword_aligned = std::vec![0u8; 2];
+    halfword_aligned.extend_from_slice(&buf);
+    let halfword_bytes = &halfword_aligned[2..];
+    assert_eq!(halfword_bytes.as_ptr() as usize & 3, 2);
+    let halfword_animation = Animation::from_bytes(halfword_bytes).expect("parse halfword-aligned");
+    assert_eq!(halfword_animation.pose(1, 0), Some(pose));
 }
 
 #[test]
@@ -346,6 +360,35 @@ fn animation_looped_pose_interpolates_q12_phase() {
     let wrapped = animation.pose_looped_q12(0x1800, 0).unwrap();
     assert_eq!(wrapped.matrix[0][0], 3072);
     assert_eq!(wrapped.translation, Vec3I32::new(50, -50, 25));
+}
+
+#[test]
+fn i16_animation_lerp_stays_between_extreme_endpoints() {
+    let values = [i16::MIN, -30_000, -1, 0, 1, 30_000, i16::MAX];
+    let alphas = [0, 1, 63, 1_024, 2_047, 2_048, 2_049, 4_094, 4_095];
+    for &a in &values {
+        for &b in &values {
+            for &alpha in &alphas {
+                let actual = super::lerp_i16_q12(a, b, alpha);
+                assert!(actual >= a.min(b) && actual <= a.max(b));
+                let expected = (a as i32 + (((b as i32 - a as i32) * alpha as i32) >> 12)) as i16;
+                assert_eq!(actual, expected);
+            }
+        }
+    }
+}
+
+#[test]
+fn packed_animation_translation_decode_fits_i32_for_every_shift() {
+    for shift in 0..=15 {
+        let scale = 1i32 << shift;
+        for value in [i16::MIN, -1, 0, 1, i16::MAX] {
+            assert_eq!(
+                super::decode_packed_translation(value, shift),
+                i32::from(value) * scale
+            );
+        }
+    }
 }
 
 #[test]
