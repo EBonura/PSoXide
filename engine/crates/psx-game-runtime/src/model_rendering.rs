@@ -366,6 +366,14 @@ fn decode_model_render_faces(
     let mut i = 0usize;
     while i < face_count {
         let face = model.face(i as u16)?;
+        let vertex_count = model.vertex_count();
+        if face
+            .corners
+            .iter()
+            .any(|corner| corner.vertex_index >= vertex_count)
+        {
+            return None;
+        }
         face_pool[*face_cursor + i] = TexturedModelRenderFace::new(
             [
                 face.corners[0].vertex_index,
