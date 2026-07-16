@@ -452,6 +452,31 @@ fn cell_frustum_sphere_test_includes_plane_normal_support() {
 }
 
 #[test]
+fn cell_frustum_aabb_rejects_flat_cell_retained_by_bounding_sphere() {
+    let camera = WorldCamera::from_basis(
+        WorldProjection::new(160, 120, 200, 40),
+        WorldVertex::ZERO,
+        Q12::ZERO,
+        Q12::ONE,
+        Q12::ZERO,
+        Q12::ONE,
+    );
+    let options = WorldSurfaceOptions::new(
+        crate::DepthBand::whole(),
+        crate::DepthRange::new(40, 10_000),
+    );
+    let frustum = CellFrustum::new(&camera, options, 0);
+    let view = ViewVertex::new(990, 0, 1_000);
+
+    // A sphere enclosing the 200x20x200 cell intersects the right plane, but
+    // the actual world-axis-aligned cell box is wholly outside it. The cached
+    // all-cells path can therefore skip projection and surface traversal
+    // without losing any potentially visible geometry.
+    assert!(frustum.sphere_visible_no_far(view, 142));
+    assert!(!frustum.cell_aabb_visible(view, 100, 10, 100));
+}
+
+#[test]
 fn cell_frustum_aabb_fast_paths_match_widened_reference() {
     let camera = WorldCamera::from_basis(
         WorldProjection::new(160, 120, 320, 40),
