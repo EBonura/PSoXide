@@ -1,5 +1,7 @@
 use super::*;
 #[cfg(feature = "cd-stream-bench")]
+use psx_game_runtime::asset_streaming::PersistentAssetStreamer;
+#[cfg(feature = "cd-stream-bench")]
 use psx_game_runtime::room_streaming::{RoomStreamScheduler, StreamedRoomPages};
 #[cfg(feature = "cd-stream-bench")]
 use psx_game_runtime::vram::UiImageCache;
@@ -496,6 +498,11 @@ pub(super) type RuntimeUiImageCache = UiImageCache<UI_STAGE_WORDS, UI_PACK_IMAGE
 #[cfg(feature = "cd-stream-bench")]
 pub(super) type RuntimeStreamedRoomSlots =
     StreamedRoomPages<STREAMED_ROOM_PAGE_COUNT, STREAMED_ROOM_SLOT_COUNT>;
+
+/// Persistent model/animation cache sized exactly by the cooked asset table.
+#[cfg(feature = "cd-stream-bench")]
+pub(super) type RuntimePersistentAssetStreamer =
+    PersistentAssetStreamer<PERSISTENT_ASSET_PAGE_COUNT, PERSISTENT_ASSET_SLOT_COUNT>;
 
 /// The crate streamed-room scheduler instantiated with this example's slot
 /// count and room-index capacity.
