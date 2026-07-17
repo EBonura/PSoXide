@@ -1189,9 +1189,40 @@ pub struct LevelMaterialRecord {
     /// Per-material modulation tint. Renderer multiplies the
     /// texture sample by this colour.
     pub tint_rgb: [u8; 3],
+    /// Blend-mode code from [`model_override_blend`].
+    pub blend_mode: u8,
+    /// One-pass room-material animation.
+    pub animation: LevelMaterialAnimation,
     /// Runtime material flags. Low two bits encode face sidedness
     /// using [`material_flags::FACE_*`].
     pub flags: u16,
+}
+
+/// Runtime animation attached to one room-material slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LevelMaterialAnimation {
+    /// No animation and no dynamic packet work.
+    #[default]
+    Static,
+    /// Signed Q8 UV motion through the resident texture.
+    UvScroll(LevelMaterialUvMotion),
+    /// Row-major frame selection inside one resident texture atlas.
+    Flipbook(LevelMaterialFlipbook),
+}
+
+/// Grid-packed room-material flipbook recipe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelMaterialFlipbook {
+    /// Frame columns in the resident texture.
+    pub columns: u8,
+    /// Frame rows in the resident texture.
+    pub rows: u8,
+    /// Active cells in row-major order.
+    pub frame_count: u8,
+    /// Simulation ticks per frame.
+    pub ticks_per_frame: u8,
+    /// Initial frame index.
+    pub phase: u8,
 }
 
 /// Material flag bits stored in [`LevelMaterialRecord::flags`].
@@ -1755,6 +1786,44 @@ pub struct LevelModelSecondaryLayer {
     pub blend_mode: u8,
     /// Independent per-pass modulation tint.
     pub tint_rgb: [u8; 3],
+    /// Deterministic UV motion applied to this pass.
+    pub motion: LevelMaterialUvMotion,
+}
+
+/// Runtime-safe UV animation recipe for a material pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelMaterialUvMotion {
+    /// Whether motion is active.
+    pub enabled: bool,
+    /// Horizontal speed in signed Q8 texels per second.
+    pub speed_u_q8: i16,
+    /// Vertical speed in signed Q8 texels per second.
+    pub speed_v_q8: i16,
+    /// Initial horizontal texel offset.
+    pub phase_u: u8,
+    /// Initial vertical texel offset.
+    pub phase_v: u8,
+}
+
+impl LevelMaterialUvMotion {
+    /// Resolve motion at a fixed simulation tick, wrapping in PS1 UV space.
+    pub fn offset_at_tick(self, tick: u32, ticks_per_second: u16) -> [u8; 2] {
+        if !self.enabled || ticks_per_second == 0 {
+            return [self.phase_u, self.phase_v];
+        }
+        let resolve = |speed_q8: i16, phase: u8| {
+            let travelled_q8 =
+                i64::from(speed_q8).saturating_mul(i64::from(tick)) / i64::from(ticks_per_second);
+            // Truncate sub-texel motion toward zero so opposite directions
+            // advance symmetrically before wrapping into byte UV space.
+            let texels = travelled_q8 / 256 + i64::from(phase);
+            texels.rem_euclid(256) as u8
+        };
+        [
+            resolve(self.speed_u_q8, self.phase_u),
+            resolve(self.speed_v_q8, self.phase_v),
+        ]
+    }
 }
 
 impl LevelModelMaterialOverride {
@@ -3381,5 +3450,25 @@ mod tests {
     fn next_focus_out_of_range_current_is_none() {
         assert_eq!(next_focus(&COLUMN, 99, NavDir::Down), None);
         assert_eq!(next_focus(&[], 0, NavDir::Up), None);
+    }
+
+    #[test]
+    fn material_uv_motion_is_symmetric_and_video_rate_aware() {
+        let positive = LevelMaterialUvMotion {
+            enabled: true,
+            speed_u_q8: 2 * 256,
+            speed_v_q8: 0,
+            phase_u: 0,
+            phase_v: 0,
+        };
+        let negative = LevelMaterialUvMotion {
+            speed_u_q8: -2 * 256,
+            ..positive
+        };
+        assert_eq!(positive.offset_at_tick(1, 60), [0, 0]);
+        assert_eq!(negative.offset_at_tick(1, 60), [0, 0]);
+        assert_eq!(positive.offset_at_tick(30, 60), [1, 0]);
+        assert_eq!(negative.offset_at_tick(30, 60), [255, 0]);
+        assert_eq!(positive.offset_at_tick(25, 50), [1, 0]);
     }
 }

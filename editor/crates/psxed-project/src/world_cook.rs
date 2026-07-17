@@ -10,9 +10,10 @@ use psxed_format::world;
 
 use crate::{
     snap_world_sector_size, GridDirection, GridHorizontalFace, GridSector, GridSplit,
-    GridVerticalFace, GridWalls, MaterialFaceSidedness, MaterialResource, ProjectDocument,
-    PsxBlendMode, ResourceData, ResourceId, WallCorner, WorldGrid, HEIGHT_QUANTUM, MAX_ROOM_BYTES,
-    MAX_ROOM_DEPTH, MAX_ROOM_TRIANGLES, MAX_ROOM_WIDTH, MAX_WALL_STACK, WORLD_SECTOR_SIZE_QUANTUM,
+    GridVerticalFace, GridWalls, MaterialAnimation, MaterialFaceSidedness, MaterialResource,
+    ProjectDocument, PsxBlendMode, ResourceData, ResourceId, WallCorner, WorldGrid, HEIGHT_QUANTUM,
+    MAX_ROOM_BYTES, MAX_ROOM_DEPTH, MAX_ROOM_TRIANGLES, MAX_ROOM_WIDTH, MAX_WALL_STACK,
+    WORLD_SECTOR_SIZE_QUANTUM,
 };
 
 mod coords;
@@ -357,6 +358,8 @@ pub struct CookedWorldMaterial {
     pub blend_mode: PsxBlendMode,
     /// Texture modulation tint.
     pub tint: [u8; 3],
+    /// One-pass room-material animation recipe.
+    pub animation: MaterialAnimation,
     /// Which side(s) should render.
     pub face_sidedness: MaterialFaceSidedness,
 }
@@ -369,6 +372,7 @@ impl CookedWorldMaterial {
             psxt_path: material.psxt_path.clone(),
             blend_mode: material.blend_mode,
             tint: material.tint,
+            animation: material.animation,
             face_sidedness: material.sidedness(),
         }
     }

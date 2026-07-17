@@ -985,31 +985,30 @@ pub(crate) fn room_grid_transform_editor(
     sector_size: i32,
 ) -> bool {
     let mut changed = false;
-    ui.horizontal(|ui| {
-        ui.label(icons::text(icons::MOVE, 12.0).color(STUDIO_TEXT_WEAK));
-        ui.label("Grid Position");
-        let mut x = transform.translation[0].round() as i32;
-        let mut z = transform.translation[2].round() as i32;
-        let mut moved = false;
-        moved |= ui
-            .add(egui::DragValue::new(&mut x).prefix("X ").speed(1.0))
-            .changed();
-        moved |= ui
-            .add(egui::DragValue::new(&mut z).prefix("Z ").speed(1.0))
-            .changed();
-        if moved {
-            // Edit X/Z only; preserve the room's elevation (Y), which is the
-            // vertical stacking axis edited on the Elevation row below.
-            transform.translation[0] = x as f32;
-            transform.translation[2] = z as f32;
-            changed = true;
-        }
-        ui.label(RichText::new(format!("× {sector_size}")).color(STUDIO_TEXT_WEAK));
+    inspector_property_row(ui, icons::label(icons::MOVE, "Grid Position"), |ui| {
+        ui.horizontal_wrapped(|ui| {
+            let mut x = transform.translation[0].round() as i32;
+            let mut z = transform.translation[2].round() as i32;
+            let mut moved = false;
+            moved |= ui
+                .add(egui::DragValue::new(&mut x).prefix("X ").speed(1.0))
+                .changed();
+            moved |= ui
+                .add(egui::DragValue::new(&mut z).prefix("Z ").speed(1.0))
+                .changed();
+            if moved {
+                // Edit X/Z only; preserve the room's elevation (Y), which is the
+                // vertical stacking axis edited on the Elevation row below.
+                transform.translation[0] = x as f32;
+                transform.translation[2] = z as f32;
+                changed = true;
+            }
+            ui.label(RichText::new(format!("× {sector_size}")).color(STUDIO_TEXT_WEAK));
+        });
     });
 
-    ui.horizontal(|ui| {
-        ui.label(icons::text(icons::MOVE, 12.0).color(STUDIO_TEXT_WEAK));
-        ui.label("Elevation");
+    inspector_property_row(ui, icons::label(icons::MOVE, "Elevation"), |ui| {
+        ui.horizontal_wrapped(|ui| {
         let mut y = transform.translation[1].round() as i32;
         let response = ui.add(egui::DragValue::new(&mut y).speed(1.0)).on_hover_text(
             "Vertical level of this room, in sectors. Stack rooms by giving them different elevations; cooked to the room's origin_y.",
@@ -1019,22 +1018,23 @@ pub(crate) fn room_grid_transform_editor(
             changed = true;
         }
         ui.label(RichText::new(format!("× {sector_size}")).color(STUDIO_TEXT_WEAK));
+        });
     });
 
-    ui.horizontal(|ui| {
-        ui.label(icons::text(icons::ROTATE_3D, 12.0).color(STUDIO_TEXT_WEAK));
-        ui.label("Rotation");
-        let mut yaw = cardinal_yaw(transform.rotation_degrees[1]);
-        for candidate in [0, 90, 180, 270] {
-            if ui
-                .selectable_value(&mut yaw, candidate, format!("{candidate}°"))
-                .changed()
-            {
-                transform.rotation_degrees = [0.0, yaw as f32, 0.0];
-                transform.scale = [1.0, 1.0, 1.0];
-                changed = true;
+    inspector_property_row(ui, icons::label(icons::ROTATE_3D, "Rotation"), |ui| {
+        ui.horizontal_wrapped(|ui| {
+            let mut yaw = cardinal_yaw(transform.rotation_degrees[1]);
+            for candidate in [0, 90, 180, 270] {
+                if ui
+                    .selectable_value(&mut yaw, candidate, format!("{candidate}°"))
+                    .changed()
+                {
+                    transform.rotation_degrees = [0.0, yaw as f32, 0.0];
+                    transform.scale = [1.0, 1.0, 1.0];
+                    changed = true;
+                }
             }
-        }
+        });
     });
     changed
 }
@@ -1047,92 +1047,95 @@ pub(crate) fn entity_transform_editor(
 ) -> bool {
     let mut changed = false;
     let sector_size = sector_size.max(1);
-    ui.horizontal(|ui| {
-        ui.label(icons::text(icons::MOVE, 12.0).color(STUDIO_TEXT_WEAK));
-        ui.label("Position");
-        let mut x = node_transform_component_to_world_units(transform.translation[0], sector_size);
-        let mut y = node_transform_component_to_world_units(transform.translation[1], sector_size);
-        let mut z = node_transform_component_to_world_units(transform.translation[2], sector_size);
-        let pos_changed = ui
-            .add(
-                egui::DragValue::new(&mut x)
-                    .prefix("X ")
-                    .speed(HEIGHT_QUANTUM as f64),
-            )
-            .changed()
-            | ui.add(
-                egui::DragValue::new(&mut y)
-                    .prefix("Y ")
-                    .speed(HEIGHT_QUANTUM as f64),
-            )
-            .changed()
-            | ui.add(
-                egui::DragValue::new(&mut z)
-                    .prefix("Z ")
-                    .speed(HEIGHT_QUANTUM as f64),
-            )
-            .changed();
-        if pos_changed {
-            transform.translation = [
-                node_transform_component_from_world_units(snap_height(x), sector_size),
-                node_transform_component_from_world_units(snap_height(y), sector_size),
-                node_transform_component_from_world_units(snap_height(z), sector_size),
-            ];
-            changed = true;
-        }
+    inspector_property_row(ui, icons::label(icons::MOVE, "Position"), |ui| {
+        ui.horizontal_wrapped(|ui| {
+            let mut x =
+                node_transform_component_to_world_units(transform.translation[0], sector_size);
+            let mut y =
+                node_transform_component_to_world_units(transform.translation[1], sector_size);
+            let mut z =
+                node_transform_component_to_world_units(transform.translation[2], sector_size);
+            let pos_changed = ui
+                .add(
+                    egui::DragValue::new(&mut x)
+                        .prefix("X ")
+                        .speed(HEIGHT_QUANTUM as f64),
+                )
+                .changed()
+                | ui.add(
+                    egui::DragValue::new(&mut y)
+                        .prefix("Y ")
+                        .speed(HEIGHT_QUANTUM as f64),
+                )
+                .changed()
+                | ui.add(
+                    egui::DragValue::new(&mut z)
+                        .prefix("Z ")
+                        .speed(HEIGHT_QUANTUM as f64),
+                )
+                .changed();
+            if pos_changed {
+                transform.translation = [
+                    node_transform_component_from_world_units(snap_height(x), sector_size),
+                    node_transform_component_from_world_units(snap_height(y), sector_size),
+                    node_transform_component_from_world_units(snap_height(z), sector_size),
+                ];
+                changed = true;
+            }
+        });
     });
 
-    ui.horizontal(|ui| {
-        ui.label(icons::text(icons::ROTATE_3D, 12.0).color(STUDIO_TEXT_WEAK));
-        ui.label("Rotation");
-        let mut x_rot = transform.rotation_degrees[0].rem_euclid(360.0);
-        let mut y_rot = transform.rotation_degrees[1].rem_euclid(360.0);
-        let mut z_rot = transform.rotation_degrees[2].rem_euclid(360.0);
-        let mut rot_changed = false;
-        if allow_full_rotation {
+    inspector_property_row(ui, icons::label(icons::ROTATE_3D, "Rotation"), |ui| {
+        ui.horizontal_wrapped(|ui| {
+            let mut x_rot = transform.rotation_degrees[0].rem_euclid(360.0);
+            let mut y_rot = transform.rotation_degrees[1].rem_euclid(360.0);
+            let mut z_rot = transform.rotation_degrees[2].rem_euclid(360.0);
+            let mut rot_changed = false;
+            if allow_full_rotation {
+                rot_changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut x_rot)
+                            .prefix("X ")
+                            .speed(1.0)
+                            .range(0.0..=359.0),
+                    )
+                    .changed();
+            }
             rot_changed |= ui
                 .add(
-                    egui::DragValue::new(&mut x_rot)
-                        .prefix("X ")
+                    egui::DragValue::new(&mut y_rot)
+                        .prefix("Y ")
                         .speed(1.0)
                         .range(0.0..=359.0),
                 )
                 .changed();
-        }
-        rot_changed |= ui
-            .add(
-                egui::DragValue::new(&mut y_rot)
-                    .prefix("Y ")
-                    .speed(1.0)
-                    .range(0.0..=359.0),
-            )
-            .changed();
-        if allow_full_rotation {
-            rot_changed |= ui
-                .add(
-                    egui::DragValue::new(&mut z_rot)
-                        .prefix("Z ")
-                        .speed(1.0)
-                        .range(0.0..=359.0),
-                )
-                .changed();
-        }
-        if rot_changed {
-            transform.rotation_degrees = [
-                if allow_full_rotation {
-                    x_rot.round().rem_euclid(360.0)
-                } else {
-                    0.0
-                },
-                y_rot.round().rem_euclid(360.0),
-                if allow_full_rotation {
-                    z_rot.round().rem_euclid(360.0)
-                } else {
-                    0.0
-                },
-            ];
-            changed = true;
-        }
+            if allow_full_rotation {
+                rot_changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut z_rot)
+                            .prefix("Z ")
+                            .speed(1.0)
+                            .range(0.0..=359.0),
+                    )
+                    .changed();
+            }
+            if rot_changed {
+                transform.rotation_degrees = [
+                    if allow_full_rotation {
+                        x_rot.round().rem_euclid(360.0)
+                    } else {
+                        0.0
+                    },
+                    y_rot.round().rem_euclid(360.0),
+                    if allow_full_rotation {
+                        z_rot.round().rem_euclid(360.0)
+                    } else {
+                        0.0
+                    },
+                ];
+                changed = true;
+            }
+        });
     });
 
     if !allow_full_rotation
@@ -1156,39 +1159,42 @@ pub(crate) fn light_transform_editor(
 ) -> bool {
     let mut changed = normalise_light_transform(transform, sector_size);
     let sector_size = sector_size.max(1);
-    ui.horizontal(|ui| {
-        ui.label(icons::text(icons::MOVE, 12.0).color(STUDIO_TEXT_WEAK));
-        ui.label("Position");
-        let mut x = node_transform_component_to_world_units(transform.translation[0], sector_size);
-        let mut y = node_transform_component_to_world_units(transform.translation[1], sector_size);
-        let mut z = node_transform_component_to_world_units(transform.translation[2], sector_size);
-        let pos_changed = ui
-            .add(
-                egui::DragValue::new(&mut x)
-                    .prefix("X ")
-                    .speed(HEIGHT_QUANTUM as f64),
-            )
-            .changed()
-            | ui.add(
-                egui::DragValue::new(&mut y)
-                    .prefix("Y ")
-                    .speed(HEIGHT_QUANTUM as f64),
-            )
-            .changed()
-            | ui.add(
-                egui::DragValue::new(&mut z)
-                    .prefix("Z ")
-                    .speed(HEIGHT_QUANTUM as f64),
-            )
-            .changed();
-        if pos_changed {
-            transform.translation = [
-                node_transform_component_from_world_units(snap_height(x), sector_size),
-                node_transform_component_from_world_units(snap_height(y), sector_size),
-                node_transform_component_from_world_units(snap_height(z), sector_size),
-            ];
-            changed = true;
-        }
+    inspector_property_row(ui, icons::label(icons::MOVE, "Position"), |ui| {
+        ui.horizontal_wrapped(|ui| {
+            let mut x =
+                node_transform_component_to_world_units(transform.translation[0], sector_size);
+            let mut y =
+                node_transform_component_to_world_units(transform.translation[1], sector_size);
+            let mut z =
+                node_transform_component_to_world_units(transform.translation[2], sector_size);
+            let pos_changed = ui
+                .add(
+                    egui::DragValue::new(&mut x)
+                        .prefix("X ")
+                        .speed(HEIGHT_QUANTUM as f64),
+                )
+                .changed()
+                | ui.add(
+                    egui::DragValue::new(&mut y)
+                        .prefix("Y ")
+                        .speed(HEIGHT_QUANTUM as f64),
+                )
+                .changed()
+                | ui.add(
+                    egui::DragValue::new(&mut z)
+                        .prefix("Z ")
+                        .speed(HEIGHT_QUANTUM as f64),
+                )
+                .changed();
+            if pos_changed {
+                transform.translation = [
+                    node_transform_component_from_world_units(snap_height(x), sector_size),
+                    node_transform_component_from_world_units(snap_height(y), sector_size),
+                    node_transform_component_from_world_units(snap_height(z), sector_size),
+                ];
+                changed = true;
+            }
+        });
     });
     changed
 }
@@ -1498,34 +1504,34 @@ pub(crate) fn transform_editor(
     values: &mut [f32; 3],
     speed: f64,
 ) -> bool {
-    ui.horizontal(|ui| {
-        let mut changed = false;
-        ui.label(icons::text(transform_icon(label), 12.0).color(STUDIO_TEXT_WEAK));
-        ui.label(label);
-        changed |= ui
-            .add(
-                egui::DragValue::new(&mut values[0])
-                    .prefix("X ")
-                    .speed(speed),
-            )
-            .changed();
-        changed |= ui
-            .add(
-                egui::DragValue::new(&mut values[1])
-                    .prefix("Y ")
-                    .speed(speed),
-            )
-            .changed();
-        changed |= ui
-            .add(
-                egui::DragValue::new(&mut values[2])
-                    .prefix("Z ")
-                    .speed(speed),
-            )
-            .changed();
-        changed
+    inspector_property_row(ui, icons::label(transform_icon(label), label), |ui| {
+        ui.horizontal_wrapped(|ui| {
+            let mut changed = false;
+            changed |= ui
+                .add(
+                    egui::DragValue::new(&mut values[0])
+                        .prefix("X ")
+                        .speed(speed),
+                )
+                .changed();
+            changed |= ui
+                .add(
+                    egui::DragValue::new(&mut values[1])
+                        .prefix("Y ")
+                        .speed(speed),
+                )
+                .changed();
+            changed |= ui
+                .add(
+                    egui::DragValue::new(&mut values[2])
+                        .prefix("Z ")
+                        .speed(speed),
+                )
+                .changed();
+            changed
+        })
+        .inner
     })
-    .inner
 }
 
 pub(crate) fn transform_icon(label: &str) -> char {
@@ -1739,10 +1745,6 @@ pub(crate) fn draw_node_kind_editor(
         camera_preview,
     } = ctx;
     let mut changed = false;
-    ui.horizontal(|ui| {
-        ui.label(icons::text(icons::CIRCLE_DOT, 13.0).color(STUDIO_TEXT_WEAK));
-        ui.strong("Node");
-    });
     match kind {
         NodeKind::Node | NodeKind::Node3D => {
             ui.weak("Organisational transform node");
@@ -3234,43 +3236,50 @@ pub(crate) fn draw_ui_gradient_editor(
     from: &[u8; 3],
     gradient: &mut Option<UiGradient>,
 ) -> bool {
-    let mut changed = false;
-    let mut enabled = gradient.is_some();
-    ui.horizontal(|ui| {
-        changed |= ui.checkbox(&mut enabled, label).changed();
-        if enabled {
-            ui.label(
-                RichText::new("start = color")
-                    .color(STUDIO_TEXT_WEAK)
-                    .small(),
-            );
-        }
-    });
+    ui.push_id(("ui-gradient", label), |ui| {
+        let mut changed = false;
+        let mut enabled = gradient.is_some();
+        ui.horizontal(|ui| {
+            changed |= ui.checkbox(&mut enabled, label).changed();
+            if enabled {
+                ui.label(
+                    RichText::new("start = color")
+                        .color(STUDIO_TEXT_WEAK)
+                        .small(),
+                );
+            }
+        });
 
-    if enabled {
-        if gradient.is_none() {
-            *gradient = Some(UiGradient::new(
-                default_ui_gradient_end(*from),
-                UiGradientDirection::Vertical,
-            ));
+        if enabled {
+            if gradient.is_none() {
+                *gradient = Some(UiGradient::new(
+                    default_ui_gradient_end(*from),
+                    UiGradientDirection::Vertical,
+                ));
+                changed = true;
+            }
+            if let Some(gradient) = gradient {
+                changed |= color_editor(ui, "To", &mut gradient.to);
+                egui::ComboBox::from_label("Direction")
+                    .selected_text(gradient.direction.label())
+                    .show_ui(ui, |ui| {
+                        for candidate in UiGradientDirection::ALL {
+                            changed |= ui
+                                .selectable_value(
+                                    &mut gradient.direction,
+                                    candidate,
+                                    candidate.label(),
+                                )
+                                .changed();
+                        }
+                    });
+            }
+        } else if gradient.take().is_some() {
             changed = true;
         }
-        if let Some(gradient) = gradient {
-            changed |= color_editor(ui, "To", &mut gradient.to);
-            egui::ComboBox::from_label("Direction")
-                .selected_text(gradient.direction.label())
-                .show_ui(ui, |ui| {
-                    for candidate in UiGradientDirection::ALL {
-                        changed |= ui
-                            .selectable_value(&mut gradient.direction, candidate, candidate.label())
-                            .changed();
-                    }
-                });
-        }
-    } else if gradient.take().is_some() {
-        changed = true;
-    }
-    changed
+        changed
+    })
+    .inner
 }
 
 pub(crate) fn default_ui_gradient_end(from: [u8; 3]) -> [u8; 3] {
