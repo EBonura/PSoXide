@@ -38,7 +38,7 @@ impl EditorWorkspace {
             self.material_lab.focused_material = material_options.first().map(|(id, _)| *id);
         }
 
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.heading(icons::label(icons::PALETTE, "Material Lab"));
             ui.add_space(8.0);
             ui.label(
@@ -53,7 +53,7 @@ impl EditorWorkspace {
             return;
         };
 
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label("Editing");
             let selected_name = material_options
                 .iter()
@@ -200,7 +200,7 @@ fn draw_material_source_presets(ui: &mut egui::Ui, material: &mut MaterialResour
 }
 
 fn draw_simple_image_settings(ui: &mut egui::Ui, material: &mut MaterialResource) {
-    ui.group(|ui| {
+    section_frame().show(ui, |ui| {
         ui.heading("Image");
         let mut path = material.psxt_path.clone().unwrap_or_default();
         ui.label("4bpp PSXT path");
@@ -222,7 +222,7 @@ fn draw_simple_image_settings(ui: &mut egui::Ui, material: &mut MaterialResource
 }
 
 fn draw_generated_settings(ui: &mut egui::Ui, generated: &mut GeneratedMaterialTexture) {
-    ui.group(|ui| {
+    section_frame().show(ui, |ui| {
         ui.heading("Generated 4bpp texture");
         ui.horizontal(|ui| {
             ui.label("Output");
@@ -311,7 +311,7 @@ fn draw_q8_scale(ui: &mut egui::Ui, value: &mut u16) {
 }
 
 fn draw_reflection_settings(ui: &mut egui::Ui, reflection: &mut ReflectionProbeMaterial) {
-    ui.group(|ui| {
+    section_frame().show(ui, |ui| {
         ui.heading("Room reflection probe");
         ui.label(
             RichText::new("Mirror-like environment mapping from the active room's baked 4bpp probe.")
@@ -321,7 +321,7 @@ fn draw_reflection_settings(ui: &mut egui::Ui, reflection: &mut ReflectionProbeM
         ui.add(egui::Slider::new(&mut reflection.roughness, 0..=255).text("Roughness"));
         ui.add_space(6.0);
         ui.colored_label(
-            Color32::from_rgb(224, 174, 92),
+            STUDIO_WARNING,
             "Probe capture and reflected UV rendering are the next backend step. Until a room probe is baked, the existing image source remains the runtime fallback.",
         );
     });
@@ -400,13 +400,13 @@ fn draw_material_lab_preview(
     let painter = ui.painter_at(rect);
     draw_preview_checker(&painter, rect);
     if material.texture_mode == MaterialTextureMode::ReflectiveProbe {
-        painter.rect_filled(rect.shrink(18.0), 8.0, Color32::from_rgb(18, 24, 32));
+        painter.rect_filled(rect.shrink(18.0), 8.0, STUDIO_VIEWPORT);
         painter.text(
             rect.center(),
             Align2::CENTER_CENTER,
             "ROOM PROBE\nNOT BAKED",
             FontId::proportional(18.0),
-            Color32::from_rgb(224, 174, 92),
+            STUDIO_WARNING,
         );
     } else if let Some(texture) = workspace.material_lab_preview_texture.as_ref() {
         painter.image(
@@ -426,7 +426,7 @@ fn draw_material_lab_preview(
     }
 
     ui.add_space(8.0);
-    ui.group(|ui| {
+    section_frame().show(ui, |ui| {
         ui.strong("PS1 output");
         ui.label("4bpp · 16-colour CLUT · nearest sampling");
         let pass_note = if material.secondary_layer.is_some() {
@@ -446,9 +446,9 @@ fn draw_preview_checker(painter: &egui::Painter, rect: Rect) {
             let min = rect.min + Vec2::new(x as f32 * cell, y as f32 * cell);
             let tile = Rect::from_min_size(min, Vec2::splat(cell + 0.5));
             let color = if (x + y) & 1 == 0 {
-                Color32::from_rgb(34, 38, 44)
+                STUDIO_PANEL_HEADER
             } else {
-                Color32::from_rgb(50, 55, 62)
+                STUDIO_HOVER
             };
             painter.rect_filled(tile, 0.0, color);
         }
