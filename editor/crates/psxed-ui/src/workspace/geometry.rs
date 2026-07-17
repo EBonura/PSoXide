@@ -1,6 +1,36 @@
 use super::*;
 
 impl EditorWorkspace {
+    /// Stop a transient character action/movement preview when its Animator is
+    /// edited. The transient preview carries its own clip override, so leaving
+    /// it alive would mask a newly selected `Editor Clip` until the project was
+    /// reopened (which happened to clear the preview state).
+    pub(crate) fn reconcile_character_preview_after_node_kind_edit(
+        &mut self,
+        edited_node: NodeId,
+        before: &NodeKind,
+    ) {
+        if !matches!(before, NodeKind::Animator { .. }) {
+            return;
+        }
+        let scene = self.project.active_scene();
+        let Some(node) = scene.node(edited_node) else {
+            return;
+        };
+        if node.kind == *before || !matches!(node.kind, NodeKind::Animator { .. }) {
+            return;
+        }
+        let Some(entity) = node.parent else {
+            return;
+        };
+        if self
+            .character_motion_preview
+            .is_some_and(|preview| preview.entity == entity)
+        {
+            self.character_motion_preview = None;
+        }
+    }
+
     pub(crate) fn preview_character_action(
         &mut self,
         selected: NodeId,

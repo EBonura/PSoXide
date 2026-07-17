@@ -3,7 +3,7 @@ use std::{
     collections::HashSet,
     path::{Path, PathBuf},
     sync::Arc,
-    time::UNIX_EPOCH,
+    time::SystemTime,
 };
 
 use egui::{
@@ -91,6 +91,11 @@ impl ModelAnimationViewerState {
         let Some(resource) = project.resource(id) else {
             return;
         };
+        // Focusing is also the resource inspector's live-refresh hook. Clear
+        // decoded contexts even when the resource keeps the same path so an
+        // in-place recook cannot leave the viewer holding stale bytes.
+        self.invalidate_model_cache();
+        self.invalidate_clip_cache();
         match &resource.data {
             ResourceData::Character(character) => {
                 self.selected_model = character.model;
@@ -213,22 +218,17 @@ fn baked_clip_path_for_source(
 struct FileStamp {
     path: PathBuf,
     len: u64,
-    modified_millis: u128,
+    modified: SystemTime,
 }
 
 impl FileStamp {
     fn read(path: PathBuf) -> Option<Self> {
         let metadata = std::fs::metadata(&path).ok()?;
-        let modified_millis = metadata
-            .modified()
-            .ok()
-            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-            .map(|duration| duration.as_millis())
-            .unwrap_or_default();
+        let modified = metadata.modified().ok()?;
         Some(Self {
             path,
             len: metadata.len(),
-            modified_millis,
+            modified,
         })
     }
 }
@@ -1619,7 +1619,7 @@ mod focus_tests {
     }
 
     #[test]
-    fn cortex_ci_player_exposes_every_baked_import_in_the_viewer() {
+    fn cortex_aletha_exposes_every_mixamo_bake_in_the_viewer() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../projects/cortex_ignition_v1/project.ron");
         let project = ProjectDocument::load_from_path(path).expect("Cortex project parses");
@@ -1627,10 +1627,10 @@ mod focus_tests {
             .resources
             .iter()
             .find_map(|resource| {
-                (resource.name == "CI Player" && matches!(resource.data, ResourceData::Model(_)))
+                (resource.name == "Aletha" && matches!(resource.data, ResourceData::Model(_)))
                     .then_some(resource.id)
             })
-            .expect("CI Player model exists");
+            .expect("Aletha model exists");
         let sources: Vec<_> = project
             .resources
             .iter()
@@ -1641,10 +1641,14 @@ mod focus_tests {
                 _ => None,
             })
             .collect();
-        assert!(
-            sources.len() > 300,
-            "the tracked CI Player library should contain the full imported catalogue"
+        assert_eq!(
+            sources.len(),
+            201,
+            "Aletha should expose only Mixamo imports"
         );
+        assert!(sources.iter().all(|(_, source)| source.provider
+            == psxed_project::AnimationSourceProvider::Mixamo
+            && source.tags.iter().any(|tag| tag == "mixamo")));
 
         let options = build_clip_options(&project, model);
         for (source_id, source) in sources {
@@ -1657,7 +1661,7 @@ mod focus_tests {
             });
             let baked_path = baked_path.unwrap_or_else(|| {
                 panic!(
-                    "animation source '{}' has no CI Player bake",
+                    "animation source '{}' has no Aletha bake",
                     source.source_path
                 )
             });

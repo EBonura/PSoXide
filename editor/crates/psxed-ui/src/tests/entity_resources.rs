@@ -453,6 +453,72 @@ fn character_action_preview_uses_animator_binding_without_mutating_animator() {
 }
 
 #[test]
+fn editing_animator_clears_transient_action_preview_that_would_mask_editor_clip() {
+    let mut project = ProjectDocument::new("animator-live-preview-refresh");
+    let entity = project
+        .active_scene_mut()
+        .add_node(NodeId::ROOT, "Player", NodeKind::Entity);
+    let controller = project.active_scene_mut().add_node(
+        entity,
+        "Character Controller",
+        NodeKind::CharacterController {
+            character: None,
+            settings: CharacterControllerSettings::default(),
+            player: true,
+        },
+    );
+    let animator = project.active_scene_mut().add_node(
+        entity,
+        "Animator",
+        NodeKind::Animator {
+            clip: Some(1),
+            action_clips: vec![psxed_project::CharacterActionClip {
+                action: psxed_project::CharacterAnimationAction::Roll,
+                clip: 7,
+                options: None,
+            }],
+            autoplay: true,
+            pose_frame: 0,
+        },
+    );
+    let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
+    workspace.replace_node_selection(controller);
+    workspace.preview_character_action(controller, psxed_project::CharacterAnimationAction::Roll);
+    assert_eq!(workspace.character_motion_preview().unwrap().clip, 7);
+
+    let before = workspace
+        .project
+        .active_scene()
+        .node(animator)
+        .unwrap()
+        .kind
+        .clone();
+    let NodeKind::Animator { clip, .. } = &mut workspace
+        .project
+        .active_scene_mut()
+        .node_mut(animator)
+        .unwrap()
+        .kind
+    else {
+        panic!("expected Animator");
+    };
+    *clip = Some(2);
+    workspace.reconcile_character_preview_after_node_kind_edit(animator, &before);
+
+    assert!(workspace.character_motion_preview().is_none());
+    let NodeKind::Animator { clip, .. } = &workspace
+        .project
+        .active_scene()
+        .node(animator)
+        .unwrap()
+        .kind
+    else {
+        panic!("expected Animator");
+    };
+    assert_eq!(*clip, Some(2));
+}
+
+#[test]
 fn character_motion_preview_moves_without_mutating_authored_transform_and_tracks_camera() {
     let mut project = ProjectDocument::new("character-motion-preview");
     let entity = project
