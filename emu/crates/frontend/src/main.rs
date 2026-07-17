@@ -1550,6 +1550,7 @@ fn editor_play_metrics(state: &app::AppState) -> Option<psxed_ui::EditorPlaytest
         .guest_visual_interval_vblanks()
         .or_else(|| sample.guest_visual_interval_vblanks())
         .unwrap_or(0.0);
+    let (visual_frame_times_ms, visual_frame_time_count) = latest.guest.visual_frame_intervals_ms();
     let visual_deadline_misses = latest
         .guest_visual_deadline_misses()
         .round()
@@ -1745,6 +1746,8 @@ fn editor_play_metrics(state: &app::AppState) -> Option<psxed_ui::EditorPlaytest
             .round()
             .clamp(0.0, u32::MAX as f32) as u32,
         visual_interval_vblanks,
+        visual_frame_times_ms,
+        visual_frame_time_count,
         visual_deadline_misses,
         visual_lateness_vblanks,
         total_ms: sample.total_ms,

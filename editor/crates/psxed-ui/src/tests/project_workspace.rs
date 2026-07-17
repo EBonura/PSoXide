@@ -578,6 +578,8 @@ fn debug_snapshot_writes_portal_runtime_log() {
         draw_hz: 0.0,
         visual_frames: 0,
         visual_interval_vblanks: 0.0,
+        visual_frame_times_ms: [0.0; 4],
+        visual_frame_time_count: 0,
         visual_deadline_misses: 0,
         visual_lateness_vblanks: 0,
         total_ms: 0.0,
@@ -665,6 +667,31 @@ fn debug_snapshot_writes_portal_runtime_log() {
     assert!(content.contains("portal #0:"));
 
     let _ = std::fs::remove_dir_all(workspace.project_dir);
+}
+
+#[test]
+fn play_frame_time_history_uses_measured_guest_intervals() {
+    let (mut workspace, _) = workspace_with_populated_grid("frame-time-history", 1, 1);
+    let metrics = EditorPlaytestMetrics {
+        sample_serial: 7,
+        visual_frames: 2,
+        frame_ms: 99.0,
+        visual_frame_times_ms: [33.25, 34.5, 0.0, 0.0],
+        visual_frame_time_count: 2,
+        ..EditorPlaytestMetrics::default()
+    };
+
+    workspace.record_play_frame_time(metrics);
+    workspace.record_play_frame_time(metrics);
+
+    assert_eq!(
+        workspace
+            .play_frame_times_ms
+            .iter()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![33.25, 34.5]
+    );
 }
 
 #[test]
