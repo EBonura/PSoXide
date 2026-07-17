@@ -328,6 +328,7 @@ pub(crate) fn resource_can_open_in_animation_viewer(data: &ResourceData) -> bool
     matches!(
         data,
         ResourceData::Model(_)
+            | ResourceData::AnimationSource(_)
             | ResourceData::AnimationClip(_)
             | ResourceData::AnimationSet(_)
             | ResourceData::Character(_)

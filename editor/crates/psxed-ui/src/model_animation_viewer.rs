@@ -15,6 +15,9 @@ use psxed_project::{
     ResourceData, ResourceId,
 };
 
+use crate::editor_helpers::{
+    animation_source_authoring_label, collect_animation_clip_authoring_labels,
+};
 use crate::icons;
 use crate::model_import_preview::{self, ImportPreviewOptions};
 use crate::style::{STUDIO_ACCENT, STUDIO_BORDER, STUDIO_PANEL_DARK, STUDIO_TEXT_WEAK};
@@ -29,6 +32,7 @@ enum AnimationPreviewQuality {
 pub(crate) struct ModelAnimationViewerState {
     selected_model: Option<ResourceId>,
     selected_clip_path: Option<String>,
+    clip_filter: String,
     last_clip_path: Option<String>,
     playing: bool,
     frame: f32,
@@ -49,6 +53,7 @@ impl Default for ModelAnimationViewerState {
         Self {
             selected_model: None,
             selected_clip_path: None,
+            clip_filter: String::new(),
             last_clip_path: None,
             playing: true,
             frame: 0.0,
@@ -108,7 +113,9 @@ impl ModelAnimationViewerState {
                 self.selected_model = source
                     .target_model
                     .or_else(|| first_model_for_skeleton(project, source.skeleton));
-                self.selected_clip_path = Some(source.source_path.clone());
+                self.selected_clip_path =
+                    baked_clip_path_for_source(project, id, self.selected_model)
+                        .or_else(|| Some(source.source_path.clone()));
                 self.reset_clip_clock();
             }
             ResourceData::AnimationSet(set) => {
@@ -184,6 +191,21 @@ fn first_model_for_skeleton(
             return None;
         };
         (model.skeleton == Some(skeleton)).then_some(resource.id)
+    })
+}
+
+fn baked_clip_path_for_source(
+    project: &ProjectDocument,
+    source_id: ResourceId,
+    target_model: Option<ResourceId>,
+) -> Option<String> {
+    project.resources.iter().find_map(|resource| {
+        let ResourceData::AnimationClip(clip) = &resource.data else {
+            return None;
+        };
+        (clip.source == Some(source_id)
+            && target_model.is_none_or(|model| clip.target_model == Some(model)))
+        .then(|| clip.psxanim_path.clone())
     })
 }
 
@@ -310,6 +332,7 @@ pub(crate) fn draw_model_animation_viewer_toolbar(
         &model_options,
     ) {
         state.selected_clip_path = None;
+        state.clip_filter.clear();
         state.reset_clip_clock();
         state.invalidate_model_cache();
         state.invalidate_clip_cache();
@@ -959,9 +982,30 @@ fn clip_combo(
             .unwrap_or("(none)");
         egui::ComboBox::from_id_salt("animation-viewer-clip")
             .selected_text(selected)
-            .width(108.0)
+            .width(164.0)
+            .height(420.0)
             .show_ui(ui, |ui| {
-                for option in options {
+                ui.set_min_width(460.0);
+                ui.add(
+                    egui::TextEdit::singleline(&mut state.clip_filter)
+                        .hint_text("Search filename, take, role, or collection…")
+                        .desired_width(f32::INFINITY),
+                );
+                let matching = options
+                    .iter()
+                    .filter(|option| animation_viewer_option_matches(option, &state.clip_filter))
+                    .count();
+                ui.label(
+                    RichText::new(format!("{matching} of {} imported clips", options.len()))
+                        .small()
+                        .color(STUDIO_TEXT_WEAK),
+                );
+                ui.separator();
+                let filter = state.clip_filter.clone();
+                for option in options
+                    .iter()
+                    .filter(|option| animation_viewer_option_matches(option, &filter))
+                {
                     let selected = state.selected_clip_path.as_deref() == Some(option.path.as_str());
                     let suffix = if option.previewable {
                         option.origin.label().to_string()
@@ -999,6 +1043,24 @@ fn clip_combo(
     });
 }
 
+fn animation_viewer_option_matches(option: &ViewerClipOption, filter: &str) -> bool {
+    let filter = filter.trim().to_ascii_lowercase();
+    if filter.is_empty() {
+        return true;
+    }
+    let haystack = format!(
+        "{} {} {} {}",
+        option.label,
+        option.path,
+        option.role.label(),
+        option.origin.label()
+    )
+    .to_ascii_lowercase();
+    filter
+        .split_whitespace()
+        .all(|term| haystack.contains(term))
+}
+
 fn collect_resource_options(
     project: &ProjectDocument,
     matches: impl Fn(&ResourceData) -> bool,
@@ -1022,14 +1084,28 @@ fn build_clip_options(project: &ProjectDocument, model_id: ResourceId) -> Vec<Vi
     let mut out = Vec::new();
     let mut seen_paths = HashSet::new();
     let mut seen_resources = HashSet::new();
+    let mut baked_sources = HashSet::new();
+    let authoring_labels = collect_animation_clip_authoring_labels(project);
 
     for clip in project.resolved_model_animation_clips(model_id) {
+        let label = clip.animation_resource.map_or_else(
+            || clip.name.clone(),
+            |clip_id| {
+                authoring_labels
+                    .get(&clip_id)
+                    .cloned()
+                    .unwrap_or_else(|| clip.name.clone())
+            },
+        );
         let (role, looping, origin) = clip
             .animation_resource
             .and_then(|id| project.resource(id).map(|resource| (id, resource)))
             .and_then(|(id, resource)| match &resource.data {
                 ResourceData::AnimationClip(clip) => {
                     seen_resources.insert(id);
+                    if let Some(source) = clip.source {
+                        baked_sources.insert(source);
+                    }
                     Some((clip.role, clip.looping, ClipOrigin::Library))
                 }
                 _ => None,
@@ -1040,7 +1116,7 @@ fn build_clip_options(project: &ProjectDocument, model_id: ResourceId) -> Vec<Vi
             });
         seen_paths.insert(clip.psxanim_path.clone());
         out.push(ViewerClipOption {
-            label: clip.name,
+            label,
             path: clip.psxanim_path,
             origin,
             role,
@@ -1060,9 +1136,15 @@ fn build_clip_options(project: &ProjectDocument, model_id: ResourceId) -> Vec<Vi
             continue;
         }
         seen_resources.insert(resource.id);
+        if let Some(source) = clip.source {
+            baked_sources.insert(source);
+        }
         seen_paths.insert(clip.psxanim_path.clone());
         out.push(ViewerClipOption {
-            label: resource.name.clone(),
+            label: authoring_labels
+                .get(&resource.id)
+                .cloned()
+                .unwrap_or_else(|| resource.name.clone()),
             path: clip.psxanim_path.clone(),
             origin: ClipOrigin::Library,
             role: clip.role,
@@ -1078,11 +1160,14 @@ fn build_clip_options(project: &ProjectDocument, model_id: ResourceId) -> Vec<Vi
         let ResourceData::AnimationSource(source) = &resource.data else {
             continue;
         };
+        if baked_sources.contains(&resource.id) {
+            continue;
+        }
         if seen_paths.contains(&source.source_path) {
             continue;
         }
         out.push(ViewerClipOption {
-            label: resource.name.clone(),
+            label: animation_source_authoring_label(source, &resource.name),
             path: source.source_path.clone(),
             origin: ClipOrigin::Source,
             role: source.role,
@@ -1452,5 +1537,149 @@ mod focus_tests {
         assert_eq!(viewer.radius, 0);
         assert_eq!(viewer.yaw_q12, 1024);
         assert_eq!(viewer.pitch_q12, 128);
+    }
+
+    #[test]
+    fn imported_mixamo_take_is_named_and_searchable_by_source_filename() {
+        let mut project = ProjectDocument::new("animation-library");
+        let skeleton = project.add_resource(
+            "Humanoid",
+            ResourceData::Skeleton(psxed_project::SkeletonResource {
+                joint_count: 1,
+                parents: vec![None],
+                signature: "test-humanoid".to_string(),
+                note: String::new(),
+            }),
+        );
+        let model = project.add_resource(
+            "CI Player",
+            ResourceData::Model(psxed_project::ModelResource {
+                model_path: "assets/ci_player.psxmdl".to_string(),
+                source_path: None,
+                texture_path: None,
+                skeleton: Some(skeleton),
+                world_height: 1024,
+                collision_radius: 192,
+                scale_q8: [psxed_project::MODEL_SCALE_ONE_Q8; 3],
+                default_visual_yaw_q12: 0,
+                attachments: Vec::new(),
+            }),
+        );
+        let source = project.add_resource(
+            "Opaque Mixamo Take Source",
+            ResourceData::AnimationSource(psxed_project::AnimationSourceResource {
+                source_path: "source_assets/animations/mixamo/Standing Melee Attack Downward.fbx"
+                    .to_string(),
+                clip_name: "Armature|mixamo.com.003".to_string(),
+                provider: psxed_project::AnimationSourceProvider::Mixamo,
+                skeleton: Some(skeleton),
+                target_model: Some(model),
+                role: AnimationRole::Attack,
+                looping: false,
+                tags: vec!["mixamo".to_string()],
+            }),
+        );
+        assert!(
+            crate::resource_browser::resource_can_open_in_animation_viewer(
+                &project.resource(source).expect("source exists").data
+            )
+        );
+        let clip = project.add_resource(
+            "CI Player / Armature|mixamo.com.003",
+            ResourceData::AnimationClip(psxed_project::AnimationClipResource {
+                psxanim_path: "assets/attack.psxanim".to_string(),
+                skeleton: Some(skeleton),
+                target_model: Some(model),
+                source: Some(source),
+                bake: psxed_project::AnimationClipBakeKind::Retargeted,
+                role: AnimationRole::Attack,
+                looping: false,
+                tags: vec!["mixamo".to_string()],
+                calibration: Default::default(),
+            }),
+        );
+
+        let options = build_clip_options(&project, model);
+        let option = options
+            .iter()
+            .find(|option| option.path == "assets/attack.psxanim")
+            .expect("baked Mixamo take is listed");
+
+        assert_eq!(
+            option.label,
+            "Standing Melee Attack Downward — Armature|mixamo.com.003"
+        );
+        assert!(animation_viewer_option_matches(option, "standing downward"));
+        assert!(!options.iter().any(|option| option.resource == Some(source)));
+
+        let mut viewer = ModelAnimationViewerState::default();
+        viewer.focus_resource(&project, source);
+        assert_eq!(viewer.selected_clip_path(), Some("assets/attack.psxanim"));
+        assert!(project.resource(clip).is_some());
+    }
+
+    #[test]
+    fn cortex_ci_player_exposes_every_baked_import_in_the_viewer() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../projects/cortex_ignition_v1/project.ron");
+        let project = ProjectDocument::load_from_path(path).expect("Cortex project parses");
+        let model = project
+            .resources
+            .iter()
+            .find_map(|resource| {
+                (resource.name == "CI Player" && matches!(resource.data, ResourceData::Model(_)))
+                    .then_some(resource.id)
+            })
+            .expect("CI Player model exists");
+        let sources: Vec<_> = project
+            .resources
+            .iter()
+            .filter_map(|resource| match &resource.data {
+                ResourceData::AnimationSource(source) if source.target_model == Some(model) => {
+                    Some((resource.id, source))
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(
+            sources.len() > 300,
+            "the tracked CI Player library should contain the full imported catalogue"
+        );
+
+        let options = build_clip_options(&project, model);
+        for (source_id, source) in sources {
+            let baked_path = project.resources.iter().find_map(|resource| {
+                let ResourceData::AnimationClip(clip) = &resource.data else {
+                    return None;
+                };
+                (clip.source == Some(source_id) && clip.target_model == Some(model))
+                    .then_some(clip.psxanim_path.as_str())
+            });
+            let baked_path = baked_path.unwrap_or_else(|| {
+                panic!(
+                    "animation source '{}' has no CI Player bake",
+                    source.source_path
+                )
+            });
+            assert!(
+                options.iter().any(|option| option.path == baked_path),
+                "baked source '{}' is missing from the Animation Studio selector",
+                source.source_path
+            );
+        }
+
+        for query in [
+            "stand to roll",
+            "standing melee attack downward",
+            "sword and shield kick",
+            "left strafe walking",
+        ] {
+            assert!(
+                options
+                    .iter()
+                    .any(|option| animation_viewer_option_matches(option, query)),
+                "expected imported animation '{query}' to be searchable"
+            );
+        }
     }
 }

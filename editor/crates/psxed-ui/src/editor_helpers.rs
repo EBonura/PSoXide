@@ -986,6 +986,7 @@ pub(crate) fn collect_room_options(project: &ProjectDocument) -> Vec<(NodeId, St
 pub(crate) fn collect_model_options(
     project: &ProjectDocument,
 ) -> Vec<(ResourceId, String, Vec<String>)> {
+    let authoring_labels = collect_animation_clip_authoring_labels(project);
     project
         .resources
         .iter()
@@ -996,7 +997,17 @@ pub(crate) fn collect_model_options(
                 project
                     .resolved_model_animation_clips(r.id)
                     .iter()
-                    .map(|c| c.name.clone())
+                    .map(|clip| {
+                        clip.animation_resource.map_or_else(
+                            || clip.name.clone(),
+                            |clip_id| {
+                                authoring_labels
+                                    .get(&clip_id)
+                                    .cloned()
+                                    .unwrap_or_else(|| clip.name.clone())
+                            },
+                        )
+                    })
                     .collect(),
             )),
             _ => None,
@@ -1018,19 +1029,82 @@ pub(crate) fn collect_skeleton_options(project: &ProjectDocument) -> Vec<(Resour
 pub(crate) fn collect_animation_clip_options(
     project: &ProjectDocument,
 ) -> Vec<AnimationClipOption> {
+    let authoring_labels = collect_animation_clip_authoring_labels(project);
     project
         .resources
         .iter()
         .filter_map(|resource| match &resource.data {
             ResourceData::AnimationClip(clip) => Some(AnimationClipOption {
                 id: resource.id,
-                name: resource.name.clone(),
+                name: authoring_labels
+                    .get(&resource.id)
+                    .cloned()
+                    .unwrap_or_else(|| resource.name.clone()),
                 skeleton: clip.skeleton,
                 role: clip.role,
             }),
             _ => None,
         })
         .collect()
+}
+
+/// Index source-aware display names once for high-density animation pickers.
+pub(crate) fn collect_animation_clip_authoring_labels(
+    project: &ProjectDocument,
+) -> HashMap<ResourceId, String> {
+    let sources: HashMap<_, _> = project
+        .resources
+        .iter()
+        .filter_map(|resource| match &resource.data {
+            ResourceData::AnimationSource(source) => Some((resource.id, source)),
+            _ => None,
+        })
+        .collect();
+    project
+        .resources
+        .iter()
+        .filter_map(|resource| {
+            let ResourceData::AnimationClip(clip) = &resource.data else {
+                return None;
+            };
+            let label = clip
+                .source
+                .and_then(|source_id| sources.get(&source_id).copied())
+                .map_or_else(
+                    || resource.name.clone(),
+                    |source| animation_source_authoring_label(source, &resource.name),
+                );
+            Some((resource.id, label))
+        })
+        .collect()
+}
+
+/// Prefer the imported filename while retaining distinct embedded FBX takes.
+/// Mixamo often calls those takes `Armature|mixamo.com.###`; presenting both
+/// pieces makes the author's animation name visible and every take searchable.
+pub(crate) fn animation_source_authoring_label(
+    source: &psxed_project::AnimationSourceResource,
+    fallback: &str,
+) -> String {
+    let path = source
+        .source_path
+        .rsplit_once("::")
+        .map_or(source.source_path.as_str(), |(_, entry)| entry);
+    let stem = std::path::Path::new(path)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .map(str::trim)
+        .filter(|stem| !stem.is_empty());
+    let take = source.clip_name.trim();
+
+    match (stem, take.is_empty()) {
+        (Some(stem), false) if !stem.eq_ignore_ascii_case(take) => {
+            format!("{stem} — {take}")
+        }
+        (Some(stem), _) => stem.to_string(),
+        (None, false) => take.to_string(),
+        (None, true) => fallback.to_string(),
+    }
 }
 
 pub(crate) fn collect_animation_source_options(

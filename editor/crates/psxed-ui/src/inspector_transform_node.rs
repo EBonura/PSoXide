@@ -728,7 +728,7 @@ pub(crate) fn draw_gameplay_camera_settings(
                             .suffix("%"),
                     )
                     .on_hover_text(
-                        "Additional camera elevation while locked, as a percentage of Height. The camera rises around the player focus so the full character remains framed.",
+                        "Fixed additional camera height while locked, as a percentage of Height. The transition is smoothed without allowing collision or manual pitch to reduce the authored lift.",
                     )
                     .changed();
             });
@@ -887,9 +887,16 @@ pub(crate) fn draw_gameplay_camera_start_preview(ui: &mut egui::Ui, camera: Worl
     let floor_y = rect.bottom() - 26.0;
     let player_x = right;
     let effective_camera_height = camera.height.max(camera.min_floor_clearance);
+    let lock_height_boost = camera
+        .height
+        .saturating_mul(i32::from(camera.lock_rise_percent))
+        / 100;
+    let locked_camera_height = camera.height.saturating_add(lock_height_boost);
+    let effective_locked_camera_height = locked_camera_height.max(camera.min_floor_clearance);
     let max_vertical = camera
         .height
         .max(effective_camera_height)
+        .max(effective_locked_camera_height)
         .max(camera.target_height)
         .max(camera.min_floor_clearance)
         .max(512) as f32;
@@ -898,6 +905,7 @@ pub(crate) fn draw_gameplay_camera_start_preview(ui: &mut egui::Ui, camera: Worl
     let camera_x = player_x - camera.distance as f32 * x_scale;
     let desired_camera_y = floor_y - camera.height as f32 * y_scale;
     let camera_y = floor_y - effective_camera_height as f32 * y_scale;
+    let locked_camera_y = floor_y - effective_locked_camera_height as f32 * y_scale;
     let target_y = floor_y - camera.target_height as f32 * y_scale;
     let clearance_y = floor_y - camera.min_floor_clearance as f32 * y_scale;
 
@@ -906,6 +914,7 @@ pub(crate) fn draw_gameplay_camera_start_preview(ui: &mut egui::Ui, camera: Worl
     let player_root = egui::pos2(player_x, floor_y);
     let target = egui::pos2(player_x, target_y);
     let camera_eye = egui::pos2(camera_x, camera_y);
+    let locked_camera_eye = egui::pos2(camera_x, locked_camera_y);
     let desired_camera_eye = egui::pos2(camera_x, desired_camera_y);
     let clearance_a = egui::pos2(rect.left() + 12.0, clearance_y);
     let clearance_b = egui::pos2(rect.right() - 12.0, clearance_y);
@@ -937,8 +946,26 @@ pub(crate) fn draw_gameplay_camera_start_preview(ui: &mut egui::Ui, camera: Worl
     );
     painter.line_segment(
         [camera_eye, target],
-        egui::Stroke::new(1.5, Color32::from_rgb(164, 190, 226)),
+        egui::Stroke::new(1.0, Color32::from_rgb(125, 145, 170)),
     );
+    if lock_height_boost > 0 {
+        painter.line_segment(
+            [camera_eye, locked_camera_eye],
+            egui::Stroke::new(2.0, Color32::from_rgb(80, 145, 225)),
+        );
+        painter.line_segment(
+            [locked_camera_eye, target],
+            egui::Stroke::new(1.5, Color32::from_rgb(105, 165, 235)),
+        );
+        painter.circle_filled(locked_camera_eye, 5.0, Color32::from_rgb(105, 165, 235));
+        painter.text(
+            locked_camera_eye + Vec2::new(8.0, 0.0),
+            egui::Align2::LEFT_CENTER,
+            "Locked",
+            egui::TextStyle::Small.resolve(ui.style()),
+            Color32::from_rgb(135, 185, 245),
+        );
+    }
     if effective_camera_height != camera.height {
         painter.circle_stroke(
             desired_camera_eye,
@@ -954,15 +981,15 @@ pub(crate) fn draw_gameplay_camera_start_preview(ui: &mut egui::Ui, camera: Worl
     painter.circle_filled(camera_eye, 5.0, Color32::from_rgb(230, 190, 120));
     painter.circle_filled(player_root, 5.0, Color32::from_rgb(180, 220, 170));
     painter.text(
-        camera_eye + Vec2::new(0.0, -12.0),
-        egui::Align2::CENTER_BOTTOM,
-        "Camera",
+        camera_eye + Vec2::new(8.0, 0.0),
+        egui::Align2::LEFT_CENTER,
+        "Free",
         egui::TextStyle::Small.resolve(ui.style()),
         STUDIO_TEXT,
     );
     painter.text(
-        target + Vec2::new(7.0, 0.0),
-        egui::Align2::LEFT_CENTER,
+        target + Vec2::new(-7.0, 0.0),
+        egui::Align2::RIGHT_CENTER,
         "Look target",
         egui::TextStyle::Small.resolve(ui.style()),
         STUDIO_TEXT_WEAK,
@@ -978,9 +1005,11 @@ pub(crate) fn draw_gameplay_camera_start_preview(ui: &mut egui::Ui, camera: Worl
         rect.left_top() + Vec2::new(10.0, 8.0),
         egui::Align2::LEFT_TOP,
         format!(
-            "side view: {}u back, {}u high{}",
+            "{}u back  •  free {}u  •  locked {}u (+{}u){}",
             camera.distance,
             effective_camera_height,
+            effective_locked_camera_height,
+            lock_height_boost,
             if effective_camera_height != camera.height {
                 " (clearance clamped)"
             } else {
@@ -1659,6 +1688,7 @@ pub(crate) fn selected_animator_clip_context(
                 character_profile_action_clip(project, model_id, character, action);
         }
     }
+    let authoring_labels = collect_animation_clip_authoring_labels(project);
     project
         .resources
         .iter()
@@ -1676,7 +1706,20 @@ pub(crate) fn selected_animator_clip_context(
                         .iter()
                         .map(|clip| clip.calibration.in_place)
                         .collect(),
-                    clips: clips.iter().map(|clip| clip.name.clone()).collect(),
+                    clips: clips
+                        .iter()
+                        .map(|clip| {
+                            clip.animation_resource.map_or_else(
+                                || clip.name.clone(),
+                                |clip_id| {
+                                    authoring_labels
+                                        .get(&clip_id)
+                                        .cloned()
+                                        .unwrap_or_else(|| clip.name.clone())
+                                },
+                            )
+                        })
+                        .collect(),
                     profile_name,
                     profile_action_clips,
                 })
@@ -1945,7 +1988,26 @@ pub(crate) fn draw_node_kind_editor(
                     };
                     egui::ComboBox::from_id_salt("mesh_instance_clip")
                         .selected_text(preview)
+                        .height(360.0)
                         .show_ui(ui, |ui| {
+                            ui.set_min_width(380.0);
+                            let filter = animation_picker_filter(
+                                ui,
+                                ui.id().with(("mesh_instance_clip", "filter")),
+                            );
+                            let matching = clips
+                                .iter()
+                                .filter(|name| animation_name_matches_filter(name, &filter))
+                                .count();
+                            ui.label(
+                                RichText::new(format!(
+                                    "{matching} of {} compatible clips",
+                                    clips.len()
+                                ))
+                                .small()
+                                .color(STUDIO_TEXT_WEAK),
+                            );
+                            ui.separator();
                             if ui
                                 .selectable_label(animation_clip.is_none(), "(inherit default)")
                                 .clicked()
@@ -1953,7 +2015,11 @@ pub(crate) fn draw_node_kind_editor(
                                 *animation_clip = None;
                                 changed = true;
                             }
-                            for (i, name) in clips.iter().enumerate() {
+                            for (i, name) in clips
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, name)| animation_name_matches_filter(name, &filter))
+                            {
                                 let label = format!("{i}: {name}");
                                 if ui
                                     .selectable_label(*animation_clip == Some(i as u16), label)

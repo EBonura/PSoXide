@@ -371,6 +371,11 @@ pub mod ui_node_flags {
     pub const FLIP_Y: u16 = 1 << 10;
     /// Node is only visible while the active controller is not in analog mode.
     pub const ANALOG_INACTIVE_ONLY: u16 = 1 << 11;
+    /// Label text contains unit-separator-delimited alternatives. The runtime
+    /// picks one using the scene-entry seed and keeps it stable while shown.
+    pub const TEXT_RANDOM_MESSAGE: u16 = 1 << 12;
+    /// Node is only visible once an authored loading screen can be confirmed.
+    pub const LOADING_COMPLETE_ONLY: u16 = 1 << 13;
 }
 
 typed_index! {
@@ -2398,6 +2403,10 @@ pub enum LevelUiImageEffect {
     /// Gentle vertical bob: the image oscillates a few pixels up and
     /// down (loading-screen mascot idiom).
     Bob,
+    /// Continuous upward drift for lightweight loading-screen motes.
+    Rise,
+    /// Fast left-to-right crosswind with a small upward lift and gust jitter.
+    Wind,
 }
 
 /// One cooked project option: a runtime-tunable integer with a bounded
