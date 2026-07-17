@@ -792,14 +792,48 @@ pub(crate) fn evaluate_mapped_fbx_frame_trs(
     let animation_base = fbx_base_trs(animation_scene);
     let node_indices = fbx_node_indices(animation_scene);
     let source_parents = fbx_parent_indices(animation_scene, &node_indices);
-    retarget_mapped_frame_trs(
+    let mut out = retarget_mapped_frame_trs(
         target_parents,
         base_trs,
         &source_parents,
         &animation_base,
         &evaluated,
         mapping,
-    )
+    );
+    let mut mapped_nodes = HashMap::new();
+    for (target_index, source_index) in mapping.iter().copied().enumerate() {
+        let Some(source_index) = source_index else {
+            continue;
+        };
+        mapped_nodes.insert(
+            node_match_key(&animation_scene.nodes[source_index].element.name),
+            (target_index, source_index),
+        );
+    }
+    let mut direction_pairs = Vec::new();
+    for (bone, child) in [
+        ("leftshoulder", "leftarm"),
+        ("leftarm", "leftforearm"),
+        ("leftforearm", "lefthand"),
+        ("rightshoulder", "rightarm"),
+        ("rightarm", "rightforearm"),
+        ("rightforearm", "righthand"),
+    ] {
+        let (Some(&(target_bone, source_bone)), Some(&(target_child, source_child))) =
+            (mapped_nodes.get(bone), mapped_nodes.get(child))
+        else {
+            continue;
+        };
+        direction_pairs.push((target_bone, target_child, source_bone, source_child));
+    }
+    retarget_mapped_bone_directions(
+        target_parents,
+        &evaluated,
+        &source_parents,
+        &mut out,
+        &direction_pairs,
+    );
+    out
 }
 
 pub(crate) fn evaluate_mapped_gltf_frame_trs(
@@ -924,9 +958,9 @@ pub(crate) fn retarget_mapped_frame_trs(
 
     let mut out = target_base_trs.to_vec();
     for (target_index, source_index) in mapping.iter().copied().enumerate() {
-        if source_index.is_none() {
+        let Some(_) = source_index else {
             continue;
-        }
+        };
         let Some(target_global) = target_pose_globals.get(target_index).copied() else {
             continue;
         };
@@ -943,6 +977,77 @@ pub(crate) fn retarget_mapped_frame_trs(
         }
     }
     out
+}
+
+pub(crate) fn retarget_mapped_bone_directions(
+    target_parents: &[Option<usize>],
+    source_pose_trs: &[Trs],
+    source_parents: &[Option<usize>],
+    target_pose_trs: &mut [Trs],
+    direction_pairs: &[(usize, usize, usize, usize)],
+) {
+    let source_locals: Vec<_> = source_pose_trs.iter().map(Trs::matrix).collect();
+    let source_globals = compute_global_matrices(source_parents, &source_locals);
+
+    for &(target_bone, target_child, source_bone, source_child) in direction_pairs {
+        if target_bone >= target_pose_trs.len()
+            || target_child >= target_pose_trs.len()
+            || source_bone >= source_globals.len()
+            || source_child >= source_globals.len()
+        {
+            continue;
+        }
+        let target_locals: Vec<_> = target_pose_trs.iter().map(Trs::matrix).collect();
+        let target_globals = compute_global_matrices(target_parents, &target_locals);
+        let target_direction = sub3(
+            matrix_translation(target_globals[target_child]),
+            matrix_translation(target_globals[target_bone]),
+        );
+        let source_direction = sub3(
+            matrix_translation(source_globals[source_child]),
+            matrix_translation(source_globals[source_bone]),
+        );
+        let Some(swing) = quat_from_to(target_direction, source_direction) else {
+            continue;
+        };
+        let target_global_rotation = global_trs_rotations(target_parents, target_pose_trs);
+        let corrected_global = quat_mul(swing, target_global_rotation[target_bone]);
+        let corrected_local = target_parents
+            .get(target_bone)
+            .copied()
+            .flatten()
+            .and_then(|parent| target_global_rotation.get(parent).copied())
+            .map_or(corrected_global, |parent_global| {
+                quat_mul(quat_inverse(parent_global), corrected_global)
+            });
+        target_pose_trs[target_bone].rotation = corrected_local;
+    }
+}
+
+pub(crate) fn matrix_translation(matrix: [[f32; 4]; 4]) -> [f32; 3] {
+    [matrix[3][0], matrix[3][1], matrix[3][2]]
+}
+
+fn quat_from_to(from: [f32; 3], to: [f32; 3]) -> Option<[f32; 4]> {
+    if length_sq3(from) <= 0.000001 || length_sq3(to) <= 0.000001 {
+        return None;
+    }
+    let from = normalize3(from);
+    let to = normalize3(to);
+    let dot = (from[0] * to[0] + from[1] * to[1] + from[2] * to[2]).clamp(-1.0, 1.0);
+    if dot >= 0.999999 {
+        return Some(identity_quat());
+    }
+    if dot <= -0.999999 {
+        let axis = if from[0].abs() < 0.9 {
+            normalize3(cross3(from, [1.0, 0.0, 0.0]))
+        } else {
+            normalize3(cross3(from, [0.0, 1.0, 0.0]))
+        };
+        return Some([axis[0], axis[1], axis[2], 0.0]);
+    }
+    let axis = cross3(from, to);
+    Some(normalize4([axis[0], axis[1], axis[2], 1.0 + dot]))
 }
 
 fn global_trs_rotations(parents: &[Option<usize>], trs: &[Trs]) -> Vec<[f32; 4]> {
