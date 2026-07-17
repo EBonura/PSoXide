@@ -1,4 +1,5 @@
 use super::*;
+use psxed_project::{ModelSecondaryLayer, ModelSecondaryTexture, ProceduralNoiseTexture};
 
 pub(crate) fn draw_transform_policy_editor(
     ui: &mut egui::Ui,
@@ -2242,48 +2243,51 @@ pub(crate) fn draw_node_kind_editor(
                 );
             }
             ui.separator();
-            // Covering-texture switch: `material == None` renders the
-            // model's own cooked atlas; `Some` covers the model's UVs
-            // with the picked material (texture + blend + tint +
-            // sidedness).
-            let mut custom_texture = material.is_some();
+            // Appearance switch: `None` renders the baked model
+            // material unchanged; `Some` applies the selected
+            // Material's blend/tint/sidedness and only replaces the
+            // atlas when that Material has a texture path.
+            let mut custom_material = material.is_some();
             ui.horizontal(|ui| {
-                ui.label("Texture");
-                egui::ComboBox::from_id_salt("model-renderer-texture-mode")
-                    .selected_text(if custom_texture {
-                        "Custom material"
+                ui.label("Appearance");
+                egui::ComboBox::from_id_salt("model-renderer-material-mode")
+                    .selected_text(if custom_material {
+                        "Material override"
                     } else {
-                        "Model atlas"
+                        "Model material"
                     })
                     .show_ui(ui, |ui| {
-                        if ui.selectable_label(!custom_texture, "Model atlas").clicked() {
-                            custom_texture = false;
-                        }
                         if ui
-                            .selectable_label(custom_texture, "Custom material")
+                            .selectable_label(!custom_material, "Model material")
                             .clicked()
                         {
-                            custom_texture = true;
+                            custom_material = false;
+                        }
+                        if ui
+                            .selectable_label(custom_material, "Material override")
+                            .clicked()
+                        {
+                            custom_material = true;
                         }
                     });
             });
-            if custom_texture != material.is_some() {
-                *material = if custom_texture {
+            if custom_material != material.is_some() {
+                *material = if custom_material {
                     material_options.first().map(|(id, _)| *id)
                 } else {
                     None
                 };
                 changed = true;
-                if custom_texture && material.is_none() {
+                if custom_material && material.is_none() {
                     ui.colored_label(
                         Color32::from_rgb(220, 160, 80),
-                        "No Material resources exist to cover with.",
+                        "No Material resources exist yet.",
                     );
                 }
             }
             if material.is_some() {
                 changed |= material_picker(ui, "Material", material, material_options, nav_target);
-                ui.weak("Covers the model's UVs with this material's texture, blend mode, tint, and sidedness.");
+                ui.weak("Applies blend mode, tint, and sidedness. Leave the Material texture empty to retain the model atlas.");
             }
             ui.separator();
             ui.weak("Visual calibration only. Collision, camera, and movement still use Entity and Character Controller data.");
@@ -2437,7 +2441,7 @@ pub(crate) fn draw_node_kind_editor(
                 .color(STUDIO_TEXT_WEAK)
                 .small(),
             );
-            changed |= draw_character_controller_settings(ui, settings);
+            changed |= draw_character_controller_settings(ui, settings, *player);
         }
         NodeKind::Camera { settings } => {
             ui.weak("Component: third-person gameplay camera for the player Entity. The Entity transform supplies the start position and yaw.");
@@ -2896,6 +2900,165 @@ pub(crate) fn blend_mode_editor(ui: &mut egui::Ui, mode: &mut PsxBlendMode) -> b
     changed
 }
 
+/// Compact Material editor embedded below a ModelRenderer. The
+/// Material resource remains canonical; this is an inspector view
+/// onto the same data, not a second per-node copy.
+pub(crate) fn draw_model_material_override_editor(
+    ui: &mut egui::Ui,
+    material: &mut MaterialResource,
+) -> bool {
+    let mut changed = false;
+
+    ui.horizontal(|ui| {
+        ui.label(icons::text(icons::PALETTE, 12.0).color(STUDIO_TEXT_WEAK));
+        ui.label("Texture source");
+        ui.strong(
+            if material
+                .psxt_path
+                .as_deref()
+                .is_some_and(|path| !path.trim().is_empty())
+            {
+                "Replacement texture"
+            } else {
+                "Model atlas"
+            },
+        );
+    });
+    let mut path = material.psxt_path.clone().unwrap_or_default();
+    if ui
+        .add(
+            egui::TextEdit::singleline(&mut path)
+                .hint_text("Leave empty to inherit the model atlas"),
+        )
+        .changed()
+    {
+        material.psxt_path = if path.trim().is_empty() {
+            None
+        } else {
+            Some(path)
+        };
+        changed = true;
+    }
+    ui.label(
+        RichText::new("The native model atlas keeps its existing palette and VRAM slot.")
+            .color(STUDIO_TEXT_WEAK)
+            .small(),
+    );
+
+    ui.separator();
+    changed |= blend_mode_editor(ui, &mut material.blend_mode);
+    if material.blend_mode == PsxBlendMode::Average {
+        ui.label(
+            RichText::new("Average is the PS1's fixed 50/50 glass blend.")
+                .color(STUDIO_TEXT_WEAK)
+                .small(),
+        );
+    }
+    changed |= color_editor(ui, "Tint", &mut material.tint);
+
+    ui.separator();
+    let mut secondary_enabled = material.secondary_layer.is_some();
+    if ui
+        .checkbox(&mut secondary_enabled, "Secondary texture layer")
+        .changed()
+    {
+        material.secondary_layer = secondary_enabled.then(ModelSecondaryLayer::default);
+        changed = true;
+    }
+    if let Some(layer) = material.secondary_layer.as_mut() {
+        ui.label(
+            RichText::new("A second 4bpp pass blended over the model with the same UVs.")
+                .color(STUDIO_TEXT_WEAK)
+                .small(),
+        );
+        let source_label = match layer.texture {
+            ModelSecondaryTexture::Texture(_) => "4bpp texture",
+            ModelSecondaryTexture::ProceduralNoise(_) => "Generated noise",
+        };
+        let mut source_choice = matches!(layer.texture, ModelSecondaryTexture::ProceduralNoise(_));
+        egui::ComboBox::from_label("Layer source")
+            .selected_text(source_label)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut source_choice, true, "Generated noise");
+                ui.selectable_value(&mut source_choice, false, "4bpp texture");
+            });
+        let source_is_noise = matches!(layer.texture, ModelSecondaryTexture::ProceduralNoise(_));
+        if source_choice != source_is_noise {
+            layer.texture = if source_choice {
+                ModelSecondaryTexture::ProceduralNoise(ProceduralNoiseTexture::default())
+            } else {
+                ModelSecondaryTexture::Texture(String::new())
+            };
+            changed = true;
+        }
+
+        match &mut layer.texture {
+            ModelSecondaryTexture::Texture(path) => {
+                changed |= ui
+                    .add(egui::TextEdit::singleline(path).hint_text("Path to a 4bpp .psxt texture"))
+                    .changed();
+            }
+            ModelSecondaryTexture::ProceduralNoise(noise) => {
+                egui::Grid::new("model_secondary_noise_controls")
+                    .num_columns(2)
+                    .show(ui, |ui| {
+                        ui.label("Seed");
+                        changed |= ui.add(egui::DragValue::new(&mut noise.seed)).changed();
+                        ui.end_row();
+                        ui.label("Feature size");
+                        changed |= ui
+                            .add(egui::DragValue::new(&mut noise.feature_size).range(2..=64))
+                            .changed();
+                        ui.end_row();
+                        ui.label("Octaves");
+                        changed |= ui
+                            .add(egui::DragValue::new(&mut noise.octaves).range(1..=5))
+                            .changed();
+                        ui.end_row();
+                        ui.label("Contrast");
+                        changed |= ui
+                            .add(egui::Slider::new(&mut noise.contrast, 1..=255))
+                            .changed();
+                        ui.end_row();
+                    });
+                ui.label(
+                    RichText::new("Generated during preview/cook; no runtime noise cost.")
+                        .color(STUDIO_TEXT_WEAK)
+                        .small(),
+                );
+            }
+        }
+        ui.label("Layer blend");
+        changed |= blend_mode_editor(ui, &mut layer.blend_mode);
+        changed |= color_editor(ui, "Layer tint / strength", &mut layer.tint);
+    }
+
+    let resolved_sides = material.sidedness();
+    if material.face_sidedness != resolved_sides {
+        material.face_sidedness = resolved_sides;
+        material.sync_legacy_sidedness();
+        changed = true;
+    }
+    let before = material.face_sidedness;
+    egui::ComboBox::from_label("Sides")
+        .selected_text(material.face_sidedness.label())
+        .show_ui(ui, |ui| {
+            for side in [
+                MaterialFaceSidedness::Front,
+                MaterialFaceSidedness::Back,
+                MaterialFaceSidedness::Both,
+            ] {
+                ui.selectable_value(&mut material.face_sidedness, side, side.label());
+            }
+        });
+    if material.face_sidedness != before {
+        material.sync_legacy_sidedness();
+        changed = true;
+    }
+
+    changed
+}
+
 pub(crate) fn draw_particle_emitter_settings(
     ui: &mut egui::Ui,
     settings: &mut ParticleEmitterSettings,
@@ -3315,10 +3478,20 @@ fn toolbar_group_menu_impl<R>(
         let fill_alpha = (34.0 + 58.0 * glow).round() as u8;
         let stroke_alpha = (120.0 + 120.0 * glow).round() as u8;
         button = button
-            .fill(Color32::from_rgba_unmultiplied(45, 177, 207, fill_alpha))
+            .fill(Color32::from_rgba_unmultiplied(
+                STUDIO_ACCENT.r(),
+                STUDIO_ACCENT.g(),
+                STUDIO_ACCENT.b(),
+                fill_alpha,
+            ))
             .stroke(Stroke::new(
                 1.0 + glow * 0.75,
-                Color32::from_rgba_unmultiplied(165, 238, 255, stroke_alpha),
+                Color32::from_rgba_unmultiplied(
+                    STUDIO_ACCENT_HOVER.r(),
+                    STUDIO_ACCENT_HOVER.g(),
+                    STUDIO_ACCENT_HOVER.b(),
+                    stroke_alpha,
+                ),
             ));
     }
     let footer = shortcut_summary.clone();
@@ -3350,10 +3523,20 @@ pub(crate) fn toolbar_option_menu<R>(
         egui::Button::new(icons::label(icon, button_text)).min_size(Vec2::new(30.0, 23.0));
     if active {
         button = button
-            .fill(Color32::from_rgba_unmultiplied(45, 177, 207, 44))
+            .fill(Color32::from_rgba_unmultiplied(
+                STUDIO_ACCENT.r(),
+                STUDIO_ACCENT.g(),
+                STUDIO_ACCENT.b(),
+                44,
+            ))
             .stroke(Stroke::new(
                 1.0,
-                Color32::from_rgba_unmultiplied(165, 238, 255, 180),
+                Color32::from_rgba_unmultiplied(
+                    STUDIO_ACCENT_HOVER.r(),
+                    STUDIO_ACCENT_HOVER.g(),
+                    STUDIO_ACCENT_HOVER.b(),
+                    180,
+                ),
             ));
     }
     let current = current.into();

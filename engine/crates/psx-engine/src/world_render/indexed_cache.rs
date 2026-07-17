@@ -306,12 +306,11 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
     cached_surfaces: &[CachedRoomSurface],
     projected_indices: &mut [u16],
     projected_vertices: &mut [crate::render3d::ProjectedVertex],
-    projected_ready: &mut [bool],
     projected_depths: &mut [i32],
     accepted_cell_indices: &mut [u16],
     accepted_cell_depths: &mut [i32],
     _room_depth: u16,
-    _sector_size: i32,
+    sector_size: i32,
     materials: &[WorldRenderMaterial],
     lighting: &L,
     camera: &WorldCamera,
@@ -327,7 +326,6 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
     let mut stats = GridVisibilityStats::default();
     if projected_indices.len() < cached_vertices.len()
         || projected_vertices.len() < cached_vertices.len()
-        || projected_ready.len() < cached_vertices.len()
         || projected_depths.len() < cached_vertices.len()
         || accepted_cell_indices.len() < visible_cells.len()
         || accepted_cell_depths.len() < visible_cells.len()
@@ -337,10 +335,12 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
     if visible_cells.is_empty() {
         return stats;
     }
-    // Pin the dedup scratch to exactly the room's vertex count so the
-    // ready-flag test inside the collect loop is the single bound that
-    // covers both slices (see push_unique_projected_index).
-    let projected_ready = &mut projected_ready[..cached_vertices.len()];
+    // Reuse the depth scratch's small prefix as one bit per cached vertex
+    // while collecting. This is self-initializing on every draw, costs one
+    // word clear per 32 vertices, and removes the old per-vertex bool arena
+    // plus its end-of-draw clearing pass.
+    let projected_seen_word_count = cached_vertices.len().div_ceil(32);
+    projected_depths[..projected_seen_word_count].fill(0);
     let projected_indices = &mut projected_indices[..cached_vertices.len()];
 
     let use_vertex_depths = lighting.uses_vertex_depths();
@@ -355,6 +355,7 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
     // every candidate cell; matches the rounding of the GTE vertex projection.
     let loaded_camera = LoadedWorldCameraGte::load(*camera);
     let cell_frustum = CellFrustum::new(camera, options, screen_margin);
+    let cell_half_xz = sector_size.max(1).saturating_add(1) >> 1;
 
     for visible in visible_cells.iter().copied() {
         cell_stage_begin(crate::telemetry::stage::CELL_LOOKUP);
@@ -383,7 +384,12 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
                 cell.visibility_center[2],
             );
             let visibility_view = loaded_camera.view_vertex(visibility_center);
-            if !cell_frustum.sphere_visible(visibility_view, cell.visibility_radius) {
+            let half_y = cell.visibility_center[1]
+                .saturating_sub(cell.min_y)
+                .abs()
+                .max(cell.max_y.saturating_sub(cell.visibility_center[1]).abs());
+            if !cell_frustum.cell_aabb_visible(visibility_view, cell_half_xz, half_y, cell_half_xz)
+            {
                 stats.cells_frustum_culled = stats.cells_frustum_culled.wrapping_add(1);
                 cell_stage_end(crate::telemetry::stage::CELL_DEPTH);
                 continue;
@@ -409,7 +415,7 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
             cell,
             cached_cell_vertices,
             cached_surfaces,
-            projected_ready,
+            &mut projected_depths[..projected_seen_word_count],
             projected_indices,
             projected_index_count,
         );
@@ -419,6 +425,8 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
         sort_cached_room_cell_indices_by_depth(
             &mut accepted_cell_indices[..accepted_cell_count],
             &mut accepted_cell_depths[..accepted_cell_count],
+            projected_vertices,
+            projected_depths,
         );
     }
     crate::telemetry::stage_end(crate::telemetry::stage::ROOM_CELL_SELECT);
@@ -477,7 +485,7 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
                 stats
                     .surfaces_considered
                     .wrapping_add(draw_indexed_cached_room_surface(
-                        cached_surfaces[i],
+                        &cached_surfaces[i],
                         cached_vertices,
                         projected_vertices,
                         projected_depths,
@@ -486,6 +494,7 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
                         screen_bounds,
                         materials,
                         lighting,
+                        camera,
                         cell_options,
                         submit_depths,
                         depth_mode,
@@ -500,11 +509,6 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
     }
     crate::telemetry::stage_end(crate::telemetry::stage::ROOM_SURFACE_DRAW);
     surface_profile.emit();
-    for raw_index in projected_indices {
-        if let Some(ready) = projected_ready.get_mut(*raw_index as usize) {
-            *ready = false;
-        }
-    }
     stats
 }
 
@@ -522,7 +526,6 @@ pub fn draw_indexed_cached_room_vertex_lit_all_cells<const OT: usize, L: WorldSu
     cached_surfaces: &[CachedRoomSurface],
     projected_indices: &mut [u16],
     projected_vertices: &mut [ProjectedVertex],
-    projected_ready: &mut [bool],
     projected_depths: &mut [i32],
     accepted_cell_indices: &mut [u16],
     accepted_cell_depths: &mut [i32],
@@ -533,6 +536,7 @@ pub fn draw_indexed_cached_room_vertex_lit_all_cells<const OT: usize, L: WorldSu
     depth_mode: CachedRoomDepthMode,
     subdivision_mode: CachedRoomSubdivisionMode,
     screen_margin: i32,
+    sector_size: i32,
     cull_cells_laterally: bool,
     mut prebuilt_pool: Option<(&mut [QuadTexturedGouraud], &mut [u8])>,
     triangles: &mut impl RoomSurfaceSink,
@@ -541,7 +545,6 @@ pub fn draw_indexed_cached_room_vertex_lit_all_cells<const OT: usize, L: WorldSu
     let mut stats = GridVisibilityStats::default();
     if projected_indices.len() < cached_vertices.len()
         || projected_vertices.len() < cached_vertices.len()
-        || projected_ready.len() < cached_vertices.len()
         || projected_depths.len() < cached_vertices.len()
         || accepted_cell_indices.len() < cached_cells.len()
         || accepted_cell_depths.len() < cached_cells.len()
@@ -551,10 +554,8 @@ pub fn draw_indexed_cached_room_vertex_lit_all_cells<const OT: usize, L: WorldSu
     if cached_cells.is_empty() || cached_surfaces.is_empty() {
         return stats;
     }
-    // Pin the dedup scratch to exactly the room's vertex count so the
-    // ready-flag test inside the collect loop is the single bound that
-    // covers both slices (see push_unique_projected_index).
-    let projected_ready = &mut projected_ready[..cached_vertices.len()];
+    let projected_seen_word_count = cached_vertices.len().div_ceil(32);
+    projected_depths[..projected_seen_word_count].fill(0);
     let projected_indices = &mut projected_indices[..cached_vertices.len()];
 
     let use_vertex_depths = lighting.uses_vertex_depths();
@@ -565,7 +566,11 @@ pub fn draw_indexed_cached_room_vertex_lit_all_cells<const OT: usize, L: WorldSu
     let mut accepted_cell_count = 0usize;
     let loaded_camera = LoadedWorldCameraGte::load(*camera);
 
-    let cell_frustum = CellFrustum::new(camera, options, screen_margin);
+    let mut cell_frustum = CellFrustum::new(camera, options, screen_margin);
+    // The all-cells fallback intentionally has no far-plane cull. Keep that
+    // policy while using the tighter cached-cell AABB for lateral rejection.
+    cell_frustum.far = i32::MAX;
+    let cell_half_xz = sector_size.max(1).saturating_add(1) >> 1;
     cell_stage_begin(crate::telemetry::stage::CELL_DEPTH);
     // Cap the scan slice up front instead of testing `cell_index >
     // u16::MAX` on every iteration (everything past the cap would be
@@ -582,11 +587,20 @@ pub fn draw_indexed_cached_room_vertex_lit_all_cells<const OT: usize, L: WorldSu
             cell.visibility_center[2],
         );
         let visibility_view = loaded_camera.view_vertex(visibility_center);
-        if cull_cells_laterally
-            && !cell_frustum.sphere_visible_no_far(visibility_view, cell.visibility_radius)
-        {
-            stats.cells_frustum_culled = stats.cells_frustum_culled.wrapping_add(1);
-            continue;
+        if cull_cells_laterally {
+            let half_y = cell.visibility_center[1]
+                .saturating_sub(cell.min_y)
+                .abs()
+                .max(cell.max_y.saturating_sub(cell.visibility_center[1]).abs());
+            if !cell_frustum.cell_aabb_visible(
+                visibility_view,
+                cell_half_xz,
+                half_y,
+                cell_half_xz,
+            ) {
+                stats.cells_frustum_culled = stats.cells_frustum_culled.wrapping_add(1);
+                continue;
+            }
         }
         stats.cells_drawn = stats.cells_drawn.wrapping_add(1);
         // SAFETY: both accepted arrays were validated to hold at least
@@ -598,11 +612,16 @@ pub fn draw_indexed_cached_room_vertex_lit_all_cells<const OT: usize, L: WorldSu
         }
         accepted_cell_count += 1;
     }
+    cell_stage_end(crate::telemetry::stage::CELL_DEPTH);
     sort_cached_room_cell_indices_by_depth(
         &mut accepted_cell_indices[..accepted_cell_count],
         &mut accepted_cell_depths[..accepted_cell_count],
+        projected_vertices,
+        projected_depths,
     );
-    cell_stage_end(crate::telemetry::stage::CELL_DEPTH);
+    // The bucket sorter borrows this scratch after selection. Restore the
+    // vertex-seen bitset before the sorted cell walk starts collecting.
+    projected_depths[..projected_seen_word_count].fill(0);
     cell_stage_begin(crate::telemetry::stage::CELL_COLLECT);
     for &cell_index in &accepted_cell_indices[..accepted_cell_count] {
         let Some(cell) = cached_cells.get(cell_index as usize) else {
@@ -612,7 +631,7 @@ pub fn draw_indexed_cached_room_vertex_lit_all_cells<const OT: usize, L: WorldSu
             cell,
             cached_cell_vertices,
             cached_surfaces,
-            projected_ready,
+            &mut projected_depths[..projected_seen_word_count],
             projected_indices,
             projected_index_count,
         );
@@ -674,7 +693,7 @@ pub fn draw_indexed_cached_room_vertex_lit_all_cells<const OT: usize, L: WorldSu
                 stats
                     .surfaces_considered
                     .wrapping_add(draw_indexed_cached_room_surface(
-                        cached_surfaces[i],
+                        &cached_surfaces[i],
                         cached_vertices,
                         projected_vertices,
                         projected_depths,
@@ -683,6 +702,7 @@ pub fn draw_indexed_cached_room_vertex_lit_all_cells<const OT: usize, L: WorldSu
                         screen_bounds,
                         materials,
                         lighting,
+                        camera,
                         cell_options,
                         submit_depths,
                         depth_mode,
@@ -697,11 +717,6 @@ pub fn draw_indexed_cached_room_vertex_lit_all_cells<const OT: usize, L: WorldSu
     }
     crate::telemetry::stage_end(crate::telemetry::stage::ROOM_SURFACE_DRAW);
     surface_profile.emit();
-    for raw_index in projected_indices {
-        if let Some(ready) = projected_ready.get_mut(*raw_index as usize) {
-            *ready = false;
-        }
-    }
     stats
 }
 
@@ -725,10 +740,97 @@ fn cell_stage_end(id: u16) {
     let _ = id;
 }
 
-fn sort_cached_room_cell_indices_by_depth(indices: &mut [u16], depths: &mut [i32]) {
+fn sort_cached_room_cell_indices_by_depth(
+    indices: &mut [u16],
+    depths: &mut [i32],
+    pair_scratch: &mut [ProjectedVertex],
+    bucket_scratch: &mut [i32],
+) {
     if indices.len() > depths.len() {
         return;
     }
+    let len = indices.len();
+    if len < 2 {
+        return;
+    }
+    // Tiny room lists are cheaper in-place; larger lists use only enough
+    // coarse buckets to keep the per-bucket insertion tails short. Avoid
+    // clearing the old fixed 128 counters for every small active room.
+    let (bucket_count, bucket_shift) = if len < 24 {
+        sort_cached_room_cell_indices_by_depth_shell(indices, depths);
+        return;
+    } else if len < 48 && bucket_scratch.len() >= 32 {
+        (32usize, 10u32)
+    } else if len < 96 && bucket_scratch.len() >= 64 {
+        (64usize, 9u32)
+    } else if bucket_scratch.len() >= 128 {
+        (128usize, 8u32)
+    } else {
+        sort_cached_room_cell_indices_by_depth_shell(indices, depths);
+        return;
+    };
+    if pair_scratch.len() < len {
+        sort_cached_room_cell_indices_by_depth_shell(indices, depths);
+        return;
+    }
+
+    let buckets = &mut bucket_scratch[..bucket_count];
+    buckets.fill(0);
+    let bucket_for =
+        |depth: i32| ((depth.clamp(0, 32_767) as usize) >> bucket_shift).min(bucket_count - 1);
+    for &depth in &depths[..len] {
+        let bucket = bucket_for(depth);
+        buckets[bucket] += 1;
+    }
+
+    let mut running = 0i32;
+    let mut bucket = bucket_count;
+    while bucket != 0 {
+        bucket -= 1;
+        let count = buckets[bucket];
+        buckets[bucket] = running;
+        running += count;
+    }
+    let mut i = 0usize;
+    while i < len {
+        let bucket = bucket_for(depths[i]);
+        let out = buckets[bucket] as usize;
+        pair_scratch[out] = ProjectedVertex::new(indices[i] as i16, 0, depths[i]);
+        buckets[bucket] += 1;
+        i += 1;
+    }
+
+    // Counting places broad far-to-near depth bands. Stable insertion only
+    // refines records that landed in the same band, preserving the exact raw
+    // depth order (and equal-depth submission order) of the old full sort.
+    let mut start = 0usize;
+    bucket = bucket_count;
+    while bucket != 0 {
+        bucket -= 1;
+        let end = buckets[bucket] as usize;
+        let mut item_index = start + 1;
+        while item_index < end {
+            let item = pair_scratch[item_index];
+            let mut position = item_index;
+            while position > start && pair_scratch[position - 1].sz < item.sz {
+                pair_scratch[position] = pair_scratch[position - 1];
+                position -= 1;
+            }
+            pair_scratch[position] = item;
+            item_index += 1;
+        }
+        start = end;
+    }
+
+    i = 0;
+    while i < len {
+        indices[i] = pair_scratch[i].sx as u16;
+        depths[i] = pair_scratch[i].sz;
+        i += 1;
+    }
+}
+
+fn sort_cached_room_cell_indices_by_depth_shell(indices: &mut [u16], depths: &mut [i32]) {
     let mut gap = indices.len() / 2;
     while gap > 0 {
         let mut i = gap;
@@ -786,7 +888,7 @@ fn collect_cached_cell_vertex_indices(
     cell: &CachedRoomCell,
     cached_cell_vertices: &[u16],
     cached_surfaces: &[CachedRoomSurface],
-    projected_ready: &mut [bool],
+    projected_seen_words: &mut [i32],
     projected_indices: &mut [u16],
     mut projected_index_count: usize,
 ) -> usize {
@@ -799,7 +901,7 @@ fn collect_cached_cell_vertex_indices(
             for raw_index in surface.vertex_indices {
                 projected_index_count = push_unique_projected_index(
                     raw_index,
-                    projected_ready,
+                    projected_seen_words,
                     projected_indices,
                     projected_index_count,
                 );
@@ -814,7 +916,7 @@ fn collect_cached_cell_vertex_indices(
     for &raw_index in &cached_cell_vertices[first..end] {
         projected_index_count = push_unique_projected_index(
             raw_index,
-            projected_ready,
+            projected_seen_words,
             projected_indices,
             projected_index_count,
         );
@@ -822,25 +924,27 @@ fn collect_cached_cell_vertex_indices(
     projected_index_count
 }
 
-/// Callers slice `projected_ready` and `projected_indices` to exactly
-/// the room's vertex count before the collect loop, so the ready-flag
-/// lookup below is the single data-dependent bound: an index that
-/// passes it is a valid vertex slot, and the write cursor (one push
+/// Callers provide one cleared seen bit for every room vertex and slice
+/// `projected_indices` to the room's vertex count. An index whose bit word
+/// exists is therefore a valid vertex slot, and the write cursor (one push
 /// per distinct vertex) can never reach the indices slice end.
 #[inline(always)]
 fn push_unique_projected_index(
     raw_index: u16,
-    projected_ready: &mut [bool],
+    projected_seen_words: &mut [i32],
     projected_indices: &mut [u16],
     projected_index_count: usize,
 ) -> usize {
     let vertex_index = raw_index as usize;
-    if let Some(ready) = projected_ready.get_mut(vertex_index) {
-        if !*ready {
-            *ready = true;
+    let word_index = vertex_index >> 5;
+    let mask = 1u32 << (vertex_index & 31);
+    if let Some(seen_word) = projected_seen_words.get_mut(word_index) {
+        let seen_bits = *seen_word as u32;
+        if seen_bits & mask == 0 {
+            *seen_word = (seen_bits | mask) as i32;
             debug_assert!(projected_index_count < projected_indices.len());
             // SAFETY: see the function doc; distinct pushes are bounded
-            // by `projected_ready.len() == projected_indices.len()`.
+            // by the represented vertex count and indices slice length.
             unsafe {
                 *projected_indices.get_unchecked_mut(projected_index_count) = raw_index;
             }
@@ -857,7 +961,7 @@ const fn cached_room_cell_key(x: u16, z: u16) -> u32 {
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
 fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
-    surface: CachedRoomSurface,
+    surface: &CachedRoomSurface,
     cached_vertices: &[WorldVertex],
     projected_vertices: &[ProjectedVertex],
     projected_depths: &[i32],
@@ -866,11 +970,12 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
     screen_bounds: ProjectedScreenBounds,
     materials: &[WorldRenderMaterial],
     lighting: &L,
+    camera: &WorldCamera,
     options: WorldSurfaceOptions,
     submit_depths: CachedRoomSubmitDepths,
     depth_mode: CachedRoomDepthMode,
     subdivision_mode: CachedRoomSubdivisionMode,
-    prebuilt: Option<(&mut QuadTexturedGouraud, &mut u8)>,
+    mut prebuilt: Option<(&mut QuadTexturedGouraud, &mut u8)>,
     triangles: &mut impl RoomSurfaceSink,
     world: &mut WorldRenderPass<'_, '_, OT>,
     profile: &mut RoomSurfaceMicroProfile,
@@ -879,31 +984,63 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
     profile.count_shape(surface.triangle_index);
     let projected_start = RoomSurfaceMicroProfile::cycle();
     let ids = surface.vertex_indices;
-    let (projected, vertex_depths) = if use_vertex_depths {
-        let Some((projected, depths)) =
-            indexed_projected_quad_with_depths(projected_vertices, projected_depths, ids)
-        else {
-            profile.add_projected(RoomSurfaceMicroProfile::elapsed(projected_start));
-            profile.count_projected_reject();
-            return 0;
-        };
-        (projected, Some(depths))
+    let projected_with_depths = if use_vertex_depths {
+        indexed_projected_quad_with_depths(projected_vertices, projected_depths, ids)
     } else {
-        let Some(projected) = indexed_projected_quad(projected_vertices, ids) else {
-            profile.add_projected(RoomSurfaceMicroProfile::elapsed(projected_start));
-            profile.count_projected_reject();
-            return 0;
-        };
-        (projected, None)
+        indexed_projected_quad(projected_vertices, ids).map(|projected| (projected, [0; 4]))
     };
+    let Some((projected, raw_vertex_depths)) = projected_with_depths else {
+        profile.add_projected(RoomSurfaceMicroProfile::elapsed(projected_start));
+        profile.count_projected_reject();
+        return draw_near_clipped_cached_room_surface(
+            surface,
+            cached_vertices,
+            ids,
+            materials,
+            lighting,
+            camera,
+            options,
+            use_vertex_depths,
+            use_direct_baked_rgb,
+            triangles,
+            world,
+        );
+    };
+    let vertex_depths = use_vertex_depths.then_some(raw_vertex_depths);
     profile.add_projected(RoomSurfaceMicroProfile::elapsed(projected_start));
     let screen_start = RoomSurfaceMicroProfile::cycle();
-    if projected_quad_outside_screen(projected, screen_bounds) {
+    let projected_metrics = ProjectedQuadMetrics::new(projected);
+    if projected_metrics.outside_screen(screen_bounds) {
         profile.add_screen(RoomSurfaceMicroProfile::elapsed(screen_start));
         profile.count_screen_culled();
         return 1;
     }
     profile.add_screen(RoomSurfaceMicroProfile::elapsed(screen_start));
+    #[cfg(not(feature = "room-surface-profile"))]
+    if use_direct_baked_rgb
+        && surface.has_baked_rgb()
+        && surface.triangle_index >= WHOLE_QUAD_TRIANGLE_INDEX
+    {
+        if let Some((quad, valid)) = prebuilt.as_mut() {
+            let ready = **valid;
+            if ready & WARMED_ROOM_QUAD_READY != 0
+                && try_submit_encoded_warmed_room_quad(
+                    surface,
+                    projected,
+                    projected_metrics,
+                    options,
+                    submit_depths,
+                    depth_mode,
+                    subdivision_mode,
+                    quad,
+                    ready,
+                    world,
+                )
+            {
+                return 1;
+            }
+        }
+    }
     let kind_start = RoomSurfaceMicroProfile::cycle();
     let kind = cached_surface_kind(surface.kind_flags, surface.wall_direction);
     profile.add_kind(RoomSurfaceMicroProfile::elapsed(kind_start));
@@ -916,11 +1053,26 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
     };
     let material = cached_uv_material(material);
     profile.add_material(RoomSurfaceMicroProfile::elapsed(material_start));
+    // A valid prebuilt packet already owns the immutable baked colours. Once
+    // its first frame has populated them, avoid reconstructing and shuffling
+    // the same four RGB triples on every subsequent draw. Positions and OT
+    // depth remain frame-dependent and are still patched below.
+    let prebuilt_static_colors_ready = use_direct_baked_rgb
+        && surface.has_baked_rgb()
+        && prebuilt.as_ref().is_some_and(|entry| *entry.1 != 0);
     match kind {
         WorldSurfaceKind::Floor | WorldSurfaceKind::Ceiling => {
             let is_ceiling = matches!(kind, WorldSurfaceKind::Ceiling);
+            let surface_risky = cached_surface_risk_for_modes(
+                depth_mode,
+                subdivision_mode,
+                kind,
+                surface,
+                projected,
+                projected_metrics.depth_span(),
+            );
             let use_triangle_depth =
-                cached_surface_uses_triangle_depth(depth_mode, kind, surface, projected);
+                cached_surface_uses_triangle_depth_with_risk(depth_mode, kind, surface_risky);
             let (surface_options, prepared_depth) = if use_triangle_depth {
                 (triangle_depth_options(options), None)
             } else {
@@ -930,9 +1082,7 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                 surface_options,
                 subdivision_mode,
                 use_triangle_depth,
-                kind,
-                surface,
-                projected,
+                surface_risky,
             );
             if surface.triangle_index < WHOLE_QUAD_TRIANGLE_INDEX {
                 let backface_start = RoomSurfaceMicroProfile::cycle();
@@ -999,19 +1149,51 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                     profile.count_backface_culled();
                     return 1;
                 }
+                #[cfg(not(feature = "room-surface-profile"))]
+                if prebuilt_static_colors_ready {
+                    let prepared_depth = prepared_depth.unwrap_or_else(|| {
+                        PreparedTriangleDepth::from_quad_average::<OT>(surface_options, projected)
+                    });
+                    let packet_verts = warmed_room_quad_packet_vertices(
+                        projected,
+                        material.sidedness,
+                        surface.split,
+                        is_ceiling,
+                    );
+                    if let Some((quad, _)) = prebuilt.as_mut() {
+                        if world
+                            .try_submit_warmed_textured_gouraud_quad(
+                                quad,
+                                packet_verts,
+                                projected_metrics.hardware_extent_safe()
+                                    && surface_options.textured_split_max_edge == 0,
+                                surface_options,
+                                prepared_depth,
+                            )
+                            .is_some()
+                        {
+                            return 1;
+                        }
+                    }
+                }
                 let lighting_start = RoomSurfaceMicroProfile::cycle();
-                let Some(colors) = indexed_vertex_lighting_colors(
-                    lighting,
-                    surface,
-                    material,
-                    cached_vertices,
-                    ids,
-                    vertex_depths,
-                    use_direct_baked_rgb,
-                ) else {
-                    profile.add_lighting(RoomSurfaceMicroProfile::elapsed(lighting_start));
-                    profile.count_lighting_reject();
-                    return 0;
+                let colors = if prebuilt_static_colors_ready {
+                    [(0, 0, 0); 4]
+                } else {
+                    let Some(colors) = indexed_vertex_lighting_colors(
+                        lighting,
+                        surface,
+                        material,
+                        cached_vertices,
+                        ids,
+                        vertex_depths,
+                        use_direct_baked_rgb,
+                    ) else {
+                        profile.add_lighting(RoomSurfaceMicroProfile::elapsed(lighting_start));
+                        profile.count_lighting_reject();
+                        return 0;
+                    };
+                    colors
                 };
                 profile.add_lighting(RoomSurfaceMicroProfile::elapsed(lighting_start));
                 let (projected, uv_words, colors) = if is_ceiling {
@@ -1032,6 +1214,7 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                 let prepared_depth = Some(prepared_depth.unwrap_or_else(|| {
                     PreparedTriangleDepth::from_quad_average::<OT>(surface_options, projected)
                 }));
+                let prebuilt_colors_static = use_direct_baked_rgb && surface.has_baked_rgb();
                 submit_sided_projected_gouraud_quad_cached_uv_words(
                     world,
                     triangles,
@@ -1044,6 +1227,8 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                     CullMode::Back,
                     surface.split,
                     prebuilt,
+                    prebuilt_colors_static,
+                    warmed_room_quad_ready_value(material.sidedness, surface.split, is_ceiling),
                     profile,
                 );
                 profile.add_submit(RoomSurfaceMicroProfile::elapsed(submit_start));
@@ -1051,8 +1236,16 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
         }
         WorldSurfaceKind::Wall { direction } => {
             let wall_material = wall_material_for_direction(material, direction);
+            let surface_risky = cached_surface_risk_for_modes(
+                depth_mode,
+                subdivision_mode,
+                kind,
+                surface,
+                projected,
+                projected_metrics.depth_span(),
+            );
             let use_triangle_depth =
-                cached_surface_uses_triangle_depth(depth_mode, kind, surface, projected);
+                cached_surface_uses_triangle_depth_with_risk(depth_mode, kind, surface_risky);
             let (surface_options, prepared_depth) = if use_triangle_depth {
                 (triangle_depth_options(options), None)
             } else {
@@ -1062,9 +1255,7 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                 surface_options,
                 subdivision_mode,
                 use_triangle_depth,
-                kind,
-                surface,
-                projected,
+                surface_risky,
             );
             if surface.triangle_index < WHOLE_QUAD_TRIANGLE_INDEX {
                 let backface_start = RoomSurfaceMicroProfile::cycle();
@@ -1126,19 +1317,51 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                     profile.count_backface_culled();
                     return 1;
                 }
+                #[cfg(not(feature = "room-surface-profile"))]
+                if prebuilt_static_colors_ready {
+                    let prepared_depth = prepared_depth.unwrap_or_else(|| {
+                        PreparedTriangleDepth::from_quad_average::<OT>(surface_options, projected)
+                    });
+                    let packet_verts = warmed_room_quad_packet_vertices(
+                        projected,
+                        wall_material.sidedness,
+                        SPLIT_NW_SE,
+                        false,
+                    );
+                    if let Some((quad, _)) = prebuilt.as_mut() {
+                        if world
+                            .try_submit_warmed_textured_gouraud_quad(
+                                quad,
+                                packet_verts,
+                                projected_metrics.hardware_extent_safe()
+                                    && surface_options.textured_split_max_edge == 0,
+                                surface_options,
+                                prepared_depth,
+                            )
+                            .is_some()
+                        {
+                            return 1;
+                        }
+                    }
+                }
                 let lighting_start = RoomSurfaceMicroProfile::cycle();
-                let Some(colors) = indexed_vertex_lighting_colors(
-                    lighting,
-                    surface,
-                    material,
-                    cached_vertices,
-                    ids,
-                    vertex_depths,
-                    use_direct_baked_rgb,
-                ) else {
-                    profile.add_lighting(RoomSurfaceMicroProfile::elapsed(lighting_start));
-                    profile.count_lighting_reject();
-                    return 0;
+                let colors = if prebuilt_static_colors_ready {
+                    [(0, 0, 0); 4]
+                } else {
+                    let Some(colors) = indexed_vertex_lighting_colors(
+                        lighting,
+                        surface,
+                        material,
+                        cached_vertices,
+                        ids,
+                        vertex_depths,
+                        use_direct_baked_rgb,
+                    ) else {
+                        profile.add_lighting(RoomSurfaceMicroProfile::elapsed(lighting_start));
+                        profile.count_lighting_reject();
+                        return 0;
+                    };
+                    colors
                 };
                 profile.add_lighting(RoomSurfaceMicroProfile::elapsed(lighting_start));
                 let submit_start = RoomSurfaceMicroProfile::cycle();
@@ -1146,6 +1369,7 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                 let prepared_depth = Some(prepared_depth.unwrap_or_else(|| {
                     PreparedTriangleDepth::from_quad_average::<OT>(surface_options, projected)
                 }));
+                let prebuilt_colors_static = use_direct_baked_rgb && surface.has_baked_rgb();
                 submit_sided_projected_gouraud_quad_cached_uv_words(
                     world,
                     triangles,
@@ -1158,11 +1382,329 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                     CullMode::Back,
                     SPLIT_NW_SE,
                     prebuilt,
+                    prebuilt_colors_static,
+                    warmed_room_quad_ready_value(wall_material.sidedness, SPLIT_NW_SE, false),
                     profile,
                 );
                 profile.add_submit(RoomSurfaceMicroProfile::elapsed(submit_start));
             }
         }
+    }
+    1
+}
+
+const WARMED_ROOM_QUAD_READY: u8 = 0x80;
+const WARMED_ROOM_QUAD_REVERSE: u8 = 0x01;
+const WARMED_ROOM_QUAD_SPLIT_NE_SW: u8 = 0x02;
+const WARMED_ROOM_QUAD_DOUBLE_SIDED: u8 = 0x04;
+
+/// Build the immutable payload of baked whole-quad room packets before the
+/// room reaches the render loop.
+///
+/// Positions and OT links remain frame-dependent and are patched when the
+/// surface is drawn. Materials, UVs, baked vertex colours, winding, and split
+/// order are static for a resident room, so preparing them during the streamed
+/// room/material lifecycle removes the first-visible-frame packet spike.
+pub fn prewarm_indexed_cached_room_quads(
+    surfaces: &[CachedRoomSurface],
+    materials: &[WorldRenderMaterial],
+    quads: &mut [QuadTexturedGouraud],
+    valid: &mut [u8],
+) -> usize {
+    let count = surfaces.len().min(quads.len()).min(valid.len());
+    let mut warmed = 0usize;
+    let mut index = 0usize;
+    while index < count {
+        valid[index] = 0;
+        let surface = &surfaces[index];
+        if surface.has_baked_rgb() && surface.triangle_index >= WHOLE_QUAD_TRIANGLE_INDEX {
+            if let Some(&base_material) = materials.get(surface.material_slot as usize) {
+                let kind = cached_surface_kind(surface.kind_flags, surface.wall_direction);
+                let (material, split, reverse_front) = match kind {
+                    WorldSurfaceKind::Floor => {
+                        (cached_uv_material(base_material), surface.split, false)
+                    }
+                    WorldSurfaceKind::Ceiling => {
+                        (cached_uv_material(base_material), surface.split, true)
+                    }
+                    WorldSurfaceKind::Wall { direction } => (
+                        wall_material_for_direction(cached_uv_material(base_material), direction),
+                        SPLIT_NW_SE,
+                        false,
+                    ),
+                };
+                let uv_words = warmed_room_quad_packet_values(
+                    surface.uv_words,
+                    material.sidedness,
+                    split,
+                    reverse_front,
+                );
+                let colors = warmed_room_quad_packet_values(
+                    surface.baked_vertex_rgb,
+                    material.sidedness,
+                    split,
+                    reverse_front,
+                );
+                quads[index] = QuadTexturedGouraud::with_packet_material_packed_uv_words(
+                    [(0, 0); 4],
+                    uv_words,
+                    colors,
+                    material.gouraud_packet,
+                );
+                valid[index] =
+                    warmed_room_quad_ready_value(material.sidedness, split, reverse_front);
+                warmed += 1;
+            }
+        }
+        index += 1;
+    }
+    warmed
+}
+
+#[inline(always)]
+const fn warmed_room_quad_ready_value(
+    sidedness: SurfaceSidedness,
+    split: u8,
+    reverse_front: bool,
+) -> u8 {
+    let reverse = reverse_front ^ matches!(sidedness, SurfaceSidedness::Back);
+    WARMED_ROOM_QUAD_READY
+        | if reverse { WARMED_ROOM_QUAD_REVERSE } else { 0 }
+        | if split == SPLIT_NE_SW {
+            WARMED_ROOM_QUAD_SPLIT_NE_SW
+        } else {
+            0
+        }
+        | if matches!(sidedness, SurfaceSidedness::Both) {
+            WARMED_ROOM_QUAD_DOUBLE_SIDED
+        } else {
+            0
+        }
+}
+
+#[inline(always)]
+fn warmed_room_quad_packet_vertices_from_ready(
+    mut verts: [ProjectedVertex; 4],
+    ready: u8,
+) -> [ProjectedVertex; 4] {
+    if ready & WARMED_ROOM_QUAD_REVERSE != 0 {
+        verts = reverse_quad_winding(verts);
+    }
+    if ready & WARMED_ROOM_QUAD_SPLIT_NE_SW != 0 {
+        [verts[0], verts[1], verts[3], verts[2]]
+    } else {
+        [verts[1], verts[0], verts[2], verts[3]]
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn try_submit_encoded_warmed_room_quad<const OT: usize>(
+    surface: &CachedRoomSurface,
+    projected: [ProjectedVertex; 4],
+    projected_metrics: ProjectedQuadMetrics,
+    options: WorldSurfaceOptions,
+    submit_depths: CachedRoomSubmitDepths,
+    depth_mode: CachedRoomDepthMode,
+    subdivision_mode: CachedRoomSubdivisionMode,
+    quad: &mut QuadTexturedGouraud,
+    ready: u8,
+    world: &mut WorldRenderPass<'_, '_, OT>,
+) -> bool {
+    if encoded_warmed_room_quad_backface_culled(projected, ready) {
+        return true;
+    }
+    let packet_verts = warmed_room_quad_packet_vertices_from_ready(projected, ready);
+
+    let kind = cached_surface_kind(surface.kind_flags, surface.wall_direction);
+    let surface_risky = cached_surface_risk_for_modes(
+        depth_mode,
+        subdivision_mode,
+        kind,
+        surface,
+        projected,
+        projected_metrics.depth_span(),
+    );
+    let use_triangle_depth =
+        cached_surface_uses_triangle_depth_with_risk(depth_mode, kind, surface_risky);
+    let (surface_options, prepared_depth) = if use_triangle_depth {
+        (triangle_depth_options(options), None)
+    } else if matches!(kind, WorldSurfaceKind::Wall { .. }) {
+        (options, submit_depths.vertical)
+    } else {
+        (horizontal_depth_options(options), submit_depths.horizontal)
+    };
+    let surface_options = cached_surface_subdivision_options(
+        surface_options,
+        subdivision_mode,
+        use_triangle_depth,
+        surface_risky,
+    );
+    let prepared_depth = prepared_depth.unwrap_or_else(|| {
+        PreparedTriangleDepth::from_quad_average::<OT>(surface_options, projected)
+    });
+    world
+        .try_submit_warmed_textured_gouraud_quad(
+            quad,
+            packet_verts,
+            projected_metrics.hardware_extent_safe()
+                && surface_options.textured_split_max_edge == 0,
+            surface_options,
+            prepared_depth,
+        )
+        .is_some()
+}
+
+#[inline(always)]
+pub(super) fn encoded_warmed_room_quad_backface_culled(
+    mut projected: [ProjectedVertex; 4],
+    ready: u8,
+) -> bool {
+    if ready & WARMED_ROOM_QUAD_DOUBLE_SIDED != 0 {
+        return false;
+    }
+    if ready & WARMED_ROOM_QUAD_REVERSE != 0 {
+        projected = reverse_quad_winding(projected);
+    }
+    let split = if ready & WARMED_ROOM_QUAD_SPLIT_NE_SW != 0 {
+        SPLIT_NE_SW
+    } else {
+        SPLIT_NW_SE
+    };
+    let [(a, b, c), (d, e, f)] = split_triangles_runtime(split);
+    projected_triangle_back_facing([projected[a], projected[b], projected[c]])
+        && projected_triangle_back_facing([projected[d], projected[e], projected[f]])
+}
+
+#[inline(always)]
+fn warmed_room_quad_packet_vertices(
+    verts: [ProjectedVertex; 4],
+    sidedness: SurfaceSidedness,
+    split: u8,
+    reverse_front: bool,
+) -> [ProjectedVertex; 4] {
+    warmed_room_quad_packet_values(verts, sidedness, split, reverse_front)
+}
+
+#[inline(always)]
+fn warmed_room_quad_packet_values<T: Copy>(
+    mut values: [T; 4],
+    sidedness: SurfaceSidedness,
+    split: u8,
+    reverse_front: bool,
+) -> [T; 4] {
+    if reverse_front ^ (sidedness == SurfaceSidedness::Back) {
+        values = reverse_quad_winding(values);
+    }
+    if split == SPLIT_NE_SW {
+        [values[0], values[1], values[3], values[2]]
+    } else {
+        [values[1], values[0], values[2], values[3]]
+    }
+}
+
+/// Rare near-plane fallback for the projected room cache.
+///
+/// Reconstructing four view-space vertices only when a cached projection is
+/// invalid avoids both whole-surface popping and a permanent per-room view
+/// arena. The clipped polygon is emitted as ordinary triangles, preserving
+/// the PS1 extent splitter and interpolating UV/light values at the new edge.
+#[allow(clippy::too_many_arguments)]
+fn draw_near_clipped_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
+    surface: &CachedRoomSurface,
+    cached_vertices: &[WorldVertex],
+    ids: [u16; 4],
+    materials: &[WorldRenderMaterial],
+    lighting: &L,
+    camera: &WorldCamera,
+    options: WorldSurfaceOptions,
+    use_vertex_depths: bool,
+    use_direct_baked_rgb: bool,
+    triangles: &mut impl RoomSurfaceSink,
+    world: &mut WorldRenderPass<'_, '_, OT>,
+) -> u16 {
+    let Some(vertices) = indexed_world_quad(cached_vertices, ids) else {
+        return 0;
+    };
+    let views = [
+        camera.view_vertex(vertices[0]),
+        camera.view_vertex(vertices[1]),
+        camera.view_vertex(vertices[2]),
+        camera.view_vertex(vertices[3]),
+    ];
+    if views.iter().all(|view| view.z < camera.projection.near_z) {
+        return 1;
+    }
+
+    let kind = cached_surface_kind(surface.kind_flags, surface.wall_direction);
+    let Some(&base_material) = materials.get(surface.material_slot as usize) else {
+        return 0;
+    };
+    let base_material = cached_uv_material(base_material);
+    let vertex_depths = use_vertex_depths.then(|| {
+        [
+            lighting.prepare_vertex_depth(views[0].z),
+            lighting.prepare_vertex_depth(views[1].z),
+            lighting.prepare_vertex_depth(views[2].z),
+            lighting.prepare_vertex_depth(views[3].z),
+        ]
+    });
+    let Some(colors) = indexed_vertex_lighting_colors(
+        lighting,
+        surface,
+        base_material,
+        cached_vertices,
+        ids,
+        vertex_depths,
+        use_direct_baked_rgb,
+    ) else {
+        return 0;
+    };
+
+    let (material, reverse_front) = match kind {
+        WorldSurfaceKind::Floor => (base_material, false),
+        WorldSurfaceKind::Ceiling => (base_material, true),
+        WorldSurfaceKind::Wall { direction } => {
+            (wall_material_for_direction(base_material, direction), false)
+        }
+    };
+    let opts = triangle_depth_options(options)
+        .with_cull_mode(cull_for_sidedness(material.sidedness, CullMode::Back))
+        .with_material_layer(material.texture);
+    let split = split_triangles_runtime(surface.split);
+    let count = if surface.triangle_index < WHOLE_QUAD_TRIANGLE_INDEX {
+        1
+    } else {
+        2
+    };
+    let mut triangle_index = 0usize;
+    while triangle_index < count {
+        let selected = if count == 1 {
+            surface.triangle_index as usize
+        } else {
+            triangle_index
+        };
+        let (a, mut b, mut c) = split[selected.min(1)];
+        if reverse_front ^ (material.sidedness == SurfaceSidedness::Back) {
+            core::mem::swap(&mut b, &mut c);
+        }
+        let stats = world.submit_textured_gouraud_view_triangle_uv_words(
+            triangles,
+            [views[a], views[b], views[c]],
+            [
+                surface.uv_words[a],
+                surface.uv_words[b],
+                surface.uv_words[c],
+            ],
+            [colors[a], colors[b], colors[c]],
+            camera.projection,
+            material.texture,
+            opts,
+        );
+        if stats.primitive_overflow || stats.command_overflow {
+            break;
+        }
+        triangle_index += 1;
     }
     1
 }
@@ -1188,22 +1730,55 @@ fn indexed_world_quad(vertices: &[WorldVertex], ids: [u16; 4]) -> Option<[WorldV
     }
 }
 
+#[cfg(test)]
 pub(super) fn cached_surface_uses_triangle_depth(
     mode: CachedRoomDepthMode,
     kind: WorldSurfaceKind,
     surface: CachedRoomSurface,
     projected: [ProjectedVertex; 4],
 ) -> bool {
+    let depth_span = cached_surface_projected_depth_span(&surface, projected);
+    cached_surface_uses_triangle_depth_with_risk(
+        mode,
+        kind,
+        cached_surface_is_risky(kind, &surface, projected, depth_span),
+    )
+}
+
+#[inline(always)]
+fn cached_surface_uses_triangle_depth_with_risk(
+    mode: CachedRoomDepthMode,
+    kind: WorldSurfaceKind,
+    surface_risky: bool,
+) -> bool {
     match mode {
         CachedRoomDepthMode::FixedCell => false,
         CachedRoomDepthMode::PerTriangle => true,
         CachedRoomDepthMode::Hybrid => match kind {
-            WorldSurfaceKind::Floor | WorldSurfaceKind::Ceiling => {
-                cached_horizontal_surface_is_risky(surface, projected)
-            }
+            WorldSurfaceKind::Floor | WorldSurfaceKind::Ceiling => surface_risky,
             WorldSurfaceKind::Wall { .. } => false,
         },
-        CachedRoomDepthMode::HybridWalls => cached_surface_is_risky(kind, surface, projected),
+        CachedRoomDepthMode::HybridWalls => surface_risky,
+    }
+}
+
+#[inline(always)]
+fn cached_surface_risk_for_modes(
+    depth_mode: CachedRoomDepthMode,
+    subdivision_mode: CachedRoomSubdivisionMode,
+    kind: WorldSurfaceKind,
+    surface: &CachedRoomSurface,
+    projected: [ProjectedVertex; 4],
+    depth_span: i32,
+) -> bool {
+    if matches!(
+        depth_mode,
+        CachedRoomDepthMode::Hybrid | CachedRoomDepthMode::HybridWalls
+    ) || matches!(subdivision_mode, CachedRoomSubdivisionMode::Risky)
+    {
+        cached_surface_is_risky(kind, surface, projected, depth_span)
+    } else {
+        false
     }
 }
 
@@ -1211,14 +1786,12 @@ fn cached_surface_subdivision_options(
     options: WorldSurfaceOptions,
     mode: CachedRoomSubdivisionMode,
     use_triangle_depth: bool,
-    kind: WorldSurfaceKind,
-    surface: CachedRoomSurface,
-    projected: [ProjectedVertex; 4],
+    surface_risky: bool,
 ) -> WorldSurfaceOptions {
     let allow_visual_subdivision = match mode {
         CachedRoomSubdivisionMode::All => true,
         CachedRoomSubdivisionMode::DepthSorted => use_triangle_depth,
-        CachedRoomSubdivisionMode::Risky => cached_surface_is_risky(kind, surface, projected),
+        CachedRoomSubdivisionMode::Risky => surface_risky,
     };
     if allow_visual_subdivision {
         options
@@ -1229,31 +1802,32 @@ fn cached_surface_subdivision_options(
 
 fn cached_surface_is_risky(
     kind: WorldSurfaceKind,
-    surface: CachedRoomSurface,
+    surface: &CachedRoomSurface,
     projected: [ProjectedVertex; 4],
+    depth_span: i32,
 ) -> bool {
+    let depth_span = if surface.triangle_index < WHOLE_QUAD_TRIANGLE_INDEX {
+        cached_surface_projected_depth_span(surface, projected)
+    } else {
+        depth_span
+    };
     match kind {
         WorldSurfaceKind::Floor | WorldSurfaceKind::Ceiling => {
-            cached_horizontal_surface_is_risky(surface, projected)
+            cached_horizontal_surface_is_risky(surface, depth_span)
         }
-        WorldSurfaceKind::Wall { .. } => {
-            cached_surface_projected_depth_span(surface, projected) >= HYBRID_HORIZONTAL_DEPTH_SPAN
-        }
+        WorldSurfaceKind::Wall { .. } => depth_span >= HYBRID_HORIZONTAL_DEPTH_SPAN,
     }
 }
 
-fn cached_horizontal_surface_is_risky(
-    surface: CachedRoomSurface,
-    projected: [ProjectedVertex; 4],
-) -> bool {
+fn cached_horizontal_surface_is_risky(surface: &CachedRoomSurface, depth_span: i32) -> bool {
     if surface.kind_flags & CACHED_SURFACE_HORIZONTAL_NON_FLAT != 0 {
         return true;
     }
-    cached_surface_projected_depth_span(surface, projected) >= HYBRID_HORIZONTAL_DEPTH_SPAN
+    depth_span >= HYBRID_HORIZONTAL_DEPTH_SPAN
 }
 
 fn cached_surface_projected_depth_span(
-    surface: CachedRoomSurface,
+    surface: &CachedRoomSurface,
     projected: [ProjectedVertex; 4],
 ) -> i32 {
     if surface.triangle_index < WHOLE_QUAD_TRIANGLE_INDEX {
@@ -1317,32 +1891,78 @@ fn projected_screen_bounds(camera: &WorldCamera, margin: i32) -> ProjectedScreen
     }
 }
 
-#[inline(always)]
-fn projected_quad_outside_screen(
-    projected: [ProjectedVertex; 4],
-    bounds: ProjectedScreenBounds,
-) -> bool {
-    let min_x = projected[0]
-        .sx
-        .min(projected[1].sx)
-        .min(projected[2].sx)
-        .min(projected[3].sx) as i32;
-    let max_x = projected[0]
-        .sx
-        .max(projected[1].sx)
-        .max(projected[2].sx)
-        .max(projected[3].sx) as i32;
-    let min_y = projected[0]
-        .sy
-        .min(projected[1].sy)
-        .min(projected[2].sy)
-        .min(projected[3].sy) as i32;
-    let max_y = projected[0]
-        .sy
-        .max(projected[1].sy)
-        .max(projected[2].sy)
-        .max(projected[3].sy) as i32;
-    max_x < bounds.left || min_x > bounds.right || max_y < bounds.top || min_y > bounds.bottom
+#[derive(Copy, Clone)]
+struct ProjectedQuadMetrics {
+    min_x: i16,
+    max_x: i16,
+    min_y: i16,
+    max_y: i16,
+    min_z: i32,
+    max_z: i32,
+}
+
+impl ProjectedQuadMetrics {
+    #[inline(always)]
+    fn new(projected: [ProjectedVertex; 4]) -> Self {
+        let min_x = projected[0]
+            .sx
+            .min(projected[1].sx)
+            .min(projected[2].sx)
+            .min(projected[3].sx);
+        let max_x = projected[0]
+            .sx
+            .max(projected[1].sx)
+            .max(projected[2].sx)
+            .max(projected[3].sx);
+        let min_y = projected[0]
+            .sy
+            .min(projected[1].sy)
+            .min(projected[2].sy)
+            .min(projected[3].sy);
+        let max_y = projected[0]
+            .sy
+            .max(projected[1].sy)
+            .max(projected[2].sy)
+            .max(projected[3].sy);
+        let min_z = projected[0]
+            .sz
+            .min(projected[1].sz)
+            .min(projected[2].sz)
+            .min(projected[3].sz);
+        let max_z = projected[0]
+            .sz
+            .max(projected[1].sz)
+            .max(projected[2].sz)
+            .max(projected[3].sz);
+        Self {
+            min_x,
+            max_x,
+            min_y,
+            max_y,
+            min_z,
+            max_z,
+        }
+    }
+
+    #[inline(always)]
+    fn outside_screen(self, bounds: ProjectedScreenBounds) -> bool {
+        i32::from(self.max_x) < bounds.left
+            || i32::from(self.min_x) > bounds.right
+            || i32::from(self.max_y) < bounds.top
+            || i32::from(self.min_y) > bounds.bottom
+    }
+
+    #[inline(always)]
+    fn depth_span(self) -> i32 {
+        self.max_z.saturating_sub(self.min_z)
+    }
+
+    #[inline(always)]
+    fn hardware_extent_safe(self) -> bool {
+        crate::render3d::projected_model_bounds_hw_extent_safe(
+            self.min_x, self.max_x, self.min_y, self.max_y,
+        )
+    }
 }
 
 #[inline(always)]
@@ -1421,7 +2041,7 @@ fn indexed_projected_quad_with_depths(
 #[inline(always)]
 fn indexed_vertex_lighting_colors<L: WorldSurfaceLighting>(
     lighting: &L,
-    surface: CachedRoomSurface,
+    surface: &CachedRoomSurface,
     material: WorldRenderMaterial,
     cached_vertices: &[WorldVertex],
     ids: [u16; 4],
@@ -1503,11 +2123,15 @@ fn projected_quad_triangle_back_facing(
 
 #[inline(always)]
 fn projected_triangle_back_facing(verts: [ProjectedVertex; 3]) -> bool {
-    psx_gte::scene::screen_triangle_back_facing([
+    // Room vertices are already projected and the GTE is idle during the
+    // surface walk. Use the hardware NCLIP path with the silicon-measured
+    // input/result gaps instead of paying two serialized CPU multiplies for
+    // every candidate face.
+    psx_gte::scene::screen_area_mac0_scheduled([
         (verts[0].sx, verts[0].sy),
         (verts[1].sx, verts[1].sy),
         (verts[2].sx, verts[2].sy),
-    ])
+    ]) <= 0
 }
 
 const fn cached_uv_material(mut material: WorldRenderMaterial) -> WorldRenderMaterial {

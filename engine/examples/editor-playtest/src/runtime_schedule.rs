@@ -17,7 +17,6 @@ pub(crate) const RUNTIME_SCHEDULE: RuntimeScheduleConfig = RuntimeScheduleConfig
     post_cross_render_debug_frames: 0,
     stream_load_batch_count: 4,
     stream_pump_sectors_per_tick: 8,
-    stream_bootstrap_pump_limit: 4096,
     // No cap: fixed simulation always catches up to real VBlank time, so
     // slow visuals DROP FRAMES instead of dilating gameplay time. The old
     // cap of 2 rationed sim ticks under render overload -- at 20 fps the

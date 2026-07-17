@@ -251,7 +251,11 @@ impl ProjectedVertex {
     /// Return whether this projection can be consumed by a textured
     /// primitive.
     pub const fn is_valid(self) -> bool {
-        self.sz != i32::MIN
+        // Projection outputs always have positive camera-space depth. Treat
+        // the zero-filled scratch default as invalid too: otherwise a missed
+        // cache projection silently becomes a real corner at screen (0, 0),
+        // stretching an off-screen room surface across the whole display.
+        self.sz > 0
     }
 }
 
@@ -370,6 +374,32 @@ struct ProjectedTexturedGouraudVertex {
     u: i32,
     v: i32,
     color: (u8, u8, u8),
+}
+
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+struct TexturedGouraudViewVertex {
+    position: ViewVertex,
+    u: i32,
+    v: i32,
+    color: (u8, u8, u8),
+}
+
+impl TexturedGouraudViewVertex {
+    const ZERO: Self = Self {
+        position: ViewVertex::ZERO,
+        u: 0,
+        v: 0,
+        color: (0, 0, 0),
+    };
+
+    const fn new(position: ViewVertex, uv_word: u16, color: (u8, u8, u8)) -> Self {
+        Self {
+            position,
+            u: (uv_word & 0xff) as i32,
+            v: (uv_word >> 8) as i32,
+            color,
+        }
+    }
 }
 
 impl ProjectedTexturedGouraudVertex {
@@ -1064,6 +1094,7 @@ impl PreparedTriangleDepth {
 /// Commands hold raw packet pointers so one pass can sort and submit
 /// several packet kinds. The pointed-to packets must live until
 /// [`WorldRenderPass::flush`] has inserted them into the OT.
+#[repr(C)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct WorldTriCommand {
     packet_ptr: *mut u32,
@@ -1073,6 +1104,42 @@ pub struct WorldTriCommand {
     next: u16,
     render_layer: u8,
     words: u8,
+}
+
+/// Compact storage used by the comparison-free bucketed path.
+///
+/// On PS1 this is eight bytes versus sixteen for [`WorldTriCommand`]. The
+/// bucketed pass aliases the beginning of its caller-provided command scratch
+/// as this type because it needs only a packet pointer, slot and word count.
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct BucketedWorldCommand {
+    packet_ptr: *mut u32,
+    // Machine-word storage keeps this compact at eight bytes on PS1 while
+    // leaving the host representation fully initialized for semantic tests.
+    slot_words: usize,
+}
+
+impl BucketedWorldCommand {
+    #[inline(always)]
+    fn new(packet_ptr: *mut u32, slot: usize, words: u8) -> Self {
+        Self {
+            packet_ptr,
+            slot_words: slot.min(u16::MAX as usize) | ((words as usize) << 24),
+        }
+    }
+
+    #[inline(always)]
+    #[cfg(test)]
+    const fn slot(self) -> usize {
+        self.slot_words & u16::MAX as usize
+    }
+
+    #[inline(always)]
+    #[cfg(test)]
+    const fn words(self) -> u8 {
+        (self.slot_words >> 24) as u8
+    }
 }
 
 impl WorldTriCommand {
@@ -2140,13 +2207,15 @@ impl SkyDirectionProjector {
 }
 
 fn scaled_pose_matrix(pose: JointPose, local_to_world: LocalToWorldScale) -> Mat3I16 {
-    let scale = local_to_world.scale();
+    let scale = local_to_world.scale().raw();
     let mut out = [[0i16; 3]; 3];
     let mut row = 0;
     while row < 3 {
         let mut col = 0;
         while col < 3 {
-            out[row][col] = clamp_i16(scale.mul_i32(pose.matrix[col][row] as i32));
+            // i16 x u16 always fits in i32, so the generic Q12 saturating
+            // multiply's overflow checks are unnecessary for pose matrices.
+            out[row][col] = clamp_i16(((pose.matrix[col][row] as i32) * scale) >> 12);
             col += 1;
         }
         row += 1;
@@ -2747,7 +2816,12 @@ fn track_projected_model_bounds(
 }
 
 #[inline]
-fn projected_model_bounds_hw_extent_safe(min_x: i16, max_x: i16, min_y: i16, max_y: i16) -> bool {
+pub(crate) fn projected_model_bounds_hw_extent_safe(
+    min_x: i16,
+    max_x: i16,
+    min_y: i16,
+    max_y: i16,
+) -> bool {
     min_x <= max_x
         && min_y <= max_y
         && ((max_x as i32) - (min_x as i32)) <= PSX_TRI_MAX_DX
@@ -2863,36 +2937,55 @@ fn flush_blended_model_vertex_chunk(
     let chunk = &chunk[..chunk.len().min(BLENDED_VERTEX_CHUNK)];
     let mut view_blend = [ViewVertex::ZERO; BLENDED_VERTEX_CHUNK];
     // Phase 1: primary-joint transforms while the caller's state is live.
-    for (slot, &vertex_index) in chunk.iter().enumerate() {
-        let a = scene::transform_vertex_scheduled(vertices[vertex_index as usize].position);
-        view_blend[slot] = ViewVertex::new(a.x, a.y, a.z);
+    let mut slot = 0usize;
+    while slot < chunk.len() {
+        // SAFETY: the caller guarantees every chunk index is valid for the
+        // model vertex and projected-vertex slices; `slot < chunk.len()` and
+        // the local array is capped to `BLENDED_VERTEX_CHUNK` above.
+        let vertex_index = unsafe { *chunk.get_unchecked(slot) as usize };
+        let vertex = unsafe { *vertices.get_unchecked(vertex_index) };
+        let a = scene::transform_vertex_scheduled(vertex.position);
+        unsafe {
+            *view_blend.get_unchecked_mut(slot) = ViewVertex::new(a.x, a.y, a.z);
+        }
+        slot += 1;
     }
     // Phase 2: secondary transforms, reloading only on joint1 change.
     let mut loaded_joint1 = u16::MAX;
-    for (slot, &vertex_index) in chunk.iter().enumerate() {
-        let vertex = vertices[vertex_index as usize];
+    slot = 0;
+    while slot < chunk.len() {
+        let vertex_index = unsafe { *chunk.get_unchecked(slot) as usize };
+        let vertex = unsafe { *vertices.get_unchecked(vertex_index) };
         if u16::from(vertex.joint1) != loaded_joint1 {
-            let secondary = joint_view_transforms[vertex.joint1 as usize];
+            let secondary = unsafe { *joint_view_transforms.get_unchecked(vertex.joint1 as usize) };
             scene::load_rotation(&secondary.rotation);
             scene::load_translation(secondary.translation);
             loaded_joint1 = u16::from(vertex.joint1);
         }
         let b = scene::transform_vertex_scheduled(vertex.position);
-        view_blend[slot] = lerp_view_vertex(
-            view_blend[slot],
-            ViewVertex::new(b.x, b.y, b.z),
-            vertex.blend,
-        );
+        unsafe {
+            let blend = view_blend.get_unchecked_mut(slot);
+            *blend = lerp_view_vertex(*blend, ViewVertex::new(b.x, b.y, b.z), vertex.blend);
+        }
+        slot += 1;
     }
     // Phase 3: one identity/zero load projects the whole chunk.
     scene::load_rotation(&Mat3I16::IDENTITY);
     scene::load_translation(Vec3I32::ZERO);
-    for (slot, &vertex_index) in chunk.iter().enumerate() {
-        let projected = project_gte_view_vertex_identity_loaded(view_blend[slot], projection);
+    slot = 0;
+    while slot < chunk.len() {
+        let vertex_index = unsafe { *chunk.get_unchecked(slot) as usize };
+        let projected = project_gte_view_vertex_identity_loaded(
+            unsafe { *view_blend.get_unchecked(slot) },
+            projection,
+        );
         *all_in_front &= projected_model_vertex_in_front(projected, near_z);
         *all_inside_hw_bounds &= projected_model_vertex_inside_hw_bounds(projected);
         track_projected_model_bounds(projected, min_x, max_x, min_y, max_y);
-        projected_vertices[vertex_index as usize] = projected;
+        unsafe {
+            *projected_vertices.get_unchecked_mut(vertex_index) = projected;
+        }
+        slot += 1;
     }
     // Phase 4: restore the caller's primary joint state.
     scene::load_rotation(&primary.rotation);
@@ -2907,11 +3000,10 @@ fn flush_blended_model_vertex_chunk(
 #[inline]
 fn lerp_view_vertex(a: ViewVertex, b: ViewVertex, t: u8) -> ViewVertex {
     let t = t as i32;
-    let inv = 256 - t;
     ViewVertex::new(
-        ((a.x * inv) + (b.x * t)) >> 8,
-        ((a.y * inv) + (b.y * t)) >> 8,
-        ((a.z * inv) + (b.z * t)) >> 8,
+        a.x + (((b.x - a.x) * t) >> 8),
+        a.y + (((b.y - a.y) * t) >> 8),
+        a.z + (((b.z - a.z) * t) >> 8),
     )
 }
 
@@ -3035,6 +3127,35 @@ fn projected_triangle_can_skip_split(
     options.split_textured_triangles
         && projected_triangle_hw_safe(verts)
         && !projected_vertices_exceed_quality_extent(verts, options.textured_split_max_edge)
+}
+
+#[inline(always)]
+fn projected_quad_bounds_hw_extent_safe(verts: &[ProjectedVertex; 4]) -> bool {
+    let min_x = verts[0]
+        .sx
+        .min(verts[1].sx)
+        .min(verts[2].sx)
+        .min(verts[3].sx);
+    let max_x = verts[0]
+        .sx
+        .max(verts[1].sx)
+        .max(verts[2].sx)
+        .max(verts[3].sx);
+    let min_y = verts[0]
+        .sy
+        .min(verts[1].sy)
+        .min(verts[2].sy)
+        .min(verts[3].sy);
+    let max_y = verts[0]
+        .sy
+        .max(verts[1].sy)
+        .max(verts[2].sy)
+        .max(verts[3].sy);
+    min_x >= PSX_VERTEX_MIN
+        && max_x <= PSX_VERTEX_MAX
+        && min_y >= PSX_VERTEX_MIN
+        && max_y <= PSX_VERTEX_MAX
+        && projected_model_bounds_hw_extent_safe(min_x, max_x, min_y, max_y)
 }
 
 fn projected_vertices_exceed_quality_extent(verts: [ProjectedVertex; 3], max_edge: u16) -> bool {
@@ -3180,6 +3301,62 @@ fn clip_textured_triangle_to_near(
     count
 }
 
+fn clip_textured_gouraud_triangle_to_near(
+    verts: [TexturedGouraudViewVertex; 3],
+    near_z: i32,
+    out: &mut [TexturedGouraudViewVertex; 4],
+) -> usize {
+    let mut count = 0;
+    let mut prev = verts[2];
+    let mut prev_inside = prev.position.z >= near_z;
+    let mut i = 0;
+    while i < verts.len() {
+        let current = verts[i];
+        let current_inside = current.position.z >= near_z;
+        if current_inside != prev_inside {
+            out[count] = intersect_textured_gouraud_near(prev, current, near_z);
+            count += 1;
+        }
+        if current_inside {
+            out[count] = current;
+            count += 1;
+        }
+        prev = current;
+        prev_inside = current_inside;
+        i += 1;
+    }
+    count
+}
+
+fn intersect_textured_gouraud_near(
+    a: TexturedGouraudViewVertex,
+    b: TexturedGouraudViewVertex,
+    near_z: i32,
+) -> TexturedGouraudViewVertex {
+    let dz = b.position.z - a.position.z;
+    if dz == 0 {
+        return TexturedGouraudViewVertex {
+            position: ViewVertex::new(a.position.x, a.position.y, near_z),
+            ..a
+        };
+    }
+    let num = near_z - a.position.z;
+    TexturedGouraudViewVertex {
+        position: ViewVertex::new(
+            lerp_i32(a.position.x, b.position.x, num, dz),
+            lerp_i32(a.position.y, b.position.y, num, dz),
+            near_z,
+        ),
+        u: lerp_i32(a.u, b.u, num, dz),
+        v: lerp_i32(a.v, b.v, num, dz),
+        color: (
+            lerp_u8(a.color.0, b.color.0, num, dz),
+            lerp_u8(a.color.1, b.color.1, num, dz),
+            lerp_u8(a.color.2, b.color.2, num, dz),
+        ),
+    }
+}
+
 fn intersect_textured_near(
     a: TexturedViewVertex,
     b: TexturedViewVertex,
@@ -3211,6 +3388,10 @@ fn lerp_i32(a: i32, b: i32, numerator: i32, denominator: i32) -> i32 {
         return a;
     }
     a.saturating_add(b.saturating_sub(a).saturating_mul(numerator) / denominator)
+}
+
+fn lerp_u8(a: u8, b: u8, numerator: i32, denominator: i32) -> u8 {
+    lerp_i32(a as i32, b as i32, numerator, denominator).clamp(0, 255) as u8
 }
 
 fn merge_world_stats(stats: &mut WorldRenderStats, next: WorldRenderStats) {
@@ -3269,7 +3450,7 @@ fn emit_textured_model_detail_counters(
     blend_vertices: bool,
     all_projected_vertices_in_front: bool,
     all_projected_vertices_inside_hw_bounds: bool,
-    packed_back_average_unclamped_faces: bool,
+    packed_average_unclamped_faces: bool,
     packed_back_in_front_faces: bool,
     packed_fast_faces: bool,
     stats: &TexturedModelRenderStats,
@@ -3356,15 +3537,15 @@ fn emit_textured_model_detail_counters(
     );
     emit_bool_counter(
         crate::telemetry::counter::TEXTURED_MODEL_PACKED_UNCLAMPED_ELIGIBLE_SUBMITS,
-        packed_back_average_unclamped_faces,
+        packed_average_unclamped_faces,
     );
     emit_bool_counter(
         crate::telemetry::counter::TEXTURED_MODEL_PACKED_CLAMPED_ELIGIBLE_SUBMITS,
-        packed_back_in_front_faces && !packed_back_average_unclamped_faces,
+        packed_back_in_front_faces && !packed_average_unclamped_faces,
     );
     emit_bool_counter(
         crate::telemetry::counter::TEXTURED_MODEL_PACKED_GENERAL_ELIGIBLE_SUBMITS,
-        packed_fast_faces && !packed_back_in_front_faces,
+        packed_fast_faces && !packed_back_in_front_faces && !packed_average_unclamped_faces,
     );
     emit_bool_counter(
         crate::telemetry::counter::TEXTURED_MODEL_VERTEX_OVERFLOW_SUBMITS,

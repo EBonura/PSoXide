@@ -246,6 +246,7 @@ impl Playtest {
     /// drained. Returns `true` while any active room still has an unresolved
     /// (pending or dropped) texture, so the caller keeps pumping until all
     /// resolve instead of stalling once in-flight uploads finish.
+    #[inline(never)]
     pub(super) fn refresh_active_room_materials(&mut self) -> bool {
         let mut unresolved = false;
         let mut slot = 0usize;
@@ -256,6 +257,15 @@ impl Playtest {
                         build_runtime_room_material_table(record);
                     if !all_resolved {
                         unresolved = true;
+                    }
+                    let materials_changed =
+                        active_room_materials(&active) != &materials[..material_count];
+                    if materials_changed {
+                        prewarm_active_room_quads(
+                            active.index,
+                            active.surface_cache,
+                            &materials[..material_count],
+                        );
                     }
                     #[cfg(feature = "cd-stream-bench")]
                     store_room_materials(active.stream_slot, materials, material_count);
@@ -441,10 +451,11 @@ impl Playtest {
     }
 
     #[cfg(feature = "cd-stream-bench")]
+    #[inline(never)]
     pub(super) fn pump_room_stream(&mut self, max_sectors: usize) -> bool {
         room_streams_arena().pump(
             cd_arena(),
-            streamed_slots_arena_mut().words_mut(),
+            streamed_slots_arena_mut(),
             max_sectors,
             debug_log_stream_entry,
         )
@@ -456,6 +467,7 @@ impl Playtest {
     /// This is the one place residency is declared; the build paths read
     /// residency from what this makes resident.
     #[cfg(feature = "cd-stream-bench")]
+    #[inline(never)]
     pub(super) fn update_room_residency(&mut self) {
         // One source of truth: the camera-rooted portal traversal. The resident
         // desired-set is its frustum-visible rooms first (correctness -- anything
@@ -479,6 +491,24 @@ impl Playtest {
         // Everything past the visible prefix is the prefetch ring; the
         // scheduler counts and protects the two classes differently.
         let active_count = count;
+        // First look-ahead tier: rooms just beyond the accepted portal walk.
+        // These portals already survived camera-facing and clipped-frustum
+        // tests, so they are a stronger prediction of where the player/view is
+        // heading than an undirected graph neighbour.
+        let frontier_count = self
+            .visibility
+            .result
+            .frontier_count
+            .min(MAX_PORTAL_FRONTIER_ROOMS);
+        let mut frontier_index = 0usize;
+        while frontier_index < frontier_count && count < STREAMED_ROOM_SLOT_COUNT {
+            let room = self.visibility.result.frontier_rooms[frontier_index].room;
+            if room != INVALID_ROOM_INDEX && !room_requested(room, &desired, count) {
+                desired[count] = room;
+                count += 1;
+            }
+            frontier_index += 1;
+        }
         // Prefetch ring rooted at the camera's room (the visibility root), not
         // the player's. Breadth-first, so the closest hops fill the rest of the
         // budget. Radius = traversal depth + a small margin that also absorbs the
@@ -502,8 +532,9 @@ impl Playtest {
         }
         self.resident_desired = desired;
         self.resident_desired_count = count;
-        room_streams_arena().reconcile_residency::<STREAMED_ROOM_SLOT_BYTES>(
+        let storage_relocated = room_streams_arena().reconcile_residency(
             cd_arena(),
+            streamed_slots_arena_mut(),
             &desired,
             count,
             active_count,
@@ -513,49 +544,23 @@ impl Playtest {
             debug_log_stream_plan,
             debug_log_stream_entry,
         );
+        if storage_relocated {
+            // The page allocator only compacts during this residency phase.
+            // Drop every parsed view containing direct pointers before any
+            // gameplay/camera work resumes, then synchronously rebuild the
+            // current collision room from its new address.
+            self.window.rooms = [const { None }; MAX_ACTIVE_ROOMS];
+            self.window.job = ActiveRoomWindowJob::EMPTY;
+            self.room = None;
+            self.current_collision_room = None;
+            self.camera_collision_room_count = 0;
+            self.camera_rooms_key = (INVALID_ROOM_INDEX, i32::MIN, i32::MIN, 0, 0);
+            self.load_active_room_window();
+        }
         // The ring only moves when the camera changes room, so the desired set is
         // stable between crossings; debounce eviction on the camera room (not the
         // player) and let the scheduler LRU absorb visible-set jitter.
         evict_unreferenced_vram(self.visibility.root, &desired, count);
-    }
-
-    #[cfg(feature = "cd-stream-bench")]
-    pub(super) fn bootstrap_streamed_room_window(&mut self) {
-        self.update_room_residency();
-        self.load_active_room_window();
-
-        let mut steps = 0usize;
-        while steps < RUNTIME_SCHEDULE.stream_bootstrap_pump_limit {
-            let stream_progress = if streamed_room_stream_active() {
-                self.pump_room_stream(RUNTIME_SCHEDULE.stream_pump_sectors_per_tick)
-            } else {
-                false
-            };
-
-            if stream_progress {
-                if self.window.job.active {
-                    self.window.job.update_streaming = true;
-                } else {
-                    self.begin_active_room_window_job(true);
-                }
-            }
-
-            self.step_active_room_window_job();
-
-            if self.current_collision_room.is_some() && !self.window.job.active {
-                break;
-            }
-
-            if !streamed_room_stream_active() {
-                self.update_room_residency();
-            }
-
-            steps += 1;
-        }
-
-        if self.current_collision_room.is_none() {
-            self.load_active_room_window();
-        }
     }
 
     pub(super) fn current_floor_link_sector(&self) -> Option<psx_engine::SectorCollision> {

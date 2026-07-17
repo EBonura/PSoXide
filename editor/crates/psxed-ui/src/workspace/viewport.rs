@@ -515,21 +515,14 @@ impl EditorWorkspace {
             return;
         }
         self.play_frame_last_sample_serial = Some(metrics.sample_serial);
-        if metrics.visual_frames == 0 {
-            return;
-        }
-        let frame_ms = if metrics.frame_ms.is_finite() && metrics.frame_ms > 0.0 {
-            metrics.frame_ms
-        } else if metrics.visual_interval_vblanks > 0.0 {
-            metrics.visual_interval_vblanks * PLAY_NTSC_VBLANK_MS
-        } else {
-            metrics.frame_ms
-        };
-        if !frame_ms.is_finite() || frame_ms <= 0.0 {
-            return;
-        }
-        let frames = metrics.visual_frames.min(4);
-        for _ in 0..frames {
+        for &frame_ms in metrics
+            .visual_frame_times_ms
+            .iter()
+            .take(metrics.visual_frame_time_count as usize)
+        {
+            if !frame_ms.is_finite() || frame_ms <= 0.0 {
+                continue;
+            }
             if self.play_frame_times_ms.len() >= PLAY_FRAME_HISTORY_CAP {
                 self.play_frame_times_ms.pop_front();
             }

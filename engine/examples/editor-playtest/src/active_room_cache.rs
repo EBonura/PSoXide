@@ -2,7 +2,7 @@
 //! vocabulary, threads the cooked manifest tables into the crate, and
 //! keeps the build orchestration (residency, streaming, lighting)
 //! whose inputs span the runtime arenas. Streamed-slot resolution
-//! lives on `StreamedRoomSlots` since the vram_runtime carve; the
+//! lives on `StreamedRoomPages` since the vram_runtime carve; the
 //! crate pool structs are arena-owned since phase 1.5 (see
 //! `runtime_arenas`).
 
@@ -129,6 +129,7 @@ pub(super) fn build_active_room(
     #[cfg(feature = "cd-stream-bench")]
     store_room_materials(stream_slot, materials, material_count);
     let surface_cache = active_room_surface_cache_for(index);
+    prewarm_active_room_quads(index, surface_cache, &materials[..material_count]);
     Some(ActiveRuntimeRoom {
         index,
         stream_slot,
@@ -147,6 +148,39 @@ pub(super) fn build_active_room(
         offset_y: record.origin_y.saturating_sub(current_record.origin_y),
         surface_cache,
     })
+}
+
+/// Prepare immutable baked-quad packet payloads while a room is being built or
+/// its streamed texture bindings change. The render loop then only patches
+/// positions and links the packet into the OT.
+pub(super) fn prewarm_active_room_quads(
+    index: RoomIndex,
+    cache: ActiveRoomSurfaceCache,
+    materials: &[WorldRenderMaterial],
+) {
+    let Some((_, _, _, surfaces)) = room_surface_cache_slices(index, cache) else {
+        return;
+    };
+    let (quads, valid) = prebuilt_room_quads_for(index);
+    prewarm_indexed_cached_room_quads(surfaces, materials, quads, valid);
+}
+
+impl Playtest {
+    /// Refill every active room's static packet payload after the menu/gameplay
+    /// overlay handoff resets the shared prebuilt-packet claims.
+    pub(super) fn prewarm_active_room_window_quads(&mut self) {
+        let mut slot = 0usize;
+        while slot < MAX_ACTIVE_ROOMS {
+            if let Some(active) = self.window.rooms[slot] {
+                prewarm_active_room_quads(
+                    active.index,
+                    active.surface_cache,
+                    active_room_materials(&active),
+                );
+            }
+            slot += 1;
+        }
+    }
 }
 
 pub(super) fn reuse_or_build_active_room(
@@ -260,7 +294,7 @@ pub(super) fn room_surface_cache_slices(
 /// slot byte buffer, re-validating residency and every chunk-view
 /// offset against the cache snapshot first. The `'static` on the
 /// result comes from borrowing the arena-owned slot-buffer instance
-/// (the `StreamedRoomSlots` staleness contract): consume it within the
+/// (the `StreamedRoomPages` staleness contract): consume it within the
 /// current render/update step and re-resolve next time; never store
 /// the slices.
 #[cfg(feature = "cd-stream-bench")]

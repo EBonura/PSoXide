@@ -177,6 +177,11 @@ pub fn draw_box_props<
         + PrimitiveSink<TriTexturedGouraud>
         + PrimitiveSink<QuadTexturedGouraud>,
 {
+    // Box faces and nearby props commonly reuse one texture. Keep the last
+    // resolved VRAM binding across the whole draw so six faces do not each
+    // linearly scan the resident-slot table.
+    let mut face_texture_cache: Option<(AssetId, BoxPropFaceTextureRuntime)> = None;
+    let mut projector = None;
     for (index, prop) in props.iter().enumerate() {
         if prop.room != current_room
             || box_prop_broken_in_words::<MAX_BOX_PROP_STATE>(&state.broken, index)
@@ -197,14 +202,24 @@ pub fn draw_box_props<
         if !sphere_visible_to_camera(camera, options, cull_center, box_runtime.cull_radius, 96) {
             continue;
         }
+        let loaded_projector = match projector {
+            Some(projector) => projector,
+            None => {
+                let loaded = LoadedWorldCameraGte::load(*camera);
+                projector = Some(loaded);
+                loaded
+            }
+        };
         draw_box_prop_faces(
             prop,
             &box_runtime.faces,
             fall_y,
+            loaded_projector,
             camera,
             options,
             lighting,
             &mut prop_texture_slot,
+            &mut face_texture_cache,
             triangles,
             world,
         );
@@ -362,7 +377,7 @@ fn draw_box_prop_floor_debris_chip<T, const GTE_PROJECT: bool, const OT_DEPTH: u
                 ),
             ];
             submit_projected_textured_gouraud_quad_u8(
-                world, triangles, projected, uvs, colors, material, opts,
+                world, triangles, &projected, &uvs, &colors, material, opts,
             );
             return;
         }
@@ -375,7 +390,7 @@ fn draw_box_prop_floor_debris_chip<T, const GTE_PROJECT: bool, const OT_DEPTH: u
     ];
     if let Some(projected) = camera.project_world_quad(quad) {
         submit_projected_textured_gouraud_quad_u8(
-            world, triangles, projected, uvs, colors, material, opts,
+            world, triangles, &projected, &uvs, &colors, material, opts,
         );
     } else {
         let tint = average_vertex_rgb(colors);
@@ -538,7 +553,7 @@ fn draw_box_prop_break_shard<T, const GTE_PROJECT: bool, const OT_DEPTH: usize>(
             ));
             let colors = box_prop_apply_fog_weight(lighting, shard_runtime.colors, fog_weight);
             submit_projected_textured_gouraud_quad_u8(
-                world, triangles, projected, uvs, colors, material, opts,
+                world, triangles, &projected, &uvs, &colors, material, opts,
             );
             return;
         }
@@ -548,7 +563,7 @@ fn draw_box_prop_break_shard<T, const GTE_PROJECT: bool, const OT_DEPTH: usize>(
     let colors = box_prop_apply_fog_weight(lighting, shard_runtime.colors, fog_weight);
     if let Some(projected) = camera.project_world_quad(quad) {
         submit_projected_textured_gouraud_quad_u8(
-            world, triangles, projected, uvs, colors, material, opts,
+            world, triangles, &projected, &uvs, &colors, material, opts,
         );
     } else {
         let tint = average_vertex_rgb(colors);
@@ -562,9 +577,9 @@ fn draw_box_prop_break_shard<T, const GTE_PROJECT: bool, const OT_DEPTH: usize>(
 fn submit_projected_textured_gouraud_quad_u8<T, const OT_DEPTH: usize>(
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
     triangles: &mut T,
-    projected: [ProjectedVertex; 4],
-    uvs: [(u8, u8); 4],
-    colors: [(u8, u8, u8); 4],
+    projected: &[ProjectedVertex; 4],
+    uvs: &[(u8, u8); 4],
+    colors: &[(u8, u8, u8); 4],
     material: TextureMaterial,
     options: WorldSurfaceOptions,
 ) where
@@ -593,10 +608,12 @@ fn draw_box_prop_faces<T, const OT_DEPTH: usize>(
     prop: &LevelBoxPropRecord,
     faces: &[BoxPropFaceRuntime; psx_level::BOX_PROP_FACE_COUNT],
     fall_y: i32,
+    projector: LoadedWorldCameraGte,
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
     lighting: &RuntimeRoomLighting,
     prop_texture_slot: &mut impl FnMut(AssetId) -> Option<VramSlot>,
+    face_texture_cache: &mut Option<(AssetId, BoxPropFaceTextureRuntime)>,
     triangles: &mut T,
     world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
 ) where
@@ -615,34 +632,58 @@ fn draw_box_prop_faces<T, const OT_DEPTH: usize>(
         let Some(texture_asset) = prop.texture_assets[face] else {
             continue;
         };
-        let Some(slot) = prop_texture_slot(texture_asset) else {
-            continue;
+        let face_texture = match *face_texture_cache {
+            Some((cached_asset, cached)) if cached_asset == texture_asset => cached,
+            _ => {
+                let Some(slot) = prop_texture_slot(texture_asset) else {
+                    continue;
+                };
+                let resolved = BoxPropFaceTextureRuntime {
+                    material: TextureMaterial::opaque(
+                        slot.clut_word,
+                        slot.tpage_word,
+                        (0x80, 0x80, 0x80),
+                    )
+                    .with_texture_window(slot.texture_window),
+                    u_max: model_render_uv_max(slot.texture_width),
+                    v_max: model_render_uv_max(slot.texture_height),
+                };
+                *face_texture_cache = Some((texture_asset, resolved));
+                resolved
+            }
         };
-        let material = TextureMaterial::opaque(slot.clut_word, slot.tpage_word, (0x80, 0x80, 0x80))
-            .with_texture_window(slot.texture_window);
-        let u_max = model_render_uv_max(slot.texture_width);
-        let v_max = model_render_uv_max(slot.texture_height);
+        let material = face_texture.material;
+        let u_max = face_texture.u_max;
+        let v_max = face_texture.v_max;
         let uvs = [(0, 0), (u_max, 0), (u_max, v_max), (0, v_max)];
-        let colors = [
-            lighting.apply_vertex_fog(prop.baked_vertex_rgb[face][0], face_vertices[0]),
-            lighting.apply_vertex_fog(prop.baked_vertex_rgb[face][1], face_vertices[1]),
-            lighting.apply_vertex_fog(prop.baked_vertex_rgb[face][2], face_vertices[2]),
-            lighting.apply_vertex_fog(prop.baked_vertex_rgb[face][3], face_vertices[3]),
-        ];
         let opts = options
             .with_depth_policy(DepthPolicy::Average)
             .with_cull_mode(CullMode::None)
             .with_material_layer(material)
             .with_textured_triangle_splitting(true)
             .with_textured_triangle_max_edge(0);
-        if let Some(projected) = camera.project_world_quad(face_vertices) {
+        if let Some(projected) = projector.project_world_quad(face_vertices) {
+            // Projection already produced the four view depths. Reusing them
+            // for fog avoids transforming every visible box-face vertex a
+            // second time on the CPU (the normal path projects through GTE).
+            let colors = [
+                lighting.apply_fog_at_depth(prop.baked_vertex_rgb[face][0], projected[0].sz),
+                lighting.apply_fog_at_depth(prop.baked_vertex_rgb[face][1], projected[1].sz),
+                lighting.apply_fog_at_depth(prop.baked_vertex_rgb[face][2], projected[2].sz),
+                lighting.apply_fog_at_depth(prop.baked_vertex_rgb[face][3], projected[3].sz),
+            ];
             submit_projected_textured_gouraud_quad_u8(
-                world, triangles, projected, uvs, colors, material, opts,
+                world, triangles, &projected, &uvs, &colors, material, opts,
             );
         } else {
+            let colors = [
+                lighting.apply_vertex_fog(prop.baked_vertex_rgb[face][0], face_vertices[0]),
+                lighting.apply_vertex_fog(prop.baked_vertex_rgb[face][1], face_vertices[1]),
+                lighting.apply_vertex_fog(prop.baked_vertex_rgb[face][2], face_vertices[2]),
+                lighting.apply_vertex_fog(prop.baked_vertex_rgb[face][3], face_vertices[3]),
+            ];
             let tint = average_vertex_rgb(colors);
-            let material = TextureMaterial::opaque(slot.clut_word, slot.tpage_word, tint)
-                .with_texture_window(slot.texture_window);
+            let material = material.with_tint(tint);
             let opts = opts.with_material_layer(material);
             let _ = world.submit_textured_world_quad(
                 triangles,

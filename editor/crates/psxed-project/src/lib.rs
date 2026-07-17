@@ -14,6 +14,8 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 pub mod floor_view;
 mod import_util;
 pub mod model_import;
+mod model_material_texture;
+pub use model_material_texture::*;
 pub mod playtest;
 pub mod portal_rooms;
 pub mod resolve;

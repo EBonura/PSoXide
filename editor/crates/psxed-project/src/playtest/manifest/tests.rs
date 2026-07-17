@@ -141,6 +141,8 @@ fn world_pack_toc_uses_same_layout_as_pack_builder() {
 
     let manifest = render_manifest_source(&package);
     assert!(manifest.contains("pub const WORLD_RESIDENT_CHUNK_LIMIT: usize = 10;"));
+    assert!(manifest.contains("pub const WORLD_STREAM_SLOT_COUNT: usize = 3;"));
+    assert!(manifest.contains("pub const WORLD_RESIDENT_PAGE_COUNT: usize = 3;"));
     assert!(manifest.contains("pub const WORLD_PACK_START_LBA: u32 = 1024;"));
     assert!(manifest.contains("pub static WORLD_PACK_TOC: &[LevelWorldPackEntryRecord]"));
     assert!(manifest.contains("LevelWorldPackEntryRecord { room: RoomIndex(2), sector_offset: 1, sector_count: 1, byte_size: 148"));
@@ -150,6 +152,8 @@ fn world_pack_toc_uses_same_layout_as_pack_builder() {
 fn empty_package_emits_gameplay_only_flow_and_no_scenes() {
     let package = PlaytestPackage::default();
     let src = render_manifest_source(&package);
+    assert!(src.contains("pub const WORLD_STREAM_SLOT_COUNT: usize = 1;"));
+    assert!(src.contains("pub const WORLD_RESIDENT_PAGE_COUNT: usize = 1;"));
     assert!(src.contains(
         "pub static UI_FONTS: &[&psx_font::BitmapFont] = &[\n    &psx_font::fonts::BASIC,\n];"
     ));

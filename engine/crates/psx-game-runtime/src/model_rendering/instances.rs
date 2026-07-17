@@ -423,6 +423,11 @@ pub fn draw_model_instances<
 
         telemetry::stage_begin(telemetry::stage::MODEL_DRAW);
         let faces = runtime_model_faces(runtime_model, model_faces);
+        let secondary_material = inst
+            .material_override
+            .and_then(|material| material.secondary_layer)
+            .and_then(|layer| model_secondary_material(layer, resolve_override_texture))
+            .map(|material| lighting.shade_model_material(origin, material));
         let stats = submit_runtime_model_predecoded(
             world,
             triangles,
@@ -435,6 +440,7 @@ pub fn draw_model_instances<
             local_to_world,
             pose_translation,
             material,
+            secondary_material,
             model_options,
             faces,
             model_parts,

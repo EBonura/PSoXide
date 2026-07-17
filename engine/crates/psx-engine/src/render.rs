@@ -347,6 +347,41 @@ impl<'a, const DEPTH: usize> OtFrame<'a, DEPTH> {
         unsafe { self.ot.insert_unchecked(slot, packet_ptr, words) };
     }
 
+    /// Insert a raw primitive whose packet length is already in GPU-tag form
+    /// at an already-clamped raw OT slot.
+    ///
+    /// # Safety
+    /// Same requirements as [`add_raw_unchecked`](Self::add_raw_unchecked).
+    /// The low 24 bits of `tag_high` must be zero.
+    #[inline(always)]
+    pub unsafe fn add_raw_tag_unchecked(
+        &mut self,
+        slot: usize,
+        packet_ptr: *mut u32,
+        tag_high: u32,
+    ) {
+        unsafe {
+            self.ot
+                .insert_unchecked_tag_high(slot, packet_ptr, tag_high)
+        };
+    }
+
+    /// Insert compact raw packet commands in reverse array order.
+    ///
+    /// See [`OrderingTable::insert_packed_commands_reverse_unchecked`] for the
+    /// two-word command layout and safety contract.
+    #[inline(always)]
+    pub unsafe fn add_packed_commands_reverse_unchecked(
+        &mut self,
+        commands: *const usize,
+        command_count: usize,
+    ) {
+        unsafe {
+            self.ot
+                .insert_packed_commands_reverse_unchecked(commands, command_count)
+        };
+    }
+
     /// Insert a known SDK GPU packet at a raw OT slot.
     pub fn add_packet<T: GpuPacket>(&mut self, slot: usize, prim: &mut T) {
         self.add(slot, prim, T::WORDS);
@@ -469,6 +504,17 @@ pub trait PrimitiveSink<T> {
     /// for ordering-table insertion.
     fn push(&mut self, prim: T) -> Option<&mut T>;
 
+    /// Write without checking capacity.
+    ///
+    /// # Safety
+    ///
+    /// The caller must prove [`Self::remaining`] is at least one before
+    /// every call and must not retain another reference into this sink.
+    unsafe fn push_unchecked(&mut self, prim: T) -> &mut T {
+        // SAFETY: delegated to the caller's capacity proof.
+        unsafe { self.push(prim).unwrap_unchecked() }
+    }
+
     /// True if no primitives have been written.
     fn is_empty(&self) -> bool {
         self.len() == 0
@@ -570,6 +616,15 @@ impl<T> PrimitiveSink<T> for PrimitiveArena<'_, T> {
 
     fn push(&mut self, prim: T) -> Option<&mut T> {
         PrimitiveArena::push(self, prim)
+    }
+
+    unsafe fn push_unchecked(&mut self, prim: T) -> &mut T {
+        let index = self.len;
+        self.len += 1;
+        // SAFETY: the trait contract requires the caller to preflight capacity.
+        let slot = unsafe { self.storage.get_unchecked_mut(index) };
+        *slot = prim;
+        slot
     }
 }
 
@@ -684,6 +739,24 @@ impl<T> PrimitiveSink<T> for PrimitivePacketArena<'_> {
 
     fn push(&mut self, prim: T) -> Option<&mut T> {
         self.push_packet(prim)
+    }
+
+    unsafe fn push_unchecked(&mut self, prim: T) -> &mut T {
+        debug_assert!(core::mem::size_of::<T>() > 0);
+        debug_assert!(core::mem::size_of::<T>() <= core::mem::size_of::<PrimitivePacketSlot>());
+        debug_assert!(core::mem::align_of::<T>() <= core::mem::align_of::<PrimitivePacketSlot>());
+        let index = self.len;
+        self.len += 1;
+        // SAFETY: the trait contract proves `index` is in range; the slot
+        // alignment/size assertions are compile-time properties of `T`.
+        let ptr = unsafe { self.storage.get_unchecked_mut(index) }
+            .words
+            .as_mut_ptr()
+            .cast::<T>();
+        unsafe {
+            ptr.write(prim);
+            &mut *ptr
+        }
     }
 }
 

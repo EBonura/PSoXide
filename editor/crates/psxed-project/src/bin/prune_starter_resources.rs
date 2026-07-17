@@ -11,23 +11,75 @@ fn seed_ids_from_ron(ron: &str, out: &mut HashSet<u64>) {
     // Covers every NodeKind variant, grid faces, wall segments and
     // triangle overrides without enumerating them.
     let fields = [
-        "mesh", "material", "model", "character", "weapon", "texture",
+        "mesh",
+        "material",
+        "materials",
+        "model",
+        "character",
+        "weapon",
+        "texture",
     ];
     for field in fields {
-        let needle = format!("{field}: Some(");
+        let needle = format!("{field}:");
         let mut rest = ron;
         while let Some(pos) = rest.find(&needle) {
             rest = &rest[pos + needle.len()..];
-            // Ids are newtype structs, so RON prints Some((42)).
-            let digits: String = rest
-                .chars()
-                .skip_while(|c| *c == '(' || c.is_whitespace())
-                .take_while(|c| c.is_ascii_digit())
-                .collect();
-            if let Ok(id) = digits.parse::<u64>() {
-                out.insert(id);
+            if field == "materials" {
+                // BoxProp stores one optional material per face in a tuple.
+                // Limit scanning to that balanced tuple so later fields are
+                // never attributed to it accidentally.
+                let Some(open) = rest.find('(') else { continue };
+                let tuple = &rest[open..];
+                let mut depth = 0usize;
+                let mut end = tuple.len();
+                for (index, ch) in tuple.char_indices() {
+                    if ch == '(' {
+                        depth += 1;
+                    } else if ch == ')' {
+                        depth = depth.saturating_sub(1);
+                        if depth == 0 {
+                            end = index + 1;
+                            break;
+                        }
+                    }
+                }
+                let mut values = &tuple[..end];
+                while let Some(value_pos) = values.find("Some((") {
+                    values = &values[value_pos + 6..];
+                    let digits: String =
+                        values.chars().take_while(|c| c.is_ascii_digit()).collect();
+                    if let Ok(id) = digits.parse::<u64>() {
+                        out.insert(id);
+                    }
+                }
+            } else if let Some(value) = rest.trim_start().strip_prefix("Some(") {
+                // Ids are newtype structs, so RON prints Some((42)).
+                let digits: String = value
+                    .chars()
+                    .skip_while(|c| *c == '(' || c.is_whitespace())
+                    .take_while(|c| c.is_ascii_digit())
+                    .collect();
+                if let Ok(id) = digits.parse::<u64>() {
+                    out.insert(id);
+                }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::seed_ids_from_ron;
+    use std::collections::HashSet;
+
+    #[test]
+    fn box_prop_material_array_seeds_its_resources() {
+        let ron = "BoxProp(materials: (Some((983)), Some((983)), Some((1316))))";
+        let mut ids = HashSet::new();
+
+        seed_ids_from_ron(ron, &mut ids);
+
+        assert_eq!(ids, HashSet::from([983, 1316]));
     }
 }
 
@@ -43,10 +95,9 @@ fn main() {
         .skip_while(|a| a != "--project")
         .nth(1)
         .unwrap_or_else(|| "projects/default".to_string());
-    let mut project = ProjectDocument::load_from_path(
-        std::path::Path::new(&project_dir).join("project.ron"),
-    )
-    .expect("load project");
+    let mut project =
+        ProjectDocument::load_from_path(std::path::Path::new(&project_dir).join("project.ron"))
+            .expect("load project");
     project.normalize_loaded();
 
     let mut keep: HashSet<u64> = HashSet::new();

@@ -47,24 +47,23 @@ pub(crate) fn cook_far_vista_texture_asset(
         ));
         return None;
     };
-    let Some(psxt_path) = resource_psxt_path(texture_resource) else {
-        report.warn(format!(
-            "{context}: material '{}' has no texture; using placeholder",
-            texture_resource.name
-        ));
-        return None;
-    };
-    if let Some(existing) = texture_asset_for_path.get(psxt_path).copied() {
-        return Some(existing);
-    }
-    let psxt_path = psxt_path.to_string();
-    let bytes = match load_psxt_bytes(&texture_resource.name, &psxt_path, project_root) {
-        Ok(bytes) => bytes,
+    let (texture_key, bytes) = match material_texture_bytes(texture_resource, project_root) {
+        Ok(Some(source)) => source,
+        Ok(None) => {
+            report.warn(format!(
+                "{context}: material '{}' has no texture; using placeholder",
+                texture_resource.name
+            ));
+            return None;
+        }
         Err(msg) => {
             report.warn(format!("{context}: {msg}; using placeholder"));
             return None;
         }
     };
+    if let Some(existing) = texture_asset_for_path.get(&texture_key).copied() {
+        return Some(existing);
+    }
     if let Err(msg) = expect_room_material_depth(&texture_resource.name, &bytes) {
         report.warn(format!("{context}: {msg}; using placeholder"));
         return None;
@@ -79,7 +78,7 @@ pub(crate) fn cook_far_vista_texture_asset(
         source_label: texture_resource.name.clone(),
         streamed_class: StreamedClass::None,
     });
-    texture_asset_for_path.insert(psxt_path, new_index);
+    texture_asset_for_path.insert(texture_key, new_index);
     Some(new_index)
 }
 
@@ -149,13 +148,12 @@ pub(crate) fn collect_runtime_model_clip_requirements(
                 mesh: Some(model),
                 animation_clip,
                 ..
+            } if project
+                .resource(*model)
+                .is_some_and(|r| matches!(r.data, ResourceData::Model(_))) =>
+            {
+                add_model_clip_requirement(project, &mut out, *model, *animation_clip);
             }
-                if project
-                    .resource(*model)
-                    .is_some_and(|r| matches!(r.data, ResourceData::Model(_)))
-                => {
-                    add_model_clip_requirement(project, &mut out, *model, *animation_clip);
-                }
             NodeKind::SpawnPoint {
                 character: Some(character_id),
                 ..
@@ -815,7 +813,7 @@ pub(crate) fn register_model_for_instance(
         bytes: mesh_bytes.clone(),
         filename: format!("{folder}/mesh.psxmdl"),
         source_label: resource.name.clone(),
-        streamed_class: StreamedClass::None,
+        streamed_class: StreamedClass::PersistentGameplay,
     });
 
     // Atlas asset (optional).
@@ -842,13 +840,11 @@ pub(crate) fn register_model_for_instance(
                 return None;
             }
         };
-        // Model atlases must be 8bpp (256-entry CLUT) -- the
-        // runtime model atlas region uses an 8bpp tpage and a
-        // 256-entry CLUT row per atlas. Other depths render with
-        // wrong colours, so reject loud at cook time.
-        if parsed_atlas.clut_entries() != 256 {
+        // The runtime model-atlas region accepts both native indexed formats.
+        // Reject direct-colour or malformed palettes loudly at cook time.
+        if !matches!(parsed_atlas.clut_entries(), 16 | 256) {
             report.error(format!(
-                "Model '{}' atlas must be 8bpp (256-entry CLUT); found {} entries",
+                "Model '{}' atlas must be 4bpp (16-entry CLUT) or 8bpp (256-entry CLUT); found {} entries",
                 resource.name,
                 parsed_atlas.clut_entries(),
             ));
@@ -860,7 +856,7 @@ pub(crate) fn register_model_for_instance(
             bytes,
             filename: format!("{folder}/atlas.psxt"),
             source_label: format!("{} atlas", resource.name),
-            streamed_class: StreamedClass::None,
+            streamed_class: StreamedClass::PersistentGameplay,
         });
         Some(idx)
     } else {
@@ -976,7 +972,7 @@ pub(crate) fn register_model_for_instance(
             bytes: animation_bytes,
             filename: format!("{folder}/clip_{:02}_{safe_clip}.psxanim", local_i),
             source_label: format!("{} / {}", resource.name, clip.name),
-            streamed_class: StreamedClass::None,
+            streamed_class: StreamedClass::PersistentGameplay,
         });
         clip_remap[resolved_i as usize] = u16::try_from(local_i).ok();
         model_clips.push(PlaytestModelClip {
@@ -1023,8 +1019,7 @@ pub(crate) fn register_model_for_instance(
             ));
             return None;
         }
-        if seen_sockets.contains(&socket.name.as_str())
-        {
+        if seen_sockets.contains(&socket.name.as_str()) {
             report.error(format!(
                 "Model '{}' has duplicate attachment socket '{}'",
                 resource.name, socket.name

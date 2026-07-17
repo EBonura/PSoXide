@@ -7,6 +7,7 @@ mod geometry;
 mod gizmo;
 mod history;
 mod icons;
+mod material_lab;
 mod model_animation_viewer;
 pub mod model_import_preview;
 mod play_mode;
@@ -49,6 +50,7 @@ pub use play_mode::{
 
 use crate::gizmo::*;
 use crate::history::UndoStack;
+use crate::material_lab::MaterialLabState;
 use crate::model_animation_viewer::ModelAnimationViewerState;
 use crate::style::*;
 
@@ -77,21 +79,21 @@ use psxed_project::{
     snap_height, ui_font_scale_f32_to_q8, ui_font_scale_q8_to_f32, BootTarget,
     CharacterControllerSettings, ColliderShape, EditorCameraMode, EditorCameraState,
     EditorVisibilityState, EditorWorkspaceState, EditorWorkspaceView, FarVistaSettings,
-    GridCellBounds, GridDirection, GridHorizontalFace, GridSector, GridSplit,
-    GridTriangleMaterialOverride, GridUvRotation, GridUvTransform, GridVerticalFace,
-    InteractableKind, MaterialFaceSidedness, MaterialResource, NodeId, NodeKind, NodeRow, OptionId,
-    OptionKind, ParticleEmitterSettings, PhysicsBodySettings, ProjectDocument, PsxBlendMode,
-    Resource, ResourceData, ResourceId, RuntimeDepthSortMode, RuntimeRoomDrawOrderMode,
-    RuntimeTextureSplitMode, Scene, SceneNode, SceneStateId, SceneWorldLayer, SkyMode, SkySettings,
-    UiAction, UiAnchor, UiFontChoice, UiGradient, UiGradientDirection, UiImageEffect, UiNode,
-    UiNodeId, UiNodeKind, UiNodeRow, UiRect, UiScene, UiSceneId, UiSfxBindings, UiSfxCue,
-    UiTextAlign, UiValueBinding, WorldCameraSettings, WorldCullingSettings, WorldGrid,
-    WorldPhysicsSettings, WorldStreamingSettings, DEFAULT_WALL_HEIGHT_SECTORS,
-    DEFAULT_WORLD_SECTOR_SIZE, HEIGHT_QUANTUM, MAX_PHYSICS_WEIGHT_Q8, MAX_UI_FONT_SCALE,
-    MAX_UI_LETTER_SPACING, MAX_WORLD_CAMERA_DISTANCE, MAX_WORLD_CAMERA_HEIGHT,
-    MAX_WORLD_CAMERA_MIN_FLOOR_CLEARANCE, MAX_WORLD_CHUNK_ACTIVATION_RADIUS_SECTORS,
-    MAX_WORLD_DRAW_DISTANCE, MAX_WORLD_GRAVITY_PER_TICK, MAX_WORLD_SECTOR_SIZE,
-    MAX_WORLD_STREAMING_RESIDENT_CHUNKS, MAX_WORLD_STREAMING_VISIBLE_CHUNKS,
+    GeneratedMaterialTexture, GridCellBounds, GridDirection, GridHorizontalFace, GridSector,
+    GridSplit, GridTriangleMaterialOverride, GridUvRotation, GridUvTransform, GridVerticalFace,
+    InteractableKind, MaterialFaceSidedness, MaterialResource, MaterialTextureMode, NodeId,
+    NodeKind, NodeRow, OptionId, OptionKind, ParticleEmitterSettings, PhysicsBodySettings,
+    ProjectDocument, PsxBlendMode, ReflectionProbeMaterial, Resource, ResourceData, ResourceId,
+    RuntimeDepthSortMode, RuntimeRoomDrawOrderMode, RuntimeTextureSplitMode, Scene, SceneNode,
+    SceneStateId, SceneWorldLayer, SkyMode, SkySettings, UiAction, UiAnchor, UiFontChoice,
+    UiGradient, UiGradientDirection, UiImageEffect, UiNode, UiNodeId, UiNodeKind, UiNodeRow,
+    UiRect, UiScene, UiSceneId, UiSfxBindings, UiSfxCue, UiTextAlign, UiValueBinding,
+    WorldCameraSettings, WorldCullingSettings, WorldGrid, WorldPhysicsSettings,
+    WorldStreamingSettings, DEFAULT_WALL_HEIGHT_SECTORS, DEFAULT_WORLD_SECTOR_SIZE, HEIGHT_QUANTUM,
+    MAX_PHYSICS_WEIGHT_Q8, MAX_UI_FONT_SCALE, MAX_UI_LETTER_SPACING, MAX_WORLD_CAMERA_DISTANCE,
+    MAX_WORLD_CAMERA_HEIGHT, MAX_WORLD_CAMERA_MIN_FLOOR_CLEARANCE,
+    MAX_WORLD_CHUNK_ACTIVATION_RADIUS_SECTORS, MAX_WORLD_DRAW_DISTANCE, MAX_WORLD_GRAVITY_PER_TICK,
+    MAX_WORLD_SECTOR_SIZE, MAX_WORLD_STREAMING_RESIDENT_CHUNKS, MAX_WORLD_STREAMING_VISIBLE_CHUNKS,
     MAX_WORLD_VISIBILITY_RADIUS, MIN_PHYSICS_WEIGHT_Q8, MIN_UI_FONT_SCALE, MIN_UI_LETTER_SPACING,
     MIN_WORLD_CAMERA_DISTANCE, MIN_WORLD_CHUNK_ACTIVATION_RADIUS_SECTORS, MIN_WORLD_DRAW_DISTANCE,
     MIN_WORLD_GRAVITY_PER_TICK, MIN_WORLD_SECTOR_SIZE, MIN_WORLD_STREAMING_RESIDENT_CHUNKS,
@@ -175,7 +177,6 @@ const ACTION_BAR_WRAP_STATUS_CHARS: usize = 96;
 const PLAY_FRAME_HISTORY_CAP: usize = 150;
 const PLAY_DEBUG_TERMINAL_LINE_CAP: usize = 1_000;
 const PLAY_FRAME_TARGET_FPS: f32 = 30.0;
-const PLAY_NTSC_VBLANK_MS: f32 = 1000.0 / 60.0;
 const PSOXIDE_APP_ICON_PNG: &[u8] =
     include_bytes!("../../../../assets/branding/psoxide-app-icon.png");
 const PLAY_PORTAL_DEBUG_SCREEN_CX: i32 = 160;
@@ -506,6 +507,8 @@ pub struct EditorWorkspace {
     model_resource_preview_texture: Option<egui::TextureHandle>,
     animation_viewer: ModelAnimationViewerState,
     animation_viewer_preview_texture: Option<egui::TextureHandle>,
+    material_lab: MaterialLabState,
+    material_lab_preview_texture: Option<egui::TextureHandle>,
     texture_import_dialog: TextureImportDialog,
     model_import_dialog: ModelImportDialog,
     import_retired_textures: Vec<(u8, egui::TextureHandle)>,
@@ -653,6 +656,7 @@ struct ModelImportDialog {
     output_name: String,
     texture_width: i32,
     texture_height: i32,
+    texture_depth_bits: u8,
     animation_fps: i32,
     world_height: i32,
     collision_radius: i32,
@@ -680,6 +684,7 @@ impl Default for ModelImportDialog {
             output_name: String::new(),
             texture_width: 128,
             texture_height: 128,
+            texture_depth_bits: 4,
             animation_fps: 15,
             world_height: 1024,
             collision_radius: default_model_collision_radius_for_height(1024) as i32,
@@ -1665,7 +1670,11 @@ impl CameraRig {
 
         let q12_signed = |v: u16| -> i32 {
             let raw = (v & 0x0fff) as i32;
-            if raw >= 2048 { raw - 4096 } else { raw }
+            if raw >= 2048 {
+                raw - 4096
+            } else {
+                raw
+            }
         };
         let to_rad = std::f32::consts::TAU / 4096.0;
         let dy = yaw_delta as f32 * to_rad;
@@ -2067,6 +2076,7 @@ enum WorkspaceView {
     Room,
     Ui,
     Animation,
+    Material,
 }
 
 impl WorkspaceView {
@@ -2075,6 +2085,7 @@ impl WorkspaceView {
             Self::Room => "3D",
             Self::Ui => "2D",
             Self::Animation => "Animation",
+            Self::Material => "Material",
         }
     }
 
@@ -2083,6 +2094,7 @@ impl WorkspaceView {
             Self::Room => icons::GRID,
             Self::Ui => icons::SQUARE,
             Self::Animation => icons::PLAY,
+            Self::Material => icons::PALETTE,
         }
     }
 
@@ -2091,6 +2103,7 @@ impl WorkspaceView {
             EditorWorkspaceView::Room => Self::Room,
             EditorWorkspaceView::Ui => Self::Ui,
             EditorWorkspaceView::Animation => Self::Animation,
+            EditorWorkspaceView::Material => Self::Material,
         }
     }
 
@@ -2099,6 +2112,7 @@ impl WorkspaceView {
             Self::Room => EditorWorkspaceView::Room,
             Self::Ui => EditorWorkspaceView::Ui,
             Self::Animation => EditorWorkspaceView::Animation,
+            Self::Material => EditorWorkspaceView::Material,
         }
     }
 }
@@ -2358,6 +2372,8 @@ impl EditorWorkspace {
             model_resource_preview_texture: None,
             animation_viewer: ModelAnimationViewerState::default(),
             animation_viewer_preview_texture: None,
+            material_lab: MaterialLabState::default(),
+            material_lab_preview_texture: None,
             texture_import_dialog: TextureImportDialog::default(),
             model_import_dialog: ModelImportDialog::default(),
             import_retired_textures: Vec::new(),

@@ -59,17 +59,16 @@ use psx_engine::GridVisibilityStats;
 ))]
 use psx_engine::GridVisibleCell;
 use psx_engine::{
-    button, telemetry, Angle, App,
-    CachedRoomCell, CachedRoomDepthMode, CachedRoomSubdivisionMode, CachedRoomSurface,
-    CharacterCollision, CharacterCollisionAabb, CharacterCollisionCylinder, CharacterCollisionRoom,
-    CharacterMotorAnim, CharacterMotorConfig, CharacterMotorInput, CharacterMotorState, Config,
-    Ctx, DepthBand, DepthRange, LoadedWorldCameraGte, OtFrame,
+    button, telemetry, Angle, App, CachedRoomCell, CachedRoomDepthMode, CachedRoomSubdivisionMode,
+    CachedRoomSurface, CharacterCollision, CharacterCollisionAabb, CharacterCollisionCylinder,
+    CharacterCollisionRoom, CharacterMotorAnim, CharacterMotorConfig, CharacterMotorInput,
+    CharacterMotorState, Config, Ctx, DepthBand, DepthRange, LoadedWorldCameraGte, OtFrame,
     PrimitivePacketArena, PrimitivePacketScratch, PrimitiveSink, ProjectedVertex, Rgb8, RoomPoint,
-    RuntimeCollisionRoom, RuntimeRoom, Scene, SceneStateRef, SchedulerConfig, SimTick,
-    TexturedModelRenderFace,
-    ThirdPersonCameraConfig, ThirdPersonCameraInput, ThirdPersonCameraState,
-    ThirdPersonCameraTarget, VideoHz, VisualPacing, WorldCamera, WorldProjection,
-    WorldRenderMaterial, WorldRenderPass, WorldSurfaceOptions, WorldTriCommand, WorldVertex, Q12,
+    RenderSubmission, RuntimeCollisionRoom, RuntimeRoom, Scene, SceneStateRef, SchedulerConfig,
+    SimTick, TexturedModelRenderFace, ThirdPersonCameraConfig, ThirdPersonCameraInput,
+    ThirdPersonCameraState, ThirdPersonCameraTarget, VideoHz, VisualPacing, WorldCamera,
+    WorldProjection, WorldRenderMaterial, WorldRenderPass, WorldSurfaceOptions, WorldTriCommand,
+    WorldVertex, Q12, prewarm_indexed_cached_room_quads,
 };
 #[cfg(all(
     feature = "world-grid-visible",
@@ -93,8 +92,8 @@ use psx_level::portal_visibility::{
     PortalVisibilityResult,
 };
 use psx_level::{
-    find_asset_of_kind, room_flags, AssetId, AssetKind, CharacterAnimationAction,
-    EntityRecord, InteractableKind, InteractableRecord, LevelBoxPropRecord, LevelCameraRecord,
+    find_asset_of_kind, room_flags, AssetId, AssetKind, CharacterAnimationAction, EntityRecord,
+    InteractableKind, InteractableRecord, LevelBoxPropRecord, LevelCameraRecord,
     LevelCharacterRecord, LevelChunkRecord, LevelFarVistaRecord, LevelImagePropRecord,
     LevelRoomRecord, LevelSkyRecord, ModelClipIndex, ParticleEmitterRecord, RoomIndex,
     RuntimeDebugMask,
@@ -169,9 +168,10 @@ use generated::{
 };
 #[cfg(feature = "cd-stream-bench")]
 use generated::{
-    GAMEPLAY_PACK_MAX_CHUNK_BYTES, UI_PACK_IMAGE_CACHE_SLOTS, UI_PACK_MAX_CHUNK_BYTES,
-    UI_PACK_START_LBA, UI_PACK_TOC, WORLD_PACK_MAX_CHUNK_BYTES, WORLD_PACK_START_LBA,
-    WORLD_PACK_TOC, WORLD_RESIDENT_CHUNK_LIMIT,
+    GAMEPLAY_PACK_MAX_CHUNK_BYTES, PERSISTENT_ASSET_PAGE_COUNT, PERSISTENT_ASSET_SLOT_COUNT,
+    UI_PACK_IMAGE_CACHE_SLOTS, UI_PACK_MAX_CHUNK_BYTES, UI_PACK_START_LBA, UI_PACK_TOC,
+    WORLD_PACK_MAX_CHUNK_BYTES, WORLD_PACK_START_LBA, WORLD_PACK_TOC,
+    WORLD_RESIDENT_CHUNK_LIMIT, WORLD_RESIDENT_PAGE_COUNT, WORLD_STREAM_SLOT_COUNT,
 };
 use generated::{GAME_FLOW, OPTIONS, UI_SCENES};
 #[cfg(all(
@@ -348,6 +348,13 @@ struct Playtest {
     /// sampling it made the overlay's animation phase nondeterministic
     /// across builds (the 3-pixel corridor LSB instability).
     overlay_sim_tick: SimTick,
+    /// Overlay state for the frame currently being prepared on the CPU. It is
+    /// promoted to `overlay_*` only when that frame is submitted, after the
+    /// previous queued frame has used its own snapshot.
+    prepared_overlay_camera: WorldCamera,
+    prepared_overlay_sim_tick: SimTick,
+    prepared_overlay_analog: bool,
+    overlay_analog: bool,
     /// Tick of the first gameplay update after loading completed. The
     /// engine clock origin is set at app init, BEFORE CD loading, so
     /// raw `ctx.sim_tick` VALUES carry the build- and disc-dependent
@@ -373,7 +380,7 @@ struct Playtest {
     camera_collision_room_count: usize,
     /// (current room, player cell x/z at the cache quantum, active-room
     /// mask) the cached camera room set was gathered for.
-    camera_rooms_key: (RoomIndex, i32, i32, RuntimeDebugMask, RuntimeDebugMask),
+    camera_rooms_key: (RoomIndex, i32, i32, u32, u32),
     /// Last movement result; stationary frames can use a broader cached
     /// visibility candidate set without rebuilding it for camera-only turns.
     player_moved_last_tick: bool,
@@ -403,6 +410,8 @@ struct Playtest {
     ui_fonts: [Option<FontAtlas>; MAX_RUNTIME_UI_FONTS],
     /// Parsed models/materials, built once at init.
     models: [Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
+    /// Persistent model bytes are resident and the parsed runtime tables are valid.
+    runtime_models_loaded: bool,
     /// Predecoded model face records, shared by `models`.
     model_faces: [TexturedModelRenderFace; MAX_RUNTIME_MODEL_FACES],
     model_face_count: usize,
@@ -536,13 +545,8 @@ impl Playtest {
             Q12::ZERO,
             Q12::ONE,
         );
-        self.camera_rooms_key = (
-            INVALID_ROOM_INDEX,
-            i32::MIN,
-            i32::MIN,
-            RuntimeDebugMask::EMPTY,
-            RuntimeDebugMask::EMPTY,
-        );
+        self.prepared_overlay_camera = self.overlay_camera;
+        self.camera_rooms_key = (INVALID_ROOM_INDEX, i32::MIN, i32::MIN, 0, 0);
         for vertex in self.model_vertices.iter_mut() {
             *vertex = ModelVertex::ZERO;
         }
@@ -552,6 +556,12 @@ impl Playtest {
 
     fn step_streaming_jobs(&mut self, ctx: &mut Ctx) {
         let background_tick = self.streaming_jobs.background_tick(ctx);
+        #[cfg(feature = "cd-stream-bench")]
+        if background_tick && !self.step_persistent_model_assets() {
+            // The model pack and WORLD.PAK share one physical CD controller.
+            // Finish the session-lifetime read before room residency can seek.
+            return;
+        }
         #[cfg(feature = "cd-stream-bench")]
         if background_tick {
             // Residency owner: the single per-frame declaration of which rooms
@@ -600,6 +610,9 @@ impl Playtest {
         }
         #[cfg(feature = "cd-stream-bench")]
         {
+            if !self.runtime_models_loaded {
+                return false;
+            }
             if !self.chunked_level() {
                 return true;
             }

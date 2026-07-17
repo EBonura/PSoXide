@@ -423,10 +423,8 @@ fn insert_preview_light(project: &mut ProjectDocument) -> NodeId {
         .iter()
         .find_map(|n| match &n.kind {
             NodeKind::Room { grid } => {
-                let e = grid.world_cells_to_editor([
-                    grid.width as f32 / 2.0,
-                    grid.depth as f32 / 2.0,
-                ]);
+                let e =
+                    grid.world_cells_to_editor([grid.width as f32 / 2.0, grid.depth as f32 / 2.0]);
                 Some((n.id, [e[0], 1.5, e[1]]))
             }
             _ => None,

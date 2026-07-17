@@ -3410,6 +3410,7 @@ dependencies = [
 name = "psxed"
 version = "0.1.0"
 dependencies = [
+ "psx-asset",
  "psxed-audio",
  "psxed-format",
  "psxed-gltf",

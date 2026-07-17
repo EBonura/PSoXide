@@ -44,7 +44,7 @@ use psx_level::{
 use psx_pad::poll_port1;
 
 use crate::game_app::{GameApp, GAMEPLAY_ONLY};
-use crate::scene::{Ctx, Scene};
+use crate::scene::{Ctx, RenderSubmission, Scene};
 use crate::scheduler::{FrameScheduler, SchedulerAction, SchedulerConfig};
 use crate::telemetry;
 use crate::time::EngineClock;
@@ -551,7 +551,9 @@ impl App {
             let elapsed_sim_ticks = clock.elapsed_sim_ticks();
             match scheduler.next_action(elapsed_sim_ticks) {
                 SchedulerAction::WaitForVBlank => {
-                    if pending_present.is_some() {
+                    if pending_present.is_some()
+                        && scene.render_submission() == RenderSubmission::Immediate
+                    {
                         if !traced_present {
                             boot_trace("psx-engine: present begin");
                         }
@@ -628,31 +630,50 @@ impl App {
                     missed_visual_intervals,
                     fixed_update_clamped: _,
                 } => {
-                    // The previous visual frame can still be awaiting its
-                    // flip when the next one is already due (sim catch-up
-                    // after a stall). Flush it now, without holding for a
-                    // vblank edge since the slot is already blown, so the
-                    // swap happens before the clear below repaints the
-                    // back buffer.
-                    Self::present_pending(scene, &mut clock, &mut ctx, &mut pending_present, false);
+                    let submission = scene.render_submission();
+                    // A queued scene keeps one completed visual in flight.
+                    // Drain only the linked-list DMA before reusing its packet
+                    // RAM; the GPU may continue rasterising while the CPU
+                    // prepares the next list. The final draw_sync is delayed
+                    // until after that CPU work, which hides the raster tail.
+                    let queued_previous = if submission == RenderSubmission::Queued {
+                        pending_present.take().inspect(|_| {
+                            telemetry::stage_begin(telemetry::stage::OT_WAIT);
+                            gpu::submit_linked_list_wait();
+                            telemetry::stage_end(telemetry::stage::OT_WAIT);
+                        })
+                    } else {
+                        // Immediate scenes retain the original overload path:
+                        // present before clearing/reusing the back buffer.
+                        Self::present_pending(
+                            scene,
+                            &mut clock,
+                            &mut ctx,
+                            &mut pending_present,
+                            false,
+                        );
+                        None
+                    };
                     if !traced_render {
                         boot_trace("psx-engine: render begin");
                         boot_visual_checkpoint(&mut ctx.fb, (120, 0, 180), "30 RENDER BEGIN");
                     }
                     telemetry::task_begin(telemetry::task::VISUAL_RENDER);
-                    telemetry::stage_begin(telemetry::stage::FRAME_CLEAR);
-                    if !traced_render {
-                        boot_visual_checkpoint(&mut ctx.fb, (80, 0, 120), "31 CLEAR BEGIN");
+                    if submission == RenderSubmission::Immediate {
+                        telemetry::stage_begin(telemetry::stage::FRAME_CLEAR);
+                        if !traced_render {
+                            boot_visual_checkpoint(&mut ctx.fb, (80, 0, 120), "31 CLEAR BEGIN");
+                        }
+                        ctx.fb.clear(
+                            config.clear_color.0,
+                            config.clear_color.1,
+                            config.clear_color.2,
+                        );
+                        if !traced_render {
+                            boot_visual_checkpoint(&mut ctx.fb, (80, 40, 160), "32 CLEAR OK");
+                        }
+                        telemetry::stage_end(telemetry::stage::FRAME_CLEAR);
                     }
-                    ctx.fb.clear(
-                        config.clear_color.0,
-                        config.clear_color.1,
-                        config.clear_color.2,
-                    );
-                    if !traced_render {
-                        boot_visual_checkpoint(&mut ctx.fb, (80, 40, 160), "32 CLEAR OK");
-                    }
-                    telemetry::stage_end(telemetry::stage::FRAME_CLEAR);
 
                     telemetry::stage_begin(telemetry::stage::RENDER);
                     if !traced_render {
@@ -672,6 +693,34 @@ impl App {
                         );
                     }
                     telemetry::stage_end(telemetry::stage::RENDER);
+
+                    if submission == RenderSubmission::Queued {
+                        if let Some(previous_misses) = queued_previous {
+                            telemetry::stage_begin(telemetry::stage::OT_WAIT);
+                            gpu::draw_sync();
+                            telemetry::stage_end(telemetry::stage::OT_WAIT);
+
+                            telemetry::stage_begin(telemetry::stage::RENDER);
+                            scene.render_overlay(&mut ctx);
+                            telemetry::stage_end(telemetry::stage::RENDER);
+
+                            telemetry::stage_begin(telemetry::stage::PRESENT);
+                            clock.wait_vblank_edge();
+                            ctx.fb.swap();
+                            telemetry::stage_end(telemetry::stage::PRESENT);
+                            emit_visual_frame_counters(previous_misses);
+                            ctx.visual_frame = ctx.visual_frame.advance();
+                        }
+
+                        telemetry::stage_begin(telemetry::stage::FRAME_CLEAR);
+                        ctx.fb.clear(
+                            config.clear_color.0,
+                            config.clear_color.1,
+                            config.clear_color.2,
+                        );
+                        telemetry::stage_end(telemetry::stage::FRAME_CLEAR);
+                        scene.submit_render(&mut ctx);
+                    }
                     if !traced_render {
                         boot_visual_checkpoint_hold(
                             &mut ctx.fb,
@@ -684,12 +733,10 @@ impl App {
                     }
                     telemetry::task_end(telemetry::task::VISUAL_RENDER);
 
-                    // The flip is deferred: the scene may have kicked its
-                    // ordering-table DMA asynchronously, and the fixed
-                    // updates that are due next run while the GPU draws.
-                    // The flip happens on the first idle wait (tear-free,
-                    // at a vblank edge) or, under overload, right before
-                    // the next visual frame starts building.
+                    // Immediate scenes defer the flip while their GPU walks.
+                    // Queued scenes retain this frame for the next visual
+                    // turn, when the following frame's CPU packets hide its
+                    // remaining raster time.
                     scheduler.complete_visual_frame();
                     pending_present = Some(missed_visual_intervals);
                 }
