@@ -776,6 +776,7 @@ fn model_renderer_material_override_cooks_onto_instance() {
     assert_eq!(secondary_asset.kind, PlaytestAssetKind::Texture);
     let texture = psx_asset::Texture::from_bytes(&secondary_asset.bytes)
         .expect("generated secondary PSXT parses");
+    assert_eq!((texture.width(), texture.height()), (128, 128));
     assert_eq!(texture.clut_entries(), 16);
     assert!(texture.index_zero_transparent());
 

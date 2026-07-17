@@ -180,6 +180,9 @@ pub struct PlaytestRoom {
     /// Index into [`PlaytestPackage::assets`] of the room's
     /// `RoomWorld` asset.
     pub world_asset_index: usize,
+    /// Host-baked 4bpp environment map used by reflective model materials in
+    /// this runtime room. `None` when the project has no reflective materials.
+    pub reflection_probe_asset_index: Option<usize>,
     /// Editor-side `WorldGrid::origin[0]` (diagnostic only).
     pub origin_x: i32,
     /// Editor-side `WorldGrid::origin[1]`.
@@ -677,6 +680,9 @@ pub struct PlaytestModelMaterialOverride {
     pub tint_rgb: [u8; 3],
     /// Optional independently blended second texture pass.
     pub secondary_layer: Option<PlaytestModelSecondaryLayer>,
+    /// Room-probe controls retained for manifest flag packing. The texture
+    /// itself is selected from the actor's current runtime room.
+    pub reflection_probe: Option<crate::ReflectionProbeMaterial>,
     /// Authored face sidedness.
     pub face_sidedness: crate::MaterialFaceSidedness,
 }

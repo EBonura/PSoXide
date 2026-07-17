@@ -163,8 +163,8 @@ use generated::{
     MATERIALS, MODELS, MODEL_CLIPS, MODEL_CLIP_BOUNDS, MODEL_FRAME_BOUNDS, MODEL_INSTANCES,
     MODEL_SOCKETS, PARTICLE_EMITTERS, PLAYER_CONTROLLER, PLAYER_SPAWN, ROOMS, ROOM_CACHE_CELLS,
     ROOM_CACHE_CELL_VERTICES, ROOM_CACHE_SURFACES, ROOM_CACHE_VERTICES, ROOM_CHUNKS, ROOM_PORTALS,
-    ROOM_RESIDENCY, ROOM_SURFACE_CACHES, ROOM_VISIBILITY, UI_FONTS, UI_NODES, UI_PAINTS,
-    UI_SFX_CUES, UI_SFX_SAMPLES, VISIBILITY_CELLS, WEAPONS, WEAPON_HITBOXES,
+    ROOM_REFLECTION_PROBES, ROOM_RESIDENCY, ROOM_SURFACE_CACHES, ROOM_VISIBILITY, UI_FONTS,
+    UI_NODES, UI_PAINTS, UI_SFX_CUES, UI_SFX_SAMPLES, VISIBILITY_CELLS, WEAPONS, WEAPON_HITBOXES,
 };
 #[cfg(feature = "cd-stream-bench")]
 use generated::{
@@ -672,6 +672,7 @@ impl Playtest {
                     ready &= room_material_textures_ready(record);
                     ready &= room_backdrop_textures_ready(record);
                 }
+                ready &= room_reflection_probe_ready(room);
                 ready &= room_prop_textures_ready(room);
             }
             i += 1;
@@ -689,6 +690,7 @@ impl Playtest {
                     ready &= room_material_textures_ready(record);
                     ready &= room_backdrop_textures_ready(record);
                 }
+                ready &= room_reflection_probe_ready(room);
                 ready &= room_prop_textures_ready(room);
             }
             visible += 1;
