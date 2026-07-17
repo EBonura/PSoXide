@@ -32,9 +32,8 @@ use psx_gpu_render::{VRAM_HEIGHT, VRAM_WIDTH};
 use psx_vram::TextureWindowAtlas;
 use psxed_project::streaming::collect_scene_resource_use;
 use psxed_project::{
-    generate_material_texture_psxt, generate_model_noise_psxt, MaterialResource,
-    MaterialTextureMode, ModelSecondaryTexture, NodeKind, ProjectDocument, ResourceData,
-    ResourceId,
+    generate_material_texture_psxt, generate_room_reflection_probe_psxt, MaterialResource,
+    MaterialTextureMode, NodeKind, ProjectDocument, ResourceData, ResourceId,
 };
 
 const ROOM_TPAGE_HALFWORDS: usize = 64;
@@ -289,12 +288,11 @@ impl EditorTextures {
             };
             self.cache.insert(item.id, CacheEntry { slot });
             let secondary_slot = match item.secondary.as_ref() {
-                Some(ModelSecondaryTexture::Texture(path)) => {
+                Some(SecondaryPreviewSource::Texture(path)) => {
                     self.upload_real_psxt_with_clut_mode(path, project_root, false)
                 }
-                Some(ModelSecondaryTexture::ProceduralNoise(settings)) => {
-                    let bytes = generate_model_noise_psxt(*settings);
-                    self.upload_psxt_bytes_with_clut_mode(&bytes, false)
+                Some(SecondaryPreviewSource::Generated(bytes)) => {
+                    self.upload_psxt_bytes_with_clut_mode(bytes, false)
                 }
                 None => None,
             };
@@ -749,8 +747,14 @@ struct PreviewTextureUploadPlan {
     generated_bytes: Option<Vec<u8>>,
     force_zero_opaque: bool,
     allow_procedural_fallback: bool,
-    secondary: Option<ModelSecondaryTexture>,
+    secondary: Option<SecondaryPreviewSource>,
     secondary_signature: String,
+}
+
+#[derive(Debug, Clone)]
+enum SecondaryPreviewSource {
+    Texture(String),
+    Generated(Vec<u8>),
 }
 
 fn preview_texture_upload_plan(
@@ -801,24 +805,37 @@ fn push_material_resource_upload(
                 Some(generate_material_texture_psxt(material.generated)),
             )
         }
-        MaterialTextureMode::SimpleImage | MaterialTextureMode::ReflectiveProbe => {
+        MaterialTextureMode::SimpleImage => {
             let signature = texture_path(project, material).unwrap_or_default();
             let cache_signature = texture_cache_signature(project_root, &signature);
             (signature, cache_signature, None)
         }
+        MaterialTextureMode::ReflectiveProbe => {
+            let bytes = preview_room_probe_bytes(project, project_root);
+            let signature = format!("@room-probe:{}", bytes_signature(bytes.as_deref()));
+            (signature.clone(), signature, bytes)
+        }
     };
     let secondary = material
-        .secondary_layer
-        .as_ref()
-        .map(|layer| layer.texture.clone());
+        .enabled_secondary_layer()
+        .and_then(|layer| match layer.texture_mode {
+            MaterialTextureMode::SimpleImage => layer
+                .psxt_path
+                .as_ref()
+                .map(|path| SecondaryPreviewSource::Texture(path.clone())),
+            MaterialTextureMode::Generated => Some(SecondaryPreviewSource::Generated(
+                generate_material_texture_psxt(layer.generated),
+            )),
+            MaterialTextureMode::ReflectiveProbe => preview_room_probe_bytes(project, project_root)
+                .map(SecondaryPreviewSource::Generated),
+        });
     let secondary_signature = match secondary.as_ref() {
-        Some(ModelSecondaryTexture::Texture(path)) => {
+        Some(SecondaryPreviewSource::Texture(path)) => {
             format!("texture:{}", texture_cache_signature(project_root, path))
         }
-        Some(ModelSecondaryTexture::ProceduralNoise(settings)) => format!(
-            "noise:{:08x}:{}:{}:{}",
-            settings.seed, settings.feature_size, settings.octaves, settings.contrast
-        ),
+        Some(SecondaryPreviewSource::Generated(bytes)) => {
+            format!("generated:{}", bytes_signature(Some(bytes)))
+        }
         None => "none".to_string(),
     };
     plan.push(PreviewTextureUploadPlan {
@@ -832,6 +849,22 @@ fn push_material_resource_upload(
         secondary,
         secondary_signature,
     });
+}
+
+fn preview_room_probe_bytes(project: &ProjectDocument, project_root: &Path) -> Option<Vec<u8>> {
+    project.active_scene().nodes().iter().find_map(|node| {
+        let NodeKind::Room { grid } = &node.kind else {
+            return None;
+        };
+        generate_room_reflection_probe_psxt(project, grid, project_root).ok()
+    })
+}
+
+fn bytes_signature(bytes: Option<&[u8]>) -> u32 {
+    bytes
+        .unwrap_or_default()
+        .iter()
+        .fold(0u32, |hash, byte| hash.rotate_left(5) ^ u32::from(*byte))
 }
 
 fn push_image_prop_material_uploads(
@@ -1471,6 +1504,23 @@ mod tests {
         assert_eq!(layer.texture_width, 128);
         assert_eq!(layer.texture_height, 128);
         assert_ne!(layer.texture_window, TextureWindow::NONE);
+
+        match &mut project.resource_mut(material_id).expect("material").data {
+            ResourceData::Material(material) => material.set_secondary_layer_enabled(false),
+            _ => unreachable!(),
+        }
+        textures.refresh(&project, Path::new("."));
+        assert!(
+            textures.secondary_slot(material_id).is_none(),
+            "disabled layer recipes should not reserve preview VRAM"
+        );
+        let ResourceData::Material(material) = &project.resource(material_id).unwrap().data else {
+            unreachable!();
+        };
+        assert!(
+            material.secondary_layer.is_some(),
+            "recipe remains authored"
+        );
     }
 
     #[test]

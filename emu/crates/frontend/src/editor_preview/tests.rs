@@ -229,6 +229,172 @@ fn cortex_ignition_v1_preview_frame_contains_draw_commands() {
     }
 }
 
+#[test]
+fn cortex_player_crystal_preview_uses_its_generated_texture() {
+    let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .canonicalize()
+        .expect("repo root");
+    let project_root = repo_root.join("editor/projects/cortex_ignition_v1");
+    let project =
+        ProjectDocument::load_from_path(project_root.join("project.ron")).expect("project loads");
+    let player_crystal = project
+        .resources
+        .iter()
+        .find(|resource| resource.name == "CI Player Crystal")
+        .expect("CI Player Crystal material exists");
+    let mut textures = crate::editor_textures::EditorTextures::new();
+    textures.refresh(&project, &project_root);
+
+    assert!(
+        textures.slot(player_crystal.id).is_some(),
+        "generated Player Crystal texture should be uploaded to editor VRAM"
+    );
+    assert!(
+        super::preview_model_material_override(&project, &textures, Some(player_crystal.id))
+            .and_then(|material| material.texture)
+            .is_some(),
+        "model preview should use Player Crystal's generated texture instead of its checkerboard atlas"
+    );
+
+    // Exercise the complete editor render path without opening a window. Frame
+    // the authored player, render once with Player Crystal and once with the
+    // material deliberately changed to atlas fallback, then require the GPU
+    // output to differ. This catches a preview regression even when both the
+    // generated texture upload and the model atlas upload succeed independently.
+    let scene = project.active_scene();
+    let room = scene
+        .nodes()
+        .iter()
+        .find(|node| node.name == "Demo7 Map" && matches!(node.kind, NodeKind::Room { .. }))
+        .expect("Demo7 Map room exists");
+    let NodeKind::Room { grid } = &room.kind else {
+        unreachable!();
+    };
+    let player = scene
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.name == "Player" && super::preview_player_reference(scene, node).is_some()
+        })
+        .expect("authored player exists");
+    let reference = super::preview_player_reference(scene, player).expect("player reference");
+    let character_id = super::resolve_player_spawn_character(&project, reference.character)
+        .expect("player character resolves");
+    let character = project
+        .resource(character_id)
+        .and_then(|resource| match &resource.data {
+            ResourceData::Character(character) => Some(character),
+            _ => None,
+        })
+        .expect("player Character resource");
+    let model_id = reference
+        .model_override
+        .or(character.model)
+        .expect("player model resolves");
+    let model = project
+        .resource(model_id)
+        .and_then(|resource| match &resource.data {
+            ResourceData::Model(model) => Some(model),
+            _ => None,
+        })
+        .expect("player Model resource");
+    let placement = super::floor_anchored_node_room_local_origin(grid, &player.transform);
+    let player_rotation = super::yaw_rotation_q12(
+        super::yaw_to_q12(player.transform.rotation_degrees[1])
+            .wrapping_add(reference.visual_yaw_q12),
+    );
+    let render_origin = super::visual_model_origin(
+        placement,
+        model.world_height as i32,
+        reference.visual_offset,
+        reference.visual_scale_q8,
+        player_rotation,
+    );
+    let camera = ViewportCameraState {
+        mode: ViewportCameraMode::Orbit,
+        yaw_q12: 512,
+        pitch_q12: 256,
+        radius: 2200,
+        target: [render_origin.x, render_origin.y, render_origin.z],
+        position: [0; 3],
+    };
+    let mut assets = crate::editor_assets::EditorAssets::new();
+    assets.refresh(&project, &project_root);
+    let empty_hidden = std::collections::HashSet::new();
+    let build_frame =
+        |document: &ProjectDocument, texture_cache: &crate::editor_textures::EditorTextures| {
+            super::build_phase1_frame(
+                document,
+                camera,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                &empty_hidden,
+                Some(room.id),
+                0,
+                NodeId::ROOT,
+                None,
+                None,
+                &[],
+                &[],
+                None,
+                &[],
+                None,
+                &[],
+                None,
+                texture_cache,
+                &assets,
+            )
+        };
+    let generated_frame = build_frame(&project, &textures);
+
+    let mut atlas_fallback_project = project.clone();
+    let fallback_material = atlas_fallback_project
+        .resource_mut(player_crystal.id)
+        .and_then(|resource| match &mut resource.data {
+            ResourceData::Material(material) => Some(material),
+            _ => None,
+        })
+        .expect("mutable Player Crystal material");
+    fallback_material.texture_mode = psxed_project::MaterialTextureMode::SimpleImage;
+    fallback_material.psxt_path = None;
+    let mut fallback_textures = crate::editor_textures::EditorTextures::new();
+    fallback_textures.refresh(&atlas_fallback_project, &project_root);
+    fallback_textures.refresh_models(&atlas_fallback_project, &project_root);
+    let fallback_frame = build_frame(&atlas_fallback_project, &fallback_textures);
+
+    if let Some(mut renderer) = headless_preview_renderer() {
+        let render = |renderer: &mut psx_gpu_render::HwRenderer,
+                      frame: &super::EditorPreviewFrame,
+                      texture_cache: &crate::editor_textures::EditorTextures| {
+            renderer.render_frame(
+                &emulator_core::Gpu::new(),
+                &frame.cmd_log,
+                texture_cache.vram_words(),
+            );
+            let scale = renderer.internal_scale();
+            renderer
+                .read_subrect_rgba8(0, 0, 320 * scale, 240 * scale)
+                .2
+        };
+        let generated_rgba = render(&mut renderer, &generated_frame, &textures);
+        let fallback_rgba = render(&mut renderer, &fallback_frame, &fallback_textures);
+        let changed_pixels = generated_rgba
+            .chunks_exact(4)
+            .zip(fallback_rgba.chunks_exact(4))
+            .filter(|(generated, fallback)| generated != fallback)
+            .count();
+        assert!(
+            changed_pixels > 100,
+            "headless editor frame should visibly change when Player Crystal falls back to the checkerboard atlas; changed pixels={changed_pixels}"
+        );
+    }
+}
+
 fn fog(rgb: (u8, u8, u8), near: i32, far: i32) -> PreviewFog {
     PreviewFog {
         enabled: true,

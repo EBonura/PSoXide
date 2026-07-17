@@ -270,11 +270,10 @@ pub fn model_override_material(
 /// disturbing the base model draw.
 fn model_secondary_material(
     layer: LevelModelSecondaryLayer,
-    resolve_override_texture: &mut impl FnMut(AssetId) -> Option<VramSlot>,
-) -> Option<(TextureMaterial, u8, u8)> {
-    let slot = resolve_override_texture(layer.texture_asset)?;
+    slot: VramSlot,
+) -> (TextureMaterial, u8, u8) {
     let [r, g, b] = layer.tint_rgb;
-    Some((
+    (
         TextureMaterial::blended(
             slot.clut_word,
             slot.tpage_word,
@@ -284,7 +283,7 @@ fn model_secondary_material(
         .with_texture_window(slot.texture_window),
         vram_slot_texture_size_u8(slot.texture_width),
         vram_slot_texture_size_u8(slot.texture_height),
-    ))
+    )
 }
 
 /// Resolve one moving secondary pass without touching texture residency. The
@@ -293,16 +292,49 @@ fn model_secondary_layer(
     layer: LevelModelSecondaryLayer,
     elapsed_tick: SimTick,
     video_hz: VideoHz,
+    room_reflection_probe: Option<VramSlot>,
     resolve_override_texture: &mut impl FnMut(AssetId) -> Option<VramSlot>,
 ) -> Option<TexturedModelLayer> {
-    let (material, texture_width, texture_height) =
-        model_secondary_material(layer, resolve_override_texture)?;
+    let slot = if layer.uses_room_reflection_probe() {
+        room_reflection_probe?
+    } else {
+        resolve_override_texture(layer.texture_asset?)?
+    };
+    let (mut material, texture_width, texture_height) = model_secondary_material(layer, slot);
+    if layer.uses_room_reflection_probe() {
+        let strength = u16::from(layer.reflection_strength());
+        let [r, g, b] = layer.tint_rgb;
+        material = material.with_tint((
+            ((u16::from(r) * strength + 127) / 255) as u8,
+            ((u16::from(g) * strength + 127) / 255) as u8,
+            ((u16::from(b) * strength + 127) / 255) as u8,
+        ));
+    }
     let [mut u, mut v] = layer
         .motion
         .offset_at_tick(elapsed_tick.as_u32(), video_hz.as_u16());
     u %= texture_width.max(1);
     v %= texture_height.max(1);
-    Some(TexturedModelLayer::new(material).with_uv_offset(ModelUvOffset::new(u, v)))
+    let offset = ModelUvOffset::new(u, v);
+    let mapping = if layer.uses_room_reflection_probe() {
+        ModelUvMapping::ScreenSpaceReflection {
+            texture_width,
+            texture_height,
+            roughness: layer.reflection_roughness_level(),
+            uv_offset: offset,
+        }
+    } else {
+        ModelUvMapping::Authored
+    };
+    Some(
+        TexturedModelLayer::new(material)
+            .with_uv_mapping(mapping)
+            .with_uv_offset(if mapping.is_authored() {
+                offset
+            } else {
+                ModelUvOffset::ZERO
+            }),
+    )
 }
 
 /// Apply an override's blend and tint to the model's own baked
@@ -326,16 +358,18 @@ pub const fn model_override_cull_mode(material_override: LevelModelMaterialOverr
     }
 }
 
-/// Resolve the material + cull mode one model draw uses: the covering
-/// override when authored and VRAM-resident, else the model's own
-/// atlas. The no-override path stays a single `match` on the record.
+/// Resolve the material + cull mode one model draw uses. A model with an
+/// authored covering texture waits until that texture is resident instead of
+/// exposing its native atlas as a visible one-frame placeholder.
 #[inline]
 fn model_material_and_cull(
     runtime_model: RuntimeModelAsset,
     material_override: Option<LevelModelMaterialOverride>,
     room_reflection_probe: Option<VramSlot>,
+    elapsed_tick: SimTick,
+    video_hz: VideoHz,
     resolve_override_texture: &mut impl FnMut(AssetId) -> Option<VramSlot>,
-) -> (TextureMaterial, CullMode, ModelUvMapping) {
+) -> Option<(TextureMaterial, CullMode, ModelUvMapping)> {
     let base_cull = if runtime_model.double_sided {
         CullMode::None
     } else {
@@ -343,6 +377,10 @@ fn model_material_and_cull(
     };
     match material_override {
         Some(material_override) => {
+            let [u, v] = material_override
+                .motion
+                .offset_at_tick(elapsed_tick.as_u32(), video_hz.as_u16());
+            let uv_offset = ModelUvOffset::new(u, v);
             let atlas = model_override_atlas_material(runtime_model.material, material_override);
             if material_override.uses_room_reflection_probe() {
                 if let Some(slot) = room_reflection_probe {
@@ -351,32 +389,34 @@ fn model_material_and_cull(
                     for channel in &mut reflection_override.tint_rgb {
                         *channel = ((u16::from(*channel) * strength + 127) / 255) as u8;
                     }
-                    return (
+                    return Some((
                         model_override_material(slot, reflection_override),
                         model_override_cull_mode(material_override),
                         ModelUvMapping::ScreenSpaceReflection {
                             texture_width: vram_slot_texture_size_u8(slot.texture_width),
                             texture_height: vram_slot_texture_size_u8(slot.texture_height),
                             roughness: material_override.reflection_roughness_level(),
+                            uv_offset,
                         },
-                    );
+                    ));
                 }
             }
             let material = match material_override.texture_asset {
                 Some(texture_asset) => resolve_override_texture(texture_asset)
-                    .map(|slot| model_override_material(slot, material_override))
-                    // Missing covering texture: retain the authored
-                    // optical properties on the native atlas.
-                    .unwrap_or(atlas),
+                    .map(|slot| model_override_material(slot, material_override))?,
                 None => atlas,
             };
-            (
+            Some((
                 material,
                 model_override_cull_mode(material_override),
-                ModelUvMapping::Authored,
-            )
+                if uv_offset.is_zero() {
+                    ModelUvMapping::Authored
+                } else {
+                    ModelUvMapping::AuthoredOffset(uv_offset)
+                },
+            ))
         }
-        None => (runtime_model.material, base_cull, ModelUvMapping::Authored),
+        None => Some((runtime_model.material, base_cull, ModelUvMapping::Authored)),
     }
 }
 
@@ -813,12 +853,20 @@ pub fn draw_player<
         };
     }
 
-    let (base_material, cull_mode, uv_mapping) = model_material_and_cull(
+    let Some((base_material, cull_mode, uv_mapping)) = model_material_and_cull(
         runtime_model,
         character.material_override,
         room_reflection_probe,
+        elapsed_tick,
+        video_hz,
         resolve_override_texture,
-    );
+    ) else {
+        return PlayerModelDrawStats {
+            stats: TexturedModelRenderStats::default(),
+            bounds_tests: 1,
+            bounds_culled: 0,
+        };
+    };
     let material = lighting.shade_model_material(origin, base_material);
     let model_options = options
         .with_depth_policy(DepthPolicy::Average)
@@ -834,7 +882,13 @@ pub fn draw_player<
         .material_override
         .and_then(|material| material.secondary_layer)
         .and_then(|layer| {
-            model_secondary_layer(layer, elapsed_tick, video_hz, resolve_override_texture)
+            model_secondary_layer(
+                layer,
+                elapsed_tick,
+                video_hz,
+                room_reflection_probe,
+                resolve_override_texture,
+            )
         })
         .map(|mut layer| {
             layer.material = lighting.shade_model_material(origin, layer.material);
@@ -1515,6 +1569,7 @@ mod tests {
             texture_asset: Some(AssetId(7)),
             blend_mode,
             tint_rgb: [96, 128, 160],
+            motion: psx_level::LevelMaterialUvMotion::default(),
             secondary_layer: None,
             flags,
         }
@@ -1588,7 +1643,7 @@ mod tests {
         overlay_slot.texture_width = 32;
         overlay_slot.texture_height = 16;
         let layer = LevelModelSecondaryLayer {
-            texture_asset: overlay_slot.asset,
+            texture_asset: Some(overlay_slot.asset),
             blend_mode: model_override_blend::ADD_QUARTER,
             tint_rgb: [128; 3],
             motion: psx_level::LevelMaterialUvMotion {
@@ -1598,13 +1653,55 @@ mod tests {
                 phase_u: 250,
                 phase_v: 250,
             },
+            flags: 0,
         };
-        let resolved =
-            model_secondary_layer(layer, SimTick::from_u32(30), VideoHz::NTSC, &mut |_| {
-                Some(overlay_slot)
-            })
-            .expect("resident overlay");
+        let resolved = model_secondary_layer(
+            layer,
+            SimTick::from_u32(30),
+            VideoHz::NTSC,
+            None,
+            &mut |_| Some(overlay_slot),
+        )
+        .expect("resident overlay");
         assert_eq!(resolved.uv_offset, ModelUvOffset::new(27, 9));
+    }
+
+    #[test]
+    fn secondary_layer_can_use_the_room_probe_with_its_own_motion() {
+        let probe_slot = slot(TextureWindow::power_of_two_tile(64, 64, 64, 64));
+        let layer = LevelModelSecondaryLayer {
+            texture_asset: None,
+            blend_mode: model_override_blend::ADD_QUARTER,
+            tint_rgb: [128; 3],
+            motion: psx_level::LevelMaterialUvMotion {
+                enabled: true,
+                speed_u_q8: 2 * 256,
+                speed_v_q8: 0,
+                phase_u: 3,
+                phase_v: 5,
+            },
+            flags: psx_level::material_flags::MODEL_REFLECTION_PROBE
+                | (2 << psx_level::material_flags::MODEL_REFLECTION_ROUGHNESS_SHIFT)
+                | (255 << psx_level::material_flags::MODEL_REFLECTION_STRENGTH_SHIFT),
+        };
+        let resolved = model_secondary_layer(
+            layer,
+            SimTick::from_u32(30),
+            VideoHz::NTSC,
+            Some(probe_slot),
+            &mut |_| None,
+        )
+        .expect("resident room probe");
+        assert_eq!(resolved.uv_offset, ModelUvOffset::ZERO);
+        assert_eq!(
+            resolved.uv_mapping,
+            ModelUvMapping::ScreenSpaceReflection {
+                texture_width: 64,
+                texture_height: 64,
+                roughness: 2,
+                uv_offset: ModelUvOffset::new(4, 5),
+            }
+        );
     }
 
     #[test]

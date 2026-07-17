@@ -448,6 +448,8 @@ pub enum ModelUvMapping {
     /// Preserve UVs authored in the cooked model atlas.
     #[default]
     Authored,
+    /// Preserve authored UVs and apply a wrapping byte-space displacement.
+    AuthoredOffset(ModelUvOffset),
     /// Project the model through the screen into the active room's compact
     /// environment map. Roughness is a 0..=3 UV-quantisation level.
     ScreenSpaceReflection {
@@ -457,6 +459,8 @@ pub enum ModelUvMapping {
         texture_height: u8,
         /// Quantised roughness (`0 = sharp`, `3 = rough`).
         roughness: u8,
+        /// Optional wrapped movement applied after probe projection.
+        uv_offset: ModelUvOffset,
     },
 }
 
@@ -489,6 +493,8 @@ pub struct TexturedModelLayer {
     pub material: TextureMaterial,
     /// Wrapped UV displacement applied only to this layer.
     pub uv_offset: ModelUvOffset,
+    /// Authored or probe-projected UV source for this layer.
+    pub uv_mapping: ModelUvMapping,
 }
 
 impl TexturedModelLayer {
@@ -497,12 +503,19 @@ impl TexturedModelLayer {
         Self {
             material,
             uv_offset: ModelUvOffset::ZERO,
+            uv_mapping: ModelUvMapping::Authored,
         }
     }
 
     /// Return this layer with a wrapped UV displacement.
     pub const fn with_uv_offset(mut self, uv_offset: ModelUvOffset) -> Self {
         self.uv_offset = uv_offset;
+        self
+    }
+
+    /// Return this layer with an independent UV source.
+    pub const fn with_uv_mapping(mut self, uv_mapping: ModelUvMapping) -> Self {
+        self.uv_mapping = uv_mapping;
         self
     }
 }

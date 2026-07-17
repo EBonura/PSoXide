@@ -1,5 +1,5 @@
 use super::*;
-use crate::{generate_model_noise_psxt, ModelSecondaryTexture};
+use crate::generate_material_texture_psxt;
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn resolve_material_texture_asset(
@@ -111,26 +111,32 @@ pub(crate) fn resolve_model_material_override(
     } else {
         None
     };
-    let secondary_layer = material.secondary_layer.as_ref().and_then(|layer| {
+    let secondary_layer = material.enabled_secondary_layer().map(|layer| {
         let texture_asset_index = resolve_model_secondary_texture_asset(
             project_root,
             &material_resource.name,
-            &layer.texture,
+            layer,
             texture_asset_for_path,
             assets,
             report,
-        )?;
-        Some(PlaytestModelSecondaryLayer {
+        );
+        PlaytestModelSecondaryLayer {
             texture_asset_index,
             blend_mode: layer.blend_mode,
             tint_rgb: layer.tint,
             motion: layer.motion,
-        })
+            reflection_probe: (layer.texture_mode == crate::MaterialTextureMode::ReflectiveProbe)
+                .then_some(layer.reflection),
+        }
     });
     Some(PlaytestModelMaterialOverride {
         texture_asset_index,
         blend_mode: material.blend_mode,
         tint_rgb: material.tint,
+        motion: crate::MaterialUvMotion {
+            enabled: material.animation.mode == crate::MaterialAnimationMode::UvScroll,
+            ..material.animation.uv_scroll
+        },
         secondary_layer,
         reflection_probe: (material.texture_mode == crate::MaterialTextureMode::ReflectiveProbe)
             .then_some(material.reflection),
@@ -142,17 +148,17 @@ pub(crate) fn resolve_model_material_override(
 fn resolve_model_secondary_texture_asset(
     project_root: &Path,
     material_name: &str,
-    source: &ModelSecondaryTexture,
+    layer: &crate::ModelSecondaryLayer,
     texture_asset_for_path: &mut HashMap<String, usize>,
     assets: &mut Vec<PlaytestAsset>,
     report: &mut PlaytestValidationReport,
 ) -> Option<usize> {
-    let (cache_key, source_label, bytes) = match source {
-        ModelSecondaryTexture::Texture(path) => {
-            let path = path.trim();
+    let (cache_key, source_label, bytes) = match layer.texture_mode {
+        crate::MaterialTextureMode::SimpleImage => {
+            let path = layer.psxt_path.as_deref().unwrap_or_default().trim();
             if path.is_empty() {
                 report.warn(format!(
-                    "Material '{material_name}' has an empty secondary texture path - layer skipped"
+                    "Material '{material_name}' layer 2 has no texture path - layer skipped"
                 ));
                 return None;
             }
@@ -174,20 +180,18 @@ fn resolve_model_secondary_texture_asset(
                 bytes,
             )
         }
-        ModelSecondaryTexture::ProceduralNoise(settings) => {
-            let cache_key = format!(
-                "@model-noise:{:08x}:{}:{}:{}",
-                settings.seed, settings.feature_size, settings.octaves, settings.contrast
-            );
+        crate::MaterialTextureMode::Generated => {
+            let cache_key = format!("@material-layer-2:{:?}", layer.generated);
             if let Some(&existing) = texture_asset_for_path.get(&cache_key) {
                 return Some(existing);
             }
             (
                 cache_key,
-                format!("{material_name} generated noise"),
-                generate_model_noise_psxt(*settings),
+                format!("{material_name} generated layer 2"),
+                generate_material_texture_psxt(layer.generated),
             )
         }
+        crate::MaterialTextureMode::ReflectiveProbe => return None,
     };
     if let Err(msg) = expect_room_material_depth(&source_label, &bytes) {
         report.warn(format!(

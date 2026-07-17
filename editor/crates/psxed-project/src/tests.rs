@@ -606,6 +606,7 @@ fn dynamic_material_recipe_round_trips_through_project_ron() {
         phase_v: 231,
     };
     material.secondary_layer = Some(layer.clone());
+    material.set_secondary_layer_enabled(false);
     material.animation = MaterialAnimation {
         mode: MaterialAnimationMode::Flipbook,
         flipbook: MaterialFlipbook {
@@ -628,7 +629,13 @@ fn dynamic_material_recipe_round_trips_through_project_ron() {
     else {
         panic!("saved resource changed kind");
     };
-    assert_eq!(loaded_material.secondary_layer.as_ref(), Some(&layer));
+    assert!(loaded_material.enabled_secondary_layer().is_none());
+    let loaded_layer = loaded_material
+        .secondary_layer
+        .as_ref()
+        .expect("disabled layer recipe remains serialized");
+    assert!(!loaded_layer.enabled);
+    assert_eq!(loaded_layer.motion, layer.motion);
     assert_eq!(loaded_material.animation, expected_animation);
 
     let _ = std::fs::remove_dir_all(dir);

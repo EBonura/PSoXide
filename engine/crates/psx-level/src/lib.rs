@@ -1779,6 +1779,8 @@ pub struct LevelModelMaterialOverride {
     pub blend_mode: u8,
     /// Per-material modulation tint (0x80 neutral).
     pub tint_rgb: [u8; 3],
+    /// Deterministic UV movement for layer 1.
+    pub motion: LevelMaterialUvMotion,
     /// Optional independently blended second texture pass.
     pub secondary_layer: Option<LevelModelSecondaryLayer>,
     /// Face-sidedness bits in the [`material_flags::FACE_*`]
@@ -1790,18 +1792,39 @@ pub struct LevelModelMaterialOverride {
 /// resident 4bpp asset and reuses the model's authored UVs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LevelModelSecondaryLayer {
-    /// Texture asset sampled by the pass.
-    pub texture_asset: AssetId,
+    /// Texture asset sampled by the pass, or `None` for the current room probe.
+    pub texture_asset: Option<AssetId>,
     /// Blend-mode code from [`model_override_blend`].
     pub blend_mode: u8,
     /// Independent per-pass modulation tint.
     pub tint_rgb: [u8; 3],
     /// Deterministic UV motion applied to this pass.
     pub motion: LevelMaterialUvMotion,
+    /// Probe and roughness fields use the same material flag encoding as layer 1.
+    pub flags: u16,
+}
+
+impl LevelModelSecondaryLayer {
+    /// Whether layer 2 samples the current room's baked probe.
+    pub const fn uses_room_reflection_probe(self) -> bool {
+        self.flags & material_flags::MODEL_REFLECTION_PROBE != 0
+    }
+
+    /// Quantised reflected-UV roughness (`0 = sharp`, `3 = rough`).
+    pub const fn reflection_roughness_level(self) -> u8 {
+        ((self.flags & material_flags::MODEL_REFLECTION_ROUGHNESS_MASK)
+            >> material_flags::MODEL_REFLECTION_ROUGHNESS_SHIFT) as u8
+    }
+
+    /// Authored probe intensity (`0 = dark`, `255 = full`).
+    pub const fn reflection_strength(self) -> u8 {
+        ((self.flags & material_flags::MODEL_REFLECTION_STRENGTH_MASK)
+            >> material_flags::MODEL_REFLECTION_STRENGTH_SHIFT) as u8
+    }
 }
 
 /// Runtime-safe UV animation recipe for a material pass.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct LevelMaterialUvMotion {
     /// Whether motion is active.
     pub enabled: bool,

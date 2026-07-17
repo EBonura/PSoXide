@@ -45,7 +45,10 @@ use psx_iso::{Disc, Exe, TrackType};
 #[cfg(feature = "editor")]
 use psxed_project::{NodeId, ProjectDocument};
 #[cfg(feature = "editor")]
-use psxed_ui::{ViewportCameraMode, ViewportCameraState};
+use psxed_ui::{
+    EditorPlaytestStatus, EditorViewport3dPresentation, EditorWorkspace, ViewportCameraMode,
+    ViewportCameraState,
+};
 
 use crate::app::{bus_from_configured_bios, fast_boot_embedded_playtest_disc};
 #[cfg(feature = "editor")]
@@ -168,6 +171,9 @@ pub enum Command {
     /// Render an editor 3D preview screenshot without opening the GUI.
     #[cfg(feature = "editor")]
     DumpEditorPreview(DumpEditorPreviewArgs),
+    /// Render the complete editor UI to PNG without opening a native window.
+    #[cfg(feature = "editor")]
+    DumpEditorUi(DumpEditorUiArgs),
     /// Run exact-hash validation checkpoints from a manifest.
     Validate(ValidateArgs),
 }
@@ -400,6 +406,33 @@ pub struct DumpEditorPreviewArgs {
     pub active_floor: usize,
 }
 
+/// Arguments for `dump-editor-ui`.
+#[cfg(feature = "editor")]
+#[derive(Debug, Args)]
+pub struct DumpEditorUiArgs {
+    /// Project directory containing `project.ron`.
+    #[arg(long, default_value = "editor/projects/default")]
+    pub project: PathBuf,
+    /// Top-level editor workspace to render.
+    #[arg(long, value_enum, default_value = "3d")]
+    pub view: EditorViewArg,
+    /// Resource name or numeric id to focus in Animation Studio or Material Lab.
+    #[arg(long, value_name = "NAME_OR_ID")]
+    pub resource: Option<String>,
+    /// Output PNG path.
+    #[arg(long)]
+    pub out: PathBuf,
+    /// Offscreen framebuffer width in physical pixels.
+    #[arg(long, default_value_t = 1920)]
+    pub width: u32,
+    /// Offscreen framebuffer height in physical pixels.
+    #[arg(long, default_value_t = 1080)]
+    pub height: u32,
+    /// Inject the `.` frame-selected shortcut before the captured frame.
+    #[arg(long)]
+    pub frame_selected: bool,
+}
+
 /// Arguments for `validate`.
 #[derive(Debug, Args)]
 pub struct ValidateArgs {
@@ -447,6 +480,8 @@ pub fn run(cli: Cli) -> Result<(), String> {
         Command::PreburnCheck(args) => cmd_preburn_check(args),
         #[cfg(feature = "editor")]
         Command::DumpEditorPreview(args) => cmd_dump_editor_preview(args),
+        #[cfg(feature = "editor")]
+        Command::DumpEditorUi(args) => cmd_dump_editor_ui(args),
         Command::Validate(args) => cmd_validate(&paths, args),
     }
 }
@@ -1874,6 +1909,271 @@ fn hash_vram(bus: &Bus) -> u64 {
         h.update(&word.to_le_bytes());
     }
     h.finish()
+}
+
+#[cfg(feature = "editor")]
+fn cmd_dump_editor_ui(args: DumpEditorUiArgs) -> Result<(), String> {
+    if args.width == 0 || args.height == 0 {
+        return Err("headless editor dimensions must be non-zero".to_string());
+    }
+    if args.width > 8192 || args.height > 8192 {
+        return Err("headless editor dimensions must not exceed 8192 px".to_string());
+    }
+
+    let (project_root, _) = resolve_project_arg(&args.project);
+    let mut editor = EditorWorkspace::open_directory(&project_root)
+        .map_err(|error| format!("open editor project at {}: {error}", project_root.display()))?;
+    let workspace_view = args.view.project_view();
+    editor.show_workspace(workspace_view);
+
+    if let Some(selector) = args.resource.as_deref() {
+        if !matches!(
+            args.view,
+            EditorViewArg::Animation | EditorViewArg::Material
+        ) {
+            return Err("--resource requires --view animation or --view material".to_string());
+        }
+        let numeric_id = selector.parse::<u64>().ok();
+        let resource_id = editor
+            .project()
+            .resources
+            .iter()
+            .find(|resource| {
+                numeric_id.is_some_and(|id| resource.id.raw() == id) || resource.name == selector
+            })
+            .or_else(|| {
+                editor
+                    .project()
+                    .resources
+                    .iter()
+                    .find(|resource| resource.name.eq_ignore_ascii_case(selector))
+            })
+            .map(|resource| resource.id)
+            .ok_or_else(|| format!("editor resource {selector:?} was not found"))?;
+        let focused = match args.view {
+            EditorViewArg::Animation => {
+                editor.open_animation_viewer_for_resource(resource_id)
+                    && editor.animation_viewer_resource_is_focused(resource_id)
+            }
+            EditorViewArg::Material => editor.focus_material_resource(resource_id),
+            EditorViewArg::ThreeD | EditorViewArg::TwoD => false,
+        };
+        if !focused {
+            return Err(format!(
+                "editor resource {selector:?} could not be focused in {:?}",
+                args.view
+            ));
+        }
+    }
+
+    let ctx = egui::Context::default();
+    crate::theme::apply(&ctx);
+    let viewport_texture = ctx.load_texture(
+        "headless-editor-viewport",
+        egui::ColorImage::new([640, 480], egui::Color32::from_rgb(8, 10, 14)),
+        egui::TextureOptions::NEAREST,
+    );
+    let viewport = EditorViewport3dPresentation::edit(viewport_texture.id(), Vec::new());
+
+    // Prime one complete frame before injecting input. This mirrors the native
+    // app's first layout pass and ensures fonts/resource textures and widget
+    // focus state all exist before the captured interaction frame.
+    let first = ctx.run(
+        headless_editor_input(args.width, args.height, 0.0, Vec::new()),
+        |ctx| editor.draw(ctx, viewport.clone(), EditorPlaytestStatus::Idle),
+    );
+    let mut textures_delta = first.textures_delta;
+
+    let events = if args.frame_selected {
+        vec![egui::Event::Key {
+            key: egui::Key::Period,
+            physical_key: Some(egui::Key::Period),
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }]
+    } else {
+        Vec::new()
+    };
+    let captured = ctx.run(
+        headless_editor_input(args.width, args.height, 1.0 / 60.0, events),
+        |ctx| editor.draw(ctx, viewport.clone(), EditorPlaytestStatus::Idle),
+    );
+    textures_delta.append(captured.textures_delta);
+    let paint_jobs = ctx.tessellate(captured.shapes, captured.pixels_per_point);
+
+    render_headless_editor_png(
+        &paint_jobs,
+        textures_delta,
+        args.width,
+        args.height,
+        captured.pixels_per_point,
+        &args.out,
+    )?;
+    println!(
+        "headless editor ui: view={:?} resource={} status={:?} out={}",
+        workspace_view,
+        args.resource.as_deref().unwrap_or("(none)"),
+        editor.status_text(),
+        args.out.display()
+    );
+    Ok(())
+}
+
+#[cfg(feature = "editor")]
+fn headless_editor_input(
+    width: u32,
+    height: u32,
+    time: f64,
+    events: Vec<egui::Event>,
+) -> egui::RawInput {
+    let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width as f32, height as f32));
+    let mut input = egui::RawInput {
+        screen_rect: Some(rect),
+        time: Some(time),
+        events,
+        focused: true,
+        ..Default::default()
+    };
+    if let Some(viewport) = input.viewports.get_mut(&egui::ViewportId::ROOT) {
+        viewport.native_pixels_per_point = Some(1.0);
+        viewport.inner_rect = Some(rect);
+        viewport.outer_rect = Some(rect);
+        viewport.focused = Some(true);
+        viewport.fullscreen = Some(true);
+    }
+    input
+}
+
+#[cfg(feature = "editor")]
+fn render_headless_editor_png(
+    paint_jobs: &[egui::ClippedPrimitive],
+    textures_delta: egui::TexturesDelta,
+    width: u32,
+    height: u32,
+    pixels_per_point: f32,
+    out: &Path,
+) -> Result<(), String> {
+    let (device, queue) = headless_wgpu_device()?;
+    let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+    let target = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("psoxide-headless-editor-ui"),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+    let mut renderer = egui_wgpu::Renderer::new(&device, format, None, 1, false);
+    for (id, delta) in &textures_delta.set {
+        renderer.update_texture(&device, &queue, *id, delta);
+    }
+
+    let screen = egui_wgpu::ScreenDescriptor {
+        size_in_pixels: [width, height],
+        pixels_per_point,
+    };
+    let unpadded_bytes_per_row = width * 4;
+    let alignment = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+    let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(alignment) * alignment;
+    let readback = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("psoxide-headless-editor-ui-readback"),
+        size: (padded_bytes_per_row * height) as wgpu::BufferAddress,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("psoxide-headless-editor-ui-encoder"),
+    });
+    renderer.update_buffers(&device, &queue, &mut encoder, paint_jobs, &screen);
+    {
+        let mut pass = encoder
+            .begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("psoxide-headless-editor-ui-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.04,
+                            g: 0.04,
+                            b: 0.06,
+                            a: 1.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                occlusion_query_set: None,
+                timestamp_writes: None,
+            })
+            .forget_lifetime();
+        renderer.render(&mut pass, paint_jobs, &screen);
+    }
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture: &target,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &readback,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(padded_bytes_per_row),
+                rows_per_image: Some(height),
+            },
+        },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+    );
+    queue.submit(Some(encoder.finish()));
+
+    let slice = readback.slice(..);
+    let (sender, receiver) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |result| {
+        let _ = sender.send(result);
+    });
+    device.poll(wgpu::Maintain::Wait);
+    receiver
+        .recv()
+        .map_err(|_| "headless editor readback callback dropped".to_string())?
+        .map_err(|error| format!("headless editor readback: {error:?}"))?;
+    let mapped = slice.get_mapped_range();
+    let mut rgba = Vec::with_capacity((width * height * 4) as usize);
+    for row in 0..height {
+        let start = (row * padded_bytes_per_row) as usize;
+        let end = start + unpadded_bytes_per_row as usize;
+        rgba.extend_from_slice(&mapped[start..end]);
+    }
+    drop(mapped);
+    readback.unmap();
+
+    if let Some(parent) = out.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("create {}: {error}", parent.display()))?;
+    }
+    image::save_buffer_with_format(
+        out,
+        &rgba,
+        width,
+        height,
+        image::ColorType::Rgba8,
+        image::ImageFormat::Png,
+    )
+    .map_err(|error| format!("write {}: {error}", out.display()))?;
+    Ok(())
 }
 
 #[cfg(feature = "editor")]

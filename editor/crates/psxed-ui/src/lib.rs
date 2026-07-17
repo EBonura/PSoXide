@@ -307,6 +307,44 @@ enum ContentBrowserView {
     Debug,
 }
 
+/// An inspector edit that already owns one undo snapshot. Pointer drags and
+/// focused keyboard edits keep this alive across frames so a single gesture is
+/// a single Ctrl/Cmd+Z step.
+#[derive(Debug, Clone, Copy)]
+struct InspectorUndoTransaction {
+    focused_widget: Option<egui::Id>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct InspectorUndoInput {
+    pointer_down: bool,
+    wants_keyboard: bool,
+    focused_widget: Option<egui::Id>,
+}
+
+impl InspectorUndoInput {
+    fn from_context(ctx: &egui::Context) -> Self {
+        Self {
+            pointer_down: ctx.input(|input| input.pointer.any_down()),
+            wants_keyboard: ctx.wants_keyboard_input(),
+            focused_widget: ctx.memory(|memory| memory.focused()),
+        }
+    }
+}
+
+/// Hover-only pointer movement cannot change an inspector value. Avoid cloning
+/// the full project on those frames; clicks, drags, wheel input, keyboard/IME,
+/// focus events, and accessibility input still pass through this guard.
+fn inspector_has_edit_input(ctx: &egui::Context) -> bool {
+    ctx.input(|input| {
+        input.pointer.any_down()
+            || input
+                .events
+                .iter()
+                .any(|event| !matches!(event, egui::Event::PointerMoved(_)))
+    })
+}
+
 /// Embedded editor workspace state.
 pub struct EditorWorkspace {
     project: ProjectDocument,
@@ -426,6 +464,7 @@ pub struct EditorWorkspace {
     hidden_ui_nodes: HashSet<(UiSceneId, UiNodeId)>,
     ui_node_clipboard: Option<UiNodeClipboard>,
     history: UndoStack,
+    inspector_undo_transaction: Option<InspectorUndoTransaction>,
     scene_filter: String,
     file_filter: String,
     left_dock_scene_fraction: f32,
@@ -481,10 +520,6 @@ pub struct EditorWorkspace {
     content_browser_view: ContentBrowserView,
     viewport_pan: Vec2,
     viewport_zoom: f32,
-    /// While a 3D rotate-drag is held: the world-space fulcrum picked
-    /// under the cursor at drag start (falls back to the orbit
-    /// target). Transient, never persisted.
-    orbit_rotate_pivot: Option<[i32; 3]>,
     last_viewport_size: Vec2,
     /// 3D viewport camera rig (orbit + free-fly params, mode, and all the
     /// camera math). Orbit preserves the original target/radius camera; Free
@@ -510,7 +545,6 @@ pub struct EditorWorkspace {
     animation_viewer_preview_texture: Option<egui::TextureHandle>,
     material_lab: MaterialLabState,
     material_lab_preview_texture: Option<egui::TextureHandle>,
-    material_lab_overlay_preview_texture: Option<egui::TextureHandle>,
     texture_import_dialog: TextureImportDialog,
     model_import_dialog: ModelImportDialog,
     import_retired_textures: Vec<(u8, egui::TextureHandle)>,
@@ -1646,72 +1680,6 @@ impl CameraRig {
         }
     }
 
-    /// Drag-rotate the orbit camera rigidly around `pivot` instead of
-    /// its own target: camera and target rotate together about the
-    /// pivot, so the content under the cursor stays the fulcrum and
-    /// the view turns with the drag (no recentring snap). Free mode
-    /// has no pivot semantics and falls back to [`Self::rotate`].
-    ///
-    /// Math: `cam = target + offset(yaw, pitch)` (see
-    /// `orbit_camera_position_f32`), and stepping yaw/pitch applies
-    /// `RotAxis(pitch_axis(yaw'), dp) * RotY(dy)` to the offset, where
-    /// `pitch_axis(y) = (cos y, 0, -sin y)`. Applying the SAME
-    /// rotation to `target - pivot` therefore moves the camera on a
-    /// rigid rotation about the pivot.
-    fn rotate_about(&mut self, delta: Vec2, pivot: [i32; 3]) {
-        if self.mode != ViewportCameraMode::Orbit {
-            self.rotate(delta);
-            return;
-        }
-        const CAMERA_DRAG_STEP: f32 = 4.0;
-        let yaw_delta = (delta.x * CAMERA_DRAG_STEP) as i16;
-        let pitch_delta = (delta.y * CAMERA_DRAG_STEP) as i32;
-        let old_pitch = self.pitch;
-        self.yaw = self.yaw.wrapping_add(yaw_delta as u16);
-        self.pitch = add_q12_signed_clamped(old_pitch, pitch_delta, -960, 960);
-
-        let q12_signed = |v: u16| -> i32 {
-            let raw = (v & 0x0fff) as i32;
-            if raw >= 2048 {
-                raw - 4096
-            } else {
-                raw
-            }
-        };
-        let to_rad = std::f32::consts::TAU / 4096.0;
-        let dy = yaw_delta as f32 * to_rad;
-        // Use the APPLIED pitch delta so a clamped pitch cannot shear
-        // the target away from the rigid rotation.
-        let dp = (q12_signed(self.pitch) - q12_signed(old_pitch)) as f32 * to_rad;
-
-        let mut v = [
-            (self.target[0] - pivot[0]) as f32,
-            (self.target[1] - pivot[1]) as f32,
-            (self.target[2] - pivot[2]) as f32,
-        ];
-        let (sy, cy) = dy.sin_cos();
-        v = [v[0] * cy + v[2] * sy, v[1], -v[0] * sy + v[2] * cy];
-        let yaw_rad = (self.yaw & 0x0fff) as f32 * to_rad;
-        let axis = [yaw_rad.cos(), 0.0, -yaw_rad.sin()];
-        let (sp, cp) = dp.sin_cos();
-        let cross = [
-            axis[1] * v[2] - axis[2] * v[1],
-            axis[2] * v[0] - axis[0] * v[2],
-            axis[0] * v[1] - axis[1] * v[0],
-        ];
-        let dot = axis[0] * v[0] + axis[1] * v[1] + axis[2] * v[2];
-        v = [
-            v[0] * cp + cross[0] * sp + axis[0] * dot * (1.0 - cp),
-            v[1] * cp + cross[1] * sp + axis[1] * dot * (1.0 - cp),
-            v[2] * cp + cross[2] * sp + axis[2] * dot * (1.0 - cp),
-        ];
-        self.target = [
-            pivot[0] + round_to_i32(v[0]),
-            pivot[1] + round_to_i32(v[1]),
-            pivot[2] + round_to_i32(v[2]),
-        ];
-    }
-
     /// Screen-space pan: dolly the orbit target, or slide the free camera.
     fn pan(&mut self, delta: Vec2, panel_size: Vec2) {
         let world_delta = viewport_3d_pan_delta(self.camera(), panel_size, delta);
@@ -2222,6 +2190,12 @@ impl EditorWorkspace {
         self.active_workspace.to_project()
     }
 
+    /// Current editor status text, exposed to deterministic headless UI
+    /// validation so scripted input can assert the action it triggered.
+    pub fn status_text(&self) -> &str {
+        &self.status
+    }
+
     /// Model currently focused in Animation Studio.
     pub const fn animation_viewer_model(&self) -> Option<ResourceId> {
         self.animation_viewer.selected_model()
@@ -2377,6 +2351,7 @@ impl EditorWorkspace {
             hidden_ui_nodes: HashSet::new(),
             ui_node_clipboard: None,
             history: UndoStack::default(),
+            inspector_undo_transaction: None,
             scene_filter: String::new(),
             file_filter: String::new(),
             left_dock_scene_fraction: LEFT_DOCK_DEFAULT_SCENE_FRACTION,
@@ -2414,7 +2389,6 @@ impl EditorWorkspace {
             content_browser_view: ContentBrowserView::Resources,
             viewport_pan: Vec2::ZERO,
             viewport_zoom: DEFAULT_VIEWPORT_ZOOM,
-            orbit_rotate_pivot: None,
             last_viewport_size: Vec2::new(1280.0, 720.0),
             camera_rig: CameraRig {
                 mode: camera_mode,
@@ -2436,7 +2410,6 @@ impl EditorWorkspace {
             animation_viewer_preview_texture: None,
             material_lab: MaterialLabState::default(),
             material_lab_preview_texture: None,
-            material_lab_overlay_preview_texture: None,
             texture_import_dialog: TextureImportDialog::default(),
             model_import_dialog: ModelImportDialog::default(),
             import_retired_textures: Vec::new(),
@@ -2847,34 +2820,6 @@ impl EditorWorkspace {
         self.camera_rig.radius = frame_radius_for_3d_bounds(half);
         if self.camera_rig.mode == ViewportCameraMode::Free {
             self.camera_rig.sync_free_to_orbit();
-        }
-    }
-
-    /// Repoint the 3D viewport at `center` without changing the
-    /// user's current distance from the focus. This is the behavior
-    /// expected from the `.` shortcut while inspecting nearby props.
-    fn focus_3d_on_point_preserving_distance(&mut self, center: [f32; 3]) {
-        let target = [
-            round_to_i32(center[0]),
-            round_to_i32(center[1]),
-            round_to_i32(center[2]),
-        ];
-        match self.camera_rig.mode {
-            ViewportCameraMode::Orbit => {
-                self.camera_rig.target = target;
-            }
-            ViewportCameraMode::Free => {
-                self.camera_rig.target = target;
-                self.camera_rig.radius =
-                    distance_i32(self.camera_rig.free_position, target).clamp(512, 262_144);
-                if let Some((yaw, pitch)) =
-                    camera_angles_to_look_at(self.camera_rig.free_position, target)
-                {
-                    self.camera_rig.free_yaw = yaw;
-                    self.camera_rig.free_pitch = pitch;
-                }
-                self.camera_rig.free_initialized = true;
-            }
         }
     }
 

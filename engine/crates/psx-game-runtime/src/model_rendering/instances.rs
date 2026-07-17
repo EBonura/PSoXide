@@ -409,12 +409,16 @@ pub fn draw_model_instances<
             continue;
         }
 
-        let (base_material, cull_mode, uv_mapping) = model_material_and_cull(
+        let Some((base_material, cull_mode, uv_mapping)) = model_material_and_cull(
             runtime_model,
             inst.material_override,
             room_reflection_probe,
+            elapsed_tick,
+            video_hz,
             resolve_override_texture,
-        );
+        ) else {
+            continue;
+        };
         let material = lighting.shade_model_material(origin, base_material);
         let model_options = options
             .with_depth_policy(DepthPolicy::Average)
@@ -430,7 +434,13 @@ pub fn draw_model_instances<
             .material_override
             .and_then(|material| material.secondary_layer)
             .and_then(|layer| {
-                model_secondary_layer(layer, elapsed_tick, video_hz, resolve_override_texture)
+                model_secondary_layer(
+                    layer,
+                    elapsed_tick,
+                    video_hz,
+                    room_reflection_probe,
+                    resolve_override_texture,
+                )
             })
             .map(|mut layer| {
                 layer.material = lighting.shade_model_material(origin, layer.material);

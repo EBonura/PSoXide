@@ -25,12 +25,16 @@ pub const UNDO_CAPACITY: usize = 64;
 pub(crate) struct UndoStack {
     timeline: VecDeque<ProjectDocument>,
     cursor: usize,
+    /// Monotonic marker for callers that need to know whether a nested
+    /// operation explicitly handled history (including a deliberate clear).
+    epoch: u64,
 }
 
 impl UndoStack {
     /// Push the *pre-mutation* `snapshot` onto the history timeline
     /// and clear future entries -- any new edit forks history.
     pub(crate) fn record(&mut self, snapshot: ProjectDocument) -> bool {
+        self.bump_epoch();
         if self.cursor < self.timeline.len() {
             self.timeline.truncate(self.cursor);
         }
@@ -50,14 +54,23 @@ impl UndoStack {
     /// operations because snapshots only capture project metadata,
     /// not file moves that have already happened on disk.
     pub(crate) fn clear(&mut self) {
+        self.bump_epoch();
         self.timeline.clear();
         self.cursor = 0;
+    }
+
+    /// Changes whenever a history operation is explicitly attempted. The
+    /// inspector uses this to avoid adding a second automatic snapshot around
+    /// actions that already recorded themselves or intentionally cleared undo.
+    pub(crate) fn epoch(&self) -> u64 {
+        self.epoch
     }
 
     /// Move the cursor one visible step backward. The live
     /// `current` document is inserted where the restored state came
     /// from, so redo remains the exact inverse operation.
     pub(crate) fn undo(&mut self, mut current: ProjectDocument) -> Option<ProjectDocument> {
+        self.bump_epoch();
         while self.cursor > 0 {
             let index = self.cursor - 1;
             let prev = self.timeline.remove(index)?;
@@ -74,6 +87,7 @@ impl UndoStack {
     /// Inverse of [`Self::undo`]: move one visible step forward in
     /// history if the user previously undid something.
     pub(crate) fn redo(&mut self, mut current: ProjectDocument) -> Option<ProjectDocument> {
+        self.bump_epoch();
         while self.cursor < self.timeline.len() {
             let index = self.cursor;
             let next = self.timeline.remove(index)?;
@@ -85,6 +99,10 @@ impl UndoStack {
             current = next;
         }
         None
+    }
+
+    fn bump_epoch(&mut self) {
+        self.epoch = self.epoch.wrapping_add(1);
     }
 }
 
