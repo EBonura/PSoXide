@@ -632,6 +632,8 @@ pub struct LevelCameraRecord {
     pub height: i32,
     /// Look-at height above the player origin.
     pub target_height: i32,
+    /// Additional lock-on camera elevation as a percentage of camera height.
+    pub lock_rise_percent: u8,
     /// Minimum camera origin height above the sampled floor.
     pub min_floor_clearance: i32,
     /// Manual orbit input speed level. Higher values turn faster.
@@ -650,6 +652,7 @@ impl LevelCameraRecord {
         distance: 2_700,
         height: 1_280,
         target_height: 640,
+        lock_rise_percent: 25,
         min_floor_clearance: 64,
         orbit_speed_level: 5,
         position_lag_shift: 2,

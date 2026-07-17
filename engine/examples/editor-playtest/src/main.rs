@@ -22,7 +22,7 @@
 //! Controls (free-orbit toggled with SELECT):
 //! * Left stick / D-pad -- camera-relative movement.
 //! * Right stick        -- camera yaw; vertical adjusts camera height.
-//! * CIRCLE tap        -- roll / backstep.
+//! * CIRCLE tap        -- directional roll; lock-on remains active.
 //! * CIRCLE hold       -- run while moving.
 //! * R1                -- light attack.
 //! * R2                -- heavy attack.
@@ -68,7 +68,7 @@ use psx_engine::{
     SimTick, TexturedModelRenderFace, ThirdPersonCameraConfig, ThirdPersonCameraInput,
     ThirdPersonCameraState, ThirdPersonCameraTarget, VideoHz, VisualPacing, WorldCamera,
     WorldProjection, WorldRenderMaterial, WorldRenderPass, WorldSurfaceOptions, WorldTriCommand,
-    WorldVertex, Q12, prewarm_indexed_cached_room_quads,
+    WorldVertex, Q12, horizontal_view_coordinates, prewarm_indexed_cached_room_quads,
 };
 #[cfg(all(
     feature = "world-grid-visible",
@@ -387,11 +387,13 @@ struct Playtest {
     /// True when the latest input frame is manually rotating the camera.
     camera_turning_last_tick: bool,
     /// Index into `MODEL_INSTANCES` for the current lock-on target.
-    /// Player-controlled characters are consumed by the player path,
-    /// so remaining placed model instances are targetable actors for
-    /// this first gameplay pass.
+    /// Only live gameplay entities participate; scenery model instances
+    /// never enter the combat target set.
     lock_target: Option<usize>,
     lock_switch_stick_held: bool,
+    /// Consecutive ticks where the hard-lock target is outside break range.
+    /// Dead/despawned targets still release immediately.
+    lock_invalid_ticks: u8,
     /// Automatic camera-only target. Suppressed after strong
     /// manual camera input until the player leaves target range.
     soft_lock_target: Option<usize>,
