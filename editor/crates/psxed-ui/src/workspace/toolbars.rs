@@ -25,16 +25,13 @@ impl EditorWorkspace {
                         }
 
                         if self.active_workspace == WorkspaceView::Animation {
-                            let action = model_animation_viewer::draw_model_animation_viewer(
+                            model_animation_viewer::draw_model_animation_viewer(
                                 ui,
                                 &mut self.project,
                                 &self.project_dir,
                                 &mut self.animation_viewer,
                                 &mut self.animation_viewer_preview_texture,
                             );
-                            if let Some(action) = action {
-                                self.handle_animation_viewer_action(action);
-                            }
                             return;
                         }
 
@@ -242,39 +239,37 @@ impl EditorWorkspace {
     pub(crate) fn draw_viewport_header_toolbar(&mut self, ui: &mut egui::Ui) {
         egui::Frame::new()
             .fill(STUDIO_PANEL_HEADER)
-            .inner_margin(egui::Margin::symmetric(8, 5))
+            .inner_margin(egui::Margin::symmetric(8, 3))
             .show(ui, |ui| {
-                ui.set_min_height(32.0);
-                ui.spacing_mut().item_spacing = Vec2::new(5.0, 4.0);
-                ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = Vec2::new(4.0, 3.0);
+                ui.horizontal(|ui| {
                     self.draw_workspace_tabs(ui);
-                    ui.separator();
-                    match self.active_workspace {
-                        WorkspaceView::Animation => {
-                            ui.label(
-                                RichText::new("Model clips, rig playback, and root motion")
-                                    .small()
-                                    .color(STUDIO_TEXT_WEAK),
-                            );
+                });
+                ui.separator();
+                ui.horizontal(|ui| match self.active_workspace {
+                    WorkspaceView::Animation => {
+                        let action = model_animation_viewer::draw_model_animation_viewer_toolbar(
+                            ui,
+                            &mut self.project,
+                            &self.project_dir,
+                            &mut self.animation_viewer,
+                            &mut self.animation_viewer_preview_texture,
+                        );
+                        if let Some(action) = action {
+                            self.handle_animation_viewer_action(action);
                         }
-                        WorkspaceView::Material => {
-                            ui.label(
-                                RichText::new(
-                                    "Texture sources, generated layers, and PS1 surface state",
-                                )
-                                .small()
-                                .color(STUDIO_TEXT_WEAK),
-                            );
-                        }
-                        _ => self.draw_viewport_toolbar(ui),
                     }
+                    WorkspaceView::Material => {
+                        self.draw_material_lab_toolbar(ui);
+                    }
+                    _ => self.draw_viewport_toolbar(ui),
                 });
             });
     }
 
-    /// Always-visible top-level workspaces. These used to be hidden behind
-    /// the first toolbar group; keeping them as labelled peers makes the
-    /// editor's 3D, 2D, Animation, and Material contexts immediately legible.
+    /// Always-visible top-level workspaces. Their row stays separate from
+    /// each workspace's tools so every mode has the same selector -> toolbar
+    /// -> content rhythm.
     pub(crate) fn draw_workspace_tabs(&mut self, ui: &mut egui::Ui) {
         for view in [
             WorkspaceView::Room,
@@ -287,7 +282,7 @@ impl EditorWorkspace {
                 .add(
                     egui::Button::new(icons::label(view.icon(), view.label()))
                         .selected(selected)
-                        .min_size(Vec2::new(86.0, 25.0)),
+                        .min_size(Vec2::new(82.0, 23.0)),
                 )
                 .on_hover_text(format!("Open the {} workspace", view.label()));
             if response.clicked() && !selected {
