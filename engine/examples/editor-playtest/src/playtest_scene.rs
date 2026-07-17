@@ -174,6 +174,7 @@ impl Scene for Playtest {
             // preload may have overwritten.
             retire_menu_ui_cache();
             prebuilt_quads_arena().reset_claims();
+            self.prewarm_active_room_window_quads();
         }
         #[cfg(not(feature = "cd-stream-bench"))]
         let _ = scene;

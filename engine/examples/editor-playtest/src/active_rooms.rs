@@ -258,6 +258,15 @@ impl Playtest {
                     if !all_resolved {
                         unresolved = true;
                     }
+                    let materials_changed =
+                        active_room_materials(&active) != &materials[..material_count];
+                    if materials_changed {
+                        prewarm_active_room_quads(
+                            active.index,
+                            active.surface_cache,
+                            &materials[..material_count],
+                        );
+                    }
                     #[cfg(feature = "cd-stream-bench")]
                     store_room_materials(active.stream_slot, materials, material_count);
                     #[cfg(not(feature = "cd-stream-bench"))]
