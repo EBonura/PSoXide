@@ -280,11 +280,31 @@ impl<
             .min(MAX_ACTIVE_ROOMS)
     }
 
-    /// Whether the latest traversal draws `_index`.
-    pub fn draws_room(&self, _index: RoomIndex) -> bool {
-        // Reachability draw: callers pass rooms from the active camera-ring
-        // window, so every active room is drawable. The room renderer still
-        // runs projection, screen, near-plane, and backface checks per surface.
-        true
+    /// Whether the latest traversal draws `index`.
+    pub fn draws_room(&self, index: RoomIndex) -> bool {
+        // Residency and visibility are different lifetimes: the active window
+        // keeps neighbouring rooms loaded for seamless traversal, while the
+        // portal walk says which of those rooms can contribute pixels now.
+        // Always retain the traversal root as a fail-safe during refreshes.
+        index == self.root || self.result.contains_room(index)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    type TestRoomVisibility = RoomVisibility<4, 4, 4, 4>;
+
+    #[test]
+    fn draw_visibility_does_not_expand_to_the_resident_room_window() {
+        let mut visibility = TestRoomVisibility::EMPTY;
+        visibility.root = RoomIndex::new(2);
+
+        assert!(visibility.draws_room(RoomIndex::new(2)));
+        assert!(
+            !visibility.draws_room(RoomIndex::new(3)),
+            "a resident neighbour is not drawable until the portal walk admits it"
+        );
     }
 }

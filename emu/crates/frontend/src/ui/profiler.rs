@@ -25,6 +25,7 @@ const BUDGET_30_MS: f32 = 1000.0 / 30.0;
 const PSX_MASTER_CLOCK_HZ: f32 = 33_868_800.0;
 const PSX_CYCLES_PER_MS: f32 = PSX_MASTER_CLOCK_HZ / 1000.0;
 const NTSC_CPU_CYCLES_PER_VBLANK: f32 = PSX_MASTER_CLOCK_HZ / 60.0;
+const VISUAL_FRAME_INTERVAL_CAP: usize = 4;
 const GUEST_RENDER_BREAKDOWN_STAGES: &[(u16, &str)] = &[
     (stage::SKY, "sky"),
     (stage::FAR_VISTA, "far vista"),
@@ -268,6 +269,14 @@ pub struct GuestRuntimeProfile {
     pub counter_max_values: [f32; COUNTER_COUNT],
     /// Last value observed per guest counter id.
     pub counter_latest_values: [u32; COUNTER_COUNT],
+    /// Guest cycles between consecutive paced visual-frame markers.
+    visual_frame_interval_cycles: [f32; VISUAL_FRAME_INTERVAL_CAP],
+    /// Number of populated entries in `visual_frame_interval_cycles`.
+    visual_frame_interval_count: u8,
+    /// Sum of all measured visual-frame intervals represented by this profile.
+    visual_frame_interval_cycle_total: f32,
+    /// Number of measured visual-frame intervals represented by this profile.
+    visual_frame_interval_hits: f32,
 }
 
 impl Default for GuestRuntimeProfile {
@@ -282,11 +291,29 @@ impl Default for GuestRuntimeProfile {
             counters: [0.0; COUNTER_COUNT],
             counter_max_values: [0.0; COUNTER_COUNT],
             counter_latest_values: [0; COUNTER_COUNT],
+            visual_frame_interval_cycles: [0.0; VISUAL_FRAME_INTERVAL_CAP],
+            visual_frame_interval_count: 0,
+            visual_frame_interval_cycle_total: 0.0,
+            visual_frame_interval_hits: 0.0,
         }
     }
 }
 
 impl GuestRuntimeProfile {
+    fn append_visual_frame_interval(&mut self, cycles: f32) {
+        if !cycles.is_finite() || cycles <= 0.0 {
+            return;
+        }
+        let count = self.visual_frame_interval_count as usize;
+        if count < VISUAL_FRAME_INTERVAL_CAP {
+            self.visual_frame_interval_cycles[count] = cycles;
+            self.visual_frame_interval_count += 1;
+        } else {
+            self.visual_frame_interval_cycles.rotate_left(1);
+            self.visual_frame_interval_cycles[VISUAL_FRAME_INTERVAL_CAP - 1] = cycles;
+        }
+    }
+
     fn accumulate(&mut self, other: Self) {
         self.frames += other.frames;
         let mut i = 0;
@@ -316,6 +343,15 @@ impl GuestRuntimeProfile {
             }
             j += 1;
         }
+        self.visual_frame_interval_cycle_total += other.visual_frame_interval_cycle_total;
+        self.visual_frame_interval_hits += other.visual_frame_interval_hits;
+        for &cycles in other
+            .visual_frame_interval_cycles
+            .iter()
+            .take(other.visual_frame_interval_count as usize)
+        {
+            self.append_visual_frame_interval(cycles);
+        }
     }
 
     fn divide(&mut self, n: f32) {
@@ -337,6 +373,8 @@ impl GuestRuntimeProfile {
             self.counters[j] /= n;
             j += 1;
         }
+        self.visual_frame_interval_cycle_total /= n;
+        self.visual_frame_interval_hits /= n;
     }
 
     fn has_data(self) -> bool {
@@ -411,6 +449,26 @@ impl GuestRuntimeProfile {
             || self
                 .counter_total(emulator_core::telemetry::counter::VISUAL_DEADLINE_MISSES as usize)
                 > 0.0
+    }
+
+    fn visual_frame_interval_cycles(self) -> Option<f32> {
+        if self.visual_frame_interval_hits > 0.0 {
+            Some(self.visual_frame_interval_cycle_total / self.visual_frame_interval_hits)
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn visual_frame_intervals_ms(self) -> ([f32; VISUAL_FRAME_INTERVAL_CAP], u8) {
+        let mut intervals_ms = [0.0; VISUAL_FRAME_INTERVAL_CAP];
+        for (interval_ms, &cycles) in intervals_ms.iter_mut().zip(
+            self.visual_frame_interval_cycles
+                .iter()
+                .take(self.visual_frame_interval_count as usize),
+        ) {
+            *interval_ms = cycles / PSX_CYCLES_PER_MS;
+        }
+        (intervals_ms, self.visual_frame_interval_count)
     }
 
     fn visual_interval_vblanks(self) -> f32 {
@@ -675,13 +733,9 @@ impl FrameProfileSample {
     }
 
     pub fn guest_visual_frame_hz(self) -> Option<f32> {
-        if !self.guest.has_pacing_data() || self.host_dt_ms <= 0.0 {
-            return None;
-        }
-        let visual_frames = self
-            .guest
-            .counter_total(emulator_core::telemetry::counter::VISUAL_FRAMES as usize);
-        Some(visual_frames * 1000.0 / self.host_dt_ms)
+        self.guest
+            .visual_frame_interval_cycles()
+            .map(|cycles| PSX_MASTER_CLOCK_HZ / cycles)
     }
 
     pub fn guest_visual_frame_count(self) -> f32 {
@@ -764,6 +818,7 @@ pub struct FrameProfiler {
     log_accum_ms: f32,
     guest_stage_starts: [Option<u64>; STAGE_COUNT],
     guest_task_starts: [Option<u64>; TASK_COUNT],
+    guest_last_visual_frame_cycle: Option<u64>,
 }
 
 impl Default for FrameProfiler {
@@ -780,6 +835,7 @@ impl Default for FrameProfiler {
             log_accum_ms: 0.0,
             guest_stage_starts: [None; STAGE_COUNT],
             guest_task_starts: [None; TASK_COUNT],
+            guest_last_visual_frame_cycle: None,
         }
     }
 }
@@ -881,6 +937,7 @@ impl FrameProfiler {
         self.log_accum_ms = 0.0;
         self.guest_stage_starts = [None; STAGE_COUNT];
         self.guest_task_starts = [None; TASK_COUNT];
+        self.guest_last_visual_frame_cycle = None;
     }
 
     /// Number of samples currently retained in the rolling history.
@@ -942,6 +999,21 @@ impl FrameProfiler {
                     out.task_max_cycles[idx] = out.task_max_cycles[idx].max(cycles);
                 }
                 emulator_core::telemetry::GuestTelemetryKind::Counter => {
+                    if event.id == counter::VISUAL_FRAMES && event.value > 0 {
+                        if let Some(cycles) = self
+                            .guest_last_visual_frame_cycle
+                            .and_then(|previous| event.cycles.checked_sub(previous))
+                            .filter(|&cycles| cycles > 0)
+                        {
+                            let cycles_per_frame = cycles as f32 / event.value as f32;
+                            out.visual_frame_interval_cycle_total += cycles as f32;
+                            out.visual_frame_interval_hits += event.value as f32;
+                            for _ in 0..event.value.min(VISUAL_FRAME_INTERVAL_CAP as u32) {
+                                out.append_visual_frame_interval(cycles_per_frame);
+                            }
+                        }
+                        self.guest_last_visual_frame_cycle = Some(event.cycles);
+                    }
                     if let Some(counter) = out.counters.get_mut(event.id as usize) {
                         *counter += event.value as f32;
                     }
@@ -1780,6 +1852,7 @@ mod tests {
             log_accum_ms: 0.0,
             guest_stage_starts: [None; STAGE_COUNT],
             guest_task_starts: [None; TASK_COUNT],
+            guest_last_visual_frame_cycle: None,
         };
         profiler.record(FrameProfileSample {
             total_ms: 10.0,
@@ -2032,15 +2105,28 @@ mod tests {
     }
 
     #[test]
-    fn visual_frame_hz_uses_guest_visual_counter() {
-        let mut sample = FrameProfileSample {
-            host_dt_ms: 50.0,
+    fn visual_frame_hz_uses_guest_cycle_intervals() {
+        let mut profiler = FrameProfiler::default();
+        let visual_frame = |cycles| GuestTelemetryEvent {
+            cycles,
+            kind: emulator_core::telemetry::GuestTelemetryKind::Counter,
+            id: counter::VISUAL_FRAMES,
+            value: 1,
+        };
+
+        let first = profiler.consume_guest_events(&[visual_frame(100)]);
+        let second = profiler.consume_guest_events(&[visual_frame(1_142_572)]);
+        let sample = FrameProfileSample {
+            host_dt_ms: 1.0,
+            guest: second,
             ..FrameProfileSample::default()
         };
-        sample.guest.counters[emulator_core::telemetry::counter::SIM_TICKS as usize] = 3.0;
-        sample.guest.counters[emulator_core::telemetry::counter::VISUAL_FRAMES as usize] = 1.0;
 
-        assert_eq!(sample.guest_visual_frame_hz(), Some(20.0));
+        assert_eq!(first.visual_frame_interval_hits, 0.0);
+        assert!((sample.guest_visual_frame_hz().unwrap() - 29.645).abs() < 0.001);
+        let (intervals_ms, count) = second.visual_frame_intervals_ms();
+        assert_eq!(count, 1);
+        assert!((intervals_ms[0] - 33.732).abs() < 0.001);
     }
 
     #[test]

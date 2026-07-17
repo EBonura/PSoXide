@@ -92,8 +92,8 @@ pub use lighting::{
     PointLightSample, Rgb8, LIGHTING_MAX, LIGHTING_NEUTRAL,
 };
 pub use movement::{
-    camera_relative_move, camera_relative_move_axes, camera_relative_move_q12, CameraRelativeMove,
-    InputAxis, InputAxisProfile, InputVector,
+    camera_relative_move, camera_relative_move_axes, camera_relative_move_q12, yaw_to_point,
+    CameraRelativeMove, InputAxis, InputAxisProfile, InputVector,
 };
 pub use render::{
     CameraDepth, DepthBand, DepthRange, DepthSlot, GpuPacket, OtDepth, OtFrame, OtSubmitInFlight,
@@ -118,7 +118,7 @@ pub use scheduler::{
 // arguments (instance rotation, joint transforms) without pulling in
 // `psx-gte` directly.
 pub use psx_gte::math::Mat3I16;
-pub use scene::{Ctx, Scene, SceneStateRef};
+pub use scene::{Ctx, RenderSubmission, Scene, SceneStateRef};
 pub use third_person_camera::{
     ThirdPersonCameraConfig, ThirdPersonCameraFrame, ThirdPersonCameraInput,
     ThirdPersonCameraState, ThirdPersonCameraTarget,
@@ -137,9 +137,9 @@ pub use world_render::{
     draw_indexed_cached_room_vertex_lit_all_cells,
     draw_indexed_cached_room_vertex_lit_visible_cells, draw_room, draw_room_lit,
     draw_room_lit_grid_visible, draw_room_vertex_lit, draw_room_vertex_lit_grid_visible,
-    draw_room_vertex_lit_visible_cells, CachedRoomCell, CachedRoomDepthMode,
-    CachedRoomSubdivisionMode, CachedRoomSurface, CachedRoomSurfaceCacheStats, GridVisibility,
-    GridVisibilityStats, GridVisibleCell, NoWorldSurfaceLighting, SurfaceSidedness,
+    draw_room_vertex_lit_visible_cells, prewarm_indexed_cached_room_quads, CachedRoomCell,
+    CachedRoomDepthMode, CachedRoomSubdivisionMode, CachedRoomSurface, CachedRoomSurfaceCacheStats,
+    GridVisibility, GridVisibilityStats, GridVisibleCell, NoWorldSurfaceLighting, SurfaceSidedness,
     WorldRenderMaterial, WorldSurfaceKind, WorldSurfaceLighting, WorldSurfaceSample,
 };
 

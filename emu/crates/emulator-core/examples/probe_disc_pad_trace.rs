@@ -13,6 +13,8 @@
 //!   or more masks for a fixed number of VBlanks starting at the given
 //!   VBlank count. Format per entry: `<mask>@<start_vblank>+<frames>`.
 //! - `PSOXIDE_VISIBLE_DUMP=/tmp/frame.ppm` dumps the final display frame.
+//! - `PSOXIDE_AUDIO_DUMP=/tmp/audio.wav` captures the raw 44.1 kHz SPU mix.
+//! - `PSOXIDE_FRAME_LOG=/tmp/frames.csv` logs every VBlank display hash.
 //! - `PSOXIDE_REQUIRE_CDDA=1` fails unless the run issued Play and mixed
 //!   audible CD-DA samples above `PSOXIDE_MIN_PEAK` (default 256).
 //! - `PSOXIDE_REQUIRE_CDROM_READS=1` fails unless the game read sectors
@@ -252,6 +254,8 @@ fn main() {
         .unwrap_or_default();
     let require_cdda = env_bool("PSOXIDE_REQUIRE_CDDA");
     let require_cdrom_reads = env_bool("PSOXIDE_REQUIRE_CDROM_READS");
+    let audio_dump = std::env::var("PSOXIDE_AUDIO_DUMP").ok().map(PathBuf::from);
+    let frame_log = std::env::var("PSOXIDE_FRAME_LOG").ok().map(PathBuf::from);
     let min_peak = std::env::var("PSOXIDE_MIN_PEAK")
         .ok()
         .and_then(|s| s.parse::<u16>().ok())
@@ -275,15 +279,28 @@ fn main() {
     bus.cdrom.enable_command_log(128);
     bus.cdrom.enable_response_log(128);
     bus.attach_digital_pad_port1();
+    if let Ok(path) = std::env::var("PSOXIDE_MEMCARD") {
+        bus.attach_memcard_port1(std::fs::read(path).expect("memory card readable"));
+    }
 
     let mut audio_cycle_accum = 0u64;
     let mut audio_stats = AudioStats::default();
+    let mut audio_capture = audio_dump.as_ref().map(|_| Vec::new());
     let mut current_pad_mask = None;
     let mut pad_mask_changes = Vec::new();
     let (initial_display_hash, initial_display_width, initial_display_height, _) =
         bus.gpu.display_hash();
     let mut last_display_hash = initial_display_hash;
     let mut display_hash_changes = Vec::new();
+    let mut frame_samples = frame_log.as_ref().map(|_| {
+        vec![(
+            bus.irq().raise_counts()[0],
+            bus.cycles(),
+            initial_display_hash,
+            0u128,
+        )]
+    });
+    let mut frame_wall_start = std::time::Instant::now();
     push_display_hash_change(
         &mut display_hash_changes,
         DisplayHashChange {
@@ -320,12 +337,21 @@ fn main() {
         audio_cycle_accum %= spu::SAMPLE_CYCLES;
         if sample_count != 0 {
             bus.run_spu_samples(sample_count);
-            audio_stats.add_samples(&bus.spu.drain_audio());
+            let samples = bus.spu.drain_audio();
+            audio_stats.add_samples(&samples);
+            if let Some(capture) = audio_capture.as_mut() {
+                capture.extend(samples);
+            }
         }
         let vblank = bus.irq().raise_counts()[0];
         if vblank != last_sampled_vblank {
             last_sampled_vblank = vblank;
             let (hash, width, height, _) = bus.gpu.display_hash();
+            if let Some(samples) = frame_samples.as_mut() {
+                let wall_us = frame_wall_start.elapsed().as_micros();
+                frame_wall_start = std::time::Instant::now();
+                samples.push((vblank, bus.cycles(), hash, wall_us));
+            }
             if hash != last_display_hash {
                 last_display_hash = hash;
                 push_display_hash_change(
@@ -360,6 +386,27 @@ fn main() {
         dump_visible_ppm(&bus, &path).expect("visible dump");
         println!("\nvisible dump: {path}");
     }
+    if let (Some(path), Some(samples)) = (audio_dump.as_ref(), audio_capture.as_ref()) {
+        write_wav_s16_stereo(path, samples).expect("audio dump");
+        println!(
+            "\naudio dump: {} ({} stereo samples, {:.2}s)",
+            path.display(),
+            samples.len(),
+            samples.len() as f64 / 44_100.0
+        );
+    }
+    if let (Some(path), Some(samples)) = (frame_log.as_ref(), frame_samples.as_ref()) {
+        let mut csv = String::from("vblank,cycle,display_hash,wall_us\n");
+        for &(vblank, cycle, hash, wall_us) in samples {
+            csv.push_str(&format!("{vblank},{cycle},0x{hash:016x},{wall_us}\n"));
+        }
+        std::fs::write(path, csv).expect("frame log");
+        println!(
+            "\nframe log: {} ({} VBlanks)",
+            path.display(),
+            samples.len()
+        );
+    }
 
     #[cfg(feature = "trace-mmio")]
     dump_trace(&bus);
@@ -393,6 +440,28 @@ fn main() {
     if failed {
         std::process::exit(1);
     }
+}
+
+fn write_wav_s16_stereo(path: &std::path::Path, samples: &[(i16, i16)]) -> std::io::Result<()> {
+    let data_len = (samples.len() as u32).saturating_mul(4);
+    let mut out = Vec::with_capacity(44 + data_len as usize);
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&(36 + data_len).to_le_bytes());
+    out.extend_from_slice(b"WAVEfmt ");
+    out.extend_from_slice(&16u32.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&2u16.to_le_bytes());
+    out.extend_from_slice(&44_100u32.to_le_bytes());
+    out.extend_from_slice(&(44_100u32 * 4).to_le_bytes());
+    out.extend_from_slice(&4u16.to_le_bytes());
+    out.extend_from_slice(&16u16.to_le_bytes());
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&data_len.to_le_bytes());
+    for &(left, right) in samples {
+        out.extend_from_slice(&left.to_le_bytes());
+        out.extend_from_slice(&right.to_le_bytes());
+    }
+    std::fs::write(path, out)
 }
 
 fn sync_pad_mask(

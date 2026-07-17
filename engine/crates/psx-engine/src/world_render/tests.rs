@@ -411,6 +411,213 @@ fn generated_cache_records_reconstruct_cached_samples() {
 }
 
 #[test]
+fn room_quad_prewarm_builds_baked_packet_payload_in_split_order() {
+    let colors = [(1, 2, 3), (4, 5, 6), (7, 8, 9), (10, 11, 12)];
+    let surface = CachedRoomSurface::new(
+        0,
+        [0, 1, 2, 3],
+        [(1, 2), (3, 4), (5, 6), (7, 8)],
+        WorldSurfaceSample {
+            kind: WorldSurfaceKind::Floor,
+            sx: 0,
+            sz: 0,
+            center: RoomPoint::ZERO,
+            baked_vertex_rgb: Some(colors),
+            ordinal: 0,
+        },
+        SPLIT_NE_SW,
+        WHOLE_QUAD_TRIANGLE_INDEX,
+    );
+    let split_triangle = CachedRoomSurface::new(
+        0,
+        [0, 1, 2, 3],
+        [(1, 2), (3, 4), (5, 6), (7, 8)],
+        WorldSurfaceSample {
+            kind: WorldSurfaceKind::Floor,
+            sx: 0,
+            sz: 0,
+            center: RoomPoint::ZERO,
+            baked_vertex_rgb: Some(colors),
+            ordinal: 0,
+        },
+        SPLIT_NE_SW,
+        0,
+    );
+    let material = WorldRenderMaterial::front(TextureMaterial::opaque(3, 4, (0x80, 0x80, 0x80)));
+    let mut quads = [QuadTexturedGouraud::EMPTY, QuadTexturedGouraud::EMPTY];
+    let mut valid = [0x55, 0x55];
+
+    let warmed = prewarm_indexed_cached_room_quads(
+        &[surface, split_triangle],
+        &[material],
+        &mut quads,
+        &mut valid,
+    );
+
+    assert_eq!(warmed, 1);
+    assert_eq!(valid[0], 0x80 | 0x02);
+    assert_eq!(valid[1], 0);
+    // NE-SW packet order is 0,1,3,2 for UVs and baked colours alike.
+    assert_eq!(quads[0].uv0_clut as u16, surface.uv_words[0]);
+    assert_eq!(quads[0].uv1_tpage as u16, surface.uv_words[1]);
+    assert_eq!(quads[0].uv2 as u16, surface.uv_words[3]);
+    assert_eq!(quads[0].uv3 as u16, surface.uv_words[2]);
+    assert_eq!(quads[0].color0_cmd & 0x00ff_ffff, 0x0003_0201);
+    assert_eq!(quads[0].color1, 0x0006_0504);
+    assert_eq!(quads[0].color2, 0x000c_0b0a);
+    assert_eq!(quads[0].color3, 0x0009_0807);
+}
+
+#[test]
+fn warmed_quad_culls_in_authored_order_before_gpu_packet_reordering() {
+    // Clockwise/back-facing NW-SE quad. Reordering this into GP0(3Ch) packet
+    // order flips only one of the packet triangles, so culling the packet
+    // vertices would incorrectly retain the authored back face.
+    let projected = [
+        ProjectedVertex::new(0, 0, 100),
+        ProjectedVertex::new(0, 10, 100),
+        ProjectedVertex::new(10, 10, 100),
+        ProjectedVertex::new(10, 0, 100),
+    ];
+    assert!(encoded_warmed_room_quad_backface_culled(projected, 0x80));
+    assert!(!encoded_warmed_room_quad_backface_culled(
+        projected,
+        0x80 | 0x04,
+    ));
+}
+
+#[test]
+fn cached_cell_visibility_sphere_tightly_and_conservatively_bounds_cell_aabb() {
+    let (flat_center, flat_radius) = cell_visibility_bounds(0, 0, 1664, 1152, 1152);
+    assert_eq!(flat_center, WorldVertex::new(832, 1152, 832));
+    assert_eq!(flat_radius, 1177);
+    assert!(
+        flat_radius < 2496,
+        "old loose radius should stay eliminated"
+    );
+    assert!(flat_radius.saturating_mul(flat_radius) >= 832 * 832 * 2);
+
+    let (odd_center, odd_radius) = cell_visibility_bounds(0, 0, 5, -5, 0);
+    assert_eq!(odd_center, WorldVertex::new(2, -2, 2));
+    // Integer midpoint truncation makes the far corner delta (3, 3, 3).
+    assert!(odd_radius.saturating_mul(odd_radius) >= 3 * 3 * 3);
+    assert_eq!(odd_radius, 6);
+}
+
+#[test]
+fn cell_frustum_sphere_test_includes_plane_normal_support() {
+    let camera = WorldCamera::from_basis(
+        WorldProjection::new(160, 120, 200, 40),
+        WorldVertex::new(0, 0, 0),
+        Q12::ZERO,
+        Q12::ONE,
+        Q12::ZERO,
+        Q12::ONE,
+    );
+    let options = WorldSurfaceOptions::new(
+        crate::DepthBand::whole(),
+        crate::DepthRange::new(40, 10_000),
+    );
+    let frustum = CellFrustum::new(&camera, options, 0);
+
+    // At z=1000 the right edge is x=800. A radius-100 sphere centered at
+    // x=900 still intersects the side plane; `radius*focal` alone incorrectly
+    // rejected it, while the full plane-normal support must retain it.
+    assert!(frustum.sphere_visible(ViewVertex::new(900, 0, 1000), 100));
+    assert!(!frustum.sphere_visible(ViewVertex::new(1100, 0, 1000), 100));
+}
+
+#[test]
+fn cell_frustum_aabb_rejects_flat_cell_retained_by_bounding_sphere() {
+    let camera = WorldCamera::from_basis(
+        WorldProjection::new(160, 120, 200, 40),
+        WorldVertex::ZERO,
+        Q12::ZERO,
+        Q12::ONE,
+        Q12::ZERO,
+        Q12::ONE,
+    );
+    let options = WorldSurfaceOptions::new(
+        crate::DepthBand::whole(),
+        crate::DepthRange::new(40, 10_000),
+    );
+    let frustum = CellFrustum::new(&camera, options, 0);
+    let view = ViewVertex::new(990, 0, 1_000);
+
+    // A sphere enclosing the 200x20x200 cell intersects the right plane, but
+    // the actual world-axis-aligned cell box is wholly outside it. The cached
+    // all-cells path can therefore skip projection and surface traversal
+    // without losing any potentially visible geometry.
+    assert!(frustum.sphere_visible_no_far(view, 142));
+    assert!(!frustum.cell_aabb_visible(view, 100, 10, 100));
+}
+
+#[test]
+fn cell_frustum_aabb_fast_paths_match_widened_reference() {
+    let camera = WorldCamera::from_basis(
+        WorldProjection::new(160, 120, 320, 40),
+        WorldVertex::ZERO,
+        Q12::from_raw(2896),
+        Q12::from_raw(2896),
+        Q12::from_raw(-1567),
+        Q12::from_raw(3785),
+    );
+    let options = WorldSurfaceOptions::new(
+        crate::DepthBand::whole(),
+        crate::DepthRange::new(40, 1_000_000),
+    );
+    let frustum = CellFrustum::new(&camera, options, 96);
+    let reference = |view: ViewVertex, half_x: i32, half_y: i32, half_z: i32| {
+        let half_x = half_x.max(0);
+        let half_y = half_y.max(0);
+        let half_z = half_z.max(0);
+        let extent_x = cell_aabb_extent_wide(frustum.view_abs[0], half_x, half_y, half_z);
+        let extent_y = cell_aabb_extent_wide(frustum.view_abs[1], half_x, half_y, half_z);
+        let extent_z = cell_aabb_extent_wide(frustum.view_abs[2], half_x, half_y, half_z);
+        if view.z < frustum.near.saturating_sub(extent_z)
+            || view.z > frustum.far.saturating_add(extent_z)
+        {
+            return false;
+        }
+        cell_aabb_lateral_visible_wide(
+            view,
+            view.z.max(frustum.near),
+            extent_x,
+            extent_y,
+            extent_z,
+            frustum.focal,
+            frustum.half_w,
+            frustum.half_h,
+        )
+    };
+
+    let views = [
+        ViewVertex::new(0, 0, 40),
+        ViewVertex::new(900, -300, 1_000),
+        ViewVertex::new(174_000, 174_000, 174_000),
+        ViewVertex::new(174_001, -174_001, 174_001),
+        ViewVertex::new(2_000_000, 500_000, 900_000),
+    ];
+    let half_extents = [
+        (0, 0, 0),
+        (832, 576, 832),
+        (174_000, 174_000, 174_000),
+        (174_001, 174_001, 174_001),
+        (i32::MAX, 2_000_000, 1_000_000),
+        (-1, -20, -300),
+    ];
+    for view in views {
+        for (half_x, half_y, half_z) in half_extents {
+            assert_eq!(
+                frustum.cell_aabb_visible(view, half_x, half_y, half_z),
+                reference(view, half_x, half_y, half_z),
+                "view={view:?}, half=({half_x},{half_y},{half_z})"
+            );
+        }
+    }
+}
+
+#[test]
 fn floor_depth_uses_farthest_projected_depth() {
     const ZERO: TriTextured = TriTextured::new(
         [(0, 0), (0, 0), (0, 0)],
@@ -435,8 +642,7 @@ fn floor_depth_uses_farthest_projected_depth() {
         Angle::ZERO,
     );
     let options =
-        WorldSurfaceOptions::new(crate::DepthBand::whole(), crate::DepthRange::new(0, 4096))
-            .with_textured_triangle_splitting(false);
+        WorldSurfaceOptions::new(crate::DepthBand::whole(), crate::DepthRange::new(0, 4096));
     emit_floor(
         0,
         0,
@@ -515,8 +721,10 @@ fn cached_full_ceiling_faces_playable_interior() {
     let cell_vertices = [0u16, 1, 2, 3];
     let mut projected_indices = [0u16; 4];
     let mut projected = [ProjectedVertex::new(0, 0, 0); 4];
-    let mut projected_ready = [false; 4];
-    let mut projected_depths = [0; 4];
+    // Simulate arbitrary bytes left by the menu/gameplay RAM overlay. The
+    // renderer must initialize only its tiny seen-bit prefix and never trust
+    // persistent per-vertex readiness state.
+    let mut projected_depths = [i32::MAX; 4];
     let mut accepted_cell_indices = [0u16; 1];
     let mut accepted_cell_depths = [0; 1];
 
@@ -527,7 +735,6 @@ fn cached_full_ceiling_faces_playable_interior() {
         &surfaces,
         &mut projected_indices,
         &mut projected,
-        &mut projected_ready,
         &mut projected_depths,
         &mut accepted_cell_indices,
         &mut accepted_cell_depths,
@@ -550,16 +757,93 @@ fn cached_full_ceiling_faces_playable_interior() {
         &mut pass,
     );
     assert_eq!(stats.surfaces_considered, 1);
-    assert_eq!(projected_ready, [false; 4]);
-    // A whole-quad surface with prepared (fixed-cell) depth now emits
-    // a single GP0(3Ch) quad packet instead of two triangle leaves;
-    // the rendered pixels are bit-identical (proved in the emulator
-    // GPU tests).
+    assert_eq!(projected_indices, [0, 1, 2, 3]);
+    assert!(projected_depths.iter().all(|&depth| depth != i32::MAX));
+    // A hardware-safe ceiling keeps the compact GP0(3Ch) quad path.
     assert_eq!(pass.command_len(), 1);
     drop(pass);
 
     let expected_depth = tile_camera_depth(&camera, visible_cells[0], 1024) + HORIZONTAL_DEPTH_BIAS;
     assert_eq!(commands[0].depth_raw(), expected_depth);
+}
+
+#[test]
+fn cached_surface_crossing_near_plane_keeps_visible_half() {
+    let mut ot_storage = psx_gpu::ot::OrderingTable::<8>::new();
+    let mut ot = crate::OtFrame::begin(&mut ot_storage);
+    let mut packet_scratch = crate::PrimitivePacketScratch::<16>::ZERO;
+    let mut triangles = crate::PrimitivePacketArena::new(&mut packet_scratch);
+    let mut commands = [crate::WorldTriCommand::EMPTY; 16];
+    let mut pass = WorldRenderPass::new(&mut ot, &mut commands);
+    let projection = WorldProjection::new(160, 120, 200, 40);
+    let camera = WorldCamera::from_basis(
+        projection,
+        WorldVertex::new(0, 0, 0),
+        crate::Q12::ZERO,
+        crate::Q12::ONE,
+        crate::Q12::ZERO,
+        crate::Q12::ONE,
+    );
+    let vertices = [
+        WorldVertex::new(-50, 0, 10),
+        WorldVertex::new(50, 0, 10),
+        WorldVertex::new(50, 0, -100),
+        WorldVertex::new(-50, 0, -100),
+    ];
+    let cells = [CachedRoomCell::new(0, 0, 0, 0, 128, 0, 1, 0, 4)];
+    let surface = CachedRoomSurface::new(
+        0,
+        [0, 1, 2, 3],
+        [(0, 0), (TILE_UV, 0), (TILE_UV, TILE_UV), (0, TILE_UV)],
+        WorldSurfaceSample {
+            kind: WorldSurfaceKind::Floor,
+            sx: 0,
+            sz: 0,
+            center: RoomPoint::new(0, 0, -45),
+            baked_vertex_rgb: None,
+            ordinal: 0,
+        },
+        SPLIT_NW_SE,
+        WHOLE_QUAD_TRIANGLE_INDEX,
+    );
+    let mut projected_indices = [0u16; 4];
+    let mut projected = [ProjectedVertex::default(); 4];
+    let mut projected_depths = [0; 4];
+    let mut accepted_cell_indices = [0u16; 1];
+    let mut accepted_cell_depths = [0; 1];
+
+    let stats = draw_indexed_cached_room_vertex_lit_visible_cells(
+        &cells,
+        &[0, 1, 2, 3],
+        &vertices,
+        &[surface],
+        &mut projected_indices,
+        &mut projected,
+        &mut projected_depths,
+        &mut accepted_cell_indices,
+        &mut accepted_cell_depths,
+        1,
+        1024,
+        &[WorldRenderMaterial::both(TextureMaterial::opaque(
+            0,
+            0,
+            (128, 128, 128),
+        ))],
+        &NoWorldSurfaceLighting,
+        &camera,
+        WorldSurfaceOptions::new(crate::DepthBand::whole(), crate::DepthRange::new(0, 4096)),
+        CachedRoomDepthMode::PerTriangle,
+        CachedRoomSubdivisionMode::All,
+        &[GridVisibleCell::new(0, 0, 0, 128)],
+        0,
+        None,
+        &mut triangles,
+        &mut pass,
+    );
+
+    assert_eq!(stats.surfaces_considered, 1);
+    assert!(projected.iter().any(|vertex| !vertex.is_valid()));
+    assert!(pass.command_len() > 0);
 }
 
 #[test]

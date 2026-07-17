@@ -342,9 +342,7 @@ impl Timers {
     pub fn hold_counter_for_read(&mut self, phys: u32, cycles: u32) {
         let (idx, off) = decode(phys);
         let mode = self.timers[idx].mode;
-        let configured_extra = if idx == 2
-            && mode & (MODE_IRQ_ON_TARGET | MODE_IRQ_ON_WRAP) != 0
-        {
+        let configured_extra = if idx == 2 && mode & (MODE_IRQ_ON_TARGET | MODE_IRQ_ON_WRAP) != 0 {
             0
         } else if mode & MODE_RESET_AT_TARGET != 0 {
             0

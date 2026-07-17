@@ -65,6 +65,13 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         ot: &'a mut OtFrame<'ot, OT_DEPTH>,
         commands: &'a mut [WorldTriCommand],
     ) -> Self {
+        debug_assert!(
+            core::mem::size_of::<BucketedWorldCommand>() <= core::mem::size_of::<WorldTriCommand>()
+        );
+        debug_assert!(
+            core::mem::align_of::<BucketedWorldCommand>()
+                <= core::mem::align_of::<WorldTriCommand>()
+        );
         Self {
             ot,
             commands,
@@ -449,6 +456,22 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
     ) {
         let command_index = self.command_len;
         debug_assert!(command_index < WORLD_COMMAND_NONE as usize);
+        if self.ordering == WorldCommandOrdering::Bucketed {
+            // SAFETY: new_bucketed verifies layout/alignment and this index is
+            // bounded by the WorldTriCommand slice length, whose elements are
+            // at least as large as BucketedWorldCommand. Bucketed mode never
+            // reads the same storage through WorldTriCommand.
+            unsafe {
+                self.commands
+                    .as_mut_ptr()
+                    .cast::<BucketedWorldCommand>()
+                    .add(command_index)
+                    .write(BucketedWorldCommand::new(packet_ptr, slot.index(), words));
+            }
+            self.command_len += 1;
+            return;
+        }
+
         self.commands[command_index] = WorldTriCommand {
             packet_ptr,
             depth,
@@ -464,7 +487,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             WorldCommandOrdering::LinkedSorted => self.insert_command_in_slot(command_index),
             WorldCommandOrdering::DeferredSorted => {}
             WorldCommandOrdering::DeferredSlotSorted => self.append_command_in_slot(command_index),
-            WorldCommandOrdering::Bucketed => {}
+            WorldCommandOrdering::Bucketed => unreachable!(),
         }
     }
 
@@ -612,7 +635,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             sort_world_for_ot_insert(&mut self.commands[..self.command_len]);
             let mut command_index = 0;
             while command_index < self.command_len {
-                let command = self.commands[command_index];
+                let command = &self.commands[command_index];
                 if !command.packet_ptr.is_null() {
                     // SAFETY: Commands are created only from primitive
                     // arenas borrowed by submit methods. Those packets live
@@ -633,22 +656,19 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         if self.ordering == WorldCommandOrdering::Bucketed {
             // OrderingTable::insert prepends packets. Walking submitted
             // commands backwards preserves same-slot submission order without
-            // building/reversing per-slot linked lists.
-            let mut command_index = self.command_len;
-            while command_index != 0 {
-                command_index -= 1;
-                let command = self.commands[command_index];
-                // SAFETY: Bucketed commands are appended only after a packet
-                // arena push succeeds, and depth slots are produced by this
-                // pass' OT-depth-aware depth-band mapping.
-                unsafe {
-                    self.ot.add_raw_unchecked(
-                        command.slot as usize,
-                        command.packet_ptr,
-                        command.words,
-                    )
-                };
-            }
+            // building/reversing per-slot linked lists. The PS1 implementation
+            // performs the whole walk in one scheduled MIPS loop; the host
+            // fallback has identical packet-chain semantics.
+            let commands = self.commands.as_ptr().cast::<BucketedWorldCommand>();
+            // SAFETY: Bucketed push_command initialised every compact entry
+            // below command_len. Every packet came from a live primitive arena,
+            // and each slot was produced by this OT-depth-aware pass.
+            unsafe {
+                self.ot.add_packed_commands_reverse_unchecked(
+                    commands.cast::<usize>(),
+                    self.command_len,
+                )
+            };
             return;
         }
 

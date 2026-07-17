@@ -173,6 +173,11 @@ pub struct Bus {
     /// BIOS warmup hands execution to a frontend or fast-booted executable.
     #[serde(default = "default_spu_sample_deadline")]
     spu_sample_deadline: u64,
+    /// Enable the short SPU-DMA acceptance aperture measured on the late PAL
+    /// SCPH-9902. Earlier consoles accept a full DMA burst immediately after
+    /// SPUCNT changes, which commercial games rely on during scene changes.
+    #[serde(default)]
+    scph_9902_spu_dma_aperture: bool,
     /// Completion point of the single-entry CPU main-RAM write buffer.
     #[serde(default)]
     ram_write_buffer_ready_cycle: u64,
@@ -310,6 +315,7 @@ impl Bus {
             mdec: crate::mdec::Mdec::new(),
             cycles: 0,
             spu_sample_deadline: default_spu_sample_deadline(),
+            scph_9902_spu_dma_aperture: false,
             ram_write_buffer_ready_cycle: 0,
             dram_refresh_deadline: default_dram_refresh_deadline(),
             last_cpu_ram_access_cycle: 0,
@@ -508,6 +514,8 @@ impl Bus {
     /// whose own register programming reflects different motherboard timing.
     pub fn apply_scph_9902_profile(&mut self) {
         self.memory_control = MemoryControl::default();
+        self.scph_9902_spu_dma_aperture = true;
+        self.spu.apply_scph_9902_profile();
         self.timers.set_vblank_sync_offset_lines(29);
         self.timers.set_counter_read_extra_hold(0, 8);
         self.timers.set_timer0_dot_read_extra_hold(5);
@@ -1833,7 +1841,7 @@ impl Bus {
                 words.push(read_ram_u16(&self.ram[..], addr));
                 addr = addr.wrapping_add(step);
             }
-            if self.spu.dma_write_ready_at(self.cycles) {
+            if !self.scph_9902_spu_dma_aperture || self.spu.dma_write_ready_at(self.cycles) {
                 self.spu.dma_write(&words);
             } else {
                 // SCPH-9902 accepts the first 32-bit DMA word while the
@@ -3755,6 +3763,7 @@ mod tests {
     #[test]
     fn early_spu_dma_write_accepts_only_the_first_32_bit_word() {
         let mut bus = Bus::new(synthetic_bios()).unwrap();
+        bus.apply_scph_9902_profile();
         bus.spu.write16(crate::spu::TRANSFER_ADDR, 0);
         bus.spu.write16(crate::spu::SPUCNT, 2 << 4);
         bus.dma.dpcr = 1 << (4 * 4 + 3);
@@ -3771,6 +3780,27 @@ mod tests {
         let mut copied = [0u16; 4];
         bus.spu.dma_read(&mut copied);
         assert_eq!(copied, [0x1111, 0x2222, 0, 0]);
+    }
+
+    #[test]
+    fn default_profile_accepts_full_early_spu_dma_write() {
+        let mut bus = Bus::new(synthetic_bios()).unwrap();
+        bus.spu.write16(crate::spu::TRANSFER_ADDR, 0);
+        bus.spu.write16(crate::spu::SPUCNT, 2 << 4);
+        bus.dma.dpcr = 1 << (4 * 4 + 3);
+        for (i, value) in [0x1111, 0x2222, 0x3333, 0x4444].into_iter().enumerate() {
+            write_ram_u16(&mut bus.ram[..], 0x100 + i as u32 * 2, value);
+        }
+        bus.dma.channels[4].base = 0x100;
+        bus.dma.channels[4].block_control = (1 << 16) | 2;
+        bus.dma.channels[4].channel_control = 0x0100_0201;
+
+        assert!(bus.run_dma_spu().is_some());
+
+        bus.spu.write16(crate::spu::TRANSFER_ADDR, 0);
+        let mut copied = [0u16; 4];
+        bus.spu.dma_read(&mut copied);
+        assert_eq!(copied, [0x1111, 0x2222, 0x3333, 0x4444]);
     }
 
     #[test]

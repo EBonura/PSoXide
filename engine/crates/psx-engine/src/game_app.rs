@@ -56,7 +56,7 @@ use psx_level::{
 };
 use psx_pad::button;
 
-use crate::scene::{Ctx, Scene, SceneStateRef};
+use crate::scene::{Ctx, RenderSubmission, Scene, SceneStateRef};
 use crate::transitions::render_transition_overlay;
 use crate::ui;
 
@@ -1660,6 +1660,14 @@ fn resolve_ui_value(
 }
 
 impl<'a, S: Scene> Scene for GameApp<'a, S> {
+    fn render_submission(&self) -> RenderSubmission {
+        if !self.loading_pending() && self.current_tag().has_gameplay() {
+            self.gameplay.render_submission()
+        } else {
+            RenderSubmission::Immediate
+        }
+    }
+
     fn init(&mut self, ctx: &mut Ctx) {
         // Menu music and UI SFX share SPU state. Initialise once here and
         // upload the generated UI SFX bank before any UI scene starts routing
@@ -1774,6 +1782,12 @@ impl<'a, S: Scene> Scene for GameApp<'a, S> {
                 "38 UI RENDER OK",
                 60,
             );
+        }
+    }
+
+    fn submit_render(&mut self, ctx: &mut Ctx) {
+        if !self.loading_pending() && self.current_tag().has_gameplay() {
+            self.gameplay.submit_render(ctx);
         }
     }
 

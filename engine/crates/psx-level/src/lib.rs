@@ -458,8 +458,9 @@ pub enum AssetKind {
     ModelAnimation,
 }
 
-/// One asset in the master table. The byte slice is the live
-/// payload -- `include_bytes!` today, a stream-pack offset later.
+/// One asset in the master table. The byte slice is the baked payload;
+/// it is empty for CD-backed assets whose live bytes are resolved from
+/// their runtime cache using [`LevelAssetRecord::flags`].
 /// `ram_bytes` and `vram_bytes` are budget hints the residency
 /// manager can use to refuse oversize bind sets without parsing
 /// the payload.
@@ -469,19 +470,27 @@ pub struct LevelAssetRecord {
     pub id: AssetId,
     /// Asset class -- picks the loader.
     pub kind: AssetKind,
-    /// Backing payload. For `include_bytes!`-baked assets this
-    /// points into the EXE; for future stream packs this will be
-    /// the live in-memory slice once the pack is paged in.
+    /// Backing payload. For `include_bytes!`-baked assets this points
+    /// into the EXE; CD-backed records leave it empty.
     pub bytes: &'static [u8],
-    /// RAM cost in bytes. For embedded assets this equals
-    /// `bytes.len()`; a stream pack would report the asset's
-    /// in-RAM size after decompression.
+    /// RAM cost in bytes. For embedded assets this equals `bytes.len()`;
+    /// streamed records retain the real destination size here.
     pub ram_bytes: u32,
     /// VRAM cost in bytes if this asset uploads to VRAM
     /// (textures). `0` for RAM-only assets (room worlds).
     pub vram_bytes: u32,
-    /// Reserved.
+    /// Lifetime and streaming class from [`asset_flags`].
     pub flags: u16,
+}
+
+/// [`LevelAssetRecord::flags`] bits describing CD-backed payload lifetime.
+pub mod asset_flags {
+    /// Front-end image cached while menu scenes are active.
+    pub const STREAMED_UI: u16 = 1 << 0;
+    /// Gameplay payload loaded into transient staging (for example the sky).
+    pub const STREAMED_GAMEPLAY_TRANSIENT: u16 = 1 << 1;
+    /// Gameplay payload loaded during initial loading and retained thereafter.
+    pub const STREAMED_GAMEPLAY_PERSISTENT: u16 = 1 << 2;
 }
 
 /// One cooked cyclorama backdrop quad.
@@ -1561,6 +1570,22 @@ pub struct LevelGameEntityRecord {
     pub patrol_wait_ticks: u16,
     /// XZ radius (engine units) inside which the player is noticed.
     pub aggro_radius: u16,
+    /// 60 Hz ticks spent observing the player before combat movement begins.
+    pub reaction_ticks: u8,
+    /// Desired XZ distance while this entity does not own the attack slot.
+    pub preferred_distance: u16,
+    /// Half-width of the desired-distance band, in engine units.
+    pub spacing_tolerance: u16,
+    /// 60 Hz ticks between hold/circle intent re-evaluations.
+    pub decision_interval_ticks: u8,
+    /// Percentage of in-band decisions that choose circling.
+    pub circle_chance: u8,
+    /// Relative score bonus when the combat director selects an attacker.
+    pub attack_priority: u8,
+    /// 60 Hz ticks this entity waits after completing an attack.
+    pub attack_cooldown_ticks: u8,
+    /// 60 Hz ticks before the combat director may grant another attack.
+    pub group_attack_delay_ticks: u8,
     /// 60 Hz ticks of attack windup (the souls-like telegraph).
     pub windup_ticks: u8,
     /// 60 Hz ticks of post-attack recovery (the punish window).
@@ -1700,21 +1725,36 @@ pub mod model_override_blend {
     pub const ADD_QUARTER: u8 = 4;
 }
 
-/// Covering-material override for one placed model instance or
-/// character visual: the model renders its own cooked UVs against
-/// `texture_asset` instead of the model's baked atlas, with the
-/// authored material's blend mode, tint, and face sidedness.
+/// Material override for one placed model instance or character
+/// visual. `texture_asset = None` keeps the model's baked atlas and
+/// only changes blend mode, tint, and face sidedness. `Some` draws
+/// the model's cooked UVs against a covering texture instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LevelModelMaterialOverride {
-    /// Texture asset drawn instead of the model's cooked atlas.
-    pub texture_asset: AssetId,
+    /// Texture asset drawn instead of the model's cooked atlas, or
+    /// `None` to retain the atlas.
+    pub texture_asset: Option<AssetId>,
     /// Blend-mode code from [`model_override_blend`].
     pub blend_mode: u8,
     /// Per-material modulation tint (0x80 neutral).
     pub tint_rgb: [u8; 3],
+    /// Optional independently blended second texture pass.
+    pub secondary_layer: Option<LevelModelSecondaryLayer>,
     /// Face-sidedness bits in the [`material_flags::FACE_*`]
     /// encoding (low two bits; the rest reserved).
     pub flags: u16,
+}
+
+/// One additional model texture pass. The texture is always a separately
+/// resident 4bpp asset and reuses the model's authored UVs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelModelSecondaryLayer {
+    /// Texture asset sampled by the pass.
+    pub texture_asset: AssetId,
+    /// Blend-mode code from [`model_override_blend`].
+    pub blend_mode: u8,
+    /// Independent per-pass modulation tint.
+    pub tint_rgb: [u8; 3],
 }
 
 impl LevelModelMaterialOverride {
@@ -2655,7 +2695,7 @@ pub struct ParticleEmitterRecord {
 pub const CHARACTER_CLIP_NONE: OptionalModelClipIndex = OptionalModelClipIndex::NONE;
 
 /// Fixed action slots used by [`LevelCharacterRecord::action_clips`].
-pub const CHARACTER_ANIMATION_ACTION_COUNT: usize = 12;
+pub const CHARACTER_ANIMATION_ACTION_COUNT: usize = 15;
 
 /// Runtime animation action slot.
 ///
@@ -2689,6 +2729,12 @@ pub enum CharacterAnimationAction {
     HitReact = 10,
     /// Death / collapse.
     Death = 11,
+    /// Locked-on backward locomotion while preserving facing.
+    WalkBackward = 12,
+    /// Locked-on left strafe while preserving facing.
+    StrafeLeft = 13,
+    /// Locked-on right strafe while preserving facing.
+    StrafeRight = 14,
 }
 
 impl CharacterAnimationAction {
@@ -2706,6 +2752,9 @@ impl CharacterAnimationAction {
         Self::Block,
         Self::HitReact,
         Self::Death,
+        Self::WalkBackward,
+        Self::StrafeLeft,
+        Self::StrafeRight,
     ];
 
     /// Convert to the cooked action slot index.
