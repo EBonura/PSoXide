@@ -9,6 +9,8 @@ use psxed_project::MODEL_SCALE_ONE_Q8;
 
 pub const PREVIEW_WIDTH: usize = 320;
 pub const PREVIEW_HEIGHT: usize = 240;
+pub const AUTHORING_PREVIEW_MAX_WIDTH: usize = 960;
+pub const AUTHORING_PREVIEW_MAX_HEIGHT: usize = 720;
 
 const PREVIEW_NEAR_Z: i32 = 48;
 const PREVIEW_FOCAL_LENGTH: i32 = 320;
@@ -38,16 +40,43 @@ pub fn render_import_model_preview_with_options(
     atlas: &ColorImage,
     options: ImportPreviewOptions,
 ) -> Option<ColorImage> {
+    render_import_model_preview_with_orientation_at_size(
+        model_bytes,
+        clip_bytes,
+        atlas,
+        options,
+        yaw_rotation_matrix(options.visual_yaw_q12),
+        [PREVIEW_WIDTH, PREVIEW_HEIGHT],
+    )
+}
+
+/// Render a model preview with the exact presentation transform used by a
+/// scene instance. Animation Studio uses this path so pitched and rolled
+/// imports do not silently fall back to the older yaw-only resource preview.
+pub(crate) fn render_import_model_preview_with_orientation_at_size(
+    model_bytes: &[u8],
+    clip_bytes: &[u8],
+    atlas: &ColorImage,
+    options: ImportPreviewOptions,
+    instance_rotation: Mat3I16,
+    render_size: [usize; 2],
+) -> Option<ColorImage> {
     let model = Model::from_bytes(model_bytes).ok()?;
     let animation = Animation::from_bytes(clip_bytes).ok()?;
     if atlas.size[0] == 0 || atlas.size[1] == 0 {
         return None;
     }
 
+    let render_width = render_size[0].clamp(PREVIEW_WIDTH, AUTHORING_PREVIEW_MAX_WIDTH);
+    let render_height = render_size[1].clamp(PREVIEW_HEIGHT, AUTHORING_PREVIEW_MAX_HEIGHT);
+    let focal_length = ((PREVIEW_FOCAL_LENGTH as i64 * render_width as i64) / PREVIEW_WIDTH as i64)
+        .clamp(1, i32::MAX as i64) as i32;
+    let vertical_nudge = ((4 * render_height) / PREVIEW_HEIGHT) as i16;
+
     let projection = WorldProjection::new(
-        (PREVIEW_WIDTH / 2) as i16,
-        (PREVIEW_HEIGHT / 2 + 4) as i16,
-        PREVIEW_FOCAL_LENGTH,
+        (render_width / 2) as i16,
+        (render_height / 2) as i16 + vertical_nudge,
+        focal_length,
         PREVIEW_NEAR_Z,
     );
     let height = options.world_height.max(128);
@@ -62,7 +91,6 @@ pub fn render_import_model_preview_with_options(
         .then(|| root_motion_delta_q12(&animation, frame_q12))
         .flatten();
     let local_to_world = preview_model_local_to_world(&model, options.visual_scale_q8);
-    let instance_rotation = yaw_rotation_matrix(options.visual_yaw_q12);
     let focus = options
         .focus_on_animated_bounds
         .then(|| {
@@ -96,11 +124,11 @@ pub fn render_import_model_preview_with_options(
     );
 
     let mut image = ColorImage {
-        size: [PREVIEW_WIDTH, PREVIEW_HEIGHT],
-        pixels: vec![Color32::from_rgb(8, 10, 14); PREVIEW_WIDTH * PREVIEW_HEIGHT],
+        size: [render_width, render_height],
+        pixels: vec![Color32::from_rgb(8, 10, 14); render_width * render_height],
     };
     draw_floor_grid(&mut image, camera, projection, focus, origin, height);
-    let mut z_buffer = vec![f32::INFINITY; PREVIEW_WIDTH * PREVIEW_HEIGHT];
+    let mut z_buffer = vec![f32::INFINITY; render_width * render_height];
     let mut joint_transforms =
         vec![JointWorldTransform::ZERO; model.joint_count().min(animation.joint_count()) as usize];
     for (joint, transform) in joint_transforms.iter_mut().enumerate() {
@@ -214,6 +242,19 @@ fn yaw_rotation_matrix(yaw_q12: i16) -> Mat3I16 {
     Mat3I16 {
         m: [[c, 0, s], [0, 0x1000, 0], [-s, 0, c]],
     }
+}
+
+/// Full instance rotation in the same `Rz * Ry * Rx` order used by the
+/// native 3D editor preview and runtime model renderer.
+pub(crate) fn euler_rotation_q12(rotation_q12: [u16; 3]) -> Mat3I16 {
+    let [pitch_q12, yaw_q12, roll_q12] = rotation_q12;
+    if pitch_q12 == 0 && roll_q12 == 0 {
+        return yaw_rotation_matrix(yaw_q12 as i16);
+    }
+    let rx = Mat3I16::rotate_x(Angle::from_q12(pitch_q12).rotate_y_arg());
+    let ry = Mat3I16::rotate_y(Angle::from_q12(yaw_q12).rotate_y_arg());
+    let rz = Mat3I16::rotate_z(Angle::from_q12(roll_q12).rotate_y_arg());
+    rz.mul(&ry).mul(&rx)
 }
 
 fn scale_q8_i32(value: i32, scale_q8: u16) -> i32 {
@@ -769,6 +810,11 @@ fn raster_textured_triangle(
     tri: [PreviewVertex; 3],
     double_sided: bool,
 ) {
+    let width = image.size[0];
+    let height = image.size[1];
+    if width == 0 || height == 0 || z_buffer.len() < width.saturating_mul(height) {
+        return;
+    }
     let area = edge(tri[0], tri[1], tri[2]);
     if area.abs() < f32::EPSILON {
         return;
@@ -789,25 +835,25 @@ fn raster_textured_triangle(
         .map(|p| p.x.floor() as i32)
         .min()
         .unwrap_or(0)
-        .clamp(0, PREVIEW_WIDTH as i32 - 1);
+        .clamp(0, width as i32 - 1);
     let max_x = tri
         .iter()
         .map(|p| p.x.ceil() as i32)
         .max()
         .unwrap_or(0)
-        .clamp(0, PREVIEW_WIDTH as i32 - 1);
+        .clamp(0, width as i32 - 1);
     let min_y = tri
         .iter()
         .map(|p| p.y.floor() as i32)
         .min()
         .unwrap_or(0)
-        .clamp(0, PREVIEW_HEIGHT as i32 - 1);
+        .clamp(0, height as i32 - 1);
     let max_y = tri
         .iter()
         .map(|p| p.y.ceil() as i32)
         .max()
         .unwrap_or(0)
-        .clamp(0, PREVIEW_HEIGHT as i32 - 1);
+        .clamp(0, height as i32 - 1);
     if min_x > max_x || min_y > max_y {
         return;
     }
@@ -837,7 +883,7 @@ fn raster_textured_triangle(
             let b1 = w1 / area;
             let b2 = w2 / area;
             let depth = tri[0].z * b0 + tri[1].z * b1 + tri[2].z * b2;
-            let index = y as usize * PREVIEW_WIDTH + x as usize;
+            let index = y as usize * width + x as usize;
             if depth >= z_buffer[index] {
                 continue;
             }
@@ -961,10 +1007,12 @@ fn draw_joint_dot(image: &mut ColorImage, cx: i32, cy: i32, color: Color32) {
 }
 
 fn put_marker_pixel(image: &mut ColorImage, x: i32, y: i32, color: Color32) {
-    if x < 0 || y < 0 || x >= PREVIEW_WIDTH as i32 || y >= PREVIEW_HEIGHT as i32 {
+    let width = image.size[0];
+    let height = image.size[1];
+    if x < 0 || y < 0 || x >= width as i32 || y >= height as i32 {
         return;
     }
-    image.pixels[y as usize * PREVIEW_WIDTH + x as usize] = color;
+    image.pixels[y as usize * width + x as usize] = color;
 }
 
 fn clamp_i16(value: i32) -> i16 {
@@ -1123,6 +1171,44 @@ mod tests {
             lit_pixels > 32,
             "expected the cooked model preview to draw visible pixels, got {lit_pixels}"
         );
+    }
+
+    #[test]
+    fn authoring_preview_renders_at_requested_size() {
+        let model = two_joint_model_with_child_part();
+        let clip = two_joint_animation_with_child_x_offsets(&[0, 32]);
+        let atlas = ColorImage {
+            size: [64, 64],
+            pixels: vec![Color32::from_rgb(210, 90, 70); 64 * 64],
+        };
+
+        let image = render_import_model_preview_with_orientation_at_size(
+            &model,
+            &clip,
+            &atlas,
+            ImportPreviewOptions {
+                world_height: 1024,
+                visual_scale_q8: MODEL_SCALE_ONE_Q8,
+                visual_yaw_q12: 0,
+                collision_radius: 192,
+                time_seconds: 0.0,
+                yaw_q12: 340,
+                pitch_q12: 350,
+                radius: 1536,
+                focus_on_animated_bounds: true,
+                preview_in_place: true,
+                pose_offset: [0, 0, 0],
+                show_animation_root: false,
+                show_collision_guides: false,
+                show_bones: false,
+            },
+            Mat3I16::IDENTITY,
+            [640, 480],
+        )
+        .expect("authoring preview should render");
+
+        assert_eq!(image.size, [640, 480]);
+        assert_eq!(image.pixels.len(), 640 * 480);
     }
 
     #[test]

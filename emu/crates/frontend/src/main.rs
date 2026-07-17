@@ -163,10 +163,27 @@ fn main() {
     let fullscreen = !cli.windowed;
     let gpu_compute = cli.gpu_compute;
 
+    #[cfg(feature = "editor")]
+    let editor_startup = cli.editor.then_some((
+        cli.editor_project,
+        cli.editor_view.map(cli::EditorViewArg::project_view),
+        cli.editor_resource,
+    ));
+
     let event_loop = EventLoop::new().expect("event loop");
     event_loop.set_control_flow(ControlFlow::Poll);
 
     let mut app = Shell::new(config_dir, fullscreen, gpu_compute);
+    #[cfg(feature = "editor")]
+    if let Some((project_dir, view, resource)) = editor_startup {
+        if let Err(error) = app
+            .state
+            .open_editor_startup(project_dir, view, resource.as_deref())
+        {
+            eprintln!("error: {error}");
+            std::process::exit(2);
+        }
+    }
     event_loop.run_app(&mut app).expect("event loop");
 }
 

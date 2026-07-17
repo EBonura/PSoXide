@@ -12,17 +12,18 @@ pub(crate) struct MaterialLabState {
 }
 
 impl EditorWorkspace {
-    pub(crate) fn draw_material_lab(&mut self, ui: &mut egui::Ui) {
-        let mut material_options: Vec<(ResourceId, String)> = self
-            .project
+    fn material_lab_options(&self) -> Vec<(ResourceId, String)> {
+        self.project
             .resources
             .iter()
             .filter_map(|resource| match &resource.data {
                 ResourceData::Material(_) => Some((resource.id, resource.name.clone())),
                 _ => None,
             })
-            .collect();
+            .collect()
+    }
 
+    fn sync_material_lab_focus(&mut self, material_options: &[(ResourceId, String)]) {
         if let Some(selected) = self.selection.selected_resource {
             if self
                 .project
@@ -39,28 +40,41 @@ impl EditorWorkspace {
         }) {
             self.material_lab.focused_material = material_options.first().map(|(id, _)| *id);
         }
+    }
 
-        let mut create_material = false;
-        let mut save_project = false;
-        ui.horizontal_wrapped(|ui| {
-            ui.heading(icons::label(icons::PALETTE, "Material Lab"));
-            ui.add_space(8.0);
-            ui.label(
-                RichText::new("Reusable PS1 materials · 4bpp-first authoring")
-                    .color(STUDIO_TEXT_WEAK),
-            );
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                save_project = ui
-                    .button(icons::label(icons::SAVE, "Save"))
-                    .on_hover_text("Save every material and the project to project.ron")
-                    .clicked();
-                create_material = ui
-                    .button(icons::label(icons::PLUS, "New Material"))
-                    .on_hover_text("Create a reusable Material resource")
-                    .clicked();
+    pub(crate) fn draw_material_lab_toolbar(&mut self, ui: &mut egui::Ui) {
+        let material_options = self.material_lab_options();
+        self.sync_material_lab_focus(&material_options);
+        let mut material_id = self.material_lab.focused_material;
+        ui.label(RichText::new("Material").color(STUDIO_TEXT_WEAK));
+        let selected_name = material_id
+            .and_then(|selected| material_options.iter().find(|(id, _)| *id == selected))
+            .map(|(_, name)| name.as_str())
+            .unwrap_or("(none)");
+        egui::ComboBox::from_id_salt("material_lab_resource")
+            .selected_text(selected_name)
+            .width(190.0)
+            .show_ui(ui, |ui| {
+                for (id, name) in &material_options {
+                    ui.selectable_value(&mut material_id, Some(*id), name);
+                }
             });
-        });
-        ui.add_space(8.0);
+        if material_id != self.material_lab.focused_material {
+            self.material_lab.focused_material = material_id;
+            if let Some(material_id) = material_id {
+                self.replace_resource_selection(material_id);
+            }
+            self.material_lab.preview_signature.clear();
+        }
+
+        let create_material = ui
+            .button(icons::label(icons::PLUS, "New"))
+            .on_hover_text("Create a reusable Material resource")
+            .clicked();
+        let save_project = ui
+            .button(icons::label(icons::SAVE, "Save"))
+            .on_hover_text("Save every material and the project to project.ron")
+            .clicked();
 
         if create_material {
             let name = unique_material_name(&material_options);
@@ -68,7 +82,6 @@ impl EditorWorkspace {
                 name.clone(),
                 ResourceData::Material(MaterialResource::opaque(None)),
             );
-            material_options.push((id, name.clone()));
             self.material_lab.focused_material = Some(id);
             self.replace_resource_selection(id);
             self.material_lab.preview_signature.clear();
@@ -80,42 +93,15 @@ impl EditorWorkspace {
                 self.status = format!("Could not save materials: {error}");
             }
         }
+    }
 
-        let Some(mut material_id) = self.material_lab.focused_material else {
+    pub(crate) fn draw_material_lab(&mut self, ui: &mut egui::Ui) {
+        let material_options = self.material_lab_options();
+        self.sync_material_lab_focus(&material_options);
+        let Some(material_id) = self.material_lab.focused_material else {
             material_lab_empty_state(ui);
             return;
         };
-
-        ui.horizontal_wrapped(|ui| {
-            ui.label("Editing");
-            let selected_name = material_options
-                .iter()
-                .find(|(id, _)| *id == material_id)
-                .map(|(_, name)| name.as_str())
-                .unwrap_or("Missing Material");
-            egui::ComboBox::from_id_salt("material_lab_resource")
-                .selected_text(selected_name)
-                .width(260.0)
-                .show_ui(ui, |ui| {
-                    for (id, name) in &material_options {
-                        ui.selectable_value(&mut material_id, *id, name);
-                    }
-                });
-            if material_id != self.material_lab.focused_material.unwrap_or(material_id) {
-                self.material_lab.focused_material = Some(material_id);
-                self.replace_resource_selection(material_id);
-                self.material_lab.preview_signature.clear();
-            }
-            ui.separator();
-            ui.label(
-                RichText::new(
-                    "One Material resource can be assigned to models, props, rooms, or UI",
-                )
-                .small()
-                .color(STUDIO_TEXT_WEAK),
-            );
-        });
-        ui.add_space(10.0);
 
         let Some(resource) = self.project.resource(material_id) else {
             material_lab_empty_state(ui);
