@@ -26,7 +26,7 @@ use std::collections::HashSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use emulator_core::{
     button, fast_boot_disc_with_hle, telemetry, warm_bios_for_disc_fast_boot, Bus, ButtonState,
     Cpu, DISC_FAST_BOOT_WARMUP_STEPS,
@@ -89,9 +89,57 @@ pub struct Cli {
     #[arg(long)]
     pub gpu_compute: bool,
 
+    /// Boot the GUI directly into the native editor workspace, bypassing the
+    /// emulator menu. Intended for deterministic editor development and
+    /// screenshot validation.
+    #[cfg(feature = "editor")]
+    #[arg(long)]
+    pub editor: bool,
+
+    /// Project directory to open when `--editor` is set. The directory must
+    /// contain a valid `project.ron`.
+    #[cfg(feature = "editor")]
+    #[arg(long, value_name = "DIR", requires = "editor")]
+    pub editor_project: Option<PathBuf>,
+
+    /// Editor workspace to show immediately when `--editor` is set.
+    #[cfg(feature = "editor")]
+    #[arg(long, value_enum, value_name = "VIEW", requires = "editor")]
+    pub editor_view: Option<EditorViewArg>,
+
+    /// Resource name (or numeric resource id) to focus when booting the
+    /// Animation workspace.
+    #[cfg(feature = "editor")]
+    #[arg(long, value_name = "NAME_OR_ID", requires = "editor")]
+    pub editor_resource: Option<String>,
+
     /// Headless subcommand. Omit to launch the GUI.
     #[command(subcommand)]
     pub command: Option<Command>,
+}
+
+/// Scriptable native-editor destinations for deterministic GUI startup.
+#[cfg(feature = "editor")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum EditorViewArg {
+    #[value(name = "3d")]
+    ThreeD,
+    #[value(name = "2d")]
+    TwoD,
+    Animation,
+    Material,
+}
+
+#[cfg(feature = "editor")]
+impl EditorViewArg {
+    pub const fn project_view(self) -> psxed_project::EditorWorkspaceView {
+        match self {
+            Self::ThreeD => psxed_project::EditorWorkspaceView::Room,
+            Self::TwoD => psxed_project::EditorWorkspaceView::Ui,
+            Self::Animation => psxed_project::EditorWorkspaceView::Animation,
+            Self::Material => psxed_project::EditorWorkspaceView::Material,
+        }
+    }
 }
 
 /// Every headless operation the frontend exposes. Add new variants

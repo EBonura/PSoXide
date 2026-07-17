@@ -2217,6 +2217,27 @@ fn decode_embedded_png(bytes: &[u8]) -> Option<ColorImage> {
 }
 
 impl EditorWorkspace {
+    /// Current top-level workspace, exposed for native startup validation.
+    pub const fn active_workspace_view(&self) -> EditorWorkspaceView {
+        self.active_workspace.to_project()
+    }
+
+    /// Model currently focused in Animation Studio.
+    pub const fn animation_viewer_model(&self) -> Option<ResourceId> {
+        self.animation_viewer.selected_model()
+    }
+
+    /// Select a top-level editor workspace without simulating UI input.
+    ///
+    /// The native frontend uses this for deterministic development startup;
+    /// normal interactive workspace switching still follows the existing
+    /// toolbar and shortcut paths.
+    pub fn show_workspace(&mut self, workspace: EditorWorkspaceView) {
+        self.active_workspace = WorkspaceView::from_project(workspace);
+        self.view_2d = false;
+        self.status = format!("Workspace: {}", self.active_workspace.label());
+    }
+
     /// Open the project at `dir`. Errors when `dir/project.ron` is
     /// missing or malformed -- the frontend wraps the error and falls
     /// back to the default project so a real load failure surfaces
