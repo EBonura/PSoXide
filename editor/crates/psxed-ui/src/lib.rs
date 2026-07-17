@@ -175,7 +175,6 @@ const ACTION_BAR_WRAP_STATUS_CHARS: usize = 96;
 const PLAY_FRAME_HISTORY_CAP: usize = 150;
 const PLAY_DEBUG_TERMINAL_LINE_CAP: usize = 1_000;
 const PLAY_FRAME_TARGET_FPS: f32 = 30.0;
-const PLAY_NTSC_VBLANK_MS: f32 = 1000.0 / 60.0;
 const PSOXIDE_APP_ICON_PNG: &[u8] =
     include_bytes!("../../../../assets/branding/psoxide-app-icon.png");
 const PLAY_PORTAL_DEBUG_SCREEN_CX: i32 = 160;
