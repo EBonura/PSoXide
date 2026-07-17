@@ -1469,7 +1469,23 @@ pub(crate) fn animation_resource_picker(
             .unwrap_or("(none)");
         egui::ComboBox::from_id_salt(id_salt)
             .selected_text(preview)
+            .height(360.0)
             .show_ui(ui, |ui| {
+                ui.set_min_width(380.0);
+                let filter = animation_picker_filter(ui, ui.id().with((id_salt, "filter")));
+                let matching = options
+                    .iter()
+                    .filter(|option| {
+                        animation_option_matches_skeleton(option, skeleton)
+                            && animation_name_matches_filter(&option.name, &filter)
+                    })
+                    .count();
+                ui.label(
+                    RichText::new(format!("{matching} compatible imported clips"))
+                        .small()
+                        .color(STUDIO_TEXT_WEAK),
+                );
+                ui.separator();
                 if ui.selectable_label(current.is_none(), "(none)").clicked() {
                     *current = None;
                     changed = true;
@@ -1477,6 +1493,7 @@ pub(crate) fn animation_resource_picker(
                 for option in options
                     .iter()
                     .filter(|option| animation_option_matches_skeleton(option, skeleton))
+                    .filter(|option| animation_name_matches_filter(&option.name, &filter))
                 {
                     let label = if matches!(option.role, psxed_project::AnimationRole::Generic) {
                         option.name.clone()

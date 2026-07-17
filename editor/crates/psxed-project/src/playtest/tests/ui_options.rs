@@ -114,12 +114,14 @@ fn ui_nodes_cook_in_hierarchy_order_with_local_offsets() {
             rect: UiRect::new(40, 30, 100, 50),
         },
     );
-    scene.add_node(
+    let prompt = scene.add_node(
         group,
         "Prompt",
         UiNodeKind::Label {
             rect: UiRect::new(8, 6, 48, 12),
             text: "Open".to_string(),
+            random_message: false,
+            messages: Vec::new(),
             tag: "prompt".to_string(),
             align: crate::UiTextAlign::Left,
             wrap: false,
@@ -130,6 +132,8 @@ fn ui_nodes_cook_in_hierarchy_order_with_local_offsets() {
             gradient: None,
         },
     );
+    scene.node_mut(prompt).expect("prompt node").visible_when =
+        crate::UiVisibilityCondition::LoadingComplete;
 
     let mut texture_asset_for_resource = HashMap::new();
     let mut assets = Vec::new();
@@ -195,6 +199,10 @@ fn ui_nodes_cook_in_hierarchy_order_with_local_offsets() {
     assert_eq!((nodes[label_index].x, nodes[label_index].y), (8, 6));
     assert_eq!(nodes[label_index].tag, "prompt");
     assert_eq!(nodes[label_index].letter_spacing, -2);
+    assert_ne!(
+        nodes[label_index].flags & psx_level::ui_node_flags::LOADING_COMPLETE_ONLY,
+        0
+    );
 }
 
 #[test]
@@ -271,6 +279,52 @@ fn ui_image_effect_cooks_to_image_node() {
         .find(|node| matches!(node.kind, UiNodeKind::Image { .. }))
         .expect("image cooked");
     assert_eq!(image.image_effect, UiImageEffect::DiagonalSweep);
+}
+
+#[test]
+fn random_label_messages_cook_into_compact_runtime_text() {
+    let mut project = ProjectDocument::new("ui-random-label");
+    let scene = project.active_ui_scene_mut().expect("default ui scene");
+    scene.add_node(
+        scene.root,
+        "Lore",
+        UiNodeKind::Label {
+            rect: UiRect::new(8, 8, 200, 32),
+            text: "fallback".to_string(),
+            random_message: true,
+            messages: vec!["first".to_string(), "second".to_string()],
+            tag: String::new(),
+            align: crate::UiTextAlign::Left,
+            wrap: true,
+            font: crate::UiFontChoice::Basic,
+            font_scale: crate::default_ui_font_scale(),
+            letter_spacing: 0,
+            color: [220, 226, 240],
+            gradient: None,
+        },
+    );
+
+    let mut texture_asset_for_resource = HashMap::new();
+    let mut assets = Vec::new();
+    let mut report = PlaytestValidationReport::default();
+    let (nodes, _, _, _, _, _, _) = cook_ui_nodes(
+        &project,
+        Path::new("."),
+        &mut texture_asset_for_resource,
+        &mut assets,
+        &mut report,
+    );
+
+    assert!(report.is_ok(), "warnings/errors: {:?}", report);
+    let lore = nodes
+        .iter()
+        .find(|node| matches!(node.kind, UiNodeKind::Label { .. }))
+        .expect("label cooked");
+    assert_eq!(lore.text, "first\u{1f}second");
+    assert_ne!(
+        lore.flags & psx_level::ui_node_flags::TEXT_RANDOM_MESSAGE,
+        0
+    );
 }
 
 #[test]
