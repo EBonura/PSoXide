@@ -310,7 +310,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         projected_vertices: &mut [ProjectedVertex],
         joint_view_transforms: &mut [JointViewTransform],
         material: TextureMaterial,
-        secondary_material: Option<TextureMaterial>,
+        secondary_material: Option<TexturedModelLayer>,
         options: WorldSurfaceOptions,
         faces: &[TexturedModelRenderFace],
         geometry: TexturedModelGeometry<'_>,
@@ -398,7 +398,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         projected_vertices: &mut [ProjectedVertex],
         joint_view_transforms: &mut [JointViewTransform],
         material: TextureMaterial,
-        secondary_material: Option<TextureMaterial>,
+        secondary_material: Option<TexturedModelLayer>,
         options: WorldSurfaceOptions,
         faces: &[TexturedModelRenderFace],
         geometry: TexturedModelGeometry<'_>,
@@ -439,7 +439,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         projected_vertices: &mut [ProjectedVertex],
         joint_view_transforms: &mut [JointViewTransform],
         material: TextureMaterial,
-        secondary_material: Option<TextureMaterial>,
+        secondary_material: Option<TexturedModelLayer>,
         options: WorldSurfaceOptions,
         faces: &[TexturedModelRenderFace],
         geometry: TexturedModelGeometry<'_>,
@@ -798,7 +798,8 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 })
         });
         crate::telemetry::stage_begin(crate::telemetry::stage::TEXTURED_MODEL_FACES);
-        if let Some(secondary_material) = fused_secondary_material {
+        if let Some(secondary_layer) = fused_secondary_material {
+            let secondary_material = secondary_layer.material;
             let projected_vertices = &projected_vertices[..project_count];
             let secondary_options = options.with_material_layer(secondary_material);
             if options.cull_mode == CullMode::Back {
@@ -808,6 +809,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                     faces,
                     packet_material,
                     secondary_material.textured_packet_material(),
+                    secondary_layer.uv_offset,
                     options,
                     secondary_options,
                     &mut stats,
@@ -820,6 +822,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                     faces,
                     packet_material,
                     secondary_material.textured_packet_material(),
+                    secondary_layer.uv_offset,
                     options,
                     secondary_options,
                     &mut stats,
@@ -964,10 +967,72 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             }
         }
         if fused_secondary_material.is_none() {
-            if let Some(material) = secondary_material {
+            if let Some(secondary_layer) = secondary_material {
+                let material = secondary_layer.material;
                 let options = options.with_material_layer(material);
                 let packet_material = material.textured_packet_material();
-                let overflow = if packed_average_unclamped_faces {
+                let overflow = if !secondary_layer.uv_offset.is_zero() {
+                    let mut overflow = false;
+                    let mut face_index = 0usize;
+                    while face_index < faces.len() {
+                        faces_considered = faces_considered.wrapping_add(1);
+                        let face = faces[face_index].with_uv_offset(secondary_layer.uv_offset);
+                        overflow = if packed_back_average_in_front_faces {
+                            self.submit_predecoded_model_face_packed_back_average_in_front_fast(
+                                triangles,
+                                projected_vertices,
+                                project_count,
+                                face,
+                                packet_material,
+                                material,
+                                options,
+                                &mut stats,
+                            )
+                        } else if packed_back_in_front_faces {
+                            self.submit_predecoded_model_face_packed_back_in_front_fast(
+                                triangles,
+                                projected_vertices,
+                                project_count,
+                                face,
+                                packet_material,
+                                material,
+                                options,
+                                &mut stats,
+                            )
+                        } else if packed_fast_faces {
+                            self.submit_predecoded_model_face_packed_fast(
+                                triangles,
+                                projected_vertices,
+                                project_count,
+                                face,
+                                all_projected_vertices_in_front,
+                                near_z,
+                                packet_material,
+                                material,
+                                options,
+                                &mut stats,
+                            )
+                        } else {
+                            self.submit_predecoded_model_face(
+                                triangles,
+                                projected_vertices,
+                                project_count,
+                                face,
+                                all_projected_vertices_in_front,
+                                near_z,
+                                packet_material,
+                                material,
+                                options,
+                                &mut stats,
+                            )
+                        };
+                        if overflow {
+                            break;
+                        }
+                        face_index += 1;
+                    }
+                    overflow
+                } else if packed_average_unclamped_faces {
                     let projected_vertices = &projected_vertices[..project_count];
                     if packed_average_unclamped_extent_safe_faces {
                         if options.cull_mode == CullMode::Back {
@@ -1123,6 +1188,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         faces: &[TexturedModelRenderFace],
         base_material: TexturedPacketMaterial,
         secondary_material: TexturedPacketMaterial,
+        secondary_uv_offset: ModelUvOffset,
         base_options: WorldSurfaceOptions,
         secondary_options: WorldSurfaceOptions,
         stats: &mut TexturedModelRenderStats,
@@ -1188,7 +1254,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             let secondary_triangle = unsafe {
                 triangles.push_unchecked(TriTextured::with_packet_material_packed_uv_words(
                     positions,
-                    face.uv_words,
+                    face.with_uv_offset(secondary_uv_offset).uv_words,
                     secondary_material,
                 ))
             };

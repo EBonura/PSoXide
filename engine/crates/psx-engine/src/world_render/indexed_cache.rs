@@ -592,12 +592,8 @@ pub fn draw_indexed_cached_room_vertex_lit_all_cells<const OT: usize, L: WorldSu
                 .saturating_sub(cell.min_y)
                 .abs()
                 .max(cell.max_y.saturating_sub(cell.visibility_center[1]).abs());
-            if !cell_frustum.cell_aabb_visible(
-                visibility_view,
-                cell_half_xz,
-                half_y,
-                cell_half_xz,
-            ) {
+            if !cell_frustum.cell_aabb_visible(visibility_view, cell_half_xz, half_y, cell_half_xz)
+            {
                 stats.cells_frustum_culled = stats.cells_frustum_culled.wrapping_add(1);
                 continue;
             }
@@ -1046,12 +1042,24 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
     profile.add_kind(RoomSurfaceMicroProfile::elapsed(kind_start));
     profile.count_kind(kind);
     let material_start = RoomSurfaceMicroProfile::cycle();
-    let Some(&material) = materials.get(surface.material_slot as usize) else {
+    let Some(&base_material) = materials.get(surface.material_slot as usize) else {
         profile.add_material(RoomSurfaceMicroProfile::elapsed(material_start));
         profile.count_material_miss();
         return 0;
     };
-    let material = cached_uv_material(material);
+    let uv_words = if base_material.animation.is_animated() {
+        prebuilt = None;
+        animated_cached_uv_words(base_material, options, surface.uv_words)
+    } else {
+        surface.uv_words
+    };
+    // The encoded warm path runs before material lookup and therefore cannot
+    // select the transparent tie-break layer. Keep translucent surfaces on
+    // the normal packet path where `with_material_layer` is applied.
+    if base_material.texture.is_translucent() {
+        prebuilt = None;
+    }
+    let material = cached_uv_material(base_material);
     profile.add_material(RoomSurfaceMicroProfile::elapsed(material_start));
     // A valid prebuilt packet already owns the immutable baked colours. Once
     // its first frame has populated them, avoid reconstructing and shuffling
@@ -1117,7 +1125,7 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                 let submit_start = RoomSurfaceMicroProfile::cycle();
                 submit_projected_split_triangle_vertex_lit_cached_uv_words(
                     projected,
-                    surface.uv_words,
+                    uv_words,
                     colors,
                     material,
                     surface_options,
@@ -1199,11 +1207,11 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                 let (projected, uv_words, colors) = if is_ceiling {
                     (
                         reverse_quad_winding(projected),
-                        reverse_quad_winding(surface.uv_words),
+                        reverse_quad_winding(uv_words),
                         reverse_quad_winding(colors),
                     )
                 } else {
-                    (projected, surface.uv_words, colors)
+                    (projected, uv_words, colors)
                 };
                 let submit_start = RoomSurfaceMicroProfile::cycle();
                 // Risky whole-quads keep the single-packet quad path
@@ -1290,7 +1298,7 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                 let submit_start = RoomSurfaceMicroProfile::cycle();
                 submit_projected_split_triangle_vertex_lit_cached_uv_words(
                     projected,
-                    surface.uv_words,
+                    uv_words,
                     colors,
                     wall_material,
                     surface_options,
@@ -1374,7 +1382,7 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                     world,
                     triangles,
                     projected,
-                    surface.uv_words,
+                    uv_words,
                     colors,
                     wall_material,
                     surface_options,
@@ -1419,6 +1427,10 @@ pub fn prewarm_indexed_cached_room_quads(
         let surface = &surfaces[index];
         if surface.has_baked_rgb() && surface.triangle_index >= WHOLE_QUAD_TRIANGLE_INDEX {
             if let Some(&base_material) = materials.get(surface.material_slot as usize) {
+                if base_material.animation.is_animated() || base_material.texture.is_translucent() {
+                    index += 1;
+                    continue;
+                }
                 let kind = cached_surface_kind(surface.kind_flags, surface.wall_direction);
                 let (material, split, reverse_front) = match kind {
                     WorldSurfaceKind::Floor => {
@@ -1640,6 +1652,11 @@ fn draw_near_clipped_cached_room_surface<const OT: usize, L: WorldSurfaceLightin
     let Some(&base_material) = materials.get(surface.material_slot as usize) else {
         return 0;
     };
+    let uv_words = if base_material.animation.is_animated() {
+        animated_cached_uv_words(base_material, options, surface.uv_words)
+    } else {
+        surface.uv_words
+    };
     let base_material = cached_uv_material(base_material);
     let vertex_depths = use_vertex_depths.then(|| {
         [
@@ -1691,11 +1708,7 @@ fn draw_near_clipped_cached_room_surface<const OT: usize, L: WorldSurfaceLightin
         let stats = world.submit_textured_gouraud_view_triangle_uv_words(
             triangles,
             [views[a], views[b], views[c]],
-            [
-                surface.uv_words[a],
-                surface.uv_words[b],
-                surface.uv_words[c],
-            ],
+            [uv_words[a], uv_words[b], uv_words[c]],
             [colors[a], colors[b], colors[c]],
             camera.projection,
             material.texture,
@@ -2138,4 +2151,26 @@ const fn cached_uv_material(mut material: WorldRenderMaterial) -> WorldRenderMat
     material.texture_width = ROOM_TEXTURE_UV_SIZE;
     material.texture_height = ROOM_TEXTURE_UV_SIZE;
     material
+}
+
+#[inline(always)]
+fn animated_cached_uv_words(
+    material: WorldRenderMaterial,
+    options: WorldSurfaceOptions,
+    uv_words: [u16; 4],
+) -> [u16; 4] {
+    let (offset_u, offset_v) = material.animation.uv_offset(
+        options.material_animation_tick,
+        options.material_animation_hz,
+        material.texture_width,
+        material.texture_height,
+    );
+    if offset_u == 0 && offset_v == 0 {
+        return uv_words;
+    }
+    uv_words.map(|word| {
+        let u = (word as u8).wrapping_add(offset_u);
+        let v = ((word >> 8) as u8).wrapping_add(offset_v);
+        u16::from(u) | (u16::from(v) << 8)
+    })
 }

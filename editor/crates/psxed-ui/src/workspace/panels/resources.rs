@@ -87,19 +87,19 @@ impl EditorWorkspace {
         let mut rename_cancelled = false;
         let mut transparency_key_action: Option<(ResourceId, PickedPsxtTexel)> = None;
         let mut changed = false;
-        ui.horizontal(|ui| {
-            draw_inline_icon(
-                ui,
-                resource_lucide_icon(&resource_data),
-                resource_lucide_color(&resource_data, true),
-            );
-            ui.strong(format!("{} #{}", resource_data.label(), resource_raw_id));
-        });
+        inspector_identity_header(
+            ui,
+            resource_lucide_icon(&resource_data),
+            resource_lucide_color(&resource_data, true),
+            &current_name,
+            resource_data.label(),
+            resource_raw_id,
+        );
         draw_breadcrumb(ui, &crumbs, &mut nav_target);
-        ui.horizontal(|ui| {
-            ui.label("Name");
+        inspector_property_row(ui, "Name", |ui| {
             if let Some((_, buffer)) = &mut self.resource_renaming {
-                let response = ui.text_edit_singleline(buffer);
+                let response =
+                    ui.add(egui::TextEdit::singleline(buffer).desired_width(f32::INFINITY));
                 let enter = response.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                 let escape = response.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape));
                 if escape {

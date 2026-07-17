@@ -2188,7 +2188,19 @@ fn submit_preview_model_instance(
         return false;
     };
 
-    let mut stats = world.submit_textured_model_predecoded_geometry_faces(
+    let secondary_layer = instance.secondary_layer.map(|layer| {
+        let layer_material = TextureMaterial::blended(
+            layer.texture.clut_word,
+            layer.texture.tpage_word,
+            layer.tint,
+            layer.blend_mode,
+        )
+        .with_texture_window(layer.texture.texture_window);
+        let [u, v] = layer.motion.offset_at_tick(tick, 60);
+        psx_engine::TexturedModelLayer::new(layer_material)
+            .with_uv_offset(psx_engine::ModelUvOffset::new(u, v))
+    });
+    let stats = world.submit_textured_model_predecoded_geometry_faces_layered(
         triangles,
         instance.model,
         instance.animation,
@@ -2201,44 +2213,11 @@ fn submit_preview_model_instance(
         projected_vertices,
         joint_view_transforms,
         material,
+        secondary_layer,
         options,
         faces,
         geometry,
     );
-
-    if !stats.primitive_overflow && !stats.command_overflow {
-        if let Some(layer) = instance.secondary_layer {
-            let layer_material = TextureMaterial::blended(
-                layer.texture.clut_word,
-                layer.texture.tpage_word,
-                layer.tint,
-                layer.blend_mode,
-            )
-            .with_texture_window(layer.texture.texture_window);
-            let layer_options =
-                preview_model_surface_options(layer_material, instance.face_sidedness);
-            let layer_stats = world.submit_textured_model_predecoded_geometry_faces(
-                triangles,
-                instance.model,
-                instance.animation,
-                frame_q12,
-                *camera,
-                instance.origin,
-                instance.model_rotation,
-                preview_model_local_to_world(instance.model, instance.visual_scale_q8),
-                psx_engine::ModelPoseTranslation::ZERO,
-                projected_vertices,
-                joint_view_transforms,
-                layer_material,
-                layer_options,
-                faces,
-                geometry,
-            );
-            stats.primitive_overflow |= layer_stats.primitive_overflow;
-            stats.command_overflow |= layer_stats.command_overflow;
-            stats.vertex_overflow |= layer_stats.vertex_overflow;
-        }
-    }
 
     stats.primitive_overflow || stats.command_overflow || stats.vertex_overflow
 }
@@ -2381,6 +2360,7 @@ struct PreviewModelSecondaryLayer {
     texture: MaterialSlot,
     blend_mode: BlendMode,
     tint: (u8, u8, u8),
+    motion: psxed_project::MaterialUvMotion,
 }
 
 fn preview_model_material_override(
@@ -2410,6 +2390,7 @@ fn preview_model_material_override(
                 texture: textures.secondary_slot(material_id)?,
                 blend_mode: room_geometry::psx_blend_mode(layer.blend_mode),
                 tint: (layer.tint[0], layer.tint[1], layer.tint[2]),
+                motion: layer.motion,
             })
         }),
         face_sidedness: material.sidedness(),

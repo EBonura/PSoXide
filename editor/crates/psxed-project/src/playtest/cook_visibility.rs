@@ -1,4 +1,5 @@
 use super::*;
+use crate::MaterialAnimationMode;
 
 pub(crate) fn append_room_visibility(
     room_index: u16,
@@ -237,20 +238,48 @@ pub(crate) fn cache_materials_for_room(
                 material.local_slot, texture_asset.source_label
             )
         })?;
-        out[slot] = WorldRenderMaterial::cache_only(
-            room_cache_texture_size(texture.width()),
-            room_cache_texture_size(texture.height()),
-        );
+        let mut width = room_cache_texture_size(texture.width());
+        let mut height = room_cache_texture_size(texture.height());
+        if material.animation.mode == MaterialAnimationMode::Flipbook {
+            let flipbook = material.animation.flipbook.normalized();
+            if texture.width() % u16::from(flipbook.columns) != 0
+                || texture.height() % u16::from(flipbook.rows) != 0
+            {
+                return Err(format!(
+                    "Room #{room_index} material slot {} flipbook grid {}x{} does not divide texture {}x{}",
+                    material.local_slot,
+                    flipbook.columns,
+                    flipbook.rows,
+                    texture.width(),
+                    texture.height()
+                ));
+            }
+            let frame_width = texture.width() / u16::from(flipbook.columns);
+            let frame_height = texture.height() / u16::from(flipbook.rows);
+            if !valid_room_texture_size(frame_width) || !valid_room_texture_size(frame_height) {
+                return Err(format!(
+                    "Room #{room_index} material slot {} flipbook frames are {}x{}; each axis must be a power of two from 8 to 64 texels",
+                    material.local_slot, frame_width, frame_height
+                ));
+            }
+            width = frame_width as u8;
+            height = frame_height as u8;
+        }
+        out[slot] = WorldRenderMaterial::cache_only(width, height);
     }
     Ok(out)
 }
 
 pub(crate) fn room_cache_texture_size(size: u16) -> u8 {
-    if !(8..=64).contains(&size) || !size.is_power_of_two() || !size.is_multiple_of(8) {
+    if !valid_room_texture_size(size) {
         64
     } else {
         size as u8
     }
+}
+
+const fn valid_room_texture_size(size: u16) -> bool {
+    size >= 8 && size <= 64 && size.is_power_of_two() && size.is_multiple_of(8)
 }
 
 pub(crate) fn checked_u32(value: usize, what: &str) -> Result<u32, String> {

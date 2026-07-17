@@ -17,6 +17,8 @@ pub(crate) const CONTROL_HEIGHT: f32 = 24.0;
 pub(crate) const ICON_BUTTON_SIZE: f32 = 28.0;
 pub(crate) const PANEL_RADIUS: u8 = 6;
 pub(crate) const CONTROL_RADIUS: u8 = 5;
+pub(crate) const INSPECTOR_LABEL_WIDTH: f32 = 96.0;
+pub(crate) const INSPECTOR_STACK_WIDTH: f32 = 258.0;
 
 // PSoXide's editor palette. The layers are deliberately close in value:
 // hierarchy comes from spacing and interaction state instead of a border around
@@ -183,6 +185,112 @@ pub(crate) fn tool_panel_body<R>(
         .inner_margin(Margin::symmetric(9, 8))
         .show(ui, add_contents)
         .inner
+}
+
+/// Inspector-local spacing and collapsing-header treatment. Keeping this
+/// scoped to the right dock lets dense trees and toolbars retain their tighter
+/// rhythm while every inspector variant shares the same visual grammar.
+pub(crate) fn apply_inspector_layout(ui: &mut egui::Ui) {
+    ui.spacing_mut().item_spacing = Vec2::new(7.0, 7.0);
+    ui.spacing_mut().indent = 13.0;
+    ui.visuals_mut().collapsing_header_frame = true;
+}
+
+/// Stable selection identity shown before any editable properties. The name
+/// leads because it is what authors recognize in the hierarchy; kind and id
+/// remain available as quieter technical context.
+pub(crate) fn inspector_identity_header(
+    ui: &mut egui::Ui,
+    icon: char,
+    icon_color: Color32,
+    name: &str,
+    kind: &str,
+    id: impl std::fmt::Display,
+) {
+    Frame::new()
+        .fill(STUDIO_PANEL_HEADER)
+        .corner_radius(CornerRadius::same(PANEL_RADIUS))
+        .inner_margin(Margin::symmetric(10, 9))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(icons::text(icon, 17.0).color(icon_color));
+                ui.vertical(|ui| {
+                    ui.label(
+                        RichText::new(if name.trim().is_empty() {
+                            "Untitled"
+                        } else {
+                            name
+                        })
+                        .strong()
+                        .size(14.0)
+                        .color(STUDIO_TEXT),
+                    );
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(kind).color(STUDIO_ACCENT).small());
+                        ui.label(
+                            RichText::new(format!("#{id}"))
+                                .color(STUDIO_TEXT_WEAK)
+                                .monospace()
+                                .small(),
+                        );
+                    });
+                });
+            });
+        });
+}
+
+/// A label/value row that becomes a vertical pair before the control is
+/// squeezed. This keeps inputs usable in a narrow dock without introducing a
+/// horizontal scrollbar.
+pub(crate) fn inspector_property_row<R>(
+    ui: &mut egui::Ui,
+    label: impl Into<egui::WidgetText>,
+    add_value: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    let label = label.into();
+    if ui.available_width() < INSPECTOR_STACK_WIDTH {
+        ui.vertical(|ui| {
+            ui.label(label.clone());
+            ui.add_space(-3.0);
+            ui.scope(|ui| {
+                ui.set_width(ui.available_width().max(1.0));
+                add_value(ui)
+            })
+            .inner
+        })
+        .inner
+    } else {
+        ui.horizontal(|ui| {
+            ui.add_sized(
+                [INSPECTOR_LABEL_WIDTH, CONTROL_HEIGHT],
+                egui::Label::new(label).truncate(),
+            );
+            ui.scope(|ui| {
+                ui.set_width(ui.available_width().max(1.0));
+                add_value(ui)
+            })
+            .inner
+        })
+        .inner
+    }
+}
+
+/// Full-width, consistently identified section used for the Inspector's main
+/// information groups. Existing specialized editors can keep their controls
+/// and behavior while gaining predictable hierarchy.
+pub(crate) fn inspector_section<R>(
+    ui: &mut egui::Ui,
+    id_salt: impl std::hash::Hash,
+    icon: char,
+    label: &str,
+    default_open: bool,
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> Option<R> {
+    egui::CollapsingHeader::new(icons::label(icon, label))
+        .id_salt(id_salt)
+        .default_open(default_open)
+        .show(ui, add_contents)
+        .body_returned
 }
 
 pub(crate) fn viewport_frame() -> Frame {

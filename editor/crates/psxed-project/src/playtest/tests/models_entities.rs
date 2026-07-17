@@ -714,7 +714,13 @@ fn model_renderer_material_override_cooks_onto_instance() {
     material.blend_mode = crate::PsxBlendMode::Average;
     material.tint = [96, 128, 160];
     material.face_sidedness = crate::MaterialFaceSidedness::Both;
-    material.secondary_layer = Some(crate::ModelSecondaryLayer::default());
+    let mut secondary_layer = crate::ModelSecondaryLayer::default();
+    secondary_layer.motion.enabled = true;
+    secondary_layer.motion.speed_u_q8 = 3 * 256;
+    secondary_layer.motion.speed_v_q8 = -2 * 256;
+    secondary_layer.motion.phase_u = 7;
+    secondary_layer.motion.phase_v = 11;
+    material.secondary_layer = Some(secondary_layer);
 
     let scene = project.active_scene_mut();
     let room_id = scene
@@ -761,6 +767,11 @@ fn model_renderer_material_override_cooks_onto_instance() {
         .expect("generated secondary layer cooks");
     assert_eq!(secondary.blend_mode, crate::PsxBlendMode::AddQuarter);
     assert_eq!(secondary.tint_rgb, [0x70, 0x78, 0x80]);
+    assert!(secondary.motion.enabled);
+    assert_eq!(secondary.motion.speed_u_q8, 3 * 256);
+    assert_eq!(secondary.motion.speed_v_q8, -2 * 256);
+    assert_eq!(secondary.motion.phase_u, 7);
+    assert_eq!(secondary.motion.phase_v, 11);
     let secondary_asset = &package.assets[secondary.texture_asset_index];
     assert_eq!(secondary_asset.kind, PlaytestAssetKind::Texture);
     let texture = psx_asset::Texture::from_bytes(&secondary_asset.bytes)
@@ -773,7 +784,7 @@ fn model_renderer_material_override_cooks_onto_instance() {
     let src = render_manifest_source(&package);
     assert!(
         src.contains(&format!(
-            "material_override: Some(LevelModelMaterialOverride {{ texture_asset: Some(AssetId({})), blend_mode: 1, tint_rgb: [96, 128, 160], secondary_layer: Some(LevelModelSecondaryLayer {{ texture_asset: AssetId({}), blend_mode: 4, tint_rgb: [112, 120, 128] }}), flags: 2 }})",
+            "material_override: Some(LevelModelMaterialOverride {{ texture_asset: Some(AssetId({})), blend_mode: 1, tint_rgb: [96, 128, 160], secondary_layer: Some(LevelModelSecondaryLayer {{ texture_asset: AssetId({}), blend_mode: 4, tint_rgb: [112, 120, 128], motion: LevelMaterialUvMotion {{ enabled: true, speed_u_q8: 768, speed_v_q8: -512, phase_u: 7, phase_v: 11 }} }}), flags: 2 }})",
             texture_asset_index,
             secondary.texture_asset_index,
         )),
