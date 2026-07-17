@@ -1722,6 +1722,11 @@ impl EditorWorkspace {
                                 let mut character_preview_action = None;
                                 let inherited_sector_size =
                                     self.project.world_sector_size_for_node(selected);
+                                let selected_kind_before = self
+                                    .project
+                                    .active_scene()
+                                    .node(selected)
+                                    .map(|node| node.kind.clone());
 
                                 // Phase 1: mutate the selected node (transform + kind props).
                                 {
@@ -1821,6 +1826,13 @@ impl EditorWorkspace {
                                             },
                                         );
                                     }
+                                }
+
+                                if let Some(before) = selected_kind_before.as_ref() {
+                                    self.reconcile_character_preview_after_node_kind_edit(
+                                        selected,
+                                        before,
+                                    );
                                 }
 
                                 if let Some(new_sector_size) = world_sector_size_change {
@@ -2004,6 +2016,11 @@ impl EditorWorkspace {
 
                                 if changed {
                                     self.mark_dirty();
+                                    // The native viewport render happens before this inspector
+                                    // pass. Schedule one more frame so it consumes the authored
+                                    // clip/animation change immediately instead of waiting for an
+                                    // unrelated event such as Save, Build, or project reopen.
+                                    ui.ctx().request_repaint();
                                 }
 
                                 // Apply any picker `→` jump-to. Phase 1 / 2 borrows
