@@ -1681,6 +1681,7 @@ impl EditorWorkspace {
                                 let mut node_nav_target: Option<NodeId> = None;
                                 let mut world_sector_size_change: Option<i32> = None;
                                 let mut room_grid_resize: Option<(u16, u16)> = None;
+                                let mut character_preview_action = None;
                                 let inherited_sector_size =
                                     self.project.world_sector_size_for_node(selected);
 
@@ -1774,6 +1775,8 @@ impl EditorWorkspace {
                                                 inherited_sector_size,
                                                 room_grid_resize: &mut room_grid_resize,
                                                 nav_target: &mut nav_target,
+                                                character_preview_action:
+                                                    &mut character_preview_action,
                                                     camera_preview,
                                                 },
                                             );
@@ -1882,7 +1885,17 @@ impl EditorWorkspace {
                                 // Phase 2: component host/member authoring. This uses
                                 // its own borrow so adding/selecting component nodes does
                                 // not fight the selected node's property editor above.
-                                self.draw_component_authoring_panel(ui, selected);
+                                changed |= self.draw_component_authoring_panel(
+                                    ui,
+                                    selected,
+                                    &character_options,
+                                    &mut nav_target,
+                                    &mut character_preview_action,
+                                );
+
+                                if let Some(action) = character_preview_action {
+                                    changed |= self.preview_character_action(selected, action);
+                                }
 
                                 // Phase 3: per-sector authoring appears only when a sector is
                                 // actively selected. Do not attach room/sector diagnostics to

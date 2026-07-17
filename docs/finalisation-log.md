@@ -228,7 +228,10 @@ Implemented:
   animation intent, with quadrant tests;
 - animation action maps include optional `WalkBackward`, `StrafeLeft`, and
   `StrafeRight` slots with walk fallback;
-- backward evade while locked is a backstep; other directions roll.
+- every locked and unlocked evade direction uses the roll profile while
+  retaining lock-on state; there is no backstep action;
+- locked sprint remains available in every direction and faces travel while
+  retaining target/camera lock;
 - the CI Player idle now uses the stable sword-and-shield combat idle instead
   of the accidentally selected Rust Mantis clip, and walk uses the CI
   Player-skinned Mixamo walk that matches the retained run;

@@ -719,6 +719,20 @@ pub(crate) fn draw_gameplay_camera_settings(
                     .changed();
             });
             ui.horizontal(|ui| {
+                ui.label(RichText::new("Lock Rise").color(STUDIO_TEXT_WEAK));
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut camera.lock_rise_percent)
+                            .speed(0.25)
+                            .range(0..=psxed_project::MAX_WORLD_CAMERA_LOCK_RISE_PERCENT)
+                            .suffix("%"),
+                    )
+                    .on_hover_text(
+                        "Additional camera elevation while locked, as a percentage of Height. The camera rises around the player focus so the full character remains framed.",
+                    )
+                    .changed();
+            });
+            ui.horizontal(|ui| {
                 ui.label(RichText::new("Floor Clearance").color(STUDIO_TEXT_WEAK));
                 changed |= ui
                     .add(
@@ -1722,6 +1736,7 @@ pub(crate) struct NodeKindEditorContext<'a> {
     pub(crate) inherited_sector_size: i32,
     pub(crate) room_grid_resize: &'a mut Option<(u16, u16)>,
     pub(crate) nav_target: &'a mut Option<ResourceId>,
+    pub(crate) character_preview_action: &'a mut Option<psxed_project::CharacterAnimationAction>,
     pub(crate) camera_preview: Option<EditorCameraPreviewPresentation>,
 }
 
@@ -1741,6 +1756,7 @@ pub(crate) fn draw_node_kind_editor(
         inherited_sector_size,
         room_grid_resize,
         nav_target,
+        character_preview_action,
         camera_preview,
     } = ctx;
     let mut changed = false;
@@ -2430,19 +2446,16 @@ pub(crate) fn draw_node_kind_editor(
             settings,
             player,
         } => {
-            ui.weak("Component: movement, stamina, and player-control logic. Model Renderer owns the model; Animator owns action clips.");
-            changed |= ui
-                .checkbox(player, icons::label(icons::MAP_PIN, "Player controlled"))
-                .changed();
-            changed |= draw_character_selector(ui, character_options, character, nav_target);
-            ui.label(
-                RichText::new(
-                    "Optional preset. Component values are used where they are authored.",
-                )
-                .color(STUDIO_TEXT_WEAK)
-                .small(),
+            ui.weak("Component: owns this character's per-instance movement and gameplay behavior. Model Renderer owns visuals; Animator owns action clips.");
+            changed |= draw_character_controller_editor(
+                ui,
+                character,
+                settings,
+                player,
+                character_options,
+                nav_target,
+                character_preview_action,
             );
-            changed |= draw_character_controller_settings(ui, settings, *player);
         }
         NodeKind::Camera { settings } => {
             ui.weak("Component: third-person gameplay camera for the player Entity. The Entity transform supplies the start position and yaw.");

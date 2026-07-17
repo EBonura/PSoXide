@@ -171,7 +171,7 @@ fn cortex_project_deserializes_authored_enemy_combat_profile() {
         })
         .expect("Cortex scene contains an enemy controller");
 
-    assert_eq!(enemy.reaction_ticks, 18);
+    assert_eq!(enemy.reaction_ticks, 22);
     assert_eq!(enemy.preferred_distance, 768);
     assert_eq!(enemy.spacing_tolerance, 128);
     assert_eq!(enemy.decision_interval_ticks, 12);
@@ -188,6 +188,7 @@ fn camera_node_kind_serializes_roundtrip() {
             distance: 2048,
             height: 900,
             target_height: 700,
+            lock_rise_percent: 24,
             min_floor_clearance: 96,
             orbit_speed_level: 6,
             position_lag_shift: 1,
@@ -445,6 +446,7 @@ fn world_camera_settings_default_normalize_and_inherit() {
             distance: 1,
             height: MAX_WORLD_CAMERA_HEIGHT + 1,
             target_height: -1,
+            lock_rise_percent: MAX_WORLD_CAMERA_LOCK_RISE_PERCENT + 1,
             min_floor_clearance: MAX_WORLD_CAMERA_MIN_FLOOR_CLEARANCE + 1,
             orbit_speed_level: MAX_WORLD_CAMERA_ORBIT_SPEED_LEVEL + 1,
             position_lag_shift: MAX_WORLD_CAMERA_LAG_SHIFT + 1,
@@ -461,6 +463,7 @@ fn world_camera_settings_default_normalize_and_inherit() {
             distance: MIN_WORLD_CAMERA_DISTANCE,
             height: MAX_WORLD_CAMERA_HEIGHT,
             target_height: 0,
+            lock_rise_percent: MAX_WORLD_CAMERA_LOCK_RISE_PERCENT,
             min_floor_clearance: MAX_WORLD_CAMERA_MIN_FLOOR_CLEARANCE,
             orbit_speed_level: MAX_WORLD_CAMERA_ORBIT_SPEED_LEVEL,
             position_lag_shift: MAX_WORLD_CAMERA_LAG_SHIFT,
@@ -556,6 +559,79 @@ fn changing_world_sector_size_rescales_descendant_room_and_colliders() {
         panic!("expected capsule collider");
     };
     assert_eq!((*radius, *height), (192, 1536));
+}
+
+#[test]
+fn normalize_loaded_removes_only_legacy_character_capsule_colliders() {
+    let mut project = ProjectDocument::new("legacy-character-collider");
+    let scene = project.active_scene_mut();
+    let character = scene.add_node(scene.root, "Character", NodeKind::Entity);
+    scene.add_node(
+        character,
+        "Character Controller",
+        NodeKind::CharacterController {
+            character: None,
+            settings: CharacterControllerSettings::default(),
+            player: true,
+        },
+    );
+    let redundant_capsule = scene.add_node(
+        character,
+        "Collider",
+        NodeKind::Collider {
+            shape: ColliderShape::Capsule {
+                radius: 312,
+                height: 1664,
+            },
+            solid: true,
+        },
+    );
+    let retained_box = scene.add_node(
+        character,
+        "Hit Box",
+        NodeKind::Collider {
+            shape: ColliderShape::Box {
+                half_extents: [128; 3],
+            },
+            solid: false,
+        },
+    );
+    let retained_custom_capsule = scene.add_node(
+        character,
+        "Interaction Capsule",
+        NodeKind::Collider {
+            shape: ColliderShape::Capsule {
+                radius: 640,
+                height: 1024,
+            },
+            solid: false,
+        },
+    );
+    let prop = scene.add_node(scene.root, "Prop", NodeKind::Entity);
+    let retained_prop_capsule = scene.add_node(
+        prop,
+        "Collider",
+        NodeKind::Collider {
+            shape: ColliderShape::Capsule {
+                radius: 128,
+                height: 512,
+            },
+            solid: true,
+        },
+    );
+
+    project.normalize_loaded();
+
+    let scene = project.active_scene();
+    assert!(scene.node(redundant_capsule).is_none());
+    assert!(scene.node(retained_box).is_some());
+    assert!(scene.node(retained_custom_capsule).is_some());
+    assert!(scene.node(retained_prop_capsule).is_some());
+    assert!(!scene
+        .node(character)
+        .unwrap()
+        .children
+        .contains(&redundant_capsule));
 }
 
 #[test]

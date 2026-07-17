@@ -525,6 +525,9 @@ pub struct EditorWorkspace {
     /// camera math). Orbit preserves the original target/radius camera; Free
     /// stores an explicit world position with the same yaw/pitch convention.
     camera_rig: CameraRig,
+    /// Editor-only controller playback. The ProjectDocument retains the
+    /// authored Entity transform while the renderer consumes a derived pose.
+    character_motion_preview: Option<CharacterMotionPreviewState>,
     /// Decoded `.psxt` thumbnails for the resources panel. Built
     /// lazily once per Texture resource (or whenever its `psxt_path`
     /// changes); the egui texture handle stays alive across frames
@@ -1607,6 +1610,28 @@ pub struct EditorCameraPreviewRequest {
     pub active_floor: usize,
 }
 
+/// Transient character transform consumed by the native editor renderer.
+/// It never mutates or serializes the owning Entity's authored transform.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EditorCharacterMotionPreview {
+    /// Entity host whose rendered model should use this transform.
+    pub entity: NodeId,
+    /// Absolute editor-preview world origin in engine units.
+    pub origin: [i32; 3],
+    /// Absolute preview yaw in Q12 turn units.
+    pub yaw_q12: u16,
+    /// Effective model-local animation clip selected for this action.
+    pub clip: u16,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CharacterMotionPreviewState {
+    entity: NodeId,
+    action: psxed_project::CharacterAnimationAction,
+    clip: u16,
+    started_at: Instant,
+}
+
 /// 3D viewport camera rig: orbit and free-fly parameters plus the active mode.
 ///
 /// Owns all camera math (rotate / pan / dolly / fly / orbit↔free sync) so it is
@@ -2264,6 +2289,8 @@ impl EditorWorkspace {
         workspace.status =
             sync_status.unwrap_or_else(|| format!("Loaded {}", short_path(&workspace.project_dir)));
         workspace.select_first_room();
+        #[cfg(debug_assertions)]
+        workspace.focus_debug_scene_node_from_env();
         workspace.apply_project_editor_camera();
         workspace.apply_project_editor_visibility();
         Ok(workspace)
@@ -2402,6 +2429,7 @@ impl EditorWorkspace {
                 free_initialized,
                 zoom_speed: editor_camera.zoom_speed,
             },
+            character_motion_preview: None,
             texture_thumbs: HashMap::new(),
             psoxide_logo_texture: None,
             ui_font_textures: Vec::new(),
@@ -2790,6 +2818,58 @@ impl EditorWorkspace {
             self.replace_node_selection(room_id);
             self.frame_3d_on_room(room_id);
         }
+    }
+
+    /// Debug-only focus hook used by deterministic native-editor captures.
+    /// Normal editor startup remains unchanged unless the environment variable
+    /// is explicitly provided to a debug build.
+    #[cfg(debug_assertions)]
+    fn focus_debug_scene_node_from_env(&mut self) {
+        let Ok(selector) = std::env::var("PSXED_DEBUG_FOCUS_NODE") else {
+            return;
+        };
+        if !self.focus_scene_node_for_debug(&selector) {
+            return;
+        }
+        let Ok(action) = std::env::var("PSXED_DEBUG_PREVIEW_ACTION") else {
+            return;
+        };
+        let action = action.trim();
+        if let Some(action) = psxed_project::CharacterAnimationAction::ALL
+            .into_iter()
+            .find(|candidate| candidate.label().eq_ignore_ascii_case(action))
+        {
+            self.preview_character_action(self.selection.selected_node, action);
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    fn focus_scene_node_for_debug(&mut self, selector: &str) -> bool {
+        let selector = selector.trim();
+        if selector.is_empty() {
+            return false;
+        }
+        let numeric_id = selector.parse::<u64>().ok();
+        let scene = self.project.active_scene();
+        let target = scene
+            .nodes()
+            .iter()
+            .find(|node| numeric_id.is_some_and(|id| node.id.raw() == id) || node.name == selector)
+            .or_else(|| {
+                scene
+                    .nodes()
+                    .iter()
+                    .find(|node| node.name.eq_ignore_ascii_case(selector))
+            })
+            .map(|node| node.id);
+        let Some(target) = target else {
+            return false;
+        };
+        self.replace_node_selection(target);
+        self.clear_resource_selection_state();
+        self.clear_primitive_selection_state();
+        self.clear_sector_selection();
+        true
     }
 
     /// Position the orbit camera so `room_id`'s grid fills the

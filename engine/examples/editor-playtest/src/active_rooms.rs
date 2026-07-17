@@ -675,6 +675,7 @@ impl Playtest {
         );
         self.lock_target = None;
         self.lock_switch_stick_held = false;
+        self.lock_invalid_ticks = 0;
         self.soft_lock_target = None;
         self.active_interactable = None;
         let camera_after = RoomPoint::new(

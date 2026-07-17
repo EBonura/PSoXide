@@ -2220,6 +2220,7 @@ fn cmd_dump_editor_preview(args: DumpEditorPreviewArgs) -> Result<(), String> {
         NodeId::ROOT,
         None,
         None,
+        None,
         &[],
         &[],
         None,

@@ -281,15 +281,18 @@ pub struct CharacterMotorConfig {
     pub roll_recovery_frames: u8,
     /// Roll invulnerability display frames from action start.
     pub roll_invulnerable_frames: u8,
-    /// Stamina spent to start a backstep.
+    /// Legacy quickstep stamina cost retained for downstream compatibility.
+    ///
+    /// Kept under the legacy `backstep_*` field names so existing cooked
+    /// character records remain binary-compatible.
     pub backstep_cost_q12: i32,
-    /// Backstep travel speed in world units per display frame.
+    /// Legacy quickstep travel speed in world units per display frame.
     pub backstep_speed: i32,
-    /// Display frames where backstep keeps moving.
+    /// Legacy quickstep active movement frames.
     pub backstep_active_frames: u8,
-    /// Recovery display frames after backstep movement ends.
+    /// Legacy quickstep recovery frames.
     pub backstep_recovery_frames: u8,
-    /// Backstep invulnerability display frames from action start.
+    /// Legacy quickstep invulnerability frames from action start.
     pub backstep_invulnerable_frames: u8,
 }
 
@@ -354,8 +357,8 @@ pub struct CharacterMotorInput {
     pub facing_yaw: Option<Angle>,
     /// True while the actor wants to spend stamina on sprinting.
     pub sprint: bool,
-    /// Rising-edge evade request. The motor chooses roll vs backstep
-    /// from the current walk intent.
+    /// Rising-edge evade request. Directional input produces a roll in both
+    /// free movement and lock-on; lock-on remains active through the action.
     pub evade: bool,
 }
 
@@ -364,10 +367,10 @@ pub struct CharacterMotorInput {
 pub enum CharacterMotorAction {
     /// No fixed action is currently playing.
     Idle,
-    /// Forward evasive roll.
+    /// Directional evasive roll.
     Roll,
-    /// Backward evasive step.
-    Backstep,
+    /// Legacy quickstep action retained for downstream compatibility.
+    Quickstep,
 }
 
 impl CharacterMotorAction {
@@ -392,10 +395,10 @@ pub enum CharacterMotorAnim {
     StrafeRight,
     /// Sprinting.
     Run,
-    /// Forward evasive roll.
+    /// Directional evasive roll.
     Roll,
-    /// Backward evasive step.
-    Backstep,
+    /// Legacy quickstep animation intent retained for compatibility.
+    Quickstep,
 }
 
 /// Result of one motor update.
@@ -614,10 +617,11 @@ impl CharacterMotorState {
                 self.yaw = move_yaw;
                 CharacterMotorAnim::Walk
             };
-            // Locked-on lateral/backward motion keeps the authored walk
-            // cadence. Sprint remains available when pushing toward the
-            // target and for all free-movement directions.
-            let wants_sprint = input.sprint && matches!(directional_anim, CharacterMotorAnim::Walk);
+            // Sprint intent remains authoritative during lock-on in every
+            // movement direction. Walking keeps the combat-facing stance;
+            // sprinting temporarily faces travel while the camera and target
+            // lock remain active, matching the modern Souls control contract.
+            let wants_sprint = input.sprint;
             self.update_sprint_gate(wants_sprint);
             let sprinting = self.can_sprint(wants_sprint, config);
             let base_speed = if sprinting {
@@ -626,6 +630,9 @@ impl CharacterMotorState {
                 config.walk_speed
             };
             let speed = move_mag.mul_i32(base_speed);
+            if sprinting {
+                self.yaw = move_yaw;
+            }
             let (moved, blocked) = self.try_move_vector(
                 collision,
                 move_x,
@@ -729,9 +736,9 @@ impl CharacterMotorState {
     }
 
     /// True while the current fixed action grants invulnerability
-    /// (the souls i-frame window: `roll_invulnerable_frames` /
-    /// `backstep_invulnerable_frames` display frames from action
-    /// start). Queried BEFORE this tick's motor update it reports
+    /// (the Souls i-frame window: `roll_invulnerable_frames`, plus the
+    /// compatibility quickstep profile when explicitly driven downstream).
+    /// Queried BEFORE this tick's motor update it reports
     /// exactly the invulnerability the update will apply, so combat
     /// resolution that runs earlier in the tick agrees with the
     /// motor's own frame result. Idle is never invulnerable.
@@ -742,30 +749,26 @@ impl CharacterMotorState {
 
     fn try_start_evade(&mut self, input: CharacterMotorInput, config: CharacterMotorConfig) {
         let analog = analog_move_vector(input);
-        let locked_backstep = analog
-            .map(|(move_x, move_z, _)| {
-                input.facing_yaw.is_some_and(|facing_yaw| {
-                    matches!(
-                        locked_locomotion_anim(facing_yaw, yaw_from_vector(move_x, move_z)),
-                        CharacterMotorAnim::WalkBackward
-                    )
-                })
-            })
-            .unwrap_or(false);
-        let action = if locked_backstep || analog.is_none() && input.walk < 0 {
-            CharacterMotorAction::Backstep
-        } else {
-            CharacterMotorAction::Roll
-        };
+        let action = CharacterMotorAction::Roll;
         if let Some((move_x, move_z, _)) = analog {
-            if !locked_backstep {
-                self.yaw = yaw_from_vector(move_x, move_z);
-            }
+            self.action_yaw = yaw_from_vector(move_x, move_z);
+            self.yaw = self.action_yaw;
+        } else {
+            // With no directional input, preserve a responsive evade button:
+            // move forward along the current combat/free-movement facing.
+            self.action_yaw = input.facing_yaw.unwrap_or_else(|| {
+                if input.walk < 0 {
+                    self.yaw.add(Angle::HALF)
+                } else {
+                    self.yaw
+                }
+            });
+            self.yaw = self.action_yaw;
         }
         let cost = match action {
             CharacterMotorAction::Idle => 0,
             CharacterMotorAction::Roll => config.roll_cost_q12,
-            CharacterMotorAction::Backstep => config.backstep_cost_q12,
+            CharacterMotorAction::Quickstep => config.backstep_cost_q12,
         };
         if self.stamina_q12 < cost {
             return;
@@ -773,7 +776,6 @@ impl CharacterMotorState {
         self.stamina_q12 -= cost;
         self.action = action;
         self.action_frame = 0;
-        self.action_yaw = self.yaw;
     }
 
     fn update_action(
@@ -812,7 +814,7 @@ impl CharacterMotorState {
         let anim = match action {
             CharacterMotorAction::Idle => CharacterMotorAnim::Idle,
             CharacterMotorAction::Roll => CharacterMotorAnim::Roll,
-            CharacterMotorAction::Backstep => CharacterMotorAnim::Backstep,
+            CharacterMotorAction::Quickstep => CharacterMotorAnim::Quickstep,
         };
         self.frame(anim, action, moved, blocked, false, invulnerable, recovery)
     }
@@ -1101,9 +1103,9 @@ impl ActionProfile {
                 recovery_frames: config.roll_recovery_frames,
                 invulnerable_frames: config.roll_invulnerable_frames,
             },
-            CharacterMotorAction::Backstep => Self {
+            CharacterMotorAction::Quickstep => Self {
                 speed: config.backstep_speed,
-                direction: -1,
+                direction: 1,
                 active_frames: config.backstep_active_frames,
                 recovery_frames: config.backstep_recovery_frames,
                 invulnerable_frames: config.backstep_invulnerable_frames,
@@ -2044,7 +2046,7 @@ mod tests {
     #[test]
     fn locked_movement_preserves_facing_and_reports_directional_intent() {
         let cases = [
-            (Q12::ZERO, Q12::ONE, CharacterMotorAnim::Run),
+            (Q12::ZERO, Q12::ONE, CharacterMotorAnim::Walk),
             (Q12::ZERO, Q12::NEG_ONE, CharacterMotorAnim::WalkBackward),
             (Q12::NEG_ONE, Q12::ZERO, CharacterMotorAnim::StrafeLeft),
             (Q12::ONE, Q12::ZERO, CharacterMotorAnim::StrafeRight),
@@ -2057,34 +2059,120 @@ mod tests {
                     move_x,
                     move_z,
                     facing_yaw: Some(Angle::ZERO),
-                    sprint: true,
                     ..CharacterMotorInput::default()
                 },
                 config(),
             );
             assert_eq!(frame.yaw, Angle::ZERO);
             assert_eq!(frame.anim, expected);
-            assert_eq!(frame.sprinting, matches!(expected, CharacterMotorAnim::Run));
+            assert!(!frame.sprinting);
         }
     }
 
     #[test]
-    fn locked_backward_evade_uses_backstep_without_turning_away() {
+    fn locked_sprint_applies_to_every_movement_direction() {
+        let directions = [
+            (Q12::ZERO, Q12::ONE),
+            (Q12::ZERO, Q12::NEG_ONE),
+            (Q12::NEG_ONE, Q12::ZERO),
+            (Q12::ONE, Q12::ZERO),
+            (Q12::ONE, Q12::ONE),
+            (Q12::NEG_ONE, Q12::ONE),
+            (Q12::ONE, Q12::NEG_ONE),
+            (Q12::NEG_ONE, Q12::NEG_ONE),
+        ];
+        for (move_x, move_z) in directions {
+            let mut motor = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO);
+            let frame = motor.update(
+                None,
+                CharacterMotorInput {
+                    move_x,
+                    move_z,
+                    facing_yaw: Some(Angle::ZERO),
+                    sprint: true,
+                    ..CharacterMotorInput::default()
+                },
+                config(),
+            );
+            assert_eq!(frame.yaw, yaw_from_vector(move_x, move_z));
+            assert_eq!(frame.anim, CharacterMotorAnim::Run);
+            assert!(frame.sprinting);
+            assert!(frame.moved);
+        }
+    }
+
+    #[test]
+    fn locked_forward_stick_can_sprint_while_camera_aligns_to_target() {
         let mut motor = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO);
         let frame = motor.update(
             None,
             CharacterMotorInput {
-                move_z: Q12::NEG_ONE,
+                // Camera-relative forward can be lateral to the target for a
+                // few frames immediately after lock-on is acquired.
+                walk: 1,
+                move_x: Q12::ONE,
+                facing_yaw: Some(Angle::ZERO),
+                sprint: true,
+                ..CharacterMotorInput::default()
+            },
+            config(),
+        );
+
+        assert_eq!(frame.yaw, Angle::QUARTER);
+        assert_eq!(frame.anim, CharacterMotorAnim::Run);
+        assert!(frame.sprinting);
+        assert_eq!(frame.position.x, config().run_speed);
+    }
+
+    #[test]
+    fn locked_evade_rolls_in_every_direction_without_dropping_lock_input() {
+        let directions = [
+            (Q12::ZERO, Q12::ONE),
+            (Q12::ZERO, Q12::NEG_ONE),
+            (Q12::NEG_ONE, Q12::ZERO),
+            (Q12::ONE, Q12::ZERO),
+            (Q12::ONE, Q12::ONE),
+            (Q12::NEG_ONE, Q12::ONE),
+            (Q12::ONE, Q12::NEG_ONE),
+            (Q12::NEG_ONE, Q12::NEG_ONE),
+        ];
+        for (move_x, move_z) in directions {
+            let mut motor = CharacterMotorState::new(RoomPoint::ZERO, Angle::HALF);
+            let frame = motor.update(
+                None,
+                CharacterMotorInput {
+                    move_x,
+                    move_z,
+                    facing_yaw: Some(Angle::ZERO),
+                    evade: true,
+                    ..CharacterMotorInput::default()
+                },
+                config(),
+            );
+            assert_eq!(frame.action, CharacterMotorAction::Roll);
+            assert_eq!(frame.anim, CharacterMotorAnim::Roll);
+            assert_eq!(frame.yaw, yaw_from_vector(move_x, move_z));
+            assert!(frame.moved);
+            assert_eq!(motor.action_yaw, yaw_from_vector(move_x, move_z));
+        }
+    }
+
+    #[test]
+    fn neutral_locked_evade_rolls_toward_target() {
+        let mut motor = CharacterMotorState::new(RoomPoint::ZERO, Angle::HALF);
+        let frame = motor.update(
+            None,
+            CharacterMotorInput {
                 facing_yaw: Some(Angle::ZERO),
                 evade: true,
                 ..CharacterMotorInput::default()
             },
             config(),
         );
-        assert_eq!(frame.action, CharacterMotorAction::Backstep);
-        assert_eq!(frame.anim, CharacterMotorAnim::Backstep);
+        assert_eq!(frame.action, CharacterMotorAction::Roll);
+        assert_eq!(frame.anim, CharacterMotorAnim::Roll);
         assert_eq!(frame.yaw, Angle::ZERO);
-        assert!(frame.position.z < 0);
+        assert_eq!(frame.position, RoomPoint::new(0, 0, 96));
     }
 
     #[test]
@@ -2731,7 +2819,7 @@ mod tests {
     }
 
     #[test]
-    fn backwards_evade_starts_backstep() {
+    fn backwards_free_evade_rolls_in_the_requested_direction() {
         let mut motor = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO);
         let frame = motor.update(
             None,
@@ -2742,9 +2830,10 @@ mod tests {
             },
             config(),
         );
-        assert_eq!(frame.action, CharacterMotorAction::Backstep);
-        assert_eq!(frame.anim, CharacterMotorAnim::Backstep);
-        assert_eq!(frame.position, RoomPoint::new(0, 0, -72));
+        assert_eq!(frame.action, CharacterMotorAction::Roll);
+        assert_eq!(frame.anim, CharacterMotorAnim::Roll);
+        assert_eq!(frame.yaw, Angle::HALF);
+        assert_eq!(frame.position, RoomPoint::new(0, 0, -96));
     }
 
     #[test]

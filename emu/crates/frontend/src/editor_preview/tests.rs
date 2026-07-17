@@ -175,6 +175,7 @@ fn cortex_ignition_v1_preview_frame_contains_draw_commands() {
         NodeId::ROOT,
         None,
         None,
+        None,
         &[],
         &[],
         None,
@@ -337,6 +338,7 @@ fn cortex_player_crystal_preview_uses_its_generated_texture() {
                 Some(room.id),
                 0,
                 NodeId::ROOT,
+                None,
                 None,
                 None,
                 &[],
@@ -1402,6 +1404,7 @@ fn diagnose_static_glb_scene_render() {
         NodeId::ROOT,
         None,
         None,
+        None,
         &[],
         &[],
         None,
@@ -1431,4 +1434,32 @@ fn diagnose_static_glb_scene_render() {
     }
     println!("opcode histogram: {histogram:x?}");
     println!("wrote /tmp/diag_scene.ppm ({w}x{h})");
+}
+#[test]
+fn character_motion_preview_overrides_only_the_target_render_transform() {
+    let mut project = ProjectDocument::new("motion-preview-targets");
+    let target = project
+        .active_scene_mut()
+        .add_node(NodeId::ROOT, "Target", NodeKind::Entity);
+    let other = project
+        .active_scene_mut()
+        .add_node(NodeId::ROOT, "Other", NodeKind::Entity);
+    let preview = psxed_ui::EditorCharacterMotionPreview {
+        entity: target,
+        origin: [1200, 64, -800],
+        yaw_q12: 1024,
+        clip: 7,
+    };
+    let mut target_origin = psx_engine::WorldVertex::new(0, 0, 0);
+    let yaw = super::apply_character_motion_preview(target, &mut target_origin, 128, Some(preview));
+    assert_eq!(
+        [target_origin.x, target_origin.y, target_origin.z],
+        preview.origin
+    );
+    assert_eq!(yaw, preview.yaw_q12);
+
+    let mut other_origin = psx_engine::WorldVertex::new(7, 8, 9);
+    let yaw = super::apply_character_motion_preview(other, &mut other_origin, 256, Some(preview));
+    assert_eq!([other_origin.x, other_origin.y, other_origin.z], [7, 8, 9]);
+    assert_eq!(yaw, 256);
 }

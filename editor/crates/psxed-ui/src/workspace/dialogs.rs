@@ -13,6 +13,9 @@ impl EditorWorkspace {
         playtest_status: EditorPlaytestStatus,
     ) {
         apply_studio_visuals(ctx);
+        if self.character_motion_preview().is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(16));
+        }
         self.import_retired_textures.retain_mut(|(frames, _)| {
             if *frames == 0 {
                 false

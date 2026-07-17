@@ -1,5 +1,11 @@
 use super::*;
 
+#[derive(Clone, Copy)]
+struct CharacterControllerOverlay {
+    origin: [f32; 3],
+    settings: CharacterControllerSettings,
+}
+
 impl EditorWorkspace {
     /// Optional clean scene render from the selected gameplay Camera.
     pub fn selected_camera_preview_request(&self) -> Option<EditorCameraPreviewRequest> {
@@ -358,6 +364,7 @@ impl EditorWorkspace {
             .paint_at(ui, rect);
         let painter = ui.painter_at(rect);
         Self::draw_viewport_3d_overlay_lines(&painter, rect, &viewport_3d);
+        self.draw_character_behavior_overlay(&painter, rect);
         self.draw_primitive_gizmo(&painter, rect, hovered_primitive_axis);
         self.draw_node_gizmo(&painter, rect, hovered_node_handle);
         draw_viewport_box_select_marquee(&painter, self.viewport_3d_box_select_rect());
@@ -454,6 +461,133 @@ impl EditorWorkspace {
                 Stroke::new(line.width, line.color),
             );
         }
+    }
+
+    fn selected_character_controller_overlay(&self) -> Option<CharacterControllerOverlay> {
+        let scene = self.project.active_scene();
+        let selected = scene.node(self.selection.selected_node)?;
+        let host_id = if matches!(selected.kind, NodeKind::Entity) {
+            selected.id
+        } else if matches!(selected.kind, NodeKind::CharacterController { .. }) {
+            selected.parent?
+        } else {
+            return None;
+        };
+        let host = scene.node(host_id)?;
+        let settings = host.children.iter().find_map(|child| {
+            scene.node(*child).and_then(|node| match &node.kind {
+                NodeKind::CharacterController { settings, .. } => Some(*settings),
+                _ => None,
+            })
+        })?;
+        let bounds = self
+            .collect_entity_bounds(None)
+            .into_iter()
+            .find(|bounds| bounds.node == host_id)?;
+        let mut origin = [
+            bounds.center[0],
+            bounds.center[1] - bounds.half_extents[1],
+            bounds.center[2],
+        ];
+        if let Some(preview) = self
+            .character_motion_preview()
+            .filter(|preview| preview.entity == host_id)
+        {
+            origin = preview.origin.map(|value| value as f32);
+        }
+        Some(CharacterControllerOverlay { origin, settings })
+    }
+
+    fn draw_character_behavior_overlay(&self, painter: &egui::Painter, rect: Rect) {
+        let Some(overlay) = self.selected_character_controller_overlay() else {
+            return;
+        };
+        let camera = self.viewport_3d_camera();
+        draw_character_capsule(
+            painter,
+            rect,
+            camera,
+            overlay.origin,
+            f32::from(overlay.settings.radius),
+            f32::from(overlay.settings.height),
+        );
+        let Some(enemy) = overlay.settings.enemy else {
+            return;
+        };
+        draw_world_xz_ring(
+            painter,
+            rect,
+            camera,
+            overlay.origin,
+            f32::from(enemy.aggro_radius),
+            Stroke::new(1.8, Color32::from_rgb(83, 165, 255)),
+        );
+
+        let preferred = f32::from(enemy.preferred_distance);
+        let tolerance = f32::from(enemy.spacing_tolerance);
+        let inner = (preferred - tolerance).max(0.0);
+        let outer = preferred + tolerance;
+        if inner > 0.0 {
+            draw_world_xz_ring(
+                painter,
+                rect,
+                camera,
+                overlay.origin,
+                inner,
+                Stroke::new(1.25, Color32::from_rgb(225, 178, 92)),
+            );
+        }
+        draw_world_xz_ring(
+            painter,
+            rect,
+            camera,
+            overlay.origin,
+            outer,
+            Stroke::new(1.25, Color32::from_rgb(225, 178, 92)),
+        );
+
+        let patrol = [
+            overlay.origin[0] + enemy.patrol_offset[0] as f32,
+            overlay.origin[1] + enemy.patrol_offset[1] as f32,
+            overlay.origin[2] + enemy.patrol_offset[2] as f32,
+        ];
+        if patrol != overlay.origin {
+            if let (Some(start), Some(end)) = (
+                project_world_to_viewport_screen(camera, rect, overlay.origin),
+                project_world_to_viewport_screen(camera, rect, patrol),
+            ) {
+                let color = Color32::from_rgb(108, 220, 171);
+                painter.line_segment([start, end], Stroke::new(1.75, color));
+                painter.circle_filled(end, 4.0, color);
+                painter.circle_stroke(end, 8.0, Stroke::new(1.25, color));
+                painter.text(
+                    end + Vec2::new(8.0, -8.0),
+                    Align2::LEFT_BOTTOM,
+                    "Patrol",
+                    FontId::proportional(11.0),
+                    color,
+                );
+            }
+        }
+
+        let legend_pos = rect.left_bottom() + Vec2::new(12.0, -10.0);
+        painter.text(
+            legend_pos,
+            Align2::LEFT_BOTTOM,
+            format!("Aggro {}", enemy.aggro_radius),
+            FontId::monospace(11.0),
+            Color32::from_rgb(83, 165, 255),
+        );
+        painter.text(
+            legend_pos + Vec2::new(0.0, -15.0),
+            Align2::LEFT_BOTTOM,
+            format!(
+                "Preferred {} ± {}",
+                enemy.preferred_distance, enemy.spacing_tolerance
+            ),
+            FontId::monospace(11.0),
+            Color32::from_rgb(225, 178, 92),
+        );
     }
 
     /// Play-mode 3D body -- paints the live emulator framebuffer into
@@ -805,7 +939,88 @@ impl EditorWorkspace {
     /// Snapshot of the 3D camera the frontend needs to drive the
     /// editor's HwRenderer this frame.
     pub fn viewport_3d_camera(&self) -> ViewportCameraState {
-        self.camera_rig.camera()
+        let mut camera = self.camera_rig.camera();
+        let Some(preview) = self.character_motion_preview() else {
+            return camera;
+        };
+        let settings = self.character_controller_settings(preview.entity);
+        let height = settings.map_or(1024, |settings| i32::from(settings.height));
+        let sector_size = self
+            .project
+            .world_sector_size_for_node(preview.entity)
+            .max(1);
+        camera.mode = ViewportCameraMode::Orbit;
+        camera.yaw_q12 = self.camera_rig.yaw;
+        camera.pitch_q12 = self.camera_rig.pitch;
+        camera.target = [
+            preview.origin[0],
+            preview.origin[1].saturating_add(height / 2),
+            preview.origin[2],
+        ];
+        let comfortable_radius = height.saturating_mul(3).max(sector_size.saturating_mul(2));
+        camera.radius = camera.radius.min(comfortable_radius).max(height.max(512));
+        camera
+    }
+
+    fn character_controller_settings(&self, entity: NodeId) -> Option<CharacterControllerSettings> {
+        let scene = self.project.active_scene();
+        let host = scene.node(entity)?;
+        host.children.iter().find_map(|child| {
+            scene.node(*child).and_then(|node| match &node.kind {
+                NodeKind::CharacterController { settings, .. } => Some(*settings),
+                _ => None,
+            })
+        })
+    }
+
+    /// Transient controller pose for the native preview renderer. Values are
+    /// derived from Inspector settings and elapsed real time; project data is
+    /// never modified.
+    pub fn character_motion_preview(&self) -> Option<EditorCharacterMotionPreview> {
+        let state = self.character_motion_preview?;
+        let scene = self.project.active_scene();
+        let selected = scene.node(self.selection.selected_node)?;
+        let selected_host = if matches!(selected.kind, NodeKind::Entity) {
+            selected.id
+        } else if matches!(selected.kind, NodeKind::CharacterController { .. }) {
+            selected.parent?
+        } else {
+            return None;
+        };
+        if selected_host != state.entity {
+            return None;
+        }
+        let host = scene.node(state.entity)?;
+        let settings = self.character_controller_settings(state.entity)?;
+        let bounds = self
+            .collect_entity_bounds(None)
+            .into_iter()
+            .find(|bounds| bounds.node == state.entity)?;
+        let base_origin = [
+            bounds.center[0].round() as i32,
+            (bounds.center[1] - bounds.half_extents[1]).round() as i32,
+            bounds.center[2].round() as i32,
+        ];
+        let base_yaw_q12 =
+            psxed_project::spatial::euler_degrees_to_q12(host.transform.rotation_degrees[1]);
+        let sector_size = self.project.world_sector_size_for_node(state.entity).max(1);
+        let (offset, yaw_offset_q12) = character_motion_delta(
+            state.action,
+            settings,
+            state.started_at.elapsed(),
+            sector_size,
+            base_yaw_q12,
+        );
+        Some(EditorCharacterMotionPreview {
+            entity: state.entity,
+            origin: [
+                base_origin[0].saturating_add(offset[0]),
+                base_origin[1].saturating_add(offset[1]),
+                base_origin[2].saturating_add(offset[2]),
+            ],
+            yaw_q12: base_yaw_q12.wrapping_add(yaw_offset_q12),
+            clip: state.clip,
+        })
     }
 
     /// Whether the editor preview should visualize authored room fog.
@@ -1100,4 +1315,206 @@ impl EditorWorkspace {
             })
         }
     }
+}
+
+fn draw_world_xz_ring(
+    painter: &egui::Painter,
+    rect: Rect,
+    camera: ViewportCameraState,
+    center: [f32; 3],
+    radius: f32,
+    stroke: Stroke,
+) {
+    if !radius.is_finite() || radius <= 0.0 {
+        return;
+    }
+    let mut previous = None;
+    for step in 0..=64 {
+        let angle = step as f32 / 64.0 * std::f32::consts::TAU;
+        let (sin, cos) = angle.sin_cos();
+        let world = [
+            center[0] + cos * radius,
+            center[1],
+            center[2] + sin * radius,
+        ];
+        let Some(screen) = project_world_to_viewport_screen(camera, rect, world) else {
+            previous = None;
+            continue;
+        };
+        if let Some(previous) = previous {
+            painter.line_segment([previous, screen], stroke);
+        }
+        previous = Some(screen);
+    }
+}
+
+fn draw_character_capsule(
+    painter: &egui::Painter,
+    rect: Rect,
+    camera: ViewportCameraState,
+    origin: [f32; 3],
+    radius: f32,
+    height: f32,
+) {
+    if !radius.is_finite() || !height.is_finite() || radius <= 0.0 || height <= 0.0 {
+        return;
+    }
+    let radius = radius.min(height * 0.5);
+    let lower = [origin[0], origin[1] + radius, origin[2]];
+    let upper = [origin[0], origin[1] + height - radius, origin[2]];
+    let color = Color32::from_rgb(95, 224, 185);
+    let stroke = Stroke::new(1.8, color);
+    draw_world_xz_ring(painter, rect, camera, lower, radius, stroke);
+    draw_world_xz_ring(painter, rect, camera, upper, radius, stroke);
+
+    for [dx, dz] in [[radius, 0.0], [-radius, 0.0], [0.0, radius], [0.0, -radius]] {
+        draw_world_polyline(
+            painter,
+            rect,
+            camera,
+            &[
+                [lower[0] + dx, lower[1], lower[2] + dz],
+                [upper[0] + dx, upper[1], upper[2] + dz],
+            ],
+            stroke,
+        );
+    }
+
+    for axis in 0..2 {
+        let mut top = Vec::with_capacity(17);
+        let mut bottom = Vec::with_capacity(17);
+        for step in 0..=16 {
+            let angle = step as f32 / 16.0 * std::f32::consts::PI;
+            let (sin, cos) = angle.sin_cos();
+            let mut top_point = upper;
+            let mut bottom_point = lower;
+            let horizontal_axis = if axis == 0 { 0 } else { 2 };
+            top_point[horizontal_axis] += cos * radius;
+            top_point[1] += sin * radius;
+            bottom_point[horizontal_axis] += cos * radius;
+            bottom_point[1] -= sin * radius;
+            top.push(top_point);
+            bottom.push(bottom_point);
+        }
+        draw_world_polyline(painter, rect, camera, &top, stroke);
+        draw_world_polyline(painter, rect, camera, &bottom, stroke);
+    }
+
+    if let Some(label_pos) = project_world_to_viewport_screen(
+        camera,
+        rect,
+        [origin[0] + radius, origin[1] + height, origin[2]],
+    ) {
+        painter.text(
+            label_pos + Vec2::new(7.0, -4.0),
+            Align2::LEFT_BOTTOM,
+            format!(
+                "Capsule  r{}  h{}",
+                radius.round() as i32,
+                height.round() as i32
+            ),
+            FontId::monospace(10.0),
+            color,
+        );
+    }
+}
+
+fn draw_world_polyline(
+    painter: &egui::Painter,
+    rect: Rect,
+    camera: ViewportCameraState,
+    points: &[[f32; 3]],
+    stroke: Stroke,
+) {
+    let mut previous = None;
+    for point in points {
+        let Some(screen) = project_world_to_viewport_screen(camera, rect, *point) else {
+            previous = None;
+            continue;
+        };
+        if let Some(previous) = previous {
+            painter.line_segment([previous, screen], stroke);
+        }
+        previous = Some(screen);
+    }
+}
+
+fn character_motion_delta(
+    action: psxed_project::CharacterAnimationAction,
+    settings: CharacterControllerSettings,
+    elapsed: std::time::Duration,
+    sector_size: i32,
+    base_yaw_q12: u16,
+) -> ([i32; 3], u16) {
+    let seconds = elapsed.as_secs_f64();
+    if action == psxed_project::CharacterAnimationAction::Turn {
+        let degrees = seconds * f64::from(settings.turn_speed_degrees_per_second);
+        let yaw = (degrees * (4096.0 / 360.0)).round() as i64;
+        return ([0; 3], yaw.rem_euclid(4096) as u16);
+    }
+
+    let frames = seconds * 60.0;
+    let (distance, lateral) = match action {
+        psxed_project::CharacterAnimationAction::Walk => (
+            looping_motion_distance(settings.walk_speed, frames, sector_size),
+            0.0,
+        ),
+        psxed_project::CharacterAnimationAction::Run => (
+            looping_motion_distance(settings.run_speed, frames, sector_size),
+            0.0,
+        ),
+        psxed_project::CharacterAnimationAction::WalkBackward => (
+            -looping_motion_distance(settings.walk_speed, frames, sector_size),
+            0.0,
+        ),
+        psxed_project::CharacterAnimationAction::StrafeLeft => (
+            0.0,
+            -looping_motion_distance(settings.walk_speed, frames, sector_size),
+        ),
+        psxed_project::CharacterAnimationAction::StrafeRight => (
+            0.0,
+            looping_motion_distance(settings.walk_speed, frames, sector_size),
+        ),
+        psxed_project::CharacterAnimationAction::Roll => (
+            action_motion_distance(
+                settings.roll_speed,
+                settings.roll_active_frames,
+                settings.roll_recovery_frames,
+                frames,
+            ),
+            0.0,
+        ),
+        psxed_project::CharacterAnimationAction::Backstep => (
+            // Legacy action slot 5 is authored and previewed as the locked
+            // forward quickstep; the serialized discriminant remains stable.
+            action_motion_distance(
+                settings.backstep_speed,
+                settings.backstep_active_frames,
+                settings.backstep_recovery_frames,
+                frames,
+            ),
+            0.0,
+        ),
+        _ => (0.0, 0.0),
+    };
+    let radians = f64::from(base_yaw_q12) * std::f64::consts::TAU / 4096.0;
+    let (sin, cos) = radians.sin_cos();
+    let forward = [sin, cos];
+    let right = [cos, -sin];
+    let x = forward[0] * distance + right[0] * lateral;
+    let z = forward[1] * distance + right[1] * lateral;
+    ([x.round() as i32, 0, z.round() as i32], 0)
+}
+
+fn looping_motion_distance(speed: i32, frames: f64, sector_size: i32) -> f64 {
+    let speed = speed.unsigned_abs().max(1) as f64;
+    let max_distance = f64::from(sector_size.max(1)) * 2.0;
+    let loop_frames = (max_distance / speed).clamp(30.0, 120.0);
+    (frames % loop_frames) * speed
+}
+
+fn action_motion_distance(speed: i32, active_frames: u8, recovery_frames: u8, frames: f64) -> f64 {
+    let active = f64::from(active_frames.max(1));
+    let cycle = active + f64::from(recovery_frames) + 12.0;
+    (frames % cycle).min(active) * f64::from(speed.unsigned_abs())
 }
