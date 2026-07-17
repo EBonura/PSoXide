@@ -2855,6 +2855,8 @@ fn render_ui_image_effect(effect: UiImageEffect) -> &'static str {
         UiImageEffect::DiagonalSweep => "LevelUiImageEffect::DiagonalSweep",
         UiImageEffect::SoftPulse => "LevelUiImageEffect::SoftPulse",
         UiImageEffect::Bob => "LevelUiImageEffect::Bob",
+        UiImageEffect::Rise => "LevelUiImageEffect::Rise",
+        UiImageEffect::Wind => "LevelUiImageEffect::Wind",
     }
 }
 

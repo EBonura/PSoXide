@@ -1179,6 +1179,8 @@ impl EditorWorkspace {
             UiNodeKind::Label {
                 rect,
                 text,
+                random_message,
+                messages,
                 tag,
                 align,
                 wrap,
@@ -1206,6 +1208,42 @@ impl EditorWorkspace {
                             )
                             .changed()
                         });
+                        changed |= ui
+                            .checkbox(random_message, "Random message on scene entry")
+                            .changed();
+                        if *random_message {
+                            ui.weak(
+                                "One message is chosen when the scene appears and stays fixed.",
+                            );
+                            let mut remove = None;
+                            for (index, message) in messages.iter_mut().enumerate() {
+                                ui.horizontal(|ui| {
+                                    ui.label(format!("{}", index + 1));
+                                    changed |= ui
+                                        .add(
+                                            egui::TextEdit::multiline(message)
+                                                .desired_rows(2)
+                                                .desired_width(f32::INFINITY),
+                                        )
+                                        .changed();
+                                    if ui
+                                        .small_button("−")
+                                        .on_hover_text("Remove message")
+                                        .clicked()
+                                    {
+                                        remove = Some(index);
+                                    }
+                                });
+                            }
+                            if let Some(index) = remove {
+                                messages.remove(index);
+                                changed = true;
+                            }
+                            if ui.button("+ Add message").clicked() {
+                                messages.push(String::new());
+                                changed = true;
+                            }
+                        }
                         changed |= inspector_property_row(ui, "Tag", |ui| {
                             ui.add(egui::TextEdit::singleline(tag).desired_width(f32::INFINITY))
                                 .changed()
