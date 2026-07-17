@@ -34,6 +34,7 @@
 //! sequencing, typed depth enums, vertex/UV packing.
 
 #![no_std]
+#![cfg_attr(target_arch = "mips", feature(asm_experimental_arch))]
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
 

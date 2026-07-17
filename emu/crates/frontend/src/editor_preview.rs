@@ -587,6 +587,7 @@ fn component_children<'a>(
 #[derive(Clone, Copy)]
 struct PreviewModelReference {
     model_id: ResourceId,
+    material_override: Option<ResourceId>,
     clip_override: Option<u16>,
     autoplay: bool,
     renderer_node: Option<NodeId>,
@@ -600,10 +601,11 @@ fn preview_model_reference(scene: &Scene, node: &SceneNode) -> Option<PreviewMod
     match &node.kind {
         NodeKind::MeshInstance {
             mesh: Some(model_id),
+            material,
             animation_clip,
-            ..
         } => Some(PreviewModelReference {
             model_id: *model_id,
+            material_override: *material,
             clip_override: *animation_clip,
             autoplay: true,
             renderer_node: None,
@@ -619,13 +621,14 @@ fn preview_model_reference(scene: &Scene, node: &SceneNode) -> Option<PreviewMod
                 match &child.kind {
                     NodeKind::ModelRenderer {
                         model: Some(model_id),
+                        material,
                         visual_offset,
                         visual_scale_q8,
-                        ..
                     } if renderer.is_none() => {
                         renderer = Some((
                             child.id,
                             *model_id,
+                            *material,
                             *visual_offset,
                             yaw_to_q12(child.transform.rotation_degrees[1]),
                             *visual_scale_q8,
@@ -638,9 +641,17 @@ fn preview_model_reference(scene: &Scene, node: &SceneNode) -> Option<PreviewMod
                 }
             }
             renderer.map(
-                |(renderer_node, model_id, visual_offset, visual_yaw_q12, visual_scale_q8)| {
+                |(
+                    renderer_node,
+                    model_id,
+                    material_override,
+                    visual_offset,
+                    visual_yaw_q12,
+                    visual_scale_q8,
+                )| {
                     PreviewModelReference {
                         model_id,
+                        material_override,
                         clip_override: animator.and_then(|(_, clip, _)| clip),
                         autoplay: animator.is_none_or(|(_, _, autoplay)| autoplay),
                         renderer_node: Some(renderer_node),
@@ -673,6 +684,7 @@ fn preview_static_model_reference(
 struct PreviewPlayerReference {
     character: Option<ResourceId>,
     model_override: Option<ResourceId>,
+    material_override: Option<ResourceId>,
     clip_override: Option<u16>,
     controller_node: Option<NodeId>,
     renderer_node: Option<NodeId>,
@@ -691,6 +703,7 @@ fn preview_player_reference(scene: &Scene, node: &SceneNode) -> Option<PreviewPl
         } => Some(PreviewPlayerReference {
             character: *character,
             model_override: None,
+            material_override: None,
             clip_override: None,
             controller_node: None,
             renderer_node: None,
@@ -715,13 +728,14 @@ fn preview_player_reference(scene: &Scene, node: &SceneNode) -> Option<PreviewPl
                     }
                     NodeKind::ModelRenderer {
                         model,
+                        material,
                         visual_offset,
                         visual_scale_q8,
-                        ..
                     } if renderer.is_none() => {
                         renderer = Some((
                             child.id,
                             *model,
+                            *material,
                             *visual_offset,
                             yaw_to_q12(child.transform.rotation_degrees[1]),
                             *visual_scale_q8,
@@ -734,15 +748,29 @@ fn preview_player_reference(scene: &Scene, node: &SceneNode) -> Option<PreviewPl
                 }
             }
             controller.map(|(controller_node, character)| {
-                let (renderer_node, model_override, visual_offset, visual_yaw_q12, visual_scale_q8) =
-                    renderer
-                        .map(|(node, model, offset, yaw, scale)| {
-                            (Some(node), model, offset, yaw, scale)
-                        })
-                        .unwrap_or((None, None, [0; 3], 0, psxed_project::MODEL_SCALE_ONE_Q8));
+                let (
+                    renderer_node,
+                    model_override,
+                    material_override,
+                    visual_offset,
+                    visual_yaw_q12,
+                    visual_scale_q8,
+                ) = renderer
+                    .map(|(node, model, material, offset, yaw, scale)| {
+                        (Some(node), model, material, offset, yaw, scale)
+                    })
+                    .unwrap_or((
+                        None,
+                        None,
+                        None,
+                        [0; 3],
+                        0,
+                        psxed_project::MODEL_SCALE_ONE_Q8,
+                    ));
                 PreviewPlayerReference {
                     character,
                     model_override,
+                    material_override,
                     clip_override: animator.and_then(|(_, clip, _)| clip),
                     controller_node: Some(controller_node),
                     renderer_node,
@@ -1441,8 +1469,8 @@ struct PreviewModelInstance<'a> {
     /// Cached parsed animation clip. Resolved through the
     /// preview / default clip rule.
     animation: psx_asset::Animation<'a>,
-    /// Atlas slot in the editor's model atlas region.
-    atlas: MaterialSlot,
+    /// Model atlas or replacement-material texture slot.
+    texture: MaterialSlot,
     /// Render origin (room-local engine units). Model placement
     /// stays floor-anchored in `InstanceMeta`; this is lifted to
     /// the cooked model's centre before drawing.
@@ -1454,6 +1482,12 @@ struct PreviewModelInstance<'a> {
     /// Lit and fogged model texture tint, matching editor-playtest's
     /// single-material actor lighting path.
     tint: (u8, u8, u8),
+    /// PS1 optical blend selected by the authored material.
+    blend_mode: BlendMode,
+    /// Optional independently blended second texture pass.
+    secondary_layer: Option<PreviewModelSecondaryLayer>,
+    /// Authored model face-sidedness after material override.
+    face_sidedness: psxed_project::MaterialFaceSidedness,
     /// Whether the editor preview should advance this instance's
     /// animation phase. Disabled instances hold frame zero.
     autoplay: bool,
@@ -1566,6 +1600,7 @@ fn walk_model_instances(
             origin,
             model_rotation,
             atlas: atlas_slot,
+            material_override: reference.material_override,
             is_selected: preview_reference_selected(
                 selected,
                 node.id,
@@ -1625,14 +1660,41 @@ fn walk_model_instances(
             meta.visual_scale_q8,
             meta.model_rotation,
         );
+        let material_override =
+            preview_model_material_override(project, textures, meta.material_override);
+        let texture = material_override
+            .and_then(|material| material.texture)
+            .unwrap_or(meta.atlas);
+        let base_tint = material_override
+            .map(|material| material.tint)
+            .unwrap_or((0x80, 0x80, 0x80));
         instances.push(PreviewModelInstance {
             model,
             animation,
-            atlas: meta.atlas,
+            texture,
             origin,
             model_rotation: meta.model_rotation,
             visual_scale_q8: meta.visual_scale_q8,
-            tint: shade_model_tint(origin, *camera, fog, &lights, ambient),
+            tint: shade_model_tint(origin, *camera, fog, &lights, ambient, base_tint),
+            blend_mode: material_override
+                .map(|material| material.blend_mode)
+                .unwrap_or(BlendMode::Opaque),
+            secondary_layer: material_override.and_then(|material| {
+                material.secondary_layer.map(|mut layer| {
+                    layer.tint =
+                        shade_model_tint(origin, *camera, fog, &lights, ambient, layer.tint);
+                    layer
+                })
+            }),
+            face_sidedness: material_override
+                .map(|material| material.face_sidedness)
+                .unwrap_or_else(|| {
+                    if model.double_sided() {
+                        psxed_project::MaterialFaceSidedness::Both
+                    } else {
+                        psxed_project::MaterialFaceSidedness::Front
+                    }
+                }),
             autoplay: meta.autoplay,
         });
     }
@@ -1760,6 +1822,7 @@ fn walk_player_spawn_preview(
             origin,
             model_rotation,
             atlas: atlas_slot,
+            material_override: reference.material_override,
             // Host/controller node is selected, not the model --
             // but the preview gizmo still helps designers see
             // which spawn/controller they have selected.
@@ -1947,6 +2010,8 @@ struct InstanceMeta {
     origin: psx_engine::WorldVertex,
     model_rotation: Mat3I16,
     atlas: MaterialSlot,
+    /// Material resource selected by the ModelRenderer, if any.
+    material_override: Option<ResourceId>,
     /// `true` when the placed instance is the currently
     /// selected scene node. Drives the selection gizmo.
     is_selected: bool,
@@ -2107,11 +2172,13 @@ fn submit_preview_model_instance(
         0
     };
     let material = TextureMaterial::opaque(
-        instance.atlas.clut_word,
-        instance.atlas.tpage_word,
+        instance.texture.clut_word,
+        instance.texture.tpage_word,
         instance.tint,
-    );
-    let options = preview_model_surface_options(material, instance.model.double_sided());
+    )
+    .with_texture_window(instance.texture.texture_window)
+    .with_blend_mode(instance.blend_mode);
+    let options = preview_model_surface_options(material, instance.face_sidedness);
     let Some((geometry, faces)) = predecode_preview_model_geometry_faces(
         instance.model,
         face_pool,
@@ -2121,7 +2188,7 @@ fn submit_preview_model_instance(
         return false;
     };
 
-    let stats = world.submit_textured_model_predecoded_geometry_faces(
+    let mut stats = world.submit_textured_model_predecoded_geometry_faces(
         triangles,
         instance.model,
         instance.animation,
@@ -2138,6 +2205,40 @@ fn submit_preview_model_instance(
         faces,
         geometry,
     );
+
+    if !stats.primitive_overflow && !stats.command_overflow {
+        if let Some(layer) = instance.secondary_layer {
+            let layer_material = TextureMaterial::blended(
+                layer.texture.clut_word,
+                layer.texture.tpage_word,
+                layer.tint,
+                layer.blend_mode,
+            )
+            .with_texture_window(layer.texture.texture_window);
+            let layer_options =
+                preview_model_surface_options(layer_material, instance.face_sidedness);
+            let layer_stats = world.submit_textured_model_predecoded_geometry_faces(
+                triangles,
+                instance.model,
+                instance.animation,
+                frame_q12,
+                *camera,
+                instance.origin,
+                instance.model_rotation,
+                preview_model_local_to_world(instance.model, instance.visual_scale_q8),
+                psx_engine::ModelPoseTranslation::ZERO,
+                projected_vertices,
+                joint_view_transforms,
+                layer_material,
+                layer_options,
+                faces,
+                geometry,
+            );
+            stats.primitive_overflow |= layer_stats.primitive_overflow;
+            stats.command_overflow |= layer_stats.command_overflow;
+            stats.vertex_overflow |= layer_stats.vertex_overflow;
+        }
+    }
 
     stats.primitive_overflow || stats.command_overflow || stats.vertex_overflow
 }
@@ -2228,12 +2329,12 @@ fn clamp_preview_model_uv(uv: (u8, u8), max_u: u8, max_v: u8) -> (u8, u8) {
 
 fn preview_model_surface_options(
     material: TextureMaterial,
-    double_sided: bool,
+    face_sidedness: psxed_project::MaterialFaceSidedness,
 ) -> psx_engine::WorldSurfaceOptions {
-    let cull_mode = if double_sided {
-        psx_engine::CullMode::None
-    } else {
-        psx_engine::CullMode::Back
+    let cull_mode = match face_sidedness {
+        psxed_project::MaterialFaceSidedness::Front => psx_engine::CullMode::Back,
+        psxed_project::MaterialFaceSidedness::Back => psx_engine::CullMode::Front,
+        psxed_project::MaterialFaceSidedness::Both => psx_engine::CullMode::None,
     };
     psx_engine::WorldSurfaceOptions::new(
         psx_engine::DepthBand::new(PREVIEW_GEOMETRY_SLOT_MIN, PREVIEW_GEOMETRY_SLOT_MAX),
@@ -2254,15 +2355,65 @@ fn shade_model_tint(
     fog: PreviewFog,
     lights: &[psx_engine::PointLightSample],
     ambient: [u8; 3],
+    base_tint: (u8, u8, u8),
 ) -> (u8, u8, u8) {
     let lit = psx_engine::shade_material_tint_with_lights(
-        psx_engine::MaterialTint::from_tuple((0x80, 0x80, 0x80)),
+        psx_engine::MaterialTint::from_tuple(base_tint),
         [origin.x, origin.y, origin.z],
         psx_engine::Rgb8::from_array(ambient),
         lights.iter().copied(),
     )
     .to_tuple();
     fog.apply_rgb(lit, camera.view_vertex(origin).z)
+}
+
+#[derive(Clone, Copy)]
+struct PreviewModelMaterialOverride {
+    texture: Option<MaterialSlot>,
+    blend_mode: BlendMode,
+    tint: (u8, u8, u8),
+    secondary_layer: Option<PreviewModelSecondaryLayer>,
+    face_sidedness: psxed_project::MaterialFaceSidedness,
+}
+
+#[derive(Clone, Copy)]
+struct PreviewModelSecondaryLayer {
+    texture: MaterialSlot,
+    blend_mode: BlendMode,
+    tint: (u8, u8, u8),
+}
+
+fn preview_model_material_override(
+    project: &ProjectDocument,
+    textures: &EditorTextures,
+    material_id: Option<ResourceId>,
+) -> Option<PreviewModelMaterialOverride> {
+    let material_id = material_id?;
+    let material = project
+        .resource(material_id)
+        .and_then(|resource| match &resource.data {
+            ResourceData::Material(material) => Some(material),
+            _ => None,
+        })?;
+    let replacement_texture = material
+        .psxt_path
+        .as_deref()
+        .is_some_and(|path| !path.trim().is_empty())
+        .then(|| textures.slot(material_id))
+        .flatten();
+    Some(PreviewModelMaterialOverride {
+        texture: replacement_texture,
+        blend_mode: room_geometry::psx_blend_mode(material.blend_mode),
+        tint: (material.tint[0], material.tint[1], material.tint[2]),
+        secondary_layer: material.secondary_layer.as_ref().and_then(|layer| {
+            Some(PreviewModelSecondaryLayer {
+                texture: textures.secondary_slot(material_id)?,
+                blend_mode: room_geometry::psx_blend_mode(layer.blend_mode),
+                tint: (layer.tint[0], layer.tint[1], layer.tint[2]),
+            })
+        }),
+        face_sidedness: material.sidedness(),
+    })
 }
 
 /// Marker colour per node kind, or `None` for nodes that aren't

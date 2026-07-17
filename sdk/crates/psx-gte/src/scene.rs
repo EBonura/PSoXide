@@ -620,7 +620,58 @@ pub fn screen_area_mac0(vertices: [(i16, i16); 3]) -> i32 {
     let (sx0, sy0) = (vertices[0].0 as i32, vertices[0].1 as i32);
     let (sx1, sy1) = (vertices[1].0 as i32, vertices[1].1 as i32);
     let (sx2, sy2) = (vertices[2].0 as i32, vertices[2].1 as i32);
-    sx0 * (sy1 - sy2) + sx1 * (sy2 - sy0) + sx2 * (sy0 - sy1)
+    // Algebraically identical to the three-product NCLIP expansion above,
+    // but expressed as one 2D cross product. On MIPS-I this removes one MULT
+    // from every cached-room and model-face backface test.
+    (sx1 - sx0) * (sy2 - sy0) - (sy1 - sy0) * (sx2 - sx0)
+}
+
+/// Run a hardware-safe `NCLIP` for an already-projected triangle.
+///
+/// The two input NOPs and eight-instruction result distance are both required
+/// by the console measurements documented on [`screen_area_mac0`]. This is
+/// useful in tight indexed-model loops where the GTE would otherwise be idle.
+#[inline(always)]
+pub fn screen_area_mac0_scheduled(vertices: [(i16, i16); 3]) -> i32 {
+    #[cfg(target_arch = "mips")]
+    {
+        let sxy0 = pack_xy(vertices[0].0, vertices[0].1);
+        let sxy1 = pack_xy(vertices[1].0, vertices[1].1);
+        let mut area = pack_xy(vertices[2].0, vertices[2].1);
+        unsafe {
+            asm!(
+                // MTC2 $8/$9/$10,SXY0/SXY1/SXY2.
+                ".word 0x48886000",
+                ".word 0x48896800",
+                ".word 0x488a7000",
+                // HWB-010/011 input-commit gap before NCLIP consumes SXY2.
+                ".word 0",
+                ".word 0",
+                // NCLIP plus its hardware-confirmed MAC0 result gap.
+                ".word 0x4a000006",
+                ".word 0",
+                ".word 0",
+                ".word 0",
+                ".word 0",
+                ".word 0",
+                ".word 0",
+                ".word 0",
+                ".word 0",
+                // MFC2 $10,MAC0 plus its CPU load-delay slot.
+                ".word 0x480ac000",
+                ".word 0",
+                in("$8") sxy0,
+                in("$9") sxy1,
+                inlateout("$10") area,
+                options(nostack, nomem, preserves_flags),
+            );
+        }
+        area as i32
+    }
+    #[cfg(not(target_arch = "mips"))]
+    {
+        screen_area_mac0(vertices)
+    }
 }
 
 /// Back-face test for three already-projected screen-space vertices.
@@ -704,5 +755,14 @@ mod host_smoke {
         let transformed = transform_vertex(Vec3I16::new(100, 200, 300));
 
         assert_eq!(transformed, Vec3I32::new(110, 180, 330));
+    }
+
+    #[test]
+    fn scheduled_nclip_matches_software_area_on_host() {
+        let vertices = [(-320, 112), (47, -91), (511, 230)];
+        assert_eq!(
+            screen_area_mac0_scheduled(vertices),
+            screen_area_mac0(vertices)
+        );
     }
 }

@@ -570,6 +570,13 @@ fn component_model_reference_reads_renderer_and_animator_children() {
             psxt_path: "dummy.psxt".to_string(),
         },
     );
+    let material_id = project.add_resource(
+        "Crystal",
+        ResourceData::Material(psxed_project::MaterialResource::translucent(
+            None,
+            psxed_project::PsxBlendMode::Average,
+        )),
+    );
     let scene = project.active_scene_mut();
     let actor = scene.add_node(scene.root, "Enemy", NodeKind::Entity);
     let renderer = scene.add_node(
@@ -577,7 +584,7 @@ fn component_model_reference_reads_renderer_and_animator_children() {
         "Model Renderer",
         NodeKind::ModelRenderer {
             model: Some(model_id),
-            material: None,
+            material: Some(material_id),
             visual_offset: [0; 3],
             visual_scale_q8: psxed_project::MODEL_SCALE_ONE_Q8,
         },
@@ -597,6 +604,7 @@ fn component_model_reference_reads_renderer_and_animator_children() {
     let reference = preview_model_reference(scene, scene.node(actor).unwrap()).unwrap();
 
     assert_eq!(reference.model_id, model_id);
+    assert_eq!(reference.material_override, Some(material_id));
     assert_eq!(reference.clip_override, Some(3));
     assert!(reference.autoplay);
     assert_eq!(reference.renderer_node, Some(renderer));
@@ -611,6 +619,13 @@ fn component_player_reference_reads_controller_renderer_and_animator_children() 
         ResourceData::Texture {
             psxt_path: "dummy.psxt".to_string(),
         },
+    );
+    let material_id = project.add_resource(
+        "Crystal",
+        ResourceData::Material(psxed_project::MaterialResource::translucent(
+            None,
+            psxed_project::PsxBlendMode::Average,
+        )),
     );
     let scene = project.active_scene_mut();
     let actor = scene.add_node(scene.root, "Player", NodeKind::Entity);
@@ -628,7 +643,7 @@ fn component_player_reference_reads_controller_renderer_and_animator_children() 
         "Model Renderer",
         NodeKind::ModelRenderer {
             model: None,
-            material: None,
+            material: Some(material_id),
             visual_offset: [0; 3],
             visual_scale_q8: psxed_project::MODEL_SCALE_ONE_Q8,
         },
@@ -648,6 +663,7 @@ fn component_player_reference_reads_controller_renderer_and_animator_children() 
     let reference = preview_player_reference(scene, scene.node(actor).unwrap()).unwrap();
 
     assert_eq!(reference.character, Some(character_id));
+    assert_eq!(reference.material_override, Some(material_id));
     assert_eq!(reference.controller_node, Some(controller));
     assert_eq!(reference.renderer_node, Some(renderer));
     assert_eq!(reference.animator_node, Some(animator));

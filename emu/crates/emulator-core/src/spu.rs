@@ -862,6 +862,11 @@ pub struct Spu {
     /// little sooner after DMA Read than after the write/manual paths.
     #[serde(default)]
     last_active_transfer_mode: u8,
+    /// Enable transfer/capture timing measured on the late PAL SCPH-9902.
+    /// Earlier consoles expose the conventional capture-half polarity and
+    /// accept ManualWrite FIFO contents as soon as the control latch changes.
+    #[serde(default)]
+    scph_9902_timing: bool,
     /// IRQ address (byte addr into SPU RAM). Written as halfword value
     /// which is scaled by 8.
     irq_addr: u32,
@@ -1065,12 +1070,12 @@ impl Spu {
             ram,
             voices: std::array::from_fn(|_| Voice::default()),
             spucnt: 0,
-            // SCPH-9902 reports the initial (first) capture-ring half high.
-            spustat: 1 << 11,
+            spustat: 0,
             spustat_control: 0,
             spustat_control_pending: None,
             dma_active: false,
             last_active_transfer_mode: 0,
+            scph_9902_timing: false,
             irq_addr: 0,
             transfer_addr: 0,
             transfer_addr_raw: 0,
@@ -1122,6 +1127,16 @@ impl Spu {
             // LFSR's NoiseWaveAdd lookup is stuck at index 0 forever.
             noise_val: 1,
             noise_counter: 0,
+        }
+    }
+
+    /// Select the transfer/capture behavior measured on a late PAL PSone.
+    pub fn apply_scph_9902_profile(&mut self) {
+        self.scph_9902_timing = true;
+        if self.capture_buffer_pos < 0x200 {
+            self.spustat |= 1 << 11;
+        } else {
+            self.spustat &= !(1 << 11);
         }
     }
 
@@ -1544,27 +1559,40 @@ impl Spu {
             }
         }
         self.spucnt = value;
-        // DMA-read mode does not become the current SPUSTAT mode merely from
-        // the control write: SCPH-9902 stayed in Stop for all 65,535 polls
-        // before channel 4 was armed. Other modes cross at the next sample.
         let transfer_mode = (value >> 4) & 3;
-        if transfer_mode != 0 {
-            self.last_active_transfer_mode = transfer_mode as u8;
-        }
-        if transfer_mode != 3 {
-            let next_sample = if transfer_mode == 0 {
-                let settle_cycles = if self.last_active_transfer_mode == 3 {
-                    832
+        if self.scph_9902_timing {
+            // DMA-read mode does not become the current SPUSTAT mode merely
+            // from the control write on SCPH-9902. Other modes cross at the
+            // next sample, while Stop has the measured asynchronous settle.
+            if transfer_mode != 0 {
+                self.last_active_transfer_mode = transfer_mode as u8;
+            }
+            if transfer_mode != 3 {
+                let next_sample = if transfer_mode == 0 {
+                    let settle_cycles = if self.last_active_transfer_mode == 3 {
+                        832
+                    } else {
+                        928
+                    };
+                    now.saturating_add(settle_cycles)
                 } else {
-                    928
+                    now.saturating_div(SAMPLE_CYCLES)
+                        .saturating_add(1)
+                        .saturating_mul(SAMPLE_CYCLES)
                 };
-                now.saturating_add(settle_cycles)
-            } else {
-                now.saturating_div(SAMPLE_CYCLES)
+                self.spustat_control_pending = Some((value & 0x3F, next_sample));
+            }
+        } else {
+            if transfer_mode != 3 {
+                let next_sample = now
+                    .saturating_div(SAMPLE_CYCLES)
                     .saturating_add(1)
-                    .saturating_mul(SAMPLE_CYCLES)
-            };
-            self.spustat_control_pending = Some((value & 0x3F, next_sample));
+                    .saturating_mul(SAMPLE_CYCLES);
+                self.spustat_control_pending = Some((value & 0x3F, next_sample));
+            }
+            if transfer_mode == 1 {
+                self.drain_transfer_fifo_to_ram();
+            }
         }
         // SPU IRQ enable transitioned to 0 → clear status latch (ack).
         if (prev & (1 << 6)) != 0 && (value & (1 << 6)) == 0 {
@@ -1682,7 +1710,12 @@ impl Spu {
             return;
         }
         self.transfer_fifo.push_back(value);
-        if (self.spustat_at(now) >> 4) & 0x3 == 1 {
+        let manual_write_active = if self.scph_9902_timing {
+            (self.spustat_at(now) >> 4) & 0x3 == 1
+        } else {
+            (self.spucnt >> 4) & 0x3 == 1
+        };
+        if manual_write_active {
             self.drain_transfer_fifo_to_ram();
         }
     }
@@ -2159,9 +2192,13 @@ impl Spu {
         self.write_to_capture(2, self.voices[1].last_sample as u16);
         self.write_to_capture(3, self.voices[3].last_sample as u16);
         self.capture_buffer_pos = (self.capture_buffer_pos + 2) & 0x3FF;
-        // SCPH-9902 reports bit 11 high while the first half of the capture
-        // ring is active and low for the second half.
-        if self.capture_buffer_pos < 0x200 {
+        let first_half_high = self.capture_buffer_pos < 0x200;
+        let capture_flag_high = if self.scph_9902_timing {
+            first_half_high
+        } else {
+            !first_half_high
+        };
+        if capture_flag_high {
             self.spustat |= 1 << 11;
         } else {
             self.spustat &= !(1 << 11);

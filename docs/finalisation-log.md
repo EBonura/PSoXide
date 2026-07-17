@@ -213,10 +213,27 @@ Done when:
 
 ### Z-targeting movement and animation polish
 
-Status: needs investigation.
+Status: directional runtime slice complete; turn-in-place remains optional.
 
 Problem: lock-on/Z-targeting movement is target-relative, but selected
 animations do not match the movement direction.
+
+Implemented:
+- hard lock preserves target-facing while the movement vector remains
+  camera/target-relative;
+- lock-on camera focus, facing, range checks, target switching, and the
+  indicator resolve moving game entities from their live runtime position
+  rather than their immutable authored spawn point;
+- `CharacterMotor` reports forward, backward, left-strafe, and right-strafe
+  animation intent, with quadrant tests;
+- animation action maps include optional `WalkBackward`, `StrafeLeft`, and
+  `StrafeRight` slots with walk fallback;
+- backward evade while locked is a backstep; other directions roll.
+- the CI Player idle now uses the stable sword-and-shield combat idle instead
+  of the accidentally selected Rust Mantis clip, and walk uses the CI
+  Player-skinned Mixamo walk that matches the retained run;
+- left/right strafe actions are bound to the clips matching the observed
+  controller direction.
 
 Likely scope:
 - define movement states for locked-on forward, backpedal, strafe left,
@@ -226,6 +243,11 @@ Likely scope:
 - make `CharacterMotor` report animation intent rich enough for the
   runtime player path;
 - keep camera-relative and target-relative movement rules explicit.
+
+Research reference:
+- [PoseCode](https://github.com/posecode-dev/posecode) — evaluate later as a
+  possible pose/animation authoring and processing tool; it is not a runtime
+  dependency for the current player-controller pass.
 
 Done when:
 - locked-on movement chooses clips that visually match direction;
