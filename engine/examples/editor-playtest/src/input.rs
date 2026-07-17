@@ -60,7 +60,7 @@ pub(crate) fn player_anim_from_motor(anim: CharacterMotorAnim) -> PlayerAnim {
         CharacterMotorAnim::StrafeRight => PlayerAnim::StrafeRight,
         CharacterMotorAnim::Run => PlayerAnim::Run,
         CharacterMotorAnim::Roll => PlayerAnim::Roll,
-        CharacterMotorAnim::Backstep => PlayerAnim::Backstep,
+        CharacterMotorAnim::Quickstep => PlayerAnim::Quickstep,
     }
 }
 

@@ -158,7 +158,8 @@ impl AnimationRole {
             Self::Run => "Run",
             Self::Turn => "Turn",
             Self::Roll => "Roll",
-            Self::Backstep => "Backstep",
+            // Legacy serialized variant retained as the locked quickstep slot.
+            Self::Backstep => "Quickstep",
             Self::Attack => "Attack",
             Self::Hit => "Hit",
             Self::Death => "Death",
@@ -172,7 +173,10 @@ impl AnimationRole {
             Self::Idle
         } else if name.contains("run") {
             Self::Run
-        } else if name.contains("backstep")
+        } else if name.contains("quickstep")
+            || name.contains("quick_step")
+            || name.contains("quick step")
+            || name.contains("backstep")
             || name.contains("back_step")
             || name.contains("back step")
             || name.contains("step_back")
@@ -251,7 +255,9 @@ impl CharacterAnimationAction {
             Self::Run => "Run",
             Self::Turn => "Turn",
             Self::Roll => "Roll",
-            Self::Backstep => "Backstep",
+            // Slot/index remains stable for existing project and package data,
+            // but the default Souls-style motor no longer drives it.
+            Self::Backstep => "Legacy Quickstep",
             Self::LightAttack => "Light Attack",
             Self::HeavyAttack => "Heavy Attack",
             Self::ComboAttack => "Combo Attack",
@@ -336,7 +342,10 @@ impl CharacterAnimationAction {
             Some(Self::Idle)
         } else if name.contains("run") {
             Some(Self::Run)
-        } else if name.contains("backstep")
+        } else if name.contains("quickstep")
+            || name.contains("quick_step")
+            || name.contains("quick step")
+            || name.contains("backstep")
             || name.contains("back_step")
             || name.contains("back step")
             || name.contains("step_back")
@@ -1110,19 +1119,19 @@ pub struct CharacterResource {
     /// Invulnerable frames from roll start.
     #[serde(default = "default_character_roll_invulnerable_frames")]
     pub roll_invulnerable_frames: u8,
-    /// Stamina spent to start a backstep.
+    /// Legacy quickstep stamina cost retained for project compatibility.
     #[serde(default = "default_character_backstep_cost_q12")]
     pub backstep_cost_q12: i32,
-    /// Backstep travel speed in engine units per 60 Hz frame.
+    /// Legacy quickstep travel speed in engine units per 60 Hz frame.
     #[serde(default = "default_character_backstep_speed")]
     pub backstep_speed: i32,
-    /// Frames where the backstep keeps moving.
+    /// Legacy quickstep active movement frames.
     #[serde(default = "default_character_backstep_active_frames")]
     pub backstep_active_frames: u8,
-    /// Recovery frames after backstep movement ends.
+    /// Legacy quickstep recovery frames.
     #[serde(default = "default_character_backstep_recovery_frames")]
     pub backstep_recovery_frames: u8,
-    /// Invulnerable frames from backstep start.
+    /// Legacy quickstep invulnerability frames.
     #[serde(default = "default_character_backstep_invulnerable_frames")]
     pub backstep_invulnerable_frames: u8,
     /// Distance the third-person camera trails the character.
@@ -1446,19 +1455,19 @@ pub struct CharacterControllerSettings {
     /// Invulnerable frames from roll start.
     #[serde(default = "default_character_roll_invulnerable_frames")]
     pub roll_invulnerable_frames: u8,
-    /// Stamina spent to start a backstep.
+    /// Legacy quickstep stamina cost retained for project compatibility.
     #[serde(default = "default_character_backstep_cost_q12")]
     pub backstep_cost_q12: i32,
-    /// Backstep travel speed in engine units per 60 Hz frame.
+    /// Legacy quickstep travel speed in engine units per 60 Hz frame.
     #[serde(default = "default_character_backstep_speed")]
     pub backstep_speed: i32,
-    /// Frames where the backstep keeps moving.
+    /// Legacy quickstep active movement frames.
     #[serde(default = "default_character_backstep_active_frames")]
     pub backstep_active_frames: u8,
-    /// Recovery frames after backstep movement ends.
+    /// Legacy quickstep recovery frames.
     #[serde(default = "default_character_backstep_recovery_frames")]
     pub backstep_recovery_frames: u8,
-    /// Invulnerable frames from backstep start.
+    /// Legacy quickstep invulnerability frames.
     #[serde(default = "default_character_backstep_invulnerable_frames")]
     pub backstep_invulnerable_frames: u8,
     /// Souls-like enemy behavior opt-in for non-player controllers.
