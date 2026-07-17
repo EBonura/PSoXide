@@ -82,9 +82,11 @@ const INITIAL_HEIGHT: u32 = 1000;
 /// Retina displays, and the initial window is already larger.
 const MIN_WIDTH: u32 = 1400;
 const MIN_HEIGHT: u32 = 700;
-/// Frontend run cadence target. The toolbar, "advance one frame"
-/// control, and sample pump all assume an NTSC-ish 60 Hz shell.
-const TARGET_FRAME_DT: f32 = 1.0 / 60.0;
+/// PSX CPU clock used to convert the active machine's exact VBlank period to
+/// wall time. NTSC is about 59.29 Hz here, not 60 Hz; forcing 60 Hz steadily
+/// overproduces SPU samples until the host queue has to discard them.
+const PSX_MASTER_CLOCK_HZ: f32 = 33_868_800.0;
+const FALLBACK_FRAME_DT: f32 = 1.0 / 60.0;
 /// Used only by the editor's Play metrics overlay (cycles -> milliseconds).
 #[cfg(feature = "editor")]
 const PSX_CYCLES_PER_MS: f32 = 33_868_800.0 / 1000.0;
@@ -92,6 +94,13 @@ const PSX_CYCLES_PER_MS: f32 = 33_868_800.0 / 1000.0;
 /// cap the burst so a debugger stop or window drag doesn't spend
 /// seconds chewing through delayed emu frames.
 const MAX_CATCHUP_FRAMES: u32 = 4;
+
+fn guest_frame_dt(vblank_period: Option<u64>) -> f32 {
+    vblank_period
+        .filter(|period| *period != 0)
+        .map(|period| period as f32 / PSX_MASTER_CLOCK_HZ)
+        .unwrap_or(FALLBACK_FRAME_DT)
+}
 /// Paused redraw cadence while interaction is plausible: a pad was
 /// recently used, the Menu overlay is up, or the editor workspace is
 /// front. Matches the run cadence so pad-driven menu navigation feels
@@ -880,9 +889,11 @@ impl ApplicationHandler for Shell {
                 // (paused, or the off-beat of a 120 Hz host pacing a 60 Hz
                 // guest) it would be identical to live VRAM anyway, which
                 // is exactly what the replay path falls back to.
+                let active_frame_dt =
+                    guest_frame_dt(self.state.bus.as_ref().map(|bus| bus.vblank_period()));
                 let frames_to_run = if self.state.running {
                     self.emu_frame_accum = (self.emu_frame_accum + dt).min(0.25);
-                    ((self.emu_frame_accum / TARGET_FRAME_DT) as u32).min(MAX_CATCHUP_FRAMES)
+                    ((self.emu_frame_accum / active_frame_dt) as u32).min(MAX_CATCHUP_FRAMES)
                 } else {
                     0
                 };
@@ -992,7 +1003,7 @@ impl ApplicationHandler for Shell {
                         profile.add_guest_profile(guest_profile);
                         profile.audio_ms += elapsed_ms(audio_start);
                     }
-                    self.emu_frame_accum -= (frames_to_run as f32) * TARGET_FRAME_DT;
+                    self.emu_frame_accum -= (frames_to_run as f32) * active_frame_dt;
                 } else {
                     self.emu_frame_accum = 0.0;
                 }
@@ -1344,7 +1355,7 @@ impl Shell {
     /// Decide when the next redraw is due and park the loop until then.
     ///
     /// Running: wake exactly when the wall clock owes the guest its next
-    /// 60 Hz frame (`emu_frame_accum` holds the unpaid fraction, anchored
+    /// active machine frame (`emu_frame_accum` holds the unpaid fraction, anchored
     /// at `last_frame`); the Fifo present keeps the actual paint aligned
     /// to vblank. Paused: take the earliest of egui's own repaint request
     /// (slide animations, caret blink) and a tick -- ACTIVE_TICK_DT while
@@ -1363,7 +1374,8 @@ impl Shell {
         };
         let now = Instant::now();
         let next = if self.state.running {
-            let owed = (TARGET_FRAME_DT - self.emu_frame_accum).max(0.0);
+            let frame_dt = guest_frame_dt(self.state.bus.as_ref().map(|bus| bus.vblank_period()));
+            let owed = (frame_dt - self.emu_frame_accum).max(0.0);
             self.last_frame
                 .checked_add(Duration::from_secs_f32(owed))
                 .unwrap_or(now)
@@ -1934,6 +1946,25 @@ fn profile_counter_i32_biased(value: u32, bias: i32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn guest_frame_cadence_tracks_emulated_vblank_period() {
+        let ntsc_period = 571_236u64;
+        let pal_period = 680_438u64;
+
+        let ntsc_hz = 1.0 / guest_frame_dt(Some(ntsc_period));
+        let pal_hz = 1.0 / guest_frame_dt(Some(pal_period));
+        assert!((ntsc_hz - 59.29).abs() < 0.01);
+        assert!((pal_hz - 49.77).abs() < 0.01);
+
+        let ntsc_samples_per_second =
+            (ntsc_period as f32 / emulator_core::spu::SAMPLE_CYCLES as f32) * ntsc_hz;
+        assert!((ntsc_samples_per_second - 44_100.0).abs() < 0.1);
+
+        let forced_60hz_samples =
+            (ntsc_period as f32 / emulator_core::spu::SAMPLE_CYCLES as f32) * 60.0;
+        assert!(forced_60hz_samples > 44_600.0);
+    }
 
     #[test]
     fn keyboard_mapping_uses_default_settings() {
