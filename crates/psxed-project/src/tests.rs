@@ -1910,11 +1910,36 @@ fn editor_visibility_roundtrips_through_ron_string() {
 fn editor_workspace_roundtrips_through_ron_string() {
     let mut project = ProjectDocument::new("workspace");
     project.editor_workspace = EditorWorkspaceState {
-        active: EditorWorkspaceView::Ui,
+        active: EditorWorkspaceView::Material,
     };
     let ron = project.to_ron_string().unwrap();
 
     assert!(ron.contains("editor_workspace"));
+    assert_eq!(ProjectDocument::from_ron_str(&ron).unwrap(), project);
+}
+
+#[test]
+fn material_lab_recipe_roundtrips_through_ron_string() {
+    let mut project = ProjectDocument::new("material-lab");
+    let mut material = MaterialResource::translucent(None, PsxBlendMode::Average);
+    material.texture_mode = MaterialTextureMode::Generated;
+    material.generated = GeneratedMaterialTexture {
+        size: 32,
+        base_color: [16, 32, 48],
+        noise_color: [200, 210, 220],
+        noise_uv: GeneratedTextureUv {
+            scale_u_q8: 384,
+            scale_v_q8: 192,
+            offset_u: -3,
+            offset_v: 9,
+            rotation_quarters: 3,
+        },
+        ..GeneratedMaterialTexture::default()
+    };
+    project.add_resource("Generated Glass", ResourceData::Material(material));
+
+    let ron = project.to_ron_string().unwrap();
+    assert!(ron.contains("texture_mode: Generated"));
     assert_eq!(ProjectDocument::from_ron_str(&ron).unwrap(), project);
 }
 

@@ -47,24 +47,23 @@ pub(crate) fn cook_far_vista_texture_asset(
         ));
         return None;
     };
-    let Some(psxt_path) = resource_psxt_path(texture_resource) else {
-        report.warn(format!(
-            "{context}: material '{}' has no texture; using placeholder",
-            texture_resource.name
-        ));
-        return None;
-    };
-    if let Some(existing) = texture_asset_for_path.get(psxt_path).copied() {
-        return Some(existing);
-    }
-    let psxt_path = psxt_path.to_string();
-    let bytes = match load_psxt_bytes(&texture_resource.name, &psxt_path, project_root) {
-        Ok(bytes) => bytes,
+    let (texture_key, bytes) = match material_texture_bytes(texture_resource, project_root) {
+        Ok(Some(source)) => source,
+        Ok(None) => {
+            report.warn(format!(
+                "{context}: material '{}' has no texture; using placeholder",
+                texture_resource.name
+            ));
+            return None;
+        }
         Err(msg) => {
             report.warn(format!("{context}: {msg}; using placeholder"));
             return None;
         }
     };
+    if let Some(existing) = texture_asset_for_path.get(&texture_key).copied() {
+        return Some(existing);
+    }
     if let Err(msg) = expect_room_material_depth(&texture_resource.name, &bytes) {
         report.warn(format!("{context}: {msg}; using placeholder"));
         return None;
@@ -79,7 +78,7 @@ pub(crate) fn cook_far_vista_texture_asset(
         source_label: texture_resource.name.clone(),
         streamed_class: StreamedClass::None,
     });
-    texture_asset_for_path.insert(psxt_path, new_index);
+    texture_asset_for_path.insert(texture_key, new_index);
     Some(new_index)
 }
 

@@ -154,6 +154,8 @@ pub enum EditorWorkspaceView {
     Ui,
     /// Model/animation preview workspace.
     Animation,
+    /// Reusable material authoring workspace.
+    Material,
 }
 
 /// Editor-only workspace preferences persisted with a project.
