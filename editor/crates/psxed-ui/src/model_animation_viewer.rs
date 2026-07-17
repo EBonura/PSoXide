@@ -1,18 +1,29 @@
 use crate::centered_aspect_rect;
-use std::{collections::HashSet, path::Path};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::UNIX_EPOCH,
+};
 
 use egui::{
     Align2, Color32, ColorImage, FontId, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Vec2,
 };
 use psx_asset::{Animation, Texture};
 use psxed_project::{
-    model_import::resolve_path, AnimationClipCalibration, AnimationRole, ProjectDocument,
+    model_import::resolve_path, AnimationClipCalibration, AnimationRole, NodeKind, ProjectDocument,
     ResourceData, ResourceId,
 };
 
 use crate::icons;
 use crate::model_import_preview::{self, ImportPreviewOptions};
-use crate::style::{STUDIO_BORDER, STUDIO_PANEL_DARK, STUDIO_TEXT_WEAK};
+use crate::style::{STUDIO_ACCENT, STUDIO_BORDER, STUDIO_PANEL_DARK, STUDIO_TEXT_WEAK};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AnimationPreviewQuality {
+    Authoring,
+    PsxOutput,
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct ModelAnimationViewerState {
@@ -27,6 +38,9 @@ pub(crate) struct ModelAnimationViewerState {
     radius: i32,
     show_animation_root: bool,
     show_bones: bool,
+    preview_quality: AnimationPreviewQuality,
+    cached_model: Option<CachedModelContext>,
+    cached_clip: Option<CachedClipContext>,
     last_time_seconds: f64,
 }
 
@@ -44,12 +58,19 @@ impl Default for ModelAnimationViewerState {
             radius: 0,
             show_animation_root: false,
             show_bones: false,
+            preview_quality: AnimationPreviewQuality::Authoring,
+            cached_model: None,
+            cached_clip: None,
             last_time_seconds: 0.0,
         }
     }
 }
 
 impl ModelAnimationViewerState {
+    pub(crate) const fn selected_model(&self) -> Option<ResourceId> {
+        self.selected_model
+    }
+
     pub(crate) fn focus_resource(&mut self, project: &ProjectDocument, id: ResourceId) {
         let Some(resource) = project.resource(id) else {
             return;
@@ -121,6 +142,57 @@ impl ModelAnimationViewerState {
         self.frame = 0.0;
         self.last_clip_path = None;
     }
+
+    fn invalidate_model_cache(&mut self) {
+        self.cached_model = None;
+    }
+
+    fn invalidate_clip_cache(&mut self) {
+        self.cached_clip = None;
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FileStamp {
+    path: PathBuf,
+    len: u64,
+    modified_millis: u128,
+}
+
+impl FileStamp {
+    fn read(path: PathBuf) -> Option<Self> {
+        let metadata = std::fs::metadata(&path).ok()?;
+        let modified_millis = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+            .map(|duration| duration.as_millis())
+            .unwrap_or_default();
+        Some(Self {
+            path,
+            len: metadata.len(),
+            modified_millis,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CachedModelContext {
+    resource: ResourceId,
+    model_stamp: FileStamp,
+    atlas_stamp: Option<FileStamp>,
+    authored_rotation_q12: [u16; 3],
+    world_height: u16,
+    collision_radius: u16,
+    visual_scale_q8: u16,
+    context: Arc<LoadedModelContext>,
+}
+
+#[derive(Debug, Clone)]
+struct CachedClipContext {
+    path: String,
+    stamp: FileStamp,
+    context: Arc<LoadedClipContext>,
 }
 
 #[derive(Clone)]
@@ -161,7 +233,7 @@ pub(crate) enum AnimationViewerAction {
     ProjectChanged,
 }
 
-pub(crate) fn draw_model_animation_viewer(
+pub(crate) fn draw_model_animation_viewer_toolbar(
     ui: &mut egui::Ui,
     project: &mut ProjectDocument,
     project_root: &Path,
@@ -169,7 +241,6 @@ pub(crate) fn draw_model_animation_viewer(
     preview_texture: &mut Option<egui::TextureHandle>,
 ) -> Option<AnimationViewerAction> {
     state.ensure_selection(project);
-    let mut action = None;
 
     let model_options =
         collect_resource_options(project, |data| matches!(data, ResourceData::Model(_)));
@@ -177,75 +248,91 @@ pub(crate) fn draw_model_animation_viewer(
         .selected_model
         .map(|id| build_clip_options(project, id))
         .unwrap_or_default();
+    let model_context = state
+        .selected_model
+        .and_then(|id| load_model_context_cached(project, project_root, state, id));
+    let mut selected_clip = state
+        .selected_clip_path
+        .as_ref()
+        .and_then(|path| clip_options.iter().find(|clip| clip.path == *path))
+        .cloned();
+    let clip_context = selected_clip
+        .as_ref()
+        .and_then(|clip| load_clip_context_cached(project_root, state, clip));
 
-    ui.vertical(|ui| {
-        ui.horizontal_wrapped(|ui| {
-            if resource_combo(
-                ui,
-                "Model",
-                "animation-viewer-model",
-                &mut state.selected_model,
-                &model_options,
-            ) {
-                state.selected_clip_path = None;
-                state.reset_clip_clock();
-                state.ensure_selection(project);
-            }
-            clip_combo(ui, state, &clip_options);
-        });
+    if state.last_clip_path.as_deref() != state.selected_clip_path.as_deref() {
+        state.frame = 0.0;
+        state.last_clip_path = state.selected_clip_path.clone();
+        state.last_time_seconds = ui.input(|input| input.time);
+    }
+    let selected_model = state.selected_model;
 
-        ui.separator();
-
-        let model_context = state
-            .selected_model
-            .and_then(|id| load_model_context(project, project_root, id));
-        let mut selected_clip = state
-            .selected_clip_path
-            .as_ref()
-            .and_then(|path| clip_options.iter().find(|clip| clip.path == *path))
-            .cloned();
-        let clip_context = selected_clip
-            .as_ref()
-            .and_then(|clip| load_clip_context(project_root, clip));
-
-        if state.last_clip_path.as_deref() != state.selected_clip_path.as_deref() {
-            state.frame = 0.0;
-            state.last_clip_path = state.selected_clip_path.clone();
-            state.last_time_seconds = ui.input(|input| input.time);
+    if resource_combo(
+        ui,
+        "Model",
+        "animation-viewer-model",
+        &mut state.selected_model,
+        &model_options,
+    ) {
+        state.selected_clip_path = None;
+        state.reset_clip_clock();
+        state.invalidate_model_cache();
+        state.invalidate_clip_cache();
+        state.ensure_selection(project);
+    }
+    clip_combo(ui, state, &clip_options);
+    ui.separator();
+    let mut action = draw_playback_controls(
+        ui,
+        state,
+        selected_model,
+        selected_clip.as_ref(),
+        clip_context.as_ref().and_then(|clip| clip.animation_stats),
+    );
+    ui.separator();
+    if draw_clip_calibration_menu(ui, project, selected_model, selected_clip.as_mut()) {
+        preview_texture.take();
+        if action.is_none() {
+            action = Some(AnimationViewerAction::ProjectChanged);
         }
-
-        let selected_model = state.selected_model;
-        action = draw_playback_controls(
-            ui,
-            state,
-            selected_model,
-            selected_clip.as_ref(),
-            clip_context.as_ref().and_then(|clip| clip.animation_stats),
-        );
-        if draw_selected_clip_calibration(ui, project, selected_model, selected_clip.as_mut()) {
-            preview_texture.take();
-            if action.is_none() {
-                action = Some(AnimationViewerAction::ProjectChanged);
-            }
-        }
-
-        let preview_height = ui.available_height().max(320.0);
-        ui.allocate_ui_with_layout(
-            Vec2::new(ui.available_width(), preview_height),
-            egui::Layout::top_down(egui::Align::Min),
-            |ui| {
-                draw_preview(
-                    ui,
-                    state,
-                    model_context.as_ref(),
-                    selected_clip.as_ref(),
-                    clip_context.as_ref(),
-                    preview_texture,
-                );
-            },
-        );
-    });
+    }
+    ui.separator();
+    draw_preview_toolbar(ui, state, model_context.as_deref());
     action
+}
+
+pub(crate) fn draw_model_animation_viewer(
+    ui: &mut egui::Ui,
+    project: &mut ProjectDocument,
+    project_root: &Path,
+    state: &mut ModelAnimationViewerState,
+    preview_texture: &mut Option<egui::TextureHandle>,
+) {
+    state.ensure_selection(project);
+    let clip_options = state
+        .selected_model
+        .map(|id| build_clip_options(project, id))
+        .unwrap_or_default();
+    let model_context = state
+        .selected_model
+        .and_then(|id| load_model_context_cached(project, project_root, state, id));
+    let selected_clip = state
+        .selected_clip_path
+        .as_ref()
+        .and_then(|path| clip_options.iter().find(|clip| clip.path == *path))
+        .cloned();
+    let clip_context = selected_clip
+        .as_ref()
+        .and_then(|clip| load_clip_context_cached(project_root, state, clip));
+
+    draw_preview(
+        ui,
+        state,
+        model_context.as_deref(),
+        selected_clip.as_ref(),
+        clip_context.as_deref(),
+        preview_texture,
+    );
 }
 
 fn draw_playback_controls(
@@ -276,80 +363,114 @@ fn draw_playback_controls(
     }
     state.last_time_seconds = now;
 
-    ui.horizontal(|ui| {
-        let Some(animation) = animation else {
-            ui.add_enabled(false, egui::Button::new(icons::label(icons::PLAY, "Play")));
-            if let Some(clip) = clip.filter(|clip| !clip.previewable) {
-                ui.weak("Source is not baked yet");
-                if let (Some(model_id), Some(source_id)) = (selected_model, clip.resource) {
-                    if ui
-                        .button(icons::label(icons::PLUS, "Bake for Model"))
-                        .clicked()
-                    {
-                        action = Some(AnimationViewerAction::BakeSourceForModel {
-                            model_id,
-                            source_id,
-                        });
-                    }
+    let Some(animation) = animation else {
+        ui.add_enabled(false, egui::Button::new(icons::label(icons::PLAY, "Play")));
+        if let Some(clip) = clip.filter(|clip| !clip.previewable) {
+            ui.weak("Source is not baked yet");
+            if let (Some(model_id), Some(source_id)) = (selected_model, clip.resource) {
+                if ui
+                    .button(icons::label(icons::PLUS, "Bake for Model"))
+                    .clicked()
+                {
+                    action = Some(AnimationViewerAction::BakeSourceForModel {
+                        model_id,
+                        source_id,
+                    });
                 }
-            } else {
-                ui.weak("No cooked animation loaded");
             }
-            draw_overlay_toggles(ui, state);
-            return;
-        };
-        if ui
-            .button(if state.playing {
-                icons::label(icons::PLAY, "Pause")
-            } else {
-                icons::label(icons::PLAY, "Play")
-            })
-            .clicked()
-        {
-            state.playing = !state.playing;
-            state.last_time_seconds = now;
+        } else {
+            ui.weak("No cooked animation loaded");
         }
-        let max_frame = animation.frame_count.saturating_sub(1).max(1);
-        let mut frame = state.frame.round() as u16;
-        if ui
-            .add(egui::Slider::new(&mut frame, 0..=max_frame).text("Frame"))
-            .changed()
-        {
-            state.frame = frame as f32;
-            state.playing = false;
-        }
-        ui.label(
-            RichText::new(format!(
-                "{} / {} @ {} Hz",
-                frame,
-                animation.frame_count.saturating_sub(1),
-                animation.sample_rate_hz
-            ))
+        return action;
+    };
+    let max_frame = animation.frame_count.saturating_sub(1).max(1);
+    let frame = state.frame.round() as u16;
+    if ui
+        .button(icons::text(icons::CHEVRON_LEFT, 14.0))
+        .on_hover_text("Previous frame")
+        .clicked()
+    {
+        state.frame = frame.saturating_sub(1) as f32;
+        state.playing = false;
+    }
+    if ui
+        .button(if state.playing {
+            icons::text(icons::SQUARE, 14.0)
+        } else {
+            icons::text(icons::PLAY, 14.0)
+        })
+        .on_hover_text(if state.playing { "Pause" } else { "Play" })
+        .clicked()
+    {
+        state.playing = !state.playing;
+        state.last_time_seconds = now;
+    }
+    if ui
+        .button(icons::text(icons::CHEVRON_RIGHT, 14.0))
+        .on_hover_text("Next frame")
+        .clicked()
+    {
+        state.frame = frame.saturating_add(1).min(max_frame) as f32;
+        state.playing = false;
+    }
+    let timeline_width = ui.available_width().clamp(80.0, 110.0);
+    let mut timeline_frame = state.frame.round() as u16;
+    let timeline_changed = ui
+        .scope(|ui| {
+            ui.spacing_mut().slider_width = timeline_width;
+            ui.add(egui::Slider::new(&mut timeline_frame, 0..=max_frame).show_value(false))
+                .changed()
+        })
+        .inner;
+    if timeline_changed {
+        state.frame = timeline_frame as f32;
+        state.playing = false;
+    }
+    ui.label(
+        RichText::new(format!("{frame}/{max_frame}"))
             .monospace()
             .color(STUDIO_TEXT_WEAK),
-        );
-        ui.add(
-            egui::Slider::new(&mut state.playback_speed, 0.1..=2.0)
-                .text("Speed")
-                .step_by(0.1),
-        );
-        draw_overlay_toggles(ui, state);
-    });
+    )
+    .on_hover_text(format!(
+        "Frame {frame} of {max_frame} · {} Hz",
+        animation.sample_rate_hz
+    ));
+    ui.add(
+        egui::DragValue::new(&mut state.playback_speed)
+            .speed(0.05)
+            .range(0.1..=2.0)
+            .fixed_decimals(1)
+            .suffix("×"),
+    )
+    .on_hover_text("Playback speed");
     action
 }
 
-fn draw_overlay_toggles(ui: &mut egui::Ui, state: &mut ModelAnimationViewerState) {
-    ui.separator();
-    ui.toggle_value(
-        &mut state.show_bones,
-        icons::label(icons::WAYPOINT, "Bones"),
-    )
-    .on_hover_text("Draw the cooked skeleton overlay");
-    ui.toggle_value(
-        &mut state.show_animation_root,
-        icons::label(icons::CIRCLE_DOT, "Anchor"),
-    )
-    .on_hover_text("Draw the body-derived preview anchor");
+fn draw_clip_calibration_menu(
+    ui: &mut egui::Ui,
+    project: &mut ProjectDocument,
+    selected_model: Option<ResourceId>,
+    clip: Option<&mut ViewerClipOption>,
+) -> bool {
+    let in_place = clip
+        .as_deref()
+        .is_some_and(|clip| clip.calibration.in_place);
+    let current = if in_place { "In-place" } else { "Root motion" };
+    let menu = egui::menu::menu_custom_button(
+        ui,
+        egui::Button::new(icons::text(icons::MOVE, 14.0))
+            .selected(in_place)
+            .min_size(Vec2::new(30.0, 23.0)),
+        |ui| {
+            ui.set_min_width(330.0);
+            ui.horizontal(|ui| draw_selected_clip_calibration(ui, project, selected_model, clip))
+                .inner
+        },
+    );
+    let changed = menu.inner.unwrap_or(false);
+    menu.response
+        .on_hover_text(format!("Root-motion placement · {current}"));
+    changed
 }
 
 fn draw_selected_clip_calibration(
@@ -364,38 +485,39 @@ fn draw_selected_clip_calibration(
     let editable = clip_calibration_editable(project, selected_model, clip);
     let mut calibration = clip.calibration;
     let mut changed = false;
-    ui.horizontal_wrapped(|ui| {
-        ui.label(RichText::new("Placement").color(STUDIO_TEXT_WEAK));
+    ui.label(RichText::new("Root").color(STUDIO_TEXT_WEAK));
+    changed |= ui
+        .add_enabled(
+            editable,
+            egui::Checkbox::new(&mut calibration.in_place, "In-place"),
+        )
+        .on_hover_text("Cancels this clip's root translation while previewing and at runtime")
+        .changed();
+    for (axis, label) in ["X", "Y", "Z"].iter().enumerate() {
+        ui.label(RichText::new(*label).color(STUDIO_TEXT_WEAK));
         changed |= ui
             .add_enabled(
                 editable,
-                egui::Checkbox::new(&mut calibration.in_place, "In-place"),
+                egui::DragValue::new(&mut calibration.offset[axis])
+                    .speed(4.0)
+                    .range(-8192..=8192),
             )
-            .on_hover_text("Cancels this clip's root translation while previewing and at runtime")
             .changed();
-        ui.separator();
-        for (axis, label) in ["X", "Y", "Z"].iter().enumerate() {
-            ui.label(RichText::new(*label).color(STUDIO_TEXT_WEAK));
-            changed |= ui
-                .add_enabled(
-                    editable,
-                    egui::DragValue::new(&mut calibration.offset[axis])
-                        .speed(4.0)
-                        .range(-8192..=8192),
-                )
-                .changed();
-        }
-        if ui
-            .add_enabled(editable, egui::Button::new("Reset"))
-            .clicked()
-        {
-            calibration = AnimationClipCalibration::default();
-            changed = true;
-        }
-        if !editable {
-            ui.weak("Bake this source before editing placement.");
-        }
-    });
+    }
+    if ui
+        .add_enabled(
+            editable,
+            egui::Button::new(icons::text(icons::ROTATE_CCW, 13.0)),
+        )
+        .on_hover_text("Reset root motion placement")
+        .clicked()
+    {
+        calibration = AnimationClipCalibration::default();
+        changed = true;
+    }
+    if !editable {
+        ui.weak("Bake source to edit placement");
+    }
     if changed && store_clip_calibration(project, selected_model, clip, calibration) {
         clip.calibration = calibration;
         return true;
@@ -443,6 +565,84 @@ fn store_clip_calibration(
     // resource there is nowhere to store calibration.
     let _ = (selected_model, clip);
     false
+}
+
+fn draw_preview_toolbar(
+    ui: &mut egui::Ui,
+    state: &mut ModelAnimationViewerState,
+    model: Option<&LoadedModelContext>,
+) {
+    egui::ComboBox::from_id_salt("animation-camera-preset")
+        .selected_text(icons::text(icons::ROTATE_3D, 14.0))
+        .width(28.0)
+        .show_ui(ui, |ui| {
+            if ui.button("Perspective").clicked() {
+                set_camera_preset(state, 340, 350);
+                ui.close_menu();
+            }
+            if ui.button("Front").clicked() {
+                set_camera_preset(state, 0, 96);
+                ui.close_menu();
+            }
+            if ui.button("Side").clicked() {
+                set_camera_preset(state, 1024, 96);
+                ui.close_menu();
+            }
+            if ui.button("Top").clicked() {
+                set_camera_preset(state, 0, 900);
+                ui.close_menu();
+            }
+            ui.separator();
+            if ui
+                .button(icons::label(icons::ROTATE_CCW, "Reset orbit"))
+                .clicked()
+            {
+                state.yaw_q12 = 340;
+                state.pitch_q12 = 350;
+                state.radius = 0;
+                ui.close_menu();
+            }
+        });
+    egui::ComboBox::from_id_salt("animation-preview-quality")
+        .selected_text(match state.preview_quality {
+            AnimationPreviewQuality::Authoring => "HQ",
+            AnimationPreviewQuality::PsxOutput => "PS1",
+        })
+        .width(48.0)
+        .show_ui(ui, |ui| {
+            ui.selectable_value(
+                &mut state.preview_quality,
+                AnimationPreviewQuality::Authoring,
+                "Authoring",
+            )
+            .on_hover_text("High-resolution authoring preview with smooth display scaling");
+            ui.selectable_value(
+                &mut state.preview_quality,
+                AnimationPreviewQuality::PsxOutput,
+                "PS1 Output",
+            )
+            .on_hover_text("Exact 320 × 240 preview with nearest-neighbour scaling");
+        });
+    ui.toggle_value(&mut state.show_bones, icons::text(icons::WAYPOINT, 14.0))
+        .on_hover_text("Draw the cooked skeleton overlay");
+    ui.toggle_value(
+        &mut state.show_animation_root,
+        icons::text(icons::CIRCLE_DOT, 14.0),
+    )
+    .on_hover_text("Draw the body-derived preview anchor");
+    if let Some(model) = model {
+        ui.label(icons::text(icons::CIRCLE_DOT, 13.0).color(STUDIO_ACCENT))
+            .on_hover_text(format!(
+                "{}\nUsing the same authored presentation transform as the 3D view",
+                model.orientation_label
+            ));
+    }
+}
+
+fn set_camera_preset(state: &mut ModelAnimationViewerState, yaw_q12: i32, pitch_q12: i32) {
+    state.yaw_q12 = yaw_q12;
+    state.pitch_q12 = pitch_q12;
+    state.radius = 0;
 }
 
 fn draw_preview(
@@ -571,7 +771,12 @@ fn draw_preview(
     };
 
     let seconds = state.frame.max(0.0) as f64 / animation.sample_rate_hz.max(1) as f64;
-    let image = model_import_preview::render_import_model_preview_with_options(
+    let render_size = preview_render_size(ui, rect, state.preview_quality);
+    let texture_options = match state.preview_quality {
+        AnimationPreviewQuality::Authoring => egui::TextureOptions::LINEAR,
+        AnimationPreviewQuality::PsxOutput => egui::TextureOptions::NEAREST,
+    };
+    let image = model_import_preview::render_import_model_preview_with_orientation_at_size(
         &model.model_bytes,
         &clip.bytes,
         atlas,
@@ -591,20 +796,22 @@ fn draw_preview(
             show_collision_guides: false,
             show_bones: state.show_bones,
         },
+        model_import_preview::euler_rotation_q12(model.authored_rotation_q12),
+        render_size,
     );
 
     match image {
         Some(image) => {
             let texture_id = match preview_texture {
                 Some(handle) => {
-                    handle.set(image, egui::TextureOptions::NEAREST);
+                    handle.set(image, texture_options);
                     handle.id()
                 }
                 None => {
                     let handle = ui.ctx().load_texture(
                         "model-animation-viewer-preview",
                         image,
-                        egui::TextureOptions::NEAREST,
+                        texture_options,
                     );
                     let id = handle.id();
                     *preview_texture = Some(handle);
@@ -613,8 +820,7 @@ fn draw_preview(
             };
             let preview_rect = centered_aspect_rect(
                 rect.shrink(8.0),
-                model_import_preview::PREVIEW_WIDTH as f32
-                    / model_import_preview::PREVIEW_HEIGHT as f32,
+                render_size[0] as f32 / render_size[1] as f32,
             );
             painter.image(
                 texture_id,
@@ -641,6 +847,35 @@ fn draw_preview(
     );
 }
 
+fn preview_render_size(ui: &egui::Ui, rect: Rect, quality: AnimationPreviewQuality) -> [usize; 2] {
+    if quality == AnimationPreviewQuality::PsxOutput {
+        return [
+            model_import_preview::PREVIEW_WIDTH,
+            model_import_preview::PREVIEW_HEIGHT,
+        ];
+    }
+
+    let available = centered_aspect_rect(rect.shrink(8.0), 4.0 / 3.0);
+    let pixels_per_point = ui.ctx().pixels_per_point().max(1.0);
+    let mut width = (available.width() * pixels_per_point).round() as usize;
+    let mut height = (available.height() * pixels_per_point).round() as usize;
+    width = width.clamp(
+        model_import_preview::PREVIEW_WIDTH,
+        model_import_preview::AUTHORING_PREVIEW_MAX_WIDTH,
+    );
+    height = height.clamp(
+        model_import_preview::PREVIEW_HEIGHT,
+        model_import_preview::AUTHORING_PREVIEW_MAX_HEIGHT,
+    );
+    let aspect_height = width.saturating_mul(3) / 4;
+    if aspect_height <= model_import_preview::AUTHORING_PREVIEW_MAX_HEIGHT {
+        height = aspect_height.max(model_import_preview::PREVIEW_HEIGHT);
+    } else {
+        width = height.saturating_mul(4) / 3;
+    }
+    [width, height]
+}
+
 fn resource_combo(
     ui: &mut egui::Ui,
     label: &str,
@@ -657,7 +892,7 @@ fn resource_combo(
             .unwrap_or("(none)");
         egui::ComboBox::from_id_salt(id_salt)
             .selected_text(selected)
-            .width(280.0)
+            .width(90.0)
             .show_ui(ui, |ui| {
                 if ui.selectable_label(current.is_none(), "(none)").clicked() {
                     *current = None;
@@ -680,7 +915,7 @@ fn clip_combo(
     options: &[ViewerClipOption],
 ) {
     ui.horizontal(|ui| {
-        ui.label(RichText::new("Animation").color(STUDIO_TEXT_WEAK));
+        ui.label(RichText::new("Clip").color(STUDIO_TEXT_WEAK));
         let selected = state
             .selected_clip_path
             .as_ref()
@@ -689,7 +924,7 @@ fn clip_combo(
             .unwrap_or("(none)");
         egui::ComboBox::from_id_salt("animation-viewer-clip")
             .selected_text(selected)
-            .width(520.0)
+            .width(108.0)
             .show_ui(ui, |ui| {
                 for option in options {
                     let selected = state.selected_clip_path.as_deref() == Some(option.path.as_str());
@@ -835,6 +1070,7 @@ fn role_loops_by_default(role: AnimationRole) -> bool {
     )
 }
 
+#[derive(Debug, Clone)]
 struct LoadedModelContext {
     model_bytes: Vec<u8>,
     atlas: Option<ColorImage>,
@@ -842,34 +1078,126 @@ struct LoadedModelContext {
     collision_radius: u16,
     visual_scale_q8: u16,
     default_visual_yaw_q12: i16,
+    authored_rotation_q12: [u16; 3],
+    orientation_label: String,
 }
 
-fn load_model_context(
+fn load_model_context_cached(
     project: &ProjectDocument,
     project_root: &Path,
+    state: &mut ModelAnimationViewerState,
     id: ResourceId,
-) -> Option<LoadedModelContext> {
+) -> Option<Arc<LoadedModelContext>> {
     let resource = project.resource(id)?;
     let ResourceData::Model(model_resource) = &resource.data else {
         return None;
     };
     let model_path = resolve_path(&model_resource.model_path, Some(project_root));
-    let model_bytes = std::fs::read(model_path).ok()?;
-    let atlas = model_resource
+    let model_stamp = FileStamp::read(model_path.clone())?;
+    let atlas_path = model_resource
         .texture_path
         .as_ref()
-        .and_then(|path| std::fs::read(resolve_path(path, Some(project_root))).ok())
+        .map(|path| resolve_path(path, Some(project_root)));
+    let atlas_stamp = atlas_path.clone().and_then(FileStamp::read);
+    let (authored_rotation_q12, orientation_label) = model_scene_orientation(project, id)
+        .unwrap_or_else(|| {
+            (
+                [
+                    0,
+                    (model_resource.default_visual_yaw_q12 as i32).rem_euclid(4096) as u16,
+                    0,
+                ],
+                "Model import orientation".to_string(),
+            )
+        });
+    let visual_scale_q8 = model_resource.scale_q8[1].max(1);
+
+    if let Some(cached) = &state.cached_model {
+        if cached.resource == id
+            && cached.model_stamp == model_stamp
+            && cached.atlas_stamp == atlas_stamp
+            && cached.authored_rotation_q12 == authored_rotation_q12
+            && cached.world_height == model_resource.world_height
+            && cached.collision_radius == model_resource.collision_radius
+            && cached.visual_scale_q8 == visual_scale_q8
+        {
+            return Some(Arc::clone(&cached.context));
+        }
+    }
+
+    let model_bytes = std::fs::read(model_path).ok()?;
+    let atlas = atlas_path
+        .and_then(|path| std::fs::read(path).ok())
         .and_then(|bytes| decode_psxt_image(&bytes));
-    Some(LoadedModelContext {
+    let context = Arc::new(LoadedModelContext {
         model_bytes,
         atlas,
         world_height: model_resource.world_height,
         collision_radius: model_resource.collision_radius,
-        visual_scale_q8: model_resource.scale_q8[1].max(1),
+        visual_scale_q8,
         default_visual_yaw_q12: model_resource.default_visual_yaw_q12,
-    })
+        authored_rotation_q12,
+        orientation_label,
+    });
+    state.cached_model = Some(CachedModelContext {
+        resource: id,
+        model_stamp,
+        atlas_stamp,
+        authored_rotation_q12,
+        world_height: model_resource.world_height,
+        collision_radius: model_resource.collision_radius,
+        visual_scale_q8,
+        context: Arc::clone(&context),
+    });
+    Some(context)
 }
 
+fn model_scene_orientation(
+    project: &ProjectDocument,
+    model_id: ResourceId,
+) -> Option<([u16; 3], String)> {
+    let scene = project.active_scene();
+    for node in scene.nodes() {
+        let rotation_degrees = match &node.kind {
+            NodeKind::MeshInstance {
+                mesh: Some(resource),
+                ..
+            } if *resource == model_id => node.transform.rotation_degrees,
+            NodeKind::Entity => {
+                let renderer_yaw = node.children.iter().find_map(|child_id| {
+                    let child = scene.node(*child_id)?;
+                    match &child.kind {
+                        NodeKind::ModelRenderer {
+                            model: Some(resource),
+                            ..
+                        } if *resource == model_id => Some(child.transform.rotation_degrees[1]),
+                        _ => None,
+                    }
+                });
+                let Some(renderer_yaw) = renderer_yaw else {
+                    continue;
+                };
+                [
+                    node.transform.rotation_degrees[0],
+                    node.transform.rotation_degrees[1] + renderer_yaw,
+                    node.transform.rotation_degrees[2],
+                ]
+            }
+            _ => continue,
+        };
+        let rotation_q12 = rotation_degrees.map(psxed_project::spatial::euler_degrees_to_q12);
+        return Some((
+            rotation_q12,
+            format!(
+                "Scene orientation · {} · X {:+.0}°  Y {:+.0}°  Z {:+.0}°",
+                node.name, rotation_degrees[0], rotation_degrees[1], rotation_degrees[2]
+            ),
+        ));
+    }
+    None
+}
+
+#[derive(Debug, Clone)]
 struct LoadedClipContext {
     bytes: Vec<u8>,
     animation_stats: Option<LoadedAnimationStats>,
@@ -881,11 +1209,21 @@ struct LoadedAnimationStats {
     sample_rate_hz: u16,
 }
 
-fn load_clip_context(project_root: &Path, clip: &ViewerClipOption) -> Option<LoadedClipContext> {
+fn load_clip_context_cached(
+    project_root: &Path,
+    state: &mut ModelAnimationViewerState,
+    clip: &ViewerClipOption,
+) -> Option<Arc<LoadedClipContext>> {
     if !clip.previewable {
         return None;
     }
     let path = resolve_path(&clip.path, Some(project_root));
+    let stamp = FileStamp::read(path.clone())?;
+    if let Some(cached) = &state.cached_clip {
+        if cached.path == clip.path && cached.stamp == stamp {
+            return Some(Arc::clone(&cached.context));
+        }
+    }
     let bytes = std::fs::read(path).ok()?;
     let animation_stats =
         Animation::from_bytes(&bytes)
@@ -894,10 +1232,16 @@ fn load_clip_context(project_root: &Path, clip: &ViewerClipOption) -> Option<Loa
                 frame_count: animation.frame_count(),
                 sample_rate_hz: animation.sample_rate_hz(),
             });
-    Some(LoadedClipContext {
+    let context = Arc::new(LoadedClipContext {
         bytes,
         animation_stats,
-    })
+    });
+    state.cached_clip = Some(CachedClipContext {
+        path: clip.path.clone(),
+        stamp,
+        context: Arc::clone(&context),
+    });
+    Some(context)
 }
 
 fn is_cooked_animation_path(path: &str) -> bool {
