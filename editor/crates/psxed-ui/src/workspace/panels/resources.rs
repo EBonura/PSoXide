@@ -1005,7 +1005,9 @@ impl EditorWorkspace {
         self.status = "Opened Animation Viewer".to_string();
     }
 
-    pub(crate) fn open_animation_viewer_for_resource(&mut self, resource_id: ResourceId) -> bool {
+    /// Open Animation Studio focused on a model, character, or animation
+    /// resource. Returns `false` when the resource cannot be previewed there.
+    pub fn open_animation_viewer_for_resource(&mut self, resource_id: ResourceId) -> bool {
         let can_open = self
             .project
             .resource(resource_id)

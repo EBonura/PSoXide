@@ -19,6 +19,8 @@ use psoxide_settings::{ConfigPaths, Library, LibraryEntry, Settings};
 use psx_iso::{Disc, Exe, SECTOR_BYTES};
 use psx_trace::InstructionRecord;
 #[cfg(feature = "editor")]
+use psxed_project::EditorWorkspaceView;
+#[cfg(feature = "editor")]
 use psxed_ui::{EditorPlaytestStatus, EditorWorkspace};
 
 use crate::burn::{validate_burn_target_path, BurnState};
@@ -2021,6 +2023,76 @@ impl AppState {
 /// whole surface drops out without the `editor` feature.
 #[cfg(feature = "editor")]
 impl AppState {
+    /// Configure a deterministic native-editor launch before the event loop
+    /// starts. This is the implementation behind the frontend's `--editor`
+    /// development flags; it never depends on menu selection or synthetic
+    /// keyboard input.
+    pub fn open_editor_startup(
+        &mut self,
+        project_dir: Option<PathBuf>,
+        view: Option<EditorWorkspaceView>,
+        resource_selector: Option<&str>,
+    ) -> Result<(), String> {
+        if let Some(project_dir) = project_dir {
+            let project_dir = if project_dir.is_absolute() {
+                project_dir
+            } else {
+                repo_root_dir().join(project_dir)
+            };
+            self.editor = EditorWorkspace::open_directory(&project_dir).map_err(|error| {
+                format!("open editor project at {}: {error}", project_dir.display())
+            })?;
+            self.editor_project_dir_seen = self.editor.project_dir().to_path_buf();
+        }
+
+        if let Some(view) = view {
+            self.editor.show_workspace(view);
+            if self.editor.active_workspace_view() != view {
+                return Err(format!("editor failed to select startup view {view:?}"));
+            }
+        }
+
+        if let Some(selector) = resource_selector {
+            if view != Some(EditorWorkspaceView::Animation) {
+                return Err("--editor-resource requires --editor-view animation".to_string());
+            }
+            let numeric_id = selector.parse::<u64>().ok();
+            let resource_id = self
+                .editor
+                .project()
+                .resources
+                .iter()
+                .find(|resource| {
+                    numeric_id.is_some_and(|id| resource.id.raw() == id)
+                        || resource.name == selector
+                })
+                .or_else(|| {
+                    self.editor
+                        .project()
+                        .resources
+                        .iter()
+                        .find(|resource| resource.name.eq_ignore_ascii_case(selector))
+                })
+                .map(|resource| resource.id)
+                .ok_or_else(|| format!("editor resource {selector:?} was not found"))?;
+            if !self.editor.open_animation_viewer_for_resource(resource_id) {
+                return Err(format!(
+                    "editor resource {selector:?} cannot open in Animation Studio"
+                ));
+            }
+            if self.editor.animation_viewer_model() != Some(resource_id) {
+                return Err(format!(
+                    "Animation Studio failed to focus editor resource {selector:?}"
+                ));
+            }
+        }
+
+        self.open_editor_workspace();
+        self.menu.open = false;
+        self.status_message_set("Editor opened from deterministic startup flags");
+        Ok(())
+    }
+
     /// Enter the embedded editor workspace.
     pub fn open_editor_workspace(&mut self) {
         self.running = false;
