@@ -2080,7 +2080,10 @@ impl AppState {
                     "editor resource {selector:?} cannot open in Animation Studio"
                 ));
             }
-            if self.editor.animation_viewer_model() != Some(resource_id) {
+            if !self
+                .editor
+                .animation_viewer_resource_is_focused(resource_id)
+            {
                 return Err(format!(
                     "Animation Studio failed to focus editor resource {selector:?}"
                 ));

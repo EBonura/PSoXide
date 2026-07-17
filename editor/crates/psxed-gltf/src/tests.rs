@@ -55,6 +55,35 @@ fn humanoid_node_match_key_aliases_synty_and_meshy_bones() {
 }
 
 #[test]
+fn humanoid_spine_mapping_follows_hierarchy_when_source_numbers_are_reversed() {
+    let target_names = ["Hips", "Spine", "Spine1", "Spine2", "Neck"];
+    let source_names = ["Hips", "Spine02", "Spine01", "Spine", "neck"];
+    let parents = [None, Some(0), Some(1), Some(2), Some(3)];
+    let mut mapping = vec![Some(0), Some(3), Some(2), Some(1), Some(4)];
+
+    align_humanoid_spine_mapping(
+        &target_names,
+        &parents,
+        &source_names,
+        &parents,
+        &mut mapping,
+    );
+
+    assert_eq!(mapping, vec![Some(0), Some(1), Some(2), Some(3), Some(4)]);
+}
+
+#[test]
+fn humanoid_spine_mapping_preserves_standard_chain_order() {
+    let names = ["Hips", "Spine", "Spine1", "Spine2", "Neck"];
+    let parents = [None, Some(0), Some(1), Some(2), Some(3)];
+    let mut mapping = vec![Some(0), Some(1), Some(2), Some(3), Some(4)];
+
+    align_humanoid_spine_mapping(&names, &parents, &names, &parents, &mut mapping);
+
+    assert_eq!(mapping, vec![Some(0), Some(1), Some(2), Some(3), Some(4)]);
+}
+
+#[test]
 fn fbx_companion_texture_search_finds_meshy_obj_export_sibling() {
     let root = std::env::temp_dir().join(format!(
         "psxed-gltf-fbx-texture-{}-{}",
@@ -138,7 +167,7 @@ fn retarget_mapped_frame_trs_keeps_target_offsets_and_child_inheritance() {
 }
 
 #[test]
-fn retarget_mapped_frame_trs_applies_delta_in_source_rest_basis() {
+fn retarget_mapped_frame_trs_rebases_world_delta_across_different_bone_axes() {
     let target_parents = vec![None];
     let source_parents = vec![None];
     let source_base_rotation = quat_x_degrees(90.0);
@@ -170,9 +199,14 @@ fn retarget_mapped_frame_trs_applies_delta_in_source_rest_basis() {
         &mapping,
     );
 
+    let source_world_delta = quat_mul(source_pose[0].rotation, quat_inverse(source_base_rotation));
     assert_quat_close(
         retargeted[0].rotation,
-        quat_mul(target_base_rotation, source_local_delta),
+        quat_mul(source_world_delta, target_base_rotation),
+    );
+    assert!(
+        retargeted[0].rotation != quat_mul(target_base_rotation, source_local_delta),
+        "different source and target bone axes must not reuse the source-local delta"
     );
 }
 
@@ -227,11 +261,11 @@ fn retarget_mapped_frame_trs_reconstructs_child_from_global_bind_delta() {
     let source_pose_child_global = quat_mul(source_pose[0].rotation, source_pose[1].rotation);
     let target_bind_child_global = quat_mul(target_base[0].rotation, target_base[1].rotation);
     let expected_child_global = quat_mul(
-        target_bind_child_global,
         quat_mul(
-            quat_inverse(source_bind_child_global),
             source_pose_child_global,
+            quat_inverse(source_bind_child_global),
         ),
+        target_bind_child_global,
     );
     let actual_child_global = quat_mul(retargeted[0].rotation, retargeted[1].rotation);
     assert_quat_close(actual_child_global, expected_child_global);

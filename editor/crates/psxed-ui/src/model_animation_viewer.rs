@@ -71,6 +71,10 @@ impl ModelAnimationViewerState {
         self.selected_model
     }
 
+    pub(crate) fn selected_clip_path(&self) -> Option<&str> {
+        self.selected_clip_path.as_deref()
+    }
+
     pub(crate) fn focus_resource(&mut self, project: &ProjectDocument, id: ResourceId) {
         let Some(resource) = project.resource(id) else {
             return;
@@ -87,11 +91,22 @@ impl ModelAnimationViewerState {
                 self.reset_clip_clock();
             }
             ResourceData::AnimationClip(clip) => {
+                self.selected_model = clip
+                    .target_model
+                    .or_else(|| first_model_for_skeleton(project, clip.skeleton));
                 self.selected_clip_path = Some(clip.psxanim_path.clone());
                 self.reset_clip_clock();
             }
             ResourceData::AnimationSource(source) => {
+                self.selected_model = source
+                    .target_model
+                    .or_else(|| first_model_for_skeleton(project, source.skeleton));
                 self.selected_clip_path = Some(source.source_path.clone());
+                self.reset_clip_clock();
+            }
+            ResourceData::AnimationSet(set) => {
+                self.selected_model = first_model_for_skeleton(project, set.skeleton);
+                self.selected_clip_path = self.preferred_model_clip_path(project);
                 self.reset_clip_clock();
             }
             _ => {}
@@ -150,6 +165,19 @@ impl ModelAnimationViewerState {
     fn invalidate_clip_cache(&mut self) {
         self.cached_clip = None;
     }
+}
+
+fn first_model_for_skeleton(
+    project: &ProjectDocument,
+    skeleton: Option<ResourceId>,
+) -> Option<ResourceId> {
+    let skeleton = skeleton?;
+    project.resources.iter().find_map(|resource| {
+        let ResourceData::Model(model) = &resource.data else {
+            return None;
+        };
+        (model.skeleton == Some(skeleton)).then_some(resource.id)
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1346,4 +1374,62 @@ fn effective_radius(state: &ModelAnimationViewerState, model: Option<&LoadedMode
             .unwrap_or(1536)
     }
     .clamp(640, 8192)
+}
+
+#[cfg(test)]
+mod focus_tests {
+    use super::*;
+
+    #[test]
+    fn focusing_targeted_clip_selects_its_model_and_exact_path() {
+        let mut project = ProjectDocument::new("animation-focus");
+        let skeleton = project.add_resource(
+            "Humanoid",
+            ResourceData::Skeleton(psxed_project::SkeletonResource {
+                joint_count: 1,
+                parents: vec![None],
+                signature: "test-humanoid".to_string(),
+                note: String::new(),
+            }),
+        );
+        let add_model = |project: &mut ProjectDocument, name: &str| {
+            project.add_resource(
+                name,
+                ResourceData::Model(psxed_project::ModelResource {
+                    model_path: format!("assets/{name}.psxmdl"),
+                    source_path: None,
+                    texture_path: None,
+                    skeleton: Some(skeleton),
+                    world_height: 1024,
+                    collision_radius: 192,
+                    scale_q8: [psxed_project::MODEL_SCALE_ONE_Q8; 3],
+                    default_visual_yaw_q12: 0,
+                    attachments: Vec::new(),
+                }),
+            )
+        };
+        let _other_model = add_model(&mut project, "Other");
+        let target_model = add_model(&mut project, "CI Player");
+        let clip_path = "assets/stand_to_roll.psxanim";
+        let clip = project.add_resource(
+            "Stand To Roll",
+            ResourceData::AnimationClip(psxed_project::AnimationClipResource {
+                psxanim_path: clip_path.to_string(),
+                skeleton: Some(skeleton),
+                target_model: Some(target_model),
+                source: None,
+                bake: psxed_project::AnimationClipBakeKind::Retargeted,
+                role: AnimationRole::Roll,
+                looping: false,
+                tags: Vec::new(),
+                calibration: Default::default(),
+            }),
+        );
+        let mut viewer = ModelAnimationViewerState::default();
+
+        viewer.focus_resource(&project, clip);
+
+        assert_eq!(viewer.selected_model(), Some(target_model));
+        assert_eq!(viewer.selected_clip_path(), Some(clip_path));
+    }
 }

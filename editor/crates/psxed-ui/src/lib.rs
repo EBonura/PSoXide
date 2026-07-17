@@ -2227,6 +2227,45 @@ impl EditorWorkspace {
         self.animation_viewer.selected_model()
     }
 
+    /// Whether Animation Studio is focused on the requested resource.
+    /// Models and characters resolve to their visual model; clips and sources
+    /// additionally verify the exact selected path so deterministic startup
+    /// cannot silently fall back to another animation on the same rig.
+    pub fn animation_viewer_resource_is_focused(&self, resource_id: ResourceId) -> bool {
+        let Some(resource) = self.project.resource(resource_id) else {
+            return false;
+        };
+        match &resource.data {
+            ResourceData::Model(_) => self.animation_viewer.selected_model() == Some(resource_id),
+            ResourceData::Character(character) => {
+                self.animation_viewer.selected_model() == character.model
+            }
+            ResourceData::AnimationClip(clip) => {
+                self.animation_viewer.selected_clip_path() == Some(clip.psxanim_path.as_str())
+                    && clip.target_model.map_or(true, |model| {
+                        self.animation_viewer.selected_model() == Some(model)
+                    })
+            }
+            ResourceData::AnimationSource(source) => {
+                self.animation_viewer.selected_clip_path() == Some(source.source_path.as_str())
+                    && source.target_model.map_or(true, |model| {
+                        self.animation_viewer.selected_model() == Some(model)
+                    })
+            }
+            ResourceData::AnimationSet(set) => {
+                self.animation_viewer
+                    .selected_model()
+                    .and_then(|model| self.project.resource(model))
+                    .and_then(|resource| match &resource.data {
+                        ResourceData::Model(model) => model.skeleton,
+                        _ => None,
+                    })
+                    == set.skeleton
+            }
+            _ => false,
+        }
+    }
+
     /// Select a top-level editor workspace without simulating UI input.
     ///
     /// The native frontend uses this for deterministic development startup;
