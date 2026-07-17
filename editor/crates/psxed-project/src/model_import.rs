@@ -762,9 +762,25 @@ pub fn bake_animation_source_for_model(
         &[animation_source_path.to_path_buf()],
         &config,
     )?;
+    // A source file may contain many named takes (the Universal Animation
+    // Library FBXs contain dozens). Prefer the take named by the authoring
+    // resource instead of silently baking whichever take happened to be last.
+    // Single-take Mixamo files generally call their internal take `mixamo.com`
+    // while the useful authoring name is the filename, so retain the legacy
+    // last-clip fallback when no explicit take name matches.
+    let requested_take = source_meta.clip_name.trim();
     let clip = package
         .clips
-        .last()
+        .iter()
+        .find(|clip| {
+            !requested_take.is_empty()
+                && (clip
+                    .source_name
+                    .as_deref()
+                    .is_some_and(|name| name.eq_ignore_ascii_case(requested_take))
+                    || clip.sanitized_name.eq_ignore_ascii_case(requested_take))
+        })
+        .or_else(|| package.clips.last())
         .ok_or_else(|| ModelImportError::NoCookedAnimationClips {
             source: animation_source_path.to_path_buf(),
         })?;
