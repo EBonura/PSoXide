@@ -426,8 +426,13 @@ pub fn draw_model_instances<
         let secondary_material = inst
             .material_override
             .and_then(|material| material.secondary_layer)
-            .and_then(|layer| model_secondary_material(layer, resolve_override_texture))
-            .map(|material| lighting.shade_model_material(origin, material));
+            .and_then(|layer| {
+                model_secondary_layer(layer, elapsed_tick, video_hz, resolve_override_texture)
+            })
+            .map(|mut layer| {
+                layer.material = lighting.shade_model_material(origin, layer.material);
+                layer
+            });
         let stats = submit_runtime_model_predecoded(
             world,
             triangles,

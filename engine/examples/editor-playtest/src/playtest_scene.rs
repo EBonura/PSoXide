@@ -354,7 +354,10 @@ impl Scene for Playtest {
                 let Some(room_record) = ROOMS.get(active.index.to_usize()) else {
                     continue;
                 };
-                let room_options = room_surface_options(room_record);
+                let room_options = room_surface_options(room_record).with_material_animation(
+                    self.gameplay_tick(ctx.sim_tick).as_u32(),
+                    ctx.video_hz.as_u16(),
+                );
                 let actor_options = room_options;
                 let room_camera = camera_for_room(camera, active);
                 let lighting = RuntimeRoomLighting {

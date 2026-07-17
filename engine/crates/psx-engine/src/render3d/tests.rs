@@ -253,6 +253,16 @@ fn model_face_packed_uv_words_match_packet_texcoords() {
 }
 
 #[test]
+fn model_face_uv_offset_wraps_each_byte_independently() {
+    let face = TexturedModelRenderFace::new([0, 1, 2], [(250, 1), (3, 254), (128, 64)]);
+    let moved = face.with_uv_offset(ModelUvOffset::new(10, 4));
+
+    assert_eq!(moved.vertex_indices, face.vertex_indices);
+    assert_eq!(moved.uvs(), [(4, 5), (13, 2), (138, 68)]);
+    assert_eq!(face.uvs(), [(250, 1), (3, 254), (128, 64)]);
+}
+
+#[test]
 fn model_no_cull_unclamped_batch_keeps_both_windings() {
     const ZERO: TriTextured = TriTextured::new(
         [(0, 0), (0, 0), (0, 0)],
@@ -347,6 +357,7 @@ fn layered_bucketed_model_batch_culls_once_and_keeps_material_passes_contiguous(
             &faces,
             base_material.textured_packet_material(),
             secondary_material.textured_packet_material(),
+            ModelUvOffset::new(5, 7),
             base_options,
             secondary_options,
             &mut stats,
@@ -376,6 +387,11 @@ fn layered_bucketed_model_batch_culls_once_and_keeps_material_passes_contiguous(
     assert_eq!(stats.culled_triangles, 2);
     assert_eq!(stats.submitted_triangles, 4);
     assert_eq!(stats.fast_submitted_triangles, 4);
+    assert_eq!(triangle_storage[0].uv0_clut as u16, faces[0].uv_words[0]);
+    assert_eq!(
+        triangle_storage[1].uv0_clut as u16,
+        faces[0].with_uv_offset(ModelUvOffset::new(5, 7)).uv_words[0]
+    );
     assert!(!stats.primitive_overflow);
     assert!(!stats.command_overflow);
 }

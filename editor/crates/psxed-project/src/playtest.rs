@@ -436,6 +436,8 @@ pub fn build_package(
                         local_slot: cooked_material.slot,
                         texture_asset_index,
                         tint_rgb: cooked_material.tint,
+                        blend_mode: cooked_material.blend_mode,
+                        animation: cooked_material.animation,
                         face_sidedness: cooked_material.face_sidedness,
                     });
                 }

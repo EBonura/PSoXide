@@ -319,6 +319,149 @@ pub enum ModelSecondaryTexture {
     ProceduralNoise(ProceduralNoiseTexture),
 }
 
+/// Deterministic UV motion for a material texture pass.
+///
+/// Speeds are signed Q8 texels per second. Keeping the recipe integral makes
+/// editor preview and PS1 playback agree without regenerating or uploading a
+/// texture every frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MaterialUvMotion {
+    /// Whether the authored motion is active. Disabled motion preserves its
+    /// speed and phase so it can be toggled while iterating in Material Lab.
+    pub enabled: bool,
+    /// Horizontal speed in signed Q8 texels per second.
+    pub speed_u_q8: i16,
+    /// Vertical speed in signed Q8 texels per second.
+    pub speed_v_q8: i16,
+    /// Initial horizontal texel offset, wrapping at 256.
+    pub phase_u: u8,
+    /// Initial vertical texel offset, wrapping at 256.
+    pub phase_v: u8,
+}
+
+impl Default for MaterialUvMotion {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            speed_u_q8: 8 * 256,
+            speed_v_q8: 0,
+            phase_u: 0,
+            phase_v: 0,
+        }
+    }
+}
+
+impl MaterialUvMotion {
+    /// Resolve this recipe to a wrapped PS1 UV offset at `tick`.
+    pub fn offset_at_tick(self, tick: u32, ticks_per_second: u16) -> [u8; 2] {
+        if !self.enabled || ticks_per_second == 0 {
+            return [self.phase_u, self.phase_v];
+        }
+        let resolve = |speed_q8: i16, phase: u8| {
+            let travelled_q8 =
+                i64::from(speed_q8).saturating_mul(i64::from(tick)) / i64::from(ticks_per_second);
+            // Truncate sub-texel motion toward zero so positive and negative
+            // speeds wait the same amount of time before the first UV step.
+            let texels = travelled_q8 / 256 + i64::from(phase);
+            texels.rem_euclid(256) as u8
+        };
+        [
+            resolve(self.speed_u_q8, self.phase_u),
+            resolve(self.speed_v_q8, self.phase_v),
+        ]
+    }
+}
+
+/// Runtime animation applied to a room material's single texture pass.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MaterialAnimationMode {
+    /// No per-frame material work.
+    #[default]
+    Static,
+    /// Move the material's UVs through its resident texture.
+    UvScroll,
+    /// Select cells from a grid packed into the resident texture.
+    Flipbook,
+}
+
+impl MaterialAnimationMode {
+    /// User-facing Material Lab label.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Static => "Static",
+            Self::UvScroll => "UV Scroll",
+            Self::Flipbook => "Flipbook Atlas",
+        }
+    }
+}
+
+/// Grid-packed flipbook contained in one resident 4bpp texture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MaterialFlipbook {
+    /// Number of frame columns in the texture.
+    pub columns: u8,
+    /// Number of frame rows in the texture.
+    pub rows: u8,
+    /// Number of active cells, in row-major order.
+    pub frame_count: u8,
+    /// Simulation ticks each frame remains selected.
+    pub ticks_per_frame: u8,
+    /// Initial frame index.
+    pub phase: u8,
+}
+
+impl Default for MaterialFlipbook {
+    fn default() -> Self {
+        Self {
+            columns: 2,
+            rows: 2,
+            frame_count: 4,
+            ticks_per_frame: 6,
+            phase: 0,
+        }
+    }
+}
+
+impl MaterialFlipbook {
+    /// Clamp authored values to a non-empty atlas grid.
+    pub const fn normalized(self) -> Self {
+        let columns = if self.columns == 0 { 1 } else { self.columns };
+        let rows = if self.rows == 0 { 1 } else { self.rows };
+        let capacity = columns.saturating_mul(rows);
+        let frame_count = if self.frame_count == 0 {
+            1
+        } else if self.frame_count > capacity {
+            capacity
+        } else {
+            self.frame_count
+        };
+        Self {
+            columns,
+            rows,
+            frame_count,
+            ticks_per_frame: if self.ticks_per_frame == 0 {
+                1
+            } else {
+                self.ticks_per_frame
+            },
+            phase: self.phase % frame_count,
+        }
+    }
+}
+
+/// Preserved room-material animation recipes. Only the selected mode is
+/// evaluated at runtime, so switching modes in Material Lab does not discard
+/// the other mode's controls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct MaterialAnimation {
+    /// Active animation algorithm.
+    pub mode: MaterialAnimationMode,
+    /// Preserved UV-scroll controls.
+    pub uv_scroll: MaterialUvMotion,
+    /// Preserved grid-flipbook controls.
+    pub flipbook: MaterialFlipbook,
+}
+
 impl Default for ModelSecondaryTexture {
     fn default() -> Self {
         Self::ProceduralNoise(ProceduralNoiseTexture::default())
@@ -335,6 +478,9 @@ pub struct ModelSecondaryLayer {
     pub blend_mode: PsxBlendMode,
     /// Independent modulation tint; 0x80 is neutral.
     pub tint: [u8; 3],
+    /// Optional runtime UV scroll. Defaults off for old project files.
+    #[serde(default)]
+    pub motion: MaterialUvMotion,
 }
 
 impl Default for ModelSecondaryLayer {
@@ -343,6 +489,7 @@ impl Default for ModelSecondaryLayer {
             texture: ModelSecondaryTexture::default(),
             blend_mode: PsxBlendMode::AddQuarter,
             tint: [0x70, 0x78, 0x80],
+            motion: MaterialUvMotion::default(),
         }
     }
 }
@@ -396,6 +543,9 @@ pub struct MaterialResource {
     /// Preserved reflection controls, even while another source mode is active.
     #[serde(default)]
     pub reflection: ReflectionProbeMaterial,
+    /// One-pass runtime animation for room tiles using this material.
+    #[serde(default)]
+    pub animation: MaterialAnimation,
     /// Optional independently blended second texture pass for model renderers.
     /// Room geometry continues to use the base material only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -499,6 +649,23 @@ impl MaterialResource {
                 strength: 255,
                 roughness: 8,
             },
+            animation: MaterialAnimation {
+                mode: MaterialAnimationMode::Static,
+                uv_scroll: MaterialUvMotion {
+                    enabled: false,
+                    speed_u_q8: 8 * 256,
+                    speed_v_q8: 0,
+                    phase_u: 0,
+                    phase_v: 0,
+                },
+                flipbook: MaterialFlipbook {
+                    columns: 2,
+                    rows: 2,
+                    frame_count: 4,
+                    ticks_per_frame: 6,
+                    phase: 0,
+                },
+            },
             secondary_layer: None,
             face_sidedness: MaterialFaceSidedness::Both,
             legacy_texture: None,
@@ -534,6 +701,23 @@ impl MaterialResource {
             reflection: ReflectionProbeMaterial {
                 strength: 255,
                 roughness: 8,
+            },
+            animation: MaterialAnimation {
+                mode: MaterialAnimationMode::Static,
+                uv_scroll: MaterialUvMotion {
+                    enabled: false,
+                    speed_u_q8: 8 * 256,
+                    speed_v_q8: 0,
+                    phase_u: 0,
+                    phase_v: 0,
+                },
+                flipbook: MaterialFlipbook {
+                    columns: 2,
+                    rows: 2,
+                    frame_count: 4,
+                    ticks_per_frame: 6,
+                    phase: 0,
+                },
             },
             secondary_layer: None,
             face_sidedness: MaterialFaceSidedness::Both,
@@ -2096,4 +2280,34 @@ pub(crate) fn scale_i32_ratio(value: i32, from: i32, to: i32) -> i32 {
 
 pub(crate) fn scale_u16_ratio(value: u16, from: i32, to: i32) -> u16 {
     scale_i32_ratio(value as i32, from, to).clamp(0, u16::MAX as i32) as u16
+}
+
+#[cfg(test)]
+mod material_uv_motion_tests {
+    use super::MaterialUvMotion;
+
+    #[test]
+    fn motion_uses_signed_q8_speed_and_wraps() {
+        let motion = MaterialUvMotion {
+            enabled: true,
+            speed_u_q8: 8 * 256,
+            speed_v_q8: -4 * 256,
+            phase_u: 250,
+            phase_v: 2,
+        };
+        assert_eq!(motion.offset_at_tick(30, 60), [254, 0]);
+        assert_eq!(motion.offset_at_tick(60, 60), [2, 254]);
+        assert_eq!(motion.offset_at_tick(1, 60), [250, 2]);
+    }
+
+    #[test]
+    fn disabled_motion_preserves_authored_phase() {
+        let motion = MaterialUvMotion {
+            enabled: false,
+            phase_u: 19,
+            phase_v: 37,
+            ..MaterialUvMotion::default()
+        };
+        assert_eq!(motion.offset_at_tick(u32::MAX, 60), [19, 37]);
+    }
 }

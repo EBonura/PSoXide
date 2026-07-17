@@ -432,6 +432,56 @@ pub struct TexturedModelRenderFace {
     pub uv_words: [u16; 3],
 }
 
+/// Wrapped offset applied to model UVs for an independently moving texture
+/// layer. PS1 polygon UVs are bytes, so addition naturally wraps at 256.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct ModelUvOffset {
+    /// Horizontal texel offset.
+    pub u: u8,
+    /// Vertical texel offset.
+    pub v: u8,
+}
+
+impl ModelUvOffset {
+    /// No UV motion.
+    pub const ZERO: Self = Self::new(0, 0);
+
+    /// Build a wrapped UV offset.
+    pub const fn new(u: u8, v: u8) -> Self {
+        Self { u, v }
+    }
+
+    /// True when applying this offset would leave UVs unchanged.
+    pub const fn is_zero(self) -> bool {
+        self.u == 0 && self.v == 0
+    }
+}
+
+/// A second textured model pass and its optional UV displacement.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct TexturedModelLayer {
+    /// Texture, tint, blend mode, and texture-window state.
+    pub material: TextureMaterial,
+    /// Wrapped UV displacement applied only to this layer.
+    pub uv_offset: ModelUvOffset,
+}
+
+impl TexturedModelLayer {
+    /// Build a static second layer.
+    pub const fn new(material: TextureMaterial) -> Self {
+        Self {
+            material,
+            uv_offset: ModelUvOffset::ZERO,
+        }
+    }
+
+    /// Return this layer with a wrapped UV displacement.
+    pub const fn with_uv_offset(mut self, uv_offset: ModelUvOffset) -> Self {
+        self.uv_offset = uv_offset;
+        self
+    }
+}
+
 impl TexturedModelRenderFace {
     /// Empty face record used for fixed-size static arrays.
     pub const ZERO: Self = Self {
@@ -458,6 +508,19 @@ impl TexturedModelRenderFace {
             model_uv_pair(self.uv_words[1]),
             model_uv_pair(self.uv_words[2]),
         ]
+    }
+
+    /// Return this face with all UVs displaced in wrapping byte space.
+    pub const fn with_uv_offset(mut self, offset: ModelUvOffset) -> Self {
+        let mut index = 0;
+        while index < self.uv_words.len() {
+            let word = self.uv_words[index];
+            let u = (word as u8).wrapping_add(offset.u);
+            let v = ((word >> 8) as u8).wrapping_add(offset.v);
+            self.uv_words[index] = (u as u16) | ((v as u16) << 8);
+            index += 1;
+        }
+        self
     }
 }
 
@@ -978,6 +1041,10 @@ pub struct WorldSurfaceOptions {
     /// emission, reducing affine/painter artifacts without forcing world
     /// geometry to spend the same budget.
     pub textured_split_max_edge: u16,
+    /// Simulation tick used by animated room materials.
+    pub material_animation_tick: u32,
+    /// Simulation rate used to convert UV-scroll speeds from texels/second.
+    pub material_animation_hz: u16,
 }
 
 impl WorldSurfaceOptions {
@@ -992,6 +1059,8 @@ impl WorldSurfaceOptions {
             render_layer: WorldRenderLayer::Opaque,
             split_textured_triangles: true,
             textured_split_max_edge: 0,
+            material_animation_tick: 0,
+            material_animation_hz: 60,
         }
     }
 
@@ -1034,6 +1103,13 @@ impl WorldSurfaceOptions {
     /// Return options with an optional projected-edge split threshold.
     pub const fn with_textured_triangle_max_edge(mut self, max_edge: u16) -> Self {
         self.textured_split_max_edge = max_edge;
+        self
+    }
+
+    /// Return options evaluated at the supplied gameplay tick and video rate.
+    pub const fn with_material_animation(mut self, tick: u32, hz: u16) -> Self {
+        self.material_animation_tick = tick;
+        self.material_animation_hz = if hz == 0 { 1 } else { hz };
         self
     }
 }
