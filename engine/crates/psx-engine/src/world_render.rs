@@ -91,7 +91,11 @@ impl WorldMaterialAnimation {
         !matches!(self, Self::Static)
     }
 
-    /// Wrapped PS1 UV offset for the supplied gameplay clock.
+    /// Material-local UV offset for the supplied gameplay clock.
+    ///
+    /// Scroll motion wraps at the resident texture-window dimensions rather
+    /// than at 256. This keeps every vertex on the same side of the byte-UV
+    /// rollover while GP0(E2) repeats the texture on the far edge.
     pub fn uv_offset(self, tick: u32, hz: u16, frame_width: u8, frame_height: u8) -> (u8, u8) {
         match self {
             Self::Static => (0, 0),
@@ -102,11 +106,15 @@ impl WorldMaterialAnimation {
                 phase_v,
             } => {
                 let hz = i64::from(hz.max(1));
-                let resolve = |speed: i16, phase: u8| {
+                let resolve = |speed: i16, phase: u8, period: u8| {
                     let travelled_q8 = i64::from(speed).saturating_mul(i64::from(tick)) / hz;
-                    (travelled_q8 / 256 + i64::from(phase)).rem_euclid(256) as u8
+                    (travelled_q8 / 256 + i64::from(phase)).rem_euclid(i64::from(period.max(1)))
+                        as u8
                 };
-                (resolve(speed_u_q8, phase_u), resolve(speed_v_q8, phase_v))
+                (
+                    resolve(speed_u_q8, phase_u, frame_width),
+                    resolve(speed_v_q8, phase_v, frame_height),
+                )
             }
             Self::Flipbook {
                 columns,
