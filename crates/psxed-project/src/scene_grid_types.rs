@@ -188,7 +188,7 @@ pub enum MaterialFaceSidedness {
 
 /// Deterministic host-baked noise used by a model material's second pass.
 ///
-/// The editor and cooker turn this into a regular 64x64 4bpp PSXT. The PS1
+/// The editor and cooker turn this into a seamless 128x128 4bpp PSXT. The PS1
 /// never evaluates noise at runtime; it only samples the cooked texture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProceduralNoiseTexture {
@@ -246,10 +246,14 @@ impl Default for GeneratedTextureUv {
 /// Host-baked base-colour plus value-noise texture recipe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GeneratedMaterialTexture {
-    /// Square output size in texels (8, 16, 32, or 64).
+    /// Square output size in texels (8, 16, 32, 64, or 128).
     pub size: u16,
     /// Dark/low end of the generated 16-colour palette.
     pub base_color: [u8; 3],
+    /// Whether value noise is folded into the generated base texture.
+    /// Defaults on so existing projects retain their appearance.
+    #[serde(default = "default_true")]
+    pub noise_enabled: bool,
     /// Bright/high end of the generated 16-colour palette.
     pub noise_color: [u8; 3],
     /// Deterministic value-noise controls.
@@ -263,6 +267,7 @@ impl Default for GeneratedMaterialTexture {
         Self {
             size: 64,
             base_color: [72, 84, 96],
+            noise_enabled: true,
             noise_color: [188, 208, 224],
             noise: ProceduralNoiseTexture::default(),
             noise_uv: GeneratedTextureUv::default(),
@@ -315,7 +320,8 @@ impl MaterialTextureMode {
 pub enum ModelSecondaryTexture {
     /// A separately authored 4bpp PSXT.
     Texture(String),
-    /// A deterministic 64x64 4bpp value-noise texture generated on the host.
+    /// A deterministic seamless 128x128 4bpp value-noise texture generated on
+    /// the host.
     ProceduralNoise(ProceduralNoiseTexture),
 }
 
@@ -494,6 +500,23 @@ impl Default for ModelSecondaryLayer {
     }
 }
 
+impl ModelSecondaryLayer {
+    /// New overlay authored from the editor: independently scrolling by
+    /// default, while legacy saved overlays without a motion field stay still.
+    pub fn moving_default() -> Self {
+        Self {
+            motion: MaterialUvMotion {
+                enabled: true,
+                speed_u_q8: 2 * 256,
+                speed_v_q8: 1 * 256,
+                phase_u: 0,
+                phase_v: 0,
+            },
+            ..Self::default()
+        }
+    }
+}
+
 impl MaterialFaceSidedness {
     /// User-facing label.
     pub const fn label(self) -> &'static str {
@@ -630,6 +653,7 @@ impl MaterialResource {
             generated: GeneratedMaterialTexture {
                 size: 64,
                 base_color: [72, 84, 96],
+                noise_enabled: true,
                 noise_color: [188, 208, 224],
                 noise: ProceduralNoiseTexture {
                     seed: 1,
@@ -683,6 +707,7 @@ impl MaterialResource {
             generated: GeneratedMaterialTexture {
                 size: 64,
                 base_color: [72, 84, 96],
+                noise_enabled: true,
                 noise_color: [188, 208, 224],
                 noise: ProceduralNoiseTexture {
                     seed: 1,
@@ -2284,7 +2309,15 @@ pub(crate) fn scale_u16_ratio(value: u16, from: i32, to: i32) -> u16 {
 
 #[cfg(test)]
 mod material_uv_motion_tests {
-    use super::MaterialUvMotion;
+    use super::{MaterialUvMotion, ModelSecondaryLayer};
+
+    #[test]
+    fn newly_authored_overlay_moves_independently_by_default() {
+        let layer = ModelSecondaryLayer::moving_default();
+        assert!(layer.motion.enabled);
+        assert_eq!(layer.motion.speed_u_q8, 2 * 256);
+        assert_eq!(layer.motion.speed_v_q8, 256);
+    }
 
     #[test]
     fn motion_uses_signed_q8_speed_and_wraps() {

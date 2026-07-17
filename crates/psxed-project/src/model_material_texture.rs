@@ -1,13 +1,263 @@
 //! Host-side generation for compact model material layer textures.
 
-use crate::{GeneratedMaterialTexture, GeneratedTextureUv, ProceduralNoiseTexture};
+use crate::{
+    GeneratedMaterialTexture, GeneratedTextureUv, GridDirection, MaterialTextureMode,
+    ProceduralNoiseTexture, ProjectDocument, ResourceData, ResourceId, WorldGrid,
+};
+use std::{collections::HashMap, path::Path};
 
 const MATERIAL_NEUTRAL_TINT: u8 = 128;
 
 /// Fixed texture size for the generated secondary model layer.
-pub const MODEL_NOISE_TEXTURE_SIZE: u16 = 64;
+///
+/// 128x128 is four times the texel area of the old 64x64 layer while still
+/// fitting one PS1 GP0(E2) texture window and a compact 4bpp VRAM allocation.
+pub const MODEL_NOISE_TEXTURE_SIZE: u16 = 128;
 
-/// Bake deterministic multi-octave value noise into a 64x64 CLUT16 PSXT.
+/// Square, texture-window-friendly environment map baked for every runtime
+/// room when at least one reflective material is used by the project.
+pub const ROOM_REFLECTION_PROBE_SIZE: u16 = 64;
+
+#[derive(Clone)]
+struct ProbeTexture {
+    width: u16,
+    height: u16,
+    indices: Vec<u8>,
+    palette: [[u8; 3]; 16],
+    tint: [u8; 3],
+}
+
+/// Bake a compact room panorama from the active grid's authored surfaces.
+///
+/// This is intentionally a host-side operation. Each horizontal probe column
+/// walks from the room centre toward one compass direction; the upper band
+/// samples ceilings, the middle band samples the far wall, and the lower band
+/// samples floors from near to far. The result is a deterministic 4bpp texture
+/// with enough spatial structure to move convincingly under screen-space
+/// reflection UVs without asking the PS1 to capture or quantise a framebuffer.
+pub fn generate_room_reflection_probe_psxt(
+    project: &ProjectDocument,
+    grid: &WorldGrid,
+    project_root: &Path,
+) -> Result<Vec<u8>, String> {
+    let size = usize::from(ROOM_REFLECTION_PROBE_SIZE);
+    let mut cache: HashMap<ResourceId, Option<ProbeTexture>> = HashMap::new();
+    let mut rgba = Vec::with_capacity(size * size);
+
+    for y in 0..size {
+        for x in 0..size {
+            let angle = (x as f64 + 0.5) * std::f64::consts::TAU / size as f64;
+            let dir_x = angle.sin();
+            let dir_z = angle.cos();
+            let depth = if y >= 44 { (y - 44) as f64 / 19.0 } else { 1.0 };
+            let sector = probe_sector_along_ray(grid, dir_x, dir_z, depth);
+            let material = sector.and_then(|sector| {
+                if y < 20 {
+                    sector.ceiling.as_ref().and_then(|face| face.material)
+                } else if y < 44 {
+                    probe_wall_material(sector, dir_x, dir_z)
+                        .or_else(|| sector.floor.as_ref().and_then(|face| face.material))
+                } else {
+                    sector.floor.as_ref().and_then(|face| face.material)
+                }
+            });
+            let sampled = material.and_then(|material| {
+                probe_texture(project, project_root, material, &mut cache).and_then(|texture| {
+                    texture.as_ref().map(|texture| {
+                        let u = ((x * usize::from(texture.width)) / size) as u16;
+                        let band_y = match y {
+                            0..=19 => y * 3,
+                            20..=43 => (y - 20) * 3,
+                            _ => (y - 44) * 3,
+                        };
+                        let v = (band_y % usize::from(texture.height)) as u16;
+                        sample_probe_texture(texture, u, v)
+                    })
+                })
+            });
+            let rgb = sampled.unwrap_or_else(|| probe_fallback_rgb(grid, x, y, size));
+            rgba.push([rgb[0], rgb[1], rgb[2], 255]);
+        }
+    }
+
+    let (palette, indices) = psxed_tex::quantize_rgba_with_transparent_zero(&rgba, 16)
+        .map_err(|error| format!("could not quantise room reflection probe: {error}"))?;
+    psxed_tex::encode_indexed_psxt(
+        ROOM_REFLECTION_PROBE_SIZE,
+        ROOM_REFLECTION_PROBE_SIZE,
+        psxed_tex::PsxtDepth::Bit4,
+        &indices,
+        &palette,
+        false,
+    )
+    .map_err(|error| format!("could not encode room reflection probe: {error}"))
+}
+
+fn probe_sector_along_ray(
+    grid: &WorldGrid,
+    dir_x: f64,
+    dir_z: f64,
+    depth: f64,
+) -> Option<&crate::GridSector> {
+    let centre_x = (f64::from(grid.width) - 1.0) * 0.5;
+    let centre_z = (f64::from(grid.depth) - 1.0) * 0.5;
+    let steps = usize::from(grid.width.max(grid.depth)).max(1) * 6;
+    let stop = ((steps as f64 * depth.clamp(0.0, 1.0)).round() as usize).max(1);
+    let mut last = None;
+    for step in 0..=stop {
+        let distance = step as f64 / 3.0;
+        let x = (centre_x + dir_x * distance).round() as i32;
+        let z = (centre_z + dir_z * distance).round() as i32;
+        if x < 0 || z < 0 || x >= i32::from(grid.width) || z >= i32::from(grid.depth) {
+            break;
+        }
+        if let Some(sector) = grid.sector(x as u16, z as u16) {
+            last = Some(sector);
+        }
+    }
+    last.or_else(|| grid.sectors.iter().flatten().next())
+}
+
+fn probe_wall_material(sector: &crate::GridSector, dir_x: f64, dir_z: f64) -> Option<ResourceId> {
+    let primary = if dir_x.abs() >= dir_z.abs() {
+        if dir_x >= 0.0 {
+            GridDirection::East
+        } else {
+            GridDirection::West
+        }
+    } else if dir_z >= 0.0 {
+        GridDirection::North
+    } else {
+        GridDirection::South
+    };
+    sector
+        .walls
+        .get(primary)
+        .last()
+        .and_then(|wall| wall.material)
+        .or_else(|| {
+            [
+                GridDirection::North,
+                GridDirection::East,
+                GridDirection::South,
+                GridDirection::West,
+            ]
+            .into_iter()
+            .find_map(|direction| {
+                sector
+                    .walls
+                    .get(direction)
+                    .last()
+                    .and_then(|wall| wall.material)
+            })
+        })
+}
+
+fn probe_texture<'a>(
+    project: &ProjectDocument,
+    project_root: &Path,
+    material: ResourceId,
+    cache: &'a mut HashMap<ResourceId, Option<ProbeTexture>>,
+) -> Option<&'a Option<ProbeTexture>> {
+    if !cache.contains_key(&material) {
+        let decoded = project.resource(material).and_then(|resource| {
+            let (bytes, tint) = match &resource.data {
+                ResourceData::Material(material) => {
+                    let bytes = if material.texture_mode == MaterialTextureMode::Generated {
+                        Some(generate_material_texture_psxt(material.generated))
+                    } else {
+                        material.psxt_path.as_deref().and_then(|path| {
+                            let path = if Path::new(path).is_absolute() {
+                                Path::new(path).to_path_buf()
+                            } else {
+                                project_root.join(path)
+                            };
+                            std::fs::read(path).ok()
+                        })
+                    }?;
+                    (bytes, material.tint)
+                }
+                ResourceData::Texture { psxt_path } => {
+                    let path = if Path::new(psxt_path).is_absolute() {
+                        Path::new(psxt_path).to_path_buf()
+                    } else {
+                        project_root.join(psxt_path)
+                    };
+                    (std::fs::read(path).ok()?, [128; 3])
+                }
+                _ => return None,
+            };
+            decode_probe_texture(&bytes, tint)
+        });
+        cache.insert(material, decoded);
+    }
+    cache.get(&material)
+}
+
+fn decode_probe_texture(bytes: &[u8], tint: [u8; 3]) -> Option<ProbeTexture> {
+    let texture = psx_asset::Texture::from_bytes(bytes).ok()?;
+    if texture.depth() != psxed_format::texture::Depth::Bit4 || texture.clut_entries() < 16 {
+        return None;
+    }
+    let mut palette = [[0u8; 3]; 16];
+    for (index, color) in palette.iter_mut().enumerate() {
+        let offset = index * 2;
+        let raw = u16::from_le_bytes([
+            texture.clut_bytes()[offset],
+            texture.clut_bytes()[offset + 1],
+        ]);
+        *color = [
+            expand_5bit((raw & 0x1f) as u8),
+            expand_5bit(((raw >> 5) & 0x1f) as u8),
+            expand_5bit(((raw >> 10) & 0x1f) as u8),
+        ];
+    }
+    let mut indices =
+        Vec::with_capacity(usize::from(texture.width()) * usize::from(texture.height()));
+    for y in 0..texture.height() {
+        for x in 0..texture.width() {
+            indices.push(texture_4bpp_index(texture, x, y));
+        }
+    }
+    Some(ProbeTexture {
+        width: texture.width(),
+        height: texture.height(),
+        indices,
+        palette,
+        tint,
+    })
+}
+
+fn sample_probe_texture(texture: &ProbeTexture, x: u16, y: u16) -> [u8; 3] {
+    let x = x % texture.width.max(1);
+    let y = y % texture.height.max(1);
+    let index = texture.indices[usize::from(y) * usize::from(texture.width) + usize::from(x)];
+    let rgb = texture.palette[usize::from(index)];
+    [
+        modulate(rgb[0], texture.tint[0]),
+        modulate(rgb[1], texture.tint[1]),
+        modulate(rgb[2], texture.tint[2]),
+    ]
+}
+
+fn probe_fallback_rgb(grid: &WorldGrid, x: usize, y: usize, size: usize) -> [u8; 3] {
+    let horizon = grid.fog_color;
+    let ambient = grid.ambient_color;
+    let vertical = y as u16 * 255 / (size.saturating_sub(1).max(1) as u16);
+    let glint = (((x * 4) % size) as i32 - (size / 2) as i32).unsigned_abs();
+    let glint = 24u8.saturating_sub((glint.min(24)) as u8);
+    let mut out = [0u8; 3];
+    for channel in 0..3 {
+        let top = u16::from(horizon[channel]);
+        let bottom = u16::from(ambient[channel]) / 2;
+        out[channel] = ((top * (255 - vertical) + bottom * vertical + 127) / 255) as u8;
+        out[channel] = out[channel].saturating_add(glint / 3);
+    }
+    out
+}
+
+/// Bake deterministic, seamless multi-octave value noise into a 128x128
+/// CLUT16 PSXT.
 ///
 /// Palette entry zero remains transparent, while entries 1..15 form a neutral
 /// grayscale ramp. Runtime material tint supplies the authored colour.
@@ -41,14 +291,22 @@ pub fn generate_model_noise_indices(settings: ProceduralNoiseTexture) -> Vec<u8>
 /// Bake a Material Lab base-colour plus noise recipe into one opaque 4bpp PSXT.
 pub fn generate_material_texture_psxt(settings: GeneratedMaterialTexture) -> Vec<u8> {
     let size = normalize_generated_texture_size(settings.size);
-    let indices = generate_noise_indices(size, settings.noise, settings.noise_uv);
+    let indices = if settings.noise_enabled {
+        generate_noise_indices(size, settings.noise, settings.noise_uv)
+    } else {
+        vec![0; usize::from(size) * usize::from(size)]
+    };
     let mut palette = [[0u8; 3]; 16];
     for (index, rgb) in palette.iter_mut().enumerate() {
-        let t = index as u16;
-        for channel in 0..3 {
-            let a = u16::from(settings.base_color[channel]);
-            let b = u16::from(settings.noise_color[channel]);
-            rgb[channel] = ((a * (15 - t) + b * t + 7) / 15) as u8;
+        if settings.noise_enabled {
+            let t = index as u16;
+            for channel in 0..3 {
+                let a = u16::from(settings.base_color[channel]);
+                let b = u16::from(settings.noise_color[channel]);
+                rgb[channel] = ((a * (15 - t) + b * t + 7) / 15) as u8;
+            }
+        } else {
+            *rgb = settings.base_color;
         }
     }
     psxed_tex::encode_indexed_psxt(
@@ -71,8 +329,10 @@ pub const fn normalize_generated_texture_size(size: u16) -> u16 {
         16
     } else if size <= 32 {
         32
-    } else {
+    } else if size <= 64 {
         64
+    } else {
+        128
     }
 }
 
@@ -90,24 +350,29 @@ fn generate_noise_indices(
 
     for y in 0..u32::from(size) {
         for x in 0..u32::from(size) {
-            let (sample_x, sample_y) = transformed_noise_uv(x, y, size, uv);
+            let (sample_x, sample_y, scale_u_q8, scale_v_q8) =
+                transformed_noise_uv(i64::from(x), i64::from(y), size, uv);
             let mut value = 0u32;
             let mut weight_sum = 0u32;
             let mut weight = 256u32;
-            let mut period = feature_size;
             for octave in 0..octaves {
+                let cells_u =
+                    periodic_noise_cell_count(u32::from(size), feature_size, scale_u_q8, octave);
+                let cells_v =
+                    periodic_noise_cell_count(u32::from(size), feature_size, scale_v_q8, octave);
                 value = value.saturating_add(
-                    value_noise_2d(
+                    periodic_value_noise_2d(
                         settings.seed ^ u32::from(octave).wrapping_mul(0x9e37_79b9),
                         sample_x,
                         sample_y,
-                        period,
+                        u32::from(size),
+                        cells_u,
+                        cells_v,
                     )
                     .saturating_mul(weight),
                 );
                 weight_sum = weight_sum.saturating_add(weight);
                 weight = (weight / 2).max(1);
-                period = (period / 2).max(2);
             }
             let normalized = (value / weight_sum.max(1)) as i32;
             let contrasted = 128 + ((normalized - 128) * contrast / 128);
@@ -118,19 +383,34 @@ fn generate_noise_indices(
     pixels
 }
 
-fn transformed_noise_uv(x: u32, y: u32, size: u16, uv: GeneratedTextureUv) -> (u32, u32) {
-    let scale_u = i64::from(uv.scale_u_q8.clamp(16, 2048));
-    let scale_v = i64::from(uv.scale_v_q8.clamp(16, 2048));
-    let mut u = i64::from(x) * scale_u / 256 + i64::from(uv.offset_u);
-    let mut v = i64::from(y) * scale_v / 256 + i64::from(uv.offset_v);
+fn transformed_noise_uv(x: i64, y: i64, size: u16, uv: GeneratedTextureUv) -> (i64, i64, u32, u32) {
+    let mut scale_u = u32::from(uv.scale_u_q8.clamp(16, 2048));
+    let mut scale_v = u32::from(uv.scale_v_q8.clamp(16, 2048));
+    let mut u = x + i64::from(uv.offset_u);
+    let mut v = y + i64::from(uv.offset_v);
     let limit = i64::from(size);
     match uv.rotation_quarters & 3 {
-        1 => (u, v) = (limit - 1 - v, u),
+        1 => {
+            (u, v) = (limit - 1 - v, u);
+            (scale_u, scale_v) = (scale_v, scale_u);
+        }
         2 => (u, v) = (limit - 1 - u, limit - 1 - v),
-        3 => (u, v) = (v, limit - 1 - u),
+        3 => {
+            (u, v) = (v, limit - 1 - u);
+            (scale_u, scale_v) = (scale_v, scale_u);
+        }
         _ => {}
     }
-    (u.rem_euclid(limit) as u32, v.rem_euclid(limit) as u32)
+    (u, v, scale_u, scale_v)
+}
+
+fn periodic_noise_cell_count(size: u32, feature_size: u32, scale_q8: u32, octave: u8) -> u32 {
+    let broad_cells = ((size + feature_size / 2) / feature_size).max(1);
+    let scaled_cells = ((broad_cells.saturating_mul(scale_q8) + 128) / 256).max(1);
+    scaled_cells
+        .checked_shl(u32::from(octave))
+        .unwrap_or(u32::MAX)
+        .min(size)
 }
 
 /// Collapse an `Average` primary pass followed by an `AddQuarter` secondary
@@ -254,13 +534,31 @@ fn modulate(value: u8, tint: u8) -> u8 {
     ((product + 64) / 128).min(255) as u8
 }
 
-fn value_noise_2d(seed: u32, x: u32, y: u32, period: u32) -> u32 {
-    let x0 = x / period;
-    let y0 = y / period;
-    let fx = (x % period) * 256 / period;
-    let fy = (y % period) * 256 / period;
-    let x1 = x0.wrapping_add(1);
-    let y1 = y0.wrapping_add(1);
+fn periodic_value_noise_2d(
+    seed: u32,
+    x: i64,
+    y: i64,
+    domain_size: u32,
+    cells_u: u32,
+    cells_v: u32,
+) -> u32 {
+    let domain = i64::from(domain_size.max(1));
+    let cells_u = cells_u.max(1);
+    let cells_v = cells_v.max(1);
+    let x_q8 = x
+        .saturating_mul(i64::from(cells_u))
+        .saturating_mul(256)
+        .div_euclid(domain);
+    let y_q8 = y
+        .saturating_mul(i64::from(cells_v))
+        .saturating_mul(256)
+        .div_euclid(domain);
+    let x0 = x_q8.div_euclid(256).rem_euclid(i64::from(cells_u)) as u32;
+    let y0 = y_q8.div_euclid(256).rem_euclid(i64::from(cells_v)) as u32;
+    let fx = x_q8.rem_euclid(256) as u32;
+    let fy = y_q8.rem_euclid(256) as u32;
+    let x1 = (x0 + 1) % cells_u;
+    let y1 = (y0 + 1) % cells_v;
     let sx = smooth_q8(fx);
     let sy = smooth_q8(fy);
     let top = lerp_q8(hash_noise(seed, x0, y0), hash_noise(seed, x1, y0), sx);
@@ -297,6 +595,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn room_reflection_probe_is_deterministic_opaque_4bpp() {
+        let project = ProjectDocument::new("Probe test");
+        let mut grid = WorldGrid::stone_room(3, 2, 1024, None, None);
+        grid.ambient_color = [32, 48, 64];
+        grid.fog_color = [96, 80, 72];
+
+        let first = generate_room_reflection_probe_psxt(&project, &grid, Path::new("."))
+            .expect("room probe bakes");
+        let second = generate_room_reflection_probe_psxt(&project, &grid, Path::new("."))
+            .expect("room probe rebakes");
+        assert_eq!(first, second);
+
+        let texture = psx_asset::Texture::from_bytes(&first).expect("room probe PSXT parses");
+        assert_eq!(texture.width(), ROOM_REFLECTION_PROBE_SIZE);
+        assert_eq!(texture.height(), ROOM_REFLECTION_PROBE_SIZE);
+        assert_eq!(texture.depth(), psxed_format::texture::Depth::Bit4);
+        assert_eq!(texture.clut_entries(), 16);
+        assert!(!texture.index_zero_transparent());
+
+        grid.fog_color[0] = grid.fog_color[0].saturating_add(40);
+        let changed = generate_room_reflection_probe_psxt(&project, &grid, Path::new("."))
+            .expect("changed room probe bakes");
+        assert_ne!(first, changed, "room lighting must affect the baked probe");
+    }
+
+    #[test]
     fn generated_noise_is_deterministic_and_uses_full_4bpp_range() {
         let settings = ProceduralNoiseTexture::default();
         let first = generate_model_noise_indices(settings);
@@ -305,6 +629,49 @@ mod tests {
         assert!(first.iter().any(|&index| index == 0));
         assert!(first.iter().any(|&index| index >= 14));
         assert!(first.iter().all(|&index| index < 16));
+    }
+
+    #[test]
+    fn value_noise_domain_wraps_exactly_on_both_axes() {
+        let size = i64::from(MODEL_NOISE_TEXTURE_SIZE);
+        for &(x, y) in &[(-19, 7), (0, 0), (31, 93), (127, -41)] {
+            let sample = periodic_value_noise_2d(0x1234_5678, x, y, size as u32, 11, 7);
+            assert_eq!(
+                sample,
+                periodic_value_noise_2d(0x1234_5678, x + size, y, size as u32, 11, 7)
+            );
+            assert_eq!(
+                sample,
+                periodic_value_noise_2d(0x1234_5678, x, y + size, size as u32, 11, 7)
+            );
+        }
+    }
+
+    #[test]
+    fn generated_noise_has_no_harder_wrap_than_its_internal_edges() {
+        let pixels = generate_model_noise_indices(ProceduralNoiseTexture::default());
+        let size = usize::from(MODEL_NOISE_TEXTURE_SIZE);
+        let mut max_internal_delta = 0u8;
+        let mut max_wrap_delta = 0u8;
+        for y in 0..size {
+            for x in 1..size {
+                max_internal_delta =
+                    max_internal_delta.max(pixels[y * size + x].abs_diff(pixels[y * size + x - 1]));
+            }
+            max_wrap_delta =
+                max_wrap_delta.max(pixels[y * size].abs_diff(pixels[y * size + size - 1]));
+        }
+        for x in 0..size {
+            for y in 1..size {
+                max_internal_delta = max_internal_delta
+                    .max(pixels[y * size + x].abs_diff(pixels[(y - 1) * size + x]));
+            }
+            max_wrap_delta = max_wrap_delta.max(pixels[x].abs_diff(pixels[(size - 1) * size + x]));
+        }
+        assert!(
+            max_wrap_delta <= max_internal_delta,
+            "wrap delta {max_wrap_delta} exceeds internal delta {max_internal_delta}"
+        );
     }
 
     #[test]
@@ -354,6 +721,46 @@ mod tests {
                 ..settings
             })
         );
+    }
+
+    #[test]
+    fn material_lab_recipe_supports_a_128_square_texture_window() {
+        let bytes = generate_material_texture_psxt(GeneratedMaterialTexture {
+            size: 128,
+            ..GeneratedMaterialTexture::default()
+        });
+        let texture = psx_asset::Texture::from_bytes(&bytes).expect("generated PSXT parses");
+        assert_eq!((texture.width(), texture.height()), (128, 128));
+        assert_eq!(texture.pixel_bytes().len(), 128 * 128 / 2);
+    }
+
+    #[test]
+    fn disabled_generated_noise_bakes_a_flat_base_independent_of_noise_recipe() {
+        let settings = GeneratedMaterialTexture {
+            size: 16,
+            base_color: [24, 48, 72],
+            noise_enabled: false,
+            noise_color: [255, 0, 255],
+            ..GeneratedMaterialTexture::default()
+        };
+        let first = generate_material_texture_psxt(settings);
+        let second = generate_material_texture_psxt(GeneratedMaterialTexture {
+            noise_color: [0, 255, 0],
+            noise: ProceduralNoiseTexture {
+                seed: 99,
+                feature_size: 2,
+                octaves: 5,
+                contrast: 255,
+            },
+            ..settings
+        });
+        assert_eq!(first, second);
+        let texture = psx_asset::Texture::from_bytes(&first).expect("flat PSXT parses");
+        for y in 0..texture.height() {
+            for x in 0..texture.width() {
+                assert_eq!(texture_4bpp_index(texture, x, y), 0);
+            }
+        }
     }
 
     #[test]
