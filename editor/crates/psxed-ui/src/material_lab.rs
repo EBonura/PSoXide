@@ -282,73 +282,81 @@ fn draw_generated_settings(ui: &mut egui::Ui, generated: &mut GeneratedMaterialT
         ui.heading("Generated 4bpp texture");
         ui.horizontal(|ui| {
             ui.label("Output");
-            for size in [8u16, 16, 32, 64] {
+            for size in [8u16, 16, 32, 64, 128] {
                 ui.selectable_value(&mut generated.size, size, format!("{size}×{size}"));
             }
         });
-        color_editor(ui, "Base colour", &mut generated.base_color);
-        color_editor(ui, "Noise colour", &mut generated.noise_color);
-
-        ui.separator();
-        ui.strong("Noise");
-        egui::Grid::new("material_lab_noise")
-            .num_columns(2)
-            .spacing(Vec2::new(12.0, 5.0))
-            .show(ui, |ui| {
-                ui.label("Seed");
-                ui.add(egui::DragValue::new(&mut generated.noise.seed));
-                ui.end_row();
-                ui.label("Feature size");
-                ui.add(egui::DragValue::new(&mut generated.noise.feature_size).range(2..=64));
-                ui.end_row();
-                ui.label("Octaves");
-                ui.add(egui::DragValue::new(&mut generated.noise.octaves).range(1..=5));
-                ui.end_row();
-                ui.label("Contrast");
-                ui.add(egui::Slider::new(&mut generated.noise.contrast, 1..=255));
-                ui.end_row();
-            });
-
-        ui.separator();
-        ui.strong("Noise UV");
         ui.label(
-            RichText::new("Baked into the texture: changing these costs nothing at runtime.")
+            RichText::new("128×128 uses about 8 KiB of PS1 VRAM at 4bpp.")
                 .small()
                 .color(STUDIO_TEXT_WEAK),
         );
-        egui::Grid::new("material_lab_noise_uv")
-            .num_columns(2)
-            .spacing(Vec2::new(12.0, 5.0))
-            .show(ui, |ui| {
-                ui.label("U scale");
-                draw_q8_scale(ui, &mut generated.noise_uv.scale_u_q8);
-                ui.end_row();
-                ui.label("V scale");
-                draw_q8_scale(ui, &mut generated.noise_uv.scale_v_q8);
-                ui.end_row();
-                ui.label("U offset");
-                ui.add(egui::DragValue::new(&mut generated.noise_uv.offset_u));
-                ui.end_row();
-                ui.label("V offset");
-                ui.add(egui::DragValue::new(&mut generated.noise_uv.offset_v));
-                ui.end_row();
-                ui.label("Rotation");
-                egui::ComboBox::from_id_salt("material_lab_noise_rotation")
-                    .selected_text(format!(
-                        "{}°",
-                        (generated.noise_uv.rotation_quarters & 3) * 90
-                    ))
-                    .show_ui(ui, |ui| {
-                        for quarter in 0..4u8 {
-                            ui.selectable_value(
-                                &mut generated.noise_uv.rotation_quarters,
-                                quarter,
-                                format!("{}°", quarter * 90),
-                            );
-                        }
-                    });
-                ui.end_row();
-            });
+        color_editor(ui, "Base colour", &mut generated.base_color);
+
+        ui.separator();
+        ui.checkbox(&mut generated.noise_enabled, "Enable baked noise");
+        ui.label(
+            RichText::new("Noise is folded into the base image and costs no extra PS1 pass.")
+                .small()
+                .color(STUDIO_TEXT_WEAK),
+        );
+        ui.add_enabled_ui(generated.noise_enabled, |ui| {
+            color_editor(ui, "Noise colour", &mut generated.noise_color);
+            ui.strong("Noise recipe");
+            egui::Grid::new("material_lab_noise")
+                .num_columns(2)
+                .spacing(Vec2::new(12.0, 5.0))
+                .show(ui, |ui| {
+                    ui.label("Seed");
+                    ui.add(egui::DragValue::new(&mut generated.noise.seed));
+                    ui.end_row();
+                    ui.label("Feature size");
+                    ui.add(egui::DragValue::new(&mut generated.noise.feature_size).range(2..=64));
+                    ui.end_row();
+                    ui.label("Octaves");
+                    ui.add(egui::DragValue::new(&mut generated.noise.octaves).range(1..=5));
+                    ui.end_row();
+                    ui.label("Contrast");
+                    ui.add(egui::Slider::new(&mut generated.noise.contrast, 1..=255));
+                    ui.end_row();
+                });
+
+            ui.separator();
+            ui.strong("Noise UV");
+            egui::Grid::new("material_lab_noise_uv")
+                .num_columns(2)
+                .spacing(Vec2::new(12.0, 5.0))
+                .show(ui, |ui| {
+                    ui.label("U scale");
+                    draw_q8_scale(ui, &mut generated.noise_uv.scale_u_q8);
+                    ui.end_row();
+                    ui.label("V scale");
+                    draw_q8_scale(ui, &mut generated.noise_uv.scale_v_q8);
+                    ui.end_row();
+                    ui.label("U offset");
+                    ui.add(egui::DragValue::new(&mut generated.noise_uv.offset_u));
+                    ui.end_row();
+                    ui.label("V offset");
+                    ui.add(egui::DragValue::new(&mut generated.noise_uv.offset_v));
+                    ui.end_row();
+                    ui.label("Rotation");
+                    egui::ComboBox::from_id_salt("material_lab_noise_rotation")
+                        .selected_text(format!(
+                            "{}°",
+                            (generated.noise_uv.rotation_quarters & 3) * 90
+                        ))
+                        .show_ui(ui, |ui| {
+                            for quarter in 0..4u8 {
+                                ui.selectable_value(
+                                    &mut generated.noise_uv.rotation_quarters,
+                                    quarter,
+                                    format!("{}°", quarter * 90),
+                                );
+                            }
+                        });
+                    ui.end_row();
+                });
+        });
     });
 }
 
@@ -376,9 +384,11 @@ fn draw_reflection_settings(ui: &mut egui::Ui, reflection: &mut ReflectionProbeM
         ui.add(egui::Slider::new(&mut reflection.strength, 0..=255).text("Strength"));
         ui.add(egui::Slider::new(&mut reflection.roughness, 0..=255).text("Roughness"));
         ui.add_space(6.0);
-        ui.colored_label(
-            STUDIO_WARNING,
-            "Probe capture and reflected UV rendering are the next backend step. Until a room probe is baked, the existing image source remains the runtime fallback.",
+        ui.label(
+            RichText::new(
+                "The active room is baked automatically to a 64x64 4bpp probe. Runtime reflections switch probes as the actor crosses rooms.",
+            )
+            .color(STUDIO_TEXT_WEAK),
         );
     });
 }
@@ -408,6 +418,24 @@ fn draw_world_animation_settings(ui: &mut egui::Ui, material: &mut MaterialResou
             .small()
             .color(STUDIO_TEXT_WEAK),
         );
+        if material.secondary_layer.is_some() {
+            ui.label(
+                RichText::new(
+                    "This moves the base only on room tiles. Model preview keeps the base fixed; use Move overlay below.",
+                )
+                .small()
+                .color(STUDIO_WARNING),
+            );
+            if material.animation.mode == MaterialAnimationMode::UvScroll
+                && ui.button("Move this scroll to the model overlay").clicked()
+            {
+                if let Some(layer) = material.secondary_layer.as_mut() {
+                    layer.motion = material.animation.uv_scroll;
+                    layer.motion.enabled = true;
+                }
+                material.animation.mode = MaterialAnimationMode::Static;
+            }
+        }
 
         egui::ComboBox::from_label("Mode")
             .selected_text(material.animation.mode.label())
@@ -496,7 +524,7 @@ fn draw_world_animation_settings(ui: &mut egui::Ui, material: &mut MaterialResou
 
 fn draw_secondary_layer_settings(ui: &mut egui::Ui, material: &mut MaterialResource) {
     section_frame().show(ui, |ui| {
-        ui.heading("Model texture layer");
+        ui.heading("Model overlay");
         ui.label(
             RichText::new(
                 "A second 4bpp texture drawn over a model's base. It can remain static or scroll at runtime.",
@@ -506,7 +534,7 @@ fn draw_secondary_layer_settings(ui: &mut egui::Ui, material: &mut MaterialResou
         );
         let mut enabled = material.secondary_layer.is_some();
         if ui.checkbox(&mut enabled, "Enable overlay").changed() {
-            material.secondary_layer = enabled.then(ModelSecondaryLayer::default);
+            material.secondary_layer = enabled.then(ModelSecondaryLayer::moving_default);
         }
         let Some(layer) = material.secondary_layer.as_mut() else {
             return;
@@ -560,7 +588,7 @@ fn draw_secondary_layer_settings(ui: &mut egui::Ui, material: &mut MaterialResou
         color_editor(ui, "Overlay tint / strength", &mut layer.tint);
 
         ui.separator();
-        ui.checkbox(&mut layer.motion.enabled, "Dynamic UV motion");
+        ui.checkbox(&mut layer.motion.enabled, "Move overlay");
         ui.add_enabled_ui(layer.motion.enabled, |ui| {
             ui.label(
                 RichText::new(
@@ -649,6 +677,29 @@ fn draw_material_lab_preview(
     );
     ui.add_space(8.0);
 
+    let mut probe_signature = String::new();
+    let probe_image = if material.texture_mode == MaterialTextureMode::ReflectiveProbe {
+        let project_root = workspace.project_root().to_path_buf();
+        workspace.active_room_id().and_then(|room| {
+            let node = workspace.project.active_scene().node(room)?;
+            let NodeKind::Room { grid } = &node.kind else {
+                return None;
+            };
+            let bytes = psxed_project::generate_room_reflection_probe_psxt(
+                &workspace.project,
+                grid,
+                &project_root,
+            )
+            .ok()?;
+            let checksum = bytes
+                .iter()
+                .fold(0u32, |hash, byte| hash.rotate_left(5) ^ u32::from(*byte));
+            probe_signature = format!("room={}:probe={checksum:08x}", room.raw());
+            decode_psxt_thumbnail(&bytes).map(|(image, _)| image)
+        })
+    } else {
+        None
+    };
     let image = match material.texture_mode {
         MaterialTextureMode::Generated => {
             let bytes = psxed_project::generate_material_texture_psxt(material.generated);
@@ -659,7 +710,7 @@ fn draw_material_lab_preview(
             .resource(material_id)
             .and_then(|resource| workspace.texture_thumb_entry(resource))
             .map(|entry| entry.image.clone()),
-        MaterialTextureMode::ReflectiveProbe => None,
+        MaterialTextureMode::ReflectiveProbe => probe_image,
     };
     let overlay_image = material
         .secondary_layer
@@ -678,7 +729,7 @@ fn draw_material_lab_preview(
             ModelSecondaryTexture::Texture(_) => None,
         });
 
-    let signature = format!("{material:?}");
+    let signature = format!("{material:?}:{probe_signature}");
     if workspace.material_lab.preview_signature != signature {
         workspace.material_lab.preview_signature = signature;
         if let Some(image) = image {
@@ -716,17 +767,19 @@ fn draw_material_lab_preview(
     let painter = ui.painter_at(rect);
     draw_preview_checker(&painter, rect);
     let tick = (ui.input(|input| input.time) * 60.0).max(0.0) as u32;
-    if material.texture_mode == MaterialTextureMode::ReflectiveProbe {
+    if material.texture_mode == MaterialTextureMode::ReflectiveProbe
+        && workspace.material_lab_preview_texture.is_none()
+    {
         painter.rect_filled(rect.shrink(18.0), 8.0, STUDIO_VIEWPORT);
         painter.text(
             rect.center(),
             Align2::CENTER_CENTER,
-            "ROOM PROBE\nNOT BAKED",
+            "NO ACTIVE ROOM\nTO BAKE",
             FontId::proportional(18.0),
             STUDIO_WARNING,
         );
     } else if let Some(texture) = workspace.material_lab_preview_texture.as_ref() {
-        match material.animation.mode {
+        match model_stack_base_preview_animation(material) {
             MaterialAnimationMode::Static => {
                 painter.image(
                     texture.id(),
@@ -737,10 +790,12 @@ fn draw_material_lab_preview(
             }
             MaterialAnimationMode::UvScroll => {
                 let [u, v] = material.animation.uv_scroll.offset_at_tick(tick, 60);
-                let texture_size = texture.size_vec2();
+                let [texture_width, texture_height] = texture.size();
+                let u = usize::from(u) % texture_width.max(1);
+                let v = usize::from(v) % texture_height.max(1);
                 let offset = Vec2::new(
-                    f32::from(u) / texture_size.x.max(1.0) * rect.width(),
-                    f32::from(v) / texture_size.y.max(1.0) * rect.height(),
+                    u as f32 / texture_width.max(1) as f32 * rect.width(),
+                    v as f32 / texture_height.max(1) as f32 * rect.height(),
                 );
                 let clipped = painter.with_clip_rect(rect);
                 for x in [-rect.width(), 0.0] {
@@ -792,9 +847,11 @@ fn draw_material_lab_preview(
         let [u, v] = layer.motion.offset_at_tick(tick, 60);
         let [width, height] = workspace.material_lab.overlay_preview_size;
         if width > 0 && height > 0 {
+            let u = usize::from(u) % width;
+            let v = usize::from(v) % height;
             let offset = Vec2::new(
-                f32::from(u) / width as f32 * rect.width(),
-                f32::from(v) / height as f32 * rect.height(),
+                u as f32 / width as f32 * rect.width(),
+                v as f32 / height as f32 * rect.height(),
             );
             let tint = Color32::from_rgba_unmultiplied(
                 layer.tint[0].saturating_mul(2),
@@ -826,9 +883,9 @@ fn draw_material_lab_preview(
             .as_ref()
             .is_some_and(|layer| layer.motion.enabled)
         {
-            "2 model passes · dynamic overlay (UV-only animation)"
+            "2 model passes · fixed base + moving overlay"
         } else if material.secondary_layer.is_some() {
-            "2 model passes · static overlay"
+            "2 model passes · fixed base + static overlay"
         } else if material.animation.mode == MaterialAnimationMode::UvScroll {
             "1 texture pass · dynamic tile UV scroll"
         } else if material.animation.mode == MaterialAnimationMode::Flipbook {
@@ -838,6 +895,14 @@ fn draw_material_lab_preview(
         };
         ui.label(RichText::new(pass_note).color(STUDIO_TEXT_WEAK));
     });
+}
+
+fn model_stack_base_preview_animation(material: &MaterialResource) -> MaterialAnimationMode {
+    if material.secondary_layer.is_some() {
+        MaterialAnimationMode::Static
+    } else {
+        material.animation.mode
+    }
 }
 
 fn draw_preview_checker(painter: &egui::Painter, rect: Rect) {
@@ -854,5 +919,27 @@ fn draw_preview_checker(painter: &egui::Painter, rect: Rect) {
             };
             painter.rect_filled(tile, 0.0, color);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn model_stack_preview_pins_base_and_leaves_overlay_motion_independent() {
+        let mut material = MaterialResource::opaque(None);
+        material.animation.mode = MaterialAnimationMode::UvScroll;
+        assert_eq!(
+            model_stack_base_preview_animation(&material),
+            MaterialAnimationMode::UvScroll
+        );
+
+        material.secondary_layer = Some(ModelSecondaryLayer::moving_default());
+        assert_eq!(
+            model_stack_base_preview_animation(&material),
+            MaterialAnimationMode::Static
+        );
+        assert!(material.secondary_layer.unwrap().motion.enabled);
     }
 }

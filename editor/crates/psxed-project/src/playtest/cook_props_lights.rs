@@ -132,6 +132,8 @@ pub(crate) fn resolve_model_material_override(
         blend_mode: material.blend_mode,
         tint_rgb: material.tint,
         secondary_layer,
+        reflection_probe: (material.texture_mode == crate::MaterialTextureMode::ReflectiveProbe)
+            .then_some(material.reflection),
         face_sidedness: material.sidedness(),
     })
 }

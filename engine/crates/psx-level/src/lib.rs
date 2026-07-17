@@ -1235,6 +1235,16 @@ pub mod material_flags {
     pub const FACE_BACK: u16 = 0x0001;
     /// Draw either winding.
     pub const FACE_BOTH: u16 = 0x0002;
+    /// Model override samples the active room's reflection-probe texture.
+    pub const MODEL_REFLECTION_PROBE: u16 = 1 << 2;
+    /// Two-bit roughness level for the reflected UV projection.
+    pub const MODEL_REFLECTION_ROUGHNESS_SHIFT: u16 = 3;
+    /// Mask for the reflected UV roughness level.
+    pub const MODEL_REFLECTION_ROUGHNESS_MASK: u16 = 0x0018;
+    /// Eight-bit probe-strength field.
+    pub const MODEL_REFLECTION_STRENGTH_SHIFT: u16 = 8;
+    /// Mask for the probe-strength field.
+    pub const MODEL_REFLECTION_STRENGTH_MASK: u16 = 0xff00;
 }
 
 /// Which side of a room face should render.
@@ -1834,6 +1844,23 @@ impl LevelModelMaterialOverride {
             material_flags::FACE_BOTH => LevelMaterialSidedness::Both,
             _ => LevelMaterialSidedness::Front,
         }
+    }
+
+    /// Whether this override should sample the current room's baked probe.
+    pub const fn uses_room_reflection_probe(self) -> bool {
+        self.flags & material_flags::MODEL_REFLECTION_PROBE != 0
+    }
+
+    /// Quantised reflected-UV roughness (`0 = sharp`, `3 = rough`).
+    pub const fn reflection_roughness_level(self) -> u8 {
+        ((self.flags & material_flags::MODEL_REFLECTION_ROUGHNESS_MASK)
+            >> material_flags::MODEL_REFLECTION_ROUGHNESS_SHIFT) as u8
+    }
+
+    /// Authored probe intensity (`0 = dark`, `255 = full`).
+    pub const fn reflection_strength(self) -> u8 {
+        ((self.flags & material_flags::MODEL_REFLECTION_STRENGTH_MASK)
+            >> material_flags::MODEL_REFLECTION_STRENGTH_SHIFT) as u8
     }
 }
 

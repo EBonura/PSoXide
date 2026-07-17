@@ -496,6 +496,13 @@ fn manual_portal_rooms_emit_warm_residency_hints() {
         .find(|resource| matches!(resource.data, ResourceData::Material(_)))
         .expect("starter has a room material")
         .id;
+    let material = project
+        .resource_mut(floor_material)
+        .expect("starter room material remains addressable");
+    let ResourceData::Material(material) = &mut material.data else {
+        panic!("starter room material is a material");
+    };
+    material.texture_mode = crate::MaterialTextureMode::ReflectiveProbe;
     let room_id = {
         let scene = project.active_scene();
         scene
@@ -538,6 +545,13 @@ fn manual_portal_rooms_emit_warm_residency_hints() {
     let (package, report) = build_package(&project, &starter_project_root());
     assert!(report.is_ok(), "errors: {:?}", report.errors);
     let package = package.expect("cooks");
+    let room_0_probe = package.rooms[0]
+        .reflection_probe_asset_index
+        .expect("room 0 probe is cooked");
+    let room_1_probe = package.rooms[1]
+        .reflection_probe_asset_index
+        .expect("room 1 probe is cooked");
+    assert_ne!(room_0_probe, room_1_probe);
     let src = render_manifest_source(&package);
 
     let warm_ram_line = src
@@ -550,4 +564,19 @@ fn manual_portal_rooms_emit_warm_residency_hints() {
     );
     assert!(src.contains("warm_ram: ROOM_0_WARM_RAM"));
     assert!(src.contains("warm_vram: ROOM_0_WARM_VRAM"));
+    let room_0_required_vram = src
+        .lines()
+        .find(|line| line.contains("pub static ROOM_0_REQUIRED_VRAM"))
+        .expect("room 0 required VRAM static emitted");
+    assert!(room_0_required_vram.contains(&format!("AssetId({room_0_probe})")));
+    let room_0_warm_vram = src
+        .lines()
+        .find(|line| line.contains("pub static ROOM_0_WARM_VRAM"))
+        .expect("room 0 warm VRAM static emitted");
+    assert!(room_0_warm_vram.contains(&format!("AssetId({room_1_probe})")));
+    let room_1_warm_vram = src
+        .lines()
+        .find(|line| line.contains("pub static ROOM_1_WARM_VRAM"))
+        .expect("room 1 warm VRAM static emitted");
+    assert!(room_1_warm_vram.contains(&format!("AssetId({room_0_probe})")));
 }

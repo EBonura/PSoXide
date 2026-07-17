@@ -228,6 +228,13 @@ pub fn build_package(
     let mut texture_asset_for_path: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();
     let mut sky_texture_assets: Vec<(crate::ResolvedSkySettings, usize)> = Vec::new();
+    let uses_room_reflection_probes = project.resources.iter().any(|resource| {
+        matches!(
+            &resource.data,
+            ResourceData::Material(material)
+                if material.texture_mode == crate::MaterialTextureMode::ReflectiveProbe
+        )
+    });
     let mut room_chunks_by_node: HashMap<NodeId, Vec<AuthoredRoomChunk>> = HashMap::new();
     let mut room_bake_inputs: Vec<CookedRoomBakeInput> = Vec::new();
     let mut room_visibility: Vec<PlaytestRoomVisibility> = Vec::new();
@@ -557,10 +564,45 @@ pub fn build_package(
                 let atmosphere_wind_speed_q4 =
                     clamp_atmosphere_wind_speed_q4(chunk_grid.atmosphere_wind_speed_q4);
                 let atmosphere_enabled = chunk_grid.atmosphere_enabled && atmosphere_density > 0;
+                let reflection_probe_asset_index = if uses_room_reflection_probes {
+                    let bytes = match crate::generate_room_reflection_probe_psxt(
+                        project,
+                        &chunk_grid,
+                        project_root,
+                    ) {
+                        Ok(bytes) => bytes,
+                        Err(error) => {
+                            report.error(format!(
+                                "Room '{}' reflection probe could not be baked: {error}",
+                                room_node.name
+                            ));
+                            return (None, report);
+                        }
+                    };
+                    let asset_index = assets.len();
+                    assets.push(PlaytestAsset {
+                        kind: PlaytestAssetKind::Texture,
+                        bytes,
+                        filename: format!("room_probe_{room_index:03}.psxt"),
+                        source_label: format!(
+                            "{} reflection probe",
+                            runtime_room_name(
+                                &room_node.name,
+                                portal_room_count,
+                                portal_room.index,
+                            )
+                        ),
+                        streamed_class: StreamedClass::None,
+                    });
+                    Some(asset_index)
+                } else {
+                    None
+                };
 
                 rooms.push(PlaytestRoom {
                     name: runtime_room_name(&room_node.name, portal_room_count, portal_room.index),
                     world_asset_index,
+                    reflection_probe_asset_index,
                     origin_x: chunk_grid.origin[0],
                     origin_z: chunk_grid.origin[1],
                     origin_y: room_origin_y,
@@ -1680,6 +1722,8 @@ fn collapse_exclusive_player_material(
     if material.texture_asset_index.is_some()
         || material.blend_mode != PsxBlendMode::Average
         || secondary.blend_mode != PsxBlendMode::AddQuarter
+        || secondary.motion.enabled
+        || material.reflection_probe.is_some()
     {
         return;
     }
