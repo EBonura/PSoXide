@@ -82,23 +82,9 @@ impl EditorWorkspace {
             let (delta, shift) = ui.input(|input| (input.pointer.delta(), input.modifiers.shift));
             if shift {
                 self.pan_viewport_3d_camera(delta, rect.size());
-                self.orbit_rotate_pivot = None;
             } else {
-                // Fulcrum: on the first rotate frame, pick the point
-                // under the cursor on the plane through the orbit
-                // target; the whole drag then rotates rigidly around
-                // it. Sky miss or Free mode falls back to the target.
-                if self.orbit_rotate_pivot.is_none() {
-                    let pivot = response
-                        .interact_pointer_pos()
-                        .and_then(|pos| self.pick_orbit_rotate_pivot(rect, pos))
-                        .unwrap_or(self.camera_rig.target);
-                    self.orbit_rotate_pivot = Some(pivot);
-                }
                 self.rotate_viewport_3d_camera(delta);
             }
-        } else {
-            self.orbit_rotate_pivot = None;
         }
 
         // Hover tracking: every frame the pointer is over the panel,
@@ -374,23 +360,6 @@ impl EditorWorkspace {
         Self::draw_viewport_3d_overlay_lines(&painter, rect, &viewport_3d);
         self.draw_primitive_gizmo(&painter, rect, hovered_primitive_axis);
         self.draw_node_gizmo(&painter, rect, hovered_node_handle);
-        if let Some(pivot) = self.orbit_rotate_pivot {
-            let world = [pivot[0] as f32, pivot[1] as f32, pivot[2] as f32];
-            if let Some(screen) =
-                project_world_to_viewport_screen(self.viewport_3d_camera(), rect, world)
-            {
-                let stroke = egui::Stroke::new(1.5, ui.visuals().strong_text_color());
-                painter.circle_stroke(screen, 5.0, stroke);
-                painter.line_segment(
-                    [screen - egui::vec2(9.0, 0.0), screen + egui::vec2(9.0, 0.0)],
-                    stroke,
-                );
-                painter.line_segment(
-                    [screen - egui::vec2(0.0, 9.0), screen + egui::vec2(0.0, 9.0)],
-                    stroke,
-                );
-            }
-        }
         draw_viewport_box_select_marquee(&painter, self.viewport_3d_box_select_rect());
         if resource_drop_hovered {
             painter.rect_stroke(
@@ -410,10 +379,7 @@ impl EditorWorkspace {
     }
 
     pub(crate) fn rotate_viewport_3d_camera(&mut self, delta: Vec2) {
-        match self.orbit_rotate_pivot {
-            Some(pivot) => self.camera_rig.rotate_about(delta, pivot),
-            None => self.camera_rig.rotate(delta),
-        }
+        self.camera_rig.rotate(delta);
         self.persist_editor_camera_state();
     }
 
@@ -458,24 +424,6 @@ impl EditorWorkspace {
             .move_free_local(forward * speed, right * speed, vertical * speed);
         self.persist_editor_camera_state();
         ui.ctx().request_repaint();
-    }
-
-    /// World-space fulcrum for a rotate-drag: the cursor ray
-    /// intersected with the horizontal plane through the orbit target
-    /// (the focus plane), which anchors rotation to the hovered
-    /// content without depending on room-local spaces. Orbit only.
-    fn pick_orbit_rotate_pivot(&self, rect: Rect, pointer: Pos2) -> Option<[i32; 3]> {
-        if self.camera_rig.mode != ViewportCameraMode::Orbit {
-            return None;
-        }
-        let (origin, dir) = self.camera_ray_for_pointer(rect, pointer)?;
-        let plane_y = self.camera_rig.target[1] as f32;
-        let hit = ray_intersects_horizontal_plane(origin, dir, plane_y)?;
-        Some([
-            round_to_i32(hit[0]),
-            round_to_i32(hit[1]),
-            round_to_i32(hit[2]),
-        ])
     }
 
     pub(crate) fn set_viewport_3d_camera_mode(&mut self, mode: ViewportCameraMode) {

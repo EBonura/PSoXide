@@ -6,6 +6,7 @@ fn reflective_model_material_packs_probe_controls_without_losing_sidedness() {
         texture_asset_index: None,
         blend_mode: crate::PsxBlendMode::Average,
         tint_rgb: [128; 3],
+        motion: crate::MaterialUvMotion::default(),
         secondary_layer: None,
         reflection_probe: Some(crate::ReflectionProbeMaterial {
             strength: 173,
@@ -19,6 +20,7 @@ fn reflective_model_material_packs_probe_controls_without_losing_sidedness() {
         texture_asset: None,
         blend_mode: 0,
         tint_rgb: [128; 3],
+        motion: psx_level::LevelMaterialUvMotion::default(),
         secondary_layer: None,
         flags,
     };

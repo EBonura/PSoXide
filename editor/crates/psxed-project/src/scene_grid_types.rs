@@ -474,12 +474,31 @@ impl Default for ModelSecondaryTexture {
     }
 }
 
-/// Optional second model-material pass, rendered over the base atlas or
-/// replacement texture with its own PS1 blend mode and tint.
+/// Optional second model-material pass. It deliberately mirrors the first
+/// layer's image/generated/probe controls so Material Lab exposes two
+/// predictable PS1 passes instead of a special-purpose "noise overlay".
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelSecondaryLayer {
-    /// Imported or generated image sampled with the model's authored UVs.
-    pub texture: ModelSecondaryTexture,
+    /// Whether this authored pass is currently rendered. Disabling a layer
+    /// deliberately preserves every control below so it can be re-enabled
+    /// without rebuilding the material recipe.
+    #[serde(
+        default = "model_secondary_layer_enabled_default",
+        skip_serializing_if = "bool_is_true"
+    )]
+    pub enabled: bool,
+    /// Active texture source for this pass.
+    #[serde(default)]
+    pub texture_mode: MaterialTextureMode,
+    /// Optional separately-authored 4bpp texture.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub psxt_path: Option<String>,
+    /// Preserved host-baked colour/noise recipe.
+    #[serde(default)]
+    pub generated: GeneratedMaterialTexture,
+    /// Preserved room-probe controls.
+    #[serde(default)]
+    pub reflection: ReflectionProbeMaterial,
     /// Optical equation used by the second pass.
     pub blend_mode: PsxBlendMode,
     /// Independent modulation tint; 0x80 is neutral.
@@ -487,20 +506,60 @@ pub struct ModelSecondaryLayer {
     /// Optional runtime UV scroll. Defaults off for old project files.
     #[serde(default)]
     pub motion: MaterialUvMotion,
+    /// Pre-two-layer source, migrated by [`Self::normalize_legacy_source`].
+    #[serde(rename = "texture", default, skip_serializing)]
+    pub legacy_texture: Option<ModelSecondaryTexture>,
 }
 
 impl Default for ModelSecondaryLayer {
     fn default() -> Self {
         Self {
-            texture: ModelSecondaryTexture::default(),
+            enabled: true,
+            texture_mode: MaterialTextureMode::Generated,
+            psxt_path: None,
+            generated: GeneratedMaterialTexture {
+                size: MODEL_SECONDARY_GENERATED_SIZE,
+                base_color: [0, 0, 0],
+                noise_enabled: true,
+                noise_color: [255, 255, 255],
+                noise: ProceduralNoiseTexture::default(),
+                noise_uv: GeneratedTextureUv::default(),
+            },
+            reflection: ReflectionProbeMaterial::default(),
             blend_mode: PsxBlendMode::AddQuarter,
             tint: [0x70, 0x78, 0x80],
             motion: MaterialUvMotion::default(),
+            legacy_texture: None,
         }
     }
 }
 
 impl ModelSecondaryLayer {
+    /// Convert the old texture-or-noise overlay into the symmetric source
+    /// controls. This runs once after loading and is then omitted on save.
+    pub fn normalize_legacy_source(&mut self) {
+        let Some(source) = self.legacy_texture.take() else {
+            return;
+        };
+        match source {
+            ModelSecondaryTexture::Texture(path) => {
+                self.texture_mode = MaterialTextureMode::SimpleImage;
+                self.psxt_path = (!path.trim().is_empty()).then_some(path);
+            }
+            ModelSecondaryTexture::ProceduralNoise(noise) => {
+                self.texture_mode = MaterialTextureMode::Generated;
+                self.generated = GeneratedMaterialTexture {
+                    size: MODEL_SECONDARY_GENERATED_SIZE,
+                    base_color: [0, 0, 0],
+                    noise_enabled: true,
+                    noise_color: [255, 255, 255],
+                    noise,
+                    noise_uv: GeneratedTextureUv::default(),
+                };
+            }
+        }
+    }
+
     /// New overlay authored from the editor: independently scrolling by
     /// default, while legacy saved overlays without a motion field stay still.
     pub fn moving_default() -> Self {
@@ -516,6 +575,8 @@ impl ModelSecondaryLayer {
         }
     }
 }
+
+const MODEL_SECONDARY_GENERATED_SIZE: u16 = 128;
 
 impl MaterialFaceSidedness {
     /// User-facing label.
@@ -767,6 +828,32 @@ impl MaterialResource {
     pub fn sync_legacy_sidedness(&mut self) {
         self.double_sided = matches!(self.face_sidedness, MaterialFaceSidedness::Both);
     }
+
+    /// Return the second pass only when it should participate in preview,
+    /// cooking and rendering. The stored `Option` is retained while disabled
+    /// so the editor never destroys the author's layer settings.
+    pub fn enabled_secondary_layer(&self) -> Option<&ModelSecondaryLayer> {
+        self.secondary_layer.as_ref().filter(|layer| layer.enabled)
+    }
+
+    /// Enable or disable the second pass without discarding its recipe.
+    /// Enabling a never-authored layer creates the one sensible initial preset.
+    pub fn set_secondary_layer_enabled(&mut self, enabled: bool) {
+        match (enabled, self.secondary_layer.as_mut()) {
+            (true, Some(layer)) => layer.enabled = true,
+            (true, None) => self.secondary_layer = Some(ModelSecondaryLayer::moving_default()),
+            (false, Some(layer)) => layer.enabled = false,
+            (false, None) => {}
+        }
+    }
+}
+
+const fn model_secondary_layer_enabled_default() -> bool {
+    true
+}
+
+fn bool_is_true(value: &bool) -> bool {
+    *value
 }
 
 /// World-grid diagonal split.
@@ -2309,7 +2396,10 @@ pub(crate) fn scale_u16_ratio(value: u16, from: i32, to: i32) -> u16 {
 
 #[cfg(test)]
 mod material_uv_motion_tests {
-    use super::{MaterialUvMotion, ModelSecondaryLayer};
+    use super::{
+        MaterialTextureMode, MaterialUvMotion, ModelSecondaryLayer, ModelSecondaryTexture,
+        ProceduralNoiseTexture,
+    };
 
     #[test]
     fn newly_authored_overlay_moves_independently_by_default() {
@@ -2342,5 +2432,21 @@ mod material_uv_motion_tests {
             ..MaterialUvMotion::default()
         };
         assert_eq!(motion.offset_at_tick(u32::MAX, 60), [19, 37]);
+    }
+
+    #[test]
+    fn legacy_noise_overlay_migrates_to_generated_layer_two() {
+        let noise = ProceduralNoiseTexture {
+            seed: 91,
+            ..ProceduralNoiseTexture::default()
+        };
+        let mut layer = ModelSecondaryLayer {
+            legacy_texture: Some(ModelSecondaryTexture::ProceduralNoise(noise)),
+            ..ModelSecondaryLayer::default()
+        };
+        layer.normalize_legacy_source();
+        assert_eq!(layer.texture_mode, MaterialTextureMode::Generated);
+        assert_eq!(layer.generated.noise, noise);
+        assert!(layer.legacy_texture.is_none());
     }
 }

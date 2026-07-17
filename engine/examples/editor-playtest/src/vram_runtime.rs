@@ -264,6 +264,15 @@ pub(super) fn prop_texture_slot(texture_asset: AssetId) -> Option<VramSlot> {
     vram_arena().prop_texture_slot(VRAM_LAYOUT, ASSETS, texture_asset)
 }
 
+/// Resolve a model material texture using the transparency mode authored in
+/// its PSXT header. Model base layers are commonly opaque while their overlays
+/// use transparent index zero, so forcing both through the prop resolver can
+/// miss an already-resident base slot and expose the model atlas for a frame.
+pub(super) fn model_texture_slot(texture_asset: AssetId) -> Option<VramSlot> {
+    let bytes = upload_bytes_for(texture_asset)?;
+    ensure_texture_uploaded(texture_asset, bytes)
+}
+
 /// True once every image/box prop texture of `room` is VRAM-resident.
 #[cfg(feature = "cd-stream-bench")]
 pub(super) fn room_prop_textures_ready(room: RoomIndex) -> bool {

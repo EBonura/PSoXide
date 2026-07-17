@@ -131,7 +131,7 @@ fn free_camera_forward_quarter_turn_uses_q12_units() {
 }
 
 #[test]
-fn focus_shortcut_preserves_orbit_distance() {
+fn focus_shortcut_fits_orbit_bounds_and_preserves_angle() {
     let mut workspace =
         EditorWorkspace::open_directory(psxed_project::default_project_dir()).unwrap();
     workspace.camera_rig.mode = ViewportCameraMode::Orbit;
@@ -139,16 +139,16 @@ fn focus_shortcut_preserves_orbit_distance() {
     workspace.camera_rig.yaw = 256;
     workspace.camera_rig.pitch = 256;
 
-    workspace.focus_3d_on_point_preserving_distance([4096.0, 512.0, -2048.0]);
+    workspace.frame_3d_bounds([4096.0, 512.0, -2048.0], [100.0, 500.0, 250.0]);
 
     assert_eq!(workspace.camera_rig.target, [4096, 512, -2048]);
-    assert_eq!(workspace.camera_rig.radius, 12_345);
+    assert_eq!(workspace.camera_rig.radius, 1600);
     assert_eq!(workspace.camera_rig.yaw, 256);
     assert_eq!(workspace.camera_rig.pitch, 256);
 }
 
 #[test]
-fn focus_shortcut_in_free_mode_keeps_position_and_points_at_target() {
+fn focus_shortcut_in_free_mode_fits_bounds_and_preserves_direction() {
     let mut workspace =
         EditorWorkspace::open_directory(psxed_project::default_project_dir()).unwrap();
     workspace.camera_rig.mode = ViewportCameraMode::Free;
@@ -157,13 +157,13 @@ fn focus_shortcut_in_free_mode_keeps_position_and_points_at_target() {
     workspace.camera_rig.free_pitch = signed_to_q12(300);
     workspace.camera_rig.free_initialized = true;
 
-    workspace.focus_3d_on_point_preserving_distance([0.0, 0.0, -4096.0]);
+    workspace.frame_3d_bounds([0.0, 0.0, -4096.0], [256.0, 256.0, 256.0]);
 
-    assert_eq!(workspace.camera_rig.free_position, [0, 0, 0]);
+    assert_eq!(workspace.camera_rig.free_position, [734, -364, -4096]);
     assert_eq!(workspace.camera_rig.target, [0, 0, -4096]);
-    assert_eq!(workspace.camera_rig.radius, 4096);
-    assert_eq!(workspace.camera_rig.free_yaw, 0);
-    assert_eq!(workspace.camera_rig.free_pitch, 0);
+    assert_eq!(workspace.camera_rig.radius, 819);
+    assert_eq!(workspace.camera_rig.free_yaw, 1024);
+    assert_eq!(workspace.camera_rig.free_pitch, signed_to_q12(300));
 }
 
 #[test]
@@ -1316,4 +1316,178 @@ fn viewport_hits_rectangles_and_circles() {
     let segment = ViewportHit::segment(NodeId::ROOT, "Segment", [0.0, 0.0], [2.0, 0.0], 0.25);
     assert!(segment.contains([1.0, 0.2]));
     assert!(!segment.contains([1.0, 0.3]));
+}
+
+#[test]
+fn inspector_changes_are_undoable_as_discrete_steps() {
+    let mut workspace =
+        EditorWorkspace::with_project(std::env::temp_dir(), ProjectDocument::new("inspector-undo"));
+    let root = workspace.project.active_scene().root;
+    let original = workspace
+        .project
+        .active_scene()
+        .node(root)
+        .unwrap()
+        .name
+        .clone();
+
+    for name in ["First inspector edit", "Second inspector edit"] {
+        let before = workspace.project.clone();
+        let history_epoch = workspace.history.epoch();
+        workspace
+            .project
+            .active_scene_mut()
+            .node_mut(root)
+            .unwrap()
+            .name = name.to_string();
+        workspace.finish_inspector_undo(before, history_epoch, InspectorUndoInput::default());
+    }
+
+    workspace.do_undo();
+    assert_eq!(
+        workspace.project.active_scene().node(root).unwrap().name,
+        "First inspector edit"
+    );
+    workspace.do_undo();
+    assert_eq!(
+        workspace.project.active_scene().node(root).unwrap().name,
+        original
+    );
+}
+
+#[test]
+fn global_ctrl_or_cmd_z_reverts_an_inspector_change() {
+    let mut workspace = EditorWorkspace::with_project(
+        std::env::temp_dir(),
+        ProjectDocument::new("inspector-shortcut-undo"),
+    );
+    let root = workspace.project.active_scene().root;
+    let original = workspace
+        .project
+        .active_scene()
+        .node(root)
+        .unwrap()
+        .name
+        .clone();
+    let before = workspace.project.clone();
+    let history_epoch = workspace.history.epoch();
+    workspace
+        .project
+        .active_scene_mut()
+        .node_mut(root)
+        .unwrap()
+        .name = "Changed in Inspector".to_string();
+    workspace.finish_inspector_undo(before, history_epoch, InspectorUndoInput::default());
+
+    let ctx = egui::Context::default();
+    let _ = ctx.run(
+        egui::RawInput {
+            events: vec![egui::Event::Key {
+                key: egui::Key::Z,
+                physical_key: Some(egui::Key::Z),
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::COMMAND,
+            }],
+            ..egui::RawInput::default()
+        },
+        |ctx| workspace.handle_global_shortcuts(ctx, EditorPlaytestStatus::Idle),
+    );
+
+    assert_eq!(
+        workspace.project.active_scene().node(root).unwrap().name,
+        original
+    );
+    assert_eq!(workspace.status, "Undo");
+}
+
+#[test]
+fn inspector_pointer_drag_coalesces_to_one_undo_step() {
+    let mut workspace = EditorWorkspace::with_project(
+        std::env::temp_dir(),
+        ProjectDocument::new("inspector-drag-undo"),
+    );
+    let root = workspace.project.active_scene().root;
+    let original = workspace
+        .project
+        .active_scene()
+        .node(root)
+        .unwrap()
+        .name
+        .clone();
+    let drag = InspectorUndoInput {
+        pointer_down: true,
+        ..InspectorUndoInput::default()
+    };
+
+    for name in ["Drag frame one", "Drag frame two", "Drag frame three"] {
+        let before = workspace.project.clone();
+        let history_epoch = workspace.history.epoch();
+        workspace
+            .project
+            .active_scene_mut()
+            .node_mut(root)
+            .unwrap()
+            .name = name.to_string();
+        workspace.finish_inspector_undo(before, history_epoch, drag);
+    }
+    workspace.prepare_inspector_undo(InspectorUndoInput::default());
+
+    workspace.do_undo();
+    assert_eq!(
+        workspace.project.active_scene().node(root).unwrap().name,
+        original
+    );
+    workspace.do_redo();
+    assert_eq!(
+        workspace.project.active_scene().node(root).unwrap().name,
+        "Drag frame three"
+    );
+}
+
+#[test]
+fn inspector_respects_explicit_history_and_deliberate_clears() {
+    let mut workspace = EditorWorkspace::with_project(
+        std::env::temp_dir(),
+        ProjectDocument::new("inspector-explicit-history"),
+    );
+    let root = workspace.project.active_scene().root;
+    let original = workspace
+        .project
+        .active_scene()
+        .node(root)
+        .unwrap()
+        .name
+        .clone();
+
+    let before = workspace.project.clone();
+    let history_epoch = workspace.history.epoch();
+    workspace.push_undo();
+    workspace
+        .project
+        .active_scene_mut()
+        .node_mut(root)
+        .unwrap()
+        .name = "Explicit".to_string();
+    workspace.finish_inspector_undo(before, history_epoch, InspectorUndoInput::default());
+    workspace.do_undo();
+    assert_eq!(
+        workspace.project.active_scene().node(root).unwrap().name,
+        original
+    );
+    workspace.do_undo();
+    assert_eq!(workspace.status, "Nothing to undo");
+
+    let before = workspace.project.clone();
+    let history_epoch = workspace.history.epoch();
+    workspace.history.clear();
+    workspace
+        .project
+        .active_scene_mut()
+        .node_mut(root)
+        .unwrap()
+        .name = "Filesystem edit".to_string();
+    workspace.finish_inspector_undo(before, history_epoch, InspectorUndoInput::default());
+    workspace.do_undo();
+    assert_eq!(workspace.status, "Nothing to undo");
 }

@@ -5,13 +5,15 @@ fn model_face_with_uv_mapping(
     projected_vertices: &[ProjectedVertex],
     mapping: ModelUvMapping,
 ) -> TexturedModelRenderFace {
-    let ModelUvMapping::ScreenSpaceReflection {
-        texture_width,
-        texture_height,
-        roughness,
-    } = mapping
-    else {
-        return face;
+    let (texture_width, texture_height, roughness, uv_offset) = match mapping {
+        ModelUvMapping::Authored => return face,
+        ModelUvMapping::AuthoredOffset(offset) => return face.with_uv_offset(offset),
+        ModelUvMapping::ScreenSpaceReflection {
+            texture_width,
+            texture_height,
+            roughness,
+            uv_offset,
+        } => (texture_width, texture_height, roughness, uv_offset),
     };
     let width = i32::from(texture_width.max(1));
     let height = i32::from(texture_height.max(1));
@@ -29,7 +31,8 @@ fn model_face_with_uv_mapping(
         let v = ((i32::from(projected.sy) + 120) * height / 240).rem_euclid(height);
         let u = (u / quantum) * quantum;
         let v = (v / quantum) * quantum;
-        face.uv_words[corner] = u as u16 | ((v as u16) << 8);
+        face.uv_words[corner] = u.wrapping_add(i32::from(uv_offset.u)).rem_euclid(width) as u16
+            | ((v.wrapping_add(i32::from(uv_offset.v)).rem_euclid(height) as u16) << 8);
     }
     face
 }
@@ -824,8 +827,9 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         // submit both materials in one traversal while retaining the original
         // command order (all base packets followed by all overlay packets).
         let layered_packet_capacity = faces.len().checked_mul(2);
-        let fused_secondary_material = secondary_material.filter(|_| {
+        let fused_secondary_material = secondary_material.filter(|layer| {
             packed_average_unclamped_extent_safe_faces
+                && layer.uv_mapping.is_authored()
                 && matches!(self.ordering, WorldCommandOrdering::Bucketed)
                 && layered_packet_capacity.is_some_and(|required| {
                     required <= triangles.remaining()
@@ -1011,12 +1015,19 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 let material = secondary_layer.material;
                 let options = options.with_material_layer(material);
                 let packet_material = material.textured_packet_material();
-                let overflow = if !secondary_layer.uv_offset.is_zero() {
+                let overflow = if !secondary_layer.uv_offset.is_zero()
+                    || !secondary_layer.uv_mapping.is_authored()
+                {
                     let mut overflow = false;
                     let mut face_index = 0usize;
                     while face_index < faces.len() {
                         faces_considered = faces_considered.wrapping_add(1);
-                        let face = faces[face_index].with_uv_offset(secondary_layer.uv_offset);
+                        let face = model_face_with_uv_mapping(
+                            faces[face_index],
+                            projected_vertices,
+                            secondary_layer.uv_mapping,
+                        )
+                        .with_uv_offset(secondary_layer.uv_offset);
                         overflow = if packed_back_average_in_front_faces {
                             self.submit_predecoded_model_face_packed_back_average_in_front_fast(
                                 triangles,

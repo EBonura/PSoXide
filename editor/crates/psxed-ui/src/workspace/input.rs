@@ -682,7 +682,16 @@ impl EditorWorkspace {
             }
             let frame = ctx.input_mut(|i| i.key_pressed(egui::Key::Period));
             if frame {
-                self.frame_viewport();
+                match self.active_workspace {
+                    WorkspaceView::Room => self.frame_viewport(),
+                    WorkspaceView::Animation => {
+                        self.animation_viewer.frame_preview();
+                        self.status = "Framed animation preview".to_string();
+                    }
+                    // The UI workspace handles its own shortcuts above, and
+                    // the Material workspace has no movable preview camera.
+                    WorkspaceView::Ui | WorkspaceView::Material => {}
+                }
             }
             if self.floating_geometry.is_some() {
                 return;
