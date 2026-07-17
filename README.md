@@ -108,7 +108,8 @@ cd psoxide
 make check && make test                # build + fast tests (no BIOS or games needed)
 
 make hello-tri-disc && make run-tri    # build a homebrew example and boot it
-make run                               # launch the desktop frontend
+make run                               # launch with fast incremental dev builds
+make run-release                       # launch the fully optimised build
 ```
 
 Open the editor from the frontend's **Create** menu, then hit **Play** to cook,
@@ -136,7 +137,7 @@ winget install Rustlang.Rustup
 winget install Microsoft.VisualStudio.2022.BuildTools --override "--add Microsoft.VisualStudio.Workload.VCTools --includeRecommended --passive --wait"
 rustup show
 cargo check --workspace --all-features
-cargo run -p frontend --release
+cargo run -p frontend
 ```
 
 The pinned nightly installs `rustfmt`, `clippy`, `rust-src`, and `llvm-tools`

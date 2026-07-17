@@ -12,7 +12,7 @@
 # SDK and engine examples are compiled individually with explicit PSX
 # cargo flags from this Makefile.
 
-.PHONY: help check test canaries fmt lint lint-policy-guard runtime-numeric-guard clean commercial-visual-guards tekken-mode-guard tekken-vs-guard tekken-fight-guard tekken-late-fight-guard run pgo web validate validate-repeat validate-bless \
+.PHONY: help check test canaries fmt lint lint-policy-guard runtime-numeric-guard clean commercial-visual-guards tekken-mode-guard tekken-vs-guard tekken-fight-guard tekken-late-fight-guard run run-release pgo web validate validate-repeat validate-bless \
         test-sdk \
         psxed assets \
 	examples hello-tri hello-tri-disc hello-input hello-input-disc hello-ot hello-ot-disc \
@@ -52,7 +52,8 @@ help:
 	@echo "    make runtime-numeric-guard"
 	@echo "                      - reject floats/wide ints in PS1 runtime code"
 	@echo "    make clean        - cargo clean all workspaces"
-	@echo "    make run          - launch the desktop frontend (no EXE)"
+	@echo "    make run          - launch the desktop frontend with fast incremental builds"
+	@echo "    make run-release  - launch the fully optimised desktop frontend"
 	@echo "    make pgo          - PGO-optimised frontend build (PGO_GAME=<.cue/.exe>, PSOXIDE_BIOS set; ~2x faster core)"
 	@echo "    make web          - serve the wasm web build locally (release, :8080)"
 	@echo "    make validate     - run exact-hash validation matrix"
@@ -150,6 +151,9 @@ help:
 	@echo "    make run-hardware-tests - build + boot the visual hardware test suite"
 
 run:
+	cd emu && cargo run -p frontend
+
+run-release:
 	cd emu && cargo run -p frontend --release
 
 # CI and the web deploy deliberately skip PGO: rustc's PGO does not
