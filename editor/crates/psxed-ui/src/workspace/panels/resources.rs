@@ -252,6 +252,13 @@ impl EditorWorkspace {
 
         if changed {
             self.mark_dirty();
+            if resource_can_open_in_animation_viewer(&resource_data) {
+                self.animation_viewer.focus_resource(&self.project, id);
+                self.animation_viewer_preview_texture = None;
+            }
+            // Resource edits land after the central preview was drawn. Force
+            // the follow-up frame that reloads the edited clip/model/source.
+            ui.ctx().request_repaint();
         }
 
         if let Some((texture_id, pick)) = transparency_key_action {
