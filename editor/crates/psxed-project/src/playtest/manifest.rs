@@ -3016,8 +3016,13 @@ const fn material_flags_for_sidedness(sidedness: crate::MaterialFaceSidedness) -
 }
 
 fn model_material_flags(material: &PlaytestModelMaterialOverride) -> u16 {
-    let mut flags = material_flags_for_sidedness(material.face_sidedness);
-    if let Some(reflection) = material.reflection_probe {
+    let flags = material_flags_for_sidedness(material.face_sidedness);
+    flags | reflection_material_flags(material.reflection_probe)
+}
+
+fn reflection_material_flags(reflection: Option<crate::ReflectionProbeMaterial>) -> u16 {
+    let mut flags = 0;
+    if let Some(reflection) = reflection {
         let roughness_level = u16::from(reflection.roughness >> 6).min(3);
         flags |= psx_level::material_flags::MODEL_REFLECTION_PROBE;
         flags |= roughness_level << psx_level::material_flags::MODEL_REFLECTION_ROUGHNESS_SHIFT;
@@ -3077,9 +3082,12 @@ fn model_material_override_literal(
             let secondary_layer = o.secondary_layer.map_or_else(
                 || "None".to_string(),
                 |layer| {
+                    let texture_asset = layer
+                        .texture_asset_index
+                        .map(|index| format!("Some(AssetId({index}))"))
+                        .unwrap_or_else(|| "None".to_string());
                     format!(
-                        "Some(LevelModelSecondaryLayer {{ texture_asset: AssetId({}), blend_mode: {}, tint_rgb: [{}, {}, {}], motion: LevelMaterialUvMotion {{ enabled: {}, speed_u_q8: {}, speed_v_q8: {}, phase_u: {}, phase_v: {} }} }})",
-                        layer.texture_asset_index,
+                        "Some(LevelModelSecondaryLayer {{ texture_asset: {texture_asset}, blend_mode: {}, tint_rgb: [{}, {}, {}], motion: LevelMaterialUvMotion {{ enabled: {}, speed_u_q8: {}, speed_v_q8: {}, phase_u: {}, phase_v: {} }}, flags: {} }})",
                         model_override_blend_code(layer.blend_mode),
                         layer.tint_rgb[0],
                         layer.tint_rgb[1],
@@ -3089,15 +3097,21 @@ fn model_material_override_literal(
                         layer.motion.speed_v_q8,
                         layer.motion.phase_u,
                         layer.motion.phase_v,
+                        reflection_material_flags(layer.reflection_probe),
                     )
                 },
             );
             format!(
-                "Some(LevelModelMaterialOverride {{ texture_asset: {texture_asset}, blend_mode: {}, tint_rgb: [{}, {}, {}], secondary_layer: {secondary_layer}, flags: {} }})",
+                "Some(LevelModelMaterialOverride {{ texture_asset: {texture_asset}, blend_mode: {}, tint_rgb: [{}, {}, {}], motion: LevelMaterialUvMotion {{ enabled: {}, speed_u_q8: {}, speed_v_q8: {}, phase_u: {}, phase_v: {} }}, secondary_layer: {secondary_layer}, flags: {} }})",
                 model_override_blend_code(o.blend_mode),
                 o.tint_rgb[0],
                 o.tint_rgb[1],
                 o.tint_rgb[2],
+                o.motion.enabled,
+                o.motion.speed_u_q8,
+                o.motion.speed_v_q8,
+                o.motion.phase_u,
+                o.motion.phase_v,
                 model_material_flags(o),
             )
         }
@@ -3187,7 +3201,9 @@ fn room_required_assets(
                 push_unique(&mut required_vram, asset_index);
             }
             if let Some(layer) = material_override.secondary_layer {
-                push_unique(&mut required_vram, layer.texture_asset_index);
+                if let Some(asset_index) = layer.texture_asset_index {
+                    push_unique(&mut required_vram, asset_index);
+                }
             }
         }
         if seen_models.contains(&inst.model) {
@@ -3206,7 +3222,9 @@ fn room_required_assets(
                 push_unique(&mut required_vram, asset_index);
             }
             if let Some(layer) = material_override.secondary_layer {
-                push_unique(&mut required_vram, layer.texture_asset_index);
+                if let Some(asset_index) = layer.texture_asset_index {
+                    push_unique(&mut required_vram, asset_index);
+                }
             }
         }
         if pc.spawn.room == room_index {

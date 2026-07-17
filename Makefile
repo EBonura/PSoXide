@@ -12,7 +12,7 @@
 # SDK and engine examples are compiled individually with explicit PSX
 # cargo flags from this Makefile.
 
-.PHONY: help check test canaries fmt lint lint-policy-guard runtime-numeric-guard clean commercial-visual-guards tekken-mode-guard tekken-vs-guard tekken-fight-guard tekken-late-fight-guard run run-release pgo web validate validate-repeat validate-bless \
+.PHONY: help check test canaries fmt lint lint-policy-guard runtime-numeric-guard clean commercial-visual-guards tekken-mode-guard tekken-vs-guard tekken-fight-guard tekken-late-fight-guard run run-release editor-ui-screenshot pgo web validate validate-repeat validate-bless \
         test-sdk \
         psxed assets \
 	examples hello-tri hello-tri-disc hello-input hello-input-disc hello-ot hello-ot-disc \
@@ -54,6 +54,8 @@ help:
 	@echo "    make clean        - cargo clean all workspaces"
 	@echo "    make run          - launch the desktop frontend with fast incremental builds"
 	@echo "    make run-release  - launch the fully optimised desktop frontend"
+	@echo "    make editor-ui-screenshot"
+	@echo "                      - render the exact editor view to PNG without opening a window"
 	@echo "    make pgo          - PGO-optimised frontend build (PGO_GAME=<.cue/.exe>, PSOXIDE_BIOS set; ~2x faster core)"
 	@echo "    make web          - serve the wasm web build locally (release, :8080)"
 	@echo "    make validate     - run exact-hash validation matrix"
@@ -152,6 +154,20 @@ help:
 
 run:
 	cd emu && cargo run -p frontend
+
+EDITOR_UI_PROJECT ?= editor/projects/cortex_ignition_v1
+EDITOR_UI_VIEW ?= animation
+EDITOR_UI_RESOURCE ?= Stand To Roll
+EDITOR_UI_OUT ?= /tmp/psoxide-editor-ui.png
+EDITOR_UI_FRAME_SELECTED ?= 0
+
+editor-ui-screenshot:
+	cargo run -p frontend -- dump-editor-ui \
+		--project "$(EDITOR_UI_PROJECT)" \
+		--view "$(EDITOR_UI_VIEW)" \
+		$(if $(strip $(EDITOR_UI_RESOURCE)),--resource "$(EDITOR_UI_RESOURCE)",) \
+		$(if $(filter 1 true yes,$(EDITOR_UI_FRAME_SELECTED)),--frame-selected,) \
+		--out "$(EDITOR_UI_OUT)"
 
 run-release:
 	cd emu && cargo run -p frontend --release

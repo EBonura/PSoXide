@@ -580,3 +580,28 @@ fn manual_portal_rooms_emit_warm_residency_hints() {
         .expect("room 1 warm VRAM static emitted");
     assert!(room_1_warm_vram.contains(&format!("AssetId({room_0_probe})")));
 }
+
+#[test]
+fn reflective_second_layer_cooks_room_probe_residency() {
+    let mut project = project_with_one_room();
+    let material = project
+        .resources
+        .iter_mut()
+        .find_map(|resource| match &mut resource.data {
+            ResourceData::Material(material) => Some(material),
+            _ => None,
+        })
+        .expect("starter has a material");
+    let mut layer = crate::ModelSecondaryLayer::default();
+    layer.texture_mode = crate::MaterialTextureMode::ReflectiveProbe;
+    material.secondary_layer = Some(layer);
+
+    let (package, report) = build_package(&project, &starter_project_root());
+    assert!(report.is_ok(), "errors: {:?}", report.errors);
+    assert!(
+        package.expect("cooks").rooms[0]
+            .reflection_probe_asset_index
+            .is_some(),
+        "layer 2 probe must request the same streamed room probe as layer 1"
+    );
+}

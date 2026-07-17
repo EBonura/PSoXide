@@ -678,6 +678,8 @@ pub struct PlaytestModelMaterialOverride {
     pub blend_mode: crate::PsxBlendMode,
     /// Authored modulation tint.
     pub tint_rgb: [u8; 3],
+    /// Independent movement for layer 1.
+    pub motion: crate::MaterialUvMotion,
     /// Optional independently blended second texture pass.
     pub secondary_layer: Option<PlaytestModelSecondaryLayer>,
     /// Room-probe controls retained for manifest flag packing. The texture
@@ -690,14 +692,17 @@ pub struct PlaytestModelMaterialOverride {
 /// Cooked host-side description of a model material's second pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlaytestModelSecondaryLayer {
-    /// Index into [`PlaytestPackage::assets`] of the 4bpp layer texture.
-    pub texture_asset_index: usize,
+    /// Index into [`PlaytestPackage::assets`] of the 4bpp layer texture, or
+    /// `None` when this layer samples the active room probe.
+    pub texture_asset_index: Option<usize>,
     /// Independent authored PS1 blend mode.
     pub blend_mode: crate::PsxBlendMode,
     /// Independent modulation tint.
     pub tint_rgb: [u8; 3],
     /// Signed Q8 texels-per-second UV scroll and initial phase.
     pub motion: crate::MaterialUvMotion,
+    /// Active-room probe controls when this layer is reflective.
+    pub reflection_probe: Option<crate::ReflectionProbeMaterial>,
 }
 
 /// One placed model instance. Coordinates are room-local

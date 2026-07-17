@@ -233,6 +233,9 @@ pub fn build_package(
             &resource.data,
             ResourceData::Material(material)
                 if material.texture_mode == crate::MaterialTextureMode::ReflectiveProbe
+                    || material.enabled_secondary_layer().is_some_and(|layer| {
+                        layer.texture_mode == crate::MaterialTextureMode::ReflectiveProbe
+                    })
         )
     });
     let mut room_chunks_by_node: HashMap<NodeId, Vec<AuthoredRoomChunk>> = HashMap::new();
@@ -1753,8 +1756,11 @@ fn collapse_exclusive_player_material(
     else {
         return;
     };
+    let Some(secondary_asset_index) = secondary.texture_asset_index else {
+        return;
+    };
     let Some(secondary_bytes) = assets
-        .get(secondary.texture_asset_index)
+        .get(secondary_asset_index)
         .map(|asset| asset.bytes.clone())
     else {
         return;

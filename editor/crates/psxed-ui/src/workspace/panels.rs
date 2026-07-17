@@ -1585,8 +1585,12 @@ impl EditorWorkspace {
         camera_preview: Option<EditorCameraPreviewPresentation>,
     ) {
         if !self.inspector_open {
+            self.inspector_undo_transaction = None;
             return;
         }
+        self.prepare_inspector_undo_frame(ctx);
+        let undo_candidate =
+            inspector_has_edit_input(ctx).then(|| (self.project.clone(), self.history.epoch()));
         let max_width = max_resizable_side_dock_width(ctx, false);
         egui::SidePanel::right("psxed_inspector")
             .resizable(true)
@@ -1974,6 +1978,9 @@ impl EditorWorkspace {
                 });
                 });
             });
+        if let Some((project_before, history_epoch_before)) = undo_candidate {
+            self.finish_inspector_undo_frame(project_before, history_epoch_before, ctx);
+        }
     }
 
     /// Build the breadcrumb crumbs shown above the face inspector.
@@ -2280,9 +2287,8 @@ impl EditorWorkspace {
             return;
         }
 
-        // Apply against the active project. Push undo BEFORE
-        // mutating so the snapshot captures the pre-edit state.
-        self.push_undo();
+        // The Inspector's shared transaction boundary records the pre-edit
+        // document and coalesces a multi-frame drag into one undo step.
         let new_a = snap_height(new_a);
         let new_b = snap_height(new_b);
         endpoint_a.world[1] = new_a;
@@ -2364,7 +2370,6 @@ impl EditorWorkspace {
             });
 
         if changed {
-            self.push_undo();
             let new_y = snap_height(new_y);
             physical.world[1] = new_y;
             let moved = if let Some(grid) = self.room_floor_grid_mut(vertex.room) {
@@ -2381,7 +2386,6 @@ impl EditorWorkspace {
                 self.mark_dirty();
             }
         } else if break_clicked {
-            self.push_undo();
             let new_y = snap_height(physical.world[1] + HEIGHT_QUANTUM);
             // Apply only to the seed -- the rest of the group
             // stays put, so they cease being coincident.
