@@ -49,8 +49,8 @@
 use psx_gpu::draw_quad_flat;
 use psx_level::{
     first_focus, next_focus, scene_state_flags, ui_node_flags, FlowState, GameFlow, LevelOptionDef,
-    LevelSceneState, LevelTransition, LevelUiAction, LevelUiNodeKind, LevelUiNodeRecord,
-    LevelUiScene, LevelUiSfxCueRecord, LevelUiSfxEvent, LevelUiSfxSampleRecord,
+    LevelSceneState, LevelTransition, LevelTransitionKind, LevelUiAction, LevelUiNodeKind,
+    LevelUiNodeRecord, LevelUiScene, LevelUiSfxCueRecord, LevelUiSfxEvent, LevelUiSfxSampleRecord,
     LevelUiValueBinding, LevelWorldLayer, NavDir, NavRect, UI_OPTION_NONE, UI_SCENE_NONE,
     UI_SFX_NONE,
 };
@@ -714,18 +714,27 @@ pub struct GameApp<'a, S: Scene> {
     /// Active full-screen transition, if a button-triggered flow change is
     /// delaying the cursor switch.
     transition: Option<FlowTransition>,
+    /// Loading-to-gameplay block dissolve. This is separate from authored
+    /// flow transitions because the gameplay state is already initialized
+    /// behind the loading card; its midpoint only changes which side renders.
+    loading_exit_transition: Option<FlowTransition>,
     /// Authored loading-screen UI scene (`UI_SCENE_NONE` = built-in
     /// fallback). See [`crate::app::Config::loading_ui_scene`].
     loading_scene: u16,
     /// Live world-load progress in Q12, fed to
     /// [`LevelUiValueBinding::LoadingProgress`].
     loading_progress_q12: i32,
+    /// The world and authored minimum hold are complete, so the loading card
+    /// may reveal its confirm prompt and accept a fresh CROSS / START press.
+    loading_confirm_ready: bool,
     /// Sim tick (vblank-anchored) at this loading pass's first render;
     /// drives the minimum-hold so an authored loading scene never
     /// flashes on a fast load. Vblank-clocked because the loading loop
     /// free-runs faster than the visual cadence, so a frame COUNT is
     /// not wall time.
     loading_hold_start_tick: u32,
+    /// Stable random-message selector for the currently shown UI scene.
+    ui_text_seed: u16,
 }
 
 /// Minimum vblanks an AUTHORED loading scene stays up before handing
@@ -733,6 +742,15 @@ pub struct GameApp<'a, S: Scene> {
 /// immediate handover, so probe/profiling projects without a Loading
 /// scene are unaffected.
 const MIN_LOADING_HOLD_VBLANKS: u32 = 100;
+
+/// PS1-cheap two-sided handoff: deterministic blocks cover the loading card,
+/// gameplay replaces it at full coverage, then the same blocks peel away.
+const LOADING_EXIT_DISSOLVE: LevelTransition = LevelTransition {
+    kind: LevelTransitionKind::BlockDissolve,
+    frames: 36,
+    color: [4, 2, 4],
+    seed: 0x71d5,
+};
 
 impl<'a, S: Scene> GameApp<'a, S> {
     /// Build a driver over `flow`, borrowing `gameplay`. The cursor is
@@ -774,9 +792,12 @@ impl<'a, S: Scene> GameApp<'a, S> {
             ui_sfx_runtime_len: 0,
             ui_sfx_cursor: 0,
             transition: None,
+            loading_exit_transition: None,
             loading_scene,
             loading_progress_q12: 0,
+            loading_confirm_ready: false,
             loading_hold_start_tick: 0,
+            ui_text_seed: 0x6d2b,
         }
     }
 
@@ -1073,6 +1094,12 @@ impl<'a, S: Scene> GameApp<'a, S> {
         if self.tag_at(state_index).has_gameplay() && !self.cursor.gameplay_inited {
             self.cdda.release_for_data_reads(ctx.sim_tick.as_u32());
             flow_trace("psx-engine: loading begin");
+            self.ui_text_seed = (ctx.sim_tick.as_u32() as u16)
+                .wrapping_mul(109)
+                .wrapping_add(state_index.wrapping_mul(257))
+                .wrapping_add(1);
+            self.loading_confirm_ready = false;
+            self.loading_exit_transition = None;
             self.cursor.begin_loading(state_index, return_to);
             return;
         }
@@ -1129,6 +1156,25 @@ impl<'a, S: Scene> GameApp<'a, S> {
         true
     }
 
+    fn update_loading_exit_transition(&mut self) {
+        let Some(mut transition) = self.loading_exit_transition else {
+            return;
+        };
+        transition.elapsed = transition.elapsed.saturating_add(1);
+        if !transition.switched && transition.elapsed >= transition.switch_frame() {
+            transition.switched = true;
+            // LOADING_READY deliberately clears only here, under a fully
+            // opaque dissolve, so the first gameplay frame cannot flash in.
+            self.cursor.mark_loading_rendered();
+            self.loading_confirm_ready = false;
+        }
+        if transition.elapsed >= transition.frames() {
+            self.loading_exit_transition = None;
+        } else {
+            self.loading_exit_transition = Some(transition);
+        }
+    }
+
     fn finish_loading_transition(&mut self, ctx: &mut Ctx) {
         if self.cursor.loading_is_inited() {
             let world_ready = self.gameplay.loading_update(ctx);
@@ -1146,9 +1192,24 @@ impl<'a, S: Scene> GameApp<'a, S> {
                     .as_u32()
                     .wrapping_sub(self.loading_hold_start_tick)
                     >= MIN_LOADING_HOLD_VBLANKS;
-            if world_ready && hold_done {
+            self.loading_confirm_ready = world_ready && hold_done;
+            // Authored loading scenes double as readable lore cards: once the
+            // world and minimum hold are complete, wait for a fresh confirm
+            // instead of tearing the card away. The built-in fallback keeps
+            // its automatic handoff for projects that did not author a screen.
+            let confirmed = !self.loading_scene_active()
+                || ctx.just_pressed(button::CROSS)
+                || ctx.just_pressed(button::START);
+            if self.loading_confirm_ready && confirmed {
                 flow_trace("psx-engine: loading ready");
                 self.cursor.mark_loading_ready();
+                if self.loading_scene_active() {
+                    self.loading_exit_transition = Some(FlowTransition::new(
+                        self.cursor.current,
+                        self.cursor.return_to,
+                        LOADING_EXIT_DISSOLVE,
+                    ));
+                }
             }
             return;
         }
@@ -1227,6 +1288,10 @@ impl<'a, S: Scene> GameApp<'a, S> {
     /// `return_to` for a later `Back`, and clear the resolved focus so
     /// the new scene re-seeds from [`first_focus`] on its first update.
     fn enter_ui_state(&mut self, state_index: u16, return_to: Option<u16>, ctx: &mut Ctx) {
+        self.ui_text_seed = (ctx.sim_tick.as_u32() as u16)
+            .wrapping_mul(109)
+            .wrapping_add(state_index.wrapping_mul(257))
+            .wrapping_add(1);
         self.switch_resources(state_index, ctx);
         self.cursor.current = state_index;
         self.cursor.return_to = return_to;
@@ -1495,6 +1560,7 @@ impl<'a, S: Scene> GameApp<'a, S> {
             .find(|record| record.id == scene)
             .map(|record| record.focus_style)
             .unwrap_or(psx_level::LevelUiFocusStyle::DEFAULT);
+        let ui_text_seed = self.ui_text_seed;
         let mut textures = |asset| self.gameplay.ui_texture(asset);
         let loading_progress_q12 = self.loading_progress_q12;
         let value = |binding: LevelUiValueBinding| {
@@ -1512,8 +1578,10 @@ impl<'a, S: Scene> GameApp<'a, S> {
         let option_value =
             |option_id: u16| resolve_option_value(options, &option_values, option_len, option_id);
         let analog_active = ctx.pad.is_analog();
+        let loading_complete = self.loading_confirm_ready;
         let visible = |node: &LevelUiNodeRecord| {
-            node.flags & ui_node_flags::ANALOG_INACTIVE_ONLY == 0 || !analog_active
+            (node.flags & ui_node_flags::ANALOG_INACTIVE_ONLY == 0 || !analog_active)
+                && (node.flags & ui_node_flags::LOADING_COMPLETE_ONLY == 0 || loading_complete)
         };
         // The gameplay scene lends its uploaded font atlases so menu labels
         // and buttons draw with the same glyphs the HUD uses. Empty slots
@@ -1534,6 +1602,7 @@ impl<'a, S: Scene> GameApp<'a, S> {
             focused,
             &focus_style,
             (ctx.sim_tick.as_u32() & 0xffff) as u16,
+            ui_text_seed,
             &mut textures,
             &value,
             options,
@@ -1697,6 +1766,12 @@ impl<'a, S: Scene> Scene for GameApp<'a, S> {
         // A UI entry only parks the cursor; gameplay.init is deferred until the
         // flow transitions into a Gameplay state.
         if self.current_tag().has_gameplay() {
+            self.ui_text_seed = (ctx.sim_tick.as_u32() as u16)
+                .wrapping_mul(109)
+                .wrapping_add(entry.wrapping_mul(257))
+                .wrapping_add(1);
+            self.loading_confirm_ready = false;
+            self.loading_exit_transition = None;
             self.cursor.begin_loading(entry, None);
         } else {
             // Cursor already at the UI-only entry from FlowCursor::new.
@@ -1709,6 +1784,12 @@ impl<'a, S: Scene> Scene for GameApp<'a, S> {
     }
 
     fn update(&mut self, ctx: &mut Ctx) {
+        if self.loading_exit_transition.is_some() {
+            self.update_loading_exit_transition();
+            if self.loading_pending() {
+                return;
+            }
+        }
         if self.loading_pending() {
             self.finish_loading_transition(ctx);
             return;
@@ -1749,7 +1830,11 @@ impl<'a, S: Scene> Scene for GameApp<'a, S> {
                 self.loading_progress_q12 = 0;
             }
             self.render_loading_screen(ctx);
-            self.cursor.mark_loading_rendered();
+            if let Some(transition) = self.loading_exit_transition {
+                render_transition_overlay(transition);
+            } else {
+                self.cursor.mark_loading_rendered();
+            }
             return;
         }
         crate::app::boot_visual_checkpoint(&mut ctx.fb, (140, 80, 220), "35 TAG RESOLVE BEGIN");
@@ -1806,6 +1891,9 @@ impl<'a, S: Scene> Scene for GameApp<'a, S> {
             }
         }
         if let Some(transition) = self.transition {
+            render_transition_overlay(transition);
+        }
+        if let Some(transition) = self.loading_exit_transition {
             render_transition_overlay(transition);
         }
     }
@@ -2340,6 +2428,70 @@ mod tests {
             !app.loading_pending(),
             "rendered loading transition should enter the target state"
         );
+    }
+
+    #[test]
+    fn authored_loading_scene_waits_for_fresh_confirm_after_ready() {
+        let mut scene = CountingScene::default();
+        let mut app = GameApp::new(
+            &MENU_FLOW,
+            MENU_SCENES,
+            MENU_NODES,
+            &[],
+            &[],
+            &[],
+            &[],
+            1,
+            &mut scene,
+        );
+        let mut ctx = test_ctx();
+        app.init(&mut ctx);
+
+        press(&mut ctx, button::CROSS);
+        app.update(&mut ctx);
+        assert!(app.loading_pending());
+
+        // First loading render permits deferred gameplay init.
+        app.cursor.mark_loading_rendered();
+        app.update(&mut ctx);
+        assert_eq!(app.gameplay.inits, 1);
+
+        // Make the authored minimum hold complete. A held/old press and an
+        // idle tick must not dismiss the lore card.
+        app.loading_hold_start_tick = u32::MAX - MIN_LOADING_HOLD_VBLANKS;
+        ctx.pad_prev = ctx.pad;
+        app.update(&mut ctx);
+        assert!(app.loading_pending());
+
+        ctx.pad = PadState::NONE;
+        ctx.pad_prev = PadState::NONE;
+        app.update(&mut ctx);
+        assert!(app.loading_pending());
+
+        // A fresh confirm begins the authored block dissolve. Loading remains
+        // visible through the cover half, then gameplay is swapped in only at
+        // full coverage and revealed through the second half.
+        press(&mut ctx, button::CROSS);
+        app.update(&mut ctx);
+        assert!(app.loading_pending());
+        let transition = app
+            .loading_exit_transition
+            .expect("confirm starts loading exit dissolve");
+        assert_eq!(transition.spec.kind, LevelTransitionKind::BlockDissolve);
+
+        ctx.pad = PadState::NONE;
+        ctx.pad_prev = PadState::NONE;
+        for _ in 1..transition.switch_frame() {
+            app.update(&mut ctx);
+            assert!(app.loading_pending());
+        }
+        app.update(&mut ctx);
+        assert!(!app.loading_pending());
+        assert!(app.loading_exit_transition.is_some());
+
+        while app.loading_exit_transition.is_some() {
+            app.update(&mut ctx);
+        }
     }
 
     #[test]

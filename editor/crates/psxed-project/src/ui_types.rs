@@ -152,17 +152,20 @@ pub enum UiVisibilityCondition {
     Always,
     /// Draw only while the current pad is not reporting DualShock analog mode.
     AnalogInactive,
+    /// Draw only once an authored loading screen is ready to accept confirm.
+    LoadingComplete,
 }
 
 impl UiVisibilityCondition {
     /// Stable list used by editor controls.
-    pub const ALL: [Self; 2] = [Self::Always, Self::AnalogInactive];
+    pub const ALL: [Self; 3] = [Self::Always, Self::AnalogInactive, Self::LoadingComplete];
 
     /// Compact display label.
     pub const fn label(self) -> &'static str {
         match self {
             Self::Always => "Always",
             Self::AnalogInactive => "Analog inactive",
+            Self::LoadingComplete => "Loading complete",
         }
     }
 }
@@ -908,17 +911,24 @@ pub enum UiImageEffect {
     SoftPulse,
     /// Gentle vertical bob (loading-screen mascot idiom).
     Bob,
+    /// Continuous upward drift. Intended for tiny untextured image quads
+    /// used as lightweight loading-screen motes.
+    Rise,
+    /// Fast left-to-right crosswind with a small upward lift and gust jitter.
+    Wind,
 }
 
 impl UiImageEffect {
     /// Stable list used by editor controls.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 8] = [
         Self::None,
         Self::Shimmer,
         Self::FastShimmer,
         Self::DiagonalSweep,
         Self::SoftPulse,
         Self::Bob,
+        Self::Rise,
+        Self::Wind,
     ];
 
     /// Compact display label.
@@ -930,6 +940,8 @@ impl UiImageEffect {
             Self::DiagonalSweep => "Diagonal Sweep",
             Self::SoftPulse => "Soft Pulse",
             Self::Bob => "Bob",
+            Self::Rise => "Rise",
+            Self::Wind => "Wind",
         }
     }
 }
@@ -1031,6 +1043,12 @@ pub enum UiNodeKind {
         rect: UiRect,
         /// Authored text.
         text: String,
+        /// Pick one authored message whenever this scene is entered.
+        #[serde(default)]
+        random_message: bool,
+        /// Candidate strings used when `random_message` is enabled.
+        #[serde(default)]
+        messages: Vec<String>,
         /// Optional runtime lookup tag for game-controlled text.
         #[serde(default)]
         tag: String,

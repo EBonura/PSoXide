@@ -90,6 +90,7 @@ pub(crate) fn draw_player_hud(
         None,
         &psx_level::LevelUiFocusStyle::DEFAULT,
         frame,
+        0,
         &mut resolve_texture,
         &resolve_value,
         &[],

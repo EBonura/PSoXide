@@ -103,7 +103,7 @@ pub(super) fn menu_ui_cache_ready() -> bool {
 /// Tracks each created slot so `release_ui_images` can free it when the scene
 /// changes or gameplay starts.
 #[cfg(feature = "cd-stream-bench")]
-pub(super) fn load_ui_images_for_scene(scene_id: u16) {
+pub(super) fn load_ui_images_for_scene(scene_id: u16) -> bool {
     vram_arena().load_ui_images_for_scene(
         VRAM_LAYOUT,
         ui_images_arena(),
@@ -112,7 +112,7 @@ pub(super) fn load_ui_images_for_scene(scene_id: u16) {
         UI_NODES,
         ASSETS,
         ROOMS,
-    );
+    )
 }
 
 /// Hand the menu UI-image cache's RAM over to gameplay: drop the cache

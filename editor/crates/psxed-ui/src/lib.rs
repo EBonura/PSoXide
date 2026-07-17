@@ -2246,7 +2246,16 @@ impl EditorWorkspace {
                     })
             }
             ResourceData::AnimationSource(source) => {
-                self.animation_viewer.selected_clip_path() == Some(source.source_path.as_str())
+                let selected_path = self.animation_viewer.selected_clip_path();
+                let source_is_selected = selected_path == Some(source.source_path.as_str())
+                    || self.project.resources.iter().any(|candidate| {
+                        let ResourceData::AnimationClip(clip) = &candidate.data else {
+                            return false;
+                        };
+                        clip.source == Some(resource_id)
+                            && selected_path == Some(clip.psxanim_path.as_str())
+                    });
+                source_is_selected
                     && source.target_model.map_or(true, |model| {
                         self.animation_viewer.selected_model() == Some(model)
                     })
