@@ -236,12 +236,12 @@ fn editor_workspace_saves_with_project_and_restores_on_open() {
     let project_dir = test_temp_dir("editor-workspace");
     let mut workspace =
         EditorWorkspace::with_project(project_dir.clone(), ProjectDocument::new("workspace"));
-    workspace.active_workspace = WorkspaceView::Ui;
+    workspace.active_workspace = WorkspaceView::Material;
 
     workspace.save().unwrap();
 
     let reopened = EditorWorkspace::open_directory(&project_dir).unwrap();
-    assert_eq!(reopened.active_workspace, WorkspaceView::Ui);
+    assert_eq!(reopened.active_workspace, WorkspaceView::Material);
 
     let _ = std::fs::remove_dir_all(project_dir);
 }

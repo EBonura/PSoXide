@@ -122,6 +122,98 @@ impl<const N: usize> OrderingTable<N> {
         self.entries[z] = pkt_addr;
     }
 
+    /// Insert a reverse-ordered array of compact raw packet commands.
+    ///
+    /// Each command is exactly two machine words: a packet pointer followed by a
+    /// packed word containing the OT slot in bits 0..15 and the GPU packet
+    /// word count in bits 24..31. Commands are consumed last-to-first, which
+    /// preserves their original submission order despite OT insertion being
+    /// prepend-only.
+    ///
+    /// On PS1 this is one tightly scheduled MIPS loop, matching the direct OT
+    /// linking used by late commercial engines while retaining the caller's
+    /// exact same-slot packet order. Host builds use the scalar equivalent so
+    /// command-stream tests exercise identical semantics.
+    ///
+    /// # Safety
+    /// `commands` must point to `command_count * 2` readable machine words in the
+    /// documented layout. Every encoded packet pointer must meet the lifetime,
+    /// alignment, and writability requirements of [`Self::insert_unchecked`],
+    /// and every encoded slot must be less than `N`.
+    #[inline]
+    pub unsafe fn insert_packed_commands_reverse_unchecked(
+        &mut self,
+        commands: *const usize,
+        command_count: usize,
+    ) {
+        if command_count == 0 {
+            return;
+        }
+        debug_assert!(N > 0);
+
+        #[cfg(target_arch = "mips")]
+        {
+            let command_end = unsafe { commands.add(command_count.saturating_mul(2)) };
+            let entries = self.entries.as_mut_ptr();
+            unsafe {
+                core::arch::asm!(
+                    ".set noreorder",
+                    "lui $15, 0x00ff",
+                    "ori $15, $15, 0xffff",
+                    "2:",
+                    "addiu $8, $8, -8",
+                    "lw $11, 0($8)",
+                    "lw $12, 4($8)",
+                    // Fill the packet-pointer load delay while making its
+                    // low-24-bit OT representation. Fill the metadata load
+                    // delay before reading its slot.
+                    "sll $14, $11, 8",
+                    "andi $13, $12, 0xffff",
+                    "srl $14, $14, 8",
+                    "srl $12, $12, 24",
+                    "sll $13, $13, 2",
+                    "sll $12, $12, 24",
+                    "addu $13, $10, $13",
+                    "lw $9, 0($13)",
+                    "nop",
+                    "and $9, $9, $15",
+                    "or $9, $9, $12",
+                    "sw $9, 0($11)",
+                    "sw $14, 0($13)",
+                    "bne $8, $16, 2b",
+                    "nop",
+                    ".set reorder",
+                    inout("$8") command_end => _,
+                    in("$10") entries,
+                    in("$16") commands,
+                    lateout("$9") _,
+                    lateout("$11") _,
+                    lateout("$12") _,
+                    lateout("$13") _,
+                    lateout("$14") _,
+                    lateout("$15") _,
+                    options(nostack),
+                );
+            }
+        }
+
+        #[cfg(not(target_arch = "mips"))]
+        {
+            let mut index = command_count;
+            while index != 0 {
+                index -= 1;
+                let command = unsafe { commands.add(index * 2) };
+                let packet_ptr = unsafe { ptr::read(command) } as *mut u32;
+                let slot_words = unsafe { ptr::read(command.add(1)) } as u32;
+                let slot = (slot_words & u16::MAX as u32) as usize;
+                debug_assert!(slot < N);
+                unsafe {
+                    self.insert_unchecked_tag_high(slot, packet_ptr, slot_words & 0xFF00_0000)
+                };
+            }
+        }
+    }
+
     /// Insert a primitive struct. The struct must be `#[repr(C)]`
     /// with its first field being the tag `u32`. `words` is the
     /// number of data words that follow the tag.
@@ -239,6 +331,48 @@ impl<const N: usize> Default for OrderingTable<N> {
 #[cfg(all(test, not(target_arch = "mips")))]
 mod tests {
     use super::*;
+
+    #[repr(C)]
+    struct PackedCommand {
+        packet: *mut u32,
+        slot_words: usize,
+    }
+
+    #[test]
+    fn packed_reverse_insert_preserves_submission_order_within_slots() {
+        let mut ot: OrderingTable<8> = OrderingTable::new();
+        ot.clear();
+        let mut a = [0u32; 2];
+        let mut b = [0u32; 2];
+        let mut c = [0u32; 2];
+        let commands = [
+            PackedCommand {
+                packet: a.as_mut_ptr(),
+                slot_words: 4 | (1 << 24),
+            },
+            PackedCommand {
+                packet: b.as_mut_ptr(),
+                slot_words: 4 | (1 << 24),
+            },
+            PackedCommand {
+                packet: c.as_mut_ptr(),
+                slot_words: 2 | (1 << 24),
+            },
+        ];
+
+        unsafe {
+            ot.insert_packed_commands_reverse_unchecked(
+                commands.as_ptr().cast::<usize>(),
+                commands.len(),
+            );
+        }
+
+        let mut iter = unsafe { ot.iter_packets() };
+        assert_eq!(iter.next().unwrap().0, a.as_ptr());
+        assert_eq!(iter.next().unwrap().0, b.as_ptr());
+        assert_eq!(iter.next().unwrap().0, c.as_ptr());
+        assert!(iter.next().is_none());
+    }
 
     /// Build a primitive packet by hand (one tag word + N data words),
     /// insert it, and walk the chain. The iterator must report the

@@ -32,8 +32,9 @@ use psx_gpu_render::{VRAM_HEIGHT, VRAM_WIDTH};
 use psx_vram::TextureWindowAtlas;
 use psxed_project::streaming::collect_scene_resource_use;
 use psxed_project::{
-    generate_model_noise_psxt, MaterialResource, ModelSecondaryTexture, NodeKind, ProjectDocument,
-    ResourceData, ResourceId,
+    generate_material_texture_psxt, generate_model_noise_psxt, MaterialResource,
+    MaterialTextureMode, ModelSecondaryTexture, NodeKind, ProjectDocument, ResourceData,
+    ResourceId,
 };
 
 const ROOM_TPAGE_HALFWORDS: usize = 64;
@@ -265,12 +266,19 @@ impl EditorTextures {
                 // Out of slots. Don't insert a stale cache entry.
                 break;
             }
-            let slot = self
-                .upload_real_psxt_with_clut_mode(
-                    &item.signature,
-                    project_root,
-                    item.force_zero_opaque,
-                )
+            let slot = item
+                .generated_bytes
+                .as_deref()
+                .and_then(|bytes| {
+                    self.upload_psxt_bytes_with_clut_mode(bytes, item.force_zero_opaque)
+                })
+                .or_else(|| {
+                    self.upload_real_psxt_with_clut_mode(
+                        &item.signature,
+                        project_root,
+                        item.force_zero_opaque,
+                    )
+                })
                 .or_else(|| {
                     item.allow_procedural_fallback
                         .then(|| self.upload_procedural(&item.name))
@@ -740,6 +748,7 @@ struct PreviewTextureUploadPlan {
     name: String,
     signature: String,
     cache_signature: String,
+    generated_bytes: Option<Vec<u8>>,
     force_zero_opaque: bool,
     allow_procedural_fallback: bool,
     secondary: Option<ModelSecondaryTexture>,
@@ -785,8 +794,21 @@ fn push_material_resource_upload(
     let ResourceData::Material(material) = &resource.data else {
         return;
     };
-    let signature = texture_path(project, material).unwrap_or_default();
-    let cache_signature = texture_cache_signature(project_root, &signature);
+    let (signature, cache_signature, generated_bytes) = match material.texture_mode {
+        MaterialTextureMode::Generated => {
+            let signature = format!("@generated:{:?}", material.generated);
+            (
+                signature.clone(),
+                signature,
+                Some(generate_material_texture_psxt(material.generated)),
+            )
+        }
+        MaterialTextureMode::SimpleImage | MaterialTextureMode::ReflectiveProbe => {
+            let signature = texture_path(project, material).unwrap_or_default();
+            let cache_signature = texture_cache_signature(project_root, &signature);
+            (signature, cache_signature, None)
+        }
+    };
     let secondary = material
         .secondary_layer
         .as_ref()
@@ -806,6 +828,7 @@ fn push_material_resource_upload(
         name: resource.name.clone(),
         signature,
         cache_signature,
+        generated_bytes,
         force_zero_opaque,
         allow_procedural_fallback: true,
         secondary,
@@ -865,22 +888,40 @@ fn push_texture_resource_upload(
     let Some(resource) = project.resource(id) else {
         return;
     };
-    let psxt_path = match &resource.data {
+    let (psxt_path, cache_signature, generated_bytes) = match &resource.data {
         // Direct image references (far vista, UI images, particle
         // masks) point at textured materials since the merge.
+        ResourceData::Material(material)
+            if material.texture_mode == MaterialTextureMode::Generated =>
+        {
+            let signature = format!("@generated:{:?}", material.generated);
+            (
+                signature.clone(),
+                signature,
+                Some(generate_material_texture_psxt(material.generated)),
+            )
+        }
         ResourceData::Material(material) => match material.psxt_path.as_deref() {
-            Some(path) => path,
+            Some(path) => (
+                path.to_string(),
+                texture_cache_signature(project_root, path),
+                None,
+            ),
             None => return,
         },
-        ResourceData::Texture { psxt_path } => psxt_path.as_str(),
+        ResourceData::Texture { psxt_path } => (
+            psxt_path.clone(),
+            texture_cache_signature(project_root, psxt_path),
+            None,
+        ),
         _ => return,
     };
-    let cache_signature = texture_cache_signature(project_root, psxt_path);
     plan.push(PreviewTextureUploadPlan {
         id,
         name: resource.name.clone(),
-        signature: psxt_path.to_string(),
+        signature: psxt_path,
         cache_signature,
+        generated_bytes,
         force_zero_opaque: false,
         allow_procedural_fallback: false,
         secondary: None,

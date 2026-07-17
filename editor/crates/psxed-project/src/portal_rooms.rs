@@ -943,10 +943,13 @@ mod tests {
         project.add_resource(
             "Material",
             ResourceData::Material(MaterialResource {
+                texture_mode: crate::MaterialTextureMode::SimpleImage,
                 psxt_path: Some("texture.psxt".to_string()),
                 legacy_texture: None,
                 blend_mode: PsxBlendMode::Opaque,
                 tint: [128, 128, 128],
+                generated: crate::GeneratedMaterialTexture::default(),
+                reflection: crate::ReflectionProbeMaterial::default(),
                 secondary_layer: None,
                 face_sidedness: crate::MaterialFaceSidedness::Both,
                 double_sided: true,
