@@ -1590,14 +1590,24 @@ impl EditorWorkspace {
                                             ..
                                         } => Some(material),
                                         _ => None,
-                                    });
+                                });
                                 if let Some(material_id) = inline_model_material {
+                                    let mut open_material_lab = false;
                                     egui::CollapsingHeader::new(icons::label(
                                         icons::BLEND,
                                         "Material Override",
                                     ))
                                     .default_open(true)
                                     .show(ui, |ui| {
+                                        if ui
+                                            .button(icons::label(
+                                                icons::PALETTE,
+                                                "Open full Material Lab",
+                                            ))
+                                            .clicked()
+                                        {
+                                            open_material_lab = true;
+                                        }
                                         let Some(resource) =
                                             self.project.resource_mut(material_id)
                                         else {
@@ -1618,6 +1628,11 @@ impl EditorWorkspace {
                                         };
                                         changed |= draw_model_material_override_editor(ui, material);
                                     });
+                                    if open_material_lab {
+                                        self.material_lab.focused_material = Some(material_id);
+                                        self.active_workspace = WorkspaceView::Material;
+                                        self.status = "Opened Material Lab".to_string();
+                                    }
                                 }
                                 if changed && self.selected_node_is_player_source() {
                                     self.demote_player_sources_except(Some(selected));

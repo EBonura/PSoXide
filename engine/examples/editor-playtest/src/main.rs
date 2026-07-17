@@ -64,11 +64,11 @@ use psx_engine::{
     CharacterCollisionRoom, CharacterMotorAnim, CharacterMotorConfig, CharacterMotorInput,
     CharacterMotorState, Config, Ctx, DepthBand, DepthRange, LoadedWorldCameraGte, OtFrame,
     PrimitivePacketArena, PrimitivePacketScratch, PrimitiveSink, ProjectedVertex, Rgb8, RoomPoint,
-    RenderSubmission, RuntimeCollisionRoom, RuntimeRoom, Scene, SceneStateRef, SchedulerConfig, SimTick,
-    TexturedModelRenderFace, ThirdPersonCameraConfig, ThirdPersonCameraInput,
+    RenderSubmission, RuntimeCollisionRoom, RuntimeRoom, Scene, SceneStateRef, SchedulerConfig,
+    SimTick, TexturedModelRenderFace, ThirdPersonCameraConfig, ThirdPersonCameraInput,
     ThirdPersonCameraState, ThirdPersonCameraTarget, VideoHz, VisualPacing, WorldCamera,
     WorldProjection, WorldRenderMaterial, WorldRenderPass, WorldSurfaceOptions, WorldTriCommand,
-    WorldVertex, Q12,
+    WorldVertex, Q12, prewarm_indexed_cached_room_quads,
 };
 #[cfg(all(
     feature = "world-grid-visible",

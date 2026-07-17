@@ -1115,7 +1115,9 @@ pub struct WorldTriCommand {
 #[derive(Copy, Clone)]
 struct BucketedWorldCommand {
     packet_ptr: *mut u32,
-    slot_words: u32,
+    // Machine-word storage keeps this compact at eight bytes on PS1 while
+    // leaving the host representation fully initialized for semantic tests.
+    slot_words: usize,
 }
 
 impl BucketedWorldCommand {
@@ -1123,24 +1125,20 @@ impl BucketedWorldCommand {
     fn new(packet_ptr: *mut u32, slot: usize, words: u8) -> Self {
         Self {
             packet_ptr,
-            slot_words: (slot.min(u16::MAX as usize) as u32) | ((words as u32) << 24),
+            slot_words: slot.min(u16::MAX as usize) | ((words as usize) << 24),
         }
     }
 
     #[inline(always)]
+    #[cfg(test)]
     const fn slot(self) -> usize {
-        (self.slot_words & u16::MAX as u32) as usize
+        self.slot_words & u16::MAX as usize
     }
 
     #[inline(always)]
     #[cfg(test)]
     const fn words(self) -> u8 {
         (self.slot_words >> 24) as u8
-    }
-
-    #[inline(always)]
-    const fn tag_high(self) -> u32 {
-        self.slot_words & 0xFF00_0000
     }
 }
 

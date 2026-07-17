@@ -1,6 +1,6 @@
 //! Host-side generation for compact model material layer textures.
 
-use crate::ProceduralNoiseTexture;
+use crate::{GeneratedMaterialTexture, GeneratedTextureUv, ProceduralNoiseTexture};
 
 const MATERIAL_NEUTRAL_TINT: u8 = 128;
 
@@ -31,14 +31,66 @@ pub fn generate_model_noise_psxt(settings: ProceduralNoiseTexture) -> Vec<u8> {
 
 /// Generate the raw 4bpp indices used by [`generate_model_noise_psxt`].
 pub fn generate_model_noise_indices(settings: ProceduralNoiseTexture) -> Vec<u8> {
-    const SIZE: usize = MODEL_NOISE_TEXTURE_SIZE as usize;
+    generate_noise_indices(
+        MODEL_NOISE_TEXTURE_SIZE,
+        settings,
+        GeneratedTextureUv::default(),
+    )
+}
+
+/// Bake a Material Lab base-colour plus noise recipe into one opaque 4bpp PSXT.
+pub fn generate_material_texture_psxt(settings: GeneratedMaterialTexture) -> Vec<u8> {
+    let size = normalize_generated_texture_size(settings.size);
+    let indices = generate_noise_indices(size, settings.noise, settings.noise_uv);
+    let mut palette = [[0u8; 3]; 16];
+    for (index, rgb) in palette.iter_mut().enumerate() {
+        let t = index as u16;
+        for channel in 0..3 {
+            let a = u16::from(settings.base_color[channel]);
+            let b = u16::from(settings.noise_color[channel]);
+            rgb[channel] = ((a * (15 - t) + b * t + 7) / 15) as u8;
+        }
+    }
+    psxed_tex::encode_indexed_psxt(
+        size,
+        size,
+        psxed_tex::PsxtDepth::Bit4,
+        &indices,
+        &palette,
+        false,
+    )
+    .expect("normalized generated material PSXT input is valid")
+}
+
+/// Clamp arbitrary saved values to the sizes supported by the room texture
+/// window and the Material Lab preset buttons.
+pub const fn normalize_generated_texture_size(size: u16) -> u16 {
+    if size <= 8 {
+        8
+    } else if size <= 16 {
+        16
+    } else if size <= 32 {
+        32
+    } else {
+        64
+    }
+}
+
+fn generate_noise_indices(
+    size: u16,
+    settings: ProceduralNoiseTexture,
+    uv: GeneratedTextureUv,
+) -> Vec<u8> {
+    let size = normalize_generated_texture_size(size);
+    let size_usize = usize::from(size);
     let feature_size = settings.feature_size.clamp(2, 64) as u32;
     let octaves = settings.octaves.clamp(1, 5);
     let contrast = settings.contrast.max(1) as i32;
-    let mut pixels = vec![0u8; SIZE * SIZE];
+    let mut pixels = vec![0u8; size_usize * size_usize];
 
-    for y in 0..SIZE as u32 {
-        for x in 0..SIZE as u32 {
+    for y in 0..u32::from(size) {
+        for x in 0..u32::from(size) {
+            let (sample_x, sample_y) = transformed_noise_uv(x, y, size, uv);
             let mut value = 0u32;
             let mut weight_sum = 0u32;
             let mut weight = 256u32;
@@ -47,8 +99,8 @@ pub fn generate_model_noise_indices(settings: ProceduralNoiseTexture) -> Vec<u8>
                 value = value.saturating_add(
                     value_noise_2d(
                         settings.seed ^ u32::from(octave).wrapping_mul(0x9e37_79b9),
-                        x,
-                        y,
+                        sample_x,
+                        sample_y,
                         period,
                     )
                     .saturating_mul(weight),
@@ -60,10 +112,25 @@ pub fn generate_model_noise_indices(settings: ProceduralNoiseTexture) -> Vec<u8>
             let normalized = (value / weight_sum.max(1)) as i32;
             let contrasted = 128 + ((normalized - 128) * contrast / 128);
             let index = ((contrasted.clamp(0, 255) * 15 + 127) / 255) as u8;
-            pixels[y as usize * SIZE + x as usize] = index;
+            pixels[y as usize * size_usize + x as usize] = index;
         }
     }
     pixels
+}
+
+fn transformed_noise_uv(x: u32, y: u32, size: u16, uv: GeneratedTextureUv) -> (u32, u32) {
+    let scale_u = i64::from(uv.scale_u_q8.clamp(16, 2048));
+    let scale_v = i64::from(uv.scale_v_q8.clamp(16, 2048));
+    let mut u = i64::from(x) * scale_u / 256 + i64::from(uv.offset_u);
+    let mut v = i64::from(y) * scale_v / 256 + i64::from(uv.offset_v);
+    let limit = i64::from(size);
+    match uv.rotation_quarters & 3 {
+        1 => (u, v) = (limit - 1 - v, u),
+        2 => (u, v) = (limit - 1 - u, limit - 1 - v),
+        3 => (u, v) = (v, limit - 1 - u),
+        _ => {}
+    }
+    (u.rem_euclid(limit) as u32, v.rem_euclid(limit) as u32)
 }
 
 /// Collapse an `Average` primary pass followed by an `AddQuarter` secondary
@@ -258,6 +325,35 @@ mod tests {
         assert_eq!(texture.height(), MODEL_NOISE_TEXTURE_SIZE);
         assert_eq!(texture.clut_entries(), 16);
         assert!(texture.index_zero_transparent());
+    }
+
+    #[test]
+    fn material_lab_recipe_bakes_requested_opaque_4bpp_size() {
+        let settings = GeneratedMaterialTexture {
+            size: 16,
+            base_color: [12, 34, 56],
+            noise_color: [210, 220, 230],
+            noise_uv: GeneratedTextureUv {
+                scale_u_q8: 512,
+                offset_v: 7,
+                rotation_quarters: 1,
+                ..GeneratedTextureUv::default()
+            },
+            ..GeneratedMaterialTexture::default()
+        };
+        let bytes = generate_material_texture_psxt(settings);
+        let texture = psx_asset::Texture::from_bytes(&bytes).expect("generated PSXT parses");
+        assert_eq!((texture.width(), texture.height()), (16, 16));
+        assert_eq!(texture.clut_entries(), 16);
+        assert!(!texture.index_zero_transparent());
+        assert_eq!(bytes, generate_material_texture_psxt(settings));
+        assert_ne!(
+            bytes,
+            generate_material_texture_psxt(GeneratedMaterialTexture {
+                noise_uv: GeneratedTextureUv::default(),
+                ..settings
+            })
+        );
     }
 
     #[test]
