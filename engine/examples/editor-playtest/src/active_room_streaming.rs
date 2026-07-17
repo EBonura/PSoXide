@@ -3,7 +3,7 @@
 //! arena-owned slot-buffer and scheduler instances (see
 //! `runtime_arenas`), plus the cooked-table threading for the
 //! room-graph ring. The buffer reads themselves live on
-//! `psx_game_runtime::room_streaming::StreamedRoomSlots` since the
+//! `psx_game_runtime::room_streaming::StreamedRoomPages` since the
 //! vram_runtime carve.
 
 use super::*;
@@ -14,12 +14,12 @@ pub(super) use psx_game_runtime::room_streaming::{room_requested, RoomStreamLoad
 /// Parse a streamed room's collision view out of its slot byte buffer,
 /// re-validating residency first. The `'static` on the result comes
 /// from borrowing the arena-owned slot-buffer instance -- see the
-/// staleness contract on `StreamedRoomSlots`: the value is only good
+/// staleness contract on `StreamedRoomPages`: the value is only good
 /// until the next streaming step. Holding it longer is sound only for
 /// ACTIVE-WINDOW rooms, which are pinned against eviction; the
 /// camera/motor collision caches rely on exactly that, plus cache
-/// keys that include the active-room mask so a room leaving the
-/// window forces a re-gather before its slot can be reused.
+/// keys that include full-width window/residency generations so a room
+/// leaving the window forces a re-gather before its pages can be reused.
 #[cfg(feature = "cd-stream-bench")]
 pub(super) fn parse_streamed_compact_collision_room(
     slot: usize,

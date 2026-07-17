@@ -174,7 +174,7 @@ pub struct EditorPlaytestTapeStatus {
 }
 
 /// Rolling emulator metrics shown over the live editor Play viewport.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct EditorPlaytestMetrics {
     /// Frontend profiler redraw sample id.
     pub sample_serial: u32,
@@ -192,13 +192,17 @@ pub struct EditorPlaytestMetrics {
     pub visual_frames: u32,
     /// Guest VBlank interval per paced visual frame.
     pub visual_interval_vblanks: f32,
+    /// Measured guest visual-frame intervals produced by the latest redraw.
+    pub visual_frame_times_ms: [f32; 4],
+    /// Populated entries in `visual_frame_times_ms`.
+    pub visual_frame_time_count: u8,
     /// Guest visual deadline misses emitted by the most recent frontend redraw.
     pub visual_deadline_misses: u32,
     /// Maximum guest visual lateness emitted by the most recent frontend redraw.
     pub visual_lateness_vblanks: u32,
     /// Full frontend frame cost.
     pub total_ms: f32,
-    /// Estimated visual-frame interval, derived from the current visual cadence.
+    /// Average visual-frame interval, derived from guest cycle timestamps.
     pub frame_ms: f32,
     /// Guest execution cost.
     pub emu_ms: f32,

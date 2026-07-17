@@ -754,7 +754,7 @@ pub fn bake_animation_source_for_model(
         (clip.source == Some(source_id)
             && clip.skeleton == skeleton
             && clip.target_model == Some(model_id))
-            .then(|| (resource.id, clip.psxanim_path.clone()))
+        .then(|| (resource.id, clip.psxanim_path.clone()))
     });
 
     let package = convert_rigid_model_source(

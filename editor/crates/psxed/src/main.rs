@@ -76,6 +76,7 @@
 //! - `font`  -- TTF or bitmap → psx-font atlas
 //! - `scene` -- edit a .pscene JSON and cook it into runtime format
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -88,6 +89,7 @@ fn main() -> ExitCode {
     let result = match args[1].as_str() {
         "glb" | "gltf" => run_glb(&args[2..]),
         "glb-model" | "gltf-model" | "fbx-model" => run_glb_model(&args[2..]),
+        "model-cluster" => run_model_cluster(&args[2..]),
         "obj" => run_obj(&args[2..]),
         "tex" => run_tex(&args[2..]),
         "audio-pack" | "audio" => run_audio_pack(&args[2..]),
@@ -106,6 +108,248 @@ fn main() -> ExitCode {
     }
 }
 
+fn run_model_cluster(args: &[String]) -> Result<(), String> {
+    let mut input = None;
+    let mut output = None;
+    let mut cell_size = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-o" | "--output" => {
+                i += 1;
+                output = Some(PathBuf::from(
+                    args.get(i).ok_or("expected path after --output")?,
+                ));
+            }
+            "--cell-size" => {
+                i += 1;
+                cell_size = Some(
+                    args.get(i)
+                        .ok_or("expected N after --cell-size")?
+                        .parse::<i32>()
+                        .map_err(|_| "invalid --cell-size value".to_string())?,
+                );
+            }
+            arg if arg.starts_with('-') => return Err(format!("unknown flag: {arg}\n\n{USAGE}")),
+            arg => {
+                if input.replace(PathBuf::from(arg)).is_some() {
+                    return Err(format!("unexpected positional argument: {arg}"));
+                }
+            }
+        }
+        i += 1;
+    }
+    let input = input.ok_or("missing input .psxmdl path")?;
+    let output = output.ok_or("missing --output path")?;
+    let cell_size = cell_size.ok_or("missing --cell-size N")?;
+    if cell_size < 2 {
+        return Err("--cell-size must be at least 2".to_string());
+    }
+    let bytes = std::fs::read(&input).map_err(|e| format!("read {}: {e}", input.display()))?;
+    let clustered = cluster_model_blob(&bytes, cell_size)?;
+    if let Some(parent) = output.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+    }
+    std::fs::write(&output, &clustered.bytes)
+        .map_err(|e| format!("write {}: {e}", output.display()))?;
+    eprintln!(
+        "[psxed model-cluster] {} -> {} (vertices {} -> {}, faces {} -> {}, cell {})",
+        input.display(),
+        output.display(),
+        clustered.source_vertices,
+        clustered.vertices,
+        clustered.source_faces,
+        clustered.faces,
+        cell_size,
+    );
+    Ok(())
+}
+
+struct ClusteredModel {
+    bytes: Vec<u8>,
+    source_vertices: usize,
+    vertices: usize,
+    source_faces: usize,
+    faces: usize,
+}
+
+#[derive(Copy, Clone)]
+struct ClusteredPart {
+    joint: u16,
+    first_vertex: u16,
+    vertex_count: u16,
+    first_face: u16,
+    face_count: u16,
+    material: u16,
+}
+
+fn cluster_model_blob(bytes: &[u8], cell_size: i32) -> Result<ClusteredModel, String> {
+    let model = psx_asset::Model::from_bytes(bytes)
+        .map_err(|error| format!("invalid .psxmdl: {error:?}"))?;
+    let mut old_to_new = vec![u16::MAX; model.vertex_count() as usize];
+    let mut vertices = Vec::with_capacity(model.vertex_count() as usize);
+    let mut sums: Vec<[i64; 4]> = Vec::with_capacity(model.vertex_count() as usize);
+    let mut parts = Vec::with_capacity(model.part_count() as usize);
+
+    for part_index in 0..model.part_count() {
+        let part = model.part(part_index).ok_or("missing model part")?;
+        let first_vertex = u16::try_from(vertices.len()).map_err(|_| "too many vertices")?;
+        let mut clusters = BTreeMap::new();
+        let end = part
+            .first_vertex()
+            .checked_add(part.vertex_count())
+            .ok_or("part vertex range overflow")?;
+        for old_index in part.first_vertex()..end {
+            let vertex = model.vertex(old_index).ok_or("missing model vertex")?;
+            let key = (
+                i32::from(vertex.position.x).div_euclid(cell_size),
+                i32::from(vertex.position.y).div_euclid(cell_size),
+                i32::from(vertex.position.z).div_euclid(cell_size),
+                vertex.joint1,
+                vertex.blend,
+            );
+            let new_index = if let Some(index) = clusters.get(&key).copied() {
+                index
+            } else {
+                let index = u16::try_from(vertices.len()).map_err(|_| "too many vertices")?;
+                clusters.insert(key, index);
+                vertices.push(vertex);
+                sums.push([0; 4]);
+                index
+            };
+            old_to_new[old_index as usize] = new_index;
+            let sum = &mut sums[new_index as usize];
+            sum[0] += i64::from(vertex.position.x);
+            sum[1] += i64::from(vertex.position.y);
+            sum[2] += i64::from(vertex.position.z);
+            sum[3] += 1;
+        }
+        parts.push(ClusteredPart {
+            joint: part.joint_index(),
+            first_vertex,
+            vertex_count: u16::try_from(vertices.len() - first_vertex as usize)
+                .map_err(|_| "part has too many vertices")?,
+            first_face: 0,
+            face_count: 0,
+            material: part.material_index(),
+        });
+    }
+    if old_to_new.contains(&u16::MAX) {
+        return Err("model parts do not cover every vertex".to_string());
+    }
+    for (vertex, sum) in vertices.iter_mut().zip(&sums) {
+        let count = sum[3].max(1);
+        vertex.position.x = (sum[0] / count) as i16;
+        vertex.position.y = (sum[1] / count) as i16;
+        vertex.position.z = (sum[2] / count) as i16;
+    }
+
+    let mut faces = Vec::with_capacity(model.face_count() as usize);
+    for (part_index, out_part) in parts.iter_mut().enumerate() {
+        let part = model.part(part_index as u16).ok_or("missing model part")?;
+        out_part.first_face = u16::try_from(faces.len()).map_err(|_| "too many faces")?;
+        let end = part
+            .first_face()
+            .checked_add(part.face_count())
+            .ok_or("part face range overflow")?;
+        for face_index in part.first_face()..end {
+            let mut face = model.face(face_index).ok_or("missing model face")?;
+            for corner in &mut face.corners {
+                corner.vertex_index = old_to_new[corner.vertex_index as usize];
+            }
+            let indices = [
+                face.corners[0].vertex_index,
+                face.corners[1].vertex_index,
+                face.corners[2].vertex_index,
+            ];
+            if indices[0] == indices[1] || indices[1] == indices[2] || indices[2] == indices[0] {
+                continue;
+            }
+            faces.push(face);
+        }
+        out_part.face_count = u16::try_from(faces.len() - out_part.first_face as usize)
+            .map_err(|_| "part has too many faces")?;
+    }
+
+    let payload_len = psxed_format::model::ModelHeader::SIZE
+        + model.joint_count() as usize * psxed_format::model::JointRecord::SIZE
+        + model.material_count() as usize * psxed_format::model::MaterialRecord::SIZE
+        + parts.len() * psxed_format::model::PartRecord::SIZE
+        + vertices.len() * psxed_format::model::VERTEX_RECORD_SIZE
+        + faces.len() * psxed_format::model::FACE_RECORD_SIZE;
+    let mut out = Vec::with_capacity(psxed_format::AssetHeader::SIZE + payload_len);
+    out.extend_from_slice(&psxed_format::model::MAGIC);
+    push_u16(&mut out, psxed_format::model::VERSION);
+    push_u16(&mut out, model.flags());
+    push_u32(&mut out, payload_len as u32);
+    push_u16(&mut out, model.joint_count());
+    push_u16(&mut out, model.part_count());
+    push_u16(&mut out, vertices.len() as u16);
+    push_u16(&mut out, faces.len() as u16);
+    push_u16(&mut out, model.material_count());
+    push_u16(&mut out, model.texture_width());
+    push_u16(&mut out, model.texture_height());
+    push_u16(&mut out, model.local_to_world_q12());
+    for index in 0..model.joint_count() {
+        let joint = model.joint(index).ok_or("missing model joint")?;
+        push_u16(
+            &mut out,
+            joint.parent().unwrap_or(psxed_format::model::NO_JOINT),
+        );
+        push_u16(&mut out, 0);
+    }
+    for index in 0..model.material_count() {
+        let material = model.material(index).ok_or("missing model material")?;
+        push_u16(&mut out, material.texture_index());
+        push_u16(&mut out, material.flags());
+        out.extend_from_slice(&material.base_color());
+    }
+    for part in &parts {
+        push_u16(&mut out, part.joint);
+        push_u16(&mut out, part.first_vertex);
+        push_u16(&mut out, part.vertex_count);
+        push_u16(&mut out, part.first_face);
+        push_u16(&mut out, part.face_count);
+        push_u16(&mut out, part.material);
+        push_u32(&mut out, 0);
+    }
+    for vertex in &vertices {
+        push_i16(&mut out, vertex.position.x);
+        push_i16(&mut out, vertex.position.y);
+        push_i16(&mut out, vertex.position.z);
+        out.push(vertex.joint1);
+        out.push(vertex.blend);
+    }
+    for face in &faces {
+        for corner in face.corners {
+            push_u16(&mut out, corner.vertex_index);
+            out.push(corner.uv.0);
+            out.push(corner.uv.1);
+        }
+    }
+    psx_asset::Model::from_bytes(&out)
+        .map_err(|error| format!("clustered model failed validation: {error:?}"))?;
+    Ok(ClusteredModel {
+        source_vertices: model.vertex_count() as usize,
+        vertices: vertices.len(),
+        source_faces: model.face_count() as usize,
+        faces: faces.len(),
+        bytes: out,
+    })
+}
+
+fn push_u16(out: &mut Vec<u8>, value: u16) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+fn push_i16(out: &mut Vec<u8>, value: i16) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+fn push_u32(out: &mut Vec<u8>, value: u32) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
 const USAGE: &str = "\
 psxed -- PSoXide content pipeline
 
@@ -116,6 +360,8 @@ SUBCOMMANDS:
     glb     Convert a glTF/.glb scene mesh to .psxm format
     glb-model
             Convert a GLB/glTF/FBX model to .psxmdl/.psxanim/.psxt
+    model-cluster
+            Conservatively merge nearby same-skin vertices in a .psxmdl
     obj     Convert a Wavefront .obj mesh to .psxm format
     tex     Convert a PNG/JPG/BMP image to .psxt format
     audio-pack
@@ -145,10 +391,14 @@ GLB-MODEL SUBCOMMAND:
                           [--anim-fps N]           (default 15)
                           [--world-height N]       (default 1024)
                           [--center-animation-root]
+                          [--fixed-model-bounds]   (extra clips do not change model quantization bounds)
                           [--animation <anim.fbx>] (repeatable)
                           [--keep-bones]            (disable default finger/end-bone collapse)
                           [--collapse-bones name,name,...]
                           [--prune-detached-islands N] (default 4)
+
+MODEL-CLUSTER SUBCOMMAND:
+    psxed model-cluster <input.psxmdl> -o <output.psxmdl> --cell-size N
 
 TEX SUBCOMMAND:
     psxed tex <input.png|.jpg|.bmp> -o <output.psxt>
@@ -331,6 +581,7 @@ fn run_glb_model(args: &[String]) -> Result<(), String> {
     let mut normalize_root_translation = false;
     let mut force_single_bind = false;
     let mut double_sided = false;
+    let mut extra_animations_affect_bounds = true;
     let mut animation_paths: Vec<PathBuf> = Vec::new();
     let mut collapse_bone_patterns = psxed_gltf::default_collapse_bone_patterns();
     let mut prune_detached_face_islands =
@@ -398,6 +649,9 @@ fn run_glb_model(args: &[String]) -> Result<(), String> {
             "--double-sided" => {
                 double_sided = true;
             }
+            "--fixed-model-bounds" => {
+                extra_animations_affect_bounds = false;
+            }
             "--animation" | "--anim" => {
                 i += 1;
                 animation_paths
@@ -458,7 +712,7 @@ fn run_glb_model(args: &[String]) -> Result<(), String> {
         normalize_root_translation,
         strip_animation_scale: true,
         prune_detached_face_islands,
-        extra_animations_affect_bounds: true,
+        extra_animations_affect_bounds,
         force_single_bind,
         double_sided,
         ignore_embedded_animations: false,

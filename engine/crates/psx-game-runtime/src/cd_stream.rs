@@ -46,7 +46,22 @@ const CD_STREAM_BENCH_MAGIC: [u8; 8] = *b"PSOXSTRM";
 const WORLD_PACK_MAGIC: [u8; 8] = *b"PSOXWPAK";
 #[cfg(feature = "cd-stream-benchmark")]
 const WORLD_PACK_MAX_SECTORS: u32 = 512;
-const SECTOR_BYTES: usize = 2048;
+/// One raw CD-ROM Mode 2 data sector. Stream residency uses this as its
+/// allocation quantum so a sector can land directly in its final RAM page.
+pub const SECTOR_BYTES: usize = 2048;
+
+/// Destination used by the incremental WORLD.PAK reader.
+///
+/// Keeping this interface sector-oriented lets the room streamer choose its
+/// RAM layout (fixed rows, sector pages, or a future shared asset cache)
+/// without teaching the CD state machine about that layout.
+pub trait WorldChunkDestination {
+    /// Writable byte capacity currently reserved for `slot`.
+    fn slot_capacity_bytes(&self, slot: usize) -> usize;
+
+    /// Copy one portion of a chunk into its reserved slot.
+    fn write_chunk_bytes(&mut self, slot: usize, offset: usize, bytes: &[u8]) -> bool;
+}
 const SECTOR_WORDS: usize = SECTOR_BYTES / 4;
 const FNV_OFFSET: u32 = 0x811C_9DC5;
 const FNV_PRIME: u32 = 0x0100_0193;
@@ -191,7 +206,7 @@ enum WorldRoomSlotsReadState {
 /// The single in-flight multi-room CD read: up to `N` chunks resolved
 /// from the WORLD.PAK TOC, read as contiguous disc groups and committed
 /// per chunk with byte-count and checksum verification. Owned by the
-/// streamed-room scheduler; pumped incrementally by [`Self::poll_words`].
+/// streamed-room scheduler; pumped incrementally by [`Self::poll_into`].
 pub struct WorldRoomSlotsReadJob<const N: usize> {
     entries: [WorldChunkInfo; N],
     slot_indices: [usize; N],
@@ -271,17 +286,22 @@ impl<const N: usize> WorldRoomSlotsReadJob<N> {
     }
 
     /// Resolve `room_ids` against `toc` and arm the read. Chunks that are
-    /// missing or exceed `SLOT_BYTES` fail immediately with a per-entry
-    /// status; the rest stream on subsequent [`Self::poll_words`] calls.
-    pub fn start<const SLOT_BYTES: usize>(
+    /// missing or exceed their pre-reserved destination fail immediately with a per-entry
+    /// status; the rest stream on subsequent [`Self::poll_into`] calls.
+    pub fn start(
         &mut self,
         world_pack_lba: u32,
         toc: &[LevelWorldPackEntryRecord],
         room_ids: &[u16],
         slot_indices: &[usize],
+        slot_capacities: &[usize],
     ) {
         *self = Self::new();
-        self.count = room_ids.len().min(slot_indices.len()).min(N);
+        self.count = room_ids
+            .len()
+            .min(slot_indices.len())
+            .min(slot_capacities.len())
+            .min(N);
         self.world_pack_lba = world_pack_lba;
         if self.count == 0 {
             self.state = WorldRoomSlotsReadState::Done;
@@ -310,7 +330,7 @@ impl<const N: usize> WorldRoomSlotsReadJob<N> {
                         self.result.status =
                             first_status_error(self.result.status, STATUS_DEST_TOO_SMALL);
                     }
-                    Some(entry) if entry.byte_size as usize <= SLOT_BYTES => {
+                    Some(entry) if entry.byte_size as usize <= slot_capacities[i] => {
                         self.entries[i] = entry;
                         self.valid_count += 1;
                     }
@@ -340,10 +360,10 @@ impl<const N: usize> WorldRoomSlotsReadJob<N> {
     /// Advance the armed read by up to `max_sectors` sectors, landing
     /// each chunk's unpadded bytes in `dst[slot]` and tracking per-chunk
     /// byte counts and running checksums.
-    pub fn poll_words<const SLOT_WORDS: usize>(
+    pub fn poll_into(
         &mut self,
         cd: &mut CdController,
-        dst: &mut [[u32; SLOT_WORDS]; N],
+        dst: &mut impl WorldChunkDestination,
         max_sectors: usize,
     ) -> RoomChunkLoadResult {
         if self.state == WorldRoomSlotsReadState::Idle
@@ -1048,15 +1068,15 @@ fn next_world_pack_info_read_group<const N: usize>(
 ///
 /// # Safety
 /// `sector_ptr` must be readable for [`SECTOR_BYTES`] bytes. Entries'
-/// `byte_size` must fit their `dst` slot rows (`start` enforced the
-/// `SLOT_BYTES` bound when arming the job).
+/// `byte_size` must fit its destination allocation (`start` checked the
+/// supplied per-slot capacities when arming the job).
 #[cfg(target_arch = "mips")]
-unsafe fn copy_window_info_sector<const N: usize, const SLOT_WORDS: usize>(
+unsafe fn copy_window_info_sector<const N: usize>(
     sector_ptr: *const u8,
     sector_offset: u32,
     entries: &[WorldChunkInfo],
     slot_indices: &[usize],
-    dst: &mut [[u32; SLOT_WORDS]; N],
+    dst: &mut impl WorldChunkDestination,
     byte_counts: &mut [usize; N],
     checksums: &mut [u32; N],
 ) {
@@ -1079,15 +1099,13 @@ unsafe fn copy_window_info_sector<const N: usize, const SLOT_WORDS: usize>(
                 // `sector_ptr` and that `byte_size` (hence
                 // `chunk_byte_offset + copy_len`) fits the slot row; the
                 // sector buffer and slot rows never overlap.
-                unsafe {
-                    let dst_ptr = dst[dst_slot]
-                        .as_mut_ptr()
-                        .cast::<u8>()
-                        .add(chunk_byte_offset);
-                    core::ptr::copy_nonoverlapping(sector_ptr, dst_ptr, copy_len);
-                    checksums[i] = checksum_bytes(sector_ptr, copy_len, checksums[i]);
+                // SAFETY: the caller guarantees `sector_ptr` is readable for
+                // a complete sector. `copy_len` is bounded by that sector.
+                let source = unsafe { core::slice::from_raw_parts(sector_ptr, copy_len) };
+                if dst.write_chunk_bytes(dst_slot, chunk_byte_offset, source) {
+                    checksums[i] = unsafe { checksum_bytes(sector_ptr, copy_len, checksums[i]) };
+                    byte_counts[i] = byte_counts[i].saturating_add(copy_len);
                 }
-                byte_counts[i] = byte_counts[i].saturating_add(copy_len);
             }
         }
         i += 1;

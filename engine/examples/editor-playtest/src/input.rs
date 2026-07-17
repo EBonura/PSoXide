@@ -11,6 +11,7 @@ pub(crate) fn motor_input(
     camera_yaw: Angle,
     sprint: bool,
     evade: bool,
+    facing_yaw: Option<Angle>,
 ) -> CharacterMotorInput {
     let movement = camera_relative_move_axes(local_move_axes(ctx), camera_yaw, move_axis_profile());
 
@@ -19,6 +20,7 @@ pub(crate) fn motor_input(
         walk: movement.forward,
         move_x: movement.x,
         move_z: movement.z,
+        facing_yaw,
         sprint,
         evade,
     }
@@ -53,6 +55,9 @@ pub(crate) fn player_anim_from_motor(anim: CharacterMotorAnim) -> PlayerAnim {
     match anim {
         CharacterMotorAnim::Idle => PlayerAnim::Idle,
         CharacterMotorAnim::Walk => PlayerAnim::Walk,
+        CharacterMotorAnim::WalkBackward => PlayerAnim::WalkBackward,
+        CharacterMotorAnim::StrafeLeft => PlayerAnim::StrafeLeft,
+        CharacterMotorAnim::StrafeRight => PlayerAnim::StrafeRight,
         CharacterMotorAnim::Run => PlayerAnim::Run,
         CharacterMotorAnim::Roll => PlayerAnim::Roll,
         CharacterMotorAnim::Backstep => PlayerAnim::Backstep,

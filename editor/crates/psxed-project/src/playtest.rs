@@ -77,8 +77,8 @@ mod cook_world;
 pub(crate) use cook_world::*;
 
 use assets::{
-    expect_room_material_depth, find_resource, load_psxt_bytes, resolve_path, resource_psxt_path,
-    sanitise_model_dirname,
+    expect_room_material_depth, find_resource, load_psxt_bytes, material_texture_bytes,
+    resolve_path, sanitise_model_dirname,
 };
 
 pub use manifest::{
@@ -366,38 +366,46 @@ pub fn build_package(
                 sorted_materials.sort_by_key(|m| m.slot);
 
                 for cooked_material in sorted_materials {
-                    let material_label = find_resource(project, cooked_material.source)
+                    let material_resource = find_resource(project, cooked_material.source);
+                    let material_label = material_resource
                         .map(|resource| resource.name.clone())
                         .unwrap_or_else(|| format!("material #{}", cooked_material.source.raw()));
-                    let psxt_path = match &cooked_material.psxt_path {
-                        Some(path) => path.clone(),
-                        None => {
-                            report.error(format!(
-                                "Room '{}' material slot {} has no texture (resource #{})",
-                                room_node.name,
-                                cooked_material.slot,
-                                cooked_material.source.raw(),
-                            ));
-                            return (None, report);
-                        }
+                    let Some(material_resource) = material_resource else {
+                        report.error(format!(
+                            "Room '{}' material slot {} references missing resource #{}",
+                            room_node.name,
+                            cooked_material.slot,
+                            cooked_material.source.raw(),
+                        ));
+                        return (None, report);
                     };
+                    let (texture_key, texture_bytes) =
+                        match material_texture_bytes(material_resource, project_root) {
+                            Ok(Some(source)) => source,
+                            Ok(None) => {
+                                report.error(format!(
+                                    "Room '{}' material slot {} has no texture (resource #{})",
+                                    room_node.name,
+                                    cooked_material.slot,
+                                    cooked_material.source.raw(),
+                                ));
+                                return (None, report);
+                            }
+                            Err(msg) => {
+                                report.error(format!(
+                                    "Room '{}' material slot {}: {}",
+                                    room_node.name, cooked_material.slot, msg,
+                                ));
+                                return (None, report);
+                            }
+                        };
                     // Texture pages dedupe by resolved path: materials
                     // sharing one .psxt share one cooked asset.
                     let texture_asset_index =
-                        if let Some(&existing) = texture_asset_for_path.get(&psxt_path) {
+                        if let Some(&existing) = texture_asset_for_path.get(&texture_key) {
                             existing
                         } else {
-                            let bytes =
-                                match load_psxt_bytes(&material_label, &psxt_path, project_root) {
-                                    Ok(b) => b,
-                                    Err(msg) => {
-                                        report.error(format!(
-                                            "Room '{}' material slot {}: {}",
-                                            room_node.name, cooked_material.slot, msg,
-                                        ));
-                                        return (None, report);
-                                    }
-                                };
+                            let bytes = texture_bytes;
                             // Room materials must be 4bpp (16-entry CLUT) --
                             // both the editor preview's material upload
                             // path and the runtime room material slots
@@ -419,7 +427,7 @@ pub fn build_package(
                                 source_label: material_label.clone(),
                                 streamed_class: StreamedClass::None,
                             });
-                            texture_asset_for_path.insert(psxt_path.clone(), new_index);
+                            texture_asset_for_path.insert(texture_key, new_index);
                             new_index
                         };
 
@@ -1482,6 +1490,16 @@ pub fn build_package(
         _ => None,
     };
 
+    collapse_exclusive_player_material(
+        player_controller,
+        &mut characters,
+        &models,
+        &model_instances,
+        &weapons,
+        &mut assets,
+        &mut report,
+    );
+
     if !report.is_ok() {
         return (None, report);
     }
@@ -1628,6 +1646,97 @@ pub fn build_package(
         }),
         report,
     )
+}
+
+/// Preserve the exact PS1 blend equation while reducing the common player
+/// crystal material from two full model submissions to one. This deliberately
+/// stays narrow: sharing the model or using any other blend pairing keeps the
+/// authored two-pass path unchanged.
+fn collapse_exclusive_player_material(
+    player_controller: Option<PlaytestPlayerController>,
+    characters: &mut [PlaytestCharacter],
+    models: &[PlaytestModel],
+    model_instances: &[PlaytestModelInstance],
+    weapons: &[PlaytestWeapon],
+    assets: &mut [PlaytestAsset],
+    report: &mut PlaytestValidationReport,
+) {
+    let Some(player_controller) = player_controller else {
+        return;
+    };
+    let character_index = usize::from(player_controller.character);
+    let Some(character) = characters.get(character_index) else {
+        return;
+    };
+    let model_index = character.model;
+    let Some(mut material) = character.material_override else {
+        return;
+    };
+    let Some(secondary) = material.secondary_layer else {
+        return;
+    };
+    if material.texture_asset_index.is_some()
+        || material.blend_mode != PsxBlendMode::Average
+        || secondary.blend_mode != PsxBlendMode::AddQuarter
+    {
+        return;
+    }
+    let shared_by_character = characters
+        .iter()
+        .enumerate()
+        .any(|(index, other)| index != character_index && other.model == model_index);
+    let shared_by_instance = model_instances
+        .iter()
+        .any(|instance| instance.model == model_index);
+    let shared_by_weapon = weapons
+        .iter()
+        .any(|weapon| weapon.model == Some(model_index));
+    if shared_by_character || shared_by_instance || shared_by_weapon {
+        return;
+    }
+
+    let Some(atlas_asset_index) = models
+        .get(usize::from(model_index))
+        .and_then(|model| model.texture_asset_index)
+    else {
+        return;
+    };
+    let Some(primary_bytes) = assets
+        .get(atlas_asset_index)
+        .map(|asset| asset.bytes.clone())
+    else {
+        return;
+    };
+    let Some(secondary_bytes) = assets
+        .get(secondary.texture_asset_index)
+        .map(|asset| asset.bytes.clone())
+    else {
+        return;
+    };
+    let fused = match crate::fuse_average_add_quarter_psxt(
+        &primary_bytes,
+        material.tint_rgb,
+        &secondary_bytes,
+        secondary.tint_rgb,
+    ) {
+        Ok(fused) => fused,
+        Err(error) => {
+            report.warn(format!(
+                "Player material passes could not be collapsed ({error}); keeping the authored two-pass path"
+            ));
+            return;
+        }
+    };
+    let Some(atlas_asset) = assets.get_mut(atlas_asset_index) else {
+        return;
+    };
+    atlas_asset.bytes = fused;
+    atlas_asset.source_label = format!("{} (fused player material)", atlas_asset.source_label);
+    material.tint_rgb = crate::fused_material_neutral_tint();
+    material.secondary_layer = None;
+    if let Some(character) = characters.get_mut(character_index) {
+        character.material_override = Some(material);
+    }
 }
 
 #[cfg(test)]

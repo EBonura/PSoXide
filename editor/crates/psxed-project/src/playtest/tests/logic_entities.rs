@@ -205,6 +205,14 @@ fn enemy_controller_cooks_game_entity_with_interned_archetype() {
     assert_eq!(a.patrol[2], a.z);
     // Archetype params flow through.
     assert_eq!(a.aggro_radius, enemy.aggro_radius);
+    assert_eq!(a.reaction_ticks, enemy.reaction_ticks);
+    assert_eq!(a.preferred_distance, enemy.preferred_distance);
+    assert_eq!(a.spacing_tolerance, enemy.spacing_tolerance);
+    assert_eq!(a.decision_interval_ticks, enemy.decision_interval_ticks);
+    assert_eq!(a.circle_chance, enemy.circle_chance);
+    assert_eq!(a.attack_priority, enemy.attack_priority);
+    assert_eq!(a.attack_cooldown_ticks, enemy.attack_cooldown_ticks);
+    assert_eq!(a.group_attack_delay_ticks, enemy.group_attack_delay_ticks);
     assert_eq!(a.windup_ticks, enemy.windup_ticks);
     assert_eq!(a.recovery_ticks, enemy.recovery_ticks);
     assert_eq!(a.poise, enemy.poise);

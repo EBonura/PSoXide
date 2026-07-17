@@ -1,6 +1,10 @@
 use super::*;
 
 impl Scene for Playtest {
+    fn render_submission(&self) -> RenderSubmission {
+        RenderSubmission::Queued
+    }
+
     /// Lend the uploaded HUD font to the flow driver so front-end UI
     /// scenes (the cooked Main Menu) draw their labels and buttons with
     /// the same glyphs the in-game HUD uses.
@@ -130,9 +134,12 @@ impl Scene for Playtest {
         }
         #[cfg(feature = "cd-stream-bench")]
         {
+            if !self.runtime_models_loaded {
+                return persistent_assets_arena().progress_q12().saturating_mul(3) / 8;
+            }
             let count = self.resident_desired_count.min(STREAMED_ROOM_SLOT_COUNT);
             if count == 0 {
-                return 0;
+                return 1536;
             }
             let mut resident = 0usize;
             let mut i = 0usize;
@@ -143,10 +150,11 @@ impl Scene for Playtest {
                 }
                 i += 1;
             }
-            // Rooms span 0..3840; the texture/upload tail is the last
+            // Persistent assets span 0..1536, rooms span 1536..3840;
+            // the texture/upload tail is the last
             // stretch, pinned to 4096 by the engine once
             // `loading_update` reports fully ready.
-            ((resident as i32).saturating_mul(3840) / count as i32).min(4096)
+            (1536 + (resident as i32).saturating_mul(2304) / count as i32).min(4096)
         }
     }
 
@@ -166,6 +174,7 @@ impl Scene for Playtest {
             // preload may have overwritten.
             retire_menu_ui_cache();
             prebuilt_quads_arena().reset_claims();
+            self.prewarm_active_room_window_quads();
         }
         #[cfg(not(feature = "cd-stream-bench"))]
         let _ = scene;
@@ -190,26 +199,22 @@ impl Scene for Playtest {
     }
 
     fn render(&mut self, ctx: &mut Ctx) {
+        let camera = self.render_camera;
+        self.prepared_overlay_camera = camera;
+        self.prepared_overlay_sim_tick = self.gameplay_tick(ctx.sim_tick);
+        self.prepared_overlay_analog = ctx.pad.is_analog();
         if !ctx.pad.is_analog() {
-            if let Some(font) = self.ui_fonts[0].as_ref() {
-                draw_analog_required_prompt(font);
-            }
+            // Keep a valid empty list queued; the prompt is an immediate
+            // overlay draw after this list has drained.
+            let _ = unsafe { OtFrame::begin(&mut OT) };
             return;
         }
 
-        let camera = self.render_camera;
-        // Snapshot for the deferred overlay pass: render_overlay runs at
-        // the flip, after the next fixed update has already moved
-        // render_camera, and must match the frame built here. The tick
-        // snapshot keeps time-animated overlay elements on this frame's
-        // clock; the flip-time tick varies with deadline-miss cadence.
-        self.overlay_camera = camera;
-        self.overlay_sim_tick = self.gameplay_tick(ctx.sim_tick);
         #[cfg(feature = "fps-overlay")]
         {
             // One presented frame per render() call; measure against the
             // gameplay-anchored tick so the readout is cadence-true.
-            let now = self.overlay_sim_tick.as_u32();
+            let now = self.prepared_overlay_sim_tick.as_u32();
             let gap = now.wrapping_sub(self.fps_last_tick).min(255) as u8;
             if self.fps_window_frames > 0 {
                 self.fps_worst_gap = self.fps_worst_gap.max(gap);
@@ -382,7 +387,6 @@ impl Scene for Playtest {
                                     &mut room_projection.indices[..vertex_count];
                                 let projected_vertices =
                                     &mut room_projection.vertices[..vertex_count];
-                                let projected_ready = &mut room_projection.ready[..vertex_count];
                                 let projected_depths = &mut room_projection.depths[..vertex_count];
                                 let cell_scratch = cell_scratch_arena();
                                 let accepted_cell_indices = &mut cell_scratch.indices[..];
@@ -394,7 +398,6 @@ impl Scene for Playtest {
                                     cached_surfaces,
                                     projected_indices,
                                     projected_vertices,
-                                    projected_ready,
                                     projected_depths,
                                     accepted_cell_indices,
                                     accepted_cell_depths,
@@ -405,6 +408,7 @@ impl Scene for Playtest {
                                     cached_room_depth_mode(),
                                     cached_room_subdivision_mode(),
                                     ROOM_VISIBLE_CELL_SCREEN_MARGIN,
+                                    active.sector_size,
                                     active.index == self.visibility.root,
                                     Some(prebuilt_room_quads_for(active.index)),
                                     &mut primitive_packets,
@@ -518,8 +522,6 @@ impl Scene for Playtest {
                                         &mut room_projection.indices[..vertex_count];
                                     let projected_vertices =
                                         &mut room_projection.vertices[..vertex_count];
-                                    let projected_ready =
-                                        &mut room_projection.ready[..vertex_count];
                                     let projected_depths =
                                         &mut room_projection.depths[..vertex_count];
                                     let cell_scratch = cell_scratch_arena();
@@ -532,7 +534,6 @@ impl Scene for Playtest {
                                         cached_surfaces,
                                         projected_indices,
                                         projected_vertices,
-                                        projected_ready,
                                         projected_depths,
                                         accepted_cell_indices,
                                         accepted_cell_depths,
@@ -615,8 +616,6 @@ impl Scene for Playtest {
                                         &mut room_projection.indices[..vertex_count];
                                     let projected_vertices =
                                         &mut room_projection.vertices[..vertex_count];
-                                    let projected_ready =
-                                        &mut room_projection.ready[..vertex_count];
                                     let projected_depths =
                                         &mut room_projection.depths[..vertex_count];
                                     let cell_scratch = cell_scratch_arena();
@@ -629,7 +628,6 @@ impl Scene for Playtest {
                                         cached_surfaces,
                                         projected_indices,
                                         projected_vertices,
-                                        projected_ready,
                                         projected_depths,
                                         accepted_cell_indices,
                                         accepted_cell_depths,
@@ -640,11 +638,12 @@ impl Scene for Playtest {
                                         cached_room_depth_mode(),
                                         cached_room_subdivision_mode(),
                                         ROOM_VISIBLE_CELL_SCREEN_MARGIN,
+                                        active.sector_size,
                                         // Lateral-cull cells in EVERY no-anchor
                                         // fallback room, not just the root: the
-                                        // sphere test is the same conservative
-                                        // radius+margin bound the root room
-                                        // already trusts, and 3-4 of ~5 drawn
+                                        // AABB test is the same conservative
+                                        // margin bound the root room already
+                                        // trusts, and 3-4 of ~5 drawn
                                         // rooms take this path per frame. Cells
                                         // it rejects are off-screen, so output
                                         // pixels are unchanged; only the
@@ -1144,22 +1143,27 @@ impl Scene for Playtest {
             primitive_packets.remaining() as u32,
         );
         telemetry::counter(telemetry::counter::WORLD_COMMANDS, world_command_len as u32);
-        // Kick the ordering-table DMA and hand the wait to the app
-        // runner's presentation flip: the GPU walks the table while the
-        // next fixed update runs on the CPU. Everything that composites
-        // over the 3D frame lives in render_overlay below, which the
-        // runner calls after draining the walker. Nothing after this
-        // kick may touch GP0 or the OT/primitive storage.
+        // Submission is deliberately split from packet preparation. The app
+        // runner first presents the previous queued frame and clears the new
+        // back buffer, then calls submit_render below.
+        let _ = ot;
+    }
+
+    fn submit_render(&mut self, _ctx: &mut Ctx) {
+        self.overlay_camera = self.prepared_overlay_camera;
+        self.overlay_sim_tick = self.prepared_overlay_sim_tick;
+        self.overlay_analog = self.prepared_overlay_analog;
         telemetry::stage_begin(telemetry::stage::OT_SUBMIT);
-        let ot_in_flight = ot.submit_async();
+        let ot_in_flight = unsafe { OtFrame::resume(&mut OT) }.submit_async();
         telemetry::stage_end(telemetry::stage::OT_SUBMIT);
         ot_in_flight.detach();
     }
 
-    fn render_overlay(&mut self, ctx: &mut Ctx) {
-        // Mirror render()'s analog-prompt early-out: those frames draw
-        // only the prompt, no world frame and no overlay layer.
-        if !ctx.pad.is_analog() {
+    fn render_overlay(&mut self, _ctx: &mut Ctx) {
+        if !self.overlay_analog {
+            if let Some(font) = self.ui_fonts[0].as_ref() {
+                draw_analog_required_prompt(font);
+            }
             return;
         }
         let camera = self.overlay_camera;

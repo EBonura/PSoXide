@@ -6,6 +6,7 @@ use super::*;
 use crate::{UiFontChoice, UiGradientDirection, UiImageEffect, UiNodeKind, UiValueBinding};
 
 const STREAMED_ROOM_SLOT_BYTES: usize = 32 * 1024;
+const CD_SECTOR_BYTES: usize = 2048;
 
 pub fn write_package(package: &PlaytestPackage, generated_dir: &Path) -> std::io::Result<()> {
     let rooms_dir = generated_dir.join(ROOMS_DIRNAME);
@@ -157,6 +158,15 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     let ui_pack_image_cache_slots = streamed_class_chunk_count(package, StreamedClass::UiImage);
     let gameplay_pack_max_chunk_bytes =
         streamed_class_max_chunk_bytes(package, StreamedClass::Gameplay);
+    let persistent_asset_slot_count = package.assets.len().max(1);
+    let persistent_asset_page_count = package
+        .assets
+        .iter()
+        .filter(|asset| asset.streamed_class == StreamedClass::PersistentGameplay)
+        .map(|asset| asset.bytes.len().next_multiple_of(4))
+        .sum::<usize>()
+        .div_ceil(CD_SECTOR_BYTES)
+        .max(1);
     let resident_chunk_limit = package
         .rooms
         .iter()
@@ -167,6 +177,25 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             crate::MIN_WORLD_STREAMING_RESIDENT_CHUNKS as usize,
             crate::MAX_WORLD_STREAMING_RESIDENT_CHUNKS as usize,
         );
+    // Keep two independently evictable look-ahead rooms beyond the authored
+    // protected window. RAM is budgeted in exact 2 KiB disc pages, using the
+    // largest possible combination of simultaneously resident chunks; this is
+    // a cook-time proof that any runtime choice of this many rooms fits.
+    let world_stream_slot_count = resident_chunk_limit
+        .saturating_add(2)
+        .min(world_pack_toc.len())
+        .max(1);
+    let mut world_chunk_sector_counts = world_pack_toc
+        .iter()
+        .map(|entry| entry.sector_count as usize)
+        .collect::<Vec<_>>();
+    world_chunk_sector_counts.sort_unstable_by(|a, b| b.cmp(a));
+    let world_resident_page_count = world_chunk_sector_counts
+        .iter()
+        .take(world_stream_slot_count)
+        .copied()
+        .sum::<usize>()
+        .max(1);
     let _ = writeln!(
         out,
         "pub const WORLD_RESIDENT_CHUNK_LIMIT: usize = {resident_chunk_limit};\n",
@@ -174,6 +203,22 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     let _ = writeln!(
         out,
         "pub const WORLD_PACK_MAX_CHUNK_BYTES: usize = {world_pack_max_chunk_bytes};\n",
+    );
+    let _ = writeln!(
+        out,
+        "pub const WORLD_STREAM_SLOT_COUNT: usize = {world_stream_slot_count};\n",
+    );
+    let _ = writeln!(
+        out,
+        "pub const WORLD_RESIDENT_PAGE_COUNT: usize = {world_resident_page_count};\n",
+    );
+    let _ = writeln!(
+        out,
+        "pub const PERSISTENT_ASSET_SLOT_COUNT: usize = {persistent_asset_slot_count};\n",
+    );
+    let _ = writeln!(
+        out,
+        "pub const PERSISTENT_ASSET_PAGE_COUNT: usize = {persistent_asset_page_count};\n",
     );
     let runtime_depth_sort_mode = package.runtime_depth_sort_mode.manifest_value();
     let _ = writeln!(
@@ -264,9 +309,16 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         };
         let static_name = asset_static_name(asset, i);
         let vram_bytes = asset_vram_bytes(asset);
+        let ram_bytes = asset.bytes.len();
+        let flags = match asset.streamed_class {
+            StreamedClass::None => "0",
+            StreamedClass::UiImage => "asset_flags::STREAMED_UI",
+            StreamedClass::Gameplay => "asset_flags::STREAMED_GAMEPLAY_TRANSIENT",
+            StreamedClass::PersistentGameplay => "asset_flags::STREAMED_GAMEPLAY_PERSISTENT",
+        };
         let _ = writeln!(
             out,
-            "    LevelAssetRecord {{ id: AssetId({i}), kind: {kind}, bytes: {static_name}, ram_bytes: {static_name}.len() as u32, vram_bytes: {vram_bytes}, flags: 0 }},"
+            "    LevelAssetRecord {{ id: AssetId({i}), kind: {kind}, bytes: {static_name}, ram_bytes: {ram_bytes}, vram_bytes: {vram_bytes}, flags: {flags} }},"
         );
     }
     out.push_str("];\n\n");
@@ -1452,7 +1504,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         };
         let _ = writeln!(
             out,
-            "    LevelGameEntityRecord {{ room: RoomIndex({}), kind: {}, targetname: {}, model_instance: {model_instance}, idle_clip: {}, walk_clip: {}, run_clip: {}, attack_clip: {}, stagger_clip: {}, death_clip: {}, x: {}, y: {}, z: {}, yaw: {}, radius: {}, height: {}, walk_speed: {}, run_speed: {}, patrol_x: {}, patrol_y: {}, patrol_z: {}, patrol_wait_ticks: {}, aggro_radius: {}, windup_ticks: {}, recovery_ticks: {}, poise: {}, touch_damage: {}, max_health: {}, flags: {} }},",
+            "    LevelGameEntityRecord {{ room: RoomIndex({}), kind: {}, targetname: {}, model_instance: {model_instance}, idle_clip: {}, walk_clip: {}, run_clip: {}, attack_clip: {}, stagger_clip: {}, death_clip: {}, x: {}, y: {}, z: {}, yaw: {}, radius: {}, height: {}, walk_speed: {}, run_speed: {}, patrol_x: {}, patrol_y: {}, patrol_z: {}, patrol_wait_ticks: {}, aggro_radius: {}, reaction_ticks: {}, preferred_distance: {}, spacing_tolerance: {}, decision_interval_ticks: {}, circle_chance: {}, attack_priority: {}, attack_cooldown_ticks: {}, group_attack_delay_ticks: {}, windup_ticks: {}, recovery_ticks: {}, poise: {}, touch_damage: {}, max_health: {}, flags: {} }},",
             entity.room,
             entity.kind,
             entity.targetname,
@@ -1475,6 +1527,14 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             entity.patrol[2],
             entity.patrol_wait_ticks,
             entity.aggro_radius,
+            entity.reaction_ticks,
+            entity.preferred_distance,
+            entity.spacing_tolerance,
+            entity.decision_interval_ticks,
+            entity.circle_chance,
+            entity.attack_priority,
+            entity.attack_cooldown_ticks,
+            entity.group_attack_delay_ticks,
             entity.windup_ticks,
             entity.recovery_ticks,
             entity.poise,
@@ -2959,15 +3019,33 @@ fn model_material_override_literal(
     material_override: &Option<PlaytestModelMaterialOverride>,
 ) -> String {
     match material_override {
-        Some(o) => format!(
-            "Some(LevelModelMaterialOverride {{ texture_asset: AssetId({}), blend_mode: {}, tint_rgb: [{}, {}, {}], flags: {} }})",
-            o.texture_asset_index,
-            model_override_blend_code(o.blend_mode),
-            o.tint_rgb[0],
-            o.tint_rgb[1],
-            o.tint_rgb[2],
-            material_flags_for_sidedness(o.face_sidedness),
-        ),
+        Some(o) => {
+            let texture_asset = o
+                .texture_asset_index
+                .map(|index| format!("Some(AssetId({index}))"))
+                .unwrap_or_else(|| "None".to_string());
+            let secondary_layer = o.secondary_layer.map_or_else(
+                || "None".to_string(),
+                |layer| {
+                    format!(
+                        "Some(LevelModelSecondaryLayer {{ texture_asset: AssetId({}), blend_mode: {}, tint_rgb: [{}, {}, {}] }})",
+                        layer.texture_asset_index,
+                        model_override_blend_code(layer.blend_mode),
+                        layer.tint_rgb[0],
+                        layer.tint_rgb[1],
+                        layer.tint_rgb[2],
+                    )
+                },
+            );
+            format!(
+                "Some(LevelModelMaterialOverride {{ texture_asset: {texture_asset}, blend_mode: {}, tint_rgb: [{}, {}, {}], secondary_layer: {secondary_layer}, flags: {} }})",
+                model_override_blend_code(o.blend_mode),
+                o.tint_rgb[0],
+                o.tint_rgb[1],
+                o.tint_rgb[2],
+                material_flags_for_sidedness(o.face_sidedness),
+            )
+        }
         None => "None".to_string(),
     }
 }
@@ -3047,7 +3125,12 @@ fn room_required_assets(
         // Covering textures upload per instance (not per model), so
         // they ride outside the seen_models dedupe.
         if let Some(material_override) = inst.material_override {
-            push_unique(&mut required_vram, material_override.texture_asset_index);
+            if let Some(asset_index) = material_override.texture_asset_index {
+                push_unique(&mut required_vram, asset_index);
+            }
+            if let Some(layer) = material_override.secondary_layer {
+                push_unique(&mut required_vram, layer.texture_asset_index);
+            }
         }
         if seen_models.contains(&inst.model) {
             continue;
@@ -3061,7 +3144,12 @@ fn room_required_assets(
         // is required everywhere (unlike the session-persistent model
         // atlas, prop-mode texture slots are evictable).
         if let Some(material_override) = character.material_override {
-            push_unique(&mut required_vram, material_override.texture_asset_index);
+            if let Some(asset_index) = material_override.texture_asset_index {
+                push_unique(&mut required_vram, asset_index);
+            }
+            if let Some(layer) = material_override.secondary_layer {
+                push_unique(&mut required_vram, layer.texture_asset_index);
+            }
         }
         if pc.spawn.room == room_index {
             let model = character.model;
@@ -3303,6 +3391,7 @@ const MANIFEST_HEADER: &str = "\
 // Play action or the `cook-playtest` CLI.
 
 use psx_level::{
+    asset_flags,
     AssetId,
     AssetKind,
     CHARACTER_CLIP_NONE,
@@ -3339,6 +3428,7 @@ use psx_level::{
     LevelModelInstanceRecord,
     LevelModelMaterialOverride,
     LevelModelRecord,
+    LevelModelSecondaryLayer,
     LevelModelSocketRecord,
     LevelOptionDef,
     LevelRoomPortalRecord,

@@ -13,6 +13,8 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
 
+#[cfg(feature = "cd-stream-bench")]
+pub mod asset_streaming;
 pub mod box_props;
 pub mod cd_stream;
 pub mod character;
