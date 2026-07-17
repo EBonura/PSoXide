@@ -327,15 +327,18 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     out.push_str("pub static MATERIALS: &[LevelMaterialRecord] = &[\n");
     for material in &package.materials {
         let flags = material_flags_for_sidedness(material.face_sidedness);
+        let animation = level_material_animation_literal(material.animation);
         let _ = writeln!(
             out,
-            "    LevelMaterialRecord {{ room: RoomIndex({}), local_slot: MaterialSlot({}), texture_asset: AssetId({}), tint_rgb: [{}, {}, {}], flags: {} }},",
+            "    LevelMaterialRecord {{ room: RoomIndex({}), local_slot: MaterialSlot({}), texture_asset: AssetId({}), tint_rgb: [{}, {}, {}], blend_mode: {}, animation: {}, flags: {} }},",
             material.room,
             material.local_slot,
             material.texture_asset_index,
             material.tint_rgb[0],
             material.tint_rgb[1],
             material.tint_rgb[2],
+            model_override_blend_code(material.blend_mode),
+            animation,
             flags,
         );
     }
@@ -3001,6 +3004,30 @@ const fn material_flags_for_sidedness(sidedness: crate::MaterialFaceSidedness) -
     }
 }
 
+fn level_material_animation_literal(animation: crate::MaterialAnimation) -> String {
+    match animation.mode {
+        crate::MaterialAnimationMode::Static => "LevelMaterialAnimation::Static".to_string(),
+        crate::MaterialAnimationMode::UvScroll => {
+            let motion = animation.uv_scroll;
+            format!(
+                "LevelMaterialAnimation::UvScroll(LevelMaterialUvMotion {{ enabled: true, speed_u_q8: {}, speed_v_q8: {}, phase_u: {}, phase_v: {} }})",
+                motion.speed_u_q8, motion.speed_v_q8, motion.phase_u, motion.phase_v,
+            )
+        }
+        crate::MaterialAnimationMode::Flipbook => {
+            let flipbook = animation.flipbook.normalized();
+            format!(
+                "LevelMaterialAnimation::Flipbook(LevelMaterialFlipbook {{ columns: {}, rows: {}, frame_count: {}, ticks_per_frame: {}, phase: {} }})",
+                flipbook.columns,
+                flipbook.rows,
+                flipbook.frame_count,
+                flipbook.ticks_per_frame,
+                flipbook.phase,
+            )
+        }
+    }
+}
+
 /// Numeric `psx_level::model_override_blend` code for an authored
 /// blend mode.
 pub(crate) const fn model_override_blend_code(blend_mode: crate::PsxBlendMode) -> u8 {
@@ -3028,12 +3055,17 @@ fn model_material_override_literal(
                 || "None".to_string(),
                 |layer| {
                     format!(
-                        "Some(LevelModelSecondaryLayer {{ texture_asset: AssetId({}), blend_mode: {}, tint_rgb: [{}, {}, {}] }})",
+                        "Some(LevelModelSecondaryLayer {{ texture_asset: AssetId({}), blend_mode: {}, tint_rgb: [{}, {}, {}], motion: LevelMaterialUvMotion {{ enabled: {}, speed_u_q8: {}, speed_v_q8: {}, phase_u: {}, phase_v: {} }} }})",
                         layer.texture_asset_index,
                         model_override_blend_code(layer.blend_mode),
                         layer.tint_rgb[0],
                         layer.tint_rgb[1],
                         layer.tint_rgb[2],
+                        layer.motion.enabled,
+                        layer.motion.speed_u_q8,
+                        layer.motion.speed_v_q8,
+                        layer.motion.phase_u,
+                        layer.motion.phase_v,
                     )
                 },
             );
@@ -3421,7 +3453,10 @@ use psx_level::{
     LevelCycloramaQuadRecord,
     LevelFarVistaRecord,
     LevelImagePropRecord,
+    LevelMaterialAnimation,
+    LevelMaterialFlipbook,
     LevelMaterialRecord,
+    LevelMaterialUvMotion,
     LevelModelClipBoundsRecord,
     LevelModelClipRecord,
     LevelModelFrameBoundsRecord,

@@ -926,8 +926,8 @@ impl EditorWorkspace {
             let parent = node
                 .parent
                 .and_then(|parent| scene.node(parent).map(|node| (node.id, node.name.clone())));
-            egui::CollapsingHeader::new(icons::label(icons::LAYERS, "Component"))
-                .default_open(true)
+            egui::CollapsingHeader::new(icons::label(icons::LAYERS, "Relationship"))
+                .default_open(false)
                 .show(ui, |ui| {
                     if let Some((parent_id, parent_name)) = &parent {
                         ui.horizontal(|ui| {

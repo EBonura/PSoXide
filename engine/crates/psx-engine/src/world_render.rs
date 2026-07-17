@@ -55,6 +55,78 @@ pub enum SurfaceSidedness {
     Both,
 }
 
+/// Runtime animation for a room material's single resident texture pass.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum WorldMaterialAnimation {
+    /// No per-frame UV work; eligible for immutable prebuilt packets.
+    #[default]
+    Static,
+    /// Signed Q8 texels-per-second UV motion.
+    UvScroll {
+        /// Horizontal Q8 texels per second.
+        speed_u_q8: i16,
+        /// Vertical Q8 texels per second.
+        speed_v_q8: i16,
+        /// Initial horizontal texel offset.
+        phase_u: u8,
+        /// Initial vertical texel offset.
+        phase_v: u8,
+    },
+    /// Row-major frames packed into the material's existing 4bpp texture.
+    Flipbook {
+        /// Number of frame columns in the atlas.
+        columns: u8,
+        /// Number of active row-major frames.
+        frame_count: u8,
+        /// Simulation ticks each frame remains selected.
+        ticks_per_frame: u8,
+        /// Initial frame index.
+        phase: u8,
+    },
+}
+
+impl WorldMaterialAnimation {
+    /// Whether this material must resolve UVs at draw time.
+    pub const fn is_animated(self) -> bool {
+        !matches!(self, Self::Static)
+    }
+
+    /// Wrapped PS1 UV offset for the supplied gameplay clock.
+    pub fn uv_offset(self, tick: u32, hz: u16, frame_width: u8, frame_height: u8) -> (u8, u8) {
+        match self {
+            Self::Static => (0, 0),
+            Self::UvScroll {
+                speed_u_q8,
+                speed_v_q8,
+                phase_u,
+                phase_v,
+            } => {
+                let hz = i64::from(hz.max(1));
+                let resolve = |speed: i16, phase: u8| {
+                    let travelled_q8 = i64::from(speed).saturating_mul(i64::from(tick)) / hz;
+                    (travelled_q8 / 256 + i64::from(phase)).rem_euclid(256) as u8
+                };
+                (resolve(speed_u_q8, phase_u), resolve(speed_v_q8, phase_v))
+            }
+            Self::Flipbook {
+                columns,
+                frame_count,
+                ticks_per_frame,
+                phase,
+            } => {
+                let columns = columns.max(1);
+                let frame_count = frame_count.max(1);
+                let frame = ((tick / u32::from(ticks_per_frame.max(1))) + u32::from(phase))
+                    % u32::from(frame_count);
+                (
+                    (frame as u8 % columns).wrapping_mul(frame_width),
+                    (frame as u8 / columns).wrapping_mul(frame_height),
+                )
+            }
+        }
+    }
+}
+
 /// Runtime material binding for cooked room geometry.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct WorldRenderMaterial {
@@ -68,6 +140,8 @@ pub struct WorldRenderMaterial {
     pub texture_width: u8,
     /// Texture-window height that maps the authored 64-texel face UV domain.
     pub texture_height: u8,
+    /// Optional UV animation evaluated from the gameplay clock.
+    pub animation: WorldMaterialAnimation,
 }
 
 impl WorldRenderMaterial {
@@ -79,6 +153,7 @@ impl WorldRenderMaterial {
             sidedness: SurfaceSidedness::Front,
             texture_width: ROOM_TEXTURE_UV_SIZE,
             texture_height: ROOM_TEXTURE_UV_SIZE,
+            animation: WorldMaterialAnimation::Static,
         }
     }
 
@@ -90,6 +165,7 @@ impl WorldRenderMaterial {
             sidedness: SurfaceSidedness::Back,
             texture_width: ROOM_TEXTURE_UV_SIZE,
             texture_height: ROOM_TEXTURE_UV_SIZE,
+            animation: WorldMaterialAnimation::Static,
         }
     }
 
@@ -101,6 +177,7 @@ impl WorldRenderMaterial {
             sidedness: SurfaceSidedness::Both,
             texture_width: ROOM_TEXTURE_UV_SIZE,
             texture_height: ROOM_TEXTURE_UV_SIZE,
+            animation: WorldMaterialAnimation::Static,
         }
     }
 
@@ -117,6 +194,12 @@ impl WorldRenderMaterial {
     pub const fn with_texture_size(mut self, width: u8, height: u8) -> Self {
         self.texture_width = normalize_room_texture_uv_size(width);
         self.texture_height = normalize_room_texture_uv_size(height);
+        self
+    }
+
+    /// Return a copy with runtime UV animation.
+    pub const fn with_animation(mut self, animation: WorldMaterialAnimation) -> Self {
+        self.animation = animation;
         self
     }
 
@@ -2352,7 +2435,7 @@ fn submit_split_quad<const OT: usize>(
         projected = reverse_quad_winding(projected);
         uvs = reverse_quad_winding(uvs);
     }
-    uvs = material_uvs(material, uvs);
+    uvs = animated_material_uvs(material, options, uvs);
     let opts = options
         .with_cull_mode(cull_for_sidedness(material.sidedness, cull))
         .with_material_layer(material.texture);
@@ -2396,7 +2479,7 @@ fn submit_split_triangle<const OT: usize>(
     let opts = options
         .with_cull_mode(cull_for_sidedness(material.sidedness, cull))
         .with_material_layer(material.texture);
-    let uvs = material_uvs(material, uvs);
+    let uvs = animated_material_uvs(material, options, uvs);
     let mut tri = split_triangles_runtime(split)[triangle_index.min(1)];
     if reverse_front ^ (material.sidedness == SurfaceSidedness::Back) {
         tri = (tri.0, tri.2, tri.1);
@@ -2494,7 +2577,7 @@ fn submit_split_triangle_vertex_lit<const OT: usize>(
     let opts = options
         .with_cull_mode(cull_for_sidedness(material.sidedness, cull))
         .with_material_layer(material.texture);
-    let uvs = material_uvs(material, uvs);
+    let uvs = animated_material_uvs(material, options, uvs);
     let mut tri = split_triangles_runtime(split)[triangle_index.min(1)];
     if reverse_front ^ (material.sidedness == SurfaceSidedness::Back) {
         tri = (tri.0, tri.2, tri.1);
@@ -2715,7 +2798,7 @@ fn submit_sided_projected_gouraud_quad<const OT: usize>(
         ),
         SurfaceSidedness::Front | SurfaceSidedness::Both => (verts, uvs, colors),
     };
-    let uvs = material_uvs(material, uvs);
+    let uvs = animated_material_uvs(material, options, uvs);
     let opts = options
         .with_cull_mode(cull_for_sidedness(material.sidedness, base_cull))
         .with_material_layer(material.texture);
@@ -2754,7 +2837,7 @@ fn submit_sided_projected_quad<const OT: usize>(
         SurfaceSidedness::Back => (reverse_quad_winding(verts), reverse_quad_winding(uvs)),
         SurfaceSidedness::Front | SurfaceSidedness::Both => (verts, uvs),
     };
-    let uvs = material_uvs(material, uvs);
+    let uvs = animated_material_uvs(material, options, uvs);
     let opts = options
         .with_cull_mode(cull_for_sidedness(material.sidedness, base_cull))
         .with_material_layer(material.texture);
@@ -2788,6 +2871,24 @@ fn material_uvs(material: WorldRenderMaterial, uvs: [(u8, u8); 4]) -> [(u8, u8);
         scale_material_uv(uvs[2], width, height),
         scale_material_uv(uvs[3], width, height),
     ]
+}
+
+fn animated_material_uvs(
+    material: WorldRenderMaterial,
+    options: WorldSurfaceOptions,
+    uvs: [(u8, u8); 4],
+) -> [(u8, u8); 4] {
+    let uvs = material_uvs(material, uvs);
+    let (offset_u, offset_v) = material.animation.uv_offset(
+        options.material_animation_tick,
+        options.material_animation_hz,
+        material.texture_width,
+        material.texture_height,
+    );
+    if offset_u == 0 && offset_v == 0 {
+        return uvs;
+    }
+    uvs.map(|(u, v)| (u.wrapping_add(offset_u), v.wrapping_add(offset_v)))
 }
 
 fn scale_material_uv((u, v): (u8, u8), width: u8, height: u8) -> (u8, u8) {

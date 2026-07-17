@@ -124,6 +124,7 @@ pub(crate) fn resolve_model_material_override(
             texture_asset_index,
             blend_mode: layer.blend_mode,
             tint_rgb: layer.tint,
+            motion: layer.motion,
         })
     });
     Some(PlaytestModelMaterialOverride {

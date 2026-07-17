@@ -594,6 +594,47 @@ fn saving_normalizes_room_sector_size_to_world() {
 }
 
 #[test]
+fn dynamic_material_recipe_round_trips_through_project_ron() {
+    let mut project = ProjectDocument::new("dynamic material persistence");
+    let mut material = MaterialResource::opaque(None);
+    let mut layer = ModelSecondaryLayer::default();
+    layer.motion = MaterialUvMotion {
+        enabled: true,
+        speed_u_q8: 640,
+        speed_v_q8: -384,
+        phase_u: 17,
+        phase_v: 231,
+    };
+    material.secondary_layer = Some(layer.clone());
+    material.animation = MaterialAnimation {
+        mode: MaterialAnimationMode::Flipbook,
+        flipbook: MaterialFlipbook {
+            columns: 4,
+            rows: 2,
+            frame_count: 7,
+            ticks_per_frame: 3,
+            phase: 2,
+        },
+        ..MaterialAnimation::default()
+    };
+    let expected_animation = material.animation;
+    let material_id = project.add_resource("Flowing glass", ResourceData::Material(material));
+
+    let dir = unique_temp_dir("dynamic-material-roundtrip");
+    let path = dir.join("project.ron");
+    project.save_to_path(&path).unwrap();
+    let loaded = ProjectDocument::load_from_path(&path).unwrap();
+    let ResourceData::Material(loaded_material) = &loaded.resource(material_id).unwrap().data
+    else {
+        panic!("saved resource changed kind");
+    };
+    assert_eq!(loaded_material.secondary_layer.as_ref(), Some(&layer));
+    assert_eq!(loaded_material.animation, expected_animation);
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn grid_direction_physical_edges_use_editor_z_convention() {
     assert_eq!(
         GridDirection::North.physical_edge(2, 3),
