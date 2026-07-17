@@ -213,6 +213,103 @@ impl Default for ProceduralNoiseTexture {
     }
 }
 
+/// UV-domain transform applied while baking a generated texture layer.
+///
+/// This remains host-side authoring data: the transformed noise is folded
+/// into the final 4bpp PSXT, so it adds no per-frame PlayStation work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GeneratedTextureUv {
+    /// Horizontal sample scale in Q8 (`256 = 1.0x`).
+    pub scale_u_q8: u16,
+    /// Vertical sample scale in Q8 (`256 = 1.0x`).
+    pub scale_v_q8: u16,
+    /// Horizontal sample offset in generated texels.
+    pub offset_u: i16,
+    /// Vertical sample offset in generated texels.
+    pub offset_v: i16,
+    /// Clockwise quarter turns (`0..=3`).
+    pub rotation_quarters: u8,
+}
+
+impl Default for GeneratedTextureUv {
+    fn default() -> Self {
+        Self {
+            scale_u_q8: 256,
+            scale_v_q8: 256,
+            offset_u: 0,
+            offset_v: 0,
+            rotation_quarters: 0,
+        }
+    }
+}
+
+/// Host-baked base-colour plus value-noise texture recipe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GeneratedMaterialTexture {
+    /// Square output size in texels (8, 16, 32, or 64).
+    pub size: u16,
+    /// Dark/low end of the generated 16-colour palette.
+    pub base_color: [u8; 3],
+    /// Bright/high end of the generated 16-colour palette.
+    pub noise_color: [u8; 3],
+    /// Deterministic value-noise controls.
+    pub noise: ProceduralNoiseTexture,
+    /// Noise-domain scale, offset, and rotation.
+    pub noise_uv: GeneratedTextureUv,
+}
+
+impl Default for GeneratedMaterialTexture {
+    fn default() -> Self {
+        Self {
+            size: 64,
+            base_color: [72, 84, 96],
+            noise_color: [188, 208, 224],
+            noise: ProceduralNoiseTexture::default(),
+            noise_uv: GeneratedTextureUv::default(),
+        }
+    }
+}
+
+/// Authoring controls for a room reflection-probe material.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReflectionProbeMaterial {
+    /// Reflection strength (`0 = none`, `255 = full probe colour`).
+    pub strength: u8,
+    /// Surface roughness used by the probe baker (`0 = mirror`).
+    pub roughness: u8,
+}
+
+impl Default for ReflectionProbeMaterial {
+    fn default() -> Self {
+        Self {
+            strength: 255,
+            roughness: 8,
+        }
+    }
+}
+
+/// High-level Material Lab source preset.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MaterialTextureMode {
+    /// Imported 4bpp PSXT, model atlas fallback, or flat tint.
+    #[default]
+    SimpleImage,
+    /// Active room's baked reflection probe with reflection-vector UVs.
+    ReflectiveProbe,
+    /// Host-baked 4bpp base colour plus procedural noise.
+    Generated,
+}
+
+impl MaterialTextureMode {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::SimpleImage => "Simple Image",
+            Self::ReflectiveProbe => "Reflective Probe",
+            Self::Generated => "Generated Colour + Noise",
+        }
+    }
+}
+
 /// Image source for a model material's optional second texture pass.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ModelSecondaryTexture {
@@ -280,6 +377,10 @@ impl MaterialFaceSidedness {
 /// load via [`crate::ProjectDocument::migrate_legacy_texture_resources`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MaterialResource {
+    /// Material Lab's active texture-source preset. Old project files omit
+    /// this field and therefore remain Simple Image materials.
+    #[serde(default)]
+    pub texture_mode: MaterialTextureMode,
     /// Cooked `.psxt` image this material draws with, or `None` for a
     /// flat tinted material. Resolved first as-is (absolute paths),
     /// then relative to the project file's directory.
@@ -289,6 +390,12 @@ pub struct MaterialResource {
     pub blend_mode: PsxBlendMode,
     /// Texture modulation tint. `0x80` is neutral for PS1 textured polys.
     pub tint: [u8; 3],
+    /// Preserved generator recipe, even while another source mode is active.
+    #[serde(default)]
+    pub generated: GeneratedMaterialTexture,
+    /// Preserved reflection controls, even while another source mode is active.
+    #[serde(default)]
+    pub reflection: ReflectionProbeMaterial,
     /// Optional independently blended second texture pass for model renderers.
     /// Room geometry continues to use the base material only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -366,9 +473,32 @@ impl MaterialResource {
     /// Build an opaque neutral material.
     pub const fn opaque(psxt_path: Option<String>) -> Self {
         Self {
+            texture_mode: MaterialTextureMode::SimpleImage,
             psxt_path,
             blend_mode: PsxBlendMode::Opaque,
             tint: [0x80, 0x80, 0x80],
+            generated: GeneratedMaterialTexture {
+                size: 64,
+                base_color: [72, 84, 96],
+                noise_color: [188, 208, 224],
+                noise: ProceduralNoiseTexture {
+                    seed: 1,
+                    feature_size: 24,
+                    octaves: 3,
+                    contrast: 176,
+                },
+                noise_uv: GeneratedTextureUv {
+                    scale_u_q8: 256,
+                    scale_v_q8: 256,
+                    offset_u: 0,
+                    offset_v: 0,
+                    rotation_quarters: 0,
+                },
+            },
+            reflection: ReflectionProbeMaterial {
+                strength: 255,
+                roughness: 8,
+            },
             secondary_layer: None,
             face_sidedness: MaterialFaceSidedness::Both,
             legacy_texture: None,
@@ -379,9 +509,32 @@ impl MaterialResource {
     /// Build a translucent neutral material.
     pub const fn translucent(psxt_path: Option<String>, blend_mode: PsxBlendMode) -> Self {
         Self {
+            texture_mode: MaterialTextureMode::SimpleImage,
             psxt_path,
             blend_mode,
             tint: [0x80, 0x80, 0x80],
+            generated: GeneratedMaterialTexture {
+                size: 64,
+                base_color: [72, 84, 96],
+                noise_color: [188, 208, 224],
+                noise: ProceduralNoiseTexture {
+                    seed: 1,
+                    feature_size: 24,
+                    octaves: 3,
+                    contrast: 176,
+                },
+                noise_uv: GeneratedTextureUv {
+                    scale_u_q8: 256,
+                    scale_v_q8: 256,
+                    offset_u: 0,
+                    offset_v: 0,
+                    rotation_quarters: 0,
+                },
+            },
+            reflection: ReflectionProbeMaterial {
+                strength: 255,
+                roughness: 8,
+            },
             secondary_layer: None,
             face_sidedness: MaterialFaceSidedness::Both,
             legacy_texture: None,

@@ -756,6 +756,9 @@ impl EditorWorkspace {
             }
             return;
         }
+        if self.active_workspace != WorkspaceView::Room {
+            return;
+        }
         if let Some(reverse) = consume_command_cycle_shortcut(ctx, egui::Key::Num2) {
             self.cycle_tool_group(reverse);
         }
@@ -787,6 +790,7 @@ impl EditorWorkspace {
             WorkspaceView::Room,
             WorkspaceView::Ui,
             WorkspaceView::Animation,
+            WorkspaceView::Material,
         ];
         self.active_workspace = cycle_value(VALUES, self.active_workspace, reverse);
         self.status = format!("Workspace: {}", self.active_workspace.label());
@@ -1638,6 +1642,10 @@ impl EditorWorkspace {
             }
             if ui.button("Animation Viewer").clicked() {
                 self.open_animation_viewer_for_current_selection();
+                ui.close_menu();
+            }
+            if ui.button("Material Lab").clicked() {
+                self.active_workspace = WorkspaceView::Material;
                 ui.close_menu();
             }
         });

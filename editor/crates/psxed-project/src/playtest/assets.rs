@@ -65,12 +65,35 @@ fn is_supported_room_material_dimension(size: u16) -> bool {
     (8..=64).contains(&size) && size.is_power_of_two() && size.is_multiple_of(8)
 }
 
-/// The `.psxt` path carried by a material resource, or `None` for
-/// flat-tint materials and non-material resources.
-pub(super) fn resource_psxt_path(resource: &Resource) -> Option<&str> {
+/// Resolve a Material Lab source to a stable cook-cache key and PSXT bytes.
+/// Generated recipes are baked on the host, so they cost no CPU on PS1 and
+/// travel through the same validated 4bpp runtime path as imported images.
+pub(super) fn material_texture_bytes(
+    resource: &Resource,
+    project_root: &Path,
+) -> Result<Option<(String, Vec<u8>)>, String> {
     match &resource.data {
-        ResourceData::Material(material) => material.psxt_path.as_deref(),
-        _ => None,
+        ResourceData::Material(material)
+            if material.texture_mode == crate::MaterialTextureMode::Generated =>
+        {
+            let key = format!("@material-generated:{:?}", material.generated);
+            Ok(Some((
+                key,
+                crate::generate_material_texture_psxt(material.generated),
+            )))
+        }
+        ResourceData::Material(material) => {
+            let Some(path) = material.psxt_path.as_deref() else {
+                return Ok(None);
+            };
+            load_psxt_bytes(&resource.name, path, project_root)
+                .map(|bytes| Some((path.to_string(), bytes)))
+        }
+        ResourceData::Texture { psxt_path } => {
+            load_psxt_bytes(&resource.name, psxt_path, project_root)
+                .map(|bytes| Some((psxt_path.clone(), bytes)))
+        }
+        _ => Ok(None),
     }
 }
 

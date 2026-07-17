@@ -19,6 +19,11 @@ impl EditorWorkspace {
                             return;
                         }
 
+                        if self.active_workspace == WorkspaceView::Material {
+                            self.draw_material_lab(ui);
+                            return;
+                        }
+
                         if self.active_workspace == WorkspaceView::Animation {
                             let action = model_animation_viewer::draw_model_animation_viewer(
                                 ui,
@@ -242,9 +247,60 @@ impl EditorWorkspace {
                 ui.set_min_height(32.0);
                 ui.spacing_mut().item_spacing = Vec2::new(5.0, 4.0);
                 ui.horizontal_wrapped(|ui| {
-                    self.draw_viewport_toolbar(ui);
+                    self.draw_workspace_tabs(ui);
+                    ui.separator();
+                    match self.active_workspace {
+                        WorkspaceView::Animation => {
+                            ui.label(
+                                RichText::new("Model clips, rig playback, and root motion")
+                                    .small()
+                                    .color(STUDIO_TEXT_WEAK),
+                            );
+                        }
+                        WorkspaceView::Material => {
+                            ui.label(
+                                RichText::new(
+                                    "Texture sources, generated layers, and PS1 surface state",
+                                )
+                                .small()
+                                .color(STUDIO_TEXT_WEAK),
+                            );
+                        }
+                        _ => self.draw_viewport_toolbar(ui),
+                    }
                 });
             });
+    }
+
+    /// Always-visible top-level workspaces. These used to be hidden behind
+    /// the first toolbar group; keeping them as labelled peers makes the
+    /// editor's 3D, 2D, Animation, and Material contexts immediately legible.
+    pub(crate) fn draw_workspace_tabs(&mut self, ui: &mut egui::Ui) {
+        for view in [
+            WorkspaceView::Room,
+            WorkspaceView::Ui,
+            WorkspaceView::Animation,
+            WorkspaceView::Material,
+        ] {
+            let selected = self.active_workspace == view;
+            let response = ui
+                .add(
+                    egui::Button::new(icons::label(view.icon(), view.label()))
+                        .selected(selected)
+                        .min_size(Vec2::new(86.0, 25.0)),
+                )
+                .on_hover_text(format!("Open the {} workspace", view.label()));
+            if response.clicked() && !selected {
+                self.active_workspace = view;
+                self.status = format!("Workspace: {}", view.label());
+                self.mark_shortcut_group_changed(ShortcutGroup::Workspace);
+                if view == WorkspaceView::Material {
+                    if let Some(material) = self.selected_material_resource() {
+                        self.material_lab.focused_material = Some(material);
+                    }
+                }
+            }
+        }
     }
 
     pub(crate) fn mark_shortcut_group_changed(&mut self, group: ShortcutGroup) {
@@ -284,15 +340,6 @@ impl EditorWorkspace {
             return;
         }
 
-        toolbar_group_menu(
-            ui,
-            1,
-            self.shortcut_group_glow(ShortcutGroup::Workspace),
-            self.active_workspace.icon(),
-            "Workspace",
-            self.active_workspace.label(),
-            |ui| self.draw_workspace_group_menu(ui),
-        );
         toolbar_group_menu(
             ui,
             2,
@@ -412,17 +459,6 @@ impl EditorWorkspace {
     }
 
     pub(crate) fn draw_ui_viewport_toolbar(&mut self, ui: &mut egui::Ui) {
-        toolbar_group_menu(
-            ui,
-            1,
-            self.shortcut_group_glow(ShortcutGroup::Workspace),
-            self.active_workspace.icon(),
-            "Workspace",
-            self.active_workspace.label(),
-            |ui| self.draw_workspace_group_menu(ui),
-        );
-
-        ui.separator();
         toolbar_group_menu(
             ui,
             2,
@@ -553,6 +589,7 @@ impl EditorWorkspace {
             WorkspaceView::Room,
             WorkspaceView::Ui,
             WorkspaceView::Animation,
+            WorkspaceView::Material,
         ] {
             if toolbar_menu_choice(
                 ui,

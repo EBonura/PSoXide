@@ -77,8 +77,8 @@ mod cook_world;
 pub(crate) use cook_world::*;
 
 use assets::{
-    expect_room_material_depth, find_resource, load_psxt_bytes, resolve_path, resource_psxt_path,
-    sanitise_model_dirname,
+    expect_room_material_depth, find_resource, load_psxt_bytes, material_texture_bytes,
+    resolve_path, sanitise_model_dirname,
 };
 
 pub use manifest::{
@@ -366,38 +366,46 @@ pub fn build_package(
                 sorted_materials.sort_by_key(|m| m.slot);
 
                 for cooked_material in sorted_materials {
-                    let material_label = find_resource(project, cooked_material.source)
+                    let material_resource = find_resource(project, cooked_material.source);
+                    let material_label = material_resource
                         .map(|resource| resource.name.clone())
                         .unwrap_or_else(|| format!("material #{}", cooked_material.source.raw()));
-                    let psxt_path = match &cooked_material.psxt_path {
-                        Some(path) => path.clone(),
-                        None => {
-                            report.error(format!(
-                                "Room '{}' material slot {} has no texture (resource #{})",
-                                room_node.name,
-                                cooked_material.slot,
-                                cooked_material.source.raw(),
-                            ));
-                            return (None, report);
-                        }
+                    let Some(material_resource) = material_resource else {
+                        report.error(format!(
+                            "Room '{}' material slot {} references missing resource #{}",
+                            room_node.name,
+                            cooked_material.slot,
+                            cooked_material.source.raw(),
+                        ));
+                        return (None, report);
                     };
+                    let (texture_key, texture_bytes) =
+                        match material_texture_bytes(material_resource, project_root) {
+                            Ok(Some(source)) => source,
+                            Ok(None) => {
+                                report.error(format!(
+                                    "Room '{}' material slot {} has no texture (resource #{})",
+                                    room_node.name,
+                                    cooked_material.slot,
+                                    cooked_material.source.raw(),
+                                ));
+                                return (None, report);
+                            }
+                            Err(msg) => {
+                                report.error(format!(
+                                    "Room '{}' material slot {}: {}",
+                                    room_node.name, cooked_material.slot, msg,
+                                ));
+                                return (None, report);
+                            }
+                        };
                     // Texture pages dedupe by resolved path: materials
                     // sharing one .psxt share one cooked asset.
                     let texture_asset_index =
-                        if let Some(&existing) = texture_asset_for_path.get(&psxt_path) {
+                        if let Some(&existing) = texture_asset_for_path.get(&texture_key) {
                             existing
                         } else {
-                            let bytes =
-                                match load_psxt_bytes(&material_label, &psxt_path, project_root) {
-                                    Ok(b) => b,
-                                    Err(msg) => {
-                                        report.error(format!(
-                                            "Room '{}' material slot {}: {}",
-                                            room_node.name, cooked_material.slot, msg,
-                                        ));
-                                        return (None, report);
-                                    }
-                                };
+                            let bytes = texture_bytes;
                             // Room materials must be 4bpp (16-entry CLUT) --
                             // both the editor preview's material upload
                             // path and the runtime room material slots
@@ -419,7 +427,7 @@ pub fn build_package(
                                 source_label: material_label.clone(),
                                 streamed_class: StreamedClass::None,
                             });
-                            texture_asset_for_path.insert(psxt_path.clone(), new_index);
+                            texture_asset_for_path.insert(texture_key, new_index);
                             new_index
                         };
 

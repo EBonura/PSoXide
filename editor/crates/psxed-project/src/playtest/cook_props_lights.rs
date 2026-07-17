@@ -25,23 +25,23 @@ pub(crate) fn resolve_material_texture_asset(
         ));
         return None;
     };
-    let Some(psxt_path) = material.psxt_path.clone() else {
-        report.warn(format!(
-            "{label} material '{}' has no Texture - skipped",
-            material_resource.name
-        ));
-        return None;
+    let (texture_key, bytes) = match material_texture_bytes(material_resource, project_root) {
+        Ok(Some(source)) => source,
+        Ok(None) => {
+            report.warn(format!(
+                "{label} material '{}' has no Texture - skipped",
+                material_resource.name
+            ));
+            return None;
+        }
+        Err(msg) => {
+            report.warn(format!("{label}: {msg} - skipped"));
+            return None;
+        }
     };
-    let texture_asset_index = if let Some(&existing) = texture_asset_for_path.get(&psxt_path) {
+    let texture_asset_index = if let Some(&existing) = texture_asset_for_path.get(&texture_key) {
         existing
     } else {
-        let bytes = match load_psxt_bytes(&material_resource.name, &psxt_path, project_root) {
-            Ok(bytes) => bytes,
-            Err(msg) => {
-                report.warn(format!("{label}: {msg} - skipped"));
-                return None;
-            }
-        };
         if let Err(msg) = expect_room_material_depth(&material_resource.name, &bytes) {
             report.warn(format!("{label}: {msg} - skipped"));
             return None;
@@ -55,7 +55,7 @@ pub(crate) fn resolve_material_texture_asset(
             source_label: material_resource.name.clone(),
             streamed_class: StreamedClass::None,
         });
-        texture_asset_for_path.insert(psxt_path, new_index);
+        texture_asset_for_path.insert(texture_key, new_index);
         new_index
     };
     Some((texture_asset_index, material.tint))
@@ -90,10 +90,11 @@ pub(crate) fn resolve_model_material_override(
         ));
         return None;
     };
-    let texture_asset_index = if material
-        .psxt_path
-        .as_deref()
-        .is_some_and(|path| !path.trim().is_empty())
+    let texture_asset_index = if material.texture_mode == crate::MaterialTextureMode::Generated
+        || material
+            .psxt_path
+            .as_deref()
+            .is_some_and(|path| !path.trim().is_empty())
     {
         Some(
             resolve_material_texture_asset(
