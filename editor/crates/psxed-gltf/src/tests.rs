@@ -211,6 +211,70 @@ fn retarget_mapped_frame_trs_rebases_world_delta_across_different_bone_axes() {
 }
 
 #[test]
+fn retarget_mapped_bone_directions_preserves_animated_limb_direction() {
+    let parents = vec![None, Some(0)];
+    let source_base = vec![
+        Trs {
+            translation: [0.0, 0.0, 0.0],
+            rotation: identity_quat(),
+            scale: [1.0, 1.0, 1.0],
+        },
+        Trs {
+            translation: [1.0, 0.0, 0.0],
+            rotation: identity_quat(),
+            scale: [1.0, 1.0, 1.0],
+        },
+    ];
+    let source_pose = vec![
+        Trs {
+            rotation: quat_z_degrees(90.0),
+            ..source_base[0]
+        },
+        source_base[1],
+    ];
+    let target_base = vec![
+        source_base[0],
+        Trs {
+            translation: [0.0, 1.0, 0.0],
+            ..source_base[1]
+        },
+    ];
+    let mut retargeted = retarget_mapped_frame_trs(
+        &parents,
+        &target_base,
+        &parents,
+        &source_base,
+        &source_pose,
+        &[Some(0), Some(1)],
+    );
+    retarget_mapped_bone_directions(
+        &parents,
+        &source_pose,
+        &parents,
+        &mut retargeted,
+        &[(0, 1, 0, 1)],
+    );
+
+    let source_globals = compute_global_matrices(
+        &parents,
+        &source_pose.iter().map(Trs::matrix).collect::<Vec<_>>(),
+    );
+    let target_globals = compute_global_matrices(
+        &parents,
+        &retargeted.iter().map(Trs::matrix).collect::<Vec<_>>(),
+    );
+    let source_direction = normalize3(sub3(
+        matrix_translation(source_globals[1]),
+        matrix_translation(source_globals[0]),
+    ));
+    let target_direction = normalize3(sub3(
+        matrix_translation(target_globals[1]),
+        matrix_translation(target_globals[0]),
+    ));
+    assert!(vec3_close(source_direction, target_direction, 0.0001));
+}
+
+#[test]
 fn retarget_mapped_frame_trs_reconstructs_child_from_global_bind_delta() {
     let parents = vec![None, Some(0)];
     let target_base = vec![
