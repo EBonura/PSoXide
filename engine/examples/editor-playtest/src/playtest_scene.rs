@@ -841,6 +841,7 @@ impl Scene for Playtest {
                 let player_draw =
                     player_lighting.map_or(PlayerModelDrawStats::default(), |lighting| {
                         draw_player(
+                            self.room_index,
                             character,
                             &self.models,
                             &self.model_faces[..self.model_face_count],

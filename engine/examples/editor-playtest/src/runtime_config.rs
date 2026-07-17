@@ -53,7 +53,7 @@ pub(super) const ROOM_TPAGE_STRIDE_HW: u16 = 64;
 pub(super) const ROOM_TPAGE_LIMIT_X: u16 = 1024;
 pub(super) const ROOM_TPAGE_COUNT: usize =
     ((ROOM_TPAGE_LIMIT_X - ROOM_TPAGE_BASE_X) / ROOM_TPAGE_STRIDE_HW) as usize;
-pub(super) const ROOM_TILE_TEXELS: u16 = 64;
+pub(super) const ROOM_TILE_TEXELS: u16 = 128;
 
 pub(super) const MODEL_TPAGE: Tpage = Tpage::new(384, 256, TexDepth::Bit8);
 /// Maximum halfword width addressable by one 8bpp texture page.
