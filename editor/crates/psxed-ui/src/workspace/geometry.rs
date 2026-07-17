@@ -1551,8 +1551,76 @@ impl EditorWorkspace {
         self.history.record(self.project.clone());
     }
 
+    /// Drop an inspector coalescing token once its pointer drag or focused
+    /// keyboard edit has ended. A new control then starts a fresh undo step.
+    pub(crate) fn prepare_inspector_undo_frame(&mut self, ctx: &egui::Context) {
+        self.prepare_inspector_undo(InspectorUndoInput::from_context(ctx));
+    }
+
+    pub(crate) fn prepare_inspector_undo(&mut self, input: InspectorUndoInput) {
+        let Some(transaction) = self.inspector_undo_transaction.as_mut() else {
+            return;
+        };
+        if input.pointer_down {
+            if input.focused_widget.is_some() {
+                transaction.focused_widget = input.focused_widget;
+            }
+            return;
+        }
+        if !input.wants_keyboard || input.focused_widget != transaction.focused_widget {
+            self.inspector_undo_transaction = None;
+        }
+    }
+
+    /// Record the pre-draw document when the Inspector mutated project data.
+    /// Nested actions that explicitly touched history win: this preserves the
+    /// non-undoable contract for filesystem-backed resource operations.
+    pub(crate) fn finish_inspector_undo_frame(
+        &mut self,
+        before: ProjectDocument,
+        history_epoch_before: u64,
+        ctx: &egui::Context,
+    ) {
+        self.finish_inspector_undo(
+            before,
+            history_epoch_before,
+            InspectorUndoInput::from_context(ctx),
+        );
+    }
+
+    pub(crate) fn finish_inspector_undo(
+        &mut self,
+        before: ProjectDocument,
+        history_epoch_before: u64,
+        input: InspectorUndoInput,
+    ) {
+        if self.project == before {
+            return;
+        }
+        if self.history.epoch() != history_epoch_before {
+            self.inspector_undo_transaction = None;
+            return;
+        }
+
+        // Focus may have moved while the Inspector was drawn, so close a stale
+        // text transaction before deciding whether this edit needs a snapshot.
+        self.prepare_inspector_undo(input);
+        if self.inspector_undo_transaction.is_none() {
+            self.history.record(before);
+        }
+
+        self.inspector_undo_transaction = if input.pointer_down || input.wants_keyboard {
+            Some(InspectorUndoTransaction {
+                focused_widget: input.focused_widget,
+            })
+        } else {
+            None
+        };
+    }
+
     /// Pop the most recent snapshot back into `project`.
     pub(crate) fn do_undo(&mut self) {
+        self.inspector_undo_transaction = None;
         if let Some(prev) = self.history.undo(self.project.clone()) {
             self.project = prev;
             self.clear_resource_selection_state();
@@ -1567,6 +1635,7 @@ impl EditorWorkspace {
     }
 
     pub(crate) fn do_redo(&mut self) {
+        self.inspector_undo_transaction = None;
         if let Some(next) = self.history.redo(self.project.clone()) {
             self.project = next;
             self.clear_resource_selection_state();
@@ -1582,8 +1651,8 @@ impl EditorWorkspace {
 
     pub(crate) fn frame_viewport(&mut self) {
         if !self.view_2d {
-            if let Some((center, _half)) = self.current_frame_bounds_3d() {
-                self.focus_3d_on_point_preserving_distance(center);
+            if let Some((center, half)) = self.current_frame_bounds_3d() {
+                self.frame_3d_bounds(center, half);
                 self.persist_editor_camera_state();
                 self.status = "Framed selection".to_string();
             } else {
@@ -1613,6 +1682,29 @@ impl EditorWorkspace {
             center[1] * self.viewport_zoom,
         );
         self.status = "Framed selection".to_string();
+    }
+
+    /// Fit 3D bounds without changing the current viewing direction. Orbit
+    /// mode moves its target and dolly distance; free mode moves the camera
+    /// backward along its own look vector. In both cases `.` therefore frames
+    /// the selection instead of merely repointing at it from an arbitrary
+    /// distance.
+    pub(crate) fn frame_3d_bounds(&mut self, center: [f32; 3], half: [f32; 3]) {
+        let target = center.map(round_to_i32);
+        let radius = frame_radius_for_3d_bounds(half);
+        self.camera_rig.target = target;
+        self.camera_rig.radius = radius;
+
+        if self.camera_rig.mode == ViewportCameraMode::Free {
+            let forward =
+                camera_forward_from_angles(self.camera_rig.free_yaw, self.camera_rig.free_pitch);
+            self.camera_rig.free_position = [
+                round_to_i32(target[0] as f32 - forward[0] * radius as f32),
+                round_to_i32(target[1] as f32 - forward[1] * radius as f32),
+                round_to_i32(target[2] as f32 - forward[2] * radius as f32),
+            ];
+            self.camera_rig.free_initialized = true;
+        }
     }
 
     pub(crate) fn current_frame_bounds_3d(&self) -> Option<([f32; 3], [f32; 3])> {

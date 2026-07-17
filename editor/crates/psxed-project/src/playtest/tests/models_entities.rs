@@ -772,24 +772,51 @@ fn model_renderer_material_override_cooks_onto_instance() {
     assert_eq!(secondary.motion.speed_v_q8, -2 * 256);
     assert_eq!(secondary.motion.phase_u, 7);
     assert_eq!(secondary.motion.phase_v, 11);
-    let secondary_asset = &package.assets[secondary.texture_asset_index];
+    let secondary_asset_index = secondary
+        .texture_asset_index
+        .expect("generated layer has a texture asset");
+    let secondary_asset = &package.assets[secondary_asset_index];
     assert_eq!(secondary_asset.kind, PlaytestAssetKind::Texture);
     let texture = psx_asset::Texture::from_bytes(&secondary_asset.bytes)
         .expect("generated secondary PSXT parses");
     assert_eq!((texture.width(), texture.height()), (128, 128));
     assert_eq!(texture.clut_entries(), 16);
-    assert!(texture.index_zero_transparent());
+    assert!(!texture.index_zero_transparent());
 
     // Manifest side: the instance literal carries the override and the
     // owning room's residency lists the covering texture.
     let src = render_manifest_source(&package);
     assert!(
         src.contains(&format!(
-            "material_override: Some(LevelModelMaterialOverride {{ texture_asset: Some(AssetId({})), blend_mode: 1, tint_rgb: [96, 128, 160], secondary_layer: Some(LevelModelSecondaryLayer {{ texture_asset: AssetId({}), blend_mode: 4, tint_rgb: [112, 120, 128], motion: LevelMaterialUvMotion {{ enabled: true, speed_u_q8: 768, speed_v_q8: -512, phase_u: 7, phase_v: 11 }} }}), flags: 2 }})",
+            "material_override: Some(LevelModelMaterialOverride {{ texture_asset: Some(AssetId({})), blend_mode: 1, tint_rgb: [96, 128, 160], motion: LevelMaterialUvMotion {{ enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0 }}, secondary_layer: Some(LevelModelSecondaryLayer {{ texture_asset: Some(AssetId({})), blend_mode: 4, tint_rgb: [112, 120, 128], motion: LevelMaterialUvMotion {{ enabled: true, speed_u_q8: 768, speed_v_q8: -512, phase_u: 7, phase_v: 11 }}, flags: 0 }}), flags: 2 }})",
             texture_asset_index,
-            secondary.texture_asset_index,
+            secondary_asset_index,
         )),
         "manifest instance literal missing override: {src}"
+    );
+
+    let ResourceData::Material(material) = &mut project.resource_mut(material_id).unwrap().data
+    else {
+        unreachable!();
+    };
+    material.set_secondary_layer_enabled(false);
+    let retained_recipe = material
+        .secondary_layer
+        .as_ref()
+        .expect("disabled layer remains authored");
+    assert_eq!(retained_recipe.motion.speed_u_q8, 3 * 256);
+
+    let (package, report) = build_package(&project, &starter_project_root());
+    assert!(report.is_ok(), "errors: {:?}", report.errors);
+    let package = package.expect("disabled overlay still cooks");
+    let material_override = package
+        .model_instances
+        .iter()
+        .find_map(|instance| instance.material_override)
+        .expect("base material override remains");
+    assert!(
+        material_override.secondary_layer.is_none(),
+        "disabled authored layers must not reach the runtime"
     );
 }
 
@@ -880,7 +907,7 @@ fn player_model_renderer_material_without_texture_keeps_model_atlas() {
     assert_eq!(material_override.tint_rgb, [128, 128, 128]);
     let manifest = render_manifest_source(&package);
     assert!(manifest.contains(
-        "material_override: Some(LevelModelMaterialOverride { texture_asset: None, blend_mode: 1, tint_rgb: [128, 128, 128], secondary_layer: None, flags: 2 })"
+        "material_override: Some(LevelModelMaterialOverride { texture_asset: None, blend_mode: 1, tint_rgb: [128, 128, 128], motion: LevelMaterialUvMotion { enabled: false, speed_u_q8: 2048, speed_v_q8: 0, phase_u: 0, phase_v: 0 }, secondary_layer: None, flags: 2 })"
     ));
 }
 

@@ -115,6 +115,22 @@ make run-release                       # launch the fully optimised build
 Open the editor from the frontend's **Create** menu, then hit **Play** to cook,
 build, and boot the active project live in the viewport.
 
+For deterministic editor UI validation, render the complete editor through its
+headless offscreen path. This opens no native window, so another PSoXide
+process, desktop focus, notifications, and Spaces cannot affect the capture:
+
+```bash
+make editor-ui-screenshot \
+  EDITOR_UI_PROJECT=editor/projects/cortex_ignition_v1 \
+  EDITOR_UI_VIEW=animation \
+  EDITOR_UI_RESOURCE='Stand To Roll' \
+  EDITOR_UI_FRAME_SELECTED=1 \
+  EDITOR_UI_OUT=/tmp/psoxide-animation.png
+```
+
+The equivalent frontend command is `dump-editor-ui`; it accepts explicit
+dimensions and can inject the `.` frame-selected shortcut before capture.
+
 <details>
 <summary><strong>Platform prerequisites</strong></summary>
 

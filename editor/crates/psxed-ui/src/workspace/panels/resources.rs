@@ -172,55 +172,11 @@ impl EditorWorkspace {
                 egui::CollapsingHeader::new(icons::label(icons::BLEND, "Material"))
                     .default_open(true)
                     .show(ui, |ui| {
-                        ui.label("Texture path");
-                        let mut path_buffer = material.psxt_path.clone().unwrap_or_default();
-                        if ui.text_edit_singleline(&mut path_buffer).changed() {
-                            material.psxt_path = if path_buffer.trim().is_empty() {
-                                None
-                            } else {
-                                Some(path_buffer)
-                            };
-                            changed = true;
-                        }
-                        ui.label(
-                            RichText::new(
-                                "Cooked .psxt this material draws with. Empty inherits a Model Renderer's atlas and renders flat tint on untextured surfaces.",
-                            )
-                            .color(STUDIO_TEXT_WEAK)
-                            .small(),
+                        changed |= crate::material_lab::draw_material_settings(
+                            ui,
+                            "resource_material",
+                            material,
                         );
-                        changed |= blend_mode_editor(ui, &mut material.blend_mode);
-                        changed |= color_editor(ui, "Tint", &mut material.tint);
-                        let resolved_sides = material.sidedness();
-                        if material.face_sidedness != resolved_sides {
-                            material.face_sidedness = resolved_sides;
-                            material.sync_legacy_sidedness();
-                            changed = true;
-                        }
-                        let before = material.face_sidedness;
-                        egui::ComboBox::from_label("Sides")
-                            .selected_text(material.face_sidedness.label())
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(
-                                    &mut material.face_sidedness,
-                                    MaterialFaceSidedness::Front,
-                                    MaterialFaceSidedness::Front.label(),
-                                );
-                                ui.selectable_value(
-                                    &mut material.face_sidedness,
-                                    MaterialFaceSidedness::Back,
-                                    MaterialFaceSidedness::Back.label(),
-                                );
-                                ui.selectable_value(
-                                    &mut material.face_sidedness,
-                                    MaterialFaceSidedness::Both,
-                                    MaterialFaceSidedness::Both.label(),
-                                );
-                            });
-                        if material.face_sidedness != before {
-                            material.sync_legacy_sidedness();
-                            changed = true;
-                        }
                     });
                 if let Some((_, stats)) = preview_thumb {
                     egui::CollapsingHeader::new(icons::label(icons::SCAN, "Linked Texture"))

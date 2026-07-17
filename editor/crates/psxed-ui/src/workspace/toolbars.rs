@@ -412,6 +412,13 @@ impl EditorWorkspace {
             self.viewport_camera_mode_label(),
             |ui| self.draw_camera_group_menu(ui),
         );
+        if ui
+            .add(egui::Button::new(icons::text(icons::FOCUS, 14.0)).min_size(Vec2::new(28.0, 23.0)))
+            .on_hover_text("Frame selection (.)")
+            .clicked()
+        {
+            self.frame_viewport();
+        }
         toolbar_group_menu(
             ui,
             9,

@@ -65,64 +65,19 @@ fn camera_rig_orbit_scroll_dollies_and_clamps_radius() {
 }
 
 #[test]
-fn camera_rig_rotate_about_target_matches_plain_rotate() {
-    let mut a = orbit_rig();
-    let mut b = orbit_rig();
-    a.radius = 8192;
-    b.radius = 8192;
-    let pivot = a.target;
-    for delta in [Vec2::new(37.0, -12.0), Vec2::new(-80.0, 55.0)] {
-        a.rotate(delta);
-        b.rotate_about(delta, pivot);
-    }
-    assert_eq!(a.yaw, b.yaw);
-    assert_eq!(a.pitch, b.pitch);
-    assert_eq!(a.target, b.target);
-}
-
-#[test]
-fn camera_rig_rotate_about_pivot_is_rigid() {
+fn camera_rig_orbit_rotate_keeps_explicit_focus_target() {
     let mut rig = orbit_rig();
     rig.radius = 8192;
     rig.target = [4096, 512, -2048];
-    let pivot = [1000, 512, 3000];
-    let cam0 = orbit_camera_position_i32(rig.yaw, rig.pitch, rig.radius, rig.target);
-    let dist = |a: [i32; 3], b: [i32; 3]| {
-        let dx = (a[0] - b[0]) as f64;
-        let dy = (a[1] - b[1]) as f64;
-        let dz = (a[2] - b[2]) as f64;
-        (dx * dx + dy * dy + dz * dz).sqrt()
-    };
-    let before = dist(cam0, pivot);
+    let target = rig.target;
     for delta in [
         Vec2::new(64.0, 0.0),
         Vec2::new(-31.0, 22.0),
         Vec2::new(5.0, -90.0),
     ] {
-        rig.rotate_about(delta, pivot);
-        let cam = orbit_camera_position_i32(rig.yaw, rig.pitch, rig.radius, rig.target);
-        let after = dist(cam, pivot);
-        assert!(
-            (after - before).abs() < 4.0,
-            "camera drifted off the pivot sphere: {before} -> {after}"
-        );
+        rig.rotate(delta);
+        assert_eq!(rig.target, target);
     }
-    // Pure 90-degree yaw about the pivot sends the target offset
-    // (dx, 0, dz) to (dz, 0, -dx) in this basis.
-    let mut rig = orbit_rig();
-    rig.radius = 8192;
-    rig.pitch = 0;
-    rig.yaw = 0;
-    rig.target = [1000, 0, 0];
-    rig.rotate_about(Vec2::new(256.0, 0.0), [0, 0, 0]);
-    assert_eq!(rig.yaw, 1024);
-    assert!(rig.target[0].abs() <= 1, "target x: {}", rig.target[0]);
-    assert_eq!(rig.target[1], 0);
-    assert!(
-        (rig.target[2] + 1000).abs() <= 1,
-        "target z: {}",
-        rig.target[2]
-    );
 }
 
 #[test]

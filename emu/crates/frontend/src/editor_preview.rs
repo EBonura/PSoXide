@@ -2375,17 +2375,24 @@ fn preview_model_material_override(
             ResourceData::Material(material) => Some(material),
             _ => None,
         })?;
-    let replacement_texture = material
-        .psxt_path
-        .as_deref()
-        .is_some_and(|path| !path.trim().is_empty())
-        .then(|| textures.slot(material_id))
-        .flatten();
+    let replacement_texture = match material.texture_mode {
+        // An image-less simple material deliberately inherits the model atlas.
+        psxed_project::MaterialTextureMode::SimpleImage => material
+            .psxt_path
+            .as_deref()
+            .is_some_and(|path| !path.trim().is_empty())
+            .then(|| textures.slot(material_id))
+            .flatten(),
+        // Generated and probe materials have no `psxt_path`: their preview
+        // texture is baked directly into the editor texture cache.
+        psxed_project::MaterialTextureMode::Generated
+        | psxed_project::MaterialTextureMode::ReflectiveProbe => textures.slot(material_id),
+    };
     Some(PreviewModelMaterialOverride {
         texture: replacement_texture,
         blend_mode: room_geometry::psx_blend_mode(material.blend_mode),
         tint: (material.tint[0], material.tint[1], material.tint[2]),
-        secondary_layer: material.secondary_layer.as_ref().and_then(|layer| {
+        secondary_layer: material.enabled_secondary_layer().and_then(|layer| {
             Some(PreviewModelSecondaryLayer {
                 texture: textures.secondary_slot(material_id)?,
                 blend_mode: room_geometry::psx_blend_mode(layer.blend_mode),

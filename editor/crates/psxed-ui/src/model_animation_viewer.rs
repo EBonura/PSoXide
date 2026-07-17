@@ -75,6 +75,13 @@ impl ModelAnimationViewerState {
         self.selected_clip_path.as_deref()
     }
 
+    /// Return the preview to its content-derived framing while preserving the
+    /// user's current viewing angle. This is the Animation workspace's `.`
+    /// (frame selected) behavior.
+    pub(crate) fn frame_preview(&mut self) {
+        self.radius = 0;
+    }
+
     pub(crate) fn focus_resource(&mut self, project: &ProjectDocument, id: ResourceId) {
         let Some(resource) = project.resource(id) else {
             return;
@@ -1431,5 +1438,19 @@ mod focus_tests {
 
         assert_eq!(viewer.selected_model(), Some(target_model));
         assert_eq!(viewer.selected_clip_path(), Some(clip_path));
+    }
+
+    #[test]
+    fn frame_preview_restores_content_derived_radius_without_changing_angle() {
+        let mut viewer = ModelAnimationViewerState::default();
+        viewer.yaw_q12 = 1024;
+        viewer.pitch_q12 = 128;
+        viewer.radius = 4096;
+
+        viewer.frame_preview();
+
+        assert_eq!(viewer.radius, 0);
+        assert_eq!(viewer.yaw_q12, 1024);
+        assert_eq!(viewer.pitch_q12, 128);
     }
 }

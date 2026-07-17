@@ -1132,6 +1132,13 @@ impl ProjectDocument {
     /// Normalize legacy or hand-authored project data after load.
     pub fn normalize_loaded(&mut self) {
         self.migrate_legacy_texture_resources();
+        for resource in &mut self.resources {
+            if let ResourceData::Material(material) = &mut resource.data {
+                if let Some(layer) = material.secondary_layer.as_mut() {
+                    layer.normalize_legacy_source();
+                }
+            }
+        }
         self.editor_camera.normalize();
         if self.ui_scenes.is_empty() {
             self.ui_scenes = default_ui_scenes();
