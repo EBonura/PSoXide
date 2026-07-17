@@ -11,9 +11,9 @@
 use psx_asset::{Animation, Model, ModelPart, ModelVertex};
 use psx_engine::{
     telemetry, Angle, CullMode, DepthPolicy, JointViewTransform, LocalToWorldScale, Mat3I16,
-    ModelPoseTranslation, PrimitiveSink, ProjectedVertex, RoomPoint, SimTick,
-    TexturedModelGeometry, TexturedModelRenderFace, TexturedModelRenderStats, VideoHz, WorldCamera,
-    WorldRenderPass, WorldSurfaceOptions, WorldVertex,
+    ModelPoseTranslation, ModelUvOffset, PrimitiveSink, ProjectedVertex, RoomPoint, SimTick,
+    TexturedModelGeometry, TexturedModelLayer, TexturedModelRenderFace, TexturedModelRenderStats,
+    VideoHz, WorldCamera, WorldRenderPass, WorldSurfaceOptions, WorldVertex,
 };
 use psx_gpu::{
     material::{BlendMode, TextureMaterial},
@@ -282,6 +282,21 @@ fn model_secondary_material(
         )
         .with_texture_window(slot.texture_window),
     )
+}
+
+/// Resolve one moving secondary pass without touching texture residency. The
+/// fixed simulation tick drives only byte-sized UV displacement.
+fn model_secondary_layer(
+    layer: LevelModelSecondaryLayer,
+    elapsed_tick: SimTick,
+    video_hz: VideoHz,
+    resolve_override_texture: &mut impl FnMut(AssetId) -> Option<VramSlot>,
+) -> Option<TexturedModelLayer> {
+    let material = model_secondary_material(layer, resolve_override_texture)?;
+    let [u, v] = layer
+        .motion
+        .offset_at_tick(elapsed_tick.as_u32(), video_hz.as_u16());
+    Some(TexturedModelLayer::new(material).with_uv_offset(ModelUvOffset::new(u, v)))
 }
 
 /// Apply an override's blend and tint to the model's own baked
@@ -786,8 +801,13 @@ pub fn draw_player<
     let secondary_material = character
         .material_override
         .and_then(|material| material.secondary_layer)
-        .and_then(|layer| model_secondary_material(layer, resolve_override_texture))
-        .map(|material| lighting.shade_model_material(origin, material));
+        .and_then(|layer| {
+            model_secondary_layer(layer, elapsed_tick, video_hz, resolve_override_texture)
+        })
+        .map(|mut layer| {
+            layer.material = lighting.shade_model_material(origin, layer.material);
+            layer
+        });
     let stats = submit_runtime_model_predecoded(
         world,
         triangles,
@@ -834,7 +854,7 @@ fn submit_runtime_model_predecoded<
     local_to_world: LocalToWorldScale,
     pose_translation: ModelPoseTranslation,
     material: TextureMaterial,
-    secondary_material: Option<TextureMaterial>,
+    secondary_material: Option<TexturedModelLayer>,
     options: WorldSurfaceOptions,
     faces: &[TexturedModelRenderFace],
     model_parts: &[ModelPart],
