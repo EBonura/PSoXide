@@ -410,6 +410,7 @@ pub fn draw_scene(
     focused: Option<usize>,
     focus_style: &LevelUiFocusStyle,
     frame: u16,
+    text_seed: u16,
     textures: &mut impl FnMut(AssetId) -> Option<UiTextureSlot>,
     value: &impl Fn(LevelUiValueBinding) -> i32,
     options: &[LevelOptionDef],
@@ -434,7 +435,13 @@ pub fn draw_scene(
             }
             LevelUiNodeKind::Label => {
                 if let Some(font) = node_font(fonts, node.font) {
-                    draw_label(font, node, resolved, paints);
+                    draw_label(
+                        font,
+                        node,
+                        resolved,
+                        paints,
+                        text_seed.wrapping_add((index as u16).wrapping_mul(0x9e37)),
+                    );
                 }
             }
             LevelUiNodeKind::Image => {
@@ -766,11 +773,12 @@ fn font_index(table_len: usize, selector: u8) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::{
-        font_index, font_tint, image_effect_vertex_colors, node_absolute_rect, scale_u16_q8,
+        diamond_quad, font_index, font_tint, image_effect_vertex_colors, image_effect_verts,
+        node_absolute_rect, scale_u16_q8, selected_label_text,
     };
     use psx_level::{
-        AssetId, LevelUiAction, LevelUiImageEffect, LevelUiNodeKind, LevelUiNodeRecord,
-        LevelUiValueBinding, UI_OPTION_NONE, UI_PAINT_NONE, UI_SFX_NONE,
+        ui_node_flags, AssetId, LevelUiAction, LevelUiImageEffect, LevelUiNodeKind,
+        LevelUiNodeRecord, LevelUiValueBinding, UI_OPTION_NONE, UI_PAINT_NONE, UI_SFX_NONE,
     };
 
     fn ui_node(
@@ -879,6 +887,29 @@ mod tests {
             image_effect_vertex_colors(base, LevelUiImageEffect::SoftPulse, 0, verts)[0],
             image_effect_vertex_colors(base, LevelUiImageEffect::SoftPulse, 0, verts)[3]
         );
+    }
+
+    #[test]
+    fn rise_effect_moves_up_and_random_label_choice_is_stable() {
+        let verts = [(10, 120), (13, 120), (10, 123), (13, 123)];
+        let risen = image_effect_verts(verts, LevelUiImageEffect::Rise, 24);
+        assert!(risen[0].1 <= verts[0].1);
+        assert_eq!(risen[0].0, verts[0].0);
+        assert_eq!(
+            diamond_quad([(0, 0), (4, 0), (0, 4), (4, 4)]),
+            [(2, 0), (4, 2), (0, 2), (2, 4)]
+        );
+        let wind_start = image_effect_verts(verts, LevelUiImageEffect::Wind, 0);
+        let wind_next = image_effect_verts(verts, LevelUiImageEffect::Wind, 1);
+        assert!(wind_next[0].0 > wind_start[0].0);
+        assert!(wind_next[0].0 - wind_start[0].0 > (wind_next[0].1 - wind_start[0].1).abs());
+
+        let mut label = ui_node(None, LevelUiNodeKind::Label, 0, 0, 100, 20);
+        label.flags |= ui_node_flags::TEXT_RANDOM_MESSAGE;
+        label.text = "one\u{1f}two\u{1f}three";
+        let first = selected_label_text(&label, 0x1234);
+        assert_eq!(first, selected_label_text(&label, 0x1234));
+        assert!(["one", "two", "three"].contains(&first));
     }
 
     #[test]
@@ -1062,27 +1093,21 @@ fn draw_label(
     node: &LevelUiNodeRecord,
     resolved: UiResolvedNode,
     paints: &[LevelUiPaintRecord],
+    text_seed: u16,
 ) {
+    let text = selected_label_text(node, text_seed);
     let paint = text_paint(node.color, node.color_paint, paints);
     let scale = node_font_scale_q8(node);
     let letter_spacing = node_letter_spacing(node);
     let align = (node.flags & ui_node_flags::TEXT_ALIGN_MASK) >> ui_node_flags::TEXT_ALIGN_SHIFT;
     if node.flags & ui_node_flags::TEXT_WRAP == 0 {
-        let text_x = aligned_text_x(
-            font,
-            node.text,
-            0,
-            resolved.width,
-            align,
-            scale,
-            letter_spacing,
-        );
+        let text_x = aligned_text_x(font, text, 0, resolved.width, align, scale, letter_spacing);
         draw_transformed_text_paint(
             font,
             resolved,
             text_x,
             0,
-            node.text,
+            text,
             scale,
             letter_spacing,
             paint,
@@ -1092,22 +1117,15 @@ fn draw_label(
 
     let mut start = 0usize;
     let mut line_y = 0i16;
-    while start < node.text.len() {
-        while matches!(node.text.as_bytes().get(start), Some(b' ' | b'\n')) {
+    while start < text.len() {
+        while matches!(text.as_bytes().get(start), Some(b' ' | b'\n')) {
             start += 1;
         }
-        if start >= node.text.len() {
+        if start >= text.len() {
             break;
         }
-        let end = wrapped_line_end(
-            font,
-            node.text,
-            start,
-            resolved.width,
-            scale,
-            letter_spacing,
-        );
-        let line = &node.text[start..end];
+        let end = wrapped_line_end(font, text, start, resolved.width, scale, letter_spacing);
+        let line = &text[start..end];
         let text_x = aligned_text_x(font, line, 0, resolved.width, align, scale, letter_spacing);
         draw_transformed_text_paint(
             font,
@@ -1122,6 +1140,21 @@ fn draw_label(
         line_y = line_y.saturating_add(scaled_line_height(font, scale));
         start = end;
     }
+}
+
+fn selected_label_text<'a>(node: &'a LevelUiNodeRecord, seed: u16) -> &'a str {
+    if node.flags & ui_node_flags::TEXT_RANDOM_MESSAGE == 0 {
+        return node.text;
+    }
+    let count = node.text.bytes().filter(|byte| *byte == 0x1f).count() + 1;
+    let mut mixed = seed ^ 0xa361;
+    mixed ^= mixed << 7;
+    mixed ^= mixed >> 9;
+    mixed ^= mixed << 8;
+    node.text
+        .split('\u{1f}')
+        .nth(usize::from(mixed) % count)
+        .unwrap_or(node.text)
 }
 
 fn wrapped_line_end(
@@ -1183,7 +1216,31 @@ fn draw_image(
 ) {
     let verts = image_effect_verts(resolved.verts, node.image_effect, frame);
     if node.texture_asset.0 == u16::MAX {
-        draw_quad_flat(verts, node.color[0], node.color[1], node.color[2]);
+        let verts = if node.image_effect == LevelUiImageEffect::Rise {
+            diamond_quad(verts)
+        } else {
+            verts
+        };
+        if matches!(
+            node.image_effect,
+            LevelUiImageEffect::Shimmer
+                | LevelUiImageEffect::FastShimmer
+                | LevelUiImageEffect::DiagonalSweep
+                | LevelUiImageEffect::SoftPulse
+        ) {
+            let colors =
+                image_effect_vertex_colors(rgb(node.color), node.image_effect, frame, verts);
+            draw_tri_gouraud(
+                [verts[0], verts[1], verts[2]],
+                [colors[0], colors[1], colors[2]],
+            );
+            draw_tri_gouraud(
+                [verts[1], verts[2], verts[3]],
+                [colors[1], colors[2], colors[3]],
+            );
+        } else {
+            draw_quad_flat(verts, node.color[0], node.color[1], node.color[2]);
+        }
         return;
     }
     let Some(slot) = textures(node.texture_asset) else {
@@ -1204,6 +1261,21 @@ fn draw_image(
             material,
         );
     }
+}
+
+fn diamond_quad(verts: [(i16, i16); 4]) -> [(i16, i16); 4] {
+    let midpoint = |a: (i16, i16), b: (i16, i16)| {
+        (
+            ((i32::from(a.0) + i32::from(b.0)) / 2) as i16,
+            ((i32::from(a.1) + i32::from(b.1)) / 2) as i16,
+        )
+    };
+    [
+        midpoint(verts[0], verts[1]),
+        midpoint(verts[1], verts[3]),
+        midpoint(verts[0], verts[2]),
+        midpoint(verts[2], verts[3]),
+    ]
 }
 
 /// Clamp a texel dimension into the GP0 8-bit UV range.
@@ -1229,6 +1301,49 @@ fn image_effect_verts(
                 (verts[1].0, verts[1].1.saturating_add(offset)),
                 (verts[2].0, verts[2].1.saturating_add(offset)),
                 (verts[3].0, verts[3].1.saturating_add(offset)),
+            ]
+        }
+        LevelUiImageEffect::Rise => {
+            let origin = verts[0];
+            let spatial_phase = origin
+                .0
+                .wrapping_mul(13)
+                .wrapping_add(origin.1.wrapping_mul(7)) as u16;
+            let phase = frame.wrapping_div(2).wrapping_add(spatial_phase) & 0x003f;
+            let offset = -(phase as i16);
+            [
+                (verts[0].0, verts[0].1.saturating_add(offset)),
+                (verts[1].0, verts[1].1.saturating_add(offset)),
+                (verts[2].0, verts[2].1.saturating_add(offset)),
+                (verts[3].0, verts[3].1.saturating_add(offset)),
+            ]
+        }
+        LevelUiImageEffect::Wind => {
+            let origin = verts[0];
+            let seed = (origin.1 as u16)
+                .wrapping_mul(11)
+                .wrapping_add((origin.0 as u16).wrapping_mul(3));
+            let phase = frame.wrapping_mul(2).wrapping_add(seed) & 0x007f;
+            let gust = i16::from(triangle_wave_u8(frame.wrapping_mul(5).wrapping_add(seed))) - 128;
+            let offset_x = (phase as i16).saturating_add(gust / 32);
+            let offset_y = (-((phase as i16) / 6)).saturating_add(gust / 64);
+            [
+                (
+                    verts[0].0.saturating_add(offset_x),
+                    verts[0].1.saturating_add(offset_y),
+                ),
+                (
+                    verts[1].0.saturating_add(offset_x),
+                    verts[1].1.saturating_add(offset_y),
+                ),
+                (
+                    verts[2].0.saturating_add(offset_x),
+                    verts[2].1.saturating_add(offset_y),
+                ),
+                (
+                    verts[3].0.saturating_add(offset_x),
+                    verts[3].1.saturating_add(offset_y),
+                ),
             ]
         }
         _ => verts,
@@ -1276,6 +1391,8 @@ fn image_effect_vertex_colors(
         // Bob displaces vertices (see `image_effect_verts`); colours
         // stay flat.
         LevelUiImageEffect::Bob => [base; 4],
+        LevelUiImageEffect::Rise => [base; 4],
+        LevelUiImageEffect::Wind => [base; 4],
     }
 }
 

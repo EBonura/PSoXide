@@ -247,6 +247,8 @@ pub(crate) fn draw_ui_scene_preview(
             }
             UiNodeKind::Label {
                 text,
+                random_message,
+                messages,
                 color,
                 gradient,
                 align,
@@ -263,11 +265,20 @@ pub(crate) fn draw_ui_scene_preview(
                 let base_scale = preview.transform.y_scale().clamp(1.0, 8.0);
                 let scale = base_scale * ui_font_scale_q8_to_f32(*font_scale);
                 let texture = ui_preview_font_texture(font_textures, *font);
+                let preview_text = if *random_message {
+                    messages
+                        .iter()
+                        .find(|message| !message.trim().is_empty())
+                        .map(String::as_str)
+                        .unwrap_or(text)
+                } else {
+                    text
+                };
                 draw_ui_preview_text(
                     painter,
                     texture,
                     preview,
-                    text,
+                    preview_text,
                     *font,
                     *align,
                     *wrap,
@@ -302,6 +313,7 @@ pub(crate) fn draw_ui_scene_preview(
                         *effect,
                         frame,
                         absolute,
+                        false,
                     );
                 } else if *effect == UiImageEffect::None {
                     draw_ui_preview_quad_mesh(
@@ -321,6 +333,7 @@ pub(crate) fn draw_ui_scene_preview(
                         *effect,
                         frame,
                         absolute,
+                        true,
                     );
                 }
                 draw_ui_preview_quad_stroke(
@@ -549,7 +562,54 @@ pub(crate) fn draw_ui_preview_image(
     effect: UiImageEffect,
     frame: u16,
     logical_rect: UiRect,
+    untextured: bool,
 ) {
+    let (offset_x, offset_y) = match effect {
+        UiImageEffect::Rise => {
+            let spatial_phase = logical_rect
+                .x
+                .wrapping_mul(13)
+                .wrapping_add(logical_rect.y.wrapping_mul(7))
+                as u16;
+            (
+                0.0,
+                -((frame.wrapping_div(2).wrapping_add(spatial_phase) & 0x003f) as f32),
+            )
+        }
+        UiImageEffect::Wind => {
+            let seed = (logical_rect.y as u16)
+                .wrapping_mul(11)
+                .wrapping_add((logical_rect.x as u16).wrapping_mul(3));
+            let phase = frame.wrapping_mul(2).wrapping_add(seed) & 0x007f;
+            let gust = i16::from(preview_triangle_wave_u8(
+                frame.wrapping_mul(5).wrapping_add(seed),
+            )) - 128;
+            (
+                f32::from((phase as i16).saturating_add(gust / 32)),
+                f32::from((-((phase as i16) / 6)).saturating_add(gust / 64)),
+            )
+        }
+        _ => (0.0, 0.0),
+    };
+    let logical_width = f32::from(logical_rect.width.max(1));
+    let logical_height = f32::from(logical_rect.height.max(1));
+    let screen_width = points[1].distance(points[0]).max(1.0);
+    let screen_height = points[2].distance(points[0]).max(1.0);
+    let screen_offset_x = offset_x * screen_width / logical_width;
+    let screen_offset_y = offset_y * screen_height / logical_height;
+    let points =
+        points.map(|point| Pos2::new(point.x + screen_offset_x, point.y + screen_offset_y));
+    let points = if untextured && effect == UiImageEffect::Rise {
+        let midpoint = |a: Pos2, b: Pos2| Pos2::new((a.x + b.x) * 0.5, (a.y + b.y) * 0.5);
+        [
+            midpoint(points[0], points[1]),
+            midpoint(points[1], points[3]),
+            midpoint(points[0], points[2]),
+            midpoint(points[2], points[3]),
+        ]
+    } else {
+        points
+    };
     if effect == UiImageEffect::None {
         draw_ui_preview_quad_mesh(
             painter,
@@ -668,7 +728,7 @@ pub(crate) fn ui_preview_image_effect_overlay_colors(
         }
         // Bob displaces the quad instead of tinting it; the preview
         // approximates the motion in the node rect, not the colours.
-        UiImageEffect::Bob => [0; 4],
+        UiImageEffect::Bob | UiImageEffect::Rise | UiImageEffect::Wind => [0; 4],
     };
     [
         ui_preview_light_overlay(lift[0]),

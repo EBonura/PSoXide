@@ -326,6 +326,8 @@ pub(crate) fn cook_ui_scene_nodes(
             UiNodeKind::Label {
                 rect,
                 text,
+                random_message,
+                messages,
                 tag,
                 align,
                 wrap,
@@ -334,29 +336,46 @@ pub(crate) fn cook_ui_scene_nodes(
                 letter_spacing,
                 color,
                 gradient,
-            } => (
-                rect.x,
-                rect.y,
-                rect.width.max(1),
-                rect.height.max(1),
-                *color,
-                [0, 0, 0],
-                [0, 0, 0],
-                cook_ui_paint(*color, *gradient, ui_paints),
-                None,
-                None,
-                UiValueBinding::ConstantQ12(0),
-                UiValueBinding::ConstantQ12(0),
-                None,
-                text.clone(),
-                tag.clone(),
-                PlaytestUiAction::default(),
-                psx_level::UI_OPTION_NONE,
-                ui_node_flags(rect.anchor, *align, *wrap),
-                font.runtime_index(),
-                clamp_ui_font_scale(*font_scale),
-                (*letter_spacing).clamp(MIN_UI_LETTER_SPACING, MAX_UI_LETTER_SPACING),
-            ),
+            } => {
+                let candidates = messages
+                    .iter()
+                    .map(String::as_str)
+                    .filter(|message| !message.trim().is_empty())
+                    .collect::<Vec<_>>();
+                let use_random = *random_message && !candidates.is_empty();
+                let cooked_text = if use_random {
+                    candidates.join("\u{1f}")
+                } else {
+                    text.clone()
+                };
+                let mut flags = ui_node_flags(rect.anchor, *align, *wrap);
+                if use_random {
+                    flags |= psx_level::ui_node_flags::TEXT_RANDOM_MESSAGE;
+                }
+                (
+                    rect.x,
+                    rect.y,
+                    rect.width.max(1),
+                    rect.height.max(1),
+                    *color,
+                    [0, 0, 0],
+                    [0, 0, 0],
+                    cook_ui_paint(*color, *gradient, ui_paints),
+                    None,
+                    None,
+                    UiValueBinding::ConstantQ12(0),
+                    UiValueBinding::ConstantQ12(0),
+                    None,
+                    cooked_text,
+                    tag.clone(),
+                    PlaytestUiAction::default(),
+                    psx_level::UI_OPTION_NONE,
+                    flags,
+                    font.runtime_index(),
+                    clamp_ui_font_scale(*font_scale),
+                    (*letter_spacing).clamp(MIN_UI_LETTER_SPACING, MAX_UI_LETTER_SPACING),
+                )
+            }
             UiNodeKind::Image { .. } => unreachable!("image nodes are handled above"),
             UiNodeKind::Bar {
                 rect,
@@ -1160,6 +1179,7 @@ pub(crate) fn ui_visibility_flags(condition: UiVisibilityCondition) -> u16 {
     match condition {
         UiVisibilityCondition::Always => 0,
         UiVisibilityCondition::AnalogInactive => psx_level::ui_node_flags::ANALOG_INACTIVE_ONLY,
+        UiVisibilityCondition::LoadingComplete => psx_level::ui_node_flags::LOADING_COMPLETE_ONLY,
     }
 }
 

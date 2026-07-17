@@ -541,12 +541,29 @@ pub(crate) fn clip_role_picker(
         };
         egui::ComboBox::from_id_salt(id_salt)
             .selected_text(preview)
+            .height(360.0)
             .show_ui(ui, |ui| {
+                ui.set_min_width(380.0);
+                let filter = animation_picker_filter(ui, ui.id().with((id_salt, "filter")));
+                let matching = clips
+                    .iter()
+                    .filter(|name| animation_name_matches_filter(name, &filter))
+                    .count();
+                ui.label(
+                    RichText::new(format!("{matching} of {} compatible clips", clips.len()))
+                        .small()
+                        .color(STUDIO_TEXT_WEAK),
+                );
+                ui.separator();
                 if ui.selectable_label(slot.is_none(), "(none)").clicked() {
                     *slot = None;
                     changed = true;
                 }
-                for (idx, name) in clips.iter().enumerate() {
+                for (idx, name) in clips
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, name)| animation_name_matches_filter(name, &filter))
+                {
                     let label = format!("{idx}: {name}");
                     if ui
                         .selectable_label(*slot == Some(idx as u16), label)
@@ -971,9 +988,22 @@ pub(crate) fn animator_action_clip_combo(
     let short_preview = compact_animator_clip_label(&preview, 36);
     egui::ComboBox::from_id_salt(id_salt)
         .width(width)
+        .height(360.0)
         .truncate()
         .selected_text(short_preview)
         .show_ui(ui, |ui| {
+            ui.set_min_width(width.max(380.0));
+            let filter = animation_picker_filter(ui, ui.id().with((id_salt, "filter")));
+            let matching = clips
+                .iter()
+                .filter(|name| animation_name_matches_filter(name, &filter))
+                .count();
+            ui.label(
+                RichText::new(format!("{matching} of {} compatible clips", clips.len()))
+                    .small()
+                    .color(STUDIO_TEXT_WEAK),
+            );
+            ui.separator();
             let inherit_label = inherited_clip
                 .map(|idx| {
                     let name = clips
@@ -989,7 +1019,11 @@ pub(crate) fn animator_action_clip_combo(
                 }
                 *slot = None;
             }
-            for (idx, name) in clips.iter().enumerate() {
+            for (idx, name) in clips
+                .iter()
+                .enumerate()
+                .filter(|(_, name)| animation_name_matches_filter(name, &filter))
+            {
                 let label = format!("{idx}: {name}");
                 if ui
                     .selectable_label(*slot == Some(idx as u16), label)
@@ -1003,6 +1037,32 @@ pub(crate) fn animator_action_clip_combo(
         .response
         .on_hover_text(preview);
     changed
+}
+
+pub(crate) fn animation_picker_filter(ui: &mut egui::Ui, id: egui::Id) -> String {
+    let mut filter = ui
+        .memory_mut(|memory| memory.data.get_persisted::<String>(id))
+        .unwrap_or_default();
+    if ui
+        .add(
+            egui::TextEdit::singleline(&mut filter)
+                .hint_text("Search imported animations…")
+                .desired_width(f32::INFINITY),
+        )
+        .changed()
+    {
+        ui.memory_mut(|memory| memory.data.insert_persisted(id, filter.clone()));
+    }
+    filter
+}
+
+pub(crate) fn animation_name_matches_filter(name: &str, filter: &str) -> bool {
+    let filter = filter.trim().to_ascii_lowercase();
+    if filter.is_empty() {
+        return true;
+    }
+    let name = name.to_ascii_lowercase();
+    filter.split_whitespace().all(|term| name.contains(term))
 }
 
 pub(crate) fn compact_animator_clip_label(label: &str, max_chars: usize) -> String {

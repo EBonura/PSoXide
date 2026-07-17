@@ -1810,6 +1810,8 @@ fn ui_scene_remove_node_removes_descendants_and_root_is_stable() {
         UiNodeKind::Label {
             rect: UiRect::new(52, 184, 96, 12),
             text: "Open".to_string(),
+            random_message: false,
+            messages: Vec::new(),
             tag: String::new(),
             align: UiTextAlign::Left,
             wrap: false,
@@ -1848,6 +1850,8 @@ fn ui_scene_parent_rect_offsets_children() {
         UiNodeKind::Label {
             rect: UiRect::new(8, 6, 48, 12),
             text: "Open".to_string(),
+            random_message: false,
+            messages: Vec::new(),
             tag: String::new(),
             align: UiTextAlign::Left,
             wrap: false,
@@ -1885,6 +1889,8 @@ fn ui_scene_absolute_rect_preserves_visual_transform() {
         UiNodeKind::Label {
             rect,
             text: "Open".to_string(),
+            random_message: false,
+            messages: Vec::new(),
             tag: String::new(),
             align: UiTextAlign::Left,
             wrap: false,
@@ -1927,6 +1933,8 @@ fn ui_scene_move_node_reparents_and_rejects_cycles() {
         UiNodeKind::Label {
             rect: UiRect::new(2, 3, 8, 8),
             text: "x".to_string(),
+            random_message: false,
+            messages: Vec::new(),
             tag: String::new(),
             align: UiTextAlign::Left,
             wrap: false,

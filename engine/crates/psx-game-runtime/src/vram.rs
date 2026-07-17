@@ -1640,17 +1640,18 @@ impl<
         ui_nodes: &'static [LevelUiNodeRecord],
         assets: &'static [LevelAssetRecord],
         rooms: &'static [LevelRoomRecord],
-    ) {
+    ) -> bool {
         if scene_id == UI_SCENE_NONE {
-            return;
+            return true;
         }
         // One byte-resolution rule for the whole pass; queued jobs
         // re-resolve through this same cache borrow per step.
         let resolve = |asset_id| resolve_upload_bytes(assets, cache, asset_id);
 
         let Some(scene) = ui_scenes.iter().find(|scene| scene.id == scene_id) else {
-            return;
+            return false;
         };
+        let mut all_ready = true;
         let first = scene.node_first as usize;
         let end = first
             .saturating_add(scene.node_count as usize)
@@ -1679,9 +1680,11 @@ impl<
             }
 
             let Some((cache_slot, cache_entry)) = cache.find_entry(asset.id) else {
+                all_ready = false;
                 continue;
             };
             let Some(bytes) = cache.image_bytes(cache_slot, cache_entry.bytes) else {
+                all_ready = false;
                 continue;
             };
             if self
@@ -1699,8 +1702,11 @@ impl<
 
             if self.find_room_texture_vram_slot(asset.id).is_some() {
                 self.track_ui_image_slot(asset.id);
+            } else {
+                all_ready = false;
             }
         }
+        all_ready
     }
 
     #[cfg(feature = "cd-stream-bench")]
