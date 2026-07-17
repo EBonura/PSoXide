@@ -2155,6 +2155,7 @@ fn dma_write_waits_for_sample_domain_mode_apply() {
 #[test]
 fn cancelled_manual_mode_leaves_queued_fifo_data_uncommitted() {
     let mut s = Spu::new();
+    s.apply_scph_9902_profile();
     s.write16_at(TRANSFER_ADDR, 0, 100);
     s.write16_at(SPUCNT, 0x0010, 100);
     s.write16_at(TRANSFER_FIFO, 0xCAFE, 110);
@@ -2165,6 +2166,19 @@ fn cancelled_manual_mode_leaves_queued_fifo_data_uncommitted() {
     let mut readback = [0u16; 1];
     s.dma_read(&mut readback);
     assert_eq!(readback, [0]);
+}
+
+#[test]
+fn default_manual_mode_accepts_fifo_before_sample_boundary() {
+    let mut s = Spu::new();
+    s.write16_at(TRANSFER_ADDR, 0, 100);
+    s.write16_at(SPUCNT, 0x0010, 100);
+    s.write16_at(TRANSFER_FIFO, 0xCAFE, 110);
+
+    s.write16(TRANSFER_ADDR, 0);
+    let mut readback = [0u16; 1];
+    s.dma_read(&mut readback);
+    assert_eq!(readback, [0xCAFE]);
 }
 
 #[test]
@@ -2191,6 +2205,7 @@ fn spustat_capture_half_flag_toggles_at_ring_midpoint() {
     // bytes per tick, wrapping at 0x400; the flag is updated after each
     // advance (1 for pos < 0x200, 0 for pos >= 0x200) on SCPH-9902.
     let mut s = Spu::new();
+    s.apply_scph_9902_profile();
     for tick in 1..=512u32 {
         s.tick_sample(tick as u64 * SAMPLE_CYCLES);
         let pos = (tick * 2) % 0x400;
@@ -2201,4 +2216,18 @@ fn spustat_capture_half_flag_toggles_at_ring_midpoint() {
             "tick {tick}: capture-half flag must follow ring pos {pos:#06x}"
         );
     }
+}
+
+#[test]
+fn default_capture_half_flag_uses_conventional_polarity() {
+    let mut s = Spu::new();
+    assert_eq!(s.read16(SPUSTAT) & 0x800, 0);
+
+    for tick in 1..256u64 {
+        s.tick_sample(tick * SAMPLE_CYCLES);
+    }
+    assert_eq!(s.read16(SPUSTAT) & 0x800, 0);
+
+    s.tick_sample(256 * SAMPLE_CYCLES);
+    assert_eq!(s.read16(SPUSTAT) & 0x800, 0x800);
 }
