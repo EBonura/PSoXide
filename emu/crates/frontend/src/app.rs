@@ -539,11 +539,6 @@ impl AppState {
         // Both builds start on the open menu (bundled discs like Celeste are
         // launchable from the Games/Examples categories), rather than
         // auto-booting into a game.
-        #[cfg(feature = "editor")]
-        if env_flag("PSOXIDE_DEBUG_DIRECT_EDITOR") {
-            out.open_editor_workspace();
-            out.menu.open = false;
-        }
         out
     }
 }
