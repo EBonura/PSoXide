@@ -469,6 +469,47 @@ fn room_quad_prewarm_builds_baked_packet_payload_in_split_order() {
 }
 
 #[test]
+fn room_quad_prewarm_skips_dynamic_and_translucent_materials() {
+    let surface = CachedRoomSurface::new(
+        0,
+        [0, 1, 2, 3],
+        [(0, 0), (64, 0), (64, 64), (0, 64)],
+        WorldSurfaceSample {
+            kind: WorldSurfaceKind::Floor,
+            sx: 0,
+            sz: 0,
+            center: RoomPoint::ZERO,
+            baked_vertex_rgb: Some([(128, 128, 128); 4]),
+            ordinal: 0,
+        },
+        SPLIT_NW_SE,
+        WHOLE_QUAD_TRIANGLE_INDEX,
+    );
+    let dynamic = WorldRenderMaterial::front(TextureMaterial::opaque(0, 0, (128, 128, 128)))
+        .with_animation(WorldMaterialAnimation::UvScroll {
+            speed_u_q8: 256,
+            speed_v_q8: 0,
+            phase_u: 0,
+            phase_v: 0,
+        });
+    let translucent = WorldRenderMaterial::front(TextureMaterial::blended(
+        0,
+        0,
+        (128, 128, 128),
+        psx_gpu::material::BlendMode::Average,
+    ));
+    for material in [dynamic, translucent] {
+        let mut quad = [QuadTexturedGouraud::EMPTY];
+        let mut valid = [0x55];
+        assert_eq!(
+            prewarm_indexed_cached_room_quads(&[surface], &[material], &mut quad, &mut valid),
+            0
+        );
+        assert_eq!(valid, [0]);
+    }
+}
+
+#[test]
 fn warmed_quad_culls_in_authored_order_before_gpu_packet_reordering() {
     // Clockwise/back-facing NW-SE quad. Reordering this into GP0(3Ch) packet
     // order flips only one of the packet triangles, so culling the packet
@@ -930,6 +971,31 @@ fn horizontal_face_center_uses_cell_midpoint_and_average_height() {
 #[test]
 fn grid_visible_cell_camera_depth_fits_existing_padding() {
     assert_eq!(core::mem::size_of::<GridVisibleCell>(), 16);
+}
+
+#[test]
+fn world_uv_scroll_uses_video_rate_and_wraps_signed_motion() {
+    let animation = WorldMaterialAnimation::UvScroll {
+        speed_u_q8: 2 * 256,
+        speed_v_q8: -2 * 256,
+        phase_u: 0,
+        phase_v: 0,
+    };
+    assert_eq!(animation.uv_offset(30, 60, 64, 64), (1, 255));
+    assert_eq!(animation.uv_offset(25, 50, 64, 64), (1, 255));
+}
+
+#[test]
+fn world_flipbook_offsets_into_one_resident_atlas() {
+    let animation = WorldMaterialAnimation::Flipbook {
+        columns: 4,
+        frame_count: 6,
+        ticks_per_frame: 2,
+        phase: 1,
+    };
+    assert_eq!(animation.uv_offset(0, 60, 16, 16), (16, 0));
+    assert_eq!(animation.uv_offset(6, 60, 16, 16), (0, 16));
+    assert_eq!(animation.uv_offset(10, 60, 16, 16), (0, 0));
 }
 
 #[test]

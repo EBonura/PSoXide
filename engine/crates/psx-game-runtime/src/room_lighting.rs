@@ -8,15 +8,17 @@
 //! fully migrates.
 
 use psx_engine::{
-    telemetry, MaterialTint, PointLightSample, Rgb8, RoomPoint, WorldCamera, WorldRenderMaterial,
-    WorldSurfaceLighting, WorldSurfaceSample, WorldVertex, Q8,
+    telemetry, MaterialTint, PointLightSample, Rgb8, RoomPoint, WorldCamera,
+    WorldMaterialAnimation, WorldRenderMaterial, WorldSurfaceLighting, WorldSurfaceSample,
+    WorldVertex, Q8,
 };
 use psx_gpu::material::TextureMaterial;
 use psx_level::{
-    find_asset_of_kind, AssetId, AssetKind, LevelMaterialRecord, LevelMaterialSidedness,
-    LevelRoomRecord, PointLightRecord, RoomIndex,
+    find_asset_of_kind, AssetId, AssetKind, LevelMaterialAnimation, LevelMaterialRecord,
+    LevelMaterialSidedness, LevelRoomRecord, PointLightRecord, RoomIndex,
 };
 
+use crate::model_rendering::model_override_blend_mode;
 use crate::vram::{vram_slot_texture_size_u8, VramSlot};
 
 /// Walk `room.material_first..material_first + material_count`,
@@ -69,21 +71,54 @@ pub fn build_room_materials<const MAX_ROOM_MATERIALS: usize>(
             }
             continue;
         };
-        let texture = TextureMaterial::opaque(
+        let texture = TextureMaterial::blended(
             slot_record.clut_word,
             slot_record.tpage_word,
             rgb_tuple(material.tint_rgb),
+            model_override_blend_mode(material.blend_mode),
         )
         .with_texture_window(slot_record.texture_window);
+        let full_width = vram_slot_texture_size_u8(slot_record.texture_width);
+        let full_height = vram_slot_texture_size_u8(slot_record.texture_height);
+        let (texture_width, texture_height, animation) = match material.animation {
+            LevelMaterialAnimation::Static => {
+                (full_width, full_height, WorldMaterialAnimation::Static)
+            }
+            LevelMaterialAnimation::UvScroll(motion) => (
+                full_width,
+                full_height,
+                WorldMaterialAnimation::UvScroll {
+                    speed_u_q8: motion.speed_u_q8,
+                    speed_v_q8: motion.speed_v_q8,
+                    phase_u: motion.phase_u,
+                    phase_v: motion.phase_v,
+                },
+            ),
+            LevelMaterialAnimation::Flipbook(flipbook) => {
+                let columns = flipbook.columns.max(1);
+                let rows = flipbook.rows.max(1);
+                (
+                    (full_width / columns).max(1),
+                    (full_height / rows).max(1),
+                    WorldMaterialAnimation::Flipbook {
+                        columns,
+                        frame_count: flipbook
+                            .frame_count
+                            .max(1)
+                            .min(columns.saturating_mul(rows)),
+                        ticks_per_frame: flipbook.ticks_per_frame.max(1),
+                        phase: flipbook.phase,
+                    },
+                )
+            }
+        };
         let render_material = match material.sidedness() {
             LevelMaterialSidedness::Front => WorldRenderMaterial::front(texture),
             LevelMaterialSidedness::Back => WorldRenderMaterial::back(texture),
             LevelMaterialSidedness::Both => WorldRenderMaterial::both(texture),
         }
-        .with_texture_size(
-            vram_slot_texture_size_u8(slot_record.texture_width),
-            vram_slot_texture_size_u8(slot_record.texture_height),
-        );
+        .with_texture_size(texture_width, texture_height)
+        .with_animation(animation);
         out[slot] = Some(render_material);
     }
     (max_slot, all_resolved)

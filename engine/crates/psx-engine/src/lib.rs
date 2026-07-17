@@ -103,11 +103,11 @@ pub use render3d::{
     apply_model_pose_translation, compute_joint_view_transform, compute_joint_world_transform,
     project_model_vertex_with_joint_transforms, CullMode, DepthPolicy, GouraudMeshOptions,
     GouraudRenderPass, GouraudTriCommand, JointViewTransform, JointWorldTransform,
-    LoadedWorldCameraGte, LocalToWorldScale, MeshRenderStats, ModelPoseTranslation,
+    LoadedWorldCameraGte, LocalToWorldScale, MeshRenderStats, ModelPoseTranslation, ModelUvOffset,
     ProjectedTexturedVertex, ProjectedVertex, SkyDirectionProjector, TexturedModelGeometry,
-    TexturedModelRenderFace, TexturedModelRenderStats, TexturedViewVertex, ViewVertex, WorldCamera,
-    WorldProjection, WorldRenderLayer, WorldRenderPass, WorldRenderStats, WorldSurfaceOptions,
-    WorldTriCommand,
+    TexturedModelLayer, TexturedModelRenderFace, TexturedModelRenderStats, TexturedViewVertex,
+    ViewVertex, WorldCamera, WorldProjection, WorldRenderLayer, WorldRenderPass, WorldRenderStats,
+    WorldSurfaceOptions, WorldTriCommand,
 };
 pub use scheduler::{
     collect_due_tasks, FixedUpdateOutcome, FrameScheduler, OverloadPolicy, SchedulerAction,
@@ -140,7 +140,8 @@ pub use world_render::{
     draw_room_vertex_lit_visible_cells, prewarm_indexed_cached_room_quads, CachedRoomCell,
     CachedRoomDepthMode, CachedRoomSubdivisionMode, CachedRoomSurface, CachedRoomSurfaceCacheStats,
     GridVisibility, GridVisibilityStats, GridVisibleCell, NoWorldSurfaceLighting, SurfaceSidedness,
-    WorldRenderMaterial, WorldSurfaceKind, WorldSurfaceLighting, WorldSurfaceSample,
+    WorldMaterialAnimation, WorldRenderMaterial, WorldSurfaceKind, WorldSurfaceLighting,
+    WorldSurfaceSample,
 };
 
 /// Button-mask constants (UP, DOWN, CROSS, START, …) re-exported

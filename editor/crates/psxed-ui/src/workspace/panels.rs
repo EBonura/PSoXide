@@ -1101,57 +1101,80 @@ impl EditorWorkspace {
             return;
         };
 
-        ui.horizontal(|ui| {
-            ui.label(icons::text(ui_node_kind_icon(node.kind.label()), 14.0).color(STUDIO_ACCENT));
-            ui.strong(format!("{} #{}", node.kind.label(), node.id.raw()));
+        let kind_label = node.kind.label();
+        inspector_identity_header(
+            ui,
+            ui_node_kind_icon(kind_label),
+            STUDIO_ACCENT,
+            &node.name,
+            kind_label,
+            node.id.raw(),
+        );
+        changed |= inspector_property_row(ui, "Name", |ui| {
+            ui.add(egui::TextEdit::singleline(&mut node.name).desired_width(f32::INFINITY))
+                .changed()
         });
-        ui.horizontal(|ui| {
-            ui.label("Name");
-            changed |= ui.text_edit_singleline(&mut node.name).changed();
-        });
-        ui.horizontal(|ui| {
-            ui.label("Parent");
-            ui.weak(parent_name);
-        });
-        if let Some(rect) = node.kind.rect() {
-            ui.horizontal(|ui| {
-                ui.label("Local");
-                ui.weak(format!(
-                    "x {}  y {}  w {}  h {}",
-                    rect.x, rect.y, rect.width, rect.height
-                ));
-            });
-        }
-        if let Some(rect) = absolute_rect {
-            ui.horizontal(|ui| {
-                ui.label("Absolute");
-                ui.weak(format!(
-                    "x {}  y {}  w {}  h {}",
-                    rect.x, rect.y, rect.width, rect.height
-                ));
-            });
-        }
-        changed |= draw_ui_visibility_editor(ui, &mut node.visible_when);
-        ui.separator();
+        inspector_section(
+            ui,
+            ("ui-node-context", node.id.raw()),
+            icons::LAYERS,
+            "Context & Visibility",
+            false,
+            |ui| {
+                inspector_property_row(ui, "Parent", |ui| ui.weak(&parent_name));
+                if let Some(rect) = node.kind.rect() {
+                    inspector_property_row(ui, "Local bounds", |ui| {
+                        ui.weak(format!(
+                            "x {}  y {}  w {}  h {}",
+                            rect.x, rect.y, rect.width, rect.height
+                        ))
+                    });
+                }
+                if let Some(rect) = absolute_rect {
+                    inspector_property_row(ui, "Canvas bounds", |ui| {
+                        ui.weak(format!(
+                            "x {}  y {}  w {}  h {}",
+                            rect.x, rect.y, rect.width, rect.height
+                        ))
+                    });
+                }
+                changed |= draw_ui_visibility_editor(ui, &mut node.visible_when);
+            },
+        );
 
         match &mut node.kind {
             UiNodeKind::Canvas { width, height } => {
-                ui.weak("Root screen-space canvas.");
-                changed |= drag_u16(ui, "Width", width, 1, 4096);
-                changed |= drag_u16(ui, "Height", height, 1, 4096);
+                inspector_section(ui, "ui-canvas-layout", icons::MOVE, "Canvas", true, |ui| {
+                    ui.weak("Root screen-space canvas.");
+                    changed |= drag_u16(ui, "Width", width, 1, 4096);
+                    changed |= drag_u16(ui, "Height", height, 1, 4096);
+                });
             }
             UiNodeKind::Group { rect } => {
-                ui.weak("Organizes child UI nodes.");
-                changed |= draw_ui_rect_editor(ui, rect);
+                inspector_section(ui, "ui-group-layout", icons::MOVE, "Layout", true, |ui| {
+                    ui.weak("Organizes child UI nodes.");
+                    changed |= draw_ui_rect_editor(ui, rect);
+                });
             }
             UiNodeKind::Rect {
                 rect,
                 color,
                 gradient,
             } => {
-                changed |= draw_ui_rect_editor(ui, rect);
-                changed |= color_editor(ui, "Color", color);
-                changed |= draw_ui_gradient_editor(ui, "Gradient", color, gradient);
+                inspector_section(ui, "ui-rect-layout", icons::MOVE, "Layout", true, |ui| {
+                    changed |= draw_ui_rect_editor(ui, rect);
+                });
+                inspector_section(
+                    ui,
+                    "ui-rect-appearance",
+                    icons::PALETTE,
+                    "Appearance",
+                    true,
+                    |ui| {
+                        changed |= color_editor(ui, "Color", color);
+                        changed |= draw_ui_gradient_editor(ui, "Gradient", color, gradient);
+                    },
+                );
             }
             UiNodeKind::Label {
                 rect,
@@ -1165,24 +1188,55 @@ impl EditorWorkspace {
                 color,
                 gradient,
             } => {
-                changed |= draw_ui_rect_editor(ui, rect);
-                ui.horizontal(|ui| {
-                    ui.label("Text");
-                    changed |= ui
-                        .add(egui::TextEdit::multiline(text).desired_rows(2))
-                        .changed();
+                inspector_section(ui, "ui-label-layout", icons::MOVE, "Layout", true, |ui| {
+                    changed |= draw_ui_rect_editor(ui, rect);
                 });
-                ui.horizontal(|ui| {
-                    ui.label("Tag");
-                    changed |= ui.text_edit_singleline(tag).changed();
-                });
-                changed |= draw_ui_text_align_editor(ui, align);
-                changed |= draw_ui_font_choice_editor(ui, font);
-                changed |= draw_ui_font_scale_editor(ui, font_scale);
-                changed |= draw_ui_letter_spacing_editor(ui, letter_spacing);
-                changed |= ui.checkbox(wrap, "Wrap").changed();
-                changed |= color_editor(ui, "Color", color);
-                changed |= draw_ui_gradient_editor(ui, "Gradient", color, gradient);
+                inspector_section(
+                    ui,
+                    "ui-label-content",
+                    icons::PEN_LINE,
+                    "Content",
+                    true,
+                    |ui| {
+                        changed |= inspector_property_row(ui, "Text", |ui| {
+                            ui.add(
+                                egui::TextEdit::multiline(text)
+                                    .desired_rows(2)
+                                    .desired_width(f32::INFINITY),
+                            )
+                            .changed()
+                        });
+                        changed |= inspector_property_row(ui, "Tag", |ui| {
+                            ui.add(egui::TextEdit::singleline(tag).desired_width(f32::INFINITY))
+                                .changed()
+                        });
+                        changed |= ui.checkbox(wrap, "Wrap text").changed();
+                    },
+                );
+                inspector_section(
+                    ui,
+                    "ui-label-typography",
+                    icons::FILE,
+                    "Typography",
+                    true,
+                    |ui| {
+                        changed |= draw_ui_text_align_editor(ui, align);
+                        changed |= draw_ui_font_choice_editor(ui, font);
+                        changed |= draw_ui_font_scale_editor(ui, font_scale);
+                        changed |= draw_ui_letter_spacing_editor(ui, letter_spacing);
+                    },
+                );
+                inspector_section(
+                    ui,
+                    "ui-label-appearance",
+                    icons::PALETTE,
+                    "Appearance",
+                    true,
+                    |ui| {
+                        changed |= color_editor(ui, "Color", color);
+                        changed |= draw_ui_gradient_editor(ui, "Gradient", color, gradient);
+                    },
+                );
             }
             UiNodeKind::Image {
                 rect,
@@ -1190,57 +1244,69 @@ impl EditorWorkspace {
                 tint,
                 effect,
             } => {
-                changed |= draw_ui_rect_editor(ui, rect);
-                changed |= ui_texture_resource_picker(ui, "Texture", texture, &texture_options);
                 let native_size = texture.and_then(|id| texture_sizes.get(&id).copied());
-                ui.horizontal(|ui| {
-                    let response = ui.add_enabled(
-                        native_size.is_some(),
-                        egui::Button::new("1:1 texels").small(),
-                    );
-                    let response = response.on_hover_text(
-                        "Resize this Image node to the selected texture's native PS1 texel size.",
-                    );
-                    if response.clicked() {
-                        if let Some((width, height)) = native_size {
-                            if rect.width != width || rect.height != height {
-                                rect.width = width;
-                                rect.height = height;
-                                changed = true;
+                inspector_section(ui, "ui-image-layout", icons::MOVE, "Layout", true, |ui| {
+                    changed |= draw_ui_rect_editor(ui, rect);
+                    ui.horizontal(|ui| {
+                        let response = ui.add_enabled(
+                            native_size.is_some(),
+                            egui::Button::new("Use texture size").small(),
+                        );
+                        let response = response.on_hover_text(
+                            "Resize this Image node to the selected texture's native PS1 texel size.",
+                        );
+                        if response.clicked() {
+                            if let Some((width, height)) = native_size {
+                                if rect.width != width || rect.height != height {
+                                    rect.width = width;
+                                    rect.height = height;
+                                    changed = true;
+                                }
                             }
                         }
-                    }
-                    if let Some((width, height)) = native_size {
-                        ui.label(
-                            RichText::new(format!("{width}x{height} texture"))
-                                .color(STUDIO_TEXT_WEAK)
-                                .small(),
-                        );
-                    } else {
-                        ui.label(
-                            RichText::new("No decoded texture size")
-                                .color(STUDIO_TEXT_WEAK)
-                                .small(),
-                        );
-                    }
+                        if let Some((width, height)) = native_size {
+                            ui.label(
+                                RichText::new(format!("{width}x{height} texture"))
+                                    .color(STUDIO_TEXT_WEAK)
+                                    .small(),
+                            );
+                        } else {
+                            ui.label(
+                                RichText::new("No decoded texture size")
+                                    .color(STUDIO_TEXT_WEAK)
+                                    .small(),
+                            );
+                        }
+                    });
                 });
-                changed |= color_editor(ui, "Tint", tint);
-                changed |= draw_ui_image_effect_picker(ui, effect);
-                ui.horizontal(|ui| {
-                    if ui.small_button("Dim").clicked() {
-                        *tint = [96, 96, 96];
-                        changed = true;
-                    }
-                    if ui.small_button("Neutral").clicked() {
-                        *tint = [128, 128, 128];
-                        changed = true;
-                    }
-                    if ui.small_button("Bright").clicked() {
-                        *tint = [192, 192, 192];
-                        changed = true;
-                    }
-                    ui.label(RichText::new("128 neutral").color(STUDIO_TEXT_WEAK).small());
-                });
+                inspector_section(
+                    ui,
+                    "ui-image-appearance",
+                    icons::PALETTE,
+                    "Appearance",
+                    true,
+                    |ui| {
+                        changed |=
+                            ui_texture_resource_picker(ui, "Texture", texture, &texture_options);
+                        changed |= color_editor(ui, "Tint", tint);
+                        changed |= draw_ui_image_effect_picker(ui, effect);
+                        ui.horizontal(|ui| {
+                            if ui.small_button("Dim").clicked() {
+                                *tint = [96, 96, 96];
+                                changed = true;
+                            }
+                            if ui.small_button("Neutral").clicked() {
+                                *tint = [128, 128, 128];
+                                changed = true;
+                            }
+                            if ui.small_button("Bright").clicked() {
+                                *tint = [192, 192, 192];
+                                changed = true;
+                            }
+                            ui.label(RichText::new("128 neutral").color(STUDIO_TEXT_WEAK).small());
+                        });
+                    },
+                );
             }
             UiNodeKind::Bar {
                 rect,
@@ -1251,17 +1317,31 @@ impl EditorWorkspace {
                 background,
                 background_gradient,
             } => {
-                changed |= draw_ui_rect_editor(ui, rect);
-                changed |= draw_ui_value_binding_editor(ui, "Value", value, &option_choices);
-                changed |= draw_ui_value_binding_editor(ui, "Max", max, &option_choices);
-                changed |= color_editor(ui, "Fill", fill);
-                changed |= draw_ui_gradient_editor(ui, "Fill Gradient", fill, fill_gradient);
-                changed |= color_editor(ui, "Background", background);
-                changed |= draw_ui_gradient_editor(
+                inspector_section(ui, "ui-bar-layout", icons::MOVE, "Layout", true, |ui| {
+                    changed |= draw_ui_rect_editor(ui, rect);
+                });
+                inspector_section(ui, "ui-bar-data", icons::WAYPOINT, "Data", true, |ui| {
+                    changed |= draw_ui_value_binding_editor(ui, "Value", value, &option_choices);
+                    changed |= draw_ui_value_binding_editor(ui, "Max", max, &option_choices);
+                });
+                inspector_section(
                     ui,
-                    "Background Gradient",
-                    background,
-                    background_gradient,
+                    "ui-bar-appearance",
+                    icons::PALETTE,
+                    "Appearance",
+                    true,
+                    |ui| {
+                        changed |= color_editor(ui, "Fill", fill);
+                        changed |=
+                            draw_ui_gradient_editor(ui, "Fill Gradient", fill, fill_gradient);
+                        changed |= color_editor(ui, "Background", background);
+                        changed |= draw_ui_gradient_editor(
+                            ui,
+                            "Background Gradient",
+                            background,
+                            background_gradient,
+                        );
+                    },
                 );
             }
             UiNodeKind::Button {
@@ -1279,34 +1359,86 @@ impl EditorWorkspace {
                 action,
                 sfx,
             } => {
-                changed |= draw_ui_rect_editor(ui, rect);
-                ui.horizontal(|ui| {
-                    ui.label("Label");
-                    changed |= ui.text_edit_singleline(label).changed();
+                inspector_section(ui, "ui-button-layout", icons::MOVE, "Layout", true, |ui| {
+                    changed |= draw_ui_rect_editor(ui, rect);
                 });
-                changed |= draw_ui_text_align_editor(ui, align);
-                changed |= draw_ui_font_choice_editor(ui, font);
-                changed |= draw_ui_font_scale_editor(ui, font_scale);
-                changed |= draw_ui_letter_spacing_editor(ui, letter_spacing);
-                changed |= color_editor(ui, "Text", text_color);
-                changed |= ui.checkbox(transparent, "Transparent background").changed();
-                changed |= color_editor(ui, "Background", color);
-                changed |=
-                    draw_ui_gradient_editor(ui, "Background Gradient", color, background_gradient);
-                changed |= draw_ui_gradient_editor(ui, "Text Gradient", text_color, text_gradient);
-                changed |= draw_ui_action_editor(
+                inspector_section(
                     ui,
-                    action,
-                    &state_options,
-                    &scene_options,
-                    &option_choices,
+                    "ui-button-content",
+                    icons::PEN_LINE,
+                    "Content",
+                    true,
+                    |ui| {
+                        changed |= inspector_property_row(ui, "Label", |ui| {
+                            ui.add(egui::TextEdit::singleline(label).desired_width(f32::INFINITY))
+                                .changed()
+                        });
+                    },
                 );
-                changed |= draw_button_sfx_editor(
+                inspector_section(
                     ui,
-                    sfx,
-                    &wav_options,
-                    &project_root,
-                    &mut preview_message,
+                    "ui-button-typography",
+                    icons::FILE,
+                    "Typography",
+                    false,
+                    |ui| {
+                        changed |= draw_ui_text_align_editor(ui, align);
+                        changed |= draw_ui_font_choice_editor(ui, font);
+                        changed |= draw_ui_font_scale_editor(ui, font_scale);
+                        changed |= draw_ui_letter_spacing_editor(ui, letter_spacing);
+                    },
+                );
+                inspector_section(
+                    ui,
+                    "ui-button-appearance",
+                    icons::PALETTE,
+                    "Appearance",
+                    true,
+                    |ui| {
+                        changed |= color_editor(ui, "Text", text_color);
+                        changed |= ui.checkbox(transparent, "Transparent background").changed();
+                        changed |= color_editor(ui, "Background", color);
+                        changed |= draw_ui_gradient_editor(
+                            ui,
+                            "Background Gradient",
+                            color,
+                            background_gradient,
+                        );
+                        changed |=
+                            draw_ui_gradient_editor(ui, "Text Gradient", text_color, text_gradient);
+                    },
+                );
+                inspector_section(
+                    ui,
+                    "ui-button-action",
+                    icons::POINTER,
+                    "Interaction",
+                    true,
+                    |ui| {
+                        changed |= draw_ui_action_editor(
+                            ui,
+                            action,
+                            &state_options,
+                            &scene_options,
+                            &option_choices,
+                        );
+                    },
+                );
+                inspector_section(
+                    ui,
+                    "ui-button-audio",
+                    icons::AUDIO_LINES,
+                    "Audio",
+                    false,
+                    |ui| {
+                        changed |= draw_button_sfx_editor(
+                            ui,
+                            sfx,
+                            &wav_options,
+                            &project_root,
+                            &mut preview_message,
+                        );
+                    },
                 );
             }
             UiNodeKind::Slider {
@@ -1320,20 +1452,45 @@ impl EditorWorkspace {
                 knob_gradient,
                 sfx,
             } => {
-                changed |= draw_ui_rect_editor(ui, rect);
-                changed |= draw_ui_option_picker(ui, "Option", option, &option_choices);
-                changed |= color_editor(ui, "Track", track);
-                changed |= draw_ui_gradient_editor(ui, "Track Gradient", track, track_gradient);
-                changed |= color_editor(ui, "Fill", fill);
-                changed |= draw_ui_gradient_editor(ui, "Fill Gradient", fill, fill_gradient);
-                changed |= color_editor(ui, "Knob", knob);
-                changed |= draw_ui_gradient_editor(ui, "Knob Gradient", knob, knob_gradient);
-                changed |= draw_slider_sfx_editor(
+                inspector_section(ui, "ui-slider-layout", icons::MOVE, "Layout", true, |ui| {
+                    changed |= draw_ui_rect_editor(ui, rect);
+                });
+                inspector_section(ui, "ui-slider-data", icons::WAYPOINT, "Data", true, |ui| {
+                    changed |= draw_ui_option_picker(ui, "Option", option, &option_choices);
+                });
+                inspector_section(
                     ui,
-                    sfx,
-                    &wav_options,
-                    &project_root,
-                    &mut preview_message,
+                    "ui-slider-appearance",
+                    icons::PALETTE,
+                    "Appearance",
+                    true,
+                    |ui| {
+                        changed |= color_editor(ui, "Track", track);
+                        changed |=
+                            draw_ui_gradient_editor(ui, "Track Gradient", track, track_gradient);
+                        changed |= color_editor(ui, "Fill", fill);
+                        changed |=
+                            draw_ui_gradient_editor(ui, "Fill Gradient", fill, fill_gradient);
+                        changed |= color_editor(ui, "Knob", knob);
+                        changed |=
+                            draw_ui_gradient_editor(ui, "Knob Gradient", knob, knob_gradient);
+                    },
+                );
+                inspector_section(
+                    ui,
+                    "ui-slider-audio",
+                    icons::AUDIO_LINES,
+                    "Audio",
+                    false,
+                    |ui| {
+                        changed |= draw_slider_sfx_editor(
+                            ui,
+                            sfx,
+                            &wav_options,
+                            &project_root,
+                            &mut preview_message,
+                        );
+                    },
                 );
             }
             UiNodeKind::Music {
@@ -1343,37 +1500,46 @@ impl EditorWorkspace {
                 playback_speed_q12,
                 loop_track,
             } => {
-                ui.weak("Non-visual CD-DA music cue for this UI scene.");
-                changed |= draw_music_wav_picker(ui, "WAV", wav_path, &wav_options);
-                changed |= ui.checkbox(loop_track, "Loop").changed();
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("Volume").color(STUDIO_TEXT_WEAK));
-                    let mut value = (*volume).min(100) as i32;
-                    if ui
-                        .add(egui::Slider::new(&mut value, 0..=100).suffix("%"))
-                        .changed()
-                    {
-                        *volume = value as u8;
-                        changed = true;
-                    }
-                });
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("Playback speed").color(STUDIO_TEXT_WEAK));
-                    let mut speed = ((*playback_speed_q12).max(1) as f32) / 4096.0;
-                    if ui
-                        .add(egui::Slider::new(&mut speed, 0.25..=2.0).suffix("x"))
-                        .changed()
-                    {
-                        *playback_speed_q12 =
-                            ((speed * 4096.0).round() as i32).clamp(1, 0x3FFF) as u16;
-                        changed = true;
-                    }
-                });
-                changed |= draw_optional_ui_option_picker(
+                inspector_section(
                     ui,
-                    "Volume option",
-                    volume_option,
-                    &option_choices,
+                    "ui-music-playback",
+                    icons::AUDIO_LINES,
+                    "Playback",
+                    true,
+                    |ui| {
+                        ui.weak("Non-visual CD-DA music cue for this UI scene.");
+                        changed |= draw_music_wav_picker(ui, "WAV", wav_path, &wav_options);
+                        changed |= ui.checkbox(loop_track, "Loop").changed();
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Volume").color(STUDIO_TEXT_WEAK));
+                            let mut value = (*volume).min(100) as i32;
+                            if ui
+                                .add(egui::Slider::new(&mut value, 0..=100).suffix("%"))
+                                .changed()
+                            {
+                                *volume = value as u8;
+                                changed = true;
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Playback speed").color(STUDIO_TEXT_WEAK));
+                            let mut speed = ((*playback_speed_q12).max(1) as f32) / 4096.0;
+                            if ui
+                                .add(egui::Slider::new(&mut speed, 0.25..=2.0).suffix("x"))
+                                .changed()
+                            {
+                                *playback_speed_q12 =
+                                    ((speed * 4096.0).round() as i32).clamp(1, 0x3FFF) as u16;
+                                changed = true;
+                            }
+                        });
+                        changed |= draw_optional_ui_option_picker(
+                            ui,
+                            "Volume option",
+                            volume_option,
+                            &option_choices,
+                        );
+                    },
                 );
             }
         }
@@ -1381,21 +1547,28 @@ impl EditorWorkspace {
         // Scene-level focus-ring style, edited from the root canvas so
         // the scene's shared chrome lives in one place.
         if selected_is_root {
-            ui.separator();
-            ui.strong("Focus Ring");
-            ui.weak("Highlight drawn around the focused button/slider.");
             let style = &mut scene.focus_style;
-            changed |= draw_ui_focus_effect_picker(ui, &mut style.effect);
-            changed |= color_editor(ui, "Color A", &mut style.color_a);
-            if style.effect != UiFocusEffect::Solid {
-                changed |= color_editor(ui, "Color B", &mut style.color_b);
-                changed |= drag_u16(ui, "Period (frames)", &mut style.period, 0, 600);
-            }
-            changed |= drag_u8(ui, "Thickness", &mut style.thickness, 1, 4);
-            changed |= drag_u8(ui, "Margin", &mut style.margin, 0, 8);
-            if style.effect == UiFocusEffect::Corners {
-                changed |= drag_u8(ui, "Corner Length", &mut style.corner_len, 2, 64);
-            }
+            inspector_section(
+                ui,
+                "ui-scene-focus-ring",
+                icons::FOCUS,
+                "Focus Ring",
+                false,
+                |ui| {
+                    ui.weak("Highlight drawn around the focused button or slider.");
+                    changed |= draw_ui_focus_effect_picker(ui, &mut style.effect);
+                    changed |= color_editor(ui, "Color A", &mut style.color_a);
+                    if style.effect != UiFocusEffect::Solid {
+                        changed |= color_editor(ui, "Color B", &mut style.color_b);
+                        changed |= drag_u16(ui, "Period (frames)", &mut style.period, 0, 600);
+                    }
+                    changed |= drag_u8(ui, "Thickness", &mut style.thickness, 1, 4);
+                    changed |= drag_u8(ui, "Margin", &mut style.margin, 0, 8);
+                    if style.effect == UiFocusEffect::Corners {
+                        changed |= drag_u8(ui, "Corner Length", &mut style.corner_len, 2, 64);
+                    }
+                },
+            );
         }
 
         if changed {
@@ -1429,9 +1602,10 @@ impl EditorWorkspace {
                         constrain_resizable_dock_content(ui, content_width);
                         tool_panel_header(ui, icons::SCAN, "Inspector", |_| {});
                         tool_panel_body(ui, |ui| {
+                            apply_inspector_layout(ui);
                             let content_width = ui.available_width().max(1.0);
                             constrain_resizable_dock_content(ui, content_width);
-                            egui::ScrollArea::both()
+                            egui::ScrollArea::vertical()
                                 .id_salt("psxed_inspector_scroll")
                                 .max_width(content_width)
                                 .auto_shrink([false, false])
@@ -1514,37 +1688,33 @@ impl EditorWorkspace {
                                         return;
                                     };
 
-                                    ui.horizontal(|ui| {
-                                        draw_inline_icon(
-                                            ui,
-                                            node_lucide_icon(
-                                                node.kind.label(),
-                                                node.id == NodeId::ROOT,
-                                            ),
-                                            node_lucide_color(
-                                                node.kind.label(),
-                                                node.id == NodeId::ROOT,
-                                                true,
-                                            ),
-                                        );
-                                        ui.strong(format!(
-                                            "{} #{}",
-                                            node.kind.label(),
-                                            node.id.raw()
-                                        ));
+                                    let node_kind_label = node.kind.label();
+                                    inspector_identity_header(
+                                        ui,
+                                        node_lucide_icon(
+                                            node_kind_label,
+                                            node.id == NodeId::ROOT,
+                                        ),
+                                        node_lucide_color(
+                                            node_kind_label,
+                                            node.id == NodeId::ROOT,
+                                            true,
+                                        ),
+                                        &node.name,
+                                        node_kind_label,
+                                        node.id.raw(),
+                                    );
+                                    changed |= inspector_property_row(ui, "Name", |ui| {
+                                        ui.add(
+                                            egui::TextEdit::singleline(&mut node.name)
+                                                .desired_width(f32::INFINITY),
+                                        )
+                                        .changed()
                                     });
-                                    ui.horizontal(|ui| {
-                                        ui.label("Name");
-                                        changed |= ui.text_edit_singleline(&mut node.name).changed();
-                                    });
-                                    ui.separator();
 
-                                    egui::CollapsingHeader::new(icons::label(
-                                        icons::CIRCLE_DOT,
-                                        "Node Properties",
-                                    ))
-                                    .default_open(true)
-                                    .show(ui, |ui| {
+                                    let is_world = matches!(&node.kind, NodeKind::World { .. });
+                                    let transform_kind = node_transform_inspector(&node.kind);
+                                    if is_world {
                                         changed |= draw_transform_policy_editor(
                                             ui,
                                             node,
@@ -1553,9 +1723,41 @@ impl EditorWorkspace {
                                             &mut nav_target,
                                             &mut world_sector_size_change,
                                         );
-                                        changed |= draw_node_kind_editor(
+                                    } else if transform_kind != NodeTransformInspector::Hidden {
+                                        inspector_section(
                                             ui,
-                                            &mut node.kind,
+                                            ("node-transform", node.id.raw()),
+                                            icons::MOVE,
+                                            "Transform",
+                                            true,
+                                            |ui| {
+                                                changed |= draw_transform_policy_editor(
+                                                    ui,
+                                                    node,
+                                                    inherited_sector_size,
+                                                    &texture_options,
+                                                    &mut nav_target,
+                                                    &mut world_sector_size_change,
+                                                );
+                                            },
+                                        );
+                                    }
+                                    if !is_world {
+                                        let properties_label = if node.kind.is_component() {
+                                            "Component Settings"
+                                        } else {
+                                            "Properties"
+                                        };
+                                        inspector_section(
+                                            ui,
+                                            ("node-properties", node.id.raw()),
+                                            icons::CIRCLE_DOT,
+                                            properties_label,
+                                            true,
+                                            |ui| {
+                                            changed |= draw_node_kind_editor(
+                                                ui,
+                                                &mut node.kind,
                                             NodeKindEditorContext {
                                                 material_options: &material_options,
                                                 texture_options: &texture_options,
@@ -1568,10 +1770,12 @@ impl EditorWorkspace {
                                                 inherited_sector_size,
                                                 room_grid_resize: &mut room_grid_resize,
                                                 nav_target: &mut nav_target,
-                                                camera_preview,
+                                                    camera_preview,
+                                                },
+                                            );
                                             },
                                         );
-                                    });
+                                    }
                                 }
 
                                 if let Some(new_sector_size) = world_sector_size_change {

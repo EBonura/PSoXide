@@ -1,8 +1,9 @@
 //! Host-side package schema for embedded editor play mode.
 
 use crate::{
-    MaterialFaceSidedness, ResourceId, RuntimeDepthSortMode, RuntimeRoomDrawOrderMode,
-    RuntimeTextureSplitMode, SkyCycloramaQuad, UiGradientDirection, UiNodeKind, UiValueBinding,
+    MaterialAnimation, MaterialFaceSidedness, PsxBlendMode, ResourceId, RuntimeDepthSortMode,
+    RuntimeRoomDrawOrderMode, RuntimeTextureSplitMode, SkyCycloramaQuad, UiGradientDirection,
+    UiNodeKind, UiValueBinding,
 };
 
 /// Number of cooked character animation action slots.
@@ -550,6 +551,10 @@ pub struct PlaytestMaterial {
     pub texture_asset_index: usize,
     /// Per-material modulation tint.
     pub tint_rgb: [u8; 3],
+    /// PS1 blend equation used by this room material.
+    pub blend_mode: PsxBlendMode,
+    /// One-pass room-material animation recipe.
+    pub animation: MaterialAnimation,
     /// Which side(s) of faces using this material should render.
     pub face_sidedness: MaterialFaceSidedness,
 }
@@ -685,6 +690,8 @@ pub struct PlaytestModelSecondaryLayer {
     pub blend_mode: crate::PsxBlendMode,
     /// Independent modulation tint.
     pub tint_rgb: [u8; 3],
+    /// Signed Q8 texels-per-second UV scroll and initial phase.
+    pub motion: crate::MaterialUvMotion,
 }
 
 /// One placed model instance. Coordinates are room-local

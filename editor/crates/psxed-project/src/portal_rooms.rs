@@ -950,6 +950,7 @@ mod tests {
                 tint: [128, 128, 128],
                 generated: crate::GeneratedMaterialTexture::default(),
                 reflection: crate::ReflectionProbeMaterial::default(),
+                animation: crate::MaterialAnimation::default(),
                 secondary_layer: None,
                 face_sidedness: crate::MaterialFaceSidedness::Both,
                 double_sided: true,

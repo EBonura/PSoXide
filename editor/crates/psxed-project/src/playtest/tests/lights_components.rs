@@ -197,6 +197,7 @@ fn diagonal_walls_bake_static_surface_lights() {
                 psxt_path: None,
                 blend_mode: PsxBlendMode::Opaque,
                 tint: [128, 128, 128],
+                animation: crate::MaterialAnimation::default(),
                 face_sidedness: MaterialFaceSidedness::Both,
             }],
             ambient_color: [32, 24, 16],
