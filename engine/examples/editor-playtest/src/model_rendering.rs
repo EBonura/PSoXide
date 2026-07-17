@@ -200,7 +200,7 @@ pub(super) fn draw_player(
         options,
         lighting,
         room_reflection_probe_slot(current_room),
-        &mut prop_texture_slot,
+        &mut model_texture_slot,
         triangles,
         world,
     )
@@ -312,7 +312,7 @@ pub(super) fn draw_model_instances(
         clips,
         pose_overrides,
         depth_pass,
-        &mut prop_texture_slot,
+        &mut model_texture_slot,
         triangles,
         world,
     )

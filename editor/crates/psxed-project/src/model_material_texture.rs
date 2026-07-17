@@ -35,6 +35,12 @@ struct ProbeTexture {
 /// samples floors from near to far. The result is a deterministic 4bpp texture
 /// with enough spatial structure to move convincingly under screen-space
 /// reflection UVs without asking the PS1 to capture or quantise a framebuffer.
+// TODO(reflection-probe-panorama): This is a material-band approximation, not
+// a rendered panoramic image, so it cannot produce a convincing mirror even
+// with better runtime UV mapping. Resume by rendering the textured room from
+// the probe position in six host-side views, stitching a 128x64 equirectangular
+// panorama, then quantising it to 4bpp. Keep that bake off the PS1; dynamic
+// objects and multi-probe parallax can remain explicit later limitations.
 pub fn generate_room_reflection_probe_psxt(
     project: &ProjectDocument,
     grid: &WorldGrid,
