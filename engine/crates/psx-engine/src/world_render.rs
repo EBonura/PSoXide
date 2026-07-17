@@ -32,12 +32,12 @@ mod indexed_cache;
 mod room_draw;
 
 pub use cache_build::cache_room_vertex_lit_surfaces;
-#[cfg(test)]
-use indexed_cache::cached_surface_uses_triangle_depth;
 use indexed_cache::{cached_surface_center, RoomSurfaceMicroProfile};
+#[cfg(test)]
+use indexed_cache::{cached_surface_uses_triangle_depth, encoded_warmed_room_quad_backface_culled};
 pub use indexed_cache::{
     draw_indexed_cached_room_vertex_lit_all_cells,
-    draw_indexed_cached_room_vertex_lit_visible_cells,
+    draw_indexed_cached_room_vertex_lit_visible_cells, prewarm_indexed_cached_room_quads,
 };
 pub use room_draw::{
     draw_room, draw_room_lit, draw_room_lit_grid_visible, draw_room_vertex_lit,
@@ -2600,6 +2600,7 @@ fn submit_sided_projected_gouraud_quad_cached_uv_words<const OT: usize>(
     split: u8,
     prebuilt: Option<(&mut QuadTexturedGouraud, &mut u8)>,
     prebuilt_colors_static: bool,
+    prebuilt_ready_value: u8,
     profile: &mut RoomSurfaceMicroProfile,
 ) {
     let (verts, uv_words, colors) = match material.sidedness {
@@ -2635,6 +2636,7 @@ fn submit_sided_projected_gouraud_quad_cached_uv_words<const OT: usize>(
             triangles,
             prebuilt,
             prebuilt_colors_static,
+            prebuilt_ready_value,
             quad_verts,
             quad_uv_words,
             quad_colors,

@@ -1247,6 +1247,7 @@ fn prepared_depth_quad_splits_before_ps1_extent_rejection() {
         &mut packets,
         None,
         false,
+        1,
         verts,
         uv_words,
         colors,
@@ -1289,6 +1290,7 @@ fn prebuilt_static_room_quad_only_patches_positions_after_first_draw() {
         &mut packet,
         &mut valid,
         true,
+        1,
         first,
         [0, 1, 2, 3],
         first_colors,
@@ -1303,14 +1305,8 @@ fn prebuilt_static_room_quad_only_patches_positions_after_first_draw() {
         packet.color3,
     );
     let first_v0 = packet.v0;
-    let warmed = pass.try_submit_warmed_textured_gouraud_quad(
-        &mut packet,
-        second,
-        false,
-        material.textured_gouraud_packet_material(),
-        options,
-        prepared,
-    );
+    let warmed =
+        pass.try_submit_warmed_textured_gouraud_quad(&mut packet, second, false, options, prepared);
 
     assert_eq!(valid, 1);
     assert!(warmed.is_some());
