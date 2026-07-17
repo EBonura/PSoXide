@@ -200,7 +200,7 @@ pub struct GameEntityTickInput<'a> {
     /// capsule; the other half of Character-derived attack reach).
     pub player_radius: i32,
     /// True while the player's motor action grants i-frames (roll /
-    /// backstep active invulnerability). Entity attacks resolve no
+    /// active roll invulnerability). Entity attacks resolve no
     /// contact against an invulnerable player -- the swing stays
     /// live, so i-framing only the first half of a window still eats
     /// the tail (souls timing rules).

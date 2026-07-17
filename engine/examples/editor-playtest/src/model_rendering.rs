@@ -9,8 +9,8 @@ use psx_game_runtime::model_rendering as mr;
 
 pub(super) use psx_game_runtime::model_rendering::{
     accumulate_model_instance_draw_stats, distance_xz_sq, draw_collision_cylinder_debug,
-    emit_model_counters, ratio_q8_i32, EquipmentDrawStats, ModelInstanceDepthPass,
-    ModelInstanceDrawStats, ModelInstancePoseOverride, PlayerModelDrawStats, RuntimeModelAsset,
+    emit_model_counters, EquipmentDrawStats, ModelInstanceDepthPass, ModelInstanceDrawStats,
+    ModelInstancePoseOverride, PlayerModelDrawStats, RuntimeModelAsset,
 };
 
 /// The cooked model-family tables bundled for the crate render policy.

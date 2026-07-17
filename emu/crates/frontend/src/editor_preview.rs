@@ -316,6 +316,7 @@ pub fn build_phase1_frame(
     active_room: Option<psxed_project::NodeId>,
     active_floor: usize,
     selected: psxed_project::NodeId,
+    character_motion: Option<psxed_ui::EditorCharacterMotionPreview>,
     hovered_primitive: Option<psxed_ui::Selection>,
     selected_primitive: Option<psxed_ui::Selection>,
     selected_primitives: &[psxed_ui::Selection],
@@ -534,6 +535,7 @@ pub fn build_phase1_frame(
             fog,
             hidden_scene_nodes,
             preview_tick,
+            character_motion,
             &mut scratch,
         );
 
@@ -1516,6 +1518,7 @@ fn walk_model_instances(
     fog: PreviewFog,
     hidden_scene_nodes: &HashSet<NodeId>,
     tick: u32,
+    character_motion: Option<psxed_ui::EditorCharacterMotionPreview>,
     scratch: &mut PreviewScratch,
 ) {
     // The persistent `EditorAssets` cache owns mesh + animation
@@ -1570,7 +1573,11 @@ fn walk_model_instances(
 
         // Geometry-only models: preview the instance's clip override,
         // else the first skeleton-scoped clip.
-        let clip_local = reference.clip_override.unwrap_or(0);
+        let preview_transform = character_motion.filter(|preview| preview.entity == node.id);
+        let clip_local = preview_transform
+            .map(|preview| preview.clip)
+            .or(reference.clip_override)
+            .unwrap_or(0);
         if (clip_local as usize)
             >= project
                 .resolved_model_animation_clips(reference.model_id)
@@ -1585,7 +1592,12 @@ fn walk_model_instances(
         let mut origin = floor_anchored_node_room_local_origin(grid, &node.transform);
         origin.y += y_offset;
 
-        let yaw_q12 = yaw_to_q12(node.transform.rotation_degrees[1]);
+        let yaw_q12 = apply_character_motion_preview(
+            node.id,
+            &mut origin,
+            yaw_to_q12(node.transform.rotation_degrees[1]),
+            character_motion,
+        );
         // Match the cooked record: entity pitch/roll plus the combined
         // entity + renderer yaw, composed exactly as the runtime does.
         let model_rotation = euler_rotation_q12(
@@ -1608,7 +1620,7 @@ fn walk_model_instances(
                 reference.animator_node,
                 None,
             ),
-            autoplay: reference.autoplay,
+            autoplay: preview_transform.is_some() || reference.autoplay,
             yaw_q12,
             collision_radius: model.collision_radius as i32,
             world_height: model.world_height as i32,
@@ -1630,6 +1642,7 @@ fn walk_model_instances(
         textures,
         hidden_scene_nodes,
         selected,
+        character_motion,
         &mut instances_meta,
     );
 
@@ -1738,6 +1751,7 @@ fn walk_player_spawn_preview(
     textures: &EditorTextures,
     hidden_scene_nodes: &HashSet<NodeId>,
     selected: psxed_project::NodeId,
+    character_motion: Option<psxed_ui::EditorCharacterMotionPreview>,
     instances_meta: &mut Vec<InstanceMeta>,
 ) {
     let scene = project.active_scene();
@@ -1796,8 +1810,10 @@ fn walk_player_spawn_preview(
         // Animator clip drives the editor viewport when authored.
         // Otherwise fall back to the player's idle action, then the
         // model preview/default clip so partial characters still draw.
-        let clip_local = reference
-            .clip_override
+        let preview_transform = character_motion.filter(|preview| preview.entity == node.id);
+        let clip_local = preview_transform
+            .map(|preview| preview.clip)
+            .or(reference.clip_override)
             .or_else(|| {
                 psxed_project::resolve::resolve_character_idle_preview_clip_for_model(
                     project,
@@ -1813,7 +1829,12 @@ fn walk_player_spawn_preview(
 
         let mut origin = floor_anchored_node_room_local_origin(grid, &node.transform);
         origin.y += y_offset;
-        let yaw_q12 = yaw_to_q12(node.transform.rotation_degrees[1]);
+        let yaw_q12 = apply_character_motion_preview(
+            node.id,
+            &mut origin,
+            yaw_to_q12(node.transform.rotation_degrees[1]),
+            character_motion,
+        );
         let model_rotation = yaw_rotation_q12(yaw_q12.wrapping_add(reference.visual_yaw_q12));
 
         instances_meta.push(InstanceMeta {
@@ -1833,7 +1854,7 @@ fn walk_player_spawn_preview(
                 reference.renderer_node,
                 reference.animator_node,
             ),
-            autoplay: reference.autoplay,
+            autoplay: preview_transform.is_some() || reference.autoplay,
             yaw_q12,
             collision_radius: model.collision_radius as i32,
             world_height: model.world_height as i32,
@@ -1871,6 +1892,19 @@ fn floor_anchored_node_room_local_origin(
 ) -> psx_engine::WorldVertex {
     let [x, y, z] = spatial::floor_anchored_node_preview_origin(grid, transform);
     psx_engine::WorldVertex::new(x, y, z)
+}
+
+fn apply_character_motion_preview(
+    entity: NodeId,
+    origin: &mut psx_engine::WorldVertex,
+    authored_yaw_q12: u16,
+    preview: Option<psxed_ui::EditorCharacterMotionPreview>,
+) -> u16 {
+    let Some(preview) = preview.filter(|preview| preview.entity == entity) else {
+        return authored_yaw_q12;
+    };
+    *origin = psx_engine::WorldVertex::new(preview.origin[0], preview.origin[1], preview.origin[2]);
+    preview.yaw_q12
 }
 
 /// Selection gizmo for a placed model: a cyan vertical line

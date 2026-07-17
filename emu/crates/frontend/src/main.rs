@@ -1673,6 +1673,7 @@ impl ApplicationHandler for Shell {
                     let editor_show_lights = state.editor.show_lights_enabled();
                     let editor_hidden_scene_nodes = state.editor.hidden_scene_nodes();
                     let editor_selected = state.editor.selected_node_id();
+                    let editor_character_motion = state.editor.character_motion_preview();
                     let editor_root = state.editor.project_root();
                     let editor_hover = state.editor.hovered_primitive();
                     let editor_selection = state.editor.selected_primitive();
@@ -1700,6 +1701,7 @@ impl ApplicationHandler for Shell {
                         editor_active_room,
                         editor_active_floor,
                         editor_selected,
+                        editor_character_motion,
                         editor_hover,
                         editor_selection,
                         &editor_selected_primitives,

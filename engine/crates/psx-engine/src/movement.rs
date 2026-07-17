@@ -7,7 +7,7 @@
 
 use crate::{Angle, RoomPoint, Q12};
 use psx_math::atan2_q12;
-use psx_math::int32::isqrt_i32;
+use psx_math::int32::{abs_i32, isqrt_i32};
 
 /// One centred analog input axis.
 ///
@@ -180,6 +180,60 @@ pub fn yaw_to_point(from: RoomPoint, to: RoomPoint) -> Option<Angle> {
     }
 }
 
+/// Project a world-space point onto a horizontal camera/view basis.
+///
+/// Returns `(screen_x_q8, forward_depth)`, where `screen_x_q8 == 0` is
+/// centred, `256` is approximately 45 degrees right, and negative values are
+/// left. Points on or behind the view plane return `None`. This deliberately
+/// avoids floats and 64-bit division so target selection stays suitable for
+/// the PS1 runtime.
+pub fn horizontal_view_coordinates(
+    origin: RoomPoint,
+    target: RoomPoint,
+    view_yaw: Angle,
+) -> Option<(i32, i32)> {
+    let dx = target.x.saturating_sub(origin.x);
+    let dz = target.z.saturating_sub(origin.z);
+    let sin_yaw = view_yaw.sin().raw();
+    let cos_yaw = view_yaw.cos().raw();
+    let forward = dx
+        .saturating_mul(sin_yaw)
+        .saturating_add(dz.saturating_mul(cos_yaw))
+        >> 12;
+    if forward <= 0 {
+        return None;
+    }
+    let lateral = dx
+        .saturating_mul(cos_yaw)
+        .saturating_sub(dz.saturating_mul(sin_yaw))
+        >> 12;
+    let screen_magnitude = positive_ratio_q8(abs_i32(lateral), forward);
+    let screen_x_q8 = if lateral < 0 {
+        screen_magnitude.saturating_neg()
+    } else {
+        screen_magnitude
+    };
+    Some((screen_x_q8, forward))
+}
+
+fn positive_ratio_q8(numerator: i32, denominator: i32) -> i32 {
+    if numerator <= 0 || denominator <= 0 {
+        return 0;
+    }
+    let numerator = numerator as u32;
+    let denominator = denominator as u32;
+    let whole = numerator / denominator;
+    let remainder = numerator % denominator;
+    let scaled_whole = if whole > (i32::MAX as u32 / 256) {
+        return i32::MAX;
+    } else {
+        whole * 256
+    };
+    scaled_whole
+        .saturating_add(remainder.saturating_mul(256) / denominator)
+        .min(i32::MAX as u32) as i32
+}
+
 /// Convert local stick axes into a world-space camera-relative
 /// movement vector.
 ///
@@ -286,6 +340,31 @@ mod tests {
             Some(Angle::QUARTER)
         );
         assert_eq!(yaw_to_point(origin, origin), None);
+    }
+
+    #[test]
+    fn horizontal_view_coordinates_are_signed_in_screen_space() {
+        let origin = RoomPoint::ZERO;
+        let (left, _) =
+            horizontal_view_coordinates(origin, RoomPoint::new(-512, 0, 1024), Angle::ZERO)
+                .unwrap();
+        let (centre, _) =
+            horizontal_view_coordinates(origin, RoomPoint::new(0, 0, 1024), Angle::ZERO).unwrap();
+        let (right, _) =
+            horizontal_view_coordinates(origin, RoomPoint::new(512, 0, 1024), Angle::ZERO).unwrap();
+        assert!(left < centre);
+        assert_eq!(centre, 0);
+        assert!(right > centre);
+    }
+
+    #[test]
+    fn horizontal_view_coordinates_reject_points_behind_camera() {
+        assert!(horizontal_view_coordinates(
+            RoomPoint::ZERO,
+            RoomPoint::new(0, 0, -1024),
+            Angle::ZERO,
+        )
+        .is_none());
     }
 
     #[test]

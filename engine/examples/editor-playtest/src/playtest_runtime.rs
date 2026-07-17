@@ -364,6 +364,10 @@ impl Playtest {
             camera.height,
             camera.target_height,
         );
+        config.lock_height_boost = camera
+            .height
+            .saturating_mul(i32::from(camera.lock_rise_percent))
+            / 100;
         config.height = config.height.max(256);
         config.min_floor_clearance = camera.min_floor_clearance;
         config.position_lag_shift = camera.position_lag_shift;
@@ -527,13 +531,14 @@ impl Playtest {
             return None;
         }
         let instance = u16::try_from(index).ok()?;
-        if game_entity_for_instance(instance).is_some() {
-            let live = self
-                .game_entities
-                .live_position_for_model_instance(GAME_ENTITIES, instance)?;
-            return Some(RoomPoint::new(live[0], live[1], live[2]));
-        }
-        Some(RoomPoint::new(target.x, target.y, target.z))
+        // Hard/soft lock is combat targeting, not a generic model picker.
+        // Requiring a live gameplay entity prevents scenery and dead actors
+        // from winning the screen-space acquisition score.
+        game_entity_for_instance(instance)?;
+        let live = self
+            .game_entities
+            .live_position_for_model_instance(GAME_ENTITIES, instance)?;
+        Some(RoomPoint::new(live[0], live[1], live[2]))
     }
 
     pub(super) fn refresh_active_interactable(&mut self) {
@@ -645,8 +650,6 @@ impl Playtest {
     pub(super) fn find_best_lock_target(&self, range: i32) -> Option<usize> {
         let player = self.motor.position();
         let view_yaw = self.camera.yaw().add(Angle::HALF);
-        let sin_yaw = view_yaw.sin();
-        let cos_yaw = view_yaw.cos();
         let range_sq = square_i32_saturating(range);
         let mut best: Option<(usize, i32)> = None;
         for (index, _) in MODEL_INSTANCES.iter().enumerate() {
@@ -659,13 +662,21 @@ impl Playtest {
             if dist_sq == 0 || dist_sq > range_sq {
                 continue;
             }
-            let dot = dx
-                .saturating_mul(sin_yaw.raw())
-                .saturating_add(dz.saturating_mul(cos_yaw.raw()));
-            if dot <= 0 {
+            let Some((screen_x_q8, forward)) =
+                horizontal_view_coordinates(player, point, view_yaw)
+            else {
+                continue;
+            };
+            if abs_i32(screen_x_q8) > LOCK_ACQUIRE_HALF_CONE_Q8 {
                 continue;
             }
-            let score = (dot >> 4).saturating_sub(dist_sq >> 12);
+            // Centre bias dominates, then forward depth and distance break
+            // ties. This makes R3 select what the player is looking at rather
+            // than a merely-near actor at the edge of the screen.
+            let score = forward
+                .saturating_mul(16)
+                .saturating_sub(abs_i32(screen_x_q8).saturating_mul(96))
+                .saturating_sub(dist_sq >> 10);
             match best {
                 Some((_, best_score)) if best_score >= score => {}
                 _ => best = Some((index, score)),
@@ -709,7 +720,7 @@ impl Playtest {
             return;
         }
 
-        self.switch_lock_target(if right_x > 0 { -1 } else { 1 });
+        self.switch_lock_target(if right_x > 0 { 1 } else { -1 });
         self.lock_switch_stick_held = true;
     }
 
@@ -722,11 +733,12 @@ impl Playtest {
             return;
         };
         let player = self.motor.position();
-        let current_dx = current.x.saturating_sub(player.x);
-        let current_dz = current.z.saturating_sub(player.z);
-        if current_dx == 0 && current_dz == 0 {
+        let view_yaw = self.camera.yaw().add(Angle::HALF);
+        let Some((current_screen_x, _)) =
+            horizontal_view_coordinates(player, current, view_yaw)
+        else {
             return;
-        }
+        };
         let range_sq = square_i32_saturating(LOCK_RANGE);
         let mut best: Option<(usize, i32)> = None;
         for (index, _) in MODEL_INSTANCES.iter().enumerate() {
@@ -742,27 +754,30 @@ impl Playtest {
             if dist_sq == 0 || dist_sq > range_sq {
                 continue;
             }
-            let cross = current_dx
-                .saturating_mul(dz)
-                .saturating_sub(current_dz.saturating_mul(dx));
-            if direction > 0 {
-                if cross >= 0 {
-                    continue;
-                }
-            } else if cross <= 0 {
+            let Some((candidate_screen_x, forward)) =
+                horizontal_view_coordinates(player, target, view_yaw)
+            else {
+                continue;
+            };
+            let screen_delta = candidate_screen_x.saturating_sub(current_screen_x);
+            if direction > 0 && screen_delta <= 0 || direction < 0 && screen_delta >= 0 {
                 continue;
             }
-            let dot = current_dx
-                .saturating_mul(dx)
-                .saturating_add(current_dz.saturating_mul(dz));
-            let score = ratio_q8_i32(dot.max(0), dist_sq.max(1)).saturating_sub(dist_sq >> 14);
+            // Select the next target in screen order, with a small depth and
+            // distance penalty so a near neighbour wins over a far backdrop.
+            let score = abs_i32(screen_delta)
+                .saturating_mul(256)
+                .saturating_add(abs_i32(candidate_screen_x))
+                .saturating_add(dist_sq >> 12)
+                .saturating_sub(forward >> 4);
             match best {
-                Some((_, best_score)) if best_score >= score => {}
+                Some((_, best_score)) if best_score <= score => {}
                 _ => best = Some((index, score)),
             }
         }
         if let Some((index, _)) = best {
             self.lock_target = Some(index);
+            self.lock_invalid_ticks = 0;
         }
     }
 }

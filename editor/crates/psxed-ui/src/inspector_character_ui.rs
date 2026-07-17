@@ -9,6 +9,57 @@ pub(crate) struct AnimationSetOption {
     pub(crate) action_clips: [Option<ResourceId>; psxed_project::CHARACTER_ANIMATION_ACTION_COUNT],
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CharacterControllerRole {
+    Passive,
+    Player,
+    Enemy,
+}
+
+impl CharacterControllerRole {
+    pub(crate) fn from_controller(player: bool, settings: &CharacterControllerSettings) -> Self {
+        if player {
+            Self::Player
+        } else if settings.enemy.is_some() {
+            Self::Enemy
+        } else {
+            Self::Passive
+        }
+    }
+
+    pub(crate) fn apply_to(
+        self,
+        player: &mut bool,
+        settings: &mut CharacterControllerSettings,
+    ) -> bool {
+        let before = (*player, settings.enemy.clone());
+        match self {
+            Self::Passive => {
+                *player = false;
+                settings.enemy = None;
+            }
+            Self::Player => {
+                *player = true;
+            }
+            Self::Enemy => {
+                *player = false;
+                if settings.enemy.is_none() {
+                    settings.enemy = Some(psxed_project::EnemyBehaviorSettings::defaults());
+                }
+            }
+        }
+        before != (*player, settings.enemy.clone())
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Passive => "Passive",
+            Self::Player => "Player",
+            Self::Enemy => "Enemy",
+        }
+    }
+}
+
 /// Inspector body for `ResourceData::Character` profiles. Combines a
 /// model picker, role-clip pickers, capsule sizes, controller speed,
 /// and camera params.
@@ -158,10 +209,11 @@ pub(crate) fn draw_character_controller_settings(
     ui: &mut egui::Ui,
     settings: &mut CharacterControllerSettings,
     player_controlled: bool,
+    preview_action: &mut Option<psxed_project::CharacterAnimationAction>,
 ) -> bool {
     let mut changed = false;
 
-    egui::CollapsingHeader::new(icons::label(icons::SCAN, "Capsule"))
+    egui::CollapsingHeader::new(icons::label(icons::SCAN, "Collision Capsule"))
         .default_open(false)
         .show(ui, |ui| {
             changed |= drag_u16(ui, "Radius", &mut settings.radius, 1, 4096);
@@ -171,14 +223,34 @@ pub(crate) fn draw_character_controller_settings(
     egui::CollapsingHeader::new(icons::label(icons::LAYERS, "Movement"))
         .default_open(true)
         .show(ui, |ui| {
-            changed |= drag_i32(ui, "Walk speed", &mut settings.walk_speed, 1, 1024);
-            changed |= drag_i32(ui, "Run speed", &mut settings.run_speed, 1, 2048);
-            changed |= drag_u16(
+            let walk_changed = drag_i32(ui, "Walk speed", &mut settings.walk_speed, 1, 1024);
+            let run_changed = drag_i32(ui, "Run speed", &mut settings.run_speed, 1, 2048);
+            changed |= walk_changed | run_changed;
+            if walk_changed {
+                *preview_action = Some(psxed_project::CharacterAnimationAction::Walk);
+            } else if run_changed {
+                *preview_action = Some(psxed_project::CharacterAnimationAction::Run);
+            }
+            let turn_changed = drag_u16(
                 ui,
                 "Turn speed (deg/s)",
                 &mut settings.turn_speed_degrees_per_second,
                 1,
                 720,
+            );
+            changed |= turn_changed;
+            if turn_changed {
+                *preview_action = Some(psxed_project::CharacterAnimationAction::Turn);
+            }
+            draw_action_preview_buttons(
+                ui,
+                preview_action,
+                &[
+                    psxed_project::CharacterAnimationAction::Idle,
+                    psxed_project::CharacterAnimationAction::Walk,
+                    psxed_project::CharacterAnimationAction::Run,
+                    psxed_project::CharacterAnimationAction::Turn,
+                ],
             );
         });
 
@@ -194,77 +266,57 @@ pub(crate) fn draw_character_controller_settings(
     egui::CollapsingHeader::new(icons::label(icons::PLAY, "Roll"))
         .default_open(false)
         .show(ui, |ui| {
-            changed |= drag_i32(ui, "Cost", &mut settings.roll_cost_q12, 0, 16384);
-            changed |= drag_i32(ui, "Speed", &mut settings.roll_speed, 1, 4096);
-            changed |= drag_u8(
+            let mut section_changed = false;
+            section_changed |= drag_i32(ui, "Cost", &mut settings.roll_cost_q12, 0, 16384);
+            section_changed |= drag_i32(ui, "Speed", &mut settings.roll_speed, 1, 4096);
+            section_changed |= drag_u8(
                 ui,
                 "Active frames",
                 &mut settings.roll_active_frames,
                 1,
                 120,
             );
-            changed |= drag_u8(
+            section_changed |= drag_u8(
                 ui,
                 "Recovery frames",
                 &mut settings.roll_recovery_frames,
                 0,
                 120,
             );
-            changed |= drag_u8(
+            section_changed |= drag_u8(
                 ui,
                 "Invulnerable frames",
                 &mut settings.roll_invulnerable_frames,
                 0,
                 120,
             );
-        });
-
-    egui::CollapsingHeader::new(icons::label(icons::ROTATE_CCW, "Backstep"))
-        .default_open(false)
-        .show(ui, |ui| {
-            changed |= drag_i32(ui, "Cost", &mut settings.backstep_cost_q12, 0, 16384);
-            changed |= drag_i32(ui, "Speed", &mut settings.backstep_speed, 1, 4096);
-            changed |= drag_u8(
+            changed |= section_changed;
+            if section_changed {
+                *preview_action = Some(psxed_project::CharacterAnimationAction::Roll);
+            }
+            draw_action_preview_buttons(
                 ui,
-                "Active frames",
-                &mut settings.backstep_active_frames,
-                1,
-                120,
-            );
-            changed |= drag_u8(
-                ui,
-                "Recovery frames",
-                &mut settings.backstep_recovery_frames,
-                0,
-                120,
-            );
-            changed |= drag_u8(
-                ui,
-                "Invulnerable frames",
-                &mut settings.backstep_invulnerable_frames,
-                0,
-                120,
+                preview_action,
+                &[psxed_project::CharacterAnimationAction::Roll],
             );
         });
 
     egui::CollapsingHeader::new(icons::label(icons::FOCUS, "Enemy AI"))
-        .default_open(settings.enemy.is_some())
+        .default_open(!player_controlled && settings.enemy.is_some())
         .show(ui, |ui| {
-            let mut enabled = settings.enemy.is_some();
-            if ui.checkbox(&mut enabled, "Enabled").changed() {
-                settings.enemy = enabled.then(psxed_project::EnemyBehaviorSettings::defaults);
-                changed = true;
-            }
             if player_controlled {
                 ui.label(
-                    RichText::new(
-                        "Enemy AI is ignored while this controller is player controlled.",
-                    )
-                    .color(STUDIO_TEXT_WEAK)
-                    .small(),
+                    RichText::new("Enemy tuning is preserved but inactive while Role is Player.")
+                        .color(STUDIO_TEXT_WEAK)
+                        .small(),
                 );
             }
             let Some(enemy) = settings.enemy.as_mut() else {
+                ui.label(
+                    RichText::new("Set Role to Enemy to create and configure enemy behavior.")
+                        .color(STUDIO_TEXT_WEAK)
+                        .small(),
+                );
                 return;
             };
 
@@ -315,32 +367,126 @@ pub(crate) fn draw_character_controller_settings(
 
             ui.separator();
             ui.label(RichText::new("Attack pacing").strong());
-            changed |= drag_u8(ui, "Director priority", &mut enemy.attack_priority, 0, 255);
-            changed |= drag_u8(
+            let mut attack_changed = false;
+            attack_changed |= drag_u8(ui, "Director priority", &mut enemy.attack_priority, 0, 255);
+            attack_changed |= drag_u8(
                 ui,
                 "Attack cooldown ticks",
                 &mut enemy.attack_cooldown_ticks,
                 0,
                 255,
             );
-            changed |= drag_u8(
+            attack_changed |= drag_u8(
                 ui,
                 "Group attack delay",
                 &mut enemy.group_attack_delay_ticks,
                 0,
                 255,
             );
-            changed |= drag_u8(ui, "Windup ticks", &mut enemy.windup_ticks, 1, 255);
-            changed |= drag_u8(ui, "Recovery ticks", &mut enemy.recovery_ticks, 0, 255);
+            attack_changed |= drag_u8(ui, "Windup ticks", &mut enemy.windup_ticks, 1, 255);
+            attack_changed |= drag_u8(ui, "Recovery ticks", &mut enemy.recovery_ticks, 0, 255);
+            changed |= attack_changed;
+            if attack_changed {
+                *preview_action = Some(psxed_project::CharacterAnimationAction::LightAttack);
+            }
+            draw_action_preview_buttons(
+                ui,
+                preview_action,
+                &[
+                    psxed_project::CharacterAnimationAction::LightAttack,
+                    psxed_project::CharacterAnimationAction::HeavyAttack,
+                    psxed_project::CharacterAnimationAction::ComboAttack,
+                    psxed_project::CharacterAnimationAction::Block,
+                ],
+            );
 
             ui.separator();
             ui.label(RichText::new("Combat stats").strong());
             changed |= drag_u16(ui, "Health", &mut enemy.max_health, 1, u16::MAX);
             changed |= drag_u16(ui, "Poise", &mut enemy.poise, 0, u16::MAX);
             changed |= drag_u16(ui, "Touch damage", &mut enemy.touch_damage, 0, u16::MAX);
+            draw_action_preview_buttons(
+                ui,
+                preview_action,
+                &[
+                    psxed_project::CharacterAnimationAction::HitReact,
+                    psxed_project::CharacterAnimationAction::Death,
+                ],
+            );
         });
 
     changed
+}
+
+pub(crate) fn draw_character_controller_editor(
+    ui: &mut egui::Ui,
+    character: &mut Option<ResourceId>,
+    settings: &mut CharacterControllerSettings,
+    player: &mut bool,
+    character_options: &[(ResourceId, String)],
+    nav_target: &mut Option<ResourceId>,
+    preview_action: &mut Option<psxed_project::CharacterAnimationAction>,
+) -> bool {
+    let mut changed = false;
+    let mut role = CharacterControllerRole::from_controller(*player, settings);
+
+    changed |= inspector_property_row(ui, "Role", |ui| {
+        let previous = role;
+        egui::ComboBox::from_id_salt("character-controller-role-picker")
+            .selected_text(role.label())
+            .width(ui.available_width().max(96.0))
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut role, CharacterControllerRole::Passive, "Passive");
+                ui.selectable_value(&mut role, CharacterControllerRole::Player, "Player");
+                ui.selectable_value(&mut role, CharacterControllerRole::Enemy, "Enemy");
+            });
+        if role != previous {
+            role.apply_to(player, settings)
+        } else {
+            false
+        }
+    });
+
+    let role_hint = match role {
+        CharacterControllerRole::Passive => "Movement settings are available, but no player input or enemy AI drives this character.",
+        CharacterControllerRole::Player => "Receives player input. Any existing enemy tuning is preserved but inactive.",
+        CharacterControllerRole::Enemy => "Driven by the Enemy AI settings below.",
+    };
+    ui.label(RichText::new(role_hint).color(STUDIO_TEXT_WEAK).small());
+
+    changed |= draw_character_selector(ui, character_options, character, nav_target);
+    ui.label(
+        RichText::new(
+            "Profile supplies reusable defaults; the values below belong to this instance.",
+        )
+        .color(STUDIO_TEXT_WEAK)
+        .small(),
+    );
+    ui.add_space(4.0);
+    changed |= draw_character_controller_settings(ui, settings, *player, preview_action);
+    changed
+}
+
+fn draw_action_preview_buttons(
+    ui: &mut egui::Ui,
+    preview_action: &mut Option<psxed_project::CharacterAnimationAction>,
+    actions: &[psxed_project::CharacterAnimationAction],
+) {
+    ui.horizontal_wrapped(|ui| {
+        ui.label(RichText::new("Preview").color(STUDIO_TEXT_WEAK).small());
+        for action in actions {
+            if ui
+                .small_button(icons::label(icons::PLAY, action.label()))
+                .on_hover_text(format!(
+                    "Play the effective {} clip in the 3D viewport",
+                    action.label()
+                ))
+                .clicked()
+            {
+                *preview_action = Some(*action);
+            }
+        }
+    });
 }
 
 pub(crate) fn draw_character_effective_roles(

@@ -172,6 +172,7 @@ fn player_camera_component_drives_cooked_camera() {
                 distance: 2048,
                 height: 900,
                 target_height: 700,
+                lock_rise_percent: 24,
                 min_floor_clearance: 96,
                 orbit_speed_level: 6,
                 position_lag_shift: 1,
@@ -188,6 +189,7 @@ fn player_camera_component_drives_cooked_camera() {
         room.camera.distance == 2048
             && room.camera.height == 900
             && room.camera.target_height == 700
+            && room.camera.lock_rise_percent == 24
             && room.camera.min_floor_clearance == 96
             && room.camera.orbit_speed_level == 6
             && room.camera.position_lag_shift == 1
