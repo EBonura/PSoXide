@@ -345,20 +345,28 @@ pub(crate) fn draw_resource_card(
     let (rect, response) = ui.allocate_exact_size(size, Sense::click_and_drag());
     let painter = ui.painter_at(rect);
     let fill = if selected {
-        Color32::from_rgb(21, 50, 62)
+        if response.hovered() {
+            STUDIO_SELECTION_HOVER
+        } else {
+            STUDIO_SELECTION
+        }
+    } else if response.hovered() {
+        STUDIO_HOVER
     } else {
-        STUDIO_PANEL
+        STUDIO_PANEL_HEADER
     };
-    painter.rect_filled(rect, 4.0, fill);
+    painter.rect_filled(rect, 6.0, fill);
     painter.rect_stroke(
         rect,
-        4.0,
+        6.0,
         Stroke::new(
-            if selected { 2.0 } else { 1.0 },
+            if selected { 1.5 } else { 1.0 },
             if selected {
                 STUDIO_ACCENT
-            } else {
+            } else if response.hovered() {
                 STUDIO_BORDER
+            } else {
+                STUDIO_BORDER_DARK
             },
         ),
         StrokeKind::Inside,
@@ -369,7 +377,7 @@ pub(crate) fn draw_resource_card(
     painter.rect_stroke(
         preview,
         2.0,
-        Stroke::new(1.0, Color32::from_rgb(54, 64, 76)),
+        Stroke::new(1.0, STUDIO_BORDER_DARK),
         StrokeKind::Inside,
     );
     let badge = Rect::from_min_size(preview.left_top() + Vec2::new(4.0, 4.0), Vec2::splat(22.0));

@@ -385,7 +385,6 @@ impl EditorWorkspace {
                     );
                 });
             });
-        ui.separator();
     }
 
     pub(crate) fn draw_debug_terminal_actions(&mut self, ui: &mut egui::Ui) {
@@ -883,6 +882,24 @@ impl EditorWorkspace {
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         ui.set_min_width(pane_width);
+                        if visible_resource_order.is_empty() {
+                            section_frame().show(ui, |ui| {
+                                ui.set_width((pane_width - 20.0).max(1.0));
+                                ui.label(
+                                    RichText::new("No matching resources")
+                                        .strong()
+                                        .color(STUDIO_TEXT),
+                                );
+                                ui.label(
+                                    RichText::new(
+                                        "Adjust the resource type or clear the search filter.",
+                                    )
+                                    .small()
+                                    .color(STUDIO_TEXT_WEAK),
+                                );
+                            });
+                            return;
+                        }
                         egui::Grid::new("psxed_resource_card_grid_layout")
                             .num_columns(columns)
                             .spacing(card_spacing)
