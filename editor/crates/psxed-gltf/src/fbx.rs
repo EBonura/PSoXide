@@ -874,8 +874,12 @@ pub(crate) fn retarget_mapped_frame_trs(
         ) else {
             continue;
         };
-        let global_delta = quat_mul(quat_inverse(*source_bind), *source_pose);
-        *target_pose = quat_mul(*target_bind, global_delta);
+        // A global pose delta is applied on the left: pose * inverse(bind).
+        // Applying inverse(bind) * pose on the right instead keeps the delta
+        // in the source bone's local basis, which mirrors motion when the two
+        // rigs use different bone rolls (notably Mixamo thighs and knees).
+        let global_delta = quat_mul(*source_pose, quat_inverse(*source_bind));
+        *target_pose = quat_mul(global_delta, *target_bind);
         target_pose_done[target_index] = true;
     }
 
@@ -985,14 +989,32 @@ pub(crate) fn fbx_animation_node_mapping(
             animation_nodes.entry(key).or_insert(index);
         }
     }
-    model_scene
+    let mut mapping: Vec<_> = model_scene
         .nodes
         .iter()
         .map(|node| {
             let key = node_match_key(&node.element.name);
             animation_nodes.get(&key).copied()
         })
-        .collect()
+        .collect();
+    let model_indices = fbx_node_indices(model_scene);
+    let animation_indices = fbx_node_indices(animation_scene);
+    align_humanoid_spine_mapping(
+        &model_scene
+            .nodes
+            .iter()
+            .map(|node| node.element.name.as_ref())
+            .collect::<Vec<_>>(),
+        &fbx_parent_indices(model_scene, &model_indices),
+        &animation_scene
+            .nodes
+            .iter()
+            .map(|node| node.element.name.as_ref())
+            .collect::<Vec<_>>(),
+        &fbx_parent_indices(animation_scene, &animation_indices),
+        &mut mapping,
+    );
+    mapping
 }
 
 pub(crate) fn gltf_fbx_animation_node_mapping(
@@ -1006,13 +1028,30 @@ pub(crate) fn gltf_fbx_animation_node_mapping(
             animation_nodes.entry(key).or_insert(index);
         }
     }
-    document
+    let target_names: Vec<_> = document
+        .nodes()
+        .map(|node| node.name().unwrap_or("").to_string())
+        .collect();
+    let mut mapping: Vec<_> = document
         .nodes()
         .map(|node| {
             let key = node.name().map(node_match_key).unwrap_or_default();
             animation_nodes.get(&key).copied()
         })
-        .collect()
+        .collect();
+    let animation_indices = fbx_node_indices(animation_scene);
+    align_humanoid_spine_mapping(
+        &target_names.iter().map(String::as_str).collect::<Vec<_>>(),
+        &build_parent_indices(document),
+        &animation_scene
+            .nodes
+            .iter()
+            .map(|node| node.element.name.as_ref())
+            .collect::<Vec<_>>(),
+        &fbx_parent_indices(animation_scene, &animation_indices),
+        &mut mapping,
+    );
+    mapping
 }
 
 pub(crate) fn gltf_gltf_animation_node_mapping(
@@ -1026,13 +1065,83 @@ pub(crate) fn gltf_gltf_animation_node_mapping(
             animation_nodes.entry(key).or_insert(node.index());
         }
     }
-    model_document
+    let target_names: Vec<_> = model_document
+        .nodes()
+        .map(|node| node.name().unwrap_or("").to_string())
+        .collect();
+    let source_names: Vec<_> = animation_document
+        .nodes()
+        .map(|node| node.name().unwrap_or("").to_string())
+        .collect();
+    let mut mapping: Vec<_> = model_document
         .nodes()
         .map(|node| {
             let key = node.name().map(node_match_key).unwrap_or_default();
             animation_nodes.get(&key).copied()
         })
-        .collect()
+        .collect();
+    align_humanoid_spine_mapping(
+        &target_names.iter().map(String::as_str).collect::<Vec<_>>(),
+        &build_parent_indices(model_document),
+        &source_names.iter().map(String::as_str).collect::<Vec<_>>(),
+        &build_parent_indices(animation_document),
+        &mut mapping,
+    );
+    mapping
+}
+
+/// Correct a common humanoid-export ambiguity where the same three spine
+/// bones are numbered from opposite ends of the chain. Mixamo-derived files
+/// encountered in the wild may use either `Hips -> Spine -> Spine1 -> Spine2`
+/// or `Hips -> Spine02 -> Spine01 -> Spine`. Matching those names directly
+/// reverses the lower and upper torso. Bone depth is the stable semantic: the
+/// first spine child above the hips must drive the first target spine child.
+pub(crate) fn align_humanoid_spine_mapping(
+    target_names: &[&str],
+    target_parents: &[Option<usize>],
+    source_names: &[&str],
+    source_parents: &[Option<usize>],
+    mapping: &mut [Option<usize>],
+) {
+    fn hierarchy_depth(index: usize, parents: &[Option<usize>]) -> usize {
+        let mut depth = 0usize;
+        let mut cursor = index;
+        while let Some(parent) = parents.get(cursor).copied().flatten() {
+            if parent >= parents.len() || parent == cursor || depth >= parents.len() {
+                break;
+            }
+            depth += 1;
+            cursor = parent;
+        }
+        depth
+    }
+
+    fn spine_chain(names: &[&str], parents: &[Option<usize>]) -> Vec<usize> {
+        let mut chain: Vec<_> = names
+            .iter()
+            .enumerate()
+            .filter_map(|(index, name)| {
+                matches!(
+                    node_match_key(name).as_str(),
+                    "spine1" | "spine2" | "spine3"
+                )
+                .then_some(index)
+            })
+            .collect();
+        chain.sort_by_key(|index| hierarchy_depth(*index, parents));
+        chain
+    }
+
+    let target_spine = spine_chain(target_names, target_parents);
+    let source_spine = spine_chain(source_names, source_parents);
+    if target_spine.len() < 2 || source_spine.len() < 2 {
+        return;
+    }
+    for (target, source) in target_spine.into_iter().zip(source_spine) {
+        if let Some(slot) = mapping.get_mut(target) {
+            *slot = Some(source);
+        }
+    }
 }
 
 pub(crate) fn validate_fbx_animation_mapping(
