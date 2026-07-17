@@ -374,6 +374,9 @@ pub struct WorldCameraSettings {
     /// Look-at height above the player origin.
     #[serde(default = "default_world_camera_target_height")]
     pub target_height: i32,
+    /// Additional lock-on camera elevation as a percentage of `height`.
+    #[serde(default = "default_world_camera_lock_rise_percent")]
+    pub lock_rise_percent: u8,
     /// Minimum camera origin height above the sampled floor.
     #[serde(default = "default_world_camera_min_floor_clearance")]
     pub min_floor_clearance: i32,
@@ -400,6 +403,9 @@ impl WorldCameraSettings {
                 .clamp(MIN_WORLD_CAMERA_DISTANCE, MAX_WORLD_CAMERA_DISTANCE),
             height: self.height.clamp(0, MAX_WORLD_CAMERA_HEIGHT),
             target_height: self.target_height.clamp(0, MAX_WORLD_CAMERA_HEIGHT),
+            lock_rise_percent: self
+                .lock_rise_percent
+                .min(MAX_WORLD_CAMERA_LOCK_RISE_PERCENT),
             min_floor_clearance: self
                 .min_floor_clearance
                 .clamp(0, MAX_WORLD_CAMERA_MIN_FLOOR_CLEARANCE),
@@ -420,6 +426,7 @@ impl Default for WorldCameraSettings {
             distance: default_world_camera_distance(),
             height: default_world_camera_height(),
             target_height: default_world_camera_target_height(),
+            lock_rise_percent: default_world_camera_lock_rise_percent(),
             min_floor_clearance: default_world_camera_min_floor_clearance(),
             orbit_speed_level: default_world_camera_orbit_speed_level(),
             position_lag_shift: default_world_camera_position_lag_shift(),

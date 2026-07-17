@@ -1150,6 +1150,41 @@ impl ProjectDocument {
         self.normalize_scene_states();
         for scene in &mut self.scenes {
             scene.normalize_world_root();
+            // CharacterController owns the runtime body dimensions. Older
+            // projects also created a sibling capsule Collider, producing two
+            // conflicting capsule editors even though the generic Collider is
+            // not used by the character motor. Remove only the default-named,
+            // solid legacy shape; colliders on ordinary entities and custom
+            // character hit/interaction volumes remain intact.
+            let redundant_character_capsules: Vec<NodeId> = scene
+                .nodes()
+                .iter()
+                .filter(|node| matches!(node.kind, NodeKind::Entity))
+                .filter(|entity| {
+                    entity.children.iter().any(|child| {
+                        scene.node(*child).is_some_and(|node| {
+                            matches!(node.kind, NodeKind::CharacterController { .. })
+                        })
+                    })
+                })
+                .flat_map(|entity| entity.children.iter().copied())
+                .filter(|child| {
+                    scene.node(*child).is_some_and(|node| {
+                        node.name == "Collider"
+                            && node.children.is_empty()
+                            && matches!(
+                                node.kind,
+                                NodeKind::Collider {
+                                    shape: ColliderShape::Capsule { .. },
+                                    solid: true,
+                                }
+                            )
+                    })
+                })
+                .collect();
+            for collider in redundant_character_capsules {
+                scene.remove_node(collider);
+            }
             for node in &mut scene.nodes {
                 match &mut node.kind {
                     NodeKind::World {
