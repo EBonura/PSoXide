@@ -3478,10 +3478,20 @@ fn toolbar_group_menu_impl<R>(
         let fill_alpha = (34.0 + 58.0 * glow).round() as u8;
         let stroke_alpha = (120.0 + 120.0 * glow).round() as u8;
         button = button
-            .fill(Color32::from_rgba_unmultiplied(45, 177, 207, fill_alpha))
+            .fill(Color32::from_rgba_unmultiplied(
+                STUDIO_ACCENT.r(),
+                STUDIO_ACCENT.g(),
+                STUDIO_ACCENT.b(),
+                fill_alpha,
+            ))
             .stroke(Stroke::new(
                 1.0 + glow * 0.75,
-                Color32::from_rgba_unmultiplied(165, 238, 255, stroke_alpha),
+                Color32::from_rgba_unmultiplied(
+                    STUDIO_ACCENT_HOVER.r(),
+                    STUDIO_ACCENT_HOVER.g(),
+                    STUDIO_ACCENT_HOVER.b(),
+                    stroke_alpha,
+                ),
             ));
     }
     let footer = shortcut_summary.clone();
@@ -3513,10 +3523,20 @@ pub(crate) fn toolbar_option_menu<R>(
         egui::Button::new(icons::label(icon, button_text)).min_size(Vec2::new(30.0, 23.0));
     if active {
         button = button
-            .fill(Color32::from_rgba_unmultiplied(45, 177, 207, 44))
+            .fill(Color32::from_rgba_unmultiplied(
+                STUDIO_ACCENT.r(),
+                STUDIO_ACCENT.g(),
+                STUDIO_ACCENT.b(),
+                44,
+            ))
             .stroke(Stroke::new(
                 1.0,
-                Color32::from_rgba_unmultiplied(165, 238, 255, 180),
+                Color32::from_rgba_unmultiplied(
+                    STUDIO_ACCENT_HOVER.r(),
+                    STUDIO_ACCENT_HOVER.g(),
+                    STUDIO_ACCENT_HOVER.b(),
+                    180,
+                ),
             ));
     }
     let current = current.into();

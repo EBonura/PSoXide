@@ -9,12 +9,12 @@ impl EditorWorkspace {
         playtest_status: EditorPlaytestStatus,
     ) {
         let status = self.action_bar_status(playtest_status);
-        let strip_width = ui.available_width().max(180.0);
+        let strip_width = ui.available_width().max(1.0);
+        let compact = strip_width < 180.0;
         let strip_height = ui.available_height().max(26.0);
-        egui::Frame::new()
-            .fill(STUDIO_PANEL_DARK)
-            .stroke(Stroke::new(1.0, status.border))
-            .corner_radius(egui::CornerRadius::same(4))
+        let frame = egui::Frame::new()
+            .fill(STUDIO_PANEL_HEADER)
+            .corner_radius(egui::CornerRadius::same(6))
             .inner_margin(egui::Margin::symmetric(9, 5))
             .show(ui, |ui| {
                 ui.set_min_width((strip_width - 18.0).max(80.0));
@@ -27,17 +27,25 @@ impl EditorWorkspace {
                             .strong()
                             .color(status.accent),
                     );
-                    ui.separator();
-                    ui.add(
-                        egui::Label::new(
-                            RichText::new(status.message)
-                                .small()
-                                .color(STUDIO_TEXT_WEAK),
-                        )
-                        .wrap(),
-                    );
+                    if !compact {
+                        ui.separator();
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(status.message)
+                                    .small()
+                                    .color(STUDIO_TEXT_WEAK),
+                            )
+                            .wrap(),
+                        );
+                    }
                 });
             });
+        let rail = Rect::from_min_max(
+            frame.response.rect.left_top() + Vec2::new(1.0, 6.0),
+            frame.response.rect.left_bottom() + Vec2::new(4.0, -6.0),
+        );
+        ui.painter()
+            .rect_filled(rail, egui::CornerRadius::same(2), status.border);
     }
 
     pub(crate) fn action_bar_status(
@@ -63,15 +71,15 @@ impl EditorWorkspace {
                 icon: icons::PLAY,
                 badge: if input_captured { "PLAY INPUT" } else { "PLAY" },
                 message: &self.status,
-                accent: Color32::from_rgb(114, 207, 138),
-                border: Color32::from_rgb(40, 93, 55),
+                accent: STUDIO_SUCCESS,
+                border: STUDIO_SUCCESS_DIM,
             },
             EditorPlaytestStatus::Failed => ActionBarStatus {
                 icon: icons::TERMINAL,
                 badge: "FAILED",
                 message: &self.status,
-                accent: Color32::from_rgb(239, 106, 106),
-                border: Color32::from_rgb(104, 42, 42),
+                accent: STUDIO_ERROR,
+                border: STUDIO_ERROR_DIM,
             },
             EditorPlaytestStatus::Idle if self.dirty => ActionBarStatus {
                 icon: icons::SAVE,
@@ -348,7 +356,11 @@ impl EditorWorkspace {
             self.apply_ui_tree_action(action);
         }
         ui.horizontal(|ui| {
-            if ui.button(icons::label(icons::FOCUS, "Canvas")).clicked() {
+            if ui
+                .add(egui::Button::new(icons::text(icons::FOCUS, 14.0)).min_size(Vec2::splat(28.0)))
+                .on_hover_text("Select canvas root")
+                .clicked()
+            {
                 if let Some(scene) = self.current_ui_scene() {
                     self.selection.selected_ui_node = scene.root;
                 }
@@ -360,15 +372,21 @@ impl EditorWorkspace {
             if ui
                 .add_enabled(
                     can_copy,
-                    egui::Button::new(icons::label(icons::COPY, "Copy")),
+                    egui::Button::new(icons::text(icons::COPY, 14.0)).min_size(Vec2::splat(28.0)),
                 )
+                .on_hover_text("Copy selected UI node")
                 .clicked()
             {
                 self.copy_selected_ui_node();
             }
             let can_paste = self.ui_node_clipboard.is_some() && self.current_ui_scene().is_some();
             if ui
-                .add_enabled(can_paste, egui::Button::new("Paste"))
+                .add_enabled(
+                    can_paste,
+                    egui::Button::new(icons::text(icons::FILE_PLUS, 14.0))
+                        .min_size(Vec2::splat(28.0)),
+                )
+                .on_hover_text("Paste as child of selected UI node")
                 .clicked()
             {
                 self.paste_ui_node();
@@ -379,8 +397,9 @@ impl EditorWorkspace {
             if ui
                 .add_enabled(
                     can_delete,
-                    egui::Button::new(icons::label(icons::TRASH, "Delete")),
+                    egui::Button::new(icons::text(icons::TRASH, 14.0)).min_size(Vec2::splat(28.0)),
                 )
+                .on_hover_text("Delete selected UI node")
                 .clicked()
             {
                 self.delete_selected_ui_node();
