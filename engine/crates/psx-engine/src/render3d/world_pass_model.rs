@@ -1,5 +1,39 @@
 use super::*;
 
+fn model_face_with_uv_mapping(
+    mut face: TexturedModelRenderFace,
+    projected_vertices: &[ProjectedVertex],
+    mapping: ModelUvMapping,
+) -> TexturedModelRenderFace {
+    let ModelUvMapping::ScreenSpaceReflection {
+        texture_width,
+        texture_height,
+        roughness,
+    } = mapping
+    else {
+        return face;
+    };
+    let width = i32::from(texture_width.max(1));
+    let height = i32::from(texture_height.max(1));
+    let quantum = 1i32 << roughness.min(3);
+    for corner in 0..3 {
+        let Some(projected) = projected_vertices.get(usize::from(face.vertex_indices[corner]))
+        else {
+            return face;
+        };
+        // The PS1 projection is centred at (0, 0). Mapping that 320x240
+        // viewport into the compact room texture makes the environment stay in
+        // screen space while the model moves beneath it, the classic PS1 fake
+        // reflection used in place of unavailable multitexture shaders.
+        let u = ((i32::from(projected.sx) + 160) * width / 320).rem_euclid(width);
+        let v = ((i32::from(projected.sy) + 120) * height / 240).rem_euclid(height);
+        let u = (u / quantum) * quantum;
+        let v = (v / quantum) * quantum;
+        face.uv_words[corner] = u as u16 | ((v as u16) << 8);
+    }
+    face
+}
+
 #[derive(Copy, Clone)]
 struct PreparedModelDepthSlots {
     front: usize,
@@ -772,6 +806,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         // CULL_BACK keeps the one semantic difference compile-time so the
         // double-sided loop has no winding test.
         let packed_average_unclamped_faces = packed_fast_faces
+            && options.model_uv_mapping.is_authored()
             && all_projected_vertices_in_front
             && options.depth_policy == DepthPolicy::Average
             && all_projected_vertices_inside_hw_bounds
@@ -897,12 +932,17 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             let mut face_index = 0usize;
             while face_index < faces.len() {
                 faces_considered = faces_considered.wrapping_add(1);
+                let face = model_face_with_uv_mapping(
+                    faces[face_index],
+                    projected_vertices,
+                    options.model_uv_mapping,
+                );
                 let overflow = if packed_back_average_in_front_faces {
                     self.submit_predecoded_model_face_packed_back_average_in_front_fast(
                         triangles,
                         projected_vertices,
                         project_count,
-                        faces[face_index],
+                        face,
                         packet_material,
                         material,
                         options,
@@ -913,7 +953,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                         triangles,
                         projected_vertices,
                         project_count,
-                        faces[face_index],
+                        face,
                         packet_material,
                         material,
                         options,
@@ -924,7 +964,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                         triangles,
                         projected_vertices,
                         project_count,
-                        faces[face_index],
+                        face,
                         all_projected_vertices_in_front,
                         near_z,
                         packet_material,
@@ -937,7 +977,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                         triangles,
                         projected_vertices,
                         project_count,
-                        faces[face_index],
+                        face,
                         all_projected_vertices_in_front,
                         near_z,
                         packet_material,

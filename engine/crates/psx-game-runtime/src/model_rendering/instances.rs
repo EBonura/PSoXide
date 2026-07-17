@@ -290,6 +290,7 @@ pub fn draw_model_instances<
     camera: &WorldCamera,
     options: WorldSurfaceOptions,
     lighting: &RuntimeRoomLighting,
+    room_reflection_probe: Option<VramSlot>,
     models: &[Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
     model_faces: &[TexturedModelRenderFace],
     model_parts: &[ModelPart],
@@ -408,15 +409,17 @@ pub fn draw_model_instances<
             continue;
         }
 
-        let (base_material, cull_mode) = model_material_and_cull(
+        let (base_material, cull_mode, uv_mapping) = model_material_and_cull(
             runtime_model,
             inst.material_override,
+            room_reflection_probe,
             resolve_override_texture,
         );
         let material = lighting.shade_model_material(origin, base_material);
         let model_options = options
             .with_depth_policy(DepthPolicy::Average)
             .with_cull_mode(cull_mode)
+            .with_model_uv_mapping(uv_mapping)
             .with_material_layer(material)
             .with_textured_triangle_splitting(true)
             .with_textured_triangle_max_edge(knobs.texture_split_max_edge);

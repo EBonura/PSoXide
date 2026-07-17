@@ -39,7 +39,7 @@ use psxed_project::{
 
 const ROOM_TPAGE_HALFWORDS: usize = 64;
 const ROOM_TPAGE_TEXEL_HEIGHT: usize = 256;
-const ROOM_TILE_TEXELS: u16 = 64;
+const ROOM_TILE_TEXELS: u16 = 128;
 const ROOM_FIRST_TPAGE: u8 = 5;
 const ROOM_LAST_TPAGE: u8 = 15;
 const ROOM_TPAGE_COUNT: usize = (ROOM_LAST_TPAGE - ROOM_FIRST_TPAGE + 1) as usize;
@@ -486,9 +486,7 @@ impl EditorTextures {
         if clut_x + ROOM_CLUT_HALFWORDS > VRAM_WIDTH as u16 {
             return None;
         }
-        let placement = self
-            .room_allocator
-            .allocate(ROOM_TILE_TEXELS, ROOM_TILE_TEXELS)?;
+        let placement = self.room_allocator.allocate(64, 64)?;
         let tpage_index = u16::from(ROOM_FIRST_TPAGE).checked_add(placement.page_index())?;
         let tpage_x = tpage_index.checked_mul(64)?;
         self.upload_4bpp(
@@ -1470,8 +1468,8 @@ mod tests {
             .secondary_slot(material_id)
             .expect("generated secondary texture slot");
         assert_ne!(base.clut_word, layer.clut_word);
-        assert_eq!(layer.texture_width, 64);
-        assert_eq!(layer.texture_height, 64);
+        assert_eq!(layer.texture_width, 128);
+        assert_eq!(layer.texture_height, 128);
         assert_ne!(layer.texture_window, TextureWindow::NONE);
     }
 

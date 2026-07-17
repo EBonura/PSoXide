@@ -123,6 +123,7 @@ pub(super) fn build_active_room(
     if let Some(residency) = ROOM_RESIDENCY.iter().find(|r| r.room == index) {
         ensure_room_resident(residency);
     }
+    let _ = room_reflection_probe_ready(index);
     let payload = parse_active_room_payload(slot, index, record)?;
     let (materials, material_count, _all_resolved) = build_runtime_room_material_table(record);
     let stream_slot = active_room_stream_slot(index);

@@ -136,9 +136,18 @@ fn runtime_model_asset_bytes(asset_id: AssetId, kind: AssetKind) -> Option<&'sta
     }
 }
 
+fn room_reflection_probe_slot(room: RoomIndex) -> Option<VramSlot> {
+    let asset = ROOM_REFLECTION_PROBES
+        .get(room.to_usize())
+        .copied()
+        .flatten()?;
+    find_room_texture_vram_slot(asset)
+}
+
 /// Draw the player's animated model through the crate policy.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn draw_player(
+    current_room: RoomIndex,
     character: RuntimeCharacter,
     models: &[Option<RuntimeModelAsset>; MAX_RUNTIME_MODELS],
     model_faces: &[TexturedModelRenderFace],
@@ -190,6 +199,7 @@ pub(super) fn draw_player(
         camera,
         options,
         lighting,
+        room_reflection_probe_slot(current_room),
         &mut prop_texture_slot,
         triangles,
         world,
@@ -294,6 +304,7 @@ pub(super) fn draw_model_instances(
         camera,
         options,
         lighting,
+        room_reflection_probe_slot(current_room),
         models,
         model_faces,
         model_parts,

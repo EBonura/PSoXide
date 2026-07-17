@@ -216,6 +216,26 @@ pub(super) fn ensure_room_texture_uploaded(
     vram_arena().ensure_room_texture_uploaded(VRAM_LAYOUT, asset_id, asset_bytes)
 }
 
+/// Queue (or resolve) the room-owned reflection probe. The active-room window
+/// calls this for the current and warm adjacent rooms, so a portal crossing
+/// only switches the selected resident slot.
+pub(super) fn room_reflection_probe_ready(room: RoomIndex) -> bool {
+    let Some(asset_id) = ROOM_REFLECTION_PROBES
+        .get(room.to_usize())
+        .copied()
+        .flatten()
+    else {
+        return true;
+    };
+    if find_room_texture_vram_slot(asset_id).is_some() {
+        return true;
+    }
+    let Some(bytes) = upload_bytes_for(asset_id) else {
+        return false;
+    };
+    ensure_room_texture_uploaded(asset_id, bytes).is_some_and(|slot| slot.ready)
+}
+
 /// Upload a UI texture, stepping the upload queue so menu images resolve
 /// within the calling frame.
 pub(super) fn ensure_ui_texture_uploaded(
