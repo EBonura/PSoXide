@@ -1509,6 +1509,8 @@ pub(crate) fn default_addable_ui_kinds() -> Vec<(&'static str, UiNodeKind)> {
             UiNodeKind::Label {
                 rect: UiRect::new(24, 24, 96, 12),
                 text: "Label".to_string(),
+                random_message: false,
+                messages: Vec::new(),
                 tag: String::new(),
                 align: UiTextAlign::Left,
                 wrap: false,

@@ -293,6 +293,234 @@ fn component_templates_filter_by_host_kind_and_singletons() {
 }
 
 #[test]
+fn character_controller_role_is_derived_from_existing_controller_state() {
+    let mut settings = CharacterControllerSettings::default();
+    assert_eq!(
+        CharacterControllerRole::from_controller(false, &settings),
+        CharacterControllerRole::Passive
+    );
+
+    settings.enemy = Some(psxed_project::EnemyBehaviorSettings::defaults());
+    assert_eq!(
+        CharacterControllerRole::from_controller(false, &settings),
+        CharacterControllerRole::Enemy
+    );
+    assert_eq!(
+        CharacterControllerRole::from_controller(true, &settings),
+        CharacterControllerRole::Player
+    );
+}
+
+#[test]
+fn character_controller_role_preserves_enemy_tuning_while_player_controlled() {
+    let mut settings = CharacterControllerSettings::default();
+    settings.enemy = Some(psxed_project::EnemyBehaviorSettings::defaults());
+    let original_enemy = settings.enemy.clone();
+    let mut player = false;
+
+    assert!(CharacterControllerRole::Player.apply_to(&mut player, &mut settings));
+    assert!(player);
+    assert_eq!(settings.enemy, original_enemy);
+
+    assert!(CharacterControllerRole::Enemy.apply_to(&mut player, &mut settings));
+    assert!(!player);
+    assert_eq!(settings.enemy, original_enemy);
+
+    assert!(CharacterControllerRole::Passive.apply_to(&mut player, &mut settings));
+    assert!(!player);
+    assert!(settings.enemy.is_none());
+}
+
+#[test]
+fn debug_scene_focus_selects_an_entity_by_name_or_id() {
+    let mut project = ProjectDocument::new("debug-scene-focus");
+    let entity =
+        project
+            .active_scene_mut()
+            .add_node(NodeId::ROOT, "Enemy Captain", NodeKind::Entity);
+    let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
+
+    assert!(workspace.focus_scene_node_for_debug("enemy captain"));
+    assert_eq!(workspace.selection.selected_node, entity);
+
+    workspace.replace_node_selection(NodeId::ROOT);
+    assert!(workspace.focus_scene_node_for_debug(&entity.raw().to_string()));
+    assert_eq!(workspace.selection.selected_node, entity);
+}
+
+#[test]
+fn inline_character_controller_edit_undoes_with_entity_selected() {
+    let mut project = ProjectDocument::new("inline-controller-undo");
+    let entity = project
+        .active_scene_mut()
+        .add_node(NodeId::ROOT, "Enemy", NodeKind::Entity);
+    let mut settings = CharacterControllerSettings::default();
+    settings.enemy = Some(psxed_project::EnemyBehaviorSettings::defaults());
+    let controller = project.active_scene_mut().add_node(
+        entity,
+        "Character Controller",
+        NodeKind::CharacterController {
+            character: None,
+            settings,
+            player: false,
+        },
+    );
+    let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
+    workspace.replace_node_selection(entity);
+    let before = workspace.project.clone();
+    let history_epoch = workspace.history.epoch();
+
+    let NodeKind::CharacterController { settings, .. } = &mut workspace
+        .project
+        .active_scene_mut()
+        .node_mut(controller)
+        .unwrap()
+        .kind
+    else {
+        panic!("expected Character Controller");
+    };
+    settings.enemy.as_mut().unwrap().aggro_radius = 4096;
+    workspace.finish_inspector_undo(before, history_epoch, InspectorUndoInput::default());
+    workspace.do_undo();
+
+    assert_eq!(workspace.selection.selected_node, entity);
+    let NodeKind::CharacterController { settings, .. } = &workspace
+        .project
+        .active_scene()
+        .node(controller)
+        .unwrap()
+        .kind
+    else {
+        panic!("expected Character Controller");
+    };
+    assert_eq!(settings.enemy.as_ref().unwrap().aggro_radius, 2048);
+}
+
+#[test]
+fn character_action_preview_uses_animator_binding_without_mutating_animator() {
+    let mut project = ProjectDocument::new("character-action-preview");
+    let entity = project
+        .active_scene_mut()
+        .add_node(NodeId::ROOT, "Enemy", NodeKind::Entity);
+    let controller = project.active_scene_mut().add_node(
+        entity,
+        "Character Controller",
+        NodeKind::CharacterController {
+            character: None,
+            settings: CharacterControllerSettings::default(),
+            player: false,
+        },
+    );
+    let animator = project.active_scene_mut().add_node(
+        entity,
+        "Animator",
+        NodeKind::Animator {
+            clip: Some(1),
+            action_clips: vec![psxed_project::CharacterActionClip {
+                action: psxed_project::CharacterAnimationAction::Roll,
+                clip: 7,
+                options: None,
+            }],
+            autoplay: false,
+            pose_frame: 18,
+        },
+    );
+    let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
+    workspace.replace_node_selection(controller);
+
+    assert!(!workspace
+        .preview_character_action(controller, psxed_project::CharacterAnimationAction::Roll));
+
+    let NodeKind::Animator {
+        clip,
+        autoplay,
+        pose_frame,
+        ..
+    } = &workspace
+        .project
+        .active_scene()
+        .node(animator)
+        .unwrap()
+        .kind
+    else {
+        panic!("expected Animator");
+    };
+    assert_eq!(*clip, Some(1));
+    assert!(!*autoplay);
+    assert_eq!(*pose_frame, 18);
+    assert_eq!(workspace.character_motion_preview().unwrap().clip, 7);
+    assert!(workspace.status.contains("Previewing Roll"));
+}
+
+#[test]
+fn character_motion_preview_moves_without_mutating_authored_transform_and_tracks_camera() {
+    let mut project = ProjectDocument::new("character-motion-preview");
+    let entity = project
+        .active_scene_mut()
+        .add_node(NodeId::ROOT, "Player", NodeKind::Entity);
+    let mut settings = CharacterControllerSettings::default();
+    settings.walk_speed = 10;
+    settings.turn_speed_degrees_per_second = 180;
+    project.active_scene_mut().add_node(
+        entity,
+        "Character Controller",
+        NodeKind::CharacterController {
+            character: None,
+            settings,
+            player: true,
+        },
+    );
+    let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
+    workspace.replace_node_selection(entity);
+    let authored = workspace
+        .project
+        .active_scene()
+        .node(entity)
+        .unwrap()
+        .transform;
+    workspace.character_motion_preview = Some(CharacterMotionPreviewState {
+        entity,
+        action: psxed_project::CharacterAnimationAction::Walk,
+        clip: 0,
+        started_at: Instant::now() - std::time::Duration::from_millis(500),
+    });
+
+    let preview = workspace.character_motion_preview().expect("walk preview");
+    assert!(preview.origin[2] >= 290 && preview.origin[2] <= 320);
+    assert_eq!(
+        workspace
+            .project
+            .active_scene()
+            .node(entity)
+            .unwrap()
+            .transform,
+        authored
+    );
+    let camera = workspace.viewport_3d_camera();
+    assert_eq!(camera.mode, ViewportCameraMode::Orbit);
+    assert_eq!(camera.target[0], preview.origin[0]);
+    assert_eq!(camera.target[2], preview.origin[2]);
+
+    workspace.character_motion_preview = Some(CharacterMotionPreviewState {
+        entity,
+        action: psxed_project::CharacterAnimationAction::Turn,
+        clip: 0,
+        started_at: Instant::now() - std::time::Duration::from_millis(500),
+    });
+    let turn = workspace.character_motion_preview().expect("turn preview");
+    assert!(turn.yaw_q12 >= 1010 && turn.yaw_q12 <= 1040);
+    assert_eq!(
+        workspace
+            .project
+            .active_scene()
+            .node(entity)
+            .unwrap()
+            .transform,
+        authored
+    );
+}
+
+#[test]
 fn scene_graph_add_menu_is_structure_only() {
     let addable = scene_graph_addable_kinds();
     assert_eq!(addable.len(), 3);
@@ -414,6 +642,7 @@ fn camera_preview_request_targets_floor_anchored_player_origin() {
                 distance: 2048,
                 height: 768,
                 target_height: 512,
+                lock_rise_percent: 15,
                 min_floor_clearance: 64,
                 orbit_speed_level: 5,
                 position_lag_shift: 2,

@@ -392,6 +392,8 @@ pub struct PlaytestCamera {
     pub height: i32,
     /// Look-at height above the player origin.
     pub target_height: i32,
+    /// Additional lock-on camera elevation as a percentage of camera height.
+    pub lock_rise_percent: u8,
     /// Minimum camera origin height above the sampled floor.
     pub min_floor_clearance: i32,
     /// Manual orbit input speed level. Higher values turn faster.
@@ -1552,15 +1554,15 @@ pub struct PlaytestCharacter {
     pub roll_recovery_frames: u8,
     /// Invulnerable frames from roll start.
     pub roll_invulnerable_frames: u8,
-    /// Stamina spent to start a backstep.
+    /// Legacy quickstep stamina cost retained for package compatibility.
     pub backstep_cost_q12: i32,
     /// Backstep travel speed in engine units per 60 Hz frame.
     pub backstep_speed: i32,
-    /// Frames where the backstep keeps moving.
+    /// Legacy quickstep active movement frames.
     pub backstep_active_frames: u8,
-    /// Recovery frames after backstep movement ends.
+    /// Legacy quickstep recovery frames.
     pub backstep_recovery_frames: u8,
-    /// Invulnerable frames from backstep start.
+    /// Legacy quickstep invulnerability frames.
     pub backstep_invulnerable_frames: u8,
     /// Camera follow distance (engine units).
     pub camera_distance: i32,

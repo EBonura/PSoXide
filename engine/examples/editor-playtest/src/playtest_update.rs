@@ -251,7 +251,13 @@ impl Playtest {
                 Some(_) => None,
                 None => self.find_best_lock_target(LOCK_RANGE),
             };
+            if self.lock_target.is_some() {
+                telemetry::debug_log("player lock:on");
+            } else {
+                telemetry::debug_log("player lock:off");
+            }
             self.lock_switch_stick_held = false;
+            self.lock_invalid_ticks = 0;
             self.soft_lock_target = None;
         }
         if ctx.just_pressed(COLLISION_DEBUG_BUTTON) {
@@ -460,6 +466,9 @@ impl Playtest {
         if new_state != self.anim_state {
             self.anim_state = new_state;
             self.anim_start_tick = now;
+            if new_state == PlayerAnim::Roll {
+                telemetry::debug_log("player roll:start");
+            }
             if new_state.is_motor_fixed_action() {
                 if let Some(character) = self.character {
                     self.lock_player_anim_action(character, new_state, now, ctx.video_hz);
@@ -468,11 +477,22 @@ impl Playtest {
         }
 
         if self.lock_target.is_some() {
-            if !self.lock_target_valid(LOCK_BREAK_RANGE) {
+            let target_exists = self
+                .lock_target
+                .is_some_and(|index| self.target_position(index).is_some());
+            if !target_exists {
                 self.lock_target = None;
                 self.lock_switch_stick_held = false;
-            } else {
+                self.lock_invalid_ticks = 0;
+            } else if self.lock_target_valid(LOCK_BREAK_RANGE) {
+                self.lock_invalid_ticks = 0;
                 self.update_lock_target_switch(ctx);
+            } else if self.lock_invalid_ticks >= LOCK_BREAK_GRACE_VBLANKS {
+                self.lock_target = None;
+                self.lock_switch_stick_held = false;
+                self.lock_invalid_ticks = 0;
+            } else {
+                self.lock_invalid_ticks = self.lock_invalid_ticks.saturating_add(1);
             }
         }
         let (camera_right_x, _) = ctx.pad.sticks.right_centered();

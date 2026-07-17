@@ -133,6 +133,10 @@ pub(super) const LOCK_SWITCH_STICK_THRESHOLD: i16 = 72;
 pub(super) const LOCK_SWITCH_STICK_RELEASE: i16 = 36;
 pub(super) const LOCK_RANGE: i32 = 4096;
 pub(super) const LOCK_BREAK_RANGE: i32 = 5120;
+/// Horizontal acquisition cone in signed Q8 screen-space (`256 = 45°`).
+pub(super) const LOCK_ACQUIRE_HALF_CONE_Q8: i32 = 288;
+/// Frames a still-live target may remain beyond break range before unlock.
+pub(super) const LOCK_BREAK_GRACE_VBLANKS: u8 = 8;
 pub(super) const SOFT_LOCK_RANGE: i32 = 3072;
 pub(super) const SOFT_LOCK_BREAK_RANGE: i32 = 3840;
 pub(super) const CAMERA_COLLISION_ENABLED: bool = true;
