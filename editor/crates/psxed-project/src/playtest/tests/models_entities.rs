@@ -66,9 +66,9 @@ fn room_material_must_be_4bpp() {
 }
 
 #[test]
-fn model_atlas_must_be_8bpp() {
-    // Swap the player atlas to a 4bpp room texture path so
-    // the cook runs the depth check on a known-bad atlas.
+fn model_atlas_accepts_4bpp() {
+    // A normal 4bpp PSXT is also a valid model atlas: the runtime selects a
+    // 4bpp tpage and allocates the corresponding 16-entry CLUT.
     let mut project = ProjectDocument::starter();
     let player_model = player_model_resource_id(&project);
     for resource in project.resources.iter_mut() {
@@ -81,12 +81,8 @@ fn model_atlas_must_be_8bpp() {
         }
     }
     let (package, report) = build_package(&project, &starter_project_root());
-    assert!(package.is_none());
-    assert!(
-        report.errors.iter().any(|e| e.contains("must be 8bpp")),
-        "errors: {:?}",
-        report.errors,
-    );
+    assert!(report.is_ok(), "errors: {:?}", report.errors);
+    assert!(package.is_some());
 }
 
 #[test]
@@ -475,7 +471,24 @@ fn entity_model_instance_y_snaps_to_floor_under_authored_xz() {
 fn rendered_manifest_emits_model_records() {
     let project = ProjectDocument::starter();
     let (package, _) = build_package(&project, &starter_project_root());
-    let src = render_manifest_source(&package.expect("cooks"));
+    let package = package.expect("cooks");
+    for model in &package.models {
+        assert_eq!(
+            package.assets[model.mesh_asset_index].streamed_class,
+            StreamedClass::PersistentGameplay
+        );
+        assert_eq!(
+            package.assets[model.texture_asset_index.expect("atlas")].streamed_class,
+            StreamedClass::PersistentGameplay
+        );
+    }
+    for clip in &package.model_clips {
+        assert_eq!(
+            package.assets[clip.animation_asset_index].streamed_class,
+            StreamedClass::PersistentGameplay
+        );
+    }
+    let src = render_manifest_source(&package);
     assert!(src.contains("LevelModelRecord"));
     assert!(src.contains("collision_radius:"));
     assert!(src.contains("LevelModelInstanceRecord"));
@@ -490,6 +503,9 @@ fn rendered_manifest_emits_model_records() {
     assert!(src.contains("MODEL_FRAME_BOUNDS"));
     assert!(src.contains("AssetKind::ModelMesh"));
     assert!(src.contains("AssetKind::ModelAnimation"));
+    assert!(src.contains("flags: asset_flags::STREAMED_GAMEPLAY_PERSISTENT"));
+    assert!(src.contains("pub const PERSISTENT_ASSET_PAGE_COUNT: usize ="));
+    assert!(src.contains("#[cfg(feature = \"cd-stream-bench\")]\npub static ASSET_"));
 }
 
 /// Helper: starter project with the player spawn moved to
@@ -698,6 +714,7 @@ fn model_renderer_material_override_cooks_onto_instance() {
     material.blend_mode = crate::PsxBlendMode::Average;
     material.tint = [96, 128, 160];
     material.face_sidedness = crate::MaterialFaceSidedness::Both;
+    material.secondary_layer = Some(crate::ModelSecondaryLayer::default());
 
     let scene = project.active_scene_mut();
     let room_id = scene
@@ -734,16 +751,31 @@ fn model_renderer_material_override_cooks_onto_instance() {
         crate::MaterialFaceSidedness::Both
     );
     // The material's psxt became a cooked texture asset requirement.
-    let asset = &package.assets[material_override.texture_asset_index];
+    let texture_asset_index = material_override
+        .texture_asset_index
+        .expect("covering material carries its texture asset");
+    let asset = &package.assets[texture_asset_index];
     assert_eq!(asset.kind, PlaytestAssetKind::Texture);
+    let secondary = material_override
+        .secondary_layer
+        .expect("generated secondary layer cooks");
+    assert_eq!(secondary.blend_mode, crate::PsxBlendMode::AddQuarter);
+    assert_eq!(secondary.tint_rgb, [0x70, 0x78, 0x80]);
+    let secondary_asset = &package.assets[secondary.texture_asset_index];
+    assert_eq!(secondary_asset.kind, PlaytestAssetKind::Texture);
+    let texture = psx_asset::Texture::from_bytes(&secondary_asset.bytes)
+        .expect("generated secondary PSXT parses");
+    assert_eq!(texture.clut_entries(), 16);
+    assert!(texture.index_zero_transparent());
 
     // Manifest side: the instance literal carries the override and the
     // owning room's residency lists the covering texture.
     let src = render_manifest_source(&package);
     assert!(
         src.contains(&format!(
-            "material_override: Some(LevelModelMaterialOverride {{ texture_asset: AssetId({}), blend_mode: 1, tint_rgb: [96, 128, 160], flags: 2 }})",
-            material_override.texture_asset_index
+            "material_override: Some(LevelModelMaterialOverride {{ texture_asset: Some(AssetId({})), blend_mode: 1, tint_rgb: [96, 128, 160], secondary_layer: Some(LevelModelSecondaryLayer {{ texture_asset: AssetId({}), blend_mode: 4, tint_rgb: [112, 120, 128] }}), flags: 2 }})",
+            texture_asset_index,
+            secondary.texture_asset_index,
         )),
         "manifest instance literal missing override: {src}"
     );
@@ -772,8 +804,7 @@ fn player_model_renderer_material_override_cooks_onto_character() {
             })
         })
         .expect("starter player has a model renderer");
-    let NodeKind::ModelRenderer { material, .. } =
-        &mut scene.node_mut(renderer_id).unwrap().kind
+    let NodeKind::ModelRenderer { material, .. } = &mut scene.node_mut(renderer_id).unwrap().kind
     else {
         panic!("expected model renderer");
     };
@@ -786,8 +817,127 @@ fn player_model_renderer_material_override_cooks_onto_character() {
     let material_override = character
         .material_override
         .expect("player character carries the covering material");
-    let asset = &package.assets[material_override.texture_asset_index];
+    let asset = &package.assets[material_override
+        .texture_asset_index
+        .expect("covering material carries its texture asset")];
     assert_eq!(asset.kind, PlaytestAssetKind::Texture);
     // No extra static instance appears for the player's renderer.
     assert!(package.model_instances.is_empty());
+}
+
+#[test]
+fn player_model_renderer_material_without_texture_keeps_model_atlas() {
+    let mut project = project_with_one_room();
+    let material_id = project.add_resource(
+        "Crystal Atlas",
+        ResourceData::Material(crate::MaterialResource::translucent(
+            None,
+            crate::PsxBlendMode::Average,
+        )),
+    );
+    let spawn_id = player_spawn_node_id(&project);
+    let renderer_id = project
+        .active_scene()
+        .node(spawn_id)
+        .and_then(|node| {
+            node.children.iter().find_map(|child| {
+                project.active_scene().node(*child).and_then(|node| {
+                    matches!(node.kind, NodeKind::ModelRenderer { .. }).then_some(node.id)
+                })
+            })
+        })
+        .expect("starter player has a model renderer");
+    let NodeKind::ModelRenderer { material, .. } = &mut project
+        .active_scene_mut()
+        .node_mut(renderer_id)
+        .unwrap()
+        .kind
+    else {
+        panic!("expected model renderer");
+    };
+    *material = Some(material_id);
+
+    let (package, report) = build_package(&project, &starter_project_root());
+    assert!(report.is_ok(), "errors: {:?}", report.errors);
+    let package = package.expect("cooks");
+    let material_override = package.characters[0]
+        .material_override
+        .expect("player character carries its optical override");
+    assert_eq!(material_override.texture_asset_index, None);
+    assert_eq!(material_override.blend_mode, crate::PsxBlendMode::Average);
+    assert_eq!(material_override.tint_rgb, [128, 128, 128]);
+    let manifest = render_manifest_source(&package);
+    assert!(manifest.contains(
+        "material_override: Some(LevelModelMaterialOverride { texture_asset: None, blend_mode: 1, tint_rgb: [128, 128, 128], secondary_layer: None, flags: 2 })"
+    ));
+}
+
+#[test]
+fn exclusive_player_average_noise_material_collapses_to_one_atlas_pass() {
+    let mut project = project_with_one_room();
+    let spawn_id = player_spawn_node_id(&project);
+    let renderer_id = project
+        .active_scene()
+        .node(spawn_id)
+        .and_then(|node| {
+            node.children.iter().find_map(|child| {
+                project.active_scene().node(*child).and_then(|node| {
+                    matches!(node.kind, NodeKind::ModelRenderer { .. }).then_some(node.id)
+                })
+            })
+        })
+        .expect("starter player has a model renderer");
+    let renderer_model = match project.active_scene().node(renderer_id).unwrap().kind {
+        NodeKind::ModelRenderer {
+            model: Some(model), ..
+        } => model,
+        _ => panic!("starter renderer has a model"),
+    };
+    // The starter model fixture uses an 8bpp atlas; point it at the starter's
+    // existing 4bpp material texture so this exercises the compatible path
+    // used by the Cortex player without introducing another binary fixture.
+    let four_bpp_atlas = project
+        .resources
+        .iter()
+        .find_map(|resource| match &resource.data {
+            ResourceData::Material(material) => material.psxt_path.clone(),
+            _ => None,
+        })
+        .expect("starter has a 4bpp material texture");
+    let model = match &mut project.resource_mut(renderer_model).unwrap().data {
+        ResourceData::Model(model) => model,
+        _ => panic!("renderer references a model resource"),
+    };
+    model.texture_path = Some(four_bpp_atlas);
+    let mut material = crate::MaterialResource::translucent(None, crate::PsxBlendMode::Average);
+    material.tint = [160, 176, 192];
+    material.secondary_layer = Some(crate::ModelSecondaryLayer::default());
+    let material_id = project.add_resource("Player Crystal", ResourceData::Material(material));
+    let NodeKind::ModelRenderer { material, .. } = &mut project
+        .active_scene_mut()
+        .node_mut(renderer_id)
+        .unwrap()
+        .kind
+    else {
+        panic!("expected model renderer");
+    };
+    *material = Some(material_id);
+
+    let (package, report) = build_package(&project, &starter_project_root());
+    assert!(report.is_ok(), "errors: {:?}", report.errors);
+    let package = package.expect("cooks");
+    let character = &package.characters[0];
+    let material = character.material_override.expect("player material cooks");
+    assert_eq!(material.blend_mode, crate::PsxBlendMode::Average);
+    assert_eq!(material.tint_rgb, [128; 3]);
+    assert_eq!(material.secondary_layer, None);
+    assert_eq!(material.texture_asset_index, None);
+
+    let model = &package.models[usize::from(character.model)];
+    let atlas = &package.assets[model.texture_asset_index.expect("model atlas")];
+    assert!(atlas.source_label.contains("fused player material"));
+    let texture = psx_asset::Texture::from_bytes(&atlas.bytes).expect("fused atlas parses");
+    assert_eq!(texture.depth(), psxed_format::texture::Depth::Bit4);
+    assert_eq!(texture.clut_entries(), 16);
+    assert!(texture.index_zero_transparent());
 }

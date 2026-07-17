@@ -348,6 +348,10 @@ pub struct CharacterMotorInput {
     /// World-space analog Z movement intent. [`Q12::ONE`] is
     /// full-strength movement to +Z.
     pub move_z: Q12,
+    /// Optional world-space yaw the actor should keep facing while
+    /// moving. Lock-on controllers set this to the target direction;
+    /// free movement leaves it unset and faces the movement vector.
+    pub facing_yaw: Option<Angle>,
     /// True while the actor wants to spend stamina on sprinting.
     pub sprint: bool,
     /// Rising-edge evade request. The motor chooses roll vs backstep
@@ -380,6 +384,12 @@ pub enum CharacterMotorAnim {
     Idle,
     /// Walking or backing up.
     Walk,
+    /// Locked-on backward locomotion while still facing the target.
+    WalkBackward,
+    /// Locked-on left strafe while still facing the target.
+    StrafeLeft,
+    /// Locked-on right strafe while still facing the target.
+    StrafeRight,
     /// Sprinting.
     Run,
     /// Forward evasive roll.
@@ -592,10 +602,23 @@ impl CharacterMotorState {
             return self.update_action(collision, config);
         }
 
+        if let Some(facing_yaw) = input.facing_yaw {
+            self.yaw = self.yaw.approach_q12(facing_yaw, config.yaw_step.as_q12());
+        }
+
         if let Some((move_x, move_z, move_mag)) = analog_move_vector(input) {
-            self.update_sprint_gate(input.sprint);
-            self.yaw = yaw_from_vector(move_x, move_z);
-            let wants_sprint = input.sprint;
+            let move_yaw = yaw_from_vector(move_x, move_z);
+            let directional_anim = if let Some(facing_yaw) = input.facing_yaw {
+                locked_locomotion_anim(facing_yaw, move_yaw)
+            } else {
+                self.yaw = move_yaw;
+                CharacterMotorAnim::Walk
+            };
+            // Locked-on lateral/backward motion keeps the authored walk
+            // cadence. Sprint remains available when pushing toward the
+            // target and for all free-movement directions.
+            let wants_sprint = input.sprint && matches!(directional_anim, CharacterMotorAnim::Walk);
+            self.update_sprint_gate(wants_sprint);
             let sprinting = self.can_sprint(wants_sprint, config);
             let base_speed = if sprinting {
                 config.run_speed
@@ -623,7 +646,7 @@ impl CharacterMotorState {
             } else if sprinting {
                 CharacterMotorAnim::Run
             } else {
-                CharacterMotorAnim::Walk
+                directional_anim
             };
 
             return self.frame(
@@ -719,14 +742,26 @@ impl CharacterMotorState {
 
     fn try_start_evade(&mut self, input: CharacterMotorInput, config: CharacterMotorConfig) {
         let analog = analog_move_vector(input);
-        if let Some((move_x, move_z, _)) = analog {
-            self.yaw = yaw_from_vector(move_x, move_z);
-        }
-        let action = if analog.is_none() && input.walk < 0 {
+        let locked_backstep = analog
+            .map(|(move_x, move_z, _)| {
+                input.facing_yaw.is_some_and(|facing_yaw| {
+                    matches!(
+                        locked_locomotion_anim(facing_yaw, yaw_from_vector(move_x, move_z)),
+                        CharacterMotorAnim::WalkBackward
+                    )
+                })
+            })
+            .unwrap_or(false);
+        let action = if locked_backstep || analog.is_none() && input.walk < 0 {
             CharacterMotorAction::Backstep
         } else {
             CharacterMotorAction::Roll
         };
+        if let Some((move_x, move_z, _)) = analog {
+            if !locked_backstep {
+                self.yaw = yaw_from_vector(move_x, move_z);
+            }
+        }
         let cost = match action {
             CharacterMotorAction::Idle => 0,
             CharacterMotorAction::Roll => config.roll_cost_q12,
@@ -865,6 +900,14 @@ impl CharacterMotorState {
         if let Some(position) = body_stand_position(collision, z_only, radius, height) {
             self.position = position;
             return (position.x != start.x || position.z != start.z, true);
+        }
+
+        // `apply_vertical` validated and anchored this exact X/Z at the start
+        // of the tick. When every candidate is blocked, keep that known-good
+        // grounded position instead of repeating two full floor/wall scans.
+        // The recovery probes below remain for airborne/no-floor edge cases.
+        if self.grounded {
+            return (false, true);
         }
 
         if body_stand_position(collision, start, radius, height).is_some() {
@@ -1489,6 +1532,20 @@ fn yaw_from_vector(dx: Q12, dz: Q12) -> Angle {
     Angle::from_q12((angle & 0x0FFF) as u16)
 }
 
+fn locked_locomotion_anim(facing_yaw: Angle, move_yaw: Angle) -> CharacterMotorAnim {
+    let delta = facing_yaw.shortest_delta_q12(move_yaw);
+    let abs_delta = i32::from(delta).abs();
+    if abs_delta <= 512 {
+        CharacterMotorAnim::Walk
+    } else if abs_delta >= 1536 {
+        CharacterMotorAnim::WalkBackward
+    } else if delta < 0 {
+        CharacterMotorAnim::StrafeLeft
+    } else {
+        CharacterMotorAnim::StrafeRight
+    }
+}
+
 fn stand_height(room: RoomCollision<'_, '_>, x: i32, z: i32, radius: i32) -> Option<i32> {
     let height = floor_height_at(room, x, z)?;
     if radius <= 0 {
@@ -1686,6 +1743,17 @@ fn circle_overlaps_segment(
     bx: i32,
     bz: i32,
 ) -> bool {
+    // Most walls in the small sector neighbourhood are nowhere near the body.
+    // Reject them before the closest-point projection, whose Q12 divide is
+    // comparatively expensive on the R3000.
+    let radius = radius.max(0);
+    if cx < ax.min(bx).saturating_sub(radius)
+        || cx > ax.max(bx).saturating_add(radius)
+        || cz < az.min(bz).saturating_sub(radius)
+        || cz > az.max(bz).saturating_add(radius)
+    {
+        return false;
+    }
     let vx = bx.saturating_sub(ax);
     let vz = bz.saturating_sub(az);
     let wx = cx.saturating_sub(ax);
@@ -1971,6 +2039,52 @@ mod tests {
         assert_eq!(frame.yaw, Angle::QUARTER);
         assert_eq!(frame.anim, CharacterMotorAnim::Walk);
         assert!(frame.moved);
+    }
+
+    #[test]
+    fn locked_movement_preserves_facing_and_reports_directional_intent() {
+        let cases = [
+            (Q12::ZERO, Q12::ONE, CharacterMotorAnim::Run),
+            (Q12::ZERO, Q12::NEG_ONE, CharacterMotorAnim::WalkBackward),
+            (Q12::NEG_ONE, Q12::ZERO, CharacterMotorAnim::StrafeLeft),
+            (Q12::ONE, Q12::ZERO, CharacterMotorAnim::StrafeRight),
+        ];
+        for (move_x, move_z, expected) in cases {
+            let mut motor = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO);
+            let frame = motor.update(
+                None,
+                CharacterMotorInput {
+                    move_x,
+                    move_z,
+                    facing_yaw: Some(Angle::ZERO),
+                    sprint: true,
+                    ..CharacterMotorInput::default()
+                },
+                config(),
+            );
+            assert_eq!(frame.yaw, Angle::ZERO);
+            assert_eq!(frame.anim, expected);
+            assert_eq!(frame.sprinting, matches!(expected, CharacterMotorAnim::Run));
+        }
+    }
+
+    #[test]
+    fn locked_backward_evade_uses_backstep_without_turning_away() {
+        let mut motor = CharacterMotorState::new(RoomPoint::ZERO, Angle::ZERO);
+        let frame = motor.update(
+            None,
+            CharacterMotorInput {
+                move_z: Q12::NEG_ONE,
+                facing_yaw: Some(Angle::ZERO),
+                evade: true,
+                ..CharacterMotorInput::default()
+            },
+            config(),
+        );
+        assert_eq!(frame.action, CharacterMotorAction::Backstep);
+        assert_eq!(frame.anim, CharacterMotorAnim::Backstep);
+        assert_eq!(frame.yaw, Angle::ZERO);
+        assert!(frame.position.z < 0);
     }
 
     #[test]

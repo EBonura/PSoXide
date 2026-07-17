@@ -5,7 +5,8 @@
 //! Pushing the stick forward moves in the camera's view direction;
 //! pushing right moves toward screen-right.
 
-use crate::{Angle, Q12};
+use crate::{Angle, RoomPoint, Q12};
+use psx_math::atan2_q12;
 use psx_math::int32::isqrt_i32;
 
 /// One centred analog input axis.
@@ -166,6 +167,19 @@ pub struct CameraRelativeMove {
     pub forward: i8,
 }
 
+/// World-space yaw from `from` toward `to` using the character motor's
+/// `x = sin(yaw), z = cos(yaw)` convention. Coincident points have no
+/// meaningful direction and return `None`.
+pub fn yaw_to_point(from: RoomPoint, to: RoomPoint) -> Option<Angle> {
+    let dx = to.x.saturating_sub(from.x);
+    let dz = to.z.saturating_sub(from.z);
+    if dx == 0 && dz == 0 {
+        None
+    } else {
+        Some(Angle::from_q12(atan2_q12(dx, dz)))
+    }
+}
+
 /// Convert local stick axes into a world-space camera-relative
 /// movement vector.
 ///
@@ -259,6 +273,20 @@ mod tests {
 
     const DEADZONE: i16 = 18;
     const AXIS_MAX: i16 = 127;
+
+    #[test]
+    fn yaw_to_point_uses_character_facing_convention() {
+        let origin = RoomPoint::ZERO;
+        assert_eq!(
+            yaw_to_point(origin, RoomPoint::new(0, 0, 10)),
+            Some(Angle::ZERO)
+        );
+        assert_eq!(
+            yaw_to_point(origin, RoomPoint::new(10, 0, 0)),
+            Some(Angle::QUARTER)
+        );
+        assert_eq!(yaw_to_point(origin, origin), None);
+    }
 
     #[test]
     fn forward_uses_q12_camera_yaw_without_low_byte_aliasing() {

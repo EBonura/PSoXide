@@ -113,8 +113,8 @@ pub enum PlaytestAssetKind {
 /// payload is packed into the parallel UI.PAK that the runtime loads
 /// on demand, keeping it out of the guest's baked `.data`. The class
 /// distinguishes which transient staging buffer the runtime loads
-/// through so each buffer stays right-sized: small for menu UI images,
-/// larger for gameplay-scoped textures like the sky panorama.
+/// through, or whether the payload receives stable session-lifetime
+/// storage for parsed models and animations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StreamedClass {
     /// Baked into the guest `.data` via `include_bytes!`; never streamed.
@@ -126,6 +126,9 @@ pub enum StreamedClass {
     /// UI.PAK and staged through a larger transient buffer, loaded on
     /// gameplay entry and freed on gameplay exit.
     Gameplay,
+    /// Model mesh, atlas, or animation loaded during the initial loading
+    /// screen and kept in stable RAM for the complete gameplay session.
+    PersistentGameplay,
 }
 
 impl StreamedClass {
@@ -155,13 +158,12 @@ pub struct PlaytestAsset {
     /// CD-streaming class. [`StreamedClass::None`] bakes the payload
     /// into the guest `.data`; the other variants route the payload to
     /// UI.PAK keyed by asset index, with the variant selecting the
-    /// runtime staging buffer (small for UI images, larger for
-    /// gameplay-scoped textures like the sky panorama).
+    /// runtime lifetime and destination arena.
     pub streamed_class: StreamedClass,
 }
 
 impl PlaytestAsset {
-    /// `true` when this asset's payload is CD-streamed off UI.PAK.
+    /// `true` when this asset's payload is CD-streamed off the asset pack.
     pub fn is_streamed(&self) -> bool {
         self.streamed_class.is_streamed()
     }
@@ -655,21 +657,34 @@ pub struct PlaytestModel {
     pub collision_radius: u16,
 }
 
-/// Covering-material override cooked for one placed model instance
-/// or the player character: the model draws its own UVs against the
-/// resolved material texture instead of the model's baked atlas.
+/// Material override cooked for one placed model instance or the
+/// player character. A missing texture keeps the model's baked atlas
+/// while still applying blend mode, tint, and face sidedness.
 /// Mirrors [`psx_level::LevelModelMaterialOverride`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlaytestModelMaterialOverride {
-    /// Index into [`PlaytestPackage::assets`] of the material's
-    /// `.psxt` texture.
-    pub texture_asset_index: usize,
+    /// Index into [`PlaytestPackage::assets`] of an optional covering
+    /// `.psxt` texture. `None` keeps the model atlas.
+    pub texture_asset_index: Option<usize>,
     /// Authored PS1 blend mode.
     pub blend_mode: crate::PsxBlendMode,
     /// Authored modulation tint.
     pub tint_rgb: [u8; 3],
+    /// Optional independently blended second texture pass.
+    pub secondary_layer: Option<PlaytestModelSecondaryLayer>,
     /// Authored face sidedness.
     pub face_sidedness: crate::MaterialFaceSidedness,
+}
+
+/// Cooked host-side description of a model material's second pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestModelSecondaryLayer {
+    /// Index into [`PlaytestPackage::assets`] of the 4bpp layer texture.
+    pub texture_asset_index: usize,
+    /// Independent authored PS1 blend mode.
+    pub blend_mode: crate::PsxBlendMode,
+    /// Independent modulation tint.
+    pub tint_rgb: [u8; 3],
 }
 
 /// One placed model instance. Coordinates are room-local
@@ -791,8 +806,7 @@ pub struct PlaytestBoxProp {
 /// [`psx_level::LevelUiAction`]: the authored `GotoScene(UiSceneId)`
 /// is resolved to a cooked [`PlaytestUiScene::id`] at cook time, and
 /// the option/game ids are carried as compact integers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PlaytestUiAction {
     /// Switch to the cooked composed scene state with this id.
     GotoState {
@@ -877,7 +891,6 @@ pub enum PlaytestTransitionKind {
     /// Digital glitch break.
     GlitchBreak,
 }
-
 
 /// One cooked UI gradient paint. Nodes reference these by small indices
 /// when one of their color roles needs something richer than a solid fill.
@@ -1404,6 +1417,22 @@ pub struct PlaytestGameEntity {
     pub patrol_wait_ticks: u16,
     /// XZ aggro radius in engine units.
     pub aggro_radius: u16,
+    /// Initial combat reaction delay in 60 Hz ticks.
+    pub reaction_ticks: u8,
+    /// Desired non-attacker distance in engine units.
+    pub preferred_distance: u16,
+    /// Half-width of the desired-distance band.
+    pub spacing_tolerance: u16,
+    /// Hold/circle decision cadence in 60 Hz ticks.
+    pub decision_interval_ticks: u8,
+    /// Percent chance that an in-band decision circles.
+    pub circle_chance: u8,
+    /// Relative combat-director attack priority.
+    pub attack_priority: u8,
+    /// Local post-attack cooldown in 60 Hz ticks.
+    pub attack_cooldown_ticks: u8,
+    /// Shared director delay after this entity attacks.
+    pub group_attack_delay_ticks: u8,
     /// Attack windup ticks.
     pub windup_ticks: u8,
     /// Post-attack recovery ticks.

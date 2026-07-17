@@ -17,9 +17,9 @@
 //! minting another mirrors the old disjoint-statics aliasing exactly;
 //! the pre-existing rule is unchanged: never hold two borrows of the
 //! SAME field at once, and treat streamed-slot views as stale after the
-//! next streaming step (the [`StreamedRoomSlots`] staleness contract).
+//! next streaming step (the [`StreamedRoomPages`] staleness contract).
 //!
-//! [`StreamedRoomSlots`]: psx_game_runtime::room_streaming::StreamedRoomSlots
+//! [`StreamedRoomPages`]: psx_game_runtime::room_streaming::StreamedRoomPages
 
 use super::*;
 
@@ -36,9 +36,12 @@ pub(super) struct RuntimeArenas {
     /// Menu/gameplay RAM overlay (see [`MenuGameplayOverlay`]).
     #[cfg(feature = "cd-stream-bench")]
     pub(super) overlay: MenuGameplayOverlay,
-    /// Streamed-room slot word buffers the CD loads land in.
+    /// Streamed-room sector pages the CD loads land in directly.
     #[cfg(feature = "cd-stream-bench")]
     pub(super) streamed_slots: RuntimeStreamedRoomSlots,
+    /// Stable session-lifetime storage for streamed models and animations.
+    #[cfg(feature = "cd-stream-bench")]
+    pub(super) persistent_assets: RuntimePersistentAssetStreamer,
     /// Streamed-room residency scheduler over `streamed_slots`.
     #[cfg(feature = "cd-stream-bench")]
     pub(super) room_streams: RuntimeRoomStreamScheduler,
@@ -119,6 +122,8 @@ impl RuntimeArenas {
         #[cfg(feature = "cd-stream-bench")]
         streamed_slots: RuntimeStreamedRoomSlots::new(),
         #[cfg(feature = "cd-stream-bench")]
+        persistent_assets: RuntimePersistentAssetStreamer::zeroed(),
+        #[cfg(feature = "cd-stream-bench")]
         room_streams: RuntimeRoomStreamScheduler::zeroed(),
         #[cfg(feature = "cd-stream-bench")]
         room_materials: RuntimeRoomMaterialPool::zeroed(),
@@ -143,6 +148,9 @@ impl RuntimeArenas {
         self.vram = RuntimeVram::new(VRAM_LAYOUT);
         #[cfg(feature = "cd-stream-bench")]
         {
+            // `persistent_assets` deliberately remains in its all-zero idle
+            // state. `begin` stamps its metadata in place; assigning `new()`
+            // here would put the entire sector-page store on the PS1 stack.
             self.room_streams = RuntimeRoomStreamScheduler::new();
             self.room_materials.init(room_material_fallback());
         }
@@ -196,7 +204,9 @@ pub(super) fn font_scratch_arena() -> &'static mut RuntimeFontPackScratch {
 #[cfg(feature = "cd-stream-bench")]
 pub(super) fn ui_images_arena() -> &'static RuntimeUiImageCache {
     // SAFETY: see `vram_arena` + the `MenuGameplayOverlay` contract.
-    unsafe { &*core::ptr::addr_of!((*arenas_ptr()).overlay.ui_images).cast::<RuntimeUiImageCache>() }
+    unsafe {
+        &*core::ptr::addr_of!((*arenas_ptr()).overlay.ui_images).cast::<RuntimeUiImageCache>()
+    }
 }
 
 /// Exclusive borrow of the streamed-UI image RAM cache.
@@ -209,7 +219,7 @@ pub(super) fn ui_images_arena_mut() -> &'static mut RuntimeUiImageCache {
     }
 }
 
-/// Shared borrow of the streamed-room slot buffers. Views resolved out
+/// Shared borrow of the streamed-room page pool. Views resolved out
 /// of the slots inherit the type's staleness contract: re-resolve after
 /// every streaming step.
 #[cfg(feature = "cd-stream-bench")]
@@ -218,12 +228,26 @@ pub(super) fn streamed_slots_arena() -> &'static RuntimeStreamedRoomSlots {
     unsafe { &(*arenas_ptr()).streamed_slots }
 }
 
-/// Exclusive borrow of the streamed-room slot buffers (the CD pump's
+/// Exclusive borrow of the streamed-room page pool (the CD pump's
 /// write destination).
 #[cfg(feature = "cd-stream-bench")]
 pub(super) fn streamed_slots_arena_mut() -> &'static mut RuntimeStreamedRoomSlots {
     // SAFETY: see `vram_arena`.
     unsafe { &mut (*arenas_ptr()).streamed_slots }
+}
+
+/// Shared borrow of stable persistent gameplay asset storage.
+#[cfg(feature = "cd-stream-bench")]
+pub(super) fn persistent_assets_arena() -> &'static RuntimePersistentAssetStreamer {
+    // SAFETY: see `vram_arena`.
+    unsafe { &(*arenas_ptr()).persistent_assets }
+}
+
+/// Exclusive borrow of the persistent gameplay asset loader and storage.
+#[cfg(feature = "cd-stream-bench")]
+pub(super) fn persistent_assets_arena_mut() -> &'static mut RuntimePersistentAssetStreamer {
+    // SAFETY: see `vram_arena`.
+    unsafe { &mut (*arenas_ptr()).persistent_assets }
 }
 
 /// Exclusive borrow of the streamed-room scheduler, same discipline as
@@ -255,8 +279,8 @@ pub(super) fn prebuilt_quads_arena() -> &'static mut RuntimePrebuiltRoomQuads {
     // SAFETY: see `vram_arena` + the `MenuGameplayOverlay` contract.
     #[cfg(feature = "cd-stream-bench")]
     unsafe {
-        let gameplay = core::ptr::addr_of_mut!((*arenas_ptr()).overlay.gameplay)
-            .cast::<GameplayRoomArenas>();
+        let gameplay =
+            core::ptr::addr_of_mut!((*arenas_ptr()).overlay.gameplay).cast::<GameplayRoomArenas>();
         &mut (*gameplay).prebuilt_quads
     }
     #[cfg(not(feature = "cd-stream-bench"))]
@@ -295,8 +319,8 @@ pub(super) fn room_projection_arena() -> &'static mut RuntimeCachedRoomProjectio
     // SAFETY: see `vram_arena` + the `MenuGameplayOverlay` contract.
     #[cfg(feature = "cd-stream-bench")]
     unsafe {
-        let gameplay = core::ptr::addr_of_mut!((*arenas_ptr()).overlay.gameplay)
-            .cast::<GameplayRoomArenas>();
+        let gameplay =
+            core::ptr::addr_of_mut!((*arenas_ptr()).overlay.gameplay).cast::<GameplayRoomArenas>();
         &mut (*gameplay).room_projection
     }
     #[cfg(not(feature = "cd-stream-bench"))]
