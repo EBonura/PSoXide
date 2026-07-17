@@ -421,6 +421,7 @@ pub(crate) fn cook_player_character(
         distance: character.camera_distance,
         height: character.camera_height,
         target_height: character.camera_target_height,
+        lock_rise_percent: crate::default_world_camera_lock_rise_percent(),
         min_floor_clearance: crate::default_world_camera_min_floor_clearance(),
         orbit_speed_level: crate::default_world_camera_orbit_speed_level(),
         position_lag_shift: crate::default_world_camera_position_lag_shift(),
@@ -669,12 +670,6 @@ pub(crate) fn cook_player_character(
             "Character '{character_name}' has no roll clip -- runtime will fall back to run/walk",
         ));
     }
-    if action_clips[CharacterAnimationAction::Backstep.to_index()] == CHARACTER_CLIP_NONE {
-        report.warn(format!(
-            "Character '{character_name}' has no backstep clip -- runtime will fall back to walk",
-        ));
-    }
-
     let character_index = u16::try_from(characters.len()).unwrap_or(u16::MAX);
     characters.push(PlaytestCharacter {
         source_resource: character_id.unwrap_or(model_resource_id),

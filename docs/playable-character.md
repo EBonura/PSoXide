@@ -137,9 +137,11 @@ Per-frame update:
   authored spawn transform.
 - CIRCLE held while moving: `Run` animation at `run_speed`. If the
   character has no run clip, the walk animation plays at run speed.
-  Locked lateral/backward movement stays at the authored walk cadence.
-- CIRCLE tapped while locked and moving backward starts `Backstep`;
-  other movement directions start `Roll`.
+  Sprint works in every locked direction; the target and camera lock remain
+  active while the character temporarily faces the travel direction.
+- CIRCLE tapped starts a directional `Roll` in both locked and unlocked
+  movement. Lock-on remains active throughout the roll. A neutral tap travels
+  forward in the current combat/free-movement facing. There is no backstep.
 - SELECT: toggle a free-orbit debug camera.
 - Right stick: manual third-person camera orbit when the pad is in
   analog mode.
@@ -147,7 +149,10 @@ Per-frame update:
   right stick.
 - L1: recenter the third-person camera behind the player.
 - R3: hard-lock / unlock the most central entity target in range.
-- L2 / R2: switch lock-on target left / right.
+- Right-stick flick: switch hard-lock target in screen-space order.
+- Lock acquisition considers only live gameplay entities inside the camera
+  cone. Dead targets release immediately; a living target receives a short
+  break-range grace window before lock is dropped.
 - Soft-lock: when no hard lock is active, the camera can bias
   toward a central target in range; strong right-stick input
   suppresses it until the player leaves and re-enters range.
@@ -161,7 +166,7 @@ proper capsule sliding lands. The committed Y position follows the
 sampled floor height under the player's root.
 
 Animation state for editor-playtest includes free locomotion, directional
-lock-on locomotion, roll/backstep, and light/heavy attacks. Optional
+lock-on locomotion, directional roll, and light/heavy attacks. Optional
 directional clips fall back to `Walk`; missing evade and attack clips retain
 their established deterministic fallbacks. State changes reset the animation
 phase so transitions don't pop into the middle of a clip.
@@ -170,6 +175,9 @@ Camera: `psx_engine::ThirdPersonCameraState` owns the follow rig.
 It starts from the Character camera defaults, placing the focus and
 camera at positive upward offsets from the player's floor/root
 position, then applies:
+
+- a lock-specific vertical lift that keeps the player lower in frame and
+  exposes more of the target while retaining the bounded player/target bias;
 
 - manual input cooldown, so right-stick orbit does not fight
   automatic re-alignment;

@@ -46,6 +46,10 @@ pub struct ThirdPersonCameraConfig {
     pub height: i32,
     /// Vertical look-at offset above the player origin.
     pub target_height: i32,
+    /// Additional vertical camera lift while a target is locked.
+    /// The focus remains anchored to the player so this cannot push the
+    /// character out through the bottom of the viewport.
+    pub lock_height_boost: i32,
     /// Minimum camera origin height above the sampled floor.
     pub min_floor_clearance: i32,
     /// Extra clearance kept between the camera ray and blocking geometry.
@@ -88,6 +92,11 @@ impl ThirdPersonCameraConfig {
             max_distance: distance,
             height,
             target_height,
+            lock_height_boost: if height > 0 {
+                height.saturating_mul(25) / 100
+            } else {
+                0
+            },
             min_floor_clearance: 0,
             collision_margin: 160,
             pitch_min_q12: -192,
@@ -155,6 +164,7 @@ pub struct ThirdPersonCameraFrame {
 pub struct ThirdPersonCameraState {
     yaw: Angle,
     pitch_q12: i16,
+    lock_pitch_offset_q12: i16,
     distance: i32,
     position: RoomPoint,
     focus: RoomPoint,
@@ -173,6 +183,7 @@ impl ThirdPersonCameraState {
         Self {
             yaw,
             pitch_q12: 0,
+            lock_pitch_offset_q12: 0,
             distance: 0,
             position: RoomPoint::ZERO,
             focus: RoomPoint::ZERO,
@@ -215,6 +226,7 @@ impl ThirdPersonCameraState {
             .distance
             .clamp(config.min_distance, config.max_distance);
         self.pitch_q12 = default_pitch_q12(config);
+        self.lock_pitch_offset_q12 = 0;
         self.focus = player_focus(target.player, config.target_height);
         self.position = camera_position(self.focus, self.distance, self.yaw, self.pitch_q12);
         self.manual_cooldown = 0;
@@ -361,15 +373,28 @@ impl ThirdPersonCameraState {
             );
         }
 
-        self.focus = if target.lock_target.is_some() {
-            approach_vertex_shift(
-                self.focus,
-                focus_goal,
-                config.focus_lag_shift.saturating_sub(1),
-            )
+        self.focus = approach_vertex_shift(self.focus, focus_goal, config.focus_lag_shift);
+
+        // Raise the camera around the player-anchored focus rather than
+        // raising the focus itself. This preserves the player's vertical
+        // screen composition while still revealing more of the arena during
+        // lock-on. Two extra lag bits make entering and leaving the combat
+        // framing deliberately calmer than ordinary focus follow.
+        let lock_pitch_goal = if target.lock_target.is_some() {
+            lock_pitch_offset_q12(config)
         } else {
-            approach_vertex_shift(self.focus, focus_goal, config.focus_lag_shift)
+            0
         };
+        self.lock_pitch_offset_q12 = approach_i16_shift(
+            self.lock_pitch_offset_q12,
+            lock_pitch_goal,
+            config.focus_lag_shift.saturating_add(2),
+        )
+        .clamp(0, config.pitch_max_q12.saturating_sub(self.pitch_q12));
+        let effective_pitch_q12 = self
+            .pitch_q12
+            .saturating_add(self.lock_pitch_offset_q12)
+            .clamp(config.pitch_min_q12, config.pitch_max_q12);
 
         // Spring-arm sweep throttle: the sweep dominates the camera's
         // per-tick cost, and between solves the focus/yaw move by one
@@ -391,7 +416,7 @@ impl ThirdPersonCameraState {
                 collision,
                 self.focus,
                 self.yaw,
-                self.pitch_q12,
+                effective_pitch_q12,
                 config,
             );
             self.cached_solve = solve;
@@ -415,7 +440,7 @@ impl ThirdPersonCameraState {
 
         let desired_position = clamp_camera_to_floor_context(
             collision,
-            camera_position(self.focus, self.distance, self.yaw, self.pitch_q12),
+            camera_position(self.focus, self.distance, self.yaw, effective_pitch_q12),
             config.min_floor_clearance,
         );
         if collision_solve.pull_in {
@@ -436,7 +461,7 @@ impl ThirdPersonCameraState {
             camera: camera_from_position_focus(projection, self.position, self.focus),
             focus: self.focus,
             yaw: self.yaw,
-            pitch_q12: self.pitch_q12,
+            pitch_q12: self.pitch_q12.saturating_add(self.lock_pitch_offset_q12),
             distance: self.distance,
             collision_pull_in: self.last_pull_in,
             collision_rotated: self.last_rotated,
@@ -554,6 +579,7 @@ fn normalize_config(mut config: ThirdPersonCameraConfig) -> ThirdPersonCameraCon
     config.position_lag_shift = config.position_lag_shift.min(6);
     config.focus_lag_shift = config.focus_lag_shift.min(6);
     config.distance_lag_shift = config.distance_lag_shift.min(6);
+    config.lock_height_boost = config.lock_height_boost.max(0);
     config.collision_solve_interval = config.collision_solve_interval.clamp(1, 4);
     config
 }
@@ -566,7 +592,34 @@ fn camera_focus_goal(
     target: ThirdPersonCameraTarget,
     config: ThirdPersonCameraConfig,
 ) -> RoomPoint {
-    player_focus(target.player, config.target_height)
+    let player = player_focus(target.player, config.target_height);
+    let Some(lock) = target.lock_target else {
+        return player;
+    };
+
+    // Bias a quarter of the way toward the target so both combatants remain
+    // legible. Keep the vertical focus on the player: lock-on elevation is a
+    // camera-orbit adjustment, and must never drag the player down and out of
+    // frame. Cap the horizontal offset relative to spring-arm length so a
+    // distant target cannot drag the player out of frame during break grace.
+    let target_focus = player_focus(lock, config.target_height);
+    let blended = lerp_vertex(player, target_focus, 1, 4);
+    let max_offset = (config.distance / 3).max(1);
+    RoomPoint::new(
+        player.x.saturating_add(
+            blended
+                .x
+                .saturating_sub(player.x)
+                .clamp(-max_offset, max_offset),
+        ),
+        player.y,
+        player.z.saturating_add(
+            blended
+                .z
+                .saturating_sub(player.z)
+                .clamp(-max_offset, max_offset),
+        ),
+    )
 }
 
 fn clamp_camera_to_floor(
@@ -1199,6 +1252,19 @@ fn default_pitch_q12(config: ThirdPersonCameraConfig) -> i16 {
     .clamp(config.pitch_min_q12, config.pitch_max_q12)
 }
 
+fn lock_pitch_offset_q12(config: ThirdPersonCameraConfig) -> i16 {
+    let base = default_pitch_q12(config);
+    let raised = pitch_from_vertical_distance(
+        config
+            .height
+            .saturating_sub(config.target_height)
+            .saturating_add(config.lock_height_boost),
+        config.distance,
+    )
+    .clamp(config.pitch_min_q12, config.pitch_max_q12);
+    raised.saturating_sub(base).max(0)
+}
+
 fn pitch_from_vertical_distance(vertical: i32, horizontal: i32) -> i16 {
     if vertical == 0 {
         return 0;
@@ -1260,6 +1326,11 @@ fn approach_i16(current: i16, target: i16, step: i16) -> i16 {
     } else {
         current.saturating_sub(step)
     }
+}
+
+fn approach_i16_shift(current: i16, target: i16, shift: u8) -> i16 {
+    approach_i32_shift(current as i32, target as i32, shift).clamp(i16::MIN as i32, i16::MAX as i32)
+        as i16
 }
 
 fn approach_i32_shift(current: i32, target: i32, shift: u8) -> i32 {
@@ -1631,9 +1702,10 @@ mod tests {
     }
 
     #[test]
-    fn lock_on_keeps_focus_on_player() {
+    fn lock_on_biases_focus_toward_target_without_losing_player_anchor() {
         let mut camera = ThirdPersonCameraState::new(Angle::HALF);
-        let config = ThirdPersonCameraConfig::character(1400, 700, 400);
+        let mut config = ThirdPersonCameraConfig::character(1400, 700, 400);
+        config.focus_lag_shift = 0;
         let mut target = ThirdPersonCameraTarget {
             player: RoomPoint::new(128, 32, -64),
             player_yaw: Angle::ZERO,
@@ -1651,10 +1723,94 @@ mod tests {
             config,
         );
 
-        assert_eq!(
-            frame.focus,
-            player_focus(target.player, config.target_height)
+        let player = player_focus(target.player, config.target_height);
+        assert_eq!(frame.focus, camera_focus_goal(target, config));
+        assert_ne!(frame.focus, player);
+        assert!(frame.focus.x > player.x);
+        assert_eq!(frame.focus.y, player.y);
+        assert!(frame.focus.z > player.z);
+    }
+
+    #[test]
+    fn equal_height_lock_target_raises_combat_framing() {
+        let mut camera = ThirdPersonCameraState::new(Angle::HALF);
+        let mut config = ThirdPersonCameraConfig::character(1400, 700, 400);
+        config.focus_lag_shift = 0;
+        let mut target = ThirdPersonCameraTarget {
+            player: RoomPoint::new(128, 32, -64),
+            player_yaw: Angle::ZERO,
+            moving: false,
+            lock_target: None,
+        };
+        camera.snap_to_player(target, config);
+        let projection = WorldProjection::new(160, 120, 320, 64);
+        let unlocked = camera.current_frame(projection);
+
+        target.lock_target = Some(RoomPoint::new(128, 32, 2048));
+        let locked = camera.update(
+            projection,
+            None,
+            target,
+            ThirdPersonCameraInput::default(),
+            config,
         );
+
+        assert_eq!(locked.focus.y, unlocked.focus.y);
+        assert!(locked.camera.position.y > unlocked.camera.position.y);
+        assert!(locked.pitch_q12 > unlocked.pitch_q12);
+        assert!(
+            locked.pitch_q12
+                < unlocked
+                    .pitch_q12
+                    .saturating_add(lock_pitch_offset_q12(config)),
+            "lock rise should ease instead of snapping to its final elevation"
+        );
+    }
+
+    #[test]
+    fn maximum_lock_rise_keeps_full_player_capsule_in_view() {
+        let projection = WorldProjection::new(160, 120, 320, 64);
+        let mut camera = ThirdPersonCameraState::new(Angle::HALF);
+        let mut config = ThirdPersonCameraConfig::character(3300, 1500, 900);
+        config.lock_height_boost = config.height;
+        let target = ThirdPersonCameraTarget {
+            player: RoomPoint::ZERO,
+            player_yaw: Angle::ZERO,
+            moving: false,
+            lock_target: Some(RoomPoint::new(0, 0, 2400)),
+        };
+        camera.snap_to_player(target, config);
+
+        let mut frame = camera.current_frame(projection);
+        let assert_player_framed = |frame: ThirdPersonCameraFrame| {
+            let feet = frame
+                .camera
+                .project_world(target.player)
+                .expect("player feet remain in front of camera");
+            let head = frame
+                .camera
+                .project_world(RoomPoint::new(
+                    target.player.x,
+                    target.player.y + 1024,
+                    target.player.z,
+                ))
+                .expect("player head remains in front of camera");
+            assert!((0..240).contains(&feet.sy), "feet clipped at y={}", feet.sy);
+            assert!((0..240).contains(&head.sy), "head clipped at y={}", head.sy);
+        };
+        assert_player_framed(frame);
+        for _ in 0..180 {
+            frame = camera.update(
+                projection,
+                None,
+                target,
+                ThirdPersonCameraInput::default(),
+                config,
+            );
+            assert_player_framed(frame);
+        }
+
+        assert_eq!(frame.focus.y, config.target_height);
     }
 
     #[test]

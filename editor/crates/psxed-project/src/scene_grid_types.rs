@@ -2274,6 +2274,8 @@ pub const DEFAULT_WORLD_CAMERA_DISTANCE: i32 = 2700;
 pub const DEFAULT_WORLD_CAMERA_HEIGHT: i32 = 1280;
 /// Default look-at height above the player origin.
 pub const DEFAULT_WORLD_CAMERA_TARGET_HEIGHT: i32 = 640;
+/// Default additional lock-on camera elevation as a percentage of Height.
+pub const DEFAULT_WORLD_CAMERA_LOCK_RISE_PERCENT: u8 = 25;
 /// Default minimum camera origin height above the sampled floor.
 pub const DEFAULT_WORLD_CAMERA_MIN_FLOOR_CLEARANCE: i32 = HEIGHT_QUANTUM;
 /// Default manual camera orbit speed level. Higher values turn faster.
@@ -2290,6 +2292,8 @@ pub const MIN_WORLD_CAMERA_DISTANCE: i32 = 384;
 pub const MAX_WORLD_CAMERA_DISTANCE: i32 = 16_384;
 /// Maximum authored camera vertical offset.
 pub const MAX_WORLD_CAMERA_HEIGHT: i32 = 16_384;
+/// Maximum authored lock-on camera elevation percentage.
+pub const MAX_WORLD_CAMERA_LOCK_RISE_PERCENT: u8 = 100;
 /// Maximum authored minimum floor clearance for the third-person camera.
 pub const MAX_WORLD_CAMERA_MIN_FLOOR_CLEARANCE: i32 = 4_096;
 /// Minimum authored manual camera orbit speed level.
@@ -2349,6 +2353,10 @@ pub(crate) fn default_world_camera_height() -> i32 {
 
 pub(crate) fn default_world_camera_target_height() -> i32 {
     DEFAULT_WORLD_CAMERA_TARGET_HEIGHT
+}
+
+pub(crate) fn default_world_camera_lock_rise_percent() -> u8 {
+    DEFAULT_WORLD_CAMERA_LOCK_RISE_PERCENT
 }
 
 pub(crate) fn default_world_camera_min_floor_clearance() -> i32 {

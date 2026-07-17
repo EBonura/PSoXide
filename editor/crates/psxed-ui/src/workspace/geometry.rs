@@ -1,6 +1,84 @@
 use super::*;
 
 impl EditorWorkspace {
+    pub(crate) fn preview_character_action(
+        &mut self,
+        selected: NodeId,
+        action: psxed_project::CharacterAnimationAction,
+    ) -> bool {
+        let (host, animator) = {
+            let scene = self.project.active_scene();
+            let Some(selected_node) = scene.node(selected) else {
+                return false;
+            };
+            let host = if matches!(selected_node.kind, NodeKind::Entity) {
+                selected
+            } else if matches!(selected_node.kind, NodeKind::CharacterController { .. }) {
+                let Some(parent) = selected_node.parent else {
+                    self.status = "Character Controller has no owning Entity".to_string();
+                    return false;
+                };
+                parent
+            } else {
+                return false;
+            };
+            let Some(host_node) = scene.node(host) else {
+                return false;
+            };
+            let animator = host_node.children.iter().find_map(|child| {
+                scene
+                    .node(*child)
+                    .filter(|node| matches!(node.kind, NodeKind::Animator { .. }))
+                    .map(|node| node.id)
+            });
+            (host, animator)
+        };
+
+        let Some(animator) = animator else {
+            self.status = "Add an Animator component to preview character actions".to_string();
+            return false;
+        };
+
+        let local_clip =
+            self.project
+                .active_scene()
+                .node(animator)
+                .and_then(|node| match &node.kind {
+                    NodeKind::Animator { action_clips, .. } => action_clips
+                        .iter()
+                        .find(|binding| binding.action == action)
+                        .map(|binding| binding.clip),
+                    _ => None,
+                });
+        let context = selected_animator_clip_context(&self.project, animator, &self.project_dir);
+        let clip = local_clip.or_else(|| {
+            context
+                .as_ref()
+                .and_then(|ctx| ctx.profile_action_clips[action.to_index()])
+        });
+        let Some(clip) = clip else {
+            self.status = format!(
+                "{} has no effective animation clip; bind one on Animator",
+                action.label()
+            );
+            return false;
+        };
+        let clip_name = context
+            .as_ref()
+            .and_then(|ctx| ctx.clips.get(clip as usize))
+            .cloned()
+            .unwrap_or_else(|| format!("Clip {clip}"));
+
+        self.character_motion_preview = Some(CharacterMotionPreviewState {
+            entity: host,
+            action,
+            clip,
+            started_at: Instant::now(),
+        });
+        self.status = format!("Previewing {} · {clip_name}", action.label());
+        false
+    }
+
     /// Single dispatch point for primary-button clicks on the viewport.
     pub(crate) fn handle_viewport_click(
         &mut self,
@@ -910,16 +988,23 @@ impl EditorWorkspace {
         }
     }
 
-    pub(crate) fn draw_component_authoring_panel(&mut self, ui: &mut egui::Ui, selected: NodeId) {
+    pub(crate) fn draw_component_authoring_panel(
+        &mut self,
+        ui: &mut egui::Ui,
+        selected: NodeId,
+        character_options: &[(ResourceId, String)],
+        nav_target: &mut Option<ResourceId>,
+        preview_action: &mut Option<psxed_project::CharacterAnimationAction>,
+    ) -> bool {
         let scene = self.project.active_scene();
         let Some(node) = scene.node(selected) else {
-            return;
+            return false;
         };
 
         let is_host = matches!(node.kind, NodeKind::Entity);
         let is_component = node.kind.is_component();
         if !is_host && !is_component {
-            return;
+            return false;
         }
 
         if is_component {
@@ -943,27 +1028,16 @@ impl EditorWorkspace {
                         ui.weak("Component has no host parent.");
                     }
                 });
-            return;
+            return false;
         }
 
         let host_kind = node.kind.clone();
-        let components: Vec<(NodeId, String, &'static str, Option<bool>)> = node
+        let components: Vec<(NodeId, String, &'static str)> = node
             .children
             .iter()
             .filter_map(|id| scene.node(*id))
             .filter(|child| child.kind.is_component())
-            .map(|child| {
-                let player_controlled = match &child.kind {
-                    NodeKind::CharacterController { player, .. } => Some(*player),
-                    _ => None,
-                };
-                (
-                    child.id,
-                    child.name.clone(),
-                    child.kind.label(),
-                    player_controlled,
-                )
-            })
+            .map(|child| (child.id, child.name.clone(), child.kind.label()))
             .collect();
         let existing: Vec<&NodeKind> = node
             .children
@@ -976,43 +1050,88 @@ impl EditorWorkspace {
 
         let mut add_component = None;
         let mut select_component = None;
-        let mut set_player_controlled = None;
+        let mut promoted_controller = None;
+        let mut changed = false;
         egui::CollapsingHeader::new(icons::label(icons::LAYERS, "Components"))
             .default_open(true)
             .show(ui, |ui| {
                 if components.is_empty() {
                     ui.weak("No components attached.");
                 } else {
-                    for (id, name, kind, player_controlled) in &components {
-                        ui.horizontal(|ui| {
-                            draw_inline_icon(ui, node_lucide_icon(kind, false), STUDIO_TEXT_WEAK);
-                            ui.label(name);
-                            ui.label(RichText::new(*kind).color(STUDIO_TEXT_WEAK).small());
-                            if ui
-                                .small_button(icons::text(icons::POINTER, 14.0))
-                                .on_hover_text("Select this component")
-                                .clicked()
-                            {
-                                select_component = Some(*id);
-                            }
-                        });
-                        // Component-specific toggles go on their own line so they
-                        // don't overflow the name/kind/select row.
-                        if let Some(player_controlled) = player_controlled {
-                            let mut player = *player_controlled;
-                            ui.horizontal(|ui| {
-                                ui.add_space(24.0);
-                                if ui
-                                    .checkbox(
-                                        &mut player,
-                                        icons::label(icons::MAP_PIN, "Player controlled"),
-                                    )
-                                    .changed()
-                                {
-                                    set_player_controlled = Some((*id, player));
+                    for (id, name, kind) in &components {
+                        let is_character_controller = *kind == "Character Controller";
+                        let title = if name == kind {
+                            name.clone()
+                        } else {
+                            format!("{name} · {kind}")
+                        };
+                        inspector_section(
+                            ui,
+                            ("entity-component", selected.raw(), id.raw()),
+                            node_lucide_icon(kind, false),
+                            &title,
+                            is_character_controller,
+                            |ui| {
+                                if is_character_controller {
+                                    let (component_changed, became_player) = {
+                                        let Some(node) =
+                                            self.project.active_scene_mut().node_mut(*id)
+                                        else {
+                                            ui.colored_label(
+                                                Color32::from_rgb(220, 120, 100),
+                                                "Component no longer exists.",
+                                            );
+                                            return;
+                                        };
+                                        let NodeKind::CharacterController {
+                                            character,
+                                            settings,
+                                            player,
+                                        } = &mut node.kind
+                                        else {
+                                            return;
+                                        };
+                                        let was_player = *player;
+                                        let edited = ui
+                                            .push_id(
+                                                ("inline-character-controller", id.raw()),
+                                                |ui| {
+                                                    draw_character_controller_editor(
+                                                        ui,
+                                                        character,
+                                                        settings,
+                                                        player,
+                                                        character_options,
+                                                        nav_target,
+                                                        preview_action,
+                                                    )
+                                                },
+                                            )
+                                            .inner;
+                                        (edited, !was_player && *player)
+                                    };
+                                    changed |= component_changed;
+                                    if became_player {
+                                        promoted_controller = Some(*id);
+                                    }
+                                } else {
+                                    ui.label(
+                                        RichText::new(
+                                            "This component keeps its dedicated settings editor.",
+                                        )
+                                        .color(STUDIO_TEXT_WEAK)
+                                        .small(),
+                                    );
                                 }
-                            });
-                        }
+                                if ui
+                                    .button(icons::label(icons::POINTER, "Open full settings"))
+                                    .on_hover_text("Select this component in the Scene Graph")
+                                    .clicked()
+                                {
+                                    select_component = Some(*id);
+                                }
+                            },
+                        );
                     }
                 }
 
@@ -1039,11 +1158,13 @@ impl EditorWorkspace {
         if let Some((label, kind)) = add_component {
             self.add_component_to_host(selected, label, kind);
         }
-        if let Some((controller, player)) = set_player_controlled {
-            self.set_character_controller_player_controlled(controller, player);
+        if let Some(controller) = promoted_controller {
+            self.demote_player_sources_except(Some(controller));
         }
+        changed
     }
 
+    #[cfg(test)]
     pub(crate) fn set_character_controller_player_controlled(
         &mut self,
         controller: NodeId,

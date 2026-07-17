@@ -272,7 +272,7 @@ mask width); entity Attack windows resolve contact against the
 player through the same arc shape (front 60-degree half-arc
 around the facing committed at windup), once per swing, whiffing
 entirely against motor i-frames
-(`CharacterMotorState::is_action_invulnerable`, the roll/backstep
+(`CharacterMotorState::is_action_invulnerable`, the directional-roll
 invulnerability window -- constraint 1's dodge rule). Damage and
 poise flow through `apply_hit` (poise break -> Staggered, health
 0 -> Dead); dead entities stop blocking and stop being targets.
