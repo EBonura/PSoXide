@@ -1,6 +1,34 @@
 use super::*;
 
 #[test]
+fn reflective_model_material_packs_probe_controls_without_losing_sidedness() {
+    let material = PlaytestModelMaterialOverride {
+        texture_asset_index: None,
+        blend_mode: crate::PsxBlendMode::Average,
+        tint_rgb: [128; 3],
+        secondary_layer: None,
+        reflection_probe: Some(crate::ReflectionProbeMaterial {
+            strength: 173,
+            roughness: 191,
+        }),
+        face_sidedness: crate::MaterialFaceSidedness::Both,
+    };
+
+    let flags = model_material_flags(&material);
+    let cooked = psx_level::LevelModelMaterialOverride {
+        texture_asset: None,
+        blend_mode: 0,
+        tint_rgb: [128; 3],
+        secondary_layer: None,
+        flags,
+    };
+    assert_eq!(cooked.sidedness(), psx_level::LevelMaterialSidedness::Both);
+    assert!(cooked.uses_room_reflection_probe());
+    assert_eq!(cooked.reflection_roughness_level(), 2);
+    assert_eq!(cooked.reflection_strength(), 173);
+}
+
+#[test]
 fn room_texture_vram_bytes_match_runtime_compact_tile_upload() {
     let bytes = std::fs::read(
         crate::default_project_dir().join("assets/textures/delven_01_slateflr1a_q2.psxt"),
@@ -682,6 +710,7 @@ fn test_room_asset(bytes: Vec<u8>, index: usize) -> PlaytestAsset {
 
 fn test_room(world_asset_index: usize) -> PlaytestRoom {
     PlaytestRoom {
+        reflection_probe_asset_index: None,
         name: format!("Room {world_asset_index}"),
         world_asset_index,
         origin_x: 0,

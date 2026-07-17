@@ -526,6 +526,17 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     }
     out.push_str("];\n\n");
 
+    out.push_str("/// Per-runtime-room host-baked 4bpp reflection probes.\n");
+    out.push_str("pub static ROOM_REFLECTION_PROBES: &[Option<AssetId>] = &[\n");
+    for room in &package.rooms {
+        let literal = room
+            .reflection_probe_asset_index
+            .map(|index| format!("Some(AssetId({index}))"))
+            .unwrap_or_else(|| "None".to_string());
+        let _ = writeln!(out, "    {literal},");
+    }
+    out.push_str("];\n\n");
+
     out.push_str("/// Cooked runtime chunk metadata.\n");
     out.push_str("pub static ROOM_CHUNKS: &[LevelChunkRecord] = &[\n");
     for chunk in &package.chunks {
@@ -842,7 +853,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     // asset + every model mesh + every animation clip
     // referenced by an instance OR by the player character in
     // this room; required VRAM = every distinct texture asset
-    // (room materials + far-vista panels + model atlases)
+    // (room materials + room reflection probes + far-vista panels + model atlases)
     // referenced by this room. Warm lists mirror touching chunks
     // so the runtime can preload neighbours without owning their
     // shared assets twice.
@@ -3004,6 +3015,18 @@ const fn material_flags_for_sidedness(sidedness: crate::MaterialFaceSidedness) -
     }
 }
 
+fn model_material_flags(material: &PlaytestModelMaterialOverride) -> u16 {
+    let mut flags = material_flags_for_sidedness(material.face_sidedness);
+    if let Some(reflection) = material.reflection_probe {
+        let roughness_level = u16::from(reflection.roughness >> 6).min(3);
+        flags |= psx_level::material_flags::MODEL_REFLECTION_PROBE;
+        flags |= roughness_level << psx_level::material_flags::MODEL_REFLECTION_ROUGHNESS_SHIFT;
+        flags |= u16::from(reflection.strength)
+            << psx_level::material_flags::MODEL_REFLECTION_STRENGTH_SHIFT;
+    }
+    flags
+}
+
 fn level_material_animation_literal(animation: crate::MaterialAnimation) -> String {
     match animation.mode {
         crate::MaterialAnimationMode::Static => "LevelMaterialAnimation::Static".to_string(),
@@ -3075,7 +3098,7 @@ fn model_material_override_literal(
                 o.tint_rgb[0],
                 o.tint_rgb[1],
                 o.tint_rgb[2],
-                material_flags_for_sidedness(o.face_sidedness),
+                model_material_flags(o),
             )
         }
         None => "None".to_string(),
@@ -3136,6 +3159,9 @@ fn room_required_assets(
         push_unique(&mut required_vram, *asset_index);
     }
     if let Some(asset_index) = room.sky.cloud_layer.texture_asset_index {
+        push_unique(&mut required_vram, asset_index);
+    }
+    if let Some(asset_index) = room.reflection_probe_asset_index {
         push_unique(&mut required_vram, asset_index);
     }
     for prop in &package.image_props {

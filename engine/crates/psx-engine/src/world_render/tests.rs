@@ -974,15 +974,16 @@ fn grid_visible_cell_camera_depth_fits_existing_padding() {
 }
 
 #[test]
-fn world_uv_scroll_uses_video_rate_and_wraps_signed_motion() {
+fn world_uv_scroll_uses_video_rate_and_wraps_inside_the_texture_window() {
     let animation = WorldMaterialAnimation::UvScroll {
         speed_u_q8: 2 * 256,
         speed_v_q8: -2 * 256,
-        phase_u: 0,
-        phase_v: 0,
+        phase_u: 250,
+        phase_v: 250,
     };
-    assert_eq!(animation.uv_offset(30, 60, 64, 64), (1, 255));
-    assert_eq!(animation.uv_offset(25, 50, 64, 64), (1, 255));
+    assert_eq!(animation.uv_offset(30, 60, 64, 64), (59, 57));
+    assert_eq!(animation.uv_offset(25, 50, 64, 64), (59, 57));
+    assert_eq!(animation.uv_offset(30, 60, 32, 16), (27, 9));
 }
 
 #[test]

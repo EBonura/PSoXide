@@ -442,6 +442,31 @@ pub struct ModelUvOffset {
     pub v: u8,
 }
 
+/// UV source used by textured model packets.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum ModelUvMapping {
+    /// Preserve UVs authored in the cooked model atlas.
+    #[default]
+    Authored,
+    /// Project the model through the screen into the active room's compact
+    /// environment map. Roughness is a 0..=3 UV-quantisation level.
+    ScreenSpaceReflection {
+        /// Resident probe width in texels.
+        texture_width: u8,
+        /// Resident probe height in texels.
+        texture_height: u8,
+        /// Quantised roughness (`0 = sharp`, `3 = rough`).
+        roughness: u8,
+    },
+}
+
+impl ModelUvMapping {
+    /// Whether packet UVs can use the model's prepacked authored words.
+    pub const fn is_authored(self) -> bool {
+        matches!(self, Self::Authored)
+    }
+}
+
 impl ModelUvOffset {
     /// No UV motion.
     pub const ZERO: Self = Self::new(0, 0);
@@ -1045,6 +1070,8 @@ pub struct WorldSurfaceOptions {
     pub material_animation_tick: u32,
     /// Simulation rate used to convert UV-scroll speeds from texels/second.
     pub material_animation_hz: u16,
+    /// Model-only UV source. Room geometry ignores this field.
+    pub model_uv_mapping: ModelUvMapping,
 }
 
 impl WorldSurfaceOptions {
@@ -1061,6 +1088,7 @@ impl WorldSurfaceOptions {
             textured_split_max_edge: 0,
             material_animation_tick: 0,
             material_animation_hz: 60,
+            model_uv_mapping: ModelUvMapping::Authored,
         }
     }
 
@@ -1079,6 +1107,12 @@ impl WorldSurfaceOptions {
     /// Return options with a different culling mode.
     pub const fn with_cull_mode(mut self, cull_mode: CullMode) -> Self {
         self.cull_mode = cull_mode;
+        self
+    }
+
+    /// Return options with a model-specific UV source.
+    pub const fn with_model_uv_mapping(mut self, mapping: ModelUvMapping) -> Self {
+        self.model_uv_mapping = mapping;
         self
     }
 

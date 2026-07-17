@@ -53,7 +53,7 @@ pub(super) fn expect_room_material_depth(label: &str, bytes: &[u8]) -> Result<()
         || !is_supported_room_material_dimension(texture.height())
     {
         return Err(format!(
-            "texture '{label}' must be a power-of-two room material no larger than 64x64 texels and aligned to 8-texel texture-window units; found {}x{}",
+            "texture '{label}' must be a power-of-two room material no larger than 128x128 texels and aligned to 8-texel texture-window units; found {}x{}",
             texture.width(),
             texture.height(),
         ));
@@ -62,7 +62,7 @@ pub(super) fn expect_room_material_depth(label: &str, bytes: &[u8]) -> Result<()
 }
 
 fn is_supported_room_material_dimension(size: u16) -> bool {
-    (8..=64).contains(&size) && size.is_power_of_two() && size.is_multiple_of(8)
+    (8..=128).contains(&size) && size.is_power_of_two() && size.is_multiple_of(8)
 }
 
 /// Resolve a Material Lab source to a stable cook-cache key and PSXT bytes.

@@ -2964,7 +2964,7 @@ pub(crate) fn draw_model_material_override_editor(
         .checkbox(&mut secondary_enabled, "Secondary texture layer")
         .changed()
     {
-        material.secondary_layer = secondary_enabled.then(ModelSecondaryLayer::default);
+        material.secondary_layer = secondary_enabled.then(ModelSecondaryLayer::moving_default);
         changed = true;
     }
     if let Some(layer) = material.secondary_layer.as_mut() {
@@ -3033,6 +3033,33 @@ pub(crate) fn draw_model_material_override_editor(
         ui.label("Layer blend");
         changed |= blend_mode_editor(ui, &mut layer.blend_mode);
         changed |= color_editor(ui, "Layer tint / strength", &mut layer.tint);
+        ui.separator();
+        changed |= ui
+            .checkbox(&mut layer.motion.enabled, "Move overlay")
+            .changed();
+        ui.add_enabled_ui(layer.motion.enabled, |ui| {
+            egui::Grid::new("model_secondary_motion_controls")
+                .num_columns(2)
+                .show(ui, |ui| {
+                    changed |= draw_overlay_q8_speed(ui, "U speed", &mut layer.motion.speed_u_q8);
+                    changed |= draw_overlay_q8_speed(ui, "V speed", &mut layer.motion.speed_v_q8);
+                    ui.label("U phase");
+                    changed |= ui
+                        .add(egui::DragValue::new(&mut layer.motion.phase_u))
+                        .changed();
+                    ui.end_row();
+                    ui.label("V phase");
+                    changed |= ui
+                        .add(egui::DragValue::new(&mut layer.motion.phase_v))
+                        .changed();
+                    ui.end_row();
+                });
+        });
+        ui.label(
+            RichText::new("Only this overlay pass moves; the model's base texture remains fixed.")
+                .color(STUDIO_TEXT_WEAK)
+                .small(),
+        );
     }
 
     let resolved_sides = material.sidedness();
@@ -3058,6 +3085,24 @@ pub(crate) fn draw_model_material_override_editor(
         changed = true;
     }
 
+    changed
+}
+
+fn draw_overlay_q8_speed(ui: &mut egui::Ui, label: &str, value: &mut i16) -> bool {
+    ui.label(label);
+    let mut speed = f32::from(*value) / 256.0;
+    let changed = ui
+        .add(
+            egui::DragValue::new(&mut speed)
+                .speed(0.25)
+                .range(-127.0..=127.0)
+                .suffix(" tex/s"),
+        )
+        .changed();
+    if changed {
+        *value = (speed * 256.0).round().clamp(-32_512.0, 32_512.0) as i16;
+    }
+    ui.end_row();
     changed
 }
 
