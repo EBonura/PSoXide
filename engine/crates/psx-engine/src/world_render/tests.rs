@@ -411,6 +411,82 @@ fn generated_cache_records_reconstruct_cached_samples() {
 }
 
 #[test]
+fn room_quad_prewarm_builds_baked_packet_payload_in_split_order() {
+    let colors = [(1, 2, 3), (4, 5, 6), (7, 8, 9), (10, 11, 12)];
+    let surface = CachedRoomSurface::new(
+        0,
+        [0, 1, 2, 3],
+        [(1, 2), (3, 4), (5, 6), (7, 8)],
+        WorldSurfaceSample {
+            kind: WorldSurfaceKind::Floor,
+            sx: 0,
+            sz: 0,
+            center: RoomPoint::ZERO,
+            baked_vertex_rgb: Some(colors),
+            ordinal: 0,
+        },
+        SPLIT_NE_SW,
+        WHOLE_QUAD_TRIANGLE_INDEX,
+    );
+    let split_triangle = CachedRoomSurface::new(
+        0,
+        [0, 1, 2, 3],
+        [(1, 2), (3, 4), (5, 6), (7, 8)],
+        WorldSurfaceSample {
+            kind: WorldSurfaceKind::Floor,
+            sx: 0,
+            sz: 0,
+            center: RoomPoint::ZERO,
+            baked_vertex_rgb: Some(colors),
+            ordinal: 0,
+        },
+        SPLIT_NE_SW,
+        0,
+    );
+    let material = WorldRenderMaterial::front(TextureMaterial::opaque(3, 4, (0x80, 0x80, 0x80)));
+    let mut quads = [QuadTexturedGouraud::EMPTY, QuadTexturedGouraud::EMPTY];
+    let mut valid = [0x55, 0x55];
+
+    let warmed = prewarm_indexed_cached_room_quads(
+        &[surface, split_triangle],
+        &[material],
+        &mut quads,
+        &mut valid,
+    );
+
+    assert_eq!(warmed, 1);
+    assert_eq!(valid[0], 0x80 | 0x02);
+    assert_eq!(valid[1], 0);
+    // NE-SW packet order is 0,1,3,2 for UVs and baked colours alike.
+    assert_eq!(quads[0].uv0_clut as u16, surface.uv_words[0]);
+    assert_eq!(quads[0].uv1_tpage as u16, surface.uv_words[1]);
+    assert_eq!(quads[0].uv2 as u16, surface.uv_words[3]);
+    assert_eq!(quads[0].uv3 as u16, surface.uv_words[2]);
+    assert_eq!(quads[0].color0_cmd & 0x00ff_ffff, 0x0003_0201);
+    assert_eq!(quads[0].color1, 0x0006_0504);
+    assert_eq!(quads[0].color2, 0x000c_0b0a);
+    assert_eq!(quads[0].color3, 0x0009_0807);
+}
+
+#[test]
+fn warmed_quad_culls_in_authored_order_before_gpu_packet_reordering() {
+    // Clockwise/back-facing NW-SE quad. Reordering this into GP0(3Ch) packet
+    // order flips only one of the packet triangles, so culling the packet
+    // vertices would incorrectly retain the authored back face.
+    let projected = [
+        ProjectedVertex::new(0, 0, 100),
+        ProjectedVertex::new(0, 10, 100),
+        ProjectedVertex::new(10, 10, 100),
+        ProjectedVertex::new(10, 0, 100),
+    ];
+    assert!(encoded_warmed_room_quad_backface_culled(projected, 0x80));
+    assert!(!encoded_warmed_room_quad_backface_culled(
+        projected,
+        0x80 | 0x04,
+    ));
+}
+
+#[test]
 fn cached_cell_visibility_sphere_tightly_and_conservatively_bounds_cell_aabb() {
     let (flat_center, flat_radius) = cell_visibility_bounds(0, 0, 1664, 1152, 1152);
     assert_eq!(flat_center, WorldVertex::new(832, 1152, 832));

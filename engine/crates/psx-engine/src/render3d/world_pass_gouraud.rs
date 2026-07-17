@@ -324,6 +324,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         primitives: &mut P,
         prebuilt: Option<(&mut QuadTexturedGouraud, &mut u8)>,
         prebuilt_colors_static: bool,
+        prebuilt_ready_value: u8,
         verts: [ProjectedVertex; 4],
         uv_words: [u16; 4],
         colors: [(u8, u8, u8); 4],
@@ -372,6 +373,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
                 quad,
                 valid,
                 prebuilt_colors_static,
+                prebuilt_ready_value,
                 verts,
                 uv_words,
                 colors,
@@ -1084,6 +1086,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         quad: &mut QuadTexturedGouraud,
         valid: &mut u8,
         colors_static: bool,
+        ready_value: u8,
         verts: [ProjectedVertex; 4],
         uv_words: [u16; 4],
         colors: [(u8, u8, u8); 4],
@@ -1106,7 +1109,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
             *quad = QuadTexturedGouraud::with_packet_material_packed_uv_words(
                 xy, uv_words, colors, material,
             );
-            *valid = 1;
+            *valid = ready_value.max(1);
         } else {
             quad.set_positions(xy);
             if !colors_static {
@@ -1137,7 +1140,6 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         quad: &mut QuadTexturedGouraud,
         verts: [ProjectedVertex; 4],
         extent_safe: bool,
-        material: TexturedGouraudPacketMaterial,
         options: WorldSurfaceOptions,
         prepared_depth: PreparedTriangleDepth,
     ) -> Option<WorldRenderStats> {
@@ -1164,7 +1166,7 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         self.push_command(
             prepared_depth.slot,
             prepared_depth.depth,
-            if material.is_translucent() {
+            if quad.color0_cmd & 0x0200_0000 != 0 {
                 WorldRenderLayer::Transparent
             } else {
                 options.render_layer

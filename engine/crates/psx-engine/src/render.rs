@@ -366,6 +366,22 @@ impl<'a, const DEPTH: usize> OtFrame<'a, DEPTH> {
         };
     }
 
+    /// Insert compact raw packet commands in reverse array order.
+    ///
+    /// See [`OrderingTable::insert_packed_commands_reverse_unchecked`] for the
+    /// two-word command layout and safety contract.
+    #[inline(always)]
+    pub unsafe fn add_packed_commands_reverse_unchecked(
+        &mut self,
+        commands: *const usize,
+        command_count: usize,
+    ) {
+        unsafe {
+            self.ot
+                .insert_packed_commands_reverse_unchecked(commands, command_count)
+        };
+    }
+
     /// Insert a known SDK GPU packet at a raw OT slot.
     pub fn add_packet<T: GpuPacket>(&mut self, slot: usize, prim: &mut T) {
         self.add(slot, prim, T::WORDS);

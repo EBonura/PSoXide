@@ -1016,6 +1016,31 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
         return 1;
     }
     profile.add_screen(RoomSurfaceMicroProfile::elapsed(screen_start));
+    #[cfg(not(feature = "room-surface-profile"))]
+    if use_direct_baked_rgb
+        && surface.has_baked_rgb()
+        && surface.triangle_index >= WHOLE_QUAD_TRIANGLE_INDEX
+    {
+        if let Some((quad, valid)) = prebuilt.as_mut() {
+            let ready = **valid;
+            if ready & WARMED_ROOM_QUAD_READY != 0
+                && try_submit_encoded_warmed_room_quad(
+                    surface,
+                    projected,
+                    projected_metrics,
+                    options,
+                    submit_depths,
+                    depth_mode,
+                    subdivision_mode,
+                    quad,
+                    ready,
+                    world,
+                )
+            {
+                return 1;
+            }
+        }
+    }
     let kind_start = RoomSurfaceMicroProfile::cycle();
     let kind = cached_surface_kind(surface.kind_flags, surface.wall_direction);
     profile.add_kind(RoomSurfaceMicroProfile::elapsed(kind_start));
@@ -1142,7 +1167,6 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                                 packet_verts,
                                 projected_metrics.hardware_extent_safe()
                                     && surface_options.textured_split_max_edge == 0,
-                                material.gouraud_packet,
                                 surface_options,
                                 prepared_depth,
                             )
@@ -1204,6 +1228,7 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                     surface.split,
                     prebuilt,
                     prebuilt_colors_static,
+                    warmed_room_quad_ready_value(material.sidedness, surface.split, is_ceiling),
                     profile,
                 );
                 profile.add_submit(RoomSurfaceMicroProfile::elapsed(submit_start));
@@ -1310,7 +1335,6 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                                 packet_verts,
                                 projected_metrics.hardware_extent_safe()
                                     && surface_options.textured_split_max_edge == 0,
-                                wall_material.gouraud_packet,
                                 surface_options,
                                 prepared_depth,
                             )
@@ -1359,6 +1383,7 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                     SPLIT_NW_SE,
                     prebuilt,
                     prebuilt_colors_static,
+                    warmed_room_quad_ready_value(wall_material.sidedness, SPLIT_NW_SE, false),
                     profile,
                 );
                 profile.add_submit(RoomSurfaceMicroProfile::elapsed(submit_start));
@@ -1368,23 +1393,213 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
     1
 }
 
+const WARMED_ROOM_QUAD_READY: u8 = 0x80;
+const WARMED_ROOM_QUAD_REVERSE: u8 = 0x01;
+const WARMED_ROOM_QUAD_SPLIT_NE_SW: u8 = 0x02;
+const WARMED_ROOM_QUAD_DOUBLE_SIDED: u8 = 0x04;
+
+/// Build the immutable payload of baked whole-quad room packets before the
+/// room reaches the render loop.
+///
+/// Positions and OT links remain frame-dependent and are patched when the
+/// surface is drawn. Materials, UVs, baked vertex colours, winding, and split
+/// order are static for a resident room, so preparing them during the streamed
+/// room/material lifecycle removes the first-visible-frame packet spike.
+pub fn prewarm_indexed_cached_room_quads(
+    surfaces: &[CachedRoomSurface],
+    materials: &[WorldRenderMaterial],
+    quads: &mut [QuadTexturedGouraud],
+    valid: &mut [u8],
+) -> usize {
+    let count = surfaces.len().min(quads.len()).min(valid.len());
+    let mut warmed = 0usize;
+    let mut index = 0usize;
+    while index < count {
+        valid[index] = 0;
+        let surface = &surfaces[index];
+        if surface.has_baked_rgb() && surface.triangle_index >= WHOLE_QUAD_TRIANGLE_INDEX {
+            if let Some(&base_material) = materials.get(surface.material_slot as usize) {
+                let kind = cached_surface_kind(surface.kind_flags, surface.wall_direction);
+                let (material, split, reverse_front) = match kind {
+                    WorldSurfaceKind::Floor => {
+                        (cached_uv_material(base_material), surface.split, false)
+                    }
+                    WorldSurfaceKind::Ceiling => {
+                        (cached_uv_material(base_material), surface.split, true)
+                    }
+                    WorldSurfaceKind::Wall { direction } => (
+                        wall_material_for_direction(cached_uv_material(base_material), direction),
+                        SPLIT_NW_SE,
+                        false,
+                    ),
+                };
+                let uv_words = warmed_room_quad_packet_values(
+                    surface.uv_words,
+                    material.sidedness,
+                    split,
+                    reverse_front,
+                );
+                let colors = warmed_room_quad_packet_values(
+                    surface.baked_vertex_rgb,
+                    material.sidedness,
+                    split,
+                    reverse_front,
+                );
+                quads[index] = QuadTexturedGouraud::with_packet_material_packed_uv_words(
+                    [(0, 0); 4],
+                    uv_words,
+                    colors,
+                    material.gouraud_packet,
+                );
+                valid[index] =
+                    warmed_room_quad_ready_value(material.sidedness, split, reverse_front);
+                warmed += 1;
+            }
+        }
+        index += 1;
+    }
+    warmed
+}
+
+#[inline(always)]
+const fn warmed_room_quad_ready_value(
+    sidedness: SurfaceSidedness,
+    split: u8,
+    reverse_front: bool,
+) -> u8 {
+    let reverse = reverse_front ^ matches!(sidedness, SurfaceSidedness::Back);
+    WARMED_ROOM_QUAD_READY
+        | if reverse { WARMED_ROOM_QUAD_REVERSE } else { 0 }
+        | if split == SPLIT_NE_SW {
+            WARMED_ROOM_QUAD_SPLIT_NE_SW
+        } else {
+            0
+        }
+        | if matches!(sidedness, SurfaceSidedness::Both) {
+            WARMED_ROOM_QUAD_DOUBLE_SIDED
+        } else {
+            0
+        }
+}
+
+#[inline(always)]
+fn warmed_room_quad_packet_vertices_from_ready(
+    mut verts: [ProjectedVertex; 4],
+    ready: u8,
+) -> [ProjectedVertex; 4] {
+    if ready & WARMED_ROOM_QUAD_REVERSE != 0 {
+        verts = reverse_quad_winding(verts);
+    }
+    if ready & WARMED_ROOM_QUAD_SPLIT_NE_SW != 0 {
+        [verts[0], verts[1], verts[3], verts[2]]
+    } else {
+        [verts[1], verts[0], verts[2], verts[3]]
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn try_submit_encoded_warmed_room_quad<const OT: usize>(
+    surface: &CachedRoomSurface,
+    projected: [ProjectedVertex; 4],
+    projected_metrics: ProjectedQuadMetrics,
+    options: WorldSurfaceOptions,
+    submit_depths: CachedRoomSubmitDepths,
+    depth_mode: CachedRoomDepthMode,
+    subdivision_mode: CachedRoomSubdivisionMode,
+    quad: &mut QuadTexturedGouraud,
+    ready: u8,
+    world: &mut WorldRenderPass<'_, '_, OT>,
+) -> bool {
+    if encoded_warmed_room_quad_backface_culled(projected, ready) {
+        return true;
+    }
+    let packet_verts = warmed_room_quad_packet_vertices_from_ready(projected, ready);
+
+    let kind = cached_surface_kind(surface.kind_flags, surface.wall_direction);
+    let surface_risky = cached_surface_risk_for_modes(
+        depth_mode,
+        subdivision_mode,
+        kind,
+        surface,
+        projected,
+        projected_metrics.depth_span(),
+    );
+    let use_triangle_depth =
+        cached_surface_uses_triangle_depth_with_risk(depth_mode, kind, surface_risky);
+    let (surface_options, prepared_depth) = if use_triangle_depth {
+        (triangle_depth_options(options), None)
+    } else if matches!(kind, WorldSurfaceKind::Wall { .. }) {
+        (options, submit_depths.vertical)
+    } else {
+        (horizontal_depth_options(options), submit_depths.horizontal)
+    };
+    let surface_options = cached_surface_subdivision_options(
+        surface_options,
+        subdivision_mode,
+        use_triangle_depth,
+        surface_risky,
+    );
+    let prepared_depth = prepared_depth.unwrap_or_else(|| {
+        PreparedTriangleDepth::from_quad_average::<OT>(surface_options, projected)
+    });
+    world
+        .try_submit_warmed_textured_gouraud_quad(
+            quad,
+            packet_verts,
+            projected_metrics.hardware_extent_safe()
+                && surface_options.textured_split_max_edge == 0,
+            surface_options,
+            prepared_depth,
+        )
+        .is_some()
+}
+
+#[inline(always)]
+pub(super) fn encoded_warmed_room_quad_backface_culled(
+    mut projected: [ProjectedVertex; 4],
+    ready: u8,
+) -> bool {
+    if ready & WARMED_ROOM_QUAD_DOUBLE_SIDED != 0 {
+        return false;
+    }
+    if ready & WARMED_ROOM_QUAD_REVERSE != 0 {
+        projected = reverse_quad_winding(projected);
+    }
+    let split = if ready & WARMED_ROOM_QUAD_SPLIT_NE_SW != 0 {
+        SPLIT_NE_SW
+    } else {
+        SPLIT_NW_SE
+    };
+    let [(a, b, c), (d, e, f)] = split_triangles_runtime(split);
+    projected_triangle_back_facing([projected[a], projected[b], projected[c]])
+        && projected_triangle_back_facing([projected[d], projected[e], projected[f]])
+}
+
 #[inline(always)]
 fn warmed_room_quad_packet_vertices(
-    mut verts: [ProjectedVertex; 4],
+    verts: [ProjectedVertex; 4],
     sidedness: SurfaceSidedness,
     split: u8,
     reverse_front: bool,
 ) -> [ProjectedVertex; 4] {
-    if reverse_front {
-        verts = reverse_quad_winding(verts);
-    }
-    if sidedness == SurfaceSidedness::Back {
-        verts = reverse_quad_winding(verts);
+    warmed_room_quad_packet_values(verts, sidedness, split, reverse_front)
+}
+
+#[inline(always)]
+fn warmed_room_quad_packet_values<T: Copy>(
+    mut values: [T; 4],
+    sidedness: SurfaceSidedness,
+    split: u8,
+    reverse_front: bool,
+) -> [T; 4] {
+    if reverse_front ^ (sidedness == SurfaceSidedness::Back) {
+        values = reverse_quad_winding(values);
     }
     if split == SPLIT_NE_SW {
-        [verts[0], verts[1], verts[3], verts[2]]
+        [values[0], values[1], values[3], values[2]]
     } else {
-        [verts[1], verts[0], verts[2], verts[3]]
+        [values[1], values[0], values[2], values[3]]
     }
 }
 
@@ -1908,11 +2123,15 @@ fn projected_quad_triangle_back_facing(
 
 #[inline(always)]
 fn projected_triangle_back_facing(verts: [ProjectedVertex; 3]) -> bool {
-    psx_gte::scene::screen_triangle_back_facing([
+    // Room vertices are already projected and the GTE is idle during the
+    // surface walk. Use the hardware NCLIP path with the silicon-measured
+    // input/result gaps instead of paying two serialized CPU multiplies for
+    // every candidate face.
+    psx_gte::scene::screen_area_mac0_scheduled([
         (verts[0].sx, verts[0].sy),
         (verts[1].sx, verts[1].sy),
         (verts[2].sx, verts[2].sy),
-    ])
+    ]) <= 0
 }
 
 const fn cached_uv_material(mut material: WorldRenderMaterial) -> WorldRenderMaterial {

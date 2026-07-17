@@ -753,23 +753,23 @@ pub(crate) fn cook_ui_image_texture_asset(
         ));
         return None;
     };
-    let Some(psxt_path) = resource_psxt_path(texture_resource).map(str::to_string) else {
-        report.warn(format!(
-            "{context}: material '{}' has no texture; using placeholder",
-            texture_resource.name
-        ));
-        return None;
-    };
-    if let Some(existing) = ui_image_texture_for_path.get(&psxt_path).cloned() {
-        return Some(existing);
-    }
-    let bytes = match load_psxt_bytes(&texture_resource.name, &psxt_path, project_root) {
-        Ok(bytes) => bytes,
+    let (texture_key, bytes) = match material_texture_bytes(texture_resource, project_root) {
+        Ok(Some(source)) => source,
+        Ok(None) => {
+            report.warn(format!(
+                "{context}: material '{}' has no texture; using placeholder",
+                texture_resource.name
+            ));
+            return None;
+        }
         Err(msg) => {
             report.warn(format!("{context}: {msg}; using placeholder"));
             return None;
         }
     };
+    if let Some(existing) = ui_image_texture_for_path.get(&texture_key).cloned() {
+        return Some(existing);
+    }
     let texture = match psx_asset::Texture::from_bytes(&bytes) {
         Ok(texture) => texture,
         Err(error) => {
@@ -840,7 +840,7 @@ pub(crate) fn cook_ui_image_texture_asset(
         width: texture.width(),
         fragments,
     };
-    ui_image_texture_for_path.insert(psxt_path, cooked.clone());
+    ui_image_texture_for_path.insert(texture_key, cooked.clone());
     Some(cooked)
 }
 

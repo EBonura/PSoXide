@@ -656,25 +656,19 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         if self.ordering == WorldCommandOrdering::Bucketed {
             // OrderingTable::insert prepends packets. Walking submitted
             // commands backwards preserves same-slot submission order without
-            // building/reversing per-slot linked lists.
-            let mut command_index = self.command_len;
+            // building/reversing per-slot linked lists. The PS1 implementation
+            // performs the whole walk in one scheduled MIPS loop; the host
+            // fallback has identical packet-chain semantics.
             let commands = self.commands.as_ptr().cast::<BucketedWorldCommand>();
-            while command_index != 0 {
-                command_index -= 1;
-                // SAFETY: Bucketed push_command initialised every compact
-                // entry below command_len in this same scratch allocation.
-                let command = unsafe { *commands.add(command_index) };
-                // SAFETY: Bucketed commands are appended only after a packet
-                // arena push succeeds, and depth slots are produced by this
-                // pass' OT-depth-aware depth-band mapping.
-                unsafe {
-                    self.ot.add_raw_tag_unchecked(
-                        command.slot(),
-                        command.packet_ptr,
-                        command.tag_high(),
-                    )
-                };
-            }
+            // SAFETY: Bucketed push_command initialised every compact entry
+            // below command_len. Every packet came from a live primitive arena,
+            // and each slot was produced by this OT-depth-aware pass.
+            unsafe {
+                self.ot.add_packed_commands_reverse_unchecked(
+                    commands.cast::<usize>(),
+                    self.command_len,
+                )
+            };
             return;
         }
 

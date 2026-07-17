@@ -124,7 +124,9 @@ fn collect_resource_use(
             continue;
         };
         if let ResourceData::Material(material) = &resource.data {
-            if material.psxt_path.is_some() {
+            if material.psxt_path.is_some()
+                || material.texture_mode == crate::MaterialTextureMode::Generated
+            {
                 push_unique(material_id, &mut use_set.textures, &mut textures);
             }
         }
