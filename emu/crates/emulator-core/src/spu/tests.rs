@@ -38,6 +38,22 @@ fn spustat_read_only_drops_writes() {
 }
 
 #[test]
+fn retail_bios_shell_audio_profile_matches_pa5_hardware_snapshot() {
+    let mut s = Spu::new();
+    s.apply_retail_bios_shell_audio_profile();
+
+    assert_eq!(s.read16(SPUCNT), 0xC085);
+    assert_eq!(s.read16(SPUSTAT), 0x0805);
+    assert_eq!(s.read16(REVERB_VOL_L), 0x5EBC);
+    assert_eq!(s.read16(REVERB_VOL_R), 0x5EBC);
+    assert_eq!(s.read16(REVERB_BASE), 0xE128);
+    assert_eq!(s.read16(EON_LO), 0xFFFF);
+    assert_eq!(s.read16(EON_HI), 0x00FF);
+    assert_eq!(s.read16(REVERB_CFG_BASE), 0x033D);
+    assert_eq!(s.read16(REVERB_CFG_BASE + 62), 0x8000);
+}
+
+#[test]
 fn voice_bank_round_trips_volume_pitch_start_loop() {
     let mut s = Spu::new();
     let base = VOICE_BASE + 5 * 16;
@@ -1669,6 +1685,7 @@ fn reverb_iir_dest_reads_one_cell_behind_write() {
     use reverb_reg::*;
     let mut s = Spu::new();
     s.write16(REVERB_BASE, 0x1000);
+    s.write16(SPUCNT, SPUCNT_REVERB_MASTER_ENABLE);
     // IIR_ALPHA=0 -> inv_iir_alpha=32768 -> iir = read(IIR_DEST-1) exactly.
     write_reverb_cfg(&mut s, IIR_ALPHA, 0);
 
@@ -1704,29 +1721,73 @@ fn reverb_iir_dest_reads_one_cell_behind_write() {
 }
 
 #[test]
-fn reverb_master_disable_holds_tail_not_silence() {
-    // the SPU spec clearing REVERB_MASTER_ENABLE must freeze the
-    // RAM feedback but keep emitting the buffered tail (PSX-SPX gates
-    // only the IIR_DEST/MIX_DEST writes; the output read always runs).
-    // PSoXide hard-zeroed the wet bus via reset_output(), snapping the
-    // tail to 0 (an audible click). After the fix the held wet survives.
+fn pa5_master_off_reverb_reads_dma_work_area_until_output_depth_is_zero() {
+    // Real-console PA5 DEPTH0 captured the BIOS handoff exactly:
+    // vLOUT=5EBC/5EBC, mBASE=E128, all 32 config words populated, then
+    // SDK init leaves that state intact while clearing EON and the reverb
+    // master bit. Uploading the t0a0 map into the overlapping work area
+    // produced -30 dBFS noise. Zeroing only vLOUT suppressed it to the
+    // -86.8 dBFS capture floor. Reproduce that causal mechanism here.
+    const BIOS_REVERB_CFG: [u16; 32] = [
+        0x033D, 0x0231, 0x7E00, 0x5000, 0xB400, 0xB000, 0x4C00, 0xB000, 0x6000, 0x5400, 0x1ED6,
+        0x1A31, 0x1D14, 0x183B, 0x1BC2, 0x16B2, 0x1A32, 0x15EF, 0x15EE, 0x1055, 0x1334, 0x0F2D,
+        0x11F6, 0x0C5D, 0x1056, 0x0AE1, 0x0AE0, 0x07A2, 0x0464, 0x0232, 0x8000, 0x8000,
+    ];
+
     let mut s = Spu::new();
-    s.write16(REVERB_BASE, 0x1000); // reverb area active
-                                    // Establish a non-zero wet tail, then process a tick with master off.
-    s.reverb.process_this_sample = true;
-    s.reverb.last_l = 1000;
-    s.reverb.wet_l = 1000;
-    s.reverb.last_r = 2000;
-    s.reverb.wet_r = 2000;
-    s.write16(SPUCNT, 0); // REVERB_MASTER_ENABLE clear
+    s.write16(REVERB_VOL_L, 0x5EBC);
+    s.write16(REVERB_VOL_R, 0x5EBC);
+    s.write16(REVERB_BASE, 0xE128);
+    for (index, value) in BIOS_REVERB_CFG.into_iter().enumerate() {
+        write_reverb_cfg(&mut s, index, value);
+    }
+    s.write16(EON_LO, 0);
+    s.write16(EON_HI, 0);
+    s.write16(SPUCNT, SPUCNT_UNMUTE); // reverb master remains clear
 
-    let (l, _r) = s.mix_reverb(0, 0);
+    // Deterministic stand-in for the PA5 map DMA overlapping the BIOS work
+    // area. The network must read it but must not write it while master-off.
+    let work_base = s.reverb_base_halfword() as usize;
+    for (index, word) in s.ram[work_base..].iter_mut().enumerate() {
+        *word = ((index as u16).wrapping_mul(0x1357) ^ 0x7878).rotate_left(3);
+    }
+    let before_hash = s.ram.iter().fold(0x811C_9DC5u32, |hash, &word| {
+        (hash ^ word as u32).wrapping_mul(0x0100_0193)
+    });
 
-    assert_ne!(
-        s.reverb.wet_l, 0,
-        "master-disable must not zero the wet bus (tail should ring down, not click)"
+    let mut wet_peak = 0i32;
+    for _ in 0..64 {
+        let (left, right) = s.mix_reverb(0, 0);
+        wet_peak = wet_peak.max(left.abs()).max(right.abs());
+    }
+    assert!(
+        wet_peak > 100,
+        "master-off read/APF path must expose uploaded reverb-work data: {wet_peak}"
     );
-    assert_eq!(l, 1000, "held tail continues on master-off process tick");
+    let after_hash = s.ram.iter().fold(0x811C_9DC5u32, |hash, &word| {
+        (hash ^ word as u32).wrapping_mul(0x0100_0193)
+    });
+    assert_eq!(
+        before_hash, after_hash,
+        "master-off must suppress reverb RAM feedback writes"
+    );
+
+    s.write16(REVERB_VOL_L, 0);
+    s.write16(REVERB_VOL_R, 0);
+    // The interpolator legitimately drains the already-computed wet sample
+    // for two 22.05 kHz reverb ticks after vLOUT changes.
+    for _ in 0..4 {
+        let _ = s.mix_reverb(0, 0);
+    }
+    let mut muted_peak = 0i32;
+    for _ in 0..8 {
+        let (left, right) = s.mix_reverb(0, 0);
+        muted_peak = muted_peak.max(left.abs()).max(right.abs());
+    }
+    assert_eq!(
+        muted_peak, 0,
+        "PA5 DEPTH0 must silence the master-off read/APF path"
+    );
 }
 
 // ---- spu-irq accuracy tests ----
