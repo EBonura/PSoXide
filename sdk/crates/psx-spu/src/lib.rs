@@ -104,6 +104,8 @@ const VOICE_REPEAT_ADDR: u32 = 0xE;
 // Global registers (PSX-SPX § "SPU Registers").
 const MAIN_VOL_LEFT: u32 = 0x1F80_1D80;
 const MAIN_VOL_RIGHT: u32 = 0x1F80_1D82;
+const REVERB_VOL_LEFT: u32 = 0x1F80_1D84;
+const REVERB_VOL_RIGHT: u32 = 0x1F80_1D86;
 const KEY_ON_LO: u32 = 0x1F80_1D88;
 const KEY_ON_HI: u32 = 0x1F80_1D8A;
 const KEY_OFF_LO: u32 = 0x1F80_1D8C;
@@ -131,7 +133,7 @@ const SPUCNT_CD_AUDIO_ENABLE: u16 = 1 << 0;
 /// - SPUCNT: enable, unmute, default reverb off, CD audio off
 /// - Main volume: max
 /// - Every voice: silenced (volume 0, ADSR release fire, key-off)
-/// - Reverb / pitch-mod / noise: all disabled
+/// - Reverb input and wet-output depth, pitch-mod, and noise: all disabled
 /// - Transfer mode: 16-bit PIO (the upload path we expose)
 ///
 /// Call once at boot before any voice operations.
@@ -156,6 +158,13 @@ pub fn init() {
     // Disable reverb, noise, pitch modulation on all voices.
     write_reg16(REVERB_ENABLE_LO, 0);
     write_reg16(REVERB_ENABLE_HI, 0);
+    // Clearing SPUCNT's reverb-master bit stops feedback writes but does not
+    // stop the hardware read/APF/output path. The retail BIOS leaves a live
+    // preset (including non-zero vLOUT and mBASE) behind; a later sample-bank
+    // DMA can overwrite that work area and become audible even with EON=0.
+    // PA5 on silicon measured 56.8 dB of suppression from these two writes.
+    write_reg16(REVERB_VOL_LEFT, 0);
+    write_reg16(REVERB_VOL_RIGHT, 0);
     write_reg16(PITCH_MOD_LO, 0);
     write_reg16(PITCH_MOD_HI, 0);
     write_reg16(NOISE_LO, 0);
