@@ -23,6 +23,10 @@ pub const MODE_DOUBLE_SPEED: u8 = 1 << 7;
 
 /// CdlPlay command.
 pub const CMD_PLAY: u8 = 0x03;
+/// CdlSetloc command.
+pub const CMD_SETLOC: u8 = 0x02;
+/// CdlReadN command.
+pub const CMD_READN: u8 = 0x06;
 /// CdlGetStat command.
 pub const CMD_GETSTAT: u8 = 0x01;
 /// CdlStop command.
@@ -129,6 +133,30 @@ pub fn set_mode(mode: u8) -> Response {
 /// Try to set the CD-ROM controller mode byte.
 pub fn try_set_mode(mode: u8, spin_limit: u32) -> Option<Response> {
     try_command(CMD_SETMODE, &[mode], spin_limit)
+}
+
+/// Seek to a logical data-sector LBA (the command receives absolute BCD MSF).
+pub fn try_set_loc_lba(lba: u32, spin_limit: u32) -> Option<Response> {
+    let [minute, second, frame] = lba_to_bcd_msf(lba);
+    try_command(
+        CMD_SETLOC,
+        &[minute, second, frame],
+        spin_limit,
+    )
+}
+
+const fn lba_to_bcd_msf(lba: u32) -> [u8; 3] {
+    let absolute = lba.saturating_add(150);
+    let raw_minute = absolute / (60 * 75);
+    let minute = if raw_minute > 99 { 99 } else { raw_minute as u8 };
+    let second = ((absolute / 75) % 60) as u8;
+    let frame = (absolute % 75) as u8;
+    [bin_to_bcd(minute), bin_to_bcd(second), bin_to_bcd(frame)]
+}
+
+/// Begin a normal data-sector stream at the most recently selected location.
+pub fn try_read_n(spin_limit: u32) -> Option<Response> {
+    try_command(CMD_READN, &[], spin_limit)
 }
 
 /// Route CD-DA/XA output out of the CD-ROM controller.
@@ -468,6 +496,13 @@ mod tests {
         for v in 0u8..=99 {
             assert_eq!(bcd_to_bin(bin_to_bcd(v)), v);
         }
+    }
+
+    #[test]
+    fn lba_to_msf_includes_the_lead_in() {
+        assert_eq!(lba_to_bcd_msf(0), [0x00, 0x02, 0x00]);
+        assert_eq!(lba_to_bcd_msf(424), [0x00, 0x07, 0x49]);
+        assert_eq!(lba_to_bcd_msf(992), [0x00, 0x15, 0x17]);
     }
 
     fn response_from(bytes: &[u8]) -> Response {
