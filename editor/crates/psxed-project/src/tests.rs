@@ -115,6 +115,12 @@ fn character_resource_deserializes_without_new_motor_tuning_fields() {
         default_character_backstep_invulnerable_frames()
     );
     assert!(character.combat_capsules.is_empty());
+    assert_eq!(character.spawn_role, CharacterSpawnRole::Auto);
+    assert!(character.enemy_behavior.is_none());
+    assert_eq!(
+        character.camera_lock_rise_percent,
+        default_world_camera_lock_rise_percent()
+    );
 }
 
 #[test]
@@ -1446,6 +1452,18 @@ fn starter_model_files_present_on_disk() {
     assert!(root
             .join("assets/models/crimson_cross_knight/crimson_cross_knight_armature_idle_03_baselayer.psxanim")
             .is_file());
+    assert!(root
+        .join("assets/models/ci_player/ci_player.psxmdl")
+        .is_file());
+    assert!(root
+        .join("assets/models/rust_mantis/rust_mantis.psxmdl")
+        .is_file());
+    assert!(root
+        .join("assets/animations/ci_player_complete/roll.psxanim")
+        .is_file());
+    assert!(root
+        .join("assets/animations/rust_mantis_starter/idle.psxanim")
+        .is_file());
 }
 
 #[test]
@@ -1508,6 +1526,68 @@ fn starter_project_has_scene_tree_and_resources() {
         grid.width as usize * grid.depth as usize
     );
     assert!(grid.populated_sector_count() > 0);
+
+    let aletha = project
+        .resources
+        .iter()
+        .find_map(|resource| match &resource.data {
+            ResourceData::Character(character) if resource.name == "Aletha" => Some(character),
+            _ => None,
+        })
+        .expect("starter includes Aletha");
+    assert_eq!(aletha.spawn_role, CharacterSpawnRole::Player);
+    assert_eq!(
+        (aletha.radius, aletha.walk_speed, aletha.run_speed),
+        (188, 44, 94)
+    );
+    assert_eq!(aletha.roll_speed, 165);
+    assert_eq!(
+        (
+            aletha.camera_distance,
+            aletha.camera_height,
+            aletha.camera_target_height,
+        ),
+        (3300, 1500, 900)
+    );
+
+    let mantis = project
+        .resources
+        .iter()
+        .find_map(|resource| match &resource.data {
+            ResourceData::Character(character) if resource.name == "Rust Mantis Enemy" => {
+                Some(character)
+            }
+            _ => None,
+        })
+        .expect("starter includes the Rust Mantis enemy");
+    assert_eq!(mantis.spawn_role, CharacterSpawnRole::Enemy);
+    assert_eq!(mantis.walk_speed, 28);
+    let enemy = mantis.enemy_behavior.expect("Mantis enemy behavior preset");
+    assert_eq!(enemy.aggro_radius, 2335);
+    assert_eq!(enemy.patrol_offset, [0, 0, -6000]);
+    assert_eq!(enemy.reaction_ticks, 22);
+
+    for name in [
+        "Obsidian Wraith Enemy",
+        "Hooded Wretch Enemy",
+        "Crowned Wraith Enemy",
+    ] {
+        let character = project
+            .resources
+            .iter()
+            .find_map(|resource| match &resource.data {
+                ResourceData::Character(character) if resource.name == name => Some(character),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("starter includes {name}"));
+        assert_eq!(character.spawn_role, CharacterSpawnRole::Enemy, "{name}");
+        assert_eq!(character.walk_speed, 28, "{name}");
+        assert_eq!(
+            character.enemy_behavior.map(|enemy| enemy.aggro_radius),
+            Some(2335),
+            "{name}"
+        );
+    }
 }
 
 #[test]

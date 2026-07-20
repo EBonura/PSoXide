@@ -82,6 +82,62 @@ pub(crate) fn draw_character_resource_editor(
     let bound_skeleton = ctx.model_skeleton(character.model);
     let selected_set = ctx.animation_set(character.animation_set);
 
+    egui::CollapsingHeader::new(icons::label(icons::FOCUS, "Spawn Defaults"))
+        .default_open(true)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Role");
+                egui::ComboBox::from_id_salt("character-spawn-role")
+                    .selected_text(match character.spawn_role {
+                        psxed_project::CharacterSpawnRole::Auto => "Auto",
+                        psxed_project::CharacterSpawnRole::Player => "Player",
+                        psxed_project::CharacterSpawnRole::Enemy => "Enemy",
+                    })
+                    .show_ui(ui, |ui| {
+                        for (role, label) in [
+                            (psxed_project::CharacterSpawnRole::Auto, "Auto"),
+                            (psxed_project::CharacterSpawnRole::Player, "Player"),
+                            (psxed_project::CharacterSpawnRole::Enemy, "Enemy"),
+                        ] {
+                            if ui
+                                .selectable_label(character.spawn_role == role, label)
+                                .clicked()
+                            {
+                                character.spawn_role = role;
+                                if role == psxed_project::CharacterSpawnRole::Enemy
+                                    && character.enemy_behavior.is_none()
+                                {
+                                    character.enemy_behavior =
+                                        Some(psxed_project::EnemyBehaviorSettings::defaults());
+                                }
+                                changed = true;
+                            }
+                        }
+                    });
+            });
+            ui.label(
+                RichText::new(match character.spawn_role {
+                    psxed_project::CharacterSpawnRole::Auto => {
+                        "Auto uses the legacy first-character-is-player placement rule."
+                    }
+                    psxed_project::CharacterSpawnRole::Player => {
+                        "Dropping this profile creates the player and replaces the previous player source."
+                    }
+                    psxed_project::CharacterSpawnRole::Enemy => {
+                        "Dropping this profile always creates an enemy with the tuning below."
+                    }
+                })
+                .color(STUDIO_TEXT_WEAK)
+                .small(),
+            );
+            if character.spawn_role == psxed_project::CharacterSpawnRole::Enemy {
+                let enemy = character
+                    .enemy_behavior
+                    .get_or_insert_with(psxed_project::EnemyBehaviorSettings::defaults);
+                changed |= draw_enemy_behavior_fields(ui, enemy).0;
+            }
+        });
+
     egui::CollapsingHeader::new(icons::label(icons::BOX, "Model"))
         .default_open(true)
         .show(ui, |ui| {
@@ -200,9 +256,133 @@ pub(crate) fn draw_character_resource_editor(
                 0,
                 16384,
             );
+            changed |= drag_u8(
+                ui,
+                "Lock rise (%)",
+                &mut character.camera_lock_rise_percent,
+                0,
+                100,
+            );
+            changed |= drag_i32(
+                ui,
+                "Floor clearance",
+                &mut character.camera_min_floor_clearance,
+                0,
+                4096,
+            );
+            changed |= drag_u8(
+                ui,
+                "Orbit speed",
+                &mut character.camera_orbit_speed_level,
+                1,
+                10,
+            );
+            changed |= drag_u8(
+                ui,
+                "Position lag",
+                &mut character.camera_position_lag_shift,
+                0,
+                12,
+            );
+            changed |= drag_u8(
+                ui,
+                "Focus lag",
+                &mut character.camera_focus_lag_shift,
+                0,
+                12,
+            );
+            changed |= drag_u8(
+                ui,
+                "Distance lag",
+                &mut character.camera_distance_lag_shift,
+                0,
+                12,
+            );
         });
 
     changed
+}
+
+fn draw_enemy_behavior_fields(
+    ui: &mut egui::Ui,
+    enemy: &mut psxed_project::EnemyBehaviorSettings,
+) -> (bool, bool) {
+    let mut changed = false;
+
+    ui.separator();
+    ui.label(RichText::new("Awareness & patrol").strong());
+    changed |= drag_u16(ui, "Aggro radius", &mut enemy.aggro_radius, 1, 32767);
+    changed |= drag_u8(ui, "Reaction ticks", &mut enemy.reaction_ticks, 0, 255);
+    changed |= drag_u16(
+        ui,
+        "Patrol wait ticks",
+        &mut enemy.patrol_wait_ticks,
+        0,
+        32767,
+    );
+    ui.label(
+        RichText::new("Patrol offset")
+            .color(STUDIO_TEXT_WEAK)
+            .small(),
+    );
+    changed |= drag_i32(ui, "X", &mut enemy.patrol_offset[0], -32767, 32767);
+    changed |= drag_i32(ui, "Y", &mut enemy.patrol_offset[1], -32767, 32767);
+    changed |= drag_i32(ui, "Z", &mut enemy.patrol_offset[2], -32767, 32767);
+
+    ui.separator();
+    ui.label(RichText::new("Spacing & intent").strong());
+    changed |= drag_u16(
+        ui,
+        "Preferred distance",
+        &mut enemy.preferred_distance,
+        1,
+        32767,
+    );
+    changed |= drag_u16(
+        ui,
+        "Spacing tolerance",
+        &mut enemy.spacing_tolerance,
+        0,
+        32767,
+    );
+    changed |= drag_u8(
+        ui,
+        "Decision interval",
+        &mut enemy.decision_interval_ticks,
+        1,
+        255,
+    );
+    changed |= drag_u8(ui, "Circle chance (%)", &mut enemy.circle_chance, 0, 100);
+
+    ui.separator();
+    ui.label(RichText::new("Attack pacing").strong());
+    let mut attack_changed = false;
+    attack_changed |= drag_u8(ui, "Director priority", &mut enemy.attack_priority, 0, 255);
+    attack_changed |= drag_u8(
+        ui,
+        "Attack cooldown ticks",
+        &mut enemy.attack_cooldown_ticks,
+        0,
+        255,
+    );
+    attack_changed |= drag_u8(
+        ui,
+        "Group attack delay",
+        &mut enemy.group_attack_delay_ticks,
+        0,
+        255,
+    );
+    attack_changed |= drag_u8(ui, "Windup ticks", &mut enemy.windup_ticks, 1, 255);
+    attack_changed |= drag_u8(ui, "Recovery ticks", &mut enemy.recovery_ticks, 0, 255);
+    changed |= attack_changed;
+
+    ui.separator();
+    ui.label(RichText::new("Combat stats").strong());
+    changed |= drag_u16(ui, "Health", &mut enemy.max_health, 1, u16::MAX);
+    changed |= drag_u16(ui, "Poise", &mut enemy.poise, 0, u16::MAX);
+    changed |= drag_u16(ui, "Touch damage", &mut enemy.touch_damage, 0, u16::MAX);
+
+    (changed, attack_changed)
 }
 
 pub(crate) fn draw_character_controller_settings(
@@ -319,73 +499,8 @@ pub(crate) fn draw_character_controller_settings(
                 );
                 return;
             };
-
-            ui.separator();
-            ui.label(RichText::new("Awareness & patrol").strong());
-            changed |= drag_u16(ui, "Aggro radius", &mut enemy.aggro_radius, 1, 32767);
-            changed |= drag_u8(ui, "Reaction ticks", &mut enemy.reaction_ticks, 0, 255);
-            changed |= drag_u16(
-                ui,
-                "Patrol wait ticks",
-                &mut enemy.patrol_wait_ticks,
-                0,
-                32767,
-            );
-            ui.label(
-                RichText::new("Patrol offset")
-                    .color(STUDIO_TEXT_WEAK)
-                    .small(),
-            );
-            changed |= drag_i32(ui, "X", &mut enemy.patrol_offset[0], -32767, 32767);
-            changed |= drag_i32(ui, "Y", &mut enemy.patrol_offset[1], -32767, 32767);
-            changed |= drag_i32(ui, "Z", &mut enemy.patrol_offset[2], -32767, 32767);
-
-            ui.separator();
-            ui.label(RichText::new("Spacing & intent").strong());
-            changed |= drag_u16(
-                ui,
-                "Preferred distance",
-                &mut enemy.preferred_distance,
-                1,
-                32767,
-            );
-            changed |= drag_u16(
-                ui,
-                "Spacing tolerance",
-                &mut enemy.spacing_tolerance,
-                0,
-                32767,
-            );
-            changed |= drag_u8(
-                ui,
-                "Decision interval",
-                &mut enemy.decision_interval_ticks,
-                1,
-                255,
-            );
-            changed |= drag_u8(ui, "Circle chance (%)", &mut enemy.circle_chance, 0, 100);
-
-            ui.separator();
-            ui.label(RichText::new("Attack pacing").strong());
-            let mut attack_changed = false;
-            attack_changed |= drag_u8(ui, "Director priority", &mut enemy.attack_priority, 0, 255);
-            attack_changed |= drag_u8(
-                ui,
-                "Attack cooldown ticks",
-                &mut enemy.attack_cooldown_ticks,
-                0,
-                255,
-            );
-            attack_changed |= drag_u8(
-                ui,
-                "Group attack delay",
-                &mut enemy.group_attack_delay_ticks,
-                0,
-                255,
-            );
-            attack_changed |= drag_u8(ui, "Windup ticks", &mut enemy.windup_ticks, 1, 255);
-            attack_changed |= drag_u8(ui, "Recovery ticks", &mut enemy.recovery_ticks, 0, 255);
-            changed |= attack_changed;
+            let (enemy_changed, attack_changed) = draw_enemy_behavior_fields(ui, enemy);
+            changed |= enemy_changed;
             if attack_changed {
                 *preview_action = Some(psxed_project::CharacterAnimationAction::LightAttack);
             }
@@ -400,11 +515,6 @@ pub(crate) fn draw_character_controller_settings(
                 ],
             );
 
-            ui.separator();
-            ui.label(RichText::new("Combat stats").strong());
-            changed |= drag_u16(ui, "Health", &mut enemy.max_health, 1, u16::MAX);
-            changed |= drag_u16(ui, "Poise", &mut enemy.poise, 0, u16::MAX);
-            changed |= drag_u16(ui, "Touch damage", &mut enemy.touch_damage, 0, u16::MAX);
             draw_action_preview_buttons(
                 ui,
                 preview_action,

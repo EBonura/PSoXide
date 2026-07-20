@@ -178,9 +178,17 @@ impl EditorWorkspace {
                     return;
                 }
                 self.push_undo();
-                let player = !self.has_player_source();
+                let player = match character.spawn_role {
+                    psxed_project::CharacterSpawnRole::Auto => !self.has_player_source(),
+                    psxed_project::CharacterSpawnRole::Player => true,
+                    psxed_project::CharacterSpawnRole::Enemy => false,
+                };
+                if player && character.spawn_role == psxed_project::CharacterSpawnRole::Player {
+                    self.demote_player_sources_except(None);
+                }
                 let idle_clip = self.resolve_character_idle_preview_clip(&character);
                 let settings = CharacterControllerSettings::from_character(&character);
+                let camera_settings = character.camera_settings();
                 let node = self.create_character_entity_at_room_hit(
                     room_id,
                     resource_id,
@@ -189,6 +197,7 @@ impl EditorWorkspace {
                     idle_clip,
                     settings,
                     player,
+                    camera_settings,
                     hit_world,
                 );
                 self.replace_node_selection(node);
@@ -369,10 +378,13 @@ impl EditorWorkspace {
         idle_clip: Option<u16>,
         settings: CharacterControllerSettings,
         player: bool,
+        camera_settings: WorldCameraSettings,
         hit_world: [f32; 3],
     ) -> NodeId {
         let translation = self.placement_translation_for_room_hit(room_id, hit_world);
         let active_floor = self.active_floor;
+        let model_visual_defaults =
+            model_id.map(|model_id| default_model_visual_defaults(&self.project, model_id));
         let scene = self.project.active_scene_mut();
         let entity = scene.add_node(room_id, name.to_string(), NodeKind::Entity);
         if let Some(node) = scene.node_mut(entity) {
@@ -382,15 +394,14 @@ impl EditorWorkspace {
             node.floor = active_floor;
         }
         if let Some(model_id) = model_id {
-            scene.add_node(
+            let (visual_scale_q8, default_visual_yaw_q12) =
+                model_visual_defaults.unwrap_or((psxed_project::MODEL_SCALE_ONE_Q8, 0));
+            add_model_renderer_node(
+                scene,
                 entity,
-                "Model Renderer",
-                NodeKind::ModelRenderer {
-                    model: Some(model_id),
-                    material: None,
-                    visual_offset: [0; 3],
-                    visual_scale_q8: psxed_project::MODEL_SCALE_ONE_Q8,
-                },
+                model_id,
+                visual_scale_q8,
+                default_visual_yaw_q12,
             );
             scene.add_node(
                 entity,
@@ -417,7 +428,7 @@ impl EditorWorkspace {
                 entity,
                 "Camera",
                 NodeKind::Camera {
-                    settings: WorldCameraSettings::default(),
+                    settings: camera_settings,
                 },
             );
         }
@@ -928,10 +939,20 @@ impl EditorWorkspace {
                             self.reject_duplicate_placement(existing, "Character");
                             return;
                         }
-                        let player = !self.has_player_source();
+                        let player = match character.spawn_role {
+                            psxed_project::CharacterSpawnRole::Auto => !self.has_player_source(),
+                            psxed_project::CharacterSpawnRole::Player => true,
+                            psxed_project::CharacterSpawnRole::Enemy => false,
+                        };
                         let idle_clip = self.resolve_character_idle_preview_clip(&character);
                         let settings = CharacterControllerSettings::from_character(&character);
+                        let camera_settings = character.camera_settings();
                         self.push_undo();
+                        if player
+                            && character.spawn_role == psxed_project::CharacterSpawnRole::Player
+                        {
+                            self.demote_player_sources_except(None);
+                        }
                         let id = self.create_character_entity_at_room_hit(
                             room_id,
                             character_id,
@@ -940,6 +961,7 @@ impl EditorWorkspace {
                             idle_clip,
                             settings,
                             player,
+                            camera_settings,
                             hit_world,
                         );
                         self.replace_node_selection(id);
