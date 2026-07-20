@@ -38,6 +38,64 @@ fn starter_project_emits_player_controller_and_character() {
 }
 
 #[test]
+fn character_combat_capsules_cook_to_bounded_contiguous_runtime_slice() {
+    let mut project = project_with_one_room();
+    let character = project
+        .resources
+        .iter_mut()
+        .find_map(|resource| match &mut resource.data {
+            ResourceData::Character(character) => Some(character),
+            _ => None,
+        })
+        .expect("starter character exists");
+    character.combat_capsules = vec![
+        crate::CharacterCombatCapsule {
+            name: "Torso".to_string(),
+            joint: 0,
+            capsule: crate::JointCapsule {
+                start: [0, 0, 0],
+                end: [0, 256, 0],
+                radius: 96,
+            },
+            role: crate::CombatCapsuleRole::Hurtbox,
+        },
+        crate::CharacterCombatCapsule {
+            name: "Attack".to_string(),
+            joint: 0,
+            capsule: crate::JointCapsule {
+                start: [0, 0, 0],
+                end: [128, 0, 0],
+                radius: 48,
+            },
+            role: crate::CombatCapsuleRole::Hitbox {
+                action: CharacterAnimationAction::LightAttack,
+                active_start_frame: 4,
+                active_end_frame: 8,
+                damage: 30,
+                poise_damage: 20,
+            },
+        },
+    ];
+
+    let (package, report) = build_package(&project, &starter_project_root());
+    assert!(report.is_ok(), "errors: {:?}", report.errors);
+    let package = package.expect("package returned on ok report");
+    assert_eq!(package.combat_capsules.len(), 2);
+    assert_eq!(package.characters[0].combat_capsule_first, 0);
+    assert_eq!(package.characters[0].combat_capsule_count, 2);
+    assert_eq!(
+        package.combat_capsules[0].flags,
+        psx_level::combat_capsule_flags::HURTBOX
+    );
+    assert_eq!(
+        package.combat_capsules[1].flags,
+        psx_level::combat_capsule_flags::HITBOX
+    );
+    assert_eq!(package.combat_capsules[1].active_start_frame, 4);
+    assert_eq!(package.combat_capsules[1].active_end_frame, 8);
+}
+
+#[test]
 fn animation_set_infers_evade_roles_from_extra_clip_names() {
     let mut project = ProjectDocument::new("role inference");
     let skeleton = project.add_resource(
@@ -61,6 +119,7 @@ fn animation_set_infers_evade_roles_from_extra_clip_names() {
             looping: false,
             tags: Vec::new(),
             calibration: Default::default(),
+            pose_corrections: Vec::new(),
         }),
     );
     let backstep = project.add_resource(
@@ -75,6 +134,7 @@ fn animation_set_infers_evade_roles_from_extra_clip_names() {
             looping: false,
             tags: Vec::new(),
             calibration: Default::default(),
+            pose_corrections: Vec::new(),
         }),
     );
     let light_attack = project.add_resource(
@@ -89,6 +149,7 @@ fn animation_set_infers_evade_roles_from_extra_clip_names() {
             looping: false,
             tags: Vec::new(),
             calibration: Default::default(),
+            pose_corrections: Vec::new(),
         }),
     );
     let heavy_attack = project.add_resource(
@@ -103,6 +164,7 @@ fn animation_set_infers_evade_roles_from_extra_clip_names() {
             looping: false,
             tags: Vec::new(),
             calibration: Default::default(),
+            pose_corrections: Vec::new(),
         }),
     );
     let mut set = crate::AnimationSetResource {

@@ -21,8 +21,24 @@
 //!   path plays, so contact frames match what the player sees.
 
 use super::*;
-use psx_game_runtime::combat::{self, MeleeArc};
+use psx_game_runtime::combat::{self, MeleeArc, WorldCombatCapsule};
+use psx_game_runtime::entities::MeleeArcStats;
 use psx_game_runtime::model_rendering as mr;
+
+#[derive(Clone, Copy)]
+struct ActivePlayerCapsule {
+    capsule: WorldCombatCapsule,
+    damage: u16,
+    poise_damage: u16,
+}
+
+impl ActivePlayerCapsule {
+    const EMPTY: Self = Self {
+        capsule: WorldCombatCapsule::EMPTY,
+        damage: 0,
+        poise_damage: 0,
+    };
+}
 
 /// Movement backend for game entities: the entity room's grid
 /// collision from the active window, closed box props, the other
@@ -202,6 +218,18 @@ impl Playtest {
             character.action_speed(action),
             character.action_frame_range(action),
         );
+        if let Some(stats) = self.resolve_player_combat_capsules(
+            ctx,
+            character,
+            model,
+            animation,
+            phase,
+            action,
+            clip,
+        ) {
+            self.report_player_melee_stats(stats);
+            return;
+        }
         if !spec.frame_active(phase >> 12) {
             return;
         }
@@ -221,6 +249,205 @@ impl Playtest {
             spec.poise_damage,
             &mut self.swing_hit_mask,
         );
+        self.report_player_melee_stats(stats);
+    }
+
+    /// Resolve authored rig volumes when the selected action has any hitbox.
+    /// `None` selects the legacy arc fallback; `Some` means the authored frame
+    /// window is authoritative, including frames with no active capsule.
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_player_combat_capsules(
+        &mut self,
+        ctx: &Ctx,
+        character: RuntimeCharacter,
+        model: RuntimeModelAsset,
+        animation: Animation<'static>,
+        phase: u32,
+        action: CharacterAnimationAction,
+        clip: ModelClipIndex,
+    ) -> Option<MeleeArcStats> {
+        let first = character.combat_capsule_first.to_usize();
+        let end = first.saturating_add(usize::from(character.combat_capsule_count));
+        let records = COMBAT_CAPSULES.get(first..end)?;
+        let action_index = action.to_index() as u8;
+        let frame = (phase >> 12).min(u32::from(u16::MAX)) as u16;
+        let mut active =
+            [ActivePlayerCapsule::EMPTY; psx_level::MAX_CHARACTER_COMBAT_CAPSULES];
+        let mut active_count = 0usize;
+        let mut authored_action = false;
+        let player = self.motor.position();
+        let tables = model_rendering::model_tables();
+        for record in records {
+            if record.flags & psx_level::combat_capsule_flags::HITBOX == 0
+                || record.action != action_index
+            {
+                continue;
+            }
+            authored_action = true;
+            if frame < record.active_start_frame
+                || frame > record.active_end_frame
+                || active_count >= active.len()
+            {
+                continue;
+            }
+            let Some(joint) = mr::player_joint_world_transform(
+                tables,
+                model,
+                character,
+                animation,
+                phase,
+                player.x,
+                player.y,
+                player.z,
+                self.motor.yaw(),
+                action,
+                clip,
+                record.joint,
+            ) else {
+                continue;
+            };
+            active[active_count] = ActivePlayerCapsule {
+                capsule: combat::transform_combat_capsule(record, joint),
+                damage: record.damage,
+                poise_damage: record.poise_damage,
+            };
+            active_count += 1;
+        }
+        if !authored_action {
+            return None;
+        }
+        if active_count == 0 {
+            return Some(MeleeArcStats::default());
+        }
+
+        let mut stats = MeleeArcStats::default();
+        let count = self.game_entities.count().min(GAME_ENTITIES.len());
+        let mut entity = 0usize;
+        while entity < count {
+            let entity_record = &GAME_ENTITIES[entity];
+            // psx-numeric-allow-next-line: one-hit-per-swing bitmask; bit ops only, two-word on R3000
+            let mask = 1u64 << entity;
+            if self.swing_hit_mask & mask != 0
+                || entity_record.room != self.room_index
+                || self.game_entities.state(entity)
+                    == psx_game_runtime::entities::GameEntityState::Dead
+            {
+                entity += 1;
+                continue;
+            }
+            let position = self.game_entities.position(entity);
+            let body = WorldCombatCapsule {
+                start: position,
+                end: [
+                    position[0],
+                    position[1].saturating_add(i32::from(entity_record.height)),
+                    position[2],
+                ],
+                radius: entity_record.radius,
+            };
+            let coarse_candidate = active[..active_count]
+                .iter()
+                .any(|hit| combat::combat_capsule_aabbs_overlap(&hit.capsule, &body));
+            if !coarse_candidate {
+                entity += 1;
+                continue;
+            }
+
+            let hit = self.authored_capsule_hit_entity(
+                ctx,
+                entity,
+                entity_record,
+                &active[..active_count],
+                body,
+                tables,
+            );
+            if let Some(hit) = hit {
+                self.swing_hit_mask |= mask;
+                let outcome = self.game_entities.apply_hit(
+                    GAME_ENTITIES,
+                    entity,
+                    hit.damage,
+                    hit.poise_damage,
+                );
+                stats.hits = stats.hits.saturating_add(u16::from(outcome.connected));
+                stats.staggers = stats
+                    .staggers
+                    .saturating_add(u16::from(outcome.staggered));
+                stats.deaths = stats.deaths.saturating_add(u16::from(outcome.died));
+            }
+            entity += 1;
+        }
+        Some(stats)
+    }
+
+    fn authored_capsule_hit_entity(
+        &self,
+        ctx: &Ctx,
+        entity: usize,
+        entity_record: &LevelGameEntityRecord,
+        active: &[ActivePlayerCapsule],
+        body_fallback: WorldCombatCapsule,
+        tables: mr::ModelTables,
+    ) -> Option<ActivePlayerCapsule> {
+        let first = entity_record.combat_capsule_first.to_usize();
+        let end = first.saturating_add(usize::from(entity_record.combat_capsule_count));
+        let hurtboxes = COMBAT_CAPSULES.get(first..end).unwrap_or(&[]);
+        let has_authored_hurtbox = hurtboxes
+            .iter()
+            .any(|record| record.flags & psx_level::combat_capsule_flags::HURTBOX != 0);
+        if !has_authored_hurtbox {
+            return active.iter().copied().find(|hit| {
+                combat::combat_capsules_overlap(&hit.capsule, &body_fallback)
+            });
+        }
+
+        let instance = MODEL_INSTANCES.get(entity_record.model_instance as usize)?;
+        let model = self.models.get(instance.model.to_usize()).copied().flatten()?;
+        let state_clip = self.game_entities.clip_for_state(GAME_ENTITIES, entity);
+        let clip = ModelClipIndex(state_clip.clip);
+        let animation = model.clip(&self.clips, clip)?;
+        let phase = mr::animation_phase_at_tick_q12(
+            animation,
+            u32::from(state_clip.phase_ticks),
+            ctx.video_hz,
+            !state_clip.one_shot,
+            psx_level::CHARACTER_ACTION_SPEED_UNSCALED_Q8,
+            psx_level::CharacterActionFrameRange::FULL,
+        );
+        let position = self.game_entities.position(entity);
+        let yaw = self.game_entities.yaw(entity);
+        for hurtbox in hurtboxes {
+            if hurtbox.flags & psx_level::combat_capsule_flags::HURTBOX == 0 {
+                continue;
+            }
+            let Some(joint) = mr::model_instance_joint_world_transform(
+                tables,
+                model,
+                instance,
+                animation,
+                phase,
+                clip,
+                position[0],
+                position[1],
+                position[2],
+                yaw,
+                hurtbox.joint,
+            ) else {
+                continue;
+            };
+            let hurtbox = combat::transform_combat_capsule(hurtbox, joint);
+            if let Some(hit) = active
+                .iter()
+                .copied()
+                .find(|hit| combat::combat_capsules_overlap(&hit.capsule, &hurtbox))
+            {
+                return Some(hit);
+            }
+        }
+        None
+    }
+
+    fn report_player_melee_stats(&self, stats: MeleeArcStats) {
         if stats.hits > 0 {
             telemetry::counter(telemetry::counter::PLAYER_MELEE_HITS, u32::from(stats.hits));
         }
