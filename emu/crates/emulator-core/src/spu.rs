@@ -1140,6 +1140,42 @@ impl Spu {
         }
     }
 
+    /// Apply the retail BIOS shell audio state inherited by a disc executable.
+    ///
+    /// A real-console PA5 capture established that the BIOS hands off with a
+    /// fully configured reverb preset: all voices routed to EON, non-zero wet
+    /// depth, and a work area at `0xE128 * 8`. Warm disc fast boot must retain
+    /// this observable peripheral state even though it skips the license/shell
+    /// path that normally programs it. Games remain responsible for resetting
+    /// the SPU before loading their own banks.
+    pub fn apply_retail_bios_shell_audio_profile(&mut self) {
+        const BIOS_REVERB_CFG: [u16; 32] = [
+            0x033D, 0x0231, 0x7E00, 0x5000, 0xB400, 0xB000, 0x4C00, 0xB000, 0x6000, 0x5400, 0x1ED6,
+            0x1A31, 0x1D14, 0x183B, 0x1BC2, 0x16B2, 0x1A32, 0x15EF, 0x15EE, 0x1055, 0x1334, 0x0F2D,
+            0x11F6, 0x0C5D, 0x1056, 0x0AE1, 0x0AE0, 0x07A2, 0x0464, 0x0232, 0x8000, 0x8000,
+        ];
+
+        self.write16(REVERB_VOL_L, 0x5EBC);
+        self.write16(REVERB_VOL_R, 0x5EBC);
+        self.write16(REVERB_BASE, 0xE128);
+        self.write16(EON_LO, 0xFFFF);
+        self.write16(EON_HI, 0x00FF);
+        self.write16(EXT_VOL_L, 0);
+        self.write16(EXT_VOL_R, 0);
+        for (index, value) in BIOS_REVERB_CFG.into_iter().enumerate() {
+            self.write16(REVERB_CFG_BASE + index as u32 * 2, value);
+        }
+
+        // PA5 sampled SPUCNT/SPUSTAT as C085/0805 before the SDK touched the
+        // device. Apply the already-settled control mirror rather than leaving
+        // a synthetic one-sample pending transition at the EXE entry point.
+        self.spucnt = 0xC085;
+        self.spustat_control = 0x0005;
+        self.spustat_control_pending = None;
+        self.spustat = (self.spustat & !0x083F) | 0x0800 | self.spustat_control;
+        self.reverb.reset_output();
+    }
+
     /// Advance the noise generator by one SPU sample. Port of
     /// PCSX-Redux's `NoiseClock` (Dr. Hell / Xebra algorithm), which
     /// in turn matches measurements from a real PSX SPU.
@@ -1915,17 +1951,13 @@ impl Spu {
 
         let processed_this_sample = self.reverb.process_this_sample;
         if processed_this_sample {
-            // the SPU spec clearing REVERB_MASTER_ENABLE must only
-            // freeze the RAM feedback, NOT hard-zero the wet bus. PSX-SPX
-            // (-2331, 2357-2389) gates just the IIR/MIX_DEST RAM
-            // writes behind master-enable while still emitting the buffered
-            // tail; PSX-SPX still adds reverb.left_out/right_out to the mix
-            // (spu.rs:542-558). The old `reset_output()` snapped the tail to 0
-            // (an audible click). With master off we hold the wet bus at its
-            // prior value and let it ring down instead of resetting it.
-            if self.spucnt & SPUCNT_REVERB_MASTER_ENABLE != 0 {
-                self.run_reverb_step(input_l, input_r);
-            }
+            // PA5 on real SCPH hardware proved that clearing the reverb-master
+            // bit disables only the IIR/MIX_DEST writes. The read/APF/output
+            // side keeps traversing SPU RAM: a later DMA into the BIOS reverb
+            // work area immediately changed the audible wet output even with
+            // SPUCNT=0xC000 and EON=0. Always evaluate the network here and
+            // gate its RAM writes inside `run_reverb_step`.
+            self.run_reverb_step(input_l, input_r);
 
             let mut next_addr = self.reverb.curr_addr.saturating_add(1);
             if next_addr >= SPU_RAM_HALFWORDS as u32 || next_addr < self.reverb_base_halfword() {
@@ -1952,6 +1984,8 @@ impl Spu {
 
     fn run_reverb_step(&mut self, input_l: i32, input_r: i32) {
         use reverb_reg::*;
+
+        let writes_enabled = self.spucnt & SPUCNT_REVERB_MASTER_ENABLE != 0;
 
         let iir_coef = self.reverb_cfg_s(IIR_COEF);
         let iir_alpha = self.reverb_cfg_s(IIR_ALPHA);
@@ -1989,10 +2023,12 @@ impl Spu {
                 inv_iir_alpha,
             );
 
-        self.reverb_write(self.reverb_cfg_s(IIR_DEST_A0), 0, iir_a0);
-        self.reverb_write(self.reverb_cfg_s(IIR_DEST_A1), 0, iir_a1);
-        self.reverb_write(self.reverb_cfg_s(IIR_DEST_B0), 0, iir_b0);
-        self.reverb_write(self.reverb_cfg_s(IIR_DEST_B1), 0, iir_b1);
+        if writes_enabled {
+            self.reverb_write(self.reverb_cfg_s(IIR_DEST_A0), 0, iir_a0);
+            self.reverb_write(self.reverb_cfg_s(IIR_DEST_A1), 0, iir_a1);
+            self.reverb_write(self.reverb_cfg_s(IIR_DEST_B0), 0, iir_b0);
+            self.reverb_write(self.reverb_cfg_s(IIR_DEST_B1), 0, iir_b1);
+        }
 
         let acc0 = Self::mul_q15(
             self.reverb_read(self.reverb_cfg_s(ACC_SRC_A0)),
@@ -2043,8 +2079,10 @@ impl Spu {
         // apply_volume = `>>15`, the same convention as mul_q15).
         let mda0 = acc0 - Self::mul_q15(fb_a0, fb_alpha);
         let mda1 = acc1 - Self::mul_q15(fb_a1, fb_alpha);
-        self.reverb_write(mix_dest_a0, 0, mda0);
-        self.reverb_write(mix_dest_a1, 0, mda1);
+        if writes_enabled {
+            self.reverb_write(mix_dest_a0, 0, mda0);
+            self.reverb_write(mix_dest_a1, 0, mda1);
+        }
         let apf1_l = Self::mul_q15(mda0, fb_alpha) + fb_a0;
         let apf1_r = Self::mul_q15(mda1, fb_alpha) + fb_a1;
 
@@ -2054,8 +2092,10 @@ impl Spu {
         //   Lout     = [mLAPF2]*vAPF2 + [mLAPF2-dAPF2]
         let mdb0 = apf1_l - Self::mul_q15(fb_b0, fb_x);
         let mdb1 = apf1_r - Self::mul_q15(fb_b1, fb_x);
-        self.reverb_write(mix_dest_b0, 0, mdb0);
-        self.reverb_write(mix_dest_b1, 0, mdb1);
+        if writes_enabled {
+            self.reverb_write(mix_dest_b0, 0, mdb0);
+            self.reverb_write(mix_dest_b1, 0, mdb1);
+        }
 
         self.reverb.last_l = self.reverb.wet_l;
         self.reverb.last_r = self.reverb.wet_r;
