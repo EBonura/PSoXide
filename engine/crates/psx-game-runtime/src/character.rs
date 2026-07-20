@@ -72,6 +72,8 @@ pub struct RuntimeCharacter {
     pub action_frame_ranges:
         [psx_level::CharacterActionFrameRange; CHARACTER_ANIMATION_ACTION_COUNT],
     pub action_pushes: [psx_level::CharacterActionPush; CHARACTER_ANIMATION_ACTION_COUNT],
+    pub combat_capsule_first: psx_level::CombatCapsuleIndex,
+    pub combat_capsule_count: u8,
     pub visual_offset: [i16; 3],
     pub visual_yaw: i16,
     pub visual_scale_q8: u16,
@@ -127,6 +129,8 @@ impl RuntimeCharacter {
             action_speeds: c.action_speeds,
             action_frame_ranges: c.action_frame_ranges,
             action_pushes: c.action_pushes,
+            combat_capsule_first: c.combat_capsule_first,
+            combat_capsule_count: c.combat_capsule_count,
             visual_offset: c.visual_offset,
             visual_yaw: c.visual_yaw,
             visual_scale_q8: c.visual_scale_q8,
