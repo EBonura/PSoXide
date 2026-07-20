@@ -27,10 +27,20 @@ use psx_rt::tty;
 use psx_spu::SpuAddr;
 use psx_vram::{Clut, TexDepth, Tpage};
 
+mod audio_probe;
 mod cpu_tests;
+mod handoff_probe;
 mod photo;
+mod reverb_probe;
+mod transition_probe;
+mod voice_probe;
+use audio_probe::AudioProbe;
 use cpu_tests::*;
+use handoff_probe::HandoffProbe;
 use photo::PhotoCapture;
+use reverb_probe::{ReverbProbe, ReverbSnapshot};
+use transition_probe::TransitionProbe;
+use voice_probe::VoiceProbe;
 
 // A complete 4 KiB direct-mapped PS1 I-cache footprint. The custom return
 // register lets inline timing assembly call it without clobbering Rust's $ra.
@@ -80,7 +90,7 @@ unsafe extern "C" {
     fn __hwtest_icache_entry_w2();
 }
 
-const SUITE_VERSION: &str = "HWTEST v0.14";
+const SUITE_VERSION: &str = "HWTEST v0.18";
 const SCREEN_W: i16 = 320;
 const SCREEN_H: i16 = 240;
 const FONT_TPAGE: Tpage = Tpage::new(320, 0, TexDepth::Bit4);
@@ -103,7 +113,7 @@ const PROBE_VARIANTS: [(&str, u32, u32); PROBE_VARIANT_COUNT] = [
     ("SETUP 768", 768, 0),
     ("SETUP 2K", 2048, 0),
 ];
-const MODE_COUNT: u8 = 16;
+const MODE_COUNT: u8 = 21;
 const CHECK_MODES: [Mode; 11] = [
     Mode::AllChecks,
     Mode::CpuChecks,
@@ -151,6 +161,11 @@ enum Status {
 
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum Mode {
+    ReverbProbe,
+    HandoffProbe,
+    TransitionProbe,
+    VoiceProbe,
+    AudioProbe,
     ControllerProbe,
     AllChecks,
     CpuChecks,
@@ -172,6 +187,11 @@ enum Mode {
 impl Mode {
     const fn label(self) -> &'static str {
         match self {
+            Self::ReverbProbe => "HL REVERB STATE",
+            Self::HandoffProbe => "HL VOICE HANDOFF",
+            Self::TransitionProbe => "HL BANK TRANSITION",
+            Self::VoiceProbe => "HL VOICE BANK",
+            Self::AudioProbe => "CD/SPU AUDIO",
             Self::ControllerProbe => "CONTROLLER PROBE",
             Self::AllChecks => "ALL CHECKS",
             Self::CpuChecks => "CPU CHECKS",
@@ -193,6 +213,11 @@ impl Mode {
 
     const fn hint(self) -> &'static str {
         match self {
+            Self::ReverbProbe
+            | Self::HandoffProbe
+            | Self::TransitionProbe
+            | Self::VoiceProbe
+            | Self::AudioProbe => "AUTOMATIC  X RERUN WHEN COMPLETE",
             Self::ControllerProbe => "DOWN=TESTS  NO PAD NEEDED TO READ THIS",
             Self::AllChecks
             | Self::CpuChecks
@@ -214,6 +239,11 @@ impl Mode {
 
     const fn description(self) -> &'static str {
         match self {
+            Self::ReverbProbe => "BIOS REVERB STATE + MAP DMA RESET VARIANTS QR",
+            Self::HandoffProbe => "SELECTABLE MENU-VOICE SHUTDOWN + BANK SPLIT QR",
+            Self::TransitionProbe => "EXACT FULL/LIGHT/MAP LIVE-BANK HANDOFF QR",
+            Self::VoiceProbe => "HL BANK DMA + VOICE 15 END GUARD QR",
+            Self::AudioProbe => "READN AUDIO PATH + CAPTURE BUFFER QR",
             Self::ControllerProbe => "RAW PAD HANDSHAKE: NO-WAIT VS ACK-WAIT",
             Self::AllChecks => "ALL STABLE PASS/FAIL CHECKS",
             Self::CpuChecks => "CPU INSTRUCTIONS AND MEMORY ACCESS",
@@ -235,6 +265,11 @@ impl Mode {
 
     const fn aux_label(self) -> &'static str {
         match self {
+            Self::ReverbProbe
+            | Self::HandoffProbe
+            | Self::TransitionProbe
+            | Self::VoiceProbe
+            | Self::AudioProbe => "CAPTURE",
             Self::ControllerProbe => "ACK",
             Self::AllChecks
             | Self::CpuChecks
@@ -256,42 +291,52 @@ impl Mode {
 
     const fn index(self) -> u8 {
         match self {
-            Self::ControllerProbe => 0,
-            Self::AllChecks => 1,
-            Self::CpuChecks => 2,
-            Self::MemoryChecks => 3,
-            Self::IrqChecks => 4,
-            Self::DmaChecks => 5,
-            Self::TimerChecks => 6,
-            Self::GpuChecks => 7,
-            Self::GteChecks => 8,
-            Self::SpuChecks => 9,
-            Self::CdromChecks => 10,
-            Self::SioChecks => 11,
-            Self::CpuScan => 12,
-            Self::GteScan => 13,
-            Self::SpuScan => 14,
-            Self::TimingScan => 15,
+            Self::ReverbProbe => 0,
+            Self::HandoffProbe => 1,
+            Self::TransitionProbe => 2,
+            Self::VoiceProbe => 3,
+            Self::AudioProbe => 4,
+            Self::ControllerProbe => 5,
+            Self::AllChecks => 6,
+            Self::CpuChecks => 7,
+            Self::MemoryChecks => 8,
+            Self::IrqChecks => 9,
+            Self::DmaChecks => 10,
+            Self::TimerChecks => 11,
+            Self::GpuChecks => 12,
+            Self::GteChecks => 13,
+            Self::SpuChecks => 14,
+            Self::CdromChecks => 15,
+            Self::SioChecks => 16,
+            Self::CpuScan => 17,
+            Self::GteScan => 18,
+            Self::SpuScan => 19,
+            Self::TimingScan => 20,
         }
     }
 
     const fn from_index(index: u8) -> Self {
         match index % MODE_COUNT {
-            0 => Self::ControllerProbe,
-            1 => Self::AllChecks,
-            2 => Self::CpuChecks,
-            3 => Self::MemoryChecks,
-            4 => Self::IrqChecks,
-            5 => Self::DmaChecks,
-            6 => Self::TimerChecks,
-            7 => Self::GpuChecks,
-            8 => Self::GteChecks,
-            9 => Self::SpuChecks,
-            10 => Self::CdromChecks,
-            11 => Self::SioChecks,
-            12 => Self::CpuScan,
-            13 => Self::GteScan,
-            14 => Self::SpuScan,
+            0 => Self::ReverbProbe,
+            1 => Self::HandoffProbe,
+            2 => Self::TransitionProbe,
+            3 => Self::VoiceProbe,
+            4 => Self::AudioProbe,
+            5 => Self::ControllerProbe,
+            6 => Self::AllChecks,
+            7 => Self::CpuChecks,
+            8 => Self::MemoryChecks,
+            9 => Self::IrqChecks,
+            10 => Self::DmaChecks,
+            11 => Self::TimerChecks,
+            12 => Self::GpuChecks,
+            13 => Self::GteChecks,
+            14 => Self::SpuChecks,
+            15 => Self::CdromChecks,
+            16 => Self::SioChecks,
+            17 => Self::CpuScan,
+            18 => Self::GteScan,
+            19 => Self::SpuScan,
             _ => Self::TimingScan,
         }
     }
@@ -1411,6 +1456,11 @@ struct HardwareTests {
     spu_scan: ScanReport,
     timing_scan: TimingReport,
     timing_capture: PhotoCapture,
+    reverb_probe: ReverbProbe,
+    handoff_probe: HandoffProbe,
+    transition_probe: TransitionProbe,
+    voice_probe: VoiceProbe,
+    audio_probe: AudioProbe,
     pass_count: u8,
     fail_count: u8,
     warn_count: u8,
@@ -1444,18 +1494,23 @@ fn enable_cop2_for_diagnostics() {
 fn enable_cop2_for_diagnostics() {}
 
 impl HardwareTests {
-    const fn new() -> Self {
+    const fn new(boot_reverb: ReverbSnapshot) -> Self {
         Self {
             font: None,
-            // Boot straight into the controller probe: it needs no pad input to
-            // read, so a non-working controller can still be diagnosed.
-            mode: Mode::ControllerProbe,
+            // Boot into PA5's selectable reverb-state probe. PA4 and the
+            // earlier audio probes remain the following sections.
+            mode: Mode::ReverbProbe,
             results: [TestResult::pending(); TEST_COUNT],
             cpu_scan: ScanReport::pending("press x to sweep"),
             gte_scan: ScanReport::pending("press x to sweep"),
             spu_scan: ScanReport::pending("press x to map"),
             timing_scan: TimingReport::pending(),
             timing_capture: PhotoCapture::new(),
+            reverb_probe: ReverbProbe::new(boot_reverb),
+            handoff_probe: HandoffProbe::new(),
+            transition_probe: TransitionProbe::new(),
+            voice_probe: VoiceProbe::new(),
+            audio_probe: AudioProbe::new(),
             pass_count: 0,
             fail_count: 0,
             warn_count: 0,
@@ -1540,6 +1595,11 @@ impl HardwareTests {
                 self.encode_capture(self.page);
                 print_scan_report(self.mode, self.timing_scan.summary);
             }
+            Mode::ReverbProbe => self.reverb_probe.restart(),
+            Mode::HandoffProbe => self.handoff_probe.restart(),
+            Mode::TransitionProbe => self.transition_probe.restart(),
+            Mode::VoiceProbe => self.voice_probe.restart(),
+            Mode::AudioProbe => self.audio_probe.restart(),
             _ => self.run_section(self.mode),
         }
     }
@@ -1579,11 +1639,38 @@ impl Scene for HardwareTests {
         self.font = Some(FontAtlas::upload(&BASIC, FONT_TPAGE, FONT_CLUT));
         self.run_all();
         self.run_startup_scans();
+        self.reverb_probe.start();
     }
 
     fn update(&mut self, ctx: &mut Ctx) {
         self.results[PAD_POLL_TEST_INDEX] = pad_poll_result(ctx.pad);
         self.recount();
+
+        if matches!(self.mode, Mode::ReverbProbe) {
+            let (realign, consume_input) = self.reverb_probe.update(ctx);
+            if realign {
+                ctx.request_timing_realign();
+            }
+            if consume_input {
+                return;
+            }
+        } else if matches!(self.mode, Mode::HandoffProbe) {
+            let (realign, consume_input) = self.handoff_probe.update(ctx);
+            if realign {
+                ctx.request_timing_realign();
+            }
+            if consume_input {
+                return;
+            }
+        } else if matches!(self.mode, Mode::TransitionProbe) {
+            if self.transition_probe.update(ctx.sim_tick.as_u32()) {
+                ctx.request_timing_realign();
+            }
+        } else if matches!(self.mode, Mode::VoiceProbe) {
+            self.voice_probe.update(ctx.sim_tick.as_u32());
+        } else if matches!(self.mode, Mode::AudioProbe) {
+            self.audio_probe.update(ctx.sim_tick.as_u32());
+        }
 
         if matches!(self.mode, Mode::ControllerProbe) {
             // Sweep every timing variant once per frame. Each poll selects and
@@ -1657,7 +1744,15 @@ impl Scene for HardwareTests {
             return;
         };
 
-        if !matches!(self.mode, Mode::TimingScan) {
+        if !matches!(
+            self.mode,
+            Mode::TimingScan
+                | Mode::ReverbProbe
+                | Mode::HandoffProbe
+                | Mode::TransitionProbe
+                | Mode::VoiceProbe
+                | Mode::AudioProbe
+        ) {
             draw_mode_menu(font, self);
         }
 
@@ -1667,6 +1762,11 @@ impl Scene for HardwareTests {
             draw_problem_detail(font, self, self.mode);
         } else {
             match self.mode {
+                Mode::ReverbProbe => self.reverb_probe.draw(font),
+                Mode::HandoffProbe => self.handoff_probe.draw(font),
+                Mode::TransitionProbe => self.transition_probe.draw(font),
+                Mode::VoiceProbe => self.voice_probe.draw(font),
+                Mode::AudioProbe => self.audio_probe.draw(font),
                 Mode::ControllerProbe => draw_controller_probe(font, self),
                 Mode::CpuScan => draw_scan_report(font, self.mode, self.cpu_scan),
                 Mode::GteScan => draw_scan_report(font, self.mode, self.gte_scan),
@@ -1680,7 +1780,10 @@ impl Scene for HardwareTests {
 
 #[no_mangle]
 fn main() -> ! {
-    let mut suite = HardwareTests::new();
+    // Capture the BIOS-owned reverb state before any SDK or engine path can
+    // initialise the SPU. PA5 transports the raw snapshot in its QR payload.
+    let boot_reverb = ReverbSnapshot::capture();
+    let mut suite = HardwareTests::new(boot_reverb);
     let config = Config {
         screen_w: SCREEN_W as u16,
         screen_h: SCREEN_H as u16,
@@ -5231,10 +5334,10 @@ fn spu_dma_read_shape(addr: u32, out: &mut [u32], block_size: u32) -> u32 {
             guard += 1;
         }
         psx_io::write16(SPUCNT, spucnt); // back to Stop
-        // Preserve both bounded counters independently. A DMA-read mode that
-        // intentionally remains gated until channel arm reports `FFFF` in the
-        // low half while the preceding Stop transition still retains its
-        // useful sample-boundary count in the high half.
+                                         // Preserve both bounded counters independently. A DMA-read mode that
+                                         // intentionally remains gated until channel arm reports `FFFF` in the
+                                         // low half while the preceding Stop transition still retains its
+                                         // useful sample-boundary count in the high half.
         (stop_guard << 16) | mode_guard
     }
 }
