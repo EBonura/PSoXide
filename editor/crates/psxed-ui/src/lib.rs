@@ -193,6 +193,10 @@ const STARTER_CHARACTER_ASSET_DIRS: &[&str] = &[
     "assets/models/hooded_wretch",
     "assets/models/crowned_wraith",
     "assets/animations/standalone_fbx",
+    "assets/models/ci_player",
+    "assets/models/rust_mantis",
+    "assets/animations/ci_player_complete",
+    "assets/animations/rust_mantis_starter",
 ];
 
 fn action_bar_height_for_status(status: &str) -> f32 {
@@ -207,18 +211,24 @@ const STARTER_CHARACTER_MODEL_NAMES: &[&str] = &[
     "Crimson Cross Knight",
     "Hooded Wretch",
     "Crowned Wraith",
+    "Aletha",
+    "Rust Mantis",
 ];
 const STARTER_ANIMATION_SET_NAMES: &[&str] = &[
     "Obsidian Wraith Enemy Set",
     "Crimson Cross Knight Player Set",
     "Hooded Wretch Enemy Set",
     "Crowned Wraith Enemy Set",
+    "Aletha Complete Animation Set",
+    "Rust Mantis Starter Animation Set",
 ];
 const STARTER_CHARACTER_PROFILE_NAMES: &[&str] = &[
     "Crimson Cross Knight Player",
     "Obsidian Wraith Enemy",
     "Hooded Wretch Enemy",
     "Crowned Wraith Enemy",
+    "Aletha",
+    "Rust Mantis Enemy",
 ];
 const LEGACY_WRAITH_HERO_PROFILE_NAME: &str = "Wraith Hero";
 const LEGACY_OBSIDIAN_WARDEN_ASSET_DIR: &str = "assets/models/obsidian_warden";

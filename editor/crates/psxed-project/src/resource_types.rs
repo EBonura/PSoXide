@@ -1209,6 +1209,16 @@ pub struct CharacterResource {
     /// path until a project opts into the authored volume pipeline.
     #[serde(default)]
     pub combat_capsules: Vec<CharacterCombatCapsule>,
+    /// How a freshly placed instance of this profile should be controlled.
+    /// `Auto` preserves the legacy behavior: the first character in a scene
+    /// becomes the player and later characters are passive.
+    #[serde(default)]
+    pub spawn_role: CharacterSpawnRole,
+    /// Reusable enemy tuning applied when [`Self::spawn_role`] is `Enemy`.
+    /// Keeping this on the Character resource makes authored AI behavior
+    /// survive placement in another scene or project.
+    #[serde(default)]
+    pub enemy_behavior: Option<EnemyBehaviorSettings>,
     /// Capsule radius (engine units). Used by collision +
     /// editor preview gizmo.
     pub radius: u16,
@@ -1270,6 +1280,36 @@ pub struct CharacterResource {
     /// the character origin (typically around the upper torso
     /// for comfortable third-person framing).
     pub camera_target_height: i32,
+    /// Additional lock-on camera elevation as a percentage of camera height.
+    #[serde(default = "default_world_camera_lock_rise_percent")]
+    pub camera_lock_rise_percent: u8,
+    /// Minimum camera origin height above the sampled floor.
+    #[serde(default = "default_world_camera_min_floor_clearance")]
+    pub camera_min_floor_clearance: i32,
+    /// Manual orbit speed copied to a newly placed player camera.
+    #[serde(default = "default_world_camera_orbit_speed_level")]
+    pub camera_orbit_speed_level: u8,
+    /// Camera origin follow lag copied to a newly placed player camera.
+    #[serde(default = "default_world_camera_position_lag_shift")]
+    pub camera_position_lag_shift: u8,
+    /// Camera focus follow lag copied to a newly placed player camera.
+    #[serde(default = "default_world_camera_focus_lag_shift")]
+    pub camera_focus_lag_shift: u8,
+    /// Collision boom recovery lag copied to a newly placed player camera.
+    #[serde(default = "default_world_camera_distance_lag_shift")]
+    pub camera_distance_lag_shift: u8,
+}
+
+/// Reusable role applied when a Character resource is dropped into a scene.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CharacterSpawnRole {
+    /// Preserve the legacy first-character-is-player placement behavior.
+    #[default]
+    Auto,
+    /// Always place as the player character, replacing an older player source.
+    Player,
+    /// Always place as an enemy using the profile's enemy behavior preset.
+    Enemy,
 }
 
 impl CharacterResource {
@@ -1280,6 +1320,8 @@ impl CharacterResource {
             model: None,
             animation_set: None,
             combat_capsules: Vec::new(),
+            spawn_role: CharacterSpawnRole::Auto,
+            enemy_behavior: None,
             radius: default_character_radius(),
             height: default_character_height(),
             walk_speed: default_character_walk_speed(),
@@ -1302,6 +1344,27 @@ impl CharacterResource {
             camera_distance: 6144,
             camera_height: 1280,
             camera_target_height: 640,
+            camera_lock_rise_percent: default_world_camera_lock_rise_percent(),
+            camera_min_floor_clearance: default_world_camera_min_floor_clearance(),
+            camera_orbit_speed_level: default_world_camera_orbit_speed_level(),
+            camera_position_lag_shift: default_world_camera_position_lag_shift(),
+            camera_focus_lag_shift: default_world_camera_focus_lag_shift(),
+            camera_distance_lag_shift: default_world_camera_distance_lag_shift(),
+        }
+    }
+
+    /// Complete camera preset for a freshly placed player instance.
+    pub const fn camera_settings(&self) -> WorldCameraSettings {
+        WorldCameraSettings {
+            distance: self.camera_distance,
+            height: self.camera_height,
+            target_height: self.camera_target_height,
+            lock_rise_percent: self.camera_lock_rise_percent,
+            min_floor_clearance: self.camera_min_floor_clearance,
+            orbit_speed_level: self.camera_orbit_speed_level,
+            position_lag_shift: self.camera_position_lag_shift,
+            focus_lag_shift: self.camera_focus_lag_shift,
+            distance_lag_shift: self.camera_distance_lag_shift,
         }
     }
 }
@@ -1652,7 +1715,8 @@ impl CharacterControllerSettings {
             backstep_active_frames: character.backstep_active_frames,
             backstep_recovery_frames: character.backstep_recovery_frames,
             backstep_invulnerable_frames: character.backstep_invulnerable_frames,
-            enemy: None,
+            enemy: (character.spawn_role == CharacterSpawnRole::Enemy)
+                .then_some(character.enemy_behavior.unwrap_or_default()),
         }
     }
 }
