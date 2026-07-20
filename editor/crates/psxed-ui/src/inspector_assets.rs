@@ -1647,6 +1647,7 @@ pub(crate) fn texture_resource_picker(
 pub(crate) struct CharacterEditorContext {
     /// `(model id, model display name, clip names in order)`.
     pub(crate) models: Vec<(ResourceId, String, Vec<String>)>,
+    pub(crate) materials: Vec<(ResourceId, String)>,
     /// `(model id, skeleton id)`.
     pub(crate) model_skeletons: Vec<(ResourceId, Option<ResourceId>)>,
     pub(crate) animation_sets: Vec<AnimationSetOption>,
@@ -1656,6 +1657,14 @@ pub(crate) struct CharacterEditorContext {
 pub(crate) fn build_character_editor_context(project: &ProjectDocument) -> CharacterEditorContext {
     CharacterEditorContext {
         models: collect_model_options(project),
+        materials: project
+            .resources
+            .iter()
+            .filter_map(|resource| match &resource.data {
+                ResourceData::Material(_) => Some((resource.id, resource.name.clone())),
+                _ => None,
+            })
+            .collect(),
         model_skeletons: project
             .resources
             .iter()
