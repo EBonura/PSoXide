@@ -1198,6 +1198,8 @@ mod tests {
             attack_clip: 3,
             stagger_clip: 4,
             death_clip: 5,
+            combat_capsule_first: psx_level::CombatCapsuleIndex(0),
+            combat_capsule_count: 0,
             x,
             y: 0,
             z,

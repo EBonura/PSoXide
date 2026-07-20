@@ -1139,6 +1139,21 @@ impl Default for PlaytestGameFlow {
     }
 }
 
+/// Compact rig-attached combat capsule ready for manifest emission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestCombatCapsule {
+    pub joint: u8,
+    pub flags: u8,
+    pub action: u8,
+    pub start: [i16; 3],
+    pub end: [i16; 3],
+    pub radius: u16,
+    pub active_start_frame: u16,
+    pub active_end_frame: u16,
+    pub damage: u16,
+    pub poise_damage: u16,
+}
+
 /// Weapon-local hit shape, ready for manifest emission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlaytestWeaponHitShape {
@@ -1415,6 +1430,10 @@ pub struct PlaytestGameEntity {
     pub stagger_clip: u16,
     /// Death one-shot clip.
     pub death_clip: u16,
+    /// First rig-attached volume in [`PlaytestPackage::combat_capsules`].
+    pub combat_capsule_first: u16,
+    /// Number of rig-attached volumes.
+    pub combat_capsule_count: u8,
     /// Room-local spawn X.
     pub x: i32,
     /// Y.
@@ -1517,6 +1536,10 @@ pub struct PlaytestCharacter {
         [psx_level::CharacterActionFrameRange; PLAYTEST_CHARACTER_ACTION_COUNT],
     /// Forward push per action.
     pub action_pushes: [psx_level::CharacterActionPush; PLAYTEST_CHARACTER_ACTION_COUNT],
+    /// First rig-attached volume in [`PlaytestPackage::combat_capsules`].
+    pub combat_capsule_first: u16,
+    /// Number of rig-attached volumes.
+    pub combat_capsule_count: u8,
     /// Render-only model offset from the player/controller root,
     /// in entity-local engine units.
     pub visual_offset: [i16; 3],
@@ -1697,6 +1720,8 @@ pub struct PlaytestPackage {
     pub options: Vec<PlaytestOption>,
     /// WAV sources baked as CD-DA tracks in the playtest/export disc image.
     pub cdda_tracks: Vec<PlaytestCddaTrack>,
+    /// Compact rig-attached hurtboxes and action-gated hitboxes.
+    pub combat_capsules: Vec<PlaytestCombatCapsule>,
     /// Weapon hitboxes, shared by [`Self::weapons`].
     pub weapon_hitboxes: Vec<PlaytestWeaponHitbox>,
     /// Cooked Weapon resources, deduplicated by source resource id.

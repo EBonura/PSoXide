@@ -465,6 +465,7 @@ fn equipment_test_project() -> (ProjectDocument, crate::ResourceId) {
             looping: true,
             tags: Vec::new(),
             calibration: Default::default(),
+            pose_corrections: Vec::new(),
         }),
     );
     let set = project.add_resource(
