@@ -522,6 +522,12 @@ impl Bus {
         self.timers.set_counter_read_extra_hold(2, 5);
     }
 
+    /// Restore the observable retail BIOS shell SPU handoff used by warm disc
+    /// fast boot after the abbreviated kernel warmup skips the shell itself.
+    pub fn apply_retail_bios_shell_audio_profile(&mut self) {
+        self.spu.apply_retail_bios_shell_audio_profile();
+    }
+
     /// Current VBlank period -- one frame in cycles.
     pub fn vblank_period(&self) -> u64 {
         self.vblank_period

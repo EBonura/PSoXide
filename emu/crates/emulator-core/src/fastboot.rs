@@ -65,6 +65,13 @@ pub fn fast_boot_disc_with_hle(
     }
     bus.load_exe_payload(boot.exe.load_addr, &boot.exe.payload);
     bus.clear_exe_bss(boot.exe.bss_addr, boot.exe.bss_size);
+    if !enable_hle_bios {
+        // The abbreviated BIOS warmup installs kernel state but intentionally
+        // stops before the license/shell path. PA5 silicon telemetry proves
+        // that disc executables normally inherit the shell's configured SPU
+        // reverb preset, so restore that observable handoff explicitly.
+        bus.apply_retail_bios_shell_audio_profile();
+    }
     // OpenBIOS enables display immediately before Exec. Some retail
     // games rely on inheriting that shell state instead of issuing
     // GP1(03h) themselves during early startup.
