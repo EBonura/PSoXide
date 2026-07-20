@@ -92,6 +92,7 @@ fn collect_resource_use(
                     &mut use_set,
                     &mut characters,
                     &mut models,
+                    &mut materials,
                 );
             }
             NodeKind::SpawnPoint { character, .. } => {
@@ -101,6 +102,7 @@ fn collect_resource_use(
                     &mut use_set,
                     &mut characters,
                     &mut models,
+                    &mut materials,
                 );
             }
             NodeKind::Collider { .. } => use_set.colliders += 1,
@@ -171,6 +173,7 @@ fn push_character_model(
     use_set: &mut SceneResourceUse,
     characters: &mut HashSet<ResourceId>,
     models: &mut HashSet<ResourceId>,
+    materials: &mut HashSet<ResourceId>,
 ) {
     let Some(character_id) = character else {
         return;
@@ -185,6 +188,7 @@ fn push_character_model(
     if let Some(model_id) = character.model {
         push_unique(model_id, &mut use_set.models, models);
     }
+    push_material(character.material, use_set, materials);
 }
 
 fn push_unique(id: ResourceId, out: &mut Vec<ResourceId>, seen: &mut HashSet<ResourceId>) {

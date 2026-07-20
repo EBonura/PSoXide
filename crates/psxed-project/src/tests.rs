@@ -115,6 +115,7 @@ fn character_resource_deserializes_without_new_motor_tuning_fields() {
         default_character_backstep_invulnerable_frames()
     );
     assert!(character.combat_capsules.is_empty());
+    assert!(character.material.is_none());
     assert_eq!(character.spawn_role, CharacterSpawnRole::Auto);
     assert!(character.enemy_behavior.is_none());
     assert_eq!(
@@ -1541,6 +1542,14 @@ fn starter_project_has_scene_tree_and_resources() {
         (188, 44, 94)
     );
     assert_eq!(aletha.roll_speed, 165);
+    let aletha_material = aletha
+        .material
+        .expect("Aletha carries her crystal material");
+    let material_resource = project
+        .resource(aletha_material)
+        .expect("Aletha material exists");
+    assert_eq!(material_resource.name, "Aletha Crystal");
+    assert!(matches!(material_resource.data, ResourceData::Material(_)));
     assert_eq!(
         (
             aletha.camera_distance,
