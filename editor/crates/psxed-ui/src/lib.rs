@@ -214,6 +214,7 @@ const STARTER_CHARACTER_MODEL_NAMES: &[&str] = &[
     "Aletha",
     "Rust Mantis",
 ];
+const STARTER_CHARACTER_MATERIAL_NAMES: &[&str] = &["Aletha Crystal"];
 const STARTER_ANIMATION_SET_NAMES: &[&str] = &[
     "Obsidian Wraith Enemy Set",
     "Crimson Cross Knight Player Set",

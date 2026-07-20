@@ -923,6 +923,7 @@ pub fn build_package(
                             room_index,
                             pos,
                             yaw,
+                            &mut texture_asset_for_path,
                             &mut assets,
                             &mut models,
                             &mut model_clips,
@@ -1500,9 +1501,19 @@ pub fn build_package(
                     }
                 }
             };
+            let profile_material = resolved.and_then(|character_id| {
+                project.resource(character_id).and_then(|resource| {
+                    if let ResourceData::Character(character) = &resource.data {
+                        character.material
+                    } else {
+                        None
+                    }
+                })
+            });
             let renderer_material_override = candidate
                 .renderer
                 .and_then(|renderer| renderer.material)
+                .or(profile_material)
                 .and_then(|material_id| {
                     resolve_model_material_override(
                         project,

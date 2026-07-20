@@ -1199,6 +1199,10 @@ pub struct CharacterResource {
     /// validated at cook time when assigned to the player.
     #[serde(default)]
     pub model: Option<ResourceId>,
+    /// Default covering material applied to freshly placed instances. `None`
+    /// keeps the model's own atlas.
+    #[serde(default)]
+    pub material: Option<ResourceId>,
     /// Reusable animation set on the model's skeleton. This is the
     /// single binding for the character's gameplay animations (idle /
     /// walk / run / actions); cook/preview resolve roles from it.
@@ -1318,6 +1322,7 @@ impl CharacterResource {
     pub const fn defaults() -> Self {
         Self {
             model: None,
+            material: None,
             animation_set: None,
             combat_capsules: Vec::new(),
             spawn_role: CharacterSpawnRole::Auto,
