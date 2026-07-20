@@ -1508,6 +1508,30 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     }
     out.push_str("];\n\n");
 
+    out.push_str("/// Compact rig-attached hitboxes and hurtboxes.\n");
+    out.push_str("pub static COMBAT_CAPSULES: &[CombatCapsuleRecord] = &[\n");
+    for capsule in &package.combat_capsules {
+        let _ = writeln!(
+            out,
+            "    CombatCapsuleRecord {{ joint: {}, flags: {}, action: {}, reserved: 0, start: [{}, {}, {}], end: [{}, {}, {}], radius: {}, active_start_frame: {}, active_end_frame: {}, damage: {}, poise_damage: {} }},",
+            capsule.joint,
+            capsule.flags,
+            capsule.action,
+            capsule.start[0],
+            capsule.start[1],
+            capsule.start[2],
+            capsule.end[0],
+            capsule.end[1],
+            capsule.end[2],
+            capsule.radius,
+            capsule.active_start_frame,
+            capsule.active_end_frame,
+            capsule.damage,
+            capsule.poise_damage,
+        );
+    }
+    out.push_str("];\n\n");
+
     out.push_str("/// Placed souls-like game entities, room-local coordinates.\n");
     out.push_str("pub static GAME_ENTITIES: &[LevelGameEntityRecord] = &[\n");
     for entity in &package.game_entities {
@@ -1519,7 +1543,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         };
         let _ = writeln!(
             out,
-            "    LevelGameEntityRecord {{ room: RoomIndex({}), kind: {}, targetname: {}, model_instance: {model_instance}, idle_clip: {}, walk_clip: {}, run_clip: {}, attack_clip: {}, stagger_clip: {}, death_clip: {}, x: {}, y: {}, z: {}, yaw: {}, radius: {}, height: {}, walk_speed: {}, run_speed: {}, patrol_x: {}, patrol_y: {}, patrol_z: {}, patrol_wait_ticks: {}, aggro_radius: {}, reaction_ticks: {}, preferred_distance: {}, spacing_tolerance: {}, decision_interval_ticks: {}, circle_chance: {}, attack_priority: {}, attack_cooldown_ticks: {}, group_attack_delay_ticks: {}, windup_ticks: {}, recovery_ticks: {}, poise: {}, touch_damage: {}, max_health: {}, flags: {} }},",
+            "    LevelGameEntityRecord {{ room: RoomIndex({}), kind: {}, targetname: {}, model_instance: {model_instance}, idle_clip: {}, walk_clip: {}, run_clip: {}, attack_clip: {}, stagger_clip: {}, death_clip: {}, combat_capsule_first: CombatCapsuleIndex({}), combat_capsule_count: {}, x: {}, y: {}, z: {}, yaw: {}, radius: {}, height: {}, walk_speed: {}, run_speed: {}, patrol_x: {}, patrol_y: {}, patrol_z: {}, patrol_wait_ticks: {}, aggro_radius: {}, reaction_ticks: {}, preferred_distance: {}, spacing_tolerance: {}, decision_interval_ticks: {}, circle_chance: {}, attack_priority: {}, attack_cooldown_ticks: {}, group_attack_delay_ticks: {}, windup_ticks: {}, recovery_ticks: {}, poise: {}, touch_damage: {}, max_health: {}, flags: {} }},",
             entity.room,
             entity.kind,
             entity.targetname,
@@ -1529,6 +1553,8 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             entity.attack_clip,
             entity.stagger_clip,
             entity.death_clip,
+            entity.combat_capsule_first,
+            entity.combat_capsule_count,
             entity.x,
             entity.y,
             entity.z,
@@ -1612,13 +1638,15 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             .join(", ");
         let _ = writeln!(
             out,
-            "    LevelCharacterRecord {{ model: ModelIndex({}), action_clips: [{}], action_flags: [{}], action_speeds: [{}], action_frame_ranges: [{}], action_pushes: [{}], visual_offset: [{}, {}, {}], visual_yaw: {}, visual_scale_q8: {}, weight_q8: {}, radius: {}, height: {}, walk_speed: {}, run_speed: {}, turn_speed_degrees_per_second: {}, stamina_max_q12: {}, sprint_min_q12: {}, sprint_drain_q12: {}, stamina_recover_q12: {}, roll_cost_q12: {}, roll_speed: {}, roll_active_frames: {}, roll_recovery_frames: {}, roll_invulnerable_frames: {}, backstep_cost_q12: {}, backstep_speed: {}, backstep_active_frames: {}, backstep_recovery_frames: {}, backstep_invulnerable_frames: {}, camera_distance: {}, camera_height: {}, camera_target_height: {}, material_override: {}, flags: 0 }},",
+            "    LevelCharacterRecord {{ model: ModelIndex({}), action_clips: [{}], action_flags: [{}], action_speeds: [{}], action_frame_ranges: [{}], action_pushes: [{}], combat_capsule_first: CombatCapsuleIndex({}), combat_capsule_count: {}, visual_offset: [{}, {}, {}], visual_yaw: {}, visual_scale_q8: {}, weight_q8: {}, radius: {}, height: {}, walk_speed: {}, run_speed: {}, turn_speed_degrees_per_second: {}, stamina_max_q12: {}, sprint_min_q12: {}, sprint_drain_q12: {}, stamina_recover_q12: {}, roll_cost_q12: {}, roll_speed: {}, roll_active_frames: {}, roll_recovery_frames: {}, roll_invulnerable_frames: {}, backstep_cost_q12: {}, backstep_speed: {}, backstep_active_frames: {}, backstep_recovery_frames: {}, backstep_invulnerable_frames: {}, camera_distance: {}, camera_height: {}, camera_target_height: {}, material_override: {}, flags: 0 }},",
             character.model,
             action_clips,
             action_flags,
             action_speeds,
             action_frame_ranges,
             action_pushes,
+            character.combat_capsule_first,
+            character.combat_capsule_count,
             character.visual_offset[0],
             character.visual_offset[1],
             character.visual_offset[2],
@@ -3477,6 +3505,8 @@ use psx_level::{
     CharacterActionFrameRange,
     CharacterActionPush,
     CharacterIndex,
+    CombatCapsuleIndex,
+    CombatCapsuleRecord,
     EntityKind,
     EntityRecord,
     EquipmentRecord,

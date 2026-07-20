@@ -349,6 +349,7 @@ mod tests {
                 looping: true,
                 tags: Vec::new(),
                 calibration: Default::default(),
+                pose_corrections: Vec::new(),
             }),
         );
         project.add_resource(
@@ -363,6 +364,7 @@ mod tests {
                 looping: true,
                 tags: Vec::new(),
                 calibration: Default::default(),
+                pose_corrections: Vec::new(),
             }),
         );
         (project, id)

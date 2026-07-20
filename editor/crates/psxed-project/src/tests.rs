@@ -114,6 +114,44 @@ fn character_resource_deserializes_without_new_motor_tuning_fields() {
         character.backstep_invulnerable_frames,
         default_character_backstep_invulnerable_frames()
     );
+    assert!(character.combat_capsules.is_empty());
+}
+
+#[test]
+fn character_combat_capsules_roundtrip_roles_and_joint_local_geometry() {
+    let mut character = CharacterResource::defaults();
+    character.combat_capsules = vec![
+        CharacterCombatCapsule {
+            name: "Torso".to_string(),
+            joint: 3,
+            capsule: JointCapsule {
+                start: [0, -120, 0],
+                end: [0, 180, 0],
+                radius: 96,
+            },
+            role: CombatCapsuleRole::Hurtbox,
+        },
+        CharacterCombatCapsule {
+            name: "Right Fist".to_string(),
+            joint: 14,
+            capsule: JointCapsule {
+                start: [0, 0, 0],
+                end: [90, 0, 0],
+                radius: 42,
+            },
+            role: CombatCapsuleRole::Hitbox {
+                action: CharacterAnimationAction::LightAttack,
+                active_start_frame: 8,
+                active_end_frame: 13,
+                damage: 30,
+                poise_damage: 20,
+            },
+        },
+    ];
+
+    let ron = ron::to_string(&character).expect("combat capsules serialize");
+    let restored: CharacterResource = ron::from_str(&ron).expect("combat capsules deserialize");
+    assert_eq!(restored, character);
 }
 
 #[test]
@@ -2115,6 +2153,7 @@ fn animation_library_resources_roundtrip_and_resolve_by_path() {
             looping: true,
             tags: vec!["idle".to_string()],
             calibration: Default::default(),
+            pose_corrections: Vec::new(),
         }),
     );
     let set = project.add_resource(
@@ -2208,6 +2247,7 @@ fn model_targeted_animation_clips_do_not_leak_across_shared_skeletons() {
         looping: true,
         tags: Vec::new(),
         calibration: Default::default(),
+        pose_corrections: Vec::new(),
     };
     let shared = project.add_resource(
         "Shared",

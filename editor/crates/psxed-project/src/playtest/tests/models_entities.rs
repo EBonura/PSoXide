@@ -39,6 +39,58 @@ fn playtest_packages_only_runtime_required_player_clips() {
 }
 
 #[test]
+fn playtest_folds_pose_corrections_into_packaged_animation_bytes() {
+    let mut project = ProjectDocument::starter();
+    let project_root = starter_project_root();
+    let player_model = player_model_resource_id(&project);
+    let resolved = project.resolved_model_animation_clips(player_model);
+    let clip_resource = resolved
+        .first()
+        .and_then(|clip| clip.animation_resource)
+        .expect("default resolved clip has a resource");
+    let base_path = project
+        .resource(clip_resource)
+        .and_then(|resource| match &resource.data {
+            ResourceData::AnimationClip(clip) => Some(clip.psxanim_path.clone()),
+            _ => None,
+        })
+        .expect("animation clip resource");
+    let base_bytes =
+        std::fs::read(resolve_path(&base_path, &project_root)).expect("base animation exists");
+    let base = psx_asset::Animation::from_bytes(&base_bytes).expect("base animation parses");
+    let ResourceData::AnimationClip(clip) = &mut project.resource_mut(clip_resource).unwrap().data
+    else {
+        panic!("animation clip expected");
+    };
+    clip.pose_corrections
+        .push(crate::AnimationPoseCorrectionKey {
+            frame: 0,
+            joint: 0,
+            rotation_q12: [0, 256, 0],
+            translation: [8, 0, 0],
+        });
+
+    let (package, report) = build_package(&project, &project_root);
+    assert!(report.is_ok(), "errors: {:?}", report.errors);
+    let package = package.expect("project cooks");
+    let model = package
+        .models
+        .iter()
+        .find(|model| model.source_resource == player_model)
+        .expect("player model packaged");
+    let packaged_clip = &package.model_clips[model.clip_first as usize];
+    let packaged_bytes = &package.assets[packaged_clip.animation_asset_index].bytes;
+    let packaged =
+        psx_asset::Animation::from_bytes(packaged_bytes).expect("packaged animation parses");
+
+    assert_eq!(packaged.frame_count(), base.frame_count());
+    assert_ne!(
+        packaged.pose(0, 0).expect("corrected pose"),
+        base.pose(0, 0).expect("base pose")
+    );
+}
+
+#[test]
 fn room_material_must_be_4bpp() {
     // Swap the starter's brick material to point at the
     // model's 8bpp atlas, which lives at the same project.
