@@ -735,6 +735,7 @@ pub fn build_package(
     let mut model_instances: Vec<PlaytestModelInstance> = Vec::new();
     let mut image_props: Vec<PlaytestImageProp> = Vec::new();
     let mut box_props: Vec<PlaytestBoxProp> = Vec::new();
+    let mut combat_capsules: Vec<PlaytestCombatCapsule> = Vec::new();
     let mut weapon_hitboxes: Vec<PlaytestWeaponHitbox> = Vec::new();
     let mut weapons: Vec<PlaytestWeapon> = Vec::new();
     let mut equipment: Vec<PlaytestEquipment> = Vec::new();
@@ -992,6 +993,24 @@ pub fn build_package(
                             ) else {
                                 return (None, report);
                             };
+                            let model_joint_count = node_model_instance
+                                .and_then(|instance| model_instances.get(instance as usize))
+                                .and_then(|instance| models.get(instance.model as usize))
+                                .and_then(|model| assets.get(model.mesh_asset_index))
+                                .and_then(|asset| psx_asset::Model::from_bytes(&asset.bytes).ok())
+                                .map(|model| model.joint_count())
+                                .unwrap_or(0);
+                            let Some((combat_capsule_first, combat_capsule_count)) =
+                                cook_character_combat_capsules(
+                                    archetype.as_str(),
+                                    enemy_character,
+                                    model_joint_count,
+                                    &mut combat_capsules,
+                                    &mut report,
+                                )
+                            else {
+                                return (None, report);
+                            };
                             if !push_game_entity(
                                 node.name.as_str(),
                                 archetype.as_str(),
@@ -1002,6 +1021,8 @@ pub fn build_package(
                                 enemy,
                                 node_model_instance,
                                 state_clips,
+                                combat_capsule_first,
+                                combat_capsule_count,
                                 &mut names,
                                 &mut game_entities,
                                 &mut report,
@@ -1528,6 +1549,7 @@ pub fn build_package(
                 &mut model_for_resource,
                 &runtime_model_clips,
                 &mut model_clip_remaps,
+                &mut combat_capsules,
                 &mut characters,
                 &mut report,
             )
@@ -1679,6 +1701,7 @@ pub fn build_package(
             game_flow,
             options,
             cdda_tracks,
+            combat_capsules,
             weapon_hitboxes,
             weapons,
             equipment,
