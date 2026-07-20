@@ -25,13 +25,26 @@ impl EditorWorkspace {
                         }
 
                         if self.active_workspace == WorkspaceView::Animation {
-                            model_animation_viewer::draw_model_animation_viewer(
+                            self.prepare_inspector_undo_frame(ctx);
+                            let undo_candidate = inspector_has_edit_input(ctx)
+                                .then(|| (self.project.clone(), self.history.epoch()));
+                            let changed = model_animation_viewer::draw_model_animation_viewer(
                                 ui,
                                 &mut self.project,
                                 &self.project_dir,
                                 &mut self.animation_viewer,
                                 &mut self.animation_viewer_preview_texture,
                             );
+                            if changed {
+                                self.mark_dirty();
+                            }
+                            if let Some((project_before, history_epoch_before)) = undo_candidate {
+                                self.finish_inspector_undo_frame(
+                                    project_before,
+                                    history_epoch_before,
+                                    ctx,
+                                );
+                            }
                             return;
                         }
 

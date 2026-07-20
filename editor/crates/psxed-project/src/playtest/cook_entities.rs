@@ -356,6 +356,123 @@ pub(crate) fn remap_runtime_model_clip(
         .flatten()
 }
 
+/// Validate and compact one Character's rig-attached combat volumes. The
+/// runtime gets a bounded contiguous slice and can therefore scan it without
+/// allocation or resource lookup.
+pub(crate) fn cook_character_combat_capsules(
+    character_name: &str,
+    character: &crate::CharacterResource,
+    model_joint_count: u16,
+    combat_capsules: &mut Vec<PlaytestCombatCapsule>,
+    report: &mut PlaytestValidationReport,
+) -> Option<(u16, u8)> {
+    if character.combat_capsules.len() > psx_level::MAX_CHARACTER_COMBAT_CAPSULES {
+        report.error(format!(
+            "Character '{character_name}' has {} combat volumes; the PS1 runtime cap is {}",
+            character.combat_capsules.len(),
+            psx_level::MAX_CHARACTER_COMBAT_CAPSULES
+        ));
+        return None;
+    }
+    let first = u16::try_from(combat_capsules.len()).ok()?;
+    let mut cooked = Vec::with_capacity(character.combat_capsules.len());
+    for volume in &character.combat_capsules {
+        if volume.joint >= model_joint_count {
+            report.error(format!(
+                "Character '{character_name}' combat volume '{}' references joint {}, but its model has {} joints",
+                volume.name, volume.joint, model_joint_count
+            ));
+            return None;
+        }
+        let Ok(joint) = u8::try_from(volume.joint) else {
+            report.error(format!(
+                "Character '{character_name}' combat volume '{}' references joint {}, but compact runtime joints are limited to 255",
+                volume.name, volume.joint
+            ));
+            return None;
+        };
+        if volume.capsule.radius == 0 {
+            report.error(format!(
+                "Character '{character_name}' combat volume '{}' has radius 0",
+                volume.name
+            ));
+            return None;
+        }
+        let compact_point = |point: [i32; 3]| -> Option<[i16; 3]> {
+            Some([
+                i16::try_from(point[0]).ok()?,
+                i16::try_from(point[1]).ok()?,
+                i16::try_from(point[2]).ok()?,
+            ])
+        };
+        let Some(start) = compact_point(volume.capsule.start) else {
+            report.error(format!(
+                "Character '{character_name}' combat volume '{}' start is outside compact joint-local range",
+                volume.name
+            ));
+            return None;
+        };
+        let Some(end) = compact_point(volume.capsule.end) else {
+            report.error(format!(
+                "Character '{character_name}' combat volume '{}' end is outside compact joint-local range",
+                volume.name
+            ));
+            return None;
+        };
+        let (flags, action, active_start_frame, active_end_frame, damage, poise_damage) =
+            match volume.role {
+                crate::CombatCapsuleRole::Hurtbox => {
+                    (psx_level::combat_capsule_flags::HURTBOX, 0, 0, 0, 0, 0)
+                }
+                crate::CombatCapsuleRole::Hitbox {
+                    action,
+                    active_start_frame,
+                    active_end_frame,
+                    damage,
+                    poise_damage,
+                } => {
+                    if active_end_frame < active_start_frame {
+                        report.error(format!(
+                            "Character '{character_name}' combat volume '{}' ends before it starts",
+                            volume.name
+                        ));
+                        return None;
+                    }
+                    if damage == 0 {
+                        report.error(format!(
+                            "Character '{character_name}' combat volume '{}' deals zero damage",
+                            volume.name
+                        ));
+                        return None;
+                    }
+                    (
+                        psx_level::combat_capsule_flags::HITBOX,
+                        action.to_index() as u8,
+                        active_start_frame,
+                        active_end_frame,
+                        damage,
+                        poise_damage,
+                    )
+                }
+            };
+        cooked.push(PlaytestCombatCapsule {
+            joint,
+            flags,
+            action,
+            start,
+            end,
+            radius: volume.capsule.radius,
+            active_start_frame,
+            active_end_frame,
+            damage,
+            poise_damage,
+        });
+    }
+    let count = u8::try_from(cooked.len()).ok()?;
+    combat_capsules.extend(cooked);
+    Some((first, count))
+}
+
 /// Cook one Character resource into a [`PlaytestCharacter`],
 /// registering its backing model on first sight (deduped against
 /// MeshInstance placements). Validates clip indices land inside
@@ -385,6 +502,7 @@ pub(crate) fn cook_player_character(
     model_for_resource: &mut std::collections::HashMap<ResourceId, u16>,
     runtime_model_clips: &HashMap<ResourceId, BTreeSet<u16>>,
     model_clip_remaps: &mut HashMap<ResourceId, Vec<Option<u16>>>,
+    combat_capsules: &mut Vec<PlaytestCombatCapsule>,
     characters: &mut Vec<PlaytestCharacter>,
     report: &mut PlaytestValidationReport,
 ) -> Option<u16> {
@@ -456,6 +574,18 @@ pub(crate) fn cook_player_character(
         report,
     )?;
     let model = &models[model_index as usize];
+    let model_joint_count = assets
+        .get(model.mesh_asset_index)
+        .and_then(|asset| psx_asset::Model::from_bytes(&asset.bytes).ok())
+        .map(|model| model.joint_count())
+        .unwrap_or(0);
+    let (combat_capsule_first, combat_capsule_count) = cook_character_combat_capsules(
+        character_name,
+        character,
+        model_joint_count,
+        combat_capsules,
+        report,
+    )?;
 
     let model_skeleton =
         project
@@ -679,6 +809,8 @@ pub(crate) fn cook_player_character(
         action_speeds,
         action_frame_ranges,
         action_pushes,
+        combat_capsule_first,
+        combat_capsule_count,
         visual_offset,
         visual_yaw,
         visual_scale_q8,
@@ -930,8 +1062,24 @@ pub(crate) fn register_model_for_instance(
                 return None;
             }
         };
-        let baked_bounds = bake_model_clip_frame_bounds(&parsed_model, &parsed_anim);
-        let animation_bytes = compact_animation_bytes(&parsed_anim);
+        let pose_corrections = clip
+            .animation_resource
+            .and_then(|id| project.resource(id))
+            .and_then(|resource| match &resource.data {
+                ResourceData::AnimationClip(animation) => {
+                    Some(animation.pose_corrections.as_slice())
+                }
+                _ => None,
+            })
+            .unwrap_or_default();
+        let animation_bytes = if pose_corrections.is_empty() {
+            compact_animation_bytes(&parsed_anim)
+        } else {
+            crate::bake_animation_pose_corrections(&parsed_model, &parsed_anim, pose_corrections)
+        };
+        let corrected_anim = psx_asset::Animation::from_bytes(&animation_bytes)
+            .expect("host-generated corrected animation must parse");
+        let baked_bounds = bake_model_clip_frame_bounds(&parsed_model, &corrected_anim);
         let frame_count = match u16::try_from(baked_bounds.len()) {
             Ok(count) => count,
             Err(_) => {

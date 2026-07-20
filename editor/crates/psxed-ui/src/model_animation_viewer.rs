@@ -11,7 +11,8 @@ use egui::{
 };
 use psx_asset::{Animation, Texture};
 use psxed_project::{
-    model_import::resolve_path, AnimationClipCalibration, AnimationRole, NodeKind, ProjectDocument,
+    model_import::resolve_path, AnimationClipCalibration, AnimationPoseCorrectionKey,
+    AnimationRole, CharacterActionOptions, CharacterAnimationAction, NodeKind, ProjectDocument,
     ResourceData, ResourceId,
 };
 
@@ -20,7 +21,18 @@ use crate::editor_helpers::{
 };
 use crate::icons;
 use crate::model_import_preview::{self, ImportPreviewOptions};
-use crate::style::{STUDIO_ACCENT, STUDIO_BORDER, STUDIO_PANEL_DARK, STUDIO_TEXT_WEAK};
+use crate::style::{
+    STUDIO_ACCENT, STUDIO_ACCENT_DIM, STUDIO_BORDER, STUDIO_BORDER_DARK, STUDIO_DOCK, STUDIO_HOVER,
+    STUDIO_INPUT, STUDIO_PANEL_DARK, STUDIO_PANEL_HEADER, STUDIO_SELECTION, STUDIO_TEXT,
+    STUDIO_TEXT_WEAK,
+};
+
+const TIMELINE_DEFAULT_HEIGHT: f32 = 206.0;
+const TIMELINE_MIN_HEIGHT: f32 = 132.0;
+const TIMELINE_MIN_PREVIEW_HEIGHT: f32 = 250.0;
+const TIMELINE_TRACK_LABEL_WIDTH: f32 = 172.0;
+const TIMELINE_RULER_HEIGHT: f32 = 28.0;
+const TIMELINE_TRACK_HEIGHT: f32 = 28.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AnimationPreviewQuality {
@@ -28,9 +40,34 @@ enum AnimationPreviewQuality {
     PsxOutput,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CapsuleEditTool {
+    Move,
+    Rotate,
+    Resize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CapsuleEditAxis {
+    X,
+    Y,
+    Z,
+}
+
+impl CapsuleEditAxis {
+    const fn index(self) -> usize {
+        match self {
+            Self::X => 0,
+            Self::Y => 1,
+            Self::Z => 2,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct ModelAnimationViewerState {
     selected_model: Option<ResourceId>,
+    selected_character: Option<ResourceId>,
     selected_clip_path: Option<String>,
     clip_filter: String,
     last_clip_path: Option<String>,
@@ -42,6 +79,16 @@ pub(crate) struct ModelAnimationViewerState {
     radius: i32,
     show_animation_root: bool,
     show_bones: bool,
+    show_combat_capsules: bool,
+    show_pose_corrections: bool,
+    selected_combat_capsule: usize,
+    selected_pose_joint: u16,
+    selected_action: CharacterAnimationAction,
+    capsule_edit_tool: CapsuleEditTool,
+    capsule_edit_axis: CapsuleEditAxis,
+    timeline_height: f32,
+    timeline_resize_origin: Option<f32>,
+    timeline_pixels_per_frame: f32,
     preview_quality: AnimationPreviewQuality,
     cached_model: Option<CachedModelContext>,
     cached_clip: Option<CachedClipContext>,
@@ -52,6 +99,7 @@ impl Default for ModelAnimationViewerState {
     fn default() -> Self {
         Self {
             selected_model: None,
+            selected_character: None,
             selected_clip_path: None,
             clip_filter: String::new(),
             last_clip_path: None,
@@ -63,6 +111,16 @@ impl Default for ModelAnimationViewerState {
             radius: 0,
             show_animation_root: false,
             show_bones: false,
+            show_combat_capsules: false,
+            show_pose_corrections: false,
+            selected_combat_capsule: 0,
+            selected_pose_joint: 0,
+            selected_action: CharacterAnimationAction::Idle,
+            capsule_edit_tool: CapsuleEditTool::Move,
+            capsule_edit_axis: CapsuleEditAxis::X,
+            timeline_height: TIMELINE_DEFAULT_HEIGHT,
+            timeline_resize_origin: None,
+            timeline_pixels_per_frame: 12.0,
             preview_quality: AnimationPreviewQuality::Authoring,
             cached_model: None,
             cached_clip: None,
@@ -98,16 +156,25 @@ impl ModelAnimationViewerState {
         self.invalidate_clip_cache();
         match &resource.data {
             ResourceData::Character(character) => {
+                self.selected_character = Some(id);
+                self.show_combat_capsules = true;
+                self.show_pose_corrections = false;
                 self.selected_model = character.model;
                 self.selected_clip_path = self.preferred_model_clip_path(project);
                 self.reset_clip_clock();
             }
             ResourceData::Model(_) => {
+                self.selected_character = None;
+                self.show_combat_capsules = false;
+                self.show_pose_corrections = false;
                 self.selected_model = Some(id);
                 self.selected_clip_path = self.preferred_model_clip_path(project);
                 self.reset_clip_clock();
             }
             ResourceData::AnimationClip(clip) => {
+                self.selected_character = None;
+                self.show_combat_capsules = false;
+                self.show_pose_corrections = true;
                 self.selected_model = clip
                     .target_model
                     .or_else(|| first_model_for_skeleton(project, clip.skeleton));
@@ -115,6 +182,9 @@ impl ModelAnimationViewerState {
                 self.reset_clip_clock();
             }
             ResourceData::AnimationSource(source) => {
+                self.selected_character = None;
+                self.show_combat_capsules = false;
+                self.show_pose_corrections = false;
                 self.selected_model = source
                     .target_model
                     .or_else(|| first_model_for_skeleton(project, source.skeleton));
@@ -124,6 +194,9 @@ impl ModelAnimationViewerState {
                 self.reset_clip_clock();
             }
             ResourceData::AnimationSet(set) => {
+                self.selected_character = None;
+                self.show_combat_capsules = false;
+                self.show_pose_corrections = false;
                 self.selected_model = first_model_for_skeleton(project, set.skeleton);
                 self.selected_clip_path = self.preferred_model_clip_path(project);
                 self.reset_clip_clock();
@@ -249,6 +322,8 @@ struct CachedModelContext {
 struct CachedClipContext {
     path: String,
     stamp: FileStamp,
+    pose_corrections: Vec<AnimationPoseCorrectionKey>,
+    model_stamp: Option<FileStamp>,
     context: Arc<LoadedClipContext>,
 }
 
@@ -313,9 +388,9 @@ pub(crate) fn draw_model_animation_viewer_toolbar(
         .as_ref()
         .and_then(|path| clip_options.iter().find(|clip| clip.path == *path))
         .cloned();
-    let clip_context = selected_clip
-        .as_ref()
-        .and_then(|clip| load_clip_context_cached(project_root, state, clip));
+    let clip_context = selected_clip.as_ref().and_then(|clip| {
+        load_clip_context_cached(project, project_root, state, clip, model_context.as_deref())
+    });
 
     if state.last_clip_path.as_deref() != state.selected_clip_path.as_deref() {
         state.frame = 0.0;
@@ -331,6 +406,7 @@ pub(crate) fn draw_model_animation_viewer_toolbar(
         &mut state.selected_model,
         &model_options,
     ) {
+        state.selected_character = None;
         state.selected_clip_path = None;
         state.clip_filter.clear();
         state.reset_clip_clock();
@@ -356,6 +432,42 @@ pub(crate) fn draw_model_animation_viewer_toolbar(
     }
     ui.separator();
     draw_preview_toolbar(ui, state, model_context.as_deref());
+    let character_available = state.selected_character.is_some_and(|id| {
+        project
+            .resource(id)
+            .is_some_and(|resource| matches!(resource.data, ResourceData::Character(_)))
+    });
+    let pose_available = selected_clip.as_ref().is_some_and(|clip| {
+        clip.resource.is_some_and(|id| {
+            project
+                .resource(id)
+                .is_some_and(|resource| matches!(resource.data, ResourceData::AnimationClip(_)))
+        })
+    });
+    ui.separator();
+    ui.add_enabled_ui(character_available, |ui| {
+        let response = ui.toggle_value(
+            &mut state.show_combat_capsules,
+            icons::label(icons::SCAN, "Combat Volumes"),
+        );
+        let clicked = response.clicked();
+        response
+            .on_hover_text("Visually attach hitboxes and hurtboxes to the selected Character rig");
+        if clicked && state.show_combat_capsules {
+            state.show_pose_corrections = false;
+        }
+    });
+    ui.add_enabled_ui(pose_available, |ui| {
+        let response = ui.toggle_value(
+            &mut state.show_pose_corrections,
+            icons::label(icons::WAYPOINT, "Pose Keys"),
+        );
+        let clicked = response.clicked();
+        response.on_hover_text("Author sparse joint corrections on the selected cooked clip");
+        if clicked && state.show_pose_corrections {
+            state.show_combat_capsules = false;
+        }
+    });
     action
 }
 
@@ -365,7 +477,7 @@ pub(crate) fn draw_model_animation_viewer(
     project_root: &Path,
     state: &mut ModelAnimationViewerState,
     preview_texture: &mut Option<egui::TextureHandle>,
-) {
+) -> bool {
     state.ensure_selection(project);
     let clip_options = state
         .selected_model
@@ -379,18 +491,1832 @@ pub(crate) fn draw_model_animation_viewer(
         .as_ref()
         .and_then(|path| clip_options.iter().find(|clip| clip.path == *path))
         .cloned();
-    let clip_context = selected_clip
-        .as_ref()
-        .and_then(|clip| load_clip_context_cached(project_root, state, clip));
+    let clip_context = selected_clip.as_ref().and_then(|clip| {
+        load_clip_context_cached(project, project_root, state, clip, model_context.as_deref())
+    });
 
-    draw_preview(
-        ui,
-        state,
-        model_context.as_deref(),
-        selected_clip.as_ref(),
-        clip_context.as_deref(),
-        preview_texture,
+    let character_id = state.selected_character.filter(|id| {
+        project
+            .resource(*id)
+            .is_some_and(|resource| matches!(resource.data, ResourceData::Character(_)))
+    });
+    let capsules = character_id
+        .and_then(|id| project.resource(id))
+        .and_then(|resource| match &resource.data {
+            ResourceData::Character(character) => Some(character.combat_capsules.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    if state.selected_combat_capsule >= capsules.len() {
+        state.selected_combat_capsule = capsules.len().saturating_sub(1);
+    }
+    let preview_capsules = if state.show_combat_capsules {
+        capsules
+            .iter()
+            .enumerate()
+            .map(
+                |(index, capsule)| model_import_preview::PreviewCombatCapsule {
+                    joint: capsule.joint,
+                    start: capsule.capsule.start,
+                    end: capsule.capsule.end,
+                    radius: capsule.capsule.radius,
+                    color: match capsule.role {
+                        psxed_project::CombatCapsuleRole::Hurtbox => {
+                            Color32::from_rgb(76, 196, 224)
+                        }
+                        psxed_project::CombatCapsuleRole::Hitbox { .. } => {
+                            Color32::from_rgb(238, 102, 82)
+                        }
+                    },
+                    selected: index == state.selected_combat_capsule,
+                },
+            )
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let pose_clip_id = state
+        .show_pose_corrections
+        .then(|| {
+            selected_clip.as_ref().and_then(|clip| {
+                clip.resource.filter(|id| {
+                    project.resource(*id).is_some_and(|resource| {
+                        matches!(resource.data, ResourceData::AnimationClip(_))
+                    })
+                })
+            })
+        })
+        .flatten();
+    let selected_joint = if state.show_pose_corrections {
+        Some(state.selected_pose_joint)
+    } else {
+        state
+            .show_combat_capsules
+            .then(|| {
+                capsules
+                    .get(state.selected_combat_capsule)
+                    .map(|capsule| capsule.joint)
+            })
+            .flatten()
+    };
+    let joint_picking =
+        (state.show_combat_capsules && character_id.is_some()) || pose_clip_id.is_some();
+    let authoring_panel_open = joint_picking;
+    let assigned_action_clip = character_id.and_then(|character_id| {
+        capsules
+            .get(state.selected_combat_capsule)
+            .and_then(|capsule| match capsule.role {
+                psxed_project::CombatCapsuleRole::Hitbox { action, .. } => Some(action),
+                psxed_project::CombatCapsuleRole::Hurtbox => None,
+            })
+            .and_then(|action| assigned_action_clip(project, character_id, action, &clip_options))
+    });
+
+    let total_height = ui.available_height();
+    let max_timeline_height = (total_height - TIMELINE_MIN_PREVIEW_HEIGHT - 7.0)
+        .max(TIMELINE_MIN_HEIGHT.min(total_height * 0.45));
+    state.timeline_height = state.timeline_height.clamp(
+        TIMELINE_MIN_HEIGHT.min(max_timeline_height),
+        max_timeline_height,
     );
+    let preview_height = (total_height - state.timeline_height - 7.0).max(120.0);
+
+    let mut preview_interaction = PreviewInteraction::default();
+    let mut editor_changed = false;
+    ui.allocate_ui_with_layout(
+        Vec2::new(ui.available_width(), preview_height),
+        egui::Layout::top_down(egui::Align::Min),
+        |ui| {
+            // `allocate_ui_with_layout` constrains the child, but advances the
+            // parent by the child's used height. Reserve the full preview slot
+            // so the bottom timeline stays docked instead of leaving dead space
+            // beneath it when the rendered image preserves a smaller aspect ratio.
+            ui.set_min_height(preview_height);
+            if authoring_panel_open {
+                ui.horizontal(|ui| {
+                    ui.set_min_height(preview_height);
+                    let editor_width = 310.0f32.min((ui.available_width() * 0.38).max(260.0));
+                    let preview_width = (ui.available_width() - editor_width - 8.0).max(360.0);
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(preview_width, ui.available_height()),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            preview_interaction = draw_preview(
+                                ui,
+                                state,
+                                model_context.as_deref(),
+                                selected_clip.as_ref(),
+                                clip_context.as_deref(),
+                                preview_texture,
+                                &preview_capsules,
+                                selected_joint,
+                                joint_picking,
+                            );
+                        },
+                    );
+                    ui.separator();
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(editor_width, ui.available_height()),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            if let Some(clip_id) = pose_clip_id {
+                                let joint_count = model_context
+                                    .as_deref()
+                                    .and_then(|model| {
+                                        psx_asset::Model::from_bytes(&model.model_bytes).ok()
+                                    })
+                                    .map(|model| model.joint_count())
+                                    .unwrap_or(0);
+                                let max_frame = clip_context
+                                    .as_ref()
+                                    .and_then(|clip| clip.animation_stats)
+                                    .map(|stats| stats.frame_count.saturating_sub(1))
+                                    .unwrap_or(0);
+                                editor_changed |= draw_pose_correction_editor(
+                                    ui,
+                                    project,
+                                    clip_id,
+                                    state,
+                                    joint_count,
+                                    max_frame,
+                                );
+                            } else if let Some(character_id) = character_id {
+                                editor_changed |= draw_combat_capsule_editor(
+                                    ui,
+                                    project,
+                                    character_id,
+                                    state,
+                                    model_context.as_deref(),
+                                    assigned_action_clip.as_ref(),
+                                );
+                            }
+                        },
+                    );
+                });
+            } else {
+                preview_interaction = draw_preview(
+                    ui,
+                    state,
+                    model_context.as_deref(),
+                    selected_clip.as_ref(),
+                    clip_context.as_deref(),
+                    preview_texture,
+                    &[],
+                    None,
+                    false,
+                );
+            }
+        },
+    );
+
+    draw_timeline_splitter(ui, state, max_timeline_height);
+    ui.allocate_ui_with_layout(
+        Vec2::new(ui.available_width(), state.timeline_height),
+        egui::Layout::top_down(egui::Align::Min),
+        |ui| {
+            ui.set_min_height(state.timeline_height);
+            editor_changed |= draw_animation_timeline(
+                ui,
+                project,
+                state,
+                character_id,
+                &clip_options,
+                selected_clip.as_ref(),
+                clip_context.as_ref().and_then(|clip| clip.animation_stats),
+            );
+        },
+    );
+
+    let mut changed = false;
+    if let Some(joint) = preview_interaction.clicked_joint {
+        if state.show_pose_corrections {
+            state.selected_pose_joint = joint;
+        } else if let Some(character_id) = character_id {
+            changed |= attach_selected_capsule_to_joint(
+                project,
+                character_id,
+                state.selected_combat_capsule,
+                joint,
+                model_context.as_deref(),
+            );
+            preview_texture.take();
+        }
+    }
+    if let (Some(character_id), Some(delta)) = (character_id, preview_interaction.edit_delta) {
+        changed |= manipulate_selected_capsule(
+            project,
+            character_id,
+            state.selected_combat_capsule,
+            state.capsule_edit_tool,
+            state.capsule_edit_axis,
+            delta,
+        );
+        preview_texture.take();
+    }
+    // The editor mutates the project in place and reports whether persistence
+    // state must be updated by the workspace.
+    changed || editor_changed
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TimelineActionContext {
+    animation_set: ResourceId,
+    clip: ResourceId,
+    options: CharacterActionOptions,
+}
+
+#[derive(Debug, Clone)]
+struct TimelineHitbox {
+    index: usize,
+    name: String,
+    start: u16,
+    end: u16,
+}
+
+fn draw_timeline_splitter(
+    ui: &mut egui::Ui,
+    state: &mut ModelAnimationViewerState,
+    max_timeline_height: f32,
+) {
+    let (rect, response) = ui.allocate_exact_size(
+        Vec2::new(ui.available_width(), 7.0),
+        Sense::click_and_drag(),
+    );
+    let color = if response.hovered() || response.dragged() {
+        STUDIO_ACCENT
+    } else {
+        STUDIO_BORDER_DARK
+    };
+    ui.painter().line_segment(
+        [
+            egui::pos2(rect.left(), rect.center().y),
+            egui::pos2(rect.right(), rect.center().y),
+        ],
+        Stroke::new(if response.dragged() { 2.0 } else { 1.0 }, color),
+    );
+    if response.hovered() || response.dragged() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+    }
+    if response.drag_started() {
+        state.timeline_resize_origin = Some(state.timeline_height);
+    }
+    if response.dragged() {
+        let origin = state
+            .timeline_resize_origin
+            .unwrap_or(state.timeline_height);
+        state.timeline_height = (origin - response.drag_delta().y).clamp(
+            TIMELINE_MIN_HEIGHT.min(max_timeline_height),
+            max_timeline_height,
+        );
+    }
+    if response.drag_stopped() {
+        state.timeline_resize_origin = None;
+    }
+}
+
+fn draw_animation_timeline(
+    ui: &mut egui::Ui,
+    project: &mut ProjectDocument,
+    state: &mut ModelAnimationViewerState,
+    character_id: Option<ResourceId>,
+    clip_options: &[ViewerClipOption],
+    selected_clip: Option<&ViewerClipOption>,
+    animation: Option<LoadedAnimationStats>,
+) -> bool {
+    let available = Vec2::new(ui.available_width(), ui.available_height());
+    let mut changed = false;
+    egui::Frame::new()
+        .fill(STUDIO_DOCK)
+        .stroke(Stroke::new(1.0, STUDIO_BORDER_DARK))
+        .inner_margin(egui::Margin::same(0))
+        .show(ui, |ui| {
+            ui.set_min_size(available);
+
+            if let (Some(character_id), Some(clip_resource)) =
+                (character_id, selected_clip.and_then(|clip| clip.resource))
+            {
+                if let Some(mapped) = timeline_action_for_clip(project, character_id, clip_resource)
+                {
+                    state.selected_action = mapped;
+                }
+            }
+
+            let mut action_changed = false;
+            egui::Frame::new()
+                .fill(STUDIO_PANEL_HEADER)
+                .inner_margin(egui::Margin::symmetric(8, 5))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Timeline").strong());
+                        ui.label(
+                            RichText::new("sampled frames")
+                                .small()
+                                .color(STUDIO_TEXT_WEAK),
+                        );
+                        if character_id.is_some() {
+                            ui.separator();
+                            ui.label(RichText::new("Action").color(STUDIO_TEXT_WEAK));
+                            egui::ComboBox::from_id_salt("animation-timeline-action")
+                                .selected_text(state.selected_action.label())
+                                .width(126.0)
+                                .show_ui(ui, |ui| {
+                                    for action in CharacterAnimationAction::ALL {
+                                        action_changed |= ui
+                                            .selectable_value(
+                                                &mut state.selected_action,
+                                                action,
+                                                action.label(),
+                                            )
+                                            .changed();
+                                    }
+                                });
+                        }
+                        if let Some(animation) = animation {
+                            ui.separator();
+                            ui.label(
+                                RichText::new(format!(
+                                    "{} frames  ·  {} Hz",
+                                    animation.frame_count, animation.sample_rate_hz
+                                ))
+                                .small()
+                                .color(STUDIO_TEXT_WEAK),
+                            );
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button("Fit").clicked() {
+                                let frames = animation
+                                    .map(|animation| animation.frame_count.saturating_sub(1).max(1))
+                                    .unwrap_or(1);
+                                let canvas =
+                                    (available.x - TIMELINE_TRACK_LABEL_WIDTH - 24.0).max(120.0);
+                                state.timeline_pixels_per_frame =
+                                    (canvas / frames as f32).clamp(2.0, 40.0);
+                            }
+                            if ui.small_button("+").on_hover_text("Zoom in").clicked() {
+                                state.timeline_pixels_per_frame =
+                                    (state.timeline_pixels_per_frame * 1.25).min(40.0);
+                            }
+                            if ui.small_button("−").on_hover_text("Zoom out").clicked() {
+                                state.timeline_pixels_per_frame =
+                                    (state.timeline_pixels_per_frame / 1.25).max(2.0);
+                            }
+                        });
+                    });
+                });
+
+            if action_changed {
+                if let Some(context) = character_id
+                    .and_then(|id| timeline_action_context(project, id, state.selected_action))
+                {
+                    if let Some(clip) = clip_options
+                        .iter()
+                        .find(|clip| clip.resource == Some(context.clip) && clip.previewable)
+                    {
+                        state.selected_clip_path = Some(clip.path.clone());
+                        state.invalidate_clip_cache();
+                        state.reset_clip_clock();
+                    }
+                }
+            }
+
+            let Some(animation) = animation else {
+                ui.centered_and_justified(|ui| {
+                    ui.label(
+                        RichText::new("Bake or select a cooked clip to expose its sampled frames.")
+                            .color(STUDIO_TEXT_WEAK),
+                    );
+                });
+                return;
+            };
+
+            let max_frame = animation.frame_count.saturating_sub(1);
+            let action_max_frame = animation.frame_count.saturating_sub(2);
+            let selected_clip_resource = selected_clip.and_then(|clip| clip.resource);
+            let action_context = character_id
+                .and_then(|id| timeline_action_context(project, id, state.selected_action))
+                .filter(|context| selected_clip_resource == Some(context.clip));
+            let hitboxes = character_id
+                .map(|id| timeline_hitboxes(project, id, state.selected_action))
+                .unwrap_or_default();
+            let pose_track = state.show_pose_corrections
+                && selected_clip_resource.is_some_and(|id| {
+                    project.resource(id).is_some_and(|resource| {
+                        matches!(resource.data, ResourceData::AnimationClip(_))
+                    })
+                });
+            let pose_key_frames = selected_clip_resource
+                .and_then(|id| project.resource(id))
+                .and_then(|resource| match &resource.data {
+                    ResourceData::AnimationClip(clip) => Some(
+                        clip.pose_corrections
+                            .iter()
+                            .filter_map(|key| {
+                                (key.joint == state.selected_pose_joint).then_some(key.frame)
+                            })
+                            .collect::<Vec<_>>(),
+                    ),
+                    _ => None,
+                })
+                .unwrap_or_default();
+
+            let canvas_available =
+                (ui.available_width() - TIMELINE_TRACK_LABEL_WIDTH - 2.0).max(180.0);
+            let content_width = canvas_available
+                .max(24.0 + max_frame.max(1) as f32 * state.timeline_pixels_per_frame);
+            let track_count = 1
+                + usize::from(pose_track)
+                + usize::from(action_context.is_some()) * 2
+                + hitboxes.len();
+            let content_height =
+                TIMELINE_RULER_HEIGHT + track_count.max(1) as f32 * TIMELINE_TRACK_HEIGHT;
+            let pose_key_detail = format!("{} baked pose keys", animation.frame_count);
+
+            let mut action_range_update = None;
+            let mut push_range_update = None;
+            let mut hitbox_updates = Vec::new();
+
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                ui.allocate_ui_with_layout(
+                    Vec2::new(TIMELINE_TRACK_LABEL_WIDTH, content_height),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        timeline_track_label(ui, "TRACKS", "", STUDIO_TEXT_WEAK, false);
+                        timeline_track_label(
+                            ui,
+                            "Imported motion",
+                            &pose_key_detail,
+                            STUDIO_ACCENT,
+                            false,
+                        );
+                        if pose_track {
+                            timeline_track_label(
+                                ui,
+                                "Pose correction",
+                                &format!(
+                                    "Joint {} · {} keys",
+                                    state.selected_pose_joint,
+                                    pose_key_frames.len()
+                                ),
+                                Color32::from_rgb(174, 116, 232),
+                                true,
+                            );
+                        }
+                        if action_context.is_some() {
+                            timeline_track_label(
+                                ui,
+                                "Action range",
+                                state.selected_action.label(),
+                                STUDIO_ACCENT,
+                                false,
+                            );
+                            timeline_track_label(
+                                ui,
+                                "Root push",
+                                "authored movement",
+                                Color32::from_rgb(220, 171, 78),
+                                false,
+                            );
+                        }
+                        for hitbox in &hitboxes {
+                            let response = timeline_track_label(
+                                ui,
+                                &hitbox.name,
+                                "damage window",
+                                Color32::from_rgb(238, 102, 82),
+                                state.selected_combat_capsule == hitbox.index,
+                            );
+                            if response.clicked() {
+                                state.selected_combat_capsule = hitbox.index;
+                                state.show_combat_capsules = true;
+                            }
+                        }
+                    },
+                );
+                ui.separator();
+                ui.allocate_ui_with_layout(
+                    Vec2::new(canvas_available, content_height),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        egui::ScrollArea::horizontal()
+                            .id_salt("animation-timeline-scroll")
+                            .max_height(content_height)
+                            .min_scrolled_height(content_height)
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                ui.set_min_width(content_width);
+                                if let Some(frame) = draw_timeline_ruler(
+                                    ui,
+                                    content_width,
+                                    max_frame,
+                                    state.timeline_pixels_per_frame,
+                                    state.frame,
+                                ) {
+                                    state.frame = frame as f32;
+                                    state.playing = false;
+                                }
+                                if let Some(frame) = draw_timeline_pose_keys_lane(
+                                    ui,
+                                    content_width,
+                                    max_frame,
+                                    state.timeline_pixels_per_frame,
+                                    state.frame,
+                                ) {
+                                    state.frame = frame as f32;
+                                    state.playing = false;
+                                }
+
+                                if pose_track {
+                                    if let Some(frame) = draw_timeline_sparse_keys_lane(
+                                        ui,
+                                        content_width,
+                                        max_frame,
+                                        state.timeline_pixels_per_frame,
+                                        state.frame,
+                                        &pose_key_frames,
+                                        Color32::from_rgb(174, 116, 232),
+                                    ) {
+                                        state.frame = frame as f32;
+                                        state.playing = false;
+                                    }
+                                }
+
+                                if let Some(context) = action_context {
+                                    let mut action_start =
+                                        context.options.frame_start.min(action_max_frame);
+                                    let mut action_end = if context.options.frame_end
+                                        == psxed_project::ACTION_FRAME_END_FULL
+                                    {
+                                        action_max_frame
+                                    } else {
+                                        context.options.frame_end.min(action_max_frame)
+                                    }
+                                    .max(action_start);
+                                    let action_response = draw_timeline_range_lane(
+                                        ui,
+                                        "animation-timeline-action-range",
+                                        content_width,
+                                        action_max_frame,
+                                        state.timeline_pixels_per_frame,
+                                        state.frame,
+                                        action_start,
+                                        action_end,
+                                        STUDIO_ACCENT,
+                                        true,
+                                    );
+                                    if let Some(frame) = action_response.seek_frame {
+                                        state.frame = frame as f32;
+                                        state.playing = false;
+                                    }
+                                    if let Some((start, end)) = action_response.range {
+                                        action_start = start;
+                                        action_end = end;
+                                        action_range_update =
+                                            Some((context, action_start, action_end));
+                                    }
+
+                                    let push_start =
+                                        context.options.push_frame_start.min(action_max_frame);
+                                    let push_end = if context.options.push_frame_end
+                                        == psxed_project::ACTION_FRAME_END_FULL
+                                    {
+                                        action_max_frame
+                                    } else {
+                                        context.options.push_frame_end.min(action_max_frame)
+                                    }
+                                    .max(push_start);
+                                    let push_response = draw_timeline_range_lane(
+                                        ui,
+                                        "animation-timeline-push-range",
+                                        content_width,
+                                        action_max_frame,
+                                        state.timeline_pixels_per_frame,
+                                        state.frame,
+                                        push_start,
+                                        push_end,
+                                        Color32::from_rgb(220, 171, 78),
+                                        true,
+                                    );
+                                    if let Some(frame) = push_response.seek_frame {
+                                        state.frame = frame as f32;
+                                        state.playing = false;
+                                    }
+                                    if let Some((start, end)) = push_response.range {
+                                        push_range_update = Some((context, start, end));
+                                    }
+                                }
+
+                                for hitbox in &hitboxes {
+                                    let response = draw_timeline_range_lane(
+                                        ui,
+                                        &format!("animation-timeline-hitbox-{}", hitbox.index),
+                                        content_width,
+                                        action_max_frame,
+                                        state.timeline_pixels_per_frame,
+                                        state.frame,
+                                        hitbox.start.min(action_max_frame),
+                                        hitbox
+                                            .end
+                                            .min(action_max_frame)
+                                            .max(hitbox.start.min(action_max_frame)),
+                                        Color32::from_rgb(238, 102, 82),
+                                        true,
+                                    );
+                                    if let Some(frame) = response.seek_frame {
+                                        state.frame = frame as f32;
+                                        state.playing = false;
+                                        state.selected_combat_capsule = hitbox.index;
+                                    }
+                                    if let Some((start, end)) = response.range {
+                                        hitbox_updates.push((hitbox.index, start, end));
+                                        state.selected_combat_capsule = hitbox.index;
+                                    }
+                                }
+                            });
+                    },
+                );
+            });
+
+            if let Some((context, start, end)) = action_range_update {
+                let mut options = context.options;
+                options.frame_start = start;
+                options.frame_end = if end == action_max_frame {
+                    psxed_project::ACTION_FRAME_END_FULL
+                } else {
+                    end
+                };
+                changed |=
+                    store_timeline_action_options(project, context, state.selected_action, options);
+            }
+            if let Some((context, start, end)) = push_range_update {
+                let mut options = context.options;
+                options.push_frame_start = start;
+                options.push_frame_end = if end == action_max_frame {
+                    psxed_project::ACTION_FRAME_END_FULL
+                } else {
+                    end
+                };
+                changed |=
+                    store_timeline_action_options(project, context, state.selected_action, options);
+            }
+            for (index, start, end) in hitbox_updates {
+                changed |= store_timeline_hitbox_range(
+                    project,
+                    character_id,
+                    index,
+                    state.selected_action,
+                    start,
+                    end,
+                );
+            }
+        });
+    changed
+}
+
+fn timeline_track_label(
+    ui: &mut egui::Ui,
+    title: &str,
+    detail: &str,
+    color: Color32,
+    selected: bool,
+) -> egui::Response {
+    let height = if title == "TRACKS" {
+        TIMELINE_RULER_HEIGHT
+    } else {
+        TIMELINE_TRACK_HEIGHT
+    };
+    let (rect, response) = ui.allocate_exact_size(
+        Vec2::new(TIMELINE_TRACK_LABEL_WIDTH, height),
+        Sense::click(),
+    );
+    let fill = if selected {
+        STUDIO_SELECTION
+    } else if response.hovered() {
+        STUDIO_HOVER
+    } else {
+        STUDIO_PANEL_DARK
+    };
+    ui.painter().rect_filled(rect, 0.0, fill);
+    ui.painter().line_segment(
+        [rect.left_bottom(), rect.right_bottom()],
+        Stroke::new(1.0, STUDIO_BORDER_DARK),
+    );
+    ui.painter().text(
+        egui::pos2(
+            rect.left() + 9.0,
+            rect.center().y - if detail.is_empty() { 0.0 } else { 6.0 },
+        ),
+        Align2::LEFT_CENTER,
+        title,
+        FontId::proportional(if title == "TRACKS" { 10.0 } else { 12.0 }),
+        if title == "TRACKS" {
+            STUDIO_TEXT_WEAK
+        } else {
+            STUDIO_TEXT
+        },
+    );
+    if !detail.is_empty() {
+        ui.painter().text(
+            egui::pos2(rect.left() + 9.0, rect.center().y + 7.0),
+            Align2::LEFT_CENTER,
+            detail,
+            FontId::proportional(9.5),
+            color,
+        );
+    }
+    response
+}
+
+fn timeline_x(rect: Rect, frame: u16, pixels_per_frame: f32) -> f32 {
+    rect.left() + 12.0 + frame as f32 * pixels_per_frame
+}
+
+fn timeline_frame_at(rect: Rect, x: f32, max_frame: u16, pixels_per_frame: f32) -> u16 {
+    let frame = ((x - rect.left() - 12.0) / pixels_per_frame.max(1.0)).round() as i32;
+    frame.clamp(0, i32::from(max_frame)) as u16
+}
+
+fn draw_timeline_ruler(
+    ui: &mut egui::Ui,
+    width: f32,
+    max_frame: u16,
+    pixels_per_frame: f32,
+    playhead: f32,
+) -> Option<u16> {
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(width, TIMELINE_RULER_HEIGHT), Sense::click());
+    ui.painter().rect_filled(rect, 0.0, STUDIO_INPUT);
+    let tick_step = if pixels_per_frame >= 22.0 {
+        1
+    } else if pixels_per_frame >= 10.0 {
+        5
+    } else if pixels_per_frame >= 5.0 {
+        10
+    } else {
+        20
+    };
+    for frame in (0..=max_frame).step_by(tick_step) {
+        let x = timeline_x(rect, frame, pixels_per_frame);
+        ui.painter().line_segment(
+            [
+                egui::pos2(x, rect.bottom() - 7.0),
+                egui::pos2(x, rect.bottom()),
+            ],
+            Stroke::new(1.0, STUDIO_BORDER),
+        );
+        ui.painter().text(
+            egui::pos2(x + 3.0, rect.top() + 5.0),
+            Align2::LEFT_TOP,
+            frame.to_string(),
+            FontId::monospace(9.0),
+            STUDIO_TEXT_WEAK,
+        );
+    }
+    let playhead_x = timeline_x(rect, playhead.round().max(0.0) as u16, pixels_per_frame);
+    ui.painter().line_segment(
+        [
+            egui::pos2(playhead_x, rect.top()),
+            egui::pos2(playhead_x, rect.bottom()),
+        ],
+        Stroke::new(2.0, STUDIO_ACCENT),
+    );
+    if response.clicked() {
+        response
+            .interact_pointer_pos()
+            .map(|pointer| timeline_frame_at(rect, pointer.x, max_frame, pixels_per_frame))
+    } else {
+        None
+    }
+}
+
+fn draw_timeline_pose_keys_lane(
+    ui: &mut egui::Ui,
+    width: f32,
+    max_frame: u16,
+    pixels_per_frame: f32,
+    playhead: f32,
+) -> Option<u16> {
+    let (rect, response) = ui.allocate_exact_size(
+        Vec2::new(width, TIMELINE_TRACK_HEIGHT),
+        Sense::click_and_drag(),
+    );
+    ui.painter().rect_filled(rect, 0.0, STUDIO_PANEL_DARK);
+    ui.painter().line_segment(
+        [rect.left_bottom(), rect.right_bottom()],
+        Stroke::new(1.0, STUDIO_BORDER_DARK),
+    );
+    let rail_y = rect.center().y;
+    ui.painter().line_segment(
+        [
+            egui::pos2(timeline_x(rect, 0, pixels_per_frame), rail_y),
+            egui::pos2(timeline_x(rect, max_frame, pixels_per_frame), rail_y),
+        ],
+        Stroke::new(2.0, STUDIO_ACCENT_DIM),
+    );
+
+    // At close zoom every baked pose sample is a discrete key. When zoomed
+    // far out, coalesce markers only enough to keep them visually separable;
+    // pointer scrubbing still addresses every source frame.
+    let marker_step = (6.0 / pixels_per_frame.max(1.0)).ceil().max(1.0) as usize;
+    let selected_frame = playhead.round().clamp(0.0, max_frame as f32) as u16;
+    for frame in (0..=max_frame).step_by(marker_step) {
+        let center = egui::pos2(timeline_x(rect, frame, pixels_per_frame), rail_y);
+        let selected = frame == selected_frame;
+        let radius = if selected { 5.0 } else { 3.5 };
+        ui.painter().add(egui::Shape::convex_polygon(
+            vec![
+                egui::pos2(center.x, center.y - radius),
+                egui::pos2(center.x + radius, center.y),
+                egui::pos2(center.x, center.y + radius),
+                egui::pos2(center.x - radius, center.y),
+            ],
+            if selected { STUDIO_TEXT } else { STUDIO_ACCENT },
+            Stroke::new(1.0, STUDIO_PANEL_DARK),
+        ));
+    }
+
+    let playhead_x = timeline_x(rect, selected_frame, pixels_per_frame);
+    ui.painter().line_segment(
+        [
+            egui::pos2(playhead_x, rect.top()),
+            egui::pos2(playhead_x, rect.bottom()),
+        ],
+        Stroke::new(1.0, STUDIO_ACCENT),
+    );
+    if response.hovered() || response.dragged() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    if response.clicked() || response.dragged() {
+        response
+            .interact_pointer_pos()
+            .map(|pointer| timeline_frame_at(rect, pointer.x, max_frame, pixels_per_frame))
+    } else {
+        None
+    }
+}
+
+fn draw_timeline_sparse_keys_lane(
+    ui: &mut egui::Ui,
+    width: f32,
+    max_frame: u16,
+    pixels_per_frame: f32,
+    playhead: f32,
+    key_frames: &[u16],
+    color: Color32,
+) -> Option<u16> {
+    let (rect, response) = ui.allocate_exact_size(
+        Vec2::new(width, TIMELINE_TRACK_HEIGHT),
+        Sense::click_and_drag(),
+    );
+    ui.painter().rect_filled(rect, 0.0, STUDIO_PANEL_DARK);
+    ui.painter().line_segment(
+        [rect.left_bottom(), rect.right_bottom()],
+        Stroke::new(1.0, STUDIO_BORDER_DARK),
+    );
+    let rail_y = rect.center().y;
+    ui.painter().line_segment(
+        [
+            egui::pos2(timeline_x(rect, 0, pixels_per_frame), rail_y),
+            egui::pos2(timeline_x(rect, max_frame, pixels_per_frame), rail_y),
+        ],
+        Stroke::new(1.0, STUDIO_BORDER),
+    );
+    let selected_frame = playhead.round().clamp(0.0, max_frame as f32) as u16;
+    for frame in key_frames.iter().copied() {
+        let center = egui::pos2(
+            timeline_x(rect, frame.min(max_frame), pixels_per_frame),
+            rail_y,
+        );
+        let radius = if frame == selected_frame { 6.0 } else { 4.5 };
+        ui.painter().add(egui::Shape::convex_polygon(
+            vec![
+                egui::pos2(center.x, center.y - radius),
+                egui::pos2(center.x + radius, center.y),
+                egui::pos2(center.x, center.y + radius),
+                egui::pos2(center.x - radius, center.y),
+            ],
+            if frame == selected_frame {
+                STUDIO_TEXT
+            } else {
+                color
+            },
+            Stroke::new(1.0, STUDIO_PANEL_DARK),
+        ));
+    }
+    let playhead_x = timeline_x(rect, selected_frame, pixels_per_frame);
+    ui.painter().line_segment(
+        [
+            egui::pos2(playhead_x, rect.top()),
+            egui::pos2(playhead_x, rect.bottom()),
+        ],
+        Stroke::new(1.0, STUDIO_ACCENT),
+    );
+    if response.hovered() || response.dragged() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    if response.clicked() || response.dragged() {
+        response
+            .interact_pointer_pos()
+            .map(|pointer| timeline_frame_at(rect, pointer.x, max_frame, pixels_per_frame))
+    } else {
+        None
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct TimelineLaneResponse {
+    seek_frame: Option<u16>,
+    range: Option<(u16, u16)>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_timeline_range_lane(
+    ui: &mut egui::Ui,
+    id_salt: &str,
+    width: f32,
+    max_frame: u16,
+    pixels_per_frame: f32,
+    playhead: f32,
+    start: u16,
+    end: u16,
+    color: Color32,
+    editable: bool,
+) -> TimelineLaneResponse {
+    let id = ui.make_persistent_id(id_salt);
+    let (rect, response) = ui.allocate_exact_size(
+        Vec2::new(width, TIMELINE_TRACK_HEIGHT),
+        Sense::click_and_drag(),
+    );
+    ui.painter().rect_filled(rect, 0.0, STUDIO_PANEL_DARK);
+    ui.painter().line_segment(
+        [rect.left_bottom(), rect.right_bottom()],
+        Stroke::new(1.0, STUDIO_BORDER_DARK),
+    );
+    let rail = Rect::from_min_max(
+        egui::pos2(timeline_x(rect, 0, pixels_per_frame), rect.center().y - 7.0),
+        egui::pos2(
+            timeline_x(rect, max_frame, pixels_per_frame).max(rect.left() + 13.0),
+            rect.center().y + 7.0,
+        ),
+    );
+    ui.painter().rect_filled(rail, 3.0, STUDIO_INPUT);
+    let start_x = timeline_x(rect, start.min(max_frame), pixels_per_frame);
+    let end_x = timeline_x(rect, end.min(max_frame), pixels_per_frame);
+    let active = Rect::from_min_max(
+        egui::pos2(start_x.min(end_x), rail.top()),
+        egui::pos2((start_x.max(end_x) + 1.0).min(rail.right()), rail.bottom()),
+    );
+    ui.painter().rect_filled(active, 3.0, color);
+    if editable {
+        for x in [start_x, end_x] {
+            ui.painter().line_segment(
+                [
+                    egui::pos2(x, rail.top() - 3.0),
+                    egui::pos2(x, rail.bottom() + 3.0),
+                ],
+                Stroke::new(2.0, STUDIO_TEXT),
+            );
+        }
+    }
+    let playhead_x = timeline_x(rect, playhead.round().max(0.0) as u16, pixels_per_frame);
+    ui.painter().line_segment(
+        [
+            egui::pos2(playhead_x, rect.top()),
+            egui::pos2(playhead_x, rect.bottom()),
+        ],
+        Stroke::new(1.0, STUDIO_ACCENT),
+    );
+
+    let mut result = TimelineLaneResponse::default();
+    if response.clicked() {
+        result.seek_frame = response
+            .interact_pointer_pos()
+            .map(|pointer| timeline_frame_at(rect, pointer.x, max_frame, pixels_per_frame));
+    }
+    if editable && response.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+    }
+    if editable && response.drag_started() {
+        if let Some(pointer) = response.interact_pointer_pos() {
+            let frame = timeline_frame_at(rect, pointer.x, max_frame, pixels_per_frame);
+            let use_start = frame.abs_diff(start) <= frame.abs_diff(end);
+            ui.memory_mut(|memory| memory.data.insert_temp(id, use_start));
+        }
+    }
+    if editable && response.dragged() {
+        if let Some(pointer) = response.interact_pointer_pos() {
+            let frame = timeline_frame_at(rect, pointer.x, max_frame, pixels_per_frame);
+            let use_start = ui
+                .memory_mut(|memory| memory.data.get_temp::<bool>(id))
+                .unwrap_or(true);
+            let range = if use_start {
+                (frame.min(end), end)
+            } else {
+                (start, frame.max(start))
+            };
+            result.range = Some(range);
+            result.seek_frame = Some(frame);
+        }
+    }
+    if response.drag_stopped() {
+        ui.memory_mut(|memory| memory.data.remove::<bool>(id));
+    }
+    result
+}
+
+fn timeline_action_context(
+    project: &ProjectDocument,
+    character_id: ResourceId,
+    action: CharacterAnimationAction,
+) -> Option<TimelineActionContext> {
+    let animation_set = project.resource(character_id).and_then(|resource| {
+        let ResourceData::Character(character) = &resource.data else {
+            return None;
+        };
+        character.animation_set
+    })?;
+    let set = project.resource(animation_set).and_then(|resource| {
+        let ResourceData::AnimationSet(set) = &resource.data else {
+            return None;
+        };
+        Some(set)
+    })?;
+    let clip = set.action_clip(action)?;
+    let options = set
+        .action_binding(action)
+        .and_then(|binding| binding.options)
+        .unwrap_or_else(|| CharacterActionOptions::for_action(action));
+    Some(TimelineActionContext {
+        animation_set,
+        clip,
+        options,
+    })
+}
+
+fn timeline_action_for_clip(
+    project: &ProjectDocument,
+    character_id: ResourceId,
+    clip: ResourceId,
+) -> Option<CharacterAnimationAction> {
+    CharacterAnimationAction::ALL.into_iter().find(|action| {
+        timeline_action_context(project, character_id, *action)
+            .is_some_and(|context| context.clip == clip)
+    })
+}
+
+fn timeline_hitboxes(
+    project: &ProjectDocument,
+    character_id: ResourceId,
+    action: CharacterAnimationAction,
+) -> Vec<TimelineHitbox> {
+    project
+        .resource(character_id)
+        .and_then(|resource| {
+            let ResourceData::Character(character) = &resource.data else {
+                return None;
+            };
+            Some(
+                character
+                    .combat_capsules
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, capsule)| {
+                        let psxed_project::CombatCapsuleRole::Hitbox {
+                            action: capsule_action,
+                            active_start_frame,
+                            active_end_frame,
+                            ..
+                        } = capsule.role
+                        else {
+                            return None;
+                        };
+                        (capsule_action == action).then(|| TimelineHitbox {
+                            index,
+                            name: capsule.name.clone(),
+                            start: active_start_frame,
+                            end: active_end_frame.max(active_start_frame),
+                        })
+                    })
+                    .collect(),
+            )
+        })
+        .unwrap_or_default()
+}
+
+fn store_timeline_action_options(
+    project: &mut ProjectDocument,
+    context: TimelineActionContext,
+    action: CharacterAnimationAction,
+    options: CharacterActionOptions,
+) -> bool {
+    if options == context.options {
+        return false;
+    }
+    let Some(resource) = project.resource_mut(context.animation_set) else {
+        return false;
+    };
+    let ResourceData::AnimationSet(set) = &mut resource.data else {
+        return false;
+    };
+    if let Some(binding) = set
+        .action_clips
+        .iter_mut()
+        .find(|binding| binding.action == action)
+    {
+        binding.options = Some(options);
+    } else {
+        set.action_clips
+            .push(psxed_project::AnimationActionBinding {
+                action,
+                clip: context.clip,
+                options: Some(options),
+            });
+    }
+    true
+}
+
+fn store_timeline_hitbox_range(
+    project: &mut ProjectDocument,
+    character_id: Option<ResourceId>,
+    index: usize,
+    action: CharacterAnimationAction,
+    start: u16,
+    end: u16,
+) -> bool {
+    let Some(character_id) = character_id else {
+        return false;
+    };
+    let Some(resource) = project.resource_mut(character_id) else {
+        return false;
+    };
+    let ResourceData::Character(character) = &mut resource.data else {
+        return false;
+    };
+    let Some(capsule) = character.combat_capsules.get_mut(index) else {
+        return false;
+    };
+    let psxed_project::CombatCapsuleRole::Hitbox {
+        action: capsule_action,
+        active_start_frame,
+        active_end_frame,
+        ..
+    } = &mut capsule.role
+    else {
+        return false;
+    };
+    if *capsule_action != action || (*active_start_frame == start && *active_end_frame == end) {
+        return false;
+    }
+    *active_start_frame = start;
+    *active_end_frame = end.max(start);
+    true
+}
+
+fn draw_pose_correction_editor(
+    ui: &mut egui::Ui,
+    project: &mut ProjectDocument,
+    clip_id: ResourceId,
+    state: &mut ModelAnimationViewerState,
+    joint_count: u16,
+    max_frame: u16,
+) -> bool {
+    ui.heading("Pose Keys");
+    ui.label(
+        RichText::new("Select a highlighted joint, then add sparse visual corrections.")
+            .small()
+            .color(STUDIO_TEXT_WEAK),
+    );
+    ui.add_space(6.0);
+
+    if joint_count == 0 {
+        ui.weak("The selected model has no cooked joints.");
+        return false;
+    }
+    state.selected_pose_joint = state.selected_pose_joint.min(joint_count.saturating_sub(1));
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Joint").color(STUDIO_TEXT_WEAK));
+        egui::ComboBox::from_id_salt("animation-pose-correction-joint")
+            .selected_text(format!("Joint {}", state.selected_pose_joint))
+            .width(132.0)
+            .show_ui(ui, |ui| {
+                for joint in 0..joint_count {
+                    ui.selectable_value(
+                        &mut state.selected_pose_joint,
+                        joint,
+                        format!("Joint {joint}"),
+                    );
+                }
+            });
+    });
+
+    let frame = (state.frame.round().max(0.0) as u16).min(max_frame);
+    let Some(resource) = project.resource_mut(clip_id) else {
+        return false;
+    };
+    let ResourceData::AnimationClip(clip) = &mut resource.data else {
+        return false;
+    };
+    let joint_key_count = clip
+        .pose_corrections
+        .iter()
+        .filter(|key| key.joint == state.selected_pose_joint)
+        .count();
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(format!("Frame {frame} / {max_frame}")).monospace());
+        ui.label(
+            RichText::new(format!("{joint_key_count} keys"))
+                .small()
+                .color(STUDIO_TEXT_WEAK),
+        );
+    });
+
+    let mut key_index = clip
+        .pose_corrections
+        .iter()
+        .position(|key| key.joint == state.selected_pose_joint && key.frame == frame);
+    ui.horizontal(|ui| {
+        if key_index.is_none()
+            && ui
+                .button(icons::label(icons::PLUS, "Add key"))
+                .on_hover_text("Add a correction key at the current sampled frame")
+                .clicked()
+        {
+            let mut key = psxed_project::sample_pose_correction(
+                &clip.pose_corrections,
+                state.selected_pose_joint,
+                frame,
+            );
+            key.frame = frame;
+            key.joint = state.selected_pose_joint;
+            clip.pose_corrections.push(key);
+            clip.pose_corrections
+                .sort_by_key(|key| (key.joint, key.frame));
+            key_index = clip
+                .pose_corrections
+                .iter()
+                .position(|key| key.joint == state.selected_pose_joint && key.frame == frame);
+            changed = true;
+        }
+        if let Some(index) = key_index {
+            if ui
+                .button(icons::label(icons::TRASH, "Delete key"))
+                .clicked()
+            {
+                clip.pose_corrections.remove(index);
+                key_index = None;
+                changed = true;
+            }
+        }
+    });
+
+    let Some(index) = key_index else {
+        ui.add_space(8.0);
+        ui.label(
+            RichText::new("No key at this frame. Existing keys hold at the ends and interpolate between frames.")
+                .small()
+                .color(STUDIO_TEXT_WEAK),
+        );
+        return changed;
+    };
+
+    let key = &mut clip.pose_corrections[index];
+    ui.add_space(5.0);
+    ui.separator();
+    ui.label(RichText::new("Rotation delta").strong());
+    ui.horizontal(|ui| {
+        for (axis, label) in ["X", "Y", "Z"].into_iter().enumerate() {
+            ui.label(RichText::new(label).color(STUDIO_TEXT_WEAK));
+            let mut degrees = q12_delta_to_degrees(key.rotation_q12[axis]);
+            if ui
+                .add(
+                    egui::DragValue::new(&mut degrees)
+                        .speed(0.5)
+                        .range(-180.0..=180.0)
+                        .suffix("°"),
+                )
+                .changed()
+            {
+                key.rotation_q12[axis] = degrees_to_q12_delta(degrees);
+                changed = true;
+            }
+        }
+    });
+    ui.add_space(4.0);
+    ui.label(RichText::new("Translation delta").strong());
+    ui.horizontal(|ui| {
+        for (axis, label) in ["X", "Y", "Z"].into_iter().enumerate() {
+            ui.label(RichText::new(label).color(STUDIO_TEXT_WEAK));
+            changed |= ui
+                .add(
+                    egui::DragValue::new(&mut key.translation[axis])
+                        .speed(2.0)
+                        .range(-8192..=8192),
+                )
+                .changed();
+        }
+    });
+    if ui.small_button("Reset key values").clicked() {
+        key.rotation_q12 = [0; 3];
+        key.translation = [0; 3];
+        changed = true;
+    }
+    ui.add_space(8.0);
+    ui.label(
+        RichText::new("Corrections are folded into sampled animation matrices during build; runtime cost is unchanged.")
+            .small()
+            .color(STUDIO_TEXT_WEAK),
+    );
+    changed
+}
+
+fn q12_delta_to_degrees(value: i16) -> f32 {
+    f32::from(value) * 360.0 / 4096.0
+}
+
+fn degrees_to_q12_delta(value: f32) -> i16 {
+    (value.clamp(-180.0, 180.0) * 4096.0 / 360.0)
+        .round()
+        .clamp(i16::MIN as f32, i16::MAX as f32) as i16
+}
+
+fn draw_combat_capsule_editor(
+    ui: &mut egui::Ui,
+    project: &mut ProjectDocument,
+    character_id: ResourceId,
+    state: &mut ModelAnimationViewerState,
+    model: Option<&LoadedModelContext>,
+    assigned_action_clip: Option<&ViewerClipOption>,
+) -> bool {
+    let mut changed = false;
+    ui.heading("Combat Volumes");
+    ui.label(
+        RichText::new(
+            "Select a capsule, then click a highlighted body joint to attach and fit it.",
+        )
+        .small()
+        .color(STUDIO_TEXT_WEAK),
+    );
+    ui.add_space(6.0);
+
+    let Some(resource) = project.resource_mut(character_id) else {
+        ui.colored_label(Color32::from_rgb(220, 120, 100), "Character is missing");
+        return false;
+    };
+    let ResourceData::Character(character) = &mut resource.data else {
+        return false;
+    };
+
+    ui.horizontal(|ui| {
+        let selected_label = character
+            .combat_capsules
+            .get(state.selected_combat_capsule)
+            .map(|capsule| capsule.name.as_str())
+            .unwrap_or("No volume");
+        egui::ComboBox::from_id_salt("animation-combat-capsule")
+            .selected_text(selected_label)
+            .width(176.0)
+            .show_ui(ui, |ui| {
+                for (index, capsule) in character.combat_capsules.iter().enumerate() {
+                    let role = match capsule.role {
+                        psxed_project::CombatCapsuleRole::Hurtbox => "Hurt",
+                        psxed_project::CombatCapsuleRole::Hitbox { .. } => "Hit",
+                    };
+                    if ui
+                        .selectable_label(
+                            index == state.selected_combat_capsule,
+                            format!("{} · {role}", capsule.name),
+                        )
+                        .clicked()
+                    {
+                        state.selected_combat_capsule = index;
+                    }
+                }
+            });
+        if ui
+            .small_button(icons::text(icons::TRASH, 13.0))
+            .on_hover_text("Remove selected combat volume")
+            .clicked()
+            && state.selected_combat_capsule < character.combat_capsules.len()
+        {
+            character
+                .combat_capsules
+                .remove(state.selected_combat_capsule);
+            state.selected_combat_capsule = state
+                .selected_combat_capsule
+                .min(character.combat_capsules.len().saturating_sub(1));
+            changed = true;
+        }
+    });
+    ui.horizontal(|ui| {
+        if ui.button(icons::label(icons::PLUS, "Hurtbox")).clicked() {
+            character
+                .combat_capsules
+                .push(psxed_project::CharacterCombatCapsule::default());
+            state.selected_combat_capsule = character.combat_capsules.len() - 1;
+            changed = true;
+        }
+        if ui.button(icons::label(icons::PLUS, "Hitbox")).clicked() {
+            character
+                .combat_capsules
+                .push(psxed_project::CharacterCombatCapsule {
+                    name: "Attack Hitbox".to_string(),
+                    role: psxed_project::CombatCapsuleRole::Hitbox {
+                        action: psxed_project::CharacterAnimationAction::LightAttack,
+                        active_start_frame: 8,
+                        active_end_frame: 14,
+                        damage: 25,
+                        poise_damage: 25,
+                    },
+                    ..psxed_project::CharacterCombatCapsule::default()
+                });
+            state.selected_combat_capsule = character.combat_capsules.len() - 1;
+            changed = true;
+        }
+    });
+
+    let Some(capsule) = character
+        .combat_capsules
+        .get_mut(state.selected_combat_capsule)
+    else {
+        ui.add_space(10.0);
+        ui.weak("Add a receiving hurtbox or a damage-dealing hitbox to begin.");
+        return changed;
+    };
+    ui.separator();
+    changed |= ui.text_edit_singleline(&mut capsule.name).changed();
+
+    ui.horizontal(|ui| {
+        ui.label("Viewport");
+        ui.selectable_value(&mut state.capsule_edit_tool, CapsuleEditTool::Move, "Move");
+        ui.selectable_value(
+            &mut state.capsule_edit_tool,
+            CapsuleEditTool::Rotate,
+            "Rotate",
+        );
+        ui.selectable_value(
+            &mut state.capsule_edit_tool,
+            CapsuleEditTool::Resize,
+            "Resize",
+        );
+    });
+    ui.horizontal(|ui| {
+        ui.label("Local axis");
+        ui.selectable_value(&mut state.capsule_edit_axis, CapsuleEditAxis::X, "X");
+        ui.selectable_value(&mut state.capsule_edit_axis, CapsuleEditAxis::Y, "Y");
+        ui.selectable_value(&mut state.capsule_edit_axis, CapsuleEditAxis::Z, "Z");
+    });
+    ui.label(
+        RichText::new(match state.capsule_edit_tool {
+            CapsuleEditTool::Move => "Left-drag moves along the selected bone-local axis.",
+            CapsuleEditTool::Rotate => "Left-drag rotates around the selected bone-local axis.",
+            CapsuleEditTool::Resize => "Left/right changes radius; up/down changes segment length.",
+        })
+        .small()
+        .color(STUDIO_TEXT_WEAK),
+    );
+
+    let mut role_kind = usize::from(matches!(
+        capsule.role,
+        psxed_project::CombatCapsuleRole::Hitbox { .. }
+    ));
+    ui.horizontal(|ui| {
+        ui.label("Role");
+        egui::ComboBox::from_id_salt("animation-combat-capsule-role")
+            .selected_text(if role_kind == 0 {
+                "Receive damage (Hurtbox)"
+            } else {
+                "Deal damage (Hitbox)"
+            })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut role_kind, 0, "Receive damage (Hurtbox)");
+                ui.selectable_value(&mut role_kind, 1, "Deal damage (Hitbox)");
+            });
+    });
+    match (role_kind, capsule.role) {
+        (0, psxed_project::CombatCapsuleRole::Hitbox { .. }) => {
+            capsule.role = psxed_project::CombatCapsuleRole::Hurtbox;
+            changed = true;
+        }
+        (1, psxed_project::CombatCapsuleRole::Hurtbox) => {
+            capsule.role = psxed_project::CombatCapsuleRole::Hitbox {
+                action: psxed_project::CharacterAnimationAction::LightAttack,
+                active_start_frame: 8,
+                active_end_frame: 14,
+                damage: 25,
+                poise_damage: 25,
+            };
+            changed = true;
+        }
+        _ => {}
+    }
+
+    let joint_count = model
+        .and_then(|model| psx_asset::Model::from_bytes(&model.model_bytes).ok())
+        .map(|model| model.joint_count())
+        .unwrap_or(0);
+    ui.horizontal(|ui| {
+        ui.label("Body joint");
+        let max = joint_count.saturating_sub(1);
+        changed |= ui
+            .add(egui::DragValue::new(&mut capsule.joint).range(0..=max))
+            .changed();
+        if ui
+            .button(icons::label(icons::SCAN, "Refit"))
+            .on_hover_text("Fit this capsule around the vertices controlled by its joint")
+            .clicked()
+        {
+            if let Some(model) = model {
+                if let Some(fit) = model_import_preview::fit_capsule_to_joint(
+                    &model.model_bytes,
+                    capsule.joint,
+                    model.visual_scale_q8,
+                ) {
+                    capsule.capsule.start = fit.start;
+                    capsule.capsule.end = fit.end;
+                    capsule.capsule.radius = fit.radius;
+                    changed = true;
+                }
+            }
+        }
+    });
+    if joint_count == 0 {
+        ui.colored_label(Color32::from_rgb(220, 160, 80), "No cooked rig is loaded");
+    } else {
+        ui.label(
+            RichText::new(format!(
+                "Joint {} of {} · click the model to reattach",
+                capsule.joint, joint_count
+            ))
+            .small()
+            .color(STUDIO_TEXT_WEAK),
+        );
+    }
+
+    ui.add_space(6.0);
+    ui.label(RichText::new("Joint-local shape").strong());
+    changed |= combat_vec3_editor(ui, "Start", &mut capsule.capsule.start);
+    changed |= combat_vec3_editor(ui, "End", &mut capsule.capsule.end);
+    ui.horizontal(|ui| {
+        ui.label("Radius");
+        changed |= ui
+            .add(
+                egui::DragValue::new(&mut capsule.capsule.radius)
+                    .range(1..=8192)
+                    .speed(2.0),
+            )
+            .changed();
+    });
+
+    if let psxed_project::CombatCapsuleRole::Hitbox {
+        action,
+        active_start_frame,
+        active_end_frame,
+        damage,
+        poise_damage,
+    } = &mut capsule.role
+    {
+        ui.separator();
+        egui::ComboBox::from_label("Action")
+            .selected_text(action.label())
+            .show_ui(ui, |ui| {
+                for candidate in psxed_project::CharacterAnimationAction::ALL {
+                    changed |= ui
+                        .selectable_value(action, candidate, candidate.label())
+                        .changed();
+                }
+            });
+        ui.horizontal(|ui| {
+            ui.label("Assigned clip");
+            if let Some(clip) = assigned_action_clip {
+                ui.label(RichText::new(&clip.label).color(STUDIO_TEXT_WEAK));
+                if ui
+                    .small_button(icons::label(icons::PLAY, "Preview"))
+                    .on_hover_text("Switch the Animation Studio preview to this action's clip")
+                    .clicked()
+                {
+                    state.selected_clip_path = Some(clip.path.clone());
+                    state.invalidate_clip_cache();
+                    state.reset_clip_clock();
+                }
+            } else {
+                ui.colored_label(
+                    Color32::from_rgb(220, 160, 80),
+                    "No clip assigned in the Animation Set",
+                );
+            }
+        });
+        changed |= combat_u16_editor(ui, "Active start", active_start_frame, 0, u16::MAX);
+        changed |= combat_u16_editor(ui, "Active end", active_end_frame, 0, u16::MAX);
+        if *active_end_frame < *active_start_frame {
+            *active_end_frame = *active_start_frame;
+            changed = true;
+        }
+        changed |= combat_u16_editor(ui, "Damage", damage, 1, 9999);
+        changed |= combat_u16_editor(ui, "Poise damage", poise_damage, 0, 9999);
+    }
+
+    changed
+}
+
+fn assigned_action_clip(
+    project: &ProjectDocument,
+    character_id: ResourceId,
+    action: psxed_project::CharacterAnimationAction,
+    clip_options: &[ViewerClipOption],
+) -> Option<ViewerClipOption> {
+    let character = project.resource(character_id).and_then(|resource| {
+        let ResourceData::Character(character) = &resource.data else {
+            return None;
+        };
+        Some(character)
+    })?;
+    let clip_id = character.animation_set.and_then(|set_id| {
+        project.resource(set_id).and_then(|resource| {
+            let ResourceData::AnimationSet(set) = &resource.data else {
+                return None;
+            };
+            set.action_clip(action)
+        })
+    })?;
+    clip_options
+        .iter()
+        .find(|clip| clip.resource == Some(clip_id) && clip.previewable)
+        .cloned()
+}
+
+fn combat_vec3_editor(ui: &mut egui::Ui, label: &str, value: &mut [i32; 3]) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.label(label);
+        for (axis, prefix) in ["X ", "Y ", "Z "].iter().enumerate() {
+            changed |= ui
+                .add(
+                    egui::DragValue::new(&mut value[axis])
+                        .prefix(*prefix)
+                        .range(-32768..=32767)
+                        .speed(2.0),
+                )
+                .changed();
+        }
+    });
+    changed
+}
+
+fn combat_u16_editor(ui: &mut egui::Ui, label: &str, value: &mut u16, min: u16, max: u16) -> bool {
+    ui.horizontal(|ui| {
+        ui.label(label);
+        ui.add(egui::DragValue::new(value).range(min..=max))
+            .changed()
+    })
+    .inner
+}
+
+fn attach_selected_capsule_to_joint(
+    project: &mut ProjectDocument,
+    character_id: ResourceId,
+    capsule_index: usize,
+    joint: u16,
+    model: Option<&LoadedModelContext>,
+) -> bool {
+    let Some(resource) = project.resource_mut(character_id) else {
+        return false;
+    };
+    let ResourceData::Character(character) = &mut resource.data else {
+        return false;
+    };
+    let Some(capsule) = character.combat_capsules.get_mut(capsule_index) else {
+        return false;
+    };
+    capsule.joint = joint;
+    if let Some(model) = model {
+        if let Some(fit) = model_import_preview::fit_capsule_to_joint(
+            &model.model_bytes,
+            joint,
+            model.visual_scale_q8,
+        ) {
+            capsule.capsule.start = fit.start;
+            capsule.capsule.end = fit.end;
+            capsule.capsule.radius = fit.radius;
+        }
+    }
+    true
+}
+
+fn manipulate_selected_capsule(
+    project: &mut ProjectDocument,
+    character_id: ResourceId,
+    capsule_index: usize,
+    tool: CapsuleEditTool,
+    axis: CapsuleEditAxis,
+    delta: Vec2,
+) -> bool {
+    let Some(resource) = project.resource_mut(character_id) else {
+        return false;
+    };
+    let ResourceData::Character(character) = &mut resource.data else {
+        return false;
+    };
+    let Some(volume) = character.combat_capsules.get_mut(capsule_index) else {
+        return false;
+    };
+    let capsule = &mut volume.capsule;
+    match tool {
+        CapsuleEditTool::Move => {
+            let amount = ((delta.x - delta.y) * 2.0).round() as i32;
+            if amount == 0 {
+                return false;
+            }
+            let index = axis.index();
+            capsule.start[index] =
+                compact_capsule_coord(capsule.start[index].saturating_add(amount));
+            capsule.end[index] = compact_capsule_coord(capsule.end[index].saturating_add(amount));
+        }
+        CapsuleEditTool::Rotate => {
+            let angle = delta.x * 0.018;
+            if angle.abs() < f32::EPSILON {
+                return false;
+            }
+            let center = [
+                (capsule.start[0] + capsule.end[0]) as f32 * 0.5,
+                (capsule.start[1] + capsule.end[1]) as f32 * 0.5,
+                (capsule.start[2] + capsule.end[2]) as f32 * 0.5,
+            ];
+            let sin = angle.sin();
+            let cos = angle.cos();
+            for point in [&mut capsule.start, &mut capsule.end] {
+                let mut local = [
+                    point[0] as f32 - center[0],
+                    point[1] as f32 - center[1],
+                    point[2] as f32 - center[2],
+                ];
+                let (a, b) = match axis {
+                    CapsuleEditAxis::X => (1, 2),
+                    CapsuleEditAxis::Y => (0, 2),
+                    CapsuleEditAxis::Z => (0, 1),
+                };
+                let old_a = local[a];
+                let old_b = local[b];
+                local[a] = old_a * cos - old_b * sin;
+                local[b] = old_a * sin + old_b * cos;
+                for component in 0..3 {
+                    point[component] = compact_capsule_coord(
+                        (center[component] + local[component]).round() as i32,
+                    );
+                }
+            }
+        }
+        CapsuleEditTool::Resize => {
+            let radius_delta = (delta.x * 2.0).round() as i32;
+            let radius = i32::from(capsule.radius)
+                .saturating_add(radius_delta)
+                .clamp(1, 8192);
+            capsule.radius = radius as u16;
+
+            let length_delta = (-delta.y * 2.0).round();
+            if length_delta != 0.0 {
+                let mut direction = [
+                    (capsule.end[0] - capsule.start[0]) as f32,
+                    (capsule.end[1] - capsule.start[1]) as f32,
+                    (capsule.end[2] - capsule.start[2]) as f32,
+                ];
+                let length = (direction[0] * direction[0]
+                    + direction[1] * direction[1]
+                    + direction[2] * direction[2])
+                    .sqrt();
+                if length <= f32::EPSILON {
+                    direction[axis.index()] = 1.0;
+                } else {
+                    for component in &mut direction {
+                        *component /= length;
+                    }
+                }
+                for component in 0..3 {
+                    let half = direction[component] * length_delta * 0.5;
+                    capsule.start[component] = compact_capsule_coord(
+                        (capsule.start[component] as f32 - half).round() as i32,
+                    );
+                    capsule.end[component] = compact_capsule_coord(
+                        (capsule.end[component] as f32 + half).round() as i32,
+                    );
+                }
+            }
+            if radius_delta == 0 && length_delta == 0.0 {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn compact_capsule_coord(value: i32) -> i32 {
+    value.clamp(i16::MIN as i32, i16::MAX as i32)
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct PreviewInteraction {
+    clicked_joint: Option<u16>,
+    edit_delta: Option<Vec2>,
 }
 
 fn draw_playback_controls(
@@ -710,17 +2636,32 @@ fn draw_preview(
     selected_clip: Option<&ViewerClipOption>,
     clip: Option<&LoadedClipContext>,
     preview_texture: &mut Option<egui::TextureHandle>,
-) {
+    combat_capsules: &[model_import_preview::PreviewCombatCapsule],
+    selected_joint: Option<u16>,
+    joint_picking: bool,
+) -> PreviewInteraction {
     let size = ui.available_size();
     let size = Vec2::new(size.x.max(360.0), size.y.max(260.0));
-    let (rect, response) = ui.allocate_exact_size(size, Sense::drag());
-    if response.dragged() {
-        let delta = ui.input(|input| input.pointer.delta());
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click_and_drag());
+    let pointer_delta = ui.input(|input| input.pointer.delta());
+    let orbiting = response.dragged_by(egui::PointerButton::Middle)
+        || response.dragged_by(egui::PointerButton::Secondary)
+        || (!joint_picking && response.dragged_by(egui::PointerButton::Primary));
+    if orbiting {
+        let delta = pointer_delta;
         state.yaw_q12 = (state.yaw_q12 - (delta.x * 6.0) as i32).rem_euclid(4096);
         state.pitch_q12 = (state.pitch_q12 - (delta.y * 4.0) as i32).clamp(64, 960);
     }
+    let edit_delta = (!combat_capsules.is_empty()
+        && response.dragged_by(egui::PointerButton::Primary)
+        && pointer_delta != Vec2::ZERO)
+        .then_some(pointer_delta);
     if response.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+        ui.ctx().set_cursor_icon(if joint_picking {
+            egui::CursorIcon::Crosshair
+        } else {
+            egui::CursorIcon::Grab
+        });
         let scroll = ui.input(|input| input.raw_scroll_delta.y);
         if scroll.abs() > f32::EPSILON {
             let current = effective_radius(state, model);
@@ -745,7 +2686,7 @@ fn draw_preview(
             Stroke::new(1.0, STUDIO_BORDER),
             StrokeKind::Inside,
         );
-        return;
+        return PreviewInteraction::default();
     };
     let Some(selected_clip) = selected_clip else {
         painter.text(
@@ -761,7 +2702,7 @@ fn draw_preview(
             Stroke::new(1.0, STUDIO_BORDER),
             StrokeKind::Inside,
         );
-        return;
+        return PreviewInteraction::default();
     };
     if !selected_clip.previewable {
         painter.text(
@@ -777,7 +2718,7 @@ fn draw_preview(
             Stroke::new(1.0, STUDIO_BORDER),
             StrokeKind::Inside,
         );
-        return;
+        return PreviewInteraction::default();
     }
     let Some(clip) = clip else {
         painter.text(
@@ -793,7 +2734,7 @@ fn draw_preview(
             Stroke::new(1.0, STUDIO_BORDER),
             StrokeKind::Inside,
         );
-        return;
+        return PreviewInteraction::default();
     };
     let Some(atlas) = model.atlas.as_ref() else {
         painter.text(
@@ -809,7 +2750,7 @@ fn draw_preview(
             Stroke::new(1.0, STUDIO_BORDER),
             StrokeKind::Inside,
         );
-        return;
+        return PreviewInteraction::default();
     };
     let Some(animation) = clip.animation_stats.as_ref() else {
         painter.text(
@@ -825,7 +2766,7 @@ fn draw_preview(
             Stroke::new(1.0, STUDIO_BORDER),
             StrokeKind::Inside,
         );
-        return;
+        return PreviewInteraction::default();
     };
 
     let seconds = state.frame.max(0.0) as f64 / animation.sample_rate_hz.max(1) as f64;
@@ -834,7 +2775,7 @@ fn draw_preview(
         AnimationPreviewQuality::Authoring => egui::TextureOptions::LINEAR,
         AnimationPreviewQuality::PsxOutput => egui::TextureOptions::NEAREST,
     };
-    let image = model_import_preview::render_import_model_preview_with_orientation_at_size(
+    let render = model_import_preview::render_import_model_preview_with_combat_capsules_at_size(
         &model.model_bytes,
         &clip.bytes,
         atlas,
@@ -852,14 +2793,18 @@ fn draw_preview(
             pose_offset: selected_clip.calibration.offset,
             show_animation_root: state.show_animation_root,
             show_collision_guides: false,
-            show_bones: state.show_bones,
+            show_bones: state.show_bones || joint_picking,
         },
         model_import_preview::euler_rotation_q12(model.authored_rotation_q12),
         render_size,
+        combat_capsules,
+        selected_joint,
     );
 
-    match image {
-        Some(image) => {
+    let mut clicked_joint = None;
+    match render {
+        Some(render) => {
+            let image = render.image;
             let texture_id = match preview_texture {
                 Some(handle) => {
                     handle.set(image, texture_options);
@@ -886,6 +2831,16 @@ fn draw_preview(
                 Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
                 Color32::WHITE,
             );
+            if response.clicked() && joint_picking {
+                if let Some(pointer) = response.interact_pointer_pos() {
+                    clicked_joint = nearest_preview_joint(
+                        pointer,
+                        preview_rect,
+                        render_size,
+                        &render.joint_screen_positions,
+                    );
+                }
+            }
         }
         None => {
             painter.text(
@@ -903,6 +2858,33 @@ fn draw_preview(
         Stroke::new(1.0, STUDIO_BORDER),
         StrokeKind::Inside,
     );
+    PreviewInteraction {
+        clicked_joint,
+        edit_delta,
+    }
+}
+
+fn nearest_preview_joint(
+    pointer: Pos2,
+    preview_rect: Rect,
+    render_size: [usize; 2],
+    joints: &[Option<[f32; 2]>],
+) -> Option<u16> {
+    let mut best: Option<(u16, f32)> = None;
+    for (index, joint) in joints.iter().enumerate() {
+        let Some([x, y]) = joint else {
+            continue;
+        };
+        let screen = Pos2::new(
+            preview_rect.left() + (*x / render_size[0].max(1) as f32) * preview_rect.width(),
+            preview_rect.top() + (*y / render_size[1].max(1) as f32) * preview_rect.height(),
+        );
+        let distance_sq = pointer.distance_sq(screen);
+        if distance_sq <= 20.0 * 20.0 && best.is_none_or(|(_, best)| distance_sq < best) {
+            best = Some((index.min(u16::MAX as usize) as u16, distance_sq));
+        }
+    }
+    best.map(|(joint, _)| joint)
 }
 
 fn preview_render_size(ui: &egui::Ui, rect: Rect, quality: AnimationPreviewQuality) -> [usize; 2] {
@@ -1193,6 +3175,7 @@ fn role_loops_by_default(role: AnimationRole) -> bool {
 #[derive(Debug, Clone)]
 struct LoadedModelContext {
     model_bytes: Vec<u8>,
+    model_stamp: FileStamp,
     atlas: Option<ColorImage>,
     world_height: u16,
     collision_radius: u16,
@@ -1251,6 +3234,7 @@ fn load_model_context_cached(
         .and_then(|bytes| decode_psxt_image(&bytes));
     let context = Arc::new(LoadedModelContext {
         model_bytes,
+        model_stamp: model_stamp.clone(),
         atlas,
         world_height: model_resource.world_height,
         collision_radius: model_resource.collision_radius,
@@ -1323,28 +3307,60 @@ struct LoadedClipContext {
     animation_stats: Option<LoadedAnimationStats>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct LoadedAnimationStats {
     frame_count: u16,
     sample_rate_hz: u16,
 }
 
 fn load_clip_context_cached(
+    project: &ProjectDocument,
     project_root: &Path,
     state: &mut ModelAnimationViewerState,
     clip: &ViewerClipOption,
+    model: Option<&LoadedModelContext>,
 ) -> Option<Arc<LoadedClipContext>> {
     if !clip.previewable {
         return None;
     }
     let path = resolve_path(&clip.path, Some(project_root));
     let stamp = FileStamp::read(path.clone())?;
+    let pose_corrections = clip
+        .resource
+        .and_then(|id| project.resource(id))
+        .and_then(|resource| match &resource.data {
+            ResourceData::AnimationClip(animation) => Some(animation.pose_corrections.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    let model_stamp = model.map(|model| model.model_stamp.clone());
     if let Some(cached) = &state.cached_clip {
-        if cached.path == clip.path && cached.stamp == stamp {
+        if cached.path == clip.path
+            && cached.stamp == stamp
+            && cached.pose_corrections == pose_corrections
+            && cached.model_stamp == model_stamp
+        {
             return Some(Arc::clone(&cached.context));
         }
     }
-    let bytes = std::fs::read(path).ok()?;
+    let base_bytes = std::fs::read(path).ok()?;
+    let bytes = if pose_corrections.is_empty() {
+        base_bytes
+    } else {
+        match (model, Animation::from_bytes(&base_bytes)) {
+            (Some(model), Ok(animation)) => {
+                match psx_asset::Model::from_bytes(&model.model_bytes) {
+                    Ok(parsed_model) => psxed_project::bake_animation_pose_corrections(
+                        &parsed_model,
+                        &animation,
+                        &pose_corrections,
+                    ),
+                    Err(_) => base_bytes,
+                }
+            }
+            _ => base_bytes,
+        }
+    };
     let animation_stats =
         Animation::from_bytes(&bytes)
             .ok()
@@ -1359,6 +3375,8 @@ fn load_clip_context_cached(
     state.cached_clip = Some(CachedClipContext {
         path: clip.path.clone(),
         stamp,
+        pose_corrections,
+        model_stamp,
         context: Arc::clone(&context),
     });
     Some(context)
@@ -1472,6 +3490,163 @@ fn effective_radius(state: &ModelAnimationViewerState, model: Option<&LoadedMode
 mod focus_tests {
     use super::*;
 
+    fn timeline_fixture() -> (ProjectDocument, ResourceId, ResourceId, ResourceId) {
+        let mut project = ProjectDocument::new("animation-timeline");
+        let clip = project.add_resource(
+            "Idle",
+            ResourceData::AnimationClip(psxed_project::AnimationClipResource {
+                psxanim_path: "assets/idle.psxanim".to_string(),
+                skeleton: None,
+                target_model: None,
+                source: None,
+                bake: psxed_project::AnimationClipBakeKind::Retargeted,
+                role: AnimationRole::Idle,
+                looping: true,
+                tags: Vec::new(),
+                calibration: Default::default(),
+                pose_corrections: Vec::new(),
+            }),
+        );
+        let animation_set = project.add_resource(
+            "Fighter Animations",
+            ResourceData::AnimationSet(psxed_project::AnimationSetResource {
+                idle_clip: Some(clip),
+                ..psxed_project::AnimationSetResource::defaults()
+            }),
+        );
+        let character = project.add_resource(
+            "Fighter Profile",
+            ResourceData::Character(psxed_project::CharacterResource {
+                animation_set: Some(animation_set),
+                combat_capsules: vec![
+                    psxed_project::CharacterCombatCapsule::default(),
+                    psxed_project::CharacterCombatCapsule {
+                        name: "Right Hand".to_string(),
+                        role: psxed_project::CombatCapsuleRole::Hitbox {
+                            action: CharacterAnimationAction::LightAttack,
+                            active_start_frame: 3,
+                            active_end_frame: 7,
+                            damage: 20,
+                            poise_damage: 10,
+                        },
+                        ..psxed_project::CharacterCombatCapsule::default()
+                    },
+                    psxed_project::CharacterCombatCapsule {
+                        name: "Heavy Blade".to_string(),
+                        role: psxed_project::CombatCapsuleRole::Hitbox {
+                            action: CharacterAnimationAction::HeavyAttack,
+                            active_start_frame: 8,
+                            active_end_frame: 12,
+                            damage: 40,
+                            poise_damage: 20,
+                        },
+                        ..psxed_project::CharacterCombatCapsule::default()
+                    },
+                ],
+                ..psxed_project::CharacterResource::defaults()
+            }),
+        );
+        (project, character, animation_set, clip)
+    }
+
+    #[test]
+    fn timeline_projects_legacy_action_slot_and_persists_an_explicit_override() {
+        let (mut project, character, animation_set, clip) = timeline_fixture();
+        let context = timeline_action_context(&project, character, CharacterAnimationAction::Idle)
+            .expect("legacy idle slot is projected into the timeline");
+
+        assert_eq!(context.animation_set, animation_set);
+        assert_eq!(context.clip, clip);
+        assert_eq!(
+            context.options,
+            CharacterActionOptions::for_action(CharacterAnimationAction::Idle)
+        );
+        assert_eq!(
+            timeline_action_for_clip(&project, character, clip),
+            Some(CharacterAnimationAction::Idle)
+        );
+
+        let mut options = context.options;
+        options.frame_start = 4;
+        options.frame_end = 12;
+        assert!(store_timeline_action_options(
+            &mut project,
+            context,
+            CharacterAnimationAction::Idle,
+            options,
+        ));
+
+        let ResourceData::AnimationSet(set) = &project.resource(animation_set).unwrap().data else {
+            panic!("animation set expected");
+        };
+        assert_eq!(set.idle_clip, Some(clip));
+        assert_eq!(
+            set.action_binding(CharacterAnimationAction::Idle)
+                .and_then(|binding| binding.options),
+            Some(options)
+        );
+    }
+
+    #[test]
+    fn timeline_hitbox_lane_updates_only_its_matching_action_volume() {
+        let (mut project, character, _, _) = timeline_fixture();
+        let hitboxes =
+            timeline_hitboxes(&project, character, CharacterAnimationAction::LightAttack);
+        assert_eq!(hitboxes.len(), 1);
+        assert_eq!(hitboxes[0].index, 1);
+        assert_eq!((hitboxes[0].start, hitboxes[0].end), (3, 7));
+
+        assert!(store_timeline_hitbox_range(
+            &mut project,
+            Some(character),
+            1,
+            CharacterAnimationAction::LightAttack,
+            5,
+            9,
+        ));
+        assert!(!store_timeline_hitbox_range(
+            &mut project,
+            Some(character),
+            1,
+            CharacterAnimationAction::HeavyAttack,
+            1,
+            2,
+        ));
+
+        let ResourceData::Character(profile) = &project.resource(character).unwrap().data else {
+            panic!("character resource expected");
+        };
+        let psxed_project::CombatCapsuleRole::Hitbox {
+            active_start_frame,
+            active_end_frame,
+            ..
+        } = profile.combat_capsules[1].role
+        else {
+            panic!("hitbox expected");
+        };
+        assert_eq!((active_start_frame, active_end_frame), (5, 9));
+    }
+
+    #[test]
+    fn timeline_frame_mapping_is_clamped_and_round_trips() {
+        let rect = Rect::from_min_size(Pos2::new(100.0, 40.0), Vec2::new(600.0, 28.0));
+        let pixels_per_frame = 12.0;
+
+        for frame in [0, 1, 12, 38] {
+            assert_eq!(
+                timeline_frame_at(
+                    rect,
+                    timeline_x(rect, frame, pixels_per_frame),
+                    38,
+                    pixels_per_frame,
+                ),
+                frame
+            );
+        }
+        assert_eq!(timeline_frame_at(rect, 0.0, 38, pixels_per_frame), 0);
+        assert_eq!(timeline_frame_at(rect, 9999.0, 38, pixels_per_frame), 38);
+    }
+
     #[test]
     fn focusing_targeted_clip_selects_its_model_and_exact_path() {
         let mut project = ProjectDocument::new("animation-focus");
@@ -1515,6 +3690,7 @@ mod focus_tests {
                 looping: false,
                 tags: Vec::new(),
                 calibration: Default::default(),
+                pose_corrections: Vec::new(),
             }),
         );
         let mut viewer = ModelAnimationViewerState::default();
@@ -1537,6 +3713,100 @@ mod focus_tests {
         assert_eq!(viewer.radius, 0);
         assert_eq!(viewer.yaw_q12, 1024);
         assert_eq!(viewer.pitch_q12, 128);
+    }
+
+    #[test]
+    fn nearest_preview_joint_uses_visible_pick_radius_and_nearest_point() {
+        let rect = Rect::from_min_size(Pos2::new(100.0, 50.0), Vec2::new(640.0, 480.0));
+        let joints = vec![Some([100.0, 100.0]), Some([108.0, 100.0]), None];
+        let pointer = Pos2::new(100.0 + 216.0, 50.0 + 200.0);
+
+        assert_eq!(
+            nearest_preview_joint(pointer, rect, [320, 240], &joints),
+            Some(1)
+        );
+        assert_eq!(
+            nearest_preview_joint(Pos2::new(700.0, 500.0), rect, [320, 240], &joints),
+            None
+        );
+    }
+
+    #[test]
+    fn focusing_character_enables_rig_volume_authoring_context() {
+        let mut project = ProjectDocument::new("combat-volume-focus");
+        let model = project.add_resource(
+            "Fighter",
+            ResourceData::Model(psxed_project::ModelResource {
+                model_path: "assets/fighter.psxmdl".to_string(),
+                source_path: None,
+                texture_path: None,
+                skeleton: None,
+                world_height: 1024,
+                collision_radius: 192,
+                scale_q8: [psxed_project::MODEL_SCALE_ONE_Q8; 3],
+                default_visual_yaw_q12: 0,
+                attachments: Vec::new(),
+            }),
+        );
+        let character = project.add_resource(
+            "Fighter Profile",
+            ResourceData::Character(psxed_project::CharacterResource {
+                model: Some(model),
+                ..psxed_project::CharacterResource::defaults()
+            }),
+        );
+        let mut viewer = ModelAnimationViewerState::default();
+
+        viewer.focus_resource(&project, character);
+
+        assert_eq!(viewer.selected_character, Some(character));
+        assert_eq!(viewer.selected_model, Some(model));
+    }
+
+    #[test]
+    fn capsule_viewport_manipulation_edits_joint_local_geometry() {
+        let mut project = ProjectDocument::new("combat-volume-manipulation");
+        let character = project.add_resource(
+            "Fighter Profile",
+            ResourceData::Character(psxed_project::CharacterResource {
+                combat_capsules: vec![psxed_project::CharacterCombatCapsule {
+                    name: "Arm".to_string(),
+                    joint: 3,
+                    capsule: psxed_project::JointCapsule {
+                        start: [-100, 0, 0],
+                        end: [100, 0, 0],
+                        radius: 40,
+                    },
+                    role: psxed_project::CombatCapsuleRole::Hurtbox,
+                }],
+                ..psxed_project::CharacterResource::defaults()
+            }),
+        );
+
+        assert!(manipulate_selected_capsule(
+            &mut project,
+            character,
+            0,
+            CapsuleEditTool::Move,
+            CapsuleEditAxis::Y,
+            Vec2::new(5.0, 0.0),
+        ));
+        assert!(manipulate_selected_capsule(
+            &mut project,
+            character,
+            0,
+            CapsuleEditTool::Resize,
+            CapsuleEditAxis::X,
+            Vec2::new(4.0, -10.0),
+        ));
+
+        let ResourceData::Character(profile) = &project.resource(character).unwrap().data else {
+            panic!("character resource expected");
+        };
+        let capsule = &profile.combat_capsules[0].capsule;
+        assert_eq!(capsule.radius, 48);
+        assert_eq!(capsule.start, [-110, 10, 0]);
+        assert_eq!(capsule.end, [110, 10, 0]);
     }
 
     #[test]
@@ -1596,6 +3866,7 @@ mod focus_tests {
                 looping: false,
                 tags: vec!["mixamo".to_string()],
                 calibration: Default::default(),
+                pose_corrections: Vec::new(),
             }),
         );
 
@@ -1685,5 +3956,71 @@ mod focus_tests {
                 "expected imported animation '{query}' to be searchable"
             );
         }
+    }
+
+    #[test]
+    fn changing_pose_keys_regenerates_the_immediate_preview_clip() {
+        let project_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../projects/cortex_ignition_v1/project.ron");
+        let project_root = project_path.parent().expect("project directory");
+        let mut project = ProjectDocument::load_from_path(&project_path).expect("Cortex parses");
+        let model = project
+            .resources
+            .iter()
+            .find_map(|resource| {
+                (resource.name == "Aletha" && matches!(resource.data, ResourceData::Model(_)))
+                    .then_some(resource.id)
+            })
+            .expect("Aletha model exists");
+        let clip = project
+            .resources
+            .iter()
+            .find_map(|resource| match &resource.data {
+                ResourceData::AnimationClip(animation)
+                    if animation.target_model == Some(model) && resource.name == "idle" =>
+                {
+                    Some(resource.id)
+                }
+                _ => None,
+            })
+            .expect("Aletha idle exists");
+        let mut viewer = ModelAnimationViewerState::default();
+        viewer.focus_resource(&project, clip);
+        let model_context = load_model_context_cached(&project, project_root, &mut viewer, model)
+            .expect("model preview loads");
+        let option = build_clip_options(&project, model)
+            .into_iter()
+            .find(|option| option.resource == Some(clip))
+            .expect("clip option exists");
+        let base = load_clip_context_cached(
+            &project,
+            project_root,
+            &mut viewer,
+            &option,
+            Some(&model_context),
+        )
+        .expect("base preview loads");
+
+        let ResourceData::AnimationClip(animation) = &mut project.resource_mut(clip).unwrap().data
+        else {
+            panic!("animation clip expected");
+        };
+        animation.pose_corrections.push(AnimationPoseCorrectionKey {
+            frame: 0,
+            joint: 0,
+            rotation_q12: [0, 256, 0],
+            translation: [8, 0, 0],
+        });
+        let corrected = load_clip_context_cached(
+            &project,
+            project_root,
+            &mut viewer,
+            &option,
+            Some(&model_context),
+        )
+        .expect("corrected preview loads");
+
+        assert_ne!(base.bytes, corrected.bytes);
+        assert_eq!(base.animation_stats, corrected.animation_stats);
     }
 }
