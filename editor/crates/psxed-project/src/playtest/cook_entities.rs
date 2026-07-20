@@ -535,17 +535,7 @@ pub(crate) fn cook_player_character(
     };
     let settings = controller_settings
         .unwrap_or_else(|| CharacterControllerSettings::from_character(character));
-    let camera = camera_settings.unwrap_or(WorldCameraSettings {
-        distance: character.camera_distance,
-        height: character.camera_height,
-        target_height: character.camera_target_height,
-        lock_rise_percent: crate::default_world_camera_lock_rise_percent(),
-        min_floor_clearance: crate::default_world_camera_min_floor_clearance(),
-        orbit_speed_level: crate::default_world_camera_orbit_speed_level(),
-        position_lag_shift: crate::default_world_camera_position_lag_shift(),
-        focus_lag_shift: crate::default_world_camera_focus_lag_shift(),
-        distance_lag_shift: crate::default_world_camera_distance_lag_shift(),
-    });
+    let camera = camera_settings.unwrap_or_else(|| character.camera_settings());
     let camera = camera.normalized();
 
     let model_resource_id = match model_override.or(character.model) {

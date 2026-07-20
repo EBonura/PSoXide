@@ -207,6 +207,7 @@ pub(crate) fn starter_catalogue_resource_matches_phase(
     match (&resource.data, phase) {
         (ResourceData::Skeleton(_), StarterCataloguePhase::Skeleton) => {
             resource.name == "Meshy Biped Skeleton"
+                || resource.name == "Cortex Humanoid 22-Bone Skeleton"
         }
         (ResourceData::Model(_), StarterCataloguePhase::Model) => {
             STARTER_CHARACTER_MODEL_NAMES.contains(&resource.name.as_str())

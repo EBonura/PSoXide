@@ -878,6 +878,147 @@ fn dropping_character_profile_stays_non_player_when_player_exists() {
 }
 
 #[test]
+fn dropping_enemy_profile_first_preserves_authored_enemy_defaults() {
+    let mut project = ProjectDocument::new("drop-enemy-profile");
+    let enemy_behavior = psxed_project::EnemyBehaviorSettings {
+        aggro_radius: 2335,
+        patrol_offset: [0, 0, -6000],
+        reaction_ticks: 22,
+        ..psxed_project::EnemyBehaviorSettings::defaults()
+    };
+    let character = project.add_resource(
+        "Rust Mantis Enemy",
+        ResourceData::Character(psxed_project::CharacterResource {
+            spawn_role: psxed_project::CharacterSpawnRole::Enemy,
+            enemy_behavior: Some(enemy_behavior),
+            walk_speed: 28,
+            ..psxed_project::CharacterResource::defaults()
+        }),
+    );
+    let room = project.active_scene_mut().add_node(
+        NodeId::ROOT,
+        "Room",
+        NodeKind::Room {
+            grid: WorldGrid::empty(1, 1, 1024),
+        },
+    );
+    let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
+
+    workspace.drop_resource_at_room_hit(character, room, [0.0, 0.0, 0.0], None);
+
+    let entity = workspace.selection.selected_node;
+    let scene = workspace.project.active_scene();
+    let (player, settings) = scene
+        .node(entity)
+        .expect("enemy entity exists")
+        .children
+        .iter()
+        .filter_map(|id| scene.node(*id))
+        .find_map(|child| match child.kind {
+            NodeKind::CharacterController {
+                player, settings, ..
+            } => Some((player, settings)),
+            _ => None,
+        })
+        .expect("enemy has a controller");
+    assert!(!player, "an enemy profile never claims the player slot");
+    assert_eq!(settings.walk_speed, 28);
+    assert_eq!(settings.enemy, Some(enemy_behavior));
+    assert!(scene
+        .node(entity)
+        .unwrap()
+        .children
+        .iter()
+        .filter_map(|id| scene.node(*id))
+        .all(|child| !matches!(child.kind, NodeKind::Camera { .. })));
+}
+
+#[test]
+fn dropping_player_profile_applies_camera_preset_and_replaces_player_source() {
+    let mut project = ProjectDocument::new("drop-player-profile");
+    let character = project.add_resource(
+        "Aletha",
+        ResourceData::Character(psxed_project::CharacterResource {
+            spawn_role: psxed_project::CharacterSpawnRole::Player,
+            radius: 188,
+            walk_speed: 44,
+            run_speed: 94,
+            roll_speed: 165,
+            camera_distance: 3300,
+            camera_height: 1500,
+            camera_target_height: 900,
+            camera_lock_rise_percent: 25,
+            camera_min_floor_clearance: 110,
+            camera_orbit_speed_level: 3,
+            camera_position_lag_shift: 6,
+            ..psxed_project::CharacterResource::defaults()
+        }),
+    );
+    let room = project.active_scene_mut().add_node(
+        NodeId::ROOT,
+        "Room",
+        NodeKind::Room {
+            grid: WorldGrid::empty(1, 1, 1024),
+        },
+    );
+    let old_spawn = project.active_scene_mut().add_node(
+        room,
+        "Old Player",
+        NodeKind::SpawnPoint {
+            player: true,
+            character: None,
+        },
+    );
+    let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
+
+    workspace.drop_resource_at_room_hit(character, room, [0.0, 0.0, 0.0], None);
+
+    let entity = workspace.selection.selected_node;
+    let scene = workspace.project.active_scene();
+    assert!(matches!(
+        scene.node(old_spawn).unwrap().kind,
+        NodeKind::SpawnPoint { player: false, .. }
+    ));
+    let children: Vec<_> = scene
+        .node(entity)
+        .expect("Aletha entity exists")
+        .children
+        .iter()
+        .filter_map(|id| scene.node(*id))
+        .collect();
+    let settings = children
+        .iter()
+        .find_map(|child| match child.kind {
+            NodeKind::CharacterController {
+                player: true,
+                settings,
+                ..
+            } => Some(settings),
+            _ => None,
+        })
+        .expect("Aletha is the player");
+    assert_eq!(
+        (settings.radius, settings.walk_speed, settings.run_speed),
+        (188, 44, 94)
+    );
+    assert_eq!(settings.roll_speed, 165);
+    let camera = children
+        .iter()
+        .find_map(|child| match child.kind {
+            NodeKind::Camera { settings } => Some(settings),
+            _ => None,
+        })
+        .expect("Aletha gets her camera preset");
+    assert_eq!(
+        (camera.distance, camera.height, camera.target_height),
+        (3300, 1500, 900)
+    );
+    assert_eq!(camera.lock_rise_percent, 25);
+    assert_eq!(camera.min_floor_clearance, 110);
+    assert_eq!(camera.position_lag_shift, 6);
+}
+
+#[test]
 fn player_source_demote_handles_spawn_points_and_character_controllers() {
     let mut project = ProjectDocument::new("player-source-demote");
     let room = project.active_scene_mut().add_node(
