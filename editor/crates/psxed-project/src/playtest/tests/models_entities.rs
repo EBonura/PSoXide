@@ -873,6 +873,45 @@ fn model_renderer_material_override_cooks_onto_instance() {
 }
 
 #[test]
+fn player_character_profile_material_cooks_without_renderer_override() {
+    let mut project = project_with_one_room();
+    let material_id = project
+        .resources
+        .iter()
+        .find(|resource| {
+            matches!(&resource.data, ResourceData::Material(material) if material.psxt_path.is_some())
+        })
+        .expect("starter has a textured material")
+        .id;
+    let character_id = project
+        .active_scene()
+        .nodes()
+        .iter()
+        .find_map(|node| match node.kind {
+            NodeKind::CharacterController {
+                character: Some(id),
+                player: true,
+                ..
+            } => Some(id),
+            _ => None,
+        })
+        .expect("starter player has a character profile");
+    let ResourceData::Character(character) = &mut project.resource_mut(character_id).unwrap().data
+    else {
+        panic!("player controller references a Character");
+    };
+    character.material = Some(material_id);
+
+    let (package, report) = build_package(&project, &starter_project_root());
+    assert!(report.is_ok(), "errors: {:?}", report.errors);
+    let package = package.expect("cooks");
+    let material_override = package.characters[0]
+        .material_override
+        .expect("profile material cooks onto the player");
+    assert!(material_override.texture_asset_index.is_some());
+}
+
+#[test]
 fn player_model_renderer_material_override_cooks_onto_character() {
     let mut project = project_with_one_room();
     let material_id = project
