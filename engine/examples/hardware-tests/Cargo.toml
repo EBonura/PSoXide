@@ -17,6 +17,7 @@ lto = true
 
 [dependencies]
 psx-engine = { path = "../../crates/psx-engine" }
+psx-asset  = { path = "../../../sdk/crates/psx-asset" }
 psx-font   = { path = "../../../sdk/crates/psx-font" }
 psx-gpu    = { path = "../../../sdk/crates/psx-gpu" }
 psx-gte    = { path = "../../../sdk/crates/psx-gte" }
