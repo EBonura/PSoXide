@@ -173,6 +173,13 @@ pub(crate) fn draw_character_resource_editor(
             }
             changed |= resource_id_picker(
                 ui,
+                "Material",
+                "character-material-picker",
+                &mut character.material,
+                &ctx.materials,
+            );
+            changed |= resource_id_picker(
+                ui,
                 "Action Map",
                 "character-animation-set-picker",
                 &mut character.animation_set,
