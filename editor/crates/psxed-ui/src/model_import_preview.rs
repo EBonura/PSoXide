@@ -16,6 +16,98 @@ const PREVIEW_NEAR_Z: i32 = 48;
 const PREVIEW_FOCAL_LENGTH: i32 = 320;
 const PREVIEW_PLAYBACK_HZ: u16 = 60;
 
+/// One joint-local combat capsule drawn over an animated model preview.
+#[derive(Clone, Debug)]
+pub(crate) struct PreviewCombatCapsule {
+    pub joint: u16,
+    pub start: [i32; 3],
+    pub end: [i32; 3],
+    pub radius: u16,
+    pub color: Color32,
+    pub selected: bool,
+}
+
+/// Preview image plus projected body-part points used by Animation Studio's
+/// click-to-attach workflow.
+pub(crate) struct ImportPreviewRender {
+    pub image: ColorImage,
+    pub joint_screen_positions: Vec<Option<[f32; 2]>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct JointCapsuleFit {
+    pub start: [i32; 3],
+    pub end: [i32; 3],
+    pub radius: u16,
+}
+
+/// Fit a conservative capsule around vertices primarily assigned to `joint`.
+/// The longest local axis becomes the segment and the other two axes size the
+/// radius. Values are returned in the same engine-unit joint space used by the
+/// combat capsule contract.
+pub(crate) fn fit_capsule_to_joint(
+    model_bytes: &[u8],
+    joint: u16,
+    visual_scale_q8: u16,
+) -> Option<JointCapsuleFit> {
+    let model = Model::from_bytes(model_bytes).ok()?;
+    if joint >= model.joint_count() {
+        return None;
+    }
+    let mut min = [i32::MAX; 3];
+    let mut max = [i32::MIN; 3];
+    let mut found = false;
+    for part_index in 0..model.part_count() {
+        let part = model.part(part_index)?;
+        if part.joint_index() != joint {
+            continue;
+        }
+        let end = part.first_vertex().saturating_add(part.vertex_count());
+        for vertex_index in part.first_vertex()..end {
+            let vertex = model.vertex(vertex_index)?;
+            let values = [
+                i32::from(vertex.position.x),
+                i32::from(vertex.position.y),
+                i32::from(vertex.position.z),
+            ];
+            for axis in 0..3 {
+                min[axis] = min[axis].min(values[axis]);
+                max[axis] = max[axis].max(values[axis]);
+            }
+            found = true;
+        }
+    }
+    if !found {
+        return None;
+    }
+    let scale = preview_model_local_to_world(&model, visual_scale_q8);
+    let center = [
+        scale.apply(min[0].saturating_add(max[0]) / 2),
+        scale.apply(min[1].saturating_add(max[1]) / 2),
+        scale.apply(min[2].saturating_add(max[2]) / 2),
+    ];
+    let extents = [
+        scale.apply(max[0].saturating_sub(min[0]).abs()) / 2,
+        scale.apply(max[1].saturating_sub(min[1]).abs()) / 2,
+        scale.apply(max[2].saturating_sub(min[2]).abs()) / 2,
+    ];
+    let segment_axis = (0..3).max_by_key(|axis| extents[*axis])?;
+    let radius = (0..3)
+        .filter(|axis| *axis != segment_axis)
+        .map(|axis| extents[axis])
+        .max()
+        .unwrap_or(1)
+        .clamp(12, i32::from(u16::MAX)) as u16;
+    let half_segment = extents[segment_axis]
+        .saturating_sub(i32::from(radius))
+        .max(0);
+    let mut start = center;
+    let mut end = center;
+    start[segment_axis] = start[segment_axis].saturating_sub(half_segment);
+    end[segment_axis] = end[segment_axis].saturating_add(half_segment);
+    Some(JointCapsuleFit { start, end, radius })
+}
+
 #[derive(Copy, Clone, Debug)]
 pub struct ImportPreviewOptions {
     pub world_height: i32,
@@ -61,6 +153,32 @@ pub(crate) fn render_import_model_preview_with_orientation_at_size(
     instance_rotation: Mat3I16,
     render_size: [usize; 2],
 ) -> Option<ColorImage> {
+    render_import_model_preview_with_combat_capsules_at_size(
+        model_bytes,
+        clip_bytes,
+        atlas,
+        options,
+        instance_rotation,
+        render_size,
+        &[],
+        None,
+    )
+    .map(|render| render.image)
+}
+
+/// Render an animated preview with rig-following combat capsules and return
+/// the projected body-part points needed for visual joint picking.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn render_import_model_preview_with_combat_capsules_at_size(
+    model_bytes: &[u8],
+    clip_bytes: &[u8],
+    atlas: &ColorImage,
+    options: ImportPreviewOptions,
+    instance_rotation: Mat3I16,
+    render_size: [usize; 2],
+    combat_capsules: &[PreviewCombatCapsule],
+    selected_joint: Option<u16>,
+) -> Option<ImportPreviewRender> {
     let model = Model::from_bytes(model_bytes).ok()?;
     let animation = Animation::from_bytes(clip_bytes).ok()?;
     if atlas.size[0] == 0 || atlas.size[1] == 0 {
@@ -141,11 +259,12 @@ pub(crate) fn render_import_model_preview_with_orientation_at_size(
     }
     let projected_body_anchor =
         body_anchor_projected(camera, projection, focus.map(|focus| focus.center), origin);
-    let joint_origins: Vec<Option<ProjectedVertex>> = if options.show_bones {
-        estimated_joint_points(&model, &joint_transforms, camera)
-    } else {
-        Vec::new()
-    };
+    let joint_origins: Vec<Option<ProjectedVertex>> =
+        if options.show_bones || !combat_capsules.is_empty() || selected_joint.is_some() {
+            estimated_joint_points(&model, &joint_transforms, camera)
+        } else {
+            Vec::new()
+        };
 
     let mut projected = vec![None; model.vertex_count() as usize];
     for part_index in 0..model.part_count() {
@@ -223,7 +342,26 @@ pub(crate) fn render_import_model_preview_with_orientation_at_size(
         draw_bone_overlay(&mut image, &model, &joint_origins);
     }
 
-    Some(image)
+    for capsule in combat_capsules {
+        let Some(joint) = joint_transforms.get(capsule.joint as usize).copied() else {
+            continue;
+        };
+        draw_joint_combat_capsule(&mut image, camera, projection, joint, capsule);
+    }
+    if let Some(joint) = selected_joint
+        .and_then(|joint| joint_origins.get(joint as usize))
+        .and_then(|point| *point)
+    {
+        draw_selected_joint_dot(&mut image, joint.sx as i32, joint.sy as i32);
+    }
+
+    Some(ImportPreviewRender {
+        image,
+        joint_screen_positions: joint_origins
+            .into_iter()
+            .map(|point| point.map(|point| [point.sx as f32, point.sy as f32]))
+            .collect(),
+    })
 }
 
 fn preview_model_local_to_world(model: &Model<'_>, visual_scale_q8: u16) -> LocalToWorldScale {
@@ -968,6 +1106,108 @@ fn draw_bone_overlay(
     }
 }
 
+fn draw_joint_combat_capsule(
+    image: &mut ColorImage,
+    camera: WorldCamera,
+    projection: WorldProjection,
+    joint: JointWorldTransform,
+    capsule: &PreviewCombatCapsule,
+) {
+    let radius = i32::from(capsule.radius.max(1));
+    let line = if capsule.selected {
+        // Gold remains legible over Aletha's pale body material while matching
+        // the editor's selection language. White disappeared against the
+        // model in the real headless Animation Studio capture.
+        Color32::from_rgb(255, 194, 72)
+    } else {
+        capsule.color
+    };
+
+    // Three great circles at each endpoint keep the volume readable from any
+    // camera angle. Their local axes rotate with the animated joint.
+    for center in [capsule.start, capsule.end] {
+        for plane in [(0usize, 1usize), (0, 2), (1, 2)] {
+            let mut previous = None;
+            for step in 0..=24 {
+                let angle = Angle::from_q12(((step * 4096) / 24) as u16);
+                let mut local = center;
+                local[plane.0] = local[plane.0].saturating_add(angle.sin().mul_i32(radius));
+                local[plane.1] = local[plane.1].saturating_add(angle.cos().mul_i32(radius));
+                let world = joint_local_point(joint, local);
+                if let Some(previous) = previous {
+                    draw_projected_world_line(image, camera, projection, previous, world, line);
+                }
+                previous = Some(world);
+            }
+        }
+    }
+
+    // Connect matching cardinal points on the endpoint spheres. This is a
+    // deliberately clear editor wireframe rather than runtime collision math.
+    for offset in [
+        [radius, 0, 0],
+        [-radius, 0, 0],
+        [0, radius, 0],
+        [0, -radius, 0],
+        [0, 0, radius],
+        [0, 0, -radius],
+    ] {
+        let a = joint_local_point(joint, add_i32x3(capsule.start, offset));
+        let b = joint_local_point(joint, add_i32x3(capsule.end, offset));
+        draw_projected_world_line(image, camera, projection, a, b, line);
+    }
+}
+
+fn add_i32x3(a: [i32; 3], b: [i32; 3]) -> [i32; 3] {
+    [
+        a[0].saturating_add(b[0]),
+        a[1].saturating_add(b[1]),
+        a[2].saturating_add(b[2]),
+    ]
+}
+
+fn joint_local_point(joint: JointWorldTransform, local: [i32; 3]) -> WorldVertex {
+    let rotate = |row: [i16; 3]| {
+        i32::from(row[0])
+            .saturating_mul(local[0])
+            .saturating_add(i32::from(row[1]).saturating_mul(local[1]))
+            .saturating_add(i32::from(row[2]).saturating_mul(local[2]))
+            >> 12
+    };
+    WorldVertex::new(
+        joint
+            .translation
+            .x
+            .saturating_add(rotate(joint.rotation.m[0])),
+        joint
+            .translation
+            .y
+            .saturating_add(rotate(joint.rotation.m[1])),
+        joint
+            .translation
+            .z
+            .saturating_add(rotate(joint.rotation.m[2])),
+    )
+}
+
+fn draw_selected_joint_dot(image: &mut ColorImage, cx: i32, cy: i32) {
+    for radius in [6, 5] {
+        let color = if radius == 6 {
+            Color32::BLACK
+        } else {
+            Color32::from_rgb(255, 218, 92)
+        };
+        for y in -radius..=radius {
+            for x in -radius..=radius {
+                let d2 = x * x + y * y;
+                if d2 >= (radius - 1) * (radius - 1) && d2 <= radius * radius {
+                    put_marker_pixel(image, cx + x, cy + y, color);
+                }
+            }
+        }
+    }
+}
+
 fn draw_image_line(
     image: &mut ColorImage,
     mut x0: i32,
@@ -1212,6 +1452,62 @@ mod tests {
     }
 
     #[test]
+    fn rig_attached_capsule_draws_selection_wireframe() {
+        let model = two_joint_model_with_child_part();
+        let clip = two_joint_animation_with_child_x_offsets(&[0, 32]);
+        let atlas = ColorImage {
+            size: [64, 64],
+            pixels: vec![Color32::from_rgb(210, 90, 70); 64 * 64],
+        };
+        let selection = Color32::from_rgb(255, 194, 72);
+
+        let render = render_import_model_preview_with_combat_capsules_at_size(
+            &model,
+            &clip,
+            &atlas,
+            ImportPreviewOptions {
+                world_height: 1024,
+                visual_scale_q8: MODEL_SCALE_ONE_Q8,
+                visual_yaw_q12: 0,
+                collision_radius: 192,
+                time_seconds: 0.0,
+                yaw_q12: 340,
+                pitch_q12: 350,
+                radius: 1536,
+                focus_on_animated_bounds: true,
+                preview_in_place: true,
+                pose_offset: [0, 0, 0],
+                show_animation_root: false,
+                show_collision_guides: false,
+                show_bones: false,
+            },
+            Mat3I16::IDENTITY,
+            [640, 480],
+            &[PreviewCombatCapsule {
+                joint: 1,
+                start: [0, -96, 0],
+                end: [0, 96, 0],
+                radius: 96,
+                color: Color32::CYAN,
+                selected: true,
+            }],
+            None,
+        )
+        .expect("rig fixture should render");
+        let wire_pixels = render
+            .image
+            .pixels
+            .iter()
+            .filter(|pixel| **pixel == selection)
+            .count();
+
+        assert!(
+            wire_pixels > 24,
+            "expected a visible selected capsule wireframe, got {wire_pixels} pixels"
+        );
+    }
+
+    #[test]
     fn estimated_joint_points_skips_joints_without_owned_vertices() {
         let model_bytes = two_joint_model_with_child_part();
         let model = Model::from_bytes(&model_bytes).expect("model fixture");
@@ -1231,6 +1527,21 @@ mod tests {
         assert_eq!(joints.len(), 2);
         assert_eq!(joints[0], None);
         assert!(joints[1].is_some());
+    }
+
+    #[test]
+    fn joint_capsule_fit_uses_owned_vertices_and_allows_a_sphere() {
+        let model = two_joint_model_with_child_part();
+
+        assert!(fit_capsule_to_joint(&model, 0, MODEL_SCALE_ONE_Q8).is_none());
+        let fit = fit_capsule_to_joint(&model, 1, MODEL_SCALE_ONE_Q8)
+            .expect("child joint owns the fixture geometry");
+
+        assert!(fit.radius > 0);
+        // This fixture is square in its two populated axes, so the most
+        // conservative capsule is a sphere. Equal endpoints are an explicit
+        // part of the serialized JointCapsule contract.
+        assert_eq!(fit.start, fit.end);
     }
 
     #[test]

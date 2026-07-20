@@ -641,6 +641,38 @@ pub struct AnimationClipResource {
     /// cooked runtime rendering.
     #[serde(default, skip_serializing_if = "AnimationClipCalibration::is_default")]
     pub calibration: AnimationClipCalibration,
+    /// Sparse editor-authored visual pose corrections. The editor previews
+    /// these immediately and the offline package cooker folds them into the
+    /// ordinary sampled `.psxanim` matrices, so runtime animation sampling
+    /// remains unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pose_corrections: Vec<AnimationPoseCorrectionKey>,
+}
+
+/// One sparse correction key for a cooked animation joint.
+///
+/// Rotation is a signed Q12 turn delta (`4096 = 360°`). Translation uses
+/// cooked model-local pose units. A single key holds across the clip; two or
+/// more keys interpolate linearly between their sampled frames.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnimationPoseCorrectionKey {
+    pub frame: u16,
+    pub joint: u16,
+    #[serde(default)]
+    pub rotation_q12: [i16; 3],
+    #[serde(default)]
+    pub translation: [i32; 3],
+}
+
+impl AnimationPoseCorrectionKey {
+    pub const fn is_identity(self) -> bool {
+        self.rotation_q12[0] == 0
+            && self.rotation_q12[1] == 0
+            && self.rotation_q12[2] == 0
+            && self.translation[0] == 0
+            && self.translation[1] == 0
+            && self.translation[2] == 0
+    }
 }
 
 impl AnimationClipResource {
@@ -893,6 +925,97 @@ impl Default for WeaponHitbox {
     }
 }
 
+/// Capsule authored in one skeleton joint's local space.
+///
+/// Keeping both endpoints local to the joint makes the volume follow every
+/// sampled animation pose without baking per-clip coordinates. A sphere is
+/// represented by equal endpoints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JointCapsule {
+    /// First endpoint relative to the owning joint.
+    #[serde(default)]
+    pub start: [i32; 3],
+    /// Second endpoint relative to the owning joint.
+    #[serde(default)]
+    pub end: [i32; 3],
+    /// Capsule radius in engine units.
+    #[serde(default = "default_combat_capsule_radius")]
+    pub radius: u16,
+}
+
+impl Default for JointCapsule {
+    fn default() -> Self {
+        Self {
+            start: [0, -128, 0],
+            end: [0, 128, 0],
+            radius: default_combat_capsule_radius(),
+        }
+    }
+}
+
+pub(crate) const fn default_combat_capsule_radius() -> u16 {
+    96
+}
+
+/// Gameplay role of a rig-attached combat capsule.
+///
+/// Receiving volumes are continuously present (invulnerability remains an
+/// action-state decision). Dealing volumes are enabled only for the authored
+/// inclusive frame range of one character action, mirroring Souls TimeAct
+/// attack events while keeping damage data separate from animation files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CombatCapsuleRole {
+    /// Receives damage when an active opposing attack capsule overlaps it.
+    Hurtbox,
+    /// Deals damage during one animation action's active frame window.
+    Hitbox {
+        /// Character action whose clip drives this volume.
+        action: CharacterAnimationAction,
+        /// First active animation frame, inclusive.
+        active_start_frame: u16,
+        /// Last active animation frame, inclusive.
+        active_end_frame: u16,
+        /// Health damage applied on a new connection.
+        damage: u16,
+        /// Poise damage applied on a new connection.
+        poise_damage: u16,
+    },
+}
+
+impl Default for CombatCapsuleRole {
+    fn default() -> Self {
+        Self::Hurtbox
+    }
+}
+
+/// One visually authored capsule attached to a character rig joint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CharacterCombatCapsule {
+    /// User-facing label such as `Torso Hurtbox` or `Right Fist`.
+    pub name: String,
+    /// Cooked skeleton joint index. Animation Studio provides visual picking;
+    /// the integer remains the compact runtime contract.
+    #[serde(default)]
+    pub joint: u16,
+    /// Joint-local capsule geometry.
+    #[serde(default)]
+    pub capsule: JointCapsule,
+    /// Whether this volume receives or deals damage.
+    #[serde(default)]
+    pub role: CombatCapsuleRole,
+}
+
+impl Default for CharacterCombatCapsule {
+    fn default() -> Self {
+        Self {
+            name: "Body Hurtbox".to_string(),
+            joint: 0,
+            capsule: JointCapsule::default(),
+            role: CombatCapsuleRole::Hurtbox,
+        }
+    }
+}
+
 /// Gameplay weapon resource: model reference, grip/pivot, authored
 /// attack hit volumes, and the melee-arc combat numbers (the phase-3
 /// combat contract: update-band hit resolution sweeps a flat arc in
@@ -1081,6 +1204,11 @@ pub struct CharacterResource {
     /// walk / run / actions); cook/preview resolve roles from it.
     #[serde(default)]
     pub animation_set: Option<ResourceId>,
+    /// Precise damage-dealing and damage-receiving capsules attached to the
+    /// animated rig. Empty preserves the legacy coarse body-cylinder combat
+    /// path until a project opts into the authored volume pipeline.
+    #[serde(default)]
+    pub combat_capsules: Vec<CharacterCombatCapsule>,
     /// Capsule radius (engine units). Used by collision +
     /// editor preview gizmo.
     pub radius: u16,
@@ -1151,6 +1279,7 @@ impl CharacterResource {
         Self {
             model: None,
             animation_set: None,
+            combat_capsules: Vec::new(),
             radius: default_character_radius(),
             height: default_character_height(),
             walk_speed: default_character_walk_speed(),
