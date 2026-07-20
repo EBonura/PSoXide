@@ -290,7 +290,7 @@ test-sdk: examples
 PSX_TARGET := mipsel-sony-psx
 EXAMPLE_TARGET_DIR := $(CURDIR)/build/examples
 EXAMPLE_OUT := build/examples/$(PSX_TARGET)/release
-PSX_BUILD_FLAGS := --target $(PSX_TARGET) -Zbuild-std=core -Zbuild-std-features=compiler-builtins-mem
+PSX_BUILD_FLAGS := --target $(PSX_TARGET) -Zjson-target-spec -Zbuild-std=core -Zbuild-std-features=compiler-builtins-mem
 SDK_EXAMPLE_CARGO_ENV := CARGO_TARGET_DIR=$(EXAMPLE_TARGET_DIR) RUSTFLAGS="-Clink-arg=-T../../psoxide.ld -Clink-arg=--oformat=binary"
 ENGINE_EXAMPLE_CARGO_ENV := CARGO_TARGET_DIR=$(EXAMPLE_TARGET_DIR) RUSTFLAGS="-Clink-arg=-T../../../sdk/psoxide.ld -Clink-arg=--oformat=binary"
 EDITOR_PLAYTEST_CARGO_ENV := CARGO_TARGET_DIR=$(EXAMPLE_TARGET_DIR) RUSTFLAGS="-Zunstable-options -Cpanic=immediate-abort -Clink-arg=-T../../../sdk/psoxide.ld -Clink-arg=--oformat=binary"
@@ -365,7 +365,7 @@ DATA_DISC_EXAMPLES := \
 	hello-tri hello-input hello-ot hello-tex hello-gte hello-audio \
 	showcase-text game-pong game-breakout game-invaders \
 	showcase-3d showcase-model showcase-lights showcase-fog showcase-particles \
-	hardware-tests hello-engine hello-memcard hello-i64probe
+	hello-engine hello-memcard hello-i64probe
 PUBLIC_EXAMPLE_DISCS := $(addsuffix -disc,$(DATA_DISC_EXAMPLES)) hello-cdda-disc hello-pack-disc game-magikaaaaaarp-pong-disc
 
 define build_data_disc
@@ -516,6 +516,17 @@ showcase-particles:
 
 hardware-tests:
 	cd engine/examples/hardware-tests && $(ENGINE_EXAMPLE_CARGO_ENV) cargo build --release $(PSX_BUILD_FLAGS)
+
+# PA5 snapshots BIOS reverb state and selects reset variants before PA4's
+# proven map-DMA trigger. PA3/PA2 retain prior fixtures and PA1 reads a deterministic 600-sector
+# CDTEST.BIN at LBA 424.
+# Keep the file explicit so every burn and emulator run uses identical inputs.
+hardware-tests-disc: hardware-tests
+	cd tools/mkisopsx && cargo run --release -- \
+		--exe ../../$(EXAMPLE_OUT)/hardware-tests.exe \
+		--out ../../$(EXAMPLE_OUT)/hardware-tests.bin \
+		--volume PSOXIDE \
+		--cdtest-sectors 600
 
 $(foreach example,$(DATA_DISC_EXAMPLES),$(eval $(call build_data_disc,$(example))))
 

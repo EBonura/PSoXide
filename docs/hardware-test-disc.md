@@ -2,8 +2,168 @@
 
 The `hardware-tests` disc is the silicon reference for PSoXide. It runs the
 same executable in PSoXide and on a real PlayStation. Real-console data is
-transported through three QR pages, so a TV and phone camera are enough and no
+transported through QR payloads, so a TV/capture card is enough and no
 character-by-character transcription is required.
+
+## Capturing and clearing stale BIOS reverb state (`PA5`)
+
+PA5 boots first and waits five seconds on a variant selector (default
+`DEPTH0`). PA4 SPLIT established that the real-console noise begins only when
+the t0a0 map bank is uploaded, after SDK init and the light bank, with all
+voice mixer volumes at zero. PA5 tests whether stale global reverb state is
+reading the newly uploaded map data as its work buffer.
+
+The probe captures SPUCNT/SPUSTAT, wet-output volumes, reverb base, external
+input volumes, EON, a per-stage hash/nonzero count of all 32 reverb registers,
+raw VBlank clocks, and map-bank readback. Crucially, `main()` snapshots the
+untouched BIOS state before any SDK initialization; all 32 raw boot reverb
+configuration words are included in the CRC-protected QR so the hardware state
+can be replayed exactly in PSoXide.
+
+Use Left/Right and Cross, and reboot the console between variants:
+
+| Variant | Reset immediately before t0a0 map upload |
+|---|---|
+| `CONTROL` | No reverb changes; expected hardware noise reproduction |
+| `DEPTH0` | Set only reverb output volume L/R to zero |
+| `DEPTH2` | Set reverb output volume L/R to zero, then wait two VBlanks |
+| `BASE0` | Set only the reverb work-area base to zero |
+| `FULL0` | Zero wet volume, EON, external inputs, reverb routing/master, base, and all 32 config words |
+
+Run DEPTH0 first. Then reboot and run CONTROL and FULL0. BASE0 and DEPTH2 are
+follow-up discriminators. Keep OBS running from the calibration beep through
+the final QR and note whether noise starts during stage 06 (`T0A0 MAP BANK
+ONLY`). Decode the final payload with:
+
+```sh
+python3 tools/hwtest-audio-report.py /tmp/pa5-qr.txt
+```
+
+Press Down from the completed PA5 screen to revisit PA4.
+
+### SCPH hardware result (2026-07-20)
+
+The real-console `DEPTH0` capture isolated the fault. The retail BIOS handed
+the executable a live full reverb preset (`SPUCNT=C085`, `SPUSTAT=0805`,
+`vLOUT=5EBC/5EBC`, work-area base `E128`, `EON=00FFFFFF`, configuration hash
+`F0417A52`). SDK initialization cleared reverb routing/master state but left
+the wet-output depth, work-area base, and configuration registers intact. A
+later map-bank DMA then replaced the data under that still-readable reverb work
+area.
+
+Setting only `vLOUT` to zero reduced the captured map-upload interval from the
+PA4 SPLIT reproduction's `-30.07 dBFS` to `-86.82 dBFS`, a `56.75 dB`
+suppression. The map-bank readback still matched (`25C971C5`) and the full
+reverb register block remained otherwise unchanged. This proves that the noise
+was stale BIOS reverb output, not a voice, CD audio, DMA corruption, or a bad
+map-bank upload.
+
+PSoXide's normal real-BIOS fast boot now recreates this measured handoff state.
+Its SPU continues reverb reads, APF processing, and wet output while the reverb
+master-write bit is clear, matching the hardware probe; only feedback writes
+are gated. The SDK now zeros both wet-output depth registers during `spu::init`,
+before game banks can reuse SPU RAM. The old PA5 executable reproduces the
+fault under CONTROL and is digitally silent under DEPTH0 in PSoXide, while a
+newly linked Half-Life build remains digitally silent through its first eight
+seconds under the same hostile handoff profile.
+
+## Isolating the stale-menu-voice handoff (`PA4`)
+
+PA4 is the second probe and waits five seconds on a variant selector (default SAFE2).
+Its schema-v2 QR records the raw VBlank counter immediately before and after
+each blocking transition, while the final stage retains the SPU RAM hashes.
+Use Left/Right and Cross to start sooner. Reboot the console between variants:
+
+| Variant | Transition under test |
+|---|---|
+| `BASELINE` | PA3 order: naturally ended voice 16, then init + 3050 + 3198 |
+| `SAFE0` | Zero voice-16 volume and key it off immediately before the exact transition |
+| `SAFE1` | Same explicit stop, then wait one hardware VBlank |
+| `SAFE2` | Same explicit stop, then wait two hardware VBlanks |
+| `SPLIT` | No pre-stop; observe separately after init, 3050, 3198, and readback |
+
+Run SAFE2 first. If it stays quiet, reboot and capture SAFE0, then SAFE1 only
+if SAFE0 is noisy. BASELINE is the PA3 reproduction and SPLIT identifies the
+specific operation that starts the fault. Keep OBS running from the calibration
+beep through the final QR for each run.
+
+The menu marker starts 15 frames into stage 2 and naturally ends before frame
+45, matching PA3. The selected shutdown and transition execute at frame 45.
+Every blocking operation records actual elapsed VBlanks and realigns the engine
+clock. The QR stores all 24 voices' nonzero-volume mask plus voice 16's complete
+register state, ENDX, SPUCNT/SPUSTAT, bank dimensions, and readback hashes.
+
+Decode each final `PA4/.../C:...` QR with:
+
+```sh
+python3 tools/hwtest-audio-report.py /tmp/pa4-qr.txt
+```
+
+Press Down from the completed PA4 screen to revisit PA3.
+
+## Reproducing the Hazard Course bank transition (`PA3`)
+
+PA3 remains as the second probe, an automatic six-stage reproduction of the
+exact audio-bank lifecycle used when Hazard Course is selected. It uploads the
+287,808-byte full menu bank (chunk 3000), starts a synthetic menu-accept sound
+on voice 16, then executes the same `spu::init()` and replacement sequence as
+the game: the 114,320-byte light profile (chunk 3050) followed by t0a0's
+367,344-byte map bank (chunk 3198). The sample rates, decoded lengths, ADPCM
+block counts, loop ownership, SPU addresses, and one-DMA-per-sample call shape
+match hl-psx; all sound content is synthetic.
+
+Stage 4 is a deliberate positive control: voices 0, 15, and 17 remain active
+while their map bank is overwritten with loud marker data. It must sound bad.
+Stage 5 recreates the same premise, silences and keys off every known map-bank
+owner, then performs the same overwrite. It must become quiet apart from one
+short completion marker. This proves the capture can distinguish a live-bank
+overwrite from a safe handoff.
+
+Every blocking upload records elapsed hardware VBlanks, then asks the engine to
+discard fixed-update debt. Consequently, stage snapshots retain their intended
+wall-clock position even when a real transfer spans several display frames.
+The QR also stores ENDX, current envelope/start address for voices 0/15/16/17,
+and a diagnostic 64-byte stable-mode SPU readback hash.
+
+Record the complete run without changing capture volume. Leave the final QR
+visible for several seconds, decode its `PA3/.../C:...` text, then run:
+
+```sh
+python3 tools/hwtest-audio-report.py /tmp/pa3-qr.txt
+```
+
+Press Down once from the completed PA3 screen to reach PA2.
+
+## Capturing hl-psx voice-bank audio (`PA2`)
+
+PA2 remains as the second automatic voice probe. Record the complete run
+without changing the capture volume. Stage 0 emits a half-second
+calibration marker. PA2 then reconstructs sanitized banks with the exact
+Hazard Course resident/per-map sample counts, rates, block lengths, and upload
+order: 68 core samples plus 26 map samples, roughly 508 KiB of back-to-back SPU
+DMA traffic. PA2 used chunk 3051 rather than the first-map chunk 3050, so PA3
+is the authoritative reproduction of the original recording's startup path.
+No Half-Life audio is stored in either fixture.
+
+Production upload and playback run first; a comparison upload that waits for
+SPUSTAT's delayed transfer-mode mirror and gives the final FIFO words time to
+drain runs second. In both cases voice 15's target contains a short marker,
+then silence, and a proper one-shot end block. The following allocation is a
+loud overrun guard. Hearing a late tone during either `END + GUARD` stage proves
+that the target's end block did not stop the voice.
+
+Leave the final QR visible for several seconds. Decode its `PA2/.../C:...` text
+from any clear OBS frame and run:
+
+```sh
+python3 tools/hwtest-audio-report.py /tmp/pa2-qr.txt
+```
+
+The report preserves SPUCNT/SPUSTAT, all voice-15 registers, ENDX, maximum
+mode/drain poll counts, and expected/observed last-64-byte hashes for all six
+stages. SPU DMA readback is intentionally diagnostic rather than a pass/fail
+oracle; compare its hash with ENDX and the external OBS waveform. Press Down
+once from the completed PA2 screen to reach the older PA1 CD-route probe.
 
 ## Capturing timing data
 
