@@ -936,9 +936,29 @@ fn dropping_enemy_profile_first_preserves_authored_enemy_defaults() {
 #[test]
 fn dropping_player_profile_applies_camera_preset_and_replaces_player_source() {
     let mut project = ProjectDocument::new("drop-player-profile");
+    let material = project.add_resource(
+        "Aletha Crystal",
+        ResourceData::Material(psxed_project::MaterialResource::opaque(None)),
+    );
+    let model = project.add_resource(
+        "Aletha Model",
+        ResourceData::Model(psxed_project::ModelResource {
+            model_path: "assets/aletha.psxmdl".to_string(),
+            source_path: None,
+            texture_path: None,
+            skeleton: None,
+            world_height: 1024,
+            collision_radius: 192,
+            scale_q8: [psxed_project::MODEL_SCALE_ONE_Q8; 3],
+            default_visual_yaw_q12: 0,
+            attachments: Vec::new(),
+        }),
+    );
     let character = project.add_resource(
         "Aletha",
         ResourceData::Character(psxed_project::CharacterResource {
+            model: Some(model),
+            material: Some(material),
             spawn_role: psxed_project::CharacterSpawnRole::Player,
             radius: 188,
             walk_speed: 44,
@@ -1016,6 +1036,13 @@ fn dropping_player_profile_applies_camera_preset_and_replaces_player_source() {
     assert_eq!(camera.lock_rise_percent, 25);
     assert_eq!(camera.min_floor_clearance, 110);
     assert_eq!(camera.position_lag_shift, 6);
+    assert!(children.iter().any(|child| matches!(
+        child.kind,
+        NodeKind::ModelRenderer {
+            material: Some(id),
+            ..
+        } if id == material
+    )));
 }
 
 #[test]

@@ -1330,6 +1330,7 @@ pub(crate) fn resource_data_reference_count(data: &ResourceData, id: ResourceId)
         }
         ResourceData::Character(character) => {
             option_resource_reference_count(character.model, id)
+                + option_resource_reference_count(character.material, id)
                 + option_resource_reference_count(character.animation_set, id)
         }
         ResourceData::Weapon(weapon) => option_resource_reference_count(weapon.model, id),
@@ -1379,6 +1380,7 @@ pub(crate) fn clear_resource_data_references(data: &mut ResourceData, id: Resour
         }
         ResourceData::Character(character) => {
             clear_option_resource(&mut character.model, id)
+                + clear_option_resource(&mut character.material, id)
                 + clear_option_resource(&mut character.animation_set, id)
         }
         ResourceData::Weapon(weapon) => clear_option_resource(&mut weapon.model, id),

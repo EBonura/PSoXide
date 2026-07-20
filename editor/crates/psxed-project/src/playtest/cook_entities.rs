@@ -1661,6 +1661,7 @@ pub(crate) fn push_character_controller_idle_instance(
     room_index: u16,
     pos: [i32; 3],
     yaw: i16,
+    texture_asset_for_path: &mut HashMap<String, usize>,
     assets: &mut Vec<PlaytestAsset>,
     models: &mut Vec<PlaytestModel>,
     model_clips: &mut Vec<PlaytestModelClip>,
@@ -1722,6 +1723,17 @@ pub(crate) fn push_character_controller_idle_instance(
     ) else {
         return false;
     };
+    let material_override = character.material.and_then(|material_id| {
+        resolve_model_material_override(
+            project,
+            project_root,
+            &format!("Character '{}'", resource.name),
+            material_id,
+            texture_asset_for_path,
+            assets,
+            report,
+        )
+    });
     model_instances.push(PlaytestModelInstance {
         room: room_index,
         model: model_index,
@@ -1736,7 +1748,7 @@ pub(crate) fn push_character_controller_idle_instance(
         roll: 0,
         visual_offset: [0; 3],
         visual_scale_q8: crate::MODEL_SCALE_ONE_Q8,
-        material_override: None,
+        material_override,
         flags: 0,
     });
     true

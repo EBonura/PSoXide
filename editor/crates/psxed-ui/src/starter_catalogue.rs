@@ -40,6 +40,7 @@ impl StarterCharacterSyncReport {
 #[derive(Clone, Copy)]
 pub(crate) enum StarterCataloguePhase {
     Skeleton,
+    Material,
     Model,
     AnimationClip,
     AnimationSet,
@@ -115,6 +116,7 @@ pub(crate) fn sync_starter_character_catalogue(
 
     for phase in [
         StarterCataloguePhase::Skeleton,
+        StarterCataloguePhase::Material,
         StarterCataloguePhase::Model,
         StarterCataloguePhase::AnimationClip,
         StarterCataloguePhase::AnimationSet,
@@ -208,6 +210,9 @@ pub(crate) fn starter_catalogue_resource_matches_phase(
         (ResourceData::Skeleton(_), StarterCataloguePhase::Skeleton) => {
             resource.name == "Meshy Biped Skeleton"
                 || resource.name == "Cortex Humanoid 22-Bone Skeleton"
+        }
+        (ResourceData::Material(_), StarterCataloguePhase::Material) => {
+            STARTER_CHARACTER_MATERIAL_NAMES.contains(&resource.name.as_str())
         }
         (ResourceData::Model(_), StarterCataloguePhase::Model) => {
             STARTER_CHARACTER_MODEL_NAMES.contains(&resource.name.as_str())
@@ -308,6 +313,7 @@ pub(crate) fn remap_resource_data(
         }
         ResourceData::Character(character) => {
             remap_resource_id_option(&mut character.model, id_map);
+            remap_resource_id_option(&mut character.material, id_map);
             remap_resource_id_option(&mut character.animation_set, id_map);
         }
         ResourceData::Weapon(weapon) => remap_resource_id_option(&mut weapon.model, id_map),

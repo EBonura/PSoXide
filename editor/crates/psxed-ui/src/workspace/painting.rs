@@ -194,6 +194,7 @@ impl EditorWorkspace {
                     resource_id,
                     &resource.name,
                     character.model,
+                    character.material,
                     idle_clip,
                     settings,
                     player,
@@ -375,6 +376,7 @@ impl EditorWorkspace {
         character_id: ResourceId,
         name: &str,
         model_id: Option<ResourceId>,
+        material_id: Option<ResourceId>,
         idle_clip: Option<u16>,
         settings: CharacterControllerSettings,
         player: bool,
@@ -396,13 +398,18 @@ impl EditorWorkspace {
         if let Some(model_id) = model_id {
             let (visual_scale_q8, default_visual_yaw_q12) =
                 model_visual_defaults.unwrap_or((psxed_project::MODEL_SCALE_ONE_Q8, 0));
-            add_model_renderer_node(
+            let renderer = add_model_renderer_node(
                 scene,
                 entity,
                 model_id,
                 visual_scale_q8,
                 default_visual_yaw_q12,
             );
+            if let Some(node) = scene.node_mut(renderer) {
+                if let NodeKind::ModelRenderer { material, .. } = &mut node.kind {
+                    *material = material_id;
+                }
+            }
             scene.add_node(
                 entity,
                 "Animator",
@@ -958,6 +965,7 @@ impl EditorWorkspace {
                             character_id,
                             &name,
                             character.model,
+                            character.material,
                             idle_clip,
                             settings,
                             player,

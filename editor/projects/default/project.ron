@@ -9350,6 +9350,7 @@
             name: "Aletha",
             data: Character((
                 model: Some((1636)),
+                material: Some((1657)),
                 animation_set: Some((1650)),
                 combat_capsules: [],
                 spawn_role: Player,
@@ -9423,6 +9424,20 @@
                 camera_distance_lag_shift: 3,
             )),
         ),
+        (
+            id: (1657),
+            name: "Aletha Crystal",
+            data: Material((
+                texture_mode: Generated,
+                blend_mode: Opaque,
+                tint: (255, 255, 255),
+                generated: (size: 64, base_color: (95, 120, 144), noise_enabled: true, noise_color: (57, 79, 95), noise: (seed: 29, feature_size: 14, octaves: 2, contrast: 255), noise_uv: (scale_u_q8: 1024, scale_v_q8: 1024, offset_u: 0, offset_v: 0, rotation_quarters: 0)),
+                reflection: (strength: 255, roughness: 0),
+                animation: (mode: UvScroll, uv_scroll: (enabled: true, speed_u_q8: 2048, speed_v_q8: 2304, phase_u: 0, phase_v: 0), flipbook: (columns: 2, rows: 2, frame_count: 4, ticks_per_frame: 6, phase: 0)),
+                face_sidedness: Front,
+                double_sided: false,
+            )),
+        ),
     ],
-    next_resource_id: 1657,
+    next_resource_id: 1658,
 )
