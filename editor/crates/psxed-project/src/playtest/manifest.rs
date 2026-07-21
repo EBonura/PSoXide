@@ -589,6 +589,32 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     }
     out.push_str("];\n\n");
 
+    out.push_str("/// Water-covered runtime sectors, sorted by room/x/z.\n");
+    out.push_str("pub static WATER_CELLS: &[LevelWaterCellRecord] = &[\n");
+    for water in &package.water_cells {
+        let texture_asset = water
+            .texture_asset_index
+            .map(|asset| format!("Some(AssetId({asset}))"))
+            .unwrap_or_else(|| "None".to_string());
+        let animation = level_material_animation_literal(water.animation);
+        let _ = writeln!(
+            out,
+            "    LevelWaterCellRecord {{ room: RoomIndex({}), x: {}, z: {}, texture_asset: {texture_asset}, blend_mode: {}, tint_rgb: {:?}, animation: {animation}, surface_y: {}, depth: {}, lethal_depth: {}, movement_percent: {}, death_delay_ticks: {}, death_submerge_depth: {} }},",
+            water.room,
+            water.x,
+            water.z,
+            water.blend_mode,
+            water.tint_rgb,
+            water.surface_y,
+            water.depth,
+            water.lethal_depth,
+            water.movement_percent,
+            water.death_delay_ticks,
+            water.death_submerge_depth,
+        );
+    }
+    out.push_str("];\n\n");
+
     out.push_str("/// Room indices near each runtime room, reserved for portal streaming.\n");
     out.push_str("pub static ROOM_NEAR_ROOMS: &[RoomIndex] = &[\n");
     for room in &package.room_near_rooms {
@@ -1106,8 +1132,9 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         let baked_vertex_rgb = render_box_prop_baked_vertex_rgb(&prop.baked_vertex_rgb);
         let _ = writeln!(
             out,
-            "    LevelBoxPropRecord {{ room: RoomIndex({}), texture_assets: {texture_assets}, x: {}, y: {}, z: {}, ground_y: {}, pitch: {}, yaw: {}, roll: {}, vertices: {vertices}, tint_rgb: {tint_rgb}, baked_vertex_rgb: {baked_vertex_rgb}, flags: {} }},",
+            "    LevelBoxPropRecord {{ room: RoomIndex({}), texture_assets: {texture_assets}, blend_modes: {:?}, x: {}, y: {}, z: {}, ground_y: {}, pitch: {}, yaw: {}, roll: {}, vertices: {vertices}, tint_rgb: {tint_rgb}, baked_vertex_rgb: {baked_vertex_rgb}, flags: {} }},",
             prop.room,
+            prop.blend_modes,
             prop.x,
             prop.y,
             prop.z,
@@ -3214,6 +3241,13 @@ fn room_required_assets(
             push_unique(&mut required_vram, prop.texture_asset_index);
         }
     }
+    for water in &package.water_cells {
+        if water.room == room_index as u16 {
+            if let Some(asset_index) = water.texture_asset_index {
+                push_unique(&mut required_vram, asset_index);
+            }
+        }
+    }
     let mut required_ram: Vec<usize> = vec![room.world_asset_index];
 
     // Models the room references -- placed MeshInstance bindings
@@ -3545,6 +3579,7 @@ use psx_level::{
     LevelOptionDef,
     LevelRoomPortalRecord,
     LevelRoomRecord,
+    LevelWaterCellRecord,
     LevelRoomSurfaceCacheRecord,
     LevelRoomVisibilityRecord,
     LevelSceneState,

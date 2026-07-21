@@ -311,6 +311,7 @@ impl EditorWorkspace {
                 | ViewTool::PaintWall
                 | ViewTool::PaintCeiling
                 | ViewTool::PaintMaterial
+                | ViewTool::Water
                 | ViewTool::Erase
                 | ViewTool::Place
         );
@@ -341,7 +342,7 @@ impl EditorWorkspace {
                 // by stamping a floor in empty space -- Sims-style.
                 // Move just bails (it never made sense for it to
                 // grow the room).
-                let cell = if paint_tool && !portal_tool {
+                let cell = if paint_tool && !portal_tool && self.active_tool != ViewTool::Water {
                     self.ensure_cell_in_grid(room_id, world)
                 } else {
                     self.world_to_sector(room_id, world)
@@ -361,7 +362,7 @@ impl EditorWorkspace {
         self.last_paint_stamp = Some(stamp);
         if portal_tool {
             self.clear_sector_selection();
-        } else if self.active_tool == ViewTool::PaintMaterial {
+        } else if matches!(self.active_tool, ViewTool::PaintMaterial | ViewTool::Water) {
             // Paint hover/click feedback is not selection. Keep the current
             // resource choice, but never create a tile/face selection.
             self.clear_sector_selection();
@@ -1992,6 +1993,11 @@ impl EditorWorkspace {
             return;
         }
 
+        if tool == ViewTool::Water {
+            self.paint_water_cell(room_id, sx, sz);
+            return;
+        }
+
         if tool == ViewTool::PaintMaterial {
             let Some(face) = picked_face else {
                 self.status =
@@ -2102,6 +2108,15 @@ impl EditorWorkspace {
                 .map(|sector| sector.walls.get(dir).len())
                 .unwrap_or(0);
             grid.add_wall_above_stack_or_aligned(sx, sz, dir, wall_mat);
+            if wall_mat.is_some() {
+                let sector_size = grid.sector_size;
+                if let Some(wall) = grid
+                    .sector_mut(sx, sz)
+                    .and_then(|sector| sector.walls.get_mut(dir).last_mut())
+                {
+                    wall.autotile_uv(sector_size);
+                }
+            }
             self.mark_dirty();
             self.status = if stack == 0 {
                 format!("Added {} wall at {sx},{sz}", direction_label(dir))
@@ -2158,6 +2173,207 @@ impl EditorWorkspace {
         };
         self.dirty = true;
         self.status = status;
+    }
+
+    fn paint_water_cell(&mut self, room_id: NodeId, sx: u16, sz: u16) {
+        let active_floor = self.active_floor;
+        let Some((world_cell, default_height)) = self.room_grid_view(room_id).and_then(|grid| {
+            let sector = grid.sector(sx, sz)?;
+            let floor = sector.floor.as_ref()?;
+            let clicked_floor = *floor.heights.iter().max()?;
+            let world_x = grid.origin[0] + i32::from(sx);
+            let world_z = grid.origin[1] + i32::from(sz);
+            let mut rim = clicked_floor;
+            for dz in -1..=1 {
+                for dx in -1..=1 {
+                    if dx == 0 && dz == 0 {
+                        continue;
+                    }
+                    let Some((nx, nz)) = grid.world_cell_to_array(world_x + dx, world_z + dz)
+                    else {
+                        continue;
+                    };
+                    if let Some(neighbor_floor) =
+                        grid.sector(nx, nz).and_then(|sector| sector.floor.as_ref())
+                    {
+                        rim = rim.max(
+                            neighbor_floor
+                                .heights
+                                .iter()
+                                .copied()
+                                .max()
+                                .unwrap_or(clicked_floor),
+                        );
+                    }
+                }
+            }
+            let height = if rim > clicked_floor {
+                u16::try_from(rim.saturating_sub(clicked_floor)).unwrap_or(u16::MAX)
+            } else {
+                64
+            };
+            Some((WaterVolumeCell::new(world_x, world_z), height.max(1)))
+        }) else {
+            self.status = "Water needs an existing floor under the cursor".to_string();
+            return;
+        };
+
+        let scene = self.project.active_scene();
+        let selected_volume = (self.selection.selected_node != NodeId::ROOT)
+            .then_some(self.selection.selected_node)
+            .filter(|id| scene.is_descendant_of(*id, room_id))
+            .filter(|id| {
+                scene.node(*id).is_some_and(|node| {
+                    node.floor == active_floor && matches!(node.kind, NodeKind::WaterVolume { .. })
+                })
+            });
+
+        if self.water_tool_mode == WaterToolMode::Select {
+            let selected = self
+                .project
+                .active_scene()
+                .nodes()
+                .iter()
+                .find(|node| {
+                    node.floor == active_floor
+                        && !self.scene_node_effectively_hidden(node.id)
+                        && self
+                            .project
+                            .active_scene()
+                            .is_descendant_of(node.id, room_id)
+                        && matches!(
+                            &node.kind,
+                            NodeKind::WaterVolume { cells, .. }
+                                if cells.contains(&world_cell)
+                        )
+                })
+                .map(|node| (node.id, node.name.clone()));
+            if let Some((id, name)) = selected {
+                self.replace_node_selection(id);
+                // Water painting commonly starts from a material selected in the
+                // Resources dock. Once the author explicitly selects a volume,
+                // the node must become the Inspector target instead of leaving
+                // that stale resource selection in front of it.
+                self.clear_resource_selection_state();
+                self.clear_primitive_selection_state();
+                self.clear_sector_selection();
+                self.status = format!("Selected {name} at {},{}", world_cell.x, world_cell.z);
+            } else {
+                self.clear_node_selection_state();
+                self.clear_resource_selection_state();
+                self.clear_primitive_selection_state();
+                self.clear_sector_selection();
+                self.status = format!("No water at {},{}", world_cell.x, world_cell.z);
+            }
+            return;
+        }
+
+        self.push_undo();
+        if self.water_tool_mode == WaterToolMode::Erase {
+            let mut changed = false;
+            let ids: Vec<NodeId> = self
+                .project
+                .active_scene()
+                .nodes()
+                .iter()
+                .filter(|node| node.floor == active_floor)
+                .filter(|node| {
+                    self.project
+                        .active_scene()
+                        .is_descendant_of(node.id, room_id)
+                })
+                .filter(|node| matches!(node.kind, NodeKind::WaterVolume { .. }))
+                .map(|node| node.id)
+                .collect();
+            let scene = self.project.active_scene_mut();
+            for id in ids {
+                if let Some(NodeKind::WaterVolume { cells, .. }) =
+                    scene.node_mut(id).map(|node| &mut node.kind)
+                {
+                    let old_len = cells.len();
+                    cells.retain(|cell| *cell != world_cell);
+                    changed |= cells.len() != old_len;
+                }
+            }
+            if changed {
+                self.mark_dirty();
+                self.status = format!("Removed water at {},{}", world_cell.x, world_cell.z);
+            } else {
+                self.status = "No water in this cell".to_string();
+            }
+            return;
+        }
+
+        let material = self.selected_material_resource().or(self.brush_material);
+        let volume_id = if let Some(id) = selected_volume {
+            id
+        } else {
+            let mut settings = WaterVolumeSettings::default();
+            settings.height_above_floor = default_height;
+            let id = self.project.active_scene_mut().add_node(
+                room_id,
+                "Water Volume",
+                NodeKind::WaterVolume {
+                    material,
+                    cells: Vec::new(),
+                    settings,
+                },
+            );
+            if let Some(node) = self.project.active_scene_mut().node_mut(id) {
+                node.floor = active_floor;
+            }
+            id
+        };
+
+        // A cell belongs to one water volume on a floor. Painting it into a
+        // selected volume transfers ownership so cook-time behavior is never
+        // ambiguous.
+        let ids: Vec<NodeId> = self
+            .project
+            .active_scene()
+            .nodes()
+            .iter()
+            .filter(|node| node.id != volume_id && node.floor == active_floor)
+            .filter(|node| {
+                self.project
+                    .active_scene()
+                    .is_descendant_of(node.id, room_id)
+            })
+            .filter(|node| matches!(node.kind, NodeKind::WaterVolume { .. }))
+            .map(|node| node.id)
+            .collect();
+        let scene = self.project.active_scene_mut();
+        for id in ids {
+            if let Some(NodeKind::WaterVolume { cells, .. }) =
+                scene.node_mut(id).map(|node| &mut node.kind)
+            {
+                cells.retain(|cell| *cell != world_cell);
+            }
+        }
+        if let Some(NodeKind::WaterVolume {
+            material: volume_material,
+            cells,
+            ..
+        }) = scene.node_mut(volume_id).map(|node| &mut node.kind)
+        {
+            if volume_material.is_none() {
+                *volume_material = material;
+            }
+            if !cells.contains(&world_cell) {
+                cells.push(world_cell);
+                cells.sort_by_key(|cell| (cell.x, cell.z));
+            }
+        }
+        self.replace_node_selection(volume_id);
+        // Painting selects the owning WaterVolume so its material and gameplay
+        // settings are immediately editable in the Inspector. The brush keeps
+        // its material independently, so clearing the Resources selection does
+        // not interrupt subsequent paint strokes.
+        self.clear_resource_selection_state();
+        self.clear_primitive_selection_state();
+        self.clear_sector_selection();
+        self.mark_dirty();
+        self.status = format!("Painted water at {},{}", world_cell.x, world_cell.z);
     }
 
     pub(crate) fn horizontal_paint_triangle_target(
@@ -2602,6 +2818,7 @@ impl EditorWorkspace {
         let Some(grid) = self.room_floor_grid_mut(face.room) else {
             return false;
         };
+        let sector_size = grid.sector_size;
         let Some(sector) = grid.sector_mut(face.sx, face.sz) else {
             return false;
         };
@@ -2626,6 +2843,13 @@ impl EditorWorkspace {
                 .get_mut(stack as usize)
                 .map(|w| {
                     w.material = material;
+                    // Applying a wall texture gets the same sensible UV
+                    // density as the Inspector's Autotile action. Rotation,
+                    // flips, and offset remain authored; only the span is
+                    // normalized to the wall's world height.
+                    if material.is_some() {
+                        w.autotile_uv(sector_size);
+                    }
                 })
                 .is_some(),
         }

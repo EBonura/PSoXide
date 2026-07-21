@@ -67,7 +67,9 @@ pub(crate) enum NodeTransformInspector {
 
 pub(crate) fn node_transform_inspector(kind: &NodeKind) -> NodeTransformInspector {
     match kind {
-        NodeKind::World { .. } | NodeKind::Node => NodeTransformInspector::Hidden,
+        NodeKind::World { .. } | NodeKind::Node | NodeKind::WaterVolume { .. } => {
+            NodeTransformInspector::Hidden
+        }
         NodeKind::Room { .. } => NodeTransformInspector::RoomGrid,
         NodeKind::PointLight { .. } | NodeKind::ParticleEmitter { .. } | NodeKind::Logic { .. } => {
             NodeTransformInspector::PositionOnly
@@ -1945,6 +1947,86 @@ pub(crate) fn draw_node_kind_editor(
                         changed = true;
                     }
                 });
+            }
+        }
+        NodeKind::WaterVolume {
+            material,
+            cells,
+            settings,
+        } => {
+            ui.weak("Painted, floor-bound water. Every cell extends from its terrain tile up to the authored height; there is no separate volume bottom.");
+            changed |= material_picker(
+                ui,
+                "Surface material",
+                material,
+                material_options,
+                nav_target,
+            );
+            ui.horizontal(|ui| {
+                ui.label("Painted cells");
+                ui.monospace(cells.len().to_string());
+            });
+            ui.separator();
+            ui.label(RichText::new("Water behaviour").strong());
+            changed |= ui
+                .add(
+                    egui::DragValue::new(&mut settings.height_above_floor)
+                        .range(1..=8192)
+                        .speed(8.0)
+                        .prefix("Water height "),
+                )
+                .on_hover_text(
+                    "Distance from the terrain floor to the water surface. Each painted cell calculates its surface from its own floor tile.",
+                )
+                .changed();
+            changed |= ui
+                .add(
+                    egui::DragValue::new(&mut settings.lethal_depth)
+                        .range(1..=8192)
+                        .prefix("Death threshold "),
+                )
+                .on_hover_text(
+                    "Gameplay threshold only: water at least this tall is lethal. It does not change the volume geometry.",
+                )
+                .changed();
+            changed |= ui
+                .add(
+                    egui::Slider::new(&mut settings.movement_percent, 10..=100)
+                        .text("Movement speed"),
+                )
+                .on_hover_text(
+                    "Percentage of normal walk and run speed retained in non-lethal water. 70% means movement is exactly 70% of normal.",
+                )
+                .changed();
+            let classification = if settings.height_above_floor >= settings.lethal_depth {
+                "Lethal water"
+            } else {
+                "Wading water"
+            };
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Result").color(STUDIO_TEXT_WEAK));
+                ui.label(classification);
+            });
+            changed |= ui
+                .add(
+                    egui::DragValue::new(&mut settings.death_submerge_depth)
+                        .range(0..=2048)
+                        .prefix("Submerge "),
+                )
+                .on_hover_text(
+                    "How far below the surface the actor must fall before deep-water death begins.",
+                )
+                .changed();
+            changed |= ui
+                .add(
+                    egui::DragValue::new(&mut settings.death_delay_ticks)
+                        .range(1..=240)
+                        .prefix("Death delay ")
+                        .suffix(" ticks"),
+                )
+                .changed();
+            if changed {
+                *settings = settings.normalized();
             }
         }
         NodeKind::MeshInstance {

@@ -630,6 +630,97 @@ pub struct PhysicsBodySettings {
     pub weight_q8: u16,
 }
 
+/// One authored cell occupied by a [`WaterVolumeSettings`] node.
+///
+/// Coordinates live in the room's persistent world-cell space rather than
+/// array indices, so extending a grid on its negative side never moves an
+/// already-painted water footprint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct WaterVolumeCell {
+    /// World-cell X coordinate.
+    pub x: i32,
+    /// World-cell Z coordinate.
+    pub z: i32,
+}
+
+impl WaterVolumeCell {
+    /// Build a cell from its persistent world-grid coordinates.
+    pub const fn new(x: i32, z: i32) -> Self {
+        Self { x, z }
+    }
+}
+
+/// Authored water behaviour shared by every cell in one volume.
+///
+/// Water never provides swimming. Every painted cell is a floor-bound volume:
+/// its bottom is the authored terrain and its surface sits
+/// `height_above_floor` units above that terrain. Non-lethal cells scale ground
+/// movement; cells at or beyond `lethal_depth` trigger the fall/death flow once
+/// the character drops below the surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WaterVolumeSettings {
+    /// Water surface height measured upward from each painted floor tile.
+    #[serde(default = "default_water_height", alias = "surface_height")]
+    pub height_above_floor: u16,
+    /// Depth at which the volume becomes lethal.
+    #[serde(default = "default_water_lethal_depth")]
+    pub lethal_depth: u16,
+    /// Ground movement speed retained while wading, as a percentage.
+    #[serde(default = "default_water_movement_percent")]
+    pub movement_percent: u8,
+    /// Simulation ticks between lethal submersion and respawn.
+    #[serde(default = "default_water_death_delay_ticks")]
+    pub death_delay_ticks: u8,
+    /// Distance below the surface required before lethal water commits death.
+    #[serde(default = "default_water_death_submerge_depth")]
+    pub death_submerge_depth: u16,
+}
+
+impl WaterVolumeSettings {
+    /// Clamp authoring values to the compact runtime contract.
+    pub fn normalized(self) -> Self {
+        Self {
+            height_above_floor: self.height_above_floor.max(1),
+            lethal_depth: self.lethal_depth.max(1),
+            movement_percent: self.movement_percent.clamp(1, 100),
+            death_delay_ticks: self.death_delay_ticks.max(1),
+            death_submerge_depth: self.death_submerge_depth.max(1),
+        }
+    }
+}
+
+impl Default for WaterVolumeSettings {
+    fn default() -> Self {
+        Self {
+            height_above_floor: default_water_height(),
+            lethal_depth: default_water_lethal_depth(),
+            movement_percent: default_water_movement_percent(),
+            death_delay_ticks: default_water_death_delay_ticks(),
+            death_submerge_depth: default_water_death_submerge_depth(),
+        }
+    }
+}
+
+pub const fn default_water_height() -> u16 {
+    64
+}
+
+pub const fn default_water_lethal_depth() -> u16 {
+    384
+}
+
+pub const fn default_water_movement_percent() -> u8 {
+    70
+}
+
+pub const fn default_water_death_delay_ticks() -> u8 {
+    45
+}
+
+pub const fn default_water_death_submerge_depth() -> u16 {
+    64
+}
+
 impl PhysicsBodySettings {
     /// Clamp authored values to runtime-safe integer ranges.
     pub fn normalized(self) -> Self {
