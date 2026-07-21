@@ -13,7 +13,7 @@ use psx_level::{
     LevelRoomSurfaceCacheRecord, LevelRoomVisibilityRecord, LevelSceneState, LevelSkyRecord,
     LevelUiNodeRecord, LevelUiPaintRecord, LevelUiScene, LevelUiSfxCueRecord,
     LevelUiSfxSampleRecord, LevelVisibilityCellRecord, LevelVisibilityPvsRecord, LevelWeaponRecord,
-    LevelWorldPackEntryRecord, ParticleEmitterRecord, PlayerControllerRecord, PlayerSpawnRecord,
+    LevelWaterCellRecord, LevelWorldPackEntryRecord, ParticleEmitterRecord, PlayerControllerRecord, PlayerSpawnRecord,
     PointLightRecord, RoomIndex, RoomResidencyRecord, WeaponHitboxRecord,
 };
 
@@ -32,6 +32,7 @@ pub static MATERIALS: &[LevelMaterialRecord] = &[];
 pub static ROOMS: &[LevelRoomRecord] = &[];
 pub static ROOM_CHUNKS: &[LevelChunkRecord] = &[];
 pub static ROOM_PORTALS: &[LevelRoomPortalRecord] = &[];
+pub static WATER_CELLS: &[LevelWaterCellRecord] = &[];
 pub static ROOM_NEAR_ROOMS: &[RoomIndex] = &[];
 pub static ROOM_OVERLAPPED_ROOMS: &[RoomIndex] = &[];
 pub const WORLD_PACK_START_LBA: u32 = 1024;

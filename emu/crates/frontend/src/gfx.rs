@@ -465,6 +465,52 @@ impl Graphics {
         );
     }
 
+    /// Capture the framebuffer exactly as the central panel presents it and
+    /// write a compact save-state thumbnail. Normal 15-bit gameplay reads the
+    /// persistent HW target; special scanout modes use the same CPU fallback
+    /// selected by [`Graphics::prepare_display`]. This is intentionally a
+    /// save-time blocking readback, never part of the per-frame render path.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn write_savestate_thumbnail(
+        &self,
+        gpu: &Gpu,
+        path: &std::path::Path,
+    ) -> Result<(), String> {
+        const THUMB_WIDTH: u32 = 160;
+        let area = gpu.display_area();
+        let cpu_fallback = area.bpp24
+            || gpu.horizontal_display_offset_px() != 0
+            || gpu.vertical_display_offset_px() != 0;
+        let (width, height, rgba) = if cpu_fallback {
+            let (rgba, width, height) = gpu.display_rgba8();
+            (width, height, rgba)
+        } else {
+            let scale = self.hw_renderer.internal_scale();
+            let (width, height, rgba) = self.hw_renderer.read_subrect_rgba8(
+                area.x as u32 * scale,
+                area.y as u32 * scale,
+                area.width as u32 * scale,
+                area.height as u32 * scale,
+            );
+            (width, height, rgba)
+        };
+        if width == 0 || height == 0 {
+            return Err("display has zero dimensions".to_string());
+        }
+        let frame = image::RgbaImage::from_raw(width, height, rgba)
+            .ok_or_else(|| "display readback has an invalid byte length".to_string())?;
+        let thumb_height = ((THUMB_WIDTH as u64 * height as u64) / width as u64).max(1) as u32;
+        let thumb = image::imageops::resize(
+            &frame,
+            THUMB_WIDTH,
+            thumb_height,
+            image::imageops::FilterType::Triangle,
+        );
+        thumb
+            .save(path)
+            .map_err(|error| format!("write {}: {error}", path.display()))
+    }
+
     fn clear_display_texture(&self) {
         let rgba = vec![0u8; (MAX_DISPLAY_WIDTH * MAX_DISPLAY_HEIGHT * 4) as usize];
         self.queue.write_texture(

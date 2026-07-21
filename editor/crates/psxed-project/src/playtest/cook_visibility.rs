@@ -43,6 +43,259 @@ pub(crate) fn append_room_visibility(
     });
 }
 
+/// Rebuild every room-local PVS after the complete portal graph is known.
+///
+/// The first visibility pass runs while rooms are still being cooked, before
+/// vertical and terrace portals exist.  A room-local flood therefore cannot
+/// see a cell on the far side of a shallow layered recess when the only open
+/// path briefly crosses into the lower runtime room and back out.  This pass
+/// walks the final, global cell graph but still writes the compact room-local
+/// bitsets expected by the runtime.  There is no runtime graph walk and no
+/// increase in the on-console PVS format.
+pub(crate) fn rebuild_portal_connected_visibility_pvs(
+    rooms: &[PlaytestRoom],
+    chunks: &[PlaytestChunk],
+    room_portals: &[PlaytestRoomPortal],
+    room_visibility: &mut [PlaytestRoomVisibility],
+    visibility_cells: &[PlaytestVisibilityCell],
+    visibility_pvs: &mut Vec<PlaytestVisibilityPvs>,
+    visibility_pvs_bits: &mut Vec<u8>,
+) {
+    if visibility_cells.is_empty() || room_visibility.is_empty() {
+        return;
+    }
+
+    let mut graph = vec![Vec::<usize>::new(); visibility_cells.len()];
+    let mut by_room_coord = std::collections::HashMap::new();
+    let mut by_room_world = std::collections::HashMap::new();
+    let mut world_coords = vec![[0i32; 2]; visibility_cells.len()];
+    for (global_index, cell) in visibility_cells.iter().enumerate() {
+        by_room_coord.insert((cell.room, cell.x, cell.z), global_index);
+        if let Some(chunk) = chunks.get(cell.room as usize) {
+            world_coords[global_index] = [
+                chunk.origin_x.saturating_add(cell.x as i32),
+                chunk.origin_z.saturating_add(cell.z as i32),
+            ];
+            by_room_world.insert(
+                (
+                    cell.room,
+                    world_coords[global_index][0],
+                    world_coords[global_index][1],
+                ),
+                global_index,
+            );
+        }
+    }
+
+    // Preserve the existing open-edge graph inside each runtime room.
+    for (global_index, cell) in visibility_cells.iter().enumerate() {
+        for edge in VISIBILITY_EDGES {
+            if cell.portal_mask & edge.bit == 0 {
+                continue;
+            }
+            let nx = cell.x as i32 + edge.dx;
+            let nz = cell.z as i32 + edge.dz;
+            if nx < 0 || nz < 0 {
+                continue;
+            }
+            if let Some(&neighbour) = by_room_coord.get(&(cell.room, nx as u16, nz as u16)) {
+                push_unique_visibility_edge(&mut graph, global_index, neighbour);
+            }
+        }
+    }
+
+    // Join cells on opposite sides of the final cooked portals.  Testing the
+    // portal rectangle midpoint prevents two rooms that share several sealed
+    // boundaries from becoming over-connected.
+    for portal in room_portals {
+        let source = visibility_room_cell_range(room_visibility, portal.source_room);
+        let destination = visibility_room_cell_range(room_visibility, portal.destination_room);
+        let (Some(source), Some(_destination)) = (source, destination) else {
+            continue;
+        };
+        for source_index in source {
+            let source_world = world_coords[source_index];
+            let candidate_coords: &[[i32; 2]] = if portal.kind == 1 {
+                std::slice::from_ref(&source_world)
+            } else {
+                &[
+                    [source_world[0], source_world[1] - 1],
+                    [source_world[0] + 1, source_world[1]],
+                    [source_world[0], source_world[1] + 1],
+                    [source_world[0] - 1, source_world[1]],
+                ]
+            };
+            for candidate in candidate_coords {
+                let Some(&destination_index) =
+                    by_room_world.get(&(portal.destination_room, candidate[0], candidate[1]))
+                else {
+                    continue;
+                };
+                if portal_connects_visibility_cells(
+                    portal,
+                    rooms,
+                    &world_coords,
+                    source_index,
+                    destination_index,
+                ) {
+                    push_unique_visibility_edge(&mut graph, source_index, destination_index);
+                }
+            }
+        }
+    }
+
+    visibility_pvs.clear();
+    visibility_pvs_bits.clear();
+    for visibility in room_visibility.iter_mut() {
+        let Some(local_range) =
+            visibility_room_cell_range(std::slice::from_ref(visibility), visibility.room)
+        else {
+            visibility.pvs_first = visibility_pvs.len() as u32;
+            visibility.pvs_count = 0;
+            continue;
+        };
+        let local_count = local_range.len();
+        let bitset_bytes = visibility_pvs_bitset_bytes(local_count);
+        let radius = rooms
+            .get(visibility.room as usize)
+            .map(|room| room.visibility_radius)
+            .unwrap_or_default();
+        visibility.pvs_first = u32::try_from(visibility_pvs.len()).unwrap_or(u32::MAX);
+
+        for anchor in local_range.clone() {
+            let mut visited = vec![false; visibility_cells.len()];
+            let mut queue = vec![(anchor, 0u16)];
+            visited[anchor] = true;
+            let mut cursor = 0usize;
+            while let Some(&(cell_index, distance)) = queue.get(cursor) {
+                cursor += 1;
+                if distance >= radius {
+                    continue;
+                }
+                for &neighbour in &graph[cell_index] {
+                    if !visited[neighbour] {
+                        visited[neighbour] = true;
+                        queue.push((neighbour, distance.saturating_add(1)));
+                    }
+                }
+            }
+
+            // Match the original conservative one-cell shell.  It hides tiny
+            // cracks at a PVS boundary without opening another traversal step.
+            let selected = visited.clone();
+            for (cell_index, is_selected) in selected.iter().copied().enumerate() {
+                if !is_selected {
+                    continue;
+                }
+                let cell = visibility_cells[cell_index];
+                for edge in VISIBILITY_EDGES {
+                    let nx = cell.x as i32 + edge.dx;
+                    let nz = cell.z as i32 + edge.dz;
+                    if nx < 0 || nz < 0 {
+                        continue;
+                    }
+                    if let Some(&neighbour) = by_room_coord.get(&(cell.room, nx as u16, nz as u16))
+                    {
+                        visited[neighbour] = true;
+                    }
+                }
+            }
+
+            let mut bits = vec![0u8; bitset_bytes];
+            for (local_index, global_index) in local_range.clone().enumerate() {
+                if visited[global_index] {
+                    set_visibility_pvs_bit(&mut bits, local_index);
+                }
+            }
+            let byte_first =
+                find_existing_visibility_pvs_bits(visibility_pvs, visibility_pvs_bits, &bits)
+                    .unwrap_or_else(|| {
+                        let first = u32::try_from(visibility_pvs_bits.len()).unwrap_or(u32::MAX);
+                        visibility_pvs_bits.extend_from_slice(&bits);
+                        first
+                    });
+            visibility_pvs.push(PlaytestVisibilityPvs {
+                byte_first,
+                byte_count: u16::try_from(bitset_bytes).unwrap_or(u16::MAX),
+            });
+        }
+        visibility.pvs_count = u16::try_from(local_count).unwrap_or(u16::MAX);
+    }
+}
+
+fn visibility_room_cell_range(
+    room_visibility: &[PlaytestRoomVisibility],
+    room: u16,
+) -> Option<std::ops::Range<usize>> {
+    let visibility = room_visibility.iter().find(|entry| entry.room == room)?;
+    let first = visibility.cell_first as usize;
+    Some(first..first.saturating_add(visibility.cell_count as usize))
+}
+
+fn push_unique_visibility_edge(graph: &mut [Vec<usize>], a: usize, b: usize) {
+    if a == b || a >= graph.len() || b >= graph.len() {
+        return;
+    }
+    if !graph[a].contains(&b) {
+        graph[a].push(b);
+    }
+}
+
+fn portal_connects_visibility_cells(
+    portal: &PlaytestRoomPortal,
+    rooms: &[PlaytestRoom],
+    world_coords: &[[i32; 2]],
+    source_index: usize,
+    destination_index: usize,
+) -> bool {
+    let source = world_coords[source_index];
+    let destination = world_coords[destination_index];
+    let dx = (source[0] - destination[0]).abs();
+    let dz = (source[1] - destination[1]).abs();
+    if (portal.kind == 1 && (dx != 0 || dz != 0))
+        || (portal.kind != 1 && dx.saturating_add(dz) != 1)
+    {
+        return false;
+    }
+    let sector_size = rooms
+        .get(portal.source_room as usize)
+        .map(|room| room.sector_size.max(1))
+        .unwrap_or(1) as i64;
+    let midpoint_x2 = (source[0] as i64)
+        .saturating_add(destination[0] as i64)
+        .saturating_add(1)
+        .saturating_mul(sector_size);
+    let midpoint_z2 = (source[1] as i64)
+        .saturating_add(destination[1] as i64)
+        .saturating_add(1)
+        .saturating_mul(sector_size);
+    let min_x2 = portal
+        .vertices
+        .iter()
+        .map(|vertex| i64::from(vertex[0]).saturating_mul(2))
+        .min()
+        .unwrap_or_default();
+    let max_x2 = portal
+        .vertices
+        .iter()
+        .map(|vertex| i64::from(vertex[0]).saturating_mul(2))
+        .max()
+        .unwrap_or_default();
+    let min_z2 = portal
+        .vertices
+        .iter()
+        .map(|vertex| i64::from(vertex[2]).saturating_mul(2))
+        .min()
+        .unwrap_or_default();
+    let max_z2 = portal
+        .vertices
+        .iter()
+        .map(|vertex| i64::from(vertex[2]).saturating_mul(2))
+        .max()
+        .unwrap_or_default();
+    midpoint_x2 >= min_x2 && midpoint_x2 <= max_x2 && midpoint_z2 >= min_z2 && midpoint_z2 <= max_z2
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn append_room_surface_cache(
     room_index: u16,

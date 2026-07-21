@@ -535,6 +535,53 @@ fn place_kind_selection_updates_toolbar_label() {
 }
 
 #[test]
+fn material_paint_is_a_separate_tool_with_an_explicit_blend_state() {
+    let mut workspace = EditorWorkspace::with_project(
+        test_temp_dir("terrain-mode-toolbar"),
+        ProjectDocument::new("terrain-mode-toolbar"),
+    );
+    workspace.active_tool = ViewTool::PaintMaterial;
+
+    assert_eq!(workspace.active_tool_group_label(), "Paint");
+    workspace.material_paint_blend = true;
+    assert_eq!(workspace.active_tool_group_label(), "Paint");
+    workspace.active_tool = ViewTool::PaintFloor;
+    assert_eq!(workspace.active_tool_group_label(), "Floor");
+}
+
+#[test]
+fn entering_material_paint_clears_geometry_selection_and_syncs_the_material() {
+    let mut project = ProjectDocument::new("paint-modal-selection");
+    let material = project.add_resource(
+        "Sand",
+        ResourceData::Material(MaterialResource::opaque(None)),
+    );
+    let mut grid = WorldGrid::empty(1, 1, 1024);
+    grid.set_floor(0, 0, 0, Some(material));
+    let room = project
+        .active_scene_mut()
+        .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+    let mut workspace =
+        EditorWorkspace::with_project(test_temp_dir("paint-modal-selection"), project);
+    workspace.replace_node_selection(room);
+    workspace.replace_primitive_selection(Selection::Face(FaceRef {
+        room,
+        sx: 0,
+        sz: 0,
+        kind: FaceKind::Floor,
+    }));
+    workspace.replace_resource_selection(material);
+
+    workspace.set_active_tool_cycle_value((ViewTool::PaintMaterial, None));
+
+    assert!(workspace.selection.selected_primitive.is_none());
+    assert!(workspace.selection.selected_primitives.is_empty());
+    assert!(workspace.selection.selected_sector.is_none());
+    assert_eq!(workspace.brush_material, Some(material));
+    assert_eq!(workspace.selection.selected_resource, Some(material));
+}
+
+#[test]
 fn visibility_cycle_only_changes_editor_view_items() {
     let mut workspace = EditorWorkspace::with_project(
         test_temp_dir("visibility-cycle"),
@@ -618,6 +665,7 @@ fn debug_snapshot_writes_portal_runtime_log() {
         vram_texture_drops: 0,
         vram_caps_full: [0, 0, 0, 0],
         room_material_slot_overflow: 0,
+        room_visibility_fallback_draws: 0,
         chunk_loaded_mask: 1,
         chunk_loading_mask: 0,
         chunk_active_mask: 1,

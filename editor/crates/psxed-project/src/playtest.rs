@@ -28,7 +28,7 @@
 //! care. The residency manager already tracks RAM/VRAM membership
 //! independently of where bytes live.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use psx_engine::{
@@ -83,7 +83,7 @@ use assets::{
 
 pub use manifest::{
     cook_to_dir, default_generated_dir, render_manifest_source, streamed_room_chunk_memory_report,
-    write_package,
+    write_cook_result, write_package,
 };
 pub use schema::*;
 
@@ -252,7 +252,6 @@ pub fn build_package(
     let mut room_portals: Vec<PlaytestRoomPortal> = Vec::new();
     let mut pending_floor_links: Vec<PendingRoomFloorLink> = Vec::new();
     let room_near_rooms: Vec<u16> = Vec::new();
-    let room_overlapped_rooms: Vec<u16> = Vec::new();
 
     for room_node in &room_nodes {
         let NodeKind::Room { grid: base_grid } = &room_node.kind else {
@@ -390,7 +389,7 @@ pub fn build_package(
                         return (None, report);
                     };
                     let (texture_key, texture_bytes) =
-                        match material_texture_bytes(material_resource, project_root) {
+                        match material_texture_bytes(project, material_resource, project_root) {
                             Ok(Some(source)) => source,
                             Ok(None) => {
                                 report.error(format!(
@@ -735,6 +734,8 @@ pub fn build_package(
     let mut model_instances: Vec<PlaytestModelInstance> = Vec::new();
     let mut image_props: Vec<PlaytestImageProp> = Vec::new();
     let mut box_props: Vec<PlaytestBoxProp> = Vec::new();
+    let mut water_cells: Vec<PlaytestWaterCell> = Vec::new();
+    let mut combat_capsules: Vec<PlaytestCombatCapsule> = Vec::new();
     let mut weapon_hitboxes: Vec<PlaytestWeaponHitbox> = Vec::new();
     let mut weapons: Vec<PlaytestWeapon> = Vec::new();
     let mut equipment: Vec<PlaytestEquipment> = Vec::new();
@@ -757,6 +758,138 @@ pub fn build_package(
     let mut model_clip_remaps: HashMap<ResourceId, Vec<Option<u16>>> = HashMap::new();
     let mut weapon_for_resource: HashMap<ResourceId, u16> = HashMap::new();
     let mut warned_unsupported: HashSet<&'static str> = HashSet::new();
+
+    // Water is authored as a sparse world-cell footprint on a Room floor.
+    // Resolve each cell through the exact portal-room plan so split rooms and
+    // stacked floors inherit the correct runtime room/local coordinates.
+    // The compact WATER_CELLS table is both the authoritative gameplay lookup
+    // and the stateless render source; water never consumes BoxProp state or
+    // collision-blocker capacity.
+    let mut occupied_water_cells: HashSet<(u16, u16, u16)> = HashSet::new();
+    for node in scene.nodes() {
+        let NodeKind::WaterVolume {
+            material,
+            cells,
+            settings,
+        } = &node.kind
+        else {
+            continue;
+        };
+        let Some(room_node) = enclosing_room(scene, node) else {
+            report.warn(format!(
+                "Water Volume '{}' has no enclosing Room - skipped",
+                node.name
+            ));
+            continue;
+        };
+        let NodeKind::Room { grid: base_grid } = &room_node.kind else {
+            continue;
+        };
+        let floor_index = node.floor.min(base_grid.floor_count().saturating_sub(1));
+        let Some(grid) = base_grid.floor(floor_index) else {
+            continue;
+        };
+        let normalized = settings.normalized();
+        if cells.is_empty() {
+            report.warn(format!("Water Volume '{}' has no painted cells", node.name));
+            continue;
+        }
+        let surface = material.and_then(|material_id| {
+            resolve_material_texture_asset(
+                project,
+                project_root,
+                &format!("Water Volume '{}' surface", node.name),
+                material_id,
+                &mut texture_asset_for_path,
+                &mut assets,
+                &mut report,
+            )
+            .map(|(texture_asset_index, tint_rgb)| {
+                let (blend_mode, animation) = project
+                    .resource(material_id)
+                    .and_then(|resource| match &resource.data {
+                        ResourceData::Material(material) => Some((
+                            manifest::model_override_blend_code(material.blend_mode),
+                            material.animation,
+                        )),
+                        _ => None,
+                    })
+                    .unwrap_or((
+                        psx_level::model_override_blend::AVERAGE,
+                        crate::MaterialAnimation::default(),
+                    ));
+                (texture_asset_index, blend_mode, tint_rgb, animation)
+            })
+        });
+        for cell in cells {
+            let Some((array_x, array_z)) = grid.world_cell_to_array(cell.x, cell.z) else {
+                report.warn(format!(
+                    "Water Volume '{}' cell {},{} lies outside floor {} - skipped",
+                    node.name,
+                    cell.x,
+                    cell.z,
+                    floor_index + 1,
+                ));
+                continue;
+            };
+            let Some(sector) = grid.sector(array_x, array_z) else {
+                report.warn(format!(
+                    "Water Volume '{}' cell {},{} has no terrain sector - skipped",
+                    node.name, cell.x, cell.z,
+                ));
+                continue;
+            };
+            let Some(floor) = sector.floor.as_ref() else {
+                report.warn(format!(
+                    "Water Volume '{}' cell {},{} has no floor - skipped",
+                    node.name, cell.x, cell.z,
+                ));
+                continue;
+            };
+            let Some(chunk) = room_chunks_by_node.get(&room_node.id).and_then(|chunks| {
+                chunks.iter().find(|chunk| {
+                    chunk.floor_idx == floor_index && chunk.cells.contains(&[array_x, array_z])
+                })
+            }) else {
+                report.warn(format!(
+                    "Water Volume '{}' cell {},{} did not map to a runtime room - skipped",
+                    node.name, cell.x, cell.z,
+                ));
+                continue;
+            };
+            let local_x = array_x.saturating_sub(chunk.array_origin[0]);
+            let local_z = array_z.saturating_sub(chunk.array_origin[1]);
+            if !occupied_water_cells.insert((chunk.room_index, local_x, local_z)) {
+                report.warn(format!(
+                    "Water Volume '{}' overlaps another volume at {},{} - later cell skipped",
+                    node.name, cell.x, cell.z,
+                ));
+                continue;
+            }
+            let center = grid.sector_size / 2;
+            let floor_y = floor.height_at_local(center, center, grid.sector_size);
+            let depth = normalized.height_above_floor;
+            let surface_y = floor_y.saturating_add(i32::from(depth));
+            water_cells.push(PlaytestWaterCell {
+                room: chunk.room_index,
+                x: local_x,
+                z: local_z,
+                texture_asset_index: surface.map(|surface| surface.0),
+                blend_mode: surface
+                    .map(|surface| surface.1)
+                    .unwrap_or(psx_level::model_override_blend::AVERAGE),
+                tint_rgb: surface.map(|surface| surface.2).unwrap_or([128; 3]),
+                animation: surface.map(|surface| surface.3).unwrap_or_default(),
+                surface_y,
+                depth,
+                lethal_depth: normalized.lethal_depth,
+                movement_percent: normalized.movement_percent,
+                death_delay_ticks: normalized.death_delay_ticks,
+                death_submerge_depth: normalized.death_submerge_depth,
+            });
+        }
+    }
+    water_cells.sort_by_key(|cell| (cell.room, cell.x, cell.z));
 
     for node in scene.nodes() {
         if node.id == scene.root || matches!(node.kind, NodeKind::Room { .. }) {
@@ -922,6 +1055,7 @@ pub fn build_package(
                             room_index,
                             pos,
                             yaw,
+                            &mut texture_asset_for_path,
                             &mut assets,
                             &mut models,
                             &mut model_clips,
@@ -992,6 +1126,24 @@ pub fn build_package(
                             ) else {
                                 return (None, report);
                             };
+                            let model_joint_count = node_model_instance
+                                .and_then(|instance| model_instances.get(instance as usize))
+                                .and_then(|instance| models.get(instance.model as usize))
+                                .and_then(|model| assets.get(model.mesh_asset_index))
+                                .and_then(|asset| psx_asset::Model::from_bytes(&asset.bytes).ok())
+                                .map(|model| model.joint_count())
+                                .unwrap_or(0);
+                            let Some((combat_capsule_first, combat_capsule_count)) =
+                                cook_character_combat_capsules(
+                                    archetype.as_str(),
+                                    enemy_character,
+                                    model_joint_count,
+                                    &mut combat_capsules,
+                                    &mut report,
+                                )
+                            else {
+                                return (None, report);
+                            };
                             if !push_game_entity(
                                 node.name.as_str(),
                                 archetype.as_str(),
@@ -1002,6 +1154,8 @@ pub fn build_package(
                                 enemy,
                                 node_model_instance,
                                 state_clips,
+                                combat_capsule_first,
+                                combat_capsule_count,
                                 &mut names,
                                 &mut game_entities,
                                 &mut report,
@@ -1318,6 +1472,7 @@ pub fn build_package(
             | NodeKind::Node3D
             | NodeKind::World { .. }
             | NodeKind::Room { .. }
+            | NodeKind::WaterVolume { .. }
             | NodeKind::ModelRenderer { .. }
             | NodeKind::Animator { .. }
             | NodeKind::Collider { .. }
@@ -1479,9 +1634,19 @@ pub fn build_package(
                     }
                 }
             };
+            let profile_material = resolved.and_then(|character_id| {
+                project.resource(character_id).and_then(|resource| {
+                    if let ResourceData::Character(character) = &resource.data {
+                        character.material
+                    } else {
+                        None
+                    }
+                })
+            });
             let renderer_material_override = candidate
                 .renderer
                 .and_then(|renderer| renderer.material)
+                .or(profile_material)
                 .and_then(|material_id| {
                     resolve_model_material_override(
                         project,
@@ -1528,6 +1693,7 @@ pub fn build_package(
                 &mut model_for_resource,
                 &runtime_model_clips,
                 &mut model_clip_remaps,
+                &mut combat_capsules,
                 &mut characters,
                 &mut report,
             )
@@ -1618,6 +1784,8 @@ pub fn build_package(
     let mut room_floor_links = resolve_room_floor_links(&pending_floor_links, &room_chunks_by_node);
     room_floor_links.extend(auto_wire_floor_stack_links(&room_chunks_by_node));
     room_portals.extend(auto_wire_floor_stack_portals(scene, &room_chunks_by_node));
+    room_portals.extend(auto_wire_floor_terrace_portals(scene, &room_chunks_by_node));
+    let room_overlapped_rooms = assign_floor_stack_overlaps(&mut rooms, &room_chunks_by_node);
     // The runtime visibility BFS reads each room's portals as the
     // contiguous slice [portal_first, portal_first+portal_count). The
     // per-room ranges set during the cook loop only covered the
@@ -1627,6 +1795,15 @@ pub fn build_package(
     // never scans them). Regroup the whole table by source_room and
     // rebuild every room's range so both kinds are reachable.
     regroup_room_portals(&mut rooms, &mut room_portals);
+    rebuild_portal_connected_visibility_pvs(
+        &rooms,
+        &chunks,
+        &room_portals,
+        &mut room_visibility,
+        &visibility_cells,
+        &mut visibility_pvs,
+        &mut visibility_pvs_bits,
+    );
     let (ui_nodes, ui_paints, ui_scenes, ui_sfx_samples, ui_sfx_cues, game_flow, cdda_tracks) =
         cook_ui_nodes(
             project,
@@ -1651,6 +1828,7 @@ pub fn build_package(
             chunks,
             room_portals,
             room_floor_links,
+            water_cells,
             room_near_rooms,
             room_overlapped_rooms,
             materials,
@@ -1679,6 +1857,7 @@ pub fn build_package(
             game_flow,
             options,
             cdda_tracks,
+            combat_capsules,
             weapon_hitboxes,
             weapons,
             equipment,
@@ -1695,6 +1874,136 @@ pub fn build_package(
         }),
         report,
     )
+}
+
+/// Build the same runtime-room/cell/portal topology as [`build_package`]
+/// without resolving textures, models, or other play assets. This is cheap
+/// enough for editor diagnostics and, importantly, prevents the Room Rings
+/// overlay from maintaining a second approximation of the cooker.
+pub fn build_debug_topology(project: &ProjectDocument) -> PlaytestDebugTopology {
+    let scene = project.active_scene();
+    let mut room_nodes: Vec<&SceneNode> = scene
+        .nodes()
+        .iter()
+        .filter(|node| matches!(node.kind, NodeKind::Room { .. }))
+        .collect();
+    room_nodes.sort_by_key(|node| node.id.raw());
+
+    let mut cells = Vec::new();
+    let mut portals = Vec::new();
+    let mut chunks_by_node: HashMap<NodeId, Vec<AuthoredRoomChunk>> = HashMap::new();
+    let mut runtime_room_count = 0usize;
+    for room_node in room_nodes {
+        let NodeKind::Room { grid: base_grid } = &room_node.kind else {
+            continue;
+        };
+        if base_grid.populated_sector_count() == 0 {
+            continue;
+        }
+        let room_origin_y_base = (f64::from(room_node.transform.translation[1])
+            * f64::from(base_grid.sector_size)) as i32;
+        let base_elevation = base_grid.elevation;
+        for floor_index in 0..base_grid.floor_count() {
+            let Some(grid) = base_grid.floor(floor_index) else {
+                continue;
+            };
+            if grid.populated_sector_count() == 0 {
+                continue;
+            }
+            let elevation = room_origin_y_base + (grid.elevation - base_elevation);
+            let plan = plan_portal_rooms(scene, room_node.id, grid, PortalRoomConfig::default());
+            let room_index_base = runtime_room_count;
+            for portal in &plan.portals {
+                portals.push(PlaytestRoomPortal {
+                    source_room: u16::try_from(room_index_base.saturating_add(portal.source_room))
+                        .unwrap_or(u16::MAX),
+                    destination_room: u16::try_from(
+                        room_index_base.saturating_add(portal.destination_room),
+                    )
+                    .unwrap_or(u16::MAX),
+                    kind: if portal.vertical { 1 } else { 0 },
+                    normal: portal.normal_world,
+                    vertices: portal.vertices_world,
+                });
+            }
+            for portal_room in plan.rooms {
+                let chunk_grid = extract_portal_room_grid(grid, &portal_room);
+                if chunk_grid.populated_sector_count() == 0 {
+                    continue;
+                }
+                let runtime_room_index = runtime_room_count;
+                let node_center = [
+                    room_node.transform.translation[0],
+                    room_node.transform.translation[2],
+                ];
+                let room_origin = [
+                    node_center[0] + portal_room.array_origin[0] as f32 - grid.width as f32 * 0.5,
+                    node_center[1] + portal_room.array_origin[1] as f32 - grid.depth as f32 * 0.5,
+                ];
+                for array_cell in &portal_room.cells {
+                    let local_center = [
+                        array_cell[0] as f32 + 0.5 - grid.width as f32 * 0.5,
+                        array_cell[1] as f32 + 0.5 - grid.depth as f32 * 0.5,
+                    ];
+                    cells.push(PlaytestDebugTopologyCell {
+                        runtime_room_index,
+                        authored_room: room_node.id.raw() as u32,
+                        portal_room_index: portal_room.index,
+                        floor_index,
+                        array_cell: *array_cell,
+                        center: [
+                            node_center[0] + local_center[0],
+                            node_center[1] + local_center[1],
+                        ],
+                        half: [0.5, 0.5],
+                        room_origin,
+                        runtime_origin: portal_room.world_origin,
+                        elevation,
+                        sector_size: grid.sector_size.max(1),
+                    });
+                }
+                let room_index = u16::try_from(runtime_room_index).unwrap_or(u16::MAX);
+                chunks_by_node
+                    .entry(room_node.id)
+                    .or_default()
+                    .push(AuthoredRoomChunk {
+                        room_index,
+                        authored_room: room_node.id.raw() as u32,
+                        chunk_index: u16::try_from(portal_room.index).unwrap_or(u16::MAX),
+                        array_origin: portal_room.array_origin,
+                        world_origin: portal_room.world_origin,
+                        size: portal_room.size,
+                        cells: portal_room.cells,
+                        neighbours: portal_room.neighbours.map(|neighbour| {
+                            neighbour.and_then(|index| {
+                                u16::try_from(room_index_base.saturating_add(index)).ok()
+                            })
+                        }),
+                        triangles: portal_room.budget.triangles,
+                        psxw_bytes: portal_room.budget.psxw_bytes,
+                        static_lit_bytes: portal_room.budget.psxw_static_lit_bytes,
+                        populated_cells: u16::try_from(chunk_grid.populated_sector_count())
+                            .unwrap_or(u16::MAX),
+                        floor_idx: floor_index,
+                    });
+                runtime_room_count += 1;
+            }
+        }
+    }
+    portals.extend(auto_wire_floor_stack_portals(scene, &chunks_by_node));
+    portals.extend(auto_wire_floor_terrace_portals(scene, &chunks_by_node));
+    portals.sort_by_key(|portal| portal.source_room);
+    PlaytestDebugTopology {
+        cells,
+        portals: portals
+            .into_iter()
+            .enumerate()
+            .map(|(portal_index, portal)| PlaytestDebugTopologyPortal {
+                portal_index,
+                portal,
+            })
+            .collect(),
+    }
 }
 
 /// Preserve the exact PS1 blend equation while reducing the common player

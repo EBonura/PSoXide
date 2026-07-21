@@ -121,6 +121,8 @@ impl EditorWorkspace {
             ViewTool::PaintFloor
                 | ViewTool::PaintWall
                 | ViewTool::PaintCeiling
+                | ViewTool::PaintMaterial
+                | ViewTool::Water
                 | ViewTool::Erase
                 | ViewTool::Place
         );
@@ -180,7 +182,7 @@ impl EditorWorkspace {
         };
         if let Some(room) = self.floating_geometry.as_ref().map(|preview| preview.room) {
             if let Some(origin) = self.floating_origin_from_3d_hover(room, face_hit, hover_world) {
-                self.update_floating_geometry_origin(origin);
+                self.track_floating_geometry_pointer_origin(origin);
             }
         }
         let dropped_resource = response
@@ -332,8 +334,12 @@ impl EditorWorkspace {
                     }
                 }
             } else {
+                // The eyedropper is deliberately click-only. Keeping it armed
+                // throughout a drag prevents a sample gesture from falling
+                // through into Paint after the one-shot state clears.
                 let primary_active = response.clicked_by(egui::PointerButton::Primary)
-                    || response.dragged_by(egui::PointerButton::Primary);
+                    || (!self.material_paint_sampling
+                        && response.dragged_by(egui::PointerButton::Primary));
                 if primary_active {
                     if let Some(pos) = response.interact_pointer_pos() {
                         let face_hit = self.pick_face_with_hit(rect, pos);
@@ -833,7 +839,14 @@ impl EditorWorkspace {
         }
         if show_debug_map {
             if let Some(metrics) = viewport_3d.play_metrics {
-                draw_play_chunk_debug_map(&painter, rect, &self.project, metrics);
+                draw_play_chunk_debug_map(
+                    &painter,
+                    rect,
+                    &self.project,
+                    metrics,
+                    self.play_debug_map_view,
+                    self.active_floor,
+                );
             }
         }
         self.draw_play_overlay_visibility_menu(ui, visibility_rect);
@@ -925,6 +938,16 @@ impl EditorWorkspace {
                                 "Portal map",
                                 &mut self.show_play_debug_map,
                             );
+                            ui.label("Map view");
+                            ui.horizontal(|ui| {
+                                for view in PlayDebugMapView::ALL {
+                                    ui.selectable_value(
+                                        &mut self.play_debug_map_view,
+                                        view,
+                                        view.label(),
+                                    );
+                                }
+                            });
                         });
                     if changed {
                         self.persist_editor_visibility_state();
@@ -1214,6 +1237,12 @@ impl EditorWorkspace {
         fallback_hit: Option<[f32; 2]>,
     ) -> Option<PaintTargetPreview> {
         let grid = self.room_grid_view(room_id)?;
+        if self.active_tool == ViewTool::PaintMaterial {
+            // The regular hovered-primitive overlay already outlines the
+            // exact ray-picked face. Never draw a cell/add-geometry ghost for
+            // material painting.
+            return None;
+        }
         if self.portal_place_active() {
             let (world_cell_x, world_cell_z) =
                 self.paint_preview_world_cell(room_id, grid, face_hit, fallback_hit)?;

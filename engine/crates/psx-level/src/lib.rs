@@ -347,6 +347,11 @@ typed_index! {
 }
 
 typed_index! {
+    /// Index into the generated `COMBAT_CAPSULES` table.
+    pub struct CombatCapsuleIndex;
+}
+
+typed_index! {
     /// Index into the generated `UI_NODES` table.
     pub struct UiNodeIndex;
 }
@@ -766,6 +771,38 @@ pub struct LevelRoomPortalRecord {
     pub vertex_y: [i32; 4],
     /// Z coordinate for each portal vertex.
     pub vertex_z: [i32; 4],
+}
+
+/// One water-covered runtime sector. The generated table is sorted by
+/// `(room, x, z)` for allocation-free binary search at runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelWaterCellRecord {
+    /// Owning runtime room.
+    pub room: RoomIndex,
+    /// Runtime-room-local sector X.
+    pub x: u16,
+    /// Runtime-room-local sector Z.
+    pub z: u16,
+    /// Texture drawn across this cell, or no surface for gameplay-only water.
+    pub texture_asset: Option<AssetId>,
+    /// Blend code from [`model_override_blend`].
+    pub blend_mode: u8,
+    /// Surface modulation tint.
+    pub tint_rgb: [u8; 3],
+    /// Animation inherited from the authored surface material.
+    pub animation: LevelMaterialAnimation,
+    /// Horizontal surface in room-local engine units.
+    pub surface_y: i32,
+    /// Terrain depth below the surface at the sector centre.
+    pub depth: u16,
+    /// Depth that makes this cell lethal.
+    pub lethal_depth: u16,
+    /// Ground speed retained while wading, as a percentage.
+    pub movement_percent: u8,
+    /// Ticks between lethal submersion and respawn.
+    pub death_delay_ticks: u8,
+    /// Submersion needed to start the lethal sequence.
+    pub death_submerge_depth: u16,
 }
 
 /// Cardinal open-portal neighbours for one cooked room.
@@ -1591,6 +1628,11 @@ pub struct LevelGameEntityRecord {
     /// One-shot clip on death; holds its final frame as the corpse
     /// pose.
     pub death_clip: u16,
+    /// First rig-attached volume in `COMBAT_CAPSULES`.
+    pub combat_capsule_first: CombatCapsuleIndex,
+    /// Number of rig-attached volumes (bounded by
+    /// [`MAX_CHARACTER_COMBAT_CAPSULES`]).
+    pub combat_capsule_count: u8,
     /// Room-local spawn X.
     pub x: i32,
     /// Y.
@@ -1992,6 +2034,8 @@ pub struct LevelBoxPropRecord {
     pub room: RoomIndex,
     /// Per-face texture asset. `None` means the face is not drawn.
     pub texture_assets: [Option<AssetId>; BOX_PROP_FACE_COUNT],
+    /// Per-face blend codes from [`model_override_blend`].
+    pub blend_modes: [u8; BOX_PROP_FACE_COUNT],
     /// Bottom-center room-local X.
     pub x: i32,
     /// Bottom Y.
@@ -2630,6 +2674,48 @@ pub fn first_focus(rects: &[NavRect]) -> Option<usize> {
     best.map(|(index, _, _)| index)
 }
 
+/// Hard cap per Character resource. Combat stays bounded on PS1: the runtime
+/// scans this tiny slice only during an active attack and rejects room/radius/
+/// AABB misses before sampling an opposing pose.
+pub const MAX_CHARACTER_COMBAT_CAPSULES: usize = 16;
+
+/// Flags for [`CombatCapsuleRecord::flags`].
+pub mod combat_capsule_flags {
+    /// Volume receives damage.
+    pub const HURTBOX: u8 = 1 << 0;
+    /// Volume deals damage during its action/frame window.
+    pub const HITBOX: u8 = 1 << 1;
+}
+
+/// Compact rig-attached combat capsule. Endpoints are signed 16-bit because
+/// they remain in one joint's local model space; the cook rejects values that
+/// do not fit instead of charging the runtime for six 32-bit coordinates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CombatCapsuleRecord {
+    /// Cooked skeleton joint index.
+    pub joint: u8,
+    /// See [`combat_capsule_flags`].
+    pub flags: u8,
+    /// Action slot that activates a hitbox. Ignored for hurtboxes.
+    pub action: u8,
+    /// Reserved/alignment byte.
+    pub reserved: u8,
+    /// Joint-local segment start.
+    pub start: [i16; 3],
+    /// Joint-local segment end.
+    pub end: [i16; 3],
+    /// Capsule radius in engine units.
+    pub radius: u16,
+    /// First active animation frame, inclusive. Ignored for hurtboxes.
+    pub active_start_frame: u16,
+    /// Last active animation frame, inclusive. Ignored for hurtboxes.
+    pub active_end_frame: u16,
+    /// Health damage dealt by a hitbox.
+    pub damage: u16,
+    /// Poise damage dealt by a hitbox.
+    pub poise_damage: u16,
+}
+
 /// Cooked weapon-local hit shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WeaponHitShapeRecord {
@@ -2955,6 +3041,11 @@ pub struct LevelCharacterRecord {
     pub action_frame_ranges: [CharacterActionFrameRange; CHARACTER_ANIMATION_ACTION_COUNT],
     /// Per-action forward push applied by locked one-shot actions.
     pub action_pushes: [CharacterActionPush; CHARACTER_ANIMATION_ACTION_COUNT],
+    /// First rig-attached volume in `COMBAT_CAPSULES`.
+    pub combat_capsule_first: CombatCapsuleIndex,
+    /// Number of rig-attached volumes (bounded by
+    /// [`MAX_CHARACTER_COMBAT_CAPSULES`]).
+    pub combat_capsule_count: u8,
     /// Render-only model offset from the controller root, in
     /// entity-local engine units.
     pub visual_offset: [i16; 3],

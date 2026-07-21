@@ -17,7 +17,12 @@ impl Playtest {
         ActiveRoomView::from_camera(self.render_camera)
     }
 
-    /// See [`RoomVisibility::portal_entry_anchor`] for the anchor contract.
+    /// Portal entry anchor expressed in the player's current-room space.
+    ///
+    /// [`RoomVisibility::portal_entry_anchor`] resolves portal records in
+    /// global level coordinates. The visible-cell cache and active-room
+    /// offsets use the current room as their shared origin, so rebase exactly
+    /// once here before the caller subtracts the target room's offset.
     pub(super) fn portal_entry_anchor(
         &self,
         room: RoomIndex,
@@ -25,6 +30,7 @@ impl Playtest {
     ) -> Option<RoomPoint> {
         self.visibility
             .portal_entry_anchor(ROOM_PORTALS, room, sector_size)
+            .map(|global| global_to_local_room_point(self.room_index, global))
     }
 
     pub(super) fn rebuild_portal_visibility(
@@ -92,6 +98,8 @@ impl Playtest {
             visibility_space.camera_global,
         );
         self.visibility.candidates = self.visibility.result.stats.portals_tested.min(u16::MAX);
+        self.visibility
+            .include_overlapped_rooms(ROOMS, ROOM_OVERLAPPED_ROOMS);
         self.visibility.visible_missing_resident = 0;
         self.visibility.visible_missing_mask = RuntimeDebugMask::EMPTY;
         self.visibility.visible_build_failed = 0;

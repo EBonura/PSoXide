@@ -682,6 +682,7 @@ pub fn import_animation_library(
                 ),
                 tags: Vec::new(),
                 calibration: Default::default(),
+                pose_corrections: Vec::new(),
             }),
         );
         clip_ids.push(id);
@@ -754,7 +755,13 @@ pub fn bake_animation_source_for_model(
         (clip.source == Some(source_id)
             && clip.skeleton == skeleton
             && clip.target_model == Some(model_id))
-        .then(|| (resource.id, clip.psxanim_path.clone()))
+        .then(|| {
+            (
+                resource.id,
+                clip.psxanim_path.clone(),
+                clip.pose_corrections.clone(),
+            )
+        })
     });
 
     let package = convert_rigid_model_source(
@@ -803,7 +810,7 @@ pub fn bake_animation_source_for_model(
         .map(|stem| sanitize_name(stem, "model"))
         .filter(|stem| !stem.is_empty())
         .unwrap_or_else(|| sanitize_name(&model_name, "model"));
-    let clip_path = if let Some((_, existing_path)) = &existing_clip {
+    let clip_path = if let Some((_, existing_path, _)) = &existing_clip {
         resolve_path(existing_path, Some(project_root))
     } else {
         unique_animation_clip_path(
@@ -862,8 +869,12 @@ pub fn bake_animation_source_for_model(
         looping: source_meta.looping,
         tags: source_meta.tags,
         calibration: Default::default(),
+        pose_corrections: existing_clip
+            .as_ref()
+            .map(|(_, _, corrections)| corrections.clone())
+            .unwrap_or_default(),
     };
-    if let Some((existing_id, _)) = existing_clip {
+    if let Some((existing_id, _, _)) = existing_clip {
         if let Some(resource) = project.resource_mut(existing_id) {
             resource.name = resource_name;
             resource.data = ResourceData::AnimationClip(clip_resource);

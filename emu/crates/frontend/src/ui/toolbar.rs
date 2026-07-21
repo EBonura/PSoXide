@@ -36,13 +36,16 @@ const BUTTON_SIZE: egui::Vec2 = egui::vec2(30.0, 26.0);
 const BAR_HEIGHT: f32 = 34.0;
 /// Horizontal padding inside the toolbar strip.
 const TOOLBAR_MARGIN_X: f32 = 8.0;
-/// Gap between the metrics lane and the controls lane.
-const TOOLBAR_CLUSTER_GAP: f32 = 8.0;
-/// Right-side lane: transport, volume slider, BIOS toggle, debug tools. The
-/// controls render right-anchored and are clipped to this width, so it must
-/// comfortably exceed their natural content width -- otherwise the leftmost
-/// button (the native/high-res scale toggle) loses its left edge to the clip.
-const CONTROLS_WIDTH: f32 = 580.0;
+/// Gap between the metrics lane and the controls lane at wide window sizes.
+const TOOLBAR_LANE_GAP: f32 = 8.0;
+/// Extra separation between control groups when the complete toolbar fits.
+/// Compact mode relies on normal item spacing instead so every action remains
+/// reachable before the non-interactive metrics are allowed to consume room.
+const TOOLBAR_GROUP_GAP: f32 = 8.0;
+/// Comfortable width for every toolbar control with the normal group spacing.
+/// The save-state and controls-panel buttons increased this cluster after the
+/// original fixed-width lane was introduced.
+const CONTROLS_PREFERRED_WIDTH: f32 = 680.0;
 /// Keep enough room for the status dot + RUNNING/PAUSED label.
 const METRICS_MIN_WIDTH: f32 = 116.0;
 /// Slider width used in the toolbar.
@@ -98,10 +101,9 @@ pub fn draw(ctx: &Context, state: &mut AppState) {
                     egui::pos2(row_right, panel_rect.bottom()),
                 );
 
-                let controls_width = CONTROLS_WIDTH
-                    .min((row_rect.width() - METRICS_MIN_WIDTH - TOOLBAR_CLUSTER_GAP).max(0.0));
-                let controls_left = (row_rect.right() - controls_width).max(row_rect.left());
-                let metrics_right = (controls_left - TOOLBAR_CLUSTER_GAP).max(row_rect.left());
+                let lanes = toolbar_lanes(row_rect.width());
+                let controls_left = row_rect.right() - lanes.controls_width;
+                let metrics_right = row_rect.left() + lanes.metrics_width;
 
                 let metrics_rect = Rect::from_min_max(
                     egui::pos2(row_rect.left(), row_rect.top()),
@@ -112,17 +114,19 @@ pub fn draw(ctx: &Context, state: &mut AppState) {
                     egui::pos2(row_rect.right(), row_rect.bottom()),
                 );
 
-                ui.scope_builder(
-                    egui::UiBuilder::new()
-                        .max_rect(metrics_rect)
-                        .layout(Layout::left_to_right(Align::Center)),
-                    |ui| {
-                        ui.set_clip_rect(metrics_rect.intersect(panel_rect));
-                        ui.set_width(metrics_rect.width());
-                        ui.set_height(metrics_rect.height());
-                        draw_metrics(ui, state, metrics_rect.width());
-                    },
-                );
+                if lanes.metrics_width > 0.5 {
+                    ui.scope_builder(
+                        egui::UiBuilder::new()
+                            .max_rect(metrics_rect)
+                            .layout(Layout::left_to_right(Align::Center)),
+                        |ui| {
+                            ui.set_clip_rect(metrics_rect.intersect(panel_rect));
+                            ui.set_width(metrics_rect.width());
+                            ui.set_height(metrics_rect.height());
+                            draw_metrics(ui, state, metrics_rect.width());
+                        },
+                    );
+                }
 
                 ui.scope_builder(
                     egui::UiBuilder::new()
@@ -132,7 +136,7 @@ pub fn draw(ctx: &Context, state: &mut AppState) {
                         ui.set_clip_rect(controls_rect.intersect(panel_rect));
                         ui.set_width(controls_rect.width());
                         ui.set_height(controls_rect.height());
-                        draw_toolbar_controls(ui, state);
+                        draw_toolbar_controls(ui, state, lanes.compact_controls);
                     },
                 );
             });
@@ -166,22 +170,57 @@ fn draw_restore_tab(ctx: &Context, state: &mut AppState, opacity: f32) {
         });
 }
 
-fn draw_toolbar_controls(ui: &mut egui::Ui, state: &mut AppState) {
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ToolbarLanes {
+    metrics_width: f32,
+    controls_width: f32,
+    compact_controls: bool,
+}
+
+/// Give actions priority over telemetry. At wide sizes the controls keep a
+/// stable right-aligned lane and the metrics take the remainder. Once that
+/// would squeeze the metrics below their useful minimum, the metrics collapse
+/// entirely and the controls receive the whole row in a denser arrangement.
+fn toolbar_lanes(row_width: f32) -> ToolbarLanes {
+    let row_width = row_width.max(0.0);
+    let wide_minimum = CONTROLS_PREFERRED_WIDTH + TOOLBAR_LANE_GAP + METRICS_MIN_WIDTH;
+    if row_width >= wide_minimum {
+        ToolbarLanes {
+            metrics_width: row_width - CONTROLS_PREFERRED_WIDTH - TOOLBAR_LANE_GAP,
+            controls_width: CONTROLS_PREFERRED_WIDTH,
+            compact_controls: false,
+        }
+    } else {
+        ToolbarLanes {
+            metrics_width: 0.0,
+            controls_width: row_width,
+            compact_controls: true,
+        }
+    }
+}
+
+fn draw_toolbar_controls(ui: &mut egui::Ui, state: &mut AppState, compact: bool) {
+    if compact {
+        // The icon buttons retain their hit targets; only whitespace yields.
+        ui.spacing_mut().item_spacing.x = 4.0;
+    }
+    let group_gap = if compact { 0.0 } else { TOOLBAR_GROUP_GAP };
+
     // Right-to-left layout: first added sits furthest right.
     let hide_btn = icon_button(icons::CARET_UP);
     if ui.add(hide_btn).on_hover_text("Hide toolbar").clicked() {
         state.toolbar_hidden = true;
     }
-    ui.add_space(TOOLBAR_CLUSTER_GAP);
+    ui.add_space(group_gap);
     draw_buttons(ui, state);
-    ui.add_space(TOOLBAR_CLUSTER_GAP);
+    ui.add_space(group_gap);
     draw_save_states_button(ui, state);
     draw_controls_button(ui, state);
-    ui.add_space(TOOLBAR_CLUSTER_GAP);
+    ui.add_space(group_gap);
     draw_audio_controls(ui, state);
-    ui.add_space(TOOLBAR_CLUSTER_GAP);
+    ui.add_space(group_gap);
     draw_boot_toggle(ui, state);
-    ui.add_space(TOOLBAR_CLUSTER_GAP);
+    ui.add_space(group_gap);
     draw_debug_toggles(ui, state);
 }
 
@@ -522,5 +561,43 @@ fn draw_buttons(ui: &mut egui::Ui, state: &mut AppState) {
         state.running = false;
         state.menu.sync_run_label(false);
         app::step_one_frame(state);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wide_toolbar_preserves_metrics_and_full_control_lane() {
+        let row_width = 1_000.0;
+        let lanes = toolbar_lanes(row_width);
+
+        assert!(!lanes.compact_controls);
+        assert_eq!(lanes.controls_width, CONTROLS_PREFERRED_WIDTH);
+        assert!(lanes.metrics_width >= METRICS_MIN_WIDTH);
+        assert_eq!(
+            lanes.metrics_width + TOOLBAR_LANE_GAP + lanes.controls_width,
+            row_width
+        );
+    }
+
+    #[test]
+    fn compact_toolbar_gives_actions_the_entire_row_before_metrics() {
+        let row_width = 641.0;
+        let lanes = toolbar_lanes(row_width);
+
+        assert!(lanes.compact_controls);
+        assert_eq!(lanes.metrics_width, 0.0);
+        assert_eq!(lanes.controls_width, row_width);
+    }
+
+    #[test]
+    fn toolbar_lane_widths_remain_valid_for_tiny_windows() {
+        let lanes = toolbar_lanes(-10.0);
+
+        assert!(lanes.compact_controls);
+        assert_eq!(lanes.metrics_width, 0.0);
+        assert_eq!(lanes.controls_width, 0.0);
     }
 }

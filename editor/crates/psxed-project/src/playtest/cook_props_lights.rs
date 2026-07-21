@@ -25,20 +25,21 @@ pub(crate) fn resolve_material_texture_asset(
         ));
         return None;
     };
-    let (texture_key, bytes) = match material_texture_bytes(material_resource, project_root) {
-        Ok(Some(source)) => source,
-        Ok(None) => {
-            report.warn(format!(
-                "{label} material '{}' has no Texture - skipped",
-                material_resource.name
-            ));
-            return None;
-        }
-        Err(msg) => {
-            report.warn(format!("{label}: {msg} - skipped"));
-            return None;
-        }
-    };
+    let (texture_key, bytes) =
+        match material_texture_bytes(project, material_resource, project_root) {
+            Ok(Some(source)) => source,
+            Ok(None) => {
+                report.warn(format!(
+                    "{label} material '{}' has no Texture - skipped",
+                    material_resource.name
+                ));
+                return None;
+            }
+            Err(msg) => {
+                report.warn(format!("{label}: {msg} - skipped"));
+                return None;
+            }
+        };
     let texture_asset_index = if let Some(&existing) = texture_asset_for_path.get(&texture_key) {
         existing
     } else {
@@ -90,11 +91,13 @@ pub(crate) fn resolve_model_material_override(
         ));
         return None;
     };
-    let texture_asset_index = if material.texture_mode == crate::MaterialTextureMode::Generated
-        || material
-            .psxt_path
-            .as_deref()
-            .is_some_and(|path| !path.trim().is_empty())
+    let texture_asset_index = if matches!(
+        material.texture_mode,
+        crate::MaterialTextureMode::Generated | crate::MaterialTextureMode::Transition
+    ) || material
+        .psxt_path
+        .as_deref()
+        .is_some_and(|path| !path.trim().is_empty())
     {
         Some(
             resolve_material_texture_asset(
@@ -113,7 +116,9 @@ pub(crate) fn resolve_model_material_override(
     };
     let secondary_layer = material.enabled_secondary_layer().map(|layer| {
         let texture_asset_index = resolve_model_secondary_texture_asset(
+            project,
             project_root,
+            material_id,
             &material_resource.name,
             layer,
             texture_asset_for_path,
@@ -146,7 +151,9 @@ pub(crate) fn resolve_model_material_override(
 
 #[allow(clippy::too_many_arguments)]
 fn resolve_model_secondary_texture_asset(
+    project: &ProjectDocument,
     project_root: &Path,
+    owner: ResourceId,
     material_name: &str,
     layer: &crate::ModelSecondaryLayer,
     texture_asset_for_path: &mut HashMap<String, usize>,
@@ -189,6 +196,30 @@ fn resolve_model_secondary_texture_asset(
                 cache_key,
                 format!("{material_name} generated layer 2"),
                 generate_material_texture_psxt(layer.generated),
+            )
+        }
+        crate::MaterialTextureMode::Transition => {
+            let bytes = match crate::generate_transition_material_texture_psxt(
+                project,
+                layer.transition,
+                project_root,
+                Some(owner),
+            ) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    report.warn(format!(
+                        "Material '{material_name}' secondary transition: {error} - skipped"
+                    ));
+                    return None;
+                }
+            };
+            let checksum = bytes.iter().fold(0xcbf2_9ce4_8422_2325u64, |hash, byte| {
+                (hash ^ u64::from(*byte)).wrapping_mul(0x100_0000_01b3)
+            });
+            (
+                format!("@material-layer-2-transition:{checksum:016x}"),
+                format!("{material_name} transition layer 2"),
+                bytes,
             )
         }
         crate::MaterialTextureMode::ReflectiveProbe => return None,
@@ -301,6 +332,7 @@ pub(crate) fn push_box_prop(
     report: &mut PlaytestValidationReport,
 ) -> bool {
     let mut texture_asset_indices = [None; psx_level::BOX_PROP_FACE_COUNT];
+    let mut blend_modes = [psx_level::model_override_blend::OPAQUE; psx_level::BOX_PROP_FACE_COUNT];
     let mut tint_rgb = [[128, 128, 128]; psx_level::BOX_PROP_FACE_COUNT];
     let mut valid_faces = 0usize;
     for (face, material) in materials.iter().enumerate() {
@@ -324,6 +356,15 @@ pub(crate) fn push_box_prop(
         };
         texture_asset_indices[face] = Some(texture_asset_index);
         tint_rgb[face] = tint;
+        blend_modes[face] = project
+            .resource(material_id)
+            .and_then(|resource| match &resource.data {
+                ResourceData::Material(material) => Some(
+                    super::manifest::model_override_blend_code(material.blend_mode),
+                ),
+                _ => None,
+            })
+            .unwrap_or(psx_level::model_override_blend::OPAQUE);
         valid_faces += 1;
     }
 
@@ -347,6 +388,7 @@ pub(crate) fn push_box_prop(
     box_props.push(PlaytestBoxProp {
         room: room_index,
         texture_asset_indices,
+        blend_modes,
         x: pos[0],
         y: pos[1],
         z: pos[2],
@@ -752,6 +794,8 @@ pub(crate) fn push_game_entity(
     enemy: crate::EnemyBehaviorSettings,
     model_instance: Option<u16>,
     state_clips: GameEntityStateClips,
+    combat_capsule_first: u16,
+    combat_capsule_count: u8,
     names: &mut NameInterner,
     game_entities: &mut Vec<PlaytestGameEntity>,
     report: &mut PlaytestValidationReport,
@@ -827,6 +871,8 @@ pub(crate) fn push_game_entity(
         attack_clip: state_clips.attack,
         stagger_clip: state_clips.stagger,
         death_clip: state_clips.death,
+        combat_capsule_first,
+        combat_capsule_count,
         x: pos[0],
         y: pos[1],
         z: pos[2],

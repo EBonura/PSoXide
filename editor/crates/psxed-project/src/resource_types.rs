@@ -641,6 +641,38 @@ pub struct AnimationClipResource {
     /// cooked runtime rendering.
     #[serde(default, skip_serializing_if = "AnimationClipCalibration::is_default")]
     pub calibration: AnimationClipCalibration,
+    /// Sparse editor-authored visual pose corrections. The editor previews
+    /// these immediately and the offline package cooker folds them into the
+    /// ordinary sampled `.psxanim` matrices, so runtime animation sampling
+    /// remains unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pose_corrections: Vec<AnimationPoseCorrectionKey>,
+}
+
+/// One sparse correction key for a cooked animation joint.
+///
+/// Rotation is a signed Q12 turn delta (`4096 = 360°`). Translation uses
+/// cooked model-local pose units. A single key holds across the clip; two or
+/// more keys interpolate linearly between their sampled frames.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnimationPoseCorrectionKey {
+    pub frame: u16,
+    pub joint: u16,
+    #[serde(default)]
+    pub rotation_q12: [i16; 3],
+    #[serde(default)]
+    pub translation: [i32; 3],
+}
+
+impl AnimationPoseCorrectionKey {
+    pub const fn is_identity(self) -> bool {
+        self.rotation_q12[0] == 0
+            && self.rotation_q12[1] == 0
+            && self.rotation_q12[2] == 0
+            && self.translation[0] == 0
+            && self.translation[1] == 0
+            && self.translation[2] == 0
+    }
 }
 
 impl AnimationClipResource {
@@ -893,6 +925,97 @@ impl Default for WeaponHitbox {
     }
 }
 
+/// Capsule authored in one skeleton joint's local space.
+///
+/// Keeping both endpoints local to the joint makes the volume follow every
+/// sampled animation pose without baking per-clip coordinates. A sphere is
+/// represented by equal endpoints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JointCapsule {
+    /// First endpoint relative to the owning joint.
+    #[serde(default)]
+    pub start: [i32; 3],
+    /// Second endpoint relative to the owning joint.
+    #[serde(default)]
+    pub end: [i32; 3],
+    /// Capsule radius in engine units.
+    #[serde(default = "default_combat_capsule_radius")]
+    pub radius: u16,
+}
+
+impl Default for JointCapsule {
+    fn default() -> Self {
+        Self {
+            start: [0, -128, 0],
+            end: [0, 128, 0],
+            radius: default_combat_capsule_radius(),
+        }
+    }
+}
+
+pub(crate) const fn default_combat_capsule_radius() -> u16 {
+    96
+}
+
+/// Gameplay role of a rig-attached combat capsule.
+///
+/// Receiving volumes are continuously present (invulnerability remains an
+/// action-state decision). Dealing volumes are enabled only for the authored
+/// inclusive frame range of one character action, mirroring Souls TimeAct
+/// attack events while keeping damage data separate from animation files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CombatCapsuleRole {
+    /// Receives damage when an active opposing attack capsule overlaps it.
+    Hurtbox,
+    /// Deals damage during one animation action's active frame window.
+    Hitbox {
+        /// Character action whose clip drives this volume.
+        action: CharacterAnimationAction,
+        /// First active animation frame, inclusive.
+        active_start_frame: u16,
+        /// Last active animation frame, inclusive.
+        active_end_frame: u16,
+        /// Health damage applied on a new connection.
+        damage: u16,
+        /// Poise damage applied on a new connection.
+        poise_damage: u16,
+    },
+}
+
+impl Default for CombatCapsuleRole {
+    fn default() -> Self {
+        Self::Hurtbox
+    }
+}
+
+/// One visually authored capsule attached to a character rig joint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CharacterCombatCapsule {
+    /// User-facing label such as `Torso Hurtbox` or `Right Fist`.
+    pub name: String,
+    /// Cooked skeleton joint index. Animation Studio provides visual picking;
+    /// the integer remains the compact runtime contract.
+    #[serde(default)]
+    pub joint: u16,
+    /// Joint-local capsule geometry.
+    #[serde(default)]
+    pub capsule: JointCapsule,
+    /// Whether this volume receives or deals damage.
+    #[serde(default)]
+    pub role: CombatCapsuleRole,
+}
+
+impl Default for CharacterCombatCapsule {
+    fn default() -> Self {
+        Self {
+            name: "Body Hurtbox".to_string(),
+            joint: 0,
+            capsule: JointCapsule::default(),
+            role: CombatCapsuleRole::Hurtbox,
+        }
+    }
+}
+
 /// Gameplay weapon resource: model reference, grip/pivot, authored
 /// attack hit volumes, and the melee-arc combat numbers (the phase-3
 /// combat contract: update-band hit resolution sweeps a flat arc in
@@ -1076,11 +1199,30 @@ pub struct CharacterResource {
     /// validated at cook time when assigned to the player.
     #[serde(default)]
     pub model: Option<ResourceId>,
+    /// Default covering material applied to freshly placed instances. `None`
+    /// keeps the model's own atlas.
+    #[serde(default)]
+    pub material: Option<ResourceId>,
     /// Reusable animation set on the model's skeleton. This is the
     /// single binding for the character's gameplay animations (idle /
     /// walk / run / actions); cook/preview resolve roles from it.
     #[serde(default)]
     pub animation_set: Option<ResourceId>,
+    /// Precise damage-dealing and damage-receiving capsules attached to the
+    /// animated rig. Empty preserves the legacy coarse body-cylinder combat
+    /// path until a project opts into the authored volume pipeline.
+    #[serde(default)]
+    pub combat_capsules: Vec<CharacterCombatCapsule>,
+    /// How a freshly placed instance of this profile should be controlled.
+    /// `Auto` preserves the legacy behavior: the first character in a scene
+    /// becomes the player and later characters are passive.
+    #[serde(default)]
+    pub spawn_role: CharacterSpawnRole,
+    /// Reusable enemy tuning applied when [`Self::spawn_role`] is `Enemy`.
+    /// Keeping this on the Character resource makes authored AI behavior
+    /// survive placement in another scene or project.
+    #[serde(default)]
+    pub enemy_behavior: Option<EnemyBehaviorSettings>,
     /// Capsule radius (engine units). Used by collision +
     /// editor preview gizmo.
     pub radius: u16,
@@ -1142,6 +1284,36 @@ pub struct CharacterResource {
     /// the character origin (typically around the upper torso
     /// for comfortable third-person framing).
     pub camera_target_height: i32,
+    /// Additional lock-on camera elevation as a percentage of camera height.
+    #[serde(default = "default_world_camera_lock_rise_percent")]
+    pub camera_lock_rise_percent: u8,
+    /// Minimum camera origin height above the sampled floor.
+    #[serde(default = "default_world_camera_min_floor_clearance")]
+    pub camera_min_floor_clearance: i32,
+    /// Manual orbit speed copied to a newly placed player camera.
+    #[serde(default = "default_world_camera_orbit_speed_level")]
+    pub camera_orbit_speed_level: u8,
+    /// Camera origin follow lag copied to a newly placed player camera.
+    #[serde(default = "default_world_camera_position_lag_shift")]
+    pub camera_position_lag_shift: u8,
+    /// Camera focus follow lag copied to a newly placed player camera.
+    #[serde(default = "default_world_camera_focus_lag_shift")]
+    pub camera_focus_lag_shift: u8,
+    /// Collision boom recovery lag copied to a newly placed player camera.
+    #[serde(default = "default_world_camera_distance_lag_shift")]
+    pub camera_distance_lag_shift: u8,
+}
+
+/// Reusable role applied when a Character resource is dropped into a scene.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CharacterSpawnRole {
+    /// Preserve the legacy first-character-is-player placement behavior.
+    #[default]
+    Auto,
+    /// Always place as the player character, replacing an older player source.
+    Player,
+    /// Always place as an enemy using the profile's enemy behavior preset.
+    Enemy,
 }
 
 impl CharacterResource {
@@ -1150,7 +1322,11 @@ impl CharacterResource {
     pub const fn defaults() -> Self {
         Self {
             model: None,
+            material: None,
             animation_set: None,
+            combat_capsules: Vec::new(),
+            spawn_role: CharacterSpawnRole::Auto,
+            enemy_behavior: None,
             radius: default_character_radius(),
             height: default_character_height(),
             walk_speed: default_character_walk_speed(),
@@ -1173,6 +1349,27 @@ impl CharacterResource {
             camera_distance: 6144,
             camera_height: 1280,
             camera_target_height: 640,
+            camera_lock_rise_percent: default_world_camera_lock_rise_percent(),
+            camera_min_floor_clearance: default_world_camera_min_floor_clearance(),
+            camera_orbit_speed_level: default_world_camera_orbit_speed_level(),
+            camera_position_lag_shift: default_world_camera_position_lag_shift(),
+            camera_focus_lag_shift: default_world_camera_focus_lag_shift(),
+            camera_distance_lag_shift: default_world_camera_distance_lag_shift(),
+        }
+    }
+
+    /// Complete camera preset for a freshly placed player instance.
+    pub const fn camera_settings(&self) -> WorldCameraSettings {
+        WorldCameraSettings {
+            distance: self.camera_distance,
+            height: self.camera_height,
+            target_height: self.camera_target_height,
+            lock_rise_percent: self.camera_lock_rise_percent,
+            min_floor_clearance: self.camera_min_floor_clearance,
+            orbit_speed_level: self.camera_orbit_speed_level,
+            position_lag_shift: self.camera_position_lag_shift,
+            focus_lag_shift: self.camera_focus_lag_shift,
+            distance_lag_shift: self.camera_distance_lag_shift,
         }
     }
 }
@@ -1523,7 +1720,8 @@ impl CharacterControllerSettings {
             backstep_active_frames: character.backstep_active_frames,
             backstep_recovery_frames: character.backstep_recovery_frames,
             backstep_invulnerable_frames: character.backstep_invulnerable_frames,
-            enemy: None,
+            enemy: (character.spawn_role == CharacterSpawnRole::Enemy)
+                .then_some(character.enemy_behavior.unwrap_or_default()),
         }
     }
 }

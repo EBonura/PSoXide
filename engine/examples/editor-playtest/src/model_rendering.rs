@@ -14,7 +14,7 @@ pub(super) use psx_game_runtime::model_rendering::{
 };
 
 /// The cooked model-family tables bundled for the crate render policy.
-fn model_tables() -> mr::ModelTables {
+pub(super) fn model_tables() -> mr::ModelTables {
     mr::ModelTables {
         model_clip_bounds: MODEL_CLIP_BOUNDS,
         model_frame_bounds: MODEL_FRAME_BOUNDS,

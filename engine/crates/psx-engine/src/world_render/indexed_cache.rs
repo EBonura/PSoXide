@@ -340,7 +340,6 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
     // word clear per 32 vertices, and removes the old per-vertex bool arena
     // plus its end-of-draw clearing pass.
     let projected_seen_word_count = cached_vertices.len().div_ceil(32);
-    projected_depths[..projected_seen_word_count].fill(0);
     let projected_indices = &mut projected_indices[..cached_vertices.len()];
 
     let use_vertex_depths = lighting.uses_vertex_depths();
@@ -349,6 +348,7 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
     crate::telemetry::stage_begin(crate::telemetry::stage::ROOM_CELL_SELECT);
     let mut projected_index_count = 0usize;
     let mut accepted_cell_count = 0usize;
+    let mut accepted_vertex_references = 0usize;
     let mut accepted_depths_need_sort = false;
     // Per-cell depth/cull transforms run on the GTE (MVMVA) via the loaded
     // camera instead of redoing the camera rotation in CPU fixed-point for
@@ -410,16 +410,12 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
             *accepted_cell_depths.get_unchecked_mut(accepted_cell_count) = cell_depth;
         }
         accepted_cell_count += 1;
-        cell_stage_begin(crate::telemetry::stage::CELL_COLLECT);
-        projected_index_count = collect_cached_cell_vertex_indices(
-            cell,
-            cached_cell_vertices,
-            cached_surfaces,
-            &mut projected_depths[..projected_seen_word_count],
-            projected_indices,
-            projected_index_count,
-        );
-        cell_stage_end(crate::telemetry::stage::CELL_COLLECT);
+        accepted_vertex_references =
+            accepted_vertex_references.saturating_add(if cell.vertex_count == 0 {
+                cell.surface_count.saturating_mul(4)
+            } else {
+                cell.vertex_count
+            } as usize);
     }
     if accepted_depths_need_sort {
         sort_cached_room_cell_indices_by_depth(
@@ -429,23 +425,70 @@ pub fn draw_indexed_cached_room_vertex_lit_visible_cells<
             projected_depths,
         );
     }
+    // When accepted cells collectively reference at least the room cache's
+    // vertex count, deduplicating their indices is more CPU work than simply
+    // projecting the contiguous cache. Sparse portal views keep the selective
+    // indexed path so large rooms do not regress.
+    let project_dense_cache = accepted_vertex_references >= cached_vertices.len();
+    if project_dense_cache {
+        // Keep the projected-index scratch coherent for callers that inspect
+        // it and, on MIPS, preserve the tighter loop layout measured for the
+        // dense path.
+        for (index, slot) in projected_indices.iter_mut().enumerate() {
+            *slot = index as u16;
+        }
+    } else {
+        projected_depths[..projected_seen_word_count].fill(0);
+        cell_stage_begin(crate::telemetry::stage::CELL_COLLECT);
+        for &cell_index in &accepted_cell_indices[..accepted_cell_count] {
+            let Some(cell) = cached_cells.get(cell_index as usize) else {
+                continue;
+            };
+            projected_index_count = collect_cached_cell_vertex_indices(
+                cell,
+                cached_cell_vertices,
+                cached_surfaces,
+                &mut projected_depths[..projected_seen_word_count],
+                projected_indices,
+                projected_index_count,
+            );
+        }
+        cell_stage_end(crate::telemetry::stage::CELL_COLLECT);
+    }
     crate::telemetry::stage_end(crate::telemetry::stage::ROOM_CELL_SELECT);
 
-    let projected_indices = &projected_indices[..projected_index_count];
-    stats.projected_vertices = projected_index_count.min(u16::MAX as usize) as u16;
+    stats.projected_vertices = if project_dense_cache {
+        cached_vertices.len().min(u16::MAX as usize) as u16
+    } else {
+        projected_index_count.min(u16::MAX as usize) as u16
+    };
     crate::telemetry::stage_begin(crate::telemetry::stage::ROOM_PROJECT);
-    project_world_vertex_indices_gte(
-        *camera,
-        cached_vertices,
-        projected_indices,
-        projected_vertices,
-    );
+    if project_dense_cache {
+        project_world_vertices_gte(*camera, cached_vertices, projected_vertices);
+    } else {
+        project_world_vertex_indices_gte(
+            *camera,
+            cached_vertices,
+            &projected_indices[..projected_index_count],
+            projected_vertices,
+        );
+    }
     crate::telemetry::stage_end(crate::telemetry::stage::ROOM_PROJECT);
     if use_vertex_depths {
         crate::telemetry::stage_begin(crate::telemetry::stage::ROOM_DEPTH_PREP);
-        for raw_index in projected_indices {
-            let index = *raw_index as usize;
-            projected_depths[index] = lighting.prepare_vertex_depth(projected_vertices[index].sz);
+        if project_dense_cache {
+            for (index, projected) in projected_vertices[..cached_vertices.len()]
+                .iter()
+                .enumerate()
+            {
+                projected_depths[index] = lighting.prepare_vertex_depth(projected.sz);
+            }
+        } else {
+            for raw_index in &projected_indices[..projected_index_count] {
+                let index = *raw_index as usize;
+                projected_depths[index] =
+                    lighting.prepare_vertex_depth(projected_vertices[index].sz);
+            }
         }
         crate::telemetry::stage_end(crate::telemetry::stage::ROOM_DEPTH_PREP);
     }

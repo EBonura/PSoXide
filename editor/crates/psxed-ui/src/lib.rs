@@ -30,6 +30,8 @@ mod scene_tree;
 use scene_tree::*;
 mod resource_browser;
 use resource_browser::*;
+mod searchable_picker;
+use searchable_picker::*;
 mod editor_helpers;
 use editor_helpers::*;
 mod animation_catalogue;
@@ -86,12 +88,13 @@ use psxed_project::{
     PhysicsBodySettings, ProjectDocument, PsxBlendMode, ReflectionProbeMaterial, Resource,
     ResourceData, ResourceId, RuntimeDepthSortMode, RuntimeRoomDrawOrderMode,
     RuntimeTextureSplitMode, Scene, SceneNode, SceneStateId, SceneWorldLayer, SkyMode, SkySettings,
-    UiAction, UiAnchor, UiFontChoice, UiGradient, UiGradientDirection, UiImageEffect, UiNode,
-    UiNodeId, UiNodeKind, UiNodeRow, UiRect, UiScene, UiSceneId, UiSfxBindings, UiSfxCue,
-    UiTextAlign, UiValueBinding, WorldCameraSettings, WorldCullingSettings, WorldGrid,
-    WorldPhysicsSettings, WorldStreamingSettings, DEFAULT_WALL_HEIGHT_SECTORS,
-    DEFAULT_WORLD_SECTOR_SIZE, HEIGHT_QUANTUM, MAX_PHYSICS_WEIGHT_Q8, MAX_UI_FONT_SCALE,
-    MAX_UI_LETTER_SPACING, MAX_WORLD_CAMERA_DISTANCE, MAX_WORLD_CAMERA_HEIGHT,
+    TransitionMaskShape, TransitionMaterialTexture, UiAction, UiAnchor, UiFontChoice, UiGradient,
+    UiGradientDirection, UiImageEffect, UiNode, UiNodeId, UiNodeKind, UiNodeRow, UiRect, UiScene,
+    UiSceneId, UiSfxBindings, UiSfxCue, UiTextAlign, UiValueBinding, WaterVolumeCell,
+    WaterVolumeSettings, WorldCameraSettings, WorldCullingSettings, WorldGrid,
+    WorldPhysicsSettings, WorldStreamingSettings, AUTO_PAINT_BLEND_PREFIX,
+    DEFAULT_WALL_HEIGHT_SECTORS, DEFAULT_WORLD_SECTOR_SIZE, HEIGHT_QUANTUM, MAX_PHYSICS_WEIGHT_Q8,
+    MAX_UI_FONT_SCALE, MAX_UI_LETTER_SPACING, MAX_WORLD_CAMERA_DISTANCE, MAX_WORLD_CAMERA_HEIGHT,
     MAX_WORLD_CAMERA_MIN_FLOOR_CLEARANCE, MAX_WORLD_CHUNK_ACTIVATION_RADIUS_SECTORS,
     MAX_WORLD_DRAW_DISTANCE, MAX_WORLD_GRAVITY_PER_TICK, MAX_WORLD_SECTOR_SIZE,
     MAX_WORLD_STREAMING_RESIDENT_CHUNKS, MAX_WORLD_STREAMING_VISIBLE_CHUNKS,
@@ -193,6 +196,10 @@ const STARTER_CHARACTER_ASSET_DIRS: &[&str] = &[
     "assets/models/hooded_wretch",
     "assets/models/crowned_wraith",
     "assets/animations/standalone_fbx",
+    "assets/models/ci_player",
+    "assets/models/rust_mantis",
+    "assets/animations/ci_player_complete",
+    "assets/animations/rust_mantis_starter",
 ];
 
 fn action_bar_height_for_status(status: &str) -> f32 {
@@ -207,18 +214,25 @@ const STARTER_CHARACTER_MODEL_NAMES: &[&str] = &[
     "Crimson Cross Knight",
     "Hooded Wretch",
     "Crowned Wraith",
+    "Aletha",
+    "Rust Mantis",
 ];
+const STARTER_CHARACTER_MATERIAL_NAMES: &[&str] = &["Aletha Crystal"];
 const STARTER_ANIMATION_SET_NAMES: &[&str] = &[
     "Obsidian Wraith Enemy Set",
     "Crimson Cross Knight Player Set",
     "Hooded Wretch Enemy Set",
     "Crowned Wraith Enemy Set",
+    "Aletha Complete Animation Set",
+    "Rust Mantis Starter Animation Set",
 ];
 const STARTER_CHARACTER_PROFILE_NAMES: &[&str] = &[
     "Crimson Cross Knight Player",
     "Obsidian Wraith Enemy",
     "Hooded Wretch Enemy",
     "Crowned Wraith Enemy",
+    "Aletha",
+    "Rust Mantis Enemy",
 ];
 const LEGACY_WRAITH_HERO_PROFILE_NAME: &str = "Wraith Hero";
 const LEGACY_OBSIDIAN_WARDEN_ASSET_DIR: &str = "assets/models/obsidian_warden";
@@ -498,6 +512,23 @@ pub struct EditorWorkspace {
     /// if one is active, otherwise fall back to a tool-specific
     /// material name hint.
     brush_material: Option<ResourceId>,
+    /// When true, the material Paint tool bakes a transition onto the one
+    /// clicked face. Neighboring faces are context only and never mutated.
+    material_paint_blend: bool,
+    /// One-shot eyedropper state for Material Paint. The next existing face
+    /// click samples its logical material into the shared brush/resource
+    /// selection, then automatically returns to painting.
+    material_paint_sampling: bool,
+    /// Percentage of the painted material kept by generated Paint blends.
+    /// Stored as a human-facing percentage and converted to the transition
+    /// recipe's byte threshold when a stroke is baked.
+    material_paint_blend_coverage_percent: u8,
+    /// Organic variation applied to the exposed edge of generated blends.
+    /// The transition baker clamps this to its seam-safe 0..=96 range.
+    material_paint_blend_edge_detail: u8,
+    /// Active Water subtool: select an existing volume, add cells to the
+    /// selected volume, or erase cells from any volume on the active floor.
+    water_tool_mode: WaterToolMode,
     snap_to_grid: bool,
     snap_units: u16,
     show_grid: bool,
@@ -508,6 +539,7 @@ pub struct EditorWorkspace {
     preview_bounds: bool,
     show_play_debug_overlays: bool,
     show_play_debug_map: bool,
+    play_debug_map_view: PlayDebugMapView,
     play_frame_times_ms: VecDeque<f32>,
     play_frame_last_sample_serial: Option<u32>,
     play_debug_terminal_lines: VecDeque<String>,
@@ -1190,6 +1222,19 @@ struct FloatingGeometryPlacement {
     rotation_quarters: u8,
     flip_x: bool,
     flip_z: bool,
+    /// First grid cell observed under the pointer after duplication begins.
+    /// Capturing it without moving prevents the command's own frame from
+    /// teleporting the adjacent preview to a stale mouse position.
+    pointer_anchor_origin: Option<[i32; 2]>,
+    /// Preview origin paired with `pointer_anchor_origin`. Pointer motion is
+    /// applied as a delta from this nearby starting placement, never as an
+    /// absolute snap to wherever the mouse happened to be when Duplicate ran.
+    pointer_anchor_placement_origin: [i32; 2],
+    /// The geometry authored by the latest preview pass. Keeping this on the
+    /// placement makes the duplicate's selection durable across the click
+    /// frame that commits it instead of relying on transient UI selection.
+    selected_cells: Vec<(u16, u16)>,
+    selected_primitives: Vec<Selection>,
     cells: Vec<GeometryClipboardCell>,
 }
 
@@ -1907,11 +1952,22 @@ enum ViewTool {
     PaintWall,
     /// Paint a ceiling on the sector under the cursor.
     PaintCeiling,
+    /// Repaint exactly one existing floor, ceiling, or wall face.
+    PaintMaterial,
+    /// Paint cells into a first-class Water Volume on the active Room floor.
+    Water,
     /// Clear the painted surface under the cursor.
     Erase,
     /// Drop a child entity node into the sector under the cursor.
     /// The kind of node placed is controlled by `place_kind`.
     Place,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WaterToolMode {
+    Add,
+    Erase,
+    Select,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2025,6 +2081,8 @@ impl ViewTool {
             Self::PaintFloor => "Floor",
             Self::PaintWall => "Wall",
             Self::PaintCeiling => "Ceiling",
+            Self::PaintMaterial => "Paint",
+            Self::Water => "Water",
             Self::Erase => "Erase",
             Self::Place => "Place",
         }
@@ -2036,6 +2094,8 @@ impl ViewTool {
             Self::PaintFloor => icons::GRID,
             Self::PaintWall => icons::BRICK_WALL,
             Self::PaintCeiling => icons::LAYERS,
+            Self::PaintMaterial => icons::PALETTE,
+            Self::Water => icons::BLEND,
             Self::Erase => icons::TRASH,
             Self::Place => icons::PLUS,
         }
@@ -2047,7 +2107,13 @@ impl ViewTool {
     const fn requires_room_context(self) -> bool {
         matches!(
             self,
-            Self::PaintFloor | Self::PaintWall | Self::PaintCeiling | Self::Erase | Self::Place
+            Self::PaintFloor
+                | Self::PaintWall
+                | Self::PaintCeiling
+                | Self::PaintMaterial
+                | Self::Water
+                | Self::Erase
+                | Self::Place
         )
     }
 }
@@ -2210,6 +2276,16 @@ fn decode_embedded_png(bytes: &[u8]) -> Option<ColorImage> {
 }
 
 impl EditorWorkspace {
+    /// Select a Room Topology diagnostic view for deterministic/headless UI
+    /// capture. Returns false for an unknown label.
+    pub fn set_play_debug_map_view(&mut self, label: &str) -> bool {
+        let Some(view) = PlayDebugMapView::parse(label) else {
+            return false;
+        };
+        self.play_debug_map_view = view;
+        self.show_play_debug_map = true;
+        true
+    }
     /// Current top-level workspace, exposed for native startup validation.
     pub const fn active_workspace_view(&self) -> EditorWorkspaceView {
         self.active_workspace.to_project()
@@ -2299,7 +2375,10 @@ impl EditorWorkspace {
             sync_status.unwrap_or_else(|| format!("Loaded {}", short_path(&workspace.project_dir)));
         workspace.select_first_room();
         #[cfg(debug_assertions)]
-        workspace.focus_debug_scene_node_from_env();
+        {
+            workspace.focus_debug_scene_node_from_env();
+            workspace.apply_debug_terrain_tool_from_env();
+        }
         workspace.apply_project_editor_camera();
         workspace.apply_project_editor_visibility();
         Ok(workspace)
@@ -2400,6 +2479,11 @@ impl EditorWorkspace {
             portal_place_direction: GridDirection::North,
             place_resource: None,
             brush_material: None,
+            material_paint_blend: false,
+            material_paint_sampling: false,
+            material_paint_blend_coverage_percent: 50,
+            material_paint_blend_edge_detail: 20,
+            water_tool_mode: WaterToolMode::Add,
             snap_to_grid: true,
             snap_units: 16,
             show_grid: editor_visibility.show_grid,
@@ -2410,6 +2494,7 @@ impl EditorWorkspace {
             preview_bounds: editor_visibility.preview_bounds,
             show_play_debug_overlays: editor_visibility.show_play_debug_overlays,
             show_play_debug_map: editor_visibility.show_play_debug_map,
+            play_debug_map_view: PlayDebugMapView::default(),
             play_frame_times_ms: VecDeque::with_capacity(PLAY_FRAME_HISTORY_CAP),
             play_frame_last_sample_serial: None,
             play_debug_terminal_lines: VecDeque::with_capacity(PLAY_DEBUG_TERMINAL_LINE_CAP),
@@ -2852,6 +2937,54 @@ impl EditorWorkspace {
         }
     }
 
+    /// Optional material-paint tool state for deterministic native captures.
+    /// Kept behind debug assertions so production startup never reads these
+    /// development-only environment variables.
+    #[cfg(debug_assertions)]
+    fn apply_debug_terrain_tool_from_env(&mut self) {
+        let Ok(tool) = std::env::var("PSXED_DEBUG_TOOL") else {
+            return;
+        };
+        let tool = match tool.trim().to_ascii_lowercase().as_str() {
+            "floor" => ViewTool::PaintFloor,
+            "ceiling" => ViewTool::PaintCeiling,
+            "wall" => ViewTool::PaintWall,
+            "paint" | "material" => ViewTool::PaintMaterial,
+            "water" => ViewTool::Water,
+            _ => return,
+        };
+        if self.active_room_id().is_none() {
+            return;
+        }
+        self.active_tool = tool;
+        self.material_paint_blend = std::env::var("PSXED_DEBUG_PAINT_BLEND")
+            .is_ok_and(|value| matches!(value.trim(), "1" | "true" | "yes" | "on"));
+        self.material_paint_sampling = tool == ViewTool::PaintMaterial
+            && std::env::var("PSXED_DEBUG_PAINT_SAMPLE")
+                .is_ok_and(|value| matches!(value.trim(), "1" | "true" | "yes" | "on"));
+        if tool == ViewTool::Water {
+            self.water_tool_mode = match std::env::var("PSXED_DEBUG_WATER_MODE")
+                .unwrap_or_default()
+                .trim()
+                .to_ascii_lowercase()
+                .as_str()
+            {
+                "erase" => WaterToolMode::Erase,
+                "select" => WaterToolMode::Select,
+                _ => WaterToolMode::Add,
+            };
+        }
+        self.status = if tool == ViewTool::Water {
+            format!("Water: {:?}", self.water_tool_mode)
+        } else if self.material_paint_sampling {
+            "Eyedropper: click a surface to sample its material".to_string()
+        } else if self.material_paint_blend {
+            "Material Paint: Blend".to_string()
+        } else {
+            "Material Paint: Direct".to_string()
+        };
+    }
+
     #[cfg(debug_assertions)]
     fn focus_scene_node_for_debug(&mut self, selector: &str) -> bool {
         let selector = selector.trim();
@@ -3099,12 +3232,10 @@ impl EditorWorkspace {
         let mut project = self.project.clone();
         project.normalize_loaded();
         self.clear_validation_issues();
-        // Re-run build_package up front to grab the asset/material
-        // counts for the status string. cook_to_dir does this
-        // internally too; the duplicate cost is negligible
-        // compared to the IO it saves a step later.
-        let (package, _report) =
-            psxed_project::playtest::build_package(&project, &self.project_dir);
+        // Build once: Cortex-sized projects have enough materials, animation,
+        // world geometry, and portal topology that doing this again merely for
+        // the status summary makes every Play launch needlessly expensive.
+        let (package, report) = psxed_project::playtest::build_package(&project, &self.project_dir);
         let summary = package.as_ref().map(|p| PackageSummary {
             rooms: p.rooms.len(),
             assets: p.assets.len(),
@@ -3120,7 +3251,7 @@ impl EditorWorkspace {
                 .and_then(|c| project.resource(c.source_resource).map(|r| r.name.clone())),
         });
 
-        let report = psxed_project::playtest::cook_to_dir(&project, &self.project_dir, &dir)
+        psxed_project::playtest::write_cook_result(package.as_ref(), &dir)
             .map_err(|e| format!("write playtest output: {e}"))?;
         if !report.is_ok() {
             self.record_first_playtest_world_cook_issue(&project);
