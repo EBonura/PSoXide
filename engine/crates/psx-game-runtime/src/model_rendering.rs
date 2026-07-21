@@ -10,7 +10,8 @@
 
 use psx_asset::{Animation, Model, ModelPart, ModelVertex};
 use psx_engine::{
-    telemetry, Angle, CullMode, DepthPolicy, JointViewTransform, LocalToWorldScale, Mat3I16,
+    apply_model_pose_translation, compute_joint_world_transform, telemetry, Angle, CullMode,
+    DepthPolicy, JointViewTransform, JointWorldTransform, LocalToWorldScale, Mat3I16,
     ModelPoseTranslation, ModelUvMapping, ModelUvOffset, PrimitiveSink, ProjectedVertex, RoomPoint,
     SimTick, TexturedModelGeometry, TexturedModelLayer, TexturedModelRenderFace,
     TexturedModelRenderStats, VideoHz, WorldCamera, WorldRenderPass, WorldSurfaceOptions,
@@ -1299,6 +1300,106 @@ pub fn animation_phase_at_tick_q12(
         return start_phase + range_phase % cycle_phase.max(1);
     }
     start_phase + range_phase.min(end_phase.saturating_sub(start_phase))
+}
+
+/// Sample one player joint through the exact presentation transform used by
+/// [`draw_player`]. Gameplay hit volumes therefore follow the visible pose,
+/// including authored visual yaw/scale/offset and in-place root correction.
+#[allow(clippy::too_many_arguments)]
+pub fn player_joint_world_transform(
+    tables: ModelTables,
+    runtime_model: RuntimeModelAsset,
+    character: RuntimeCharacter,
+    animation: Animation<'static>,
+    phase_q12: u32,
+    x: i32,
+    y: i32,
+    z: i32,
+    yaw: Angle,
+    action: CharacterAnimationAction,
+    clip_local: ModelClipIndex,
+    joint: u8,
+) -> Option<JointWorldTransform> {
+    let clip_anchor = model_clip_anchor(tables, runtime_model, clip_local);
+    let reference_anchor =
+        model_clip_anchor(tables, runtime_model, character.clip_for(PlayerAnim::Idle));
+    let pose_translation = model_pose_anchor_translation(
+        animation,
+        phase_q12,
+        clip_anchor,
+        reference_anchor,
+        character.action_in_place_override(action),
+    );
+    let model_rotation = yaw_rotation_matrix(yaw.add_signed_q12(character.visual_yaw));
+    let origin = visual_model_origin(
+        x,
+        y,
+        z,
+        runtime_model.world_height,
+        character.visual_offset,
+        character.visual_scale_q8,
+        &model_rotation,
+    );
+    let local_to_world = visual_model_local_to_world(runtime_model, character.visual_scale_q8);
+    let pose = apply_model_pose_translation(
+        animation.pose_looped_q12(phase_q12, u16::from(joint))?,
+        pose_translation,
+    );
+    Some(compute_joint_world_transform(
+        pose,
+        model_rotation,
+        local_to_world,
+        origin,
+    ))
+}
+
+/// Sample one live model-instance joint through the same transform used by
+/// [`draw_model_instances`]. The caller supplies the entity's live transform,
+/// clip, and phase so authored hurtboxes stay attached to the rendered rig.
+#[allow(clippy::too_many_arguments)]
+pub fn model_instance_joint_world_transform(
+    tables: ModelTables,
+    runtime_model: RuntimeModelAsset,
+    instance: &LevelModelInstanceRecord,
+    animation: Animation<'static>,
+    phase_q12: u32,
+    clip_local: ModelClipIndex,
+    x: i32,
+    y: i32,
+    z: i32,
+    yaw: i16,
+    joint: u8,
+) -> Option<JointWorldTransform> {
+    let clip_anchor = model_clip_anchor(tables, runtime_model, clip_local);
+    let reference_anchor = model_clip_anchor(tables, runtime_model, runtime_model.default_clip);
+    let pose_translation =
+        model_pose_anchor_translation(animation, phase_q12, clip_anchor, reference_anchor, None);
+    let combined_yaw = Angle::from_q12(yaw as u16).add_signed_q12(instance.visual_yaw);
+    let model_rotation = if instance.pitch == 0 && instance.roll == 0 {
+        yaw_rotation_matrix(combined_yaw)
+    } else {
+        euler_q12_rotation([instance.pitch, combined_yaw.as_q12() as i16, instance.roll])
+    };
+    let origin = visual_model_origin(
+        x,
+        y,
+        z,
+        runtime_model.world_height,
+        instance.visual_offset,
+        instance.visual_scale_q8,
+        &model_rotation,
+    );
+    let local_to_world = visual_model_local_to_world(runtime_model, instance.visual_scale_q8);
+    let pose = apply_model_pose_translation(
+        animation.pose_looped_q12(phase_q12, u16::from(joint))?,
+        pose_translation,
+    );
+    Some(compute_joint_world_transform(
+        pose,
+        model_rotation,
+        local_to_world,
+        origin,
+    ))
 }
 
 fn model_pose_anchor_translation(

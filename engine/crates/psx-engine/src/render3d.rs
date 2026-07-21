@@ -424,12 +424,13 @@ impl ProjectedTexturedGouraudVertex {
 /// loaders and validation but wasteful in the per-frame face loop. Runtime
 /// code can decode them once into this compact POD record and pass the slice
 /// to the predecoded geometry submit methods.
+#[repr(C, align(4))]
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct TexturedModelRenderFace {
-    /// Projected-vertex indices for the triangle corners.
-    pub vertex_indices: [u16; 3],
-    /// Packed low 16 bits of each packet UV word: `u | v << 8`.
-    pub uv_words: [u16; 3],
+    /// Three cooked corner words: vertex index in the low half and packet UV
+    /// (`u | v << 8`) in the high half. This mirrors the `.psxmdl` record and
+    /// lets the runtime face loop load one aligned word per corner.
+    pub corner_words: [u32; 3],
 }
 
 /// Wrapped offset applied to model UVs for an independently moving texture
@@ -523,39 +524,64 @@ impl TexturedModelLayer {
 impl TexturedModelRenderFace {
     /// Empty face record used for fixed-size static arrays.
     pub const ZERO: Self = Self {
-        vertex_indices: [0; 3],
-        uv_words: [0; 3],
+        corner_words: [0; 3],
     };
 
     /// Build a predecoded face from canonical `(u, v)` pairs.
     pub const fn new(vertex_indices: [u16; 3], uvs: [(u8, u8); 3]) -> Self {
         Self {
-            vertex_indices,
-            uv_words: [
-                model_uv_word(uvs[0]),
-                model_uv_word(uvs[1]),
-                model_uv_word(uvs[2]),
+            corner_words: [
+                (vertex_indices[0] as u32) | ((model_uv_word(uvs[0]) as u32) << 16),
+                (vertex_indices[1] as u32) | ((model_uv_word(uvs[1]) as u32) << 16),
+                (vertex_indices[2] as u32) | ((model_uv_word(uvs[2]) as u32) << 16),
             ],
         }
     }
 
+    /// Projected-vertex indices for the triangle corners.
+    pub const fn vertex_indices(self) -> [u16; 3] {
+        [
+            self.corner_words[0] as u16,
+            self.corner_words[1] as u16,
+            self.corner_words[2] as u16,
+        ]
+    }
+
+    /// Packed packet UV words for the triangle corners.
+    pub const fn uv_words(self) -> [u16; 3] {
+        [
+            (self.corner_words[0] >> 16) as u16,
+            (self.corner_words[1] >> 16) as u16,
+            (self.corner_words[2] >> 16) as u16,
+        ]
+    }
+
+    /// Replace one packed packet UV word while preserving its vertex index.
+    pub const fn with_corner_uv_word(mut self, index: usize, uv_word: u16) -> Self {
+        self.corner_words[index] = (self.corner_words[index] & 0xffff) | ((uv_word as u32) << 16);
+        self
+    }
+
     /// Return canonical `(u, v)` pairs for fallback paths and tests.
     pub const fn uvs(self) -> [(u8, u8); 3] {
+        let uv_words = self.uv_words();
         [
-            model_uv_pair(self.uv_words[0]),
-            model_uv_pair(self.uv_words[1]),
-            model_uv_pair(self.uv_words[2]),
+            model_uv_pair(uv_words[0]),
+            model_uv_pair(uv_words[1]),
+            model_uv_pair(uv_words[2]),
         ]
     }
 
     /// Return this face with all UVs displaced in wrapping byte space.
     pub const fn with_uv_offset(mut self, offset: ModelUvOffset) -> Self {
         let mut index = 0;
-        while index < self.uv_words.len() {
-            let word = self.uv_words[index];
+        while index < self.corner_words.len() {
+            let word = (self.corner_words[index] >> 16) as u16;
             let u = (word as u8).wrapping_add(offset.u);
             let v = ((word >> 8) as u8).wrapping_add(offset.v);
-            self.uv_words[index] = (u as u16) | ((v as u16) << 8);
+            let uv_word = (u as u16) | ((v as u16) << 8);
+            self.corner_words[index] =
+                (self.corner_words[index] & 0xffff) | ((uv_word as u32) << 16);
             index += 1;
         }
         self
@@ -991,6 +1017,38 @@ pub(crate) fn project_world_vertex_indices_gte(
     while i < group_count {
         project_world_vertex_cpu(camera, vertices, projected_vertices, group[i]);
         i += 1;
+    }
+}
+
+/// Project one contiguous cached world-vertex slice through the GTE.
+///
+/// Dense room views already reference most of their cache. Walking a second
+/// index stream and maintaining a per-frame dedup bitset costs more CPU than
+/// projecting the small remainder, while the GTE itself has substantial
+/// headroom. Keep this separate from the indexed path so sparse portal views
+/// can continue projecting only the vertices they actually use.
+pub(crate) fn project_world_vertices_gte(
+    camera: WorldCamera,
+    vertices: &[WorldVertex],
+    projected_vertices: &mut [ProjectedVertex],
+) {
+    load_world_camera_gte(camera);
+    let near_z = camera.projection.near_z;
+    let limit = vertices.len().min(projected_vertices.len());
+    let mut index = 0usize;
+    while index.saturating_add(3) <= limit {
+        project_world_index_group_gte(
+            camera,
+            vertices,
+            projected_vertices,
+            near_z,
+            [index, index + 1, index + 2],
+        );
+        index += 3;
+    }
+    while index < limit {
+        project_world_vertex_cpu(camera, vertices, projected_vertices, index);
+        index += 1;
     }
 }
 
