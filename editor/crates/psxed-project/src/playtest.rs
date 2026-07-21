@@ -83,7 +83,7 @@ use assets::{
 
 pub use manifest::{
     cook_to_dir, default_generated_dir, render_manifest_source, streamed_room_chunk_memory_report,
-    write_package,
+    write_cook_result, write_package,
 };
 pub use schema::*;
 
