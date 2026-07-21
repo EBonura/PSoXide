@@ -2473,7 +2473,7 @@ impl EditorWorkspace {
         // mutable scene borrow below releases so we never mutate
         // `self.selected_*` while the project is borrowed.
         let mut nav_target: Option<ResourceId> = None;
-        let material_options = self.project.material_options();
+        let mut material_options = self.project.material_options();
         // Snapshot the face's current material id BEFORE we borrow
         // the scene mutably, so the preview lookup below can run
         // without fighting the inspector's `&mut` on resource.data.
@@ -2495,6 +2495,18 @@ impl EditorWorkspace {
                     .get(stack as usize)
                     .and_then(|w| w.material),
             });
+        if let Some(id) = current_material {
+            if !material_options
+                .iter()
+                .any(|(candidate, _)| *candidate == id)
+                && self
+                    .project
+                    .resource(id)
+                    .is_some_and(|resource| resource.name.starts_with(AUTO_PAINT_BLEND_PREFIX))
+            {
+                material_options.push((id, "Paint blend (generated)".to_string()));
+            }
+        }
         let preview_thumb = current_material
             .and_then(|id| self.project.resource(id))
             .and_then(|resource| self.texture_thumb_entry(resource))

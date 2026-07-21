@@ -334,7 +334,16 @@ pub enum TransitionMaskShape {
     Corner,
     /// Coverage growing outward from the texture centre.
     Island,
+    /// Source B fills the tile interior and reaches only the edges connected
+    /// to adjacent tiles painted with the same material. Used by Material
+    /// Paint to remove seams inside a multi-tile painted region.
+    Connected,
 }
+
+/// Reserved resource-name prefix for transition variants synthesized by the
+/// material Paint tool. They remain normal Material resources for cooking and
+/// undo, but author-facing material pickers hide them by default.
+pub const AUTO_PAINT_BLEND_PREFIX: &str = "@paint-blend:";
 
 impl TransitionMaskShape {
     pub const fn label(self) -> &'static str {
@@ -343,6 +352,7 @@ impl TransitionMaskShape {
             Self::Diagonal => "Diagonal edge",
             Self::Corner => "Corner",
             Self::Island => "Island / patch",
+            Self::Connected => "Connected paint",
         }
     }
 }
@@ -376,6 +386,10 @@ pub struct TransitionMaterialTexture {
     pub edge_breakup: u8,
     /// Stable boundary-noise seed.
     pub seed: u32,
+    /// Edge bits reached by Source B for [`TransitionMaskShape::Connected`].
+    /// North, east, south, and west use bits 0 through 3 respectively.
+    #[serde(default, skip_serializing_if = "u8_is_zero")]
+    pub connected_edges: u8,
 }
 
 impl Default for TransitionMaterialTexture {
@@ -396,7 +410,12 @@ impl TransitionMaterialTexture {
         flip_y: false,
         edge_breakup: 20,
         seed: 1,
+        connected_edges: 0,
     };
+}
+
+const fn u8_is_zero(value: &u8) -> bool {
+    *value == 0
 }
 
 /// Image source for a model material's optional second texture pass.
