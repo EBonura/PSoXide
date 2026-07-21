@@ -1600,8 +1600,7 @@ pub(crate) fn apply_world_sector_size_to_descendants(
                 if rescale {
                     grid.rescale_sector_size(sector_size);
                 } else {
-                    grid.sector_size = snap_world_sector_size(sector_size);
-                    grid.snap_heights_to_quantum();
+                    grid.normalize_stacked_sector_size(sector_size);
                 }
             }
             NodeKind::Collider { shape, .. } if rescale => {
