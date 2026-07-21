@@ -3969,9 +3969,9 @@ mod focus_tests {
     #[test]
     fn changing_pose_keys_regenerates_the_immediate_preview_clip() {
         let project_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../projects/cortex_ignition_v1/project.ron");
+            .join("../../projects/default/project.ron");
         let project_root = project_path.parent().expect("project directory");
-        let mut project = ProjectDocument::load_from_path(&project_path).expect("Cortex parses");
+        let mut project = ProjectDocument::load_from_path(&project_path).expect("default parses");
         let model = project
             .resources
             .iter()
@@ -3985,7 +3985,8 @@ mod focus_tests {
             .iter()
             .find_map(|resource| match &resource.data {
                 ResourceData::AnimationClip(animation)
-                    if animation.target_model == Some(model) && resource.name == "idle" =>
+                    if animation.target_model == Some(model)
+                        && resource.name == "Aletha / Idle" =>
                 {
                     Some(resource.id)
                 }
