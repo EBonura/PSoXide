@@ -750,6 +750,24 @@ pub struct MaterialResource {
     /// Which side(s) of faces using this material should render.
     #[serde(default)]
     pub face_sidedness: MaterialFaceSidedness,
+    /// Stable identity of the recipe currently exposed to preview and cooking.
+    /// Legacy project files become version 1 (`Original`).
+    #[serde(
+        default = "default_material_version_id",
+        skip_serializing_if = "material_version_id_is_original"
+    )]
+    pub active_version_id: MaterialVersionId,
+    /// Author-facing label for the active recipe.
+    #[serde(
+        default = "default_material_version_name",
+        skip_serializing_if = "material_version_name_is_original"
+    )]
+    pub active_version_name: String,
+    /// Complete non-active recipes for this same logical material. Faces,
+    /// props, models, and transition sources continue to reference the owning
+    /// [`ResourceId`], so activating one of these changes every use at once.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub versions: Vec<MaterialVersion>,
     /// Legacy pre-merge texture resource reference. Parsed from old
     /// projects, folded into [`psxt_path`](Self::psxt_path) by the
     /// load-time migration, never written back.
@@ -760,6 +778,79 @@ pub struct MaterialResource {
     /// `.ron` projects migrate without losing their two-sided setting.
     #[serde(default)]
     pub double_sided: bool,
+}
+
+/// Stable identity for one named recipe inside a [`MaterialResource`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct MaterialVersionId(u64);
+
+impl MaterialVersionId {
+    /// Identity assigned to every legacy material's initial recipe.
+    pub const ORIGINAL: Self = Self(1);
+
+    /// Return the stored integer for UI ordering and diagnostics.
+    pub const fn raw(self) -> u64 {
+        self.0
+    }
+}
+
+impl Default for MaterialVersionId {
+    fn default() -> Self {
+        Self::ORIGINAL
+    }
+}
+
+/// One named, inactive version of a material recipe.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MaterialVersion {
+    /// Stable version identity, unique within the owning material.
+    pub id: MaterialVersionId,
+    /// Author-facing version label.
+    pub name: String,
+    /// Complete material recipe restored when this version is activated.
+    pub recipe: MaterialVersionRecipe,
+}
+
+/// Complete versionable portion of a [`MaterialResource`].
+///
+/// Legacy migration fields deliberately stay on the owning material. They are
+/// input compatibility state, not authoring choices that should vary by
+/// version.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MaterialVersionRecipe {
+    pub texture_mode: MaterialTextureMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub psxt_path: Option<String>,
+    pub blend_mode: PsxBlendMode,
+    pub tint: [u8; 3],
+    #[serde(default)]
+    pub generated: GeneratedMaterialTexture,
+    #[serde(default)]
+    pub transition: TransitionMaterialTexture,
+    #[serde(default)]
+    pub reflection: ReflectionProbeMaterial,
+    #[serde(default)]
+    pub animation: MaterialAnimation,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secondary_layer: Option<ModelSecondaryLayer>,
+    #[serde(default)]
+    pub face_sidedness: MaterialFaceSidedness,
+}
+
+fn default_material_version_id() -> MaterialVersionId {
+    MaterialVersionId::ORIGINAL
+}
+
+fn material_version_id_is_original(id: &MaterialVersionId) -> bool {
+    *id == MaterialVersionId::ORIGINAL
+}
+
+fn default_material_version_name() -> String {
+    "Original".to_string()
+}
+
+fn material_version_name_is_original(name: &String) -> bool {
+    name == "Original"
 }
 
 /// Default authored width/height for image props, in engine/editor units.
@@ -818,7 +909,7 @@ pub const fn box_prop_vertices_for_size(size: u16) -> [[i16; 3]; BOX_PROP_VERTEX
 
 impl MaterialResource {
     /// Build an opaque neutral material.
-    pub const fn opaque(psxt_path: Option<String>) -> Self {
+    pub fn opaque(psxt_path: Option<String>) -> Self {
         Self {
             texture_mode: MaterialTextureMode::SimpleImage,
             psxt_path,
@@ -867,13 +958,16 @@ impl MaterialResource {
             },
             secondary_layer: None,
             face_sidedness: MaterialFaceSidedness::Both,
+            active_version_id: MaterialVersionId::ORIGINAL,
+            active_version_name: default_material_version_name(),
+            versions: Vec::new(),
             legacy_texture: None,
             double_sided: true,
         }
     }
 
     /// Build a translucent neutral material.
-    pub const fn translucent(psxt_path: Option<String>, blend_mode: PsxBlendMode) -> Self {
+    pub fn translucent(psxt_path: Option<String>, blend_mode: PsxBlendMode) -> Self {
         Self {
             texture_mode: MaterialTextureMode::SimpleImage,
             psxt_path,
@@ -922,6 +1016,9 @@ impl MaterialResource {
             },
             secondary_layer: None,
             face_sidedness: MaterialFaceSidedness::Both,
+            active_version_id: MaterialVersionId::ORIGINAL,
+            active_version_name: default_material_version_name(),
+            versions: Vec::new(),
             legacy_texture: None,
             double_sided: true,
         }
@@ -960,6 +1057,297 @@ impl MaterialResource {
             (false, Some(layer)) => layer.enabled = false,
             (false, None) => {}
         }
+    }
+
+    /// Named versions in stable id order, including the active recipe.
+    pub fn version_options(&self) -> Vec<(MaterialVersionId, String)> {
+        let mut options = Vec::with_capacity(self.versions.len() + 1);
+        options.push((self.active_version_id, self.active_version_name.clone()));
+        options.extend(
+            self.versions
+                .iter()
+                .map(|version| (version.id, version.name.clone())),
+        );
+        options.sort_by_key(|(id, _)| id.raw());
+        options
+    }
+
+    /// Total number of recipes stored under this logical material.
+    pub fn version_count(&self) -> usize {
+        self.versions.len() + 1
+    }
+
+    /// Duplicate the active recipe into a newly named active version.
+    /// The previous active version is retained as an inactive snapshot.
+    pub fn create_version(&mut self, name: impl Into<String>) -> MaterialVersionId {
+        let current = self.capture_active_version();
+        self.versions.push(current);
+        let id = self.next_version_id();
+        self.active_version_id = id;
+        self.active_version_name = normalized_material_version_name(name.into(), id);
+        id
+    }
+
+    /// Activate a saved recipe without changing the owning resource id.
+    pub fn activate_version(&mut self, id: MaterialVersionId) -> bool {
+        if id == self.active_version_id {
+            return false;
+        }
+        let Some(index) = self.versions.iter().position(|version| version.id == id) else {
+            return false;
+        };
+        let current = self.capture_active_version();
+        let target = std::mem::replace(&mut self.versions[index], current);
+        self.apply_version(target);
+        true
+    }
+
+    /// Rename one version. Empty and duplicate labels are rejected.
+    pub fn rename_version(&mut self, id: MaterialVersionId, name: impl Into<String>) -> bool {
+        let name = name.into();
+        let name = name.trim();
+        if name.is_empty()
+            || self
+                .version_options()
+                .iter()
+                .any(|(candidate_id, candidate)| {
+                    *candidate_id != id && candidate.eq_ignore_ascii_case(name)
+                })
+        {
+            return false;
+        }
+        if id == self.active_version_id {
+            self.active_version_name = name.to_string();
+            return true;
+        }
+        let Some(version) = self.versions.iter_mut().find(|version| version.id == id) else {
+            return false;
+        };
+        version.name = name.to_string();
+        true
+    }
+
+    /// Remove one version. The final remaining recipe cannot be deleted.
+    /// Deleting the active version first activates the oldest saved version.
+    pub fn delete_version(&mut self, id: MaterialVersionId) -> bool {
+        if self.version_count() <= 1 {
+            return false;
+        }
+        if id == self.active_version_id {
+            let Some(replacement) = self
+                .versions
+                .iter()
+                .min_by_key(|version| version.id.raw())
+                .map(|version| version.id)
+            else {
+                return false;
+            };
+            if !self.activate_version(replacement) {
+                return false;
+            }
+        }
+        let Some(index) = self.versions.iter().position(|version| version.id == id) else {
+            return false;
+        };
+        self.versions.remove(index);
+        true
+    }
+
+    /// Repair hand-authored or legacy version metadata after deserialization.
+    pub fn normalize_versions(&mut self) {
+        if self.active_version_id.raw() == 0 {
+            self.active_version_id = MaterialVersionId::ORIGINAL;
+        }
+        self.active_version_name = normalized_material_version_name(
+            std::mem::take(&mut self.active_version_name),
+            self.active_version_id,
+        );
+        if let Some(layer) = self.secondary_layer.as_mut() {
+            layer.normalize_legacy_source();
+        }
+
+        let mut seen = HashSet::new();
+        seen.insert(self.active_version_id);
+        let mut next = self
+            .versions
+            .iter()
+            .map(|version| version.id.raw())
+            .chain(std::iter::once(self.active_version_id.raw()))
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1)
+            .max(2);
+        for version in &mut self.versions {
+            if version.id.raw() == 0 || !seen.insert(version.id) {
+                while seen.contains(&MaterialVersionId(next)) {
+                    next = next.saturating_add(1);
+                }
+                version.id = MaterialVersionId(next);
+                seen.insert(version.id);
+                next = next.saturating_add(1);
+            }
+            version.name =
+                normalized_material_version_name(std::mem::take(&mut version.name), version.id);
+            if let Some(layer) = version.recipe.secondary_layer.as_mut() {
+                layer.normalize_legacy_source();
+            }
+        }
+    }
+
+    pub(crate) fn version_resource_reference_count(&self, id: ResourceId) -> usize {
+        MaterialVersionRecipe::from(self).resource_reference_count(id)
+            + self
+                .versions
+                .iter()
+                .map(|version| version.recipe.resource_reference_count(id))
+                .sum::<usize>()
+    }
+
+    pub(crate) fn clear_version_resource_references(&mut self, id: ResourceId) -> usize {
+        let mut active = MaterialVersionRecipe::from(&*self);
+        let mut cleared = active.clear_resource_references(id);
+        active.apply_to(self);
+        cleared += self
+            .versions
+            .iter_mut()
+            .map(|version| version.recipe.clear_resource_references(id))
+            .sum::<usize>();
+        cleared
+    }
+
+    /// Every imported texture path preserved by every version and layer.
+    pub(crate) fn version_texture_paths(&self) -> Vec<&str> {
+        let mut paths = Vec::with_capacity((self.versions.len() + 1) * 2);
+        if let Some(path) = self.psxt_path.as_deref() {
+            paths.push(path);
+        }
+        if let Some(path) = self
+            .secondary_layer
+            .as_ref()
+            .and_then(|layer| layer.psxt_path.as_deref())
+        {
+            paths.push(path);
+        }
+        for version in &self.versions {
+            paths.extend(version.recipe.texture_paths());
+        }
+        paths
+    }
+
+    fn capture_active_version(&self) -> MaterialVersion {
+        MaterialVersion {
+            id: self.active_version_id,
+            name: self.active_version_name.clone(),
+            recipe: MaterialVersionRecipe::from(self),
+        }
+    }
+
+    fn apply_version(&mut self, version: MaterialVersion) {
+        self.active_version_id = version.id;
+        self.active_version_name = version.name;
+        version.recipe.apply_to(self);
+    }
+
+    fn next_version_id(&self) -> MaterialVersionId {
+        let next = self
+            .versions
+            .iter()
+            .map(|version| version.id.raw())
+            .chain(std::iter::once(self.active_version_id.raw()))
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1)
+            .max(2);
+        MaterialVersionId(next)
+    }
+}
+
+impl From<&MaterialResource> for MaterialVersionRecipe {
+    fn from(material: &MaterialResource) -> Self {
+        Self {
+            texture_mode: material.texture_mode,
+            psxt_path: material.psxt_path.clone(),
+            blend_mode: material.blend_mode,
+            tint: material.tint,
+            generated: material.generated,
+            transition: material.transition,
+            reflection: material.reflection,
+            animation: material.animation,
+            secondary_layer: material.secondary_layer.clone(),
+            face_sidedness: material.sidedness(),
+        }
+    }
+}
+
+impl MaterialVersionRecipe {
+    fn apply_to(self, material: &mut MaterialResource) {
+        material.texture_mode = self.texture_mode;
+        material.psxt_path = self.psxt_path;
+        material.blend_mode = self.blend_mode;
+        material.tint = self.tint;
+        material.generated = self.generated;
+        material.transition = self.transition;
+        material.reflection = self.reflection;
+        material.animation = self.animation;
+        material.secondary_layer = self.secondary_layer;
+        material.face_sidedness = self.face_sidedness;
+        material.legacy_texture = None;
+        material.sync_legacy_sidedness();
+    }
+
+    fn resource_reference_count(&self, id: ResourceId) -> usize {
+        usize::from(self.transition.source_a == Some(id))
+            + usize::from(self.transition.source_b == Some(id))
+            + self.secondary_layer.as_ref().map_or(0, |layer| {
+                usize::from(layer.transition.source_a == Some(id))
+                    + usize::from(layer.transition.source_b == Some(id))
+            })
+    }
+
+    fn clear_resource_references(&mut self, id: ResourceId) -> usize {
+        let clear = |value: &mut Option<ResourceId>| {
+            if *value == Some(id) {
+                *value = None;
+                1
+            } else {
+                0
+            }
+        };
+        let mut cleared =
+            clear(&mut self.transition.source_a) + clear(&mut self.transition.source_b);
+        if let Some(layer) = self.secondary_layer.as_mut() {
+            cleared +=
+                clear(&mut layer.transition.source_a) + clear(&mut layer.transition.source_b);
+        }
+        cleared
+    }
+
+    fn texture_paths(&self) -> Vec<&str> {
+        let mut paths = Vec::with_capacity(2);
+        if let Some(path) = self.psxt_path.as_deref() {
+            paths.push(path);
+        }
+        if let Some(path) = self
+            .secondary_layer
+            .as_ref()
+            .and_then(|layer| layer.psxt_path.as_deref())
+        {
+            paths.push(path);
+        }
+        paths
+    }
+}
+
+fn normalized_material_version_name(name: String, id: MaterialVersionId) -> String {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        if id == MaterialVersionId::ORIGINAL {
+            default_material_version_name()
+        } else {
+            format!("Version {}", id.raw())
+        }
+    } else {
+        trimmed.to_string()
     }
 }
 
