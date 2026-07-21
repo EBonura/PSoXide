@@ -773,6 +773,38 @@ pub struct LevelRoomPortalRecord {
     pub vertex_z: [i32; 4],
 }
 
+/// One water-covered runtime sector. The generated table is sorted by
+/// `(room, x, z)` for allocation-free binary search at runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelWaterCellRecord {
+    /// Owning runtime room.
+    pub room: RoomIndex,
+    /// Runtime-room-local sector X.
+    pub x: u16,
+    /// Runtime-room-local sector Z.
+    pub z: u16,
+    /// Texture drawn across this cell, or no surface for gameplay-only water.
+    pub texture_asset: Option<AssetId>,
+    /// Blend code from [`model_override_blend`].
+    pub blend_mode: u8,
+    /// Surface modulation tint.
+    pub tint_rgb: [u8; 3],
+    /// Animation inherited from the authored surface material.
+    pub animation: LevelMaterialAnimation,
+    /// Horizontal surface in room-local engine units.
+    pub surface_y: i32,
+    /// Terrain depth below the surface at the sector centre.
+    pub depth: u16,
+    /// Depth that makes this cell lethal.
+    pub lethal_depth: u16,
+    /// Ground speed retained while wading, as a percentage.
+    pub movement_percent: u8,
+    /// Ticks between lethal submersion and respawn.
+    pub death_delay_ticks: u8,
+    /// Submersion needed to start the lethal sequence.
+    pub death_submerge_depth: u16,
+}
+
 /// Cardinal open-portal neighbours for one cooked room.
 ///
 /// Missing neighbours are encoded as `RoomIndex(u16::MAX)` so the
@@ -2002,6 +2034,8 @@ pub struct LevelBoxPropRecord {
     pub room: RoomIndex,
     /// Per-face texture asset. `None` means the face is not drawn.
     pub texture_assets: [Option<AssetId>; BOX_PROP_FACE_COUNT],
+    /// Per-face blend codes from [`model_override_blend`].
+    pub blend_modes: [u8; BOX_PROP_FACE_COUNT],
     /// Bottom-center room-local X.
     pub x: i32,
     /// Bottom Y.

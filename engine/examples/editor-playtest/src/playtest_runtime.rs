@@ -1,6 +1,64 @@
 use super::*;
 
 impl Playtest {
+    pub(super) fn water_cell_at(
+        &self,
+        room: RoomIndex,
+        position: RoomPoint,
+    ) -> Option<&'static LevelWaterCellRecord> {
+        let sector_size = i32::from(ROOMS.get(room.to_usize())?.sector_size);
+        if sector_size <= 0 {
+            return None;
+        }
+        let x = u16::try_from(position.x.div_euclid(sector_size)).ok()?;
+        let z = u16::try_from(position.z.div_euclid(sector_size)).ok()?;
+        WATER_CELLS
+            .binary_search_by_key(&(room, x, z), |cell| (cell.room, cell.x, cell.z))
+            .ok()
+            .and_then(|index| WATER_CELLS.get(index))
+    }
+
+    pub(super) fn respawn_after_water_death(&mut self) {
+        let (room, position, yaw) = if let Some(checkpoint) = self.checkpoint {
+            (checkpoint.room, checkpoint.position, checkpoint.yaw)
+        } else {
+            let spawn = PLAYER_CONTROLLER.map_or(PLAYER_SPAWN, |controller| controller.spawn);
+            (
+                spawn.room,
+                RoomPoint::new(spawn.x, spawn.y, spawn.z),
+                Angle::from_q12(spawn.yaw as u16),
+            )
+        };
+        if ROOMS.get(room.to_usize()).is_none() {
+            return;
+        }
+        self.room_index = room;
+        self.motor.snap_to(position, yaw);
+        self.player_health = self.player_health_max;
+        self.water_death_ticks_remaining = 0;
+        self.anim_state = PlayerAnim::Idle;
+        self.anim_lock_until_tick = SimTick::ZERO;
+        self.lock_target = None;
+        self.soft_lock_target = None;
+        self.active_interactable = None;
+        self.evade_run_hold_ticks = 0;
+        self.evade_run_hold_consumed = false;
+        self.game_entities.spawn_from_records(GAME_ENTITIES);
+        self.logic.init_from_records(LOGIC);
+        self.box_props.reset_dynamic_state();
+        self.sync_door_box_props();
+        self.camera
+            .snap_to_player_with_yaw(self.camera_target(None, false), self.camera_config(), yaw);
+        self.render_camera = world_camera_from_position_focus(
+            PROJECTION,
+            self.camera.position(),
+            self.camera.focus(),
+        );
+        #[cfg(not(feature = "cd-stream-bench"))]
+        self.load_active_room_window();
+        telemetry::debug_log("player water:respawn");
+    }
+
     pub(super) fn start_player_anim_action(
         &mut self,
         anim: PlayerAnim,
@@ -343,6 +401,49 @@ impl Playtest {
             }
         }
         submitted
+    }
+
+    /// Draw the player's lightweight water-foot splash when actually moving
+    /// through non-lethal water. The effect is capped at three sprite packets
+    /// and derives its phase from time, so it adds no persistent particle state.
+    pub(super) fn draw_player_water_wade_splash(
+        &self,
+        camera: WorldCamera,
+        elapsed_tick: SimTick,
+        ot: &mut OtFrame<'_, OT_DEPTH>,
+        primitive_packets: &mut PrimitivePacketArena<'_>,
+    ) -> usize {
+        if !self.player_moved_last_tick || self.water_death_ticks_remaining > 0 {
+            return 0;
+        }
+        let player = self.motor.position();
+        let Some(water) = self.water_cell_at(self.room_index, player) else {
+            return 0;
+        };
+        if player.y >= water.surface_y || water.depth >= water.lethal_depth {
+            return 0;
+        }
+        let Some(particle_material) = self.particle_material else {
+            return 0;
+        };
+        let depth_range = ROOMS
+            .get(self.room_index.to_usize())
+            .map(room_depth_range)
+            .unwrap_or(WORLD_DEPTH_RANGE);
+        let projector = PROP_PARTICLE_GTE_PROJECT_ENABLED
+            .then(|| LoadedWorldCameraGte::load(camera));
+        draw_water_wade_splash(
+            player.x,
+            water.surface_y,
+            player.z,
+            camera,
+            projector,
+            depth_range,
+            particle_material,
+            elapsed_tick,
+            ot,
+            primitive_packets,
+        )
     }
 
     /// Gameplay-anchored animation tick: raw sim ticks minus the epoch

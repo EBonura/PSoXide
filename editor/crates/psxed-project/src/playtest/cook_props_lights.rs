@@ -332,6 +332,7 @@ pub(crate) fn push_box_prop(
     report: &mut PlaytestValidationReport,
 ) -> bool {
     let mut texture_asset_indices = [None; psx_level::BOX_PROP_FACE_COUNT];
+    let mut blend_modes = [psx_level::model_override_blend::OPAQUE; psx_level::BOX_PROP_FACE_COUNT];
     let mut tint_rgb = [[128, 128, 128]; psx_level::BOX_PROP_FACE_COUNT];
     let mut valid_faces = 0usize;
     for (face, material) in materials.iter().enumerate() {
@@ -355,6 +356,15 @@ pub(crate) fn push_box_prop(
         };
         texture_asset_indices[face] = Some(texture_asset_index);
         tint_rgb[face] = tint;
+        blend_modes[face] = project
+            .resource(material_id)
+            .and_then(|resource| match &resource.data {
+                ResourceData::Material(material) => Some(
+                    super::manifest::model_override_blend_code(material.blend_mode),
+                ),
+                _ => None,
+            })
+            .unwrap_or(psx_level::model_override_blend::OPAQUE);
         valid_faces += 1;
     }
 
@@ -378,6 +388,7 @@ pub(crate) fn push_box_prop(
     box_props.push(PlaytestBoxProp {
         room: room_index,
         texture_asset_indices,
+        blend_modes,
         x: pos[0],
         y: pos[1],
         z: pos[2],

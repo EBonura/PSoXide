@@ -56,6 +56,9 @@ fn collect_resource_use(
             NodeKind::Room { grid } => {
                 collect_grid_resources(grid, &mut use_set, &mut materials);
             }
+            NodeKind::WaterVolume { material, .. } => {
+                push_material(*material, &mut use_set, &mut materials);
+            }
             NodeKind::MeshInstance { mesh, material, .. } => {
                 push_material(*material, &mut use_set, &mut materials);
                 if let Some(mesh_id) = mesh {
@@ -214,7 +217,7 @@ mod tests {
     use super::*;
     use crate::{
         CharacterResource, GridTriangleMaterialOverride, MaterialResource, NodeKind,
-        ParticleEmitterSettings, ResourceData,
+        ParticleEmitterSettings, ResourceData, WaterVolumeCell, WaterVolumeSettings,
     };
 
     #[test]
@@ -284,6 +287,15 @@ mod tests {
                     texture: Some(particle_texture),
                     ..ParticleEmitterSettings::default()
                 },
+            },
+        );
+        scene.add_node(
+            room,
+            "Water",
+            NodeKind::WaterVolume {
+                material: Some(material),
+                cells: vec![WaterVolumeCell::new(0, 0)],
+                settings: WaterVolumeSettings::default(),
             },
         );
         let entity = scene.add_node(room, "Entity", NodeKind::Entity);

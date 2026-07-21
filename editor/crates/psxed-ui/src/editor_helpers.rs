@@ -807,7 +807,11 @@ pub(crate) fn entity_bound_kind_and_size(
     node: &psxed_project::SceneNode,
 ) -> Option<(EntityBoundKind, [f32; 3])> {
     match &node.kind {
-        NodeKind::Room { .. } | NodeKind::World { .. } | NodeKind::Node | NodeKind::Node3D => None,
+        NodeKind::Room { .. }
+        | NodeKind::World { .. }
+        | NodeKind::Node
+        | NodeKind::Node3D
+        | NodeKind::WaterVolume { .. } => None,
         NodeKind::ModelRenderer { .. }
         | NodeKind::Animator { .. }
         | NodeKind::Collider { .. }

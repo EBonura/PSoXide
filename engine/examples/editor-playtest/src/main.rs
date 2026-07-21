@@ -97,7 +97,7 @@ use psx_level::{
     InteractableKind, InteractableRecord, LevelBoxPropRecord, LevelCameraRecord,
     LevelCharacterRecord, LevelChunkRecord, LevelFarVistaRecord, LevelGameEntityRecord,
     LevelImagePropRecord, LevelRoomRecord, LevelSkyRecord, ModelClipIndex, ParticleEmitterRecord,
-    RoomIndex, RuntimeDebugMask,
+    LevelWaterCellRecord, RoomIndex, RuntimeDebugMask,
 };
 use psx_vram::{TexDepth, Tpage};
 
@@ -128,6 +128,7 @@ mod sky_runtime;
 mod visibility_runtime;
 mod visible_cell_runtime;
 mod vram_runtime;
+mod water_runtime;
 
 use active_room_cache::*;
 use active_room_streaming::*;
@@ -149,6 +150,7 @@ use sky_runtime::*;
 use visibility_runtime::*;
 use visible_cell_runtime::*;
 use vram_runtime::*;
+use water_runtime::*;
 
 // Placeholder manifests reference unused statics; populated
 // manifests reference all of them. Quiet either side here.
@@ -166,7 +168,7 @@ use generated::{
     PLAYER_SPAWN, ROOMS, ROOM_CACHE_CELLS, ROOM_CACHE_CELL_VERTICES, ROOM_CACHE_SURFACES,
     ROOM_CACHE_VERTICES, ROOM_CHUNKS, ROOM_OVERLAPPED_ROOMS, ROOM_PORTALS, ROOM_REFLECTION_PROBES,
     ROOM_RESIDENCY, ROOM_SURFACE_CACHES, ROOM_VISIBILITY, UI_FONTS, UI_NODES, UI_PAINTS,
-    UI_SFX_CUES, UI_SFX_SAMPLES, VISIBILITY_CELLS, WEAPONS, WEAPON_HITBOXES,
+    UI_SFX_CUES, UI_SFX_SAMPLES, VISIBILITY_CELLS, WATER_CELLS, WEAPONS, WEAPON_HITBOXES,
 };
 #[cfg(feature = "cd-stream-bench")]
 use generated::{
@@ -318,6 +320,9 @@ struct Playtest {
     player_health: u16,
     /// See [`Self::player_health`].
     player_health_max: u16,
+    /// Remaining deep-water death sequence ticks. Non-zero locks player
+    /// input while gravity carries the body below the authored surface.
+    water_death_ticks_remaining: u8,
     /// Entities already hit by the CURRENT player swing (bit i =
     /// entity i): one swing connects at most once per enemy. Cleared
     /// when an attack action starts.
