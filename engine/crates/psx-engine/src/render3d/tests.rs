@@ -239,8 +239,13 @@ fn model_face_packed_uv_words_match_packet_texcoords() {
     let face = TexturedModelRenderFace::new([0, 1, 2], uvs);
 
     let tuple_packet = TriTextured::with_material_packet_texcoords(verts, uvs, material);
-    let packed_packet = TriTextured::with_material_packed_uv_words(verts, face.uv_words, material);
+    let packed_packet =
+        TriTextured::with_material_packed_uv_words(verts, face.uv_words(), material);
 
+    assert_eq!(core::mem::size_of::<TexturedModelRenderFace>(), 12);
+    assert_eq!(core::mem::align_of::<TexturedModelRenderFace>(), 4);
+    assert_eq!(face.corner_words, [0x0503_0000, 0x0711_0001, 0x1d0b_0002]);
+    assert_eq!(face.vertex_indices(), [0, 1, 2]);
     assert_eq!(face.uvs(), uvs);
     assert_eq!(tuple_packet.tex_window, packed_packet.tex_window);
     assert_eq!(tuple_packet.color_cmd, packed_packet.color_cmd);
@@ -257,7 +262,7 @@ fn model_face_uv_offset_wraps_each_byte_independently() {
     let face = TexturedModelRenderFace::new([0, 1, 2], [(250, 1), (3, 254), (128, 64)]);
     let moved = face.with_uv_offset(ModelUvOffset::new(10, 4));
 
-    assert_eq!(moved.vertex_indices, face.vertex_indices);
+    assert_eq!(moved.vertex_indices(), face.vertex_indices());
     assert_eq!(moved.uvs(), [(4, 5), (13, 2), (138, 68)]);
     assert_eq!(face.uvs(), [(250, 1), (3, 254), (128, 64)]);
 }
@@ -293,6 +298,7 @@ fn model_no_cull_unclamped_batch_keeps_both_windings() {
     let mut commands = [WorldTriCommand::EMPTY; 2];
     let mut stats = TexturedModelRenderStats::default();
     let mut faces_considered = 0;
+    let uv_offset = ModelUvOffset::new(10, 4);
     let overflow = {
         let mut pass = WorldRenderPass::new(&mut ot, &mut commands);
         pass.submit_predecoded_model_faces_packed_average_unclamped_extent_safe_batch::<false>(
@@ -300,6 +306,7 @@ fn model_no_cull_unclamped_batch_keeps_both_windings() {
             &projected,
             &faces,
             material.textured_packet_material(),
+            uv_offset,
             options,
             &mut stats,
             &mut faces_considered,
@@ -313,6 +320,14 @@ fn model_no_cull_unclamped_batch_keeps_both_windings() {
     assert_eq!(stats.culled_triangles, 0);
     assert_eq!(stats.submitted_triangles, 2);
     assert_eq!(stats.fast_submitted_triangles, 2);
+    assert_eq!(
+        triangle_storage[0].uv0_clut as u16,
+        faces[0].with_uv_offset(uv_offset).uv_words()[0]
+    );
+    assert_eq!(
+        triangle_storage[1].uv1_tpage as u16,
+        faces[1].with_uv_offset(uv_offset).uv_words()[1]
+    );
 }
 
 #[test]
@@ -387,10 +402,10 @@ fn layered_bucketed_model_batch_culls_once_and_keeps_material_passes_contiguous(
     assert_eq!(stats.culled_triangles, 2);
     assert_eq!(stats.submitted_triangles, 4);
     assert_eq!(stats.fast_submitted_triangles, 4);
-    assert_eq!(triangle_storage[0].uv0_clut as u16, faces[0].uv_words[0]);
+    assert_eq!(triangle_storage[0].uv0_clut as u16, faces[0].uv_words()[0]);
     assert_eq!(
         triangle_storage[1].uv0_clut as u16,
-        faces[0].with_uv_offset(ModelUvOffset::new(5, 7)).uv_words[0]
+        faces[0].with_uv_offset(ModelUvOffset::new(5, 7)).uv_words()[0]
     );
     assert!(!stats.primitive_overflow);
     assert!(!stats.command_overflow);
@@ -688,6 +703,28 @@ fn loaded_world_camera_gte_projects_quad_like_cpu() {
         assert!((gte[i].sy - cpu[i].sy).abs() <= 2);
         assert!((gte[i].sz - cpu[i].sz).abs() <= 2);
     }
+}
+
+#[test]
+fn contiguous_gte_projection_matches_ordered_index_projection() {
+    let projection = WorldProjection::new(160, 118, 320, 48);
+    let target = WorldVertex::new(0, 128, 0);
+    let camera = WorldCamera::orbit_yaw(projection, target, 512, 1536, Angle::from_q12(170));
+    let vertices = [
+        WorldVertex::new(-128, 320, 64),
+        WorldVertex::new(128, 320, 64),
+        WorldVertex::new(128, 64, 64),
+        WorldVertex::new(-128, 64, 64),
+        WorldVertex::new(0, 160, -32),
+    ];
+    let indices = [0, 1, 2, 3, 4];
+    let mut indexed = [ProjectedVertex::INVALID; 5];
+    let mut contiguous = [ProjectedVertex::INVALID; 5];
+
+    project_world_vertex_indices_gte(camera, &vertices, &indices, &mut indexed);
+    project_world_vertices_gte(camera, &vertices, &mut contiguous);
+
+    assert_eq!(contiguous, indexed);
 }
 
 #[test]
