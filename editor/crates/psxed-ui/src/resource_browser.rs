@@ -262,6 +262,12 @@ pub(crate) fn resource_matches_filter(
     }
     resource.name.to_ascii_lowercase().contains(search)
         || resource.data.label().to_ascii_lowercase().contains(search)
+        || matches!(
+            &resource.data,
+            ResourceData::Material(material)
+                if material.texture_mode == MaterialTextureMode::Transition
+                    && "transition material".contains(search)
+        )
         || resource_source_path(resource)
             .is_some_and(|path| path.to_ascii_lowercase().contains(search))
 }
@@ -760,6 +766,11 @@ pub(crate) fn resource_preview_color(resource: &Resource) -> Color32 {
 pub(crate) fn resource_detail(resource: &Resource) -> &'static str {
     match &resource.data {
         ResourceData::Texture { .. } => "Texture - 4bpp",
+        ResourceData::Material(material)
+            if material.texture_mode == MaterialTextureMode::Transition =>
+        {
+            "Transition Material - 4bpp"
+        }
         ResourceData::Material(_) => "Material - 4bpp",
         ResourceData::Model(_) => "Model",
         ResourceData::Skeleton(_) => "Skeleton",

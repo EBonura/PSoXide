@@ -1302,7 +1302,14 @@ impl ProjectDocument {
 
 pub(crate) fn resource_data_reference_count(data: &ResourceData, id: ResourceId) -> usize {
     match data {
-        ResourceData::Material(_) => 0,
+        ResourceData::Material(material) => {
+            option_resource_reference_count(material.transition.source_a, id)
+                + option_resource_reference_count(material.transition.source_b, id)
+                + material.secondary_layer.as_ref().map_or(0, |layer| {
+                    option_resource_reference_count(layer.transition.source_a, id)
+                        + option_resource_reference_count(layer.transition.source_b, id)
+                })
+        }
         ResourceData::Model(model) => option_resource_reference_count(model.skeleton, id),
         ResourceData::AnimationSource(source) => {
             option_resource_reference_count(source.skeleton, id)
@@ -1345,7 +1352,15 @@ pub(crate) fn resource_data_reference_count(data: &ResourceData, id: ResourceId)
 
 pub(crate) fn clear_resource_data_references(data: &mut ResourceData, id: ResourceId) -> usize {
     match data {
-        ResourceData::Material(_) => 0,
+        ResourceData::Material(material) => {
+            let mut cleared = clear_option_resource(&mut material.transition.source_a, id)
+                + clear_option_resource(&mut material.transition.source_b, id);
+            if let Some(layer) = material.secondary_layer.as_mut() {
+                cleared += clear_option_resource(&mut layer.transition.source_a, id)
+                    + clear_option_resource(&mut layer.transition.source_b, id);
+            }
+            cleared
+        }
         ResourceData::Model(model) => clear_option_resource(&mut model.skeleton, id),
         ResourceData::AnimationSource(source) => {
             clear_option_resource(&mut source.skeleton, id)

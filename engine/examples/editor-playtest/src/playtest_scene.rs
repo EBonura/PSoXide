@@ -165,8 +165,7 @@ impl Scene for Playtest {
     fn prepare_loading_assets(&mut self, scene: u16) {
         #[cfg(feature = "cd-stream-bench")]
         {
-            let loading_images_ready =
-                menu_ui_cache_ready() && load_ui_images_for_scene(scene);
+            let loading_images_ready = menu_ui_cache_ready() && load_ui_images_for_scene(scene);
             // The loading images are now in VRAM; this is the overlay
             // handoff point (`MenuGameplayOverlay`): gameplay room draws
             // own the cache's RAM from here. Claims are reset so any

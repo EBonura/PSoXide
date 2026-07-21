@@ -458,10 +458,14 @@ impl EditorWorkspace {
             rotation_quarters: 0,
             flip_x: false,
             flip_z: false,
+            pointer_anchor_origin: None,
+            pointer_tracking_started: false,
+            selected_cells: Vec::new(),
+            selected_primitives: Vec::new(),
             cells: clipboard.cells,
         });
         self.apply_floating_geometry_preview();
-        self.status = "Duplicating world geometry - move cursor, R rotates, F flips, Shift+F flips vertically, click places, Esc cancels"
+        self.status = "Duplicating world geometry beside source - move cursor, R rotates, F flips, Shift+F flips vertically, click places, Esc cancels"
             .to_string();
     }
 
@@ -496,6 +500,33 @@ impl EditorWorkspace {
         true
     }
 
+    /// Feed a pointer-derived grid origin into floating placement. The first
+    /// observed cell is only an anchor: duplicate commands can originate from
+    /// a shortcut, toolbar, or tree menu while the mouse is elsewhere, and
+    /// immediately snapping to that stale position makes the copy appear to
+    /// vanish. Crossing into another cell is treated as deliberate movement
+    /// and enables the normal cursor-following behaviour for the rest of the
+    /// placement.
+    pub(crate) fn track_floating_geometry_pointer_origin(&mut self, origin: [i32; 2]) -> bool {
+        let Some(preview) = self.floating_geometry.as_mut() else {
+            return false;
+        };
+        if preview.pointer_tracking_started {
+            return self.update_floating_geometry_origin(origin);
+        }
+        match preview.pointer_anchor_origin {
+            None => {
+                preview.pointer_anchor_origin = Some(origin);
+                true
+            }
+            Some(anchor) if anchor == origin => true,
+            Some(_) => {
+                preview.pointer_tracking_started = true;
+                self.update_floating_geometry_origin(origin)
+            }
+        }
+    }
+
     pub(crate) fn rotate_floating_geometry_cw(&mut self) {
         let Some(preview) = self.floating_geometry.as_mut() else {
             return;
@@ -528,6 +559,14 @@ impl EditorWorkspace {
             return false;
         };
         self.history.record(preview.base_project);
+        match preview.mode {
+            GeometryClipboardMode::ReplaceCells => {
+                self.select_geometry_cells(preview.room, preview.selected_cells);
+            }
+            GeometryClipboardMode::MergePrimitives => {
+                self.select_geometry_primitives(preview.room, preview.selected_primitives);
+            }
+        }
         self.status = "Placed duplicated world geometry".to_string();
         self.mark_dirty();
         true
@@ -628,6 +667,10 @@ impl EditorWorkspace {
                     }
                 }
             }
+        }
+        if let Some(active_preview) = self.floating_geometry.as_mut() {
+            active_preview.selected_cells = selected_cells.clone();
+            active_preview.selected_primitives = selected_primitives.clone();
         }
         match preview.mode {
             GeometryClipboardMode::ReplaceCells => {

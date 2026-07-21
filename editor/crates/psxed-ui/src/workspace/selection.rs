@@ -785,6 +785,15 @@ impl EditorWorkspace {
         {
             self.selection.selected_ui_node = ui_root;
         }
+
+        // Layer creation is undoable. If undo removes the active top layer,
+        // keep the authoring index inside the restored room instead of
+        // carrying a stale value into the next Up/Down action.
+        self.active_floor = self
+            .floors_target_room()
+            .and_then(|room| self.room_base_grid(room))
+            .map(|grid| self.active_floor.min(grid.floor_count().saturating_sub(1)))
+            .unwrap_or(0);
     }
 
     pub(crate) fn clear_sector_selection(&mut self) {

@@ -280,6 +280,50 @@ impl<
             .min(MAX_ACTIVE_ROOMS)
     }
 
+    /// Expand the portal-visible set with every cooked room that overlaps it
+    /// in X/Z on another stacked floor. The expansion is transitive and
+    /// deduplicated in the fixed room pool. Overlap rooms inherit the source
+    /// room's draw-distance result but deliberately carry no portal frustum:
+    /// they must draw their complete cached surface set behind translucent
+    /// floors instead of being clipped to a doorway that does not exist.
+    pub fn include_overlapped_rooms(
+        &mut self,
+        rooms: &[LevelRoomRecord],
+        overlapped_rooms: &[RoomIndex],
+    ) {
+        let mut source_index = 0usize;
+        while source_index < self.result.room_count.min(MAX_ACTIVE_ROOMS) {
+            let source = self.result.rooms[source_index];
+            let Some(record) = rooms.get(source.room.to_usize()) else {
+                source_index += 1;
+                continue;
+            };
+            let first = record.overlapped_room_first as usize;
+            let end = first
+                .saturating_add(record.overlapped_room_count as usize)
+                .min(overlapped_rooms.len());
+            for &overlap in overlapped_rooms.get(first..end).unwrap_or(&[]) {
+                if overlap.to_usize() >= rooms.len() || self.result.contains_room(overlap) {
+                    continue;
+                }
+                if self.result.room_count >= MAX_ACTIVE_ROOMS {
+                    self.result.stats.cap_room = self.result.stats.cap_room.saturating_add(1);
+                    break;
+                }
+                let slot = self.result.room_count;
+                self.result.rooms[slot] = PortalVisibleRoom {
+                    room: overlap,
+                    frustum_first: self.result.frustum_count.min(u16::MAX as usize) as u16,
+                    frustum_count: 0,
+                    depth: source.depth,
+                    within_far: source.within_far,
+                };
+                self.result.room_count += 1;
+            }
+            source_index += 1;
+        }
+    }
+
     /// Whether the latest traversal draws `index`.
     pub fn draws_room(&self, index: RoomIndex) -> bool {
         // Residency and visibility are different lifetimes: the active window
@@ -293,8 +337,47 @@ impl<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use psx_level::{
+        AssetId, LevelCameraRecord, LevelFarVistaRecord, LevelSkyRecord, MaterialIndex,
+    };
 
     type TestRoomVisibility = RoomVisibility<4, 4, 4, 4>;
+
+    fn room(overlapped_room_first: u16, overlapped_room_count: u8) -> LevelRoomRecord {
+        LevelRoomRecord {
+            name: "room",
+            world_asset: AssetId(0),
+            origin_x: 0,
+            origin_z: 0,
+            origin_y: 0,
+            sector_size: 1024,
+            draw_distance: 16_384,
+            chunk_activation_radius_sectors: 4,
+            visibility_radius: 4,
+            resident_chunk_limit: 4,
+            visible_chunk_limit: 4,
+            gravity_per_tick: 0,
+            material_first: MaterialIndex::ZERO,
+            material_count: 0,
+            portal_first: 0,
+            portal_count: 0,
+            near_room_first: 0,
+            near_room_count: 0,
+            overlapped_room_first,
+            overlapped_room_count,
+            fog_rgb: [0; 3],
+            fog_near: 0,
+            fog_far: 0,
+            atmosphere_rgb: [0; 3],
+            atmosphere_density: 0,
+            atmosphere_fall_speed_q4: 0,
+            atmosphere_wind_speed_q4: 0,
+            sky: LevelSkyRecord::DEFAULT,
+            far_vista: LevelFarVistaRecord::DEFAULT,
+            camera: LevelCameraRecord::DEFAULT,
+            flags: 0,
+        }
+    }
 
     #[test]
     fn draw_visibility_does_not_expand_to_the_resident_room_window() {
@@ -306,5 +389,38 @@ mod tests {
             !visibility.draws_room(RoomIndex::new(3)),
             "a resident neighbour is not drawable until the portal walk admits it"
         );
+    }
+
+    #[test]
+    fn stacked_overlaps_expand_visible_rooms_transitively_without_duplicates() {
+        let rooms = [room(0, 1), room(1, 2), room(3, 1)];
+        let overlaps = [
+            RoomIndex::new(1),
+            RoomIndex::new(0),
+            RoomIndex::new(2),
+            RoomIndex::new(1),
+        ];
+        let mut visibility = TestRoomVisibility::EMPTY;
+        visibility.root = RoomIndex::ZERO;
+        visibility.result.rooms[0] = PortalVisibleRoom {
+            room: RoomIndex::ZERO,
+            frustum_first: 0,
+            frustum_count: 1,
+            depth: 2,
+            within_far: true,
+        };
+        visibility.result.room_count = 1;
+
+        visibility.include_overlapped_rooms(&rooms, &overlaps);
+        visibility.include_overlapped_rooms(&rooms, &overlaps);
+
+        assert_eq!(visibility.result.room_count, 3);
+        assert!(visibility.result.contains_room(RoomIndex::new(1)));
+        assert!(visibility.result.contains_room(RoomIndex::new(2)));
+        for room in &visibility.result.rooms[1..3] {
+            assert_eq!(room.frustum_count, 0);
+            assert_eq!(room.depth, 2);
+            assert!(room.within_far);
+        }
     }
 }

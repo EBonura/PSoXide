@@ -303,6 +303,8 @@ pub enum MaterialTextureMode {
     ReflectiveProbe,
     /// Host-baked 4bpp base colour plus procedural noise.
     Generated,
+    /// Host-baked mask transition between two Material images.
+    Transition,
 }
 
 impl MaterialTextureMode {
@@ -311,8 +313,90 @@ impl MaterialTextureMode {
             Self::SimpleImage => "Simple Image",
             Self::ReflectiveProbe => "Reflective Probe",
             Self::Generated => "Generated Colour + Noise",
+            Self::Transition => "Transition Material",
         }
     }
+}
+
+/// Coverage-mask family used by a host-baked transition material.
+///
+/// Every shape is thresholded rather than alpha blended. This keeps the
+/// resulting pixel art crisp and leaves the cooker to quantise one final
+/// image into a normal PS1 4bpp texture.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TransitionMaskShape {
+    /// A moving edge across the texture.
+    #[default]
+    Straight,
+    /// A diagonal moving edge.
+    Diagonal,
+    /// Coverage growing outward from one corner.
+    Corner,
+    /// Coverage growing outward from the texture centre.
+    Island,
+}
+
+impl TransitionMaskShape {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Straight => "Straight edge",
+            Self::Diagonal => "Diagonal edge",
+            Self::Corner => "Corner",
+            Self::Island => "Island / patch",
+        }
+    }
+}
+
+/// Authoring-only recipe for combining two Material images.
+///
+/// The editor and cooker resolve both sources, apply their tints, choose
+/// pixels through the selected coverage mask, and jointly quantise the result
+/// into one 4bpp PSXT. The PlayStation never evaluates this recipe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransitionMaterialTexture {
+    /// Material visible outside / beyond the coverage mask.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_a: Option<ResourceId>,
+    /// Material revealed as coverage increases.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_b: Option<ResourceId>,
+    /// Square output size in texels (8, 16, 32, 64, or 128).
+    pub size: u16,
+    /// Amount of source B coverage (`0 = all A`, `255 = all B`).
+    pub coverage: u8,
+    /// Spatial family used to form the boundary.
+    pub shape: TransitionMaskShape,
+    /// Clockwise quarter turns (`0..=3`).
+    pub rotation_quarters: u8,
+    /// Mirror the mask horizontally after rotation.
+    pub flip_x: bool,
+    /// Mirror the mask vertically after rotation.
+    pub flip_y: bool,
+    /// Deterministic displacement of the boundary in texels (`0 = clean`).
+    pub edge_breakup: u8,
+    /// Stable boundary-noise seed.
+    pub seed: u32,
+}
+
+impl Default for TransitionMaterialTexture {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+impl TransitionMaterialTexture {
+    pub const DEFAULT: Self = Self {
+        source_a: None,
+        source_b: None,
+        size: 64,
+        coverage: 128,
+        shape: TransitionMaskShape::Straight,
+        rotation_quarters: 0,
+        flip_x: false,
+        flip_y: false,
+        edge_breakup: 20,
+        seed: 1,
+    };
 }
 
 /// Image source for a model material's optional second texture pass.
@@ -496,6 +580,11 @@ pub struct ModelSecondaryLayer {
     /// Preserved host-baked colour/noise recipe.
     #[serde(default)]
     pub generated: GeneratedMaterialTexture,
+    /// Preserved transition recipe. Transition sources are currently intended
+    /// for the primary material pass, but retaining this keeps source-mode
+    /// switching lossless and forward compatible.
+    #[serde(default)]
+    pub transition: TransitionMaterialTexture,
     /// Preserved room-probe controls.
     #[serde(default)]
     pub reflection: ReflectionProbeMaterial,
@@ -525,6 +614,7 @@ impl Default for ModelSecondaryLayer {
                 noise: ProceduralNoiseTexture::default(),
                 noise_uv: GeneratedTextureUv::default(),
             },
+            transition: TransitionMaterialTexture::DEFAULT,
             reflection: ReflectionProbeMaterial::default(),
             blend_mode: PsxBlendMode::AddQuarter,
             tint: [0x70, 0x78, 0x80],
@@ -624,6 +714,10 @@ pub struct MaterialResource {
     /// Preserved generator recipe, even while another source mode is active.
     #[serde(default)]
     pub generated: GeneratedMaterialTexture,
+    /// Preserved two-source transition recipe, even while another source mode
+    /// is active.
+    #[serde(default)]
+    pub transition: TransitionMaterialTexture,
     /// Preserved reflection controls, even while another source mode is active.
     #[serde(default)]
     pub reflection: ReflectionProbeMaterial,
@@ -730,6 +824,7 @@ impl MaterialResource {
                     rotation_quarters: 0,
                 },
             },
+            transition: TransitionMaterialTexture::DEFAULT,
             reflection: ReflectionProbeMaterial {
                 strength: 255,
                 roughness: 8,
@@ -784,6 +879,7 @@ impl MaterialResource {
                     rotation_quarters: 0,
                 },
             },
+            transition: TransitionMaterialTexture::DEFAULT,
             reflection: ReflectionProbeMaterial {
                 strength: 255,
                 roughness: 8,

@@ -148,6 +148,27 @@ fn floors_cook_to_stacked_rooms_with_auto_links() {
         package.rooms.iter().any(|room| room.origin_y > 0),
         "an upper floor should cook at a stacked origin_y"
     );
+    // Every X/Z-overlapping floor room references its counterpart even when
+    // the vertical boundary is sealed. This keeps the lower geometry drawable
+    // behind translucent upper surfaces.
+    let lower = package
+        .rooms
+        .iter()
+        .position(|room| room.origin_y == 0)
+        .expect("base floor room");
+    let upper = package
+        .rooms
+        .iter()
+        .position(|room| room.origin_y > 0)
+        .expect("upper floor room");
+    let overlap_slice = |room_index: usize| {
+        let room = &package.rooms[room_index];
+        let first = room.overlapped_room_first as usize;
+        let end = first + room.overlapped_room_count as usize;
+        &package.room_overlapped_rooms[first..end]
+    };
+    assert!(overlap_slice(lower).contains(&(upper as u16)));
+    assert!(overlap_slice(upper).contains(&(lower as u16)));
     // The floors are auto-wired with vertical room links.
     assert!(
         package
