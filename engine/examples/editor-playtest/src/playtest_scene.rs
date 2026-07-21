@@ -165,8 +165,7 @@ impl Scene for Playtest {
     fn prepare_loading_assets(&mut self, scene: u16) {
         #[cfg(feature = "cd-stream-bench")]
         {
-            let loading_images_ready =
-                menu_ui_cache_ready() && load_ui_images_for_scene(scene);
+            let loading_images_ready = menu_ui_cache_ready() && load_ui_images_for_scene(scene);
             // The loading images are now in VRAM; this is the overlay
             // handoff point (`MenuGameplayOverlay`): gameplay room draws
             // own the cache's RAM from here. Claims are reset so any
@@ -474,18 +473,18 @@ impl Scene for Playtest {
                         // doorway-eye view). Rooms with no usable anchor
                         // draw every cell through the cached path below --
                         // NEVER a silent skip (the arch-door regression).
-                        let global_visibility_anchor = if active.index == self.room_index {
+                        let window_visibility_anchor = if active.index == self.room_index {
                             Some(player)
                         } else {
                             self.portal_entry_anchor(active.index, active.sector_size)
                         };
                         telemetry::stage_begin(telemetry::stage::ROOM_VISIBLE_LIST);
-                        let visible_cells_result = match global_visibility_anchor {
-                            Some(global_anchor) => {
+                        let visible_cells_result = match window_visibility_anchor {
+                            Some(window_anchor) => {
                                 let visibility_anchor = RoomPoint::new(
-                                    global_anchor.x.saturating_sub(active.offset_x),
-                                    global_anchor.y,
-                                    global_anchor.z.saturating_sub(active.offset_z),
+                                    window_anchor.x.saturating_sub(active.offset_x),
+                                    window_anchor.y,
+                                    window_anchor.z.saturating_sub(active.offset_z),
                                 );
                                 self.cached_precomputed_visible_cells(
                                     active_slot,
@@ -496,7 +495,7 @@ impl Scene for Playtest {
                                     visibility_anchor,
                                     active.offset_x,
                                     active.offset_z,
-                                    global_anchor,
+                                    window_anchor,
                                     room_camera,
                                     ROOM_VISIBLE_CELL_STATIONARY_CANDIDATES
                                         && !self.player_moved_last_tick
@@ -717,6 +716,14 @@ impl Scene for Playtest {
                     }
                 }
                 telemetry::stage_end(telemetry::stage::ROOM);
+                draw_water(
+                    active.index,
+                    &room_camera,
+                    actor_options,
+                    &lighting,
+                    &mut primitive_packets,
+                    &mut world,
+                );
                 telemetry::stage_begin(telemetry::stage::ENTITY_MARKERS);
                 draw_entity_markers(
                     ENTITIES,
@@ -1136,6 +1143,12 @@ impl Scene for Playtest {
         world.flush();
         telemetry::stage_end(telemetry::stage::WORLD_FLUSH);
         let _ = self.draw_particle_emitters(
+            camera,
+            self.gameplay_tick(ctx.sim_tick),
+            &mut ot,
+            &mut primitive_packets,
+        );
+        let _ = self.draw_player_water_wade_splash(
             camera,
             self.gameplay_tick(ctx.sim_tick),
             &mut ot,

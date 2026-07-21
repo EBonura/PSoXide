@@ -296,6 +296,38 @@ pub struct PlaytestRoomPortal {
     pub vertices: [[i32; 3]; 4],
 }
 
+/// Lightweight, asset-free snapshot of one cell in the exact runtime-room
+/// topology used by the playtest cook. Intended for editor diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PlaytestDebugTopologyCell {
+    pub runtime_room_index: usize,
+    pub authored_room: u32,
+    pub portal_room_index: usize,
+    pub floor_index: usize,
+    pub array_cell: [u16; 2],
+    pub center: [f32; 2],
+    pub half: [f32; 2],
+    pub room_origin: [f32; 2],
+    pub runtime_origin: [i32; 2],
+    pub elevation: i32,
+    pub sector_size: i32,
+}
+
+/// Lightweight snapshot of a directed portal after generated layer links have
+/// been added and the table has been sorted into runtime order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestDebugTopologyPortal {
+    pub portal_index: usize,
+    pub portal: PlaytestRoomPortal,
+}
+
+/// Asset-free topology used by the Room Rings editor diagnostic.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct PlaytestDebugTopology {
+    pub cells: Vec<PlaytestDebugTopologyCell>,
+    pub portals: Vec<PlaytestDebugTopologyPortal>,
+}
+
 /// Runtime floor-link metadata copied into compact collision sector records.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlaytestRoomFloorLink {
@@ -309,6 +341,39 @@ pub struct PlaytestRoomFloorLink {
     pub above_room: Option<u16>,
     /// Runtime room reached by moving downward through this sector.
     pub below_room: Option<u16>,
+}
+
+/// One water-covered runtime sector. Records are sorted by
+/// `(room, x, z)` so the runtime can binary-search the player's current cell
+/// without scanning authored volumes or geometry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestWaterCell {
+    /// Owning runtime room.
+    pub room: u16,
+    /// Runtime-room-local sector X.
+    pub x: u16,
+    /// Runtime-room-local sector Z.
+    pub z: u16,
+    /// Optional texture asset for the visible water surface.
+    pub texture_asset_index: Option<usize>,
+    /// PSX semi-transparency code for the surface.
+    pub blend_mode: u8,
+    /// Material modulation tint.
+    pub tint_rgb: [u8; 3],
+    /// Material animation preserved for the water-surface render pass.
+    pub animation: MaterialAnimation,
+    /// Horizontal surface in runtime-room-local engine units.
+    pub surface_y: i32,
+    /// Terrain depth below the surface at the sector centre.
+    pub depth: u16,
+    /// Depth at which entering this cell starts water death.
+    pub lethal_depth: u16,
+    /// Movement speed retained while wading, as a percentage.
+    pub movement_percent: u8,
+    /// Ticks from lethal submersion to respawn.
+    pub death_delay_ticks: u8,
+    /// Required submersion before the lethal sequence begins.
+    pub death_submerge_depth: u16,
 }
 
 /// Resolved sky values written into one runtime room record.
@@ -796,6 +861,8 @@ pub struct PlaytestBoxProp {
     pub room: u16,
     /// Per-face texture asset indices. `None` skips that face.
     pub texture_asset_indices: [Option<usize>; psx_level::BOX_PROP_FACE_COUNT],
+    /// Per-face material blend codes using `model_override_blend` values.
+    pub blend_modes: [u8; psx_level::BOX_PROP_FACE_COUNT],
     /// Bottom-center room-local X.
     pub x: i32,
     /// Bottom Y.
@@ -1139,6 +1206,21 @@ impl Default for PlaytestGameFlow {
     }
 }
 
+/// Compact rig-attached combat capsule ready for manifest emission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestCombatCapsule {
+    pub joint: u8,
+    pub flags: u8,
+    pub action: u8,
+    pub start: [i16; 3],
+    pub end: [i16; 3],
+    pub radius: u16,
+    pub active_start_frame: u16,
+    pub active_end_frame: u16,
+    pub damage: u16,
+    pub poise_damage: u16,
+}
+
 /// Weapon-local hit shape, ready for manifest emission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlaytestWeaponHitShape {
@@ -1415,6 +1497,10 @@ pub struct PlaytestGameEntity {
     pub stagger_clip: u16,
     /// Death one-shot clip.
     pub death_clip: u16,
+    /// First rig-attached volume in [`PlaytestPackage::combat_capsules`].
+    pub combat_capsule_first: u16,
+    /// Number of rig-attached volumes.
+    pub combat_capsule_count: u8,
     /// Room-local spawn X.
     pub x: i32,
     /// Y.
@@ -1517,6 +1603,10 @@ pub struct PlaytestCharacter {
         [psx_level::CharacterActionFrameRange; PLAYTEST_CHARACTER_ACTION_COUNT],
     /// Forward push per action.
     pub action_pushes: [psx_level::CharacterActionPush; PLAYTEST_CHARACTER_ACTION_COUNT],
+    /// First rig-attached volume in [`PlaytestPackage::combat_capsules`].
+    pub combat_capsule_first: u16,
+    /// Number of rig-attached volumes.
+    pub combat_capsule_count: u8,
     /// Render-only model offset from the player/controller root,
     /// in entity-local engine units.
     pub visual_offset: [i16; 3],
@@ -1638,6 +1728,8 @@ pub struct PlaytestPackage {
     pub room_portals: Vec<PlaytestRoomPortal>,
     /// Runtime floor links, indexed by `(room, x, z)` and copied into streamed collision chunks.
     pub room_floor_links: Vec<PlaytestRoomFloorLink>,
+    /// Sorted water-sector lookup table.
+    pub water_cells: Vec<PlaytestWaterCell>,
     /// Reserved near-room index table for room coherence / streaming.
     pub room_near_rooms: Vec<u16>,
     /// Reserved overlapped-room index table for stacked-room coherence.
@@ -1697,6 +1789,8 @@ pub struct PlaytestPackage {
     pub options: Vec<PlaytestOption>,
     /// WAV sources baked as CD-DA tracks in the playtest/export disc image.
     pub cdda_tracks: Vec<PlaytestCddaTrack>,
+    /// Compact rig-attached hurtboxes and action-gated hitboxes.
+    pub combat_capsules: Vec<PlaytestCombatCapsule>,
     /// Weapon hitboxes, shared by [`Self::weapons`].
     pub weapon_hitboxes: Vec<PlaytestWeaponHitbox>,
     /// Cooked Weapon resources, deduplicated by source resource id.

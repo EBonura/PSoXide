@@ -59,16 +59,17 @@ use psx_engine::GridVisibilityStats;
 ))]
 use psx_engine::GridVisibleCell;
 use psx_engine::{
-    button, telemetry, Angle, App, CachedRoomCell, CachedRoomDepthMode, CachedRoomSubdivisionMode,
-    CachedRoomSurface, CharacterCollision, CharacterCollisionAabb, CharacterCollisionCylinder,
-    CharacterCollisionRoom, CharacterMotorAnim, CharacterMotorConfig, CharacterMotorInput,
-    CharacterMotorState, Config, Ctx, DepthBand, DepthRange, LoadedWorldCameraGte, OtFrame,
-    PrimitivePacketArena, PrimitivePacketScratch, PrimitiveSink, ProjectedVertex, Rgb8, RoomPoint,
-    RenderSubmission, RuntimeCollisionRoom, RuntimeRoom, Scene, SceneStateRef, SchedulerConfig,
-    SimTick, TexturedModelRenderFace, ThirdPersonCameraConfig, ThirdPersonCameraInput,
+    button, horizontal_view_coordinates, prewarm_indexed_cached_room_quads, telemetry, Angle, App,
+    CachedRoomCell, CachedRoomDepthMode, CachedRoomSubdivisionMode, CachedRoomSurface,
+    CharacterCollision, CharacterCollisionAabb, CharacterCollisionCylinder, CharacterCollisionRoom,
+    CharacterMotorAnim, CharacterMotorConfig, CharacterMotorInput, CharacterMotorState, Config,
+    Ctx, DepthBand, DepthRange, LoadedWorldCameraGte, OtFrame, PrimitivePacketArena,
+    PrimitivePacketScratch, PrimitiveSink, ProjectedVertex, RenderSubmission, Rgb8, RoomPoint,
+    RuntimeCollisionRoom, RuntimeRoom, Scene, SceneStateRef, SchedulerConfig, SimTick,
+    TexturedModelRenderFace, ThirdPersonCameraConfig, ThirdPersonCameraInput,
     ThirdPersonCameraState, ThirdPersonCameraTarget, VideoHz, VisualPacing, WorldCamera,
     WorldProjection, WorldRenderMaterial, WorldRenderPass, WorldSurfaceOptions, WorldTriCommand,
-    WorldVertex, Q12, horizontal_view_coordinates, prewarm_indexed_cached_room_quads,
+    WorldVertex, Q12,
 };
 #[cfg(all(
     feature = "world-grid-visible",
@@ -94,9 +95,9 @@ use psx_level::portal_visibility::{
 use psx_level::{
     find_asset_of_kind, room_flags, AssetId, AssetKind, CharacterAnimationAction, EntityRecord,
     InteractableKind, InteractableRecord, LevelBoxPropRecord, LevelCameraRecord,
-    LevelCharacterRecord, LevelChunkRecord, LevelFarVistaRecord, LevelImagePropRecord,
-    LevelRoomRecord, LevelSkyRecord, ModelClipIndex, ParticleEmitterRecord, RoomIndex,
-    RuntimeDebugMask,
+    LevelCharacterRecord, LevelChunkRecord, LevelFarVistaRecord, LevelGameEntityRecord,
+    LevelImagePropRecord, LevelRoomRecord, LevelSkyRecord, ModelClipIndex, ParticleEmitterRecord,
+    LevelWaterCellRecord, RoomIndex, RuntimeDebugMask,
 };
 use psx_vram::{TexDepth, Tpage};
 
@@ -127,6 +128,7 @@ mod sky_runtime;
 mod visibility_runtime;
 mod visible_cell_runtime;
 mod vram_runtime;
+mod water_runtime;
 
 use active_room_cache::*;
 use active_room_streaming::*;
@@ -148,6 +150,7 @@ use sky_runtime::*;
 use visibility_runtime::*;
 use visible_cell_runtime::*;
 use vram_runtime::*;
+use water_runtime::*;
 
 // Placeholder manifests reference unused statics; populated
 // manifests reference all of them. Quiet either side here.
@@ -158,20 +161,21 @@ mod generated {
 
 use generated::{
     ASSETS, BOX_PROPS, CACHED_ROOM_DEPTH_MODE, CACHED_ROOM_DRAW_ORDER_MODE,
-    CACHED_ROOM_TEXTURE_SPLIT_MAX_EDGE, CACHED_ROOM_TEXTURE_SPLIT_MODE, CHARACTERS, ENTITIES,
-    EQUIPMENT, GAME_ENTITIES, IMAGE_PROPS, INTERACTABLES, INTERACTABLE_MESSAGES, LIGHTS, LOGIC,
-    MATERIALS, MODELS, MODEL_CLIPS, MODEL_CLIP_BOUNDS, MODEL_FRAME_BOUNDS, MODEL_INSTANCES,
-    MODEL_SOCKETS, PARTICLE_EMITTERS, PLAYER_CONTROLLER, PLAYER_SPAWN, ROOMS, ROOM_CACHE_CELLS,
-    ROOM_CACHE_CELL_VERTICES, ROOM_CACHE_SURFACES, ROOM_CACHE_VERTICES, ROOM_CHUNKS, ROOM_PORTALS,
-    ROOM_REFLECTION_PROBES, ROOM_RESIDENCY, ROOM_SURFACE_CACHES, ROOM_VISIBILITY, UI_FONTS,
-    UI_NODES, UI_PAINTS, UI_SFX_CUES, UI_SFX_SAMPLES, VISIBILITY_CELLS, WEAPONS, WEAPON_HITBOXES,
+    CACHED_ROOM_TEXTURE_SPLIT_MAX_EDGE, CACHED_ROOM_TEXTURE_SPLIT_MODE, CHARACTERS,
+    COMBAT_CAPSULES, ENTITIES, EQUIPMENT, GAME_ENTITIES, IMAGE_PROPS, INTERACTABLES,
+    INTERACTABLE_MESSAGES, LIGHTS, LOGIC, MATERIALS, MODELS, MODEL_CLIPS, MODEL_CLIP_BOUNDS,
+    MODEL_FRAME_BOUNDS, MODEL_INSTANCES, MODEL_SOCKETS, PARTICLE_EMITTERS, PLAYER_CONTROLLER,
+    PLAYER_SPAWN, ROOMS, ROOM_CACHE_CELLS, ROOM_CACHE_CELL_VERTICES, ROOM_CACHE_SURFACES,
+    ROOM_CACHE_VERTICES, ROOM_CHUNKS, ROOM_OVERLAPPED_ROOMS, ROOM_PORTALS, ROOM_REFLECTION_PROBES,
+    ROOM_RESIDENCY, ROOM_SURFACE_CACHES, ROOM_VISIBILITY, UI_FONTS, UI_NODES, UI_PAINTS,
+    UI_SFX_CUES, UI_SFX_SAMPLES, VISIBILITY_CELLS, WATER_CELLS, WEAPONS, WEAPON_HITBOXES,
 };
 #[cfg(feature = "cd-stream-bench")]
 use generated::{
     GAMEPLAY_PACK_MAX_CHUNK_BYTES, PERSISTENT_ASSET_PAGE_COUNT, PERSISTENT_ASSET_SLOT_COUNT,
     UI_PACK_IMAGE_CACHE_SLOTS, UI_PACK_MAX_CHUNK_BYTES, UI_PACK_START_LBA, UI_PACK_TOC,
-    WORLD_PACK_MAX_CHUNK_BYTES, WORLD_PACK_START_LBA, WORLD_PACK_TOC,
-    WORLD_RESIDENT_CHUNK_LIMIT, WORLD_RESIDENT_PAGE_COUNT, WORLD_STREAM_SLOT_COUNT,
+    WORLD_PACK_MAX_CHUNK_BYTES, WORLD_PACK_START_LBA, WORLD_PACK_TOC, WORLD_RESIDENT_CHUNK_LIMIT,
+    WORLD_RESIDENT_PAGE_COUNT, WORLD_STREAM_SLOT_COUNT,
 };
 use generated::{GAME_FLOW, OPTIONS, UI_SCENES};
 #[cfg(all(
@@ -316,6 +320,9 @@ struct Playtest {
     player_health: u16,
     /// See [`Self::player_health`].
     player_health_max: u16,
+    /// Remaining deep-water death sequence ticks. Non-zero locks player
+    /// input while gravity carries the body below the authored surface.
+    water_death_ticks_remaining: u8,
     /// Entities already hit by the CURRENT player swing (bit i =
     /// entity i): one swing connects at most once per enemy. Cleared
     /// when an attack action starts.
