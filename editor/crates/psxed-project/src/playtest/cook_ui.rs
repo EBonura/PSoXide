@@ -772,7 +772,8 @@ pub(crate) fn cook_ui_image_texture_asset(
         ));
         return None;
     };
-    let (texture_key, bytes) = match material_texture_bytes(texture_resource, project_root) {
+    let (texture_key, bytes) = match material_texture_bytes(project, texture_resource, project_root)
+    {
         Ok(Some(source)) => source,
         Ok(None) => {
             report.warn(format!(

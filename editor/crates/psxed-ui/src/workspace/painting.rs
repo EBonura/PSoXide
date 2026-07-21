@@ -1,5 +1,29 @@
 use super::*;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LayerDirection {
+    Above,
+    Below,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LayerFootprintCell {
+    world: (i32, i32),
+    floor_material: Option<ResourceId>,
+    ceiling_material: Option<ResourceId>,
+    wall_material: Option<ResourceId>,
+}
+
+fn layer_neighbor((x, z): (i32, i32), direction: GridDirection) -> Option<(i32, i32)> {
+    match direction {
+        GridDirection::North => Some((x, z.saturating_add(1))),
+        GridDirection::East => Some((x.saturating_add(1), z)),
+        GridDirection::South => Some((x, z.saturating_sub(1))),
+        GridDirection::West => Some((x.saturating_sub(1), z)),
+        GridDirection::NorthWestSouthEast | GridDirection::NorthEastSouthWest => None,
+    }
+}
+
 fn add_model_renderer_node(
     scene: &mut Scene,
     entity: NodeId,
@@ -810,6 +834,7 @@ impl EditorWorkspace {
             return;
         };
         let active_floor = self.active_floor;
+        let before = self.project.clone();
         let pushed = {
             let Some(node) = self.project.active_scene_mut().node_mut(room_id) else {
                 return;
@@ -826,6 +851,7 @@ impl EditorWorkspace {
         };
         self.active_floor = active_floor + 1;
         if pushed {
+            self.history.record(before);
             self.mark_dirty();
             self.status = format!("Added floor {} (paint to build it)", self.active_floor + 1);
         } else {
@@ -839,6 +865,382 @@ impl EditorWorkspace {
             self.active_floor -= 1;
             self.status = format!("Floor {}", self.active_floor + 1);
         }
+    }
+
+    fn selected_layer_footprint(&self, room: NodeId) -> Vec<LayerFootprintCell> {
+        let Some(base) = self.room_base_grid(room) else {
+            return Vec::new();
+        };
+        let floor_index = self.active_floor.min(base.floor_count().saturating_sub(1));
+        let Some(grid) = base.floor(floor_index) else {
+            return Vec::new();
+        };
+
+        let mut cells = Vec::new();
+        for &(selected_room, sx, sz) in &self.selection.selected_sectors {
+            if selected_room == room && !cells.contains(&(sx, sz)) {
+                cells.push((sx, sz));
+            }
+        }
+        for selection in self.selected_primitive_targets() {
+            let (selected_room, sx, sz) = selection_sector(selection);
+            if selected_room == room && !cells.contains(&(sx, sz)) {
+                cells.push((sx, sz));
+            }
+        }
+        if cells.is_empty() {
+            if let Some((sx, sz)) = self.selection.selected_sector {
+                cells.push((sx, sz));
+            }
+        }
+        cells.sort_unstable();
+
+        cells
+            .into_iter()
+            .filter(|&(sx, sz)| sx < grid.width && sz < grid.depth)
+            .map(|(sx, sz)| {
+                let sector = grid.sector(sx, sz);
+                let wall_material = sector.and_then(|sector| {
+                    GridDirection::CARDINAL.iter().find_map(|&direction| {
+                        sector
+                            .walls
+                            .get(direction)
+                            .iter()
+                            .find_map(|wall| wall.material)
+                    })
+                });
+                LayerFootprintCell {
+                    world: (
+                        grid.origin[0].saturating_add(i32::from(sx)),
+                        grid.origin[1].saturating_add(i32::from(sz)),
+                    ),
+                    floor_material: sector
+                        .and_then(|sector| sector.floor.as_ref())
+                        .and_then(|face| face.material),
+                    ceiling_material: sector
+                        .and_then(|sector| sector.ceiling.as_ref())
+                        .and_then(|face| face.material),
+                    wall_material,
+                }
+            })
+            .collect()
+    }
+
+    pub(crate) fn can_author_selected_layer_footprint(&self) -> bool {
+        self.floors_target_room()
+            .is_some_and(|room| !self.selected_layer_footprint(room).is_empty())
+    }
+
+    pub(crate) fn extrude_selected_layer_above(&mut self, open_boundary: bool) {
+        self.extrude_selected_layer(LayerDirection::Above, open_boundary);
+    }
+
+    pub(crate) fn extrude_selected_layer_below(&mut self, open_boundary: bool) {
+        self.extrude_selected_layer(LayerDirection::Below, open_boundary);
+    }
+
+    fn extrude_selected_layer(&mut self, direction: LayerDirection, open_boundary: bool) {
+        let Some(room) = self.floors_target_room() else {
+            self.status = "Layer extrusion needs an active Room".to_string();
+            return;
+        };
+        let footprint = self.selected_layer_footprint(room);
+        if footprint.is_empty() {
+            self.status = "Select one or more sectors or faces to extrude".to_string();
+            return;
+        }
+
+        let before = self.project.clone();
+        let source_floor = self.active_floor;
+        let mut changed = false;
+        let target_floor = {
+            let scene = self.project.active_scene_mut();
+            let Some(room_node) = scene.node_mut(room) else {
+                return;
+            };
+            let NodeKind::Room { grid } = &mut room_node.kind else {
+                return;
+            };
+            let source_floor = source_floor.min(grid.floor_count().saturating_sub(1));
+            match direction {
+                LayerDirection::Above => {
+                    let target = source_floor.saturating_add(1);
+                    if target >= grid.floor_count() {
+                        grid.push_floor();
+                        changed = true;
+                    }
+                    target
+                }
+                LayerDirection::Below if source_floor > 0 => source_floor - 1,
+                LayerDirection::Below => {
+                    grid.push_floor_below();
+                    room_node.transform.translation[1] -= DEFAULT_WALL_HEIGHT_SECTORS as f32;
+                    changed = true;
+                    0
+                }
+            }
+        };
+
+        // Prepending a base floor changes every old floor index. Shift all
+        // descendants so their inherited layer remains the same, while the
+        // room translation above keeps their world-space height unchanged.
+        if direction == LayerDirection::Below && source_floor == 0 {
+            let scene = self.project.active_scene_mut();
+            let ids: Vec<NodeId> = scene
+                .nodes()
+                .iter()
+                .filter(|node| node.id != room && scene.is_descendant_of(node.id, room))
+                .map(|node| node.id)
+                .collect();
+            for id in ids {
+                if let Some(node) = scene.node_mut(id) {
+                    node.floor = node.floor.saturating_add(1);
+                }
+            }
+        }
+
+        let default_floor_material = self.paint_material_for("floor");
+        let default_wall_material = self.paint_material_for("brick").or(default_floor_material);
+        let footprint_world: HashSet<(i32, i32)> =
+            footprint.iter().map(|cell| cell.world).collect();
+        let layer_height = {
+            let scene = self.project.active_scene_mut();
+            let Some(room_node) = scene.node_mut(room) else {
+                return;
+            };
+            let NodeKind::Room { grid } = &mut room_node.kind else {
+                return;
+            };
+            let Some(target) = grid.floor_mut(target_floor) else {
+                return;
+            };
+            for cell in &footprint {
+                target.extend_to_include(cell.world.0, cell.world.1);
+            }
+            let layer_height = target
+                .sector_size
+                .saturating_mul(DEFAULT_WALL_HEIGHT_SECTORS);
+            for cell in &footprint {
+                let Some((sx, sz)) = target.world_cell_to_array(cell.world.0, cell.world.1) else {
+                    continue;
+                };
+                let floor_material = cell.floor_material.or(default_floor_material);
+                let ceiling_material = cell
+                    .ceiling_material
+                    .or(cell.floor_material)
+                    .or(default_floor_material);
+                let wall_material = cell.wall_material.or(default_wall_material);
+                let Some(sector) = target.ensure_sector(sx, sz) else {
+                    continue;
+                };
+                if sector.floor.is_none() {
+                    sector.floor = Some(GridHorizontalFace::flat(0, floor_material));
+                    changed = true;
+                }
+                if sector.ceiling.is_none() {
+                    sector.ceiling = Some(GridHorizontalFace::flat(layer_height, ceiling_material));
+                    changed = true;
+                }
+                for direction in GridDirection::CARDINAL {
+                    let is_perimeter = layer_neighbor(cell.world, direction)
+                        .is_none_or(|neighbor| !footprint_world.contains(&neighbor));
+                    if is_perimeter && sector.walls.get(direction).is_empty() {
+                        sector.walls.get_mut(direction).push(GridVerticalFace::flat(
+                            0,
+                            layer_height,
+                            wall_material,
+                        ));
+                        changed = true;
+                    }
+                }
+            }
+            layer_height
+        };
+
+        let (lower_floor, upper_floor) = match direction {
+            LayerDirection::Above => (source_floor, target_floor),
+            LayerDirection::Below if source_floor > 0 => (target_floor, source_floor),
+            LayerDirection::Below => (target_floor, source_floor + 1),
+        };
+        if open_boundary {
+            changed |= self.set_layer_boundary_open_no_undo(
+                room,
+                lower_floor,
+                upper_floor,
+                &footprint_world,
+                true,
+                default_floor_material,
+                layer_height,
+            ) > 0;
+        }
+
+        let selected_target_cells: HashSet<(NodeId, u16, u16)> = self
+            .room_base_grid(room)
+            .and_then(|base| base.floor(target_floor))
+            .map(|target| {
+                footprint
+                    .iter()
+                    .filter_map(|cell| {
+                        target
+                            .world_cell_to_array(cell.world.0, cell.world.1)
+                            .map(|(sx, sz)| (room, sx, sz))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        if changed {
+            self.history.record(before);
+            self.active_floor = target_floor;
+            self.selection.selected_sectors = selected_target_cells;
+            self.selection.selected_sector = self
+                .selection
+                .selected_sectors
+                .iter()
+                .next()
+                .map(|(_, sx, sz)| (*sx, *sz));
+            self.selection.sector_selection_anchor =
+                self.selection.selected_sectors.iter().next().copied();
+            self.replace_node_selection(room);
+            self.clear_resource_selection_state();
+            self.clear_primitive_selection_state();
+            self.mark_dirty();
+            let side = if direction == LayerDirection::Above {
+                "above"
+            } else {
+                "below"
+            };
+            let connection = if open_boundary { "open" } else { "solid" };
+            self.status = format!(
+                "Extruded {} sector{} {side} ({connection})",
+                footprint.len(),
+                if footprint.len() == 1 { "" } else { "s" }
+            );
+        } else {
+            self.status = "The target layer already contains that solid footprint".to_string();
+        }
+    }
+
+    pub(crate) fn set_selected_slab_above(&mut self, open: bool) {
+        self.set_selected_slab(LayerDirection::Above, open);
+    }
+
+    pub(crate) fn set_selected_slab_below(&mut self, open: bool) {
+        self.set_selected_slab(LayerDirection::Below, open);
+    }
+
+    fn set_selected_slab(&mut self, direction: LayerDirection, open: bool) {
+        let Some(room) = self.floors_target_room() else {
+            return;
+        };
+        let footprint = self.selected_layer_footprint(room);
+        if footprint.is_empty() {
+            self.status = "Select one or more sectors or faces first".to_string();
+            return;
+        }
+        let Some(base) = self.room_base_grid(room) else {
+            return;
+        };
+        let active = self.active_floor.min(base.floor_count().saturating_sub(1));
+        let pair = match direction {
+            LayerDirection::Above if active + 1 < base.floor_count() => (active, active + 1),
+            LayerDirection::Below if active > 0 => (active - 1, active),
+            LayerDirection::Above => {
+                self.status = "There is no layer above this one".to_string();
+                return;
+            }
+            LayerDirection::Below => {
+                self.status = "There is no layer below this one".to_string();
+                return;
+            }
+        };
+        let cells: HashSet<(i32, i32)> = footprint.iter().map(|cell| cell.world).collect();
+        let material = self.paint_material_for("floor");
+        let layer_height = base
+            .floor(pair.0)
+            .map(|grid| grid.sector_size.saturating_mul(DEFAULT_WALL_HEIGHT_SECTORS))
+            .unwrap_or(DEFAULT_WORLD_SECTOR_SIZE.saturating_mul(DEFAULT_WALL_HEIGHT_SECTORS));
+        let before = self.project.clone();
+        let changed = self.set_layer_boundary_open_no_undo(
+            room,
+            pair.0,
+            pair.1,
+            &cells,
+            open,
+            material,
+            layer_height,
+        );
+        if changed == 0 {
+            self.status = if open {
+                "Selected boundary is already open".to_string()
+            } else {
+                "Selected boundary is already sealed".to_string()
+            };
+            return;
+        }
+        self.history.record(before);
+        self.mark_dirty();
+        self.status = format!(
+            "{} {} vertical surface{}",
+            if open { "Opened" } else { "Sealed" },
+            changed,
+            if changed == 1 { "" } else { "s" }
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn set_layer_boundary_open_no_undo(
+        &mut self,
+        room: NodeId,
+        lower_floor: usize,
+        upper_floor: usize,
+        cells: &HashSet<(i32, i32)>,
+        open: bool,
+        material: Option<ResourceId>,
+        layer_height: i32,
+    ) -> usize {
+        let mut changed = 0usize;
+        let scene = self.project.active_scene_mut();
+        let Some(room_node) = scene.node_mut(room) else {
+            return 0;
+        };
+        let NodeKind::Room { grid } = &mut room_node.kind else {
+            return 0;
+        };
+
+        if let Some(lower) = grid.floor_mut(lower_floor) {
+            for &(wcx, wcz) in cells {
+                let Some((sx, sz)) = lower.world_cell_to_array(wcx, wcz) else {
+                    continue;
+                };
+                let Some(sector) = lower.ensure_sector(sx, sz) else {
+                    continue;
+                };
+                if open {
+                    changed += usize::from(sector.ceiling.take().is_some());
+                } else if sector.ceiling.is_none() {
+                    sector.ceiling = Some(GridHorizontalFace::flat(layer_height, material));
+                    changed += 1;
+                }
+            }
+        }
+        if let Some(upper) = grid.floor_mut(upper_floor) {
+            for &(wcx, wcz) in cells {
+                let Some((sx, sz)) = upper.world_cell_to_array(wcx, wcz) else {
+                    continue;
+                };
+                let Some(sector) = upper.ensure_sector(sx, sz) else {
+                    continue;
+                };
+                if open {
+                    changed += usize::from(sector.floor.take().is_some());
+                } else if sector.floor.is_none() {
+                    sector.floor = Some(GridHorizontalFace::flat(0, material));
+                    changed += 1;
+                }
+            }
+        }
+        changed
     }
 
     /// Apply one paint / erase / place action to `(sx, sz)` in
@@ -1510,6 +1912,64 @@ impl EditorWorkspace {
             }
         }
         targets
+    }
+
+    /// Apply only the UV fields changed in the active face inspector to every
+    /// selected face. Keeping this field-wise is important: rotating a batch
+    /// must not also replace offsets, spans, or flips that differ per face.
+    ///
+    /// The inspector transaction owns undo/dirty bookkeeping; this helper is
+    /// deliberately mutation-only so the whole batch remains one undo step.
+    pub(crate) fn apply_selected_face_uv_change_no_undo(
+        &mut self,
+        active: FaceRef,
+        edit: GridUvTransformEdit,
+        authored: GridUvTransform,
+    ) -> (usize, usize) {
+        if !edit.changed() {
+            return (0, 0);
+        }
+
+        let mut targets = self.selected_sector_faces();
+        for selection in self.selected_primitive_targets() {
+            let Selection::Face(face) = selection else {
+                continue;
+            };
+            if !targets.contains(&face) {
+                targets.push(face);
+            }
+        }
+        if !targets.contains(&active) {
+            targets.push(active);
+        }
+
+        let mut affected = 0;
+        let mut updated = 0;
+        for face in targets {
+            let Some(grid) = self.room_floor_grid_mut(face.room) else {
+                continue;
+            };
+            let Some(sector) = grid.sector_mut(face.sx, face.sz) else {
+                continue;
+            };
+            let uv = match face.kind {
+                FaceKind::Floor => sector.floor.as_mut().map(|face| &mut face.uv),
+                FaceKind::Ceiling => sector.ceiling.as_mut().map(|face| &mut face.uv),
+                FaceKind::Wall { dir, stack } => sector
+                    .walls
+                    .get_mut(dir)
+                    .get_mut(stack as usize)
+                    .map(|face| &mut face.uv),
+            };
+            let Some(uv) = uv else {
+                continue;
+            };
+            let before = *uv;
+            edit.apply(uv, authored);
+            affected += 1;
+            updated += usize::from(*uv != before);
+        }
+        (affected, updated)
     }
 
     #[cfg(test)]

@@ -31,7 +31,7 @@ impl EditorWorkspace {
         true
     }
 
-    fn material_lab_options(&self) -> Vec<(ResourceId, String)> {
+    pub(crate) fn material_lab_options(&self) -> Vec<(ResourceId, String)> {
         self.project
             .resources
             .iter()
@@ -70,14 +70,17 @@ impl EditorWorkspace {
             .and_then(|selected| material_options.iter().find(|(id, _)| *id == selected))
             .map(|(_, name)| name.as_str())
             .unwrap_or("(none)");
-        egui::ComboBox::from_id_salt("material_lab_resource")
-            .selected_text(selected_name)
-            .width(190.0)
-            .show_ui(ui, |ui| {
-                for (id, name) in &material_options {
-                    ui.selectable_value(&mut material_id, Some(*id), name);
-                }
-            });
+        searchable_picker(
+            ui,
+            "material_lab_resource",
+            &mut material_id,
+            selected_name,
+            &material_options,
+            SearchablePickerConfig::required()
+                .with_width(190.0)
+                .with_popup_min_width(360.0)
+                .with_search_hint("Search materials…"),
+        );
         if material_id != self.material_lab.focused_material {
             if let Some(material_id) = material_id {
                 self.focus_material_resource(material_id);
@@ -89,6 +92,19 @@ impl EditorWorkspace {
         let create_material = ui
             .button(icons::label(icons::PLUS, "New"))
             .on_hover_text("Create a reusable Material resource")
+            .clicked();
+        let create_transition = ui
+            .button(icons::label(icons::BLEND, "New Transition"))
+            .on_hover_text("Create a prebaked transition, using the focused material as Source A")
+            .clicked();
+        let duplicate_material = ui
+            .add_enabled(
+                self.material_lab.focused_material.is_some(),
+                egui::Button::new(icons::label(icons::COPY, "Duplicate")),
+            )
+            .on_hover_text(
+                "Duplicate the focused material; useful for retaining several transition stages",
+            )
             .clicked();
         let save_project = ui
             .button(icons::label(icons::SAVE, "Save"))
@@ -104,6 +120,30 @@ impl EditorWorkspace {
             self.focus_material_resource(id);
             self.dirty = true;
             self.status = format!("Created material: {name}");
+        }
+        if create_transition {
+            let name = unique_named_material("New Transition", &material_options);
+            let mut material = MaterialResource::opaque(None);
+            material.texture_mode = MaterialTextureMode::Transition;
+            material.transition.source_a = self.material_lab.focused_material;
+            let id = self
+                .project
+                .add_resource(name.clone(), ResourceData::Material(material));
+            self.focus_material_resource(id);
+            self.dirty = true;
+            self.status = format!("Created transition material: {name}");
+        }
+        if duplicate_material {
+            if let Some(source_id) = self.material_lab.focused_material {
+                if let Some(source) = self.project.resource(source_id).cloned() {
+                    let name =
+                        unique_named_material(&format!("{} Copy", source.name), &material_options);
+                    let id = self.project.add_resource(name.clone(), source.data);
+                    self.focus_material_resource(id);
+                    self.dirty = true;
+                    self.status = format!("Duplicated material: {name}");
+                }
+            }
         }
         if save_project {
             if let Err(error) = self.save() {
@@ -153,7 +193,13 @@ impl EditorWorkspace {
                     egui::ScrollArea::vertical()
                         .id_salt("material_lab_settings")
                         .show(ui, |ui| {
-                            draw_material_settings(ui, "material_lab", &mut edited);
+                            draw_material_settings(
+                                ui,
+                                "material_lab",
+                                &mut edited,
+                                &material_options,
+                                Some(material_id),
+                            );
                         });
                 },
             );
@@ -196,22 +242,31 @@ fn material_lab_empty_state(ui: &mut egui::Ui) {
 }
 
 fn unique_material_name(materials: &[(ResourceId, String)]) -> String {
+    unique_named_material("New Material", materials)
+}
+
+fn unique_named_material(base: &str, materials: &[(ResourceId, String)]) -> String {
     let available = |candidate: &str| materials.iter().all(|(_, name)| name != candidate);
-    if available("New Material") {
-        return "New Material".to_string();
+    if available(base) {
+        return base.to_string();
     }
     for suffix in 2..=u16::MAX {
-        let candidate = format!("New Material {suffix}");
+        let candidate = format!("{base} {suffix}");
         if available(&candidate) {
             return candidate;
         }
     }
-    "New Material Copy".to_string()
+    format!("{base} Copy")
 }
 
-pub(crate) fn draw_primary_layer_settings(ui: &mut egui::Ui, material: &mut MaterialResource) {
+pub(crate) fn draw_primary_layer_settings(
+    ui: &mut egui::Ui,
+    material: &mut MaterialResource,
+    material_options: &[(ResourceId, String)],
+    owner: Option<ResourceId>,
+) {
     ui.push_id("material_layer_1", |ui| {
-        draw_primary_layer_settings_inner(ui, material);
+        draw_primary_layer_settings_inner(ui, material, material_options, owner);
     });
 }
 
@@ -222,12 +277,14 @@ pub(crate) fn draw_material_settings(
     ui: &mut egui::Ui,
     id_salt: impl std::hash::Hash,
     material: &mut MaterialResource,
+    material_options: &[(ResourceId, String)],
+    owner: Option<ResourceId>,
 ) -> bool {
     let original = material.clone();
     ui.push_id(id_salt, |ui| {
-        draw_primary_layer_settings(ui, material);
+        draw_primary_layer_settings(ui, material, material_options, owner);
         ui.add_space(12.0);
-        draw_secondary_layer_settings(ui, material);
+        draw_secondary_layer_settings(ui, material, material_options, owner);
         ui.add_space(12.0);
         ui.separator();
         ui.heading("Surface");
@@ -236,13 +293,21 @@ pub(crate) fn draw_material_settings(
     *material != original
 }
 
-fn draw_primary_layer_settings_inner(ui: &mut egui::Ui, material: &mut MaterialResource) {
+fn draw_primary_layer_settings_inner(
+    ui: &mut egui::Ui,
+    material: &mut MaterialResource,
+    material_options: &[(ResourceId, String)],
+    owner: Option<ResourceId>,
+) {
     ui.heading("Layer 1");
     draw_material_source_presets(ui, &mut material.texture_mode);
     ui.add_space(6.0);
     match material.texture_mode {
         MaterialTextureMode::SimpleImage => draw_simple_image_settings(ui, &mut material.psxt_path),
         MaterialTextureMode::Generated => draw_generated_settings(ui, &mut material.generated),
+        MaterialTextureMode::Transition => {
+            draw_transition_settings(ui, &mut material.transition, material_options, owner)
+        }
         MaterialTextureMode::ReflectiveProbe => {
             draw_reflection_settings(ui, &mut material.reflection)
         }
@@ -291,6 +356,11 @@ fn draw_material_source_presets(ui: &mut egui::Ui, selected_mode: &mut MaterialT
                 icons::LAYERS,
                 "Base colour plus noise",
             ),
+            (
+                MaterialTextureMode::Transition,
+                icons::BLEND,
+                "Prebaked transition between two materials",
+            ),
         ] {
             let selected = *selected_mode == mode;
             let response = ui
@@ -304,6 +374,170 @@ fn draw_material_source_presets(ui: &mut egui::Ui, selected_mode: &mut MaterialT
                 *selected_mode = mode;
             }
         }
+    });
+}
+
+fn draw_transition_settings(
+    ui: &mut egui::Ui,
+    transition: &mut TransitionMaterialTexture,
+    material_options: &[(ResourceId, String)],
+    owner: Option<ResourceId>,
+) {
+    section_frame().show(ui, |ui| {
+        ui.heading("Prebaked transition");
+        ui.label(
+            RichText::new(
+                "Source B covers Source A through a crisp mask. Both source tints are baked before the final shared 16-colour palette is created.",
+            )
+            .small()
+            .color(STUDIO_TEXT_WEAK),
+        );
+        ui.add_space(6.0);
+        draw_transition_source_picker(
+            ui,
+            "transition_source_a",
+            "Source A",
+            &mut transition.source_a,
+            material_options,
+            owner,
+        );
+        draw_transition_source_picker(
+            ui,
+            "transition_source_b",
+            "Source B",
+            &mut transition.source_b,
+            material_options,
+            owner,
+        );
+        if ui
+            .button(icons::label(icons::ROTATE_CCW, "Swap A / B"))
+            .clicked()
+        {
+            std::mem::swap(&mut transition.source_a, &mut transition.source_b);
+        }
+        if transition.source_a.is_some() && transition.source_a == transition.source_b {
+            ui.colored_label(
+                Color32::from_rgb(224, 176, 88),
+                "Choose two different source materials to see a transition.",
+            );
+        }
+
+        ui.separator();
+        ui.strong("Coverage stages");
+        ui.horizontal_wrapped(|ui| {
+            for (label, coverage) in [
+                ("0%", 0),
+                ("25%", 64),
+                ("50%", 128),
+                ("75%", 191),
+                ("100%", 255),
+            ] {
+                if ui
+                    .add(egui::Button::new(label).selected(transition.coverage == coverage))
+                    .clicked()
+                {
+                    transition.coverage = coverage;
+                }
+            }
+        });
+        ui.add(egui::Slider::new(&mut transition.coverage, 0..=255).text("Source B coverage"));
+
+        egui::ComboBox::from_id_salt("transition_mask_shape")
+            .selected_text(transition.shape.label())
+            .show_ui(ui, |ui| {
+                for shape in [
+                    TransitionMaskShape::Straight,
+                    TransitionMaskShape::Diagonal,
+                    TransitionMaskShape::Corner,
+                    TransitionMaskShape::Island,
+                ] {
+                    ui.selectable_value(&mut transition.shape, shape, shape.label());
+                }
+            });
+        ui.horizontal(|ui| {
+            ui.label("Orientation");
+            for quarter in 0..4 {
+                if ui
+                    .add(
+                        egui::Button::new(format!("{}°", u16::from(quarter) * 90))
+                            .selected(transition.rotation_quarters & 3 == quarter),
+                    )
+                    .clicked()
+                {
+                    transition.rotation_quarters = quarter;
+                }
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut transition.flip_x, "Flip X");
+            ui.checkbox(&mut transition.flip_y, "Flip Y");
+        });
+        ui.add(
+            egui::Slider::new(&mut transition.edge_breakup, 0..=96).text("Edge breakup"),
+        );
+        ui.horizontal(|ui| {
+            ui.label("Seed");
+            ui.add(egui::DragValue::new(&mut transition.seed).speed(1));
+        });
+
+        ui.separator();
+        ui.label("Output size");
+        ui.horizontal_wrapped(|ui| {
+            for size in [8u16, 16, 32, 64, 128] {
+                if ui
+                    .add(
+                        egui::Button::new(format!("{size}×{size}"))
+                            .selected(transition.size == size),
+                    )
+                    .clicked()
+                {
+                    transition.size = size;
+                }
+            }
+        });
+        let size = psxed_project::normalize_generated_texture_size(transition.size);
+        let vram_bytes = u32::from(size) * u32::from(size) / 2 + 32;
+        ui.label(
+            RichText::new(format!(
+                "Cooked result: approximately {:.1} KiB of PS1 VRAM including its CLUT.",
+                vram_bytes as f32 / 1024.0
+            ))
+            .small()
+            .color(STUDIO_TEXT_WEAK),
+        );
+    });
+}
+
+fn draw_transition_source_picker(
+    ui: &mut egui::Ui,
+    id_salt: &'static str,
+    label: &str,
+    selected: &mut Option<ResourceId>,
+    material_options: &[(ResourceId, String)],
+    owner: Option<ResourceId>,
+) {
+    let available_options = material_options
+        .iter()
+        .filter(|(id, _)| Some(*id) != owner)
+        .cloned()
+        .collect::<Vec<_>>();
+    let selected_name = selected
+        .and_then(|selected| material_options.iter().find(|(id, _)| *id == selected))
+        .map(|(_, name)| name.as_str())
+        .unwrap_or("(choose material)");
+    ui.horizontal(|ui| {
+        ui.label(label);
+        searchable_picker(
+            ui,
+            id_salt,
+            selected,
+            selected_name,
+            &available_options,
+            SearchablePickerConfig::optional("(none)")
+                .with_width(210.0)
+                .with_popup_min_width(360.0)
+                .with_search_hint("Search materials…"),
+        );
     });
 }
 
@@ -474,13 +708,23 @@ fn draw_reflection_settings(ui: &mut egui::Ui, reflection: &mut ReflectionProbeM
     });
 }
 
-pub(crate) fn draw_secondary_layer_settings(ui: &mut egui::Ui, material: &mut MaterialResource) {
+pub(crate) fn draw_secondary_layer_settings(
+    ui: &mut egui::Ui,
+    material: &mut MaterialResource,
+    material_options: &[(ResourceId, String)],
+    owner: Option<ResourceId>,
+) {
     ui.push_id("material_layer_2", |ui| {
-        draw_secondary_layer_settings_inner(ui, material);
+        draw_secondary_layer_settings_inner(ui, material, material_options, owner);
     });
 }
 
-fn draw_secondary_layer_settings_inner(ui: &mut egui::Ui, material: &mut MaterialResource) {
+fn draw_secondary_layer_settings_inner(
+    ui: &mut egui::Ui,
+    material: &mut MaterialResource,
+    material_options: &[(ResourceId, String)],
+    owner: Option<ResourceId>,
+) {
     ui.heading("Layer 2");
     let mut enabled = material.enabled_secondary_layer().is_some();
     if ui.checkbox(&mut enabled, "Enable layer 2").changed() {
@@ -502,6 +746,9 @@ fn draw_secondary_layer_settings_inner(ui: &mut egui::Ui, material: &mut Materia
     match layer.texture_mode {
         MaterialTextureMode::SimpleImage => draw_simple_image_settings(ui, &mut layer.psxt_path),
         MaterialTextureMode::Generated => draw_generated_settings(ui, &mut layer.generated),
+        MaterialTextureMode::Transition => {
+            draw_transition_settings(ui, &mut layer.transition, material_options, owner)
+        }
         MaterialTextureMode::ReflectiveProbe => draw_reflection_settings(ui, &mut layer.reflection),
     }
     ui.add_space(6.0);
@@ -641,10 +888,25 @@ fn draw_material_lab_preview(
     } else {
         None
     };
+    let mut preview_error = None;
     let image = match material.texture_mode {
         MaterialTextureMode::Generated => {
             let bytes = psxed_project::generate_material_texture_psxt(material.generated);
             decode_psxt_thumbnail(&bytes).map(|(image, _)| image)
+        }
+        MaterialTextureMode::Transition => {
+            match psxed_project::generate_transition_material_texture_psxt(
+                &workspace.project,
+                material.transition,
+                workspace.project_root(),
+                Some(material_id),
+            ) {
+                Ok(bytes) => decode_psxt_thumbnail(&bytes).map(|(image, _)| image),
+                Err(error) => {
+                    preview_error = Some(error);
+                    None
+                }
+            }
         }
         MaterialTextureMode::SimpleImage => workspace
             .project
@@ -660,6 +922,22 @@ fn draw_material_lab_preview(
                 MaterialTextureMode::Generated => {
                     let bytes = psxed_project::generate_material_texture_psxt(layer.generated);
                     decode_psxt_thumbnail(&bytes).map(|(image, _)| image)
+                }
+                MaterialTextureMode::Transition => {
+                    match psxed_project::generate_transition_material_texture_psxt(
+                        &workspace.project,
+                        layer.transition,
+                        workspace.project_root(),
+                        Some(material_id),
+                    ) {
+                        Ok(bytes) => decode_psxt_thumbnail(&bytes).map(|(image, _)| image),
+                        Err(error) => {
+                            if preview_error.is_none() {
+                                preview_error = Some(format!("Layer 2: {error}"));
+                            }
+                            None
+                        }
+                    }
                 }
                 MaterialTextureMode::SimpleImage => layer.psxt_path.as_deref().and_then(|path| {
                     let path = workspace.project_root().join(path);
@@ -730,6 +1008,10 @@ fn draw_material_lab_preview(
             FontId::proportional(18.0),
             STUDIO_TEXT_WEAK,
         );
+    }
+    if let Some(error) = preview_error {
+        ui.add_space(6.0);
+        ui.colored_label(Color32::from_rgb(224, 128, 112), error);
     }
     ui.add_space(8.0);
     section_frame().show(ui, |ui| {
@@ -968,8 +1250,8 @@ mod tests {
             },
             |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
-                    draw_material_settings(ui, "material_lab_test", &mut material);
-                    draw_material_settings(ui, "resource_inspector_test", &mut material);
+                    draw_material_settings(ui, "material_lab_test", &mut material, &[], None);
+                    draw_material_settings(ui, "resource_inspector_test", &mut material, &[], None);
                 });
             },
         );
@@ -1016,6 +1298,71 @@ mod tests {
     }
 
     #[test]
+    fn transition_material_controls_render_with_source_and_stage_authoring() {
+        let mut project = ProjectDocument::new("transition-ui");
+        let source_a = project.add_resource(
+            "Stone",
+            ResourceData::Material(MaterialResource::opaque(None)),
+        );
+        let source_b = project.add_resource(
+            "Sand",
+            ResourceData::Material(MaterialResource::opaque(None)),
+        );
+        let mut material = MaterialResource::opaque(None);
+        material.texture_mode = MaterialTextureMode::Transition;
+        material.transition.source_a = Some(source_a);
+        material.transition.source_b = Some(source_b);
+        let options = vec![
+            (source_a, "Stone".to_string()),
+            (source_b, "Sand".to_string()),
+        ];
+
+        let ctx = egui::Context::default();
+        let mut fonts = egui::FontDefinitions::default();
+        let proportional = fonts
+            .families
+            .get(&egui::FontFamily::Proportional)
+            .cloned()
+            .expect("default proportional font family");
+        fonts
+            .families
+            .insert(egui::FontFamily::Name("lucide".into()), proportional);
+        ctx.set_fonts(fonts);
+        let output = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(420.0, 1600.0))),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    draw_material_settings(
+                        ui,
+                        "transition_material",
+                        &mut material,
+                        &options,
+                        None,
+                    );
+                });
+            },
+        );
+        let mut text_shapes = Vec::new();
+        for clipped in &output.shapes {
+            collect_text_shapes(&clipped.shape, &mut text_shapes);
+        }
+        let text = text_shapes
+            .iter()
+            .map(|shape| shape.galley.job.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(text.contains("Prebaked transition"));
+        assert!(text.contains("Coverage stages"));
+        assert!(text.contains("Source A"));
+        assert!(text.contains("Source B"));
+        assert!(text.contains("50%"));
+        assert!(text.contains("Edge breakup"));
+    }
+
+    #[test]
     fn layer_two_toggle_preserves_the_complete_recipe() {
         let mut material = MaterialResource::opaque(None);
         let mut layer = ModelSecondaryLayer::moving_default();
@@ -1034,6 +1381,7 @@ mod tests {
         assert!(!disabled.enabled);
         assert_eq!(disabled.psxt_path, layer.psxt_path);
         assert_eq!(disabled.generated, layer.generated);
+        assert_eq!(disabled.transition, layer.transition);
         assert_eq!(disabled.reflection, layer.reflection);
         assert_eq!(disabled.blend_mode, layer.blend_mode);
         assert_eq!(disabled.tint, layer.tint);

@@ -218,15 +218,9 @@ impl Playtest {
             character.action_speed(action),
             character.action_frame_range(action),
         );
-        if let Some(stats) = self.resolve_player_combat_capsules(
-            ctx,
-            character,
-            model,
-            animation,
-            phase,
-            action,
-            clip,
-        ) {
+        if let Some(stats) = self
+            .resolve_player_combat_capsules(ctx, character, model, animation, phase, action, clip)
+        {
             self.report_player_melee_stats(stats);
             return;
         }
@@ -271,8 +265,7 @@ impl Playtest {
         let records = COMBAT_CAPSULES.get(first..end)?;
         let action_index = action.to_index() as u8;
         let frame = (phase >> 12).min(u32::from(u16::MAX)) as u16;
-        let mut active =
-            [ActivePlayerCapsule::EMPTY; psx_level::MAX_CHARACTER_COMBAT_CAPSULES];
+        let mut active = [ActivePlayerCapsule::EMPTY; psx_level::MAX_CHARACTER_COMBAT_CAPSULES];
         let mut active_count = 0usize;
         let mut authored_action = false;
         let player = self.motor.position();
@@ -370,9 +363,7 @@ impl Playtest {
                     hit.poise_damage,
                 );
                 stats.hits = stats.hits.saturating_add(u16::from(outcome.connected));
-                stats.staggers = stats
-                    .staggers
-                    .saturating_add(u16::from(outcome.staggered));
+                stats.staggers = stats.staggers.saturating_add(u16::from(outcome.staggered));
                 stats.deaths = stats.deaths.saturating_add(u16::from(outcome.died));
             }
             entity += 1;
@@ -396,13 +387,18 @@ impl Playtest {
             .iter()
             .any(|record| record.flags & psx_level::combat_capsule_flags::HURTBOX != 0);
         if !has_authored_hurtbox {
-            return active.iter().copied().find(|hit| {
-                combat::combat_capsules_overlap(&hit.capsule, &body_fallback)
-            });
+            return active
+                .iter()
+                .copied()
+                .find(|hit| combat::combat_capsules_overlap(&hit.capsule, &body_fallback));
         }
 
         let instance = MODEL_INSTANCES.get(entity_record.model_instance as usize)?;
-        let model = self.models.get(instance.model.to_usize()).copied().flatten()?;
+        let model = self
+            .models
+            .get(instance.model.to_usize())
+            .copied()
+            .flatten()?;
         let state_clip = self.game_entities.clip_for_state(GAME_ENTITIES, entity);
         let clip = ModelClipIndex(state_clip.clip);
         let animation = model.clip(&self.clips, clip)?;

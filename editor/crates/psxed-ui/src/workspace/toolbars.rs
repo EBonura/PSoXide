@@ -148,7 +148,7 @@ impl EditorWorkspace {
                             pointer_world,
                         ) {
                             if let Some(origin) = self.floating_origin_from_2d_world(room, world) {
-                                self.update_floating_geometry_origin(origin);
+                                self.track_floating_geometry_pointer_origin(origin);
                             }
                         }
                         let top_hit = pointer_world
@@ -442,9 +442,9 @@ impl EditorWorkspace {
             |ui| self.draw_view_dimension_group_menu(ui),
         );
 
-        // Floor stepper: author multiple stacked floors per room. Shown
-        // only in the Room workspace with a room in context. Floor 0 is
-        // the base grid; "Up" past the top floor adds a new one.
+        // Compact layer stepper. Navigation stays on the toolbar; footprint
+        // extrusion and slab/portal actions live in one adjacent menu so
+        // stacked-room authoring does not consume another toolbar row.
         if matches!(self.active_workspace, WorkspaceView::Room) {
             if let Some(room_id) = self.floors_target_room() {
                 let floor_count = self
@@ -452,23 +452,140 @@ impl EditorWorkspace {
                     .map(|grid| grid.floor_count())
                     .unwrap_or(1);
                 let active = self.active_floor.min(floor_count.saturating_sub(1));
+                let has_footprint = self.can_author_selected_layer_footprint();
                 ui.separator();
-                ui.label("Floor");
                 if ui
-                    .add_enabled(active > 0, egui::Button::new("Down"))
-                    .on_hover_text("Edit the floor below")
+                    .add_enabled(
+                        active > 0,
+                        egui::Button::new(icons::text(icons::CHEVRON_LEFT, 14.0))
+                            .min_size(Vec2::new(24.0, 23.0)),
+                    )
+                    .on_hover_text("Edit the layer below")
                     .clicked()
                 {
                     self.floor_down();
                 }
-                ui.label(format!("{} / {}", active + 1, floor_count));
+                ui.label(
+                    RichText::new(format!("L{}/{}", active + 1, floor_count))
+                        .monospace()
+                        .color(STUDIO_TEXT_WEAK),
+                );
                 if ui
-                    .button("Up")
-                    .on_hover_text("Edit the floor above (adds one above the top floor)")
+                    .add(
+                        egui::Button::new(icons::text(icons::CHEVRON_RIGHT, 14.0))
+                            .min_size(Vec2::new(24.0, 23.0)),
+                    )
+                    .on_hover_text("Edit the layer above (adds an empty layer at the top)")
                     .clicked()
                 {
                     self.floor_up();
                 }
+                toolbar_option_menu(
+                    ui,
+                    icons::LAYERS,
+                    "Layers",
+                    "Layer actions",
+                    format!("Layer {} of {}", active + 1, floor_count),
+                    false,
+                    |ui| {
+                        ui.set_min_width(230.0);
+                        ui.label(
+                            RichText::new("EXTRUDE SELECTION")
+                                .small()
+                                .color(STUDIO_TEXT_WEAK),
+                        );
+                        if ui
+                            .add_enabled(has_footprint, egui::Button::new("Above with opening"))
+                            .on_hover_text(
+                                "Build a closed volume above the selected footprint and remove the slab between layers",
+                            )
+                            .clicked()
+                        {
+                            self.extrude_selected_layer_above(true);
+                            ui.close_menu();
+                        }
+                        if ui
+                            .add_enabled(has_footprint, egui::Button::new("Above as solid layer"))
+                            .clicked()
+                        {
+                            self.extrude_selected_layer_above(false);
+                            ui.close_menu();
+                        }
+                        if ui
+                            .add_enabled(has_footprint, egui::Button::new("Below with opening"))
+                            .on_hover_text(
+                                "Build below the selected footprint; at layer one this inserts a new base without moving existing content",
+                            )
+                            .clicked()
+                        {
+                            self.extrude_selected_layer_below(true);
+                            ui.close_menu();
+                        }
+                        if ui
+                            .add_enabled(has_footprint, egui::Button::new("Below as solid layer"))
+                            .clicked()
+                        {
+                            self.extrude_selected_layer_below(false);
+                            ui.close_menu();
+                        }
+
+                        ui.separator();
+                        ui.label(
+                            RichText::new("SELECTED SLAB")
+                                .small()
+                                .color(STUDIO_TEXT_WEAK),
+                        );
+                        if ui
+                            .add_enabled(
+                                has_footprint && active + 1 < floor_count,
+                                egui::Button::new("Open to layer above"),
+                            )
+                            .clicked()
+                        {
+                            self.set_selected_slab_above(true);
+                            ui.close_menu();
+                        }
+                        if ui
+                            .add_enabled(
+                                has_footprint && active + 1 < floor_count,
+                                egui::Button::new("Seal layer above"),
+                            )
+                            .clicked()
+                        {
+                            self.set_selected_slab_above(false);
+                            ui.close_menu();
+                        }
+                        if ui
+                            .add_enabled(
+                                has_footprint && active > 0,
+                                egui::Button::new("Open to layer below"),
+                            )
+                            .clicked()
+                        {
+                            self.set_selected_slab_below(true);
+                            ui.close_menu();
+                        }
+                        if ui
+                            .add_enabled(
+                                has_footprint && active > 0,
+                                egui::Button::new("Seal layer below"),
+                            )
+                            .clicked()
+                        {
+                            self.set_selected_slab_below(false);
+                            ui.close_menu();
+                        }
+
+                        if !has_footprint {
+                            ui.separator();
+                            ui.label(
+                                RichText::new("Select tiles or 3D faces to enable layer actions.")
+                                    .small()
+                                    .color(STUDIO_TEXT_WEAK),
+                            );
+                        }
+                    },
+                );
             }
         }
     }
@@ -949,21 +1066,32 @@ impl EditorWorkspace {
         } else {
             format!("Auto {label}")
         };
-        if ui
-            .selectable_label(self.place_resource.is_none(), auto_label)
-            .clicked()
-        {
-            self.place_resource = None;
-        }
+        let selected_label = self
+            .place_resource
+            .and_then(|selected| {
+                options
+                    .iter()
+                    .find(|(id, _)| *id == selected)
+                    .map(|(_, name)| name.as_str())
+            })
+            .unwrap_or(&auto_label);
+        let search_hint = format!("Search {}…", label.to_ascii_lowercase());
+        let picker_changed = searchable_picker(
+            ui,
+            ui.id().with(("place-resource-picker", label)),
+            &mut self.place_resource,
+            selected_label,
+            &options,
+            SearchablePickerConfig::optional(&auto_label)
+                .with_width(220.0)
+                .with_popup_min_width(360.0)
+                .with_search_hint(&search_hint),
+        );
         if options.is_empty() {
             ui.weak(format!("No {} resources", label.to_ascii_lowercase()));
         }
-        for (id, name) in options {
-            if ui
-                .selectable_label(self.place_resource == Some(id), name)
-                .clicked()
-            {
-                self.place_resource = Some(id);
+        if picker_changed {
+            if let Some(id) = self.place_resource {
                 self.replace_resource_selection(id);
             }
         }
@@ -1096,15 +1224,17 @@ impl EditorWorkspace {
         ui.label(icons::text(icons::PALETTE, 14.0).color(STUDIO_TEXT_WEAK))
             .on_hover_text("Brush material");
         let before = self.brush_material;
-        egui::ComboBox::from_id_salt("brush-material-picker")
-            .selected_text(label)
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.brush_material, None, "Auto")
-                    .on_hover_text("Use the selected material, then fall back by tool.");
-                for (id, name) in &materials {
-                    ui.selectable_value(&mut self.brush_material, Some(*id), name);
-                }
-            });
+        searchable_picker(
+            ui,
+            "brush-material-picker",
+            &mut self.brush_material,
+            &label,
+            &materials,
+            SearchablePickerConfig::optional("Auto")
+                .with_width(180.0)
+                .with_popup_min_width(360.0)
+                .with_search_hint("Search materials…"),
+        );
         if self.brush_material != before {
             self.mark_shortcut_group_changed(ShortcutGroup::Tool);
         }

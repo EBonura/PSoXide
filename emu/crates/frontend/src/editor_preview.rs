@@ -2420,6 +2420,7 @@ fn preview_model_material_override(
         // Generated and probe materials have no `psxt_path`: their preview
         // texture is baked directly into the editor texture cache.
         psxed_project::MaterialTextureMode::Generated
+        | psxed_project::MaterialTextureMode::Transition
         | psxed_project::MaterialTextureMode::ReflectiveProbe => textures.slot(material_id),
     };
     Some(PreviewModelMaterialOverride {
