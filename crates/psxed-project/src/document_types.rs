@@ -1415,6 +1415,7 @@ pub(crate) fn clear_resource_data_references(data: &mut ResourceData, id: Resour
 pub(crate) fn node_kind_reference_count(kind: &NodeKind, id: ResourceId) -> usize {
     match kind {
         NodeKind::Room { grid } => grid_resource_reference_count(grid, id),
+        NodeKind::WaterVolume { material, .. } => option_resource_reference_count(*material, id),
         NodeKind::MeshInstance { mesh, material, .. } => {
             option_resource_reference_count(*mesh, id)
                 + option_resource_reference_count(*material, id)
@@ -1479,6 +1480,7 @@ pub(crate) fn clear_far_vista_resource_references(
 pub(crate) fn clear_node_kind_references(kind: &mut NodeKind, id: ResourceId) -> usize {
     match kind {
         NodeKind::Room { grid } => clear_grid_resource_references(grid, id),
+        NodeKind::WaterVolume { material, .. } => clear_option_resource(material, id),
         NodeKind::MeshInstance { mesh, material, .. } => {
             clear_option_resource(mesh, id) + clear_option_resource(material, id)
         }

@@ -734,6 +734,7 @@ pub fn build_package(
     let mut model_instances: Vec<PlaytestModelInstance> = Vec::new();
     let mut image_props: Vec<PlaytestImageProp> = Vec::new();
     let mut box_props: Vec<PlaytestBoxProp> = Vec::new();
+    let mut water_cells: Vec<PlaytestWaterCell> = Vec::new();
     let mut combat_capsules: Vec<PlaytestCombatCapsule> = Vec::new();
     let mut weapon_hitboxes: Vec<PlaytestWeaponHitbox> = Vec::new();
     let mut weapons: Vec<PlaytestWeapon> = Vec::new();
@@ -757,6 +758,138 @@ pub fn build_package(
     let mut model_clip_remaps: HashMap<ResourceId, Vec<Option<u16>>> = HashMap::new();
     let mut weapon_for_resource: HashMap<ResourceId, u16> = HashMap::new();
     let mut warned_unsupported: HashSet<&'static str> = HashSet::new();
+
+    // Water is authored as a sparse world-cell footprint on a Room floor.
+    // Resolve each cell through the exact portal-room plan so split rooms and
+    // stacked floors inherit the correct runtime room/local coordinates.
+    // The compact WATER_CELLS table is both the authoritative gameplay lookup
+    // and the stateless render source; water never consumes BoxProp state or
+    // collision-blocker capacity.
+    let mut occupied_water_cells: HashSet<(u16, u16, u16)> = HashSet::new();
+    for node in scene.nodes() {
+        let NodeKind::WaterVolume {
+            material,
+            cells,
+            settings,
+        } = &node.kind
+        else {
+            continue;
+        };
+        let Some(room_node) = enclosing_room(scene, node) else {
+            report.warn(format!(
+                "Water Volume '{}' has no enclosing Room - skipped",
+                node.name
+            ));
+            continue;
+        };
+        let NodeKind::Room { grid: base_grid } = &room_node.kind else {
+            continue;
+        };
+        let floor_index = node.floor.min(base_grid.floor_count().saturating_sub(1));
+        let Some(grid) = base_grid.floor(floor_index) else {
+            continue;
+        };
+        let normalized = settings.normalized();
+        if cells.is_empty() {
+            report.warn(format!("Water Volume '{}' has no painted cells", node.name));
+            continue;
+        }
+        let surface = material.and_then(|material_id| {
+            resolve_material_texture_asset(
+                project,
+                project_root,
+                &format!("Water Volume '{}' surface", node.name),
+                material_id,
+                &mut texture_asset_for_path,
+                &mut assets,
+                &mut report,
+            )
+            .map(|(texture_asset_index, tint_rgb)| {
+                let (blend_mode, animation) = project
+                    .resource(material_id)
+                    .and_then(|resource| match &resource.data {
+                        ResourceData::Material(material) => Some((
+                            manifest::model_override_blend_code(material.blend_mode),
+                            material.animation,
+                        )),
+                        _ => None,
+                    })
+                    .unwrap_or((
+                        psx_level::model_override_blend::AVERAGE,
+                        crate::MaterialAnimation::default(),
+                    ));
+                (texture_asset_index, blend_mode, tint_rgb, animation)
+            })
+        });
+        for cell in cells {
+            let Some((array_x, array_z)) = grid.world_cell_to_array(cell.x, cell.z) else {
+                report.warn(format!(
+                    "Water Volume '{}' cell {},{} lies outside floor {} - skipped",
+                    node.name,
+                    cell.x,
+                    cell.z,
+                    floor_index + 1,
+                ));
+                continue;
+            };
+            let Some(sector) = grid.sector(array_x, array_z) else {
+                report.warn(format!(
+                    "Water Volume '{}' cell {},{} has no terrain sector - skipped",
+                    node.name, cell.x, cell.z,
+                ));
+                continue;
+            };
+            let Some(floor) = sector.floor.as_ref() else {
+                report.warn(format!(
+                    "Water Volume '{}' cell {},{} has no floor - skipped",
+                    node.name, cell.x, cell.z,
+                ));
+                continue;
+            };
+            let Some(chunk) = room_chunks_by_node.get(&room_node.id).and_then(|chunks| {
+                chunks.iter().find(|chunk| {
+                    chunk.floor_idx == floor_index && chunk.cells.contains(&[array_x, array_z])
+                })
+            }) else {
+                report.warn(format!(
+                    "Water Volume '{}' cell {},{} did not map to a runtime room - skipped",
+                    node.name, cell.x, cell.z,
+                ));
+                continue;
+            };
+            let local_x = array_x.saturating_sub(chunk.array_origin[0]);
+            let local_z = array_z.saturating_sub(chunk.array_origin[1]);
+            if !occupied_water_cells.insert((chunk.room_index, local_x, local_z)) {
+                report.warn(format!(
+                    "Water Volume '{}' overlaps another volume at {},{} - later cell skipped",
+                    node.name, cell.x, cell.z,
+                ));
+                continue;
+            }
+            let center = grid.sector_size / 2;
+            let floor_y = floor.height_at_local(center, center, grid.sector_size);
+            let depth = normalized.height_above_floor;
+            let surface_y = floor_y.saturating_add(i32::from(depth));
+            water_cells.push(PlaytestWaterCell {
+                room: chunk.room_index,
+                x: local_x,
+                z: local_z,
+                texture_asset_index: surface.map(|surface| surface.0),
+                blend_mode: surface
+                    .map(|surface| surface.1)
+                    .unwrap_or(psx_level::model_override_blend::AVERAGE),
+                tint_rgb: surface.map(|surface| surface.2).unwrap_or([128; 3]),
+                animation: surface.map(|surface| surface.3).unwrap_or_default(),
+                surface_y,
+                depth,
+                lethal_depth: normalized.lethal_depth,
+                movement_percent: normalized.movement_percent,
+                death_delay_ticks: normalized.death_delay_ticks,
+                death_submerge_depth: normalized.death_submerge_depth,
+            });
+        }
+    }
+    water_cells.sort_by_key(|cell| (cell.room, cell.x, cell.z));
 
     for node in scene.nodes() {
         if node.id == scene.root || matches!(node.kind, NodeKind::Room { .. }) {
@@ -1339,6 +1472,7 @@ pub fn build_package(
             | NodeKind::Node3D
             | NodeKind::World { .. }
             | NodeKind::Room { .. }
+            | NodeKind::WaterVolume { .. }
             | NodeKind::ModelRenderer { .. }
             | NodeKind::Animator { .. }
             | NodeKind::Collider { .. }
@@ -1694,6 +1828,7 @@ pub fn build_package(
             chunks,
             room_portals,
             room_floor_links,
+            water_cells,
             room_near_rooms,
             room_overlapped_rooms,
             materials,
