@@ -562,6 +562,10 @@ fn changing_world_sector_size_rescales_descendant_room_and_colliders() {
     let mut grid = WorldGrid::empty(1, 1, 1024);
     grid.set_floor(0, 0, 160, None);
     grid.add_wall(0, 0, GridDirection::North, 0, 1024, None);
+    let upper = grid.push_floor();
+    let upper_grid = grid.floor_mut(upper).expect("upper floor");
+    upper_grid.set_floor(0, 0, 320, None);
+    upper_grid.add_wall(0, 0, GridDirection::North, 0, 2048, None);
     let room = scene.add_node(world, "Room", NodeKind::Room { grid });
     let entity = scene.add_node(room, "Entity", NodeKind::Entity);
     let collider = scene.add_node(
@@ -594,6 +598,20 @@ fn changing_world_sector_size_rescales_descendant_room_and_colliders() {
             .unwrap()
             .heights,
         [0, 0, 1536, 1536]
+    );
+    let upper_grid = grid.floor(upper).expect("upper floor remains present");
+    assert_eq!(upper_grid.sector_size, 1536);
+    assert_eq!(upper_grid.elevation, 3072);
+    let upper_sector = upper_grid.sector(0, 0).expect("upper sector");
+    assert_eq!(upper_sector.floor.as_ref().unwrap().heights, [512; 4]);
+    assert_eq!(
+        upper_sector
+            .walls
+            .get(GridDirection::North)
+            .first()
+            .unwrap()
+            .heights,
+        [0, 0, 3072, 3072]
     );
 
     let NodeKind::Collider {
