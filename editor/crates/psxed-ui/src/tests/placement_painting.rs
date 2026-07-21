@@ -429,6 +429,494 @@ fn paint_ceiling_in_triangle_mode_targets_clicked_triangle_only() {
     assert!(workspace.is_dirty());
 }
 
+fn workspace_with_terrain_strip(label: &str) -> (EditorWorkspace, NodeId, ResourceId, ResourceId) {
+    let mut project = ProjectDocument::new(label);
+    let generated = |base_color| {
+        let mut material = MaterialResource::opaque(None);
+        material.texture_mode = MaterialTextureMode::Generated;
+        material.generated.base_color = base_color;
+        material
+    };
+    let grass = project.add_resource("Grass", ResourceData::Material(generated([46, 108, 55])));
+    let sand = project.add_resource("Sand", ResourceData::Material(generated([176, 142, 88])));
+    let grid = WorldGrid::stone_room(3, 1, 1024, Some(grass), Some(grass));
+    let room = project
+        .active_scene_mut()
+        .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+    (
+        EditorWorkspace::with_project(std::env::temp_dir(), project),
+        room,
+        grass,
+        sand,
+    )
+}
+
+fn workspace_with_terrain_patch(label: &str) -> (EditorWorkspace, NodeId, ResourceId, ResourceId) {
+    let mut project = ProjectDocument::new(label);
+    let generated = |base_color| {
+        let mut material = MaterialResource::opaque(None);
+        material.texture_mode = MaterialTextureMode::Generated;
+        material.generated.base_color = base_color;
+        material
+    };
+    let grass = project.add_resource("Grass", ResourceData::Material(generated([46, 108, 55])));
+    let sand = project.add_resource("Sand", ResourceData::Material(generated([176, 142, 88])));
+    let grid = WorldGrid::stone_room(3, 3, 1024, Some(grass), Some(grass));
+    let room = project
+        .active_scene_mut()
+        .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+    (
+        EditorWorkspace::with_project(std::env::temp_dir(), project),
+        room,
+        grass,
+        sand,
+    )
+}
+
+#[test]
+fn material_paint_direct_changes_only_the_clicked_floor() {
+    let (mut workspace, room, grass, sand) = workspace_with_terrain_patch("direct-face-paint");
+    workspace.brush_material = Some(sand);
+    let target = FaceRef {
+        room,
+        sx: 1,
+        sz: 1,
+        kind: FaceKind::Floor,
+    };
+
+    workspace.run_paint_action(
+        ViewTool::PaintMaterial,
+        room,
+        1,
+        1,
+        Some(target),
+        [1536.0, 0.0, 1536.0],
+    );
+
+    let grid = workspace.room_grid_view(room).unwrap();
+    for z in 0..3 {
+        for x in 0..3 {
+            let material = grid.sector(x, z).unwrap().floor.as_ref().unwrap().material;
+            assert_eq!(
+                material,
+                Some(if (x, z) == (1, 1) { sand } else { grass }),
+                "unexpected material change at {x},{z}"
+            );
+        }
+    }
+    assert!(!workspace.material_paint_blend);
+    assert!(!workspace
+        .project
+        .resources
+        .iter()
+        .any(|resource| resource.name.starts_with(AUTO_PAINT_BLEND_PREFIX)));
+}
+
+#[test]
+fn material_paint_eyedropper_samples_once_and_syncs_resource_selection() {
+    let (mut workspace, room, grass, sand) = workspace_with_terrain_patch("sample-face-material");
+    let target = FaceRef {
+        room,
+        sx: 1,
+        sz: 1,
+        kind: FaceKind::Floor,
+    };
+    workspace.active_tool = ViewTool::PaintMaterial;
+    workspace.brush_material = Some(sand);
+    workspace.material_paint_sampling = true;
+
+    workspace.dispatch_paint_3d(Some((target, [1536.0, 0.0, 1536.0])), None);
+
+    assert_eq!(workspace.brush_material, Some(grass));
+    assert_eq!(workspace.selection.selected_resource, Some(grass));
+    assert!(workspace.selection.selected_resources.contains(&grass));
+    assert!(!workspace.material_paint_sampling);
+    assert_eq!(workspace.face_material(target), Some(grass));
+    assert!(workspace.status.contains("Sampled"));
+}
+
+#[test]
+fn material_paint_eyedropper_unwraps_generated_blend_to_its_brush() {
+    let (mut workspace, room, grass, sand) = workspace_with_terrain_patch("sample-face-blend");
+    let target = FaceRef {
+        room,
+        sx: 1,
+        sz: 1,
+        kind: FaceKind::Floor,
+    };
+    workspace.active_tool = ViewTool::PaintMaterial;
+    workspace.brush_material = Some(sand);
+    workspace.material_paint_blend = true;
+    workspace.run_paint_action(
+        ViewTool::PaintMaterial,
+        room,
+        1,
+        1,
+        Some(target),
+        [1536.0, 0.0, 1536.0],
+    );
+    let generated = workspace.face_material(target).unwrap();
+    assert_ne!(generated, sand);
+    let resource_count = workspace.project.resources.len();
+
+    workspace.replace_resource_selection(grass);
+    workspace.material_paint_sampling = true;
+    workspace.dispatch_paint_3d(Some((target, [1536.0, 0.0, 1536.0])), None);
+
+    assert_eq!(workspace.brush_material, Some(sand));
+    assert_eq!(workspace.selection.selected_resource, Some(sand));
+    assert_eq!(workspace.face_material(target), Some(generated));
+    assert_eq!(workspace.project.resources.len(), resource_count);
+    assert!(!workspace.material_paint_sampling);
+}
+
+#[test]
+fn material_paint_blend_changes_only_the_clicked_floor() {
+    let (mut workspace, room, grass, sand) = workspace_with_terrain_patch("blended-face-paint");
+    workspace.brush_material = Some(sand);
+    workspace.material_paint_blend = true;
+    let target = FaceRef {
+        room,
+        sx: 1,
+        sz: 1,
+        kind: FaceKind::Floor,
+    };
+
+    workspace.run_paint_action(
+        ViewTool::PaintMaterial,
+        room,
+        1,
+        1,
+        Some(target),
+        [1536.0, 0.0, 1536.0],
+    );
+
+    let grid = workspace.room_grid_view(room).unwrap();
+    let painted = grid
+        .sector(1, 1)
+        .unwrap()
+        .floor
+        .as_ref()
+        .unwrap()
+        .material
+        .unwrap();
+    for z in 0..3 {
+        for x in 0..3 {
+            if (x, z) != (1, 1) {
+                assert_eq!(
+                    grid.sector(x, z).unwrap().floor.as_ref().unwrap().material,
+                    Some(grass),
+                    "blend mutated neighbor {x},{z}"
+                );
+            }
+        }
+    }
+    let material = match &workspace.project.resource(painted).unwrap().data {
+        ResourceData::Material(material) => material,
+        other => panic!("expected generated transition material, got {other:?}"),
+    };
+    assert_eq!(material.texture_mode, MaterialTextureMode::Transition);
+    assert_eq!(material.transition.source_a, Some(grass));
+    assert_eq!(material.transition.source_b, Some(sand));
+    assert_eq!(material.transition.shape, TransitionMaskShape::Connected);
+    assert_eq!(material.transition.connected_edges, 0);
+    assert!(workspace.status.contains("only"));
+}
+
+#[test]
+fn adjacent_blended_paint_tiles_form_one_continuous_region() {
+    let (mut workspace, room, grass, sand) = workspace_with_terrain_patch("connected-face-paint");
+    workspace.brush_material = Some(sand);
+    workspace.material_paint_blend = true;
+
+    for sx in 0..3 {
+        let target = FaceRef {
+            room,
+            sx,
+            sz: 1,
+            kind: FaceKind::Floor,
+        };
+        workspace.run_paint_action(
+            ViewTool::PaintMaterial,
+            room,
+            sx,
+            1,
+            Some(target),
+            [(sx as f32 + 0.5) * 1024.0, 0.0, 1536.0],
+        );
+    }
+
+    let grid = workspace.room_grid_view(room).unwrap();
+    for z in [0, 2] {
+        for x in 0..3 {
+            assert_eq!(
+                grid.sector(x, z).unwrap().floor.as_ref().unwrap().material,
+                Some(grass),
+                "painting the row mutated unpainted tile {x},{z}"
+            );
+        }
+    }
+
+    let expected_connections = [1 << 1, (1 << 3) | (1 << 1), 1 << 3];
+    for (sx, expected) in expected_connections.into_iter().enumerate() {
+        let material_id = grid
+            .sector(sx as u16, 1)
+            .unwrap()
+            .floor
+            .as_ref()
+            .unwrap()
+            .material
+            .unwrap();
+        let ResourceData::Material(material) =
+            &workspace.project.resource(material_id).unwrap().data
+        else {
+            panic!("paint blend should resolve to a material");
+        };
+        assert_eq!(material.transition.source_a, Some(grass));
+        assert_eq!(material.transition.source_b, Some(sand));
+        assert_eq!(material.transition.shape, TransitionMaskShape::Connected);
+        assert_eq!(material.transition.connected_edges, expected);
+        assert_eq!(material.transition.edge_breakup, 20);
+    }
+}
+
+#[test]
+fn blended_paint_connections_follow_authored_face_uv_rotation() {
+    let (mut workspace, room, _grass, sand) =
+        workspace_with_terrain_patch("rotated-connected-face-paint");
+    {
+        let grid = workspace.room_floor_grid_mut(room).unwrap();
+        for sx in 0..3 {
+            grid.sector_mut(sx, 1)
+                .unwrap()
+                .floor
+                .as_mut()
+                .unwrap()
+                .uv
+                .rotation = GridUvRotation::Deg90;
+        }
+    }
+    workspace.brush_material = Some(sand);
+    workspace.material_paint_blend = true;
+
+    for sx in 0..3 {
+        let target = FaceRef {
+            room,
+            sx,
+            sz: 1,
+            kind: FaceKind::Floor,
+        };
+        workspace.run_paint_action(
+            ViewTool::PaintMaterial,
+            room,
+            sx,
+            1,
+            Some(target),
+            [(sx as f32 + 0.5) * 1024.0, 0.0, 1536.0],
+        );
+    }
+
+    // A clockwise face UV rotation maps physical E -> texture S and
+    // physical W -> texture N. The generated mask must use those transformed
+    // edges or the three-tile row appears as three 90-degree islands.
+    let expected_connections = [1 << 2, (1 << 0) | (1 << 2), 1 << 0];
+    let grid = workspace.room_grid_view(room).unwrap();
+    for (sx, expected) in expected_connections.into_iter().enumerate() {
+        let material_id = grid
+            .sector(sx as u16, 1)
+            .unwrap()
+            .floor
+            .as_ref()
+            .unwrap()
+            .material
+            .unwrap();
+        let ResourceData::Material(material) =
+            &workspace.project.resource(material_id).unwrap().data
+        else {
+            panic!("paint blend should resolve to a material");
+        };
+        assert_eq!(material.transition.connected_edges, expected);
+    }
+}
+
+#[test]
+fn material_paint_blend_uses_adjustable_coverage_and_edge_detail() {
+    let (mut workspace, room, _grass, sand) = workspace_with_terrain_patch("detailed-face-paint");
+    workspace.brush_material = Some(sand);
+    workspace.material_paint_blend = true;
+    workspace.material_paint_blend_coverage_percent = 70;
+    workspace.material_paint_blend_edge_detail = 44;
+    let target = FaceRef {
+        room,
+        sx: 1,
+        sz: 1,
+        kind: FaceKind::Floor,
+    };
+
+    workspace.run_paint_action(
+        ViewTool::PaintMaterial,
+        room,
+        1,
+        1,
+        Some(target),
+        [1536.0, 0.0, 1536.0],
+    );
+
+    let material_id = workspace
+        .room_grid_view(room)
+        .unwrap()
+        .sector(1, 1)
+        .unwrap()
+        .floor
+        .as_ref()
+        .unwrap()
+        .material
+        .unwrap();
+    let ResourceData::Material(material) = &workspace.project.resource(material_id).unwrap().data
+    else {
+        panic!("paint blend should resolve to a material");
+    };
+    assert_eq!(material.transition.coverage, 179);
+    assert_eq!(material.transition.edge_breakup, 44);
+}
+
+#[test]
+fn material_paint_blend_is_one_undo_step() {
+    let (mut workspace, room, grass, sand) = workspace_with_terrain_patch("undo-face-blend");
+    workspace.brush_material = Some(sand);
+    workspace.material_paint_blend = true;
+    let target = FaceRef {
+        room,
+        sx: 1,
+        sz: 1,
+        kind: FaceKind::Floor,
+    };
+
+    workspace.run_paint_action(
+        ViewTool::PaintMaterial,
+        room,
+        1,
+        1,
+        Some(target),
+        [1536.0, 0.0, 1536.0],
+    );
+    workspace.do_undo();
+
+    let grid = workspace.room_grid_view(room).unwrap();
+    for z in 0..3 {
+        for x in 0..3 {
+            assert_eq!(
+                grid.sector(x, z).unwrap().floor.as_ref().unwrap().material,
+                Some(grass)
+            );
+        }
+    }
+    assert!(!workspace
+        .project
+        .resources
+        .iter()
+        .any(|resource| resource.name.starts_with(AUTO_PAINT_BLEND_PREFIX)));
+}
+
+#[test]
+fn material_paint_targets_one_ceiling_or_wall_face() {
+    let (mut workspace, room, grass, sand) = workspace_with_terrain_strip("paint-all-surfaces");
+    {
+        let grid = workspace.room_floor_grid_mut(room).unwrap();
+        for sx in 0..3 {
+            grid.set_ceiling_aligned_to_neighbors(sx, 0, Some(grass));
+            grid.add_wall(sx, 0, GridDirection::North, 0, 2048, Some(grass));
+        }
+    }
+    workspace.brush_material = Some(sand);
+
+    workspace.run_paint_action(
+        ViewTool::PaintMaterial,
+        room,
+        1,
+        0,
+        Some(FaceRef {
+            room,
+            sx: 1,
+            sz: 0,
+            kind: FaceKind::Ceiling,
+        }),
+        [1536.0, 2048.0, 512.0],
+    );
+    workspace.run_paint_action(
+        ViewTool::PaintMaterial,
+        room,
+        1,
+        0,
+        Some(FaceRef {
+            room,
+            sx: 1,
+            sz: 0,
+            kind: FaceKind::Wall {
+                dir: GridDirection::North,
+                stack: 1,
+            },
+        }),
+        [1536.0, 1024.0, 1024.0],
+    );
+
+    let grid = workspace.room_grid_view(room).unwrap();
+    for sx in 0..3 {
+        assert_eq!(
+            grid.sector(sx, 0)
+                .unwrap()
+                .ceiling
+                .as_ref()
+                .unwrap()
+                .material,
+            Some(if sx == 1 { sand } else { grass })
+        );
+        let walls = grid.sector(sx, 0).unwrap().walls.get(GridDirection::North);
+        assert_eq!(walls[1].material, Some(if sx == 1 { sand } else { grass }));
+    }
+}
+
+#[test]
+fn generated_paint_blends_are_hidden_until_explicitly_searched() {
+    let (mut workspace, room, _grass, sand) = workspace_with_terrain_patch("hidden-face-blend");
+    workspace.brush_material = Some(sand);
+    workspace.material_paint_blend = true;
+    workspace.run_paint_action(
+        ViewTool::PaintMaterial,
+        room,
+        1,
+        1,
+        Some(FaceRef {
+            room,
+            sx: 1,
+            sz: 1,
+            kind: FaceKind::Floor,
+        }),
+        [1536.0, 0.0, 1536.0],
+    );
+    let generated = workspace
+        .project
+        .resources
+        .iter()
+        .find(|resource| resource.name.starts_with(AUTO_PAINT_BLEND_PREFIX))
+        .expect("generated paint blend");
+
+    assert!(!workspace
+        .project
+        .material_options()
+        .iter()
+        .any(|(id, _)| *id == generated.id));
+    assert!(!resource_matches_filter(
+        generated,
+        ResourceFilter::Material,
+        ""
+    ));
+    assert!(resource_matches_filter(
+        generated,
+        ResourceFilter::Material,
+        "paint blend"
+    ));
+}
 #[test]
 fn wall_paint_shape_stamps_diagonal_wall() {
     let mut project = ProjectDocument::new("diagonal-wall-paint");

@@ -917,6 +917,69 @@ pub(super) fn material_sized_uv_component(value: u8, size: u8) -> u8 {
     ((u16::from(value) * u16::from(size)) / u16::from(GRID_TILE_UV)).min(u16::from(u8::MAX)) as u8
 }
 
+/// Resolve a full material texture pass for editor-only prop/water geometry.
+/// Room geometry has its own authored UV transforms; standalone surfaces use
+/// this helper so their preview still consumes the same animation recipe as
+/// the native runtime.
+pub(super) fn animated_material_quad_uvs(
+    project: &ProjectDocument,
+    material_id: ResourceId,
+    slot: MaterialSlot,
+    tick: u32,
+) -> [(u8, u8); 4] {
+    let animation = project
+        .resource(material_id)
+        .and_then(|resource| match &resource.data {
+            ResourceData::Material(material) => Some(material.animation),
+            _ => None,
+        })
+        .unwrap_or_default();
+    let (frame_width, frame_height, animation) = match animation.mode {
+        psxed_project::MaterialAnimationMode::Static => (
+            slot.texture_width,
+            slot.texture_height,
+            psx_engine::WorldMaterialAnimation::Static,
+        ),
+        psxed_project::MaterialAnimationMode::UvScroll if animation.uv_scroll.enabled => (
+            slot.texture_width,
+            slot.texture_height,
+            psx_engine::WorldMaterialAnimation::UvScroll {
+                speed_u_q8: animation.uv_scroll.speed_u_q8,
+                speed_v_q8: animation.uv_scroll.speed_v_q8,
+                phase_u: animation.uv_scroll.phase_u,
+                phase_v: animation.uv_scroll.phase_v,
+            },
+        ),
+        psxed_project::MaterialAnimationMode::UvScroll => (
+            slot.texture_width,
+            slot.texture_height,
+            psx_engine::WorldMaterialAnimation::Static,
+        ),
+        psxed_project::MaterialAnimationMode::Flipbook => {
+            let flipbook = animation.flipbook.normalized();
+            (
+                (slot.texture_width / flipbook.columns).max(1),
+                (slot.texture_height / flipbook.rows).max(1),
+                psx_engine::WorldMaterialAnimation::Flipbook {
+                    columns: flipbook.columns,
+                    frame_count: flipbook.frame_count,
+                    ticks_per_frame: flipbook.ticks_per_frame,
+                    phase: flipbook.phase,
+                },
+            )
+        }
+    };
+    let (offset_u, offset_v) = animation.uv_offset(tick, 60, frame_width, frame_height);
+    let u_max = frame_width.saturating_sub(1);
+    let v_max = frame_height.saturating_sub(1);
+    [
+        (offset_u, offset_v),
+        (u_max.wrapping_add(offset_u), offset_v),
+        (u_max.wrapping_add(offset_u), v_max.wrapping_add(offset_v)),
+        (offset_u, v_max.wrapping_add(offset_v)),
+    ]
+}
+
 pub(super) fn select_uv_corners(uvs: [(u8, u8); 4], corners: [Corner; 3]) -> [(u8, u8); 3] {
     [
         uvs[corners[0].idx()],

@@ -49,6 +49,23 @@ pub enum NodeKind {
         /// Authored grid-world payload.
         grid: WorldGrid,
     },
+    /// A horizontal, cell-painted water body owned by one Room floor.
+    ///
+    /// The node's [`SceneNode::floor`] selects the stacked floor and `cells`
+    /// use that floor grid's persistent world-cell coordinates. `material`
+    /// renders only the exposed top surface; gameplay comes from `settings`,
+    /// never from the material.
+    WaterVolume {
+        /// Material used by the generated water surface.
+        #[serde(default)]
+        material: Option<ResourceId>,
+        /// Persistent world-cell footprint.
+        #[serde(default)]
+        cells: Vec<WaterVolumeCell>,
+        /// Shallow/lethal gameplay configuration.
+        #[serde(default)]
+        settings: WaterVolumeSettings,
+    },
     /// Static or dynamic mesh / model instance.
     ///
     /// `mesh` references either a legacy [`ResourceData::Mesh`] or a
@@ -331,6 +348,7 @@ impl NodeKind {
             Self::Entity => "Entity",
             Self::World { .. } => "World",
             Self::Room { .. } => "Room",
+            Self::WaterVolume { .. } => "Water Volume",
             Self::MeshInstance { .. } => "Mesh Instance",
             Self::ImageProp { .. } => "Image Prop",
             Self::BoxProp { .. } => "Box Prop",

@@ -273,13 +273,18 @@ pub(crate) fn wall_stack_row(
             }
         });
         let pick_label = format!("    #{i} mat");
-        changed |= material_picker(
+        let material_before = wall.material;
+        let material_changed = material_picker(
             ui,
             &pick_label,
             &mut wall.material,
             material_options,
             nav_target,
         );
+        if material_changed && wall.material != material_before && wall.material.is_some() {
+            wall.autotile_uv(sector_size);
+        }
+        changed |= material_changed;
     }
     if let Some(i) = remove_at {
         walls.remove(i);
@@ -288,60 +293,143 @@ pub(crate) fn wall_stack_row(
     changed
 }
 
-pub(crate) fn uv_transform_controls(uv: &mut GridUvTransform, ui: &mut egui::Ui) -> bool {
-    let before = *uv;
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct GridUvTransformEdit {
+    pub(crate) offset: [bool; 2],
+    pub(crate) span: [bool; 2],
+    pub(crate) rotation: bool,
+    pub(crate) flip_u: bool,
+    pub(crate) flip_v: bool,
+}
+
+impl GridUvTransformEdit {
+    pub(crate) const fn changed(self) -> bool {
+        self.offset[0]
+            || self.offset[1]
+            || self.span[0]
+            || self.span[1]
+            || self.rotation
+            || self.flip_u
+            || self.flip_v
+    }
+
+    pub(crate) fn include_value_changes(
+        &mut self,
+        before: GridUvTransform,
+        after: GridUvTransform,
+    ) {
+        for axis in 0..2 {
+            self.offset[axis] |= before.offset[axis] != after.offset[axis];
+            self.span[axis] |= before.span[axis] != after.span[axis];
+        }
+        self.rotation |= before.rotation != after.rotation;
+        self.flip_u |= before.flip_u != after.flip_u;
+        self.flip_v |= before.flip_v != after.flip_v;
+    }
+
+    pub(crate) fn apply(self, uv: &mut GridUvTransform, authored: GridUvTransform) {
+        for axis in 0..2 {
+            if self.offset[axis] {
+                uv.offset[axis] = authored.offset[axis];
+            }
+            if self.span[axis] {
+                uv.span[axis] = authored.span[axis];
+            }
+        }
+        if self.rotation {
+            uv.rotation = authored.rotation;
+        }
+        if self.flip_u {
+            uv.flip_u = authored.flip_u;
+        }
+        if self.flip_v {
+            uv.flip_v = authored.flip_v;
+        }
+    }
+
+    const fn all() -> Self {
+        Self {
+            offset: [true; 2],
+            span: [true; 2],
+            rotation: true,
+            flip_u: true,
+            flip_v: true,
+        }
+    }
+}
+
+pub(crate) fn uv_transform_controls(
+    uv: &mut GridUvTransform,
+    ui: &mut egui::Ui,
+) -> GridUvTransformEdit {
+    let mut edit = GridUvTransformEdit::default();
 
     ui.horizontal(|ui| {
         ui.label("Offset");
         ui.label("U");
-        ui.add(egui::DragValue::new(&mut uv.offset[0]).speed(1.0));
+        edit.offset[0] |= ui
+            .add(egui::DragValue::new(&mut uv.offset[0]).speed(1.0))
+            .changed();
         ui.label("V");
-        ui.add(egui::DragValue::new(&mut uv.offset[1]).speed(1.0));
+        edit.offset[1] |= ui
+            .add(egui::DragValue::new(&mut uv.offset[1]).speed(1.0))
+            .changed();
     });
 
     ui.horizontal(|ui| {
         ui.label("Span");
         ui.label("U");
-        ui.add(
-            egui::DragValue::new(&mut uv.span[0])
-                .speed(1.0)
-                .range(0..=255),
-        )
-        .on_hover_text("0 uses the material's native U span.");
+        edit.span[0] |= ui
+            .add(
+                egui::DragValue::new(&mut uv.span[0])
+                    .speed(1.0)
+                    .range(0..=255),
+            )
+            .on_hover_text("0 uses the material's native U span.")
+            .changed();
         ui.label("V");
-        ui.add(
-            egui::DragValue::new(&mut uv.span[1])
-                .speed(1.0)
-                .range(0..=255),
-        )
-        .on_hover_text("0 uses the material's native V span.");
+        edit.span[1] |= ui
+            .add(
+                egui::DragValue::new(&mut uv.span[1])
+                    .speed(1.0)
+                    .range(0..=255),
+            )
+            .on_hover_text("0 uses the material's native V span.")
+            .changed();
     });
 
     ui.horizontal(|ui| {
         ui.label("Rotate");
-        ui.selectable_value(&mut uv.rotation, GridUvRotation::Deg0, "0");
-        ui.selectable_value(&mut uv.rotation, GridUvRotation::Deg45, "45");
-        ui.selectable_value(&mut uv.rotation, GridUvRotation::Deg90, "90");
-        ui.selectable_value(&mut uv.rotation, GridUvRotation::Deg135, "135");
-        ui.selectable_value(&mut uv.rotation, GridUvRotation::Deg180, "180");
-        ui.selectable_value(&mut uv.rotation, GridUvRotation::Deg225, "225");
-        ui.selectable_value(&mut uv.rotation, GridUvRotation::Deg270, "270");
-        ui.selectable_value(&mut uv.rotation, GridUvRotation::Deg315, "315");
-    });
-
-    ui.horizontal(|ui| {
-        ui.checkbox(&mut uv.flip_u, "Flip U");
-        ui.checkbox(&mut uv.flip_v, "Flip V");
-        if ui
-            .small_button("Reset")
-            .on_hover_text("Reset this face's UV offset, span, rotation, and flips.")
-            .clicked()
-        {
-            *uv = GridUvTransform::IDENTITY;
+        for (rotation, label) in [
+            (GridUvRotation::Deg0, "0"),
+            (GridUvRotation::Deg45, "45"),
+            (GridUvRotation::Deg90, "90"),
+            (GridUvRotation::Deg135, "135"),
+            (GridUvRotation::Deg180, "180"),
+            (GridUvRotation::Deg225, "225"),
+            (GridUvRotation::Deg270, "270"),
+            (GridUvRotation::Deg315, "315"),
+        ] {
+            edit.rotation |= ui
+                .selectable_value(&mut uv.rotation, rotation, label)
+                .clicked();
         }
     });
 
-    *uv != before
+    ui.horizontal(|ui| {
+        edit.flip_u |= ui.checkbox(&mut uv.flip_u, "Flip U").changed();
+        edit.flip_v |= ui.checkbox(&mut uv.flip_v, "Flip V").changed();
+        if ui
+            .small_button("Reset")
+            .on_hover_text("Reset selected faces' UV offset, span, rotation, and flips.")
+            .clicked()
+        {
+            *uv = GridUvTransform::IDENTITY;
+            edit = GridUvTransformEdit::all();
+        }
+    });
+
+    edit
 }
 
 /// Editable row for a `[NW, NE, SE, SW]` corner-height array.
@@ -454,20 +542,16 @@ pub(crate) fn material_picker(
                     .map(|(_, n)| n.as_str())
             })
             .unwrap_or("(none)");
-        egui::ComboBox::from_id_salt(label.to_string())
-            .selected_text(preview)
-            .show_ui(ui, |ui| {
-                if ui.selectable_label(current.is_none(), "(none)").clicked() {
-                    *current = None;
-                    changed = true;
-                }
-                for (id, name) in options {
-                    if ui.selectable_label(*current == Some(*id), name).clicked() {
-                        *current = Some(*id);
-                        changed = true;
-                    }
-                }
-            });
+        changed |= searchable_picker(
+            ui,
+            ui.id().with(("material-picker", label)),
+            current,
+            preview,
+            options,
+            SearchablePickerConfig::optional("(none)")
+                .with_popup_min_width(360.0)
+                .with_search_hint("Search materials…"),
+        );
         if let Some(id) = *current {
             if ui
                 .small_button("→")

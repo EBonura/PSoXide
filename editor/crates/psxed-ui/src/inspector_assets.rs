@@ -990,20 +990,14 @@ pub(crate) fn resource_id_picker(
                     .map(|(_, name)| name.as_str())
             })
             .unwrap_or("(none)");
-        egui::ComboBox::from_id_salt(id_salt)
-            .selected_text(preview)
-            .show_ui(ui, |ui| {
-                if ui.selectable_label(current.is_none(), "(none)").clicked() {
-                    *current = None;
-                    changed = true;
-                }
-                for (id, name) in options {
-                    if ui.selectable_label(*current == Some(*id), name).clicked() {
-                        *current = Some(*id);
-                        changed = true;
-                    }
-                }
-            });
+        changed |= searchable_picker(
+            ui,
+            id_salt,
+            current,
+            preview,
+            options,
+            SearchablePickerConfig::optional("(none)"),
+        );
     });
     if let Some(id) = *current {
         if !options.iter().any(|(rid, _)| *rid == id) {
@@ -1613,20 +1607,14 @@ pub(crate) fn texture_resource_picker(
                     .map(|(_, n)| n.as_str())
             })
             .unwrap_or("(none)");
-        egui::ComboBox::from_id_salt(label.to_string())
-            .selected_text(preview)
-            .show_ui(ui, |ui| {
-                if ui.selectable_label(current.is_none(), "(none)").clicked() {
-                    *current = None;
-                    changed = true;
-                }
-                for (id, name) in options {
-                    if ui.selectable_label(*current == Some(*id), name).clicked() {
-                        *current = Some(*id);
-                        changed = true;
-                    }
-                }
-            });
+        changed |= searchable_picker(
+            ui,
+            ui.id().with(("texture-resource-picker", label)),
+            current,
+            preview,
+            options,
+            SearchablePickerConfig::optional("(none)"),
+        );
         if let Some(id) = *current {
             if ui
                 .small_button("→")
@@ -1647,6 +1635,7 @@ pub(crate) fn texture_resource_picker(
 pub(crate) struct CharacterEditorContext {
     /// `(model id, model display name, clip names in order)`.
     pub(crate) models: Vec<(ResourceId, String, Vec<String>)>,
+    pub(crate) materials: Vec<(ResourceId, String)>,
     /// `(model id, skeleton id)`.
     pub(crate) model_skeletons: Vec<(ResourceId, Option<ResourceId>)>,
     pub(crate) animation_sets: Vec<AnimationSetOption>,
@@ -1656,6 +1645,14 @@ pub(crate) struct CharacterEditorContext {
 pub(crate) fn build_character_editor_context(project: &ProjectDocument) -> CharacterEditorContext {
     CharacterEditorContext {
         models: collect_model_options(project),
+        materials: project
+            .resources
+            .iter()
+            .filter_map(|resource| match &resource.data {
+                ResourceData::Material(_) => Some((resource.id, resource.name.clone())),
+                _ => None,
+            })
+            .collect(),
         model_skeletons: project
             .resources
             .iter()

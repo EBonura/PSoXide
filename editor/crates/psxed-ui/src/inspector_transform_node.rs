@@ -67,7 +67,9 @@ pub(crate) enum NodeTransformInspector {
 
 pub(crate) fn node_transform_inspector(kind: &NodeKind) -> NodeTransformInspector {
     match kind {
-        NodeKind::World { .. } | NodeKind::Node => NodeTransformInspector::Hidden,
+        NodeKind::World { .. } | NodeKind::Node | NodeKind::WaterVolume { .. } => {
+            NodeTransformInspector::Hidden
+        }
         NodeKind::Room { .. } => NodeTransformInspector::RoomGrid,
         NodeKind::PointLight { .. } | NodeKind::ParticleEmitter { .. } | NodeKind::Logic { .. } => {
             NodeTransformInspector::PositionOnly
@@ -1947,6 +1949,86 @@ pub(crate) fn draw_node_kind_editor(
                 });
             }
         }
+        NodeKind::WaterVolume {
+            material,
+            cells,
+            settings,
+        } => {
+            ui.weak("Painted, floor-bound water. Every cell extends from its terrain tile up to the authored height; there is no separate volume bottom.");
+            changed |= material_picker(
+                ui,
+                "Surface material",
+                material,
+                material_options,
+                nav_target,
+            );
+            ui.horizontal(|ui| {
+                ui.label("Painted cells");
+                ui.monospace(cells.len().to_string());
+            });
+            ui.separator();
+            ui.label(RichText::new("Water behaviour").strong());
+            changed |= ui
+                .add(
+                    egui::DragValue::new(&mut settings.height_above_floor)
+                        .range(1..=8192)
+                        .speed(8.0)
+                        .prefix("Water height "),
+                )
+                .on_hover_text(
+                    "Distance from the terrain floor to the water surface. Each painted cell calculates its surface from its own floor tile.",
+                )
+                .changed();
+            changed |= ui
+                .add(
+                    egui::DragValue::new(&mut settings.lethal_depth)
+                        .range(1..=8192)
+                        .prefix("Death threshold "),
+                )
+                .on_hover_text(
+                    "Gameplay threshold only: water at least this tall is lethal. It does not change the volume geometry.",
+                )
+                .changed();
+            changed |= ui
+                .add(
+                    egui::Slider::new(&mut settings.movement_percent, 10..=100)
+                        .text("Movement speed"),
+                )
+                .on_hover_text(
+                    "Percentage of normal walk and run speed retained in non-lethal water. 70% means movement is exactly 70% of normal.",
+                )
+                .changed();
+            let classification = if settings.height_above_floor >= settings.lethal_depth {
+                "Lethal water"
+            } else {
+                "Wading water"
+            };
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Result").color(STUDIO_TEXT_WEAK));
+                ui.label(classification);
+            });
+            changed |= ui
+                .add(
+                    egui::DragValue::new(&mut settings.death_submerge_depth)
+                        .range(0..=2048)
+                        .prefix("Submerge "),
+                )
+                .on_hover_text(
+                    "How far below the surface the actor must fall before deep-water death begins.",
+                )
+                .changed();
+            changed |= ui
+                .add(
+                    egui::DragValue::new(&mut settings.death_delay_ticks)
+                        .range(1..=240)
+                        .prefix("Death delay ")
+                        .suffix(" ticks"),
+                )
+                .changed();
+            if changed {
+                *settings = settings.normalized();
+            }
+        }
         NodeKind::MeshInstance {
             mesh,
             material,
@@ -2299,25 +2381,23 @@ pub(crate) fn draw_node_kind_editor(
             ui.weak("Component: renders a Model from the parent Entity transform.");
             let bound_model =
                 model.and_then(|id| model_options.iter().find(|(rid, _, _)| *rid == id));
+            let searchable_model_options = model_options
+                .iter()
+                .map(|(id, name, _)| (*id, name.clone()))
+                .collect::<Vec<_>>();
             ui.horizontal(|ui| {
                 ui.label("Model");
                 let preview = bound_model
                     .map(|(_, name, _)| name.as_str())
                     .unwrap_or("(none)");
-                egui::ComboBox::from_id_salt("model-renderer-model-picker")
-                    .selected_text(preview)
-                    .show_ui(ui, |ui| {
-                        if ui.selectable_label(model.is_none(), "(none)").clicked() {
-                            *model = None;
-                            changed = true;
-                        }
-                        for (id, name, _) in model_options {
-                            if ui.selectable_label(*model == Some(*id), name).clicked() {
-                                *model = Some(*id);
-                                changed = true;
-                            }
-                        }
-                    });
+                changed |= searchable_picker(
+                    ui,
+                    "model-renderer-model-picker",
+                    model,
+                    preview,
+                    &searchable_model_options,
+                    SearchablePickerConfig::optional("(none)").with_search_hint("Search models…"),
+                );
             });
             if model.is_some() && bound_model.is_none() {
                 ui.colored_label(
@@ -2915,26 +2995,14 @@ pub(crate) fn draw_node_kind_editor(
                             .map(|(_, name)| name.as_str())
                     })
                     .unwrap_or("(none)");
-                egui::ComboBox::from_id_salt("portal_target_room")
-                    .selected_text(preview)
-                    .show_ui(ui, |ui| {
-                        if ui
-                            .selectable_label(target_room.is_none(), "(none)")
-                            .clicked()
-                        {
-                            *target_room = None;
-                            changed = true;
-                        }
-                        for (id, name) in room_options {
-                            if ui
-                                .selectable_label(*target_room == Some(*id), name)
-                                .clicked()
-                            {
-                                *target_room = Some(*id);
-                                changed = true;
-                            }
-                        }
-                    });
+                changed |= searchable_picker(
+                    ui,
+                    "portal_target_room",
+                    target_room,
+                    preview,
+                    room_options,
+                    SearchablePickerConfig::optional("(none)").with_search_hint("Search rooms…"),
+                );
             });
             ui.horizontal(|ui| {
                 ui.label(icons::text(icons::MAP_PIN, 12.0).color(STUDIO_TEXT_WEAK));
@@ -2986,8 +3054,16 @@ pub(crate) fn blend_mode_editor(ui: &mut egui::Ui, mode: &mut PsxBlendMode) -> b
 pub(crate) fn draw_model_material_override_editor(
     ui: &mut egui::Ui,
     material: &mut MaterialResource,
+    material_options: &[(ResourceId, String)],
+    owner: ResourceId,
 ) -> bool {
-    crate::material_lab::draw_material_settings(ui, "model_renderer_material", material)
+    crate::material_lab::draw_material_settings(
+        ui,
+        "model_renderer_material",
+        material,
+        material_options,
+        Some(owner),
+    )
 }
 
 pub(crate) fn draw_particle_emitter_settings(

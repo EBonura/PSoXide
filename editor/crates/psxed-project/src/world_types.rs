@@ -630,6 +630,97 @@ pub struct PhysicsBodySettings {
     pub weight_q8: u16,
 }
 
+/// One authored cell occupied by a [`WaterVolumeSettings`] node.
+///
+/// Coordinates live in the room's persistent world-cell space rather than
+/// array indices, so extending a grid on its negative side never moves an
+/// already-painted water footprint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct WaterVolumeCell {
+    /// World-cell X coordinate.
+    pub x: i32,
+    /// World-cell Z coordinate.
+    pub z: i32,
+}
+
+impl WaterVolumeCell {
+    /// Build a cell from its persistent world-grid coordinates.
+    pub const fn new(x: i32, z: i32) -> Self {
+        Self { x, z }
+    }
+}
+
+/// Authored water behaviour shared by every cell in one volume.
+///
+/// Water never provides swimming. Every painted cell is a floor-bound volume:
+/// its bottom is the authored terrain and its surface sits
+/// `height_above_floor` units above that terrain. Non-lethal cells scale ground
+/// movement; cells at or beyond `lethal_depth` trigger the fall/death flow once
+/// the character drops below the surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WaterVolumeSettings {
+    /// Water surface height measured upward from each painted floor tile.
+    #[serde(default = "default_water_height", alias = "surface_height")]
+    pub height_above_floor: u16,
+    /// Depth at which the volume becomes lethal.
+    #[serde(default = "default_water_lethal_depth")]
+    pub lethal_depth: u16,
+    /// Ground movement speed retained while wading, as a percentage.
+    #[serde(default = "default_water_movement_percent")]
+    pub movement_percent: u8,
+    /// Simulation ticks between lethal submersion and respawn.
+    #[serde(default = "default_water_death_delay_ticks")]
+    pub death_delay_ticks: u8,
+    /// Distance below the surface required before lethal water commits death.
+    #[serde(default = "default_water_death_submerge_depth")]
+    pub death_submerge_depth: u16,
+}
+
+impl WaterVolumeSettings {
+    /// Clamp authoring values to the compact runtime contract.
+    pub fn normalized(self) -> Self {
+        Self {
+            height_above_floor: self.height_above_floor.max(1),
+            lethal_depth: self.lethal_depth.max(1),
+            movement_percent: self.movement_percent.clamp(1, 100),
+            death_delay_ticks: self.death_delay_ticks.max(1),
+            death_submerge_depth: self.death_submerge_depth.max(1),
+        }
+    }
+}
+
+impl Default for WaterVolumeSettings {
+    fn default() -> Self {
+        Self {
+            height_above_floor: default_water_height(),
+            lethal_depth: default_water_lethal_depth(),
+            movement_percent: default_water_movement_percent(),
+            death_delay_ticks: default_water_death_delay_ticks(),
+            death_submerge_depth: default_water_death_submerge_depth(),
+        }
+    }
+}
+
+pub const fn default_water_height() -> u16 {
+    64
+}
+
+pub const fn default_water_lethal_depth() -> u16 {
+    384
+}
+
+pub const fn default_water_movement_percent() -> u8 {
+    70
+}
+
+pub const fn default_water_death_delay_ticks() -> u8 {
+    45
+}
+
+pub const fn default_water_death_submerge_depth() -> u16 {
+    64
+}
+
 impl PhysicsBodySettings {
     /// Clamp authored values to runtime-safe integer ranges.
     pub fn normalized(self) -> Self {
@@ -731,6 +822,23 @@ pub struct WorldGrid {
 }
 
 impl WorldGrid {
+    fn empty_stacked_floor_like(source: &Self, elevation: i32) -> Self {
+        let mut floor = Self::empty(source.width, source.depth, source.sector_size);
+        floor.origin = source.origin;
+        floor.elevation = elevation;
+        floor.ambient_color = source.ambient_color;
+        floor.fog_enabled = source.fog_enabled;
+        floor.fog_color = source.fog_color;
+        floor.fog_near = source.fog_near;
+        floor.fog_far = source.fog_far;
+        floor.atmosphere_enabled = source.atmosphere_enabled;
+        floor.atmosphere_color = source.atmosphere_color;
+        floor.atmosphere_density = source.atmosphere_density;
+        floor.atmosphere_fall_speed_q4 = source.atmosphere_fall_speed_q4;
+        floor.atmosphere_wind_speed_q4 = source.atmosphere_wind_speed_q4;
+        floor
+    }
+
     /// Create an empty sparse grid.
     pub fn empty(width: u16, depth: u16, sector_size: i32) -> Self {
         let len = width as usize * depth as usize;
@@ -786,24 +894,30 @@ impl WorldGrid {
     pub fn push_floor(&mut self) -> usize {
         let top = self.floors_above.last().unwrap_or(self);
         let elevation = top.elevation + default_wall_height_for_sector_size(top.sector_size);
-        let mut floor = WorldGrid::empty(self.width, self.depth, self.sector_size);
-        floor.origin = self.origin;
-        floor.elevation = elevation;
-        // Inherit the room-level look so stacked floors render
-        // consistently (and the sky/fog seed grid is unaffected by which
-        // floor is active).
-        floor.ambient_color = self.ambient_color;
-        floor.fog_enabled = self.fog_enabled;
-        floor.fog_color = self.fog_color;
-        floor.fog_near = self.fog_near;
-        floor.fog_far = self.fog_far;
-        floor.atmosphere_enabled = self.atmosphere_enabled;
-        floor.atmosphere_color = self.atmosphere_color;
-        floor.atmosphere_density = self.atmosphere_density;
-        floor.atmosphere_fall_speed_q4 = self.atmosphere_fall_speed_q4;
-        floor.atmosphere_wind_speed_q4 = self.atmosphere_wind_speed_q4;
+        // Inherit the top floor's footprint and room-level look so an
+        // adjacent layer starts aligned even when that floor was extended
+        // independently from the base grid.
+        let floor = Self::empty_stacked_floor_like(top, elevation);
         self.floors_above.push(floor);
         self.floors_above.len()
+    }
+
+    /// Insert an empty floor below floor zero while preserving every
+    /// existing floor and its authored elevation. The former base becomes
+    /// floor one; callers that own scene nodes must shift their floor indices
+    /// and room transform to keep existing content at the same world height.
+    pub fn push_floor_below(&mut self) -> usize {
+        let elevation = self
+            .elevation
+            .saturating_sub(default_wall_height_for_sector_size(self.sector_size));
+        let mut new_base = Self::empty_stacked_floor_like(self, elevation);
+        std::mem::swap(self, &mut new_base);
+
+        let previous_upper_floors = std::mem::take(&mut new_base.floors_above);
+        self.floors_above.reserve(1 + previous_upper_floors.len());
+        self.floors_above.push(new_base);
+        self.floors_above.extend(previous_upper_floors);
+        0
     }
 
     /// Create a rectangular room with floors and perimeter walls.
@@ -1745,8 +1859,16 @@ impl WorldGrid {
         if old_sector_size == new_sector_size {
             self.sector_size = new_sector_size;
             self.snap_heights_to_quantum();
+            for floor in &mut self.floors_above {
+                floor.rescale_sector_size(new_sector_size);
+            }
             return;
         }
+        self.elevation = snap_height(scale_i32_ratio(
+            self.elevation,
+            old_sector_size,
+            new_sector_size,
+        ));
         for sector in self.sectors.iter_mut().flatten() {
             if let Some(face) = &mut sector.floor {
                 for h in &mut face.heights {
@@ -1784,6 +1906,21 @@ impl WorldGrid {
         self.fog_far = scale_i32_ratio(self.fog_far, old_sector_size, new_sector_size)
             .max(self.fog_near + HEIGHT_QUANTUM);
         self.sector_size = new_sector_size;
+        for floor in &mut self.floors_above {
+            floor.rescale_sector_size(new_sector_size);
+        }
+    }
+
+    /// Apply a normalized sector size to every stacked floor without changing
+    /// authored engine-unit geometry. Used while loading projects whose World
+    /// node already owns the canonical size.
+    pub fn normalize_stacked_sector_size(&mut self, sector_size: i32) {
+        let sector_size = snap_world_sector_size(sector_size);
+        self.sector_size = sector_size;
+        self.snap_heights_to_quantum();
+        for floor in &mut self.floors_above {
+            floor.normalize_stacked_sector_size(sector_size);
+        }
     }
 
     /// Snap all authored vertical geometry to the cooker-supported

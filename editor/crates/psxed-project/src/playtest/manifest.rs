@@ -589,6 +589,32 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     }
     out.push_str("];\n\n");
 
+    out.push_str("/// Water-covered runtime sectors, sorted by room/x/z.\n");
+    out.push_str("pub static WATER_CELLS: &[LevelWaterCellRecord] = &[\n");
+    for water in &package.water_cells {
+        let texture_asset = water
+            .texture_asset_index
+            .map(|asset| format!("Some(AssetId({asset}))"))
+            .unwrap_or_else(|| "None".to_string());
+        let animation = level_material_animation_literal(water.animation);
+        let _ = writeln!(
+            out,
+            "    LevelWaterCellRecord {{ room: RoomIndex({}), x: {}, z: {}, texture_asset: {texture_asset}, blend_mode: {}, tint_rgb: {:?}, animation: {animation}, surface_y: {}, depth: {}, lethal_depth: {}, movement_percent: {}, death_delay_ticks: {}, death_submerge_depth: {} }},",
+            water.room,
+            water.x,
+            water.z,
+            water.blend_mode,
+            water.tint_rgb,
+            water.surface_y,
+            water.depth,
+            water.lethal_depth,
+            water.movement_percent,
+            water.death_delay_ticks,
+            water.death_submerge_depth,
+        );
+    }
+    out.push_str("];\n\n");
+
     out.push_str("/// Room indices near each runtime room, reserved for portal streaming.\n");
     out.push_str("pub static ROOM_NEAR_ROOMS: &[RoomIndex] = &[\n");
     for room in &package.room_near_rooms {
@@ -1106,8 +1132,9 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         let baked_vertex_rgb = render_box_prop_baked_vertex_rgb(&prop.baked_vertex_rgb);
         let _ = writeln!(
             out,
-            "    LevelBoxPropRecord {{ room: RoomIndex({}), texture_assets: {texture_assets}, x: {}, y: {}, z: {}, ground_y: {}, pitch: {}, yaw: {}, roll: {}, vertices: {vertices}, tint_rgb: {tint_rgb}, baked_vertex_rgb: {baked_vertex_rgb}, flags: {} }},",
+            "    LevelBoxPropRecord {{ room: RoomIndex({}), texture_assets: {texture_assets}, blend_modes: {:?}, x: {}, y: {}, z: {}, ground_y: {}, pitch: {}, yaw: {}, roll: {}, vertices: {vertices}, tint_rgb: {tint_rgb}, baked_vertex_rgb: {baked_vertex_rgb}, flags: {} }},",
             prop.room,
+            prop.blend_modes,
             prop.x,
             prop.y,
             prop.z,
@@ -1508,6 +1535,30 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     }
     out.push_str("];\n\n");
 
+    out.push_str("/// Compact rig-attached hitboxes and hurtboxes.\n");
+    out.push_str("pub static COMBAT_CAPSULES: &[CombatCapsuleRecord] = &[\n");
+    for capsule in &package.combat_capsules {
+        let _ = writeln!(
+            out,
+            "    CombatCapsuleRecord {{ joint: {}, flags: {}, action: {}, reserved: 0, start: [{}, {}, {}], end: [{}, {}, {}], radius: {}, active_start_frame: {}, active_end_frame: {}, damage: {}, poise_damage: {} }},",
+            capsule.joint,
+            capsule.flags,
+            capsule.action,
+            capsule.start[0],
+            capsule.start[1],
+            capsule.start[2],
+            capsule.end[0],
+            capsule.end[1],
+            capsule.end[2],
+            capsule.radius,
+            capsule.active_start_frame,
+            capsule.active_end_frame,
+            capsule.damage,
+            capsule.poise_damage,
+        );
+    }
+    out.push_str("];\n\n");
+
     out.push_str("/// Placed souls-like game entities, room-local coordinates.\n");
     out.push_str("pub static GAME_ENTITIES: &[LevelGameEntityRecord] = &[\n");
     for entity in &package.game_entities {
@@ -1519,7 +1570,7 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
         };
         let _ = writeln!(
             out,
-            "    LevelGameEntityRecord {{ room: RoomIndex({}), kind: {}, targetname: {}, model_instance: {model_instance}, idle_clip: {}, walk_clip: {}, run_clip: {}, attack_clip: {}, stagger_clip: {}, death_clip: {}, x: {}, y: {}, z: {}, yaw: {}, radius: {}, height: {}, walk_speed: {}, run_speed: {}, patrol_x: {}, patrol_y: {}, patrol_z: {}, patrol_wait_ticks: {}, aggro_radius: {}, reaction_ticks: {}, preferred_distance: {}, spacing_tolerance: {}, decision_interval_ticks: {}, circle_chance: {}, attack_priority: {}, attack_cooldown_ticks: {}, group_attack_delay_ticks: {}, windup_ticks: {}, recovery_ticks: {}, poise: {}, touch_damage: {}, max_health: {}, flags: {} }},",
+            "    LevelGameEntityRecord {{ room: RoomIndex({}), kind: {}, targetname: {}, model_instance: {model_instance}, idle_clip: {}, walk_clip: {}, run_clip: {}, attack_clip: {}, stagger_clip: {}, death_clip: {}, combat_capsule_first: CombatCapsuleIndex({}), combat_capsule_count: {}, x: {}, y: {}, z: {}, yaw: {}, radius: {}, height: {}, walk_speed: {}, run_speed: {}, patrol_x: {}, patrol_y: {}, patrol_z: {}, patrol_wait_ticks: {}, aggro_radius: {}, reaction_ticks: {}, preferred_distance: {}, spacing_tolerance: {}, decision_interval_ticks: {}, circle_chance: {}, attack_priority: {}, attack_cooldown_ticks: {}, group_attack_delay_ticks: {}, windup_ticks: {}, recovery_ticks: {}, poise: {}, touch_damage: {}, max_health: {}, flags: {} }},",
             entity.room,
             entity.kind,
             entity.targetname,
@@ -1529,6 +1580,8 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             entity.attack_clip,
             entity.stagger_clip,
             entity.death_clip,
+            entity.combat_capsule_first,
+            entity.combat_capsule_count,
             entity.x,
             entity.y,
             entity.z,
@@ -1612,13 +1665,15 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
             .join(", ");
         let _ = writeln!(
             out,
-            "    LevelCharacterRecord {{ model: ModelIndex({}), action_clips: [{}], action_flags: [{}], action_speeds: [{}], action_frame_ranges: [{}], action_pushes: [{}], visual_offset: [{}, {}, {}], visual_yaw: {}, visual_scale_q8: {}, weight_q8: {}, radius: {}, height: {}, walk_speed: {}, run_speed: {}, turn_speed_degrees_per_second: {}, stamina_max_q12: {}, sprint_min_q12: {}, sprint_drain_q12: {}, stamina_recover_q12: {}, roll_cost_q12: {}, roll_speed: {}, roll_active_frames: {}, roll_recovery_frames: {}, roll_invulnerable_frames: {}, backstep_cost_q12: {}, backstep_speed: {}, backstep_active_frames: {}, backstep_recovery_frames: {}, backstep_invulnerable_frames: {}, camera_distance: {}, camera_height: {}, camera_target_height: {}, material_override: {}, flags: 0 }},",
+            "    LevelCharacterRecord {{ model: ModelIndex({}), action_clips: [{}], action_flags: [{}], action_speeds: [{}], action_frame_ranges: [{}], action_pushes: [{}], combat_capsule_first: CombatCapsuleIndex({}), combat_capsule_count: {}, visual_offset: [{}, {}, {}], visual_yaw: {}, visual_scale_q8: {}, weight_q8: {}, radius: {}, height: {}, walk_speed: {}, run_speed: {}, turn_speed_degrees_per_second: {}, stamina_max_q12: {}, sprint_min_q12: {}, sprint_drain_q12: {}, stamina_recover_q12: {}, roll_cost_q12: {}, roll_speed: {}, roll_active_frames: {}, roll_recovery_frames: {}, roll_invulnerable_frames: {}, backstep_cost_q12: {}, backstep_speed: {}, backstep_active_frames: {}, backstep_recovery_frames: {}, backstep_invulnerable_frames: {}, camera_distance: {}, camera_height: {}, camera_target_height: {}, material_override: {}, flags: 0 }},",
             character.model,
             action_clips,
             action_flags,
             action_speeds,
             action_frame_ranges,
             action_pushes,
+            character.combat_capsule_first,
+            character.combat_capsule_count,
             character.visual_offset[0],
             character.visual_offset[1],
             character.visual_offset[2],
@@ -3146,6 +3201,18 @@ pub fn cook_to_dir(
     project_root: &Path,
     generated_dir: &Path,
 ) -> std::io::Result<PlaytestValidationReport> {
+    let (package, report) = build_package(project, project_root);
+    write_cook_result(package.as_ref(), generated_dir)?;
+    Ok(report)
+}
+
+/// Write an already-built playtest package without rebuilding it. This keeps
+/// interactive Play callers from paying for topology, world, material, model,
+/// and animation cooking twice merely to produce their status summary.
+pub fn write_cook_result(
+    package: Option<&PlaytestPackage>,
+    generated_dir: &Path,
+) -> std::io::Result<()> {
     // A failed cook must not leave a stale cooked manifest for
     // subsequent runtime builds. If validation fails before a
     // package exists, editor-playtest falls back to the tracked
@@ -3154,11 +3221,10 @@ pub fn cook_to_dir(
     if cooked_manifest.exists() {
         std::fs::remove_file(&cooked_manifest)?;
     }
-    let (package, report) = build_package(project, project_root);
     if let Some(package) = package {
-        write_package(&package, generated_dir)?;
+        write_package(package, generated_dir)?;
     }
-    Ok(report)
+    Ok(())
 }
 
 fn room_required_assets(
@@ -3184,6 +3250,13 @@ fn room_required_assets(
     for prop in &package.image_props {
         if prop.room == room_index as u16 {
             push_unique(&mut required_vram, prop.texture_asset_index);
+        }
+    }
+    for water in &package.water_cells {
+        if water.room == room_index as u16 {
+            if let Some(asset_index) = water.texture_asset_index {
+                push_unique(&mut required_vram, asset_index);
+            }
         }
     }
     let mut required_ram: Vec<usize> = vec![room.world_asset_index];
@@ -3477,6 +3550,8 @@ use psx_level::{
     CharacterActionFrameRange,
     CharacterActionPush,
     CharacterIndex,
+    CombatCapsuleIndex,
+    CombatCapsuleRecord,
     EntityKind,
     EntityRecord,
     EquipmentRecord,
@@ -3515,6 +3590,7 @@ use psx_level::{
     LevelOptionDef,
     LevelRoomPortalRecord,
     LevelRoomRecord,
+    LevelWaterCellRecord,
     LevelRoomSurfaceCacheRecord,
     LevelRoomVisibilityRecord,
     LevelSceneState,
