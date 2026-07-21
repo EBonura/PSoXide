@@ -279,6 +279,9 @@ pub struct EditorPlaytestMetrics {
     /// every surface on an overflow slot renders untextured or not at all. This
     /// is a per-room-cap problem, distinct from the VRAM drops above.
     pub room_material_slot_overflow: u32,
+    /// Active room draws that conservatively rendered all cells because a
+    /// usable precomputed visibility set was unavailable.
+    pub room_visibility_fallback_draws: u32,
     /// Resident streamed chunks, keyed by runtime room/chunk index.
     pub chunk_loaded_mask: u64,
     /// Streamed chunks with in-flight loads, keyed by runtime room/chunk index.

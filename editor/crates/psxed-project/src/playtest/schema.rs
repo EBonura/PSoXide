@@ -296,6 +296,38 @@ pub struct PlaytestRoomPortal {
     pub vertices: [[i32; 3]; 4],
 }
 
+/// Lightweight, asset-free snapshot of one cell in the exact runtime-room
+/// topology used by the playtest cook. Intended for editor diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PlaytestDebugTopologyCell {
+    pub runtime_room_index: usize,
+    pub authored_room: u32,
+    pub portal_room_index: usize,
+    pub floor_index: usize,
+    pub array_cell: [u16; 2],
+    pub center: [f32; 2],
+    pub half: [f32; 2],
+    pub room_origin: [f32; 2],
+    pub runtime_origin: [i32; 2],
+    pub elevation: i32,
+    pub sector_size: i32,
+}
+
+/// Lightweight snapshot of a directed portal after generated layer links have
+/// been added and the table has been sorted into runtime order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestDebugTopologyPortal {
+    pub portal_index: usize,
+    pub portal: PlaytestRoomPortal,
+}
+
+/// Asset-free topology used by the Room Rings editor diagnostic.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct PlaytestDebugTopology {
+    pub cells: Vec<PlaytestDebugTopologyCell>,
+    pub portals: Vec<PlaytestDebugTopologyPortal>,
+}
+
 /// Runtime floor-link metadata copied into compact collision sector records.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlaytestRoomFloorLink {

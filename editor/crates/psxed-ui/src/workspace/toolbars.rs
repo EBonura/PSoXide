@@ -337,6 +337,7 @@ impl EditorWorkspace {
     pub(crate) fn draw_viewport_toolbar(&mut self, ui: &mut egui::Ui) {
         if self.active_room_id().is_none() && self.active_tool.requires_room_context() {
             self.active_tool = ViewTool::Select;
+            self.material_paint_sampling = false;
         }
         self.retain_shortcut_group_flash();
         if self.shortcut_group_flash.is_some() {
@@ -348,65 +349,39 @@ impl EditorWorkspace {
             return;
         }
 
+        let active_tool_label = self.active_tool_group_label();
         toolbar_group_menu(
             ui,
             2,
             self.shortcut_group_glow(ShortcutGroup::Tool),
             self.active_tool_group_icon(),
             "Tool",
-            self.active_tool_group_label(),
+            &active_tool_label,
             |ui| self.draw_tool_group_menu(ui),
         );
-        toolbar_group_menu(
-            ui,
-            3,
-            self.shortcut_group_glow(ShortcutGroup::Transform),
-            self.transform_gizmo_mode.icon(),
-            "Transform",
-            self.transform_gizmo_mode.label(),
-            |ui| self.draw_transform_group_menu(ui),
-        );
-        let space = self.gizmo_space;
-        let space_response = ui
-            .add(
-                egui::Button::new(icons::label(space.icon(), space.label()))
-                    .min_size(Vec2::new(30.0, 23.0)),
-            )
-            .on_hover_text(
-                "Gizmo orientation. Global aligns handles to the world axes; \
-                 Local aligns them to the selected node's own rotation.",
-            );
-        if space_response.clicked() {
-            self.gizmo_space = space.toggled();
-            self.status = format!("Gizmo orientation: {}", self.gizmo_space.label());
+        match self.active_tool {
+            ViewTool::Select => self.draw_select_tool_toolbar_controls(ui),
+            ViewTool::PaintMaterial => self.draw_material_paint_toolbar_controls(ui),
+            ViewTool::PaintFloor | ViewTool::PaintCeiling => {
+                ui.separator();
+                self.draw_brush_material_picker(ui);
+            }
+            ViewTool::PaintWall => {
+                ui.separator();
+                toolbar_option_menu(
+                    ui,
+                    icons::BRICK_WALL,
+                    "Wall shape",
+                    "Wall shape",
+                    self.wall_paint_shape.label(),
+                    false,
+                    |ui| self.draw_wall_paint_shape_picker(ui),
+                );
+                self.draw_brush_material_picker(ui);
+            }
+            ViewTool::Erase | ViewTool::Place => {}
         }
-        toolbar_group_menu(
-            ui,
-            4,
-            self.shortcut_group_glow(ShortcutGroup::Selection),
-            self.selection_mode.icon(),
-            "Selection",
-            self.selection_mode.label(),
-            |ui| self.draw_selection_group_menu(ui),
-        );
-        toolbar_group_menu(
-            ui,
-            5,
-            self.shortcut_group_glow(ShortcutGroup::Surface),
-            self.horizontal_edit_mode.icon(),
-            "Surface",
-            self.horizontal_edit_mode.label(),
-            |ui| self.draw_horizontal_edit_group_menu(ui),
-        );
-        toolbar_group_menu(
-            ui,
-            6,
-            self.shortcut_group_glow(ShortcutGroup::Vertex),
-            self.vertex_connectivity.icon(),
-            "Vertex Edits",
-            self.vertex_connectivity.label(),
-            |ui| self.draw_vertex_connectivity_group_menu(ui),
-        );
+        ui.separator();
         toolbar_group_menu_icon_only(
             ui,
             7,
@@ -590,6 +565,150 @@ impl EditorWorkspace {
         }
     }
 
+    fn draw_select_tool_toolbar_controls(&mut self, ui: &mut egui::Ui) {
+        toolbar_group_menu(
+            ui,
+            3,
+            self.shortcut_group_glow(ShortcutGroup::Transform),
+            self.transform_gizmo_mode.icon(),
+            "Transform",
+            self.transform_gizmo_mode.label(),
+            |ui| self.draw_transform_group_menu(ui),
+        );
+        let space = self.gizmo_space;
+        let space_response = ui
+            .add(
+                egui::Button::new(icons::label(space.icon(), space.label()))
+                    .min_size(Vec2::new(30.0, 23.0)),
+            )
+            .on_hover_text(
+                "Gizmo orientation. Global aligns handles to the world axes; \
+                 Local aligns them to the selected node's own rotation.",
+            );
+        if space_response.clicked() {
+            self.gizmo_space = space.toggled();
+            self.status = format!("Gizmo orientation: {}", self.gizmo_space.label());
+        }
+        toolbar_group_menu(
+            ui,
+            4,
+            self.shortcut_group_glow(ShortcutGroup::Selection),
+            self.selection_mode.icon(),
+            "Selection",
+            self.selection_mode.label(),
+            |ui| self.draw_selection_group_menu(ui),
+        );
+        toolbar_group_menu(
+            ui,
+            5,
+            self.shortcut_group_glow(ShortcutGroup::Surface),
+            self.horizontal_edit_mode.icon(),
+            "Surface",
+            self.horizontal_edit_mode.label(),
+            |ui| self.draw_horizontal_edit_group_menu(ui),
+        );
+        toolbar_group_menu(
+            ui,
+            6,
+            self.shortcut_group_glow(ShortcutGroup::Vertex),
+            self.vertex_connectivity.icon(),
+            "Vertex Edits",
+            self.vertex_connectivity.label(),
+            |ui| self.draw_vertex_connectivity_group_menu(ui),
+        );
+    }
+
+    fn draw_material_paint_toolbar_controls(&mut self, ui: &mut egui::Ui) {
+        ui.separator();
+        self.draw_brush_material_picker(ui);
+        let eyedropper = ui
+            .toggle_value(
+                &mut self.material_paint_sampling,
+                icons::text(icons::PIPETTE, 14.0),
+            )
+            .on_hover_text(
+                "Eyedropper: sample the material from the next floor, ceiling, or wall you click.",
+            );
+        if eyedropper.changed() {
+            self.status = if self.material_paint_sampling {
+                "Eyedropper: click a surface to sample its material".to_string()
+            } else {
+                "Eyedropper cancelled".to_string()
+            };
+            self.mark_shortcut_group_changed(ShortcutGroup::Tool);
+        }
+        let blend = ui
+            .toggle_value(
+                &mut self.material_paint_blend,
+                icons::label(icons::BLEND, "Blend"),
+            )
+            .on_hover_text(
+                "Blend the painted tile into its surroundings. Connected painted tiles remain continuous.",
+            );
+        if blend.changed() {
+            self.status = if self.material_paint_blend {
+                "Material Paint: Blend".to_string()
+            } else {
+                "Material Paint: Direct".to_string()
+            };
+            self.mark_shortcut_group_changed(ShortcutGroup::Tool);
+        }
+        if self.material_paint_blend {
+            let coverage = self.material_paint_blend_coverage_percent;
+            let detail = self.material_paint_blend_edge_detail;
+            toolbar_option_menu(
+                ui,
+                icons::BLEND,
+                "Details",
+                "Blend details",
+                format!("{coverage}% coverage, {detail} detail"),
+                false,
+                |ui| {
+                    ui.set_min_width(260.0);
+                    ui.label(RichText::new("Blend details").strong());
+                    let coverage_changed = ui
+                        .add(
+                            egui::Slider::new(
+                                &mut self.material_paint_blend_coverage_percent,
+                                5..=95,
+                            )
+                            .text("Coverage")
+                            .suffix("%"),
+                        )
+                        .on_hover_text("How much of each tile is occupied by the painted material.")
+                        .changed();
+                    let detail_changed = ui
+                        .add(
+                            egui::Slider::new(
+                                &mut self.material_paint_blend_edge_detail,
+                                0..=96,
+                            )
+                            .text("Edge detail"),
+                        )
+                        .on_hover_text(
+                            "Adds organic breakup to exposed blend edges while keeping connected edges seamless.",
+                        )
+                        .changed();
+                    ui.horizontal(|ui| {
+                        if ui.button("Reset").clicked() {
+                            self.material_paint_blend_coverage_percent = 50;
+                            self.material_paint_blend_edge_detail = 20;
+                            self.status = "Reset Paint blend details".to_string();
+                        }
+                        ui.weak("Applied on the next stroke");
+                    });
+                    if coverage_changed || detail_changed {
+                        self.status = format!(
+                            "Paint blend: {}% coverage, {} edge detail",
+                            self.material_paint_blend_coverage_percent,
+                            self.material_paint_blend_edge_detail
+                        );
+                    }
+                },
+            );
+        }
+    }
+
     pub(crate) fn draw_ui_viewport_toolbar(&mut self, ui: &mut egui::Ui) {
         toolbar_group_menu(
             ui,
@@ -739,8 +858,28 @@ impl EditorWorkspace {
     pub(crate) fn draw_tool_group_menu(&mut self, ui: &mut egui::Ui) {
         ui.set_min_width(236.0);
         let room_active = self.active_room_id().is_some();
+        ui.label("Edit surfaces");
         for (tool, icon, label) in [
             (ViewTool::Select, ViewTool::Select.icon(), "Select"),
+            (
+                ViewTool::PaintMaterial,
+                ViewTool::PaintMaterial.icon(),
+                "Paint",
+            ),
+            (ViewTool::Erase, ViewTool::Erase.icon(), "Erase"),
+        ] {
+            let enabled = room_active || !tool.requires_room_context();
+            let selected = self.active_tool_cycle_value() == (tool, None);
+            ui.add_enabled_ui(enabled, |ui| {
+                if toolbar_menu_choice(ui, icons::label(icon, label), selected) {
+                    self.set_active_tool_cycle_value((tool, None));
+                }
+            });
+        }
+
+        ui.separator();
+        ui.label("Create geometry");
+        for (tool, icon, label) in [
             (ViewTool::PaintFloor, ViewTool::PaintFloor.icon(), "Floor"),
             (ViewTool::PaintWall, ViewTool::PaintWall.icon(), "Wall"),
             (
@@ -748,11 +887,9 @@ impl EditorWorkspace {
                 ViewTool::PaintCeiling.icon(),
                 "Ceiling",
             ),
-            (ViewTool::Erase, ViewTool::Erase.icon(), "Erase"),
         ] {
-            let enabled = room_active || !tool.requires_room_context();
             let selected = self.active_tool_cycle_value() == (tool, None);
-            ui.add_enabled_ui(enabled, |ui| {
+            ui.add_enabled_ui(room_active, |ui| {
                 if toolbar_menu_choice(ui, icons::label(icon, label), selected) {
                     self.set_active_tool_cycle_value((tool, None));
                 }
@@ -787,23 +924,9 @@ impl EditorWorkspace {
             snap_response.on_hover_text("Snap interval.");
         });
 
-        match self.active_tool {
-            ViewTool::Place if self.place_kind != PlaceKind::Portal => {
-                ui.separator();
-                self.draw_active_place_options(ui);
-            }
-            ViewTool::PaintWall => {
-                ui.separator();
-                ui.label("Wall shape");
-                ui.horizontal(|ui| self.draw_wall_paint_shape_picker(ui));
-                ui.separator();
-                ui.horizontal(|ui| self.draw_brush_material_picker(ui));
-            }
-            ViewTool::PaintFloor | ViewTool::PaintCeiling => {
-                ui.separator();
-                ui.horizontal(|ui| self.draw_brush_material_picker(ui));
-            }
-            ViewTool::Select | ViewTool::Erase | ViewTool::Place => {}
+        if self.active_tool == ViewTool::Place && self.place_kind != PlaceKind::Portal {
+            ui.separator();
+            self.draw_active_place_options(ui);
         }
     }
 
@@ -938,11 +1061,11 @@ impl EditorWorkspace {
         }
     }
 
-    pub(crate) fn active_tool_group_label(&self) -> &'static str {
+    pub(crate) fn active_tool_group_label(&self) -> String {
         if self.active_tool == ViewTool::Place {
-            self.place_kind.label()
+            self.place_kind.label().to_string()
         } else {
-            self.active_tool.label()
+            self.active_tool.label().to_string()
         }
     }
 
@@ -1213,29 +1336,60 @@ impl EditorWorkspace {
 
     pub(crate) fn draw_brush_material_picker(&mut self, ui: &mut egui::Ui) {
         let materials = self.project.material_options();
+        if self.active_tool == ViewTool::PaintMaterial && self.brush_material.is_none() {
+            let material = self
+                .selected_material_resource()
+                .or_else(|| materials.first().map(|(id, _)| *id));
+            if let Some(material) = material {
+                self.brush_material = Some(material);
+                self.replace_resource_selection(material);
+            }
+        }
         let label = match self.brush_material {
             Some(id) => materials
                 .iter()
                 .find(|(mid, _)| *mid == id)
                 .map(|(_, name)| name.clone())
                 .unwrap_or_else(|| "(missing)".to_string()),
-            None => "Auto".to_string(),
+            None => {
+                if self.active_tool == ViewTool::PaintMaterial {
+                    "Select material".to_string()
+                } else {
+                    "Auto".to_string()
+                }
+            }
         };
         ui.label(icons::text(icons::PALETTE, 14.0).color(STUDIO_TEXT_WEAK))
             .on_hover_text("Brush material");
         let before = self.brush_material;
+        let config = if self.active_tool == ViewTool::PaintMaterial {
+            SearchablePickerConfig::required()
+                .with_width(220.0)
+                .with_popup_min_width(360.0)
+                .with_search_hint("Search materials…")
+        } else {
+            SearchablePickerConfig::optional("Auto")
+                .with_width(180.0)
+                .with_popup_min_width(360.0)
+                .with_search_hint("Search materials…")
+        };
         searchable_picker(
             ui,
             "brush-material-picker",
             &mut self.brush_material,
             &label,
             &materials,
-            SearchablePickerConfig::optional("Auto")
-                .with_width(180.0)
-                .with_popup_min_width(360.0)
-                .with_search_hint("Search materials…"),
+            config,
         );
         if self.brush_material != before {
+            if let Some(material) = self.brush_material {
+                self.material_paint_sampling = false;
+                self.replace_resource_selection(material);
+                self.status = format!(
+                    "Paint material: {}",
+                    self.project.resource_name(material).unwrap_or("(missing)")
+                );
+            }
             self.mark_shortcut_group_changed(ShortcutGroup::Tool);
         }
     }

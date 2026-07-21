@@ -2302,6 +2302,7 @@ fn editor_play_metrics(state: &app::AppState) -> Option<psxed_ui::EditorPlaytest
             recent_counter(counter::VRAM_UPLOAD_QUEUE_FULL),
         ],
         room_material_slot_overflow: recent_counter(counter::ROOM_MATERIAL_SLOT_OVERFLOW),
+        room_visibility_fallback_draws: recent_counter(counter::ROOM_VISIBILITY_FALLBACK_DRAWS),
         chunk_loaded_mask: chunk_mask(
             counter::ROOM_STREAM_RESIDENT_MASK_LO,
             counter::ROOM_STREAM_RESIDENT_MASK_HI,

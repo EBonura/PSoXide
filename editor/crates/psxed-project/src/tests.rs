@@ -2254,12 +2254,14 @@ fn transition_material_recipe_roundtrips_through_ron_string() {
         flip_y: false,
         edge_breakup: 37,
         seed: 0x5eed_cafe,
+        connected_edges: 0b1010,
     };
     project.add_resource("Sand over stone", ResourceData::Material(material));
 
     let ron = project.to_ron_string().unwrap();
     assert!(ron.contains("texture_mode: Transition"));
     assert!(ron.contains("shape: Corner"));
+    assert!(ron.contains("connected_edges: 10"));
     assert_eq!(ProjectDocument::from_ron_str(&ron).unwrap(), project);
 }
 

@@ -809,6 +809,7 @@ impl EditorWorkspace {
     pub(crate) fn cycle_tool_group(&mut self, reverse: bool) {
         const ALL_VALUES: &[(ViewTool, Option<PlaceKind>)] = &[
             (ViewTool::Select, None),
+            (ViewTool::PaintMaterial, None),
             (ViewTool::PaintFloor, None),
             (ViewTool::PaintWall, None),
             (ViewTool::PaintCeiling, None),
@@ -848,6 +849,9 @@ impl EditorWorkspace {
         self.active_workspace = WorkspaceView::Room;
         let (tool, place_kind) = value;
         self.active_tool = tool;
+        if tool != ViewTool::PaintMaterial {
+            self.material_paint_sampling = false;
+        }
         if let Some(place_kind) = place_kind {
             self.place_kind = place_kind;
         }
@@ -855,6 +859,25 @@ impl EditorWorkspace {
             self.clear_sector_selection();
             self.clear_primitive_selection_state();
             self.selection.hovered_primitive = None;
+        }
+        if tool == ViewTool::PaintMaterial {
+            self.clear_sector_selection();
+            self.clear_primitive_selection_state();
+            self.selection.hovered_primitive = None;
+            if matches!(
+                self.interaction,
+                Interaction::PrimitiveGizmo(_) | Interaction::NodeGizmo(_) | Interaction::Node(_)
+            ) {
+                self.interaction = Interaction::Idle;
+            }
+            let material = self
+                .selected_material_resource()
+                .or(self.brush_material)
+                .or_else(|| self.first_material());
+            if let Some(material) = material {
+                self.brush_material = Some(material);
+                self.replace_resource_selection(material);
+            }
         }
         self.status = if tool == ViewTool::Place {
             format!("Tool: {}", self.place_kind.label())

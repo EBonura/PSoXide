@@ -437,6 +437,10 @@ pub struct DumpEditorUiArgs {
     /// Inject the `.` frame-selected shortcut before the captured frame.
     #[arg(long)]
     pub frame_selected: bool,
+    /// Render the embedded Play viewport with the named Room Topology debug
+    /// view. Accepted values: rooms, cells, portals, streaming.
+    #[arg(long, value_name = "VIEW")]
+    pub debug_map_view: Option<String>,
 }
 
 /// Arguments for `validate`.
@@ -2015,14 +2019,76 @@ fn cmd_dump_editor_ui(args: DumpEditorUiArgs) -> Result<(), String> {
         egui::ColorImage::new([640, 480], egui::Color32::from_rgb(8, 10, 14)),
         egui::TextureOptions::NEAREST,
     );
-    let viewport = EditorViewport3dPresentation::edit(viewport_texture.id(), Vec::new());
+    let (viewport, play_status) = if let Some(view) = args.debug_map_view.as_deref() {
+        if !editor.set_play_debug_map_view(view) {
+            return Err(format!(
+                "unknown --debug-map-view {view:?}; expected rooms, cells, portals, or streaming"
+            ));
+        }
+        let topology = psxed_project::playtest::build_debug_topology(editor.project());
+        let room_count = topology
+            .cells
+            .iter()
+            .map(|cell| cell.runtime_room_index + 1)
+            .max()
+            .unwrap_or_default();
+        let room_mask = if room_count >= u64::BITS as usize {
+            u64::MAX
+        } else if room_count == 0 {
+            0
+        } else {
+            (1u64 << room_count) - 1
+        };
+        let portal_count = topology.portals.len().min(u64::BITS as usize);
+        let portal_mask = if portal_count == u64::BITS as usize {
+            u64::MAX
+        } else if portal_count == 0 {
+            0
+        } else {
+            (1u64 << portal_count) - 1
+        };
+        let metrics = psxed_ui::EditorPlaytestMetrics {
+            chunk_visible: room_count as u32,
+            chunk_loaded: room_count as u32,
+            stream_slot_limit: room_count.max(1) as u32,
+            portal_visible_rooms: room_count as u32,
+            chunk_loaded_mask: room_mask,
+            chunk_active_mask: room_mask,
+            chunk_drawn_mask: room_mask,
+            portal_visible_mask: room_mask,
+            portal_tested_mask: room_mask,
+            portal_accepted_mask: room_mask,
+            portal_tested_portal_mask: portal_mask,
+            portal_accepted_portal_mask: portal_mask,
+            player_map_valid: room_count > 0,
+            player_room_index: 0,
+            portal_current_room_index: 0,
+            ..Default::default()
+        };
+        (
+            EditorViewport3dPresentation::play(
+                viewport_texture.id(),
+                egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+                psxed_ui::EditorPlaytestTapeStatus::default(),
+                Some(metrics),
+            ),
+            EditorPlaytestStatus::Running {
+                input_captured: false,
+            },
+        )
+    } else {
+        (
+            EditorViewport3dPresentation::edit(viewport_texture.id(), Vec::new()),
+            EditorPlaytestStatus::Idle,
+        )
+    };
 
     // Prime one complete frame before injecting input. This mirrors the native
     // app's first layout pass and ensures fonts/resource textures and widget
     // focus state all exist before the captured interaction frame.
     let first = ctx.run(
         headless_editor_input(args.width, args.height, 0.0, Vec::new()),
-        |ctx| editor.draw(ctx, viewport.clone(), EditorPlaytestStatus::Idle),
+        |ctx| editor.draw(ctx, viewport.clone(), play_status),
     );
     let mut textures_delta = first.textures_delta;
 
@@ -2039,7 +2105,7 @@ fn cmd_dump_editor_ui(args: DumpEditorUiArgs) -> Result<(), String> {
     };
     let captured = ctx.run(
         headless_editor_input(args.width, args.height, 1.0 / 60.0, events),
-        |ctx| editor.draw(ctx, viewport.clone(), EditorPlaytestStatus::Idle),
+        |ctx| editor.draw(ctx, viewport.clone(), play_status),
     );
     textures_delta.append(captured.textures_delta);
     let paint_jobs = ctx.tessellate(captured.shapes, captured.pixels_per_point);

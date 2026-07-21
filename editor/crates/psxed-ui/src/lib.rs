@@ -92,11 +92,11 @@ use psxed_project::{
     UiGradientDirection, UiImageEffect, UiNode, UiNodeId, UiNodeKind, UiNodeRow, UiRect, UiScene,
     UiSceneId, UiSfxBindings, UiSfxCue, UiTextAlign, UiValueBinding, WorldCameraSettings,
     WorldCullingSettings, WorldGrid, WorldPhysicsSettings, WorldStreamingSettings,
-    DEFAULT_WALL_HEIGHT_SECTORS, DEFAULT_WORLD_SECTOR_SIZE, HEIGHT_QUANTUM, MAX_PHYSICS_WEIGHT_Q8,
-    MAX_UI_FONT_SCALE, MAX_UI_LETTER_SPACING, MAX_WORLD_CAMERA_DISTANCE, MAX_WORLD_CAMERA_HEIGHT,
-    MAX_WORLD_CAMERA_MIN_FLOOR_CLEARANCE, MAX_WORLD_CHUNK_ACTIVATION_RADIUS_SECTORS,
-    MAX_WORLD_DRAW_DISTANCE, MAX_WORLD_GRAVITY_PER_TICK, MAX_WORLD_SECTOR_SIZE,
-    MAX_WORLD_STREAMING_RESIDENT_CHUNKS, MAX_WORLD_STREAMING_VISIBLE_CHUNKS,
+    AUTO_PAINT_BLEND_PREFIX, DEFAULT_WALL_HEIGHT_SECTORS, DEFAULT_WORLD_SECTOR_SIZE,
+    HEIGHT_QUANTUM, MAX_PHYSICS_WEIGHT_Q8, MAX_UI_FONT_SCALE, MAX_UI_LETTER_SPACING,
+    MAX_WORLD_CAMERA_DISTANCE, MAX_WORLD_CAMERA_HEIGHT, MAX_WORLD_CAMERA_MIN_FLOOR_CLEARANCE,
+    MAX_WORLD_CHUNK_ACTIVATION_RADIUS_SECTORS, MAX_WORLD_DRAW_DISTANCE, MAX_WORLD_GRAVITY_PER_TICK,
+    MAX_WORLD_SECTOR_SIZE, MAX_WORLD_STREAMING_RESIDENT_CHUNKS, MAX_WORLD_STREAMING_VISIBLE_CHUNKS,
     MAX_WORLD_VISIBILITY_RADIUS, MIN_PHYSICS_WEIGHT_Q8, MIN_UI_FONT_SCALE, MIN_UI_LETTER_SPACING,
     MIN_WORLD_CAMERA_DISTANCE, MIN_WORLD_CHUNK_ACTIVATION_RADIUS_SECTORS, MIN_WORLD_DRAW_DISTANCE,
     MIN_WORLD_GRAVITY_PER_TICK, MIN_WORLD_SECTOR_SIZE, MIN_WORLD_STREAMING_RESIDENT_CHUNKS,
@@ -511,6 +511,20 @@ pub struct EditorWorkspace {
     /// if one is active, otherwise fall back to a tool-specific
     /// material name hint.
     brush_material: Option<ResourceId>,
+    /// When true, the material Paint tool bakes a transition onto the one
+    /// clicked face. Neighboring faces are context only and never mutated.
+    material_paint_blend: bool,
+    /// One-shot eyedropper state for Material Paint. The next existing face
+    /// click samples its logical material into the shared brush/resource
+    /// selection, then automatically returns to painting.
+    material_paint_sampling: bool,
+    /// Percentage of the painted material kept by generated Paint blends.
+    /// Stored as a human-facing percentage and converted to the transition
+    /// recipe's byte threshold when a stroke is baked.
+    material_paint_blend_coverage_percent: u8,
+    /// Organic variation applied to the exposed edge of generated blends.
+    /// The transition baker clamps this to its seam-safe 0..=96 range.
+    material_paint_blend_edge_detail: u8,
     snap_to_grid: bool,
     snap_units: u16,
     show_grid: bool,
@@ -521,6 +535,7 @@ pub struct EditorWorkspace {
     preview_bounds: bool,
     show_play_debug_overlays: bool,
     show_play_debug_map: bool,
+    play_debug_map_view: PlayDebugMapView,
     play_frame_times_ms: VecDeque<f32>,
     play_frame_last_sample_serial: Option<u32>,
     play_debug_terminal_lines: VecDeque<String>,
@@ -1932,6 +1947,8 @@ enum ViewTool {
     PaintWall,
     /// Paint a ceiling on the sector under the cursor.
     PaintCeiling,
+    /// Repaint exactly one existing floor, ceiling, or wall face.
+    PaintMaterial,
     /// Clear the painted surface under the cursor.
     Erase,
     /// Drop a child entity node into the sector under the cursor.
@@ -2050,6 +2067,7 @@ impl ViewTool {
             Self::PaintFloor => "Floor",
             Self::PaintWall => "Wall",
             Self::PaintCeiling => "Ceiling",
+            Self::PaintMaterial => "Paint",
             Self::Erase => "Erase",
             Self::Place => "Place",
         }
@@ -2061,6 +2079,7 @@ impl ViewTool {
             Self::PaintFloor => icons::GRID,
             Self::PaintWall => icons::BRICK_WALL,
             Self::PaintCeiling => icons::LAYERS,
+            Self::PaintMaterial => icons::PALETTE,
             Self::Erase => icons::TRASH,
             Self::Place => icons::PLUS,
         }
@@ -2072,7 +2091,12 @@ impl ViewTool {
     const fn requires_room_context(self) -> bool {
         matches!(
             self,
-            Self::PaintFloor | Self::PaintWall | Self::PaintCeiling | Self::Erase | Self::Place
+            Self::PaintFloor
+                | Self::PaintWall
+                | Self::PaintCeiling
+                | Self::PaintMaterial
+                | Self::Erase
+                | Self::Place
         )
     }
 }
@@ -2235,6 +2259,16 @@ fn decode_embedded_png(bytes: &[u8]) -> Option<ColorImage> {
 }
 
 impl EditorWorkspace {
+    /// Select a Room Topology diagnostic view for deterministic/headless UI
+    /// capture. Returns false for an unknown label.
+    pub fn set_play_debug_map_view(&mut self, label: &str) -> bool {
+        let Some(view) = PlayDebugMapView::parse(label) else {
+            return false;
+        };
+        self.play_debug_map_view = view;
+        self.show_play_debug_map = true;
+        true
+    }
     /// Current top-level workspace, exposed for native startup validation.
     pub const fn active_workspace_view(&self) -> EditorWorkspaceView {
         self.active_workspace.to_project()
@@ -2324,7 +2358,10 @@ impl EditorWorkspace {
             sync_status.unwrap_or_else(|| format!("Loaded {}", short_path(&workspace.project_dir)));
         workspace.select_first_room();
         #[cfg(debug_assertions)]
-        workspace.focus_debug_scene_node_from_env();
+        {
+            workspace.focus_debug_scene_node_from_env();
+            workspace.apply_debug_terrain_tool_from_env();
+        }
         workspace.apply_project_editor_camera();
         workspace.apply_project_editor_visibility();
         Ok(workspace)
@@ -2425,6 +2462,10 @@ impl EditorWorkspace {
             portal_place_direction: GridDirection::North,
             place_resource: None,
             brush_material: None,
+            material_paint_blend: false,
+            material_paint_sampling: false,
+            material_paint_blend_coverage_percent: 50,
+            material_paint_blend_edge_detail: 20,
             snap_to_grid: true,
             snap_units: 16,
             show_grid: editor_visibility.show_grid,
@@ -2435,6 +2476,7 @@ impl EditorWorkspace {
             preview_bounds: editor_visibility.preview_bounds,
             show_play_debug_overlays: editor_visibility.show_play_debug_overlays,
             show_play_debug_map: editor_visibility.show_play_debug_map,
+            play_debug_map_view: PlayDebugMapView::default(),
             play_frame_times_ms: VecDeque::with_capacity(PLAY_FRAME_HISTORY_CAP),
             play_frame_last_sample_serial: None,
             play_debug_terminal_lines: VecDeque::with_capacity(PLAY_DEBUG_TERMINAL_LINE_CAP),
@@ -2875,6 +2917,39 @@ impl EditorWorkspace {
         {
             self.preview_character_action(self.selection.selected_node, action);
         }
+    }
+
+    /// Optional material-paint tool state for deterministic native captures.
+    /// Kept behind debug assertions so production startup never reads these
+    /// development-only environment variables.
+    #[cfg(debug_assertions)]
+    fn apply_debug_terrain_tool_from_env(&mut self) {
+        let Ok(tool) = std::env::var("PSXED_DEBUG_TOOL") else {
+            return;
+        };
+        let tool = match tool.trim().to_ascii_lowercase().as_str() {
+            "floor" => ViewTool::PaintFloor,
+            "ceiling" => ViewTool::PaintCeiling,
+            "wall" => ViewTool::PaintWall,
+            "paint" | "material" => ViewTool::PaintMaterial,
+            _ => return,
+        };
+        if self.active_room_id().is_none() {
+            return;
+        }
+        self.active_tool = tool;
+        self.material_paint_blend = std::env::var("PSXED_DEBUG_PAINT_BLEND")
+            .is_ok_and(|value| matches!(value.trim(), "1" | "true" | "yes" | "on"));
+        self.material_paint_sampling = tool == ViewTool::PaintMaterial
+            && std::env::var("PSXED_DEBUG_PAINT_SAMPLE")
+                .is_ok_and(|value| matches!(value.trim(), "1" | "true" | "yes" | "on"));
+        self.status = if self.material_paint_sampling {
+            "Eyedropper: click a surface to sample its material".to_string()
+        } else if self.material_paint_blend {
+            "Material Paint: Blend".to_string()
+        } else {
+            "Material Paint: Direct".to_string()
+        };
     }
 
     #[cfg(debug_assertions)]

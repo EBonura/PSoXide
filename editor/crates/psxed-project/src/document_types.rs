@@ -996,7 +996,11 @@ impl ProjectDocument {
         self.resources
             .iter()
             .filter_map(|resource| match &resource.data {
-                ResourceData::Material(_) => Some((resource.id, resource.name.clone())),
+                ResourceData::Material(_)
+                    if !resource.name.starts_with(AUTO_PAINT_BLEND_PREFIX) =>
+                {
+                    Some((resource.id, resource.name.clone()))
+                }
                 _ => None,
             })
             .collect()
@@ -1523,6 +1527,9 @@ pub(crate) fn grid_resource_reference_count(grid: &WorldGrid, id: ResourceId) ->
             }
         }
     }
+    for floor in &grid.floors_above {
+        count += grid_resource_reference_count(floor, id);
+    }
     count
 }
 
@@ -1540,6 +1547,9 @@ pub(crate) fn clear_grid_resource_references(grid: &mut WorldGrid, id: ResourceI
                 count += clear_option_resource(&mut wall.material, id);
             }
         }
+    }
+    for floor in &mut grid.floors_above {
+        count += clear_grid_resource_references(floor, id);
     }
     count
 }
