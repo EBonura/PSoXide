@@ -221,6 +221,9 @@ pub(crate) fn resource_filter_counts(project: &ProjectDocument) -> [(ResourceFil
     let mut room = 0;
     let mut other = 0;
     for resource in &project.resources {
+        if resource.name.starts_with(AUTO_PAINT_BLEND_PREFIX) {
+            continue;
+        }
         match &resource.data {
             // Legacy Texture resources are folded into materials at
             // load; none survive in memory.
@@ -254,6 +257,9 @@ pub(crate) fn resource_matches_filter(
     filter: ResourceFilter,
     search: &str,
 ) -> bool {
+    if resource.name.starts_with(AUTO_PAINT_BLEND_PREFIX) {
+        return filter.matches(&resource.data) && search.contains("paint blend");
+    }
     if !filter.matches(&resource.data) {
         return false;
     }

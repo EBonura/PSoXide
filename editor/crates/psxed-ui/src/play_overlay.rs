@@ -1,5 +1,33 @@
 use super::*;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum PlayDebugMapView {
+    #[default]
+    Rooms,
+    Cells,
+    Portals,
+    Streaming,
+}
+
+impl PlayDebugMapView {
+    pub(crate) const ALL: [Self; 4] = [Self::Rooms, Self::Cells, Self::Portals, Self::Streaming];
+
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Rooms => "Rooms",
+            Self::Cells => "Cells",
+            Self::Portals => "Portals",
+            Self::Streaming => "Streaming",
+        }
+    }
+
+    pub(crate) fn parse(label: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|view| view.label().eq_ignore_ascii_case(label))
+    }
+}
+
 pub(crate) fn human_bytes(n: u32) -> String {
     human_bytes_u64(n as u64)
 }
@@ -83,6 +111,8 @@ pub(crate) struct PlayChunkDebugMapCell {
     pub(crate) room_origin: [f32; 2],
     pub(crate) runtime_origin: [i32; 2],
     pub(crate) sector_size: f32,
+    pub(crate) floor_index: usize,
+    pub(crate) elevation: i32,
 }
 
 #[derive(Clone)]
@@ -96,6 +126,9 @@ pub(crate) struct PlayChunkDebugMapPortal {
     pub(crate) direction: GridDirection,
     pub(crate) normal_world: [i16; 3],
     pub(crate) source_marker: Option<NodeId>,
+    pub(crate) kind: u8,
+    pub(crate) source_floor_index: usize,
+    pub(crate) destination_floor_index: usize,
 }
 
 pub(crate) struct PlayChunkDebugMap {
@@ -267,7 +300,7 @@ pub(crate) fn portal_level_record(
         destination_room: psx_level::RoomIndex(
             portal.destination_room_index.min(u16::MAX as usize) as u16,
         ),
-        kind: 0,
+        kind: portal.kind,
         normal_x: portal.normal_world[0],
         normal_y: portal.normal_world[1],
         normal_z: portal.normal_world[2],
@@ -353,13 +386,14 @@ pub(crate) fn draw_play_chunk_debug_map(
     viewport_rect: Rect,
     project: &ProjectDocument,
     metrics: EditorPlaytestMetrics,
+    view: PlayDebugMapView,
 ) {
     let map = collect_play_chunk_debug_map(project);
     if map.cells.is_empty() {
         return;
     }
 
-    let map_size = Vec2::new(300.0, 248.0);
+    let map_size = Vec2::new(410.0, 300.0);
     let mut map_rect = Rect::from_min_size(
         Pos2::new(
             viewport_rect.right() - map_size.x - 8.0,
@@ -377,18 +411,29 @@ pub(crate) fn draw_play_chunk_debug_map(
         );
     }
 
-    let mut min_x = f32::INFINITY;
-    let mut max_x = f32::NEG_INFINITY;
+    let mut raw_min_x = f32::INFINITY;
+    let mut raw_max_x = f32::NEG_INFINITY;
     let mut min_z = f32::INFINITY;
     let mut max_z = f32::NEG_INFINITY;
     for cell in &map.cells {
-        min_x = min_x.min(cell.center[0] - cell.half[0]);
-        max_x = max_x.max(cell.center[0] + cell.half[0]);
+        raw_min_x = raw_min_x.min(cell.center[0] - cell.half[0]);
+        raw_max_x = raw_max_x.max(cell.center[0] + cell.half[0]);
         min_z = min_z.min(cell.center[1] - cell.half[1]);
         max_z = max_z.max(cell.center[1] + cell.half[1]);
     }
-    if !min_x.is_finite() || !min_z.is_finite() {
+    if !raw_min_x.is_finite() || !min_z.is_finite() {
         return;
+    }
+    // Explode authored floors into side-by-side lanes. The old overlay folded
+    // every layer onto the same XZ footprint, producing the misleading stack
+    // of boxes all labelled room 0 seen in the layer regression captures.
+    let layer_stride = (raw_max_x - raw_min_x).max(1.0) + 1.5;
+    let display_x = |x: f32, floor_index: usize| x + floor_index as f32 * layer_stride;
+    let mut min_x = f32::INFINITY;
+    let mut max_x = f32::NEG_INFINITY;
+    for cell in &map.cells {
+        min_x = min_x.min(display_x(cell.center[0] - cell.half[0], cell.floor_index));
+        max_x = max_x.max(display_x(cell.center[0] + cell.half[0], cell.floor_index));
     }
 
     painter.rect_filled(map_rect, 4.0, Color32::from_black_alpha(176));
@@ -401,7 +446,7 @@ pub(crate) fn draw_play_chunk_debug_map(
     painter.text(
         map_rect.left_top() + Vec2::new(8.0, 6.0),
         Align2::LEFT_TOP,
-        "Room rings",
+        format!("Room topology · {}", view.label()),
         FontId::monospace(11.0),
         STUDIO_TEXT,
     );
@@ -422,12 +467,16 @@ pub(crate) fn draw_play_chunk_debug_map(
         map_rect.left_top() + Vec2::new(8.0, 21.0),
         Align2::LEFT_TOP,
         format!(
-            "pool {}/{}  load {}  pre {}  evict {}",
+            "rooms {}  layers {}  portals {}   pool {}/{}",
+            map.runtime_room_count(),
+            map.cells
+                .iter()
+                .map(|cell| cell.floor_index + 1)
+                .max()
+                .unwrap_or(1),
+            map.portals.len(),
             metrics.chunk_loaded,
-            metrics.stream_slot_limit,
-            metrics.stream_pending,
-            metrics.stream_prefetches,
-            metrics.stream_evictions
+            metrics.stream_slot_limit
         ),
         FontId::monospace(9.0),
         pool_color,
@@ -435,7 +484,8 @@ pub(crate) fn draw_play_chunk_debug_map(
     let fault_total = metrics.portal_missing_resident
         + metrics.portal_build_failed
         + metrics.stream_failed
-        + metrics.stream_protected_full;
+        + metrics.stream_protected_full
+        + metrics.room_visibility_fallback_draws;
     let fault_color = if fault_total > 0 {
         Color32::from_rgb(255, 120, 120)
     } else {
@@ -445,11 +495,12 @@ pub(crate) fn draw_play_chunk_debug_map(
         map_rect.left_top() + Vec2::new(8.0, 33.0),
         Align2::LEFT_TOP,
         format!(
-            "vis {}  miss {}  bfail {}  full {}",
+            "vis {}  drawn {}  load {}  miss {}  pvs-fallback {}",
             metrics.portal_visible_rooms,
+            metrics.chunk_drawn_mask.count_ones(),
+            metrics.stream_pending,
             metrics.portal_missing_resident,
-            metrics.portal_build_failed,
-            metrics.stream_protected_full
+            metrics.room_visibility_fallback_draws
         ),
         FontId::monospace(9.0),
         fault_color,
@@ -468,26 +519,18 @@ pub(crate) fn draw_play_chunk_debug_map(
     } else {
         STUDIO_TEXT_WEAK
     };
-    painter.text(
-        map_rect.left_top() + Vec2::new(8.0, 45.0),
-        Align2::LEFT_TOP,
-        format!(
-            // `mat` is the per-room material-slot overflow: room uses more
-            // materials than MAX_ROOM_MATERIALS, so surfaces go invisible.
-            "vdrop {}  slot {}  win {}  clut {}  q {}  mat {}",
-            metrics.vram_texture_drops,
-            metrics.vram_caps_full[0],
-            metrics.vram_caps_full[1],
-            metrics.vram_caps_full[2],
-            metrics.vram_caps_full[3],
-            metrics.room_material_slot_overflow,
-        ),
-        FontId::monospace(9.0),
-        vram_color,
-    );
+    if vram_total > 0 {
+        painter.text(
+            map_rect.right_top() + Vec2::new(-8.0, 6.0),
+            Align2::RIGHT_TOP,
+            format!("VRAM fault {vram_total}"),
+            FontId::monospace(9.0),
+            vram_color,
+        );
+    }
 
     let plot = Rect::from_min_max(
-        map_rect.left_top() + Vec2::new(8.0, 60.0),
+        map_rect.left_top() + Vec2::new(8.0, 62.0),
         map_rect.right_bottom() - Vec2::new(8.0, 78.0),
     );
     let world_w = (max_x - min_x).max(1.0);
@@ -501,6 +544,22 @@ pub(crate) fn draw_play_chunk_debug_map(
     );
     let map_x = |x: f32| origin.x + (x - min_x) * scale;
     let map_z = |z: f32| origin.y + (z - min_z) * scale;
+
+    let mut layer_labels = std::collections::BTreeMap::new();
+    for cell in &map.cells {
+        layer_labels
+            .entry(cell.floor_index)
+            .or_insert((cell.elevation, cell.center[0] - cell.half[0]));
+    }
+    for (floor_index, (elevation, lane_x)) in layer_labels {
+        painter.text(
+            Pos2::new(map_x(display_x(lane_x, floor_index)), plot.top() - 11.0),
+            Align2::LEFT_BOTTOM,
+            format!("L{} · y {}", floor_index + 1, elevation),
+            FontId::monospace(8.5),
+            STUDIO_TEXT_WEAK,
+        );
+    }
 
     // Each room is shaded by its innermost membership in the three rings of the
     // streaming model, read as a heat ramp out from the player:
@@ -524,16 +583,40 @@ pub(crate) fn draw_play_chunk_debug_map(
         let drawn = bit != 0 && metrics.chunk_drawn_mask & bit != 0;
         let rect = Rect::from_min_max(
             Pos2::new(
-                map_x(cell.center[0] - cell.half[0]),
+                map_x(display_x(cell.center[0] - cell.half[0], cell.floor_index)),
                 map_z(cell.center[1] - cell.half[1]),
             ),
             Pos2::new(
-                map_x(cell.center[0] + cell.half[0]),
+                map_x(display_x(cell.center[0] + cell.half[0], cell.floor_index)),
                 map_z(cell.center[1] + cell.half[1]),
             ),
         )
         .shrink(0.75);
-        let (fill, stroke) = if is_current {
+        let (fill, stroke) = if view != PlayDebugMapView::Streaming {
+            let hue = (cell.runtime_room_index as u8).wrapping_mul(37);
+            let base = Color32::from_rgb(
+                66u8.saturating_add(hue / 5),
+                98u8.saturating_add(hue / 7),
+                132u8.saturating_add(hue / 9),
+            );
+            let fill_alpha = match view {
+                PlayDebugMapView::Rooms => 92,
+                PlayDebugMapView::Cells => 38,
+                PlayDebugMapView::Portals => 20,
+                PlayDebugMapView::Streaming => unreachable!(),
+            };
+            (
+                Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), fill_alpha),
+                Stroke::new(
+                    if is_current { 2.0 } else { 1.0 },
+                    if is_current {
+                        Color32::from_rgb(255, 138, 96)
+                    } else {
+                        base
+                    },
+                ),
+            )
+        } else if is_current {
             // Collision ring: the room the player occupies.
             (
                 Color32::from_rgba_unmultiplied(240, 96, 64, 150),
@@ -600,33 +683,47 @@ pub(crate) fn draw_play_chunk_debug_map(
             painter.rect_filled(rect, 0.0, fill);
         }
         painter.rect_stroke(rect, 0.0, stroke, StrokeKind::Inside);
-        // Runtime room index, to correlate the map with logs and counter dumps.
-        // A dark four-way outline keeps it legible on both bright and dark fills.
-        if rect.width() >= 12.0 && rect.height() >= 10.0 {
-            let center = rect.center();
-            let label = format!("{}", cell.runtime_room_index);
-            for off in [
-                Vec2::new(-0.8, 0.0),
-                Vec2::new(0.8, 0.0),
-                Vec2::new(0.0, -0.8),
-                Vec2::new(0.0, 0.8),
-            ] {
-                painter.text(
-                    center + off,
-                    Align2::CENTER_CENTER,
-                    label.as_str(),
-                    FontId::monospace(8.0),
-                    Color32::from_black_alpha(210),
-                );
-            }
+        if view == PlayDebugMapView::Cells && rect.width() >= 8.0 && rect.height() >= 8.0 {
             painter.text(
-                center,
+                rect.center(),
                 Align2::CENTER_CENTER,
-                label.as_str(),
-                FontId::monospace(8.0),
-                Color32::WHITE,
+                format!("{},{}", cell.array_cell[0], cell.array_cell[1]),
+                FontId::monospace(5.5),
+                STUDIO_TEXT_WEAK,
             );
         }
+    }
+
+    // Label each runtime room once at its centroid instead of repeating the
+    // same index in every cell. This keeps dense room grids readable.
+    let mut room_centroids: HashMap<usize, ([f32; 2], usize, usize)> = HashMap::new();
+    for cell in &map.cells {
+        let entry = room_centroids.entry(cell.runtime_room_index).or_insert((
+            [0.0, 0.0],
+            0,
+            cell.floor_index,
+        ));
+        entry.0[0] += cell.center[0];
+        entry.0[1] += cell.center[1];
+        entry.1 += 1;
+    }
+    for (room_index, (sum, count, floor_index)) in room_centroids {
+        if view == PlayDebugMapView::Cells {
+            continue;
+        }
+        let count = count.max(1) as f32;
+        let pos = Pos2::new(
+            map_x(display_x(sum[0] / count, floor_index)),
+            map_z(sum[1] / count),
+        );
+        painter.circle_filled(pos, 7.0, Color32::from_black_alpha(190));
+        painter.text(
+            pos,
+            Align2::CENTER_CENTER,
+            room_index.to_string(),
+            FontId::monospace(8.5),
+            Color32::WHITE,
+        );
     }
 
     let clipped = painter.with_clip_rect(plot);
@@ -655,21 +752,59 @@ pub(crate) fn draw_play_chunk_debug_map(
         } else {
             Color32::from_rgba_unmultiplied(210, 220, 235, 112)
         };
-        let (a, b) = directed_portal_map_segment(
-            Pos2::new(map_x(portal.a[0]), map_z(portal.a[1])),
-            Pos2::new(map_x(portal.b[0]), map_z(portal.b[1])),
-            portal.source_room_index,
-            portal.destination_room_index,
+        let (a, b) = if portal.source_floor_index == portal.destination_floor_index {
+            directed_portal_map_segment(
+                Pos2::new(
+                    map_x(display_x(portal.a[0], portal.source_floor_index)),
+                    map_z(portal.a[1]),
+                ),
+                Pos2::new(
+                    map_x(display_x(portal.b[0], portal.source_floor_index)),
+                    map_z(portal.b[1]),
+                ),
+                portal.source_room_index,
+                portal.destination_room_index,
+            )
+        } else {
+            let midpoint = [
+                (portal.a[0] + portal.b[0]) * 0.5,
+                (portal.a[1] + portal.b[1]) * 0.5,
+            ];
+            (
+                Pos2::new(
+                    map_x(display_x(midpoint[0], portal.source_floor_index)),
+                    map_z(midpoint[1]),
+                ),
+                Pos2::new(
+                    map_x(display_x(midpoint[0], portal.destination_floor_index)),
+                    map_z(midpoint[1]),
+                ),
+            )
+        };
+        clipped.line_segment(
+            [a, b],
+            Stroke::new(
+                if view == PlayDebugMapView::Portals {
+                    2.8
+                } else {
+                    2.0
+                },
+                color,
+            ),
         );
-        clipped.line_segment([a, b], Stroke::new(2.0, color));
         if source_visible && portal_rejected && !portal_accepted {
             draw_rejected_portal_marker(&clipped, a, b);
         }
-        if source_visible && (portal_accepted || portal_rejected) {
+        if view == PlayDebugMapView::Portals
+            || source_visible && (portal_accepted || portal_rejected)
+        {
             let label = if portal_rejected && !portal_accepted {
                 format!("#{} R", portal.portal_index)
             } else {
-                format!("#{}", portal.portal_index)
+                format!(
+                    "#{} {}→{}",
+                    portal.portal_index, portal.source_room_index, portal.destination_room_index
+                )
             };
             clipped.text(
                 a.lerp(b, 0.5) + Vec2::new(0.0, -7.0),
@@ -691,7 +826,7 @@ pub(crate) fn draw_play_chunk_debug_map(
             let local_to_map_pos = |local_x: i32, local_z: i32| {
                 let x = cell.room_origin[0] + local_x as f32 / sector_size;
                 let z = cell.room_origin[1] + local_z as f32 / sector_size;
-                Pos2::new(map_x(x), map_z(z))
+                Pos2::new(map_x(display_x(x, cell.floor_index)), map_z(z))
             };
             let global_to_map_pos = |cell: &PlayChunkDebugMapCell, global_x: i32, global_z: i32| {
                 let sector_size = cell.sector_size.max(1.0);
@@ -699,7 +834,7 @@ pub(crate) fn draw_play_chunk_debug_map(
                     - cell.runtime_origin[0] as f32;
                 let z = cell.room_origin[1] + global_z as f32 / sector_size
                     - cell.runtime_origin[1] as f32;
-                Pos2::new(map_x(x), map_z(z))
+                Pos2::new(map_x(display_x(x, cell.floor_index)), map_z(z))
             };
             let player_pos = local_to_map_pos(metrics.player_local_x, metrics.player_local_z);
             let camera_pos = if metrics.camera_global_valid {
@@ -861,87 +996,78 @@ pub(crate) fn draw_play_chunk_debug_map(
 }
 
 pub(crate) fn collect_play_chunk_debug_map(project: &ProjectDocument) -> PlayChunkDebugMap {
+    let topology = psxed_project::playtest::build_debug_topology(project);
     let scene = project.active_scene();
-    let mut cells = Vec::new();
-    let mut portals = Vec::new();
-    let mut runtime_room_index = 0usize;
-    let mut room_nodes: Vec<_> = scene
-        .nodes()
+    let cells: Vec<_> = topology
+        .cells
         .iter()
-        .filter(|node| matches!(node.kind, NodeKind::Room { .. }))
+        .filter_map(|cell| {
+            let project_room_id = scene
+                .nodes()
+                .iter()
+                .find(|node| node.id.raw() == u64::from(cell.authored_room))?
+                .id;
+            Some(PlayChunkDebugMapCell {
+                runtime_room_index: cell.runtime_room_index,
+                project_room_id,
+                portal_room_index: cell.portal_room_index,
+                array_cell: cell.array_cell,
+                center: cell.center,
+                half: cell.half,
+                room_origin: cell.room_origin,
+                runtime_origin: cell.runtime_origin,
+                sector_size: cell.sector_size.max(1) as f32,
+                floor_index: cell.floor_index,
+                elevation: cell.elevation,
+            })
+        })
         .collect();
-    room_nodes.sort_by_key(|node| node.id.raw());
-    for node in room_nodes {
-        let NodeKind::Room { grid } = &node.kind else {
-            continue;
-        };
-        if grid.populated_sector_count() == 0 {
-            continue;
-        }
-        let plan = plan_portal_rooms(scene, node.id, grid, PortalRoomConfig::default());
-        let node_center = node_world(node);
-        let room_base_index = runtime_room_index;
-        for portal_room in &plan.rooms {
-            let room_origin = [
-                node_center[0] + portal_room.array_origin[0] as f32 - grid.width as f32 * 0.5,
-                node_center[1] + portal_room.array_origin[1] as f32 - grid.depth as f32 * 0.5,
-            ];
-            for [cell_x, cell_z] in &portal_room.cells {
-                let local_center = grid_cell_editor_center(grid, *cell_x, *cell_z);
-                cells.push(PlayChunkDebugMapCell {
-                    runtime_room_index,
-                    project_room_id: node.id,
-                    portal_room_index: portal_room.index,
-                    array_cell: [*cell_x, *cell_z],
-                    center: [
-                        node_center[0] + local_center[0],
-                        node_center[1] + local_center[1],
-                    ],
-                    half: [0.5, 0.5],
-                    room_origin,
-                    runtime_origin: portal_room.world_origin,
-                    sector_size: grid.sector_size.max(1) as f32,
-                });
-            }
-            runtime_room_index += 1;
-        }
-        let sector_size = grid.sector_size.max(1) as f32;
-        let room_portal_base = portals.len();
-        for portal in plan.portals {
-            let a =
-                portal_debug_map_point(grid, node_center, sector_size, portal.vertices_world[0]);
-            let b =
-                portal_debug_map_point(grid, node_center, sector_size, portal.vertices_world[1]);
-            portals.push(PlayChunkDebugMapPortal {
-                portal_index: room_portal_base + portal.index,
-                source_room_index: room_base_index + portal.source_room,
-                destination_room_index: room_base_index + portal.destination_room,
-                a,
-                b,
-                vertices_world: portal.vertices_world,
-                direction: portal.direction,
-                normal_world: portal.normal_world,
-                source_marker: portal.source_marker,
-            });
-        }
-    }
+    let portals = topology
+        .portals
+        .iter()
+        .filter_map(|topology_portal| {
+            let portal = topology_portal.portal;
+            let source = cells
+                .iter()
+                .find(|cell| cell.runtime_room_index == portal.source_room as usize)?;
+            let destination = cells
+                .iter()
+                .find(|cell| cell.runtime_room_index == portal.destination_room as usize)?;
+            let to_map = |cell: &PlayChunkDebugMapCell, vertex: [i32; 3]| {
+                [
+                    cell.room_origin[0] + vertex[0] as f32 / cell.sector_size
+                        - cell.runtime_origin[0] as f32,
+                    cell.room_origin[1] + vertex[2] as f32 / cell.sector_size
+                        - cell.runtime_origin[1] as f32,
+                ]
+            };
+            Some(PlayChunkDebugMapPortal {
+                portal_index: topology_portal.portal_index,
+                source_room_index: portal.source_room as usize,
+                destination_room_index: portal.destination_room as usize,
+                a: to_map(source, portal.vertices[0]),
+                b: to_map(source, portal.vertices[1]),
+                vertices_world: portal.vertices,
+                direction: debug_portal_direction(portal.normal),
+                normal_world: portal.normal,
+                source_marker: None,
+                kind: portal.kind,
+                source_floor_index: source.floor_index,
+                destination_floor_index: destination.floor_index,
+            })
+        })
+        .collect();
     PlayChunkDebugMap { cells, portals }
 }
 
-pub(crate) fn portal_debug_map_point(
-    grid: &WorldGrid,
-    node_center: [f32; 2],
-    sector_size: f32,
-    vertex: [i32; 3],
-) -> [f32; 2] {
-    [
-        node_center[0] + vertex[0] as f32 / sector_size
-            - grid.origin[0] as f32
-            - grid.width as f32 * 0.5,
-        node_center[1] + vertex[2] as f32 / sector_size
-            - grid.origin[1] as f32
-            - grid.depth as f32 * 0.5,
-    ]
+fn debug_portal_direction(normal: [i16; 3]) -> GridDirection {
+    match normal {
+        [0, 0, -1] => GridDirection::North,
+        [-1, 0, 0] => GridDirection::East,
+        [0, 0, 1] => GridDirection::South,
+        [1, 0, 0] => GridDirection::West,
+        _ => GridDirection::NorthWestSouthEast,
+    }
 }
 
 pub(crate) fn debug_chunk_bit(index: usize) -> u64 {
