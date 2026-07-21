@@ -28,7 +28,7 @@
 //! care. The residency manager already tracks RAM/VRAM membership
 //! independently of where bytes live.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use psx_engine::{

@@ -12,6 +12,14 @@ impl EditorWorkspace {
             .show(ctx, |ui| {
                 tool_panel_frame().show(ui, |ui| {
                     ui.expand_to_include_rect(ui.max_rect());
+                    let material_undo_candidate =
+                        if self.active_workspace == WorkspaceView::Material {
+                            self.prepare_inspector_undo_frame(ctx);
+                            inspector_has_edit_input(ctx)
+                                .then(|| (self.project.clone(), self.history.epoch()))
+                        } else {
+                            None
+                        };
                     self.draw_viewport_header_toolbar(ui);
                     tool_panel_body(ui, |ui| {
                         if viewport_3d.mode == EditorViewport3dMode::Play {
@@ -21,6 +29,15 @@ impl EditorWorkspace {
 
                         if self.active_workspace == WorkspaceView::Material {
                             self.draw_material_lab(ui);
+                            if let Some((project_before, history_epoch_before)) =
+                                material_undo_candidate
+                            {
+                                self.finish_inspector_undo_frame(
+                                    project_before,
+                                    history_epoch_before,
+                                    ctx,
+                                );
+                            }
                             return;
                         }
 
@@ -259,24 +276,26 @@ impl EditorWorkspace {
                     self.draw_workspace_tabs(ui);
                 });
                 ui.separator();
-                ui.horizontal(|ui| match self.active_workspace {
-                    WorkspaceView::Animation => {
-                        let action = model_animation_viewer::draw_model_animation_viewer_toolbar(
-                            ui,
-                            &mut self.project,
-                            &self.project_dir,
-                            &mut self.animation_viewer,
-                            &mut self.animation_viewer_preview_texture,
-                        );
-                        if let Some(action) = action {
-                            self.handle_animation_viewer_action(action);
+                if self.active_workspace == WorkspaceView::Material {
+                    ui.horizontal_wrapped(|ui| self.draw_material_lab_toolbar(ui));
+                } else {
+                    ui.horizontal(|ui| match self.active_workspace {
+                        WorkspaceView::Animation => {
+                            let action =
+                                model_animation_viewer::draw_model_animation_viewer_toolbar(
+                                    ui,
+                                    &mut self.project,
+                                    &self.project_dir,
+                                    &mut self.animation_viewer,
+                                    &mut self.animation_viewer_preview_texture,
+                                );
+                            if let Some(action) = action {
+                                self.handle_animation_viewer_action(action);
+                            }
                         }
-                    }
-                    WorkspaceView::Material => {
-                        self.draw_material_lab_toolbar(ui);
-                    }
-                    _ => self.draw_viewport_toolbar(ui),
-                });
+                        _ => self.draw_viewport_toolbar(ui),
+                    });
+                }
             });
     }
 
