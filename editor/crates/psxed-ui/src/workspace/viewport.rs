@@ -845,6 +845,7 @@ impl EditorWorkspace {
                     &self.project,
                     metrics,
                     self.play_debug_map_view,
+                    self.active_floor,
                 );
             }
         }
