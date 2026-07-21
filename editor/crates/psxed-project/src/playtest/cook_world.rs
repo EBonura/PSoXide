@@ -286,6 +286,7 @@ pub(crate) fn auto_wire_floor_stack_portals(
             .map(|node| (f64::from(node.transform.translation[1]) * f64::from(s)) as i32)
             .unwrap_or(0);
         let floor_elevation_offset = room_origin_y_base.saturating_sub(grid.elevation);
+        let mut openings: BTreeMap<(u16, u16, i32), BTreeSet<(i32, i32)>> = BTreeMap::new();
         for chunk in chunks {
             // Only emit from the lower side of each boundary, so each
             // shared cell yields exactly one reciprocal pair.
@@ -323,11 +324,18 @@ pub(crate) fn auto_wire_floor_stack_portals(
                 }
                 let below_room = u16::try_from(chunk.room_index as usize).unwrap_or(u16::MAX);
                 let above_room = above.room_index;
-                // Cell footprint in world units at the boundary plane.
-                let x0 = world_cell[0].saturating_mul(s);
-                let x1 = world_cell[0].saturating_add(1).saturating_mul(s);
-                let z0 = world_cell[1].saturating_mul(s);
-                let z1 = world_cell[1].saturating_add(1).saturating_mul(s);
+                openings
+                    .entry((below_room, above_room, boundary_y))
+                    .or_default()
+                    .insert((world_cell[0], world_cell[1]));
+            }
+        }
+        for ((below_room, above_room, boundary_y), cells) in openings {
+            for [x0_cell, z0_cell, x1_cell, z1_cell] in exact_cell_rectangles(cells) {
+                let x0 = x0_cell.saturating_mul(s);
+                let x1 = x1_cell.saturating_mul(s);
+                let z0 = z0_cell.saturating_mul(s);
+                let z1 = z1_cell.saturating_mul(s);
                 let quad = [
                     [x0, boundary_y, z0],
                     [x1, boundary_y, z0],
@@ -355,6 +363,78 @@ pub(crate) fn auto_wire_floor_stack_portals(
         }
     }
     out
+}
+
+/// Cover grid cells with deterministic, non-overlapping rectangles. A
+/// rectangle never bridges a missing cell, so the combined portal quads cover
+/// exactly the same opening as the original per-cell quads.
+fn exact_cell_rectangles(mut cells: BTreeSet<(i32, i32)>) -> Vec<[i32; 4]> {
+    let mut rectangles = Vec::new();
+    while let Some(&(x0, z0)) = cells.first() {
+        let mut x1 = x0 + 1;
+        while cells.contains(&(x1, z0)) {
+            x1 += 1;
+        }
+        let mut z1 = z0 + 1;
+        while (x0..x1).all(|x| cells.contains(&(x, z1))) {
+            z1 += 1;
+        }
+        for z in z0..z1 {
+            for x in x0..x1 {
+                cells.remove(&(x, z));
+            }
+        }
+        rectangles.push([x0, z0, x1, z1]);
+    }
+    rectangles
+}
+
+#[cfg(test)]
+mod stack_portal_compaction_tests {
+    use super::exact_cell_rectangles;
+    use std::collections::BTreeSet;
+
+    fn covered_cells(rectangles: &[[i32; 4]]) -> BTreeSet<(i32, i32)> {
+        let mut covered = BTreeSet::new();
+        for &[x0, z0, x1, z1] in rectangles {
+            assert!(x1 > x0 && z1 > z0);
+            for z in z0..z1 {
+                for x in x0..x1 {
+                    assert!(covered.insert((x, z)), "rectangles overlap at ({x}, {z})");
+                }
+            }
+        }
+        covered
+    }
+
+    #[test]
+    fn exact_rectangles_compact_runs_without_filling_holes() {
+        let cells: BTreeSet<_> = [
+            (0, 0),
+            (1, 0),
+            (2, 0),
+            (0, 1),
+            (2, 1),
+            (0, 2),
+            (1, 2),
+            (2, 2),
+            (5, 4),
+            (6, 4),
+            (5, 5),
+            (6, 5),
+        ]
+        .into_iter()
+        .collect();
+        let rectangles = exact_cell_rectangles(cells.clone());
+        assert_eq!(covered_cells(&rectangles), cells);
+        assert!(rectangles.len() < cells.len());
+    }
+
+    #[test]
+    fn exact_rectangles_merge_a_full_opening() {
+        let cells: BTreeSet<_> = (10..16).map(|z| (3, z)).collect();
+        assert_eq!(exact_cell_rectangles(cells), vec![[3, 10, 4, 16]]);
+    }
 }
 
 /// Emit lateral portal pairs where two consecutive authored layers meet along
