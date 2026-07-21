@@ -3232,12 +3232,10 @@ impl EditorWorkspace {
         let mut project = self.project.clone();
         project.normalize_loaded();
         self.clear_validation_issues();
-        // Re-run build_package up front to grab the asset/material
-        // counts for the status string. cook_to_dir does this
-        // internally too; the duplicate cost is negligible
-        // compared to the IO it saves a step later.
-        let (package, _report) =
-            psxed_project::playtest::build_package(&project, &self.project_dir);
+        // Build once: Cortex-sized projects have enough materials, animation,
+        // world geometry, and portal topology that doing this again merely for
+        // the status summary makes every Play launch needlessly expensive.
+        let (package, report) = psxed_project::playtest::build_package(&project, &self.project_dir);
         let summary = package.as_ref().map(|p| PackageSummary {
             rooms: p.rooms.len(),
             assets: p.assets.len(),
@@ -3253,7 +3251,7 @@ impl EditorWorkspace {
                 .and_then(|c| project.resource(c.source_resource).map(|r| r.name.clone())),
         });
 
-        let report = psxed_project::playtest::cook_to_dir(&project, &self.project_dir, &dir)
+        psxed_project::playtest::write_cook_result(package.as_ref(), &dir)
             .map_err(|e| format!("write playtest output: {e}"))?;
         if !report.is_ok() {
             self.record_first_playtest_world_cook_issue(&project);

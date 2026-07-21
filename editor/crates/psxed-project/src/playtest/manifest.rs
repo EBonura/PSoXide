@@ -3201,6 +3201,18 @@ pub fn cook_to_dir(
     project_root: &Path,
     generated_dir: &Path,
 ) -> std::io::Result<PlaytestValidationReport> {
+    let (package, report) = build_package(project, project_root);
+    write_cook_result(package.as_ref(), generated_dir)?;
+    Ok(report)
+}
+
+/// Write an already-built playtest package without rebuilding it. This keeps
+/// interactive Play callers from paying for topology, world, material, model,
+/// and animation cooking twice merely to produce their status summary.
+pub fn write_cook_result(
+    package: Option<&PlaytestPackage>,
+    generated_dir: &Path,
+) -> std::io::Result<()> {
     // A failed cook must not leave a stale cooked manifest for
     // subsequent runtime builds. If validation fails before a
     // package exists, editor-playtest falls back to the tracked
@@ -3209,11 +3221,10 @@ pub fn cook_to_dir(
     if cooked_manifest.exists() {
         std::fs::remove_file(&cooked_manifest)?;
     }
-    let (package, report) = build_package(project, project_root);
     if let Some(package) = package {
-        write_package(&package, generated_dir)?;
+        write_package(package, generated_dir)?;
     }
-    Ok(report)
+    Ok(())
 }
 
 fn room_required_assets(

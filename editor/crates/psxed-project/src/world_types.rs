@@ -1859,8 +1859,16 @@ impl WorldGrid {
         if old_sector_size == new_sector_size {
             self.sector_size = new_sector_size;
             self.snap_heights_to_quantum();
+            for floor in &mut self.floors_above {
+                floor.rescale_sector_size(new_sector_size);
+            }
             return;
         }
+        self.elevation = snap_height(scale_i32_ratio(
+            self.elevation,
+            old_sector_size,
+            new_sector_size,
+        ));
         for sector in self.sectors.iter_mut().flatten() {
             if let Some(face) = &mut sector.floor {
                 for h in &mut face.heights {
@@ -1898,6 +1906,21 @@ impl WorldGrid {
         self.fog_far = scale_i32_ratio(self.fog_far, old_sector_size, new_sector_size)
             .max(self.fog_near + HEIGHT_QUANTUM);
         self.sector_size = new_sector_size;
+        for floor in &mut self.floors_above {
+            floor.rescale_sector_size(new_sector_size);
+        }
+    }
+
+    /// Apply a normalized sector size to every stacked floor without changing
+    /// authored engine-unit geometry. Used while loading projects whose World
+    /// node already owns the canonical size.
+    pub fn normalize_stacked_sector_size(&mut self, sector_size: i32) {
+        let sector_size = snap_world_sector_size(sector_size);
+        self.sector_size = sector_size;
+        self.snap_heights_to_quantum();
+        for floor in &mut self.floors_above {
+            floor.normalize_stacked_sector_size(sector_size);
+        }
     }
 
     /// Snap all authored vertical geometry to the cooker-supported
