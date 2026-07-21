@@ -2,7 +2,8 @@
 
 use crate::{
     GeneratedMaterialTexture, GeneratedTextureUv, GridDirection, MaterialTextureMode,
-    ProceduralNoiseTexture, ProjectDocument, ResourceData, ResourceId, WorldGrid,
+    ProceduralNoiseTexture, ProjectDocument, ResourceData, ResourceId, TransitionMaskShape,
+    TransitionMaterialTexture, WorldGrid,
 };
 use std::{collections::HashMap, path::Path};
 
@@ -167,32 +168,14 @@ fn probe_texture<'a>(
 ) -> Option<&'a Option<ProbeTexture>> {
     if !cache.contains_key(&material) {
         let decoded = project.resource(material).and_then(|resource| {
-            let (bytes, tint) = match &resource.data {
-                ResourceData::Material(material) => {
-                    let bytes = if material.texture_mode == MaterialTextureMode::Generated {
-                        Some(generate_material_texture_psxt(material.generated))
-                    } else {
-                        material.psxt_path.as_deref().and_then(|path| {
-                            let path = if Path::new(path).is_absolute() {
-                                Path::new(path).to_path_buf()
-                            } else {
-                                project_root.join(path)
-                            };
-                            std::fs::read(path).ok()
-                        })
-                    }?;
-                    (bytes, material.tint)
-                }
-                ResourceData::Texture { psxt_path } => {
-                    let path = if Path::new(psxt_path).is_absolute() {
-                        Path::new(psxt_path).to_path_buf()
-                    } else {
-                        project_root.join(psxt_path)
-                    };
-                    (std::fs::read(path).ok()?, [128; 3])
-                }
+            let tint = match &resource.data {
+                ResourceData::Material(material) => material.tint,
+                ResourceData::Texture { .. } => [MATERIAL_NEUTRAL_TINT; 3],
                 _ => return None,
             };
+            let bytes = resolve_material_texture_psxt(project, material, project_root)
+                .ok()??
+                .1;
             decode_probe_texture(&bytes, tint)
         });
         cache.insert(material, decoded);
@@ -340,6 +323,307 @@ pub const fn normalize_generated_texture_size(size: u16) -> u16 {
     } else {
         128
     }
+}
+
+/// Resolve any static authoring material source to its cooked PSXT bytes.
+///
+/// Transition materials recurse through their two source materials with cycle
+/// detection. The returned key is stable for cook-time deduplication; runtime
+/// code only receives the final bytes and never sees the authoring recipe.
+pub fn resolve_material_texture_psxt(
+    project: &ProjectDocument,
+    material_id: ResourceId,
+    project_root: &Path,
+) -> Result<Option<(String, Vec<u8>)>, String> {
+    resolve_material_texture_psxt_inner(project, material_id, project_root, &mut Vec::new())
+}
+
+fn resolve_material_texture_psxt_inner(
+    project: &ProjectDocument,
+    material_id: ResourceId,
+    project_root: &Path,
+    stack: &mut Vec<ResourceId>,
+) -> Result<Option<(String, Vec<u8>)>, String> {
+    if stack.contains(&material_id) {
+        let chain = stack
+            .iter()
+            .chain(std::iter::once(&material_id))
+            .map(|id| format!("#{}", id.raw()))
+            .collect::<Vec<_>>()
+            .join(" -> ");
+        return Err(format!("transition material source cycle: {chain}"));
+    }
+    let resource = project
+        .resource(material_id)
+        .ok_or_else(|| format!("material #{} does not exist", material_id.raw()))?;
+    stack.push(material_id);
+    let result = match &resource.data {
+        ResourceData::Texture { psxt_path } => {
+            load_material_psxt(&resource.name, psxt_path, project_root)
+                .map(|bytes| Some((psxt_path.clone(), bytes)))
+        }
+        ResourceData::Material(material) => match material.texture_mode {
+            MaterialTextureMode::SimpleImage => match material.psxt_path.as_deref() {
+                Some(path) if !path.trim().is_empty() => {
+                    load_material_psxt(&resource.name, path, project_root)
+                        .map(|bytes| Some((path.to_string(), bytes)))
+                }
+                _ => Ok(None),
+            },
+            MaterialTextureMode::Generated => Ok(Some((
+                format!("@material-generated:{:?}", material.generated),
+                generate_material_texture_psxt(material.generated),
+            ))),
+            MaterialTextureMode::Transition => {
+                bake_transition_material(project, material.transition, project_root, stack)
+                    .map(Some)
+            }
+            // Room/model rendering replaces this with the room-specific probe
+            // where that context exists. Keep resolving the authored image as
+            // a fallback for generic texture consumers and for the base room
+            // material path, matching the pre-transition behaviour.
+            MaterialTextureMode::ReflectiveProbe => match material.psxt_path.as_deref() {
+                Some(path) if !path.trim().is_empty() => {
+                    load_material_psxt(&resource.name, path, project_root)
+                        .map(|bytes| Some((path.to_string(), bytes)))
+                }
+                _ => Ok(None),
+            },
+        },
+        _ => Err(format!(
+            "'{}' is not a texture-bearing resource",
+            resource.name
+        )),
+    };
+    stack.pop();
+    result
+}
+
+/// Bake an edited transition recipe without first mutating its owning project
+/// resource. Material Lab uses this for immediate, accurate preview.
+pub fn generate_transition_material_texture_psxt(
+    project: &ProjectDocument,
+    recipe: TransitionMaterialTexture,
+    project_root: &Path,
+    owner: Option<ResourceId>,
+) -> Result<Vec<u8>, String> {
+    let mut stack = owner.into_iter().collect::<Vec<_>>();
+    bake_transition_material(project, recipe, project_root, &mut stack).map(|(_, bytes)| bytes)
+}
+
+fn bake_transition_material(
+    project: &ProjectDocument,
+    recipe: TransitionMaterialTexture,
+    project_root: &Path,
+    stack: &mut Vec<ResourceId>,
+) -> Result<(String, Vec<u8>), String> {
+    let source_a =
+        resolve_transition_source(project, recipe.source_a, "Source A", project_root, stack)?;
+    let source_b =
+        resolve_transition_source(project, recipe.source_b, "Source B", project_root, stack)?;
+    let bytes = compose_transition_psxt(
+        &source_a.bytes,
+        source_a.tint,
+        &source_b.bytes,
+        source_b.tint,
+        recipe,
+    )?;
+    let key = format!(
+        "@material-transition:{recipe:?}:a={}:{:?}:b={}:{:?}",
+        source_a.key, source_a.tint, source_b.key, source_b.tint
+    );
+    Ok((key, bytes))
+}
+
+struct TransitionSource {
+    key: String,
+    bytes: Vec<u8>,
+    tint: [u8; 3],
+}
+
+fn resolve_transition_source(
+    project: &ProjectDocument,
+    source: Option<ResourceId>,
+    label: &str,
+    project_root: &Path,
+    stack: &mut Vec<ResourceId>,
+) -> Result<TransitionSource, String> {
+    let source = source.ok_or_else(|| format!("transition {label} is not assigned"))?;
+    let resource = project.resource(source).ok_or_else(|| {
+        format!(
+            "transition {label} references missing material #{}",
+            source.raw()
+        )
+    })?;
+    let tint = match &resource.data {
+        ResourceData::Material(material) => material.tint,
+        ResourceData::Texture { .. } => [MATERIAL_NEUTRAL_TINT; 3],
+        _ => {
+            return Err(format!(
+                "transition {label} '{}' is not a Material or Texture",
+                resource.name
+            ))
+        }
+    };
+    let Some((key, bytes)) =
+        resolve_material_texture_psxt_inner(project, source, project_root, stack)?
+    else {
+        return Err(format!(
+            "transition {label} '{}' has no static image",
+            resource.name
+        ));
+    };
+    Ok(TransitionSource { key, bytes, tint })
+}
+
+fn load_material_psxt(label: &str, stored: &str, project_root: &Path) -> Result<Vec<u8>, String> {
+    let path = if Path::new(stored).is_absolute() {
+        Path::new(stored).to_path_buf()
+    } else {
+        project_root.join(stored)
+    };
+    std::fs::read(&path).map_err(|error| {
+        format!(
+            "failed to read texture '{label}' at {}: {error}",
+            path.display()
+        )
+    })
+}
+
+/// Combine two single-CLUT 4bpp textures using a crisp coverage mask and
+/// jointly quantise the result into one standard 4bpp PSXT.
+pub fn compose_transition_psxt(
+    source_a_bytes: &[u8],
+    source_a_tint: [u8; 3],
+    source_b_bytes: &[u8],
+    source_b_tint: [u8; 3],
+    recipe: TransitionMaterialTexture,
+) -> Result<Vec<u8>, String> {
+    let source_a = psx_asset::Texture::from_bytes(source_a_bytes)
+        .map_err(|error| format!("transition Source A is not a valid PSXT: {error:?}"))?;
+    let source_b = psx_asset::Texture::from_bytes(source_b_bytes)
+        .map_err(|error| format!("transition Source B is not a valid PSXT: {error:?}"))?;
+    validate_fusion_texture("transition Source A", source_a)?;
+    validate_fusion_texture("transition Source B", source_b)?;
+
+    let size = normalize_generated_texture_size(recipe.size);
+    let mut rgba = Vec::with_capacity(usize::from(size) * usize::from(size));
+    for y in 0..size {
+        for x in 0..size {
+            let use_b = transition_uses_source_b(x, y, size, recipe);
+            let (texture, tint) = if use_b {
+                (source_b, source_b_tint)
+            } else {
+                (source_a, source_a_tint)
+            };
+            let sample_x = x % texture.width();
+            let sample_y = y % texture.height();
+            let index = texture_4bpp_index(texture, sample_x, sample_y);
+            let transparent = texture.index_zero_transparent() && index == 0;
+            let rgb = tinted_clut_rgb(texture, index, tint);
+            rgba.push([rgb[0], rgb[1], rgb[2], if transparent { 0 } else { 255 }]);
+        }
+    }
+
+    let has_transparency = rgba.iter().any(|pixel| pixel[3] == 0);
+    let (palette, indices) = if has_transparency {
+        psxed_tex::quantize_rgba_with_transparent_zero(&rgba, 16)
+            .map_err(|error| format!("could not quantise transition material: {error}"))?
+    } else {
+        let rgb = rgba
+            .iter()
+            .map(|pixel| [pixel[0], pixel[1], pixel[2]])
+            .collect::<Vec<_>>();
+        psxed_tex::quantize_rgb(&rgb, 16)
+            .map_err(|error| format!("could not quantise transition material: {error}"))?
+    };
+    psxed_tex::encode_indexed_psxt(
+        size,
+        size,
+        psxed_tex::PsxtDepth::Bit4,
+        &indices,
+        &palette,
+        has_transparency,
+    )
+    .map_err(|error| format!("could not encode transition material: {error}"))
+}
+
+fn transition_uses_source_b(x: u16, y: u16, size: u16, recipe: TransitionMaterialTexture) -> bool {
+    if recipe.coverage == 0 {
+        return false;
+    }
+    if recipe.coverage == u8::MAX {
+        return true;
+    }
+    let last = size.saturating_sub(1).max(1);
+    let mut u = u32::from(x) * 255 / u32::from(last);
+    let mut v = u32::from(y) * 255 / u32::from(last);
+    match recipe.rotation_quarters & 3 {
+        1 => (u, v) = (255 - v, u),
+        2 => (u, v) = (255 - u, 255 - v),
+        3 => (u, v) = (v, 255 - u),
+        _ => {}
+    }
+    if recipe.flip_x {
+        u = 255 - u;
+    }
+    if recipe.flip_y {
+        v = 255 - v;
+    }
+    let base = match recipe.shape {
+        TransitionMaskShape::Straight => u,
+        TransitionMaskShape::Diagonal => (u + v) / 2,
+        TransitionMaskShape::Corner => u.max(v),
+        TransitionMaskShape::Island => {
+            let du = u.abs_diff(128);
+            let dv = v.abs_diff(128);
+            du.max(dv).saturating_mul(2).min(255)
+        }
+        TransitionMaskShape::Connected => connected_transition_base(u, v, recipe.connected_edges),
+    } as i32;
+    let breakup = i32::from(recipe.edge_breakup.min(96));
+    // Connected Paint masks meet at opposite texture borders. Make their
+    // detail noise periodic so u=0/u=255 and v=0/v=255 sample identically;
+    // recipes can then keep organic exposed edges without opening hairline
+    // seams between adjacent painted tiles.
+    let (noise_u, noise_v) = if recipe.shape == TransitionMaskShape::Connected {
+        (u % 255, v % 255)
+    } else {
+        (u, v)
+    };
+    let random = transition_hash(recipe.seed, noise_u, noise_v) as i32 & 0xff;
+    let jitter = (random - 128) * breakup / 128;
+    let threshold = (base + jitter).clamp(1, 254);
+    i32::from(recipe.coverage) >= threshold
+}
+
+fn connected_transition_base(u: u32, v: u32, connected_edges: u8) -> u32 {
+    const NORTH: u8 = 1 << 0;
+    const EAST: u8 = 1 << 1;
+    const SOUTH: u8 = 1 << 2;
+    const WEST: u8 = 1 << 3;
+
+    let closed_edge_distances = [(NORTH, v), (EAST, 255 - u), (SOUTH, 255 - v), (WEST, u)]
+        .into_iter()
+        .filter_map(|(edge, distance)| (connected_edges & edge == 0).then_some(distance));
+    let Some(nearest_closed_edge) = closed_edge_distances.min() else {
+        // Surrounded by the same painted material: the entire tile is B.
+        return 0;
+    };
+
+    // Closed edges retain Source A for roughly the outer quarter of the
+    // tile, then transition into B. Connected edges are omitted from the
+    // distance field, allowing B to flow across them without a seam.
+    255u32.saturating_sub(nearest_closed_edge.saturating_mul(2).min(255))
+}
+
+fn transition_hash(seed: u32, x: u32, y: u32) -> u32 {
+    let mut value = seed ^ x.wrapping_mul(0x9e37_79b9) ^ y.wrapping_mul(0x85eb_ca6b);
+    value ^= value >> 16;
+    value = value.wrapping_mul(0x7feb_352d);
+    value ^= value >> 15;
+    value = value.wrapping_mul(0x846c_a68b);
+    value ^ (value >> 16)
 }
 
 fn generate_noise_indices(
@@ -599,6 +883,214 @@ fn hash_noise(seed: u32, x: u32, y: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn solid_4bpp(rgb: [u8; 3]) -> Vec<u8> {
+        psxed_tex::encode_indexed_psxt(
+            8,
+            8,
+            psxed_tex::PsxtDepth::Bit4,
+            &[0; 64],
+            &[rgb; 16],
+            false,
+        )
+        .expect("solid test texture encodes")
+    }
+
+    fn sampled_rgb(bytes: &[u8], x: u16, y: u16) -> [u8; 3] {
+        let texture = psx_asset::Texture::from_bytes(bytes).expect("test PSXT parses");
+        let index = texture_4bpp_index(texture, x, y);
+        tinted_clut_rgb(texture, index, [128; 3])
+    }
+
+    #[test]
+    fn transition_coverage_endpoints_are_exact_source_images() {
+        let red = solid_4bpp([255, 0, 0]);
+        let blue = solid_4bpp([0, 0, 255]);
+        let recipe = TransitionMaterialTexture {
+            size: 8,
+            coverage: 0,
+            ..TransitionMaterialTexture::default()
+        };
+        let all_a = compose_transition_psxt(&red, [128; 3], &blue, [128; 3], recipe)
+            .expect("A endpoint bakes");
+        let a = sampled_rgb(&all_a, 4, 4);
+        assert!(a[0] > 240 && a[2] < 16);
+
+        let all_b = compose_transition_psxt(
+            &red,
+            [128; 3],
+            &blue,
+            [128; 3],
+            TransitionMaterialTexture {
+                coverage: 255,
+                ..recipe
+            },
+        )
+        .expect("B endpoint bakes");
+        let b = sampled_rgb(&all_b, 4, 4);
+        assert!(b[2] > 240 && b[0] < 16);
+    }
+
+    #[test]
+    fn transition_midpoint_is_crisp_deterministic_and_rotatable() {
+        let red = solid_4bpp([255, 0, 0]);
+        let blue = solid_4bpp([0, 0, 255]);
+        let recipe = TransitionMaterialTexture {
+            size: 32,
+            coverage: 128,
+            edge_breakup: 0,
+            ..TransitionMaterialTexture::default()
+        };
+        let horizontal = compose_transition_psxt(&red, [128; 3], &blue, [128; 3], recipe)
+            .expect("midpoint bakes");
+        assert_eq!(
+            horizontal,
+            compose_transition_psxt(&red, [128; 3], &blue, [128; 3], recipe)
+                .expect("midpoint rebakes")
+        );
+        let left = sampled_rgb(&horizontal, 2, 16);
+        let right = sampled_rgb(&horizontal, 29, 16);
+        assert!(left[2] > left[0], "Source B should cover the low-mask side");
+        assert!(
+            right[0] > right[2],
+            "Source A should remain beyond the edge"
+        );
+
+        let vertical = compose_transition_psxt(
+            &red,
+            [128; 3],
+            &blue,
+            [128; 3],
+            TransitionMaterialTexture {
+                rotation_quarters: 1,
+                ..recipe
+            },
+        )
+        .expect("rotated midpoint bakes");
+        assert_ne!(horizontal, vertical);
+        assert_ne!(
+            sampled_rgb(&vertical, 16, 2),
+            sampled_rgb(&vertical, 16, 29)
+        );
+    }
+
+    #[test]
+    fn connected_transition_opens_only_shared_painted_edges() {
+        let east = TransitionMaterialTexture {
+            size: 64,
+            coverage: 128,
+            shape: TransitionMaskShape::Connected,
+            edge_breakup: 0,
+            connected_edges: 1 << 1,
+            ..TransitionMaterialTexture::default()
+        };
+        assert!(transition_uses_source_b(63, 32, 64, east));
+        assert!(!transition_uses_source_b(0, 32, 64, east));
+        assert!(!transition_uses_source_b(32, 0, 64, east));
+        assert!(transition_uses_source_b(32, 32, 64, east));
+
+        let horizontal_strip = TransitionMaterialTexture {
+            connected_edges: (1 << 1) | (1 << 3),
+            ..east
+        };
+        assert!(transition_uses_source_b(0, 32, 64, horizontal_strip));
+        assert!(transition_uses_source_b(63, 32, 64, horizontal_strip));
+        assert!(!transition_uses_source_b(32, 0, 64, horizontal_strip));
+
+        let surrounded = TransitionMaterialTexture {
+            connected_edges: 0b1111,
+            ..east
+        };
+        assert!(transition_uses_source_b(0, 0, 64, surrounded));
+        assert!(transition_uses_source_b(63, 63, 64, surrounded));
+    }
+
+    #[test]
+    fn connected_transition_edge_detail_is_periodic_across_tile_seams() {
+        let east = TransitionMaterialTexture {
+            size: 64,
+            coverage: 128,
+            shape: TransitionMaskShape::Connected,
+            edge_breakup: 72,
+            seed: 0x1234_5678,
+            connected_edges: 1 << 1,
+            ..TransitionMaterialTexture::default()
+        };
+        let west = TransitionMaterialTexture {
+            connected_edges: 1 << 3,
+            ..east
+        };
+        for y in 0..64 {
+            assert_eq!(
+                transition_uses_source_b(63, y, 64, east),
+                transition_uses_source_b(0, y, 64, west),
+                "connected seam disagreed at row {y}"
+            );
+        }
+    }
+
+    #[test]
+    fn transition_material_resolves_sources_and_rejects_cycles() {
+        let mut project = ProjectDocument::new("transition-resolve");
+        let source_a = project.add_resource(
+            "Sand",
+            ResourceData::Material(crate::MaterialResource {
+                texture_mode: MaterialTextureMode::Generated,
+                generated: GeneratedMaterialTexture {
+                    size: 16,
+                    base_color: [184, 144, 88],
+                    noise_enabled: false,
+                    ..GeneratedMaterialTexture::default()
+                },
+                ..crate::MaterialResource::opaque(None)
+            }),
+        );
+        let source_b = project.add_resource(
+            "Stone",
+            ResourceData::Material(crate::MaterialResource {
+                texture_mode: MaterialTextureMode::Generated,
+                generated: GeneratedMaterialTexture {
+                    size: 16,
+                    base_color: [72, 80, 96],
+                    noise_enabled: false,
+                    ..GeneratedMaterialTexture::default()
+                },
+                ..crate::MaterialResource::opaque(None)
+            }),
+        );
+        let transition = project.add_resource(
+            "Sand over stone",
+            ResourceData::Material(crate::MaterialResource {
+                texture_mode: MaterialTextureMode::Transition,
+                transition: TransitionMaterialTexture {
+                    source_a: Some(source_a),
+                    source_b: Some(source_b),
+                    ..TransitionMaterialTexture::default()
+                },
+                ..crate::MaterialResource::opaque(None)
+            }),
+        );
+
+        let (_, bytes) = resolve_material_texture_psxt(&project, transition, Path::new("."))
+            .expect("transition resolves")
+            .expect("transition has bytes");
+        let texture = psx_asset::Texture::from_bytes(&bytes).expect("transition PSXT parses");
+        assert_eq!(texture.depth(), psxed_format::texture::Depth::Bit4);
+        assert_eq!(texture.clut_entries(), 16);
+        assert_eq!((texture.width(), texture.height()), (64, 64));
+
+        let ResourceData::Material(material) =
+            &mut project.resource_mut(source_a).expect("source exists").data
+        else {
+            unreachable!()
+        };
+        material.texture_mode = MaterialTextureMode::Transition;
+        material.transition.source_a = Some(transition);
+        material.transition.source_b = Some(source_b);
+        let error = resolve_material_texture_psxt(&project, transition, Path::new("."))
+            .expect_err("cycle rejected");
+        assert!(error.contains("cycle"));
+    }
 
     #[test]
     fn room_reflection_probe_is_deterministic_opaque_4bpp() {

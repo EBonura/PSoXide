@@ -1096,7 +1096,18 @@ fn material_click_assignment_updates_all_faces_in_selected_sectors() {
         grid.set_floor(sx, 0, 0, Some(original));
         grid.ensure_sector(sx, 0).unwrap().ceiling =
             Some(GridHorizontalFace::flat(1024, Some(original)));
-        grid.add_wall(sx, 0, GridDirection::North, 0, 1024, Some(original));
+        grid.add_wall(sx, 0, GridDirection::North, 0, 2048, Some(original));
+        grid.sector_mut(sx, 0)
+            .unwrap()
+            .walls
+            .get_mut(GridDirection::North)[0]
+            .uv = GridUvTransform {
+            offset: [9, 11],
+            span: [22, 33],
+            rotation: GridUvRotation::Deg90,
+            flip_u: true,
+            flip_v: false,
+        };
     }
     let room = project
         .active_scene_mut()
@@ -1122,6 +1133,22 @@ fn material_click_assignment_updates_all_faces_in_selected_sectors() {
             }),
             Some(target)
         );
+        let wall = &workspace
+            .room_grid_view(room)
+            .unwrap()
+            .sector(sx, 0)
+            .unwrap()
+            .walls
+            .get(GridDirection::North)[0];
+        assert_eq!(
+            wall.uv.span,
+            [0, 128],
+            "assigning a material autotiles every selected wall"
+        );
+        assert_eq!(wall.uv.offset, [9, 11]);
+        assert_eq!(wall.uv.rotation, GridUvRotation::Deg90);
+        assert!(wall.uv.flip_u);
+        assert!(!wall.uv.flip_v);
         assert_eq!(
             workspace.face_material(FaceRef {
                 room,
@@ -1145,6 +1172,211 @@ fn material_click_assignment_updates_all_faces_in_selected_sectors() {
         );
     }
     assert!(workspace.is_dirty());
+}
+
+#[test]
+fn face_uv_rotation_and_flip_apply_to_every_selected_face() {
+    let mut project = ProjectDocument::new("multi-face-uv");
+    let mut grid = WorldGrid::empty(2, 1, 1024);
+    grid.set_floor(0, 0, 0, None);
+    grid.set_floor(1, 0, 0, None);
+    grid.ensure_sector(0, 0).unwrap().ceiling = Some(GridHorizontalFace::flat(1024, None));
+    grid.add_wall(0, 0, GridDirection::North, 0, 1024, None);
+    let room = project
+        .active_scene_mut()
+        .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+    let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
+
+    let floor = FaceRef {
+        room,
+        sx: 0,
+        sz: 0,
+        kind: FaceKind::Floor,
+    };
+    let ceiling = FaceRef {
+        room,
+        sx: 0,
+        sz: 0,
+        kind: FaceKind::Ceiling,
+    };
+    let wall = FaceRef {
+        room,
+        sx: 0,
+        sz: 0,
+        kind: FaceKind::Wall {
+            dir: GridDirection::North,
+            stack: 0,
+        },
+    };
+    {
+        let grid = workspace.room_floor_grid_mut(room).unwrap();
+        let sector = grid.sector_mut(0, 0).unwrap();
+        sector.floor.as_mut().unwrap().uv = GridUvTransform {
+            offset: [11, 12],
+            span: [21, 22],
+            rotation: GridUvRotation::Deg45,
+            flip_u: false,
+            flip_v: true,
+        };
+        sector.ceiling.as_mut().unwrap().uv = GridUvTransform {
+            offset: [31, 32],
+            span: [41, 42],
+            rotation: GridUvRotation::Deg90,
+            flip_u: false,
+            flip_v: false,
+        };
+        sector.walls.get_mut(GridDirection::North)[0].uv = GridUvTransform {
+            offset: [51, 52],
+            span: [61, 62],
+            rotation: GridUvRotation::Deg135,
+            flip_u: false,
+            flip_v: true,
+        };
+        grid.sector_mut(1, 0).unwrap().floor.as_mut().unwrap().uv = GridUvTransform {
+            offset: [71, 72],
+            span: [81, 82],
+            rotation: GridUvRotation::Deg180,
+            flip_u: false,
+            flip_v: false,
+        };
+    }
+    workspace.selection.selected_primitives = vec![
+        Selection::Face(floor),
+        Selection::Face(ceiling),
+        Selection::Face(wall),
+    ];
+    workspace.selection.selected_primitive = Some(Selection::Face(wall));
+
+    let before = workspace
+        .room_grid_view(room)
+        .unwrap()
+        .sector(0, 0)
+        .unwrap()
+        .walls
+        .get(GridDirection::North)[0]
+        .uv;
+    let mut after = before;
+    after.flip_u = true;
+    workspace
+        .room_floor_grid_mut(room)
+        .unwrap()
+        .sector_mut(0, 0)
+        .unwrap()
+        .walls
+        .get_mut(GridDirection::North)[0]
+        .uv = after;
+
+    assert_eq!(
+        workspace.apply_selected_face_uv_change_no_undo(
+            wall,
+            GridUvTransformEdit {
+                rotation: true,
+                flip_u: true,
+                ..Default::default()
+            },
+            after,
+        ),
+        (3, 2)
+    );
+
+    let grid = workspace.room_grid_view(room).unwrap();
+    let sector = grid.sector(0, 0).unwrap();
+    let floor_uv = sector.floor.as_ref().unwrap().uv;
+    let ceiling_uv = sector.ceiling.as_ref().unwrap().uv;
+    let wall_uv = sector.walls.get(GridDirection::North)[0].uv;
+    let unselected_uv = grid.sector(1, 0).unwrap().floor.as_ref().unwrap().uv;
+
+    assert_eq!(floor_uv.rotation, GridUvRotation::Deg135);
+    assert!(floor_uv.flip_u);
+    assert_eq!(floor_uv.offset, [11, 12]);
+    assert_eq!(floor_uv.span, [21, 22]);
+    assert!(floor_uv.flip_v);
+    assert_eq!(ceiling_uv.rotation, GridUvRotation::Deg135);
+    assert!(ceiling_uv.flip_u);
+    assert_eq!(ceiling_uv.offset, [31, 32]);
+    assert_eq!(ceiling_uv.span, [41, 42]);
+    assert!(!ceiling_uv.flip_v);
+    assert_eq!(wall_uv, after);
+    assert_eq!(unselected_uv.rotation, GridUvRotation::Deg180);
+    assert!(!unselected_uv.flip_u);
+}
+
+#[test]
+fn face_uv_offset_span_and_flip_v_apply_without_replacing_untouched_fields() {
+    let mut project = ProjectDocument::new("multi-face-uv-fields");
+    let mut grid = WorldGrid::empty(2, 1, 1024);
+    grid.set_floor(0, 0, 0, None);
+    grid.set_floor(1, 0, 0, None);
+    let room = project
+        .active_scene_mut()
+        .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+    let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
+    let first = FaceRef {
+        room,
+        sx: 0,
+        sz: 0,
+        kind: FaceKind::Floor,
+    };
+    let active = FaceRef {
+        room,
+        sx: 1,
+        sz: 0,
+        kind: FaceKind::Floor,
+    };
+    let first_uv = GridUvTransform {
+        offset: [3, 4],
+        span: [5, 6],
+        rotation: GridUvRotation::Deg225,
+        flip_u: true,
+        flip_v: false,
+    };
+    let before = GridUvTransform {
+        offset: [10, 20],
+        span: [30, 40],
+        rotation: GridUvRotation::Deg45,
+        flip_u: false,
+        flip_v: false,
+    };
+    let mut after = before;
+    after.offset[0] = 90;
+    after.span[1] = 120;
+    after.flip_v = true;
+    {
+        let grid = workspace.room_floor_grid_mut(room).unwrap();
+        grid.sector_mut(0, 0).unwrap().floor.as_mut().unwrap().uv = first_uv;
+        grid.sector_mut(1, 0).unwrap().floor.as_mut().unwrap().uv = after;
+    }
+    workspace.selection.selected_primitives = vec![Selection::Face(first), Selection::Face(active)];
+    workspace.selection.selected_primitive = Some(Selection::Face(active));
+
+    assert_eq!(
+        workspace.apply_selected_face_uv_change_no_undo(
+            active,
+            GridUvTransformEdit {
+                offset: [true, false],
+                span: [false, true],
+                flip_v: true,
+                ..Default::default()
+            },
+            after,
+        ),
+        (2, 1)
+    );
+
+    let first_after = workspace
+        .room_grid_view(room)
+        .unwrap()
+        .sector(0, 0)
+        .unwrap()
+        .floor
+        .as_ref()
+        .unwrap()
+        .uv;
+    assert_eq!(first_after.offset, [90, 4]);
+    assert_eq!(first_after.span, [5, 120]);
+    assert_eq!(first_after.rotation, GridUvRotation::Deg225);
+    assert!(first_after.flip_u);
+    assert!(first_after.flip_v);
 }
 
 #[test]
@@ -1329,6 +1561,11 @@ fn selected_material_resource_paints_new_floor_ceiling_and_wall() {
         sector.walls.get(GridDirection::North)[0].material,
         Some(selected)
     );
+    assert_eq!(
+        sector.walls.get(GridDirection::North)[0].uv.span,
+        [0, 128],
+        "new textured walls autotile without a second Inspector action"
+    );
 }
 
 #[test]
@@ -1375,4 +1612,110 @@ fn place_image_prop_with_selected_material_creates_node() {
     assert!(!*cylindrical_billboard);
     assert_eq!(workspace.status, "Placed Image Prop at 0,0");
     assert!(workspace.is_dirty());
+}
+
+#[test]
+fn water_tool_paints_one_selected_volume_and_erases_by_cell() {
+    let mut project = ProjectDocument::new("water-paint");
+    let material = project.add_resource(
+        "Water",
+        ResourceData::Material(MaterialResource::opaque(None)),
+    );
+    let mut grid = WorldGrid::empty(2, 1, 1024);
+    grid.set_floor(0, 0, -256, None);
+    grid.set_floor(1, 0, 0, None);
+    let room = project
+        .active_scene_mut()
+        .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+    let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
+    workspace.replace_resource_selection(material);
+
+    workspace.run_paint_action(ViewTool::Water, room, 0, 0, None, [512.0, -256.0, 512.0]);
+    let volume = workspace.selected_node_id();
+    assert_eq!(
+        workspace.selection.selected_resource, None,
+        "the painted volume, not its brush material, must own the Inspector"
+    );
+    let node = workspace
+        .project
+        .active_scene()
+        .node(volume)
+        .expect("water node");
+    let NodeKind::WaterVolume {
+        material: actual,
+        cells,
+        settings,
+    } = &node.kind
+    else {
+        panic!("water node expected");
+    };
+    assert_eq!(*actual, Some(material));
+    assert_eq!(cells, &[WaterVolumeCell::new(0, 0)]);
+    assert_eq!(
+        settings.height_above_floor, 256,
+        "adjacent rim becomes height above the clicked floor"
+    );
+
+    workspace.run_paint_action(ViewTool::Water, room, 1, 0, None, [1536.0, 0.0, 512.0]);
+    let NodeKind::WaterVolume { cells, .. } =
+        &workspace.project.active_scene().node(volume).unwrap().kind
+    else {
+        unreachable!()
+    };
+    assert_eq!(
+        cells.len(),
+        2,
+        "selected volume grows instead of duplicating"
+    );
+
+    workspace.water_tool_mode = WaterToolMode::Select;
+    workspace.replace_resource_selection(material);
+    workspace.replace_node_selection(room);
+    workspace.run_paint_action(ViewTool::Water, room, 0, 0, None, [512.0, 0.0, 512.0]);
+    assert_eq!(workspace.selected_node_id(), volume);
+    assert_eq!(
+        workspace.selection.selected_resource, None,
+        "selecting water must reveal the WaterVolume node Inspector"
+    );
+    assert!(workspace.selection.selected_resources.is_empty());
+    assert_eq!(workspace.status, "Selected Water Volume at 0,0");
+    let NodeKind::WaterVolume { cells, .. } =
+        &workspace.project.active_scene().node(volume).unwrap().kind
+    else {
+        unreachable!()
+    };
+    assert_eq!(cells.len(), 2, "selection must not mutate the footprint");
+
+    workspace.water_tool_mode = WaterToolMode::Erase;
+    workspace.run_paint_action(ViewTool::Water, room, 0, 0, None, [512.0, 0.0, 512.0]);
+    let NodeKind::WaterVolume { cells, .. } =
+        &workspace.project.active_scene().node(volume).unwrap().kind
+    else {
+        unreachable!()
+    };
+    assert_eq!(cells, &[WaterVolumeCell::new(1, 0)]);
+
+    // The real keyboard path must treat the selected water footprint as its
+    // owning scene node. Delete removes the complete WaterVolume, not merely
+    // the cell under the cursor or the brush material resource.
+    workspace.water_tool_mode = WaterToolMode::Select;
+    workspace.active_tool = ViewTool::Water;
+    workspace.run_paint_action(ViewTool::Water, room, 1, 0, None, [1536.0, 0.0, 512.0]);
+    assert_eq!(workspace.selected_node_id(), volume);
+    let ctx = egui::Context::default();
+    let _ = ctx.run(
+        egui::RawInput {
+            events: vec![egui::Event::Key {
+                key: egui::Key::Delete,
+                physical_key: Some(egui::Key::Delete),
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..egui::RawInput::default()
+        },
+        |ctx| workspace.handle_global_shortcuts(ctx, EditorPlaytestStatus::Idle),
+    );
+    assert!(workspace.project.active_scene().node(volume).is_none());
+    assert_eq!(workspace.status, "Deleted node");
 }

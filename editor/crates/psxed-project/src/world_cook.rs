@@ -867,8 +867,8 @@ fn generated_floor_transition_walls(grid: &WorldGrid, x: u16, z: u16) -> GridWal
 mod tests {
     use super::*;
     use crate::{
-        Corner, GridTriangleMaterialOverride, GridUvRotation, GridUvTransform, NodeKind,
-        ResourceData, WallCorner,
+        Corner, GridTriangleMaterialOverride, GridUvRotation, GridUvTransform, MaterialVersionId,
+        NodeKind, ResourceData, WallCorner,
     };
 
     fn starter_grid(project: &ProjectDocument) -> WorldGrid {
@@ -1343,6 +1343,41 @@ mod tests {
 
         assert!(psxt_path_for_slot(0).ends_with("block_1a.psxt"));
         assert!(psxt_path_for_slot(1).ends_with("brick_1a.psxt"));
+    }
+
+    #[test]
+    fn world_cook_uses_only_the_active_material_version() {
+        let mut project = ProjectDocument::new("versioned cook");
+        let mut material = MaterialResource::opaque(Some("original.psxt".to_string()));
+        material.tint = [32, 48, 64];
+        let material_id = project.add_resource("Stone", ResourceData::Material(material));
+        let grid = WorldGrid::stone_room(1, 1, 1024, Some(material_id), Some(material_id));
+
+        let ResourceData::Material(material) = &mut project.resource_mut(material_id).unwrap().data
+        else {
+            panic!("stone is a material");
+        };
+        let llm_version = material.create_version("LLM");
+        material.psxt_path = Some("llm.psxt".to_string());
+        material.tint = [129, 37, 181];
+
+        let cooked = cook_world_grid(&project, &grid).unwrap();
+        assert_eq!(cooked.materials.len(), 1);
+        assert_eq!(cooked.materials[0].psxt_path.as_deref(), Some("llm.psxt"));
+        assert_eq!(cooked.materials[0].tint, [129, 37, 181]);
+
+        let ResourceData::Material(material) = &mut project.resource_mut(material_id).unwrap().data
+        else {
+            unreachable!();
+        };
+        assert_eq!(material.active_version_id, llm_version);
+        assert!(material.activate_version(MaterialVersionId::ORIGINAL));
+        let cooked = cook_world_grid(&project, &grid).unwrap();
+        assert_eq!(
+            cooked.materials[0].psxt_path.as_deref(),
+            Some("original.psxt")
+        );
+        assert_eq!(cooked.materials[0].tint, [32, 48, 64]);
     }
 
     #[test]

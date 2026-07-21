@@ -12,6 +12,14 @@ impl EditorWorkspace {
             .show(ctx, |ui| {
                 tool_panel_frame().show(ui, |ui| {
                     ui.expand_to_include_rect(ui.max_rect());
+                    let material_undo_candidate =
+                        if self.active_workspace == WorkspaceView::Material {
+                            self.prepare_inspector_undo_frame(ctx);
+                            inspector_has_edit_input(ctx)
+                                .then(|| (self.project.clone(), self.history.epoch()))
+                        } else {
+                            None
+                        };
                     self.draw_viewport_header_toolbar(ui);
                     tool_panel_body(ui, |ui| {
                         if viewport_3d.mode == EditorViewport3dMode::Play {
@@ -21,17 +29,39 @@ impl EditorWorkspace {
 
                         if self.active_workspace == WorkspaceView::Material {
                             self.draw_material_lab(ui);
+                            if let Some((project_before, history_epoch_before)) =
+                                material_undo_candidate
+                            {
+                                self.finish_inspector_undo_frame(
+                                    project_before,
+                                    history_epoch_before,
+                                    ctx,
+                                );
+                            }
                             return;
                         }
 
                         if self.active_workspace == WorkspaceView::Animation {
-                            model_animation_viewer::draw_model_animation_viewer(
+                            self.prepare_inspector_undo_frame(ctx);
+                            let undo_candidate = inspector_has_edit_input(ctx)
+                                .then(|| (self.project.clone(), self.history.epoch()));
+                            let changed = model_animation_viewer::draw_model_animation_viewer(
                                 ui,
                                 &mut self.project,
                                 &self.project_dir,
                                 &mut self.animation_viewer,
                                 &mut self.animation_viewer_preview_texture,
                             );
+                            if changed {
+                                self.mark_dirty();
+                            }
+                            if let Some((project_before, history_epoch_before)) = undo_candidate {
+                                self.finish_inspector_undo_frame(
+                                    project_before,
+                                    history_epoch_before,
+                                    ctx,
+                                );
+                            }
                             return;
                         }
 
@@ -135,7 +165,7 @@ impl EditorWorkspace {
                             pointer_world,
                         ) {
                             if let Some(origin) = self.floating_origin_from_2d_world(room, world) {
-                                self.update_floating_geometry_origin(origin);
+                                self.track_floating_geometry_pointer_origin(origin);
                             }
                         }
                         let top_hit = pointer_world
@@ -246,24 +276,26 @@ impl EditorWorkspace {
                     self.draw_workspace_tabs(ui);
                 });
                 ui.separator();
-                ui.horizontal(|ui| match self.active_workspace {
-                    WorkspaceView::Animation => {
-                        let action = model_animation_viewer::draw_model_animation_viewer_toolbar(
-                            ui,
-                            &mut self.project,
-                            &self.project_dir,
-                            &mut self.animation_viewer,
-                            &mut self.animation_viewer_preview_texture,
-                        );
-                        if let Some(action) = action {
-                            self.handle_animation_viewer_action(action);
+                if self.active_workspace == WorkspaceView::Material {
+                    ui.horizontal_wrapped(|ui| self.draw_material_lab_toolbar(ui));
+                } else {
+                    ui.horizontal(|ui| match self.active_workspace {
+                        WorkspaceView::Animation => {
+                            let action =
+                                model_animation_viewer::draw_model_animation_viewer_toolbar(
+                                    ui,
+                                    &mut self.project,
+                                    &self.project_dir,
+                                    &mut self.animation_viewer,
+                                    &mut self.animation_viewer_preview_texture,
+                                );
+                            if let Some(action) = action {
+                                self.handle_animation_viewer_action(action);
+                            }
                         }
-                    }
-                    WorkspaceView::Material => {
-                        self.draw_material_lab_toolbar(ui);
-                    }
-                    _ => self.draw_viewport_toolbar(ui),
-                });
+                        _ => self.draw_viewport_toolbar(ui),
+                    });
+                }
             });
     }
 
@@ -324,6 +356,7 @@ impl EditorWorkspace {
     pub(crate) fn draw_viewport_toolbar(&mut self, ui: &mut egui::Ui) {
         if self.active_room_id().is_none() && self.active_tool.requires_room_context() {
             self.active_tool = ViewTool::Select;
+            self.material_paint_sampling = false;
         }
         self.retain_shortcut_group_flash();
         if self.shortcut_group_flash.is_some() {
@@ -335,15 +368,224 @@ impl EditorWorkspace {
             return;
         }
 
+        let active_tool_label = self.active_tool_group_label();
         toolbar_group_menu(
             ui,
             2,
             self.shortcut_group_glow(ShortcutGroup::Tool),
             self.active_tool_group_icon(),
             "Tool",
-            self.active_tool_group_label(),
+            &active_tool_label,
             |ui| self.draw_tool_group_menu(ui),
         );
+        match self.active_tool {
+            ViewTool::Select => self.draw_select_tool_toolbar_controls(ui),
+            ViewTool::PaintMaterial => self.draw_material_paint_toolbar_controls(ui),
+            ViewTool::Water => self.draw_water_toolbar_controls(ui),
+            ViewTool::PaintFloor | ViewTool::PaintCeiling => {
+                ui.separator();
+                self.draw_brush_material_picker(ui);
+            }
+            ViewTool::PaintWall => {
+                ui.separator();
+                toolbar_option_menu(
+                    ui,
+                    icons::BRICK_WALL,
+                    "Wall shape",
+                    "Wall shape",
+                    self.wall_paint_shape.label(),
+                    false,
+                    |ui| self.draw_wall_paint_shape_picker(ui),
+                );
+                self.draw_brush_material_picker(ui);
+            }
+            ViewTool::Erase | ViewTool::Place => {}
+        }
+        ui.separator();
+        toolbar_group_menu_icon_only(
+            ui,
+            7,
+            self.shortcut_group_glow(ShortcutGroup::Visibility),
+            self.visibility_group_icon(),
+            "Visibility",
+            self.visibility_group_label(),
+            |ui| self.draw_visibility_menu_contents(ui),
+        );
+        toolbar_group_menu(
+            ui,
+            8,
+            self.shortcut_group_glow(ShortcutGroup::Camera),
+            self.camera_rig.mode.icon(),
+            "Camera",
+            self.viewport_camera_mode_label(),
+            |ui| self.draw_camera_group_menu(ui),
+        );
+        if ui
+            .add(egui::Button::new(icons::text(icons::FOCUS, 14.0)).min_size(Vec2::new(28.0, 23.0)))
+            .on_hover_text("Frame selection (.)")
+            .clicked()
+        {
+            self.frame_viewport();
+        }
+        toolbar_group_menu(
+            ui,
+            9,
+            self.shortcut_group_glow(ShortcutGroup::Viewport),
+            self.view_dimension_group_icon(),
+            "Viewport",
+            self.view_dimension_group_label(),
+            |ui| self.draw_view_dimension_group_menu(ui),
+        );
+
+        // Compact layer stepper. Navigation stays on the toolbar; footprint
+        // extrusion and slab/portal actions live in one adjacent menu so
+        // stacked-room authoring does not consume another toolbar row.
+        if matches!(self.active_workspace, WorkspaceView::Room) {
+            if let Some(room_id) = self.floors_target_room() {
+                let floor_count = self
+                    .room_base_grid(room_id)
+                    .map(|grid| grid.floor_count())
+                    .unwrap_or(1);
+                let active = self.active_floor.min(floor_count.saturating_sub(1));
+                let has_footprint = self.can_author_selected_layer_footprint();
+                ui.separator();
+                if ui
+                    .add_enabled(
+                        active > 0,
+                        egui::Button::new(icons::text(icons::CHEVRON_LEFT, 14.0))
+                            .min_size(Vec2::new(24.0, 23.0)),
+                    )
+                    .on_hover_text("Edit the layer below")
+                    .clicked()
+                {
+                    self.floor_down();
+                }
+                ui.label(
+                    RichText::new(format!("L{}/{}", active + 1, floor_count))
+                        .monospace()
+                        .color(STUDIO_TEXT_WEAK),
+                );
+                if ui
+                    .add(
+                        egui::Button::new(icons::text(icons::CHEVRON_RIGHT, 14.0))
+                            .min_size(Vec2::new(24.0, 23.0)),
+                    )
+                    .on_hover_text("Edit the layer above (adds an empty layer at the top)")
+                    .clicked()
+                {
+                    self.floor_up();
+                }
+                toolbar_option_menu(
+                    ui,
+                    icons::LAYERS,
+                    "Layers",
+                    "Layer actions",
+                    format!("Layer {} of {}", active + 1, floor_count),
+                    false,
+                    |ui| {
+                        ui.set_min_width(230.0);
+                        ui.label(
+                            RichText::new("EXTRUDE SELECTION")
+                                .small()
+                                .color(STUDIO_TEXT_WEAK),
+                        );
+                        if ui
+                            .add_enabled(has_footprint, egui::Button::new("Above with opening"))
+                            .on_hover_text(
+                                "Build a closed volume above the selected footprint and remove the slab between layers",
+                            )
+                            .clicked()
+                        {
+                            self.extrude_selected_layer_above(true);
+                            ui.close_menu();
+                        }
+                        if ui
+                            .add_enabled(has_footprint, egui::Button::new("Above as solid layer"))
+                            .clicked()
+                        {
+                            self.extrude_selected_layer_above(false);
+                            ui.close_menu();
+                        }
+                        if ui
+                            .add_enabled(has_footprint, egui::Button::new("Below with opening"))
+                            .on_hover_text(
+                                "Build below the selected footprint; at layer one this inserts a new base without moving existing content",
+                            )
+                            .clicked()
+                        {
+                            self.extrude_selected_layer_below(true);
+                            ui.close_menu();
+                        }
+                        if ui
+                            .add_enabled(has_footprint, egui::Button::new("Below as solid layer"))
+                            .clicked()
+                        {
+                            self.extrude_selected_layer_below(false);
+                            ui.close_menu();
+                        }
+
+                        ui.separator();
+                        ui.label(
+                            RichText::new("SELECTED SLAB")
+                                .small()
+                                .color(STUDIO_TEXT_WEAK),
+                        );
+                        if ui
+                            .add_enabled(
+                                has_footprint && active + 1 < floor_count,
+                                egui::Button::new("Open to layer above"),
+                            )
+                            .clicked()
+                        {
+                            self.set_selected_slab_above(true);
+                            ui.close_menu();
+                        }
+                        if ui
+                            .add_enabled(
+                                has_footprint && active + 1 < floor_count,
+                                egui::Button::new("Seal layer above"),
+                            )
+                            .clicked()
+                        {
+                            self.set_selected_slab_above(false);
+                            ui.close_menu();
+                        }
+                        if ui
+                            .add_enabled(
+                                has_footprint && active > 0,
+                                egui::Button::new("Open to layer below"),
+                            )
+                            .clicked()
+                        {
+                            self.set_selected_slab_below(true);
+                            ui.close_menu();
+                        }
+                        if ui
+                            .add_enabled(
+                                has_footprint && active > 0,
+                                egui::Button::new("Seal layer below"),
+                            )
+                            .clicked()
+                        {
+                            self.set_selected_slab_below(false);
+                            ui.close_menu();
+                        }
+
+                        if !has_footprint {
+                            ui.separator();
+                            ui.label(
+                                RichText::new("Select tiles or 3D faces to enable layer actions.")
+                                    .small()
+                                    .color(STUDIO_TEXT_WEAK),
+                            );
+                        }
+                    },
+                );
+            }
+        }
+    }
+
+    fn draw_select_tool_toolbar_controls(&mut self, ui: &mut egui::Ui) {
         toolbar_group_menu(
             ui,
             3,
@@ -394,67 +636,144 @@ impl EditorWorkspace {
             self.vertex_connectivity.label(),
             |ui| self.draw_vertex_connectivity_group_menu(ui),
         );
-        toolbar_group_menu_icon_only(
-            ui,
-            7,
-            self.shortcut_group_glow(ShortcutGroup::Visibility),
-            self.visibility_group_icon(),
-            "Visibility",
-            self.visibility_group_label(),
-            |ui| self.draw_visibility_menu_contents(ui),
-        );
-        toolbar_group_menu(
-            ui,
-            8,
-            self.shortcut_group_glow(ShortcutGroup::Camera),
-            self.camera_rig.mode.icon(),
-            "Camera",
-            self.viewport_camera_mode_label(),
-            |ui| self.draw_camera_group_menu(ui),
-        );
-        if ui
-            .add(egui::Button::new(icons::text(icons::FOCUS, 14.0)).min_size(Vec2::new(28.0, 23.0)))
-            .on_hover_text("Frame selection (.)")
-            .clicked()
-        {
-            self.frame_viewport();
-        }
-        toolbar_group_menu(
-            ui,
-            9,
-            self.shortcut_group_glow(ShortcutGroup::Viewport),
-            self.view_dimension_group_icon(),
-            "Viewport",
-            self.view_dimension_group_label(),
-            |ui| self.draw_view_dimension_group_menu(ui),
-        );
+    }
 
-        // Floor stepper: author multiple stacked floors per room. Shown
-        // only in the Room workspace with a room in context. Floor 0 is
-        // the base grid; "Up" past the top floor adds a new one.
-        if matches!(self.active_workspace, WorkspaceView::Room) {
-            if let Some(room_id) = self.floors_target_room() {
-                let floor_count = self
-                    .room_base_grid(room_id)
-                    .map(|grid| grid.floor_count())
-                    .unwrap_or(1);
-                let active = self.active_floor.min(floor_count.saturating_sub(1));
+    fn draw_material_paint_toolbar_controls(&mut self, ui: &mut egui::Ui) {
+        ui.separator();
+        self.draw_brush_material_picker(ui);
+        let eyedropper = ui
+            .toggle_value(
+                &mut self.material_paint_sampling,
+                icons::text(icons::PIPETTE, 14.0),
+            )
+            .on_hover_text(
+                "Eyedropper: sample the material from the next floor, ceiling, or wall you click.",
+            );
+        if eyedropper.changed() {
+            self.status = if self.material_paint_sampling {
+                "Eyedropper: click a surface to sample its material".to_string()
+            } else {
+                "Eyedropper cancelled".to_string()
+            };
+            self.mark_shortcut_group_changed(ShortcutGroup::Tool);
+        }
+        let blend = ui
+            .toggle_value(
+                &mut self.material_paint_blend,
+                icons::label(icons::BLEND, "Blend"),
+            )
+            .on_hover_text(
+                "Blend the painted tile into its surroundings. Connected painted tiles remain continuous.",
+            );
+        if blend.changed() {
+            self.status = if self.material_paint_blend {
+                "Material Paint: Blend".to_string()
+            } else {
+                "Material Paint: Direct".to_string()
+            };
+            self.mark_shortcut_group_changed(ShortcutGroup::Tool);
+        }
+        if self.material_paint_blend {
+            let coverage = self.material_paint_blend_coverage_percent;
+            let detail = self.material_paint_blend_edge_detail;
+            toolbar_option_menu(
+                ui,
+                icons::BLEND,
+                "Details",
+                "Blend details",
+                format!("{coverage}% coverage, {detail} detail"),
+                false,
+                |ui| {
+                    ui.set_min_width(260.0);
+                    ui.label(RichText::new("Blend details").strong());
+                    let coverage_changed = ui
+                        .add(
+                            egui::Slider::new(
+                                &mut self.material_paint_blend_coverage_percent,
+                                5..=95,
+                            )
+                            .text("Coverage")
+                            .suffix("%"),
+                        )
+                        .on_hover_text("How much of each tile is occupied by the painted material.")
+                        .changed();
+                    let detail_changed = ui
+                        .add(
+                            egui::Slider::new(
+                                &mut self.material_paint_blend_edge_detail,
+                                0..=96,
+                            )
+                            .text("Edge detail"),
+                        )
+                        .on_hover_text(
+                            "Adds organic breakup to exposed blend edges while keeping connected edges seamless.",
+                        )
+                        .changed();
+                    ui.horizontal(|ui| {
+                        if ui.button("Reset").clicked() {
+                            self.material_paint_blend_coverage_percent = 50;
+                            self.material_paint_blend_edge_detail = 20;
+                            self.status = "Reset Paint blend details".to_string();
+                        }
+                        ui.weak("Applied on the next stroke");
+                    });
+                    if coverage_changed || detail_changed {
+                        self.status = format!(
+                            "Paint blend: {}% coverage, {} edge detail",
+                            self.material_paint_blend_coverage_percent,
+                            self.material_paint_blend_edge_detail
+                        );
+                    }
+                },
+            );
+        }
+    }
+
+    fn draw_water_toolbar_controls(&mut self, ui: &mut egui::Ui) {
+        ui.separator();
+        ui.selectable_value(&mut self.water_tool_mode, WaterToolMode::Add, "Add")
+            .on_hover_text("Add the clicked cell to the selected water volume.");
+        ui.selectable_value(&mut self.water_tool_mode, WaterToolMode::Erase, "Erase")
+            .on_hover_text("Remove water from the clicked cell.");
+        ui.selectable_value(&mut self.water_tool_mode, WaterToolMode::Select, "Select")
+            .on_hover_text("Select the water volume that owns the clicked cell.");
+        if self.water_tool_mode == WaterToolMode::Add {
+            self.draw_brush_material_picker(ui);
+        }
+        let node_id = self.selection.selected_node;
+        if node_id != NodeId::ROOT {
+            let current =
+                self.project
+                    .active_scene()
+                    .node(node_id)
+                    .and_then(|node| match &node.kind {
+                        NodeKind::WaterVolume { settings, .. } => Some(*settings),
+                        _ => None,
+                    });
+            if let Some(mut edited) = current {
                 ui.separator();
-                ui.label("Floor");
-                if ui
-                    .add_enabled(active > 0, egui::Button::new("Down"))
-                    .on_hover_text("Edit the floor below")
-                    .clicked()
-                {
-                    self.floor_down();
-                }
-                ui.label(format!("{} / {}", active + 1, floor_count));
-                if ui
-                    .button("Up")
-                    .on_hover_text("Edit the floor above (adds one above the top floor)")
-                    .clicked()
-                {
-                    self.floor_up();
+                let changed = ui
+                    .add(
+                        egui::DragValue::new(&mut edited.height_above_floor)
+                            .range(1..=8192)
+                            .speed(8.0)
+                            .prefix("Height "),
+                    )
+                    .on_hover_text(
+                        "Water surface height above each painted floor tile. The volume bottom always follows the terrain.",
+                    )
+                    .changed();
+                if changed {
+                    self.push_undo();
+                    if let Some(NodeKind::WaterVolume { settings, .. }) = self
+                        .project
+                        .active_scene_mut()
+                        .node_mut(node_id)
+                        .map(|node| &mut node.kind)
+                    {
+                        *settings = edited.normalized();
+                    }
+                    self.mark_dirty();
                 }
             }
         }
@@ -609,8 +928,29 @@ impl EditorWorkspace {
     pub(crate) fn draw_tool_group_menu(&mut self, ui: &mut egui::Ui) {
         ui.set_min_width(236.0);
         let room_active = self.active_room_id().is_some();
+        ui.label("Edit surfaces");
         for (tool, icon, label) in [
             (ViewTool::Select, ViewTool::Select.icon(), "Select"),
+            (
+                ViewTool::PaintMaterial,
+                ViewTool::PaintMaterial.icon(),
+                "Paint",
+            ),
+            (ViewTool::Water, ViewTool::Water.icon(), "Water"),
+            (ViewTool::Erase, ViewTool::Erase.icon(), "Erase"),
+        ] {
+            let enabled = room_active || !tool.requires_room_context();
+            let selected = self.active_tool_cycle_value() == (tool, None);
+            ui.add_enabled_ui(enabled, |ui| {
+                if toolbar_menu_choice(ui, icons::label(icon, label), selected) {
+                    self.set_active_tool_cycle_value((tool, None));
+                }
+            });
+        }
+
+        ui.separator();
+        ui.label("Create geometry");
+        for (tool, icon, label) in [
             (ViewTool::PaintFloor, ViewTool::PaintFloor.icon(), "Floor"),
             (ViewTool::PaintWall, ViewTool::PaintWall.icon(), "Wall"),
             (
@@ -618,11 +958,9 @@ impl EditorWorkspace {
                 ViewTool::PaintCeiling.icon(),
                 "Ceiling",
             ),
-            (ViewTool::Erase, ViewTool::Erase.icon(), "Erase"),
         ] {
-            let enabled = room_active || !tool.requires_room_context();
             let selected = self.active_tool_cycle_value() == (tool, None);
-            ui.add_enabled_ui(enabled, |ui| {
+            ui.add_enabled_ui(room_active, |ui| {
                 if toolbar_menu_choice(ui, icons::label(icon, label), selected) {
                     self.set_active_tool_cycle_value((tool, None));
                 }
@@ -657,23 +995,9 @@ impl EditorWorkspace {
             snap_response.on_hover_text("Snap interval.");
         });
 
-        match self.active_tool {
-            ViewTool::Place if self.place_kind != PlaceKind::Portal => {
-                ui.separator();
-                self.draw_active_place_options(ui);
-            }
-            ViewTool::PaintWall => {
-                ui.separator();
-                ui.label("Wall shape");
-                ui.horizontal(|ui| self.draw_wall_paint_shape_picker(ui));
-                ui.separator();
-                ui.horizontal(|ui| self.draw_brush_material_picker(ui));
-            }
-            ViewTool::PaintFloor | ViewTool::PaintCeiling => {
-                ui.separator();
-                ui.horizontal(|ui| self.draw_brush_material_picker(ui));
-            }
-            ViewTool::Select | ViewTool::Erase | ViewTool::Place => {}
+        if self.active_tool == ViewTool::Place && self.place_kind != PlaceKind::Portal {
+            ui.separator();
+            self.draw_active_place_options(ui);
         }
     }
 
@@ -808,11 +1132,11 @@ impl EditorWorkspace {
         }
     }
 
-    pub(crate) fn active_tool_group_label(&self) -> &'static str {
+    pub(crate) fn active_tool_group_label(&self) -> String {
         if self.active_tool == ViewTool::Place {
-            self.place_kind.label()
+            self.place_kind.label().to_string()
         } else {
-            self.active_tool.label()
+            self.active_tool.label().to_string()
         }
     }
 
@@ -936,21 +1260,32 @@ impl EditorWorkspace {
         } else {
             format!("Auto {label}")
         };
-        if ui
-            .selectable_label(self.place_resource.is_none(), auto_label)
-            .clicked()
-        {
-            self.place_resource = None;
-        }
+        let selected_label = self
+            .place_resource
+            .and_then(|selected| {
+                options
+                    .iter()
+                    .find(|(id, _)| *id == selected)
+                    .map(|(_, name)| name.as_str())
+            })
+            .unwrap_or(&auto_label);
+        let search_hint = format!("Search {}…", label.to_ascii_lowercase());
+        let picker_changed = searchable_picker(
+            ui,
+            ui.id().with(("place-resource-picker", label)),
+            &mut self.place_resource,
+            selected_label,
+            &options,
+            SearchablePickerConfig::optional(&auto_label)
+                .with_width(220.0)
+                .with_popup_min_width(360.0)
+                .with_search_hint(&search_hint),
+        );
         if options.is_empty() {
             ui.weak(format!("No {} resources", label.to_ascii_lowercase()));
         }
-        for (id, name) in options {
-            if ui
-                .selectable_label(self.place_resource == Some(id), name)
-                .clicked()
-            {
-                self.place_resource = Some(id);
+        if picker_changed {
+            if let Some(id) = self.place_resource {
                 self.replace_resource_selection(id);
             }
         }
@@ -1072,27 +1407,60 @@ impl EditorWorkspace {
 
     pub(crate) fn draw_brush_material_picker(&mut self, ui: &mut egui::Ui) {
         let materials = self.project.material_options();
+        if self.active_tool == ViewTool::PaintMaterial && self.brush_material.is_none() {
+            let material = self
+                .selected_material_resource()
+                .or_else(|| materials.first().map(|(id, _)| *id));
+            if let Some(material) = material {
+                self.brush_material = Some(material);
+                self.replace_resource_selection(material);
+            }
+        }
         let label = match self.brush_material {
             Some(id) => materials
                 .iter()
                 .find(|(mid, _)| *mid == id)
                 .map(|(_, name)| name.clone())
                 .unwrap_or_else(|| "(missing)".to_string()),
-            None => "Auto".to_string(),
+            None => {
+                if self.active_tool == ViewTool::PaintMaterial {
+                    "Select material".to_string()
+                } else {
+                    "Auto".to_string()
+                }
+            }
         };
         ui.label(icons::text(icons::PALETTE, 14.0).color(STUDIO_TEXT_WEAK))
             .on_hover_text("Brush material");
         let before = self.brush_material;
-        egui::ComboBox::from_id_salt("brush-material-picker")
-            .selected_text(label)
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.brush_material, None, "Auto")
-                    .on_hover_text("Use the selected material, then fall back by tool.");
-                for (id, name) in &materials {
-                    ui.selectable_value(&mut self.brush_material, Some(*id), name);
-                }
-            });
+        let config = if self.active_tool == ViewTool::PaintMaterial {
+            SearchablePickerConfig::required()
+                .with_width(220.0)
+                .with_popup_min_width(360.0)
+                .with_search_hint("Search materials…")
+        } else {
+            SearchablePickerConfig::optional("Auto")
+                .with_width(180.0)
+                .with_popup_min_width(360.0)
+                .with_search_hint("Search materials…")
+        };
+        searchable_picker(
+            ui,
+            "brush-material-picker",
+            &mut self.brush_material,
+            &label,
+            &materials,
+            config,
+        );
         if self.brush_material != before {
+            if let Some(material) = self.brush_material {
+                self.material_paint_sampling = false;
+                self.replace_resource_selection(material);
+                self.status = format!(
+                    "Paint material: {}",
+                    self.project.resource_name(material).unwrap_or("(missing)")
+                );
+            }
             self.mark_shortcut_group_changed(ShortcutGroup::Tool);
         }
     }
@@ -1163,21 +1531,41 @@ impl EditorWorkspace {
             let center_world = match enclosing_room.and_then(|id| scene.node(id)) {
                 Some(room_node) => match &room_node.kind {
                     NodeKind::Room { grid } => {
+                        // A stacked floor can grow independently from the
+                        // base floor, so its width/origin (and therefore its
+                        // editor-to-preview conversion) can differ. The 3D
+                        // renderer places node markers with the node's own
+                        // floor grid; picking must use that same grid or the
+                        // clickable bound drifts away from the visible node.
+                        let node_floor = psxed_project::floor_view::node_floor(scene, node.id);
+                        let Some(node_grid) = grid.floor(node_floor) else {
+                            continue;
+                        };
                         if kind == EntityBoundKind::Portal {
-                            let Some((center, half)) = portal_seam_bounds_3d(grid, node) else {
+                            let Some((center, half)) = portal_seam_bounds_3d(node_grid, node)
+                            else {
                                 continue;
                             };
                             half_extents = half;
                             center
                         } else if node_is_floor_anchored(&node.kind) {
                             psxed_project::spatial::floor_anchored_node_preview_bounds_center(
-                                grid,
+                                node_grid,
                                 &node.transform,
                                 half_extents,
                             )
+                        } else if kind == EntityBoundKind::PointLight {
+                            // The light bulb gizmo is centred exactly on the
+                            // authored transform. Keep its pick box symmetric
+                            // around that visible marker instead of treating
+                            // the transform as the bottom of a standing prop.
+                            psxed_project::spatial::node_preview_origin_f32(
+                                node_grid,
+                                &node.transform,
+                            )
                         } else {
                             psxed_project::spatial::node_preview_bounds_center(
-                                grid,
+                                node_grid,
                                 &node.transform,
                                 half_extents,
                             )

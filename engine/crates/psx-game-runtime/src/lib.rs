@@ -33,5 +33,6 @@ pub mod save;
 pub mod schedule;
 pub mod sky;
 pub mod vram;
+pub mod water;
 pub mod world_cells;
 pub mod world_visibility;

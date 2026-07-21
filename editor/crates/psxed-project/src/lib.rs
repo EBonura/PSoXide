@@ -11,7 +11,9 @@ use std::path::{Path, PathBuf};
 use ron::ser::PrettyConfig;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+mod animation_pose_correction;
 pub mod floor_view;
+pub use animation_pose_correction::*;
 mod import_util;
 pub mod model_import;
 mod model_material_texture;

@@ -835,24 +835,18 @@ impl ProjectDocument {
             return Err(ResourceDeleteError::MissingResource(id));
         };
         let mut plan = plan_resource_file_deletes(&self.resources[index], project_root);
-        // A material's image file is shared when another material
-        // points at the same path; deleting one material must not
-        // strand the survivors without their texture.
-        if let ResourceData::Material(material) = &self.resources[index].data {
-            if let Some(psxt_path) = &material.psxt_path {
-                let shared = self.resources.iter().any(|other| {
-                    other.id != id
-                        && matches!(
-                            &other.data,
-                            ResourceData::Material(m)
-                                if m.psxt_path.as_deref() == Some(psxt_path.as_str())
-                        )
-                });
-                if shared {
-                    plan.files.clear();
-                }
-            }
-        }
+        // Keep files shared by any active or saved version of another
+        // material. Filtering per path avoids preserving unrelated files just
+        // because one version happens to share an image.
+        plan.files.retain(|op| {
+            !self.resources.iter().any(|other| {
+                other.id != id
+                    && matches!(&other.data, ResourceData::Material(material)
+                    if material.version_texture_paths().iter().any(|stored| {
+                        model_import::resolve_path(stored, Some(project_root)) == op.abs
+                    }))
+            })
+        });
         execute_resource_delete_plan(&plan, project_root)?;
 
         let mut report = self
@@ -906,14 +900,21 @@ impl ProjectDocument {
             // (file-level sharing), in which case the file stays put.
             ResourceData::Material(material) => {
                 if let Some(psxt_path) = &mut material.psxt_path {
-                    let shared = self.resources.iter().any(|other| {
-                        other.id != resource.id
-                            && matches!(
-                                &other.data,
-                                ResourceData::Material(m)
-                                    if m.psxt_path.as_deref() == Some(psxt_path.as_str())
-                            )
-                    });
+                    let active_path = model_import::resolve_path(psxt_path, Some(project_root));
+                    let shared = self
+                        .resources
+                        .iter()
+                        .filter_map(|candidate| match &candidate.data {
+                            ResourceData::Material(material) => Some(material),
+                            _ => None,
+                        })
+                        .flat_map(MaterialResource::version_texture_paths)
+                        .filter(|candidate| {
+                            model_import::resolve_path(candidate, Some(project_root)) == active_path
+                        })
+                        .take(2)
+                        .count()
+                        > 1;
                     if !shared {
                         plan_path_rename(psxt_path, &safe_stem, "psxt", project_root, &mut plan);
                     }
@@ -996,7 +997,11 @@ impl ProjectDocument {
         self.resources
             .iter()
             .filter_map(|resource| match &resource.data {
-                ResourceData::Material(_) => Some((resource.id, resource.name.clone())),
+                ResourceData::Material(_)
+                    if !resource.name.starts_with(AUTO_PAINT_BLEND_PREFIX) =>
+                {
+                    Some((resource.id, resource.name.clone()))
+                }
                 _ => None,
             })
             .collect()
@@ -1134,9 +1139,7 @@ impl ProjectDocument {
         self.migrate_legacy_texture_resources();
         for resource in &mut self.resources {
             if let ResourceData::Material(material) = &mut resource.data {
-                if let Some(layer) = material.secondary_layer.as_mut() {
-                    layer.normalize_legacy_source();
-                }
+                material.normalize_versions();
             }
         }
         self.editor_camera.normalize();
@@ -1302,7 +1305,7 @@ impl ProjectDocument {
 
 pub(crate) fn resource_data_reference_count(data: &ResourceData, id: ResourceId) -> usize {
     match data {
-        ResourceData::Material(_) => 0,
+        ResourceData::Material(material) => material.version_resource_reference_count(id),
         ResourceData::Model(model) => option_resource_reference_count(model.skeleton, id),
         ResourceData::AnimationSource(source) => {
             option_resource_reference_count(source.skeleton, id)
@@ -1330,6 +1333,7 @@ pub(crate) fn resource_data_reference_count(data: &ResourceData, id: ResourceId)
         }
         ResourceData::Character(character) => {
             option_resource_reference_count(character.model, id)
+                + option_resource_reference_count(character.material, id)
                 + option_resource_reference_count(character.animation_set, id)
         }
         ResourceData::Weapon(weapon) => option_resource_reference_count(weapon.model, id),
@@ -1344,7 +1348,7 @@ pub(crate) fn resource_data_reference_count(data: &ResourceData, id: ResourceId)
 
 pub(crate) fn clear_resource_data_references(data: &mut ResourceData, id: ResourceId) -> usize {
     match data {
-        ResourceData::Material(_) => 0,
+        ResourceData::Material(material) => material.clear_version_resource_references(id),
         ResourceData::Model(model) => clear_option_resource(&mut model.skeleton, id),
         ResourceData::AnimationSource(source) => {
             clear_option_resource(&mut source.skeleton, id)
@@ -1379,6 +1383,7 @@ pub(crate) fn clear_resource_data_references(data: &mut ResourceData, id: Resour
         }
         ResourceData::Character(character) => {
             clear_option_resource(&mut character.model, id)
+                + clear_option_resource(&mut character.material, id)
                 + clear_option_resource(&mut character.animation_set, id)
         }
         ResourceData::Weapon(weapon) => clear_option_resource(&mut weapon.model, id),
@@ -1394,6 +1399,7 @@ pub(crate) fn clear_resource_data_references(data: &mut ResourceData, id: Resour
 pub(crate) fn node_kind_reference_count(kind: &NodeKind, id: ResourceId) -> usize {
     match kind {
         NodeKind::Room { grid } => grid_resource_reference_count(grid, id),
+        NodeKind::WaterVolume { material, .. } => option_resource_reference_count(*material, id),
         NodeKind::MeshInstance { mesh, material, .. } => {
             option_resource_reference_count(*mesh, id)
                 + option_resource_reference_count(*material, id)
@@ -1458,6 +1464,7 @@ pub(crate) fn clear_far_vista_resource_references(
 pub(crate) fn clear_node_kind_references(kind: &mut NodeKind, id: ResourceId) -> usize {
     match kind {
         NodeKind::Room { grid } => clear_grid_resource_references(grid, id),
+        NodeKind::WaterVolume { material, .. } => clear_option_resource(material, id),
         NodeKind::MeshInstance { mesh, material, .. } => {
             clear_option_resource(mesh, id) + clear_option_resource(material, id)
         }
@@ -1506,6 +1513,9 @@ pub(crate) fn grid_resource_reference_count(grid: &WorldGrid, id: ResourceId) ->
             }
         }
     }
+    for floor in &grid.floors_above {
+        count += grid_resource_reference_count(floor, id);
+    }
     count
 }
 
@@ -1523,6 +1533,9 @@ pub(crate) fn clear_grid_resource_references(grid: &mut WorldGrid, id: ResourceI
                 count += clear_option_resource(&mut wall.material, id);
             }
         }
+    }
+    for floor in &mut grid.floors_above {
+        count += clear_grid_resource_references(floor, id);
     }
     count
 }
@@ -1571,8 +1584,7 @@ pub(crate) fn apply_world_sector_size_to_descendants(
                 if rescale {
                     grid.rescale_sector_size(sector_size);
                 } else {
-                    grid.sector_size = snap_world_sector_size(sector_size);
-                    grid.snap_heights_to_quantum();
+                    grid.normalize_stacked_sector_size(sector_size);
                 }
             }
             NodeKind::Collider { shape, .. } if rescale => {
@@ -1634,7 +1646,7 @@ pub(crate) fn plan_resource_file_deletes(
             plan_path_delete(psxt_path, project_root, &mut plan);
         }
         ResourceData::Material(material) => {
-            if let Some(psxt_path) = &material.psxt_path {
+            for psxt_path in material.version_texture_paths() {
                 plan_path_delete(psxt_path, project_root, &mut plan);
             }
         }

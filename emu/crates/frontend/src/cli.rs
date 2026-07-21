@@ -29,13 +29,14 @@ use std::path::{Path, PathBuf};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use emulator_core::{
     button, fast_boot_disc_with_hle, telemetry, warm_bios_for_disc_fast_boot, Bus, ButtonState,
-    Cpu, DISC_FAST_BOOT_WARMUP_STEPS,
+    Cpu, EmulatorState, DISC_FAST_BOOT_WARMUP_STEPS,
 };
 // `Gpu` is only constructed for the editor 3D preview dump.
 #[cfg(feature = "editor")]
 use emulator_core::Gpu;
 use psoxide_settings::{
     library::{GameKind, LibraryEntry},
+    savestate::SaveStateV1,
     ConfigPaths, Library, Settings,
 };
 use psoxide_validation::{
@@ -198,6 +199,11 @@ pub struct LaunchArgs {
     /// by its stable ID (16-hex-char fingerprint).
     #[arg(long)]
     pub game_id: Option<String>,
+    /// Restore this save state after mounting the selected game. This is useful
+    /// for extracting a precise gameplay checkpoint through the headless
+    /// profiler without navigating there again in the GUI.
+    #[arg(long, value_name = "PATH")]
+    pub savestate: Option<PathBuf>,
     /// Override the configured BIOS for this headless launch.
     #[arg(long)]
     pub bios: Option<PathBuf>,
@@ -431,6 +437,10 @@ pub struct DumpEditorUiArgs {
     /// Inject the `.` frame-selected shortcut before the captured frame.
     #[arg(long)]
     pub frame_selected: bool,
+    /// Render the embedded Play viewport with the named Room Topology debug
+    /// view. Accepted values: rooms, cells, portals, streaming.
+    #[arg(long, value_name = "VIEW")]
+    pub debug_map_view: Option<String>,
 }
 
 /// Arguments for `validate`.
@@ -835,6 +845,41 @@ fn run_headless_launch(
         bus.cdrom.insert_disc(Some(disc));
         if emit_summary {
             eprintln!("[cli] mounted auxiliary disc {}", disc_path.display());
+        }
+    }
+
+    if let Some(path) = args.savestate.as_ref() {
+        let loaded = std::thread::scope(|scope| {
+            std::thread::Builder::new()
+                .stack_size(64 * 1024 * 1024)
+                .spawn_scoped(scope, || SaveStateV1::<EmulatorState>::read_from(path))
+                .map_err(|e| format!("spawn save-state loader: {e}"))?
+                .join()
+                .map_err(|_| "save-state loader panicked".to_string())?
+                .map_err(|e| e.to_string())
+        })?;
+        let header = loaded.header;
+        let mut payload = loaded.payload;
+        payload.bus.restore_excluded_from(&mut bus);
+        cpu = payload.cpu;
+        bus = payload.bus;
+        // A GUI save can capture the pad while a movement key is held. The
+        // headless runner has no window event loop to release that key, so use
+        // the same fresh neutral controller a normal headless launch starts
+        // with before applying any explicit tape/pulse input below.
+        attach_headless_playtest_pad(&mut bus, args.digital_pad);
+        bus.set_port1_buttons(ButtonState::default());
+        bus.set_port1_sticks(0x80, 0x80, 0x80, 0x80);
+        if args.dump_hw.is_some() {
+            bus.gpu.enable_cmd_log();
+        }
+        if emit_summary {
+            eprintln!(
+                "[cli] restored save state {} (game={} tick={})",
+                path.display(),
+                header.game_id,
+                header.cpu_tick
+            );
         }
     }
 
@@ -1715,6 +1760,7 @@ fn validation_launch_args(
     LaunchArgs {
         path: Some(artifact.path.clone()),
         game_id: None,
+        savestate: None,
         bios: None,
         disc: None,
         steps: checkpoint.stop.steps,
@@ -1973,14 +2019,76 @@ fn cmd_dump_editor_ui(args: DumpEditorUiArgs) -> Result<(), String> {
         egui::ColorImage::new([640, 480], egui::Color32::from_rgb(8, 10, 14)),
         egui::TextureOptions::NEAREST,
     );
-    let viewport = EditorViewport3dPresentation::edit(viewport_texture.id(), Vec::new());
+    let (viewport, play_status) = if let Some(view) = args.debug_map_view.as_deref() {
+        if !editor.set_play_debug_map_view(view) {
+            return Err(format!(
+                "unknown --debug-map-view {view:?}; expected rooms, cells, portals, or streaming"
+            ));
+        }
+        let topology = psxed_project::playtest::build_debug_topology(editor.project());
+        let room_count = topology
+            .cells
+            .iter()
+            .map(|cell| cell.runtime_room_index + 1)
+            .max()
+            .unwrap_or_default();
+        let room_mask = if room_count >= u64::BITS as usize {
+            u64::MAX
+        } else if room_count == 0 {
+            0
+        } else {
+            (1u64 << room_count) - 1
+        };
+        let portal_count = topology.portals.len().min(u64::BITS as usize);
+        let portal_mask = if portal_count == u64::BITS as usize {
+            u64::MAX
+        } else if portal_count == 0 {
+            0
+        } else {
+            (1u64 << portal_count) - 1
+        };
+        let metrics = psxed_ui::EditorPlaytestMetrics {
+            chunk_visible: room_count as u32,
+            chunk_loaded: room_count as u32,
+            stream_slot_limit: room_count.max(1) as u32,
+            portal_visible_rooms: room_count as u32,
+            chunk_loaded_mask: room_mask,
+            chunk_active_mask: room_mask,
+            chunk_drawn_mask: room_mask,
+            portal_visible_mask: room_mask,
+            portal_tested_mask: room_mask,
+            portal_accepted_mask: room_mask,
+            portal_tested_portal_mask: portal_mask,
+            portal_accepted_portal_mask: portal_mask,
+            player_map_valid: room_count > 0,
+            player_room_index: 0,
+            portal_current_room_index: 0,
+            ..Default::default()
+        };
+        (
+            EditorViewport3dPresentation::play(
+                viewport_texture.id(),
+                egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+                psxed_ui::EditorPlaytestTapeStatus::default(),
+                Some(metrics),
+            ),
+            EditorPlaytestStatus::Running {
+                input_captured: false,
+            },
+        )
+    } else {
+        (
+            EditorViewport3dPresentation::edit(viewport_texture.id(), Vec::new()),
+            EditorPlaytestStatus::Idle,
+        )
+    };
 
     // Prime one complete frame before injecting input. This mirrors the native
     // app's first layout pass and ensures fonts/resource textures and widget
     // focus state all exist before the captured interaction frame.
     let first = ctx.run(
         headless_editor_input(args.width, args.height, 0.0, Vec::new()),
-        |ctx| editor.draw(ctx, viewport.clone(), EditorPlaytestStatus::Idle),
+        |ctx| editor.draw(ctx, viewport.clone(), play_status),
     );
     let mut textures_delta = first.textures_delta;
 
@@ -1997,7 +2105,7 @@ fn cmd_dump_editor_ui(args: DumpEditorUiArgs) -> Result<(), String> {
     };
     let captured = ctx.run(
         headless_editor_input(args.width, args.height, 1.0 / 60.0, events),
-        |ctx| editor.draw(ctx, viewport.clone(), EditorPlaytestStatus::Idle),
+        |ctx| editor.draw(ctx, viewport.clone(), play_status),
     );
     textures_delta.append(captured.textures_delta);
     let paint_jobs = ctx.tessellate(captured.shapes, captured.pixels_per_point);

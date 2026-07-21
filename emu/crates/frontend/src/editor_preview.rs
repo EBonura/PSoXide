@@ -429,6 +429,20 @@ pub fn build_phase1_frame(
             preview_bounds,
             &mut scratch,
         );
+        walk_water_volumes(
+            project,
+            room_id,
+            grid,
+            floor_index,
+            y_offset,
+            textures,
+            world_camera,
+            fog,
+            hidden_scene_nodes,
+            selected,
+            preview_tick,
+            &mut scratch,
+        );
         if show_grid {
             push_streaming_chunk_boundaries(project, room_id, grid, &mut scratch);
         }
@@ -1193,6 +1207,137 @@ fn walk_box_props(
                 world_vertices,
                 entity_bound_style(psxed_ui::EntityBoundKind::BoxProp, is_selected, is_hovered),
             );
+        }
+    }
+}
+
+fn walk_water_volumes(
+    project: &ProjectDocument,
+    room_id: NodeId,
+    grid: &WorldGrid,
+    floor_index: usize,
+    y_offset: i32,
+    textures: &EditorTextures,
+    camera: psx_engine::WorldCamera,
+    fog: PreviewFog,
+    hidden_scene_nodes: &HashSet<NodeId>,
+    selected: NodeId,
+    preview_tick: u32,
+    scratch: &mut PreviewScratch,
+) {
+    let scene = project.active_scene();
+    let lights = collect_preview_lights(project, room_id, grid, hidden_scene_nodes);
+    for node in scene.nodes() {
+        if scene_node_hidden(scene, hidden_scene_nodes, node.id)
+            || !is_descendant_of_room(scene, node.id, room_id)
+            || node_enclosing_floor(scene, node.id) != floor_index
+        {
+            continue;
+        }
+        let NodeKind::WaterVolume {
+            material,
+            cells,
+            settings,
+        } = &node.kind
+        else {
+            continue;
+        };
+        let Some(material_id) = *material else {
+            continue;
+        };
+        let sector_size = grid.sector_size;
+        for cell in cells {
+            let Some((array_x, array_z)) = grid.world_cell_to_array(cell.x, cell.z) else {
+                continue;
+            };
+            let x0 = cell.x.saturating_mul(sector_size);
+            let z0 = cell.z.saturating_mul(sector_size);
+            let x1 = x0.saturating_add(sector_size);
+            let z1 = z0.saturating_add(sector_size);
+            let floor = grid
+                .sector(array_x, array_z)
+                .and_then(|sector| sector.floor.as_ref());
+            let floor_y = floor
+                .map(|floor| floor.height_at_local(sector_size / 2, sector_size / 2, sector_size))
+                .unwrap_or(0);
+            let y = floor_y
+                .saturating_add(i32::from(settings.height_above_floor))
+                .saturating_add(y_offset);
+            // Match the top face winding used by BoxProp so editor and
+            // generated runtime surface packets share culling/orientation.
+            let verts = [
+                psx_engine::WorldVertex::new(x0, y, z1),
+                psx_engine::WorldVertex::new(x1, y, z1),
+                psx_engine::WorldVertex::new(x1, y, z0),
+                psx_engine::WorldVertex::new(x0, y, z0),
+            ];
+            let Some(projected) = camera.project_world_quad(verts) else {
+                continue;
+            };
+            let p = projected.map(preview_projected_from_engine);
+            let center = average_world_quad(verts);
+            let depth = face_depth(camera, center);
+            let shade = face_shade(project, Some(material_id), (52, 92, 112), textures)
+                .with_sidedness(psxed_project::MaterialFaceSidedness::Both);
+            let shade = fog.apply_shade(
+                light_face(shade, center, &lights, grid.ambient_color),
+                depth,
+            );
+            let uvs = match shade {
+                FaceShade::Textured { slot, .. } => {
+                    animated_material_quad_uvs(project, material_id, slot, preview_tick)
+                }
+                FaceShade::Flat { .. } => PREVIEW_FLOOR_UVS,
+            };
+            emit_box_prop_face(scratch, p, uvs, shade);
+            if node.id == selected {
+                let style = if settings.height_above_floor >= settings.lethal_depth {
+                    FACE_OUTLINE_ERROR
+                } else {
+                    FACE_OUTLINE_SELECTED
+                };
+                push_world_quad_wireframe(scratch, verts, style);
+                if let Some(floor) = floor {
+                    let bottom = [
+                        psx_engine::WorldVertex::new(
+                            x0,
+                            floor.heights[0].saturating_add(y_offset),
+                            z1,
+                        ),
+                        psx_engine::WorldVertex::new(
+                            x1,
+                            floor.heights[1].saturating_add(y_offset),
+                            z1,
+                        ),
+                        psx_engine::WorldVertex::new(
+                            x1,
+                            floor.heights[2].saturating_add(y_offset),
+                            z0,
+                        ),
+                        psx_engine::WorldVertex::new(
+                            x0,
+                            floor.heights[3].saturating_add(y_offset),
+                            z0,
+                        ),
+                    ];
+                    push_world_quad_wireframe(scratch, bottom, style);
+                    for index in 0..4 {
+                        let projected_top = gte_scene::project_vertex(world_to_view([
+                            verts[index].x,
+                            verts[index].y,
+                            verts[index].z,
+                        ]));
+                        let projected_bottom = gte_scene::project_vertex(world_to_view([
+                            bottom[index].x,
+                            bottom[index].y,
+                            bottom[index].z,
+                        ]));
+                        if projected_top.sz != 0 && projected_bottom.sz != 0 {
+                            push_screen_line(scratch, projected_top, projected_bottom, style);
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -2420,6 +2565,7 @@ fn preview_model_material_override(
         // Generated and probe materials have no `psxt_path`: their preview
         // texture is baked directly into the editor texture cache.
         psxed_project::MaterialTextureMode::Generated
+        | psxed_project::MaterialTextureMode::Transition
         | psxed_project::MaterialTextureMode::ReflectiveProbe => textures.slot(material_id),
     };
     Some(PreviewModelMaterialOverride {
@@ -2449,7 +2595,7 @@ fn entity_marker_color(kind: &NodeKind) -> Option<(u8, u8, u8)> {
         NodeKind::ImageProp { .. } => Some((0xD0, 0xAA, 0x78)),
         // Box props render as real textured geometry in
         // `walk_box_props`; don't cover them with a 2D marker.
-        NodeKind::BoxProp { .. } => None,
+        NodeKind::BoxProp { .. } | NodeKind::WaterVolume { .. } => None,
         NodeKind::Entity => Some((0xA0, 0xB0, 0xC0)),
         // Lights draw their own bulb icon + radius ring in
         // `walk_light_gizmos`; using the generic billboard square

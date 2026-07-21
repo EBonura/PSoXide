@@ -20,6 +20,12 @@ impl EditorWorkspace {
         self.selection.selected_resources.insert(id);
         self.selection.resource_selection_anchor = Some(id);
         self.resource_delete_confirm = None;
+        if matches!(
+            self.project.resource(id).map(|resource| &resource.data),
+            Some(ResourceData::Material(_))
+        ) {
+            self.brush_material = Some(id);
+        }
     }
 
     pub(crate) fn clear_resource_selection_state(&mut self) {
@@ -313,6 +319,18 @@ impl EditorWorkspace {
         self.resource_delete_confirm = None;
 
         let count = self.selection.selected_resources.len();
+        if count <= 1 {
+            if let Some(selected) = self.selection.selected_resource {
+                if matches!(
+                    self.project
+                        .resource(selected)
+                        .map(|resource| &resource.data),
+                    Some(ResourceData::Material(_))
+                ) {
+                    self.brush_material = Some(selected);
+                }
+            }
+        }
         if count > 1 {
             self.status = format!("Selected {count} resources");
         } else if let Some(id) = self.selection.selected_resource {
@@ -785,6 +803,15 @@ impl EditorWorkspace {
         {
             self.selection.selected_ui_node = ui_root;
         }
+
+        // Layer creation is undoable. If undo removes the active top layer,
+        // keep the authoring index inside the restored room instead of
+        // carrying a stale value into the next Up/Down action.
+        self.active_floor = self
+            .floors_target_room()
+            .and_then(|room| self.room_base_grid(room))
+            .map(|grid| self.active_floor.min(grid.floor_count().saturating_sub(1)))
+            .unwrap_or(0);
     }
 
     pub(crate) fn clear_sector_selection(&mut self) {

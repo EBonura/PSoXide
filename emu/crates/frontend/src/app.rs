@@ -349,6 +349,11 @@ pub struct AppState {
     /// Toolbar mute latch. Kept separate from `audio_volume` so
     /// unmuting restores the prior level.
     pub audio_muted: bool,
+    /// Native save-state thumbnails waiting for the shell to capture the
+    /// hardware-renderer display. AppState owns save files, but only the shell
+    /// has access to the wgpu texture that was actually presented.
+    #[cfg(not(target_arch = "wasm32"))]
+    pending_savestate_thumbnails: Vec<PathBuf>,
     /// Web build only: the BIOS image uploaded this session. The browser has no
     /// filesystem, so a real-BIOS retail disc boot reads its BIOS from here
     /// instead of `settings.paths.bios`. `None` until the user loads one.
@@ -494,6 +499,8 @@ impl AppState {
             status_message: None,
             audio_volume: 1.0,
             audio_muted: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            pending_savestate_thumbnails: Vec::new(),
             #[cfg(target_arch = "wasm32")]
             bios_bytes: None,
             #[cfg(target_arch = "wasm32")]
@@ -805,13 +812,7 @@ impl AppState {
                 .spawn_scoped(scope, || {
                     let snapshot = EmulatorStateRef { cpu, bus };
                     let state = SaveStateV1::new(snapshot, game_id.clone(), tick);
-                    let result = state.write_to(&path);
-                    if result.is_ok() {
-                        // Best-effort: a missing thumbnail just means no
-                        // preview in the panel, not a failed save.
-                        write_savestate_thumbnail(bus, &thumb_path);
-                    }
-                    result
+                    state.write_to(&path)
                 })
                 .expect("spawn save-state thread")
                 .join()
@@ -822,12 +823,21 @@ impl AppState {
                 // "undo to my last save" should mean *this* save until the
                 // user explicitly pins something else.
                 let _ = self.paths.write_top_slot(&game_id, slot);
+                // Defer readback until the UI render returns. The shell then
+                // captures the persistent HW target the user actually saw,
+                // rather than the independently rasterized CPU VRAM mirror.
+                self.pending_savestate_thumbnails.push(thumb_path);
                 self.status_message_set(format!("Saved slot {slot}"));
                 self.refresh_save_state_menu_rows();
             }
             Ok(Err(e)) => self.status_message_set(format!("Save state failed: {e}")),
             Err(_) => self.status_message_set("Save state failed: internal error".to_string()),
         }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn take_pending_savestate_thumbnails(&mut self) -> Vec<PathBuf> {
+        std::mem::take(&mut self.pending_savestate_thumbnails)
     }
 
     /// Load whichever save is "on top" -- the pinned quick-load target
@@ -973,7 +983,7 @@ impl AppState {
     /// header-only peek per file, no full-state decode) so there's no
     /// need to cache this across frames.
     #[cfg(not(target_arch = "wasm32"))]
-    fn refresh_save_state_menu_rows(&mut self) {
+    pub(crate) fn refresh_save_state_menu_rows(&mut self) {
         let rows = match self.current_game.as_ref().map(|g| g.id.clone()) {
             Some(game_id) => self.build_save_state_rows(&game_id),
             None => Vec::new(),
@@ -2768,33 +2778,6 @@ fn unix_now_secs() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
-}
-
-/// Best-effort screenshot capture for the save-states panel: downscale
-/// whatever's currently on the PS1's display (not the full 1024x512
-/// VRAM -- just the visible framebuffer area) to a small PNG next to
-/// the save file. Pure-CPU (no wgpu/GPU-resource access), so it's safe
-/// to call from the save's dedicated big-stack thread alongside the
-/// rest of the (de)serialize work. Failures (bad dimensions, I/O,
-/// encode) are swallowed -- a missing thumbnail just means the panel
-/// shows a placeholder for that slot, not a failed save.
-fn write_savestate_thumbnail(bus: &emulator_core::Bus, path: &std::path::Path) {
-    const THUMB_WIDTH: u32 = 160;
-    let (rgba, width, height) = bus.gpu.display_rgba8();
-    if width == 0 || height == 0 {
-        return;
-    }
-    let Some(frame) = image::RgbaImage::from_raw(width, height, rgba) else {
-        return;
-    };
-    let thumb_height = ((THUMB_WIDTH as u64 * height as u64) / width as u64).max(1) as u32;
-    let thumb = image::imageops::resize(
-        &frame,
-        THUMB_WIDTH,
-        thumb_height,
-        image::imageops::FilterType::Triangle,
-    );
-    let _ = thumb.save(path);
 }
 
 fn display_size_bytes(e: &LibraryEntry) -> u64 {

@@ -118,6 +118,92 @@ fn entity_selection_respects_active_floor() {
         );
 }
 
+/// A stacked floor can be grown independently, giving it a different grid
+/// origin/extent from floor 0. The renderer uses that floor-local grid for a
+/// light bulb gizmo, so its selectable bound must do the same. Cortex2 has
+/// exactly this shape: its Preview Light lives on floor 1 after that floor was
+/// expanded further than the base grid.
+#[test]
+fn point_light_pick_matches_visible_marker_on_independently_grown_floor() {
+    let mut project = ProjectDocument::new("stacked-light-pick");
+    let mut grid = WorldGrid::empty(2, 2, 1024);
+    grid.push_floor();
+    grid.floor_mut(1)
+        .expect("floor 1")
+        .extend_to_include(-3, -2);
+    let room = project
+        .active_scene_mut()
+        .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+    let light = project.active_scene_mut().add_node(
+        room,
+        "Light",
+        NodeKind::PointLight {
+            color: [255, 240, 200],
+            intensity: 1.0,
+            radius: 4.0,
+        },
+    );
+    {
+        let node = project.active_scene_mut().node_mut(light).unwrap();
+        node.floor = 1;
+        node.transform.translation = [-1.5, 0.75, -0.5];
+    }
+
+    let mut workspace = EditorWorkspace::with_project(test_temp_dir("stacked-light-pick"), project);
+    workspace.active_floor = 1;
+    workspace.active_tool = ViewTool::Select;
+
+    let scene = workspace.project.active_scene();
+    let room_node = scene.node(room).unwrap();
+    let NodeKind::Room { grid } = &room_node.kind else {
+        unreachable!("test room is a room");
+    };
+    let light_node = scene.node(light).unwrap();
+    let expected = psxed_project::spatial::node_preview_origin_f32(
+        grid.floor(1).expect("floor 1 grid"),
+        &light_node.transform,
+    );
+    let stale_base_position =
+        psxed_project::spatial::node_preview_origin_f32(grid, &light_node.transform);
+    assert_ne!(
+        expected, stale_base_position,
+        "the test must reproduce a floor-grid placement mismatch"
+    );
+
+    let bound = workspace
+        .collect_entity_bounds(Some(room))
+        .into_iter()
+        .find(|bound| bound.node == light)
+        .expect("visible floor-1 light has a selectable bound");
+    assert_eq!(bound.kind, EntityBoundKind::PointLight);
+    assert_eq!(
+        bound.center, expected,
+        "pick bound follows the visible bulb"
+    );
+
+    let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(1200.0, 800.0));
+    workspace.camera_rig.mode = ViewportCameraMode::Free;
+    workspace.camera_rig.free_initialized = true;
+    workspace.camera_rig.free_position = [
+        expected[0].round() as i32 + 2600,
+        expected[1].round() as i32 + 1800,
+        expected[2].round() as i32 - 2600,
+    ];
+    let target = expected.map(|value| value.round() as i32);
+    let (yaw, pitch) =
+        camera_angles_to_look_at(workspace.camera_rig.free_position, target).unwrap();
+    workspace.camera_rig.free_yaw = yaw;
+    workspace.camera_rig.free_pitch = pitch;
+    let pointer =
+        project_world_to_viewport_screen(workspace.viewport_3d_camera(), viewport, expected)
+            .expect("visible bulb projects into the viewport");
+
+    assert!(matches!(
+        workspace.resolve_viewport_3d_pointer_target(viewport, pointer, Some(room), true),
+        Some(Viewport3dPointerTarget::Entity(hit)) if hit.node == light
+    ));
+}
+
 /// Diagnostic (not a strict assertion): print an ASCII map of what a
 /// click resolves to across the gizmo region, at several zoom levels.
 /// Run with `cargo test gizmo_pick_map -- --nocapture` to eyeball

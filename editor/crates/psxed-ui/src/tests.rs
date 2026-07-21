@@ -1,7 +1,39 @@
 use super::*;
 
+#[test]
+fn play_chunk_debug_map_follows_player_layer_then_editor_layer() {
+    let cell = |runtime_room_index, floor_index, elevation| PlayChunkDebugMapCell {
+        runtime_room_index,
+        project_room_id: NodeId::ROOT,
+        portal_room_index: runtime_room_index,
+        array_cell: [0, 0],
+        center: [0.0, 0.0],
+        half: [0.5, 0.5],
+        room_origin: [0.0, 0.0],
+        runtime_origin: [0, 0],
+        sector_size: 1024.0,
+        floor_index,
+        elevation,
+    };
+    let map = PlayChunkDebugMap {
+        cells: vec![cell(2, 0, 0), cell(7, 1, 2048)],
+        portals: Vec::new(),
+    };
+
+    let player_on_upper = EditorPlaytestMetrics {
+        player_map_valid: true,
+        player_room_index: 7,
+        ..Default::default()
+    };
+    assert_eq!(map.display_floor(player_on_upper, 0), 1);
+    assert_eq!(map.display_floor(EditorPlaytestMetrics::default(), 1), 1);
+    assert_eq!(map.display_floor(EditorPlaytestMetrics::default(), 99), 0);
+    assert_eq!(map.floor_count(), 2);
+}
+
 mod entity_resources;
 mod geometry_resources;
+mod layer_authoring;
 mod placement_painting;
 mod project_workspace;
 mod scene_tree_selection;
