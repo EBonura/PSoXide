@@ -20,8 +20,8 @@ use crate::render3d::TexturedGouraudSubmitMicroProfile;
 
 use crate::{
     render3d::{
-        project_world_vertex_indices_gte, CullMode, DepthPolicy, LoadedWorldCameraGte,
-        PreparedTriangleDepth, ProjectedVertex, ViewVertex,
+        project_world_vertex_indices_gte, project_world_vertices_gte, CullMode, DepthPolicy,
+        LoadedWorldCameraGte, PreparedTriangleDepth, ProjectedVertex, ViewVertex,
     },
     PrimitiveSink, RoomPoint, RoomRender, RoomSurfaceSink, WorldCamera, WorldRenderPass,
     WorldSurfaceOptions, WorldVertex,

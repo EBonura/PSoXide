@@ -280,12 +280,17 @@ impl<
             .min(MAX_ACTIVE_ROOMS)
     }
 
-    /// Expand the portal-visible set with every cooked room that overlaps it
-    /// in X/Z on another stacked floor. The expansion is transitive and
-    /// deduplicated in the fixed room pool. Overlap rooms inherit the source
-    /// room's draw-distance result but deliberately carry no portal frustum:
-    /// they must draw their complete cached surface set behind translucent
-    /// floors instead of being clipped to a doorway that does not exist.
+    /// Expand the portal-visible set with every cooked room that directly
+    /// overlaps a portal-admitted room in X/Z on another stacked floor.
+    ///
+    /// Cooked overlap slices already contain every genuine pair, including
+    /// non-adjacent stacked floors. Do not recursively expand from rooms added
+    /// by this pass: that would turn a narrow lower room spanning two lateral
+    /// portal rooms into a false visibility bridge between those upper rooms.
+    /// Overlap rooms inherit the source room's draw-distance result but
+    /// deliberately carry no portal frustum: they must draw their complete
+    /// cached surface set behind translucent floors instead of being clipped
+    /// to a doorway that does not exist.
     pub fn include_overlapped_rooms(
         &mut self,
         rooms: &[LevelRoomRecord],
@@ -294,6 +299,14 @@ impl<
         let mut source_index = 0usize;
         while source_index < self.result.room_count.min(MAX_ACTIVE_ROOMS) {
             let source = self.result.rooms[source_index];
+            // A zero-frustum room was added by an earlier overlap expansion,
+            // not admitted by the portal traversal. Expanding from it would
+            // make overlap visibility transitive and can pull unrelated
+            // lateral rooms into the full-cell fallback draw.
+            if source.frustum_count == 0 {
+                source_index += 1;
+                continue;
+            }
             let Some(record) = rooms.get(source.room.to_usize()) else {
                 source_index += 1;
                 continue;
@@ -392,7 +405,7 @@ mod tests {
     }
 
     #[test]
-    fn stacked_overlaps_expand_visible_rooms_transitively_without_duplicates() {
+    fn stacked_overlaps_only_expand_from_portal_admitted_rooms() {
         let rooms = [room(0, 1), room(1, 2), room(3, 1)];
         let overlaps = [
             RoomIndex::new(1),
@@ -414,13 +427,51 @@ mod tests {
         visibility.include_overlapped_rooms(&rooms, &overlaps);
         visibility.include_overlapped_rooms(&rooms, &overlaps);
 
-        assert_eq!(visibility.result.room_count, 3);
+        assert_eq!(visibility.result.room_count, 2);
         assert!(visibility.result.contains_room(RoomIndex::new(1)));
-        assert!(visibility.result.contains_room(RoomIndex::new(2)));
-        for room in &visibility.result.rooms[1..3] {
+        assert!(
+            !visibility.result.contains_room(RoomIndex::new(2)),
+            "an overlap-only room must not bridge visibility to its neighbours"
+        );
+        for room in &visibility.result.rooms[1..2] {
             assert_eq!(room.frustum_count, 0);
             assert_eq!(room.depth, 2);
             assert!(room.within_far);
         }
+    }
+
+    #[test]
+    fn each_portal_admitted_room_expands_its_direct_stacked_overlaps() {
+        let rooms = [room(0, 1), room(1, 2), room(3, 1)];
+        let overlaps = [
+            RoomIndex::new(1),
+            RoomIndex::new(0),
+            RoomIndex::new(2),
+            RoomIndex::new(1),
+        ];
+        let mut visibility = TestRoomVisibility::EMPTY;
+        visibility.root = RoomIndex::ZERO;
+        visibility.result.rooms[0] = PortalVisibleRoom {
+            room: RoomIndex::ZERO,
+            frustum_first: 0,
+            frustum_count: 1,
+            depth: 0,
+            within_far: true,
+        };
+        visibility.result.rooms[1] = PortalVisibleRoom {
+            room: RoomIndex::new(1),
+            frustum_first: 1,
+            frustum_count: 1,
+            depth: 1,
+            within_far: true,
+        };
+        visibility.result.room_count = 2;
+
+        visibility.include_overlapped_rooms(&rooms, &overlaps);
+
+        assert_eq!(visibility.result.room_count, 3);
+        assert!(visibility.result.contains_room(RoomIndex::new(2)));
+        assert_eq!(visibility.result.rooms[2].frustum_count, 0);
+        assert_eq!(visibility.result.rooms[2].depth, 1);
     }
 }
