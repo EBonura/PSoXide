@@ -143,8 +143,13 @@ impl EditorWorkspace {
                     self.clear_sector_selection();
                     return;
                 };
-                if self.portal_place_active() {
+                if self.portal_place_active()
+                    || matches!(tool, ViewTool::PaintMaterial | ViewTool::Water)
+                {
                     self.clear_sector_selection();
+                    if matches!(tool, ViewTool::PaintMaterial | ViewTool::Water) {
+                        self.clear_primitive_selection_state();
+                    }
                 } else {
                     self.selection.selected_sector = Some((x, z));
                     self.selection.selected_sectors.clear();
@@ -211,11 +216,29 @@ impl EditorWorkspace {
                         },
                     })
                 })
+            } else if matches!(tool, ViewTool::PaintMaterial) {
+                grid.sector(sx, sz)
+                    .and_then(|sector| sector.floor.as_ref())
+                    .map(|_| FaceRef {
+                        room: room_id,
+                        sx,
+                        sz,
+                        kind: FaceKind::Floor,
+                    })
             } else {
                 None
             };
             (hit, face)
         };
+
+        if tool == ViewTool::PaintMaterial && self.material_paint_sampling {
+            let Some(face) = picked_face else {
+                self.status = "Eyedropper needs an existing floor under the cursor".to_string();
+                return;
+            };
+            self.sample_paint_material_from_face(face);
+            return;
+        }
 
         self.run_paint_action(tool, room_id, sx, sz, picked_face, hit_world);
     }
@@ -458,10 +481,14 @@ impl EditorWorkspace {
             rotation_quarters: 0,
             flip_x: false,
             flip_z: false,
+            pointer_anchor_origin: None,
+            pointer_anchor_placement_origin: clipboard.next_paste_origin,
+            selected_cells: Vec::new(),
+            selected_primitives: Vec::new(),
             cells: clipboard.cells,
         });
         self.apply_floating_geometry_preview();
-        self.status = "Duplicating world geometry - move cursor, R rotates, F flips, Shift+F flips vertically, click places, Esc cancels"
+        self.status = "Duplicating world geometry beside source - move cursor, R rotates, F flips, Shift+F flips vertically, click places, Esc cancels"
             .to_string();
     }
 
@@ -496,6 +523,30 @@ impl EditorWorkspace {
         true
     }
 
+    /// Feed a pointer-derived grid origin into floating placement. The first
+    /// observed cell is only an anchor: duplicate commands can originate from
+    /// a shortcut, toolbar, or tree menu while the mouse is elsewhere, and
+    /// immediately snapping to that stale position makes the copy appear to
+    /// vanish. Later pointer cells move the preview by their delta from this
+    /// anchor, preserving the adjacent starting placement even when the cursor
+    /// began on the other side of a large room.
+    pub(crate) fn track_floating_geometry_pointer_origin(&mut self, origin: [i32; 2]) -> bool {
+        let Some(preview) = self.floating_geometry.as_mut() else {
+            return false;
+        };
+        let Some(anchor) = preview.pointer_anchor_origin else {
+            preview.pointer_anchor_origin = Some(origin);
+            preview.pointer_anchor_placement_origin = preview.origin;
+            return true;
+        };
+        let placement_anchor = preview.pointer_anchor_placement_origin;
+        let target = [
+            placement_anchor[0].saturating_add(origin[0].saturating_sub(anchor[0])),
+            placement_anchor[1].saturating_add(origin[1].saturating_sub(anchor[1])),
+        ];
+        self.update_floating_geometry_origin(target)
+    }
+
     pub(crate) fn rotate_floating_geometry_cw(&mut self) {
         let Some(preview) = self.floating_geometry.as_mut() else {
             return;
@@ -528,6 +579,14 @@ impl EditorWorkspace {
             return false;
         };
         self.history.record(preview.base_project);
+        match preview.mode {
+            GeometryClipboardMode::ReplaceCells => {
+                self.select_geometry_cells(preview.room, preview.selected_cells);
+            }
+            GeometryClipboardMode::MergePrimitives => {
+                self.select_geometry_primitives(preview.room, preview.selected_primitives);
+            }
+        }
         self.status = "Placed duplicated world geometry".to_string();
         self.mark_dirty();
         true
@@ -628,6 +687,10 @@ impl EditorWorkspace {
                     }
                 }
             }
+        }
+        if let Some(active_preview) = self.floating_geometry.as_mut() {
+            active_preview.selected_cells = selected_cells.clone();
+            active_preview.selected_primitives = selected_primitives.clone();
         }
         match preview.mode {
             GeometryClipboardMode::ReplaceCells => {

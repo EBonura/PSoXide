@@ -114,6 +114,51 @@ fn character_resource_deserializes_without_new_motor_tuning_fields() {
         character.backstep_invulnerable_frames,
         default_character_backstep_invulnerable_frames()
     );
+    assert!(character.combat_capsules.is_empty());
+    assert!(character.material.is_none());
+    assert_eq!(character.spawn_role, CharacterSpawnRole::Auto);
+    assert!(character.enemy_behavior.is_none());
+    assert_eq!(
+        character.camera_lock_rise_percent,
+        default_world_camera_lock_rise_percent()
+    );
+}
+
+#[test]
+fn character_combat_capsules_roundtrip_roles_and_joint_local_geometry() {
+    let mut character = CharacterResource::defaults();
+    character.combat_capsules = vec![
+        CharacterCombatCapsule {
+            name: "Torso".to_string(),
+            joint: 3,
+            capsule: JointCapsule {
+                start: [0, -120, 0],
+                end: [0, 180, 0],
+                radius: 96,
+            },
+            role: CombatCapsuleRole::Hurtbox,
+        },
+        CharacterCombatCapsule {
+            name: "Right Fist".to_string(),
+            joint: 14,
+            capsule: JointCapsule {
+                start: [0, 0, 0],
+                end: [90, 0, 0],
+                radius: 42,
+            },
+            role: CombatCapsuleRole::Hitbox {
+                action: CharacterAnimationAction::LightAttack,
+                active_start_frame: 8,
+                active_end_frame: 13,
+                damage: 30,
+                poise_damage: 20,
+            },
+        },
+    ];
+
+    let ron = ron::to_string(&character).expect("combat capsules serialize");
+    let restored: CharacterResource = ron::from_str(&ron).expect("combat capsules deserialize");
+    assert_eq!(restored, character);
 }
 
 #[test]
@@ -517,6 +562,10 @@ fn changing_world_sector_size_rescales_descendant_room_and_colliders() {
     let mut grid = WorldGrid::empty(1, 1, 1024);
     grid.set_floor(0, 0, 160, None);
     grid.add_wall(0, 0, GridDirection::North, 0, 1024, None);
+    let upper = grid.push_floor();
+    let upper_grid = grid.floor_mut(upper).expect("upper floor");
+    upper_grid.set_floor(0, 0, 320, None);
+    upper_grid.add_wall(0, 0, GridDirection::North, 0, 2048, None);
     let room = scene.add_node(world, "Room", NodeKind::Room { grid });
     let entity = scene.add_node(room, "Entity", NodeKind::Entity);
     let collider = scene.add_node(
@@ -549,6 +598,20 @@ fn changing_world_sector_size_rescales_descendant_room_and_colliders() {
             .unwrap()
             .heights,
         [0, 0, 1536, 1536]
+    );
+    let upper_grid = grid.floor(upper).expect("upper floor remains present");
+    assert_eq!(upper_grid.sector_size, 1536);
+    assert_eq!(upper_grid.elevation, 3072);
+    let upper_sector = upper_grid.sector(0, 0).expect("upper sector");
+    assert_eq!(upper_sector.floor.as_ref().unwrap().heights, [512; 4]);
+    assert_eq!(
+        upper_sector
+            .walls
+            .get(GridDirection::North)
+            .first()
+            .unwrap()
+            .heights,
+        [0, 0, 3072, 3072]
     );
 
     let NodeKind::Collider {
@@ -715,6 +778,78 @@ fn dynamic_material_recipe_round_trips_through_project_ron() {
     assert_eq!(loaded_material.animation, expected_animation);
 
     let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn material_versions_preserve_complete_recipes_and_stable_identity() {
+    let mut material = MaterialResource::opaque(Some("materials/original.psxt".to_string()));
+    material.tint = [24, 48, 96];
+    material.blend_mode = PsxBlendMode::Average;
+    material.animation.mode = MaterialAnimationMode::UvScroll;
+    material.secondary_layer = Some(ModelSecondaryLayer::moving_default());
+
+    let original_recipe = MaterialVersionRecipe::from(&material);
+    let llm_version = material.create_version("LLM Gothic");
+    assert_eq!(llm_version.raw(), 2);
+    assert_eq!(material.active_version_name, "LLM Gothic");
+    assert_eq!(material.version_count(), 2);
+
+    material.texture_mode = MaterialTextureMode::Generated;
+    material.psxt_path = Some("materials/llm_gothic.psxt".to_string());
+    material.tint = [131, 37, 171];
+    material.generated.noise.seed = 0xfeed_beef;
+    material.secondary_layer = None;
+    let llm_recipe = MaterialVersionRecipe::from(&material);
+
+    assert!(material.activate_version(MaterialVersionId::ORIGINAL));
+    assert_eq!(material.active_version_name, "Original");
+    assert_eq!(MaterialVersionRecipe::from(&material), original_recipe);
+    assert!(material.activate_version(llm_version));
+    assert_eq!(MaterialVersionRecipe::from(&material), llm_recipe);
+
+    assert!(material.rename_version(llm_version, "LLM Cathedral"));
+    assert!(!material.rename_version(llm_version, "Original"));
+    assert!(material.delete_version(llm_version));
+    assert_eq!(material.active_version_id, MaterialVersionId::ORIGINAL);
+    assert_eq!(material.version_count(), 1);
+    assert!(!material.delete_version(MaterialVersionId::ORIGINAL));
+}
+
+#[test]
+fn material_versions_round_trip_and_legacy_materials_become_original() {
+    let legacy = r#"(
+        texture_mode: SimpleImage,
+        psxt_path: Some("materials/legacy.psxt"),
+        blend_mode: Opaque,
+        tint: (128, 128, 128),
+        face_sidedness: Both,
+        double_sided: true,
+    )"#;
+    let legacy: MaterialResource = ron::from_str(legacy).expect("legacy material parses");
+    assert_eq!(legacy.active_version_id, MaterialVersionId::ORIGINAL);
+    assert_eq!(legacy.active_version_name, "Original");
+    assert_eq!(legacy.version_count(), 1);
+
+    let mut project = ProjectDocument::new("version persistence");
+    let mut material = legacy;
+    let generated = material.create_version("LLM Moss");
+    material.texture_mode = MaterialTextureMode::Generated;
+    material.generated.noise.seed = 73;
+    material.tint = [52, 91, 47];
+    let material_id = project.add_resource("Stone", ResourceData::Material(material));
+
+    let loaded = ProjectDocument::from_ron_str(&project.to_ron_string().unwrap()).unwrap();
+    let ResourceData::Material(loaded) = &loaded.resource(material_id).unwrap().data else {
+        panic!("material changed resource kind");
+    };
+    assert_eq!(loaded.active_version_id, generated);
+    assert_eq!(loaded.active_version_name, "LLM Moss");
+    assert_eq!(loaded.version_count(), 2);
+    assert_eq!(loaded.generated.noise.seed, 73);
+    assert!(loaded
+        .version_options()
+        .iter()
+        .any(|(id, name)| *id == MaterialVersionId::ORIGINAL && name == "Original"));
 }
 
 #[test]
@@ -985,6 +1120,34 @@ fn wall_stack_placement_preserves_sloped_top_edge() {
     let heights = grid.wall_heights_above_stack_or_surfaces(0, 0, GridDirection::North);
 
     assert_eq!(heights, [1152, 1408, 3456, 3200]);
+}
+
+#[test]
+fn pushing_floor_below_preserves_existing_layers_and_inherits_room_look() {
+    let mut grid = WorldGrid::empty(2, 1, 1024);
+    grid.elevation = 4096;
+    grid.ambient_color = [18, 24, 31];
+    grid.set_floor(1, 0, 128, None);
+    grid.push_floor();
+    grid.floor_mut(1).unwrap().set_floor(0, 0, 64, None);
+
+    grid.push_floor_below();
+
+    assert_eq!(grid.floor_count(), 3);
+    assert_eq!(grid.elevation, 2048);
+    assert_eq!(grid.ambient_color, [18, 24, 31]);
+    assert!(grid.floor(0).unwrap().sector(1, 0).is_none());
+    assert!(grid.floor(1).unwrap().sector(1, 0).unwrap().floor.is_some());
+    assert_eq!(grid.floor(1).unwrap().elevation, 4096);
+    assert!(grid.floor(2).unwrap().sector(0, 0).unwrap().floor.is_some());
+    assert_eq!(grid.floor(2).unwrap().elevation, 6144);
+
+    let encoded = ron::ser::to_string_pretty(&grid, ron::ser::PrettyConfig::default()).unwrap();
+    let decoded: WorldGrid = ron::from_str(&encoded).unwrap();
+    assert_eq!(
+        decoded, grid,
+        "stacked layers must use the existing RON schema"
+    );
 }
 
 #[test]
@@ -1408,6 +1571,18 @@ fn starter_model_files_present_on_disk() {
     assert!(root
             .join("assets/models/crimson_cross_knight/crimson_cross_knight_armature_idle_03_baselayer.psxanim")
             .is_file());
+    assert!(root
+        .join("assets/models/ci_player/ci_player.psxmdl")
+        .is_file());
+    assert!(root
+        .join("assets/models/rust_mantis/rust_mantis.psxmdl")
+        .is_file());
+    assert!(root
+        .join("assets/animations/ci_player_complete/roll.psxanim")
+        .is_file());
+    assert!(root
+        .join("assets/animations/rust_mantis_starter/idle.psxanim")
+        .is_file());
 }
 
 #[test]
@@ -1470,6 +1645,76 @@ fn starter_project_has_scene_tree_and_resources() {
         grid.width as usize * grid.depth as usize
     );
     assert!(grid.populated_sector_count() > 0);
+
+    let aletha = project
+        .resources
+        .iter()
+        .find_map(|resource| match &resource.data {
+            ResourceData::Character(character) if resource.name == "Aletha" => Some(character),
+            _ => None,
+        })
+        .expect("starter includes Aletha");
+    assert_eq!(aletha.spawn_role, CharacterSpawnRole::Player);
+    assert_eq!(
+        (aletha.radius, aletha.walk_speed, aletha.run_speed),
+        (188, 44, 94)
+    );
+    assert_eq!(aletha.roll_speed, 165);
+    let aletha_material = aletha
+        .material
+        .expect("Aletha carries her crystal material");
+    let material_resource = project
+        .resource(aletha_material)
+        .expect("Aletha material exists");
+    assert_eq!(material_resource.name, "Aletha Crystal");
+    assert!(matches!(material_resource.data, ResourceData::Material(_)));
+    assert_eq!(
+        (
+            aletha.camera_distance,
+            aletha.camera_height,
+            aletha.camera_target_height,
+        ),
+        (3300, 1500, 900)
+    );
+
+    let mantis = project
+        .resources
+        .iter()
+        .find_map(|resource| match &resource.data {
+            ResourceData::Character(character) if resource.name == "Rust Mantis Enemy" => {
+                Some(character)
+            }
+            _ => None,
+        })
+        .expect("starter includes the Rust Mantis enemy");
+    assert_eq!(mantis.spawn_role, CharacterSpawnRole::Enemy);
+    assert_eq!(mantis.walk_speed, 28);
+    let enemy = mantis.enemy_behavior.expect("Mantis enemy behavior preset");
+    assert_eq!(enemy.aggro_radius, 2335);
+    assert_eq!(enemy.patrol_offset, [0, 0, -6000]);
+    assert_eq!(enemy.reaction_ticks, 22);
+
+    for name in [
+        "Obsidian Wraith Enemy",
+        "Hooded Wretch Enemy",
+        "Crowned Wraith Enemy",
+    ] {
+        let character = project
+            .resources
+            .iter()
+            .find_map(|resource| match &resource.data {
+                ResourceData::Character(character) if resource.name == name => Some(character),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("starter includes {name}"));
+        assert_eq!(character.spawn_role, CharacterSpawnRole::Enemy, "{name}");
+        assert_eq!(character.walk_speed, 28, "{name}");
+        assert_eq!(
+            character.enemy_behavior.map(|enemy| enemy.aggro_radius),
+            Some(2335),
+            "{name}"
+        );
+    }
 }
 
 #[test]
@@ -2076,6 +2321,41 @@ fn material_lab_recipe_roundtrips_through_ron_string() {
 }
 
 #[test]
+fn transition_material_recipe_roundtrips_through_ron_string() {
+    let mut project = ProjectDocument::new("transition-material");
+    let source_a = project.add_resource(
+        "Sand",
+        ResourceData::Material(MaterialResource::opaque(Some("sand.psxt".to_string()))),
+    );
+    let source_b = project.add_resource(
+        "Stone",
+        ResourceData::Material(MaterialResource::opaque(Some("stone.psxt".to_string()))),
+    );
+    let mut material = MaterialResource::opaque(None);
+    material.texture_mode = MaterialTextureMode::Transition;
+    material.transition = TransitionMaterialTexture {
+        source_a: Some(source_a),
+        source_b: Some(source_b),
+        size: 128,
+        coverage: 191,
+        shape: TransitionMaskShape::Corner,
+        rotation_quarters: 3,
+        flip_x: true,
+        flip_y: false,
+        edge_breakup: 37,
+        seed: 0x5eed_cafe,
+        connected_edges: 0b1010,
+    };
+    project.add_resource("Sand over stone", ResourceData::Material(material));
+
+    let ron = project.to_ron_string().unwrap();
+    assert!(ron.contains("texture_mode: Transition"));
+    assert!(ron.contains("shape: Corner"));
+    assert!(ron.contains("connected_edges: 10"));
+    assert_eq!(ProjectDocument::from_ron_str(&ron).unwrap(), project);
+}
+
+#[test]
 fn runtime_depth_sort_mode_roundtrips_through_ron_string() {
     let mut project = ProjectDocument::new("depth-sort");
     project.runtime_depth_sort_mode = RuntimeDepthSortMode::HybridWalls;
@@ -2115,6 +2395,7 @@ fn animation_library_resources_roundtrip_and_resolve_by_path() {
             looping: true,
             tags: vec!["idle".to_string()],
             calibration: Default::default(),
+            pose_corrections: Vec::new(),
         }),
     );
     let set = project.add_resource(
@@ -2208,6 +2489,7 @@ fn model_targeted_animation_clips_do_not_leak_across_shared_skeletons() {
         looping: true,
         tags: Vec::new(),
         calibration: Default::default(),
+        pose_corrections: Vec::new(),
     };
     let shared = project.add_resource(
         "Shared",
@@ -2426,6 +2708,68 @@ fn resource_rename_moves_project_owned_texture_file() {
         b"texture"
     );
     assert_eq!(report.renamed_files.len(), 1);
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn deleting_versioned_material_removes_each_unshared_texture() {
+    let root = unique_temp_dir("delete-versioned-material-files");
+    let texture_dir = root.join("assets").join("textures");
+    std::fs::create_dir_all(&texture_dir).unwrap();
+    std::fs::write(texture_dir.join("original.psxt"), b"original").unwrap();
+    std::fs::write(texture_dir.join("llm.psxt"), b"llm").unwrap();
+
+    let mut project = ProjectDocument::new("version files");
+    let mut material = MaterialResource::opaque(Some("assets/textures/original.psxt".to_string()));
+    material.create_version("LLM");
+    material.psxt_path = Some("assets/textures/llm.psxt".to_string());
+    let id = project.add_resource("Stone", ResourceData::Material(material));
+
+    let report = project
+        .delete_resource_with_files(id, &root)
+        .expect("versioned material deletes");
+    let mut deleted = report
+        .deleted_files
+        .iter()
+        .map(|file| file.path.as_str())
+        .collect::<Vec<_>>();
+    deleted.sort_unstable();
+    assert_eq!(
+        deleted,
+        vec!["assets/textures/llm.psxt", "assets/textures/original.psxt"]
+    );
+    assert!(!texture_dir.join("original.psxt").exists());
+    assert!(!texture_dir.join("llm.psxt").exists());
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn renaming_material_keeps_texture_shared_with_saved_version() {
+    let root = unique_temp_dir("rename-version-shared-texture");
+    let texture_dir = root.join("assets").join("textures");
+    std::fs::create_dir_all(&texture_dir).unwrap();
+    std::fs::write(texture_dir.join("stone.psxt"), b"stone").unwrap();
+
+    let mut project = ProjectDocument::new("version sharing");
+    let mut material = MaterialResource::opaque(Some("assets/textures/stone.psxt".to_string()));
+    material.create_version("LLM");
+    let id = project.add_resource("Stone", ResourceData::Material(material));
+
+    let report = project
+        .rename_resource_with_files(id, "Cathedral Stone", &root)
+        .unwrap();
+    assert!(report.renamed_files.is_empty());
+    assert!(texture_dir.join("stone.psxt").exists());
+    assert!(!texture_dir.join("cathedral_stone.psxt").exists());
+    let ResourceData::Material(material) = &project.resource(id).unwrap().data else {
+        panic!("stone remains a material");
+    };
+    assert!(material
+        .version_texture_paths()
+        .iter()
+        .all(|path| *path == "assets/textures/stone.psxt"));
 
     let _ = std::fs::remove_dir_all(root);
 }
@@ -2658,6 +3002,80 @@ fn delete_resource_removes_entry_and_clears_references() {
     }
 
     let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn delete_material_source_clears_transition_recipes() {
+    let mut project = ProjectDocument::new("delete-transition-source");
+    let source = project.add_resource(
+        "Source",
+        ResourceData::Material(MaterialResource::opaque(None)),
+    );
+    let transition = project.add_resource(
+        "Transition",
+        ResourceData::Material(MaterialResource {
+            texture_mode: MaterialTextureMode::Transition,
+            transition: TransitionMaterialTexture {
+                source_a: Some(source),
+                source_b: Some(source),
+                ..TransitionMaterialTexture::default()
+            },
+            secondary_layer: Some(ModelSecondaryLayer {
+                texture_mode: MaterialTextureMode::Transition,
+                transition: TransitionMaterialTexture {
+                    source_a: Some(source),
+                    source_b: Some(source),
+                    ..TransitionMaterialTexture::default()
+                },
+                ..ModelSecondaryLayer::default()
+            }),
+            ..MaterialResource::opaque(None)
+        }),
+    );
+
+    assert_eq!(project.resource_reference_count(source), 4);
+    let report = project.delete_resource(source).expect("source exists");
+    assert_eq!(report.cleared_references, 4);
+    let ResourceData::Material(material) = &project.resource(transition).unwrap().data else {
+        panic!("transition remains a material");
+    };
+    assert_eq!(material.transition.source_a, None);
+    assert_eq!(material.transition.source_b, None);
+    let layer = material
+        .secondary_layer
+        .as_ref()
+        .expect("layer is preserved");
+    assert_eq!(layer.transition.source_a, None);
+    assert_eq!(layer.transition.source_b, None);
+}
+
+#[test]
+fn delete_material_source_clears_inactive_version_recipes() {
+    let mut project = ProjectDocument::new("delete-versioned-transition-source");
+    let source = project.add_resource(
+        "Source",
+        ResourceData::Material(MaterialResource::opaque(None)),
+    );
+    let mut transition = MaterialResource::opaque(None);
+    transition.texture_mode = MaterialTextureMode::Transition;
+    transition.transition.source_a = Some(source);
+    transition.transition.source_b = Some(source);
+    transition.create_version("LLM Alternative");
+    transition.texture_mode = MaterialTextureMode::Generated;
+    transition.transition.source_a = None;
+    transition.transition.source_b = None;
+    let transition_id = project.add_resource("Transition", ResourceData::Material(transition));
+
+    assert_eq!(project.resource_reference_count(source), 2);
+    let report = project.delete_resource(source).expect("source exists");
+    assert_eq!(report.cleared_references, 2);
+    let ResourceData::Material(material) = &mut project.resource_mut(transition_id).unwrap().data
+    else {
+        panic!("transition remains a material");
+    };
+    assert!(material.activate_version(MaterialVersionId::ORIGINAL));
+    assert_eq!(material.transition.source_a, None);
+    assert_eq!(material.transition.source_b, None);
 }
 
 #[test]

@@ -1,4 +1,5 @@
 use super::*;
+use crate::{GridDirection, GridVerticalFace};
 
 pub(crate) fn cooked_sector(
     cooked: &CookedWorldGrid,
@@ -196,6 +197,59 @@ pub(crate) fn auto_wire_floor_stack_links(
     out
 }
 
+/// Build the flattened stacked-room overlap table and assign each room's
+/// contiguous slice. Unlike vertical portals, overlaps are emitted for sealed
+/// stacked cells too: a translucent upper floor still needs the lower room
+/// resident and drawable so the PS1 blend operation has geometry behind it.
+pub(crate) fn assign_floor_stack_overlaps(
+    rooms: &mut [PlaytestRoom],
+    chunks_by_node: &HashMap<NodeId, Vec<AuthoredRoomChunk>>,
+) -> Vec<u16> {
+    let mut overlaps = vec![Vec::<u16>::new(); rooms.len()];
+    for chunks in chunks_by_node.values() {
+        for left_index in 0..chunks.len() {
+            let left = &chunks[left_index];
+            for right in &chunks[left_index + 1..] {
+                if left.floor_idx == right.floor_idx || !chunks_share_world_cell(left, right) {
+                    continue;
+                }
+                if let Some(list) = overlaps.get_mut(left.room_index as usize) {
+                    list.push(right.room_index);
+                }
+                if let Some(list) = overlaps.get_mut(right.room_index as usize) {
+                    list.push(left.room_index);
+                }
+            }
+        }
+    }
+
+    let mut flattened = Vec::new();
+    for (room_index, room_overlaps) in overlaps.iter_mut().enumerate() {
+        room_overlaps.sort_unstable();
+        room_overlaps.dedup();
+        let first = flattened.len();
+        let available = usize::from(u8::MAX).min(room_overlaps.len());
+        flattened.extend_from_slice(&room_overlaps[..available]);
+        if let Some(room) = rooms.get_mut(room_index) {
+            room.overlapped_room_first = u16::try_from(first).unwrap_or(u16::MAX);
+            room.overlapped_room_count = u8::try_from(available).unwrap_or(u8::MAX);
+        }
+    }
+    flattened
+}
+
+fn chunks_share_world_cell(left: &AuthoredRoomChunk, right: &AuthoredRoomChunk) -> bool {
+    let (smaller, larger) = if left.cells.len() <= right.cells.len() {
+        (left, right)
+    } else {
+        (right, left)
+    };
+    smaller.cells.iter().copied().any(|cell| {
+        let world_cell = chunk_cell_world_cell(smaller, cell);
+        chunk_contains_world_cell(larger, world_cell)
+    })
+}
+
 /// Emit vertical portal quads between consecutive floors, mirroring the
 /// floor links. For each cell shared by floor N (below) and floor N+1
 /// (above) the runtime gets a reciprocal pair: an up-portal owned by the
@@ -227,6 +281,12 @@ pub(crate) fn auto_wire_floor_stack_portals(
         if s <= 0 {
             continue;
         }
+        let room_origin_y_base = scene
+            .node(*node_id)
+            .map(|node| (f64::from(node.transform.translation[1]) * f64::from(s)) as i32)
+            .unwrap_or(0);
+        let floor_elevation_offset = room_origin_y_base.saturating_sub(grid.elevation);
+        let mut openings: BTreeMap<(u16, u16, i32), BTreeSet<(i32, i32)>> = BTreeMap::new();
         for chunk in chunks {
             // Only emit from the lower side of each boundary, so each
             // shared cell yields exactly one reciprocal pair.
@@ -236,7 +296,7 @@ pub(crate) fn auto_wire_floor_stack_portals(
             else {
                 continue;
             };
-            let boundary_y = upper_grid.elevation;
+            let boundary_y = floor_elevation_offset.saturating_add(upper_grid.elevation);
             for &cell in &chunk.cells {
                 let world_cell = chunk_cell_world_cell(chunk, cell);
                 let Some(above) = chunks.iter().find(|other| {
@@ -264,11 +324,18 @@ pub(crate) fn auto_wire_floor_stack_portals(
                 }
                 let below_room = u16::try_from(chunk.room_index as usize).unwrap_or(u16::MAX);
                 let above_room = above.room_index;
-                // Cell footprint in world units at the boundary plane.
-                let x0 = world_cell[0].saturating_mul(s);
-                let x1 = world_cell[0].saturating_add(1).saturating_mul(s);
-                let z0 = world_cell[1].saturating_mul(s);
-                let z1 = world_cell[1].saturating_add(1).saturating_mul(s);
+                openings
+                    .entry((below_room, above_room, boundary_y))
+                    .or_default()
+                    .insert((world_cell[0], world_cell[1]));
+            }
+        }
+        for ((below_room, above_room, boundary_y), cells) in openings {
+            for [x0_cell, z0_cell, x1_cell, z1_cell] in exact_cell_rectangles(cells) {
+                let x0 = x0_cell.saturating_mul(s);
+                let x1 = x1_cell.saturating_mul(s);
+                let z0 = z0_cell.saturating_mul(s);
+                let z1 = z1_cell.saturating_mul(s);
                 let quad = [
                     [x0, boundary_y, z0],
                     [x1, boundary_y, z0],
@@ -296,6 +363,367 @@ pub(crate) fn auto_wire_floor_stack_portals(
         }
     }
     out
+}
+
+/// Cover grid cells with deterministic, non-overlapping rectangles. A
+/// rectangle never bridges a missing cell, so the combined portal quads cover
+/// exactly the same opening as the original per-cell quads.
+fn exact_cell_rectangles(mut cells: BTreeSet<(i32, i32)>) -> Vec<[i32; 4]> {
+    let mut rectangles = Vec::new();
+    while let Some(&(x0, z0)) = cells.first() {
+        let mut x1 = x0 + 1;
+        while cells.contains(&(x1, z0)) {
+            x1 += 1;
+        }
+        let mut z1 = z0 + 1;
+        while (x0..x1).all(|x| cells.contains(&(x, z1))) {
+            z1 += 1;
+        }
+        for z in z0..z1 {
+            for x in x0..x1 {
+                cells.remove(&(x, z));
+            }
+        }
+        rectangles.push([x0, z0, x1, z1]);
+    }
+    rectangles
+}
+
+#[cfg(test)]
+mod stack_portal_compaction_tests {
+    use super::exact_cell_rectangles;
+    use std::collections::BTreeSet;
+
+    fn covered_cells(rectangles: &[[i32; 4]]) -> BTreeSet<(i32, i32)> {
+        let mut covered = BTreeSet::new();
+        for &[x0, z0, x1, z1] in rectangles {
+            assert!(x1 > x0 && z1 > z0);
+            for z in z0..z1 {
+                for x in x0..x1 {
+                    assert!(covered.insert((x, z)), "rectangles overlap at ({x}, {z})");
+                }
+            }
+        }
+        covered
+    }
+
+    #[test]
+    fn exact_rectangles_compact_runs_without_filling_holes() {
+        let cells: BTreeSet<_> = [
+            (0, 0),
+            (1, 0),
+            (2, 0),
+            (0, 1),
+            (2, 1),
+            (0, 2),
+            (1, 2),
+            (2, 2),
+            (5, 4),
+            (6, 4),
+            (5, 5),
+            (6, 5),
+        ]
+        .into_iter()
+        .collect();
+        let rectangles = exact_cell_rectangles(cells.clone());
+        assert_eq!(covered_cells(&rectangles), cells);
+        assert!(rectangles.len() < cells.len());
+    }
+
+    #[test]
+    fn exact_rectangles_merge_a_full_opening() {
+        let cells: BTreeSet<_> = (10..16).map(|z| (3, z)).collect();
+        assert_eq!(exact_cell_rectangles(cells), vec![[3, 10, 4, 16]]);
+    }
+}
+
+/// Emit lateral portal pairs where two consecutive authored layers meet along
+/// a cardinal edge instead of overlapping in X/Z.
+///
+/// A terraced floor (a shallow pit, stair landing, water basin, etc.) is often
+/// easiest to author by painting its lower cells on the layer below. Those
+/// cells cook into a distinct runtime room because their `origin_y` differs.
+/// Previously only same-layer chunks received horizontal portals and only
+/// overlapping cells received vertical portals, leaving an adjacent terrace
+/// as two isolated runtime rooms. The current room could neither stream/query
+/// the other side's collision nor keep it in the visible set.
+///
+/// Low solid riser walls are deliberately allowed: if their top does not rise
+/// above the higher floor edge, the character motor can step over them. A wall
+/// extending into the opening still seals the seam and suppresses the portal.
+pub(crate) fn auto_wire_floor_terrace_portals(
+    scene: &crate::Scene,
+    chunks_by_node: &HashMap<NodeId, Vec<AuthoredRoomChunk>>,
+) -> Vec<PlaytestRoomPortal> {
+    let mut out = Vec::new();
+    for (node_id, chunks) in chunks_by_node {
+        let Some(room_node) = scene.node(*node_id) else {
+            continue;
+        };
+        let NodeKind::Room { grid } = &room_node.kind else {
+            continue;
+        };
+        let s = grid.sector_size;
+        if s <= 0 || grid.floor_count() < 2 {
+            continue;
+        }
+        let room_origin_y_base =
+            (f64::from(room_node.transform.translation[1]) * f64::from(s)) as i32;
+        let floor_elevation_offset = room_origin_y_base.saturating_sub(grid.elevation);
+        let mut seams = Vec::new();
+
+        for source in chunks {
+            let Some(source_grid) = grid.floor(source.floor_idx) else {
+                continue;
+            };
+            let source_origin_y = floor_elevation_offset.saturating_add(source_grid.elevation);
+            for &cell in &source.cells {
+                let world_cell = chunk_cell_world_cell(source, cell);
+                for direction in GridDirection::CARDINAL {
+                    let Some(opposite) = direction.opposite_cardinal() else {
+                        continue;
+                    };
+                    let neighbour_cell = terrace_neighbour_world_cell(world_cell, direction);
+                    let Some(destination) = chunks.iter().find(|candidate| {
+                        candidate.room_index != source.room_index
+                            && candidate.floor_idx.abs_diff(source.floor_idx) == 1
+                            && chunk_contains_world_cell(candidate, neighbour_cell)
+                    }) else {
+                        continue;
+                    };
+                    // One physical seam produces one reciprocal pair.
+                    if source.room_index > destination.room_index {
+                        continue;
+                    }
+                    let Some(destination_grid) = grid.floor(destination.floor_idx) else {
+                        continue;
+                    };
+                    let Some((source_x, source_z)) =
+                        source_grid.world_cell_to_array(world_cell[0], world_cell[1])
+                    else {
+                        continue;
+                    };
+                    let Some((destination_x, destination_z)) =
+                        destination_grid.world_cell_to_array(neighbour_cell[0], neighbour_cell[1])
+                    else {
+                        continue;
+                    };
+                    let Some(source_sector) = source_grid.sector(source_x, source_z) else {
+                        continue;
+                    };
+                    let Some(destination_sector) =
+                        destination_grid.sector(destination_x, destination_z)
+                    else {
+                        continue;
+                    };
+                    if source_sector.floor.is_none() || destination_sector.floor.is_none() {
+                        continue;
+                    }
+
+                    let destination_origin_y =
+                        floor_elevation_offset.saturating_add(destination_grid.elevation);
+                    let source_heights = source_grid
+                        .wall_heights_aligned_to_surfaces_for_world_cell(
+                            world_cell[0],
+                            world_cell[1],
+                            direction,
+                        )
+                        .map(|height| source_origin_y.saturating_add(height));
+                    let destination_heights = destination_grid
+                        .wall_heights_aligned_to_surfaces_for_world_cell(
+                            neighbour_cell[0],
+                            neighbour_cell[1],
+                            opposite,
+                        )
+                        .map(|height| destination_origin_y.saturating_add(height));
+                    let bottom = source_heights[0]
+                        .max(source_heights[1])
+                        .max(destination_heights[0])
+                        .max(destination_heights[1]);
+                    let top = source_heights[2]
+                        .min(source_heights[3])
+                        .min(destination_heights[2])
+                        .min(destination_heights[3]);
+                    if top <= bottom
+                        || terrace_wall_seals_opening(
+                            source_sector.walls.get(direction),
+                            source_origin_y,
+                            bottom,
+                        )
+                        || terrace_wall_seals_opening(
+                            destination_sector.walls.get(opposite),
+                            destination_origin_y,
+                            bottom,
+                        )
+                    {
+                        continue;
+                    }
+
+                    seams.push(TerracePortalSeam {
+                        source_room: source.room_index,
+                        destination_room: destination.room_index,
+                        direction,
+                        first_cell: world_cell,
+                        last_cell: world_cell,
+                        bottom,
+                        top,
+                    });
+                }
+            }
+        }
+
+        seams.sort_by_key(terrace_portal_seam_sort_key);
+        let mut index = 0usize;
+        while index < seams.len() {
+            let mut merged = seams[index];
+            index += 1;
+            while index < seams.len() && terrace_portal_seams_can_merge(merged, seams[index]) {
+                merged.last_cell = seams[index].last_cell;
+                index += 1;
+            }
+            let Some(opposite) = merged.direction.opposite_cardinal() else {
+                continue;
+            };
+            let vertices = terrace_portal_span_vertices(merged, s);
+            out.push(PlaytestRoomPortal {
+                source_room: merged.source_room,
+                destination_room: merged.destination_room,
+                kind: 0,
+                normal: terrace_portal_source_normal(merged.direction),
+                vertices,
+            });
+            out.push(PlaytestRoomPortal {
+                source_room: merged.destination_room,
+                destination_room: merged.source_room,
+                kind: 0,
+                normal: terrace_portal_source_normal(opposite),
+                vertices,
+            });
+        }
+    }
+    out
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TerracePortalSeam {
+    source_room: u16,
+    destination_room: u16,
+    direction: GridDirection,
+    first_cell: [i32; 2],
+    last_cell: [i32; 2],
+    bottom: i32,
+    top: i32,
+}
+
+fn terrace_portal_seam_sort_key(seam: &TerracePortalSeam) -> (u16, u16, u8, i32, i32, i32, i32) {
+    let (line, span) = terrace_portal_seam_line_and_span(*seam);
+    (
+        seam.source_room,
+        seam.destination_room,
+        terrace_direction_slot(seam.direction),
+        line,
+        span,
+        seam.bottom,
+        seam.top,
+    )
+}
+
+fn terrace_portal_seams_can_merge(left: TerracePortalSeam, right: TerracePortalSeam) -> bool {
+    if left.source_room != right.source_room
+        || left.destination_room != right.destination_room
+        || left.direction != right.direction
+        || left.bottom != right.bottom
+        || left.top != right.top
+    {
+        return false;
+    }
+    let (left_line, _) = terrace_portal_seam_line_and_span(left);
+    let (right_line, right_span) = terrace_portal_seam_line_and_span(right);
+    let left_span = match left.direction {
+        GridDirection::North | GridDirection::South => left.last_cell[0],
+        GridDirection::East | GridDirection::West => left.last_cell[1],
+        GridDirection::NorthWestSouthEast | GridDirection::NorthEastSouthWest => i32::MIN,
+    };
+    left_line == right_line && left_span.saturating_add(1) == right_span
+}
+
+fn terrace_portal_seam_line_and_span(seam: TerracePortalSeam) -> (i32, i32) {
+    match seam.direction {
+        GridDirection::North => (seam.first_cell[1].saturating_add(1), seam.first_cell[0]),
+        GridDirection::East => (seam.first_cell[0].saturating_add(1), seam.first_cell[1]),
+        GridDirection::South => (seam.first_cell[1], seam.first_cell[0]),
+        GridDirection::West => (seam.first_cell[0], seam.first_cell[1]),
+        GridDirection::NorthWestSouthEast | GridDirection::NorthEastSouthWest => {
+            (i32::MIN, i32::MIN)
+        }
+    }
+}
+
+fn terrace_direction_slot(direction: GridDirection) -> u8 {
+    match direction {
+        GridDirection::North => 0,
+        GridDirection::East => 1,
+        GridDirection::South => 2,
+        GridDirection::West => 3,
+        GridDirection::NorthWestSouthEast | GridDirection::NorthEastSouthWest => u8::MAX,
+    }
+}
+
+fn terrace_neighbour_world_cell(cell: [i32; 2], direction: GridDirection) -> [i32; 2] {
+    match direction {
+        GridDirection::North => [cell[0], cell[1].saturating_add(1)],
+        GridDirection::East => [cell[0].saturating_add(1), cell[1]],
+        GridDirection::South => [cell[0], cell[1].saturating_sub(1)],
+        GridDirection::West => [cell[0].saturating_sub(1), cell[1]],
+        GridDirection::NorthWestSouthEast | GridDirection::NorthEastSouthWest => cell,
+    }
+}
+
+fn terrace_wall_seals_opening(
+    walls: &[GridVerticalFace],
+    room_origin_y: i32,
+    opening_bottom: i32,
+) -> bool {
+    walls.iter().any(|wall| {
+        wall.solid
+            && room_origin_y.saturating_add(wall.heights[2].max(wall.heights[3])) > opening_bottom
+    })
+}
+
+fn terrace_portal_span_vertices(seam: TerracePortalSeam, sector_size: i32) -> [[i32; 3]; 4] {
+    let x0 = seam.first_cell[0].saturating_mul(sector_size);
+    let x1 = seam.last_cell[0]
+        .saturating_add(1)
+        .saturating_mul(sector_size);
+    let z0 = seam.first_cell[1].saturating_mul(sector_size);
+    let z1 = seam.last_cell[1]
+        .saturating_add(1)
+        .saturating_mul(sector_size);
+    let (a, b) = match seam.direction {
+        GridDirection::North => ([x0, z1], [x1, z1]),
+        GridDirection::East => ([x1, z1], [x1, z0]),
+        GridDirection::South => ([x0, z0], [x1, z0]),
+        GridDirection::West => ([x0, z1], [x0, z0]),
+        GridDirection::NorthWestSouthEast | GridDirection::NorthEastSouthWest => {
+            ([x0, z0], [x0, z0])
+        }
+    };
+    [
+        [a[0], seam.bottom, a[1]],
+        [b[0], seam.bottom, b[1]],
+        [b[0], seam.top, b[1]],
+        [a[0], seam.top, a[1]],
+    ]
+}
+
+fn terrace_portal_source_normal(direction: GridDirection) -> [i16; 3] {
+    match direction {
+        GridDirection::North => [0, 0, -1],
+        GridDirection::East => [-1, 0, 0],
+        GridDirection::South => [0, 0, 1],
+        GridDirection::West => [1, 0, 0],
+        GridDirection::NorthWestSouthEast | GridDirection::NorthEastSouthWest => [0, 0, 0],
+    }
 }
 
 /// Sort the portal table by `source_room` and rebuild every room's

@@ -142,6 +142,26 @@ impl Playtest {
             }
         }
 
+        // Stacked overlaps are visibility additions, not portal-graph edges.
+        // Reachability mode above therefore cannot discover them through
+        // `room_graph_ring`. Append every remaining visible room explicitly so
+        // the active-window job can build the lower geometry that translucent
+        // upper floors blend against. Portal rooms already present in the ring
+        // are deduplicated here.
+        let visible = self.visibility.result.room_count.min(MAX_ACTIVE_ROOMS);
+        let mut visible_index = 0usize;
+        while visible_index < visible && requested_count < MAX_ACTIVE_ROOMS {
+            let room = self.visibility.result.rooms[visible_index].room;
+            if room != current_index
+                && room != INVALID_ROOM_INDEX
+                && !requested_rooms[..requested_count].contains(&room)
+            {
+                requested_rooms[requested_count] = room;
+                requested_count += 1;
+            }
+            visible_index += 1;
+        }
+
         self.window.begin_job(
             current_index,
             requested_rooms,

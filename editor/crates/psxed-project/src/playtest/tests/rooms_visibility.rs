@@ -1,4 +1,5 @@
 use super::*;
+use crate::GridVerticalFace;
 
 #[test]
 fn generated_room_cache_counts_match_runtime_builder() {
@@ -148,6 +149,27 @@ fn floors_cook_to_stacked_rooms_with_auto_links() {
         package.rooms.iter().any(|room| room.origin_y > 0),
         "an upper floor should cook at a stacked origin_y"
     );
+    // Every X/Z-overlapping floor room references its counterpart even when
+    // the vertical boundary is sealed. This keeps the lower geometry drawable
+    // behind translucent upper surfaces.
+    let lower = package
+        .rooms
+        .iter()
+        .position(|room| room.origin_y == 0)
+        .expect("base floor room");
+    let upper = package
+        .rooms
+        .iter()
+        .position(|room| room.origin_y > 0)
+        .expect("upper floor room");
+    let overlap_slice = |room_index: usize| {
+        let room = &package.rooms[room_index];
+        let first = room.overlapped_room_first as usize;
+        let end = first + room.overlapped_room_count as usize;
+        &package.room_overlapped_rooms[first..end]
+    };
+    assert!(overlap_slice(lower).contains(&(upper as u16)));
+    assert!(overlap_slice(upper).contains(&(lower as u16)));
     // The floors are auto-wired with vertical room links.
     assert!(
         package
@@ -185,6 +207,149 @@ fn floors_cook_to_stacked_rooms_with_auto_links() {
             p.vertices
         );
     }
+}
+
+#[test]
+fn adjacent_floor_layers_cook_as_a_traversable_terrace_seam() {
+    let mut project = project_with_one_room();
+    let material = project
+        .resources
+        .iter()
+        .find(|resource| matches!(resource.data, ResourceData::Material(_)))
+        .map(|resource| resource.id);
+
+    let room_id = project
+        .active_scene()
+        .nodes()
+        .iter()
+        .find(|node| matches!(node.kind, NodeKind::Room { .. }))
+        .map(|node| node.id)
+        .expect("room node");
+    let node = project
+        .active_scene_mut()
+        .node_mut(room_id)
+        .expect("room node");
+    node.transform.translation[1] = 0.0;
+    let NodeKind::Room { grid } = &mut node.kind else {
+        panic!("expected a room");
+    };
+    let sector_size = grid.sector_size;
+    let mut lower = WorldGrid::empty(2, 1, sector_size);
+    lower.set_floor(0, 0, 0, material);
+    // This is a solid collision wall, but it ends exactly at the upper
+    // walking surface. It is a low riser, not a room-sealing wall.
+    lower
+        .ensure_sector(0, 0)
+        .expect("lower sector")
+        .walls
+        .east
+        .push(GridVerticalFace::flat(0, 320, material));
+    let mut upper = WorldGrid::empty(2, 1, sector_size);
+    upper.elevation = 320;
+    upper.set_floor(1, 0, 0, material);
+    lower.floors_above.push(upper);
+    *grid = lower;
+
+    let (package, report) = build_package(&project, &starter_project_root());
+    assert!(report.is_ok(), "{report:?}");
+    let package = package.expect("package");
+    assert_eq!(package.rooms.len(), 2, "one room per authored layer");
+    assert!(
+        package.room_floor_links.is_empty(),
+        "the layers do not overlap"
+    );
+
+    let lateral: Vec<_> = package
+        .room_portals
+        .iter()
+        .filter(|portal| portal.kind == 0)
+        .collect();
+    assert_eq!(lateral.len(), 2, "the terrace seam must be reciprocal");
+    assert!(
+        lateral.iter().any(|portal| portal.normal == [-1, 0, 0])
+            && lateral.iter().any(|portal| portal.normal == [1, 0, 0]),
+        "both sides of the seam must reach the other room: {lateral:?}"
+    );
+    for portal in lateral {
+        assert_eq!(portal.vertices[0][0], sector_size);
+        assert_eq!(portal.vertices[0][1], 320);
+        assert!(portal.vertices[2][1] > portal.vertices[0][1]);
+    }
+    assert!(
+        package.rooms.iter().all(|room| room.portal_count == 1),
+        "each runtime room must expose its side of the terrace portal"
+    );
+}
+
+#[test]
+fn layered_pvs_can_leave_a_room_and_reenter_behind_a_shallow_recess() {
+    let mut project = project_with_one_room();
+    let material = project
+        .resources
+        .iter()
+        .find(|resource| matches!(resource.data, ResourceData::Material(_)))
+        .map(|resource| resource.id);
+    let room_id = project
+        .active_scene()
+        .nodes()
+        .iter()
+        .find(|node| matches!(node.kind, NodeKind::Room { .. }))
+        .map(|node| node.id)
+        .expect("room node");
+    let node = project.active_scene_mut().node_mut(room_id).expect("room");
+    node.transform.translation[1] = 0.0;
+    let NodeKind::Room { grid } = &mut node.kind else {
+        panic!("expected room grid");
+    };
+    let sector_size = grid.sector_size;
+    let mut lower = WorldGrid::empty(3, 1, sector_size);
+    lower.set_floor(1, 0, 0, material);
+    let mut upper = WorldGrid::empty(3, 1, sector_size);
+    upper.elevation = 320;
+    upper.set_floor(0, 0, 0, material);
+    upper.set_floor(2, 0, 0, material);
+    lower.floors_above.push(upper);
+    *grid = lower;
+
+    let (package, report) = build_package(&project, &starter_project_root());
+    assert!(report.is_ok(), "{report:?}");
+    let package = package.expect("package");
+    let upper_room = package
+        .rooms
+        .iter()
+        .position(|room| room.origin_y == 320)
+        .expect("upper runtime room") as u16;
+    let visibility = package
+        .room_visibility
+        .iter()
+        .find(|visibility| visibility.room == upper_room)
+        .expect("upper room visibility");
+    assert_eq!(visibility.cell_count, 2);
+    let pvs = package.visibility_pvs[visibility.pvs_first as usize];
+    let bits = &package.visibility_pvs_bits
+        [pvs.byte_first as usize..pvs.byte_first as usize + pvs.byte_count as usize];
+    assert_ne!(
+        bits[0] & 0b10,
+        0,
+        "the far upper cell must remain visible through upper -> recess -> upper"
+    );
+
+    let debug = build_debug_topology(&project);
+    assert_eq!(
+        debug.cells.len(),
+        package.visibility_cells.len(),
+        "the editor diagnostic must use the same layered cells as the cook"
+    );
+    assert_eq!(
+        debug.portals.len(),
+        package.room_portals.len(),
+        "the editor diagnostic must include generated terrace portals"
+    );
+    assert!(debug.cells.iter().any(|cell| cell.floor_index == 1));
+    assert!(debug
+        .portals
+        .iter()
+        .any(|portal| portal.portal.source_room != portal.portal.destination_room));
 }
 
 #[test]

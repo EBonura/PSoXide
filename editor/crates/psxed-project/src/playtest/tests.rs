@@ -31,11 +31,13 @@ fn test_wav_mono_44k() -> Vec<u8> {
 }
 
 #[test]
-#[ignore = "diagnostic: run with --ignored --nocapture to inspect demo11 cook"]
-fn diag_demo11_cook() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../projects/demo11");
+#[ignore = "diagnostic: set PSXED_DIAG_PROJECT and run with --ignored --nocapture"]
+fn diag_project_cook() {
+    let root = std::env::var_os("PSXED_DIAG_PROJECT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../projects/demo11"));
     let mut project =
-        ProjectDocument::load_from_path(root.join("project.ron")).expect("load demo11");
+        ProjectDocument::load_from_path(root.join("project.ron")).expect("load diagnostic project");
     project.normalize_loaded();
 
     // Authored side: room node, its floors, the player entity Y.
@@ -110,7 +112,7 @@ fn diag_demo11_cook() {
 
     let (package, report) = build_package(&project, &root);
     println!("report.ok={} errors={:?}", report.is_ok(), report);
-    let package = package.expect("demo11 cooked");
+    let package = package.expect("diagnostic project cooked");
 
     println!("=== COOKED rooms ({}) ===", package.rooms.len());
     for (i, r) in package.rooms.iter().enumerate() {
@@ -516,3 +518,4 @@ mod models_entities;
 mod player_character;
 mod rooms_visibility;
 mod ui_options;
+mod water;
