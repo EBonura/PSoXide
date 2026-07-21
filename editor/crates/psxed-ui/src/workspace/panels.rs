@@ -599,29 +599,18 @@ impl EditorWorkspace {
                             .map(|(_, name)| name.as_str())
                     })
                     .unwrap_or("None");
-                egui::ComboBox::from_id_salt(ui.id().with("scene_state_ui_overlay"))
-                    .selected_text(preview)
-                    .show_ui(ui, |ui| {
-                        if ui
-                            .selectable_label(state.ui_scene.is_none(), "None")
-                            .clicked()
-                            && state.ui_scene.is_some()
-                        {
-                            state.ui_scene = None;
-                            changed = true;
-                        }
-                        for (scene_id, name) in &ui_scene_options {
-                            if ui
-                                .selectable_label(state.ui_scene == Some(*scene_id), name)
-                                .clicked()
-                                && state.ui_scene != Some(*scene_id)
-                            {
-                                state.ui_scene = Some(*scene_id);
-                                overlay_to_switch = Some(*scene_id);
-                                changed = true;
-                            }
-                        }
-                    });
+                let previous = state.ui_scene;
+                if searchable_picker(
+                    ui,
+                    ui.id().with("scene_state_ui_overlay"),
+                    &mut state.ui_scene,
+                    preview,
+                    &ui_scene_options,
+                    SearchablePickerConfig::optional("None").with_search_hint("Search UI scenes…"),
+                ) {
+                    overlay_to_switch = state.ui_scene;
+                    changed |= state.ui_scene != previous;
+                }
             });
             changed |= ui
                 .checkbox(&mut state.ui_input, "UI captures input")
@@ -1906,7 +1895,12 @@ impl EditorWorkspace {
                                             );
                                             return;
                                         };
-                                        changed |= draw_model_material_override_editor(ui, material);
+                                        changed |= draw_model_material_override_editor(
+                                            ui,
+                                            material,
+                                            &material_options,
+                                            material_id,
+                                        );
                                     });
                                     if open_material_lab {
                                         self.material_lab.focused_material = Some(material_id);
@@ -2185,7 +2179,9 @@ impl EditorWorkspace {
                         changed = true;
                     }
                     if let Some(uv) = override_data.uv.as_mut() {
-                        changed |= uv_transform_controls(uv, ui);
+                        let uv_before = *uv;
+                        let _edit = uv_transform_controls(uv, ui);
+                        changed |= *uv != uv_before;
                     }
                 });
 
@@ -2535,12 +2531,14 @@ impl EditorWorkspace {
 
         let mut changed = false;
         let mut status_message: Option<String> = None;
+        let mut selected_uv_change: Option<(GridUvTransformEdit, GridUvTransform)> = None;
         match face.kind {
             FaceKind::Floor => {
                 let Some(face_data) = sector.floor.as_mut() else {
                     ui.weak("Floor was removed");
                     return;
                 };
+                let uv_before = face_data.uv;
                 egui::CollapsingHeader::new(icons::label(icons::BLEND, "Material"))
                     .default_open(true)
                     .show(ui, |ui| {
@@ -2558,17 +2556,23 @@ impl EditorWorkspace {
                         changed |= height_row("Height", &mut face_data.heights, ui);
                         changed |= split_row("Split", &mut face_data.split, ui);
                     });
+                let mut uv_edit = GridUvTransformEdit::default();
                 egui::CollapsingHeader::new(icons::label(icons::GRID, "UV"))
                     .default_open(false)
                     .show(ui, |ui| {
-                        changed |= uv_transform_controls(&mut face_data.uv, ui);
+                        uv_edit = uv_transform_controls(&mut face_data.uv, ui);
                     });
+                changed |= face_data.uv != uv_before;
+                if uv_edit.changed() {
+                    selected_uv_change = Some((uv_edit, face_data.uv));
+                }
             }
             FaceKind::Ceiling => {
                 let Some(face_data) = sector.ceiling.as_mut() else {
                     ui.weak("Ceiling was removed");
                     return;
                 };
+                let uv_before = face_data.uv;
                 egui::CollapsingHeader::new(icons::label(icons::BLEND, "Material"))
                     .default_open(true)
                     .show(ui, |ui| {
@@ -2586,11 +2590,16 @@ impl EditorWorkspace {
                         changed |= height_row("Height", &mut face_data.heights, ui);
                         changed |= split_row("Split", &mut face_data.split, ui);
                     });
+                let mut uv_edit = GridUvTransformEdit::default();
                 egui::CollapsingHeader::new(icons::label(icons::GRID, "UV"))
                     .default_open(false)
                     .show(ui, |ui| {
-                        changed |= uv_transform_controls(&mut face_data.uv, ui);
+                        uv_edit = uv_transform_controls(&mut face_data.uv, ui);
                     });
+                changed |= face_data.uv != uv_before;
+                if uv_edit.changed() {
+                    selected_uv_change = Some((uv_edit, face_data.uv));
+                }
             }
             FaceKind::Wall { dir, stack } => {
                 let walls = sector.walls.get_mut(dir);
@@ -2600,6 +2609,8 @@ impl EditorWorkspace {
                         ui.weak("Wall stack entry was removed");
                         return;
                     };
+                    let uv_before = wall.uv;
+                    let mut uv_edit = GridUvTransformEdit::default();
                     egui::CollapsingHeader::new(icons::label(icons::BLEND, "Material"))
                         .default_open(true)
                         .show(ui, |ui| {
@@ -2657,7 +2668,7 @@ impl EditorWorkspace {
                     egui::CollapsingHeader::new(icons::label(icons::GRID, "UV"))
                         .default_open(false)
                         .show(ui, |ui| {
-                            changed |= uv_transform_controls(&mut wall.uv, ui);
+                            uv_edit = uv_transform_controls(&mut wall.uv, ui);
                             if ui
                                 .button("Autotile")
                                 .on_hover_text(
@@ -2678,6 +2689,11 @@ impl EditorWorkspace {
                                 });
                             }
                         });
+                    changed |= wall.uv != uv_before;
+                    uv_edit.include_value_changes(uv_before, wall.uv);
+                    if uv_edit.changed() {
+                        selected_uv_change = Some((uv_edit, wall.uv));
+                    }
                 }
                 if split_wall {
                     if let Some(wall) = walls.get(stack as usize).cloned() {
@@ -2693,6 +2709,15 @@ impl EditorWorkspace {
                         }
                     }
                 }
+            }
+        }
+
+        if let Some((edit, authored)) = selected_uv_change {
+            let (affected, propagated) =
+                self.apply_selected_face_uv_change_no_undo(face, edit, authored);
+            changed |= propagated > 0;
+            if affected > 1 && status_message.is_none() {
+                status_message = Some(format!("Updated UV settings on {affected} selected faces"));
             }
         }
 

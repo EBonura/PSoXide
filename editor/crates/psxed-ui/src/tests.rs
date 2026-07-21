@@ -2,6 +2,7 @@ use super::*;
 
 mod entity_resources;
 mod geometry_resources;
+mod layer_authoring;
 mod placement_painting;
 mod project_workspace;
 mod scene_tree_selection;

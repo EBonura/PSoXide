@@ -29,13 +29,14 @@ use std::path::{Path, PathBuf};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use emulator_core::{
     button, fast_boot_disc_with_hle, telemetry, warm_bios_for_disc_fast_boot, Bus, ButtonState,
-    Cpu, DISC_FAST_BOOT_WARMUP_STEPS,
+    Cpu, EmulatorState, DISC_FAST_BOOT_WARMUP_STEPS,
 };
 // `Gpu` is only constructed for the editor 3D preview dump.
 #[cfg(feature = "editor")]
 use emulator_core::Gpu;
 use psoxide_settings::{
     library::{GameKind, LibraryEntry},
+    savestate::SaveStateV1,
     ConfigPaths, Library, Settings,
 };
 use psoxide_validation::{
@@ -198,6 +199,11 @@ pub struct LaunchArgs {
     /// by its stable ID (16-hex-char fingerprint).
     #[arg(long)]
     pub game_id: Option<String>,
+    /// Restore this save state after mounting the selected game. This is useful
+    /// for extracting a precise gameplay checkpoint through the headless
+    /// profiler without navigating there again in the GUI.
+    #[arg(long, value_name = "PATH")]
+    pub savestate: Option<PathBuf>,
     /// Override the configured BIOS for this headless launch.
     #[arg(long)]
     pub bios: Option<PathBuf>,
@@ -835,6 +841,41 @@ fn run_headless_launch(
         bus.cdrom.insert_disc(Some(disc));
         if emit_summary {
             eprintln!("[cli] mounted auxiliary disc {}", disc_path.display());
+        }
+    }
+
+    if let Some(path) = args.savestate.as_ref() {
+        let loaded = std::thread::scope(|scope| {
+            std::thread::Builder::new()
+                .stack_size(64 * 1024 * 1024)
+                .spawn_scoped(scope, || SaveStateV1::<EmulatorState>::read_from(path))
+                .map_err(|e| format!("spawn save-state loader: {e}"))?
+                .join()
+                .map_err(|_| "save-state loader panicked".to_string())?
+                .map_err(|e| e.to_string())
+        })?;
+        let header = loaded.header;
+        let mut payload = loaded.payload;
+        payload.bus.restore_excluded_from(&mut bus);
+        cpu = payload.cpu;
+        bus = payload.bus;
+        // A GUI save can capture the pad while a movement key is held. The
+        // headless runner has no window event loop to release that key, so use
+        // the same fresh neutral controller a normal headless launch starts
+        // with before applying any explicit tape/pulse input below.
+        attach_headless_playtest_pad(&mut bus, args.digital_pad);
+        bus.set_port1_buttons(ButtonState::default());
+        bus.set_port1_sticks(0x80, 0x80, 0x80, 0x80);
+        if args.dump_hw.is_some() {
+            bus.gpu.enable_cmd_log();
+        }
+        if emit_summary {
+            eprintln!(
+                "[cli] restored save state {} (game={} tick={})",
+                path.display(),
+                header.game_id,
+                header.cpu_tick
+            );
         }
     }
 
@@ -1715,6 +1756,7 @@ fn validation_launch_args(
     LaunchArgs {
         path: Some(artifact.path.clone()),
         game_id: None,
+        savestate: None,
         bios: None,
         disc: None,
         steps: checkpoint.stop.steps,

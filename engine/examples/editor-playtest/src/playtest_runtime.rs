@@ -662,8 +662,7 @@ impl Playtest {
             if dist_sq == 0 || dist_sq > range_sq {
                 continue;
             }
-            let Some((screen_x_q8, forward)) =
-                horizontal_view_coordinates(player, point, view_yaw)
+            let Some((screen_x_q8, forward)) = horizontal_view_coordinates(player, point, view_yaw)
             else {
                 continue;
             };
@@ -734,8 +733,7 @@ impl Playtest {
         };
         let player = self.motor.position();
         let view_yaw = self.camera.yaw().add(Angle::HALF);
-        let Some((current_screen_x, _)) =
-            horizontal_view_coordinates(player, current, view_yaw)
+        let Some((current_screen_x, _)) = horizontal_view_coordinates(player, current, view_yaw)
         else {
             return;
         };

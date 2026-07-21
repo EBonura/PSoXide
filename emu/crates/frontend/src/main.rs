@@ -1768,6 +1768,19 @@ impl ApplicationHandler for Shell {
                         dt,
                     )
                 });
+                #[cfg(not(target_arch = "wasm32"))]
+                for path in state.take_pending_savestate_thumbnails() {
+                    let result = match state.bus.as_ref() {
+                        Some(bus) => gfx.write_savestate_thumbnail(&bus.gpu, &path),
+                        None => Err("emulator stopped after save".to_string()),
+                    };
+                    match result {
+                        Ok(()) => state.refresh_save_state_menu_rows(),
+                        Err(error) => {
+                            eprintln!("[frontend] save-state thumbnail: {error}");
+                        }
+                    }
+                }
                 #[cfg(feature = "editor")]
                 if let Some(request) = state.editor.take_playtest_request() {
                     state.handle_editor_playtest_request(request);

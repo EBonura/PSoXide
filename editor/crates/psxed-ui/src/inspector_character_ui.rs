@@ -141,29 +141,22 @@ pub(crate) fn draw_character_resource_editor(
     egui::CollapsingHeader::new(icons::label(icons::BOX, "Model"))
         .default_open(true)
         .show(ui, |ui| {
+            let model_options = ctx
+                .models
+                .iter()
+                .map(|(id, name, _)| (*id, name.clone()))
+                .collect::<Vec<_>>();
             ui.horizontal(|ui| {
                 ui.label("Model");
                 let preview = bound.map(|(_, name, _)| name.as_str()).unwrap_or("(none)");
-                egui::ComboBox::from_id_salt("character-model-picker")
-                    .selected_text(preview)
-                    .show_ui(ui, |ui| {
-                        if ui
-                            .selectable_label(character.model.is_none(), "(none)")
-                            .clicked()
-                        {
-                            character.model = None;
-                            changed = true;
-                        }
-                        for (id, name, _) in &ctx.models {
-                            if ui
-                                .selectable_label(character.model == Some(*id), name)
-                                .clicked()
-                            {
-                                character.model = Some(*id);
-                                changed = true;
-                            }
-                        }
-                    });
+                changed |= searchable_picker(
+                    ui,
+                    "character-model-picker",
+                    &mut character.model,
+                    preview,
+                    &model_options,
+                    SearchablePickerConfig::optional("(none)"),
+                );
             });
             if character.model.is_some() && bound.is_none() {
                 ui.colored_label(
@@ -646,7 +639,12 @@ pub(crate) fn clip_role_picker(
     slot: &mut Option<u16>,
     clips: &[String],
 ) -> bool {
-    let mut changed = false;
+    let before = *slot;
+    let options = clips
+        .iter()
+        .enumerate()
+        .map(|(index, name)| (index as u16, format!("{index}: {name}")))
+        .collect::<Vec<_>>();
     ui.horizontal(|ui| {
         ui.label(label);
         let preview = match *slot {
@@ -656,43 +654,18 @@ pub(crate) fn clip_role_picker(
                 .unwrap_or_else(|| format!("#{idx} (missing)")),
             None => "(none)".to_string(),
         };
-        egui::ComboBox::from_id_salt(id_salt)
-            .selected_text(preview)
-            .height(360.0)
-            .show_ui(ui, |ui| {
-                ui.set_min_width(380.0);
-                let filter = animation_picker_filter(ui, ui.id().with((id_salt, "filter")));
-                let matching = clips
-                    .iter()
-                    .filter(|name| animation_name_matches_filter(name, &filter))
-                    .count();
-                ui.label(
-                    RichText::new(format!("{matching} of {} compatible clips", clips.len()))
-                        .small()
-                        .color(STUDIO_TEXT_WEAK),
-                );
-                ui.separator();
-                if ui.selectable_label(slot.is_none(), "(none)").clicked() {
-                    *slot = None;
-                    changed = true;
-                }
-                for (idx, name) in clips
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, name)| animation_name_matches_filter(name, &filter))
-                {
-                    let label = format!("{idx}: {name}");
-                    if ui
-                        .selectable_label(*slot == Some(idx as u16), label)
-                        .clicked()
-                    {
-                        *slot = Some(idx as u16);
-                        changed = true;
-                    }
-                }
-            });
+        let _ = searchable_picker(
+            ui,
+            id_salt,
+            slot,
+            &preview,
+            &options,
+            SearchablePickerConfig::optional("(none)")
+                .with_popup_min_width(380.0)
+                .with_search_hint("Search imported animations…"),
+        );
     });
-    changed
+    *slot != before
 }
 
 pub(crate) fn draw_animator_action_clip_table(
@@ -1083,7 +1056,7 @@ pub(crate) fn animator_action_clip_combo(
     inherited_source: Option<&str>,
     clips: &[String],
 ) -> bool {
-    let mut changed = false;
+    let before = *slot;
     let preview = match *slot {
         Some(idx) => clips
             .get(idx as usize)
@@ -1102,58 +1075,32 @@ pub(crate) fn animator_action_clip_combo(
             })
             .unwrap_or_else(|| "(none)".to_string()),
     };
-    let short_preview = compact_animator_clip_label(&preview, 36);
-    egui::ComboBox::from_id_salt(id_salt)
-        .width(width)
-        .height(360.0)
-        .truncate()
-        .selected_text(short_preview)
-        .show_ui(ui, |ui| {
-            ui.set_min_width(width.max(380.0));
-            let filter = animation_picker_filter(ui, ui.id().with((id_salt, "filter")));
-            let matching = clips
-                .iter()
-                .filter(|name| animation_name_matches_filter(name, &filter))
-                .count();
-            ui.label(
-                RichText::new(format!("{matching} of {} compatible clips", clips.len()))
-                    .small()
-                    .color(STUDIO_TEXT_WEAK),
-            );
-            ui.separator();
-            let inherit_label = inherited_clip
-                .map(|idx| {
-                    let name = clips
-                        .get(idx as usize)
-                        .map(String::as_str)
-                        .unwrap_or("(missing)");
-                    format!("Inherit {idx}: {name}")
-                })
-                .unwrap_or_else(|| "(none)".to_string());
-            if ui.selectable_label(slot.is_none(), inherit_label).clicked() {
-                if slot.is_some() {
-                    changed = true;
-                }
-                *slot = None;
-            }
-            for (idx, name) in clips
-                .iter()
-                .enumerate()
-                .filter(|(_, name)| animation_name_matches_filter(name, &filter))
-            {
-                let label = format!("{idx}: {name}");
-                if ui
-                    .selectable_label(*slot == Some(idx as u16), label)
-                    .clicked()
-                {
-                    *slot = Some(idx as u16);
-                    changed = true;
-                }
-            }
+    let options = clips
+        .iter()
+        .enumerate()
+        .map(|(index, name)| (index as u16, format!("{index}: {name}")))
+        .collect::<Vec<_>>();
+    let inherit_label = inherited_clip
+        .map(|idx| {
+            let name = clips
+                .get(idx as usize)
+                .map(String::as_str)
+                .unwrap_or("(missing)");
+            format!("Inherit {idx}: {name}")
         })
-        .response
-        .on_hover_text(preview);
-    changed
+        .unwrap_or_else(|| "(none)".to_string());
+    let _ = searchable_picker(
+        ui,
+        id_salt,
+        slot,
+        &preview,
+        &options,
+        SearchablePickerConfig::optional(&inherit_label)
+            .with_width(width)
+            .with_popup_min_width(width.max(380.0))
+            .with_search_hint("Search imported animations…"),
+    );
+    *slot != before
 }
 
 pub(crate) fn animation_picker_filter(ui: &mut egui::Ui, id: egui::Id) -> String {
@@ -1180,16 +1127,6 @@ pub(crate) fn animation_name_matches_filter(name: &str, filter: &str) -> bool {
     }
     let name = name.to_ascii_lowercase();
     filter.split_whitespace().all(|term| name.contains(term))
-}
-
-pub(crate) fn compact_animator_clip_label(label: &str, max_chars: usize) -> String {
-    if label.chars().count() <= max_chars {
-        return label.to_string();
-    }
-    let keep = max_chars.saturating_sub(3);
-    let mut out = label.chars().take(keep).collect::<String>();
-    out.push_str("...");
-    out
 }
 
 pub(crate) fn set_node_action_clip(
@@ -1251,20 +1188,15 @@ pub(crate) fn draw_character_selector(
                     .map(|(_, n)| n.as_str())
             })
             .unwrap_or("(none)");
-        egui::ComboBox::from_id_salt("player-spawn-character-picker")
-            .selected_text(preview)
-            .show_ui(ui, |ui| {
-                if ui.selectable_label(current.is_none(), "(none)").clicked() {
-                    *current = None;
-                    changed = true;
-                }
-                for (id, name) in options {
-                    if ui.selectable_label(*current == Some(*id), name).clicked() {
-                        *current = Some(*id);
-                        changed = true;
-                    }
-                }
-            });
+        changed |= searchable_picker(
+            ui,
+            "player-spawn-character-picker",
+            current,
+            preview,
+            options,
+            SearchablePickerConfig::optional("(none)")
+                .with_search_hint("Search character profiles…"),
+        );
         if let Some(id) = *current {
             if options.iter().any(|(rid, _)| *rid == id)
                 && ui
@@ -1321,20 +1253,14 @@ pub(crate) fn draw_weapon_selector(
                     .map(|(_, n)| n.as_str())
             })
             .unwrap_or("(none)");
-        egui::ComboBox::from_id_salt("equipment-weapon-picker")
-            .selected_text(preview)
-            .show_ui(ui, |ui| {
-                if ui.selectable_label(current.is_none(), "(none)").clicked() {
-                    *current = None;
-                    changed = true;
-                }
-                for (id, name) in options {
-                    if ui.selectable_label(*current == Some(*id), name).clicked() {
-                        *current = Some(*id);
-                        changed = true;
-                    }
-                }
-            });
+        changed |= searchable_picker(
+            ui,
+            "equipment-weapon-picker",
+            current,
+            preview,
+            options,
+            SearchablePickerConfig::optional("(none)").with_search_hint("Search weapons…"),
+        );
     });
     if let Some(id) = *current {
         if !options.iter().any(|(rid, _)| *rid == id) {
@@ -1643,20 +1569,14 @@ pub(crate) fn ui_texture_resource_picker(
                     .map(|(_, name)| name.as_str())
             })
             .unwrap_or("(none)");
-        egui::ComboBox::from_id_salt(ui.id().with(label))
-            .selected_text(preview)
-            .show_ui(ui, |ui| {
-                if ui.selectable_label(current.is_none(), "(none)").clicked() {
-                    *current = None;
-                    changed = true;
-                }
-                for (id, name) in options {
-                    if ui.selectable_label(*current == Some(*id), name).clicked() {
-                        *current = Some(*id);
-                        changed = true;
-                    }
-                }
-            });
+        changed |= searchable_picker(
+            ui,
+            ui.id().with(("ui-texture-resource-picker", label)),
+            current,
+            preview,
+            options,
+            SearchablePickerConfig::optional("(none)"),
+        );
     });
     changed
 }
@@ -1890,16 +1810,18 @@ pub(crate) fn draw_scene_state_picker(
             .find(|(id, _)| id == current)
             .map(|(_, name)| name.as_str())
             .unwrap_or("(none)");
-        egui::ComboBox::from_id_salt(ui.id().with(label))
-            .selected_text(preview)
-            .show_ui(ui, |ui| {
-                for (id, name) in options {
-                    if ui.selectable_label(current == id, name).clicked() && current != id {
-                        *current = *id;
-                        changed = true;
-                    }
-                }
-            });
+        let mut selected = Some(*current);
+        changed |= searchable_picker(
+            ui,
+            ui.id().with(("scene-state-picker", label)),
+            &mut selected,
+            preview,
+            options,
+            SearchablePickerConfig::required(),
+        );
+        if let Some(selected) = selected {
+            *current = selected;
+        }
     });
     changed
 }
@@ -1919,16 +1841,18 @@ pub(crate) fn draw_ui_scene_picker(
             .find(|(id, _)| id == current)
             .map(|(_, name)| name.as_str())
             .unwrap_or("(none)");
-        egui::ComboBox::from_id_salt(ui.id().with(label))
-            .selected_text(preview)
-            .show_ui(ui, |ui| {
-                for (id, name) in options {
-                    if ui.selectable_label(current == id, name).clicked() && current != id {
-                        *current = *id;
-                        changed = true;
-                    }
-                }
-            });
+        let mut selected = Some(*current);
+        changed |= searchable_picker(
+            ui,
+            ui.id().with(("ui-scene-picker", label)),
+            &mut selected,
+            preview,
+            options,
+            SearchablePickerConfig::required(),
+        );
+        if let Some(selected) = selected {
+            *current = selected;
+        }
     });
     changed
 }
@@ -1950,16 +1874,18 @@ pub(crate) fn draw_ui_option_picker(
             .find(|(id, _)| id == current)
             .map(|(_, name)| name.as_str())
             .unwrap_or("(none)");
-        egui::ComboBox::from_id_salt(ui.id().with(label))
-            .selected_text(preview)
-            .show_ui(ui, |ui| {
-                for (id, name) in options {
-                    if ui.selectable_label(current == id, name).clicked() && current != id {
-                        *current = *id;
-                        changed = true;
-                    }
-                }
-            });
+        let mut selected = Some(*current);
+        changed |= searchable_picker(
+            ui,
+            ui.id().with(("ui-option-picker", label)),
+            &mut selected,
+            preview,
+            options,
+            SearchablePickerConfig::required(),
+        );
+        if let Some(selected) = selected {
+            *current = selected;
+        }
     });
     changed
 }
@@ -1982,22 +1908,14 @@ pub(crate) fn draw_optional_ui_option_picker(
                     .map(|(_, name)| name.as_str())
             })
             .unwrap_or("(none)");
-        egui::ComboBox::from_id_salt(ui.id().with(label))
-            .selected_text(preview)
-            .show_ui(ui, |ui| {
-                if ui.selectable_label(current.is_none(), "(none)").clicked() && current.is_some() {
-                    *current = None;
-                    changed = true;
-                }
-                for (id, name) in options {
-                    if ui.selectable_label(current == &Some(*id), name).clicked()
-                        && current != &Some(*id)
-                    {
-                        *current = Some(*id);
-                        changed = true;
-                    }
-                }
-            });
+        changed |= searchable_picker(
+            ui,
+            ui.id().with(("optional-ui-option-picker", label)),
+            current,
+            preview,
+            options,
+            SearchablePickerConfig::optional("(none)"),
+        );
     });
     changed
 }
@@ -2156,31 +2074,33 @@ pub(crate) fn draw_sfx_wav_picker(
     current: &mut String,
     options: &[String],
 ) -> bool {
-    let mut changed = false;
+    let picker_options = options
+        .iter()
+        .enumerate()
+        .map(|(index, path)| (index, path.clone()))
+        .collect::<Vec<_>>();
+    let mut selected = options.iter().position(|path| path == current);
     let preview = if current.trim().is_empty() {
         "(none)"
     } else {
         current.as_str()
     };
-    egui::ComboBox::from_id_salt(ui.id().with(label))
-        .width(150.0)
-        .selected_text(preview)
-        .show_ui(ui, |ui| {
-            if ui
-                .selectable_label(current.trim().is_empty(), "(none)")
-                .clicked()
-                && !current.is_empty()
-            {
-                current.clear();
-                changed = true;
-            }
-            for path in options {
-                if ui.selectable_label(current == path, path).clicked() && current != path {
-                    *current = path.clone();
-                    changed = true;
-                }
-            }
-        });
+    let changed = searchable_picker(
+        ui,
+        ui.id().with(("sfx-wav-picker", label)),
+        &mut selected,
+        preview,
+        &picker_options,
+        SearchablePickerConfig::optional("(none)")
+            .with_width(150.0)
+            .with_search_hint("Search WAV files…"),
+    );
+    if changed {
+        *current = selected
+            .and_then(|index| options.get(index))
+            .cloned()
+            .unwrap_or_default();
+    }
     changed
 }
 
@@ -2240,29 +2160,31 @@ pub(crate) fn draw_music_wav_picker(
     let mut changed = false;
     ui.horizontal(|ui| {
         ui.label(label);
+        let picker_options = options
+            .iter()
+            .enumerate()
+            .map(|(index, path)| (index, path.clone()))
+            .collect::<Vec<_>>();
+        let mut selected = options.iter().position(|path| path == current);
         let preview = if current.trim().is_empty() {
             "(none)"
         } else {
             current.as_str()
         };
-        egui::ComboBox::from_id_salt(ui.id().with(label))
-            .selected_text(preview)
-            .show_ui(ui, |ui| {
-                if ui
-                    .selectable_label(current.trim().is_empty(), "(none)")
-                    .clicked()
-                    && !current.is_empty()
-                {
-                    current.clear();
-                    changed = true;
-                }
-                for path in options {
-                    if ui.selectable_label(current == path, path).clicked() && current != path {
-                        *current = path.clone();
-                        changed = true;
-                    }
-                }
-            });
+        if searchable_picker(
+            ui,
+            ui.id().with(("music-wav-picker", label)),
+            &mut selected,
+            preview,
+            &picker_options,
+            SearchablePickerConfig::optional("(none)").with_search_hint("Search WAV files…"),
+        ) {
+            *current = selected
+                .and_then(|index| options.get(index))
+                .cloned()
+                .unwrap_or_default();
+            changed = true;
+        }
     });
     ui.horizontal(|ui| {
         ui.label("Path");
@@ -2672,20 +2594,31 @@ pub(crate) fn socket_name_picker(
     known_socket_names: &[String],
 ) -> bool {
     let mut changed = false;
+    let picker_options = known_socket_names
+        .iter()
+        .enumerate()
+        .map(|(index, name)| (index, name.clone()))
+        .collect::<Vec<_>>();
     ui.horizontal(|ui| {
         ui.label(label);
         changed |= ui.text_edit_singleline(value).changed();
         if !known_socket_names.is_empty() {
-            egui::ComboBox::from_id_salt(ui.id().with(label))
-                .selected_text("Known")
-                .show_ui(ui, |ui| {
-                    for name in known_socket_names {
-                        if ui.selectable_label(value == name, name).clicked() {
-                            *value = name.clone();
-                            changed = true;
-                        }
-                    }
-                });
+            let mut selected = known_socket_names.iter().position(|name| name == value);
+            if searchable_picker(
+                ui,
+                ui.id().with(("socket-name-picker", label)),
+                &mut selected,
+                "Known",
+                &picker_options,
+                SearchablePickerConfig::required()
+                    .with_width(100.0)
+                    .with_search_hint("Search sockets…"),
+            ) {
+                if let Some(name) = selected.and_then(|index| known_socket_names.get(index)) {
+                    *value = name.clone();
+                    changed = true;
+                }
+            }
         }
     });
     changed
@@ -2803,6 +2736,10 @@ pub(crate) fn model_resource_picker(
     options: &[(ResourceId, String, Vec<String>)],
 ) -> bool {
     let mut changed = false;
+    let picker_options = options
+        .iter()
+        .map(|(id, name, _)| (*id, name.clone()))
+        .collect::<Vec<_>>();
     ui.horizontal(|ui| {
         ui.label(label);
         let preview = current
@@ -2813,20 +2750,14 @@ pub(crate) fn model_resource_picker(
                     .map(|(_, name, _)| name.as_str())
             })
             .unwrap_or("(none)");
-        egui::ComboBox::from_id_salt(label)
-            .selected_text(preview)
-            .show_ui(ui, |ui| {
-                if ui.selectable_label(current.is_none(), "(none)").clicked() {
-                    *current = None;
-                    changed = true;
-                }
-                for (id, name, _) in options {
-                    if ui.selectable_label(*current == Some(*id), name).clicked() {
-                        *current = Some(*id);
-                        changed = true;
-                    }
-                }
-            });
+        changed |= searchable_picker(
+            ui,
+            ui.id().with(("model-resource-picker", label)),
+            current,
+            preview,
+            &picker_options,
+            SearchablePickerConfig::optional("(none)"),
+        );
     });
     if let Some(id) = *current {
         if !options.iter().any(|(rid, _, _)| *rid == id) {

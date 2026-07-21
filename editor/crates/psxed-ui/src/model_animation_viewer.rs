@@ -21,6 +21,7 @@ use crate::editor_helpers::{
 };
 use crate::icons;
 use crate::model_import_preview::{self, ImportPreviewOptions};
+use crate::searchable_picker::{searchable_picker, SearchablePickerConfig};
 use crate::style::{
     STUDIO_ACCENT, STUDIO_ACCENT_DIM, STUDIO_BORDER, STUDIO_BORDER_DARK, STUDIO_DOCK, STUDIO_HOVER,
     STUDIO_INPUT, STUDIO_PANEL_DARK, STUDIO_PANEL_HEADER, STUDIO_SELECTION, STUDIO_TEXT,
@@ -1694,20 +1695,24 @@ fn draw_pose_correction_editor(
     }
     state.selected_pose_joint = state.selected_pose_joint.min(joint_count.saturating_sub(1));
     let mut changed = false;
+    let joint_options = (0..joint_count)
+        .map(|joint| (joint, format!("Joint {joint}")))
+        .collect::<Vec<_>>();
     ui.horizontal(|ui| {
         ui.label(RichText::new("Joint").color(STUDIO_TEXT_WEAK));
-        egui::ComboBox::from_id_salt("animation-pose-correction-joint")
-            .selected_text(format!("Joint {}", state.selected_pose_joint))
-            .width(132.0)
-            .show_ui(ui, |ui| {
-                for joint in 0..joint_count {
-                    ui.selectable_value(
-                        &mut state.selected_pose_joint,
-                        joint,
-                        format!("Joint {joint}"),
-                    );
-                }
-            });
+        let mut selected = Some(state.selected_pose_joint);
+        if searchable_picker(
+            ui,
+            "animation-pose-correction-joint",
+            &mut selected,
+            &format!("Joint {}", state.selected_pose_joint),
+            &joint_options,
+            SearchablePickerConfig::required()
+                .with_width(132.0)
+                .with_search_hint("Search joints…"),
+        ) {
+            state.selected_pose_joint = selected.unwrap_or(state.selected_pose_joint);
+        }
     });
 
     let frame = (state.frame.round().max(0.0) as u16).min(max_frame);
@@ -1867,32 +1872,40 @@ fn draw_combat_capsule_editor(
         return false;
     };
 
+    let capsule_options = character
+        .combat_capsules
+        .iter()
+        .enumerate()
+        .map(|(index, capsule)| {
+            let role = match capsule.role {
+                psxed_project::CombatCapsuleRole::Hurtbox => "Hurt",
+                psxed_project::CombatCapsuleRole::Hitbox { .. } => "Hit",
+            };
+            (index, format!("{} · {role}", capsule.name))
+        })
+        .collect::<Vec<_>>();
     ui.horizontal(|ui| {
         let selected_label = character
             .combat_capsules
             .get(state.selected_combat_capsule)
             .map(|capsule| capsule.name.as_str())
             .unwrap_or("No volume");
-        egui::ComboBox::from_id_salt("animation-combat-capsule")
-            .selected_text(selected_label)
-            .width(176.0)
-            .show_ui(ui, |ui| {
-                for (index, capsule) in character.combat_capsules.iter().enumerate() {
-                    let role = match capsule.role {
-                        psxed_project::CombatCapsuleRole::Hurtbox => "Hurt",
-                        psxed_project::CombatCapsuleRole::Hitbox { .. } => "Hit",
-                    };
-                    if ui
-                        .selectable_label(
-                            index == state.selected_combat_capsule,
-                            format!("{} · {role}", capsule.name),
-                        )
-                        .clicked()
-                    {
-                        state.selected_combat_capsule = index;
-                    }
-                }
-            });
+        let mut selected = character
+            .combat_capsules
+            .get(state.selected_combat_capsule)
+            .map(|_| state.selected_combat_capsule);
+        if searchable_picker(
+            ui,
+            "animation-combat-capsule",
+            &mut selected,
+            selected_label,
+            &capsule_options,
+            SearchablePickerConfig::required()
+                .with_width(176.0)
+                .with_search_hint("Search combat volumes…"),
+        ) {
+            state.selected_combat_capsule = selected.unwrap_or(state.selected_combat_capsule);
+        }
         if ui
             .small_button(icons::text(icons::TRASH, 13.0))
             .on_hover_text("Remove selected combat volume")
@@ -2930,21 +2943,16 @@ fn resource_combo(
             .and_then(|id| options.iter().find(|(rid, _)| *rid == id))
             .map(|(_, name)| name.as_str())
             .unwrap_or("(none)");
-        egui::ComboBox::from_id_salt(id_salt)
-            .selected_text(selected)
-            .width(90.0)
-            .show_ui(ui, |ui| {
-                if ui.selectable_label(current.is_none(), "(none)").clicked() {
-                    *current = None;
-                    changed = true;
-                }
-                for (id, name) in options {
-                    if ui.selectable_label(*current == Some(*id), name).clicked() {
-                        *current = Some(*id);
-                        changed = true;
-                    }
-                }
-            });
+        changed |= searchable_picker(
+            ui,
+            id_salt,
+            current,
+            selected,
+            options,
+            SearchablePickerConfig::optional("(none)")
+                .with_width(120.0)
+                .with_popup_min_width(360.0),
+        );
     });
     changed
 }

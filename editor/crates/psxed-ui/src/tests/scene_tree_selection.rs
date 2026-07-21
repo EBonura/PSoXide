@@ -1128,14 +1128,63 @@ fn floating_duplicate_previews_moves_and_commits_world_geometry() {
     assert_eq!(workspace.selection.selected_sector, Some((0, 1)));
     assert!(!workspace.is_dirty());
 
+    // Placement must restore the duplicate selection even if another input
+    // path disturbed the transient preview selection during the click frame.
+    workspace.clear_sector_selection();
     assert!(workspace.commit_floating_geometry());
     assert!(workspace.floating_geometry.is_none());
     assert!(workspace.is_dirty());
+    assert!(workspace.selection.selected_sectors.contains(&(room, 0, 1)));
+    assert_eq!(workspace.selection.selected_sector, Some((0, 1)));
 
     workspace.do_undo();
     let grid = workspace.room_grid_view(room).unwrap();
     assert_eq!((grid.width, grid.depth), (1, 1));
     assert!(grid.sector(0, 1).is_none());
+}
+
+#[test]
+fn floating_duplicate_stays_adjacent_until_the_pointer_deliberately_moves() {
+    let mut project = ProjectDocument::new("geometry-duplicate-pointer-anchor");
+    let mut grid = WorldGrid::empty(2, 1, 1024);
+    grid.set_floor(0, 0, 0, None);
+    grid.set_floor(1, 0, 0, None);
+    let room = project
+        .active_scene_mut()
+        .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+    let mut workspace =
+        EditorWorkspace::with_project(test_temp_dir("geometry-duplicate-pointer-anchor"), project);
+
+    workspace.select_sector((room, 0, 0), egui::Modifiers::NONE);
+    let mut additive = egui::Modifiers::NONE;
+    additive.ctrl = true;
+    workspace.select_sector((room, 1, 0), additive);
+    workspace.begin_floating_geometry_duplicate();
+
+    // The two-cell duplicate starts directly beside the source at world cells
+    // (2, 0) and (3, 0).
+    // The first viewport frame may report a completely unrelated stale mouse
+    // cell; observing it must not teleport the preview there.
+    assert!(workspace.track_floating_geometry_pointer_origin([20, 20]));
+    let grid = workspace.room_grid_view(room).unwrap();
+    assert!(grid.sector(2, 0).is_some());
+    assert!(grid.sector(3, 0).is_some());
+    assert_eq!((grid.width, grid.depth), (4, 1));
+
+    // Dwelling in the same cell still means no deliberate placement motion.
+    assert!(workspace.track_floating_geometry_pointer_origin([20, 20]));
+    assert_eq!(workspace.room_grid_view(room).unwrap().origin, [0, 0]);
+
+    // Crossing a cell boundary starts pointer-following and moves the preview.
+    assert!(workspace.track_floating_geometry_pointer_origin([21, 20]));
+    let grid = workspace.room_grid_view(room).unwrap();
+    let (sx, sz) = grid.world_cell_to_array(21, 20).unwrap();
+    assert!(grid.sector(sx, sz).is_some());
+    let (sx, sz) = grid.world_cell_to_array(22, 20).unwrap();
+    assert!(grid.sector(sx, sz).is_some());
+    assert!(grid
+        .world_cell_to_array(2, 0)
+        .is_some_and(|(sx, sz)| grid.sector(sx, sz).is_none()));
 }
 
 #[test]
@@ -1209,6 +1258,31 @@ fn floating_duplicate_of_face_selection_copies_only_selected_primitives() {
         })));
     assert_eq!(workspace.selection.selected_primitives.len(), 2);
     assert!(!workspace.is_dirty());
+
+    workspace.clear_primitive_selection_state();
+    assert!(workspace.commit_floating_geometry());
+    assert!(workspace
+        .selection
+        .selected_primitives
+        .contains(&Selection::Face(FaceRef {
+            room,
+            sx: 1,
+            sz: 0,
+            kind: FaceKind::Floor,
+        })));
+    assert!(workspace
+        .selection
+        .selected_primitives
+        .contains(&Selection::Face(FaceRef {
+            room,
+            sx: 1,
+            sz: 0,
+            kind: FaceKind::Wall {
+                dir: GridDirection::North,
+                stack: 0,
+            },
+        })));
+    assert_eq!(workspace.selection.selected_primitives.len(), 2);
 }
 
 #[test]
