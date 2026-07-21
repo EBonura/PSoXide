@@ -107,7 +107,8 @@ impl Playtest {
         camera: WorldCamera,
         camera_independent: bool,
     ) -> Option<(&[GridVisibleCell], u16)> {
-        self.visible_cells.cached_precomputed_visible_cells(
+        self.visible_cells
+            .cached_precomputed_visible_cells(
             world_tables(),
             PvsTables {
                 visibility_pvs: VISIBILITY_PVS,
@@ -127,5 +128,10 @@ impl Playtest {
             camera,
             camera_independent,
         )
+            // An empty PVS is never a valid reason to make an active room
+            // disappear. Treat corrupt/incomplete data exactly like missing
+            // data so the render path takes its existing conservative all-cell
+            // fallback and reports ROOM_VISIBILITY_FALLBACK_DRAWS.
+            .filter(|(cells, _)| !cells.is_empty())
     }
 }

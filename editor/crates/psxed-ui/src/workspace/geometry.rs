@@ -143,8 +143,11 @@ impl EditorWorkspace {
                     self.clear_sector_selection();
                     return;
                 };
-                if self.portal_place_active() {
+                if self.portal_place_active() || tool == ViewTool::PaintMaterial {
                     self.clear_sector_selection();
+                    if tool == ViewTool::PaintMaterial {
+                        self.clear_primitive_selection_state();
+                    }
                 } else {
                     self.selection.selected_sector = Some((x, z));
                     self.selection.selected_sectors.clear();
@@ -211,11 +214,29 @@ impl EditorWorkspace {
                         },
                     })
                 })
+            } else if matches!(tool, ViewTool::PaintMaterial) {
+                grid.sector(sx, sz)
+                    .and_then(|sector| sector.floor.as_ref())
+                    .map(|_| FaceRef {
+                        room: room_id,
+                        sx,
+                        sz,
+                        kind: FaceKind::Floor,
+                    })
             } else {
                 None
             };
             (hit, face)
         };
+
+        if tool == ViewTool::PaintMaterial && self.material_paint_sampling {
+            let Some(face) = picked_face else {
+                self.status = "Eyedropper needs an existing floor under the cursor".to_string();
+                return;
+            };
+            self.sample_paint_material_from_face(face);
+            return;
+        }
 
         self.run_paint_action(tool, room_id, sx, sz, picked_face, hit_world);
     }

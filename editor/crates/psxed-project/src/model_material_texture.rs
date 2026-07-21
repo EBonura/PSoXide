@@ -579,12 +579,42 @@ fn transition_uses_source_b(x: u16, y: u16, size: u16, recipe: TransitionMateria
             let dv = v.abs_diff(128);
             du.max(dv).saturating_mul(2).min(255)
         }
+        TransitionMaskShape::Connected => connected_transition_base(u, v, recipe.connected_edges),
     } as i32;
     let breakup = i32::from(recipe.edge_breakup.min(96));
-    let random = transition_hash(recipe.seed, u, v) as i32 & 0xff;
+    // Connected Paint masks meet at opposite texture borders. Make their
+    // detail noise periodic so u=0/u=255 and v=0/v=255 sample identically;
+    // recipes can then keep organic exposed edges without opening hairline
+    // seams between adjacent painted tiles.
+    let (noise_u, noise_v) = if recipe.shape == TransitionMaskShape::Connected {
+        (u % 255, v % 255)
+    } else {
+        (u, v)
+    };
+    let random = transition_hash(recipe.seed, noise_u, noise_v) as i32 & 0xff;
     let jitter = (random - 128) * breakup / 128;
     let threshold = (base + jitter).clamp(1, 254);
     i32::from(recipe.coverage) >= threshold
+}
+
+fn connected_transition_base(u: u32, v: u32, connected_edges: u8) -> u32 {
+    const NORTH: u8 = 1 << 0;
+    const EAST: u8 = 1 << 1;
+    const SOUTH: u8 = 1 << 2;
+    const WEST: u8 = 1 << 3;
+
+    let closed_edge_distances = [(NORTH, v), (EAST, 255 - u), (SOUTH, 255 - v), (WEST, u)]
+        .into_iter()
+        .filter_map(|(edge, distance)| (connected_edges & edge == 0).then_some(distance));
+    let Some(nearest_closed_edge) = closed_edge_distances.min() else {
+        // Surrounded by the same painted material: the entire tile is B.
+        return 0;
+    };
+
+    // Closed edges retain Source A for roughly the outer quarter of the
+    // tile, then transition into B. Connected edges are omitted from the
+    // distance field, allowing B to flow across them without a seam.
+    255u32.saturating_sub(nearest_closed_edge.saturating_mul(2).min(255))
 }
 
 fn transition_hash(seed: u32, x: u32, y: u32) -> u32 {
@@ -942,6 +972,61 @@ mod tests {
             sampled_rgb(&vertical, 16, 2),
             sampled_rgb(&vertical, 16, 29)
         );
+    }
+
+    #[test]
+    fn connected_transition_opens_only_shared_painted_edges() {
+        let east = TransitionMaterialTexture {
+            size: 64,
+            coverage: 128,
+            shape: TransitionMaskShape::Connected,
+            edge_breakup: 0,
+            connected_edges: 1 << 1,
+            ..TransitionMaterialTexture::default()
+        };
+        assert!(transition_uses_source_b(63, 32, 64, east));
+        assert!(!transition_uses_source_b(0, 32, 64, east));
+        assert!(!transition_uses_source_b(32, 0, 64, east));
+        assert!(transition_uses_source_b(32, 32, 64, east));
+
+        let horizontal_strip = TransitionMaterialTexture {
+            connected_edges: (1 << 1) | (1 << 3),
+            ..east
+        };
+        assert!(transition_uses_source_b(0, 32, 64, horizontal_strip));
+        assert!(transition_uses_source_b(63, 32, 64, horizontal_strip));
+        assert!(!transition_uses_source_b(32, 0, 64, horizontal_strip));
+
+        let surrounded = TransitionMaterialTexture {
+            connected_edges: 0b1111,
+            ..east
+        };
+        assert!(transition_uses_source_b(0, 0, 64, surrounded));
+        assert!(transition_uses_source_b(63, 63, 64, surrounded));
+    }
+
+    #[test]
+    fn connected_transition_edge_detail_is_periodic_across_tile_seams() {
+        let east = TransitionMaterialTexture {
+            size: 64,
+            coverage: 128,
+            shape: TransitionMaskShape::Connected,
+            edge_breakup: 72,
+            seed: 0x1234_5678,
+            connected_edges: 1 << 1,
+            ..TransitionMaterialTexture::default()
+        };
+        let west = TransitionMaterialTexture {
+            connected_edges: 1 << 3,
+            ..east
+        };
+        for y in 0..64 {
+            assert_eq!(
+                transition_uses_source_b(63, y, 64, east),
+                transition_uses_source_b(0, y, 64, west),
+                "connected seam disagreed at row {y}"
+            );
+        }
     }
 
     #[test]
