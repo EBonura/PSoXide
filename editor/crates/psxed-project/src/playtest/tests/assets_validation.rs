@@ -71,6 +71,97 @@ fn starter_room_material_slice_matches_cook() {
 }
 
 #[test]
+fn room_material_blend_mode_survives_package_cook() {
+    let mut project = project_with_one_room();
+    let room_material = project
+        .active_scene()
+        .nodes()
+        .iter()
+        .find_map(|node| {
+            let NodeKind::Room { grid } = &node.kind else {
+                return None;
+            };
+            grid.sectors
+                .iter()
+                .flatten()
+                .find_map(|sector| sector.floor.as_ref()?.material)
+        })
+        .expect("starter room has a floor material");
+    let ResourceData::Material(material) = &mut project
+        .resource_mut(room_material)
+        .expect("room material remains addressable")
+        .data
+    else {
+        panic!("room surface points to a Material");
+    };
+    material.blend_mode = crate::PsxBlendMode::Average;
+
+    let (package, report) = build_package(&project, &starter_project_root());
+    assert!(report.is_ok(), "errors: {:?}", report.errors);
+    let package = package.expect("translucent room cooks");
+    let cooked = package.materials[package.rooms[0].material_first as usize];
+    assert_eq!(cooked.blend_mode, crate::PsxBlendMode::Average);
+}
+
+#[test]
+fn transition_material_survives_the_complete_room_package_cook() {
+    let mut project = project_with_one_room();
+    let room_material = project
+        .active_scene()
+        .nodes()
+        .iter()
+        .find_map(|node| {
+            let NodeKind::Room { grid } = &node.kind else {
+                return None;
+            };
+            grid.sectors
+                .iter()
+                .flatten()
+                .find_map(|sector| sector.floor.as_ref()?.material)
+        })
+        .expect("starter room has a floor material");
+    let generated = |color| {
+        ResourceData::Material(crate::MaterialResource {
+            texture_mode: crate::MaterialTextureMode::Generated,
+            generated: crate::GeneratedMaterialTexture {
+                size: 32,
+                base_color: color,
+                noise_enabled: false,
+                ..crate::GeneratedMaterialTexture::default()
+            },
+            ..crate::MaterialResource::opaque(None)
+        })
+    };
+    let stone = project.add_resource("Cook Stone", generated([72, 80, 96]));
+    let sand = project.add_resource("Cook Sand", generated([184, 144, 88]));
+    let ResourceData::Material(material) = &mut project
+        .resource_mut(room_material)
+        .expect("room material remains addressable")
+        .data
+    else {
+        panic!("room surface points to a Material");
+    };
+    material.texture_mode = crate::MaterialTextureMode::Transition;
+    material.transition = crate::TransitionMaterialTexture {
+        source_a: Some(stone),
+        source_b: Some(sand),
+        size: 64,
+        coverage: 128,
+        ..crate::TransitionMaterialTexture::default()
+    };
+
+    let (package, report) = build_package(&project, &starter_project_root());
+    assert!(report.is_ok(), "errors: {:?}", report.errors);
+    let package = package.expect("transition room cooks");
+    let material = package.materials[package.rooms[0].material_first as usize];
+    let texture = &package.assets[material.texture_asset_index];
+    assert_eq!(texture.kind, PlaytestAssetKind::Texture);
+    let decoded = psx_asset::Texture::from_bytes(&texture.bytes).expect("cooked PSXT parses");
+    assert_eq!(decoded.depth(), psxed_format::texture::Depth::Bit4);
+    assert_eq!((decoded.width(), decoded.height()), (64, 64));
+}
+
+#[test]
 fn starter_residency_includes_world_and_textures() {
     let project = project_with_one_room();
     let (package, _) = build_package(&project, &starter_project_root());

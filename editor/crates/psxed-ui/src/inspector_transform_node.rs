@@ -2299,25 +2299,23 @@ pub(crate) fn draw_node_kind_editor(
             ui.weak("Component: renders a Model from the parent Entity transform.");
             let bound_model =
                 model.and_then(|id| model_options.iter().find(|(rid, _, _)| *rid == id));
+            let searchable_model_options = model_options
+                .iter()
+                .map(|(id, name, _)| (*id, name.clone()))
+                .collect::<Vec<_>>();
             ui.horizontal(|ui| {
                 ui.label("Model");
                 let preview = bound_model
                     .map(|(_, name, _)| name.as_str())
                     .unwrap_or("(none)");
-                egui::ComboBox::from_id_salt("model-renderer-model-picker")
-                    .selected_text(preview)
-                    .show_ui(ui, |ui| {
-                        if ui.selectable_label(model.is_none(), "(none)").clicked() {
-                            *model = None;
-                            changed = true;
-                        }
-                        for (id, name, _) in model_options {
-                            if ui.selectable_label(*model == Some(*id), name).clicked() {
-                                *model = Some(*id);
-                                changed = true;
-                            }
-                        }
-                    });
+                changed |= searchable_picker(
+                    ui,
+                    "model-renderer-model-picker",
+                    model,
+                    preview,
+                    &searchable_model_options,
+                    SearchablePickerConfig::optional("(none)").with_search_hint("Search models…"),
+                );
             });
             if model.is_some() && bound_model.is_none() {
                 ui.colored_label(
@@ -2915,26 +2913,14 @@ pub(crate) fn draw_node_kind_editor(
                             .map(|(_, name)| name.as_str())
                     })
                     .unwrap_or("(none)");
-                egui::ComboBox::from_id_salt("portal_target_room")
-                    .selected_text(preview)
-                    .show_ui(ui, |ui| {
-                        if ui
-                            .selectable_label(target_room.is_none(), "(none)")
-                            .clicked()
-                        {
-                            *target_room = None;
-                            changed = true;
-                        }
-                        for (id, name) in room_options {
-                            if ui
-                                .selectable_label(*target_room == Some(*id), name)
-                                .clicked()
-                            {
-                                *target_room = Some(*id);
-                                changed = true;
-                            }
-                        }
-                    });
+                changed |= searchable_picker(
+                    ui,
+                    "portal_target_room",
+                    target_room,
+                    preview,
+                    room_options,
+                    SearchablePickerConfig::optional("(none)").with_search_hint("Search rooms…"),
+                );
             });
             ui.horizontal(|ui| {
                 ui.label(icons::text(icons::MAP_PIN, 12.0).color(STUDIO_TEXT_WEAK));
@@ -2986,8 +2972,16 @@ pub(crate) fn blend_mode_editor(ui: &mut egui::Ui, mode: &mut PsxBlendMode) -> b
 pub(crate) fn draw_model_material_override_editor(
     ui: &mut egui::Ui,
     material: &mut MaterialResource,
+    material_options: &[(ResourceId, String)],
+    owner: ResourceId,
 ) -> bool {
-    crate::material_lab::draw_material_settings(ui, "model_renderer_material", material)
+    crate::material_lab::draw_material_settings(
+        ui,
+        "model_renderer_material",
+        material,
+        material_options,
+        Some(owner),
+    )
 }
 
 pub(crate) fn draw_particle_emitter_settings(

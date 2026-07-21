@@ -128,6 +128,7 @@ fn collect_resource_use(
         if let ResourceData::Material(material) = &resource.data {
             if material.psxt_path.is_some()
                 || material.texture_mode == crate::MaterialTextureMode::Generated
+                || material.texture_mode == crate::MaterialTextureMode::Transition
             {
                 push_unique(material_id, &mut use_set.textures, &mut textures);
             }
@@ -142,16 +143,27 @@ fn collect_grid_resources(
     use_set: &mut SceneResourceUse,
     materials: &mut HashSet<ResourceId>,
 ) {
-    for sector in grid.sectors.iter().flatten() {
-        if let Some(face) = &sector.floor {
-            push_material(face.material, use_set, materials);
-        }
-        if let Some(face) = &sector.ceiling {
-            push_material(face.material, use_set, materials);
-        }
-        for direction in GridDirection::ALL {
-            for wall in sector.walls.get(direction) {
-                push_material(wall.material, use_set, materials);
+    // A Room owns every authored floor through its base grid. Resource
+    // residency therefore has to walk the complete stack, not just floor
+    // zero; otherwise upper-floor materials lose their native preview slots
+    // even though the runtime cooker (which walks every floor) renders them.
+    for floor_index in 0..grid.floor_count() {
+        let Some(floor_grid) = grid.floor(floor_index) else {
+            continue;
+        };
+        for sector in floor_grid.sectors.iter().flatten() {
+            if let Some(face) = &sector.floor {
+                push_material(face.triangle_material(0), use_set, materials);
+                push_material(face.triangle_material(1), use_set, materials);
+            }
+            if let Some(face) = &sector.ceiling {
+                push_material(face.triangle_material(0), use_set, materials);
+                push_material(face.triangle_material(1), use_set, materials);
+            }
+            for direction in GridDirection::ALL {
+                for wall in sector.walls.get(direction) {
+                    push_material(wall.material, use_set, materials);
+                }
             }
         }
     }
@@ -201,7 +213,8 @@ fn push_unique(id: ResourceId, out: &mut Vec<ResourceId>, seen: &mut HashSet<Res
 mod tests {
     use super::*;
     use crate::{
-        CharacterResource, MaterialResource, NodeKind, ParticleEmitterSettings, ResourceData,
+        CharacterResource, GridTriangleMaterialOverride, MaterialResource, NodeKind,
+        ParticleEmitterSettings, ResourceData,
     };
 
     #[test]
@@ -305,5 +318,48 @@ mod tests {
         assert_eq!(use_set.model_instances, 1);
         assert_eq!(use_set.character_controllers, 1);
         assert_eq!(use_set.particle_emitters, 1);
+    }
+
+    #[test]
+    fn scene_resource_use_includes_stacked_floor_and_triangle_materials() {
+        let mut project = ProjectDocument::new("stacked-floor-resources");
+        let base_material = project.add_resource(
+            "base",
+            ResourceData::Material(MaterialResource::opaque(Some("base.psxt".to_string()))),
+        );
+        let upper_material = project.add_resource(
+            "upper",
+            ResourceData::Material(MaterialResource::opaque(Some("upper.psxt".to_string()))),
+        );
+        let triangle_material = project.add_resource(
+            "triangle",
+            ResourceData::Material(MaterialResource::opaque(Some("triangle.psxt".to_string()))),
+        );
+
+        let mut grid = WorldGrid::empty(1, 1, 1024);
+        grid.set_floor(0, 0, 0, Some(base_material));
+        let upper = grid.push_floor();
+        let upper_grid = grid.floor_mut(upper).expect("new upper floor");
+        upper_grid.set_floor(0, 0, 0, Some(upper_material));
+        upper_grid
+            .sector_mut(0, 0)
+            .expect("upper sector")
+            .floor
+            .as_mut()
+            .expect("upper floor face")
+            .triangle_override_mut(1)
+            .material = Some(GridTriangleMaterialOverride::Resource(triangle_material));
+
+        let scene = project.active_scene_mut();
+        scene.add_node(scene.root, "Room", NodeKind::Room { grid });
+
+        let use_set = collect_scene_resource_use(&project);
+        assert_eq!(
+            use_set.materials,
+            vec![base_material, upper_material, triangle_material]
+        );
+        assert!(use_set.textures.contains(&base_material));
+        assert!(use_set.textures.contains(&upper_material));
+        assert!(use_set.textures.contains(&triangle_material));
     }
 }

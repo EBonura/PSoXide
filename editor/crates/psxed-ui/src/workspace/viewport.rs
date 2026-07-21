@@ -180,7 +180,7 @@ impl EditorWorkspace {
         };
         if let Some(room) = self.floating_geometry.as_ref().map(|preview| preview.room) {
             if let Some(origin) = self.floating_origin_from_3d_hover(room, face_hit, hover_world) {
-                self.update_floating_geometry_origin(origin);
+                self.track_floating_geometry_pointer_origin(origin);
             }
         }
         let dropped_resource = response

@@ -1,10 +1,10 @@
 use super::{
     euler_rotation_q12, face_side_visible, floor_anchored_model_origin,
-    horizontal_triangle_world_points, light_face, material_sized_uvs, material_texture_tint,
-    node_room_local_origin, preview_lights, preview_model_reference, preview_player_reference,
-    preview_projected_triangle_hw_safe, preview_scratch, preview_shadow_radius,
-    preview_static_model_reference, preview_vertices_in_front, push_clear, push_tri,
-    push_wall_face, room_depth_slot, rotate_image_prop_local, setup_gte_for_camera,
+    horizontal_triangle_world_points, light_face, material_blend_mode, material_sized_uvs,
+    material_texture_tint, node_room_local_origin, preview_lights, preview_model_reference,
+    preview_player_reference, preview_projected_triangle_hw_safe, preview_scratch,
+    preview_shadow_radius, preview_static_model_reference, preview_vertices_in_front, push_clear,
+    push_tri, push_wall_face, room_depth_slot, rotate_image_prop_local, setup_gte_for_camera,
     shadow_depth_slot, should_draw_culled_face_outline, wall_material_sidedness_for_edge,
     wall_side_visible, yaw_rotation_q12, FaceShade, MaterialSlot, PreviewFog, WallEdge,
     GRID_TILE_UV, PREVIEW_FLOOR_UVS, PREVIEW_GEOMETRY_SLOT_MAX, PREVIEW_GEOMETRY_SLOT_MIN,
@@ -40,6 +40,23 @@ fn unpack(shade: FaceShade) -> (u8, u8, u8) {
         FaceShade::Flat { rgb, .. } => rgb,
         FaceShade::Textured { tint, .. } => tint,
     }
+}
+
+#[test]
+fn editor_preview_uses_authored_average_blend_mode() {
+    let mut project = ProjectDocument::new("blend-preview");
+    let water = project.add_resource(
+        "Water",
+        ResourceData::Material(MaterialResource::translucent(
+            None,
+            psxed_project::PsxBlendMode::Average,
+        )),
+    );
+
+    assert_eq!(
+        material_blend_mode(&project, Some(water)),
+        BlendMode::Average
+    );
 }
 
 fn address_window(addr: usize) -> usize {
@@ -231,7 +248,7 @@ fn cortex_ignition_v1_preview_frame_contains_draw_commands() {
 }
 
 #[test]
-fn cortex_player_crystal_preview_uses_its_generated_texture() {
+fn cortex_aletha_crystal_preview_uses_its_generated_texture() {
     let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../..")
         .canonicalize()
@@ -242,8 +259,8 @@ fn cortex_player_crystal_preview_uses_its_generated_texture() {
     let player_crystal = project
         .resources
         .iter()
-        .find(|resource| resource.name == "CI Player Crystal")
-        .expect("CI Player Crystal material exists");
+        .find(|resource| resource.name == "Aletha Crystal")
+        .expect("Aletha Crystal material exists");
     let mut textures = crate::editor_textures::EditorTextures::new();
     textures.refresh(&project, &project_root);
 
@@ -276,7 +293,7 @@ fn cortex_player_crystal_preview_uses_its_generated_texture() {
         .nodes()
         .iter()
         .find(|node| {
-            node.name == "Player" && super::preview_player_reference(scene, node).is_some()
+            node.name == "Aletha" && super::preview_player_reference(scene, node).is_some()
         })
         .expect("authored player exists");
     let reference = super::preview_player_reference(scene, player).expect("player reference");

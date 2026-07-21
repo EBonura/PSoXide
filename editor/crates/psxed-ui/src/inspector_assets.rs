@@ -990,20 +990,14 @@ pub(crate) fn resource_id_picker(
                     .map(|(_, name)| name.as_str())
             })
             .unwrap_or("(none)");
-        egui::ComboBox::from_id_salt(id_salt)
-            .selected_text(preview)
-            .show_ui(ui, |ui| {
-                if ui.selectable_label(current.is_none(), "(none)").clicked() {
-                    *current = None;
-                    changed = true;
-                }
-                for (id, name) in options {
-                    if ui.selectable_label(*current == Some(*id), name).clicked() {
-                        *current = Some(*id);
-                        changed = true;
-                    }
-                }
-            });
+        changed |= searchable_picker(
+            ui,
+            id_salt,
+            current,
+            preview,
+            options,
+            SearchablePickerConfig::optional("(none)"),
+        );
     });
     if let Some(id) = *current {
         if !options.iter().any(|(rid, _)| *rid == id) {
@@ -1613,20 +1607,14 @@ pub(crate) fn texture_resource_picker(
                     .map(|(_, n)| n.as_str())
             })
             .unwrap_or("(none)");
-        egui::ComboBox::from_id_salt(label.to_string())
-            .selected_text(preview)
-            .show_ui(ui, |ui| {
-                if ui.selectable_label(current.is_none(), "(none)").clicked() {
-                    *current = None;
-                    changed = true;
-                }
-                for (id, name) in options {
-                    if ui.selectable_label(*current == Some(*id), name).clicked() {
-                        *current = Some(*id);
-                        changed = true;
-                    }
-                }
-            });
+        changed |= searchable_picker(
+            ui,
+            ui.id().with(("texture-resource-picker", label)),
+            current,
+            preview,
+            options,
+            SearchablePickerConfig::optional("(none)"),
+        );
         if let Some(id) = *current {
             if ui
                 .small_button("→")

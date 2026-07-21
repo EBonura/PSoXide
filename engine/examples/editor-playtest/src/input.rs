@@ -1,8 +1,6 @@
 //! Player movement and camera input helpers.
 
-use psx_engine::{
-    camera_relative_move_axes, Angle, InputAxis, InputAxisProfile, InputVector,
-};
+use psx_engine::{camera_relative_move_axes, Angle, InputAxis, InputAxisProfile, InputVector};
 
 use super::*;
 

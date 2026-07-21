@@ -444,6 +444,19 @@ pub fn quantize_rgba_with_transparent_zero(
     Ok(median_cut_quantize_with_transparent_zero(pixels, n_entries))
 }
 
+/// Quantise opaque RGB pixels into an indexed palette without reserving a
+/// transparency entry. Host-side material bakers use this when every selected
+/// source texel is opaque so all 16 colours remain available to a 4bpp result.
+pub fn quantize_rgb(
+    pixels: &[[u8; 3]],
+    n_entries: usize,
+) -> Result<(Vec<[u8; 3]>, Vec<u8>), Error> {
+    if !(2..=256).contains(&n_entries) || pixels.is_empty() {
+        return Err(Error::InvalidIndexedInput);
+    }
+    Ok(median_cut_quantize(pixels, n_entries))
+}
+
 /// Median-cut colour quantisation. Input: per-pixel RGB. Output:
 /// (palette, indices) where each index is `< n_entries`.
 ///
@@ -843,5 +856,16 @@ mod tests {
         let pixels = [[0, 0, 0, 255]];
         assert!(quantize_rgba_with_transparent_zero(&pixels, 1).is_err());
         assert!(quantize_rgba_with_transparent_zero(&pixels, 257).is_err());
+    }
+
+    #[test]
+    fn opaque_in_memory_quantizer_keeps_all_palette_entries_available() {
+        let pixels = (0..16)
+            .map(|index| [index * 16, 255 - index * 16, index * 7])
+            .collect::<Vec<_>>();
+        let (palette, indices) = quantize_rgb(&pixels, 16).unwrap();
+        assert_eq!(palette.len(), 16);
+        assert_eq!(indices.len(), pixels.len());
+        assert!(indices.iter().all(|index| *index < 16));
     }
 }
