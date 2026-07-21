@@ -810,6 +810,7 @@ impl EditorWorkspace {
         const ALL_VALUES: &[(ViewTool, Option<PlaceKind>)] = &[
             (ViewTool::Select, None),
             (ViewTool::PaintMaterial, None),
+            (ViewTool::Water, None),
             (ViewTool::PaintFloor, None),
             (ViewTool::PaintWall, None),
             (ViewTool::PaintCeiling, None),
@@ -860,7 +861,7 @@ impl EditorWorkspace {
             self.clear_primitive_selection_state();
             self.selection.hovered_primitive = None;
         }
-        if tool == ViewTool::PaintMaterial {
+        if matches!(tool, ViewTool::PaintMaterial | ViewTool::Water) {
             self.clear_sector_selection();
             self.clear_primitive_selection_state();
             self.selection.hovered_primitive = None;

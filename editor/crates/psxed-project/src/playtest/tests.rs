@@ -518,3 +518,4 @@ mod models_entities;
 mod player_character;
 mod rooms_visibility;
 mod ui_options;
+mod water;

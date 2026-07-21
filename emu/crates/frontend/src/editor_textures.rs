@@ -1607,6 +1607,15 @@ mod tests {
                 }
             }
         }
+        for node in project.active_scene().nodes() {
+            if let NodeKind::WaterVolume {
+                material: Some(material),
+                ..
+            } = &node.kind
+            {
+                used.entry(*material).or_insert(node.floor);
+            }
+        }
 
         let mut textures = EditorTextures::new();
         textures.refresh(&project, &project_root);

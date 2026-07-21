@@ -343,6 +343,39 @@ pub struct PlaytestRoomFloorLink {
     pub below_room: Option<u16>,
 }
 
+/// One water-covered runtime sector. Records are sorted by
+/// `(room, x, z)` so the runtime can binary-search the player's current cell
+/// without scanning authored volumes or geometry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestWaterCell {
+    /// Owning runtime room.
+    pub room: u16,
+    /// Runtime-room-local sector X.
+    pub x: u16,
+    /// Runtime-room-local sector Z.
+    pub z: u16,
+    /// Optional texture asset for the visible water surface.
+    pub texture_asset_index: Option<usize>,
+    /// PSX semi-transparency code for the surface.
+    pub blend_mode: u8,
+    /// Material modulation tint.
+    pub tint_rgb: [u8; 3],
+    /// Material animation preserved for the water-surface render pass.
+    pub animation: MaterialAnimation,
+    /// Horizontal surface in runtime-room-local engine units.
+    pub surface_y: i32,
+    /// Terrain depth below the surface at the sector centre.
+    pub depth: u16,
+    /// Depth at which entering this cell starts water death.
+    pub lethal_depth: u16,
+    /// Movement speed retained while wading, as a percentage.
+    pub movement_percent: u8,
+    /// Ticks from lethal submersion to respawn.
+    pub death_delay_ticks: u8,
+    /// Required submersion before the lethal sequence begins.
+    pub death_submerge_depth: u16,
+}
+
 /// Resolved sky values written into one runtime room record.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlaytestSky {
@@ -828,6 +861,8 @@ pub struct PlaytestBoxProp {
     pub room: u16,
     /// Per-face texture asset indices. `None` skips that face.
     pub texture_asset_indices: [Option<usize>; psx_level::BOX_PROP_FACE_COUNT],
+    /// Per-face material blend codes using `model_override_blend` values.
+    pub blend_modes: [u8; psx_level::BOX_PROP_FACE_COUNT],
     /// Bottom-center room-local X.
     pub x: i32,
     /// Bottom Y.
@@ -1693,6 +1728,8 @@ pub struct PlaytestPackage {
     pub room_portals: Vec<PlaytestRoomPortal>,
     /// Runtime floor links, indexed by `(room, x, z)` and copied into streamed collision chunks.
     pub room_floor_links: Vec<PlaytestRoomFloorLink>,
+    /// Sorted water-sector lookup table.
+    pub water_cells: Vec<PlaytestWaterCell>,
     /// Reserved near-room index table for room coherence / streaming.
     pub room_near_rooms: Vec<u16>,
     /// Reserved overlapped-room index table for stacked-room coherence.

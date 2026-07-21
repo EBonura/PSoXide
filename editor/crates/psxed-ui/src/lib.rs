@@ -90,13 +90,14 @@ use psxed_project::{
     RuntimeTextureSplitMode, Scene, SceneNode, SceneStateId, SceneWorldLayer, SkyMode, SkySettings,
     TransitionMaskShape, TransitionMaterialTexture, UiAction, UiAnchor, UiFontChoice, UiGradient,
     UiGradientDirection, UiImageEffect, UiNode, UiNodeId, UiNodeKind, UiNodeRow, UiRect, UiScene,
-    UiSceneId, UiSfxBindings, UiSfxCue, UiTextAlign, UiValueBinding, WorldCameraSettings,
-    WorldCullingSettings, WorldGrid, WorldPhysicsSettings, WorldStreamingSettings,
-    AUTO_PAINT_BLEND_PREFIX, DEFAULT_WALL_HEIGHT_SECTORS, DEFAULT_WORLD_SECTOR_SIZE,
-    HEIGHT_QUANTUM, MAX_PHYSICS_WEIGHT_Q8, MAX_UI_FONT_SCALE, MAX_UI_LETTER_SPACING,
-    MAX_WORLD_CAMERA_DISTANCE, MAX_WORLD_CAMERA_HEIGHT, MAX_WORLD_CAMERA_MIN_FLOOR_CLEARANCE,
-    MAX_WORLD_CHUNK_ACTIVATION_RADIUS_SECTORS, MAX_WORLD_DRAW_DISTANCE, MAX_WORLD_GRAVITY_PER_TICK,
-    MAX_WORLD_SECTOR_SIZE, MAX_WORLD_STREAMING_RESIDENT_CHUNKS, MAX_WORLD_STREAMING_VISIBLE_CHUNKS,
+    UiSceneId, UiSfxBindings, UiSfxCue, UiTextAlign, UiValueBinding, WaterVolumeCell,
+    WaterVolumeSettings, WorldCameraSettings, WorldCullingSettings, WorldGrid,
+    WorldPhysicsSettings, WorldStreamingSettings, AUTO_PAINT_BLEND_PREFIX,
+    DEFAULT_WALL_HEIGHT_SECTORS, DEFAULT_WORLD_SECTOR_SIZE, HEIGHT_QUANTUM, MAX_PHYSICS_WEIGHT_Q8,
+    MAX_UI_FONT_SCALE, MAX_UI_LETTER_SPACING, MAX_WORLD_CAMERA_DISTANCE, MAX_WORLD_CAMERA_HEIGHT,
+    MAX_WORLD_CAMERA_MIN_FLOOR_CLEARANCE, MAX_WORLD_CHUNK_ACTIVATION_RADIUS_SECTORS,
+    MAX_WORLD_DRAW_DISTANCE, MAX_WORLD_GRAVITY_PER_TICK, MAX_WORLD_SECTOR_SIZE,
+    MAX_WORLD_STREAMING_RESIDENT_CHUNKS, MAX_WORLD_STREAMING_VISIBLE_CHUNKS,
     MAX_WORLD_VISIBILITY_RADIUS, MIN_PHYSICS_WEIGHT_Q8, MIN_UI_FONT_SCALE, MIN_UI_LETTER_SPACING,
     MIN_WORLD_CAMERA_DISTANCE, MIN_WORLD_CHUNK_ACTIVATION_RADIUS_SECTORS, MIN_WORLD_DRAW_DISTANCE,
     MIN_WORLD_GRAVITY_PER_TICK, MIN_WORLD_SECTOR_SIZE, MIN_WORLD_STREAMING_RESIDENT_CHUNKS,
@@ -525,6 +526,9 @@ pub struct EditorWorkspace {
     /// Organic variation applied to the exposed edge of generated blends.
     /// The transition baker clamps this to its seam-safe 0..=96 range.
     material_paint_blend_edge_detail: u8,
+    /// Active Water subtool: select an existing volume, add cells to the
+    /// selected volume, or erase cells from any volume on the active floor.
+    water_tool_mode: WaterToolMode,
     snap_to_grid: bool,
     snap_units: u16,
     show_grid: bool,
@@ -1222,9 +1226,10 @@ struct FloatingGeometryPlacement {
     /// Capturing it without moving prevents the command's own frame from
     /// teleporting the adjacent preview to a stale mouse position.
     pointer_anchor_origin: Option<[i32; 2]>,
-    /// Once the pointer deliberately crosses into another grid cell, the
-    /// preview resumes the existing cursor-following placement behaviour.
-    pointer_tracking_started: bool,
+    /// Preview origin paired with `pointer_anchor_origin`. Pointer motion is
+    /// applied as a delta from this nearby starting placement, never as an
+    /// absolute snap to wherever the mouse happened to be when Duplicate ran.
+    pointer_anchor_placement_origin: [i32; 2],
     /// The geometry authored by the latest preview pass. Keeping this on the
     /// placement makes the duplicate's selection durable across the click
     /// frame that commits it instead of relying on transient UI selection.
@@ -1949,11 +1954,20 @@ enum ViewTool {
     PaintCeiling,
     /// Repaint exactly one existing floor, ceiling, or wall face.
     PaintMaterial,
+    /// Paint cells into a first-class Water Volume on the active Room floor.
+    Water,
     /// Clear the painted surface under the cursor.
     Erase,
     /// Drop a child entity node into the sector under the cursor.
     /// The kind of node placed is controlled by `place_kind`.
     Place,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WaterToolMode {
+    Add,
+    Erase,
+    Select,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2068,6 +2082,7 @@ impl ViewTool {
             Self::PaintWall => "Wall",
             Self::PaintCeiling => "Ceiling",
             Self::PaintMaterial => "Paint",
+            Self::Water => "Water",
             Self::Erase => "Erase",
             Self::Place => "Place",
         }
@@ -2080,6 +2095,7 @@ impl ViewTool {
             Self::PaintWall => icons::BRICK_WALL,
             Self::PaintCeiling => icons::LAYERS,
             Self::PaintMaterial => icons::PALETTE,
+            Self::Water => icons::BLEND,
             Self::Erase => icons::TRASH,
             Self::Place => icons::PLUS,
         }
@@ -2095,6 +2111,7 @@ impl ViewTool {
                 | Self::PaintWall
                 | Self::PaintCeiling
                 | Self::PaintMaterial
+                | Self::Water
                 | Self::Erase
                 | Self::Place
         )
@@ -2466,6 +2483,7 @@ impl EditorWorkspace {
             material_paint_sampling: false,
             material_paint_blend_coverage_percent: 50,
             material_paint_blend_edge_detail: 20,
+            water_tool_mode: WaterToolMode::Add,
             snap_to_grid: true,
             snap_units: 16,
             show_grid: editor_visibility.show_grid,
@@ -2932,6 +2950,7 @@ impl EditorWorkspace {
             "ceiling" => ViewTool::PaintCeiling,
             "wall" => ViewTool::PaintWall,
             "paint" | "material" => ViewTool::PaintMaterial,
+            "water" => ViewTool::Water,
             _ => return,
         };
         if self.active_room_id().is_none() {
@@ -2943,7 +2962,21 @@ impl EditorWorkspace {
         self.material_paint_sampling = tool == ViewTool::PaintMaterial
             && std::env::var("PSXED_DEBUG_PAINT_SAMPLE")
                 .is_ok_and(|value| matches!(value.trim(), "1" | "true" | "yes" | "on"));
-        self.status = if self.material_paint_sampling {
+        if tool == ViewTool::Water {
+            self.water_tool_mode = match std::env::var("PSXED_DEBUG_WATER_MODE")
+                .unwrap_or_default()
+                .trim()
+                .to_ascii_lowercase()
+                .as_str()
+            {
+                "erase" => WaterToolMode::Erase,
+                "select" => WaterToolMode::Select,
+                _ => WaterToolMode::Add,
+            };
+        }
+        self.status = if tool == ViewTool::Water {
+            format!("Water: {:?}", self.water_tool_mode)
+        } else if self.material_paint_sampling {
             "Eyedropper: click a surface to sample its material".to_string()
         } else if self.material_paint_blend {
             "Material Paint: Blend".to_string()

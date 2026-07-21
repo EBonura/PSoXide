@@ -143,9 +143,11 @@ impl EditorWorkspace {
                     self.clear_sector_selection();
                     return;
                 };
-                if self.portal_place_active() || tool == ViewTool::PaintMaterial {
+                if self.portal_place_active()
+                    || matches!(tool, ViewTool::PaintMaterial | ViewTool::Water)
+                {
                     self.clear_sector_selection();
-                    if tool == ViewTool::PaintMaterial {
+                    if matches!(tool, ViewTool::PaintMaterial | ViewTool::Water) {
                         self.clear_primitive_selection_state();
                     }
                 } else {
@@ -480,7 +482,7 @@ impl EditorWorkspace {
             flip_x: false,
             flip_z: false,
             pointer_anchor_origin: None,
-            pointer_tracking_started: false,
+            pointer_anchor_placement_origin: clipboard.next_paste_origin,
             selected_cells: Vec::new(),
             selected_primitives: Vec::new(),
             cells: clipboard.cells,
@@ -525,27 +527,24 @@ impl EditorWorkspace {
     /// observed cell is only an anchor: duplicate commands can originate from
     /// a shortcut, toolbar, or tree menu while the mouse is elsewhere, and
     /// immediately snapping to that stale position makes the copy appear to
-    /// vanish. Crossing into another cell is treated as deliberate movement
-    /// and enables the normal cursor-following behaviour for the rest of the
-    /// placement.
+    /// vanish. Later pointer cells move the preview by their delta from this
+    /// anchor, preserving the adjacent starting placement even when the cursor
+    /// began on the other side of a large room.
     pub(crate) fn track_floating_geometry_pointer_origin(&mut self, origin: [i32; 2]) -> bool {
         let Some(preview) = self.floating_geometry.as_mut() else {
             return false;
         };
-        if preview.pointer_tracking_started {
-            return self.update_floating_geometry_origin(origin);
-        }
-        match preview.pointer_anchor_origin {
-            None => {
-                preview.pointer_anchor_origin = Some(origin);
-                true
-            }
-            Some(anchor) if anchor == origin => true,
-            Some(_) => {
-                preview.pointer_tracking_started = true;
-                self.update_floating_geometry_origin(origin)
-            }
-        }
+        let Some(anchor) = preview.pointer_anchor_origin else {
+            preview.pointer_anchor_origin = Some(origin);
+            preview.pointer_anchor_placement_origin = preview.origin;
+            return true;
+        };
+        let placement_anchor = preview.pointer_anchor_placement_origin;
+        let target = [
+            placement_anchor[0].saturating_add(origin[0].saturating_sub(anchor[0])),
+            placement_anchor[1].saturating_add(origin[1].saturating_sub(anchor[1])),
+        ];
+        self.update_floating_geometry_origin(target)
     }
 
     pub(crate) fn rotate_floating_geometry_cw(&mut self) {
