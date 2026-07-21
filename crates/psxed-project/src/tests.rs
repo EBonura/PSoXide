@@ -1033,6 +1033,34 @@ fn wall_stack_placement_preserves_sloped_top_edge() {
 }
 
 #[test]
+fn pushing_floor_below_preserves_existing_layers_and_inherits_room_look() {
+    let mut grid = WorldGrid::empty(2, 1, 1024);
+    grid.elevation = 4096;
+    grid.ambient_color = [18, 24, 31];
+    grid.set_floor(1, 0, 128, None);
+    grid.push_floor();
+    grid.floor_mut(1).unwrap().set_floor(0, 0, 64, None);
+
+    grid.push_floor_below();
+
+    assert_eq!(grid.floor_count(), 3);
+    assert_eq!(grid.elevation, 2048);
+    assert_eq!(grid.ambient_color, [18, 24, 31]);
+    assert!(grid.floor(0).unwrap().sector(1, 0).is_none());
+    assert!(grid.floor(1).unwrap().sector(1, 0).unwrap().floor.is_some());
+    assert_eq!(grid.floor(1).unwrap().elevation, 4096);
+    assert!(grid.floor(2).unwrap().sector(0, 0).unwrap().floor.is_some());
+    assert_eq!(grid.floor(2).unwrap().elevation, 6144);
+
+    let encoded = ron::ser::to_string_pretty(&grid, ron::ser::PrettyConfig::default()).unwrap();
+    let decoded: WorldGrid = ron::from_str(&encoded).unwrap();
+    assert_eq!(
+        decoded, grid,
+        "stacked layers must use the existing RON schema"
+    );
+}
+
+#[test]
 fn stone_room_perimeter_uses_editor_direction_convention() {
     let grid = WorldGrid::stone_room(2, 3, 1024, None, None);
     let default_wall_height = default_wall_height_for_sector_size(1024);
@@ -2203,6 +2231,39 @@ fn material_lab_recipe_roundtrips_through_ron_string() {
 }
 
 #[test]
+fn transition_material_recipe_roundtrips_through_ron_string() {
+    let mut project = ProjectDocument::new("transition-material");
+    let source_a = project.add_resource(
+        "Sand",
+        ResourceData::Material(MaterialResource::opaque(Some("sand.psxt".to_string()))),
+    );
+    let source_b = project.add_resource(
+        "Stone",
+        ResourceData::Material(MaterialResource::opaque(Some("stone.psxt".to_string()))),
+    );
+    let mut material = MaterialResource::opaque(None);
+    material.texture_mode = MaterialTextureMode::Transition;
+    material.transition = TransitionMaterialTexture {
+        source_a: Some(source_a),
+        source_b: Some(source_b),
+        size: 128,
+        coverage: 191,
+        shape: TransitionMaskShape::Corner,
+        rotation_quarters: 3,
+        flip_x: true,
+        flip_y: false,
+        edge_breakup: 37,
+        seed: 0x5eed_cafe,
+    };
+    project.add_resource("Sand over stone", ResourceData::Material(material));
+
+    let ron = project.to_ron_string().unwrap();
+    assert!(ron.contains("texture_mode: Transition"));
+    assert!(ron.contains("shape: Corner"));
+    assert_eq!(ProjectDocument::from_ron_str(&ron).unwrap(), project);
+}
+
+#[test]
 fn runtime_depth_sort_mode_roundtrips_through_ron_string() {
     let mut project = ProjectDocument::new("depth-sort");
     project.runtime_depth_sort_mode = RuntimeDepthSortMode::HybridWalls;
@@ -2787,6 +2848,51 @@ fn delete_resource_removes_entry_and_clears_references() {
     }
 
     let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn delete_material_source_clears_transition_recipes() {
+    let mut project = ProjectDocument::new("delete-transition-source");
+    let source = project.add_resource(
+        "Source",
+        ResourceData::Material(MaterialResource::opaque(None)),
+    );
+    let transition = project.add_resource(
+        "Transition",
+        ResourceData::Material(MaterialResource {
+            texture_mode: MaterialTextureMode::Transition,
+            transition: TransitionMaterialTexture {
+                source_a: Some(source),
+                source_b: Some(source),
+                ..TransitionMaterialTexture::default()
+            },
+            secondary_layer: Some(ModelSecondaryLayer {
+                texture_mode: MaterialTextureMode::Transition,
+                transition: TransitionMaterialTexture {
+                    source_a: Some(source),
+                    source_b: Some(source),
+                    ..TransitionMaterialTexture::default()
+                },
+                ..ModelSecondaryLayer::default()
+            }),
+            ..MaterialResource::opaque(None)
+        }),
+    );
+
+    assert_eq!(project.resource_reference_count(source), 4);
+    let report = project.delete_resource(source).expect("source exists");
+    assert_eq!(report.cleared_references, 4);
+    let ResourceData::Material(material) = &project.resource(transition).unwrap().data else {
+        panic!("transition remains a material");
+    };
+    assert_eq!(material.transition.source_a, None);
+    assert_eq!(material.transition.source_b, None);
+    let layer = material
+        .secondary_layer
+        .as_ref()
+        .expect("layer is preserved");
+    assert_eq!(layer.transition.source_a, None);
+    assert_eq!(layer.transition.source_b, None);
 }
 
 #[test]

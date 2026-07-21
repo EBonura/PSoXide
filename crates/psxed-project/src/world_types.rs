@@ -731,6 +731,23 @@ pub struct WorldGrid {
 }
 
 impl WorldGrid {
+    fn empty_stacked_floor_like(source: &Self, elevation: i32) -> Self {
+        let mut floor = Self::empty(source.width, source.depth, source.sector_size);
+        floor.origin = source.origin;
+        floor.elevation = elevation;
+        floor.ambient_color = source.ambient_color;
+        floor.fog_enabled = source.fog_enabled;
+        floor.fog_color = source.fog_color;
+        floor.fog_near = source.fog_near;
+        floor.fog_far = source.fog_far;
+        floor.atmosphere_enabled = source.atmosphere_enabled;
+        floor.atmosphere_color = source.atmosphere_color;
+        floor.atmosphere_density = source.atmosphere_density;
+        floor.atmosphere_fall_speed_q4 = source.atmosphere_fall_speed_q4;
+        floor.atmosphere_wind_speed_q4 = source.atmosphere_wind_speed_q4;
+        floor
+    }
+
     /// Create an empty sparse grid.
     pub fn empty(width: u16, depth: u16, sector_size: i32) -> Self {
         let len = width as usize * depth as usize;
@@ -786,24 +803,30 @@ impl WorldGrid {
     pub fn push_floor(&mut self) -> usize {
         let top = self.floors_above.last().unwrap_or(self);
         let elevation = top.elevation + default_wall_height_for_sector_size(top.sector_size);
-        let mut floor = WorldGrid::empty(self.width, self.depth, self.sector_size);
-        floor.origin = self.origin;
-        floor.elevation = elevation;
-        // Inherit the room-level look so stacked floors render
-        // consistently (and the sky/fog seed grid is unaffected by which
-        // floor is active).
-        floor.ambient_color = self.ambient_color;
-        floor.fog_enabled = self.fog_enabled;
-        floor.fog_color = self.fog_color;
-        floor.fog_near = self.fog_near;
-        floor.fog_far = self.fog_far;
-        floor.atmosphere_enabled = self.atmosphere_enabled;
-        floor.atmosphere_color = self.atmosphere_color;
-        floor.atmosphere_density = self.atmosphere_density;
-        floor.atmosphere_fall_speed_q4 = self.atmosphere_fall_speed_q4;
-        floor.atmosphere_wind_speed_q4 = self.atmosphere_wind_speed_q4;
+        // Inherit the top floor's footprint and room-level look so an
+        // adjacent layer starts aligned even when that floor was extended
+        // independently from the base grid.
+        let floor = Self::empty_stacked_floor_like(top, elevation);
         self.floors_above.push(floor);
         self.floors_above.len()
+    }
+
+    /// Insert an empty floor below floor zero while preserving every
+    /// existing floor and its authored elevation. The former base becomes
+    /// floor one; callers that own scene nodes must shift their floor indices
+    /// and room transform to keep existing content at the same world height.
+    pub fn push_floor_below(&mut self) -> usize {
+        let elevation = self
+            .elevation
+            .saturating_sub(default_wall_height_for_sector_size(self.sector_size));
+        let mut new_base = Self::empty_stacked_floor_like(self, elevation);
+        std::mem::swap(self, &mut new_base);
+
+        let previous_upper_floors = std::mem::take(&mut new_base.floors_above);
+        self.floors_above.reserve(1 + previous_upper_floors.len());
+        self.floors_above.push(new_base);
+        self.floors_above.extend(previous_upper_floors);
+        0
     }
 
     /// Create a rectangular room with floors and perimeter walls.

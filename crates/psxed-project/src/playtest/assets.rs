@@ -69,32 +69,11 @@ fn is_supported_room_material_dimension(size: u16) -> bool {
 /// Generated recipes are baked on the host, so they cost no CPU on PS1 and
 /// travel through the same validated 4bpp runtime path as imported images.
 pub(super) fn material_texture_bytes(
+    project: &ProjectDocument,
     resource: &Resource,
     project_root: &Path,
 ) -> Result<Option<(String, Vec<u8>)>, String> {
-    match &resource.data {
-        ResourceData::Material(material)
-            if material.texture_mode == crate::MaterialTextureMode::Generated =>
-        {
-            let key = format!("@material-generated:{:?}", material.generated);
-            Ok(Some((
-                key,
-                crate::generate_material_texture_psxt(material.generated),
-            )))
-        }
-        ResourceData::Material(material) => {
-            let Some(path) = material.psxt_path.as_deref() else {
-                return Ok(None);
-            };
-            load_psxt_bytes(&resource.name, path, project_root)
-                .map(|bytes| Some((path.to_string(), bytes)))
-        }
-        ResourceData::Texture { psxt_path } => {
-            load_psxt_bytes(&resource.name, psxt_path, project_root)
-                .map(|bytes| Some((psxt_path.clone(), bytes)))
-        }
-        _ => Ok(None),
-    }
+    crate::resolve_material_texture_psxt(project, resource.id, project_root)
 }
 
 /// Read a material's `.psxt` bytes from disk. Resolves `psxt_path`
@@ -126,6 +105,43 @@ pub(super) fn load_psxt_bytes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transition_material_uses_the_standard_room_texture_cook_path() {
+        let mut project = ProjectDocument::new("transition-cook");
+        let generated = |color| {
+            ResourceData::Material(crate::MaterialResource {
+                texture_mode: crate::MaterialTextureMode::Generated,
+                generated: crate::GeneratedMaterialTexture {
+                    size: 32,
+                    base_color: color,
+                    noise_enabled: false,
+                    ..crate::GeneratedMaterialTexture::default()
+                },
+                ..crate::MaterialResource::opaque(None)
+            })
+        };
+        let sand = project.add_resource("Sand", generated([176, 136, 80]));
+        let stone = project.add_resource("Stone", generated([72, 80, 96]));
+        let transition = project.add_resource(
+            "Sand over stone",
+            ResourceData::Material(crate::MaterialResource {
+                texture_mode: crate::MaterialTextureMode::Transition,
+                transition: crate::TransitionMaterialTexture {
+                    source_a: Some(stone),
+                    source_b: Some(sand),
+                    ..crate::TransitionMaterialTexture::default()
+                },
+                ..crate::MaterialResource::opaque(None)
+            }),
+        );
+        let resource = project.resource(transition).expect("transition resource");
+        let (key, bytes) = material_texture_bytes(&project, resource, Path::new("."))
+            .expect("cook resolves")
+            .expect("transition has texture bytes");
+        assert!(key.starts_with("@material-transition:"));
+        expect_room_material_depth("transition", &bytes).expect("normal room PSXT accepted");
+    }
 
     #[test]
     fn room_material_rejects_non_texture_window_dimensions() {

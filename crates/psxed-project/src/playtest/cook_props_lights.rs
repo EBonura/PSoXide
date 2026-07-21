@@ -25,20 +25,21 @@ pub(crate) fn resolve_material_texture_asset(
         ));
         return None;
     };
-    let (texture_key, bytes) = match material_texture_bytes(material_resource, project_root) {
-        Ok(Some(source)) => source,
-        Ok(None) => {
-            report.warn(format!(
-                "{label} material '{}' has no Texture - skipped",
-                material_resource.name
-            ));
-            return None;
-        }
-        Err(msg) => {
-            report.warn(format!("{label}: {msg} - skipped"));
-            return None;
-        }
-    };
+    let (texture_key, bytes) =
+        match material_texture_bytes(project, material_resource, project_root) {
+            Ok(Some(source)) => source,
+            Ok(None) => {
+                report.warn(format!(
+                    "{label} material '{}' has no Texture - skipped",
+                    material_resource.name
+                ));
+                return None;
+            }
+            Err(msg) => {
+                report.warn(format!("{label}: {msg} - skipped"));
+                return None;
+            }
+        };
     let texture_asset_index = if let Some(&existing) = texture_asset_for_path.get(&texture_key) {
         existing
     } else {
@@ -90,11 +91,13 @@ pub(crate) fn resolve_model_material_override(
         ));
         return None;
     };
-    let texture_asset_index = if material.texture_mode == crate::MaterialTextureMode::Generated
-        || material
-            .psxt_path
-            .as_deref()
-            .is_some_and(|path| !path.trim().is_empty())
+    let texture_asset_index = if matches!(
+        material.texture_mode,
+        crate::MaterialTextureMode::Generated | crate::MaterialTextureMode::Transition
+    ) || material
+        .psxt_path
+        .as_deref()
+        .is_some_and(|path| !path.trim().is_empty())
     {
         Some(
             resolve_material_texture_asset(
@@ -113,7 +116,9 @@ pub(crate) fn resolve_model_material_override(
     };
     let secondary_layer = material.enabled_secondary_layer().map(|layer| {
         let texture_asset_index = resolve_model_secondary_texture_asset(
+            project,
             project_root,
+            material_id,
             &material_resource.name,
             layer,
             texture_asset_for_path,
@@ -146,7 +151,9 @@ pub(crate) fn resolve_model_material_override(
 
 #[allow(clippy::too_many_arguments)]
 fn resolve_model_secondary_texture_asset(
+    project: &ProjectDocument,
     project_root: &Path,
+    owner: ResourceId,
     material_name: &str,
     layer: &crate::ModelSecondaryLayer,
     texture_asset_for_path: &mut HashMap<String, usize>,
@@ -189,6 +196,30 @@ fn resolve_model_secondary_texture_asset(
                 cache_key,
                 format!("{material_name} generated layer 2"),
                 generate_material_texture_psxt(layer.generated),
+            )
+        }
+        crate::MaterialTextureMode::Transition => {
+            let bytes = match crate::generate_transition_material_texture_psxt(
+                project,
+                layer.transition,
+                project_root,
+                Some(owner),
+            ) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    report.warn(format!(
+                        "Material '{material_name}' secondary transition: {error} - skipped"
+                    ));
+                    return None;
+                }
+            };
+            let checksum = bytes.iter().fold(0xcbf2_9ce4_8422_2325u64, |hash, byte| {
+                (hash ^ u64::from(*byte)).wrapping_mul(0x100_0000_01b3)
+            });
+            (
+                format!("@material-layer-2-transition:{checksum:016x}"),
+                format!("{material_name} transition layer 2"),
+                bytes,
             )
         }
         crate::MaterialTextureMode::ReflectiveProbe => return None,
