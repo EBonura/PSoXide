@@ -1175,13 +1175,16 @@ fn floating_duplicate_stays_adjacent_until_the_pointer_deliberately_moves() {
     assert!(workspace.track_floating_geometry_pointer_origin([20, 20]));
     assert_eq!(workspace.room_grid_view(room).unwrap().origin, [0, 0]);
 
-    // Crossing a cell boundary starts pointer-following and moves the preview.
+    // Crossing one cell must move the nearby preview by one cell. The pointer
+    // itself is twenty cells away, so absolute pointer snapping would create a
+    // huge room and reproduce the editor's rough teleport.
     assert!(workspace.track_floating_geometry_pointer_origin([21, 20]));
     let grid = workspace.room_grid_view(room).unwrap();
-    let (sx, sz) = grid.world_cell_to_array(21, 20).unwrap();
+    let (sx, sz) = grid.world_cell_to_array(3, 0).unwrap();
     assert!(grid.sector(sx, sz).is_some());
-    let (sx, sz) = grid.world_cell_to_array(22, 20).unwrap();
+    let (sx, sz) = grid.world_cell_to_array(4, 0).unwrap();
     assert!(grid.sector(sx, sz).is_some());
+    assert_eq!((grid.width, grid.depth), (5, 1));
     assert!(grid
         .world_cell_to_array(2, 0)
         .is_some_and(|(sx, sz)| grid.sector(sx, sz).is_none()));

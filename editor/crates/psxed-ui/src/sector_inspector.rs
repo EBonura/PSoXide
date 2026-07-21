@@ -273,13 +273,18 @@ pub(crate) fn wall_stack_row(
             }
         });
         let pick_label = format!("    #{i} mat");
-        changed |= material_picker(
+        let material_before = wall.material;
+        let material_changed = material_picker(
             ui,
             &pick_label,
             &mut wall.material,
             material_options,
             nav_target,
         );
+        if material_changed && wall.material != material_before && wall.material.is_some() {
+            wall.autotile_uv(sector_size);
+        }
+        changed |= material_changed;
     }
     if let Some(i) = remove_at {
         walls.remove(i);

@@ -716,6 +716,14 @@ impl Scene for Playtest {
                     }
                 }
                 telemetry::stage_end(telemetry::stage::ROOM);
+                draw_water(
+                    active.index,
+                    &room_camera,
+                    actor_options,
+                    &lighting,
+                    &mut primitive_packets,
+                    &mut world,
+                );
                 telemetry::stage_begin(telemetry::stage::ENTITY_MARKERS);
                 draw_entity_markers(
                     ENTITIES,
@@ -1135,6 +1143,12 @@ impl Scene for Playtest {
         world.flush();
         telemetry::stage_end(telemetry::stage::WORLD_FLUSH);
         let _ = self.draw_particle_emitters(
+            camera,
+            self.gameplay_tick(ctx.sim_tick),
+            &mut ot,
+            &mut primitive_packets,
+        );
+        let _ = self.draw_player_water_wade_splash(
             camera,
             self.gameplay_tick(ctx.sim_tick),
             &mut ot,

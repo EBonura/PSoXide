@@ -1,5 +1,5 @@
 use super::{
-    euler_rotation_q12, face_side_visible, floor_anchored_model_origin,
+    animated_material_quad_uvs, euler_rotation_q12, face_side_visible, floor_anchored_model_origin,
     horizontal_triangle_world_points, light_face, material_blend_mode, material_sized_uvs,
     material_texture_tint, node_room_local_origin, preview_lights, preview_model_reference,
     preview_player_reference, preview_projected_triangle_hw_safe, preview_scratch,
@@ -56,6 +56,33 @@ fn editor_preview_uses_authored_average_blend_mode() {
     assert_eq!(
         material_blend_mode(&project, Some(water)),
         BlendMode::Average
+    );
+}
+
+#[test]
+fn editor_water_preview_uses_material_uv_motion() {
+    let mut project = ProjectDocument::new("animated-water-preview");
+    let mut material = MaterialResource::translucent(None, psxed_project::PsxBlendMode::Average);
+    material.animation.mode = psxed_project::MaterialAnimationMode::UvScroll;
+    material.animation.uv_scroll.enabled = true;
+    material.animation.uv_scroll.speed_u_q8 = 8 * 256;
+    material.animation.uv_scroll.speed_v_q8 = 4 * 256;
+    let material_id = project.add_resource("Water", ResourceData::Material(material));
+    let slot = MaterialSlot {
+        tpage_word: 0,
+        clut_word: 0,
+        texture_window: psx_gpu::material::TextureWindow::NONE,
+        texture_width: 64,
+        texture_height: 64,
+    };
+
+    assert_eq!(
+        animated_material_quad_uvs(&project, material_id, slot, 0)[0],
+        (0, 0)
+    );
+    assert_eq!(
+        animated_material_quad_uvs(&project, material_id, slot, 60)[0],
+        (8, 4)
     );
 }
 
