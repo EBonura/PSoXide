@@ -320,13 +320,13 @@ mod tests {
     }
 
     #[test]
-    fn cortex_aletha_correction_reencodes_standard_psxanim_without_runtime_metadata() {
+    fn tracked_aletha_correction_reencodes_standard_psxanim_without_runtime_metadata() {
         use crate::{model_import::resolve_path, ProjectDocument, ResourceData};
 
         let project_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../projects/cortex_ignition_v1/project.ron");
+            .join("../../projects/default/project.ron");
         let project =
-            ProjectDocument::load_from_path(&project_path).expect("Cortex project parses");
+            ProjectDocument::load_from_path(&project_path).expect("default project parses");
         let project_root = project_path.parent().expect("project directory");
         let (model_id, model_path) = project
             .resources
@@ -343,7 +343,7 @@ mod tests {
             .iter()
             .find_map(|resource| match &resource.data {
                 ResourceData::AnimationClip(clip)
-                    if clip.target_model == Some(model_id) && resource.name == "idle" =>
+                    if clip.target_model == Some(model_id) && resource.name == "Aletha / Idle" =>
                 {
                     Some(clip.psxanim_path.as_str())
                 }
