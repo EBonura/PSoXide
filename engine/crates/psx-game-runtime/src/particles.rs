@@ -28,6 +28,8 @@ const ATMOSPHERE_SCREEN_MARGIN: i32 = 24;
 const PARTICLE_EMITTER_DRAW_CAP: u16 = 64;
 const PARTICLE_MIN_SCREEN_SIZE: i16 = 2;
 const PARTICLE_MAX_SCREEN_SIZE: i16 = 18;
+const WATER_SPLASH_PARTICLES: u32 = 3;
+const WATER_SPLASH_LIFETIME: u32 = 16;
 
 /// Draw one authored particle emitter's steady-state population as
 /// camera-facing textured quads. Returns the submitted quad count.
@@ -85,6 +87,70 @@ pub fn draw_particle_emitter<const OT_DEPTH: usize>(
             primitive_packets,
         );
         i += 1;
+    }
+    submitted
+}
+
+/// Draw a tiny fixed-budget splash around a moving actor's feet. This is a
+/// purely visual three-sprite effect: it owns no emitter state, performs no
+/// collision queries, and derives its phase from the gameplay tick.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_water_wade_splash<const OT_DEPTH: usize>(
+    x: i32,
+    surface_y: i32,
+    z: i32,
+    camera: WorldCamera,
+    projector: Option<LoadedWorldCameraGte>,
+    depth_range: DepthRange,
+    particle_material: TextureMaterial,
+    elapsed_tick: SimTick,
+    ot: &mut OtFrame<'_, OT_DEPTH>,
+    primitive_packets: &mut PrimitivePacketArena<'_>,
+) -> usize {
+    let mut submitted = 0usize;
+    let mut index = 0u32;
+    while index < WATER_SPLASH_PARTICLES {
+        let age = (elapsed_tick
+            .as_u32()
+            .wrapping_add(index.saturating_mul(WATER_SPLASH_LIFETIME / WATER_SPLASH_PARTICLES))
+            % WATER_SPLASH_LIFETIME) as i32;
+        let spread = 10i32.saturating_add(age.saturating_mul(3));
+        let (dx, dz) = match index {
+            0 => (-spread, spread / 2),
+            1 => (spread, spread / 3),
+            _ => (-(spread / 3), -spread),
+        };
+        // A short parabola reads as droplets kicked away from the feet.
+        let rise = age.saturating_mul(16 - age) / 2;
+        let position = WorldVertex::new(
+            x.saturating_add(dx),
+            surface_y.saturating_add(6).saturating_add(rise),
+            z.saturating_add(dz),
+        );
+        let center = if let Some(projector) = projector {
+            projector.project_world(position)
+        } else {
+            camera.project_world(position)
+        };
+        if let Some(center) = center {
+            let world_size = 18i32.saturating_sub(age / 2).max(8);
+            let half = ((world_size.saturating_mul(camera.projection.focal_length))
+                / center.sz.max(1))
+            .clamp(2, 10) as i16;
+            let fade = (112i32.saturating_sub(age.saturating_mul(4))).clamp(48, 112) as u8;
+            let material = particle_material
+                .with_tint((fade / 2, fade, fade.saturating_add(24)))
+                .with_blend_mode(BlendMode::AddQuarter);
+            submitted += draw_particle_quad(
+                center,
+                half,
+                material,
+                depth_range.slot::<OT_DEPTH>(center.sz),
+                ot,
+                primitive_packets,
+            );
+        }
+        index += 1;
     }
     submitted
 }
