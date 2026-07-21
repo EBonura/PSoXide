@@ -26,6 +26,7 @@ pub enum PlayerAnim {
     Quickstep,
     LightAttack,
     HeavyAttack,
+    Death,
 }
 
 impl PlayerAnim {
@@ -43,6 +44,7 @@ impl PlayerAnim {
             Self::Quickstep => CharacterAnimationAction::Backstep,
             Self::LightAttack => CharacterAnimationAction::LightAttack,
             Self::HeavyAttack => CharacterAnimationAction::HeavyAttack,
+            Self::Death => CharacterAnimationAction::Death,
         }
     }
 

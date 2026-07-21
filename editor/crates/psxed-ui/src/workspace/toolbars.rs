@@ -362,6 +362,7 @@ impl EditorWorkspace {
         match self.active_tool {
             ViewTool::Select => self.draw_select_tool_toolbar_controls(ui),
             ViewTool::PaintMaterial => self.draw_material_paint_toolbar_controls(ui),
+            ViewTool::Water => self.draw_water_toolbar_controls(ui),
             ViewTool::PaintFloor | ViewTool::PaintCeiling => {
                 ui.separator();
                 self.draw_brush_material_picker(ui);
@@ -709,6 +710,56 @@ impl EditorWorkspace {
         }
     }
 
+    fn draw_water_toolbar_controls(&mut self, ui: &mut egui::Ui) {
+        ui.separator();
+        ui.selectable_value(&mut self.water_tool_mode, WaterToolMode::Add, "Add")
+            .on_hover_text("Add the clicked cell to the selected water volume.");
+        ui.selectable_value(&mut self.water_tool_mode, WaterToolMode::Erase, "Erase")
+            .on_hover_text("Remove water from the clicked cell.");
+        ui.selectable_value(&mut self.water_tool_mode, WaterToolMode::Select, "Select")
+            .on_hover_text("Select the water volume that owns the clicked cell.");
+        if self.water_tool_mode == WaterToolMode::Add {
+            self.draw_brush_material_picker(ui);
+        }
+        let node_id = self.selection.selected_node;
+        if node_id != NodeId::ROOT {
+            let current =
+                self.project
+                    .active_scene()
+                    .node(node_id)
+                    .and_then(|node| match &node.kind {
+                        NodeKind::WaterVolume { settings, .. } => Some(*settings),
+                        _ => None,
+                    });
+            if let Some(mut edited) = current {
+                ui.separator();
+                let changed = ui
+                    .add(
+                        egui::DragValue::new(&mut edited.height_above_floor)
+                            .range(1..=8192)
+                            .speed(8.0)
+                            .prefix("Height "),
+                    )
+                    .on_hover_text(
+                        "Water surface height above each painted floor tile. The volume bottom always follows the terrain.",
+                    )
+                    .changed();
+                if changed {
+                    self.push_undo();
+                    if let Some(NodeKind::WaterVolume { settings, .. }) = self
+                        .project
+                        .active_scene_mut()
+                        .node_mut(node_id)
+                        .map(|node| &mut node.kind)
+                    {
+                        *settings = edited.normalized();
+                    }
+                    self.mark_dirty();
+                }
+            }
+        }
+    }
+
     pub(crate) fn draw_ui_viewport_toolbar(&mut self, ui: &mut egui::Ui) {
         toolbar_group_menu(
             ui,
@@ -866,6 +917,7 @@ impl EditorWorkspace {
                 ViewTool::PaintMaterial.icon(),
                 "Paint",
             ),
+            (ViewTool::Water, ViewTool::Water.icon(), "Water"),
             (ViewTool::Erase, ViewTool::Erase.icon(), "Erase"),
         ] {
             let enabled = room_active || !tool.requires_room_context();
@@ -1460,21 +1512,41 @@ impl EditorWorkspace {
             let center_world = match enclosing_room.and_then(|id| scene.node(id)) {
                 Some(room_node) => match &room_node.kind {
                     NodeKind::Room { grid } => {
+                        // A stacked floor can grow independently from the
+                        // base floor, so its width/origin (and therefore its
+                        // editor-to-preview conversion) can differ. The 3D
+                        // renderer places node markers with the node's own
+                        // floor grid; picking must use that same grid or the
+                        // clickable bound drifts away from the visible node.
+                        let node_floor = psxed_project::floor_view::node_floor(scene, node.id);
+                        let Some(node_grid) = grid.floor(node_floor) else {
+                            continue;
+                        };
                         if kind == EntityBoundKind::Portal {
-                            let Some((center, half)) = portal_seam_bounds_3d(grid, node) else {
+                            let Some((center, half)) = portal_seam_bounds_3d(node_grid, node)
+                            else {
                                 continue;
                             };
                             half_extents = half;
                             center
                         } else if node_is_floor_anchored(&node.kind) {
                             psxed_project::spatial::floor_anchored_node_preview_bounds_center(
-                                grid,
+                                node_grid,
                                 &node.transform,
                                 half_extents,
                             )
+                        } else if kind == EntityBoundKind::PointLight {
+                            // The light bulb gizmo is centred exactly on the
+                            // authored transform. Keep its pick box symmetric
+                            // around that visible marker instead of treating
+                            // the transform as the bottom of a standing prop.
+                            psxed_project::spatial::node_preview_origin_f32(
+                                node_grid,
+                                &node.transform,
+                            )
                         } else {
                             psxed_project::spatial::node_preview_bounds_center(
-                                grid,
+                                node_grid,
                                 &node.transform,
                                 half_extents,
                             )

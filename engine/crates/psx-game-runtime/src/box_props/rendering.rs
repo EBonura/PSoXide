@@ -1,7 +1,9 @@
 use super::geometry::*;
 use super::*;
 use crate::image_props::{average4_i32, average_vertex_rgb};
-use crate::model_rendering::{model_render_uv_max, sphere_visible_to_camera};
+use crate::model_rendering::{
+    model_override_blend_mode, model_render_uv_max, sphere_visible_to_camera,
+};
 use crate::room_lighting::RuntimeRoomLighting;
 use crate::vram::VramSlot;
 use psx_engine::{
@@ -141,6 +143,7 @@ fn box_prop_face_textures(
                         slot.tpage_word,
                         (0x80, 0x80, 0x80),
                     )
+                    .with_blend_mode(model_override_blend_mode(prop.blend_modes[face]))
                     .with_texture_window(slot.texture_window),
                     u_max: model_render_uv_max(slot.texture_width),
                     v_max: model_render_uv_max(slot.texture_height),
@@ -644,6 +647,7 @@ fn draw_box_prop_faces<T, const OT_DEPTH: usize>(
                         slot.tpage_word,
                         (0x80, 0x80, 0x80),
                     )
+                    .with_blend_mode(model_override_blend_mode(prop.blend_modes[face]))
                     .with_texture_window(slot.texture_window),
                     u_max: model_render_uv_max(slot.texture_width),
                     v_max: model_render_uv_max(slot.texture_height),

@@ -2622,6 +2622,7 @@ impl EditorWorkspace {
                         return;
                     };
                     let uv_before = wall.uv;
+                    let material_before = wall.material;
                     let mut uv_edit = GridUvTransformEdit::default();
                     egui::CollapsingHeader::new(icons::label(icons::BLEND, "Material"))
                         .default_open(true)
@@ -2633,6 +2634,9 @@ impl EditorWorkspace {
                                 &material_options,
                                 &mut nav_target,
                             );
+                            if wall.material != material_before && wall.material.is_some() {
+                                wall.autotile_uv(sector_size);
+                            }
                         });
                     egui::CollapsingHeader::new(icons::label(icons::MOVE, "Span"))
                         .default_open(true)

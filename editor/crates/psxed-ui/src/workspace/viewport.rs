@@ -122,6 +122,7 @@ impl EditorWorkspace {
                 | ViewTool::PaintWall
                 | ViewTool::PaintCeiling
                 | ViewTool::PaintMaterial
+                | ViewTool::Water
                 | ViewTool::Erase
                 | ViewTool::Place
         );
