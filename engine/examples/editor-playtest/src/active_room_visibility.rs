@@ -92,6 +92,8 @@ impl Playtest {
             visibility_space.camera_global,
         );
         self.visibility.candidates = self.visibility.result.stats.portals_tested.min(u16::MAX);
+        self.visibility
+            .include_overlapped_rooms(ROOMS, ROOM_OVERLAPPED_ROOMS);
         self.visibility.visible_missing_resident = 0;
         self.visibility.visible_missing_mask = RuntimeDebugMask::EMPTY;
         self.visibility.visible_build_failed = 0;

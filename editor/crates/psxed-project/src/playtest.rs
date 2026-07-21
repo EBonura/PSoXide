@@ -252,7 +252,6 @@ pub fn build_package(
     let mut room_portals: Vec<PlaytestRoomPortal> = Vec::new();
     let mut pending_floor_links: Vec<PendingRoomFloorLink> = Vec::new();
     let room_near_rooms: Vec<u16> = Vec::new();
-    let room_overlapped_rooms: Vec<u16> = Vec::new();
 
     for room_node in &room_nodes {
         let NodeKind::Room { grid: base_grid } = &room_node.kind else {
@@ -390,7 +389,7 @@ pub fn build_package(
                         return (None, report);
                     };
                     let (texture_key, texture_bytes) =
-                        match material_texture_bytes(material_resource, project_root) {
+                        match material_texture_bytes(project, material_resource, project_root) {
                             Ok(Some(source)) => source,
                             Ok(None) => {
                                 report.error(format!(
@@ -1651,6 +1650,7 @@ pub fn build_package(
     let mut room_floor_links = resolve_room_floor_links(&pending_floor_links, &room_chunks_by_node);
     room_floor_links.extend(auto_wire_floor_stack_links(&room_chunks_by_node));
     room_portals.extend(auto_wire_floor_stack_portals(scene, &room_chunks_by_node));
+    let room_overlapped_rooms = assign_floor_stack_overlaps(&mut rooms, &room_chunks_by_node);
     // The runtime visibility BFS reads each room's portals as the
     // contiguous slice [portal_first, portal_first+portal_count). The
     // per-room ranges set during the cook loop only covered the

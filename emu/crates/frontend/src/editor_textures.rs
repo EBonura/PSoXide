@@ -34,6 +34,7 @@ use psxed_project::streaming::collect_scene_resource_use;
 use psxed_project::{
     generate_material_texture_psxt, generate_room_reflection_probe_psxt, MaterialResource,
     MaterialTextureMode, NodeKind, ProjectDocument, ResourceData, ResourceId,
+    TransitionMaterialTexture,
 };
 
 const ROOM_TPAGE_HALFWORDS: usize = 64;
@@ -265,9 +266,20 @@ impl EditorTextures {
                 // Out of slots. Don't insert a stale cache entry.
                 break;
             }
-            let slot = item
+            let transition_bytes = item.transition.as_ref().and_then(|source| {
+                psxed_project::generate_transition_material_texture_psxt(
+                    project,
+                    source.recipe,
+                    project_root,
+                    Some(source.owner),
+                )
+                .ok()
+            });
+            let generated_bytes = item
                 .generated_bytes
                 .as_deref()
+                .or_else(|| transition_bytes.as_deref());
+            let slot = generated_bytes
                 .and_then(|bytes| {
                     self.upload_psxt_bytes_with_clut_mode(bytes, item.force_zero_opaque)
                 })
@@ -293,6 +305,16 @@ impl EditorTextures {
                 }
                 Some(SecondaryPreviewSource::Generated(bytes)) => {
                     self.upload_psxt_bytes_with_clut_mode(bytes, false)
+                }
+                Some(SecondaryPreviewSource::Transition(source)) => {
+                    psxed_project::generate_transition_material_texture_psxt(
+                        project,
+                        source.recipe,
+                        project_root,
+                        Some(source.owner),
+                    )
+                    .ok()
+                    .and_then(|bytes| self.upload_psxt_bytes_with_clut_mode(&bytes, false))
                 }
                 None => None,
             };
@@ -745,6 +767,7 @@ struct PreviewTextureUploadPlan {
     signature: String,
     cache_signature: String,
     generated_bytes: Option<Vec<u8>>,
+    transition: Option<TransitionPreviewSource>,
     force_zero_opaque: bool,
     allow_procedural_fallback: bool,
     secondary: Option<SecondaryPreviewSource>,
@@ -755,6 +778,13 @@ struct PreviewTextureUploadPlan {
 enum SecondaryPreviewSource {
     Texture(String),
     Generated(Vec<u8>),
+    Transition(TransitionPreviewSource),
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TransitionPreviewSource {
+    owner: ResourceId,
+    recipe: TransitionMaterialTexture,
 }
 
 fn preview_texture_upload_plan(
@@ -796,24 +826,37 @@ fn push_material_resource_upload(
     let ResourceData::Material(material) = &resource.data else {
         return;
     };
-    let (signature, cache_signature, generated_bytes) = match material.texture_mode {
+    let (signature, cache_signature, generated_bytes, transition) = match material.texture_mode {
         MaterialTextureMode::Generated => {
             let signature = format!("@generated:{:?}", material.generated);
             (
                 signature.clone(),
                 signature,
                 Some(generate_material_texture_psxt(material.generated)),
+                None,
+            )
+        }
+        MaterialTextureMode::Transition => {
+            let signature = format!("@transition:{}", id.raw());
+            (
+                signature,
+                transition_preview_signature(project, material.transition, project_root, Some(id)),
+                None,
+                Some(TransitionPreviewSource {
+                    owner: id,
+                    recipe: material.transition,
+                }),
             )
         }
         MaterialTextureMode::SimpleImage => {
             let signature = texture_path(project, material).unwrap_or_default();
             let cache_signature = texture_cache_signature(project_root, &signature);
-            (signature, cache_signature, None)
+            (signature, cache_signature, None, None)
         }
         MaterialTextureMode::ReflectiveProbe => {
             let bytes = preview_room_probe_bytes(project, project_root);
             let signature = format!("@room-probe:{}", bytes_signature(bytes.as_deref()));
-            (signature.clone(), signature, bytes)
+            (signature.clone(), signature, bytes, None)
         }
     };
     let secondary = material
@@ -826,6 +869,12 @@ fn push_material_resource_upload(
             MaterialTextureMode::Generated => Some(SecondaryPreviewSource::Generated(
                 generate_material_texture_psxt(layer.generated),
             )),
+            MaterialTextureMode::Transition => Some(SecondaryPreviewSource::Transition(
+                TransitionPreviewSource {
+                    owner: id,
+                    recipe: layer.transition,
+                },
+            )),
             MaterialTextureMode::ReflectiveProbe => preview_room_probe_bytes(project, project_root)
                 .map(SecondaryPreviewSource::Generated),
         });
@@ -836,6 +885,9 @@ fn push_material_resource_upload(
         Some(SecondaryPreviewSource::Generated(bytes)) => {
             format!("generated:{}", bytes_signature(Some(bytes)))
         }
+        Some(SecondaryPreviewSource::Transition(source)) => {
+            transition_preview_signature(project, source.recipe, project_root, Some(source.owner))
+        }
         None => "none".to_string(),
     };
     plan.push(PreviewTextureUploadPlan {
@@ -844,6 +896,7 @@ fn push_material_resource_upload(
         signature,
         cache_signature,
         generated_bytes,
+        transition,
         force_zero_opaque,
         allow_procedural_fallback: true,
         secondary,
@@ -919,7 +972,7 @@ fn push_texture_resource_upload(
     let Some(resource) = project.resource(id) else {
         return;
     };
-    let (psxt_path, cache_signature, generated_bytes) = match &resource.data {
+    let (psxt_path, cache_signature, generated_bytes, transition) = match &resource.data {
         // Direct image references (far vista, UI images, particle
         // masks) point at textured materials since the merge.
         ResourceData::Material(material)
@@ -930,6 +983,20 @@ fn push_texture_resource_upload(
                 signature.clone(),
                 signature,
                 Some(generate_material_texture_psxt(material.generated)),
+                None,
+            )
+        }
+        ResourceData::Material(material)
+            if material.texture_mode == MaterialTextureMode::Transition =>
+        {
+            (
+                format!("@transition:{}", id.raw()),
+                transition_preview_signature(project, material.transition, project_root, Some(id)),
+                None,
+                Some(TransitionPreviewSource {
+                    owner: id,
+                    recipe: material.transition,
+                }),
             )
         }
         ResourceData::Material(material) => match material.psxt_path.as_deref() {
@@ -937,12 +1004,14 @@ fn push_texture_resource_upload(
                 path.to_string(),
                 texture_cache_signature(project_root, path),
                 None,
+                None,
             ),
             None => return,
         },
         ResourceData::Texture { psxt_path } => (
             psxt_path.clone(),
             texture_cache_signature(project_root, psxt_path),
+            None,
             None,
         ),
         _ => return,
@@ -953,11 +1022,102 @@ fn push_texture_resource_upload(
         signature: psxt_path,
         cache_signature,
         generated_bytes,
+        transition,
         force_zero_opaque: false,
         allow_procedural_fallback: false,
         secondary: None,
         secondary_signature: "none".to_string(),
     });
+}
+
+fn transition_preview_signature(
+    project: &ProjectDocument,
+    recipe: TransitionMaterialTexture,
+    project_root: &Path,
+    owner: Option<ResourceId>,
+) -> String {
+    fn append_source(
+        project: &ProjectDocument,
+        source: Option<ResourceId>,
+        project_root: &Path,
+        stack: &mut Vec<ResourceId>,
+        signature: &mut String,
+    ) {
+        let Some(id) = source else {
+            signature.push_str("|none");
+            return;
+        };
+        if stack.contains(&id) {
+            signature.push_str(&format!("|cycle#{}", id.raw()));
+            return;
+        }
+        let Some(resource) = project.resource(id) else {
+            signature.push_str(&format!("|missing#{}", id.raw()));
+            return;
+        };
+        signature.push_str(&format!("|#{}:", id.raw()));
+        match &resource.data {
+            ResourceData::Texture { psxt_path } => {
+                signature.push_str(&texture_cache_signature(project_root, psxt_path));
+            }
+            ResourceData::Material(material) => {
+                signature.push_str(&format!(
+                    "{:?}:tint={:?}",
+                    material.texture_mode, material.tint
+                ));
+                match material.texture_mode {
+                    MaterialTextureMode::SimpleImage | MaterialTextureMode::ReflectiveProbe => {
+                        if let Some(path) = material.psxt_path.as_deref() {
+                            signature.push_str(&texture_cache_signature(project_root, path));
+                        } else {
+                            signature.push_str("no-image");
+                        }
+                    }
+                    MaterialTextureMode::Generated => {
+                        signature.push_str(&format!("{:?}", material.generated));
+                    }
+                    MaterialTextureMode::Transition => {
+                        signature.push_str(&format!("{:?}", material.transition));
+                        stack.push(id);
+                        append_source(
+                            project,
+                            material.transition.source_a,
+                            project_root,
+                            stack,
+                            signature,
+                        );
+                        append_source(
+                            project,
+                            material.transition.source_b,
+                            project_root,
+                            stack,
+                            signature,
+                        );
+                        stack.pop();
+                    }
+                }
+            }
+            other => signature.push_str(&format!("invalid:{other:?}")),
+        }
+    }
+
+    let mut signature = format!("transition:{recipe:?}");
+    let mut stack = owner.into_iter().collect::<Vec<_>>();
+    append_source(
+        project,
+        recipe.source_a,
+        project_root,
+        &mut stack,
+        &mut signature,
+    );
+    append_source(
+        project,
+        recipe.source_b,
+        project_root,
+        &mut stack,
+        &mut signature,
+    );
+    signature
 }
 
 fn texture_cache_signature(project_root: &Path, stored: &str) -> String {
@@ -1388,8 +1548,9 @@ mod tests {
     use psx_gpu::material::TextureWindow;
     use psx_gpu_render::VRAM_WIDTH;
     use psxed_project::{
-        FarVistaSettings, MaterialResource, ModelSecondaryLayer, NodeKind, ProjectDocument,
-        ResourceData, WorldGrid,
+        FarVistaSettings, GeneratedMaterialTexture, GridDirection, MaterialResource,
+        MaterialTextureMode, ModelSecondaryLayer, NodeKind, ProjectDocument, ResourceData,
+        TransitionMaterialTexture, WorldGrid,
     };
     use std::path::{Path, PathBuf};
 
@@ -1398,6 +1559,72 @@ mod tests {
         name: impl Into<String>,
     ) -> psxed_project::ResourceId {
         project.add_resource(name, ResourceData::Material(MaterialResource::opaque(None)))
+    }
+
+    #[test]
+    fn cortex2_stacked_floor_materials_receive_native_preview_slots() {
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..")
+            .canonicalize()
+            .expect("repo root");
+        let project_root = repo_root.join("editor/projects/cortex2");
+        let project = ProjectDocument::load_from_path(project_root.join("project.ron"))
+            .expect("cortex2 loads");
+        let grid = project
+            .active_scene()
+            .nodes()
+            .iter()
+            .find_map(|node| match &node.kind {
+                NodeKind::Room { grid } => Some(grid),
+                _ => None,
+            })
+            .expect("cortex2 room");
+        let mut used = std::collections::HashMap::new();
+        for floor_index in 0..grid.floor_count() {
+            let floor = grid.floor(floor_index).expect("floor index is valid");
+            for sector in floor.sectors.iter().flatten() {
+                for face in [sector.floor.as_ref(), sector.ceiling.as_ref()]
+                    .into_iter()
+                    .flatten()
+                {
+                    for id in [
+                        face.material,
+                        face.triangle_material(0),
+                        face.triangle_material(1),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    {
+                        used.entry(id).or_insert(floor_index);
+                    }
+                }
+                for direction in GridDirection::ALL {
+                    for wall in sector.walls.get(direction) {
+                        if let Some(id) = wall.material {
+                            used.entry(id).or_insert(floor_index);
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut textures = EditorTextures::new();
+        textures.refresh(&project, &project_root);
+        let missing = used
+            .into_iter()
+            .filter(|(id, _)| textures.slot(*id).is_none())
+            .map(|(id, floor_index)| {
+                let name = project
+                    .resource(id)
+                    .map(|resource| resource.name.clone())
+                    .unwrap_or_else(|| format!("missing #{}", id.raw()));
+                format!("L{} {name}", floor_index + 1)
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            missing.is_empty(),
+            "stacked-floor materials missing preview slots: {missing:?}"
+        );
     }
 
     fn write_test_indexed_psxt(width: u16, height: u16, depth: u8) -> PathBuf {
@@ -1521,6 +1748,68 @@ mod tests {
             material.secondary_layer.is_some(),
             "recipe remains authored"
         );
+    }
+
+    #[test]
+    fn transition_material_bakes_into_native_editor_preview_texture_slot() {
+        let mut project = ProjectDocument::new("transition preview");
+        let generated = |color| {
+            ResourceData::Material(MaterialResource {
+                texture_mode: MaterialTextureMode::Generated,
+                generated: GeneratedMaterialTexture {
+                    size: 32,
+                    base_color: color,
+                    noise_enabled: false,
+                    ..GeneratedMaterialTexture::default()
+                },
+                ..MaterialResource::opaque(None)
+            })
+        };
+        let stone = project.add_resource("Stone", generated([72, 80, 96]));
+        let sand = project.add_resource("Sand", generated([184, 144, 88]));
+        let transition = project.add_resource(
+            "Sand over stone",
+            ResourceData::Material(MaterialResource {
+                texture_mode: MaterialTextureMode::Transition,
+                transition: TransitionMaterialTexture {
+                    source_a: Some(stone),
+                    source_b: Some(sand),
+                    size: 64,
+                    coverage: 128,
+                    ..TransitionMaterialTexture::default()
+                },
+                ..MaterialResource::opaque(None)
+            }),
+        );
+
+        let plan = preview_texture_upload_plan(&project, Path::new("."));
+        let item = plan
+            .iter()
+            .find(|item| item.id == transition)
+            .expect("transition is included in preview upload plan");
+        assert!(item.signature.starts_with("@transition:"));
+        assert!(item.generated_bytes.is_none(), "transition bake stays lazy");
+        assert!(item.transition.is_some());
+        let initial_cache_signature = item.cache_signature.clone();
+
+        let mut textures = EditorTextures::new();
+        textures.refresh(&project, Path::new("."));
+        let slot = textures.slot(transition).expect("transition preview slot");
+        assert_eq!(slot.texture_width, 64);
+        assert_eq!(slot.texture_height, 64);
+
+        let ResourceData::Material(source) = &mut project.resource_mut(sand).unwrap().data else {
+            unreachable!()
+        };
+        source.generated.base_color = [216, 176, 112];
+        let changed_cache_signature = preview_texture_upload_plan(&project, Path::new("."))
+            .into_iter()
+            .find(|item| item.id == transition)
+            .expect("transition remains in upload plan")
+            .cache_signature;
+        assert_ne!(initial_cache_signature, changed_cache_signature);
+        textures.refresh(&project, Path::new("."));
+        assert!(textures.slot(transition).is_some());
     }
 
     #[test]

@@ -949,6 +949,7 @@ mod tests {
                 blend_mode: PsxBlendMode::Opaque,
                 tint: [128, 128, 128],
                 generated: crate::GeneratedMaterialTexture::default(),
+                transition: crate::TransitionMaterialTexture::default(),
                 reflection: crate::ReflectionProbeMaterial::default(),
                 animation: crate::MaterialAnimation::default(),
                 secondary_layer: None,

@@ -30,6 +30,8 @@ mod scene_tree;
 use scene_tree::*;
 mod resource_browser;
 use resource_browser::*;
+mod searchable_picker;
+use searchable_picker::*;
 mod editor_helpers;
 use editor_helpers::*;
 mod animation_catalogue;
@@ -86,12 +88,12 @@ use psxed_project::{
     PhysicsBodySettings, ProjectDocument, PsxBlendMode, ReflectionProbeMaterial, Resource,
     ResourceData, ResourceId, RuntimeDepthSortMode, RuntimeRoomDrawOrderMode,
     RuntimeTextureSplitMode, Scene, SceneNode, SceneStateId, SceneWorldLayer, SkyMode, SkySettings,
-    UiAction, UiAnchor, UiFontChoice, UiGradient, UiGradientDirection, UiImageEffect, UiNode,
-    UiNodeId, UiNodeKind, UiNodeRow, UiRect, UiScene, UiSceneId, UiSfxBindings, UiSfxCue,
-    UiTextAlign, UiValueBinding, WorldCameraSettings, WorldCullingSettings, WorldGrid,
-    WorldPhysicsSettings, WorldStreamingSettings, DEFAULT_WALL_HEIGHT_SECTORS,
-    DEFAULT_WORLD_SECTOR_SIZE, HEIGHT_QUANTUM, MAX_PHYSICS_WEIGHT_Q8, MAX_UI_FONT_SCALE,
-    MAX_UI_LETTER_SPACING, MAX_WORLD_CAMERA_DISTANCE, MAX_WORLD_CAMERA_HEIGHT,
+    TransitionMaskShape, TransitionMaterialTexture, UiAction, UiAnchor, UiFontChoice, UiGradient,
+    UiGradientDirection, UiImageEffect, UiNode, UiNodeId, UiNodeKind, UiNodeRow, UiRect, UiScene,
+    UiSceneId, UiSfxBindings, UiSfxCue, UiTextAlign, UiValueBinding, WorldCameraSettings,
+    WorldCullingSettings, WorldGrid, WorldPhysicsSettings, WorldStreamingSettings,
+    DEFAULT_WALL_HEIGHT_SECTORS, DEFAULT_WORLD_SECTOR_SIZE, HEIGHT_QUANTUM, MAX_PHYSICS_WEIGHT_Q8,
+    MAX_UI_FONT_SCALE, MAX_UI_LETTER_SPACING, MAX_WORLD_CAMERA_DISTANCE, MAX_WORLD_CAMERA_HEIGHT,
     MAX_WORLD_CAMERA_MIN_FLOOR_CLEARANCE, MAX_WORLD_CHUNK_ACTIVATION_RADIUS_SECTORS,
     MAX_WORLD_DRAW_DISTANCE, MAX_WORLD_GRAVITY_PER_TICK, MAX_WORLD_SECTOR_SIZE,
     MAX_WORLD_STREAMING_RESIDENT_CHUNKS, MAX_WORLD_STREAMING_VISIBLE_CHUNKS,
@@ -1201,6 +1203,18 @@ struct FloatingGeometryPlacement {
     rotation_quarters: u8,
     flip_x: bool,
     flip_z: bool,
+    /// First grid cell observed under the pointer after duplication begins.
+    /// Capturing it without moving prevents the command's own frame from
+    /// teleporting the adjacent preview to a stale mouse position.
+    pointer_anchor_origin: Option<[i32; 2]>,
+    /// Once the pointer deliberately crosses into another grid cell, the
+    /// preview resumes the existing cursor-following placement behaviour.
+    pointer_tracking_started: bool,
+    /// The geometry authored by the latest preview pass. Keeping this on the
+    /// placement makes the duplicate's selection durable across the click
+    /// frame that commits it instead of relying on transient UI selection.
+    selected_cells: Vec<(u16, u16)>,
+    selected_primitives: Vec<Selection>,
     cells: Vec<GeometryClipboardCell>,
 }
 

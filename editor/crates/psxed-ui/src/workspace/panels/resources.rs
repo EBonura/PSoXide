@@ -60,6 +60,7 @@ impl EditorWorkspace {
         let animation_source_options = collect_animation_source_options(&self.project);
         let animation_clip_options = collect_animation_clip_options(&self.project);
         let attachment_socket_names = collect_attachment_socket_names(&self.project);
+        let material_options = self.material_lab_options();
 
         // Build the breadcrumb before the mutable borrow on
         // `resource_mut` -- we need other resources by id to
@@ -176,6 +177,8 @@ impl EditorWorkspace {
                             ui,
                             "resource_material",
                             material,
+                            &material_options,
+                            Some(id),
                         );
                     });
                 if let Some((_, stats)) = preview_thumb {
@@ -467,6 +470,31 @@ impl EditorWorkspace {
                 self.mark_dirty();
                 ui.close_menu();
             }
+            if ui
+                .button(icons::label(icons::BLEND, "Transition Material"))
+                .on_hover_text("Add a host-baked transition between two Material images.")
+                .clicked()
+            {
+                let mut material = MaterialResource::opaque(None);
+                material.texture_mode = MaterialTextureMode::Transition;
+                material.transition.source_a = self.selection.selected_resource.filter(|id| {
+                    self.project
+                        .resource(*id)
+                        .is_some_and(|resource| matches!(resource.data, ResourceData::Material(_)))
+                });
+                let id = self.project.add_resource(
+                    "New Transition",
+                    ResourceData::Material(material),
+                );
+                self.replace_resource_selection(id);
+                self.material_lab.focused_material = Some(id);
+                self.clear_node_selection_state();
+                self.clear_primitive_selection_state();
+                self.clear_sector_selection();
+                self.status = "Added transition material".to_string();
+                self.mark_dirty();
+                ui.close_menu();
+            }
 
             ui.separator();
 
@@ -607,7 +635,7 @@ impl EditorWorkspace {
         // Snapshot resource id + path first so cache mutation below
         // cannot fight the immutable project-resource walk.
         let project_root = self.project_dir.clone();
-        let sources: Vec<(ResourceId, String)> = self
+        let sources: Vec<(ResourceId, String, Option<String>)> = self
             .project
             .resources
             .iter()
@@ -616,39 +644,63 @@ impl EditorWorkspace {
                 // Model resources have a `texture_path` field -- both
                 // share the same on-disk format and decoder, so the
                 // thumbnail cache treats them uniformly.
-                let psxt_path = match &resource.data {
-                    ResourceData::Texture { psxt_path } => psxt_path.as_str(),
-                    ResourceData::Material(material) => material.psxt_path.as_deref()?,
-                    ResourceData::Model(model) => model.texture_path.as_deref()?,
-                    _ => return None,
-                };
-                Some((resource.id, psxt_path.to_string()))
+                match &resource.data {
+                    ResourceData::Texture { psxt_path } => {
+                        Some((resource.id, psxt_path.clone(), Some(psxt_path.clone())))
+                    }
+                    ResourceData::Material(material)
+                        if matches!(
+                            material.texture_mode,
+                            MaterialTextureMode::Generated | MaterialTextureMode::Transition
+                        ) =>
+                    {
+                        Some((
+                            resource.id,
+                            material_thumbnail_signature(&self.project, resource.id),
+                            None,
+                        ))
+                    }
+                    ResourceData::Material(material) => {
+                        let psxt_path = material.psxt_path.as_ref()?;
+                        Some((resource.id, psxt_path.clone(), Some(psxt_path.clone())))
+                    }
+                    ResourceData::Model(model) => {
+                        let psxt_path = model.texture_path.as_ref()?;
+                        Some((resource.id, psxt_path.clone(), Some(psxt_path.clone())))
+                    }
+                    _ => None,
+                }
             })
             .collect();
-        let alive: HashSet<ResourceId> = sources.iter().map(|(id, _)| *id).collect();
-        for (id, psxt_path) in sources {
+        let alive: HashSet<ResourceId> = sources.iter().map(|(id, _, _)| *id).collect();
+        for (id, signature, psxt_path) in sources {
             if let Some(entry) = self.texture_thumbs.get(&id) {
-                if entry.signature == psxt_path.as_str() {
+                if entry.signature == signature {
                     continue;
                 }
             }
-            if psxt_path.is_empty() {
+            if psxt_path.as_deref().is_some_and(str::is_empty) {
                 self.remove_texture_thumb(id);
                 continue;
             }
-            let abs = if Path::new(psxt_path.as_str()).is_absolute() {
-                PathBuf::from(psxt_path.as_str())
+            let bytes = if let Some(psxt_path) = psxt_path {
+                let abs = if Path::new(psxt_path.as_str()).is_absolute() {
+                    PathBuf::from(psxt_path.as_str())
+                } else {
+                    project_root.join(psxt_path.as_str())
+                };
+                std::fs::read(&abs).ok()
             } else {
-                project_root.join(psxt_path.as_str())
+                psxed_project::resolve_material_texture_psxt(&self.project, id, &project_root)
+                    .ok()
+                    .flatten()
+                    .map(|(_, bytes)| bytes)
             };
-            let Some((image, stats)) = std::fs::read(&abs)
-                .ok()
-                .and_then(|bytes| decode_psxt_thumbnail(&bytes))
-            else {
+            let Some((image, stats)) = bytes.as_deref().and_then(decode_psxt_thumbnail) else {
                 self.remove_texture_thumb(id);
                 continue;
             };
-            self.set_texture_thumb(ctx, id, psxt_path, image, stats);
+            self.set_texture_thumb(ctx, id, signature, image, stats);
         }
         // Drop entries for Texture / Model resources that no longer
         // exist -- keeps the cache from growing across delete + re-add.
@@ -988,4 +1040,41 @@ impl EditorWorkspace {
             .unwrap_or_else(|| "Opened Animation Viewer".to_string());
         true
     }
+}
+
+fn material_thumbnail_signature(project: &ProjectDocument, id: ResourceId) -> String {
+    fn append(
+        project: &ProjectDocument,
+        id: ResourceId,
+        stack: &mut Vec<ResourceId>,
+        out: &mut String,
+    ) {
+        if stack.contains(&id) {
+            out.push_str(&format!("cycle#{}", id.raw()));
+            return;
+        }
+        let Some(resource) = project.resource(id) else {
+            out.push_str(&format!("missing#{}", id.raw()));
+            return;
+        };
+        out.push_str(&format!("{}:{:?}", resource.id.raw(), resource.data));
+        let ResourceData::Material(material) = &resource.data else {
+            return;
+        };
+        if material.texture_mode != MaterialTextureMode::Transition {
+            return;
+        }
+        stack.push(id);
+        for source in [material.transition.source_a, material.transition.source_b]
+            .into_iter()
+            .flatten()
+        {
+            append(project, source, stack, out);
+        }
+        stack.pop();
+    }
+
+    let mut signature = String::new();
+    append(project, id, &mut Vec::new(), &mut signature);
+    signature
 }

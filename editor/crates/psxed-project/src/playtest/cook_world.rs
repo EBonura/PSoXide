@@ -196,6 +196,59 @@ pub(crate) fn auto_wire_floor_stack_links(
     out
 }
 
+/// Build the flattened stacked-room overlap table and assign each room's
+/// contiguous slice. Unlike vertical portals, overlaps are emitted for sealed
+/// stacked cells too: a translucent upper floor still needs the lower room
+/// resident and drawable so the PS1 blend operation has geometry behind it.
+pub(crate) fn assign_floor_stack_overlaps(
+    rooms: &mut [PlaytestRoom],
+    chunks_by_node: &HashMap<NodeId, Vec<AuthoredRoomChunk>>,
+) -> Vec<u16> {
+    let mut overlaps = vec![Vec::<u16>::new(); rooms.len()];
+    for chunks in chunks_by_node.values() {
+        for left_index in 0..chunks.len() {
+            let left = &chunks[left_index];
+            for right in &chunks[left_index + 1..] {
+                if left.floor_idx == right.floor_idx || !chunks_share_world_cell(left, right) {
+                    continue;
+                }
+                if let Some(list) = overlaps.get_mut(left.room_index as usize) {
+                    list.push(right.room_index);
+                }
+                if let Some(list) = overlaps.get_mut(right.room_index as usize) {
+                    list.push(left.room_index);
+                }
+            }
+        }
+    }
+
+    let mut flattened = Vec::new();
+    for (room_index, room_overlaps) in overlaps.iter_mut().enumerate() {
+        room_overlaps.sort_unstable();
+        room_overlaps.dedup();
+        let first = flattened.len();
+        let available = usize::from(u8::MAX).min(room_overlaps.len());
+        flattened.extend_from_slice(&room_overlaps[..available]);
+        if let Some(room) = rooms.get_mut(room_index) {
+            room.overlapped_room_first = u16::try_from(first).unwrap_or(u16::MAX);
+            room.overlapped_room_count = u8::try_from(available).unwrap_or(u8::MAX);
+        }
+    }
+    flattened
+}
+
+fn chunks_share_world_cell(left: &AuthoredRoomChunk, right: &AuthoredRoomChunk) -> bool {
+    let (smaller, larger) = if left.cells.len() <= right.cells.len() {
+        (left, right)
+    } else {
+        (right, left)
+    };
+    smaller.cells.iter().copied().any(|cell| {
+        let world_cell = chunk_cell_world_cell(smaller, cell);
+        chunk_contains_world_cell(larger, world_cell)
+    })
+}
+
 /// Emit vertical portal quads between consecutive floors, mirroring the
 /// floor links. For each cell shared by floor N (below) and floor N+1
 /// (above) the runtime gets a reciprocal pair: an up-portal owned by the
