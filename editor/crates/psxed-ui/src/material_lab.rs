@@ -89,6 +89,47 @@ impl EditorWorkspace {
             }
         }
 
+        let version_state = self.material_lab.focused_material.and_then(|id| {
+            let resource = self.project.resource(id)?;
+            let ResourceData::Material(material) = &resource.data else {
+                return None;
+            };
+            Some((
+                material.active_version_id,
+                material.active_version_name.clone(),
+                material.version_options(),
+                material.version_count(),
+            ))
+        });
+        ui.separator();
+        ui.label(RichText::new("Version").color(STUDIO_TEXT_WEAK));
+        let mut selected_version = version_state.as_ref().map(|state| state.0);
+        let selected_version_name = version_state
+            .as_ref()
+            .map(|state| state.1.as_str())
+            .unwrap_or("(none)");
+        let no_versions = Vec::new();
+        let version_options = version_state
+            .as_ref()
+            .map(|state| state.2.as_slice())
+            .unwrap_or(no_versions.as_slice());
+        searchable_picker(
+            ui,
+            "material_lab_version",
+            &mut selected_version,
+            selected_version_name,
+            version_options,
+            SearchablePickerConfig::required()
+                .with_width(150.0)
+                .with_popup_min_width(280.0)
+                .with_search_hint("Search versions…"),
+        );
+        let switch_version = version_state.as_ref().and_then(|state| {
+            selected_version
+                .filter(|selected| *selected != state.0)
+                .map(|selected| (state.0, selected))
+        });
+
         let create_material = ui
             .button(icons::label(icons::PLUS, "New"))
             .on_hover_text("Create a reusable Material resource")
@@ -106,10 +147,43 @@ impl EditorWorkspace {
                 "Duplicate the focused material; useful for retaining several transition stages",
             )
             .clicked();
+        let create_version = ui
+            .add_enabled(
+                self.material_lab.focused_material.is_some(),
+                egui::Button::new(icons::label(icons::COPY, "New Version")),
+            )
+            .on_hover_text("Clone the active recipe as a new version of this same material")
+            .clicked();
+        let delete_version = ui
+            .add_enabled(
+                version_state.as_ref().is_some_and(|state| state.3 > 1),
+                egui::Button::new(icons::text(icons::TRASH, 13.0)),
+            )
+            .on_hover_text("Delete the active version; this can be undone")
+            .clicked();
         let save_project = ui
             .button(icons::label(icons::SAVE, "Save"))
             .on_hover_text("Save every material and the project to project.ron")
             .clicked();
+
+        if let Some((_, selected)) = switch_version {
+            if let Some(material_id) = self.material_lab.focused_material {
+                let activated =
+                    self.project
+                        .resource_mut(material_id)
+                        .and_then(|resource| match &mut resource.data {
+                            ResourceData::Material(material) => material
+                                .activate_version(selected)
+                                .then(|| material.active_version_name.clone()),
+                            _ => None,
+                        });
+                if let Some(name) = activated {
+                    self.dirty = true;
+                    self.material_lab.preview_signature.clear();
+                    self.status = format!("Activated material version: {name}");
+                }
+            }
+        }
 
         if create_material {
             let name = unique_material_name(&material_options);
@@ -145,6 +219,47 @@ impl EditorWorkspace {
                 }
             }
         }
+        if create_version {
+            if let Some(material_id) = self.material_lab.focused_material {
+                let created =
+                    self.project
+                        .resource_mut(material_id)
+                        .and_then(|resource| match &mut resource.data {
+                            ResourceData::Material(material) => {
+                                let name = unique_material_version_name(material);
+                                material.create_version(name.clone());
+                                Some(name)
+                            }
+                            _ => None,
+                        });
+                if let Some(name) = created {
+                    self.dirty = true;
+                    self.material_lab.preview_signature.clear();
+                    self.status = format!("Created material version: {name}");
+                }
+            }
+        }
+        if delete_version {
+            if let Some(material_id) = self.material_lab.focused_material {
+                let deleted =
+                    self.project
+                        .resource_mut(material_id)
+                        .and_then(|resource| match &mut resource.data {
+                            ResourceData::Material(material) => {
+                                let deleted = material.active_version_name.clone();
+                                material
+                                    .delete_version(material.active_version_id)
+                                    .then_some((deleted, material.active_version_name.clone()))
+                            }
+                            _ => None,
+                        });
+                if let Some((deleted, active)) = deleted {
+                    self.dirty = true;
+                    self.material_lab.preview_signature.clear();
+                    self.status = format!("Deleted version {deleted}; active version: {active}");
+                }
+            }
+        }
         if save_project {
             if let Err(error) = self.save() {
                 self.status = format!("Could not save materials: {error}");
@@ -172,6 +287,9 @@ impl EditorWorkspace {
         let mut edited = original.clone();
         let resource_name = resource.name.clone();
         let mut edited_name = resource_name.clone();
+        let active_version_id = original.active_version_id;
+        let version_name = original.active_version_name.clone();
+        let mut edited_version_name = version_name.clone();
 
         ui.horizontal(|ui| {
             ui.label("Name");
@@ -179,6 +297,14 @@ impl EditorWorkspace {
                 egui::TextEdit::singleline(&mut edited_name)
                     .desired_width(320.0)
                     .hint_text("Material name"),
+            );
+        });
+        ui.horizontal(|ui| {
+            ui.label("Version name");
+            ui.add(
+                egui::TextEdit::singleline(&mut edited_version_name)
+                    .desired_width(240.0)
+                    .hint_text("Version name"),
             );
         });
         ui.add_space(8.0);
@@ -225,6 +351,23 @@ impl EditorWorkspace {
                 self.status = format!("Renamed material: {edited_name}");
             }
         }
+        if edited_version_name != version_name {
+            let renamed = self
+                .project
+                .resource_mut(material_id)
+                .is_some_and(|resource| match &mut resource.data {
+                    ResourceData::Material(material) => {
+                        material.rename_version(active_version_id, &edited_version_name)
+                    }
+                    _ => false,
+                });
+            if renamed {
+                self.dirty = true;
+                self.status = format!("Renamed material version: {}", edited_version_name.trim());
+            } else {
+                self.status = "Version names must be non-empty and unique".to_string();
+            }
+        }
     }
 }
 
@@ -257,6 +400,24 @@ fn unique_named_material(base: &str, materials: &[(ResourceId, String)]) -> Stri
         }
     }
     format!("{base} Copy")
+}
+
+fn unique_material_version_name(material: &MaterialResource) -> String {
+    let options = material.version_options();
+    let mut suffix = options
+        .iter()
+        .map(|(id, _)| id.raw())
+        .max()
+        .unwrap_or(1)
+        .saturating_add(1)
+        .max(2);
+    loop {
+        let candidate = format!("Version {suffix}");
+        if options.iter().all(|(_, name)| name != &candidate) {
+            return candidate;
+        }
+        suffix = suffix.saturating_add(1);
+    }
 }
 
 pub(crate) fn draw_primary_layer_settings(
@@ -1216,6 +1377,59 @@ mod tests {
             }
             _ => {}
         }
+    }
+
+    #[test]
+    fn material_lab_toolbar_exposes_named_version_picker() {
+        let mut project = ProjectDocument::new("material versions ui");
+        let material_id = project.add_resource(
+            "Stone",
+            ResourceData::Material(MaterialResource::opaque(None)),
+        );
+        let mut workspace = EditorWorkspace::with_project(PathBuf::new(), project);
+        assert!(workspace.focus_material_resource(material_id));
+
+        let ctx = egui::Context::default();
+        let mut fonts = egui::FontDefinitions::default();
+        let proportional = fonts
+            .families
+            .get(&egui::FontFamily::Proportional)
+            .cloned()
+            .expect("default proportional font family");
+        fonts
+            .families
+            .insert(egui::FontFamily::Name("lucide".into()), proportional);
+        ctx.set_fonts(fonts);
+        let output = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(4000.0, 120.0))),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    workspace.draw_material_lab_toolbar(ui);
+                });
+            },
+        );
+        let mut text_shapes = Vec::new();
+        for clipped in &output.shapes {
+            collect_text_shapes(&clipped.shape, &mut text_shapes);
+        }
+        let text = text_shapes
+            .iter()
+            .map(|shape| shape.galley.job.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(text.contains("Version"), "toolbar text: {text}");
+        assert!(text.contains("Original"), "toolbar text: {text}");
+    }
+
+    #[test]
+    fn new_material_version_names_follow_stable_ids() {
+        let mut material = MaterialResource::opaque(None);
+        assert_eq!(unique_material_version_name(&material), "Version 2");
+        material.create_version("LLM Pass");
+        assert_eq!(unique_material_version_name(&material), "Version 3");
     }
 
     #[test]

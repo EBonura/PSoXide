@@ -781,6 +781,78 @@ fn dynamic_material_recipe_round_trips_through_project_ron() {
 }
 
 #[test]
+fn material_versions_preserve_complete_recipes_and_stable_identity() {
+    let mut material = MaterialResource::opaque(Some("materials/original.psxt".to_string()));
+    material.tint = [24, 48, 96];
+    material.blend_mode = PsxBlendMode::Average;
+    material.animation.mode = MaterialAnimationMode::UvScroll;
+    material.secondary_layer = Some(ModelSecondaryLayer::moving_default());
+
+    let original_recipe = MaterialVersionRecipe::from(&material);
+    let llm_version = material.create_version("LLM Gothic");
+    assert_eq!(llm_version.raw(), 2);
+    assert_eq!(material.active_version_name, "LLM Gothic");
+    assert_eq!(material.version_count(), 2);
+
+    material.texture_mode = MaterialTextureMode::Generated;
+    material.psxt_path = Some("materials/llm_gothic.psxt".to_string());
+    material.tint = [131, 37, 171];
+    material.generated.noise.seed = 0xfeed_beef;
+    material.secondary_layer = None;
+    let llm_recipe = MaterialVersionRecipe::from(&material);
+
+    assert!(material.activate_version(MaterialVersionId::ORIGINAL));
+    assert_eq!(material.active_version_name, "Original");
+    assert_eq!(MaterialVersionRecipe::from(&material), original_recipe);
+    assert!(material.activate_version(llm_version));
+    assert_eq!(MaterialVersionRecipe::from(&material), llm_recipe);
+
+    assert!(material.rename_version(llm_version, "LLM Cathedral"));
+    assert!(!material.rename_version(llm_version, "Original"));
+    assert!(material.delete_version(llm_version));
+    assert_eq!(material.active_version_id, MaterialVersionId::ORIGINAL);
+    assert_eq!(material.version_count(), 1);
+    assert!(!material.delete_version(MaterialVersionId::ORIGINAL));
+}
+
+#[test]
+fn material_versions_round_trip_and_legacy_materials_become_original() {
+    let legacy = r#"(
+        texture_mode: SimpleImage,
+        psxt_path: Some("materials/legacy.psxt"),
+        blend_mode: Opaque,
+        tint: (128, 128, 128),
+        face_sidedness: Both,
+        double_sided: true,
+    )"#;
+    let legacy: MaterialResource = ron::from_str(legacy).expect("legacy material parses");
+    assert_eq!(legacy.active_version_id, MaterialVersionId::ORIGINAL);
+    assert_eq!(legacy.active_version_name, "Original");
+    assert_eq!(legacy.version_count(), 1);
+
+    let mut project = ProjectDocument::new("version persistence");
+    let mut material = legacy;
+    let generated = material.create_version("LLM Moss");
+    material.texture_mode = MaterialTextureMode::Generated;
+    material.generated.noise.seed = 73;
+    material.tint = [52, 91, 47];
+    let material_id = project.add_resource("Stone", ResourceData::Material(material));
+
+    let loaded = ProjectDocument::from_ron_str(&project.to_ron_string().unwrap()).unwrap();
+    let ResourceData::Material(loaded) = &loaded.resource(material_id).unwrap().data else {
+        panic!("material changed resource kind");
+    };
+    assert_eq!(loaded.active_version_id, generated);
+    assert_eq!(loaded.active_version_name, "LLM Moss");
+    assert_eq!(loaded.version_count(), 2);
+    assert_eq!(loaded.generated.noise.seed, 73);
+    assert!(loaded
+        .version_options()
+        .iter()
+        .any(|(id, name)| *id == MaterialVersionId::ORIGINAL && name == "Original"));
+}
+
+#[test]
 fn grid_direction_physical_edges_use_editor_z_convention() {
     assert_eq!(
         GridDirection::North.physical_edge(2, 3),
@@ -2641,6 +2713,68 @@ fn resource_rename_moves_project_owned_texture_file() {
 }
 
 #[test]
+fn deleting_versioned_material_removes_each_unshared_texture() {
+    let root = unique_temp_dir("delete-versioned-material-files");
+    let texture_dir = root.join("assets").join("textures");
+    std::fs::create_dir_all(&texture_dir).unwrap();
+    std::fs::write(texture_dir.join("original.psxt"), b"original").unwrap();
+    std::fs::write(texture_dir.join("llm.psxt"), b"llm").unwrap();
+
+    let mut project = ProjectDocument::new("version files");
+    let mut material = MaterialResource::opaque(Some("assets/textures/original.psxt".to_string()));
+    material.create_version("LLM");
+    material.psxt_path = Some("assets/textures/llm.psxt".to_string());
+    let id = project.add_resource("Stone", ResourceData::Material(material));
+
+    let report = project
+        .delete_resource_with_files(id, &root)
+        .expect("versioned material deletes");
+    let mut deleted = report
+        .deleted_files
+        .iter()
+        .map(|file| file.path.as_str())
+        .collect::<Vec<_>>();
+    deleted.sort_unstable();
+    assert_eq!(
+        deleted,
+        vec!["assets/textures/llm.psxt", "assets/textures/original.psxt"]
+    );
+    assert!(!texture_dir.join("original.psxt").exists());
+    assert!(!texture_dir.join("llm.psxt").exists());
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn renaming_material_keeps_texture_shared_with_saved_version() {
+    let root = unique_temp_dir("rename-version-shared-texture");
+    let texture_dir = root.join("assets").join("textures");
+    std::fs::create_dir_all(&texture_dir).unwrap();
+    std::fs::write(texture_dir.join("stone.psxt"), b"stone").unwrap();
+
+    let mut project = ProjectDocument::new("version sharing");
+    let mut material = MaterialResource::opaque(Some("assets/textures/stone.psxt".to_string()));
+    material.create_version("LLM");
+    let id = project.add_resource("Stone", ResourceData::Material(material));
+
+    let report = project
+        .rename_resource_with_files(id, "Cathedral Stone", &root)
+        .unwrap();
+    assert!(report.renamed_files.is_empty());
+    assert!(texture_dir.join("stone.psxt").exists());
+    assert!(!texture_dir.join("cathedral_stone.psxt").exists());
+    let ResourceData::Material(material) = &project.resource(id).unwrap().data else {
+        panic!("stone remains a material");
+    };
+    assert!(material
+        .version_texture_paths()
+        .iter()
+        .all(|path| *path == "assets/textures/stone.psxt"));
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn resource_rename_moves_imported_model_bundle_files() {
     let root = unique_temp_dir("resource-rename-model");
     let bundle_dir = root.join("assets").join("models").join("obsidian_wraith");
@@ -2913,6 +3047,35 @@ fn delete_material_source_clears_transition_recipes() {
         .expect("layer is preserved");
     assert_eq!(layer.transition.source_a, None);
     assert_eq!(layer.transition.source_b, None);
+}
+
+#[test]
+fn delete_material_source_clears_inactive_version_recipes() {
+    let mut project = ProjectDocument::new("delete-versioned-transition-source");
+    let source = project.add_resource(
+        "Source",
+        ResourceData::Material(MaterialResource::opaque(None)),
+    );
+    let mut transition = MaterialResource::opaque(None);
+    transition.texture_mode = MaterialTextureMode::Transition;
+    transition.transition.source_a = Some(source);
+    transition.transition.source_b = Some(source);
+    transition.create_version("LLM Alternative");
+    transition.texture_mode = MaterialTextureMode::Generated;
+    transition.transition.source_a = None;
+    transition.transition.source_b = None;
+    let transition_id = project.add_resource("Transition", ResourceData::Material(transition));
+
+    assert_eq!(project.resource_reference_count(source), 2);
+    let report = project.delete_resource(source).expect("source exists");
+    assert_eq!(report.cleared_references, 2);
+    let ResourceData::Material(material) = &mut project.resource_mut(transition_id).unwrap().data
+    else {
+        panic!("transition remains a material");
+    };
+    assert!(material.activate_version(MaterialVersionId::ORIGINAL));
+    assert_eq!(material.transition.source_a, None);
+    assert_eq!(material.transition.source_b, None);
 }
 
 #[test]
