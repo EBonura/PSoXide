@@ -115,6 +115,68 @@ fn extrusion_below_base_preserves_existing_world_height_and_node_floor() {
 }
 
 #[test]
+fn deleting_empty_base_promotes_upper_layer_without_moving_or_losing_nodes() {
+    let (mut workspace, room) = workspace_with_populated_grid("delete-base", 1, 1);
+    let marker = workspace.project.active_scene_mut().add_node(
+        room,
+        "Layer marker",
+        NodeKind::Portal {
+            target_room: None,
+            target_entry: String::new(),
+            entry_name: String::new(),
+            geometry: None,
+        },
+    );
+    let entity =
+        workspace
+            .project
+            .active_scene_mut()
+            .add_node(room, "Upper entity", NodeKind::Entity);
+    workspace
+        .project
+        .active_scene_mut()
+        .node_mut(entity)
+        .unwrap()
+        .floor = 1;
+    {
+        let room_node = workspace.project.active_scene_mut().node_mut(room).unwrap();
+        room_node.transform.translation[1] = -2.0;
+        let NodeKind::Room { grid } = &mut room_node.kind else {
+            panic!("room node");
+        };
+        grid.push_floor();
+        grid.floor_mut(1).unwrap().set_floor(0, 0, 0, None);
+        grid.sectors.fill(None);
+    }
+
+    assert!(workspace.can_delete_active_empty_layer());
+    workspace.delete_active_empty_layer();
+
+    let scene = workspace.project.active_scene();
+    let room_node = scene.node(room).unwrap();
+    let NodeKind::Room { grid } = &room_node.kind else {
+        panic!("room node");
+    };
+    assert_eq!(grid.floor_count(), 1);
+    assert!(grid.sector(0, 0).unwrap().floor.is_some());
+    assert_eq!(room_node.transform.translation[1], 0.0);
+    assert_eq!(scene.node(marker).unwrap().floor, 0);
+    assert_eq!(scene.node(entity).unwrap().floor, 0);
+    assert_eq!(workspace.active_floor, 0);
+
+    workspace.do_undo();
+    let scene = workspace.project.active_scene();
+    let room_node = scene.node(room).unwrap();
+    let NodeKind::Room { grid } = &room_node.kind else {
+        panic!("room node");
+    };
+    assert_eq!(grid.floor_count(), 2);
+    assert_eq!(room_node.transform.translation[1], -2.0);
+    assert_eq!(scene.node(marker).unwrap().floor, 0);
+    assert_eq!(scene.node(entity).unwrap().floor, 1);
+}
+
+#[test]
 fn three_dimensional_face_selection_can_drive_layer_extrusion() {
     let (mut workspace, room) = workspace_with_populated_grid("face-layer", 1, 1);
     workspace.replace_primitive_selection(Selection::Face(FaceRef {
