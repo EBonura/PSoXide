@@ -920,6 +920,35 @@ impl WorldGrid {
         0
     }
 
+    /// Remove an empty stacked floor while keeping at least one floor in the
+    /// room. Removing floor zero promotes the next floor to the base and
+    /// returns the elevation delta callers must add to the owning Room node
+    /// to preserve the promoted floor's world-space height. A zero delta
+    /// means a non-base floor was removed. Returns `None` for an invalid,
+    /// populated, or only floor.
+    pub fn remove_empty_floor(&mut self, floor_index: usize) -> Option<i32> {
+        if self.floor_count() <= 1
+            || self
+                .floor(floor_index)
+                .is_none_or(|floor| floor.populated_sector_count() != 0)
+        {
+            return None;
+        }
+
+        if floor_index == 0 {
+            let old_base_elevation = self.elevation;
+            let mut remaining = std::mem::take(&mut self.floors_above);
+            let mut promoted = remaining.remove(0);
+            let elevation_delta = promoted.elevation.saturating_sub(old_base_elevation);
+            promoted.floors_above = remaining;
+            *self = promoted;
+            Some(elevation_delta)
+        } else {
+            self.floors_above.remove(floor_index - 1);
+            Some(0)
+        }
+    }
+
     /// Create a rectangular room with floors and perimeter walls.
     pub fn stone_room(
         width: u16,
@@ -1509,7 +1538,7 @@ impl WorldGrid {
                 max_z = max_z.max(z);
             }
         }
-        found.then_some(WorldGridFootprint {
+        found.then(|| WorldGridFootprint {
             x: min_x,
             z: min_z,
             width: max_x - min_x + 1,

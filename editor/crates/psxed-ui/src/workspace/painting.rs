@@ -1,4 +1,5 @@
 use super::*;
+use psxed_project::GridFloorLink;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LayerDirection {
@@ -12,6 +13,29 @@ struct LayerFootprintCell {
     floor_material: Option<ResourceId>,
     ceiling_material: Option<ResourceId>,
     wall_material: Option<ResourceId>,
+}
+
+fn remap_deleted_floor_target(
+    link: &mut Option<GridFloorLink>,
+    target_room: NodeId,
+    removed_floor: usize,
+    replacement_floor: usize,
+) {
+    let Some(link) = link.as_mut() else {
+        return;
+    };
+    if link.target_room != Some(target_room) {
+        return;
+    }
+    let target = usize::from(link.target_floor);
+    let remapped = if target > removed_floor {
+        target - 1
+    } else if target == removed_floor {
+        replacement_floor
+    } else {
+        target
+    };
+    link.target_floor = u16::try_from(remapped).unwrap_or(u16::MAX);
 }
 
 const PAINT_NEIGHBOR_NORTH: u8 = 1 << 0;
@@ -1120,6 +1144,128 @@ impl EditorWorkspace {
             self.active_floor -= 1;
             self.status = format!("Floor {}", self.active_floor + 1);
         }
+    }
+
+    /// Whether the active layer has no tile geometry and another layer can
+    /// replace it. Layer-owned nodes are preserved and remapped by
+    /// [`Self::delete_active_empty_layer`].
+    pub(crate) fn can_delete_active_empty_layer(&self) -> bool {
+        let Some(room) = self.floors_target_room() else {
+            return false;
+        };
+        let Some(grid) = self.room_base_grid(room) else {
+            return false;
+        };
+        let active = self.active_floor.min(grid.floor_count().saturating_sub(1));
+        grid.floor_count() > 1
+            && grid
+                .floor(active)
+                .is_some_and(|floor| floor.populated_sector_count() == 0)
+    }
+
+    /// Delete the active empty layer as one undoable edit. Removing the base
+    /// promotes layer two and offsets the Room node so the promoted geometry
+    /// does not move in world space. Nodes and authored floor-link targets are
+    /// compacted to the surviving layer indices instead of being discarded.
+    pub(crate) fn delete_active_empty_layer(&mut self) {
+        let Some(room) = self.floors_target_room() else {
+            self.status = "Layer deletion needs an active Room".to_string();
+            return;
+        };
+        let Some(base) = self.room_base_grid(room) else {
+            return;
+        };
+        let active = self.active_floor.min(base.floor_count().saturating_sub(1));
+        if base.floor_count() <= 1 {
+            self.status = "A room must keep at least one layer".to_string();
+            return;
+        }
+        if base
+            .floor(active)
+            .is_none_or(|floor| floor.populated_sector_count() != 0)
+        {
+            self.status = "Delete this layer's tile geometry first".to_string();
+            return;
+        }
+
+        let before = self.project.clone();
+        let (replacement, new_floor_count) = {
+            let scene = self.project.active_scene_mut();
+            let Some(room_node) = scene.node_mut(room) else {
+                return;
+            };
+            let NodeKind::Room { grid } = &mut room_node.kind else {
+                return;
+            };
+            let room_origin_y = room_node.transform.translation[1] * grid.sector_size.max(1) as f32;
+            let Some(elevation_delta) = grid.remove_empty_floor(active) else {
+                return;
+            };
+            if active == 0 {
+                room_node.transform.translation[1] =
+                    (room_origin_y + elevation_delta as f32) / grid.sector_size.max(1) as f32;
+            }
+            let new_floor_count = grid.floor_count();
+            (
+                active.min(new_floor_count.saturating_sub(1)),
+                new_floor_count,
+            )
+        };
+
+        let scene = self.project.active_scene_mut();
+        let descendant_ids: Vec<NodeId> = scene
+            .nodes()
+            .iter()
+            .filter(|node| node.id != room && scene.is_descendant_of(node.id, room))
+            .map(|node| node.id)
+            .collect();
+        for id in descendant_ids {
+            if let Some(node) = scene.node_mut(id) {
+                node.floor = if node.floor > active {
+                    node.floor - 1
+                } else if node.floor == active {
+                    replacement
+                } else {
+                    node.floor
+                };
+            }
+        }
+
+        let room_ids: Vec<NodeId> = scene
+            .nodes()
+            .iter()
+            .filter(|node| matches!(node.kind, NodeKind::Room { .. }))
+            .map(|node| node.id)
+            .collect();
+        for room_id in room_ids {
+            let Some(node) = scene.node_mut(room_id) else {
+                continue;
+            };
+            let NodeKind::Room { grid } = &mut node.kind else {
+                continue;
+            };
+            for floor_index in 0..grid.floor_count() {
+                let Some(floor) = grid.floor_mut(floor_index) else {
+                    continue;
+                };
+                for sector in floor.sectors.iter_mut().flatten() {
+                    remap_deleted_floor_target(&mut sector.floor_above, room, active, replacement);
+                    remap_deleted_floor_target(&mut sector.floor_below, room, active, replacement);
+                }
+            }
+        }
+
+        self.active_floor = replacement;
+        self.clear_sector_selection();
+        self.clear_primitive_selection_state();
+        self.history.record(before);
+        self.mark_dirty();
+        self.status = format!(
+            "Deleted empty layer {}; now editing layer {} of {}",
+            active + 1,
+            replacement + 1,
+            new_floor_count
+        );
     }
 
     fn selected_layer_footprint(&self, room: NodeId) -> Vec<LayerFootprintCell> {
