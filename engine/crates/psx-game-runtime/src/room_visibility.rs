@@ -343,7 +343,7 @@ impl<
         // keeps neighbouring rooms loaded for seamless traversal, while the
         // portal walk says which of those rooms can contribute pixels now.
         // Always retain the traversal root as a fail-safe during refreshes.
-        index == self.root || self.result.contains_room(index)
+        index == self.root || self.result.contains_drawable_room(index)
     }
 }
 
@@ -396,11 +396,24 @@ mod tests {
     fn draw_visibility_does_not_expand_to_the_resident_room_window() {
         let mut visibility = TestRoomVisibility::EMPTY;
         visibility.root = RoomIndex::new(2);
+        visibility.result.rooms[0] = PortalVisibleRoom {
+            room: RoomIndex::new(4),
+            frustum_first: 0,
+            frustum_count: 1,
+            depth: 1,
+            within_far: false,
+        };
+        visibility.result.room_count = 1;
 
         assert!(visibility.draws_room(RoomIndex::new(2)));
         assert!(
             !visibility.draws_room(RoomIndex::new(3)),
             "a resident neighbour is not drawable until the portal walk admits it"
+        );
+        assert!(visibility.result.contains_room(RoomIndex::new(4)));
+        assert!(
+            !visibility.draws_room(RoomIndex::new(4)),
+            "a beyond-far room stays visible for streaming but must not draw"
         );
     }
 
