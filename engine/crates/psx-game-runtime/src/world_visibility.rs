@@ -139,9 +139,11 @@ fn active_room_draw_order_by_portal<
     let mut visible_index = 0usize;
     while visible_index < visibility.room_count.min(MAX_ACTIVE_ROOMS) && count < MAX_ACTIVE_ROOMS {
         let room = visibility.rooms[visible_index].room;
-        if let Some(slot) = active_room_slot_for_room(active_rooms, room) {
-            order[count] = slot;
-            count += 1;
+        if portal_visibility_result_draws_room(visibility, current_room, room) {
+            if let Some(slot) = active_room_slot_for_room(active_rooms, room) {
+                order[count] = slot;
+                count += 1;
+            }
         }
         visible_index += 1;
     }
@@ -239,7 +241,7 @@ fn portal_visibility_result_draws_room<
     // Keep streamed residency broad but make the draw list match the latest
     // portal traversal. The current room remains a conservative fail-safe if a
     // visibility refresh has not populated its result yet.
-    index == current_room || visibility.contains_room(index)
+    index == current_room || visibility.contains_drawable_room(index)
 }
 
 fn active_room_sort_depth(active: ActiveRuntimeRoom, camera: WorldCamera) -> i32 {

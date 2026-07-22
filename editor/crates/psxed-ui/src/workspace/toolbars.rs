@@ -448,6 +448,7 @@ impl EditorWorkspace {
                     .unwrap_or(1);
                 let active = self.active_floor.min(floor_count.saturating_sub(1));
                 let has_footprint = self.can_author_selected_layer_footprint();
+                let can_delete_empty_layer = self.can_delete_active_empty_layer();
                 ui.separator();
                 if ui
                     .add_enabled(
@@ -578,6 +579,25 @@ impl EditorWorkspace {
                                     .small()
                                     .color(STUDIO_TEXT_WEAK),
                             );
+                        }
+
+                        ui.separator();
+                        ui.label(RichText::new("LAYER").small().color(STUDIO_TEXT_WEAK));
+                        if ui
+                            .add_enabled(
+                                can_delete_empty_layer,
+                                egui::Button::new(icons::label(
+                                    icons::TRASH,
+                                    "Delete empty layer",
+                                )),
+                            )
+                            .on_hover_text(
+                                "Remove this layer after all of its tile geometry is deleted; objects are preserved on the nearest surviving layer",
+                            )
+                            .clicked()
+                        {
+                            self.delete_active_empty_layer();
+                            ui.close_menu();
                         }
                     },
                 );
