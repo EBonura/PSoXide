@@ -1151,6 +1151,32 @@ fn pushing_floor_below_preserves_existing_layers_and_inherits_room_look() {
 }
 
 #[test]
+fn removing_empty_base_floor_promotes_upper_floor_and_reports_height_shift() {
+    let mut grid = WorldGrid::empty(2, 2, 1024);
+    grid.elevation = -2048;
+    grid.push_floor();
+    grid.floor_mut(1).unwrap().set_floor(1, 1, 0, None);
+
+    let shift = grid.remove_empty_floor(0).expect("empty base is removable");
+
+    assert_eq!(shift, 2048);
+    assert_eq!(grid.floor_count(), 1);
+    assert_eq!(grid.elevation, 0);
+    assert!(grid.sector(1, 1).unwrap().floor.is_some());
+}
+
+#[test]
+fn removing_empty_floor_refuses_the_only_or_a_populated_floor() {
+    let mut grid = WorldGrid::empty(1, 1, 1024);
+    assert_eq!(grid.remove_empty_floor(0), None);
+
+    grid.push_floor();
+    grid.set_floor(0, 0, 0, None);
+    assert_eq!(grid.remove_empty_floor(0), None);
+    assert_eq!(grid.floor_count(), 2);
+}
+
+#[test]
 fn stone_room_perimeter_uses_editor_direction_convention() {
     let grid = WorldGrid::stone_room(2, 3, 1024, None, None);
     let default_wall_height = default_wall_height_for_sector_size(1024);
@@ -1302,6 +1328,18 @@ fn authored_footprint_ignores_empty_allocation() {
     assert_eq!(budget.depth, 4);
     assert_eq!(budget.total_cells, 16);
     assert_eq!(budget.populated_cells, 2);
+}
+
+#[test]
+fn authored_footprint_is_empty_after_last_face_is_deleted() {
+    let mut grid = WorldGrid::empty(8, 6, 1024);
+    grid.set_floor(2, 1, 0, None);
+
+    grid.sector_mut(2, 1).expect("authored sector").floor = None;
+
+    assert_eq!(grid.populated_sector_count(), 0);
+    assert_eq!(grid.authored_footprint(), None);
+    assert_eq!(grid.authored_budget(), WorldGridBudget::default());
 }
 
 #[test]
