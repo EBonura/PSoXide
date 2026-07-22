@@ -429,6 +429,13 @@ impl<const MAX_ROOMS: usize, const MAX_FRUSTUMS: usize, const MAX_FRONTIER: usiz
         self.room_position(room).is_some()
     }
 
+    /// True when `room` was accepted and at least one path to it remains
+    /// inside the camera's draw-distance limit.
+    pub fn contains_drawable_room(&self, room: RoomIndex) -> bool {
+        self.room_position(room)
+            .is_some_and(|slot| self.rooms[slot].within_far)
+    }
+
     /// Find a visible room's traversal-order slot.
     pub fn room_position(&self, room: RoomIndex) -> Option<usize> {
         let mut i = 0usize;
@@ -1774,6 +1781,7 @@ mod tests {
             .room_position(RoomIndex(1))
             .expect("beyond-far room is visible");
         assert!(!out.rooms[slot].within_far);
+        assert!(!out.contains_drawable_room(RoomIndex(1)));
     }
 
     #[test]
@@ -1790,6 +1798,7 @@ mod tests {
             .room_position(RoomIndex(1))
             .expect("near room is visible");
         assert!(out.rooms[slot].within_far);
+        assert!(out.contains_drawable_room(RoomIndex(1)));
     }
 
     #[test]
