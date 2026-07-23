@@ -32,7 +32,6 @@ use crate::playtest_disc::{
     editor_playtest_build_log_path, project_baked_disc_path, project_build_menu_metadata,
     project_disc_volume_id, DEFAULT_EMBEDDED_PLAYTEST_VOLUME_ID,
 };
-#[cfg(feature = "editor")]
 use crate::playtest_input::{PlaytestInputEvent, PlaytestInputTape, Port1PadSample};
 use crate::ui;
 use crate::ui::hud::HudState;
@@ -246,8 +245,8 @@ pub struct AppState {
     /// In-process playtest launched from the editor viewport.
     #[cfg(feature = "editor")]
     pub embedded_playtest: EmbeddedPlaytestState,
-    /// Recorded/replayed input for embedded editor play sessions.
-    #[cfg(feature = "editor")]
+    /// Video-frame-exact port-1 recording/replay shared by ordinary emulator
+    /// sessions, headless runs and embedded editor playtests.
     playtest_input_tape: PlaytestInputTape,
     /// Editor project directory observed at the last
     /// [`AppState::sync_embedded_playtest_with_editor_project`]
@@ -464,7 +463,6 @@ impl AppState {
             editor,
             #[cfg(feature = "editor")]
             embedded_playtest: EmbeddedPlaytestState::default(),
-            #[cfg(feature = "editor")]
             playtest_input_tape: PlaytestInputTape::default(),
             #[cfg(feature = "editor")]
             editor_project_dir_seen,
@@ -608,6 +606,11 @@ impl AppState {
     }
 
     pub fn launch_entry(&mut self, entry: &LibraryEntry) -> Result<(), String> {
+        // One tape belongs to one bootable disc identity. Finish the outgoing
+        // recording before replacing Bus/current_game so a file can never
+        // silently contain frames from two executables.
+        self.stop_input_recording_if_active();
+
         // Flush the outgoing game's memcard before we discard its
         // Bus state. Silently log on failure -- we'd rather launch
         // the new game than refuse because of a stale save.
@@ -2166,20 +2169,6 @@ impl AppState {
             .join(format!("{stem}.pxtape"))
     }
 
-    /// Feed or override the live pad sample for one embedded-play frame.
-    pub fn editor_playtest_input_sample_for_frame(
-        &mut self,
-        live_sample: Port1PadSample,
-    ) -> Port1PadSample {
-        let (sample, event) = self.playtest_input_tape.sample_for_frame(live_sample);
-        if let Some(PlaytestInputEvent::ReplayFinished { frames }) = event {
-            let message = format!("Input replay finished: {frames} frames");
-            self.editor.set_status(message.clone());
-            self.status_message_set(message);
-        }
-        sample
-    }
-
     /// True when the editor viewport is currently the live game.
     pub fn embedded_playtest_running(&self) -> bool {
         self.embedded_playtest.is_running()
@@ -2655,6 +2644,99 @@ impl AppState {
 }
 
 impl AppState {
+    fn active_input_tape_path(&self) -> Result<PathBuf, String> {
+        #[cfg(feature = "editor")]
+        if self.workspace.is_editor() && self.embedded_playtest_running() {
+            return Ok(self.editor_playtest_input_tape_path());
+        }
+        let game = self
+            .current_game
+            .as_ref()
+            .ok_or_else(|| "launch a game before recording input".to_string())?;
+        Ok(self.paths.latest_input_tape_file(&game.id))
+    }
+
+    /// Apply recording/replay at the port-1 boundary of one emulated video
+    /// frame. The headless `--input-tape` runner consumes the same PXITAPE1
+    /// samples at this exact clock boundary.
+    pub fn input_sample_for_frame(&mut self, live_sample: Port1PadSample) -> Port1PadSample {
+        let (sample, event) = self.playtest_input_tape.sample_for_frame(live_sample);
+        if let Some(PlaytestInputEvent::ReplayFinished { frames }) = event {
+            let message = format!("Input replay finished: {frames} frames");
+            #[cfg(feature = "editor")]
+            if self.workspace.is_editor() {
+                self.editor.set_status(message.clone());
+            }
+            self.status_message_set(message);
+        }
+        sample
+    }
+
+    /// `(recording, frames)` for the persistent on-screen REC indicator.
+    pub fn input_recording_status(&self) -> (bool, usize) {
+        (
+            self.playtest_input_tape.is_recording(),
+            self.playtest_input_tape.frame_count(),
+        )
+    }
+
+    /// Start a fresh recording, or stop and save the active one.
+    pub fn toggle_input_recording(&mut self) {
+        if self.playtest_input_tape.is_recording() {
+            self.stop_input_recording_if_active();
+            return;
+        }
+        let path = match self.active_input_tape_path() {
+            Ok(path) => path,
+            Err(error) => {
+                self.status_message_set(format!("Input recording unavailable: {error}"));
+                return;
+            }
+        };
+        if let Some(parent) = path.parent() {
+            if let Err(error) = self.paths.ensure_dir(parent) {
+                self.status_message_set(format!("Input recording unavailable: {error}"));
+                return;
+            }
+        }
+        self.playtest_input_tape.start_recording();
+        self.running = true;
+        self.menu.open = false;
+        self.menu.sync_run_label(true);
+        self.menu.sync_input_recording_label(true);
+        self.status_message_set(format!(
+            "Input recording started (F8 to stop): {}",
+            path.display()
+        ));
+    }
+
+    /// Persist an active recording. Safe in every exit path; a no-op while
+    /// idle or replaying.
+    pub fn stop_input_recording_if_active(&mut self) {
+        if !self.playtest_input_tape.is_recording() {
+            return;
+        }
+        let path = match self.active_input_tape_path() {
+            Ok(path) => path,
+            Err(error) => {
+                self.status_message_set(format!("Input recording save failed: {error}"));
+                return;
+            }
+        };
+        match self.playtest_input_tape.stop_recording(&path) {
+            Ok(frames) => {
+                self.menu.sync_input_recording_label(false);
+                self.status_message_set(format!(
+                    "Input recording saved: {frames} frames → {}",
+                    path.display()
+                ));
+            }
+            Err(error) => {
+                self.status_message_set(format!("Input recording save failed: {error}"));
+            }
+        }
+    }
+
     /// Flush any dirty memory-card state on port 1 back to its
     /// `<config>/games/<id>/memcard-1.mcd` file. A no-op when no
     /// card is attached or when no writes have landed since load.

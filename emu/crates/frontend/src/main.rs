@@ -802,7 +802,6 @@ fn keycode_to_binding(code: KeyCode) -> Option<InputBinding> {
         KeyCode::F3 => named("F3"),
         KeyCode::F4 => named("F4"),
         KeyCode::F6 => named("F6"),
-        KeyCode::F8 => named("F8"),
         KeyCode::F9 => named("F9"),
         KeyCode::F10 => named("F10"),
         KeyCode::F11 => named("F11"),
@@ -839,8 +838,8 @@ fn keycode_to_binding(code: KeyCode) -> Option<InputBinding> {
         KeyCode::Backquote => named("Backquote"),
         KeyCode::IntlRo => named("IntlRo"),
         KeyCode::IntlBackslash => named("IntlBackslash"),
-        // Escape toggles the menu, F5/F7 are quick save/load, and F12
-        // toggles the renderer display source. Keeping host commands out
+        // Escape toggles the menu, F5/F7 save/load, F8 records input, and
+        // F12 toggles the renderer display source. Keeping host commands out
         // of pad bindings prevents one key press from firing both actions.
         _ => None,
     }
@@ -926,6 +925,7 @@ impl ApplicationHandler for Shell {
 
         match event {
             WindowEvent::CloseRequested => {
+                self.state.stop_input_recording_if_active();
                 #[cfg(feature = "editor")]
                 self.state.stop_embedded_playtest();
                 self.state.stop_examples_build();
@@ -1067,10 +1067,13 @@ impl ApplicationHandler for Shell {
                 // around after. F9 is already the DualShock analog-mode
                 // toggle (see `key_is_analog_button`), so quick-save/-load
                 // land on F5/F7 instead of the more conventional F5/F9.
+                // F8 toggles a deterministic port-1 recording saved below the
+                // current game's config directory.
                 if state == ElementState::Pressed && !repeat {
                     match &logical_key {
                         Key::Named(NamedKey::F5) => self.state.save_state(),
                         Key::Named(NamedKey::F7) => self.state.load_latest_state(false),
+                        Key::Named(NamedKey::F8) => self.state.toggle_input_recording(),
                         _ => {}
                     }
                 }
@@ -1318,6 +1321,7 @@ impl ApplicationHandler for Shell {
                             merged_right = pad_frame.right_stick;
                         }
                         MenuOutcome::Quit => {
+                            self.state.stop_input_recording_if_active();
                             #[cfg(feature = "editor")]
                             self.state.stop_embedded_playtest();
                             self.state.stop_examples_build();
@@ -1394,14 +1398,10 @@ impl ApplicationHandler for Shell {
                     let live_pad_sample =
                         Port1PadSample::from_host(merged_mask, game_right, game_left);
                     for _ in 0..frames_to_run {
-                        // The editor can splice a recorded tape over the live pad;
-                        // without it the host pad sample drives the game directly.
-                        #[cfg(feature = "editor")]
-                        let pad_sample = self
-                            .state
-                            .editor_playtest_input_sample_for_frame(live_pad_sample);
-                        #[cfg(not(feature = "editor"))]
-                        let pad_sample = live_pad_sample;
+                        // Recording/replay happens at one authoritative video-
+                        // frame port-1 boundary for emulator, editor and headless
+                        // runs alike.
+                        let pad_sample = self.state.input_sample_for_frame(live_pad_sample);
                         if let Some(bus) = self.state.bus.as_mut() {
                             pad_sample.apply_to_bus(bus);
                         }
@@ -2721,7 +2721,13 @@ mod tests {
             );
         }
         // Host commands are deliberately unavailable as pad bindings.
-        for code in [KeyCode::Escape, KeyCode::F5, KeyCode::F7, KeyCode::F12] {
+        for code in [
+            KeyCode::Escape,
+            KeyCode::F5,
+            KeyCode::F7,
+            KeyCode::F8,
+            KeyCode::F12,
+        ] {
             assert_eq!(keycode_to_binding(code), None);
         }
         // The default Circle key must remain ordinary pad input rather than
