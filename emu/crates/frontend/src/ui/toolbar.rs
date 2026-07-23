@@ -6,15 +6,15 @@
 //!   label, followed by PS1 emulation cadence, paced visual cadence
 //!   when available, host redraw rate, MIPS, frame-time, and
 //!   audio backlog.
-//! - **Right**: icon buttons. Play/pause (context-sensitive),
-//!   reset, advance-one-frame. Clicking fires the same state
+//! - **Right**: recording and transport buttons. Record/stop,
+//!   play/pause (context-sensitive), reset, advance-one-frame. Clicking fires the same state
 //!   transition as the equivalent Menu menu item.
 //!
 //! Layout shape:
 //!
 //! ```text
 //!  ┌────────────────────────────────────────────────────────────────┐
-//!  │ ● RUNNING    EMU 60.0   VIS 20.0   HOST 120.0        ▶  ⟲  ⇥ │
+//!  │ ● RUNNING    EMU 60.0   VIS 20.0   HOST 120.0   REC  ▶  ⟲  ⇥ │
 //!  └────────────────────────────────────────────────────────────────┘
 //! ```
 //!
@@ -45,7 +45,7 @@ const TOOLBAR_GROUP_GAP: f32 = 8.0;
 /// Comfortable width for every toolbar control with the normal group spacing.
 /// The save-state and controls-panel buttons increased this cluster after the
 /// original fixed-width lane was introduced.
-const CONTROLS_PREFERRED_WIDTH: f32 = 680.0;
+const CONTROLS_PREFERRED_WIDTH: f32 = 730.0;
 /// Keep enough room for the status dot + RUNNING/PAUSED label.
 const METRICS_MIN_WIDTH: f32 = 116.0;
 /// Slider width used in the toolbar.
@@ -61,6 +61,8 @@ const METRIC_TEXT_SIZE: f32 = 12.0;
 /// only place these get used.
 const STATUS_RUNNING: Color32 = Color32::from_rgb(80, 200, 120);
 const STATUS_PAUSED: Color32 = Color32::from_rgb(153, 153, 166);
+const RECORDING_RED: Color32 = Color32::from_rgb(235, 62, 74);
+const RECORDING_BG: Color32 = Color32::from_rgb(88, 24, 32);
 const METRIC_TEXT: Color32 = Color32::from_rgb(204, 204, 217);
 const METRIC_LABEL: Color32 = Color32::from_rgb(102, 102, 115);
 
@@ -523,6 +525,31 @@ fn metric(ui: &mut egui::Ui, label: &str, value: String) {
 
 /// Transport cluster, in visual left-to-right order.
 fn draw_buttons(ui: &mut egui::Ui, state: &mut AppState) {
+    // Input recording -- an always-visible counterpart to F8 and the System
+    // menu item. The active state becomes a filled STOP control so it cannot
+    // be mistaken for a passive status light.
+    let recording = state.input_recording_status().0;
+    let (record_label, record_tooltip) = recording_button_copy(recording);
+    let mut record_btn = Button::new(
+        RichText::new(record_label)
+            .color(if recording {
+                Color32::WHITE
+            } else {
+                RECORDING_RED
+            })
+            .strong()
+            .size(12.0),
+    )
+    .min_size(egui::vec2(44.0, BUTTON_SIZE.y));
+    if recording {
+        record_btn = record_btn
+            .fill(RECORDING_BG)
+            .stroke(egui::Stroke::new(1.0, RECORDING_RED));
+    }
+    if ui.add(record_btn).on_hover_text(record_tooltip).clicked() {
+        state.toggle_input_recording();
+    }
+
     // Play / Pause -- icon + tooltip flip with state.
     let (icon, tooltip) = if state.running {
         (icons::PAUSE, "Pause")
@@ -564,6 +591,14 @@ fn draw_buttons(ui: &mut egui::Ui, state: &mut AppState) {
     }
 }
 
+fn recording_button_copy(recording: bool) -> (&'static str, &'static str) {
+    if recording {
+        ("STOP", "Stop and save input recording (F8)")
+    } else {
+        ("REC", "Start input recording (F8)")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -599,5 +634,17 @@ mod tests {
         assert!(lanes.compact_controls);
         assert_eq!(lanes.metrics_width, 0.0);
         assert_eq!(lanes.controls_width, 0.0);
+    }
+
+    #[test]
+    fn recording_button_changes_from_record_to_stop() {
+        assert_eq!(
+            recording_button_copy(false),
+            ("REC", "Start input recording (F8)")
+        );
+        assert_eq!(
+            recording_button_copy(true),
+            ("STOP", "Stop and save input recording (F8)")
+        );
     }
 }
