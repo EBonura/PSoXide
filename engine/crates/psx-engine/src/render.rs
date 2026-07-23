@@ -726,6 +726,29 @@ impl<'a> PrimitivePacketArena<'a> {
             Some(&mut *ptr)
         }
     }
+
+    /// Advance over a packet that is already initialized in the next fixed
+    /// slot and borrow it again without changing its payload or type.
+    ///
+    /// # Safety
+    /// The next slot must contain a valid `T` written by an earlier arena use,
+    /// and no intervening write may have changed that slot to another packet
+    /// type. The returned reference must not outlive this arena borrow.
+    pub unsafe fn reuse_packet<T>(&mut self) -> Option<&mut T> {
+        let size = core::mem::size_of::<T>();
+        if size == 0 || size > core::mem::size_of::<PrimitivePacketSlot>() {
+            return None;
+        }
+        if core::mem::align_of::<T>() > core::mem::align_of::<PrimitivePacketSlot>() {
+            return None;
+        }
+        if self.len >= self.storage.len() {
+            return None;
+        }
+        let ptr = self.storage[self.len].words.as_mut_ptr().cast::<T>();
+        self.len += 1;
+        Some(unsafe { &mut *ptr })
+    }
 }
 
 impl<T> PrimitiveSink<T> for PrimitivePacketArena<'_> {
@@ -854,5 +877,33 @@ mod tests {
 
         assert_eq!(*arena.get_mut(idx).expect("slot still live"), 12);
         assert!(arena.get_mut(1).is_none());
+    }
+
+    #[test]
+    fn packet_arena_can_relink_an_initialized_slot_without_rewriting_payload() {
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        #[repr(C)]
+        struct Packet {
+            tag: u32,
+            command: u32,
+            payload: u32,
+        }
+
+        let expected = Packet {
+            tag: 0x0300_1234,
+            command: 0x3400_00ff,
+            payload: 0x89ab_cdef,
+        };
+        let mut scratch = PrimitivePacketScratch::<1>::ZERO;
+        {
+            let mut arena = PrimitivePacketArena::new(&mut scratch);
+            arena.push(expected).expect("initial packet");
+        }
+
+        let mut arena = PrimitivePacketArena::new(&mut scratch);
+        let replayed = unsafe { arena.reuse_packet::<Packet>() }.expect("cached packet");
+        assert_eq!(*replayed, expected);
+        assert_eq!(arena.len(), 1);
+        assert_eq!(arena.remaining(), 0);
     }
 }
