@@ -51,6 +51,9 @@ pub enum MenuAction {
     StepOne,
     /// Reseat the CPU at its reset vector.
     Reset,
+    /// Start a new video-frame-exact port-1 recording, or stop and save the
+    /// active recording under the current game's config tree.
+    ToggleInputRecording,
     /// Toggle warm SYSTEM.CNF disc fast boot. When disabled, discs
     /// boot through the full BIOS logo path.
     ToggleFastBoot,
@@ -523,6 +526,23 @@ impl MenuState {
                 .find(|item| item.action == MenuAction::ToggleFastBoot)
             {
                 item.value = Some(if enabled { "On" } else { "Off" }.into());
+            }
+        }
+    }
+
+    /// Keep the System row in sync with the F8 recording latch.
+    pub fn sync_input_recording_label(&mut self, recording: bool) {
+        if let Some(system) = self.categories.iter_mut().find(|c| c.name == "System") {
+            if let Some(item) = system
+                .items
+                .iter_mut()
+                .find(|item| item.action == MenuAction::ToggleInputRecording)
+            {
+                item.label = if recording {
+                    "Stop input recording".into()
+                } else {
+                    "Record input".into()
+                };
             }
         }
     }
@@ -2567,6 +2587,12 @@ fn build_system_category(running: bool, save_count: usize) -> Category {
             action: MenuAction::Reset,
             burn_action: None,
             value: None,
+        },
+        MenuItem {
+            label: "Record input".into(),
+            action: MenuAction::ToggleInputRecording,
+            burn_action: None,
+            value: Some("F8".into()),
         },
         MenuItem {
             label: "Fast boot discs".into(),
