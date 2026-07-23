@@ -6,10 +6,7 @@
 
 use std::path::Path;
 
-use emulator_core::input_tape::read_tape;
-// `write_tape` only persists tapes recorded from the editor Play viewport.
-#[cfg(feature = "editor")]
-use emulator_core::input_tape::write_tape;
+use emulator_core::input_tape::{read_tape, write_tape};
 #[cfg(feature = "editor")]
 use psxed_ui::{EditorPlaytestTapeMode, EditorPlaytestTapeStatus};
 
@@ -25,7 +22,6 @@ pub(crate) fn read_input_tape(path: &Path) -> Result<Vec<Port1PadSample>, String
     read_tape(path)
 }
 
-#[cfg(feature = "editor")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PlaytestInputMode {
     Idle,
@@ -33,7 +29,6 @@ enum PlaytestInputMode {
     Replaying,
 }
 
-#[cfg(feature = "editor")]
 impl Default for PlaytestInputMode {
     fn default() -> Self {
         Self::Idle
@@ -41,7 +36,6 @@ impl Default for PlaytestInputMode {
 }
 
 /// One state transition emitted while applying a tape frame.
-#[cfg(feature = "editor")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PlaytestInputEvent {
     /// Replay consumed the final recorded frame.
@@ -49,7 +43,6 @@ pub(crate) enum PlaytestInputEvent {
 }
 
 /// Mutable input tape state owned by the frontend app.
-#[cfg(feature = "editor")]
 #[derive(Debug, Default)]
 pub(crate) struct PlaytestInputTape {
     mode: PlaytestInputMode,
@@ -57,9 +50,9 @@ pub(crate) struct PlaytestInputTape {
     replay_cursor: usize,
 }
 
-#[cfg(feature = "editor")]
 impl PlaytestInputTape {
     /// Editor-facing summary for controls and overlays.
+    #[cfg(feature = "editor")]
     pub(crate) fn editor_status(&self) -> EditorPlaytestTapeStatus {
         EditorPlaytestTapeStatus {
             mode: match self.mode {
@@ -75,6 +68,11 @@ impl PlaytestInputTape {
     /// True while live input is being appended to a tape.
     pub(crate) fn is_recording(&self) -> bool {
         self.mode == PlaytestInputMode::Recording
+    }
+
+    /// Number of video-frame samples currently retained.
+    pub(crate) fn frame_count(&self) -> usize {
+        self.samples.len()
     }
 
     /// Start a new tape, discarding the in-memory previous recording.
@@ -156,5 +154,58 @@ impl PlaytestInputTape {
                 (sample, event)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normal_emulator_recording_round_trips_through_shared_format() {
+        let path = std::env::temp_dir().join(format!(
+            "psoxide-input-tape-test-{}.pxtape",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let frames = [
+            Port1PadSample {
+                buttons: 0xffef,
+                right_x: 0x80,
+                right_y: 0x80,
+                left_x: 0x80,
+                left_y: 0x80,
+            },
+            Port1PadSample {
+                buttons: 0xffff,
+                right_x: 0x70,
+                right_y: 0x90,
+                left_x: 0x60,
+                left_y: 0xa0,
+            },
+        ];
+        let mut tape = PlaytestInputTape::default();
+        tape.start_recording();
+        for frame in frames {
+            assert_eq!(tape.sample_for_frame(frame).0, frame);
+        }
+        assert_eq!(tape.stop_recording(&path).unwrap(), frames.len());
+        assert_eq!(read_input_tape(&path).unwrap(), frames);
+
+        let mut replay = PlaytestInputTape::default();
+        assert_eq!(replay.start_replay(&path).unwrap(), frames.len());
+        assert_eq!(
+            replay.sample_for_frame(Port1PadSample::default()).0,
+            frames[0]
+        );
+        let (last, event) = replay.sample_for_frame(Port1PadSample::default());
+        assert_eq!(last, frames[1]);
+        assert_eq!(
+            event,
+            Some(PlaytestInputEvent::ReplayFinished {
+                frames: frames.len()
+            })
+        );
+        std::fs::remove_file(path).unwrap();
     }
 }

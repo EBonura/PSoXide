@@ -31,6 +31,8 @@ pub fn draw_layout(
 ) {
     state.hud.update(dt, state.cpu.tick());
     state.tick_status(dt);
+    let recording_input = state.input_recording_status().0;
+    state.menu.sync_input_recording_label(recording_input);
 
     // One-shot boot splash on a foreground layer (drawn before the workspace
     // branch so it overlays both the emulator and editor at launch).
@@ -47,6 +49,7 @@ pub fn draw_layout(
         let menu_warning = state.menu_setup_warning();
         state.menu.draw(ctx, dt, menu_warning);
         burn::draw(ctx, state);
+        draw_recording_indicator(ctx, state);
         draw_status_toast(ctx, state);
         return;
     }
@@ -77,6 +80,7 @@ pub fn draw_layout(
     let menu_warning = state.menu_setup_warning();
     state.menu.draw(ctx, dt, menu_warning);
     burn::draw(ctx, state);
+    draw_recording_indicator(ctx, state);
     draw_status_toast(ctx, state);
 }
 
@@ -110,6 +114,10 @@ pub fn apply_menu_action(state: &mut AppState, action: menu::MenuAction) -> Menu
                 bus.gpu.vram.clear();
                 state.gpu_resync_generation = state.gpu_resync_generation.wrapping_add(1);
             }
+            MenuOutcome::None
+        }
+        ToggleInputRecording => {
+            state.toggle_input_recording();
             MenuOutcome::None
         }
         ToggleFastBoot => {
@@ -243,8 +251,13 @@ fn draw_status_toast(ctx: &egui::Context, state: &AppState) {
     );
     let text = egui::Color32::from_rgba_premultiplied(235, 238, 242, (255.0 * alpha) as u8);
 
+    let toast_y = if state.input_recording_status().0 {
+        94.0
+    } else {
+        48.0
+    };
     egui::Area::new("status-toast".into())
-        .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-18.0, 48.0))
+        .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-18.0, toast_y))
         .order(egui::Order::Foreground)
         .show(ctx, |ui| {
             egui::Frame::new()
@@ -257,6 +270,33 @@ fn draw_status_toast(ctx: &egui::Context, state: &AppState) {
                     ui.add(
                         egui::Label::new(egui::RichText::new(msg).color(text).size(13.0)).wrap(),
                     );
+                });
+        });
+}
+
+fn draw_recording_indicator(ctx: &egui::Context, state: &AppState) {
+    let (recording, frames) = state.input_recording_status();
+    if !recording {
+        return;
+    }
+    egui::Area::new("input-recording-indicator".into())
+        .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-18.0, 48.0))
+        .order(egui::Order::Foreground)
+        .show(ctx, |ui| {
+            egui::Frame::new()
+                .fill(egui::Color32::from_rgba_premultiplied(30, 12, 14, 235))
+                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(235, 62, 74)))
+                .corner_radius(egui::CornerRadius::same(4))
+                .inner_margin(egui::Margin::symmetric(10, 6))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.colored_label(egui::Color32::from_rgb(245, 54, 68), "●");
+                        ui.label(
+                            egui::RichText::new(format!("REC  {frames} frames · F8 to stop"))
+                                .color(egui::Color32::WHITE)
+                                .strong(),
+                        );
+                    });
                 });
         });
 }

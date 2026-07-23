@@ -14,6 +14,8 @@
 //! │       ├── thumbnail.png
 //! │       ├── memcard-1.mcd
 //! │       ├── memcard-2.mcd
+//! │       ├── input-tapes/
+//! │       │   └── latest.pxtape
 //! │       └── savestates/
 //! │           ├── slot0.psx
 //! │           └── slot1.psx
@@ -129,6 +131,18 @@ impl ConfigPaths {
         self.game_dir(game_id).join("savestates")
     }
 
+    /// Directory for deterministic controller recordings belonging to one
+    /// game. Tapes are kept beside saves and memory cards because their boot
+    /// sequence is meaningful only for the same disc identity.
+    pub fn input_tapes_dir(&self, game_id: &str) -> PathBuf {
+        self.game_dir(game_id).join("input-tapes")
+    }
+
+    /// The most recently recorded full-session input tape.
+    pub fn latest_input_tape_file(&self, game_id: &str) -> PathBuf {
+        self.input_tapes_dir(game_id).join("latest.pxtape")
+    }
+
     /// Path to a specific save-state slot. Slots are numbered from 0
     /// upward; the frontend treats them as a history/stack rather
     /// than fixed named slots -- each save picks the next unused
@@ -226,6 +240,7 @@ impl ConfigPaths {
     pub fn ensure_game_tree(&self, game_id: &str) -> Result<(), PathError> {
         self.ensure_dir(&self.game_dir(game_id))?;
         self.ensure_dir(&self.savestates_dir(game_id))?;
+        self.ensure_dir(&self.input_tapes_dir(game_id))?;
         Ok(())
     }
 }
@@ -249,6 +264,10 @@ mod tests {
             tmp.path().join("games/abc123/savestates/slot3.psx")
         );
         assert_eq!(
+            p.latest_input_tape_file(game),
+            tmp.path().join("games/abc123/input-tapes/latest.pxtape")
+        );
+        assert_eq!(
             p.memcard_file(game, 2),
             tmp.path().join("games/abc123/memcard-2.mcd")
         );
@@ -265,6 +284,7 @@ mod tests {
         p.ensure_game_tree("mygame").unwrap();
         assert!(p.game_dir("mygame").is_dir());
         assert!(p.savestates_dir("mygame").is_dir());
+        assert!(p.input_tapes_dir("mygame").is_dir());
     }
 
     #[test]
