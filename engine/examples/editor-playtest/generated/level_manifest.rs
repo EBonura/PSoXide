@@ -5,7 +5,8 @@
 use psx_level::{
     EntityRecord, EquipmentRecord, FlowState, GameFlow, InteractableMessageRecord,
     InteractableRecord, LevelAssetRecord, LevelBoxPropRecord, LevelBoxPropSurfaceRecord,
-    LevelCylinderPropRecord, LevelCylinderPropSurfaceRecord, LevelCachedRoomCellRecord,
+    LevelCylinderPropRecord, LevelCylinderPropSurfaceRecord, LevelArchPropCollisionRecord,
+    LevelArchPropRecord, LevelArchPropSurfaceRecord, LevelCachedRoomCellRecord,
     LevelCachedRoomSurfaceRecord, LevelCachedRoomVertexRecord, LevelCameraRecord,
     LevelCharacterRecord, LevelChunkRecord, LevelFarVistaRecord, LevelGameEntityRecord,
     LevelImagePropRecord, LevelLogicRecord, LevelMaterialRecord, LevelModelClipBoundsRecord,
@@ -69,6 +70,9 @@ pub static BOX_PROPS: &[LevelBoxPropRecord] = &[];
 pub static BOX_PROP_SURFACES: &[LevelBoxPropSurfaceRecord] = &[];
 pub static CYLINDER_PROPS: &[LevelCylinderPropRecord] = &[];
 pub static CYLINDER_PROP_SURFACES: &[LevelCylinderPropSurfaceRecord] = &[];
+pub static ARCH_PROPS: &[LevelArchPropRecord] = &[];
+pub static ARCH_PROP_SURFACES: &[LevelArchPropSurfaceRecord] = &[];
+pub static ARCH_PROP_COLLISIONS: &[LevelArchPropCollisionRecord] = &[];
 pub static UI_FONTS: &[&psx_font::BitmapFont] = &[&psx_font::fonts::BASIC];
 pub static UI_PAINTS: &[LevelUiPaintRecord] = &[];
 pub static UI_NODES: &[LevelUiNodeRecord] = &[];

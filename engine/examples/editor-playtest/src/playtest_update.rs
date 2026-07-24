@@ -448,7 +448,7 @@ impl Playtest {
         };
         let mut blockers = [CharacterCollisionCylinder::EMPTY; MAX_COLLISION_CYLINDERS];
         let blocker_count = self.collect_collision_blockers(&mut blockers);
-        let mut aabb_blockers = [CharacterCollisionAabb::EMPTY; MAX_BOX_PROP_BLOCKERS];
+        let mut aabb_blockers = [CharacterCollisionAabb::EMPTY; MAX_STATIC_PROP_AABB_BLOCKERS];
         let aabb_blocker_count = self.collect_box_prop_collision_blockers(&mut aabb_blockers);
         let collision = if collision_room_count <= 1 {
             CharacterCollision::new_with_aabbs(
