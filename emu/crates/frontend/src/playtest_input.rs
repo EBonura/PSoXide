@@ -5,7 +5,10 @@
 //! which is game-agnostic.
 
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(any(target_arch = "wasm32", test))]
+use emulator_core::input_tape::tape_to_csv;
 use emulator_core::input_tape::{read_tape, write_tape};
 #[cfg(feature = "editor")]
 use psxed_ui::{EditorPlaytestTapeMode, EditorPlaytestTapeStatus};
@@ -89,12 +92,18 @@ impl PlaytestInputTape {
 
     /// Stop recording and persist the tape.
     pub(crate) fn stop_recording(&mut self, path: &Path) -> Result<usize, String> {
-        let frames = self.samples.len();
-        if self.mode == PlaytestInputMode::Recording {
-            self.mode = PlaytestInputMode::Idle;
-        }
+        let frames = self.finish_recording();
+        archive_existing_tape(path)?;
         write_tape(path, &self.samples)?;
         Ok(frames)
+    }
+
+    /// Stop recording without touching a host filesystem and return the CSV
+    /// payload used by the browser download path.
+    #[cfg(any(target_arch = "wasm32", test))]
+    pub(crate) fn stop_recording_csv(&mut self) -> (usize, String) {
+        let frames = self.finish_recording();
+        (frames, tape_to_csv(&self.samples))
     }
 
     /// Start replaying a persisted tape, falling back to memory.
@@ -114,16 +123,6 @@ impl PlaytestInputTape {
     pub(crate) fn stop_replay(&mut self) {
         if self.mode == PlaytestInputMode::Replaying {
             self.mode = PlaytestInputMode::Idle;
-        }
-    }
-
-    /// Stop any active tape mode, optionally saving an in-progress recording.
-    pub(crate) fn stop_active(&mut self, path: &Path) -> Result<Option<usize>, String> {
-        if self.is_recording() {
-            self.stop_recording(path).map(Some)
-        } else {
-            self.stop_replay();
-            Ok(None)
         }
     }
 
@@ -160,6 +159,52 @@ impl PlaytestInputTape {
             }
         }
     }
+
+    fn finish_recording(&mut self) -> usize {
+        let frames = self.samples.len();
+        if self.mode == PlaytestInputMode::Recording {
+            self.mode = PlaytestInputMode::Idle;
+        }
+        frames
+    }
+}
+
+/// Preserve the previous `latest.pxtape` before replacing it. Recordings can
+/// represent hours of navigation and must not silently disappear when a new
+/// capture starts.
+fn archive_existing_tape(path: &Path) -> Result<(), String> {
+    if !path.is_file() {
+        return Ok(());
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("input tape has no parent directory: {}", path.display()))?;
+    let archive_dir = parent.join("archive");
+    std::fs::create_dir_all(&archive_dir)
+        .map_err(|error| format!("create {}: {error}", archive_dir.display()))?;
+    let modified = std::fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .unwrap_or_else(|_| SystemTime::now());
+    let elapsed = modified.duration_since(UNIX_EPOCH).unwrap_or_default();
+    let base = format!(
+        "recording-{}-{:09}",
+        elapsed.as_secs(),
+        elapsed.subsec_nanos()
+    );
+    let mut archive_path = archive_dir.join(format!("{base}.pxtape"));
+    let mut suffix = 1u32;
+    while archive_path.exists() {
+        archive_path = archive_dir.join(format!("{base}-{suffix}.pxtape"));
+        suffix = suffix.saturating_add(1);
+    }
+    std::fs::copy(path, &archive_path).map_err(|error| {
+        format!(
+            "archive {} to {}: {error}",
+            path.display(),
+            archive_path.display()
+        )
+    })?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -212,5 +257,61 @@ mod tests {
             })
         );
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn replacing_latest_tape_archives_the_previous_recording() {
+        let root = std::env::temp_dir().join(format!(
+            "psoxide-input-tape-archive-test-{}",
+            std::process::id()
+        ));
+        let path = root.join("latest.pxtape");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        let first = Port1PadSample {
+            buttons: 0xfffe,
+            ..Port1PadSample::default()
+        };
+        let second = Port1PadSample {
+            buttons: 0xfffd,
+            ..Port1PadSample::default()
+        };
+        let mut tape = PlaytestInputTape::default();
+        tape.start_recording();
+        tape.sample_for_frame(first);
+        tape.stop_recording(&path).unwrap();
+        tape.start_recording();
+        tape.sample_for_frame(second);
+        tape.stop_recording(&path).unwrap();
+
+        assert_eq!(read_input_tape(&path).unwrap(), [second]);
+        let archived = std::fs::read_dir(root.join("archive"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+        assert_eq!(archived.len(), 1);
+        assert_eq!(read_input_tape(&archived[0]).unwrap(), [first]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn browser_stop_returns_replayable_csv_without_a_filesystem() {
+        let frame = Port1PadSample {
+            buttons: 0xffef,
+            right_x: 0x70,
+            right_y: 0x90,
+            left_x: 0x60,
+            left_y: 0xa0,
+        };
+        let mut tape = PlaytestInputTape::default();
+        tape.start_recording();
+        tape.sample_for_frame(frame);
+
+        let (frames, csv) = tape.stop_recording_csv();
+
+        assert_eq!(frames, 1);
+        assert!(!tape.is_recording());
+        assert_eq!(emulator_core::tape_from_csv(&csv).unwrap(), [frame]);
     }
 }
