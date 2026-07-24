@@ -370,7 +370,7 @@ impl Scene for Playtest {
                     fog_rgb: Rgb8::from_array(room_record.fog_rgb),
                     fog_near: room_record.fog_near,
                     fog_far: room_record.fog_far,
-                    lights: LIGHTS,
+                    lights: room_light_slice(LIGHTS, active.index),
                 };
                 telemetry::stage_begin(telemetry::stage::ROOM);
                 #[cfg(feature = "world-grid-visible")]
@@ -807,7 +807,8 @@ impl Scene for Playtest {
                 )
                 .map(ModelInstanceDepthPass::BehindPlayer)
                 .unwrap_or(ModelInstanceDepthPass::All);
-                if let Some(shadow_material) = self.shadow_material {
+                if !cfg!(feature = "actor-shadows-off") {
+                    if let Some(shadow_material) = self.shadow_material {
                     draw_model_instance_shadows(
                         active.index,
                         &room_camera,
@@ -818,6 +819,7 @@ impl Scene for Playtest {
                         &mut primitive_packets,
                         &mut world,
                     );
+                    }
                 }
                 let instance_stats = draw_model_instances(
                     active.index,
@@ -847,18 +849,20 @@ impl Scene for Playtest {
                 let player_lighting = self.current_room_lighting(camera);
                 let actor_options = current_room_surface_options(self.room_index);
                 telemetry::stage_begin(telemetry::stage::PLAYER);
-                if let Some(shadow_material) = self.shadow_material {
-                    draw_actor_shadow(
-                        player.x,
-                        player.y,
-                        player.z,
-                        actor_shadow_radius(character.radius),
-                        &camera,
-                        actor_options,
-                        shadow_material,
-                        &mut primitive_packets,
-                        &mut world,
-                    );
+                if !cfg!(feature = "actor-shadows-off") {
+                    if let Some(shadow_material) = self.shadow_material {
+                        draw_actor_shadow(
+                            player.x,
+                            player.y,
+                            player.z,
+                            actor_shadow_radius(character.radius),
+                            &camera,
+                            actor_options,
+                            shadow_material,
+                            &mut primitive_packets,
+                            &mut world,
+                        );
+                    }
                 }
                 let player_draw =
                     player_lighting.map_or(PlayerModelDrawStats::default(), |lighting| {
@@ -988,7 +992,7 @@ impl Scene for Playtest {
                         fog_rgb: Rgb8::from_array(room_record.fog_rgb),
                         fog_near: room_record.fog_near,
                         fog_far: room_record.fog_far,
-                        lights: LIGHTS,
+                        lights: room_light_slice(LIGHTS, active.index),
                     };
                     telemetry::stage_begin(telemetry::stage::MODEL_INSTANCES);
                     let instance_stats = draw_model_instances(

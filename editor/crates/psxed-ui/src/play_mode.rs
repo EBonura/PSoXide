@@ -28,6 +28,8 @@ pub enum EditorPlaytestRequest {
     StopInputReplay,
     /// Write the rolling embedded Play profiler history to the project logs.
     DumpProfilerHistory,
+    /// Enable or disable the emulator GPU's polygon wireframe mode.
+    SetWireframe { enabled: bool },
 }
 
 /// Frontend-owned embedded playtest state, mirrored into the editor
@@ -80,6 +82,8 @@ pub struct EditorViewport3dPresentation {
     pub play_metrics: Option<EditorPlaytestMetrics>,
     /// Current embedded-play input tape state.
     pub play_tape: EditorPlaytestTapeStatus,
+    /// Whether the emulator GPU is currently drawing polygon edges only.
+    pub play_wireframe: bool,
     /// Optional rendered gameplay Camera view for the inspector.
     pub camera_preview: Option<EditorCameraPreviewPresentation>,
 }
@@ -120,6 +124,7 @@ impl EditorViewport3dPresentation {
             overlay_source_size: egui::vec2(320.0, 240.0),
             play_metrics: None,
             play_tape: EditorPlaytestTapeStatus::default(),
+            play_wireframe: false,
             camera_preview: None,
         }
     }
@@ -130,6 +135,7 @@ impl EditorViewport3dPresentation {
         uv: Rect,
         play_tape: EditorPlaytestTapeStatus,
         play_metrics: Option<EditorPlaytestMetrics>,
+        play_wireframe: bool,
     ) -> Self {
         Self {
             texture,
@@ -139,6 +145,7 @@ impl EditorViewport3dPresentation {
             overlay_source_size: Vec2::ZERO,
             play_metrics,
             play_tape,
+            play_wireframe,
             camera_preview: None,
         }
     }
@@ -376,4 +383,32 @@ pub enum EditorViewport3dMode {
     Edit,
     /// Embedded emulator framebuffer.
     Play,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn play_presentation_reports_the_frontend_wireframe_state() {
+        let presentation = EditorViewport3dPresentation::play(
+            egui::TextureId::Managed(7),
+            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+            EditorPlaytestTapeStatus::default(),
+            None,
+            true,
+        );
+
+        assert_eq!(presentation.mode, EditorViewport3dMode::Play);
+        assert!(presentation.play_wireframe);
+    }
+
+    #[test]
+    fn edit_presentation_never_inherits_play_wireframe() {
+        let presentation =
+            EditorViewport3dPresentation::edit(egui::TextureId::Managed(8), Vec::new());
+
+        assert_eq!(presentation.mode, EditorViewport3dMode::Edit);
+        assert!(!presentation.play_wireframe);
+    }
 }

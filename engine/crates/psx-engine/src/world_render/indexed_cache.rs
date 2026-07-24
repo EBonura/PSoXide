@@ -1132,6 +1132,7 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
             let surface_options = cached_surface_subdivision_options(
                 surface_options,
                 subdivision_mode,
+                kind,
                 use_triangle_depth,
                 surface_risky,
             );
@@ -1164,8 +1165,36 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                     profile.count_lighting_reject();
                     return 0;
                 };
+                let colors = adaptive_debug_root_colors(surface_options, colors);
                 profile.add_lighting(RoomSurfaceMicroProfile::elapsed(lighting_start));
                 let submit_start = RoomSurfaceMicroProfile::cycle();
+                if surface_options.adaptive_subdivision
+                    && adaptive_projected_triangle_needs_subdivision(
+                        projected,
+                        surface_options.adaptive_subdivision_profile,
+                        surface.split,
+                        surface.triangle_index as usize,
+                        is_ceiling,
+                        material.sidedness,
+                    )
+                    && submit_adaptive_cached_room_triangle(
+                        cached_vertices,
+                        ids,
+                        camera,
+                        uv_words,
+                        colors,
+                        material,
+                        surface_options,
+                        surface.split,
+                        surface.triangle_index as usize,
+                        is_ceiling,
+                        triangles,
+                        world,
+                    )
+                {
+                    profile.add_submit(RoomSurfaceMicroProfile::elapsed(submit_start));
+                    return 1;
+                }
                 submit_projected_split_triangle_vertex_lit_cached_uv_words(
                     projected,
                     uv_words,
@@ -1183,6 +1212,11 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                 );
                 profile.add_submit(RoomSurfaceMicroProfile::elapsed(submit_start));
             } else {
+                let adaptive_subdivision = surface_options.adaptive_subdivision
+                    && adaptive_projected_quad_needs_subdivision(
+                        projected,
+                        surface_options.adaptive_subdivision_profile,
+                    );
                 let projected_for_cull = if is_ceiling {
                     reverse_quad_winding(projected)
                 } else {
@@ -1201,7 +1235,10 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                     return 1;
                 }
                 #[cfg(not(feature = "room-surface-profile"))]
-                if prebuilt_static_colors_ready {
+                if prebuilt_static_colors_ready
+                    && !adaptive_subdivision
+                    && !surface_options.adaptive_debug_subdivision_levels
+                {
                     let prepared_depth = prepared_depth.unwrap_or_else(|| {
                         PreparedTriangleDepth::from_quad_average::<OT>(surface_options, projected)
                     });
@@ -1228,7 +1265,10 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                     }
                 }
                 let lighting_start = RoomSurfaceMicroProfile::cycle();
-                let colors = if prebuilt_static_colors_ready {
+                let colors = if prebuilt_static_colors_ready
+                    && !adaptive_subdivision
+                    && !surface_options.adaptive_debug_subdivision_levels
+                {
                     [(0, 0, 0); 4]
                 } else {
                     let Some(colors) = indexed_vertex_lighting_colors(
@@ -1246,7 +1286,27 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                     };
                     colors
                 };
+                let colors = adaptive_debug_root_colors(surface_options, colors);
                 profile.add_lighting(RoomSurfaceMicroProfile::elapsed(lighting_start));
+                let submit_start = RoomSurfaceMicroProfile::cycle();
+                if adaptive_subdivision
+                    && submit_adaptive_cached_room_quad(
+                        cached_vertices,
+                        ids,
+                        camera,
+                        uv_words,
+                        colors,
+                        material,
+                        surface_options,
+                        surface.split,
+                        is_ceiling,
+                        triangles,
+                        world,
+                    )
+                {
+                    profile.add_submit(RoomSurfaceMicroProfile::elapsed(submit_start));
+                    return 1;
+                }
                 let (projected, uv_words, colors) = if is_ceiling {
                     (
                         reverse_quad_winding(projected),
@@ -1256,7 +1316,6 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                 } else {
                     (projected, uv_words, colors)
                 };
-                let submit_start = RoomSurfaceMicroProfile::cycle();
                 // Risky whole-quads keep the single-packet quad path
                 // with their own averaged depth (the key their two
                 // leaves would approximate) instead of splitting into
@@ -1305,6 +1364,7 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
             let surface_options = cached_surface_subdivision_options(
                 surface_options,
                 subdivision_mode,
+                kind,
                 use_triangle_depth,
                 surface_risky,
             );
@@ -1337,8 +1397,36 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                     profile.count_lighting_reject();
                     return 0;
                 };
+                let colors = adaptive_debug_root_colors(surface_options, colors);
                 profile.add_lighting(RoomSurfaceMicroProfile::elapsed(lighting_start));
                 let submit_start = RoomSurfaceMicroProfile::cycle();
+                if surface_options.adaptive_subdivision
+                    && adaptive_projected_triangle_needs_subdivision(
+                        projected,
+                        surface_options.adaptive_subdivision_profile,
+                        surface.split,
+                        surface.triangle_index as usize,
+                        false,
+                        wall_material.sidedness,
+                    )
+                    && submit_adaptive_cached_room_triangle(
+                        cached_vertices,
+                        ids,
+                        camera,
+                        uv_words,
+                        colors,
+                        wall_material,
+                        surface_options,
+                        surface.split,
+                        surface.triangle_index as usize,
+                        false,
+                        triangles,
+                        world,
+                    )
+                {
+                    profile.add_submit(RoomSurfaceMicroProfile::elapsed(submit_start));
+                    return 1;
+                }
                 submit_projected_split_triangle_vertex_lit_cached_uv_words(
                     projected,
                     uv_words,
@@ -1356,6 +1444,11 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                 );
                 profile.add_submit(RoomSurfaceMicroProfile::elapsed(submit_start));
             } else {
+                let adaptive_subdivision = surface_options.adaptive_subdivision
+                    && adaptive_projected_quad_needs_subdivision(
+                        projected,
+                        surface_options.adaptive_subdivision_profile,
+                    );
                 let backface_start = RoomSurfaceMicroProfile::cycle();
                 let backface_culled = projected_quad_backface_culled(
                     projected,
@@ -1369,7 +1462,10 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                     return 1;
                 }
                 #[cfg(not(feature = "room-surface-profile"))]
-                if prebuilt_static_colors_ready {
+                if prebuilt_static_colors_ready
+                    && !adaptive_subdivision
+                    && !surface_options.adaptive_debug_subdivision_levels
+                {
                     let prepared_depth = prepared_depth.unwrap_or_else(|| {
                         PreparedTriangleDepth::from_quad_average::<OT>(surface_options, projected)
                     });
@@ -1396,7 +1492,10 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                     }
                 }
                 let lighting_start = RoomSurfaceMicroProfile::cycle();
-                let colors = if prebuilt_static_colors_ready {
+                let colors = if prebuilt_static_colors_ready
+                    && !adaptive_subdivision
+                    && !surface_options.adaptive_debug_subdivision_levels
+                {
                     [(0, 0, 0); 4]
                 } else {
                     let Some(colors) = indexed_vertex_lighting_colors(
@@ -1414,8 +1513,27 @@ fn draw_indexed_cached_room_surface<const OT: usize, L: WorldSurfaceLighting>(
                     };
                     colors
                 };
+                let colors = adaptive_debug_root_colors(surface_options, colors);
                 profile.add_lighting(RoomSurfaceMicroProfile::elapsed(lighting_start));
                 let submit_start = RoomSurfaceMicroProfile::cycle();
+                if adaptive_subdivision
+                    && submit_adaptive_cached_room_quad(
+                        cached_vertices,
+                        ids,
+                        camera,
+                        uv_words,
+                        colors,
+                        wall_material,
+                        surface_options,
+                        SPLIT_NW_SE,
+                        false,
+                        triangles,
+                        world,
+                    )
+                {
+                    profile.add_submit(RoomSurfaceMicroProfile::elapsed(submit_start));
+                    return 1;
+                }
                 // Same single-packet upgrade for risky whole-quad walls.
                 let prepared_depth = Some(prepared_depth.unwrap_or_else(|| {
                     PreparedTriangleDepth::from_quad_average::<OT>(surface_options, projected)
@@ -1592,9 +1710,13 @@ fn try_submit_encoded_warmed_room_quad<const OT: usize>(
     let surface_options = cached_surface_subdivision_options(
         surface_options,
         subdivision_mode,
+        kind,
         use_triangle_depth,
         surface_risky,
     );
+    if adaptive_warmed_quad_requires_dynamic_submit(surface_options, projected) {
+        return false;
+    }
     let prepared_depth = prepared_depth.unwrap_or_else(|| {
         PreparedTriangleDepth::from_quad_average::<OT>(surface_options, projected)
     });
@@ -1786,6 +1908,152 @@ fn indexed_world_quad(vertices: &[WorldVertex], ids: [u16; 4]) -> Option<[WorldV
     }
 }
 
+#[inline(always)]
+fn adaptive_projected_quad_needs_subdivision(
+    projected: [ProjectedVertex; 4],
+    profile: AdaptiveSubdivisionProfile,
+) -> bool {
+    projected[0]
+        .sz
+        .max(projected[1].sz)
+        .max(projected[2].sz)
+        .max(projected[3].sz)
+        < profile.far_depth
+}
+
+#[inline(always)]
+fn adaptive_debug_root_colors<const N: usize>(
+    options: WorldSurfaceOptions,
+    colors: [(u8, u8, u8); N],
+) -> [(u8, u8, u8); N] {
+    if options.adaptive_debug_subdivision_levels {
+        [(255, 0, 0); N]
+    } else {
+        colors
+    }
+}
+
+/// Warmed authored quads can only take the direct packet path when TR
+/// subdivision will not replace them with dynamically generated children.
+#[inline(always)]
+pub(super) fn adaptive_warmed_quad_requires_dynamic_submit(
+    options: WorldSurfaceOptions,
+    projected: [ProjectedVertex; 4],
+) -> bool {
+    options.adaptive_debug_subdivision_levels
+        || (options.adaptive_subdivision
+            && adaptive_projected_quad_needs_subdivision(
+                projected,
+                options.adaptive_subdivision_profile,
+            ))
+}
+
+#[inline(always)]
+fn adaptive_projected_triangle_needs_subdivision(
+    projected: [ProjectedVertex; 4],
+    profile: AdaptiveSubdivisionProfile,
+    split: u8,
+    triangle_index: usize,
+    reverse_front: bool,
+    sidedness: SurfaceSidedness,
+) -> bool {
+    let mut tri = split_triangles_runtime(split)[triangle_index.min(1)];
+    if reverse_front ^ (sidedness == SurfaceSidedness::Back) {
+        tri = (tri.0, tri.2, tri.1);
+    }
+    projected[tri.0]
+        .sz
+        .max(projected[tri.1].sz)
+        .max(projected[tri.2].sz)
+        < profile.far_depth
+}
+
+#[allow(clippy::too_many_arguments)]
+fn submit_adaptive_cached_room_triangle<const OT: usize>(
+    cached_vertices: &[WorldVertex],
+    ids: [u16; 4],
+    camera: &WorldCamera,
+    uv_words: [u16; 4],
+    colors: [(u8, u8, u8); 4],
+    material: WorldRenderMaterial,
+    options: WorldSurfaceOptions,
+    split: u8,
+    triangle_index: usize,
+    reverse_front: bool,
+    triangles: &mut impl RoomSurfaceSink,
+    world: &mut WorldRenderPass<'_, '_, OT>,
+) -> bool {
+    let Some(vertices) = indexed_world_quad(cached_vertices, ids) else {
+        return false;
+    };
+    let mut tri = split_triangles_runtime(split)[triangle_index.min(1)];
+    if reverse_front ^ (material.sidedness == SurfaceSidedness::Back) {
+        tri = (tri.0, tri.2, tri.1);
+    }
+    let views = [
+        camera.view_vertex(vertices[tri.0]),
+        camera.view_vertex(vertices[tri.1]),
+        camera.view_vertex(vertices[tri.2]),
+    ];
+    let options = options
+        .with_cull_mode(cull_for_sidedness(material.sidedness, CullMode::Back))
+        .with_material_layer(material.texture);
+    let _ = world.submit_adaptive_textured_gouraud_view_triangle_uv_words(
+        triangles,
+        views,
+        [uv_words[tri.0], uv_words[tri.1], uv_words[tri.2]],
+        [colors[tri.0], colors[tri.1], colors[tri.2]],
+        camera.projection,
+        material.texture,
+        options,
+    );
+    true
+}
+
+#[allow(clippy::too_many_arguments)]
+fn submit_adaptive_cached_room_quad<const OT: usize>(
+    cached_vertices: &[WorldVertex],
+    ids: [u16; 4],
+    camera: &WorldCamera,
+    uv_words: [u16; 4],
+    colors: [(u8, u8, u8); 4],
+    material: WorldRenderMaterial,
+    options: WorldSurfaceOptions,
+    split: u8,
+    reverse_front: bool,
+    primitives: &mut impl RoomSurfaceSink,
+    world: &mut WorldRenderPass<'_, '_, OT>,
+) -> bool {
+    let Some(vertices) = indexed_world_quad(cached_vertices, ids) else {
+        return false;
+    };
+    let views = [
+        camera.view_vertex(vertices[0]),
+        camera.view_vertex(vertices[1]),
+        camera.view_vertex(vertices[2]),
+        camera.view_vertex(vertices[3]),
+    ];
+    let packet_views =
+        warmed_room_quad_packet_values(views, material.sidedness, split, reverse_front);
+    let packet_uv_words =
+        warmed_room_quad_packet_values(uv_words, material.sidedness, split, reverse_front);
+    let packet_colors =
+        warmed_room_quad_packet_values(colors, material.sidedness, split, reverse_front);
+    let options = options
+        .with_cull_mode(cull_for_sidedness(material.sidedness, CullMode::Back))
+        .with_material_layer(material.texture);
+    let _ = world.submit_adaptive_textured_gouraud_view_quad_uv_words(
+        primitives,
+        packet_views,
+        packet_uv_words,
+        packet_colors,
+        camera.projection,
+        material.texture,
+        options,
+    );
+    true
+}
+
 #[cfg(test)]
 pub(super) fn cached_surface_uses_triangle_depth(
     mode: CachedRoomDepthMode,
@@ -1838,21 +2106,29 @@ fn cached_surface_risk_for_modes(
     }
 }
 
-fn cached_surface_subdivision_options(
+pub(super) fn cached_surface_subdivision_options(
     options: WorldSurfaceOptions,
     mode: CachedRoomSubdivisionMode,
+    kind: WorldSurfaceKind,
     use_triangle_depth: bool,
     surface_risky: bool,
 ) -> WorldSurfaceOptions {
+    let kind_mask = match kind {
+        WorldSurfaceKind::Floor => AdaptiveSubdivisionKindMask::FLOOR,
+        WorldSurfaceKind::Ceiling => AdaptiveSubdivisionKindMask::CEILING,
+        WorldSurfaceKind::Wall { .. } => AdaptiveSubdivisionKindMask::WALL,
+    };
     let allow_visual_subdivision = match mode {
         CachedRoomSubdivisionMode::All => true,
         CachedRoomSubdivisionMode::DepthSorted => use_triangle_depth,
         CachedRoomSubdivisionMode::Risky => surface_risky,
-    };
+    } && options.adaptive_subdivision_kinds.contains(kind_mask);
     if allow_visual_subdivision {
         options
     } else {
-        options.with_textured_triangle_max_edge(0)
+        options
+            .with_textured_triangle_max_edge(0)
+            .with_adaptive_subdivision(false)
     }
 }
 

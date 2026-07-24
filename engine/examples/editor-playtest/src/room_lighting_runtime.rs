@@ -4,7 +4,7 @@
 
 use super::*;
 
-pub(super) use psx_game_runtime::room_lighting::RuntimeRoomLighting;
+pub(super) use psx_game_runtime::room_lighting::{room_light_slice, RuntimeRoomLighting};
 
 /// The crate room-material builder over this example's cooked
 /// `MATERIALS`/`ASSETS` tables and arena-backed texture uploads.
