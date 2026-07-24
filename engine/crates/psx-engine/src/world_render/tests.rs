@@ -1,7 +1,8 @@
 use super::*;
+use super::indexed_cache::cached_surface_subdivision_options;
 use crate::Angle;
 use crate::PrimitiveArena;
-use crate::{ProjectedVertex, WorldProjection, Q12};
+use crate::{DepthBand, DepthRange, ProjectedVertex, WorldProjection, Q12};
 
 /// Helper: the two indices both triangles in `[t0, t1]`
 /// share form the diagonal of the split. Returned sorted
@@ -44,6 +45,69 @@ fn split_one_uses_ne_sw_diagonal() {
     assert_eq!(triangles[0], (0, 1, 3));
     assert_eq!(triangles[1], (1, 2, 3));
     assert_eq!(diagonal(triangles), [1, 3]);
+}
+
+#[test]
+fn warmed_room_quad_defers_to_sector_scaled_adaptive_splitter() {
+    let options = WorldSurfaceOptions::new(DepthBand::whole(), DepthRange::new(16, 25_000))
+        .with_adaptive_subdivision_sector_size(1664);
+    let near = [
+        ProjectedVertex::new(0, 0, 3354),
+        ProjectedVertex::new(64, 0, 3354),
+        ProjectedVertex::new(0, 64, 3354),
+        ProjectedVertex::new(64, 64, 3354),
+    ];
+    let far = [
+        ProjectedVertex::new(0, 0, 9000),
+        ProjectedVertex::new(64, 0, 9000),
+        ProjectedVertex::new(0, 64, 9000),
+        ProjectedVertex::new(64, 64, 9000),
+    ];
+
+    assert!(adaptive_warmed_quad_requires_dynamic_submit(
+        options, near
+    ));
+    assert!(!adaptive_warmed_quad_requires_dynamic_submit(
+        options, far
+    ));
+    assert!(adaptive_warmed_quad_requires_dynamic_submit(
+        options.with_adaptive_subdivision_debug_levels(true),
+        far,
+    ));
+}
+
+#[test]
+fn floor_wall_subdivision_mask_keeps_ceilings_on_authored_path() {
+    let options = WorldSurfaceOptions::new(DepthBand::whole(), DepthRange::new(16, 25_000))
+        .with_adaptive_subdivision_sector_size(1664)
+        .with_adaptive_subdivision_kinds(AdaptiveSubdivisionKindMask::FLOOR_WALL);
+    let floor = cached_surface_subdivision_options(
+        options,
+        CachedRoomSubdivisionMode::All,
+        WorldSurfaceKind::Floor,
+        false,
+        false,
+    );
+    let ceiling = cached_surface_subdivision_options(
+        options,
+        CachedRoomSubdivisionMode::All,
+        WorldSurfaceKind::Ceiling,
+        false,
+        false,
+    );
+    let wall = cached_surface_subdivision_options(
+        options,
+        CachedRoomSubdivisionMode::All,
+        WorldSurfaceKind::Wall {
+            direction: DIR_NORTH,
+        },
+        false,
+        false,
+    );
+
+    assert!(floor.adaptive_subdivision);
+    assert!(!ceiling.adaptive_subdivision);
+    assert!(wall.adaptive_subdivision);
 }
 
 #[test]

@@ -31,6 +31,9 @@ default = [
     # camera rotation no longer refills every drawn room each tick
     # (was 33k avg / 184k spike ticks on the benchmark tape).
     "vis-anchor-pvs-candidates",
+    # Fixed 3x3 one-level TR subdivision lattice. The Cortex v1 A/B reduced
+    # matched room-surface work by 15.5% with bit-identical leaf packets.
+    "tr-subdivision-lattice",
 ]
 cd-stream-bench = ["dep:psx-io", "psx-game-runtime/cd-stream-bench"]
 cd-stream-benchmark = ["cd-stream-bench", "psx-game-runtime/cd-stream-benchmark"]
@@ -58,7 +61,25 @@ vis-player-anchor = []
 # Opt-in until the pop-in behaviour passes an eyes-on gate.
 vis-draw-pruned = []
 room-surface-profile = ["psx-engine/room-surface-profile"]
+# A/B candidate: project the nine unique points of a one-level subdivided
+# room quad once, instead of projecting four overlapping child quads.
+tr-subdivision-lattice = ["psx-engine/tr-subdivision-lattice"]
+# Opt-in for projects whose close, strongly patterned ceilings visibly need
+# affine correction. The measured default spends subdivision on floors/walls.
+tr-subdivision-ceilings = []
+# Experiment-only stress profile that expands the distance band fourfold so
+# the upward-camera tape exercises ceiling subdivision even in tall rooms.
+tr-subdivision-wide-band = []
+# Experiment-only reference cadence for measuring the existing 30 Hz NPC
+# schedule against collision/decision work on every 60 Hz simulation tick.
+npc-think-60hz = []
+# Reference build for measuring the cost of the existing single-quad actor
+# shadow implementation.
+actor-shadows-off = []
 cell-select-profile = ["psx-engine/cell-select-profile"]
+# High-contrast TR subdivision colors for emulator wireframe captures.
+# Diagnostic only: normal builds retain authored Gouraud lighting.
+tessellation-debug = []
 # On-screen presented-fps + worst-frame-gap counter for hardware
 # ratification burns. Off by default: shipping builds must not carry it.
 fps-overlay = []

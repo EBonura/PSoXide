@@ -34,6 +34,9 @@ boot-trace = ["psx-rt/boot-trace"]
 emulator-telemetry = []
 hardware-boot-visual = []
 room-surface-profile = []
+# Experimental fixed 3x3 projection lattice for one-level TR room
+# subdivision. Kept opt-in until the Cortex v1 A/B has been recorded.
+tr-subdivision-lattice = []
 # Per-candidate stage marks inside ROOM_CELL_SELECT (cell_lookup /
 # cell_depth / cell_collect CSV columns). Off by default: the per-cell
 # begin/end telemetry writes cost ~4k cycles/frame on the benchmark tape.
