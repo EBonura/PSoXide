@@ -143,7 +143,7 @@ pub struct RuntimeRoomLighting {
     pub fog_near: i32,
     /// View depth where fog saturates.
     pub fog_far: i32,
-    /// Cooked point-light table (the whole level's; filtered by room).
+    /// Cooked point-light slice for this room only.
     pub lights: &'static [PointLightRecord],
 }
 
@@ -213,10 +213,8 @@ impl RuntimeRoomLighting {
 
     #[inline]
     fn point_lights(&self) -> impl Iterator<Item = PointLightSample> + '_ {
-        self.lights
-            .iter()
-            .filter(move |light| light.room == self.room_index)
-            .map(|light| {
+        self.lights.iter().map(|light| {
+                debug_assert_eq!(light.room, self.room_index);
                 PointLightSample::from_rgb_intensity(
                     [light.x, light.y, light.z],
                     light.radius as i32,
@@ -225,6 +223,7 @@ impl RuntimeRoomLighting {
                 )
             })
     }
+
 
     /// Fog a baked vertex colour by `vertex`'s camera-view depth.
     #[inline]
@@ -241,6 +240,20 @@ impl RuntimeRoomLighting {
     pub fn apply_vertex_fog_weight(&self, rgb: (u8, u8, u8), weight: i32) -> (u8, u8, u8) {
         self.apply_fog_weight(rgb, weight)
     }
+}
+
+/// Return the contiguous cooked light slice for `room`.
+///
+/// The cooker sorts the global table by room once. Two binary partition
+/// searches replace the former complete-table filter in every shade call.
+#[inline]
+pub fn room_light_slice(
+    lights: &'static [PointLightRecord],
+    room: RoomIndex,
+) -> &'static [PointLightRecord] {
+    let first = lights.partition_point(|light| light.room < room);
+    let count = lights[first..].partition_point(|light| light.room == room);
+    &lights[first..first + count]
 }
 
 impl WorldSurfaceLighting for RuntimeRoomLighting {
@@ -389,4 +402,61 @@ fn blend_channel(src: u8, fog: u8, keep: i32, weight: i32) -> u8 {
 /// `[r, g, b]` array to the `(r, g, b)` tuple the GPU material API takes.
 pub const fn rgb_tuple(rgb: [u8; 3]) -> (u8, u8, u8) {
     (rgb[0], rgb[1], rgb[2])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TEST_LIGHTS: &[PointLightRecord] = &[
+        PointLightRecord {
+            room: RoomIndex(0),
+            x: 0,
+            y: 0,
+            z: 0,
+            radius: 64,
+            intensity_q8: 256,
+            color: [255; 3],
+            flags: 0,
+        },
+        PointLightRecord {
+            room: RoomIndex(2),
+            x: 1,
+            y: 0,
+            z: 0,
+            radius: 64,
+            intensity_q8: 256,
+            color: [255; 3],
+            flags: 0,
+        },
+        PointLightRecord {
+            room: RoomIndex(2),
+            x: 2,
+            y: 0,
+            z: 0,
+            radius: 64,
+            intensity_q8: 256,
+            color: [255; 3],
+            flags: 0,
+        },
+        PointLightRecord {
+            room: RoomIndex(4),
+            x: 3,
+            y: 0,
+            z: 0,
+            radius: 64,
+            intensity_q8: 256,
+            color: [255; 3],
+            flags: 0,
+        },
+    ];
+
+    #[test]
+    fn room_light_slice_returns_exact_contiguous_range() {
+        assert!(room_light_slice(TEST_LIGHTS, RoomIndex(1)).is_empty());
+        let room_two = room_light_slice(TEST_LIGHTS, RoomIndex(2));
+        assert_eq!(room_two.len(), 2);
+        assert_eq!(room_two[0].x, 1);
+        assert_eq!(room_two[1].x, 2);
+    }
 }
