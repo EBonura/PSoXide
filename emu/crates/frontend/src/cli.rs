@@ -292,6 +292,12 @@ pub struct LaunchArgs {
     /// stack together on deadline-miss spikes.
     #[arg(long)]
     pub profile_log: Option<PathBuf>,
+    /// Write one emulator-owned CSV row per headless route tick. Unlike guest
+    /// telemetry, this works with shipping discs and records CPU/cycle cost plus
+    /// display-buffer flips, which makes rendered-frame cadence measurable from
+    /// an input-tape replay.
+    #[arg(long)]
+    pub route_log: Option<PathBuf>,
     /// Optional path to dump the final VRAM as a raw PPM image.
     /// Lets you eyeball the boot state without firing up the GUI.
     #[arg(long)]
@@ -914,6 +920,43 @@ fn run_headless_launch(
     let mut route_tick_steps = 0u64;
     let mut route_ticks = 0u64;
     let mut tape_cursor = 0usize;
+    let mut route_log = match args.route_log.as_ref() {
+        Some(path) => {
+            if let Some(parent) = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+            {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+            }
+            let file = std::fs::File::create(path)
+                .map_err(|e| format!("create route log {}: {e}", path.display()))?;
+            let mut writer = std::io::BufWriter::new(file);
+            writeln!(
+                writer,
+                "route_tick,tape_frame,cpu_tick,bus_cycles,cpu_tick_delta,bus_cycle_delta,display_x,display_y,display_width,display_height,display_start_changed"
+            )
+            .map_err(|e| format!("write route log {}: {e}", path.display()))?;
+            let area = bus.gpu.display_area();
+            writeln!(
+                writer,
+                "0,0,{},{},0,0,{},{},{},{},0",
+                cpu.tick(),
+                bus.cycles(),
+                area.x,
+                area.y,
+                area.width,
+                area.height
+            )
+            .map_err(|e| format!("write route log {}: {e}", path.display()))?;
+            Some(writer)
+        }
+        None => None,
+    };
+    let initial_display_area = bus.gpu.display_area();
+    let mut route_last_display_start = (initial_display_area.x, initial_display_area.y);
+    let mut route_last_cpu_tick = cpu.tick();
+    let mut route_last_bus_cycles = bus.cycles();
     if let Some(samples) = tape_samples.as_ref() {
         samples[tape_cursor].apply_to_bus(&mut bus);
     }
@@ -1001,6 +1044,27 @@ fn run_headless_launch(
                     route_ticks,
                     &mut current_pulsed_button_mask,
                 );
+            }
+            if let Some(writer) = route_log.as_mut() {
+                let area = bus.gpu.display_area();
+                let display_start = (area.x, area.y);
+                let display_start_changed = u8::from(display_start != route_last_display_start);
+                let cpu_tick = cpu.tick();
+                let bus_cycles = bus.cycles();
+                writeln!(
+                    writer,
+                    "{route_ticks},{tape_cursor},{cpu_tick},{bus_cycles},{},{},{},{},{},{},{display_start_changed}",
+                    cpu_tick.saturating_sub(route_last_cpu_tick),
+                    bus_cycles.saturating_sub(route_last_bus_cycles),
+                    area.x,
+                    area.y,
+                    area.width,
+                    area.height
+                )
+                .map_err(|e| e.to_string())?;
+                route_last_display_start = display_start;
+                route_last_cpu_tick = cpu_tick;
+                route_last_bus_cycles = bus_cycles;
             }
         }
         if current_guest_frames != observed_guest_frames {
@@ -1152,6 +1216,10 @@ fn run_headless_launch(
                 bus.cdrom.command_log().len()
             );
         }
+    }
+
+    if let Some(writer) = route_log.as_mut() {
+        writer.flush().map_err(|e| e.to_string())?;
     }
 
     if let Some(path) = args.dump_hw {
@@ -1781,6 +1849,7 @@ fn validation_launch_args(
         guest_hash_interval: 60,
         counter_log: None,
         profile_log: None,
+        route_log: None,
         dump_vram: None,
         dump_ram: None,
         dump_spu_ram: None,
@@ -2071,6 +2140,7 @@ fn cmd_dump_editor_ui(args: DumpEditorUiArgs) -> Result<(), String> {
                 egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
                 psxed_ui::EditorPlaytestTapeStatus::default(),
                 Some(metrics),
+                false,
             ),
             EditorPlaytestStatus::Running {
                 input_captured: false,

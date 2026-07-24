@@ -641,8 +641,12 @@ impl EditorWorkspace {
         let control_gap = 6.0;
         let controls_origin = rect.left_top() + Vec2::new(8.0, 8.0);
         let visibility_rect = Rect::from_min_size(controls_origin, control_size);
-        let record_rect = Rect::from_min_size(
+        let wireframe_rect = Rect::from_min_size(
             visibility_rect.left_bottom() + Vec2::new(0.0, control_gap),
+            control_size,
+        );
+        let record_rect = Rect::from_min_size(
+            wireframe_rect.left_bottom() + Vec2::new(0.0, control_gap),
             control_size,
         );
         let replay_rect = Rect::from_min_size(
@@ -852,13 +856,31 @@ impl EditorWorkspace {
         self.draw_play_overlay_visibility_menu(ui, visibility_rect);
         if draw_play_overlay_icon_button(
             ui,
+            wireframe_rect,
+            "play_wireframe_toggle",
+            icons::GRID,
+            if viewport_3d.play_wireframe {
+                "Disable wireframe view"
+            } else {
+                "Enable wireframe view (polygon edges only)"
+            },
+            viewport_3d.play_wireframe,
+            true,
+            Some(STUDIO_ACCENT_DIM),
+        ) {
+            self.pending_playtest_request = Some(EditorPlaytestRequest::SetWireframe {
+                enabled: !viewport_3d.play_wireframe,
+            });
+        }
+        if draw_play_overlay_icon_button(
+            ui,
             record_rect,
             "play_input_record_toggle",
             icons::CIRCLE_DOT,
             if recording {
-                "Stop recording input"
+                "Stop and save input plus whole-run profile"
             } else {
-                "Record embedded play input"
+                "Record embedded play input plus whole-run profile"
             },
             recording,
             can_record,
@@ -882,7 +904,7 @@ impl EditorWorkspace {
             if replaying {
                 "Stop replaying input"
             } else {
-                "Replay saved input"
+                "Replay saved input and capture a deterministic profile"
             },
             replaying,
             can_replay,

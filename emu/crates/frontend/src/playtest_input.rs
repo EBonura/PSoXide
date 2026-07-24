@@ -70,6 +70,11 @@ impl PlaytestInputTape {
         self.mode == PlaytestInputMode::Recording
     }
 
+    /// True while saved input is replacing live port-1 samples.
+    pub(crate) fn is_replaying(&self) -> bool {
+        self.mode == PlaytestInputMode::Replaying
+    }
+
     /// Number of video-frame samples currently retained.
     pub(crate) fn frame_count(&self) -> usize {
         self.samples.len()

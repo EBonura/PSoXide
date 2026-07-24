@@ -21,7 +21,8 @@ use crate::render3d::TexturedGouraudSubmitMicroProfile;
 use crate::{
     render3d::{
         project_world_vertex_indices_gte, project_world_vertices_gte, CullMode, DepthPolicy,
-        LoadedWorldCameraGte, PreparedTriangleDepth, ProjectedVertex, ViewVertex,
+        LoadedWorldCameraGte, PreparedTriangleDepth, ProjectedVertex,
+        TombRaiderSubdivisionKindMask, TombRaiderSubdivisionProfile, ViewVertex,
     },
     PrimitiveSink, RoomPoint, RoomRender, RoomSurfaceSink, WorldCamera, WorldRenderPass,
     WorldSurfaceOptions, WorldVertex,
@@ -34,7 +35,10 @@ mod room_draw;
 pub use cache_build::cache_room_vertex_lit_surfaces;
 use indexed_cache::{cached_surface_center, RoomSurfaceMicroProfile};
 #[cfg(test)]
-use indexed_cache::{cached_surface_uses_triangle_depth, encoded_warmed_room_quad_backface_culled};
+use indexed_cache::{
+    cached_surface_uses_triangle_depth, encoded_warmed_room_quad_backface_culled,
+    tomb_raider_warmed_quad_requires_dynamic_submit,
+};
 pub use indexed_cache::{
     draw_indexed_cached_room_vertex_lit_all_cells,
     draw_indexed_cached_room_vertex_lit_visible_cells, prewarm_indexed_cached_room_quads,
