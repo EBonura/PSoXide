@@ -551,10 +551,16 @@ pub enum TextureDepth {
 /// controller clocks bits 23..=0 of the 32-bit tag as the next-
 /// node address and bits 31..=24 as that packet's data-word count.
 pub fn submit_linked_list_async(head: *const u32) {
-    draw_sync();
-    // Make sure the GPU's DMA direction is CPU→GP0 before we kick
-    // off the walker. `gpu::init` sets this, but games occasionally
-    // re-route DMA for VRAM readback and forget to reset it.
+    // A completed DMA walk does not imply that the GPU has finished
+    // rasterising the commands it consumed. Do not call `draw_sync()` here:
+    // channel 2's request handshake can queue the next list behind that work,
+    // which is how PsyQ/PSn00bSDK keep the GPU fed. Only the DMA channel and
+    // the list's backing storage must be free before starting another walk.
+    while dma::is_busy(Channel::Gpu) {}
+
+    // Make sure the GPU's DMA direction is CPU→GP0 before we kick off the
+    // walker. `gpu::init` sets this, but games occasionally re-route DMA for
+    // VRAM readback and forget to reset it.
     write_gp1(gp1::dma_direction(2));
     dma::enable_channel(Channel::Gpu);
     dma::set_madr(Channel::Gpu, head as u32);

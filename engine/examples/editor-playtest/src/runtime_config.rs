@@ -437,8 +437,11 @@ pub(super) const MAX_MODEL_INSTANCES: usize = 16;
 pub(super) const MAX_CYLINDER_PROP_BLOCKERS: usize = 32;
 /// Shared fixed collision buffer for actor/model and CylinderProp blockers.
 pub(super) const MAX_COLLISION_CYLINDERS: usize = MAX_MODEL_INSTANCES + MAX_CYLINDER_PROP_BLOCKERS;
-/// Cap on static boxed prop collision blockers per frame.
-pub(super) const MAX_BOX_PROP_BLOCKERS: usize = 32;
+/// Shared cap for BoxProp blockers and per-segment ArchProp blockers.
+///
+/// A maximum-detail full arch contributes 14 entries, while the default
+/// contributes 8. The fixed cap keeps stack/RAM cost explicit on PS1.
+pub(super) const MAX_STATIC_PROP_AABB_BLOCKERS: usize = psx_level::MAX_STATIC_PROP_AABB_BLOCKERS;
 /// Fixed authored box-prop state budget. Props beyond this still render
 /// as static props, but cannot be toggled broken in this no-heap runtime.
 pub(super) const MAX_BOX_PROP_STATE: usize = 128;
