@@ -95,7 +95,7 @@ pub(crate) fn node_transform_inspector(kind: &NodeKind) -> NodeTransformInspecto
         | NodeKind::ImageProp { .. }
         | NodeKind::BoxProp { .. }
         | NodeKind::CylinderProp { .. } => NodeTransformInspector::PositionFullRotation,
-        NodeKind::ArchProp { .. } => NodeTransformInspector::Hidden,
+        NodeKind::ArchProp { .. } => NodeTransformInspector::PositionFullRotation,
         NodeKind::Node3D => NodeTransformInspector::FullTransform,
     }
 }
@@ -1388,6 +1388,13 @@ pub(crate) fn node_gizmo_translation(
         | NodeKind::CylinderProp { .. } => {
             node_transform_component_from_world_units(HEIGHT_QUANTUM, sector_size)
         }
+        NodeKind::ArchProp { .. } => {
+            if direction[1].abs() > 0.5 {
+                node_transform_component_from_world_units(HEIGHT_QUANTUM, sector_size)
+            } else {
+                1.0
+            }
+        }
         _ => 1.0,
     };
     let axis_aligned = direction.iter().filter(|c| c.abs() > 1e-4).count() <= 1;
@@ -1405,7 +1412,8 @@ pub(crate) fn node_gizmo_translation(
                 | NodeKind::ParticleEmitter { .. }
                 | NodeKind::ImageProp { .. }
                 | NodeKind::BoxProp { .. }
-                | NodeKind::CylinderProp { .. } => {
+                | NodeKind::CylinderProp { .. }
+                | NodeKind::ArchProp { .. } => {
                     translation[index] = snap_node_transform_component_to_world_step(
                         translation[index],
                         sector_size,
@@ -1437,7 +1445,8 @@ pub(crate) fn node_gizmo_plane_translation(
         | NodeKind::PointLight { .. }
         | NodeKind::ParticleEmitter { .. }
         | NodeKind::ImageProp { .. }
-        | NodeKind::BoxProp { .. } => {
+        | NodeKind::BoxProp { .. }
+        | NodeKind::ArchProp { .. } => {
             for axis in plane.axes() {
                 let index = axis.index();
                 if delta_world[index].abs() > f32::EPSILON {
@@ -1592,6 +1601,7 @@ pub(crate) fn node_rotation_axes(kind: &NodeKind) -> &'static [PrimitiveGizmoAxi
             PrimitiveGizmoAxis::Y,
             PrimitiveGizmoAxis::Z,
         ],
+        NodeKind::ArchProp { .. } => &[PrimitiveGizmoAxis::Y],
         _ => &[PrimitiveGizmoAxis::Y],
     }
 }
@@ -1601,6 +1611,7 @@ pub(crate) fn apply_node_gizmo_scale(
     start_image_prop_size: Option<[u16; 2]>,
     start_box_prop_vertices: Option<[[i16; 3]; psxed_project::BOX_PROP_VERTEX_COUNT]>,
     start_cylinder_prop_geometry: Option<psxed_project::CylinderPropGeometry>,
+    start_arch_prop_geometry: Option<psxed_project::ArchPropGeometry>,
     axis: PrimitiveGizmoAxis,
     steps: i32,
 ) {
@@ -1641,6 +1652,31 @@ pub(crate) fn apply_node_gizmo_scale(
                 PrimitiveGizmoAxis::X => geometry.radius[0] = resize(start.radius[0]),
                 PrimitiveGizmoAxis::Y => geometry.height = resize(start.height),
                 PrimitiveGizmoAxis::Z => geometry.radius[1] = resize(start.radius[1]),
+            }
+        }
+        NodeKind::ArchProp { geometry, .. } => {
+            let Some(start) = start_arch_prop_geometry else {
+                return;
+            };
+            *geometry = start;
+            match axis {
+                PrimitiveGizmoAxis::X => {
+                    geometry.span_tiles = (i32::from(start.span_tiles) + steps).clamp(
+                        i32::from(psxed_project::ARCH_PROP_MIN_TILES),
+                        i32::from(psxed_project::ARCH_PROP_MAX_TILES),
+                    ) as u8;
+                }
+                PrimitiveGizmoAxis::Y => {
+                    geometry.rise_quanta = (i32::from(start.rise_quanta) + steps)
+                        .clamp(1, i32::from(psxed_project::ARCH_PROP_MAX_HEIGHT_QUANTA))
+                        as u16;
+                }
+                PrimitiveGizmoAxis::Z => {
+                    geometry.depth_tiles = (i32::from(start.depth_tiles) + steps).clamp(
+                        i32::from(psxed_project::ARCH_PROP_MIN_TILES),
+                        i32::from(psxed_project::ARCH_PROP_MAX_TILES),
+                    ) as u8;
+                }
             }
         }
         _ => {}
@@ -1737,6 +1773,7 @@ pub(crate) fn node_kind_supports_transform_gizmo(
                 | NodeKind::ImageProp { .. }
                 | NodeKind::BoxProp { .. }
                 | NodeKind::CylinderProp { .. }
+                | NodeKind::ArchProp { .. }
                 | NodeKind::MeshInstance { .. }
                 | NodeKind::SpawnPoint { .. }
                 | NodeKind::Portal { .. }
@@ -1747,6 +1784,7 @@ pub(crate) fn node_kind_supports_transform_gizmo(
                 | NodeKind::ImageProp { .. }
                 | NodeKind::BoxProp { .. }
                 | NodeKind::CylinderProp { .. }
+                | NodeKind::ArchProp { .. }
                 | NodeKind::MeshInstance { .. }
                 | NodeKind::SpawnPoint { .. }
                 | NodeKind::Portal { .. }
@@ -1757,6 +1795,7 @@ pub(crate) fn node_kind_supports_transform_gizmo(
                 NodeKind::ImageProp { .. }
                     | NodeKind::BoxProp { .. }
                     | NodeKind::CylinderProp { .. }
+                    | NodeKind::ArchProp { .. }
             )
         }
     }
@@ -3117,8 +3156,16 @@ pub(crate) fn draw_node_kind_editor(
                         .color(STUDIO_TEXT_WEAK)
                         .italics(),
                 );
+                changed |= ui
+                    .checkbox(&mut geometry.filled_top, "Filled top")
+                    .changed();
                 changed |= ui.checkbox(collision_enabled, "Collision").changed();
             });
+            if geometry.filled_top {
+                ui.weak(
+                    "Filled top closes the spandrel up to a flat crown-height surface, ready to meet flat tiles.",
+                );
+            }
             if *collision_enabled {
                 ui.weak(
                     "Collision is approximated by bounded segment boxes; the opening remains passable.",

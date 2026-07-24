@@ -1193,6 +1193,7 @@ struct NodeGizmoTarget {
     start_image_prop_size: Option<[u16; 2]>,
     start_box_prop_vertices: Option<[[i16; 3]; psxed_project::BOX_PROP_VERTEX_COUNT]>,
     start_cylinder_prop_geometry: Option<psxed_project::CylinderPropGeometry>,
+    start_arch_prop_geometry: Option<psxed_project::ArchPropGeometry>,
     sector_size: i32,
 }
 
