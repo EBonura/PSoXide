@@ -2400,6 +2400,7 @@ impl AppState {
     /// authored 3D preview.
     pub fn stop_embedded_playtest(&mut self) {
         let tape_path = self.editor_playtest_input_tape_path();
+        #[cfg(not(target_arch = "wasm32"))]
         let capture_phase = if self.playtest_input_tape.is_recording() {
             Some("record")
         } else if self.playtest_input_tape.is_replaying() {
@@ -2407,10 +2408,19 @@ impl AppState {
         } else {
             None
         };
-        if let Err(error) = self.playtest_input_tape.stop_active(&tape_path) {
+        let stop_result = if self.playtest_input_tape.is_recording() {
+            self.finish_input_recording(&tape_path).map(Some)
+        } else {
+            self.playtest_input_tape.stop_replay();
+            Ok(None)
+        };
+        if let Err(error) = stop_result {
             eprintln!("[frontend] stop input tape: {error}");
-        } else if let Some(phase) = capture_phase {
-            self.queue_input_profile_capture(&tape_path, phase);
+        } else {
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(phase) = capture_phase {
+                self.queue_input_profile_capture(&tape_path, phase);
+            }
         }
         if let Some(mut child) = self.embedded_playtest.take_build_child() {
             let _ = child.kill();
@@ -2473,6 +2483,7 @@ impl AppState {
             return;
         }
         self.playtest_input_tape.start_recording();
+        #[cfg(not(target_arch = "wasm32"))]
         self.begin_input_profile_capture();
         let _ = self.embedded_playtest.capture_input();
         self.running = true;
@@ -2485,10 +2496,14 @@ impl AppState {
 
     fn stop_embedded_playtest_input_recording(&mut self) {
         let path = self.editor_playtest_input_tape_path();
-        let result = self.playtest_input_tape.stop_recording(&path);
+        let result = self.finish_input_recording(&path);
+        #[cfg(not(target_arch = "wasm32"))]
         self.queue_input_profile_capture(&path, "record");
         match result {
             Ok(frames) => {
+                #[cfg(target_arch = "wasm32")]
+                let message = format!("Input recording downloaded: {frames} frames (CSV)");
+                #[cfg(not(target_arch = "wasm32"))]
                 let message = format!("Input recording saved: {frames} frames");
                 self.editor.set_status(message.clone());
                 self.status_message_set(message);
@@ -2515,6 +2530,7 @@ impl AppState {
         let path = self.editor_playtest_input_tape_path();
         match self.playtest_input_tape.start_replay(&path) {
             Ok(frames) => {
+                #[cfg(not(target_arch = "wasm32"))]
                 self.begin_input_profile_capture();
                 let _ = self.embedded_playtest.capture_input();
                 self.running = true;
@@ -2533,8 +2549,10 @@ impl AppState {
     }
 
     fn stop_embedded_playtest_input_replay(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
         let path = self.editor_playtest_input_tape_path();
         self.playtest_input_tape.stop_replay();
+        #[cfg(not(target_arch = "wasm32"))]
         self.queue_input_profile_capture(&path, "replay");
         let message = "Input replay stopped";
         self.editor.set_status(message);
@@ -2709,6 +2727,29 @@ impl AppState {
         self.profiler.begin_capture();
     }
 
+    fn finish_input_recording(&mut self, path: &Path) -> Result<usize, String> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.playtest_input_tape.stop_recording(path)
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let (frames, csv) = self.playtest_input_tape.stop_recording_csv();
+            let default_stem = path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .filter(|stem| !stem.is_empty() && *stem != "latest")
+                .unwrap_or("input");
+            let filename_stem = self
+                .current_game
+                .as_ref()
+                .map(|game| format!("psoxide-input-{}", game.id))
+                .unwrap_or_else(|| format!("psoxide-input-{default_stem}"));
+            crate::web_files::download_input_csv(&filename_stem, &csv)?;
+            Ok(frames)
+        }
+    }
+
     fn queue_input_profile_capture(&mut self, tape_path: &Path, phase: &'static str) {
         if self.profiler.capture_active() {
             self.pending_input_profile_capture = Some(PendingInputProfileCapture {
@@ -2767,6 +2808,7 @@ impl AppState {
     pub fn input_sample_for_frame(&mut self, live_sample: Port1PadSample) -> Port1PadSample {
         let (sample, event) = self.playtest_input_tape.sample_for_frame(live_sample);
         if let Some(PlaytestInputEvent::ReplayFinished { frames }) = event {
+            #[cfg(not(target_arch = "wasm32"))]
             if let Ok(tape_path) = self.active_input_tape_path() {
                 self.queue_input_profile_capture(&tape_path, "replay");
             }
@@ -2801,6 +2843,9 @@ impl AppState {
                 return;
             }
         };
+        #[cfg(target_arch = "wasm32")]
+        let _ = &path;
+        #[cfg(not(target_arch = "wasm32"))]
         if let Some(parent) = path.parent() {
             if let Err(error) = self.paths.ensure_dir(parent) {
                 self.status_message_set(format!("Input recording unavailable: {error}"));
@@ -2808,11 +2853,15 @@ impl AppState {
             }
         }
         self.playtest_input_tape.start_recording();
+        #[cfg(not(target_arch = "wasm32"))]
         self.begin_input_profile_capture();
         self.running = true;
         self.menu.open = false;
         self.menu.sync_run_label(true);
         self.menu.sync_input_recording_label(true);
+        #[cfg(target_arch = "wasm32")]
+        self.status_message_set("Input recording started (F8 to download CSV)");
+        #[cfg(not(target_arch = "wasm32"))]
         self.status_message_set(format!(
             "Input recording started (F8 to stop): {}",
             path.display()
@@ -2832,11 +2881,17 @@ impl AppState {
                 return;
             }
         };
-        let result = self.playtest_input_tape.stop_recording(&path);
+        let result = self.finish_input_recording(&path);
+        #[cfg(not(target_arch = "wasm32"))]
         self.queue_input_profile_capture(&path, "record");
+        self.menu.sync_input_recording_label(false);
         match result {
             Ok(frames) => {
-                self.menu.sync_input_recording_label(false);
+                #[cfg(target_arch = "wasm32")]
+                self.status_message_set(format!(
+                    "Input recording downloaded: {frames} frames (CSV)"
+                ));
+                #[cfg(not(target_arch = "wasm32"))]
                 self.status_message_set(format!(
                     "Input recording saved: {frames} frames → {}",
                     path.display()
