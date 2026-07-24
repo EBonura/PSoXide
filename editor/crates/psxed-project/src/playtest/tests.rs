@@ -1,8 +1,7 @@
 use super::*;
 use crate::tests::unique_temp_dir;
 use crate::{
-    ArchPropGeometry, GridUvTransform, NodeKind, ProjectDocument, UiRect,
-    ARCH_PROP_MATERIAL_COUNT,
+    ArchPropGeometry, GridUvTransform, NodeKind, ProjectDocument, UiRect, ARCH_PROP_MATERIAL_COUNT,
 };
 
 fn starter_project_root() -> PathBuf {
@@ -55,7 +54,10 @@ fn tile_arch_cooks_surfaces_materials_and_segmented_collision() {
         NodeKind::ArchProp {
             materials: [Some(material); ARCH_PROP_MATERIAL_COUNT],
             uvs: [GridUvTransform::IDENTITY; ARCH_PROP_MATERIAL_COUNT],
-            geometry: ArchPropGeometry::default(),
+            geometry: ArchPropGeometry {
+                filled_top: true,
+                ..ArchPropGeometry::default()
+            },
             collision_enabled: true,
         },
     );
@@ -70,9 +72,9 @@ fn tile_arch_cooks_surfaces_materials_and_segmented_collision() {
     assert!(report.is_ok(), "{report:?}");
     let package = package.expect("arch project cooks");
     assert_eq!(package.arch_props.len(), 1);
-    assert_eq!(package.arch_prop_surfaces.len(), 34);
+    assert_eq!(package.arch_prop_surfaces.len(), 43);
     assert_eq!(package.arch_prop_collisions.len(), 8);
-    assert_eq!(package.arch_props[0].surface_count, 34);
+    assert_eq!(package.arch_props[0].surface_count, 43);
     assert_eq!(package.arch_props[0].collision_count, 8);
     let manifest = render_manifest_source(&package);
     assert!(manifest.contains("pub static ARCH_PROPS: &[LevelArchPropRecord]"));
