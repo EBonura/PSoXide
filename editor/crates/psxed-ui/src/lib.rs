@@ -2036,6 +2036,8 @@ enum PlaceKind {
     BoxProp,
     /// Low-poly procedural radial prop.
     CylinderProp,
+    /// Tile-snapped procedural arch or half-arch.
+    ArchProp,
     /// `PointLight` with default color / intensity / radius.
     PointLightMarker,
     /// Fixed-budget point-projected sprite particle emitter.
@@ -2049,7 +2051,7 @@ enum PlaceKind {
 }
 
 impl PlaceKind {
-    const ALL: [Self; 11] = [
+    const ALL: [Self; 12] = [
         Self::PlayerSpawn,
         Self::SpawnMarker,
         Self::ModelInstance,
@@ -2057,6 +2059,7 @@ impl PlaceKind {
         Self::ImageProp,
         Self::BoxProp,
         Self::CylinderProp,
+        Self::ArchProp,
         Self::PointLightMarker,
         Self::ParticleEmitter,
         Self::Portal,
@@ -2072,6 +2075,7 @@ impl PlaceKind {
             Self::ImageProp => "Image Prop",
             Self::BoxProp => "Box Prop",
             Self::CylinderProp => "Cylinder Prop",
+            Self::ArchProp => "Arch Prop",
             Self::PointLightMarker => "Point Light",
             Self::ParticleEmitter => "Particle Emitter",
             Self::Portal => "Portal",
@@ -2087,6 +2091,7 @@ impl PlaceKind {
             Self::ImageProp => icons::PALETTE,
             Self::BoxProp => icons::BOX,
             Self::CylinderProp => icons::CIRCLE_DOT,
+            Self::ArchProp => icons::WAYPOINT,
             Self::PointLightMarker => icons::SUN,
             Self::ParticleEmitter => icons::FOCUS,
             Self::Portal => icons::WAYPOINT,

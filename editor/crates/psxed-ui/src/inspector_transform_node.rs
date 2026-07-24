@@ -29,6 +29,9 @@ pub(crate) fn draw_transform_policy_editor(
             nav_target,
             world_sector_size_change,
         ),
+        NodeKind::ArchProp { geometry, .. } => {
+            arch_prop_transform_editor(ui, &mut node.transform, inherited_sector_size, *geometry)
+        }
         _ => match node_transform_inspector(&node.kind) {
             NodeTransformInspector::Hidden => false,
             NodeTransformInspector::RoomGrid => {
@@ -92,6 +95,7 @@ pub(crate) fn node_transform_inspector(kind: &NodeKind) -> NodeTransformInspecto
         | NodeKind::ImageProp { .. }
         | NodeKind::BoxProp { .. }
         | NodeKind::CylinderProp { .. } => NodeTransformInspector::PositionFullRotation,
+        NodeKind::ArchProp { .. } => NodeTransformInspector::Hidden,
         NodeKind::Node3D => NodeTransformInspector::FullTransform,
     }
 }
@@ -1191,6 +1195,119 @@ pub(crate) fn entity_transform_editor(
     {
         transform.rotation_degrees[0] = 0.0;
         transform.rotation_degrees[2] = 0.0;
+        changed = true;
+    }
+    if transform.scale != [1.0, 1.0, 1.0] {
+        transform.scale = [1.0, 1.0, 1.0];
+        changed = true;
+    }
+    changed
+}
+
+pub(crate) fn arch_prop_transform_editor(
+    ui: &mut egui::Ui,
+    transform: &mut psxed_project::Transform3,
+    sector_size: i32,
+    geometry: psxed_project::ArchPropGeometry,
+) -> bool {
+    let mut changed = false;
+    let sector_size = sector_size.max(1);
+    inspector_property_row(ui, icons::label(icons::MOVE, "Grid anchor"), |ui| {
+        ui.horizontal_wrapped(|ui| {
+            let mut x =
+                node_transform_component_to_world_units(transform.translation[0], sector_size);
+            let mut y =
+                node_transform_component_to_world_units(transform.translation[1], sector_size);
+            let mut z =
+                node_transform_component_to_world_units(transform.translation[2], sector_size);
+            let position_changed = ui
+                .add(
+                    egui::DragValue::new(&mut x)
+                        .prefix("X ")
+                        .speed(sector_size as f64 * 0.5),
+                )
+                .changed()
+                | ui.add(
+                    egui::DragValue::new(&mut y)
+                        .prefix("Y ")
+                        .speed(HEIGHT_QUANTUM as f64),
+                )
+                .changed()
+                | ui.add(
+                    egui::DragValue::new(&mut z)
+                        .prefix("Z ")
+                        .speed(sector_size as f64 * 0.5),
+                )
+                .changed();
+            if position_changed {
+                transform.translation = [
+                    node_transform_component_from_world_units(x, sector_size),
+                    node_transform_component_from_world_units(snap_height(y), sector_size),
+                    node_transform_component_from_world_units(z, sector_size),
+                ];
+                changed = true;
+            }
+        });
+    });
+
+    inspector_property_row(ui, icons::label(icons::ROTATE_3D, "Direction"), |ui| {
+        ui.horizontal_wrapped(|ui| {
+            let mut yaw = cardinal_yaw(transform.rotation_degrees[1]);
+            for candidate in [0, 90, 180, 270] {
+                if ui
+                    .selectable_value(&mut yaw, candidate, format!("{candidate}°"))
+                    .changed()
+                {
+                    transform.rotation_degrees = [0.0, yaw as f32, 0.0];
+                    changed = true;
+                }
+            }
+        });
+    });
+
+    changed |= snap_arch_prop_transform(transform, geometry, sector_size);
+    changed
+}
+
+/// Enforce the ArchProp grid contract after placement, inspector edits, load,
+/// or gizmo movement. Odd tile counts centre on a cell; even counts centre on
+/// a grid line, so every outer footprint edge lands exactly on room geometry.
+pub(crate) fn snap_arch_prop_transform(
+    transform: &mut psxed_project::Transform3,
+    geometry: psxed_project::ArchPropGeometry,
+    sector_size: i32,
+) -> bool {
+    let sector_size = sector_size.max(1);
+    let yaw = cardinal_yaw(transform.rotation_degrees[1]);
+    let swapped = yaw == 90 || yaw == 270;
+    let (tiles_x, tiles_z) = if swapped {
+        (geometry.depth_tiles, geometry.span_tiles)
+    } else {
+        (geometry.span_tiles, geometry.depth_tiles)
+    };
+    let snap_axis = |value: f32, tiles: u8| {
+        let offset = if tiles.max(1) & 1 == 0 { 0.0 } else { 0.5 };
+        (value - offset).round() + offset
+    };
+    let next = [
+        snap_axis(transform.translation[0], tiles_x),
+        node_transform_component_from_world_units(
+            snap_height(node_transform_component_to_world_units(
+                transform.translation[1],
+                sector_size,
+            )),
+            sector_size,
+        ),
+        snap_axis(transform.translation[2], tiles_z),
+    ];
+    let next_rotation = [0.0, yaw as f32, 0.0];
+    let mut changed = false;
+    if transform.translation != next {
+        transform.translation = next;
+        changed = true;
+    }
+    if transform.rotation_degrees != next_rotation {
+        transform.rotation_degrees = next_rotation;
         changed = true;
     }
     if transform.scale != [1.0, 1.0, 1.0] {
@@ -2909,6 +3026,191 @@ pub(crate) fn draw_node_kind_editor(
                 "{} generated surfaces · {} render triangles",
                 surfaces.len(),
                 triangles
+            ));
+        }
+        NodeKind::ArchProp {
+            materials,
+            uvs,
+            geometry,
+            collision_enabled,
+        } => {
+            ui.weak(
+                "Tile-native extruded arch. The footprint snaps to room grid lines; vertical controls use the same 64-unit quantum as room geometry.",
+            );
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new("Portion").color(STUDIO_TEXT_WEAK));
+                for candidate in [
+                    psxed_project::ArchPortion::Full,
+                    psxed_project::ArchPortion::LeftHalf,
+                    psxed_project::ArchPortion::RightHalf,
+                ] {
+                    changed |= ui
+                        .selectable_value(&mut geometry.portion, candidate, candidate.label())
+                        .changed();
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label("Span");
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut geometry.span_tiles)
+                            .range(
+                                psxed_project::ARCH_PROP_MIN_TILES
+                                    ..=psxed_project::ARCH_PROP_MAX_TILES,
+                            )
+                            .suffix(" tiles"),
+                    )
+                    .changed();
+                ui.label("Depth");
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut geometry.depth_tiles)
+                            .range(
+                                psxed_project::ARCH_PROP_MIN_TILES
+                                    ..=psxed_project::ARCH_PROP_MAX_TILES,
+                            )
+                            .suffix(" tiles"),
+                    )
+                    .changed();
+            });
+            ui.horizontal(|ui| {
+                ui.label("Rise");
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut geometry.rise_quanta)
+                            .range(1..=psxed_project::ARCH_PROP_MAX_HEIGHT_QUANTA)
+                            .suffix(" ×64"),
+                    )
+                    .changed();
+                ui.label("Legs");
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut geometry.leg_height_quanta)
+                            .range(0..=psxed_project::ARCH_PROP_MAX_HEIGHT_QUANTA)
+                            .suffix(" ×64"),
+                    )
+                    .changed();
+            });
+            ui.horizontal(|ui| {
+                ui.label("Band");
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut geometry.band_thickness_quanta)
+                            .range(1..=psxed_project::ARCH_PROP_MAX_HEIGHT_QUANTA)
+                            .suffix(" ×64"),
+                    )
+                    .changed();
+                ui.label("Detail");
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut geometry.segments_per_quadrant).range(
+                            psxed_project::ARCH_PROP_MIN_SEGMENTS_PER_QUADRANT
+                                ..=psxed_project::ARCH_PROP_MAX_SEGMENTS_PER_QUADRANT,
+                        ),
+                    )
+                    .changed();
+            });
+            ui.horizontal(|ui| {
+                ui.label("Curve");
+                ui.label(
+                    RichText::new(geometry.curve.label())
+                        .color(STUDIO_TEXT_WEAK)
+                        .italics(),
+                );
+                changed |= ui.checkbox(collision_enabled, "Collision").changed();
+            });
+            if *collision_enabled {
+                ui.weak(
+                    "Collision is approximated by bounded segment boxes; the opening remains passable.",
+                );
+            }
+            ui.weak(format!(
+                "{}×{} sectors · {} units total height",
+                geometry.span_tiles,
+                geometry.depth_tiles,
+                u32::from(
+                    geometry
+                        .rise_quanta
+                        .saturating_add(geometry.leg_height_quanta)
+                ) * psxed_project::HEIGHT_QUANTUM as u32
+            ));
+            ui.colored_label(
+                Color32::from_rgb(180, 150, 90),
+                "Arch props do not carve room walls; place them in an authored open span.",
+            );
+
+            ui.separator();
+            ui.label(RichText::new("Materials / UV").color(STUDIO_TEXT_WEAK));
+            for (slot, name) in psxed_project::ARCH_PROP_MATERIAL_NAMES.iter().enumerate() {
+                egui::CollapsingHeader::new(*name)
+                    .id_salt(("arch-prop-material", slot))
+                    .default_open(slot == 0)
+                    .show(ui, |ui| {
+                        changed |= material_picker(
+                            ui,
+                            "Material",
+                            &mut materials[slot],
+                            material_options,
+                            nav_target,
+                        );
+                        let texture_size = materials[slot].and_then(|material| {
+                            material_texture_dimensions
+                                .iter()
+                                .find_map(|(id, size)| (*id == material).then_some(*size))
+                        });
+                        ui.horizontal(|ui| {
+                            if ui
+                                .add_enabled(
+                                    texture_size.is_some(),
+                                    egui::Button::new("1:1 Texels"),
+                                )
+                                .clicked()
+                            {
+                                let texture = texture_size.unwrap_or([1, 1]);
+                                let sector = inherited_sector_size.max(1) as f32;
+                                let total_height = f32::from(
+                                    geometry
+                                        .rise_quanta
+                                        .saturating_add(geometry.leg_height_quanta),
+                                ) * psxed_project::HEIGHT_QUANTUM as f32;
+                                let span = f32::from(geometry.span_tiles.max(1)) * sector;
+                                let depth = f32::from(geometry.depth_tiles.max(1)) * sector;
+                                let band = f32::from(geometry.band_thickness_quanta.max(1))
+                                    * psxed_project::HEIGHT_QUANTUM as f32;
+                                let (world_u, world_v) = match slot as u8 {
+                                    psxed_project::ARCH_PROP_MATERIAL_FASCIA => {
+                                        (span, total_height)
+                                    }
+                                    psxed_project::ARCH_PROP_MATERIAL_SOFFIT
+                                    | psxed_project::ARCH_PROP_MATERIAL_EXTRADOS => (span, depth),
+                                    _ => (band, depth),
+                                };
+                                uvs[slot].span = [
+                                    ((world_u / sector) * f32::from(texture[0]))
+                                        .round()
+                                        .clamp(1.0, 255.0)
+                                        as u16,
+                                    ((world_v / sector) * f32::from(texture[1]))
+                                        .round()
+                                        .clamp(1.0, 255.0)
+                                        as u16,
+                                ];
+                                changed = true;
+                            }
+                            if ui.small_button("Fit once").clicked() {
+                                uvs[slot].span = [0, 0];
+                                changed = true;
+                            }
+                        });
+                        changed |= uv_transform_controls(&mut uvs[slot], ui).changed();
+                    });
+            }
+            let surfaces =
+                psxed_project::generate_arch_prop_surfaces(*geometry, inherited_sector_size);
+            ui.weak(format!(
+                "{} generated quads · {} render triangles",
+                surfaces.len(),
+                surfaces.len() * 2
             ));
         }
         NodeKind::ModelRenderer {
