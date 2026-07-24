@@ -56,7 +56,7 @@ impl Playtest {
 
     pub(super) fn collect_box_prop_collision_blockers(
         &self,
-        out: &mut [CharacterCollisionAabb; MAX_BOX_PROP_BLOCKERS],
+        out: &mut [CharacterCollisionAabb],
     ) -> usize {
         self.box_props
             .collect_collision_blockers(BOX_PROPS, self.room_index, out)
@@ -81,6 +81,7 @@ pub(super) fn box_prop_profile_end(stage_id: u16) {
 /// policy.
 pub(super) fn draw_box_props<T>(
     props: &[LevelBoxPropRecord],
+    generated_surfaces: &[psx_level::LevelBoxPropSurfaceRecord],
     state: &RuntimeBoxProps,
     current_room: RoomIndex,
     camera: &WorldCamera,
@@ -95,6 +96,7 @@ pub(super) fn draw_box_props<T>(
 {
     psx_game_runtime::box_props::draw_box_props(
         props,
+        generated_surfaces,
         state,
         current_room,
         camera,

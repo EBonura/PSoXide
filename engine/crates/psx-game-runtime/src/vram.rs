@@ -25,8 +25,9 @@ use psx_font::{upload_fonts, BitmapFont, FontAtlas};
 use psx_gpu::material::{BlendMode, TextureMaterial, TextureWindow};
 #[cfg(feature = "cd-stream-bench")]
 use psx_level::{
-    asset_flags, LevelBoxPropRecord, LevelImagePropRecord, LevelUiNodeKind, LevelUiNodeRecord,
-    LevelUiScene, LevelWorldPackEntryRecord, BOX_PROP_FACE_COUNT, UI_SCENE_NONE,
+    asset_flags, LevelBoxPropRecord, LevelCylinderPropRecord, LevelImagePropRecord,
+    LevelUiNodeKind, LevelUiNodeRecord, LevelUiScene, LevelWorldPackEntryRecord,
+    BOX_PROP_FACE_COUNT, UI_SCENE_NONE,
 };
 use psx_level::{
     find_asset_of_kind, sky_flags, AssetId, AssetKind, LevelAssetRecord, LevelRoomRecord,
@@ -1303,7 +1304,8 @@ impl<
         self.ensure_texture_uploaded_with_clut_mode(layout, asset.id, asset.bytes, clut_mode)
     }
 
-    /// True once every image/box prop texture of `room` is VRAM-resident.
+    /// True once every image, box, and cylinder prop texture of `room` is
+    /// VRAM-resident.
     #[cfg(feature = "cd-stream-bench")]
     pub fn room_prop_textures_ready(
         &mut self,
@@ -1311,6 +1313,7 @@ impl<
         assets: &'static [LevelAssetRecord],
         image_props: &'static [LevelImagePropRecord],
         box_props: &'static [LevelBoxPropRecord],
+        cylinder_props: &'static [LevelCylinderPropRecord],
         room: RoomIndex,
     ) -> bool {
         let mut ready = true;
@@ -1340,6 +1343,20 @@ impl<
                     }
                 }
                 face += 1;
+            }
+        }
+
+        for prop in cylinder_props {
+            if prop.room != room {
+                continue;
+            }
+            for texture_asset in prop.texture_assets.iter().flatten() {
+                if self
+                    .prop_texture_slot(layout, assets, *texture_asset)
+                    .is_none()
+                {
+                    ready = false;
+                }
             }
         }
 

@@ -4,7 +4,8 @@
 
 use psx_level::{
     EntityRecord, EquipmentRecord, FlowState, GameFlow, InteractableMessageRecord,
-    InteractableRecord, LevelAssetRecord, LevelBoxPropRecord, LevelCachedRoomCellRecord,
+    InteractableRecord, LevelAssetRecord, LevelBoxPropRecord, LevelBoxPropSurfaceRecord,
+    LevelCylinderPropRecord, LevelCylinderPropSurfaceRecord, LevelCachedRoomCellRecord,
     LevelCachedRoomSurfaceRecord, LevelCachedRoomVertexRecord, LevelCameraRecord,
     LevelCharacterRecord, LevelChunkRecord, LevelFarVistaRecord, LevelGameEntityRecord,
     LevelImagePropRecord, LevelLogicRecord, LevelMaterialRecord, LevelModelClipBoundsRecord,
@@ -65,6 +66,9 @@ pub static MODELS: &[LevelModelRecord] = &[];
 pub static MODEL_INSTANCES: &[LevelModelInstanceRecord] = &[];
 pub static IMAGE_PROPS: &[LevelImagePropRecord] = &[];
 pub static BOX_PROPS: &[LevelBoxPropRecord] = &[];
+pub static BOX_PROP_SURFACES: &[LevelBoxPropSurfaceRecord] = &[];
+pub static CYLINDER_PROPS: &[LevelCylinderPropRecord] = &[];
+pub static CYLINDER_PROP_SURFACES: &[LevelCylinderPropSurfaceRecord] = &[];
 pub static UI_FONTS: &[&psx_font::BitmapFont] = &[&psx_font::fonts::BASIC];
 pub static UI_PAINTS: &[LevelUiPaintRecord] = &[];
 pub static UI_NODES: &[LevelUiNodeRecord] = &[];

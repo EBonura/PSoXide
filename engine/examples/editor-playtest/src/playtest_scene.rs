@@ -739,6 +739,7 @@ impl Scene for Playtest {
                 box_prop_profile_begin(telemetry::stage::BOX_PROPS);
                 draw_box_props(
                     BOX_PROPS,
+                    BOX_PROP_SURFACES,
                     &self.box_props,
                     active.index,
                     &room_camera,
@@ -748,6 +749,17 @@ impl Scene for Playtest {
                     &mut world,
                 );
                 box_prop_profile_end(telemetry::stage::BOX_PROPS);
+                psx_game_runtime::cylinder_props::draw_cylinder_props(
+                    CYLINDER_PROPS,
+                    CYLINDER_PROP_SURFACES,
+                    active.index,
+                    &room_camera,
+                    actor_options,
+                    &lighting,
+                    prop_texture_slot,
+                    &mut primitive_packets,
+                    &mut world,
+                );
                 box_prop_profile_begin(telemetry::stage::BOX_PROP_DEBRIS);
                 draw_box_prop_floor_debris(
                     BOX_PROPS,
