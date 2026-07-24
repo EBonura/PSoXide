@@ -35,6 +35,8 @@ mod box_prop_erosion;
 pub use box_prop_erosion::*;
 mod cylinder_prop;
 pub use cylinder_prop::*;
+mod arch_prop;
+pub use arch_prop::*;
 mod world_types;
 pub use world_types::*;
 mod resource_types;

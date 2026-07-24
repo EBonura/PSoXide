@@ -936,6 +936,38 @@ pub struct PlaytestCylinderPropSurface {
     pub vertex_count: u8,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestArchProp {
+    pub room: u16,
+    pub texture_asset_indices: [Option<usize>; psx_level::ARCH_PROP_MATERIAL_COUNT],
+    pub blend_modes: [u8; psx_level::ARCH_PROP_MATERIAL_COUNT],
+    pub uvs: [[(u8, u8); 4]; psx_level::ARCH_PROP_MATERIAL_COUNT],
+    pub tint_rgb: [[u8; 3]; psx_level::ARCH_PROP_MATERIAL_COUNT],
+    pub surface_first: u16,
+    pub surface_count: u16,
+    pub collision_first: u16,
+    pub collision_count: u8,
+    pub center: [i32; 3],
+    pub cull_radius: i32,
+    pub flags: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestArchPropSurface {
+    pub vertices: [[i32; 3]; 4],
+    pub center: [i32; 3],
+    pub normal: [i32; 3],
+    pub uv_q8: [[u8; 2]; 4],
+    pub baked_vertex_rgb: [(u8, u8, u8); 4],
+    pub material_slot: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestArchPropCollision {
+    pub min: [i32; 3],
+    pub max: [i32; 3],
+}
+
 /// Cooked button action, ready for manifest emission. Mirrors
 /// [`psx_level::LevelUiAction`]: the authored `GotoScene(UiSceneId)`
 /// is resolved to a cooked [`PlaytestUiScene::id`] at cook time, and
@@ -1823,6 +1855,12 @@ pub struct PlaytestPackage {
     pub cylinder_props: Vec<PlaytestCylinderProp>,
     /// Generated surfaces sliced by [`Self::cylinder_props`].
     pub cylinder_prop_surfaces: Vec<PlaytestCylinderPropSurface>,
+    /// Placed tile-native arches.
+    pub arch_props: Vec<PlaytestArchProp>,
+    /// Generated quads sliced by [`Self::arch_props`].
+    pub arch_prop_surfaces: Vec<PlaytestArchPropSurface>,
+    /// Conservative curved-band collision boxes sliced by [`Self::arch_props`].
+    pub arch_prop_collisions: Vec<PlaytestArchPropCollision>,
     /// Cooked screen-space UI nodes for every scene, concatenated
     /// into one shared pool. [`Self::ui_scenes`] slices this pool.
     pub ui_nodes: Vec<PlaytestUiNode>,

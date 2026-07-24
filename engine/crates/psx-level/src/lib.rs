@@ -280,6 +280,8 @@ pub const BOX_PROP_FACE_COUNT: usize = 6;
 pub const BOX_PROP_VERTEX_COUNT: usize = 8;
 /// Side / top / bottom / fracture slots on an authored CylinderProp.
 pub const CYLINDER_PROP_MATERIAL_COUNT: usize = 4;
+/// Fascia / soffit / extrados / end-cap slots on an authored ArchProp.
+pub const ARCH_PROP_MATERIAL_COUNT: usize = 4;
 
 /// Maximum distinct materials a single room may reference.
 ///
@@ -289,6 +291,8 @@ pub const CYLINDER_PROP_MATERIAL_COUNT: usize = 4;
 /// exceeds it (otherwise surfaces on the overflow slots silently vanish at
 /// runtime). Both sides reference this single constant so they can never drift.
 pub const MAX_ROOM_MATERIALS: usize = 16;
+/// Shared fixed AABB blocker budget for BoxProps and ArchProp segments.
+pub const MAX_STATIC_PROP_AABB_BLOCKERS: usize = 64;
 
 /// Box prop record flags.
 pub mod box_prop_flags {
@@ -307,6 +311,12 @@ pub mod box_prop_flags {
 /// Cylinder prop record flags.
 pub mod cylinder_prop_flags {
     /// Prop emits one static collision blocker for the character motor.
+    pub const COLLISION_ENABLED: u16 = 1 << 0;
+}
+
+/// Arch prop record flags.
+pub mod arch_prop_flags {
+    /// Prop emits conservative per-segment AABBs for the character motor.
     pub const COLLISION_ENABLED: u16 = 1 << 0;
 }
 
@@ -2148,6 +2158,60 @@ pub struct LevelCylinderPropSurfaceRecord {
     pub material_slot: u8,
     /// `3` or `4`.
     pub vertex_count: u8,
+}
+
+/// One placed tile-native arch. Curves are expanded by the cooker, so runtime
+/// rendering only walks a compact surface slice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelArchPropRecord {
+    /// Owning room.
+    pub room: RoomIndex,
+    /// Fascia, soffit, extrados, and end-cap texture assets.
+    pub texture_assets: [Option<AssetId>; ARCH_PROP_MATERIAL_COUNT],
+    /// Per-material blend codes.
+    pub blend_modes: [u8; ARCH_PROP_MATERIAL_COUNT],
+    /// Per-material final UV rectangles.
+    pub uvs: [[(u8, u8); 4]; ARCH_PROP_MATERIAL_COUNT],
+    /// First generated quad.
+    pub surface_first: u16,
+    /// Generated quad count.
+    pub surface_count: u16,
+    /// First generated collision AABB.
+    pub collision_first: u16,
+    /// Generated collision AABB count.
+    pub collision_count: u8,
+    /// Culling-sphere center.
+    pub center: [i32; 3],
+    /// Conservative culling-sphere radius.
+    pub cull_radius: i32,
+    /// Runtime flags from [`arch_prop_flags`].
+    pub flags: u16,
+}
+
+/// One cook-generated ArchProp quad in room-local coordinates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelArchPropSurfaceRecord {
+    /// Outward-wound room-local vertices.
+    pub vertices: [[i32; 3]; 4],
+    /// Polygon center used for facing and fog.
+    pub center: [i32; 3],
+    /// Precomputed unnormalised outward normal.
+    pub normal: [i32; 3],
+    /// UVs relative to the selected material rectangle.
+    pub uv_q8: [[u8; 2]; 4],
+    /// Per-vertex baked static lighting.
+    pub baked_vertex_rgb: [(u8, u8, u8); 4],
+    /// Fascia, soffit, extrados, or end-cap slot.
+    pub material_slot: u8,
+}
+
+/// Conservative AABB for one curved-band segment or straight arch leg.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelArchPropCollisionRecord {
+    /// Minimum room-local corner.
+    pub min: [i32; 3],
+    /// Maximum room-local corner.
+    pub max: [i32; 3],
 }
 
 /// One addressable cooked UI scene. Each scene names a contiguous

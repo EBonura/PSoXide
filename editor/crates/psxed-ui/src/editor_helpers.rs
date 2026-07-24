@@ -903,6 +903,31 @@ pub(crate) fn entity_bound_kind_and_size(
                 ],
             ))
         }
+        NodeKind::ArchProp { geometry, .. } => {
+            let sector =
+                node_enclosing_sector_size(workspace.project.active_scene(), node.id).max(1) as f32;
+            let span = f32::from(geometry.span_tiles.clamp(
+                psxed_project::ARCH_PROP_MIN_TILES,
+                psxed_project::ARCH_PROP_MAX_TILES,
+            )) * sector;
+            let depth = f32::from(geometry.depth_tiles.clamp(
+                psxed_project::ARCH_PROP_MIN_TILES,
+                psxed_project::ARCH_PROP_MAX_TILES,
+            )) * sector;
+            let height = f32::from(
+                geometry
+                    .rise_quanta
+                    .saturating_add(geometry.leg_height_quanta),
+            ) * psxed_project::HEIGHT_QUANTUM as f32;
+            Some((
+                EntityBoundKind::ArchProp,
+                [
+                    (span * 0.5).max(32.0),
+                    (height * 0.5).max(32.0),
+                    (depth * 0.5).max(32.0),
+                ],
+            ))
+        }
         NodeKind::SpawnPoint { .. } => Some((EntityBoundKind::SpawnPoint, [128.0, 256.0, 128.0])),
         NodeKind::PointLight { .. } => Some((EntityBoundKind::PointLight, [128.0, 128.0, 128.0])),
         NodeKind::ParticleEmitter { .. } => {
@@ -933,6 +958,7 @@ pub(crate) fn node_is_floor_anchored(kind: &NodeKind) -> bool {
             | NodeKind::MeshInstance { .. }
             | NodeKind::BoxProp { .. }
             | NodeKind::CylinderProp { .. }
+            | NodeKind::ArchProp { .. }
             | NodeKind::SpawnPoint { .. }
     )
 }

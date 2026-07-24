@@ -1417,6 +1417,10 @@ pub(crate) fn node_kind_reference_count(kind: &NodeKind, id: ResourceId) -> usiz
             .iter()
             .filter(|material| **material == Some(id))
             .count(),
+        NodeKind::ArchProp { materials, .. } => materials
+            .iter()
+            .filter(|material| **material == Some(id))
+            .count(),
         NodeKind::ModelRenderer {
             model, material, ..
         } => {
@@ -1485,6 +1489,13 @@ pub(crate) fn clear_node_kind_references(kind: &mut NodeKind, id: ResourceId) ->
             cleared
         }
         NodeKind::CylinderProp { materials, .. } => {
+            let mut cleared = 0;
+            for material in materials {
+                cleared += clear_option_resource(material, id);
+            }
+            cleared
+        }
+        NodeKind::ArchProp { materials, .. } => {
             let mut cleared = 0;
             for material in materials {
                 cleared += clear_option_resource(material, id);
