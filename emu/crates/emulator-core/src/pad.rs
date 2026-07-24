@@ -578,6 +578,13 @@ pub struct DigitalPad {
     recent_poll_head: usize,
     #[serde(skip)]
     recent_poll_len: usize,
+    /// Monotonic count of *completed* `0x42` poll transactions. This is the
+    /// guest's own input clock: a game reads the pad once per simulation tick
+    /// regardless of how long its rendering took, so binding an input tape to
+    /// this counter makes a replay independent of frame rate. Diagnostic and
+    /// deliberately excluded from save states, like the other poll telemetry.
+    #[serde(skip)]
+    completed_polls: u64,
 }
 
 /// Zero-indexed step of the last byte in a transaction. Ack stays
@@ -624,6 +631,7 @@ impl DigitalPad {
             recent_polls: [PollSnapshot::default(); 8],
             recent_poll_head: 0,
             recent_poll_len: 0,
+            completed_polls: 0,
         }
     }
 
@@ -669,6 +677,12 @@ impl DigitalPad {
             out.push(self.recent_cmds[idx]);
         }
         out
+    }
+
+    /// Number of completed `0x42` poll transactions since power-on. Input
+    /// tapes bound to this counter replay identically at any frame rate.
+    pub fn completed_polls(&self) -> u64 {
+        self.completed_polls
     }
 
     /// Recent completed `0x42` poll transactions, oldest first.
@@ -1048,6 +1062,9 @@ impl DigitalPad {
     fn snapshot_current_poll(&mut self, complete: bool) {
         if self.cmd != 0x42 || self.current_trace_len == 0 {
             return;
+        }
+        if complete {
+            self.completed_polls = self.completed_polls.saturating_add(1);
         }
         let slot = self.recent_poll_head;
         self.recent_polls[slot] = PollSnapshot {
@@ -2048,6 +2065,31 @@ mod tests {
             let _ = pad.exchange(0x00);
         }
         assert_eq!(pad.motor_state(), (true, 0x80));
+    }
+
+    #[test]
+    fn completed_polls_counts_only_finished_poll_transactions() {
+        let mut pad = DigitalPad::new();
+        assert_eq!(pad.completed_polls(), 0);
+
+        // A full four-byte digital poll counts once.
+        pad.exchange(0x42);
+        pad.exchange(0x00);
+        pad.exchange(0x00);
+        pad.exchange(0x00);
+        assert_eq!(pad.completed_polls(), 1);
+
+        // A poll abandoned partway through does not.
+        pad.exchange(0x42);
+        pad.exchange(0x00);
+        pad.reset();
+        assert_eq!(pad.completed_polls(), 1);
+
+        pad.exchange(0x42);
+        pad.exchange(0x00);
+        pad.exchange(0x00);
+        pad.exchange(0x00);
+        assert_eq!(pad.completed_polls(), 2);
     }
 
     #[test]

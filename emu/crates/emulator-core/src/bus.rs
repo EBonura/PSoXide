@@ -744,6 +744,19 @@ impl Bus {
         self.sio0.port1().recent_first_bytes()
     }
 
+    /// Completed `0x42` poll transactions on port 1 since power-on. This is
+    /// the guest's input clock, not the host's: it advances once per pad read
+    /// however long the game took to get there. Poll-bound input tapes
+    /// (`PXITAPE2`) index off it so a replay follows the same route whatever
+    /// the frame rate.
+    pub fn port1_completed_polls(&self) -> u64 {
+        self.sio0
+            .port1()
+            .pad()
+            .map(|p| p.completed_polls())
+            .unwrap_or(0)
+    }
+
     /// Recent completed `0x42` poll transactions seen on port 1.
     pub fn port1_recent_polls(&self) -> Vec<crate::pad::PollSnapshot> {
         self.sio0

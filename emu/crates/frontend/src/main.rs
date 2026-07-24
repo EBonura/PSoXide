@@ -1407,6 +1407,12 @@ impl ApplicationHandler for Shell {
                         if let Some(bus) = self.state.bus.as_mut() {
                             pad_sample.apply_to_bus(bus);
                         }
+                        let polls_before = self
+                            .state
+                            .bus
+                            .as_ref()
+                            .map(|bus| bus.port1_completed_polls())
+                            .unwrap_or(0);
                         let draw_log_start = self
                             .state
                             .bus
@@ -1415,6 +1421,18 @@ impl ApplicationHandler for Shell {
                             .unwrap_or(0);
                         let emu_start = Instant::now();
                         let step_report = app::step_one_frame(&mut self.state);
+                        // The pad state above was live for the whole frame, so
+                        // every poll the guest completed inside it read exactly
+                        // `pad_sample`. Recording one tape entry per poll makes
+                        // the tape indexed by the guest's input clock.
+                        let polls_after = self
+                            .state
+                            .bus
+                            .as_ref()
+                            .map(|bus| bus.port1_completed_polls())
+                            .unwrap_or(polls_before);
+                        self.state
+                            .input_note_polls(pad_sample, polls_after.saturating_sub(polls_before));
                         profile.emu_ms += elapsed_ms(emu_start);
                         profile.frames_run += 1.0;
                         profile.psx_budget_cycles += step_report.target_cycles as f32;
