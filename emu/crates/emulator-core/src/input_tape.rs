@@ -20,6 +20,7 @@ use crate::{Bus, ButtonState};
 const TAPE_MAGIC: &[u8; 8] = b"PXITAPE1";
 const TAPE_HEADER_BYTES: usize = 12;
 const TAPE_SAMPLE_BYTES: usize = 6;
+const TAPE_CSV_HEADER: &str = "frame,buttons,right_x,right_y,left_x,left_y";
 
 /// One emulated frame's port-1 DualShock state.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -94,9 +95,93 @@ pub fn write_tape(path: &Path, samples: &[PadSample]) -> Result<(), String> {
     std::fs::write(path, bytes).map_err(|e| format!("write {}: {e}", path.display()))
 }
 
+/// Serialize samples to the human-readable CSV format used by browser
+/// downloads. `buttons` is the raw active-low PlayStation pad mask.
+pub fn tape_to_csv(samples: &[PadSample]) -> String {
+    use std::fmt::Write as _;
+
+    let mut csv = String::with_capacity(TAPE_CSV_HEADER.len() + 1 + samples.len() * 28);
+    csv.push_str(TAPE_CSV_HEADER);
+    csv.push('\n');
+    for (frame, sample) in samples.iter().enumerate() {
+        let _ = writeln!(
+            csv,
+            "{frame},{},{},{},{},{}",
+            sample.buttons, sample.right_x, sample.right_y, sample.left_x, sample.left_y
+        );
+    }
+    csv
+}
+
+/// Parse a browser-exported input CSV back into frame samples.
+pub fn tape_from_csv(csv: &str) -> Result<Vec<PadSample>, String> {
+    let mut lines = csv.lines();
+    let header = lines
+        .next()
+        .map(str::trim)
+        .ok_or_else(|| "input tape CSV is empty".to_string())?;
+    if header != TAPE_CSV_HEADER {
+        return Err(format!(
+            "unknown input tape CSV header: expected {TAPE_CSV_HEADER}"
+        ));
+    }
+
+    let mut samples = Vec::new();
+    for (line_index, line) in lines.enumerate() {
+        let line_number = line_index + 2;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let fields = line.split(',').map(str::trim).collect::<Vec<_>>();
+        if fields.len() != 6 {
+            return Err(format!(
+                "input tape CSV line {line_number} has {} fields, expected 6",
+                fields.len()
+            ));
+        }
+        let frame = fields[0]
+            .parse::<usize>()
+            .map_err(|error| format!("input tape CSV line {line_number} frame: {error}"))?;
+        if frame != samples.len() {
+            return Err(format!(
+                "input tape CSV line {line_number} has frame {frame}, expected {}",
+                samples.len()
+            ));
+        }
+        let parse_u16 = |field: &str, name: &str| {
+            field
+                .parse::<u16>()
+                .map_err(|error| format!("input tape CSV line {line_number} {name}: {error}"))
+        };
+        let parse_u8 = |field: &str, name: &str| {
+            field
+                .parse::<u8>()
+                .map_err(|error| format!("input tape CSV line {line_number} {name}: {error}"))
+        };
+        samples.push(PadSample {
+            buttons: parse_u16(fields[1], "buttons")?,
+            right_x: parse_u8(fields[2], "right_x")?,
+            right_y: parse_u8(fields[3], "right_y")?,
+            left_x: parse_u8(fields[4], "left_x")?,
+            left_y: parse_u8(fields[5], "left_y")?,
+        });
+    }
+    Ok(samples)
+}
+
 /// Read a `PXITAPE1` file into samples.
 pub fn read_tape(path: &Path) -> Result<Vec<PadSample>, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    if path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("csv"))
+    {
+        let csv = std::str::from_utf8(&bytes)
+            .map_err(|error| format!("read input tape CSV {}: {error}", path.display()))?;
+        return tape_from_csv(csv)
+            .map_err(|error| format!("read input tape CSV {}: {error}", path.display()));
+    }
     if bytes.len() < TAPE_HEADER_BYTES {
         return Err(format!("{} is not a PSoXide input tape", path.display()));
     }
@@ -174,5 +259,40 @@ mod tests {
         let loaded = read_tape(&path).expect("read");
         let _ = std::fs::remove_file(&path);
         assert_eq!(loaded, samples);
+    }
+
+    #[test]
+    fn tape_round_trips_browser_csv() {
+        let samples = vec![
+            PadSample::from_host(0xffef, (0.0, 0.0), (-1.0, 1.0)),
+            PadSample::from_host(0x7fff, (1.0, -1.0), (0.25, -0.25)),
+        ];
+        let csv = tape_to_csv(&samples);
+        assert_eq!(
+            csv.lines().next(),
+            Some("frame,buttons,right_x,right_y,left_x,left_y")
+        );
+        assert_eq!(tape_from_csv(&csv).unwrap(), samples);
+    }
+
+    #[test]
+    fn read_tape_accepts_browser_csv_files() {
+        let path = std::env::temp_dir().join(format!("psoxide-tape-{}.csv", std::process::id()));
+        let samples = [PadSample::from_buttons(0xfffe)];
+        std::fs::write(&path, tape_to_csv(&samples)).expect("write CSV tape");
+        let loaded = read_tape(&path).expect("read CSV tape");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(loaded, samples);
+    }
+
+    #[test]
+    fn browser_csv_rejects_discontinuous_frames() {
+        let csv = concat!(
+            "frame,buttons,right_x,right_y,left_x,left_y\n",
+            "1,65535,128,128,128,128\n"
+        );
+        assert!(tape_from_csv(csv)
+            .unwrap_err()
+            .contains("has frame 1, expected 0"));
     }
 }
