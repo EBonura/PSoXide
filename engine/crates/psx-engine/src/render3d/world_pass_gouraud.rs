@@ -1,6 +1,621 @@
 use super::*;
 
 impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
+    /// Submit one camera-space room triangle using Tomb Raider's bounded
+    /// bounded subdivision schedule.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn submit_tomb_raider_textured_gouraud_view_triangle_uv_words(
+        &mut self,
+        triangles: &mut impl PrimitiveSink<TriTexturedGouraud>,
+        positions: [ViewVertex; 3],
+        uv_words: [u16; 3],
+        colors: [(u8, u8, u8); 3],
+        projection: WorldProjection,
+        material: TextureMaterial,
+        options: WorldSurfaceOptions,
+    ) -> WorldRenderStats {
+        load_tomb_raider_view_projection_gte(projection);
+        let vertices = [
+            TexturedGouraudViewVertex::new(positions[0], uv_words[0], colors[0]),
+            TexturedGouraudViewVertex::new(positions[1], uv_words[1], colors[1]),
+            TexturedGouraudViewVertex::new(positions[2], uv_words[2], colors[2]),
+        ];
+        let leaf_options = options
+            .with_tomb_raider_subdivision(false)
+            .with_textured_triangle_max_edge(0);
+        let subdivision_profile = options.tomb_raider_subdivision_profile;
+        let root_depth = tomb_raider_triangle_farthest_depth(vertices);
+        if root_depth >= subdivision_profile.far_depth {
+            return self.submit_tomb_raider_textured_gouraud_view_triangle_leaf(
+                triangles,
+                vertices,
+                projection,
+                material,
+                leaf_options,
+                0,
+            );
+        }
+        let mut stats = self.submit_tomb_raider_textured_gouraud_view_triangle_split(
+            triangles,
+            vertices,
+            projection,
+            material,
+            leaf_options,
+            0,
+        );
+        if !stats.primitive_overflow
+            && !stats.command_overflow
+            && !material.is_translucent()
+            && root_depth >= subdivision_profile.underdraw_depth
+        {
+            let underdraw = self.submit_tomb_raider_textured_gouraud_view_triangle_leaf(
+                triangles,
+                vertices,
+                projection,
+                material,
+                leaf_options.with_depth_bias(
+                    leaf_options
+                        .depth_bias
+                        .saturating_add(subdivision_profile.underdraw_depth_bias),
+                ),
+                3,
+            );
+            merge_world_stats(&mut stats, underdraw);
+        }
+        stats
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn submit_tomb_raider_textured_gouraud_view_triangle_split(
+        &mut self,
+        triangles: &mut impl PrimitiveSink<TriTexturedGouraud>,
+        vertices: [TexturedGouraudViewVertex; 3],
+        projection: WorldProjection,
+        material: TextureMaterial,
+        options: WorldSurfaceOptions,
+        split_level: u8,
+    ) -> WorldRenderStats {
+        let edge_01 = midpoint_textured_gouraud_view(vertices[0], vertices[1]);
+        let edge_12 = midpoint_textured_gouraud_view(vertices[1], vertices[2]);
+        let edge_20 = midpoint_textured_gouraud_view(vertices[2], vertices[0]);
+        let children = [
+            [vertices[0], edge_01, edge_20],
+            [edge_01, vertices[1], edge_12],
+            [edge_20, edge_12, vertices[2]],
+            [edge_01, edge_12, edge_20],
+        ];
+        let mut stats = WorldRenderStats {
+            split_triangles: 1,
+            ..WorldRenderStats::default()
+        };
+        let mut index = 0usize;
+        while index < children.len() {
+            let child = children[index];
+            let next = if options.tomb_raider_subdivision_profile.max_levels
+                > split_level.saturating_add(1)
+                && tomb_raider_triangle_farthest_depth(child)
+                    < options.tomb_raider_subdivision_profile.near_depth
+            {
+                self.submit_tomb_raider_textured_gouraud_view_triangle_split(
+                    triangles, child, projection, material, options, 1,
+                )
+            } else {
+                self.submit_tomb_raider_textured_gouraud_view_triangle_leaf(
+                    triangles,
+                    child,
+                    projection,
+                    material,
+                    options,
+                    split_level.saturating_add(1),
+                )
+            };
+            merge_world_stats(&mut stats, next);
+            if stats.primitive_overflow || stats.command_overflow {
+                break;
+            }
+            index += 1;
+        }
+        stats
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn submit_tomb_raider_textured_gouraud_view_triangle_leaf(
+        &mut self,
+        triangles: &mut impl PrimitiveSink<TriTexturedGouraud>,
+        mut vertices: [TexturedGouraudViewVertex; 3],
+        projection: WorldProjection,
+        material: TextureMaterial,
+        options: WorldSurfaceOptions,
+        subdivision_level: u8,
+    ) -> WorldRenderStats {
+        if options.tomb_raider_debug_subdivision_levels {
+            if let Some(color) = tomb_raider_debug_subdivision_color(subdivision_level) {
+                vertices[0].color = color;
+                vertices[1].color = color;
+                vertices[2].color = color;
+            }
+        }
+        if vertices
+            .iter()
+            .any(|vertex| vertex.position.z < projection.near_z)
+        {
+            return self.submit_textured_gouraud_view_triangle_uv_words(
+                triangles,
+                [
+                    vertices[0].position,
+                    vertices[1].position,
+                    vertices[2].position,
+                ],
+                [
+                    textured_gouraud_view_uv_word(vertices[0]),
+                    textured_gouraud_view_uv_word(vertices[1]),
+                    textured_gouraud_view_uv_word(vertices[2]),
+                ],
+                [vertices[0].color, vertices[1].color, vertices[2].color],
+                projection,
+                material,
+                options,
+            );
+        }
+        let Some([a, b, c]) = project_tomb_raider_view_triangle_gte(
+            [
+                vertices[0].position,
+                vertices[1].position,
+                vertices[2].position,
+            ],
+            projection,
+        ) else {
+            return WorldRenderStats {
+                dropped_triangles: 1,
+                ..WorldRenderStats::default()
+            };
+        };
+        self.submit_textured_gouraud_triangle(
+            triangles,
+            [a, b, c],
+            [
+                (
+                    vertices[0].u.clamp(0, 255) as u8,
+                    vertices[0].v.clamp(0, 255) as u8,
+                ),
+                (
+                    vertices[1].u.clamp(0, 255) as u8,
+                    vertices[1].v.clamp(0, 255) as u8,
+                ),
+                (
+                    vertices[2].u.clamp(0, 255) as u8,
+                    vertices[2].v.clamp(0, 255) as u8,
+                ),
+            ],
+            [vertices[0].color, vertices[1].color, vertices[2].color],
+            material,
+            options,
+        )
+    }
+
+    /// Submit one camera-space room quad using the bounded
+    /// subdivision schedule from the later PS1 Tomb Raider renderer.
+    ///
+    /// The important detail is that generated positions remain in camera
+    /// space until each leaf is projected. Splitting the already-projected
+    /// polygon would preserve the original affine texture plane and therefore
+    /// would not provide Tomb Raider's piecewise-perspective correction.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn submit_tomb_raider_textured_gouraud_view_quad_uv_words<P>(
+        &mut self,
+        primitives: &mut P,
+        positions: [ViewVertex; 4],
+        uv_words: [u16; 4],
+        colors: [(u8, u8, u8); 4],
+        projection: WorldProjection,
+        material: TextureMaterial,
+        options: WorldSurfaceOptions,
+    ) -> WorldRenderStats
+    where
+        P: PrimitiveSink<QuadTexturedGouraud> + PrimitiveSink<TriTexturedGouraud>,
+    {
+        load_tomb_raider_view_projection_gte(projection);
+        let vertices = [
+            TexturedGouraudViewVertex::new(positions[0], uv_words[0], colors[0]),
+            TexturedGouraudViewVertex::new(positions[1], uv_words[1], colors[1]),
+            TexturedGouraudViewVertex::new(positions[2], uv_words[2], colors[2]),
+            TexturedGouraudViewVertex::new(positions[3], uv_words[3], colors[3]),
+        ];
+        let leaf_options = options
+            .with_tomb_raider_subdivision(false)
+            .with_textured_triangle_max_edge(0);
+        let subdivision_profile = options.tomb_raider_subdivision_profile;
+        let root_depth = tomb_raider_quad_farthest_depth(vertices);
+        if root_depth >= subdivision_profile.far_depth {
+            return self.submit_tomb_raider_textured_gouraud_view_quad_leaf(
+                primitives,
+                vertices,
+                projection,
+                material,
+                leaf_options,
+                0,
+            );
+        }
+        #[cfg(feature = "tr-subdivision-lattice")]
+        if subdivision_profile.max_levels == 1 {
+            let mut stats = self.submit_tomb_raider_textured_gouraud_view_quad_lattice(
+                primitives,
+                vertices,
+                projection,
+                material,
+                leaf_options,
+            );
+            if !stats.primitive_overflow
+                && !stats.command_overflow
+                && !material.is_translucent()
+                && root_depth >= subdivision_profile.underdraw_depth
+            {
+                let underdraw = self.submit_tomb_raider_textured_gouraud_view_quad_leaf(
+                    primitives,
+                    vertices,
+                    projection,
+                    material,
+                    leaf_options.with_depth_bias(
+                        leaf_options
+                            .depth_bias
+                            .saturating_add(subdivision_profile.underdraw_depth_bias),
+                    ),
+                    3,
+                );
+                merge_world_stats(&mut stats, underdraw);
+            }
+            return stats;
+        }
+        let mut stats = self.submit_tomb_raider_textured_gouraud_view_quad_split(
+            primitives,
+            vertices,
+            projection,
+            material,
+            leaf_options,
+            0,
+        );
+        if !stats.primitive_overflow
+            && !stats.command_overflow
+            && !material.is_translucent()
+            && root_depth >= subdivision_profile.underdraw_depth
+        {
+            let underdraw = self.submit_tomb_raider_textured_gouraud_view_quad_leaf(
+                primitives,
+                vertices,
+                projection,
+                material,
+                leaf_options.with_depth_bias(
+                    leaf_options
+                        .depth_bias
+                        .saturating_add(subdivision_profile.underdraw_depth_bias),
+                ),
+                3,
+            );
+            merge_world_stats(&mut stats, underdraw);
+        }
+        stats
+    }
+
+    /// Fixed-topology one-level quad split. The nine shared points are
+    /// projected once and addressed through a constant four-leaf table.
+    #[cfg(feature = "tr-subdivision-lattice")]
+    #[allow(clippy::too_many_arguments)]
+    fn submit_tomb_raider_textured_gouraud_view_quad_lattice<P>(
+        &mut self,
+        primitives: &mut P,
+        vertices: [TexturedGouraudViewVertex; 4],
+        projection: WorldProjection,
+        material: TextureMaterial,
+        options: WorldSurfaceOptions,
+    ) -> WorldRenderStats
+    where
+        P: PrimitiveSink<QuadTexturedGouraud> + PrimitiveSink<TriTexturedGouraud>,
+    {
+        // Packet/layout order is 0--1 / 2--3.
+        let top = midpoint_textured_gouraud_view(vertices[0], vertices[1]);
+        let left = midpoint_textured_gouraud_view(vertices[0], vertices[2]);
+        let right = midpoint_textured_gouraud_view(vertices[1], vertices[3]);
+        let bottom = midpoint_textured_gouraud_view(vertices[2], vertices[3]);
+        let center = midpoint_textured_gouraud_view(top, bottom);
+        let lattice = [
+            vertices[0],
+            top,
+            vertices[1],
+            left,
+            center,
+            right,
+            vertices[2],
+            bottom,
+            vertices[3],
+        ];
+        let Some(projected) = project_tomb_raider_view_lattice_gte(
+            [
+                lattice[0].position,
+                lattice[1].position,
+                lattice[2].position,
+                lattice[3].position,
+                lattice[4].position,
+                lattice[5].position,
+                lattice[6].position,
+                lattice[7].position,
+                lattice[8].position,
+            ],
+            projection,
+        ) else {
+            // Preserve the existing near-plane clipping behavior for the
+            // uncommon quad that crosses the camera.
+            return self.submit_tomb_raider_textured_gouraud_view_quad_split(
+                primitives,
+                vertices,
+                projection,
+                material,
+                options,
+                0,
+            );
+        };
+        const LEAVES: [[usize; 4]; 4] =
+            [[0, 1, 3, 4], [1, 2, 4, 5], [3, 4, 6, 7], [4, 5, 7, 8]];
+        let mut stats = WorldRenderStats {
+            split_triangles: 1,
+            ..WorldRenderStats::default()
+        };
+        let mut leaf_index = 0usize;
+        while leaf_index < LEAVES.len() {
+            let ids = LEAVES[leaf_index];
+            let next = self.submit_tomb_raider_textured_gouraud_projected_quad_leaf(
+                primitives,
+                [
+                    lattice[ids[0]],
+                    lattice[ids[1]],
+                    lattice[ids[2]],
+                    lattice[ids[3]],
+                ],
+                [
+                    projected[ids[0]],
+                    projected[ids[1]],
+                    projected[ids[2]],
+                    projected[ids[3]],
+                ],
+                material,
+                options,
+                1,
+            );
+            merge_world_stats(&mut stats, next);
+            if stats.primitive_overflow || stats.command_overflow {
+                break;
+            }
+            leaf_index += 1;
+        }
+        stats
+    }
+
+    #[cfg(feature = "tr-subdivision-lattice")]
+    #[allow(clippy::too_many_arguments)]
+    fn submit_tomb_raider_textured_gouraud_projected_quad_leaf<P>(
+        &mut self,
+        primitives: &mut P,
+        mut vertices: [TexturedGouraudViewVertex; 4],
+        projected: [ProjectedVertex; 4],
+        material: TextureMaterial,
+        options: WorldSurfaceOptions,
+        subdivision_level: u8,
+    ) -> WorldRenderStats
+    where
+        P: PrimitiveSink<QuadTexturedGouraud> + PrimitiveSink<TriTexturedGouraud>,
+    {
+        if options.tomb_raider_debug_subdivision_levels {
+            if let Some(color) = tomb_raider_debug_subdivision_color(subdivision_level) {
+                vertices[0].color = color;
+                vertices[1].color = color;
+                vertices[2].color = color;
+                vertices[3].color = color;
+            }
+        }
+        let [a, b, c, _d] = projected;
+        if projected_culled([a, b, c], options.cull_mode) {
+            return WorldRenderStats {
+                culled_triangles: 1,
+                ..WorldRenderStats::default()
+            };
+        }
+        let prepared_depth =
+            PreparedTriangleDepth::from_quad_average::<OT_DEPTH>(options, projected);
+        self.submit_textured_gouraud_quad_prescreened_uv_words_prepared_depth(
+            primitives,
+            None,
+            false,
+            0,
+            projected,
+            [
+                textured_gouraud_view_uv_word(vertices[0]),
+                textured_gouraud_view_uv_word(vertices[1]),
+                textured_gouraud_view_uv_word(vertices[2]),
+                textured_gouraud_view_uv_word(vertices[3]),
+            ],
+            [
+                vertices[0].color,
+                vertices[1].color,
+                vertices[2].color,
+                vertices[3].color,
+            ],
+            material,
+            options,
+            prepared_depth,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn submit_tomb_raider_textured_gouraud_view_quad_split<P>(
+        &mut self,
+        primitives: &mut P,
+        vertices: [TexturedGouraudViewVertex; 4],
+        projection: WorldProjection,
+        material: TextureMaterial,
+        options: WorldSurfaceOptions,
+        split_level: u8,
+    ) -> WorldRenderStats
+    where
+        P: PrimitiveSink<QuadTexturedGouraud> + PrimitiveSink<TriTexturedGouraud>,
+    {
+        // Packet/layout order is 0--1 / 2--3. Generate the four edge
+        // midpoints plus the centre exactly once, then form four child quads.
+        let top = midpoint_textured_gouraud_view(vertices[0], vertices[1]);
+        let left = midpoint_textured_gouraud_view(vertices[0], vertices[2]);
+        let right = midpoint_textured_gouraud_view(vertices[1], vertices[3]);
+        let bottom = midpoint_textured_gouraud_view(vertices[2], vertices[3]);
+        let center = midpoint_textured_gouraud_view(top, bottom);
+        let children = [
+            [vertices[0], top, left, center],
+            [top, vertices[1], center, right],
+            [left, center, vertices[2], bottom],
+            [center, right, bottom, vertices[3]],
+        ];
+        let mut stats = WorldRenderStats {
+            split_triangles: 1,
+            ..WorldRenderStats::default()
+        };
+        let mut index = 0usize;
+        while index < children.len() {
+            let child = children[index];
+            let next = if options.tomb_raider_subdivision_profile.max_levels
+                > split_level.saturating_add(1)
+                && tomb_raider_quad_farthest_depth(child)
+                    < options.tomb_raider_subdivision_profile.near_depth
+            {
+                self.submit_tomb_raider_textured_gouraud_view_quad_split(
+                    primitives, child, projection, material, options, 1,
+                )
+            } else {
+                self.submit_tomb_raider_textured_gouraud_view_quad_leaf(
+                    primitives,
+                    child,
+                    projection,
+                    material,
+                    options,
+                    split_level.saturating_add(1),
+                )
+            };
+            merge_world_stats(&mut stats, next);
+            if stats.primitive_overflow || stats.command_overflow {
+                break;
+            }
+            index += 1;
+        }
+        stats
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn submit_tomb_raider_textured_gouraud_view_quad_leaf<P>(
+        &mut self,
+        primitives: &mut P,
+        mut vertices: [TexturedGouraudViewVertex; 4],
+        projection: WorldProjection,
+        material: TextureMaterial,
+        options: WorldSurfaceOptions,
+        subdivision_level: u8,
+    ) -> WorldRenderStats
+    where
+        P: PrimitiveSink<QuadTexturedGouraud> + PrimitiveSink<TriTexturedGouraud>,
+    {
+        if options.tomb_raider_debug_subdivision_levels {
+            if let Some(color) = tomb_raider_debug_subdivision_color(subdivision_level) {
+                vertices[0].color = color;
+                vertices[1].color = color;
+                vertices[2].color = color;
+                vertices[3].color = color;
+            }
+        }
+        if vertices
+            .iter()
+            .any(|vertex| vertex.position.z < projection.near_z)
+        {
+            let mut stats = self.submit_textured_gouraud_view_triangle_uv_words(
+                primitives,
+                [
+                    vertices[0].position,
+                    vertices[1].position,
+                    vertices[2].position,
+                ],
+                [
+                    textured_gouraud_view_uv_word(vertices[0]),
+                    textured_gouraud_view_uv_word(vertices[1]),
+                    textured_gouraud_view_uv_word(vertices[2]),
+                ],
+                [vertices[0].color, vertices[1].color, vertices[2].color],
+                projection,
+                material,
+                options,
+            );
+            if !stats.primitive_overflow && !stats.command_overflow {
+                let next = self.submit_textured_gouraud_view_triangle_uv_words(
+                    primitives,
+                    [
+                        vertices[1].position,
+                        vertices[3].position,
+                        vertices[2].position,
+                    ],
+                    [
+                        textured_gouraud_view_uv_word(vertices[1]),
+                        textured_gouraud_view_uv_word(vertices[3]),
+                        textured_gouraud_view_uv_word(vertices[2]),
+                    ],
+                    [vertices[1].color, vertices[3].color, vertices[2].color],
+                    projection,
+                    material,
+                    options,
+                );
+                merge_world_stats(&mut stats, next);
+            }
+            return stats;
+        }
+
+        let Some(projected) = project_tomb_raider_view_quad_gte(
+            [
+                vertices[0].position,
+                vertices[1].position,
+                vertices[2].position,
+                vertices[3].position,
+            ],
+            projection,
+        ) else {
+            return WorldRenderStats {
+                dropped_triangles: 1,
+                ..WorldRenderStats::default()
+            };
+        };
+        let [a, b, c, _d] = projected;
+        if projected_culled([a, b, c], options.cull_mode) {
+            return WorldRenderStats {
+                culled_triangles: 1,
+                ..WorldRenderStats::default()
+            };
+        }
+        let prepared_depth =
+            PreparedTriangleDepth::from_quad_average::<OT_DEPTH>(options, projected);
+        self.submit_textured_gouraud_quad_prescreened_uv_words_prepared_depth(
+            primitives,
+            None,
+            false,
+            0,
+            projected,
+            [
+                textured_gouraud_view_uv_word(vertices[0]),
+                textured_gouraud_view_uv_word(vertices[1]),
+                textured_gouraud_view_uv_word(vertices[2]),
+                textured_gouraud_view_uv_word(vertices[3]),
+            ],
+            [
+                vertices[0].color,
+                vertices[1].color,
+                vertices[2].color,
+                vertices[3].color,
+            ],
+            material,
+            options,
+            prepared_depth,
+        )
+    }
+
     /// Clip one textured, vertex-lit camera-space triangle at the near plane.
     /// Cached rooms use this only for the uncommon surface that straddles the
     /// camera; the ordinary projected-cache path stays allocation-free and
@@ -1438,5 +2053,111 @@ impl<'a, 'ot, const OT_DEPTH: usize> WorldRenderPass<'a, 'ot, OT_DEPTH> {
         profile.add_command(TexturedGouraudSubmitMicroProfile::elapsed(command_start));
         stats.submitted_triangles = 1;
         stats
+    }
+}
+
+/// High-contrast packet colors consumed directly by emulator wireframe mode.
+pub(super) const fn tomb_raider_debug_subdivision_color(level: u8) -> Option<(u8, u8, u8)> {
+    match level {
+        1 => Some((0, 255, 255)),
+        2 => Some((255, 0, 255)),
+        3 => Some((255, 255, 0)),
+        _ => None,
+    }
+}
+
+#[cfg(all(test, feature = "tr-subdivision-lattice"))]
+mod lattice_tests {
+    use super::*;
+    use psx_gpu::ot::OrderingTable;
+
+    #[test]
+    fn one_level_lattice_packets_match_recursive_reference_bitexact() {
+        let projection = WorldProjection::new(160, 120, 256, 16);
+        let material = TextureMaterial::opaque(2, 4, (128, 128, 128));
+        let options = WorldSurfaceOptions::new(DepthBand::whole(), DepthRange::new(16, 8192))
+            .with_cull_mode(CullMode::None)
+            .with_tomb_raider_subdivision_sector_size(1664)
+            .with_tomb_raider_subdivision_max_levels(1)
+            .with_tomb_raider_subdivision(false)
+            .with_textured_triangle_max_edge(0);
+        let vertices = [
+            TexturedGouraudViewVertex::new(
+                ViewVertex::new(-900, -480, 2800),
+                model_uv_word((2, 4)),
+                (40, 60, 80),
+            ),
+            TexturedGouraudViewVertex::new(
+                ViewVertex::new(760, -360, 5100),
+                model_uv_word((61, 7)),
+                (90, 110, 130),
+            ),
+            TexturedGouraudViewVertex::new(
+                ViewVertex::new(-820, 620, 3300),
+                model_uv_word((5, 58)),
+                (140, 160, 180),
+            ),
+            TexturedGouraudViewVertex::new(
+                ViewVertex::new(840, 540, 5600),
+                model_uv_word((59, 62)),
+                (190, 210, 230),
+            ),
+        ];
+
+        let mut lattice_ot_storage = OrderingTable::<64>::new();
+        let mut lattice_ot = OtFrame::begin(&mut lattice_ot_storage);
+        let mut lattice_scratch = crate::PrimitivePacketScratch::<8>::ZERO;
+        let mut lattice_packets = crate::PrimitivePacketArena::new(&mut lattice_scratch);
+        let mut lattice_commands = [WorldTriCommand::EMPTY; 8];
+        load_tomb_raider_view_projection_gte(projection);
+        let lattice_stats = {
+            let mut pass = WorldRenderPass::new(&mut lattice_ot, &mut lattice_commands);
+            pass.submit_tomb_raider_textured_gouraud_view_quad_lattice(
+                &mut lattice_packets,
+                vertices,
+                projection,
+                material,
+                options,
+            )
+        };
+
+        let mut reference_ot_storage = OrderingTable::<64>::new();
+        let mut reference_ot = OtFrame::begin(&mut reference_ot_storage);
+        let mut reference_scratch = crate::PrimitivePacketScratch::<8>::ZERO;
+        let mut reference_packets = crate::PrimitivePacketArena::new(&mut reference_scratch);
+        let mut reference_commands = [WorldTriCommand::EMPTY; 8];
+        load_tomb_raider_view_projection_gte(projection);
+        let reference_stats = {
+            let mut pass = WorldRenderPass::new(&mut reference_ot, &mut reference_commands);
+            pass.submit_tomb_raider_textured_gouraud_view_quad_split(
+                &mut reference_packets,
+                vertices,
+                projection,
+                material,
+                options,
+                0,
+            )
+        };
+
+        assert_eq!(lattice_packets.len(), 4);
+        assert_eq!(lattice_packets.len(), reference_packets.len());
+        assert_eq!(lattice_stats, reference_stats);
+        let packet_bytes = core::mem::size_of::<QuadTexturedGouraud>();
+        for index in 0..lattice_packets.len() {
+            let lattice_command = lattice_commands[index];
+            let reference_command = reference_commands[index];
+            assert_eq!(lattice_command.slot, reference_command.slot);
+            assert_eq!(lattice_command.depth, reference_command.depth);
+            assert_eq!(lattice_command.order, reference_command.order);
+            assert_eq!(lattice_command.render_layer, reference_command.render_layer);
+            assert_eq!(lattice_command.words, reference_command.words);
+            let lattice = unsafe {
+                core::slice::from_raw_parts(lattice_command.packet_ptr.cast::<u8>(), packet_bytes)
+            };
+            let reference = unsafe {
+                core::slice::from_raw_parts(reference_command.packet_ptr.cast::<u8>(), packet_bytes)
+            };
+            assert_eq!(lattice, reference, "leaf packet {index} differs");
+        }
     }
 }

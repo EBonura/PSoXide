@@ -1108,6 +1108,97 @@ const fn world_render_layer_code(layer: WorldRenderLayer) -> u8 {
     }
 }
 
+/// First camera-space depth band used by the later PS1 Tomb Raider room
+/// renderer. `SPEC_PSX/ROOMLETB.MIP` compares `max_z >> 3` with `0x280`,
+/// so room polygons closer than five 1024-unit sectors split 4-way.
+pub const TOMB_RAIDER_SUBDIVIDE_FAR_DEPTH: i32 = 5 * 1024;
+
+/// Second camera-space depth band used by the later PS1 Tomb Raider room
+/// renderer. First-level children closer than three sectors split 4-way once
+/// more, yielding at most sixteen leaves from one authored polygon.
+pub const TOMB_RAIDER_SUBDIVIDE_NEAR_DEPTH: i32 = 3 * 1024;
+
+/// The original renderer keeps the authored polygon behind its children from
+/// this depth onward. It is invisible in the ordinary case and only covers
+/// sub-pixel cracks caused by fixed-point midpoint projection.
+pub const TOMB_RAIDER_UNDERDRAW_DEPTH: i32 = 5 * 512;
+
+/// Camera-depth offset corresponding to the original renderer's 32-slot
+/// ordering-table underdraw offset.
+pub const TOMB_RAIDER_UNDERDRAW_DEPTH_BIAS: i32 = 256;
+
+/// Camera-space depth bands for Tomb Raider-style room subdivision.
+///
+/// The original TR5 values are expressed in terms of its 1024-unit sectors.
+/// Keeping the profile beside each surface submission lets projects with a
+/// different sector scale preserve the same five-sector/three-sector visual
+/// schedule instead of inheriting thresholds that are too close to the camera.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct TombRaiderSubdivisionProfile {
+    /// Maximum number of four-way subdivision passes (one or two).
+    pub max_levels: u8,
+    /// Farthest root depth that receives the first four-way split.
+    pub far_depth: i32,
+    /// Farthest child depth that receives the second four-way split.
+    pub near_depth: i32,
+    /// Root depth from which the authored polygon is retained as crack cover.
+    pub underdraw_depth: i32,
+    /// Ordering-table depth bias applied to the crack-cover polygon.
+    pub underdraw_depth_bias: i32,
+}
+
+impl TombRaiderSubdivisionProfile {
+    /// Exact depth profile used by TR5's 1024-unit room sectors.
+    pub const TR5: Self = Self {
+        max_levels: 2,
+        far_depth: TOMB_RAIDER_SUBDIVIDE_FAR_DEPTH,
+        near_depth: TOMB_RAIDER_SUBDIVIDE_NEAR_DEPTH,
+        underdraw_depth: TOMB_RAIDER_UNDERDRAW_DEPTH,
+        underdraw_depth_bias: TOMB_RAIDER_UNDERDRAW_DEPTH_BIAS,
+    };
+
+    /// Preserve TR5's subdivision distances for an arbitrary room sector size.
+    pub const fn for_sector_size(sector_size: i32) -> Self {
+        let sector_size = if sector_size > 0 { sector_size } else { 1024 };
+        Self {
+            max_levels: 2,
+            far_depth: sector_size.saturating_mul(5),
+            near_depth: sector_size.saturating_mul(3),
+            underdraw_depth: sector_size.saturating_mul(5) / 2,
+            underdraw_depth_bias: sector_size / 4,
+        }
+    }
+}
+
+/// Cached room-surface kinds eligible for Tomb Raider-style subdivision.
+///
+/// This policy is evaluated by the indexed room renderer before it enters the
+/// generated-vertex path. Keeping it as a compact mask lets projects spend
+/// affine-correction work only on surface orientations that materially need
+/// it.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct TombRaiderSubdivisionKindMask(u8);
+
+impl TombRaiderSubdivisionKindMask {
+    /// No cached room surfaces.
+    pub const NONE: Self = Self(0);
+    /// Authored floor surfaces.
+    pub const FLOOR: Self = Self(1 << 0);
+    /// Authored ceiling surfaces.
+    pub const CEILING: Self = Self(1 << 1);
+    /// Authored wall surfaces.
+    pub const WALL: Self = Self(1 << 2);
+    /// Floors and walls, excluding ceilings.
+    pub const FLOOR_WALL: Self = Self(Self::FLOOR.0 | Self::WALL.0);
+    /// Every cached room-surface kind.
+    pub const ALL: Self = Self(Self::FLOOR.0 | Self::CEILING.0 | Self::WALL.0);
+
+    /// True when every bit in `kind` is enabled.
+    pub const fn contains(self, kind: Self) -> bool {
+        self.0 & kind.0 == kind.0
+    }
+}
+
 /// Shared options for projected world surfaces.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct WorldSurfaceOptions {
@@ -1137,6 +1228,24 @@ pub struct WorldSurfaceOptions {
     /// emission, reducing affine/painter artifacts without forcing world
     /// geometry to spend the same budget.
     pub textured_split_max_edge: u16,
+    /// Enable the bounded room subdivision used by the later
+    /// PlayStation Tomb Raider renderers.
+    ///
+    /// Unlike projected-edge splitting, this path averages camera-space
+    /// positions and then reprojects every generated midpoint. That turns the
+    /// PS1 GPU's affine texture mapping into a bounded piecewise-perspective
+    /// approximation while keeping the work capped by the active profile.
+    pub tomb_raider_subdivision: bool,
+    /// Depth bands used when `tomb_raider_subdivision` is enabled.
+    pub tomb_raider_subdivision_profile: TombRaiderSubdivisionProfile,
+    /// Cached room-surface orientations eligible for TR subdivision.
+    pub tomb_raider_subdivision_kinds: TombRaiderSubdivisionKindMask,
+    /// Replace generated leaf lighting with diagnostic subdivision colors.
+    ///
+    /// This is intended for emulator wireframe captures: first-level children
+    /// are cyan, second-level children are magenta, and the optional authored
+    /// crack-cover polygon is yellow. It remains disabled in normal builds.
+    pub tomb_raider_debug_subdivision_levels: bool,
     /// Simulation tick used by animated room materials.
     pub material_animation_tick: u32,
     /// Simulation rate used to convert UV-scroll speeds from texels/second.
@@ -1157,6 +1266,10 @@ impl WorldSurfaceOptions {
             render_layer: WorldRenderLayer::Opaque,
             split_textured_triangles: true,
             textured_split_max_edge: 0,
+            tomb_raider_subdivision: false,
+            tomb_raider_subdivision_profile: TombRaiderSubdivisionProfile::TR5,
+            tomb_raider_subdivision_kinds: TombRaiderSubdivisionKindMask::ALL,
+            tomb_raider_debug_subdivision_levels: false,
             material_animation_tick: 0,
             material_animation_hz: 60,
             model_uv_mapping: ModelUvMapping::Authored,
@@ -1208,6 +1321,56 @@ impl WorldSurfaceOptions {
     /// Return options with an optional projected-edge split threshold.
     pub const fn with_textured_triangle_max_edge(mut self, max_edge: u16) -> Self {
         self.textured_split_max_edge = max_edge;
+        self
+    }
+
+    /// Enable or disable Tomb Raider-style pre-projection subdivision.
+    pub const fn with_tomb_raider_subdivision(mut self, enabled: bool) -> Self {
+        self.tomb_raider_subdivision = enabled;
+        self
+    }
+
+    /// Enable Tomb Raider subdivision using an explicit depth profile.
+    pub const fn with_tomb_raider_subdivision_profile(
+        mut self,
+        profile: TombRaiderSubdivisionProfile,
+    ) -> Self {
+        self.tomb_raider_subdivision = true;
+        self.tomb_raider_subdivision_profile = profile;
+        self
+    }
+
+    /// Enable Tomb Raider subdivision scaled to the room's cooked sector size.
+    pub const fn with_tomb_raider_subdivision_sector_size(self, sector_size: i32) -> Self {
+        self.with_tomb_raider_subdivision_profile(TombRaiderSubdivisionProfile::for_sector_size(
+            sector_size,
+        ))
+    }
+
+    /// Limit Tomb Raider subdivision to one or two four-way passes.
+    pub const fn with_tomb_raider_subdivision_max_levels(mut self, max_levels: u8) -> Self {
+        self.tomb_raider_subdivision_profile.max_levels = if max_levels < 1 {
+            1
+        } else if max_levels > 2 {
+            2
+        } else {
+            max_levels
+        };
+        self
+    }
+
+    /// Restrict cached room subdivision to selected surface orientations.
+    pub const fn with_tomb_raider_subdivision_kinds(
+        mut self,
+        kinds: TombRaiderSubdivisionKindMask,
+    ) -> Self {
+        self.tomb_raider_subdivision_kinds = kinds;
+        self
+    }
+
+    /// Enable or disable diagnostic colors on generated subdivision leaves.
+    pub const fn with_tomb_raider_subdivision_debug_levels(mut self, enabled: bool) -> Self {
+        self.tomb_raider_debug_subdivision_levels = enabled;
         self
     }
 
@@ -1832,6 +1995,172 @@ fn load_world_camera_gte(camera: WorldCamera) {
     );
     scene::load_rotation(&view);
     scene::load_translation(translation);
+}
+
+/// Install an identity camera-space transform for Tomb Raider-style generated
+/// vertices. The authored room vertices have already been transformed into
+/// view space; RTPS is used here only for the perspective divide, exactly as
+/// in the original subdivision path.
+fn load_tomb_raider_view_projection_gte(projection: WorldProjection) {
+    load_world_projection_gte(projection);
+    scene::load_rotation(&Mat3I16::IDENTITY);
+    scene::load_translation(Vec3I32::ZERO);
+}
+
+/// Project one ordinary (Y-up) camera-space point with the identity RTPS state
+/// installed by [`load_tomb_raider_view_projection_gte`].
+fn project_tomb_raider_view_vertex_gte(
+    vertex: ViewVertex,
+    projection: WorldProjection,
+) -> Option<ProjectedVertex> {
+    if vertex.z <= 0 || vertex.z < projection.near_z {
+        return None;
+    }
+    let Some(input) = tomb_raider_view_gte_input(vertex) else {
+        return projection.project_view(vertex);
+    };
+    tomb_raider_projected_option_from_gte(scene::project_vertex_scheduled(input), projection.near_z)
+}
+
+/// Project three generated camera-space vertices with one RTPT, matching the
+/// batched GTE path in Tomb Raider's room subdivision loop.
+fn project_tomb_raider_view_triangle_gte(
+    vertices: [ViewVertex; 3],
+    projection: WorldProjection,
+) -> Option<[ProjectedVertex; 3]> {
+    if vertices
+        .iter()
+        .any(|vertex| vertex.z <= 0 || vertex.z < projection.near_z)
+    {
+        return None;
+    }
+    let inputs = [
+        tomb_raider_view_gte_input(vertices[0]),
+        tomb_raider_view_gte_input(vertices[1]),
+        tomb_raider_view_gte_input(vertices[2]),
+    ];
+    let [Some(a), Some(b), Some(c)] = inputs else {
+        return Some([
+            projection.project_view(vertices[0])?,
+            projection.project_view(vertices[1])?,
+            projection.project_view(vertices[2])?,
+        ]);
+    };
+    let projected = scene::project_triangle_scheduled(a, b, c);
+    Some([
+        tomb_raider_projected_option_from_gte(projected[0], projection.near_z)?,
+        tomb_raider_projected_option_from_gte(projected[1], projection.near_z)?,
+        tomb_raider_projected_option_from_gte(projected[2], projection.near_z)?,
+    ])
+}
+
+/// Project a generated camera-space quad as RTPT + RTPS rather than four
+/// independent RTPS operations.
+fn project_tomb_raider_view_quad_gte(
+    vertices: [ViewVertex; 4],
+    projection: WorldProjection,
+) -> Option<[ProjectedVertex; 4]> {
+    let triangle =
+        project_tomb_raider_view_triangle_gte([vertices[0], vertices[1], vertices[2]], projection)?;
+    Some([
+        triangle[0],
+        triangle[1],
+        triangle[2],
+        project_tomb_raider_view_vertex_gte(vertices[3], projection)?,
+    ])
+}
+
+/// Project the fixed 3x3 point lattice of a one-level subdivided quad.
+///
+/// The recursive path projects four overlapping child quads (16 inputs).
+/// This schedule emits three RTPT operations and reuses the shared edge and
+/// centre results, matching the table-driven topology used by later PS1 Tomb
+/// Raider room renderers.
+#[cfg(feature = "tr-subdivision-lattice")]
+fn project_tomb_raider_view_lattice_gte(
+    vertices: [ViewVertex; 9],
+    projection: WorldProjection,
+) -> Option<[ProjectedVertex; 9]> {
+    if vertices
+        .iter()
+        .any(|vertex| vertex.z <= 0 || vertex.z < projection.near_z)
+    {
+        return None;
+    }
+    let inputs = [
+        tomb_raider_view_gte_input(vertices[0]),
+        tomb_raider_view_gte_input(vertices[1]),
+        tomb_raider_view_gte_input(vertices[2]),
+        tomb_raider_view_gte_input(vertices[3]),
+        tomb_raider_view_gte_input(vertices[4]),
+        tomb_raider_view_gte_input(vertices[5]),
+        tomb_raider_view_gte_input(vertices[6]),
+        tomb_raider_view_gte_input(vertices[7]),
+        tomb_raider_view_gte_input(vertices[8]),
+    ];
+    let [
+        Some(a),
+        Some(b),
+        Some(c),
+        Some(d),
+        Some(e),
+        Some(f),
+        Some(g),
+        Some(h),
+        Some(i),
+    ] = inputs
+    else {
+        return Some([
+            projection.project_view(vertices[0])?,
+            projection.project_view(vertices[1])?,
+            projection.project_view(vertices[2])?,
+            projection.project_view(vertices[3])?,
+            projection.project_view(vertices[4])?,
+            projection.project_view(vertices[5])?,
+            projection.project_view(vertices[6])?,
+            projection.project_view(vertices[7])?,
+            projection.project_view(vertices[8])?,
+        ]);
+    };
+    let top = scene::project_triangle_scheduled(a, b, c);
+    let middle = scene::project_triangle_scheduled(d, e, f);
+    let bottom = scene::project_triangle_scheduled(g, h, i);
+    Some([
+        tomb_raider_projected_option_from_gte(top[0], projection.near_z)?,
+        tomb_raider_projected_option_from_gte(top[1], projection.near_z)?,
+        tomb_raider_projected_option_from_gte(top[2], projection.near_z)?,
+        tomb_raider_projected_option_from_gte(middle[0], projection.near_z)?,
+        tomb_raider_projected_option_from_gte(middle[1], projection.near_z)?,
+        tomb_raider_projected_option_from_gte(middle[2], projection.near_z)?,
+        tomb_raider_projected_option_from_gte(bottom[0], projection.near_z)?,
+        tomb_raider_projected_option_from_gte(bottom[1], projection.near_z)?,
+        tomb_raider_projected_option_from_gte(bottom[2], projection.near_z)?,
+    ])
+}
+
+#[inline(always)]
+fn tomb_raider_view_gte_input(vertex: ViewVertex) -> Option<Vec3I16> {
+    Some(Vec3I16::new(
+        i16::try_from(vertex.x).ok()?,
+        i16::try_from(vertex.y.checked_neg()?).ok()?,
+        i16::try_from(vertex.z).ok()?,
+    ))
+}
+
+#[inline(always)]
+fn tomb_raider_projected_option_from_gte(
+    projected: psx_gte::scene::Projected,
+    near_z: i32,
+) -> Option<ProjectedVertex> {
+    if (projected.sz as i32) < near_z {
+        None
+    } else {
+        Some(ProjectedVertex::new(
+            projected.sx,
+            projected.sy,
+            projected.sz as i32,
+        ))
+    }
 }
 
 #[inline(always)]
@@ -3441,6 +3770,47 @@ fn midpoint_projected_textured_gouraud(
             midpoint_u8(a.color.2, b.color.2),
         ),
     )
+}
+
+fn midpoint_textured_gouraud_view(
+    a: TexturedGouraudViewVertex,
+    b: TexturedGouraudViewVertex,
+) -> TexturedGouraudViewVertex {
+    TexturedGouraudViewVertex {
+        position: ViewVertex::new(
+            midpoint_i32(a.position.x, b.position.x),
+            midpoint_i32(a.position.y, b.position.y),
+            midpoint_i32(a.position.z, b.position.z),
+        ),
+        u: midpoint_i32(a.u, b.u),
+        v: midpoint_i32(a.v, b.v),
+        color: (
+            midpoint_u8(a.color.0, b.color.0),
+            midpoint_u8(a.color.1, b.color.1),
+            midpoint_u8(a.color.2, b.color.2),
+        ),
+    }
+}
+
+fn textured_gouraud_view_uv_word(vertex: TexturedGouraudViewVertex) -> u16 {
+    (vertex.u.clamp(0, 255) as u16) | ((vertex.v.clamp(0, 255) as u16) << 8)
+}
+
+fn tomb_raider_quad_farthest_depth(vertices: [TexturedGouraudViewVertex; 4]) -> i32 {
+    vertices[0]
+        .position
+        .z
+        .max(vertices[1].position.z)
+        .max(vertices[2].position.z)
+        .max(vertices[3].position.z)
+}
+
+fn tomb_raider_triangle_farthest_depth(vertices: [TexturedGouraudViewVertex; 3]) -> i32 {
+    vertices[0]
+        .position
+        .z
+        .max(vertices[1].position.z)
+        .max(vertices[2].position.z)
 }
 
 fn midpoint_i16(a: i16, b: i16) -> i16 {

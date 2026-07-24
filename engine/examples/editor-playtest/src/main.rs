@@ -67,9 +67,9 @@ use psx_engine::{
     PrimitivePacketScratch, PrimitiveSink, ProjectedVertex, RenderSubmission, Rgb8, RoomPoint,
     RuntimeCollisionRoom, RuntimeRoom, Scene, SceneStateRef, SchedulerConfig, SimTick,
     TexturedModelRenderFace, ThirdPersonCameraConfig, ThirdPersonCameraInput,
-    ThirdPersonCameraState, ThirdPersonCameraTarget, VideoHz, VisualPacing, WorldCamera,
-    WorldProjection, WorldRenderMaterial, WorldRenderPass, WorldSurfaceOptions, WorldTriCommand,
-    WorldVertex, Q12,
+    ThirdPersonCameraState, ThirdPersonCameraTarget, TombRaiderSubdivisionKindMask, VideoHz,
+    VisualPacing, WorldCamera, WorldProjection, WorldRenderMaterial, WorldRenderPass,
+    WorldSurfaceOptions, WorldTriCommand, WorldVertex, Q12,
 };
 #[cfg(all(
     feature = "world-grid-visible",

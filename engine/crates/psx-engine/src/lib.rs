@@ -107,8 +107,9 @@ pub use render3d::{
     LoadedWorldCameraGte, LocalToWorldScale, MeshRenderStats, ModelPoseTranslation, ModelUvMapping,
     ModelUvOffset, ProjectedTexturedVertex, ProjectedVertex, SkyDirectionProjector,
     TexturedModelGeometry, TexturedModelLayer, TexturedModelRenderFace, TexturedModelRenderStats,
-    TexturedViewVertex, ViewVertex, WorldCamera, WorldProjection, WorldRenderLayer,
-    WorldRenderPass, WorldRenderStats, WorldSurfaceOptions, WorldTriCommand,
+    TexturedViewVertex, TombRaiderSubdivisionKindMask, TombRaiderSubdivisionProfile, ViewVertex,
+    WorldCamera, WorldProjection, WorldRenderLayer, WorldRenderPass, WorldRenderStats,
+    WorldSurfaceOptions, WorldTriCommand,
 };
 pub use scheduler::{
     collect_due_tasks, FixedUpdateOutcome, FrameScheduler, OverloadPolicy, SchedulerAction,

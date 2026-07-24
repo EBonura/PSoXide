@@ -1314,6 +1314,250 @@ fn prepared_depth_quad_splits_before_ps1_extent_rejection() {
     assert_eq!(packets.len(), stats.submitted_triangles as usize);
 }
 
+fn tomb_raider_quad_packet_count(depth: i32) -> (usize, WorldRenderStats) {
+    tomb_raider_quad_packet_count_with_profile(depth, TombRaiderSubdivisionProfile::TR5)
+}
+
+fn tomb_raider_quad_packet_count_with_profile(
+    depth: i32,
+    profile: TombRaiderSubdivisionProfile,
+) -> (usize, WorldRenderStats) {
+    let projection = WorldProjection::new(160, 120, 256, 16);
+    let positions = [
+        ViewVertex::new(-256, -256, depth),
+        ViewVertex::new(256, -256, depth),
+        ViewVertex::new(-256, 256, depth),
+        ViewVertex::new(256, 256, depth),
+    ];
+    let uv_words = [
+        model_uv_word((0, 0)),
+        model_uv_word((63, 0)),
+        model_uv_word((0, 63)),
+        model_uv_word((63, 63)),
+    ];
+    let colors = [(128, 128, 128); 4];
+    let material = TextureMaterial::opaque(2, 4, (128, 128, 128));
+    let options = WorldSurfaceOptions::new(DepthBand::whole(), DepthRange::new(16, 8192))
+        .with_cull_mode(CullMode::None)
+        .with_tomb_raider_subdivision_profile(profile);
+    let mut ot_storage = OrderingTable::<64>::new();
+    let mut ot = OtFrame::begin(&mut ot_storage);
+    let mut packet_scratch = crate::PrimitivePacketScratch::<32>::ZERO;
+    let mut packets = crate::PrimitivePacketArena::new(&mut packet_scratch);
+    let mut commands = [WorldTriCommand::EMPTY; 32];
+    let stats = {
+        let mut pass = WorldRenderPass::new(&mut ot, &mut commands);
+        pass.submit_tomb_raider_textured_gouraud_view_quad_uv_words(
+            &mut packets,
+            positions,
+            uv_words,
+            colors,
+            projection,
+            material,
+            options,
+        )
+    };
+    (packets.len(), stats)
+}
+
+#[test]
+fn tomb_raider_quad_subdivision_uses_exact_two_depth_bands() {
+    let (far_packets, far_stats) = tomb_raider_quad_packet_count(7 * 1024);
+    let (middle_packets, middle_stats) = tomb_raider_quad_packet_count(4 * 1024);
+    let (near_packets, near_stats) = tomb_raider_quad_packet_count(2 * 1024);
+
+    assert_eq!(far_packets, 1);
+    assert_eq!(middle_packets, 5);
+    assert_eq!(near_packets, 16);
+    assert_eq!(far_stats.split_triangles, 0);
+    assert_eq!(middle_stats.split_triangles, 1);
+    assert_eq!(near_stats.split_triangles, 5);
+}
+
+#[test]
+fn tomb_raider_quad_subdivision_scales_with_cortex_sector_size() {
+    let cortex = TombRaiderSubdivisionProfile::for_sector_size(1664);
+    assert_eq!(
+        cortex,
+        TombRaiderSubdivisionProfile {
+            max_levels: 2,
+            far_depth: 8320,
+            near_depth: 4992,
+            underdraw_depth: 4160,
+            underdraw_depth_bias: 416,
+        }
+    );
+
+    // Cortex's 3300-unit horizontal boom and 600-unit camera-to-focus height
+    // difference place its focus near z=3354. That is outside TR5's second
+    // band but remains inside the equivalent three-sector Cortex band.
+    let (tr5_focus_packets, tr5_focus_stats) =
+        tomb_raider_quad_packet_count_with_profile(3354, TombRaiderSubdivisionProfile::TR5);
+    let (cortex_focus_packets, cortex_focus_stats) =
+        tomb_raider_quad_packet_count_with_profile(3354, cortex);
+    assert_eq!(tr5_focus_packets, 5);
+    assert_eq!(tr5_focus_stats.split_triangles, 1);
+    assert_eq!(cortex_focus_packets, 16);
+    assert_eq!(cortex_focus_stats.split_triangles, 5);
+
+    // A surface at z=6000 was entirely outside the unscaled root band.
+    let (tr5_far_packets, _) =
+        tomb_raider_quad_packet_count_with_profile(6000, TombRaiderSubdivisionProfile::TR5);
+    let (cortex_far_packets, cortex_far_stats) =
+        tomb_raider_quad_packet_count_with_profile(6000, cortex);
+    assert_eq!(tr5_far_packets, 1);
+    assert_eq!(cortex_far_packets, 5);
+    assert_eq!(cortex_far_stats.split_triangles, 1);
+}
+
+#[test]
+fn tomb_raider_quad_subdivision_can_stop_after_one_level() {
+    let cortex = WorldSurfaceOptions::new(DepthBand::new(0, 31), DepthRange::new(1, i32::MAX))
+        .with_tomb_raider_subdivision_sector_size(1664)
+        .with_tomb_raider_subdivision_max_levels(1)
+        .tomb_raider_subdivision_profile;
+    let (packets, stats) = tomb_raider_quad_packet_count_with_profile(3354, cortex);
+
+    assert_eq!(cortex.max_levels, 1);
+    assert_eq!(packets, 4);
+    assert_eq!(stats.split_triangles, 1);
+}
+
+#[test]
+fn tomb_raider_debug_colors_identify_generated_levels() {
+    use super::world_pass_gouraud::tomb_raider_debug_subdivision_color;
+
+    assert_eq!(tomb_raider_debug_subdivision_color(0), None);
+    assert_eq!(tomb_raider_debug_subdivision_color(1), Some((0, 255, 255)));
+    assert_eq!(tomb_raider_debug_subdivision_color(2), Some((255, 0, 255)));
+    assert_eq!(tomb_raider_debug_subdivision_color(3), Some((255, 255, 0)));
+}
+
+#[test]
+fn tomb_raider_quad_subdivision_matches_psx_far_boundary() {
+    let (boundary_packets, boundary_stats) =
+        tomb_raider_quad_packet_count(TOMB_RAIDER_SUBDIVIDE_FAR_DEPTH);
+    let (inside_packets, inside_stats) =
+        tomb_raider_quad_packet_count(TOMB_RAIDER_SUBDIVIDE_FAR_DEPTH - 1);
+
+    assert_eq!(boundary_packets, 1);
+    assert_eq!(boundary_stats.split_triangles, 0);
+    assert_eq!(inside_packets, 5);
+    assert_eq!(inside_stats.split_triangles, 1);
+}
+
+fn tomb_raider_triangle_packet_count(depth: i32) -> (usize, WorldRenderStats) {
+    let projection = WorldProjection::new(160, 120, 256, 16);
+    let positions = [
+        ViewVertex::new(-256, -256, depth),
+        ViewVertex::new(256, -256, depth),
+        ViewVertex::new(0, 256, depth),
+    ];
+    let uv_words = [
+        model_uv_word((0, 0)),
+        model_uv_word((63, 0)),
+        model_uv_word((32, 63)),
+    ];
+    let colors = [(128, 128, 128); 3];
+    let material = TextureMaterial::opaque(2, 4, (128, 128, 128));
+    let options = WorldSurfaceOptions::new(DepthBand::whole(), DepthRange::new(16, 8192))
+        .with_cull_mode(CullMode::None)
+        .with_tomb_raider_subdivision(true);
+    let mut ot_storage = OrderingTable::<64>::new();
+    let mut ot = OtFrame::begin(&mut ot_storage);
+    let mut packet_scratch = crate::PrimitivePacketScratch::<32>::ZERO;
+    let mut packets = crate::PrimitivePacketArena::new(&mut packet_scratch);
+    let mut commands = [WorldTriCommand::EMPTY; 32];
+    let stats = {
+        let mut pass = WorldRenderPass::new(&mut ot, &mut commands);
+        pass.submit_tomb_raider_textured_gouraud_view_triangle_uv_words(
+            &mut packets,
+            positions,
+            uv_words,
+            colors,
+            projection,
+            material,
+            options,
+        )
+    };
+    (packets.len(), stats)
+}
+
+#[test]
+fn tomb_raider_triangle_subdivision_uses_exact_two_depth_bands() {
+    let (far_packets, far_stats) = tomb_raider_triangle_packet_count(7 * 1024);
+    let (middle_packets, middle_stats) = tomb_raider_triangle_packet_count(4 * 1024);
+    let (near_packets, near_stats) = tomb_raider_triangle_packet_count(2 * 1024);
+
+    assert_eq!(far_packets, 1);
+    assert_eq!(middle_packets, 5);
+    assert_eq!(near_packets, 16);
+    assert_eq!(far_stats.split_triangles, 0);
+    assert_eq!(middle_stats.split_triangles, 1);
+    assert_eq!(near_stats.split_triangles, 5);
+}
+
+#[test]
+fn tomb_raider_subdivision_reprojects_camera_space_midpoints() {
+    let projection = WorldProjection::new(160, 120, 256, 16);
+    let a = TexturedGouraudViewVertex::new(
+        ViewVertex::new(-512, 0, 1024),
+        model_uv_word((0, 0)),
+        (64, 64, 64),
+    );
+    let b = TexturedGouraudViewVertex::new(
+        ViewVertex::new(512, 0, 4096),
+        model_uv_word((64, 0)),
+        (192, 192, 192),
+    );
+    let projected_a = projection.project_view(a.position).unwrap();
+    let projected_b = projection.project_view(b.position).unwrap();
+    let midpoint = midpoint_textured_gouraud_view(a, b);
+    let projected_midpoint = projection.project_view(midpoint.position).unwrap();
+    let projected_edge_midpoint = midpoint_i16(projected_a.sx, projected_b.sx);
+
+    assert_ne!(projected_midpoint.sx, projected_edge_midpoint);
+    assert_eq!(projected_midpoint.sx, projection.screen_x);
+    assert_eq!(midpoint.u, 32);
+    assert_eq!(midpoint.color, (128, 128, 128));
+}
+
+#[test]
+fn tomb_raider_identity_rtps_matches_world_projection() {
+    let projection = WorldProjection::new(160, 120, 256, 16);
+    load_tomb_raider_view_projection_gte(projection);
+    for vertex in [
+        ViewVertex::new(-512, 320, 2048),
+        ViewVertex::new(384, -224, 1536),
+        ViewVertex::new(0, 0, 4096),
+    ] {
+        assert_eq!(
+            project_tomb_raider_view_vertex_gte(vertex, projection),
+            projection.project_view(vertex)
+        );
+    }
+}
+
+#[test]
+fn tomb_raider_identity_rtpt_matches_world_projection() {
+    let projection = WorldProjection::new(160, 120, 256, 16);
+    let vertices = [
+        ViewVertex::new(-512, 320, 2048),
+        ViewVertex::new(384, -224, 1536),
+        ViewVertex::new(0, 0, 4096),
+    ];
+    load_tomb_raider_view_projection_gte(projection);
+
+    assert_eq!(
+        project_tomb_raider_view_triangle_gte(vertices, projection),
+        Some([
+            projection.project_view(vertices[0]).unwrap(),
+            projection.project_view(vertices[1]).unwrap(),
+            projection.project_view(vertices[2]).unwrap(),
+        ])
+    );
+}
+
 #[test]
 fn prebuilt_static_room_quad_only_patches_positions_after_first_draw() {
     let first = [
