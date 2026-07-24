@@ -237,6 +237,24 @@ export async function inspectQuickState(gameId) {
   const state = await _getState('quick:' + gameId);
   return state ? state.createdAt + '\n' + state.cpuTick : undefined;
 }
+export function downloadCsv(filenameStem, csv) {
+  const safeStem = String(filenameStem || 'psoxide-input')
+    .replace(/[^a-zA-Z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '') || 'psoxide-input';
+  const stamp = new Date().toISOString()
+    .replace(/\.\d{3}Z$/, 'Z')
+    .replace(/[:]/g, '-');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = `${safeStem}-${stamp}.csv`;
+  anchor.style.display = 'none';
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+}
 "#)]
 extern "C" {
     #[wasm_bindgen(js_name = fsaSupported)]
@@ -266,6 +284,17 @@ extern "C" {
     fn idb_load_quick_state(game_id: &str) -> js_sys::Promise;
     #[wasm_bindgen(js_name = inspectQuickState)]
     fn idb_inspect_quick_state(game_id: &str) -> js_sys::Promise;
+    #[wasm_bindgen(catch, js_name = downloadCsv)]
+    fn download_csv(filename_stem: &str, csv: &str) -> Result<(), JsValue>;
+}
+
+/// Download a UTF-8 input recording as a timestamped CSV file.
+pub fn download_input_csv(filename_stem: &str, csv: &str) -> Result<(), String> {
+    download_csv(filename_stem, csv).map_err(|error| {
+        error
+            .as_string()
+            .unwrap_or_else(|| "browser rejected the CSV download".to_string())
+    })
 }
 
 /// Whether the persistent (File System Access) backend is available.
