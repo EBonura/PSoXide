@@ -1,6 +1,9 @@
 use super::*;
 use crate::tests::unique_temp_dir;
-use crate::{NodeKind, ProjectDocument, UiRect};
+use crate::{
+    ArchPropGeometry, GridUvTransform, NodeKind, ProjectDocument, UiRect,
+    ARCH_PROP_MATERIAL_COUNT,
+};
 
 fn starter_project_root() -> PathBuf {
     crate::default_project_dir()
@@ -28,6 +31,53 @@ fn test_wav_mono_44k() -> Vec<u8> {
         out.extend_from_slice(&sample.to_le_bytes());
     }
     out
+}
+
+#[test]
+fn tile_arch_cooks_surfaces_materials_and_segmented_collision() {
+    let mut project = ProjectDocument::starter();
+    let room_id = project
+        .active_scene()
+        .nodes()
+        .iter()
+        .find(|node| matches!(node.kind, NodeKind::Room { .. }))
+        .map(|node| node.id)
+        .expect("starter has a room");
+    let material = project
+        .resources
+        .iter()
+        .find(|resource| matches!(resource.data, ResourceData::Material(_)))
+        .map(|resource| resource.id)
+        .expect("starter has a material");
+    let arch_id = project.active_scene_mut().add_node(
+        room_id,
+        "Cook Test Arch",
+        NodeKind::ArchProp {
+            materials: [Some(material); ARCH_PROP_MATERIAL_COUNT],
+            uvs: [GridUvTransform::IDENTITY; ARCH_PROP_MATERIAL_COUNT],
+            geometry: ArchPropGeometry::default(),
+            collision_enabled: true,
+        },
+    );
+    project
+        .active_scene_mut()
+        .node_mut(arch_id)
+        .expect("arch exists")
+        .transform
+        .translation = [0.0, 0.0, 0.0];
+
+    let (package, report) = build_package(&project, &starter_project_root());
+    assert!(report.is_ok(), "{report:?}");
+    let package = package.expect("arch project cooks");
+    assert_eq!(package.arch_props.len(), 1);
+    assert_eq!(package.arch_prop_surfaces.len(), 34);
+    assert_eq!(package.arch_prop_collisions.len(), 8);
+    assert_eq!(package.arch_props[0].surface_count, 34);
+    assert_eq!(package.arch_props[0].collision_count, 8);
+    let manifest = render_manifest_source(&package);
+    assert!(manifest.contains("pub static ARCH_PROPS: &[LevelArchPropRecord]"));
+    assert!(manifest.contains("pub static ARCH_PROP_SURFACES: &[LevelArchPropSurfaceRecord]"));
+    assert!(manifest.contains("pub static ARCH_PROP_COLLISIONS: &[LevelArchPropCollisionRecord]"));
 }
 
 #[test]
