@@ -503,6 +503,7 @@ fn tool_group_cycle_includes_explicit_add_slots() {
         PlaceKind::Character,
         PlaceKind::ImageProp,
         PlaceKind::BoxProp,
+        PlaceKind::CylinderProp,
         PlaceKind::PointLightMarker,
         PlaceKind::ParticleEmitter,
         PlaceKind::Portal,

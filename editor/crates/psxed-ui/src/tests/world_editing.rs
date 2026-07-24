@@ -932,9 +932,11 @@ fn node_gizmo_scales_box_prop_width() {
         "Crate",
         NodeKind::BoxProp {
             materials: [None; psxed_project::BOX_PROP_FACE_COUNT],
+            uvs: [GridUvTransform::IDENTITY; psxed_project::BOX_PROP_FACE_COUNT],
             vertices: psxed_project::box_prop_vertices_for_size(1024),
             collision_enabled: true,
             break_flags: 0,
+            erosion: psxed_project::BoxPropErosion::default(),
         },
     );
     let mut workspace =
@@ -970,6 +972,61 @@ fn node_gizmo_scales_box_prop_width() {
         panic!("expected box prop");
     };
     assert_eq!(*vertices, psxed_project::box_prop_vertices_for_size(1024));
+}
+
+#[test]
+fn box_prop_one_to_one_uv_span_tracks_face_size_and_native_texture() {
+    let mut vertices = psxed_project::box_prop_vertices_for_size(1024);
+    assert_eq!(
+        box_prop_face_native_texel_span(vertices, 0, 1024, [64, 32]),
+        [63, 31]
+    );
+
+    for vertex in &mut vertices {
+        vertex[0] *= 2;
+    }
+    assert_eq!(
+        box_prop_face_native_texel_span(vertices, 0, 1024, [64, 32]),
+        [127, 31],
+        "a two-sector face repeats a 64px texture twice without stretching it"
+    );
+}
+
+#[test]
+fn box_prop_face_resize_keeps_the_opposite_face_fixed() {
+    let start_vertices = psxed_project::box_prop_vertices_for_size(1024);
+    let mut project = ProjectDocument::new("anchored-box-resize");
+    let node_id = project.active_scene_mut().add_node(
+        NodeId::ROOT,
+        "Anchored Crate",
+        NodeKind::BoxProp {
+            materials: [None; psxed_project::BOX_PROP_FACE_COUNT],
+            uvs: [GridUvTransform::IDENTITY; psxed_project::BOX_PROP_FACE_COUNT],
+            vertices: start_vertices,
+            collision_enabled: true,
+            break_flags: 0,
+            erosion: psxed_project::BoxPropErosion::default(),
+        },
+    );
+    let start_translation = [3.0, 0.0, 2.0];
+    let node = project.active_scene_mut().node_mut(node_id).unwrap();
+    node.transform.translation = start_translation;
+
+    apply_box_prop_face_gizmo_resize(node, start_translation, Some(start_vertices), 1, 1, 1024);
+
+    let NodeKind::BoxProp { vertices, .. } = &node.kind else {
+        unreachable!();
+    };
+    assert_eq!(vertices.iter().map(|vertex| vertex[0]).min(), Some(-544));
+    assert_eq!(vertices.iter().map(|vertex| vertex[0]).max(), Some(544));
+    assert_eq!(node.transform.translation[0], 3.03125);
+    let left_world = node.transform.translation[0] * 1024.0 - 544.0;
+    let right_world = node.transform.translation[0] * 1024.0 + 544.0;
+    assert_eq!(left_world, 2560.0, "the opposite (left) face stays fixed");
+    assert_eq!(
+        right_world, 3648.0,
+        "the dragged face moves one 64-unit step"
+    );
 }
 
 #[test]
@@ -1398,9 +1455,11 @@ fn material_click_assignment_updates_selected_box_prop_faces() {
         "Crate",
         NodeKind::BoxProp {
             materials: [None; psxed_project::BOX_PROP_FACE_COUNT],
+            uvs: [GridUvTransform::IDENTITY; psxed_project::BOX_PROP_FACE_COUNT],
             vertices: psxed_project::box_prop_vertices_for_size(1024),
             collision_enabled: true,
             break_flags: 0,
+            erosion: psxed_project::BoxPropErosion::default(),
         },
     );
     let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
@@ -1441,9 +1500,11 @@ fn material_click_assignment_applies_to_selected_box_prop() {
         "Crate",
         NodeKind::BoxProp {
             materials: [None; psxed_project::BOX_PROP_FACE_COUNT],
+            uvs: [GridUvTransform::IDENTITY; psxed_project::BOX_PROP_FACE_COUNT],
             vertices: psxed_project::box_prop_vertices_for_size(1024),
             collision_enabled: true,
             break_flags: 0,
+            erosion: psxed_project::BoxPropErosion::default(),
         },
     );
     let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
@@ -1484,9 +1545,11 @@ fn box_prop_resource_click_keeps_node_selection_active() {
         "Crate",
         NodeKind::BoxProp {
             materials: [None; psxed_project::BOX_PROP_FACE_COUNT],
+            uvs: [GridUvTransform::IDENTITY; psxed_project::BOX_PROP_FACE_COUNT],
             vertices: psxed_project::box_prop_vertices_for_size(1024),
             collision_enabled: true,
             break_flags: 0,
+            erosion: psxed_project::BoxPropErosion::default(),
         },
     );
     let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
@@ -1718,4 +1781,36 @@ fn water_tool_paints_one_selected_volume_and_erases_by_cell() {
     );
     assert!(workspace.project.active_scene().node(volume).is_none());
     assert_eq!(workspace.status, "Deleted node");
+}
+
+#[test]
+fn water_tool_derives_initial_height_from_slope_low_points() {
+    let mut project = ProjectDocument::new("water-slope-anchor");
+    let mut grid = WorldGrid::empty(2, 1, 1024);
+    grid.set_floor(0, 0, 0, None);
+    grid.set_floor(1, 0, 0, None);
+    grid.sector_mut(0, 0)
+        .and_then(|sector| sector.floor.as_mut())
+        .expect("sloped floor")
+        .heights = [-256, -128, 0, 128];
+    let room = project
+        .active_scene_mut()
+        .add_node(NodeId::ROOT, "Room", NodeKind::Room { grid });
+    let mut workspace = EditorWorkspace::with_project(std::env::temp_dir(), project);
+
+    workspace.run_paint_action(ViewTool::Water, room, 0, 0, None, [512.0, 0.0, 512.0]);
+
+    let NodeKind::WaterVolume { settings, .. } = &workspace
+        .project
+        .active_scene()
+        .node(workspace.selected_node_id())
+        .expect("painted water volume")
+        .kind
+    else {
+        panic!("water volume expected");
+    };
+    assert_eq!(
+        settings.height_above_floor, 256,
+        "the neighbouring zero-height rim is measured from the slope's -256 low point"
+    );
 }

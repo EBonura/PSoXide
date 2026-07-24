@@ -37,7 +37,14 @@ impl Playtest {
         // 60 Hz-authored speeds/durations while avoiding two identical,
         // collision-heavy decisions per displayed frame. Player control,
         // combat arcs, and the logic graph remain 60 Hz below.
-        let entity_stats = if ctx.sim_tick.as_u32().is_multiple_of(2) {
+        let npc_tick_due =
+            cfg!(feature = "npc-think-60hz") || ctx.sim_tick.as_u32().is_multiple_of(2);
+        let npc_delta_ticks = if cfg!(feature = "npc-think-60hz") {
+            1
+        } else {
+            2
+        };
+        let entity_stats = if npc_tick_due {
             let mut entity_positions = [[0i32; 3]; MAX_GAME_ENTITIES];
             let mut entity_dead = [false; MAX_GAME_ENTITIES];
             for (index, slot) in entity_positions
@@ -73,7 +80,7 @@ impl Playtest {
                     active_rooms: &active_rooms[..active_count],
                 },
                 &mut mover,
-                2,
+                npc_delta_ticks,
             )
         } else {
             psx_game_runtime::entities::GameEntityTickStats::default()
@@ -339,8 +346,7 @@ impl Playtest {
         }
 
         let now = ctx.sim_tick;
-        let action_locked =
-            self.anim_lock_until_tick > now || self.water_death_ticks_remaining > 0;
+        let action_locked = self.anim_lock_until_tick > now || self.water_death_ticks_remaining > 0;
         self.refresh_active_interactable();
         if !action_locked {
             if let Some(index) = self.active_interactable {
@@ -440,7 +446,7 @@ impl Playtest {
             1 => single_collision_room.as_ref().map(|room| room.collision()),
             _ => None,
         };
-        let mut blockers = [CharacterCollisionCylinder::EMPTY; MAX_MODEL_INSTANCES];
+        let mut blockers = [CharacterCollisionCylinder::EMPTY; MAX_COLLISION_CYLINDERS];
         let blocker_count = self.collect_collision_blockers(&mut blockers);
         let mut aabb_blockers = [CharacterCollisionAabb::EMPTY; MAX_BOX_PROP_BLOCKERS];
         let aabb_blocker_count = self.collect_box_prop_collision_blockers(&mut aabb_blockers);
@@ -485,8 +491,7 @@ impl Playtest {
                 self.player_health = 0;
                 self.anim_state = PlayerAnim::Death;
                 self.anim_start_tick = now;
-                self.anim_lock_until_tick =
-                    now.saturating_add(u32::from(water.death_delay_ticks));
+                self.anim_lock_until_tick = now.saturating_add(u32::from(water.death_delay_ticks));
                 self.lock_target = None;
                 self.soft_lock_target = None;
                 self.active_interactable = None;

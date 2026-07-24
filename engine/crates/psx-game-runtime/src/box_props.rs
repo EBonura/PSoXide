@@ -11,7 +11,7 @@ use psx_engine::{
     Angle, CharacterCollisionAabb, CharacterMotorConfig, CharacterMotorInput, RoomPoint,
     WorldVertex,
 };
-use psx_level::{box_prop_flags, LevelBoxPropRecord, RoomIndex};
+use psx_level::{box_prop_flags, LevelBoxPropRecord, LevelBoxPropSurfaceRecord, RoomIndex};
 use psx_math::int32::{abs_i32, square_i32_saturating};
 
 use crate::image_props::abs_delta_i32;
@@ -584,11 +584,11 @@ impl<
 
     /// Collect the unbroken, door-closed collision-enabled boxes of
     /// `current_room` as AABB blockers. Returns the filled count.
-    pub fn collect_collision_blockers<const MAX_BOX_PROP_BLOCKERS: usize>(
+    pub fn collect_collision_blockers(
         &self,
         props: &'static [LevelBoxPropRecord],
         current_room: RoomIndex,
-        out: &mut [CharacterCollisionAabb; MAX_BOX_PROP_BLOCKERS],
+        out: &mut [CharacterCollisionAabb],
     ) -> usize {
         let mut count = 0usize;
         for (index, prop) in props.iter().enumerate() {

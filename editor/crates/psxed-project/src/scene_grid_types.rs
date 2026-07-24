@@ -883,8 +883,26 @@ pub const DEFAULT_BOX_PROP_SIZE: u16 = DEFAULT_WORLD_SECTOR_SIZE as u16;
 pub const BOX_PROP_FACE_NAMES: [&str; BOX_PROP_FACE_COUNT] =
     ["Front", "Right", "Back", "Left", "Top", "Bottom"];
 
+/// Vertex perimeter for each Box Prop face in [`BOX_PROP_FACE_NAMES`] order.
+///
+/// The order on every face is UV-compatible: `[top-left, top-right,
+/// bottom-right, bottom-left]` for vertical faces, with equivalent perimeter
+/// ordering on the top and bottom.
+pub const BOX_PROP_FACE_VERTEX_INDICES: [[usize; 4]; BOX_PROP_FACE_COUNT] = [
+    [4, 5, 1, 0],
+    [5, 6, 2, 1],
+    [6, 7, 3, 2],
+    [7, 4, 0, 3],
+    [7, 6, 5, 4],
+    [0, 1, 2, 3],
+];
+
 pub(crate) const fn default_box_prop_materials() -> [Option<ResourceId>; BOX_PROP_FACE_COUNT] {
     [None; BOX_PROP_FACE_COUNT]
+}
+
+pub(crate) const fn default_box_prop_uvs() -> [GridUvTransform; BOX_PROP_FACE_COUNT] {
+    [GridUvTransform::IDENTITY; BOX_PROP_FACE_COUNT]
 }
 
 pub(crate) const fn default_box_prop_vertices() -> [[i16; 3]; BOX_PROP_VERTEX_COUNT] {
@@ -2150,6 +2168,33 @@ impl GridHorizontalFace {
             local_z,
             sector_size,
         )
+    }
+
+    /// Lowest height present in the rendered face geometry.
+    ///
+    /// This honors per-triangle height overrides and ignores the triangle
+    /// removed by a dropped corner. Water uses this as its floor anchor so a
+    /// horizontal surface on a slope starts from the low point rather than
+    /// floating from the center or high edge.
+    pub fn lowest_height(&self) -> i32 {
+        let mut lowest = i32::MAX;
+        for triangle_index in 0..2 {
+            let corners = horizontal_triangle_corners(self.split, triangle_index);
+            if self
+                .dropped_corner
+                .is_some_and(|dropped| corners.contains(&dropped))
+            {
+                continue;
+            }
+            for height in self.triangle_heights(triangle_index) {
+                lowest = lowest.min(height);
+            }
+        }
+        if lowest == i32::MAX {
+            self.heights.iter().copied().min().unwrap_or_default()
+        } else {
+            lowest
+        }
     }
 
     /// `true` when the face is currently a triangle.

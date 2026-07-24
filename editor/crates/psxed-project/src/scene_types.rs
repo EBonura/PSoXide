@@ -122,6 +122,9 @@ pub enum NodeKind {
         /// Per-face material slots in [`BOX_PROP_FACE_NAMES`] order.
         #[serde(default = "default_box_prop_materials")]
         materials: [Option<ResourceId>; BOX_PROP_FACE_COUNT],
+        /// Per-face texture transforms in [`BOX_PROP_FACE_NAMES`] order.
+        #[serde(default = "default_box_prop_uvs")]
+        uvs: [GridUvTransform; BOX_PROP_FACE_COUNT],
         /// Editable local vertices, bottom ring then top ring.
         #[serde(default = "default_box_prop_vertices")]
         vertices: [[i16; 3]; BOX_PROP_VERTEX_COUNT],
@@ -131,6 +134,29 @@ pub enum NodeKind {
         /// Authored break trigger bits from [`psx_level::box_prop_flags`].
         #[serde(default)]
         break_flags: u16,
+        /// Optional direction-driven low-poly erosion. Disabled by default so
+        /// existing projects retain the exact legacy six-face box.
+        #[serde(default)]
+        erosion: BoxPropErosion,
+    },
+    /// Low-poly radial prop for columns, pillars, pipes, and authored debris.
+    ///
+    /// This deliberately remains separate from [`BoxProp`](Self::BoxProp):
+    /// the transform is a bottom-center anchor and `geometry` describes a
+    /// compact radial profile expanded by the shared preview/cook generator.
+    CylinderProp {
+        /// Side, top, bottom, and fracture material slots.
+        #[serde(default = "default_cylinder_prop_materials")]
+        materials: [Option<ResourceId>; CYLINDER_PROP_MATERIAL_COUNT],
+        /// Per-slot texture transforms.
+        #[serde(default = "default_cylinder_prop_uvs")]
+        uvs: [GridUvTransform; CYLINDER_PROP_MATERIAL_COUNT],
+        /// Compact procedural shape recipe.
+        #[serde(default)]
+        geometry: CylinderPropGeometry,
+        /// Whether this prop blocks the character motor.
+        #[serde(default = "default_true")]
+        collision_enabled: bool,
     },
     /// Render a cooked [`ResourceData::Model`] from the transform
     /// on the nearest entity ancestor. This is the component form of
@@ -352,6 +378,7 @@ impl NodeKind {
             Self::MeshInstance { .. } => "Mesh Instance",
             Self::ImageProp { .. } => "Image Prop",
             Self::BoxProp { .. } => "Box Prop",
+            Self::CylinderProp { .. } => "Cylinder Prop",
             Self::ModelRenderer { .. } => "Model Renderer",
             Self::Animator { .. } => "Animator",
             Self::Collider { .. } => "Collider",

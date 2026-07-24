@@ -49,6 +49,16 @@ fn horizontal_face_height_samples_editor_corner_convention() {
 }
 
 #[test]
+fn horizontal_face_lowest_height_includes_triangle_overrides() {
+    let mut floor = GridHorizontalFace::flat(128, None);
+    floor.heights = [64, 256, 384, 192];
+    assert_eq!(floor.lowest_height(), 64);
+
+    floor.triangle_heights_mut(1)[1] = -192;
+    assert_eq!(floor.lowest_height(), -192);
+}
+
+#[test]
 fn grid_floor_height_handles_negative_origin_cells() {
     let mut grid = WorldGrid::empty(1, 1, 1024);
     grid.origin = [-1, -1];
