@@ -257,6 +257,8 @@ pub struct GuestRuntimeProfile {
     pub stage_cycles: [f32; STAGE_COUNT],
     /// Completed span count per guest stage id.
     pub stage_hits: [f32; STAGE_COUNT],
+    /// Largest single completed stage span per id.
+    pub stage_max_cycles: [f32; STAGE_COUNT],
     /// Total cycle spans per scheduled guest task id.
     pub task_cycles: [f32; TASK_COUNT],
     /// Completed span count per scheduled guest task id.
@@ -285,6 +287,7 @@ impl Default for GuestRuntimeProfile {
             frames: 0.0,
             stage_cycles: [0.0; STAGE_COUNT],
             stage_hits: [0.0; STAGE_COUNT],
+            stage_max_cycles: [0.0; STAGE_COUNT],
             task_cycles: [0.0; TASK_COUNT],
             task_hits: [0.0; TASK_COUNT],
             task_max_cycles: [0.0; TASK_COUNT],
@@ -320,6 +323,7 @@ impl GuestRuntimeProfile {
         while i < STAGE_COUNT {
             self.stage_cycles[i] += other.stage_cycles[i];
             self.stage_hits[i] += other.stage_hits[i];
+            self.stage_max_cycles[i] = self.stage_max_cycles[i].max(other.stage_max_cycles[i]);
             i += 1;
         }
         let mut task_index = 0;
@@ -819,6 +823,252 @@ pub struct FrameProfiler {
     guest_stage_starts: [Option<u64>; STAGE_COUNT],
     guest_task_starts: [Option<u64>; TASK_COUNT],
     guest_last_visual_frame_cycle: Option<u64>,
+    capture: Option<FrameProfilerCapture>,
+}
+
+/// Bounded aggregate for a full input recording or replay.
+///
+/// The rolling profiler intentionally retains only 500 host frames. This
+/// aggregate keeps totals and high-water marks for an arbitrarily long route
+/// without retaining one very wide telemetry sample per redraw.
+#[derive(Clone, Copy, Debug, Default)]
+struct FrameProfilerCapture {
+    sample_count: u64,
+    totals: FrameProfileSample,
+    max_host_dt_ms: f32,
+    max_total_ms: f32,
+    max_emu_ms: f32,
+    max_vram_upload_ms: f32,
+    max_hw_render_ms: f32,
+    observed_tri_capacity: u32,
+}
+
+impl FrameProfilerCapture {
+    fn record(&mut self, sample: FrameProfileSample) {
+        self.sample_count = self.sample_count.saturating_add(1);
+        self.max_host_dt_ms = self.max_host_dt_ms.max(sample.host_dt_ms);
+        self.max_total_ms = self.max_total_ms.max(sample.total_ms);
+        self.max_emu_ms = self.max_emu_ms.max(sample.emu_ms);
+        self.max_vram_upload_ms = self.max_vram_upload_ms.max(sample.vram_upload_ms);
+        self.max_hw_render_ms = self.max_hw_render_ms.max(sample.hw_render_ms);
+
+        let used = sample
+            .guest
+            .counter_latest_value(counter::TRI_PRIMITIVES as usize);
+        let free = sample
+            .guest
+            .counter_latest_value(counter::TRI_PRIMITIVE_REMAINING as usize);
+        if sample
+            .guest
+            .has_counter_observation(counter::TRI_PRIMITIVES as usize)
+            && sample
+                .guest
+                .has_counter_observation(counter::TRI_PRIMITIVE_REMAINING as usize)
+        {
+            self.observed_tri_capacity = self.observed_tri_capacity.max(used.saturating_add(free));
+        }
+        self.totals.accumulate(sample);
+    }
+}
+
+/// Completed whole-run profiler capture.
+#[derive(Clone, Copy, Debug)]
+pub struct FrameProfilerCaptureReport {
+    capture: FrameProfilerCapture,
+}
+
+impl FrameProfilerCaptureReport {
+    /// Number of frontend samples folded into this report.
+    pub fn sample_count(self) -> u64 {
+        self.capture.sample_count
+    }
+
+    /// Export one compact row per host metric, guest stage/task and observed
+    /// guest counter. This stays small even for hour-long input tapes.
+    pub fn csv(self) -> String {
+        let capture = self.capture;
+        let samples = capture.sample_count.max(1) as f32;
+        let guest = capture.totals.guest;
+        let visual_frames = guest
+            .counter_total(counter::VISUAL_FRAMES as usize)
+            .max(1.0);
+        let stream_capacity = guest.counter_max_value(counter::ROOM_STREAM_SLOT_LIMIT as usize);
+        let mut out =
+            String::from("kind,id,name,total,hits,average,max,latest,capacity,peak_percent\n");
+
+        push_capture_row(
+            &mut out,
+            "session",
+            0,
+            "host samples",
+            capture.sample_count as f32,
+            capture.sample_count as f32,
+            1.0,
+            capture.sample_count as f32,
+            capture.sample_count as u32,
+            None,
+        );
+        push_capture_row(
+            &mut out,
+            "host",
+            0,
+            "host frame dt ms",
+            capture.totals.host_dt_ms,
+            capture.sample_count as f32,
+            capture.totals.host_dt_ms / samples,
+            capture.max_host_dt_ms,
+            0,
+            None,
+        );
+        push_capture_row(
+            &mut out,
+            "host",
+            1,
+            "total frame work ms",
+            capture.totals.total_ms,
+            capture.sample_count as f32,
+            capture.totals.total_ms / samples,
+            capture.max_total_ms,
+            0,
+            None,
+        );
+        push_capture_row(
+            &mut out,
+            "host",
+            2,
+            "emulation ms",
+            capture.totals.emu_ms,
+            capture.sample_count as f32,
+            capture.totals.emu_ms / samples,
+            capture.max_emu_ms,
+            0,
+            None,
+        );
+        push_capture_row(
+            &mut out,
+            "host",
+            3,
+            "vram upload ms",
+            capture.totals.vram_upload_ms,
+            capture.sample_count as f32,
+            capture.totals.vram_upload_ms / samples,
+            capture.max_vram_upload_ms,
+            0,
+            None,
+        );
+        push_capture_row(
+            &mut out,
+            "host",
+            4,
+            "hardware render ms",
+            capture.totals.hw_render_ms,
+            capture.sample_count as f32,
+            capture.totals.hw_render_ms / samples,
+            capture.max_hw_render_ms,
+            0,
+            None,
+        );
+
+        for id in 1..STAGE_COUNT {
+            let total = guest.stage_cycles[id];
+            let hits = guest.stage_hits[id];
+            if total <= 0.0 && hits <= 0.0 {
+                continue;
+            }
+            push_capture_row(
+                &mut out,
+                "stage",
+                id,
+                stage_name(id as u16),
+                total,
+                hits,
+                if hits > 0.0 { total / hits } else { 0.0 },
+                guest.stage_max_cycles[id],
+                0,
+                None,
+            );
+        }
+        for id in 1..TASK_COUNT {
+            let total = guest.task_cycles[id];
+            let hits = guest.task_hits[id];
+            if total <= 0.0 && hits <= 0.0 {
+                continue;
+            }
+            push_capture_row(
+                &mut out,
+                "task",
+                id,
+                task_name(id as u16),
+                total,
+                hits,
+                if hits > 0.0 { total / hits } else { 0.0 },
+                guest.task_max_cycles[id],
+                0,
+                None,
+            );
+        }
+        for id in 1..COUNTER_COUNT {
+            let total = guest.counters[id];
+            let max = guest.counter_max_values[id];
+            let latest = guest.counter_latest_values[id];
+            if total <= 0.0 && max <= 0.0 && latest == 0 {
+                continue;
+            }
+            let capacity = match id as u16 {
+                counter::TRI_PRIMITIVES | counter::WORLD_COMMANDS
+                    if capture.observed_tri_capacity > 0 =>
+                {
+                    Some(capture.observed_tri_capacity as f32)
+                }
+                counter::ROOM_STREAM_RESIDENT_SLOTS if stream_capacity > 0.0 => {
+                    Some(stream_capacity)
+                }
+                _ => None,
+            };
+            push_capture_row(
+                &mut out,
+                "counter",
+                id,
+                counter_name(id as u16),
+                total,
+                visual_frames,
+                total / visual_frames,
+                max,
+                latest,
+                capacity,
+            );
+        }
+        out
+    }
+}
+
+fn push_capture_row(
+    out: &mut String,
+    kind: &str,
+    id: usize,
+    name: &str,
+    total: f32,
+    hits: f32,
+    average: f32,
+    max: f32,
+    latest: u32,
+    capacity: Option<f32>,
+) {
+    let (capacity_text, percent_text) = capacity.map_or_else(
+        || (String::new(), String::new()),
+        |capacity| {
+            let percent = if capacity > 0.0 {
+                max * 100.0 / capacity
+            } else {
+                0.0
+            };
+            (format!("{capacity:.0}"), format!("{percent:.2}"))
+        },
+    );
+    let _ = writeln!(
+        out,
+        "{kind},{id},{name},{total:.0},{hits:.0},{average:.3},{max:.0},{latest},{capacity_text},{percent_text}"
+    );
 }
 
 impl Default for FrameProfiler {
@@ -836,6 +1086,7 @@ impl Default for FrameProfiler {
             guest_stage_starts: [None; STAGE_COUNT],
             guest_task_starts: [None; TASK_COUNT],
             guest_last_visual_frame_cycle: None,
+            capture: None,
         }
     }
 }
@@ -845,6 +1096,9 @@ impl FrameProfiler {
     pub fn record(&mut self, mut sample: FrameProfileSample) -> Option<String> {
         self.next_sample_serial = self.next_sample_serial.wrapping_add(1);
         sample.sample_serial = self.next_sample_serial;
+        if let Some(capture) = self.capture.as_mut() {
+            capture.record(sample);
+        }
         if self.samples.len() >= HISTORY_CAP {
             self.samples.pop_front();
         }
@@ -940,6 +1194,23 @@ impl FrameProfiler {
         self.guest_last_visual_frame_cycle = None;
     }
 
+    /// Start a fresh bounded whole-run capture.
+    pub fn begin_capture(&mut self) {
+        self.capture = Some(FrameProfilerCapture::default());
+    }
+
+    /// True while samples are being folded into a whole-run capture.
+    pub fn capture_active(&self) -> bool {
+        self.capture.is_some()
+    }
+
+    /// Finish the active whole-run capture.
+    pub fn finish_capture(&mut self) -> Option<FrameProfilerCaptureReport> {
+        self.capture
+            .take()
+            .map(|capture| FrameProfilerCaptureReport { capture })
+    }
+
     /// Number of samples currently retained in the rolling history.
     pub fn history_len(&self) -> usize {
         self.samples.len()
@@ -977,8 +1248,10 @@ impl FrameProfiler {
                         continue;
                     };
                     let idx = event.id as usize;
-                    out.stage_cycles[idx] += event.cycles.saturating_sub(start) as f32;
+                    let cycles = event.cycles.saturating_sub(start) as f32;
+                    out.stage_cycles[idx] += cycles;
                     out.stage_hits[idx] += 1.0;
+                    out.stage_max_cycles[idx] = out.stage_max_cycles[idx].max(cycles);
                 }
                 emulator_core::telemetry::GuestTelemetryKind::TaskBegin => {
                     if let Some(slot) = self.guest_task_starts.get_mut(event.id as usize) {
@@ -1574,6 +1847,7 @@ fn push_history_csv_header(out: &mut String) {
     for id in 0..STAGE_COUNT {
         push_csv_metric_header(out, "stage", id, stage_name(id as u16), "cycles");
         push_csv_metric_header(out, "stage", id, stage_name(id as u16), "hits");
+        push_csv_metric_header(out, "stage", id, stage_name(id as u16), "max");
     }
     for id in 0..TASK_COUNT {
         push_csv_metric_header(out, "task", id, task_name(id as u16), "cycles");
@@ -1668,8 +1942,10 @@ fn push_history_csv_sample(out: &mut String, index: usize, sample: FrameProfileS
     for id in 0..STAGE_COUNT {
         let _ = write!(
             out,
-            ",{:.0},{:.0}",
-            sample.guest.stage_cycles[id], sample.guest.stage_hits[id]
+            ",{:.0},{:.0},{:.0}",
+            sample.guest.stage_cycles[id],
+            sample.guest.stage_hits[id],
+            sample.guest.stage_max_cycles[id]
         );
     }
     for id in 0..TASK_COUNT {
@@ -1853,6 +2129,7 @@ mod tests {
             guest_stage_starts: [None; STAGE_COUNT],
             guest_task_starts: [None; TASK_COUNT],
             guest_last_visual_frame_cycle: None,
+            capture: None,
         };
         profiler.record(FrameProfileSample {
             total_ms: 10.0,
@@ -1957,6 +2234,37 @@ mod tests {
             b.stage_cycles[emulator_core::telemetry::stage::RENDER as usize],
             150.0
         );
+        assert_eq!(
+            b.stage_max_cycles[emulator_core::telemetry::stage::RENDER as usize],
+            150.0
+        );
+    }
+
+    #[test]
+    fn whole_run_capture_survives_the_rolling_history_limit() {
+        let mut profiler = FrameProfiler::default();
+        profiler.begin_capture();
+        for frame in 0..(HISTORY_CAP + 25) {
+            let mut sample = FrameProfileSample {
+                total_ms: frame as f32,
+                host_dt_ms: 16.0,
+                ..FrameProfileSample::default()
+            };
+            sample.guest.counter_latest_values[counter::TRI_PRIMITIVES as usize] = frame as u32;
+            sample.guest.counter_latest_values[counter::TRI_PRIMITIVE_REMAINING as usize] =
+                1536u32.saturating_sub(frame as u32);
+            sample.guest.counter_max_values[counter::TRI_PRIMITIVES as usize] = frame as f32;
+            sample.guest.counters[counter::TRI_PRIMITIVES as usize] = frame as f32;
+            profiler.record(sample);
+        }
+
+        assert_eq!(profiler.history_len(), HISTORY_CAP);
+        let report = profiler.finish_capture().unwrap();
+        assert_eq!(report.sample_count(), (HISTORY_CAP + 25) as u64);
+        let csv = report.csv();
+        assert!(csv.contains("counter,1,tri prims"));
+        assert!(csv.contains(",1536,"));
+        assert!(!profiler.capture_active());
     }
 
     #[test]

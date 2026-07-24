@@ -928,6 +928,7 @@ impl ApplicationHandler for Shell {
                 self.state.stop_input_recording_if_active();
                 #[cfg(feature = "editor")]
                 self.state.stop_embedded_playtest();
+                self.state.flush_pending_input_profile_capture();
                 self.state.stop_examples_build();
                 // Flush any dirty memory card so save progress
                 // survives a window-close. A hard crash still
@@ -1324,6 +1325,7 @@ impl ApplicationHandler for Shell {
                             self.state.stop_input_recording_if_active();
                             #[cfg(feature = "editor")]
                             self.state.stop_embedded_playtest();
+                            self.state.flush_pending_input_profile_capture();
                             self.state.stop_examples_build();
                             if let Err(e) = self.state.flush_memcard_port1() {
                                 eprintln!("[frontend] memcard flush on quit: {e}");
@@ -1743,6 +1745,10 @@ impl ApplicationHandler for Shell {
                             display_uv,
                             state.editor_playtest_input_tape_status(),
                             editor_play_metrics(state),
+                            state
+                                .bus
+                                .as_ref()
+                                .is_some_and(|bus| bus.gpu.wireframe_enabled),
                         )
                     } else {
                         psxed_ui::EditorViewport3dPresentation::edit(
@@ -1789,6 +1795,7 @@ impl ApplicationHandler for Shell {
                 if let Some(line) = state.profiler.record(profile) {
                     eprintln!("{line}");
                 }
+                state.flush_pending_input_profile_capture();
             }
             _ => {
                 if !consumed {

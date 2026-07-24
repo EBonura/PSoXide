@@ -235,6 +235,12 @@ pub struct FreelookInput {
     pub boost: bool,
 }
 
+#[derive(Clone, Debug)]
+struct PendingInputProfileCapture {
+    tape_path: PathBuf,
+    phase: &'static str,
+}
+
 pub struct AppState {
     /// Active host workspace.
     pub workspace: Workspace,
@@ -248,6 +254,9 @@ pub struct AppState {
     /// Video-frame-exact port-1 recording/replay shared by ordinary emulator
     /// sessions, headless runs and embedded editor playtests.
     playtest_input_tape: PlaytestInputTape,
+    /// Whole-run profiler capture waiting for the current host sample to be
+    /// recorded before it is persisted beside its input tape.
+    pending_input_profile_capture: Option<PendingInputProfileCapture>,
     /// Editor project directory observed at the last
     /// [`AppState::sync_embedded_playtest_with_editor_project`]
     /// call. When the editor's current project_dir diverges, the
@@ -464,6 +473,7 @@ impl AppState {
             #[cfg(feature = "editor")]
             embedded_playtest: EmbeddedPlaytestState::default(),
             playtest_input_tape: PlaytestInputTape::default(),
+            pending_input_profile_capture: None,
             #[cfg(feature = "editor")]
             editor_project_dir_seen,
             #[cfg(feature = "editor")]
@@ -2390,8 +2400,17 @@ impl AppState {
     /// authored 3D preview.
     pub fn stop_embedded_playtest(&mut self) {
         let tape_path = self.editor_playtest_input_tape_path();
+        let capture_phase = if self.playtest_input_tape.is_recording() {
+            Some("record")
+        } else if self.playtest_input_tape.is_replaying() {
+            Some("replay")
+        } else {
+            None
+        };
         if let Err(error) = self.playtest_input_tape.stop_active(&tape_path) {
             eprintln!("[frontend] stop input tape: {error}");
+        } else if let Some(phase) = capture_phase {
+            self.queue_input_profile_capture(&tape_path, phase);
         }
         if let Some(mut child) = self.embedded_playtest.take_build_child() {
             let _ = child.kill();
@@ -2454,6 +2473,7 @@ impl AppState {
             return;
         }
         self.playtest_input_tape.start_recording();
+        self.begin_input_profile_capture();
         let _ = self.embedded_playtest.capture_input();
         self.running = true;
         self.menu.open = false;
@@ -2465,7 +2485,9 @@ impl AppState {
 
     fn stop_embedded_playtest_input_recording(&mut self) {
         let path = self.editor_playtest_input_tape_path();
-        match self.playtest_input_tape.stop_recording(&path) {
+        let result = self.playtest_input_tape.stop_recording(&path);
+        self.queue_input_profile_capture(&path, "record");
+        match result {
             Ok(frames) => {
                 let message = format!("Input recording saved: {frames} frames");
                 self.editor.set_status(message.clone());
@@ -2493,6 +2515,7 @@ impl AppState {
         let path = self.editor_playtest_input_tape_path();
         match self.playtest_input_tape.start_replay(&path) {
             Ok(frames) => {
+                self.begin_input_profile_capture();
                 let _ = self.embedded_playtest.capture_input();
                 self.running = true;
                 self.menu.open = false;
@@ -2510,7 +2533,9 @@ impl AppState {
     }
 
     fn stop_embedded_playtest_input_replay(&mut self) {
+        let path = self.editor_playtest_input_tape_path();
         self.playtest_input_tape.stop_replay();
+        self.queue_input_profile_capture(&path, "replay");
         let message = "Input replay stopped";
         self.editor.set_status(message);
         self.status_message_set(message);
@@ -2592,6 +2617,18 @@ impl AppState {
             psxed_ui::EditorPlaytestRequest::DumpProfilerHistory => {
                 self.dump_embedded_playtest_profiler_history();
             }
+            psxed_ui::EditorPlaytestRequest::SetWireframe { enabled } => {
+                if let Some(bus) = self.bus.as_mut() {
+                    bus.gpu.wireframe_enabled = enabled;
+                    let message = if enabled {
+                        "Embedded Play wireframe enabled"
+                    } else {
+                        "Embedded Play wireframe disabled"
+                    };
+                    self.editor.set_status(message);
+                    self.status_message_set(message);
+                }
+            }
         }
     }
 
@@ -2656,12 +2693,83 @@ impl AppState {
         Ok(self.paths.latest_input_tape_file(&game.id))
     }
 
+    fn input_profile_capture_path(tape_path: &Path, phase: &str) -> PathBuf {
+        let stem = tape_path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .filter(|stem| !stem.is_empty())
+            .unwrap_or("input");
+        tape_path.with_file_name(format!("{stem}.{phase}.profile.csv"))
+    }
+
+    fn begin_input_profile_capture(&mut self) {
+        // A completed replay can end at the input boundary immediately before
+        // another UI action. Persist it before replacing the bounded aggregate.
+        self.flush_pending_input_profile_capture();
+        self.profiler.begin_capture();
+    }
+
+    fn queue_input_profile_capture(&mut self, tape_path: &Path, phase: &'static str) {
+        if self.profiler.capture_active() {
+            self.pending_input_profile_capture = Some(PendingInputProfileCapture {
+                tape_path: tape_path.to_path_buf(),
+                phase,
+            });
+        }
+    }
+
+    /// Persist a queued whole-run recording/replay profile after the current
+    /// frontend sample has been folded into the profiler.
+    pub fn flush_pending_input_profile_capture(&mut self) {
+        let Some(pending) = self.pending_input_profile_capture.take() else {
+            return;
+        };
+        let Some(report) = self.profiler.finish_capture() else {
+            return;
+        };
+        let sample_count = report.sample_count();
+        let path = Self::input_profile_capture_path(&pending.tape_path, pending.phase);
+        let write_result = (|| -> Result<(), String> {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|error| format!("{}: {error}", parent.display()))?;
+            }
+            std::fs::write(&path, report.csv())
+                .map_err(|error| format!("{}: {error}", path.display()))
+        })();
+
+        match write_result {
+            Ok(()) => {
+                let message = format!(
+                    "Whole-run profile saved: {sample_count} samples -> {}",
+                    path.display()
+                );
+                #[cfg(feature = "editor")]
+                if self.workspace.is_editor() {
+                    self.editor.set_status(message.clone());
+                }
+                self.status_message_set(message);
+            }
+            Err(error) => {
+                let message = format!("Whole-run profile save failed: {error}");
+                #[cfg(feature = "editor")]
+                if self.workspace.is_editor() {
+                    self.editor.set_status(message.clone());
+                }
+                self.status_message_set(message);
+            }
+        }
+    }
+
     /// Apply recording/replay at the port-1 boundary of one emulated video
     /// frame. The headless `--input-tape` runner consumes the same PXITAPE1
     /// samples at this exact clock boundary.
     pub fn input_sample_for_frame(&mut self, live_sample: Port1PadSample) -> Port1PadSample {
         let (sample, event) = self.playtest_input_tape.sample_for_frame(live_sample);
         if let Some(PlaytestInputEvent::ReplayFinished { frames }) = event {
+            if let Ok(tape_path) = self.active_input_tape_path() {
+                self.queue_input_profile_capture(&tape_path, "replay");
+            }
             let message = format!("Input replay finished: {frames} frames");
             #[cfg(feature = "editor")]
             if self.workspace.is_editor() {
@@ -2700,6 +2808,7 @@ impl AppState {
             }
         }
         self.playtest_input_tape.start_recording();
+        self.begin_input_profile_capture();
         self.running = true;
         self.menu.open = false;
         self.menu.sync_run_label(true);
@@ -2723,7 +2832,9 @@ impl AppState {
                 return;
             }
         };
-        match self.playtest_input_tape.stop_recording(&path) {
+        let result = self.playtest_input_tape.stop_recording(&path);
+        self.queue_input_profile_capture(&path, "record");
+        match result {
             Ok(frames) => {
                 self.menu.sync_input_recording_label(false);
                 self.status_message_set(format!(
@@ -3505,6 +3616,60 @@ pub fn build_ui(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn whole_run_profile_is_written_next_to_its_input_tape() {
+        let root = frontend_test_temp_dir("input-high-water");
+        let tape_path = root.join("routes").join("cortex.pxtape");
+        let mut state = AppState::with_config_dir(Some(root.clone()));
+        state.begin_input_profile_capture();
+
+        let mut sample = ui::profiler::FrameProfileSample {
+            total_ms: 17.5,
+            emu_ms: 12.0,
+            ..ui::profiler::FrameProfileSample::default()
+        };
+        sample.guest.counter_latest_values
+            [emulator_core::telemetry::counter::TRI_PRIMITIVES as usize] = 1080;
+        sample.guest.counter_latest_values
+            [emulator_core::telemetry::counter::TRI_PRIMITIVE_REMAINING as usize] = 456;
+        sample.guest.counter_max_values
+            [emulator_core::telemetry::counter::TRI_PRIMITIVES as usize] = 1080.0;
+        sample.guest.counters[emulator_core::telemetry::counter::TRI_PRIMITIVES as usize] = 1080.0;
+        state.profiler.record(sample);
+        state.queue_input_profile_capture(&tape_path, "record");
+        state.flush_pending_input_profile_capture();
+
+        let profile_path = root.join("routes").join("cortex.record.profile.csv");
+        let csv = std::fs::read_to_string(&profile_path).unwrap();
+        assert!(
+            csv.starts_with("kind,id,name,total,hits,average,max,latest,capacity,peak_percent\n")
+        );
+        assert!(csv.contains("counter,1,tri prims,1080"));
+        assert!(csv.contains(",1536,70.31"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(feature = "editor")]
+    #[test]
+    fn editor_wireframe_request_updates_the_live_gpu() {
+        let root = frontend_test_temp_dir("editor-wireframe");
+        let mut state = AppState::with_config_dir(Some(root.clone()));
+        state.bus = Some(Bus::new_without_bios());
+
+        state.handle_editor_playtest_request(psxed_ui::EditorPlaytestRequest::SetWireframe {
+            enabled: true,
+        });
+        assert!(state.bus.as_ref().unwrap().gpu.wireframe_enabled);
+
+        state.handle_editor_playtest_request(psxed_ui::EditorPlaytestRequest::SetWireframe {
+            enabled: false,
+        });
+        assert!(!state.bus.as_ref().unwrap().gpu.wireframe_enabled);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[test]
     fn internal_editor_playtest_artifacts_are_hidden_from_menu() {

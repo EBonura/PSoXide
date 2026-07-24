@@ -244,13 +244,35 @@ pub(super) fn room_depth_range(record: &LevelRoomRecord) -> DepthRange {
 pub(super) const SCREEN_OFFSET_X_OPTION_ID: u16 = 1;
 pub(super) const SCREEN_OFFSET_Y_OPTION_ID: u16 = 2;
 
+/// Cortex tiles are smaller than REFERENCE room sectors, so one four-way split gives
+/// the desired affine correction without paying for the 16-leaf near band.
+pub(super) const ROOM_ADAPTIVE_SUBDIVISION_LEVELS: u8 = 1;
+pub(super) const ROOM_ADAPTIVE_SUBDIVISION_KINDS: AdaptiveSubdivisionKindMask =
+    if cfg!(feature = "tr-subdivision-ceilings") {
+        AdaptiveSubdivisionKindMask::ALL
+    } else {
+        AdaptiveSubdivisionKindMask::FLOOR_WALL
+    };
+
 pub(super) fn room_surface_options(record: &LevelRoomRecord) -> WorldSurfaceOptions {
+    let subdivision_sector_size = if cfg!(feature = "tr-subdivision-wide-band") {
+        record.sector_size.saturating_mul(4)
+    } else {
+        record.sector_size
+    };
     WorldSurfaceOptions::new(WORLD_BAND, room_depth_range(record))
+        .with_adaptive_subdivision_sector_size(subdivision_sector_size)
+        .with_adaptive_subdivision_max_levels(ROOM_ADAPTIVE_SUBDIVISION_LEVELS)
+        .with_adaptive_subdivision_kinds(ROOM_ADAPTIVE_SUBDIVISION_KINDS)
+        .with_adaptive_subdivision_debug_levels(cfg!(feature = "tessellation-debug"))
         .with_textured_triangle_max_edge(CACHED_ROOM_TEXTURE_SPLIT_MAX_EDGE)
 }
 
 pub(super) fn fallback_surface_options() -> WorldSurfaceOptions {
     WorldSurfaceOptions::new(WORLD_BAND, WORLD_DEPTH_RANGE)
+        .with_adaptive_subdivision(true)
+        .with_adaptive_subdivision_max_levels(ROOM_ADAPTIVE_SUBDIVISION_LEVELS)
+        .with_adaptive_subdivision_kinds(ROOM_ADAPTIVE_SUBDIVISION_KINDS)
         .with_textured_triangle_max_edge(CACHED_ROOM_TEXTURE_SPLIT_MAX_EDGE)
 }
 
@@ -411,6 +433,10 @@ pub(super) const MODEL_TEXTURE_SPLIT_MAX_EDGE: u16 = 0;
 pub(super) const JOINT_CAP: usize = 32;
 /// Cap on placed model instances rendered per frame.
 pub(super) const MAX_MODEL_INSTANCES: usize = 16;
+/// Cap on cooked CylinderProps contributing one radial blocker apiece.
+pub(super) const MAX_CYLINDER_PROP_BLOCKERS: usize = 32;
+/// Shared fixed collision buffer for actor/model and CylinderProp blockers.
+pub(super) const MAX_COLLISION_CYLINDERS: usize = MAX_MODEL_INSTANCES + MAX_CYLINDER_PROP_BLOCKERS;
 /// Cap on static boxed prop collision blockers per frame.
 pub(super) const MAX_BOX_PROP_BLOCKERS: usize = 32;
 /// Fixed authored box-prop state budget. Props beyond this still render
