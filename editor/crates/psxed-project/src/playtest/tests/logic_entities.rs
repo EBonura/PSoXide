@@ -36,9 +36,11 @@ fn add_box_prop(project: &mut ProjectDocument, name: &str) {
         name,
         NodeKind::BoxProp {
             materials: [material; crate::BOX_PROP_FACE_COUNT],
+            uvs: [crate::GridUvTransform::IDENTITY; crate::BOX_PROP_FACE_COUNT],
             vertices: crate::default_box_prop_vertices(),
             collision_enabled: true,
             break_flags: 0,
+            erosion: crate::BoxPropErosion::default(),
         },
     );
 }

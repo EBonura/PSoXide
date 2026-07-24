@@ -275,6 +275,218 @@ fn cortex_ignition_v1_preview_frame_contains_draw_commands() {
 }
 
 #[test]
+fn eroded_box_prop_preview_uses_generated_surface_mesh() {
+    let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .canonicalize()
+        .expect("repo root");
+    let project_root = repo_root.join("editor/projects/default");
+    let mut project = ProjectDocument::starter();
+    let material_id = project
+        .resources
+        .iter()
+        .find(|resource| matches!(resource.data, ResourceData::Material(_)))
+        .expect("starter material")
+        .id;
+    let room = project
+        .active_scene()
+        .nodes()
+        .iter()
+        .find(|node| matches!(node.kind, NodeKind::Room { .. }))
+        .expect("starter room");
+    let room_id = room.id;
+    let NodeKind::Room { grid } = &room.kind else {
+        unreachable!();
+    };
+    let [target_x, _, target_z] = psxed_project::spatial::room_preview_center(grid);
+    let prop_id = project.active_scene_mut().add_node(
+        room_id,
+        "Preview Broken Wall",
+        NodeKind::BoxProp {
+            materials: [Some(material_id); psxed_project::BOX_PROP_FACE_COUNT],
+            uvs: [psxed_project::GridUvTransform::IDENTITY; psxed_project::BOX_PROP_FACE_COUNT],
+            vertices: psxed_project::box_prop_vertices_for_size(512),
+            collision_enabled: true,
+            break_flags: 0,
+            erosion: psxed_project::BoxPropErosion::default(),
+        },
+    );
+
+    let mut textures = crate::editor_textures::EditorTextures::new();
+    textures.refresh(&project, &project_root);
+    let assets = crate::editor_assets::EditorAssets::new();
+    let hidden = std::collections::HashSet::new();
+    let camera = ViewportCameraState {
+        mode: ViewportCameraMode::Orbit,
+        yaw_q12: 512,
+        pitch_q12: 256,
+        radius: 2048,
+        target: [target_x, 256, target_z],
+        position: [0; 3],
+    };
+    let build_frame = |document: &ProjectDocument| {
+        super::build_phase1_frame(
+            document,
+            camera,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &hidden,
+            Some(room_id),
+            0,
+            prop_id,
+            None,
+            None,
+            None,
+            &[],
+            &[],
+            None,
+            &[],
+            None,
+            &[],
+            None,
+            &textures,
+            &assets,
+        )
+    };
+    let legacy_frame = build_frame(&project);
+
+    let NodeKind::BoxProp { erosion, .. } = &mut project
+        .active_scene_mut()
+        .node_mut(prop_id)
+        .expect("box prop")
+        .kind
+    else {
+        unreachable!();
+    };
+    erosion.apply_broken_top_template();
+    assert!(!psxed_project::generate_box_prop_erosion_quads(
+        psxed_project::box_prop_vertices_for_size(512),
+        *erosion,
+    )
+    .is_empty());
+    let eroded_frame = build_frame(&project);
+
+    let draw_count = |frame: &super::EditorPreviewFrame| {
+        frame
+            .cmd_log
+            .iter()
+            .filter(|entry| matches!(entry.opcode, 0x20..=0x7f))
+            .count()
+    };
+    let legacy_draws = draw_count(&legacy_frame);
+    let eroded_draws = draw_count(&eroded_frame);
+    assert!(legacy_draws > 0);
+    assert!(
+        eroded_draws > legacy_draws,
+        "generated low-poly surface must replace the six-face preview path; legacy={legacy_draws} eroded={eroded_draws}"
+    );
+}
+
+#[test]
+fn cylinder_prop_preview_renders_shared_generated_profile_headlessly() {
+    let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .canonicalize()
+        .expect("repo root");
+    let project_root = repo_root.join("editor/projects/default");
+    let mut project = ProjectDocument::starter();
+    let material_id = project
+        .resources
+        .iter()
+        .find(|resource| matches!(resource.data, ResourceData::Material(_)))
+        .expect("starter material")
+        .id;
+    let room = project
+        .active_scene()
+        .nodes()
+        .iter()
+        .find(|node| matches!(node.kind, NodeKind::Room { .. }))
+        .expect("starter room");
+    let room_id = room.id;
+    let NodeKind::Room { grid } = &room.kind else {
+        unreachable!();
+    };
+    let [target_x, _, target_z] = psxed_project::spatial::room_preview_center(grid);
+    let camera = ViewportCameraState {
+        mode: ViewportCameraMode::Orbit,
+        yaw_q12: 512,
+        pitch_q12: 256,
+        radius: 2048,
+        target: [target_x, 512, target_z],
+        position: [0; 3],
+    };
+    let hidden = std::collections::HashSet::new();
+    let mut textures = crate::editor_textures::EditorTextures::new();
+    textures.refresh(&project, &project_root);
+    let assets = crate::editor_assets::EditorAssets::new();
+    let build_frame = |document: &ProjectDocument, selected| {
+        super::build_phase1_frame(
+            document,
+            camera,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            &hidden,
+            Some(room_id),
+            0,
+            selected,
+            None,
+            None,
+            None,
+            &[],
+            &[],
+            None,
+            &[],
+            None,
+            &[],
+            None,
+            &textures,
+            &assets,
+        )
+    };
+    let baseline = build_frame(&project, NodeId::ROOT);
+
+    let mut geometry = psxed_project::CylinderPropGeometry::default();
+    geometry.radius = [320, 320];
+    geometry.height = 1024;
+    geometry.base_bulge.enabled = true;
+    geometry.top_bulge.enabled = true;
+    geometry.broken_ends = psxed_project::CylinderBrokenEnds::Top;
+    let expected_surfaces = psxed_project::generate_cylinder_prop_surfaces(geometry).len();
+    let prop = project.active_scene_mut().add_node(
+        room_id,
+        "Preview Broken Column",
+        NodeKind::CylinderProp {
+            materials: [Some(material_id); psxed_project::CYLINDER_PROP_MATERIAL_COUNT],
+            uvs: [psxed_project::GridUvTransform::IDENTITY;
+                psxed_project::CYLINDER_PROP_MATERIAL_COUNT],
+            geometry,
+            collision_enabled: true,
+        },
+    );
+    let frame = build_frame(&project, prop);
+    let draw_count = |frame: &super::EditorPreviewFrame| {
+        frame
+            .cmd_log
+            .iter()
+            .filter(|entry| matches!(entry.opcode, 0x20..=0x7f))
+            .count()
+    };
+    assert!(expected_surfaces > 18);
+    assert!(
+        draw_count(&frame) > draw_count(&baseline),
+        "CylinderProp generated surfaces must reach the native headless preview"
+    );
+}
+
+#[test]
 fn cortex_aletha_crystal_preview_uses_its_generated_texture() {
     let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../..")

@@ -150,13 +150,16 @@ impl NodeGizmoPlane {
 pub(crate) enum NodeGizmoHandle {
     Axis(PrimitiveGizmoAxis),
     Plane(NodeGizmoPlane),
+    /// One of the six authored Box Prop faces, in
+    /// `psxed_project::BOX_PROP_FACE_NAMES` order.
+    BoxFace(u8),
 }
 
 impl NodeGizmoHandle {
     pub(crate) const fn axis(self) -> Option<PrimitiveGizmoAxis> {
         match self {
             Self::Axis(axis) => Some(axis),
-            Self::Plane(_) => None,
+            Self::Plane(_) | Self::BoxFace(_) => None,
         }
     }
 
@@ -164,8 +167,26 @@ impl NodeGizmoHandle {
         match self {
             Self::Axis(axis) => axis.label(),
             Self::Plane(plane) => plane.label(),
+            Self::BoxFace(0) => "Front",
+            Self::BoxFace(1) => "Right",
+            Self::BoxFace(2) => "Back",
+            Self::BoxFace(3) => "Left",
+            Self::BoxFace(4) => "Top",
+            Self::BoxFace(_) => "Bottom",
         }
     }
+}
+
+pub(crate) const fn box_prop_face_axis(face: u8) -> PrimitiveGizmoAxis {
+    match face {
+        0 | 2 => PrimitiveGizmoAxis::Z,
+        1 | 3 => PrimitiveGizmoAxis::X,
+        _ => PrimitiveGizmoAxis::Y,
+    }
+}
+
+pub(crate) const fn box_prop_face_axis_and_sign(face: u8) -> (PrimitiveGizmoAxis, bool) {
+    (box_prop_face_axis(face), matches!(face, 1 | 2 | 4))
 }
 
 pub(crate) fn gizmo_axis_color(axis: PrimitiveGizmoAxis, highlighted: bool) -> Color32 {
