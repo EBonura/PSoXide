@@ -19,8 +19,37 @@ use crate::{Bus, ButtonState};
 
 const TAPE_MAGIC: &[u8; 8] = b"PXITAPE1";
 const TAPE_HEADER_BYTES: usize = 12;
+/// Poll-bound tape: one sample per completed port-1 `0x42` poll, plus the
+/// poll index the recording started at.
+const TAPE_POLL_MAGIC: &[u8; 8] = b"PXITAPE2";
+const TAPE_POLL_HEADER_BYTES: usize = 16;
 const TAPE_SAMPLE_BYTES: usize = 6;
 const TAPE_CSV_HEADER: &str = "frame,buttons,right_x,right_y,left_x,left_y";
+
+/// Which clock a tape's samples are indexed by.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TapeClock {
+    /// `PXITAPE1`: one sample per emulated video frame. Faithful to when the
+    /// host held each input, but the *guest* only sees the samples that happen
+    /// to be live when it polls, so a build that renders at a different speed
+    /// reads a shifted input stream and plays a different route.
+    VideoFrame,
+    /// `PXITAPE2`: one sample per completed port-1 pad poll. The guest reads
+    /// the pad once per simulation tick, so sample N is delivered to poll N
+    /// whatever the frame rate. Use this for performance A/B work, where the
+    /// route must be identical between builds.
+    PadPoll,
+}
+
+/// A tape plus the clock its samples are indexed by.
+#[derive(Clone, Debug)]
+pub struct Tape {
+    pub samples: Vec<PadSample>,
+    pub clock: TapeClock,
+    /// For [`TapeClock::PadPoll`], the port-1 poll index that sample 0 belongs
+    /// to; replay feeds nothing until the guest reaches it. Zero otherwise.
+    pub start_poll: u64,
+}
 
 /// One emulated frame's port-1 DualShock state.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -97,6 +126,10 @@ pub fn write_tape(path: &Path, samples: &[PadSample]) -> Result<(), String> {
 
 /// Serialize samples to the human-readable CSV format used by browser
 /// downloads. `buttons` is the raw active-low PlayStation pad mask.
+///
+/// The CSV carries no clock marker, so a round-tripped tape reads back as
+/// [`TapeClock::VideoFrame`]. Use the binary `PXITAPE2` form for anything that
+/// must replay identically across builds of differing speed.
 pub fn tape_to_csv(samples: &[PadSample]) -> String {
     use std::fmt::Write as _;
 
@@ -167,6 +200,83 @@ pub fn tape_from_csv(csv: &str) -> Result<Vec<PadSample>, String> {
         });
     }
     Ok(samples)
+}
+
+/// Serialize poll-bound samples as `PXITAPE2`. `start_poll` is the port-1
+/// completed-poll count at which sample 0 was captured.
+pub fn write_tape_poll_bound(
+    path: &Path,
+    samples: &[PadSample],
+    start_poll: u64,
+) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+        }
+    }
+    let sample_count = u32::try_from(samples.len())
+        .map_err(|_| format!("input tape too large: {} polls", samples.len()))?;
+    let start = u32::try_from(start_poll)
+        .map_err(|_| format!("input tape start poll too large: {start_poll}"))?;
+    let mut bytes = Vec::with_capacity(TAPE_POLL_HEADER_BYTES + samples.len() * TAPE_SAMPLE_BYTES);
+    bytes.extend_from_slice(TAPE_POLL_MAGIC);
+    bytes.extend_from_slice(&sample_count.to_le_bytes());
+    bytes.extend_from_slice(&start.to_le_bytes());
+    for s in samples {
+        bytes.extend_from_slice(&s.buttons.to_le_bytes());
+        bytes.push(s.right_x);
+        bytes.push(s.right_y);
+        bytes.push(s.left_x);
+        bytes.push(s.left_y);
+    }
+    std::fs::write(path, bytes).map_err(|e| format!("write {}: {e}", path.display()))
+}
+
+/// Read a tape of either clock. CSV and `PXITAPE1` files report
+/// [`TapeClock::VideoFrame`].
+pub fn read_tape_full(path: &Path) -> Result<Tape, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    if bytes.len() >= TAPE_POLL_HEADER_BYTES && &bytes[..TAPE_POLL_MAGIC.len()] == TAPE_POLL_MAGIC {
+        let count = u32::from_le_bytes(bytes[8..12].try_into().expect("count slice")) as usize;
+        let start_poll = u32::from_le_bytes(bytes[12..16].try_into().expect("start slice")) as u64;
+        let expected_len = TAPE_POLL_HEADER_BYTES
+            .checked_add(
+                count
+                    .checked_mul(TAPE_SAMPLE_BYTES)
+                    .ok_or_else(|| format!("{} poll count overflows", path.display()))?,
+            )
+            .ok_or_else(|| format!("{} length overflows", path.display()))?;
+        if bytes.len() != expected_len {
+            return Err(format!(
+                "{} length mismatch: expected {expected_len} bytes, got {}",
+                path.display(),
+                bytes.len()
+            ));
+        }
+        let mut samples = Vec::with_capacity(count);
+        let mut off = TAPE_POLL_HEADER_BYTES;
+        for _ in 0..count {
+            samples.push(PadSample {
+                buttons: u16::from_le_bytes([bytes[off], bytes[off + 1]]),
+                right_x: bytes[off + 2],
+                right_y: bytes[off + 3],
+                left_x: bytes[off + 4],
+                left_y: bytes[off + 5],
+            });
+            off += TAPE_SAMPLE_BYTES;
+        }
+        return Ok(Tape {
+            samples,
+            clock: TapeClock::PadPoll,
+            start_poll,
+        });
+    }
+    Ok(Tape {
+        samples: read_tape(path)?,
+        clock: TapeClock::VideoFrame,
+        start_poll: 0,
+    })
 }
 
 /// Read a `PXITAPE1` file into samples.

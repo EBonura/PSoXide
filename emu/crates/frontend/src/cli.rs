@@ -234,6 +234,14 @@ pub struct LaunchArgs {
     /// running need this offset when replayed from a cold boot.
     #[arg(long, default_value_t = 0)]
     pub input_tape_delay_ticks: u64,
+    /// Transcribe the replayed `--input-tape` onto the guest's own input clock
+    /// and write it here as a poll-bound `PXITAPE2`. Each completed port-1 poll
+    /// records the sample the guest actually read, so the transcript reproduces
+    /// this exact playthrough while replaying identically on builds of
+    /// differing speed. Use it to convert a legacy video-frame tape into a
+    /// benchmark that cannot diverge.
+    #[arg(long)]
+    pub input_tape_transcribe: Option<PathBuf>,
     /// Press pad-1 button masks on the headless route clock. Format:
     /// `<mask>@<tick>+<frames>`, comma-separated, e.g.
     /// `0x4000@45+12,0x4000@80+16`.
@@ -731,20 +739,33 @@ fn run_headless_launch(
             return Err("Provide --path or --game-id".to_string());
         }
     };
+    let mut tape_poll_bound = false;
+    let mut tape_start_poll = 0u64;
     let tape_samples = match args.input_tape.as_deref() {
         Some(path) => {
-            let samples = read_input_tape(path)?;
-            if samples.is_empty() {
+            let tape = read_input_tape(path)?;
+            if tape.samples.is_empty() {
                 return Err(format!("input tape has no frames: {}", path.display()));
             }
+            tape_poll_bound = tape.clock == emulator_core::input_tape::TapeClock::PadPoll;
+            tape_start_poll = tape.start_poll;
             if emit_summary {
-                eprintln!(
-                    "[cli] loaded input tape {} ({} frames)",
-                    path.display(),
-                    samples.len()
-                );
+                if tape_poll_bound {
+                    eprintln!(
+                        "[cli] loaded poll-bound input tape {} ({} polls, starting at poll {})",
+                        path.display(),
+                        tape.samples.len(),
+                        tape_start_poll
+                    );
+                } else {
+                    eprintln!(
+                        "[cli] loaded input tape {} ({} frames)",
+                        path.display(),
+                        tape.samples.len()
+                    );
+                }
             }
-            Some(samples)
+            Some(tape.samples)
         }
         None => None,
     };
@@ -964,6 +985,14 @@ fn run_headless_launch(
     let mut route_ticks = 0u64;
     let mut tape_cursor = 0usize;
     let mut tape_started = false;
+    // Transcription state: the pad sample that was live during the route tick
+    // just finished, and one entry per poll the guest completed while it was.
+    let mut transcript: Vec<emulator_core::input_tape::PadSample> = Vec::new();
+    let mut transcript_live = emulator_core::input_tape::PadSample::from_buttons(0);
+    let mut transcript_polls = 0u64;
+    // Set once a poll-bound tape has delivered its final sample; the run ends
+    // there rather than at a wall-clock tick count.
+    let mut tape_exhausted = false;
     if let Some(path) = args.route_screenshot_dir.as_ref() {
         std::fs::create_dir_all(path).map_err(|e| format!("mkdir {}: {e}", path.display()))?;
     }
@@ -981,7 +1010,7 @@ fn run_headless_launch(
             let mut writer = std::io::BufWriter::new(file);
             writeln!(
                 writer,
-                "route_tick,tape_frame,cpu_tick,bus_cycles,cpu_tick_delta,bus_cycle_delta,display_x,display_y,display_width,display_height,display_start_changed"
+                "route_tick,tape_frame,cpu_tick,bus_cycles,cpu_tick_delta,bus_cycle_delta,display_x,display_y,display_width,display_height,display_start_changed,port1_polls"
             )
             .map_err(|e| format!("write route log {}: {e}", path.display()))?;
             let area = bus.gpu.display_area();
@@ -1029,7 +1058,7 @@ fn run_headless_launch(
     let mut gpu_prev_texture_window = None;
     let mut route_last_cpu_tick = cpu.tick();
     let mut route_last_bus_cycles = bus.cycles();
-    if args.input_tape_delay_ticks == 0 {
+    if args.input_tape_delay_ticks == 0 && !tape_poll_bound {
         if let Some(samples) = tape_samples.as_ref() {
             samples[tape_cursor].apply_to_bus(&mut bus);
             tape_started = true;
@@ -1089,6 +1118,29 @@ fn run_headless_launch(
             }
             next_pc_sample = next_pc_sample.saturating_add(pc_sample_interval);
         }
+        // A poll-bound tape must land sample N on poll N. When the guest
+        // catches up on missed simulation ticks it polls two or three times
+        // inside a single route tick, so re-checking only on the route clock
+        // would feed the burst a stale sample and desynchronise the route.
+        // Consecutive polls are a whole simulation tick apart, so this coarse
+        // stride is exact and stays off the per-instruction path.
+        if tape_poll_bound && i & 0x3F == 0 {
+            if let Some(samples) = tape_samples.as_ref() {
+                let polls = bus.port1_completed_polls();
+                if polls >= tape_start_poll {
+                    let index = polls.saturating_sub(tape_start_poll);
+                    if index >= samples.len() as u64 {
+                        tape_exhausted = true;
+                    }
+                    let cursor = index.min(samples.len().saturating_sub(1) as u64) as usize;
+                    if !tape_started || cursor != tape_cursor {
+                        tape_started = true;
+                        tape_cursor = cursor;
+                        samples[tape_cursor].apply_to_bus(&mut bus);
+                    }
+                }
+            }
+        }
         if let Err(e) = cpu.step(&mut bus) {
             eprintln!("[cli] step {i} failed: {e:?}");
             eprintln!(
@@ -1119,8 +1171,39 @@ fn run_headless_launch(
             route_tick_deadline = bus.cycles().saturating_add(route_vblank_period);
             route_tick_steps = 0;
             route_ticks += 1;
+            if args.input_tape_transcribe.is_some() {
+                // Attribute polls to the sample that was live while they ran,
+                // before this tick installs a new one. The bus sample is
+                // constant across a route tick and a poll interval spans
+                // several ticks, so this is exact.
+                let polls = bus.port1_completed_polls();
+                for _ in 0..polls.saturating_sub(transcript_polls) {
+                    transcript.push(transcript_live);
+                }
+                transcript_polls = polls;
+            }
             if let Some(samples) = tape_samples.as_ref() {
-                if route_ticks >= args.input_tape_delay_ticks {
+                if tape_poll_bound {
+                    // Index by the guest's own input clock. A route tick is far
+                    // shorter than a pad-poll interval, so the sample for poll N
+                    // is always in place before the guest reads it, whatever the
+                    // frame rate. That is what makes the route identical between
+                    // builds of different speed.
+                    let polls = bus.port1_completed_polls();
+                    if polls >= tape_start_poll {
+                        let index = polls.saturating_sub(tape_start_poll);
+                        if index >= samples.len() as u64 {
+                            tape_exhausted = true;
+                        }
+                        let cursor = index.min(samples.len().saturating_sub(1) as u64) as usize;
+                        if !tape_started || cursor != tape_cursor {
+                            tape_started = true;
+                            tape_cursor = cursor;
+                            samples[tape_cursor].apply_to_bus(&mut bus);
+                        }
+                        transcript_live = samples[tape_cursor];
+                    }
+                } else if route_ticks >= args.input_tape_delay_ticks {
                     let cursor = route_ticks
                         .saturating_sub(args.input_tape_delay_ticks)
                         .min(samples.len().saturating_sub(1) as u64)
@@ -1130,6 +1213,7 @@ fn run_headless_launch(
                         tape_cursor = cursor;
                         samples[tape_cursor].apply_to_bus(&mut bus);
                     }
+                    transcript_live = samples[tape_cursor];
                 }
             }
             if let Some(dir) = args.route_screenshot_dir.as_ref() {
@@ -1156,13 +1240,14 @@ fn run_headless_launch(
                 let bus_cycles = bus.cycles();
                 writeln!(
                     writer,
-                    "{route_ticks},{tape_cursor},{cpu_tick},{bus_cycles},{},{},{},{},{},{},{display_start_changed}",
+                    "{route_ticks},{tape_cursor},{cpu_tick},{bus_cycles},{},{},{},{},{},{},{display_start_changed},{}",
                     cpu_tick.saturating_sub(route_last_cpu_tick),
                     bus_cycles.saturating_sub(route_last_bus_cycles),
                     area.x,
                     area.y,
                     area.width,
-                    area.height
+                    area.height,
+                    bus.port1_completed_polls()
                 )
                 .map_err(|e| e.to_string())?;
                 route_last_display_start = display_start;
@@ -1304,11 +1389,17 @@ fn run_headless_launch(
                 break;
             }
         }
+        if tape_exhausted {
+            stopped_at = Some(i + 1);
+            break;
+        }
         if let Some(target) = guest_frame_limit {
             // When replaying a tape the natural clock is tape ticks, not
             // `frames_seen`; otherwise `--guest-frames N` stops at the wrong
             // moment now that the tape advances on the vblank tick.
-            let reached = if tape_samples.is_some() {
+            let reached = if tape_poll_bound {
+                false
+            } else if tape_samples.is_some() {
                 route_ticks >= target
             } else {
                 bus.telemetry.frames_seen() >= target
@@ -1325,6 +1416,19 @@ fn run_headless_launch(
             summary.add_events(&events);
         }
         profile_log.add_events(&events, cpu.tick(), bus.cycles())?;
+    }
+    if let Some(path) = args.input_tape_transcribe.as_ref() {
+        for _ in 0..bus.port1_completed_polls().saturating_sub(transcript_polls) {
+            transcript.push(transcript_live);
+        }
+        emulator_core::input_tape::write_tape_poll_bound(path, &transcript, 0)?;
+        if emit_summary {
+            eprintln!(
+                "[cli] transcribed {} polls to {}",
+                transcript.len(),
+                path.display()
+            );
+        }
     }
     profile_log.finish(cpu.tick(), bus.cycles())?;
     visual_hash_log.flush()?;
@@ -2050,6 +2154,7 @@ fn validation_launch_args(
         guest_visual_frames: checkpoint.stop.guest_visual_frames,
         input_tape,
         input_tape_delay_ticks: 0,
+        input_tape_transcribe: None,
         pad_pulses: checkpoint.pad_pulses.clone(),
         digital_pad: false,
         embedded_playtest: artifact.embedded_playtest,
