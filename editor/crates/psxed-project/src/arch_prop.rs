@@ -83,6 +83,12 @@ pub struct ArchPropGeometry {
     /// Thickness between the inner and outer curves.
     #[serde(default = "default_arch_band_thickness_quanta")]
     pub band_thickness_quanta: u16,
+    /// Fill the spandrel between the outer curve and a flat crown-height top.
+    ///
+    /// This turns the arch into a complete rectangular archway insert that can
+    /// meet flat floor/ceiling tiles without leaving curved gaps above it.
+    #[serde(default)]
+    pub filled_top: bool,
     /// Full arch or one cardinal half of the same curve.
     #[serde(default)]
     pub portion: ArchPortion,
@@ -102,6 +108,7 @@ impl Default for ArchPropGeometry {
             rise_quanta: default_arch_rise_quanta(),
             leg_height_quanta: default_arch_leg_height_quanta(),
             band_thickness_quanta: default_arch_band_thickness_quanta(),
+            filled_top: false,
             portion: ArchPortion::Full,
             curve: ArchCurve::Round,
             segments_per_quadrant: default_arch_segments_per_quadrant(),
@@ -240,7 +247,14 @@ pub fn generate_arch_prop_surfaces(
     } else {
         0
     };
-    let mut surfaces = Vec::with_capacity(selected_segments * 4 + leg_count * 6 + 2);
+    let total_height = leg_height.saturating_add(rise);
+    let fill_capacity = if geometry.filled_top {
+        selected_segments * 2 + 3
+    } else {
+        0
+    };
+    let mut surfaces =
+        Vec::with_capacity(selected_segments * 4 + leg_count * 6 + 2 + fill_capacity);
 
     for pair in points.windows(2) {
         append_band_segment(
@@ -249,8 +263,33 @@ pub fn generate_arch_prop_surfaces(
             pair[1],
             half_depth,
             half_span,
-            leg_height.saturating_add(rise),
+            total_height,
+            !geometry.filled_top,
         );
+        if geometry.filled_top {
+            append_spandrel_segment(
+                &mut surfaces,
+                pair[0],
+                pair[1],
+                half_depth,
+                half_span,
+                total_height,
+            );
+        }
+    }
+
+    if geometry.filled_top {
+        let first = *points.first().expect("arch has profile points");
+        let last = *points.last().expect("arch has profile points");
+        append_flat_arch_top(
+            &mut surfaces,
+            first.outer[0],
+            last.outer[0],
+            total_height,
+            half_depth,
+        );
+        append_spandrel_end_cap(&mut surfaces, first, total_height, half_depth, [-1, 0, 0]);
+        append_spandrel_end_cap(&mut surfaces, last, total_height, half_depth, [1, 0, 0]);
     }
 
     let has_left = matches!(geometry.portion, ArchPortion::Full | ArchPortion::LeftHalf);
@@ -264,7 +303,7 @@ pub fn generate_arch_prop_surfaces(
                 leg_height,
                 half_depth,
                 half_span,
-                leg_height.saturating_add(rise),
+                total_height,
                 true,
             );
         }
@@ -276,7 +315,7 @@ pub fn generate_arch_prop_surfaces(
                 leg_height,
                 half_depth,
                 half_span,
-                leg_height.saturating_add(rise),
+                total_height,
                 false,
             );
         }
@@ -386,12 +425,15 @@ pub fn generate_arch_prop_collision_boxes(
             pair[1].outer[0],
             pair[1].inner[0],
         ];
-        let ys = [
+        let mut ys = [
             pair[0].outer[1],
             pair[0].inner[1],
             pair[1].outer[1],
             pair[1].inner[1],
         ];
+        if geometry.filled_top {
+            ys[0] = leg_height.saturating_add(rise);
+        }
         boxes.push(collision_box(
             *xs.iter().min().unwrap_or(&0),
             *ys.iter().min().unwrap_or(&0),
@@ -475,6 +517,7 @@ fn append_band_segment(
     half_depth: i32,
     half_span: i32,
     total_height: i32,
+    include_extrados: bool,
 ) {
     let facade_uv = |point: [i32; 2]| {
         [
@@ -519,27 +562,29 @@ fn append_band_segment(
         [0, 0, 1],
     );
 
-    append_oriented_quad(
-        out,
-        [
-            point3(a.outer, -half_depth),
-            point3(b.outer, -half_depth),
-            point3(b.outer, half_depth),
-            point3(a.outer, half_depth),
-        ],
-        [
-            [a.path_q8, 0],
-            [b.path_q8, 0],
-            [b.path_q8, 255],
-            [a.path_q8, 255],
-        ],
-        ARCH_PROP_MATERIAL_EXTRADOS,
-        [
-            a.outer[0].saturating_add(b.outer[0]),
-            a.outer[1].saturating_add(b.outer[1]),
-            0,
-        ],
-    );
+    if include_extrados {
+        append_oriented_quad(
+            out,
+            [
+                point3(a.outer, -half_depth),
+                point3(b.outer, -half_depth),
+                point3(b.outer, half_depth),
+                point3(a.outer, half_depth),
+            ],
+            [
+                [a.path_q8, 0],
+                [b.path_q8, 0],
+                [b.path_q8, 255],
+                [a.path_q8, 255],
+            ],
+            ARCH_PROP_MATERIAL_EXTRADOS,
+            [
+                a.outer[0].saturating_add(b.outer[0]),
+                a.outer[1].saturating_add(b.outer[1]),
+                0,
+            ],
+        );
+    }
     append_oriented_quad(
         out,
         [
@@ -560,6 +605,103 @@ fn append_band_segment(
             -a.inner[1].saturating_sub(b.inner[1]),
             0,
         ],
+    );
+}
+
+fn append_spandrel_segment(
+    out: &mut Vec<GeneratedArchPropSurface>,
+    a: ProfilePoint,
+    b: ProfilePoint,
+    half_depth: i32,
+    half_span: i32,
+    total_height: i32,
+) {
+    let facade_uv = |point: [i32; 2]| {
+        [
+            normalize_q8(point[0], -half_span, half_span),
+            255u8.saturating_sub(normalize_q8(point[1], 0, total_height)),
+        ]
+    };
+    let a_top = [a.outer[0], total_height];
+    let b_top = [b.outer[0], total_height];
+    append_oriented_quad(
+        out,
+        [
+            point3(a.outer, -half_depth),
+            point3(b.outer, -half_depth),
+            point3(b_top, -half_depth),
+            point3(a_top, -half_depth),
+        ],
+        [
+            facade_uv(a.outer),
+            facade_uv(b.outer),
+            facade_uv(b_top),
+            facade_uv(a_top),
+        ],
+        ARCH_PROP_MATERIAL_FASCIA,
+        [0, 0, -1],
+    );
+    append_oriented_quad(
+        out,
+        [
+            point3(a.outer, half_depth),
+            point3(a_top, half_depth),
+            point3(b_top, half_depth),
+            point3(b.outer, half_depth),
+        ],
+        [
+            facade_uv(a.outer),
+            facade_uv(a_top),
+            facade_uv(b_top),
+            facade_uv(b.outer),
+        ],
+        ARCH_PROP_MATERIAL_FASCIA,
+        [0, 0, 1],
+    );
+}
+
+fn append_flat_arch_top(
+    out: &mut Vec<GeneratedArchPropSurface>,
+    x0: i32,
+    x1: i32,
+    y: i32,
+    half_depth: i32,
+) {
+    append_oriented_quad(
+        out,
+        [
+            vertex3(x0, y, -half_depth),
+            vertex3(x0, y, half_depth),
+            vertex3(x1, y, half_depth),
+            vertex3(x1, y, -half_depth),
+        ],
+        [[0, 0], [0, 255], [255, 255], [255, 0]],
+        ARCH_PROP_MATERIAL_EXTRADOS,
+        [0, 1, 0],
+    );
+}
+
+fn append_spandrel_end_cap(
+    out: &mut Vec<GeneratedArchPropSurface>,
+    point: ProfilePoint,
+    total_height: i32,
+    half_depth: i32,
+    desired_normal: [i32; 3],
+) {
+    if point.outer[1] >= total_height {
+        return;
+    }
+    append_oriented_quad(
+        out,
+        [
+            point3(point.outer, -half_depth),
+            point3(point.outer, half_depth),
+            vertex3(point.outer[0], total_height, half_depth),
+            vertex3(point.outer[0], total_height, -half_depth),
+        ],
+        [[0, 255], [255, 255], [255, 0], [0, 0]],
+        ARCH_PROP_MATERIAL_END_CAP,
+        desired_normal,
     );
 }
 
@@ -809,6 +951,34 @@ mod tests {
     }
 
     #[test]
+    fn filled_top_closes_spandrel_to_one_flat_tile_aligned_surface() {
+        let geometry = ArchPropGeometry {
+            filled_top: true,
+            ..ArchPropGeometry::default()
+        };
+        let surfaces = generate_arch_prop_surfaces(geometry, 1024);
+        let total_height = i16::try_from(
+            i32::from(geometry.rise_quanta + geometry.leg_height_quanta) * HEIGHT_QUANTUM,
+        )
+        .unwrap();
+        assert_eq!(surfaces.len(), 43);
+        assert!(surfaces.iter().any(|surface| {
+            surface.material_slot == ARCH_PROP_MATERIAL_EXTRADOS
+                && surface
+                    .vertices
+                    .iter()
+                    .all(|vertex| vertex[1] == total_height)
+                && surface.vertices.iter().any(|vertex| vertex[0] == -1024)
+                && surface.vertices.iter().any(|vertex| vertex[0] == 1024)
+        }));
+        let collisions = generate_arch_prop_collision_boxes(geometry, 1024);
+        assert_eq!(collisions.len(), 8);
+        assert!(collisions
+            .iter()
+            .any(|collision| collision.max[1] == total_height));
+    }
+
+    #[test]
     fn polygon_budget_is_bounded_by_authored_limits() {
         let geometry = ArchPropGeometry {
             span_tiles: u8::MAX,
@@ -816,12 +986,13 @@ mod tests {
             rise_quanta: u16::MAX,
             leg_height_quanta: u16::MAX,
             band_thickness_quanta: u16::MAX,
+            filled_top: true,
             portion: ArchPortion::Full,
             curve: ArchCurve::Round,
             segments_per_quadrant: u8::MAX,
         };
         let surfaces = generate_arch_prop_surfaces(geometry, 8192);
-        assert!(surfaces.len() <= 60);
+        assert!(surfaces.len() <= 80);
         assert!(surfaces
             .iter()
             .flat_map(|surface| surface.vertices)
