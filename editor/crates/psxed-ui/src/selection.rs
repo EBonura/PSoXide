@@ -396,6 +396,8 @@ pub enum EntityBoundKind {
     BoxProp,
     /// Low-poly procedural radial prop.
     CylinderProp,
+    /// Tile-snapped procedural arch.
+    ArchProp,
     /// `SpawnPoint` (player or non-player).
     SpawnPoint,
     /// `PointLight`. Marker box only -- radius ring is drawn

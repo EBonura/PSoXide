@@ -1205,6 +1205,54 @@ pub fn render_manifest_source(package: &PlaytestPackage) -> String {
     }
     out.push_str("];\n\n");
 
+    out.push_str("/// Placed tile-native arches.\n");
+    out.push_str("pub static ARCH_PROPS: &[LevelArchPropRecord] = &[\n");
+    for prop in &package.arch_props {
+        let texture_assets = render_arch_prop_texture_assets(&prop.texture_asset_indices);
+        let _ = writeln!(
+            out,
+            "    LevelArchPropRecord {{ room: RoomIndex({}), texture_assets: {texture_assets}, blend_modes: {:?}, uvs: {:?}, surface_first: {}, surface_count: {}, collision_first: {}, collision_count: {}, center: {:?}, cull_radius: {}, flags: {} }},",
+            prop.room,
+            prop.blend_modes,
+            prop.uvs,
+            prop.surface_first,
+            prop.surface_count,
+            prop.collision_first,
+            prop.collision_count,
+            prop.center,
+            prop.cull_radius,
+            prop.flags,
+        );
+    }
+    out.push_str("];\n\n");
+
+    out.push_str("/// Cook-generated ArchProp quads.\n");
+    out.push_str("pub static ARCH_PROP_SURFACES: &[LevelArchPropSurfaceRecord] = &[\n");
+    for surface in &package.arch_prop_surfaces {
+        let _ = writeln!(
+            out,
+            "    LevelArchPropSurfaceRecord {{ vertices: {:?}, center: {:?}, normal: {:?}, uv_q8: {:?}, baked_vertex_rgb: {:?}, material_slot: {} }},",
+            surface.vertices,
+            surface.center,
+            surface.normal,
+            surface.uv_q8,
+            surface.baked_vertex_rgb,
+            surface.material_slot,
+        );
+    }
+    out.push_str("];\n\n");
+
+    out.push_str("/// Per-segment ArchProp collision approximation.\n");
+    out.push_str("pub static ARCH_PROP_COLLISIONS: &[LevelArchPropCollisionRecord] = &[\n");
+    for collision in &package.arch_prop_collisions {
+        let _ = writeln!(
+            out,
+            "    LevelArchPropCollisionRecord {{ min: {:?}, max: {:?} }},",
+            collision.min, collision.max,
+        );
+    }
+    out.push_str("];\n\n");
+
     let ui_fonts = collect_ui_fonts(&package.ui_nodes);
     out.push_str("/// Cooked UI font sources, compacted to fonts used by cooked UI text.\n");
     out.push_str("pub static UI_FONTS: &[&psx_font::BitmapFont] = &[\n");
@@ -3097,6 +3145,25 @@ fn render_cylinder_prop_texture_assets(
     out
 }
 
+fn render_arch_prop_texture_assets(
+    texture_assets: &[Option<usize>; psx_level::ARCH_PROP_MATERIAL_COUNT],
+) -> String {
+    let mut out = String::from("[");
+    for (index, texture_asset) in texture_assets.iter().enumerate() {
+        if index > 0 {
+            out.push_str(", ");
+        }
+        match texture_asset {
+            Some(asset) => {
+                let _ = write!(out, "Some(AssetId({asset}))");
+            }
+            None => out.push_str("None"),
+        }
+    }
+    out.push(']');
+    out
+}
+
 fn render_box_prop_vertices(vertices: &[[i16; 3]; psx_level::BOX_PROP_VERTEX_COUNT]) -> String {
     let mut out = String::from("[");
     for (index, vertex) in vertices.iter().enumerate() {
@@ -3327,6 +3394,27 @@ fn room_required_assets(
     for prop in &package.image_props {
         if prop.room == room_index as u16 {
             push_unique(&mut required_vram, prop.texture_asset_index);
+        }
+    }
+    for prop in &package.box_props {
+        if prop.room == room_index as u16 {
+            for asset_index in prop.texture_asset_indices.iter().flatten() {
+                push_unique(&mut required_vram, *asset_index);
+            }
+        }
+    }
+    for prop in &package.cylinder_props {
+        if prop.room == room_index as u16 {
+            for asset_index in prop.texture_asset_indices.iter().flatten() {
+                push_unique(&mut required_vram, *asset_index);
+            }
+        }
+    }
+    for prop in &package.arch_props {
+        if prop.room == room_index as u16 {
+            for asset_index in prop.texture_asset_indices.iter().flatten() {
+                push_unique(&mut required_vram, *asset_index);
+            }
         }
     }
     for water in &package.water_cells {
@@ -3645,6 +3733,9 @@ use psx_level::{
     LevelBoxPropSurfaceRecord,
     LevelCylinderPropRecord,
     LevelCylinderPropSurfaceRecord,
+    LevelArchPropRecord,
+    LevelArchPropSurfaceRecord,
+    LevelArchPropCollisionRecord,
     LevelCameraRecord,
     LevelCloudLayerRecord,
     LevelCharacterRecord,

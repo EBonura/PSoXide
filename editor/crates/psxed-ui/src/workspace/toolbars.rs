@@ -1242,12 +1242,8 @@ impl EditorWorkspace {
             PlaceKind::ImageProp => {
                 self.draw_place_resource_picker(ui, ResourceFilter::ImagePropSource, "Image", false)
             }
-            PlaceKind::BoxProp | PlaceKind::CylinderProp => self.draw_place_resource_picker(
-                ui,
-                ResourceFilter::ImagePropSource,
-                "Material",
-                true,
-            ),
+            PlaceKind::BoxProp | PlaceKind::CylinderProp | PlaceKind::ArchProp => self
+                .draw_place_resource_picker(ui, ResourceFilter::ImagePropSource, "Material", true),
             PlaceKind::ParticleEmitter => {
                 ui.weak(
                     "Point-projected sprite emitter. Configure texture and budget after placement.",

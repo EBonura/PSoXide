@@ -866,6 +866,60 @@ fn node_gizmo_local_space_rotates_about_node_axis() {
 }
 
 #[test]
+fn arch_prop_exposes_move_rotate_and_quantized_scale_gizmos() {
+    let mut project = ProjectDocument::new("arch-prop-gizmos");
+    let room = project.active_scene_mut().add_node(
+        NodeId::ROOT,
+        "Room",
+        NodeKind::Room {
+            grid: WorldGrid::empty(4, 4, 1024),
+        },
+    );
+    let arch = project.active_scene_mut().add_node(
+        room,
+        "Arch",
+        NodeKind::ArchProp {
+            materials: [None; psxed_project::ARCH_PROP_MATERIAL_COUNT],
+            uvs: [GridUvTransform::IDENTITY; psxed_project::ARCH_PROP_MATERIAL_COUNT],
+            geometry: psxed_project::ArchPropGeometry::default(),
+            collision_enabled: false,
+        },
+    );
+    let mut workspace = EditorWorkspace::with_project(test_temp_dir("arch-prop-gizmos"), project);
+    set_gizmo_test_camera(&mut workspace);
+    workspace.replace_node_selection(arch);
+    let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+
+    workspace.transform_gizmo_mode = TransformGizmoMode::Move;
+    assert_eq!(workspace.selected_node_gizmo_targets(), vec![arch]);
+    assert_eq!(workspace.node_gizmo_screen_axes(viewport).len(), 3);
+
+    workspace.transform_gizmo_mode = TransformGizmoMode::Rotate;
+    assert_eq!(
+        workspace.selected_node_rotation_axes(),
+        vec![PrimitiveGizmoAxis::Y]
+    );
+    assert!(!workspace
+        .node_rotation_gizmo_screen_rings(viewport)
+        .is_empty());
+
+    workspace.transform_gizmo_mode = TransformGizmoMode::Scale;
+    let x_axis = projected_node_gizmo_axis(&workspace, viewport, PrimitiveGizmoAxis::X);
+    let unit = (x_axis.end - x_axis.start).normalized();
+    assert!(workspace.begin_node_gizmo_drag(PrimitiveGizmoAxis::X, viewport, x_axis.start));
+    workspace.update_node_gizmo_drag(viewport, x_axis.start + unit * 8.0);
+    workspace.end_node_gizmo_drag();
+
+    let node = workspace.project.active_scene().node(arch).unwrap();
+    let NodeKind::ArchProp { geometry, .. } = &node.kind else {
+        panic!("expected arch prop");
+    };
+    assert_eq!(geometry.span_tiles, 3);
+    assert_eq!(node.transform.scale, [1.0, 1.0, 1.0]);
+    assert!(workspace.is_dirty());
+}
+
+#[test]
 fn node_gizmo_scales_image_prop_width() {
     let mut project = ProjectDocument::new("image-prop-gizmo-scale");
     let room = project.active_scene_mut().add_node(
