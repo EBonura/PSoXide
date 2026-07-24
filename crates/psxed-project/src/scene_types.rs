@@ -158,6 +158,26 @@ pub enum NodeKind {
         #[serde(default = "default_true")]
         collision_enabled: bool,
     },
+    /// Tile-snapped procedural arch or half-arch.
+    ///
+    /// The transform is a bottom-centre anchor. Horizontal dimensions are
+    /// inherited from the enclosing room's sector size, while vertical
+    /// dimensions are stored as 64-unit quanta in `geometry`. Preview and cook
+    /// expand the same compact curve recipe into an extruded low-poly band.
+    ArchProp {
+        /// Fascia, soffit, extrados, and exposed end-cap material slots.
+        #[serde(default = "default_arch_prop_materials")]
+        materials: [Option<ResourceId>; ARCH_PROP_MATERIAL_COUNT],
+        /// Per-slot texture transforms.
+        #[serde(default = "default_arch_prop_uvs")]
+        uvs: [GridUvTransform; ARCH_PROP_MATERIAL_COUNT],
+        /// Compact tile-native arch recipe.
+        #[serde(default)]
+        geometry: ArchPropGeometry,
+        /// Whether generated arch segments block the character motor.
+        #[serde(default)]
+        collision_enabled: bool,
+    },
     /// Render a cooked [`ResourceData::Model`] from the transform
     /// on the nearest entity ancestor. This is the component form of
     /// the legacy [`MeshInstance`](Self::MeshInstance) node.
@@ -379,6 +399,7 @@ impl NodeKind {
             Self::ImageProp { .. } => "Image Prop",
             Self::BoxProp { .. } => "Box Prop",
             Self::CylinderProp { .. } => "Cylinder Prop",
+            Self::ArchProp { .. } => "Arch Prop",
             Self::ModelRenderer { .. } => "Model Renderer",
             Self::Animator { .. } => "Animator",
             Self::Collider { .. } => "Collider",
