@@ -95,6 +95,7 @@ pub(super) fn walk_entity_bounds(
             b.kind,
             psxed_ui::EntityBoundKind::ImageProp
                 | psxed_ui::EntityBoundKind::BoxProp
+                | psxed_ui::EntityBoundKind::CylinderProp
                 | psxed_ui::EntityBoundKind::Portal
         ) {
             continue;
@@ -139,6 +140,7 @@ pub(super) fn entity_bound_style(
         psxed_ui::EntityBoundKind::MeshFallback => (0x90, 0x98, 0xA0),
         psxed_ui::EntityBoundKind::ImageProp => (0xD0, 0xAA, 0x78),
         psxed_ui::EntityBoundKind::BoxProp => (0x87, 0xB4, 0xDC),
+        psxed_ui::EntityBoundKind::CylinderProp => (0x78, 0xB8, 0xC8),
         psxed_ui::EntityBoundKind::SpawnPoint => (0x60, 0xE0, 0x80),
         psxed_ui::EntityBoundKind::PointLight => (0xFF, 0xD8, 0x70),
         psxed_ui::EntityBoundKind::ParticleEmitter => (0x98, 0xD6, 0xE6),
@@ -218,7 +220,7 @@ pub(super) fn selected_node_is_image_prop(project: &ProjectDocument, selected: N
     project.active_scene().node(selected).is_some_and(|node| {
         matches!(
             node.kind,
-            NodeKind::ImageProp { .. } | NodeKind::BoxProp { .. }
+            NodeKind::ImageProp { .. } | NodeKind::BoxProp { .. } | NodeKind::CylinderProp { .. }
         )
     })
 }

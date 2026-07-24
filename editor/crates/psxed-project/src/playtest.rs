@@ -734,6 +734,9 @@ pub fn build_package(
     let mut model_instances: Vec<PlaytestModelInstance> = Vec::new();
     let mut image_props: Vec<PlaytestImageProp> = Vec::new();
     let mut box_props: Vec<PlaytestBoxProp> = Vec::new();
+    let mut box_prop_surfaces: Vec<PlaytestBoxPropSurface> = Vec::new();
+    let mut cylinder_props: Vec<PlaytestCylinderProp> = Vec::new();
+    let mut cylinder_prop_surfaces: Vec<PlaytestCylinderPropSurface> = Vec::new();
     let mut water_cells: Vec<PlaytestWaterCell> = Vec::new();
     let mut combat_capsules: Vec<PlaytestCombatCapsule> = Vec::new();
     let mut weapon_hitboxes: Vec<PlaytestWeaponHitbox> = Vec::new();
@@ -866,8 +869,7 @@ pub fn build_package(
                 ));
                 continue;
             }
-            let center = grid.sector_size / 2;
-            let floor_y = floor.height_at_local(center, center, grid.sector_size);
+            let floor_y = floor.lowest_height();
             let depth = normalized.height_above_floor;
             let surface_y = floor_y.saturating_add(i32::from(depth));
             water_cells.push(PlaytestWaterCell {
@@ -1376,9 +1378,11 @@ pub fn build_package(
             }
             NodeKind::BoxProp {
                 materials,
+                uvs,
                 vertices,
                 collision_enabled,
                 break_flags,
+                erosion,
             } => {
                 // Box props are scenery that can sit at any height (e.g.
                 // stacked on another box), so they honor the authored Y
@@ -1399,12 +1403,15 @@ pub fn build_package(
                     yaw,
                     roll,
                     materials,
+                    uvs,
                     *vertices,
                     *collision_enabled,
                     *break_flags,
+                    *erosion,
                     &mut texture_asset_for_path,
                     &mut assets,
                     &mut box_props,
+                    &mut box_prop_surfaces,
                     &mut report,
                 ) {
                     return (None, report);
@@ -1420,6 +1427,34 @@ pub fn build_package(
                         .entry(node.name.clone())
                         .or_default()
                         .push(cooked_index);
+                }
+            }
+            NodeKind::CylinderProp {
+                materials,
+                uvs,
+                geometry,
+                collision_enabled,
+            } => {
+                if !push_cylinder_prop(
+                    project,
+                    project_root,
+                    node.name.as_str(),
+                    room_index,
+                    raw_pos,
+                    pitch,
+                    yaw,
+                    roll,
+                    materials,
+                    uvs,
+                    *geometry,
+                    *collision_enabled,
+                    &mut texture_asset_for_path,
+                    &mut assets,
+                    &mut cylinder_props,
+                    &mut cylinder_prop_surfaces,
+                    &mut report,
+                ) {
+                    return (None, report);
                 }
             }
             NodeKind::Logic {
@@ -1719,10 +1754,21 @@ pub fn build_package(
         return (None, report);
     }
 
-    let lights = expand_lights_across_chunks(&room_bake_inputs, &lights);
+    let mut lights = expand_lights_across_chunks(&room_bake_inputs, &lights);
     bake_static_surface_lights(&mut room_bake_inputs, &lights);
     bake_static_image_prop_lights(&mut image_props, &room_bake_inputs, &lights);
-    bake_static_box_prop_lights(&mut box_props, &room_bake_inputs, &lights);
+    bake_static_box_prop_lights(
+        &mut box_props,
+        &mut box_prop_surfaces,
+        &room_bake_inputs,
+        &lights,
+    );
+    bake_static_cylinder_prop_lights(
+        &cylinder_props,
+        &mut cylinder_prop_surfaces,
+        &room_bake_inputs,
+        &lights,
+    );
     for room in &room_bake_inputs {
         let bytes = match room.cooked.to_psxw_bytes() {
             Ok(b) => b,
@@ -1815,6 +1861,10 @@ pub fn build_package(
     if !report.is_ok() {
         return (None, report);
     }
+    // Runtime lighting shades in room-local space. Keep each room's lights
+    // contiguous so a room view can binary-slice once instead of filtering
+    // the complete level table for every material shade.
+    lights.sort_by_key(|light| light.room);
     let options = cook_options(project);
 
     (
@@ -1849,6 +1899,9 @@ pub fn build_package(
             model_instances,
             image_props,
             box_props,
+            box_prop_surfaces,
+            cylinder_props,
+            cylinder_prop_surfaces,
             ui_nodes,
             ui_paints,
             ui_scenes,

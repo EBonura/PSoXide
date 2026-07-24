@@ -863,6 +863,8 @@ pub struct PlaytestBoxProp {
     pub texture_asset_indices: [Option<usize>; psx_level::BOX_PROP_FACE_COUNT],
     /// Per-face material blend codes using `model_override_blend` values.
     pub blend_modes: [u8; psx_level::BOX_PROP_FACE_COUNT],
+    /// Final per-face PS1 UV coordinates in face perimeter order.
+    pub uvs: [[(u8, u8); 4]; psx_level::BOX_PROP_FACE_COUNT],
     /// Bottom-center room-local X.
     pub x: i32,
     /// Bottom Y.
@@ -881,12 +883,57 @@ pub struct PlaytestBoxProp {
     pub roll: i16,
     /// Editable local vertices, bottom ring then top ring.
     pub vertices: [[i16; 3]; psx_level::BOX_PROP_VERTEX_COUNT],
+    /// First generated quad in [`PlaytestPackage::box_prop_surfaces`].
+    pub surface_first: u16,
+    /// Number of generated erosion quads. Zero selects legacy cage faces.
+    pub surface_count: u16,
     /// Material modulation tint per face.
     pub tint_rgb: [[u8; 3]; psx_level::BOX_PROP_FACE_COUNT],
     /// Baked static light base per face vertex.
     pub baked_vertex_rgb: [[(u8, u8, u8); 4]; psx_level::BOX_PROP_FACE_COUNT],
     /// Runtime flags.
     pub flags: u16,
+}
+
+/// One generated BoxProp quad baked into room-local coordinates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestBoxPropSurface {
+    pub vertices: [[i32; 3]; 4],
+    pub center: [i32; 3],
+    pub normal: [i32; 3],
+    pub uv_q8: [[u8; 2]; 4],
+    pub baked_vertex_rgb: [(u8, u8, u8); 4],
+    pub source_face: u8,
+    pub flags: u8,
+}
+
+/// One cooked low-poly procedural radial prop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestCylinderProp {
+    pub room: u16,
+    pub texture_asset_indices: [Option<usize>; psx_level::CYLINDER_PROP_MATERIAL_COUNT],
+    pub blend_modes: [u8; psx_level::CYLINDER_PROP_MATERIAL_COUNT],
+    pub uvs: [[(u8, u8); 4]; psx_level::CYLINDER_PROP_MATERIAL_COUNT],
+    pub tint_rgb: [[u8; 3]; psx_level::CYLINDER_PROP_MATERIAL_COUNT],
+    pub surface_first: u16,
+    pub surface_count: u16,
+    pub center: [i32; 3],
+    pub cull_radius: i32,
+    pub bounds_min: [i32; 3],
+    pub bounds_max: [i32; 3],
+    pub flags: u16,
+}
+
+/// One generated CylinderProp triangle or quad in room-local coordinates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaytestCylinderPropSurface {
+    pub vertices: [[i32; 3]; 4],
+    pub center: [i32; 3],
+    pub normal: [i32; 3],
+    pub uv_q8: [[u8; 2]; 4],
+    pub baked_vertex_rgb: [(u8, u8, u8); 4],
+    pub material_slot: u8,
+    pub vertex_count: u8,
 }
 
 /// Cooked button action, ready for manifest emission. Mirrors
@@ -1770,6 +1817,12 @@ pub struct PlaytestPackage {
     pub image_props: Vec<PlaytestImageProp>,
     /// Placed editable box props, room-local coordinates.
     pub box_props: Vec<PlaytestBoxProp>,
+    /// Generated directional-erosion surfaces sliced by [`Self::box_props`].
+    pub box_prop_surfaces: Vec<PlaytestBoxPropSurface>,
+    /// Placed low-poly procedural radial props.
+    pub cylinder_props: Vec<PlaytestCylinderProp>,
+    /// Generated surfaces sliced by [`Self::cylinder_props`].
+    pub cylinder_prop_surfaces: Vec<PlaytestCylinderPropSurface>,
     /// Cooked screen-space UI nodes for every scene, concatenated
     /// into one shared pool. [`Self::ui_scenes`] slices this pool.
     pub ui_nodes: Vec<PlaytestUiNode>,

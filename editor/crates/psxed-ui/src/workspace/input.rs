@@ -821,6 +821,7 @@ impl EditorWorkspace {
             (ViewTool::Place, Some(PlaceKind::Character)),
             (ViewTool::Place, Some(PlaceKind::ImageProp)),
             (ViewTool::Place, Some(PlaceKind::BoxProp)),
+            (ViewTool::Place, Some(PlaceKind::CylinderProp)),
             (ViewTool::Place, Some(PlaceKind::PointLightMarker)),
             (ViewTool::Place, Some(PlaceKind::ParticleEmitter)),
             (ViewTool::Place, Some(PlaceKind::Portal)),
@@ -1148,6 +1149,7 @@ impl EditorWorkspace {
                 | NodeKind::MeshInstance { .. }
                 | NodeKind::ImageProp { .. }
                 | NodeKind::BoxProp { .. }
+                | NodeKind::CylinderProp { .. }
                 | NodeKind::SpawnPoint { .. }
                 | NodeKind::Portal { .. }
         );

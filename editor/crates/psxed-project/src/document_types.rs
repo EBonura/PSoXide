@@ -224,8 +224,8 @@ impl RuntimeDepthSortMode {
 
 /// Default projected edge threshold for runtime room subdivision.
 ///
-/// `0` disables visual subdivision and keeps splitting limited to PS1
-/// hardware packet bounds. Lower positive values split more aggressively.
+/// `0` keeps the fixed Tomb Raider depth-band schedule without additional
+/// projected-edge refinement. Lower positive values split more aggressively.
 pub const DEFAULT_RUNTIME_TEXTURE_SPLIT_MAX_EDGE: u16 = 0;
 
 pub(crate) const fn default_runtime_texture_split_max_edge() -> u16 {
@@ -235,7 +235,7 @@ pub(crate) const fn default_runtime_texture_split_max_edge() -> u16 {
 /// Scope for runtime room triangle subdivision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum RuntimeTextureSplitMode {
-    /// Apply the edge threshold to every cached room surface.
+    /// Apply depth-band subdivision and optional edge refinement everywhere.
     #[default]
     All,
     /// Apply the edge threshold only to surfaces using per-triangle depth.
@@ -257,9 +257,13 @@ impl RuntimeTextureSplitMode {
 
     pub const fn description(self) -> &'static str {
         match self {
-            Self::All => "Current behavior. Every cached room surface may subdivide.",
-            Self::DepthSorted => "Only per-triangle depth surfaces subdivide.",
-            Self::Risky => "Only sloped or high-depth-span surfaces subdivide.",
+            Self::All => "Tomb Raider depth-band subdivision applies to every cached room surface.",
+            Self::DepthSorted => {
+                "Only surfaces using per-triangle depth receive depth-band subdivision."
+            }
+            Self::Risky => {
+                "Only sloped or high-depth-span surfaces receive depth-band subdivision."
+            }
         }
     }
 
@@ -337,7 +341,7 @@ pub struct ProjectDocument {
     /// Runtime active-room draw ordering policy.
     #[serde(default)]
     pub runtime_room_draw_order_mode: RuntimeRoomDrawOrderMode,
-    /// Projected edge threshold used to subdivide textured runtime room surfaces.
+    /// Optional projected-edge refinement layered over depth-band subdivision.
     #[serde(default = "default_runtime_texture_split_max_edge")]
     pub runtime_texture_split_max_edge: u16,
     /// Open scenes. The first scene is the active scene for now.
@@ -1409,6 +1413,10 @@ pub(crate) fn node_kind_reference_count(kind: &NodeKind, id: ResourceId) -> usiz
             .iter()
             .filter(|material| **material == Some(id))
             .count(),
+        NodeKind::CylinderProp { materials, .. } => materials
+            .iter()
+            .filter(|material| **material == Some(id))
+            .count(),
         NodeKind::ModelRenderer {
             model, material, ..
         } => {
@@ -1470,6 +1478,13 @@ pub(crate) fn clear_node_kind_references(kind: &mut NodeKind, id: ResourceId) ->
         }
         NodeKind::ImageProp { material, .. } => clear_option_resource(material, id),
         NodeKind::BoxProp { materials, .. } => {
+            let mut cleared = 0;
+            for material in materials {
+                cleared += clear_option_resource(material, id);
+            }
+            cleared
+        }
+        NodeKind::CylinderProp { materials, .. } => {
             let mut cleared = 0;
             for material in materials {
                 cleared += clear_option_resource(material, id);
