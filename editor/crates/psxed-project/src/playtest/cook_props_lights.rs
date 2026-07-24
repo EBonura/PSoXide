@@ -618,6 +618,201 @@ pub(crate) fn push_cylinder_prop(
     true
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn push_arch_prop(
+    project: &ProjectDocument,
+    project_root: &Path,
+    node_name: &str,
+    room_index: u16,
+    pos: [i32; 3],
+    pitch: i16,
+    yaw: i16,
+    roll: i16,
+    sector_size: i32,
+    materials: &[Option<ResourceId>; crate::ARCH_PROP_MATERIAL_COUNT],
+    uvs: &[crate::GridUvTransform; crate::ARCH_PROP_MATERIAL_COUNT],
+    geometry: crate::ArchPropGeometry,
+    collision_enabled: bool,
+    texture_asset_for_path: &mut HashMap<String, usize>,
+    assets: &mut Vec<PlaytestAsset>,
+    arch_props: &mut Vec<PlaytestArchProp>,
+    arch_prop_surfaces: &mut Vec<PlaytestArchPropSurface>,
+    arch_prop_collisions: &mut Vec<PlaytestArchPropCollision>,
+    report: &mut PlaytestValidationReport,
+) -> bool {
+    let mut texture_asset_indices = [None; psx_level::ARCH_PROP_MATERIAL_COUNT];
+    let mut blend_modes =
+        [psx_level::model_override_blend::OPAQUE; psx_level::ARCH_PROP_MATERIAL_COUNT];
+    let mut cooked_uvs = [[(0, 0); 4]; psx_level::ARCH_PROP_MATERIAL_COUNT];
+    let mut tint_rgb = [[128, 128, 128]; psx_level::ARCH_PROP_MATERIAL_COUNT];
+    let mut valid_materials = 0;
+    for (slot, material) in materials.iter().enumerate() {
+        let Some(material_id) = *material else {
+            continue;
+        };
+        let label = format!(
+            "Arch Prop '{node_name}' {}",
+            crate::ARCH_PROP_MATERIAL_NAMES[slot]
+        );
+        let Some((texture_asset_index, tint)) = resolve_material_texture_asset(
+            project,
+            project_root,
+            &label,
+            material_id,
+            texture_asset_for_path,
+            assets,
+            report,
+        ) else {
+            continue;
+        };
+        texture_asset_indices[slot] = Some(texture_asset_index);
+        if let Ok(texture) = psx_asset::Texture::from_bytes(&assets[texture_asset_index].bytes) {
+            let u_max = texture.width().saturating_sub(1).min(255) as u8;
+            let v_max = texture.height().saturating_sub(1).min(255) as u8;
+            cooked_uvs[slot] =
+                uvs[slot].apply_to_quad([(0, 0), (u_max, 0), (u_max, v_max), (0, v_max)]);
+        }
+        tint_rgb[slot] = tint;
+        blend_modes[slot] = project
+            .resource(material_id)
+            .and_then(|resource| match &resource.data {
+                ResourceData::Material(material) => Some(
+                    super::manifest::model_override_blend_code(material.blend_mode),
+                ),
+                _ => None,
+            })
+            .unwrap_or(psx_level::model_override_blend::OPAQUE);
+        valid_materials += 1;
+    }
+    if valid_materials == 0 {
+        report.warn(format!(
+            "Arch Prop '{node_name}' has no drawable Materials - skipped"
+        ));
+        return true;
+    }
+
+    let generated = crate::generate_arch_prop_surfaces(geometry, sector_size);
+    let surface_first = arch_prop_surfaces.len();
+    if surface_first.saturating_add(generated.len()) > u16::MAX as usize {
+        report.error(format!(
+            "Arch Prop '{node_name}' generated surface table exceeds 65535 entries"
+        ));
+        return false;
+    }
+    let mut bounds_min = [i32::MAX; 3];
+    let mut bounds_max = [i32::MIN; 3];
+    for surface in generated {
+        let vertices = surface.vertices.map(|local| {
+            let rotated = crate::spatial::rotate_euler_local_q12(
+                [
+                    i32::from(local[0]),
+                    i32::from(local[1]),
+                    i32::from(local[2]),
+                ],
+                pitch as u16,
+                yaw as u16,
+                roll as u16,
+            );
+            [
+                pos[0].saturating_add(rotated[0]),
+                pos[1].saturating_add(rotated[1]),
+                pos[2].saturating_add(rotated[2]),
+            ]
+        });
+        for vertex in vertices {
+            for axis in 0..3 {
+                bounds_min[axis] = bounds_min[axis].min(vertex[axis]);
+                bounds_max[axis] = bounds_max[axis].max(vertex[axis]);
+            }
+        }
+        let material_slot =
+            usize::from(surface.material_slot).min(crate::ARCH_PROP_MATERIAL_COUNT - 1);
+        arch_prop_surfaces.push(PlaytestArchPropSurface {
+            vertices,
+            center: polygon_surface_center(vertices, 4),
+            normal: box_prop_surface_normal(vertices),
+            uv_q8: surface.uv_q8,
+            baked_vertex_rgb: [rgb_tuple(tint_rgb[material_slot]); 4],
+            material_slot: material_slot as u8,
+        });
+    }
+
+    let collision_first = arch_prop_collisions.len();
+    if collision_enabled {
+        for collision in crate::generate_arch_prop_collision_boxes(geometry, sector_size) {
+            let mut world_min = [i32::MAX; 3];
+            let mut world_max = [i32::MIN; 3];
+            for x in [collision.min[0], collision.max[0]] {
+                for y in [collision.min[1], collision.max[1]] {
+                    for z in [collision.min[2], collision.max[2]] {
+                        let rotated = crate::spatial::rotate_euler_local_q12(
+                            [i32::from(x), i32::from(y), i32::from(z)],
+                            pitch as u16,
+                            yaw as u16,
+                            roll as u16,
+                        );
+                        let world = [
+                            pos[0].saturating_add(rotated[0]),
+                            pos[1].saturating_add(rotated[1]),
+                            pos[2].saturating_add(rotated[2]),
+                        ];
+                        for axis in 0..3 {
+                            world_min[axis] = world_min[axis].min(world[axis]);
+                            world_max[axis] = world_max[axis].max(world[axis]);
+                        }
+                    }
+                }
+            }
+            arch_prop_collisions.push(PlaytestArchPropCollision {
+                min: world_min,
+                max: world_max,
+            });
+        }
+    }
+    let collision_count = arch_prop_collisions.len() - collision_first;
+    if collision_first.saturating_add(collision_count) > u16::MAX as usize
+        || collision_count > u8::MAX as usize
+    {
+        report.error(format!(
+            "Arch Prop '{node_name}' collision table exceeds its fixed runtime indices"
+        ));
+        return false;
+    }
+    let center = [
+        bounds_min[0].saturating_add(bounds_max[0]) / 2,
+        bounds_min[1].saturating_add(bounds_max[1]) / 2,
+        bounds_min[2].saturating_add(bounds_max[2]) / 2,
+    ];
+    let half = [
+        i64::from(bounds_max[0] - bounds_min[0]) / 2,
+        i64::from(bounds_max[1] - bounds_min[1]) / 2,
+        i64::from(bounds_max[2] - bounds_min[2]) / 2,
+    ];
+    let cull_radius = ((half[0] * half[0] + half[1] * half[1] + half[2] * half[2]) as f64)
+        .sqrt()
+        .ceil()
+        .clamp(1.0, i32::MAX as f64) as i32;
+    arch_props.push(PlaytestArchProp {
+        room: room_index,
+        texture_asset_indices,
+        blend_modes,
+        uvs: cooked_uvs,
+        tint_rgb,
+        surface_first: surface_first as u16,
+        surface_count: (arch_prop_surfaces.len() - surface_first) as u16,
+        collision_first: collision_first as u16,
+        collision_count: collision_count as u8,
+        center,
+        cull_radius,
+        flags: if collision_enabled {
+            psx_level::arch_prop_flags::COLLISION_ENABLED
+        } else {
+            0
+        },
+    });
+    true
+}
+
 pub(crate) fn push_point_light(
     node_name: &str,
     grid: &crate::WorldGrid,
@@ -1448,6 +1643,40 @@ pub(crate) fn bake_static_cylinder_prop_lights(
             }
             if surface.vertex_count == 3 {
                 surface.baked_vertex_rgb[3] = surface.baked_vertex_rgb[2];
+            }
+        }
+    }
+}
+
+pub(crate) fn bake_static_arch_prop_lights(
+    arch_props: &[PlaytestArchProp],
+    arch_prop_surfaces: &mut [PlaytestArchPropSurface],
+    rooms: &[CookedRoomBakeInput],
+    lights: &[PlaytestLight],
+) {
+    for prop in arch_props {
+        let Some(room) = rooms.iter().find(|room| room.room_index == prop.room) else {
+            continue;
+        };
+        let room_lights: Vec<&PlaytestLight> = lights
+            .iter()
+            .filter(|light| light.room == prop.room)
+            .collect();
+        let ambient = room.cooked.ambient_color;
+        let first = usize::from(prop.surface_first);
+        let end = first
+            .saturating_add(usize::from(prop.surface_count))
+            .min(arch_prop_surfaces.len());
+        for surface in &mut arch_prop_surfaces[first..end] {
+            let slot =
+                usize::from(surface.material_slot).min(psx_level::ARCH_PROP_MATERIAL_COUNT - 1);
+            let base = prop.tint_rgb[slot];
+            for (color, vertex) in surface
+                .baked_vertex_rgb
+                .iter_mut()
+                .zip(surface.vertices.iter())
+            {
+                *color = rgb_tuple(bake_static_vertex_rgb(*vertex, base, ambient, &room_lights));
             }
         }
     }

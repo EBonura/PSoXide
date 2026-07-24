@@ -760,6 +760,17 @@ impl Scene for Playtest {
                     &mut primitive_packets,
                     &mut world,
                 );
+                psx_game_runtime::arch_props::draw_arch_props(
+                    ARCH_PROPS,
+                    ARCH_PROP_SURFACES,
+                    active.index,
+                    &room_camera,
+                    actor_options,
+                    &lighting,
+                    prop_texture_slot,
+                    &mut primitive_packets,
+                    &mut world,
+                );
                 box_prop_profile_begin(telemetry::stage::BOX_PROP_DEBRIS);
                 draw_box_prop_floor_debris(
                     BOX_PROPS,
