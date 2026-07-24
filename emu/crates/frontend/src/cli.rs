@@ -21,6 +21,7 @@
 //! returns -- `main()` never spins up winit/wgpu. Without a
 //! subcommand, the GUI runs as normal.
 
+use std::collections::BTreeMap;
 #[cfg(feature = "editor")]
 use std::collections::HashSet;
 use std::io::Write;
@@ -228,6 +229,11 @@ pub struct LaunchArgs {
     /// emitted guest frame-begin marker.
     #[arg(long)]
     pub input_tape: Option<PathBuf>,
+    /// Wait this many emulator route ticks before applying frame zero from
+    /// `--input-tape`. Recordings started after the console was already
+    /// running need this offset when replayed from a cold boot.
+    #[arg(long, default_value_t = 0)]
+    pub input_tape_delay_ticks: u64,
     /// Press pad-1 button masks on the headless route clock. Format:
     /// `<mask>@<tick>+<frames>`, comma-separated, e.g.
     /// `0x4000@45+12,0x4000@80+16`.
@@ -298,6 +304,34 @@ pub struct LaunchArgs {
     /// an input-tape replay.
     #[arg(long)]
     pub route_log: Option<PathBuf>,
+    /// Write an emulator-owned GP0 command census per route tick. Command
+    /// capture is drained after every tick, so long input-tape replays can
+    /// measure draw composition without retaining the whole command stream.
+    #[arg(long)]
+    pub gpu_frame_stats_log: Option<PathBuf>,
+    /// Capture the software display at fixed route-tick checkpoints. These
+    /// screenshots are emulator-owned and do not alter guest RAM or timing.
+    #[arg(long)]
+    pub route_screenshot_dir: Option<PathBuf>,
+    /// Route ticks between screenshots written by `--route-screenshot-dir`.
+    #[arg(long, default_value_t = 3_000)]
+    pub route_screenshot_interval: u64,
+    /// Sample the guest program counter entirely from the emulator and write
+    /// aggregate address counts. This profiles an untouched shipping binary:
+    /// no guest telemetry code, RAM, or timing hooks are required.
+    #[arg(long)]
+    pub pc_sample_log: Option<PathBuf>,
+    /// Write out-of-band PC samples grouped into route-tick windows. This
+    /// identifies which guest code dominates individual slow gameplay spans
+    /// instead of averaging menu, loading and gameplay into one profile.
+    #[arg(long)]
+    pub pc_sample_window_log: Option<PathBuf>,
+    /// Route ticks per bucket in `--pc-sample-window-log`.
+    #[arg(long, default_value_t = 300)]
+    pub pc_sample_window_ticks: u64,
+    /// Retired guest instructions between program-counter samples.
+    #[arg(long, default_value_t = 16_384)]
+    pub pc_sample_instructions: u64,
     /// Optional path to dump the final VRAM as a raw PPM image.
     /// Lets you eyeball the boot state without firing up the GUI.
     #[arg(long)]
@@ -675,6 +709,12 @@ fn run_headless_launch(
     if args.input_tape.is_some() && has_pad_pulses {
         return Err("--input-tape cannot be combined with --pad-pulses".to_string());
     }
+    if args.input_tape.is_none() && args.input_tape_delay_ticks != 0 {
+        return Err("--input-tape-delay-ticks requires --input-tape".to_string());
+    }
+    if args.route_screenshot_dir.is_some() && args.route_screenshot_interval == 0 {
+        return Err("--route-screenshot-interval must be greater than zero".to_string());
+    }
 
     // Resolve `path`: direct flag or lookup by game-id.
     let game_path = match (args.path, args.game_id) {
@@ -708,9 +748,12 @@ fn run_headless_launch(
         }
         None => None,
     };
-    let guest_frame_limit = args
-        .guest_frames
-        .or_else(|| tape_samples.as_ref().map(|samples| samples.len() as u64));
+    let guest_frame_limit = args.guest_frames.or_else(|| {
+        tape_samples
+            .as_ref()
+            .map(|samples| (samples.len() as u64).saturating_add(args.input_tape_delay_ticks))
+    });
+    let capture_gpu_commands = args.dump_hw.is_some() || args.gpu_frame_stats_log.is_some();
 
     let mut cpu = Cpu::new();
 
@@ -724,7 +767,7 @@ fn run_headless_launch(
     let mut bus = match ext.as_str() {
         "exe" => {
             let mut bus = Bus::new_without_bios();
-            if args.dump_hw.is_some() {
+            if capture_gpu_commands {
                 bus.gpu.enable_cmd_log();
             }
             let bytes = std::fs::read(&game_path).map_err(|e| e.to_string())?;
@@ -754,7 +797,7 @@ fn run_headless_launch(
             } else {
                 bus_from_configured_bios(&settings)?
             };
-            if args.dump_hw.is_some() {
+            if capture_gpu_commands {
                 bus.gpu.enable_cmd_log();
             }
             let bytes = std::fs::read(&game_path).map_err(|e| e.to_string())?;
@@ -785,7 +828,7 @@ fn run_headless_launch(
             } else {
                 bus_from_configured_bios(&settings)?
             };
-            if args.dump_hw.is_some() {
+            if capture_gpu_commands {
                 bus.gpu.enable_cmd_log();
             }
             let disc = psoxide_settings::library::load_disc_from_cue(&game_path)?;
@@ -814,7 +857,7 @@ fn run_headless_launch(
                 return Err("--embedded-playtest does not support .ccd".to_string());
             }
             let mut bus = bus_from_configured_bios(&settings)?;
-            if args.dump_hw.is_some() {
+            if capture_gpu_commands {
                 bus.gpu.enable_cmd_log();
             }
             let disc = psoxide_settings::library::load_disc_from_ccd(&game_path)?;
@@ -876,7 +919,7 @@ fn run_headless_launch(
         attach_headless_playtest_pad(&mut bus, args.digital_pad);
         bus.set_port1_buttons(ButtonState::default());
         bus.set_port1_sticks(0x80, 0x80, 0x80, 0x80);
-        if args.dump_hw.is_some() {
+        if capture_gpu_commands {
             bus.gpu.enable_cmd_log();
         }
         if emit_summary {
@@ -920,6 +963,10 @@ fn run_headless_launch(
     let mut route_tick_steps = 0u64;
     let mut route_ticks = 0u64;
     let mut tape_cursor = 0usize;
+    let mut tape_started = false;
+    if let Some(path) = args.route_screenshot_dir.as_ref() {
+        std::fs::create_dir_all(path).map_err(|e| format!("mkdir {}: {e}", path.display()))?;
+    }
     let mut route_log = match args.route_log.as_ref() {
         Some(path) => {
             if let Some(parent) = path
@@ -953,12 +1000,40 @@ fn run_headless_launch(
         }
         None => None,
     };
+    let mut gpu_frame_stats_log = match args.gpu_frame_stats_log.as_ref() {
+        Some(path) => {
+            if let Some(parent) = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+            {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+            }
+            let file = std::fs::File::create(path)
+                .map_err(|e| format!("create GPU stats log {}: {e}", path.display()))?;
+            let mut writer = std::io::BufWriter::new(file);
+            writeln!(
+                writer,
+                "route_tick,tape_frame,display_start_changed,commands,draws,fills,textured_tris,textured_quads,textured_rects,sky_quads,texture_windows,texture_window_zero,texture_window_changes,texture_window_redundant,gpu_cycles,dma_gpu_cycles,fill_cycles,textured_tri_cycles,textured_quad_cycles,textured_rect_cycles,other_cycles"
+            )
+            .map_err(|e| format!("write GPU stats log {}: {e}", path.display()))?;
+            Some(writer)
+        }
+        None => None,
+    };
     let initial_display_area = bus.gpu.display_area();
     let mut route_last_display_start = (initial_display_area.x, initial_display_area.y);
+    let mut gpu_stats_last_display_start = route_last_display_start;
+    let mut gpu_prev_timing = bus.gpu.gp0_timing_histogram();
+    let mut gpu_prev_dma_timing = bus.gpu.gp0_dma_timing_histogram();
+    let mut gpu_prev_texture_window = None;
     let mut route_last_cpu_tick = cpu.tick();
     let mut route_last_bus_cycles = bus.cycles();
-    if let Some(samples) = tape_samples.as_ref() {
-        samples[tape_cursor].apply_to_bus(&mut bus);
+    if args.input_tape_delay_ticks == 0 {
+        if let Some(samples) = tape_samples.as_ref() {
+            samples[tape_cursor].apply_to_bus(&mut bus);
+            tape_started = true;
+        }
     }
     let mut current_pulsed_button_mask = None;
     if has_pad_pulses {
@@ -992,6 +1067,11 @@ fn run_headless_launch(
     let mut counter_log = CounterLog::new(args.counter_log.as_deref())?;
     let mut observed_counter_frames = observed_guest_frames;
     let mut profile_log = GuestProfileLog::new(args.profile_log.as_deref())?;
+    let mut pc_samples = args.pc_sample_log.as_ref().map(|_| BTreeMap::new());
+    let mut pc_window_samples = args.pc_sample_window_log.as_ref().map(|_| BTreeMap::new());
+    let pc_sample_interval = args.pc_sample_instructions.max(1);
+    let pc_sample_window_ticks = args.pc_sample_window_ticks.max(1);
+    let mut next_pc_sample = 0u64;
 
     // Step the CPU. Report early on opcode errors -- they're usually
     // "we hit an unimplemented instruction" and worth surfacing.
@@ -999,6 +1079,16 @@ fn run_headless_launch(
     let mut audio_capture: Vec<(i16, i16)> = Vec::new();
     let gte_profile_before = cpu.cop2().profile_snapshot();
     for i in 0..args.steps {
+        if i >= next_pc_sample {
+            if let Some(samples) = pc_samples.as_mut() {
+                *samples.entry(cpu.pc()).or_insert(0u64) += 1;
+            }
+            if let Some(samples) = pc_window_samples.as_mut() {
+                let window_start = route_ticks / pc_sample_window_ticks * pc_sample_window_ticks;
+                *samples.entry((window_start, cpu.pc())).or_insert(0u64) += 1;
+            }
+            next_pc_sample = next_pc_sample.saturating_add(pc_sample_interval);
+        }
         if let Err(e) = cpu.step(&mut bus) {
             eprintln!("[cli] step {i} failed: {e:?}");
             eprintln!(
@@ -1030,10 +1120,23 @@ fn run_headless_launch(
             route_tick_steps = 0;
             route_ticks += 1;
             if let Some(samples) = tape_samples.as_ref() {
-                let cursor = (route_ticks as usize).min(samples.len().saturating_sub(1));
-                if cursor != tape_cursor {
-                    tape_cursor = cursor;
-                    samples[tape_cursor].apply_to_bus(&mut bus);
+                if route_ticks >= args.input_tape_delay_ticks {
+                    let cursor = route_ticks
+                        .saturating_sub(args.input_tape_delay_ticks)
+                        .min(samples.len().saturating_sub(1) as u64)
+                        as usize;
+                    if !tape_started || cursor != tape_cursor {
+                        tape_started = true;
+                        tape_cursor = cursor;
+                        samples[tape_cursor].apply_to_bus(&mut bus);
+                    }
+                }
+            }
+            if let Some(dir) = args.route_screenshot_dir.as_ref() {
+                if route_ticks % args.route_screenshot_interval == 0 {
+                    let path = dir.join(format!("tick-{route_ticks:06}.ppm"));
+                    let (rgba, width, height) = bus.gpu.display_rgba8();
+                    write_rgb_ppm_from_rgba(&path, width, height, &rgba)?;
                 }
             }
             if has_pad_pulses {
@@ -1065,6 +1168,90 @@ fn run_headless_launch(
                 route_last_display_start = display_start;
                 route_last_cpu_tick = cpu_tick;
                 route_last_bus_cycles = bus_cycles;
+            }
+            if let Some(writer) = gpu_frame_stats_log.as_mut() {
+                let commands = bus.gpu.drain_completed_cmd_log();
+                let timing = bus.gpu.gp0_timing_histogram();
+                let dma_timing = bus.gpu.gp0_dma_timing_histogram();
+                let mut timing_delta = [0u64; 256];
+                let mut dma_timing_delta = [0u64; 256];
+                for opcode in 0..256 {
+                    timing_delta[opcode] = timing[opcode].saturating_sub(gpu_prev_timing[opcode]);
+                    dma_timing_delta[opcode] =
+                        dma_timing[opcode].saturating_sub(gpu_prev_dma_timing[opcode]);
+                }
+                gpu_prev_timing = timing;
+                gpu_prev_dma_timing = dma_timing;
+                let mut draws = 0u64;
+                let mut fills = 0u64;
+                let mut textured_tris = 0u64;
+                let mut textured_quads = 0u64;
+                let mut textured_rects = 0u64;
+                let mut sky_quads = 0u64;
+                let mut texture_windows = 0u64;
+                let mut texture_window_zero = 0u64;
+                let mut texture_window_changes = 0u64;
+                let mut texture_window_redundant = 0u64;
+                for command in &commands {
+                    if matches!(command.opcode, 0x20..=0x7F) {
+                        draws += 1;
+                    }
+                    match command.opcode {
+                        0x02 => fills += 1,
+                        0x24..=0x27 | 0x34..=0x37 => textured_tris += 1,
+                        0x2C..=0x2F | 0x3C..=0x3F => {
+                            textured_quads += 1;
+                            if command.fifo.len() >= 9
+                                && command.fifo[1] == 0
+                                && command.fifo[3] == 319
+                                && command.fifo[5] == (239u32 << 16)
+                                && command.fifo[7] == ((239u32 << 16) | 319)
+                            {
+                                sky_quads += 1;
+                            }
+                        }
+                        0x64..=0x7F => textured_rects += 1,
+                        0xE2 => {
+                            texture_windows += 1;
+                            let value = command.fifo[0] & 0x000F_FFFF;
+                            texture_window_zero += u64::from(value == 0);
+                            if gpu_prev_texture_window == Some(value) {
+                                texture_window_redundant += 1;
+                            } else {
+                                texture_window_changes += 1;
+                                gpu_prev_texture_window = Some(value);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                let area = bus.gpu.display_area();
+                let display_start = (area.x, area.y);
+                let display_start_changed = u8::from(display_start != gpu_stats_last_display_start);
+                let sum_cycles = |ranges: &[(usize, usize)]| -> u64 {
+                    ranges
+                        .iter()
+                        .map(|&(first, last)| timing_delta[first..=last].iter().sum::<u64>())
+                        .sum()
+                };
+                let gpu_cycles: u64 = timing_delta.iter().sum();
+                let dma_gpu_cycles: u64 = dma_timing_delta.iter().sum();
+                let fill_cycles = timing_delta[0x02];
+                let textured_tri_cycles = sum_cycles(&[(0x24, 0x27), (0x34, 0x37)]);
+                let textured_quad_cycles = sum_cycles(&[(0x2C, 0x2F), (0x3C, 0x3F)]);
+                let textured_rect_cycles = sum_cycles(&[(0x64, 0x7F)]);
+                let classified_cycles = fill_cycles
+                    .saturating_add(textured_tri_cycles)
+                    .saturating_add(textured_quad_cycles)
+                    .saturating_add(textured_rect_cycles);
+                let other_cycles = gpu_cycles.saturating_sub(classified_cycles);
+                writeln!(
+                    writer,
+                    "{route_ticks},{tape_cursor},{display_start_changed},{},{draws},{fills},{textured_tris},{textured_quads},{textured_rects},{sky_quads},{texture_windows},{texture_window_zero},{texture_window_changes},{texture_window_redundant},{gpu_cycles},{dma_gpu_cycles},{fill_cycles},{textured_tri_cycles},{textured_quad_cycles},{textured_rect_cycles},{other_cycles}",
+                    commands.len(),
+                )
+                .map_err(|e| e.to_string())?;
+                gpu_stats_last_display_start = display_start;
             }
         }
         if current_guest_frames != observed_guest_frames {
@@ -1220,6 +1407,33 @@ fn run_headless_launch(
 
     if let Some(writer) = route_log.as_mut() {
         writer.flush().map_err(|e| e.to_string())?;
+    }
+    if let (Some(path), Some(samples)) = (args.pc_sample_log.as_ref(), pc_samples.as_ref()) {
+        write_pc_sample_log(path, samples)?;
+        if emit_summary {
+            let total = samples.values().copied().sum::<u64>();
+            eprintln!(
+                "[cli] PC samples → {} ({} samples, {} addresses)",
+                path.display(),
+                total,
+                samples.len()
+            );
+        }
+    }
+    if let (Some(path), Some(samples)) = (
+        args.pc_sample_window_log.as_ref(),
+        pc_window_samples.as_ref(),
+    ) {
+        write_pc_window_sample_log(path, samples)?;
+        if emit_summary {
+            let total = samples.values().copied().sum::<u64>();
+            eprintln!(
+                "[cli] windowed PC samples → {} ({} samples, {} buckets)",
+                path.display(),
+                total,
+                samples.len()
+            );
+        }
     }
 
     if let Some(path) = args.dump_hw {
@@ -1835,6 +2049,7 @@ fn validation_launch_args(
         guest_frames: checkpoint.stop.guest_frames,
         guest_visual_frames: checkpoint.stop.guest_visual_frames,
         input_tape,
+        input_tape_delay_ticks: 0,
         pad_pulses: checkpoint.pad_pulses.clone(),
         digital_pad: false,
         embedded_playtest: artifact.embedded_playtest,
@@ -1850,6 +2065,13 @@ fn validation_launch_args(
         counter_log: None,
         profile_log: None,
         route_log: None,
+        gpu_frame_stats_log: None,
+        route_screenshot_dir: None,
+        route_screenshot_interval: 3_000,
+        pc_sample_log: None,
+        pc_sample_window_log: None,
+        pc_sample_window_ticks: 300,
+        pc_sample_instructions: 16_384,
         dump_vram: None,
         dump_ram: None,
         dump_spu_ram: None,
@@ -2605,6 +2827,64 @@ fn write_rgb_ppm_from_rgba(
     }
     f.write_all(&rgb).map_err(|e| e.to_string())?;
     Ok(())
+}
+
+fn write_pc_sample_log(path: &Path, samples: &BTreeMap<u32, u64>) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("create {}: {error}", parent.display()))?;
+    }
+    let file = std::fs::File::create(path)
+        .map_err(|error| format!("create {}: {error}", path.display()))?;
+    let mut writer = std::io::BufWriter::new(file);
+    writeln!(writer, "pc,samples,percent").map_err(|error| error.to_string())?;
+    let total = samples.values().copied().sum::<u64>();
+    let mut ranked = samples
+        .iter()
+        .map(|(&pc, &count)| (pc, count))
+        .collect::<Vec<_>>();
+    ranked.sort_unstable_by(|(pc_a, count_a), (pc_b, count_b)| {
+        count_b.cmp(count_a).then_with(|| pc_a.cmp(pc_b))
+    });
+    for (pc, count) in ranked {
+        let percent = if total == 0 {
+            0.0
+        } else {
+            count as f64 * 100.0 / total as f64
+        };
+        writeln!(writer, "0x{pc:08x},{count},{percent:.6}").map_err(|error| error.to_string())?;
+    }
+    writer.flush().map_err(|error| error.to_string())
+}
+
+fn write_pc_window_sample_log(
+    path: &Path,
+    samples: &BTreeMap<(u64, u32), u64>,
+) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("create {}: {error}", parent.display()))?;
+    }
+    let file = std::fs::File::create(path)
+        .map_err(|error| format!("create {}: {error}", path.display()))?;
+    let mut writer = std::io::BufWriter::new(file);
+    writeln!(writer, "window_start_tick,pc,samples,percent_window")
+        .map_err(|error| error.to_string())?;
+    let mut window_totals = BTreeMap::<u64, u64>::new();
+    for (&(window_start, _), &count) in samples {
+        *window_totals.entry(window_start).or_insert(0) += count;
+    }
+    for (&(window_start, pc), &count) in samples {
+        let window_total = window_totals.get(&window_start).copied().unwrap_or(0);
+        let percent = if window_total == 0 {
+            0.0
+        } else {
+            count as f64 * 100.0 / window_total as f64
+        };
+        writeln!(writer, "{window_start},0x{pc:08x},{count},{percent:.6}")
+            .map_err(|error| error.to_string())?;
+    }
+    writer.flush().map_err(|error| error.to_string())
 }
 
 fn dump_vram_ppm(bus: &Bus, path: &std::path::Path) -> Result<(), String> {

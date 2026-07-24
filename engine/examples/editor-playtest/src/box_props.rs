@@ -58,8 +58,16 @@ impl Playtest {
         &self,
         out: &mut [CharacterCollisionAabb],
     ) -> usize {
-        self.box_props
-            .collect_collision_blockers(BOX_PROPS, self.room_index, out)
+        let count = self
+            .box_props
+            .collect_collision_blockers(BOX_PROPS, self.room_index, out);
+        count
+            + psx_game_runtime::arch_props::collect_arch_prop_collision_blockers(
+                ARCH_PROPS,
+                ARCH_PROP_COLLISIONS,
+                self.room_index,
+                &mut out[count..],
+            )
     }
 }
 
