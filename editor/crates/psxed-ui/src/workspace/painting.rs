@@ -803,14 +803,35 @@ impl EditorWorkspace {
     pub(crate) fn find_duplicate_box_prop(
         &self,
         room_id: NodeId,
-        material_id: ResourceId,
+        material_id: Option<ResourceId>,
         translation: [f32; 3],
     ) -> Option<NodeId> {
         self.find_duplicate_room_child(room_id, translation, |_, node| {
             matches!(
                 node.kind,
                 NodeKind::BoxProp { materials, .. }
-                    if materials.contains(&Some(material_id))
+                    if material_id.map_or_else(
+                        || materials.iter().all(Option::is_none),
+                        |material| materials.contains(&Some(material)),
+                    )
+            )
+        })
+    }
+
+    pub(crate) fn find_duplicate_cylinder_prop(
+        &self,
+        room_id: NodeId,
+        material_id: Option<ResourceId>,
+        translation: [f32; 3],
+    ) -> Option<NodeId> {
+        self.find_duplicate_room_child(room_id, translation, |_, node| {
+            matches!(
+                node.kind,
+                NodeKind::CylinderProp { materials, .. }
+                    if material_id.map_or_else(
+                        || materials.iter().all(Option::is_none),
+                        |material| materials.contains(&Some(material)),
+                    )
             )
         })
     }
@@ -1163,6 +1184,99 @@ impl EditorWorkspace {
                 .is_some_and(|floor| floor.populated_sector_count() == 0)
     }
 
+    /// Remove an empty layer and repair every floor-indexed reference without
+    /// creating an undo entry. Callers own undo, selection, status, and dirty
+    /// state so this can be folded into a larger authoring action such as
+    /// deleting the last tiles on a layer.
+    pub(crate) fn remove_empty_layer_in_room(
+        &mut self,
+        room: NodeId,
+        floor_index: usize,
+    ) -> Option<(usize, usize)> {
+        let (replacement, new_floor_count) = {
+            let scene = self.project.active_scene_mut();
+            let room_node = scene.node_mut(room)?;
+            let NodeKind::Room { grid } = &mut room_node.kind else {
+                return None;
+            };
+            if grid.floor_count() <= 1
+                || grid
+                    .floor(floor_index)
+                    .is_none_or(|floor| floor.populated_sector_count() != 0)
+            {
+                return None;
+            }
+
+            let room_origin_y = room_node.transform.translation[1] * grid.sector_size.max(1) as f32;
+            let elevation_delta = grid.remove_empty_floor(floor_index)?;
+            if floor_index == 0 {
+                room_node.transform.translation[1] =
+                    (room_origin_y + elevation_delta as f32) / grid.sector_size.max(1) as f32;
+            }
+            let new_floor_count = grid.floor_count();
+            (
+                floor_index.min(new_floor_count.saturating_sub(1)),
+                new_floor_count,
+            )
+        };
+
+        let scene = self.project.active_scene_mut();
+        let descendant_ids: Vec<NodeId> = scene
+            .nodes()
+            .iter()
+            .filter(|node| node.id != room && scene.is_descendant_of(node.id, room))
+            .map(|node| node.id)
+            .collect();
+        for id in descendant_ids {
+            if let Some(node) = scene.node_mut(id) {
+                node.floor = if node.floor > floor_index {
+                    node.floor - 1
+                } else if node.floor == floor_index {
+                    replacement
+                } else {
+                    node.floor
+                };
+            }
+        }
+
+        let room_ids: Vec<NodeId> = scene
+            .nodes()
+            .iter()
+            .filter(|node| matches!(node.kind, NodeKind::Room { .. }))
+            .map(|node| node.id)
+            .collect();
+        for room_id in room_ids {
+            let Some(node) = scene.node_mut(room_id) else {
+                continue;
+            };
+            let NodeKind::Room { grid } = &mut node.kind else {
+                continue;
+            };
+            for current_floor in 0..grid.floor_count() {
+                let Some(floor) = grid.floor_mut(current_floor) else {
+                    continue;
+                };
+                for sector in floor.sectors.iter_mut().flatten() {
+                    remap_deleted_floor_target(
+                        &mut sector.floor_above,
+                        room,
+                        floor_index,
+                        replacement,
+                    );
+                    remap_deleted_floor_target(
+                        &mut sector.floor_below,
+                        room,
+                        floor_index,
+                        replacement,
+                    );
+                }
+            }
+        }
+
+        self.active_floor = replacement;
+        Some((replacement, new_floor_count))
+    }
+
     /// Delete the active empty layer as one undoable edit. Removing the base
     /// promotes layer two and offsets the Room node so the promoted geometry
     /// does not move in world space. Nodes and authored floor-link targets are
@@ -1189,73 +1303,10 @@ impl EditorWorkspace {
         }
 
         let before = self.project.clone();
-        let (replacement, new_floor_count) = {
-            let scene = self.project.active_scene_mut();
-            let Some(room_node) = scene.node_mut(room) else {
-                return;
-            };
-            let NodeKind::Room { grid } = &mut room_node.kind else {
-                return;
-            };
-            let room_origin_y = room_node.transform.translation[1] * grid.sector_size.max(1) as f32;
-            let Some(elevation_delta) = grid.remove_empty_floor(active) else {
-                return;
-            };
-            if active == 0 {
-                room_node.transform.translation[1] =
-                    (room_origin_y + elevation_delta as f32) / grid.sector_size.max(1) as f32;
-            }
-            let new_floor_count = grid.floor_count();
-            (
-                active.min(new_floor_count.saturating_sub(1)),
-                new_floor_count,
-            )
+        let Some((replacement, new_floor_count)) = self.remove_empty_layer_in_room(room, active)
+        else {
+            return;
         };
-
-        let scene = self.project.active_scene_mut();
-        let descendant_ids: Vec<NodeId> = scene
-            .nodes()
-            .iter()
-            .filter(|node| node.id != room && scene.is_descendant_of(node.id, room))
-            .map(|node| node.id)
-            .collect();
-        for id in descendant_ids {
-            if let Some(node) = scene.node_mut(id) {
-                node.floor = if node.floor > active {
-                    node.floor - 1
-                } else if node.floor == active {
-                    replacement
-                } else {
-                    node.floor
-                };
-            }
-        }
-
-        let room_ids: Vec<NodeId> = scene
-            .nodes()
-            .iter()
-            .filter(|node| matches!(node.kind, NodeKind::Room { .. }))
-            .map(|node| node.id)
-            .collect();
-        for room_id in room_ids {
-            let Some(node) = scene.node_mut(room_id) else {
-                continue;
-            };
-            let NodeKind::Room { grid } = &mut node.kind else {
-                continue;
-            };
-            for floor_index in 0..grid.floor_count() {
-                let Some(floor) = grid.floor_mut(floor_index) else {
-                    continue;
-                };
-                for sector in floor.sectors.iter_mut().flatten() {
-                    remap_deleted_floor_target(&mut sector.floor_above, room, active, replacement);
-                    remap_deleted_floor_target(&mut sector.floor_below, room, active, replacement);
-                }
-            }
-        }
-
-        self.active_floor = replacement;
         self.clear_sector_selection();
         self.clear_primitive_selection_state();
         self.history.record(before);
@@ -2045,30 +2096,60 @@ impl EditorWorkspace {
                         return;
                     }
                 },
-                PlaceKind::BoxProp => match self.resolve_place_image_prop_material() {
-                    Ok((material_id, name)) => {
-                        let size = image_prop_default_size_for_sector(sector_size_i);
-                        if let Some(existing) =
-                            self.find_duplicate_box_prop(room_id, material_id, translation)
-                        {
-                            self.reject_duplicate_placement(existing, "Box Prop");
-                            return;
-                        }
-                        (
-                            format!("{name} Box"),
-                            NodeKind::BoxProp {
-                                materials: [Some(material_id); psxed_project::BOX_PROP_FACE_COUNT],
-                                vertices: psxed_project::box_prop_vertices_for_size(size),
-                                collision_enabled: true,
-                                break_flags: 0,
-                            },
-                        )
-                    }
-                    Err(message) => {
-                        self.status = message;
+                PlaceKind::BoxProp => {
+                    let material = self.resolve_place_box_prop_material();
+                    let material_id = material.as_ref().map(|(id, _)| *id);
+                    let size = image_prop_default_size_for_sector(sector_size_i);
+                    if let Some(existing) =
+                        self.find_duplicate_box_prop(room_id, material_id, translation)
+                    {
+                        self.reject_duplicate_placement(existing, "Box Prop");
                         return;
                     }
-                },
+                    let name = material
+                        .as_ref()
+                        .map(|(_, name)| format!("{name} Box"))
+                        .unwrap_or_else(|| "Box Prop".to_string());
+                    (
+                        name,
+                        NodeKind::BoxProp {
+                            materials: [material_id; psxed_project::BOX_PROP_FACE_COUNT],
+                            uvs: [GridUvTransform::IDENTITY; psxed_project::BOX_PROP_FACE_COUNT],
+                            vertices: psxed_project::box_prop_vertices_for_size(size),
+                            collision_enabled: true,
+                            break_flags: 0,
+                            erosion: psxed_project::BoxPropErosion::default(),
+                        },
+                    )
+                }
+                PlaceKind::CylinderProp => {
+                    let material = self.resolve_place_box_prop_material();
+                    let material_id = material.as_ref().map(|(id, _)| *id);
+                    let size = image_prop_default_size_for_sector(sector_size_i);
+                    if let Some(existing) =
+                        self.find_duplicate_cylinder_prop(room_id, material_id, translation)
+                    {
+                        self.reject_duplicate_placement(existing, "Cylinder Prop");
+                        return;
+                    }
+                    let name = material
+                        .as_ref()
+                        .map(|(_, name)| format!("{name} Column"))
+                        .unwrap_or_else(|| "Cylinder Prop".to_string());
+                    let mut geometry = psxed_project::CylinderPropGeometry::default();
+                    geometry.radius = [size / 2, size / 2];
+                    geometry.height = size.saturating_mul(2);
+                    (
+                        name,
+                        NodeKind::CylinderProp {
+                            materials: [material_id; psxed_project::CYLINDER_PROP_MATERIAL_COUNT],
+                            uvs: [GridUvTransform::IDENTITY;
+                                psxed_project::CYLINDER_PROP_MATERIAL_COUNT],
+                            geometry,
+                            collision_enabled: true,
+                        },
+                    )
+                }
                 PlaceKind::PointLightMarker => {
                     if let Some(existing) = self.find_duplicate_point_light(room_id, translation) {
                         self.reject_duplicate_placement(existing, "Point Light");
@@ -2326,7 +2407,7 @@ impl EditorWorkspace {
         let Some((world_cell, default_height)) = self.room_grid_view(room_id).and_then(|grid| {
             let sector = grid.sector(sx, sz)?;
             let floor = sector.floor.as_ref()?;
-            let clicked_floor = *floor.heights.iter().max()?;
+            let clicked_floor = floor.lowest_height();
             let world_x = grid.origin[0] + i32::from(sx);
             let world_z = grid.origin[1] + i32::from(sz);
             let mut rim = clicked_floor;
@@ -2342,14 +2423,7 @@ impl EditorWorkspace {
                     if let Some(neighbor_floor) =
                         grid.sector(nx, nz).and_then(|sector| sector.floor.as_ref())
                     {
-                        rim = rim.max(
-                            neighbor_floor
-                                .heights
-                                .iter()
-                                .copied()
-                                .max()
-                                .unwrap_or(clicked_floor),
-                        );
+                        rim = rim.max(neighbor_floor.lowest_height());
                     }
                 }
             }
@@ -2703,14 +2777,14 @@ impl EditorWorkspace {
             return false;
         };
         self.status = match (assignment.targets, assignment.updated) {
-            (1, 0) => "Material already assigned to selected Box Prop".to_string(),
-            (1, _) => "Assigned material to Box Prop".to_string(),
-            (_, 0) => "Material already assigned to selected Box Props".to_string(),
+            (1, 0) => "Material already assigned to selected Prop".to_string(),
+            (1, _) => "Assigned material to Prop".to_string(),
+            (_, 0) => "Material already assigned to selected Props".to_string(),
             (total, updated) if total == updated => {
-                format!("Assigned material to {updated} selected Box Props")
+                format!("Assigned material to {updated} selected Props")
             }
             (total, updated) => {
-                format!("Assigned material to {updated}/{total} selected Box Props")
+                format!("Assigned material to {updated}/{total} selected Props")
             }
         };
         self.clear_resource_selection_state();
@@ -2757,10 +2831,12 @@ impl EditorWorkspace {
         self.selected_node_ids_in_hierarchy()
             .into_iter()
             .filter(|id| {
-                self.project
-                    .active_scene()
-                    .node(*id)
-                    .is_some_and(|node| matches!(node.kind, NodeKind::BoxProp { .. }))
+                self.project.active_scene().node(*id).is_some_and(|node| {
+                    matches!(
+                        node.kind,
+                        NodeKind::BoxProp { .. } | NodeKind::CylinderProp { .. }
+                    )
+                })
             })
             .collect()
     }
@@ -2769,11 +2845,15 @@ impl EditorWorkspace {
         self.project
             .active_scene()
             .node(id)
-            .and_then(|node| match &node.kind {
-                NodeKind::BoxProp { materials, .. } => Some(materials),
-                _ => None,
+            .is_some_and(|node| match &node.kind {
+                NodeKind::BoxProp { materials, .. } => {
+                    materials.iter().any(|slot| *slot != Some(material))
+                }
+                NodeKind::CylinderProp { materials, .. } => {
+                    materials.iter().any(|slot| *slot != Some(material))
+                }
+                _ => false,
             })
-            .is_some_and(|materials| materials.iter().any(|slot| *slot != Some(material)))
     }
 
     pub(crate) fn assign_box_prop_nodes_material_no_undo(
@@ -2787,13 +2867,21 @@ impl EditorWorkspace {
             let Some(node) = scene.node_mut(*id) else {
                 continue;
             };
-            let NodeKind::BoxProp { materials, .. } = &mut node.kind else {
-                continue;
-            };
-            if materials.iter().all(|slot| *slot == Some(material)) {
-                continue;
+            match &mut node.kind {
+                NodeKind::BoxProp { materials, .. } => {
+                    if materials.iter().all(|slot| *slot == Some(material)) {
+                        continue;
+                    }
+                    *materials = [Some(material); psxed_project::BOX_PROP_FACE_COUNT];
+                }
+                NodeKind::CylinderProp { materials, .. } => {
+                    if materials.iter().all(|slot| *slot == Some(material)) {
+                        continue;
+                    }
+                    *materials = [Some(material); psxed_project::CYLINDER_PROP_MATERIAL_COUNT];
+                }
+                _ => continue,
             }
-            *materials = [Some(material); psxed_project::BOX_PROP_FACE_COUNT];
             updated += 1;
         }
         updated

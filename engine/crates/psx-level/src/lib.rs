@@ -278,6 +278,8 @@ pub mod image_prop_flags {
 pub const BOX_PROP_FACE_COUNT: usize = 6;
 /// Editable vertex count on an authored boxed prop.
 pub const BOX_PROP_VERTEX_COUNT: usize = 8;
+/// Side / top / bottom / fracture slots on an authored CylinderProp.
+pub const CYLINDER_PROP_MATERIAL_COUNT: usize = 4;
 
 /// Maximum distinct materials a single room may reference.
 ///
@@ -300,6 +302,12 @@ pub mod box_prop_flags {
     pub const BREAK_ON_ATTACK: u16 = 1 << 3;
     /// All authored break trigger bits.
     pub const BREAK_ON_MASK: u16 = BREAK_ON_WALK | BREAK_ON_RUN | BREAK_ON_ATTACK;
+}
+
+/// Cylinder prop record flags.
+pub mod cylinder_prop_flags {
+    /// Prop emits one static collision blocker for the character motor.
+    pub const COLLISION_ENABLED: u16 = 1 << 0;
 }
 
 /// Model clip bounds/calibration flags.
@@ -2036,6 +2044,8 @@ pub struct LevelBoxPropRecord {
     pub texture_assets: [Option<AssetId>; BOX_PROP_FACE_COUNT],
     /// Per-face blend codes from [`model_override_blend`].
     pub blend_modes: [u8; BOX_PROP_FACE_COUNT],
+    /// Final per-face PS1 UV coordinates in face perimeter order.
+    pub uvs: [[(u8, u8); 4]; BOX_PROP_FACE_COUNT],
     /// Bottom-center room-local X.
     pub x: i32,
     /// Bottom Y.
@@ -2057,12 +2067,87 @@ pub struct LevelBoxPropRecord {
     pub roll: i16,
     /// Editable local vertices, bottom ring then top ring.
     pub vertices: [[i16; 3]; BOX_PROP_VERTEX_COUNT],
+    /// First generated surface in `BOX_PROP_SURFACES`. A zero count keeps the
+    /// legacy six-face cage rendering path.
+    pub surface_first: u16,
+    /// Number of generated erosion surfaces owned by this prop.
+    pub surface_count: u16,
     /// Per-face modulation tint.
     pub tint_rgb: [[u8; 3]; BOX_PROP_FACE_COUNT],
     /// Baked static light base per face vertex.
     pub baked_vertex_rgb: [[(u8, u8, u8); 4]; BOX_PROP_FACE_COUNT],
     /// Runtime flags.
     pub flags: u16,
+}
+
+/// One cook-generated BoxProp surface. Vertices and center are already in
+/// room-local world coordinates, so runtime rendering only applies transient
+/// falling offsets before projection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelBoxPropSurfaceRecord {
+    /// Outward-wound quad corners. Non-planar quads are split by the renderer.
+    pub vertices: [[i32; 3]; 4],
+    /// Precomputed center for camera-facing and fog calculations.
+    pub center: [i32; 3],
+    /// Precomputed unnormalised face normal, scaled down by the cooker.
+    pub normal: [i32; 3],
+    /// UV coordinates relative to the selected texture's extent (`0..=255`).
+    pub uv_q8: [[u8; 2]; 4],
+    /// Per-vertex baked static light base.
+    pub baked_vertex_rgb: [(u8, u8, u8); 4],
+    /// Material slot in BoxProp face order.
+    pub source_face: u8,
+    /// Reserved flags.
+    pub flags: u8,
+}
+
+/// One placed low-poly procedural radial prop. The editor/cooker expands the
+/// compact authored recipe into [`LevelCylinderPropSurfaceRecord`]s, keeping
+/// runtime CPU cost independent of profile complexity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelCylinderPropRecord {
+    /// Owning room index.
+    pub room: RoomIndex,
+    /// Side, top, bottom, and fracture texture assets.
+    pub texture_assets: [Option<AssetId>; CYLINDER_PROP_MATERIAL_COUNT],
+    /// Per-slot blend codes from [`model_override_blend`].
+    pub blend_modes: [u8; CYLINDER_PROP_MATERIAL_COUNT],
+    /// Final per-slot PS1 UV rectangles.
+    pub uvs: [[(u8, u8); 4]; CYLINDER_PROP_MATERIAL_COUNT],
+    /// First generated surface in `CYLINDER_PROP_SURFACES`.
+    pub surface_first: u16,
+    /// Generated surface count.
+    pub surface_count: u16,
+    /// Cooked room-local culling center.
+    pub center: [i32; 3],
+    /// Conservative spherical culling radius.
+    pub cull_radius: i32,
+    /// Conservative room-local collision bounds.
+    pub bounds_min: [i32; 3],
+    /// Upper conservative room-local collision bounds.
+    pub bounds_max: [i32; 3],
+    /// Runtime flags from [`cylinder_prop_flags`].
+    pub flags: u16,
+}
+
+/// One cook-generated CylinderProp triangle or quad. Vertices and center are
+/// already in room-local world coordinates; runtime only projects and submits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LevelCylinderPropSurfaceRecord {
+    /// Outward-wound vertices. Triangles repeat their last vertex in slot 3.
+    pub vertices: [[i32; 3]; 4],
+    /// Precomputed polygon center for facing and fog calculations.
+    pub center: [i32; 3],
+    /// Precomputed unnormalised outward normal.
+    pub normal: [i32; 3],
+    /// UVs relative to the selected texture extent (`0..=255`).
+    pub uv_q8: [[u8; 2]; 4],
+    /// Per-vertex baked static light base.
+    pub baked_vertex_rgb: [(u8, u8, u8); 4],
+    /// Side/top/bottom/fracture material slot.
+    pub material_slot: u8,
+    /// `3` or `4`.
+    pub vertex_count: u8,
 }
 
 /// One addressable cooked UI scene. Each scene names a contiguous

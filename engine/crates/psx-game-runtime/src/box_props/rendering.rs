@@ -167,6 +167,7 @@ pub fn draw_box_props<
     const OT_DEPTH: usize,
 >(
     props: &[LevelBoxPropRecord],
+    generated_surfaces: &[LevelBoxPropSurfaceRecord],
     state: &BoxProps<MAX_BOX_PROP_STATE, BOX_PROP_BROKEN_WORDS, MAX_BOX_PROP_BREAK_EVENTS>,
     current_room: RoomIndex,
     camera: &WorldCamera,
@@ -213,19 +214,139 @@ pub fn draw_box_props<
                 loaded
             }
         };
-        draw_box_prop_faces(
-            prop,
-            &box_runtime.faces,
-            fall_y,
-            loaded_projector,
-            camera,
-            options,
-            lighting,
-            &mut prop_texture_slot,
-            &mut face_texture_cache,
-            triangles,
-            world,
-        );
+        if prop.surface_count == 0 {
+            draw_box_prop_faces(
+                prop,
+                &box_runtime.faces,
+                fall_y,
+                loaded_projector,
+                camera,
+                options,
+                lighting,
+                &mut prop_texture_slot,
+                &mut face_texture_cache,
+                triangles,
+                world,
+            );
+        } else {
+            draw_generated_box_prop_surfaces(
+                prop,
+                generated_surfaces,
+                fall_y,
+                loaded_projector,
+                camera,
+                options,
+                lighting,
+                &mut prop_texture_slot,
+                &mut face_texture_cache,
+                triangles,
+                world,
+            );
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_generated_box_prop_surfaces<T, const OT_DEPTH: usize>(
+    prop: &LevelBoxPropRecord,
+    generated_surfaces: &[LevelBoxPropSurfaceRecord],
+    fall_y: i32,
+    projector: LoadedWorldCameraGte,
+    camera: &WorldCamera,
+    options: WorldSurfaceOptions,
+    lighting: &RuntimeRoomLighting,
+    prop_texture_slot: &mut impl FnMut(AssetId) -> Option<VramSlot>,
+    face_texture_cache: &mut Option<(AssetId, BoxPropFaceTextureRuntime)>,
+    triangles: &mut T,
+    world: &mut WorldRenderPass<'_, '_, OT_DEPTH>,
+) where
+    T: PrimitiveSink<TriTextured>
+        + PrimitiveSink<TriTexturedGouraud>
+        + PrimitiveSink<QuadTexturedGouraud>,
+{
+    let first = usize::from(prop.surface_first);
+    let end = first
+        .saturating_add(usize::from(prop.surface_count))
+        .min(generated_surfaces.len());
+    for surface in generated_surfaces.get(first..end).unwrap_or(&[]) {
+        let face = usize::from(surface.source_face);
+        if face >= psx_level::BOX_PROP_FACE_COUNT {
+            continue;
+        }
+        let face_runtime = BoxPropFaceRuntime {
+            vertices: surface
+                .vertices
+                .map(|vertex| WorldVertex::new(vertex[0], vertex[1], vertex[2])),
+            center: WorldVertex::new(surface.center[0], surface.center[1], surface.center[2]),
+            normal: surface.normal,
+        };
+        if !box_prop_face_front_facing(camera, face_runtime) {
+            continue;
+        }
+        let face_vertices = box_prop_offset_quad_y(face_runtime.vertices, fall_y);
+        let Some(texture_asset) = prop.texture_assets[face] else {
+            continue;
+        };
+        let face_texture = match *face_texture_cache {
+            Some((cached_asset, cached)) if cached_asset == texture_asset => cached,
+            _ => {
+                let Some(slot) = prop_texture_slot(texture_asset) else {
+                    continue;
+                };
+                let resolved = BoxPropFaceTextureRuntime {
+                    material: TextureMaterial::opaque(
+                        slot.clut_word,
+                        slot.tpage_word,
+                        (0x80, 0x80, 0x80),
+                    )
+                    .with_blend_mode(model_override_blend_mode(prop.blend_modes[face]))
+                    .with_texture_window(slot.texture_window),
+                    u_max: model_render_uv_max(slot.texture_width),
+                    v_max: model_render_uv_max(slot.texture_height),
+                };
+                *face_texture_cache = Some((texture_asset, resolved));
+                resolved
+            }
+        };
+        let material = face_texture.material;
+        let uvs = surface
+            .uv_q8
+            .map(|uv| box_prop_face_uv_at(prop.uvs[face], uv));
+        let opts = options
+            .with_depth_policy(DepthPolicy::Average)
+            .with_cull_mode(CullMode::None)
+            .with_material_layer(material)
+            .with_textured_triangle_splitting(true)
+            .with_textured_triangle_max_edge(0);
+        if let Some(projected) = projector.project_world_quad(face_vertices) {
+            let colors = [
+                lighting.apply_fog_at_depth(surface.baked_vertex_rgb[0], projected[0].sz),
+                lighting.apply_fog_at_depth(surface.baked_vertex_rgb[1], projected[1].sz),
+                lighting.apply_fog_at_depth(surface.baked_vertex_rgb[2], projected[2].sz),
+                lighting.apply_fog_at_depth(surface.baked_vertex_rgb[3], projected[3].sz),
+            ];
+            submit_projected_textured_gouraud_quad_u8(
+                world, triangles, &projected, &uvs, &colors, material, opts,
+            );
+        } else {
+            let colors = [
+                lighting.apply_vertex_fog(surface.baked_vertex_rgb[0], face_vertices[0]),
+                lighting.apply_vertex_fog(surface.baked_vertex_rgb[1], face_vertices[1]),
+                lighting.apply_vertex_fog(surface.baked_vertex_rgb[2], face_vertices[2]),
+                lighting.apply_vertex_fog(surface.baked_vertex_rgb[3], face_vertices[3]),
+            ];
+            let tint = average_vertex_rgb(colors);
+            let material = material.with_tint(tint);
+            let opts = opts.with_material_layer(material);
+            let _ = world.submit_textured_world_quad(
+                triangles,
+                *camera,
+                face_vertices,
+                uvs,
+                material,
+                opts,
+            );
+        }
     }
 }
 
@@ -657,9 +778,7 @@ fn draw_box_prop_faces<T, const OT_DEPTH: usize>(
             }
         };
         let material = face_texture.material;
-        let u_max = face_texture.u_max;
-        let v_max = face_texture.v_max;
-        let uvs = [(0, 0), (u_max, 0), (u_max, v_max), (0, v_max)];
+        let uvs = prop.uvs[face];
         let opts = options
             .with_depth_policy(DepthPolicy::Average)
             .with_cull_mode(CullMode::None)
@@ -699,6 +818,34 @@ fn draw_box_prop_faces<T, const OT_DEPTH: usize>(
             );
         }
     }
+}
+
+fn box_prop_face_uv_at(corners: [(u8, u8); 4], uv_q8: [u8; 2]) -> (u8, u8) {
+    let u = u32::from(uv_q8[0]);
+    let v = u32::from(uv_q8[1]);
+    let inv_u = 255 - u;
+    let inv_v = 255 - v;
+    let interpolate = |axis: usize| {
+        let values = if axis == 0 {
+            [
+                u32::from(corners[0].0),
+                u32::from(corners[1].0),
+                u32::from(corners[2].0),
+                u32::from(corners[3].0),
+            ]
+        } else {
+            [
+                u32::from(corners[0].1),
+                u32::from(corners[1].1),
+                u32::from(corners[2].1),
+                u32::from(corners[3].1),
+            ]
+        };
+        let top = values[0] * inv_u + values[1] * u;
+        let bottom = values[3] * inv_u + values[2] * u;
+        ((top * inv_v + bottom * v + 32_512) / 65_025).min(255) as u8
+    };
+    (interpolate(0), interpolate(1))
 }
 
 fn box_prop_face_front_facing(camera: &WorldCamera, face: BoxPropFaceRuntime) -> bool {

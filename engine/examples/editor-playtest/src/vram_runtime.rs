@@ -276,13 +276,23 @@ pub(super) fn model_texture_slot(texture_asset: AssetId) -> Option<VramSlot> {
 /// True once every image/box prop texture of `room` is VRAM-resident.
 #[cfg(feature = "cd-stream-bench")]
 pub(super) fn room_prop_textures_ready(room: RoomIndex) -> bool {
-    if !vram_arena().room_prop_textures_ready(VRAM_LAYOUT, ASSETS, IMAGE_PROPS, BOX_PROPS, room) {
+    if !vram_arena().room_prop_textures_ready(
+        VRAM_LAYOUT,
+        ASSETS,
+        IMAGE_PROPS,
+        BOX_PROPS,
+        CYLINDER_PROPS,
+        room,
+    ) {
         return false;
     }
     WATER_CELLS
         .iter()
         .filter(|cell| cell.room == room)
-        .all(|cell| cell.texture_asset.is_none_or(|asset| prop_texture_slot(asset).is_some()))
+        .all(|cell| {
+            cell.texture_asset
+                .is_none_or(|asset| prop_texture_slot(asset).is_some())
+        })
 }
 
 /// Upload the streamed sky panorama synchronously from `asset_bytes`.

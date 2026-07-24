@@ -89,6 +89,7 @@ pub(crate) fn node_kind_uses_room_editor_position(kind: &NodeKind) -> bool {
             | NodeKind::MeshInstance { .. }
             | NodeKind::ImageProp { .. }
             | NodeKind::BoxProp { .. }
+            | NodeKind::CylinderProp { .. }
             | NodeKind::SpawnPoint { .. }
             | NodeKind::PointLight { .. }
             | NodeKind::Portal { .. }
@@ -877,6 +878,31 @@ pub(crate) fn entity_bound_kind_and_size(
                 ],
             ))
         }
+        NodeKind::CylinderProp { geometry, .. } => {
+            let base_scale = if geometry.base_bulge.enabled {
+                geometry.base_bulge.radius_percent
+            } else {
+                100
+            };
+            let top_scale = if geometry.top_bulge.enabled {
+                geometry
+                    .top_bulge
+                    .radius_percent
+                    .saturating_mul(geometry.top_radius_percent)
+                    / 100
+            } else {
+                geometry.top_radius_percent
+            };
+            let radial_scale = f32::from(base_scale.max(top_scale).max(100)) / 100.0;
+            Some((
+                EntityBoundKind::CylinderProp,
+                [
+                    (f32::from(geometry.radius[0]) * radial_scale).max(32.0),
+                    (f32::from(geometry.height) * 0.5).max(32.0),
+                    (f32::from(geometry.radius[1]) * radial_scale).max(32.0),
+                ],
+            ))
+        }
         NodeKind::SpawnPoint { .. } => Some((EntityBoundKind::SpawnPoint, [128.0, 256.0, 128.0])),
         NodeKind::PointLight { .. } => Some((EntityBoundKind::PointLight, [128.0, 128.0, 128.0])),
         NodeKind::ParticleEmitter { .. } => {
@@ -906,6 +932,7 @@ pub(crate) fn node_is_floor_anchored(kind: &NodeKind) -> bool {
         NodeKind::Entity
             | NodeKind::MeshInstance { .. }
             | NodeKind::BoxProp { .. }
+            | NodeKind::CylinderProp { .. }
             | NodeKind::SpawnPoint { .. }
     )
 }

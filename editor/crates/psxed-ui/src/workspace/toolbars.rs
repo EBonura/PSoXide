@@ -780,7 +780,7 @@ impl EditorWorkspace {
                             .prefix("Height "),
                     )
                     .on_hover_text(
-                        "Water surface height above each painted floor tile. The volume bottom always follows the terrain.",
+                        "Water surface height above the lowest point of each painted floor tile. The volume bottom always follows the terrain.",
                     )
                     .changed();
                 if changed {
@@ -1234,17 +1234,20 @@ impl EditorWorkspace {
     pub(crate) fn draw_active_place_options(&mut self, ui: &mut egui::Ui) {
         match self.place_kind {
             PlaceKind::ModelInstance => {
-                self.draw_place_resource_picker(ui, ResourceFilter::Model, "Model")
+                self.draw_place_resource_picker(ui, ResourceFilter::Model, "Model", false)
             }
             PlaceKind::Character => {
-                self.draw_place_resource_picker(ui, ResourceFilter::Character, "Profile")
+                self.draw_place_resource_picker(ui, ResourceFilter::Character, "Profile", false)
             }
             PlaceKind::ImageProp => {
-                self.draw_place_resource_picker(ui, ResourceFilter::ImagePropSource, "Image")
+                self.draw_place_resource_picker(ui, ResourceFilter::ImagePropSource, "Image", false)
             }
-            PlaceKind::BoxProp => {
-                self.draw_place_resource_picker(ui, ResourceFilter::ImagePropSource, "Material")
-            }
+            PlaceKind::BoxProp | PlaceKind::CylinderProp => self.draw_place_resource_picker(
+                ui,
+                ResourceFilter::ImagePropSource,
+                "Material",
+                true,
+            ),
             PlaceKind::ParticleEmitter => {
                 ui.weak(
                     "Point-projected sprite emitter. Configure texture and budget after placement.",
@@ -1259,6 +1262,7 @@ impl EditorWorkspace {
         ui: &mut egui::Ui,
         filter: ResourceFilter,
         label: &str,
+        allow_unassigned: bool,
     ) {
         let options: Vec<(ResourceId, String)> = self
             .project
@@ -1277,6 +1281,8 @@ impl EditorWorkspace {
         let before = self.place_resource;
         let auto_label = if options.len() == 1 {
             format!("Auto ({})", options[0].1)
+        } else if allow_unassigned {
+            "None (assign later)".to_string()
         } else {
             format!("Auto {label}")
         };
@@ -1392,6 +1398,27 @@ impl EditorWorkspace {
                 "Select a Material before placing an image prop ({n} available)"
             )),
         }
+    }
+
+    /// Resolve an optional material for a new Box Prop. A Box Prop remains
+    /// useful editable geometry without a material, so an ambiguous material
+    /// choice must not block placement.
+    pub(crate) fn resolve_place_box_prop_material(&self) -> Option<(ResourceId, String)> {
+        for id in self.place_resource_candidates() {
+            let Some(resource) = self.project.resource(id) else {
+                continue;
+            };
+            if matches!(&resource.data, ResourceData::Material(_)) {
+                return Some((id, resource.name.clone()));
+            }
+        }
+
+        let mut materials = self.project.resources.iter().filter_map(|resource| {
+            matches!(&resource.data, ResourceData::Material(_))
+                .then(|| (resource.id, resource.name.clone()))
+        });
+        let only = materials.next()?;
+        materials.next().is_none().then_some(only)
     }
 
     pub(crate) fn resolve_place_character_resource(

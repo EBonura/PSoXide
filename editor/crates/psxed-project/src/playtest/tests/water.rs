@@ -87,3 +87,48 @@ fn water_volume_cooks_sparse_cells_and_transparent_surface() {
         "animation: LevelMaterialAnimation::UvScroll(LevelMaterialUvMotion { enabled: true, speed_u_q8: 2048, speed_v_q8: 1203"
     ));
 }
+
+#[test]
+fn water_surface_anchors_to_lowest_point_of_sloped_floor() {
+    let mut project = project_with_one_room();
+    let room = project
+        .active_scene()
+        .nodes()
+        .iter()
+        .find(|node| matches!(node.kind, NodeKind::Room { .. }))
+        .map(|node| node.id)
+        .expect("fixture room");
+    let (world_x, world_z) = {
+        let NodeKind::Room { grid } = &mut project.active_scene_mut().node_mut(room).unwrap().kind
+        else {
+            unreachable!()
+        };
+        let grid = grid.floor_mut(0).expect("base floor");
+        let sector = grid.sector_mut(0, 0).expect("fixture sector");
+        sector.floor.as_mut().expect("floor").heights = [256, -128, 512, 64];
+        (grid.origin[0], grid.origin[1])
+    };
+    project.active_scene_mut().add_node(
+        room,
+        "Slope water",
+        NodeKind::WaterVolume {
+            material: None,
+            cells: vec![WaterVolumeCell::new(world_x, world_z)],
+            settings: WaterVolumeSettings {
+                height_above_floor: 128,
+                ..WaterVolumeSettings::default()
+            },
+        },
+    );
+
+    let (package, report) = build_package(&project, &starter_project_root());
+    assert!(report.is_ok(), "errors: {:?}", report.errors);
+    let water = package
+        .expect("water project cooks")
+        .water_cells
+        .into_iter()
+        .next()
+        .expect("water cell");
+    assert_eq!(water.surface_y, 0, "-128 low point + 128 water height");
+    assert_eq!(water.depth, 128);
+}

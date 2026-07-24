@@ -88,9 +88,10 @@ pub(crate) fn node_transform_inspector(kind: &NodeKind) -> NodeTransformInspecto
         // Entities allow pitch/roll so placed model props can face any
         // direction; the cook forwards all three axes to the runtime
         // model instance (character gameplay still drives yaw only).
-        NodeKind::Entity | NodeKind::ImageProp { .. } | NodeKind::BoxProp { .. } => {
-            NodeTransformInspector::PositionFullRotation
-        }
+        NodeKind::Entity
+        | NodeKind::ImageProp { .. }
+        | NodeKind::BoxProp { .. }
+        | NodeKind::CylinderProp { .. } => NodeTransformInspector::PositionFullRotation,
         NodeKind::Node3D => NodeTransformInspector::FullTransform,
     }
 }
@@ -159,8 +160,9 @@ pub(crate) fn draw_playtest_render_settings(
                             .update_while_editing(false),
                     )
                     .on_hover_text(
-                        "Maximum projected edge length before cached room triangles are split. \
-                         Lower values reduce PS1 ordering artifacts at higher CPU cost; 0 disables visual subdivision.",
+                        "Optional maximum projected edge length before cached room triangles are split \
+                         beyond the fixed Tomb Raider depth bands. Lower values reduce PS1 ordering \
+                         artifacts at higher CPU cost; 0 keeps only the depth-band schedule.",
                     )
                     .changed()
                 {
@@ -168,7 +170,9 @@ pub(crate) fn draw_playtest_render_settings(
                     changed = true;
                 }
             });
-            ui.weak("0 disables visual subdivision. Lower values split room triangles more aggressively.");
+            ui.weak(
+                "0 uses only Tomb Raider depth bands. Lower values add progressively finer edge-based splitting.",
+            );
         });
     changed
 }
@@ -1263,7 +1267,8 @@ pub(crate) fn node_gizmo_translation(
         | NodeKind::PointLight { .. }
         | NodeKind::ParticleEmitter { .. }
         | NodeKind::ImageProp { .. }
-        | NodeKind::BoxProp { .. } => {
+        | NodeKind::BoxProp { .. }
+        | NodeKind::CylinderProp { .. } => {
             node_transform_component_from_world_units(HEIGHT_QUANTUM, sector_size)
         }
         _ => 1.0,
@@ -1282,7 +1287,8 @@ pub(crate) fn node_gizmo_translation(
                 | NodeKind::PointLight { .. }
                 | NodeKind::ParticleEmitter { .. }
                 | NodeKind::ImageProp { .. }
-                | NodeKind::BoxProp { .. } => {
+                | NodeKind::BoxProp { .. }
+                | NodeKind::CylinderProp { .. } => {
                     translation[index] = snap_node_transform_component_to_world_step(
                         translation[index],
                         sector_size,
@@ -1332,13 +1338,92 @@ pub(crate) fn node_gizmo_plane_translation(
 
 pub(crate) fn node_gizmo_drag_has_motion(drag: &NodeGizmoDrag) -> bool {
     match drag.handle {
-        NodeGizmoHandle::Axis(_) => drag.current_steps != 0,
+        NodeGizmoHandle::Axis(_) | NodeGizmoHandle::BoxFace(_) => drag.current_steps != 0,
         NodeGizmoHandle::Plane(plane) => {
             let [a, b] = plane.axes();
             drag.current_plane_delta_world[a.index()].abs() > f32::EPSILON
                 || drag.current_plane_delta_world[b.index()].abs() > f32::EPSILON
         }
     }
+}
+
+pub(crate) fn apply_box_prop_face_gizmo_resize(
+    node: &mut psxed_project::SceneNode,
+    start_translation: [f32; 3],
+    start_box_prop_vertices: Option<[[i16; 3]; psxed_project::BOX_PROP_VERTEX_COUNT]>,
+    face: u8,
+    steps: i32,
+    sector_size: i32,
+) {
+    let NodeKind::BoxProp { vertices, .. } = &mut node.kind else {
+        return;
+    };
+    let Some(start_vertices) = start_box_prop_vertices else {
+        return;
+    };
+    let (axis, positive) = box_prop_face_axis_and_sign(face);
+    let index = axis.index();
+    let (mut min, mut max) = (i32::MAX, i32::MIN);
+    for vertex in start_vertices {
+        min = min.min(i32::from(vertex[index]));
+        max = max.max(i32::from(vertex[index]));
+    }
+    if min >= max {
+        return;
+    }
+
+    let delta = steps.saturating_mul(HEIGHT_QUANTUM);
+    let (new_min, new_max) = if positive {
+        (
+            min,
+            max.saturating_add(delta).clamp(
+                min.saturating_add(1),
+                min.saturating_add(i32::from(MAX_IMAGE_PROP_SIZE)),
+            ),
+        )
+    } else {
+        (
+            min.saturating_sub(delta).clamp(
+                max.saturating_sub(i32::from(MAX_IMAGE_PROP_SIZE)),
+                max.saturating_sub(1),
+            ),
+            max,
+        )
+    };
+    let old_size = (max - min) as f32;
+    let new_size = (new_max - new_min) as f32;
+    let old_anchor = if index == PrimitiveGizmoAxis::Y.index() {
+        min as f32
+    } else {
+        (min + max) as f32 * 0.5
+    };
+    let new_anchor = if index == PrimitiveGizmoAxis::Y.index() {
+        new_min as f32
+    } else {
+        (new_min + new_max) as f32 * 0.5
+    };
+    let anchor_shift = new_anchor - old_anchor;
+
+    *vertices = start_vertices;
+    for vertex in vertices.iter_mut() {
+        let t = (f32::from(vertex[index]) - min as f32) / old_size;
+        let remapped = new_min as f32 + t * new_size - anchor_shift;
+        vertex[index] = remapped.round().clamp(
+            -f32::from(MAX_IMAGE_PROP_SIZE),
+            f32::from(MAX_IMAGE_PROP_SIZE),
+        ) as i16;
+    }
+
+    let mut local_shift = [0.0; 3];
+    local_shift[index] = anchor_shift;
+    let rotation = euler_degrees_to_matrix(node.transform.rotation_degrees);
+    let world_shift = rotate_vector_by_matrix(&rotation, local_shift);
+    let sector_size = sector_size.max(1) as f32;
+    node.transform.translation = [
+        start_translation[0] + world_shift[0] / sector_size,
+        start_translation[1] + world_shift[1] / sector_size,
+        start_translation[2] + world_shift[2] / sector_size,
+    ];
 }
 
 pub(crate) fn node_gizmo_rotation(
@@ -1382,7 +1467,10 @@ pub(crate) fn node_gizmo_rotation(
 /// so spawn / trigger transforms stay flat without stray pitch / roll.
 pub(crate) fn node_rotation_axes(kind: &NodeKind) -> &'static [PrimitiveGizmoAxis] {
     match kind {
-        NodeKind::Entity | NodeKind::ImageProp { .. } | NodeKind::BoxProp { .. } => &[
+        NodeKind::Entity
+        | NodeKind::ImageProp { .. }
+        | NodeKind::BoxProp { .. }
+        | NodeKind::CylinderProp { .. } => &[
             PrimitiveGizmoAxis::X,
             PrimitiveGizmoAxis::Y,
             PrimitiveGizmoAxis::Z,
@@ -1395,6 +1483,7 @@ pub(crate) fn apply_node_gizmo_scale(
     node: &mut psxed_project::SceneNode,
     start_image_prop_size: Option<[u16; 2]>,
     start_box_prop_vertices: Option<[[i16; 3]; psxed_project::BOX_PROP_VERTEX_COUNT]>,
+    start_cylinder_prop_geometry: Option<psxed_project::CylinderPropGeometry>,
     axis: PrimitiveGizmoAxis,
     steps: i32,
 ) {
@@ -1421,6 +1510,21 @@ pub(crate) fn apply_node_gizmo_scale(
                 return;
             };
             apply_box_prop_gizmo_scale(vertices, start_vertices, axis, steps);
+        }
+        NodeKind::CylinderProp { geometry, .. } => {
+            let Some(start) = start_cylinder_prop_geometry else {
+                return;
+            };
+            let delta = steps.saturating_mul(HEIGHT_QUANTUM);
+            let resize = |value: u16| {
+                (i32::from(value) + delta).clamp(1, i32::from(MAX_IMAGE_PROP_SIZE)) as u16
+            };
+            *geometry = start;
+            match axis {
+                PrimitiveGizmoAxis::X => geometry.radius[0] = resize(start.radius[0]),
+                PrimitiveGizmoAxis::Y => geometry.height = resize(start.height),
+                PrimitiveGizmoAxis::Z => geometry.radius[1] = resize(start.radius[1]),
+            }
         }
         _ => {}
     }
@@ -1464,6 +1568,45 @@ pub(crate) fn apply_box_prop_gizmo_scale(
     }
 }
 
+/// Return the UV span that preserves the material's native room-surface
+/// texel density on one Box Prop face.
+///
+/// Room surfaces map one complete source texture across one sector. Box
+/// faces can be arbitrary quadrilaterals, so use the average length of each
+/// pair of opposing edges and repeat the source texture proportionally.
+/// `GridUvTransform` stores inclusive u8 spans, hence the `- 1`.
+pub(crate) fn box_prop_face_native_texel_span(
+    vertices: [[i16; 3]; psxed_project::BOX_PROP_VERTEX_COUNT],
+    face: usize,
+    sector_size: i32,
+    texture_size: [u16; 2],
+) -> [u16; 2] {
+    let [top_left, top_right, bottom_right, bottom_left] =
+        psxed_project::BOX_PROP_FACE_VERTEX_INDICES
+            [face.min(psxed_project::BOX_PROP_FACE_COUNT.saturating_sub(1))];
+    let edge_length = |a: usize, b: usize| {
+        let delta = [
+            f32::from(vertices[b][0] - vertices[a][0]),
+            f32::from(vertices[b][1] - vertices[a][1]),
+            f32::from(vertices[b][2] - vertices[a][2]),
+        ];
+        (delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2]).sqrt()
+    };
+    let face_width =
+        (edge_length(top_left, top_right) + edge_length(bottom_left, bottom_right)) * 0.5;
+    let face_height =
+        (edge_length(top_left, bottom_left) + edge_length(top_right, bottom_right)) * 0.5;
+    let sector_size = sector_size.max(1) as f32;
+    let native_span = |length: f32, texels: u16| {
+        ((length / sector_size * f32::from(texels.max(1))).round() as i32 - 1)
+            .clamp(1, u8::MAX as i32) as u16
+    };
+    [
+        native_span(face_width, texture_size[0]),
+        native_span(face_height, texture_size[1]),
+    ]
+}
+
 pub(crate) fn node_kind_supports_transform_gizmo(
     kind: &NodeKind,
     mode: TransformGizmoMode,
@@ -1476,6 +1619,7 @@ pub(crate) fn node_kind_supports_transform_gizmo(
                 | NodeKind::ParticleEmitter { .. }
                 | NodeKind::ImageProp { .. }
                 | NodeKind::BoxProp { .. }
+                | NodeKind::CylinderProp { .. }
                 | NodeKind::MeshInstance { .. }
                 | NodeKind::SpawnPoint { .. }
                 | NodeKind::Portal { .. }
@@ -1485,12 +1629,18 @@ pub(crate) fn node_kind_supports_transform_gizmo(
             NodeKind::Entity
                 | NodeKind::ImageProp { .. }
                 | NodeKind::BoxProp { .. }
+                | NodeKind::CylinderProp { .. }
                 | NodeKind::MeshInstance { .. }
                 | NodeKind::SpawnPoint { .. }
                 | NodeKind::Portal { .. }
         ),
         TransformGizmoMode::Scale => {
-            matches!(kind, NodeKind::ImageProp { .. } | NodeKind::BoxProp { .. })
+            matches!(
+                kind,
+                NodeKind::ImageProp { .. }
+                    | NodeKind::BoxProp { .. }
+                    | NodeKind::CylinderProp { .. }
+            )
         }
     }
 }
@@ -1772,6 +1922,7 @@ pub(crate) fn character_profile_action_clip(
 /// option lists, animator clip info, and the resize/navigation outputs.
 pub(crate) struct NodeKindEditorContext<'a> {
     pub(crate) material_options: &'a [(ResourceId, String)],
+    pub(crate) material_texture_dimensions: &'a [(ResourceId, [u16; 2])],
     pub(crate) texture_options: &'a [(ResourceId, String)],
     pub(crate) room_options: &'a [(NodeId, String)],
     pub(crate) model_options: &'a [(ResourceId, String, Vec<String>)],
@@ -1792,6 +1943,7 @@ pub(crate) fn draw_node_kind_editor(
 ) -> bool {
     let NodeKindEditorContext {
         material_options,
+        material_texture_dimensions,
         texture_options,
         room_options,
         model_options,
@@ -1976,7 +2128,7 @@ pub(crate) fn draw_node_kind_editor(
                         .prefix("Water height "),
                 )
                 .on_hover_text(
-                    "Distance from the terrain floor to the water surface. Each painted cell calculates its surface from its own floor tile.",
+                    "Distance from the lowest point of the terrain tile to the water surface. Each painted cell calculates its surface from its own floor geometry.",
                 )
                 .changed();
             changed |= ui
@@ -2229,9 +2381,11 @@ pub(crate) fn draw_node_kind_editor(
         }
         NodeKind::BoxProp {
             materials,
+            uvs,
             vertices,
             collision_enabled,
             break_flags,
+            erosion,
         } => {
             ui.weak(
                 "Editable material-backed box. Transform position is the bottom-center anchor.",
@@ -2246,12 +2400,58 @@ pub(crate) fn draw_node_kind_editor(
                         changed = true;
                     }
                 }
+                if ui.small_button("Copy Front UV").clicked() {
+                    let front = uvs[0];
+                    uvs.fill(front);
+                    changed = true;
+                }
             });
-            for (name, slot) in psxed_project::BOX_PROP_FACE_NAMES
-                .iter()
-                .zip(materials.iter_mut())
-            {
-                changed |= material_picker(ui, name, slot, material_options, nav_target);
+            ui.weak(
+                "Each face has independent offset, span, rotation, and mirroring. 1:1 keeps the same native texel density as room surfaces instead of stretching one tile across the face.",
+            );
+            for (face, name) in psxed_project::BOX_PROP_FACE_NAMES.iter().enumerate() {
+                egui::CollapsingHeader::new(*name)
+                    .id_salt(("box-prop-face", face))
+                    .default_open(face == 0)
+                    .show(ui, |ui| {
+                        changed |= material_picker(
+                            ui,
+                            "Material",
+                            &mut materials[face],
+                            material_options,
+                            nav_target,
+                        );
+                        let texture_size = materials[face].and_then(|material| {
+                            material_texture_dimensions
+                                .iter()
+                                .find_map(|(id, size)| (*id == material).then_some(*size))
+                        });
+                        ui.horizontal(|ui| {
+                            let one_to_one = ui
+                                .add_enabled(texture_size.is_some(), egui::Button::new("1:1 Texels"))
+                                .on_hover_text(
+                                    "Use the material's native texel density: one texture tile per room sector, repeated across larger faces.",
+                                );
+                            if one_to_one.clicked() {
+                                uvs[face].span = box_prop_face_native_texel_span(
+                                    *vertices,
+                                    face,
+                                    inherited_sector_size,
+                                    texture_size.unwrap_or([1, 1]),
+                                );
+                                changed = true;
+                            }
+                            if ui
+                                .small_button("Fit once")
+                                .on_hover_text("Stretch one complete material tile across this face.")
+                                .clicked()
+                            {
+                                uvs[face].span = [0, 0];
+                                changed = true;
+                            }
+                        });
+                        changed |= uv_transform_controls(&mut uvs[face], ui).changed();
+                    });
             }
             ui.separator();
             changed |= ui.checkbox(collision_enabled, "Collision").changed();
@@ -2277,6 +2477,99 @@ pub(crate) fn draw_node_kind_editor(
                     "Attack",
                 );
             });
+            ui.separator();
+            egui::CollapsingHeader::new("Procedural Erosion")
+                .default_open(erosion.is_enabled())
+                .show(ui, |ui| {
+                    ui.weak(
+                        "One shared seeded field erodes the editable box cage from any enabled direction.",
+                    );
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new("Templates").color(STUDIO_TEXT_WEAK));
+                        if ui.small_button("Broken top").clicked() {
+                            erosion.apply_broken_top_template();
+                            changed = true;
+                        }
+                        if ui.small_button("Boulder").clicked() {
+                            erosion.apply_boulder_template();
+                            changed = true;
+                        }
+                        if ui.small_button("Clear").clicked() {
+                            erosion.clear();
+                            changed = true;
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Seed").color(STUDIO_TEXT_WEAK));
+                        changed |= ui
+                            .add(egui::DragValue::new(&mut erosion.seed).speed(1.0))
+                            .changed();
+                        if ui.small_button("New variation").clicked() {
+                            erosion.seed = erosion.seed.wrapping_add(1);
+                            changed = true;
+                        }
+                        ui.label(RichText::new("Detail").color(STUDIO_TEXT_WEAK));
+                        changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut erosion.detail)
+                                    .range(1..=psxed_project::BOX_PROP_EROSION_MAX_DETAIL),
+                            )
+                            .changed();
+                    });
+                    ui.separator();
+                    for (face, name) in psxed_project::BOX_PROP_FACE_NAMES.iter().enumerate() {
+                        let direction = &mut erosion.directions[face];
+                        ui.horizontal(|ui| {
+                            changed |= ui.checkbox(&mut direction.enabled, *name).changed();
+                            if direction.enabled {
+                                ui.label(RichText::new("Depth").color(STUDIO_TEXT_WEAK));
+                                changed |= ui
+                                    .add(
+                                        egui::DragValue::new(&mut direction.amount)
+                                            .range(0..=45)
+                                            .suffix("%"),
+                                    )
+                                    .changed();
+                                ui.label(RichText::new("Cover").color(STUDIO_TEXT_WEAK));
+                                changed |= ui
+                                    .add(
+                                        egui::DragValue::new(&mut direction.coverage)
+                                            .range(0..=100)
+                                            .suffix("%"),
+                                    )
+                                    .changed();
+                            }
+                        });
+                        if direction.enabled {
+                            ui.horizontal(|ui| {
+                                ui.add_space(24.0);
+                                ui.label(RichText::new("Rough").color(STUDIO_TEXT_WEAK));
+                                changed |= ui
+                                    .add(
+                                        egui::DragValue::new(&mut direction.roughness)
+                                            .range(0..=100)
+                                            .suffix("%"),
+                                    )
+                                    .changed();
+                                ui.label(RichText::new("Feature").color(STUDIO_TEXT_WEAK));
+                                changed |= ui
+                                    .add(
+                                        egui::DragValue::new(&mut direction.feature_size)
+                                            .range(1..=psxed_project::BOX_PROP_EROSION_MAX_DETAIL),
+                                    )
+                                    .changed();
+                                ui.label(RichText::new("Protect edge").color(STUDIO_TEXT_WEAK));
+                                changed |= ui
+                                    .add(
+                                        egui::DragValue::new(&mut direction.edge_protection)
+                                            .range(0..=100)
+                                            .suffix("%"),
+                                    )
+                                    .changed();
+                            });
+                        }
+                    }
+                });
             ui.separator();
             egui::CollapsingHeader::new("Move Faces")
                 .default_open(false)
@@ -2371,6 +2664,252 @@ pub(crate) fn draw_node_kind_editor(
                         });
                     }
                 });
+        }
+        NodeKind::CylinderProp {
+            materials,
+            uvs,
+            geometry,
+            collision_enabled,
+        } => {
+            ui.weak(
+                "Low-poly radial prop. Transform position is the bottom-center anchor; geometry is generated only for preview and cooking.",
+            );
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new("Templates").color(STUDIO_TEXT_WEAK));
+                if ui.small_button("Column").clicked() {
+                    *geometry = psxed_project::CylinderPropGeometry::default();
+                    changed = true;
+                }
+                if ui.small_button("Broken column").clicked() {
+                    *geometry = psxed_project::CylinderPropGeometry::default();
+                    geometry.broken_ends = psxed_project::CylinderBrokenEnds::Top;
+                    geometry.top_bulge.enabled = true;
+                    changed = true;
+                }
+                if ui.small_button("Pedestal").clicked() {
+                    *geometry = psxed_project::CylinderPropGeometry::default();
+                    geometry.base_bulge.enabled = true;
+                    geometry.top_bulge.enabled = true;
+                    geometry.base_bulge.radius_percent = 135;
+                    geometry.top_bulge.radius_percent = 135;
+                    changed = true;
+                }
+            });
+
+            ui.separator();
+            ui.label(RichText::new("Shape").color(STUDIO_TEXT_WEAK));
+            ui.horizontal(|ui| {
+                ui.label("Radius");
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut geometry.radius[0])
+                            .range(1..=MAX_IMAGE_PROP_SIZE)
+                            .prefix("X "),
+                    )
+                    .changed();
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut geometry.radius[1])
+                            .range(1..=MAX_IMAGE_PROP_SIZE)
+                            .prefix("Z "),
+                    )
+                    .changed();
+            });
+            ui.horizontal(|ui| {
+                ui.label("Height");
+                changed |= ui
+                    .add(egui::DragValue::new(&mut geometry.height).range(1..=MAX_IMAGE_PROP_SIZE))
+                    .changed();
+                ui.label("Sides");
+                changed |= ui
+                    .add(egui::DragValue::new(&mut geometry.sides).range(
+                        psxed_project::CYLINDER_PROP_MIN_SIDES
+                            ..=psxed_project::CYLINDER_PROP_MAX_SIDES,
+                    ))
+                    .changed();
+            });
+            ui.horizontal(|ui| {
+                ui.label("Top radius");
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut geometry.top_radius_percent)
+                            .range(10..=300)
+                            .suffix("%"),
+                    )
+                    .changed();
+                changed |= ui.checkbox(collision_enabled, "Collision").changed();
+            });
+
+            ui.separator();
+            egui::CollapsingHeader::new("Base / top profile")
+                .default_open(geometry.base_bulge.enabled || geometry.top_bulge.enabled)
+                .show(ui, |ui| {
+                    for (label, bulge) in [
+                        ("Base collar", &mut geometry.base_bulge),
+                        ("Top collar", &mut geometry.top_bulge),
+                    ] {
+                        ui.horizontal(|ui| {
+                            changed |= ui.checkbox(&mut bulge.enabled, label).changed();
+                            if bulge.enabled {
+                                changed |= ui
+                                    .add(
+                                        egui::DragValue::new(&mut bulge.radius_percent)
+                                            .range(100..=250)
+                                            .prefix("Radius ")
+                                            .suffix("%"),
+                                    )
+                                    .changed();
+                                changed |= ui
+                                    .add(
+                                        egui::DragValue::new(&mut bulge.height_percent)
+                                            .range(2..=45)
+                                            .prefix("Height ")
+                                            .suffix("%"),
+                                    )
+                                    .changed();
+                            }
+                        });
+                    }
+                });
+
+            ui.separator();
+            egui::CollapsingHeader::new("Broken ends")
+                .default_open(!matches!(
+                    geometry.broken_ends,
+                    psxed_project::CylinderBrokenEnds::None
+                ))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Break");
+                        egui::ComboBox::from_id_salt("cylinder-prop-broken-ends")
+                            .selected_text(geometry.broken_ends.label())
+                            .show_ui(ui, |ui| {
+                                for candidate in [
+                                    psxed_project::CylinderBrokenEnds::None,
+                                    psxed_project::CylinderBrokenEnds::Top,
+                                    psxed_project::CylinderBrokenEnds::Bottom,
+                                    psxed_project::CylinderBrokenEnds::Both,
+                                ] {
+                                    changed |= ui
+                                        .selectable_value(
+                                            &mut geometry.broken_ends,
+                                            candidate,
+                                            candidate.label(),
+                                        )
+                                        .changed();
+                                }
+                            });
+                        if ui.small_button("New variation").clicked() {
+                            geometry.seed = geometry.seed.wrapping_add(1);
+                            changed = true;
+                        }
+                    });
+                    if !matches!(
+                        geometry.broken_ends,
+                        psxed_project::CylinderBrokenEnds::None
+                    ) {
+                        ui.horizontal(|ui| {
+                            ui.label("Depth");
+                            changed |= ui
+                                .add(
+                                    egui::DragValue::new(&mut geometry.fracture_depth_percent)
+                                        .range(2..=80)
+                                        .suffix("%"),
+                                )
+                                .changed();
+                            ui.label("Roughness");
+                            changed |= ui
+                                .add(
+                                    egui::DragValue::new(&mut geometry.fracture_roughness)
+                                        .range(0..=100)
+                                        .suffix("%"),
+                                )
+                                .changed();
+                            ui.label("Seed");
+                            changed |= ui
+                                .add(egui::DragValue::new(&mut geometry.seed).speed(1.0))
+                                .changed();
+                        });
+                    }
+                });
+
+            ui.separator();
+            ui.label(RichText::new("Materials / UV").color(STUDIO_TEXT_WEAK));
+            for (slot, name) in psxed_project::CYLINDER_PROP_MATERIAL_NAMES
+                .iter()
+                .enumerate()
+            {
+                egui::CollapsingHeader::new(*name)
+                    .id_salt(("cylinder-prop-material", slot))
+                    .default_open(slot == 0)
+                    .show(ui, |ui| {
+                        changed |= material_picker(
+                            ui,
+                            "Material",
+                            &mut materials[slot],
+                            material_options,
+                            nav_target,
+                        );
+                        let texture_size = materials[slot].and_then(|material| {
+                            material_texture_dimensions
+                                .iter()
+                                .find_map(|(id, size)| (*id == material).then_some(*size))
+                        });
+                        ui.horizontal(|ui| {
+                            if ui
+                                .add_enabled(
+                                    texture_size.is_some(),
+                                    egui::Button::new("1:1 Texels"),
+                                )
+                                .clicked()
+                            {
+                                let texture = texture_size.unwrap_or([1, 1]);
+                                let sector = inherited_sector_size.max(1) as f32;
+                                let (world_u, world_v) = if slot
+                                    == usize::from(psxed_project::CYLINDER_PROP_MATERIAL_SIDE)
+                                {
+                                    let rx = f32::from(geometry.radius[0]);
+                                    let rz = f32::from(geometry.radius[1]);
+                                    (
+                                        core::f32::consts::TAU * ((rx * rx + rz * rz) * 0.5).sqrt(),
+                                        f32::from(geometry.height),
+                                    )
+                                } else {
+                                    (
+                                        f32::from(geometry.radius[0]) * 2.0,
+                                        f32::from(geometry.radius[1]) * 2.0,
+                                    )
+                                };
+                                uvs[slot].span = [
+                                    ((world_u / sector) * f32::from(texture[0]))
+                                        .round()
+                                        .clamp(1.0, 255.0)
+                                        as u16,
+                                    ((world_v / sector) * f32::from(texture[1]))
+                                        .round()
+                                        .clamp(1.0, 255.0)
+                                        as u16,
+                                ];
+                                changed = true;
+                            }
+                            if ui.small_button("Fit once").clicked() {
+                                uvs[slot].span = [0, 0];
+                                changed = true;
+                            }
+                        });
+                        changed |= uv_transform_controls(&mut uvs[slot], ui).changed();
+                    });
+            }
+            let surfaces = psxed_project::generate_cylinder_prop_surfaces(*geometry);
+            let triangles = surfaces
+                .iter()
+                .map(|surface| if surface.vertex_count == 4 { 2 } else { 1 })
+                .sum::<usize>();
+            ui.weak(format!(
+                "{} generated surfaces · {} render triangles",
+                surfaces.len(),
+                triangles
+            ));
         }
         NodeKind::ModelRenderer {
             model,

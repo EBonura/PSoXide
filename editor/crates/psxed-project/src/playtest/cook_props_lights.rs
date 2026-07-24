@@ -302,15 +302,6 @@ pub(crate) fn push_image_prop(
     true
 }
 
-pub(crate) const BOX_PROP_FACE_VERTEX_INDICES: [[usize; 4]; psx_level::BOX_PROP_FACE_COUNT] = [
-    [4, 5, 1, 0],
-    [5, 6, 2, 1],
-    [6, 7, 3, 2],
-    [7, 4, 0, 3],
-    [7, 6, 5, 4],
-    [0, 1, 2, 3],
-];
-
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn push_box_prop(
     project: &ProjectDocument,
@@ -323,16 +314,20 @@ pub(crate) fn push_box_prop(
     yaw: i16,
     roll: i16,
     materials: &[Option<ResourceId>; crate::BOX_PROP_FACE_COUNT],
+    uvs: &[crate::GridUvTransform; crate::BOX_PROP_FACE_COUNT],
     vertices: [[i16; 3]; crate::BOX_PROP_VERTEX_COUNT],
     collision_enabled: bool,
     break_flags: u16,
+    erosion: crate::BoxPropErosion,
     texture_asset_for_path: &mut HashMap<String, usize>,
     assets: &mut Vec<PlaytestAsset>,
     box_props: &mut Vec<PlaytestBoxProp>,
+    box_prop_surfaces: &mut Vec<PlaytestBoxPropSurface>,
     report: &mut PlaytestValidationReport,
 ) -> bool {
     let mut texture_asset_indices = [None; psx_level::BOX_PROP_FACE_COUNT];
     let mut blend_modes = [psx_level::model_override_blend::OPAQUE; psx_level::BOX_PROP_FACE_COUNT];
+    let mut cooked_uvs = [[(0, 0); 4]; psx_level::BOX_PROP_FACE_COUNT];
     let mut tint_rgb = [[128, 128, 128]; psx_level::BOX_PROP_FACE_COUNT];
     let mut valid_faces = 0usize;
     for (face, material) in materials.iter().enumerate() {
@@ -355,6 +350,12 @@ pub(crate) fn push_box_prop(
             continue;
         };
         texture_asset_indices[face] = Some(texture_asset_index);
+        if let Ok(texture) = psx_asset::Texture::from_bytes(&assets[texture_asset_index].bytes) {
+            let u_max = texture.width().saturating_sub(1).min(255) as u8;
+            let v_max = texture.height().saturating_sub(1).min(255) as u8;
+            cooked_uvs[face] =
+                uvs[face].apply_to_quad([(0, 0), (u_max, 0), (u_max, v_max), (0, v_max)]);
+        }
         tint_rgb[face] = tint;
         blend_modes[face] = project
             .resource(material_id)
@@ -385,10 +386,55 @@ pub(crate) fn push_box_prop(
         flags |= box_prop_flags::COLLISION_ENABLED;
     }
 
+    let generated = crate::generate_box_prop_erosion_quads(vertices, erosion);
+    let surface_first = box_prop_surfaces.len();
+    if surface_first > u16::MAX as usize
+        || generated.len() > u16::MAX as usize
+        || surface_first.saturating_add(generated.len()) > u16::MAX as usize
+    {
+        report.error(format!(
+            "Box Prop '{node_name}' generated surface table exceeds 65535 entries"
+        ));
+        return false;
+    }
+    for quad in generated {
+        let mut world_vertices = [[0i32; 3]; 4];
+        for (index, local) in quad.vertices.iter().enumerate() {
+            let rotated = crate::spatial::rotate_euler_local_q12(
+                [
+                    i32::from(local[0]),
+                    i32::from(local[1]),
+                    i32::from(local[2]),
+                ],
+                pitch as u16,
+                yaw as u16,
+                roll as u16,
+            );
+            world_vertices[index] = [
+                pos[0].saturating_add(rotated[0]),
+                pos[1].saturating_add(rotated[1]),
+                pos[2].saturating_add(rotated[2]),
+            ];
+        }
+        let center = box_prop_surface_center(world_vertices);
+        let normal = box_prop_surface_normal(world_vertices);
+        let face = usize::from(quad.source_face).min(crate::BOX_PROP_FACE_COUNT - 1);
+        box_prop_surfaces.push(PlaytestBoxPropSurface {
+            vertices: world_vertices,
+            center,
+            normal,
+            uv_q8: quad.uv_q8,
+            baked_vertex_rgb: [rgb_tuple(tint_rgb[face]); 4],
+            source_face: face as u8,
+            flags: 0,
+        });
+    }
+
     box_props.push(PlaytestBoxProp {
         room: room_index,
         texture_asset_indices,
         blend_modes,
+        uvs: cooked_uvs,
         x: pos[0],
         y: pos[1],
         z: pos[2],
@@ -397,9 +443,177 @@ pub(crate) fn push_box_prop(
         yaw,
         roll,
         vertices,
+        surface_first: surface_first as u16,
+        surface_count: (box_prop_surfaces.len() - surface_first) as u16,
         tint_rgb,
         baked_vertex_rgb,
         flags,
+    });
+    true
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn push_cylinder_prop(
+    project: &ProjectDocument,
+    project_root: &Path,
+    node_name: &str,
+    room_index: u16,
+    pos: [i32; 3],
+    pitch: i16,
+    yaw: i16,
+    roll: i16,
+    materials: &[Option<ResourceId>; crate::CYLINDER_PROP_MATERIAL_COUNT],
+    uvs: &[crate::GridUvTransform; crate::CYLINDER_PROP_MATERIAL_COUNT],
+    geometry: crate::CylinderPropGeometry,
+    collision_enabled: bool,
+    texture_asset_for_path: &mut HashMap<String, usize>,
+    assets: &mut Vec<PlaytestAsset>,
+    cylinder_props: &mut Vec<PlaytestCylinderProp>,
+    cylinder_prop_surfaces: &mut Vec<PlaytestCylinderPropSurface>,
+    report: &mut PlaytestValidationReport,
+) -> bool {
+    let mut texture_asset_indices = [None; psx_level::CYLINDER_PROP_MATERIAL_COUNT];
+    let mut blend_modes =
+        [psx_level::model_override_blend::OPAQUE; psx_level::CYLINDER_PROP_MATERIAL_COUNT];
+    let mut cooked_uvs = [[(0, 0); 4]; psx_level::CYLINDER_PROP_MATERIAL_COUNT];
+    let mut tint_rgb = [[128, 128, 128]; psx_level::CYLINDER_PROP_MATERIAL_COUNT];
+    let mut valid_materials = 0usize;
+    for (slot, material) in materials.iter().enumerate() {
+        let Some(material_id) = *material else {
+            continue;
+        };
+        let label = format!(
+            "Cylinder Prop '{node_name}' {}",
+            crate::CYLINDER_PROP_MATERIAL_NAMES[slot]
+        );
+        let Some((texture_asset_index, tint)) = resolve_material_texture_asset(
+            project,
+            project_root,
+            &label,
+            material_id,
+            texture_asset_for_path,
+            assets,
+            report,
+        ) else {
+            continue;
+        };
+        texture_asset_indices[slot] = Some(texture_asset_index);
+        if let Ok(texture) = psx_asset::Texture::from_bytes(&assets[texture_asset_index].bytes) {
+            let u_max = texture.width().saturating_sub(1).min(255) as u8;
+            let v_max = texture.height().saturating_sub(1).min(255) as u8;
+            cooked_uvs[slot] =
+                uvs[slot].apply_to_quad([(0, 0), (u_max, 0), (u_max, v_max), (0, v_max)]);
+        }
+        tint_rgb[slot] = tint;
+        blend_modes[slot] = project
+            .resource(material_id)
+            .and_then(|resource| match &resource.data {
+                ResourceData::Material(material) => Some(
+                    super::manifest::model_override_blend_code(material.blend_mode),
+                ),
+                _ => None,
+            })
+            .unwrap_or(psx_level::model_override_blend::OPAQUE);
+        valid_materials += 1;
+    }
+    if valid_materials == 0 {
+        report.warn(format!(
+            "Cylinder Prop '{node_name}' has no drawable Materials - skipped"
+        ));
+        return true;
+    }
+
+    let generated = crate::generate_cylinder_prop_surfaces(geometry);
+    let surface_first = cylinder_prop_surfaces.len();
+    if surface_first > u16::MAX as usize
+        || generated.len() > u16::MAX as usize
+        || surface_first.saturating_add(generated.len()) > u16::MAX as usize
+    {
+        report.error(format!(
+            "Cylinder Prop '{node_name}' generated surface table exceeds 65535 entries"
+        ));
+        return false;
+    }
+
+    let mut bounds_min = [i32::MAX; 3];
+    let mut bounds_max = [i32::MIN; 3];
+    for surface in generated {
+        let vertex_count = usize::from(surface.vertex_count.clamp(3, 4));
+        let mut world_vertices = [[0i32; 3]; 4];
+        for (index, local) in surface.vertices.iter().enumerate() {
+            let rotated = crate::spatial::rotate_euler_local_q12(
+                [
+                    i32::from(local[0]),
+                    i32::from(local[1]),
+                    i32::from(local[2]),
+                ],
+                pitch as u16,
+                yaw as u16,
+                roll as u16,
+            );
+            world_vertices[index] = [
+                pos[0].saturating_add(rotated[0]),
+                pos[1].saturating_add(rotated[1]),
+                pos[2].saturating_add(rotated[2]),
+            ];
+            if index < vertex_count {
+                for axis in 0..3 {
+                    bounds_min[axis] = bounds_min[axis].min(world_vertices[index][axis]);
+                    bounds_max[axis] = bounds_max[axis].max(world_vertices[index][axis]);
+                }
+            }
+        }
+        let center = polygon_surface_center(world_vertices, vertex_count);
+        let normal = box_prop_surface_normal(world_vertices);
+        let material_slot =
+            usize::from(surface.material_slot).min(crate::CYLINDER_PROP_MATERIAL_COUNT - 1);
+        cylinder_prop_surfaces.push(PlaytestCylinderPropSurface {
+            vertices: world_vertices,
+            center,
+            normal,
+            uv_q8: surface.uv_q8,
+            baked_vertex_rgb: [rgb_tuple(tint_rgb[material_slot]); 4],
+            material_slot: material_slot as u8,
+            vertex_count: vertex_count as u8,
+        });
+    }
+    if bounds_min[0] == i32::MAX {
+        report.warn(format!(
+            "Cylinder Prop '{node_name}' generated no surfaces - skipped"
+        ));
+        return true;
+    }
+    let center = [
+        bounds_min[0].saturating_add(bounds_max[0]) / 2,
+        bounds_min[1].saturating_add(bounds_max[1]) / 2,
+        bounds_min[2].saturating_add(bounds_max[2]) / 2,
+    ];
+    let half = [
+        i64::from(bounds_max[0] - bounds_min[0]) / 2,
+        i64::from(bounds_max[1] - bounds_min[1]) / 2,
+        i64::from(bounds_max[2] - bounds_min[2]) / 2,
+    ];
+    let cull_radius = ((half[0] * half[0] + half[1] * half[1] + half[2] * half[2]) as f64)
+        .sqrt()
+        .ceil()
+        .clamp(1.0, i32::MAX as f64) as i32;
+    cylinder_props.push(PlaytestCylinderProp {
+        room: room_index,
+        texture_asset_indices,
+        blend_modes,
+        uvs: cooked_uvs,
+        tint_rgb,
+        surface_first: surface_first as u16,
+        surface_count: (cylinder_prop_surfaces.len() - surface_first) as u16,
+        center,
+        cull_radius,
+        bounds_min,
+        bounds_max,
+        flags: if collision_enabled {
+            psx_level::cylinder_prop_flags::COLLISION_ENABLED
+        } else {
+            0
+        },
     });
     true
 }
@@ -1140,6 +1354,7 @@ pub(crate) fn bake_static_image_prop_lights(
 
 pub(crate) fn bake_static_box_prop_lights(
     box_props: &mut [PlaytestBoxProp],
+    box_prop_surfaces: &mut [PlaytestBoxPropSurface],
     rooms: &[CookedRoomBakeInput],
     lights: &[PlaytestLight],
 ) {
@@ -1182,7 +1397,122 @@ pub(crate) fn bake_static_box_prop_lights(
                 )),
             ];
         }
+        let first = usize::from(prop.surface_first);
+        let end = first
+            .saturating_add(usize::from(prop.surface_count))
+            .min(box_prop_surfaces.len());
+        for surface in &mut box_prop_surfaces[first..end] {
+            let face = usize::from(surface.source_face).min(psx_level::BOX_PROP_FACE_COUNT - 1);
+            let base = prop.tint_rgb[face];
+            for (color, vertex) in surface
+                .baked_vertex_rgb
+                .iter_mut()
+                .zip(surface.vertices.iter())
+            {
+                *color = rgb_tuple(bake_static_vertex_rgb(*vertex, base, ambient, &room_lights));
+            }
+        }
     }
+}
+
+pub(crate) fn bake_static_cylinder_prop_lights(
+    cylinder_props: &[PlaytestCylinderProp],
+    cylinder_prop_surfaces: &mut [PlaytestCylinderPropSurface],
+    rooms: &[CookedRoomBakeInput],
+    lights: &[PlaytestLight],
+) {
+    for prop in cylinder_props {
+        let Some(room) = rooms.iter().find(|room| room.room_index == prop.room) else {
+            continue;
+        };
+        let room_lights: Vec<&PlaytestLight> = lights
+            .iter()
+            .filter(|light| light.room == prop.room)
+            .collect();
+        let ambient = room.cooked.ambient_color;
+        let first = usize::from(prop.surface_first);
+        let end = first
+            .saturating_add(usize::from(prop.surface_count))
+            .min(cylinder_prop_surfaces.len());
+        for surface in &mut cylinder_prop_surfaces[first..end] {
+            let slot =
+                usize::from(surface.material_slot).min(psx_level::CYLINDER_PROP_MATERIAL_COUNT - 1);
+            let base = prop.tint_rgb[slot];
+            for index in 0..usize::from(surface.vertex_count.clamp(3, 4)) {
+                surface.baked_vertex_rgb[index] = rgb_tuple(bake_static_vertex_rgb(
+                    surface.vertices[index],
+                    base,
+                    ambient,
+                    &room_lights,
+                ));
+            }
+            if surface.vertex_count == 3 {
+                surface.baked_vertex_rgb[3] = surface.baked_vertex_rgb[2];
+            }
+        }
+    }
+}
+
+fn box_prop_surface_center(vertices: [[i32; 3]; 4]) -> [i32; 3] {
+    [
+        vertices
+            .iter()
+            .map(|v| i64::from(v[0]))
+            .sum::<i64>()
+            .div_euclid(4) as i32,
+        vertices
+            .iter()
+            .map(|v| i64::from(v[1]))
+            .sum::<i64>()
+            .div_euclid(4) as i32,
+        vertices
+            .iter()
+            .map(|v| i64::from(v[2]))
+            .sum::<i64>()
+            .div_euclid(4) as i32,
+    ]
+}
+
+fn polygon_surface_center(vertices: [[i32; 3]; 4], vertex_count: usize) -> [i32; 3] {
+    let count = vertex_count.clamp(1, 4);
+    [
+        vertices[..count]
+            .iter()
+            .map(|v| i64::from(v[0]))
+            .sum::<i64>()
+            .div_euclid(count as i64) as i32,
+        vertices[..count]
+            .iter()
+            .map(|v| i64::from(v[1]))
+            .sum::<i64>()
+            .div_euclid(count as i64) as i32,
+        vertices[..count]
+            .iter()
+            .map(|v| i64::from(v[2]))
+            .sum::<i64>()
+            .div_euclid(count as i64) as i32,
+    ]
+}
+
+fn box_prop_surface_normal(vertices: [[i32; 3]; 4]) -> [i32; 3] {
+    let ab = [
+        i64::from(vertices[1][0]) - i64::from(vertices[0][0]),
+        i64::from(vertices[1][1]) - i64::from(vertices[0][1]),
+        i64::from(vertices[1][2]) - i64::from(vertices[0][2]),
+    ];
+    let ac = [
+        i64::from(vertices[2][0]) - i64::from(vertices[0][0]),
+        i64::from(vertices[2][1]) - i64::from(vertices[0][1]),
+        i64::from(vertices[2][2]) - i64::from(vertices[0][2]),
+    ];
+    [
+        ((ab[1] * ac[2] - ab[2] * ac[1]) >> 10).clamp(i64::from(i32::MIN), i64::from(i32::MAX))
+            as i32,
+        ((ab[2] * ac[0] - ab[0] * ac[2]) >> 10).clamp(i64::from(i32::MIN), i64::from(i32::MAX))
+            as i32,
+        ((ab[0] * ac[1] - ab[1] * ac[0]) >> 10).clamp(i64::from(i32::MIN), i64::from(i32::MAX))
+            as i32,
+    ]
 }
 
 pub(crate) fn image_prop_static_vertices(prop: &PlaytestImageProp) -> [[i32; 3]; 4] {
@@ -1232,7 +1562,7 @@ pub(crate) fn box_prop_static_face_vertices(
     let mut faces = [[[0, 0, 0]; 4]; psx_level::BOX_PROP_FACE_COUNT];
     for face in 0..psx_level::BOX_PROP_FACE_COUNT {
         for corner in 0..4 {
-            faces[face][corner] = vertices[BOX_PROP_FACE_VERTEX_INDICES[face][corner]];
+            faces[face][corner] = vertices[crate::BOX_PROP_FACE_VERTEX_INDICES[face][corner]];
         }
     }
     faces

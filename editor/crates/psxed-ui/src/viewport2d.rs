@@ -337,6 +337,18 @@ pub(crate) fn draw_scene_viewport(
                     &mut hits,
                 );
             }
+            NodeKind::CylinderProp { .. } => {
+                draw_simple_marker(
+                    painter,
+                    transform,
+                    node,
+                    selected_nodes.contains(&node.id)
+                        || (selected_nodes.is_empty() && selected == node.id),
+                    "C",
+                    Color32::from_rgb(120, 184, 200),
+                    &mut hits,
+                );
+            }
             NodeKind::SpawnPoint { .. } => {
                 draw_spawn_marker(
                     painter,
