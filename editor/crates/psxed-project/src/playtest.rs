@@ -737,6 +737,9 @@ pub fn build_package(
     let mut box_prop_surfaces: Vec<PlaytestBoxPropSurface> = Vec::new();
     let mut cylinder_props: Vec<PlaytestCylinderProp> = Vec::new();
     let mut cylinder_prop_surfaces: Vec<PlaytestCylinderPropSurface> = Vec::new();
+    let mut arch_props: Vec<PlaytestArchProp> = Vec::new();
+    let mut arch_prop_surfaces: Vec<PlaytestArchPropSurface> = Vec::new();
+    let mut arch_prop_collisions: Vec<PlaytestArchPropCollision> = Vec::new();
     let mut water_cells: Vec<PlaytestWaterCell> = Vec::new();
     let mut combat_capsules: Vec<PlaytestCombatCapsule> = Vec::new();
     let mut weapon_hitboxes: Vec<PlaytestWeaponHitbox> = Vec::new();
@@ -1457,6 +1460,36 @@ pub fn build_package(
                     return (None, report);
                 }
             }
+            NodeKind::ArchProp {
+                materials,
+                uvs,
+                geometry,
+                collision_enabled,
+            } => {
+                if !push_arch_prop(
+                    project,
+                    project_root,
+                    node.name.as_str(),
+                    room_index,
+                    raw_pos,
+                    pitch,
+                    yaw,
+                    roll,
+                    grid.sector_size,
+                    materials,
+                    uvs,
+                    *geometry,
+                    *collision_enabled,
+                    &mut texture_asset_for_path,
+                    &mut assets,
+                    &mut arch_props,
+                    &mut arch_prop_surfaces,
+                    &mut arch_prop_collisions,
+                    &mut report,
+                ) {
+                    return (None, report);
+                }
+            }
             NodeKind::Logic {
                 kind,
                 target,
@@ -1516,6 +1549,29 @@ pub fn build_package(
             | NodeKind::Equipment { .. }
             | NodeKind::PhysicsBody { .. }
             | NodeKind::Interactable { .. } => {}
+        }
+    }
+
+    for room_index in 0..rooms.len() {
+        let box_count = box_props
+            .iter()
+            .filter(|prop| {
+                usize::from(prop.room) == room_index
+                    && prop.flags & psx_level::box_prop_flags::COLLISION_ENABLED != 0
+            })
+            .count();
+        let arch_count: usize = arch_props
+            .iter()
+            .filter(|prop| usize::from(prop.room) == room_index)
+            .map(|prop| usize::from(prop.collision_count))
+            .sum();
+        let total = box_count.saturating_add(arch_count);
+        if total > psx_level::MAX_STATIC_PROP_AABB_BLOCKERS {
+            report.error(format!(
+                "Room '{}' needs {total} static prop collision AABBs ({box_count} box + {arch_count} arch), exceeding the PS1 runtime budget of {}",
+                rooms[room_index].name,
+                psx_level::MAX_STATIC_PROP_AABB_BLOCKERS,
+            ));
         }
     }
 
@@ -1769,6 +1825,12 @@ pub fn build_package(
         &room_bake_inputs,
         &lights,
     );
+    bake_static_arch_prop_lights(
+        &arch_props,
+        &mut arch_prop_surfaces,
+        &room_bake_inputs,
+        &lights,
+    );
     for room in &room_bake_inputs {
         let bytes = match room.cooked.to_psxw_bytes() {
             Ok(b) => b,
@@ -1902,6 +1964,9 @@ pub fn build_package(
             box_prop_surfaces,
             cylinder_props,
             cylinder_prop_surfaces,
+            arch_props,
+            arch_prop_surfaces,
+            arch_prop_collisions,
             ui_nodes,
             ui_paints,
             ui_scenes,

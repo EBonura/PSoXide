@@ -282,6 +282,7 @@ pub(super) fn room_prop_textures_ready(room: RoomIndex) -> bool {
         IMAGE_PROPS,
         BOX_PROPS,
         CYLINDER_PROPS,
+        ARCH_PROPS,
         room,
     ) {
         return false;
