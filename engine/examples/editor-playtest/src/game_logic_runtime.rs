@@ -147,10 +147,16 @@ impl psx_game_runtime::entities::GameEntityMover for SceneEntityMover<'_> {
                 &mut cylinders[cylinder_count..],
             );
 
-        let mut aabbs = [CharacterCollisionAabb::EMPTY; MAX_BOX_PROP_BLOCKERS];
-        let aabb_count = self
+        let mut aabbs = [CharacterCollisionAabb::EMPTY; MAX_STATIC_PROP_AABB_BLOCKERS];
+        let mut aabb_count = self
             .box_props
             .collect_collision_blockers(BOX_PROPS, room, &mut aabbs);
+        aabb_count += psx_game_runtime::arch_props::collect_arch_prop_collision_blockers(
+            ARCH_PROPS,
+            ARCH_PROP_COLLISIONS,
+            room,
+            &mut aabbs[aabb_count..],
+        );
 
         let collision = CharacterCollision::rooms_with_aabbs(
             &collision_rooms,
