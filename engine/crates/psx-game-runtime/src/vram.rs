@@ -25,9 +25,9 @@ use psx_font::{upload_fonts, BitmapFont, FontAtlas};
 use psx_gpu::material::{BlendMode, TextureMaterial, TextureWindow};
 #[cfg(feature = "cd-stream-bench")]
 use psx_level::{
-    asset_flags, LevelBoxPropRecord, LevelCylinderPropRecord, LevelImagePropRecord,
-    LevelUiNodeKind, LevelUiNodeRecord, LevelUiScene, LevelWorldPackEntryRecord,
-    BOX_PROP_FACE_COUNT, UI_SCENE_NONE,
+    asset_flags, LevelArchPropRecord, LevelBoxPropRecord, LevelCylinderPropRecord,
+    LevelImagePropRecord, LevelUiNodeKind, LevelUiNodeRecord, LevelUiScene,
+    LevelWorldPackEntryRecord, ARCH_PROP_MATERIAL_COUNT, BOX_PROP_FACE_COUNT, UI_SCENE_NONE,
 };
 use psx_level::{
     find_asset_of_kind, sky_flags, AssetId, AssetKind, LevelAssetRecord, LevelRoomRecord,
@@ -1304,7 +1304,7 @@ impl<
         self.ensure_texture_uploaded_with_clut_mode(layout, asset.id, asset.bytes, clut_mode)
     }
 
-    /// True once every image, box, and cylinder prop texture of `room` is
+    /// True once every image, box, cylinder, and arch texture of `room` is
     /// VRAM-resident.
     #[cfg(feature = "cd-stream-bench")]
     pub fn room_prop_textures_ready(
@@ -1314,6 +1314,7 @@ impl<
         image_props: &'static [LevelImagePropRecord],
         box_props: &'static [LevelBoxPropRecord],
         cylinder_props: &'static [LevelCylinderPropRecord],
+        arch_props: &'static [LevelArchPropRecord],
         room: RoomIndex,
     ) -> bool {
         let mut ready = true;
@@ -1357,6 +1358,24 @@ impl<
                 {
                     ready = false;
                 }
+            }
+        }
+
+        for prop in arch_props {
+            if prop.room != room {
+                continue;
+            }
+            let mut slot = 0;
+            while slot < ARCH_PROP_MATERIAL_COUNT {
+                if let Some(texture_asset) = prop.texture_assets[slot] {
+                    if self
+                        .prop_texture_slot(layout, assets, texture_asset)
+                        .is_none()
+                    {
+                        ready = false;
+                    }
+                }
+                slot += 1;
             }
         }
 
