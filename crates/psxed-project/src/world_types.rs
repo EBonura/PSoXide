@@ -654,12 +654,12 @@ impl WaterVolumeCell {
 ///
 /// Water never provides swimming. Every painted cell is a floor-bound volume:
 /// its bottom is the authored terrain and its surface sits
-/// `height_above_floor` units above that terrain. Non-lethal cells scale ground
-/// movement; cells at or beyond `lethal_depth` trigger the fall/death flow once
-/// the character drops below the surface.
+/// `height_above_floor` units above that tile's lowest rendered point.
+/// Non-lethal cells scale ground movement; cells at or beyond `lethal_depth`
+/// trigger the fall/death flow once the character drops below the surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WaterVolumeSettings {
-    /// Water surface height measured upward from each painted floor tile.
+    /// Water surface height measured upward from each painted tile's low point.
     #[serde(default = "default_water_height", alias = "surface_height")]
     pub height_above_floor: u16,
     /// Depth at which the volume becomes lethal.

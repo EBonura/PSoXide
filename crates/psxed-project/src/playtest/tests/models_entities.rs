@@ -324,15 +324,20 @@ fn box_prop_cooks_faces_vertices_and_collision() {
         .map(|n| n.id)
         .unwrap();
     let vertices = crate::box_prop_vertices_for_size(512);
+    let mut uvs = [crate::GridUvTransform::IDENTITY; crate::BOX_PROP_FACE_COUNT];
+    uvs[0].offset = [5, 7];
+    uvs[0].span = [11, 13];
     let prop_id = scene.add_node(
         room_id,
         "Cooked Box Prop",
         NodeKind::BoxProp {
             materials: [Some(material_id); crate::BOX_PROP_FACE_COUNT],
+            uvs,
             vertices,
             collision_enabled: true,
             break_flags: psx_level::box_prop_flags::BREAK_ON_WALK
                 | psx_level::box_prop_flags::BREAK_ON_ATTACK,
+            erosion: crate::BoxPropErosion::default(),
         },
     );
     if let Some(node) = scene.node_mut(prop_id) {
@@ -351,9 +356,117 @@ fn box_prop_cooks_faces_vertices_and_collision() {
     assert_eq!(prop.pitch, 512);
     assert_eq!(prop.yaw, 1024);
     assert_eq!(prop.roll, 3072);
+    assert_eq!(
+        prop.uvs[0],
+        [(5, 7), (16, 7), (16, 20), (5, 20)],
+        "authored per-face UVs survive the cook"
+    );
     assert_eq!(prop.flags & psx_level::box_prop_flags::COLLISION_ENABLED, 1);
     assert_ne!(prop.flags & psx_level::box_prop_flags::BREAK_ON_WALK, 0);
     assert_ne!(prop.flags & psx_level::box_prop_flags::BREAK_ON_ATTACK, 0);
+    assert_eq!(
+        prop.surface_count, 0,
+        "plain boxes keep the compact legacy path"
+    );
+}
+
+#[test]
+fn eroded_box_prop_cooks_shared_runtime_surfaces() {
+    let mut project = ProjectDocument::starter();
+    let material_id = project
+        .resources
+        .iter()
+        .find(|resource| matches!(resource.data, ResourceData::Material(_)))
+        .expect("starter has a material")
+        .id;
+    let scene = project.active_scene_mut();
+    let room_id = scene
+        .nodes()
+        .iter()
+        .find(|node| matches!(node.kind, NodeKind::Room { .. }))
+        .map(|node| node.id)
+        .expect("starter has a room");
+    let mut erosion = crate::BoxPropErosion::default();
+    erosion.apply_broken_top_template();
+    scene.add_node(
+        room_id,
+        "Broken Wall",
+        NodeKind::BoxProp {
+            materials: [Some(material_id); crate::BOX_PROP_FACE_COUNT],
+            uvs: [crate::GridUvTransform::IDENTITY; crate::BOX_PROP_FACE_COUNT],
+            vertices: crate::box_prop_vertices_for_size(512),
+            collision_enabled: true,
+            break_flags: 0,
+            erosion,
+        },
+    );
+
+    let (package, report) = build_package(&project, &starter_project_root());
+    assert!(report.is_ok(), "errors: {:?}", report.errors);
+    let package = package.expect("eroded box cooks");
+    let prop = package.box_props.last().expect("box prop record");
+    assert!(prop.surface_count > crate::BOX_PROP_FACE_COUNT as u16);
+    let first = usize::from(prop.surface_first);
+    let end = first + usize::from(prop.surface_count);
+    let surfaces = &package.box_prop_surfaces[first..end];
+    assert_eq!(usize::from(prop.surface_count), surfaces.len());
+    assert!(surfaces
+        .iter()
+        .all(|surface| usize::from(surface.source_face) < crate::BOX_PROP_FACE_COUNT));
+    assert!(surfaces.iter().any(|surface| surface.source_face == 4));
+}
+
+#[test]
+fn cylinder_prop_cooks_shared_triangle_and_quad_surfaces() {
+    let mut project = ProjectDocument::starter();
+    let material_id = project
+        .resources
+        .iter()
+        .find(|resource| matches!(resource.data, ResourceData::Material(_)))
+        .expect("starter has a material")
+        .id;
+    let scene = project.active_scene_mut();
+    let room_id = scene
+        .nodes()
+        .iter()
+        .find(|node| matches!(node.kind, NodeKind::Room { .. }))
+        .map(|node| node.id)
+        .expect("starter has a room");
+    let mut geometry = crate::CylinderPropGeometry::default();
+    geometry.broken_ends = crate::CylinderBrokenEnds::Top;
+    geometry.top_bulge.enabled = true;
+    scene.add_node(
+        room_id,
+        "Broken Column",
+        NodeKind::CylinderProp {
+            materials: [Some(material_id); crate::CYLINDER_PROP_MATERIAL_COUNT],
+            uvs: [crate::GridUvTransform::IDENTITY; crate::CYLINDER_PROP_MATERIAL_COUNT],
+            geometry,
+            collision_enabled: true,
+        },
+    );
+
+    let (package, report) = build_package(&project, &starter_project_root());
+    assert!(report.is_ok(), "errors: {:?}", report.errors);
+    let package = package.expect("cylinder cooks");
+    let prop = package.cylinder_props.last().expect("cylinder record");
+    assert_eq!(
+        prop.flags & psx_level::cylinder_prop_flags::COLLISION_ENABLED,
+        psx_level::cylinder_prop_flags::COLLISION_ENABLED
+    );
+    let first = usize::from(prop.surface_first);
+    let end = first + usize::from(prop.surface_count);
+    let surfaces = &package.cylinder_prop_surfaces[first..end];
+    assert!(surfaces.iter().any(|surface| surface.vertex_count == 3));
+    assert!(surfaces.iter().any(|surface| surface.vertex_count == 4));
+    assert!(surfaces
+        .iter()
+        .any(|surface| { surface.material_slot == crate::CYLINDER_PROP_MATERIAL_FRACTURE }));
+    assert!(prop.bounds_max[1] > prop.bounds_min[1]);
+    let source = render_manifest_source(&package);
+    assert!(source.contains("pub static CYLINDER_PROPS: &[LevelCylinderPropRecord]"));
+    assert!(source.contains("pub static CYLINDER_PROP_SURFACES: &[LevelCylinderPropSurfaceRecord]"));
+    assert!(source.contains("vertex_count: 3"));
 }
 
 #[test]
@@ -394,9 +507,11 @@ fn box_prop_cooks_authored_y_instead_of_snapping_to_floor() {
         "Elevated Box Prop",
         NodeKind::BoxProp {
             materials: [Some(material_id); crate::BOX_PROP_FACE_COUNT],
+            uvs: [crate::GridUvTransform::IDENTITY; crate::BOX_PROP_FACE_COUNT],
             vertices,
             collision_enabled: false,
             break_flags: 0,
+            erosion: crate::BoxPropErosion::default(),
         },
     );
     if let Some(node) = scene.node_mut(prop_id) {
