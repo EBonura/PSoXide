@@ -1529,6 +1529,10 @@ impl EditorWorkspace {
                         NodeKind::CylinderProp { geometry, .. } => Some(*geometry),
                         _ => None,
                     },
+                    start_arch_prop_geometry: match &node.kind {
+                        NodeKind::ArchProp { geometry, .. } => Some(*geometry),
+                        _ => None,
+                    },
                     sector_size: node_enclosing_sector_size(scene, id),
                 })
             })
@@ -1707,6 +1711,7 @@ impl EditorWorkspace {
                         target.start_image_prop_size,
                         target.start_box_prop_vertices,
                         target.start_cylinder_prop_geometry,
+                        target.start_arch_prop_geometry,
                         axis,
                         steps,
                     ),
@@ -1720,6 +1725,9 @@ impl EditorWorkspace {
                     ),
                     NodeGizmoHandle::Plane(_) => {}
                 },
+            }
+            if let NodeKind::ArchProp { geometry, .. } = &node.kind {
+                snap_arch_prop_transform(&mut node.transform, *geometry, target.sector_size);
             }
         }
         self.mark_dirty();

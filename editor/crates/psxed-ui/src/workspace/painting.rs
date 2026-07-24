@@ -2150,6 +2150,24 @@ impl EditorWorkspace {
                         },
                     )
                 }
+                PlaceKind::ArchProp => {
+                    let material = self.resolve_place_box_prop_material();
+                    let material_id = material.as_ref().map(|(id, _)| *id);
+                    let name = material
+                        .as_ref()
+                        .map(|(_, name)| format!("{name} Arch"))
+                        .unwrap_or_else(|| "Arch Prop".to_string());
+                    (
+                        name,
+                        NodeKind::ArchProp {
+                            materials: [material_id; psxed_project::ARCH_PROP_MATERIAL_COUNT],
+                            uvs: [GridUvTransform::IDENTITY;
+                                psxed_project::ARCH_PROP_MATERIAL_COUNT],
+                            geometry: psxed_project::ArchPropGeometry::default(),
+                            collision_enabled: false,
+                        },
+                    )
+                }
                 PlaceKind::PointLightMarker => {
                     if let Some(existing) = self.find_duplicate_point_light(room_id, translation) {
                         self.reject_duplicate_placement(existing, "Point Light");
@@ -2206,6 +2224,17 @@ impl EditorWorkspace {
                 .add_node(room_id, default_name, node_kind);
             if let Some(node) = self.project.active_scene_mut().node_mut(id) {
                 node.transform.translation = translation;
+                let arch_geometry = match &node.kind {
+                    NodeKind::ArchProp { geometry, .. } => Some(*geometry),
+                    _ => None,
+                };
+                if let Some(geometry) = arch_geometry {
+                    crate::inspector_transform_node::snap_arch_prop_transform(
+                        &mut node.transform,
+                        geometry,
+                        sector_size_i,
+                    );
+                }
                 // Record the floor this was placed on (0 = ground). The
                 // cook binds the node to this floor's runtime room; Y is
                 // a placement default and can't select the floor.
